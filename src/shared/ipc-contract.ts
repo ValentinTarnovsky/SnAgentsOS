@@ -51,4 +51,14 @@ export interface SnApi {
   app: {
     info(): Promise<AppInfo>
   }
+  pty: {
+    spawn(req: PtySpawnReq): Promise<PtySpawnRes>
+    write(req: PtyWriteReq): void
+    resize(req: PtyResizeReq): void
+    kill(ptyId: string): Promise<void>
+    /** Returns an unsubscribe function. */
+    onData(cb: (e: PtyDataEvt) => void): () => void
+    /** Returns an unsubscribe function. */
+    onExit(cb: (e: PtyExitEvt) => void): () => void
+  }
 }

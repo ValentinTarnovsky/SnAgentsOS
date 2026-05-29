@@ -3,8 +3,13 @@ import { CH } from '@shared/ipc-channels'
 import type { AppInfo } from '@shared/ipc-contract'
 import { createMainWindow } from './window'
 import { getConfigPath, isPortable } from './paths'
+import { PtyManager } from './pty/PtyManager'
+import { registerPtyIpc } from './ipc/registerPtyIpc'
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
+
+let mainWindow: BrowserWindow | null = null
+const ptyManager = new PtyManager(() => mainWindow?.webContents ?? null)
 
 function registerCsp(): void {
   const csp = isDev
@@ -34,16 +39,27 @@ function registerAppIpc(): void {
   )
 }
 
+function openMainWindow(): void {
+  mainWindow = createMainWindow()
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+}
+
 app.whenReady().then(() => {
   registerCsp()
   registerAppIpc()
-  createMainWindow()
+  registerPtyIpc(ptyManager)
+  openMainWindow()
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow()
+    if (BrowserWindow.getAllWindows().length === 0) openMainWindow()
   })
 })
 
+app.on('before-quit', () => ptyManager.killAll())
+
 app.on('window-all-closed', () => {
+  ptyManager.killAll()
   if (process.platform !== 'darwin') app.quit()
 })

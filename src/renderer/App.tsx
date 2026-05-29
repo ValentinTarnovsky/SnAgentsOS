@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
-import { motion } from 'framer-motion'
 import type { AppInfo } from '@shared/ipc-contract'
-import { Button } from '@/components/ui/Button'
 import { Logo } from '@/components/ui/Logo'
+import { TerminalPane } from '@/components/terminal/TerminalPane'
 
 export function App() {
   const [info, setInfo] = useState<AppInfo | null>(null)
@@ -12,33 +11,16 @@ export function App() {
   }, [])
 
   return (
-    <div className="flex h-full w-full flex-col items-center justify-center gap-8 bg-bg-primary px-6 text-center">
-      <motion.div
-        initial={{ opacity: 0, y: 12 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3, ease: 'easeOut' }}
-        className="flex flex-col items-center gap-6"
-      >
-        <Logo size="lg" />
-        <div className="space-y-2">
-          <h1 className="text-3xl font-semibold tracking-tight text-text-primary">
-            Multi Command Consoles
-          </h1>
-          <p className="max-w-md text-sm text-text-secondary">
-            Conjuntos de terminales y sesiones de IA en un mosaico. Engineered in silence.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Button>Nuevo workspace</Button>
-          <Button variant="ghost">Ajustes</Button>
-        </div>
-      </motion.div>
-
-      {info && (
-        <div className="rounded-card border border-border bg-card px-4 py-2 font-mono text-xs text-text-secondary">
-          v{info.version} · {info.platform}/{info.arch} · {info.portable ? 'portable' : 'installed'}
-        </div>
-      )}
+    <div className="flex h-full w-full flex-col bg-bg-primary">
+      <header className="flex h-11 shrink-0 items-center justify-between border-b border-border px-4">
+        <Logo size="sm" />
+        <span className="font-mono text-xs text-text-secondary">
+          {info ? `v${info.version} · ${info.platform}/${info.arch}` : ''}
+        </span>
+      </header>
+      <main className="min-h-0 flex-1">
+        <TerminalPane paneId="main" />
+      </main>
     </div>
   )
 }
