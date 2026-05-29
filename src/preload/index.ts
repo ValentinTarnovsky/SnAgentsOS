@@ -31,6 +31,9 @@ const api: SnApi = {
     onData: (cb: (e: PtyDataEvt) => void) => sub<PtyDataEvt>(CH.PTY_DATA, cb),
     onExit: (cb: (e: PtyExitEvt) => void) => sub<PtyExitEvt>(CH.PTY_EXIT, cb),
   },
+  dialog: {
+    openDirectory: () => ipcRenderer.invoke(CH.DIALOG_OPEN_DIR) as Promise<string | null>,
+  },
 }
 
 // contextIsolation is always enabled (see window.ts), so the bridge is the only path.

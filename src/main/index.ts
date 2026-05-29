@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { AppInfo } from '@shared/ipc-contract'
 import { createMainWindow } from './window'
@@ -39,6 +39,17 @@ function registerAppIpc(): void {
   )
 }
 
+function registerDialogIpc(): void {
+  ipcMain.handle(CH.DIALOG_OPEN_DIR, async (): Promise<string | null> => {
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, {
+          properties: ['openDirectory', 'createDirectory'],
+        })
+      : await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+}
+
 function openMainWindow(): void {
   mainWindow = createMainWindow()
   mainWindow.on('closed', () => {
@@ -49,6 +60,7 @@ function openMainWindow(): void {
 app.whenReady().then(() => {
   registerCsp()
   registerAppIpc()
+  registerDialogIpc()
   registerPtyIpc(ptyManager)
   openMainWindow()
 

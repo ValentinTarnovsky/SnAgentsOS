@@ -61,4 +61,8 @@ export interface SnApi {
     /** Returns an unsubscribe function. */
     onExit(cb: (e: PtyExitEvt) => void): () => void
   }
+  dialog: {
+    /** Opens a native folder picker; resolves to the chosen path or null. */
+    openDirectory(): Promise<string | null>
+  }
 }
