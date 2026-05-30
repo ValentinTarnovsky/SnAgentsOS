@@ -9,6 +9,10 @@ Open *sets* of multiple terminals and AI CLI sessions (Claude Code, Codex, custo
 
 *Engineered in silence.*
 
+[![CI](https://github.com/ValentinTarnovsky/SnMultiCC/actions/workflows/ci.yml/badge.svg)](https://github.com/ValentinTarnovsky/SnMultiCC/actions/workflows/ci.yml)
+[![Release](https://github.com/ValentinTarnovsky/SnMultiCC/actions/workflows/release.yml/badge.svg)](https://github.com/ValentinTarnovsky/SnMultiCC/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-6366f1.svg)](./LICENSE)
+
 </div>
 
 ![SnMultiCC](docs/screenshot.png)
@@ -39,8 +43,10 @@ Grab the latest build from **[Releases](https://github.com/ValentinTarnovsky/SnM
 |----------|----------|
 | Windows (installer) | `SnMultiCC-x.y.z-setup.exe` |
 | Windows (portable) | `SnMultiCC-x.y.z-portable.exe` — stores its config next to the `.exe` |
+| macOS | `SnMultiCC-x.y.z.dmg` / `-mac.zip` (x64 + arm64) |
+| Linux | `SnMultiCC-x.y.z.AppImage` / `.deb` |
 
-> macOS (`.dmg`/`.zip`) and Linux (`.AppImage`/`.deb`) targets are configured; build them from source on their own OS (`npm run dist:mac` / `dist:linux`) until CI artifacts are published.
+> CI builds and attaches all three platforms to the release on every `v*` tag (see `.github/workflows/release.yml`). `v0.1.0` shipped Windows only.
 > Builds are unsigned for now — Windows SmartScreen / macOS Gatekeeper may warn on first launch.
 
 ## Tech
