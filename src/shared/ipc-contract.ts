@@ -20,6 +20,12 @@ export interface PtySpawnReq {
   args?: string[]
   cwd?: string
   env?: Record<string, string>
+  /**
+   * A command line typed into the shell after spawn (e.g. "claude").
+   * Running inside the shell makes PATH/PATHEXT resolution work on Windows
+   * and leaves an interactive shell when the command exits.
+   */
+  initialCommand?: string
   cols: number
   rows: number
 }

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Pane, Workspace } from '@shared/types'
+import type { AgentPreset, Pane, Settings, Workspace } from '@shared/types'
 
 const ACCENTS = ['#6366f1', '#8b5cf6', '#60a5fa']
 
@@ -17,10 +17,30 @@ function makeShellPane(index: number): Pane {
   }
 }
 
+const DEFAULT_PRESETS: AgentPreset[] = [
+  { id: 'preset-shell', name: 'Shell', type: 'shell', command: '', args: [], color: '#6366f1', icon: 'terminal' },
+  { id: 'preset-claude', name: 'Claude Code', type: 'claude', command: 'claude', args: [], color: '#d97757', icon: 'sparkles' },
+  { id: 'preset-codex', name: 'Codex', type: 'codex', command: 'codex', args: [], color: '#10a37f', icon: 'bot' },
+]
+
+const DEFAULT_SETTINGS: Settings = {
+  defaultShell: {},
+  fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+  fontSize: 13,
+  accent: 'violet',
+  scrollback: 5000,
+  restoreLastWorkspace: true,
+  confirmCloseRunning: true,
+  sidebarCollapsed: false,
+}
+
 interface AppState {
   workspaces: Workspace[]
   activeWorkspaceId: string | null
   sidebarCollapsed: boolean
+  presets: AgentPreset[]
+  settings: Settings
+  settingsOpen: boolean
 
   createWorkspace: (name: string, cwd: string) => string
   deleteWorkspace: (id: string) => void
@@ -28,12 +48,22 @@ interface AppState {
   toggleSidebar: () => void
   addPane: (workspaceId: string, pane?: Partial<Pane>) => void
   removePane: (workspaceId: string, paneId: string) => void
+
+  savePreset: (preset: AgentPreset) => void
+  deletePreset: (id: string) => void
+  newPresetId: () => string
+
+  updateSettings: (patch: Partial<Settings>) => void
+  setSettingsOpen: (open: boolean) => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
   workspaces: [],
   activeWorkspaceId: null,
   sidebarCollapsed: false,
+  presets: DEFAULT_PRESETS,
+  settings: DEFAULT_SETTINGS,
+  settingsOpen: false,
 
   createWorkspace: (name, cwd) => {
     const ws: Workspace = { id: uid('ws'), name, cwd, panes: [makeShellPane(0)] }
@@ -68,4 +98,22 @@ export const useAppStore = create<AppState>((set) => ({
         w.id === workspaceId ? { ...w, panes: w.panes.filter((p) => p.id !== paneId) } : w,
       ),
     })),
+
+  savePreset: (preset) =>
+    set((s) => {
+      const exists = s.presets.some((p) => p.id === preset.id)
+      return {
+        presets: exists
+          ? s.presets.map((p) => (p.id === preset.id ? preset : p))
+          : [...s.presets, preset],
+      }
+    }),
+
+  deletePreset: (id) => set((s) => ({ presets: s.presets.filter((p) => p.id !== id) })),
+
+  newPresetId: () => uid('preset'),
+
+  updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
+
+  setSettingsOpen: (open) => set({ settingsOpen: open }),
 }))

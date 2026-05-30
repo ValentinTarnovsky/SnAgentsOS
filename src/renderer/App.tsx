@@ -1,9 +1,17 @@
+import { useEffect } from 'react'
 import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { Sidebar } from '@/components/sidebar/Sidebar'
 import { WorkspaceView } from '@/components/workspace/WorkspaceView'
+import { SettingsModal } from '@/components/settings/SettingsModal'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
+
+const ACCENT_HEX: Record<string, string> = {
+  violet: '#6366f1',
+  purple: '#8b5cf6',
+  blue: '#60a5fa',
+}
 
 function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? 'workspace'
@@ -13,7 +21,13 @@ export function App() {
   const workspaces = useAppStore((s) => s.workspaces)
   const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId)
   const createWorkspace = useAppStore((s) => s.createWorkspace)
+  const accent = useAppStore((s) => s.settings.accent)
   const active = workspaces.find((w) => w.id === activeWorkspaceId) ?? null
+
+  // Remap the primary accent token to the chosen accent.
+  useEffect(() => {
+    document.documentElement.style.setProperty('--color-accent-violet', ACCENT_HEX[accent])
+  }, [accent])
 
   const onNew = async (): Promise<void> => {
     const dir = await window.snApi.dialog.openDirectory()
@@ -42,6 +56,7 @@ export function App() {
           </div>
         )}
       </main>
+      <SettingsModal />
     </div>
   )
 }

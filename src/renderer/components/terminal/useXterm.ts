@@ -10,6 +10,8 @@ export interface UseXtermOptions {
   paneId: string
   cwd?: string
   shell?: string
+  /** Command line typed into the shell after spawn (e.g. an AI CLI). */
+  initialCommand?: string
   fontSize?: number
 }
 
@@ -56,6 +58,7 @@ export function useXterm(
         paneId: opts.paneId,
         shell: opts.shell,
         cwd: opts.cwd,
+        initialCommand: opts.initialCommand,
         cols: term.cols,
         rows: term.rows,
       })
@@ -104,5 +107,5 @@ export function useXterm(
       term.dispose()
       startedRef.current = false
     }
-  }, [containerRef, opts.paneId, opts.cwd, opts.shell, opts.fontSize])
+  }, [containerRef, opts.paneId, opts.cwd, opts.shell, opts.initialCommand, opts.fontSize])
 }

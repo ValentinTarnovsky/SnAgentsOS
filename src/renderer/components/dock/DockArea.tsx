@@ -8,30 +8,46 @@ import {
 } from 'dockview'
 import 'dockview/dist/styles/dockview.css'
 import './dock-theme.css'
-import type { Pane, Workspace } from '@shared/types'
+import type { AgentPreset, Pane, Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
+import { resolveLaunch } from '@/lib/launch'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
 
 interface PanelParams {
   paneId: string
   cwd?: string
-  shell?: string
+  initialCommand?: string
+  fontSize?: number
 }
 
 function TerminalPanel(props: IDockviewPanelProps<PanelParams>) {
-  const { paneId, cwd, shell } = props.params
-  return <TerminalPane paneId={paneId} cwd={cwd} shell={shell} />
+  const { paneId, cwd, initialCommand, fontSize } = props.params
+  return (
+    <TerminalPane
+      paneId={paneId}
+      cwd={cwd}
+      initialCommand={initialCommand}
+      fontSize={fontSize}
+    />
+  )
 }
 
 const components = { terminal: TerminalPanel }
 
-function addPanel(api: DockviewApi, pane: Pane, workspace: Workspace): void {
+function addPanel(
+  api: DockviewApi,
+  pane: Pane,
+  workspace: Workspace,
+  presets: AgentPreset[],
+  fontSize: number,
+): void {
+  const { cwd, initialCommand } = resolveLaunch(pane, workspace, presets)
   const isFirst = api.panels.length === 0
   api.addPanel<PanelParams>({
     id: pane.id,
     component: 'terminal',
     title: pane.title,
-    params: { paneId: pane.id, cwd: pane.cwd ?? workspace.cwd, shell: pane.command },
+    params: { paneId: pane.id, cwd, initialCommand, fontSize },
     position: isFirst ? undefined : { direction: 'right' },
   })
 }
@@ -45,12 +61,14 @@ export function DockArea({ workspace }: { workspace: Workspace }) {
   const apiRef = useRef<DockviewApi | null>(null)
   const have = useRef<Set<string>>(new Set())
   const removePane = useAppStore((s) => s.removePane)
+  const presets = useAppStore((s) => s.presets)
+  const fontSize = useAppStore((s) => s.settings.fontSize)
 
   const reconcile = useCallback(
     (api: DockviewApi) => {
       for (const pane of workspace.panes) {
         if (!have.current.has(pane.id)) {
-          addPanel(api, pane, workspace)
+          addPanel(api, pane, workspace, presets, fontSize)
           have.current.add(pane.id)
         }
       }
@@ -62,7 +80,7 @@ export function DockArea({ workspace }: { workspace: Workspace }) {
         }
       }
     },
-    [workspace],
+    [workspace, presets, fontSize],
   )
 
   const onReady = (event: DockviewReadyEvent): void => {

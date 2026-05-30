@@ -1,16 +1,8 @@
 import { useState } from 'react'
-import {
-  Check,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Plus,
-  Settings,
-  TerminalSquare,
-  Trash2,
-  X,
-} from 'lucide-react'
+import { Check, PanelLeftClose, PanelLeftOpen, Plus, Settings, Trash2, X } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { Logo, LogoMark } from '@/components/ui/Logo'
+import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
 
 function basename(p: string): string {
@@ -26,6 +18,7 @@ export function Sidebar() {
     createWorkspace,
     deleteWorkspace,
     toggleSidebar,
+    setSettingsOpen,
   } = useAppStore()
   const [confirmId, setConfirmId] = useState<string | null>(null)
 
@@ -69,6 +62,7 @@ export function Sidebar() {
       <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2">
         {workspaces.map((w) => {
           const active = w.id === activeWorkspaceId
+          const WsIcon = iconFor(w.panes[0]?.icon)
           return (
             <div
               key={w.id}
@@ -88,7 +82,7 @@ export function Sidebar() {
                 )}
                 title={w.name}
               >
-                <TerminalSquare
+                <WsIcon
                   size={16}
                   className="shrink-0"
                   style={{ color: active ? (w.panes[0]?.color ?? '#6366f1') : undefined }}
@@ -140,6 +134,7 @@ export function Sidebar() {
 
       <div className="shrink-0 border-t border-border p-2">
         <button
+          onClick={() => setSettingsOpen(true)}
           className={cn(
             'flex w-full items-center gap-2 rounded-btn px-2.5 py-2 text-sm text-text-secondary transition-colors hover:bg-card hover:text-text-primary',
             sidebarCollapsed && 'justify-center px-0',

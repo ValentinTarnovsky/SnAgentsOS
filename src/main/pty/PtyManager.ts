@@ -38,6 +38,19 @@ export class PtyManager {
     const entry: Entry = { pty: proc, buf: '', timer: null }
     this.entries.set(ptyId, entry)
 
+    if (req.initialCommand && req.initialCommand.trim()) {
+      // Terminate with a bare CR — exactly what pressing Enter sends in a
+      // terminal. CRLF makes PowerShell emit a spurious ">>" continuation.
+      // Small delay so the shell finishes initializing before we feed input.
+      setTimeout(() => {
+        try {
+          proc.write(req.initialCommand!.trim() + '\r')
+        } catch {
+          /* pty may have exited */
+        }
+      }, 350)
+    }
+
     proc.onData((data) => {
       entry.buf += data
       if (entry.timer === null) {
