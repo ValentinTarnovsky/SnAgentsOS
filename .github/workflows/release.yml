@@ -58,10 +58,11 @@ jobs:
           name: SnMultiCC ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: false
+          # Match only the named distributables — NOT the win-unpacked/ helper
+          # binaries (elevate.exe, OpenConsole.exe, the raw SnMultiCC.exe, …).
           files: |
-            release/**/*.exe
-            release/**/*.dmg
-            release/**/*.zip
-            release/**/*.AppImage
-            release/**/*.deb
-            release/**/*.blockmap
+            release/**/SnMultiCC-*.exe
+            release/**/SnMultiCC-*.dmg
+            release/**/SnMultiCC-*.zip
+            release/**/SnMultiCC-*.AppImage
+            release/**/snmulticc_*.deb
