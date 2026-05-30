@@ -39,6 +39,19 @@ const api: SnApi = {
     load: () => ipcRenderer.invoke(CH.CONFIG_LOAD) as Promise<ConfigFile | null>,
     save: (config: ConfigFile) => ipcRenderer.send(CH.CONFIG_SAVE, config),
   },
+  window: {
+    minimize: () => ipcRenderer.send(CH.WINDOW_MINIMIZE),
+    maximize: () => ipcRenderer.send(CH.WINDOW_MAXIMIZE),
+    close: () => ipcRenderer.send(CH.WINDOW_CLOSE),
+    isMaximized: () => ipcRenderer.invoke(CH.WINDOW_IS_MAXIMIZED) as Promise<boolean>,
+    onMaximizeChange: (cb: (maximized: boolean) => void) =>
+      sub<boolean>(CH.WINDOW_MAXIMIZE_CHANGED, cb),
+  },
+  system: {
+    setLoginItem: (enabled: boolean) =>
+      ipcRenderer.invoke(CH.SYSTEM_SET_LOGIN_ITEM, enabled) as Promise<void>,
+    getLoginItem: () => ipcRenderer.invoke(CH.SYSTEM_GET_LOGIN_ITEM) as Promise<boolean>,
+  },
 }
 
 // contextIsolation is always enabled (see window.ts), so the bridge is the only path.

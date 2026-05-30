@@ -7,12 +7,22 @@ import { getConfigPath, isPortable } from './paths'
 import { PtyManager } from './pty/PtyManager'
 import { ConfigStore } from './store/ConfigStore'
 import { registerPtyIpc } from './ipc/registerPtyIpc'
+import { registerWindowIpc, wireWindowMaximizeEvents } from './ipc/registerWindowIpc'
+import { registerSystemIpc } from './ipc/registerSystemIpc'
+import { ensureTray, destroyTray } from './tray'
+import { mainT } from './i18n'
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 
 let mainWindow: BrowserWindow | null = null
+let isQuitting = false
 const ptyManager = new PtyManager(() => mainWindow?.webContents ?? null)
 const configStore = new ConfigStore()
+
+function quitApp(): void {
+  isQuitting = true
+  app.quit()
+}
 
 function registerCsp(): void {
   const csp = isDev
@@ -61,25 +71,38 @@ function registerDialogIpc(): void {
 function openMainWindow(): void {
   mainWindow = createMainWindow()
   const win = mainWindow
+  wireWindowMaximizeEvents(win)
 
   let forceClose = false
   win.on('close', (event) => {
-    if (forceClose) return
     const cfg = configStore.load()
+    // Installed build: hide to tray instead of quitting (keeps consoles running).
+    const useTray = !isPortable() && cfg?.settings?.closeToTray !== false
+    if (useTray && !isQuitting) {
+      event.preventDefault()
+      win.hide()
+      ensureTray(() => mainWindow, quitApp, {
+        show: mainT(cfg, 'tray.show'),
+        quit: mainT(cfg, 'tray.quit'),
+      })
+      return
+    }
+    if (forceClose) return
     const shouldConfirm = cfg?.settings?.confirmCloseRunning !== false
     if (shouldConfirm && ptyManager.count > 0) {
       const choice = dialog.showMessageBoxSync(win, {
         type: 'question',
-        buttons: ['Cancelar', 'Cerrar de todos modos'],
+        buttons: [mainT(cfg, 'dialog.cancel'), mainT(cfg, 'dialog.closeAnyway')],
         defaultId: 1,
         cancelId: 0,
         noLink: true,
         title: 'SnMultiCC',
-        message: 'Hay consolas activas',
-        detail: `${ptyManager.count} proceso(s) en ejecución se cerrarán.`,
+        message: mainT(cfg, 'dialog.activeTitle'),
+        detail: mainT(cfg, 'dialog.activeDetail', { n: ptyManager.count }),
       })
       if (choice === 0) {
         event.preventDefault()
+        isQuitting = false
         return
       }
     }
@@ -97,6 +120,8 @@ app.whenReady().then(() => {
   registerConfigIpc()
   registerDialogIpc()
   registerPtyIpc(ptyManager)
+  registerWindowIpc(() => mainWindow)
+  registerSystemIpc()
   openMainWindow()
 
   app.on('activate', () => {
@@ -104,7 +129,11 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('before-quit', () => ptyManager.killAll())
+app.on('before-quit', () => {
+  isQuitting = true
+  ptyManager.killAll()
+  destroyTray()
+})
 
 app.on('window-all-closed', () => {
   ptyManager.killAll()

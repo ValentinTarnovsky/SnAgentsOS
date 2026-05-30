@@ -15,6 +15,11 @@ files:
   - out/**
   - package.json
 
+# Tray icon — copied next to the app so the main process can load it at runtime.
+extraResources:
+  - from: build/icon.png
+    to: icon.png
+
 # node-pty is N-API (ABI-stable) and ships prebuilt binaries that load in
 # Electron directly, so no native rebuild is needed (and avoids requiring a
 # C++ toolchain). asarUnpack keeps the .node files loadable on disk.

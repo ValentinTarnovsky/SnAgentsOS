@@ -3,10 +3,17 @@ import { ChevronDown, Plus } from 'lucide-react'
 import type { AgentPreset, Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
-import { DockArea } from '@/components/dock/DockArea'
-import { cn } from '@/lib/cn'
+import { TilingGrid } from '@/components/layout/TilingGrid'
+import { useT } from '@/i18n'
 
-export function WorkspaceView({ workspace }: { workspace: Workspace }) {
+export function WorkspaceView({
+  workspace,
+  isActive,
+}: {
+  workspace: Workspace
+  isActive: boolean
+}) {
+  const t = useT()
   const addPane = useAppStore((s) => s.addPane)
   const presets = useAppStore((s) => s.presets)
   const [open, setOpen] = useState(false)
@@ -34,10 +41,9 @@ export function WorkspaceView({ workspace }: { workspace: Workspace }) {
           <button
             onClick={() => setOpen((v) => !v)}
             className="flex items-center gap-1.5 rounded-btn border border-border bg-card px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:border-accent-violet/40"
-            title="Nueva consola"
           >
             <Plus size={14} className="text-accent-violet" />
-            Nueva consola
+            {t('workspace.newConsole')}
             <ChevronDown size={13} className="text-text-secondary" />
           </button>
 
@@ -55,16 +61,11 @@ export function WorkspaceView({ workspace }: { workspace: Workspace }) {
                     >
                       <Icon size={15} style={{ color: preset.color }} className="shrink-0" />
                       <span className="min-w-0 flex-1 truncate">{preset.name}</span>
-                      {preset.type !== 'shell' && preset.command && (
-                        <span className="shrink-0 font-mono text-[10px] text-text-secondary">
-                          {preset.command}
-                        </span>
-                      )}
                     </button>
                   )
                 })}
                 {presets.length === 0 && (
-                  <p className={cn('px-3 py-2 text-xs text-text-secondary')}>Sin presets</p>
+                  <p className="px-3 py-2 text-xs text-text-secondary">{t('workspace.noPresets')}</p>
                 )}
               </div>
             </>
@@ -73,7 +74,7 @@ export function WorkspaceView({ workspace }: { workspace: Workspace }) {
       </div>
 
       <div className="min-h-0 flex-1">
-        <DockArea key={workspace.id} workspace={workspace} />
+        <TilingGrid workspace={workspace} isActive={isActive} />
       </div>
     </div>
   )

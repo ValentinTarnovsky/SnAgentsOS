@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { ConfigFile } from '@shared/types'
 
-export const CONFIG_VERSION = 1
+export const CONFIG_VERSION = 2
 
 const paneType = z.enum(['shell', 'claude', 'codex', 'custom'])
 
@@ -16,12 +16,22 @@ const paneSchema = z.object({
   icon: z.string(),
 })
 
+const layoutSchema = z
+  .object({
+    grid: z.number(),
+    order: z.array(z.string()),
+  })
+  .optional()
+  // Old v1 configs stored an opaque dockview blob here — tolerate & drop it.
+  .catch(undefined)
+
 const workspaceSchema = z.object({
   id: z.string(),
   name: z.string(),
   cwd: z.string(),
   panes: z.array(paneSchema),
-  layout: z.unknown().optional(),
+  favorite: z.boolean().optional(),
+  layout: layoutSchema,
 })
 
 const presetSchema = z.object({
@@ -44,10 +54,17 @@ const settingsSchema = z.object({
   }),
   fontFamily: z.string(),
   fontSize: z.number(),
-  accent: z.enum(['violet', 'purple', 'blue']),
+  accent: z.enum(['violet', 'purple', 'blue']).default('violet'),
+  theme: z
+    .enum(['midnight', 'light', 'nord', 'dracula', 'solarized', 'custom'])
+    .default('midnight'),
+  customColors: z.record(z.string()).optional(),
+  language: z.enum(['en', 'es']).default('en'),
   scrollback: z.number(),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
+  closeToTray: z.boolean().default(true),
+  launchOnStartup: z.boolean().default(false),
   sidebarCollapsed: z.boolean(),
 })
 
@@ -63,11 +80,14 @@ const configSchema = z.object({
 export function parseConfig(raw: unknown): ConfigFile | null {
   const result = configSchema.safeParse(raw)
   if (!result.success) return null
-  return migrate(result.data as ConfigFile)
+  return migrate(result.data as unknown as ConfigFile)
 }
 
-/** Forward migrations live here as the schema version grows. */
+/**
+ * Forward migrations. The zod schema applies field-level defaults (theme,
+ * language, closeToTray, …) and drops the legacy dockview `layout` blob, so
+ * v1 configs load without data loss. Here we just stamp the current version.
+ */
 function migrate(config: ConfigFile): ConfigFile {
-  // v1 is the current shape — nothing to migrate yet.
   return { ...config, version: CONFIG_VERSION }
 }

@@ -22,6 +22,17 @@ export const CH = {
 
   // Dialogs
   DIALOG_OPEN_DIR: 'dialog:openDirectory',
+
+  // Window controls (custom frameless title bar)
+  WINDOW_MINIMIZE: 'window:minimize', // send
+  WINDOW_MAXIMIZE: 'window:maximize', // send (toggles maximize/restore)
+  WINDOW_CLOSE: 'window:close', // send
+  WINDOW_IS_MAXIMIZED: 'window:isMaximized', // invoke -> boolean
+  WINDOW_MAXIMIZE_CHANGED: 'window:maximizeChanged', // main -> renderer (boolean)
+
+  // System integration (installed build only)
+  SYSTEM_SET_LOGIN_ITEM: 'system:setLoginItem', // invoke (boolean) -> void
+  SYSTEM_GET_LOGIN_ITEM: 'system:getLoginItem', // invoke -> boolean
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

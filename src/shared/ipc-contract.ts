@@ -78,4 +78,19 @@ export interface SnApi {
     /** Persists the full config blob (fire-and-forget; debounced by caller). */
     save(config: ConfigFile): void
   }
+  /** Custom title bar window controls (frame: false). */
+  window: {
+    minimize(): void
+    /** Toggles maximize/restore. */
+    maximize(): void
+    close(): void
+    isMaximized(): Promise<boolean>
+    /** Fires on maximize/unmaximize; returns an unsubscribe function. */
+    onMaximizeChange(cb: (maximized: boolean) => void): () => void
+  }
+  /** OS integration (no-ops on the portable build). */
+  system: {
+    setLoginItem(enabled: boolean): Promise<void>
+    getLoginItem(): Promise<boolean>
+  }
 }

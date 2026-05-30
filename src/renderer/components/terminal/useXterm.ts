@@ -5,7 +5,8 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { CanvasAddon } from '@xterm/addon-canvas'
 import '@xterm/xterm/css/xterm.css'
-import { snXtermTheme } from '@/lib/xterm-theme'
+import { useAppStore } from '@/lib/store'
+import { buildXtermTheme } from '@/themes'
 
 /** GPU renderer with a 2D-canvas fallback (WebGL contexts are capped per page). */
 function loadRenderer(term: Terminal): void {
@@ -30,12 +31,18 @@ export interface UseXtermOptions {
   /** Command line typed into the shell after spawn (e.g. an AI CLI). */
   initialCommand?: string
   fontSize?: number
+  /**
+   * Whether this terminal's workspace is currently visible. Hidden terminals
+   * (display:none) can't be measured by xterm, so we refit when they reveal.
+   */
+  isActive?: boolean
 }
 
 /**
  * Mounts an xterm Terminal into `containerRef`, spawns a backing pty, and wires
- * the bidirectional data + resize streams. Disposes everything (incl. the pty)
- * on unmount.
+ * the bidirectional data + resize streams. The pty is killed only on real
+ * teardown (pane/workspace removal) — NOT on theme/font/visibility changes —
+ * so running sessions survive workspace switches.
  */
 export function useXterm(
   containerRef: RefObject<HTMLDivElement | null>,
@@ -43,6 +50,12 @@ export function useXterm(
 ): void {
   const ptyIdRef = useRef<string | null>(null)
   const startedRef = useRef(false)
+  const termRef = useRef<Terminal | null>(null)
+  const fitRef = useRef<FitAddon | null>(null)
+
+  const theme = useAppStore((s) => s.settings.theme)
+  const customColors = useAppStore((s) => s.settings.customColors)
+  const fontSize = useAppStore((s) => s.settings.fontSize)
 
   useEffect(() => {
     const container = containerRef.current
@@ -52,15 +65,18 @@ export function useXterm(
     if (startedRef.current) return
     startedRef.current = true
 
+    const settings = useAppStore.getState().settings
     const term = new Terminal({
-      fontFamily: "'JetBrains Mono', 'Fira Code', ui-monospace, monospace",
-      fontSize: opts.fontSize ?? 13,
-      theme: snXtermTheme,
+      fontFamily: settings.fontFamily || "'JetBrains Mono', 'Fira Code', ui-monospace, monospace",
+      fontSize: opts.fontSize ?? settings.fontSize ?? 13,
+      theme: buildXtermTheme(settings.theme, settings.customColors),
       cursorBlink: true,
-      scrollback: 5000,
+      scrollback: settings.scrollback ?? 5000,
       allowProposedApi: true,
     })
     const fit = new FitAddon()
+    termRef.current = term
+    fitRef.current = fit
     term.loadAddon(fit)
     term.loadAddon(new WebLinksAddon())
     term.open(container)
@@ -122,8 +138,53 @@ export function useXterm(
       const id = ptyIdRef.current
       if (id) void window.snApi.pty.kill(id)
       ptyIdRef.current = null
+      termRef.current = null
+      fitRef.current = null
       term.dispose()
       startedRef.current = false
     }
-  }, [containerRef, opts.paneId, opts.cwd, opts.shell, opts.initialCommand, opts.fontSize])
+    // Spawn ONCE per pane. cwd/shell/initialCommand are captured at mount, so
+    // editing a preset's command only affects NEW consoles and never restarts
+    // already-running ones. Theme/font/visibility update via the effects below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [containerRef, opts.paneId])
+
+  // Live theme updates — swap the palette in place.
+  useEffect(() => {
+    const term = termRef.current
+    if (term) term.options.theme = buildXtermTheme(theme, customColors)
+  }, [theme, customColors])
+
+  // Live font-size updates — resize without remounting.
+  useEffect(() => {
+    const term = termRef.current
+    const fit = fitRef.current
+    if (!term) return
+    term.options.fontSize = fontSize
+    try {
+      fit?.fit()
+    } catch {
+      /* not measurable */
+    }
+    const id = ptyIdRef.current
+    if (id) window.snApi.pty.resize({ ptyId: id, cols: term.cols, rows: term.rows })
+  }, [fontSize])
+
+  // Refit when this terminal becomes visible (hidden xterms can't measure).
+  useEffect(() => {
+    if (!opts.isActive) return
+    const term = termRef.current
+    const fit = fitRef.current
+    if (!term || !fit) return
+    const raf = requestAnimationFrame(() => {
+      try {
+        fit.fit()
+      } catch {
+        /* not measurable yet */
+      }
+      const id = ptyIdRef.current
+      if (id) window.snApi.pty.resize({ ptyId: id, cols: term.cols, rows: term.rows })
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [opts.isActive])
 }

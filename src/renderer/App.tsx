@@ -2,30 +2,22 @@ import { useEffect } from 'react'
 import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { startPersistence } from '@/lib/persist'
+import { applyTheme } from '@/themes'
+import { I18nProvider, useT } from '@/i18n'
 import { Sidebar } from '@/components/sidebar/Sidebar'
-import { WorkspaceView } from '@/components/workspace/WorkspaceView'
+import { WorkspaceHost } from '@/components/layout/WorkspaceHost'
 import { SettingsModal } from '@/components/settings/SettingsModal'
+import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
+import { TitleBar } from '@/components/titlebar/TitleBar'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
-const ACCENT_HEX: Record<string, string> = {
-  violet: '#6366f1',
-  purple: '#8b5cf6',
-  blue: '#60a5fa',
-}
-
-function basename(p: string): string {
-  return p.split(/[\\/]/).filter(Boolean).pop() ?? 'workspace'
-}
-
 export function App() {
-  const workspaces = useAppStore((s) => s.workspaces)
-  const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId)
-  const createWorkspace = useAppStore((s) => s.createWorkspace)
-  const accent = useAppStore((s) => s.settings.accent)
   const hydrated = useAppStore((s) => s.hydrated)
   const hydrate = useAppStore((s) => s.hydrate)
-  const active = workspaces.find((w) => w.id === activeWorkspaceId) ?? null
+  const theme = useAppStore((s) => s.settings.theme)
+  const customColors = useAppStore((s) => s.settings.customColors)
+  const language = useAppStore((s) => s.settings.language)
 
   // Load persisted config once, then start the debounced persistence writer.
   useEffect(() => {
@@ -40,43 +32,54 @@ export function App() {
     return () => unsub?.()
   }, [hydrate])
 
-  // Remap the primary accent token to the chosen accent.
+  // Apply the active theme to CSS custom properties (xterm reads it separately).
   useEffect(() => {
-    document.documentElement.style.setProperty('--color-accent-violet', ACCENT_HEX[accent])
-  }, [accent])
-
-  const onNew = async (): Promise<void> => {
-    const dir = await window.snApi.dialog.openDirectory()
-    if (dir) createWorkspace(basename(dir), dir)
-  }
+    applyTheme(theme, customColors)
+  }, [theme, customColors])
 
   if (!hydrated) {
     return <div className="h-full w-full bg-bg-primary" />
   }
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-bg-primary">
+    <I18nProvider lang={language}>
+      <div className="flex h-full w-full flex-col bg-bg-primary">
+        <TitleBar />
+        <AppBody />
+      </div>
+    </I18nProvider>
+  )
+}
+
+function AppBody() {
+  const t = useT()
+  const workspaces = useAppStore((s) => s.workspaces)
+  const setWizardOpen = useAppStore((s) => s.setWizardOpen)
+
+  const onNew = (): void => setWizardOpen(true)
+
+  return (
+    <div className="flex min-h-0 w-full flex-1 overflow-hidden bg-bg-primary">
       <Sidebar />
       <main className="min-w-0 flex-1">
-        {active ? (
-          <WorkspaceView workspace={active} />
+        {workspaces.length > 0 ? (
+          <WorkspaceHost />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-6 px-6 text-center">
             <Logo size="lg" />
             <div className="space-y-1">
-              <h1 className="text-2xl font-semibold text-text-primary">Multi Command Consoles</h1>
-              <p className="max-w-sm text-sm text-text-secondary">
-                Creá un workspace en el directorio que quieras y abrí varias consolas a la vez.
-              </p>
+              <h1 className="text-2xl font-semibold text-text-primary">{t('empty.title')}</h1>
+              <p className="max-w-sm text-sm text-text-secondary">{t('empty.subtitle')}</p>
             </div>
             <Button onClick={onNew}>
               <Plus size={16} />
-              Nuevo workspace
+              {t('sidebar.newWorkspace')}
             </Button>
           </div>
         )}
       </main>
       <SettingsModal />
+      <NewWorkspaceWizard />
     </div>
   )
 }

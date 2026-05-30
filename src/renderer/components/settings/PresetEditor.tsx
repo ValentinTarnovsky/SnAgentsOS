@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { FolderOpen } from 'lucide-react'
+import { FolderOpen, Plus } from 'lucide-react'
 import type { AgentPreset, PaneType } from '@shared/types'
 import { ICON_NAMES, iconFor } from '@/lib/icons'
+import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
 
 const ACCENT_SWATCHES = ['#6366f1', '#8b5cf6', '#60a5fa', '#d97757', '#10a37f', '#22c55e', '#f59e0b', '#ef4444']
@@ -39,6 +40,7 @@ export function PresetEditor({
   onSave: (preset: AgentPreset) => void
   onCancel: () => void
 }) {
+  const t = useT()
   const [name, setName] = useState(initial.name)
   const [type, setType] = useState<PaneType>(initial.type)
   const [command, setCommand] = useState(initial.command)
@@ -68,22 +70,22 @@ export function PresetEditor({
   }
 
   return (
-    <div className="space-y-4 p-5">
+    <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className={labelCls}>Nombre</label>
+          <label className={labelCls}>{t('preset.name')}</label>
           <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
         </div>
         <div>
-          <label className={labelCls}>Tipo</label>
+          <label className={labelCls}>{t('preset.type')}</label>
           <select
             className={inputCls}
             value={type}
             onChange={(e) => setType(e.target.value as PaneType)}
           >
-            {TYPES.map((t) => (
-              <option key={t} value={t} className="bg-card">
-                {t}
+            {TYPES.map((pt) => (
+              <option key={pt} value={pt} className="bg-card">
+                {pt}
               </option>
             ))}
           </select>
@@ -92,7 +94,10 @@ export function PresetEditor({
 
       <div>
         <label className={labelCls}>
-          Comando {type === 'shell' && <span className="text-text-secondary/60">(vacío = shell por defecto)</span>}
+          {t('preset.command')}{' '}
+          {type === 'shell' && (
+            <span className="text-text-secondary/60">{t('preset.commandHint')}</span>
+          )}
         </label>
         <input
           className={cn(inputCls, 'font-mono')}
@@ -103,7 +108,7 @@ export function PresetEditor({
       </div>
 
       <div>
-        <label className={labelCls}>Argumentos (separados por espacio)</label>
+        <label className={labelCls}>{t('preset.args')}</label>
         <input
           className={cn(inputCls, 'font-mono')}
           value={args}
@@ -113,7 +118,7 @@ export function PresetEditor({
       </div>
 
       <div>
-        <label className={labelCls}>Variables de entorno (una por línea, KEY=VALUE)</label>
+        <label className={labelCls}>{t('preset.env')}</label>
         <textarea
           className={cn(inputCls, 'h-20 resize-none py-2 font-mono')}
           value={envText}
@@ -123,12 +128,12 @@ export function PresetEditor({
       </div>
 
       <div>
-        <label className={labelCls}>Directorio por defecto (opcional)</label>
+        <label className={labelCls}>{t('preset.defaultCwd')}</label>
         <div className="flex gap-2">
           <input
             className={cn(inputCls, 'font-mono')}
             value={defaultCwd}
-            placeholder="usa el cwd del workspace"
+            placeholder={t('preset.defaultCwdHint')}
             onChange={(e) => setDefaultCwd(e.target.value)}
           />
           <button
@@ -142,7 +147,7 @@ export function PresetEditor({
 
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className={labelCls}>Color</label>
+          <label className={labelCls}>{t('preset.color')}</label>
           <div className="flex flex-wrap gap-1.5">
             {ACCENT_SWATCHES.map((c) => (
               <button
@@ -155,10 +160,26 @@ export function PresetEditor({
                 style={{ backgroundColor: c }}
               />
             ))}
+            <label
+              className={cn(
+                'relative grid h-6 w-6 cursor-pointer place-items-center overflow-hidden rounded-full border-2 transition-transform',
+                ACCENT_SWATCHES.includes(color) ? 'border-dashed border-border' : 'scale-110 border-text-primary',
+              )}
+              style={ACCENT_SWATCHES.includes(color) ? undefined : { backgroundColor: color }}
+              title="Custom"
+            >
+              {ACCENT_SWATCHES.includes(color) && <Plus size={13} className="text-text-secondary" />}
+              <input
+                type="color"
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+              />
+            </label>
           </div>
         </div>
         <div>
-          <label className={labelCls}>Ícono</label>
+          <label className={labelCls}>{t('preset.icon')}</label>
           <div className="flex flex-wrap gap-1.5">
             {ICON_NAMES.map((n) => {
               const Icon = iconFor(n)
@@ -186,13 +207,13 @@ export function PresetEditor({
           onClick={onCancel}
           className="rounded-btn border border-border px-4 py-2 text-sm text-text-secondary hover:text-text-primary"
         >
-          Cancelar
+          {t('common.cancel')}
         </button>
         <button
           onClick={save}
           className="rounded-btn bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))] px-4 py-2 text-sm font-medium text-white hover:brightness-110"
         >
-          Guardar
+          {t('common.save')}
         </button>
       </div>
     </div>

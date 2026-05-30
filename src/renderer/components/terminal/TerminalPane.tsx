@@ -7,11 +7,20 @@ export interface TerminalPaneProps {
   shell?: string
   initialCommand?: string
   fontSize?: number
+  /** Whether this terminal is currently visible (drives refit-on-reveal). */
+  isActive?: boolean
 }
 
-export function TerminalPane({ paneId, cwd, shell, initialCommand, fontSize }: TerminalPaneProps) {
+export function TerminalPane({
+  paneId,
+  cwd,
+  shell,
+  initialCommand,
+  fontSize,
+  isActive,
+}: TerminalPaneProps) {
   const ref = useRef<HTMLDivElement>(null)
-  useXterm(ref, { paneId, cwd, shell, initialCommand, fontSize })
+  useXterm(ref, { paneId, cwd, shell, initialCommand, fontSize, isActive })
 
   return (
     <div className="h-full w-full overflow-hidden bg-bg-primary p-2">

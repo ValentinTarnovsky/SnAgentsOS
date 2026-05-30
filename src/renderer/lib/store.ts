@@ -1,5 +1,15 @@
 import { create } from 'zustand'
-import type { AgentPreset, ConfigFile, Pane, Settings, Workspace } from '@shared/types'
+import type {
+  AgentPreset,
+  ConfigFile,
+  GridPreset,
+  Pane,
+  PaneType,
+  Settings,
+  Workspace,
+  WorkspaceLayout,
+} from '@shared/types'
+import { gridForCount } from '@/components/layout/gridTemplates'
 
 const ACCENTS = ['#6366f1', '#8b5cf6', '#60a5fa']
 
@@ -17,10 +27,16 @@ function makeShellPane(index: number): Pane {
   }
 }
 
+/** Grow the grid to fit `count` panes, never shrinking a deliberately larger grid. */
+function growGrid(current: GridPreset | undefined, count: number): GridPreset {
+  const needed = gridForCount(count)
+  return current && current >= needed ? current : needed
+}
+
 const DEFAULT_PRESETS: AgentPreset[] = [
   { id: 'preset-shell', name: 'Shell', type: 'shell', command: '', args: [], color: '#6366f1', icon: 'terminal' },
-  { id: 'preset-claude', name: 'Claude Code', type: 'claude', command: 'claude', args: [], color: '#d97757', icon: 'sparkles' },
-  { id: 'preset-codex', name: 'Codex', type: 'codex', command: 'codex', args: [], color: '#10a37f', icon: 'bot' },
+  { id: 'preset-claude', name: 'Claude Code', type: 'claude', command: 'claude', args: [], color: '#d97757', icon: 'claude' },
+  { id: 'preset-codex', name: 'Codex', type: 'codex', command: 'codex', args: [], color: '#10a37f', icon: 'openai' },
 ]
 
 const DEFAULT_SETTINGS: Settings = {
@@ -28,10 +44,32 @@ const DEFAULT_SETTINGS: Settings = {
   fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
   fontSize: 13,
   accent: 'violet',
+  theme: 'midnight',
+  customColors: {},
+  language: 'en',
   scrollback: 5000,
   restoreLastWorkspace: true,
   confirmCloseRunning: true,
+  closeToTray: true,
+  launchOnStartup: false,
   sidebarCollapsed: false,
+}
+
+/** A single terminal cell chosen in the new-workspace wizard. */
+export interface WorkspaceDraftPane {
+  type: PaneType
+  presetId?: string
+  title: string
+  color: string
+  icon: string
+  command?: string
+}
+
+export interface WorkspaceDraft {
+  name: string
+  cwd: string
+  grid: GridPreset
+  panes: WorkspaceDraftPane[]
 }
 
 export interface AppState {
@@ -41,17 +79,25 @@ export interface AppState {
   presets: AgentPreset[]
   settings: Settings
   settingsOpen: boolean
+  wizardOpen: boolean
+  /** workspaceId -> maximized paneId (transient; never persisted). */
+  maximized: Record<string, string | null>
   /** False until persisted config has been loaded (gates the persistence writer). */
   hydrated: boolean
 
   hydrate: (config: ConfigFile | null) => void
   createWorkspace: (name: string, cwd: string) => string
+  createWorkspaceFull: (draft: WorkspaceDraft) => string
   deleteWorkspace: (id: string) => void
+  renameWorkspace: (id: string, name: string) => void
+  toggleFavorite: (id: string) => void
   setActive: (id: string) => void
   toggleSidebar: () => void
   addPane: (workspaceId: string, pane?: Partial<Pane>) => void
   removePane: (workspaceId: string, paneId: string) => void
-  saveLayout: (workspaceId: string, layout: unknown) => void
+  setGrid: (workspaceId: string, grid: GridPreset) => void
+  toggleMaximize: (workspaceId: string, paneId: string) => void
+  clearMaximize: (workspaceId: string) => void
 
   savePreset: (preset: AgentPreset) => void
   deletePreset: (id: string) => void
@@ -59,6 +105,7 @@ export interface AppState {
 
   updateSettings: (patch: Partial<Settings>) => void
   setSettingsOpen: (open: boolean) => void
+  setWizardOpen: (open: boolean) => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -68,6 +115,8 @@ export const useAppStore = create<AppState>((set) => ({
   presets: DEFAULT_PRESETS,
   settings: DEFAULT_SETTINGS,
   settingsOpen: false,
+  wizardOpen: false,
+  maximized: {},
   hydrated: false,
 
   hydrate: (config) =>
@@ -94,7 +143,41 @@ export const useAppStore = create<AppState>((set) => ({
     }),
 
   createWorkspace: (name, cwd) => {
-    const ws: Workspace = { id: uid('ws'), name, cwd, panes: [makeShellPane(0)] }
+    const pane = makeShellPane(0)
+    const ws: Workspace = {
+      id: uid('ws'),
+      name,
+      cwd,
+      panes: [pane],
+      favorite: false,
+      layout: { grid: 1, order: [pane.id] },
+    }
+    set((s) => ({ workspaces: [...s.workspaces, ws], activeWorkspaceId: ws.id }))
+    return ws.id
+  },
+
+  createWorkspaceFull: (draft) => {
+    const panes: Pane[] =
+      draft.panes.length > 0
+        ? draft.panes.map((p) => ({
+            id: uid('pane'),
+            type: p.type,
+            presetId: p.presetId,
+            command: p.command,
+            title: p.title,
+            color: p.color,
+            icon: p.icon,
+          }))
+        : [makeShellPane(0)]
+    const layout: WorkspaceLayout = { grid: draft.grid, order: panes.map((p) => p.id) }
+    const ws: Workspace = {
+      id: uid('ws'),
+      name: draft.name,
+      cwd: draft.cwd,
+      panes,
+      favorite: false,
+      layout,
+    }
     set((s) => ({ workspaces: [...s.workspaces, ws], activeWorkspaceId: ws.id }))
     return ws.id
   },
@@ -104,8 +187,22 @@ export const useAppStore = create<AppState>((set) => ({
       const workspaces = s.workspaces.filter((w) => w.id !== id)
       const activeWorkspaceId =
         s.activeWorkspaceId === id ? (workspaces[0]?.id ?? null) : s.activeWorkspaceId
-      return { workspaces, activeWorkspaceId }
+      const maximized = { ...s.maximized }
+      delete maximized[id]
+      return { workspaces, activeWorkspaceId, maximized }
     }),
+
+  renameWorkspace: (id, name) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) =>
+        w.id === id ? { ...w, name: name.trim() || w.name } : w,
+      ),
+    })),
+
+  toggleFavorite: (id) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, favorite: !w.favorite } : w)),
+    })),
 
   setActive: (id) => set({ activeWorkspaceId: id }),
 
@@ -116,21 +213,48 @@ export const useAppStore = create<AppState>((set) => ({
       workspaces: s.workspaces.map((w) => {
         if (w.id !== workspaceId) return w
         const newPane: Pane = { ...makeShellPane(w.panes.length), ...pane, id: uid('pane') }
-        return { ...w, panes: [...w.panes, newPane] }
+        const panes = [...w.panes, newPane]
+        const order = [...(w.layout?.order ?? w.panes.map((p) => p.id)), newPane.id]
+        const grid = growGrid(w.layout?.grid, panes.length)
+        return { ...w, panes, layout: { grid, order } }
       }),
     })),
 
   removePane: (workspaceId, paneId) =>
+    set((s) => {
+      const maximized = { ...s.maximized }
+      if (maximized[workspaceId] === paneId) maximized[workspaceId] = null
+      return {
+        maximized,
+        workspaces: s.workspaces.map((w) => {
+          if (w.id !== workspaceId) return w
+          const panes = w.panes.filter((p) => p.id !== paneId)
+          const order = (w.layout?.order ?? w.panes.map((p) => p.id)).filter((id) => id !== paneId)
+          const grid = w.layout?.grid ?? gridForCount(panes.length)
+          return { ...w, panes, layout: { grid, order } }
+        }),
+      }
+    }),
+
+  setGrid: (workspaceId, grid) =>
     set((s) => ({
       workspaces: s.workspaces.map((w) =>
-        w.id === workspaceId ? { ...w, panes: w.panes.filter((p) => p.id !== paneId) } : w,
+        w.id === workspaceId
+          ? { ...w, layout: { grid, order: w.layout?.order ?? w.panes.map((p) => p.id) } }
+          : w,
       ),
     })),
 
-  saveLayout: (workspaceId, layout) =>
+  toggleMaximize: (workspaceId, paneId) =>
     set((s) => ({
-      workspaces: s.workspaces.map((w) => (w.id === workspaceId ? { ...w, layout } : w)),
+      maximized: {
+        ...s.maximized,
+        [workspaceId]: s.maximized[workspaceId] === paneId ? null : paneId,
+      },
     })),
+
+  clearMaximize: (workspaceId) =>
+    set((s) => ({ maximized: { ...s.maximized, [workspaceId]: null } })),
 
   savePreset: (preset) =>
     set((s) => {
@@ -149,4 +273,6 @@ export const useAppStore = create<AppState>((set) => ({
   updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
 
   setSettingsOpen: (open) => set({ settingsOpen: open }),
+
+  setWizardOpen: (open) => set({ wizardOpen: open }),
 }))

@@ -1,0 +1,40 @@
+import type { ThemeDefinition } from '@shared/types'
+
+export const light: ThemeDefinition = {
+  name: 'light',
+  label: 'Light',
+  light: true,
+  tokens: {
+    'bg-primary': '#ffffff',
+    'bg-secondary': '#f4f5f7',
+    card: '#ffffff',
+    border: '#e5e7eb',
+    'text-primary': '#111827',
+    'text-secondary': '#6b7280',
+    accent: '#6366f1',
+    'accent-2': '#8b5cf6',
+    'accent-3': '#3b82f6',
+
+    'term-bg': '#ffffff',
+    'term-fg': '#1f2937',
+    'term-cursor': '#6366f1',
+    'term-selection': 'rgba(99, 102, 241, 0.20)',
+
+    'ansi-black': '#1f2937',
+    'ansi-red': '#dc2626',
+    'ansi-green': '#16a34a',
+    'ansi-yellow': '#ca8a04',
+    'ansi-blue': '#2563eb',
+    'ansi-magenta': '#9333ea',
+    'ansi-cyan': '#0891b2',
+    'ansi-white': '#e5e7eb',
+    'ansi-brightBlack': '#6b7280',
+    'ansi-brightRed': '#ef4444',
+    'ansi-brightGreen': '#22c55e',
+    'ansi-brightYellow': '#eab308',
+    'ansi-brightBlue': '#3b82f6',
+    'ansi-brightMagenta': '#a855f7',
+    'ansi-brightCyan': '#06b6d4',
+    'ansi-brightWhite': '#f9fafb',
+  },
+}
