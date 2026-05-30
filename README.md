@@ -46,7 +46,7 @@ Grab the latest build from **[Releases](https://github.com/ValentinTarnovsky/SnM
 | macOS | `SnMultiCC-x.y.z.dmg` / `-mac.zip` (x64 + arm64) |
 | Linux | `SnMultiCC-x.y.z.AppImage` / `.deb` |
 
-> CI builds and attaches all three platforms to the release on every `v*` tag (see `.github/workflows/release.yml`). `v0.1.0` shipped Windows only.
+> CI builds and attaches all three platforms to the release on every `v*` tag (see `.github/workflows/release.yml`). `v0.1.1` is the first cross-platform release (`v0.1.0` was Windows-only).
 > Builds are unsigned for now — Windows SmartScreen / macOS Gatekeeper may warn on first launch.
 
 ## Tech
