@@ -24,6 +24,11 @@ export class PtyManager {
 
   constructor(private readonly getSender: () => WebContents | null) {}
 
+  /** Number of live ptys. */
+  get count(): number {
+    return this.entries.size
+  }
+
   spawn(req: PtySpawnReq): string {
     const ptyId = `pty-${++this.seq}`
     const shell = req.shell || defaultShell()

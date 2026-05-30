@@ -2,8 +2,25 @@ import { useEffect, useRef, type RefObject } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { WebglAddon } from '@xterm/addon-webgl'
+import { CanvasAddon } from '@xterm/addon-canvas'
 import '@xterm/xterm/css/xterm.css'
 import { snXtermTheme } from '@/lib/xterm-theme'
+
+/** GPU renderer with a 2D-canvas fallback (WebGL contexts are capped per page). */
+function loadRenderer(term: Terminal): void {
+  try {
+    const webgl = new WebglAddon()
+    webgl.onContextLoss(() => webgl.dispose())
+    term.loadAddon(webgl)
+  } catch {
+    try {
+      term.loadAddon(new CanvasAddon())
+    } catch {
+      /* fall back to the default DOM renderer */
+    }
+  }
+}
 
 export interface UseXtermOptions {
   /** Stable pane id (ties this terminal to a workspace pane). */
@@ -47,6 +64,7 @@ export function useXterm(
     term.loadAddon(fit)
     term.loadAddon(new WebLinksAddon())
     term.open(container)
+    loadRenderer(term)
     fit.fit()
 
     let disposed = false

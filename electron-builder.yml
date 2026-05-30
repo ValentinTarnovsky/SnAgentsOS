@@ -21,7 +21,6 @@ files:
 npmRebuild: false
 
 win:
-  icon: build/icon.ico
   target:
     - target: nsis
       arch: [x64]
@@ -38,7 +37,6 @@ portable:
   artifactName: ${productName}-${version}-portable.${ext}
 
 mac:
-  icon: build/icon.icns
   category: public.app-category.developer-tools
   # Signing / notarization are out of scope for the OSS v1.
   identity: null
@@ -50,7 +48,6 @@ mac:
       arch: [x64, arm64]
 
 linux:
-  icon: build/icon.png
   category: Development
   maintainer: Valentin Tarnovsky <tarnovskyvalentin@gmail.com>
   target:

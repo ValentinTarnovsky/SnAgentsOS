@@ -60,7 +60,33 @@ function registerDialogIpc(): void {
 
 function openMainWindow(): void {
   mainWindow = createMainWindow()
-  mainWindow.on('closed', () => {
+  const win = mainWindow
+
+  let forceClose = false
+  win.on('close', (event) => {
+    if (forceClose) return
+    const cfg = configStore.load()
+    const shouldConfirm = cfg?.settings?.confirmCloseRunning !== false
+    if (shouldConfirm && ptyManager.count > 0) {
+      const choice = dialog.showMessageBoxSync(win, {
+        type: 'question',
+        buttons: ['Cancelar', 'Cerrar de todos modos'],
+        defaultId: 1,
+        cancelId: 0,
+        noLink: true,
+        title: 'SnMultiCC',
+        message: 'Hay consolas activas',
+        detail: `${ptyManager.count} proceso(s) en ejecución se cerrarán.`,
+      })
+      if (choice === 0) {
+        event.preventDefault()
+        return
+      }
+    }
+    forceClose = true
+  })
+
+  win.on('closed', () => {
     mainWindow = null
   })
 }
