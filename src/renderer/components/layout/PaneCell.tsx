@@ -1,4 +1,5 @@
-import { Maximize2, Minimize2, X } from 'lucide-react'
+import { GripVertical, Maximize2, Minimize2, X } from 'lucide-react'
+import { motion } from 'framer-motion'
 import type { AgentPreset, Pane, Workspace } from '@shared/types'
 import { resolveLaunch } from '@/lib/launch'
 import { iconFor } from '@/lib/icons'
@@ -15,8 +16,14 @@ interface PaneCellProps {
   workspaceActive: boolean
   /** Currently maximized pane id in this workspace (null = none). */
   maximizedId: string | null
+  index: number
+  isDragging: boolean
+  draggable: boolean
   onToggleMax: () => void
   onClose: () => void
+  onDragStartCell: () => void
+  onDragEnterCell: () => void
+  onDragEndCell: () => void
 }
 
 export function PaneCell({
@@ -25,8 +32,13 @@ export function PaneCell({
   presets,
   workspaceActive,
   maximizedId,
+  isDragging,
+  draggable,
   onToggleMax,
   onClose,
+  onDragStartCell,
+  onDragEnterCell,
+  onDragEndCell,
 }: PaneCellProps) {
   const t = useT()
   const Icon = iconFor(pane.icon)
@@ -34,19 +46,27 @@ export function PaneCell({
 
   const isMax = maximizedId === pane.id
   const hidden = maximizedId !== null && !isMax
-  // Terminal is visible (and should refit) only when its workspace is shown
-  // and it isn't hidden behind a maximized sibling.
   const cellVisible = workspaceActive && !hidden
 
   return (
-    <div
+    <motion.div
+      layout
+      transition={{ type: 'spring', stiffness: 500, damping: 40 }}
+      onDragOver={(e) => e.preventDefault()}
+      onDragEnter={onDragEnterCell}
       className={cn(
-        'flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-bg-primary',
+        'flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border bg-bg-primary',
         hidden && 'hidden',
+        isDragging ? 'border-accent-violet opacity-40' : 'border-border',
       )}
     >
       <header
-        className="flex h-8 shrink-0 items-center gap-2 border-b border-border bg-card/50 px-2.5"
+        draggable={draggable}
+        onDragStart={(e) => {
+          e.dataTransfer.effectAllowed = 'move'
+          onDragStartCell()
+        }}
+        onDragEnd={onDragEndCell}
         onAuxClick={(e) => {
           if (e.button === 1) {
             e.preventDefault()
@@ -54,13 +74,19 @@ export function PaneCell({
           }
         }}
         onDoubleClick={onToggleMax}
+        className={cn(
+          'flex h-8 shrink-0 items-center gap-1.5 border-b border-border bg-card/50 px-2',
+          draggable ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
+        )}
       >
+        {draggable && <GripVertical size={13} className="shrink-0 text-text-secondary/40" />}
         <Icon size={13} className="shrink-0" style={{ color: pane.color }} />
         <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-secondary">
           {pane.title}
         </span>
         <Tooltip label={isMax ? t('pane.restore') : t('pane.maximize')}>
           <button
+            draggable={false}
             onClick={onToggleMax}
             className="rounded p-1 text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
           >
@@ -69,6 +95,7 @@ export function PaneCell({
         </Tooltip>
         <Tooltip label={t('pane.close')}>
           <button
+            draggable={false}
             onClick={onClose}
             className="rounded p-1 text-text-secondary transition-colors hover:bg-red-400/10 hover:text-red-400"
           >
@@ -84,6 +111,6 @@ export function PaneCell({
           isActive={cellVisible}
         />
       </div>
-    </div>
+    </motion.div>
   )
 }

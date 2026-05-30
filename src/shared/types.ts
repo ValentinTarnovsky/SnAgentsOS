@@ -128,6 +128,10 @@ export interface Settings {
   closeToTray: boolean
   /** Installed build only: register the app to launch at system login. */
   launchOnStartup: boolean
+  /** Global OS shortcut to show/focus the app from anywhere. */
+  globalHotkeyEnabled: boolean
+  /** Electron accelerator string, e.g. "Super+Alt+O". */
+  globalHotkey: string
   sidebarCollapsed: boolean
 }
 

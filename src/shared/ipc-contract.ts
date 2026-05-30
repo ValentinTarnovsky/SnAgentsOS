@@ -12,6 +12,18 @@ export interface AppInfo {
   configPath: string | null
 }
 
+/** Live resource usage of the app (its own Electron processes). */
+export interface AppMetrics {
+  /** Total working-set memory across all app processes, in MB. */
+  memMB: number
+  /** Total CPU usage across all app processes, in percent (can exceed 100). */
+  cpuPercent: number
+  /** Number of Electron processes (main + renderer + gpu + utility). */
+  processes: number
+  /** Number of running console processes (ptys). */
+  consoles: number
+}
+
 // --- PTY payloads (wired from F1) ---
 export interface PtySpawnReq {
   /** Renderer-owned stable id tying the pty to a pane. */
@@ -88,9 +100,14 @@ export interface SnApi {
     /** Fires on maximize/unmaximize; returns an unsubscribe function. */
     onMaximizeChange(cb: (maximized: boolean) => void): () => void
   }
-  /** OS integration (no-ops on the portable build). */
+  /** OS integration. */
   system: {
+    /** Login item: no-ops on the portable build. */
     setLoginItem(enabled: boolean): Promise<void>
     getLoginItem(): Promise<boolean>
+    /** Registers/unregisters the global show-app shortcut; resolves false if it couldn't bind. */
+    setGlobalHotkey(enabled: boolean, accelerator: string): Promise<boolean>
+    /** Snapshot of live resource usage (poll this for a real-time view). */
+    getMetrics(): Promise<AppMetrics>
   }
 }

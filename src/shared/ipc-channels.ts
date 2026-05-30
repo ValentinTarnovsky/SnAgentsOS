@@ -33,6 +33,12 @@ export const CH = {
   // System integration (installed build only)
   SYSTEM_SET_LOGIN_ITEM: 'system:setLoginItem', // invoke (boolean) -> void
   SYSTEM_GET_LOGIN_ITEM: 'system:getLoginItem', // invoke -> boolean
+
+  // Global shortcut to show/focus the app
+  SYSTEM_SET_HOTKEY: 'system:setHotkey', // invoke ({enabled, accelerator}) -> boolean success
+
+  // Live resource metrics
+  SYSTEM_METRICS: 'system:metrics', // invoke -> AppMetrics
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

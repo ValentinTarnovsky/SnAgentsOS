@@ -7,6 +7,7 @@ import { CanvasAddon } from '@xterm/addon-canvas'
 import '@xterm/xterm/css/xterm.css'
 import { useAppStore } from '@/lib/store'
 import { buildXtermTheme } from '@/themes'
+import { registerPty, unregisterPty } from '@/lib/ptyRegistry'
 
 /** GPU renderer with a 2D-canvas fallback (WebGL contexts are capped per page). */
 function loadRenderer(term: Terminal): void {
@@ -102,6 +103,7 @@ export function useXterm(
           return
         }
         ptyIdRef.current = ptyId
+        registerPty(opts.paneId, ptyId)
         offData = window.snApi.pty.onData((e) => {
           if (e.ptyId === ptyId) term.write(e.data)
         })
@@ -137,6 +139,7 @@ export function useXterm(
       offExit()
       const id = ptyIdRef.current
       if (id) void window.snApi.pty.kill(id)
+      unregisterPty(opts.paneId)
       ptyIdRef.current = null
       termRef.current = null
       fitRef.current = null

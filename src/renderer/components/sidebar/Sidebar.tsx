@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import {
+  ChevronLeft,
+  ChevronRight,
   MoreVertical,
-  PanelLeftClose,
-  PanelLeftOpen,
   Pencil,
   Plus,
   Settings,
@@ -102,9 +102,9 @@ export function Sidebar() {
         <Tooltip label={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')} side="right">
           <button
             onClick={toggleSidebar}
-            className="rounded-md border border-border/70 bg-card/40 p-1.5 text-text-secondary transition-colors hover:border-accent-violet/40 hover:bg-card hover:text-text-primary"
+            className="rounded-lg border border-border/70 bg-card/40 p-1 text-text-secondary transition-colors hover:border-accent-violet/40 hover:bg-card hover:text-text-primary"
           >
-            {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+            {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           </button>
         </Tooltip>
       </div>

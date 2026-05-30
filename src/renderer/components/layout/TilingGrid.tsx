@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { GRID_COLS, gridForCount, orderPanes } from './gridTemplates'
@@ -5,14 +6,16 @@ import { PaneCell } from './PaneCell'
 
 /**
  * Renders a workspace's terminals in a fixed CSS grid. No tab groups — each
- * cell is one terminal with a slim header. Clicking maximize (or double-click
- * the header) spans one cell over the others; middle-click closes a cell.
+ * cell is one terminal with a slim header. Maximize spans one cell over the
+ * others; middle-click closes; drag a cell's header to reorder (smooth reflow).
  */
 export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isActive: boolean }) {
   const presets = useAppStore((s) => s.presets)
   const removePane = useAppStore((s) => s.removePane)
   const toggleMaximize = useAppStore((s) => s.toggleMaximize)
+  const movePane = useAppStore((s) => s.movePane)
   const maximizedId = useAppStore((s) => s.maximized[workspace.id] ?? null)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
 
   const grid = workspace.layout?.grid ?? gridForCount(workspace.panes.length)
   const ordered = orderPanes(workspace.panes, workspace.layout?.order)
@@ -27,7 +30,7 @@ export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isAc
           gridAutoRows: '1fr',
         }}
       >
-        {ordered.map((pane) => (
+        {ordered.map((pane, index) => (
           <PaneCell
             key={pane.id}
             workspace={workspace}
@@ -35,8 +38,16 @@ export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isAc
             presets={presets}
             workspaceActive={isActive}
             maximizedId={maximizedId}
+            index={index}
+            isDragging={draggingId === pane.id}
+            draggable={!maximizedId}
             onToggleMax={() => toggleMaximize(workspace.id, pane.id)}
             onClose={() => removePane(workspace.id, pane.id)}
+            onDragStartCell={() => setDraggingId(pane.id)}
+            onDragEnterCell={() => {
+              if (draggingId && draggingId !== pane.id) movePane(workspace.id, draggingId, index)
+            }}
+            onDragEndCell={() => setDraggingId(null)}
           />
         ))}
       </div>

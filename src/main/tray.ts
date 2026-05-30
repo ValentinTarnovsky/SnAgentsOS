@@ -31,6 +31,7 @@ export function ensureTray(
   const show = (): void => {
     const win = getWindow()
     if (win) {
+      if (win.isMinimized()) win.restore()
       win.show()
       win.focus()
     }

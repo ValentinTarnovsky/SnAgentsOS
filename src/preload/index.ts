@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type {
   AppInfo,
+  AppMetrics,
   PtyDataEvt,
   PtyExitEvt,
   PtyResizeReq,
@@ -51,6 +52,9 @@ const api: SnApi = {
     setLoginItem: (enabled: boolean) =>
       ipcRenderer.invoke(CH.SYSTEM_SET_LOGIN_ITEM, enabled) as Promise<void>,
     getLoginItem: () => ipcRenderer.invoke(CH.SYSTEM_GET_LOGIN_ITEM) as Promise<boolean>,
+    setGlobalHotkey: (enabled: boolean, accelerator: string) =>
+      ipcRenderer.invoke(CH.SYSTEM_SET_HOTKEY, { enabled, accelerator }) as Promise<boolean>,
+    getMetrics: () => ipcRenderer.invoke(CH.SYSTEM_METRICS) as Promise<AppMetrics>,
   },
 }
 

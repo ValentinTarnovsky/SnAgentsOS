@@ -65,6 +65,8 @@ const settingsSchema = z.object({
   confirmCloseRunning: z.boolean(),
   closeToTray: z.boolean().default(true),
   launchOnStartup: z.boolean().default(false),
+  globalHotkeyEnabled: z.boolean().default(false),
+  globalHotkey: z.string().default('Super+Alt+O'),
   sidebarCollapsed: z.boolean(),
 })
 

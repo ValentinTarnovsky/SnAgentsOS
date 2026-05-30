@@ -1,6 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, session } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
-import type { AppInfo } from '@shared/ipc-contract'
+import type { AppInfo, AppMetrics } from '@shared/ipc-contract'
 import type { ConfigFile } from '@shared/types'
 import { createMainWindow } from './window'
 import { getConfigPath, isPortable } from './paths'
@@ -22,6 +22,39 @@ const configStore = new ConfigStore()
 function quitApp(): void {
   isQuitting = true
   app.quit()
+}
+
+/** Bring the window to the front from anywhere (tray / global hotkey). */
+function showWindow(): void {
+  if (!mainWindow) {
+    openMainWindow()
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+let currentHotkey: string | null = null
+
+/** (Re)register the global show-app shortcut. Returns false if binding failed. */
+function applyGlobalHotkey(enabled: boolean, accelerator: string): boolean {
+  if (currentHotkey) {
+    try {
+      globalShortcut.unregister(currentHotkey)
+    } catch {
+      /* ignore */
+    }
+    currentHotkey = null
+  }
+  if (!enabled || !accelerator || !accelerator.trim()) return true
+  try {
+    const ok = globalShortcut.register(accelerator, showWindow)
+    if (ok) currentHotkey = accelerator
+    return ok
+  } catch {
+    return false
+  }
 }
 
 function registerCsp(): void {
@@ -122,7 +155,30 @@ app.whenReady().then(() => {
   registerPtyIpc(ptyManager)
   registerWindowIpc(() => mainWindow)
   registerSystemIpc()
+  ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
+    applyGlobalHotkey(p.enabled, p.accelerator),
+  )
+  ipcMain.handle(CH.SYSTEM_METRICS, (): AppMetrics => {
+    const metrics = app.getAppMetrics()
+    let memKB = 0
+    let cpu = 0
+    for (const m of metrics) {
+      memKB += m.memory?.workingSetSize ?? 0
+      cpu += m.cpu?.percentCPUUsage ?? 0
+    }
+    return {
+      memMB: Math.round(memKB / 1024),
+      cpuPercent: Math.round(cpu * 10) / 10,
+      processes: metrics.length,
+      consoles: ptyManager.count,
+    }
+  })
   openMainWindow()
+
+  const startupCfg = configStore.load()
+  if (startupCfg?.settings) {
+    applyGlobalHotkey(startupCfg.settings.globalHotkeyEnabled, startupCfg.settings.globalHotkey)
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) openMainWindow()
@@ -134,6 +190,8 @@ app.on('before-quit', () => {
   ptyManager.killAll()
   destroyTray()
 })
+
+app.on('will-quit', () => globalShortcut.unregisterAll())
 
 app.on('window-all-closed', () => {
   ptyManager.killAll()

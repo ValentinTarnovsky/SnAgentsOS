@@ -10,6 +10,7 @@ import type {
   WorkspaceLayout,
 } from '@shared/types'
 import { gridForCount } from '@/components/layout/gridTemplates'
+import { killPanePtys } from '@/lib/ptyRegistry'
 
 const ACCENTS = ['#6366f1', '#8b5cf6', '#60a5fa']
 
@@ -52,6 +53,8 @@ const DEFAULT_SETTINGS: Settings = {
   confirmCloseRunning: true,
   closeToTray: true,
   launchOnStartup: false,
+  globalHotkeyEnabled: false,
+  globalHotkey: 'Super+Alt+O',
   sidebarCollapsed: false,
 }
 
@@ -96,6 +99,7 @@ export interface AppState {
   addPane: (workspaceId: string, pane?: Partial<Pane>) => void
   removePane: (workspaceId: string, paneId: string) => void
   setGrid: (workspaceId: string, grid: GridPreset) => void
+  movePane: (workspaceId: string, paneId: string, toIndex: number) => void
   toggleMaximize: (workspaceId: string, paneId: string) => void
   clearMaximize: (workspaceId: string) => void
 
@@ -108,7 +112,7 @@ export interface AppState {
   setWizardOpen: (open: boolean) => void
 }
 
-export const useAppStore = create<AppState>((set) => ({
+export const useAppStore = create<AppState>((set, get) => ({
   workspaces: [],
   activeWorkspaceId: null,
   sidebarCollapsed: false,
@@ -182,7 +186,10 @@ export const useAppStore = create<AppState>((set) => ({
     return ws.id
   },
 
-  deleteWorkspace: (id) =>
+  deleteWorkspace: (id) => {
+    // Force-kill the workspace's consoles so nothing lingers in the background.
+    const ws = get().workspaces.find((w) => w.id === id)
+    if (ws) killPanePtys(ws.panes.map((p) => p.id))
     set((s) => {
       const workspaces = s.workspaces.filter((w) => w.id !== id)
       const activeWorkspaceId =
@@ -190,7 +197,8 @@ export const useAppStore = create<AppState>((set) => ({
       const maximized = { ...s.maximized }
       delete maximized[id]
       return { workspaces, activeWorkspaceId, maximized }
-    }),
+    })
+  },
 
   renameWorkspace: (id, name) =>
     set((s) => ({
@@ -243,6 +251,22 @@ export const useAppStore = create<AppState>((set) => ({
           ? { ...w, layout: { grid, order: w.layout?.order ?? w.panes.map((p) => p.id) } }
           : w,
       ),
+    })),
+
+  movePane: (workspaceId, paneId, toIndex) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => {
+        if (w.id !== workspaceId) return w
+        const order = (w.layout?.order ?? w.panes.map((p) => p.id)).slice()
+        const from = order.indexOf(paneId)
+        if (from === -1) return w
+        const to = Math.max(0, Math.min(toIndex, order.length - 1))
+        if (from === to) return w
+        order.splice(from, 1)
+        order.splice(to, 0, paneId)
+        const grid = w.layout?.grid ?? gridForCount(w.panes.length)
+        return { ...w, layout: { grid, order } }
+      }),
     })),
 
   toggleMaximize: (workspaceId, paneId) =>

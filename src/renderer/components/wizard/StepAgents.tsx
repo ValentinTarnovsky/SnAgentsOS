@@ -14,9 +14,31 @@ export function StepAgents({ draft, update }: StepProps) {
     update({ assignments: next })
   }
 
+  const applyAll = (presetId: string): void => {
+    update({ assignments: draft.assignments.map(() => presetId) })
+  }
+
   return (
     <div className="space-y-3">
       <p className="text-sm text-text-secondary">{t('wizard.assignAgents')}</p>
+
+      <div className="flex flex-wrap items-center gap-2 rounded-btn border border-dashed border-border bg-bg-secondary/40 px-3 py-2">
+        <span className="text-xs font-medium text-text-secondary">{t('wizard.applyAll')}</span>
+        {presets.map((preset) => {
+          const Icon = iconFor(preset.icon)
+          return (
+            <button
+              key={preset.id}
+              onClick={() => applyAll(preset.id)}
+              className="flex items-center gap-1.5 rounded-btn border border-border px-2.5 py-1 text-xs text-text-secondary transition-colors hover:border-accent-violet/50 hover:text-text-primary"
+            >
+              <Icon size={13} style={{ color: preset.color }} />
+              {preset.name}
+            </button>
+          )
+        })}
+      </div>
+
       <div className="space-y-2">
         {draft.assignments.map((presetId, i) => (
           <div
