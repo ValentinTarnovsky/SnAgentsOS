@@ -15,9 +15,9 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "rebuild": "electron-builder install-app-deps",
     "pack:dir": "npm run build && electron-builder --dir",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:linux": "npm run build && electron-builder --linux"
+    "dist:win": "npm run build && electron-builder --win --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist:linux": "npm run build && electron-builder --linux --publish never"
   },
   "dependencies": {
     "@fontsource/inter": "^5.1.0",
