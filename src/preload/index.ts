@@ -10,6 +10,7 @@ import type {
   PtyWriteReq,
   SnApi,
 } from '@shared/ipc-contract'
+import type { ConfigFile } from '@shared/types'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -33,6 +34,10 @@ const api: SnApi = {
   },
   dialog: {
     openDirectory: () => ipcRenderer.invoke(CH.DIALOG_OPEN_DIR) as Promise<string | null>,
+  },
+  config: {
+    load: () => ipcRenderer.invoke(CH.CONFIG_LOAD) as Promise<ConfigFile | null>,
+    save: (config: ConfigFile) => ipcRenderer.send(CH.CONFIG_SAVE, config),
   },
 }
 

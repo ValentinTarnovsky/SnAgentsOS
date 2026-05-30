@@ -2,6 +2,7 @@
  * IPC request/response/event payload shapes and the typed bridge surface
  * exposed on `window.snApi`. The SnApi interface grows phase by phase.
  */
+import type { ConfigFile } from './types'
 
 export interface AppInfo {
   version: string
@@ -70,5 +71,11 @@ export interface SnApi {
   dialog: {
     /** Opens a native folder picker; resolves to the chosen path or null. */
     openDirectory(): Promise<string | null>
+  }
+  config: {
+    /** Loads persisted config, or null if none / invalid. */
+    load(): Promise<ConfigFile | null>
+    /** Persists the full config blob (fire-and-forget; debounced by caller). */
+    save(config: ConfigFile): void
   }
 }

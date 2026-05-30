@@ -15,8 +15,10 @@ files:
   - out/**
   - package.json
 
-# Rebuild native deps (node-pty) against the Electron ABI.
-npmRebuild: true
+# node-pty is N-API (ABI-stable) and ships prebuilt binaries that load in
+# Electron directly, so no native rebuild is needed (and avoids requiring a
+# C++ toolchain). asarUnpack keeps the .node files loadable on disk.
+npmRebuild: false
 
 win:
   icon: build/icon.ico

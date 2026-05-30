@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
+import { startPersistence } from '@/lib/persist'
 import { Sidebar } from '@/components/sidebar/Sidebar'
 import { WorkspaceView } from '@/components/workspace/WorkspaceView'
 import { SettingsModal } from '@/components/settings/SettingsModal'
@@ -22,7 +23,22 @@ export function App() {
   const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId)
   const createWorkspace = useAppStore((s) => s.createWorkspace)
   const accent = useAppStore((s) => s.settings.accent)
+  const hydrated = useAppStore((s) => s.hydrated)
+  const hydrate = useAppStore((s) => s.hydrate)
   const active = workspaces.find((w) => w.id === activeWorkspaceId) ?? null
+
+  // Load persisted config once, then start the debounced persistence writer.
+  useEffect(() => {
+    let unsub: (() => void) | undefined
+    window.snApi.config
+      .load()
+      .then((cfg) => {
+        hydrate(cfg)
+        unsub = startPersistence()
+      })
+      .catch(() => hydrate(null))
+    return () => unsub?.()
+  }, [hydrate])
 
   // Remap the primary accent token to the chosen accent.
   useEffect(() => {
@@ -32,6 +48,10 @@ export function App() {
   const onNew = async (): Promise<void> => {
     const dir = await window.snApi.dialog.openDirectory()
     if (dir) createWorkspace(basename(dir), dir)
+  }
+
+  if (!hydrated) {
+    return <div className="h-full w-full bg-bg-primary" />
   }
 
   return (

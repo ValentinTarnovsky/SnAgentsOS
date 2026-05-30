@@ -16,20 +16,9 @@ export const CH = {
   PTY_DATA: 'pty:data', // { ptyId, data }
   PTY_EXIT: 'pty:exit', // { ptyId, exitCode, signal }
 
-  // Workspaces
-  WS_LIST: 'workspaces:list',
-  WS_SAVE: 'workspaces:save',
-  WS_DELETE: 'workspaces:delete',
-  WS_LAYOUT_SAVE: 'workspaces:layout:save',
-
-  // Agent presets
-  PRESET_LIST: 'presets:list',
-  PRESET_SAVE: 'presets:save',
-  PRESET_DELETE: 'presets:delete',
-
-  // Settings
-  SETTINGS_GET: 'settings:get',
-  SETTINGS_SET: 'settings:set',
+  // Config (single blob: workspaces + presets + settings + layout)
+  CONFIG_LOAD: 'config:load', // invoke -> ConfigFile | null
+  CONFIG_SAVE: 'config:save', // send (debounced from the renderer)
 
   // Dialogs
   DIALOG_OPEN_DIR: 'dialog:openDirectory',

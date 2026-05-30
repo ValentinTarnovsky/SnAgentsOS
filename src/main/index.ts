@@ -1,15 +1,18 @@
 import { app, BrowserWindow, dialog, ipcMain, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { AppInfo } from '@shared/ipc-contract'
+import type { ConfigFile } from '@shared/types'
 import { createMainWindow } from './window'
 import { getConfigPath, isPortable } from './paths'
 import { PtyManager } from './pty/PtyManager'
+import { ConfigStore } from './store/ConfigStore'
 import { registerPtyIpc } from './ipc/registerPtyIpc'
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 
 let mainWindow: BrowserWindow | null = null
 const ptyManager = new PtyManager(() => mainWindow?.webContents ?? null)
+const configStore = new ConfigStore()
 
 function registerCsp(): void {
   const csp = isDev
@@ -39,6 +42,11 @@ function registerAppIpc(): void {
   )
 }
 
+function registerConfigIpc(): void {
+  ipcMain.handle(CH.CONFIG_LOAD, (): ConfigFile | null => configStore.load())
+  ipcMain.on(CH.CONFIG_SAVE, (_e, config: ConfigFile) => configStore.save(config))
+}
+
 function registerDialogIpc(): void {
   ipcMain.handle(CH.DIALOG_OPEN_DIR, async (): Promise<string | null> => {
     const result = mainWindow
@@ -60,6 +68,7 @@ function openMainWindow(): void {
 app.whenReady().then(() => {
   registerCsp()
   registerAppIpc()
+  registerConfigIpc()
   registerDialogIpc()
   registerPtyIpc(ptyManager)
   openMainWindow()

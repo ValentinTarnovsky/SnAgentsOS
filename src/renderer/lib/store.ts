@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AgentPreset, Pane, Settings, Workspace } from '@shared/types'
+import type { AgentPreset, ConfigFile, Pane, Settings, Workspace } from '@shared/types'
 
 const ACCENTS = ['#6366f1', '#8b5cf6', '#60a5fa']
 
@@ -34,20 +34,24 @@ const DEFAULT_SETTINGS: Settings = {
   sidebarCollapsed: false,
 }
 
-interface AppState {
+export interface AppState {
   workspaces: Workspace[]
   activeWorkspaceId: string | null
   sidebarCollapsed: boolean
   presets: AgentPreset[]
   settings: Settings
   settingsOpen: boolean
+  /** False until persisted config has been loaded (gates the persistence writer). */
+  hydrated: boolean
 
+  hydrate: (config: ConfigFile | null) => void
   createWorkspace: (name: string, cwd: string) => string
   deleteWorkspace: (id: string) => void
   setActive: (id: string) => void
   toggleSidebar: () => void
   addPane: (workspaceId: string, pane?: Partial<Pane>) => void
   removePane: (workspaceId: string, paneId: string) => void
+  saveLayout: (workspaceId: string, layout: unknown) => void
 
   savePreset: (preset: AgentPreset) => void
   deletePreset: (id: string) => void
@@ -64,6 +68,30 @@ export const useAppStore = create<AppState>((set) => ({
   presets: DEFAULT_PRESETS,
   settings: DEFAULT_SETTINGS,
   settingsOpen: false,
+  hydrated: false,
+
+  hydrate: (config) =>
+    set((s) => {
+      if (!config) return { hydrated: true }
+      const workspaces = config.workspaces ?? []
+      const presets = config.presets && config.presets.length ? config.presets : s.presets
+      const settings: Settings = { ...s.settings, ...config.settings }
+      let activeWorkspaceId: string | null = null
+      if (settings.restoreLastWorkspace) {
+        const wanted = config.activeWorkspaceId ?? null
+        activeWorkspaceId = workspaces.some((w) => w.id === wanted)
+          ? wanted
+          : (workspaces[0]?.id ?? null)
+      }
+      return {
+        workspaces,
+        presets,
+        settings,
+        sidebarCollapsed: settings.sidebarCollapsed,
+        activeWorkspaceId,
+        hydrated: true,
+      }
+    }),
 
   createWorkspace: (name, cwd) => {
     const ws: Workspace = { id: uid('ws'), name, cwd, panes: [makeShellPane(0)] }
@@ -97,6 +125,11 @@ export const useAppStore = create<AppState>((set) => ({
       workspaces: s.workspaces.map((w) =>
         w.id === workspaceId ? { ...w, panes: w.panes.filter((p) => p.id !== paneId) } : w,
       ),
+    })),
+
+  saveLayout: (workspaceId, layout) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => (w.id === workspaceId ? { ...w, layout } : w)),
     })),
 
   savePreset: (preset) =>

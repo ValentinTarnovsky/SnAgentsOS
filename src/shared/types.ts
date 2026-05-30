@@ -59,4 +59,5 @@ export interface ConfigFile {
   workspaces: Workspace[]
   presets: AgentPreset[]
   settings: Settings
+  activeWorkspaceId?: string | null
 }
