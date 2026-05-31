@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useAppStore } from './store'
 import { eventToAccel, resolveKeymap, type ActionId } from './keymap'
+import { getFocusedPane } from './focus'
 
 /** Sidebar display order: favorites first (matches the Sidebar). */
 function displayOrder() {
@@ -27,6 +28,18 @@ function runAction(id: ActionId): void {
     case 'newConsole':
       if (s.activeWorkspaceId) s.addPane(s.activeWorkspaceId)
       break
+    case 'maximizePane': {
+      const ws = s.activeWorkspaceId
+      const pane = getFocusedPane()
+      if (ws && pane) s.toggleMaximize(ws, pane)
+      break
+    }
+    case 'minimizePane': {
+      const ws = s.activeWorkspaceId
+      const pane = getFocusedPane()
+      if (ws && pane) s.toggleMinimize(ws, pane)
+      break
+    }
     case 'workspaceFlip': {
       const prev = s.previousWorkspaceId
       if (prev && prev !== s.activeWorkspaceId && s.workspaces.some((w) => w.id === prev)) {

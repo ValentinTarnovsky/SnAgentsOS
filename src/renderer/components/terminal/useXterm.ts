@@ -224,6 +224,17 @@ export function useXterm(
       const mod = e.ctrlKey || e.metaKey
       if (!mod || e.altKey) return true
       const key = e.key.toLowerCase()
+      // Ctrl+Enter inserts a newline in AI CLIs (Claude Code, etc.) instead of
+      // submitting. A terminal sends the same CR for Enter and Ctrl+Enter, so
+      // the inner app can't tell them apart; we remap Ctrl+Enter to ESC+CR
+      // (meta+enter), which those tools treat as "insert newline". Plain Enter
+      // is left untouched so normal submitting still works.
+      if (key === 'enter' && e.ctrlKey && !e.shiftKey) {
+        e.preventDefault()
+        const id = ptyIdRef.current
+        if (id) window.snApi.pty.write({ ptyId: id, data: '\x1b\r' })
+        return false
+      }
       if (key === 'c') {
         if (term.hasSelection()) {
           e.preventDefault()

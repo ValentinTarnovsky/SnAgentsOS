@@ -1,5 +1,5 @@
 import { useState, type DragEvent } from 'react'
-import { GripVertical, Maximize2, Minimize2, Pencil, RotateCw, X } from 'lucide-react'
+import { GripVertical, Maximize2, Minimize2, Minus, Pencil, RotateCw, X } from 'lucide-react'
 import { motion } from 'framer-motion'
 import type { AgentPreset, Pane, Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
@@ -20,10 +20,13 @@ interface PaneCellProps {
   workspaceActive: boolean
   /** Currently maximized pane id in this workspace (null = none). */
   maximizedId: string | null
+  /** Pane ids minimized (collapsed to the strip) in this workspace. */
+  minimizedIds: string[]
   index: number
   isDragging: boolean
   draggable: boolean
   onToggleMax: () => void
+  onToggleMin: () => void
   onClose: () => void
   onDragStartCell: () => void
   onDragEnterCell: () => void
@@ -36,9 +39,11 @@ export function PaneCell({
   presets,
   workspaceActive,
   maximizedId,
+  minimizedIds,
   isDragging,
   draggable,
   onToggleMax,
+  onToggleMin,
   onClose,
   onDragStartCell,
   onDragEnterCell,
@@ -50,7 +55,8 @@ export function PaneCell({
   const { cwd, initialCommand, setup } = resolveLaunch(pane, workspace, presets, connections)
 
   const isMax = maximizedId === pane.id
-  const hidden = maximizedId !== null && !isMax
+  const isMin = minimizedIds.includes(pane.id)
+  const hidden = (maximizedId !== null && !isMax) || isMin
   const cellVisible = workspaceActive && !hidden
 
   const renamePane = useAppStore((s) => s.renamePane)
@@ -95,6 +101,7 @@ export function PaneCell({
       icon: isMax ? Minimize2 : Maximize2,
       onClick: onToggleMax,
     },
+    { label: t('pane.minimize'), icon: Minus, onClick: onToggleMin },
     { label: t('pane.restart'), icon: RotateCw, onClick: () => restartPane(pane.id) },
     { label: t('pane.close'), icon: X, danger: true, separated: true, onClick: onClose },
   ]
@@ -159,6 +166,15 @@ export function PaneCell({
             {pane.title}
           </span>
         )}
+        <Tooltip label={t('pane.minimize')}>
+          <button
+            draggable={false}
+            onClick={onToggleMin}
+            className="rounded p-1 text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
+          >
+            <Minus size={13} />
+          </button>
+        </Tooltip>
         <Tooltip label={isMax ? t('pane.restore') : t('pane.maximize')}>
           <button
             draggable={false}

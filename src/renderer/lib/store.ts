@@ -30,12 +30,6 @@ function makeShellPane(index: number): Pane {
   }
 }
 
-/** Grow the grid to fit `count` panes, never shrinking a deliberately larger grid. */
-function growGrid(current: GridPreset | undefined, count: number): GridPreset {
-  const needed = gridForCount(count)
-  return current && current >= needed ? current : needed
-}
-
 const DEFAULT_PRESETS: AgentPreset[] = [
   { id: 'preset-shell', name: 'Shell', type: 'shell', command: '', args: [], color: '#6366f1', icon: 'terminal' },
   { id: 'preset-claude', name: 'Claude Code', type: 'claude', command: 'claude', args: [], color: '#d97757', icon: 'claude' },
@@ -96,6 +90,8 @@ export interface AppState {
   paletteOpen: boolean
   /** workspaceId -> maximized paneId (transient; never persisted). */
   maximized: Record<string, string | null>
+  /** workspaceId -> minimized paneIds (transient; never persisted). */
+  minimized: Record<string, string[]>
   /** paneId -> relaunch counter (transient; bumping it remounts the console). */
   paneEpoch: Record<string, number>
   /** False until persisted config has been loaded (gates the persistence writer). */
@@ -121,6 +117,7 @@ export interface AppState {
   movePane: (workspaceId: string, paneId: string, toIndex: number) => void
   toggleMaximize: (workspaceId: string, paneId: string) => void
   clearMaximize: (workspaceId: string) => void
+  toggleMinimize: (workspaceId: string, paneId: string) => void
 
   savePreset: (preset: AgentPreset) => void
   deletePreset: (id: string) => void
@@ -153,6 +150,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   wizardOpen: false,
   paletteOpen: false,
   maximized: {},
+  minimized: {},
   paneEpoch: {},
   hydrated: false,
 
@@ -275,7 +273,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         s.activeWorkspaceId === id ? (workspaces[0]?.id ?? null) : s.activeWorkspaceId
       const maximized = { ...s.maximized }
       delete maximized[id]
-      return { workspaces, activeWorkspaceId, maximized }
+      const minimized = { ...s.minimized }
+      delete minimized[id]
+      return { workspaces, activeWorkspaceId, maximized, minimized }
     })
   },
 
@@ -306,7 +306,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         const newPane: Pane = { ...makeShellPane(w.panes.length), ...pane, id: uid('pane') }
         const panes = [...w.panes, newPane]
         const order = [...(w.layout?.order ?? w.panes.map((p) => p.id)), newPane.id]
-        const grid = growGrid(w.layout?.grid, panes.length)
+        const grid = gridForCount(panes.length)
         return { ...w, panes, layout: { grid, order } }
       }),
     })),
@@ -315,13 +315,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const maximized = { ...s.maximized }
       if (maximized[workspaceId] === paneId) maximized[workspaceId] = null
+      const minimized = { ...s.minimized }
+      if (minimized[workspaceId]?.includes(paneId)) {
+        minimized[workspaceId] = minimized[workspaceId].filter((id) => id !== paneId)
+      }
       return {
         maximized,
+        minimized,
         workspaces: s.workspaces.map((w) => {
           if (w.id !== workspaceId) return w
           const panes = w.panes.filter((p) => p.id !== paneId)
           const order = (w.layout?.order ?? w.panes.map((p) => p.id)).filter((id) => id !== paneId)
-          const grid = w.layout?.grid ?? gridForCount(panes.length)
+          // Shrink the grid back to the smallest preset that fits the remaining
+          // panes so removing a console reflows the rest (no leftover empty cells).
+          const grid = gridForCount(panes.length)
           return { ...w, panes, layout: { grid, order } }
         }),
       }
@@ -381,7 +388,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (from === to) return w
         order.splice(from, 1)
         order.splice(to, 0, paneId)
-        const grid = w.layout?.grid ?? gridForCount(w.panes.length)
+        const grid = gridForCount(w.panes.length)
         return { ...w, layout: { grid, order } }
       }),
     })),
@@ -396,6 +403,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearMaximize: (workspaceId) =>
     set((s) => ({ maximized: { ...s.maximized, [workspaceId]: null } })),
+
+  toggleMinimize: (workspaceId, paneId) =>
+    set((s) => {
+      const current = s.minimized[workspaceId] ?? []
+      const next = current.includes(paneId)
+        ? current.filter((id) => id !== paneId)
+        : [...current, paneId]
+      return { minimized: { ...s.minimized, [workspaceId]: next } }
+    }),
 
   savePreset: (preset) =>
     set((s) => {
