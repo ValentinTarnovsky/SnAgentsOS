@@ -1,9 +1,13 @@
-import { GripVertical, Maximize2, Minimize2, X } from 'lucide-react'
+import { useState, type DragEvent } from 'react'
+import { GripVertical, Maximize2, Minimize2, Pencil, RotateCw, X } from 'lucide-react'
 import { motion } from 'framer-motion'
 import type { AgentPreset, Pane, Workspace } from '@shared/types'
+import { useAppStore } from '@/lib/store'
 import { resolveLaunch } from '@/lib/launch'
+import { getPtyId } from '@/lib/ptyRegistry'
 import { iconFor } from '@/lib/icons'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -48,12 +52,59 @@ export function PaneCell({
   const hidden = maximizedId !== null && !isMax
   const cellVisible = workspaceActive && !hidden
 
+  const renamePane = useAppStore((s) => s.renamePane)
+  const restartPane = useAppStore((s) => s.restartPane)
+  const epoch = useAppStore((s) => s.paneEpoch[pane.id] ?? 0)
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  const [renaming, setRenaming] = useState(false)
+  const [nameVal, setNameVal] = useState(pane.title)
+
+  const startRename = (): void => {
+    setNameVal(pane.title)
+    setRenaming(true)
+  }
+  const commitRename = (): void => {
+    renamePane(workspace.id, pane.id, nameVal)
+    setRenaming(false)
+  }
+
+  // Drop file(s)/folder(s) onto the console. A single folder in a shell cds
+  // into it; anything else pastes every dropped path (quoted, space-separated).
+  const onDropFolder = (e: DragEvent): void => {
+    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
+    e.preventDefault()
+    e.stopPropagation()
+    const paths = Array.from(e.dataTransfer.files)
+      .map((f) => window.snApi.filePath(f))
+      .filter(Boolean)
+    if (paths.length === 0) return
+    const ptyId = getPtyId(pane.id)
+    if (!ptyId) return
+    const data =
+      pane.type === 'shell' && paths.length === 1
+        ? `cd "${paths[0]}"\r`
+        : `${paths.map((p) => `"${p}"`).join(' ')} `
+    window.snApi.pty.write({ ptyId, data })
+  }
+
+  const menuItems: ContextMenuItem[] = [
+    { label: t('ctx.rename'), icon: Pencil, onClick: startRename },
+    {
+      label: isMax ? t('pane.restore') : t('pane.maximize'),
+      icon: isMax ? Minimize2 : Maximize2,
+      onClick: onToggleMax,
+    },
+    { label: t('pane.restart'), icon: RotateCw, onClick: () => restartPane(pane.id) },
+    { label: t('pane.close'), icon: X, danger: true, separated: true, onClick: onClose },
+  ]
+
   return (
     <motion.div
       layout
       transition={{ type: 'spring', stiffness: 500, damping: 40 }}
       onDragOver={(e) => e.preventDefault()}
       onDragEnter={onDragEnterCell}
+      onDrop={onDropFolder}
       className={cn(
         'flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border bg-bg-primary',
         hidden && 'hidden',
@@ -61,7 +112,7 @@ export function PaneCell({
       )}
     >
       <header
-        draggable={draggable}
+        draggable={draggable && !renaming}
         onDragStart={(e) => {
           e.dataTransfer.effectAllowed = 'move'
           onDragStartCell()
@@ -74,16 +125,36 @@ export function PaneCell({
           }
         }}
         onDoubleClick={onToggleMax}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          setMenu({ x: e.clientX, y: e.clientY })
+        }}
         className={cn(
           'flex h-8 shrink-0 items-center gap-1.5 border-b border-border bg-card/50 px-2',
-          draggable ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
+          draggable && !renaming ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
         )}
       >
         {draggable && <GripVertical size={13} className="shrink-0 text-text-secondary/40" />}
         <Icon size={13} className="shrink-0" style={{ color: pane.color }} />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-secondary">
-          {pane.title}
-        </span>
+        {renaming ? (
+          <input
+            autoFocus
+            value={nameVal}
+            onChange={(e) => setNameVal(e.target.value)}
+            onBlur={commitRename}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitRename()
+              if (e.key === 'Escape') setRenaming(false)
+            }}
+            className="min-w-0 flex-1 rounded border border-accent-violet/50 bg-bg-primary px-1.5 py-0.5 text-xs text-text-primary outline-none"
+          />
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-secondary">
+            {pane.title}
+          </span>
+        )}
         <Tooltip label={isMax ? t('pane.restore') : t('pane.maximize')}>
           <button
             draggable={false}
@@ -105,12 +176,19 @@ export function PaneCell({
       </header>
       <div className="min-h-0 flex-1">
         <TerminalPane
+          key={epoch}
           paneId={pane.id}
+          workspaceId={workspace.id}
           cwd={cwd}
           initialCommand={initialCommand}
+          fontSize={pane.fontSize}
           isActive={cellVisible}
         />
       </div>
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+      )}
     </motion.div>
   )
 }

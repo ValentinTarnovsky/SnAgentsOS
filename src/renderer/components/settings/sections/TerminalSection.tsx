@@ -1,6 +1,6 @@
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
-import { SettingRow, inputCls } from '../ui'
+import { SettingRow, ToggleRow, inputCls } from '../ui'
 import { cn } from '@/lib/cn'
 
 export function TerminalSection() {
@@ -74,12 +74,20 @@ export function TerminalSection() {
             min={500}
             max={100000}
             step={500}
-            className={inputCls}
+            disabled={settings.infiniteScrollback}
+            className={cn(inputCls, settings.infiniteScrollback && 'pointer-events-none opacity-50')}
             value={settings.scrollback}
             onChange={(e) => updateSettings({ scrollback: Number(e.target.value) || 5000 })}
           />
         </SettingRow>
       </div>
+
+      <ToggleRow
+        checked={settings.infiniteScrollback}
+        onChange={(v) => updateSettings({ infiniteScrollback: v })}
+        title={t('settings.infiniteScrollback')}
+        description={t('settings.infiniteScrollbackHint')}
+      />
     </div>
   )
 }

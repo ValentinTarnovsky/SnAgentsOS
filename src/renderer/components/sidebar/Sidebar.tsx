@@ -14,6 +14,7 @@ import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
 
@@ -39,6 +40,7 @@ export function Sidebar() {
   } = useAppStore()
 
   const [menu, setMenu] = useState<MenuState | null>(null)
+  const [confirmWs, setConfirmWs] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
 
@@ -76,7 +78,7 @@ export function Sidebar() {
         icon: Trash2,
         danger: true,
         separated: true,
-        onClick: () => deleteWorkspace(wsId),
+        onClick: () => setConfirmWs(wsId),
       },
     ]
   }
@@ -244,6 +246,24 @@ export function Sidebar() {
           y={menu.y}
           items={menuItems(menu.wsId)}
           onClose={() => setMenu(null)}
+        />
+      )}
+
+      {confirmWs && (
+        <ConfirmDialog
+          open
+          title={t('confirm.deleteWorkspaceTitle')}
+          message={t('confirm.deleteWorkspaceMsg', {
+            name: workspaces.find((w) => w.id === confirmWs)?.name ?? '',
+          })}
+          confirmLabel={t('confirm.deleteYes')}
+          cancelLabel={t('confirm.deleteNo')}
+          danger
+          onConfirm={() => {
+            deleteWorkspace(confirmWs)
+            setConfirmWs(null)
+          }}
+          onCancel={() => setConfirmWs(null)}
         />
       )}
     </aside>

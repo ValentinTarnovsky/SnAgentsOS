@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { startPersistence } from '@/lib/persist'
+import { useGlobalKeys } from '@/lib/useGlobalKeys'
 import { applyTheme } from '@/themes'
 import { I18nProvider, useT } from '@/i18n'
 import { Sidebar } from '@/components/sidebar/Sidebar'
@@ -9,6 +10,7 @@ import { WorkspaceHost } from '@/components/layout/WorkspaceHost'
 import { SettingsModal } from '@/components/settings/SettingsModal'
 import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
 import { TitleBar } from '@/components/titlebar/TitleBar'
+import { CommandPalette } from '@/components/ui/CommandPalette'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -56,6 +58,9 @@ function AppBody() {
   const workspaces = useAppStore((s) => s.workspaces)
   const setWizardOpen = useAppStore((s) => s.setWizardOpen)
 
+  // App-wide shortcuts: Ctrl+K palette, Alt+1..9 / Ctrl+Tab workspace switch.
+  useGlobalKeys()
+
   const onNew = (): void => setWizardOpen(true)
 
   return (
@@ -80,6 +85,7 @@ function AppBody() {
       </main>
       <SettingsModal />
       <NewWorkspaceWizard />
+      <CommandPalette />
     </div>
   )
 }

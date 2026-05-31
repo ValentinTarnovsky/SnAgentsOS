@@ -12,6 +12,11 @@ export function unregisterPty(paneId: string): void {
   registry.delete(paneId)
 }
 
+/** The live pty id backing a pane, if any (used to write into it directly). */
+export function getPtyId(paneId: string): string | undefined {
+  return registry.get(paneId)
+}
+
 /** Kill the ptys backing the given panes (no-op for panes without one). */
 export function killPanePtys(paneIds: string[]): void {
   for (const paneId of paneIds) {

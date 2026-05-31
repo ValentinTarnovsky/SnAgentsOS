@@ -1,10 +1,12 @@
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type {
   AppInfo,
   AppMetrics,
   PtyDataEvt,
   PtyExitEvt,
+  PtyFlowReq,
+  PtyReattachRes,
   PtyResizeReq,
   PtySpawnReq,
   PtySpawnRes,
@@ -22,23 +24,35 @@ function sub<T>(channel: string, cb: (payload: T) => void): () => void {
 
 const api: SnApi = {
   platform: process.platform,
+  filePath: (file: unknown) =>
+    webUtils.getPathForFile(file as Parameters<typeof webUtils.getPathForFile>[0]),
   app: {
     info: () => ipcRenderer.invoke(CH.APP_INFO) as Promise<AppInfo>,
   },
   pty: {
     spawn: (req: PtySpawnReq) => ipcRenderer.invoke(CH.PTY_SPAWN, req) as Promise<PtySpawnRes>,
+    reattach: (paneId: string) =>
+      ipcRenderer.invoke(CH.PTY_REATTACH, paneId) as Promise<PtyReattachRes | null>,
     write: (req: PtyWriteReq) => ipcRenderer.send(CH.PTY_WRITE, req),
     resize: (req: PtyResizeReq) => ipcRenderer.send(CH.PTY_RESIZE, req),
     kill: (ptyId: string) => ipcRenderer.invoke(CH.PTY_KILL, ptyId) as Promise<void>,
+    setActive: (paneIds: string[]) => ipcRenderer.send(CH.PTY_SET_ACTIVE, paneIds),
+    flow: (req: PtyFlowReq) => ipcRenderer.send(CH.PTY_FLOW, req),
     onData: (cb: (e: PtyDataEvt) => void) => sub<PtyDataEvt>(CH.PTY_DATA, cb),
     onExit: (cb: (e: PtyExitEvt) => void) => sub<PtyExitEvt>(CH.PTY_EXIT, cb),
   },
   dialog: {
     openDirectory: () => ipcRenderer.invoke(CH.DIALOG_OPEN_DIR) as Promise<string | null>,
   },
+  clipboard: {
+    writeText: (text: string) => ipcRenderer.send(CH.CLIPBOARD_WRITE, text),
+    readText: () => ipcRenderer.invoke(CH.CLIPBOARD_READ) as Promise<string>,
+  },
   config: {
     load: () => ipcRenderer.invoke(CH.CONFIG_LOAD) as Promise<ConfigFile | null>,
     save: (config: ConfigFile) => ipcRenderer.send(CH.CONFIG_SAVE, config),
+    export: (config: ConfigFile) => ipcRenderer.invoke(CH.CONFIG_EXPORT, config) as Promise<boolean>,
+    import: () => ipcRenderer.invoke(CH.CONFIG_IMPORT) as Promise<ConfigFile | null>,
   },
   window: {
     minimize: () => ipcRenderer.send(CH.WINDOW_MINIMIZE),

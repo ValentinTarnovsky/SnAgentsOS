@@ -1,7 +1,7 @@
 import { z } from 'zod'
-import type { ConfigFile } from '@shared/types'
+import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
 
-export const CONFIG_VERSION = 2
+export { CONFIG_VERSION }
 
 const paneType = z.enum(['shell', 'claude', 'codex', 'custom'])
 
@@ -14,6 +14,7 @@ const paneSchema = z.object({
   title: z.string(),
   color: z.string(),
   icon: z.string(),
+  fontSize: z.number().optional(),
 })
 
 const layoutSchema = z
@@ -61,13 +62,21 @@ const settingsSchema = z.object({
   customColors: z.record(z.string()).optional(),
   language: z.enum(['en', 'es']).default('en'),
   scrollback: z.number(),
+  infiniteScrollback: z.boolean().default(true),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
   closeToTray: z.boolean().default(true),
   launchOnStartup: z.boolean().default(false),
   globalHotkeyEnabled: z.boolean().default(false),
   globalHotkey: z.string().default('Super+Alt+O'),
+  keymap: z.record(z.string()).default({}),
   sidebarCollapsed: z.boolean(),
+})
+
+const snippetSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  text: z.string(),
 })
 
 const configSchema = z.object({
@@ -76,6 +85,7 @@ const configSchema = z.object({
   presets: z.array(presetSchema),
   settings: settingsSchema,
   activeWorkspaceId: z.string().nullable().optional(),
+  snippets: z.array(snippetSchema).optional().catch(undefined),
 })
 
 /** Validates a raw parsed object into a ConfigFile, or null if invalid. */

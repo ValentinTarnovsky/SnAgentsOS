@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, session } from 'electron'
+import { readFileSync, writeFileSync } from 'fs'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { AppInfo, AppMetrics } from '@shared/ipc-contract'
 import type { ConfigFile } from '@shared/types'
@@ -6,6 +7,7 @@ import { createMainWindow } from './window'
 import { getConfigPath, isPortable } from './paths'
 import { PtyManager } from './pty/PtyManager'
 import { ConfigStore } from './store/ConfigStore'
+import { parseConfig } from './store/schema'
 import { registerPtyIpc } from './ipc/registerPtyIpc'
 import { registerWindowIpc, wireWindowMaximizeEvents } from './ipc/registerWindowIpc'
 import { registerSystemIpc } from './ipc/registerSystemIpc'
@@ -88,6 +90,46 @@ function registerAppIpc(): void {
 function registerConfigIpc(): void {
   ipcMain.handle(CH.CONFIG_LOAD, (): ConfigFile | null => configStore.load())
   ipcMain.on(CH.CONFIG_SAVE, (_e, config: ConfigFile) => configStore.save(config))
+
+  ipcMain.handle(CH.CONFIG_EXPORT, async (_e, config: ConfigFile): Promise<boolean> => {
+    const opts = {
+      defaultPath: 'snmulticc-config.json',
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    }
+    const res = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, opts)
+      : await dialog.showSaveDialog(opts)
+    if (res.canceled || !res.filePath) return false
+    try {
+      writeFileSync(res.filePath, JSON.stringify(config, null, 2), 'utf8')
+      return true
+    } catch (error) {
+      console.error('Config export failed:', error)
+      return false
+    }
+  })
+
+  ipcMain.handle(CH.CONFIG_IMPORT, async (): Promise<ConfigFile | null> => {
+    const opts = {
+      properties: ['openFile' as const],
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    }
+    const res = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, opts)
+      : await dialog.showOpenDialog(opts)
+    if (res.canceled || res.filePaths.length === 0) return null
+    try {
+      return parseConfig(JSON.parse(readFileSync(res.filePaths[0], 'utf8')))
+    } catch (error) {
+      console.error('Config import failed:', error)
+      return null
+    }
+  })
+}
+
+function registerClipboardIpc(): void {
+  ipcMain.on(CH.CLIPBOARD_WRITE, (_e, text: string) => clipboard.writeText(String(text ?? '')))
+  ipcMain.handle(CH.CLIPBOARD_READ, (): string => clipboard.readText())
 }
 
 function registerDialogIpc(): void {
@@ -152,6 +194,7 @@ app.whenReady().then(() => {
   registerAppIpc()
   registerConfigIpc()
   registerDialogIpc()
+  registerClipboardIpc()
   registerPtyIpc(ptyManager)
   registerWindowIpc(() => mainWindow)
   registerSystemIpc()

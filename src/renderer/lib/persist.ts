@@ -1,7 +1,5 @@
-import type { ConfigFile } from '@shared/types'
+import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
 import { type AppState, useAppStore } from './store'
-
-const CONFIG_VERSION = 2
 
 function toConfig(state: AppState): ConfigFile {
   return {
@@ -10,7 +8,13 @@ function toConfig(state: AppState): ConfigFile {
     presets: state.presets,
     settings: { ...state.settings, sidebarCollapsed: state.sidebarCollapsed },
     activeWorkspaceId: state.activeWorkspaceId,
+    snippets: state.snippets,
   }
+}
+
+/** A snapshot of the current config (for export). */
+export function snapshotConfig(): ConfigFile {
+  return toConfig(useAppStore.getState())
 }
 
 /**

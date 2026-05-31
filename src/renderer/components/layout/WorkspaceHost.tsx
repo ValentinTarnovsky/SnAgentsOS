@@ -22,6 +22,13 @@ export function WorkspaceHost() {
     }
   }, [activeId, mounted])
 
+  // Tell main which panes are visible so hidden workspaces throttle output (S4).
+  const activeWs = workspaces.find((w) => w.id === activeId)
+  const activePaneKey = activeWs ? activeWs.panes.map((p) => p.id).join(',') : ''
+  useEffect(() => {
+    window.snApi.pty.setActive(activePaneKey ? activePaneKey.split(',') : [])
+  }, [activePaneKey])
+
   return (
     <div className="relative h-full w-full">
       {workspaces

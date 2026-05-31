@@ -6,6 +6,7 @@ import type {
   Pane,
   PaneType,
   Settings,
+  Snippet,
   Workspace,
   WorkspaceLayout,
 } from '@shared/types'
@@ -49,12 +50,14 @@ const DEFAULT_SETTINGS: Settings = {
   customColors: {},
   language: 'en',
   scrollback: 5000,
+  infiniteScrollback: true,
   restoreLastWorkspace: true,
   confirmCloseRunning: true,
   closeToTray: true,
   launchOnStartup: false,
   globalHotkeyEnabled: false,
   globalHotkey: 'Super+Alt+O',
+  keymap: {},
   sidebarCollapsed: false,
 }
 
@@ -78,19 +81,27 @@ export interface WorkspaceDraft {
 export interface AppState {
   workspaces: Workspace[]
   activeWorkspaceId: string | null
+  /** Last active workspace (drives Ctrl+Tab quick-flip). */
+  previousWorkspaceId: string | null
   sidebarCollapsed: boolean
   presets: AgentPreset[]
+  snippets: Snippet[]
   settings: Settings
   settingsOpen: boolean
   wizardOpen: boolean
+  paletteOpen: boolean
   /** workspaceId -> maximized paneId (transient; never persisted). */
   maximized: Record<string, string | null>
+  /** paneId -> relaunch counter (transient; bumping it remounts the console). */
+  paneEpoch: Record<string, number>
   /** False until persisted config has been loaded (gates the persistence writer). */
   hydrated: boolean
 
   hydrate: (config: ConfigFile | null) => void
   createWorkspace: (name: string, cwd: string) => string
   createWorkspaceFull: (draft: WorkspaceDraft) => string
+  importConfig: (config: ConfigFile) => void
+  mergeConfig: (config: ConfigFile) => void
   deleteWorkspace: (id: string) => void
   renameWorkspace: (id: string, name: string) => void
   toggleFavorite: (id: string) => void
@@ -98,6 +109,10 @@ export interface AppState {
   toggleSidebar: () => void
   addPane: (workspaceId: string, pane?: Partial<Pane>) => void
   removePane: (workspaceId: string, paneId: string) => void
+  renamePane: (workspaceId: string, paneId: string, title: string) => void
+  setPaneFontSize: (workspaceId: string, paneId: string, fontSize: number) => void
+  /** Force a console to relaunch (kills + respawns its pty via remount). */
+  restartPane: (paneId: string) => void
   setGrid: (workspaceId: string, grid: GridPreset) => void
   movePane: (workspaceId: string, paneId: string, toIndex: number) => void
   toggleMaximize: (workspaceId: string, paneId: string) => void
@@ -107,20 +122,29 @@ export interface AppState {
   deletePreset: (id: string) => void
   newPresetId: () => string
 
+  saveSnippet: (snippet: Snippet) => void
+  deleteSnippet: (id: string) => void
+  newSnippetId: () => string
+
   updateSettings: (patch: Partial<Settings>) => void
   setSettingsOpen: (open: boolean) => void
   setWizardOpen: (open: boolean) => void
+  setPaletteOpen: (open: boolean) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
   workspaces: [],
   activeWorkspaceId: null,
+  previousWorkspaceId: null,
   sidebarCollapsed: false,
   presets: DEFAULT_PRESETS,
+  snippets: [],
   settings: DEFAULT_SETTINGS,
   settingsOpen: false,
   wizardOpen: false,
+  paletteOpen: false,
   maximized: {},
+  paneEpoch: {},
   hydrated: false,
 
   hydrate: (config) =>
@@ -128,6 +152,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!config) return { hydrated: true }
       const workspaces = config.workspaces ?? []
       const presets = config.presets && config.presets.length ? config.presets : s.presets
+      const snippets = config.snippets ?? []
       const settings: Settings = { ...s.settings, ...config.settings }
       let activeWorkspaceId: string | null = null
       if (settings.restoreLastWorkspace) {
@@ -139,6 +164,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return {
         workspaces,
         presets,
+        snippets,
         settings,
         sidebarCollapsed: settings.sidebarCollapsed,
         activeWorkspaceId,
@@ -186,6 +212,43 @@ export const useAppStore = create<AppState>((set, get) => ({
     return ws.id
   },
 
+  importConfig: (config) =>
+    set((s) => ({
+      workspaces: config.workspaces ?? [],
+      presets: config.presets && config.presets.length ? config.presets : s.presets,
+      snippets: config.snippets ?? [],
+      settings: { ...s.settings, ...config.settings },
+      sidebarCollapsed: config.settings?.sidebarCollapsed ?? s.sidebarCollapsed,
+      activeWorkspaceId: config.workspaces?.[0]?.id ?? null,
+      previousWorkspaceId: null,
+    })),
+
+  mergeConfig: (config) =>
+    set((s) => {
+      const existingPreset = new Set(s.presets.map((p) => p.id))
+      const newPresets = (config.presets ?? []).filter((p) => !existingPreset.has(p.id))
+      // Re-id imported workspaces + their panes so they never collide with ours.
+      const importedWs: Workspace[] = (config.workspaces ?? []).map((w) => {
+        const idMap = new Map<string, string>()
+        const panes = w.panes.map((p) => {
+          const nid = uid('pane')
+          idMap.set(p.id, nid)
+          return { ...p, id: nid }
+        })
+        const layout: WorkspaceLayout | undefined = w.layout
+          ? { grid: w.layout.grid, order: w.layout.order.map((id) => idMap.get(id) ?? id) }
+          : undefined
+        return { ...w, id: uid('ws'), panes, layout }
+      })
+      const existingSnip = new Set(s.snippets.map((x) => x.id))
+      const newSnippets = (config.snippets ?? []).filter((x) => !existingSnip.has(x.id))
+      return {
+        workspaces: [...s.workspaces, ...importedWs],
+        presets: [...s.presets, ...newPresets],
+        snippets: [...s.snippets, ...newSnippets],
+      }
+    }),
+
   deleteWorkspace: (id) => {
     // Force-kill the workspace's consoles so nothing lingers in the background.
     const ws = get().workspaces.find((w) => w.id === id)
@@ -212,7 +275,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, favorite: !w.favorite } : w)),
     })),
 
-  setActive: (id) => set({ activeWorkspaceId: id }),
+  setActive: (id) =>
+    set((s) => ({
+      activeWorkspaceId: id,
+      previousWorkspaceId: s.activeWorkspaceId !== id ? s.activeWorkspaceId : s.previousWorkspaceId,
+    })),
 
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 
@@ -243,6 +310,40 @@ export const useAppStore = create<AppState>((set, get) => ({
         }),
       }
     }),
+
+  renamePane: (workspaceId, paneId, title) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) =>
+        w.id === workspaceId
+          ? {
+              ...w,
+              panes: w.panes.map((p) =>
+                p.id === paneId ? { ...p, title: title.trim() || p.title } : p,
+              ),
+            }
+          : w,
+      ),
+    })),
+
+  setPaneFontSize: (workspaceId, paneId, fontSize) =>
+    set((s) => {
+      const clamped = Math.max(8, Math.min(40, Math.round(fontSize)))
+      return {
+        workspaces: s.workspaces.map((w) =>
+          w.id === workspaceId
+            ? {
+                ...w,
+                panes: w.panes.map((p) =>
+                  p.id === paneId ? { ...p, fontSize: clamped } : p,
+                ),
+              }
+            : w,
+        ),
+      }
+    }),
+
+  restartPane: (paneId) =>
+    set((s) => ({ paneEpoch: { ...s.paneEpoch, [paneId]: (s.paneEpoch[paneId] ?? 0) + 1 } })),
 
   setGrid: (workspaceId, grid) =>
     set((s) => ({
@@ -294,9 +395,25 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   newPresetId: () => uid('preset'),
 
+  saveSnippet: (snippet) =>
+    set((s) => {
+      const exists = s.snippets.some((x) => x.id === snippet.id)
+      return {
+        snippets: exists
+          ? s.snippets.map((x) => (x.id === snippet.id ? snippet : x))
+          : [...s.snippets, snippet],
+      }
+    }),
+
+  deleteSnippet: (id) => set((s) => ({ snippets: s.snippets.filter((x) => x.id !== id) })),
+
+  newSnippetId: () => uid('snip'),
+
   updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
 
   setSettingsOpen: (open) => set({ settingsOpen: open }),
 
   setWizardOpen: (open) => set({ wizardOpen: open }),
+
+  setPaletteOpen: (open) => set({ paletteOpen: open }),
 }))

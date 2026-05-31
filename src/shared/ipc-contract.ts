@@ -63,18 +63,35 @@ export interface PtyExitEvt {
   exitCode: number
   signal?: number
 }
+export interface PtyReattachRes {
+  ptyId: string
+  /** Recent raw output to replay into the freshly-mounted terminal. */
+  replay: string
+}
+export interface PtyFlowReq {
+  ptyId: string
+  pause: boolean
+}
 
 /** The object exposed on window.snApi via contextBridge. */
 export interface SnApi {
   platform: string
+  /** Resolve the absolute path of a dropped File (Electron webUtils). */
+  filePath(file: unknown): string
   app: {
     info(): Promise<AppInfo>
   }
   pty: {
     spawn(req: PtySpawnReq): Promise<PtySpawnRes>
+    /** Rebind to an already-running pty for this paneId (renderer reload / remount). */
+    reattach(paneId: string): Promise<PtyReattachRes | null>
     write(req: PtyWriteReq): void
     resize(req: PtyResizeReq): void
     kill(ptyId: string): Promise<void>
+    /** Mark which panes belong to the visible workspace (drives output throttling). */
+    setActive(paneIds: string[]): void
+    /** Backpressure: pause/resume a pty when the renderer can't keep up. */
+    flow(req: PtyFlowReq): void
     /** Returns an unsubscribe function. */
     onData(cb: (e: PtyDataEvt) => void): () => void
     /** Returns an unsubscribe function. */
@@ -84,11 +101,20 @@ export interface SnApi {
     /** Opens a native folder picker; resolves to the chosen path or null. */
     openDirectory(): Promise<string | null>
   }
+  /** System clipboard, used for terminal copy/paste. */
+  clipboard: {
+    writeText(text: string): void
+    readText(): Promise<string>
+  }
   config: {
     /** Loads persisted config, or null if none / invalid. */
     load(): Promise<ConfigFile | null>
     /** Persists the full config blob (fire-and-forget; debounced by caller). */
     save(config: ConfigFile): void
+    /** Save the config to a user-chosen file; resolves true if written. */
+    export(config: ConfigFile): Promise<boolean>
+    /** Pick + parse a config file; resolves null if cancelled/invalid. */
+    import(): Promise<ConfigFile | null>
   }
   /** Custom title bar window controls (frame: false). */
   window: {

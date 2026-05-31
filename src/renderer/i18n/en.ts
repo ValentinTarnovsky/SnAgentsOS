@@ -23,12 +23,70 @@ export const en = {
   'ctx.rename': 'Rename',
   'ctx.delete': 'Delete',
 
+  // Delete confirmation
+  'confirm.deleteWorkspaceTitle': 'Delete workspace?',
+  'confirm.deleteWorkspaceMsg': 'This closes every console in “{name}”. It can’t be undone.',
+  'confirm.deleteYes': 'Yes, delete',
+  'confirm.deleteNo': 'No, keep it',
+
+  // Command palette
+  'palette.placeholder': 'Type a command or workspace…',
+  'palette.empty': 'No results',
+  'palette.general': 'General',
+  'palette.workspace': 'Workspace',
+  'palette.console': 'Console',
+  'palette.appearance': 'Appearance',
+  'palette.newConsole': 'New console',
+  'palette.snippet': 'Snippet',
+  'palette.theme': 'Theme',
+  'palette.toggleSidebar': 'Toggle sidebar',
+
+  // Snippets
+  'snippets.hint': 'Saved prompts you can drop into the focused console (Ctrl+K → Snippet).',
+  'snippets.new': 'New snippet',
+  'snippets.name': 'Name',
+  'snippets.text': 'Text',
+
+  // Keyboard shortcuts
+  'keys.hint':
+    'Click a shortcut and press the new keys (Esc to cancel). Terminal copy/paste, font zoom and find stay fixed.',
+  'keys.recording': 'Press keys…',
+  'keys.conflict': 'conflict',
+  'keys.reset': 'Reset to default',
+  'keys.palette': 'Open command palette',
+  'keys.workspaceFlip': 'Flip to last workspace',
+  'keys.workspaceNext': 'Next workspace',
+  'keys.workspacePrev': 'Previous workspace',
+  'keys.newWorkspace': 'New workspace',
+  'keys.newConsole': 'New console (active workspace)',
+  'keys.openSettings': 'Open settings',
+  'keys.toggleSidebar': 'Toggle sidebar',
+
+  // Data settings
+  'settings.cat.data': 'Data',
+  'data.backup': 'Backup',
+  'data.exportHint': 'Save all workspaces, presets and settings to a file.',
+  'data.export': 'Export config',
+  'data.import': 'Import config',
+  'data.exported': 'Exported.',
+  'data.imported': 'Imported (replaced).',
+  'data.merged': 'Imported (merged).',
+  'data.importChoose': 'How should the imported config be applied?',
+  'data.replace': 'Replace',
+  'data.merge': 'Merge',
+
   // Workspace header
   'workspace.newConsole': 'New console',
   'workspace.noPresets': 'No presets',
   'pane.maximize': 'Maximize',
   'pane.restore': 'Restore',
   'pane.close': 'Close',
+  'pane.restart': 'Restart console',
+
+  // In-pane search
+  'search.placeholder': 'Find…',
+  'search.next': 'Next match',
+  'search.prev': 'Previous match',
 
   // Empty state
   'empty.title': 'Multi Command Consoles',
@@ -61,7 +119,9 @@ export const en = {
   'settings.cat.terminal': 'Terminal',
   'settings.cat.language': 'Language',
   'settings.cat.agents': 'Models',
+  'settings.cat.snippets': 'Snippets',
   'settings.cat.startup': 'Startup',
+  'settings.cat.keys': 'Keyboard',
   'settings.cat.usage': 'Usage',
   'settings.cat.about': 'About',
   'usage.hint': 'Live resource usage of SnMultiCC on your PC.',
@@ -79,6 +139,9 @@ export const en = {
   'settings.shellMac': 'Shell (macOS)',
   'settings.shellLinux': 'Shell (Linux)',
   'settings.scrollback': 'Scrollback (lines)',
+  'settings.infiniteScrollback': 'Infinite scrollback',
+  'settings.infiniteScrollbackHint':
+    'Keep all output like a normal terminal. Turn off to cap the number of lines.',
   'settings.language': 'Language',
   'settings.languageHint': 'Interface language.',
   'settings.restoreLast': 'Restore the last workspace on open',

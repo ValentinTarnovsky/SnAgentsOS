@@ -8,9 +8,12 @@ export const CH = {
 
   // PTY lifecycle (renderer -> main)
   PTY_SPAWN: 'pty:spawn', // invoke -> { ptyId }
+  PTY_REATTACH: 'pty:reattach', // invoke (paneId) -> { ptyId, replay } | null
   PTY_WRITE: 'pty:write', // send (high frequency)
   PTY_RESIZE: 'pty:resize', // send
   PTY_KILL: 'pty:kill', // invoke
+  PTY_SET_ACTIVE: 'pty:setActive', // send (paneIds of the visible workspace)
+  PTY_FLOW: 'pty:flow', // send ({ ptyId, pause }) backpressure
 
   // PTY events (main -> renderer)
   PTY_DATA: 'pty:data', // { ptyId, data }
@@ -19,9 +22,15 @@ export const CH = {
   // Config (single blob: workspaces + presets + settings + layout)
   CONFIG_LOAD: 'config:load', // invoke -> ConfigFile | null
   CONFIG_SAVE: 'config:save', // send (debounced from the renderer)
+  CONFIG_EXPORT: 'config:export', // invoke (config) -> boolean (saved)
+  CONFIG_IMPORT: 'config:import', // invoke -> ConfigFile | null
 
   // Dialogs
   DIALOG_OPEN_DIR: 'dialog:openDirectory',
+
+  // Clipboard (terminal copy/paste)
+  CLIPBOARD_WRITE: 'clipboard:write', // send (text)
+  CLIPBOARD_READ: 'clipboard:read', // invoke -> string
 
   // Window controls (custom frameless title bar)
   WINDOW_MINIMIZE: 'window:minimize', // send

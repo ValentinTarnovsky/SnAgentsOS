@@ -25,12 +25,70 @@ export const es: Record<keyof typeof en, string> = {
   'ctx.rename': 'Renombrar',
   'ctx.delete': 'Eliminar',
 
+  // Confirmación de borrado
+  'confirm.deleteWorkspaceTitle': '¿Eliminar workspace?',
+  'confirm.deleteWorkspaceMsg': 'Esto cierra todas las consolas de «{name}». No se puede deshacer.',
+  'confirm.deleteYes': 'Sí, eliminar',
+  'confirm.deleteNo': 'No, conservar',
+
+  // Paleta de comandos
+  'palette.placeholder': 'Escribí un comando o workspace…',
+  'palette.empty': 'Sin resultados',
+  'palette.general': 'General',
+  'palette.workspace': 'Workspace',
+  'palette.console': 'Consola',
+  'palette.appearance': 'Apariencia',
+  'palette.newConsole': 'Nueva consola',
+  'palette.snippet': 'Snippet',
+  'palette.theme': 'Tema',
+  'palette.toggleSidebar': 'Mostrar/ocultar barra lateral',
+
+  // Snippets
+  'snippets.hint': 'Prompts guardados para insertar en la consola enfocada (Ctrl+K → Snippet).',
+  'snippets.new': 'Nuevo snippet',
+  'snippets.name': 'Nombre',
+  'snippets.text': 'Texto',
+
+  // Atajos de teclado
+  'keys.hint':
+    'Clic en un atajo y presioná las teclas nuevas (Esc para cancelar). Copy/paste, zoom y búsqueda de la terminal quedan fijos.',
+  'keys.recording': 'Presioná las teclas…',
+  'keys.conflict': 'conflicto',
+  'keys.reset': 'Restablecer',
+  'keys.palette': 'Abrir paleta de comandos',
+  'keys.workspaceFlip': 'Saltar al último workspace',
+  'keys.workspaceNext': 'Workspace siguiente',
+  'keys.workspacePrev': 'Workspace anterior',
+  'keys.newWorkspace': 'Nuevo workspace',
+  'keys.newConsole': 'Nueva consola (workspace activo)',
+  'keys.openSettings': 'Abrir ajustes',
+  'keys.toggleSidebar': 'Mostrar/ocultar barra lateral',
+
+  // Datos
+  'settings.cat.data': 'Datos',
+  'data.backup': 'Respaldo',
+  'data.exportHint': 'Guardá todos los workspaces, presets y ajustes en un archivo.',
+  'data.export': 'Exportar configuración',
+  'data.import': 'Importar configuración',
+  'data.exported': 'Exportado.',
+  'data.imported': 'Importado (reemplazado).',
+  'data.merged': 'Importado (combinado).',
+  'data.importChoose': '¿Cómo aplicar la configuración importada?',
+  'data.replace': 'Reemplazar',
+  'data.merge': 'Combinar',
+
   // Workspace header
   'workspace.newConsole': 'Nueva consola',
   'workspace.noPresets': 'Sin presets',
   'pane.maximize': 'Maximizar',
   'pane.restore': 'Restaurar',
   'pane.close': 'Cerrar',
+  'pane.restart': 'Reiniciar consola',
+
+  // Búsqueda en consola
+  'search.placeholder': 'Buscar…',
+  'search.next': 'Siguiente',
+  'search.prev': 'Anterior',
 
   // Empty state
   'empty.title': 'Multi Command Consoles',
@@ -63,7 +121,9 @@ export const es: Record<keyof typeof en, string> = {
   'settings.cat.terminal': 'Terminal',
   'settings.cat.language': 'Idioma',
   'settings.cat.agents': 'Modelos',
+  'settings.cat.snippets': 'Snippets',
   'settings.cat.startup': 'Inicio',
+  'settings.cat.keys': 'Teclado',
   'settings.cat.usage': 'Uso',
   'settings.cat.about': 'Acerca de',
   'usage.hint': 'Uso de recursos de SnMultiCC en tu PC, en tiempo real.',
@@ -81,6 +141,9 @@ export const es: Record<keyof typeof en, string> = {
   'settings.shellMac': 'Shell (macOS)',
   'settings.shellLinux': 'Shell (Linux)',
   'settings.scrollback': 'Scrollback (líneas)',
+  'settings.infiniteScrollback': 'Scrollback infinito',
+  'settings.infiniteScrollbackHint':
+    'Mantené todo el output como una terminal normal. Desactivalo para limitar las líneas.',
   'settings.language': 'Idioma',
   'settings.languageHint': 'Idioma de la interfaz.',
   'settings.restoreLast': 'Restaurar el último workspace al abrir',
