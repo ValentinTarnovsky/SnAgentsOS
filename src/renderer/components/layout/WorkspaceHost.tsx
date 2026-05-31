@@ -4,7 +4,7 @@ import { WorkspaceView } from '@/components/workspace/WorkspaceView'
 
 /**
  * Keeps every visited workspace MOUNTED so its terminals (and ptys) survive
- * workspace switches — the inactive ones are just hidden with `display:none`.
+ * workspace switches, the inactive ones are just hidden with `display:none`.
  * A workspace mounts the first time it becomes active and is never unmounted
  * afterwards (until it's deleted), so we don't spawn every workspace's shells
  * at startup.

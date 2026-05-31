@@ -1,6 +1,6 @@
 /**
  * Maps live pane ids to their backing pty ids so we can force-kill a
- * workspace's consoles on delete — independent of React unmount timing.
+ * workspace's consoles on delete, independent of React unmount timing.
  */
 const registry = new Map<string, string>()
 

@@ -38,10 +38,10 @@ export function UsageSection() {
       <p className="text-sm text-text-secondary">{t('usage.hint')}</p>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat icon={MemoryStick} label={t('usage.ram')} value={current ? `${current.memMB} MB` : '—'} />
-        <Stat icon={Cpu} label={t('usage.cpu')} value={current ? `${current.cpuPercent}%` : '—'} />
-        <Stat icon={Boxes} label={t('usage.processes')} value={current ? String(current.processes) : '—'} />
-        <Stat icon={TerminalSquare} label={t('usage.consoles')} value={current ? String(current.consoles) : '—'} />
+        <Stat icon={MemoryStick} label={t('usage.ram')} value={current ? `${current.memMB} MB` : '-'} />
+        <Stat icon={Cpu} label={t('usage.cpu')} value={current ? `${current.cpuPercent}%` : '-'} />
+        <Stat icon={Boxes} label={t('usage.processes')} value={current ? String(current.processes) : '-'} />
+        <Stat icon={TerminalSquare} label={t('usage.consoles')} value={current ? String(current.consoles) : '-'} />
       </div>
 
       <Chart title={t('usage.ram')} unit=" MB" data={mem} color="var(--color-accent-violet)" />

@@ -2,7 +2,7 @@
  * IPC request/response/event payload shapes and the typed bridge surface
  * exposed on `window.snApi`. The SnApi interface grows phase by phase.
  */
-import type { ConfigFile } from './types'
+import type { ConfigFile, SetupStep } from './types'
 
 export interface AppInfo {
   version: string
@@ -39,6 +39,13 @@ export interface PtySpawnReq {
    * and leaves an interactive shell when the command exits.
    */
   initialCommand?: string
+  /**
+   * Pre-launch sequence (e.g. SSH connect) run before `initialCommand`. The
+   * main process drives it: each step optionally waits for the terminal to
+   * print `waitFor`, then writes its text, so an interactive prompt like a
+   * password can be answered automatically.
+   */
+  setup?: SetupStep[]
   cols: number
   rows: number
 }

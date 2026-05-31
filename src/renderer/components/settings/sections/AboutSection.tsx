@@ -10,12 +10,12 @@ export function AboutSection() {
     <div className="space-y-6">
       <Logo size="lg" />
       <dl className="space-y-3 text-sm">
-        <Row label={t('settings.about.version')} value={info?.version ?? '—'} />
+        <Row label={t('settings.about.version')} value={info?.version ?? '-'} />
         <Row
           label={t('settings.about.platform')}
-          value={info ? `${info.platform} · ${info.arch}${info.portable ? ' · portable' : ''}` : '—'}
+          value={info ? `${info.platform} · ${info.arch}${info.portable ? ' · portable' : ''}` : '-'}
         />
-        <Row label={t('settings.about.config')} value={info?.configPath ?? '—'} mono />
+        <Row label={t('settings.about.config')} value={info?.configPath ?? '-'} mono />
       </dl>
     </div>
   )

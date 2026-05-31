@@ -1,7 +1,7 @@
 @import 'tailwindcss';
 
 @theme {
-  /* Sn brand tokens — kept identical to the SnDevelopment web. */
+  /* Sn brand tokens, kept identical to the SnDevelopment web. */
   --color-bg-primary: #0b0f19;
   --color-bg-secondary: #0f172a;
   --color-card: #111827;
@@ -128,7 +128,7 @@ body {
   border-radius: 9999px;
 }
 
-/* xterm renders its own viewport — match the same fine style */
+/* xterm renders its own viewport, match the same fine style */
 .xterm .xterm-viewport::-webkit-scrollbar {
   width: 10px;
 }

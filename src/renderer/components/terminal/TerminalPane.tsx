@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from 'react'
 import { ChevronDown, ChevronUp, Search, X } from 'lucide-react'
+import type { SetupStep } from '@shared/types'
 import { useXterm } from './useXterm'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
@@ -19,6 +20,8 @@ export interface TerminalPaneProps {
   cwd?: string
   shell?: string
   initialCommand?: string
+  /** Pre-launch sequence (e.g. SSH connect) run before initialCommand. */
+  setup?: SetupStep[]
   fontSize?: number
   /** Whether this terminal is currently visible (drives refit-on-reveal). */
   isActive?: boolean
@@ -30,13 +33,14 @@ export function TerminalPane({
   cwd,
   shell,
   initialCommand,
+  setup,
   fontSize,
   isActive,
 }: TerminalPaneProps) {
   const t = useT()
   const wrapRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<HTMLDivElement>(null)
-  const ctl = useXterm(termRef, { paneId, cwd, shell, initialCommand, fontSize, isActive })
+  const ctl = useXterm(termRef, { paneId, cwd, shell, initialCommand, setup, fontSize, isActive })
 
   const setPaneFontSize = useAppStore((s) => s.setPaneFontSize)
   const globalFont = useAppStore((s) => s.settings.fontSize)

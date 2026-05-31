@@ -2,7 +2,7 @@ name: Release
 
 # Build installers/portables on all three OSes and attach them to the
 # GitHub Release for the pushed tag. node-pty is N-API, so no native rebuild
-# is needed — each runner just packages its own prebuilt binary.
+# is needed, each runner just packages its own prebuilt binary.
 on:
   push:
     tags:
@@ -58,7 +58,7 @@ jobs:
           name: SnMultiCC ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: false
-          # Match only the named distributables — NOT the win-unpacked/ helper
+          # Match only the named distributables, NOT the win-unpacked/ helper
           # binaries (elevate.exe, OpenConsole.exe, the raw SnMultiCC.exe, …).
           files: |
             release/**/SnMultiCC-*.exe

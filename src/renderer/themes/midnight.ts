@@ -1,6 +1,6 @@
 import type { ThemeDefinition } from '@shared/types'
 
-/** Default theme — identical to the original Sn brand look (do not drift). */
+/** Default theme, identical to the original Sn brand look (do not drift). */
 export const midnight: ThemeDefinition = {
   name: 'midnight',
   label: 'Midnight',

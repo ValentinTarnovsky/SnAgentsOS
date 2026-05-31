@@ -11,10 +11,26 @@ const paneSchema = z.object({
   presetId: z.string().optional(),
   cwd: z.string().optional(),
   command: z.string().optional(),
+  setupId: z.string().optional(),
   title: z.string(),
   color: z.string(),
   icon: z.string(),
   fontSize: z.number().optional(),
+})
+
+const setupStepSchema = z.object({
+  send: z.string(),
+  waitFor: z.string().optional(),
+  timeoutMs: z.number().optional(),
+  delayMs: z.number().optional(),
+  secret: z.boolean().optional(),
+  noEnter: z.boolean().optional(),
+})
+
+const connectionProfileSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  steps: z.array(setupStepSchema),
 })
 
 const layoutSchema = z
@@ -23,7 +39,7 @@ const layoutSchema = z
     order: z.array(z.string()),
   })
   .optional()
-  // Old v1 configs stored an opaque dockview blob here — tolerate & drop it.
+  // Old v1 configs stored an opaque dockview blob here, tolerate & drop it.
   .catch(undefined)
 
 const workspaceSchema = z.object({
@@ -33,6 +49,7 @@ const workspaceSchema = z.object({
   panes: z.array(paneSchema),
   favorite: z.boolean().optional(),
   layout: layoutSchema,
+  setupId: z.string().optional(),
 })
 
 const presetSchema = z.object({
@@ -86,6 +103,7 @@ const configSchema = z.object({
   settings: settingsSchema,
   activeWorkspaceId: z.string().nullable().optional(),
   snippets: z.array(snippetSchema).optional().catch(undefined),
+  connections: z.array(connectionProfileSchema).optional().catch(undefined),
 })
 
 /** Validates a raw parsed object into a ConfigFile, or null if invalid. */

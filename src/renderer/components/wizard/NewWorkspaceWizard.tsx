@@ -34,13 +34,14 @@ export function NewWorkspaceWizard() {
     cwd: '',
     grid: 1,
     assignments: [defaultPresetId],
+    setupId: '',
   })
 
   // Reset whenever the wizard opens.
   useEffect(() => {
     if (open) {
       setStep(0)
-      setDraft({ name: '', cwd: '', grid: 1, assignments: [defaultPresetId] })
+      setDraft({ name: '', cwd: '', grid: 1, assignments: [defaultPresetId], setupId: '' })
     }
   }, [open, defaultPresetId])
 
@@ -91,6 +92,7 @@ export function NewWorkspaceWizard() {
       cwd: draft.cwd.trim(),
       grid: draft.grid,
       panes,
+      setupId: draft.setupId || undefined,
     })
     setWizardOpen(false)
   }

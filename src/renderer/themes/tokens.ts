@@ -2,7 +2,7 @@ import type { ThemeTokenKey } from '@shared/types'
 
 /**
  * Maps the UI-chrome tokens to the Tailwind `@theme` CSS custom properties
- * defined in globals.css. Terminal/ansi tokens are not CSS vars — they feed
+ * defined in globals.css. Terminal/ansi tokens are not CSS vars, they feed
  * the xterm palette directly (see applyTheme/buildXtermTheme).
  */
 export const CSS_VAR_BY_TOKEN: Partial<Record<ThemeTokenKey, string>> = {

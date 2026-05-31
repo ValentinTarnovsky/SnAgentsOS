@@ -20,7 +20,7 @@ function trayIconPath(): string {
 }
 
 /**
- * Lazily creates the system tray (installed build only). Idempotent — calling
+ * Lazily creates the system tray (installed build only). Idempotent, calling
  * it again only refreshes the menu labels (e.g. after a language change).
  */
 export function ensureTray(

@@ -7,9 +7,44 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 3
+export const CONFIG_VERSION = 4
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
+
+/**
+ * One step of a pre-launch sequence (expect/send). The runner sends `send`,
+ * optionally waiting for the terminal to print `waitFor` first, this is how a
+ * console can auto-answer an interactive prompt (e.g. send a password right
+ * after the shell prints "password:").
+ */
+export interface SetupStep {
+  /** Text written to the shell. A CR (Enter) is appended unless `noEnter`. */
+  send: string
+  /**
+   * Wait until the terminal output contains this string before sending.
+   * Wrap in slashes for a regex, e.g. "/\\$\\s*$/". Empty = send immediately.
+   */
+  waitFor?: string
+  /** Max ms to wait for `waitFor` before sending anyway. Default 15000. */
+  timeoutMs?: number
+  /** Fixed pause (ms) applied right before sending (after any `waitFor`). */
+  delayMs?: number
+  /** Treat `send` as a secret (password): masked in the UI. */
+  secret?: boolean
+  /** Send `send` literally without appending Enter/CR. */
+  noEnter?: boolean
+}
+
+/**
+ * A reusable pre-launch sequence (e.g. "SSH into the dedi") applied to a
+ * console before its model command runs. Defined in Settings, selected when a
+ * workspace is created, and applied to every console in that workspace.
+ */
+export interface ConnectionProfile {
+  id: string
+  name: string
+  steps: SetupStep[]
+}
 
 export interface Pane {
   id: string
@@ -20,6 +55,8 @@ export interface Pane {
   cwd?: string
   /** Overrides the resolved shell/command for this pane. */
   command?: string
+  /** Per-pane connection profile override (falls back to the workspace's). */
+  setupId?: string
   title: string
   color: string
   icon: string
@@ -46,6 +83,8 @@ export interface Workspace {
   favorite?: boolean
   /** Console grid layout (custom tiling grid). */
   layout?: WorkspaceLayout
+  /** Connection profile run in every console before its model command. */
+  setupId?: string
 }
 
 /** A saved, reusable prompt/text snippet inserted into a console (U10). */
@@ -162,4 +201,6 @@ export interface ConfigFile {
   activeWorkspaceId?: string | null
   /** Saved prompt snippets (U10). */
   snippets?: Snippet[]
+  /** Reusable pre-launch connection sequences (e.g. SSH). */
+  connections?: ConnectionProfile[]
 }

@@ -15,7 +15,7 @@ files:
   - out/**
   - package.json
 
-# Tray icon — copied next to the app so the main process can load it at runtime.
+# Tray icon, copied next to the app so the main process can load it at runtime.
 extraResources:
   - from: build/icon.png
     to: icon.png

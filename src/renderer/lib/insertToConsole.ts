@@ -4,7 +4,7 @@ import { useAppStore } from './store'
 
 /**
  * Write text into the most recently focused console; falls back to the active
- * workspace's first console. No trailing newline — the user reviews and sends.
+ * workspace's first console. No trailing newline, the user reviews and sends.
  */
 export function insertToConsole(text: string): boolean {
   if (!text) return false

@@ -2,6 +2,7 @@ import { spawn, type IPty } from 'node-pty'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { PtyDataEvt, PtyExitEvt, PtyReattachRes, PtySpawnReq } from '@shared/ipc-contract'
+import type { SetupStep } from '@shared/types'
 import { cleanEnv, defaultShell, homeDir } from './shellResolver'
 
 interface Entry {
@@ -16,16 +17,55 @@ interface Entry {
   historyBytes: number
   /** False while the owning workspace is hidden (output is throttled). */
   active: boolean
+  /** True while a setup (expect/send) sequence is running for this pty. */
+  setupActive: boolean
+  /** Set on teardown so an in-flight setup sequence aborts. */
+  cancelled: boolean
+  /** Rolling tail of recent output the setup runner matches `waitFor` against. */
+  scratch: string
+  /** Notified (no args) on each new chunk while a setup waiter is pending. */
+  onChunk: (() => void) | null
+  /** Settles the pending `waitFor` promise (match, timeout, or cancel). */
+  setupResolve: (() => void) | null
+  /** Pending setup timer (delay or waitFor timeout), cleared on cancel. */
+  setupTimer: ReturnType<typeof setTimeout> | null
 }
 
 /** Output is coalesced and flushed at ~120Hz for the visible workspace. */
 const FLUSH_MS = 8
-/** Hidden workspaces flush far slower — their xterms can't paint anyway. */
+/** Hidden workspaces flush far slower, their xterms can't paint anyway. */
 const HIDDEN_FLUSH_MS = 250
 /** Cap on a single IPC payload (split larger bursts across frames). */
 const MAX_CHUNK = 256 * 1024
 /** Replay ring-buffer size per pty. */
 const HISTORY_CAP = 256 * 1024
+/** Recent-output tail kept for setup `waitFor` matching (bounds memory). */
+const SCRATCH_CAP = 16 * 1024
+/** How long the shell is given to print its first prompt before setup begins. */
+const SHELL_SETTLE_MS = 350
+/** Default cap on waiting for a `waitFor` match before proceeding anyway. */
+const DEFAULT_WAIT_MS = 15000
+
+/**
+ * Builds a predicate for a `waitFor` pattern. `/body/flags` is treated as a
+ * regex (bad patterns fall back to a literal match); everything else is a
+ * case-insensitive substring test so "password:" matches "Password:".
+ */
+function buildMatcher(pattern: string): (text: string) => boolean {
+  const re = pattern.match(/^\/(.*)\/([a-z]*)$/is)
+  if (re) {
+    try {
+      const rx = new RegExp(re[1], re[2])
+      return (text) => rx.test(text)
+    } catch {
+      /* malformed regex, fall through to substring */
+    }
+  }
+  const needle = pattern.toLowerCase()
+  return (text) => text.toLowerCase().includes(needle)
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /**
  * Owns every node-pty instance. The renderer never touches native modules;
@@ -66,26 +106,44 @@ export class PtyManager {
       history: [],
       historyBytes: 0,
       active: true,
+      setupActive: false,
+      cancelled: false,
+      scratch: '',
+      onChunk: null,
+      setupResolve: null,
+      setupTimer: null,
     }
     this.entries.set(ptyId, entry)
     this.byPane.set(req.paneId, ptyId)
 
-    if (req.initialCommand && req.initialCommand.trim()) {
-      // Terminate with a bare CR — exactly what pressing Enter sends in a
-      // terminal. CRLF makes PowerShell emit a spurious ">>" continuation.
-      // Small delay so the shell finishes initializing before we feed input.
-      setTimeout(() => {
+    const initial = req.initialCommand?.trim()
+    if (req.setup && req.setup.length > 0) {
+      // Drive the expect/send sequence (e.g. SSH login), then type the model.
+      void this.runSetup(entry, req.setup, initial)
+    } else if (initial) {
+      // No setup: original behavior, type the model command once the shell has
+      // settled. A bare CR is exactly what pressing Enter sends; CRLF makes
+      // PowerShell emit a spurious ">>" continuation.
+      entry.setupTimer = setTimeout(() => {
+        entry.setupTimer = null
+        if (entry.cancelled) return
         try {
-          proc.write(req.initialCommand!.trim() + '\r')
+          proc.write(initial + '\r')
         } catch {
           /* pty may have exited */
         }
-      }, 350)
+      }, SHELL_SETTLE_MS)
     }
 
     proc.onData((data) => {
       entry.buf.push(data)
       this.pushHistory(entry, data)
+      if (entry.setupActive) {
+        // Feed the setup runner the same bytes the renderer sees, in order.
+        entry.scratch += data
+        if (entry.scratch.length > SCRATCH_CAP) entry.scratch = entry.scratch.slice(-SCRATCH_CAP)
+        entry.onChunk?.()
+      }
       if (entry.timer === null) {
         entry.timer = setTimeout(() => this.flush(ptyId), entry.active ? FLUSH_MS : HIDDEN_FLUSH_MS)
       }
@@ -169,6 +227,77 @@ export class PtyManager {
     }
   }
 
+  /**
+   * Runs an expect/send sequence on a freshly spawned pty, then types the model
+   * command. Each step optionally waits for the terminal to print `waitFor`
+   * (with a timeout fallback) before sending its text, so an interactive
+   * prompt like "password:" is answered automatically. Lives in main so it
+   * survives renderer remounts and reads the same byte stream as the terminal.
+   */
+  private async runSetup(entry: Entry, steps: SetupStep[], initialCommand?: string): Promise<void> {
+    entry.setupActive = true
+    try {
+      // Let the shell print its first prompt before we touch it.
+      await sleep(SHELL_SETTLE_MS)
+      for (const step of steps) {
+        if (entry.cancelled) return
+        if (step.waitFor && step.waitFor.trim()) {
+          await this.waitForOutput(entry, step.waitFor.trim(), step.timeoutMs ?? DEFAULT_WAIT_MS)
+        }
+        if (entry.cancelled) return
+        await sleep(step.delayMs ?? 120)
+        if (entry.cancelled) return
+        try {
+          entry.pty.write(step.noEnter ? step.send : step.send + '\r')
+        } catch {
+          return // pty exited mid-sequence
+        }
+        // Only match the response to THIS step against the next waitFor.
+        entry.scratch = ''
+      }
+      if (initialCommand) {
+        if (entry.cancelled) return
+        // Give the post-setup shell (often a remote one) a beat to be ready.
+        await sleep(steps.length ? 400 : SHELL_SETTLE_MS)
+        if (entry.cancelled) return
+        try {
+          entry.pty.write(initialCommand + '\r')
+        } catch {
+          /* pty exited */
+        }
+      }
+    } finally {
+      entry.setupActive = false
+      entry.onChunk = null
+      entry.scratch = ''
+    }
+  }
+
+  /** Resolves when `entry.scratch` matches `pattern`, or after `timeoutMs`. */
+  private waitForOutput(entry: Entry, pattern: string, timeoutMs: number): Promise<void> {
+    const matches = buildMatcher(pattern)
+    return new Promise<void>((resolve) => {
+      const finish = (): void => {
+        if (entry.setupTimer) {
+          clearTimeout(entry.setupTimer)
+          entry.setupTimer = null
+        }
+        entry.onChunk = null
+        entry.setupResolve = null
+        resolve()
+      }
+      if (entry.cancelled || matches(entry.scratch)) {
+        finish()
+        return
+      }
+      entry.setupResolve = finish
+      entry.setupTimer = setTimeout(finish, timeoutMs)
+      entry.onChunk = () => {
+        if (matches(entry.scratch)) finish()
+      }
+    })
+  }
+
   private pushHistory(entry: Entry, data: string): void {
     entry.history.push(data)
     entry.historyBytes += data.length
@@ -201,6 +330,16 @@ export class PtyManager {
   private dispose(ptyId: string): void {
     const entry = this.entries.get(ptyId)
     if (!entry) return
+    // Abort any in-flight setup sequence: unblock a pending waiter so its async
+    // runner wakes, sees `cancelled`, and returns without writing to a dead pty.
+    entry.cancelled = true
+    entry.setupActive = false
+    entry.onChunk = null
+    const resolveWait = entry.setupResolve
+    entry.setupResolve = null
+    if (resolveWait) resolveWait()
+    if (entry.setupTimer) clearTimeout(entry.setupTimer)
+    entry.setupTimer = null
     if (entry.timer) clearTimeout(entry.timer)
     if (this.byPane.get(entry.paneId) === ptyId) this.byPane.delete(entry.paneId)
     this.entries.delete(ptyId)

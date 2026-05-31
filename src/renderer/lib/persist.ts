@@ -9,6 +9,7 @@ function toConfig(state: AppState): ConfigFile {
     settings: { ...state.settings, sidebarCollapsed: state.sidebarCollapsed },
     activeWorkspaceId: state.activeWorkspaceId,
     snippets: state.snippets,
+    connections: state.connections,
   }
 }
 

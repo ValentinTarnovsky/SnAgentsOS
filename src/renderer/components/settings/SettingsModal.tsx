@@ -1,5 +1,5 @@
 import { useMemo, useState, type ComponentType } from 'react'
-import { Activity, Bot, Database, FileText, Info, Keyboard, Languages, Palette, Power, Search, TerminalSquare, type LucideIcon } from 'lucide-react'
+import { Activity, Bot, Database, FileText, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, TerminalSquare, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type MessageKey, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -8,6 +8,7 @@ import { AppearanceSection } from './sections/AppearanceSection'
 import { TerminalSection } from './sections/TerminalSection'
 import { LanguageSection } from './sections/LanguageSection'
 import { AgentsSection } from './sections/AgentsSection'
+import { ConnectionsSection } from './sections/ConnectionsSection'
 import { StartupSection } from './sections/StartupSection'
 import { SnippetsSection } from './sections/SnippetsSection'
 import { KeymapSection } from './sections/KeymapSection'
@@ -20,6 +21,7 @@ type CategoryId =
   | 'terminal'
   | 'language'
   | 'agents'
+  | 'connections'
   | 'snippets'
   | 'startup'
   | 'keys'
@@ -38,6 +40,7 @@ interface Category {
 const CATEGORIES: Category[] = [
   { id: 'terminal', labelKey: 'settings.cat.terminal', icon: TerminalSquare, keywords: ['shell', 'font', 'fuente', 'scrollback', 'powershell'] },
   { id: 'agents', labelKey: 'settings.cat.agents', icon: Bot, keywords: ['preset', 'model', 'modelo', 'agent', 'agente', 'claude', 'codex'] },
+  { id: 'connections', labelKey: 'settings.cat.connections', icon: PlugZap, keywords: ['ssh', 'connection', 'conexion', 'conexión', 'setup', 'login', 'password', 'contraseña', 'dedi', 'server', 'servidor', 'expect'] },
   { id: 'snippets', labelKey: 'settings.cat.snippets', icon: FileText, keywords: ['snippet', 'prompt', 'plantilla', 'texto', 'text'] },
   { id: 'startup', labelKey: 'settings.cat.startup', icon: Power, keywords: ['startup', 'inicio', 'tray', 'bandeja', 'launch', 'close', 'cerrar', 'shortcut', 'atajo', 'hotkey'] },
   { id: 'keys', labelKey: 'settings.cat.keys', icon: Keyboard, keywords: ['keys', 'teclas', 'keyboard', 'teclado', 'shortcut', 'atajo', 'keybinding', 'binding', 'palette', 'paleta'] },
@@ -59,6 +62,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   terminal: TerminalSection,
   language: LanguageSection,
   agents: AgentsSection,
+  connections: ConnectionsSection,
   snippets: SnippetsSection,
   startup: StartupSection,
   keys: KeymapSection,

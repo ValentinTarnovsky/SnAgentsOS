@@ -46,7 +46,8 @@ export function PaneCell({
 }: PaneCellProps) {
   const t = useT()
   const Icon = iconFor(pane.icon)
-  const { cwd, initialCommand } = resolveLaunch(pane, workspace, presets)
+  const connections = useAppStore((s) => s.connections)
+  const { cwd, initialCommand, setup } = resolveLaunch(pane, workspace, presets, connections)
 
   const isMax = maximizedId === pane.id
   const hidden = maximizedId !== null && !isMax
@@ -100,7 +101,10 @@ export function PaneCell({
 
   return (
     <motion.div
-      layout
+      // "position" (not full `layout`) animates only the cell's position, never
+      // its size via a CSS transform. A scale transform would make xterm's fit
+      // measure a transient wrong width on mount → the narrow-column glitch.
+      layout="position"
       transition={{ type: 'spring', stiffness: 500, damping: 40 }}
       onDragOver={(e) => e.preventDefault()}
       onDragEnter={onDragEnterCell}
@@ -181,6 +185,7 @@ export function PaneCell({
           workspaceId={workspace.id}
           cwd={cwd}
           initialCommand={initialCommand}
+          setup={setup}
           fontSize={pane.fontSize}
           isActive={cellVisible}
         />

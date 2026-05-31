@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react'
+import type { SetupStep } from '@shared/types'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -24,19 +25,54 @@ const SEARCH_OPTS = {
   },
 }
 
-/** GPU renderer with a 2D-canvas fallback (WebGL contexts are capped per page). */
-function loadRenderer(term: Terminal): void {
-  try {
-    const webgl = new WebglAddon()
-    webgl.onContextLoss(() => webgl.dispose())
-    term.loadAddon(webgl)
-  } catch {
+/**
+ * Browsers cap live WebGL contexts (~16 in Chromium). Past that, Chromium
+ * EVICTS the oldest context, so an already-running terminal loses its GPU
+ * context and (previously) silently fell to the slow DOM renderer, which
+ * garbles and duplicates lines while an AI CLI is redrawing. We avoid that two
+ * ways: (a) cap how many panes use WebGL so eviction never triggers, and (b) on
+ * a context loss fall back to the 2D Canvas renderer, never the DOM renderer.
+ * Returns a release fn that frees the WebGL slot on teardown.
+ */
+let webglContexts = 0
+const MAX_WEBGL = 8
+
+function loadRenderer(term: Terminal): () => void {
+  if (webglContexts < MAX_WEBGL) {
     try {
-      term.loadAddon(new CanvasAddon())
+      const webgl = new WebglAddon()
+      webglContexts++
+      let released = false
+      const release = (): void => {
+        if (released) return
+        released = true
+        webglContexts--
+      }
+      webgl.onContextLoss(() => {
+        release()
+        try {
+          webgl.dispose()
+        } catch {
+          /* already gone */
+        }
+        try {
+          term.loadAddon(new CanvasAddon())
+        } catch {
+          /* fall back to the default DOM renderer */
+        }
+      })
+      term.loadAddon(webgl)
+      return release
     } catch {
-      /* fall back to the default DOM renderer */
+      /* WebGL2 unsupported, fall through to Canvas */
     }
   }
+  try {
+    term.loadAddon(new CanvasAddon())
+  } catch {
+    /* default DOM renderer */
+  }
+  return () => undefined
 }
 
 /** Imperative handle returned by useXterm, used by chrome (find bar, focus). */
@@ -56,6 +92,8 @@ export interface UseXtermOptions {
   shell?: string
   /** Command line typed into the shell after spawn (e.g. an AI CLI). */
   initialCommand?: string
+  /** Pre-launch sequence (e.g. SSH connect) run before initialCommand. */
+  setup?: SetupStep[]
   fontSize?: number
   /**
    * Whether this terminal's workspace is currently visible. Hidden terminals
@@ -67,7 +105,7 @@ export interface UseXtermOptions {
 /**
  * Mounts an xterm Terminal into `containerRef`, spawns a backing pty, and wires
  * the bidirectional data + resize streams. The pty is killed only on real
- * teardown (pane/workspace removal) — NOT on theme/font/visibility changes —
+ * teardown (pane/workspace removal), NOT on theme/font/visibility changes,
  * so running sessions survive workspace switches.
  */
 export function useXterm(
@@ -79,6 +117,8 @@ export function useXterm(
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchRef = useRef<SearchAddon | null>(null)
+  /** Latest guarded fit fn; reused by the font-size + reveal effects. */
+  const refitRef = useRef<() => void>(() => undefined)
   const controllerRef = useRef<XtermController>({
     search: () => false,
     clearSearch: () => undefined,
@@ -124,8 +164,34 @@ export function useXterm(
     term.loadAddon(new WebLinksAddon())
     term.loadAddon(search)
     term.open(container)
-    loadRenderer(term)
-    fit.fit()
+    const releaseRenderer = loadRenderer(term)
+
+    // Track the last geometry pushed to the pty so we never spam pty.resize and
+    // never settle on a bad fit. -1 forces the first real fit to propagate.
+    let lastCols = -1
+    let lastRows = -1
+    // Fit only when the container is actually measurable. A display:none or
+    // mid-relayout box yields a bogus tiny geometry, that is the "everything
+    // crammed into a narrow column / text floating to one side" bug. We also
+    // tell the pty only when cols/rows truly change, so an AI CLI redrawing
+    // isn't interrupted by a stream of no-op SIGWINCH resizes.
+    const safeFit = (): void => {
+      if (!container || container.clientWidth < 8 || container.clientHeight < 8) return
+      try {
+        fit.fit()
+      } catch {
+        return
+      }
+      if (term.cols === lastCols && term.rows === lastRows) return
+      lastCols = term.cols
+      lastRows = term.rows
+      const id = ptyIdRef.current
+      if (id) window.snApi.pty.resize({ ptyId: id, cols: term.cols, rows: term.rows })
+    }
+    refitRef.current = safeFit
+    // Size synchronously so the pty spawns at the right cols/rows when the box
+    // is already laid out; the double-rAF below covers reveal/animation cases.
+    safeFit()
 
     // Cursor blinks only while this terminal has focus.
     const onFocusIn = (): void => {
@@ -186,7 +252,7 @@ export function useXterm(
     let offExit: () => void = () => undefined
 
     // Backpressure: throttle a chatty *visible* pty when xterm can't drain.
-    // Hidden panes are NEVER paused — background agents must keep running, and a
+    // Hidden panes are NEVER paused, background agents must keep running, and a
     // display:none xterm may not fire write callbacks, which would otherwise
     // stall the pty (freezing its activity state). See the reveal effect below.
     const HIGH_WATER = 1_000_000
@@ -236,6 +302,7 @@ export function useXterm(
             shell: opts.shell,
             cwd: opts.cwd,
             initialCommand: opts.initialCommand,
+            setup: opts.setup,
             cols: term.cols,
             rows: term.rows,
           })
@@ -254,20 +321,25 @@ export function useXterm(
       if (id) window.snApi.pty.write({ ptyId: id, data })
     })
 
+    // Coalesce resize bursts (CSS-grid reflow, window drag, the spring layout
+    // animation) into a single fit per frame; safeFit's diff guard suppresses
+    // redundant pty.resize calls so a busy console doesn't glitch mid-redraw.
+    let roRaf = 0
     const resizeObserver = new ResizeObserver(() => {
-      try {
-        fit.fit()
-      } catch {
-        /* container not measurable yet */
-      }
-      const id = ptyIdRef.current
-      if (id) window.snApi.pty.resize({ ptyId: id, cols: term.cols, rows: term.rows })
+      cancelAnimationFrame(roRaf)
+      roRaf = requestAnimationFrame(safeFit)
     })
     resizeObserver.observe(container)
+    // Framer-motion finishes its layout animation via a CSS transform, which
+    // does NOT fire the ResizeObserver, so re-fit once the box has settled.
+    const mountRaf = requestAnimationFrame(() => requestAnimationFrame(safeFit))
 
     return () => {
       disposed = true
+      cancelAnimationFrame(roRaf)
+      cancelAnimationFrame(mountRaf)
       resizeObserver.disconnect()
+      releaseRenderer()
       container.removeEventListener('focusin', onFocusIn)
       container.removeEventListener('focusout', onFocusOut)
       input.dispose()
@@ -286,6 +358,7 @@ export function useXterm(
         clearSearch: () => undefined,
         focus: () => undefined,
       }
+      refitRef.current = () => undefined
       term.dispose()
       startedRef.current = false
     }
@@ -295,25 +368,20 @@ export function useXterm(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerRef, opts.paneId])
 
-  // Live theme updates — swap the palette in place.
+  // Live theme updates, swap the palette in place.
   useEffect(() => {
     const term = termRef.current
     if (term) term.options.theme = buildXtermTheme(theme, customColors)
   }, [theme, customColors])
 
-  // Live font-size updates — per-pane override wins over the global size.
+  // Live font-size updates, per-pane override wins over the global size.
   useEffect(() => {
     const term = termRef.current
-    const fit = fitRef.current
     if (!term) return
     term.options.fontSize = effectiveFontSize
-    try {
-      fit?.fit()
-    } catch {
-      /* not measurable */
-    }
-    const id = ptyIdRef.current
-    if (id) window.snApi.pty.resize({ ptyId: id, cols: term.cols, rows: term.rows })
+    // A font change alters cell size ⇒ cols/rows change, so the guarded refit
+    // re-fits and propagates the new geometry to the pty.
+    refitRef.current()
   }, [effectiveFontSize])
 
   // Live scrollback updates (infinite ⇒ effectively unbounded buffer).
@@ -341,18 +409,7 @@ export function useXterm(
   // Refit when this terminal becomes visible (hidden xterms can't measure).
   useEffect(() => {
     if (!opts.isActive) return
-    const term = termRef.current
-    const fit = fitRef.current
-    if (!term || !fit) return
-    const raf = requestAnimationFrame(() => {
-      try {
-        fit.fit()
-      } catch {
-        /* not measurable yet */
-      }
-      const id = ptyIdRef.current
-      if (id) window.snApi.pty.resize({ ptyId: id, cols: term.cols, rows: term.rows })
-    })
+    const raf = requestAnimationFrame(() => refitRef.current())
     return () => cancelAnimationFrame(raf)
   }, [opts.isActive])
 

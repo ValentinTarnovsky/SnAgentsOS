@@ -1,7 +1,7 @@
 {
   "name": "snmulticc",
-  "version": "0.3.0",
-  "description": "Multi Command Consoles — a personal command center for the Sn brand. Open sets of multiple terminals and AI CLI sessions (Claude Code, Codex, custom) in a draggable mosaic.",
+  "version": "1.0.0",
+  "description": "Multi Command Consoles: a personal command center for the Sn brand. Open sets of multiple terminals and AI CLI sessions (Claude Code, Codex, custom) in a draggable mosaic.",
   "author": "Valentin Tarnovsky",
   "license": "MIT",
   "private": true,

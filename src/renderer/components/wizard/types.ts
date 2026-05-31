@@ -6,6 +6,8 @@ export interface WizardDraft {
   grid: GridPreset
   /** presetId per cell; length always equals the grid count. */
   assignments: string[]
+  /** Connection profile applied to every console (empty = none). */
+  setupId: string
 }
 
 export interface StepProps {

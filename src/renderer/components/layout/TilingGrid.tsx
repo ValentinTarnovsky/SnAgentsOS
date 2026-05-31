@@ -5,7 +5,7 @@ import { GRID_COLS, gridForCount, orderPanes } from './gridTemplates'
 import { PaneCell } from './PaneCell'
 
 /**
- * Renders a workspace's terminals in a fixed CSS grid. No tab groups — each
+ * Renders a workspace's terminals in a fixed CSS grid. No tab groups, each
  * cell is one terminal with a slim header. Maximize spans one cell over the
  * others; middle-click closes; drag a cell's header to reorder (smooth reflow).
  */

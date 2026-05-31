@@ -10,7 +10,7 @@ export function createMainWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#0b0f19',
     autoHideMenuBar: true,
-    // Custom frameless title bar — controls live in the renderer (TitleBar.tsx).
+    // Custom frameless title bar, controls live in the renderer (TitleBar.tsx).
     frame: false,
     title: 'SnMultiCC',
     webPreferences: {

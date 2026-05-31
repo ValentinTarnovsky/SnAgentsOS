@@ -44,10 +44,10 @@ export class ConfigStore {
     const primary = this.tryRead(this.path)
     if (primary) return primary
 
-    // Primary missing or corrupt — recover from the last-good snapshot or history.
+    // Primary missing or corrupt, recover from the last-good snapshot or history.
     const recovered = this.tryRead(this.bakPath) ?? this.tryReadNewestBackup()
     if (recovered) {
-      console.warn('[ConfigStore] primary config unreadable — recovered from backup.')
+      console.warn('[ConfigStore] primary config unreadable, recovered from backup.')
       return recovered
     }
     return null

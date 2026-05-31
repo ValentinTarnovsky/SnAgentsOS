@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type {
   AgentPreset,
   ConfigFile,
+  ConnectionProfile,
   GridPreset,
   Pane,
   PaneType,
@@ -76,6 +77,8 @@ export interface WorkspaceDraft {
   cwd: string
   grid: GridPreset
   panes: WorkspaceDraftPane[]
+  /** Connection profile applied to every console in the new workspace. */
+  setupId?: string
 }
 
 export interface AppState {
@@ -86,6 +89,7 @@ export interface AppState {
   sidebarCollapsed: boolean
   presets: AgentPreset[]
   snippets: Snippet[]
+  connections: ConnectionProfile[]
   settings: Settings
   settingsOpen: boolean
   wizardOpen: boolean
@@ -126,6 +130,10 @@ export interface AppState {
   deleteSnippet: (id: string) => void
   newSnippetId: () => string
 
+  saveConnection: (connection: ConnectionProfile) => void
+  deleteConnection: (id: string) => void
+  newConnectionId: () => string
+
   updateSettings: (patch: Partial<Settings>) => void
   setSettingsOpen: (open: boolean) => void
   setWizardOpen: (open: boolean) => void
@@ -139,6 +147,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sidebarCollapsed: false,
   presets: DEFAULT_PRESETS,
   snippets: [],
+  connections: [],
   settings: DEFAULT_SETTINGS,
   settingsOpen: false,
   wizardOpen: false,
@@ -153,6 +162,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const workspaces = config.workspaces ?? []
       const presets = config.presets && config.presets.length ? config.presets : s.presets
       const snippets = config.snippets ?? []
+      const connections = config.connections ?? []
       const settings: Settings = { ...s.settings, ...config.settings }
       let activeWorkspaceId: string | null = null
       if (settings.restoreLastWorkspace) {
@@ -165,6 +175,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         workspaces,
         presets,
         snippets,
+        connections,
         settings,
         sidebarCollapsed: settings.sidebarCollapsed,
         activeWorkspaceId,
@@ -207,6 +218,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       panes,
       favorite: false,
       layout,
+      setupId: draft.setupId,
     }
     set((s) => ({ workspaces: [...s.workspaces, ws], activeWorkspaceId: ws.id }))
     return ws.id
@@ -217,6 +229,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       workspaces: config.workspaces ?? [],
       presets: config.presets && config.presets.length ? config.presets : s.presets,
       snippets: config.snippets ?? [],
+      connections: config.connections ?? [],
       settings: { ...s.settings, ...config.settings },
       sidebarCollapsed: config.settings?.sidebarCollapsed ?? s.sidebarCollapsed,
       activeWorkspaceId: config.workspaces?.[0]?.id ?? null,
@@ -242,10 +255,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
       const existingSnip = new Set(s.snippets.map((x) => x.id))
       const newSnippets = (config.snippets ?? []).filter((x) => !existingSnip.has(x.id))
+      const existingConn = new Set(s.connections.map((x) => x.id))
+      const newConnections = (config.connections ?? []).filter((x) => !existingConn.has(x.id))
       return {
         workspaces: [...s.workspaces, ...importedWs],
         presets: [...s.presets, ...newPresets],
         snippets: [...s.snippets, ...newSnippets],
+        connections: [...s.connections, ...newConnections],
       }
     }),
 
@@ -408,6 +424,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   deleteSnippet: (id) => set((s) => ({ snippets: s.snippets.filter((x) => x.id !== id) })),
 
   newSnippetId: () => uid('snip'),
+
+  saveConnection: (connection) =>
+    set((s) => {
+      const exists = s.connections.some((c) => c.id === connection.id)
+      return {
+        connections: exists
+          ? s.connections.map((c) => (c.id === connection.id ? connection : c))
+          : [...s.connections, connection],
+      }
+    }),
+
+  deleteConnection: (id) => set((s) => ({ connections: s.connections.filter((c) => c.id !== id) })),
+
+  newConnectionId: () => uid('conn'),
 
   updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
 

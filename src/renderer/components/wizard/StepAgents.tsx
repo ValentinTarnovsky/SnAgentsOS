@@ -7,6 +7,7 @@ import type { StepProps } from './types'
 export function StepAgents({ draft, update }: StepProps) {
   const t = useT()
   const presets = useAppStore((s) => s.presets)
+  const connections = useAppStore((s) => s.connections)
 
   const setAssignment = (index: number, presetId: string): void => {
     const next = [...draft.assignments]
@@ -21,6 +22,31 @@ export function StepAgents({ draft, update }: StepProps) {
   return (
     <div className="space-y-3">
       <p className="text-sm text-text-secondary">{t('wizard.assignAgents')}</p>
+
+      {connections.length > 0 && (
+        <div className="rounded-btn border border-border bg-bg-primary px-3 py-2.5">
+          <div className="mb-1.5 flex items-baseline gap-2">
+            <label className="text-xs font-medium text-text-primary">
+              {t('wizard.connection')}
+            </label>
+            <span className="text-[11px] text-text-secondary">{t('wizard.connectionHint')}</span>
+          </div>
+          <select
+            value={draft.setupId}
+            onChange={(e) => update({ setupId: e.target.value })}
+            className="h-9 w-full rounded-btn border border-border bg-bg-secondary px-3 text-sm text-text-primary outline-none transition-colors focus:border-accent-violet"
+          >
+            <option value="" className="bg-card">
+              {t('wizard.connectionNone')}
+            </option>
+            {connections.map((c) => (
+              <option key={c.id} value={c.id} className="bg-card">
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2 rounded-btn border border-dashed border-border bg-bg-secondary/40 px-3 py-2">
         <span className="text-xs font-medium text-text-secondary">{t('wizard.applyAll')}</span>
