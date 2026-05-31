@@ -55,14 +55,32 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: SnMultiCC ${{ github.event.inputs.tag || github.ref_name }}
-          generate_release_notes: true
           fail_on_unmatched_files: false
           # Match only the named distributables, NOT the win-unpacked/ helper
-          # binaries (elevate.exe, OpenConsole.exe, the raw SnMultiCC.exe, …).
+          # binaries (elevate.exe, OpenConsole.exe, the raw SnMultiCC.exe, etc.).
+          # NOTE: do NOT set generate_release_notes here. This step runs once
+          # per OS in the matrix, and each run would re-generate and append the
+          # changelog, producing a triplicated release body. Notes are written
+          # exactly once by the separate release-notes job below.
           files: |
             release/**/SnMultiCC-*.exe
             release/**/SnMultiCC-*.dmg
             release/**/SnMultiCC-*.zip
             release/**/SnMultiCC-*.AppImage
             release/**/snmulticc_*.deb
+
+  release-notes:
+    name: Release notes
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # Single, authoritative pass that sets the title and the generated
+      # changelog once. Runs after the build matrix so it has the final say on
+      # the release body (append_body: false replaces, never accumulates).
+      - name: Set release title and notes
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: SnMultiCC ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          append_body: false
