@@ -1,5 +1,6 @@
 import { join } from 'path'
-import { BrowserWindow, shell } from 'electron'
+import { BrowserWindow } from 'electron'
+import { openExternalSafe } from './openExternal'
 
 export function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -24,9 +25,11 @@ export function createMainWindow(): BrowserWindow {
 
   win.once('ready-to-show', () => win.show())
 
-  // Open external links in the OS browser, never in-app.
+  // Open external links in the OS browser, never in-app. The safe-protocol
+  // filter stops stray window.open() calls (e.g. about:blank) from reaching
+  // the OS and triggering a "no app for this protocol" prompt.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    openExternalSafe(url)
     return { action: 'deny' }
   })
 

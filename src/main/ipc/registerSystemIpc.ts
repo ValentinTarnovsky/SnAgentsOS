@@ -1,6 +1,7 @@
 import { app, ipcMain } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import { isPortable } from '../paths'
+import { openExternalSafe } from '../openExternal'
 
 /**
  * OS login-item integration. No-op on the portable build because the executable
@@ -16,4 +17,7 @@ export function registerSystemIpc(): void {
     if (isPortable()) return false
     return app.getLoginItemSettings().openAtLogin
   })
+
+  // Terminal hyperlinks (and any renderer "open in browser" action) route here.
+  ipcMain.on(CH.SHELL_OPEN_EXTERNAL, (_e, url: unknown) => openExternalSafe(url))
 }

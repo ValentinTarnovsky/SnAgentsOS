@@ -48,6 +48,9 @@ export const CH = {
 
   // Live resource metrics
   SYSTEM_METRICS: 'system:metrics', // invoke -> AppMetrics
+
+  // Open a URL in the OS default browser (terminal links, About page, etc.)
+  SHELL_OPEN_EXTERNAL: 'shell:openExternal', // send (url)
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

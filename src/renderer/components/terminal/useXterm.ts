@@ -161,7 +161,10 @@ export function useXterm(
     fitRef.current = fit
     searchRef.current = search
     term.loadAddon(fit)
-    term.loadAddon(new WebLinksAddon())
+    // Custom handler: hand the URL straight to the OS browser via IPC. The
+    // addon's default opens window.open() with no URL (about:blank), which the
+    // sandboxed renderer can't navigate, so links appeared dead.
+    term.loadAddon(new WebLinksAddon((_event, uri) => window.snApi.system.openExternal(uri)))
     term.loadAddon(search)
     term.open(container)
     const releaseRenderer = loadRenderer(term)

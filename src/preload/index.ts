@@ -69,6 +69,7 @@ const api: SnApi = {
     setGlobalHotkey: (enabled: boolean, accelerator: string) =>
       ipcRenderer.invoke(CH.SYSTEM_SET_HOTKEY, { enabled, accelerator }) as Promise<boolean>,
     getMetrics: () => ipcRenderer.invoke(CH.SYSTEM_METRICS) as Promise<AppMetrics>,
+    openExternal: (url: string) => ipcRenderer.send(CH.SHELL_OPEN_EXTERNAL, url),
   },
 }
 

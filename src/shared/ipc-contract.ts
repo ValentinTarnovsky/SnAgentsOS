@@ -142,5 +142,7 @@ export interface SnApi {
     setGlobalHotkey(enabled: boolean, accelerator: string): Promise<boolean>
     /** Snapshot of live resource usage (poll this for a real-time view). */
     getMetrics(): Promise<AppMetrics>
+    /** Open a URL in the OS default browser. http/https/mailto only; others are ignored. */
+    openExternal(url: string): void
   }
 }
