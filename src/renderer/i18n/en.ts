@@ -112,6 +112,22 @@ export const en = {
   'pane.restore': 'Restore',
   'pane.close': 'Close',
   'pane.restart': 'Restart console',
+  'pane.schedule': 'Schedule prompt',
+
+  // Scheduled prompt (per console)
+  'schedule.title': 'Schedule a prompt',
+  'schedule.edit': 'Edit scheduled prompt',
+  'schedule.active': 'Scheduled for {time}',
+  'schedule.time': 'Time',
+  'schedule.prompt': 'Prompt',
+  'schedule.promptPlaceholder': 'Text to run in this console…',
+  'schedule.hint':
+    'Runs once at the set time using the PC clock. If it has already passed today, it runs tomorrow.',
+  'schedule.save': 'Schedule',
+  'schedule.update': 'Update',
+  'schedule.remove': 'Cancel schedule',
+  'schedule.clear': 'Clear',
+  'schedule.cancel': 'Close',
 
   // In-pane search
   'search.placeholder': 'Find…',

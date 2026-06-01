@@ -5,6 +5,7 @@ import type {
   ConnectionProfile,
   GridPreset,
   Pane,
+  PaneSchedule,
   PaneType,
   Settings,
   Snippet,
@@ -113,6 +114,8 @@ export interface AppState {
   setPaneFontSize: (workspaceId: string, paneId: string, fontSize: number) => void
   /** Force a console to relaunch (kills + respawns its pty via remount). */
   restartPane: (paneId: string) => void
+  /** Set (or clear, with null) a console's one-shot scheduled prompt. */
+  setPaneSchedule: (workspaceId: string, paneId: string, schedule: PaneSchedule | null) => void
   setGrid: (workspaceId: string, grid: GridPreset) => void
   movePane: (workspaceId: string, paneId: string, toIndex: number) => void
   toggleMaximize: (workspaceId: string, paneId: string) => void
@@ -367,6 +370,20 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   restartPane: (paneId) =>
     set((s) => ({ paneEpoch: { ...s.paneEpoch, [paneId]: (s.paneEpoch[paneId] ?? 0) + 1 } })),
+
+  setPaneSchedule: (workspaceId, paneId, schedule) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) =>
+        w.id === workspaceId
+          ? {
+              ...w,
+              panes: w.panes.map((p) =>
+                p.id === paneId ? { ...p, schedule: schedule ?? undefined } : p,
+              ),
+            }
+          : w,
+      ),
+    })),
 
   setGrid: (workspaceId, grid) =>
     set((s) => ({

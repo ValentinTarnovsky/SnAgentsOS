@@ -3,6 +3,7 @@ import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { startPersistence } from '@/lib/persist'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
+import { usePaneScheduler } from '@/lib/usePaneScheduler'
 import { applyTheme } from '@/themes'
 import { I18nProvider, useT } from '@/i18n'
 import { Sidebar } from '@/components/sidebar/Sidebar'
@@ -60,6 +61,8 @@ function AppBody() {
 
   // App-wide shortcuts: Ctrl+K palette, Alt+1..9 / Ctrl+Tab workspace switch.
   useGlobalKeys()
+  // Drives per-console scheduled prompts (fires them at their set wall-clock time).
+  usePaneScheduler()
 
   const onNew = (): void => setWizardOpen(true)
 

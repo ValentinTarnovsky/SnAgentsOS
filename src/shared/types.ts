@@ -46,6 +46,20 @@ export interface ConnectionProfile {
   steps: SetupStep[]
 }
 
+/**
+ * A one-shot prompt scheduled to run in a single console at a wall-clock time.
+ * The renderer ticker writes `prompt` (then Enter) into the pane once `dueAt`
+ * is reached, using the local PC clock, then clears the schedule.
+ */
+export interface PaneSchedule {
+  /** "HH:MM" wall-clock time the user picked (for display/editing). */
+  time: string
+  /** Prompt text sent into the console (Enter appended) when it fires. */
+  prompt: string
+  /** Epoch ms of the next occurrence; the ticker fires when Date.now() >= dueAt. */
+  dueAt: number
+}
+
 export interface Pane {
   id: string
   type: PaneType
@@ -62,6 +76,8 @@ export interface Pane {
   icon: string
   /** Per-pane terminal font size override (Ctrl +/-/0, Ctrl+wheel). */
   fontSize?: number
+  /** One-shot prompt scheduled to run in this console at a set time. */
+  schedule?: PaneSchedule
 }
 
 /** Number of terminals in a workspace grid; maps to a fixed CSS grid template. */

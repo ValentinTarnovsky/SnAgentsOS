@@ -1,5 +1,5 @@
 import { useState, type DragEvent } from 'react'
-import { GripVertical, Maximize2, Minimize2, Minus, Pencil, RotateCw, X } from 'lucide-react'
+import { Clock, GripVertical, Maximize2, Minimize2, Minus, Pencil, RotateCw, X } from 'lucide-react'
 import { motion } from 'framer-motion'
 import type { AgentPreset, Pane, Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
@@ -8,6 +8,7 @@ import { getPtyId } from '@/lib/ptyRegistry'
 import { iconFor } from '@/lib/icons'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
+import { ScheduleDialog } from '@/components/layout/ScheduleDialog'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -65,6 +66,8 @@ export function PaneCell({
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const [renaming, setRenaming] = useState(false)
   const [nameVal, setNameVal] = useState(pane.title)
+  const [scheduling, setScheduling] = useState(false)
+  const isScheduled = pane.schedule != null
 
   const startRename = (): void => {
     setNameVal(pane.title)
@@ -102,6 +105,11 @@ export function PaneCell({
       onClick: onToggleMax,
     },
     { label: t('pane.minimize'), icon: Minus, onClick: onToggleMin },
+    {
+      label: isScheduled ? t('schedule.edit') : t('pane.schedule'),
+      icon: Clock,
+      onClick: () => setScheduling(true),
+    },
     { label: t('pane.restart'), icon: RotateCw, onClick: () => restartPane(pane.id) },
     { label: t('pane.close'), icon: X, danger: true, separated: true, onClick: onClose },
   ]
@@ -166,6 +174,29 @@ export function PaneCell({
             {pane.title}
           </span>
         )}
+        <Tooltip label={isScheduled ? t('schedule.active', { time: pane.schedule!.time }) : t('pane.schedule')}>
+          <button
+            draggable={false}
+            onClick={() => setScheduling(true)}
+            className={cn(
+              'rounded p-1 transition-colors hover:bg-bg-secondary',
+              isScheduled
+                ? 'text-accent-violet hover:text-accent-violet'
+                : 'text-text-secondary hover:text-text-primary',
+            )}
+          >
+            <Clock size={13} />
+          </button>
+        </Tooltip>
+        <Tooltip label={t('pane.restart')}>
+          <button
+            draggable={false}
+            onClick={() => restartPane(pane.id)}
+            className="rounded p-1 text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
+          >
+            <RotateCw size={13} />
+          </button>
+        </Tooltip>
         <Tooltip label={t('pane.minimize')}>
           <button
             draggable={false}
@@ -209,6 +240,16 @@ export function PaneCell({
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+      )}
+
+      {scheduling && (
+        <ScheduleDialog
+          workspaceId={workspace.id}
+          paneId={pane.id}
+          paneTitle={pane.title}
+          schedule={pane.schedule}
+          onClose={() => setScheduling(false)}
+        />
       )}
     </motion.div>
   )

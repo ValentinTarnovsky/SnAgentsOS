@@ -114,6 +114,22 @@ export const es: Record<keyof typeof en, string> = {
   'pane.restore': 'Restaurar',
   'pane.close': 'Cerrar',
   'pane.restart': 'Reiniciar consola',
+  'pane.schedule': 'Programar prompt',
+
+  // Prompt programado (por consola)
+  'schedule.title': 'Programar un prompt',
+  'schedule.edit': 'Editar prompt programado',
+  'schedule.active': 'Programado para las {time}',
+  'schedule.time': 'Hora',
+  'schedule.prompt': 'Prompt',
+  'schedule.promptPlaceholder': 'Texto a ejecutar en esta consola…',
+  'schedule.hint':
+    'Se ejecuta una sola vez a la hora indicada según el reloj del PC. Si ya pasó hoy, se ejecuta mañana.',
+  'schedule.save': 'Programar',
+  'schedule.update': 'Actualizar',
+  'schedule.remove': 'Cancelar programación',
+  'schedule.clear': 'Quitar',
+  'schedule.cancel': 'Cerrar',
 
   // Búsqueda en consola
   'search.placeholder': 'Buscar…',

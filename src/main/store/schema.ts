@@ -5,6 +5,12 @@ export { CONFIG_VERSION }
 
 const paneType = z.enum(['shell', 'claude', 'codex', 'custom'])
 
+const paneScheduleSchema = z.object({
+  time: z.string(),
+  prompt: z.string(),
+  dueAt: z.number(),
+})
+
 const paneSchema = z.object({
   id: z.string(),
   type: paneType,
@@ -16,6 +22,7 @@ const paneSchema = z.object({
   color: z.string(),
   icon: z.string(),
   fontSize: z.number().optional(),
+  schedule: paneScheduleSchema.optional(),
 })
 
 const setupStepSchema = z.object({
