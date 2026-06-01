@@ -189,7 +189,7 @@ function openMainWindow(): void {
   })
 }
 
-app.whenReady().then(() => {
+function bootstrap(): void {
   registerCsp()
   registerAppIpc()
   registerConfigIpc()
@@ -226,7 +226,16 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) openMainWindow()
   })
-})
+}
+
+// Single-instance lock: if another copy is already running (e.g. hidden in the
+// system tray), hand off to it and quit this one instead of opening a duplicate.
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => showWindow())
+  app.whenReady().then(bootstrap)
+}
 
 app.on('before-quit', () => {
   isQuitting = true
