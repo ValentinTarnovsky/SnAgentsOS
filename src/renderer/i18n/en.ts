@@ -102,6 +102,31 @@ export const en = {
   'data.replace': 'Replace',
   'data.merge': 'Merge',
 
+  // Updates
+  'settings.cat.updates': 'Updates',
+  'update.title': 'Update available',
+  'update.newVersion': 'Version {version} is available.',
+  'update.upToDate': "You're on the latest version ({version}).",
+  'update.current': 'Current version',
+  'update.check': 'Check for updates',
+  'update.checking': 'Checking…',
+  'update.updateNow': 'Update now',
+  'update.installing': 'Installing…',
+  'update.downloading': 'Downloading… {percent}%',
+  'update.later': 'Later',
+  'update.viewRelease': 'View release',
+  'update.releaseNotes': "What's new",
+  'update.autoCheck': 'Check for updates on startup',
+  'update.autoCheckHint': 'When a newer version is published, ask to install it automatically.',
+  'update.failed': "Couldn't check for updates. Check your connection and try again.",
+  'update.installFailed': 'Update failed: {error}',
+  'update.manualHint':
+    "This build can't update itself automatically. Open the release page to download it.",
+  'update.openedInstaller': 'The installer was opened. Follow its steps to finish updating.',
+  'update.portableNote': 'The app will close, update itself and reopen automatically.',
+  'update.installerNote': 'The installer will open. Complete its steps to update and reopen the app.',
+  'update.openHint': 'The download will open so you can finish installing it.',
+
   // Workspace header
   'workspace.newConsole': 'New console',
   'workspace.noPresets': 'No presets',

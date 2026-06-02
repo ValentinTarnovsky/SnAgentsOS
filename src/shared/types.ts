@@ -200,6 +200,8 @@ export interface Settings {
   closeToTray: boolean
   /** Installed build only: register the app to launch at system login. */
   launchOnStartup: boolean
+  /** Check GitHub for a newer release on startup and offer to install it. */
+  autoCheckUpdates: boolean
   /** Global OS shortcut to show/focus the app from anywhere. */
   globalHotkeyEnabled: boolean
   /** Electron accelerator string, e.g. "Super+Alt+O". */

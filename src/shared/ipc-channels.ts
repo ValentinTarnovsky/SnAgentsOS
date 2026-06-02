@@ -51,6 +51,11 @@ export const CH = {
 
   // Open a URL in the OS default browser (terminal links, About page, etc.)
   SHELL_OPEN_EXTERNAL: 'shell:openExternal', // send (url)
+
+  // Auto-update (GitHub releases)
+  UPDATE_CHECK: 'update:check', // invoke -> UpdateInfo
+  UPDATE_INSTALL: 'update:install', // invoke -> { relaunching } (downloads + applies)
+  UPDATE_PROGRESS: 'update:progress', // main -> renderer ({ percent, transferred, total })
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

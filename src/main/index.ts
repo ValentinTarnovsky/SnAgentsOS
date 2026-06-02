@@ -11,6 +11,7 @@ import { parseConfig } from './store/schema'
 import { registerPtyIpc } from './ipc/registerPtyIpc'
 import { registerWindowIpc, wireWindowMaximizeEvents } from './ipc/registerWindowIpc'
 import { registerSystemIpc } from './ipc/registerSystemIpc'
+import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { ensureTray, destroyTray } from './tray'
 import { mainT } from './i18n'
 
@@ -18,11 +19,25 @@ const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 
 let mainWindow: BrowserWindow | null = null
 let isQuitting = false
+// Set while an update is being applied: lets the window close immediately,
+// skipping both the hide-to-tray and the "active consoles" confirmation so the
+// installer/swap can replace files and relaunch.
+let bypassCloseGuards = false
+// True while an update download/install is in flight: blocks the user closing
+// the window mid-download (which would abort the update).
+let isInstalling = false
 const ptyManager = new PtyManager(() => mainWindow?.webContents ?? null)
 const configStore = new ConfigStore()
 
 function quitApp(): void {
   isQuitting = true
+  app.quit()
+}
+
+/** Quit for an in-progress update, bypassing tray-hide and close confirmations. */
+function quitForUpdate(): void {
+  isQuitting = true
+  bypassCloseGuards = true
   app.quit()
 }
 
@@ -150,6 +165,13 @@ function openMainWindow(): void {
 
   let forceClose = false
   win.on('close', (event) => {
+    // Updater is relaunching us: let the window close without any guard.
+    if (bypassCloseGuards) return
+    // An update is downloading/installing: don't let the user abort it.
+    if (isInstalling) {
+      event.preventDefault()
+      return
+    }
     const cfg = configStore.load()
     // Installed build: hide to tray instead of quitting (keeps consoles running).
     const useTray = !isPortable() && cfg?.settings?.closeToTray !== false
@@ -198,6 +220,13 @@ function bootstrap(): void {
   registerPtyIpc(ptyManager)
   registerWindowIpc(() => mainWindow)
   registerSystemIpc()
+  registerUpdateIpc({
+    getSender: () => mainWindow?.webContents ?? null,
+    quitForUpdate,
+    setInstalling: (v) => {
+      isInstalling = v
+    },
+  })
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),
   )

@@ -12,6 +12,52 @@ export interface AppInfo {
   configPath: string | null
 }
 
+/**
+ * How a downloaded update will be applied, derived from the OS + install type.
+ *  - win-installer  : run the NSIS setup (upgrades + relaunches)
+ *  - win-portable   : swap the portable exe in place, then relaunch
+ *  - mac-dmg        : open the dmg (manual drag; unsigned can't auto-install)
+ *  - linux-appimage : swap the AppImage in place, then relaunch
+ *  - linux-deb      : open the .deb with the system handler
+ *  - open           : update exists but no matching asset; open the release page
+ *  - none           : already up to date / check failed
+ */
+export type InstallKind =
+  | 'win-installer'
+  | 'win-portable'
+  | 'mac-dmg'
+  | 'linux-appimage'
+  | 'linux-deb'
+  | 'open'
+  | 'none'
+
+/** Result of an update check against the GitHub releases API. */
+export interface UpdateInfo {
+  /** True when the latest published release is newer than the running app. */
+  available: boolean
+  currentVersion: string
+  /** Latest release version (no leading "v"), or null when unknown. */
+  latestVersion: string | null
+  /** Release notes (the GitHub release body, markdown). */
+  notes: string
+  /** GitHub release page URL (for "view release" / manual download). */
+  releaseUrl: string | null
+  /** True when an asset matching this OS + install type can be downloaded. */
+  installable: boolean
+  /** How the update would be applied on this machine. */
+  installKind: InstallKind
+  /** Set when the check itself failed (network/API error). */
+  error?: string
+}
+
+/** Streamed while an update is downloading. */
+export interface UpdateProgress {
+  /** 0..100 */
+  percent: number
+  transferred: number
+  total: number
+}
+
 /** Live resource usage of the app (its own Electron processes). */
 export interface AppMetrics {
   /** Total working-set memory across all app processes, in MB. */
@@ -144,5 +190,17 @@ export interface SnApi {
     getMetrics(): Promise<AppMetrics>
     /** Open a URL in the OS default browser. http/https/mailto only; others are ignored. */
     openExternal(url: string): void
+  }
+  /** Self-update via GitHub releases. */
+  updates: {
+    /** Query GitHub for the latest release and whether/how it can be installed. */
+    check(): Promise<UpdateInfo>
+    /**
+     * Download the matching asset (progress on `onProgress`) and apply it. When
+     * `relaunching` is true the app is about to quit so the installer/swap runs.
+     */
+    downloadAndInstall(): Promise<{ relaunching: boolean }>
+    /** Subscribe to download progress; returns an unsubscribe function. */
+    onProgress(cb: (p: UpdateProgress) => void): () => void
   }
 }

@@ -89,6 +89,7 @@ const settingsSchema = z.object({
   infiniteScrollback: z.boolean().default(true),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
+  autoCheckUpdates: z.boolean().default(true),
   closeToTray: z.boolean().default(true),
   launchOnStartup: z.boolean().default(false),
   globalHotkeyEnabled: z.boolean().default(false),

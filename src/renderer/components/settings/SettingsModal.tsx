@@ -1,5 +1,5 @@
 import { useMemo, useState, type ComponentType } from 'react'
-import { Activity, Bot, Database, FileText, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, TerminalSquare, type LucideIcon } from 'lucide-react'
+import { Activity, Bot, Database, DownloadCloud, FileText, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, TerminalSquare, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type MessageKey, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -14,6 +14,7 @@ import { SnippetsSection } from './sections/SnippetsSection'
 import { KeymapSection } from './sections/KeymapSection'
 import { DataSection } from './sections/DataSection'
 import { UsageSection } from './sections/UsageSection'
+import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
 
 type CategoryId =
@@ -27,6 +28,7 @@ type CategoryId =
   | 'keys'
   | 'data'
   | 'usage'
+  | 'updates'
   | 'about'
 
 interface Category {
@@ -48,6 +50,7 @@ const CATEGORIES: Category[] = [
   { id: 'appearance', labelKey: 'settings.cat.appearance', icon: Palette, keywords: ['theme', 'color', 'tema', 'apariencia', 'custom'] },
   { id: 'language', labelKey: 'settings.cat.language', icon: Languages, keywords: ['language', 'idioma', 'english', 'español', 'spanish'] },
   { id: 'usage', labelKey: 'settings.cat.usage', icon: Activity, keywords: ['usage', 'uso', 'ram', 'cpu', 'memory', 'memoria', 'performance', 'rendimiento'] },
+  { id: 'updates', labelKey: 'settings.cat.updates', icon: DownloadCloud, keywords: ['update', 'updates', 'actualizar', 'actualización', 'actualizacion', 'version', 'versión', 'upgrade', 'release'] },
   { id: 'about', labelKey: 'settings.cat.about', icon: Info, keywords: ['about', 'acerca', 'version', 'versión'] },
 ]
 
@@ -68,6 +71,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   keys: KeymapSection,
   data: DataSection,
   usage: UsageSection,
+  updates: UpdatesSection,
   about: AboutSection,
 }
 

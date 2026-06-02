@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Copy, Minus, Square, X } from 'lucide-react'
 import { LogoMark } from '@/components/ui/Logo'
+import { useUpdaterStore } from '@/lib/updater'
 import { useT } from '@/i18n'
 
 /**
@@ -10,6 +11,8 @@ import { useT } from '@/i18n'
 export function TitleBar() {
   const t = useT()
   const [maxed, setMaxed] = useState(false)
+  // Block closing the window while an update is downloading/installing.
+  const installing = useUpdaterStore((s) => s.installing)
 
   useEffect(() => {
     window.snApi.window
@@ -42,9 +45,10 @@ export function TitleBar() {
           {maxed ? <Copy size={13} /> : <Square size={13} />}
         </button>
         <button
-          onClick={() => window.snApi.window.close()}
+          onClick={() => !installing && window.snApi.window.close()}
+          disabled={installing}
           title={t('titlebar.close')}
-          className="flex w-11 items-center justify-center text-text-secondary transition-colors hover:bg-red-500 hover:text-white"
+          className="flex w-11 items-center justify-center text-text-secondary transition-colors hover:bg-red-500 hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-secondary"
         >
           <X size={16} />
         </button>

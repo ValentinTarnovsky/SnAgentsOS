@@ -51,6 +51,17 @@ jobs:
       - name: Build and package
         run: ${{ matrix.cmd }}
 
+      # Emit a "<artifact>.sha256" sidecar for every distributable so the in-app
+      # auto-updater can verify the bytes it downloads before executing them.
+      # bash + node are available on all three runners (Git Bash on Windows).
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          cd release
+          for f in $(find . -type f \( -name 'SnMultiCC-*.exe' -o -name 'SnMultiCC-*.dmg' -o -name 'SnMultiCC-*.zip' -o -name 'SnMultiCC-*.AppImage' -o -name 'snmulticc_*.deb' \)); do
+            node -e "const c=require('crypto'),fs=require('fs'),p=require('path');const f=process.argv[1];const h=c.createHash('sha256').update(fs.readFileSync(f)).digest('hex');fs.writeFileSync(f+'.sha256',h+'  '+p.basename(f)+'\n');console.log('sha256',p.basename(f),h)" "$f"
+          done
+
       - name: Attach artifacts to release
         uses: softprops/action-gh-release@v3
         with:
@@ -68,6 +79,7 @@ jobs:
             release/**/SnMultiCC-*.zip
             release/**/SnMultiCC-*.AppImage
             release/**/snmulticc_*.deb
+            release/**/*.sha256
 
   release-notes:
     name: Release notes

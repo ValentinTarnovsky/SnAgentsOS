@@ -6,6 +6,15 @@ export function isPortable(): boolean {
   return Boolean(process.env.PORTABLE_EXECUTABLE_DIR) || process.argv.includes('--portable')
 }
 
+/**
+ * The actual portable .exe the user launched (electron-builder runs the app
+ * from a temp extraction, so `process.execPath` is NOT this file). Used by the
+ * updater to overwrite the right file. Null when not a portable build.
+ */
+export function portableExeFile(): string | null {
+  return process.env.PORTABLE_EXECUTABLE_FILE ?? null
+}
+
 /** Directory next to the executable when portable, else null. */
 export function portableDir(): string | null {
   if (process.env.PORTABLE_EXECUTABLE_DIR) return process.env.PORTABLE_EXECUTABLE_DIR

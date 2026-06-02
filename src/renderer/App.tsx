@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
+import { useUpdaterStore, initUpdaterEvents } from '@/lib/updater'
 import { startPersistence } from '@/lib/persist'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
 import { usePaneScheduler } from '@/lib/usePaneScheduler'
@@ -9,6 +10,7 @@ import { I18nProvider, useT } from '@/i18n'
 import { Sidebar } from '@/components/sidebar/Sidebar'
 import { WorkspaceHost } from '@/components/layout/WorkspaceHost'
 import { SettingsModal } from '@/components/settings/SettingsModal'
+import { UpdateModal } from '@/components/updates/UpdateModal'
 import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { CommandPalette } from '@/components/ui/CommandPalette'
@@ -39,6 +41,26 @@ export function App() {
   useEffect(() => {
     applyTheme(theme, customColors)
   }, [theme, customColors])
+
+  // Keep the download-progress stream wired for the whole app lifetime.
+  useEffect(() => initUpdaterEvents(), [])
+
+  // After config loads, check GitHub for a newer release (if enabled) and, when
+  // one is found, open the "update available" prompt. Slightly delayed so it
+  // never competes with the first paint.
+  useEffect(() => {
+    if (!hydrated) return
+    if (!useAppStore.getState().settings.autoCheckUpdates) return
+    const timer = setTimeout(() => {
+      void useUpdaterStore
+        .getState()
+        .check()
+        .then((info) => {
+          if (info?.available) useUpdaterStore.getState().openPrompt()
+        })
+    }, 2500)
+    return () => clearTimeout(timer)
+  }, [hydrated])
 
   if (!hydrated) {
     return <div className="h-full w-full bg-bg-primary" />
@@ -87,6 +109,7 @@ function AppBody() {
         )}
       </main>
       <SettingsModal />
+      <UpdateModal />
       <NewWorkspaceWizard />
       <CommandPalette />
     </div>

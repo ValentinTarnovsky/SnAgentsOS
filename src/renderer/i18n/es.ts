@@ -104,6 +104,32 @@ export const es: Record<keyof typeof en, string> = {
   'data.replace': 'Reemplazar',
   'data.merge': 'Combinar',
 
+  // Actualizaciones
+  'settings.cat.updates': 'Actualizaciones',
+  'update.title': 'Actualización disponible',
+  'update.newVersion': 'La versión {version} está disponible.',
+  'update.upToDate': 'Estás usando la última versión ({version}).',
+  'update.current': 'Versión actual',
+  'update.check': 'Buscar actualizaciones',
+  'update.checking': 'Buscando…',
+  'update.updateNow': 'Actualizar ahora',
+  'update.installing': 'Instalando…',
+  'update.downloading': 'Descargando… {percent}%',
+  'update.later': 'Más tarde',
+  'update.viewRelease': 'Ver la publicación',
+  'update.releaseNotes': 'Novedades',
+  'update.autoCheck': 'Buscar actualizaciones al iniciar',
+  'update.autoCheckHint':
+    'Cuando se publica una versión más nueva, te ofrece instalarla automáticamente.',
+  'update.failed': 'No se pudo buscar actualizaciones. Revisá tu conexión e intentá de nuevo.',
+  'update.installFailed': 'La actualización falló: {error}',
+  'update.manualHint':
+    'Esta versión no puede actualizarse sola. Abrí la página de la publicación para descargarla.',
+  'update.openedInstaller': 'Se abrió el instalador. Seguí sus pasos para terminar de actualizar.',
+  'update.portableNote': 'La app se cerrará, se actualizará y se volverá a abrir automáticamente.',
+  'update.installerNote': 'Se abrirá el instalador. Completá sus pasos para actualizar y reabrir la app.',
+  'update.openHint': 'Se abrirá la descarga para que termines de instalarla.',
+
   // Workspace header
   'workspace.newConsole': 'Nueva consola',
   'workspace.noPresets': 'Sin presets',

@@ -49,6 +49,7 @@ const DEFAULT_SETTINGS: Settings = {
   infiniteScrollback: true,
   restoreLastWorkspace: true,
   confirmCloseRunning: true,
+  autoCheckUpdates: true,
   closeToTray: true,
   launchOnStartup: false,
   globalHotkeyEnabled: false,
