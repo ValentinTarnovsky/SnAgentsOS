@@ -154,6 +154,16 @@ export function useXterm(
       cursorBlink: false,
       scrollback: settings.infiniteScrollback ? INFINITE_SCROLLBACK : (settings.scrollback ?? 5000),
       allowProposedApi: true,
+      // Windows ConPTY emits long lines without reliable native wrap markers,
+      // so xterm can't tell a soft-wrapped row from a hard line break: links
+      // and selections then stop at the wrap boundary (a URL split over two
+      // rows only half-detects). Enabling windowsPty turns on the heuristic
+      // "a full row whose last cell isn't blank continues on the next row",
+      // which lets the web-links addon join the wrapped URL. Omitting
+      // buildNumber keeps the heuristic on regardless of the OS build.
+      ...(window.snApi.platform === 'win32'
+        ? { windowsPty: { backend: 'conpty' as const } }
+        : {}),
     })
     const fit = new FitAddon()
     const search = new SearchAddon()
