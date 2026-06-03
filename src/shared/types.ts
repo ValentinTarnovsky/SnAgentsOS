@@ -180,6 +180,50 @@ export interface ThemeDefinition {
   tokens: ThemeTokens
 }
 
+/**
+ * A user-defined usage row that counts tokens for an arbitrary model by parsing
+ * the local transcript JSONL (no live quota %, totals only). The optional
+ * `tokenBudget` turns the absolute count into a percent bar.
+ */
+export interface UsageCustomRow {
+  id: string
+  /** Display label for the row. */
+  label: string
+  /** Which transcript store to scan. */
+  source: 'claude' | 'codex'
+  /** Case-insensitive substring matched against each turn's model id. */
+  modelMatch: string
+  /** Time window the tokens are summed over. */
+  window: 'session5h' | 'weekly7d' | 'today' | 'all'
+  /** When set, the row shows used/budget as a percent bar. */
+  tokenBudget?: number
+  enabled: boolean
+}
+
+/** Settings for the live usage bars feature (Claude + Codex + custom). */
+export interface UsageSettings {
+  /** Master switch for the sidebar widget + polling. */
+  enabled: boolean
+  /** Poll interval for the Claude OAuth endpoint (ms; clamped >= 30s in main). */
+  claudeIntervalMs: number
+  /** Poll interval for the local Codex rollout file (ms; clamped >= 3s in main). */
+  codexIntervalMs: number
+  /** Re-fetch when the app window regains focus. */
+  refreshOnFocus: boolean
+  /** Show the Anthropic service-status dot. */
+  showStatus: boolean
+  /** Which built-in quota rows are visible. */
+  rows: {
+    claude5h: boolean
+    claude7d: boolean
+    claudeOpus7d: boolean
+    claudeSonnet7d: boolean
+    codex5h: boolean
+    codex7d: boolean
+  }
+  custom: UsageCustomRow[]
+}
+
 export interface Settings {
   /** Default shell per platform; undefined => resolver picks the OS default. */
   defaultShell: { win32?: string; darwin?: string; linux?: string }
@@ -209,6 +253,8 @@ export interface Settings {
   /** Remapped in-app shortcuts: actionId -> accelerator (overrides defaults). */
   keymap: Record<string, string>
   sidebarCollapsed: boolean
+  /** Live usage / quota bars (Claude + Codex + custom models). */
+  usage: UsageSettings
 }
 
 export interface ConfigFile {

@@ -12,6 +12,7 @@ import { registerPtyIpc } from './ipc/registerPtyIpc'
 import { registerWindowIpc, wireWindowMaximizeEvents } from './ipc/registerWindowIpc'
 import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
+import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { ensureTray, destroyTray } from './tray'
 import { mainT } from './i18n'
 
@@ -226,6 +227,10 @@ function bootstrap(): void {
     setInstalling: (v) => {
       isInstalling = v
     },
+  })
+  registerUsageIpc({
+    getSender: () => mainWindow?.webContents ?? null,
+    getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
   })
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),

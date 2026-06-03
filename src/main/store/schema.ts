@@ -71,6 +71,37 @@ const presetSchema = z.object({
   defaultCwd: z.string().optional(),
 })
 
+const usageCustomRowSchema = z.object({
+  id: z.string(),
+  label: z.string().default(''),
+  source: z.enum(['claude', 'codex']).default('claude'),
+  modelMatch: z.string().default(''),
+  window: z.enum(['session5h', 'weekly7d', 'today', 'all']).default('session5h'),
+  tokenBudget: z.number().optional(),
+  enabled: z.boolean().default(true),
+})
+
+const usageSettingsSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    claudeIntervalMs: z.number().default(60000),
+    codexIntervalMs: z.number().default(10000),
+    refreshOnFocus: z.boolean().default(true),
+    showStatus: z.boolean().default(true),
+    rows: z
+      .object({
+        claude5h: z.boolean().default(true),
+        claude7d: z.boolean().default(true),
+        claudeOpus7d: z.boolean().default(false),
+        claudeSonnet7d: z.boolean().default(false),
+        codex5h: z.boolean().default(true),
+        codex7d: z.boolean().default(true),
+      })
+      .default({}),
+    custom: z.array(usageCustomRowSchema).default([]),
+  })
+  .default({})
+
 const settingsSchema = z.object({
   defaultShell: z.object({
     win32: z.string().optional(),
@@ -96,6 +127,7 @@ const settingsSchema = z.object({
   globalHotkey: z.string().default('Super+Alt+O'),
   keymap: z.record(z.string()).default({}),
   sidebarCollapsed: z.boolean(),
+  usage: usageSettingsSchema,
 })
 
 const snippetSchema = z.object({

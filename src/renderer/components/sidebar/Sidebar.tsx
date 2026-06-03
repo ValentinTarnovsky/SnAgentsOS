@@ -15,6 +15,7 @@ import { useT } from '@/i18n'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { UsageBars } from '@/components/sidebar/UsageBars'
 import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
 
@@ -220,6 +221,8 @@ export function Sidebar() {
           )
         })}
       </nav>
+
+      <UsageBars />
 
       <div className="shrink-0 border-t border-border p-2">
         <Tooltip label={sidebarCollapsed ? t('sidebar.settings') : ''} side="right">

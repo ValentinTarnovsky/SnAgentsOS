@@ -14,8 +14,9 @@ import type {
   SnApi,
   UpdateInfo,
   UpdateProgress,
+  UsageSnapshot,
 } from '@shared/ipc-contract'
-import type { ConfigFile } from '@shared/types'
+import type { ConfigFile, UsageSettings } from '@shared/types'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -78,6 +79,12 @@ const api: SnApi = {
     downloadAndInstall: () =>
       ipcRenderer.invoke(CH.UPDATE_INSTALL) as Promise<{ relaunching: boolean }>,
     onProgress: (cb: (p: UpdateProgress) => void) => sub<UpdateProgress>(CH.UPDATE_PROGRESS, cb),
+  },
+  usage: {
+    get: () => ipcRenderer.invoke(CH.USAGE_GET) as Promise<UsageSnapshot>,
+    refresh: () => ipcRenderer.invoke(CH.USAGE_REFRESH) as Promise<UsageSnapshot>,
+    setConfig: (cfg: UsageSettings) => ipcRenderer.send(CH.USAGE_SET_CONFIG, cfg),
+    onUpdate: (cb: (s: UsageSnapshot) => void) => sub<UsageSnapshot>(CH.USAGE_UPDATE, cb),
   },
 }
 

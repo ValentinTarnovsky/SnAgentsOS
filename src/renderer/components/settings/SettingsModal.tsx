@@ -1,5 +1,5 @@
 import { useMemo, useState, type ComponentType } from 'react'
-import { Activity, Bot, Database, DownloadCloud, FileText, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, TerminalSquare, type LucideIcon } from 'lucide-react'
+import { Activity, Bot, Database, DownloadCloud, FileText, Gauge, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, TerminalSquare, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type MessageKey, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -14,6 +14,7 @@ import { SnippetsSection } from './sections/SnippetsSection'
 import { KeymapSection } from './sections/KeymapSection'
 import { DataSection } from './sections/DataSection'
 import { UsageSection } from './sections/UsageSection'
+import { AiUsageSection } from './sections/AiUsageSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
 
@@ -27,6 +28,7 @@ type CategoryId =
   | 'startup'
   | 'keys'
   | 'data'
+  | 'aiusage'
   | 'usage'
   | 'updates'
   | 'about'
@@ -49,7 +51,8 @@ const CATEGORIES: Category[] = [
   { id: 'data', labelKey: 'settings.cat.data', icon: Database, keywords: ['data', 'datos', 'export', 'exportar', 'import', 'importar', 'backup', 'respaldo'] },
   { id: 'appearance', labelKey: 'settings.cat.appearance', icon: Palette, keywords: ['theme', 'color', 'tema', 'apariencia', 'custom'] },
   { id: 'language', labelKey: 'settings.cat.language', icon: Languages, keywords: ['language', 'idioma', 'english', 'español', 'spanish'] },
-  { id: 'usage', labelKey: 'settings.cat.usage', icon: Activity, keywords: ['usage', 'uso', 'ram', 'cpu', 'memory', 'memoria', 'performance', 'rendimiento'] },
+  { id: 'aiusage', labelKey: 'settings.cat.aiusage', icon: Gauge, keywords: ['usage', 'uso', 'tokens', 'token', 'limit', 'limite', 'límite', 'quota', 'cuota', 'claude', 'codex', 'bar', 'barra', 'bars', 'barras'] },
+  { id: 'usage', labelKey: 'settings.cat.usage', icon: Activity, keywords: ['performance', 'rendimiento', 'ram', 'cpu', 'memory', 'memoria', 'resources', 'recursos', 'processes', 'procesos'] },
   { id: 'updates', labelKey: 'settings.cat.updates', icon: DownloadCloud, keywords: ['update', 'updates', 'actualizar', 'actualización', 'actualizacion', 'version', 'versión', 'upgrade', 'release'] },
   { id: 'about', labelKey: 'settings.cat.about', icon: Info, keywords: ['about', 'acerca', 'version', 'versión'] },
 ]
@@ -70,6 +73,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   startup: StartupSection,
   keys: KeymapSection,
   data: DataSection,
+  aiusage: AiUsageSection,
   usage: UsageSection,
   updates: UpdatesSection,
   about: AboutSection,
