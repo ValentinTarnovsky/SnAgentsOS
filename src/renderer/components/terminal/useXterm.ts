@@ -217,6 +217,48 @@ export function useXterm(
     container.addEventListener('focusin', onFocusIn)
     container.addEventListener('focusout', onFocusOut)
 
+    // Wheel-scroll "sticks" short of the newest output: after a burst (an AI CLI
+    // streaming, or just the tail of a command) xterm defers its scroll-area
+    // resize to the next frame, and a fractional cell height (Windows display
+    // scaling) can round the DOM scroll-max to one row above the buffer's true
+    // bottom. The viewport then parks at ybase-k and the wheel can't advance
+    // past the stale clamp; only a keypress (which force-scrolls to bottom)
+    // reveals the tail. When a downward wheel leaves us demonstrably stuck (no
+    // movement) at the end of the scrollback, finish the scroll for the user.
+    const viewportEl = container.querySelector<HTMLElement>('.xterm-viewport')
+    const SNAP_ROWS = 4
+    let snapRaf = 0
+    const onWheelSnap = (e: WheelEvent): void => {
+      // Ctrl/Cmd+wheel is zoom (handled by TerminalPane); Shift+wheel is
+      // horizontal. Only react to a plain downward scroll.
+      if (e.deltaY <= 0 || e.ctrlKey || e.metaKey || e.shiftKey) return
+      const before = term.buffer.active.viewportY
+      cancelAnimationFrame(snapRaf)
+      // xterm applies the scroll and updates ydisp over the next frame; re-check
+      // once it settles. A burst of wheels coalesces to one check on the last
+      // event, so we never snap mid-scroll.
+      snapRaf = requestAnimationFrame(() => {
+        const buf = term.buffer.active
+        // Full-screen apps (vim, less, htop) use the alternate buffer with no
+        // scrollback, so snapping their viewport would be wrong.
+        if (buf.type !== 'normal') return
+        // The wheel moved us, or we're already at the bottom: not stuck.
+        if (buf.viewportY !== before || buf.viewportY >= buf.baseY) return
+        // Confirm we're genuinely at the tail, not mid-scrollback (where slow
+        // sub-row touchpad deltas can also leave ydisp unchanged). Snap if the
+        // DOM scroller is pinned at its max (the stale-clamp case, any stall
+        // size) or we're within a couple rows of the bottom (the round-off
+        // case, covering the frame where xterm already healed the scroll area).
+        const atDomMax =
+          !!viewportEl &&
+          viewportEl.scrollTop + viewportEl.clientHeight >= viewportEl.scrollHeight - 1
+        if (atDomMax || buf.baseY - buf.viewportY <= SNAP_ROWS) {
+          term.scrollToBottom()
+        }
+      })
+    }
+    container.addEventListener('wheel', onWheelSnap, { passive: true })
+
     // Wire the imperative handle now that the addons exist.
     controllerRef.current.search = (query, o) => {
       if (!query) {
@@ -362,10 +404,12 @@ export function useXterm(
       disposed = true
       cancelAnimationFrame(roRaf)
       cancelAnimationFrame(mountRaf)
+      cancelAnimationFrame(snapRaf)
       resizeObserver.disconnect()
       releaseRenderer()
       container.removeEventListener('focusin', onFocusIn)
       container.removeEventListener('focusout', onFocusOut)
+      container.removeEventListener('wheel', onWheelSnap)
       input.dispose()
       offData()
       offExit()
