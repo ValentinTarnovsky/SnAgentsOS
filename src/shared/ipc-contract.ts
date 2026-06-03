@@ -2,7 +2,7 @@
  * IPC request/response/event payload shapes and the typed bridge surface
  * exposed on `window.snApi`. The SnApi interface grows phase by phase.
  */
-import type { ConfigFile, SetupStep } from './types'
+import type { ConfigFile, SetupStep, UsageSettings } from './types'
 
 export interface AppInfo {
   version: string
@@ -68,6 +68,37 @@ export interface AppMetrics {
   processes: number
   /** Number of running console processes (ptys). */
   consoles: number
+}
+
+/** One bar in the live usage widget (a quota window or a custom token counter). */
+export interface UsageRow {
+  /** Stable id, e.g. 'claude.5h', 'codex.7d', 'custom.<rowId>'. */
+  id: string
+  provider: 'claude' | 'codex' | 'custom'
+  kind: '5h' | '7d' | 'custom'
+  /** Resolved display label (model name for custom rows). */
+  label: string
+  /** 0..100 quota utilization, or null for a custom row with no token budget. */
+  percent: number | null
+  /** Absolute tokens used (custom rows). */
+  used?: number
+  /** Token budget (custom rows with a configured budget). */
+  limit?: number
+  /** ISO-8601 reset time, when the source provides one. */
+  resetsAt?: string | null
+  /** Subscription/plan label (Codex: plus/pro/...). */
+  planType?: string | null
+  status: 'ok' | 'expired' | 'error' | 'nodata' | 'loading'
+}
+
+/** A full snapshot of every enabled usage row, pushed to the renderer. */
+export interface UsageSnapshot {
+  rows: UsageRow[]
+  /** Epoch ms the snapshot was produced. */
+  updatedAt: number
+  /** Anthropic service health, when the status dot is enabled. */
+  services?: 'operational' | 'degraded' | 'down' | null
+  error?: string | null
 }
 
 // --- PTY payloads (wired from F1) ---
@@ -202,5 +233,16 @@ export interface SnApi {
     downloadAndInstall(): Promise<{ relaunching: boolean }>
     /** Subscribe to download progress; returns an unsubscribe function. */
     onProgress(cb: (p: UpdateProgress) => void): () => void
+  }
+  /** Live usage / quota bars (Claude OAuth + Codex rollout + custom models). */
+  usage: {
+    /** Current cached snapshot (kicks a background refresh). */
+    get(): Promise<UsageSnapshot>
+    /** Force a full refresh of every source and return the fresh snapshot. */
+    refresh(): Promise<UsageSnapshot>
+    /** Push the latest usage settings so main can (re)schedule its pollers. */
+    setConfig(cfg: UsageSettings): void
+    /** Subscribe to pushed snapshots; returns an unsubscribe function. */
+    onUpdate(cb: (s: UsageSnapshot) => void): () => void
   }
 }

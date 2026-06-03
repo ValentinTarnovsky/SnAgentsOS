@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useUpdaterStore, initUpdaterEvents } from '@/lib/updater'
+import { initUsageEvents, syncUsageConfig } from '@/lib/usageStore'
 import { startPersistence } from '@/lib/persist'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
 import { usePaneScheduler } from '@/lib/usePaneScheduler'
@@ -23,6 +24,7 @@ export function App() {
   const theme = useAppStore((s) => s.settings.theme)
   const customColors = useAppStore((s) => s.settings.customColors)
   const language = useAppStore((s) => s.settings.language)
+  const usage = useAppStore((s) => s.settings.usage)
 
   // Load persisted config once, then start the debounced persistence writer.
   useEffect(() => {
@@ -44,6 +46,14 @@ export function App() {
 
   // Keep the download-progress stream wired for the whole app lifetime.
   useEffect(() => initUpdaterEvents(), [])
+
+  // Keep the usage-snapshot stream wired for the whole app lifetime.
+  useEffect(() => initUsageEvents(), [])
+
+  // Push usage settings to main (reschedules its pollers) whenever they change.
+  useEffect(() => {
+    if (hydrated) syncUsageConfig(usage)
+  }, [hydrated, usage])
 
   // After config loads, check GitHub for a newer release (if enabled) and, when
   // one is found, open the "update available" prompt. Slightly delayed so it

@@ -56,6 +56,12 @@ export const CH = {
   UPDATE_CHECK: 'update:check', // invoke -> UpdateInfo
   UPDATE_INSTALL: 'update:install', // invoke -> { relaunching } (downloads + applies)
   UPDATE_PROGRESS: 'update:progress', // main -> renderer ({ percent, transferred, total })
+
+  // Live usage / quota bars (Claude OAuth + Codex rollout + custom models)
+  USAGE_GET: 'usage:get', // invoke -> UsageSnapshot (cached, kicks a refresh)
+  USAGE_REFRESH: 'usage:refresh', // invoke -> UsageSnapshot (force a full refresh)
+  USAGE_SET_CONFIG: 'usage:setConfig', // send (renderer pushes the usage settings to main)
+  USAGE_UPDATE: 'usage:update', // main -> renderer (UsageSnapshot, pushed on the poll interval)
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

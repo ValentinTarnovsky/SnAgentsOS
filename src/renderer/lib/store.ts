@@ -56,6 +56,22 @@ const DEFAULT_SETTINGS: Settings = {
   globalHotkey: 'Super+Alt+O',
   keymap: {},
   sidebarCollapsed: false,
+  usage: {
+    enabled: true,
+    claudeIntervalMs: 60000,
+    codexIntervalMs: 10000,
+    refreshOnFocus: true,
+    showStatus: true,
+    rows: {
+      claude5h: true,
+      claude7d: true,
+      claudeOpus7d: false,
+      claudeSonnet7d: false,
+      codex5h: true,
+      codex7d: true,
+    },
+    custom: [],
+  },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */
