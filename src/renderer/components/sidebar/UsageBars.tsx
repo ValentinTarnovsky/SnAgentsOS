@@ -7,6 +7,7 @@ import { useT, type MessageKey, type TFn } from '@/i18n'
 import { iconFor, type IconComponent } from '@/lib/icons'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { UsageMeter } from '@/components/ui/UsageMeter'
+import { UsageRing } from '@/components/ui/UsageRing'
 import { cn } from '@/lib/cn'
 
 const ClaudeIcon = iconFor('claude')
@@ -135,6 +136,7 @@ export function UsageBars() {
   const codex = rows.filter((r) => r.provider === 'codex')
   const custom = rows.filter((r) => r.provider === 'custom')
   const codexPlan = codex.find((r) => r.planType)?.planType ?? undefined
+  const claudePlan = claude.find((r) => r.planType)?.planType ?? undefined
   const services = usage.showStatus ? (snapshot?.services ?? null) : null
 
   if (collapsed) {
@@ -145,16 +147,16 @@ export function UsageBars() {
     ].filter((g) => g.list.length > 0)
     if (groups.length === 0) return null
     return (
-      <div className="shrink-0 space-y-2 border-t border-border px-2 py-2">
+      <div className="shrink-0 space-y-3 border-t border-border px-2 py-3">
         {groups.map((g, gi) => (
-          <div key={gi} className="space-y-1">
-            {g.Icon && <g.Icon size={13} className="mx-auto text-text-secondary" />}
+          <div key={gi} className="flex flex-col items-center gap-1.5">
+            {g.Icon && <g.Icon size={13} className="text-text-secondary" />}
             {g.list.map((r) => {
               const v = viewRow(r, t)
               return (
                 <Tooltip key={r.id} label={`${v.label} · ${v.valueText}`} side="right">
-                  <div>
-                    <UsageMeter compact label={v.label} percent={v.percent} valueText={v.valueText} muted={v.muted} />
+                  <div className="flex justify-center">
+                    <UsageRing percent={v.percent} muted={v.muted} size={36} />
                   </div>
                 </Tooltip>
               )
@@ -185,7 +187,7 @@ export function UsageBars() {
       ) : (
         <div className="space-y-2.5">
           {claude.length > 0 && (
-            <Group icon={ClaudeIcon} title={t('aiusage.claude')} status={services}>
+            <Group icon={ClaudeIcon} title={t('aiusage.claude')} badge={claudePlan} status={services}>
               {claude.map((r) => (
                 <UsageMeter key={r.id} {...viewRow(r, t)} />
               ))}

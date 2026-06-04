@@ -1,7 +1,7 @@
 import { cn } from '@/lib/cn'
 
 /** Reference palette: green when there's headroom, amber getting close, red near the cap. */
-function barColor(percent: number): string {
+export function barColor(percent: number): string {
   if (percent >= 85) return '#ef4444'
   if (percent >= 60) return '#f59e0b'
   return '#22c55e'

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Download, ExternalLink, Sparkles, X } from 'lucide-react'
 import { useT } from '@/i18n'
 import { useUpdaterStore } from '@/lib/updater'
+import { Markdown } from '@/components/ui/Markdown'
 import { cn } from '@/lib/cn'
 
 type NoteKey =
@@ -98,9 +99,9 @@ export function UpdateModal() {
               <div className="mb-1 text-xs font-medium text-text-secondary">
                 {t('update.releaseNotes')}
               </div>
-              <pre className="max-h-44 overflow-y-auto whitespace-pre-wrap break-words rounded-card border border-border bg-bg-secondary/50 p-3 text-xs leading-relaxed text-text-primary">
-                {info.notes.trim()}
-              </pre>
+              <div className="max-h-44 overflow-y-auto break-words rounded-card border border-border bg-bg-secondary/50 p-3 text-xs leading-relaxed">
+                <Markdown source={info.notes.trim()} />
+              </div>
             </div>
           )}
 

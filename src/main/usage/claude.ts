@@ -2,14 +2,14 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { app } from 'electron'
-import { getJson } from './httpJson'
+import { getJson, type JsonResponse } from './httpJson'
 import type { UsageRow } from '@shared/ipc-contract'
 
 /** Confirmed OAuth usage endpoint used by Claude Code (utilization 0..100 + reset). */
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 
 interface OauthCred {
-  claudeAiOauth?: { accessToken?: string; expiresAt?: number }
+  claudeAiOauth?: { accessToken?: string; expiresAt?: number; subscriptionType?: string }
 }
 interface UsageWindow {
   utilization?: number | null
@@ -49,6 +49,44 @@ function clampPercent(x: number): number {
   return Math.max(0, Math.min(100, Math.round(x)))
 }
 
+/** Transient = worth retrying. 401/403 (expired token) are not. */
+function isTransientStatus(status: number): boolean {
+  return status === 429 || status >= 500
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * GET the usage endpoint with a bounded retry on transient failures only (a
+ * thrown network/timeout error, 429, or 5xx). A single blip used to flip the
+ * sidebar usage to "Error" for one poll; retrying here keeps the bars steady.
+ * 401/403 (expired) and 2xx return immediately. Throws only if every attempt
+ * threw. Worst-case added latency ~1.2s, well under the 30s+ poll interval.
+ */
+async function getUsageWithRetry(
+  headers: Record<string, string>,
+  attempts = 3,
+): Promise<JsonResponse<UsageResponse>> {
+  let lastErr: unknown
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await getJson<UsageResponse>(USAGE_URL, headers)
+      if (i < attempts - 1 && isTransientStatus(res.status)) {
+        await sleep(400 * (i + 1))
+        continue
+      }
+      return res
+    } catch (err) {
+      lastErr = err
+      if (i < attempts - 1) {
+        await sleep(400 * (i + 1))
+        continue
+      }
+    }
+  }
+  throw lastErr ?? new Error('usage request failed')
+}
+
 /**
  * Fetch the enabled Claude quota windows. The OAuth token is read fresh from
  * disk on every call (so a token Claude Code refreshes is picked up), and is
@@ -65,6 +103,13 @@ export async function fetchClaudeRows(flags: ClaudeRowFlags): Promise<UsageRow[]
     wanted.push({ id: 'claude.sonnet7d', kind: '7d', label: 'Weekly Sonnet', key: 'seven_day_sonnet' })
   if (wanted.length === 0) return []
 
+  const cred = readCred()
+  const token = cred?.claudeAiOauth?.accessToken
+  const expiresAt = cred?.claudeAiOauth?.expiresAt
+  // The plan label lives in the local credentials file, not the usage response,
+  // so every row (incl. error/expired) can carry it: the MAX badge stays put.
+  const planType = cred?.claudeAiOauth?.subscriptionType ?? null
+
   const all = (status: UsageRow['status']): UsageRow[] =>
     wanted.map(
       (w): UsageRow => ({
@@ -74,18 +119,16 @@ export async function fetchClaudeRows(flags: ClaudeRowFlags): Promise<UsageRow[]
         label: w.label,
         percent: null,
         resetsAt: null,
+        planType,
         status,
       }),
     )
 
-  const cred = readCred()
-  const token = cred?.claudeAiOauth?.accessToken
-  const expiresAt = cred?.claudeAiOauth?.expiresAt
   if (!token) return all('nodata')
   if (typeof expiresAt === 'number' && expiresAt <= Date.now()) return all('expired')
 
   try {
-    const { status, json } = await getJson<UsageResponse>(USAGE_URL, {
+    const { status, json } = await getUsageWithRetry({
       Authorization: `Bearer ${token}`,
       'anthropic-beta': 'oauth-2025-04-20',
       'User-Agent': `claude-code/${app.getVersion()}`,
@@ -104,6 +147,7 @@ export async function fetchClaudeRows(flags: ClaudeRowFlags): Promise<UsageRow[]
           label: w.label,
           percent: null,
           resetsAt: null,
+          planType,
           status: 'nodata',
         }
       }
@@ -114,6 +158,7 @@ export async function fetchClaudeRows(flags: ClaudeRowFlags): Promise<UsageRow[]
         label: w.label,
         percent: clampPercent(win.utilization),
         resetsAt: win.resets_at ?? null,
+        planType,
         status: 'ok',
       }
     })

@@ -67,7 +67,13 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
   let claudeTimer: NodeJS.Timeout | null = null
   let codexTimer: NodeJS.Timeout | null = null
   let claudeBusy = false
+  let claudeErrorStreak = 0
   let configDebounce: NodeJS.Timeout | null = null
+
+  // Consecutive all-error Claude polls tolerated before the UI shows "Error".
+  const CLAUDE_ERROR_GRACE = 3
+  const isAllError = (rows: UsageRow[]): boolean =>
+    rows.length > 0 && rows.every((r) => r.status === 'error')
 
   const snapshot = (): UsageSnapshot => ({
     rows: [...claudeRows, ...codexRows, ...customRows],
@@ -84,7 +90,20 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
     if (claudeBusy) return
     claudeBusy = true
     try {
-      claudeRows = await fetchClaudeRows(cfg.rows)
+      const fresh = await fetchClaudeRows(cfg.rows)
+      // A lone transient failure (timeout/5xx/429) used to flip the bars to
+      // "Error" for one cycle. Hold the last-good rows through a short grace
+      // window so only a sustained outage surfaces. Expired/nodata aren't
+      // all-error, so those legitimate states still show immediately.
+      if (isAllError(fresh)) {
+        claudeErrorStreak += 1
+        const holdLastGood =
+          claudeRows.length > 0 && !isAllError(claudeRows) && claudeErrorStreak < CLAUDE_ERROR_GRACE
+        if (!holdLastGood) claudeRows = fresh
+      } else {
+        claudeErrorStreak = 0
+        claudeRows = fresh
+      }
       customRows = computeCustomRows(cfg.custom)
       services = cfg.showStatus ? await fetchServiceStatus() : null
       lastUpdated = Date.now()
