@@ -190,11 +190,21 @@ export function useXterm(
     // isn't interrupted by a stream of no-op SIGWINCH resizes.
     const safeFit = (): void => {
       if (!container || container.clientWidth < 8 || container.clientHeight < 8) return
+
+      // Re-anchor the viewport across the refit. A resize reflow (a window drag
+      // on fractional-DPI Windows nudges rows/cols by a line) makes xterm pull
+      // scrollback in and drag the viewport upward. Remember where the user was,
+      // pinned to the live bottom or N rows up the scrollback, and restore it
+      // after the fit.
+      const buf = term.buffer.active
+      const fromBottom = buf.baseY - buf.viewportY
       try {
         fit.fit()
       } catch {
         return
       }
+      if (fromBottom <= 0) term.scrollToBottom()
+      else term.scrollToLine(Math.max(0, term.buffer.active.baseY - fromBottom))
       if (term.cols === lastCols && term.rows === lastRows) return
       lastCols = term.cols
       lastRows = term.rows
