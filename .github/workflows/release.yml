@@ -23,7 +23,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          # Pinned (not windows-latest): GitHub redirects windows-latest to a
+          # newer image on 2026-06-15, which could silently change the MSVC
+          # toolchain that compiles node-pty. Bump deliberately when ready.
+          - os: windows-2022
             cmd: npm run dist:win
           - os: macos-latest
             cmd: npm run dist:mac
