@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '@/lib/store'
 import { WorkspaceView } from '@/components/workspace/WorkspaceView'
+import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 
 /**
  * Keeps every visited workspace MOUNTED so its terminals (and ptys) survive
@@ -28,6 +29,18 @@ export function WorkspaceHost() {
   useEffect(() => {
     window.snApi.pty.setActive(activePaneKey ? activePaneKey.split(',') : [])
   }, [activePaneKey])
+
+  // Auto-focus the active workspace's last-used console whenever we switch to it
+  // (sidebar click, Alt+1..9, next/prev, quick-flip, programmatic). Without this
+  // focus stays on the sidebar and the first keystrokes go nowhere. Skipped while
+  // a modal/palette is open so we don't yank focus out of its input.
+  const paletteOpen = useAppStore((s) => s.paletteOpen)
+  const settingsOpen = useAppStore((s) => s.settingsOpen)
+  const wizardOpen = useAppStore((s) => s.wizardOpen)
+  useEffect(() => {
+    if (!activeId || paletteOpen || settingsOpen || wizardOpen) return
+    return focusWorkspaceConsole(activeId)
+  }, [activeId, paletteOpen, settingsOpen, wizardOpen])
 
   return (
     <div className="relative h-full w-full">

@@ -148,6 +148,11 @@ export function useXterm(
     const term = new Terminal({
       fontFamily: settings.fontFamily || "'JetBrains Mono', 'Fira Code', ui-monospace, monospace",
       fontSize: opts.fontSize ?? settings.fontSize ?? 13,
+      // Pin weights to faces we actually ship (see main.tsx). xterm's default
+      // bold is 'bold' (700); if that face is missing the renderer fakes it,
+      // producing uneven thick glyphs next to the crisp 400s.
+      fontWeight: 400,
+      fontWeightBold: 700,
       theme: buildXtermTheme(settings.theme, settings.customColors),
       // Blink only while focused (toggled in focusin/out below) so idle panes
       // don't each schedule a repaint twice a second forever.
@@ -219,7 +224,9 @@ export function useXterm(
     // Cursor blinks only while this terminal has focus.
     const onFocusIn = (): void => {
       term.options.cursorBlink = true
-      setFocusedPane(opts.paneId)
+      // A visible (focusable) pane always lives in the active workspace, so we
+      // can tag this pane as that workspace's last-used console for switch focus.
+      setFocusedPane(opts.paneId, useAppStore.getState().activeWorkspaceId ?? undefined)
     }
     const onFocusOut = (): void => {
       term.options.cursorBlink = false
@@ -326,6 +333,22 @@ export function useXterm(
     let disposed = false
     let offData: () => void = () => undefined
     let offExit: () => void = () => undefined
+
+    // Cold start: the first pane can mount before the JetBrains Mono web font
+    // finishes loading, so xterm builds its glyph atlas from the fallback font
+    // (wrong metrics + wrong weights). Once the real faces (incl. bold/italic)
+    // are ready, drop the stale atlas and repaint so every glyph re-rasterizes
+    // at the correct weight.
+    void document.fonts.ready.then(() => {
+      if (disposed) return
+      try {
+        term.clearTextureAtlas()
+        refitRef.current()
+        term.refresh(0, term.rows - 1)
+      } catch {
+        /* terminal torn down between the guard and here */
+      }
+    })
 
     // Backpressure: throttle a chatty *visible* pty when xterm can't drain.
     // Hidden panes are NEVER paused, background agents must keep running, and a

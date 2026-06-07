@@ -17,6 +17,7 @@ import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { UsageBars } from '@/components/sidebar/UsageBars'
 import { iconFor } from '@/lib/icons'
+import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 import { cn } from '@/lib/cn'
 
 interface MenuState {
@@ -173,7 +174,13 @@ export function Sidebar() {
               ) : (
                 <Tooltip label={sidebarCollapsed ? w.name : ''} side="right">
                   <button
-                    onClick={() => setActive(w.id)}
+                    onClick={() => {
+                      setActive(w.id)
+                      // Move focus into the workspace's console right away, even
+                      // when re-clicking the already-active one, so the click
+                      // never leaves focus parked on this sidebar button.
+                      focusWorkspaceConsole(w.id)
+                    }}
                     className={cn(
                       'flex min-w-0 flex-1 items-center gap-2 overflow-hidden px-[11px] py-2 text-left text-sm',
                       active ? 'text-text-primary' : 'text-text-secondary',
