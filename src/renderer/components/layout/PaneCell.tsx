@@ -78,8 +78,9 @@ export function PaneCell({
     setRenaming(false)
   }
 
-  // Drop file(s)/folder(s) onto the console. A single folder in a shell cds
-  // into it; anything else pastes every dropped path (quoted, space-separated).
+  // Drop file(s)/folder(s) onto the console: paste every dropped path (quoted,
+  // space-separated) into the prompt. We never prefix `cd` or send Enter, so the
+  // user keeps control over what to do with the path(s).
   const onDropFolder = (e: DragEvent): void => {
     if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
     e.preventDefault()
@@ -90,10 +91,7 @@ export function PaneCell({
     if (paths.length === 0) return
     const ptyId = getPtyId(pane.id)
     if (!ptyId) return
-    const data =
-      pane.type === 'shell' && paths.length === 1
-        ? `cd "${paths[0]}"\r`
-        : `${paths.map((p) => `"${p}"`).join(' ')} `
+    const data = `${paths.map((p) => `"${p}"`).join(' ')} `
     window.snApi.pty.write({ ptyId, data })
   }
 
