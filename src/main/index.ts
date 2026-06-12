@@ -220,7 +220,7 @@ function bootstrap(): void {
   registerClipboardIpc()
   registerPtyIpc(ptyManager)
   registerWindowIpc(() => mainWindow)
-  registerSystemIpc()
+  registerSystemIpc(() => mainWindow?.webContents ?? null)
   registerUpdateIpc({
     getSender: () => mainWindow?.webContents ?? null,
     quitForUpdate,

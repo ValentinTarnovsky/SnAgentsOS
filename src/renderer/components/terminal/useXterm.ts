@@ -350,6 +350,29 @@ export function useXterm(
       }
     })
 
+    // Glyph-atlas self-heal. System sleep/resume, screen unlock, and GPU
+    // resets can bring WebGL back with trashed texture memory: the layout
+    // survives but every cell draws the wrong glyph from the corrupted atlas
+    // (mojibake panes). Rebuild the atlas and repaint when main signals a
+    // recovery, and as a catch-all whenever the window regains OS focus.
+    let healTimer: ReturnType<typeof setTimeout> | undefined
+    const healAtlas = (): void => {
+      clearTimeout(healTimer)
+      // Right after resume the GPU may still be re-initializing; healing a
+      // beat too early would rebuild the atlas into a half-restored context.
+      healTimer = setTimeout(() => {
+        if (disposed) return
+        try {
+          term.clearTextureAtlas()
+          term.refresh(0, term.rows - 1)
+        } catch {
+          /* renderer mid-teardown */
+        }
+      }, 300)
+    }
+    const offDisplayRecovered = window.snApi.system.onDisplayRecovered(healAtlas)
+    window.addEventListener('focus', healAtlas)
+
     // Backpressure: throttle a chatty *visible* pty when xterm can't drain.
     // Hidden panes are NEVER paused, background agents must keep running, and a
     // display:none xterm may not fire write callbacks, which would otherwise
@@ -440,6 +463,9 @@ export function useXterm(
       cancelAnimationFrame(snapRaf)
       resizeObserver.disconnect()
       releaseRenderer()
+      clearTimeout(healTimer)
+      offDisplayRecovered()
+      window.removeEventListener('focus', healAtlas)
       container.removeEventListener('focusin', onFocusIn)
       container.removeEventListener('focusout', onFocusOut)
       container.removeEventListener('wheel', onWheelSnap)

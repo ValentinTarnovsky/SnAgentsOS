@@ -221,6 +221,12 @@ export interface SnApi {
     getMetrics(): Promise<AppMetrics>
     /** Open a URL in the OS default browser. http/https/mailto only; others are ignored. */
     openExternal(url: string): void
+    /**
+     * Fires after system resume, screen unlock, or a GPU process crash, the
+     * moments where WebGL texture memory can come back corrupted. Terminals
+     * rebuild their glyph atlases on it. Returns an unsubscribe function.
+     */
+    onDisplayRecovered(cb: () => void): () => void
   }
   /** Self-update via GitHub releases. */
   updates: {

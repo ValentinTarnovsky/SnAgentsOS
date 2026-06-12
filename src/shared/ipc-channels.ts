@@ -52,6 +52,10 @@ export const CH = {
   // Open a URL in the OS default browser (terminal links, About page, etc.)
   SHELL_OPEN_EXTERNAL: 'shell:openExternal', // send (url)
 
+  // GPU/display recovery (main -> renderer). Fired after system resume, screen
+  // unlock, or a GPU process crash so terminals rebuild their glyph atlases.
+  SYSTEM_DISPLAY_RECOVERED: 'system:displayRecovered',
+
   // Auto-update (GitHub releases)
   UPDATE_CHECK: 'update:check', // invoke -> UpdateInfo
   UPDATE_INSTALL: 'update:install', // invoke -> { relaunching } (downloads + applies)
