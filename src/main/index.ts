@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from 'fs'
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { AppInfo, AppMetrics } from '@shared/ipc-contract'
 import type { ConfigFile } from '@shared/types'
@@ -213,6 +213,14 @@ function openMainWindow(): void {
 }
 
 function bootstrap(): void {
+  // No native menu on Windows/Linux: it's a frameless app with a custom
+  // in-renderer title bar, so the default menu is invisible anyway, and its
+  // accelerators are footguns in a terminal app. CmdOrCtrl+R (Reload) would
+  // hijack readline reverse-i-search, and CmdOrCtrl+Shift+R (Force Reload)
+  // would tear down every pane's renderer. Removing the menu lets those keys
+  // reach the shell / our remappable redraw action. macOS keeps its menu (its
+  // accelerators use Cmd, so they don't collide with the terminal's Ctrl keys).
+  if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   registerCsp()
   registerAppIpc()
   registerConfigIpc()

@@ -25,6 +25,19 @@ export function createMainWindow(): BrowserWindow {
 
   win.once('ready-to-show', () => win.show())
 
+  // The app ships no native menu (see Menu.setApplicationMenu(null) in main),
+  // which also drops the default DevTools accelerators. Re-add a DevTools
+  // toggle in dev only so debugging still works; production stays locked down.
+  if (process.env.ELECTRON_RENDERER_URL) {
+    win.webContents.on('before-input-event', (_e, input) => {
+      if (input.type !== 'keyDown') return
+      const key = input.key
+      if (key === 'F12' || (input.control && input.shift && (key === 'I' || key === 'i'))) {
+        win.webContents.toggleDevTools()
+      }
+    })
+  }
+
   // Open external links in the OS browser, never in-app. The safe-protocol
   // filter stops stray window.open() calls (e.g. about:blank) from reaching
   // the OS and triggering a "no app for this protocol" prompt.
