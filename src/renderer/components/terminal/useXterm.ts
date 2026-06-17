@@ -11,6 +11,7 @@ import { useAppStore } from '@/lib/store'
 import { buildXtermTheme } from '@/themes'
 import { registerPty, unregisterPty } from '@/lib/ptyRegistry'
 import { registerFocuser, setFocusedPane, unregisterFocuser } from '@/lib/focus'
+import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
 const INFINITE_SCROLLBACK = 100000
@@ -196,6 +197,10 @@ export function useXterm(
   const pendingRef = useRef(0)
   const pausedRef = useRef(false)
   const activeRef = useRef<boolean>(Boolean(opts.isActive))
+  /** A heal was requested while this pane was hidden; applied on next reveal. */
+  const healPendingRef = useRef(false)
+  /** Latest gated heal fn; reused by the reveal effect. */
+  const healRef = useRef<() => void>(() => undefined)
 
   const theme = useAppStore((s) => s.settings.theme)
   const customColors = useAppStore((s) => s.settings.customColors)
@@ -355,6 +360,10 @@ export function useXterm(
     controllerRef.current.clearSearch = () => search.clearDecorations()
     controllerRef.current.focus = () => term.focus()
     registerFocuser(opts.paneId, () => term.focus())
+    // Manual escape hatch for garbled glyphs (pane menu / keybinding): rebuild
+    // the renderer immediately, no debounce, since the user is reacting to
+    // visible corruption right now.
+    registerRedrawer(opts.paneId, () => rendererHandle.reload())
 
     // Terminal copy/paste via the Electron clipboard. Ctrl+C copies the
     // selection (else falls through to ^C / interrupt); Ctrl+V pastes;
@@ -390,8 +399,14 @@ export function useXterm(
       if (key === 'v') {
         e.preventDefault()
         void window.snApi.clipboard.readText().then((text) => {
-          const id = ptyIdRef.current
-          if (id && text) window.snApi.pty.write({ ptyId: id, data: text })
+          // Route through xterm's paste rather than writing the raw clipboard:
+          // it normalizes CRLF/LF to CR and, when the inner app enabled
+          // bracketed-paste mode, wraps the text in paste markers so a
+          // multi-line paste is inserted as one literal block instead of each
+          // line running as a command. The onData handler below forwards it to
+          // the pty, where PtyManager paces the write so ConPTY can't drop a
+          // large paste.
+          if (text) term.paste(text)
         })
         return false
       }
@@ -428,12 +443,27 @@ export function useXterm(
     // regains OS focus (covers a GPU reset that fired no power/metrics event).
     let healTimer: ReturnType<typeof setTimeout> | undefined
     const healAtlas = (): void => {
+      // Only rebuild a pane that's actually on screen and measurable. Reloading
+      // a hidden (display:none / zero-size) pane just churns its GL context and
+      // repaints nothing, and on a single window-restore EVERY mounted pane
+      // would fire at once (each visited workspace stays mounted). Defer instead
+      // and heal once the pane is revealed (see the reveal effect below).
+      if (
+        !activeRef.current ||
+        !container ||
+        container.clientWidth < 8 ||
+        container.clientHeight < 8
+      ) {
+        healPendingRef.current = true
+        return
+      }
       clearTimeout(healTimer)
       // Right after resume the GPU may still be re-initializing; recreating a
       // beat too early would build the fresh context against a half-restored
       // GPU. The debounce also coalesces an alt-tab burst into one reload.
       healTimer = setTimeout(() => {
         if (disposed) return
+        healPendingRef.current = false
         try {
           rendererHandle.reload()
         } catch {
@@ -441,8 +471,15 @@ export function useXterm(
         }
       }, 300)
     }
+    healRef.current = healAtlas
     const offDisplayRecovered = window.snApi.system.onDisplayRecovered(healAtlas)
     window.addEventListener('focus', healAtlas)
+    // A GPU reset can lose then restore the SAME WebGL context while the window
+    // stays focused and visible (so neither focus nor display-recovered fires);
+    // the restored context comes back with a trashed atlas. The event targets
+    // the addon's canvas and does not bubble, so catch it on the container in
+    // the capture phase and rebuild.
+    container.addEventListener('webglcontextrestored', healAtlas, true)
 
     // Backpressure: throttle a chatty *visible* pty when xterm can't drain.
     // Hidden panes are NEVER paused, background agents must keep running, and a
@@ -537,6 +574,7 @@ export function useXterm(
       clearTimeout(healTimer)
       offDisplayRecovered()
       window.removeEventListener('focus', healAtlas)
+      container.removeEventListener('webglcontextrestored', healAtlas, true)
       container.removeEventListener('focusin', onFocusIn)
       container.removeEventListener('focusout', onFocusOut)
       container.removeEventListener('wheel', onWheelSnap)
@@ -547,6 +585,7 @@ export function useXterm(
       if (id) void window.snApi.pty.kill(id)
       unregisterPty(opts.paneId)
       unregisterFocuser(opts.paneId)
+      unregisterRedrawer(opts.paneId)
       ptyIdRef.current = null
       termRef.current = null
       fitRef.current = null
@@ -607,7 +646,13 @@ export function useXterm(
   // Refit when this terminal becomes visible (hidden xterms can't measure).
   useEffect(() => {
     if (!opts.isActive) return
-    const raf = requestAnimationFrame(() => refitRef.current())
+    const raf = requestAnimationFrame(() => {
+      refitRef.current()
+      // Apply a heal that was deferred while this pane was hidden (e.g. a GPU
+      // reset during sleep while another workspace was shown). Now that the box
+      // is measurable, the gated heal will actually rebuild the renderer.
+      if (healPendingRef.current) healRef.current()
+    })
     return () => cancelAnimationFrame(raf)
   }, [opts.isActive])
 

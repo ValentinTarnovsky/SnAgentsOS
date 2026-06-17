@@ -29,6 +29,10 @@ interface Entry {
   setupResolve: (() => void) | null
   /** Pending setup timer (delay or waitFor timeout), cleared on cancel. */
   setupTimer: ReturnType<typeof setTimeout> | null
+  /** Outbound bytes still queued for the pty, drained in paced chunks. */
+  writeQueue: string
+  /** Timer pacing the writeQueue drain (null while idle). */
+  writeTimer: ReturnType<typeof setTimeout> | null
 }
 
 /** Output is coalesced and flushed at ~120Hz for the visible workspace. */
@@ -37,6 +41,14 @@ const FLUSH_MS = 8
 const HIDDEN_FLUSH_MS = 250
 /** Cap on a single IPC payload (split larger bursts across frames). */
 const MAX_CHUNK = 256 * 1024
+/**
+ * Windows ConPTY silently drops bytes when one write exceeds its small input
+ * buffer, so a large paste arrives truncated (only the tail survives). Feed the
+ * pty in capped, paced chunks instead. Normal typing (a write at or under the
+ * cap with nothing queued) skips the queue, so keystroke latency is unchanged.
+ */
+const WRITE_CHUNK = 4 * 1024
+const WRITE_PACE_MS = 4
 /** Replay ring-buffer size per pty. */
 const HISTORY_CAP = 256 * 1024
 /** Recent-output tail kept for setup `waitFor` matching (bounds memory). */
@@ -112,6 +124,8 @@ export class PtyManager {
       onChunk: null,
       setupResolve: null,
       setupTimer: null,
+      writeQueue: '',
+      writeTimer: null,
     }
     this.entries.set(ptyId, entry)
     this.byPane.set(req.paneId, ptyId)
@@ -170,7 +184,50 @@ export class PtyManager {
   }
 
   write(ptyId: string, data: string): void {
-    this.entries.get(ptyId)?.pty.write(data)
+    const entry = this.entries.get(ptyId)
+    if (!entry || !data) return
+    // Fast path: a small write with nothing queued goes straight to the pty so
+    // interactive typing keeps zero added latency.
+    if (entry.writeQueue.length === 0 && data.length <= WRITE_CHUNK) {
+      try {
+        entry.pty.write(data)
+      } catch {
+        /* pty may have exited */
+      }
+      return
+    }
+    // Large input, or input arriving behind a backlog: queue it and drain in
+    // capped, paced chunks. Appending preserves byte order against whatever is
+    // already queued.
+    entry.writeQueue += data
+    this.drainWrites(ptyId)
+  }
+
+  /** Drain an entry's writeQueue to its pty, one capped chunk per pace tick. */
+  private drainWrites(ptyId: string): void {
+    const entry = this.entries.get(ptyId)
+    if (!entry || entry.writeTimer) return
+    const pump = (): void => {
+      const e = this.entries.get(ptyId)
+      if (!e) return
+      e.writeTimer = null
+      if (e.writeQueue.length === 0) return
+      let end = Math.min(WRITE_CHUNK, e.writeQueue.length)
+      // Never split a surrogate pair across two writes: node-pty would encode
+      // each half on its own, corrupting that character.
+      const lead = e.writeQueue.charCodeAt(end - 1)
+      if (end > 1 && end < e.writeQueue.length && lead >= 0xd800 && lead <= 0xdbff) end--
+      const chunk = e.writeQueue.slice(0, end)
+      e.writeQueue = e.writeQueue.slice(end)
+      try {
+        e.pty.write(chunk)
+      } catch {
+        e.writeQueue = '' // pty exited: drop the rest
+        return
+      }
+      if (e.writeQueue.length > 0) e.writeTimer = setTimeout(pump, WRITE_PACE_MS)
+    }
+    pump()
   }
 
   resize(ptyId: string, cols: number, rows: number): void {
@@ -341,6 +398,9 @@ export class PtyManager {
     if (entry.setupTimer) clearTimeout(entry.setupTimer)
     entry.setupTimer = null
     if (entry.timer) clearTimeout(entry.timer)
+    if (entry.writeTimer) clearTimeout(entry.writeTimer)
+    entry.writeTimer = null
+    entry.writeQueue = ''
     if (this.byPane.get(entry.paneId) === ptyId) this.byPane.delete(entry.paneId)
     this.entries.delete(ptyId)
   }

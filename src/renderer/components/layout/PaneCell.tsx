@@ -1,10 +1,21 @@
 import { useState, type DragEvent } from 'react'
-import { Clock, GripVertical, Maximize2, Minimize2, Minus, Pencil, RotateCw, X } from 'lucide-react'
+import {
+  Clock,
+  GripVertical,
+  Maximize2,
+  Minimize2,
+  Minus,
+  Paintbrush,
+  Pencil,
+  RotateCw,
+  X,
+} from 'lucide-react'
 import { motion } from 'framer-motion'
 import type { AgentPreset, Pane, Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { resolveLaunch } from '@/lib/launch'
 import { getPtyId } from '@/lib/ptyRegistry'
+import { redrawPane } from '@/lib/redrawRegistry'
 import { iconFor } from '@/lib/icons'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
@@ -109,6 +120,7 @@ export function PaneCell({
       onClick: () => setScheduling(true),
     },
     { label: t('pane.restart'), icon: RotateCw, onClick: () => restartPane(pane.id) },
+    { label: t('pane.redraw'), icon: Paintbrush, onClick: () => redrawPane(pane.id) },
     { label: t('pane.close'), icon: X, danger: true, separated: true, onClick: onClose },
   ]
 

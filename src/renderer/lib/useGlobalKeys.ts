@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useAppStore } from './store'
 import { eventToAccel, resolveKeymap, type ActionId } from './keymap'
 import { getFocusedPane } from './focus'
+import { redrawPane } from './redrawRegistry'
 
 /** Sidebar display order: favorites first (matches the Sidebar). */
 function displayOrder() {
@@ -38,6 +39,11 @@ function runAction(id: ActionId): void {
       const ws = s.activeWorkspaceId
       const pane = getFocusedPane()
       if (ws && pane) s.toggleMinimize(ws, pane)
+      break
+    }
+    case 'redrawPane': {
+      const pane = getFocusedPane()
+      if (pane) redrawPane(pane)
       break
     }
     case 'workspaceFlip': {

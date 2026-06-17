@@ -12,6 +12,7 @@ export type ActionId =
   | 'toggleSidebar'
   | 'maximizePane'
   | 'minimizePane'
+  | 'redrawPane'
 
 export interface KeyAction {
   id: ActionId
@@ -31,6 +32,7 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'toggleSidebar', labelKey: 'keys.toggleSidebar', defaultAccel: 'Ctrl+Shift+B' },
   { id: 'maximizePane', labelKey: 'keys.maximizePane', defaultAccel: 'Ctrl+Shift+Space' },
   { id: 'minimizePane', labelKey: 'keys.minimizePane', defaultAccel: 'Ctrl+Shift+Down' },
+  { id: 'redrawPane', labelKey: 'keys.redrawPane', defaultAccel: 'Ctrl+Shift+R' },
 ]
 
 /** Merge user overrides over the defaults into a full actionId → accel map. */

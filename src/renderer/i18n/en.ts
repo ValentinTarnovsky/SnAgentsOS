@@ -134,9 +134,11 @@ export const en = {
   'pane.minimize': 'Minimize',
   'keys.maximizePane': 'Maximize console',
   'keys.minimizePane': 'Minimize console',
+  'keys.redrawPane': 'Redraw console',
   'pane.restore': 'Restore',
   'pane.close': 'Close',
   'pane.restart': 'Restart console',
+  'pane.redraw': 'Redraw',
   'pane.schedule': 'Schedule prompt',
 
   // Scheduled prompt (per console)

@@ -137,9 +137,11 @@ export const es: Record<keyof typeof en, string> = {
   'pane.minimize': 'Minimizar',
   'keys.maximizePane': 'Maximizar consola',
   'keys.minimizePane': 'Minimizar consola',
+  'keys.redrawPane': 'Redibujar consola',
   'pane.restore': 'Restaurar',
   'pane.close': 'Cerrar',
   'pane.restart': 'Reiniciar consola',
+  'pane.redraw': 'Redibujar',
   'pane.schedule': 'Programar prompt',
 
   // Prompt programado (por consola)
