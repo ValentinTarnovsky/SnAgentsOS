@@ -47,6 +47,7 @@ const DEFAULT_SETTINGS: Settings = {
   language: 'en',
   scrollback: 5000,
   infiniteScrollback: true,
+  terminalRenderer: 'canvas',
   restoreLastWorkspace: true,
   confirmCloseRunning: true,
   autoCheckUpdates: true,

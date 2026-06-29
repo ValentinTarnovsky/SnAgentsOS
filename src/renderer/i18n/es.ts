@@ -279,6 +279,11 @@ export const es: Record<keyof typeof en, string> = {
   'settings.infiniteScrollback': 'Scrollback infinito',
   'settings.infiniteScrollbackHint':
     'Mantené todo el output como una terminal normal. Desactivalo para limitar las líneas.',
+  'settings.renderer': 'Motor de render de la terminal',
+  'settings.rendererHint':
+    'Canvas (por defecto) no puede mostrar texto corrupto despues de suspender/reanudar o un fallo de GPU. WebGL es mas rapido con muchas consolas activas pero puede corromperse tras un reinicio de GPU; si pasa, usa Redibujar (Ctrl+Shift+R). Se aplica a las consolas nuevas o reiniciadas.',
+  'settings.rendererCanvas': 'Canvas (recomendado, estable)',
+  'settings.rendererWebgl': 'WebGL (mas rapido, puede corromperse tras reinicio de GPU)',
   'settings.language': 'Idioma',
   'settings.languageHint': 'Idioma de la interfaz.',
   'settings.restoreLast': 'Restaurar el último workspace al abrir',

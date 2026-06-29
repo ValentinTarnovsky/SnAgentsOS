@@ -88,6 +88,19 @@ export function TerminalSection() {
         title={t('settings.infiniteScrollback')}
         description={t('settings.infiniteScrollbackHint')}
       />
+
+      <SettingRow title={t('settings.renderer')} description={t('settings.rendererHint')}>
+        <select
+          className={inputCls}
+          value={settings.terminalRenderer}
+          onChange={(e) =>
+            updateSettings({ terminalRenderer: e.target.value as 'canvas' | 'webgl' })
+          }
+        >
+          <option value="canvas">{t('settings.rendererCanvas')}</option>
+          <option value="webgl">{t('settings.rendererWebgl')}</option>
+        </select>
+      </SettingRow>
     </div>
   )
 }

@@ -276,6 +276,11 @@ export const en = {
   'settings.infiniteScrollback': 'Infinite scrollback',
   'settings.infiniteScrollbackHint':
     'Keep all output like a normal terminal. Turn off to cap the number of lines.',
+  'settings.renderer': 'Terminal renderer',
+  'settings.rendererHint':
+    'Canvas (default) cannot show garbled text after sleep/resume or a GPU glitch. WebGL is faster with many busy panes but can garble after a GPU reset; if it does, use Redraw (Ctrl+Shift+R). Applies to newly opened or relaunched consoles.',
+  'settings.rendererCanvas': 'Canvas (recommended, stable)',
+  'settings.rendererWebgl': 'WebGL (faster, may garble after GPU reset)',
   'settings.language': 'Language',
   'settings.languageHint': 'Interface language.',
   'settings.restoreLast': 'Restore the last workspace on open',

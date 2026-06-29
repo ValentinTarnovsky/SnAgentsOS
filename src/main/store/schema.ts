@@ -118,6 +118,10 @@ const settingsSchema = z.object({
   language: z.enum(['en', 'es']).default('en'),
   scrollback: z.number(),
   infiniteScrollback: z.boolean().default(true),
+  // Field-level default is the load-bearing migration: parseConfig runs this
+  // schema over every existing config, so configs that predate the key silently
+  // gain 'canvas' WITHOUT any migrate() logic (migrate only re-stamps version).
+  terminalRenderer: z.enum(['canvas', 'webgl']).default('canvas'),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
   autoCheckUpdates: z.boolean().default(true),

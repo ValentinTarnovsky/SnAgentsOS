@@ -7,7 +7,7 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 4
+export const CONFIG_VERSION = 5
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -238,6 +238,16 @@ export interface Settings {
   scrollback: number
   /** When true, consoles keep effectively unlimited scrollback (like a normal terminal). */
   infiniteScrollback: boolean
+  /**
+   * Terminal draw engine. 'canvas' (default) has no corruptible GPU glyph
+   * atlas, so it cannot show garbled mojibake after a GPU reset (sleep/resume,
+   * screen unlock, Windows TDR, GPU-process crash); its worst case is a blank
+   * glyph that repaints on the next output. 'webgl' is faster for many busy
+   * panes but its context can come back "alive but invalid" with a trashed
+   * atlas and NO event to detect it, which is the historical mojibake bug, so
+   * it is opt-in only.
+   */
+  terminalRenderer: 'canvas' | 'webgl'
   restoreLastWorkspace: boolean
   confirmCloseRunning: boolean
   /** Installed build only: hide to tray on window close instead of quitting. */

@@ -27,33 +27,51 @@ const SEARCH_OPTS = {
 }
 
 /**
- * Browsers cap live WebGL contexts (~16 in Chromium). Past that, Chromium
- * EVICTS the oldest context, so an already-running terminal loses its GPU
- * context and (previously) silently fell to the slow DOM renderer, which
- * garbles and duplicates lines while an AI CLI is redrawing. We avoid that two
- * ways: (a) cap how many panes use WebGL so eviction never triggers, and (b) on
- * a context loss fall back to the 2D Canvas renderer, never the DOM renderer.
+ * Renderer policy. The recurring "garbled glyphs / mojibake" bug is caused by
+ * xterm's WebGL renderer: a GPU reset (sleep/resume, screen unlock, Windows
+ * TDR, GPU-process crash) can hand its WebGL2 context back ALIVE BUT INVALID,
+ * with the glyph texture atlas trashed, while firing NO webglcontextlost event,
+ * raising no GL error, and reporting gl.isContextLost()===false. There is no
+ * reliable signal to react to, so every event-driven heal eventually misses a
+ * path and the panes stay garbled (the bug recurred across v1.4.5-v1.4.7, each
+ * release just bolting on one more trigger).
  *
- * Returns a handle whose reload() rebuilds the renderer from scratch. A GPU
- * reset (sleep/resume, screen unlock, Windows TDR) can hand WebGL back a context
- * that is alive but invalid WITHOUT firing webglcontextlost: the glyph atlas is
- * trashed and clearTextureAtlas() just re-uploads into the zombie context, so
- * the mojibake persists. Disposing the addon and mounting a fresh one gives a
- * brand-new canvas + GL context + textures, which is the real cure (see
- * https://github.com/xtermjs/xterm.js/blob/master/addons/addon-webgl/README.md).
+ * The real cure is to stop keeping a corruptible GPU atlas at all: the 2D
+ * Canvas renderer is now the DEFAULT. It holds no app-owned WebGL context and
+ * no sampled GPU texture, so a backing-store loss is deterministic (Chromium
+ * re-creates it blank) and the worst case is a blank glyph that repaints on the
+ * next output, never a wrong (garbled) glyph. WebGL stays available as an opt-in
+ * (settings.terminalRenderer === 'webgl') for users who want its throughput and
+ * accept the reset risk; for that path we keep the recreate-on-event heal and
+ * the manual Ctrl+Shift+R redraw as defense in depth.
+ *
+ * Browsers also cap live WebGL contexts (~16 in Chromium) and evict the oldest,
+ * which silently drops a running terminal to the DOM renderer (garbles +
+ * duplicates lines). The opt-in WebGL path therefore still caps itself at
+ * MAX_WEBGL and, on a true onContextLoss, degrades to Canvas (never DOM).
+ *
+ * loadRenderer returns a handle: heal() applies the cheapest correct repair for
+ * the live renderer (clearTextureAtlas + refresh for Canvas, full recreate for
+ * WebGL's zombie context); reload() always fully rebuilds (the manual escape
+ * hatch); dispose() frees any WebGL slot. See
+ * https://github.com/xtermjs/xterm.js/blob/master/addons/addon-webgl/README.md
  */
 let webglContexts = 0
 const MAX_WEBGL = 8
 
 interface RendererHandle {
-  /** Dispose the current addon and mount a fresh one, then repaint. */
+  /** Renderer-appropriate repair: cheap atlas refresh for Canvas, full recreate for WebGL. */
+  heal: () => void
+  /** Dispose the current addon and mount a fresh one, then repaint (manual redraw). */
   reload: () => void
   /** Teardown for unmount: dispose the current addon and free any WebGL slot. */
   dispose: () => void
 }
 
-function loadRenderer(term: Terminal): RendererHandle {
+function loadRenderer(term: Terminal, getRenderer: () => 'canvas' | 'webgl'): RendererHandle {
   let current: WebglAddon | CanvasAddon | null = null
+  // What `current` actually is, so heal() can pick the right repair.
+  let currentKind: 'webgl' | 'canvas' | 'dom' = 'dom'
   // True only while `current` is a WebglAddon counted in webglContexts.
   let holdsSlot = false
   let handleDisposed = false
@@ -72,6 +90,7 @@ function loadRenderer(term: Terminal): RendererHandle {
   const teardownCurrent = (): void => {
     const addon = current
     current = null
+    currentKind = 'dom'
     releaseSlot()
     if (addon) {
       try {
@@ -82,59 +101,100 @@ function loadRenderer(term: Terminal): RendererHandle {
     }
   }
 
-  // Mount the best available renderer: WebGL if a slot is free, else Canvas,
-  // else leave xterm's default DOM renderer.
-  const mount = (): void => {
-    if (webglContexts < MAX_WEBGL) {
-      try {
-        const webgl = new WebglAddon()
-        webglContexts++
-        holdsSlot = true
-        current = webgl
-        // A TRUE context loss degrades permanently to Canvas (recreating WebGL
-        // here could loop recreate -> lose). Route through teardownCurrent so a
-        // later reload() can't double-dispose this addon or miscount the slot;
-        // bail if a reload()/dispose() already replaced us.
-        webgl.onContextLoss(() => {
-          if (handleDisposed || current !== webgl) return
-          teardownCurrent()
-          try {
-            const canvas = new CanvasAddon()
-            current = canvas
-            term.loadAddon(canvas)
-          } catch {
-            /* fall back to the default DOM renderer */
-          }
-        })
-        term.loadAddon(webgl)
-        return
-      } catch {
-        // WebGL2 unsupported / construction failed: undo the optimistic bump.
-        releaseSlot()
-      }
+  // Mount the WebGL renderer if a context slot is free. Returns true on success.
+  const mountWebgl = (): boolean => {
+    if (webglContexts >= MAX_WEBGL) return false
+    try {
+      const webgl = new WebglAddon()
+      webglContexts++
+      holdsSlot = true
+      current = webgl
+      currentKind = 'webgl'
+      // A TRUE context loss degrades permanently to Canvas (recreating WebGL
+      // here could loop recreate -> lose). Route through teardownCurrent so a
+      // later reload() can't double-dispose this addon or miscount the slot;
+      // bail if a reload()/dispose() already replaced us.
+      webgl.onContextLoss(() => {
+        if (handleDisposed || current !== webgl) return
+        teardownCurrent()
+        mountCanvas()
+      })
+      term.loadAddon(webgl)
+      return true
+    } catch {
+      // WebGL2 unsupported / construction failed: undo the optimistic bump.
+      releaseSlot()
+      return false
     }
+  }
+
+  // Mount the 2D Canvas renderer. Returns true on success.
+  const mountCanvas = (): boolean => {
     try {
       const canvas = new CanvasAddon()
       current = canvas
+      currentKind = 'canvas'
       term.loadAddon(canvas)
+      return true
     } catch {
-      current = null /* default DOM renderer */
+      return false
+    }
+  }
+
+  // Mount the renderer for the current preference. Canvas is the default; WebGL
+  // only when explicitly opted in. If the preferred engine fails to construct,
+  // try the other before falling back to xterm's DOM renderer (the known
+  // glyph-garbling path), which we therefore only reach as a last resort and
+  // announce so it is never a silent downgrade.
+  const mount = (): void => {
+    const pref = getRenderer()
+    if (pref === 'webgl') {
+      if (mountWebgl()) return
+    }
+    if (mountCanvas()) return
+    if (pref !== 'webgl' && mountWebgl()) return
+    current = null
+    currentKind = 'dom'
+    console.warn(
+      '[snmulticc] no GPU/2D renderer available; using xterm DOM renderer (known to garble under heavy redraw)',
+    )
+  }
+
+  // Full rebuild: fresh canvas + (for WebGL) fresh GL context + atlas, repainted
+  // from the intact buffer. Re-reads the preference, so toggling the setting and
+  // then triggering a rebuild switches engine.
+  const rebuild = (): void => {
+    teardownCurrent()
+    mount()
+    try {
+      term.refresh(0, term.rows - 1)
+    } catch {
+      /* renderer mid-teardown */
     }
   }
 
   mount()
 
   return {
-    reload: (): void => {
+    heal: (): void => {
       if (handleDisposed) return
-      teardownCurrent()
-      mount()
-      // Buffer is intact; repaint it through the fresh context.
+      // A WebGL zombie context must be fully recreated; a Canvas pane only needs
+      // its atlas dropped and a repaint (a full addon teardown on every focus
+      // would blank-flash every visible pane on each alt-tab for no reason).
+      if (currentKind === 'webgl') {
+        rebuild()
+        return
+      }
       try {
+        term.clearTextureAtlas()
         term.refresh(0, term.rows - 1)
       } catch {
         /* renderer mid-teardown */
       }
+    },
+    reload: (): void => {
+      if (handleDisposed) return
+      rebuild()
     },
     dispose: (): void => {
       if (handleDisposed) return
@@ -255,7 +315,10 @@ export function useXterm(
     term.loadAddon(new WebLinksAddon((_event, uri) => window.snApi.system.openExternal(uri)))
     term.loadAddon(search)
     term.open(container)
-    const rendererHandle = loadRenderer(term)
+    // Reading the preference inside the closure means mount() AND reload() always
+    // re-read the CURRENT setting, so toggling the renderer then redrawing a pane
+    // actually switches engine.
+    const rendererHandle = loadRenderer(term, () => useAppStore.getState().settings.terminalRenderer)
 
     // Track the last geometry pushed to the pty so we never spam pty.resize and
     // never settle on a bad fit. -1 forces the first real fit to propagate.
@@ -433,14 +496,16 @@ export function useXterm(
       }
     })
 
-    // Glyph-atlas self-heal. System sleep/resume, screen unlock, and GPU
-    // resets can bring WebGL back with a context that is alive but invalid
-    // (trashed texture memory) without firing webglcontextlost: the layout
-    // survives but every cell draws the wrong glyph (mojibake panes). Just
-    // clearing the atlas re-uploads into that zombie context and the corruption
-    // persists, so we fully recreate the renderer (fresh canvas + GL context)
-    // when main signals a recovery, and as a catch-all whenever the window
-    // regains OS focus (covers a GPU reset that fired no power/metrics event).
+    // Renderer self-heal on a display recovery. With Canvas as the default this
+    // is cheap insurance: rendererHandle.heal() drops the atlas and repaints,
+    // which cures Canvas's one residual (a blank/missing glyph after a
+    // backing-store reset) without a full addon teardown. For an opt-in WebGL
+    // pane, heal() instead fully recreates the renderer (fresh canvas + GL
+    // context), because a GPU reset can hand WebGL back a context that is alive
+    // but invalid (trashed atlas) without firing webglcontextlost, and clearing
+    // the atlas alone just re-uploads into that zombie context. We heal when
+    // main signals a recovery, and as a catch-all whenever the window regains
+    // OS focus (covers a GPU reset that fired no power/metrics event).
     let healTimer: ReturnType<typeof setTimeout> | undefined
     const healAtlas = (): void => {
       // Only rebuild a pane that's actually on screen and measurable. Reloading
@@ -465,7 +530,7 @@ export function useXterm(
         if (disposed) return
         healPendingRef.current = false
         try {
-          rendererHandle.reload()
+          rendererHandle.heal()
         } catch {
           /* renderer mid-teardown */
         }
@@ -478,8 +543,13 @@ export function useXterm(
     // stays focused and visible (so neither focus nor display-recovered fires);
     // the restored context comes back with a trashed atlas. The event targets
     // the addon's canvas and does not bubble, so catch it on the container in
-    // the capture phase and rebuild.
+    // the capture phase and rebuild. (Only the opt-in WebGL path emits this.)
     container.addEventListener('webglcontextrestored', healAtlas, true)
+    // Canvas equivalent: a 2D canvas whose backing store was reset fires
+    // 'contextrestored' (not 'webglcontextrestored'). Catch it the same way so a
+    // static Canvas pane that lost its backing during sleep repaints at once
+    // instead of waiting for the next output/scroll.
+    container.addEventListener('contextrestored', healAtlas, true)
 
     // Backpressure: throttle a chatty *visible* pty when xterm can't drain.
     // Hidden panes are NEVER paused, background agents must keep running, and a
@@ -575,6 +645,7 @@ export function useXterm(
       offDisplayRecovered()
       window.removeEventListener('focus', healAtlas)
       container.removeEventListener('webglcontextrestored', healAtlas, true)
+      container.removeEventListener('contextrestored', healAtlas, true)
       container.removeEventListener('focusin', onFocusIn)
       container.removeEventListener('focusout', onFocusOut)
       container.removeEventListener('wheel', onWheelSnap)
