@@ -15,6 +15,7 @@ import { UpdateModal } from '@/components/updates/UpdateModal'
 import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { CommandPalette } from '@/components/ui/CommandPalette'
+import { GlobalPromptDialog } from '@/components/workspace/GlobalPromptDialog'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -122,6 +123,7 @@ function AppBody() {
       <UpdateModal />
       <NewWorkspaceWizard />
       <CommandPalette />
+      <GlobalPromptDialog />
     </div>
   )
 }

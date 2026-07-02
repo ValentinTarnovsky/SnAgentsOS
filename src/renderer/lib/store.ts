@@ -107,6 +107,7 @@ export interface AppState {
   settingsOpen: boolean
   wizardOpen: boolean
   paletteOpen: boolean
+  globalPromptOpen: boolean
   /** workspaceId -> maximized paneId (transient; never persisted). */
   maximized: Record<string, string | null>
   /** workspaceId -> minimized paneIds (transient; never persisted). */
@@ -156,6 +157,7 @@ export interface AppState {
   setSettingsOpen: (open: boolean) => void
   setWizardOpen: (open: boolean) => void
   setPaletteOpen: (open: boolean) => void
+  setGlobalPromptOpen: (open: boolean) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -170,6 +172,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsOpen: false,
   wizardOpen: false,
   paletteOpen: false,
+  globalPromptOpen: false,
   maximized: {},
   minimized: {},
   paneEpoch: {},
@@ -497,4 +500,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setWizardOpen: (open) => set({ wizardOpen: open }),
 
   setPaletteOpen: (open) => set({ paletteOpen: open }),
+
+  setGlobalPromptOpen: (open) => set({ globalPromptOpen: open }),
 }))

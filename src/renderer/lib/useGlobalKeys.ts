@@ -29,6 +29,9 @@ function runAction(id: ActionId): void {
     case 'newConsole':
       if (s.activeWorkspaceId) s.addPane(s.activeWorkspaceId)
       break
+    case 'globalPrompt':
+      if (s.activeWorkspaceId) s.setGlobalPromptOpen(true)
+      break
     case 'maximizePane': {
       const ws = s.activeWorkspaceId
       const pane = getFocusedPane()

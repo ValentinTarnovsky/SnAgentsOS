@@ -8,6 +8,7 @@ export type ActionId =
   | 'workspacePrev'
   | 'newWorkspace'
   | 'newConsole'
+  | 'globalPrompt'
   | 'openSettings'
   | 'toggleSidebar'
   | 'maximizePane'
@@ -28,6 +29,7 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'workspacePrev', labelKey: 'keys.workspacePrev', defaultAccel: 'Ctrl+PageUp' },
   { id: 'newWorkspace', labelKey: 'keys.newWorkspace', defaultAccel: 'Ctrl+Shift+N' },
   { id: 'newConsole', labelKey: 'keys.newConsole', defaultAccel: 'Ctrl+Shift+T' },
+  { id: 'globalPrompt', labelKey: 'keys.globalPrompt', defaultAccel: 'Ctrl+Shift+G' },
   { id: 'openSettings', labelKey: 'keys.openSettings', defaultAccel: 'Ctrl+,' },
   { id: 'toggleSidebar', labelKey: 'keys.toggleSidebar', defaultAccel: 'Ctrl+Shift+B' },
   { id: 'maximizePane', labelKey: 'keys.maximizePane', defaultAccel: 'Ctrl+Shift+Space' },

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { FileText, Palette, PanelLeft, Plus, Search, Settings } from 'lucide-react'
+import { FileText, Megaphone, Palette, PanelLeft, Plus, Search, Settings } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { insertToConsole } from '@/lib/insertToConsole'
 import { useT } from '@/i18n'
@@ -41,6 +41,7 @@ export function CommandPalette() {
   const toggleSidebar = useAppStore((s) => s.toggleSidebar)
   const addPane = useAppStore((s) => s.addPane)
   const updateSettings = useAppStore((s) => s.updateSettings)
+  const setGlobalPromptOpen = useAppStore((s) => s.setGlobalPromptOpen)
 
   const [query, setQuery] = useState('')
   const [idx, setIdx] = useState(0)
@@ -55,6 +56,13 @@ export function CommandPalette() {
       cmds.push({ id: `ws-${w.id}`, label: w.name, hint: t('palette.workspace'), icon: iconFor(w.panes[0]?.icon), run: () => setActive(w.id) })
     }
     if (activeId) {
+      cmds.push({
+        id: 'global-prompt',
+        label: t('globalPrompt.title'),
+        hint: t('palette.console'),
+        icon: Megaphone,
+        run: () => setGlobalPromptOpen(true),
+      })
       for (const p of presets) {
         cmds.push({
           id: `pane-${p.id}`,
@@ -78,7 +86,7 @@ export function CommandPalette() {
       cmds.push({ id: `theme-${th.name}`, label: `${t('palette.theme')}: ${th.label}`, hint: t('palette.appearance'), icon: Palette, run: () => updateSettings({ theme: th.name }) })
     }
     return cmds
-  }, [workspaces, presets, snippets, activeId, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings])
+  }, [workspaces, presets, snippets, activeId, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()

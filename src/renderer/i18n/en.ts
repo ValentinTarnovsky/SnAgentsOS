@@ -86,6 +86,7 @@ export const en = {
   'keys.workspacePrev': 'Previous workspace',
   'keys.newWorkspace': 'New workspace',
   'keys.newConsole': 'New console (active workspace)',
+  'keys.globalPrompt': 'Global prompt (active workspace)',
   'keys.openSettings': 'Open settings',
   'keys.toggleSidebar': 'Toggle sidebar',
 
@@ -155,6 +156,15 @@ export const en = {
   'schedule.remove': 'Cancel schedule',
   'schedule.clear': 'Clear',
   'schedule.cancel': 'Close',
+
+  // Global prompt (broadcast to a workspace)
+  'globalPrompt.button': 'Global prompt',
+  'globalPrompt.title': 'Global prompt',
+  'globalPrompt.placeholder': 'Text to insert into every active console…',
+  'globalPrompt.target': 'Inserts into {count} active console(s)',
+  'globalPrompt.empty': 'No active consoles in this workspace',
+  'globalPrompt.hint': 'Inserted without Enter - review and run it in each console.',
+  'globalPrompt.send': 'Send to all',
 
   // In-pane search
   'search.placeholder': 'Find…',

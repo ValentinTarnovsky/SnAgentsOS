@@ -88,6 +88,7 @@ export const es: Record<keyof typeof en, string> = {
   'keys.workspacePrev': 'Workspace anterior',
   'keys.newWorkspace': 'Nuevo workspace',
   'keys.newConsole': 'Nueva consola (workspace activo)',
+  'keys.globalPrompt': 'Prompt global (workspace activo)',
   'keys.openSettings': 'Abrir ajustes',
   'keys.toggleSidebar': 'Mostrar/ocultar barra lateral',
 
@@ -158,6 +159,15 @@ export const es: Record<keyof typeof en, string> = {
   'schedule.remove': 'Cancelar programación',
   'schedule.clear': 'Quitar',
   'schedule.cancel': 'Cerrar',
+
+  // Prompt global (broadcast a un workspace)
+  'globalPrompt.button': 'Prompt global',
+  'globalPrompt.title': 'Prompt global',
+  'globalPrompt.placeholder': 'Texto para insertar en cada consola activa…',
+  'globalPrompt.target': 'Se inserta en {count} consolas activas',
+  'globalPrompt.empty': 'No hay consolas activas en este workspace',
+  'globalPrompt.hint': 'Se inserta sin Enter: revisá y ejecutá en cada consola.',
+  'globalPrompt.send': 'Enviar a todas',
 
   // Búsqueda en consola
   'search.placeholder': 'Buscar…',
