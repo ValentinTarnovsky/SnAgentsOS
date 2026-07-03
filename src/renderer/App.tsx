@@ -3,6 +3,9 @@ import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useUpdaterStore, initUpdaterEvents } from '@/lib/updater'
 import { initUsageEvents, syncUsageConfig } from '@/lib/usageStore'
+import { initRemoteEvents, syncRemoteConfig } from '@/lib/remoteStore'
+import { initRemoteCommands } from '@/lib/remoteCommands'
+import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
 import { startPersistence } from '@/lib/persist'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
 import { usePaneScheduler } from '@/lib/usePaneScheduler'
@@ -12,6 +15,8 @@ import { Sidebar } from '@/components/sidebar/Sidebar'
 import { WorkspaceHost } from '@/components/layout/WorkspaceHost'
 import { SettingsModal } from '@/components/settings/SettingsModal'
 import { UpdateModal } from '@/components/updates/UpdateModal'
+import { RemoteQrModal } from '@/components/remote/RemoteQrModal'
+import { RemotePairingPrompt } from '@/components/remote/RemotePairingPrompt'
 import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { CommandPalette } from '@/components/ui/CommandPalette'
@@ -26,6 +31,7 @@ export function App() {
   const customColors = useAppStore((s) => s.settings.customColors)
   const language = useAppStore((s) => s.settings.language)
   const usage = useAppStore((s) => s.settings.usage)
+  const remote = useAppStore((s) => s.settings.remote)
 
   // Load persisted config once, then start the debounced persistence writer.
   useEffect(() => {
@@ -51,10 +57,25 @@ export function App() {
   // Keep the usage-snapshot stream wired for the whole app lifetime.
   useEffect(() => initUsageEvents(), [])
 
+  // Keep the remote server-status stream + control-command handler wired.
+  useEffect(() => initRemoteEvents(), [])
+  useEffect(() => initRemoteCommands(), [])
+
   // Push usage settings to main (reschedules its pollers) whenever they change.
   useEffect(() => {
     if (hydrated) syncUsageConfig(usage)
   }, [hydrated, usage])
+
+  // Push remote settings to main (starts/stops/restarts the server) on change.
+  useEffect(() => {
+    if (hydrated) syncRemoteConfig(remote)
+  }, [hydrated, remote])
+
+  // Mirror desktop state to phones once config is loaded (debounced snapshots).
+  useEffect(() => {
+    if (!hydrated) return
+    return startRemoteSnapshotSync()
+  }, [hydrated])
 
   // After config loads, check GitHub for a newer release (if enabled) and, when
   // one is found, open the "update available" prompt. Slightly delayed so it
@@ -121,6 +142,8 @@ function AppBody() {
       </main>
       <SettingsModal />
       <UpdateModal />
+      <RemoteQrModal />
+      <RemotePairingPrompt />
       <NewWorkspaceWizard />
       <CommandPalette />
       <GlobalPromptDialog />

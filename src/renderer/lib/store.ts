@@ -109,6 +109,8 @@ export interface AppState {
   connections: ConnectionProfile[]
   settings: Settings
   settingsOpen: boolean
+  /** Deep-link target for the settings modal: the category to open on. */
+  settingsCategory: string | null
   wizardOpen: boolean
   paletteOpen: boolean
   globalPromptOpen: boolean
@@ -159,6 +161,8 @@ export interface AppState {
 
   updateSettings: (patch: Partial<Settings>) => void
   setSettingsOpen: (open: boolean) => void
+  /** Open settings, optionally deep-linking to a category (e.g. 'remote'). */
+  openSettings: (category?: string) => void
   setWizardOpen: (open: boolean) => void
   setPaletteOpen: (open: boolean) => void
   setGlobalPromptOpen: (open: boolean) => void
@@ -174,6 +178,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   connections: [],
   settings: DEFAULT_SETTINGS,
   settingsOpen: false,
+  settingsCategory: null,
   wizardOpen: false,
   paletteOpen: false,
   globalPromptOpen: false,
@@ -500,6 +505,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
 
   setSettingsOpen: (open) => set({ settingsOpen: open }),
+
+  openSettings: (category) => set({ settingsOpen: true, settingsCategory: category ?? null }),
 
   setWizardOpen: (open) => set({ wizardOpen: open }),
 

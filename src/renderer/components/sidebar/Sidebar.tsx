@@ -16,6 +16,7 @@ import { Tooltip } from '@/components/ui/Tooltip'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { UsageBars } from '@/components/sidebar/UsageBars'
+import { RemoteIndicator } from '@/components/sidebar/RemoteIndicator'
 import { iconFor } from '@/lib/icons'
 import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 import { cn } from '@/lib/cn'
@@ -229,6 +230,7 @@ export function Sidebar() {
         })}
       </nav>
 
+      <RemoteIndicator />
       <UsageBars />
 
       <div className="shrink-0 border-t border-border p-2">

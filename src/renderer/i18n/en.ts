@@ -211,6 +211,7 @@ export const en = {
   'settings.cat.keys': 'Keyboard',
   'settings.cat.usage': 'Performance',
   'settings.cat.aiusage': 'AI Usage',
+  'settings.cat.remote': 'Remote control',
   'settings.cat.about': 'About',
   'usage.hint': 'Live resource usage of SnMultiCC on your PC.',
   'usage.ram': 'Memory',
@@ -321,6 +322,52 @@ export const en = {
   'preset.defaultCwdHint': 'uses the workspace cwd',
   'preset.color': 'Color',
   'preset.icon': 'Icon',
+
+  // Remote control (phone access over LAN / Tailscale)
+  'remote.hint':
+    'Control this app from your phone browser over your local network or Tailscale. Scan a QR to pair once, then approve the device here.',
+  'remote.enable': 'Enable remote control',
+  'remote.enableHint': 'Runs a small server on this PC so paired phones can connect.',
+  'remote.port': 'Port',
+  'remote.portHint': 'TCP port between 1024 and 65535. Changing it means re-pairing devices.',
+  'remote.state.stopped': 'Stopped',
+  'remote.state.starting': 'Starting…',
+  'remote.state.running': 'Running',
+  'remote.state.error': 'Error',
+  'remote.showQr': 'Show QR',
+  'remote.copy': 'Copy address',
+  'remote.kind.lan': 'LAN',
+  'remote.kind.tailscale': 'Tailscale',
+  'remote.kind.other': 'Other',
+  'remote.devices': 'Paired devices',
+  'remote.noDevices': 'No devices paired yet.',
+  'remote.connected': 'Connected',
+  'remote.revoke': 'Revoke',
+  'remote.revokeTitle': 'Revoke device?',
+  'remote.revokeMessage': '“{name}” will be disconnected immediately and must pair again to reconnect.',
+  'remote.firewallHint':
+    'Windows may ask to allow SnMultiCC on private networks the first time - allow it so phones can reach this PC.',
+  'remote.portableHint': 'On the portable build, closing the app stops the server.',
+  'remote.securityHint':
+    'Traffic is not encrypted with TLS; use it on trusted Wi-Fi (WPA2) or over Tailscale.',
+  'remote.indicator.connected': '{count} connected',
+
+  // Remote pairing QR modal
+  'remote.qr.title': 'Pair a phone',
+  'remote.qr.scanHint': 'Scan this with your phone camera.',
+  'remote.qr.code': 'Code',
+  'remote.qr.expiresIn': 'Expires in {seconds}s',
+  'remote.qr.expired': 'Expired',
+  'remote.qr.regenerate': 'Regenerate',
+  'remote.qr.tailscaleHint':
+    'The Tailscale address stays the same across networks - prefer it to avoid re-pairing.',
+
+  // Remote pairing approval prompt
+  'remote.pairing.title': 'Device wants to connect',
+  'remote.pairing.wants': '“{name}” wants to control SnMultiCC.',
+  'remote.pairing.expiresIn': 'Expires in {seconds}s',
+  'remote.pairing.allow': 'Allow',
+  'remote.pairing.deny': 'Deny',
 
   // Title bar / tray
   'titlebar.minimize': 'Minimize',

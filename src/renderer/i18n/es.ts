@@ -214,6 +214,7 @@ export const es: Record<keyof typeof en, string> = {
   'settings.cat.keys': 'Teclado',
   'settings.cat.usage': 'Rendimiento',
   'settings.cat.aiusage': 'Uso de IA',
+  'settings.cat.remote': 'Control remoto',
   'settings.cat.about': 'Acerca de',
   'usage.hint': 'Uso de recursos de SnMultiCC en tu PC, en tiempo real.',
   'usage.ram': 'Memoria',
@@ -324,6 +325,52 @@ export const es: Record<keyof typeof en, string> = {
   'preset.defaultCwdHint': 'usa el cwd del workspace',
   'preset.color': 'Color',
   'preset.icon': 'Ícono',
+
+  // Remote control (phone access over LAN / Tailscale)
+  'remote.hint':
+    'Controlá esta app desde el navegador del celular por tu red local o Tailscale. Escaneá un QR para vincular una vez y aprobá el dispositivo acá.',
+  'remote.enable': 'Activar control remoto',
+  'remote.enableHint': 'Levanta un servidor chico en esta PC para que los celulares vinculados se conecten.',
+  'remote.port': 'Puerto',
+  'remote.portHint': 'Puerto TCP entre 1024 y 65535. Si lo cambiás, hay que volver a vincular los dispositivos.',
+  'remote.state.stopped': 'Detenido',
+  'remote.state.starting': 'Iniciando…',
+  'remote.state.running': 'Activo',
+  'remote.state.error': 'Error',
+  'remote.showQr': 'Mostrar QR',
+  'remote.copy': 'Copiar dirección',
+  'remote.kind.lan': 'LAN',
+  'remote.kind.tailscale': 'Tailscale',
+  'remote.kind.other': 'Otra',
+  'remote.devices': 'Dispositivos vinculados',
+  'remote.noDevices': 'Todavía no hay dispositivos vinculados.',
+  'remote.connected': 'Conectado',
+  'remote.revoke': 'Revocar',
+  'remote.revokeTitle': '¿Revocar dispositivo?',
+  'remote.revokeMessage': '“{name}” se desconectará al instante y tendrá que volver a vincularse para reconectar.',
+  'remote.firewallHint':
+    'Windows puede pedir permitir SnMultiCC en redes privadas la primera vez; permitilo para que los celulares lleguen a esta PC.',
+  'remote.portableHint': 'En la versión portable, cerrar la app detiene el servidor.',
+  'remote.securityHint':
+    'El tráfico no va cifrado con TLS; usalo en Wi-Fi de confianza (WPA2) o por Tailscale.',
+  'remote.indicator.connected': '{count} conectado(s)',
+
+  // Remote pairing QR modal
+  'remote.qr.title': 'Vincular un celular',
+  'remote.qr.scanHint': 'Escaneá esto con la cámara del celular.',
+  'remote.qr.code': 'Código',
+  'remote.qr.expiresIn': 'Vence en {seconds}s',
+  'remote.qr.expired': 'Vencido',
+  'remote.qr.regenerate': 'Regenerar',
+  'remote.qr.tailscaleHint':
+    'La dirección de Tailscale no cambia entre redes; conviene usarla para no volver a vincular.',
+
+  // Remote pairing approval prompt
+  'remote.pairing.title': 'Un dispositivo quiere conectarse',
+  'remote.pairing.wants': '“{name}” quiere controlar SnMultiCC.',
+  'remote.pairing.expiresIn': 'Vence en {seconds}s',
+  'remote.pairing.allow': 'Permitir',
+  'remote.pairing.deny': 'Denegar',
 
   // Title bar / tray
   'titlebar.minimize': 'Minimizar',

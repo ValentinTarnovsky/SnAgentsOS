@@ -1,0 +1,134 @@
+@import 'tailwindcss';
+
+/*
+ * Same brand token names as the desktop renderer (globals.css) so utility
+ * classes read identically: bg-bg-primary, text-text-secondary, border-border,
+ * bg-accent-violet, etc. The values below are only the cold-start defaults;
+ * applyRemoteTheme() overwrites each --color-* var at runtime with the resolved
+ * tokens pushed from the desktop, so the phone follows the desktop theme live.
+ */
+@theme {
+  --color-bg-primary: #0b0f19;
+  --color-bg-secondary: #0f172a;
+  --color-card: #111827;
+  --color-border: #1f2937;
+
+  --color-text-primary: #e5e7eb;
+  --color-text-secondary: #9ca3af;
+
+  --color-accent-violet: #6366f1;
+  --color-accent-purple: #8b5cf6;
+  --color-accent-blue: #60a5fa;
+
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+
+  --radius-btn: 10px;
+  --radius-card: 12px;
+  --radius-modal: 16px;
+}
+
+:root {
+  color-scheme: dark;
+  /* Live viewport height (soft-keyboard aware); viewport.ts keeps it in sync. */
+  --vvh: 100dvh;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  /* Kill iOS rubber-band / pull-to-refresh at the document level. */
+  overscroll-behavior: none;
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  /* Disable the iOS double-tap-to-zoom + text-size adjust jumpiness. */
+  -webkit-text-size-adjust: 100%;
+  touch-action: manipulation;
+}
+
+/* Highlight-on-tap flash is distracting on a full-screen terminal shell. */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The xterm viewport is the one place vertical touch-scroll is allowed. */
+.xterm .xterm-viewport {
+  overscroll-behavior: contain;
+}
+
+/* Thin scrollbars matching the desktop feel. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--color-text-secondary) 24%, transparent) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--color-text-secondary) 24%, transparent);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fade-in 0.15s ease-out;
+}
+
+.sheet-up {
+  animation: sheet-up 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin,
+  .fade-in,
+  .sheet-up {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

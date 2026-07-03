@@ -1,5 +1,5 @@
-import { useMemo, useState, type ComponentType } from 'react'
-import { Activity, Bot, Database, DownloadCloud, FileText, Gauge, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, TerminalSquare, type LucideIcon } from 'lucide-react'
+import { useEffect, useMemo, useState, type ComponentType } from 'react'
+import { Activity, Bot, Database, DownloadCloud, FileText, Gauge, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type MessageKey, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -15,6 +15,7 @@ import { KeymapSection } from './sections/KeymapSection'
 import { DataSection } from './sections/DataSection'
 import { UsageSection } from './sections/UsageSection'
 import { AiUsageSection } from './sections/AiUsageSection'
+import { RemoteSection } from './sections/RemoteSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
 
@@ -30,6 +31,7 @@ type CategoryId =
   | 'data'
   | 'aiusage'
   | 'usage'
+  | 'remote'
   | 'updates'
   | 'about'
 
@@ -53,6 +55,7 @@ const CATEGORIES: Category[] = [
   { id: 'language', labelKey: 'settings.cat.language', icon: Languages, keywords: ['language', 'idioma', 'english', 'español', 'spanish'] },
   { id: 'aiusage', labelKey: 'settings.cat.aiusage', icon: Gauge, keywords: ['usage', 'uso', 'tokens', 'token', 'limit', 'limite', 'límite', 'quota', 'cuota', 'claude', 'codex', 'bar', 'barra', 'bars', 'barras'] },
   { id: 'usage', labelKey: 'settings.cat.usage', icon: Activity, keywords: ['performance', 'rendimiento', 'ram', 'cpu', 'memory', 'memoria', 'resources', 'recursos', 'processes', 'procesos'] },
+  { id: 'remote', labelKey: 'settings.cat.remote', icon: Smartphone, keywords: ['remote', 'phone', 'celular', 'movil', 'móvil', 'qr', 'control', 'tailscale', 'lan'] },
   { id: 'updates', labelKey: 'settings.cat.updates', icon: DownloadCloud, keywords: ['update', 'updates', 'actualizar', 'actualización', 'actualizacion', 'version', 'versión', 'upgrade', 'release'] },
   { id: 'about', labelKey: 'settings.cat.about', icon: Info, keywords: ['about', 'acerca', 'version', 'versión'] },
 ]
@@ -75,6 +78,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   data: DataSection,
   aiusage: AiUsageSection,
   usage: UsageSection,
+  remote: RemoteSection,
   updates: UpdatesSection,
   about: AboutSection,
 }
@@ -83,9 +87,18 @@ export function SettingsModal() {
   const t = useT()
   const open = useAppStore((s) => s.settingsOpen)
   const setOpen = useAppStore((s) => s.setSettingsOpen)
+  const settingsCategory = useAppStore((s) => s.settingsCategory)
 
   const [active, setActive] = useState<CategoryId>('terminal')
   const [query, setQuery] = useState('')
+
+  // Apply a deep-link target (e.g. openSettings('remote')) once, then clear it.
+  useEffect(() => {
+    if (open && settingsCategory) {
+      setActive(settingsCategory as CategoryId)
+      useAppStore.setState({ settingsCategory: null })
+    }
+  }, [open, settingsCategory])
 
   const visible = useMemo(() => CATEGORIES.filter((c) => matches(c, query, t)), [query, t])
   const current = visible.some((c) => c.id === active) ? active : (visible[0]?.id ?? 'terminal')

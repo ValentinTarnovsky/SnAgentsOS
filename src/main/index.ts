@@ -13,6 +13,8 @@ import { registerWindowIpc, wireWindowMaximizeEvents } from './ipc/registerWindo
 import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
+import { registerRemoteIpc } from './ipc/registerRemoteIpc'
+import { RemoteManager } from './remote/RemoteManager'
 import { ensureTray, destroyTray } from './tray'
 import { mainT } from './i18n'
 
@@ -29,6 +31,11 @@ let bypassCloseGuards = false
 let isInstalling = false
 const ptyManager = new PtyManager(() => mainWindow?.webContents ?? null)
 const configStore = new ConfigStore()
+const remoteManager = new RemoteManager(
+  ptyManager,
+  () => mainWindow?.webContents ?? null,
+  app.getVersion(),
+)
 
 function quitApp(): void {
   isQuitting = true
@@ -164,6 +171,14 @@ function openMainWindow(): void {
   const win = mainWindow
   wireWindowMaximizeEvents(win)
 
+  // A renderer reload or crash leaves any ptys it had paused (backpressure)
+  // stuck paused, which would starve connected phones. Resume them so the
+  // remote data plane keeps flowing regardless of the desktop renderer.
+  win.webContents.on('render-process-gone', () => ptyManager.resumeRendererPaused())
+  win.webContents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame) ptyManager.resumeRendererPaused()
+  })
+
   let forceClose = false
   win.on('close', (event) => {
     // Updater is relaunching us: let the window close without any guard.
@@ -240,6 +255,7 @@ function bootstrap(): void {
     getSender: () => mainWindow?.webContents ?? null,
     getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
   })
+  registerRemoteIpc(remoteManager)
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),
   )
@@ -264,6 +280,7 @@ function bootstrap(): void {
   if (startupCfg?.settings) {
     applyGlobalHotkey(startupCfg.settings.globalHotkeyEnabled, startupCfg.settings.globalHotkey)
   }
+  remoteManager.applyConfig(startupCfg?.settings?.remote ?? { enabled: false, port: 4517 })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) openMainWindow()
@@ -281,6 +298,9 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', () => {
   isQuitting = true
+  // Shut the remote server first (best-effort, non-blocking) so phones get a
+  // shutdown frame before the ptys they mirror are torn down.
+  remoteManager.shutdown('quit')
   ptyManager.killAll()
   destroyTray()
 })
@@ -288,6 +308,9 @@ app.on('before-quit', () => {
 app.on('will-quit', () => globalShortcut.unregisterAll())
 
 app.on('window-all-closed', () => {
+  // On darwin the app stays alive with no window; still stop the server so it
+  // isn't left listening without any UI to approve pairings.
+  remoteManager.shutdown('quit')
   ptyManager.killAll()
   if (process.platform !== 'darwin') app.quit()
 })

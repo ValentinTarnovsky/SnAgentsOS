@@ -40,6 +40,10 @@ nsis:
 
 portable:
   artifactName: ${productName}-${version}-portable.${ext}
+  # Stable extraction path so the exe Windows Firewall sees does not change
+  # per release; without it every update re-triggers the firewall prompt for
+  # the embedded remote-control server.
+  unpackDirName: SnMultiCC
 
 mac:
   category: public.app-category.developer-tools
