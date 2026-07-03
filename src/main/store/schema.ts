@@ -132,6 +132,13 @@ const settingsSchema = z.object({
   keymap: z.record(z.string()).default({}),
   sidebarCollapsed: z.boolean(),
   usage: usageSettingsSchema,
+  // Field-level defaults migrate configs that predate the remote feature.
+  remote: z
+    .object({
+      enabled: z.boolean().default(false),
+      port: z.number().int().min(1024).max(65535).default(4517),
+    })
+    .default({}),
 })
 
 const snippetSchema = z.object({

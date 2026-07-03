@@ -80,6 +80,21 @@ function buildMatcher(pattern: string): (text: string) => boolean {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /**
+ * An extra consumer of pty lifecycle + output, fed alongside the renderer
+ * (remote-control sessions mirror terminals through one of these). Callbacks
+ * run synchronously on the pty event path and must never throw or block.
+ */
+export interface PtySink {
+  id: string
+  /** A pty was bound to paneId (spawn or restart => NEW ptyId, rebind). */
+  onSpawn(ptyId: string, paneId: string): void
+  /** Coalesced output, same bytes the renderer receives (unsplit). */
+  onData(ptyId: string, paneId: string, data: string): void
+  /** The pty exited. Fired after the final data flush, before teardown. */
+  onExit(ptyId: string, paneId: string, exitCode: number): void
+}
+
+/**
  * Owns every node-pty instance. The renderer never touches native modules;
  * it drives ptys exclusively through this manager via IPC.
  *
@@ -91,6 +106,12 @@ export class PtyManager {
   private readonly entries = new Map<string, Entry>()
   private readonly byPane = new Map<string, string>()
   private seq = 0
+  /** Extra output listeners (remote-control sessions) fed alongside the renderer. */
+  private readonly sinks = new Map<string, PtySink>()
+  /** Panes that flush at the fast cadence even while hidden (remote viewers). */
+  private readonly forcedFast = new Set<string>()
+  /** Ptys paused via renderer backpressure; auto-resumed if the renderer dies. */
+  private readonly pausedByRenderer = new Set<string>()
 
   constructor(private readonly getSender: () => WebContents | null) {}
 
@@ -129,6 +150,13 @@ export class PtyManager {
     }
     this.entries.set(ptyId, entry)
     this.byPane.set(req.paneId, ptyId)
+    for (const sink of this.sinks.values()) {
+      try {
+        sink.onSpawn(ptyId, req.paneId)
+      } catch {
+        /* a sink must never break a spawn */
+      }
+    }
 
     const initial = req.initialCommand?.trim()
     if (req.setup && req.setup.length > 0) {
@@ -159,12 +187,20 @@ export class PtyManager {
         entry.onChunk?.()
       }
       if (entry.timer === null) {
-        entry.timer = setTimeout(() => this.flush(ptyId), entry.active ? FLUSH_MS : HIDDEN_FLUSH_MS)
+        const fast = entry.active || this.forcedFast.has(entry.paneId)
+        entry.timer = setTimeout(() => this.flush(ptyId), fast ? FLUSH_MS : HIDDEN_FLUSH_MS)
       }
     })
 
     proc.onExit(({ exitCode, signal }) => {
       this.flush(ptyId)
+      for (const sink of this.sinks.values()) {
+        try {
+          sink.onExit(ptyId, entry.paneId, exitCode)
+        } catch {
+          /* sink errors must not block teardown */
+        }
+      }
       this.send(CH.PTY_EXIT, { ptyId, exitCode, signal } satisfies PtyExitEvt)
       this.dispose(ptyId)
     })
@@ -277,11 +313,75 @@ export class PtyManager {
     const entry = this.entries.get(ptyId)
     if (!entry) return
     try {
-      if (pause) entry.pty.pause()
-      else entry.pty.resume()
+      if (pause) {
+        entry.pty.pause()
+        this.pausedByRenderer.add(ptyId)
+      } else {
+        entry.pty.resume()
+        this.pausedByRenderer.delete(ptyId)
+      }
     } catch {
       /* pty may have exited */
     }
+  }
+
+  /**
+   * Resume every pty paused by renderer backpressure. Called when the renderer
+   * goes away (reload / crash) so remote viewers aren't starved forever by a
+   * pause that will never be lifted.
+   */
+  resumeRendererPaused(): void {
+    for (const ptyId of [...this.pausedByRenderer]) this.setFlow(ptyId, false)
+  }
+
+  /** Register an extra output listener (remote-control sessions). */
+  addSink(sink: PtySink): void {
+    this.sinks.set(sink.id, sink)
+  }
+
+  removeSink(id: string): void {
+    this.sinks.delete(id)
+  }
+
+  /**
+   * Replace the set of panes remote viewers are watching. Those panes flush at
+   * the fast cadence even when their desktop pane is hidden; panes that just
+   * became fast flush immediately (mirror of the reveal flush in setActive).
+   */
+  setForcedFast(paneIds: Iterable<string>): void {
+    const next = new Set(paneIds)
+    const newlyFast = [...next].filter((paneId) => !this.forcedFast.has(paneId))
+    this.forcedFast.clear()
+    for (const paneId of next) this.forcedFast.add(paneId)
+    for (const paneId of newlyFast) {
+      const ptyId = this.byPane.get(paneId)
+      if (ptyId) this.flush(ptyId)
+    }
+  }
+
+  /** Live pty id bound to a pane, or null. */
+  ptyIdForPane(paneId: string): string | null {
+    return this.byPane.get(paneId) ?? null
+  }
+
+  /** Pane ids that currently have a live pty (drives snapshot `running`). */
+  runningPaneIds(): string[] {
+    return [...this.byPane.keys()]
+  }
+
+  /**
+   * Initial screen for a new remote subscriber: drain pending output to the
+   * current listeners first (so the ring is the exact prefix of what follows),
+   * then return the ring + live size. Callers must add their subscription in
+   * the same synchronous block to avoid a gap or overlap with live `out` data.
+   */
+  getReplay(paneId: string): { ptyId: string; replay: string; cols: number; rows: number } | null {
+    const ptyId = this.byPane.get(paneId)
+    if (!ptyId) return null
+    const entry = this.entries.get(ptyId)
+    if (!entry) return null
+    this.flush(ptyId)
+    return { ptyId, replay: entry.history.join(''), cols: entry.pty.cols, rows: entry.pty.rows }
   }
 
   /**
@@ -374,6 +474,14 @@ export class PtyManager {
     if (entry.buf.length === 0) return
     const data = entry.buf.join('')
     entry.buf = []
+    // Sinks get the unsplit burst; MAX_CHUNK framing is an IPC-only concern.
+    for (const sink of this.sinks.values()) {
+      try {
+        sink.onData(ptyId, entry.paneId, data)
+      } catch {
+        /* a sink must never break renderer delivery */
+      }
+    }
     if (data.length <= MAX_CHUNK) {
       this.send(CH.PTY_DATA, { ptyId, data } satisfies PtyDataEvt)
       return
@@ -401,6 +509,7 @@ export class PtyManager {
     if (entry.writeTimer) clearTimeout(entry.writeTimer)
     entry.writeTimer = null
     entry.writeQueue = ''
+    this.pausedByRenderer.delete(ptyId)
     if (this.byPane.get(entry.paneId) === ptyId) this.byPane.delete(entry.paneId)
     this.entries.delete(ptyId)
   }

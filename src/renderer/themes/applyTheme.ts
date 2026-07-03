@@ -1,5 +1,6 @@
 import type { ITheme } from '@xterm/xterm'
 import type { ThemeName, ThemeTokenKey, ThemeTokens } from '@shared/types'
+import { xtermThemeFromTokens } from '@shared/xtermTheme'
 import { THEMES } from './registry'
 import { CSS_VAR_BY_TOKEN } from './tokens'
 
@@ -27,30 +28,5 @@ export function applyTheme(name: ThemeName, custom?: CustomColors): void {
 
 /** Build an xterm ITheme from the active theme tokens. */
 export function buildXtermTheme(name: ThemeName, custom?: CustomColors): ITheme {
-  const t = resolveTokens(name, custom)
-  return {
-    background: t['term-bg'],
-    foreground: t['term-fg'],
-    cursor: t['term-cursor'],
-    cursorAccent: t['term-bg'],
-    selectionBackground: t['term-selection'],
-
-    black: t['ansi-black'],
-    red: t['ansi-red'],
-    green: t['ansi-green'],
-    yellow: t['ansi-yellow'],
-    blue: t['ansi-blue'],
-    magenta: t['ansi-magenta'],
-    cyan: t['ansi-cyan'],
-    white: t['ansi-white'],
-
-    brightBlack: t['ansi-brightBlack'],
-    brightRed: t['ansi-brightRed'],
-    brightGreen: t['ansi-brightGreen'],
-    brightYellow: t['ansi-brightYellow'],
-    brightBlue: t['ansi-brightBlue'],
-    brightMagenta: t['ansi-brightMagenta'],
-    brightCyan: t['ansi-brightCyan'],
-    brightWhite: t['ansi-brightWhite'],
-  }
+  return xtermThemeFromTokens(resolveTokens(name, custom))
 }

@@ -73,6 +73,10 @@ const DEFAULT_SETTINGS: Settings = {
     },
     custom: [],
   },
+  remote: {
+    enabled: false,
+    port: 4517,
+  },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */

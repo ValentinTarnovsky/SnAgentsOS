@@ -7,7 +7,7 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 5
+export const CONFIG_VERSION = 6
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -224,6 +224,19 @@ export interface UsageSettings {
   custom: UsageCustomRow[]
 }
 
+/**
+ * Persisted settings for the embedded remote-control server (phone access).
+ * Only the on/off switch and port live here; the paired-device registry is a
+ * separate main-owned file (remote-devices.json) so device secrets never
+ * enter the renderer-persisted config blob.
+ */
+export interface RemoteSettings {
+  /** Master switch for the embedded HTTP+WS server. Off by default. */
+  enabled: boolean
+  /** TCP port the server binds on 0.0.0.0. */
+  port: number
+}
+
 export interface Settings {
   /** Default shell per platform; undefined => resolver picks the OS default. */
   defaultShell: { win32?: string; darwin?: string; linux?: string }
@@ -265,6 +278,8 @@ export interface Settings {
   sidebarCollapsed: boolean
   /** Live usage / quota bars (Claude + Codex + custom models). */
   usage: UsageSettings
+  /** Remote control from a phone browser (embedded LAN/Tailscale server). */
+  remote: RemoteSettings
 }
 
 export interface ConfigFile {

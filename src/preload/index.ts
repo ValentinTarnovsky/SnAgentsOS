@@ -3,6 +3,7 @@ import { CH } from '@shared/ipc-channels'
 import type {
   AppInfo,
   AppMetrics,
+  PairingQrPayload,
   PtyDataEvt,
   PtyExitEvt,
   PtyFlowReq,
@@ -11,12 +12,16 @@ import type {
   PtySpawnReq,
   PtySpawnRes,
   PtyWriteReq,
+  RemoteCommand,
+  RemoteCommandResult,
+  RemoteUiState,
   SnApi,
   UpdateInfo,
   UpdateProgress,
   UsageSnapshot,
 } from '@shared/ipc-contract'
-import type { ConfigFile, UsageSettings } from '@shared/types'
+import type { ConfigFile, RemoteSettings, UsageSettings } from '@shared/types'
+import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -86,6 +91,21 @@ const api: SnApi = {
     refresh: () => ipcRenderer.invoke(CH.USAGE_REFRESH) as Promise<UsageSnapshot>,
     setConfig: (cfg: UsageSettings) => ipcRenderer.send(CH.USAGE_SET_CONFIG, cfg),
     onUpdate: (cb: (s: UsageSnapshot) => void) => sub<UsageSnapshot>(CH.USAGE_UPDATE, cb),
+  },
+  remote: {
+    setConfig: (cfg: RemoteSettings) => ipcRenderer.send(CH.REMOTE_SET_CONFIG, cfg),
+    getState: () => ipcRenderer.invoke(CH.REMOTE_GET_STATE) as Promise<RemoteUiState>,
+    pairingBegin: () =>
+      ipcRenderer.invoke(CH.REMOTE_PAIRING_BEGIN) as Promise<PairingQrPayload | null>,
+    pairingCancel: () => ipcRenderer.send(CH.REMOTE_PAIRING_CANCEL),
+    pairingResolve: (requestId: string, allow: boolean) =>
+      ipcRenderer.send(CH.REMOTE_PAIRING_RESOLVE, { requestId, allow }),
+    revokeDevice: (deviceId: string) =>
+      ipcRenderer.invoke(CH.REMOTE_DEVICE_REVOKE, deviceId) as Promise<void>,
+    pushState: (snapshot: RemoteStateSnapshot) => ipcRenderer.send(CH.REMOTE_STATE_PUSH, snapshot),
+    onCommand: (cb: (cmd: RemoteCommand) => void) => sub<RemoteCommand>(CH.REMOTE_CONTROL_CMD, cb),
+    commandResult: (res: RemoteCommandResult) => ipcRenderer.send(CH.REMOTE_CONTROL_RESULT, res),
+    onEvent: (cb: (s: RemoteUiState) => void) => sub<RemoteUiState>(CH.REMOTE_EVENT, cb),
   },
 }
 

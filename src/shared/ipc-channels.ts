@@ -66,6 +66,18 @@ export const CH = {
   USAGE_REFRESH: 'usage:refresh', // invoke -> UsageSnapshot (force a full refresh)
   USAGE_SET_CONFIG: 'usage:setConfig', // send (renderer pushes the usage settings to main)
   USAGE_UPDATE: 'usage:update', // main -> renderer (UsageSnapshot, pushed on the poll interval)
+
+  // Remote control (embedded LAN/Tailscale server for phone clients)
+  REMOTE_SET_CONFIG: 'remote:setConfig', // send (renderer pushes RemoteSettings; main starts/stops/restarts)
+  REMOTE_GET_STATE: 'remote:getState', // invoke -> RemoteUiState
+  REMOTE_PAIRING_BEGIN: 'remote:pairingBegin', // invoke -> PairingQrPayload | null (server not running)
+  REMOTE_PAIRING_CANCEL: 'remote:pairingCancel', // send (QR modal closed; invalidates the active code)
+  REMOTE_PAIRING_RESOLVE: 'remote:pairingResolve', // send ({ requestId, allow })
+  REMOTE_DEVICE_REVOKE: 'remote:deviceRevoke', // invoke (deviceId) -> void (kills live sessions)
+  REMOTE_STATE_PUSH: 'remote:statePush', // send (RemoteStateSnapshot, renderer -> main, debounced)
+  REMOTE_CONTROL_CMD: 'remote:controlCmd', // main -> renderer (RemoteCommand)
+  REMOTE_CONTROL_RESULT: 'remote:controlResult', // send (RemoteCommandResult, renderer -> main)
+  REMOTE_EVENT: 'remote:event', // main -> renderer (RemoteUiState: status/devices/pendingPairing)
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

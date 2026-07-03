@@ -2,7 +2,12 @@
  * IPC request/response/event payload shapes and the typed bridge surface
  * exposed on `window.snApi`. The SnApi interface grows phase by phase.
  */
-import type { ConfigFile, SetupStep, UsageSettings } from './types'
+import type { ConfigFile, RemoteSettings, SetupStep, UsageSettings } from './types'
+import type {
+  RemoteCtlAction,
+  RemoteEndpointKind,
+  RemoteStateSnapshot,
+} from './remote-protocol'
 
 export interface AppInfo {
   version: string
@@ -157,6 +162,75 @@ export interface PtyFlowReq {
   pause: boolean
 }
 
+// --- Remote control (embedded LAN/Tailscale server for phone clients) ---
+
+export type RemoteServerState = 'stopped' | 'starting' | 'running' | 'error'
+
+/** One reachable address the phone can use (LAN NIC, Tailscale, ...). */
+export interface RemoteEndpoint {
+  ip: string
+  kind: RemoteEndpointKind
+  url: string
+}
+
+export interface RemoteServerStatus {
+  state: RemoteServerState
+  port: number
+  endpoints: RemoteEndpoint[]
+  /** Live authed phone sessions. */
+  connectedCount: number
+  /** Bind/start failure detail (e.g. port in use). */
+  error?: string
+}
+
+/** Device info safe to show in the renderer (never includes the secret). */
+export interface SanitizedDevice {
+  id: string
+  name: string
+  createdAt: number
+  lastSeen: number
+  /** True while the device has at least one live authed socket. */
+  connected: boolean
+}
+
+/** An in-flight pairing request awaiting the user's Allow/Deny. */
+export interface PendingPairingInfo {
+  requestId: string
+  deviceName: string
+  ip: string
+  expiresAt: number
+}
+
+/** Everything the QR modal needs: one code, one QR per reachable endpoint. */
+export interface PairingQrPayload {
+  code: string
+  expiresAt: number
+  endpoints: Array<{ ip: string; kind: RemoteEndpointKind; url: string; qrDataUrl: string }>
+}
+
+/** Pushed to the renderer whenever server status / devices / pairing change. */
+export interface RemoteUiState {
+  status: RemoteServerStatus
+  devices: SanitizedDevice[]
+  pendingPairing: PendingPairingInfo | null
+}
+
+/** A control action relayed main -> renderer for execution via store actions. */
+export interface RemoteCommand {
+  id: string
+  action: RemoteCtlAction
+}
+
+export interface RemoteCommandResult {
+  id: string
+  ok: boolean
+  error?: string
+  /** createPane: id of the freshly created pane. */
+  paneId?: string
+  /** globalPrompt: number of consoles written to. */
+  info?: number
+}
+
 /** The object exposed on window.snApi via contextBridge. */
 export interface SnApi {
   platform: string
@@ -250,5 +324,28 @@ export interface SnApi {
     setConfig(cfg: UsageSettings): void
     /** Subscribe to pushed snapshots; returns an unsubscribe function. */
     onUpdate(cb: (s: UsageSnapshot) => void): () => void
+  }
+  /** Remote control from a phone browser (embedded LAN/Tailscale server). */
+  remote: {
+    /** Push RemoteSettings; main diffs and starts/stops/restarts the server. */
+    setConfig(cfg: RemoteSettings): void
+    /** Current server status + paired devices + pending pairing. */
+    getState(): Promise<RemoteUiState>
+    /** Open a pairing window: mints the code + QR per endpoint, or null if the server is down. */
+    pairingBegin(): Promise<PairingQrPayload | null>
+    /** QR modal closed: invalidate the active pairing code. */
+    pairingCancel(): void
+    /** User answered the Allow/Deny prompt for a pending pairing request. */
+    pairingResolve(requestId: string, allow: boolean): void
+    /** Forget a paired device and kill its live sessions immediately. */
+    revokeDevice(deviceId: string): Promise<void>
+    /** Renderer -> main state sync (debounced compact snapshot for phones). */
+    pushState(snapshot: RemoteStateSnapshot): void
+    /** Control commands from phones, to run through store actions. Returns unsubscribe. */
+    onCommand(cb: (cmd: RemoteCommand) => void): () => void
+    /** Report the outcome of an onCommand execution back to main. */
+    commandResult(res: RemoteCommandResult): void
+    /** Server status / device list / pairing events. Returns unsubscribe. */
+    onEvent(cb: (s: RemoteUiState) => void): () => void
   }
 }
