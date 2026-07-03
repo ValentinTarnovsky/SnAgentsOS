@@ -19,6 +19,7 @@ import { client, type TermFrame } from '../lib/client'
 import { useRemoteStore } from '../lib/store'
 import { resetRatio, solveFont } from '../lib/fit'
 import { setActiveTerm } from '../lib/terminalBus'
+import { getStoredHostPlatform } from '../lib/auth'
 
 export function RemoteTerminal(): ReactNode {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -33,7 +34,9 @@ export function RemoteTerminal(): ReactNode {
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    const hostPlatform = useRemoteStore.getState().hostPlatform
+    // On the pairing path the store's hostPlatform is unknown; fall back to the
+    // value cached from a previous session's authOk so windowsPty still applies.
+    const hostPlatform = useRemoteStore.getState().hostPlatform || getStoredHostPlatform()
 
     const term = new Terminal({
       fontFamily: "'JetBrains Mono', ui-monospace, monospace",

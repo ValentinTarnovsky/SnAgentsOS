@@ -11,6 +11,7 @@ import { bytesToHex } from './sha256'
 
 const DEVICE_ID_KEY = 'snmulticc.remote.deviceId'
 const SECRET_KEY = 'snmulticc.remote.secret'
+const HOST_PLATFORM_KEY = 'snmulticc.remote.hostPlatform'
 
 export interface StoredAuth {
   deviceId: string
@@ -47,6 +48,28 @@ export function clearAuth(): void {
     localStorage.removeItem(SECRET_KEY)
   } catch {
     /* ignore */
+  }
+}
+
+/**
+ * Persist the desktop OS learned from a reconnect's authOk. The pairing path
+ * never carries hostPlatform, so caching it lets a later Windows session enable
+ * xterm's windowsPty even before the next authOk. Best-effort only.
+ */
+export function storeHostPlatform(platform: string): void {
+  try {
+    if (platform) localStorage.setItem(HOST_PLATFORM_KEY, platform)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Read the cached desktop OS, or '' if never learned. */
+export function getStoredHostPlatform(): string {
+  try {
+    return localStorage.getItem(HOST_PLATFORM_KEY) ?? ''
+  } catch {
+    return ''
   }
 }
 

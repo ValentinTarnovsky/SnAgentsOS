@@ -30,7 +30,7 @@ import {
   storeAuth,
   storeHostPlatform,
 } from './auth'
-import { hexEqual, hmacSha256Hex, toBytes } from './sha256'
+import { hexEqual, hexToBytes, hmacSha256Hex } from './sha256'
 import { store } from './store'
 import { applyRemoteTheme } from './theme'
 import { setLang } from './i18n'
@@ -83,9 +83,10 @@ class RemoteClient {
   private ws: WebSocket | null = null
   private mode: 'auth' | 'pair' | 'idle' = 'idle'
   private deviceId: string | null = null
-  // HMAC key = the device secret's 64-char HEX STRING encoded as UTF-8 bytes
-  // (NOT hex-decoded). This matches the server's createHmac('sha256', secretHex)
-  // which treats the hex string as a UTF-8 key. Hex-decoding here breaks auth.
+  // HMAC key = the device secret hex-DECODED to its raw 32 bytes. This matches
+  // the server's createHmac('sha256', Buffer.from(secretHex, 'hex')). The
+  // message (a nonce) is passed as its literal hex STRING (hashed as UTF-8) on
+  // both sides. Encoding the key as the hex string's UTF-8 bytes breaks auth.
   private secretKey: Uint8Array | null = null
   private clientNonce = ''
   private pairCode: string | null = null
@@ -117,7 +118,7 @@ class RemoteClient {
     if (auth) {
       this.mode = 'auth'
       this.deviceId = auth.deviceId
-      this.secretKey = toBytes(auth.secretHex)
+      this.secretKey = hexToBytes(auth.secretHex)
       store.getState().update({ phase: 'connecting' })
       this.connect()
     } else if (code) {
@@ -347,7 +348,7 @@ class RemoteClient {
   private handlePaired(msg: Extract<RemoteServerMsg, { type: 'paired' }>): void {
     storeAuth(msg.deviceId, msg.secret)
     this.deviceId = msg.deviceId
-    this.secretBytes = hexToBytes(msg.secret)
+    this.secretKey = hexToBytes(msg.secret)
     this.mode = 'auth'
     // Strip #pair from the URL so a manual refresh reconnects via the auth path.
     try {
@@ -355,29 +356,46 @@ class RemoteClient {
     } catch {
       /* ignore */
     }
-    // authOk arrives right after; show a brief connecting state until then.
+    // On the pairing path the socket is ALREADY authed: there is no authOk, the
+    // server just pushes a 'state' frame next. Show a brief connecting state
+    // until that arrives (handleState then takes us live). hostPlatform/appVersion
+    // never arrive on this path, so windowsPty defaults off until a later
+    // reconnect's authOk fills it in (and persists it for next time).
     store.getState().update({ phase: 'connecting', pairExpiresAt: null })
   }
 
-  private handleAuthOk(msg: Extract<RemoteServerMsg, { type: 'authOk' }>): void {
-    setLang(msg.state.language)
-    const xtermTheme = applyRemoteTheme(msg.state.themeTokens)
+  /**
+   * Adopt a state snapshot as the live screen: apply theme/lang, pick a pane and
+   * subscribe, start keepalive. Shared by the reconnect authOk path (with
+   * hostPlatform/appVersion) and the pairing path's first 'state' frame (without).
+   */
+  private goLive(state: RemoteStateSnapshot, hostPlatform: string, appVersion: string): void {
+    setLang(state.language)
+    const xtermTheme = applyRemoteTheme(state.themeTokens)
     this.reconnectAttempt = 0
     const cur = store.getState().activePaneId
-    const keep = cur && paneExists(msg.state, cur) ? cur : pickPane(msg.state, msg.state.activeWorkspaceId)
+    const keep = cur && paneExists(state, cur) ? cur : pickPane(state, state.activeWorkspaceId)
     store.getState().update({
       phase: 'live',
       banner: null,
-      snapshot: msg.state,
+      snapshot: state,
       xtermTheme,
-      hostPlatform: msg.hostPlatform,
-      appVersion: msg.appVersion,
+      hostPlatform,
+      appVersion,
+      pairExpiresAt: null,
       // Force viewPane below to (re)issue a sub even on reconnect to the same pane.
       subscribedPaneId: null,
       activePaneId: keep ?? null,
     })
     this.startKeepalive()
     if (keep) this.viewPane(keep)
+  }
+
+  private handleAuthOk(msg: Extract<RemoteServerMsg, { type: 'authOk' }>): void {
+    // Persist the host platform so future sessions (incl. the pairing path, which
+    // never learns it) can still enable windowsPty on Windows desktops.
+    storeHostPlatform(msg.hostPlatform)
+    this.goLive(msg.state, msg.hostPlatform, msg.appVersion)
   }
 
   private handleAuthFail(msg: Extract<RemoteServerMsg, { type: 'authFail' }>): void {
@@ -392,6 +410,11 @@ class RemoteClient {
   }
 
   private handleState(state: RemoteStateSnapshot): void {
+    // Pairing path: the first 'state' (no preceding authOk) is what takes us live.
+    if (store.getState().phase !== 'live') {
+      this.goLive(state, getStoredHostPlatform(), store.getState().appVersion)
+      return
+    }
     setLang(state.language)
     const xtermTheme = applyRemoteTheme(state.themeTokens)
     store.getState().update({ snapshot: state, xtermTheme })
@@ -461,7 +484,7 @@ class RemoteClient {
 
     if (ev.code === REMOTE_CLOSE.REVOKED) {
       clearAuth()
-      this.secretBytes = null
+      this.secretKey = null
       this.deviceId = null
       store.getState().update({ phase: 'revoked', banner: null })
       return
