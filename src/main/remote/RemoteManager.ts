@@ -112,6 +112,11 @@ export class RemoteManager {
       onConnectionsChanged: () => this.onConnectionsChanged(),
     })
     this.ptyManager.addSink(this.sessions)
+    // A pty spawning/exiting flips a pane's `running`; re-broadcast so phones
+    // update their dots even without a renderer-driven snapshot push.
+    this.ptyManager.setRunningChangeListener(() =>
+      this.sessions?.broadcastState(this.currentSnapshot()),
+    )
     this.server = new RemoteServer(port, {
       onSocket: (ws, ip) => this.sessions?.handleSocket(ws, ip),
     })
@@ -131,13 +136,16 @@ export class RemoteManager {
       return
     }
     this.sessions?.shutdownAll(reason)
-    this.pairing.cancelCode()
+    // dispose (not just cancelCode) so a pending 60s approval + its timer are
+    // cleared too; otherwise it would block all new pairings until it expires.
+    this.pairing.dispose()
     this.teardownServer()
     this.setStatus('stopped')
   }
 
   private teardownServer(): void {
     if (this.sessions) {
+      this.ptyManager.setRunningChangeListener(null)
       this.ptyManager.removeSink(this.sessions.id)
       this.sessions.dispose()
       this.sessions = null

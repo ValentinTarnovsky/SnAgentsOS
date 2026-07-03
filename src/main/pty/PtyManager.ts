@@ -112,6 +112,8 @@ export class PtyManager {
   private readonly forcedFast = new Set<string>()
   /** Ptys paused via renderer backpressure; auto-resumed if the renderer dies. */
   private readonly pausedByRenderer = new Set<string>()
+  /** Fired after byPane changes (spawn/dispose) so remote can refresh `running`. */
+  private onRunningChange: (() => void) | null = null
 
   constructor(private readonly getSender: () => WebContents | null) {}
 
@@ -157,6 +159,8 @@ export class PtyManager {
         /* a sink must never break a spawn */
       }
     }
+    // byPane gained a pane: let remote re-broadcast so its `running` dot flips.
+    this.onRunningChange?.()
 
     const initial = req.initialCommand?.trim()
     if (req.setup && req.setup.length > 0) {
@@ -510,8 +514,21 @@ export class PtyManager {
     entry.writeTimer = null
     entry.writeQueue = ''
     this.pausedByRenderer.delete(ptyId)
-    if (this.byPane.get(entry.paneId) === ptyId) this.byPane.delete(entry.paneId)
+    const removed = this.byPane.get(entry.paneId) === ptyId
+    if (removed) this.byPane.delete(entry.paneId)
     this.entries.delete(ptyId)
+    // byPane lost a pane: let remote re-broadcast so its `running` dot clears
+    // even on a natural shell exit (which never triggers a renderer state push).
+    if (removed) this.onRunningChange?.()
+  }
+
+  /**
+   * Register a callback fired whenever the live pane->pty table changes (a pty
+   * spawns or exits). Remote-control uses it to re-broadcast pane `running`
+   * state to phones without waiting on a renderer-driven snapshot push.
+   */
+  setRunningChangeListener(cb: (() => void) | null): void {
+    this.onRunningChange = cb
   }
 
   private send(channel: string, payload: PtyDataEvt | PtyExitEvt): void {

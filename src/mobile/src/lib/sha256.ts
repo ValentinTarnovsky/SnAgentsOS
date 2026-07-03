@@ -8,12 +8,11 @@
  * anywhere. Only `crypto.getRandomValues` (available in insecure contexts too)
  * is used elsewhere for nonces.
  *
- * Wire convention (must match the desktop SessionManager): the device secret's
- * 64-char HEX STRING is used DIRECTLY as the HMAC key, encoded as UTF-8 bytes
- * (NOT hex-decoded); the nonce is likewise its hex STRING hashed as UTF-8 (the
- * message). Node computes the mirror image with the strings passed straight in:
- * `createHmac('sha256', secretHex).update(nonceHex)`. Hex-decoding either input
- * on this side makes every auth fail.
+ * Wire convention (must match the desktop SessionManager, verified end-to-end):
+ * the device secret is hex-DECODED to its raw 32 bytes and used as the HMAC KEY
+ * (client.ts passes hexToBytes(secret)); the nonce is passed as its hex STRING
+ * and hashed as UTF-8 (the message). Node computes the mirror image with
+ * `createHmac('sha256', Buffer.from(secretHex,'hex')).update(nonceHex)`.
  *
  * Correctness anchor - standard HMAC-SHA256 test vector:
  *   key = "key"

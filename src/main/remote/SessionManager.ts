@@ -82,8 +82,6 @@ interface Session {
   /** Panes whose `out` is currently being dropped for backpressure. */
   congested: Set<string>
   congestedSince: Map<string, number>
-  /** Last ptyId seen per subscribed pane (drives the stale-exit guard). */
-  lastPtyId: Map<string, string>
   lastSeen: number
   handshakeTimer: ReturnType<typeof setTimeout> | null
   badMsgStrikes: number
@@ -164,7 +162,6 @@ export class SessionManager implements PtySink {
       outTimer: null,
       congested: new Set(),
       congestedSince: new Map(),
-      lastPtyId: new Map(),
       lastSeen: Date.now(),
       handshakeTimer: null,
       badMsgStrikes: 0,
@@ -395,7 +392,6 @@ export class SessionManager implements PtySink {
       if (set.size === 0) this.paneSubs.delete(paneId)
     }
     this.discardPane(session, paneId)
-    session.lastPtyId.delete(paneId)
     this.recomputeForcedFast()
   }
 
@@ -433,13 +429,10 @@ export class SessionManager implements PtySink {
     this.recomputeForcedFast()
   }
 
-  onData(ptyId: string, paneId: string, data: string): void {
+  onData(_ptyId: string, paneId: string, data: string): void {
     const subs = this.paneSubs.get(paneId)
     if (!subs) return
-    for (const session of subs) {
-      session.lastPtyId.set(paneId, ptyId)
-      this.bufferOut(session, paneId, data)
-    }
+    for (const session of subs) this.bufferOut(session, paneId, data)
   }
 
   onExit(ptyId: string, paneId: string, exitCode: number): void {
@@ -477,11 +470,19 @@ export class SessionManager implements PtySink {
 
   /** Terminate every socket of a revoked device (revoked frame, then 4403). */
   killByDevice(deviceId: string): void {
+    let changed = false
     for (const session of [...this.sessions]) {
       if (session.deviceId !== deviceId) continue
-      this.send(session, { type: 'revoked' })
+      this.send(session, { type: 'revoked' }) // best-effort while still OPEN
+      // ws.close() only starts a graceful close: the TCP can linger up to ws's
+      // 30s closeTimeout, during which a malicious client that ignores the
+      // close frame would otherwise keep hitting the authed choke point. Flip
+      // authed off NOW so any further sub/input/ctl is rejected immediately.
+      session.authed = false
+      changed = true
       this.closeSession(session, REMOTE_CLOSE.REVOKED, 'revoked')
     }
+    if (changed) this.deps.onConnectionsChanged()
   }
 
   /** Best-effort shutdown frame + close; never awaits (must not delay quit). */
@@ -565,7 +566,6 @@ export class SessionManager implements PtySink {
     replay: { ptyId: string; replay: string; cols: number; rows: number } | null,
   ): void {
     if (replay) {
-      session.lastPtyId.set(paneId, replay.ptyId)
       this.send(session, {
         type: 'replay',
         paneId,
@@ -611,10 +611,16 @@ export class SessionManager implements PtySink {
       }
       if (killed) continue
       // Recovery: the socket drained, so resync each congested pane from history.
+      // Order matters and mirrors handleSub: getReplay first (its internal flush
+      // re-buffers the just-flushed tail into outBuf, and that tail is already in
+      // the replay history), THEN discardPane to drop that re-buffered tail and
+      // clear congestion, THEN send. Doing discardPane first would let the tail
+      // reappear as an `out` frame after the replay, duplicating output.
       if (session.congested.size > 0 && ws.bufferedAmount < BACKPRESSURE_RECOVER) {
         for (const paneId of [...session.congested]) {
+          const replay = this.deps.ptyManager.getReplay(paneId)
           this.discardPane(session, paneId)
-          this.sendReplay(session, paneId, this.deps.ptyManager.getReplay(paneId))
+          this.sendReplay(session, paneId, replay)
         }
       }
     }
