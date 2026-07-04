@@ -131,6 +131,36 @@ class RemoteClient {
     }
   }
 
+  /**
+   * Enter pairing mode from inside the app (in-app QR scan or manual code).
+   * Needed by installed home-screen apps: scanning the QR with the OS camera
+   * opens the URL in the browser, a different storage origin, so pairing must
+   * be reachable without the #pair= boot fragment. Resets any auth/reconnect
+   * state so the next socket runs the pair path exactly like a #pair= boot.
+   */
+  startPairing(code: string): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+    }
+    if (this.ws) {
+      this.manualClose = true
+      try {
+        this.ws.close()
+      } catch {
+        /* ignore */
+      }
+      this.ws = null
+    }
+    this.mode = 'pair'
+    this.pairCode = code
+    this.deviceId = null
+    this.secretKey = null
+    this.noReconnect = false
+    this.reconnectAttempt = 0
+    store.getState().update({ phase: 'pairForm', banner: null, pairReason: null, pairExpiresAt: null })
+  }
+
   /** Submit the pairing form: open the socket and request pairing. */
   submitPairing(deviceName: string): void {
     if (this.mode !== 'pair') return

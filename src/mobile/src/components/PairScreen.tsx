@@ -7,6 +7,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Smartphone, Clock, ShieldX } from 'lucide-react'
 import { InfoScreen, PrimaryButton } from './InfoScreen'
+import { LinkDeviceButton } from './ScanScreen'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { t } from '../lib/i18n'
@@ -61,7 +62,9 @@ export function PairScreen(): ReactNode {
             ? 'pair.badCode'
             : 'pair.denied'
     return (
-      <InfoScreen tone="danger" icon={<ShieldX size={30} />} title={t(key)} body={t('pair.rescan')} />
+      <InfoScreen tone="danger" icon={<ShieldX size={30} />} title={t(key)} body={t('pair.rescan')}>
+        <LinkDeviceButton />
+      </InfoScreen>
     )
   }
 

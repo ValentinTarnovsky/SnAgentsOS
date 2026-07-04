@@ -4,6 +4,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { QrCode, ShieldAlert } from 'lucide-react'
 import { InfoScreen, PrimaryButton } from './InfoScreen'
+import { LinkDeviceButton } from './ScanScreen'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { t } from '../lib/i18n'
@@ -19,7 +20,9 @@ export function RePairScreen(): ReactNode {
       icon={<QrCode size={30} />}
       title={t('conn.rePair')}
       body={t('conn.rePairBody')}
-    />
+    >
+      <LinkDeviceButton />
+    </InfoScreen>
   )
 }
 

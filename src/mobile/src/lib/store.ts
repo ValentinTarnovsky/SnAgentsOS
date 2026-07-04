@@ -56,6 +56,8 @@ export interface RemoteState {
   lockUntil: number | null
   /** Ephemeral toast text (e.g. "Sent to 3 consoles"). */
   toast: string | null
+  /** In-app QR scanner overlay (pairing without the #pair= boot fragment). */
+  scanOpen: boolean
 
   /** Merge a partial state (used by the client for machine transitions). */
   update: (partial: Partial<RemoteState>) => void
@@ -80,6 +82,7 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   authFailReason: null,
   lockUntil: null,
   toast: null,
+  scanOpen: false,
 
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
