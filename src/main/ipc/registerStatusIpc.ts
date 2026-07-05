@@ -4,33 +4,60 @@ import type { StatusTitleReq } from '@shared/ipc-contract'
 import type { NotificationSettings, StatusHooksStatusRes } from '@shared/types'
 import type { StatusManager } from '../status/StatusManager'
 import type { HookServer } from '../status/HookServer'
-import { hooksStatus, installHooks, uninstallHooks } from '../status/HookInstaller'
+import { hooksStatus, hooksUpToDate, installHooks, uninstallHooks } from '../status/HookInstaller'
+
+export interface StatusIpc {
+  /** Apply the persisted config once at boot (starts the HookServer if enabled). */
+  applyStartup(cfg: NotificationSettings | null | undefined): void
+}
 
 /**
  * IPC surface for the Claude status feature. Also owns the HookServer
- * lifecycle: it runs only while notifications.hooksEnabled is true.
+ * lifecycle: it runs only while notifications.hooksEnabled is true. Every
+ * lifecycle mutation goes through one promise chain, so rapid config toggles
+ * or an install racing a boot start can never double-bind the port or leave
+ * a stopped flag with a live server.
  */
-export function registerStatusIpc(statusManager: StatusManager, hookServer: HookServer): void {
+export function registerStatusIpc(statusManager: StatusManager, hookServer: HookServer): StatusIpc {
   hookServer.onEvent((evt) => statusManager.onHookEvent(evt))
 
-  async function applyHookLifecycle(cfg: NotificationSettings): Promise<void> {
-    if (cfg.hooksEnabled && cfg.hookToken) {
-      if (!hookServer.running) {
-        try {
-          const port = await hookServer.start(cfg.hookPort, cfg.hookToken)
-          // Stale-port trap: hooks installed on a previous run may point at a
-          // port someone else now owns. Re-point them at the live port.
-          const installed = hooksStatus()
-          if (installed.installed && installed.port !== port) {
-            installHooks(port, cfg.hookToken)
-          }
-        } catch (error) {
-          console.error('[hooks] server failed to start:', error)
-        }
-      }
-    } else if (hookServer.running) {
-      await hookServer.stop()
+  let chain: Promise<unknown> = Promise.resolve()
+  /** Port+token the server was last started with (requested port, not bound). */
+  let started: { port: number; token: string } | null = null
+
+  function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = chain.then(fn)
+    chain = run.then(
+      () => undefined,
+      (err) => console.error('[hooks] lifecycle step failed:', err),
+    )
+    return run
+  }
+
+  /** Repoint installed hooks when their URL drifted from the live server. */
+  function reconcileInstalled(token: string): void {
+    if (hooksStatus().installed && !hooksUpToDate(hookServer.activePort, token)) {
+      installHooks(hookServer.activePort, token)
     }
+  }
+
+  async function ensureServer(cfg: NotificationSettings): Promise<void> {
+    if (!hookServer.running || started?.port !== cfg.hookPort || started?.token !== cfg.hookToken) {
+      await hookServer.start(cfg.hookPort, cfg.hookToken)
+      started = { port: cfg.hookPort, token: cfg.hookToken }
+    }
+    reconcileInstalled(cfg.hookToken)
+  }
+
+  function applyHookLifecycle(cfg: NotificationSettings): Promise<void> {
+    return enqueue(async () => {
+      if (cfg.hooksEnabled && cfg.hookToken) {
+        await ensureServer(cfg)
+      } else if (hookServer.running) {
+        await hookServer.stop()
+        started = null
+      }
+    })
   }
 
   ipcMain.on(CH.STATUS_TITLE, (_e, req: StatusTitleReq) => {
@@ -51,39 +78,31 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
 
   ipcMain.handle(
     CH.STATUS_HOOKS_INSTALL,
-    async (_e, cfg: NotificationSettings): Promise<StatusHooksStatusRes> => {
+    (_e, cfg: NotificationSettings): Promise<StatusHooksStatusRes> => {
       statusManager.setConfig(cfg)
-      if (!hookServer.running) await hookServer.start(cfg.hookPort, cfg.hookToken)
-      return installHooks(hookServer.activePort, cfg.hookToken)
+      return enqueue(async () => {
+        await ensureServer(cfg)
+        return installHooks(hookServer.activePort, cfg.hookToken)
+      })
     },
   )
 
-  ipcMain.handle(CH.STATUS_HOOKS_UNINSTALL, async (): Promise<StatusHooksStatusRes> => {
-    const res = uninstallHooks()
-    await hookServer.stop()
-    return res
+  ipcMain.handle(CH.STATUS_HOOKS_UNINSTALL, (): Promise<StatusHooksStatusRes> => {
+    return enqueue(async () => {
+      const res = uninstallHooks()
+      await hookServer.stop()
+      started = null
+      return res
+    })
   })
 
   ipcMain.handle(CH.STATUS_HOOKS_STATUS, (): StatusHooksStatusRes => hooksStatus())
 
-  return
-}
-
-/** Boot-time hook: start the server if the persisted config enables it. */
-export async function applyStartupStatusConfig(
-  statusManager: StatusManager,
-  hookServer: HookServer,
-  cfg: NotificationSettings | null | undefined,
-): Promise<void> {
-  if (!cfg) return
-  statusManager.setConfig(cfg)
-  if (cfg.hooksEnabled && cfg.hookToken) {
-    try {
-      const port = await hookServer.start(cfg.hookPort, cfg.hookToken)
-      const installed = hooksStatus()
-      if (installed.installed && installed.port !== port) installHooks(port, cfg.hookToken)
-    } catch (error) {
-      console.error('[hooks] server failed to start at boot:', error)
-    }
+  return {
+    applyStartup(cfg) {
+      if (!cfg) return
+      statusManager.setConfig(cfg)
+      void applyHookLifecycle(cfg)
+    },
   }
 }

@@ -133,6 +133,16 @@ export class StatusManager implements PtySink {
     }
 
     if (track.precise) {
+      // Answering a permission prompt or question fires no hook; the spinner
+      // resuming is the only signal the turn continued. Without this, the pane
+      // would stay amber while working and the NEXT prompt of the same turn
+      // would be swallowed by the same-state guard (no toast, no badge).
+      if (titleState === 'working' && track.state === 'action') {
+        if (track.hookState === 'action') track.hookState = 'working'
+        this.cancelFusion(track)
+        this.setState(paneId, track, 'working')
+        return
+      }
       // Hooks own the state; the title only powers the AskUserQuestion fusion:
       // Claude is mid-turn (no Stop yet) but its spinner stopped => it is
       // waiting on a question/permission UI that fires no hook.

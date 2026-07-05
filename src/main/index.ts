@@ -14,7 +14,7 @@ import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
-import { registerStatusIpc, applyStartupStatusConfig } from './ipc/registerStatusIpc'
+import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
 import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
 import { HookServer } from './status/HookServer'
@@ -45,6 +45,7 @@ const statusManager = new StatusManager(
   () => configStore.load(),
 )
 ptyManager.addSink(statusManager)
+let statusIpc: StatusIpc | null = null
 
 function quitApp(): void {
   isQuitting = true
@@ -274,7 +275,7 @@ function bootstrap(): void {
     getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
   })
   registerRemoteIpc(remoteManager)
-  registerStatusIpc(statusManager, hookServer)
+  statusIpc = registerStatusIpc(statusManager, hookServer)
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),
   )
@@ -300,7 +301,7 @@ function bootstrap(): void {
     applyGlobalHotkey(startupCfg.settings.globalHotkeyEnabled, startupCfg.settings.globalHotkey)
   }
   remoteManager.applyConfig(startupCfg?.settings?.remote ?? { enabled: false, port: 4517 })
-  void applyStartupStatusConfig(statusManager, hookServer, startupCfg?.settings?.notifications)
+  statusIpc?.applyStartup(startupCfg?.settings?.notifications)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) openMainWindow()

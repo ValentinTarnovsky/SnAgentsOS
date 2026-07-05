@@ -79,15 +79,13 @@ function hooksOf(settings: Record<string, unknown>): Record<string, unknown> {
   return {}
 }
 
-/** Scans every event's matcher groups for our handler; returns its port. */
-function findInstalledPort(settings: Record<string, unknown>): number | null {
+/** Scans every event's matcher groups for our handler; returns its full url. */
+function findInstalledUrl(settings: Record<string, unknown>): string | null {
   for (const groups of Object.values(hooksOf(settings))) {
     if (!Array.isArray(groups)) continue
     for (const group of groups as MatcherGroup[]) {
       for (const handler of group?.hooks ?? []) {
-        if (!isOurs(handler)) continue
-        const m = /^http:\/\/127\.0\.0\.1:(\d+)\//.exec(String(handler.url))
-        return m ? Number(m[1]) : null
+        if (isOurs(handler)) return String(handler.url)
       }
     }
   }
@@ -97,10 +95,25 @@ function findInstalledPort(settings: Record<string, unknown>): number | null {
 export function hooksStatus(): StatusHooksStatusRes {
   const path = settingsPath()
   try {
-    const port = findInstalledPort(readSettings(path))
-    return { installed: port !== null, settingsPath: path, port }
+    const url = findInstalledUrl(readSettings(path))
+    const m = url ? /^http:\/\/127\.0\.0\.1:(\d+)\//.exec(url) : null
+    return { installed: url !== null, settingsPath: path, port: m ? Number(m[1]) : null }
   } catch {
     return { installed: false, settingsPath: path, port: null }
+  }
+}
+
+/**
+ * True when the installed hook URL matches this exact port + token. Catches
+ * both the stale-port trap (fallback bind on a busy port) and token drift
+ * (e.g. a config imported from another machine), either of which would leave
+ * every hook POST 404ing as a visible hook error inside Claude sessions.
+ */
+export function hooksUpToDate(port: number, token: string): boolean {
+  try {
+    return findInstalledUrl(readSettings(settingsPath())) === buildHandler(port, token).url
+  } catch {
+    return false
   }
 }
 
@@ -120,7 +133,9 @@ export function installHooks(port: number, token: string): StatusHooksStatusRes 
       ? (hooks[event] as MatcherGroup[])
       : []
     // Drop our stale handlers wherever they live, then prune emptied groups.
+    // Tolerate hand-edited files: null/non-object group entries are dropped.
     const cleaned = groups
+      .filter((g): g is MatcherGroup => typeof g === 'object' && g !== null)
       .map((g) => ({ ...g, hooks: (g.hooks ?? []).filter((h) => !isOurs(h)) }))
       .filter((g) => (g.hooks?.length ?? 0) > 0)
     const group: MatcherGroup = matcher ? { matcher, hooks: [handler] } : { hooks: [handler] }
@@ -147,6 +162,7 @@ export function uninstallHooks(): StatusHooksStatusRes {
   for (const [event, groups] of Object.entries(hooks)) {
     if (!Array.isArray(groups)) continue
     const cleaned = (groups as MatcherGroup[])
+      .filter((g): g is MatcherGroup => typeof g === 'object' && g !== null)
       .map((g) => {
         const kept = (g.hooks ?? []).filter((h) => !isOurs(h))
         if (kept.length !== (g.hooks?.length ?? 0)) changed = true
