@@ -27,12 +27,28 @@ interface MenuState {
   wsId: string
 }
 
+/** Discord-style unread pill: consoles in this workspace awaiting the user. */
+function AttentionBadge({ count, className }: { count: number; className?: string }) {
+  if (count <= 0) return null
+  return (
+    <span
+      className={cn(
+        'flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-[#EF4444] px-1 text-[11px] font-semibold leading-none text-white',
+        className,
+      )}
+    >
+      {count > 9 ? '9+' : count}
+    </span>
+  )
+}
+
 export function Sidebar() {
   const t = useT()
   const {
     workspaces,
     activeWorkspaceId,
     sidebarCollapsed,
+    paneAttention,
     setActive,
     deleteWorkspace,
     renameWorkspace,
@@ -141,6 +157,9 @@ export function Sidebar() {
           const active = w.id === activeWorkspaceId
           const WsIcon = iconFor(w.panes[0]?.icon)
           const renaming = renamingId === w.id
+          const attentionCount = active
+            ? 0
+            : w.panes.reduce((n, p) => n + (paneAttention[p.id] ? 1 : 0), 0)
           return (
             <div
               key={w.id}
@@ -214,6 +233,15 @@ export function Sidebar() {
                 </Tooltip>
               )}
 
+              {!sidebarCollapsed && !renaming && (
+                <AttentionBadge count={attentionCount} className="mr-1.5 group-hover:hidden" />
+              )}
+              {sidebarCollapsed && (
+                <AttentionBadge
+                  count={attentionCount}
+                  className="pointer-events-none absolute right-0.5 top-0.5"
+                />
+              )}
               {!sidebarCollapsed && !renaming && (
                 <button
                   onClick={(e) => {

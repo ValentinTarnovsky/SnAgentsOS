@@ -14,7 +14,10 @@ import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
+import { registerStatusIpc, applyStartupStatusConfig } from './ipc/registerStatusIpc'
 import { RemoteManager } from './remote/RemoteManager'
+import { StatusManager } from './status/StatusManager'
+import { HookServer } from './status/HookServer'
 import { ensureTray, destroyTray } from './tray'
 import { mainT } from './i18n'
 
@@ -36,6 +39,12 @@ const remoteManager = new RemoteManager(
   () => mainWindow?.webContents ?? null,
   app.getVersion(),
 )
+const hookServer = new HookServer()
+const statusManager = new StatusManager(
+  () => mainWindow,
+  () => configStore.load(),
+)
+ptyManager.addSink(statusManager)
 
 function quitApp(): void {
   isQuitting = true
@@ -171,6 +180,9 @@ function openMainWindow(): void {
   const win = mainWindow
   wireWindowMaximizeEvents(win)
 
+  // Stop the taskbar flash (status notifications) once the user comes back.
+  win.on('focus', () => win.flashFrame(false))
+
   // A renderer reload or crash leaves any ptys it had paused (backpressure)
   // stuck paused, which would starve connected phones. Resume them so the
   // remote data plane keeps flowing regardless of the desktop renderer.
@@ -228,6 +240,12 @@ function openMainWindow(): void {
 }
 
 function bootstrap(): void {
+  // Windows toasts need the AppUserModelID to match the installed shortcut's.
+  // Packaged only: in dev an AUMID without a Start Menu shortcut can silently
+  // suppress notifications, so dev keeps Electron's default.
+  if (process.platform === 'win32' && app.isPackaged) {
+    app.setAppUserModelId('com.sndevelopment.snmulticc')
+  }
   // No native menu on Windows/Linux: it's a frameless app with a custom
   // in-renderer title bar, so the default menu is invisible anyway, and its
   // accelerators are footguns in a terminal app. CmdOrCtrl+R (Reload) would
@@ -256,6 +274,7 @@ function bootstrap(): void {
     getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
   })
   registerRemoteIpc(remoteManager)
+  registerStatusIpc(statusManager, hookServer)
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),
   )
@@ -281,6 +300,7 @@ function bootstrap(): void {
     applyGlobalHotkey(startupCfg.settings.globalHotkeyEnabled, startupCfg.settings.globalHotkey)
   }
   remoteManager.applyConfig(startupCfg?.settings?.remote ?? { enabled: false, port: 4517 })
+  void applyStartupStatusConfig(statusManager, hookServer, startupCfg?.settings?.notifications)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) openMainWindow()

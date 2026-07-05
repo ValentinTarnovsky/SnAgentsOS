@@ -139,6 +139,21 @@ const settingsSchema = z.object({
       port: z.number().int().min(1024).max(65535).default(4517),
     })
     .default({}),
+  // Field-level defaults migrate configs that predate the notifications feature.
+  notifications: z
+    .object({
+      enabled: z.boolean().default(true),
+      notifyDone: z.boolean().default(true),
+      notifyAction: z.boolean().default(true),
+      sound: z.boolean().default(true),
+      soundId: z.enum(['chime', 'ping', 'pop']).default('chime'),
+      volume: z.number().min(0).max(100).default(70),
+      flashTaskbar: z.boolean().default(true),
+      hooksEnabled: z.boolean().default(false),
+      hookPort: z.number().int().min(1024).max(65535).default(43917),
+      hookToken: z.string().default(''),
+    })
+    .default({}),
 })
 
 const snippetSchema = z.object({

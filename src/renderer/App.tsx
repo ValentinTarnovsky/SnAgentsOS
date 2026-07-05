@@ -9,6 +9,7 @@ import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
 import { startPersistence } from '@/lib/persist'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
 import { usePaneScheduler } from '@/lib/usePaneScheduler'
+import { useStatusEvents } from '@/lib/useStatusEvents'
 import { applyTheme } from '@/themes'
 import { I18nProvider, useT } from '@/i18n'
 import { Sidebar } from '@/components/sidebar/Sidebar'
@@ -117,6 +118,8 @@ function AppBody() {
   useGlobalKeys()
   // Drives per-console scheduled prompts (fires them at their set wall-clock time).
   usePaneScheduler()
+  // Claude status: state events, notification sounds, viewed-set + config sync.
+  useStatusEvents()
 
   const onNew = (): void => setWizardOpen(true)
 

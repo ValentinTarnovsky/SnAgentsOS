@@ -7,7 +7,7 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 6
+export const CONFIG_VERSION = 7
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -237,6 +237,57 @@ export interface RemoteSettings {
   port: number
 }
 
+/**
+ * Live state of a Claude Code session inside a console, derived from two
+ * structured channels (never from sniffing raw pty bytes):
+ *  - the OSC terminal title Claude Code sets (braille spinner = working,
+ *    U+2733 = stopped at the prompt),
+ *  - optional Claude Code hooks POSTing to the local HookServer (precise).
+ */
+export type ClaudePaneState = 'idle' | 'working' | 'done' | 'action'
+
+/** Main -> renderer status update for one console. */
+export interface PaneStatusEvt {
+  paneId: string
+  /** null clears the indicator (claude exited / pty died). */
+  state: ClaudePaneState | null
+  /** True when the hooks channel is live for this pane (exact 3-state info). */
+  precise: boolean
+  /** Main already decided this transition deserves a notification (drives sound too). */
+  notify: boolean
+}
+
+/** Result of installing/uninstalling/inspecting the Claude Code hooks block. */
+export interface StatusHooksStatusRes {
+  installed: boolean
+  settingsPath: string
+  /** Port found in the installed hook URL, null when not installed. */
+  port: number | null
+}
+
+/** Desktop notifications, sounds and Claude status integration. */
+export interface NotificationSettings {
+  /** Master switch for desktop notifications. */
+  enabled: boolean
+  /** Notify when Claude finishes a turn. */
+  notifyDone: boolean
+  /** Notify when Claude needs the user (permission prompt, question). */
+  notifyAction: boolean
+  /** Play a sound alongside the notification. */
+  sound: boolean
+  soundId: 'chime' | 'ping' | 'pop'
+  /** 0-100. */
+  volume: number
+  /** Flash the taskbar button when unfocused. */
+  flashTaskbar: boolean
+  /** Claude Code hooks integration (writes to ~/.claude/settings.json). */
+  hooksEnabled: boolean
+  /** Local port the HookServer listens on (127.0.0.1 only). */
+  hookPort: number
+  /** Random token in the hook URL path; generated on first install. */
+  hookToken: string
+}
+
 export interface Settings {
   /** Default shell per platform; undefined => resolver picks the OS default. */
   defaultShell: { win32?: string; darwin?: string; linux?: string }
@@ -280,6 +331,8 @@ export interface Settings {
   usage: UsageSettings
   /** Remote control from a phone browser (embedded LAN/Tailscale server). */
   remote: RemoteSettings
+  /** Desktop notifications, sounds and Claude status integration. */
+  notifications: NotificationSettings
 }
 
 export interface ConfigFile {

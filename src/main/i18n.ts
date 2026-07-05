@@ -10,6 +10,9 @@ const MESSAGES = {
     'dialog.closeAnyway': 'Close anyway',
     'tray.show': 'Show SnMultiCC',
     'tray.quit': 'Quit',
+    'status.notif.done': 'Claude finished in "{pane}"',
+    'status.notif.action': 'Claude needs your input in "{pane}"',
+    'status.notif.generic': 'Claude stopped in "{pane}", check the console',
   },
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
@@ -18,6 +21,9 @@ const MESSAGES = {
     'dialog.closeAnyway': 'Cerrar de todos modos',
     'tray.show': 'Mostrar SnMultiCC',
     'tray.quit': 'Salir',
+    'status.notif.done': 'Claude termino en "{pane}"',
+    'status.notif.action': 'Claude requiere tu accion en "{pane}"',
+    'status.notif.generic': 'Claude se detuvo en "{pane}", revisa la consola',
   },
 } as const
 

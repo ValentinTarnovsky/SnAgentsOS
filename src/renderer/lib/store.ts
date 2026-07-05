@@ -1,11 +1,13 @@
 import { create } from 'zustand'
 import type {
   AgentPreset,
+  ClaudePaneState,
   ConfigFile,
   ConnectionProfile,
   GridPreset,
   Pane,
   PaneSchedule,
+  PaneStatusEvt,
   PaneType,
   Settings,
   Snippet,
@@ -77,6 +79,18 @@ const DEFAULT_SETTINGS: Settings = {
     enabled: false,
     port: 4517,
   },
+  notifications: {
+    enabled: true,
+    notifyDone: true,
+    notifyAction: true,
+    sound: true,
+    soundId: 'chime',
+    volume: 70,
+    flashTaskbar: true,
+    hooksEnabled: false,
+    hookPort: 43917,
+    hookToken: '',
+  },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */
@@ -120,6 +134,10 @@ export interface AppState {
   minimized: Record<string, string[]>
   /** paneId -> relaunch counter (transient; bumping it remounts the console). */
   paneEpoch: Record<string, number>
+  /** paneId -> live Claude state (transient; fed by main over STATUS_STATE). */
+  paneStatus: Record<string, { state: ClaudePaneState; precise: boolean }>
+  /** paneId -> unacknowledged done/action flag (transient; drives sidebar badges). */
+  paneAttention: Record<string, true>
   /** False until persisted config has been loaded (gates the persistence writer). */
   hydrated: boolean
 
@@ -166,6 +184,13 @@ export interface AppState {
   setWizardOpen: (open: boolean) => void
   setPaletteOpen: (open: boolean) => void
   setGlobalPromptOpen: (open: boolean) => void
+
+  /** Apply a Claude status update pushed by main (also flags attention). */
+  setPaneStatus: (evt: PaneStatusEvt) => void
+  /** Acknowledge one console's attention flag (typing into it, restoring it). */
+  clearPaneAttention: (paneId: string) => void
+  /** Acknowledge every non-minimized console of a workspace (viewing it). */
+  markWorkspaceSeen: (workspaceId: string) => void
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -185,6 +210,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   maximized: {},
   minimized: {},
   paneEpoch: {},
+  paneStatus: {},
+  paneAttention: {},
   hydrated: false,
 
   hydrate: (config) =>
@@ -324,11 +351,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, favorite: !w.favorite } : w)),
     })),
 
-  setActive: (id) =>
+  setActive: (id) => {
     set((s) => ({
       activeWorkspaceId: id,
       previousWorkspaceId: s.activeWorkspaceId !== id ? s.activeWorkspaceId : s.previousWorkspaceId,
-    })),
+    }))
+    // Viewing a workspace acknowledges its visible consoles' attention badges.
+    get().markWorkspaceSeen(id)
+  },
 
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 
@@ -451,14 +481,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearMaximize: (workspaceId) =>
     set((s) => ({ maximized: { ...s.maximized, [workspaceId]: null } })),
 
-  toggleMinimize: (workspaceId, paneId) =>
+  toggleMinimize: (workspaceId, paneId) => {
+    const wasMinimized = (get().minimized[workspaceId] ?? []).includes(paneId)
     set((s) => {
       const current = s.minimized[workspaceId] ?? []
       const next = current.includes(paneId)
         ? current.filter((id) => id !== paneId)
         : [...current, paneId]
       return { minimized: { ...s.minimized, [workspaceId]: next } }
-    }),
+    })
+    // Restoring a minimized console counts as looking at it.
+    if (wasMinimized) get().clearPaneAttention(paneId)
+  },
 
   savePreset: (preset) =>
     set((s) => {
@@ -507,6 +541,62 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSettingsOpen: (open) => set({ settingsOpen: open }),
 
   openSettings: (category) => set({ settingsOpen: true, settingsCategory: category ?? null }),
+
+  setPaneStatus: (evt) =>
+    set((s) => {
+      const paneStatus = { ...s.paneStatus }
+      let paneAttention = s.paneAttention
+      if (evt.state === null) {
+        if (!(evt.paneId in paneStatus) && !(evt.paneId in paneAttention)) return {}
+        delete paneStatus[evt.paneId]
+        if (evt.paneId in paneAttention) {
+          paneAttention = { ...paneAttention }
+          delete paneAttention[evt.paneId]
+        }
+        return { paneStatus, paneAttention }
+      }
+      paneStatus[evt.paneId] = { state: evt.state, precise: evt.precise }
+      if (evt.state === 'done' || evt.state === 'action') {
+        // Only flag attention when the console is not being looked at right now:
+        // other workspace, minimized in the active one, or the window unfocused.
+        const wsId = s.workspaces.find((w) => w.panes.some((p) => p.id === evt.paneId))?.id
+        const minimizedHere = wsId ? (s.minimized[wsId] ?? []).includes(evt.paneId) : false
+        const inView =
+          wsId === s.activeWorkspaceId && !minimizedHere && document.hasFocus()
+        if (!inView && !(evt.paneId in paneAttention)) {
+          paneAttention = { ...paneAttention, [evt.paneId]: true }
+        }
+      } else if (evt.state === 'working' && evt.paneId in paneAttention) {
+        // Back to work: the pending "look at me" flag is stale.
+        paneAttention = { ...paneAttention }
+        delete paneAttention[evt.paneId]
+      }
+      return { paneStatus, paneAttention }
+    }),
+
+  clearPaneAttention: (paneId) => {
+    // Hot path (called per keystroke): bail without a set() when clean.
+    if (!(paneId in get().paneAttention)) return
+    set((s) => {
+      const paneAttention = { ...s.paneAttention }
+      delete paneAttention[paneId]
+      return { paneAttention }
+    })
+  },
+
+  markWorkspaceSeen: (workspaceId) =>
+    set((s) => {
+      const ws = s.workspaces.find((w) => w.id === workspaceId)
+      if (!ws) return {}
+      const minimizedHere = new Set(s.minimized[workspaceId] ?? [])
+      const toClear = ws.panes.filter(
+        (p) => p.id in s.paneAttention && !minimizedHere.has(p.id),
+      )
+      if (toClear.length === 0) return {}
+      const paneAttention = { ...s.paneAttention }
+      for (const p of toClear) delete paneAttention[p.id]
+      return { paneAttention }
+    }),
 
   setWizardOpen: (open) => set({ wizardOpen: open }),
 

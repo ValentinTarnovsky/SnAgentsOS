@@ -130,7 +130,9 @@ export class PtyManager {
       cols: req.cols > 0 ? req.cols : 80,
       rows: req.rows > 0 ? req.rows : 24,
       cwd: req.cwd || homeDir(),
-      env: cleanEnv(req.env),
+      // SNMULTICC_CONSOLE_ID lets Claude Code hooks (which inherit the shell
+      // env) attribute their events back to this console; req.env wins on clash.
+      env: cleanEnv({ SNMULTICC_CONSOLE_ID: req.paneId, ...req.env }),
     })
 
     const entry: Entry = {

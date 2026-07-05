@@ -67,6 +67,16 @@ export const CH = {
   USAGE_SET_CONFIG: 'usage:setConfig', // send (renderer pushes the usage settings to main)
   USAGE_UPDATE: 'usage:update', // main -> renderer (UsageSnapshot, pushed on the poll interval)
 
+  // Claude status (per-console state dots, badges, notifications)
+  STATUS_TITLE: 'status:title', // send (renderer reports an xterm OSC title change: { paneId, title })
+  STATUS_VIEWED: 'status:viewed', // send (paneIds currently in view: active workspace minus minimized)
+  STATUS_SET_CONFIG: 'status:setConfig', // send (renderer pushes NotificationSettings to main)
+  STATUS_STATE: 'status:state', // main -> renderer (PaneStatusEvt)
+  STATUS_REVEAL: 'status:reveal', // main -> renderer (paneId; notification clicked)
+  STATUS_HOOKS_INSTALL: 'status:hooksInstall', // invoke -> StatusHooksStatusRes
+  STATUS_HOOKS_UNINSTALL: 'status:hooksUninstall', // invoke -> StatusHooksStatusRes
+  STATUS_HOOKS_STATUS: 'status:hooksStatus', // invoke -> StatusHooksStatusRes
+
   // Remote control (embedded LAN/Tailscale server for phone clients)
   REMOTE_SET_CONFIG: 'remote:setConfig', // send (renderer pushes RemoteSettings; main starts/stops/restarts)
   REMOTE_GET_STATE: 'remote:getState', // invoke -> RemoteUiState

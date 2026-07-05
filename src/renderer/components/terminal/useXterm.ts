@@ -619,7 +619,17 @@ export function useXterm(
     const input = term.onData((data) => {
       const id = ptyIdRef.current
       if (id) window.snApi.pty.write({ ptyId: id, data })
+      // Typing into a console acknowledges its attention badge (early-returns
+      // inside the action when there is nothing to clear, so this stays cheap).
+      useAppStore.getState().clearPaneAttention(opts.paneId)
     })
+
+    // Claude Code publishes its state through the terminal title (OSC 0/2,
+    // relayed by ConPTY): braille spinner = working, U+2733 = stopped. Main
+    // fuses this with the optional hooks channel; never parse pty bytes here.
+    const titleSub = term.onTitleChange((title) =>
+      window.snApi.status.reportTitle(opts.paneId, title),
+    )
 
     // Coalesce resize bursts (CSS-grid reflow, window drag, the spring layout
     // animation) into a single fit per frame; safeFit's diff guard suppresses
@@ -650,6 +660,7 @@ export function useXterm(
       container.removeEventListener('focusout', onFocusOut)
       container.removeEventListener('wheel', onWheelSnap)
       input.dispose()
+      titleSub.dispose()
       offData()
       offExit()
       const id = ptyIdRef.current

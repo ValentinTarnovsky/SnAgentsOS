@@ -20,7 +20,14 @@ import type {
   UpdateProgress,
   UsageSnapshot,
 } from '@shared/ipc-contract'
-import type { ConfigFile, RemoteSettings, UsageSettings } from '@shared/types'
+import type {
+  ConfigFile,
+  NotificationSettings,
+  PaneStatusEvt,
+  RemoteSettings,
+  StatusHooksStatusRes,
+  UsageSettings,
+} from '@shared/types'
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
@@ -91,6 +98,19 @@ const api: SnApi = {
     refresh: () => ipcRenderer.invoke(CH.USAGE_REFRESH) as Promise<UsageSnapshot>,
     setConfig: (cfg: UsageSettings) => ipcRenderer.send(CH.USAGE_SET_CONFIG, cfg),
     onUpdate: (cb: (s: UsageSnapshot) => void) => sub<UsageSnapshot>(CH.USAGE_UPDATE, cb),
+  },
+  status: {
+    reportTitle: (paneId: string, title: string) =>
+      ipcRenderer.send(CH.STATUS_TITLE, { paneId, title }),
+    setViewed: (paneIds: string[]) => ipcRenderer.send(CH.STATUS_VIEWED, paneIds),
+    setConfig: (cfg: NotificationSettings) => ipcRenderer.send(CH.STATUS_SET_CONFIG, cfg),
+    onState: (cb: (e: PaneStatusEvt) => void) => sub<PaneStatusEvt>(CH.STATUS_STATE, cb),
+    onReveal: (cb: (paneId: string) => void) => sub<string>(CH.STATUS_REVEAL, cb),
+    hooksInstall: (cfg: NotificationSettings) =>
+      ipcRenderer.invoke(CH.STATUS_HOOKS_INSTALL, cfg) as Promise<StatusHooksStatusRes>,
+    hooksUninstall: () =>
+      ipcRenderer.invoke(CH.STATUS_HOOKS_UNINSTALL) as Promise<StatusHooksStatusRes>,
+    hooksStatus: () => ipcRenderer.invoke(CH.STATUS_HOOKS_STATUS) as Promise<StatusHooksStatusRes>,
   },
   remote: {
     setConfig: (cfg: RemoteSettings) => ipcRenderer.send(CH.REMOTE_SET_CONFIG, cfg),

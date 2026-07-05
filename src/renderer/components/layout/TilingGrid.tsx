@@ -6,6 +6,7 @@ import { iconFor } from '@/lib/icons'
 import { focusPane, setFocusedPane } from '@/lib/focus'
 import { GRID_COLS, gridForCount, orderPanes } from './gridTemplates'
 import { PaneCell } from './PaneCell'
+import { PaneStatusDot } from '@/components/ui/StatusDot'
 
 /** Stable empty array so the minimized selector keeps a constant reference. */
 const NO_MINIMIZED: string[] = []
@@ -85,6 +86,7 @@ export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isAc
                 className="flex h-7 max-w-[200px] items-center gap-1.5 rounded-md border border-border bg-card/50 px-2 text-xs text-text-secondary transition-colors hover:border-accent-violet hover:text-text-primary"
               >
                 <Icon size={13} className="shrink-0" style={{ color: pane.color }} />
+                <PaneStatusDot paneId={pane.id} size={6} />
                 <span className="min-w-0 truncate">{pane.title}</span>
               </button>
             )

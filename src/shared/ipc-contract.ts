@@ -2,7 +2,15 @@
  * IPC request/response/event payload shapes and the typed bridge surface
  * exposed on `window.snApi`. The SnApi interface grows phase by phase.
  */
-import type { ConfigFile, RemoteSettings, SetupStep, UsageSettings } from './types'
+import type {
+  ConfigFile,
+  NotificationSettings,
+  PaneStatusEvt,
+  RemoteSettings,
+  SetupStep,
+  StatusHooksStatusRes,
+  UsageSettings,
+} from './types'
 import type {
   RemoteCtlAction,
   RemoteEndpointKind,
@@ -160,6 +168,14 @@ export interface PtyReattachRes {
 export interface PtyFlowReq {
   ptyId: string
   pause: boolean
+}
+
+// --- Claude status (state dots, badges, notifications) ---
+
+/** Renderer -> main: an xterm OSC title change observed in one console. */
+export interface StatusTitleReq {
+  paneId: string
+  title: string
 }
 
 // --- Remote control (embedded LAN/Tailscale server for phone clients) ---
@@ -324,6 +340,24 @@ export interface SnApi {
     setConfig(cfg: UsageSettings): void
     /** Subscribe to pushed snapshots; returns an unsubscribe function. */
     onUpdate(cb: (s: UsageSnapshot) => void): () => void
+  }
+  /** Claude status: per-console state dots, badges, notifications. */
+  status: {
+    /** Relay an xterm OSC title change (the structured Claude state channel). */
+    reportTitle(paneId: string, title: string): void
+    /** Panes currently in view (active workspace minus minimized); drives notify rules. */
+    setViewed(paneIds: string[]): void
+    /** Push NotificationSettings so main keeps notify rules + HookServer in sync. */
+    setConfig(cfg: NotificationSettings): void
+    /** Per-console state updates. Returns an unsubscribe function. */
+    onState(cb: (e: PaneStatusEvt) => void): () => void
+    /** Fired when a status notification is clicked (reveal that console). */
+    onReveal(cb: (paneId: string) => void): () => void
+    /** Write the SnMultiCC hook block into ~/.claude/settings.json. */
+    hooksInstall(cfg: NotificationSettings): Promise<StatusHooksStatusRes>
+    /** Remove every SnMultiCC hook handler from ~/.claude/settings.json. */
+    hooksUninstall(): Promise<StatusHooksStatusRes>
+    hooksStatus(): Promise<StatusHooksStatusRes>
   }
   /** Remote control from a phone browser (embedded LAN/Tailscale server). */
   remote: {

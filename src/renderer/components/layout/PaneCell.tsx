@@ -18,6 +18,7 @@ import { getPtyId } from '@/lib/ptyRegistry'
 import { redrawPane } from '@/lib/redrawRegistry'
 import { iconFor } from '@/lib/icons'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { PaneStatusDot } from '@/components/ui/StatusDot'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ScheduleDialog } from '@/components/layout/ScheduleDialog'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
@@ -165,6 +166,7 @@ export function PaneCell({
       >
         {draggable && <GripVertical size={13} className="shrink-0 text-text-secondary/40" />}
         <Icon size={13} className="shrink-0" style={{ color: pane.color }} />
+        <PaneStatusDot paneId={pane.id} />
         {renaming ? (
           <input
             autoFocus
