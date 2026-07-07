@@ -25,6 +25,11 @@ export function RemoteTerminal(): ReactNode {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const colsRef = useRef(80)
+  /** True when even MIN_FONT overflows the viewport (solveFont's overflow flag). */
+  const overflowRef = useRef(false)
+  /** Set once by the mount effect; lets the fontOverride effect below re-run
+   * the same cursor-follow pan logic without duplicating it out of scope. */
+  const followCursorRef = useRef<() => void>(() => {})
   const xtermTheme = useRemoteStore((s) => s.xtermTheme)
   const fontOverride = useRemoteStore((s) => s.fontOverride)
   const subscribedPaneId = useRemoteStore((s) => s.subscribedPaneId)
@@ -62,11 +67,57 @@ export function RemoteTerminal(): ReactNode {
     term.open(container)
     setActiveTerm(term)
 
+    // Best-effort hygiene on xterm's hidden input (item 5: iOS's input accessory
+    // bar - the prev/next chevrons + close-keyboard button above the keyboard -
+    // is OS chrome over any focused text field; no web API removes it. This does
+    // NOT remove the bar, it only avoids opting into extra affordances on it.
+    const helperTextarea = container.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea')
+    if (helperTextarea) {
+      helperTextarea.setAttribute('autocorrect', 'off')
+      helperTextarea.setAttribute('autocapitalize', 'off')
+      helperTextarea.setAttribute('spellcheck', 'false')
+    }
+
     const applyFont = (): void => {
       const width = container.clientWidth || window.innerWidth
-      const { fontSize } = solveFont(colsRef.current, width, useRemoteStore.getState().fontOverride)
+      const { fontSize, overflow } = solveFont(colsRef.current, width, useRemoteStore.getState().fontOverride)
       if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize
+      overflowRef.current = overflow
+      // Re-sync the pan immediately on any transition (not just overflow->fit):
+      // a resize/rotation can also flip fit->overflow with the caret already
+      // outside the new, narrower width.
+      followCursorRef.current()
     }
+
+    // Cursor-follow: when the grid overflows the viewport, pan the container so
+    // the caret stays visible with a small margin (hysteresis) instead of the
+    // browser's incidental focus-scroll. Never resizes the pty (v1 intact).
+    const HYSTERESIS_CELLS = 2
+    let cursorRaf: number | null = null
+    const followCursor = (): void => {
+      cursorRaf = null
+      if (!overflowRef.current) {
+        if (container.scrollLeft !== 0) container.scrollLeft = 0
+        return
+      }
+      const cols = term.cols || 1
+      const cellW = container.scrollWidth / cols
+      const caretX = term.buffer.active.cursorX * cellW
+      const margin = HYSTERESIS_CELLS * cellW
+      const viewLeft = container.scrollLeft
+      const viewRight = viewLeft + container.clientWidth
+      if (caretX < viewLeft + margin) {
+        container.scrollLeft = Math.max(0, caretX - margin)
+      } else if (caretX > viewRight - margin) {
+        container.scrollLeft = caretX - container.clientWidth + margin
+      }
+    }
+    const scheduleCursorFollow = (): void => {
+      if (cursorRaf != null) return
+      cursorRaf = requestAnimationFrame(followCursor)
+    }
+    followCursorRef.current = followCursor
+    const cursorSub = term.onCursorMove(() => scheduleCursorFollow())
 
     // Typed input -> pty. The Ctrl latch converts the next printable char to its
     // control code (charCode & 0x1f) then releases.
@@ -131,6 +182,8 @@ export function RemoteTerminal(): ReactNode {
       vv?.removeEventListener('resize', onResize)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('orientationchange', onResize)
+      if (cursorRaf != null) cancelAnimationFrame(cursorRaf)
+      cursorSub.dispose()
       inputSub.dispose()
       try {
         canvas?.dispose()
@@ -150,14 +203,18 @@ export function RemoteTerminal(): ReactNode {
     if (term && xtermTheme) term.options.theme = xtermTheme
   }, [xtermTheme])
 
-  // Manual font-size override (settings sheet +/-).
+  // Manual font-size override (settings sheet +/-). Must sync overflowRef too:
+  // solveFont's overflow flag is what the cursor-follow effect above reads, and
+  // this is the only other place fontSize (hence overflow) can change.
   useEffect(() => {
     const term = termRef.current
     const container = containerRef.current
     if (!term || !container) return
     const width = container.clientWidth || window.innerWidth
-    const { fontSize } = solveFont(colsRef.current, width, fontOverride)
+    const { fontSize, overflow } = solveFont(colsRef.current, width, fontOverride)
     term.options.fontSize = fontSize
+    overflowRef.current = overflow
+    followCursorRef.current()
   }, [fontOverride])
 
   // Switching panes: clear the stale content immediately so the gap before the

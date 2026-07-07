@@ -5,17 +5,25 @@
  * workspace first (triggering any lazy pty spawns) then subscribes - a
  * not-yet-running pane shows a spinner until the server pushes its replay.
  */
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Pencil } from 'lucide-react'
 import { Sheet } from './Sheet'
+import { RenameSheet } from './RenameSheet'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { t } from '../lib/i18n'
 
+interface RenameTarget {
+  workspaceId: string
+  paneId: string
+  title: string
+}
+
 export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
   const snapshot = useRemoteStore((s) => s.snapshot)
   const activePaneId = useRemoteStore((s) => s.activePaneId)
+  const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
 
   if (!snapshot) return null
 
@@ -26,6 +34,7 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
   }
 
   return (
+    <>
     <Sheet open={open} onClose={onClose} title={t('main.workspaces')}>
       <div className="flex flex-col gap-4">
         {snapshot.workspaces.map((ws) => {
@@ -46,9 +55,17 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
                 {ws.panes.map((pane) => {
                   const selected = pane.id === activePaneId
                   return (
-                    <button
+                    <div
                       key={pane.id}
+                      role="button"
+                      tabIndex={0}
                       onClick={() => pickPane(ws.id, pane.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          pickPane(ws.id, pane.id)
+                        }
+                      }}
                       className={clsx(
                         'flex items-center gap-3 rounded-btn border px-3 py-2.5 text-left transition',
                         selected
@@ -67,7 +84,18 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
                         <span className="text-[10px] font-medium uppercase text-text-secondary">{t('main.stopped')}</span>
                       )}
                       {selected && !pane.running && <Loader2 size={14} className="spin text-accent-violet" />}
-                    </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setRenameTarget({ workspaceId: ws.id, paneId: pane.id, title: pane.title })
+                        }}
+                        onKeyDown={(e) => e.stopPropagation()}
+                        className="shrink-0 rounded p-1 text-text-secondary transition-colors hover:text-text-primary"
+                        title={t('act.rename')}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    </div>
                   )
                 })}
               </div>
@@ -76,5 +104,21 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
         })}
       </div>
     </Sheet>
+    <RenameSheet
+      open={renameTarget != null}
+      initial={renameTarget?.title ?? ''}
+      onClose={() => setRenameTarget(null)}
+      onSave={(title) => {
+        if (renameTarget) {
+          void client.sendCtl({
+            kind: 'renamePane',
+            workspaceId: renameTarget.workspaceId,
+            paneId: renameTarget.paneId,
+            title,
+          })
+        }
+      }}
+    />
+    </>
   )
 }

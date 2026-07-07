@@ -5,6 +5,7 @@ import type {
   ConfigFile,
   ConnectionProfile,
   GridPreset,
+  KeyButton,
   Pane,
   PaneSchedule,
   PaneStatusEvt,
@@ -120,6 +121,7 @@ export interface AppState {
   sidebarCollapsed: boolean
   presets: AgentPreset[]
   snippets: Snippet[]
+  keyButtons: KeyButton[]
   connections: ConnectionProfile[]
   settings: Settings
   settingsOpen: boolean
@@ -173,6 +175,10 @@ export interface AppState {
   deleteSnippet: (id: string) => void
   newSnippetId: () => string
 
+  saveKeyButton: (button: KeyButton) => void
+  deleteKeyButton: (id: string) => void
+  newKeyButtonId: () => string
+
   saveConnection: (connection: ConnectionProfile) => void
   deleteConnection: (id: string) => void
   newConnectionId: () => string
@@ -200,6 +206,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sidebarCollapsed: false,
   presets: DEFAULT_PRESETS,
   snippets: [],
+  keyButtons: [],
   connections: [],
   settings: DEFAULT_SETTINGS,
   settingsOpen: false,
@@ -220,6 +227,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const workspaces = config.workspaces ?? []
       const presets = config.presets && config.presets.length ? config.presets : s.presets
       const snippets = config.snippets ?? []
+      const keyButtons = config.keyButtons ?? []
       const connections = config.connections ?? []
       const settings: Settings = { ...s.settings, ...config.settings }
       let activeWorkspaceId: string | null = null
@@ -233,6 +241,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         workspaces,
         presets,
         snippets,
+        keyButtons,
         connections,
         settings,
         sidebarCollapsed: settings.sidebarCollapsed,
@@ -287,6 +296,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       workspaces: config.workspaces ?? [],
       presets: config.presets && config.presets.length ? config.presets : s.presets,
       snippets: config.snippets ?? [],
+      keyButtons: config.keyButtons ?? [],
       connections: config.connections ?? [],
       settings: { ...s.settings, ...config.settings },
       sidebarCollapsed: config.settings?.sidebarCollapsed ?? s.sidebarCollapsed,
@@ -313,12 +323,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       })
       const existingSnip = new Set(s.snippets.map((x) => x.id))
       const newSnippets = (config.snippets ?? []).filter((x) => !existingSnip.has(x.id))
+      const existingKeyButton = new Set(s.keyButtons.map((x) => x.id))
+      const newKeyButtons = (config.keyButtons ?? []).filter((x) => !existingKeyButton.has(x.id))
       const existingConn = new Set(s.connections.map((x) => x.id))
       const newConnections = (config.connections ?? []).filter((x) => !existingConn.has(x.id))
       return {
         workspaces: [...s.workspaces, ...importedWs],
         presets: [...s.presets, ...newPresets],
         snippets: [...s.snippets, ...newSnippets],
+        keyButtons: [...s.keyButtons, ...newKeyButtons],
         connections: [...s.connections, ...newConnections],
       }
     }),
@@ -521,6 +534,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   deleteSnippet: (id) => set((s) => ({ snippets: s.snippets.filter((x) => x.id !== id) })),
 
   newSnippetId: () => uid('snip'),
+
+  saveKeyButton: (button) =>
+    set((s) => {
+      const exists = s.keyButtons.some((x) => x.id === button.id)
+      return {
+        keyButtons: exists
+          ? s.keyButtons.map((x) => (x.id === button.id ? button : x))
+          : [...s.keyButtons, button],
+      }
+    }),
+
+  deleteKeyButton: (id) => set((s) => ({ keyButtons: s.keyButtons.filter((x) => x.id !== id) })),
+
+  newKeyButtonId: () => uid('key'),
 
   saveConnection: (connection) =>
     set((s) => {

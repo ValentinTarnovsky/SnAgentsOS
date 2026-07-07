@@ -7,13 +7,23 @@
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
 import { Megaphone, Plus, RotateCcw, Settings as SettingsIcon, Trash2, Minus, Plus as PlusSmall, LogOut } from 'lucide-react'
+import type { ThemeName } from '@shared/types'
 import { Sheet } from './Sheet'
 import { PrimaryButton } from './InfoScreen'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { getActiveTerm } from '../lib/terminalBus'
 import { MAX_FONT, MIN_FONT } from '../lib/fit'
-import { t } from '../lib/i18n'
+import { t, type MobileMessageKey } from '../lib/i18n'
+
+const THEMES = ['midnight', 'light', 'nord', 'dracula', 'solarized'] as const
+const THEME_KEY: Record<(typeof THEMES)[number], MobileMessageKey> = {
+  midnight: 'theme.midnight',
+  light: 'theme.light',
+  nord: 'theme.nord',
+  dracula: 'theme.dracula',
+  solarized: 'theme.solarized',
+}
 
 function Row({
   icon,
@@ -114,6 +124,8 @@ function GlobalPromptSheet({
 function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
   const fontOverride = useRemoteStore((s) => s.fontOverride)
   const setFontOverride = useRemoteStore((s) => s.setFontOverride)
+  const snapshot = useRemoteStore((s) => s.snapshot)
+  const themeName = snapshot?.themeName
   const [confirmUnpair, setConfirmUnpair] = useState(false)
 
   const currentSize = (): number => {
@@ -126,10 +138,37 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
     const next = Math.max(MIN_FONT, Math.min(MAX_FONT, currentSize() + delta))
     setFontOverride(next)
   }
+  const setTheme = (theme: ThemeName): void => {
+    void client.sendCtl({ kind: 'setTheme', theme })
+  }
 
   return (
     <>
       <Sheet open={open} onClose={onClose} title={t('act.settings')}>
+        <div className="mb-5">
+          <span className="mb-2 block text-sm text-text-primary">{t('act.theme')}</span>
+          <div className="flex flex-wrap gap-2">
+            {THEMES.map((id) => (
+              <button
+                key={id}
+                onClick={() => setTheme(id)}
+                className={clsx(
+                  'rounded-btn border px-3 py-1.5 text-xs font-medium transition',
+                  themeName === id
+                    ? 'border-accent-violet bg-accent-violet text-white'
+                    : 'border-border bg-bg-secondary text-text-primary active:bg-card',
+                )}
+              >
+                {t(THEME_KEY[id])}
+              </button>
+            ))}
+            {themeName === 'custom' && (
+              <span className="rounded-btn border border-border bg-bg-secondary px-3 py-1.5 text-xs font-medium text-text-secondary opacity-60">
+                {t('theme.custom')}
+              </span>
+            )}
+          </div>
+        </div>
         <div className="mb-5 flex items-center justify-between">
           <span className="text-sm text-text-primary">{t('act.fontSize')}</span>
           <div className="flex items-center gap-3">

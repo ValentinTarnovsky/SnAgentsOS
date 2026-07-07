@@ -23,9 +23,12 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     workspaces,
     activeWorkspaceId: state.activeWorkspaceId,
     themeTokens: resolveTokens(state.settings.theme, state.settings.customColors),
+    themeName: state.settings.theme,
     language: state.settings.language,
     fontFamily: state.settings.fontFamily,
     fontSize: state.settings.fontSize,
+    snippets: state.snippets,
+    keyButtons: state.keyButtons,
   }
 }
 
@@ -39,6 +42,8 @@ function relevant(s: AppState): unknown[] {
     s.settings.language,
     s.settings.fontFamily,
     s.settings.fontSize,
+    s.snippets,
+    s.keyButtons,
   ]
 }
 

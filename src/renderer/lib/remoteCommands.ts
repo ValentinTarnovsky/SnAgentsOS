@@ -80,6 +80,20 @@ function run(action: RemoteCtlAction): CmdResult {
       return { ok: true, info: count }
     }
 
+    case 'setTheme': {
+      store.updateSettings({ theme: action.theme })
+      return { ok: true }
+    }
+
+    case 'renamePane': {
+      const ws = store.workspaces.find((w) => w.id === action.workspaceId)
+      if (!ws || !ws.panes.some((p) => p.id === action.paneId)) {
+        return { ok: false, error: 'not_found' }
+      }
+      store.renamePane(action.workspaceId, action.paneId, action.title)
+      return { ok: true }
+    }
+
     default:
       return { ok: false, error: 'unknown_action' }
   }

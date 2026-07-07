@@ -6,7 +6,7 @@
  * into three targets: main, renderer and the mobile web client. Runtime
  * validation schemas live in remote-protocol-schemas.ts (main-only).
  */
-import type { Language, PaneType, ThemeTokens } from './types'
+import type { KeyButton, Language, PaneType, Snippet, ThemeName, ThemeTokens } from './types'
 
 export const PROTOCOL_VERSION = 1
 
@@ -49,9 +49,15 @@ export interface RemoteStateSnapshot {
   activeWorkspaceId: string | null
   /** Resolved flat theme tokens (base theme + custom overrides). */
   themeTokens: ThemeTokens
+  /** Named theme id (undefined for older desktops mid-upgrade). */
+  themeName?: ThemeName
   language: Language
   fontFamily: string
   fontSize: number
+  /** Saved prompt snippets, invocable from the phone. */
+  snippets?: Snippet[]
+  /** Custom phone KeyBar buttons. */
+  keyButtons?: KeyButton[]
 }
 
 // --- Control actions (phone -> desktop, executed by the renderer) ---
@@ -62,6 +68,8 @@ export type RemoteCtlAction =
   | { kind: 'closePane'; workspaceId: string; paneId: string }
   | { kind: 'restartPane'; workspaceId: string; paneId: string }
   | { kind: 'globalPrompt'; workspaceId: string; text: string }
+  | { kind: 'setTheme'; theme: ThemeName }
+  | { kind: 'renamePane'; workspaceId: string; paneId: string; title: string }
 
 // --- Client -> server messages ---
 

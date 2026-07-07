@@ -396,6 +396,24 @@ export const es: Record<keyof typeof en, string> = {
   'remote.pairing.allow': 'Permitir',
   'remote.pairing.deny': 'Denegar',
 
+  // Atajos custom de la barra de teclas del telefono
+  'remote.keybar.title': 'Botones de la barra de teclas del telefono',
+  'remote.keybar.hint':
+    'Agrega botones custom a la barra de teclas de los telefonos pareados. Cada boton manda una secuencia fija de bytes a la consola - que eso se interprete como "insertar una linea nueva" o algo distinto depende de la app que corre ahi, no de SnMultiCC.',
+  'remote.keybar.new': 'Nuevo boton',
+  'remote.keybar.label': 'Etiqueta',
+  'remote.keybar.seq': 'Secuencia',
+  'remote.keybar.literal': 'Texto literal',
+  'remote.keybar.addText': 'Agregar texto',
+  'remote.keybar.enter': 'Enter',
+  'remote.keybar.newline': 'Salto de linea',
+  'remote.keybar.tab': 'Tab',
+  'remote.keybar.esc': 'Esc',
+  'remote.keybar.ctrl': 'Ctrl+',
+  'remote.keybar.clear': 'Limpiar',
+  'remote.keybar.preview': 'Vista previa',
+  'remote.keybar.empty': 'Todavia no hay botones custom.',
+
   // Title bar / tray
   'titlebar.minimize': 'Minimizar',
   'titlebar.maximize': 'Maximizar',

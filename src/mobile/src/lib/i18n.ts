@@ -65,6 +65,9 @@ const en = {
   'key.enter': 'Enter',
   'key.paste': 'Paste',
   'key.keyboard': 'Keyboard',
+  'key.snippets': 'Snippets',
+  // Snippets sheet
+  'snip.empty': 'No snippets defined on the desktop.',
   // Action sheet
   'act.newConsole': 'New console',
   'act.restart': 'Restart console',
@@ -74,6 +77,9 @@ const en = {
   'act.send': 'Send',
   'act.cancel': 'Cancel',
   'act.confirm': 'Confirm',
+  'act.save': 'Save',
+  'act.rename': 'Rename console',
+  'act.theme': 'Theme',
   'act.restartConfirm': 'Restart this console? Its running process will be killed.',
   'act.closeConfirm': 'Close this console? Its running process will be killed.',
   'act.promptPlaceholder': 'Prompt sent to every console in this workspace',
@@ -83,6 +89,15 @@ const en = {
   'act.fontSize': 'Font size',
   'act.unpair': 'Unpair this device',
   'act.unpairConfirm': 'Forget this device? You will need to scan the QR to pair again.',
+  // Rename sheet
+  'rename.label': 'Console name',
+  // Theme picker
+  'theme.midnight': 'Midnight',
+  'theme.light': 'Light',
+  'theme.nord': 'Nord',
+  'theme.dracula': 'Dracula',
+  'theme.solarized': 'Solarized',
+  'theme.custom': 'Custom (edit on the desktop)',
 } as const
 
 type Key = keyof typeof en
@@ -139,6 +154,8 @@ const es: Record<Key, string> = {
   'key.enter': 'Enter',
   'key.paste': 'Pegar',
   'key.keyboard': 'Teclado',
+  'key.snippets': 'Snippets',
+  'snip.empty': 'No hay snippets definidos en la PC.',
   'act.newConsole': 'Nueva consola',
   'act.restart': 'Reiniciar consola',
   'act.close': 'Cerrar consola',
@@ -147,6 +164,9 @@ const es: Record<Key, string> = {
   'act.send': 'Enviar',
   'act.cancel': 'Cancelar',
   'act.confirm': 'Confirmar',
+  'act.save': 'Guardar',
+  'act.rename': 'Renombrar consola',
+  'act.theme': 'Tema',
   'act.restartConfirm': 'Reiniciar esta consola? Su proceso en ejecucion sera terminado.',
   'act.closeConfirm': 'Cerrar esta consola? Su proceso en ejecucion sera terminado.',
   'act.promptPlaceholder': 'Prompt enviado a cada consola de este espacio',
@@ -156,6 +176,13 @@ const es: Record<Key, string> = {
   'act.fontSize': 'Tamano de fuente',
   'act.unpair': 'Desvincular este dispositivo',
   'act.unpairConfirm': 'Olvidar este dispositivo? Vas a tener que escanear el QR para vincular otra vez.',
+  'rename.label': 'Nombre de la consola',
+  'theme.midnight': 'Midnight',
+  'theme.light': 'Claro',
+  'theme.nord': 'Nord',
+  'theme.dracula': 'Dracula',
+  'theme.solarized': 'Solarized',
+  'theme.custom': 'Personalizado (editalo en la PC)',
 }
 
 const DICTS: Record<Language, Record<Key, string>> = { en, es }

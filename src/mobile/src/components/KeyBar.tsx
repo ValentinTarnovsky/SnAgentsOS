@@ -10,7 +10,15 @@
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardPaste, Keyboard } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  ClipboardPaste,
+  FileText,
+  Keyboard,
+} from 'lucide-react'
 import { client } from '../lib/client'
 import { getActiveTerm } from '../lib/terminalBus'
 import { useRemoteStore } from '../lib/store'
@@ -49,9 +57,17 @@ function Key({ label, onDown, active, children }: KeyProps): ReactNode {
   )
 }
 
-export function KeyBar({ onPaste }: { onPaste: () => void }): ReactNode {
+export function KeyBar({
+  onPaste,
+  onSnippets,
+}: {
+  onPaste: () => void
+  onSnippets: () => void
+}): ReactNode {
   const ctrlLatch = useRemoteStore((s) => s.ctrlLatch)
   const setCtrlLatch = useRemoteStore((s) => s.setCtrlLatch)
+  const snapshot = useRemoteStore((s) => s.snapshot)
+  const keyButtons = snapshot?.keyButtons ?? []
   const [kbShown, setKbShown] = useState(false)
 
   const toggleKeyboard = (): void => {
@@ -88,8 +104,14 @@ export function KeyBar({ onPaste }: { onPaste: () => void }): ReactNode {
         <ChevronRight size={18} />
       </Key>
       <Key label={t('key.enter')} onDown={() => client.sendInput('\r')} />
+      {keyButtons.map((btn) => (
+        <Key key={btn.id} label={btn.label} onDown={() => client.sendInput(btn.seq)} />
+      ))}
       <Key onDown={onPaste}>
         <ClipboardPaste size={18} />
+      </Key>
+      <Key onDown={onSnippets}>
+        <FileText size={18} />
       </Key>
       <Key active={kbShown} onDown={toggleKeyboard}>
         <Keyboard size={18} />

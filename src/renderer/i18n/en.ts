@@ -393,6 +393,24 @@ export const en = {
   'remote.pairing.allow': 'Allow',
   'remote.pairing.deny': 'Deny',
 
+  // Phone KeyBar custom shortcuts
+  'remote.keybar.title': 'Phone key bar buttons',
+  'remote.keybar.hint':
+    'Add custom buttons to the key bar on paired phones. Each button sends a fixed sequence of bytes to the console - whether that reads as "insert a newline" or something else depends on the app running there, not on SnMultiCC.',
+  'remote.keybar.new': 'New button',
+  'remote.keybar.label': 'Label',
+  'remote.keybar.seq': 'Sequence',
+  'remote.keybar.literal': 'Literal text',
+  'remote.keybar.addText': 'Add text',
+  'remote.keybar.enter': 'Enter',
+  'remote.keybar.newline': 'Newline',
+  'remote.keybar.tab': 'Tab',
+  'remote.keybar.esc': 'Esc',
+  'remote.keybar.ctrl': 'Ctrl+',
+  'remote.keybar.clear': 'Clear',
+  'remote.keybar.preview': 'Preview',
+  'remote.keybar.empty': 'No custom buttons yet.',
+
   // Title bar / tray
   'titlebar.minimize': 'Minimize',
   'titlebar.maximize': 'Maximize',

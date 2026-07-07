@@ -21,6 +21,16 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('closePane'), workspaceId: id, paneId: id }),
   z.object({ kind: z.literal('restartPane'), workspaceId: id, paneId: id }),
   z.object({ kind: z.literal('globalPrompt'), workspaceId: id, text: z.string().max(16384) }),
+  z.object({
+    kind: z.literal('setTheme'),
+    theme: z.enum(['midnight', 'light', 'nord', 'dracula', 'solarized', 'custom']),
+  }),
+  z.object({
+    kind: z.literal('renamePane'),
+    workspaceId: id,
+    paneId: id,
+    title: z.string().min(1).max(200),
+  }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [

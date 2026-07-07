@@ -7,7 +7,7 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 7
+export const CONFIG_VERSION = 8
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -108,6 +108,17 @@ export interface Snippet {
   id: string
   name: string
   text: string
+}
+
+/**
+ * A custom button in the phone's KeyBar. `seq` is the raw bytes written to the
+ * pty when tapped (e.g. "\r", "\x1b", a literal string) - what it does depends
+ * on the app reading it, SnMultiCC just forwards the bytes.
+ */
+export interface KeyButton {
+  id: string
+  label: string
+  seq: string
 }
 
 export interface AgentPreset {
@@ -345,4 +356,6 @@ export interface ConfigFile {
   snippets?: Snippet[]
   /** Reusable pre-launch connection sequences (e.g. SSH). */
   connections?: ConnectionProfile[]
+  /** Custom phone KeyBar buttons. */
+  keyButtons?: KeyButton[]
 }

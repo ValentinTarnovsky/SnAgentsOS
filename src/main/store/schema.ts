@@ -162,6 +162,12 @@ const snippetSchema = z.object({
   text: z.string(),
 })
 
+const keyButtonSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  seq: z.string(),
+})
+
 const configSchema = z.object({
   version: z.number(),
   workspaces: z.array(workspaceSchema),
@@ -170,6 +176,7 @@ const configSchema = z.object({
   activeWorkspaceId: z.string().nullable().optional(),
   snippets: z.array(snippetSchema).optional().catch(undefined),
   connections: z.array(connectionProfileSchema).optional().catch(undefined),
+  keyButtons: z.array(keyButtonSchema).optional().catch(undefined),
 })
 
 /** Validates a raw parsed object into a ConfigFile, or null if invalid. */

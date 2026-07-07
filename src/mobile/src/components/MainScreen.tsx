@@ -13,6 +13,7 @@ import { KeyBar } from './KeyBar'
 import { ConsoleDrawer } from './ConsoleDrawer'
 import { ActionSheet } from './ActionSheet'
 import { PasteSheet } from './PasteSheet'
+import { SnippetsSheet } from './SnippetsSheet'
 import { StatusBanner } from './StatusBanner'
 import { useRemoteStore } from '../lib/store'
 import { t } from '../lib/i18n'
@@ -49,6 +50,7 @@ export function MainScreen(): ReactNode {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [actionsOpen, setActionsOpen] = useState(false)
   const [pasteOpen, setPasteOpen] = useState(false)
+  const [snippetsOpen, setSnippetsOpen] = useState(false)
 
   const { workspaceName, paneTitle } = useMemo(() => {
     if (!snapshot) return { workspaceName: '', paneTitle: t('main.noConsole') }
@@ -93,11 +95,12 @@ export function MainScreen(): ReactNode {
         <Toast />
       </main>
 
-      <KeyBar onPaste={() => setPasteOpen(true)} />
+      <KeyBar onPaste={() => setPasteOpen(true)} onSnippets={() => setSnippetsOpen(true)} />
 
       <ConsoleDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <ActionSheet open={actionsOpen} onClose={() => setActionsOpen(false)} />
       <PasteSheet open={pasteOpen} onClose={() => setPasteOpen(false)} />
+      <SnippetsSheet open={snippetsOpen} onClose={() => setSnippetsOpen(false)} />
     </div>
   )
 }

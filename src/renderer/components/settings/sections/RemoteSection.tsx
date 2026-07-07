@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Copy, QrCode, Smartphone, Trash2 } from 'lucide-react'
+import { Copy, Pencil, Plus, QrCode, Smartphone, Trash2 } from 'lucide-react'
 import type { RemoteServerState } from '@shared/ipc-contract'
 import type { RemoteEndpointKind } from '@shared/remote-protocol'
+import type { KeyButton } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { useRemoteStore } from '@/lib/remoteStore'
 import { useT, useLang, type MessageKey } from '@/i18n'
@@ -33,6 +34,18 @@ const KIND_KEY: Record<RemoteEndpointKind, MessageKey> = {
   other: 'remote.kind.other',
 }
 
+/** Renders control bytes in caret notation (^J, ^[, ^?) so a sequence is readable. */
+function caretNotation(seq: string): string {
+  let out = ''
+  for (const ch of seq) {
+    const code = ch.charCodeAt(0)
+    if (code === 0x7f) out += '^?'
+    else if (code < 0x20) out += '^' + String.fromCharCode(code + 64)
+    else out += ch
+  }
+  return out
+}
+
 /** Localized relative "last seen" without extra i18n keys. */
 function fmtLastSeen(ms: number, lang: string): string {
   const diff = ms - Date.now()
@@ -57,6 +70,12 @@ export function RemoteSection() {
   const setQrOpen = useRemoteStore((s) => s.setQrOpen)
   const revoke = useRemoteStore((s) => s.revoke)
   const info = useAppInfo()
+
+  const keyButtons = useAppStore((s) => s.keyButtons)
+  const saveKeyButton = useAppStore((s) => s.saveKeyButton)
+  const deleteKeyButton = useAppStore((s) => s.deleteKeyButton)
+  const newKeyButtonId = useAppStore((s) => s.newKeyButtonId)
+  const [editingButton, setEditingButton] = useState<KeyButton | null>(null)
 
   const [portDraft, setPortDraft] = useState(String(settings.port))
   const [revoking, setRevoking] = useState<string | null>(null)
@@ -201,6 +220,67 @@ export function RemoteSection() {
         <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.securityHint')}</p>
       </div>
 
+      {/* Phone KeyBar custom shortcuts */}
+      <div className="space-y-2 border-t border-border pt-5">
+        <label className={labelCls}>{t('remote.keybar.title')}</label>
+        <p className="text-xs leading-relaxed text-text-secondary">{t('remote.keybar.hint')}</p>
+
+        {editingButton ? (
+          <KeyButtonEditor
+            initial={editingButton}
+            onSave={(button) => {
+              saveKeyButton(button)
+              setEditingButton(null)
+            }}
+            onCancel={() => setEditingButton(null)}
+          />
+        ) : (
+          <>
+            {keyButtons.length === 0 && (
+              <p className="text-xs text-text-secondary">{t('remote.keybar.empty')}</p>
+            )}
+            {keyButtons.length > 0 && (
+              <div className="space-y-2">
+                {keyButtons.map((btn) => (
+                  <div
+                    key={btn.id}
+                    className="flex items-center gap-3 rounded-card border border-border bg-bg-secondary px-3 py-2.5"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <span className="block truncate text-sm text-text-primary">{btn.label}</span>
+                      <span className="block truncate font-mono text-[11px] text-text-secondary">
+                        {caretNotation(btn.seq)}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setEditingButton(btn)}
+                      className="rounded p-1.5 text-text-secondary hover:text-text-primary"
+                      title={t('settings.edit')}
+                    >
+                      <Pencil size={15} />
+                    </button>
+                    <button
+                      onClick={() => deleteKeyButton(btn.id)}
+                      className="rounded p-1.5 text-text-secondary hover:text-red-400"
+                      title={t('ctx.delete')}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              onClick={() => setEditingButton({ id: newKeyButtonId(), label: '', seq: '' })}
+              className="flex w-full items-center justify-center gap-2 rounded-card border border-dashed border-border py-2.5 text-sm text-text-secondary transition-colors hover:border-accent-violet/40 hover:text-text-primary"
+            >
+              <Plus size={16} />
+              {t('remote.keybar.new')}
+            </button>
+          </>
+        )}
+      </div>
+
       {revokingDevice && (
         <ConfirmDialog
           open
@@ -216,6 +296,111 @@ export function RemoteSection() {
           onCancel={() => setRevoking(null)}
         />
       )}
+    </div>
+  )
+}
+
+const chipCls =
+  'rounded-btn border border-border bg-bg-secondary px-2.5 py-1 text-xs text-text-primary transition-colors hover:border-accent-violet/40'
+
+function KeyButtonEditor({
+  initial,
+  onSave,
+  onCancel,
+}: {
+  initial: KeyButton
+  onSave: (button: KeyButton) => void
+  onCancel: () => void
+}) {
+  const t = useT()
+  const [label, setLabel] = useState(initial.label)
+  const [seq, setSeq] = useState(initial.seq)
+  const [literal, setLiteral] = useState('')
+  const [ctrlChar, setCtrlChar] = useState('J')
+
+  const addLiteral = (): void => {
+    if (!literal) return
+    setSeq(seq + literal)
+    setLiteral('')
+  }
+  const addCtrl = (): void => {
+    const upper = ctrlChar.toUpperCase().charCodeAt(0) || 74 // 74 = 'J'
+    setSeq(seq + String.fromCharCode(upper & 0x1f))
+  }
+
+  return (
+    <div className="space-y-4 rounded-card border border-border bg-bg-secondary p-3">
+      <div>
+        <label className={labelCls}>{t('remote.keybar.label')}</label>
+        <input className={inputCls} value={label} onChange={(e) => setLabel(e.target.value)} />
+      </div>
+
+      <div className="space-y-2">
+        <label className={labelCls}>{t('remote.keybar.literal')}</label>
+        <div className="flex gap-2">
+          <input
+            className={cn(inputCls, 'flex-1')}
+            value={literal}
+            onChange={(e) => setLiteral(e.target.value)}
+          />
+          <button onClick={addLiteral} className={chipCls}>
+            {t('remote.keybar.addText')}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button onClick={() => setSeq(seq + '\r')} className={chipCls}>
+          {t('remote.keybar.enter')}
+        </button>
+        <button onClick={() => setSeq(seq + '\n')} className={chipCls}>
+          {t('remote.keybar.newline')}
+        </button>
+        <button onClick={() => setSeq(seq + '\t')} className={chipCls}>
+          {t('remote.keybar.tab')}
+        </button>
+        <button onClick={() => setSeq(seq + '\x1b')} className={chipCls}>
+          {t('remote.keybar.esc')}
+        </button>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-text-secondary">{t('remote.keybar.ctrl')}</span>
+          <input
+            maxLength={1}
+            value={ctrlChar}
+            onChange={(e) => setCtrlChar(e.target.value.slice(-1) || 'J')}
+            className={cn(inputCls, 'w-10 px-2 text-center')}
+          />
+          <button onClick={addCtrl} className={chipCls}>
+            {t('remote.keybar.addText')}
+          </button>
+        </div>
+        <button onClick={() => setSeq('')} className={chipCls}>
+          {t('remote.keybar.clear')}
+        </button>
+      </div>
+
+      <div>
+        <label className={labelCls}>{t('remote.keybar.preview')}</label>
+        <p className="rounded-btn border border-border bg-card px-3 py-2 font-mono text-sm text-text-primary">
+          {caretNotation(seq) || ' '}
+        </p>
+      </div>
+
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          onClick={onCancel}
+          className="rounded-btn border border-border px-4 py-2 text-sm text-text-secondary hover:text-text-primary"
+        >
+          {t('common.cancel')}
+        </button>
+        <button
+          disabled={seq.length === 0 || label.trim().length === 0}
+          onClick={() => onSave({ id: initial.id, label: label.trim(), seq })}
+          className="rounded-btn bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))] px-4 py-2 text-sm font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {t('common.save')}
+        </button>
+      </div>
     </div>
   )
 }
