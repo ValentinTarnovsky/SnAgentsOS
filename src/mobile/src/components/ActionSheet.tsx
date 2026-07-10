@@ -6,9 +6,10 @@
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Megaphone, Plus, RotateCcw, Settings as SettingsIcon, Trash2, Minus, Plus as PlusSmall, LogOut } from 'lucide-react'
+import { Megaphone, Plus, RotateCcw, Settings as SettingsIcon, Trash2, Minus, Plus as PlusSmall, LogOut, Gauge } from 'lucide-react'
 import type { ThemeName } from '@shared/types'
 import { Sheet } from './Sheet'
+import { UsageSheet } from './UsageSheet'
 import { PrimaryButton } from './InfoScreen'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
@@ -211,6 +212,7 @@ export function ActionSheet({ open, onClose }: { open: boolean; onClose: () => v
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [promptOpen, setPromptOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [usageOpen, setUsageOpen] = useState(false)
 
   const workspaceId = snapshot?.activeWorkspaceId ?? null
 
@@ -242,6 +244,14 @@ export function ActionSheet({ open, onClose }: { open: boolean; onClose: () => v
       <Sheet open={open} onClose={onClose} title={t('main.actions')}>
         <div className="flex flex-col gap-2">
           <Row icon={<Plus size={18} />} label={t('act.newConsole')} onClick={() => void newConsole()} />
+          <Row
+            icon={<Gauge size={18} />}
+            label={t('act.usage')}
+            onClick={() => {
+              onClose()
+              setUsageOpen(true)
+            }}
+          />
           <Row
             icon={<Megaphone size={18} />}
             label={t('act.globalPrompt')}
@@ -281,6 +291,7 @@ export function ActionSheet({ open, onClose }: { open: boolean; onClose: () => v
       <ConfirmSheet state={confirm} onClose={() => setConfirm(null)} />
       <GlobalPromptSheet open={promptOpen} onClose={() => setPromptOpen(false)} workspaceId={workspaceId} />
       <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <UsageSheet open={usageOpen} onClose={() => setUsageOpen(false)} />
     </>
   )
 }

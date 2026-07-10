@@ -70,6 +70,7 @@ const en = {
   'snip.empty': 'No snippets defined on the desktop.',
   // Action sheet
   'act.newConsole': 'New console',
+  'act.usage': 'Usage',
   'act.restart': 'Restart console',
   'act.close': 'Close console',
   'act.globalPrompt': 'Global prompt',
@@ -98,6 +99,19 @@ const en = {
   'theme.dracula': 'Dracula',
   'theme.solarized': 'Solarized',
   'theme.custom': 'Custom (edit on the desktop)',
+  // Usage sheet
+  'usage.title': 'Usage',
+  'usage.claude': 'Claude',
+  'usage.codex': 'Codex',
+  'usage.custom': 'Custom',
+  'usage.session': 'Session',
+  'usage.weekly': 'Weekly',
+  'usage.none': 'No usage data. Enable the usage widget on the desktop.',
+  'usage.resets': 'resets in {t}',
+  'usage.expired': 'expired',
+  'usage.error': 'error',
+  'usage.loading': 'loading...',
+  'usage.updated': 'updated {t}',
 } as const
 
 type Key = keyof typeof en
@@ -157,6 +171,7 @@ const es: Record<Key, string> = {
   'key.snippets': 'Snippets',
   'snip.empty': 'No hay snippets definidos en la PC.',
   'act.newConsole': 'Nueva consola',
+  'act.usage': 'Uso',
   'act.restart': 'Reiniciar consola',
   'act.close': 'Cerrar consola',
   'act.globalPrompt': 'Prompt global',
@@ -183,6 +198,18 @@ const es: Record<Key, string> = {
   'theme.dracula': 'Dracula',
   'theme.solarized': 'Solarized',
   'theme.custom': 'Personalizado (editalo en la PC)',
+  'usage.title': 'Uso',
+  'usage.claude': 'Claude',
+  'usage.codex': 'Codex',
+  'usage.custom': 'Custom',
+  'usage.session': 'Sesion',
+  'usage.weekly': 'Semanal',
+  'usage.none': 'Sin datos de uso. Activa el widget de uso en la PC.',
+  'usage.resets': 'reinicia en {t}',
+  'usage.expired': 'expirado',
+  'usage.error': 'error',
+  'usage.loading': 'cargando...',
+  'usage.updated': 'actualizado {t}',
 }
 
 const DICTS: Record<Language, Record<Key, string>> = { en, es }

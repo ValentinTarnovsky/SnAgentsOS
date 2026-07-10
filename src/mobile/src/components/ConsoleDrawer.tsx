@@ -7,7 +7,7 @@
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Loader2, Pencil } from 'lucide-react'
+import { Loader2, Pencil, Plus } from 'lucide-react'
 import { Sheet } from './Sheet'
 import { RenameSheet } from './RenameSheet'
 import { useRemoteStore } from '../lib/store'
@@ -33,6 +33,19 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
     onClose()
   }
 
+  /**
+   * Create a console in any workspace (incl. an empty one) and enter it. Works
+   * for the active workspace or another; the ctlAck carries the new pane id and
+   * switchWorkspaceAndView handles the switch even before the snapshot updates.
+   */
+  const createInWorkspace = async (workspaceId: string): Promise<void> => {
+    onClose()
+    const res = await client.sendCtl({ kind: 'createPane', workspaceId })
+    if (!res.ok || !res.paneId) return
+    if (workspaceId === snapshot.activeWorkspaceId) client.viewPane(res.paneId)
+    else await client.switchWorkspaceAndView(workspaceId, res.paneId)
+  }
+
   return (
     <>
     <Sheet open={open} onClose={onClose} title={t('main.workspaces')}>
@@ -49,9 +62,6 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
                 </span>
               </div>
               <div className="flex flex-col gap-1">
-                {ws.panes.length === 0 && (
-                  <div className="px-3 py-2 text-xs text-text-secondary">-</div>
-                )}
                 {ws.panes.map((pane) => {
                   const selected = pane.id === activePaneId
                   return (
@@ -98,6 +108,13 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
                     </div>
                   )
                 })}
+                <button
+                  onClick={() => void createInWorkspace(ws.id)}
+                  className="flex items-center gap-3 rounded-btn border border-dashed border-border px-3 py-2.5 text-left text-text-secondary transition active:bg-card"
+                >
+                  <Plus size={16} className="shrink-0" />
+                  <span className="text-sm">{t('act.newConsole')}</span>
+                </button>
               </div>
             </div>
           )

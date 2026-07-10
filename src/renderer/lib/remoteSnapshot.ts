@@ -2,6 +2,7 @@ import type { RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-pr
 import { resolveTokens } from '@/themes'
 import { type AppState, useAppStore } from './store'
 import { getPtyId, onPtyRegistryChange } from './ptyRegistry'
+import { useUsageStore } from './usageStore'
 
 /** Build the compact desktop-state mirror pushed to phones. */
 function buildSnapshot(state: AppState): RemoteStateSnapshot {
@@ -29,6 +30,8 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     fontSize: state.settings.fontSize,
     snippets: state.snippets,
     keyButtons: state.keyButtons,
+    // Fields are structurally identical to RemoteUsageSnapshot; passthrough.
+    usage: useUsageStore.getState().snapshot ?? null,
   }
 }
 
@@ -73,6 +76,9 @@ export function startRemoteSnapshotSync(): () => void {
     }
   })
   const unsubPty = onPtyRegistryChange(schedule)
+  // Usage lives in its own store; it only mutates when the snapshot changes, so
+  // subscribing directly (no reference gate) won't over-fire.
+  const unsubUsage = useUsageStore.subscribe(schedule)
 
   // Seed main with the current state right away (post-hydrate).
   window.snApi.remote.pushState(buildSnapshot(useAppStore.getState()))
@@ -81,5 +87,6 @@ export function startRemoteSnapshotSync(): () => void {
     if (timer) clearTimeout(timer)
     unsubStore()
     unsubPty()
+    unsubUsage()
   }
 }

@@ -43,6 +43,39 @@ export interface RemoteWorkspaceInfo {
   panes: RemotePaneInfo[]
 }
 
+/**
+ * One usage bar as seen by the phone. Structural mirror of the desktop's
+ * `UsageRow` (ipc-contract.ts), duplicated here to keep this wire protocol
+ * self-contained (ipc-contract imports THIS file, so it can't be imported back).
+ */
+export interface RemoteUsageRow {
+  id: string
+  provider: 'claude' | 'codex' | 'custom'
+  kind: '5h' | '7d' | 'custom'
+  /** Resolved display label (model name for custom rows). */
+  label: string
+  /** 0..100 quota utilization, or null for a custom row with no token budget. */
+  percent: number | null
+  /** Absolute tokens used (custom rows). */
+  used?: number
+  /** Token budget (custom rows with a configured budget). */
+  limit?: number
+  /** ISO-8601 reset time, when the source provides one. */
+  resetsAt?: string | null
+  /** Subscription/plan label (Codex: plus/pro/...). */
+  planType?: string | null
+  status: 'ok' | 'expired' | 'error' | 'nodata' | 'loading'
+}
+
+/** Snapshot of the desktop's live usage bars, mirrored to the phone. */
+export interface RemoteUsageSnapshot {
+  rows: RemoteUsageRow[]
+  /** Epoch ms the snapshot was produced. */
+  updatedAt: number
+  /** Anthropic service health, when the status dot is enabled. */
+  services?: 'operational' | 'degraded' | 'down' | null
+}
+
 /** Compact mirror of the desktop state, pushed to every authed phone. */
 export interface RemoteStateSnapshot {
   workspaces: RemoteWorkspaceInfo[]
@@ -58,6 +91,8 @@ export interface RemoteStateSnapshot {
   snippets?: Snippet[]
   /** Custom phone KeyBar buttons. */
   keyButtons?: KeyButton[]
+  /** Live usage bars (undefined/null when the usage widget is off). */
+  usage?: RemoteUsageSnapshot | null
 }
 
 // --- Control actions (phone -> desktop, executed by the renderer) ---
