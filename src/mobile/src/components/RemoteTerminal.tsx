@@ -89,27 +89,49 @@ export function RemoteTerminal(): ReactNode {
       followCursorRef.current()
     }
 
-    // Cursor-follow: when the grid overflows the viewport, pan the container so
-    // the caret stays visible with a small margin (hysteresis) instead of the
-    // browser's incidental focus-scroll. Never resizes the pty (v1 intact).
+    // Cursor-follow: when the grid overflows the viewport on either axis, pan the
+    // container so the caret stays visible with a small margin (hysteresis)
+    // instead of the browser's incidental focus-scroll. Never resizes the pty
+    // (v1 intact) - the two axes are independent:
+    //  - X: the width-overflow flag from solveFont (grid wider than the viewport).
+    //  - Y: the fixed grid is taller than the keyboard-shrunk container, so the
+    //    TUI's bottom input line would otherwise be clipped behind the keyboard.
     const HYSTERESIS_CELLS = 2
     let cursorRaf: number | null = null
     const followCursor = (): void => {
       cursorRaf = null
-      if (!overflowRef.current) {
-        if (container.scrollLeft !== 0) container.scrollLeft = 0
-        return
+      // Horizontal pan (only when the grid overflows the viewport width).
+      if (overflowRef.current) {
+        const cols = term.cols || 1
+        const cellW = container.scrollWidth / cols
+        const caretX = term.buffer.active.cursorX * cellW
+        const margin = HYSTERESIS_CELLS * cellW
+        const viewLeft = container.scrollLeft
+        const viewRight = viewLeft + container.clientWidth
+        if (caretX < viewLeft + margin) {
+          container.scrollLeft = Math.max(0, caretX - margin)
+        } else if (caretX > viewRight - margin) {
+          container.scrollLeft = caretX - container.clientWidth + margin
+        }
+      } else if (container.scrollLeft !== 0) {
+        container.scrollLeft = 0
       }
-      const cols = term.cols || 1
-      const cellW = container.scrollWidth / cols
-      const caretX = term.buffer.active.cursorX * cellW
-      const margin = HYSTERESIS_CELLS * cellW
-      const viewLeft = container.scrollLeft
-      const viewRight = viewLeft + container.clientWidth
-      if (caretX < viewLeft + margin) {
-        container.scrollLeft = Math.max(0, caretX - margin)
-      } else if (caretX > viewRight - margin) {
-        container.scrollLeft = caretX - container.clientWidth + margin
+      // Vertical pan (only when the grid is taller than the container). Keeps
+      // the caret row on screen so the input line docks above the soft keyboard.
+      if (container.scrollHeight > container.clientHeight + 1) {
+        const rows = term.rows || 1
+        const cellH = container.scrollHeight / rows
+        const caretY = term.buffer.active.cursorY * cellH
+        const marginY = HYSTERESIS_CELLS * cellH
+        const viewTop = container.scrollTop
+        const viewBottom = viewTop + container.clientHeight
+        if (caretY < viewTop + marginY) {
+          container.scrollTop = Math.max(0, caretY - marginY)
+        } else if (caretY + cellH > viewBottom - marginY) {
+          container.scrollTop = caretY + cellH - container.clientHeight + marginY
+        }
+      } else if (container.scrollTop !== 0) {
+        container.scrollTop = 0
       }
     }
     const scheduleCursorFollow = (): void => {
@@ -118,6 +140,26 @@ export function RemoteTerminal(): ReactNode {
     }
     followCursorRef.current = followCursor
     const cursorSub = term.onCursorMove(() => scheduleCursorFollow())
+
+    // While iOS slides the soft keyboard in/out, visualViewport.resize fires
+    // late, so re-pan to the caret every frame for a short window on focus
+    // change (mirrors the --vvh settle loop in viewport.ts). This closes the
+    // "typing blind" gap where the input line is still clipped behind the
+    // keyboard until the first keystroke nudges it into view.
+    let settleRaf: number | null = null
+    const startSettle = (durationMs: number): void => {
+      if (settleRaf != null) cancelAnimationFrame(settleRaf)
+      const deadline = performance.now() + durationMs
+      const tick = (now: number): void => {
+        followCursor()
+        settleRaf = now < deadline ? requestAnimationFrame(tick) : null
+      }
+      settleRaf = requestAnimationFrame(tick)
+    }
+    const onFocusIn = (): void => startSettle(500)
+    const onFocusOut = (): void => startSettle(300)
+    document.addEventListener('focusin', onFocusIn)
+    document.addEventListener('focusout', onFocusOut)
 
     // Typed input -> pty. The Ctrl latch converts the next printable char to its
     // control code (charCode & 0x1f) then releases.
@@ -182,7 +224,10 @@ export function RemoteTerminal(): ReactNode {
       vv?.removeEventListener('resize', onResize)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('orientationchange', onResize)
+      document.removeEventListener('focusin', onFocusIn)
+      document.removeEventListener('focusout', onFocusOut)
       if (cursorRaf != null) cancelAnimationFrame(cursorRaf)
+      if (settleRaf != null) cancelAnimationFrame(settleRaf)
       cursorSub.dispose()
       inputSub.dispose()
       try {
