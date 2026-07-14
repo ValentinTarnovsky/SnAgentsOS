@@ -3,6 +3,7 @@ import { Copy, Pencil, Plus, QrCode, Smartphone, Trash2 } from 'lucide-react'
 import type { RemoteServerState } from '@shared/ipc-contract'
 import type { RemoteEndpointKind } from '@shared/remote-protocol'
 import type { KeyButton } from '@shared/types'
+import { BASE_KEYS, comboToSeq, type BaseKeyId } from '@shared/keyseq'
 import { useAppStore } from '@/lib/store'
 import { useRemoteStore } from '@/lib/remoteStore'
 import { useT, useLang, type MessageKey } from '@/i18n'
@@ -316,16 +317,18 @@ function KeyButtonEditor({
   const [label, setLabel] = useState(initial.label)
   const [seq, setSeq] = useState(initial.seq)
   const [literal, setLiteral] = useState('')
-  const [ctrlChar, setCtrlChar] = useState('J')
+  const [combo, setCombo] = useState({ ctrl: false, shift: false, alt: false })
+  const [base, setBase] = useState<BaseKeyId>('char')
+  const [comboChar, setComboChar] = useState('a')
 
   const addLiteral = (): void => {
     if (!literal) return
     setSeq(seq + literal)
     setLiteral('')
   }
-  const addCtrl = (): void => {
-    const upper = ctrlChar.toUpperCase().charCodeAt(0) || 74 // 74 = 'J'
-    setSeq(seq + String.fromCharCode(upper & 0x1f))
+  const addCombo = (): void => {
+    const s = comboToSeq({ ...combo, base, char: comboChar })
+    if (s) setSeq(seq + s)
   }
 
   return (
@@ -362,21 +365,55 @@ function KeyButtonEditor({
         <button onClick={() => setSeq(seq + '\x1b')} className={chipCls}>
           {t('remote.keybar.esc')}
         </button>
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs text-text-secondary">{t('remote.keybar.ctrl')}</span>
-          <input
-            maxLength={1}
-            value={ctrlChar}
-            onChange={(e) => setCtrlChar(e.target.value.slice(-1) || 'J')}
-            className={cn(inputCls, 'w-10 px-2 text-center')}
-          />
-          <button onClick={addCtrl} className={chipCls}>
-            {t('remote.keybar.addText')}
-          </button>
-        </div>
         <button onClick={() => setSeq('')} className={chipCls}>
           {t('remote.keybar.clear')}
         </button>
+      </div>
+
+      {/* Modifier combo builder: pick Ctrl/Shift/Alt + a base key. */}
+      <div className="space-y-2">
+        <label className={labelCls}>{t('remote.keybar.combo')}</label>
+        <div className="flex flex-wrap items-center gap-2">
+          {(['ctrl', 'shift', 'alt'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setCombo({ ...combo, [m]: !combo[m] })}
+              className={cn(
+                'rounded-btn border px-2.5 py-1 text-xs transition-colors',
+                combo[m]
+                  ? 'border-accent-violet bg-accent-violet text-white'
+                  : 'border-border bg-bg-secondary text-text-primary hover:border-accent-violet/40',
+              )}
+            >
+              {m === 'ctrl' ? 'Ctrl' : m === 'shift' ? 'Shift' : 'Alt'}
+            </button>
+          ))}
+          <span className="text-xs text-text-secondary">+</span>
+          <select
+            value={base}
+            onChange={(e) => setBase(e.target.value as BaseKeyId)}
+            className={cn(inputCls, 'w-auto')}
+            aria-label={t('remote.keybar.base')}
+          >
+            {BASE_KEYS.map((k) => (
+              <option key={k.id} value={k.id}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+          {base === 'char' && (
+            <input
+              maxLength={1}
+              value={comboChar}
+              onChange={(e) => setComboChar(e.target.value.slice(-1) || 'a')}
+              className={cn(inputCls, 'w-10 px-2 text-center')}
+              aria-label={t('remote.keybar.char')}
+            />
+          )}
+          <button onClick={addCombo} className={chipCls}>
+            {t('remote.keybar.addCombo')}
+          </button>
+        </div>
       </div>
 
       <div>

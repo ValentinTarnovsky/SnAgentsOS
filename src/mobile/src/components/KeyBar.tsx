@@ -104,6 +104,8 @@ export function KeyBar({
         <ChevronRight size={18} />
       </Key>
       <Key label={t('key.enter')} onDown={() => client.sendInput('\r')} />
+      <Key label={t('key.shiftTab')} onDown={() => client.sendInput('\x1b[Z')} />
+      <Key label={t('key.ctrlEnter')} onDown={() => client.sendInput('\x1b\r')} />
       {keyButtons.map((btn) => (
         <Key key={btn.id} label={btn.label} onDown={() => client.sendInput(btn.seq)} />
       ))}
