@@ -302,6 +302,9 @@ export function useXterm(
       ...(window.snApi.platform === 'win32'
         ? { windowsPty: { backend: 'conpty' as const } }
         : {}),
+      // On mac the force-selection modifier is Option, and it only works when
+      // this flag is on; the interceptor below relies on it. Inert elsewhere.
+      ...(window.snApi.platform === 'darwin' ? { macOptionClickForcesSelection: true } : {}),
     })
     const fit = new FitAddon()
     const search = new SearchAddon()
@@ -411,6 +414,56 @@ export function useXterm(
       })
     }
     container.addEventListener('wheel', onWheelSnap, { passive: true })
+
+    // Selection wins over TUI mouse tracking. When the inner app (Claude Code)
+    // enables mouse reporting, xterm routes clicks to the pty and drag-select
+    // stops working. Intercept the trusted mousedown in the capture phase and
+    // re-dispatch a clone carrying xterm's force-selection modifier (Shift on
+    // Windows/Linux, Option on mac): SelectionService then makes a local
+    // selection and the reporting listener skips the event, so nothing reaches
+    // the pty. Only mousedown needs cloning; during the drag xterm owns the
+    // document-level mousemove/mouseup, and the pty drag reporters are only
+    // installed after a reported mousedown, which never happened. Wheel events
+    // are untouched, so the TUI keeps its scroll.
+    const isMac = window.snApi.platform === 'darwin'
+    const onMouseDownCapture = (ev: MouseEvent): void => {
+      // Clones are untrusted; never re-intercept our own dispatch.
+      if (!ev.isTrusted || ev.button !== 0) return
+      // Force modifier already held: xterm handles it natively.
+      if (isMac ? ev.altKey : ev.shiftKey) return
+      if (!useAppStore.getState().settings.terminalSelectionOverride) return
+      // Without tracking the SelectionService is enabled, and a shift-flagged
+      // click would EXTEND the selection instead of starting one, so only
+      // rewrite events while an app actually owns the mouse.
+      if (term.modes.mouseTrackingMode === 'none') return
+      // Only clicks on the text screen; the scrollbar (.xterm-viewport) keeps
+      // its native drag (a synthetic event has no browser default action).
+      const screen = container.querySelector('.xterm-screen')
+      if (!screen || !(ev.target instanceof Node) || !screen.contains(ev.target)) return
+      ev.preventDefault()
+      ev.stopImmediatePropagation()
+      ev.target.dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          // detail carries the click count: 2 = word select, 3 = line select.
+          detail: ev.detail,
+          screenX: ev.screenX,
+          screenY: ev.screenY,
+          clientX: ev.clientX,
+          clientY: ev.clientY,
+          button: ev.button,
+          buttons: ev.buttons,
+          ctrlKey: ev.ctrlKey,
+          metaKey: ev.metaKey,
+          altKey: isMac ? true : ev.altKey,
+          shiftKey: isMac ? ev.shiftKey : true,
+        }),
+      )
+    }
+    container.addEventListener('mousedown', onMouseDownCapture, true)
 
     // Wire the imperative handle now that the addons exist.
     controllerRef.current.search = (query, o) => {
@@ -659,6 +712,7 @@ export function useXterm(
       container.removeEventListener('focusin', onFocusIn)
       container.removeEventListener('focusout', onFocusOut)
       container.removeEventListener('wheel', onWheelSnap)
+      container.removeEventListener('mousedown', onMouseDownCapture, true)
       input.dispose()
       titleSub.dispose()
       offData()

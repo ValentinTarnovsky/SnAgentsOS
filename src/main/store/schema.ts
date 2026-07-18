@@ -122,6 +122,8 @@ const settingsSchema = z.object({
   // schema over every existing config, so configs that predate the key silently
   // gain 'canvas' WITHOUT any migrate() logic (migrate only re-stamps version).
   terminalRenderer: z.enum(['canvas', 'webgl']).default('canvas'),
+  // Same load-bearing-default pattern: pre-v9 configs silently gain `true`.
+  terminalSelectionOverride: z.boolean().default(true),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
   autoCheckUpdates: z.boolean().default(true),

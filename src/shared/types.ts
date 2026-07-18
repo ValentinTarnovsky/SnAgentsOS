@@ -7,7 +7,7 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 8
+export const CONFIG_VERSION = 9
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -323,6 +323,13 @@ export interface Settings {
    * it is opt-in only.
    */
   terminalRenderer: 'canvas' | 'webgl'
+  /**
+   * When a TUI (Claude Code, vim with mouse) enables xterm mouse reporting,
+   * a plain left-drag still makes a local text selection instead of being
+   * sent to the app. Shift+drag selects either way; turn off to let plain
+   * clicks reach the TUI (previous behavior).
+   */
+  terminalSelectionOverride: boolean
   restoreLastWorkspace: boolean
   confirmCloseRunning: boolean
   /** Installed build only: hide to tray on window close instead of quitting. */

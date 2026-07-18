@@ -101,6 +101,13 @@ export function TerminalSection() {
           <option value="webgl">{t('settings.rendererWebgl')}</option>
         </select>
       </SettingRow>
+
+      <ToggleRow
+        checked={settings.terminalSelectionOverride}
+        onChange={(v) => updateSettings({ terminalSelectionOverride: v })}
+        title={t('settings.selectionOverride')}
+        description={t('settings.selectionOverrideHint')}
+      />
     </div>
   )
 }

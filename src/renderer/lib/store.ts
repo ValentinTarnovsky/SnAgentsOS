@@ -51,6 +51,7 @@ const DEFAULT_SETTINGS: Settings = {
   scrollback: 5000,
   infiniteScrollback: true,
   terminalRenderer: 'canvas',
+  terminalSelectionOverride: true,
   restoreLastWorkspace: true,
   confirmCloseRunning: true,
   autoCheckUpdates: true,

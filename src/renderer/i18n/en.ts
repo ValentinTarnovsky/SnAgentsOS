@@ -316,6 +316,9 @@ export const en = {
     'Canvas (default) cannot show garbled text after sleep/resume or a GPU glitch. WebGL is faster with many busy panes but can garble after a GPU reset; if it does, use Redraw (Ctrl+Shift+R). Applies to newly opened or relaunched consoles.',
   'settings.rendererCanvas': 'Canvas (recommended, stable)',
   'settings.rendererWebgl': 'WebGL (faster, may garble after GPU reset)',
+  'settings.selectionOverride': 'Text selection wins over app mouse capture',
+  'settings.selectionOverrideHint':
+    'Select and copy with a plain drag even while a full-screen app (like Claude Code) is using the mouse. Wheel scrolling still reaches the app. Turn off to send plain clicks to the app; Shift+drag always selects.',
   'settings.language': 'Language',
   'settings.languageHint': 'Interface language.',
   'settings.restoreLast': 'Restore the last workspace on open',
