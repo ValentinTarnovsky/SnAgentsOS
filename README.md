@@ -50,6 +50,8 @@ Use **Test desktop notification** to check the system channel. If Windows blocks
 
 Console headers and both sidebar layouts show violet for working, amber for pending input, green for a completed turn, red for failure, gray for idle, and a hollow dot for lost status. Pending requests remain visible while an agent continues working. Sidebar counters include hidden consoles in the active workspace.
 
+In the phone web client, vertical finger drags also scroll applications that capture the mouse, such as Claude. These gestures become terminal wheel events; regular shell scrollback, horizontal pan and taps to open the keyboard retain their usual behavior.
+
 Integration limits: remote SSH/WSL sessions, explicit executable paths, `--remote`, and `--no-daemon` bypass the local Codex launcher. Initial login/trust dialogs and free-form questions may not emit structured events; completion notifications cover the end of those responses. Claude title fallback is approximate. Codex async message questions are acknowledged when the server accepts the next user input; individually identified RPC requests resolve separately.
 
 Discord sends only provider, workspace/pane names, reason and time. Webhook URLs remain in the local config and its backups, are hidden in the UI, and are removed from config exports. No prompts, command output, or terminal contents are sent. A network timeout can leave delivery unconfirmed; the app reports it without blindly duplicating the message.
@@ -95,6 +97,7 @@ npm run dev        # launch with HMR
 npm run typecheck  # type-check main + renderer
 npm test           # status, protocol, hook transport and Discord regressions
 npm run test:ui    # isolated Electron visual smoke, after npm run build
+npm run test:mobile # real xterm touch-scroll regression in isolated Electron
 ```
 
 ## Build
