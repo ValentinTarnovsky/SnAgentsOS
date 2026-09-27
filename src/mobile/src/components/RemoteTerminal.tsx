@@ -20,6 +20,7 @@ import { useRemoteStore } from '../lib/store'
 import { resetRatio, solveFont } from '../lib/fit'
 import { setActiveTerm } from '../lib/terminalBus'
 import { getStoredHostPlatform } from '../lib/auth'
+import { attachTouchScroll } from '../lib/touchScroll'
 
 export function RemoteTerminal(): ReactNode {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -65,6 +66,7 @@ export function RemoteTerminal(): ReactNode {
       /* fall back to xterm's DOM renderer if canvas construction fails */
     }
     term.open(container)
+    const detachTouchScroll = attachTouchScroll(term, container)
     setActiveTerm(term)
 
     // Best-effort hygiene on xterm's hidden input (item 5: iOS's input accessory
@@ -229,6 +231,7 @@ export function RemoteTerminal(): ReactNode {
       if (cursorRaf != null) cancelAnimationFrame(cursorRaf)
       if (settleRaf != null) cancelAnimationFrame(settleRaf)
       cursorSub.dispose()
+      detachTouchScroll()
       inputSub.dispose()
       try {
         canvas?.dispose()

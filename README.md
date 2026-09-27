@@ -19,7 +19,7 @@ Open *sets* of multiple terminals and AI CLI sessions (Claude Code, Codex, custo
 
 ---
 
-> **Status:** `v1.14.0`, stable. Built in public as a VibeCoding showcase, open source under MIT.
+> **Status:** `v1.14.1`, stable. Built in public as a VibeCoding showcase, open source under MIT.
 
 ## What it is
 
@@ -49,6 +49,8 @@ Open **Settings > Notifications** to enable the integrations:
 Use **Test desktop notification** to check the system channel. If Windows blocks it, enable SnMultiCC under **Windows Settings > System > Notifications**. The app reports native delivery errors in its notification settings.
 
 Console headers and both sidebar layouts show violet for working, amber for pending input, green for a completed turn, red for failure, gray for idle, and a hollow dot for lost status. Pending requests remain visible while an agent continues working. Sidebar counters include hidden consoles in the active workspace.
+
+In the phone web client, vertical finger drags also scroll applications that capture the mouse, such as Claude. These gestures become terminal wheel events; regular shell scrollback, horizontal pan and taps to open the keyboard retain their usual behavior.
 
 Integration limits: remote SSH/WSL sessions, explicit executable paths, `--remote`, and `--no-daemon` bypass the local Codex launcher. Initial login/trust dialogs and free-form questions may not emit structured events; completion notifications cover the end of those responses. Claude title fallback is approximate. Codex async message questions are acknowledged when the server accepts the next user input; individually identified RPC requests resolve separately.
 
@@ -95,6 +97,7 @@ npm run dev        # launch with HMR
 npm run typecheck  # type-check main + renderer
 npm test           # status, protocol, hook transport and Discord regressions
 npm run test:ui    # isolated Electron visual smoke, after npm run build
+npm run test:mobile # real xterm touch-scroll regression, after npm run build:mobile
 ```
 
 ## Build
