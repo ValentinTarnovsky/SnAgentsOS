@@ -18,6 +18,9 @@ import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
 import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
 import { HookServer } from './status/HookServer'
+import { CodexBridge } from './status/CodexBridge'
+import { DiscordNotifier } from './status/DiscordNotifier'
+import { join } from 'path'
 import { ensureTray, destroyTray } from './tray'
 import { mainT } from './i18n'
 
@@ -32,7 +35,7 @@ let bypassCloseGuards = false
 // True while an update download/install is in flight: blocks the user closing
 // the window mid-download (which would abort the update).
 let isInstalling = false
-const ptyManager = new PtyManager(() => mainWindow?.webContents ?? null)
+const ptyManager = new PtyManager(() => mainWindow?.webContents ?? null, (ptyId, paneId, cwd) => codexBridge.environment(ptyId, paneId, cwd))
 const configStore = new ConfigStore()
 const remoteManager = new RemoteManager(
   ptyManager,
@@ -40,11 +43,15 @@ const remoteManager = new RemoteManager(
   app.getVersion(),
 )
 const hookServer = new HookServer()
+const discordNotifier = new DiscordNotifier()
 const statusManager = new StatusManager(
   () => mainWindow,
   () => configStore.load(),
+  notice => discordNotifier.notify(notice, configStore.load()),
 )
+const codexBridge = new CodexBridge(() => join(app.getPath('userData'), 'status-bin'), join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event))
 ptyManager.addSink(statusManager)
+ptyManager.addSink(codexBridge)
 let statusIpc: StatusIpc | null = null
 
 function quitApp(): void {
@@ -134,7 +141,12 @@ function registerConfigIpc(): void {
       : await dialog.showSaveDialog(opts)
     if (res.canceled || !res.filePath) return false
     try {
-      writeFileSync(res.filePath, JSON.stringify(config, null, 2), 'utf8')
+      const exported = structuredClone(config)
+      exported.settings.notifications.hookToken = ''
+      exported.settings.notifications.hooksEnabled = false
+      exported.settings.notifications.discord.webhookUrl = ''
+      exported.settings.notifications.discord.enabled = false
+      writeFileSync(res.filePath, JSON.stringify(exported, null, 2), 'utf8')
       return true
     } catch (error) {
       console.error('Config export failed:', error)
@@ -240,7 +252,7 @@ function openMainWindow(): void {
   })
 }
 
-function bootstrap(): void {
+async function bootstrap(): Promise<void> {
   // Windows toasts need the AppUserModelID to match the installed shortcut's.
   // Packaged only: in dev an AUMID without a Start Menu shortcut can silently
   // suppress notifications, so dev keeps Electron's default.
@@ -275,7 +287,7 @@ function bootstrap(): void {
     getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
   })
   registerRemoteIpc(remoteManager)
-  statusIpc = registerStatusIpc(statusManager, hookServer)
+  statusIpc = registerStatusIpc(statusManager, hookServer, codexBridge, discordNotifier)
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),
   )
@@ -294,9 +306,9 @@ function bootstrap(): void {
       consoles: ptyManager.count,
     }
   })
-  openMainWindow()
-
   const startupCfg = configStore.load()
+  await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? false)
+  openMainWindow()
   if (startupCfg?.settings) {
     applyGlobalHotkey(startupCfg.settings.globalHotkeyEnabled, startupCfg.settings.globalHotkey)
   }
@@ -323,6 +335,10 @@ app.on('before-quit', () => {
   // shutdown frame before the ptys they mirror are torn down.
   remoteManager.shutdown('quit')
   ptyManager.killAll()
+  statusManager.dispose()
+  codexBridge.dispose()
+  discordNotifier.dispose()
+  void hookServer.stop()
   destroyTray()
 })
 

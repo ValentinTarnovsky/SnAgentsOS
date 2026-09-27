@@ -10,9 +10,14 @@ export interface HookEvent {
   /** Notification only: permission_prompt | idle_prompt | elicitation_dialog | ... */
   notificationType?: string
   sessionId?: string
+  ptyId?: string
+  toolName?: string
+  toolUseId?: string
+  elicitationId?: string
+  agentId?: string
 }
 
-const MAX_BODY = 64 * 1024
+const MAX_BODY = 2 * 1024 * 1024
 const REQUEST_TIMEOUT_MS = 3000
 
 function safeEqual(a: string, b: string): boolean {
@@ -58,7 +63,7 @@ export class HookServer {
   async start(port: number, token: string): Promise<number> {
     await this.stop()
     this.token = token
-    this.port = await this.listen(port).catch(() => this.listen(port + 1))
+    this.port = await this.listen(port).catch(() => this.listen(port < 65535 ? port + 1 : 0))
     return this.port
   }
 
@@ -80,26 +85,29 @@ export class HookServer {
       server.requestTimeout = REQUEST_TIMEOUT_MS
       server.listen(port, '127.0.0.1', () => {
         this.server = server
-        resolve(port)
+        const address = server.address()
+        resolve(typeof address === 'object' && address ? address.port : port)
       })
     })
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
     const url = req.url ?? ''
-    const match = /^\/cc-hook\/([^/?]+)/.exec(url)
+    const match = /^\/cc-hook\/([^/?]+)$/.exec(url)
     if (req.method !== 'POST' || !match || !this.token || !safeEqual(match[1], this.token)) {
       res.statusCode = 404
       res.end()
       return
     }
 
-    let body = ''
+    const chunks: Buffer[] = []
+    let bytes = 0
     let overflow = false
     req.on('data', (chunk: Buffer) => {
       if (overflow) return
-      body += chunk.toString('utf8')
-      if (body.length > MAX_BODY) overflow = true
+      bytes += chunk.length
+      if (bytes > MAX_BODY) overflow = true
+      else chunks.push(chunk)
     })
     req.on('error', () => {
       res.statusCode = 200
@@ -114,7 +122,7 @@ export class HookServer {
       // Empty id => a claude launched outside SnMultiCC; not ours to track.
       if (!consoleId) return
       try {
-        const json = JSON.parse(body) as Record<string, unknown>
+        const json = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
         const name = typeof json.hook_event_name === 'string' ? json.hook_event_name : ''
         if (!name) return
         this.listener?.({
@@ -123,6 +131,11 @@ export class HookServer {
           notificationType:
             typeof json.notification_type === 'string' ? json.notification_type : undefined,
           sessionId: typeof json.session_id === 'string' ? json.session_id : undefined,
+          ptyId: String(req.headers['x-pty-id'] ?? ''),
+          toolName: typeof json.tool_name === 'string' ? json.tool_name : undefined,
+          toolUseId: typeof json.tool_use_id === 'string' ? json.tool_use_id : undefined,
+          elicitationId: typeof json.elicitation_id === 'string' ? json.elicitation_id : undefined,
+          agentId: typeof json.agent_id === 'string' ? json.agent_id : undefined,
         })
       } catch {
         console.warn('[hooks] discarded malformed hook payload')

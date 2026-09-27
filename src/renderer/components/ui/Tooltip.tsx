@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 
@@ -9,6 +9,7 @@ interface TooltipProps {
   side?: Side
   delay?: number
   children: ReactNode
+  className?: string
 }
 
 interface Coords {
@@ -23,20 +24,14 @@ const TRANSFORM: Record<Side, string> = {
   right: 'translate(0, -50%)',
 }
 
-const ENTER_OFFSET: Record<Side, { x?: number; y?: number }> = {
-  top: { y: 4 },
-  bottom: { y: -4 },
-  left: { x: 4 },
-  right: { x: -4 },
-}
-
 /**
  * Lightweight, themed tooltip. Replaces native `title=""` attributes app-wide.
  * Renders into a portal so it never gets clipped by overflow containers.
  */
-export function Tooltip({ label, side = 'top', delay = 350, children }: TooltipProps): ReactNode {
+export function Tooltip({ label, side = 'top', delay = 350, children, className = '' }: TooltipProps): ReactNode {
   const [coords, setCoords] = useState<Coords | null>(null)
   const triggerRef = useRef<HTMLSpanElement>(null)
+  const tooltipRef = useRef<HTMLSpanElement>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const id = useId()
 
@@ -67,6 +62,21 @@ export function Tooltip({ label, side = 'top', delay = 350, children }: TooltipP
     if (timer.current) clearTimeout(timer.current)
   }, [])
 
+  useLayoutEffect(() => {
+    if (!coords || !tooltipRef.current) return
+    const r = tooltipRef.current.getBoundingClientRect()
+    const dx = Math.max(8 - r.left, Math.min(0, window.innerWidth - 8 - r.right))
+    const dy = Math.max(8 - r.top, Math.min(0, window.innerHeight - 8 - r.bottom))
+    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) setCoords({ x: coords.x + dx, y: coords.y + dy })
+  }, [coords, label])
+
+  useEffect(() => {
+    if (!coords) return
+    window.addEventListener('resize', hide)
+    window.addEventListener('scroll', hide, true)
+    return () => { window.removeEventListener('resize', hide); window.removeEventListener('scroll', hide, true) }
+  }, [coords, hide])
+
   if (label === undefined || label === null || label === '') {
     return <>{children}</>
   }
@@ -74,7 +84,7 @@ export function Tooltip({ label, side = 'top', delay = 350, children }: TooltipP
   return (
     <span
       ref={triggerRef}
-      className="inline-flex"
+      className={`inline-flex ${className}`}
       onMouseEnter={show}
       onMouseLeave={hide}
       onPointerDown={hide}
@@ -88,10 +98,11 @@ export function Tooltip({ label, side = 'top', delay = 350, children }: TooltipP
         <AnimatePresence>
           {coords && (
             <motion.span
+              ref={tooltipRef}
               id={id}
               role="tooltip"
-              initial={{ opacity: 0, ...ENTER_OFFSET[side] }}
-              animate={{ opacity: 1, x: 0, y: 0 }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.12, ease: 'easeOut' }}
               style={{
@@ -101,8 +112,10 @@ export function Tooltip({ label, side = 'top', delay = 350, children }: TooltipP
                 transform: TRANSFORM[side],
                 zIndex: 9999,
                 pointerEvents: 'none',
+                width: 'max-content',
+                maxWidth: 'min(260px, calc(100vw - 16px))',
               }}
-              className="max-w-[260px] whitespace-nowrap rounded-md border border-border bg-card px-2 py-1 text-[12px] font-medium text-text-primary shadow-lg shadow-black/40"
+              className="max-w-[260px] whitespace-normal break-words rounded-md border border-border bg-card px-2 py-1 text-[12px] font-medium text-text-primary shadow-lg shadow-black/40"
             >
               {label}
             </motion.span>

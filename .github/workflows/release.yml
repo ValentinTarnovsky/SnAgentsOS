@@ -51,7 +51,11 @@ jobs:
       - name: Type-check
         run: npm run typecheck
 
-      - name: Build and package
+      - name: Status regression tests
+        # The same status regressions run on each supported OS before packaging.
+        run: npm test
+
+      - name: Package artifacts
         run: ${{ matrix.cmd }}
 
       # Emit a "<artifact>.sha256" sidecar for every distributable so the in-app

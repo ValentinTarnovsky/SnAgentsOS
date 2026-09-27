@@ -1,4 +1,6 @@
 import { spawn, type IPty } from 'node-pty'
+import { randomUUID } from 'crypto'
+import { delimiter } from 'path'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { PtyDataEvt, PtyExitEvt, PtyReattachRes, PtySpawnReq } from '@shared/ipc-contract'
@@ -115,7 +117,9 @@ export class PtyManager {
   /** Fired after byPane changes (spawn/dispose) so remote can refresh `running`. */
   private onRunningChange: (() => void) | null = null
 
-  constructor(private readonly getSender: () => WebContents | null) {}
+  constructor(private readonly getSender: () => WebContents | null,
+    private readonly statusEnv: (ptyId: string, paneId: string, cwd: string) => Record<string, string> = () => ({}),
+  ) {}
 
   /** Number of live ptys. */
   get count(): number {
@@ -123,17 +127,25 @@ export class PtyManager {
   }
 
   spawn(req: PtySpawnReq): string {
-    const ptyId = `pty-${++this.seq}`
+    const ptyId = `pty-${++this.seq}-${randomUUID()}`
     const shell = req.shell || defaultShell()
-    const proc = spawn(shell, req.args ?? [], {
+    const env = cleanEnv({ ...req.env, ...this.statusEnv(ptyId, req.paneId, req.cwd || homeDir()), SNMULTICC_CONSOLE_ID: req.paneId, SNMULTICC_PTY_ID: ptyId })
+    const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH'
+    if (env.SNMULTICC_CODEX_SHIM) env[pathKey] = env.SNMULTICC_CODEX_SHIM + delimiter + (env[pathKey] ?? '')
+    let proc: IPty
+    try { proc = spawn(shell, req.args ?? [], {
       name: 'xterm-256color',
       cols: req.cols > 0 ? req.cols : 80,
       rows: req.rows > 0 ? req.rows : 24,
       cwd: req.cwd || homeDir(),
-      // SNMULTICC_CONSOLE_ID lets Claude Code hooks (which inherit the shell
-      // env) attribute their events back to this console; req.env wins on clash.
-      env: cleanEnv({ SNMULTICC_CONSOLE_ID: req.paneId, ...req.env }),
-    })
+      // Reserved IDs bind hooks to this exact terminal generation.
+      env,
+    }) } catch (error) {
+      for (const sink of this.sinks.values()) {
+        try { sink.onExit(ptyId, req.paneId, -1) } catch { /* release prepared integrations */ }
+      }
+      throw error
+    }
 
     const entry: Entry = {
       pty: proc,
@@ -200,15 +212,8 @@ export class PtyManager {
 
     proc.onExit(({ exitCode, signal }) => {
       this.flush(ptyId)
-      for (const sink of this.sinks.values()) {
-        try {
-          sink.onExit(ptyId, entry.paneId, exitCode)
-        } catch {
-          /* sink errors must not block teardown */
-        }
-      }
       this.send(CH.PTY_EXIT, { ptyId, exitCode, signal } satisfies PtyExitEvt)
-      this.dispose(ptyId)
+      this.dispose(ptyId, exitCode)
     })
 
     return ptyId
@@ -498,7 +503,7 @@ export class PtyManager {
     }
   }
 
-  private dispose(ptyId: string): void {
+  private dispose(ptyId: string, exitCode = 0): void {
     const entry = this.entries.get(ptyId)
     if (!entry) return
     // Abort any in-flight setup sequence: unblock a pending waiter so its async
@@ -518,6 +523,9 @@ export class PtyManager {
     this.pausedByRenderer.delete(ptyId)
     const removed = this.byPane.get(entry.paneId) === ptyId
     if (removed) this.byPane.delete(entry.paneId)
+    for (const sink of this.sinks.values()) {
+      try { sink.onExit(ptyId, entry.paneId, exitCode) } catch { /* sink teardown must not block PTY cleanup */ }
+    }
     this.entries.delete(ptyId)
     // byPane lost a pane: let remote re-broadcast so its `running` dot clears
     // even on a natural shell exit (which never triggers a renderer state push).

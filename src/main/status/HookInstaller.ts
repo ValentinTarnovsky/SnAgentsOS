@@ -19,6 +19,12 @@ const HOOK_EVENTS: Array<{ event: string; matcher?: string }> = [
   { event: 'StopFailure' },
   { event: 'SessionStart' },
   { event: 'SessionEnd' },
+  { event: 'PermissionRequest' },
+  { event: 'PreToolUse' },
+  { event: 'PostToolUse' },
+  { event: 'PostToolUseFailure' },
+  { event: 'Elicitation' },
+  { event: 'ElicitationResult' },
   { event: 'Notification', matcher: 'permission_prompt|idle_prompt|elicitation_dialog' },
 ]
 
@@ -35,21 +41,41 @@ interface MatcherGroup {
 }
 
 function settingsPath(): string {
-  return join(homedir(), '.claude', 'settings.json')
+  return join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'settings.json')
 }
 
 function buildHandler(port: number, token: string): HookHandler {
   return {
     type: 'http',
     url: `http://127.0.0.1:${port}${URL_MARKER}${token}`,
-    headers: { 'X-Console-Id': '$SNMULTICC_CONSOLE_ID' },
-    allowedEnvVars: ['SNMULTICC_CONSOLE_ID'],
+    headers: { 'X-Console-Id': '$SNMULTICC_CONSOLE_ID', 'X-Pty-Id': '$SNMULTICC_PTY_ID' },
+    allowedEnvVars: ['SNMULTICC_CONSOLE_ID', 'SNMULTICC_PTY_ID'],
     timeout: 3,
   }
 }
 
 function isOurs(handler: HookHandler): boolean {
-  return typeof handler.url === 'string' && handler.url.includes(URL_MARKER)
+  return !!handler && ((typeof handler.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/cc-hook\//.test(handler.url)) || handler.statusMessage === 'SnMultiCC session status')
+}
+
+/** SessionStart does not support HTTP handlers in current Claude releases. */
+function startHandler(port: number, token: string): HookHandler {
+  const url = `http://127.0.0.1:${port}${URL_MARKER}${token}`
+  const command = process.platform === 'win32'
+    ? 'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + Buffer.from(
+      `[Console]::InputEncoding=[Text.Encoding]::UTF8; $body=[Console]::In.ReadToEnd(); if($env:SNMULTICC_CONSOLE_ID -and $env:SNMULTICC_PTY_ID){try{Invoke-WebRequest -UseBasicParsing -Uri '${url}' -Method POST -TimeoutSec 2 -Headers @{'X-Console-Id'=$env:SNMULTICC_CONSOLE_ID;'X-Pty-Id'=$env:SNMULTICC_PTY_ID} -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json' | Out-Null}catch{}}`, 'utf16le').toString('base64')
+    : `if [ -n "$SNMULTICC_CONSOLE_ID" ] && [ -n "$SNMULTICC_PTY_ID" ]; then curl --silent --max-time 2 --output /dev/null -H "X-Console-Id: $SNMULTICC_CONSOLE_ID" -H "X-Pty-Id: $SNMULTICC_PTY_ID" -H 'Content-Type: application/json' --data-binary @- '${url}'; fi; exit 0`
+  return { type: 'command', command, timeout: 3, statusMessage: 'SnMultiCC session status' }
+}
+
+function complete(settings: Record<string, unknown>, port: number, token: string): boolean {
+  const hooks = hooksOf(settings)
+  return HOOK_EVENTS.every(({ event, matcher }) => {
+    const groups = hooks[event]
+    if (!Array.isArray(groups)) return false
+    const expected = event === 'SessionStart' ? startHandler(port, token) : buildHandler(port, token)
+    return groups.some(g => g && g.matcher === matcher && Array.isArray(g.hooks) && g.hooks.some((h: HookHandler) => JSON.stringify(h) === JSON.stringify(expected)))
+  })
 }
 
 /** Reads and parses settings.json. Throws on unparseable JSON (never clobber). */
@@ -84,8 +110,8 @@ function findInstalledUrl(settings: Record<string, unknown>): string | null {
   for (const groups of Object.values(hooksOf(settings))) {
     if (!Array.isArray(groups)) continue
     for (const group of groups as MatcherGroup[]) {
-      for (const handler of group?.hooks ?? []) {
-        if (isOurs(handler)) return String(handler.url)
+      for (const handler of Array.isArray(group?.hooks) ? group.hooks : []) {
+        if (isOurs(handler) && typeof handler.url === 'string') return handler.url
       }
     }
   }
@@ -95,11 +121,13 @@ function findInstalledUrl(settings: Record<string, unknown>): string | null {
 export function hooksStatus(): StatusHooksStatusRes {
   const path = settingsPath()
   try {
-    const url = findInstalledUrl(readSettings(path))
+    const settings = readSettings(path)
+    const url = findInstalledUrl(settings)
     const m = url ? /^http:\/\/127\.0\.0\.1:(\d+)\//.exec(url) : null
-    return { installed: url !== null, settingsPath: path, port: m ? Number(m[1]) : null }
+    const token = url?.split('/').pop() ?? ''
+    return { installed: url !== null, settingsPath: path, port: m ? Number(m[1]) : null, complete: !!m && complete(settings, Number(m[1]), token) }
   } catch {
-    return { installed: false, settingsPath: path, port: null }
+    return { installed: false, settingsPath: path, port: null, complete: false, error: 'Could not read Claude settings.json' }
   }
 }
 
@@ -111,7 +139,7 @@ export function hooksStatus(): StatusHooksStatusRes {
  */
 export function hooksUpToDate(port: number, token: string): boolean {
   try {
-    return findInstalledUrl(readSettings(settingsPath())) === buildHandler(port, token).url
+    return complete(readSettings(settingsPath()), port, token)
   } catch {
     return false
   }
@@ -126,9 +154,9 @@ export function installHooks(port: number, token: string): StatusHooksStatusRes 
   const path = settingsPath()
   const settings = readSettings(path)
   const hooks = hooksOf(settings)
-  const handler = buildHandler(port, token)
 
   for (const { event, matcher } of HOOK_EVENTS) {
+    const handler = event === 'SessionStart' ? startHandler(port, token) : buildHandler(port, token)
     const groups: MatcherGroup[] = Array.isArray(hooks[event])
       ? (hooks[event] as MatcherGroup[])
       : []
@@ -136,7 +164,7 @@ export function installHooks(port: number, token: string): StatusHooksStatusRes 
     // Tolerate hand-edited files: null/non-object group entries are dropped.
     const cleaned = groups
       .filter((g): g is MatcherGroup => typeof g === 'object' && g !== null)
-      .map((g) => ({ ...g, hooks: (g.hooks ?? []).filter((h) => !isOurs(h)) }))
+      .map((g) => ({ ...g, hooks: (Array.isArray(g.hooks) ? g.hooks : []).filter((h) => !isOurs(h)) }))
       .filter((g) => (g.hooks?.length ?? 0) > 0)
     const group: MatcherGroup = matcher ? { matcher, hooks: [handler] } : { hooks: [handler] }
     hooks[event] = [...cleaned, group]
@@ -144,7 +172,7 @@ export function installHooks(port: number, token: string): StatusHooksStatusRes 
 
   settings.hooks = hooks
   writeSettings(path, settings)
-  return { installed: true, settingsPath: path, port }
+  return { installed: true, settingsPath: path, port, complete: true }
 }
 
 /** Removes every SnMultiCC handler; leaves user hooks and unknown keys intact. */
@@ -153,9 +181,7 @@ export function uninstallHooks(): StatusHooksStatusRes {
   let settings: Record<string, unknown>
   try {
     settings = readSettings(path)
-  } catch {
-    return { installed: false, settingsPath: path, port: null }
-  }
+  } catch { throw new Error('Could not read Claude settings.json; no hooks were removed') }
   const hooks = hooksOf(settings)
   let changed = false
 
@@ -164,7 +190,7 @@ export function uninstallHooks(): StatusHooksStatusRes {
     const cleaned = (groups as MatcherGroup[])
       .filter((g): g is MatcherGroup => typeof g === 'object' && g !== null)
       .map((g) => {
-        const kept = (g.hooks ?? []).filter((h) => !isOurs(h))
+        const kept = (Array.isArray(g.hooks) ? g.hooks : []).filter((h) => !isOurs(h))
         if (kept.length !== (g.hooks?.length ?? 0)) changed = true
         return { ...g, hooks: kept }
       })

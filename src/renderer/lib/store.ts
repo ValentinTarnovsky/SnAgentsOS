@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type {
   AgentPreset,
-  ClaudePaneState,
+  PaneStatus,
   ConfigFile,
   ConnectionProfile,
   GridPreset,
@@ -17,6 +17,7 @@ import type {
 } from '@shared/types'
 import { gridForCount } from '@/components/layout/gridTemplates'
 import { killPanePtys } from '@/lib/ptyRegistry'
+import { visiblePaneIds } from '@shared/status'
 
 const ACCENTS = ['#6366f1', '#8b5cf6', '#60a5fa']
 
@@ -92,6 +93,8 @@ const DEFAULT_SETTINGS: Settings = {
     hooksEnabled: false,
     hookPort: 43917,
     hookToken: '',
+    codexEnabled: false,
+    discord: { enabled: false, webhookUrl: '', userId: '', notifyAction: true, notifyDone: true },
   },
 }
 
@@ -138,7 +141,7 @@ export interface AppState {
   /** paneId -> relaunch counter (transient; bumping it remounts the console). */
   paneEpoch: Record<string, number>
   /** paneId -> live Claude state (transient; fed by main over STATUS_STATE). */
-  paneStatus: Record<string, { state: ClaudePaneState; precise: boolean }>
+  paneStatus: Record<string, PaneStatus>
   /** paneId -> unacknowledged done/action flag (transient; drives sidebar badges). */
   paneAttention: Record<string, true>
   /** False until persisted config has been loaded (gates the persistence writer). */
@@ -583,18 +586,17 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         return { paneStatus, paneAttention }
       }
-      paneStatus[evt.paneId] = { state: evt.state, precise: evt.precise }
-      if (evt.state === 'done' || evt.state === 'action') {
+      paneStatus[evt.paneId] = { state: evt.state, precise: evt.precise, provider: evt.provider, reason: evt.reason, pendingCount: evt.pendingCount, updatedAt: evt.updatedAt }
+      if (evt.state === 'done' || evt.state === 'action' || evt.state === 'error') {
         // Only flag attention when the console is not being looked at right now:
         // other workspace, minimized in the active one, or the window unfocused.
         const wsId = s.workspaces.find((w) => w.panes.some((p) => p.id === evt.paneId))?.id
-        const minimizedHere = wsId ? (s.minimized[wsId] ?? []).includes(evt.paneId) : false
-        const inView =
-          wsId === s.activeWorkspaceId && !minimizedHere && document.hasFocus()
+        const visible = wsId ? visiblePaneIds(s.workspaces.find(w => w.id === wsId), s.minimized[wsId] ?? [], s.maximized[wsId]) : []
+        const inView = wsId === s.activeWorkspaceId && visible.includes(evt.paneId) && document.hasFocus()
         if (!inView && !(evt.paneId in paneAttention)) {
           paneAttention = { ...paneAttention, [evt.paneId]: true }
         }
-      } else if (evt.state === 'working' && evt.paneId in paneAttention) {
+      } else if ((evt.state === 'working' || evt.state === 'idle') && evt.paneId in paneAttention) {
         // Back to work: the pending "look at me" flag is stale.
         paneAttention = { ...paneAttention }
         delete paneAttention[evt.paneId]
@@ -616,9 +618,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => {
       const ws = s.workspaces.find((w) => w.id === workspaceId)
       if (!ws) return {}
-      const minimizedHere = new Set(s.minimized[workspaceId] ?? [])
+      const visible = new Set(visiblePaneIds(ws, s.minimized[workspaceId] ?? [], s.maximized[workspaceId]))
       const toClear = ws.panes.filter(
-        (p) => p.id in s.paneAttention && !minimizedHere.has(p.id),
+        (p) => p.id in s.paneAttention && visible.has(p.id),
       )
       if (toClear.length === 0) return {}
       const paneAttention = { ...s.paneAttention }

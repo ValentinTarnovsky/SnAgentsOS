@@ -3,6 +3,18 @@ import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
 
 export { CONFIG_VERSION }
 
+export const discordSettingsSchema = z.object({
+  enabled: z.boolean().default(false), webhookUrl: z.string().max(2048).default(''),
+  userId: z.string().max(32).default(''), notifyAction: z.boolean().default(true), notifyDone: z.boolean().default(true),
+})
+export const notificationSettingsSchema = z.object({
+  enabled: z.boolean().default(true), notifyDone: z.boolean().default(true), notifyAction: z.boolean().default(true),
+  sound: z.boolean().default(true), soundId: z.enum(['chime', 'ping', 'pop']).default('chime'), volume: z.number().min(0).max(100).default(70),
+  flashTaskbar: z.boolean().default(true), hooksEnabled: z.boolean().default(false),
+  hookPort: z.number().int().min(1024).max(65535).default(43917), hookToken: z.string().regex(/^(?:[a-f0-9]{32,64})?$/).default(''),
+  codexEnabled: z.boolean().default(false), discord: discordSettingsSchema.default({}),
+})
+
 const paneType = z.enum(['shell', 'claude', 'codex', 'custom'])
 
 const paneScheduleSchema = z.object({
@@ -142,20 +154,7 @@ const settingsSchema = z.object({
     })
     .default({}),
   // Field-level defaults migrate configs that predate the notifications feature.
-  notifications: z
-    .object({
-      enabled: z.boolean().default(true),
-      notifyDone: z.boolean().default(true),
-      notifyAction: z.boolean().default(true),
-      sound: z.boolean().default(true),
-      soundId: z.enum(['chime', 'ping', 'pop']).default('chime'),
-      volume: z.number().min(0).max(100).default(70),
-      flashTaskbar: z.boolean().default(true),
-      hooksEnabled: z.boolean().default(false),
-      hookPort: z.number().int().min(1024).max(65535).default(43917),
-      hookToken: z.string().default(''),
-    })
-    .default({}),
+  notifications: notificationSettingsSchema.default({}),
 })
 
 const snippetSchema = z.object({

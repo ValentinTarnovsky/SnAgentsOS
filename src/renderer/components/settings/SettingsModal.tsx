@@ -51,7 +51,7 @@ const CATEGORIES: Category[] = [
   { id: 'connections', labelKey: 'settings.cat.connections', icon: PlugZap, keywords: ['ssh', 'connection', 'conexion', 'conexión', 'setup', 'login', 'password', 'contraseña', 'dedi', 'server', 'servidor', 'expect'] },
   { id: 'snippets', labelKey: 'settings.cat.snippets', icon: FileText, keywords: ['snippet', 'prompt', 'plantilla', 'texto', 'text'] },
   { id: 'startup', labelKey: 'settings.cat.startup', icon: Power, keywords: ['startup', 'inicio', 'tray', 'bandeja', 'launch', 'close', 'cerrar', 'shortcut', 'atajo', 'hotkey'] },
-  { id: 'notifications', labelKey: 'settings.cat.notifications', icon: Bell, keywords: ['notifications', 'notificaciones', 'sound', 'sonido', 'claude', 'status', 'estado', 'badge', 'hooks', 'toast', 'alerta'] },
+  { id: 'notifications', labelKey: 'settings.cat.notifications', icon: Bell, keywords: ['notifications', 'notificaciones', 'sound', 'sonido', 'claude', 'codex', 'discord', 'webhook', 'status', 'estado', 'badge', 'hooks', 'toast', 'alerta'] },
   { id: 'keys', labelKey: 'settings.cat.keys', icon: Keyboard, keywords: ['keys', 'teclas', 'keyboard', 'teclado', 'shortcut', 'atajo', 'keybinding', 'binding', 'palette', 'paleta'] },
   { id: 'data', labelKey: 'settings.cat.data', icon: Database, keywords: ['data', 'datos', 'export', 'exportar', 'import', 'importar', 'backup', 'respaldo'] },
   { id: 'appearance', labelKey: 'settings.cat.appearance', icon: Palette, keywords: ['theme', 'color', 'tema', 'apariencia', 'custom'] },

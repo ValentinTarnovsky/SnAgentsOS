@@ -72,6 +72,10 @@ export const CH = {
   STATUS_VIEWED: 'status:viewed', // send (paneIds currently in view: active workspace minus minimized)
   STATUS_SET_CONFIG: 'status:setConfig', // send (renderer pushes NotificationSettings to main)
   STATUS_STATE: 'status:state', // main -> renderer (PaneStatusEvt)
+  STATUS_SNAPSHOT: 'status:snapshot',
+  STATUS_HEALTH: 'status:health',
+  STATUS_DISCORD_TEST: 'status:discordTest',
+  STATUS_DESKTOP_TEST: 'status:desktopTest',
   STATUS_REVEAL: 'status:reveal', // main -> renderer (paneId; notification clicked)
   STATUS_HOOKS_INSTALL: 'status:hooksInstall', // invoke -> StatusHooksStatusRes
   STATUS_HOOKS_UNINSTALL: 'status:hooksUninstall', // invoke -> StatusHooksStatusRes

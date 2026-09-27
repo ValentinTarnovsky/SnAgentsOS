@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
 import { useAppStore } from '@/lib/store'
 import { playStatusSound } from '@/lib/sound'
+import { visiblePaneIds } from '@shared/status'
+import { focusPaneWhenReady } from './focus'
 
 /**
  * Wires the Claude status feature on the renderer side. Mounted once inside
@@ -12,17 +14,29 @@ export function useStatusEvents(): void {
   const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId)
   const workspaces = useAppStore((s) => s.workspaces)
   const minimized = useAppStore((s) => s.minimized)
+  const maximized = useAppStore((s) => s.maximized)
   const notifications = useAppStore((s) => s.settings.notifications)
 
   // Status updates pushed by main. The notify flag carries main's already
   // debounced notification decision, so the sound can never diverge from the
   // desktop toast.
   useEffect(() => {
-    return window.snApi.status.onState((evt) => {
+    const changed = new Set<string>()
+    let alive = true
+    const unsubscribe = window.snApi.status.onState((evt) => {
+      changed.add(evt.paneId)
       useAppStore.getState().setPaneStatus(evt)
       const cfg = useAppStore.getState().settings.notifications
       if (evt.notify && cfg.sound) playStatusSound(cfg.soundId, cfg.volume)
     })
+    void window.snApi.status.snapshot().then(events => {
+      if (!alive) return
+      for (const paneId of Object.keys(useAppStore.getState().paneStatus)) {
+        if (!changed.has(paneId) && !events.some(e => e.paneId === paneId)) useAppStore.getState().setPaneStatus({ paneId, state: null, precise: false, notify: false })
+      }
+      for (const evt of events) if (!changed.has(evt.paneId)) useAppStore.getState().setPaneStatus({ ...evt, notify: false })
+    }).catch(() => {})
+    return () => { alive = false; unsubscribe() }
   }, [])
 
   // A status notification was clicked: reveal that console.
@@ -32,8 +46,10 @@ export function useStatusEvents(): void {
       const ws = s.workspaces.find((w) => w.panes.some((p) => p.id === paneId))
       if (!ws) return
       if (s.activeWorkspaceId !== ws.id) s.setActive(ws.id)
+      if (s.maximized[ws.id] && s.maximized[ws.id] !== paneId) s.clearMaximize(ws.id)
       if ((s.minimized[ws.id] ?? []).includes(paneId)) s.toggleMinimize(ws.id, paneId)
       s.clearPaneAttention(paneId)
+      focusPaneWhenReady(paneId)
     })
   }, [])
 
@@ -51,10 +67,10 @@ export function useStatusEvents(): void {
   // minimized): its notification rule treats everything else as unseen.
   useEffect(() => {
     const ws = workspaces.find((w) => w.id === activeWorkspaceId)
-    const hidden = new Set(activeWorkspaceId ? (minimized[activeWorkspaceId] ?? []) : [])
-    const viewed = ws ? ws.panes.map((p) => p.id).filter((id) => !hidden.has(id)) : []
+    const viewed = visiblePaneIds(ws, activeWorkspaceId ? minimized[activeWorkspaceId] ?? [] : [], activeWorkspaceId ? maximized[activeWorkspaceId] : null)
     window.snApi.status.setViewed(viewed)
-  }, [activeWorkspaceId, workspaces, minimized])
+    if (activeWorkspaceId && document.hasFocus()) useAppStore.getState().markWorkspaceSeen(activeWorkspaceId)
+  }, [activeWorkspaceId, workspaces, minimized, maximized])
 
   // Keep main's notify rules + HookServer lifecycle in sync with settings.
   useEffect(() => {

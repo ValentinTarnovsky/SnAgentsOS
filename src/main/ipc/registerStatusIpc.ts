@@ -5,6 +5,9 @@ import type { NotificationSettings, StatusHooksStatusRes } from '@shared/types'
 import type { StatusManager } from '../status/StatusManager'
 import type { HookServer } from '../status/HookServer'
 import { hooksStatus, hooksUpToDate, installHooks, uninstallHooks } from '../status/HookInstaller'
+import { notificationSettingsSchema, discordSettingsSchema } from '../store/schema'
+import type { CodexBridge } from '../status/CodexBridge'
+import type { DiscordNotifier } from '../status/DiscordNotifier'
 
 export interface StatusIpc {
   /** Apply the persisted config once at boot (starts the HookServer if enabled). */
@@ -18,18 +21,19 @@ export interface StatusIpc {
  * or an install racing a boot start can never double-bind the port or leave
  * a stopped flag with a live server.
  */
-export function registerStatusIpc(statusManager: StatusManager, hookServer: HookServer): StatusIpc {
+export function registerStatusIpc(statusManager: StatusManager, hookServer: HookServer, codex: CodexBridge, discord: DiscordNotifier): StatusIpc {
   hookServer.onEvent((evt) => statusManager.onHookEvent(evt))
 
   let chain: Promise<unknown> = Promise.resolve()
   /** Port+token the server was last started with (requested port, not bound). */
   let started: { port: number; token: string } | null = null
+  let lifecycleError: string | undefined
 
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const run = chain.then(fn)
     chain = run.then(
       () => undefined,
-      (err) => console.error('[hooks] lifecycle step failed:', err),
+      () => { lifecycleError = 'Could not update the local integration; check the settings file and port' },
     )
     return run
   }
@@ -51,12 +55,14 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
 
   function applyHookLifecycle(cfg: NotificationSettings): Promise<void> {
     return enqueue(async () => {
+      await codex.configure(cfg.codexEnabled)
       if (cfg.hooksEnabled && cfg.hookToken) {
         await ensureServer(cfg)
       } else if (hookServer.running) {
         await hookServer.stop()
         started = null
       }
+      lifecycleError = undefined
     })
   }
 
@@ -71,14 +77,18 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
   })
 
   ipcMain.on(CH.STATUS_SET_CONFIG, (_e, cfg: NotificationSettings) => {
-    if (!cfg || typeof cfg !== 'object') return
-    statusManager.setConfig(cfg)
-    void applyHookLifecycle(cfg)
+    const result = notificationSettingsSchema.safeParse(cfg)
+    if (!result.success) return
+    statusManager.setConfig(result.data)
+    discord.setConfig(result.data.discord)
+    void applyHookLifecycle(result.data).catch(() => {})
   })
 
   ipcMain.handle(
     CH.STATUS_HOOKS_INSTALL,
     (_e, cfg: NotificationSettings): Promise<StatusHooksStatusRes> => {
+      cfg = notificationSettingsSchema.parse(cfg)
+      if (!cfg.hookToken) throw new Error('Hook token is required')
       statusManager.setConfig(cfg)
       return enqueue(async () => {
         await ensureServer(cfg)
@@ -97,12 +107,21 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
   })
 
   ipcMain.handle(CH.STATUS_HOOKS_STATUS, (): StatusHooksStatusRes => hooksStatus())
+  ipcMain.handle(CH.STATUS_SNAPSHOT, () => statusManager.snapshot())
+  ipcMain.handle(CH.STATUS_HEALTH, () => ({
+    desktop: { error: statusManager.desktopError },
+    claude: { ...hooksStatus(), running: hookServer.running, lastEventAt: statusManager.lastClaudeEventAt, ...(lifecycleError ? { error: lifecycleError } : {}) },
+    codex: codex.health, discord: discord.health,
+  }))
+  ipcMain.handle(CH.STATUS_DISCORD_TEST, (_e, cfg) => discord.test(discordSettingsSchema.parse(cfg)))
+  ipcMain.handle(CH.STATUS_DESKTOP_TEST, () => statusManager.testDesktop())
 
   return {
     applyStartup(cfg) {
       if (!cfg) return
       statusManager.setConfig(cfg)
-      void applyHookLifecycle(cfg)
+      discord.setConfig(cfg.discord)
+      void applyHookLifecycle(cfg).catch(() => {})
     },
   }
 }
