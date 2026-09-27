@@ -70,6 +70,12 @@ body {
   overscroll-behavior: contain;
 }
 
+/* Reserve vertical swipes for the application's wheel handler before the
+   browser commits to native panning. Keep horizontal pan and pinch zoom. */
+.xterm.enable-mouse-events {
+  touch-action: pan-x pinch-zoom;
+}
+
 /* Thin scrollbars matching the desktop feel. */
 * {
   scrollbar-width: thin;

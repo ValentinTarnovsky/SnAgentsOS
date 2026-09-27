@@ -4,6 +4,9 @@ const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
 const root = path.resolve(__dirname, '..')
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snmulticc-touch-'))
+const assets = path.join(root, 'out/mobile/assets')
+const mobileCss = fs.readdirSync(assets).find(name => /^index-.*\.css$/.test(name))
+if (!mobileCss) throw new Error('Run npm run build:mobile first')
 require('esbuild').buildSync({ stdin: { resolveDir: root, loader: 'ts', contents: `
 import { Terminal } from '@xterm/xterm';
 import { CanvasAddon } from '@xterm/addon-canvas';
@@ -31,6 +34,7 @@ window.result = (async () => {
  check(data.length===0,'normal scrolling sends no keystrokes');
  await write('\\x1b[?1049h\\x1b[?1000h\\x1b[?1006h');await frames();
  check(term.modes.mouseTrackingMode==='vt200','fixture enables application mouse capture');
+ check(getComputedStyle(term.element).touchAction.includes('pan-x')&&!getComputedStyle(term.element).touchAction.includes('pan-y'),'browser reserves vertical gestures while allowing horizontal pan');
  detach();data.length=0;
  touch('touchstart',60,40);touch('touchmove',60,160);touch('touchend',60,160);
  check(data.length===0,'reproduced original failure: xterm ignores captured touch scroll');
@@ -57,7 +61,7 @@ window.result = (async () => {
 })();
 ` }, bundle: true, platform: 'browser', format: 'iife', outfile: path.join(dir, 'renderer.js') })
 const css = pathToFileURL(path.join(root, 'node_modules/@xterm/xterm/css/xterm.css'))
-fs.writeFileSync(path.join(dir, 'index.html'), `<html><head><meta charset="utf-8"><link rel="stylesheet" href="${css}"></head><body><div id="terminal" style="width:400px;height:280px"></div><script src="renderer.js"></script></body></html>`)
+fs.writeFileSync(path.join(dir, 'index.html'), `<html><head><meta charset="utf-8"><link rel="stylesheet" href="${css}"><link rel="stylesheet" href="${pathToFileURL(path.join(assets, mobileCss))}"></head><body><div id="terminal" style="width:400px;height:280px"></div><script src="renderer.js"></script></body></html>`)
 fs.writeFileSync(path.join(dir, 'main.cjs'), `
 const {app,BrowserWindow}=require('electron');const path=require('path');
 app.setPath('userData',path.join(__dirname,'profile'));
@@ -69,7 +73,10 @@ app.whenReady().then(async()=>{
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-const result = spawnSync(require('electron'), [path.join(dir, 'main.cjs')], { env, windowsHide: true, encoding: 'utf8', timeout: 20000 })
+// Hosted Linux CI cannot use Electron's unpacked SUID helper. This flag applies
+// only to the isolated, trusted fixture; the shipped application is unchanged.
+const flags = process.platform === 'linux' && process.env.CI ? ['--no-sandbox'] : []
+const result = spawnSync(require('electron'), [...flags, path.join(dir, 'main.cjs')], { env, windowsHide: true, encoding: 'utf8', timeout: 20000 })
 process.stdout.write(result.stdout ?? '')
 if (result.status !== 0) process.stderr.write(result.stderr ?? result.error?.message ?? '')
 process.exitCode = result.status ?? 1

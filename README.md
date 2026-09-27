@@ -97,7 +97,7 @@ npm run dev        # launch with HMR
 npm run typecheck  # type-check main + renderer
 npm test           # status, protocol, hook transport and Discord regressions
 npm run test:ui    # isolated Electron visual smoke, after npm run build
-npm run test:mobile # real xterm touch-scroll regression in isolated Electron
+npm run test:mobile # real xterm touch-scroll regression, after npm run build:mobile
 ```
 
 ## Build
