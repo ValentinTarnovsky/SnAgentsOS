@@ -7,7 +7,7 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 9
+export const CONFIG_VERSION = 10
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -255,7 +255,18 @@ export interface RemoteSettings {
  *    U+2733 = stopped at the prompt),
  *  - optional Claude Code hooks POSTing to the local HookServer (precise).
  */
-export type ClaudePaneState = 'idle' | 'working' | 'done' | 'action'
+export type ClaudePaneState = 'idle' | 'working' | 'done' | 'action' | 'error' | 'unknown'
+export type AgentProvider = 'claude' | 'codex'
+export type AttentionReason = 'permission' | 'question' | 'plan' | 'elicitation' | 'failure'
+
+export interface PaneStatus {
+  state: ClaudePaneState
+  precise: boolean
+  provider?: AgentProvider
+  reason?: AttentionReason
+  pendingCount?: number
+  updatedAt?: number
+}
 
 /** Main -> renderer status update for one console. */
 export interface PaneStatusEvt {
@@ -266,6 +277,10 @@ export interface PaneStatusEvt {
   precise: boolean
   /** Main already decided this transition deserves a notification (drives sound too). */
   notify: boolean
+  provider?: AgentProvider
+  reason?: AttentionReason
+  pendingCount?: number
+  updatedAt?: number
 }
 
 /** Result of installing/uninstalling/inspecting the Claude Code hooks block. */
@@ -274,6 +289,25 @@ export interface StatusHooksStatusRes {
   settingsPath: string
   /** Port found in the installed hook URL, null when not installed. */
   port: number | null
+  complete?: boolean
+  running?: boolean
+  lastEventAt?: number | null
+  error?: string
+}
+
+export interface DiscordSettings {
+  enabled: boolean
+  webhookUrl: string
+  userId: string
+  notifyAction: boolean
+  notifyDone: boolean
+}
+
+export interface StatusHealth {
+  desktop: { error: 'blocked' | 'failed' | 'unavailable' | null }
+  claude: StatusHooksStatusRes
+  codex: { enabled: boolean; available: boolean; connected: number; error?: string }
+  discord: { lastSuccessAt: number | null; error: string | null; queued: number }
 }
 
 /** Desktop notifications, sounds and Claude status integration. */
@@ -297,6 +331,9 @@ export interface NotificationSettings {
   hookPort: number
   /** Random token in the hook URL path; generated on first install. */
   hookToken: string
+  /** Private per-console Codex transport for new local terminals. */
+  codexEnabled: boolean
+  discord: DiscordSettings
 }
 
 export interface Settings {

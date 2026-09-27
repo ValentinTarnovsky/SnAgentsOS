@@ -1,12 +1,14 @@
 {
   "name": "snmulticc",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "Multi Command Consoles: a personal command center for the Sn brand. Open sets of multiple terminals and AI CLI sessions (Claude Code, Codex, custom) in a draggable mosaic.",
   "author": "Valentin Tarnovsky",
   "license": "MIT",
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {
+    "test": "node scripts/test-status.cjs",
+    "test:ui": "node scripts/test-status-ui.cjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build && npm run build:mobile",
     "build:mobile": "vite build --config src/mobile/vite.config.ts",

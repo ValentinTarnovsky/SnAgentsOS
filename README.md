@@ -19,7 +19,7 @@ Open *sets* of multiple terminals and AI CLI sessions (Claude Code, Codex, custo
 
 ---
 
-> **Status:** `v1.0.0`, stable. Built in public as a VibeCoding showcase, open source under MIT.
+> **Status:** `v1.14.0`, stable. Built in public as a VibeCoding showcase, open source under MIT.
 
 ## What it is
 
@@ -37,6 +37,22 @@ A collapsible sidebar lists **workspaces** (not chats). Opening a workspace show
 - 🎨 **Themes + i18n**: Midnight, Light, Nord, Dracula, Solarized and a fully custom palette. English and Spanish.
 - 🪟 **Native feel**: frameless custom title bar, tray integration, launch on startup, crash-safe config with automatic backups.
 - 📦 **Portable + installable**: Windows 10+, macOS (Intel + Apple Silicon), Linux.
+
+## Agent status and notifications
+
+Open **Settings > Notifications** to enable the integrations:
+
+1. **Claude:** install or repair the status hooks, then restart the Claude session. Existing third-party hooks are preserved. Settings show whether hooks are complete and events have arrived.
+2. **Codex:** enable the local integration and restart the console. Interactive `codex` commands use a private App Server for each console, preserving the shell environment and directory. Existing sessions keep their transport until they exit. Requires a native Codex executable in PATH supporting `app-server --stdio` and `--remote` (tested with 0.157.1).
+3. **Discord:** enter a webhook URL and your Discord user ID, enable delivery, and use **Send test to Discord**. Leave the user ID empty for messages without a ping. Intervention/failure and turn-completion messages have separate switches. Discord works while the app is focused and independently of desktop notifications.
+
+Use **Test desktop notification** to check the system channel. If Windows blocks it, enable SnMultiCC under **Windows Settings > System > Notifications**. The app reports native delivery errors in its notification settings.
+
+Console headers and both sidebar layouts show violet for working, amber for pending input, green for a completed turn, red for failure, gray for idle, and a hollow dot for lost status. Pending requests remain visible while an agent continues working. Sidebar counters include hidden consoles in the active workspace.
+
+Integration limits: remote SSH/WSL sessions, explicit executable paths, `--remote`, and `--no-daemon` bypass the local Codex launcher. Initial login/trust dialogs and free-form questions may not emit structured events; completion notifications cover the end of those responses. Claude title fallback is approximate. Codex async message questions are acknowledged when the server accepts the next user input; individually identified RPC requests resolve separately.
+
+Discord sends only provider, workspace/pane names, reason and time. Webhook URLs remain in the local config and its backups, are hidden in the UI, and are removed from config exports. No prompts, command output, or terminal contents are sent. A network timeout can leave delivery unconfirmed; the app reports it without blindly duplicating the message.
 
 ## Connection profiles (SSH and more)
 
@@ -77,6 +93,8 @@ Grab the latest build from **[Releases](https://github.com/ValentinTarnovsky/SnM
 npm install
 npm run dev        # launch with HMR
 npm run typecheck  # type-check main + renderer
+npm test           # status, protocol, hook transport and Discord regressions
+npm run test:ui    # isolated Electron visual smoke, after npm run build
 ```
 
 ## Build

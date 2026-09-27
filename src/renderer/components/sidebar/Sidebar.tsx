@@ -20,6 +20,8 @@ import { RemoteIndicator } from '@/components/sidebar/RemoteIndicator'
 import { iconFor } from '@/lib/icons'
 import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 import { cn } from '@/lib/cn'
+import { StatusDot } from '@/components/ui/StatusDot'
+import { aggregateStatus } from '@shared/status'
 
 interface MenuState {
   x: number
@@ -49,6 +51,7 @@ export function Sidebar() {
     activeWorkspaceId,
     sidebarCollapsed,
     paneAttention,
+    paneStatus,
     setActive,
     deleteWorkspace,
     renameWorkspace,
@@ -157,9 +160,9 @@ export function Sidebar() {
           const active = w.id === activeWorkspaceId
           const WsIcon = iconFor(w.panes[0]?.icon)
           const renaming = renamingId === w.id
-          const attentionCount = active
-            ? 0
-            : w.panes.reduce((n, p) => n + (paneAttention[p.id] ? 1 : 0), 0)
+          const attentionCount = w.panes.reduce((n, p) => n + Math.max(paneStatus[p.id]?.pendingCount ?? 0, paneAttention[p.id] ? 1 : 0), 0)
+          const status = aggregateStatus(w.panes.map(p => paneStatus[p.id]))
+          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${paneStatus[p.id].state}`)}`).join('\n')
           return (
             <div
               key={w.id}
@@ -192,7 +195,7 @@ export function Sidebar() {
                   />
                 </div>
               ) : (
-                <Tooltip label={sidebarCollapsed ? w.name : ''} side="right">
+                <Tooltip label={sidebarCollapsed ? w.name : ''} side="right" className="min-w-0 flex-1">
                   <button
                     onClick={() => {
                       setActive(w.id)
@@ -206,11 +209,14 @@ export function Sidebar() {
                       active ? 'text-text-primary' : 'text-text-secondary',
                     )}
                   >
+                    <span className="relative shrink-0">
                     <WsIcon
                       size={16}
                       className="shrink-0"
                       style={{ color: active ? (w.panes[0]?.color ?? '#6366f1') : undefined }}
                     />
+                    {sidebarCollapsed && status && <span className="absolute -bottom-1 -right-1 rounded-full bg-bg-secondary p-0.5"><StatusDot status={status} label={statusLabel} size={6} /></span>}
+                    </span>
                     <span
                       className={cn(
                         'min-w-0 flex-1 transition-opacity duration-150',
@@ -218,6 +224,7 @@ export function Sidebar() {
                       )}
                     >
                       <span className="flex items-center gap-1">
+                        {!sidebarCollapsed && <StatusDot status={status} label={statusLabel} />}
                         <span className="truncate">{w.name}</span>
                         {w.favorite && (
                           <Star size={11} className="shrink-0 fill-amber-400 text-amber-400" />
@@ -234,7 +241,7 @@ export function Sidebar() {
               )}
 
               {!sidebarCollapsed && !renaming && (
-                <AttentionBadge count={attentionCount} className="mr-1.5 group-hover:hidden" />
+                <AttentionBadge count={attentionCount} className="mr-1" />
               )}
               {sidebarCollapsed && (
                 <AttentionBadge
@@ -248,7 +255,8 @@ export function Sidebar() {
                     e.stopPropagation()
                     openMenu(e, w.id)
                   }}
-                  className="mr-1 hidden shrink-0 rounded p-1 text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary group-hover:block"
+                  aria-label={t('ctx.moreActions')}
+                  className="mr-1 shrink-0 rounded p-1 text-text-secondary opacity-0 transition-opacity hover:bg-bg-secondary hover:text-text-primary focus:opacity-100 group-hover:opacity-100"
                 >
                   <MoreVertical size={15} />
                 </button>

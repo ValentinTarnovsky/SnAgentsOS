@@ -351,6 +351,10 @@ export interface SnApi {
     setConfig(cfg: NotificationSettings): void
     /** Per-console state updates. Returns an unsubscribe function. */
     onState(cb: (e: PaneStatusEvt) => void): () => void
+    snapshot(): Promise<PaneStatusEvt[]>
+    health(): Promise<import('./types').StatusHealth>
+    testDiscord(cfg: import('./types').DiscordSettings): Promise<{ ok: boolean; error?: string }>
+    testDesktop(): Promise<void>
     /** Fired when a status notification is clicked (reveal that console). */
     onReveal(cb: (paneId: string) => void): () => void
     /** Write the SnMultiCC hook block into ~/.claude/settings.json. */

@@ -105,6 +105,10 @@ const api: SnApi = {
     setViewed: (paneIds: string[]) => ipcRenderer.send(CH.STATUS_VIEWED, paneIds),
     setConfig: (cfg: NotificationSettings) => ipcRenderer.send(CH.STATUS_SET_CONFIG, cfg),
     onState: (cb: (e: PaneStatusEvt) => void) => sub<PaneStatusEvt>(CH.STATUS_STATE, cb),
+    snapshot: () => ipcRenderer.invoke(CH.STATUS_SNAPSHOT),
+    health: () => ipcRenderer.invoke(CH.STATUS_HEALTH),
+    testDiscord: (cfg: import('@shared/types').DiscordSettings) => ipcRenderer.invoke(CH.STATUS_DISCORD_TEST, cfg),
+    testDesktop: () => ipcRenderer.invoke(CH.STATUS_DESKTOP_TEST),
     onReveal: (cb: (paneId: string) => void) => sub<string>(CH.STATUS_REVEAL, cb),
     hooksInstall: (cfg: NotificationSettings) =>
       ipcRenderer.invoke(CH.STATUS_HOOKS_INSTALL, cfg) as Promise<StatusHooksStatusRes>,
