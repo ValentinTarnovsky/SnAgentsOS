@@ -19,7 +19,7 @@ Open *sets* of multiple terminals and AI CLI sessions (Claude Code, Codex, custo
 
 ---
 
-> **Status:** `v1.14.0`, stable. Built in public as a VibeCoding showcase, open source under MIT.
+> **Status:** `v1.14.1`, stable. Built in public as a VibeCoding showcase, open source under MIT.
 
 ## What it is
 
