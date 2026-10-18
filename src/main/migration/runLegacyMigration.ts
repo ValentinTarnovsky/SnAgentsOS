@@ -476,6 +476,8 @@ export function scheduleLegacyCleanup(win: Pick<BrowserWindow, 'isVisible' | 'on
   else win.once('ready-to-show', start)
   // The zip expires with the app open too (committed, cleaning or done).
   deps.setInterval(() => {
+    // A pass in flight owns the marker (it rewrites it after every item); try again tomorrow.
+    if (running) return
     try {
       if (maintainBackup(dataDir(), deps.now(), undefined, log)) emit(readLegacyMarker())
     } catch {
