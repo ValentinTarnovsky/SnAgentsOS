@@ -76,7 +76,7 @@ export function Logo({
           <span className="bg-clip-text text-transparent bg-gradient-to-br from-accent-violet via-accent-purple to-accent-blue">
             Sn
           </span>
-          <span className="text-text-primary">MultiCC</span>
+          <span className="text-text-primary">AgentsOS</span>
         </span>
       )}
     </span>

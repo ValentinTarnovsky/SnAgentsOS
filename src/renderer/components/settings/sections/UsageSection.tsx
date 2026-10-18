@@ -1,6 +1,7 @@
 import { useEffect, useState, type ComponentType } from 'react'
 import { Boxes, Cpu, MemoryStick, TerminalSquare } from 'lucide-react'
 import type { AppMetrics } from '@shared/ipc-contract'
+import { BRAND } from '@shared/brand'
 import { useT } from '@/i18n'
 
 const N = 60 // samples kept (~1 minute at 1s cadence)
@@ -35,7 +36,7 @@ export function UsageSection() {
 
   return (
     <div className="space-y-5">
-      <p className="text-sm text-text-secondary">{t('usage.hint')}</p>
+      <p className="text-sm text-text-secondary">{t('usage.hint', { app: BRAND.productName })}</p>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Stat icon={MemoryStick} label={t('usage.ram')} value={current ? `${current.memMB} MB` : '-'} />

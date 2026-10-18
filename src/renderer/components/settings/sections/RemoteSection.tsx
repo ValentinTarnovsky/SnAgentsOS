@@ -3,6 +3,7 @@ import { Copy, Pencil, Plus, QrCode, Smartphone, Trash2 } from 'lucide-react'
 import type { RemoteServerState } from '@shared/ipc-contract'
 import type { RemoteEndpointKind } from '@shared/remote-protocol'
 import type { KeyButton } from '@shared/types'
+import { BRAND } from '@shared/brand'
 import { BASE_KEYS, comboToSeq, type BaseKeyId } from '@shared/keyseq'
 import { useAppStore } from '@/lib/store'
 import { useRemoteStore } from '@/lib/remoteStore'
@@ -213,7 +214,7 @@ export function RemoteSection() {
       {/* Platform hints */}
       <div className="space-y-1.5 border-t border-border pt-5">
         {info?.platform === 'win32' && (
-          <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.firewallHint')}</p>
+          <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.firewallHint', { app: BRAND.productName })}</p>
         )}
         {info?.portable && (
           <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.portableHint')}</p>
@@ -224,7 +225,7 @@ export function RemoteSection() {
       {/* Phone KeyBar custom shortcuts */}
       <div className="space-y-2 border-t border-border pt-5">
         <label className={labelCls}>{t('remote.keybar.title')}</label>
-        <p className="text-xs leading-relaxed text-text-secondary">{t('remote.keybar.hint')}</p>
+        <p className="text-xs leading-relaxed text-text-secondary">{t('remote.keybar.hint', { app: BRAND.productName })}</p>
 
         {editingButton ? (
           <KeyButtonEditor

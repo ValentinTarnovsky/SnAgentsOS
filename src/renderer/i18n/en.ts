@@ -173,7 +173,7 @@ export const en = {
   'search.prev': 'Previous match',
 
   // Empty state
-  'empty.title': 'Multi Command Consoles',
+  'empty.title': 'Agents command center',
   'empty.subtitle': 'Create a workspace in any folder and open several consoles at once.',
 
   // Wizard
@@ -236,7 +236,7 @@ export const en = {
   'notif.discord.userHint': 'Copy your user ID with Discord Developer Mode. Leave empty to send without a ping.',
   'notif.discord.test': 'Send test to Discord',
   'notif.desktop.test': 'Test desktop notification',
-  'notif.desktop.blocked': 'Windows blocked the notification. Enable notifications for SnMultiCC in Windows Settings > System > Notifications.',
+  'notif.desktop.blocked': 'Windows blocked the notification. Enable notifications for {app} in Windows Settings > System > Notifications.',
   'notif.desktop.failed': 'The system could not display the notification. Check notification permissions and, on Windows, use the installed app with its Start Menu shortcut.',
   'notif.desktop.unavailable': 'Desktop notifications are unavailable on this system.',
   'notif.discord.sending': 'Sending...',
@@ -264,7 +264,7 @@ export const en = {
   'settings.cat.aiusage': 'AI Usage',
   'settings.cat.remote': 'Remote control',
   'settings.cat.about': 'About',
-  'usage.hint': 'Live resource usage of SnMultiCC on your PC.',
+  'usage.hint': 'Live resource usage of {app} on your PC.',
   'usage.ram': 'Memory',
   'usage.cpu': 'CPU',
   'usage.processes': 'Processes',
@@ -400,7 +400,7 @@ export const en = {
   'remote.revokeTitle': 'Revoke device?',
   'remote.revokeMessage': '“{name}” will be disconnected immediately and must pair again to reconnect.',
   'remote.firewallHint':
-    'Windows may ask to allow SnMultiCC on private networks the first time - allow it so phones can reach this PC.',
+    'Windows may ask to allow {app} on private networks the first time - allow it so phones can reach this PC.',
   'remote.portableHint': 'On the portable build, closing the app stops the server.',
   'remote.securityHint':
     'Traffic is not encrypted with TLS; use it on trusted Wi-Fi (WPA2) or over Tailscale.',
@@ -418,7 +418,7 @@ export const en = {
 
   // Remote pairing approval prompt
   'remote.pairing.title': 'Device wants to connect',
-  'remote.pairing.wants': '“{name}” wants to control SnMultiCC.',
+  'remote.pairing.wants': '“{name}” wants to control {app}.',
   'remote.pairing.expiresIn': 'Expires in {seconds}s',
   'remote.pairing.allow': 'Allow',
   'remote.pairing.deny': 'Deny',
@@ -426,7 +426,7 @@ export const en = {
   // Phone KeyBar custom shortcuts
   'remote.keybar.title': 'Phone key bar buttons',
   'remote.keybar.hint':
-    'Add custom buttons to the key bar on paired phones. Each button sends a fixed sequence of bytes to the console - whether that reads as "insert a newline" or something else depends on the app running there, not on SnMultiCC.',
+    'Add custom buttons to the key bar on paired phones. Each button sends a fixed sequence of bytes to the console - whether that reads as "insert a newline" or something else depends on the app running there, not on {app}.',
   'remote.keybar.new': 'New button',
   'remote.keybar.label': 'Label',
   'remote.keybar.seq': 'Sequence',
@@ -450,6 +450,5 @@ export const en = {
   'titlebar.maximize': 'Maximize',
   'titlebar.restore': 'Restore',
   'titlebar.close': 'Close',
-  'tray.show': 'Show SnMultiCC',
   'tray.quit': 'Quit',
 } as const

@@ -1,5 +1,6 @@
 import { join } from 'path'
 import { BrowserWindow } from 'electron'
+import { BRAND } from '@shared/brand'
 import { openExternalSafe } from './openExternal'
 
 export function createMainWindow(): BrowserWindow {
@@ -13,7 +14,7 @@ export function createMainWindow(): BrowserWindow {
     autoHideMenuBar: true,
     // Custom frameless title bar, controls live in the renderer (TitleBar.tsx).
     frame: false,
-    title: 'SnMultiCC',
+    title: BRAND.productName,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
