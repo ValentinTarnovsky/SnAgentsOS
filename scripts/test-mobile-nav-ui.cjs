@@ -271,6 +271,19 @@ window.runMain = async () => {
  history.back();
  await wait(420);
  check(!$('[data-push-screen]') && settingsOpen === false, 'the browser back closes Settings');
+ // E2-FR-45: Settings > Key bar pushes a second screen; back pops only that one.
+ settingsOpen = true; renderSettings();
+ await wait(420);
+ click($('[data-settings-section=keybar] [data-action=keybar]'));
+ await wait(420);
+ check($('[data-push-screen=keybar]') && $('[data-push-screen=keybar]').dataset.stage === 'shown' && $('[data-push-screen=keybar] [data-key-row=esc]'), 'the Key bar row pushes the Key bar screen');
+ check(noOverflow() && [...document.querySelectorAll('[data-key-row]')].every(r => r.scrollWidth <= r.clientWidth), 'the Key bar screen and every row fit 360px');
+ history.back();
+ await wait(420);
+ check(!$('[data-push-screen=keybar]') && $('[data-push-screen=settings]') && settingsOpen === true, 'the browser back pops the Key bar screen and leaves Settings open');
+ history.back();
+ await wait(420);
+ check(!$('[data-push-screen]') && settingsOpen === false, 'a second back closes Settings');
  return checks;
 };
 window.reducedCheck = async () => {

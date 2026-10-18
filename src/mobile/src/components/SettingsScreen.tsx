@@ -3,15 +3,17 @@
  * action sheet. Sections: Appearance (desktop theme, font size), Alerts
  * (in-page alerts, E1-FR-40) and This device (unpair). The Input section of
  * E1-FR-22/30 (AI consoles start in Composer, composer autocorrect) sits
- * between Appearance and Alerts.
+ * between Appearance and Alerts. The Key bar row (E2-FR-45) pushes
+ * KeyLayoutScreen over this screen.
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { LogOut, Minus, Plus as PlusSmall } from 'lucide-react'
+import { Keyboard, LogOut, Minus, Plus as PlusSmall } from 'lucide-react'
 import type { ThemeName } from '@shared/types'
 import { PushScreen } from './PushScreen'
 import { ActionList } from './ActionList'
 import { ConfirmSheet } from './ConfirmSheet'
+import { KeyLayoutScreen } from './KeyLayoutScreen'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { getActiveTerm } from '../lib/terminalBus'
@@ -84,6 +86,9 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const composerAutocorrect = useRemoteStore((s) => s.composerAutocorrect)
   const setComposerPref = useRemoteStore((s) => s.setComposerPref)
   const [confirmUnpair, setConfirmUnpair] = useState(false)
+  const [keyLayoutOpen, setKeyLayoutOpen] = useState(false)
+  // Settings closing takes the Key bar screen with it, so reopening starts at Settings.
+  if (!open && keyLayoutOpen) setKeyLayoutOpen(false)
 
   const currentSize = (): number => {
     if (fontOverride != null) return fontOverride
@@ -172,6 +177,20 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
             />
           </div>
         </SettingsSection>
+        {/* E2-FR-45: Key bar layout */}
+        <SettingsSection id="keybar" title={t('keybar.title')}>
+          <ActionList
+            items={[
+              {
+                id: 'keybar',
+                icon: <Keyboard size={16} />,
+                label: t('keybar.title'),
+                hint: t('keybar.entryHint'),
+                onSelect: () => setKeyLayoutOpen(true),
+              },
+            ]}
+          />
+        </SettingsSection>
         <SettingsSection id="alerts" title={t('alerts.title')}>
           <PrefToggle
             pref="inPageAlerts"
@@ -195,6 +214,7 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
           />
         </SettingsSection>
       </PushScreen>
+      <KeyLayoutScreen open={keyLayoutOpen} onClose={() => setKeyLayoutOpen(false)} />
       <ConfirmSheet
         state={confirmUnpair ? { message: t('act.unpairConfirm'), onConfirm: () => client.unpair() } : null}
         onClose={() => setConfirmUnpair(false)}

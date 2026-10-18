@@ -1,6 +1,7 @@
 // Exercise the real KeyBar component (E1-FR-16..21) with synthetic pointer
 // events in an isolated, hidden browser: tap on pointerup, swipe voids, hold
-// repeat, latch release, offline no-op, pane switch, keyboard toggle, layout.
+// repeat, latch release, offline no-op, pane switch, keyboard toggle, layout,
+// and the Key bar screen (E2-FR-45, 46): hide, reorder, reset, custom keys.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -13,6 +14,7 @@ require('esbuild').buildSync({ stdin: { resolveDir: root, loader: 'tsx', content
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { KeyBar } from './src/mobile/src/components/KeyBar';
+import { KeyLayoutScreen } from './src/mobile/src/components/KeyLayoutScreen';
 import { client } from './src/mobile/src/lib/client';
 import { store } from './src/mobile/src/lib/store';
 import { setActiveTerm } from './src/mobile/src/lib/terminalBus';
@@ -111,6 +113,75 @@ window.result = (async () => {
  const latch=key('Ctrl'); tap(latch); await frames();
  check(!store.getState().ctrlLatch&&latch.className.includes('opacity-40'),'in composer mode the latch is disabled');
  check(store.getState().toast==='Ctrl+letter: use Direct mode','and explains Direct mode in a toast');
+
+ // --- KeyBar part 2 (E2-FR-45, 46): the Key bar screen drives the live bar ---
+ // rAF can stall in a hidden window after many re-renders, so this part settles on timers.
+ const settle = () => wait(30);
+ render({}); await settle();
+ const layoutHost=document.createElement('div'); document.body.appendChild(layoutHost);
+ const layoutRoot=createRoot(layoutHost);
+ flushSync(() => layoutRoot.render(<KeyLayoutScreen open={true} onClose={() => {}} />)); await wait(400);
+ const barLabels = () => [...host.querySelector('[data-scrollable]').querySelectorAll('button')].map(b=>b.getAttribute('aria-label'));
+ const rowIds = () => [...layoutHost.querySelectorAll('[data-key-row]')].map(r=>r.getAttribute('data-key-row'));
+ const row = id => { const r=layoutHost.querySelector('[data-key-row="'+id+'"]'); if(!r)throw new Error('missing row '+id); return r };
+ const stored = () => JSON.parse(localStorage.getItem('snagentsos.keybar'));
+ check(layoutHost.querySelector('[data-push-screen="keybar"]')!=null,'the Key bar screen opens as a pushed screen');
+ check(rowIds().length===20&&rowIds()[0]==='esc'&&rowIds().includes('desk:u1')&&!rowIds().includes('keyboard'),'it lists every scroll key (desktop keys included), not the keyboard toggle');
+ const tabRow=row('tab');
+ check([...tabRow.querySelectorAll('[data-key-up],[data-key-down]')].every(b=>{const r=b.getBoundingClientRect();return r.width>=44&&r.height>=44}),'move up / move down buttons are 44px');
+ check(row('esc').querySelector('[data-key-up]').disabled&&row('chip:^Z').querySelector('[data-key-down]').disabled,'the first row cannot move up and the last cannot move down');
+ tabRow.querySelector('[data-key-toggle]').click(); await settle();
+ check(row('tab').getAttribute('data-visible')==='false'&&row('tab').querySelector('[role=switch]').getAttribute('aria-checked')==='false','hiding Tab flips its switch');
+ check(!barLabels().includes('Tab'),'a hidden key leaves the live KeyBar');
+ for(let i=0;i<25;i++){ const b=row('esc').querySelector('[data-key-down]'); if(b.disabled)break; b.click(); await settle(); }
+ check(rowIds().at(-1)==='esc'&&barLabels().at(-1)==='Esc','moving Esc down to the end reorders the live KeyBar');
+ check(stored().version===1&&!stored().visibleIds.includes('tab')&&stored().orderedIds.at(-1)==='esc','the layout persists to snagentsos.keybar');
+ row('tab').querySelector('[data-key-toggle]').click(); await settle();
+ check(barLabels().includes('Tab'),'showing Tab again brings it back');
+ layoutHost.querySelector('[data-keybar-reset]').click(); await settle();
+ check(JSON.stringify(barLabels())===JSON.stringify(order),'Reset restores the default order');
+ check(store.getState().toast==='Key bar reset','and confirms with a toast');
+
+ const setVal=(el,v)=>{ const proto=el.tagName==='SELECT'?HTMLSelectElement.prototype:HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto,'value').set.call(el,v); el.dispatchEvent(new Event(el.tagName==='SELECT'?'change':'input',{bubbles:true})) };
+ const q = sel => { const el=document.querySelector(sel); if(!el)throw new Error('missing '+sel); return el };
+ const saveBtn = () => [...document.querySelectorAll('button')].find(b=>b.textContent==='Save');
+ layoutHost.querySelector('[data-keybar-add]').click(); await wait(400);
+ check(q('[data-custom-mode="key"]').getAttribute('aria-pressed')==='true','a new key starts in Key mode');
+ setVal(q('[data-custom-key]'),'right'); q('[data-custom-mod="ctrl"]').click(); await settle();
+ check(q('[data-custom-preview]').textContent==='\\\\x1b[1;5C','the builder previews Ctrl+Right as \\\\x1b[1;5C');
+ check(q('[data-custom-label]').placeholder==='C-\\u2192','a blank label suggests C-\\u2192');
+ setVal(q('[data-custom-key]'),'enter'); await settle();
+ check(saveBtn().disabled&&q('[data-custom-preview]').textContent==='Ctrl+Enter has no key of its own: use Text mode','Ctrl+Enter disables Save and points to Text mode');
+ setVal(q('[data-custom-key]'),'right'); setVal(q('[data-custom-label]'),'Word>'); await settle();
+ check(!saveBtn().disabled,'a valid key can be saved');
+ saveBtn().click(); await wait(400);
+ check(rowIds().at(-1)?.startsWith('cust:')&&barLabels().at(-1)==='Word>','the custom key is appended to the list and the live KeyBar');
+ check(stored().custom.length===1&&stored().custom[0].mode==='key'&&stored().custom[0].ctrl===true,'the custom key persists in custom[]');
+ sent.length=0; tap(key('Word>'));
+ check(sent[0]==='\\x1b[1;5C','tapping the custom key sends ESC [ 1 ; 5 C');
+
+ const custId=rowIds().at(-1);
+ row(custId).querySelector('[data-key-edit]').click(); await wait(400);
+ check(q('[data-custom-label]').value==='Word>'&&q('[data-custom-mod="ctrl"]').getAttribute('aria-pressed')==='true','editing loads the saved key');
+ q('[data-custom-mode="text"]').click(); await settle();
+ setVal(q('[data-custom-text]'),'git status'); q('[data-custom-enter]').click(); setVal(q('[data-custom-label]'),'gst'); await settle();
+ check(q('[data-custom-preview]').textContent==='git status\\\\r','Text mode previews the literal and the Enter');
+ saveBtn().click(); await wait(400);
+ check(rowIds().at(-1)===custId&&barLabels().at(-1)==='gst','an edit keeps the key in place');
+ sent.length=0; tap(key('gst'));
+ check(sent[0]==='git status\\r','the Text key sends its literal and Enter');
+ row(custId).querySelector('[data-key-up]').click(); await settle();
+ check(rowIds().at(-2)===custId,'custom keys reorder like any other');
+
+ flushSync(() => store.getState().update({ snapshot:{ keyButtons:[] } })); await settle();
+ check(!rowIds().includes('desk:u1')&&!barLabels().includes('F5'),'a desktop key that disappears from the snapshot is dropped silently');
+ flushSync(() => store.getState().update({ snapshot:{ keyButtons:[{id:'u1',label:'F5',seq:'\\x1b[15~'}] } })); await settle();
+ check(rowIds().indexOf('desk:u1')===rowIds().indexOf('chip:^R')+1,'and comes back next to its canonical neighbour');
+
+ row(custId).querySelector('[data-key-edit]').click(); await wait(400);
+ q('[data-custom-delete]').click(); await wait(400);
+ check(!rowIds().includes(custId)&&!barLabels().includes('gst')&&stored().custom.length===0,'deleting a custom key removes it from the list, the bar and storage');
+ layoutRoot.unmount();
 
  reactRoot.unmount(); return checks;
 })();
