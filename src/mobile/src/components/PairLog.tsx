@@ -16,10 +16,12 @@ export function PairLog({ since }: { since?: number | null }): ReactNode {
   const from = since ?? startedAt ?? 0
   const lines: LogEntry[] = all.filter((e) => e.t >= from).slice(-PAIR_LOG_LINES)
   const ref = useRef<HTMLDivElement | null>(null)
+  // Keyed on the newest line, not the count: the count stops growing at the cap.
+  const newest = lines.length > 0 ? lines[lines.length - 1].t : 0
   useEffect(() => {
     const el = ref.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [lines.length])
+  }, [newest, lines.length])
   return (
     <div
       ref={ref}

@@ -17,6 +17,7 @@ import { flushSync } from 'react-dom';
 import { DiagnosticsBody, currentReport } from './src/mobile/src/components/DiagnosticsScreen';
 import { ConnectingScreen } from './src/mobile/src/components/StatusScreens';
 import { StatusBanner } from './src/mobile/src/components/StatusBanner';
+import { SettingsScreen } from './src/mobile/src/components/SettingsScreen';
 import { store } from './src/mobile/src/lib/store';
 import { log, useDiagStore } from './src/mobile/src/lib/connLog';
 import { setLang } from './src/mobile/src/lib/i18n';
@@ -81,6 +82,14 @@ window.result = (async () => {
  flushSync(() => diagBtn.click());
  check(useDiagStore.getState().open === true, 'Diagnose opens the diagnostics screen');
  check(noOverflow(), 'the banner with Diagnose fits 360px');
+
+ // Settings > This device opens Diagnostics too.
+ flushSync(() => useDiagStore.getState().update({ open: false }));
+ flushSync(() => root.render(<SettingsScreen open onClose={() => {}} />)); await wait(400);
+ const setBtn = host.querySelector('[data-settings-section=device] [data-action=diagnostics]');
+ check(!!setBtn && setBtn.textContent.includes('Diagnostics'), 'Settings lists Diagnostics under This device');
+ flushSync(() => setBtn.click());
+ check(useDiagStore.getState().open === true, 'the Settings row opens the diagnostics screen');
  return checks;
 })();
 ` }, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', define: { __APP_VERSION__: '"2.0.0"', 'process.env.NODE_ENV': '"production"' }, alias: { '@shared': path.join(root, 'src/shared') }, outfile: path.join(dir, 'renderer.js') })
