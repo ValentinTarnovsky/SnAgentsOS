@@ -43,6 +43,8 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('openUrl'), url: z.string().min(1).max(2048) }),
   // E2-FR-28..30. Main re-validates the path against the root the renderer resolves.
   z.object({ kind: z.literal('openPath'), workspaceId: id, paneId: id, path: z.string().min(1).max(4096) }),
+  // E6-FR-24 (R22-20): pane membership and the stale check are the executor's.
+  z.object({ kind: z.literal('agentResume'), workspaceId: id, paneId: id, mode: z.enum(['resume', 'new']) }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [

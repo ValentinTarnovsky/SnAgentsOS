@@ -305,6 +305,168 @@ async function testHome() {
   check(!frame({ kind: 'openUrl', url: 'https://x.co/' + 'a'.repeat(2048) }), 'openUrl rejects more than 2048 characters')
 }
 
+/**
+ * E6-FR-24 (R22-20): ctl agentResume. The zod schema, the relay through main
+ * (stale ack, the agentEnded marker kept by the overlay) and the renderer
+ * executor in the esbuild + vm harness of test-mobile-home.cjs: membership
+ * like restartPane, the same text as the desktop chip, the first action of
+ * any device wins and the rest ack stale, and the snapshot marker.
+ */
+async function testAgentResume() {
+  const { parseRemoteClientMsg } = (() => {
+    const mod = { exports: {} }
+    const src = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/shared/remote-protocol-schemas.ts')], bundle: true, platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
+    vm.runInNewContext(src, { module: mod, exports: mod.exports, require, URL })
+    return mod.exports
+  })()
+  const frame = action => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'ctl', id: 'x', action }))
+  const base = { kind: 'agentResume', workspaceId: 'w1', paneId: 'p1' }
+  check(frame({ ...base, mode: 'resume' }).action.mode === 'resume' && frame({ ...base, mode: 'new' }).action.mode === 'new', 'agentResume accepts mode resume and new')
+  check(!frame({ ...base, mode: 'fresh' }) && !frame(base) && !frame({ ...base, mode: 'resume', paneId: '' }) && !frame({ kind: 'agentResume', paneId: 'p1', mode: 'new' }), 'agentResume rejects another mode, a missing mode, an empty paneId or a missing workspaceId')
+
+  // Main relays it as-is and copies the executor's stale error into the ack.
+  const w = world()
+  const first = snapshot.workspaces[0]
+  const ended = { ...snapshot, workspaces: [{ ...first, panes: first.panes.map((p, j) => j === 0 ? { ...p, agentEnded: { canResume: true } } : p) }, ...snapshot.workspaces.slice(1)] }
+  w.manager.pushState(ended)
+  const { ws } = await pair(w)
+  check(ws.of('authOk')[0].state.workspaces[0].panes[0].agentEnded.canResume === true, 'the overlay keeps the renderer\'s agentEnded marker')
+  ws.msg({ type: 'ctl', id: 'a1', action: { kind: 'agentResume', workspaceId: first.id, paneId: first.panes[0].id, mode: 'resume' } })
+  const relayed = w.commands.at(-1)
+  check(relayed && relayed.action.kind === 'agentResume' && relayed.action.mode === 'resume', 'agentResume reaches the renderer executor')
+  w.manager.onControlResult({ id: relayed.id, ok: false, error: 'stale' })
+  await new Promise(resolve => setImmediate(resolve))
+  const ack = ws.of('ctlAck').find(a => a.id === 'a1')
+  check(ack && !ack.ok && ack.error === 'stale', 'the phone gets ctlAck stale')
+
+  // --- Renderer executor ---
+  const timers = []
+  const fakeSet = (fn, ms) => { timers.push({ fn, ms }); return timers.length }
+  const flush = () => { while (timers.length) timers.shift().fn() }
+  const ptyWrites = [], results = [], states = []
+  const snApi = {
+    platform: 'win32',
+    config: { save() {} },
+    pty: { killPanes: async () => 0, submit: async () => ({ ok: true }), write: (req) => ptyWrites.push(req) },
+    window: { reveal() {} },
+    system: { openExternal() {} },
+    remote: { onCommand: (cb) => { snApi._cmd = cb; return () => {} }, commandResult: (res) => results.push(res), pushState: (st) => states.push(st) },
+    clipboard: { writeText() {} },
+  }
+  const rcode = require('esbuild').buildSync({ stdin: { contents: `
+    export { useAppStore } from './store'
+    export { initRemoteCommands } from './remoteCommands'
+    export { startRemoteSnapshotSync } from './remoteSnapshot'
+    export { registerPty } from './ptyRegistry'
+    export { registerAgentEndShell, runAgentEnd } from './agentEndRun'
+    export { agentEndCommands, AGENT_END_READY_MS } from './agentEnd'
+  `, resolveDir: path.join(root, 'src/renderer/lib'), loader: 'ts' }, bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, define: { 'process.env.NODE_ENV': '"production"' } }).outputFiles[0].text
+  const rmod = { exports: {} }
+  vm.runInNewContext(rcode, { module: rmod, exports: rmod.exports, require, console, process, crypto: globalThis.crypto, setTimeout: fakeSet, clearTimeout() {}, URL, window: { snApi }, document: { hasFocus: () => true, querySelector: () => null }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} })
+  const r = rmod.exports
+  const S = r.useAppStore
+  const UUID = '0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab'
+  const claude = { id: 'preset-claude', name: 'Claude Code', type: 'claude', command: 'claude', args: ['--model', 'opus'], color: '#d97757', icon: 'claude' }
+  S.getState().hydrate({
+    version: 12,
+    workspaces: [
+      { id: 'w1', name: 'Uno', cwd: 'C:/a', panes: [{ id: 'p1', type: 'claude', presetId: 'preset-claude', title: 'Claude', color: '#fff', icon: 'claude' }, { id: 'p2', type: 'shell', title: 'Sh', color: '#fff', icon: 'terminal' }] },
+      { id: 'w2', name: 'Dos', cwd: 'C:/b', panes: [{ id: 'q1', type: 'claude', presetId: 'preset-claude', title: 'Claude B', color: '#fff', icon: 'claude' }] },
+    ],
+    presets: [claude],
+    connections: [],
+    settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false, language: 'es' },
+    activeWorkspaceId: 'w1',
+  })
+  r.initRemoteCommands()
+  r.registerPty('p1', 'pty-1')
+  r.registerPty('p2', 'pty-2')
+  r.registerPty('q1', 'pty-q')
+  const offer = (paneId, extra = {}) => S.getState().setAgentEnded({ paneId, ptyId: 'pty', provider: 'claude', sessionId: UUID, reason: 'prompt_input_exit', cwd: 'C:\\repo', at: Date.now() - 5000, ...extra })
+  let n = 0
+  const ctl = (action) => { snApi._cmd({ id: 'r' + (++n), action }); return results.at(-1) }
+  const resumeText = `Set-Location -LiteralPath 'C:\\repo'; claude --model opus --resume ${UUID}\r`
+
+  offer('p1')
+  let res = ctl({ kind: 'agentResume', workspaceId: 'w2', paneId: 'p1', mode: 'resume' })
+  check(!res.ok && res.error === 'not_found' && ptyWrites.length === 0 && S.getState().agentEnded.p1, 'a paneId of another workspace is rejected and keeps the offer')
+  res = ctl({ kind: 'agentResume', workspaceId: 'gone', paneId: 'p1', mode: 'resume' })
+  check(!res.ok && res.error === 'not_found', 'an unknown workspace is not_found')
+
+  // The desktop chip's text for the same pane, through the shell its terminal registered.
+  const off = r.registerAgentEndShell('p1', () => 'powershell')
+  const desk = r.agentEndCommands({ evt: { sessionId: UUID, cwd: 'C:\\repo' }, shellKind: 'powershell', preset: claude, initialCommand: 'claude --model opus' })
+  res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'resume' })
+  check(res.ok && ptyWrites.length === 1 && ptyWrites[0].ptyId === 'pty-1' && ptyWrites[0].data === resumeText && ptyWrites[0].data === desk.resume + '\r', 'Resume types the desktop chip\'s cd prefix + --resume command with a bare CR')
+  check(S.getState().agentEnded.p1 === undefined, 'the first action clears the offer')
+  res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'new' })
+  check(!res.ok && res.error === 'stale' && ptyWrites.length === 1, 'a second action acks stale and types nothing')
+
+  // Two devices at once: both ctl frames reach the executor back to back.
+  offer('p1')
+  snApi._cmd({ id: 'dev-a', action: { kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'resume' } })
+  snApi._cmd({ id: 'dev-b', action: { kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'resume' } })
+  const a = results.find(x => x.id === 'dev-a'), b = results.find(x => x.id === 'dev-b')
+  check(a.ok && !b.ok && b.error === 'stale' && ptyWrites.length === 2, 'two devices tapping Resume together produce one command; the second gets stale')
+
+  offer('p1')
+  res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'new' })
+  check(res.ok && ptyWrites.at(-1).data === desk.fresh + '\r' && desk.fresh === 'claude --model opus', 'New types the pane\'s Claude command, like the desktop chip')
+
+  // The desktop chip goes through the same runner (its first click wins too).
+  offer('p1')
+  check(r.runAgentEnd('p1', 'resume').ok && ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'resume' }).error === 'stale', 'after a desktop click the phone gets stale')
+  off()
+
+  // A pane not mounted on the desktop: the configured default shell (PowerShell on win32).
+  offer('q1')
+  res = ctl({ kind: 'agentResume', workspaceId: 'w2', paneId: 'q1', mode: 'resume' })
+  check(res.ok && ptyWrites.at(-1).ptyId === 'pty-q' && ptyWrites.at(-1).data === resumeText, 'without a mounted terminal the cd prefix follows the default shell')
+
+  offer('p1', { sessionId: 'bad id;' })
+  res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'resume' })
+  check(!res.ok && res.error === 'no_resume' && S.getState().agentEnded.p1, 'an unsafe session id refuses Resume (no_resume) and keeps the offer for New')
+  S.getState().clearAgentEnded('p1')
+
+  offer('p2')
+  const writesBefore = ptyWrites.length
+  S.getState().updateSettings({ terminalAgentEndChip: false })
+  res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p2', mode: 'new' })
+  check(!res.ok && res.error === 'stale' && ptyWrites.length === writesBefore, 'with the chip setting off there is no offer to take (stale)')
+  S.getState().updateSettings({ terminalAgentEndChip: true })
+  S.getState().clearAgentEnded('p2')
+
+  // Too early: the write waits until the shell had AGENT_END_READY_MS to print its prompt.
+  offer('p1', { at: Date.now() })
+  timers.length = 0
+  res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'new' })
+  const early = timers.find(t => t.ms > 0 && t.ms <= r.AGENT_END_READY_MS)
+  check(res.ok && ptyWrites.length === writesBefore && early && S.getState().agentEnded.p1 === undefined, 'an action right after the exit acks ok, clears the offer and defers the write')
+  flush()
+  check(ptyWrites.length === writesBefore + 1 && ptyWrites.at(-1).data === 'claude --model opus\r', 'and types it once the ready delay elapses')
+
+  // Snapshot marker.
+  const stop = r.startRemoteSnapshotSync()
+  const paneOf = (st, id) => st.workspaces.flatMap(x => x.panes).find(p => p.id === id)
+  check(!('agentEnded' in paneOf(states.at(-1), 'p1')), 'no marker without an offer')
+  offer('p1')
+  flush()
+  check(JSON.stringify(paneOf(states.at(-1), 'p1').agentEnded) === '{"canResume":true}' && !('agentEnded' in paneOf(states.at(-1), 'p2')), 'an offer pushes agentEnded { canResume: true } for that pane only')
+  check(!JSON.stringify(states.at(-1)).includes(UUID), 'the session id never travels to the phone')
+  S.getState().updateSettings({ terminalAgentEndChip: false })
+  flush()
+  check(!('agentEnded' in paneOf(states.at(-1), 'p1')), 'the setting off removes the marker')
+  S.getState().updateSettings({ terminalAgentEndChip: true })
+  flush()
+  ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'resume' })
+  flush()
+  check(!('agentEnded' in paneOf(states.at(-1), 'p1')), 'taking the offer removes the marker from the next push')
+  offer('p1', { sessionId: 'x;y' })
+  flush()
+  check(paneOf(states.at(-1), 'p1').agentEnded.canResume === false, 'an unsafe session id marks canResume false (only New)')
+  stop()
+}
+
 async function main() {
   await bundle()
   const w = world()
@@ -313,6 +475,7 @@ async function main() {
   await testBroadcast()
   await testDataPlane()
   await testHome()
+  await testAgentResume()
   fs.rmSync(dataDir, { recursive: true, force: true })
   console.log(`PASS: ${checks} remote overlay and paneStatus checks`)
 }

@@ -80,6 +80,13 @@ export interface RemotePaneInfo {
    * by main like `running`; absent while running or never started.
    */
   exitCode?: number
+  /**
+   * The pane's Claude session ended with /exit and the desktop offers the
+   * "Claude exited [Resume] [New]" chip (E6-FR-24, renderer-computed, absent
+   * with the chip setting off). `canResume` false = only [New] (unsafe id or
+   * command). The phone mirrors it with `agentResume`.
+   */
+  agentEnded?: { canResume: boolean }
   /** Agent status overlaid by main on every state / authOk (E1-FR-03). */
   status?: RemotePaneStatus
 }
@@ -211,6 +218,13 @@ export type RemoteCtlAction =
   | { kind: 'openPath'; workspaceId: string; paneId: string; path: string }
   /** E2-FR-28: open a link on the PC (http, https or mailto only, <= 2048; else ack denied_url). */
   | { kind: 'openUrl'; url: string }
+  /**
+   * E6-FR-24: the phone's [Resume] / [New] of the "Claude exited" strip. The
+   * renderer types the same text as the desktop chip; the first action of any
+   * device clears the offer and the rest ack `stale`. Other errors: not_found
+   * (pane outside workspaceId), no_resume, not_running.
+   */
+  | { kind: 'agentResume'; workspaceId: string; paneId: string; mode: 'resume' | 'new' }
 
 // --- Client -> server messages ---
 
