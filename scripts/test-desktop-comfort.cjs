@@ -353,7 +353,112 @@ async function main() {
     check((src.match(/shouldKillLateSpawn\(/g) || []).length === 2, 'both late-resolving launches (spawn, restart) use shouldKillLateSpawn')
   }
 
-  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices, pty lifecycle)`)
+  // --- update state in main + the UPDATE_INSTALL guard (E4-FR-37) --------------
+  {
+    const handlers = {}
+    const timers = []
+    const fakeElectron = { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn }, on() {} }, app: { getVersion: () => '2.0.0', isPackaged: false }, net: {}, shell: {} }
+    const mod = load('src/main/ipc/registerUpdateIpc.ts', {
+      require: id => id === 'electron' ? fakeElectron : require(id),
+      setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+    })
+    const stateMod = load('src/main/updateState.ts')
+    const state = new stateMod.UpdateStateStore()
+    const sent = []
+    const installing = []
+    let quits = 0
+    let installCalls = 0
+    let pending = null
+    mod.registerUpdateIpc({
+      getSender: () => ({ isDestroyed: () => false, send: (ch, p) => sent.push({ ch, p }) }),
+      quitForUpdate: () => { quits++ },
+      setInstalling: v => installing.push(v),
+      check: async () => ({ available: true }),
+      install: onProgress => { installCalls++; pending = { onProgress }; return new Promise((resolve, reject) => { pending.resolve = resolve; pending.reject = reject }) },
+      state,
+    })
+    const info = { available: true, currentVersion: '2.0.0', latestVersion: '2.1.0', notes: '', releaseUrl: null, installable: true, installKind: 'win-portable' }
+    state.checked(info)
+    check(handlers['update:getState']().phase === 'available' && handlers['update:getState']().info.latestVersion === '2.1.0', 'a good check moves main to available with its info')
+    const p1 = handlers['update:install']()
+    const p2 = handlers['update:install']()
+    check(p1 === p2 && installCalls === 1, 'a second update:install joins the running one (same promise, one download)')
+    check(state.get().phase === 'downloading' && installing.at(-1) === true, 'install starts downloading and blocks close')
+    const stateFrames = () => sent.filter(s => s.ch === 'update:state').map(s => s.p.phase)
+    check(stateFrames().join() === 'available,downloading', 'update:state is pushed on every phase change')
+    pending.onProgress({ percent: 42, transferred: 42, total: 100 })
+    check(state.get().progress.percent === 42 && sent.at(-1).ch === 'update:progress', 'progress is stored in main and streamed')
+    check(stateFrames().length === 2, 'progress alone does not push a state frame')
+    // A reload mid-download: getState hands the phase and the live percent back.
+    const reloaded = handlers['update:getState']()
+    check(reloaded.phase === 'downloading' && reloaded.progress.percent === 42 && reloaded.info.latestVersion === '2.1.0', 'getState after a reload returns downloading at 42%')
+    state.checked({ ...info, latestVersion: '2.2.0' })
+    check(state.get().info.latestVersion === '2.1.0' && state.get().phase === 'downloading', 'a check during the download changes nothing')
+    pending.onProgress({ percent: 100, transferred: 100, total: 100 })
+    check(state.get().phase === 'installing' && installing.at(-1) === true, '100% with the apply pending is installing (close still blocked)')
+    pending.resolve({ relaunching: false })
+    const res = await p1
+    check(res.relaunching === false && state.get().phase === 'opened' && installing.at(-1) === false, 'an opened installer ends in opened and unblocks close')
+    check(timers.length === 0 && quits === 0, 'no relaunch when the installer only opened')
+
+    // After it settles a new install really starts again.
+    const p3 = handlers['update:install']()
+    check(p3 !== p1 && installCalls === 2, 'a finished install releases the guard')
+    pending.reject(new Error('missing-checksum'))
+    let failed = null
+    try { await p3 } catch (err) { failed = err }
+    check(failed && state.get().phase === 'failed' && state.get().installError === 'missing-checksum' && installing.at(-1) === false, 'a failed install ends in failed with its error')
+
+    const p4 = handlers['update:install']()
+    check(state.get().installError === null, 'a retry clears the previous error')
+    pending.resolve({ relaunching: true })
+    await p4
+    check(state.get().phase === 'installing' && timers.length === 1 && timers[0].ms === 400, 'a relaunching install keeps installing and schedules the quit')
+    timers[0].fn()
+    check(quits === 1, 'quitForUpdate runs')
+
+    // A failed check keeps the phase; a good one after an outcome resets it.
+    const s2 = new stateMod.UpdateStateStore()
+    s2.checked(info); s2.begin(); s2.failed('boom')
+    s2.checked({ ...info, available: false, error: 'offline' })
+    check(s2.get().phase === 'failed' && s2.get().installError === 'boom', 'a failed check keeps the install outcome')
+    s2.checked({ ...info, available: false })
+    check(s2.get().phase === 'idle' && s2.get().installError === null, 'a good check with nothing newer goes idle')
+    check(stateMod.isUpdateBusy('downloading') && stateMod.isUpdateBusy('installing') && !stateMod.isUpdateBusy('opened'), 'busy phases are downloading and installing')
+  }
+
+  // --- renderer mirror of main's update state (E4-FR-37) -----------------------
+  {
+    let stateCb = null
+    let progressCb = null
+    const r = loadRenderer(`export { useUpdaterStore, initUpdaterEvents, mirrorUpdateState, isInstallPhase } from './updater'`, {
+      window: { snApi: { updates: {
+        getState: async () => ({ phase: 'downloading', progress: { percent: 40, transferred: 4, total: 10 }, installError: null, info: { available: true, latestVersion: '2.1.0' } }),
+        onState: cb => { stateCb = cb; return () => { stateCb = null } },
+        onProgress: cb => { progressCb = cb; return () => { progressCb = null } },
+        check: async () => ({ available: true, latestVersion: '9.9.9' }),
+      } } },
+    })
+    const U = r.useUpdaterStore
+    const off = r.initUpdaterEvents()
+    await new Promise(res => setTimeout(res, 0))
+    let st = U.getState()
+    check(st.phase === 'downloading' && st.installing && st.progress.percent === 40 && st.info.latestVersion === '2.1.0', 'a reload rehydrates downloading at 40% from main')
+    progressCb({ percent: 55, transferred: 5, total: 10 })
+    check(U.getState().progress.percent === 55, 'the live percent keeps streaming')
+    await U.getState().check()
+    check(U.getState().info.latestVersion === '2.1.0', 'a check during the download keeps the info being installed')
+    stateCb({ phase: 'failed', progress: null, installError: "Error invoking remote method 'update:install': Error: missing-checksum", info: null })
+    st = U.getState()
+    check(st.phase === 'failed' && !st.installing && st.installError === 'missing-checksum' && st.info.latestVersion === '2.1.0', 'a failed phase from main maps the checksum code and keeps the info')
+    stateCb({ phase: 'opened', progress: null, installError: null, info: null })
+    check(U.getState().opened && !U.getState().installing, 'opened mirrors from main')
+    check(r.isInstallPhase('installing') && !r.isInstallPhase('available'), 'the close button is blocked only while downloading/installing')
+    off()
+    check(stateCb === null && progressCb === null, 'initUpdaterEvents unsubscribes')
+  }
+
+  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices, pty lifecycle, update state)`)
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })

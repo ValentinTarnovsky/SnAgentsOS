@@ -22,6 +22,7 @@ import type {
   SnApi,
   UpdateInfo,
   UpdateProgress,
+  UpdateState,
   UsageSnapshot,
 } from '@shared/ipc-contract'
 import type {
@@ -108,6 +109,8 @@ const api: SnApi = {
     downloadAndInstall: () =>
       ipcRenderer.invoke(CH.UPDATE_INSTALL) as Promise<{ relaunching: boolean }>,
     onProgress: (cb: (p: UpdateProgress) => void) => sub<UpdateProgress>(CH.UPDATE_PROGRESS, cb),
+    getState: () => ipcRenderer.invoke(CH.UPDATE_GET_STATE) as Promise<UpdateState>,
+    onState: (cb: (s: UpdateState) => void) => sub<UpdateState>(CH.UPDATE_STATE, cb),
   },
   usage: {
     get: () => ipcRenderer.invoke(CH.USAGE_GET) as Promise<UsageSnapshot>,
