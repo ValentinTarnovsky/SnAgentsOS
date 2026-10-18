@@ -95,8 +95,11 @@ export interface SessionManagerDeps {
   appVersion: string
   /** Current running-overridden snapshot (for authOk / post-pair state). */
   getSnapshot: () => RemoteStateSnapshot
-  /** Relay a control action to the renderer and await its result (10s bound). */
-  executeCommand: (action: RemoteCtlAction) => Promise<RemoteCommandResult>
+  /**
+   * Relay a control action to the renderer and await its result (10s bound).
+   * `deviceName` comes from the authenticated session (E4-FR-08).
+   */
+  executeCommand: (action: RemoteCtlAction, deviceName?: string) => Promise<RemoteCommandResult>
   /** Authed-session count changed (toggles throttling + pushes UI state). */
   onConnectionsChanged: () => void
 }
@@ -401,7 +404,10 @@ export class SessionManager implements PtySink {
   }
 
   private async handleCtl(session: Session, id: string, action: RemoteCtlAction): Promise<void> {
-    const result = await this.deps.executeCommand(action)
+    // The device name is looked up from the authenticated session, never taken
+    // from the client payload (E4-FR-08).
+    const deviceName = session.deviceId ? this.deps.registry.get(session.deviceId)?.name : undefined
+    const result = await this.deps.executeCommand(action, deviceName || undefined)
     this.send(session, {
       type: 'ctlAck',
       id,

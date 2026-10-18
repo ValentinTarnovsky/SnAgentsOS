@@ -2,7 +2,8 @@ import { useEffect } from 'react'
 import { useAppStore } from '@/lib/store'
 import { playStatusSound } from '@/lib/sound'
 import { visiblePaneIds } from '@shared/status'
-import { focusPaneWhenReady } from './focus'
+import { revealPane } from './revealPane'
+import { dismissAgentCardsInView, onAgentStatus } from './agentNotice'
 
 /**
  * Wires the Claude status feature on the renderer side. Mounted once inside
@@ -19,7 +20,8 @@ export function useStatusEvents(): void {
 
   // Status updates pushed by main. The notify flag carries main's already
   // debounced notification decision, so the sound can never diverge from the
-  // desktop toast.
+  // desktop toast. `delivery: 'inApp'` turns it into an in-app card instead of
+  // the OS notification (E4-FR-07); the sound is unchanged.
   useEffect(() => {
     const changed = new Set<string>()
     let alive = true
@@ -28,6 +30,7 @@ export function useStatusEvents(): void {
       useAppStore.getState().setPaneStatus(evt)
       const cfg = useAppStore.getState().settings.notifications
       if (evt.notify && cfg.sound) playStatusSound(cfg.soundId, cfg.volume)
+      onAgentStatus(evt)
     })
     void window.snApi.status.snapshot().then(events => {
       if (!alive) return
@@ -39,17 +42,10 @@ export function useStatusEvents(): void {
     return () => { alive = false; unsubscribe() }
   }, [])
 
-  // A status notification was clicked: reveal that console.
+  // A status notification was clicked: reveal that console (E5-FR-04).
   useEffect(() => {
     return window.snApi.status.onReveal((paneId) => {
-      const s = useAppStore.getState()
-      const ws = s.workspaces.find((w) => w.panes.some((p) => p.id === paneId))
-      if (!ws) return
-      if (s.activeWorkspaceId !== ws.id) s.setActive(ws.id)
-      if (s.maximized[ws.id] && s.maximized[ws.id] !== paneId) s.clearMaximize(ws.id)
-      if ((s.minimized[ws.id] ?? []).includes(paneId)) s.toggleMinimize(ws.id, paneId)
-      s.clearPaneAttention(paneId)
-      focusPaneWhenReady(paneId)
+      revealPane(paneId)
     })
   }, [])
 
@@ -69,7 +65,10 @@ export function useStatusEvents(): void {
     const ws = workspaces.find((w) => w.id === activeWorkspaceId)
     const viewed = visiblePaneIds(ws, activeWorkspaceId ? minimized[activeWorkspaceId] ?? [] : [], activeWorkspaceId ? maximized[activeWorkspaceId] : null)
     window.snApi.status.setViewed(viewed)
-    if (activeWorkspaceId && document.hasFocus()) useAppStore.getState().markWorkspaceSeen(activeWorkspaceId)
+    if (activeWorkspaceId && document.hasFocus()) {
+      useAppStore.getState().markWorkspaceSeen(activeWorkspaceId)
+      dismissAgentCardsInView(viewed)
+    }
   }, [activeWorkspaceId, workspaces, minimized, maximized])
 
   // Keep main's notify rules + HookServer lifecycle in sync with settings.

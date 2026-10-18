@@ -4,6 +4,7 @@ import type { GridPreset } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
+import { isFromToast } from '@/lib/toast'
 import { StepStart } from './StepStart'
 import { StepLayout } from './StepLayout'
 import { StepAgents } from './StepAgents'
@@ -99,7 +100,7 @@ export function NewWorkspaceWizard() {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-black/60" onClick={() => setWizardOpen(false)} />
+      <div className="absolute inset-0 bg-black/60" onClick={(e) => { if (!isFromToast(e)) setWizardOpen(false) }} />
       <div className="relative z-10 flex max-h-[86vh] w-full max-w-3xl flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]">
         {/* Header + stepper */}
         <div className="shrink-0 border-b border-border px-6 pb-4 pt-5 text-center">

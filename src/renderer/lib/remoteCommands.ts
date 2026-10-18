@@ -4,6 +4,9 @@ import { useAppStore } from './store'
 import { killPanePtys } from './ptyRegistry'
 import { broadcastToWorkspace } from './broadcastPrompt'
 import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
+import { toast } from './toast'
+import { translate } from '@/i18n'
+import type { Language } from '@shared/types'
 
 interface CmdResult {
   ok: boolean
@@ -105,6 +108,40 @@ function run(action: RemoteCtlAction): CmdResult {
   }
 }
 
+/**
+ * Text of the info toast for a phone action that changed the desktop
+ * (E4-FR-08): globalPrompt, restartPane and closePane. `deviceName` is the one
+ * main resolved from the authenticated session; without it the text says
+ * "from the phone". Null for every other action or a failed one.
+ */
+export function remoteNoticeText(
+  action: RemoteCtlAction,
+  result: CmdResult,
+  deviceName: string | undefined,
+  paneTitle: string | undefined,
+  lang: Language,
+): string | null {
+  if (!result.ok) return null
+  let what: string
+  if (action.kind === 'globalPrompt') {
+    const count = result.info ?? 0
+    what = translate(lang, count === 1 ? 'toast.remote.promptOne' : count === 0 ? 'toast.remote.promptNone' : 'toast.remote.promptMany', { count })
+  } else if (action.kind === 'restartPane') {
+    what = translate(lang, 'toast.remote.restarted', { pane: paneTitle ?? '' })
+  } else if (action.kind === 'closePane') {
+    what = translate(lang, 'toast.remote.closed', { pane: paneTitle ?? '' })
+  } else return null
+  const name = deviceName?.trim()
+  return name ? translate(lang, 'toast.remote.fromDevice', { device: name, what }) : translate(lang, 'toast.remote.fromPhone', { what })
+}
+
+/** Title of the pane an action targets, read before it runs (closePane removes it). */
+function targetTitle(action: RemoteCtlAction): string | undefined {
+  if (action.kind !== 'restartPane' && action.kind !== 'closePane') return undefined
+  const ws = useAppStore.getState().workspaces.find((w) => w.id === action.workspaceId)
+  return ws?.panes.find((p) => p.id === action.paneId)?.title
+}
+
 let wired = false
 
 /** Wire the main->renderer control-command stream to the store actions (idempotent). */
@@ -113,12 +150,15 @@ export function initRemoteCommands(): () => void {
   wired = true
   const off = window.snApi.remote.onCommand((cmd: RemoteCommand) => {
     let result: CmdResult
+    const title = targetTitle(cmd.action)
     try {
       result = run(cmd.action)
     } catch (err) {
       result = { ok: false, error: err instanceof Error ? err.message : 'error' }
     }
     window.snApi.remote.commandResult({ id: cmd.id, ...result })
+    const notice = remoteNoticeText(cmd.action, result, cmd.deviceName, title, useAppStore.getState().settings.language)
+    if (notice) toast.info(notice)
   })
   return () => {
     wired = false
