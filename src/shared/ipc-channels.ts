@@ -13,6 +13,12 @@ export const CH = {
   APP_LEGACY_OPEN_LOG: 'app:legacyOpenLog', // send -> open logs/legacy-migration.log
   APP_LEGACY_STATUS: 'app:legacyStatus', // main -> renderer (LegacyDataInfo on every marker change)
 
+  // "Open in SnAgentsOS" (E4-FR-32..34). main validates every path; the renderer only matches it.
+  APP_OPEN_PATH: 'app:openPath', // main -> renderer (OpenRequest; superset of { path })
+  APP_TAKE_PENDING_OPEN: 'app:takePendingOpen', // invoke -> OpenRequest | null (consumes it)
+  SYSTEM_SET_EXPLORER_MENU: 'system:setExplorerMenu', // invoke ({ enabled, language }) -> ExplorerMenuResult
+  SYSTEM_GET_EXPLORER_MENU: 'system:getExplorerMenu', // invoke -> ExplorerMenuResult
+
   // PTY lifecycle (renderer -> main)
   PTY_SPAWN: 'pty:spawn', // invoke -> { ptyId }
   PTY_REATTACH: 'pty:reattach', // invoke (paneId) -> { ptyId, replay } | null
