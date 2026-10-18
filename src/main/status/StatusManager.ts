@@ -30,6 +30,7 @@ export class StatusManager implements PtySink {
   private viewed = new Set<string>()
   private cfg: NotificationSettings | null = null
   private promptSequence = 0
+  private readonly listeners = new Set<(evt: PaneStatusEvt) => void>()
   lastClaudeEventAt: number | null = null
   desktopError: 'blocked' | 'failed' | 'unavailable' | null = null
   constructor(
@@ -46,6 +47,8 @@ export class StatusManager implements PtySink {
   }
   setConfig(cfg: NotificationSettings): void { this.cfg = cfg }
   setViewed(paneIds: string[]): void { this.viewed = new Set(paneIds) }
+  /** Every emit (including `state: null` from clearPane) reaches each listener (E1-FR-01). */
+  addListener(cb: (evt: PaneStatusEvt) => void): () => void { this.listeners.add(cb); return () => { this.listeners.delete(cb) } }
   snapshot(): PaneStatusEvt[] { return [...this.panes].map(([id, track]) => this.event(id, track, false)) }
   testDesktop(): void { this.showNative(mainT(this.getConfig(), 'status.notif.test')) }
 
@@ -247,5 +250,8 @@ export class StatusManager implements PtySink {
   private emit(evt: PaneStatusEvt): void {
     const win = this.getWindow()
     if (win && !win.isDestroyed()) win.webContents.send(CH.STATUS_STATE, evt)
+    for (const cb of this.listeners) {
+      try { cb(evt) } catch (error) { console.warn('[status] listener failed:', error) }
+    }
   }
 }
