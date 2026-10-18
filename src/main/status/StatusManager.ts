@@ -1,11 +1,20 @@
 import { Notification, type BrowserWindow } from 'electron'
+import { isAbsolute } from 'path'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
-import type { AgentProvider, AttentionReason, ClaudePaneState, ConfigFile, NotificationSettings, PaneStatusEvt } from '@shared/types'
+import type { AgentDetail, AgentProvider, AttentionReason, ClaudePaneState, ConfigFile, NotificationSettings, PaneStatusEvt, RemotePending } from '@shared/types'
 import type { PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
 import type { HookEvent } from './HookServer'
 import type { AgentEvent, StatusNotice } from './events'
+import { LIMITS, clip, firstLine, readLastAssistantMessage, sanitize } from './statusDetails'
+
+interface PendingEntry {
+  reason: AttentionReason
+  toolName?: string
+  summary: string
+  questions?: RemotePending['questions']
+}
 
 interface PaneTrack {
   provider: AgentProvider
@@ -13,13 +22,53 @@ interface PaneTrack {
   retired: Set<string>
   precise: boolean
   activity: ClaudePaneState
-  pending: Map<string, AttentionReason>
+  pending: Map<string, PendingEntry>
   seen: Set<string>
   turnId: string
   turn: number
   timer: NodeJS.Timeout | null
   updatedAt: number
   ended: boolean
+  // Enrichment (E4-FR-09, E5-FR-02).
+  /** Effective state last published and when it started. */
+  lastState: ClaudePaneState
+  stateSince: number
+  cacheSince?: number
+  /** Last assistant reply (<= 2000) and the turn it belongs to. */
+  reply?: string
+  replyTurn?: string
+  /** Current tool summary (public `activity`). */
+  tool?: string
+  detail?: AgentDetail
+  topic?: string
+  firstPrompt?: string
+  cwd?: string
+  transcriptPath?: string
+  /** Throttle of detail-only emissions (500 ms per pane). */
+  emitted?: string
+  emittedAt: number
+  detailTimer: NodeJS.Timeout | null
+  deferredCause?: AgentEvent
+}
+
+/** Called on every emission, `state: null` included (E1-FR-01). `cause` is the agent event behind it, when any. */
+export type StatusListener = (evt: PaneStatusEvt, cause?: AgentEvent) => void
+
+/** Same charset as schema 11 `lastSession.sessionId`: rejects `launch:` ids and shell syntax. */
+const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/
+const DETAIL_THROTTLE_MS = 500
+// 'resolved' is not here: every tool call ends in a PostToolUse, so forcing it
+// would defeat the throttle. A resolution that clears a pending request still
+// goes out at once through the state / pending signature.
+const IMMEDIATE_KINDS = new Set<AgentEvent['kind']>(['start', 'end', 'request', 'done', 'error', 'unknown'])
+const GENERIC_TOPICS = /^(claude|claude code)$/i
+
+/** Topic after the spinner / stopped glyph of Claude's OSC title, or undefined for generic titles. */
+function titleTopic(title: string): string | undefined {
+  const cp = title.codePointAt(0) ?? 0
+  if (!((cp >= 0x2800 && cp <= 0x28ff) || cp === 0x2733)) return undefined
+  const topic = clip(sanitize(title.slice(cp > 0xffff ? 2 : 1), true), LIMITS.title)
+  return topic && !GENERIC_TOPICS.test(topic) ? topic : undefined
 }
 
 /** Requests survive title changes, renderer reloads and concurrent background work. */
@@ -30,14 +79,18 @@ export class StatusManager implements PtySink {
   private viewed = new Set<string>()
   private cfg: NotificationSettings | null = null
   private promptSequence = 0
+  private readonly listeners = new Set<StatusListener>()
+  private readonly sshPanes = new Map<string, boolean>()
+  private readonly sshMisses = new Map<string, number>()
   lastClaudeEventAt: number | null = null
   desktopError: 'blocked' | 'failed' | 'unavailable' | null = null
   constructor(
     private readonly getWindow: () => BrowserWindow | null,
     private readonly getConfig: () => ConfigFile | null,
     private readonly onNotice: (notice: StatusNotice) => void = () => {},
+    private readonly readTranscript: (path: string, sessionId: string) => Promise<string | undefined> = (path, sessionId) => readLastAssistantMessage(path, sessionId),
   ) {}
-  onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.ptys.set(paneId, ptyId) }
+  onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.ptys.set(paneId, ptyId) }
   onData(): void {}
   onExit(ptyId: string, paneId: string): void {
     if (this.ptys.get(paneId) !== ptyId) return
@@ -47,13 +100,29 @@ export class StatusManager implements PtySink {
   setConfig(cfg: NotificationSettings): void { this.cfg = cfg }
   setViewed(paneIds: string[]): void { this.viewed = new Set(paneIds) }
   snapshot(): PaneStatusEvt[] { return [...this.panes].map(([id, track]) => this.event(id, track, false)) }
+  /** Current status of one console, or null when it has none. */
+  stateOf(paneId: string): PaneStatusEvt | null {
+    const track = this.panes.get(paneId)
+    return track ? this.event(paneId, track, false) : null
+  }
+  /** Observer seam (E1-FR-01) for the remote overlay, the session store and the awake service. */
+  addListener(cb: StatusListener): () => void {
+    this.listeners.add(cb)
+    return () => { this.listeners.delete(cb) }
+  }
   testDesktop(): void { this.showNative(mainT(this.getConfig(), 'status.notif.test')) }
 
   reportTitle(paneId: string, title: string): void {
     if (!this.ptys.has(paneId)) return
     const current = this.panes.get(paneId)
-    if (current?.precise) return
     const t = title.trim(), cp = t.codePointAt(0) ?? 0
+    // The topic is captured before the precise early return (E5-FR-02); a
+    // generic title never overwrites a valid one.
+    const topic = titleTopic(t)
+    if (current?.precise) {
+      if (topic && topic !== current.topic) { current.topic = topic; this.publish(paneId, current) }
+      return
+    }
     const working = cp >= 0x2800 && cp <= 0x28ff, stopped = cp === 0x2733
     const present = /^(claude|Claude Code|claude daemon)$/.test(t) || t.startsWith('claude · ')
     if (!working && !stopped && !present) {
@@ -63,13 +132,14 @@ export class StatusManager implements PtySink {
     const track = current ?? this.createTrack('claude', '')
     this.panes.set(paneId, track)
     this.cancelTimer(track)
+    if (topic) track.topic = topic
     if (working) {
       if (track.activity !== 'working') track.turn++
       track.activity = 'working'
       track.pending.clear()
     } else if (stopped && track.activity === 'working') {
       track.activity = 'idle'
-      track.pending.set('title', 'question')
+      track.pending.set('title', { reason: 'question', summary: '' })
       this.publish(paneId, track, `title:${track.turn}`, 'action')
       return
     }
@@ -80,28 +150,39 @@ export class StatusManager implements PtySink {
     if (!evt.ptyId || !evt.sessionId || this.ptys.get(evt.consoleId) !== evt.ptyId) return
     if (evt.agentId && !['PermissionRequest', 'Elicitation', 'ElicitationResult', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Notification'].includes(evt.name)) return
     if (evt.agentId && evt.name === 'PreToolUse' && !['AskUserQuestion', 'ExitPlanMode'].includes(evt.toolName ?? '')) return
-    const base = { paneId: evt.consoleId, ptyId: evt.ptyId, provider: 'claude' as const, sessionId: evt.agentId ? this.panes.get(evt.consoleId)?.sessionId ?? evt.sessionId : evt.sessionId }
+    const base = {
+      paneId: evt.consoleId, ptyId: evt.ptyId, provider: 'claude' as const,
+      sessionId: evt.agentId ? this.panes.get(evt.consoleId)?.sessionId ?? evt.sessionId : evt.sessionId,
+      cwd: evt.cwd, transcriptPath: evt.agentId ? undefined : evt.transcriptPath, subagent: evt.agentId ? true : undefined,
+    }
     const requestId = evt.toolUseId ?? evt.elicitationId
+    const tool = { toolName: evt.toolName, tool: evt.toolSummary, summary: evt.requestSummary ?? evt.toolSummary }
     let event: AgentEvent | undefined
     switch (evt.name) {
       case 'SessionStart': event = { ...base, kind: 'start' }; break
-      case 'SessionEnd': event = { ...base, kind: 'end' }; break
-      case 'UserPromptSubmit': event = { ...base, kind: 'working', turnId: `prompt:${++this.promptSequence}` }; break
-      case 'Stop': event = { ...base, kind: 'done' }; break
+      case 'SessionEnd': event = { ...base, kind: 'end', endReason: evt.endReason }; break
+      case 'UserPromptSubmit':
+        event = { ...base, kind: 'working', turnId: `prompt:${++this.promptSequence}`, prompt: evt.prompt, detail: evt.prompt ? { kind: 'prompt', text: firstLine(evt.prompt, LIMITS.detail) } : undefined }
+        break
+      case 'Stop':
+        event = { ...base, kind: 'done', reply: evt.lastAssistantMessage, detail: { kind: 'reply', text: firstLine(evt.lastAssistantMessage, LIMITS.detail) } }
+        break
       case 'StopFailure': event = { ...base, kind: 'error', reason: 'failure' }; break
-      case 'PermissionRequest': event = { ...base, kind: 'request', requestId, reason: 'permission' }; break
+      case 'PermissionRequest':
+        event = { ...base, ...tool, kind: 'request', requestId, reason: 'permission', detail: { kind: 'permission', text: evt.toolSummary ?? '' } }
+        break
       case 'Elicitation': event = { ...base, kind: 'request', requestId, reason: 'elicitation' }; break
       case 'ElicitationResult': event = { ...base, kind: 'resolved', requestId, reason: 'elicitation' }; break
       case 'PreToolUse':
-        event = evt.toolName === 'AskUserQuestion' || evt.toolName === 'ExitPlanMode'
-          ? { ...base, kind: 'request', requestId, reason: evt.toolName === 'ExitPlanMode' ? 'plan' : 'question' }
-          : { ...base, kind: 'working' }
+        if (evt.toolName === 'ExitPlanMode') event = { ...base, toolName: evt.toolName, summary: evt.requestSummary, kind: 'request', requestId, reason: 'plan', detail: { kind: 'plan', text: '' } }
+        else if (evt.toolName === 'AskUserQuestion') event = { ...base, toolName: evt.toolName, summary: evt.question ?? '', questions: evt.questions, kind: 'request', requestId, reason: 'question', detail: { kind: 'question', text: evt.question ?? '' } }
+        else event = { ...base, ...tool, kind: 'working', detail: evt.toolSummary ? { kind: 'tool', text: evt.toolSummary } : undefined }
         break
       case 'PostToolUse':
       case 'PostToolUseFailure': event = { ...base, kind: 'resolved', requestId }; break
       case 'Notification': {
         const reason = evt.notificationType === 'permission_prompt' ? 'permission' : evt.notificationType === 'elicitation_dialog' ? 'elicitation' : undefined
-        if (reason && ![...(this.panes.get(evt.consoleId)?.pending.values() ?? [])].includes(reason)) event = { ...base, kind: 'request', reason }
+        if (reason && ![...(this.panes.get(evt.consoleId)?.pending.values() ?? [])].some(p => p.reason === reason)) event = { ...base, kind: 'request', reason }
         break
       }
     }
@@ -121,6 +202,7 @@ export class StatusManager implements PtySink {
       retired.add(`${track.provider}:${track.sessionId}`)
       if (retired.size > 64) retired.delete(retired.values().next().value!)
       this.cancelTimer(track)
+      this.cancelDetail(track)
       track = this.createTrack(evt.provider, evt.sessionId)
       track.retired = retired
     }
@@ -130,6 +212,11 @@ export class StatusManager implements PtySink {
     this.panes.set(evt.paneId, track)
     this.cancelTimer(track)
     if (evt.turnId) track.turnId = evt.turnId
+    if (evt.kind === 'start') {
+      // A new session starts clean (E5-FR-02: firstPrompt resets on start).
+      track.firstPrompt = undefined; track.detail = undefined; track.tool = undefined; track.reply = undefined; track.replyTurn = undefined
+    }
+    this.enrich(track, evt)
     let notice: StatusNotice['state'] | undefined, key: string | undefined
     switch (evt.kind) {
       case 'start':
@@ -143,7 +230,7 @@ export class StatusManager implements PtySink {
         key = evt.requestId ? `request:${id}` : `request:${track.turnId}:${id}`
         if (evt.requestId && track.seen.has(key)) return
         const promoted = !!evt.requestId && track.pending.delete(`fallback:${evt.reason ?? 'question'}`)
-        track.pending.set(id, evt.reason ?? 'question')
+        track.pending.set(id, { reason: evt.reason ?? 'question', toolName: evt.toolName ? clip(sanitize(evt.toolName, true), 80) : undefined, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions })
         if (!promoted) notice = 'action'
         break
       }
@@ -163,11 +250,13 @@ export class StatusManager implements PtySink {
       case 'done':
         if (evt.provider === 'claude') {
           const target = track
+          if (!evt.reply && !evt.subagent && target.transcriptPath) this.replyFromTranscript(evt.paneId, target)
           target.timer = setTimeout(() => {
             target.timer = null
             target.activity = 'done'
             target.pending.clear()
-            this.publish(evt.paneId, target, `done:${target.turnId}`, 'done')
+            target.tool = undefined
+            this.publish(evt.paneId, target, `done:${target.turnId}`, 'done', evt)
           }, 700)
           return
         }
@@ -178,32 +267,109 @@ export class StatusManager implements PtySink {
       case 'end':
         track.retired.add(`${evt.provider}:${evt.sessionId}`)
         track.pending.clear(); track.activity = 'idle'; track.ended = true
+        track.detail = undefined; track.tool = undefined
         break
     }
-    this.publish(evt.paneId, track, key, notice)
+    this.publish(evt.paneId, track, key, notice, evt)
   }
 
   dispose(): void { for (const id of [...this.panes.keys()]) this.clearPane(id); this.ptys.clear() }
+
+  /** Copies the bounded enrichment of an accepted event onto its track. */
+  private enrich(track: PaneTrack, evt: AgentEvent): void {
+    if (evt.cwd && isAbsolute(evt.cwd)) track.cwd = evt.cwd
+    if (evt.transcriptPath) track.transcriptPath = evt.transcriptPath
+    // Subagents only touch the main detail through questions and permissions.
+    const own = !evt.subagent || evt.kind === 'request'
+    if (own && evt.detail) track.detail = { kind: evt.detail.kind, text: clip(sanitize(evt.detail.text, true), LIMITS.detail) }
+    if (own && evt.tool) track.tool = evt.tool
+    if (evt.prompt) {
+      track.tool = undefined
+      if (!track.firstPrompt) track.firstPrompt = firstLine(evt.prompt, LIMITS.title) || undefined
+    }
+    if (evt.reply) { track.reply = evt.reply; track.replyTurn = track.turnId }
+  }
+
+  /**
+   * Stop without last_assistant_message: read the reply from the tail of the
+   * validated transcript (E1-FR-09). Runs after the HTTP answer and never
+   * blocks the event flow; a stale result (other session or turn) is dropped.
+   */
+  private replyFromTranscript(paneId: string, track: PaneTrack): void {
+    const turn = track.turnId, session = track.sessionId, path = track.transcriptPath!
+    void this.readTranscript(path, session).then((text) => {
+      if (!text || this.panes.get(paneId) !== track || track.sessionId !== session || track.turnId !== turn || track.replyTurn === turn) return
+      track.reply = text; track.replyTurn = turn
+      if (!track.detail || track.detail.kind === 'reply') track.detail = { kind: 'reply', text: firstLine(text, LIMITS.detail) }
+      this.publish(paneId, track)
+    }, () => {})
+  }
+
   private createTrack(provider: AgentProvider, sessionId: string): PaneTrack {
-    return { provider, sessionId, retired: new Set(), precise: false, activity: 'idle', pending: new Map(), seen: new Set(), turnId: '', turn: 0, timer: null, updatedAt: Date.now(), ended: false }
+    const now = Date.now()
+    return { provider, sessionId, retired: new Set(), precise: false, activity: 'idle', pending: new Map(), seen: new Set(), turnId: '', turn: 0, timer: null, updatedAt: now, ended: false, lastState: 'idle', stateSince: now, emittedAt: 0, detailTimer: null }
   }
   private cancelTimer(track: PaneTrack): void { if (track.timer) clearTimeout(track.timer); track.timer = null }
+  private cancelDetail(track: PaneTrack): void { if (track.detailTimer) clearTimeout(track.detailTimer); track.detailTimer = null; track.deferredCause = undefined }
   private clearPane(paneId: string): void {
     const track = this.panes.get(paneId)
     if (!track) return
-    this.cancelTimer(track); this.panes.delete(paneId)
+    this.cancelTimer(track); this.cancelDetail(track); this.panes.delete(paneId)
     this.emit({ paneId, state: null, precise: false, notify: false })
   }
-  private event(paneId: string, track: PaneTrack, notify: boolean): PaneStatusEvt {
-    return {
-      paneId, provider: track.provider, precise: track.precise, notify,
-      state: track.activity === 'error' || track.activity === 'unknown' ? track.activity : track.pending.size ? 'action' : track.activity,
-      reason: track.activity === 'error' ? 'failure' : track.pending.values().next().value,
-      pendingCount: track.pending.size, updatedAt: track.updatedAt,
-    }
+  private stateOfTrack(track: PaneTrack): ClaudePaneState {
+    return track.activity === 'error' || track.activity === 'unknown' ? track.activity : track.pending.size ? 'action' : track.activity
   }
-  private publish(paneId: string, track: PaneTrack, key?: string, state?: StatusNotice['state']): void {
-    track.updatedAt = Date.now()
+  private event(paneId: string, track: PaneTrack, notify: boolean): PaneStatusEvt {
+    const state = this.stateOfTrack(track)
+    const evt: PaneStatusEvt = {
+      paneId, provider: track.provider, precise: track.precise, notify, state,
+      reason: track.activity === 'error' ? 'failure' : track.pending.values().next().value?.reason,
+      pendingCount: track.pending.size, updatedAt: track.updatedAt, stateSince: track.stateSince,
+    }
+    if (track.topic) evt.topic = track.topic
+    if (track.firstPrompt) evt.firstPrompt = track.firstPrompt
+    if (track.provider === 'claude' && track.cacheSince) evt.cacheSince = track.cacheSince
+    // A title-only (approximate) track carries no reply, tool or pending detail (E4-FR-09).
+    if (!track.precise) return evt
+    if (track.reply) evt.lastMessage = clip(sanitize(track.reply, true), LIMITS.lastMessage)
+    if (track.tool && (state === 'working' || state === 'action')) evt.activity = clip(track.tool, LIMITS.activity)
+    const pending: RemotePending[] = []
+    for (const [id, entry] of track.pending) {
+      if (entry.reason === 'failure') continue
+      pending.push({ id, kind: entry.reason, ...(entry.toolName ? { toolName: entry.toolName } : {}), summary: entry.summary, ...(entry.questions ? { questions: entry.questions } : {}) })
+    }
+    if (pending.length) evt.pending = pending
+    if (track.detail) evt.detail = track.detail
+    if (track.cwd) evt.cwd = track.cwd
+    // Never a Codex `launch:` placeholder, never a console behind a Connection Profile.
+    if (SESSION_ID_RE.test(track.sessionId) && !this.isSshPane(paneId)) evt.sessionId = track.sessionId
+    return evt
+  }
+  /** pane.setupId ?? workspace.setupId (same precedence as launch.ts). Cached per spawn; misses retried after 5 s. */
+  private isSshPane(paneId: string): boolean {
+    const cached = this.sshPanes.get(paneId)
+    if (cached !== undefined) return cached
+    if (Date.now() - (this.sshMisses.get(paneId) ?? -Infinity) < 5000) return false
+    for (const ws of this.getConfig()?.workspaces ?? []) {
+      const pane = ws.panes.find(p => p.id === paneId)
+      if (pane) { const ssh = !!(pane.setupId ?? ws.setupId); this.sshPanes.set(paneId, ssh); return ssh }
+    }
+    this.sshMisses.set(paneId, Date.now())
+    return false
+  }
+  private publish(paneId: string, track: PaneTrack, key?: string, state?: StatusNotice['state'], cause?: AgentEvent): void {
+    const now = Date.now()
+    track.updatedAt = now
+    // stateSince moves only when the effective state changes (E4-FR-09 c);
+    // cacheSince marks Claude's working -> done/idle transition (E5-FR-28).
+    const effective = this.stateOfTrack(track)
+    const transition = effective !== track.lastState
+    if (transition) {
+      if (effective === 'working') track.cacheSince = undefined
+      else if (track.lastState === 'working' && (effective === 'done' || effective === 'idle')) track.cacheSince = now
+      track.lastState = effective; track.stateSince = now
+    }
     const fresh = !!key && !track.seen.has(key)
     if (key) { track.seen.add(key); if (track.seen.size > 512) track.seen.delete(track.seen.values().next().value!) }
     const evt = this.event(paneId, track, false), cfg = this.cfg
@@ -213,7 +379,25 @@ export class StatusManager implements PtySink {
       evt.notify = !!cfg?.enabled && (state === 'done' ? cfg.notifyDone : cfg.notifyAction) && !inView
       if (evt.notify) this.showNotification(paneId, track, state)
     }
-    this.emit(evt)
+    // Only-detail changes are coalesced to one emission per 500 ms per pane
+    // (E5-FR-02); state, pending, session and notifications go out at once.
+    const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.precise, evt.sessionId, evt.cwd])
+    const immediate = transition || !!key || evt.notify || (!!cause && IMMEDIATE_KINDS.has(cause.kind)) || signature !== track.emitted
+    if (immediate || now - track.emittedAt >= DETAIL_THROTTLE_MS) {
+      this.cancelDetail(track)
+      track.emitted = signature; track.emittedAt = now
+      this.emit(evt, cause)
+      return
+    }
+    if (cause) track.deferredCause = cause
+    if (track.detailTimer) return
+    track.detailTimer = setTimeout(() => {
+      const deferred = track.deferredCause
+      track.detailTimer = null; track.deferredCause = undefined
+      if (this.panes.get(paneId) !== track) return
+      track.emittedAt = Date.now()
+      this.emit(this.event(paneId, track, false), deferred)
+    }, Math.max(0, DETAIL_THROTTLE_MS - (now - track.emittedAt)))
   }
   private showNotification(paneId: string, track: PaneTrack, state: StatusNotice['state']): void {
     const win = this.getWindow(), cfg = this.getConfig()
@@ -244,8 +428,11 @@ export class StatusManager implements PtySink {
       notification.show()
     } else this.desktopError = 'unavailable'
   }
-  private emit(evt: PaneStatusEvt): void {
+  private emit(evt: PaneStatusEvt, cause?: AgentEvent): void {
     const win = this.getWindow()
     if (win && !win.isDestroyed()) win.webContents.send(CH.STATUS_STATE, evt)
+    for (const listener of this.listeners) {
+      try { listener(evt, cause) } catch { console.warn('[status] a status listener failed') }
+    }
   }
 }

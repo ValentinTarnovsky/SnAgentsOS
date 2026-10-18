@@ -106,7 +106,8 @@ export class CodexBridge implements PtySink {
   private connect(binding: Binding, socket: WebSocket): void {
     const protocol = new CodexProtocol(binding.paneId, binding.ptyId, evt => {
       binding.sessionId = evt.sessionId
-      if (!binding.finished) this.emit(evt)
+      // The launcher reported its real directory; the store and the renderer use it as cwd.
+      if (!binding.finished) this.emit({ ...evt, cwd: binding.cwd })
     })
     // An isolated stdio server gives this TUI exclusive, observable ownership.
     // The shared daemon control socket uses a different framing protocol.

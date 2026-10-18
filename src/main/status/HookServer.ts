@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { timingSafeEqual } from 'crypto'
+import type { RemotePending } from '@shared/types'
+import { LIMITS, claudeConfigDir, cleanString, extractQuestions, isSafeCwd, isSafeTranscriptPath, summarizeRequest, summarizeTool } from './statusDetails'
 
 /** One Claude Code hook event, already attributed to a console. */
 export interface HookEvent {
@@ -15,6 +17,26 @@ export interface HookEvent {
   toolUseId?: string
   elicitationId?: string
   agentId?: string
+  // Enrichment (E5-FR-01, E4-FR-09). Bounded and sanitized here; the raw
+  // payload (tool_input included) is dropped with the request.
+  /** json.cwd, only when absolute and an existing directory. */
+  cwd?: string
+  /** json.transcript_path, only when isSafeTranscriptPath(p, session_id). */
+  transcriptPath?: string
+  /** UserPromptSubmit json.prompt, <= 2000. */
+  prompt?: string
+  /** Stop json.last_assistant_message, <= 2000. */
+  lastAssistantMessage?: string
+  /** SessionEnd json.reason ('clear' | 'logout' | 'prompt_input_exit' | 'other' | ...). */
+  endReason?: string
+  /** summarizeTool(tool_name, tool_input), <= 160. */
+  toolSummary?: string
+  /** summarizeRequest(tool_name, tool_input) for pending cards, <= 200. */
+  requestSummary?: string
+  /** AskUserQuestion tool_input.questions[0].question, <= 300. */
+  question?: string
+  /** AskUserQuestion questions in the RemotePending shape. */
+  questions?: RemotePending['questions']
 }
 
 const MAX_BODY = 2 * 1024 * 1024
@@ -125,21 +147,45 @@ export class HookServer {
         const json = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
         const name = typeof json.hook_event_name === 'string' ? json.hook_event_name : ''
         if (!name) return
-        this.listener?.({
-          consoleId,
-          name,
-          notificationType:
-            typeof json.notification_type === 'string' ? json.notification_type : undefined,
-          sessionId: typeof json.session_id === 'string' ? json.session_id : undefined,
-          ptyId: String(req.headers['x-pty-id'] ?? ''),
-          toolName: typeof json.tool_name === 'string' ? json.tool_name : undefined,
-          toolUseId: typeof json.tool_use_id === 'string' ? json.tool_use_id : undefined,
-          elicitationId: typeof json.elicitation_id === 'string' ? json.elicitation_id : undefined,
-          agentId: typeof json.agent_id === 'string' ? json.agent_id : undefined,
-        })
+        this.listener?.(parseHookPayload(consoleId, String(req.headers['x-pty-id'] ?? ''), name, json))
       } catch {
         console.warn('[hooks] discarded malformed hook payload')
       }
     })
   }
+}
+
+/**
+ * Builds a HookEvent from an already parsed payload (E5-FR-01). Invalid
+ * optional fields are dropped silently and the event is still delivered.
+ * Never logs: prompts, replies and tool inputs are user content.
+ */
+export function parseHookPayload(consoleId: string, ptyId: string, name: string, json: Record<string, unknown>, claudeDir = claudeConfigDir()): HookEvent {
+  const sessionId = typeof json.session_id === 'string' ? json.session_id : undefined
+  const toolName = typeof json.tool_name === 'string' ? json.tool_name : undefined
+  const evt: HookEvent = {
+    consoleId,
+    name,
+    notificationType: typeof json.notification_type === 'string' ? json.notification_type : undefined,
+    sessionId,
+    ptyId,
+    toolName,
+    toolUseId: typeof json.tool_use_id === 'string' ? json.tool_use_id : undefined,
+    elicitationId: typeof json.elicitation_id === 'string' ? json.elicitation_id : undefined,
+    agentId: typeof json.agent_id === 'string' ? json.agent_id : undefined,
+  }
+  if (isSafeCwd(json.cwd)) evt.cwd = json.cwd
+  if (sessionId && isSafeTranscriptPath(json.transcript_path, sessionId, claudeDir)) evt.transcriptPath = json.transcript_path
+  if (name === 'UserPromptSubmit') evt.prompt = cleanString(json.prompt, LIMITS.text)
+  if (name === 'Stop') evt.lastAssistantMessage = cleanString(json.last_assistant_message, LIMITS.text)
+  if (name === 'SessionEnd') evt.endReason = cleanString(json.reason, 64, true)
+  if ((name === 'PreToolUse' || name === 'PermissionRequest') && toolName) {
+    evt.toolSummary = summarizeTool(toolName, json.tool_input) || undefined
+    evt.requestSummary = summarizeRequest(toolName, json.tool_input) || undefined
+    if (toolName === 'AskUserQuestion') {
+      evt.questions = extractQuestions(json.tool_input)
+      evt.question = evt.questions?.[0]?.question
+    }
+  }
+  return evt
 }
