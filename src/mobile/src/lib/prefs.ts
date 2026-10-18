@@ -5,12 +5,11 @@
  *
  * Booleans are stored only when they differ from the default ('1' / '0') and
  * removed otherwise, so a cleared or blocked storage reads back as defaults.
- * inPageAlerts keeps its own format in inPageAlerts.ts (E1-FR-40) and is only
- * re-exposed here so MobilePrefs matches the contract.
+ * The page alert preferences (E2-FR-44) share one JSON object instead,
+ * 'snagentsos.prefs', which replaced E1-FR-40's 'snagentsos.alerts.inPage'.
  */
 import type { PaneType } from '@shared/types'
 import { INPUT_MODE_PREFIX, STORAGE_PREFIX, storageGet, storageKeys, storageRemove, storageSet } from './mobileStorage'
-import { loadInPageAlerts, saveInPageAlerts } from './inPageAlerts'
 
 /** Where typed text goes: the xterm helper textarea or the docked composer. */
 export type InputMode = 'direct' | 'composer'
@@ -20,7 +19,7 @@ export interface MobilePrefs {
   composerDefaultForAgents: boolean
   /** Phone keyboard autocorrect, spell check and capitalization in the composer. */
   composerAutocorrect: boolean
-  /** Toast and vibration when another console needs the user (E1-FR-40). */
+  /** On-screen alerts: toasts when another console needs the user (E2-FR-43, 44). */
   inPageAlerts: boolean
 }
 
@@ -52,12 +51,56 @@ export function loadPrefs(): MobilePrefs {
   return {
     composerDefaultForAgents: loadPref('composerDefaultForAgents'),
     composerAutocorrect: loadPref('composerAutocorrect'),
-    inPageAlerts: loadInPageAlerts(),
+    inPageAlerts: loadPagePrefs().toasts,
   }
 }
 
 export function saveInPageAlertsPref(on: boolean): void {
-  saveInPageAlerts(on)
+  savePagePrefs({ toasts: on })
+}
+
+// --- Page alerts (E2-FR-43, 44; R22-18) ---
+
+/**
+ * 'snagentsos.prefs': { version: 1, toasts, vibrate, toastDone } plus any key
+ * another feature keeps there (it is preserved on write). Per origin, like
+ * every key here.
+ */
+export const PAGE_PREFS_KEY = `${STORAGE_PREFIX}prefs`
+/** E1-FR-40's single switch; read once as the toasts default, then removed. */
+export const LEGACY_IN_PAGE_KEY = `${STORAGE_PREFIX}alerts.inPage`
+
+export interface PagePrefs {
+  /** "On-screen alerts": toasts in the terminal for another console (default on). */
+  toasts: boolean
+  /** Vibrate on action and error (default on; hidden without navigator.vibrate). */
+  vibrate: boolean
+  /** "Alert when a turn ends": a toast on done too (default off). */
+  toastDone: boolean
+}
+
+export const PAGE_PREFS_DEFAULTS: PagePrefs = { toasts: true, vibrate: true, toastDone: false }
+
+function readPagePrefsObject(): Record<string, unknown> {
+  const v = readJson(PAGE_PREFS_KEY)
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
+}
+
+export function loadPagePrefs(): PagePrefs {
+  const stored = readPagePrefsObject()
+  const bool = (key: keyof PagePrefs, fallback: boolean): boolean => (typeof stored[key] === 'boolean' ? (stored[key] as boolean) : fallback)
+  return {
+    toasts: bool('toasts', storageGet(LEGACY_IN_PAGE_KEY) !== '0'),
+    vibrate: bool('vibrate', PAGE_PREFS_DEFAULTS.vibrate),
+    toastDone: bool('toastDone', PAGE_PREFS_DEFAULTS.toastDone),
+  }
+}
+
+/** Merge a change into 'snagentsos.prefs' (unknown keys kept) and drop the legacy key. */
+export function savePagePrefs(patch: Partial<PagePrefs>): PagePrefs {
+  const next = { ...readPagePrefsObject(), ...loadPagePrefs(), ...patch, version: 1 }
+  if (storageSet(PAGE_PREFS_KEY, JSON.stringify(next))) storageRemove(LEGACY_IN_PAGE_KEY)
+  return { toasts: next.toasts, vibrate: next.vibrate, toastDone: next.toastDone }
 }
 
 // --- input mode per pane ('snagentsos.inputMode.<paneId>') ---
