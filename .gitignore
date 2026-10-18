@@ -18,7 +18,8 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 
-# Local config / portable data
+# Local config / portable data (the second line is the 1.x portable folder)
+snagentsos-data/
 snmulticc-data/
 *.local
 
