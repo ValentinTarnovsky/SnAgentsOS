@@ -2,6 +2,7 @@ import { useEffect, useState, type DragEvent } from 'react'
 import {
   ArchiveRestore,
   Clock,
+  Eraser,
   GripVertical,
   History,
   Maximize2,
@@ -35,7 +36,7 @@ import { ScheduleDialog } from '@/components/layout/ScheduleDialog'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { ResumeChip } from '@/components/agents/ResumeChip'
 import { useAgentStore } from '@/lib/agentStore'
-import { reopenClosedConsole, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
+import { reopenClosedConsole, restartClean, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
 
@@ -99,6 +100,8 @@ export function PaneCell({
   const closedCount = useAgentStore((s) => s.closedStack.length)
   const resume = resumeMenuState({ workspaces: [workspace], presets, settings }, session ? { [pane.id]: session } : {}, pane.id)
   const epoch = useAppStore((s) => s.paneEpoch[pane.id] ?? 0)
+  // The shell ended on its own (E6-FR-17/38): gray "exited" tag in the header.
+  const exited = useAppStore((s) => s.paneExit[pane.id] !== undefined)
   // Partial mount (D4): a console outside the mounted list shows a placeholder
   // instead of spawning. The visible workspace always counts as mounted.
   const mounted = useAppStore(
@@ -205,6 +208,8 @@ export function PaneCell({
           { label: t('agents.restartFresh'), icon: SquarePen, onClick: () => restartFresh(pane.id) },
         ]
       : [{ label: t('pane.restart'), icon: RotateCw, onClick: () => restartFromButton(pane.id) }]),
+    // The pre-2.0 restart: remount with an empty screen (E6-FR-18).
+    { label: t('pane.restartClean'), icon: Eraser, onClick: () => restartClean(pane.id) },
     { label: t('pane.redraw'), icon: Paintbrush, onClick: () => redrawPane(pane.id) },
     ...(closedCount > 0
       ? [{ label: t('agents.reopenClosed'), icon: ArchiveRestore, separated: true, onClick: () => void reopenClosedConsole() }]
@@ -282,6 +287,14 @@ export function PaneCell({
         ) : (
           <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-secondary">
             {pane.title}
+          </span>
+        )}
+        {exited && (
+          <span
+            data-pane-exited
+            className="shrink-0 rounded border border-border px-1 text-[10px] font-medium uppercase leading-4 text-text-secondary/80"
+          >
+            {t('pane.exited')}
           </span>
         )}
         <Tooltip label={isScheduled ? t('schedule.active', { time: pane.schedule!.time }) : t('pane.schedule')}>

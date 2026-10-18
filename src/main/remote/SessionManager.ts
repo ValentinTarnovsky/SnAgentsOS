@@ -584,6 +584,13 @@ export class SessionManager implements PtySink {
         rows: replay.rows,
       })
     } else {
+      // A shell that ended on its own: its last output + exit code, so the
+      // phone shows the content and its exit strip, not a spinner (E6-FR-20).
+      const exited = this.deps.ptyManager.getExited(paneId)
+      if (exited) {
+        this.send(session, { type: 'replay', paneId, running: false, data: exited.data, cols: exited.cols, rows: exited.rows, exitCode: exited.exitCode })
+        return
+      }
       // Pane exists but has no live pty yet: client shows a spinner until the
       // lazy spawn arrives and onSpawn pushes a running replay.
       this.send(session, { type: 'replay', paneId, running: false, data: '', cols: 80, rows: 24 })

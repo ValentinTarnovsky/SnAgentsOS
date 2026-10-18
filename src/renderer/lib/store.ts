@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
   AgentPreset,
+  AgentSessionEndEvt,
   PaneStatus,
   ConfigFile,
   ConnectionProfile,
@@ -17,6 +18,7 @@ import type {
 } from '@shared/types'
 import { gridForCount } from '@/components/layout/gridTemplates'
 import { killPanePtys } from '@/lib/ptyRegistry'
+import { restartInPlace } from '@/lib/restartRegistry'
 import { visiblePaneIds } from '@shared/status'
 import { useAgentStore } from '@/lib/agentStore'
 import {
@@ -163,6 +165,10 @@ export interface AppState {
   paneStatus: Record<string, PaneStatus>
   /** paneId -> unacknowledged done/action flag (transient; drives sidebar badges). */
   paneAttention: Record<string, true>
+  /** paneId -> exit code of a shell that ended on its own (transient; "exited" label, E6-FR-38). */
+  paneExit: Record<string, number>
+  /** paneId -> Claude session that just ended (transient; "Claude exited" chip, E6-FR-22). */
+  agentEnded: Record<string, AgentSessionEndEvt>
   /**
    * workspaceId -> 'full' | mounted paneIds (transient; never persisted). The
    * single mounting primitive (D4): activating a workspace mounts it 'full',
@@ -202,8 +208,19 @@ export interface AppState {
   clearLastSession: (paneId: string) => void
   renamePane: (workspaceId: string, paneId: string, title: string) => void
   setPaneFontSize: (workspaceId: string, paneId: string, fontSize: number) => void
-  /** Force a console to relaunch (kills + respawns its pty via remount). */
+  /**
+   * Relaunch a console: in place when its terminal is mounted (same xterm,
+   * scrollback kept, E6-FR-18), else by remount.
+   */
   restartPane: (paneId: string) => void
+  /** "Restart clean": remount the console (empty screen, fresh pty). */
+  restartPaneClean: (paneId: string) => void
+  /** Record (code) or clear (null) a console's natural shell exit. */
+  setPaneExit: (paneId: string, code: number | null) => void
+  /** Show the "Claude exited" chip for the event's console (E6-FR-22). */
+  setAgentEnded: (evt: AgentSessionEndEvt) => void
+  /** Hide a console's "Claude exited" chip (typing, exit, an action, [x]). */
+  clearAgentEnded: (paneId: string) => void
   /** Set (or clear, with null) a console's one-shot scheduled prompt. */
   setPaneSchedule: (workspaceId: string, paneId: string, schedule: PaneSchedule | null) => void
   setGrid: (workspaceId: string, grid: GridPreset) => void
@@ -298,6 +315,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   paneEpoch: {},
   paneStatus: {},
   paneAttention: {},
+  paneExit: {},
+  agentEnded: {},
   mountedWorkspaces: {},
   hydrated: false,
 
@@ -504,9 +523,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (minimized[workspaceId]?.includes(paneId)) {
         minimized[workspaceId] = minimized[workspaceId].filter((id) => id !== paneId)
       }
+      const paneExit = { ...s.paneExit }
+      delete paneExit[paneId]
+      const agentEnded = { ...s.agentEnded }
+      delete agentEnded[paneId]
       return {
         maximized,
         minimized,
+        paneExit,
+        agentEnded,
         workspaces: s.workspaces.map((w) => {
           if (w.id !== workspaceId) return w
           const panes = w.panes.filter((p) => p.id !== paneId)
@@ -607,8 +632,37 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }),
 
-  restartPane: (paneId) =>
+  restartPane: (paneId) => {
+    if (restartInPlace(paneId)) return
+    get().restartPaneClean(paneId)
+  },
+
+  restartPaneClean: (paneId) =>
     set((s) => ({ paneEpoch: { ...s.paneEpoch, [paneId]: (s.paneEpoch[paneId] ?? 0) + 1 } })),
+
+  setPaneExit: (paneId, code) => {
+    // Hot path on every spawn: no set() when nothing changes.
+    const cur = get().paneExit[paneId]
+    if (code === null ? cur === undefined : cur === code) return
+    set((s) => {
+      const paneExit = { ...s.paneExit }
+      if (code === null) delete paneExit[paneId]
+      else paneExit[paneId] = code
+      return { paneExit }
+    })
+  },
+
+  setAgentEnded: (evt) => set((s) => ({ agentEnded: { ...s.agentEnded, [evt.paneId]: evt } })),
+
+  clearAgentEnded: (paneId) => {
+    // Hot path (called per keystroke): bail without a set() when clean.
+    if (!(paneId in get().agentEnded)) return
+    set((s) => {
+      const agentEnded = { ...s.agentEnded }
+      delete agentEnded[paneId]
+      return { agentEnded }
+    })
+  },
 
   setPaneSchedule: (workspaceId, paneId, schedule) =>
     set((s) => ({
@@ -753,6 +807,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         stateSince: evt.stateSince, lastMessage: evt.lastMessage, activity: evt.activity, pending: evt.pending, sessionId: evt.sessionId, cwd: evt.cwd,
         detail: evt.detail, topic: evt.topic, firstPrompt: evt.firstPrompt, cacheSince: evt.cacheSince,
       }
+      // A new session (or Claude working again) hides the "Claude exited" chip (E6-FR-22).
+      let agentEnded = s.agentEnded
+      const ended = agentEnded[evt.paneId]
+      if (ended && (evt.state === 'working' || (evt.sessionId && evt.sessionId !== ended.sessionId))) {
+        agentEnded = { ...agentEnded }
+        delete agentEnded[evt.paneId]
+      }
       // E4-FR-09 (d): mirror a validated session id onto pane.lastSession
       // (schema 11, a seed for main's agent-sessions.json). Only a change of
       // session, provider or cwd writes, so plain status traffic never persists.
@@ -771,7 +832,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         paneAttention = { ...paneAttention }
         delete paneAttention[evt.paneId]
       }
-      return workspaces === s.workspaces ? { paneStatus, paneAttention } : { paneStatus, paneAttention, workspaces }
+      return workspaces === s.workspaces ? { paneStatus, paneAttention, agentEnded } : { paneStatus, paneAttention, agentEnded, workspaces }
     }),
 
   clearPaneAttention: (paneId) => {

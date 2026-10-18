@@ -193,11 +193,17 @@ export class RemoteManager {
 
   private overlayRunning(snap: RemoteStateSnapshot): RemoteStateSnapshot {
     const running = new Set(this.ptyManager.runningPaneIds())
+    // E6-FR-38: a shell that ended on its own shows as "exited" on the phone.
+    const exited = this.ptyManager.exitedPaneCodes()
     return {
       ...snap,
       workspaces: snap.workspaces.map((ws) => ({
         ...ws,
-        panes: ws.panes.map((p) => ({ ...p, running: running.has(p.id) })),
+        panes: ws.panes.map((p) => {
+          const live = running.has(p.id)
+          const exitCode = live ? undefined : exited.get(p.id)
+          return exitCode === undefined ? { ...p, running: live } : { ...p, running: live, exitCode }
+        }),
       })),
     }
   }

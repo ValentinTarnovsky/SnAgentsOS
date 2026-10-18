@@ -11,6 +11,8 @@ import type {
   PtyFlowReq,
   PtyReattachRes,
   PtyResizeReq,
+  PtyRestartReq,
+  PtyRestartRes,
   PtySpawnReq,
   PtySpawnRes,
   PtyWriteReq,
@@ -23,6 +25,7 @@ import type {
   UsageSnapshot,
 } from '@shared/ipc-contract'
 import type {
+  AgentSessionEndEvt,
   AgentSettings,
   AwakeMode,
   ConfigFile,
@@ -65,6 +68,7 @@ const api: SnApi = {
     flow: (req: PtyFlowReq) => ipcRenderer.send(CH.PTY_FLOW, req),
     onData: (cb: (e: PtyDataEvt) => void) => sub<PtyDataEvt>(CH.PTY_DATA, cb),
     onExit: (cb: (e: PtyExitEvt) => void) => sub<PtyExitEvt>(CH.PTY_EXIT, cb),
+    restart: (req: PtyRestartReq) => ipcRenderer.invoke(CH.PTY_RESTART, req) as Promise<PtyRestartRes>,
   },
   dialog: {
     openDirectory: () => ipcRenderer.invoke(CH.DIALOG_OPEN_DIR) as Promise<string | null>,
@@ -120,6 +124,7 @@ const api: SnApi = {
     testDiscord: (cfg: import('@shared/types').DiscordSettings) => ipcRenderer.invoke(CH.STATUS_DISCORD_TEST, cfg),
     testDesktop: () => ipcRenderer.invoke(CH.STATUS_DESKTOP_TEST),
     onReveal: (cb: (paneId: string) => void) => sub<string>(CH.STATUS_REVEAL, cb),
+    onSessionEnd: (cb: (e: AgentSessionEndEvt) => void) => sub<AgentSessionEndEvt>(CH.STATUS_SESSION_END, cb),
     hooksInstall: (cfg: NotificationSettings) =>
       ipcRenderer.invoke(CH.STATUS_HOOKS_INSTALL, cfg) as Promise<StatusHooksStatusRes>,
     hooksUninstall: () =>

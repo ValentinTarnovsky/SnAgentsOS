@@ -31,6 +31,7 @@ import { formatSince, STATUS_LABEL_KEY } from '@/lib/formatSince'
 import { sidebarOrder } from '@/lib/sidebarOrder'
 import { useLang, type MessageKey } from '@/i18n'
 import { AgentRows } from '@/components/sidebar/AgentRows'
+import { ExitedDot, allExited, exitedLines } from '@/components/sidebar/ExitedDot'
 
 interface MenuState {
   x: number
@@ -71,7 +72,7 @@ const SUMMARY_ORDER: PaneStatus['state'][] = ['action', 'error', 'working', 'don
  * sidebar only), a summary ("3 working, 1 waiting") and one line per console
  * with a state, up to 8 plus "+N". Built when it opens.
  */
-function WorkspaceTip({ ws, paneStatus, showName }: { ws: Workspace; paneStatus: Record<string, PaneStatus>; showName: boolean }) {
+function WorkspaceTip({ ws, paneStatus, showName, extra = [] }: { ws: Workspace; paneStatus: Record<string, PaneStatus>; showName: boolean; extra?: string[] }) {
   const t = useT()
   const lang = useLang()
   const [now] = useState(() => Date.now())
@@ -99,6 +100,12 @@ function WorkspaceTip({ ws, paneStatus, showName }: { ws: Workspace; paneStatus:
       {withStatus.length > TIP_MAX_LINES && (
         <span className="font-normal text-text-secondary">+{withStatus.length - TIP_MAX_LINES}</span>
       )}
+      {/* "<pane>: exited" lines (E6-FR-38). */}
+      {extra.map((line, i) => (
+        <span key={`x${i}`} className="font-normal text-text-secondary">
+          {line}
+        </span>
+      ))}
     </span>
   )
 }
@@ -143,6 +150,8 @@ export function Sidebar() {
     })),
   )
   const sessions = useAgentStore((s) => s.sessions)
+  // Consoles whose shell ended on its own (E6-FR-38).
+  const paneExit = useAppStore((s) => s.paneExit)
   // Agent rows (E5-FR-19): expanded sidebar only, unless turned off.
   const rowsOn = !sidebarCollapsed && agentSettings?.sidebarAgentRows !== false
   const navInput = navInputFrom(
@@ -251,7 +260,11 @@ export function Sidebar() {
           const renaming = renamingId === w.id
           const attentionCount = w.panes.reduce((n, p) => n + Math.max(paneStatus[p.id]?.pendingCount ?? 0, paneAttention[p.id] ? 1 : 0), 0)
           const status = aggregateStatus(w.panes.map(p => paneStatus[p.id]))
-          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${paneStatus[p.id].state}`)}`).join(', ')
+          const exited = exitedLines(w.panes, paneExit, t)
+          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${paneStatus[p.id].state}`)}`).concat(exited).join(', ')
+          // Gray dot when no agent state is shown and every console has exited (E6-FR-38).
+          const exitedDot = !status && allExited(w.panes, paneExit)
+          const exitedLabel = exited.join('\n')
           const agents = rowsOn ? workspaceAgents(w, navInput) : []
           return (
             <div key={w.id}>
@@ -286,12 +299,15 @@ export function Sidebar() {
                   </div>
                 ) : (
                   <Tooltip
-                    label={sidebarCollapsed ? (status ? <WorkspaceTip ws={w} paneStatus={paneStatus} showName /> : w.name) : ''}
+                    label={sidebarCollapsed ? (status ? <WorkspaceTip ws={w} paneStatus={paneStatus} showName extra={exited} /> : w.name) : ''}
                     side="right"
                     delay={sidebarCollapsed && status ? 200 : undefined}
                     className="min-w-0 flex-1"
                   >
                     <button
+                      // No dot to hover (no agent state, not every console exited):
+                      // the "<pane>: exited" lines go on the row itself (E6-FR-38).
+                      title={!sidebarCollapsed && !status && !exitedDot && exitedLabel ? exitedLabel : undefined}
                       onClick={() => {
                         setActive(w.id)
                         // Move focus into the workspace's console right away, even
@@ -310,7 +326,7 @@ export function Sidebar() {
                         className="shrink-0"
                         style={{ color: active ? (w.panes[0]?.color ?? '#6366f1') : undefined }}
                       />
-                      {sidebarCollapsed && status && <span className="absolute -bottom-1 -right-1 rounded-full bg-bg-secondary p-0.5"><StatusDot status={status} label={statusLabel} size={6} noTooltip /></span>}
+                      {sidebarCollapsed && (status || exitedDot) && <span className="absolute -bottom-1 -right-1 rounded-full bg-bg-secondary p-0.5">{status ? <StatusDot status={status} label={statusLabel} size={6} noTooltip /> : <ExitedDot label={exitedLabel} size={6} />}</span>}
                       </span>
                       <span
                         className={cn(
@@ -319,7 +335,7 @@ export function Sidebar() {
                         )}
                       >
                         <span className="flex items-center gap-1">
-                          {!sidebarCollapsed && <StatusDot status={status} label={statusLabel} tip={<WorkspaceTip ws={w} paneStatus={paneStatus} showName={false} />} />}
+                          {!sidebarCollapsed && (exitedDot ? <ExitedDot label={exitedLabel} /> : <StatusDot status={status} label={statusLabel} tip={<WorkspaceTip ws={w} paneStatus={paneStatus} showName={false} extra={exited} />} />)}
                           <span className="truncate">{w.name}</span>
                           {w.favorite && (
                             <Star size={11} className="shrink-0 fill-amber-400 text-amber-400" />

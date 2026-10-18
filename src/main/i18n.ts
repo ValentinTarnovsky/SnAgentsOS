@@ -27,6 +27,7 @@ const MESSAGES = {
     'legacy.failed.detail': 'Close {legacy} yourself and try again, or quit {app}.',
     'legacy.failed.retry': 'Retry',
     'legacy.failed.quit': 'Quit',
+    'pty.restarted': 'restarted {time}',
   },
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
@@ -52,6 +53,7 @@ const MESSAGES = {
     'legacy.failed.detail': 'Cerrá {legacy} a mano y volvé a intentar, o salí de {app}.',
     'legacy.failed.retry': 'Reintentar',
     'legacy.failed.quit': 'Salir',
+    'pty.restarted': 'reiniciado {time}',
   },
 } as const
 
@@ -64,6 +66,13 @@ export function mainT(
   vars?: Record<string, string | number>,
 ): string {
   return mainTLang(cfg?.settings?.language === 'es' ? 'es' : 'en', key, vars)
+}
+
+/** Local wall-clock time for short labels: 14:32 in Spanish, 2:32 PM in English. */
+export function shortTime(cfg: ConfigFile | null, date: Date = new Date()): string {
+  const h = date.getHours(), mm = String(date.getMinutes()).padStart(2, '0')
+  if (cfg?.settings?.language === 'es') return `${String(h).padStart(2, '0')}:${mm}`
+  return `${h % 12 || 12}:${mm} ${h < 12 ? 'AM' : 'PM'}`
 }
 
 /** Same, with an explicit language (the legacy dialogs run before any config of this app is loaded). */
