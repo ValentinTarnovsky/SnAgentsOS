@@ -580,6 +580,24 @@ export const es: Record<keyof typeof en, string> = {
   'settings.about.version': 'Versión',
   'settings.about.platform': 'Plataforma',
   'settings.about.config': 'Archivo de configuración',
+  'settings.about.diagnostics': 'Diagnóstico',
+  'settings.about.diagnosticsHint': 'Copia un reporte para pegar en un issue. Deja afuera los ajustes, las conexiones, los comandos rápidos y los tokens.',
+
+  // Crash resilience (E4-FR-19..25)
+  'crash.pane.message': 'Esta consola falló al dibujarse. El proceso sigue corriendo.',
+  'crash.pane.reload': 'Recargar consola',
+  'crash.pane.copyDetail': 'Copiar detalle',
+  'crash.pane.restart': 'Reiniciar consola',
+  'crash.pane.repeated': 'Falló {n} veces en el último minuto.',
+  'crash.app.message': 'La interfaz de {app} falló. Tus consolas siguen corriendo.',
+  'crash.app.reload': 'Recargar ventana',
+  'crash.copyDiagnostics': 'Copiar diagnóstico',
+  'crash.diagCopied': 'Diagnóstico copiado ({kb} KB)',
+  'crash.diagFailed': 'No se pudo armar el diagnóstico',
+  'crash.recovered.title': '{app} se recuperó de un cierre inesperado de la ventana.',
+  'crash.recovered.bodyNone': 'No había consolas en ejecución.',
+  'crash.recovered.bodyOne': 'Tu consola sigue viva.',
+  'crash.recovered.bodyMany': 'Tus {n} consolas siguen vivas.',
 
   // Preset editor
   'preset.name': 'Nombre',
