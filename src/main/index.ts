@@ -5,7 +5,7 @@ import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, s
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
 import type { AppInfo, AppMetrics } from '@shared/ipc-contract'
-import type { ConfigFile } from '@shared/types'
+import type { AwakeMode, ConfigFile } from '@shared/types'
 import { createMainWindow } from './window'
 import { getConfigPath, isPortable } from './paths'
 import { PtyManager } from './pty/PtyManager'
@@ -19,6 +19,8 @@ import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
 import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
+import { registerPowerIpc } from './ipc/registerPowerIpc'
+import type { AwakeService } from './agents/AwakeService'
 import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
 import { HookServer } from './status/HookServer'
@@ -26,7 +28,7 @@ import { CodexBridge } from './status/CodexBridge'
 import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
 import { join } from 'path'
-import { ensureTray, destroyTray } from './tray'
+import { ensureTray, destroyTray, hasTray } from './tray'
 import { mainT } from './i18n'
 import { runLegacyMigrationAtBoot, scheduleLegacyCleanup } from './migration/runLegacyMigration'
 
@@ -59,6 +61,9 @@ const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime
 ptyManager.addSink(statusManager)
 ptyManager.addSink(codexBridge)
 let statusIpc: StatusIpc | null = null
+// Created in bootstrap: powerSaveBlocker/powerMonitor need app ready.
+let awakeService: AwakeService | null = null
+let trayAwakeMode: AwakeMode | null = null
 
 function quitApp(): void {
   isQuitting = true
@@ -81,6 +86,34 @@ function showWindow(): void {
   if (mainWindow.isMinimized()) mainWindow.restore()
   mainWindow.show()
   mainWindow.focus()
+}
+
+/** Shows (or refreshes) the tray with labels in the persisted language. */
+function showTray(): void {
+  const cfg = configStore.load()
+  const awake = awakeService
+  trayAwakeMode = awake ? awake.getState().mode ?? 'auto' : null
+  ensureTray(
+    () => mainWindow,
+    quitApp,
+    {
+      show: mainT(cfg, 'tray.show', { app: BRAND.productName }),
+      quit: mainT(cfg, 'tray.quit'),
+    },
+    awake && trayAwakeMode
+      ? {
+          mode: trayAwakeMode,
+          labels: {
+            title: mainT(cfg, 'tray.awake'),
+            auto: mainT(cfg, 'tray.awakeAuto'),
+            always: mainT(cfg, 'tray.awakeAlways'),
+            never: mainT(cfg, 'tray.awakeNever'),
+          },
+          // Main decides; the power:state echo makes the renderer persist it.
+          onMode: (mode) => awake.setMode(mode),
+        }
+      : undefined,
+  )
 }
 
 let currentHotkey: string | null = null
@@ -225,10 +258,7 @@ function openMainWindow(): void {
     if (useTray && !isQuitting) {
       event.preventDefault()
       win.hide()
-      ensureTray(() => mainWindow, quitApp, {
-        show: mainT(cfg, 'tray.show', { app: BRAND.productName }),
-        quit: mainT(cfg, 'tray.quit'),
-      })
+      showTray()
       return
     }
     if (forceClose) return
@@ -306,6 +336,20 @@ async function bootstrap(): Promise<void> {
     remoteEnabled: () => configStore.load()?.settings?.remote?.enabled === true,
   })
   statusIpc = registerStatusIpc(statusManager, hookServer, codexBridge, discordNotifier)
+  const bootCfg = configStore.load()
+  awakeService = registerPowerIpc({
+    getSender: () => mainWindow?.webContents ?? null,
+    initialMode: bootCfg?.settings?.awakeMode,
+    initialDisplay: bootCfg?.settings?.agents?.awakeDisplay,
+    onState: (state) => {
+      if (hasTray() && state.mode && state.mode !== trayAwakeMode) showTray()
+    },
+  })
+  const awake = awakeService
+  statusManager.addListener((evt) => awake.onPaneStatus(evt))
+  awake.seed(statusManager.snapshot())
+  remoteManager.setPhoneListener((connected) => awake.setPhoneConnected(connected))
+  awake.setPhoneConnected(remoteManager.phoneConnected)
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),
   )
@@ -355,6 +399,7 @@ app.on('before-quit', () => {
   // shutdown frame before the ptys they mirror are torn down.
   remoteManager.shutdown('quit')
   ptyManager.killAll()
+  awakeService?.dispose()
   statusManager.dispose()
   codexBridge.dispose()
   discordNotifier.dispose()

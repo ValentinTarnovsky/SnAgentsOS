@@ -68,6 +68,9 @@ export class RemoteManager {
   private uiScheduled = false
   /** Tracks the current setBackgroundThrottling state to avoid redundant calls. */
   private throttlingDisabled = false
+  /** Phone presence observer (AwakeService: an agent in `action` + a phone keeps the PC awake). */
+  private phoneListener: ((connected: boolean) => void) | null = null
+  private phoneNotified = false
 
   constructor(
     private readonly ptyManager: PtyManager,
@@ -160,6 +163,7 @@ export class RemoteManager {
       this.server = null
     }
     this.applyThrottling(false)
+    this.notifyPhones()
   }
 
   /**
@@ -284,6 +288,27 @@ export class RemoteManager {
   private onConnectionsChanged(): void {
     this.applyThrottling((this.sessions?.connectedCount ?? 0) > 0)
     this.scheduleUi()
+    this.notifyPhones()
+  }
+
+  // --- Phone presence (AwakeService) -----------------------------------------
+
+  /** At least one authenticated phone session is connected right now. */
+  get phoneConnected(): boolean {
+    return (this.sessions?.connectedCount ?? 0) > 0
+  }
+
+  /** Observe phone presence; called only when it flips. */
+  setPhoneListener(cb: ((connected: boolean) => void) | null): void {
+    this.phoneListener = cb
+    this.phoneNotified = this.phoneConnected
+  }
+
+  private notifyPhones(): void {
+    const connected = this.phoneConnected
+    if (connected === this.phoneNotified) return
+    this.phoneNotified = connected
+    this.phoneListener?.(connected)
   }
 
   private applyThrottling(disable: boolean): void {
