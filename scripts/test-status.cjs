@@ -818,6 +818,7 @@ async function firewallChecks() {
   const portable = fw.buildFixScript({ exe: EXE, port: 4600, programScope: false, tailnet: true, domain: true })
   check(!portable.includes('-Program') && portable.includes('-LocalPort 4600 -Profile Private,Domain'), 'portable / dev fix: port-only rule, Domain added for a domain network')
   check(portable.includes("New-NetFirewallRule -Name 'SnAgentsOS.Remote.Tailnet'") && portable.includes('-Profile Any -RemoteAddress 100.64.0.0/10'), 'the Tailscale rule is limited to 100.64.0.0/10 on any profile')
+  check(fix.includes("$prof -notmatch 'Private')") && portable.includes("$prof -notmatch 'Private|Domain|Public')"), 'Public Blocks on the exe are removed only when the Tailscale rule is made (Domain on a domain network)')
   const wrap = fw.buildElevatedWrapper(fix)
   check(wrap.includes('-Verb RunAs -Wait -PassThru') && wrap.includes('NativeErrorCode -eq 1223') && wrap.includes("Join-Path $PSHOME 'powershell.exe'"), 'the wrapper elevates, waits and maps a cancelled UAC to 1223')
   const innerB64 = /'-EncodedCommand', '([A-Za-z0-9+/=]+)'/.exec(wrap)[1]
@@ -847,6 +848,12 @@ async function firewallChecks() {
   check(st.state === 'ok' && st.blockingRules[0].scope === 'otherProgram' && st.fixable, 'a Block on another copy of the exe is listed but does not block this one')
   st = parse(ep('Private'), [allowExe, tailAllow, rule({ action: 'Block', program: EXE, profile: 'Public', localPort: ['Any'] })])
   check(st.state === 'ok', 'a Public-only Block does not apply on a Private network')
+  st = parse(ep('Private', 'Public'), [allowExe, tailAllow, rule({ name: 'pub', action: 'Block', program: EXE, profile: 'Public', localPort: ['Any'] })])
+  check(st.state === 'blocked' && st.fixable && st.blockingRules[0].scope === 'currentProgram', 'a Public Block on the exe blocks a Public Tailscale endpoint and is fixable')
+  st = parse(ep('Public'), [allowExe, tailAllow, rule({ action: 'Block', program: EXE, profile: 'Public, Private', localPort: ['Any'] })])
+  check(st.state === 'publicProfile' && st.fixable, 'a Public LAN comes before a Block on our exe (mark the network Private first)')
+  st = parse(ep('Public'), [allowExe, tailAllow, rule({ name: 'corp', action: 'Block', profile: 'Any' })])
+  check(st.state === 'blocked' && !st.fixable, 'a port Block still wins over a Public LAN')
   st = parse(ep('Private'), [rule({ name: 'Tailscale-In', protocol: 'Any', localPort: ['Any'], profile: 'Domain, Private', localAddress: ['100.70.1.2'] })])
   check(st.state === 'noRule' && st.ruleFound, 'an Allow bound to the Tailscale address leaves the LAN uncovered')
   st = parse(ep('Private'), [rule({ protocol: 'UDP', localPort: ['Any'], profile: 'Any' })])
@@ -885,6 +892,19 @@ async function firewallChecks() {
   st = await svc({ platform: 'darwin' }).check()
   check(st.state === 'unsupported' && runs.length === 6, 'off Windows nothing runs')
   runs = []; next = [{ code: 0, stdout: blockedJson, timedOut: false }, { code: 1223, stdout: '', timedOut: false }, { code: 0, stdout: blockedJson, timedOut: false }]
+  // A forced check started after a fix never reuses a run from before it.
+  {
+    let release
+    const gate = new Promise(r => { release = r })
+    let n = 0
+    const s3 = svc({ run: async (args) => { const script = decode(args); n++; if (n === 1) { await gate; return { code: 0, stdout: blockedJson, timedOut: false } } if (script.includes('-Verb RunAs')) return { code: 0, stdout: '', timedOut: false }; return { code: 0, stdout: okJson, timedOut: false } } })
+    const stale = s3.check()
+    const fixed = s3.fix()
+    await new Promise(r => setTimeout(r, 0))
+    release()
+    const [a, b] = await Promise.all([stale, fixed])
+    check(a.state === 'blocked' && b.ok && b.status.state === 'ok', 'the re-check after a fix is a fresh run, not one that started before it')
+  }
   const s2 = svc(); await s2.check()
   let res = await s2.fix()
   check(res.cancelled && res.error === 'cancelled' && !res.ok && res.status.state === 'blocked', 'a cancelled UAC is reported as Cancelled')

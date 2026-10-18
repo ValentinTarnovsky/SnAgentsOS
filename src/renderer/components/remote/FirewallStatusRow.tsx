@@ -21,6 +21,19 @@ const FIX_NOTE: Record<string, MessageKey> = {
   notFixed: 'remote.fw.notFixed',
 }
 
+const UNKNOWN: FirewallStatus = {
+  ok: false,
+  profile: 'unknown',
+  ruleFound: false,
+  state: 'unknown',
+  port: 0,
+  endpoints: [],
+  blockingRules: [],
+  ruleScope: 'port',
+  fixable: false,
+  checkedAt: 0,
+}
+
 /**
  * Windows firewall and network profile row (E2-FR-38/39), under the QR in the
  * pairing modal and in Settings > Remote. Checks on mount (main caches it for
@@ -45,7 +58,10 @@ export function FirewallStatusRow({ className }: { className?: string }) {
       .then((s) => {
         if (alive) setStatus(s)
       })
-      .catch(() => undefined)
+      // A failed IPC call is "could not check" (grey hint), never a spinner forever.
+      .catch(() => {
+        if (alive) setStatus((prev) => prev ?? UNKNOWN)
+      })
       .finally(() => {
         if (alive) setBusy(null)
       })

@@ -1,19 +1,21 @@
 /**
  * Phone settings as a pushed screen (E1-FR-37) instead of a sheet over the
  * action sheet. Sections: Appearance (desktop theme, font size), Alerts
- * (in-page alerts, E1-FR-40) and This device (unpair). The Input section of
+ * (in-page alerts, E1-FR-40) and This device (Diagnostics, E2-FR-36, and
+ * unpair). The Input section of
  * E1-FR-22/30 (AI consoles start in Composer, composer autocorrect) sits
  * between Appearance and Alerts.
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { LogOut, Minus, Plus as PlusSmall } from 'lucide-react'
+import { Activity, LogOut, Minus, Plus as PlusSmall } from 'lucide-react'
 import type { ThemeName } from '@shared/types'
 import { PushScreen } from './PushScreen'
 import { ActionList } from './ActionList'
 import { ConfirmSheet } from './ConfirmSheet'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
+import { openDiagnostics } from '../lib/connLog'
 import { getActiveTerm } from '../lib/terminalBus'
 import { MAX_FONT, MIN_FONT } from '../lib/fit'
 import { t, type MobileMessageKey } from '../lib/i18n'
@@ -184,6 +186,13 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
         <SettingsSection id="device" title={t('set.device')}>
           <ActionList
             items={[
+              {
+                // E2-FR-36: Diagnostics opens over Settings (it is mounted after it).
+                id: 'diagnostics',
+                icon: <Activity size={16} />,
+                label: t('diag.title'),
+                onSelect: openDiagnostics,
+              },
               {
                 id: 'unpair',
                 icon: <LogOut size={16} />,

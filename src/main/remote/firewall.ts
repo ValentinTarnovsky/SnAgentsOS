@@ -22,7 +22,8 @@
  * port and exe never come from the renderer) through an unelevated wrapper
  * that starts it with Start-Process -Verb RunAs -Wait and maps a cancelled
  * UAC prompt to exit code 1223. The script removes the enabled inbound Block
- * rules on the current exe (TCP or Any, profile Private or Any, the port or
+ * rules on the current exe (TCP or Any, profile Private or Any, plus Public
+ * when the Tailscale rule is made and Domain on a domain network, the port or
  * Any) and recreates our own Allow rule under a stable -Name, so running it
  * twice never duplicates rules. The installed app scopes the rule to its exe
  * and port; portable and dev builds scope it to the port only (their exe
@@ -172,6 +173,12 @@ export function buildFixScript({ exe, port, programScope, tailnet, domain }: Fix
   const program = programScope ? ` -Program ${psQuote(exe)}` : ''
   const lanName = psQuote(FW_RULE_LAN)
   const tailName = psQuote(FW_RULE_TAILNET)
+  // Blocks on the current exe are removed on the profiles our rules open:
+  // Private (plus Domain on a domain network), and Public too when the
+  // Tailscale rule is created, since the tailnet adapter usually sits on a
+  // Public network and the Defender dialog leaves a Public Block there.
+  // Without our Allow rules nothing else opens on those profiles.
+  const removeProfiles = ['Private', ...(domain ? ['Domain'] : []), ...(tailnet ? ['Public'] : [])].join('|')
   const lines = [
     "$ErrorActionPreference = 'Stop'",
     "$ProgressPreference = 'SilentlyContinue'",
@@ -187,7 +194,7 @@ export function buildFixScript({ exe, port, programScope, tailnet, domain }: Fix
     '    foreach ($r in @($f | Get-NetFirewallRule)) {',
     "      if ([string]$r.Direction -ne 'Inbound' -or [string]$r.Action -ne 'Block' -or [string]$r.Enabled -ne 'True') { continue }",
     '      $prof = [string]$r.Profile',
-    "      if ($prof -ne 'Any' -and $prof -notmatch 'Private') { continue }",
+    `      if ($prof -ne 'Any' -and $prof -notmatch ${psQuote(removeProfiles)}) { continue }`,
     '      $pf = $r | Get-NetFirewallPortFilter',
     '      $proto = [string]$pf.Protocol',
     "      if ($proto -ne 'TCP' -and $proto -ne 'Any' -and $proto -ne '6') { continue }",
@@ -442,10 +449,22 @@ export function parseInspectOutput(stdout: string, ctx: ClassifyContext): Firewa
   }
 
   const endpoints: FirewallEndpointCheck[] = all.map(({ alias: _alias, ...e }) => e)
-  const blocked = blockingRules.some((b) => b.scope !== 'otherProgram')
+  const portBlocked = blockingRules.some((b) => b.scope === 'port')
+  const blocked = portBlocked || blockingRules.some((b) => b.scope === 'currentProgram')
   const publicLan = judged.some((e) => e.kind === 'lan' && e.profile === 'Public')
   const uncovered = judged.length === 0 ? !ruleFound : judged.some((e) => !covered.has(e.ip))
-  const state: FirewallStatus['state'] = blocked ? 'blocked' : publicLan ? 'publicProfile' : uncovered ? 'noRule' : 'ok'
+  // A Public LAN comes before a Block on our own exe: the Allow rule [Fix]
+  // makes is Private only, so fixing first would end in "could not fix" while
+  // the real step is marking the network Private (then Fix, if still needed).
+  const state: FirewallStatus['state'] = portBlocked
+    ? 'blocked'
+    : publicLan
+      ? 'publicProfile'
+      : blocked
+        ? 'blocked'
+        : uncovered
+          ? 'noRule'
+          : 'ok'
   return {
     ok: state === 'ok',
     profile: worstProfile(judged),
@@ -455,7 +474,7 @@ export function parseInspectOutput(stdout: string, ctx: ClassifyContext): Firewa
     endpoints,
     blockingRules,
     ruleScope: ctx.programScope ? 'program' : 'port',
-    fixable: !blockingRules.some((b) => b.scope === 'port'),
+    fixable: !portBlocked,
     checkedAt: ctx.now,
   }
 }
@@ -503,6 +522,9 @@ export class FirewallService {
   private cache: { key: string; status: FirewallStatus } | null = null
   private inflight: Promise<FirewallStatus> | null = null
   private fixing: Promise<FirewallFixRes> | null = null
+  /** Bumped when a fix run ends, so a check started before it is not reused. */
+  private gen = 0
+  private inflightGen = -1
 
   constructor(private readonly deps: FirewallDeps) {}
 
@@ -514,7 +536,13 @@ export class FirewallService {
     const key = `${normPath(this.deps.exe())}|${port}`
     const c = this.cache
     if (!force && c && c.key === key && this.deps.now() - c.status.checkedAt < FIREWALL_CACHE_MS) return Promise.resolve(c.status)
-    if (this.inflight) return this.inflight
+    if (this.inflight) {
+      // A run that started before the last fix ran may show the old rules: a
+      // forced check waits for it and starts its own.
+      if (!force || this.inflightGen === this.gen) return this.inflight
+      return this.inflight.then(() => this.check(true))
+    }
+    this.inflightGen = this.gen
     this.inflight = this.inspect(key, port, programScope).finally(() => {
       this.inflight = null
     })
@@ -565,8 +593,10 @@ export class FirewallService {
     try {
       res = await this.deps.run(psArgs(buildElevatedWrapper(script)), FIREWALL_FIX_TIMEOUT_MS)
     } catch {
+      this.gen++
       return { ok: false, error: 'failed', status: await this.check(true) }
     }
+    this.gen++
     if (res.code === UAC_CANCELLED) return { ok: false, cancelled: true, error: 'cancelled', status: await this.check(true) }
     const status = await this.check(true)
     if (res.timedOut) return { ok: false, error: 'timeout', status }
