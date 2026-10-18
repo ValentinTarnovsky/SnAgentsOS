@@ -1,14 +1,77 @@
 import { useEffect } from 'react'
 import { useAppStore } from './store'
-import { eventToAccel, resolveKeymap, type ActionId } from './keymap'
+import { useAgentStore } from './agentStore'
+import { ctrlDigit, eventToAccel, isEditableTarget, resolveKeymap, SKIP_IN_EDITABLE, type ActionId } from './keymap'
 import { getFocusedPane } from './focus'
 import { redrawPane } from './redrawRegistry'
+import { sidebarOrder } from './sidebarOrder'
+import { reopenClosedConsole } from './agentLaunch'
+import { revealPane } from './revealPane'
+import { toast } from './toast'
+import { translate } from '@/i18n'
+import {
+  advanceWaiting,
+  allAgents,
+  navigablePanes,
+  navInputFrom,
+  stepPane,
+  visibleConsoles,
+  waitingIds,
+  type WaitingCursor,
+} from './agentNav'
 
-/** Sidebar display order: favorites first (matches the Sidebar). */
+/** Sidebar display order (the single helper the Sidebar renders too). */
 function displayOrder() {
-  return [...useAppStore.getState().workspaces].sort(
-    (a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0),
-  )
+  return sidebarOrder(useAppStore.getState().workspaces)
+}
+
+/** "Next waiting" walk shared by consecutive presses (E5-FR-17). */
+let waitingCursor: WaitingCursor | null = null
+
+/**
+ * Reveal the next console waiting on the user: action/error first, then
+ * unread done, longest waiting first; presses within 5 s keep walking the same
+ * list. With nobody waiting, a toast (announced by the stack's aria-live).
+ */
+export function goToNextWaiting(now = Date.now()): string | null {
+  const app = useAppStore.getState()
+  // A frozen entry still counts while its console exists and is still waiting
+  // or done (revealing a done one clears its unread flag, not its state).
+  const exists = (id: string): boolean => {
+    const s = useAppStore.getState()
+    const state = s.paneStatus[id]?.state
+    return (state === 'action' || state === 'error' || state === 'done') && s.workspaces.some((w) => w.panes.some((p) => p.id === id))
+  }
+  const step = advanceWaiting(waitingCursor, () => waitingIds(allAgents(navInputFrom(app, useAgentStore.getState()))), exists, now)
+  waitingCursor = step.cursor
+  if (!step.target) {
+    toast.info(translate(app.settings.language, 'agents.nobodyWaiting'), { dedupeKey: 'next-waiting' })
+    return null
+  }
+  revealPane(step.target)
+  return step.target
+}
+
+/** Focus the next/previous console of the active workspace in grid order. */
+function focusStep(dir: 1 | -1): void {
+  const s = useAppStore.getState()
+  const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId)
+  if (!ws) return
+  const ids = navigablePanes(ws, s.minimized[ws.id] ?? [])
+  const current = getFocusedPane()
+  const target = stepPane(ids, current && ids.includes(current) ? current : null, dir)
+  if (target) revealPane(target)
+}
+
+/**
+ * Whether Ctrl+1..9 must stay out of the way: turned off, inside a text field
+ * (the palette handles its own Ctrl+1..6) or with a modal open.
+ */
+function ctrlDigitBlocked(e: KeyboardEvent): boolean {
+  const s = useAppStore.getState()
+  if (s.settings.agents?.ctrlDigitFocus === false) return true
+  if (s.paletteOpen || s.settingsOpen || s.wizardOpen || s.globalPromptOpen || useAgentStore.getState().modalPending) return true
+  return isEditableTarget(e)
 }
 
 function runAction(id: ActionId): void {
@@ -69,14 +132,27 @@ function runAction(id: ActionId): void {
       s.setActive(list[to].id)
       break
     }
+    case 'nextWaiting':
+      goToNextWaiting()
+      break
+    case 'reopenClosedPane':
+      reopenClosedConsole()
+      break
+    case 'focusNextPane':
+      focusStep(1)
+      break
+    case 'focusPrevPane':
+      focusStep(-1)
+      break
   }
 }
 
 /**
  * Central keyboard dispatcher (S13). Resolves each keydown against the active
  * keymap (defaults + user overrides) and runs the matching action. Attached on
- * the capture phase so it wins over xterm. Alt+1..9 (jump to Nth workspace) is
- * a fixed numeric family, not part of the remappable keymap.
+ * the capture phase so it wins over xterm. Alt+1..9 (jump to Nth workspace) and
+ * Ctrl+1..9 (focus the Nth visible console of the active workspace) are fixed
+ * numeric families, not part of the remappable keymap.
  */
 export function useGlobalKeys(): void {
   useEffect(() => {
@@ -91,11 +167,28 @@ export function useGlobalKeys(): void {
         return
       }
 
+      const digit = ctrlDigit(e)
+      if (digit !== null) {
+        // Unhandled, Ctrl+3..8 reach xterm as control bytes (Ctrl+3 = ESC).
+        if (ctrlDigitBlocked(e)) return
+        const s = useAppStore.getState()
+        const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId)
+        const target = ws ? visibleConsoles(ws, s.minimized[ws.id] ?? [], s.maximized[ws.id])[digit - 1] : undefined
+        if (target) {
+          e.preventDefault()
+          e.stopPropagation()
+          revealPane(target)
+        }
+        return
+      }
+
       const accel = eventToAccel(e)
       if (!accel) return
       const keymap = resolveKeymap(useAppStore.getState().settings.keymap)
       for (const id of Object.keys(keymap) as ActionId[]) {
         if (keymap[id] === accel) {
+          // Ctrl+Shift+U inside a text field stays the field's key.
+          if (SKIP_IN_EDITABLE.has(id) && isEditableTarget(e)) return
           e.preventDefault()
           e.stopPropagation()
           runAction(id)
