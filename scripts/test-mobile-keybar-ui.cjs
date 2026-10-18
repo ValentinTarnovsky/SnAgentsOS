@@ -133,6 +133,11 @@ window.result = (async () => {
  tabRow.querySelector('[data-key-toggle]').click(); await settle();
  check(row('tab').getAttribute('data-visible')==='false'&&row('tab').querySelector('[role=switch]').getAttribute('aria-checked')==='false','hiding Tab flips its switch');
  check(!barLabels().includes('Tab'),'a hidden key leaves the live KeyBar');
+ flushSync(() => store.getState().setCtrlLatch(true)); await settle();
+ row('ctrl').querySelector('[data-key-toggle]').click(); await settle();
+ check(!store.getState().ctrlLatch&&!barLabels().includes('Ctrl'),'hiding the Ctrl key releases a held latch');
+ row('ctrl').querySelector('[data-key-toggle]').click(); await settle();
+ check(barLabels().includes('Ctrl'),'showing Ctrl again brings the latch key back');
  for(let i=0;i<25;i++){ const b=row('esc').querySelector('[data-key-down]'); if(b.disabled)break; b.click(); await settle(); }
  check(rowIds().at(-1)==='esc'&&barLabels().at(-1)==='Esc','moving Esc down to the end reorders the live KeyBar');
  check(stored().version===1&&!stored().visibleIds.includes('tab')&&stored().orderedIds.at(-1)==='esc','the layout persists to snagentsos.keybar');

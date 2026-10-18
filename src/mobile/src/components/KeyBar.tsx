@@ -155,6 +155,14 @@ export function KeyBar({
   const keys = useMemo(() => visibleKeyDefs(layout, deskButtons), [layout, deskButtons])
   const composer = inputMode === 'composer'
 
+  // A latch the user hid from the bar (E2-FR-45) could no longer be seen or
+  // released, and would silently turn the next letter typed into a control
+  // byte: hiding the Ctrl key releases it.
+  const latchShown = keys.some((k) => k.latch)
+  useEffect(() => {
+    if (ctrlLatch && !latchShown) setCtrlLatch(false)
+  }, [ctrlLatch, latchShown, setCtrlLatch])
+
   // Switching panes stops any running repeat (E1-FR-17). A store subscription
   // runs synchronously inside the pane change, so no repeat tick can slip in
   // and write a key into the new pane before a post-render effect would run.
