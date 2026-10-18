@@ -72,6 +72,8 @@ app.whenReady().then(async()=>{
  await js("smoke.dragPlain(1,'dragleave')");
  await js("smoke.drag(0,'dragenter',['a.png'],'cell')");await frame();await js("window.dispatchEvent(new DragEvent('dragend'))");await frame();
  ok(!(await js('smoke.overlay(0)')),'dragend clears the overlay');
+ await js("smoke.drag(0,'dragenter',['a.png'],'cell')");await frame();await js("smoke.dragPlain(1,'drop')");await frame();
+ ok(!(await js('smoke.overlay(0)')),'a drop on another target clears the overlay');
 
  // FR-02c: no bracketed paste, 1.14.1 quoted write.
  ok((await js("smoke.isBracketedPaste('agent')"))===false,'fresh terminal has bracketed paste off');
@@ -83,9 +85,9 @@ app.whenReady().then(async()=>{
  await js("smoke.emit('pty-agent','\\\\x1b[?2004h')");await wait(150);
  ok((await js("smoke.isBracketedPaste('agent')"))===true,'mode 2004 turns bracketed paste on');
  await js("smoke.drag(0,'drop',['a.png','b.png'],'cell')");
- eq(await take(),[['pty-agent','\\x1b[200~C:\\\\x\\\\a.pngC:\\\\x\\\\b.png\\x1b[201~']],'two raw images glued inside the paste frame, no Enter');
+ eq(await take(),[['pty-agent','\\x1b[200~C:\\\\x\\\\a.png\\x1b[201~'],['pty-agent','\\x1b[200~C:\\\\x\\\\b.png\\x1b[201~']],'two raw images: one paste frame each, no space, no Enter');
  await js("smoke.drag(0,'drop',['e.ts','c d.png'],'cell')");
- eq(await take(),[['pty-agent','\\x1b[200~C:\\\\x\\\\e.ts "C:\\\\tmp\\\\c d.png"\\x1b[201~']],'file, space, quoted image');
+ eq(await take(),[['pty-agent','\\x1b[200~C:\\\\x\\\\e.ts \\x1b[201~'],['pty-agent','\\x1b[200~"C:\\\\tmp\\\\c d.png"\\x1b[201~']],'file with its space, then the quoted image as its own paste');
 
  // FR-02b: bracketed shell (bash over SSH) separates every path with a space.
  await js("smoke.emit('pty-shell','\\\\x1b[?2004h')");await wait(150);

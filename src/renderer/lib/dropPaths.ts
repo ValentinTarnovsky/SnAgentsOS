@@ -3,11 +3,12 @@
 /**
  * Turns the paths of a file drop into the text that goes to a console (E7-FR-01..02).
  *
- * - `agent`: Claude Code / Codex with bracketed paste. Images go raw (or
- *   double quoted when they hold a shell-unsafe char) so the agent attaches
- *   them as `[Image #N]`; two raw images in a row are glued with no space, the
- *   format both agents recognize. Other files use the Windows escape and are
- *   followed by a space. Sent with `term.paste`.
+ * - `agent`: Claude Code / Codex with bracketed paste. Each path is its own
+ *   `term.paste` (an agent only attaches an image when one paste event is
+ *   exactly one path). Images go raw (or double quoted when they hold a
+ *   shell-unsafe char) so the agent attaches them as `[Image #N]`; two raw
+ *   images in a row get no space between them, the format both agents
+ *   recognize. Other files use the Windows escape and are followed by a space.
  * - `safe`: any other console with bracketed paste (bash over SSH/WSL,
  *   PSReadLine with mode 2004). Every path uses the Windows escape and is
  *   followed by a space. Sent with `term.paste`.
@@ -22,7 +23,10 @@ export type DropMode = 'agent' | 'safe' | 'plain'
 export interface DropPayload {
   /** `paste` goes through xterm (`pasteToPane`); `write` straight to the pty. */
   kind: 'paste' | 'write'
+  /** Everything that reaches the console, in order (`parts` joined). */
   text: string
+  /** One entry per `term.paste` / `pty.write` call, in order. */
+  parts: string[]
 }
 
 /** Image extensions the agents attach, case-insensitive. */
@@ -65,23 +69,27 @@ export function buildDropPayload(paths: readonly string[], mode: DropMode): Drop
   if (list.some(hasControlChars)) return null
 
   if (mode === 'plain') {
-    return { kind: 'write', text: `${list.map((p) => `"${p}"`).join(' ')} ` }
+    const text = `${list.map((p) => `"${p}"`).join(' ')} `
+    return { kind: 'write', text, parts: [text] }
   }
   if (mode === 'safe') {
-    return { kind: 'paste', text: list.map((p) => `${escapeWindowsPath(p)} `).join('') }
+    const text = list.map((p) => `${escapeWindowsPath(p)} `).join('')
+    return { kind: 'paste', text, parts: [text] }
   }
 
-  let text = ''
+  const parts: string[] = []
   let prevRawImage = false
   for (const p of list) {
     const image = isImagePath(p)
     const raw = image && canPasteRaw(p)
     // Separator rule: a space between items unless the previous one already
-    // ended in one (files carry their own) or both are raw images.
-    if (text && !text.endsWith(' ') && !(prevRawImage && raw)) text += ' '
-    if (image) text += raw ? p : `"${p}"`
-    else text += `${escapeWindowsPath(p)} `
+    // ended in one (files carry their own) or both are raw images. The space
+    // is a paste of its own so an image paste stays exactly its path.
+    const prev = parts[parts.length - 1]
+    if (prev !== undefined && !prev.endsWith(' ') && !(prevRawImage && raw)) parts.push(' ')
+    if (image) parts.push(raw ? p : `"${p}"`)
+    else parts.push(`${escapeWindowsPath(p)} `)
     prevRawImage = raw
   }
-  return { kind: 'paste', text }
+  return { kind: 'paste', text: parts.join(''), parts }
 }

@@ -145,7 +145,10 @@ export function PaneCell({
     const payload = buildDropPayload(paths, mode)
     if (!payload) return
     if (payload.kind === 'paste') {
-      if (!pasteToPane(pane.id, payload.text)) return
+      // One xterm paste per part: an agent sees each image as its own paste.
+      for (const part of payload.parts) {
+        if (!pasteToPane(pane.id, part)) return
+      }
     } else {
       window.snApi.pty.write({ ptyId, data: payload.text })
     }
