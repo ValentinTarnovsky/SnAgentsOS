@@ -166,7 +166,14 @@ async function main() {
       const inherited = { [legacyVar]: 'old-pane', [AGENT_ENV.ptyId]: 'parent-pty', KEEP: 'yes' }
       const resolver = env => load('src/main/pty/shellResolver.ts', { require: withElectron, process: { ...process, env } })
 
-      check(resolver({}).statusBinDirs().join() === [currentBin, legacyBin].join(), 'status-bin dirs: current userData and the 1.x userData')
+      check(resolver({}).statusBinDirs().join() === [currentBin, legacyBin, currentBin].join(), 'status-bin dirs: current userData, the 1.x userData and the default 2.x one')
+      {
+        // Overridden userData (dev build) started from a console of the installed app.
+        const devBin = path.join(appData, BRAND.packageName + '-dev', 'status-bin')
+        const devElectron = { app: { getPath: name => ({ appData, userData: path.dirname(devBin) })[name] } }
+        const dev = load('src/main/pty/shellResolver.ts', { require: id => id === 'electron' ? devElectron : require(id), process: { ...process, env: { PATH: [currentBin, devBin, legacyBin, tools].join(path.delimiter) } } })
+        check(dev.statusBinDirs().join() === [devBin, legacyBin, currentBin].join() && dev.cleanEnv().PATH === tools, 'overridden userData: the installed app status-bin is stripped too')
+      }
       for (const key of ['PATH', 'Path']) {
         const { cleanEnv } = resolver({ ...inherited, [key]: [legacyBin, tools, currentBin].join(path.delimiter) })
         const env = cleanEnv({ SNAOS_FOO: 'preset', [AGENT_ENV.consoleId]: 'pane' })
@@ -317,6 +324,17 @@ async function main() {
       seed({ Stop: [{ hooks: [thirdParty] }] })
       before = fs.readFileSync(file)
       check(installer.migrateLegacyHooks() === 'pending' && fs.readFileSync(file).equals(before), 'a third-party hook naming a 1.x variable is never touched (stays pending)')
+
+      // The reconcile path: installHooks with the new port and token over a 1.x
+      // block whose handlers share a group with foreign ones.
+      const foreignHttp = { type: 'http', url: 'http://example.test/cc-hook/x' }
+      seed({ ...legacyBlock(), Stop: [{ hooks: [userHook, legacyHttp, foreignHttp] }], SessionStart: [{ matcher: 'startup', hooks: [legacyEncoded, userHook] }] })
+      const newUrl = `http://127.0.0.1:${port + 1}/cc-hook/${'c'.repeat(32)}`
+      installer.installHooks(port + 1, 'c'.repeat(32))
+      data = settings()
+      check(!legacyMarks() && installer.hooksUpToDate(port + 1, 'c'.repeat(32)), 'installHooks over a 1.x block: 0 legacy marks, block complete')
+      check(handlers(data).filter(h => h.url === newUrl || h.statusMessage === BRAND.hookStatusMessage).length === 12 && !handlers(data).some(h => h.url === url), 'installHooks over a 1.x block: no duplicates, no orphan')
+      check(handlers(data).filter(h => h.command === 'user-command').length === 2 && handlers(data).filter(h => h.url === foreignHttp.url).length === 1 && data.hooks.SessionStart[0].matcher === 'startup', 'installHooks over a 1.x block: foreign hooks and their groups kept')
 
       seed(legacyBlock())
       installer.uninstallHooks()
