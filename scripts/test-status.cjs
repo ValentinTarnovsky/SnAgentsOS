@@ -553,7 +553,6 @@ async function schemaV11Checks() {
   stop()
 }
 
-// R22-01: schema 12 notification keys (E2-FR-40/41) and the export sanitizer.
 // ntfy channel, the away gate, the deep link and lastHost (E2-FR-40..42, 52; R22-18).
 async function ntfyChannelChecks() {
   const { ntfyServer, NtfyNotifier, ntfyPayload } = load('src/main/status/NtfyNotifier.ts')
@@ -603,6 +602,20 @@ async function ntfyChannelChecks() {
     const res = await notifier.test()
     check(!res.ok && res.error === 'ntfy HTTP 403' && attempts === 1, 'a 403 is not retried and the test reports the HTTP error')
     check(!res.error.includes(base.topic) && !res.error.includes(base.token), 'the error never echoes the topic or token')
+  }
+  {
+    // Texts come from main/i18n.ts in the config language.
+    const bodies = []
+    let lang = 'es'
+    const notifier = new NtfyNotifier(async (url, init) => { bodies.push(JSON.parse(init.body)); return new Response('{}', { status: 200 }) }, async () => {}, () => ({ settings: { language: lang } }))
+    notifier.setConfig(base)
+    await notifier.test()
+    lang = 'en'
+    await notifier.test()
+    notifier.notify({ paneId: 'p1', provider: 'claude', state: 'error' }, { ...config, settings: { ...config.settings, language: 'en' } })
+    await settle(); await settle()
+    check(bodies[0].message === 'Prueba de notificación de ntfy' && bodies[1].message === 'ntfy notification test', 'the test push follows the config language')
+    check(bodies[2].title === 'Claude: Agent stopped with an error' && bodies[2].priority === 4, 'an English error notice reads "Agent stopped with an error"')
   }
   {
     let attempts = 0
@@ -694,6 +707,7 @@ async function ntfyChannelChecks() {
   } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
 }
 
+// R22-01: schema 12 notification keys (E2-FR-40/41) and the export sanitizer.
 function ntfyConfigChecks() {
   check(JSON.stringify(settings.ntfy) === JSON.stringify({ enabled: false, server: 'https://ntfy.sh', topic: '', token: '', notifyAction: true, notifyDone: false }), 'ntfy defaults (off, ntfy.sh, action on, done off)')
   check(settings.onlyWhenAway === false, 'onlyWhenAway defaults to false')

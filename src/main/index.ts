@@ -87,7 +87,7 @@ const remoteManager = new RemoteManager(
 )
 const hookServer = new HookServer()
 const discordNotifier = new DiscordNotifier()
-const ntfyNotifier = new NtfyNotifier()
+const ntfyNotifier = new NtfyNotifier(undefined, undefined, () => configStore.load())
 // Lazy closure: the router is built right below StatusManager (E2-FR-40..42, 52).
 let noticeRouter: NoticeRouter | null = null
 const statusManager = new StatusManager(

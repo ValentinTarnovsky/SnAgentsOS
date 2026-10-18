@@ -45,6 +45,14 @@ const MESSAGES = {
     'crash.wait': 'Wait',
     'crash.reload': 'Reload window',
     'explorer.menuLabel': 'Open in {app}',
+    // Remote channels, Discord and ntfy (E2-FR-40): the reason only, never reply text.
+    'status.push.permission': 'Permission requested',
+    'status.push.question': 'Question pending',
+    'status.push.plan': 'Plan approval requested',
+    'status.push.elicitation': 'MCP response requested',
+    'status.push.failure': 'Agent stopped with an error',
+    'status.push.done': 'Turn complete',
+    'status.push.test': 'ntfy notification test',
   },
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
@@ -87,6 +95,13 @@ const MESSAGES = {
     'crash.wait': 'Esperar',
     'crash.reload': 'Recargar ventana',
     'explorer.menuLabel': 'Abrir en {app}',
+    'status.push.permission': 'Permiso pendiente',
+    'status.push.question': 'Pregunta pendiente',
+    'status.push.plan': 'Plan para aprobar',
+    'status.push.elicitation': 'Respuesta MCP pendiente',
+    'status.push.failure': 'El agente se detuvo por un error',
+    'status.push.done': 'Turno terminado',
+    'status.push.test': 'Prueba de notificación de ntfy',
   },
 } as const
 

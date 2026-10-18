@@ -1,4 +1,5 @@
 import type { AgentDetail, AgentProvider, AttentionReason, ConfigFile, RemotePending } from '@shared/types'
+import { mainT } from '../i18n'
 export interface AgentEvent {
   paneId: string
   ptyId: string
@@ -54,16 +55,14 @@ export interface NoticeText {
 }
 
 export function describeNotice(notice: StatusNotice, config: ConfigFile | null, fallbackPlace: string): NoticeText {
-  const es = config?.settings.language === 'es'
   let place = fallbackPlace
   let workspaceId: string | null = null
   for (const ws of config?.workspaces ?? []) {
     const pane = ws.panes.find(p => p.id === notice.paneId)
     if (pane) { place = `${ws.name} / ${pane.title}`; workspaceId = ws.id; break }
   }
-  const reasons = es
-    ? { permission: 'Permiso pendiente', question: 'Pregunta pendiente', plan: 'Plan para aprobar', elicitation: 'Respuesta MCP pendiente', failure: 'El agente se detuvo por un error' }
-    : { permission: 'Permission requested', question: 'Question pending', plan: 'Plan approval requested', elicitation: 'MCP response requested', failure: 'Agent stopped with an error' }
-  const message = notice.state === 'done' ? (es ? 'Turno terminado' : 'Turn complete') : reasons[notice.reason ?? (notice.state === 'error' ? 'failure' : 'question')]
+  const reason: AttentionReason = notice.reason ?? (notice.state === 'error' ? 'failure' : 'question')
+  // The words live in main/i18n.ts, in the config language (E2 i18n).
+  const message = mainT(config, notice.state === 'done' ? 'status.push.done' : `status.push.${reason}`)
   return { agent: notice.provider === 'codex' ? 'Codex' : 'Claude', message, place, workspaceId }
 }
