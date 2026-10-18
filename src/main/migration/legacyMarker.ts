@@ -178,7 +178,7 @@ type Parsed = { kind: 'ok'; marker: LegacyMigrationMarker } | { kind: 'oldVersio
 
 function parseMarkerFile(path: string, fsx: MarkerFs): Parsed {
   try {
-    const raw: unknown = JSON.parse(String(fsx.readFileSync(path, 'utf8')).replace(/^﻿/, ''))
+    const raw: unknown = JSON.parse(String(fsx.readFileSync(path, 'utf8')).replace(/^\uFEFF/, ''))
     if (typeof raw === 'object' && raw !== null && !Array.isArray(raw) && (raw as { v?: unknown }).v !== 2) {
       return { kind: 'oldVersion' }
     }
