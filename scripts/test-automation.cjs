@@ -575,6 +575,9 @@ async function quickRunChecks() {
   check(S.getState().pendingPrompts[res.paneId].text === 'revisa el diff' && S.getState().pendingPrompts[res.paneId].enter === true, 'its prompt waits for the first spawn')
   check(S.getState().takePendingPrompt(res.paneId).text === 'revisa el diff' && S.getState().takePendingPrompt(res.paneId) === null, 'the pending prompt is consumed once (a restart finds nothing)')
   check(toasts().at(-1).title === 'Abriendo Claude Code: Cmd agent', 'agent feedback toast')
+  const closed = (await r.runQuickCommand(qcOf('agent'))).paneId
+  S.getState().removePane('w1', closed)
+  check(!(closed in S.getState().pendingPrompts), 'closing a console before its spawn drops its pending prompt (a reopen never delivers it)')
   const before = S.getState().quickCommands.length
   res = await r.runQuickCommand(qcOf('ghost'))
   check(!res.ok && res.error === 'no_preset' && toasts().at(-1).title === 'El preset de este Quick Command ya no existe' && S.getState().settingsOpen && S.getState().quickEdit.id === 'qc-ghost' && S.getState().quickCommands.length === before, 'a deleted preset shows the toast and opens the editor on it')

@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useAppStore } from './store'
 import { useAgentStore } from './agentStore'
 import { ctrlDigit, eventToAccel, isEditableTarget, resolveKeymap, SKIP_IN_EDITABLE, type ActionId } from './keymap'
-import { getFocusedPane } from './focus'
+import { focusPane, getFocusedPane } from './focus'
 import { redrawPane } from './redrawRegistry'
 import { sidebarOrder } from './sidebarOrder'
 import { reopenClosedConsole } from './agentLaunch'
@@ -146,8 +146,12 @@ function runAction(id: ActionId): void {
       break
     case 'quickCommands':
       // E8-FR-04: never over another modal (settings, wizard, palette, prompt).
-      if (s.quickPopoverOpen) s.setQuickPopoverOpen(false)
-      else if (!quickBlocked()) s.setQuickPopoverOpen(true)
+      if (s.quickPopoverOpen) {
+        // Closing with the shortcut gives the console its focus back, like Esc.
+        s.setQuickPopoverOpen(false)
+        const paneId = getFocusedPane()
+        if (paneId) setTimeout(() => focusPane(paneId), 0)
+      } else if (!quickBlocked()) s.setQuickPopoverOpen(true)
       break
   }
 }
