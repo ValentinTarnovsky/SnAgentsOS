@@ -237,6 +237,14 @@ async function main() {
     check(pm.reconcile(['b']) === 0 && pm.count === 1, 'reconcile with every pane live kills nothing')
     procs[1].exit(0)
     check(pm.getExited('b') !== null && pm.killPanes(['b']) === 0 && pm.getExited('b') === null, 'killPanes drops the exit record of a removed pane')
+    // A pty superseded by a second spawn for the same pane is killed with it.
+    const before = procs.length
+    pm.spawn({ paneId: 'o', cols: 80, rows: 24 })
+    pm.spawn({ paneId: 'o', cols: 80, rows: 24 })
+    check(pm.killPanes(['o']) === 2 && procs[before].killed && procs[before + 1].killed, 'killPanes kills every live pty of the pane, superseded ones too')
+    pm.spawn({ paneId: 'o2', cols: 80, rows: 24 })
+    pm.spawn({ paneId: 'o2', cols: 80, rows: 24 })
+    check(pm.reconcile(['b']) === 2 && pm.count === 0, 'reconcile also catches a superseded pty of a removed pane')
     pm.killAll()
 
     // The IPC: a malformed reconcile list never reads as "no panes".
@@ -310,6 +318,15 @@ async function main() {
     killCalls.length = 0
     S.getState().mergeConfig({ workspaces: [{ id: 'm', name: 'M', cwd: '', panes: [pane('m1')] }] })
     check(killCalls.length === 0, 'mergeConfig adds panes and kills nothing')
+
+    // Restart clean of a console outside the mounted set (phone, a workspace not
+    // revisited since a reload): it kills and then mounts, so a shell comes back.
+    const merged = S.getState().workspaces.at(-1)
+    const mPane = merged.panes[0].id
+    check(!(S.getState().mountedWorkspaces[merged.id]), 'the merged workspace is not mounted')
+    S.getState().restartPaneClean(mPane)
+    const mm = S.getState().mountedWorkspaces[merged.id]
+    check(killCalls.length === 1 && killCalls[0].join() === mPane && Array.isArray(mm) && mm.includes(mPane), 'restartPaneClean on an unmounted console kills it and mounts it')
 
     // Restart clean: the kill goes out before the epoch rises (the remount's
     // reattach then finds nothing and spawns).
@@ -422,6 +439,14 @@ async function main() {
     s2.checked(info); s2.begin(); s2.failed('boom')
     s2.checked({ ...info, available: false, error: 'offline' })
     check(s2.get().phase === 'failed' && s2.get().installError === 'boom', 'a failed check keeps the install outcome')
+    const s3 = new stateMod.UpdateStateStore()
+    const s3frames = []
+    s3.onChange(s => s3frames.push(s.phase))
+    s3.checked({ ...info, available: false, error: 'offline' })
+    check(s3.get().phase === 'idle' && s3.get().info.error === 'offline', 'a first failed check records its error info')
+    s3.checked(info)
+    s3.checked({ ...info, available: false, latestVersion: null, error: 'offline' })
+    check(s3.get().phase === 'available' && s3.get().info.available && s3.get().info.latestVersion === '2.1.0' && s3frames.length === 2, 'a failed recheck keeps available with its good info (no contradictory state)')
     s2.checked({ ...info, available: false })
     check(s2.get().phase === 'idle' && s2.get().installError === null, 'a good check with nothing newer goes idle')
     check(stateMod.isUpdateBusy('downloading') && stateMod.isUpdateBusy('installing') && !stateMod.isUpdateBusy('opened'), 'busy phases are downloading and installing')

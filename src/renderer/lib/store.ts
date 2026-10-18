@@ -644,6 +644,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     // new mount's reattach finds nothing and spawns a fresh shell.
     killPanePtys([paneId])
     set((s) => ({ paneEpoch: { ...s.paneEpoch, [paneId]: (s.paneEpoch[paneId] ?? 0) + 1 } }))
+    // A console outside the mounted set (a workspace not revisited since a
+    // reload, a phone restart) mounts now, so the kill is followed by a fresh
+    // shell instead of leaving the pane without one.
+    const ws = get().workspaces.find((w) => w.panes.some((p) => p.id === paneId))
+    if (ws) get().ensureMounted(ws.id, { only: [paneId] })
   },
 
   setPaneExit: (paneId, code) => {

@@ -504,18 +504,19 @@ export class PtyManager {
    * Kill the ptys of these panes by paneId (E4-FR-36): the renderer's
    * registry can be empty after a reload, main's byPane never is. A pane that
    * goes away also drops the output kept for its natural exit (E6-FR-20).
-   * Returns how many live ptys were killed; unknown panes are a no-op.
+   * Returns how many live ptys were killed; unknown panes are a no-op. Every
+   * live pty of the pane goes, not only the byPane one: an unmount never
+   * kills, so a superseded pty would otherwise outlive its pane.
    */
   killPanes(paneIds: string[]): number {
+    const gone = new Set(paneIds)
     let killed = 0
-    for (const paneId of paneIds) {
-      const ptyId = this.byPane.get(paneId)
-      if (ptyId && this.entries.has(ptyId)) {
-        this.kill(ptyId)
-        killed++
-      }
-      if (this.exited.delete(paneId)) this.onRunningChange?.()
+    for (const [ptyId, entry] of [...this.entries]) {
+      if (!gone.has(entry.paneId)) continue
+      this.kill(ptyId)
+      killed++
     }
+    for (const paneId of gone) if (this.exited.delete(paneId)) this.onRunningChange?.()
     return killed
   }
 
@@ -526,7 +527,9 @@ export class PtyManager {
    */
   reconcile(livePaneIds: string[]): number {
     const live = new Set(livePaneIds)
-    const gone = [...new Set([...this.byPane.keys(), ...this.exited.keys()])].filter((id) => !live.has(id))
+    const known = new Set(this.exited.keys())
+    for (const entry of this.entries.values()) known.add(entry.paneId)
+    const gone = [...known].filter((id) => !live.has(id))
     return this.killPanes(gone)
   }
 
