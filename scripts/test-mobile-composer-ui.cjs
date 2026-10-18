@@ -3,7 +3,7 @@
 // the mode chip and its persistence, the helper textarea going readOnly with
 // inputmode=none, KeyBar taps keeping the composer's focus, Send / Insert /
 // Stop / slash typing, drafts per pane, offline, the multi-line confirm, the
-// Paste one-shot, snippets at the caret, the counter, growth and autocorrect.
+// Paste one-shot, Quick Commands at the caret, the counter, growth and autocorrect.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -28,9 +28,10 @@ window.result = (async () => {
  const sent=[]; let open=true;
  client.sendInput = data => { if(!open) return false; sent.push(data); return true };
  client.isOpen = () => open;
+ const ctls=[]; client.sendCtl = async action => { ctls.push(action); return { ok:true } };
  const snapshot = {
   language:'en', themeTokens:{}, fontFamily:'mono', fontSize:13, activeWorkspaceId:'w1', keyButtons:[],
-  snippets:[{ id:'s1', name:'Greeting', text:'SNIP' }],
+  quickCommands:[{ id:'s1', name:'Greeting', text:'SNIP', action:'send', enter:false }],
   workspaces:[{ id:'w1', name:'Front', layoutOrder:['c1','s1'], panes:[
    { id:'c1', title:'Claude', type:'claude', color:'', icon:'', running:true },
    { id:'s1', title:'Shell', type:'shell', color:'', icon:'', running:true },
@@ -187,19 +188,19 @@ window.result = (async () => {
  check(localStorage.getItem('snagentsos.composer.autocorrect')==='1','the preference persists');
  flushSync(() => store.getState().setComposerPref('composerAutocorrect', false)); await frames();
 
- // Snippets insert at the caret in Composer mode.
+ // Quick Commands without Enter insert at the caret in Composer mode (E1-FR-31).
  sent.length=0; typeInto(composer(),'ab'); composer().setSelectionRange(1,1);
- tap(key('Snippets')); await frames();
+ tap(key('Quick Commands')); await frames();
  const snip=[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Greeting'));
- check(!!snip,'the snippets sheet lists the snippet');
+ check(!!snip,'the Quick Commands sheet lists the command');
  snip.click(); await frames();
- check(composer().value==='aSNIPb' && sent.length===0,'a snippet lands in the composer at the caret, not in the pty');
+ check(composer().value==='aSNIPb' && sent.length===0 && ctls.length===0,'a send without Enter lands in the composer at the caret, not in the pty');
  typeInto(composer(),'x'.repeat(16384)); await frames(); composer().setSelectionRange(2,2);
- tap(key('Snippets')); await frames();
+ tap(key('Quick Commands')); await frames();
  [...document.querySelectorAll('button')].find(b=>b.textContent.includes('Greeting')).click(); await frames();
  check(composer().value.length===16384 && !composer().value.includes('SNIP'),'a full field takes no snippet');
  typeInto(composer(),'abc'); await frames();
- check(composer().selectionStart===3,'a snippet that did not fit leaves no stale caret behind');
+ check(composer().selectionStart===3,'a command that did not fit leaves no stale caret behind');
  typeInto(composer(),''); await frames();
 
  // Paste key: a one-shot composer on a Direct pane.
@@ -212,9 +213,10 @@ window.result = (async () => {
  sent.length=0; typeInto(composer(),'ls'); await frames(); tap(sendBtn()); await wait(150); await frames();
  check(sent.length===2 && sent[1]==='\\r' && !composer() && !!q('[data-direct-strip]'),'after Send the one-shot returns to Direct');
  check(!helper.readOnly && !helper.hasAttribute('inputmode'),'Direct mode restores the helper attributes');
- sent.length=0; tap(key('Snippets')); await frames();
+ sent.length=0; tap(key('Quick Commands')); await frames();
  [...document.querySelectorAll('button')].find(b=>b.textContent.includes('Greeting')).click(); await frames();
- check(sent[0]==='SNIP','in Direct mode a snippet goes to the pty');
+ await frames();
+ check(sent.length===0 && JSON.stringify(ctls.at(-1))===JSON.stringify({ kind:'runQuickCommand', workspaceId:'w1', id:'s1', paneId:'s1' }),'in Direct mode it runs on the desktop by id, for the console open here');
 
  // Agents default: an unsaved claude pane opens in Composer.
  flushSync(() => store.getState().setComposerPref('composerDefaultForAgents', true)); await frames();
