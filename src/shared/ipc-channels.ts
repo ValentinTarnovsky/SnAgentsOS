@@ -13,6 +13,12 @@ export const CH = {
   APP_LEGACY_OPEN_LOG: 'app:legacyOpenLog', // send -> open logs/legacy-migration.log
   APP_LEGACY_STATUS: 'app:legacyStatus', // main -> renderer (LegacyDataInfo on every marker change)
 
+  // Crash resilience (E4-FR-19..25). main owns the breaker, the crash records and lastRecovery.
+  APP_RELOAD: 'app:reload', // send; manual reload, resets the breaker and drops lastRecovery
+  APP_TAKE_RECOVERY: 'app:takeRecovery', // invoke -> RecoveryInfo | null (consumed once)
+  APP_REPORT_RENDER_ERROR: 'app:reportRenderError', // send (RenderErrorReport), zod-validated and throttled in main
+  APP_DIAGNOSTICS: 'app:diagnostics', // invoke (RendererDiagnostics) -> redacted markdown (<= 64KB)
+
   // PTY lifecycle (renderer -> main)
   PTY_SPAWN: 'pty:spawn', // invoke -> { ptyId }
   PTY_REATTACH: 'pty:reattach', // invoke (paneId) -> { ptyId, replay } | null
