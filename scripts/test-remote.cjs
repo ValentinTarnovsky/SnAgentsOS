@@ -357,7 +357,7 @@ async function testAgentResume() {
     export { useAppStore } from './store'
     export { initRemoteCommands } from './remoteCommands'
     export { startRemoteSnapshotSync } from './remoteSnapshot'
-    export { registerPty } from './ptyRegistry'
+    export { registerPty, unregisterPty } from './ptyRegistry'
     export { registerAgentEndShell, runAgentEnd } from './agentEndRun'
     export { agentEndCommands, AGENT_END_READY_MS } from './agentEnd'
   `, resolveDir: path.join(root, 'src/renderer/lib'), loader: 'ts' }, bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, define: { 'process.env.NODE_ENV': '"production"' } }).outputFiles[0].text
@@ -435,6 +435,13 @@ async function testAgentResume() {
   check(!res.ok && res.error === 'stale' && ptyWrites.length === writesBefore, 'with the chip setting off there is no offer to take (stale)')
   S.getState().updateSettings({ terminalAgentEndChip: true })
   S.getState().clearAgentEnded('p2')
+
+  // No live pty: nothing can take the offer, so it is dropped (no lingering strip).
+  offer('p2')
+  r.unregisterPty('p2')
+  res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p2', mode: 'new' })
+  check(!res.ok && res.error === 'not_running' && ptyWrites.length === writesBefore && S.getState().agentEnded.p2 === undefined, 'without a live pty the ack is not_running and the offer is dropped')
+  r.registerPty('p2', 'pty-2')
 
   // Too early: the write waits until the shell had AGENT_END_READY_MS to print its prompt.
   offer('p1', { at: Date.now() })

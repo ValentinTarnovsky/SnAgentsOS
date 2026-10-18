@@ -185,6 +185,8 @@ class RemoteClient {
   private openAt = 0
   /** measureRtt() callers waiting for the next pong. */
   private rttWaiters: Array<(ms: number) => void> = []
+  /** Notified with the pane id after this phone sends it input (onInputSent). */
+  private inputListeners = new Set<(paneId: string) => void>()
 
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
@@ -434,7 +436,20 @@ class RemoteClient {
     for (const chunk of chunkInput(data)) {
       if (!this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data: chunk })) return false
     }
+    for (const cb of this.inputListeners) cb(paneId)
     return true
+  }
+
+  /**
+   * Called with the pane id after each input this phone sends. A key typed
+   * here hides the "Claude exited" strip on this phone, like any key in the
+   * desktop pane hides its chip (E6-FR-22/24). Returns the unsubscribe.
+   */
+  onInputSent(cb: (paneId: string) => void): () => void {
+    this.inputListeners.add(cb)
+    return () => {
+      this.inputListeners.delete(cb)
+    }
   }
 
   /** Switch the viewed pane within the current workspace (unsub old, sub new). */

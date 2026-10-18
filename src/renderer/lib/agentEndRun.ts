@@ -97,8 +97,10 @@ export function runAgentEnd(paneId: string, mode: AgentEndMode, workspaceId?: st
   const text = mode === 'resume' ? found.cmds.resume : found.cmds.fresh
   if (!text) return { ok: false, error: 'no_resume' }
   const ptyId = getPtyId(paneId)
-  if (!ptyId) return { ok: false, error: 'not_running' }
+  // Nothing can take an offer without a live pty: drop it (the desktop chip
+  // already hid on that refusal) so the phone strip does not linger.
   state.clearAgentEnded(paneId)
+  if (!ptyId) return { ok: false, error: 'not_running' }
   // A bare CR is exactly what Enter sends (CRLF makes PowerShell print ">>").
   const write = (): void => window.snApi.pty.write({ ptyId, data: text + '\r' })
   const wait = AGENT_END_READY_MS - (Date.now() - found.evt.at)
