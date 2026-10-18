@@ -20,6 +20,7 @@ import type {
   RemoteCommandResult,
   RemoteUiState,
   SnApi,
+  TerminalEngineSettings,
   UpdateInfo,
   UpdateProgress,
   UpdateState,
@@ -73,6 +74,7 @@ const api: SnApi = {
     restart: (req: PtyRestartReq) => ipcRenderer.invoke(CH.PTY_RESTART, req) as Promise<PtyRestartRes>,
     killPanes: (paneIds: string[]) => ipcRenderer.invoke(CH.PTY_KILL_PANES, paneIds) as Promise<number>,
     reconcile: (livePaneIds: string[]) => ipcRenderer.invoke(CH.PTY_RECONCILE, livePaneIds) as Promise<number>,
+    setEngine: (settings: TerminalEngineSettings) => ipcRenderer.send(CH.PTY_SET_ENGINE, settings),
   },
   dialog: {
     openDirectory: () => ipcRenderer.invoke(CH.DIALOG_OPEN_DIR) as Promise<string | null>,
