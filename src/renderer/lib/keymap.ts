@@ -19,6 +19,8 @@ export type ActionId =
   | 'reopenClosedPane'
   | 'focusNextPane'
   | 'focusPrevPane'
+  // Quick Commands popover (E8-FR-04).
+  | 'quickCommands'
 
 export interface KeyAction {
   id: ActionId
@@ -46,6 +48,7 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'reopenClosedPane', labelKey: 'keys.reopenClosedPane', defaultAccel: 'Ctrl+Shift+U' },
   { id: 'focusNextPane', labelKey: 'keys.focusNextPane', defaultAccel: 'Ctrl+Alt+Right' },
   { id: 'focusPrevPane', labelKey: 'keys.focusPrevPane', defaultAccel: 'Ctrl+Alt+Left' },
+  { id: 'quickCommands', labelKey: 'keys.quickCommands', defaultAccel: 'Ctrl+Shift+Q' },
 ]
 
 /** Actions that stay out of text fields so the field keeps the key (E5-FR-18). */

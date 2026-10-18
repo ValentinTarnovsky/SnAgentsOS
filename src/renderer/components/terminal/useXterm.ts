@@ -1,5 +1,6 @@
 import { useEffect, useRef, type RefObject } from 'react'
 import type { SetupStep } from '@shared/types'
+import type { LaunchKind } from '@shared/initialPrompt'
 import { BRAND } from '@shared/brand'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -18,6 +19,7 @@ import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegist
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
 import { registerRestarter, unregisterRestarter } from '@/lib/restartRegistry'
 import { prepareAgentLaunch } from '@/lib/agentLaunch'
+import { rememberPrompt } from '@/lib/promptDelivery'
 import type { ShellKind } from '@shared/ipc-contract'
 import { useT } from '@/i18n'
 
@@ -255,6 +257,8 @@ export interface UseXtermOptions {
   shell?: string
   /** Command line typed into the shell after spawn (e.g. an AI CLI). */
   initialCommand?: string
+  /** E8-FR-02b: 'claude' / 'codex' when initialCommand is that preset's own command. */
+  launchKind?: LaunchKind
   /** Pre-launch sequence (e.g. SSH connect) run before initialCommand. */
   setup?: SetupStep[]
   fontSize?: number
@@ -834,10 +838,15 @@ export function useXterm(
         }
         // A real spawn (not a reattach): an agent console may resume its
         // last chat instead (E5-FR-08); this decides the command and cwd.
-        return prepareAgentLaunch(opts.paneId, { cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup })
-          .catch(() => ({ cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup }))
+        const base = { cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup, launchKind: opts.launchKind }
+        return prepareAgentLaunch(opts.paneId, base)
+          .catch(() => base)
           .then((launch) => {
             if (disposed) return null
+            // E8-FR-02: the pane's one-shot prompt is consumed by this spawn
+            // only; a later restart (or remount + reattach) never finds it.
+            const pending = useAppStore.getState().takePendingPrompt(opts.paneId)
+            if (pending) rememberPrompt(opts.paneId, pending.text)
             return window.snApi.pty.spawn({
               paneId: opts.paneId,
               shell: opts.shell,
@@ -846,6 +855,8 @@ export function useXterm(
               setup: launch.setup,
               cols: term.cols,
               rows: term.rows,
+              launchKind: launch.launchKind ?? 'other',
+              ...(pending ? { initialPrompt: { text: pending.text, enter: pending.enter } } : {}),
             })
           })
           .then((spawned) => {

@@ -70,7 +70,7 @@ function focusStep(dir: 1 | -1): void {
 function ctrlDigitBlocked(e: KeyboardEvent): boolean {
   const s = useAppStore.getState()
   if (s.settings.agents?.ctrlDigitFocus === false) return true
-  if (s.paletteOpen || s.settingsOpen || s.wizardOpen || s.globalPromptOpen || useAgentStore.getState().modalPending) return true
+  if (s.paletteOpen || s.settingsOpen || s.wizardOpen || s.globalPromptOpen || s.quickPopoverOpen || useAgentStore.getState().modalPending) return true
   return isEditableTarget(e)
 }
 
@@ -144,7 +144,18 @@ function runAction(id: ActionId): void {
     case 'focusPrevPane':
       focusStep(-1)
       break
+    case 'quickCommands':
+      // E8-FR-04: never over another modal (settings, wizard, palette, prompt).
+      if (s.quickPopoverOpen) s.setQuickPopoverOpen(false)
+      else if (!quickBlocked()) s.setQuickPopoverOpen(true)
+      break
   }
+}
+
+/** A modal is open: the Quick Commands popover stays closed (E8-FR-04). */
+export function quickBlocked(): boolean {
+  const s = useAppStore.getState()
+  return s.paletteOpen || s.settingsOpen || s.wizardOpen || s.globalPromptOpen || useAgentStore.getState().modalPending
 }
 
 /**

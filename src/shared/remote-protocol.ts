@@ -14,8 +14,8 @@ import type {
   KeyButton,
   Language,
   PaneType,
+  QuickCommand,
   RemotePending,
-  Snippet,
   ThemeName,
   ThemeTokens,
 } from './types'
@@ -138,8 +138,12 @@ export interface RemoteStateSnapshot {
   language: Language
   fontFamily: string
   fontSize: number
-  /** Saved prompt snippets, invocable from the phone. */
-  snippets?: Snippet[]
+  /**
+   * Quick Commands (E8-FR-07, replaces `snippets`): globals and every
+   * workspace's own. The phone runs them by id (`runQuickCommand`); the
+   * desktop resolves the text.
+   */
+  quickCommands?: QuickCommand[]
   /** Custom phone KeyBar buttons. */
   keyButtons?: KeyButton[]
   /** Live usage bars (undefined/null when the usage widget is off). */
@@ -162,6 +166,14 @@ export type RemoteCtlAction =
   | { kind: 'globalPrompt'; workspaceId: string; text: string }
   | { kind: 'setTheme'; theme: ThemeName }
   | { kind: 'renamePane'; workspaceId: string; paneId: string; title: string }
+  /**
+   * E8-FR-07: run a Quick Command by id. `send` needs `paneId` (the console
+   * open on the phone; never the desktop's focus) and answers `not_running`
+   * without a live pty; `agent` creates the console in `workspaceId` without
+   * activating it and acks its id. The command must be global or scoped to
+   * `workspaceId`, else `not_found`.
+   */
+  | { kind: 'runQuickCommand'; workspaceId: string; paneId?: string; id: string }
 
 // --- Client -> server messages ---
 

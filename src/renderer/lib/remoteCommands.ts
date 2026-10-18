@@ -4,6 +4,7 @@ import { useAppStore } from './store'
 import { killPanePtys } from './ptyRegistry'
 import { broadcastToWorkspace } from './broadcastPrompt'
 import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
+import { runRemoteQuickCommand } from './quickCommands'
 import { toast } from './toast'
 import { translate } from '@/i18n'
 import type { Language } from '@shared/types'
@@ -21,7 +22,7 @@ interface CmdResult {
  * Execute a phone control action through the existing store actions. Ids are
  * validated first so a stale phone view can't act on a deleted workspace/pane.
  */
-function run(action: RemoteCtlAction): CmdResult {
+function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
   const store = useAppStore.getState()
 
   switch (action.kind) {
@@ -103,6 +104,10 @@ function run(action: RemoteCtlAction): CmdResult {
       return { ok: true }
     }
 
+    case 'runQuickCommand':
+      // E8-FR-07: strict variant (the phone's console, its workspace, no activation).
+      return runRemoteQuickCommand(action)
+
     default:
       return { ok: false, error: 'unknown_action' }
   }
@@ -149,16 +154,22 @@ export function initRemoteCommands(): () => void {
   if (wired) return () => undefined
   wired = true
   const off = window.snApi.remote.onCommand((cmd: RemoteCommand) => {
-    let result: CmdResult
     const title = targetTitle(cmd.action)
-    try {
-      result = run(cmd.action)
-    } catch (err) {
-      result = { ok: false, error: err instanceof Error ? err.message : 'error' }
+    const report = (result: CmdResult): void => {
+      window.snApi.remote.commandResult({ id: cmd.id, ...result })
+      const notice = remoteNoticeText(cmd.action, result, cmd.deviceName, title, useAppStore.getState().settings.language)
+      if (notice) toast.info(notice)
     }
-    window.snApi.remote.commandResult({ id: cmd.id, ...result })
-    const notice = remoteNoticeText(cmd.action, result, cmd.deviceName, title, useAppStore.getState().settings.language)
-    if (notice) toast.info(notice)
+    const failed = (err: unknown): CmdResult => ({ ok: false, error: err instanceof Error ? err.message : 'error' })
+    let out: CmdResult | Promise<CmdResult>
+    try {
+      out = run(cmd.action)
+    } catch (err) {
+      out = failed(err)
+    }
+    // Most actions answer synchronously; a Quick Command waits for its submit.
+    if ('then' in out) void out.then(report, (err: unknown) => report(failed(err)))
+    else report(out)
   })
   return () => {
     wired = false

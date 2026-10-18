@@ -1,6 +1,6 @@
 /**
  * Tracks the most recently focused console pane and exposes a way to refocus a
- * pane's terminal from elsewhere (command palette, snippets, workspace switch),
+ * pane's terminal from elsewhere (command palette, Quick Commands, workspace switch),
  * so the user can keep typing right after an action without clicking back into
  * the console.
  */

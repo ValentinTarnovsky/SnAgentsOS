@@ -81,7 +81,7 @@ export function PaneCell({
   const t = useT()
   const Icon = iconFor(pane.icon)
   const connections = useAppStore((s) => s.connections)
-  const { cwd, initialCommand, setup } = resolveLaunch(pane, workspace, presets, connections)
+  const { cwd, initialCommand, setup, launchKind } = resolveLaunch(pane, workspace, presets, connections)
   // E6-FR-32: the configured default shell for this OS (main falls back to the
   // OS default, with a warning line, when it does not exist). Read at mount.
   const shell = useAppStore((s) => {
@@ -239,6 +239,7 @@ export function PaneCell({
       }}
       onDrop={onDropFolder}
       data-drop-hover={dropHover || undefined}
+      data-pane-cell={pane.id}
       className={cn(
         'relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border bg-bg-primary',
         hidden && 'hidden',
@@ -363,6 +364,7 @@ export function PaneCell({
               cwd={cwd}
               shell={shell}
               initialCommand={initialCommand}
+              launchKind={launchKind}
               setup={setup}
               fontSize={pane.fontSize}
               isActive={cellVisible}
