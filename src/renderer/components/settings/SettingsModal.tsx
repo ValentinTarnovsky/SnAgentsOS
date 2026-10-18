@@ -97,9 +97,10 @@ export function SettingsModal() {
   const [query, setQuery] = useState('')
 
   // Apply a deep-link target (e.g. openSettings('remote')) once, then clear it.
+  // A 'category#row' target opens the category (the row part is a later hook).
   useEffect(() => {
     if (open && settingsCategory) {
-      setActive(settingsCategory as CategoryId)
+      setActive(settingsCategory.split('#')[0] as CategoryId)
       useAppStore.setState({ settingsCategory: null })
     }
   }, [open, settingsCategory])
