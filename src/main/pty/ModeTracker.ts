@@ -51,6 +51,14 @@ export class ModeTracker {
     return this.alt
   }
 
+  /**
+   * ?2004 bracketed paste is on (E8-FR-02a: a multi-line submit is wrapped in
+   * a paste only then). Survives a sequence split across chunks like the rest.
+   */
+  get bracketedPaste(): boolean {
+    return this.bracketed
+  }
+
   feed(data: string): void {
     const n = data.length
     let i = 0

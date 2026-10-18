@@ -8,8 +8,10 @@ import type {
   PtyRestartRes,
   PtySpawnReq,
   PtySpawnRes,
+  PtySubmitRes,
   PtyWriteReq,
 } from '@shared/ipc-contract'
+import { SUBMIT_TEXT_MAX } from '@shared/initialPrompt'
 import type { PtyManager } from '../pty/PtyManager'
 
 /**
@@ -38,6 +40,17 @@ export function registerPtyIpc(manager: PtyManager, restartLabel: () => string =
   ipcMain.on(CH.PTY_SET_ENGINE, (_e, settings: unknown) => manager.setEngine(settings))
 
   ipcMain.handle(CH.PTY_KILL, (_e, ptyId: string) => manager.kill(ptyId))
+
+  // The shared delivery path (E8-FR-02a): validated here, the text is never trusted blindly.
+  ipcMain.handle(CH.PTY_SUBMIT, (_e, req: unknown): Promise<PtySubmitRes> => {
+    const r = (req && typeof req === 'object' ? req : {}) as Record<string, unknown>
+    const ptyId = typeof r.ptyId === 'string' ? r.ptyId : ''
+    const paneId = typeof r.paneId === 'string' && r.paneId ? r.paneId : undefined
+    if (typeof r.text !== 'string' || r.text.length > SUBMIT_TEXT_MAX || (!ptyId && !paneId)) {
+      return Promise.resolve({ ok: false, error: 'not_running' })
+    }
+    return manager.submitToPane(ptyId, paneId, r.text, r.enter === true)
+  })
 
   // Explicit lifecycle (E4-FR-36): an unmount never kills, these do, by paneId.
   ipcMain.handle(CH.PTY_KILL_PANES, (_e, paneIds: unknown): number => manager.killPanes(paneIdList(paneIds)))
