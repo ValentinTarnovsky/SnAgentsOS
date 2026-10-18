@@ -5,6 +5,7 @@ import { getPtyId, onPtyRegistryChange } from './ptyRegistry'
 import { useUsageStore } from './usageStore'
 import { useAgentStore } from './agentStore'
 import { paneResumable } from './agentLaunch'
+import { legacySnippets } from '@shared/quickCommands'
 
 /** Build the compact desktop-state mirror pushed to phones. */
 function buildSnapshot(state: AppState): RemoteStateSnapshot {
@@ -33,7 +34,8 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     language: state.settings.language,
     fontFamily: state.settings.fontFamily,
     fontSize: state.settings.fontSize,
-    snippets: state.snippets,
+    // Interim until the phone gets QuickCommandsSheet (R22-12): global send commands.
+    snippets: legacySnippets(state.quickCommands),
     keyButtons: state.keyButtons,
     // Fields are structurally identical to RemoteUsageSnapshot; passthrough.
     usage: useUsageStore.getState().snapshot ?? null,
@@ -54,7 +56,7 @@ function relevant(s: AppState): unknown[] {
     s.settings.fontFamily,
     s.settings.fontSize,
     s.settings.terminalUnicode11,
-    s.snippets,
+    s.quickCommands,
     s.keyButtons,
   ]
 }

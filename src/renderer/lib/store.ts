@@ -11,12 +11,18 @@ import type {
   PaneSchedule,
   PaneStatusEvt,
   PaneType,
+  QuickCommand,
   Settings,
-  Snippet,
   Workspace,
   WorkspaceLayout,
 } from '@shared/types'
 import { gridForCount } from '@/components/layout/gridTemplates'
+import {
+  QUICK_COMMANDS_MAX,
+  mergeQuickCommands,
+  migrateQuickCommandsConfig,
+  parseQuickCommand,
+} from '@shared/quickCommands'
 import { killPanePtys } from '@/lib/ptyRegistry'
 import { restartInPlace } from '@/lib/restartRegistry'
 import { visiblePaneIds } from '@shared/status'
@@ -66,6 +72,12 @@ const DEFAULT_SETTINGS: Settings = {
   terminalUnicode11: true,
   terminalAgentEndChip: true,
   awakeMode: 'auto',
+  terminalSnapshotMode: 'auto',
+  persistScrollback: true,
+  persistScrollbackLines: 2000,
+  gitChip: true,
+  explorerMenu: false,
+  updateDismissedVersion: '',
   restoreLastWorkspace: true,
   confirmCloseRunning: true,
   autoCheckUpdates: true,
@@ -109,6 +121,8 @@ const DEFAULT_SETTINGS: Settings = {
     codexEnabled: false,
     discord: { enabled: false, webhookUrl: '', userId: '', notifyAction: true, notifyDone: true },
     inAppWhenFocused: true,
+    ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', token: '', notifyAction: true, notifyDone: false },
+    onlyWhenAway: false,
   },
   agents: {
     resumeOnStartup: 'ask',
@@ -116,7 +130,12 @@ const DEFAULT_SETTINGS: Settings = {
     sidebarAgentRows: true,
     topicAsTitle: true,
     ctrlDigitFocus: true,
+    resumeModalTimeoutSec: 60,
+    resumeNudge: false,
+    resumeNudgeText: '',
+    sidebarSort: 'manual',
   },
+  automation: { defaultAgentPresetId: '', composerCreateAnother: false },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */
@@ -138,6 +157,16 @@ export interface WorkspaceDraft {
   setupId?: string
 }
 
+/** What a merge import added, so the caller can warn about the 100 cap. */
+export interface MergeConfigResult {
+  quickCommands: { imported: number; total: number }
+}
+
+/** The renderer side of the v12 step (main already migrates on parse). */
+function quickCommandsOf(config: ConfigFile): QuickCommand[] {
+  return migrateQuickCommandsConfig(config).config.quickCommands ?? []
+}
+
 export interface AppState {
   workspaces: Workspace[]
   activeWorkspaceId: string | null
@@ -145,7 +174,8 @@ export interface AppState {
   previousWorkspaceId: string | null
   sidebarCollapsed: boolean
   presets: AgentPreset[]
-  snippets: Snippet[]
+  /** Schema 12 (E8-FR-01): replaces snippets; at most QUICK_COMMANDS_MAX. */
+  quickCommands: QuickCommand[]
   keyButtons: KeyButton[]
   connections: ConnectionProfile[]
   settings: Settings
@@ -182,7 +212,8 @@ export interface AppState {
   createWorkspace: (name: string, cwd: string) => string
   createWorkspaceFull: (draft: WorkspaceDraft) => string
   importConfig: (config: ConfigFile) => void
-  mergeConfig: (config: ConfigFile) => void
+  /** Appends the imported config; reports a Quick Commands import cut by the limit. */
+  mergeConfig: (config: ConfigFile) => MergeConfigResult
   deleteWorkspace: (id: string) => void
   renameWorkspace: (id: string, name: string) => void
   toggleFavorite: (id: string) => void
@@ -233,9 +264,15 @@ export interface AppState {
   deletePreset: (id: string) => void
   newPresetId: () => string
 
-  saveSnippet: (snippet: Snippet) => void
-  deleteSnippet: (id: string) => void
-  newSnippetId: () => string
+  /**
+   * Insert or replace by id. Returns false (and changes nothing) for an
+   * invalid command or a new one past the 100 limit.
+   */
+  saveQuickCommand: (cmd: QuickCommand) => boolean
+  deleteQuickCommand: (id: string) => void
+  /** Moves a command one slot up (-1) or down (+1) in the Settings order. */
+  moveQuickCommand: (id: string, delta: -1 | 1) => void
+  newQuickCommandId: () => string
 
   saveKeyButton: (button: KeyButton) => void
   deleteKeyButton: (id: string) => void
@@ -301,7 +338,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   previousWorkspaceId: null,
   sidebarCollapsed: false,
   presets: DEFAULT_PRESETS,
-  snippets: [],
+  quickCommands: [],
   keyButtons: [],
   connections: [],
   settings: DEFAULT_SETTINGS,
@@ -325,7 +362,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!config) return { hydrated: true }
       const workspaces = config.workspaces ?? []
       const presets = config.presets && config.presets.length ? config.presets : s.presets
-      const snippets = config.snippets ?? []
+      const quickCommands = quickCommandsOf(config)
       const keyButtons = config.keyButtons ?? []
       const connections = config.connections ?? []
       const settings: Settings = { ...s.settings, ...config.settings }
@@ -339,7 +376,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return {
         workspaces,
         presets,
-        snippets,
+        quickCommands,
         keyButtons,
         connections,
         settings,
@@ -409,7 +446,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       ),
       workspaces: config.workspaces ?? [],
       presets: config.presets && config.presets.length ? config.presets : s.presets,
-      snippets: config.snippets ?? [],
+      quickCommands: quickCommandsOf(config),
       keyButtons: config.keyButtons ?? [],
       connections: config.connections ?? [],
       settings: { ...s.settings, ...config.settings },
@@ -418,11 +455,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       previousWorkspaceId: null,
     })),
 
-  mergeConfig: (config) =>
+  mergeConfig: (config) => {
+    const result: MergeConfigResult = { quickCommands: { imported: 0, total: 0 } }
     set((s) => {
       const existingPreset = new Set(s.presets.map((p) => p.id))
       const newPresets = (config.presets ?? []).filter((p) => !existingPreset.has(p.id))
       // Re-id imported workspaces + their panes so they never collide with ours.
+      const wsIdMap = new Map<string, string>()
       const importedWs: Workspace[] = (config.workspaces ?? []).map((w) => {
         const idMap = new Map<string, string>()
         const panes = w.panes.map((p) => {
@@ -433,10 +472,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         const layout: WorkspaceLayout | undefined = w.layout
           ? { grid: w.layout.grid, order: w.layout.order.map((id) => idMap.get(id) ?? id) }
           : undefined
-        return { ...w, id: uid('ws'), panes, layout }
+        const id = uid('ws')
+        wsIdMap.set(w.id, id)
+        return { ...w, id, panes, layout }
       })
-      const existingSnip = new Set(s.snippets.map((x) => x.id))
-      const newSnippets = (config.snippets ?? []).filter((x) => !existingSnip.has(x.id))
+      // Scoped commands follow their workspace to its new id; the 100 cap holds.
+      const qc = mergeQuickCommands(s.quickCommands, quickCommandsOf(config), wsIdMap)
+      result.quickCommands = { imported: qc.imported, total: qc.total }
       const existingKeyButton = new Set(s.keyButtons.map((x) => x.id))
       const newKeyButtons = (config.keyButtons ?? []).filter((x) => !existingKeyButton.has(x.id))
       const existingConn = new Set(s.connections.map((x) => x.id))
@@ -444,11 +486,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       return {
         workspaces: [...s.workspaces, ...importedWs],
         presets: [...s.presets, ...newPresets],
-        snippets: [...s.snippets, ...newSnippets],
+        quickCommands: qc.list,
         keyButtons: [...s.keyButtons, ...newKeyButtons],
         connections: [...s.connections, ...newConnections],
       }
-    }),
+    })
+    return result
+  },
 
   deleteWorkspace: (id) => {
     // Force-kill the workspace's consoles so nothing lingers in the background.
@@ -463,7 +507,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       const minimized = { ...s.minimized }
       delete minimized[id]
       const mountedWorkspaces = mountActive(withoutMounted(s.mountedWorkspaces, id), activeWorkspaceId)
-      return { workspaces, activeWorkspaceId, maximized, minimized, mountedWorkspaces }
+      // E8-FR-01: the workspace's scoped Quick Commands go with it.
+      const quickCommands = s.quickCommands.some((c) => c.workspaceId === id)
+        ? s.quickCommands.filter((c) => c.workspaceId !== id)
+        : s.quickCommands
+      return { workspaces, activeWorkspaceId, maximized, minimized, mountedWorkspaces, quickCommands }
     })
   },
 
@@ -741,19 +789,30 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   newPresetId: () => uid('preset'),
 
-  saveSnippet: (snippet) =>
+  saveQuickCommand: (input) => {
+    const cmd = parseQuickCommand(input)
+    if (!cmd) return false
+    const list = get().quickCommands
+    const exists = list.some((x) => x.id === cmd.id)
+    if (!exists && list.length >= QUICK_COMMANDS_MAX) return false
+    set({ quickCommands: exists ? list.map((x) => (x.id === cmd.id ? cmd : x)) : [...list, cmd] })
+    return true
+  },
+
+  deleteQuickCommand: (id) => set((s) => ({ quickCommands: s.quickCommands.filter((x) => x.id !== id) })),
+
+  moveQuickCommand: (id, delta) =>
     set((s) => {
-      const exists = s.snippets.some((x) => x.id === snippet.id)
-      return {
-        snippets: exists
-          ? s.snippets.map((x) => (x.id === snippet.id ? snippet : x))
-          : [...s.snippets, snippet],
-      }
+      const from = s.quickCommands.findIndex((x) => x.id === id)
+      const to = from + delta
+      if (from < 0 || to < 0 || to >= s.quickCommands.length) return {}
+      const quickCommands = [...s.quickCommands]
+      const [item] = quickCommands.splice(from, 1)
+      quickCommands.splice(to, 0, item)
+      return { quickCommands }
     }),
 
-  deleteSnippet: (id) => set((s) => ({ snippets: s.snippets.filter((x) => x.id !== id) })),
-
-  newSnippetId: () => uid('snip'),
+  newQuickCommandId: () => uid('qc'),
 
   saveKeyButton: (button) =>
     set((s) => {
