@@ -457,6 +457,225 @@ async function main() {
     } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
   }
 
+  // E0-FR-18: phone credentials move from the legacy localStorage keys once.
+  {
+    const NEW = k => BRAND.mobileStoragePrefix + 'remote.' + k
+    const OLD = k => LEGACY_BRAND.mobileStoragePrefix + 'remote.' + k
+    const KEYS = ['deviceId', 'secret', 'hostPlatform']
+    const SECRET = 'ab'.repeat(32)
+    const legacyCreds = (id = 'dev-legacy') => ({ [OLD('deviceId')]: id, [OLD('secret')]: SECRET, [OLD('hostPlatform')]: 'win32' })
+    // Map-backed localStorage. failSet(key) decides per call whether setItem
+    // throws (quota, private mode); dropSet makes writes vanish silently.
+    function fakeStorage(initial = {}, opts = {}) {
+      const map = new Map(Object.entries(initial))
+      const log = []
+      const api = {
+        getItem: k => (map.has(k) ? map.get(k) : null),
+        setItem(k, v) {
+          log.push('set ' + k)
+          if (opts.failSet?.(k)) throw new Error('QuotaExceededError')
+          if (!opts.dropSet) map.set(k, String(v))
+        },
+        removeItem(k) { log.push('remove ' + k); map.delete(k) },
+      }
+      return { map, log, api, opts }
+    }
+    const authKeys = s => [...s.map.keys()].filter(k => k.includes('remote.')).sort()
+    const hasLegacy = s => [...s.map.keys()].some(k => k.startsWith(LEGACY_BRAND.mobileStoragePrefix))
+    const loadAuth = s => load('src/mobile/src/lib/auth.ts', { localStorage: s.api, TextEncoder })
+
+    // First load migrates, second load touches nothing.
+    const s1 = fakeStorage(legacyCreds())
+    let auth = loadAuth(s1)
+    check(s1.log.length === 0, 'migration waits for the first read')
+    assert.deepStrictEqual({ ...auth.getStoredAuth() }, { deviceId: 'dev-legacy', secretHex: SECRET }); checks++
+    check(auth.getStoredHostPlatform() === 'win32', 'hostPlatform carried over')
+    check(KEYS.every(k => s1.map.get(NEW(k)) === legacyCreds()[OLD(k)]), 'all three legacy values copied to the new keys')
+    check(!hasLegacy(s1), 'legacy keys removed after the confirmed copy')
+    const firstLog = s1.log.join('|')
+    check(firstLog.indexOf('remove ') > firstLog.lastIndexOf('set '), 'legacy keys removed only after every write')
+    s1.log.length = 0
+    auth = loadAuth(s1)
+    assert.deepStrictEqual({ ...auth.getStoredAuth() }, { deviceId: 'dev-legacy', secretHex: SECRET }); checks++
+    check(s1.log.length === 0, 'second load writes and removes nothing')
+
+    // Legacy pairing without a cached hostPlatform migrates the two credentials.
+    const s2 = fakeStorage({ [OLD('deviceId')]: 'dev-2', [OLD('secret')]: SECRET })
+    auth = loadAuth(s2)
+    check(auth.getStoredAuth()?.deviceId === 'dev-2' && auth.getStoredHostPlatform() === '', 'migration without hostPlatform')
+    assert.deepStrictEqual(authKeys(s2), [NEW('deviceId'), NEW('secret')]); checks++
+
+    // setItem throwing: legacy values serve from memory and stay in storage.
+    const s3 = fakeStorage(legacyCreds(), { failSet: () => true })
+    auth = loadAuth(s3)
+    assert.deepStrictEqual({ ...auth.getStoredAuth() }, { deviceId: 'dev-legacy', secretHex: SECRET }); checks++
+    check(auth.getStoredHostPlatform() === 'win32', 'hostPlatform from memory when the write fails')
+    assert.deepStrictEqual(Object.fromEntries(s3.map), legacyCreds()); checks++
+    // Failing midway (deviceId written, secret refused) rolls the copy back.
+    const s4 = fakeStorage(legacyCreds(), { failSet: k => k === NEW('secret') })
+    auth = loadAuth(s4)
+    check(auth.getStoredAuth()?.deviceId === 'dev-legacy', 'partial write still boots from memory')
+    assert.deepStrictEqual(Object.fromEntries(s4.map), legacyCreds()); checks++
+    // A write that does not read back is not trusted either.
+    const s5 = fakeStorage(legacyCreds(), { dropSet: true })
+    auth = loadAuth(s5)
+    check(auth.getStoredAuth()?.deviceId === 'dev-legacy' && hasLegacy(s5), 'unconfirmed write keeps the legacy keys')
+    // The next load retries once storage works again.
+    s4.opts.failSet = undefined
+    auth = loadAuth(s4)
+    check(auth.getStoredAuth()?.deviceId === 'dev-legacy' && !hasLegacy(s4) && s4.map.get(NEW('secret')) === SECRET, 'next load retries the migration')
+
+    // New keys plus legacy leftovers (a removeItem failed): the new keys win.
+    const s6 = fakeStorage({ ...legacyCreds('dev-old'), [NEW('deviceId')]: 'dev-new', [NEW('secret')]: SECRET })
+    auth = loadAuth(s6)
+    check(auth.getStoredAuth()?.deviceId === 'dev-new' && !hasLegacy(s6), 'new keys win over legacy leftovers, which are removed')
+
+    // A lone new deviceId (an interrupted write) is not trusted over the full
+    // legacy pairing: the legacy secret is migrated, never dropped.
+    const s6b = fakeStorage({ ...legacyCreds(), [NEW('deviceId')]: 'dev-legacy' })
+    auth = loadAuth(s6b)
+    assert.deepStrictEqual({ ...auth.getStoredAuth() }, { deviceId: 'dev-legacy', secretHex: SECRET }); checks++
+    check(!hasLegacy(s6b) && s6b.map.get(NEW('secret')) === SECRET, 'partial new keys are completed from the legacy pairing')
+
+    // Unpaired in 1.x (its clearAuth kept hostPlatform): the orphan moves to
+    // the new key and no legacy key survives; a lone legacy secret just goes.
+    const s9 = fakeStorage({ [OLD('hostPlatform')]: 'win32', [OLD('secret')]: SECRET })
+    auth = loadAuth(s9)
+    check(auth.getStoredAuth() === null && auth.getStoredHostPlatform() === 'win32', 'orphaned legacy keys read as unpaired with the cached platform')
+    assert.deepStrictEqual(Object.fromEntries(s9.map), { [NEW('hostPlatform')]: 'win32' }); checks++
+    s9.log.length = 0
+    loadAuth(s9).getStoredAuth()
+    check(s9.log.length === 0, 'second load after the orphan cleanup touches nothing')
+    // The orphan copy failing keeps the legacy key for the next load.
+    const s10 = fakeStorage({ [OLD('hostPlatform')]: 'darwin' }, { failSet: () => true })
+    auth = loadAuth(s10)
+    check(auth.getStoredHostPlatform() === 'darwin' && s10.map.get(OLD('hostPlatform')) === 'darwin', 'failed orphan copy serves from memory and keeps the legacy key')
+    // An existing new hostPlatform wins; the orphan is only removed.
+    const s11 = fakeStorage({ [OLD('hostPlatform')]: 'darwin', [NEW('hostPlatform')]: 'linux' })
+    auth = loadAuth(s11)
+    check(auth.getStoredHostPlatform() === 'linux' && !hasLegacy(s11), 'new hostPlatform wins over the orphaned legacy one')
+
+    // A storage that throws on every call boots unpaired instead of crashing.
+    const denied = () => { throw new Error('denied') }
+    auth = load('src/mobile/src/lib/auth.ts', { TextEncoder, localStorage: { getItem: denied, setItem: denied, removeItem: denied } })
+    check(auth.getStoredAuth() === null && auth.getStoredHostPlatform() === '', 'throwing storage reads as unpaired')
+    assert.doesNotThrow(() => { auth.storeAuth('x', SECRET); auth.clearAuth(); auth.storeHostPlatform('linux') }); checks++
+
+    // clearAuth after a failed migration wipes memory and storage: no resurrection.
+    const s7 = fakeStorage(legacyCreds(), { failSet: () => true })
+    auth = loadAuth(s7)
+    check(auth.getStoredAuth() !== null, 'failed migration boots paired')
+    auth.clearAuth()
+    check(auth.getStoredAuth() === null && !hasLegacy(s7), 'clearAuth drops the in-memory fallback and the legacy keys')
+    check(loadAuth(s7).getStoredAuth() === null, 'reload after clearAuth stays unpaired')
+
+    // storeAuth after a failed migration leaves no legacy credential behind.
+    const s8 = fakeStorage(legacyCreds('dev-old'), { failSet: () => true })
+    auth = loadAuth(s8)
+    auth.getStoredAuth()
+    s8.opts.failSet = undefined
+    auth.storeAuth('dev-new', 'cd'.repeat(32))
+    check(!hasLegacy(s8) && s8.map.get(NEW('deviceId')) === 'dev-new', 'storeAuth removes the legacy keys')
+    check(auth.getStoredAuth()?.deviceId === 'dev-new', 'storeAuth replaces the in-memory fallback')
+    check(!LEGACY_RE.test(read('src/mobile/src/lib/auth.ts')), 'auth.ts reads the legacy prefix from LEGACY_BRAND only')
+
+    // E0-FR-18 + E0-FR-19 through the real client: revocation, unpair, new
+    // pairing, and a 1.14.1 phone reconnecting with no QR and no rePair.
+    const { createHmac } = require('node:crypto')
+    const hmac = (secretHex, msg) => createHmac('sha256', Buffer.from(secretHex, 'hex')).update(msg).digest('hex')
+    const clientCode = buildSync({
+      stdin: { contents: "export { client } from './src/mobile/src/lib/client'\nexport { store } from './src/mobile/src/lib/store'", resolveDir: root, loader: 'ts' },
+      bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared') },
+    }).outputFiles[0].text
+    // Each call is a fresh page load against the given storage.
+    function loadClient(storage, hash = '') {
+      const sockets = []
+      const timers = []
+      let reloads = 0
+      class FakeWebSocket {
+        static OPEN = 1
+        constructor(url) { this.url = url; this.readyState = 0; this.sent = []; sockets.push(this) }
+        send(data) { this.sent.push(JSON.parse(data)) }
+        close() { this.readyState = 3 }
+      }
+      const mod = { exports: {} }
+      vm.runInNewContext(clientCode, {
+        module: mod, exports: mod.exports, require, console, process, crypto: globalThis.crypto, TextEncoder,
+        localStorage: storage.api, WebSocket: FakeWebSocket,
+        location: { hash, host: '192.168.1.20:4517', pathname: '/', search: '', reload: () => { reloads++ } },
+        history: { replaceState() {} },
+        document: { addEventListener() {}, visibilityState: 'visible' },
+        setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length }, clearTimeout() {},
+        setInterval: () => 0, clearInterval() {},
+      })
+      const open = ws => { ws.readyState = 1; ws.onopen() }
+      const deliver = (ws, msg) => ws.onmessage({ data: JSON.stringify({ v: 1, ...msg }) })
+      return { ...mod.exports, sockets, timers, open, deliver, reloads: () => reloads }
+    }
+    const { PROTOCOL_VERSION, REMOTE_CLOSE } = load('src/shared/remote-protocol.ts')
+    check(PROTOCOL_VERSION === 1, 'E0 keeps PROTOCOL_VERSION at 1')
+
+    // A 1.14.1 phone loads the 2.0 bundle: migrated credentials authenticate.
+    const p1 = fakeStorage(legacyCreds())
+    let app = loadClient(p1)
+    app.client.start()
+    check(app.store.getState().phase === 'connecting' && app.sockets.length === 1, 'legacy pairing boots the auth path, not rePair or welcome')
+    check(!hasLegacy(p1) && p1.map.get(NEW('deviceId')) === 'dev-legacy', 'boot migrated the keys')
+    app.open(app.sockets[0])
+    const hello = app.sockets[0].sent[0]
+    check(hello.type === 'hello' && hello.v === 1 && hello.deviceId === 'dev-legacy', 'hello carries the legacy deviceId')
+    app.deliver(app.sockets[0], { type: 'challenge', nonce: 'cafe01', proof: hmac(SECRET, hello.clientNonce) })
+    const authMsg = app.sockets[0].sent[1]
+    check(authMsg?.type === 'auth' && authMsg.deviceId === 'dev-legacy' && authMsg.hmac === hmac(SECRET, 'cafe01'), 'auth HMAC uses the migrated secret')
+
+    // Page open across the desktop update: the socket drops and the backoff
+    // reconnects with the credentials already in memory, without a reload.
+    p1.map.clear()
+    app.sockets[0].onclose({ code: 1006 })
+    check(app.store.getState().phase === 'connecting' && app.timers.length === 1, 'drop schedules a backoff reconnect')
+    app.timers.shift().fn()
+    check(app.sockets.length === 2, 'backoff opens a new socket')
+    app.open(app.sockets[1])
+    check(app.sockets[1].sent[0].deviceId === 'dev-legacy' && app.store.getState().phase === 'connecting', 'reconnect reuses the in-memory deviceId with no rePair')
+    check(app.reloads() === 0, 'reconnect needs no reload')
+
+    // Revocation (4403) wipes new and legacy keys; reload stays unpaired.
+    const p2 = fakeStorage(legacyCreds(), { failSet: () => true })
+    app = loadClient(p2)
+    app.client.start()
+    check(app.store.getState().phase === 'connecting' && hasLegacy(p2), 'failed migration still connects from memory')
+    app.open(app.sockets[0])
+    app.sockets[0].onclose({ code: REMOTE_CLOSE.REVOKED })
+    check(app.store.getState().phase === 'revoked' && authKeys(p2).length === 0, '4403 removes new and legacy credentials')
+    app = loadClient(p2)
+    app.client.start()
+    check(app.store.getState().phase === 'welcome' && app.sockets.length === 0, 'no resurrection after revocation')
+
+    // unpair() wipes both and reloads; the reload stays unpaired.
+    const p3 = fakeStorage(legacyCreds())
+    app = loadClient(p3)
+    app.client.start()
+    app.client.unpair()
+    check(app.reloads() === 1 && !p3.map.has(NEW('deviceId')) && !p3.map.has(NEW('secret')) && !hasLegacy(p3), 'unpair removes new and legacy credentials')
+    app = loadClient(p3)
+    app.client.start()
+    check(app.store.getState().phase === 'welcome', 'no resurrection after unpair')
+
+    // A new pairing leaves no legacy credential behind.
+    const p4 = fakeStorage(legacyCreds('dev-old'), { failSet: () => true })
+    app = loadClient(p4)
+    app.client.start()
+    p4.opts.failSet = undefined
+    app.client.startPairing('ABC123')
+    app.client.submitPairing('Phone')
+    const ws = app.sockets[app.sockets.length - 1]
+    app.open(ws)
+    check(ws.sent.some(m => m.type === 'pair' && m.code === 'ABC123'), 'pairing request sent')
+    app.deliver(ws, { type: 'paired', deviceId: 'dev-new', secret: 'cd'.repeat(32) })
+    check(p4.map.get(NEW('deviceId')) === 'dev-new' && p4.map.get(NEW('secret')) === 'cd'.repeat(32), 'pairing stores the new keys')
+    check(!hasLegacy(p4), 'pairing removes the legacy keys')
+  }
+
   // R20-01 scope: every file it rebrands is free of the legacy name.
   const scope = [
     'src/main/window.ts', 'src/main/index.ts', 'src/main/tray.ts', 'src/main/i18n.ts',
