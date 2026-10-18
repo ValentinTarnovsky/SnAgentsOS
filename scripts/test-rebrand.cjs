@@ -697,6 +697,7 @@ async function main() {
   for (const file of envScope) check(!LEGACY_RE.test(read(file)), `${file}: no legacy name`)
 
   await updaterChecks(BRAND, en, es)
+  await legacyUiChecks(BRAND, LEGACY_BRAND, en, es)
 
   // E0-FR-21 / FR-24 (R20-08): release.yml uploads to a draft and publishes only
   // after the 16-asset gate. js-yaml ships with electron-builder (dev tree).
@@ -1110,6 +1111,223 @@ async function updaterChecks(BRAND, en, es) {
   }
   for (const file of ['src/main/updater.ts', 'src/renderer/lib/updater.ts']) check(!LEGACY_RE.test(read(file)), `${file}: no legacy name`)
   check(read('src/renderer/components/updates/UpdateModal.tsx').includes('installErrorText(t, error)') && read('src/renderer/components/settings/sections/UpdatesSection.tsx').includes('installErrorText(t, installError)'), 'both update views render installErrorText')
+}
+
+// R20-05: welcome notice, banners and the backup line (E0-FR-10, FR-28 line in
+// Settings > Data, FR-35 banners). The derivation, the IPC and the renderer
+// store run against stubs; every marker lives in a throwaway folder under
+// os.tmpdir(), never in the real %APPDATA%.
+async function legacyUiChecks(BRAND, LEGACY_BRAND, en, es) {
+  const { CH } = load('src/shared/ipc-channels.ts')
+  const channels = Object.values(CH)
+  // FR-11 is retired: nothing imports, deletes or opens the legacy folder.
+  for (const gone of ['app:legacyImport', 'app:legacyCleanup', 'app:legacyOpenDir']) check(!channels.includes(gone), `no ${gone} channel`)
+  const walkSrc = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walkSrc(path.join(dir, e.name)) : [path.join(dir, e.name)])
+  const srcText = walkSrc(path.join(root, 'src')).filter(f => /\.tsx?$/.test(f)).map(f => fs.readFileSync(f, 'utf8')).join('\n')
+  check(!/legacyImport|legacyCleanup|legacyOpenDir/.test(srcText), 'no import, cleanup or open-folder legacy channel anywhere in src')
+  for (const [lang, dict] of [['en', en], ['es', es]]) check(!Object.keys(dict).some(k => k.startsWith('settings.data.legacy.')), `${lang}: no settings.data.legacy.* keys`)
+  check(CH.APP_LEGACY_INFO === 'app:legacyInfo' && CH.APP_LEGACY_ACK === 'app:legacyAck' && CH.APP_LEGACY_SHOW_BACKUP === 'app:legacyShowBackup' && CH.APP_LEGACY_OPEN_LOG === 'app:legacyOpenLog' && CH.APP_LEGACY_STATUS === 'app:legacyStatus', 'legacy channel names per the contract')
+  check(channels.filter(c => /^app:legacy/.test(c)).length === 5, 'exactly five legacy channels')
+
+  // i18n: every key of the notice, the banners and the backup line exists in both
+  // languages, with the same placeholders, and names the brands only through them.
+  const uiKeys = Object.keys(en).filter(k => /^(rebrand\.|legacy\.banner\.|settings\.data\.backup\.)/.test(k))
+  const placeholders = s => (s.match(/\{\w+\}/g) ?? []).sort().join()
+  check(uiKeys.length >= 20, `notice, banner and backup keys present: ${uiKeys.length}`)
+  for (const k of uiKeys) check(k in es && placeholders(en[k]) === placeholders(es[k]), `${k}: same placeholders in es`)
+  check(en['rebrand.title'] === '{legacy} is now {app}' && es['rebrand.title'] === '{legacy} ahora es {app}', 'notice title interpolates both brands')
+  check(es['legacy.banner.failed'] === 'No se pudieron traer tus datos de {legacy}. Siguen intactos y se reintenta en el próximo inicio.', 'failure banner text (FR-35)')
+  check(es['legacy.banner.deferred'] === 'Quedan {n} restos de {legacy} en uso. Se vuelve a intentar solo.', 'leftovers banner text (FR-35)')
+  check(es['settings.data.backup.title'] === 'Respaldo de {legacy}' && es['settings.data.backup.line'] === '{path} (se borra el {date})', 'backup line text (FR-28)')
+
+  // Derivation from the marker.
+  const { deriveLegacyInfo, emptyLegacyInfo, DEFERRED_BANNER_STARTS } = load('src/main/migration/legacyInfo.ts')
+  const ids = Array.from({ length: 21 }, (_, i) => `L${String(i + 1).padStart(2, '0')}`)
+  const allPending = () => Object.fromEntries(ids.map(id => [id, { state: 'pending', attempts: 0 }]))
+  const zip = path.join(os.tmpdir(), 'snaos-r2005-none', 'migration-backup-v1.zip')
+  const marker = (o = {}) => ({
+    v: 2, phase: 'cleaning', outcome: 'migrated', mode: 'installed', from: 'legacy', to: 'data', attempts: 1, sources: [],
+    verified: { at: 1, legacyConfigLoadable: true, effectiveConfigSha256: 'x', workspaces: 3, presets: 2, devices: 0, backups: 14 },
+    backup: { file: 'migration-backup-v1.zip', bytes: 10, sha256: 'y', entries: 5, createdAt: 1000, expiresAt: 2000 },
+    committedAt: 1, hooksMigration: 'rewritten', loginItemMigrated: true, cleanup: allPending(), cleanupStarts: 0, noticeSeen: false, appVersion: '2.0.0', at: 1,
+    ...o,
+  })
+  const input = (o = {}) => ({ backupPath: zip, backupExists: () => true, remoteEnabled: false, platform: 'win32', ...o })
+  const withItems = (items, o = {}) => marker({ cleanup: { ...allPending(), ...items }, ...o })
+  check(JSON.stringify(deriveLegacyInfo(null, input())) === JSON.stringify(emptyLegacyInfo()), 'no marker: empty info (no notice, no banner, no backup line)')
+  {
+    const info = deriveLegacyInfo(marker(), input())
+    check(info.outcome === 'migrated' && info.phase === 'cleaning' && !info.noticeSeen, 'phase, outcome and noticeSeen from the marker')
+    check(JSON.stringify(info.counts) === JSON.stringify({ workspaces: 3, presets: 2, devices: 0, backups: 14 }), 'counts from the verification')
+    check(info.cleanup.pending === 21 && info.cleanup.done === 0, 'right after the commit every item is pending')
+    check(info.backup && info.backup.path === zip && info.backup.expiresAt === 2000, 'backup: path computed in main and its expiry')
+    check(info.failure === null && info.pinRetargeted === null && info.manualActions.length === 0, 'no failure, no pin line, no manual action')
+  }
+  {
+    const info = deriveLegacyInfo(withItems({ L01: { state: 'done', attempts: 1 }, L02: { state: 'absent', attempts: 1 }, L03: { state: 'deferred', attempts: 2 }, L19: { state: 'skipped', attempts: 1, reason: 'unknownFiles' } }), input())
+    check(info.cleanup.done === 2 && info.cleanup.deferred === 1 && info.cleanup.skipped === 1 && info.cleanup.pending === 17, 'cleanup counts (absent counts as done)')
+  }
+  // firewallHint: settings.remote.enabled or migrated devices, on Windows.
+  check(deriveLegacyInfo(marker(), input()).firewallHint === false, 'firewallHint: no remote, no devices -> off')
+  check(deriveLegacyInfo(marker(), input({ remoteEnabled: true })).firewallHint === true, 'firewallHint: remote.enabled -> on')
+  const twoDevices = marker({ verified: { ...marker().verified, devices: 2 } })
+  check(deriveLegacyInfo(twoDevices, input()).firewallHint === true, 'firewallHint: migrated devices -> on')
+  check(deriveLegacyInfo(twoDevices, input({ platform: 'darwin', remoteEnabled: true })).firewallHint === false, 'firewallHint: never outside Windows (the text names its firewall)')
+  // showDeferredBanner: some item deferred and cleanupStarts >= 5.
+  const deferred = { L14: { state: 'deferred', attempts: 9, reason: 'EBUSY' } }
+  check(DEFERRED_BANNER_STARTS === 5, 'deferred banner after 5 starts')
+  check(deriveLegacyInfo(withItems(deferred, { cleanupStarts: 4 }), input()).showDeferredBanner === false, 'showDeferredBanner: 4 starts -> no')
+  check(deriveLegacyInfo(withItems(deferred, { cleanupStarts: 5 }), input()).showDeferredBanner === true, 'showDeferredBanner: deferred and 5 starts -> yes')
+  check(deriveLegacyInfo(withItems({}, { cleanupStarts: 7 }), input()).showDeferredBanner === false, 'showDeferredBanner: 7 starts but nothing deferred -> no')
+  // manualActions from the items left skipped: needsElevation.
+  const elev = { state: 'skipped', attempts: 1, reason: 'needsElevation' }
+  check(JSON.stringify(deriveLegacyInfo(withItems({ L05: elev }), input()).manualActions) === '["uninstallPerMachine"]', 'manualActions: per-machine 1.x registered -> uninstall')
+  check(JSON.stringify(deriveLegacyInfo(withItems({ L04: elev, L05: elev }), input()).manualActions) === '["uninstallPerMachine"]', 'manualActions: one action per kind')
+  check(JSON.stringify(deriveLegacyInfo(withItems({ L21: elev }), input({ platform: 'darwin' })).manualActions) === '["trashMacApp"]', 'manualActions: mac bundle without permission -> Trash')
+  check(deriveLegacyInfo(withItems({ L04: { state: 'skipped', attempts: 1, reason: 'unknownFiles' }, L05: { state: 'deferred', attempts: 1, reason: 'needsElevation' } }), input()).manualActions.length === 0, 'manualActions: only skipped needsElevation counts')
+  // backup: null after deletedAt, or when the file is gone.
+  check(deriveLegacyInfo(marker({ backup: { ...marker().backup, deletedAt: 3000 } }), input()).backup === null, 'backup: null after deletedAt')
+  check(deriveLegacyInfo(marker(), input({ backupExists: () => false })).backup === null, 'backup: null when the zip no longer exists')
+  check(deriveLegacyInfo(marker({ backup: undefined }), input()).backup === null, 'backup: null when nothing was backed up')
+  // pinRetargeted and failure.
+  check(deriveLegacyInfo(marker({ pinRetargeted: false }), input()).pinRetargeted === false && deriveLegacyInfo(marker({ pinRetargeted: true }), input()).pinRetargeted === true, 'pinRetargeted passes through')
+  {
+    const failed = deriveLegacyInfo(marker({ phase: 'failed', outcome: undefined, attempts: 2, cleanup: {}, backup: undefined, verified: undefined, lastError: { phase: 'verified', code: 'configMismatch', at: 5 } }), input())
+    check(failed.failure && failed.failure.phase === 'verified' && failed.failure.attempts === 2, 'failure: phase of the last error and attempts')
+    check(failed.outcome === null && failed.counts === null && failed.cleanup.pending === 0, 'failure: before the commit nothing is scheduled')
+    const corrupt = deriveLegacyInfo(marker({ phase: 'failed', outcome: undefined, cleanup: {}, lastError: { phase: 'failed', code: 'markerCorrupt', at: 5 } }), input())
+    check(corrupt.failure && corrupt.failure.phase === 'failed', 'failure: markerCorrupt also shows the banner')
+  }
+
+  // IPC: registered against an electron stub; dataDir() is a throwaway userData.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'snaos-r2005-'))
+  try {
+    const userData = path.join(tmp, 'userData')
+    fs.mkdirSync(userData, { recursive: true })
+    const handles = new Map(), ons = new Map(), shown = [], opened = [], sent = []
+    const electron = {
+      app: { isPackaged: true, getPath: name => (name === 'userData' ? userData : path.join(tmp, name)), getVersion: () => '2.0.0', getLocale: () => 'en', getAppPath: () => tmp, on() {} },
+      ipcMain: { handle: (ch, fn) => handles.set(ch, fn), on: (ch, fn) => ons.set(ch, fn) },
+      shell: { showItemInFolder: p => shown.push(p), openPath: async p => { opened.push(p); return '' } },
+      dialog: {},
+    }
+    const { PORTABLE_EXECUTABLE_DIR: _pd, PORTABLE_EXECUTABLE_FILE: _pf, ...env } = process.env
+    const { registerLegacyIpc } = load('src/main/ipc/registerLegacyIpc.ts', { require: id => (id === 'electron' ? electron : require(id)), process: { ...process, env, argv: ['electron'] }, setInterval, clearInterval, setImmediate })
+    let destroyed = false
+    const wc = { isDestroyed: () => destroyed, send: (ch, payload) => sent.push([ch, payload]) }
+    const unsub = registerLegacyIpc({ getSender: () => wc, remoteEnabled: () => false })
+    check([...handles.keys()].join() === 'app:legacyInfo' && [...ons.keys()].sort().join() === 'app:legacyAck,app:legacyOpenLog,app:legacyShowBackup', 'IPC: one invoke and three sends, nothing else')
+    const markerFile = path.join(userData, 'legacy-migration.json')
+    const writeM = m => fs.writeFileSync(markerFile, JSON.stringify(m))
+    const readM = () => JSON.parse(fs.readFileSync(markerFile, 'utf8'))
+    const zipFile = path.join(userData, 'migration-backup-v1.zip')
+    const logFile = path.join(userData, 'logs', 'legacy-migration.log')
+    const evil = path.join(tmp, 'evil.exe')
+
+    // No marker yet (dev, or before the first start).
+    check(handles.get('app:legacyInfo')({}).phase === null, 'IPC info: no marker -> empty')
+    writeM(marker({ verified: { ...marker().verified, devices: 1 } }))
+    let info = handles.get('app:legacyInfo')({}, evil)
+    check(info.outcome === 'migrated' && info.backup === null, 'IPC info: zip not on disk -> no backup line')
+    check(info.firewallHint === (process.platform === 'win32'), 'IPC info: firewall line from the migrated devices')
+    fs.writeFileSync(zipFile, 'zip')
+    info = handles.get('app:legacyInfo')({}, evil)
+    check(info.backup && info.backup.path === zipFile, 'IPC info: backup path is dataDir()/migration-backup-v1.zip, whatever the renderer sends')
+
+    // Show backup and open log ignore any argument and need the file.
+    ons.get('app:legacyShowBackup')({}, evil)
+    check(shown.length === 1 && shown[0] === zipFile, 'IPC show backup: reveals the zip computed in main')
+    fs.rmSync(zipFile)
+    ons.get('app:legacyShowBackup')({}, evil)
+    check(shown.length === 1, 'IPC show backup: nothing when the zip is gone')
+    ons.get('app:legacyOpenLog')({}, evil)
+    check(opened.length === 0, 'IPC open log: nothing when there is no log')
+    fs.mkdirSync(path.dirname(logFile), { recursive: true })
+    fs.writeFileSync(logFile, 'x\n')
+    ons.get('app:legacyOpenLog')({}, evil)
+    check(opened.length === 1 && opened[0] === logFile, 'IPC open log: opens logs/legacy-migration.log')
+
+    // Ack: noticeSeen = true in the marker, pushed as app:legacyStatus.
+    ons.get('app:legacyAck')({})
+    check(readM().noticeSeen === true && readM().phase === 'cleaning', 'IPC ack: noticeSeen stored in the marker, nothing else changes')
+    check(fs.existsSync(path.join(userData, 'legacy-migration.prev.json')), 'IPC ack: written through writeMarker (prev copy kept)')
+    const pushed = sent.filter(([ch]) => ch === 'app:legacyStatus')
+    check(pushed.length === 1 && pushed[0][1].noticeSeen === true, 'IPC ack: status pushed with noticeSeen')
+    // A cleanup pass holding the older marker writes next: the notice stays closed.
+    const { writeMarker } = load('src/main/migration/legacyMarker.ts')
+    const stale = marker({ cleanup: { ...allPending(), L01: { state: 'done', attempts: 1 } } })
+    writeMarker(userData, stale)
+    check(readM().noticeSeen === true && readM().cleanup.L01.state === 'done' && stale.noticeSeen === true, 'a stale cleanup write keeps noticeSeen (sticky)')
+    // Ack before the commit does nothing (there is no notice for a failed migration).
+    fs.rmSync(path.join(userData, 'legacy-migration.prev.json'))
+    writeM(marker({ phase: 'failed', outcome: undefined }))
+    ons.get('app:legacyAck')({})
+    check(readM().noticeSeen === false && sent.length === 1, 'IPC ack: ignored when the migration is not committed')
+    // A destroyed window gets no push.
+    writeM(marker())
+    destroyed = true
+    ons.get('app:legacyAck')({})
+    check(readM().noticeSeen === true && sent.length === 1, 'IPC ack: no push to a destroyed window')
+    unsub()
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+
+  // Renderer store: when the notice and the banners show, and the live updates.
+  {
+    const acks = []
+    let push = null
+    let resolveInfo
+    const snApi = { app: { legacyAck: () => acks.push(1), legacyInfo: () => new Promise(r => { resolveInfo = r }), onLegacyStatus: cb => { push = cb; return () => { push = null } } } }
+    const S = load('src/renderer/lib/legacyStore.ts', { window: { snApi } })
+    const base = deriveLegacyInfo(marker(), input())
+    check(S.shouldShowNotice(base) === true, 'notice: migrated, committed, not seen -> shows')
+    check(S.shouldShowNotice({ ...base, noticeSeen: true }) === false, 'notice: shows only once')
+    check(S.shouldShowNotice({ ...base, outcome: 'noLegacy' }) === false, 'notice: no modal for noLegacy')
+    check(S.shouldShowNotice({ ...base, phase: 'failed', outcome: null }) === false && S.shouldShowNotice(null) === false, 'notice: no modal for a failure or without a marker')
+    check(S.shouldShowNotice({ ...base, phase: 'done' }) === true, 'notice: also when the cleanup already finished')
+    check(S.cleanupStatus(base) === 'running', 'cleanup status: running while items are pending')
+    check(S.cleanupStatus({ ...base, cleanup: { pending: 0, deferred: 2, done: 19, skipped: 0 } }) === 'deferred', 'cleanup status: only items in use left')
+    check(S.cleanupStatus({ ...base, phase: 'done', cleanup: { pending: 0, deferred: 0, done: 21, skipped: 0 } }) === 'done', 'cleanup status: done')
+    const none = { failed: false, deferred: false }
+    const failedInfo = { ...base, failure: { phase: 'verified', attempts: 1 }, showDeferredBanner: true }
+    check(S.bannerKind(failedInfo, none) === 'failed', 'banner: a failure wins')
+    check(S.bannerKind(failedInfo, { failed: true, deferred: false }) === 'deferred', 'banner: dismissed failure leaves the leftovers banner')
+    check(S.bannerKind({ ...base, showDeferredBanner: true }, { failed: false, deferred: true }) === null && S.bannerKind(base, none) === null && S.bannerKind(null, none) === null, 'banner: none when dismissed or not needed')
+    // Live state: a push that lands before the first reply wins; an ack is never undone by a stale push.
+    const unsub = S.initLegacyEvents()
+    push({ ...base, cleanup: { ...base.cleanup, done: 5 } })
+    resolveInfo(base)
+    await new Promise(r => setTimeout(r, 0))
+    check(S.useLegacyStore.getState().info.cleanup.done === 5, 'store: a push newer than the first reply is kept')
+    S.useLegacyStore.getState().ack()
+    check(acks.length === 1 && S.useLegacyStore.getState().info.noticeSeen === true, 'store: ack closes the notice and asks main')
+    push({ ...base, noticeSeen: false, cleanup: { ...base.cleanup, done: 6 } })
+    check(S.useLegacyStore.getState().info.noticeSeen === true && S.useLegacyStore.getState().info.cleanup.done === 6, 'store: a push computed before the ack keeps the notice closed')
+    S.useLegacyStore.getState().dismiss('failed')
+    check(S.useLegacyStore.getState().dismissed.failed === true && S.useLegacyStore.getState().dismissed.deferred === false, 'store: banners dismiss per kind, for the session')
+    unsub()
+    check(push === null, 'store: unsubscribes')
+  }
+
+  // Components: accessibility and wiring as the plan asks (no DOM here, so the source).
+  const notice = read('src/renderer/components/rebrand/RebrandNotice.tsx')
+  check(notice.includes('role="dialog"') && notice.includes('aria-modal="true"') && notice.includes('aria-labelledby="rebrand-notice-title"') && notice.includes('id="rebrand-notice-title"'), 'notice: dialog role labelled by its title')
+  check(/e\.key === 'Escape'[\s\S]{0,120}ack\(\)/.test(notice) && notice.includes('okRef.current?.focus()') && notice.includes('ref={okRef}'), 'notice: initial focus on [Got it], Esc acks')
+  check(notice.includes('legacyShowBackup()') && notice.includes("t('rebrand.repin'") && notice.includes('rebrand.manual.${action}') && notice.includes("t('rebrand.firewall'"), 'notice: backup button, repin, manual actions and firewall lines')
+  check(notice.includes('info.pinRetargeted === false') && notice.includes('info.firewallHint'), 'notice: repin only with pinRetargeted false, firewall only with the hint')
+  const banner = read('src/renderer/components/rebrand/LegacyBanner.tsx')
+  check(banner.includes('role="status"') && !banner.includes('autoFocus') && !banner.includes('.focus('), 'banner: status region that never takes the focus')
+  check(banner.includes('legacyOpenLog()'), 'banner: [View log] opens the log')
+  const app = read('src/renderer/App.tsx')
+  check(app.includes('<RebrandNotice />') && app.includes('<LegacyBanner />') && app.includes('initLegacyEvents()'), 'App mounts the notice, the banner and the live state')
+  const dataSection = read('src/renderer/components/settings/sections/DataSection.tsx')
+  check(dataSection.includes("t('settings.data.backup.title'") && dataSection.includes('legacyShowBackup()') && dataSection.includes('s.info?.backup'), 'Settings > Data: backup line with [Show] while the zip exists')
+  const preload = read('src/preload/index.ts')
+  check(/legacyAck: \(\) => ipcRenderer\.send\(CH\.APP_LEGACY_ACK\)/.test(preload) && /legacyShowBackup: \(\) => ipcRenderer\.send\(CH\.APP_LEGACY_SHOW_BACKUP\)/.test(preload) && /legacyOpenLog: \(\) => ipcRenderer\.send\(CH\.APP_LEGACY_OPEN_LOG\)/.test(preload), 'preload: the renderer sends no argument on any legacy channel')
+  check(read('src/main/index.ts').includes('registerLegacyIpc({'), 'main registers the legacy IPC')
+  for (const file of ['src/main/ipc/registerLegacyIpc.ts', 'src/main/migration/legacyInfo.ts', 'src/renderer/lib/legacyStore.ts', 'src/renderer/components/rebrand/RebrandNotice.tsx', 'src/renderer/components/rebrand/LegacyBanner.tsx']) check(!LEGACY_RE.test(read(file)), `${file}: no legacy literal`)
+  check(LEGACY_BRAND.productName === 'SnMultiCC' && BRAND.productName === 'SnAgentsOS', 'notice names come from the brand constants')
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })
