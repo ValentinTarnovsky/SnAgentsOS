@@ -167,6 +167,8 @@ export const en = {
   'pane.close': 'Close',
   'pane.restart': 'Restart console',
   'pane.redraw': 'Redraw',
+  'pane.notStarted': 'Console not started',
+  'pane.start': 'Start',
   'pane.schedule': 'Schedule prompt',
 
   // Scheduled prompt (per console)

@@ -18,6 +18,12 @@ import type {
 import { gridForCount } from '@/components/layout/gridTemplates'
 import { killPanePtys } from '@/lib/ptyRegistry'
 import { visiblePaneIds } from '@shared/status'
+import {
+  type EnsureMountedOpts,
+  type MountedWorkspaces,
+  withMounted,
+  withoutMounted,
+} from '@/lib/mounting'
 
 const ACCENTS = ['#6366f1', '#8b5cf6', '#60a5fa']
 
@@ -155,6 +161,12 @@ export interface AppState {
   paneStatus: Record<string, PaneStatus>
   /** paneId -> unacknowledged done/action flag (transient; drives sidebar badges). */
   paneAttention: Record<string, true>
+  /**
+   * workspaceId -> 'full' | mounted paneIds (transient; never persisted). The
+   * single mounting primitive (D4): activating a workspace mounts it 'full',
+   * and nothing unmounts except deleting the workspace.
+   */
+  mountedWorkspaces: MountedWorkspaces
   /** False until persisted config has been loaded (gates the persistence writer). */
   hydrated: boolean
 
@@ -212,6 +224,17 @@ export interface AppState {
   clearPaneAttention: (paneId: string) => void
   /** Acknowledge every non-minimized console of a workspace (viewing it). */
   markWorkspaceSeen: (workspaceId: string) => void
+  /**
+   * Mount a workspace without activating it: every console, or with `only`
+   * just those panes (the rest show the "console not started" placeholder).
+   * No-op for unknown workspaces and when already mounted that far.
+   */
+  ensureMounted: (workspaceId: string, opts?: EnsureMountedOpts) => void
+}
+
+/** Mount `wsId` fully in `map` (activation). Null ids leave the map as is. */
+function mountActive(map: MountedWorkspaces, wsId: string | null): MountedWorkspaces {
+  return wsId ? withMounted(map, wsId, []) : map
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -234,6 +257,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   paneEpoch: {},
   paneStatus: {},
   paneAttention: {},
+  mountedWorkspaces: {},
   hydrated: false,
 
   hydrate: (config) =>
@@ -261,6 +285,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         settings,
         sidebarCollapsed: settings.sidebarCollapsed,
         activeWorkspaceId,
+        mountedWorkspaces: mountActive(s.mountedWorkspaces, activeWorkspaceId),
         hydrated: true,
       }
     }),
@@ -275,7 +300,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       favorite: false,
       layout: { grid: 1, order: [pane.id] },
     }
-    set((s) => ({ workspaces: [...s.workspaces, ws], activeWorkspaceId: ws.id }))
+    set((s) => ({
+      workspaces: [...s.workspaces, ws],
+      activeWorkspaceId: ws.id,
+      mountedWorkspaces: mountActive(s.mountedWorkspaces, ws.id),
+    }))
     return ws.id
   },
 
@@ -302,12 +331,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       layout,
       setupId: draft.setupId,
     }
-    set((s) => ({ workspaces: [...s.workspaces, ws], activeWorkspaceId: ws.id }))
+    set((s) => ({
+      workspaces: [...s.workspaces, ws],
+      activeWorkspaceId: ws.id,
+      mountedWorkspaces: mountActive(s.mountedWorkspaces, ws.id),
+    }))
     return ws.id
   },
 
   importConfig: (config) =>
     set((s) => ({
+      // The replaced workspaces unmount with the list; only the new active one mounts.
+      mountedWorkspaces: mountActive({}, config.workspaces?.[0]?.id ?? null),
       workspaces: config.workspaces ?? [],
       presets: config.presets && config.presets.length ? config.presets : s.presets,
       snippets: config.snippets ?? [],
@@ -363,7 +398,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       delete maximized[id]
       const minimized = { ...s.minimized }
       delete minimized[id]
-      return { workspaces, activeWorkspaceId, maximized, minimized }
+      const mountedWorkspaces = mountActive(withoutMounted(s.mountedWorkspaces, id), activeWorkspaceId)
+      return { workspaces, activeWorkspaceId, maximized, minimized, mountedWorkspaces }
     })
   },
 
@@ -383,6 +419,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({
       activeWorkspaceId: id,
       previousWorkspaceId: s.activeWorkspaceId !== id ? s.activeWorkspaceId : s.previousWorkspaceId,
+      mountedWorkspaces: mountActive(s.mountedWorkspaces, id),
     }))
     // Viewing a workspace acknowledges its visible consoles' attention badges.
     get().markWorkspaceSeen(id)
@@ -638,6 +675,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       for (const p of toClear) delete paneAttention[p.id]
       return { paneAttention }
     }),
+
+  ensureMounted: (workspaceId, opts) => {
+    const s = get()
+    const ws = s.workspaces.find((w) => w.id === workspaceId)
+    if (!ws) return
+    const next = withMounted(s.mountedWorkspaces, workspaceId, ws.panes.map((p) => p.id), opts)
+    if (next !== s.mountedWorkspaces) set({ mountedWorkspaces: next })
+  },
 
   setWizardOpen: (open) => set({ wizardOpen: open }),
 
