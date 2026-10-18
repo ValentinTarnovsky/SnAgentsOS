@@ -35,6 +35,7 @@ import { TitleBar } from '@/components/titlebar/TitleBar'
 import { CommandPalette } from '@/components/ui/CommandPalette'
 import { GlobalPromptDialog } from '@/components/workspace/GlobalPromptDialog'
 import { NotificationStack } from '@/components/ui/NotificationStack'
+import { ResumeDialog } from '@/components/agents/ResumeDialog'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -227,6 +228,8 @@ function AppBody() {
       <NewWorkspaceWizard />
       <CommandPalette />
       <GlobalPromptDialog />
+      {/* "Resume interrupted chats?" (E5-FR-12): opened by the agent loader after hydrate. */}
+      <ResumeDialog />
     </div>
   )
 }

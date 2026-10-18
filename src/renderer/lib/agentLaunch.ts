@@ -12,16 +12,136 @@
 import { buildAgentArgv } from '@shared/agent-argv'
 import { decideLaunch, effectiveProvider, type AgentSessionView } from '@shared/agents'
 import type { AgentPreset, AgentProvider, Pane, Workspace } from '@shared/types'
-import type { MessageKey } from '@/i18n'
+import { translate, type MessageKey } from '@/i18n'
 import type { ResolvedLaunch } from './launch'
 import { useAppStore, type AppState } from './store'
 import { useAgentStore } from './agentStore'
+import { getPtyId } from './ptyRegistry'
+import { resumeModalCandidates } from './resumeModal'
+import { createNudger, type Nudger } from './resumeNudge'
 
 /** No `start` from a resumed session in this long = the resume failed (E5-FR-08). */
 export const RESUME_WATCH_MS = 20_000
 
 let loading: Promise<void> | null = null
 const watches = new Map<string, ReturnType<typeof setTimeout>>()
+/** Spawns held back by the resume dialog, released when it is decided (E5-FR-12). */
+let modalWaiters: Array<() => void> = []
+let nudger: Nudger | null = null
+
+/** The resume nudge (E5-FR-13) over the real pty and status. */
+function getNudger(): Nudger {
+  nudger ??= createNudger({
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
+    write: (paneId, data) => {
+      const ptyId = getPtyId(paneId)
+      if (!ptyId) return false
+      window.snApi.pty.write({ ptyId, data })
+      return true
+    },
+    isAction: (paneId) => useAppStore.getState().paneStatus[paneId]?.state === 'action',
+  })
+  return nudger
+}
+
+/** Text the nudge writes: the user's own, or the default of the UI language. */
+export function nudgeText(): string {
+  const s = useAppStore.getState().settings
+  return s.agents?.resumeNudgeText?.trim() || translate(s.language, 'agents.nudge.default')
+}
+
+/** Resolves once the resume dialog is closed (at once when none is open). */
+function waitForModal(): Promise<void> {
+  if (!useAgentStore.getState().modalPending) return Promise.resolve()
+  return new Promise((resolve) => modalWaiters.push(resolve))
+}
+
+/**
+ * Opens the "resume interrupted chats?" dialog (E5-FR-12) when the `ask`
+ * policy has interrupted chats whose startup decision is still unspent (a
+ * renderer reload after the decision does not ask again). Runs inside
+ * ensureAgentsLoaded, so no spawn decides before the dialog is known.
+ */
+async function openResumeModalIfNeeded(): Promise<void> {
+  const app = useAppStore.getState()
+  const agents = useAgentStore.getState()
+  if (agents.modal) return
+  const ids = resumeModalCandidates({
+    workspaces: app.workspaces,
+    presets: app.presets,
+    sessions: agents.sessions,
+    startup: agents.startup,
+    policy: app.settings.agents?.resumeOnStartup ?? 'ask',
+  })
+  if (ids.length === 0) return
+  let pending: string[] = []
+  try {
+    pending = await window.snApi.agents.startupPending(ids)
+  } catch {
+    pending = []
+  }
+  const open = ids.filter((id) => pending.includes(id))
+  if (open.length === 0) return
+  useAgentStore.getState().setModal({ paneIds: open, trigger: agents.startup?.trigger ?? null, openedAt: Date.now() })
+}
+
+/** What the dialog's buttons (and its countdown) apply. */
+export interface ResumeChoice {
+  /** Panes to resume; every other listed pane starts a new chat. */
+  resume: string[]
+  /** "Start fresh": no pane resumes and every listed chat is forgotten. */
+  startFresh?: boolean
+  /** "Don't ask again": the policy becomes `auto`. */
+  dontAskAgain?: boolean
+  /** The nudge checkbox, saved as settings.agents.resumeNudge. */
+  nudge?: boolean
+}
+
+/**
+ * Applies the dialog's decision: one-shot intents for every listed pane
+ * (resume or fresh), the settings it changed, mounting of the resumed
+ * consoles in workspaces not opened yet (E5-FR-10), then the held spawns go.
+ */
+export function applyResumeChoice(choice: ResumeChoice): void {
+  const agents = useAgentStore.getState()
+  const modal = agents.modal
+  if (!modal) return
+  const app = useAppStore.getState()
+  const current = app.settings.agents
+  if (current && ((choice.dontAskAgain && current.resumeOnStartup !== 'auto') || (choice.nudge !== undefined && choice.nudge !== current.resumeNudge))) {
+    app.updateSettings({
+      agents: {
+        ...current,
+        ...(choice.dontAskAgain ? { resumeOnStartup: 'auto' as const } : {}),
+        ...(choice.nudge !== undefined ? { resumeNudge: choice.nudge } : {}),
+      },
+    })
+  }
+  const resume = new Set(choice.startFresh ? [] : choice.resume.filter((id) => modal.paneIds.includes(id)))
+  for (const paneId of modal.paneIds) {
+    if (resume.has(paneId)) {
+      agents.setIntent(paneId, 'resume')
+      continue
+    }
+    agents.setIntent(paneId, 'fresh')
+    if (choice.startFresh) {
+      window.snApi.agents.forget(paneId)
+      if (useAgentStore.getState().sessions[paneId]) useAgentStore.getState().applyChanged({ paneId, removed: true })
+      app.clearLastSession(paneId)
+    }
+  }
+  useAgentStore.getState().setModal(null)
+  const byWs = new Map<string, string[]>()
+  for (const paneId of resume) {
+    const found = findPane(useAppStore.getState(), paneId)
+    if (found) byWs.set(found.ws.id, [...(byWs.get(found.ws.id) ?? []), paneId])
+  }
+  for (const [wsId, only] of byWs) useAppStore.getState().ensureMounted(wsId, { only })
+  const waiters = modalWaiters
+  modalWaiters = []
+  for (const release of waiters) release()
+}
 
 function findPane(s: Pick<AppState, 'workspaces'>, paneId: string): { ws: Workspace; pane: Pane } | null {
   for (const ws of s.workspaces) {
@@ -51,6 +171,7 @@ export function ensureAgentsLoaded(): Promise<void> {
   const agents = useAgentStore.getState()
   api.onChanged((evt) => useAgentStore.getState().applyChanged(evt))
   api.onReady((evt) => {
+    if (nudger) nudger.onReady(evt)
     if (evt.phase !== 'start') return
     // Any session start in the pane proves the resume worked.
     cancelWatch(evt.paneId)
@@ -63,7 +184,9 @@ export function ensureAgentsLoaded(): Promise<void> {
     (info) => agents.setStartup(info),
     () => agents.setStartup({ trigger: null, interrupted: [] }),
   )
-  loading = Promise.all([list, startup]).then(() => undefined)
+  loading = Promise.all([list, startup])
+    .then(() => openResumeModalIfNeeded())
+    .catch(() => undefined)
   return loading
 }
 
@@ -84,13 +207,14 @@ export async function prepareAgentLaunch(paneId: string, base: ResolvedLaunch): 
   const app = useAppStore.getState()
   const found = findPane(app, paneId)
   const agents = useAgentStore.getState()
-  const intent = agents.takeIntent(paneId)
+  let intent = agents.takeIntent(paneId)
   cancelWatch(paneId)
+  getNudger().cancel(paneId)
   if (!found) return base
   const { pane } = found
   const preset = presetOf(app, pane)
   const provider = effectiveProvider(pane, preset)
-  const session: AgentSessionView | undefined = agents.sessions[paneId]
+  let session: AgentSessionView | undefined = agents.sessions[paneId]
   const hasSetup = !!base.setup
   let startupUnconsumed = false
   try {
@@ -99,12 +223,22 @@ export async function prepareAgentLaunch(paneId: string, base: ResolvedLaunch): 
     startupUnconsumed = false
   }
   const policy = app.settings.agents?.resumeOnStartup ?? 'ask'
-  const decision = decideLaunch({ pane, provider, hasSetup, session, intent, startupUnconsumed, policy, modalPending: agents.modalPending })
-  // 'pending' needs the startup dialog (E5-FR-12); without it `ask` acts as `auto`.
+  let decision = decideLaunch({ pane, provider, hasSetup, session, intent, startupUnconsumed, policy, modalPending: useAgentStore.getState().modalPending })
+  if (decision === 'pending') {
+    // Held back by the resume dialog (E5-FR-12): its decision arrives as this pane's intent.
+    await waitForModal()
+    intent = useAgentStore.getState().takeIntent(paneId)
+    session = useAgentStore.getState().sessions[paneId]
+    decision = decideLaunch({ pane, provider, hasSetup, session, intent, startupUnconsumed, policy, modalPending: false })
+  }
   if (decision !== 'fresh' && session) {
     const command = buildAgentArgv({ preset, command: pane.command, resume: { provider: session.provider, sessionId: session.sessionId } })
     if (command) {
       agents.setChip(paneId, { kind: 'resumed', provider: session.provider, updatedAt: session.updatedAt, shownAt: Date.now() })
+      // A chat that was mid-turn when the app closed gets "continue where you left off" once ready (E5-FR-13).
+      if (startupUnconsumed && session.interrupted?.activity === 'working' && useAppStore.getState().settings.agents?.resumeNudge) {
+        getNudger().arm(paneId, nudgeText())
+      }
       if (hasReadySignal(session.provider)) {
         watches.set(
           paneId,

@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
-import type { AgentPreset, AwakeMode, ResumeOnStartup } from '@shared/types'
+import type { AgentPreset, AgentSettings, AwakeMode, ResumeOnStartup } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
 import { useT, type MessageKey } from '@/i18n'
 import { PresetEditor } from '../PresetEditor'
-import { SettingRow, ToggleRow } from '../ui'
+import { SettingRow, ToggleRow, inputCls } from '../ui'
 
 const AWAKE_MODES: Array<{ mode: AwakeMode; key: MessageKey }> = [
   { mode: 'auto', key: 'awake.mode.auto' },
@@ -20,13 +20,25 @@ const RESUME_POLICIES: Array<{ policy: ResumeOnStartup; key: MessageKey }> = [
   { policy: 'off', key: 'settings.agents.resume.off' },
 ]
 
+const SIDEBAR_SORTS: Array<{ sort: AgentSettings['sidebarSort']; key: MessageKey }> = [
+  { sort: 'manual', key: 'settings.agents.sort.manual' },
+  { sort: 'smart', key: 'settings.agents.sort.smart' },
+]
+
 const headingCls = 'text-xs font-semibold uppercase tracking-wide text-text-secondary'
+
+/** Whole seconds 0..600 for settings.agents.resumeModalTimeoutSec (0 = never). */
+function clampTimeout(value: string): number {
+  const n = Math.round(Number(value))
+  return Number.isFinite(n) ? Math.min(600, Math.max(0, n)) : 60
+}
 
 /**
  * Agent "Behavior" block (E5-FR-29). Each key joins when its FR lands; today:
- * resume on startup (E5-FR-10), keep the PC awake and its display variant
- * (E5-FR-23/24), sidebar agent rows and topic as title (E5-FR-19) and
- * Ctrl+1..9 (E5-FR-18).
+ * resume on startup (E5-FR-10), the resume dialog countdown (E5-FR-12) and
+ * nudge (E5-FR-13), keep the PC awake and its display variant (E5-FR-23/24),
+ * sidebar agent rows and topic as title (E5-FR-19), the sidebar order
+ * (E5-FR-22) and Ctrl+1..9 (E5-FR-18).
  */
 function BehaviorBlock() {
   const t = useT()
@@ -60,6 +72,39 @@ function BehaviorBlock() {
             </button>
           ))}
         </div>
+      </SettingRow>
+      <SettingRow searchId="agents.resumeTimeout" title={t('settings.agents.resumeTimeout')} description={t('settings.agents.resumeTimeoutHint')}>
+        <input
+          type="number"
+          min={0}
+          max={600}
+          step={5}
+          data-resume-timeout
+          disabled={agents.resumeOnStartup !== 'ask'}
+          className={cn(inputCls, 'w-28', agents.resumeOnStartup !== 'ask' && 'pointer-events-none opacity-50')}
+          value={agents.resumeModalTimeoutSec}
+          onChange={(e) => updateSettings({ agents: { ...agents, resumeModalTimeoutSec: clampTimeout(e.target.value) } })}
+        />
+      </SettingRow>
+      <ToggleRow
+        checked={agents.resumeNudge}
+        onChange={(v) => updateSettings({ agents: { ...agents, resumeNudge: v } })}
+        searchId="agents.resumeNudge"
+        title={t('settings.agents.resumeNudge')}
+        description={t('settings.agents.resumeNudgeHint')}
+        disabled={agents.resumeOnStartup === 'off'}
+      />
+      <SettingRow searchId="agents.resumeNudgeText" title={t('settings.agents.resumeNudgeText')} description={t('settings.agents.resumeNudgeTextHint')}>
+        <input
+          type="text"
+          maxLength={500}
+          data-resume-nudge-text
+          disabled={!agents.resumeNudge || agents.resumeOnStartup === 'off'}
+          placeholder={t('agents.nudge.default')}
+          className={cn(inputCls, (!agents.resumeNudge || agents.resumeOnStartup === 'off') && 'pointer-events-none opacity-50')}
+          value={agents.resumeNudgeText}
+          onChange={(e) => updateSettings({ agents: { ...agents, resumeNudgeText: e.target.value.slice(0, 500) } })}
+        />
       </SettingRow>
       <SettingRow searchId="agents.awake" title={t('settings.agents.awake')} description={t('settings.agents.awakeHint')}>
         <div role="radiogroup" aria-label={t('settings.agents.awake')} className="flex flex-wrap gap-2">
@@ -98,6 +143,28 @@ function BehaviorBlock() {
         title={t('settings.agents.rows')}
         description={t('settings.agents.rowsHint')}
       />
+      <SettingRow searchId="agents.sort" title={t('settings.agents.sort')} description={t('settings.agents.sortHint')}>
+        <div role="radiogroup" aria-label={t('settings.agents.sort')} className="flex flex-wrap gap-2">
+          {SIDEBAR_SORTS.map(({ sort, key }) => (
+            <button
+              key={sort}
+              type="button"
+              role="radio"
+              aria-checked={agents.sidebarSort === sort}
+              data-sidebar-sort={sort}
+              onClick={() => updateSettings({ agents: { ...agents, sidebarSort: sort } })}
+              className={cn(
+                'rounded-btn border px-3 py-1 text-xs transition-colors',
+                agents.sidebarSort === sort
+                  ? 'border-accent-violet bg-accent-violet text-white'
+                  : 'border-border bg-bg-secondary text-text-primary hover:border-accent-violet/40',
+              )}
+            >
+              {t(key)}
+            </button>
+          ))}
+        </div>
+      </SettingRow>
       <ToggleRow
         checked={agents.topicAsTitle}
         onChange={(v) => updateSettings({ agents: { ...agents, topicAsTitle: v } })}
