@@ -20,12 +20,15 @@ import {ConfirmDialog} from './src/renderer/components/ui/ConfirmDialog';
 import {I18nProvider} from './src/renderer/i18n';
 import {useAppStore} from './src/renderer/lib/store';
 import {applyTheme} from './src/renderer/themes/applyTheme';
-const calls={};const spy=(name,ret)=>(...a)=>{calls[name]=(calls[name]||0)+1;return ret}
+import {dispatchOpenRequest} from './src/renderer/lib/openRequest';
+const explorerArgs=[];const calls={};const spy=(name,ret)=>(...a)=>{calls[name]=(calls[name]||0)+1;return ret}
 const noop=()=>()=>{};
 const fallback=(base)=>new Proxy(base,{get:(t,k)=>k in t?t[k]:(typeof k==='string'?fallback(noop):undefined)});
 window.snApi=fallback({platform:'win32',
  updates:fallback({check:spy('updates.check',Promise.resolve({available:false,currentVersion:'2.0.0'})),onProgress:noop}),
- system:fallback({getMetrics:spy('system.getMetrics',Promise.resolve(null)),getLoginItem:spy('system.getLoginItem',Promise.resolve(false)),openExternal(){}}),
+ system:fallback({getMetrics:spy('system.getMetrics',Promise.resolve(null)),getLoginItem:spy('system.getLoginItem',Promise.resolve(false)),openExternal(){},
+  getExplorerMenu:spy('system.getExplorerMenu',Promise.resolve({ok:true,registered:true,exe:'D:/Portable/SnAgentsOS-portable.exe',currentExe:'C:/App/SnAgentsOS.exe',mismatch:true})),
+  setExplorerMenu:(req)=>{explorerArgs.push(req);return Promise.resolve({ok:true,registered:!!req.enabled,exe:req.enabled?'C:/App/SnAgentsOS.exe':undefined,currentExe:'C:/App/SnAgentsOS.exe',mismatch:false})}}),
  status:fallback({health:spy('status.health',Promise.resolve({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}})),hooksStatus:spy('status.hooksStatus',Promise.resolve({installed:false,settingsPath:'x'}))}),
  app:fallback({info:async()=>({version:'2.0.0',portable:false,platform:'win32'})}),
  remote:fallback({onStatus:noop,onDevices:noop,getStatus:async()=>({state:'stopped',connectedCount:0}),listDevices:async()=>[]}),
@@ -48,7 +51,10 @@ const termKeys=[];document.addEventListener('keydown',e=>{if(e.target&&e.target.
 // checks read this log instead of racing the 1200 ms timer.
 const flashLog=[];new MutationObserver(ms=>ms.forEach(m=>flashLog.push({id:m.target.id,on:m.target.hasAttribute('data-setting-flash'),t:performance.now()}))).observe(document.body,{attributes:true,subtree:true,attributeFilter:['data-setting-flash']});
 const setInput=(el,v)=>{const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}))};
-window.smoke={calls,created,termKeys,theme:applyTheme,
+window.smoke={calls,created,termKeys,explorerArgs,theme:applyTheme,
+ open:(p,id)=>dispatchOpenRequest({id,path:p,source:'second-instance'}),
+ explorerMenu:()=>useAppStore.getState().settings.explorerMenu,
+ activeWs:()=>useAppStore.getState().activeWorkspaceId,
  flashed:id=>flashLog.some(f=>f.id===id&&f.on),
  flashMs:id=>{const on=flashLog.find(f=>f.id===id&&f.on),off=on&&flashLog.find(f=>f.id===id&&!f.on&&f.t>=on.t);return on&&off?Math.round(off.t-on.t):null},
  clearFlash:()=>{flashLog.length=0},
@@ -211,6 +217,25 @@ app.whenReady().then(async()=>{
  ok(await js("[...document.querySelectorAll('button')].filter(b=>b.textContent==='Cancelar').every(b=>!b.querySelector('[data-key-hint]'))"),'ConfirmDialog cancel has no chip');
  await shot('confirm');
  await js('smoke.confirm(false)');await frame();
+
+ // --- E4-FR-34: Explorer menu row (path, mismatch, toggle) ---------------------
+ await js("smoke.clearFlash();smoke.openSettings('startup#explorerMenu')");await frame();await frame();
+ ok(await js("smoke.inView('#setting-startup-explorerMenu')&&smoke.flashed('setting-startup-explorerMenu')"),"openSettings('startup#explorerMenu') shows and rings the row");
+ ok(await js("(document.querySelector('[data-explorer-mismatch]')?.textContent||'').includes('D:/Portable/SnAgentsOS-portable.exe')&&!document.querySelector('[data-explorer-path]')"),'a key for another exe shows the amber mismatch, not the path');
+ await js("document.querySelector('#setting-startup-explorerMenu [role=switch]').click()");await frame();await frame();
+ eq([await js('smoke.explorerArgs'),await js('smoke.explorerMenu()')],[[{enabled:true,language:'es'}],true],'the toggle sends enabled + the UI language and persists the setting');
+ ok(await js("(document.querySelector('[data-explorer-path]')?.textContent||'').includes('C:/App/SnAgentsOS.exe')&&!document.querySelector('[data-explorer-mismatch]')&&!document.querySelector('[data-explorer-error]')"),'after enabling, the registered path shows and the mismatch is gone');
+
+ // --- E4-FR-33: "Open in" over Settings ---------------------------------------
+ await js("smoke.open('D:/New/proj','open-1')");await frame();await frame();
+ eq([(await js('smoke.state()')).open,(await js('smoke.state()')).wizard,await js("document.querySelector('[data-wizard-cwd]')?.value"),(await js('smoke.active()')).primary],[false,true,'D:/New/proj','next'],'a new folder closes Settings and opens the wizard prefilled, focus on Next');
+ ok(await js("[...document.querySelectorAll('[data-wizard] input')].some(i=>i.value==='proj')"),'the name is the folder basename');
+ await js("smoke.open('E:/Other','open-2')");await frame();
+ eq(await js("document.querySelector('[data-wizard-cwd]')?.value"),'D:/New/proj','another folder never overwrites the wizard in progress');
+ await js("smoke.set({wizardOpen:false})");await frame();
+ await js("smoke.openSettings();smoke.set({activeWorkspaceId:null})");await frame();
+ await js("smoke.open('c:/W/','open-3')");await frame();
+ eq([await js('smoke.activeWs()'),(await js('smoke.state()')).open,(await js('smoke.state()')).wizard],['ws-0',false,false],'a folder that is a workspace (other case, trailing slash) activates it');
 
  // Light theme and zoom: the results list fits.
  await js("smoke.theme('light');smoke.openSettings()");await frame();await js("smoke.search('notif')");
