@@ -1,6 +1,7 @@
 /**
  * Phone settings as a pushed screen over Home (E1-FR-37, E2-FR-13), opened
- * from the Home header. Sections: Appearance (desktop theme, font size), Input
+ * from the Home header. Sections: Appearance (desktop theme, text size
+ * presets of E2-FR-34), Input
  * (E1-FR-22/30: AI consoles start in Composer, composer autocorrect), Alerts
  * (in-page alerts, E1-FR-40), About (desktop and bundle versions) and This
  * device (unpair, with confirmation). Later WPs add their rows here: answer
@@ -8,15 +9,14 @@
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { LogOut, Minus, Plus as PlusSmall } from 'lucide-react'
+import { LogOut } from 'lucide-react'
 import type { ThemeName } from '@shared/types'
 import { PushScreen } from './PushScreen'
 import { ActionList } from './ActionList'
 import { ConfirmSheet } from './ConfirmSheet'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
-import { getActiveTerm } from '../lib/terminalBus'
-import { MAX_FONT, MIN_FONT } from '../lib/fit'
+import { FontScaleRow } from './FontScaleRow'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
 /** This page's version, baked in by vite.config.ts. */
@@ -79,8 +79,6 @@ export function PrefToggle({
 }
 
 export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
-  const fontOverride = useRemoteStore((s) => s.fontOverride)
-  const setFontOverride = useRemoteStore((s) => s.setFontOverride)
   const themeName = useRemoteStore((s) => s.snapshot?.themeName)
   const inPageAlerts = useRemoteStore((s) => s.inPageAlerts)
   const setInPageAlerts = useRemoteStore((s) => s.setInPageAlerts)
@@ -90,16 +88,6 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const [confirmUnpair, setConfirmUnpair] = useState(false)
   const desktopVersion = useRemoteStore((s) => s.appVersion)
 
-  const currentSize = (): number => {
-    if (fontOverride != null) return fontOverride
-    const term = getActiveTerm()
-    const raw = term ? Number(term.options.fontSize) : 14
-    return Number.isFinite(raw) ? Math.round(raw) : 14
-  }
-  const bump = (delta: number): void => {
-    const next = Math.max(MIN_FONT, Math.min(MAX_FONT, currentSize() + delta))
-    setFontOverride(next)
-  }
   const setTheme = (theme: ThemeName): void => {
     void client.sendCtl({ kind: 'setTheme', theme })
   }
@@ -131,32 +119,7 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
                 </span>
               )}
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-text-primary">{t('act.fontSize')}</span>
-              <div className="flex items-center gap-3">
-                <button
-                  onPointerDown={(e) => {
-                    e.preventDefault()
-                    bump(-1)
-                  }}
-                  className="flex h-10 w-10 items-center justify-center rounded-btn border border-border bg-card text-text-primary active:bg-bg-primary"
-                  aria-label={t('set.fontSmaller')}
-                >
-                  <Minus size={16} />
-                </button>
-                <span className="w-8 text-center text-sm font-medium text-text-primary">{currentSize()}</span>
-                <button
-                  onPointerDown={(e) => {
-                    e.preventDefault()
-                    bump(1)
-                  }}
-                  className="flex h-10 w-10 items-center justify-center rounded-btn border border-border bg-card text-text-primary active:bg-bg-primary"
-                  aria-label={t('set.fontLarger')}
-                >
-                  <PlusSmall size={16} />
-                </button>
-              </div>
-            </div>
+            <FontScaleRow />
           </div>
         </SettingsSection>
         <SettingsSection id="input" title={t('input.title')}>

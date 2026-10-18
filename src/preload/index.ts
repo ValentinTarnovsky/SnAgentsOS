@@ -50,6 +50,7 @@ import type {
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
 import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
+import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -133,6 +134,7 @@ const api: SnApi = {
       ipcRenderer.invoke(CH.SYSTEM_SET_HOTKEY, { enabled, accelerator }) as Promise<boolean>,
     getMetrics: () => ipcRenderer.invoke(CH.SYSTEM_METRICS) as Promise<AppMetrics>,
     openExternal: (url: string) => ipcRenderer.send(CH.SHELL_OPEN_EXTERNAL, url),
+    openPath: (req: OpenPathReq) => ipcRenderer.invoke(CH.SHELL_OPEN_PATH, req) as Promise<OpenPathRes>,
     onDisplayRecovered: (cb: () => void) => sub<void>(CH.SYSTEM_DISPLAY_RECOVERED, cb),
     setExplorerMenu: (req: { enabled: boolean; language: Language }) =>
       ipcRenderer.invoke(CH.SYSTEM_SET_EXPLORER_MENU, req) as Promise<ExplorerMenuResult>,

@@ -84,6 +84,8 @@ export const CH = {
 
   // Open a URL in the OS default browser (terminal links, About page, etc.)
   SHELL_OPEN_EXTERNAL: 'shell:openExternal', // send (url)
+  // A path tapped on the phone: open (inert) or reveal it, contained in cwd (E2-FR-30)
+  SHELL_OPEN_PATH: 'shell:openPath', // invoke ({ cwd, path }) -> { ok, error? }
 
   // GPU/display recovery (main -> renderer). Fired after system resume, screen
   // unlock, or a GPU process crash so terminals rebuild their glyph atlases.

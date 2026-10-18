@@ -24,6 +24,7 @@ import type {
 } from './remote-protocol'
 import type { InitialPromptReq, LaunchKind, SubmitError } from './initialPrompt'
 import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
+import type { OpenPathReq, OpenPathRes } from './inertOpen'
 
 export type { GitArea, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -635,6 +636,8 @@ export interface SnApi {
     getMetrics(): Promise<AppMetrics>
     /** Open a URL in the OS default browser. http/https/mailto only; others are ignored. */
     openExternal(url: string): void
+    /** Open (inert extension) or reveal a phone-tapped path contained in cwd (E2-FR-30). */
+    openPath(req: OpenPathReq): Promise<OpenPathRes>
     /**
      * Fires after system resume, screen unlock, or a GPU process crash, the
      * moments where WebGL texture memory can come back corrupted. Terminals
