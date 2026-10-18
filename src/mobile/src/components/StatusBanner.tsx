@@ -6,13 +6,15 @@
  * Below the title sits a hint picked from the address the phone used (Tailscale,
  * LAN or generic). Tapping the banner toggles the details; Retry reconnects in
  * place (client.reconnectNow) without leaving the live screen. The terminal
- * stays visible (stale) underneath so context is not lost.
+ * stays visible (stale) underneath so context is not lost. The expanded banner
+ * also opens Diagnostics (E2-FR-36).
  */
 import { useEffect, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Loader2, MonitorOff, PowerOff, RotateCw, WifiOff } from 'lucide-react'
+import { Activity, Loader2, MonitorOff, PowerOff, RotateCw, WifiOff } from 'lucide-react'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
+import { openDiagnostics } from '../lib/connLog'
 import { classifyConnection, formatAgo, type ConnHint, type ConnTier } from '../lib/connectionHealth'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
@@ -162,6 +164,19 @@ export function StatusBanner(): ReactNode {
           </button>
         )}
       </div>
+      {open && (
+        <div className="-mt-1 flex px-3 pb-2 pl-8">
+          <button
+            type="button"
+            data-action="diagnostics"
+            onClick={openDiagnostics}
+            className="flex h-7 items-center gap-1 rounded-lg bg-black/15 px-2.5 text-[11px] font-semibold active:bg-black/25"
+          >
+            <Activity size={12} />
+            {t('diag.open')}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
