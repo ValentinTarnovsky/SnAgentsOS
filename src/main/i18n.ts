@@ -43,6 +43,7 @@ const MESSAGES = {
     'crash.hang.detail': 'The window has not responded for more than 15 seconds. Your consoles keep running.',
     'crash.wait': 'Wait',
     'crash.reload': 'Reload window',
+    'explorer.menuLabel': 'Open in {app}',
   },
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
@@ -83,6 +84,7 @@ const MESSAGES = {
     'crash.hang.detail': 'La ventana no responde hace más de 15 segundos. Tus consolas siguen corriendo.',
     'crash.wait': 'Esperar',
     'crash.reload': 'Recargar ventana',
+    'explorer.menuLabel': 'Abrir en {app}',
   },
 } as const
 
