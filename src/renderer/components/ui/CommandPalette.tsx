@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArchiveRestore, BellRing, Bot, Megaphone, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
+import { ArchiveRestore, BellRing, Bot, FileDiff, Megaphone, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
 import { formatAgeShort } from '@shared/agents'
 import { visiblePaneIds } from '@shared/status'
 import { useAppStore } from '@/lib/store'
@@ -19,6 +19,7 @@ import { agentPhrase, agentTitle, allAgents, navInputFrom, paletteWaiting, type 
 import { StatusGlyph } from '@/components/ui/StatusDot'
 import { glyphOf, useNow } from '@/components/sidebar/AgentRows'
 import { orderQuickCommands } from '@shared/quickCommands'
+import { openChangesPanel } from '@/lib/changesPanel'
 
 interface Command {
   id: string
@@ -133,6 +134,8 @@ export function CommandPalette() {
         action: 'globalPrompt',
         run: () => setGlobalPromptOpen(true),
       })
+      // E7-FR-11: the Changes panel of the active workspace.
+      cmds.push({ id: 'view-changes', label: t('changes.viewChanges'), hint: t('palette.workspace'), icon: FileDiff, action: 'toggleChanges', run: () => openChangesPanel() })
       for (const p of presets) {
         cmds.push({
           id: `pane-${p.id}`,

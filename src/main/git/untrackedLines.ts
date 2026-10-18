@@ -101,6 +101,11 @@ export class UntrackedCounter {
     return { lines, approx, bytesRead }
   }
 
+  /** Cached line count of one file: a number, null for a binary, undefined when not counted. */
+  peek(abs: string): number | null | undefined {
+    return this.cache.get(abs)?.lines
+  }
+
   /** Drop every cached file under a repo (its target went away). */
   forget(repoRoot: string): void {
     const prefix = join(repoRoot, '/')
