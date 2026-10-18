@@ -50,12 +50,12 @@ function Row({
   )
 }
 
-interface ConfirmState {
+export interface ConfirmState {
   message: string
   onConfirm: () => void
 }
 
-function ConfirmSheet({
+export function ConfirmSheet({
   state,
   onClose,
 }: {

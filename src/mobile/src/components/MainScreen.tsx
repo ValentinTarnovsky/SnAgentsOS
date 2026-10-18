@@ -14,6 +14,7 @@ import { ConsoleDrawer } from './ConsoleDrawer'
 import { ActionSheet } from './ActionSheet'
 import { PasteSheet } from './PasteSheet'
 import { SnippetsSheet } from './SnippetsSheet'
+import { ExitStrip } from './ExitStrip'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { useRemoteStore } from '../lib/store'
 import { t } from '../lib/i18n'
@@ -91,6 +92,8 @@ export function MainScreen(): ReactNode {
         <StatusBanner />
         <Toast />
       </main>
+
+      <ExitStrip />
 
       {/* Offline: the keys are dimmed and inert (E1-FR-14); sendInput refuses too. */}
       <div

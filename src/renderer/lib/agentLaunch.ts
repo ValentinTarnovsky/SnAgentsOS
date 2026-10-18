@@ -208,6 +208,16 @@ export function restartFromButton(paneId: string): void {
   useAppStore.getState().restartPane(paneId)
 }
 
+/**
+ * "Restart clean" (E6-FR-18): same launch decision as the header button, but
+ * remounts the console (empty screen) instead of restarting in place.
+ */
+export function restartClean(paneId: string): void {
+  const state = resumeMenuState(useAppStore.getState(), useAgentStore.getState().sessions, paneId)
+  useAgentStore.getState().setIntent(paneId, state.button)
+  useAppStore.getState().restartPaneClean(paneId)
+}
+
 /** Chip button "Start a new chat" after a failed resume. */
 export function startNewChatAfterFailure(paneId: string): void {
   restartFresh(paneId)

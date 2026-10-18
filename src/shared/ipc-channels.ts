@@ -21,6 +21,7 @@ export const CH = {
   PTY_KILL: 'pty:kill', // invoke
   PTY_SET_ACTIVE: 'pty:setActive', // send (paneIds of the visible workspace)
   PTY_FLOW: 'pty:flow', // send ({ ptyId, pause }) backpressure
+  PTY_RESTART: 'pty:restart', // invoke (PtyRestartReq) -> PtyRestartRes (rejects when the spawn fails; E6-FR-18/19)
 
   // PTY events (main -> renderer)
   PTY_DATA: 'pty:data', // { ptyId, data }
@@ -84,6 +85,7 @@ export const CH = {
   STATUS_DISCORD_TEST: 'status:discordTest',
   STATUS_DESKTOP_TEST: 'status:desktopTest',
   STATUS_REVEAL: 'status:reveal', // main -> renderer (paneId; notification clicked)
+  STATUS_SESSION_END: 'status:sessionEnd', // main -> renderer (AgentSessionEndEvt; E6-FR-21)
   STATUS_HOOKS_INSTALL: 'status:hooksInstall', // invoke -> StatusHooksStatusRes
   STATUS_HOOKS_UNINSTALL: 'status:hooksUninstall', // invoke -> StatusHooksStatusRes
   STATUS_HOOKS_STATUS: 'status:hooksStatus', // invoke -> StatusHooksStatusRes

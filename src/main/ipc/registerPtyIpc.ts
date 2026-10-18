@@ -4,14 +4,23 @@ import type {
   PtyFlowReq,
   PtyReattachRes,
   PtyResizeReq,
+  PtyRestartReq,
+  PtyRestartRes,
   PtySpawnReq,
   PtySpawnRes,
   PtyWriteReq,
 } from '@shared/ipc-contract'
 import type { PtyManager } from '../pty/PtyManager'
 
-export function registerPtyIpc(manager: PtyManager): void {
+/**
+ * `restartLabel` gives the localized separator text for an in-place restart
+ * ("restarted 14:32"), read from the current config language.
+ */
+export function registerPtyIpc(manager: PtyManager, restartLabel: () => string = () => 'restarted'): void {
   ipcMain.handle(CH.PTY_SPAWN, (_e, req: PtySpawnReq): PtySpawnRes => manager.spawn(req))
+
+  // In-place restart (E6-FR-18/19): rejects when the new shell fails to spawn.
+  ipcMain.handle(CH.PTY_RESTART, (_e, req: PtyRestartReq): PtyRestartRes => manager.restart(req, restartLabel()))
 
   ipcMain.handle(
     CH.PTY_REATTACH,

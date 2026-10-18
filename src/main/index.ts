@@ -33,7 +33,7 @@ import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
 import { join } from 'path'
 import { ensureTray, destroyTray, hasTray } from './tray'
-import { mainT } from './i18n'
+import { mainT, shortTime } from './i18n'
 import { runLegacyMigrationAtBoot, scheduleLegacyCleanup } from './migration/runLegacyMigration'
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
@@ -335,7 +335,10 @@ async function bootstrap(): Promise<void> {
   registerConfigIpc()
   registerDialogIpc()
   registerClipboardIpc()
-  registerPtyIpc(ptyManager)
+  registerPtyIpc(ptyManager, () => {
+    const cfg = configStore.load()
+    return mainT(cfg, 'pty.restarted', { time: shortTime(cfg) })
+  })
   registerWindowIpc(() => mainWindow)
   registerSystemIpc(() => mainWindow?.webContents ?? null)
   registerUpdateIpc({
