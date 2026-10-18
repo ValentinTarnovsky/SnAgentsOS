@@ -22,6 +22,11 @@
   --color-state-error: #ef4444;
   --color-state-idle: #6b7280;
 
+  /* Diff and git chip counts (E7). Themeable: applyTheme overwrites them with
+     the active theme ansi green/red, so they always match the terminal palette. */
+  --color-ansi-green: #22c55e;
+  --color-ansi-red: #ef4444;
+
   --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 
