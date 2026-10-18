@@ -687,6 +687,7 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
  */
 export async function downloadAndInstall(
   onProgress: (p: UpdateProgress) => void,
+  opts?: { beforeApply?: (kind: InstallKind) => void },
 ): Promise<{ relaunching: boolean }> {
   let match = lastMatch
   if (!match) {
@@ -737,6 +738,13 @@ export async function downloadAndInstall(
     throw err
   }
 
+  // Last chance before the setup runs (E6-FR-10): the NSIS installer closes
+  // the app itself, without a before-quit, so the scrollback is saved here.
+  try {
+    opts?.beforeApply?.(kind)
+  } catch (err) {
+    console.warn('[updater] beforeApply failed:', err)
+  }
   const relaunching = await applyInstall(kind, dest)
   return { relaunching }
 }

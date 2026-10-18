@@ -9,14 +9,17 @@ import type {
   PtySpawnReq,
   PtySpawnRes,
   PtyWriteReq,
+  ScrollbackStats,
 } from '@shared/ipc-contract'
 import type { PtyManager } from '../pty/PtyManager'
+import type { ScrollbackStore } from '../pty/ScrollbackStore'
 
 /**
  * `restartLabel` gives the localized separator text for an in-place restart
- * ("restarted 14:32"), read from the current config language.
+ * ("restarted 14:32"), read from the current config language. `scrollback`
+ * (the saved history store, E6-FR-12) adds the `scrollback:*` channels.
  */
-export function registerPtyIpc(manager: PtyManager, restartLabel: () => string = () => 'restarted'): void {
+export function registerPtyIpc(manager: PtyManager, restartLabel: () => string = () => 'restarted', scrollback?: ScrollbackStore): void {
   ipcMain.handle(CH.PTY_SPAWN, (_e, req: PtySpawnReq): PtySpawnRes => manager.spawn(req))
 
   // In-place restart (E6-FR-18/19): rejects when the new shell fails to spawn.
@@ -46,6 +49,34 @@ export function registerPtyIpc(manager: PtyManager, restartLabel: () => string =
     if (!Array.isArray(livePaneIds)) return 0
     return manager.reconcile(paneIdList(livePaneIds))
   })
+
+  if (scrollback) registerScrollbackIpc(manager, scrollback)
+}
+
+/**
+ * Saved scrollback (E6-FR-11/12). A closed pane's file goes to the trash and
+ * its seed can be taken again (reopened in this session); "clear" deletes at
+ * once and also drops what the next save could bring back.
+ */
+export function registerScrollbackIpc(manager: PtyManager, store: ScrollbackStore): void {
+  ipcMain.handle(CH.PTY_SCROLLBACK_LOAD, (_e, paneId: unknown): string | null =>
+    typeof paneId === 'string' ? (store.load(paneId)?.ansi ?? null) : null,
+  )
+  ipcMain.handle(CH.SCROLLBACK_CLEAR, async (_e, paneId: unknown, opts: unknown): Promise<void> => {
+    if (typeof paneId !== 'string') return
+    if ((opts as { trash?: unknown } | null)?.trash === true) {
+      manager.forgetSeed(paneId)
+      await store.trash(paneId)
+      return
+    }
+    manager.clearPersisted(paneId)
+    await store.remove(paneId)
+  })
+  ipcMain.handle(CH.SCROLLBACK_CLEAR_ALL, async (): Promise<void> => {
+    manager.clearPersisted()
+    await store.clearAll()
+  })
+  ipcMain.handle(CH.SCROLLBACK_STATS, (): Promise<ScrollbackStats> => store.stats())
 }
 
 /** The string entries of an IPC paneId list (anything else is dropped). */

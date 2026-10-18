@@ -2,7 +2,7 @@
 import './devUserData'
 import { readFileSync, writeFileSync } from 'fs'
 import { stat } from 'fs/promises'
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, powerMonitor, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
 import type { AppInfo, AppMetrics, OpenRequest } from '@shared/ipc-contract'
@@ -10,6 +10,8 @@ import type { AwakeMode, ConfigFile } from '@shared/types'
 import { createMainWindow } from './window'
 import { dataDir, getConfigPath, isPortable } from './paths'
 import { PtyManager } from './pty/PtyManager'
+import { ScrollbackStore, buildSeed } from './pty/ScrollbackStore'
+import { ScrollbackCheckpoint } from './pty/ScrollbackCheckpoint'
 import { engineFromSettings } from '@shared/terminalEngine'
 import { ConfigStore } from './store/ConfigStore'
 import { parseConfig } from './store/schema'
@@ -38,7 +40,7 @@ import { DiscordNotifier } from './status/DiscordNotifier'
 import { join } from 'path'
 import { homedir } from 'os'
 import { ensureTray, destroyTray, hasTray } from './tray'
-import { mainT, shortTime } from './i18n'
+import { mainT, shortDateTime, shortTime } from './i18n'
 import { runLegacyMigrationAtBoot, scheduleLegacyCleanup } from './migration/runLegacyMigration'
 import { installLogRing } from './diagnostics/logRing'
 import { CrashStore } from './crash/crashStore'
@@ -90,6 +92,8 @@ let awakeService: AwakeService | null = null
 let trayAwakeMode: AwakeMode | null = null
 // Created in bootstrap, after the legacy migration put dataDir() in place.
 let agentSessions: AgentSessionStore | null = null
+// Saved scrollback (E6-FR-08..13, 36): created in bootstrap, under dataDir().
+let scrollbackCheckpoint: ScrollbackCheckpoint | null = null
 // Crash resilience (E4-FR-21..25). The breaker dialog's [Close] quits without
 // the tray-hide or "active consoles" guards (the button already names N).
 let crashQuit = false
@@ -143,6 +147,33 @@ async function handleOpenArgv(argv: readonly string[], cwd: string, source: Open
  */
 function snapshotAgentsOnce(trigger: ExitTrigger): void {
   agentSessions?.snapshotExitOnce(bypassCloseGuards ? 'update' : trigger)
+}
+
+/**
+ * Saves every console's new output before the ptys die (E6-FR-10/36), once
+ * per exit: X, tray, Windows session end, macOS/Linux shutdown.
+ */
+function persistScrollbackOnExit(): void {
+  try {
+    scrollbackCheckpoint?.persistOnExit()
+  } catch (error) {
+    console.warn('[scrollback] exit save failed:', error)
+  }
+}
+
+/** After killAll(): the next exit saves again and the next spawns restore again (macOS new window). */
+function afterPtysKilled(): void {
+  scrollbackCheckpoint?.resetExit()
+  ptyManager.resetSeeds()
+}
+
+/**
+ * The OS is ending the session: save now, but if the shutdown is cancelled
+ * the app lives on, so a later quit must save again.
+ */
+function persistScrollbackForShutdown(): void {
+  persistScrollbackOnExit()
+  setTimeout(() => scrollbackCheckpoint?.resetExit(), 10_000).unref?.()
 }
 
 function quitApp(): void {
@@ -369,7 +400,10 @@ function openMainWindow(): void {
 
   // Windows shutdown, restart or log off: Electron emits no before-quit, so the
   // agent snapshot runs here, synchronously (E5-FR-06).
-  win.on('session-end', () => snapshotAgentsOnce('shutdown'))
+  win.on('session-end', () => {
+    snapshotAgentsOnce('shutdown')
+    persistScrollbackForShutdown()
+  })
 
   win.on('closed', () => {
     mainWindow = null
@@ -407,10 +441,34 @@ async function bootstrap(): Promise<void> {
   // Headless mirror policy from the saved config before any pty spawns (E6-FR-01);
   // the renderer pushes every later change on pty:setEngine.
   ptyManager.setEngine(engineFromSettings(configStore.load()?.settings))
-  registerPtyIpc(ptyManager, () => {
+  // Saved scrollback (E6-FR-08..13): the first spawn of each pane restores
+  // its file (sanitized, with the dated separator), a checkpoint saves every
+  // 60 s and the exit paths below save synchronously.
+  const scrollbackStore = new ScrollbackStore(join(dataDir(), 'scrollback'))
+  ptyManager.setSeedSource((paneId, rows) => {
+    const saved = scrollbackStore.load(paneId)
+    if (!saved) return null
     const cfg = configStore.load()
-    return mainT(cfg, 'pty.restarted', { time: shortTime(cfg) })
+    return buildSeed(saved.ansi, mainT(cfg, 'pty.historyRestored', { date: shortDateTime(cfg, new Date(saved.savedAt)) }), rows)
   })
+  registerPtyIpc(
+    ptyManager,
+    () => {
+      const cfg = configStore.load()
+      return mainT(cfg, 'pty.restarted', { time: shortTime(cfg) })
+    },
+    scrollbackStore,
+  )
+  scrollbackCheckpoint = new ScrollbackCheckpoint(scrollbackStore, ptyManager, { log: (msg) => console.warn(msg) })
+  scrollbackCheckpoint.start()
+  {
+    // Startup GC: only a config read from the primary file says which panes are gone.
+    const cfg = configStore.load()
+    const live = cfg && configStore.lastLoadSource === 'primary' ? new Set(cfg.workspaces.flatMap((w) => w.panes.map((p) => p.id))) : null
+    void scrollbackStore.gc(live).catch(() => undefined)
+  }
+  // macOS/Linux shutdown (Windows uses the window's session-end, E6-FR-36).
+  powerMonitor.on('shutdown', () => persistScrollbackForShutdown())
   registerWindowIpc(() => mainWindow)
   registerSystemIpc(() => mainWindow?.webContents ?? null, openRequests)
   void handleOpenArgv(process.argv, process.cwd(), 'argv')
@@ -420,6 +478,9 @@ async function bootstrap(): Promise<void> {
     setInstalling: (v) => {
       isInstalling = v
     },
+    // The NSIS setup closes the app without a before-quit (E6-FR-10). Leaves
+    // the exit flag alone: a cancelled wizard still saves on the next quit.
+    persistBeforeInstall: () => scrollbackCheckpoint?.persistAllSync(),
   })
   registerUsageIpc({
     getSender: () => mainWindow?.webContents ?? null,
@@ -545,7 +606,10 @@ app.on('before-quit', () => {
   // Shut the remote server first (best-effort, non-blocking) so phones get a
   // shutdown frame before the ptys they mirror are torn down.
   remoteManager.shutdown('quit')
+  persistScrollbackOnExit()
   ptyManager.killAll()
+  afterPtysKilled()
+  scrollbackCheckpoint?.stop()
   awakeService?.dispose()
   statusManager.dispose()
   codexBridge.dispose()
@@ -562,6 +626,8 @@ app.on('window-all-closed', () => {
   // On darwin the app stays alive with no window; still stop the server so it
   // isn't left listening without any UI to approve pairings.
   remoteManager.shutdown('quit')
+  persistScrollbackOnExit()
   ptyManager.killAll()
+  afterPtysKilled()
   if (process.platform !== 'darwin') app.quit()
 })
