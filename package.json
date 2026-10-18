@@ -8,7 +8,8 @@
   "main": "./out/main/index.js",
   "scripts": {
     "test": "node scripts/test-status.cjs && node scripts/test-rebrand.cjs && node scripts/test-desktop-comfort.cjs && node scripts/test-agents.cjs && node scripts/test-agents-resume.cjs && node scripts/test-terminal-engine.cjs && node scripts/test-legacy-migration.cjs && node scripts/test-docs.cjs && node scripts/test-git.cjs && node scripts/test-mobile-logic.cjs && node scripts/test-mobile-keybar.cjs && node scripts/check-brand.cjs",
-    "test:ui": "node scripts/test-status-ui.cjs && node scripts/test-toast-ui.cjs && node scripts/test-drop-ui.cjs && node scripts/test-awake-ui.cjs && node scripts/test-resume-ui.cjs",
+    "test:ui": "node scripts/test-status-ui.cjs && node scripts/test-toast-ui.cjs && node scripts/test-drop-ui.cjs && node scripts/test-awake-ui.cjs && node scripts/test-resume-ui.cjs && node scripts/test-terminal-ui.cjs",
+    "test:ui:terminal": "node scripts/test-terminal-ui.cjs",
     "test:agents": "node scripts/test-agents.cjs && node scripts/test-agents-resume.cjs",
     "test:mobile": "node scripts/test-mobile-scroll.cjs && node scripts/test-mobile-terminal.cjs && node scripts/test-mobile-connection-ui.cjs && node scripts/test-mobile-keybar-ui.cjs",
     "dev": "electron-vite dev",

@@ -8,7 +8,9 @@ import {
 } from 'react'
 import { ChevronDown, ChevronUp, Search, X } from 'lucide-react'
 import type { SetupStep } from '@shared/types'
-import { useXterm } from './useXterm'
+import { useXterm, type XtermExitState } from './useXterm'
+import { ExitCard } from './ExitCard'
+import { AgentEndChip } from './AgentEndChip'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -40,7 +42,9 @@ export function TerminalPane({
   const t = useT()
   const wrapRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<HTMLDivElement>(null)
-  const ctl = useXterm(termRef, { paneId, cwd, shell, initialCommand, setup, fontSize, isActive })
+  // Exit card (E6-FR-17): visibility is local to the pane, never persisted.
+  const [exit, setExit] = useState<XtermExitState | null>(null)
+  const ctl = useXterm(termRef, { paneId, cwd, shell, initialCommand, setup, fontSize, isActive, onExitState: setExit })
 
   const setPaneFontSize = useAppStore((s) => s.setPaneFontSize)
   const globalFont = useAppStore((s) => s.settings.fontSize)
@@ -113,6 +117,21 @@ export function TerminalPane({
       className="relative h-full w-full overflow-hidden bg-bg-primary p-2"
     >
       <div ref={termRef} className="h-full w-full" />
+
+      {exit?.cardVisible ? (
+        <ExitCard
+          code={exit.code}
+          error={exit.error}
+          onRestart={() => {
+            ctl.restart()
+            ctl.focus()
+          }}
+          // A dead console closes without the running-process confirmation.
+          onClose={() => useAppStore.getState().closePane(workspaceId, paneId)}
+        />
+      ) : (
+        !exit && <AgentEndChip paneId={paneId} initialCommand={initialCommand} shellKind={ctl.shellKind} onDone={ctl.focus} />
+      )}
 
       {findOpen && (
         <div className="absolute right-3 top-3 z-10 flex items-center gap-1 rounded-btn border border-border bg-card/95 px-2 py-1 shadow-lg backdrop-blur">

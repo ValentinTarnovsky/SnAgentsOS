@@ -115,6 +115,13 @@ export function TerminalSection() {
         title={t('settings.unicode11')}
         description={t('settings.unicode11Hint')}
       />
+
+      <ToggleRow
+        checked={settings.terminalAgentEndChip !== false}
+        onChange={(v) => updateSettings({ terminalAgentEndChip: v })}
+        title={t('settings.agentEndChip')}
+        description={t('settings.agentEndChipHint')}
+      />
     </div>
   )
 }
