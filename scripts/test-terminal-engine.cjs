@@ -778,6 +778,15 @@ async function main() {
       const c1 = client(80, 24)
       c1.write(sanitizeSeed(`hist${ESC}[6n${ESC}[c${ESC}]0;\u2733 Claude\x07${ESC}]11;?\x07${ESC}P$qm${ESC}\\\r\n`))
       check(c1.replies.length === 0 && c1.titles.length === 0, 'writing a sanitized hostile seed makes the terminal answer nothing and keeps the title (no pty.write, no status change)')
+      // Strings cut by another ESC (xterm.js still dispatches them) and removals that join a new sequence.
+      const sneaky = `a${ESC}]0;✳ Claude${ESC}[0mb${ESC}P$qm${ESC}[1mc${ESC}${ESC}[c]0;joined\x07d${ESC}[${ESC}[cce${ESC}${ESC}]0;x\x07[6nf`
+      const raw = client(80, 24)
+      raw.write(sneaky)
+      check(raw.replies.length > 0 && raw.titles.length > 0, 'fixture: unsanitized, these sequences make xterm answer and set the title')
+      const c2 = client(80, 24)
+      c2.write(sanitizeSeed(sneaky))
+      check(c2.replies.length === 0 && c2.titles.length === 0, 'an OSC/DCS ended by another ESC and sequences joined by a removal are dropped too')
+      check(!sanitizeSeed(sneaky).includes(`${ESC}]`) && !sanitizeSeed(sneaky).includes(`${ESC}P`) && sanitizeSeed(sneaky).includes(`${ESC}[0mb`), 'the ESC that ended the string still opens its own SGR')
 
       // Persisted text and seed helpers.
       check(S.trimPersistAnsi(`a${ESC}[31mb${ESC}[0m\r\n   \r\n\r\n${ESC}[3A${ESC}[5C`) === `a${ESC}[31mb`, 'trailing blank rows, SGR and cursor moves are trimmed')
@@ -1036,7 +1045,7 @@ async function main() {
         pm.killAll()
       }
       {
-        // Budget: 12 panes x 256 KB within 1500 ms (CI asserts < 5000 ms and logs the real time).
+        // Budget: 12 panes x 256 KB within 1500 ms, all of them saved (logs the real time).
         const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
         const st = newStore()
         const cp = new ScrollbackCheckpoint(st, pm, { log() {} })
@@ -1049,7 +1058,7 @@ async function main() {
         await flushAll()
         const r = cp.persistAllSync()
         console.log(`  persistAllSync: 12 panes x 256 KB in ${Math.round(r.ms)} ms (budget 1500 ms), saved ${r.saved}, skipped ${r.skipped}`)
-        check(r.ms < 5000 && r.saved + r.skipped === 12 && r.saved >= 1, 'persistAllSync with 12 full panes stays under 5000 ms')
+        check(r.ms <= 1500 && r.saved === 12 && r.skipped === 0, 'persistAllSync saves 12 full panes within the 1500 ms budget (E6-FR-10)')
         // A clock that runs out after the first pane: the rest keep their checkpoint.
         for (let p = 0; p < 12; p++) h.procs[p].emit('more\r\n')
         let t = 0

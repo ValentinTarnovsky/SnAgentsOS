@@ -33,6 +33,20 @@ export function TerminalSection() {
       )
   }, [])
   useEffect(refreshStats, [refreshStats])
+  // Typed freely and clamped on blur/Enter: clamping each keystroke would turn
+  // the "3" of "3000" into 200 before the zeros arrive.
+  const [linesDraft, setLinesDraft] = useState(String(settings.persistScrollbackLines))
+  useEffect(() => setLinesDraft(String(settings.persistScrollbackLines)), [settings.persistScrollbackLines])
+  const commitLines = (): void => {
+    const n = Math.round(Number(linesDraft))
+    if (!linesDraft.trim() || !Number.isFinite(n) || n <= 0) {
+      setLinesDraft(String(settings.persistScrollbackLines))
+      return
+    }
+    const clamped = Math.min(PERSIST_LINES_MAX, Math.max(PERSIST_LINES_MIN, n))
+    if (clamped !== settings.persistScrollbackLines) updateSettings({ persistScrollbackLines: clamped })
+    setLinesDraft(String(clamped))
+  }
   const clearAll = (): void => {
     const api = window.snApi.scrollback
     if (!api) return
@@ -185,11 +199,11 @@ export function TerminalSection() {
             step={100}
             disabled={!settings.persistScrollback || snapshotOff}
             className={cn(inputCls, 'max-w-[10rem]', (!settings.persistScrollback || snapshotOff) && 'pointer-events-none opacity-50')}
-            value={settings.persistScrollbackLines}
-            onChange={(e) => {
-              const n = Math.round(Number(e.target.value))
-              if (!Number.isFinite(n) || n <= 0) return
-              updateSettings({ persistScrollbackLines: Math.min(PERSIST_LINES_MAX, Math.max(PERSIST_LINES_MIN, n)) })
+            value={linesDraft}
+            onChange={(e) => setLinesDraft(e.target.value)}
+            onBlur={commitLines}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur()
             }}
           />
         </SettingRow>

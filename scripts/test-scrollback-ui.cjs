@@ -58,6 +58,7 @@ window.smoke={calls,theme:applyTheme,app:useAppStore.getState,
  toggle:()=>document.querySelector('[data-persist-scrollback] button[role=switch]'),
  clearBtn:()=>{const b=document.querySelector('[data-clear-scrollback]');return b?{t:b.textContent,d:b.disabled}:null},
  lines:()=>document.querySelector('[data-persist-scrollback] input[type=number]'),
+ blur:(el)=>el.dispatchEvent(new FocusEvent('focusout',{bubbles:true})),
  dialog:()=>{const b=document.querySelector('[data-confirm]');const d=b&&b.closest('.rounded-modal');return d?d.textContent:null},
  confirm:()=>document.querySelector('[data-confirm]').click(),
  click:(el)=>el.click(),
@@ -94,9 +95,17 @@ app.whenReady().then(async()=>{
  v=await js("({s:smoke.section(),b:smoke.clearBtn(),l:smoke.lines()&&smoke.lines().value})");
  if(!v.s||!v.s.includes('Guardar historial de consolas entre reinicios')||!v.s.includes('Líneas a guardar')||v.l!=='2000')fail('the persist section with its defaults',v);n++;
  if(!v.b||v.b.d||v.b.t!=='Borrar todo el historial guardado (3 consolas, 1.5 MB)')fail('the clear-all button shows N consoles and MB',v);n++;
- await js("smoke.setInput(smoke.lines(),'99999')");await wait(50);
- if(await js("smoke.settings().persistScrollbackLines")!==5000)fail('lines are clamped to 5000',await js("smoke.settings().persistScrollbackLines"));
- await js("smoke.setInput(smoke.lines(),'2500')");await wait(50);
+ await js("smoke.setInput(smoke.lines(),'3')");await wait(50);
+ v=await js("({s:smoke.settings().persistScrollbackLines,l:smoke.lines().value})");
+ if(v.s!==2000||v.l!=='3')fail('a half-typed value is not clamped while typing',v);n++;
+ await js("smoke.setInput(smoke.lines(),'3000');smoke.blur(smoke.lines())");await wait(50);
+ if(await js("smoke.settings().persistScrollbackLines")!==3000)fail('lines commit on blur',await js("smoke.settings().persistScrollbackLines"));
+ await js("smoke.setInput(smoke.lines(),'99999');smoke.blur(smoke.lines())");await wait(50);
+ v=await js("({s:smoke.settings().persistScrollbackLines,l:smoke.lines().value})");
+ if(v.s!==5000||v.l!=='5000')fail('lines are clamped to 5000',v);
+ await js("smoke.setInput(smoke.lines(),'');smoke.blur(smoke.lines())");await wait(50);
+ if(await js("smoke.lines().value")!=='5000')fail('an empty value snaps back',await js("smoke.lines().value"));
+ await js("smoke.setInput(smoke.lines(),'2500');smoke.blur(smoke.lines())");await wait(50);
  if(await js("smoke.settings().persistScrollbackLines")!==2500)fail('lines follow the input',null);n++;
  await shot('scrollback-es-midnight');
  // Clear all asks first, then empties and refreshes the counts.
