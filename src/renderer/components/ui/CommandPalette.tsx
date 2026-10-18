@@ -27,7 +27,11 @@ interface Command {
   icon?: IconComponent
   /** Bound keymap action: its accelerator shows on the row (E5-FR-18). */
   action?: ActionId
-  /** Text the query matches against when it is more than the label. */
+  /**
+   * Longer free text (an agent's topic and first prompt) the query must
+   * contain as a substring: a fuzzy subsequence over a 200 char prompt would
+   * match nearly any query.
+   */
   search?: string
   /** Console rows (E5-FR-16) show its live glyph. */
   paneId?: string
@@ -174,7 +178,7 @@ export function CommandPalette() {
         out.push({
           id: `console-${p.id}`,
           label,
-          search: [label, info?.topic, info?.firstPrompt].filter(Boolean).join(' '),
+          search: [info?.topic, info?.firstPrompt].filter(Boolean).join('\n'),
           hint: t('palette.console'),
           icon: iconFor(p.icon),
           paneId: p.id,
@@ -188,7 +192,7 @@ export function CommandPalette() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return commands
-    return [...consoleCommands, ...commands].filter((c) => matches(q, (c.search ?? c.label).toLowerCase()))
+    return [...consoleCommands, ...commands].filter((c) => matches(q, c.label.toLowerCase()) || !!c.search?.toLowerCase().includes(q))
   }, [commands, consoleCommands, query])
 
   useEffect(() => {

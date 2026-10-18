@@ -129,7 +129,10 @@ app.whenReady().then(async()=>{
  await js("(()=>{const i=document.querySelector('[data-palette-waiting]').closest('.relative').querySelector('input');const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(i,'migrar');i.dispatchEvent(new Event('input',{bubbles:true}))})()");await frames();
  const found=await js("[...document.querySelectorAll('[data-palette-cmd]')].map(b=>b.dataset.paletteCmd)");
  ok(found[0]==='console-b1'&&!(await js("!!document.querySelector('[data-palette-waiting]')")),'a query finds a console by its topic and hides the waiting section',found);
- await js("(()=>{const i=document.querySelector('[data-palette-cmd]').closest('.relative').querySelector('input');const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(i,'');i.dispatchEvent(new Event('input',{bubbles:true}))})()");await frames();
+ await js("(()=>{const i=document.querySelector('.relative input');const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(i,'mgrb');i.dispatchEvent(new Event('input',{bubbles:true}))})()");await frames();
+ const scattered=await js("[...document.querySelectorAll('[data-palette-cmd]')].map(b=>b.dataset.paletteCmd)");
+ ok(!scattered.includes('console-b1'),'topic and first prompt match as a substring, not as a scattered fuzzy subsequence',scattered);
+ await js("(()=>{const i=document.querySelector('.relative input');const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(i,'');i.dispatchEvent(new Event('input',{bubbles:true}))})()");await frames();
  await js("window.focusLog=[]");
  await js("smoke.key('.relative input','1',{ctrlKey:true})");
  // focusPaneWhenReady waits for animation frames (slow while hidden).
