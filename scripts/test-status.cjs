@@ -451,6 +451,18 @@ async function enrichmentChecks() {
     const n = h.events.length
     h.hook('PermissionRequest', { toolUseId: 'r', toolName: 'Bash', toolSummary: 'Bash: rm' })
     check(h.events.length === n + 1 && h.last().state === 'action', 'a state change is emitted at once even inside the throttle window')
+    h.hook('PostToolUse', { toolUseId: 'r' })
+    check(h.events.length === n + 2 && h.last().state === 'working' && h.last().pending === undefined, 'resolving a pending request is emitted at once')
+    // Real Claude pairs every PreToolUse with a PostToolUse: those must not defeat the throttle.
+    const h2 = rich()
+    h2.hook('UserPromptSubmit', { prompt: 'x' })
+    const start = h2.events.length
+    for (let i = 0; i < 10; i++) {
+      h2.tick(50); h2.hook('PreToolUse', { toolName: 'Read', toolUseId: `t${i}`, toolSummary: `Read g${i}.ts` })
+      h2.tick(50); h2.hook('PostToolUse', { toolUseId: `t${i}` })
+    }
+    h2.flush()
+    check(h2.events.length - start <= 3 && h2.last().activity === 'Read g9.ts' && h2.heard.length === h2.events.length, '10 PreToolUse/PostToolUse pairs in one second stay throttled')
   }
   // Listener seam (E1-FR-01) and SessionEnd parsing for E6-FR-21.
   {
@@ -581,8 +593,9 @@ async function enrichmentChecks() {
   const ref = S.getState().workspaces
   S.getState().setPaneStatus({ paneId: 'p1', state: 'working', precise: true, notify: false, provider: 'claude', updatedAt: 12, sessionId: SID, cwd: 'C:\\repo' })
   S.getState().setPaneStatus({ paneId: 'p1', state: 'working', precise: true, notify: false, provider: 'claude', updatedAt: 13, sessionId: SID })
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'working', precise: true, notify: false, provider: 'claude', updatedAt: 14, sessionId: SID, cwd: 'C:\\repo\\sub' })
   flushSaves()
-  check(S.getState().workspaces === ref && saves.length === 1, 'the same session never rewrites the config')
+  check(S.getState().workspaces === ref && saves.length === 1 && S.getState().workspaces[0].panes[0].lastSession.cwd === 'C:\\repo', 'the same session never rewrites the config, not even after a cd')
   check(parseConfig(saves[0]).workspaces[0].panes[0].lastSession.sessionId === SID, 'the mirrored lastSession passes the schema 11 validation')
   S.getState().setPaneStatus({ paneId: 'p1', state: null, precise: false, notify: false })
   check(S.getState().paneStatus.p1 === undefined && S.getState().workspaces[0].panes[0].lastSession.sessionId === SID, 'state:null clears the status but keeps the lastSession mirror')

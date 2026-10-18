@@ -250,7 +250,10 @@ function withLastSession(workspaces: Workspace[], evt: PaneStatusEvt): Workspace
     const pane = ws.panes.find((p) => p.id === evt.paneId)
     if (!pane) continue
     const prev = pane.lastSession
-    const cwd = evt.cwd ?? (prev?.sessionId === sessionId ? prev.cwd : '')
+    // The first cwd of a session is its launch directory (what a resume needs,
+    // E5 spawnCwd). Claude's hook cwd follows a later `cd`, so it never moves it.
+    const same = prev?.sessionId === sessionId && prev.provider === provider
+    const cwd = same && prev.cwd ? prev.cwd : evt.cwd ?? ''
     if (prev && prev.sessionId === sessionId && prev.provider === provider && prev.cwd === cwd) return workspaces
     const lastSession = { provider, sessionId, cwd, at: evt.updatedAt ?? Date.now() }
     return workspaces.map((w) => (w === ws ? { ...w, panes: w.panes.map((p) => (p === pane ? { ...p, lastSession } : p)) } : w))

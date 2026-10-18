@@ -57,7 +57,10 @@ export type StatusListener = (evt: PaneStatusEvt, cause?: AgentEvent) => void
 /** Same charset as schema 11 `lastSession.sessionId`: rejects `launch:` ids and shell syntax. */
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/
 const DETAIL_THROTTLE_MS = 500
-const IMMEDIATE_KINDS = new Set<AgentEvent['kind']>(['start', 'end', 'request', 'resolved', 'done', 'error', 'unknown'])
+// 'resolved' is not here: every tool call ends in a PostToolUse, so forcing it
+// would defeat the throttle. A resolution that clears a pending request still
+// goes out at once through the state / pending signature.
+const IMMEDIATE_KINDS = new Set<AgentEvent['kind']>(['start', 'end', 'request', 'done', 'error', 'unknown'])
 const GENERIC_TOPICS = /^(claude|claude code)$/i
 
 /** Topic after the spinner / stopped glyph of Claude's OSC title, or undefined for generic titles. */
