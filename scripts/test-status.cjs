@@ -275,11 +275,13 @@ async function schemaV11Checks() {
   v11.workspaces[0].panes[0].lastSession = { provider: 'claude', sessionId: '0123abcd-0000-4000-8000-000000000000', cwd: 'C:/repo', at: 5 }
   v11.workspaces[0].panes[1].lastSession = { provider: 'gemini', sessionId: '', cwd: 1 }
   v11.workspaces[1].agentsCollapsed = 'no'
+  v11.workspaces[1].panes[0].lastSession = { provider: 'codex', sessionId: 'abcd1234; calc.exe', cwd: 'C:/repo', at: 6 }
   const d = parseConfig(v11)
   check(d && d.settings.terminalRenderer === 'canvas' && d.settings.awakeMode === 'auto' && d.settings.terminalUnicode11 === true, 'junk renderer, awake mode and Unicode values fall back without rejecting the config')
   check(d.settings.agents.resumeOnStartup === 'auto' && d.settings.agents.ctrlDigitFocus === false && d.settings.agents.topicAsTitle === true, 'partial agents settings keep values and default the rest')
   check(d.workspaces[0].agentsCollapsed === true && d.workspaces[1].agentsCollapsed === undefined, 'agentsCollapsed kept, malformed value dropped')
   check(d.workspaces[0].panes[0].lastSession.sessionId.startsWith('0123abcd') && d.workspaces[0].panes[1].lastSession === undefined, 'valid lastSession kept, malformed one dropped instead of failing the whole config')
+  check(d.workspaces[1].panes[0].lastSession === undefined, 'a lastSession id with shell syntax (imported config) is dropped')
   check(parseConfig({ ...v10, version: 12 }).version === 11, 'parse stamps the current version')
 
   // ConfigStore: only the renderer load (upgrade) stamps an older file, once.
@@ -344,6 +346,9 @@ async function schemaV11Checks() {
   check(!('mountedWorkspaces' in saves[1]) && !('paneStatus' in saves[1]) && saves[1].settings.agents.ctrlDigitFocus === true, 'transient slices never reach config.json, v11 settings do')
   S.getState().deleteWorkspace('w1')
   check(!('w1' in S.getState().mountedWorkspaces) && S.getState().mountedWorkspaces.w2 === 'full', 'deleting a workspace unmounts it and mounts the next active one')
+  check(m.keepMounted({ a: 'full', b: ['p'], c: 'full' }, ['b', 'c', 'z']).a === undefined && JSON.stringify(m.keepMounted({ a: 'full', b: ['p'] }, ['b'])) === '{"b":["p"]}', 'keepMounted keeps only surviving workspace ids')
+  S.getState().importConfig({ ...c, workspaces: [{ ...c.workspaces[0], id: 'w3' }, c.workspaces[1]] })
+  check(JSON.stringify(S.getState().mountedWorkspaces) === '{"w2":"full","w3":"full"}' && S.getState().activeWorkspaceId === 'w3', 'replace import keeps a surviving workspace mounted (its consoles keep running) and mounts the new active one')
   stop()
 }
 

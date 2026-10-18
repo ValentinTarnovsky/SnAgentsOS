@@ -21,6 +21,7 @@ import { visiblePaneIds } from '@shared/status'
 import {
   type EnsureMountedOpts,
   type MountedWorkspaces,
+  keepMounted,
   withMounted,
   withoutMounted,
 } from '@/lib/mounting'
@@ -341,8 +342,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   importConfig: (config) =>
     set((s) => ({
-      // The replaced workspaces unmount with the list; only the new active one mounts.
-      mountedWorkspaces: mountActive({}, config.workspaces?.[0]?.id ?? null),
+      // Workspaces that leave the list unmount; ones that survive the import
+      // (same id) keep their consoles running, and the new active one mounts.
+      mountedWorkspaces: mountActive(
+        keepMounted(s.mountedWorkspaces, (config.workspaces ?? []).map((w) => w.id)),
+        config.workspaces?.[0]?.id ?? null,
+      ),
       workspaces: config.workspaces ?? [],
       presets: config.presets && config.presets.length ? config.presets : s.presets,
       snippets: config.snippets ?? [],

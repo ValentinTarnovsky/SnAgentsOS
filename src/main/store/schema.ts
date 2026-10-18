@@ -50,8 +50,10 @@ const paneSchema = z.object({
   lastSession: z
     .object({
       provider: z.enum(['claude', 'codex']),
-      sessionId: z.string().min(1).max(256),
-      cwd: z.string(),
+      // Same charset as E5's SESSION_ID_RE, so an imported config can never
+      // smuggle shell syntax into a resume command typed later.
+      sessionId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/),
+      cwd: z.string().max(4096),
       at: z.number(),
     })
     .optional()
