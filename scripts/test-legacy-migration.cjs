@@ -461,6 +461,20 @@ async function pipelineChecks() {
     fs.rmSync(path.join(legacyDir, 'nested'), { recursive: true })
     check(sameTree(snapshotTree(legacyDir), before), 'pipeline: overlapping legacy folder untouched')
   }
+  // NFR: the synchronous part (migrate, verify, zip, mark) of a ~7 KB config with
+  // 12 backups and devices stays under 800 ms. The first run warms the bundle up.
+  {
+    const config = JSON.stringify(makeConfig({ ws: 45, presets: 25 }))
+    const seed = () => { const f = fresh(); seedLegacy(f.legacyDir, { config, backups: 12 }); return f }
+    const warm = seed()
+    pipe(L, warm)
+    const { legacyDir, targetDir } = seed()
+    const t0 = process.hrtime.bigint()
+    const r = pipe(L, { legacyDir, targetDir })
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6
+    check(r.status === 'committed' && r.marker.verified.backups === 12 && fs.existsSync(path.join(targetDir, 'migration-backup-v1.zip')), 'pipeline perf: migrated with 12 backups and the zip')
+    check(ms < 800, `pipeline perf: ${Math.round(config.length / 1024)} KB config, 12 backups and devices in under 800 ms (${ms.toFixed(1)} ms)`)
+  }
 }
 
 async function verificationChecks() {
