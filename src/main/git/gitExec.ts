@@ -8,10 +8,15 @@
  *    from refreshing the index;
  *  - a global semaphore runs at most 2 git processes, and a remote (phone)
  *    request can only ever hold 1 of them, so the desktop always has a slot.
+ *  - git runs by its absolute path, found in the absolute PATH entries only:
+ *    on Windows a bare `git` is searched in the cwd first, so a repo holding
+ *    its own git.exe would otherwise run it as soon as its chip refreshes.
  * Flag and env pattern after Orca's status-line-stats.ts and git-process-env.ts
  * (flags only, no code copied).
  */
 import { execFile as nodeExecFile } from 'child_process'
+import { existsSync, statSync } from 'fs'
+import { posix, win32 } from 'path'
 import type { GitError, GitInfoRes } from '@shared/git-types'
 
 export const GIT_PREFIX = ['-c', 'core.quotePath=false', '-c', 'core.fsmonitor=false', '-c', 'diff.autoRefreshIndex=false']
@@ -91,6 +96,46 @@ export function versionTooOld(v: number[]): boolean {
   return v[0] < MIN_GIT_VERSION[0] || (v[0] === MIN_GIT_VERSION[0] && v[1] < MIN_GIT_VERSION[1])
 }
 
+/** Case-insensitive env lookup (Windows keeps `Path`, POSIX keeps `PATH`). */
+function envValue(env: NodeJS.ProcessEnv, key: string): string {
+  const hit = Object.keys(env).find((k) => k.toUpperCase() === key)
+  return (hit && env[hit]) || ''
+}
+
+const defaultIsFile = (p: string): boolean => {
+  try {
+    return statSync(p).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Absolute path of `name` from the absolute PATH entries, or null. Never the
+ * cwd and never a relative PATH entry (both would let a repo plant its own
+ * git). On Windows only .exe / .com, which execFile runs without a shell.
+ */
+export function resolveGitBin(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  isFile: (p: string) => boolean = defaultIsFile,
+  name = 'git',
+): string | null {
+  const win = platform === 'win32'
+  const p = win ? win32 : posix
+  const candidates = win ? (/\.(exe|com)$/i.test(name) ? [name] : [`${name}.exe`, `${name}.com`]) : [name]
+  for (const raw of envValue(env, 'PATH').split(p.delimiter)) {
+    const dir = raw.trim().replace(/^"|"$/g, '')
+    // Windows: a drive path or UNC only; "\dir" hangs off the cwd's drive.
+    if (!dir || !p.isAbsolute(dir) || (win && !/^([a-z]:[\\/]|\\\\)/i.test(dir))) continue
+    for (const c of candidates) {
+      const hit = p.join(dir, c)
+      if (isFile(hit)) return hit
+    }
+  }
+  return null
+}
+
 interface Waiter {
   priority: GitPriority
   start: () => void
@@ -107,7 +152,9 @@ export interface GitRunnerDeps {
   execFile?: ExecFileFn
   env?: () => NodeJS.ProcessEnv
   platform?: NodeJS.Platform
+  /** Fixed git binary (tests). Default: resolveGitBin over the env's PATH. */
   gitBin?: string
+  isFile?: (p: string) => boolean
 }
 
 /** A git runner with its own semaphore. The app uses the `gitRunner` singleton. */
@@ -115,7 +162,12 @@ export function createGitRunner(deps: GitRunnerDeps = {}): GitRunner {
   const exec: ExecFileFn = deps.execFile ?? (nodeExecFile as unknown as ExecFileFn)
   const envOf = deps.env ?? (() => gitEnv())
   const platform = deps.platform ?? process.platform
-  const bin = deps.gitBin ?? 'git'
+  let bin: string | null | undefined = deps.gitBin
+  const binOf = (force = false): string | null => {
+    if (deps.gitBin) return deps.gitBin
+    if (bin === undefined || force) bin = resolveGitBin(envOf(), platform, deps.isFile)
+    return bin
+  }
   let running = 0
   let remoteRunning = 0
   const queue: Waiter[] = []
@@ -166,7 +218,8 @@ export function createGitRunner(deps: GitRunnerDeps = {}): GitRunner {
         exec(file, args, { cwd, env: envOf(), timeout: timeoutMs, maxBuffer, windowsHide: true, encoding: 'utf8' }, (err, stdout, stderr) => {
           const errText = String(stderr ?? '')
           if (err) {
-            const code = classifyGitError(err, errText)
+            // A spawn ENOENT with a git we just found means the cwd is gone, not git.
+            const code = err.code === 'ENOENT' && !existsSync(cwd) ? 'not_repo' : classifyGitError(err, errText)
             reject(new GitExecError(code, errText.trim() || err.message, errText))
           } else resolve({ stdout: String(stdout ?? ''), stderr: errText })
         })
@@ -180,9 +233,11 @@ export function createGitRunner(deps: GitRunnerDeps = {}): GitRunner {
       return running
     },
     async run(args, opts) {
+      const file = binOf()
+      if (!file) throw new GitExecError('git_missing', 'git not found in PATH')
       const release = await acquire(opts.priority ?? 'desktop')
       try {
-        const { stdout } = await execRaw(bin, [...GIT_PREFIX, ...args], opts.cwd, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, opts.maxBuffer ?? 16 * 1024 * 1024)
+        const { stdout } = await execRaw(file, [...GIT_PREFIX, ...args], opts.cwd, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, opts.maxBuffer ?? 16 * 1024 * 1024)
         return stdout
       } finally {
         release()
@@ -191,23 +246,18 @@ export function createGitRunner(deps: GitRunnerDeps = {}): GitRunner {
     info(force = false) {
       if (infoCache && !force) return infoCache
       infoCache = (async (): Promise<GitInfoRes> => {
+        const file = binOf(force)
+        if (!file) return { available: false }
         let version: number[] | null = null
         let raw = ''
         try {
-          raw = (await execRaw(bin, ['--version'], process.cwd(), 5000, 64 * 1024)).stdout.trim()
+          raw = (await execRaw(file, ['--version'], platform === 'win32' ? win32.dirname(file) : posix.dirname(file), 5000, 64 * 1024)).stdout.trim()
           version = parseGitVersion(raw)
         } catch {
           return { available: false }
         }
-        let where: string | undefined
-        try {
-          const out = await execRaw(platform === 'win32' ? 'where' : 'which', [bin], process.cwd(), 5000, 64 * 1024)
-          where = out.stdout.split(/\r?\n/).map((l) => l.trim()).find(Boolean)
-        } catch {
-          /* the version is what matters; the path is a hint */
-        }
         const label = version ? version.join('.') : raw.replace(/^git version\s*/, '')
-        return { available: true, version: label, path: where, tooOld: version ? versionTooOld(version) : false }
+        return { available: true, version: label, path: deps.gitBin ? undefined : file, tooOld: version ? versionTooOld(version) : false }
       })()
       return infoCache
     },

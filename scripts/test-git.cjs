@@ -203,6 +203,18 @@ same(gx.parseGitVersion('git version 2.45.1.windows.1'), [2, 45, 1], 'windows ve
 check(gx.versionTooOld([2, 19, 9]) && gx.versionTooOld([1, 9, 0]) && !gx.versionTooOld([2, 20, 0]) && !gx.versionTooOld([3, 0, 0]), 'minimum git is 2.20')
 check(gx.GIT_PREFIX.join(' ') === '-c core.quotePath=false -c core.fsmonitor=false -c diff.autoRefreshIndex=false', 'fixed -c prefix')
 
+// git binary lookup: absolute PATH entries only, never the cwd (a repo's own git.exe).
+{
+  const seen = []
+  const files = new Set(['C:\\Git\\cmd\\git.exe', 'D:\\rel\\git.exe', '/usr/bin/git'])
+  const isFile = (p) => { seen.push(p); return files.has(p) }
+  check(gx.resolveGitBin({ Path: '.;rel;\\Git\\cmd;"C:\\Git\\cmd"' }, 'win32', isFile) === 'C:\\Git\\cmd\\git.exe', 'windows: Path key in any case, quoted entry, .exe')
+  check(!seen.some((p) => !/^[A-Z]:\\/.test(p)), `windows: ".", relative and drive-relative PATH entries are never probed (${seen.filter((p) => !/^[A-Z]:\\/.test(p)).join(', ')})`)
+  check(gx.resolveGitBin({ PATH: 'C:\\nogit' }, 'win32', isFile) === null && gx.resolveGitBin({}, 'win32', isFile) === null, 'no git in PATH: null')
+  check(gx.resolveGitBin({ PATH: 'bin:/usr/bin' }, 'linux', isFile) === '/usr/bin/git', 'posix: absolute entries only')
+  check(gx.resolveGitBin({ PATH: 'C:\\Git\\cmd' }, 'win32', (p) => p === 'C:\\Git\\cmd\\git.cmd') === null, 'windows: a git.cmd alone is not run (no shell)')
+}
+
 function fakeExec() {
   const calls = []
   const fn = (file, args, opts, cb) => calls.push({ file, args, opts, done: (out = '', err = null, stderr = '') => cb(err, out, stderr) })
@@ -221,7 +233,7 @@ process.on('exit', (code) => {
 ;(async () => {
   {
     const fx = fakeExec()
-    const runner = gx.createGitRunner({ execFile: fx.fn, env: () => ({ X: '1' }) })
+    const runner = gx.createGitRunner({ execFile: fx.fn, env: () => ({ X: '1' }), gitBin: 'git' })
     const p = [1, 2, 3].map(() => runner.run(['status'], { cwd: 'C:\\r' }))
     await tick()
     check(runner.running === 2 && fx.calls.length === 2, 'at most 2 git processes at once')
@@ -665,6 +677,19 @@ process.on('exit', (code) => {
       const pv = (await summarize(sm, polluted)).summary
       check(pv && pv.files === 1 && pv.added === 10 && path.resolve(pv.repoRoot).toLowerCase() === path.resolve(sm).toLowerCase(), 'GIT_DIR / GIT_WORK_TREE in the env never redirect the query')
 
+      // A folder holding its own git.exe never runs it (Windows searches the cwd first for a bare name).
+      check(path.isAbsolute((await realRunner.info()).path || ''), 'the runner reports git by its absolute path')
+      const sys32Host = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'hostname.exe')
+      if (process.platform === 'win32' && fs.existsSync(sys32Host)) {
+        const trap = path.join(base, 'trap')
+        fs.mkdirSync(trap)
+        fs.copyFileSync(sys32Host, path.join(trap, 'git.exe'))
+        const tv = await summarize(trap)
+        check(tv.summary === null && tv.error === 'not_repo', `a planted git.exe in the cwd is not run (got ${tv.error})`)
+      }
+      const gone = await summarize(path.join(base, 'does-not-exist'))
+      check(gone.error === 'not_repo', `a deleted workspace folder is not_repo, not git_missing (got ${gone.error})`)
+
       // Not a repo.
       const plain = path.join(base, 'plain')
       fs.mkdirSync(plain)
@@ -769,6 +794,10 @@ process.on('exit', (code) => {
   updateCb({ key: 'ws:w1', cwd: 'C:\\fixture\\secret-repo', summary: sum() })
   await sleep(160)
   check(pushes.length === p0 + 1, 'an unchanged summary does not push a new state')
+  updateCb({ key: 'ws:w1', cwd: 'C:\\fixture\\secret-repo', summary: sum({ staged: 2, unstaged: 2, updatedAt: 9 }) })
+  updateCb({ key: 'pane:p9', cwd: 'C:\\wt', summary: sum({ branch: 'sn/x' }) })
+  await sleep(160)
+  check(pushes.length === p0 + 1 && useGitStore.getState().summaries['ws:w1'].staged === 2, 'a change the phone cannot see (areas, updatedAt, a pane worktree) pushes no state')
   useAppStore.setState((s) => ({ settings: { ...s.settings, gitChip: false } }))
   await sleep(160)
   check(pushes.length === p0 + 2 && pushes.at(-1).workspaces[0].git === undefined, 'gitChip off omits git from the state')
