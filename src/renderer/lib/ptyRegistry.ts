@@ -1,6 +1,7 @@
 /**
- * Maps live pane ids to their backing pty ids so we can force-kill a
- * workspace's consoles on delete, independent of React unmount timing.
+ * Maps live pane ids to their backing pty ids (for direct writes and the
+ * remote `running` flag). Kills go by paneId through main, so they never
+ * depend on this map or on React unmount timing (E4-FR-36).
  */
 const registry = new Map<string, string>()
 
@@ -37,16 +38,18 @@ export function getPtyId(paneId: string): string | undefined {
   return registry.get(paneId)
 }
 
-/** Kill the ptys backing the given panes (no-op for panes without one). */
+/**
+ * Kill the ptys backing the given panes (E4-FR-36). Main kills by paneId
+ * (`pty:killPanes`), so this works even when the registry is empty after a
+ * renderer reload; the local bindings are dropped too. Idempotent: a pane
+ * without a pty is a no-op in main.
+ */
 export function killPanePtys(paneIds: string[]): void {
+  if (paneIds.length === 0) return
+  void window.snApi.pty.killPanes(paneIds).catch(() => undefined)
   let changed = false
   for (const paneId of paneIds) {
-    const ptyId = registry.get(paneId)
-    if (ptyId) {
-      void window.snApi.pty.kill(ptyId)
-      registry.delete(paneId)
-      changed = true
-    }
+    if (registry.delete(paneId)) changed = true
   }
   if (changed) notify()
 }

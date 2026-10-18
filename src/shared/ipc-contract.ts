@@ -366,6 +366,10 @@ export interface SnApi {
     onExit(cb: (e: PtyExitEvt) => void): () => void
     /** Restart the pane's shell in place, keeping its output (E6-FR-18). Rejects when the spawn fails. */
     restart(req: PtyRestartReq): Promise<PtyRestartRes>
+    /** Kill the ptys of these panes in main, by paneId (E4-FR-36). Resolves to how many were live. */
+    killPanes(paneIds: string[]): Promise<number>
+    /** Kill every pty whose pane is not in `livePaneIds` (after hydrate, E4-FR-36). */
+    reconcile(livePaneIds: string[]): Promise<number>
   }
   dialog: {
     /** Opens a native folder picker; resolves to the chosen path or null. */

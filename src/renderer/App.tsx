@@ -10,6 +10,7 @@ import { initPowerEvents, syncAgentSettings, syncAwakeMode } from '@/lib/powerSt
 import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
 import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { startPersistence } from '@/lib/persist'
+import { initPtyLifecycle, reconcilePtys } from '@/lib/ptyLifecycle'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
 import { usePaneScheduler } from '@/lib/usePaneScheduler'
 import { useStatusEvents } from '@/lib/useStatusEvents'
@@ -43,16 +44,28 @@ export function App() {
   const agents = useAppStore((s) => s.settings.agents)
 
   // Load persisted config once, then start the debounced persistence writer.
+  // The pty lifecycle (E4-FR-36) starts right after hydrate: removed panes are
+  // killed from then on, and main kills the ptys whose pane did not survive
+  // the reload. A failed load never reconciles (an empty store is not "no panes").
   useEffect(() => {
     let unsub: (() => void) | undefined
+    let stopLifecycle: (() => void) | undefined
     window.snApi.config
       .load()
       .then((cfg) => {
         hydrate(cfg)
+        stopLifecycle = initPtyLifecycle()
+        if (cfg) void reconcilePtys()
         unsub = startPersistence()
       })
-      .catch(() => hydrate(null))
-    return () => unsub?.()
+      .catch(() => {
+        hydrate(null)
+        stopLifecycle = initPtyLifecycle()
+      })
+    return () => {
+      unsub?.()
+      stopLifecycle?.()
+    }
   }, [hydrate])
 
   // Apply the active theme to CSS custom properties (xterm reads it separately).
