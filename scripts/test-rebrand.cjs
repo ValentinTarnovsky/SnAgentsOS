@@ -831,6 +831,8 @@ async function main() {
     } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
   }
 
+  docsBrandChecks(BRAND)
+
   // No en dash or em dash anywhere under src/ (style rule; check-brand extends it to the repo).
   const walk = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)])
   const offenders = walk(path.join(root, 'src')).filter(f => /\.(tsx?|html|css|json|webmanifest)$/.test(f) && DASH_RE.test(fs.readFileSync(f, 'utf8')))
@@ -1329,6 +1331,108 @@ async function legacyUiChecks(BRAND, LEGACY_BRAND, en, es) {
   check(read('src/main/index.ts').includes('registerLegacyIpc({'), 'main registers the legacy IPC')
   for (const file of ['src/main/ipc/registerLegacyIpc.ts', 'src/main/migration/legacyInfo.ts', 'src/renderer/lib/legacyStore.ts', 'src/renderer/components/rebrand/RebrandNotice.tsx', 'src/renderer/components/rebrand/LegacyBanner.tsx']) check(!LEGACY_RE.test(read(file)), `${file}: no legacy literal`)
   check(LEGACY_BRAND.productName === 'SnMultiCC' && BRAND.productName === 'SnAgentsOS', 'notice names come from the brand constants')
+}
+
+
+// R20-09: README, release notes, .gitignore and the brand guard (E0-FR-22,
+// FR-23, FR-24 content). The guard itself runs last in npm test; here its
+// rules are pinned down, also end to end in a scratch git repo.
+function docsBrandChecks(BRAND) {
+  const { spawnSync } = require('node:child_process')
+  const guard = require(path.join(root, 'scripts/check-brand.cjs'))
+  const emDash = String.fromCharCode(0x2014), enDash = String.fromCharCode(0x2013)
+  const S = guard.LEGACY_START, E = guard.LEGACY_END
+  const kinds = (file, text) => guard.scanText(file, text).map(f => `${f.kind}:${f.line}`).join()
+
+  // E0-FR-23: the allowlist and the dash rule.
+  check(kinds('src/main/foo.ts', "const a = 'SnMultiCC'\n") === 'legacy:1', 'guard: a legacy literal in src/ is a finding')
+  check(kinds('src/main/foo.ts', 'multicc\nMulti Command Consoles\nSNMULTICC_X\n') === 'legacy:1,legacy:2,legacy:3', 'guard: every variant, in any case')
+  check(kinds('src/shared/brand.ts', "productName: 'SnMultiCC'") === '' && kinds('src/main/migration/x.ts', 'snmulticc') === '' && kinds('build/installer.nsh', 'SnMultiCC.exe') === '', 'guard: allowlisted source files')
+  check(kinds('docs/release-notes/v9.md', 'SnMultiCC') === '' && kinds('scripts/test-legacy-migration.cjs', 'snmulticc') === '', 'guard: allowlisted docs and tests')
+  check(kinds('src/main/migrationx.ts', 'snmulticc') === 'legacy:1' && kinds('src/main/migration.ts', 'snmulticc') === 'legacy:1' && kinds('scripts/test-status.cjs', 'snmulticc') === 'legacy:1', 'guard: a prefix rule needs the folder, other scripts are scanned')
+  check(kinds('README.md', 'a\nSnMultiCC\n') === 'legacy:2', 'README: the name outside the markers fails')
+  check(kinds('README.md', `x\n${S}\n## SnMultiCC\n${E}\nSnMultiCC\n`) === 'legacy:5', 'README: allowed only between the markers')
+  check(kinds('README.md', `${S}\nSnMultiCC\n`) === 'marker:1', 'README: an unclosed marker fails instead of allowing the rest')
+  check(kinds('README.md', `${E}\n`) === 'marker:1' && kinds('README.md', `${S}\n${S}\n${E}\n`) === 'marker:2', 'README: stray or nested markers fail')
+  check(kinds('.gitignore', 'snmulticc-data/\n') === '' && kinds('.gitignore', '# snmulticc-data/\nsnmulticc-x/\n') === 'legacy:1,legacy:2', '.gitignore: only the exact line')
+  check(kinds('docs/x.md', `a ${emDash} b\n`) === 'dash:1' && kinds('scripts/check-brand.cjs', `x${enDash}\n`) === 'dash:1' && kinds('README.md', `${S}\n${emDash}\n${E}\n`) === 'dash:2', 'guard: an en/em dash fails even where the name is allowed')
+  check(kinds('src/a.ts', `SnMultiCC ${emDash}`) === 'dash:1,legacy:1', 'guard: both findings on one line')
+  check(guard.scanText('a.ts', 'x\r\ny SnMultiCC\r\n')[0].line === 2, 'guard: CRLF line numbers')
+  check(guard.isBinary(Buffer.from([0x89, 0x50, 0, 1])) && !guard.isBinary(Buffer.from('SnMultiCC')), 'guard: a NUL byte means binary, as git grep -I')
+  check(guard.ALLOWLIST.every(r => r.why && (r.path || r.prefix)), 'guard: every allowlist entry says why')
+
+  // End to end in a scratch repo: a planted literal fails, binaries and ignored files never do.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'snaos-brand-'))
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: os.tmpdir() }
+  for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']) delete env[k]
+  try {
+    const git = (...args) => spawnSync('git', args, { cwd: tmp, env, encoding: 'utf8' })
+    const run = (dir = tmp) => spawnSync(process.execPath, [path.join(root, 'scripts/check-brand.cjs')], { cwd: dir, env, encoding: 'utf8' })
+    const write = (rel, data) => { fs.mkdirSync(path.dirname(path.join(tmp, rel)), { recursive: true }); fs.writeFileSync(path.join(tmp, rel), data) }
+    check(git('init', '-q').status === 0, 'scratch repo')
+    write('src/ok.ts', "export const name = 'SnAgentsOS'\n")
+    write('src/shared/brand.ts', "export const LEGACY = 'SnMultiCC'\n")
+    write('build/icon.png', Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0]), Buffer.from('SnMultiCC ' + emDash)]))
+    write('.gitignore', 'snmulticc-data/\nignored/\n')
+    write('ignored/old.ts', 'SnMultiCC\n')
+    git('add', '-A')
+    const clean = run()
+    check(clean.status === 0 && clean.stdout.includes('3 text files clean (1 binaries skipped)'), `cli: a clean tree passes, binaries and ignored files skipped (${clean.stdout}${clean.stderr})`)
+    write('src/planted.ts', "export const n = 'SnMultiCC'\n")
+    const planted = run(path.join(tmp, 'src'))
+    check(planted.status === 1 && planted.stderr.includes('src/planted.ts:1: legacy name "SnMultiCC"'), 'cli: a literal planted in src/ fails, untracked and run from a subfolder')
+    git('add', '-A')
+    check(run().status === 1, 'cli: and once it is tracked')
+    fs.rmSync(path.join(tmp, 'src/planted.ts'))
+    check(run().status === 0, 'cli: a tracked file deleted from the tree is skipped')
+    write('src/dash.ts', `// a ${enDash} b\n`)
+    const dashed = run()
+    check(dashed.status === 1 && dashed.stderr.includes('src/dash.ts:1: en/em dash (U+2013)'), 'cli: an en dash fails')
+    fs.rmSync(path.join(tmp, 'src/dash.ts'))
+    fs.mkdirSync(path.join(tmp, 'norepo'))
+    const outside = spawnSync(process.execPath, [path.join(root, 'scripts/check-brand.cjs')], { cwd: path.join(tmp, 'norepo'), env: { ...env, GIT_CEILING_DIRECTORIES: tmp }, encoding: 'utf8' })
+    check(outside.status === 2 && outside.stderr.includes('not a git work tree'), 'cli: outside a git work tree exits 2')
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+
+  // E0-FR-22: README.
+  const pkg = JSON.parse(read('package.json'))
+  const readme = read('README.md')
+  const start = readme.indexOf(S), end = readme.indexOf(E)
+  check(start > 0 && end > start && readme.split(S).length === 2 && readme.split(E).length === 2, 'README: one legacy section between the markers')
+  const outside = readme.slice(0, start) + readme.slice(end + E.length)
+  const legacy = readme.slice(start, end)
+  check(!LEGACY_RE.test(outside), 'README: no legacy name outside the section')
+  check(outside.includes('alt="SnAgentsOS"') && /^# SnAgentsOS$/m.test(outside) && outside.includes('![SnAgentsOS](docs/screenshot.png)'), 'README: name, logo alt and screenshot alt')
+  const links = [...outside.matchAll(/https:\/\/github\.com\/ValentinTarnovsky\/[^\s)]+/g)].map(m => m[0])
+  check(links.length >= 5 && links.every(u => u.startsWith(`https://github.com/${BRAND.repo}/`)), 'README: badges and release links point to the renamed repo')
+  check(outside.includes(`\`v${pkg.version}\``), 'README: the status line shows the package version')
+  for (const name of ['SnAgentsOS-x.y.z-setup.exe', 'SnAgentsOS-x.y.z-portable.exe', 'SnAgentsOS-x.y.z.dmg', 'SnAgentsOS-x.y.z.AppImage', 'snagentsos_x.y.z_amd64.deb']) check(outside.includes('`' + name + '`'), `README: the download table lists ${name}`)
+  check(outside.includes('](#upgrading-from-1x)') && legacy.includes('<a name="upgrading-from-1x"></a>'), 'README: the status line links to the section without spelling the old name')
+  check(/delete what SnMultiCC left behind/.test(legacy) && legacy.includes('`%APPDATA%\\snmulticc`') && legacy.includes('Settings > Apps'), 'README: automatic migration, cleanup and what is deleted')
+  check(legacy.includes('migration-backup-v1.zip') && legacy.includes('deleted automatically 30 days after the migration'), 'README: the zip and its 30-day expiry')
+  check(legacy.includes('**Settings > Data**') && legacy.includes('`%APPDATA%\\snagentsos`') && legacy.includes('`snagentsos-data`'), 'README: where the zip lives')
+  check(/Quit SnAgentsOS completely/.test(legacy) && /copy `config\.json` and `remote-devices\.json` into the data folder/.test(legacy), 'README: the recovery procedure')
+  check(legacy.includes('**Going back to SnMultiCC 1.x is not supported.**'), 'README: rollback to 1.x is not supported')
+  check(/firewall rule for `SnMultiCC\.exe` stays behind, inert/.test(legacy) && /pin SnAgentsOS again/.test(legacy), 'README: firewall and taskbar pin')
+  check(/Installed for all users/.test(legacy) && /Do not keep a portable .*inside the installation folder/.test(legacy), 'README: per-machine and portable notes')
+  check(/iOS keeps the old name/.test(legacy) && legacy.includes('`SnMultiCC.app` is moved to the Trash') && legacy.includes('`sudo apt remove snmulticc`'), 'README: iOS home-screen app, macOS Trash and Linux .deb')
+  check(!DASH_RE.test(readme), 'README: no en/em dash')
+
+  // E0-FR-24: release notes (the release-notes job puts them above the changelog).
+  const notes = read(`docs/release-notes/v${pkg.version}.md`)
+  check(notes.startsWith('## Rebrand\n') && !/^# /m.test(notes), 'release notes: open with the Rebrand section, no H1 above the changelog')
+  check(notes.includes('**What moves over.**') && notes.includes('**What is deleted by itself.**'), 'release notes: what migrates and what is deleted')
+  check(notes.includes('migration-backup-v1.zip') && notes.includes('deleted automatically 30 days after the migration'), 'release notes: the 30-day backup')
+  check(notes.includes('**Firewall.**') && notes.includes('**Taskbar pin.**') && notes.includes('**Rolling back to 1.x is not supported.**'), 'release notes: firewall, pin and no rollback')
+  check(!DASH_RE.test(notes), 'release notes: no en/em dash')
+
+  // E0-FR-22: the small files.
+  const gitignore = read('.gitignore').split(/\r?\n/)
+  check(gitignore.includes('snagentsos-data/') && gitignore.includes('snmulticc-data/'), '.gitignore keeps both portable data folders')
+  check(read('docs/notifications-status-plan.md').split(/\r?\n/)[0] === '> SnMultiCC paso a llamarse SnAgentsOS en v2.0.0; este documento conserva el nombre historico.', 'notifications plan: one-line note at the top')
+
+  // E0-FR-23: wired into npm test, so CI and every release leg run it.
+  check(pkg.scripts.test.startsWith('node scripts/test-status.cjs && node scripts/test-rebrand.cjs') && pkg.scripts.test.endsWith('&& node scripts/check-brand.cjs'), 'npm test ends with the brand guard')
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })
