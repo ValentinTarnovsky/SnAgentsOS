@@ -12,6 +12,10 @@ export interface ContextMenuItem {
   separated?: boolean
   /** Radio item: a check mark when true, an empty slot when false. */
   checked?: boolean
+  /** Shown but not clickable; `hint` says why (tooltip). */
+  disabled?: boolean
+  /** Tooltip, e.g. the reason a disabled item cannot run. */
+  hint?: string
 }
 
 interface ContextMenuProps {
@@ -64,15 +68,20 @@ export function ContextMenu({ x, y, items, onClose, label }: ContextMenuProps) {
             <button
               role={item.checked === undefined ? 'menuitem' : 'menuitemradio'}
               aria-checked={item.checked}
+              aria-disabled={item.disabled || undefined}
+              title={item.hint}
               onClick={() => {
+                if (item.disabled) return
                 item.onClick()
                 onClose()
               }}
               className={cn(
                 'flex w-full items-center gap-2.5 whitespace-nowrap px-3 py-1.5 text-left text-sm transition-colors',
-                item.danger
-                  ? 'text-red-400 hover:bg-red-400/10'
-                  : 'text-text-primary hover:bg-bg-secondary',
+                item.disabled
+                  ? 'cursor-default text-text-secondary/50'
+                  : item.danger
+                    ? 'text-red-400 hover:bg-red-400/10'
+                    : 'text-text-primary hover:bg-bg-secondary',
               )}
             >
               {item.checked !== undefined && (

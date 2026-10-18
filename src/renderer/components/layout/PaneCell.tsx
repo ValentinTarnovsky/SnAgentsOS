@@ -1,7 +1,9 @@
 import { useEffect, useState, type DragEvent } from 'react'
 import {
+  ArchiveRestore,
   Clock,
   GripVertical,
+  History,
   Maximize2,
   Minimize2,
   Minus,
@@ -9,6 +11,7 @@ import {
   Pencil,
   Play,
   RotateCw,
+  SquarePen,
   X,
 } from 'lucide-react'
 import { motion } from 'framer-motion'
@@ -30,6 +33,9 @@ import { PaneStatusDot } from '@/components/ui/StatusDot'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ScheduleDialog } from '@/components/layout/ScheduleDialog'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
+import { ResumeChip } from '@/components/agents/ResumeChip'
+import { useAgentStore } from '@/lib/agentStore'
+import { reopenClosedConsole, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
 
@@ -87,7 +93,11 @@ export function PaneCell({
   const cellVisible = workspaceActive && !hidden
 
   const renamePane = useAppStore((s) => s.renamePane)
-  const restartPane = useAppStore((s) => s.restartPane)
+  // Resume entries (E5-FR-09): from main's session record and the integrations.
+  const settings = useAppStore((s) => s.settings)
+  const session = useAgentStore((s) => s.sessions[pane.id])
+  const closedCount = useAgentStore((s) => s.closedStack.length)
+  const resume = resumeMenuState({ workspaces: [workspace], presets, settings }, session ? { [pane.id]: session } : {}, pane.id)
   const epoch = useAppStore((s) => s.paneEpoch[pane.id] ?? 0)
   // Partial mount (D4): a console outside the mounted list shows a placeholder
   // instead of spawning. The visible workspace always counts as mounted.
@@ -183,10 +193,25 @@ export function PaneCell({
       icon: Clock,
       onClick: () => setScheduling(true),
     },
-    { label: t('pane.restart'), icon: RotateCw, onClick: () => restartPane(pane.id) },
+    ...(resume.show
+      ? [
+          {
+            label: t('agents.restartResume'),
+            icon: History,
+            disabled: !resume.canResume,
+            hint: resume.reason ? t(resume.reason) : undefined,
+            onClick: () => restartResume(pane.id),
+          },
+          { label: t('agents.restartFresh'), icon: SquarePen, onClick: () => restartFresh(pane.id) },
+        ]
+      : [{ label: t('pane.restart'), icon: RotateCw, onClick: () => restartFromButton(pane.id) }]),
     { label: t('pane.redraw'), icon: Paintbrush, onClick: () => redrawPane(pane.id) },
+    ...(closedCount > 0
+      ? [{ label: t('agents.reopenClosed'), icon: ArchiveRestore, separated: true, onClick: () => void reopenClosedConsole() }]
+      : []),
     { label: t('pane.close'), icon: X, danger: true, separated: true, onClick: onClose },
   ]
+  const restartTip = resume.show && resume.button === 'resume' ? t('agents.restartTipResume') : t('pane.restart')
 
   return (
     <motion.div
@@ -273,10 +298,11 @@ export function PaneCell({
             <Clock size={13} />
           </button>
         </Tooltip>
-        <Tooltip label={t('pane.restart')}>
+        <Tooltip label={restartTip}>
           <button
             draggable={false}
-            onClick={() => restartPane(pane.id)}
+            aria-label={restartTip}
+            onClick={() => restartFromButton(pane.id)}
             className="rounded p-1 text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
           >
             <RotateCw size={13} />
@@ -310,7 +336,8 @@ export function PaneCell({
           </button>
         </Tooltip>
       </header>
-      <div className="min-h-0 flex-1">
+      <div className="relative min-h-0 flex-1">
+        <ResumeChip paneId={pane.id} />
         {mounted ? (
           <TerminalPane
             key={epoch}

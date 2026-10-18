@@ -19,7 +19,7 @@ const NO_MINIMIZED: string[] = []
 export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isActive: boolean }) {
   const t = useT()
   const presets = useAppStore((s) => s.presets)
-  const removePane = useAppStore((s) => s.removePane)
+  const closePane = useAppStore((s) => s.closePane)
   const toggleMaximize = useAppStore((s) => s.toggleMaximize)
   const toggleMinimize = useAppStore((s) => s.toggleMinimize)
   const movePane = useAppStore((s) => s.movePane)
@@ -65,7 +65,7 @@ export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isAc
             draggable={!maximizedId}
             onToggleMax={() => toggleMaximize(workspace.id, pane.id)}
             onToggleMin={() => toggleMinimize(workspace.id, pane.id)}
-            onClose={() => removePane(workspace.id, pane.id)}
+            onClose={() => closePane(workspace.id, pane.id)}
             onDragStartCell={() => setDraggingId(pane.id)}
             onDragEnterCell={() => {
               if (draggingId && draggingId !== pane.id) movePane(workspace.id, draggingId, index)

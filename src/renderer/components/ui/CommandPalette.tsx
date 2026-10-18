@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { FileText, Megaphone, Palette, PanelLeft, Plus, Search, Settings } from 'lucide-react'
+import { ArchiveRestore, FileText, Megaphone, Palette, PanelLeft, Plus, Search, Settings } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { insertToConsole } from '@/lib/insertToConsole'
+import { useAgentStore } from '@/lib/agentStore'
+import { reopenClosedConsole } from '@/lib/agentLaunch'
 import { useT } from '@/i18n'
 import { iconFor, type IconComponent } from '@/lib/icons'
 import { THEME_LIST } from '@/themes'
@@ -42,6 +44,7 @@ export function CommandPalette() {
   const addPane = useAppStore((s) => s.addPane)
   const updateSettings = useAppStore((s) => s.updateSettings)
   const setGlobalPromptOpen = useAppStore((s) => s.setGlobalPromptOpen)
+  const canReopen = useAgentStore((s) => s.closedStack.length > 0)
 
   const [query, setQuery] = useState('')
   const [idx, setIdx] = useState(0)
@@ -52,6 +55,10 @@ export function CommandPalette() {
       { id: 'settings', label: t('sidebar.settings'), hint: t('palette.general'), icon: Settings, run: () => setSettingsOpen(true) },
       { id: 'toggle-sidebar', label: t('palette.toggleSidebar'), hint: t('palette.general'), icon: PanelLeft, run: () => toggleSidebar() },
     ]
+    if (canReopen) {
+      // E5-FR-14: the last closed console, same id and place, resuming its chat.
+      cmds.push({ id: 'reopen-closed', label: t('agents.reopenClosed'), hint: t('palette.console'), icon: ArchiveRestore, run: () => void reopenClosedConsole() })
+    }
     for (const w of workspaces) {
       cmds.push({ id: `ws-${w.id}`, label: w.name, hint: t('palette.workspace'), icon: iconFor(w.panes[0]?.icon), run: () => setActive(w.id) })
     }
@@ -86,7 +93,7 @@ export function CommandPalette() {
       cmds.push({ id: `theme-${th.name}`, label: `${t('palette.theme')}: ${th.label}`, hint: t('palette.appearance'), icon: Palette, run: () => updateSettings({ theme: th.name }) })
     }
     return cmds
-  }, [workspaces, presets, snippets, activeId, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
+  }, [workspaces, presets, snippets, activeId, canReopen, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
-import type { AgentPreset, AwakeMode } from '@shared/types'
+import type { AgentPreset, AwakeMode, ResumeOnStartup } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
@@ -14,11 +14,18 @@ const AWAKE_MODES: Array<{ mode: AwakeMode; key: MessageKey }> = [
   { mode: 'never', key: 'awake.mode.never' },
 ]
 
+const RESUME_POLICIES: Array<{ policy: ResumeOnStartup; key: MessageKey }> = [
+  { policy: 'ask', key: 'settings.agents.resume.ask' },
+  { policy: 'auto', key: 'settings.agents.resume.auto' },
+  { policy: 'off', key: 'settings.agents.resume.off' },
+]
+
 const headingCls = 'text-xs font-semibold uppercase tracking-wide text-text-secondary'
 
 /**
  * Agent "Behavior" block (E5-FR-29). Each key joins when its FR lands; today:
- * keep the PC awake and its display variant (E5-FR-23/24).
+ * resume on startup (E5-FR-10), keep the PC awake and its display variant
+ * (E5-FR-23/24).
  */
 function BehaviorBlock() {
   const t = useT()
@@ -31,6 +38,28 @@ function BehaviorBlock() {
       <h4 id="agents-behavior" className={headingCls}>
         {t('settings.agents.behavior')}
       </h4>
+      <SettingRow title={t('settings.agents.resume')} description={t('settings.agents.resumeHint')}>
+        <div role="radiogroup" aria-label={t('settings.agents.resume')} className="flex flex-wrap gap-2">
+          {RESUME_POLICIES.map(({ policy, key }) => (
+            <button
+              key={policy}
+              type="button"
+              role="radio"
+              aria-checked={agents.resumeOnStartup === policy}
+              data-resume-policy={policy}
+              onClick={() => updateSettings({ agents: { ...agents, resumeOnStartup: policy } })}
+              className={cn(
+                'rounded-btn border px-3 py-1 text-xs transition-colors',
+                agents.resumeOnStartup === policy
+                  ? 'border-accent-violet bg-accent-violet text-white'
+                  : 'border-border bg-bg-secondary text-text-primary hover:border-accent-violet/40',
+              )}
+            >
+              {t(key)}
+            </button>
+          ))}
+        </div>
+      </SettingRow>
       <SettingRow title={t('settings.agents.awake')} description={t('settings.agents.awakeHint')}>
         <div role="radiogroup" aria-label={t('settings.agents.awake')} className="flex flex-wrap gap-2">
           {AWAKE_MODES.map(({ mode, key }) => (

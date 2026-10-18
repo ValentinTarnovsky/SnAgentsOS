@@ -15,6 +15,7 @@ import { registerPty, unregisterPty } from '@/lib/ptyRegistry'
 import { registerFocuser, setFocusedPane, unregisterFocuser } from '@/lib/focus'
 import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegistry'
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
+import { prepareAgentLaunch } from '@/lib/agentLaunch'
 import { useT } from '@/i18n'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
@@ -679,17 +680,25 @@ export function useXterm(
           bind(existing.ptyId)
           return undefined
         }
-        return window.snApi.pty
-          .spawn({
-            paneId: opts.paneId,
-            shell: opts.shell,
-            cwd: opts.cwd,
-            initialCommand: opts.initialCommand,
-            setup: opts.setup,
-            cols: term.cols,
-            rows: term.rows,
+        // A real spawn (not a reattach): an agent console may resume its
+        // last chat instead (E5-FR-08); this decides the command and cwd.
+        return prepareAgentLaunch(opts.paneId, { cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup })
+          .catch(() => ({ cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup }))
+          .then((launch) => {
+            if (disposed) return null
+            return window.snApi.pty.spawn({
+              paneId: opts.paneId,
+              shell: opts.shell,
+              cwd: launch.cwd || opts.cwd,
+              initialCommand: launch.initialCommand,
+              setup: launch.setup,
+              cols: term.cols,
+              rows: term.rows,
+            })
           })
-          .then(({ ptyId, warning }) => {
+          .then((spawned) => {
+            if (!spawned) return
+            const { ptyId, warning } = spawned
             if (disposed) {
               void window.snApi.pty.kill(ptyId)
               return
