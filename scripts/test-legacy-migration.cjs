@@ -1037,7 +1037,7 @@ async function windowsItemChecks() {
     check(!fs.existsSync(orphan) && JSON.parse(fs.readFileSync(foreign, 'utf8')).target === path.join(p.base, 'code.exe'), 'L08: the orphan pin is removed, a foreign pin untouched')
     check(marker(p).pinRetargeted === true && state(p, 'L08').state === 'done', 'L08: pinRetargeted true')
     const p2 = committed()
-    const live2 = path.join(p2.roots.taskbarPins, 'SnMultiCC.lnk'); lnk(live2, 'C:\\gone\\SnMultiCC.exe')
+    const live2 = path.join(p2.roots.taskbarPins, 'SnMultiCC.lnk'); lnk(live2, path.join(p2.base, 'gone', 'SnMultiCC.exe'))
     await I.runCleanup(cleanupEnv(p2, { shortcuts: makeShortcuts(['SnMultiCC.lnk']), registry: makeRegistry() }))
     check(!fs.existsSync(live2) && marker(p2).pinRetargeted === false, 'L08: no Favorites value means alive; a failed write removes the pin and asks to pin again')
     check(j.cwd === p.exeDir, 'L08: the retargeted pin starts in the new exe folder (the old one is deleted)')
