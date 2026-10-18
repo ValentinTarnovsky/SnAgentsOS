@@ -168,6 +168,7 @@ export const en = {
   'pane.restart': 'Restart console',
   'pane.redraw': 'Redraw',
   'pane.schedule': 'Schedule prompt',
+  'drop.hint': 'Drop to paste path',
 
   // Scheduled prompt (per console)
   'schedule.title': 'Schedule a prompt',
