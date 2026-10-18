@@ -308,6 +308,15 @@ export class AgentSessionStore {
     return true
   }
 
+  /**
+   * Which of `paneIds` still have their startup decision unspent, without
+   * spending it (E5-FR-12): the resume dialog lists only those, so a renderer
+   * reload after the decision does not ask again.
+   */
+  startupPending(paneIds: readonly string[]): string[] {
+    return paneIds.filter((id) => typeof id === 'string' && !!id && !this.consumed.has(id))
+  }
+
   get isFrozen(): boolean {
     return this.frozen
   }
