@@ -1,7 +1,9 @@
 /**
  * Docked key bar for keys a soft keyboard lacks or sends unreliably
  * (E1-FR-16..21). Three zones: the input-mode chip pinned left, a horizontally
- * scrolling row built from lib/keys.ts, and the keyboard toggle pinned right.
+ * scrolling row with the visible keys of the user's layout (lib/keyLayout.ts,
+ * E2-FR-45: order, hidden keys and custom keys), and the keyboard toggle
+ * pinned right, which stays out of the layout.
  *
  * Firing (lib/keyPress.ts): every key fires on pointerup, only if the finger
  * moved less than 10px and no pointercancel arrived, so swiping the bar never
@@ -33,7 +35,8 @@ import { getActiveTerm } from '../lib/terminalBus'
 import { store, useRemoteStore } from '../lib/store'
 import { t } from '../lib/i18n'
 import { createKeyPress, type PressHandlers } from '../lib/keyPress'
-import { buildScrollKeys, resolveSeq, type KeyDef, type KeyIcon } from '../lib/keys'
+import { resolveSeq, visibleKeyDefs, type KeyDef, type KeyIcon } from '../lib/keys'
+import { useKeyLayout } from '../lib/keyLayout'
 
 export type InputMode = 'direct' | 'composer'
 
@@ -146,11 +149,19 @@ export function KeyBar({
   const ctrlLatch = useRemoteStore((s) => s.ctrlLatch)
   const setCtrlLatch = useRemoteStore((s) => s.setCtrlLatch)
   const setToast = useRemoteStore((s) => s.setToast)
-  const keyButtons = useRemoteStore((s) => s.snapshot?.keyButtons)
+  const { layout, deskButtons } = useKeyLayout()
   const offline = useRemoteStore((s) => s.banner != null)
   const kbOpen = useRemoteStore((s) => s.kbOpen && s.kbFocus === inputMode)
-  const keys = useMemo(() => buildScrollKeys(keyButtons ?? []), [keyButtons])
+  const keys = useMemo(() => visibleKeyDefs(layout, deskButtons), [layout, deskButtons])
   const composer = inputMode === 'composer'
+
+  // A latch the user hid from the bar (E2-FR-45) could no longer be seen or
+  // released, and would silently turn the next letter typed into a control
+  // byte: hiding the Ctrl key releases it.
+  const latchShown = keys.some((k) => k.latch)
+  useEffect(() => {
+    if (ctrlLatch && !latchShown) setCtrlLatch(false)
+  }, [ctrlLatch, latchShown, setCtrlLatch])
 
   // Switching panes stops any running repeat (E1-FR-17). A store subscription
   // runs synchronously inside the pane change, so no repeat tick can slip in
