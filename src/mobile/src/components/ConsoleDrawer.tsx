@@ -1,17 +1,23 @@
 /**
- * Bottom-sheet workspace + console picker. Lists every workspace (active one
- * highlighted) and its panes. Tapping a pane in the active workspace just
- * subscribes; tapping a pane in another workspace asks the desktop to switch
- * workspace first (triggering any lazy pty spawns) then subscribes - a
- * not-yet-running pane shows a spinner until the server pushes its replay.
+ * Bottom-sheet workspace + console picker. Lists every workspace (the viewed
+ * one highlighted) and its panes, each with its agent status, a second line
+ * and the last reply (E1-FR-05). Every tap goes through
+ * client.switchWorkspaceAndView (E1-FR-07): a running pane of another
+ * workspace is only subscribed, so the desktop never moves; a pane without a
+ * pty asks the desktop to switch first (lazy spawn) and shows a spinner until
+ * the server pushes its replay.
  */
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
 import { Loader2, Pencil, Plus } from 'lucide-react'
 import { Sheet } from './Sheet'
 import { RenameSheet } from './RenameSheet'
+import { StatusIndicator } from './StatusIndicator'
+import { PaneStatusLines } from './PaneStatusLines'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
+import { showsTime, STATUS_TICK_MS } from '../lib/statusText'
+import { viewedWorkspaceId } from '../lib/workspace'
 import { t } from '../lib/i18n'
 
 interface RenameTarget {
@@ -23,27 +29,40 @@ interface RenameTarget {
 export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
   const snapshot = useRemoteStore((s) => s.snapshot)
   const activePaneId = useRemoteStore((s) => s.activePaneId)
+  const paneStatus = useRemoteStore((s) => s.paneStatus)
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
+  const [now, setNow] = useState(() => Date.now())
+
+  // One 30s ticker for every relative time, only while a visible row shows one.
+  const ticking = open && !!snapshot && snapshot.workspaces.some((ws) => ws.panes.some((p) => showsTime(paneStatus[p.id])))
+  useEffect(() => {
+    if (!ticking) return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), STATUS_TICK_MS)
+    return () => clearInterval(id)
+  }, [ticking])
+  useEffect(() => {
+    if (open) setNow(Date.now())
+  }, [open, paneStatus])
 
   if (!snapshot) return null
+  const viewedWs = viewedWorkspaceId(snapshot, activePaneId)
 
   const pickPane = (workspaceId: string, paneId: string): void => {
-    if (workspaceId === snapshot.activeWorkspaceId) client.viewPane(paneId)
-    else void client.switchWorkspaceAndView(workspaceId, paneId)
+    void client.switchWorkspaceAndView(workspaceId, paneId)
     onClose()
   }
 
   /**
-   * Create a console in any workspace (incl. an empty one) and enter it. Works
-   * for the active workspace or another; the ctlAck carries the new pane id and
-   * switchWorkspaceAndView handles the switch even before the snapshot updates.
+   * Create a console in any workspace (incl. an empty one) and enter it. The
+   * ctlAck carries the new pane id; switchWorkspaceAndView switches the desktop
+   * first only when that workspace is not on screen there (lazy spawn).
    */
   const createInWorkspace = async (workspaceId: string): Promise<void> => {
     onClose()
     const res = await client.sendCtl({ kind: 'createPane', workspaceId })
     if (!res.ok || !res.paneId) return
-    if (workspaceId === snapshot.activeWorkspaceId) client.viewPane(res.paneId)
-    else await client.switchWorkspaceAndView(workspaceId, res.paneId)
+    await client.switchWorkspaceAndView(workspaceId, res.paneId)
   }
 
   return (
@@ -51,9 +70,9 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
     <Sheet open={open} onClose={onClose} title={t('main.workspaces')}>
       <div className="flex flex-col gap-4">
         {snapshot.workspaces.map((ws) => {
-          const isActiveWs = ws.id === snapshot.activeWorkspaceId
+          const isActiveWs = ws.id === viewedWs
           return (
-            <div key={ws.id}>
+            <div key={ws.id} data-workspace={ws.id}>
               <div className="mb-1.5 flex items-center gap-2 px-1">
                 <span
                   className={clsx('text-xs font-semibold uppercase tracking-wide', isActiveWs ? 'text-accent-violet' : 'text-text-secondary')}
@@ -64,9 +83,11 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
               <div className="flex flex-col gap-1">
                 {ws.panes.map((pane) => {
                   const selected = pane.id === activePaneId
+                  const status = paneStatus[pane.id]
                   return (
                     <div
                       key={pane.id}
+                      data-pane={pane.id}
                       role="button"
                       tabIndex={0}
                       onClick={() => pickPane(ws.id, pane.id)}
@@ -87,7 +108,13 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
                         className="h-2.5 w-2.5 shrink-0 rounded-full"
                         style={{ background: pane.color || 'var(--color-accent-violet)' }}
                       />
-                      <span className="min-w-0 flex-1 truncate text-sm text-text-primary">{pane.title}</span>
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="min-w-0 truncate text-sm text-text-primary">{pane.title}</span>
+                          <StatusIndicator status={status} />
+                        </span>
+                        <PaneStatusLines status={status} now={now} />
+                      </span>
                       {pane.running ? (
                         <span className="text-[10px] font-medium uppercase text-green-400">{t('main.running')}</span>
                       ) : (

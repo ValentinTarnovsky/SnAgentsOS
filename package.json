@@ -11,7 +11,7 @@
     "test:ui": "node scripts/test-status-ui.cjs && node scripts/test-toast-ui.cjs && node scripts/test-drop-ui.cjs && node scripts/test-awake-ui.cjs && node scripts/test-resume-ui.cjs",
     "test:remote": "node scripts/test-remote.cjs",
     "test:agents": "node scripts/test-agents.cjs && node scripts/test-agents-resume.cjs",
-    "test:mobile": "node scripts/test-mobile-scroll.cjs && node scripts/test-mobile-terminal.cjs && node scripts/test-mobile-connection-ui.cjs && node scripts/test-mobile-keybar-ui.cjs",
+    "test:mobile": "node scripts/test-mobile-scroll.cjs && node scripts/test-mobile-terminal.cjs && node scripts/test-mobile-connection-ui.cjs && node scripts/test-mobile-keybar-ui.cjs && node scripts/test-mobile-status-ui.cjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build && npm run build:mobile",
     "build:mobile": "vite build --config src/mobile/vite.config.ts",

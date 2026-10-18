@@ -1,8 +1,8 @@
 /**
  * The live layout: a flex column sized to the keyboard-aware --vvh so the
  * KeyBar always docks just above the soft keyboard. TopBar (workspace + console
- * title, connection dot, drawer + actions) / terminal (flex-1, min-h-0) /
- * KeyBar. The drawer, action sheet and paste sheet mount here; the status
+ * title of the viewed pane with its agent status, the "N waiting" pill,
+ * connection dot, drawer + actions) / terminal (flex-1, min-h-0) / KeyBar. The drawer, action sheet and paste sheet mount here; the status
  * banner and toast overlay the terminal.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
@@ -15,7 +15,10 @@ import { ActionSheet } from './ActionSheet'
 import { PasteSheet } from './PasteSheet'
 import { SnippetsSheet } from './SnippetsSheet'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
+import { StatusIndicator } from './StatusIndicator'
+import { WaitingPill } from './WaitingPill'
 import { useRemoteStore } from '../lib/store'
+import { paneById, viewedWorkspaceId } from '../lib/workspace'
 import { t } from '../lib/i18n'
 
 /** Header dot colored by the connection tier (E1-FR-13). */
@@ -43,6 +46,7 @@ function Toast(): ReactNode {
 export function MainScreen(): ReactNode {
   const snapshot = useRemoteStore((s) => s.snapshot)
   const activePaneId = useRemoteStore((s) => s.activePaneId)
+  const activeStatus = useRemoteStore((s) => (s.activePaneId ? s.paneStatus[s.activePaneId] : undefined))
   const connected = useRemoteStore((s) => s.connected)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [actionsOpen, setActionsOpen] = useState(false)
@@ -51,8 +55,10 @@ export function MainScreen(): ReactNode {
 
   const { workspaceName, paneTitle } = useMemo(() => {
     if (!snapshot) return { workspaceName: '', paneTitle: t('main.noConsole') }
-    const ws = snapshot.workspaces.find((w) => w.id === snapshot.activeWorkspaceId)
-    const pane = ws?.panes.find((p) => p.id === activePaneId)
+    // The viewed pane's own workspace (E1-FR-07), which may not be the desktop's.
+    const wsId = viewedWorkspaceId(snapshot, activePaneId)
+    const ws = snapshot.workspaces.find((w) => w.id === wsId)
+    const pane = paneById(snapshot, activePaneId)
     return {
       workspaceName: ws?.name ?? '',
       paneTitle: pane?.title ?? t('main.noConsole'),
@@ -67,9 +73,13 @@ export function MainScreen(): ReactNode {
       >
         <ConnectionDot />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold leading-tight text-text-primary">{paneTitle}</div>
-          {workspaceName && <div className="truncate text-[11px] leading-tight text-text-secondary">{workspaceName}</div>}
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span data-pane-title className="truncate text-sm font-semibold leading-tight text-text-primary">{paneTitle}</span>
+            <StatusIndicator status={activeStatus} />
+          </div>
+          {workspaceName && <div data-ws-name className="truncate text-[11px] leading-tight text-text-secondary">{workspaceName}</div>}
         </div>
+        <WaitingPill />
         <button
           onClick={() => setDrawerOpen(true)}
           className="flex h-10 w-10 items-center justify-center rounded-btn text-text-secondary active:bg-card"
