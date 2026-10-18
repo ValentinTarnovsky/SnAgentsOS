@@ -392,10 +392,6 @@ export interface SnApi {
     takePendingOpen(): Promise<OpenRequest | null>
     /** A folder arrived through `--open`. Returns an unsubscribe function. */
     onOpenPath(cb: (req: OpenRequest) => void): () => void
-    /** Consumes the open request main is holding (E4-FR-33), or null. */
-    takePendingOpen(): Promise<OpenRequest | null>
-    /** A folder arrived through . Returns an unsubscribe function. */
-    onOpenPath(cb: (req: OpenRequest) => void): () => void
   }
   pty: {
     spawn(req: PtySpawnReq): Promise<PtySpawnRes>
@@ -465,10 +461,6 @@ export interface SnApi {
      * rebuild their glyph atlases on it. Returns an unsubscribe function.
      */
     onDisplayRecovered(cb: () => void): () => void
-    /** Adds or removes the Explorer "Open in" menu (E4-FR-34). */
-    setExplorerMenu(req: { enabled: boolean; language: Language }): Promise<ExplorerMenuResult>
-    /** What the Explorer menu keys point at now. */
-    getExplorerMenu(): Promise<ExplorerMenuResult>
     /** Adds or removes the Explorer "Open in" menu (E4-FR-34). */
     setExplorerMenu(req: { enabled: boolean; language: Language }): Promise<ExplorerMenuResult>
     /** What the Explorer menu keys point at now. */

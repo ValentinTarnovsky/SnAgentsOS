@@ -42,7 +42,9 @@ export function StartupSection() {
       .then((r) => {
         if (!isExplorerResult(r)) return
         setExplorer(r)
-        if (!r.ok && !r.skipped) updateSettings({ explorerMenu: r.registered })
+        // Skipped (dev, not Windows): nothing was registered, so the toggle stays off.
+        if (r.skipped) updateSettings({ explorerMenu: false })
+        else if (!r.ok) updateSettings({ explorerMenu: r.registered })
       })
       .catch((err: unknown) => setExplorer((prev) => ({ ...(prev ?? { registered: false }), ok: false, error: String(err) })))
       .finally(() => setExplorerBusy(false))

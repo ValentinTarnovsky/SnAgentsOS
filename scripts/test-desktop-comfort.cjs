@@ -713,6 +713,14 @@ async function main() {
     check(r.dispatchOpenRequest({ id: 'r6', path: 'C:\\Other', source: 'argv' }) === 'ignored', 'before hydrate nothing runs')
     S.setState({ hydrated: true })
     check(r.dispatchOpenRequest({ id: 'r6', path: 'C:\\Other', source: 'argv' }) === 'activated' && S.getState().activeWorkspaceId === 'wd', 'the same request runs once hydrated')
+    S.setState({ wizardOpen: true, wizardPrefill: null, activeWorkspaceId: 'wd' })
+    r.setWizardDraftCwd('')
+    check(r.dispatchOpenRequest({ id: 'r7', path: 'C:\\Repos\\App', source: 'argv' }) === 'activated' && !S.getState().wizardOpen && S.getState().activeWorkspaceId === 'wb', 'an empty wizard closes so the activated workspace shows')
+    S.setState({ wizardOpen: true })
+    r.setWizardDraftCwd('G:\\draft')
+    check(r.dispatchOpenRequest({ id: 'r8', path: 'C:\\Other', source: 'argv' }) === 'activated' && S.getState().wizardOpen, 'a wizard with a folder typed is never closed by an activation')
+    r.setWizardDraftCwd(null)
+    S.setState({ wizardOpen: false })
 
     // A reload: fresh module state, same sessionStorage.
     const r2 = loadRenderer(src, overrides)
