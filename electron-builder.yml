@@ -1,5 +1,5 @@
-appId: com.sndevelopment.snmulticc
-productName: SnMultiCC
+appId: com.sndevelopment.snagentsos
+productName: SnAgentsOS
 copyright: Copyright © 2026 Valentin Tarnovsky
 
 directories:
@@ -37,13 +37,18 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   artifactName: ${productName}-${version}-setup.${ext}
+  # GUID of the 1.x installs: keeps a single entry in Apps and lets the setup
+  # run the old uninstaller. build/installer.nsh moves the app out of the old
+  # folder (E0-FR-15).
+  guid: 8c5f793e-c93a-5e95-add6-ae90c4af8c04
+  include: build/installer.nsh
 
 portable:
   artifactName: ${productName}-${version}-portable.${ext}
   # Stable extraction path so the exe Windows Firewall sees does not change
   # per release; without it every update re-triggers the firewall prompt for
   # the embedded remote-control server.
-  unpackDirName: SnMultiCC
+  unpackDirName: SnAgentsOS
 
 mac:
   category: public.app-category.developer-tools

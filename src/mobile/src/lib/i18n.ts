@@ -5,12 +5,13 @@
  * the store whenever a snapshot arrives.
  */
 import type { Language } from '@shared/types'
+import { BRAND } from '@shared/brand'
 
 type Vars = Record<string, string | number>
 
 const en = {
   // Welcome / pairing
-  'welcome.title': 'SnMultiCC Remote',
+  'welcome.title': BRAND.mobileTitle,
   'welcome.body': 'Open Settings > Remote control on the desktop and scan the QR code to connect this phone.',
   'pair.title': 'Pair this device',
   'pair.nameLabel': 'Device name',
@@ -119,7 +120,7 @@ const en = {
 type Key = keyof typeof en
 
 const es: Record<Key, string> = {
-  'welcome.title': 'SnMultiCC Remoto',
+  'welcome.title': BRAND.mobileTitle,
   'welcome.body': 'Abri Ajustes > Control remoto en la PC y escanea el codigo QR para conectar este telefono.',
   'pair.title': 'Vincular este dispositivo',
   'pair.nameLabel': 'Nombre del dispositivo',

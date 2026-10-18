@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { NotificationSettings, StatusHealth, DiscordSettings } from '@shared/types'
+import { BRAND } from '@shared/brand'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { playStatusSound } from '@/lib/sound'
@@ -100,7 +101,7 @@ export function NotificationsSection() {
       <Button variant="ghost" size="sm" onClick={() => {
         void window.snApi.status.testDesktop().catch(() => setHealth(h => h ? { ...h, desktop: { error: 'failed' } } : h))
       }}>{t('notif.desktop.test')}</Button>
-      {health?.desktop?.error && <p role="status" className="text-xs text-amber-500">{t(`notif.desktop.${health.desktop.error}`)}</p>}
+      {health?.desktop?.error && <p role="status" className="text-xs text-amber-500">{t(`notif.desktop.${health.desktop.error}`, { app: BRAND.productName })}</p>}
       <ToggleRow
         checked={n.notifyAction}
         onChange={(v) => patch({ notifyAction: v })}

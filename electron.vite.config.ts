@@ -9,6 +9,9 @@ export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
     resolve: { alias: { '@shared': shared } },
+    // Fault injection of the legacy migration (SNAOS_TEST_FAULT) exists only in a
+    // test build made with SNAOS_TEST_FAULTS_BUILD=1; a release always has false.
+    define: { __SNAOS_TEST_FAULTS__: JSON.stringify(process.env.SNAOS_TEST_FAULTS_BUILD === '1') },
     build: {
       rollupOptions: { input: { index: resolve(__dirname, 'src/main/index.ts'), statusRuntime: resolve(__dirname, 'src/main/status/statusRuntime.ts') } },
     },

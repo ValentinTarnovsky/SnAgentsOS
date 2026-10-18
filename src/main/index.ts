@@ -1,6 +1,9 @@
+// Must stay the first import: isolates the dev userData before any path is read (E0-FR-26).
+import './devUserData'
 import { readFileSync, writeFileSync } from 'fs'
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
+import { BRAND } from '@shared/brand'
 import type { AppInfo, AppMetrics } from '@shared/ipc-contract'
 import type { ConfigFile } from '@shared/types'
 import { createMainWindow } from './window'
@@ -14,15 +17,18 @@ import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
+import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
 import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
 import { HookServer } from './status/HookServer'
 import { CodexBridge } from './status/CodexBridge'
+import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
 import { join } from 'path'
 import { ensureTray, destroyTray } from './tray'
 import { mainT } from './i18n'
+import { runLegacyMigrationAtBoot, scheduleLegacyCleanup } from './migration/runLegacyMigration'
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 
@@ -49,7 +55,7 @@ const statusManager = new StatusManager(
   () => configStore.load(),
   notice => discordNotifier.notify(notice, configStore.load()),
 )
-const codexBridge = new CodexBridge(() => join(app.getPath('userData'), 'status-bin'), join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event))
+const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event))
 ptyManager.addSink(statusManager)
 ptyManager.addSink(codexBridge)
 let statusIpc: StatusIpc | null = null
@@ -133,7 +139,7 @@ function registerConfigIpc(): void {
 
   ipcMain.handle(CH.CONFIG_EXPORT, async (_e, config: ConfigFile): Promise<boolean> => {
     const opts = {
-      defaultPath: 'snmulticc-config.json',
+      defaultPath: BRAND.exportFileName,
       filters: [{ name: 'JSON', extensions: ['json'] }],
     }
     const res = mainWindow
@@ -220,7 +226,7 @@ function openMainWindow(): void {
       event.preventDefault()
       win.hide()
       ensureTray(() => mainWindow, quitApp, {
-        show: mainT(cfg, 'tray.show'),
+        show: mainT(cfg, 'tray.show', { app: BRAND.productName }),
         quit: mainT(cfg, 'tray.quit'),
       })
       return
@@ -234,7 +240,7 @@ function openMainWindow(): void {
         defaultId: 1,
         cancelId: 0,
         noLink: true,
-        title: 'SnMultiCC',
+        title: BRAND.productName,
         message: mainT(cfg, 'dialog.activeTitle'),
         detail: mainT(cfg, 'dialog.activeDetail', { n: ptyManager.count }),
       })
@@ -257,7 +263,14 @@ async function bootstrap(): Promise<void> {
   // Packaged only: in dev an AUMID without a Start Menu shortcut can silently
   // suppress notifications, so dev keeps Electron's default.
   if (process.platform === 'win32' && app.isPackaged) {
-    app.setAppUserModelId('com.sndevelopment.snmulticc')
+    app.setAppUserModelId(BRAND.appId)
+  }
+  // 1.x data moves in before anything reads config.json or remote-devices.json,
+  // and before a window exists (its store persists on a debounce). Only the
+  // FR-09 dialog's [Quit] stops the start; a failed migration never does.
+  if ((await runLegacyMigrationAtBoot()) === 'quit') {
+    quitApp()
+    return
   }
   // No native menu on Windows/Linux: it's a frameless app with a custom
   // in-renderer title bar, so the default menu is invisible anyway, and its
@@ -267,6 +280,7 @@ async function bootstrap(): Promise<void> {
   // reach the shell / our remappable redraw action. macOS keeps its menu (its
   // accelerators use Cmd, so they don't collide with the terminal's Ctrl keys).
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+  remoteManager.loadDevices()
   registerCsp()
   registerAppIpc()
   registerConfigIpc()
@@ -287,6 +301,10 @@ async function bootstrap(): Promise<void> {
     getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
   })
   registerRemoteIpc(remoteManager)
+  registerLegacyIpc({
+    getSender: () => mainWindow?.webContents ?? null,
+    remoteEnabled: () => configStore.load()?.settings?.remote?.enabled === true,
+  })
   statusIpc = registerStatusIpc(statusManager, hookServer, codexBridge, discordNotifier)
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),
@@ -309,6 +327,8 @@ async function bootstrap(): Promise<void> {
   const startupCfg = configStore.load()
   await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? false)
   openMainWindow()
+  // Deletes what 1.x left behind, only after a committed migration, in the background.
+  if (mainWindow) scheduleLegacyCleanup(mainWindow)
   if (startupCfg?.settings) {
     applyGlobalHotkey(startupCfg.settings.globalHotkeyEnabled, startupCfg.settings.globalHotkey)
   }

@@ -18,6 +18,57 @@ const MAX_BACKUPS = 12
 /** Minimum gap between timestamped history snapshots (the .bak last-good is always fresh). */
 const ROTATE_EVERY_MS = 10 * 60 * 1000
 
+export interface LadderResult {
+  config: ConfigFile
+  /** `version` as written in the file, before parseConfig stamps CONFIG_VERSION. */
+  rawVersion: number
+  /** Which rung loaded: 'config.json', 'config.json.bak' or 'backups/<name>'. */
+  source: string
+}
+
+function readRung(p: string): { config: ConfigFile; rawVersion: number } | null {
+  try {
+    if (!existsSync(p)) return null
+    const raw: unknown = JSON.parse(readFileSync(p, 'utf8'))
+    const config = parseConfig(raw)
+    if (!config) return null
+    const v = (raw as { version?: unknown }).version
+    return { config, rawVersion: typeof v === 'number' ? v : 0 }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The load ladder as a pure, read-only function over a folder: config.json,
+ * then config.json.bak, then the newest readable backups/*.json (alphabetical
+ * order, which is why nothing but config-<ISO>.json may ever land there).
+ * Never writes, rotates or repairs anything, so the legacy migration can run
+ * it on the 1.x folder and on the copy to verify both load the same config
+ * (E0-FR-27). ConfigStore.load() is this ladder over its own folder.
+ */
+export function loadLadder(dir: string): LadderResult | null {
+  const primary = readRung(join(dir, 'config.json'))
+  if (primary) return { ...primary, source: 'config.json' }
+  const bak = readRung(join(dir, 'config.json.bak'))
+  if (bak) return { ...bak, source: 'config.json.bak' }
+  const backupDir = join(dir, 'backups')
+  try {
+    if (!existsSync(backupDir)) return null
+    const files = readdirSync(backupDir)
+      .filter((f) => f.endsWith('.json'))
+      .sort()
+      .reverse()
+    for (const f of files) {
+      const hit = readRung(join(backupDir, f))
+      if (hit) return { ...hit, source: `backups/${f}` }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
 /**
  * Reads/writes the single config.json blob. Path is resolved per run:
  * next to the executable when portable, else in userData (see paths.ts).
@@ -41,16 +92,10 @@ export class ConfigStore {
   }
 
   load(): ConfigFile | null {
-    const primary = this.tryRead(this.path)
-    if (primary) return primary
-
-    // Primary missing or corrupt, recover from the last-good snapshot or history.
-    const recovered = this.tryRead(this.bakPath) ?? this.tryReadNewestBackup()
-    if (recovered) {
-      console.warn('[ConfigStore] primary config unreadable, recovered from backup.')
-      return recovered
-    }
-    return null
+    // Primary missing or corrupt: the ladder recovers from the last-good snapshot or history.
+    const hit = loadLadder(dirname(this.path))
+    if (hit && hit.source !== 'config.json') console.warn('[ConfigStore] primary config unreadable, recovered from backup.')
+    return hit?.config ?? null
   }
 
   save(config: ConfigFile): void {
@@ -76,32 +121,6 @@ export class ConfigStore {
     } catch (error) {
       console.error('Failed to save config:', error)
     }
-  }
-
-  private tryRead(p: string): ConfigFile | null {
-    try {
-      if (!existsSync(p)) return null
-      return parseConfig(JSON.parse(readFileSync(p, 'utf8')))
-    } catch {
-      return null
-    }
-  }
-
-  private tryReadNewestBackup(): ConfigFile | null {
-    try {
-      if (!existsSync(this.backupDir)) return null
-      const files = readdirSync(this.backupDir)
-        .filter((f) => f.endsWith('.json'))
-        .sort()
-        .reverse()
-      for (const f of files) {
-        const cfg = this.tryRead(join(this.backupDir, f))
-        if (cfg) return cfg
-      }
-    } catch {
-      /* ignore */
-    }
-    return null
   }
 
   /** Copy the freshly-made .bak into the throttled, capped history folder. */

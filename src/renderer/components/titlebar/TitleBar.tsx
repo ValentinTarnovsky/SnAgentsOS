@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Copy, Minus, Square, X } from 'lucide-react'
+import { BRAND } from '@shared/brand'
 import { LogoMark } from '@/components/ui/Logo'
 import { useUpdaterStore } from '@/lib/updater'
 import { useT } from '@/i18n'
@@ -26,7 +27,7 @@ export function TitleBar() {
     <div className="app-drag flex h-9 shrink-0 select-none items-center justify-between border-b border-border bg-bg-secondary pl-3">
       <div className="flex items-center gap-2">
         <LogoMark size="sm" />
-        <span className="text-xs font-medium text-text-secondary">SnMultiCC</span>
+        <span className="text-xs font-medium text-text-secondary">{BRAND.productName}</span>
       </div>
 
       <div className="app-no-drag flex h-full items-stretch">

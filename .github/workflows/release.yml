@@ -1,8 +1,10 @@
 name: Release
 
-# Build installers/portables on all three OSes and attach them to the
+# Build installers/portables on all three OSes and attach them to a DRAFT
 # GitHub Release for the pushed tag. node-pty is N-API, so no native rebuild
-# is needed, each runner just packages its own prebuilt binary.
+# is needed, each runner just packages its own prebuilt binary. The release
+# only becomes public (and visible to the in-app updater through
+# releases/latest) once the release-notes job has verified all 16 assets.
 on:
   push:
     tags:
@@ -15,6 +17,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -37,7 +42,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ env.TAG }}
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -65,41 +70,87 @@ jobs:
         shell: bash
         run: |
           cd release
-          for f in $(find . -type f \( -name 'SnMultiCC-*.exe' -o -name 'SnMultiCC-*.dmg' -o -name 'SnMultiCC-*.zip' -o -name 'SnMultiCC-*.AppImage' -o -name 'snmulticc_*.deb' \)); do
+          for f in $(find . -type f \( -name 'SnAgentsOS-*.exe' -o -name 'SnAgentsOS-*.dmg' -o -name 'SnAgentsOS-*.zip' -o -name 'SnAgentsOS-*.AppImage' -o -name 'snagentsos_*.deb' \)); do
             node -e "const c=require('crypto'),fs=require('fs'),p=require('path');const f=process.argv[1];const h=c.createHash('sha256').update(fs.readFileSync(f)).digest('hex');fs.writeFileSync(f+'.sha256',h+'  '+p.basename(f)+'\n');console.log('sha256',p.basename(f),h)" "$f"
           done
 
-      - name: Attach artifacts to release
+      # Every leg uploads to the same DRAFT release (softprops finds an
+      # existing draft by tag and folds a duplicate draft created by a racing
+      # leg into the canonical one). A draft is invisible to releases/latest,
+      # so a client never sees a half-uploaded release. A tag with a "-"
+      # (v2.0.0-rc.1) is a prerelease and never becomes latest either.
+      - name: Attach artifacts to draft release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ env.TAG }}
+          name: SnAgentsOS ${{ env.TAG }}
+          draft: true
+          prerelease: ${{ contains(env.TAG, '-') }}
           fail_on_unmatched_files: false
           # Match only the named distributables, NOT the win-unpacked/ helper
-          # binaries (elevate.exe, OpenConsole.exe, the raw SnMultiCC.exe, etc.).
+          # binaries (elevate.exe, OpenConsole.exe, the raw app exe, etc.).
           # NOTE: do NOT set generate_release_notes here. This step runs once
           # per OS in the matrix, and each run would re-generate and append the
           # changelog, producing a triplicated release body. Notes are written
           # exactly once by the separate release-notes job below.
           files: |
-            release/**/SnMultiCC-*.exe
-            release/**/SnMultiCC-*.dmg
-            release/**/SnMultiCC-*.zip
-            release/**/SnMultiCC-*.AppImage
-            release/**/snmulticc_*.deb
+            release/**/SnAgentsOS-*.exe
+            release/**/SnAgentsOS-*.dmg
+            release/**/SnAgentsOS-*.zip
+            release/**/SnAgentsOS-*.AppImage
+            release/**/snagentsos_*.deb
             release/**/*.sha256
 
   release-notes:
     name: Release notes
+    # Skipped when any leg fails: the release then stays a draft. Fix it and
+    # re-run with workflow_dispatch on the same tag, never with a new tag.
     needs: build
     runs-on: ubuntu-latest
     steps:
-      # Single, authoritative pass that sets the title and the generated
-      # changelog once. Runs after the build matrix so it has the final say on
-      # the release body (append_body: false replaces, never accumulates).
-      - name: Set release title and notes
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+
+      # Health gate: exactly 16 assets (the 8 distributables of the tagged
+      # package.json version, each with its .sha256). On failure the job fails
+      # and the release stays a draft. A short retry absorbs API listing lag.
+      - name: Verify release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          for attempt in 1 2 3; do
+            gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets > "$RUNNER_TEMP/assets.json" \
+              && node scripts/check-release-assets.cjs "$RUNNER_TEMP/assets.json" "$TAG" "$version" && exit 0
+            [ "$attempt" -lt 3 ] && sleep 15
+          done
+          exit 1
+
+      # The file is never empty: softprops treats an empty body as "keep the
+      # existing body", so a re-run after publishing would append a second
+      # changelog. A lone newline still replaces it and renders as nothing.
+      - name: Compose release notes
+        run: |
+          if [ -f "docs/release-notes/$TAG.md" ]; then
+            cp "docs/release-notes/$TAG.md" "$RUNNER_TEMP/notes.md"
+          fi
+          if [ ! -s "$RUNNER_TEMP/notes.md" ]; then
+            printf '\n' > "$RUNNER_TEMP/notes.md"
+          fi
+
+      # Single, authoritative pass that publishes the draft and sets the title
+      # and the body once: docs/release-notes/<tag>.md (when present) followed
+      # by the generated changelog. append_body: false replaces, never
+      # accumulates, so a re-run does not duplicate the body.
+      - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: SnMultiCC ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ env.TAG }}
+          name: SnAgentsOS ${{ env.TAG }}
+          draft: false
+          prerelease: ${{ contains(env.TAG, '-') }}
+          body_path: ${{ runner.temp }}/notes.md
           generate_release_notes: true
           append_body: false

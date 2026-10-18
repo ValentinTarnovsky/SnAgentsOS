@@ -5,12 +5,19 @@ import { tmpdir } from 'os'
 import { join, dirname } from 'path'
 import { spawn, type SpawnOptions } from 'child_process'
 import { app, net, shell, type ClientRequest } from 'electron'
-import type { InstallKind, UpdateInfo, UpdateProgress } from '@shared/ipc-contract'
+import { MISSING_CHECKSUM, type InstallKind, type UpdateInfo, type UpdateProgress } from '@shared/ipc-contract'
+import { BRAND } from '@shared/brand'
 import { isPortable, portableExeFile } from './paths'
 
-/** owner/repo the releases are published under. */
-const REPO = 'ValentinTarnovsky/SnMultiCC'
+/**
+ * owner/repo the releases are published under. 1.x clients still query the old
+ * name and reach this repo through GitHub's 301 (followed by makeRequest).
+ */
+const REPO = BRAND.repo
 const LATEST_URL = `https://api.github.com/repos/${REPO}/releases/latest`
+const userAgent = (): string => `${BRAND.productName}/${app.getVersion()}`
+const UPDATE_DIR_PREFIX = `${BRAND.tempPrefix}update-`
+const SWAP_DIR_PREFIX = `${BRAND.tempPrefix}swap-`
 
 /**
  * Hosts we will ever fetch from, including the CDN GitHub redirects asset
@@ -83,9 +90,11 @@ function sidecarFor(assets: GhAsset[], name: string): string | null {
 /**
  * Choose the release asset that matches this OS, architecture and install type
  * (portable vs installed). Returns null when nothing safely installable fits, in
- * which case the UI falls back to opening the release page.
+ * which case the UI falls back to opening the release page. Matching is by
+ * pattern, never by product prefix, so a rename of the artifacts keeps working.
+ * Exported for scripts/test-rebrand.cjs.
  */
-function pickAsset(assets: GhAsset[]): Match | null {
+export function pickAsset(assets: GhAsset[]): Match | null {
   const find = (re: RegExp): GhAsset | undefined => assets.find((a) => re.test(a.name))
   const wrap = (asset: GhAsset | undefined, kind: InstallKind): Match | null =>
     asset ? { asset, kind, sha256Url: sidecarFor(assets, asset.name) } : null
@@ -125,7 +134,7 @@ function pickAsset(assets: GhAsset[]): Match | null {
 /** A GET request with a strict https + host allowlist enforced across redirects. */
 function makeRequest(url: string, onReject: (err: Error) => void): ClientRequest {
   const req = net.request({ url, method: 'GET', redirect: 'manual' })
-  req.setHeader('User-Agent', `SnMultiCC/${app.getVersion()}`)
+  req.setHeader('User-Agent', userAgent())
   req.on('redirect', (_status: number, _method: string, redirectUrl: string) => {
     try {
       const u = new URL(redirectUrl)
@@ -217,14 +226,14 @@ function parseSha256(text: string): string | null {
  * Stream the (large) installer to disk via Node's https, which is a real
  * Readable so write backpressure actually works (Electron's net IncomingMessage
  * is only an EventEmitter and can't be paused). Redirects are followed manually
- * against the same host allowlist; the byte count and, when published, the
- * SHA-256 are verified, and the partial file is removed on any failure.
+ * against the same host allowlist; the byte count and the SHA-256 are verified,
+ * and the partial file is removed on any failure.
  */
 function download(
   url: string,
   dest: string,
   expectedSize: number,
-  expectedSha256: string | null,
+  expectedSha256: string,
   onProgress: (p: UpdateProgress) => void,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
@@ -238,7 +247,7 @@ function download(
     const attempt = (current: string, redirectsLeft: number): void => {
       const req = httpsGet(
         current,
-        { headers: { 'User-Agent': `SnMultiCC/${app.getVersion()}` } },
+        { headers: { 'User-Agent': userAgent() } },
         (res) => {
           const status = res.statusCode ?? 0
 
@@ -307,7 +316,7 @@ function download(
                 cleanupFail(new Error(`Size mismatch: got ${transferred}, expected ${expectedSize}`))
                 return
               }
-              if (expectedSha256 && hash.digest('hex') !== expectedSha256) {
+              if (hash.digest('hex') !== expectedSha256) {
                 cleanupFail(new Error('The downloaded update failed SHA-256 verification.'))
                 return
               }
@@ -384,7 +393,7 @@ const UNIX_SWAP_SCRIPT = [
 ].join('\n')
 
 function writeScript(name: string, body: string): string {
-  const script = join(mkdtempSync(join(tmpdir(), 'snmulticc-swap-')), name)
+  const script = join(mkdtempSync(join(tmpdir(), SWAP_DIR_PREFIX)), name)
   writeFileSync(script, body, 'utf8')
   return script
 }
@@ -405,6 +414,8 @@ async function applyInstall(kind: InstallKind, file: string): Promise<boolean> {
       return false
     }
     case 'win-portable': {
+      // Resolved now, never cached: the first-run rename (E0-FR-33) updates
+      // PORTABLE_EXECUTABLE_FILE, and a stale value would recreate the old name.
       const target = portableExeFile() ?? process.execPath
       const script = writeScript('swap.cmd', WIN_SWAP_SCRIPT)
       return spawnDetached('cmd.exe', ['/c', script], {
@@ -478,7 +489,7 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
 }
 
 /**
- * Download the matching asset (verifying its SHA-256 when published) and start
+ * Download the matching asset (verifying its published SHA-256) and start
  * applying it. Resolves with `relaunching: true` when the app must quit so the
  * swap/installer can run.
  */
@@ -501,23 +512,25 @@ export async function downloadAndInstall(
     throw new Error('Refusing to download an update from an untrusted URL.')
   }
 
-  // Fetch the published checksum (over the host-pinned path) before downloading.
-  // If a sidecar exists we REQUIRE it to match; only its absence skips the check.
-  let expectedSha256: string | null = null
-  if (sha256Url) {
-    try {
-      expectedSha256 = parseSha256(await fetchText(sha256Url))
-    } catch (err) {
-      throw new Error(
-        `Could not fetch the update checksum, aborting for safety: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      )
-    }
-    if (!expectedSha256) throw new Error('The published update checksum was malformed.')
-  }
+  // Every installable kind runs the downloaded bytes, so a release without the
+  // "<asset>.sha256" sidecar is refused outright (E0-FR-25); the renderer maps
+  // this message to update.error.missingChecksum.
+  if (!sha256Url) throw new Error(MISSING_CHECKSUM)
 
-  const dir = mkdtempSync(join(tmpdir(), 'snmulticc-update-'))
+  // Fetch the published checksum (over the host-pinned path) before downloading.
+  let expectedSha256: string | null
+  try {
+    expectedSha256 = parseSha256(await fetchText(sha256Url))
+  } catch (err) {
+    throw new Error(
+      `Could not fetch the update checksum, aborting for safety: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+  }
+  if (!expectedSha256) throw new Error('The published update checksum was malformed.')
+
+  const dir = mkdtempSync(join(tmpdir(), UPDATE_DIR_PREFIX))
   const dest = join(dir, asset.name)
   try {
     await download(asset.browser_download_url, dest, asset.size, expectedSha256, onProgress)

@@ -1,6 +1,7 @@
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { app, BrowserWindow, Menu, nativeImage, Tray } from 'electron'
+import { BRAND } from '@shared/brand'
 
 let tray: Tray | null = null
 
@@ -51,7 +52,7 @@ export function ensureTray(
   const base = nativeImage.createFromPath(trayIconPath())
   const icon = base.isEmpty() ? base : base.resize({ width: 16, height: 16 })
   tray = new Tray(icon)
-  tray.setToolTip('SnMultiCC')
+  tray.setToolTip(BRAND.productName)
   tray.on('click', show)
   tray.on('double-click', show)
   tray.setContextMenu(menu)

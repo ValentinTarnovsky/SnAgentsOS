@@ -25,6 +25,34 @@ export interface AppInfo {
   configPath: string | null
 }
 
+/** Phases of the 1.x migration marker (mirrors LEGACY_PHASES in main's legacyMarker.ts). */
+export type LegacyPhase = 'migrating' | 'verified' | 'backedUp' | 'committed' | 'cleaning' | 'done' | 'failed'
+
+/** What only the user can do about 1.x: items left skipped: needsElevation (E0-FR-10). */
+export type LegacyManualAction = 'uninstallPerMachine' | 'trashMacApp'
+
+/**
+ * The 1.x migration as the renderer sees it (E0-FR-10, 28, 35), derived in
+ * main from the marker. Paths are computed in main and only shown; no channel
+ * takes a path back from the renderer.
+ */
+export interface LegacyDataInfo {
+  phase: LegacyPhase | null
+  outcome: 'migrated' | 'noLegacy' | null
+  counts: { workspaces: number; presets: number; devices: number; backups: number } | null
+  cleanup: { pending: number; deferred: number; done: number; skipped: number }
+  /** Some item deferred and cleanupStarts >= 5. */
+  showDeferredBanner: boolean
+  failure: { phase: LegacyPhase; attempts: number } | null
+  /** migration-backup-v1.zip while it exists (null after its expiry). */
+  backup: { path: string; expiresAt: number } | null
+  pinRetargeted: boolean | null
+  manualActions: LegacyManualAction[]
+  /** Windows: settings.remote.enabled or migrated devices; the new exe path triggers the firewall prompt. */
+  firewallHint: boolean
+  noticeSeen: boolean
+}
+
 /**
  * How a downloaded update will be applied, derived from the OS + install type.
  *  - win-installer  : run the NSIS setup (upgrades + relaunches)
@@ -62,6 +90,12 @@ export interface UpdateInfo {
   /** Set when the check itself failed (network/API error). */
   error?: string
 }
+
+/**
+ * Install error raised when the chosen asset has no "<asset>.sha256" sidecar
+ * (E0-FR-25). The renderer shows update.error.missingChecksum for it.
+ */
+export const MISSING_CHECKSUM = 'missing-checksum'
 
 /** Streamed while an update is downloading. */
 export interface UpdateProgress {
@@ -254,6 +288,16 @@ export interface SnApi {
   filePath(file: unknown): string
   app: {
     info(): Promise<AppInfo>
+    /** State of the 1.x migration (E0-FR-10). */
+    legacyInfo(): Promise<LegacyDataInfo>
+    /** Closes the welcome notice for good (noticeSeen in the marker). */
+    legacyAck(): void
+    /** Reveals migration-backup-v1.zip in the file manager (path resolved in main). */
+    legacyShowBackup(): void
+    /** Opens logs/legacy-migration.log (path resolved in main). */
+    legacyOpenLog(): void
+    /** Pushed on every marker change. Returns an unsubscribe function. */
+    onLegacyStatus(cb: (info: LegacyDataInfo) => void): () => void
   }
   pty: {
     spawn(req: PtySpawnReq): Promise<PtySpawnRes>
@@ -357,9 +401,9 @@ export interface SnApi {
     testDesktop(): Promise<void>
     /** Fired when a status notification is clicked (reveal that console). */
     onReveal(cb: (paneId: string) => void): () => void
-    /** Write the SnMultiCC hook block into ~/.claude/settings.json. */
+    /** Write our hook block into ~/.claude/settings.json. */
     hooksInstall(cfg: NotificationSettings): Promise<StatusHooksStatusRes>
-    /** Remove every SnMultiCC hook handler from ~/.claude/settings.json. */
+    /** Remove every hook handler of ours from ~/.claude/settings.json. */
     hooksUninstall(): Promise<StatusHooksStatusRes>
     hooksStatus(): Promise<StatusHooksStatusRes>
   }
