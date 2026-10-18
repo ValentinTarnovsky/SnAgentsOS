@@ -24,6 +24,7 @@ import { Composer, openComposerForPaste, toggleInputMode } from './Composer'
 import { DirectInputStrip } from './DirectInputStrip'
 import { ExitStrip } from './ExitStrip'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
+import { DiagnosticsScreen } from './DiagnosticsScreen'
 import { StatusIndicator } from './StatusIndicator'
 import { WaitingPill } from './WaitingPill'
 import { selectInputMode, store, useRemoteStore } from '../lib/store'
@@ -148,6 +149,7 @@ export function MainScreen(): ReactNode {
       <ActionSheet open={actionsOpen} onClose={() => setActionsOpen(false)} />
       <QuickCommandsSheet open={quickOpen} onClose={() => setQuickOpen(false)} />
       <PaneActionSheet target={paneActions} onClose={() => setPaneActions(null)} />
+      <DiagnosticsScreen />
     </div>
     </BackStackHost>
   )

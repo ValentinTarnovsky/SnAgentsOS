@@ -9,11 +9,13 @@
  * - hex runs of 32+ characters (tokens, hashes) -> `<redacted>`
  * - `#pair=...` fragments -> `#pair=<redacted>`
  * - the `home` folder -> `~` (case-insensitive for a Windows path)
- * - private IPv4 (RFC 1918 and 100.64/10) -> `a.b.x.x`
+ * - private IPv4 (RFC 1918 and 100.64/10) -> `a.b.x.x` (unless `keepIps`)
  */
 export interface RedactOptions {
   home?: string
   extraSecrets?: string[]
+  /** Leave private IPv4 addresses readable (the phone's own connection log). */
+  keepIps?: boolean
 }
 
 const MIN_SECRET = 4
@@ -58,6 +60,6 @@ export function redact(text: string, opts: RedactOptions = {}): string {
       out = out.replace(new RegExp(escapeRe(v), windows ? 'gi' : 'g'), '~')
     }
   }
-  out = out.replace(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g, (whole) => maskIpv4(whole))
+  if (!opts.keepIps) out = out.replace(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g, (whole) => maskIpv4(whole))
   return out
 }
