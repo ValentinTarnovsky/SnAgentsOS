@@ -28,11 +28,16 @@ export function statusBinDir(): string {
 
 /**
  * Every launcher directory a parent process may have left in an inherited
- * PATH: the current one and the 1.x one (its userData, also for the 1.x
- * portable). A pty or the Codex lookup must never pick either up (E0-FR-05).
+ * PATH: the current one, the 1.x one (its userData, also for the 1.x
+ * portable) and the default 2.x one, which differs from the current one when
+ * userData is overridden (dev build, --user-data-dir) and the app was started
+ * from a console of the installed app. A pty or the Codex lookup must never
+ * pick any of them up (E0-FR-05): on POSIX the shim taken for the real CLI
+ * would recurse into itself.
  */
 export function statusBinDirs(): string[] {
-  return [statusBinDir(), join(app.getPath('appData'), LEGACY_BRAND.packageName, 'status-bin')]
+  const appData = app.getPath('appData')
+  return [statusBinDir(), join(appData, LEGACY_BRAND.packageName, 'status-bin'), join(appData, BRAND.packageName, 'status-bin')]
 }
 
 /** Normalized form for comparing PATH entries (Windows paths ignore case). */
