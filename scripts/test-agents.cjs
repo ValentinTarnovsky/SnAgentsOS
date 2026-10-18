@@ -435,13 +435,339 @@ function testNavigation() {
   check(navKeys.length >= 40 && navKeys.every(k => typeof es[k] === 'string' && es[k].length > 0), 'every navigation string exists in es and en')
 }
 
-testModes()
-testStaleAndPhone()
-testDisplayResumeAndEvents()
-testIpc()
-testTray()
-testRemotePhones()
-testRendererHelpers()
-testSchema()
-testNavigation()
-console.log(`PASS: ${checks} agents checks (AwakeService modes, grace, 2 h lease, action + phone, resume, IPC, tray, renderer sync, agent navigation)`)
+/** Renderer modules bundled together so they share one store instance (agents v2.2). */
+function loadRenderer(contents, overrides = {}) {
+  const code = buildSync({ stdin: { contents, resolveDir: path.join(root, 'src/renderer/lib'), loader: 'ts' }, bundle: true, platform: 'node', format: 'cjs', write: false, alias, define: { 'process.env.NODE_ENV': '"production"' } }).outputFiles[0].text
+  const mod = { exports: {} }
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console, process, crypto: globalThis.crypto, setTimeout, clearTimeout, Promise, ...overrides })
+  return mod.exports
+}
+
+/** Fake timers with a clock: advance(ms) fires what came due, in order. */
+function fakeTimers() {
+  let clock = 0, seq = 0
+  const timers = new Map()
+  const setTimer = (fn, ms) => { timers.set(++seq, { fn, at: clock + ms }); return seq }
+  const clearTimer = id => { timers.delete(id) }
+  const advance = ms => {
+    const end = clock + ms
+    for (;;) {
+      const due = [...timers.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0]
+      if (!due) break
+      timers.delete(due[0]); clock = due[1].at; due[1].fn()
+    }
+    clock = end
+  }
+  return { setTimer, clearTimer, advance, pending: () => timers.size }
+}
+
+// E5-FR-12: dialog model (candidates, groups, phrases) and its countdown.
+function testResumeModalModel() {
+  const m = load('src/renderer/lib/resumeModal.ts')
+  const preset = { id: 'pc', name: 'Claude Code', type: 'claude', command: 'claude', args: [], color: '', icon: 'claude' }
+  const pane = (id, extra = {}) => ({ id, type: 'claude', presetId: 'pc', title: 'Claude Code', color: '', icon: 'claude', ...extra })
+  const view = (paneId, extra = {}) => ({ paneId, provider: 'claude', sessionId: '0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab', spawnCwd: 'C:/r', activity: 'working', updatedAt: 50, available: true, ...extra })
+  const working = { activity: 'working', trigger: 'update', at: 60 }
+  const workspaces = [
+    { id: 'w1', name: 'Uno', cwd: '', panes: [pane('a'), pane('b'), pane('n')], layout: { grid: 4, order: ['b', 'a', 'n'] } },
+    { id: 'w2', name: 'Dos', cwd: '', favorite: true, panes: [pane('c', { type: 'codex', presetId: undefined, title: 'Codex' }), pane('s', { setupId: 'ssh' }), pane('e'), pane('g')] },
+  ]
+  const sessions = {
+    a: view('a', { interrupted: working, topic: 'Fix login', lastPrompt: 'arreglá el login' }),
+    b: view('b', { interrupted: { activity: 'action', reason: 'permission', trigger: 'update', at: 60 }, firstPrompt: 'refactor store' }),
+    n: view('n'),
+    c: view('c', { interrupted: { activity: 'action', reason: 'plan', trigger: 'update', at: 60 }, provider: 'codex' }),
+    s: view('s', { interrupted: working }),
+    e: view('e', { interrupted: working, endedAt: 70 }),
+    g: view('g', { interrupted: working, available: false, unavailableReason: 'transcript' }),
+  }
+  const startup = { trigger: 'update', interrupted: ['a', 'b', 'c', 's', 'e', 'g', 'gone'] }
+  const input = { workspaces, presets: [preset], sessions, startup, policy: 'ask' }
+  check(m.resumeModalCandidates(input).join() === 'c,b,a', 'candidates: interrupted and resumable only (no SSH, ended or unavailable), sidebar order (favorites first) then grid order')
+  check(m.resumeModalCandidates({ ...input, policy: 'auto' }).length === 0 && m.resumeModalCandidates({ ...input, policy: 'off' }).length === 0, 'auto and off never ask')
+  check(m.resumeModalCandidates({ ...input, startup: { trigger: null, interrupted: [] } }).length === 0 && m.resumeModalCandidates({ ...input, startup: null }).length === 0, 'no interrupted chat, no dialog')
+  const groups = m.resumeGroups(['c', 'b', 'a'], workspaces, sessions)
+  check(groups.length === 2 && groups[0].name === 'Dos' && groups[1].rows.map(r => r.paneId).join() === 'b,a', 'rows grouped by workspace in the order given')
+  const [rc] = groups[0].rows, [rb, ra] = groups[1].rows
+  check(ra.title === 'Fix login' && rb.title === 'refactor store' && rc.title === 'Codex', 'title: topic, else first prompt, else the console title')
+  check(ra.stateKey === 'agents.modal.state.working' && rb.stateKey === 'agents.modal.state.permission' && rc.stateKey === 'agents.modal.state.plan', 'state phrase per interruption (working, permission, plan)')
+  check(m.interruptedStateKey({ activity: 'action', reason: 'question' }) === 'agents.modal.state.question' && m.interruptedStateKey({ activity: 'action', reason: 'elicitation' }) === 'agents.modal.state.question' && m.interruptedStateKey({ activity: 'action' }) === 'agents.modal.state.action', 'question and elicitation read "question pending"')
+  check(ra.working && !rb.working && ra.lastPrompt === 'arreglá el login' && rc.provider === 'codex', 'rows carry working, last prompt and provider')
+  check(['update', 'quit', 'shutdown', 'crash', null].map(m.triggerKey).join() === 'agents.modal.sub.update,agents.modal.sub.quit,agents.modal.sub.shutdown,agents.modal.sub.crash,agents.modal.sub.crash', 'subtitle by trigger')
+  check(m.groupCheck(groups[1].rows, new Set(['a', 'b'])) === 'all' && m.groupCheck(groups[1].rows, new Set(['a'])) === 'some' && m.groupCheck(groups[1].rows, new Set()) === 'none', 'tri-state workspace checkbox')
+  // Countdown (fake clock values).
+  check(m.countdownLeft(1000, 60, 16_000, false) === 45_000 && m.formatCountdown(45_000) === '0:45', '"Resuming automatically in 0:45" 15 s into a 60 s countdown')
+  check(m.formatCountdown(44_001) === '0:45' && m.formatCountdown(60_000) === '1:00' && m.formatCountdown(600_000) === '10:00' && m.formatCountdown(9_000) === '0:09' && m.formatCountdown(-1) === '0:00', 'formatCountdown rounds up to whole seconds')
+  check(m.countdownLeft(1000, 60, 61_000, false) === 0 && m.countdownLeft(1000, 60, 99_000, false) === 0, 'it reaches 0 at the deadline and stays there')
+  check(m.countdownLeft(1000, 0, 2000, false) === null, 'resumeModalTimeoutSec = 0: no countdown')
+  check(m.countdownLeft(1000, 60, 2000, true) === null, 'any interaction cancels the countdown')
+}
+
+// E5-FR-13: the nudge under fake timers.
+function testNudge() {
+  const { createNudger, NUDGE_START_TIMEOUT_MS, NUDGE_IDLE_WAIT_MS, NUDGE_ENTER_DELAY_MS } = load('src/renderer/lib/resumeNudge.ts')
+  check(NUDGE_START_TIMEOUT_MS === 20_000 && NUDGE_IDLE_WAIT_MS === 1000 && NUDGE_ENTER_DELAY_MS === 150, 'nudge timings: 20 s for start, 1 s for idle, Enter 150 ms later')
+  const make = () => {
+    const t = fakeTimers(), writes = [], action = new Set()
+    let hasPty = true
+    const n = createNudger({ setTimer: t.setTimer, clearTimer: t.clearTimer, write: (p, d) => { if (!hasPty) return false; writes.push([p, d]); return true }, isAction: p => action.has(p) })
+    return { t, writes, action, n, noPty: () => { hasPty = false } }
+  }
+  const S1 = 'session-1111', S2 = 'session-2222'
+  {
+    const h = make()
+    h.n.arm('p', 'Continuá donde quedaste.')
+    h.t.advance(5000)
+    h.n.onReady({ paneId: 'p', sessionId: S1, phase: 'start' })
+    h.t.advance(999)
+    check(h.writes.length === 0, 'nothing before the idle or the 1 s after start')
+    h.t.advance(1)
+    check(h.writes.length === 1 && h.writes[0][1] === 'Continuá donde quedaste.', 'no idle: the text goes 1 s after start')
+    h.t.advance(149)
+    check(h.writes.length === 1, 'the Enter waits 150 ms')
+    h.t.advance(1)
+    check(h.writes.length === 2 && h.writes[1][1] === '\r' && !h.n.isArmed('p') && h.t.pending() === 0, 'then the Enter, once, and nothing stays armed')
+  }
+  {
+    const h = make()
+    h.n.arm('p', 'Seguí')
+    h.n.onReady({ paneId: 'p', sessionId: S1, phase: 'start' })
+    h.t.advance(300)
+    h.n.onReady({ paneId: 'p', sessionId: S2, phase: 'idle' })
+    check(h.writes.length === 0, 'an idle of another session does not fire it')
+    h.n.onReady({ paneId: 'p', sessionId: S1, phase: 'idle' })
+    check(h.writes.length === 1 && h.writes[0][1] === 'Seguí', 'the first idle after the session start fires it at once')
+    h.t.advance(2000)
+    check(h.writes.length === 2 && h.writes[1][1] === '\r', 'the 1 s fallback was cancelled: exactly text + Enter')
+  }
+  {
+    const h = make()
+    h.n.arm('p', 'Seguí')
+    h.t.advance(20_000)
+    h.n.onReady({ paneId: 'p', sessionId: S1, phase: 'start' })
+    h.t.advance(5000)
+    check(h.writes.length === 0 && !h.n.isArmed('p'), 'no start in 20 s: nothing is written, a late start is ignored')
+  }
+  {
+    const h = make()
+    h.n.arm('p', 'Seguí')
+    h.n.onReady({ paneId: 'p', sessionId: S1, phase: 'start' })
+    h.action.add('p')
+    h.t.advance(1000)
+    check(h.writes.length === 0 && !h.n.isArmed('p'), 'never sent to a console in action')
+  }
+  {
+    const h = make()
+    h.n.arm('p', 'Seguí')
+    h.n.onReady({ paneId: 'p', sessionId: S1, phase: 'idle' })
+    check(h.writes.length === 0 && h.n.isArmed('p'), 'an idle before any start does not count')
+    h.n.arm('q', '   ')
+    check(!h.n.isArmed('q'), 'a blank text arms nothing')
+    h.n.cancel('p')
+    h.n.onReady({ paneId: 'p', sessionId: S1, phase: 'start' })
+    h.t.advance(2000)
+    check(h.writes.length === 0, 'a cancelled nudge never fires')
+    h.n.arm('p', 'Seguí')
+    h.noPty()
+    h.n.onReady({ paneId: 'p', sessionId: S1, phase: 'start' })
+    h.t.advance(2000)
+    check(h.writes.length === 0 && h.t.pending() === 0, 'without a pty no Enter is scheduled')
+  }
+}
+
+// E5-FR-22: Smart order, the freeze and Alt+N on the same order.
+function testSmartOrder() {
+  const { sidebarOrder, liveSidebarOrder, freezeSidebarOrder, releaseSidebarOrder, useSidebarFreeze } = load('src/renderer/lib/sidebarOrder.ts')
+  const ws = (id, favorite, paneIds) => ({ id, name: id, cwd: '', favorite, panes: paneIds.map(p => ({ id: p, type: 'claude', title: p, color: '', icon: '' })) })
+  const workspaces = [ws('A', false, ['a1']), ws('B', false, ['b1', 'b2']), ws('C', false, ['c1']), ws('D', true, ['d1']), ws('E', true, ['e1']), ws('F', false, ['f1'])]
+  const paneStatus = {
+    a1: { state: 'idle', precise: true, stateSince: 100 },
+    b1: { state: 'working', precise: true, stateSince: 50 }, b2: { state: 'action', precise: true, stateSince: 400 },
+    d1: { state: 'working', precise: true, stateSince: 10 },
+    e1: { state: 'done', precise: true, stateSince: 20 },
+    f1: { state: 'action', precise: true, stateSince: 300 },
+  }
+  const nav = { workspaces, paneStatus, paneAttention: { e1: true }, mountedWorkspaces: Object.fromEntries(workspaces.map(w => [w.id, 'full'])), sessions: {}, presets: [], policy: 'ask' }
+  const ids = list => list.map(w => w.id).join()
+  check(ids(sidebarOrder(workspaces)) === 'D,E,A,B,C,F', 'manual: favorites first, stable')
+  check(ids(sidebarOrder(workspaces, { sort: 'manual', nav })) === 'D,E,A,B,C,F', 'manual ignores agent state')
+  const smart = sidebarOrder(workspaces, { sort: 'smart', nav })
+  check(ids(smart) === 'E,D,F,B,A,C', 'smart: favorites stay on top; inside each group the most demanding agent wins (action waiting longest first), agentless workspaces last')
+  check(ids(sidebarOrder(workspaces, { sort: 'smart', nav: { ...nav, paneStatus: { ...paneStatus, f1: { state: 'action', precise: true, stateSince: 400 } } } })) === 'E,D,B,F,A,C', 'equal urgency keeps the manual order')
+  const frozen = ['D', 'E', 'A', 'B', 'C']
+  check(ids(sidebarOrder(workspaces, { sort: 'smart', nav, frozen })) === 'D,E,A,B,C,F', 'frozen: the order shown at freeze time holds, a new workspace goes last')
+  check(ids(sidebarOrder(workspaces.map(w => w.id === 'C' ? { ...w, favorite: true } : w), { sort: 'smart', nav, frozen })) === 'D,E,C,A,B,F', 'frozen: a favorite toggle still regroups (favorites stay on top)')
+  const app = { workspaces, paneStatus, paneAttention: nav.paneAttention, mountedWorkspaces: nav.mountedWorkspaces, presets: [], settings: { agents: { sidebarSort: 'smart', resumeOnStartup: 'ask' } } }
+  check(ids(liveSidebarOrder(app, { sessions: {} })) === 'E,D,F,B,A,C', 'live order (Alt+1..9, next/previous workspace) follows Smart: Alt+1 is the first of the Smart order')
+  check(ids(liveSidebarOrder({ ...app, settings: { agents: { sidebarSort: 'manual' } } }, { sessions: {} })) === 'D,E,A,B,C,F', 'live order with manual sort')
+  freezeSidebarOrder(['D', 'E', 'A', 'B', 'C', 'F'])
+  freezeSidebarOrder(['X'])
+  check(useSidebarFreeze.getState().frozen.join() === 'D,E,A,B,C,F', 'a freeze in place is kept (pointer and focus both inside)')
+  check(ids(liveSidebarOrder(app, { sessions: {} })) === 'D,E,A,B,C,F', 'while frozen Alt+N matches what is on screen')
+  releaseSidebarOrder()
+  check(useSidebarFreeze.getState().frozen === null && ids(liveSidebarOrder(app, { sessions: {} })) === 'E,D,F,B,A,C', 'released: the Smart order applies again')
+}
+
+// E5-FR-12/13 end to end in the renderer: the dialog holds the spawns, the
+// decision becomes intents, the nudge arms, a reload does not ask again.
+async function testResumeModalFlow() {
+  const UUID = '0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab', UUID2 = '1c8d3a5f-2b3c-4d4e-9fa0-123456789abc'
+  const flush = () => new Promise(r => setImmediate(r))
+  const build = (consumed) => {
+    const sent = { forget: [], writes: [] }
+    let onReady = null
+    const t = fakeTimers()
+    const sessions = [
+      { paneId: 'pa', provider: 'claude', sessionId: UUID, spawnCwd: 'C:\\repo', activity: 'unknown', updatedAt: 1, available: true, topic: 'Fix login', interrupted: { activity: 'working', trigger: 'update', at: 1 } },
+      { paneId: 'pd', provider: 'claude', sessionId: UUID2, spawnCwd: 'C:\\repo', activity: 'unknown', updatedAt: 1, available: true, interrupted: { activity: 'action', reason: 'permission', trigger: 'update', at: 1 } },
+    ]
+    const snApi = {
+      platform: 'win32',
+      agents: {
+        list: async () => sessions, startup: async () => ({ trigger: 'update', interrupted: ['pa', 'pd'] }),
+        consumeStartup: async (id) => { if (consumed.has(id)) return false; consumed.add(id); return true },
+        startupPending: async (ids) => ids.filter(id => !consumed.has(id)),
+        forget: (id) => sent.forget.push(id), onChanged: () => () => {}, onReady: (cb) => { onReady = cb; return () => {} },
+      },
+      pty: { kill: async () => {}, killPanes: async () => 0, write: (req) => sent.writes.push(req) },
+      config: { save() {} },
+    }
+    const r = loadRenderer(`export * as launch from './agentLaunch'; export { useAppStore } from './store'; export { useAgentStore } from './agentStore'; export { registerPty } from './ptyRegistry'; export { resolveLaunch } from './launch'`, {
+      window: { snApi }, document: { hasFocus: () => false }, setTimeout: t.setTimer, clearTimeout: t.clearTimer,
+    })
+    const S = r.useAppStore
+    const preset = { id: 'preset-claude', name: 'Claude Code', type: 'claude', command: 'claude', args: [], color: '#000', icon: 'claude' }
+    S.getState().hydrate({
+      version: 12, presets: [preset],
+      settings: { ...S.getState().settings, notifications: { ...S.getState().settings.notifications, hooksEnabled: true }, agents: { ...S.getState().settings.agents, resumeOnStartup: 'ask', resumeNudge: true } },
+      activeWorkspaceId: 'w1',
+      workspaces: [
+        { id: 'w1', name: 'One', cwd: 'C:\\repo', panes: [{ id: 'pa', type: 'claude', presetId: 'preset-claude', title: 'A', color: '', icon: '' }], layout: { grid: 1, order: ['pa'] } },
+        { id: 'w2', name: 'Two', cwd: 'C:\\repo', panes: [{ id: 'pd', type: 'claude', presetId: 'preset-claude', title: 'D', color: '', icon: '' }], layout: { grid: 1, order: ['pd'] } },
+      ],
+    })
+    const base = (paneId) => { const ws = S.getState().workspaces.find(w => w.panes.some(p => p.id === paneId)); return r.resolveLaunch(ws.panes.find(p => p.id === paneId), ws, S.getState().presets, S.getState().connections) }
+    return { r, S, A: r.useAgentStore, L: r.launch, t, sent, base, ready: (e) => onReady(e) }
+  }
+
+  const consumed = new Set()
+  const h = build(consumed)
+  await h.L.mountInterruptedAgents()
+  let modal = h.A.getState().modal
+  check(modal && modal.paneIds.join() === 'pa,pd' && modal.trigger === 'update' && h.A.getState().modalPending, 'ask + 2 interrupted chats in 2 workspaces: the dialog opens with both, from the update')
+  check(h.A.getState().gated.pa && h.A.getState().gated.pd, 'their consoles are gated (placeholder)')
+  check(h.S.getState().mountedWorkspaces.w2 === undefined, 'a pending pane is not mounted before the decision')
+  let settled = null
+  const pa = h.L.prepareAgentLaunch('pa', h.base('pa')).then(v => { settled = v })
+  await flush(); await flush()
+  check(settled === null && consumed.has('pa'), 'the gated spawn waits for the dialog (its startup decision is spent)')
+  h.L.applyResumeChoice({ resume: ['pa'], nudge: true })
+  await pa
+  check(settled.initialCommand === `claude --resume ${UUID}` && settled.cwd === 'C:\\repo', 'a ticked row resumes once the dialog is decided')
+  check(!h.A.getState().modal && !h.A.getState().modalPending && Object.keys(h.A.getState().gated).length === 0, 'the dialog closes and releases every gate')
+  check(h.A.getState().launchIntent.pd === 'fresh' && h.S.getState().mountedWorkspaces.w2 === undefined, 'an unticked row starts fresh (on its first visit; nothing mounted for it)')
+  const pd = await h.L.prepareAgentLaunch('pd', h.base('pd'))
+  check(pd.initialCommand === 'claude' && !h.A.getState().resumeChip.pd && h.sent.forget.length === 0, 'unticked: fresh launch, no chip, the record is kept')
+  // Nudge: pa was working, resumeNudge is on.
+  h.r.registerPty('pa', 'pty-a')
+  h.ready({ paneId: 'pa', sessionId: UUID, phase: 'start' })
+  h.ready({ paneId: 'pa', sessionId: UUID, phase: 'idle' })
+  check(h.sent.writes.length === 1 && h.sent.writes[0].ptyId === 'pty-a' && h.sent.writes[0].data === 'Continue where you left off.', 'the resumed working chat gets the nudge on its first idle (default text in the UI language)')
+  h.t.advance(150)
+  check(h.sent.writes.length === 2 && h.sent.writes[1].data === '\r', 'and the Enter 150 ms later')
+
+  // A renderer reload after the decision: nothing pending, no dialog.
+  const again = build(consumed)
+  await again.L.mountInterruptedAgents()
+  check(!again.A.getState().modal && !again.A.getState().modalPending, 'a reload after the decision does not ask again')
+
+  // "Start fresh" + "Don't ask again", and the resume counter mounting the other workspace.
+  const h2 = build(new Set())
+  await h2.L.mountInterruptedAgents()
+  h2.L.applyResumeChoice({ resume: ['pa', 'pd'], startFresh: true, dontAskAgain: true, nudge: false })
+  check(h2.sent.forget.join() === 'pa,pd' && !h2.A.getState().sessions.pa && h2.A.getState().launchIntent.pa === 'fresh' && h2.A.getState().launchIntent.pd === 'fresh', '"Start fresh" forgets every listed chat and starts them clean')
+  check(h2.S.getState().settings.agents.resumeOnStartup === 'auto' && h2.S.getState().settings.agents.resumeNudge === false, '"Don\'t ask again" sets resumeOnStartup=auto; the nudge checkbox is saved')
+  const h3 = build(new Set())
+  await h3.L.mountInterruptedAgents()
+  h3.L.applyResumeChoice({ resume: ['pa', 'pd'] })
+  check(JSON.stringify(h3.S.getState().mountedWorkspaces.w2) === '["pd"]' && h3.S.getState().activeWorkspaceId === 'w1', '"Resume 2" mounts the resumed console of a workspace never opened, without switching to it')
+  const r3 = await h3.L.prepareAgentLaunch('pd', h3.base('pd'))
+  check(r3.initialCommand === `claude --resume ${UUID2}`, 'and it resumes on spawn')
+  check(h3.L.nudgeText() === 'Continue where you left off.', 'nudgeText falls back to the i18n default')
+  h3.S.getState().updateSettings({ agents: { ...h3.S.getState().settings.agents, resumeNudgeText: '  Seguí con lo tuyo  ' } })
+  check(h3.L.nudgeText() === 'Seguí con lo tuyo', 'a custom nudge text wins (trimmed)')
+  const h4 = build(new Set())
+  h4.S.getState().updateSettings({ agents: { ...h4.S.getState().settings.agents, resumeOnStartup: 'auto' } })
+  await h4.L.mountInterruptedAgents()
+  check(!h4.A.getState().modal && JSON.stringify(h4.S.getState().mountedWorkspaces.w2) === '["pd"]', 'auto: no dialog, interrupted chats resume and mount right away')
+  // A listed console restarted while the dialog is open (its menu, the phone) starts at once and leaves the dialog.
+  const h5 = build(new Set())
+  await h5.L.mountInterruptedAgents()
+  h5.A.getState().setIntent('pd', 'resume')
+  const r5 = await h5.L.prepareAgentLaunch('pd', h5.base('pd'))
+  check(r5.initialCommand === `claude --resume ${UUID2}` && h5.A.getState().modal.paneIds.join() === 'pa' && !h5.A.getState().gated.pd && h5.A.getState().gated.pa, 'a restarted listed console starts at once, loses its placeholder and leaves the dialog')
+  h5.L.applyResumeChoice({ resume: [] })
+  check(h5.A.getState().launchIntent.pd === undefined && h5.A.getState().launchIntent.pa === 'fresh', 'the later choice leaves no intent behind for the console that already started')
+  const h6 = build(new Set())
+  await h6.L.mountInterruptedAgents()
+  let p6 = null
+  const w6 = h6.L.prepareAgentLaunch('pa', h6.base('pa')).then(v => { p6 = v })
+  await flush(); await flush()
+  h6.A.getState().setIntent('pd', 'fresh')
+  await h6.L.prepareAgentLaunch('pd', h6.base('pd'))
+  check(p6 === null && h6.A.getState().modal && h6.A.getState().modal.paneIds.join() === 'pa', 'one console leaving keeps the dialog open for the rest')
+  h6.A.getState().setIntent('pa', 'fresh')
+  const r6 = await h6.L.prepareAgentLaunch('pa', h6.base('pa'))
+  await w6
+  check(!h6.A.getState().modal && !h6.A.getState().modalPending && p6 !== null && r6.initialCommand === 'claude', 'the last one leaving closes the dialog and releases the held spawns')
+  h6.S.getState().updateSettings({ agents: { ...h6.S.getState().settings.agents, resumeNudgeText: 'Seguí\r\n\x1b[2Jcon\testo' } })
+  check(h6.L.nudgeText() === 'Seguí [2Jcon esto', 'control characters in a hand-edited nudge text never reach the pty (no early Enter, no escape)')
+}
+
+// agents:startupPending: a peek at the unspent startup decisions (never spends one).
+function testStartupPending() {
+  const { AgentSessionStore } = load('src/main/agents/AgentSessionStore.ts')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-pending-'))
+  try {
+    const store = new AgentSessionStore({ file: path.join(dir, 'agent-sessions.json'), getConfig: () => null, spawnCwd: () => dir, projectsDir: () => dir, now: () => 0, setTimer: () => 0, clearTimer: () => {} })
+    check(store.startupPending(['a', 'b']).join() === 'a,b', 'nothing spent yet: every pane is pending')
+    check(store.consumeStartup('a') === true && store.startupPending(['a', 'b', '']).join() === 'b', 'a spent pane leaves the list; empty ids are dropped')
+    check(store.startupPending(['b']).join() === 'b' && store.consumeStartup('b') === true, 'the peek never spends a decision')
+    const handlers = new Map()
+    const electron = { ipcMain: { on: () => {}, handle: (ch, fn) => handlers.set(ch, fn) } }
+    const { registerAgentsIpc } = load('src/main/ipc/registerAgentsIpc.ts', { require: m => m === 'electron' ? electron : require(m) })
+    const { CH } = load('src/shared/ipc-channels.ts')
+    registerAgentsIpc(store)
+    const h = handlers.get(CH.AGENTS_STARTUP_PENDING)
+    check(CH.AGENTS_STARTUP_PENDING === 'agents:startupPending' && h({}, ['a', 'c', 42, 'x'.repeat(200)]).join() === 'c', 'IPC: strings only, bounded ids, answered from the store')
+    check(h({}, 'c').length === 0 && h({}, Array(1001).fill('c')).length === 0, 'IPC: a non-array or an oversized list answers nothing')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+function testV22I18n() {
+  const { en } = load('src/renderer/i18n/en.ts'), { es } = load('src/renderer/i18n/es.ts')
+  const keys = Object.keys(en).filter(k => /^(agents\.modal\.|agents\.nudge\.|settings\.agents\.(sort|resumeTimeout|resumeNudge))/.test(k))
+  check(keys.length >= 28 && keys.every(k => typeof es[k] === 'string' && es[k].length > 0), 'every resume dialog, nudge and Smart order string exists in es and en')
+  check(es['agents.nudge.default'] === 'Continuá donde quedaste.' && es['agents.modal.dontAsk'] === 'No preguntar más (retomar automáticamente)' && es['agents.modal.gated'].startsWith('Esperando tu decisión sobre retomar el chat'), 'the dialog wording matches the PRD')
+}
+
+;(async () => {
+  testModes()
+  testStaleAndPhone()
+  testDisplayResumeAndEvents()
+  testIpc()
+  testTray()
+  testRemotePhones()
+  testRendererHelpers()
+  testSchema()
+  testNavigation()
+  testResumeModalModel()
+  testNudge()
+  testSmartOrder()
+  await testResumeModalFlow()
+  testStartupPending()
+  testV22I18n()
+  console.log(`PASS: ${checks} agents checks (AwakeService modes, grace, 2 h lease, action + phone, resume, IPC, tray, renderer sync, agent navigation, resume dialog, countdown, nudge, Smart order)`)
+})().catch((err) => { console.error(err); process.exit(1) })

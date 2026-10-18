@@ -727,6 +727,8 @@ export interface SnApi {
     startup(): Promise<AgentsStartup>
     /** True only for the first spawn of a pane in this run (survives renderer reloads). */
     consumeStartup(paneId: string): Promise<boolean>
+    /** Which of these panes have not spent their startup decision yet; spends nothing (E5-FR-12). */
+    startupPending(paneIds: string[]): Promise<string[]>
     /** Drop a pane's session ("Restart with a new chat"). */
     forget(paneId: string): void
     /** A session view changed in a visible field, or was removed. Returns unsubscribe. */

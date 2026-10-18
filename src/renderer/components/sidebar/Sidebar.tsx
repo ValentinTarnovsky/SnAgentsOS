@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState, type FocusEvent } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   ChevronDown,
@@ -30,7 +30,7 @@ import type { PaneStatus, Workspace } from '@shared/types'
 import { useAgentStore } from '@/lib/agentStore'
 import { navInputFrom, workspaceAgents } from '@/lib/agentNav'
 import { formatSince, STATUS_LABEL_KEY } from '@/lib/formatSince'
-import { sidebarOrder } from '@/lib/sidebarOrder'
+import { freezeSidebarOrder, releaseSidebarOrder, sidebarOrder, useSidebarFreeze } from '@/lib/sidebarOrder'
 import { useLang, type MessageKey } from '@/i18n'
 import { AgentRows } from '@/components/sidebar/AgentRows'
 import { ExitedDot, allExited, exitedLines } from '@/components/sidebar/ExitedDot'
@@ -178,8 +178,26 @@ export function Sidebar() {
   const settingsKeys = useActionKeys('openSettings')
   const sidebarKeys = useActionKeys('toggleSidebar')
 
-  // Favorites float to the top (stable within each group); Alt+1..9 use the same order.
-  const sorted = sidebarOrder(workspaces)
+  // Favorites float to the top (stable within each group); Alt+1..9 use the same
+  // order. Smart (E5-FR-22) ranks by the most demanding agent and holds still
+  // while the pointer is over the sidebar or the focus is inside it.
+  const frozen = useSidebarFreeze((s) => s.frozen)
+  const smart = agentSettings?.sidebarSort === 'smart'
+  const sorted = sidebarOrder(workspaces, smart ? { sort: 'smart', nav: navInput, frozen } : undefined)
+  const shownIds = useRef<string[]>([])
+  shownIds.current = sorted.map((w) => w.id)
+  const hovering = useRef(false)
+  const focusInside = useRef(false)
+  const syncFreeze = (): void => {
+    if (hovering.current || focusInside.current) freezeSidebarOrder(shownIds.current)
+    else releaseSidebarOrder()
+  }
+  useEffect(() => () => releaseSidebarOrder(), [])
+  const onBlurAside = (e: FocusEvent<HTMLElement>): void => {
+    if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return
+    focusInside.current = false
+    syncFreeze()
+  }
 
   const openMenu = (e: { clientX: number; clientY: number }, wsId: string): void => {
     setMenu({ x: e.clientX, y: e.clientY, wsId })
@@ -217,6 +235,21 @@ export function Sidebar() {
 
   return (
     <aside
+      data-sidebar
+      data-sidebar-frozen={frozen ? '' : undefined}
+      onPointerEnter={() => {
+        hovering.current = true
+        syncFreeze()
+      }}
+      onPointerLeave={() => {
+        hovering.current = false
+        syncFreeze()
+      }}
+      onFocus={() => {
+        focusInside.current = true
+        syncFreeze()
+      }}
+      onBlur={onBlurAside}
       className={cn(
         'flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-bg-secondary transition-[width] duration-200 ease-out',
         sidebarCollapsed ? 'w-[60px]' : 'w-[260px]',
@@ -287,7 +320,7 @@ export function Sidebar() {
           const git = gitOn ? gitSummaries[workspaceGitKey(w.id)] : undefined
           const gitLine = git ? compactChip(git) : null
           return (
-            <div key={w.id}>
+            <div key={w.id} data-sidebar-ws={w.id}>
               <div
                 onContextMenu={(e) => {
                   e.preventDefault()
