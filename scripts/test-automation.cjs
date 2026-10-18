@@ -161,7 +161,7 @@ function storeChecks() {
   let seq = 0
   const flush = () => { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) }
   const r = loadRenderer(`export { startPersistence } from './persist'; export { useAppStore } from './store'`, {
-    window: { snApi: { config: { save: cfg => saves.push(clone(cfg)) }, pty: {} } },
+    window: { snApi: { config: { save: cfg => saves.push(clone(cfg)) }, pty: { killPanes: async () => 0 } } },
     document: { hasFocus: () => false },
     setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
   })
