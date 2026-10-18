@@ -155,7 +155,7 @@ check(REPEAT_MAX_MS === 15000 && TAP_SLOP_PX === 10, 'safety cap is 15s and the 
 // Layout and sequences.
 const keys = load('src/mobile/src/lib/keys.ts')
 const order = keys.buildScrollKeys([{ id: 'u1', label: 'F5', seq: '\x1b[15~' }]).map(k => k.label ?? k.labelKey ?? k.icon)
-const expectedOrder = ['key.esc', '^C', 'key.tab', 'key.ctrl', 'left', 'up', 'down', 'right', 'backspace', 'key.del', 'key.enter', 'key.shiftTab', 'key.ctrlEnter', '^L', '^R', 'F5', 'paste', 'snippets', '^D', '^Z']
+const expectedOrder = ['key.esc', '^C', 'key.tab', 'key.ctrl', 'left', 'up', 'down', 'right', 'backspace', 'key.del', 'key.enter', 'key.shiftTab', 'key.ctrlEnter', '^L', '^R', 'F5', 'paste', 'quick', '^D', '^Z']
 check(JSON.stringify(order) === JSON.stringify(expectedOrder), `scroll order matches E1-FR-21: ${order.join(' ')}`)
 const all = keys.buildScrollKeys([])
 const byId = Object.fromEntries(all.map(k => [k.id, k]))
