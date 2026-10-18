@@ -173,6 +173,7 @@ export const es: Record<keyof typeof en, string> = {
   'pane.notStarted': 'Consola sin iniciar',
   'pane.start': 'Iniciar',
   'pane.schedule': 'Programar prompt',
+  'drop.hint': 'Soltar para pegar la ruta',
 
   // Prompt programado (por consola)
   'schedule.title': 'Programar un prompt',
