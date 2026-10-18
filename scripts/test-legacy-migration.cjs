@@ -105,6 +105,81 @@ function hookedFs(hooks) {
   return new Proxy(fs, { get: (target, prop) => hooks[prop] ? hooks[prop] : target[prop] })
 }
 
+
+/** In-memory registry stub: { 'HKCU\\key': { name: value } }, case-insensitive keys. */
+function makeRegistry(init = {}) {
+  const data = new Map(Object.entries(init).map(([k, v]) => [k.toLowerCase(), { ...v }]))
+  const ops = []
+  return {
+    data, ops,
+    read: (hive, key, name) => { const v = data.get(`${hive}\\${key}`.toLowerCase()); return v && name in v ? v[name] : null },
+    deleteValue: (hive, key, name) => { ops.push(['deleteValue', hive, key, name]); const v = data.get(`${hive}\\${key}`.toLowerCase()); if (!v || !(name in v)) return 'absent'; delete v[name]; return 'done' },
+    deleteKey: (hive, key) => { ops.push(['deleteKey', hive, key]); return data.delete(`${hive}\\${key}`.toLowerCase()) ? 'done' : 'absent' },
+  }
+}
+
+/** A fake user profile under the test temp root: every root the inventory reads. */
+function fakeProfile() {
+  const base = freshDir('profile')
+  const home = path.join(base, 'home')
+  const appData = path.join(home, 'AppData', 'Roaming')
+  const roots = {
+    appData, localAppData: path.join(home, 'AppData', 'Local'), temp: path.join(home, 'AppData', 'Local', 'Temp'), home,
+    desktop: path.join(home, 'Desktop'), claudeDir: path.join(home, '.claude'),
+    startMenuPrograms: path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+    taskbarPins: path.join(appData, 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar'),
+    macApplications: [path.join(base, 'Applications'), path.join(home, 'Applications')],
+  }
+  for (const d of [roots.appData, roots.localAppData, roots.temp, roots.desktop, roots.claudeDir]) fs.mkdirSync(d, { recursive: true })
+  const programFiles = path.join(base, 'Program Files')
+  const exeDir = path.join(roots.localAppData, 'Programs', 'SnAgentsOS')
+  write(path.join(exeDir, 'SnAgentsOS.exe'), 'new exe')
+  return { base, home, roots, programFiles, exeDir, targetDir: path.join(appData, 'snagentsos') }
+}
+
+function guardFor(p, extra = {}) {
+  return {
+    forbiddenExact: [p.roots.appData, p.roots.localAppData, p.roots.temp, p.roots.home, p.roots.claudeDir, path.join(p.roots.localAppData, 'Programs')],
+    forbiddenTree: [p.targetDir, ...(extra.tree ?? [p.targetDir])],
+    forbiddenContain: [p.exeDir, ...(extra.contain ?? [])],
+    ...(extra.allowedRoots ? { allowedRoots: extra.allowedRoots } : {}),
+  }
+}
+
+function cleanupEnv(p, o = {}) {
+  let t = o.start ?? Date.UTC(2026, 9, 18, 13, 0, 0)
+  const lines = []
+  const env = {
+    targetDir: p.targetDir, mode: 'installed', platform: 'win32', roots: p.roots, legacyDataDir: null, portableDir: null,
+    exe: { execPath: path.join(p.exeDir, 'SnAgentsOS.exe'), portableExeFile: () => null, setPortableExeFile() {} },
+    guard: guardFor(p), elevation: { platform: 'win32', programFiles: [p.programFiles] },
+    registry: makeRegistry(), shortcuts: null, loginItem: null,
+    isLegacyProcessRunning: () => false, isFolderLocked: () => false, migrateLegacyHooks: () => 'notNeeded', readMigratedSettings: () => null,
+    now: () => (t += 1000), log: l => lines.push(l), simulate: false, delayMs: 0, ...o,
+  }
+  env.lines = lines
+  return env
+}
+
+/** The P-LEGACY fixture: 1.x data with an unknown file, a junction to a sentinel and a read-only file, plus every disk leftover. */
+function seedProfile(p, o = {}) {
+  const legacyDir = seedLegacy(path.join(p.roots.appData, 'snmulticc'), o)
+  write(path.join(legacyDir, 'notes.txt'), 'x'.repeat(1024))
+  const sentinel = path.join(p.base, 'sentinel'); write(path.join(sentinel, 'keep.txt'), 'keep')
+  fs.symlinkSync(sentinel, path.join(legacyDir, 'linked'), isWin ? 'junction' : 'dir')
+  const ro = path.join(legacyDir, 'Local Storage', 'leveldb', 'LOCK'); write(ro, 'ro'); fs.chmodSync(ro, 0o444)
+  const dev = path.join(p.roots.appData, 'snmulticc-dev'); write(path.join(dev, 'config.json'), 'dev-config'); write(path.join(dev, 'Cache', 'x'), 'c')
+  write(path.join(p.roots.localAppData, 'snmulticc-updater', 'installer.exe'), 'old setup')
+  write(path.join(p.roots.temp, 'SnMultiCC', 'SnMultiCC.exe'), 'extracted 1.x')
+  write(path.join(p.roots.temp, 'snmulticc-update-abc', 'SnMultiCC-1.14.1-setup.exe'), 'dl')
+  write(path.join(p.roots.temp, 'snmulticc-swap-xyz', 'swap.cmd'), 'swap')
+  write(path.join(p.roots.temp, 'unrelated-update-1', 'x'), 'not ours')
+  write(path.join(p.roots.claudeDir, 'settings.json.snmulticc.bak'), '{"old":true}')
+  write(path.join(p.roots.claudeDir, 'settings.json'), '{}')
+  write(path.join(p.roots.appData, 'other-app', 'data.json'), '{}')
+  return { legacyDir, sentinel, dev }
+}
+
 async function markerChecks() {
   const M = load('src/main/migration/legacyMarker.ts')
   const dir = freshDir('marker')
@@ -605,6 +680,247 @@ async function zipChecks() {
   }
 }
 
+async function safeRemoveChecks() {
+  const S = load('src/main/migration/safeRemove.ts')
+  const p = fakeProfile()
+  const guard = guardFor(p)
+  const o = { delayMs: 0, elevation: { platform: 'win32', programFiles: [p.programFiles] } }
+  check(await S.safeRemoveTree(path.join(p.roots.appData, 'nope'), guard, o) === 'absent', 'safeRemove: missing target is absent')
+  const sentinel = path.join(p.base, 'sentinel'); write(path.join(sentinel, 'keep.txt'), 'keep')
+  const asLink = path.join(p.roots.appData, 'link-root')
+  fs.symlinkSync(sentinel, asLink, isWin ? 'junction' : 'dir')
+  const linkRes = await S.safeRemoveTree(asLink, guard, o)
+  check(linkRes.skipped === 'reparsePoint' && fs.existsSync(asLink) && fs.existsSync(path.join(sentinel, 'keep.txt')), 'safeRemove: a link as the target is refused, never followed')
+  fs.rmSync(asLink, { recursive: false, force: true }); try { fs.unlinkSync(asLink) } catch {}
+  const tree = path.join(p.roots.appData, 'tree')
+  write(path.join(tree, 'a', 'b', 'c.txt'), 'c'); write(path.join(tree, 'ro.txt'), 'ro'); fs.chmodSync(path.join(tree, 'ro.txt'), 0o444)
+  fs.symlinkSync(sentinel, path.join(tree, 'a', 'inner-link'), isWin ? 'junction' : 'dir')
+  check(await S.safeRemoveTree(tree, guard, o) === 'done' && !fs.existsSync(tree), 'safeRemove: nested tree, read-only file and inner link removed')
+  check(fs.readFileSync(path.join(sentinel, 'keep.txt'), 'utf8') === 'keep', 'safeRemove: the sentinel behind the inner link is intact')
+  // Guards: data folders, exe folder, roots, allowedRoots, case variants.
+  const legacy = path.join(p.roots.appData, 'snmulticc'); write(path.join(legacy, 'x'), 'x')
+  const flip = s => s.replace(/snmulticc/, 'SnMultiCC')
+  for (const [label, g] of [
+    ['userData equal', { ...guard, forbiddenTree: [isWin ? flip(legacy) : legacy] }],
+    ['userData inside', { ...guard, forbiddenTree: [path.join(legacy, 'sub')] }],
+    ['userData containing', { ...guard, forbiddenTree: [p.roots.appData] }],
+    ['exe folder inside', { ...guard, forbiddenContain: [path.join(legacy, 'app')] }],
+    ['outside allowedRoots', { ...guard, allowedRoots: [p.roots.temp] }],
+  ]) {
+    const r = await S.safeRemoveTree(legacy, g, o)
+    check(r.skipped === 'guard' && fs.existsSync(path.join(legacy, 'x')), `safeRemove guard: ${label}`)
+  }
+  check((await S.safeRemoveTree(p.roots.appData, guard, o)).skipped === 'guard', 'safeRemove guard: a profile root itself')
+  check((await S.safeRemoveTree(path.parse(tmpRoot).root, guard, o)).skipped === 'guard', 'safeRemove guard: a filesystem root')
+  check(S.violatesGuard([legacy], { ...guard, allowedRoots: [p.roots.appData] }) === false, 'safeRemove guard: inside allowedRoots passes')
+  // needsElevation: skipped before touching anything.
+  const pf = path.join(p.programFiles, 'SnMultiCC'); write(path.join(pf, 'SnMultiCC.exe'), 'x')
+  let touched = 0
+  const counting = new Proxy(fs.promises, { get: (t, k) => (['unlink', 'rmdir', 'rename', 'chmod'].includes(k) ? (...a) => { touched++; return t[k](...a) } : t[k]) })
+  const el = await S.safeRemoveTree(pf, guard, { ...o, fs: counting })
+  check(el.skipped === 'needsElevation' && touched === 0 && fs.existsSync(path.join(pf, 'SnMultiCC.exe')), 'safeRemove: Program Files is needsElevation with no attempt')
+  check(S.needsElevation('/Applications/SnMultiCC.app', { platform: 'darwin', programFiles: [], uid: 501, ownerUid: () => 0 }) && !S.needsElevation('/Applications/SnMultiCC.app', { platform: 'darwin', programFiles: [], uid: 501, ownerUid: () => 501 }), 'safeRemove: a foreign /Applications bundle needs elevation, an own one does not')
+  // EBUSY forever on one file: deferred, the rest goes.
+  const busy = path.join(p.roots.temp, 'busy'); write(path.join(busy, 'locked.bin'), 'l'); write(path.join(busy, 'free.bin'), 'f')
+  let unlinkCalls = 0
+  const ebusy = new Proxy(fs.promises, { get: (t, k) => (k === 'unlink' ? async f => { if (String(f).endsWith('locked.bin')) { unlinkCalls++; throw Object.assign(new Error('busy'), { code: 'EBUSY' }) } return t.unlink(f) } : t[k]) })
+  const br = await S.safeRemoveTree(busy, guard, { ...o, fs: ebusy })
+  check(br.deferred === 'EBUSY' && unlinkCalls === 4 && fs.existsSync(path.join(busy, 'locked.bin')) && !fs.existsSync(path.join(busy, 'free.bin')), 'safeRemove: EBUSY retries 3 times, defers, siblings removed')
+  check(await S.safeRemoveTree(busy, guard, o) === 'done', 'safeRemove: the next call finishes')
+  // Tombstone: rename refused keeps everything; crash after the rename leaves only the tombstone.
+  const data = path.join(p.roots.appData, 'snmulticc-data-t'); write(path.join(data, 'config.json'), '{}')
+  const refuse = new Proxy(fs.promises, { get: (t, k) => (k === 'rename' ? async () => { throw Object.assign(new Error('in use'), { code: 'EPERM' }) } : t[k]) })
+  const tr = await S.tombstoneAndRemove(data, guard, { ...o, fs: refuse })
+  check(tr.deferred === 'EPERM' && fs.existsSync(path.join(data, 'config.json')), 'tombstone: a refused rename defers and touches nothing')
+  const rofs = new Proxy(fs.promises, { get: (t, k) => (k === 'rename' ? async () => { throw Object.assign(new Error('ro'), { code: 'EROFS' }) } : t[k]) })
+  check((await S.tombstoneAndRemove(data, guard, { ...o, fs: rofs })).skipped === 'readOnly', 'tombstone: read-only medium is skipped: readOnly')
+  let tomb = null
+  try { await S.tombstoneAndRemove(data, guard, { ...o, now: () => 0, afterRename: t => { tomb = t; throw new Error('killed') } }) } catch {}
+  check(tomb && path.basename(tomb) === 'snmulticc-data-t.deleting-1970-01-01T00-00-00-000Z' && fs.existsSync(tomb) && !fs.existsSync(data), 'tombstone: after the rename only the tombstone exists')
+  check(await S.removeTombstones(data, guard, o) === 'done' && !fs.existsSync(tomb), 'tombstone: the next pass finishes it')
+  check(await S.removeTombstones(data, guard, o) === 'absent', 'tombstone: nothing left is absent')
+  // A real lock: another process holds the file with FileShare.None (Windows only).
+  if (isWin) {
+    const { spawn } = require('node:child_process')
+    const lockedDir = path.join(p.roots.temp, 'real-lock'); const lockedFile = path.join(lockedDir, 'held.bin'); write(lockedFile, 'held')
+    const ps = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$f=[IO.File]::Open('${lockedFile.replace(/'/g, "''")}','Open','Read','None'); [Console]::Out.WriteLine('locked'); [Console]::Out.Flush(); [void][Console]::In.ReadLine(); $f.Close()`], { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true })
+    await new Promise((resolve, reject) => { ps.stdout.on('data', d => { if (String(d).includes('locked')) resolve() }); ps.on('error', reject); ps.on('exit', () => resolve()) })
+    const held = await S.safeRemoveTree(lockedDir, guard, { ...o, delayMs: 10 })
+    check(typeof held === 'object' && held.deferred && fs.existsSync(lockedFile), `safeRemove: a FileShare.None handle defers (${held.deferred})`)
+    ps.stdin.write('\n'); ps.stdin.end()
+    await new Promise(resolve => ps.on('exit', resolve))
+    check(await S.safeRemoveTree(lockedDir, guard, o) === 'done', 'safeRemove: released, the next pass deletes it')
+  }
+}
+
+async function cleanupChecks() {
+  const L = loadMigration()
+  const I = load('src/main/migration/legacyInventory.ts', withElectron(electronStub(), { process: { ...process, env: {}, argv: ['electron'] } }))
+  const migrate = (p, o = {}) => pipe(L, { legacyDir: path.join(p.roots.appData, 'snmulticc'), targetDir: p.targetDir, extras: { claudeBak: path.join(p.roots.claudeDir, 'settings.json.snmulticc.bak'), devDir: path.join(p.roots.appData, 'snmulticc-dev') }, ...o })
+  const marker = p => JSON.parse(fs.readFileSync(path.join(p.targetDir, 'legacy-migration.json'), 'utf8'))
+  const state = (p, id) => marker(p).cleanup[id]
+
+  // The full disk pass on the fixture: exactly L01, L12-L16 and L18 go.
+  {
+    const p = fakeProfile(); const { sentinel } = seedProfile(p)
+    check(migrate(p).status === 'committed', 'cleanup: fixture migrated')
+    const before = snapshotTree(p.base)
+    const env = cleanupEnv(p)
+    await I.runCleanup(env)
+    const after = snapshotTree(p.base)
+    const gone = Object.keys(before).filter(k => !(k in after))
+    const roots = ['home/AppData/Roaming/snmulticc/', 'home/.claude/settings.json.snmulticc.bak', 'home/AppData/Local/snmulticc-updater/', 'home/AppData/Local/Temp/SnMultiCC/', 'home/AppData/Local/Temp/snmulticc-update-abc/', 'home/AppData/Local/Temp/snmulticc-swap-xyz/', 'home/AppData/Roaming/snmulticc-dev/']
+    const expectedGone = Object.keys(before).filter(k => roots.some(r => k === r || k.startsWith(r)))
+    check(JSON.stringify(gone.sort()) === JSON.stringify(expectedGone.sort()), `cleanup: removed exactly the L01, L12-L16, L18 paths: ${gone.filter(k => !expectedGone.includes(k))} / ${expectedGone.filter(k => !gone.includes(k))}`)
+    const changed = Object.keys(after).filter(k => k in before && before[k] !== after[k] && !k.includes('snagentsos/'))
+    check(changed.length === 0, `cleanup: no other path changed: ${changed}`)
+    check(fs.readFileSync(path.join(sentinel, 'keep.txt'), 'utf8') === 'keep', 'cleanup: the junction target outside the legacy folder is intact')
+    const m = marker(p)
+    check(['L01', 'L12', 'L13', 'L14', 'L15', 'L16', 'L18'].every(id => m.cleanup[id].state === 'done'), 'cleanup: disk items done')
+    check(m.cleanup.L02.state === 'absent' && m.cleanup.L03.state === 'absent' && m.cleanup.L19.state === 'absent' && m.cleanup.L20.state === 'absent', 'cleanup: items of the other mode and the documented exceptions are absent')
+    check(m.phase === 'cleaning', 'cleanup: phase cleaning while items stay open')
+    const Z = load('src/main/migration/backupZip.ts')
+    const z = Z.readBackupZip(path.join(p.targetDir, 'migration-backup-v1.zip'))
+    const names = z.entries.map(e => e.name)
+    check(names.includes('other/notes.txt') && !names.some(n => n.startsWith('other/linked')) && z.entries.find(e => e.name === 'other/notes.txt').data.length === 1024, 'cleanup: the unknown 1 KB file is in other/, the link is not')
+    check(names.includes('claude/settings.json.snmulticc.bak') && names.includes('dev/config.json'), 'cleanup: claude bak and dev config are in the zip before deletion')
+    check(Z.verifyBackupZip(path.join(p.targetDir, 'migration-backup-v1.zip'), z.manifest) && m.backup.entries === names.length, 'cleanup: the rewritten zip verifies')
+    check(env.lines.some(l => l.includes('item=L01 result=done')) && !env.lines.some(l => /s0|secret/.test(l)), 'cleanup: one log line per item, no secrets')
+  }
+  // Dev without SNAOS_FORCE_LEGACY_CLEANUP: simulation, nothing deleted, everything logged.
+  {
+    const p = fakeProfile(); seedProfile(p); migrate(p)
+    const before = snapshotTree(p.base)
+    const env = cleanupEnv(p, { simulate: true })
+    const res = await I.runCleanup(env)
+    check(res.simulated && sameTree(snapshotTree(p.base), before), 'cleanup dev: simulation deletes nothing and does not touch the marker')
+    check(env.lines.some(l => l.startsWith('simulate item=L01 path=')) && env.lines.some(l => l.startsWith('simulate item=L14')), 'cleanup dev: every target is logged')
+  }
+  // userData or the exe folder overlapping the legacy folder: L01 skipped: guard.
+  for (const [label, extra] of [
+    ['userData equal (case variant)', p => ({ tree: [isWin ? path.join(p.roots.appData, 'SnMultiCC') : path.join(p.roots.appData, 'snmulticc')] })],
+    ['userData inside', p => ({ tree: [path.join(p.roots.appData, 'snmulticc', 'profile')] })],
+    ['userData containing', p => ({ tree: [p.roots.appData] })],
+    ['exe folder inside', p => ({ contain: [path.join(p.roots.appData, 'snmulticc', 'app')] })],
+  ]) {
+    const p = fakeProfile(); seedProfile(p); migrate(p)
+    await I.runCleanup(cleanupEnv(p, { guard: guardFor(p, extra(p)) }))
+    check(state(p, 'L01').state === 'skipped' && state(p, 'L01').reason === 'guard' && fs.existsSync(path.join(p.roots.appData, 'snmulticc', 'config.json')), `cleanup guard: ${label}`)
+  }
+  // EBUSY on one item: deferred with attempts, the others finish, the next pass completes it.
+  {
+    const p = fakeProfile(); seedProfile(p); migrate(p)
+    const ebusy = new Proxy(fs.promises, { get: (t, k) => (k === 'unlink' ? async f => { if (String(f).includes(`${path.sep}SnMultiCC${path.sep}`)) throw Object.assign(new Error('busy'), { code: 'EBUSY' }); return t.unlink(f) } : t[k]) })
+    await I.runCleanup(cleanupEnv(p, { fs: ebusy }))
+    check(state(p, 'L14').state === 'deferred' && state(p, 'L14').reason === 'EBUSY' && state(p, 'L14').attempts === 1, 'cleanup busy: L14 deferred with attempts')
+    check(state(p, 'L01').state === 'done' && state(p, 'L16').state === 'done', 'cleanup busy: the other items finish')
+    await I.runCleanup(cleanupEnv(p, { fs: ebusy, firstPassOfStart: true }))
+    check(state(p, 'L14').attempts === 2 && marker(p).cleanupStarts === 1, 'cleanup busy: attempts grow, a start with deferred items counts')
+    await I.runCleanup(cleanupEnv(p))
+    check(state(p, 'L14').state === 'done' && !fs.existsSync(path.join(p.roots.temp, 'SnMultiCC')), 'cleanup busy: released, L14 done')
+  }
+  // A source changed after the commit: post-commit/ in the zip, destination unchanged, L01 done.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p); migrate(p)
+    const destBefore = fs.readFileSync(path.join(p.targetDir, 'config.json'))
+    fs.writeFileSync(path.join(legacyDir, 'config.json'), JSON.stringify(makeConfig({ tag: 'opened-1x-again', ws: 3 })))
+    write(path.join(legacyDir, 'backups', 'config-2030-01-01T00-00-00-000Z.json'), JSON.stringify(makeConfig({ tag: 'new' })))
+    await I.runCleanup(cleanupEnv(p))
+    const Z = load('src/main/migration/backupZip.ts')
+    const z = Z.readBackupZip(path.join(p.targetDir, 'migration-backup-v1.zip'))
+    const post = z.entries.filter(e => e.name.startsWith('post-commit/'))
+    const m = marker(p)
+    check(post.length === 2 && post.some(e => e.name.endsWith('/config.json') && e.data.toString().includes('opened-1x-again')) && m.postCommitBackup.entries === 2, 'cleanup post-commit: changed and new sources are in post-commit/')
+    check(Z.verifyBackupZip(path.join(p.targetDir, 'migration-backup-v1.zip'), z.manifest) && z.manifest.createdAt === m.backup.createdAt, 'cleanup post-commit: zip verifies and keeps its dates')
+    check(fs.readFileSync(path.join(p.targetDir, 'config.json')).equals(destBefore) && m.cleanup.L01.state === 'done' && !fs.existsSync(legacyDir), 'cleanup post-commit: destination unchanged, never re-migrated, L01 done')
+  }
+  // Unknown entries over 5 MB keep the folder.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p); migrate(p)
+    write(path.join(legacyDir, 'my-videos', 'big.bin'), crypto.randomBytes(5 * 1024 * 1024 + 10))
+    const env = cleanupEnv(p)
+    await I.runCleanup(env)
+    check(state(p, 'L01').state === 'skipped' && state(p, 'L01').reason === 'unknownFiles' && fs.existsSync(path.join(legacyDir, 'my-videos', 'big.bin')), 'cleanup unknown: over 5 MB is skipped: unknownFiles, folder kept')
+    check(env.lines.some(l => l.includes('result=unknownFiles') && l.includes('my-videos')), 'cleanup unknown: the names are logged')
+  }
+  // 1.x running: folder items deferred, temp prefixes still go; a locked profile defers L01 alone.
+  {
+    const p = fakeProfile(); seedProfile(p); migrate(p)
+    await I.runCleanup(cleanupEnv(p, { isLegacyProcessRunning: () => true }))
+    check(['L01', 'L11', 'L12', 'L13', 'L14', 'L18'].every(id => state(p, id).state === 'deferred' && state(p, id).reason === 'legacyRunning'), 'cleanup running: legacy folders deferred')
+    check(state(p, 'L15').state === 'done' && state(p, 'L16').state === 'done' && fs.existsSync(path.join(p.roots.appData, 'snmulticc')), 'cleanup running: temp downloads go, the data folder stays')
+    await I.runCleanup(cleanupEnv(p, { isFolderLocked: d => d.endsWith('snmulticc') }))
+    check(state(p, 'L01').state === 'deferred' && state(p, 'L01').reason === 'legacyRunning' && state(p, 'L18').state === 'done', 'cleanup running: a held lockfile defers only its folder')
+  }
+  // Hooks: L11 records the result; pending defers L11 and L12.
+  {
+    const p = fakeProfile(); seedProfile(p); migrate(p)
+    await I.runCleanup(cleanupEnv(p, { migrateLegacyHooks: () => 'pending' }))
+    check(state(p, 'L11').state === 'deferred' && state(p, 'L12').state === 'deferred' && state(p, 'L12').reason === 'waitingL11' && fs.existsSync(path.join(p.roots.claudeDir, 'settings.json.snmulticc.bak')), 'cleanup hooks: pending keeps L11 and the claude bak')
+    await I.runCleanup(cleanupEnv(p, { migrateLegacyHooks: () => 'rewritten' }))
+    check(marker(p).hooksMigration === 'rewritten' && state(p, 'L11').state === 'done' && state(p, 'L12').state === 'done', 'cleanup hooks: rewritten recorded, then the claude bak goes')
+  }
+  // Crash after item k and between the tombstone rename and its deletion.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p); migrate(p)
+    let crashed = false
+    try { await I.runCleanup(cleanupEnv(p, { faultAt: 'crash:item:L12' })) } catch (e) { crashed = /crash at item:L12/.test(e.message) }
+    check(crashed && state(p, 'L12').state === 'done' && state(p, 'L01').state === 'pending', 'cleanup crash: L12 persisted before the crash, later items pending')
+    crashed = false
+    try { await I.runCleanup(cleanupEnv(p, { faultAt: 'crash:tombstone:L01' })) } catch (e) { crashed = /crash at tombstone:L01/.test(e.message) }
+    const tombs = fs.readdirSync(p.roots.appData).filter(n => n.startsWith('snmulticc.deleting-'))
+    check(crashed && !fs.existsSync(legacyDir) && tombs.length === 1, 'cleanup crash: mid L01 only the tombstone remains')
+    const again = migrate(p)
+    check(again.status === 'alreadyCommitted', 'cleanup crash: the next start does not migrate again')
+    const P = load('src/main/paths.ts', withElectron(electronStub({ appData: p.roots.appData }), { process: { ...process, env: {}, argv: ['electron'] } }))
+    check(P.getLegacyDataDir() === null, 'cleanup crash: detection ignores the tombstone')
+    const zips = fs.readdirSync(p.targetDir).filter(n => n.endsWith('.zip'))
+    await I.runCleanup(cleanupEnv(p))
+    check(state(p, 'L01').state === 'done' && fs.readdirSync(p.roots.appData).every(n => !n.startsWith('snmulticc')) && zips.length === 1, 'cleanup crash: the tombstone is finished, one zip')
+  }
+  // Portable: L02 next to the exe, L03 kept with data or with a registered 1.x install.
+  {
+    const p = fakeProfile()
+    const exeDir = path.join(p.base, 'usb'); write(path.join(exeDir, 'SnMultiCC-1.14.1-portable.exe'), 'portable')
+    const legacyDir = seedLegacy(path.join(exeDir, 'snmulticc-data'))
+    const target = path.join(exeDir, 'snagentsos-data')
+    const roam = path.join(p.roots.appData, 'snmulticc'); write(path.join(roam, 'Cache', 'x'), 'c'); write(path.join(roam, 'config.json'), '{}')
+    check(pipe(L, { legacyDir, targetDir: target, mode: 'portable' }).status === 'committed', 'cleanup portable: migrated')
+    const pp = { ...p, targetDir: target }
+    const env = cleanupEnv(pp, { mode: 'portable', portableDir: exeDir, guard: guardFor(pp, { contain: [exeDir] }) })
+    await I.runCleanup(env)
+    const m = JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8'))
+    check(m.cleanup.L02.state === 'done' && !fs.existsSync(legacyDir) && fs.existsSync(path.join(exeDir, 'SnMultiCC-1.14.1-portable.exe')), 'cleanup portable: snmulticc-data next to the exe removed, inside the exe folder is allowed')
+    check(m.cleanup.L01.state === 'absent' && m.cleanup.L03.state === 'skipped' && m.cleanup.L03.reason === 'ownedByInstalled' && fs.existsSync(roam), 'cleanup portable: %APPDATA% legacy with data is ownedByInstalled')
+    fs.rmSync(path.join(roam, 'config.json'))
+    m.cleanup.L03 = { state: 'pending', attempts: 1 }; m.phase = 'cleaning'
+    fs.writeFileSync(path.join(target, 'legacy-migration.json'), JSON.stringify(m))
+    const reg = makeRegistry({ [`HKLM\\${I.REG.uninstall}`]: { DisplayName: 'SnMultiCC 1.14.1' } })
+    await I.runCleanup({ ...env, registry: reg })
+    check(JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8')).cleanup.L03.reason === 'ownedByInstalled' && fs.existsSync(roam), 'cleanup portable: a registered 1.x install keeps it too')
+    const m2 = JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8'))
+    m2.cleanup.L03 = { state: 'pending', attempts: 2 }
+    fs.writeFileSync(path.join(target, 'legacy-migration.json'), JSON.stringify(m2))
+    await I.runCleanup(env)
+    check(JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8')).cleanup.L03.state === 'done' && !fs.existsSync(roam), 'cleanup portable: no data, no install: removed')
+  }
+  // The dev sandbox check that unlocks real deletion in dev.
+  {
+    const realHome = path.join(tmpRoot, 'realhome')
+    const tempBase = path.join(realHome, 'AppData', 'Local', 'Temp')
+    const fake = path.join(tempBase, 'snaos-fake')
+    const winEnv = { SNAOS_FORCE_LEGACY_CLEANUP: '1', APPDATA: path.join(fake, 'appdata'), LOCALAPPDATA: path.join(fake, 'local'), TEMP: path.join(fake, 'temp'), TMP: path.join(fake, 'temp'), USERPROFILE: path.join(fake, 'home'), CLAUDE_CONFIG_DIR: path.join(fake, 'claude') }
+    const ok = I.devCleanupSandbox({ env: winEnv, platform: 'win32', realHome })
+    check(ok.ok && ok.roots.length === 6, 'dev sandbox: forced with every path in the system temp is allowed')
+    check(I.devCleanupSandbox({ env: { ...winEnv, SNAOS_FORCE_LEGACY_CLEANUP: undefined }, platform: 'win32', realHome }).reason === 'notForced', 'dev sandbox: not forced is simulation')
+    check(I.devCleanupSandbox({ env: { ...winEnv, APPDATA: path.join(realHome, 'AppData', 'Roaming') }, platform: 'win32', realHome }).reason === 'outsideTemp:APPDATA', 'dev sandbox: the real APPDATA is refused')
+    check(I.devCleanupSandbox({ env: { ...winEnv, TEMP: tempBase }, platform: 'win32', realHome }).reason === 'outsideTemp:TEMP', 'dev sandbox: the temp folder itself is not inside it')
+    check(I.devCleanupSandbox({ env: { ...winEnv, CLAUDE_CONFIG_DIR: undefined }, platform: 'win32', realHome }).reason === 'missing:CLAUDE_CONFIG_DIR', 'dev sandbox: an unset path is refused (the real ~/.claude)')
+    check(I.devCleanupSandbox({ env: { SNAOS_FORCE_LEGACY_CLEANUP: '1', HOME: '/tmp/snaos-fake/home', CLAUDE_CONFIG_DIR: '/tmp/snaos-fake/claude' }, platform: 'linux', realHome: '/home/u' }).ok, 'dev sandbox: POSIX fake tree under /tmp')
+    check(I.devCleanupSandbox({ env: { SNAOS_FORCE_LEGACY_CLEANUP: '1', HOME: '/home/u', CLAUDE_CONFIG_DIR: '/tmp/x/claude' }, platform: 'linux', realHome: '/home/u' }).reason === 'outsideTemp:HOME', 'dev sandbox: the real HOME is refused')
+  }
+}
+
 async function main() {
   try {
     await markerChecks()
@@ -615,6 +931,8 @@ async function main() {
     await verificationChecks()
     await resumeChecks()
     await zipChecks()
+    await safeRemoveChecks()
+    await cleanupChecks()
     console.log(`PASS: ${checks} legacy migration and cleanup checks`)
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true })

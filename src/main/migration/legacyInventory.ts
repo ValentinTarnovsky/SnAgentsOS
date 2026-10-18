@@ -1,0 +1,596 @@
+import { existsSync, promises as nodeFsp, type Stats } from 'fs'
+import { dirname, join } from 'path'
+import { INSTALLER_REG, LEGACY_BRAND } from '@shared/brand'
+import {
+  isCommittedPhase,
+  isoStamp,
+  isTerminalItem,
+  readMarker,
+  writeMarker,
+  type LegacyItemId,
+  type LegacyItemState,
+  type LegacyMigrationMarker,
+} from './legacyMarker'
+import { appendToBackup, listLegacyWhitelist, sha256, CrashFault } from './legacyBrand'
+import {
+  combineResults,
+  needsElevation,
+  removeTombstones,
+  safeRemoveTree,
+  tombstoneAndRemove,
+  violatesGuard,
+  type ElevationContext,
+  type PathGuard,
+  type RemoveFs,
+  type RemoveOptions,
+  type RemoveResult,
+} from './safeRemove'
+import { isInside, samePath } from './pathUtil'
+import type { BackupEntry } from './backupZip'
+
+/**
+ * Inventory L01-L21 of what 1.x leaves behind and the cleanup that walks it
+ * (E0-FR-30..FR-34, FR-36). Runs only with the marker in committed or later,
+ * in the background, one item at a time; after each item its state is
+ * persisted (done, absent, skipped with a reason, or deferred with attempts),
+ * so a crash or a file in use resumes exactly there on the next pass. Every
+ * path is computed here in main from injected roots (no IPC sends paths), and
+ * every deletion goes through safeRemove's guards.
+ */
+
+export type Hive = 'HKCU' | 'HKLM'
+
+/** Registry access; reads return null for an absent value. Errors throw. */
+export interface RegistryAccess {
+  read(hive: Hive, key: string, name: string): string | Buffer | null
+  deleteValue(hive: Hive, key: string, name: string): 'done' | 'absent'
+  deleteKey(hive: Hive, key: string): 'done' | 'absent'
+}
+
+/** .lnk access (Electron shell.readShortcutLink / writeShortcutLink on Windows). */
+export interface ShortcutAccess {
+  /** Null when the file cannot be read as a shortcut. */
+  read(lnk: string): { target: string } | null
+  update(lnk: string, o: { target: string; icon?: string; iconIndex?: number; appUserModelId?: string }): boolean
+}
+
+/** Every root the inventory derives paths from. */
+export interface LegacyRoots {
+  appData: string
+  localAppData: string | null
+  temp: string
+  home: string
+  desktop: string | null
+  claudeDir: string
+  /** %APPDATA%\Microsoft\Windows\Start Menu\Programs */
+  startMenuPrograms: string | null
+  /** %APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar */
+  taskbarPins: string | null
+  /** /Applications and ~/Applications on macOS. */
+  macApplications: string[]
+}
+
+export interface CleanupEnv {
+  targetDir: string
+  mode: 'installed' | 'portable'
+  platform: NodeJS.Platform
+  roots: LegacyRoots
+  /** 1.x data folder as detected now (null when gone); falls back to the marker. */
+  legacyDataDir: string | null
+  /** Folder of the portable exe (PORTABLE_EXECUTABLE_DIR), null when installed. */
+  portableDir: string | null
+  exe: {
+    /** The running executable (installed: SnAgentsOS.exe). */
+    execPath: string
+    portableExeFile(): string | null
+    setPortableExeFile(p: string): void
+    appImage?(): string | null
+    setAppImage?(p: string): void
+    /** Rename or delete a file once this process has exited (detached helper). */
+    scheduleExitHelper?(op: { from: string; to?: string }): boolean
+  }
+  guard: PathGuard
+  elevation?: ElevationContext
+  /** Null where there is no registry (POSIX) or it must not be touched (dev). */
+  registry: RegistryAccess | null
+  shortcuts: ShortcutAccess | null
+  /** app.setLoginItemSettings({ openAtLogin: true }) for the new app; null where it does not apply. */
+  loginItem: { enable(): void } | null
+  /** shell.trashItem (macOS bundle). */
+  trash?: (p: string) => Promise<void>
+  /** CFBundleIdentifier of an .app, null when unreadable. */
+  bundleId?: (appPath: string) => string | null
+  /** SnMultiCC.exe (or the POSIX process) of the current user is running. */
+  isLegacyProcessRunning(): boolean
+  /** The Chromium profile in dir is held by a live process (lockfile / SingletonLock). */
+  isFolderLocked(dir: string): boolean
+  migrateLegacyHooks(): 'rewritten' | 'notNeeded' | 'pending'
+  /** Settings of the migrated config (dataDir), read when an item needs them. */
+  readMigratedSettings(): { launchOnStartup?: boolean } | null
+  now(): number
+  log(line: string): void
+  fs?: RemoveFs
+  retries?: number
+  delayMs?: number
+  /** Log what would be done and change nothing (dev without SNAOS_FORCE_LEGACY_CLEANUP). */
+  simulate: boolean
+  /** First pass of this app start: counts towards cleanupStarts when something is deferred. */
+  firstPassOfStart?: boolean
+  onChange?(marker: LegacyMigrationMarker): void
+  /** Test seam: 'crash:item:Lxx' throws after Lxx is persisted, 'crash:tombstone:Lxx' right after its rename. */
+  faultAt?: string | null
+}
+
+export interface ItemOutcome {
+  state: LegacyItemState
+  reason?: string
+}
+
+interface Run {
+  env: CleanupEnv
+  marker: LegacyMigrationMarker
+  rm: RemoveOptions
+  persist(): void
+}
+
+interface InventoryItem {
+  /** Deferred while 1.x runs (FR-09 b): it touches folders or files 1.x uses. */
+  needsLegacyClosed: boolean
+  describe(env: CleanupEnv): string[]
+  run(r: Run, id: LegacyItemId): Promise<ItemOutcome>
+}
+
+export const MAX_UNKNOWN_BYTES = 5 * 1024 * 1024
+
+export const REG = {
+  run: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+  startupApproved: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run',
+  notifications: `Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\${LEGACY_BRAND.appId}`,
+  uninstall: `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${LEGACY_BRAND.nsisGuid}`,
+  taskband: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Taskband',
+} as const
+
+/** Order of a pass: login item first (needs the migrated config), hooks, shortcuts and registry, then disk. */
+export const CLEANUP_ORDER: LegacyItemId[] = [
+  'L10', 'L11', 'L12', 'L17', 'L08', 'L06', 'L07', 'L09', 'L01', 'L02', 'L03', 'L18',
+  'L04', 'L13', 'L14', 'L15', 'L16', 'L21', 'L05', 'L19', 'L20',
+]
+
+/** Top-level names of a 1.x data folder that are ours or Chromium's (anything else is unknown). */
+const KNOWN_ENTRIES = new Set(
+  [
+    'config.json', 'config.json.bak', 'config.json.tmp', 'remote-devices.json', 'remote-devices.json.tmp', 'backups', 'status-bin',
+    'cache', 'code cache', 'gpucache', 'dawncache', 'dawngraphitecache', 'dawnwebgpucache', 'grshadercache', 'graphitedawncache',
+    'shadercache', 'local storage', 'session storage', 'indexeddb', 'network', 'shared dictionary', 'sharedstorage', 'blob_storage',
+    'crashpad', 'service worker', 'webstorage', 'databases', 'partitions', 'dictionaries', 'videodecodestats', 'shared_proto_db',
+    'local state', 'preferences', 'network persistent state', 'transportsecurity', 'cookies', 'trust tokens', 'lockfile',
+    'singletonlock', 'singletoncookie', 'singletonsocket', 'dips', 'origin bound certs', 'quotamanager', 'visited links', 'web data',
+    'history', 'favicons', 'login data', 'heavy_ad_intervention_opt_out.db', 'first_party_sets.db', 'component_crx_cache',
+    'extensions_crx_cache', 'browsermetrics', 'crash reports', 'pending_crashes', 'media device salts', 'webrtcvideostats',
+    'extension state', 'extension rules', 'extension scripts', 'sync data', 'segmentation_platform', 'optimization_guide_model_store',
+    'hyphen-data', 'spellcheck', 'storage', 'privatenetworkdevicestore', 'reporting and nel', 'commerce_heuristics',
+  ].map((n) => n.toLowerCase()),
+)
+
+function isKnownEntry(name: string): boolean {
+  const n = name.toLowerCase()
+  return KNOWN_ENTRIES.has(n) || n.endsWith('-journal') || n.startsWith('.org.chromium.')
+}
+
+function errCode(err: unknown): string {
+  const c = (err as { code?: unknown })?.code
+  return typeof c === 'string' && c ? c : 'error'
+}
+
+function outcome(r: RemoveResult): ItemOutcome {
+  if (r === 'done' || r === 'absent') return { state: r }
+  return 'deferred' in r ? { state: 'deferred', reason: r.deferred } : { state: 'skipped', reason: r.skipped }
+}
+
+async function lstatOrNull(r: Run, p: string): Promise<Stats | null> {
+  try {
+    return await (r.env.fs ?? nodeFsp).lstat(p)
+  } catch {
+    return null
+  }
+}
+
+/** Link, elevation and guard checks before any backup work (the removal repeats them). */
+function precheck(r: Run, target: string, st: Stats): ItemOutcome | null {
+  if (st.isSymbolicLink()) return { state: 'skipped', reason: 'reparsePoint' }
+  if (needsElevation(target, r.rm.elevation)) return { state: 'skipped', reason: 'needsElevation' }
+  if (violatesGuard([target], r.env.guard)) return { state: 'skipped', reason: 'guard' }
+  return null
+}
+
+/**
+ * A 1.x install registered in either hive: its uninstall entry still says
+ * SnMultiCC, or Software\<GUID> points at a folder that still holds the 1.x
+ * exe (after the 2.x setup that key belongs to 2.x). A registry error counts
+ * as registered: the caller then keeps what belongs to that install.
+ */
+export function legacyInstallRegistered(env: CleanupEnv): boolean {
+  const reg = env.registry
+  if (!reg) return false
+  try {
+    for (const hive of ['HKCU', 'HKLM'] as Hive[]) {
+      const name = reg.read(hive, REG.uninstall, 'DisplayName')
+      if (typeof name === 'string' && name.startsWith(LEGACY_BRAND.productName)) return true
+      const loc = reg.read(hive, INSTALLER_REG.key, 'InstallLocation')
+      if (typeof loc === 'string' && loc && existsSync(join(loc, LEGACY_BRAND.winExe))) return true
+    }
+    return false
+  } catch {
+    return true
+  }
+}
+
+/** Sources that changed (or appeared) after the commit go to post-commit/<ISO>/ in the zip; 2.x data wins. */
+async function backupPostCommit(r: Run, folder: string): Promise<void> {
+  const m = r.marker
+  const known = new Map(m.from && samePath(m.from, folder) ? m.sources.map((s) => [s.rel, s.sha256]) : [])
+  const rels = new Set([...listLegacyWhitelist(folder), ...known.keys()])
+  const stamp = isoStamp(r.env.now())
+  const changed: BackupEntry[] = []
+  const fsx = r.env.fs ?? nodeFsp
+  for (const rel of rels) {
+    let data: Buffer
+    try {
+      data = await fsx.readFile(join(folder, rel))
+    } catch {
+      continue
+    }
+    if (known.get(rel) !== sha256(data)) changed.push({ name: `post-commit/${stamp}/${rel}`, data, source: join(folder, rel) })
+  }
+  if (changed.length === 0) return
+  const added = appendToBackup(r.env.targetDir, m, changed, r.env.now())
+  if (added > 0) {
+    m.postCommitBackup = { at: r.env.now(), entries: (m.postCommitBackup?.entries ?? 0) + added }
+    r.persist()
+    r.env.log(`phase=cleaning result=postCommitBackup entries=${added} path=${folder}`)
+  }
+}
+
+/**
+ * Unknown top-level entries (not ours, not Chromium's) go to the zip under
+ * prefix when they add up to 5 MB or less. Over that the folder is kept:
+ * returns skipped: unknownFiles and logs the names (never the contents).
+ */
+async function backupUnknown(r: Run, folder: string, prefix: string): Promise<ItemOutcome | null> {
+  const fsx = r.env.fs ?? nodeFsp
+  const files: Array<{ rel: string; abs: string }> = []
+  let bytes = 0
+  const walk = async (abs: string, rel: string): Promise<void> => {
+    const st = await fsx.lstat(abs)
+    if (st.isSymbolicLink()) return // removed as a link, nothing to keep
+    if (st.isDirectory()) {
+      for (const n of await fsx.readdir(abs)) await walk(join(abs, String(n)), `${rel}/${String(n)}`)
+    } else if (st.isFile()) {
+      bytes += st.size
+      files.push({ rel, abs })
+    }
+  }
+  const unknown = (await fsx.readdir(folder)).map(String).filter((n) => !isKnownEntry(n))
+  for (const n of unknown) await walk(join(folder, n), n)
+  if (unknown.length === 0) return null
+  if (bytes > MAX_UNKNOWN_BYTES) {
+    r.env.log(`phase=cleaning result=unknownFiles bytes=${bytes} names=${unknown.join('|')} path=${folder}`)
+    return { state: 'skipped', reason: 'unknownFiles' }
+  }
+  const entries: BackupEntry[] = []
+  for (const f of files) entries.push({ name: `${prefix}${f.rel}`, data: await fsx.readFile(f.abs), source: f.abs })
+  if (entries.length > 0 && appendToBackup(r.env.targetDir, r.marker, entries, r.env.now()) > 0) r.persist()
+  return null
+}
+
+function tombstoneOpts(r: Run, id: LegacyItemId): RemoveOptions {
+  return {
+    ...r.rm,
+    afterRename: () => {
+      if (r.env.faultAt === `crash:tombstone:${id}`) throw new CrashFault(`tombstone:${id}`)
+    },
+  }
+}
+
+/** L01, L02, L18: a 1.x data folder. Back up what changed and what is unknown, then tombstone and delete. */
+async function cleanDataFolder(r: Run, id: LegacyItemId, target: string, opts: { postCommit: boolean; unknownPrefix: string; extras?: BackupEntry[] }): Promise<ItemOutcome> {
+  const tombs = await removeTombstones(target, r.env.guard, r.rm)
+  if (typeof tombs === 'object' && 'deferred' in tombs) return outcome(tombs)
+  const st = await lstatOrNull(r, target)
+  if (!st) return { state: tombs === 'done' ? 'done' : 'absent' }
+  const pre = precheck(r, target, st)
+  if (pre) return pre
+  if (r.env.isFolderLocked(target)) return { state: 'deferred', reason: 'legacyRunning' }
+  if (opts.postCommit) await backupPostCommit(r, target)
+  if (opts.extras && opts.extras.length > 0 && appendToBackup(r.env.targetDir, r.marker, opts.extras, r.env.now()) > 0) r.persist()
+  const unknown = await backupUnknown(r, target, opts.unknownPrefix)
+  if (unknown) return unknown
+  return outcome(await tombstoneAndRemove(target, r.env.guard, tombstoneOpts(r, id)))
+}
+
+function installedLegacyDir(env: CleanupEnv, m: LegacyMigrationMarker): string {
+  return env.legacyDataDir ?? (m.mode === 'installed' && m.from ? m.from : join(env.roots.appData, LEGACY_BRAND.packageName))
+}
+
+function portableLegacyDir(env: CleanupEnv): string | null {
+  return env.portableDir ? join(env.portableDir, LEGACY_BRAND.portableDataDir) : null
+}
+
+const notThisMode: ItemOutcome = { state: 'absent', reason: 'notThisMode' }
+
+async function readFileOrNull(r: Run, p: string): Promise<Buffer | null> {
+  try {
+    return await (r.env.fs ?? nodeFsp).readFile(p)
+  } catch {
+    return null
+  }
+}
+
+// --- Items ------------------------------------------------------------------
+
+const L01: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => [join(env.roots.appData, LEGACY_BRAND.packageName)],
+  async run(r) {
+    if (r.env.mode !== 'installed') return notThisMode
+    return cleanDataFolder(r, 'L01', installedLegacyDir(r.env, r.marker), { postCommit: true, unknownPrefix: 'other/' })
+  },
+}
+
+const L02: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => [portableLegacyDir(env) ?? '-'],
+  async run(r) {
+    const target = portableLegacyDir(r.env)
+    if (r.env.mode !== 'portable' || !target) return notThisMode
+    // Only the folder right next to the running portable exe, nothing found elsewhere.
+    if (!r.env.portableDir || !samePath(dirname(target), r.env.portableDir)) return { state: 'skipped', reason: 'guard' }
+    return cleanDataFolder(r, 'L02', target, { postCommit: true, unknownPrefix: 'other/' })
+  },
+}
+
+const L03: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => [join(env.roots.appData, LEGACY_BRAND.packageName)],
+  async run(r) {
+    if (r.env.mode !== 'portable') return notThisMode
+    const target = join(r.env.roots.appData, LEGACY_BRAND.packageName)
+    const st = await lstatOrNull(r, target)
+    if (!st) return { state: 'absent' }
+    const pre = precheck(r, target, st)
+    if (pre) return pre
+    // Data in there, or a registered 1.x install: it belongs to that install, never to the portable.
+    const hasData = (await lstatOrNull(r, join(target, 'config.json'))) || (await lstatOrNull(r, join(target, 'remote-devices.json')))
+    if (hasData || legacyInstallRegistered(r.env)) return { state: 'skipped', reason: 'ownedByInstalled' }
+    if (r.env.isFolderLocked(target)) return { state: 'deferred', reason: 'legacyRunning' }
+    return outcome(await safeRemoveTree(target, r.env.guard, r.rm))
+  },
+}
+
+const L11: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => [join(env.roots.claudeDir, 'settings.json')],
+  async run(r) {
+    if (r.marker.hooksMigration !== 'pending') return { state: 'done' }
+    const res = r.env.migrateLegacyHooks()
+    if (res === 'pending') return { state: 'deferred', reason: 'hooksPending' }
+    r.marker.hooksMigration = res
+    return { state: res === 'rewritten' ? 'done' : 'absent' }
+  },
+}
+
+const L12: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => [join(env.roots.claudeDir, 'settings.json.snmulticc.bak')],
+  async run(r) {
+    if (!isTerminalItem(r.marker.cleanup.L11?.state)) return { state: 'deferred', reason: 'waitingL11' }
+    // The only file of ~/.claude ever deleted, by exact path, after it is in the verified zip.
+    const target = join(r.env.roots.claudeDir, 'settings.json.snmulticc.bak')
+    const st = await lstatOrNull(r, target)
+    if (!st) return { state: 'absent' }
+    const pre = precheck(r, target, st)
+    if (pre) return pre
+    const data = await readFileOrNull(r, target)
+    if (!data) return { state: 'deferred', reason: 'unreadable' }
+    if (appendToBackup(r.env.targetDir, r.marker, [{ name: 'claude/settings.json.snmulticc.bak', data, source: target }], r.env.now()) > 0) r.persist()
+    return outcome(await safeRemoveTree(target, r.env.guard, r.rm))
+  },
+}
+
+const L13: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => [env.roots.localAppData ? join(env.roots.localAppData, LEGACY_BRAND.updaterCacheDir) : '-'],
+  async run(r) {
+    if (!r.env.roots.localAppData) return notThisMode
+    const target = join(r.env.roots.localAppData, LEGACY_BRAND.updaterCacheDir)
+    if (!(await lstatOrNull(r, target))) return { state: 'absent' }
+    if (legacyInstallRegistered(r.env)) return { state: 'skipped', reason: 'ownedByInstalled' }
+    return outcome(await safeRemoveTree(target, r.env.guard, r.rm))
+  },
+}
+
+const L14: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => [join(env.roots.temp, LEGACY_BRAND.portableUnpackDir)],
+  async run(r) {
+    if (r.env.platform !== 'win32') return notThisMode
+    return outcome(await safeRemoveTree(join(r.env.roots.temp, LEGACY_BRAND.portableUnpackDir), r.env.guard, r.rm))
+  },
+}
+
+/** L15, L16: direct entries of the temp folder with an exact prefix. */
+function tempPrefixItem(prefix: string): InventoryItem {
+  return {
+    needsLegacyClosed: false,
+    describe: (env) => [join(env.roots.temp, `${prefix}*`)],
+    async run(r) {
+      let names: string[]
+      try {
+        names = (await (r.env.fs ?? nodeFsp).readdir(r.env.roots.temp)).map(String)
+      } catch {
+        return { state: 'absent' }
+      }
+      const hits = names.filter((n) => n.toLowerCase().startsWith(prefix.toLowerCase()))
+      const results: RemoveResult[] = []
+      for (const n of hits) results.push(await safeRemoveTree(join(r.env.roots.temp, n), r.env.guard, r.rm))
+      return outcome(combineResults(results))
+    },
+  }
+}
+
+const L18: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => [join(env.roots.appData, `${LEGACY_BRAND.packageName}-dev`)],
+  async run(r) {
+    const target = join(r.env.roots.appData, `${LEGACY_BRAND.packageName}-dev`)
+    // Its config and devices go to the zip first (dev/...), whatever the pipeline saw.
+    const extras: BackupEntry[] = []
+    for (const name of ['config.json', 'remote-devices.json']) {
+      const p = join(target, name)
+      const st = await lstatOrNull(r, p)
+      if (st && st.isFile()) {
+        const data = await readFileOrNull(r, p)
+        if (data) extras.push({ name: `dev/${name}`, data, source: p })
+      }
+    }
+    return cleanDataFolder(r, 'L18', target, { postCommit: false, unknownPrefix: 'dev/other/', extras })
+  },
+}
+
+const L19: InventoryItem = {
+  needsLegacyClosed: false,
+  describe: () => ['Windows Firewall rules for the 1.x exe (kept: they need elevation and are inert)'],
+  async run() {
+    return { state: 'absent', reason: 'firewallRulesInert' }
+  },
+}
+
+const L20: InventoryItem = {
+  needsLegacyClosed: false,
+  describe: () => ['phone localStorage (migrated by the mobile client)'],
+  async run() {
+    return { state: 'absent', reason: 'mobileClient' }
+  },
+}
+
+/** Placeholder for items whose platform part is not wired yet: they stay open. */
+const notYet: InventoryItem = {
+  needsLegacyClosed: false,
+  describe: () => [],
+  async run() {
+    return { state: 'deferred', reason: 'notImplemented' }
+  },
+}
+
+export const INVENTORY: Record<LegacyItemId, InventoryItem> = {
+  L01, L02, L03, L04: notYet, L05: notYet, L06: notYet, L07: notYet, L08: notYet, L09: notYet, L10: notYet, L11,
+  L12, L13, L14, L15: tempPrefixItem(`${LEGACY_BRAND.tempPrefix}update-`), L16: tempPrefixItem(`${LEGACY_BRAND.tempPrefix}swap-`),
+  L17: notYet, L18, L19, L20, L21: notYet,
+}
+
+// --- Runner -----------------------------------------------------------------
+
+export interface CleanupResult {
+  marker: LegacyMigrationMarker | null
+  simulated: boolean
+}
+
+/**
+ * One cleanup pass. Needs the marker in committed or cleaning (done only gets
+ * maintenance, elsewhere). Simulation logs every target and changes nothing,
+ * not even the marker. Otherwise: committed -> cleaning, then each open item
+ * in CLEANUP_ORDER, persisted one by one, and done once every item is done,
+ * absent or skipped.
+ */
+export async function runCleanup(env: CleanupEnv): Promise<CleanupResult> {
+  const read = readMarker(env.targetDir)
+  if (read.kind !== 'ok' || !isCommittedPhase(read.marker.phase) || read.marker.phase === 'done') return { marker: read.kind === 'ok' ? read.marker : null, simulated: false }
+  const marker = read.marker
+  if (env.simulate) {
+    for (const id of CLEANUP_ORDER) {
+      if (isTerminalItem(marker.cleanup[id]?.state)) continue
+      for (const p of INVENTORY[id].describe(env)) env.log(`simulate item=${id} path=${p}`)
+    }
+    return { marker, simulated: true }
+  }
+  const persist = (): void => {
+    marker.at = env.now()
+    writeMarker(env.targetDir, marker)
+    env.onChange?.(marker)
+  }
+  if (marker.phase === 'committed') {
+    marker.phase = 'cleaning'
+    persist()
+    env.log('phase=cleaning result=started')
+  }
+  if (env.firstPassOfStart && Object.values(marker.cleanup).some((s) => s?.state === 'deferred')) {
+    marker.cleanupStarts += 1
+    persist()
+  }
+  const run: Run = {
+    env,
+    marker,
+    rm: { fs: env.fs, elevation: env.elevation, retries: env.retries, delayMs: env.delayMs, now: env.now },
+    persist,
+  }
+  let legacyRunning: boolean | null = null
+  for (const id of CLEANUP_ORDER) {
+    const current = marker.cleanup[id]
+    if (isTerminalItem(current?.state)) continue
+    const item = INVENTORY[id]
+    let result: ItemOutcome
+    if (item.needsLegacyClosed && (legacyRunning ??= env.isLegacyProcessRunning())) {
+      result = { state: 'deferred', reason: 'legacyRunning' }
+    } else {
+      try {
+        result = await item.run(run, id)
+      } catch (err) {
+        if (err instanceof CrashFault) throw err
+        result = { state: 'deferred', reason: errCode(err) }
+      }
+    }
+    marker.cleanup[id] = { state: result.state, attempts: (current?.attempts ?? 0) + 1, ...(result.reason ? { reason: result.reason } : {}), at: env.now() }
+    persist()
+    env.log(`phase=cleaning item=${id} result=${result.state}${result.reason ? ` reason=${result.reason}` : ''}`)
+    if (env.faultAt === `crash:item:${id}`) throw new CrashFault(`item:${id}`)
+  }
+  if (CLEANUP_ORDER.every((id) => isTerminalItem(marker.cleanup[id]?.state))) {
+    marker.phase = 'done'
+    persist()
+    env.log('phase=done')
+  }
+  return { marker, simulated: false }
+}
+
+/**
+ * Dev cleanup really deletes only on a fake tree: SNAOS_FORCE_LEGACY_CLEANUP=1
+ * AND every path variable set and strictly inside the system temp folder
+ * (derived from the real profile, not from %TEMP%, which the fake tree
+ * redirects too). Returns the fake roots, which then become the guard's
+ * allowedRoots, or why the run stays a simulation.
+ */
+export function devCleanupSandbox(input: {
+  env: Record<string, string | undefined>
+  platform: NodeJS.Platform
+  realHome: string
+}): { ok: true; roots: string[] } | { ok: false; reason: string } {
+  const { env, platform } = input
+  if (env.SNAOS_FORCE_LEGACY_CLEANUP !== '1') return { ok: false, reason: 'notForced' }
+  const required = platform === 'win32' ? ['APPDATA', 'LOCALAPPDATA', 'TEMP', 'USERPROFILE', 'CLAUDE_CONFIG_DIR'] : ['HOME', 'CLAUDE_CONFIG_DIR']
+  const optional = platform === 'win32' ? ['TMP'] : ['TMPDIR', 'XDG_CONFIG_HOME']
+  const bases =
+    platform === 'win32'
+      ? [join(input.realHome, 'AppData', 'Local', 'Temp')]
+      : ['/tmp', '/var/tmp', '/private/tmp', '/var/folders', '/private/var/folders']
+  const roots: string[] = []
+  for (const name of [...required, ...optional]) {
+    const value = env[name]
+    if (!value) {
+      if (required.includes(name)) return { ok: false, reason: `missing:${name}` }
+      continue
+    }
+    if (!bases.some((b) => isInside(value, b))) return { ok: false, reason: `outsideTemp:${name}` }
+    roots.push(value)
+  }
+  return { ok: true, roots }
+}
