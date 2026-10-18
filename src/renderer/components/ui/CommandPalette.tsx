@@ -19,6 +19,7 @@ import { goToNextWaiting } from '@/lib/useGlobalKeys'
 import { agentPhrase, agentTitle, allAgents, navInputFrom, paletteWaiting, type AgentEntry } from '@/lib/agentNav'
 import { StatusGlyph } from '@/components/ui/StatusDot'
 import { glyphOf, useNow } from '@/components/sidebar/AgentRows'
+import { orderQuickCommands } from '@shared/quickCommands'
 
 interface Command {
   id: string
@@ -73,7 +74,7 @@ export function CommandPalette() {
   const setOpen = useAppStore((s) => s.setPaletteOpen)
   const workspaces = useAppStore((s) => s.workspaces)
   const presets = useAppStore((s) => s.presets)
-  const snippets = useAppStore((s) => s.snippets)
+  const quickCommands = useAppStore((s) => s.quickCommands)
   const activeId = useAppStore((s) => s.activeWorkspaceId)
   const setActive = useAppStore((s) => s.setActive)
   const setWizardOpen = useAppStore((s) => s.setWizardOpen)
@@ -143,7 +144,9 @@ export function CommandPalette() {
         })
       }
     }
-    for (const snip of snippets) {
+    // Interim (R22-01): send commands insert their text as snippets did; R22-12
+    // replaces these rows with qc-<id> runners for both actions.
+    for (const snip of orderQuickCommands(quickCommands, activeId).filter((c) => c.action === 'send')) {
       cmds.push({
         id: `snip-${snip.id}`,
         label: `${t('palette.snippet')}: ${snip.name}`,
@@ -164,7 +167,7 @@ export function CommandPalette() {
       cmds.push({ id: `theme-${th.name}`, label: `${t('palette.theme')}: ${th.label}`, hint: t('palette.appearance'), icon: Palette, run: () => updateSettings({ theme: th.name }) })
     }
     return cmds
-  }, [workspaces, presets, snippets, activeId, canReopen, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
+  }, [workspaces, presets, quickCommands, activeId, canReopen, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
 
   // E5-FR-16: with a query every console is searchable by title, workspace,
   // its agent's topic and first prompt.

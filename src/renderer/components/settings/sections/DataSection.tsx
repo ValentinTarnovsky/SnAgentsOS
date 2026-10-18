@@ -69,9 +69,13 @@ export function DataSection() {
               </button>
               <button
                 onClick={() => {
-                  mergeConfig(pending)
+                  const { quickCommands: qc } = mergeConfig(pending)
                   setPending(null)
-                  setMsg(t('data.merged'))
+                  setMsg(
+                    qc.imported < qc.total
+                      ? t('data.mergedQuickLimit', { n: qc.imported, m: qc.total })
+                      : t('data.merged'),
+                  )
                 }}
                 className="rounded-btn bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))] px-3 py-1.5 text-sm font-medium text-white hover:brightness-110"
               >

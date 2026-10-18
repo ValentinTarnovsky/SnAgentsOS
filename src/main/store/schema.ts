@@ -1,11 +1,22 @@
 import { z } from 'zod'
 import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
+import { migrateQuickCommandsConfig } from '@shared/quickCommands'
 
 export { CONFIG_VERSION }
 
 export const discordSettingsSchema = z.object({
   enabled: z.boolean().default(false), webhookUrl: z.string().max(2048).default(''),
   userId: z.string().max(32).default(''), notifyAction: z.boolean().default(true), notifyDone: z.boolean().default(true),
+})
+// Schema 12 (E2-FR-40). Every field defaults on its own and a junk value falls
+// back instead of invalidating the config. Topic and token never reach an export.
+export const ntfySettingsSchema = z.object({
+  enabled: z.boolean().catch(false).default(false),
+  server: z.string().max(512).catch('https://ntfy.sh').default('https://ntfy.sh'),
+  topic: z.string().regex(/^(?:[A-Za-z0-9_-]{1,64})?$/).catch('').default(''),
+  token: z.string().max(128).catch('').default(''),
+  notifyAction: z.boolean().catch(true).default(true),
+  notifyDone: z.boolean().catch(false).default(false),
 })
 export const notificationSettingsSchema = z.object({
   enabled: z.boolean().default(true), notifyDone: z.boolean().default(true), notifyAction: z.boolean().default(true),
@@ -14,6 +25,8 @@ export const notificationSettingsSchema = z.object({
   hookPort: z.number().int().min(1024).max(65535).default(43917), hookToken: z.string().regex(/^(?:[a-f0-9]{32,64})?$/).default(''),
   codexEnabled: z.boolean().default(false), discord: discordSettingsSchema.default({}),
   inAppWhenFocused: z.boolean().default(true), // schema 11
+  ntfy: ntfySettingsSchema.default({}), // schema 12
+  onlyWhenAway: z.boolean().catch(false).default(false), // schema 12
 })
 
 // Schema 11. Field-level defaults are the whole migration (migrate() only re-stamps).
@@ -23,6 +36,17 @@ export const agentSettingsSchema = z.object({
   sidebarAgentRows: z.boolean().default(true),
   topicAsTitle: z.boolean().default(true),
   ctrlDigitFocus: z.boolean().default(true),
+  // Schema 12 (E5-FR-12/13/22), same tolerant field-level defaults.
+  resumeModalTimeoutSec: z.number().int().min(0).max(600).catch(60).default(60),
+  resumeNudge: z.boolean().catch(false).default(false),
+  resumeNudgeText: z.string().max(500).catch('').default(''),
+  sidebarSort: z.enum(['manual', 'smart']).catch('manual').default('manual'),
+})
+
+// Schema 12 (E8-FR-08/09). v3.0 adds the CLI and schedule fields here.
+export const automationSettingsSchema = z.object({
+  defaultAgentPresetId: z.string().max(128).catch('').default(''),
+  composerCreateAnother: z.boolean().catch(false).default(false),
 })
 
 const paneType = z.enum(['shell', 'claude', 'codex', 'custom'])
@@ -93,6 +117,9 @@ const workspaceSchema = z.object({
   layout: layoutSchema,
   setupId: z.string().optional(),
   agentsCollapsed: z.boolean().optional().catch(undefined), // schema 11
+  // Schema 12 (E8-FR-10): an over-long note is clipped, a junk value dropped.
+  note: z.string().transform((v) => v.slice(0, 140)).optional().catch(undefined),
+  taskState: z.enum(['todo', 'doing', 'review', 'done']).optional().catch(undefined),
 })
 
 const presetSchema = z.object({
@@ -166,6 +193,18 @@ const settingsSchema = z.object({
   terminalUnicode11: z.boolean().catch(true).default(true),
   terminalAgentEndChip: z.boolean().catch(true).default(true),
   awakeMode: z.enum(['auto', 'always', 'never']).catch('auto').default('auto'),
+  // Schema 12 (E6-FR-01/08, E7-FR-06/07, E4-FR-13/34): same pattern.
+  terminalSnapshotMode: z.enum(['auto', 'lazy', 'off']).catch('auto').default('auto'),
+  persistScrollback: z.boolean().catch(true).default(true),
+  persistScrollbackLines: z
+    .number()
+    .int()
+    .transform((v) => Math.min(5000, Math.max(200, v)))
+    .catch(2000)
+    .default(2000),
+  gitChip: z.boolean().catch(true).default(true),
+  explorerMenu: z.boolean().catch(false).default(false),
+  updateDismissedVersion: z.string().max(64).catch('').default(''),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
   autoCheckUpdates: z.boolean().default(true),
@@ -187,12 +226,8 @@ const settingsSchema = z.object({
   notifications: notificationSettingsSchema.default({}),
   // Schema 11: agent behavior settings, defaulted field by field.
   agents: agentSettingsSchema.default({}),
-})
-
-const snippetSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  text: z.string(),
+  // Schema 12: workspace composer defaults.
+  automation: automationSettingsSchema.default({}),
 })
 
 const keyButtonSchema = z.object({
@@ -207,7 +242,13 @@ const configSchema = z.object({
   presets: z.array(presetSchema),
   settings: settingsSchema,
   activeWorkspaceId: z.string().nullable().optional(),
-  snippets: z.array(snippetSchema).optional().catch(undefined),
+  // Schema 12 (E8-FR-01): items stay unknown here and migrate() validates them
+  // one by one, so a broken command never empties the list. Only a non-array
+  // value falls back to undefined.
+  quickCommands: z.array(z.unknown()).optional().catch(undefined),
+  // Schema <= 11 input only: migrate() converts it to quickCommands, also item
+  // by item (a malformed snippet no longer drops all of them).
+  snippets: z.array(z.unknown()).optional().catch(undefined),
   connections: z.array(connectionProfileSchema).optional().catch(undefined),
   keyButtons: z.array(keyButtonSchema).optional().catch(undefined),
 })
@@ -222,9 +263,13 @@ export function parseConfig(raw: unknown): ConfigFile | null {
 /**
  * Forward migrations. The zod schema applies field-level defaults (theme,
  * language, closeToTray, …) and drops the legacy dockview `layout` blob, so
- * v1 configs load without data loss. Here we just stamp the current version.
- * v10 -> v11 adds only defaulted keys, so it needs no logic here either.
+ * v1 configs load without data loss. v10 -> v11 adds only defaulted keys.
+ * v11 -> v12 is the one real transformation: `snippets` become global `send`
+ * quick commands (once, only while `quickCommands` is missing) and `snippets`
+ * is never carried forward. Idempotent: a second parse changes nothing.
  */
 function migrate(config: ConfigFile): ConfigFile {
-  return { ...config, version: CONFIG_VERSION }
+  const m = migrateQuickCommandsConfig(config)
+  if (m.dropped > 0) console.warn(`[config] dropped ${m.dropped} invalid quick command(s)`)
+  return { ...m.config, version: CONFIG_VERSION }
 }

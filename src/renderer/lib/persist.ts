@@ -8,7 +8,7 @@ function toConfig(state: AppState): ConfigFile {
     presets: state.presets,
     settings: { ...state.settings, sidebarCollapsed: state.sidebarCollapsed },
     activeWorkspaceId: state.activeWorkspaceId,
-    snippets: state.snippets,
+    quickCommands: state.quickCommands,
     keyButtons: state.keyButtons,
     connections: state.connections,
   }
@@ -24,7 +24,7 @@ function relevant(s: AppState): unknown[] {
     s.workspaces,
     s.presets,
     s.settings,
-    s.snippets,
+    s.quickCommands,
     s.keyButtons,
     s.connections,
     s.activeWorkspaceId,
