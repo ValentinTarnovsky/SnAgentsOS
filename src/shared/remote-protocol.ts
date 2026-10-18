@@ -6,7 +6,20 @@
  * into three targets: main, renderer and the mobile web client. Runtime
  * validation schemas live in remote-protocol-schemas.ts (main-only).
  */
-import type { KeyButton, Language, PaneType, Snippet, ThemeName, ThemeTokens } from './types'
+import type {
+  AgentProvider,
+  AttentionReason,
+  ClaudePaneState,
+  KeyButton,
+  Language,
+  PaneType,
+  RemotePending,
+  Snippet,
+  ThemeName,
+  ThemeTokens,
+} from './types'
+
+export type { RemotePending }
 
 export const PROTOCOL_VERSION = 1
 
@@ -25,6 +38,27 @@ export type RemoteEndpointKind = 'lan' | 'tailscale' | 'other'
 
 // --- State snapshot (desktop -> phone) ---
 
+/**
+ * Agent status of one pane as the phone sees it (E1-FR-03, CONTRATOS). Main
+ * builds it from StatusManager and never copies the desktop-only fields
+ * (sessionId, cwd, detail, topic, firstPrompt, cacheSince).
+ */
+export interface RemotePaneStatus {
+  state: ClaudePaneState
+  /** false = inferred from the OSC title (SSH or no hooks); absent = true. */
+  precise?: boolean
+  provider?: AgentProvider
+  reason?: AttentionReason
+  pendingCount?: number
+  /** Desktop clock (epoch ms) of the last state transition. */
+  stateSince: number
+  /** Last assistant reply, <= 280. */
+  lastMessage?: string
+  /** Current tool, <= 120. */
+  activity?: string
+  pending?: RemotePending[]
+}
+
 export interface RemotePaneInfo {
   id: string
   title: string
@@ -39,6 +73,8 @@ export interface RemotePaneInfo {
    * resuming" and "New chat".
    */
   resumable?: boolean
+  /** Agent status overlaid by main on every state / authOk (E1-FR-03). */
+  status?: RemotePaneStatus
 }
 
 export interface RemoteWorkspaceInfo {
@@ -181,6 +217,8 @@ export type RemoteServerMsg =
     }
   | { v: number; type: 'out'; paneId: string; data: string }
   | { v: number; type: 'exit'; paneId: string; exitCode: number }
+  /** Live agent status change, straight from main (E1-FR-03); null clears it. */
+  | { v: number; type: 'paneStatus'; paneId: string; status: RemotePaneStatus | null }
   | {
       v: number
       type: 'ctlAck'

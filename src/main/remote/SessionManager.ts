@@ -17,6 +17,7 @@ import {
   type RemoteAuthFailReason,
   type RemoteCtlAction,
   type RemotePairDeniedReason,
+  type RemotePaneStatus,
   type RemoteServerMsg,
   type RemoteStateSnapshot,
 } from '@shared/remote-protocol'
@@ -460,6 +461,13 @@ export class SessionManager implements PtySink {
   broadcastState(snapshot: RemoteStateSnapshot): void {
     for (const session of this.sessions) {
       if (session.authed) this.send(session, { type: 'state', state: snapshot })
+    }
+  }
+
+  /** Live agent status of one pane (E1-FR-03), only to authenticated sessions. */
+  broadcastPaneStatus(paneId: string, status: RemotePaneStatus | null): void {
+    for (const session of this.sessions) {
+      if (session.authed) this.send(session, { type: 'paneStatus', paneId, status })
     }
   }
 
