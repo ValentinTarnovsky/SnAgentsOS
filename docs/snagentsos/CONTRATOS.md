@@ -146,8 +146,10 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v2.1 | `agents:settingsPatch` | main->renderer | `Partial<AgentSettings>` (cambio desde el tray; el renderer persiste) | E5 |
 | v2.2 | `app:diagnostics` | invoke | `-> string` redactado | E5 |
 | v2.2 | `app:rendererRecovered` | main->renderer | `{ reloads: number }` | E5 |
-| v2.2 | `app:openPath` | main->renderer | `{ path }` (second-instance `--open`) | E5 |
-| v2.2 | `system:setExplorerMenu` | invoke | `boolean -> boolean` | E5 |
+| v2.2 | `app:openPath` | main->renderer | `OpenRequest` = `{ id, path, source: 'argv' \| 'second-instance' }`, superset de `{ path }` (primer arranque y second-instance `--open`; enmienda R22-06) | E5 |
+| v2.2 | `app:takePendingOpen` | invoke | `-> OpenRequest \| null` (consume el pedido que main retiene hasta que el renderer hidrata; enmienda R22-06) | E5 |
+| v2.2 | `system:setExplorerMenu` | invoke | `{ enabled, language } -> ExplorerMenuResult` = `{ ok, registered, exe?, currentExe?, mismatch?, error?, skipped?: 'not-windows' \| 'dev' }` (enmienda R22-06, forma del PRD E4) | E5 |
+| v2.2 | `system:getExplorerMenu` | invoke | `-> ExplorerMenuResult` (enmienda R22-06) | E5 |
 | v2.2 | `pty:scrollbackLoad` | invoke | `paneId -> string \| null` | E5 |
 | v2.2 | `git:setWatch` | send | `GitTarget[]` = `{ key, cwd, workspaceId, paneId?, active }` (enmienda R22-10: la clave `ws:<id>` / `pane:<id>` y `active` acompanan al cwd) | E5 |
 | v2.2 | `git:update` | main->renderer | `{ key, cwd, summary: GitSummary \| null, error? }`, solo cuando cambia por valor | E5 |
@@ -270,3 +272,4 @@ Ids y combinaciones de v2.1 segun D8 (gana el contrato): `reopenClosedPane` es C
 |---|---|---|
 | v2.1 | R21-00 | `RemotePaneStatus.precise?` (adoptada); `RemotePaneInfo.resumable?` (D10); `RemoteStateSnapshot.terminalUnicode?`, `replay.exitCode?`, `RemotePaneInfo.exitCode?`; IPC `pty:restart`, `status:sessionEnd`, `agents:*`, `power:getState` y los opcionales de `PowerState`; campos desktop-only de `PaneStatus` (`detail`, `topic`, `firstPrompt`, `cacheSince`); claves `notifications.inAppWhenFocused`, `settings.agents.*` (v11), `workspaces[].agentsCollapsed`, `terminalAgentEndChip`; storage `snagentsos.alerts.inPage` y sessionStorage `snagentsos.reloadFor`; atajos segun D8; archivo `dataDir()/agent-sessions.json` |
 | v2.2 | R22-01 (config) | Claves `terminalSnapshotMode`, `settings.agents.{resumeModalTimeoutSec, resumeNudge, resumeNudgeText, sidebarSort}`, `settings.automation.{defaultAgentPresetId, composerCreateAnother}`, `workspaces[].note`/`taskState`. `CONFIG_VERSION` 12 con la migracion snippets -> quickCommands. Las enmiendas v2.2 de protocolo, IPC y storage se registran con el WP que las implementa |
+| v2.2 | R22-06 | IPC `app:openPath` lleva `OpenRequest`; `system:setExplorerMenu` toma `{ enabled, language }` y devuelve `ExplorerMenuResult`; altas `app:takePendingOpen` y `system:getExplorerMenu`. sessionStorage del desktop `snagentsos.openHandled` (ids de `OpenRequest` ya despachados, tope 20, sobrevive a una recarga). Variable de dev `SNAOS_TEST_EXPLORER_ROOT` (solo `HKCU\Software\SnAgentsOSTest-*`, para pruebas) |
