@@ -157,6 +157,62 @@ async function main() {
     send(a, 'server', { method: 'turn/completed', params: { threadId: 'thread-a', turn: { status: 'failed', id: 'turn' } } }); check(events.at(-1).kind === 'error', 'Codex terminal failure captured')
     a.disconnected(); check(events.at(-1).kind === 'unknown', 'transport loss reported')
   }
+  // E5-FR-03 + E1-FR-08 (D12): the App Server contract of the installed CLI
+  // (codex app-server generate-ts, ThreadItem v2) through StatusManager.
+  {
+    class NativeNotification extends require('events').EventEmitter { static isSupported() { return false } show() {} }
+    const { StatusManager } = load('src/main/status/StatusManager.ts', { require: id => id === 'electron' ? { Notification: NativeNotification } : require(id) })
+    const { codexItemTool } = load('src/main/status/CodexProtocol.ts')
+    const manager = new StatusManager(() => null, () => null)
+    manager.onSpawn('pty-c', 'pane-c')
+    const raw = []
+    const proto = new CodexProtocol('pane-c', 'pty-c', e => { raw.push(e); manager.onAgentEvent(e) })
+    const send = (side, m) => proto[side](JSON.stringify(m))
+    const thread = '019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b'
+    send('client', { id: 1, method: 'thread/resume', params: { threadId: thread } })
+    send('server', { id: 1, result: { thread: { id: thread, preview: 'arreglá el login\nmás texto', status: { type: 'idle' }, turns: [] } } })
+    let st = manager.stateOf('pane-c')
+    check(raw[0].kind === 'start' && st.firstPrompt === 'arreglá el login' && st.provider === 'codex', 'a resumed thread names its first prompt from thread.preview')
+    send('server', { method: 'turn/started', params: { threadId: thread, turn: { id: 't1', items: [], status: 'inProgress' } } })
+    send('server', { method: 'item/started', params: { threadId: thread, turnId: 't1', startedAtMs: 1, item: { type: 'userMessage', id: 'u1', clientId: null, content: [{ type: 'text', text: 'agregá tests\ncon detalle', text_elements: [] }, { type: 'localImage', path: 'C:\\x.png' }] } } })
+    st = manager.stateOf('pane-c')
+    check(st.state === 'working' && st.detail.kind === 'prompt' && st.detail.text === 'agregá tests' && st.firstPrompt === 'arreglá el login', 'a user message is the prompt detail and never replaces the first prompt')
+    check(raw.at(-1).prompt === 'agregá tests\ncon detalle', 'the prompt text reaches the session store as the last prompt')
+    send('server', { method: 'item/started', params: { threadId: thread, turnId: 't1', startedAtMs: 2, item: { type: 'commandExecution', id: 'c1', command: '"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command "npm test"', commandActions: [{ type: 'unknown', command: 'npm test' }], cwd: 'C:\\repo', processId: null, source: 'agent', status: 'inProgress', aggregatedOutput: null, exitCode: null, durationMs: null, pluginId: null, scriptPath: null } } })
+    st = manager.stateOf('pane-c')
+    check(st.detail.kind === 'tool' && st.detail.text === 'npm test' && st.activity === 'npm test', 'commandExecution shows its (parsed) command as the detail and the phone activity')
+    check(codexItemTool({ type: 'commandExecution', command: 'git status\nsecond line', commandActions: [] }) === 'git status', 'without parsed actions the first command line is used')
+    check(codexItemTool({ type: 'commandExecution', command: 'echo \x1b[31mred\x1b[0m', commandActions: [] }) === 'echo red', 'ANSI escapes never reach the detail')
+    send('server', { method: 'item/started', params: { threadId: thread, turnId: 't1', startedAtMs: 3, item: { type: 'fileChange', id: 'f1', status: 'inProgress', changes: [{ path: 'C:\\repo\\src\\login.ts', kind: { type: 'update', move_path: null }, diff: '' }, { path: 'C:\\repo\\b.ts', kind: { type: 'add' }, diff: '' }] } } })
+    check(manager.stateOf('pane-c').detail.text === 'Edit login.ts +1', 'fileChange names its file (and how many more)')
+    check(codexItemTool({ type: 'mcpToolCall', server: 'docs', tool: 'search' }) === 'mcp docs.search' && codexItemTool({ type: 'reasoning' }) === undefined, 'MCP calls read like Claude rows; non-tool items carry no detail')
+    send('server', { method: 'item/completed', params: { threadId: thread, turnId: 't1', completedAtMs: 4, item: { type: 'agentMessage', id: 'a1', text: 'Voy a correr los tests', phase: 'commentary', memoryCitation: null, delivery: null, questions: null } } })
+    st = manager.stateOf('pane-c')
+    check(st.state === 'working' && st.detail.kind === 'reply' && st.detail.text === 'Voy a correr los tests' && st.lastMessage === undefined, 'commentary mid-turn is the detail, not yet the last message')
+    const long = 'x'.repeat(400)
+    send('server', { method: 'item/completed', params: { threadId: thread, turnId: 't1', completedAtMs: 5, item: { type: 'agentMessage', id: 'a2', text: '## Listo\nTodos los tests pasan. ' + long, phase: 'final_answer', memoryCitation: null, delivery: null, questions: null } } })
+    send('server', { method: 'turn/completed', params: { threadId: thread, turn: { id: 't1', status: 'completed', items: [] } } })
+    st = manager.stateOf('pane-c')
+    check(st.state === 'done' && st.lastMessage.startsWith('## Listo Todos los tests pasan.') && st.lastMessage.length === 280, 'the completed agentMessage is published as lastMessage, cut to 280 like Claude')
+    check(st.detail.kind === 'reply' && st.detail.text === 'Listo' && st.activity === undefined, 'done shows the first line of the reply as its detail')
+    check(raw.at(-1).kind === 'done' && raw.at(-1).reply.length <= 2000, 'the reply rides the done event, bounded in memory')
+    send('server', { method: 'turn/started', params: { threadId: thread, turn: { id: 't2' } } })
+    send('server', { method: 'turn/completed', params: { threadId: thread, turn: { id: 't2', status: 'interrupted' } } })
+    check(raw.at(-1).kind === 'idle' && raw.at(-1).reply === undefined, 'an interrupted turn publishes no reply')
+    const n = raw.length
+    send('server', { method: 'item/started', params: { threadId: 'child-thread', turnId: 'x', item: { type: 'commandExecution', command: 'rm -rf /', commandActions: [] } } })
+    send('server', { method: 'item/completed', params: { threadId: thread, item: { type: 'agentMessage', id: 'late', text: 'late' } } })
+    check(raw.length === n, 'a child thread and an agentMessage outside a turn change nothing')
+    // A fresh thread (no preview) takes its first prompt from the first user message.
+    const proto2 = new CodexProtocol('pane-c', 'pty-c', e => manager.onAgentEvent(e))
+    proto2.client(JSON.stringify({ id: 7, method: 'thread/start' }))
+    proto2.server(JSON.stringify({ id: 7, result: { thread: { id: '019a1b2c-0000-7f80-9a1b-2c3d4e5f6a7c', preview: '', status: { type: 'idle' } } } }))
+    check(manager.stateOf('pane-c').firstPrompt === undefined, 'a new thread starts without a first prompt')
+    proto2.server(JSON.stringify({ method: 'turn/started', params: { threadId: '019a1b2c-0000-7f80-9a1b-2c3d4e5f6a7c', turn: { id: 'n1' } } }))
+    proto2.server(JSON.stringify({ method: 'item/started', params: { threadId: '019a1b2c-0000-7f80-9a1b-2c3d4e5f6a7c', item: { type: 'userMessage', id: 'u', content: [{ type: 'text', text: 'explicá el repo' }] } } }))
+    check(manager.stateOf('pane-c').firstPrompt === 'explicá el repo', 'the first user message of the thread sets firstPrompt')
+    manager.dispose()
+  }
   const { visiblePaneIds, aggregateStatus } = load('src/shared/status.ts')
   check(visiblePaneIds({ panes: [{ id: 'a' }, { id: 'b' }] }, [], 'a').join() === 'a', 'maximization excludes hidden consoles')
   check(visiblePaneIds({ panes: [{ id: 'a' }, { id: 'b' }] }, ['b']).join() === 'a', 'minimization excludes hidden consoles')
@@ -268,7 +324,7 @@ async function main() {
   await schemaV11Checks()
   ntfyConfigChecks()
   await enrichmentChecks()
-  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, store and enrichment checks`)
+  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, store, enrichment and Codex App Server detail checks`)
 }
 
 // R21-01: schema 11 (defaults only, no migrate() logic), the config upgrade

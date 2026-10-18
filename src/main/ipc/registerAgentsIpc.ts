@@ -15,6 +15,11 @@ export function registerAgentsIpc(store: AgentSessionStore): void {
   ipcMain.handle(CH.AGENTS_CONSUME_STARTUP, (_e, paneId: unknown): boolean =>
     typeof paneId === 'string' && paneId.length <= 128 ? store.consumeStartup(paneId) : false,
   )
+  ipcMain.handle(CH.AGENTS_STARTUP_PENDING, (_e, paneIds: unknown): string[] =>
+    Array.isArray(paneIds) && paneIds.length <= 1000
+      ? store.startupPending(paneIds.filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 128))
+      : [],
+  )
   ipcMain.on(CH.AGENTS_FORGET, (_e, paneId: unknown) => {
     if (typeof paneId === 'string' && paneId && paneId.length <= 128) store.forget(paneId)
   })

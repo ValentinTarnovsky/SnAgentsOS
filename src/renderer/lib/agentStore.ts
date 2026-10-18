@@ -26,6 +26,15 @@ export type ResumeChipState =
   | { kind: 'unavailable'; shownAt: number }
   | { kind: 'failed'; shownAt: number }
 
+/** The open "resume interrupted chats?" dialog (E5-FR-12). */
+export interface ResumeModalState {
+  /** Interrupted panes it lists, in workspace and layout order. */
+  paneIds: string[]
+  trigger: AgentsStartup['trigger']
+  /** Epoch ms the dialog opened (its countdown starts here). */
+  openedAt: number
+}
+
 export interface AgentState {
   /** paneId -> session view from main. */
   sessions: Record<string, AgentSessionView>
@@ -34,8 +43,11 @@ export interface AgentState {
   launchIntent: Record<string, 'resume' | 'fresh'>
   closedStack: ClosedPaneEntry[]
   resumeChip: Record<string, ResumeChipState>
-  /** True while the "resume interrupted chats?" dialog is open (E5-FR-12, later). */
+  /** True while the "resume interrupted chats?" dialog is open (E5-FR-12). */
   modalPending: boolean
+  modal: ResumeModalState | null
+  /** Panes the dialog holds back: they show a placeholder and do not spawn until it is decided. */
+  gated: Record<string, true>
 
   setSessions: (list: AgentSessionView[]) => void
   applyChanged: (evt: AgentsChangedEvt) => void
@@ -47,6 +59,8 @@ export interface AgentState {
   /** Pops the most recent closed console, or undefined. */
   popClosed: () => ClosedPaneEntry | undefined
   setChip: (paneId: string, chip: ResumeChipState | null) => void
+  /** Opens the dialog and gates its panes, or (null) closes it and releases them. */
+  setModal: (modal: ResumeModalState | null) => void
 }
 
 export const useAgentStore = create<AgentState>((set, get) => ({
@@ -56,6 +70,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   closedStack: [],
   resumeChip: {},
   modalPending: false,
+  modal: null,
+  gated: {},
 
   setSessions: (list) => set({ sessions: Object.fromEntries(list.map((v) => [v.paneId, v])) }),
 
@@ -100,4 +116,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       else delete resumeChip[paneId]
       return { resumeChip }
     }),
+
+  setModal: (modal) =>
+    set(
+      modal
+        ? { modal, modalPending: true, gated: Object.fromEntries(modal.paneIds.map((id) => [id, true as const])) }
+        : { modal: null, modalPending: false, gated: {} },
+    ),
 }))

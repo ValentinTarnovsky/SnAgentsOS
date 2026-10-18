@@ -117,9 +117,13 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
 
   // Agents
   e('agents.resume', 'settings.agents.resume', 'settings.agents.resumeHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'session', 'sesion', 'chat', 'restart', 'reinicio'] }),
+  e('agents.resumeTimeout', 'settings.agents.resumeTimeout', 'settings.agents.resumeTimeoutHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'countdown', 'cuenta regresiva', 'timeout', 'dialog', 'aviso', 'modal'] }),
+  e('agents.resumeNudge', 'settings.agents.resumeNudge', 'settings.agents.resumeNudgeHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'nudge', 'continue', 'continuar', 'seguir'] }),
+  e('agents.resumeNudgeText', 'settings.agents.resumeNudgeText', 'settings.agents.resumeNudgeTextHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'nudge', 'message', 'mensaje', 'texto', 'text'] }),
   e('agents.awake', 'settings.agents.awake', 'settings.agents.awakeHint', { groupKey: 'settings.agents.behavior', keywords: ['awake', 'despierta', 'sleep', 'suspender', 'suspension', 'energy', 'energia', 'power'] }),
   e('agents.awakeDisplay', 'settings.agents.awakeDisplay', 'settings.agents.awakeDisplayHint', { groupKey: 'settings.agents.behavior', keywords: ['awake', 'despierta', 'display', 'pantalla', 'sleep', 'screen'] }),
   e('agents.rows', 'settings.agents.rows', 'settings.agents.rowsHint', { groupKey: 'settings.agents.behavior', keywords: ['rows', 'filas', 'sidebar', 'barra lateral'], toggle: { path: 'agents.sidebarAgentRows' } }),
+  e('agents.sort', 'settings.agents.sort', 'settings.agents.sortHint', { groupKey: 'settings.agents.behavior', keywords: ['sort', 'orden', 'smart', 'inteligente', 'sidebar', 'barra lateral', 'workspace'] }),
   e('agents.topicAsTitle', 'settings.agents.topicAsTitle', 'settings.agents.topicAsTitleHint', { groupKey: 'settings.agents.behavior', keywords: ['topic', 'tema', 'title', 'titulo'], toggle: { path: 'agents.topicAsTitle' } }),
   e('agents.ctrlDigit', 'settings.agents.ctrlDigit', 'settings.agents.ctrlDigitHint', { groupKey: 'settings.agents.behavior', keywords: ['ctrl', 'focus', 'foco', 'shortcut', 'atajo'], toggle: { path: 'agents.ctrlDigitFocus' } }),
   e('agents.presets', 'settings.search.agentsPresets', 'settings.search.agentsPresetsHint', { summary: true, keywords: ['preset', 'model', 'modelo', 'agent', 'agente', 'claude', 'codex', 'command', 'comando'] }),

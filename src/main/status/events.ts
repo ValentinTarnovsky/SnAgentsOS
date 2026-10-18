@@ -16,8 +16,10 @@ export interface AgentEvent {
   transcriptPath?: string
   /** UserPromptSubmit text, <= 2000. */
   prompt?: string
-  /** Assistant reply (Stop last_assistant_message), <= 2000. */
+  /** Assistant reply (Stop last_assistant_message, Codex last agentMessage of the turn), <= 2000. */
   reply?: string
+  /** First user message of a resumed thread (Codex `thread.preview`), <= 2000; never a last prompt. */
+  firstPrompt?: string
   /** SessionEnd reason as sent by Claude ('prompt_input_exit', 'other', 'clear', ...). */
   endReason?: string
   /** Replaces the pane detail when set. */
