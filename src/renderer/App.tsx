@@ -6,6 +6,7 @@ import { initUsageEvents, syncUsageConfig } from '@/lib/usageStore'
 import { initRemoteEvents, syncRemoteConfig } from '@/lib/remoteStore'
 import { initRemoteCommands } from '@/lib/remoteCommands'
 import { initLegacyEvents } from '@/lib/legacyStore'
+import { initPowerEvents, syncAgentSettings, syncAwakeMode } from '@/lib/powerStore'
 import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
 import { startPersistence } from '@/lib/persist'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
@@ -36,6 +37,8 @@ export function App() {
   const language = useAppStore((s) => s.settings.language)
   const usage = useAppStore((s) => s.settings.usage)
   const remote = useAppStore((s) => s.settings.remote)
+  const awakeMode = useAppStore((s) => s.settings.awakeMode)
+  const agents = useAppStore((s) => s.settings.agents)
 
   // Load persisted config once, then start the debounced persistence writer.
   useEffect(() => {
@@ -77,6 +80,19 @@ export function App() {
   useEffect(() => {
     if (hydrated) syncRemoteConfig(remote)
   }, [hydrated, remote])
+
+  // "PC awake": wire main's state stream once config is loaded (a tray pick is
+  // persisted from it), then push the mode and the agent settings on change.
+  useEffect(() => {
+    if (!hydrated) return
+    return initPowerEvents()
+  }, [hydrated])
+  useEffect(() => {
+    if (hydrated) syncAwakeMode(awakeMode)
+  }, [hydrated, awakeMode])
+  useEffect(() => {
+    if (hydrated) syncAgentSettings(agents)
+  }, [hydrated, agents])
 
   // Mirror desktop state to phones once config is loaded (debounced snapshots).
   useEffect(() => {
