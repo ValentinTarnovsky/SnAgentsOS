@@ -100,6 +100,9 @@ async function main() {
     check(total === NOTES_BUDGET && heavy.missed[0].notes.length === big.length && heavy.missed[1].notes.length === NOTES_BUDGET - big.length && heavy.missed[2].notes === '', 'notes share one 64 KB budget, newest first, cut where it runs out')
     const emoji = selectReleases([rel('2.1.0', { body: '\u{1F600}'.repeat(20000) })], '2.0.0')
     check(Buffer.byteLength(emoji.missed[0].notes) <= NOTES_BUDGET && !/[\uD800-\uDBFF]$/.test(emoji.missed[0].notes), 'the cut never splits a character')
+    const junk = rel('2.1.0'); junk.assets = [null, 7, { name: 5 }, ...junk.assets]; junk.html_url = 42
+    const messy = selectReleases([junk], '2.0.0')
+    check(messy.match && messy.match.kind === 'win-installer' && messy.missed[0].url === null, 'malformed assets and a non-string url do not sink the list')
     const pick = () => ({ asset: asset('9', 'x.exe'), kind: 'win-portable', sha256Url: 'https://github.com/x.sha256' })
     check(selectReleases([rel('2.1.0')], '2.0.0', pick).match.kind === 'win-portable', 'the install kind comes from the injected picker')
   }
@@ -137,6 +140,9 @@ async function main() {
     const bad = loadUpdater({ env: { SNAOS_UPDATE_REPO: 'evil.com/x/../y?z' }, routes: url => url === listUrl ? { status: 200, body: list } : undefined })
     await bad.mod.checkForUpdate()
     check(bad.log.requests[0] === listUrl, 'a malformed override is ignored')
+    const dots = loadUpdater({ env: { SNAOS_UPDATE_REPO: '../..' }, routes: url => url === listUrl ? { status: 200, body: list } : undefined })
+    await dots.mod.checkForUpdate()
+    check(dots.log.requests[0] === listUrl, 'a dot-only override segment is ignored')
   }
 
   // --- visibility table (E4-FR-13, 16, 18) ----------------------------------
@@ -221,6 +227,24 @@ async function main() {
     const ex = r.notesExcerpt(md)
     check(ex.length === 3 && ex[0] === 'Novedades' && ex[1] === 'Tarjeta de update con notas' && ex[2] === 'chip en el titlebar', `markdown becomes 3 plain lines: ${JSON.stringify(ex)}`)
     check(r.notesExcerpt('').length === 0 && r.notesExcerpt('<b>Hola</b> snake_case_name').join() === 'Hola snake_case_name', 'empty notes, html stripped, snake_case kept')
+  }
+
+  // --- the collapsed card survives a window reload (sessionStorage) ---------
+  {
+    const bag = new Map()
+    const sessionStorage = { getItem: k => bag.has(k) ? bag.get(k) : null, setItem: (k, v) => bag.set(k, String(v)), removeItem: k => bag.delete(k) }
+    const first = loadRenderer(`export * from './updater'`, { sessionStorage, window: { snApi: {} } })
+    check(first.useUpdaterStore.getState().cardCollapsed === false, 'a fresh window starts with the card expanded')
+    first.useUpdaterStore.getState().collapseCard()
+    const reloaded = loadRenderer(`export * from './updater'`, { sessionStorage, window: { snApi: {} } })
+    check(reloaded.useUpdaterStore.getState().cardCollapsed === true, 'reloading after collapsing keeps the chip')
+    reloaded.useUpdaterStore.getState().showCard()
+    const again = loadRenderer(`export * from './updater'`, { sessionStorage, window: { snApi: {} } })
+    check(again.useUpdaterStore.getState().cardCollapsed === false, 'reopening the card clears the flag')
+    const broken = { getItem: () => { throw new Error('denied') }, setItem: () => { throw new Error('denied') }, removeItem: () => { throw new Error('denied') } }
+    const safe = loadRenderer(`export * from './updater'`, { sessionStorage: broken, window: { snApi: {} } })
+    safe.useUpdaterStore.getState().collapseCard()
+    check(safe.useUpdaterStore.getState().cardCollapsed === true, 'a throwing storage never breaks the store')
   }
 
   // --- scheduler with fake timers (E4-FR-12, 14, 18) -------------------------
