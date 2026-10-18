@@ -20,6 +20,14 @@
   --color-accent-purple: #8b5cf6;
   --color-accent-blue: #60a5fa;
 
+  /* Agent state colors (docs/STYLEGUIDE.md section 8): same values on desktop
+     and mobile, only for state, never decoration. Not themeable on purpose. */
+  --color-state-working: #8b5cf6;
+  --color-state-action: #f59e0b;
+  --color-state-done: #22c55e;
+  --color-state-error: #ef4444;
+  --color-state-idle: #6b7280;
+
   --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 
