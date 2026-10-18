@@ -71,6 +71,8 @@ export const CH = {
   UPDATE_CHECK: 'update:check', // invoke -> UpdateInfo
   UPDATE_INSTALL: 'update:install', // invoke -> { relaunching } (downloads + applies)
   UPDATE_PROGRESS: 'update:progress', // main -> renderer ({ percent, transferred, total })
+  UPDATE_GET_STATE: 'update:getState', // invoke -> UpdateState (main owns the phase, E4-FR-37)
+  UPDATE_STATE: 'update:state', // main -> renderer (UpdateState on every phase change)
 
   // Live usage / quota bars (Claude OAuth + Codex rollout + custom models)
   USAGE_GET: 'usage:get', // invoke -> UsageSnapshot (cached, kicks a refresh)

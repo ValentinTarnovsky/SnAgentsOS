@@ -3,7 +3,7 @@ import { Copy, Minus, Square, X } from 'lucide-react'
 import { BRAND } from '@shared/brand'
 import { LogoMark } from '@/components/ui/Logo'
 import { AwakeIndicator } from '@/components/agents/AwakeIndicator'
-import { useUpdaterStore } from '@/lib/updater'
+import { isInstallPhase, useUpdaterStore } from '@/lib/updater'
 import { useT } from '@/i18n'
 
 /**
@@ -13,8 +13,10 @@ import { useT } from '@/i18n'
 export function TitleBar() {
   const t = useT()
   const [maxed, setMaxed] = useState(false)
-  // Block closing the window while an update is downloading/installing.
-  const installing = useUpdaterStore((s) => s.installing)
+  // Block closing the window while an update is downloading/installing. The
+  // phase is main's (E4-FR-37), so this matches main's close guard, also
+  // after a reload mid-download.
+  const installing = useUpdaterStore((s) => isInstallPhase(s.phase))
 
   useEffect(() => {
     window.snApi.window

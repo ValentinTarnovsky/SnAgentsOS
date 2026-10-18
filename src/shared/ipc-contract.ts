@@ -125,6 +125,21 @@ export interface UpdateProgress {
   total: number
 }
 
+/**
+ * Where the self-update stands, owned by main (E4-FR-37). 'installing' means
+ * the download reached 100% and the apply step has not resolved yet; 'opened'
+ * means an installer/file was opened and the app keeps running.
+ */
+export type UpdatePhase = 'idle' | 'available' | 'downloading' | 'installing' | 'opened' | 'failed'
+
+/** main's update state, rehydrated by the renderer after a reload (E4-FR-37). */
+export interface UpdateState {
+  phase: UpdatePhase
+  progress: UpdateProgress | null
+  installError: string | null
+  info: UpdateInfo | null
+}
+
 /** Live resource usage of the app (its own Electron processes). */
 export interface AppMetrics {
   /** Total working-set memory across all app processes, in MB. */
@@ -429,6 +444,10 @@ export interface SnApi {
     downloadAndInstall(): Promise<{ relaunching: boolean }>
     /** Subscribe to download progress; returns an unsubscribe function. */
     onProgress(cb: (p: UpdateProgress) => void): () => void
+    /** main's update state (phase, progress, error, info), for a reload mid-download (E4-FR-37). */
+    getState(): Promise<UpdateState>
+    /** Subscribe to main's update state on every phase change; returns an unsubscribe function. */
+    onState(cb: (s: UpdateState) => void): () => void
   }
   /** Live usage / quota bars (Claude OAuth + Codex rollout + custom models). */
   usage: {
