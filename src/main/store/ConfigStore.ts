@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'fs'
 import { dirname, join } from 'path'
-import type { ConfigFile } from '@shared/types'
+import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
 import { getConfigPath } from '../paths'
 import { parseConfig } from './schema'
 
@@ -91,10 +91,20 @@ export class ConfigStore {
     return this.path
   }
 
-  load(): ConfigFile | null {
+  /**
+   * `upgrade` (only the renderer's CONFIG_LOAD passes it): stamp an older
+   * primary file once with the migrated blob. The renderer writes only on
+   * relevant changes, so without this a config that is merely opened would
+   * stay on the old schema version. save() keeps the pre-upgrade file as .bak
+   * and in backups/. A newer file (downgrade) and a recovered rung are never
+   * rewritten. Every other caller (the legacy migration's verification among
+   * them) stays read-only.
+   */
+  load(opts?: { upgrade?: boolean }): ConfigFile | null {
     // Primary missing or corrupt: the ladder recovers from the last-good snapshot or history.
     const hit = loadLadder(dirname(this.path))
     if (hit && hit.source !== 'config.json') console.warn('[ConfigStore] primary config unreadable, recovered from backup.')
+    if (opts?.upgrade && hit && hit.source === 'config.json' && hit.rawVersion < CONFIG_VERSION) this.save(hit.config)
     return hit?.config ?? null
   }
 

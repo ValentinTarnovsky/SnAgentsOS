@@ -170,6 +170,8 @@ export const es: Record<keyof typeof en, string> = {
   'pane.close': 'Cerrar',
   'pane.restart': 'Reiniciar consola',
   'pane.redraw': 'Redibujar',
+  'pane.notStarted': 'Consola sin iniciar',
+  'pane.start': 'Iniciar',
   'pane.schedule': 'Programar prompt',
 
   // Prompt programado (por consola)

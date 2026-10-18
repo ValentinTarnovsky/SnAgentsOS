@@ -13,6 +13,16 @@ export const notificationSettingsSchema = z.object({
   flashTaskbar: z.boolean().default(true), hooksEnabled: z.boolean().default(false),
   hookPort: z.number().int().min(1024).max(65535).default(43917), hookToken: z.string().regex(/^(?:[a-f0-9]{32,64})?$/).default(''),
   codexEnabled: z.boolean().default(false), discord: discordSettingsSchema.default({}),
+  inAppWhenFocused: z.boolean().default(true), // schema 11
+})
+
+// Schema 11. Field-level defaults are the whole migration (migrate() only re-stamps).
+export const agentSettingsSchema = z.object({
+  resumeOnStartup: z.enum(['ask', 'auto', 'off']).catch('ask').default('ask'),
+  awakeDisplay: z.boolean().default(false),
+  sidebarAgentRows: z.boolean().default(true),
+  topicAsTitle: z.boolean().default(true),
+  ctrlDigitFocus: z.boolean().default(true),
 })
 
 const paneType = z.enum(['shell', 'claude', 'codex', 'custom'])
@@ -35,6 +45,19 @@ const paneSchema = z.object({
   icon: z.string(),
   fontSize: z.number().optional(),
   schedule: paneScheduleSchema.optional(),
+  // Schema 11: a mirror of main's agent-sessions.json. A malformed value is
+  // dropped instead of failing the whole config (which would fall back to .bak).
+  lastSession: z
+    .object({
+      provider: z.enum(['claude', 'codex']),
+      // Same charset as E5's SESSION_ID_RE, so an imported config can never
+      // smuggle shell syntax into a resume command typed later.
+      sessionId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/),
+      cwd: z.string().max(4096),
+      at: z.number(),
+    })
+    .optional()
+    .catch(undefined),
 })
 
 const setupStepSchema = z.object({
@@ -69,6 +92,7 @@ const workspaceSchema = z.object({
   favorite: z.boolean().optional(),
   layout: layoutSchema,
   setupId: z.string().optional(),
+  agentsCollapsed: z.boolean().optional().catch(undefined), // schema 11
 })
 
 const presetSchema = z.object({
@@ -133,9 +157,15 @@ const settingsSchema = z.object({
   // Field-level default is the load-bearing migration: parseConfig runs this
   // schema over every existing config, so configs that predate the key silently
   // gain 'canvas' WITHOUT any migrate() logic (migrate only re-stamps version).
-  terminalRenderer: z.enum(['canvas', 'webgl']).default('canvas'),
+  // .catch(): an unknown renderer value falls back to the safe engine instead
+  // of invalidating the whole config.
+  terminalRenderer: z.enum(['canvas', 'webgl']).catch('canvas').default('canvas'),
   // Same load-bearing-default pattern: pre-v9 configs silently gain `true`.
   terminalSelectionOverride: z.boolean().default(true),
+  // Schema 11 (same load-bearing-default pattern, tolerant of junk values).
+  terminalUnicode11: z.boolean().catch(true).default(true),
+  terminalAgentEndChip: z.boolean().catch(true).default(true),
+  awakeMode: z.enum(['auto', 'always', 'never']).catch('auto').default('auto'),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
   autoCheckUpdates: z.boolean().default(true),
@@ -155,6 +185,8 @@ const settingsSchema = z.object({
     .default({}),
   // Field-level defaults migrate configs that predate the notifications feature.
   notifications: notificationSettingsSchema.default({}),
+  // Schema 11: agent behavior settings, defaulted field by field.
+  agents: agentSettingsSchema.default({}),
 })
 
 const snippetSchema = z.object({
@@ -191,6 +223,7 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * Forward migrations. The zod schema applies field-level defaults (theme,
  * language, closeToTray, …) and drops the legacy dockview `layout` blob, so
  * v1 configs load without data loss. Here we just stamp the current version.
+ * v10 -> v11 adds only defaulted keys, so it needs no logic here either.
  */
 function migrate(config: ConfigFile): ConfigFile {
   return { ...config, version: CONFIG_VERSION }

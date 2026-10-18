@@ -7,12 +7,14 @@ import {
   Minus,
   Paintbrush,
   Pencil,
+  Play,
   RotateCw,
   X,
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import type { AgentPreset, Pane, Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
+import { isPaneMounted } from '@/lib/mounting'
 import { resolveLaunch } from '@/lib/launch'
 import { getPtyId } from '@/lib/ptyRegistry'
 import { redrawPane } from '@/lib/redrawRegistry'
@@ -75,6 +77,12 @@ export function PaneCell({
   const renamePane = useAppStore((s) => s.renamePane)
   const restartPane = useAppStore((s) => s.restartPane)
   const epoch = useAppStore((s) => s.paneEpoch[pane.id] ?? 0)
+  // Partial mount (D4): a console outside the mounted list shows a placeholder
+  // instead of spawning. The visible workspace always counts as mounted.
+  const mounted = useAppStore(
+    (s) => workspaceActive || isPaneMounted(s.mountedWorkspaces, workspace.id, pane.id),
+  )
+  const ensureMounted = useAppStore((s) => s.ensureMounted)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const [renaming, setRenaming] = useState(false)
   const [nameVal, setNameVal] = useState(pane.title)
@@ -238,16 +246,32 @@ export function PaneCell({
         </Tooltip>
       </header>
       <div className="min-h-0 flex-1">
-        <TerminalPane
-          key={epoch}
-          paneId={pane.id}
-          workspaceId={workspace.id}
-          cwd={cwd}
-          initialCommand={initialCommand}
-          setup={setup}
-          fontSize={pane.fontSize}
-          isActive={cellVisible}
-        />
+        {mounted ? (
+          <TerminalPane
+            key={epoch}
+            paneId={pane.id}
+            workspaceId={workspace.id}
+            cwd={cwd}
+            initialCommand={initialCommand}
+            setup={setup}
+            fontSize={pane.fontSize}
+            isActive={cellVisible}
+          />
+        ) : (
+          <div
+            data-pane-placeholder={pane.id}
+            className="flex h-full flex-col items-center justify-center gap-2 text-xs text-text-secondary"
+          >
+            <span>{t('pane.notStarted')}</span>
+            <button
+              onClick={() => ensureMounted(workspace.id, { only: [pane.id] })}
+              className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-text-primary transition-colors hover:bg-bg-secondary"
+            >
+              <Play size={12} />
+              {t('pane.start')}
+            </button>
+          </div>
+        )}
       </div>
 
       {menu && (

@@ -1,27 +1,29 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useAppStore } from '@/lib/store'
 import { WorkspaceView } from '@/components/workspace/WorkspaceView'
 import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
+import { isWorkspaceMounted } from '@/lib/mounting'
 
 /**
  * Keeps every visited workspace MOUNTED so its terminals (and ptys) survive
  * workspace switches, the inactive ones are just hidden with `display:none`.
  * A workspace mounts the first time it becomes active and is never unmounted
  * afterwards (until it's deleted), so we don't spawn every workspace's shells
- * at startup.
+ * at startup. The mounted set lives in the store (`mountedWorkspaces`, D4) so
+ * other features can mount a workspace, or just some of its consoles, without
+ * activating it (`ensureMounted`).
  */
 export function WorkspaceHost() {
   const workspaces = useAppStore((s) => s.workspaces)
   const activeId = useAppStore((s) => s.activeWorkspaceId)
-  const [mounted, setMounted] = useState<Set<string>>(() =>
-    new Set(activeId ? [activeId] : []),
-  )
+  const mounted = useAppStore((s) => s.mountedWorkspaces)
+  const ensureMounted = useAppStore((s) => s.ensureMounted)
 
+  // The store already mounts on activation; this keeps any other path that
+  // sets the active id honest (no-op when it is already 'full').
   useEffect(() => {
-    if (activeId && !mounted.has(activeId)) {
-      setMounted((prev) => new Set(prev).add(activeId))
-    }
-  }, [activeId, mounted])
+    if (activeId) ensureMounted(activeId)
+  }, [activeId, ensureMounted])
 
   // Tell main which panes are visible so hidden workspaces throttle output (S4).
   const activeWs = workspaces.find((w) => w.id === activeId)
@@ -45,7 +47,7 @@ export function WorkspaceHost() {
   return (
     <div className="relative h-full w-full">
       {workspaces
-        .filter((w) => mounted.has(w.id))
+        .filter((w) => w.id === activeId || isWorkspaceMounted(mounted, w.id))
         .map((w) => (
           <div
             key={w.id}
