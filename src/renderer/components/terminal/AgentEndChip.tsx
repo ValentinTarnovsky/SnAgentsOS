@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { History, Plus, X } from 'lucide-react'
 import type { ShellKind } from '@shared/ipc-contract'
 import { useAppStore } from '@/lib/store'
-import { getPtyId } from '@/lib/ptyRegistry'
 import { AGENT_END_READY_MS, agentEndCommands } from '@/lib/agentEnd'
+import { type AgentEndMode, registerAgentEndShell, runAgentEnd } from '@/lib/agentEndRun'
 import { useT } from '@/i18n'
 
 export interface AgentEndChipProps {
@@ -39,6 +39,11 @@ export function AgentEndChip({ paneId, initialCommand, shellKind, onDone }: Agen
   const clear = useAppStore((s) => s.clearAgentEnded)
   const [readyAt, setReadyAt] = useState<number | null>(null)
 
+  // The phone's agentResume (E6-FR-24) builds its cd prefix from this shell too.
+  const shellKindRef = useRef(shellKind)
+  shellKindRef.current = shellKind
+  useEffect(() => registerAgentEndShell(paneId, () => shellKindRef.current()), [paneId])
+
   useEffect(() => {
     if (!evt) return
     const timer = setTimeout(() => setReadyAt(evt.at), Math.max(0, AGENT_END_READY_MS - (Date.now() - evt.at)))
@@ -49,11 +54,10 @@ export function AgentEndChip({ paneId, initialCommand, shellKind, onDone }: Agen
   const ready = readyAt === evt.at
   const cmds = agentEndCommands({ evt, shellKind: shellKind(), preset, paneCommand: pane?.command, initialCommand })
 
-  const type = (text: string): void => {
-    clear(paneId)
-    const ptyId = getPtyId(paneId)
-    // A bare CR is exactly what Enter sends (CRLF makes PowerShell print ">>").
-    if (ptyId) window.snApi.pty.write({ ptyId, data: text + '\r' })
+  // Same path as the phone's agentResume, so both type the same text. A
+  // refusal (no live pty) still hides the chip, as before.
+  const take = (mode: AgentEndMode): void => {
+    if (!runAgentEnd(paneId, mode).ok) clear(paneId)
     onDone()
   }
 
@@ -70,12 +74,12 @@ export function AgentEndChip({ paneId, initialCommand, shellKind, onDone }: Agen
         <History size={13} className="shrink-0 text-accent-violet" />
         <span className="min-w-0 break-words">{t('agentEnd.title')}</span>
         {cmds.resume && (
-          <button type="button" data-agent-end="resume" disabled={!ready} onClick={() => type(cmds.resume!)} className={btn}>
+          <button type="button" data-agent-end="resume" disabled={!ready} onClick={() => take('resume')} className={btn}>
             <History size={11} />
             {t('agentEnd.resume')}
           </button>
         )}
-        <button type="button" data-agent-end="new" disabled={!ready} onClick={() => type(cmds.fresh)} className={btn}>
+        <button type="button" data-agent-end="new" disabled={!ready} onClick={() => take('new')} className={btn}>
           <Plus size={11} />
           {t('agentEnd.new')}
         </button>
