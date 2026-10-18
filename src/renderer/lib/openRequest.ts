@@ -92,6 +92,8 @@ export function dispatchOpenRequest(req: unknown): OpenOutcome {
     // Overlays would hide the workspace that just came forward.
     if (s.paletteOpen) s.setPaletteOpen(false)
     if (s.settingsOpen) s.setSettingsOpen(false)
+    // An empty wizard would hide it too; one with a folder typed is left alone.
+    if (s.wizardOpen && !wizardDraftCwd.trim()) s.setWizardOpen(false)
     s.ensureMounted(ws.id)
     if (s.activeWorkspaceId !== ws.id) s.setActive(ws.id)
     focusWorkspaceConsole(ws.id)
