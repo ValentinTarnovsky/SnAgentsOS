@@ -180,7 +180,7 @@ El CLI `snaos` ejecuta open/spawn/send reutilizando `remote:controlCmd` / `remot
 | v2.0 (10) | ninguna | - | - | E0 |
 | v2.1 (11) | `settings.awakeMode` | `'auto'\|'always'\|'never'` | `'auto'` | E4 |
 | v2.1 (11) | `settings.terminalUnicode11` | boolean | `true` | E4 |
-| v2.1 (11) | `workspaces[].panes[].lastSession` | `{ provider, sessionId, cwd, at }` opcional | ausente | E4 |
+| v2.1 (11) | `workspaces[].panes[].lastSession` | `{ provider, sessionId, cwd, at }` opcional (`sessionId` cumple `SESSION_ID_RE`; un valor invalido se descarta) | ausente | E4 |
 | v2.1 (11) | `settings.notifications.inAppWhenFocused` | boolean | `true` | E4 |
 | v2.1 (11) | `settings.agents.resumeOnStartup` | `'ask'\|'auto'\|'off'` | `'ask'` | E5 |
 | v2.1 (11) | `settings.agents.awakeDisplay` | boolean | `false` | E5 |

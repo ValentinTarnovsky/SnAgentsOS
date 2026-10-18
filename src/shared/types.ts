@@ -7,7 +7,7 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 10
+export const CONFIG_VERSION = 11
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -78,6 +78,22 @@ export interface Pane {
   fontSize?: number
   /** One-shot prompt scheduled to run in this console at a set time. */
   schedule?: PaneSchedule
+  /**
+   * Last agent session seen in this console (schema 11). A mirror written by
+   * the renderer; main's agent-sessions.json is the source of truth and only
+   * seeds from this when that file is missing or corrupt.
+   */
+  lastSession?: PaneLastSession
+}
+
+/** Agent session mirrored onto a pane so it can be resumed later (schema 11). */
+export interface PaneLastSession {
+  provider: AgentProvider
+  sessionId: string
+  /** Directory the agent was spawned in. */
+  cwd: string
+  /** Epoch ms of the status update that carried the session id. */
+  at: number
 }
 
 /** Number of terminals in a workspace grid; maps to a fixed CSS grid template. */
@@ -101,6 +117,8 @@ export interface Workspace {
   layout?: WorkspaceLayout
   /** Connection profile run in every console before its model command. */
   setupId?: string
+  /** Sidebar agent rows folded under this workspace (schema 11). */
+  agentsCollapsed?: boolean
 }
 
 /** A saved, reusable prompt/text snippet inserted into a console (U10). */
@@ -334,6 +352,31 @@ export interface NotificationSettings {
   /** Private per-console Codex transport for new local terminals. */
   codexEnabled: boolean
   discord: DiscordSettings
+  /**
+   * With the window focused but the console out of view, show an in-app card
+   * instead of the OS notification and taskbar flash (schema 11).
+   */
+  inAppWhenFocused: boolean
+}
+
+/** Keep the PC awake while agents work (schema 11). */
+export type AwakeMode = 'auto' | 'always' | 'never'
+
+/** What to do with interrupted agent sessions on startup (schema 11). */
+export type ResumeOnStartup = 'ask' | 'auto' | 'off'
+
+/** Agent behavior settings (schema 11). */
+export interface AgentSettings {
+  /** Startup decision for consoles whose agent session was interrupted. */
+  resumeOnStartup: ResumeOnStartup
+  /** Awake mode also keeps the display on (prevent-display-sleep). */
+  awakeDisplay: boolean
+  /** One row per agent console under each workspace in the expanded sidebar. */
+  sidebarAgentRows: boolean
+  /** Show the agent's topic as the console title. */
+  topicAsTitle: boolean
+  /** Ctrl+1..9 focuses the Nth visible console instead of reaching the terminal. */
+  ctrlDigitFocus: boolean
 }
 
 export interface Settings {
@@ -367,6 +410,12 @@ export interface Settings {
    * clicks reach the TUI (previous behavior).
    */
   terminalSelectionOverride: boolean
+  /** Unicode 11 character widths in the terminal (emoji and symbols). Schema 11. */
+  terminalUnicode11: boolean
+  /** Offer Resume / New under a console when Claude exits. Schema 11. */
+  terminalAgentEndChip: boolean
+  /** Keep the PC awake while agents work. Schema 11. */
+  awakeMode: AwakeMode
   restoreLastWorkspace: boolean
   confirmCloseRunning: boolean
   /** Installed build only: hide to tray on window close instead of quitting. */
@@ -388,6 +437,8 @@ export interface Settings {
   remote: RemoteSettings
   /** Desktop notifications, sounds and Claude status integration. */
   notifications: NotificationSettings
+  /** Agent behavior (resume, awake display, sidebar rows, shortcuts). Schema 11. */
+  agents: AgentSettings
 }
 
 export interface ConfigFile {
