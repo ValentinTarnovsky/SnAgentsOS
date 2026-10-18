@@ -1,6 +1,6 @@
 import * as nodeFs from 'fs'
 import { createHash } from 'crypto'
-import { dirname, join } from 'path'
+import { basename, dirname, join, resolve } from 'path'
 import { CONFIG_VERSION } from '@shared/types'
 import { loadLadder, type LadderResult } from '../store/ConfigStore'
 import { fileSchema as devicesFileSchema } from '../remote/DeviceRegistry'
@@ -21,7 +21,7 @@ import {
   type LegacySource,
 } from './legacyMarker'
 import { overlaps } from './pathUtil'
-import { buildManifest, readBackupZip, verifyBackupZip, writeBackupZip, type BackupEntry } from './backupZip'
+import { buildManifest, decodeZip, readBackupZip, verifyBackupZip, writeBackupZip, type BackupEntry } from './backupZip'
 
 /**
  * Detect -> migrate -> verify -> backup -> mark (E0-FR-07, 08, 27, 28, 29). The
@@ -260,9 +260,11 @@ class UndoJournal {
     this.file = join(this.dir, 'journal.json')
   }
 
+  /** tmp + rename: a torn journal would hide what was moved aside. */
   private save(): void {
     this.fsx.mkdirSync(this.dir, { recursive: true })
-    this.fsx.writeFileSync(this.file, JSON.stringify({ entries: this.entries }), 'utf8')
+    this.fsx.writeFileSync(`${this.file}.tmp`, JSON.stringify({ entries: this.entries }), 'utf8')
+    this.fsx.renameSync(`${this.file}.tmp`, this.file)
   }
 
   /** Moves the destination file aside the first time this run touches rel. */
@@ -279,16 +281,37 @@ class UndoJournal {
     }
   }
 
-  /** Loads the journal a crashed run left behind, if any. */
+  /**
+   * Loads the journal a crashed run left behind, if any. An unreadable one
+   * still has its originals in undo/files: they are all put back (an original
+   * of the destination always wins over a staged legacy copy, which the next
+   * run copies again), so nothing moved aside is lost with the staging folder.
+   */
   load(): boolean {
+    if (!this.fsx.existsSync(this.file) && !this.fsx.existsSync(join(this.dir, 'files'))) return false
     try {
-      if (!this.fsx.existsSync(this.file)) return false
       const parsed = JSON.parse(String(this.fsx.readFileSync(this.file, 'utf8'))) as { entries?: Array<{ rel: string; existed: boolean }> }
-      this.entries = Array.isArray(parsed.entries) ? parsed.entries : []
-      return true
+      this.entries = Array.isArray(parsed.entries) ? parsed.entries.filter((e) => typeof e?.rel === 'string') : []
     } catch {
-      return false
+      this.entries = this.scanAside('').map((rel) => ({ rel, existed: true }))
     }
+    return true
+  }
+
+  /** Relative paths of every file under undo/files. */
+  private scanAside(rel: string): string[] {
+    const abs = join(this.dir, 'files', rel)
+    try {
+      const st = this.fsx.lstatSync(abs)
+      if (st.isSymbolicLink()) return []
+      if (!st.isDirectory()) return rel ? [rel] : []
+    } catch {
+      return []
+    }
+    return this.fsx
+      .readdirSync(abs)
+      .map(String)
+      .flatMap((n) => this.scanAside(rel ? `${rel}/${n}` : n))
   }
 
   rollback(): void {
@@ -400,6 +423,39 @@ function readIfFile(ctx: Ctx, p: string): Buffer | null {
   }
 }
 
+/**
+ * The legacy config wins (FR-07) even when it loads from a lower rung than
+ * config.json: a destination config.json (or .bak) above that rung would
+ * shadow it, so it is moved aside through the journal (rolled back on a
+ * failure). config.json is already in pre-import/; a .bak without a
+ * config.json next to it is copied there first.
+ */
+function displaceShadowingConfigs(ctx: Ctx, verdict: StagingVerdict, moving: Copied[], journal: UndoJournal, seenHashes: string[]): void {
+  const source = verdict.legacyEff?.source
+  if (!source || source === 'config.json') return
+  const shadowing = source === 'config.json.bak' ? ['config.json'] : ['config.json', 'config.json.bak']
+  for (const rel of shadowing) {
+    if (moving.some((c) => c.rel === rel)) continue
+    const live = join(ctx.o.targetDir, rel)
+    if (!isRegularFile(ctx.fsx, live)) continue
+    if (rel === 'config.json.bak' && !isRegularFile(ctx.fsx, join(ctx.o.targetDir, 'config.json'))) keepLoneBak(ctx, live, seenHashes)
+    journal.record(rel)
+    ctx.log(`phase=migrating result=displaced path=${rel}`)
+  }
+}
+
+function keepLoneBak(ctx: Ctx, live: string, seenHashes: string[]): void {
+  const data = ctx.fsx.readFileSync(live) as Buffer
+  const hash = sha256(data)
+  if (seenHashes.includes(hash)) return
+  const dir = join(ctx.o.targetDir, PRE_IMPORT_DIR)
+  if (ctx.fsx.existsSync(dir) && ctx.fsx.readdirSync(dir).map(String).some((n) => sha256(ctx.fsx.readFileSync(join(dir, n)) as Buffer) === hash)) return
+  ctx.fsx.mkdirSync(dir, { recursive: true })
+  let stampMs = ctx.now()
+  while (ctx.fsx.existsSync(join(dir, `config-${isoStamp(stampMs)}.json.bak`))) stampMs++
+  ctx.fsx.writeFileSync(join(dir, `config-${isoStamp(stampMs)}.json.bak`), data)
+}
+
 function moveIntoPlace(ctx: Ctx, moving: Copied[], journal: UndoJournal): void {
   const staging = stagingFiles(ctx.o.targetDir)
   for (const c of moving) {
@@ -494,10 +550,27 @@ export function snapshotCurrentConfig(targetDir: string, sourceHashes: string[],
   return `${PRE_IMPORT_DIR}/${name}`
 }
 
+/** realpath of p, or of its nearest existing ancestor with the rest appended (dataDir() may not exist yet). */
+export function realPathDeep(p: string): string {
+  const rest: string[] = []
+  let cur = resolve(p)
+  for (;;) {
+    try {
+      return join(nodeFs.realpathSync.native(cur), ...rest.reverse())
+    } catch {
+      const parent = dirname(cur)
+      if (parent === cur) return resolve(p)
+      rest.push(basename(cur))
+      cur = parent
+    }
+  }
+}
+
 function usableLegacyDir(ctx: Ctx): string | null {
   const dir = ctx.o.legacyDir
   if (!dir || !isRealDir(ctx.fsx, dir)) return null
-  if (overlaps(dir, ctx.o.targetDir)) {
+  // Also through a junction, a symlink, a subst drive or an 8.3 name of either.
+  if (overlaps(dir, ctx.o.targetDir) || overlaps(realPathDeep(dir), realPathDeep(ctx.o.targetDir))) {
     // --user-data-dir on the 1.x folder (or nested in it): nothing to copy, the
     // cleanup guard keeps the folder too.
     ctx.log(`detect skip=overlap path=${dir}`)
@@ -568,6 +641,36 @@ function writePipelineBackup(ctx: Ctx, entries: BackupEntry[], createdAt: number
   }
   if (!verifyBackupZip(dest, manifest, ctx.fsx)) throw new MigrationError('backupVerify')
   return { file: BACKUP_FILE, bytes: written.bytes, sha256: written.sha256, entries: entries.length, createdAt, expiresAt }
+}
+
+/**
+ * What a new pipeline zip must carry from the zip already in dataDir(): all
+ * of it (raw, readable or not) when the marker does not account for it, or
+ * the previous/ entry an interrupted earlier run had carried. raw is the file
+ * as it is now, put back if this run fails.
+ */
+function readInheritedZip(ctx: Ctx, prior: LegacyMigrationMarker | null): { raw: Buffer; entry: Buffer } | null {
+  const dest = backupPath(ctx.o.targetDir)
+  if (!isRegularFile(ctx.fsx, dest)) return null
+  const raw = ctx.fsx.readFileSync(dest) as Buffer
+  if (!prior?.backup) return { raw, entry: raw }
+  try {
+    const carried = decodeZip(raw).entries.find((e) => e.name === `previous/${BACKUP_FILE}`)
+    return carried ? { raw, entry: carried.data } : null
+  } catch {
+    return null
+  }
+}
+
+/** Puts an inherited zip back after a failed run (tmp + rename). */
+function restoreInheritedZip(ctx: Ctx, raw: Buffer): void {
+  const dest = backupPath(ctx.o.targetDir)
+  try {
+    ctx.fsx.writeFileSync(`${dest}.tmp`, raw)
+    ctx.fsx.renameSync(`${dest}.tmp`, dest)
+  } catch (err) {
+    ctx.log(`phase=failed result=inheritedBackupRestoreError code=${errCode(err)}`)
+  }
 }
 
 /** A readable zip already in dataDir() (marker lost or rebuilt): adopted with its original dates. */
@@ -719,6 +822,14 @@ export function runPipeline(o: MigrateOptions): PipelineResult {
   let createdAt: number | undefined
   let wroteBackup = false
   const extras = collectExtras(ctx)
+  // A zip this marker does not account for (the marker was lost after an
+  // earlier commit) may hold the only copy of items already cleaned: it rides
+  // inside the new zip, and a failed run puts it back as it was.
+  const inherited = readInheritedZip(ctx, prior)
+  if (inherited) {
+    extras.push({ name: `previous/${BACKUP_FILE}`, data: inherited.entry, source: backupPath(target) })
+    ctx.log(`phase=migrating result=inheritedBackup bytes=${inherited.entry.length}`)
+  }
   try {
     for (let round = 1; ; round++) {
       phase = 'migrating'
@@ -734,12 +845,13 @@ export function runPipeline(o: MigrateOptions): PipelineResult {
 
       const verdict = verifyStaging(ctx, legacyDir, copied)
       const moving = filesToMove(ctx, copied, verdict)
-      if (moving.some((c) => c.rel === 'config.json')) {
+      if (verdict.legacyEff) {
         const snap = snapshotCurrentConfig(target, seenHashes, ctx.now(), fsx)
         if (snap) {
           m.preImportSnapshot = snap
           ctx.log(`phase=migrating result=preImportSnapshot path=${snap}`)
         }
+        displaceShadowingConfigs(ctx, verdict, moving, journal, seenHashes)
       }
       moveIntoPlace(ctx, moving, journal)
       const verified = verifyTarget(ctx, verdict, moving)
@@ -787,16 +899,22 @@ export function runPipeline(o: MigrateOptions): PipelineResult {
   } catch (err) {
     if (err instanceof CrashFault) throw err
     const code = errCode(err)
+    let rolledBack = true
     try {
       journal.rollback()
     } catch (rollbackErr) {
+      rolledBack = false
       ctx.log(`phase=failed result=rollbackError code=${errCode(rollbackErr)}`)
     }
-    clearStaging(ctx, true)
-    // Not committed, so the zip this run wrote protects nothing yet: drop it with the rest.
+    // A rollback that did not finish keeps undo/ (the destination's originals)
+    // for the next start, which rolls back again before anything else.
+    clearStaging(ctx, rolledBack)
+    // Not committed, so the zip this run wrote protects nothing yet: drop it
+    // with the rest, or put back the one that was there before the run.
     if (wroteBackup) {
-      fsx.rmSync(backupPath(target), { force: true })
       fsx.rmSync(`${backupPath(target)}.tmp`, { force: true })
+      if (inherited) restoreInheritedZip(ctx, inherited.raw)
+      else fsx.rmSync(backupPath(target), { force: true })
     }
     const at = ctx.now()
     const failed: LegacyMigrationMarker = { ...m, phase: 'failed', lastError: { phase, code, at }, at }
