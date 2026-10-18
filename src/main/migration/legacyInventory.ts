@@ -1,4 +1,4 @@
-import { existsSync, promises as nodeFsp, type Stats } from 'fs'
+import { existsSync, promises as nodeFsp, realpathSync, type Stats } from 'fs'
 import { basename, dirname, join } from 'path'
 import { BRAND, INSTALLER_REG, LEGACY_BRAND } from '@shared/brand'
 import {
@@ -973,8 +973,17 @@ export function devCleanupSandbox(input: {
   env: Record<string, string | undefined>
   platform: NodeJS.Platform
   realHome: string
+  /** Long-name, link-free form (8.3 names on Windows CI, /var -> /private/var on macOS). */
+  realpath?: (p: string) => string
 }): { ok: true; roots: string[] } | { ok: false; reason: string } {
   const { env, platform } = input
+  const real = (p: string): string => {
+    try {
+      return (input.realpath ?? realpathSync.native)(p)
+    } catch {
+      return p
+    }
+  }
   if (env.SNAOS_FORCE_LEGACY_CLEANUP !== '1') return { ok: false, reason: 'notForced' }
   const required = platform === 'win32' ? ['APPDATA', 'LOCALAPPDATA', 'TEMP', 'USERPROFILE', 'CLAUDE_CONFIG_DIR'] : ['HOME', 'CLAUDE_CONFIG_DIR']
   const optional = platform === 'win32' ? ['TMP'] : ['TMPDIR', 'XDG_CONFIG_HOME']
@@ -989,7 +998,7 @@ export function devCleanupSandbox(input: {
       if (required.includes(name)) return { ok: false, reason: `missing:${name}` }
       continue
     }
-    if (!bases.some((b) => isInside(value, b))) return { ok: false, reason: `outsideTemp:${name}` }
+    if (!bases.some((b) => isInside(real(value), real(b)))) return { ok: false, reason: `outsideTemp:${name}` }
     roots.push(value)
   }
   return { ok: true, roots }
