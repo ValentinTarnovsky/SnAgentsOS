@@ -244,7 +244,7 @@ export interface AppState {
    * scrollback kept, E6-FR-18), else by remount.
    */
   restartPane: (paneId: string) => void
-  /** "Restart clean": remount the console (empty screen, fresh pty). */
+  /** "Restart clean": kill the pty, then remount the console (empty screen, fresh pty). */
   restartPaneClean: (paneId: string) => void
   /** Record (code) or clear (null) a console's natural shell exit. */
   setPaneExit: (paneId: string, code: number | null) => void
@@ -495,7 +495,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   deleteWorkspace: (id) => {
-    // Force-kill the workspace's consoles so nothing lingers in the background.
+    // Force-kill the workspace's consoles so nothing lingers in the background
+    // (ptyLifecycle would too; both are idempotent, E4-FR-36).
     const ws = get().workspaces.find((w) => w.id === id)
     if (ws) killPanePtys(ws.panes.map((p) => p.id))
     set((s) => {
@@ -685,8 +686,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().restartPaneClean(paneId)
   },
 
-  restartPaneClean: (paneId) =>
-    set((s) => ({ paneEpoch: { ...s.paneEpoch, [paneId]: (s.paneEpoch[paneId] ?? 0) + 1 } })),
+  restartPaneClean: (paneId) => {
+    // Unmounting never kills (E4-FR-36), so kill first, by paneId in main: IPC
+    // from one renderer is handled in order and the kill is synchronous, so the
+    // new mount's reattach finds nothing and spawns a fresh shell.
+    killPanePtys([paneId])
+    set((s) => ({ paneEpoch: { ...s.paneEpoch, [paneId]: (s.paneEpoch[paneId] ?? 0) + 1 } }))
+    // A console outside the mounted set (a workspace not revisited since a
+    // reload, a phone restart) mounts now, so the kill is followed by a fresh
+    // shell instead of leaving the pane without one.
+    const ws = get().workspaces.find((w) => w.panes.some((p) => p.id === paneId))
+    if (ws) get().ensureMounted(ws.id, { only: [paneId] })
+  },
 
   setPaneExit: (paneId, code) => {
     // Hot path on every spawn: no set() when nothing changes.

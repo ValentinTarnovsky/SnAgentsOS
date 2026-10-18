@@ -8,6 +8,7 @@ import { app, net, shell, type ClientRequest } from 'electron'
 import { MISSING_CHECKSUM, type InstallKind, type UpdateInfo, type UpdateProgress } from '@shared/ipc-contract'
 import { BRAND } from '@shared/brand'
 import { isPortable, portableExeFile } from './paths'
+import { updateState } from './updateState'
 
 /**
  * owner/repo the releases are published under. 1.x clients still query the old
@@ -456,15 +457,14 @@ async function applyInstall(kind: InstallKind, file: string): Promise<boolean> {
 }
 
 /** Query GitHub for the latest release and decide if/how we can update. */
-export async function checkForUpdate(): Promise<UpdateInfo> {
+async function queryLatest(): Promise<{ info: UpdateInfo; match: Match | null }> {
   const current = app.getVersion()
   try {
     const rel = await fetchJson<GhRelease>(LATEST_URL)
     const latest = (rel.tag_name ?? '').replace(/^v/i, '')
     const available = latest.length > 0 && isNewer(latest, current)
     const match = available ? pickAsset(rel.assets ?? []) : null
-    lastMatch = match
-    return {
+    const info: UpdateInfo = {
       available,
       currentVersion: current,
       latestVersion: latest || null,
@@ -473,9 +473,10 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
       installable: Boolean(match),
       installKind: match ? match.kind : available ? 'open' : 'none',
     }
+    return { info, match }
   } catch (err) {
     console.error('Update check failed:', err)
-    return {
+    const info: UpdateInfo = {
       available: false,
       currentVersion: current,
       latestVersion: null,
@@ -485,7 +486,22 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
       installKind: 'none',
       error: err instanceof Error ? err.message : String(err),
     }
+    return { info, match: null }
   }
+}
+
+/**
+ * Check for an update and record it in main's state (E4-FR-37). While a
+ * download/apply runs, neither the remembered asset nor the state change, so
+ * a check never swaps the file an install is working on.
+ */
+export async function checkForUpdate(): Promise<UpdateInfo> {
+  const { info, match } = await queryLatest()
+  if (!updateState.busy) {
+    lastMatch = match
+    updateState.checked(info)
+  }
+  return info
 }
 
 /**
@@ -498,8 +514,10 @@ export async function downloadAndInstall(
 ): Promise<{ relaunching: boolean }> {
   let match = lastMatch
   if (!match) {
-    await checkForUpdate()
-    match = lastMatch
+    // Called with the install already 'downloading': query directly, the
+    // state-recording check would ignore the result.
+    match = (await queryLatest()).match
+    lastMatch = match
   }
   if (!match) throw new Error('No installable update is available for this build.')
 

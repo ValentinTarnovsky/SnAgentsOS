@@ -22,6 +22,9 @@ export const CH = {
   PTY_SET_ACTIVE: 'pty:setActive', // send (paneIds of the visible workspace)
   PTY_FLOW: 'pty:flow', // send ({ ptyId, pause }) backpressure
   PTY_RESTART: 'pty:restart', // invoke (PtyRestartReq) -> PtyRestartRes (rejects when the spawn fails; E6-FR-18/19)
+  // Explicit pty lifecycle (E4-FR-36): kills by paneId, so they work with an empty renderer registry.
+  PTY_KILL_PANES: 'pty:killPanes', // invoke (paneIds: string[]) -> number (killed)
+  PTY_RECONCILE: 'pty:reconcile', // invoke (livePaneIds: string[]) -> number (killed)
 
   // PTY events (main -> renderer)
   PTY_DATA: 'pty:data', // { ptyId, data }
@@ -68,6 +71,8 @@ export const CH = {
   UPDATE_CHECK: 'update:check', // invoke -> UpdateInfo
   UPDATE_INSTALL: 'update:install', // invoke -> { relaunching } (downloads + applies)
   UPDATE_PROGRESS: 'update:progress', // main -> renderer ({ percent, transferred, total })
+  UPDATE_GET_STATE: 'update:getState', // invoke -> UpdateState (main owns the phase, E4-FR-37)
+  UPDATE_STATE: 'update:state', // main -> renderer (UpdateState on every phase change)
 
   // Live usage / quota bars (Claude OAuth + Codex rollout + custom models)
   USAGE_GET: 'usage:get', // invoke -> UsageSnapshot (cached, kicks a refresh)
