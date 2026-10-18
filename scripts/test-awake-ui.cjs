@@ -87,6 +87,7 @@ app.whenReady().then(async()=>{
  ok(await js("[...document.querySelectorAll('section[aria-labelledby=agents-behavior] [role=switch]')].every(e=>e.disabled)"),'the display toggle is disabled in Never');
  await shot('awake-settings-midnight');
  for(const q of ['despierta','awake','pantalla','sleep']){await js('smoke.search('+JSON.stringify(q)+')');await frame();ok(await js("document.body.textContent.includes('Comportamiento')"),'search finds the block: '+q)}
+ await js("smoke.search('zzqx')");await frame();ok(!(await js("document.body.textContent.includes('Comportamiento')")),'a search that matches nothing hides the block');
  await js("smoke.search('')");
  for(const scale of [1,1.25,1.5]){w.setSize(900,600);w.webContents.setZoomFactor(scale);await wait(200);ok(!(await js('smoke.overflow()')),'no overflow at '+scale);if(scale===1.5)await shot('awake-settings-150')}
  w.webContents.setZoomFactor(1);w.setSize(1200,760);
