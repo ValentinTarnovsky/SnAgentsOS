@@ -13,6 +13,7 @@
  *    it and answered within 10s, or reported as unavailable.
  */
 import { randomUUID } from 'crypto'
+import { hostname } from 'os'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type {
@@ -58,6 +59,15 @@ export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | n
   if (evt.activity) out.activity = evt.activity
   if (evt.pending?.length) out.pending = evt.pending
   return out
+}
+
+/** os.hostname() cut to 64 characters; '' when the OS will not say. */
+function safeHostName(): string {
+  try {
+    return hostname().trim().slice(0, 64)
+  } catch {
+    return ''
+  }
 }
 
 /** Placeholder state until the renderer pushes its first real snapshot. */
@@ -107,6 +117,8 @@ export class RemoteManager {
     private readonly appVersion: string,
     /** Live agent statuses (StatusManager.snapshot), overlaid on every snapshot. */
     private readonly getPaneStatuses: () => PaneStatusEvt[] = () => [],
+    /** The PC name the phone's Home header shows (E2-FR-02); injectable for tests. */
+    private readonly getHostName: () => string = safeHostName,
   ) {
     this.pairing = new PairingService({
       registry: this.registry,
@@ -243,7 +255,11 @@ export class RemoteManager {
     return this.rawSnapshot ? this.overlayRunning(this.rawSnapshot) : EMPTY_SNAPSHOT
   }
 
-  /** Overlay main's authoritative `running` and agent `status` on each pane. */
+  /**
+   * Overlay main's authoritative `running` and agent `status` on each pane,
+   * and the PC name (E2-FR-12): pushState() emits through here too, so every
+   * state frame carries it, not only authOk.
+   */
   private overlayRunning(snap: RemoteStateSnapshot): RemoteStateSnapshot {
     const running = new Set(this.ptyManager.runningPaneIds())
     // E6-FR-38: a shell that ended on its own shows as "exited" on the phone.
@@ -253,8 +269,10 @@ export class RemoteManager {
       const status = toRemoteStatus(evt)
       if (status) statuses.set(evt.paneId, status)
     }
+    const host = this.getHostName()
     return {
       ...snap,
+      ...(host ? { hostName: host } : {}),
       workspaces: snap.workspaces.map((ws) => ({
         ...ws,
         panes: ws.panes.map((p) => {

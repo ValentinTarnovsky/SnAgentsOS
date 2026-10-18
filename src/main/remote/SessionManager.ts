@@ -416,6 +416,8 @@ export class SessionManager implements PtySink {
       error: result.error,
       paneId: result.paneId,
       info: result.info,
+      // E2-FR-11: the phone keeps the prompt in the new console's composer.
+      ...(result.promptFallback ? { promptFallback: true } : {}),
     })
   }
 

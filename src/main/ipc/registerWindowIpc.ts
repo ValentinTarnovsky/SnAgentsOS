@@ -1,5 +1,6 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { CH } from '@shared/ipc-channels'
+import { revealWindow } from '../window/revealWindow'
 
 /**
  * Window controls for the custom frameless title bar. The renderer drives
@@ -17,6 +18,12 @@ export function registerWindowIpc(getWindow: () => BrowserWindow | null): void {
   })
 
   ipcMain.on(CH.WINDOW_CLOSE, () => getWindow()?.close())
+
+  // "Show on the PC" from a phone (E2-FR-07): the renderer reveals the pane itself.
+  ipcMain.on(CH.WINDOW_REVEAL, () => {
+    const win = getWindow()
+    if (win && !win.isDestroyed()) revealWindow(win)
+  })
 
   ipcMain.handle(CH.WINDOW_IS_MAXIMIZED, (): boolean => getWindow()?.isMaximized() ?? false)
 }

@@ -10,6 +10,17 @@ import type { RemoteClientMsg } from './remote-protocol'
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/)
 const id = z.string().min(1).max(128)
 
+/** Schemes a phone may ask the PC to open (E2-FR-28): never file:, javascript: or custom ones. */
+export function isSafeRemoteUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw)
+    if (url.protocol === 'mailto:') return true
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.hostname
+  } catch {
+    return false
+  }
+}
+
 const ctlActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('switchWorkspace'), workspaceId: id }),
   z.object({
@@ -17,6 +28,8 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     workspaceId: id,
     presetId: id.optional(),
     paneType: z.enum(['shell', 'claude', 'codex', 'custom']).optional(),
+    // E2-FR-11: the initial prompt, same bound as globalPrompt.
+    prompt: z.string().max(16384).optional(),
   }),
   z.object({ kind: z.literal('closePane'), workspaceId: id, paneId: id }),
   z.object({ kind: z.literal('restartPane'), workspaceId: id, paneId: id, resume: z.boolean().optional() }),
@@ -33,6 +46,10 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   }),
   // E8-FR-07. The renderer requires paneId for a `send` command (bad_request).
   z.object({ kind: z.literal('runQuickCommand'), workspaceId: id, paneId: id.optional(), id }),
+  // E2 Home (R22-14). openUrl is re-checked by the executor (http, https, mailto).
+  z.object({ kind: z.literal('mountWorkspace'), workspaceId: id }),
+  z.object({ kind: z.literal('revealPane'), paneId: id }),
+  z.object({ kind: z.literal('openUrl'), url: z.string().min(1).max(2048).refine(isSafeRemoteUrl) }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [
