@@ -50,6 +50,10 @@ window.result = (async () => {
  check(noOverflow() && strip().getBoundingClientRect().right <= 360, 'strip fits 360 px');
  btn('resume').click(); await frames();
  check(sent.length === 1 && JSON.stringify(sent[0]) === JSON.stringify({ kind: 'agentResume', workspaceId: 'w1', paneId: 'a', mode: 'resume' }), 'Resume sends agentResume resume for the viewed pane and its workspace');
+ check(!strip(), 'a taken offer hides at once, before the push that drops it');
+ setSnap(snap()); await frames();
+ setSnap(snap({ canResume: true })); await frames();
+ check(strip(), 'the next offer shows it again');
  reply = { ok: false, error: 'stale' };
  btn('new').click(); await frames(); await frames();
  check(sent.length === 2 && sent[1].mode === 'new' && store.getState().toast === 'Already answered from another device', 'New sends agentResume new; a stale ack becomes a toast');
@@ -72,10 +76,18 @@ window.result = (async () => {
  setSnap(snap()); await frames();
  setSnap(snap({ canResume: true })); await frames();
  check(strip(), 'a new offer shows it again');
+ // A key typed from this phone hides it here (the desktop pane hides its chip on any key).
+ client.isOpen = () => true; client.send = () => true;
+ flushSync(() => { client.sendInput('x') }); await frames();
+ check(!strip() && sent.length === 3, 'typing into the console from the phone hides the strip');
+ setSnap(snap()); await frames();
+ setSnap(snap({ canResume: true })); await frames();
+ check(strip(), 'and the next offer shows it again');
  // Another viewed pane in another workspace sends its own workspace.
  setSnap(snap(undefined, undefined, { canResume: true }), { activePaneId: 'c', subscribedPaneId: 'c' }); await frames();
  btn('new').click(); await frames();
  check(sent.at(-1).workspaceId === 'w2' && sent.at(-1).paneId === 'c', 'the ctl carries the viewed pane\\'s own workspace');
+ setSnap(snap()); await frames();
  setLang('es'); setSnap({ ...snap(undefined, undefined, { canResume: true }), language: 'es' }); mount(); await frames();
  check(strip().textContent.includes('Claude termino') && btn('resume').textContent.includes('Retomar') && btn('new').textContent.includes('Nueva'), 'strip is translated');
  setLang('en');

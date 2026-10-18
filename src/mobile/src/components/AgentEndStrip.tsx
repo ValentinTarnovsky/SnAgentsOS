@@ -4,8 +4,8 @@
  * carries `agentEnded` for that pane (the desktop still offers it) and the
  * exit strip does not. [Resume] / [New] send ctl agentResume: the desktop
  * types the very same text as its own chip, and the first device to answer
- * wins (the rest get `stale`). [Hide] only hides it on this phone until the
- * offer goes away.
+ * wins (the rest get `stale`). [Hide], a taken offer or a key typed here
+ * only hides it on this phone until the offer goes away.
  */
 import { useEffect, useState, type ReactNode } from 'react'
 import { History, Plus, X } from 'lucide-react'
@@ -39,6 +39,14 @@ export function AgentEndStrip(): ReactNode {
   useEffect(() => {
     if (!offered) setHidden(null)
   }, [offered, paneId])
+  // Typing into the console from this phone hides it here, like any key in
+  // the desktop pane hides the chip: a later tap would append to that line.
+  useEffect(() => {
+    if (!offered || !paneId) return
+    return client.onInputSent((typed) => {
+      if (typed === paneId) setHidden(paneId)
+    })
+  }, [offered, paneId])
 
   if (!paneId || !workspaceId || exited || hidden === paneId) return null
 
@@ -46,7 +54,9 @@ export function AgentEndStrip(): ReactNode {
     setBusy(true)
     const res = await client.sendCtl({ kind: 'agentResume', workspaceId, paneId, mode })
     setBusy(false)
-    if (res.ok) return
+    // Taken: hide it now, before the push that drops the offer, so a second
+    // tap in between does not come back as stale.
+    if (res.ok) return setHidden(paneId)
     useRemoteStore.getState().setToast(t(res.error === 'stale' ? 'agentEnd.stale' : 'toast.actionFailed'))
   }
 
