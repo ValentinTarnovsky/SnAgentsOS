@@ -323,11 +323,12 @@ async function main() {
   } finally { await server.stop(); fs.rmSync(temporary, { recursive: true, force: true }) }
   await schemaV11Checks()
   ntfyConfigChecks()
+  await ntfyChannelChecks()
   await enrichmentChecks()
   await pathOpenChecks()
   await firewallChecks()
   connLogRedactChecks()
-  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, store, enrichment, Codex App Server detail, path open, firewall and connection log checks`)
+  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, ntfy channel, away gate, lastHost, store, enrichment, Codex App Server detail, path open, firewall and connection log checks`)
 }
 
 // R22-16 (E2-FR-28..30): shell:openPath containment in main with real files and
@@ -553,6 +554,129 @@ async function schemaV11Checks() {
 }
 
 // R22-01: schema 12 notification keys (E2-FR-40/41) and the export sanitizer.
+// ntfy channel, the away gate, the deep link and lastHost (E2-FR-40..42, 52; R22-18).
+async function ntfyChannelChecks() {
+  const { ntfyServer, NtfyNotifier, ntfyPayload } = load('src/main/status/NtfyNotifier.ts')
+  check(ntfyServer('https://ntfy.sh') === 'https://ntfy.sh/' && ntfyServer(' https://push.example.com/ntfy?x=1#y ') === 'https://push.example.com/ntfy/', 'ntfyServer keeps https, drops query and fragment and ends on /')
+  check(ntfyServer('http://192.168.1.10:8080') === 'http://192.168.1.10:8080/' && ntfyServer('http://100.80.1.2') === 'http://100.80.1.2/', 'plain http only for a private or tailnet IP')
+  for (const bad of ['http://ntfy.sh', 'http://8.8.8.8', 'https://user:pass@ntfy.sh', 'ftp://ntfy.sh', 'not a url']) { assert.throws(() => ntfyServer(bad)); checks++ }
+  const base = { ...settings.ntfy, enabled: true, topic: 'snaos-0123456789abcdef', token: 'tk_live', notifyAction: true, notifyDone: false }
+  check(settings.ntfy.server === 'https://ntfy.sh' && settings.ntfy.enabled === false && settings.ntfy.notifyAction && !settings.ntfy.notifyDone, 'ntfy defaults: off, ntfy.sh, action on, done off')
+  assert.throws(() => ntfyPayload({ ...base, topic: 'bad topic' }, { title: 't', message: 'm', urgent: true })); checks++
+  const config = { settings: { language: 'es', notifications: settings }, workspaces: [{ id: 'w1', name: 'Front', panes: [{ id: 'p1', title: 'Builder' }] }] }
+  const calls = []
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0))
+  {
+    const notifier = new NtfyNotifier(async (url, init) => { calls.push({ url, init }); return new Response('{}', { status: 200 }) })
+    notifier.setConfig(base)
+    notifier.notify({ paneId: 'p1', provider: 'claude', state: 'action', reason: 'permission' }, config, 'http://100.64.0.2:4517/#ws=w1&pane=p1')
+    await settle(); await settle()
+    const body = JSON.parse(calls[0].init.body)
+    check(calls.length === 1 && calls[0].url === 'https://ntfy.sh/' && calls[0].init.method === 'POST' && calls[0].init.redirect === 'error', 'an action publishes once with POST to the server root')
+    check(calls[0].init.headers.Authorization === 'Bearer tk_live' && calls[0].init.headers['Content-Type'] === 'application/json', 'with the Bearer token and JSON')
+    check(body.topic === base.topic && body.title === 'Claude: Permiso pendiente' && body.message === 'Front / Builder' && body.priority === 4 && body.tags[0] === 'warning' && body.click === 'http://100.64.0.2:4517/#ws=w1&pane=p1', 'body: topic, reason, workspace / console, priority 4, warning tag and the deep link')
+    check(Object.keys(body).sort().join() === 'click,message,priority,tags,title,topic', 'nothing else rides along (never a reply preview)')
+    notifier.notify({ paneId: 'p1', provider: 'claude', state: 'done' }, config)
+    await settle()
+    check(calls.length === 1, 'done is skipped while notifyDone is off')
+    notifier.setConfig({ ...base, notifyDone: true, token: '' })
+    notifier.notify({ paneId: 'p1', provider: 'codex', state: 'done' }, config)
+    await settle(); await settle()
+    const done = JSON.parse(calls[1].init.body)
+    check(done.priority === 3 && done.tags[0] === 'white_check_mark' && done.title === 'Codex: Turno terminado' && !('click' in done) && !calls[1].init.headers.Authorization, 'done: priority 3, check tag, no click without a base, no token header without a token')
+    check(notifier.health.lastSuccessAt !== null && notifier.health.error === null, 'health reports the last success')
+    notifier.setConfig({ ...base, enabled: false })
+    check(!notifier.wants({ paneId: 'p1', provider: 'claude', state: 'action' }), 'a disabled channel wants nothing')
+    notifier.setConfig({ ...base, topic: '' })
+    check(!notifier.wants({ paneId: 'p1', provider: 'claude', state: 'action' }), 'an empty topic wants nothing')
+  }
+  {
+    let attempts = 0, delay = 0
+    const notifier = new NtfyNotifier(async () => ++attempts === 1 ? new Response('', { status: 429, headers: { 'retry-after': '0.5' } }) : new Response('{}', { status: 200 }), async ms => { delay = ms })
+    notifier.setConfig(base)
+    check((await notifier.test()).ok && attempts === 2 && delay === 500, 'a 429 retries after Retry-After and the test reports Accepted')
+  }
+  {
+    let attempts = 0
+    const notifier = new NtfyNotifier(async () => { attempts++; return new Response('forbidden', { status: 403 }) })
+    notifier.setConfig(base)
+    const res = await notifier.test()
+    check(!res.ok && res.error === 'ntfy HTTP 403' && attempts === 1, 'a 403 is not retried and the test reports the HTTP error')
+    check(!res.error.includes(base.topic) && !res.error.includes(base.token), 'the error never echoes the topic or token')
+  }
+  {
+    let attempts = 0
+    const notifier = new NtfyNotifier(async () => { attempts++; return new Response('', { status: attempts < 3 ? 502 : 200 }) }, async () => {})
+    notifier.setConfig(base)
+    check((await notifier.test()).ok && attempts === 3, '5xx retries within the bound')
+    const none = new NtfyNotifier(async () => { throw new Error('no network') })
+    check(!(await none.test(null)).ok, 'a test without a saved config fails cleanly')
+    none.setConfig({ ...base, server: 'http://ntfy.sh' })
+    check((await none.test()).error === 'Invalid ntfy server URL', 'an http public server is refused before any request')
+  }
+
+  const { isDesktopAway, AWAY_IDLE_THRESHOLD_SEC } = load('src/main/status/desktopAway.ts')
+  let asked = 0
+  const monitor = state => ({ getSystemIdleState: sec => { asked = sec; if (state === 'throw') throw new Error('x'); return state } })
+  check(isDesktopAway(monitor('idle')) === true && asked === 180 && AWAY_IDLE_THRESHOLD_SEC === 180, 'idle is away, with the fixed 180s threshold')
+  check(isDesktopAway(monitor('locked')) === true && isDesktopAway(monitor('active')) === false, 'locked is away, active is not')
+  check(isDesktopAway(monitor('unknown')) === undefined && isDesktopAway(monitor('throw')) === undefined && isDesktopAway(null) === undefined, 'unknown, a throw or no monitor read as undefined')
+
+  const { createNoticeRouter, deepLinkUrl } = load('src/main/status/noticeRouter.ts')
+  check(deepLinkUrl('http://192.168.1.5:4517', 'w 1', 'p&1') === 'http://192.168.1.5:4517/#ws=w%201&pane=p%261' && deepLinkUrl(null, 'w', 'p') === undefined && deepLinkUrl('http://x:1', null, 'p') === undefined, 'deepLinkUrl encodes both ids and needs a base and a workspace')
+  const routed = { discord: [], ntfy: [] }
+  const env = { away: undefined, viewed: false, base: 'http://100.64.0.2:4517', onlyWhenAway: false, wants: true }
+  const router = createNoticeRouter({
+    discord: { notify: (n, c) => routed.discord.push({ n, c }) },
+    ntfy: { notify: (n, c, click) => routed.ntfy.push({ n, click }), wants: () => env.wants },
+    loadConfig: () => ({ ...config, settings: { ...config.settings, notifications: { ...settings, onlyWhenAway: env.onlyWhenAway } } }),
+    isAway: () => { if (env.away === 'throw') throw new Error('x'); return env.away },
+    isPaneViewed: () => env.viewed,
+    deepLinkBase: () => env.base,
+  })
+  const notice = { paneId: 'p1', provider: 'claude', state: 'action', reason: 'question' }
+  const count = () => routed.discord.length + '/' + routed.ntfy.length
+  env.away = false; router.route(notice)
+  check(count() === '1/1', 'with the gate off, an active PC still delivers to both')
+  check(routed.ntfy[0].click === 'http://100.64.0.2:4517/#ws=w1&pane=p1', 'the ntfy click is the deep link of the pane workspace')
+  env.onlyWhenAway = true; router.route(notice)
+  check(count() === '1/1', 'gate on + active PC: neither Discord nor ntfy')
+  env.away = true; router.route(notice)
+  check(count() === '2/2', 'gate on + idle/locked: both deliver')
+  env.away = undefined; router.route(notice)
+  check(count() === '3/3', 'gate on + unknown state: delivers anyway')
+  env.away = 'throw'; router.route(notice)
+  check(count() === '4/4', 'gate on + a failing idle read: delivers anyway')
+  env.viewed = true; router.route(notice)
+  check(count() === '5/4', 'a pane watched on the phone skips ntfy only (Discord still goes)')
+  env.viewed = false; env.base = null; router.route({ ...notice, paneId: 'gone' })
+  check(count() === '6/5' && routed.ntfy.at(-1).click === undefined, 'no base (server off) or unknown pane: a push without click')
+  env.wants = false; router.route(notice)
+  check(count() === '7/5', 'ntfy not wanted: only Discord')
+
+  // lastHost in remote-devices.json (E2-FR-42), under the dataDir() stub.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-lasthost-'))
+  try {
+    const electron = { app: { getPath: () => tmp, isPackaged: false } }
+    const { DeviceRegistry } = load('src/main/remote/DeviceRegistry.ts', { require: id => id === 'electron' ? electron : require(id) })
+    const file = path.join(tmp, 'remote-devices.json')
+    fs.writeFileSync(file, JSON.stringify({ version: 1, devices: [{ id: 'old', name: 'Old', secret: 'ab', createdAt: 1, lastSeen: 1 }] }))
+    const reg = new DeviceRegistry()
+    check(reg.get('old') && reg.lastHosts().length === 0, 'a file written before lastHost still loads')
+    const phone = reg.add('Phone')
+    reg.setLastHost(phone.id, '192.168.1.5', 1000)
+    check(JSON.parse(fs.readFileSync(file, 'utf8')).devices.find(d => d.id === phone.id).lastHost === '192.168.1.5', 'setLastHost persists a new host at once')
+    fs.rmSync(file)
+    reg.setLastHost(phone.id, '192.168.1.5', 2000)
+    check(!fs.existsSync(file), 'the same host again does not write the file')
+    reg.setLastHost('old', '100.64.0.7', 3000)
+    check(fs.existsSync(file) && reg.lastHosts().map(h => h.host).join() === '100.64.0.7,192.168.1.5', 'a changed host persists and lastHosts lists the most recent first')
+    check(!JSON.stringify(reg.listSanitized(new Set())).includes('lastHost'), 'the renderer list never carries lastHost')
+    const again = new DeviceRegistry()
+    check(again.get(phone.id).lastHost === '192.168.1.5' && again.get('old').lastHost === '100.64.0.7', 'lastHost survives a reload')
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+}
+
 function ntfyConfigChecks() {
   check(JSON.stringify(settings.ntfy) === JSON.stringify({ enabled: false, server: 'https://ntfy.sh', topic: '', token: '', notifyAction: true, notifyDone: false }), 'ntfy defaults (off, ntfy.sh, action on, done off)')
   check(settings.onlyWhenAway === false, 'onlyWhenAway defaults to false')

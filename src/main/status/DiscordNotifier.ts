@@ -1,6 +1,6 @@
 import { BRAND } from '@shared/brand'
 import type { ConfigFile, DiscordSettings, StatusHealth } from '@shared/types'
-import type { StatusNotice } from './events'
+import { describeNotice, type StatusNotice } from './events'
 
 export function discordUrl(value: string): string {
   const url = new URL(value.trim())
@@ -35,17 +35,8 @@ export class DiscordNotifier {
   notify(notice: StatusNotice, config: ConfigFile | null): void {
     const cfg = this.cfg
     if (!cfg?.enabled || !(notice.state === 'done' ? cfg.notifyDone : cfg.notifyAction)) return
-    const es = config?.settings.language === 'es'
-    let place: string = BRAND.productName
-    for (const ws of config?.workspaces ?? []) {
-      const pane = ws.panes.find(p => p.id === notice.paneId)
-      if (pane) { place = `${ws.name} / ${pane.title}`; break }
-    }
-    const reasons = es
-      ? { permission: 'Permiso pendiente', question: 'Pregunta pendiente', plan: 'Plan para aprobar', elicitation: 'Respuesta MCP pendiente', failure: 'El agente se detuvo por un error' }
-      : { permission: 'Permission requested', question: 'Question pending', plan: 'Plan approval requested', elicitation: 'MCP response requested', failure: 'Agent stopped with an error' }
-    const message = notice.state === 'done' ? (es ? 'Turno terminado' : 'Turn complete') : reasons[notice.reason ?? (notice.state === 'error' ? 'failure' : 'question')]
-    const text = `${notice.provider === 'codex' ? 'Codex' : 'Claude'}: ${message}\n${place}\n${new Date().toISOString()}`
+    const { agent, message, place } = describeNotice(notice, config, BRAND.productName)
+    const text = `${agent}: ${message}\n${place}\n${new Date().toISOString()}`
     void this.enqueue(cfg, text).catch(() => {})
   }
   async test(cfg: DiscordSettings): Promise<{ ok: boolean; error?: string }> {

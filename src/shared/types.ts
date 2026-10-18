@@ -443,6 +443,8 @@ export interface StatusHealth {
   claude: StatusHooksStatusRes
   codex: { enabled: boolean; available: boolean; connected: number; error?: string }
   discord: { lastSuccessAt: number | null; error: string | null; queued: number }
+  /** ntfy channel (E2-FR-40), same shape as discord. */
+  ntfy?: { lastSuccessAt: number | null; error: string | null; queued: number }
 }
 
 /** Desktop notifications, sounds and Claude status integration. */
