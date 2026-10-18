@@ -168,9 +168,7 @@ export function useGlobalKeys(): void {
       }
 
       const digit = ctrlDigit(e)
-      if (digit !== null) {
-        // Unhandled, Ctrl+3..8 reach xterm as control bytes (Ctrl+3 = ESC).
-        if (ctrlDigitBlocked(e)) return
+      if (digit !== null && !ctrlDigitBlocked(e)) {
         const s = useAppStore.getState()
         const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId)
         const target = ws ? visibleConsoles(ws, s.minimized[ws.id] ?? [], s.maximized[ws.id])[digit - 1] : undefined
@@ -178,9 +176,11 @@ export function useGlobalKeys(): void {
           e.preventDefault()
           e.stopPropagation()
           revealPane(target)
+          return
         }
-        return
       }
+      // A Ctrl+digit left unhandled falls through to a user binding, if any;
+      // otherwise Ctrl+3..8 reach xterm as control bytes (Ctrl+3 = ESC).
 
       const accel = eventToAccel(e)
       if (!accel) return
