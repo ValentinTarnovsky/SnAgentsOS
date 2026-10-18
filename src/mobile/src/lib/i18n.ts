@@ -144,6 +144,8 @@ const en = {
   'nav.back': 'Back',
   'set.appearance': 'Appearance',
   'set.device': 'This device',
+  'set.fontSmaller': 'Smaller font',
+  'set.fontLarger': 'Larger font',
   // Rename sheet
   'rename.label': 'Console name',
   // Theme picker
@@ -317,6 +319,8 @@ const es: Record<Key, string> = {
   'nav.back': 'Atras',
   'set.appearance': 'Apariencia',
   'set.device': 'Este dispositivo',
+  'set.fontSmaller': 'Fuente mas chica',
+  'set.fontLarger': 'Fuente mas grande',
   'rename.label': 'Nombre de la consola',
   'theme.midnight': 'Midnight',
   'theme.light': 'Claro',
