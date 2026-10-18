@@ -37,7 +37,7 @@ export { RemoteManager, toRemoteStatus, PANE_STATUS_COALESCE_MS } from './src/ma
   plugins: [stubs], alias: { '@shared': path.join(root, 'src/shared') },
 }).then(r => { code = r.outputFiles[0].text })
 
-function world() {
+function world(opts = {}) {
   let clock = 0, seq = 0
   const timers = new Map()
   const add = (fn, ms, every) => { const id = ++seq; timers.set(id, { at: clock + Math.max(0, ms || 0), fn, every }); return { id, unref() {}, ref() {} } }
@@ -81,7 +81,7 @@ function world() {
   // A fake renderer: commands relayed by main land here (E2 executor tests).
   const commands = []
   const webContents = { isDestroyed: () => false, setBackgroundThrottling() {}, send: (ch, cmd) => { if (ch === 'remote:controlCmd') commands.push(cmd) } }
-  const manager = new api.RemoteManager(pty, () => webContents, '2.0.0', () => statuses, () => 'MI-PC')
+  const manager = new api.RemoteManager(pty, () => webContents, '2.0.0', () => statuses, () => 'MI-PC', ...(opts.endpoints ? [opts.endpoints] : []))
   manager.applyConfig({ enabled: true, port: 4600 })
 
   class FakeSocket {
@@ -93,15 +93,15 @@ function world() {
     msg(obj) { this.handlers.message(JSON.stringify({ v: 1, ...obj })) }
     of(type) { return this.inbox.filter(m => m.type === type) }
   }
-  const socket = () => { const ws = new FakeSocket(); ctx.__server.handlers.onSocket(ws, '100.64.0.9'); return ws }
+  const socket = (host = '100.64.0.9') => { const ws = new FakeSocket(); ctx.__server.handlers.onSocket(ws, '100.64.0.9', host); return ws }
   return { api, manager, statuses, writes, commands, socket, advance, get clock() { return clock } }
 }
 
 /** Pair a phone through the pairing route; returns its socket and credentials. */
-async function pair(w) {
+async function pair(w, host) {
   await new Promise(resolve => setImmediate(resolve)) // the stub server's start() settles
   const payload = await w.manager.pairingBegin()
-  const ws = w.socket()
+  const ws = w.socket(host)
   ws.msg({ type: 'hello', clientNonce: 'aa'.repeat(32) })
   ws.msg({ type: 'pair', code: payload.code, deviceName: 'Phone' })
   const requestId = w.manager.getUiState().pendingPairing.requestId
@@ -111,8 +111,8 @@ async function pair(w) {
 }
 
 /** Reconnect with stored credentials through the challenge route. */
-function reconnect(w, deviceId, secret) {
-  const ws = w.socket()
+function reconnect(w, deviceId, secret, host) {
+  const ws = w.socket(host)
   const clientNonce = 'bb'.repeat(32)
   ws.msg({ type: 'hello', deviceId, clientNonce })
   const challenge = ws.of('challenge')[0]
@@ -305,6 +305,53 @@ async function testHome() {
   check(!frame({ kind: 'openUrl', url: 'https://x.co/' + 'a'.repeat(2048) }), 'openUrl rejects more than 2048 characters')
 }
 
+/** ntfy support (R22-18): lastHost and deepLinkBase (E2-FR-42), visibility and isPaneViewed (E2-FR-52). */
+async function testNotify() {
+  fs.rmSync(path.join(dataDir, 'remote-devices.json'), { force: true })
+  const LAN = { ip: '192.168.1.20', kind: 'lan', url: '' }, TS = { ip: '100.64.0.9', kind: 'tailscale', url: '' }
+  let endpoints = [LAN, TS]
+  const w = world({ endpoints: () => endpoints })
+  w.manager.pushState(snapshot)
+  await new Promise(resolve => setImmediate(resolve))
+  check(w.manager.deepLinkBase() === 'http://100.64.0.9:4600', 'no phone yet: the deep link uses the Tailscale endpoint')
+  endpoints = [LAN]
+  check(w.manager.deepLinkBase() === 'http://192.168.1.20:4600', 'without Tailscale: the first LAN endpoint')
+  endpoints = [LAN, TS]
+  const { ws, deviceId, secret } = await pair(w, '192.168.1.20')
+  check(ws.of('paired').length === 1 && w.manager.deepLinkBase() === 'http://192.168.1.20:4600', 'the host a phone authenticated through wins over Tailscale')
+  endpoints = [TS]
+  check(w.manager.deepLinkBase() === 'http://100.64.0.9:4600', 'a lastHost this PC no longer has is skipped')
+  endpoints = [{ ip: '127.0.0.1', kind: 'lan', url: '' }, LAN]
+  const loop = reconnect(w, deviceId, secret, '127.0.0.1')
+  check(loop.of('authOk').length === 1 && w.manager.deepLinkBase() === 'http://192.168.1.20:4600', 'a loopback login never becomes lastHost')
+
+  // E2-FR-52: subscribed + visible + fresh.
+  check(!w.manager.isPaneViewed('p1'), 'an authed phone that is not subscribed does not watch p1')
+  ws.msg({ type: 'sub', paneId: 'p1' })
+  check(!w.manager.isPaneViewed('p1'), 'subscribed but no visibility yet: not watching')
+  ws.msg({ type: 'visibility', visible: true })
+  check(w.manager.isPaneViewed('p1') && !w.manager.isPaneViewed('p2'), 'subscribed and visible: watching p1 only')
+  check(ws.of('err').length === 0, 'visibility is a valid post-auth frame')
+  w.advance(31000)
+  check(!w.manager.isPaneViewed('p1'), 'silent for more than 30s: no longer counts as watching')
+  ws.msg({ type: 'ping', t: 1 })
+  check(w.manager.isPaneViewed('p1'), 'a ping refreshes it')
+  ws.msg({ type: 'visibility', visible: false })
+  check(!w.manager.isPaneViewed('p1'), 'hidden page: not watching')
+  const stranger = w.socket()
+  stranger.msg({ type: 'visibility', visible: true })
+  check(stranger.of('err').at(-1).code === 'unauthorized', 'visibility before auth is refused')
+  const { parseRemoteClientMsg } = (() => {
+    const mod = { exports: {} }
+    const src = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/shared/remote-protocol-schemas.ts')], bundle: true, platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
+    vm.runInNewContext(src, { module: mod, exports: mod.exports, require, URL })
+    return mod.exports
+  })()
+  check(parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'visibility', visible: true })) && !parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'visibility', visible: 'yes' })), 'the visibility schema takes a boolean only')
+  w.manager.applyConfig({ enabled: false, port: 4600 })
+  check(w.manager.deepLinkBase() === null && !w.manager.isPaneViewed('p1'), 'server off: no deep link and nobody watching')
+}
+
 async function main() {
   await bundle()
   const w = world()
@@ -313,8 +360,9 @@ async function main() {
   await testBroadcast()
   await testDataPlane()
   await testHome()
+  await testNotify()
   fs.rmSync(dataDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} remote overlay and paneStatus checks`)
+  console.log(`PASS: ${checks} remote overlay, paneStatus, lastHost and visibility checks`)
 }
 
 main().catch(error => { console.error(error); fs.rmSync(dataDir, { recursive: true, force: true }); process.exit(1) })
