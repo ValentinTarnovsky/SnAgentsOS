@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, '..')
 let checks = 0
 function check(condition, label) { assert.ok(condition, label); checks++ }
 function load(file, overrides = {}) {
-  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws', 'node-pty'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws', 'node-pty', '@xterm/headless', '@xterm/addon-serialize', '@xterm/addon-unicode11'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
   const mod = { exports: {} }
   vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console, process, Buffer, URL, setTimeout, clearTimeout, setInterval, clearInterval, ...overrides })
   return mod.exports
@@ -102,9 +102,11 @@ const { sanitizeQueries } = load('src/main/pty/ansiSanitize.ts')
   check(sanitizeQueries(sets) === sets, 'color sets, other DCS and hyperlinks are kept')
 }
 let current = null
+// PtyManager's console: warnings are muted, a case can swap `warn` to count them.
+const ptyConsole = { ...console, warn() {} }
 const loaded = load('src/main/pty/PtyManager.ts', {
   require: id => id === 'node-pty' ? { spawn: (...a) => current.impl(...a) } : id === 'electron' ? { app: { getPath: () => os.tmpdir() } } : require(id),
-  console: { ...console, warn() {} },
+  console: ptyConsole,
 })
 const { trimRingHead } = loaded
 {
@@ -139,9 +141,12 @@ function fakeHarness() {
   }
   return { impl, procs, sent, spawnCalls }
 }
-function manager() {
+// The ring-replay cases run with the mirror off (E6-FR-01 kill switch); the
+// headless cases below pass their own engine settings.
+function manager(engine = { snapshotMode: 'off' }) {
   current = fakeHarness()
   const pm = new loaded.PtyManager(() => ({ isDestroyed: () => false, send: (ch, p) => current.sent.push({ ch, p }) }))
+  pm.setEngine(engine)
   return { pm, h: current }
 }
 const flushAll = () => new Promise(r => setTimeout(r, 30))
@@ -347,6 +352,306 @@ async function main() {
       check(repBig.includes('LAST-OLD-LINE') && repBig.length > 200 * 1024 && repBig.endsWith('new output line 7\r\n'), 'new output after restarting a full ring keeps the kept output (oldest lines trimmed only)')
     }
     pm.killAll()
+  }
+
+  // --- Headless mirror (E6-FR-01..07, FR-35) -----------------------------------
+  {
+    const { HeadlessMirror, advancePartialEscapeTail } = load('src/main/pty/HeadlessMirror.ts')
+    const { normalizeEngine, engineFromSettings, mirrorScrollback, REPLAY_LINES, DEFAULT_ENGINE } = load('src/shared/terminalEngine.ts')
+    const { Terminal } = require('@xterm/headless')
+    const { Unicode11Addon } = require('@xterm/addon-unicode11')
+    const { SessionManager } = load('src/main/remote/SessionManager.ts', { setInterval: () => 0, clearInterval() {} })
+    const pkg = require(path.join(root, 'package.json'))
+    check(pkg.dependencies['@xterm/headless'] === '5.5.0' && pkg.dependencies['@xterm/addon-serialize'] === '0.13.0', '@xterm/headless 5.5.0 and @xterm/addon-serialize 0.13.0 pinned exact')
+    // A receiving terminal (desktop xterm or phone), headless here.
+    const client = (cols, rows, v11 = true) => {
+      const t = new Terminal({ cols, rows, scrollback: 6000, allowProposedApi: true, logLevel: 'off' })
+      t.loadAddon(new Unicode11Addon())
+      t.unicode.activeVersion = v11 ? '11' : '6'
+      const replies = []
+      t.onData(d => replies.push(d))
+      return { t, replies, write: d => t._core.writeSync(d) }
+    }
+    const phone = () => {
+      const frames = []
+      return { frames, session: { ws: { readyState: 1, send: s => frames.push(JSON.parse(s)), bufferedAmount: 0 }, authed: true, subs: new Set(), outBuf: new Map(), outTimer: null, congested: new Set(), congestedSince: new Map(), lastSeen: Date.now() } }
+    }
+    // Cell-level signature of a buffer: text, colors and bold per row.
+    const sig = buf => {
+      const rows = []
+      for (let y = 0; y < buf.length; y++) {
+        const line = buf.getLine(y); let row = ''
+        for (let x = 0; x < line.length; x++) {
+          const c = line.getCell(x)
+          if (!c || c.getWidth() === 0) continue
+          row += `${c.getChars() || ' '}/${c.getFgColorMode()}:${c.getFgColor()}/${c.getBgColorMode()}:${c.getBgColor()}/${c.isBold()};`
+        }
+        rows.push(row.replace(/( \/0:0\/0:0\/0;)+$/, ''))
+      }
+      while (rows.length && rows[rows.length - 1] === '') rows.pop()
+      return rows
+    }
+    const texts = buf => { const out = []; for (let y = 0; y < buf.length; y++) out.push(buf.getLine(y).translateToString(true)); return out }
+    const state = t => ({
+      normal: sig(t.buffer.normal), alt: t.buffer.active.type === 'alternate' ? sig(t.buffer.alternate) : null,
+      cx: t.buffer.active.cursorX, cy: t.buffer.active.cursorY, type: t.buffer.active.type,
+      modes: JSON.stringify(t.modes), encoding: t._core.coreMouseService.activeEncoding, hidden: t._core.coreService.isCursorHidden,
+    })
+    const mirrorOf = (cols, rows, opts = {}) => new HeadlessMirror({ cols, rows, scrollback: 2000, unicode11: true, ...opts })
+    const endModes = text => { const t = new ModeTracker(); t.feed(text); return t.rehydrate() }
+
+    // Engine settings normalization.
+    check(JSON.stringify(normalizeEngine(null)) === JSON.stringify(DEFAULT_ENGINE), 'junk engine payload -> defaults (auto, Unicode 11, persist, 2000)')
+    const eng = normalizeEngine({ snapshotMode: 'lazy', unicode11: false, persist: false, persistLines: 99999, extra: 1 })
+    check(eng.snapshotMode === 'lazy' && !eng.unicode11 && !eng.persist && eng.persistLines === 5000 && !('extra' in eng), 'valid fields kept, lines clamped to 5000, unknown keys dropped')
+    check(normalizeEngine({ snapshotMode: 'x', persistLines: 10 }).snapshotMode === 'auto' && normalizeEngine({ persistLines: 10 }).persistLines === 200, 'unknown mode -> auto, lines below 200 clamp up')
+    const fromCfg = engineFromSettings({ terminalSnapshotMode: 'off', terminalUnicode11: false, persistScrollback: true, persistScrollbackLines: 3000 })
+    check(fromCfg.snapshotMode === 'off' && fromCfg.unicode11 === false && fromCfg.persistLines === 3000 && engineFromSettings(undefined).snapshotMode === 'auto', 'engineFromSettings maps the schema 12 keys')
+    check(REPLAY_LINES === 2000 && mirrorScrollback(fromCfg) === 3000 && mirrorScrollback(DEFAULT_ENGINE) === 2000, 'mirror scrollback = max(REPLAY_LINES, persistLines)')
+
+    // Partial escape tail scanner (E6-FR-35).
+    check(advancePartialEscapeTail('', 'abc\x1b[38;2;25') === '\x1b[38;2;25' && advancePartialEscapeTail('\x1b[38;2;25', '5;0;0mX') === '', 'a CSI cut at the end is kept, then completed')
+    check(advancePartialEscapeTail('', 'x\x1b]0;tit') === '\x1b]0;tit' && advancePartialEscapeTail('\x1b]0;tit', 'le more') === '\x1b]0;title more' && advancePartialEscapeTail('\x1b]0;title more', 'x\x07y') === '', 'an OSC title spanning chunks stays pending until BEL')
+    check(advancePartialEscapeTail('', 'a\x1b') === '\x1b' && advancePartialEscapeTail('\x1b', '[') === '\x1b[' && advancePartialEscapeTail('', '\x1b]0;t\x1b\\') === '', 'lone ESC and ST endings')
+    check(advancePartialEscapeTail('', '\x1b(') === '\x1b(' && advancePartialEscapeTail('', '\x1b(B') === '' && advancePartialEscapeTail('', '\x1b7') === '', 'charset designation needs its final byte, two-byte escapes are whole')
+    check(advancePartialEscapeTail('', '\x1b[3\x18') === '' && advancePartialEscapeTail('', '\x1b]0;t\x1a') === '', 'CAN / SUB abort a pending sequence')
+    check(advancePartialEscapeTail('', 'hi \ud83d') === '\ud83d' && advancePartialEscapeTail('', 'plain') === '' && advancePartialEscapeTail('\x1b[', '') === '\x1b[', 'a split surrogate pair is kept, plain text and empty chunks are clean')
+    check(advancePartialEscapeTail('', '\x1bP' + 'q'.repeat(5000)) === '', 'an oversized pending sequence (sixel) is dropped')
+
+    // Round trip of a Claude-like TUI (E6-FR-03).
+    let fx = ''
+    for (let i = 0; i < 60; i++) fx += `\x1b[38;2;${i * 4};120;200mline ${i}\x1b[0m ` + 'é漢😀'.repeat(i % 3) + '\r\n'
+    fx += '\x1b[?2004h\x1b[?1h\x1b[?25l\x1b[?1000;1006h\x1b[?1004h'
+    fx += '╭' + '─'.repeat(40) + '╮\r\n│ \x1b[1m> \x1b[0mtype here' + ' '.repeat(28) + '│\r\n╰' + '─'.repeat(40) + '╯'
+    fx += '\x1b[2A\x1b[5G\x1b[K\x1b[48;2;30;30;30m✻ Thinking\x1b[0m\x1b[3;1H\x1b[2Kreplaced row\x1b[J\x1b[10;20H'
+    {
+      const m = mirrorOf(80, 24)
+      const src = client(80, 24)
+      for (let i = 0; i < fx.length; i += 97) { m.write(fx.slice(i, i + 97)); src.write(fx.slice(i, i + 97)) }
+      const snap = m.snapshot({ scrollback: 2000, purpose: 'replay' })
+      check(snap.cols === 80 && snap.rows === 24 && !snap.altScreen && snap.lines > 24, 'snapshot reports size, buffer and lines')
+      const dst = client(80, 24)
+      dst.write(snap.data)
+      const a = state(src.t), b = state(dst.t)
+      check(JSON.stringify(a.normal) === JSON.stringify(b.normal), 'round trip: every row (text, truecolor, bold, wide chars) identical')
+      check(a.cx === b.cx && a.cy === b.cy, 'round trip: cursor position identical')
+      check(a.modes === b.modes && a.encoding === b.encoding && b.encoding === 'SGR' && a.hidden === b.hidden && b.hidden === true, 'round trip: modes (mouse, SGR encoding, paste, app cursor, focus) and hidden cursor identical')
+      check(dst.replies.length === 0, 'writing a snapshot makes the receiving terminal answer nothing')
+      m.dispose()
+    }
+    {
+      // Alt screen: normal history + vim-like alt content.
+      const m = mirrorOf(60, 12), src = client(60, 12)
+      const alt = '$ ls\r\nfile.txt\r\n$ vim\x1b[?1049h\x1b[?1002h\x1b[H\x1b[2J' + '~\r\n'.repeat(8) + '\x1b[1;1H\x1b[7m-- INSERT --\x1b[0m\x1b[5;3H'
+      m.write(alt); src.write(alt)
+      const snap = m.snapshot({ scrollback: 2000, purpose: 'replay' })
+      const dst = client(60, 12); dst.write(snap.data)
+      const a = state(src.t), b = state(dst.t)
+      check(snap.altScreen && b.type === 'alternate' && JSON.stringify(a.alt) === JSON.stringify(b.alt) && JSON.stringify(a.normal) === JSON.stringify(b.normal), 'round trip with the alt screen active: both buffers identical')
+      check(a.cx === b.cx && a.cy === b.cy && a.modes === b.modes, 'alt screen round trip keeps cursor and mouse mode')
+      const persist = m.snapshot({ scrollback: 2000, purpose: 'persist' })
+      check(!persist.data.includes('\x1b[?1049h') && !persist.data.includes('INSERT') && persist.data.includes('file.txt') && !persist.data.includes('\x1b[?1002h'), 'persist snapshot: normal buffer only, no alt buffer and no modes')
+      m.dispose()
+    }
+    {
+      // Partial tail through a snapshot: the next frame completes it (E6-FR-35).
+      const m = mirrorOf(40, 5)
+      m.write('abc\x1b[38;2;25')
+      const snap = m.snapshot({ scrollback: 2000, purpose: 'replay' })
+      check(snap.data.endsWith('\x1b[38;2;25'), 'the replay ends with the pending escape')
+      const dst = client(40, 5); dst.write(snap.data); dst.write('5;0;0mX')
+      const line = dst.t.buffer.active.getLine(0), x = line.getCell(3)
+      check(line.translateToString(true) === 'abcX' && x.getChars() === 'X' && x.isFgRGB() && x.getFgColor() === 0xff0000, 'the client shows a red X and no literal escape text')
+      m.write('5;0;0mX')
+      check(!m.snapshot({ scrollback: 2000, purpose: 'replay' }).data.endsWith('25'), 'once completed, the tail is gone')
+      m.dispose()
+    }
+    {
+      // Resize and live Unicode (E6-FR-06).
+      const m = mirrorOf(80, 24)
+      m.resize(100, 30)
+      check(m.cols === 100 && m.rows === 30 && m.synchronous, 'resize reaches the mirror (writeSync available in xterm 5.5)')
+      m.write('😀x')
+      check(m.term.buffer.active.cursorX === 3, 'Unicode 11: the emoji is 2 columns wide')
+      m.setUnicode(false); m.write('\r\n😀x')
+      check(m.term.buffer.active.cursorX === 2, 'switching to Unicode 6 live changes the width in the existing mirror')
+      m.setScrollback(5000)
+      check(m.term.options.scrollback === 5000, 'scrollback adjusts live')
+      m.dispose()
+    }
+    {
+      // Snapshot cost at the NFR size (2000 lines x 120 columns), printed; the gate is loose.
+      const m = mirrorOf(120, 40)
+      const row = i => `\x1b[38;2;${i % 255};90;160m${String(i).padStart(5)} ` + 'lorem ipsum dolor sit amet '.repeat(5).slice(0, 110) + '\x1b[0m\r\n'
+      let big = ''; for (let i = 0; i < 2100; i++) big += row(i)
+      m.write(big)
+      const times = []
+      for (let i = 0; i < 10; i++) { const t0 = process.hrtime.bigint(); m.snapshot({ scrollback: 2000, purpose: 'replay' }); times.push(Number(process.hrtime.bigint() - t0) / 1e6) }
+      times.sort((a, b) => a - b)
+      console.log(`  HeadlessMirror: snapshot 2000x120 p95 ${times[9].toFixed(1)} ms (budget 25 ms)`)
+      check(times[9] < 500, 'a 2000-line snapshot stays far below 500 ms')
+      m.dispose()
+    }
+
+    // PtyManager integration: when the mirror exists (E6-FR-01).
+    {
+      const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+      pm.spawn({ paneId: 'a', cols: 80, rows: 24 }); pm.spawn({ paneId: 'b', cols: 80, rows: 24 })
+      check(pm.headlessMetrics().panes === 2, 'auto + persistence: a mirror per pane from the spawn')
+      h.procs[0].exit(0)
+      check(pm.headlessMetrics().panes === 1, 'the mirror is disposed with its pty')
+      pm.setEngine({ snapshotMode: 'off' })
+      check(pm.headlessMetrics().panes === 0, "switching to 'off' drops every mirror")
+      pm.setEngine({ snapshotMode: 'auto', persist: true })
+      check(pm.headlessMetrics().panes === 1, 'back to auto + persistence: live ptys get a mirror again')
+      pm.killAll()
+    }
+    for (const engine of [{ snapshotMode: 'auto', persist: false }, { snapshotMode: 'lazy', persist: true }]) {
+      const { pm, h } = manager(engine)
+      const sm = new SessionManager({ ptyManager: pm })
+      pm.addSink(sm)
+      pm.spawn({ paneId: 'p', cols: 80, rows: 24 })
+      h.procs[0].emit('hello\r\n')
+      await flushAll()
+      const label = engine.snapshotMode + (engine.persist ? '' : ' without persistence')
+      check(pm.headlessMetrics().panes === 0, `${label}: no mirror before anyone replays`)
+      const p = phone()
+      sm.handleSub(p.session, 'p')
+      check(pm.headlessMetrics().panes === 1 && p.frames[0].type === 'replay' && p.frames[0].data.includes('hello'), `${label}: a phone sub creates it (count +1) and gets its snapshot`)
+      h.procs[0].exit(0)
+      check(pm.headlessMetrics().panes === 0, `${label}: and it goes when the pty exits`)
+      pm.killAll()
+    }
+    for (const mode of ['lazy', 'off']) {
+      // Modes set long before the mirror exists (lazy) and in 'off' (E6-FR-05/33).
+      const { pm, h } = manager({ snapshotMode: mode })
+      pm.spawn({ paneId: 'm', cols: 100, rows: 30 })
+      h.procs[0].emit('\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l')
+      const line = '\x1b[38;2;200;100;50m' + 'y'.repeat(60) + '\x1b[0m\r\n'
+      for (let i = 0; i < 4000; i++) h.procs[0].emit(line)
+      h.procs[0].emit('tail$ ')
+      await flushAll()
+      const rep = pm.getReplay('m')
+      const dst = client(100, 30); dst.write(rep.replay)
+      const b = state(dst.t)
+      check(dst.t.modes.mouseTrackingMode === 'vt200' && b.encoding === 'SGR' && dst.t.modes.bracketedPasteMode && b.hidden, `${mode}: modes emitted before 300 KB of output are active in the replay`)
+      const buf = dst.t.buffer.active
+      check(!/;\d+;\d+m/.test(texts(dst.t.buffer.normal).join('\n')) && buf.getLine(buf.baseY + buf.cursorY).translateToString(true).startsWith('tail$'), `${mode}: clean head and the live prompt on the cursor row`)
+      check(pm.headlessMetrics().panes === (mode === 'off' ? 0 : 1), `${mode}: ${mode === 'off' ? 'no mirror in any path' : 'the replay created the mirror'}`)
+      pm.killAll()
+    }
+    {
+      // A ring truncated inside an escape seeds a lazy mirror without garbage (E6-FR-02).
+      const { pm, h } = manager({ snapshotMode: 'lazy' })
+      pm.spawn({ paneId: 't', cols: 80, rows: 24 })
+      h.procs[0].emit('start\x1b[38;2;')
+      h.procs[0].emit('255;0;0mRED-HEAD\r\n')
+      // Small chunks so the ring drops one chunk at a time.
+      const filler = 'f'.repeat(8) + '\r\n'
+      let n = 0
+      const entry = pm.entries.get(pm.ptyIdForPane('t'))
+      // Stop right after the chunk ending in `\x1b[38;2;` leaves the ring.
+      while (entry.history[0] !== '255;0;0mRED-HEAD\r\n' && n++ < 40000) h.procs[0].emit(filler)
+      await flushAll()
+      check(entry.historyTruncated && entry.history[0].startsWith('255;0;0m'), 'fixture: the ring head starts inside an escape sequence')
+      const dst = client(80, 24); dst.write(pm.getReplay('t').replay)
+      check(!texts(dst.t.buffer.normal).some(l => /\d+;\d+;\d+m/.test(l)), 'no `255;0;0m` text anywhere in the replayed screen')
+      pm.killAll()
+    }
+    {
+      // DA1 / DSR never reach the pty (E6-FR-06), the cache serializes once (NFR).
+      const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+      const { ptyId } = pm.spawn({ paneId: 'q', cols: 80, rows: 24 })
+      h.procs[0].emit('prompt\x1b[c\x1b[6n\x1b[>c\x1b]11;?\x07$ ')
+      await flushAll()
+      const r1 = pm.getReplay('q')
+      check(h.procs[0].writes.length === 0, 'queries parsed by the mirror produce no pty.write')
+      check(!r1.replay.includes('\x1b[6n') && !r1.replay.includes('\x1b[c'), 'the snapshot carries no query')
+      const hits = pm.headlessMetrics().snapshotCacheHits
+      const r2 = pm.getReplay('q'), r3 = pm.reattach('q')
+      check(r2.replay === r1.replay && r3.replay === r1.replay && pm.headlessMetrics().snapshotCacheHits === hits + 2, 'two more replays without output reuse the cached snapshot')
+      check(r3.cols === 80 && r3.rows === 24 && typeof r3.shellKind === 'string' && r3.ptyId === ptyId, 'reattach returns cols/rows/shellKind (E6-FR-04)')
+      h.procs[0].emit('more')
+      await flushAll()
+      const r4 = pm.getReplay('q')
+      check(r4.replay !== r1.replay && pm.headlessMetrics().snapshotCacheHits === hits + 2, 'new output invalidates the cache')
+      pm.resize(ptyId, 100, 30)
+      const entry = pm.entries.get(ptyId)
+      check(entry.mirror.cols === 100 && entry.mirror.rows === 30, 'PtyManager.resize resizes the mirror')
+      const r5 = pm.getReplay('q')
+      check(r5.cols === 100 && r5.rows === 30 && pm.headlessMetrics().snapshotCacheHits === hits + 2, 'a resize invalidates the cache and the replay follows the new size')
+      pm.setEngine({ snapshotMode: 'auto', persist: true, unicode11: false, persistLines: 4000 })
+      check(entry.mirror.term.unicode.activeVersion === '6' && entry.mirror.term.options.scrollback === 4000, 'setEngine reaches live mirrors (Unicode version and scrollback)')
+      const m = pm.headlessMetrics()
+      check(['panes', 'parseMsP95', 'snapshotMsP95', 'bytesParsed', 'snapshotCacheHits'].every(k => typeof m[k] === 'number' && Number.isFinite(m[k])) && m.bytesParsed > 0, 'headlessMetrics: numeric panes, p95s and counters (E6-FR-07)')
+      pm.setEngine('garbage')
+      check(pm.getEngine().snapshotMode === 'auto' && pm.getEngine().unicode11 === true, 'a junk setEngine payload normalizes instead of throwing')
+      pm.killAll()
+    }
+    {
+      // A mirror that throws falls back to ring + modes, once, for good.
+      const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+      const warns = []
+      const realWarn = ptyConsole.warn
+      const { ptyId } = pm.spawn({ paneId: 'x', cols: 80, rows: 24 })
+      const entry = pm.entries.get(ptyId)
+      entry.mirror.write = () => { throw new Error('parser exploded') }
+      ptyConsole.warn = (...a) => warns.push(a.join(' '))
+      try {
+        h.procs[0].emit('\x1b[?2004hafter failure')
+        await flushAll()
+        const rep = pm.getReplay('x').replay
+        check(entry.mirror === null && entry.mirrorFailed && rep === '\x1b[?2004h' + '\x1b[?2004hafter failure', 'a mirror exception drops it and the replay is ModeTracker prefix + ring again')
+        h.procs[0].emit(' more'); await flushAll(); pm.getReplay('x')
+        check(entry.mirror === null && warns.length === 1 && warns[0].includes('pane x'), 'no new mirror for that pty and a single warning')
+      } finally { ptyConsole.warn = realWarn }
+      pm.killAll()
+    }
+    {
+      // Restart and natural exit read the mirror (E6-FR-19/20); the respawn seeds a new one.
+      const { SOFT_RESET } = loaded
+      const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+      const sm = new SessionManager({ ptyManager: pm })
+      pm.addSink(sm)
+      pm.spawn({ paneId: 'r', cols: 80, rows: 24 })
+      const line = 'z'.repeat(70) + '\r\n'
+      for (let i = 0; i < 4000; i++) h.procs[0].emit(line)
+      h.procs[0].emit('KEEP-ME\r\n\x1b[?1000h\x1b[?2004h$ ')
+      await flushAll()
+      const p = phone()
+      sm.handleSub(p.session, 'r')
+      const res = pm.restart({ paneId: 'r', cols: 80, rows: 24 }, 'reiniciado 14:32')
+      const seeded = p.frames.filter(f => f.type === 'replay').at(-1)
+      const dst = client(80, 24); dst.write(seeded.data)
+      const text = texts(dst.t.buffer.normal)
+      check(text.includes('KEEP-ME') && text.some(l => l.includes('--- reiniciado 14:32 ---')), 'after a restart the phone replay (from the new mirror) shows the kept output + separator')
+      check(dst.t.modes.mouseTrackingMode === 'none' && !dst.t.modes.bracketedPasteMode && pm.headlessMetrics().panes === 1, 'with modes off, and the new pty has its own mirror')
+      check(text.filter(l => l === 'z'.repeat(70)).length >= 1900, 'the new mirror got the whole seed (2000 lines), not only what fits in the ring')
+      h.procs.at(-1).emit('bye\r\n'); h.procs.at(-1).exit(4)
+      const ex = pm.getExited('r')
+      check(ex && ex.exitCode === 4 && ex.data.includes('bye') && ex.data.endsWith(SOFT_RESET) && endModes(ex.data) === '', 'a natural exit keeps the mirror snapshot + SOFT_RESET')
+      check(pm.headlessMetrics().panes === 0 && typeof res.ptyId === 'string', 'no mirror outlives its pty')
+      pm.killAll()
+    }
+    {
+      // Phone replay + next out frame across a partial escape (E6-FR-35, through SessionManager).
+      const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+      const sm = new SessionManager({ ptyManager: pm })
+      pm.addSink(sm)
+      const p = phone()
+      pm.spawn({ paneId: 's', cols: 40, rows: 5 })
+      h.procs[0].emit('abc\x1b[38;2;25')
+      await flushAll()
+      sm.handleSub(p.session, 's')
+      h.procs[0].emit('5;0;0mX')
+      await flushAll()
+      await new Promise(r => setTimeout(r, 120))
+      const out = p.frames.filter(f => f.type === 'out').map(f => f.data).join('')
+      const dst = client(40, 5); dst.write(p.frames[0].data + out)
+      const cellX = dst.t.buffer.active.getLine(0).getCell(3)
+      check(out === '5;0;0mX' && dst.t.buffer.active.getLine(0).translateToString(true) === 'abcX' && cellX.getFgColor() === 0xff0000, 'replay + next out frame: a red X on the phone, no literal text')
+      pm.killAll()
+    }
   }
 
   // Phone exit strip state (E6-FR-20).

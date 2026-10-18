@@ -34,6 +34,8 @@ export function registerPtyIpc(manager: PtyManager, restartLabel: () => string =
   )
   ipcMain.on(CH.PTY_SET_ACTIVE, (_e, paneIds: string[]) => manager.setActive(paneIds))
   ipcMain.on(CH.PTY_FLOW, (_e, req: PtyFlowReq) => manager.setFlow(req.ptyId, req.pause))
+  // Headless mirror settings (E6-FR-06): normalized in setEngine, junk never throws.
+  ipcMain.on(CH.PTY_SET_ENGINE, (_e, settings: unknown) => manager.setEngine(settings))
 
   ipcMain.handle(CH.PTY_KILL, (_e, ptyId: string) => manager.kill(ptyId))
 

@@ -9,6 +9,7 @@ import type { AwakeMode, ConfigFile } from '@shared/types'
 import { createMainWindow } from './window'
 import { dataDir, getConfigPath, isPortable } from './paths'
 import { PtyManager } from './pty/PtyManager'
+import { engineFromSettings } from '@shared/terminalEngine'
 import { ConfigStore } from './store/ConfigStore'
 import { parseConfig } from './store/schema'
 import { sanitizeExport } from './store/exportConfig'
@@ -337,6 +338,9 @@ async function bootstrap(): Promise<void> {
   registerConfigIpc()
   registerDialogIpc()
   registerClipboardIpc()
+  // Headless mirror policy from the saved config before any pty spawns (E6-FR-01);
+  // the renderer pushes every later change on pty:setEngine.
+  ptyManager.setEngine(engineFromSettings(configStore.load()?.settings))
   registerPtyIpc(ptyManager, () => {
     const cfg = configStore.load()
     return mainT(cfg, 'pty.restarted', { time: shortTime(cfg) })
@@ -411,6 +415,7 @@ async function bootstrap(): Promise<void> {
       cpuPercent: Math.round(cpu * 10) / 10,
       processes: metrics.length,
       consoles: ptyManager.count,
+      headless: ptyManager.headlessMetrics(),
     }
   })
   const startupCfg = configStore.load()

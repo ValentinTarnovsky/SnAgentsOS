@@ -1,7 +1,9 @@
 // Mobile terminal engine (E6-FR-05/14/15/33) against real xterm + Canvas +
 // Unicode11 in an isolated Electron window: emoji widths match the desktop
 // table, and a replay built by the real PtyManager for a pane whose mouse
-// capture scrolled out of the ring still routes the phone's swipe to the TUI.
+// capture scrolled out of the ring still routes the phone's swipe to the TUI,
+// both from the headless mirror snapshot (default 'auto', E6-FR-03/05) and
+// from the raw ring + ModeTracker prefix of the 'off' kill switch.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -23,22 +25,31 @@ function buildReplays() {
   const mod = { exports: {} }
   vm.runInNewContext(code, { module: mod, exports: mod.exports, console: { ...console, warn() {} }, process, Buffer, setTimeout, clearTimeout, require: id => id === 'node-pty' ? fakePty : id === 'electron' ? { app: { getPath: () => os.tmpdir() } } : require(id) })
   const pm = new mod.exports.PtyManager(() => null)
-  pm.spawn({ paneId: 'p', cols: 40, rows: 12 })
-  emit('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[c')
   const line = '\x1b[38;2;120;200;80m' + 'claude output '.repeat(4) + '\x1b[0m\r\n'
   let ring = ''
-  for (let i = 0; i < 5000; i++) { emit(line); ring += line }
-  emit('\x1b[H> prompt\x1b[6n')
-  const replay = pm.getReplay('p').replay
-  pm.killAll()
+  const busyPane = (paneId) => {
+    pm.spawn({ paneId, cols: 40, rows: 12 })
+    emit('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[c')
+    ring = ''
+    for (let i = 0; i < 5000; i++) { emit(line); ring += line }
+    emit('\x1b[H> prompt\x1b[6n')
+    const out = pm.getReplay(paneId).replay
+    pm.killAll()
+    return out
+  }
+  const replay = busyPane('p')
+  pm.setEngine({ snapshotMode: 'off' })
+  const replayOff = busyPane('o')
+  pm.setEngine({ snapshotMode: 'auto', persist: true })
   // A young pane where vim entered the alt screen: the ring has the switch.
   pm.spawn({ paneId: 'v', cols: 40, rows: 12 })
   emit('$ ls\r\nfile.txt\r\n$ vim\x1b[?1049h\x1b[?1000h\x1b[H~ vim buffer')
   const vimReplay = pm.getReplay('v').replay
   pm.killAll()
-  return { replay, vimReplay, rawTail: ring.slice(-200 * 1024) + '\x1b[H> prompt' }
+  return { replay, replayOff, vimReplay, rawTail: ring.slice(-200 * 1024) + '\x1b[H> prompt' }
 }
-const { replay, vimReplay, rawTail } = buildReplays()
+const { replay, replayOff, vimReplay, rawTail } = buildReplays()
+if (replay === replayOff || replay.length >= replayOff.length) throw new Error('fixture: the default replay should be the (smaller) mirror snapshot, not the ring')
 
 buildSync({ stdin: { resolveDir: root, loader: 'ts', contents: `
 import { Terminal } from '@xterm/xterm';
@@ -48,6 +59,7 @@ import { attachTouchScroll } from './src/mobile/src/lib/touchScroll';
 const REPLAY = ${JSON.stringify(replay)};
 const RAW_TAIL = ${JSON.stringify(rawTail)};
 const VIM_REPLAY = ${JSON.stringify(vimReplay)};
+const REPLAY_OFF = ${JSON.stringify(replayOff)};
 window.result = (async () => {
  let checks=0; const check=(ok,label)=>{if(!ok)throw new Error(label);checks++};
  const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -94,6 +106,13 @@ window.result = (async () => {
  touch('touchstart',60,40);touch('touchmove',60,160);touch('touchend',60,160);
  check(data.length>0 && data.every(s=>/^\\x1b\\[<64;/.test(s)), 'the first swipe reaches the TUI as SGR wheel reports, nothing sent before');
  detach(); term.dispose();
+
+ // The 'off' kill switch: raw ring + ModeTracker prefix gives the phone the same modes.
+ term = make();
+ const offData=[]; term.onData(s=>offData.push(s));
+ await write(REPLAY_OFF); await frames();
+ check(offData.length===0 && term.modes.mouseTrackingMode==='vt200' && term.modes.bracketedPasteMode && term.buffer.active.type==='alternate', "'off' replay: no answer, mouse capture, paste mode and alt screen restored");
+ term.dispose();
 
  // The alt-screen entry is still in the ring: quitting vim brings the shell back.
  term = make();
