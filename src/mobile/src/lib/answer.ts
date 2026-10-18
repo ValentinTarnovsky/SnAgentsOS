@@ -125,8 +125,8 @@ export function createAnswerer(deps: AnswerDeps): Answerer {
     after.set(paneId, deps.setTimeout(() => {
       after.delete(paneId)
       const status = deps.status(paneId)
-      // A new question of its own is a new request, not this one unconfirmed.
-      const newer = status?.pending?.some((p) => p.kind === 'question' && p.id !== state.pendingId)
+      // A newer request means Claude moved past this one: not unconfirmed.
+      const newer = status?.pending?.some((p) => p.id !== state.pendingId)
       deps.setState(paneId, stillAsking(status) && !newer ? { ...state, phase: 'unconfirmed' } : null)
     }, Math.max(0, ASK_CONFIRM_MS - ANSWER_STEP_MS)))
   }

@@ -1094,6 +1094,30 @@ function promptCardChecks() {
     h.input('\x1b')
     check(h.last().pending === undefined && h.last().state === 'action', 'Esc (a deny) invalidates the card too')
     h.hook('PostToolUse', { toolUseId: 'p2' })
+    // More terminal replies (DECXCPR, DECRQSS) never invalidate either.
+    h.tick(5)
+    h.hook('PermissionRequest', { toolUseId: 'p2b', toolName: 'Bash', requestSummary: 'ls' })
+    h.tick(1)
+    h.input('\x1b[?12;40;1R'); h.input('\x1bP1$r0;1m\x1b\\'); h.input('\x1bP0$r\x1b\\')
+    check(h.last().pending?.[0]?.id === 'p2b', 'DECXCPR and DECRQSS replies never invalidate the card')
+    h.hook('PostToolUse', { toolUseId: 'p2b' })
+    // A fallback (Notification only) answered before its PermissionRequest
+    // arrives: the promoted request keeps the mark, so no card comes back.
+    h.tick(5)
+    h.hook('Notification', { notificationType: 'permission_prompt' })
+    check(h.last().pending?.[0]?.id === 'fallback:permission', 'a permission_prompt Notification lists the fallback')
+    h.tick(1); h.input('1')
+    check(h.last().pending === undefined, 'answering the fallback invalidates it')
+    h.tick(1)
+    h.hook('PermissionRequest', { toolUseId: 'p2c', toolName: 'Bash', requestSummary: 'ls' })
+    check(h.manager.stateOf('pane').pending === undefined && h.manager.stateOf('pane').pendingCount === 1, 'the promoted request of an answered fallback stays out of pending[]')
+    h.hook('PostToolUse', { toolUseId: 'p2c' })
+    h.tick(5)
+    h.hook('Notification', { notificationType: 'permission_prompt' })
+    h.tick(1)
+    h.hook('PermissionRequest', { toolUseId: 'p2d', toolName: 'Bash', requestSummary: 'ls' })
+    check(h.manager.stateOf('pane').pending?.[0]?.id === 'p2d', 'an unanswered fallback promotes to a visible request')
+    h.hook('PostToolUse', { toolUseId: 'p2d' })
   }
   {
     const h = track()

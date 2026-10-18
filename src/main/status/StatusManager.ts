@@ -74,11 +74,11 @@ const GENERIC_TOPICS = /^(claude|claude code)$/i
  * Input that is only terminal reports, never an answer (E2-FR-48): focus in /
  * out, SGR and X10 mouse, plus the replies a terminal sends on its own to the
  * app's queries (cursor position, device attributes, status, mode reports,
- * kitty keyboard flags, OSC color answers), which a phone xterm emits while it
+ * kitty keyboard flags, OSC color answers, DECRQSS), which a phone xterm emits while it
  * parses a replay.
  */
 // eslint-disable-next-line no-control-regex
-const REPORTS_ONLY_RE = /^(?:\x1b\[[IO]|\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[M[\s\S]{3}|\x1b\[\d+;\d+R|\x1b\[[?>=][\d;]*c|\x1b\[\??\d+n|\x1b\[\??[\d;]+\$y|\x1b\[\?\d+u|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))+$/
+const REPORTS_ONLY_RE = /^(?:\x1b\[[IO]|\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[M[\s\S]{3}|\x1b\[\??\d+;\d+(?:;\d+)?R|\x1b\[[?>=][\d;]*c|\x1b\[\??\d+n|\x1b\[\??[\d;]+\$y|\x1b\[\?\d+u|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[01]\$r[^\x1b]*\x1b\\)+$/
 
 /** Topic after the spinner / stopped glyph of Claude's OSC title, or undefined for generic titles. */
 function titleTopic(title: string): string | undefined {
@@ -262,8 +262,12 @@ export class StatusManager implements PtySink {
         const id = evt.requestId ?? `fallback:${evt.reason ?? 'question'}`
         key = evt.requestId ? `request:${id}` : `request:${track.turnId}:${id}`
         if (evt.requestId && track.seen.has(key)) return
-        const promoted = !!evt.requestId && track.pending.delete(`fallback:${evt.reason ?? 'question'}`)
-        track.pending.set(id, { reason: evt.reason ?? 'question', toolName: evt.toolName ? clip(sanitize(evt.toolName, true), 80) : undefined, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions, requestAt: Date.now() })
+        const fallbackId = `fallback:${evt.reason ?? 'question'}`
+        const fallback = evt.requestId ? track.pending.get(fallbackId) : undefined
+        const promoted = !!evt.requestId && track.pending.delete(fallbackId)
+        // E2-FR-48: the promoted request is the prompt the fallback stood for;
+        // one already answered keeps its mark, so no card comes back for it.
+        track.pending.set(id, { reason: evt.reason ?? 'question', toolName: evt.toolName ? clip(sanitize(evt.toolName, true), 80) : undefined, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions, requestAt: fallback?.requestAt ?? Date.now(), ...(fallback?.invalidated ? { invalidated: true } : {}) })
         if (!promoted) notice = 'action'
         break
       }

@@ -145,6 +145,15 @@ function rig() {
   check(r.sent.length === 1 && r.sent[0].data === '2' && r.last() === null, 'a resolved ask clears without "Not confirmed"')
 }
 {
+  // Claude moved on to a new request (any kind): the old ask is not "Not confirmed".
+  const r = rig()
+  r.statuses.p = status([ask('q', [single()])], { reason: 'question' })
+  r.answerer.answerCard('p', 'q', { kind: 'ask', selections: [{ options: [0] }] })
+  r.statuses.p = status([perm('n', 'Bash')], { reason: 'question', pendingCount: 2 })
+  r.advance(P.ASK_CONFIRM_MS + 10)
+  check(r.last() === null, 'a newer permission request clears the ask outcome instead of "Not confirmed"')
+}
+{
   // The pane leaves action between groups: the rest is not written.
   const r = rig()
   r.statuses.p = status([ask('q', [multi(), multi()])], { reason: 'question' })
