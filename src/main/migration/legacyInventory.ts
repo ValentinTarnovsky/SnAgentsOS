@@ -101,7 +101,7 @@ export interface CleanupEnv {
   /** CFBundleIdentifier of an .app, null when unreadable. */
   bundleId?: (appPath: string) => string | null
   /** SnMultiCC.exe (or the POSIX process) of the current user is running. */
-  isLegacyProcessRunning(): boolean
+  isLegacyProcessRunning(): boolean | Promise<boolean>
   /** The Chromium profile in dir is held by a live process (lockfile / SingletonLock). */
   isFolderLocked(dir: string): boolean
   migrateLegacyHooks(): 'rewritten' | 'notNeeded' | 'pending'
@@ -687,6 +687,7 @@ const L10: InventoryItem = {
   needsLegacyClosed: false,
   describe: () => [`HKCU\\${REG.run}\\${LEGACY_BRAND.appId}`, `HKCU\\${REG.startupApproved}\\${LEGACY_BRAND.appId}`],
   async run(r) {
+    if (r.env.platform === 'darwin' && r.env.mode === 'installed') return macLoginItem(r)
     if (r.env.platform !== 'win32' || r.env.mode !== 'installed') return notThisMode
     if (!r.env.registry || !r.env.loginItem) return { state: 'absent', reason: 'noRegistry' }
     // New value first, then the legacy ones: StartupSection reads the OS state and must stay ON.
@@ -785,27 +786,106 @@ async function cleanWindowsPortableExe(r: Run): Promise<ItemOutcome> {
 
 const L17: InventoryItem = {
   needsLegacyClosed: true,
-  describe: (env) => [env.exe.portableExeFile() ?? '-'],
+  describe: (env) => [(env.platform === 'linux' ? env.exe.appImage?.() : env.exe.portableExeFile()) ?? '-'],
   async run(r) {
-    if (r.env.mode !== 'portable') return notThisMode
-    if (r.env.platform === 'win32') return cleanWindowsPortableExe(r)
-    return { state: 'deferred', reason: 'notImplemented' }
+    if (r.env.platform === 'linux') return renameLinuxAppImage(r)
+    if (r.env.mode !== 'portable' || r.env.platform !== 'win32') return notThisMode
+    return cleanWindowsPortableExe(r)
   },
 }
 
-/** Placeholder for items whose platform part is not wired yet: they stay open. */
-const notYet: InventoryItem = {
-  needsLegacyClosed: false,
-  describe: () => [],
-  async run() {
-    return { state: 'deferred', reason: 'notImplemented' }
+// --- macOS and Linux ---------------------------------------------------------
+
+/**
+ * macOS (FR-12): with launchOnStartup migrated, the new login item is
+ * registered, or StartupSection would silently turn off. The 1.x one cannot
+ * be removed from another app (SMAppService registers per bundle); macOS
+ * drops it with the bundle (L21).
+ */
+async function macLoginItem(r: Run): Promise<ItemOutcome> {
+  r.marker.loginItemMigrated = true
+  if (!r.env.loginItem || !r.env.readMigratedSettings()?.launchOnStartup) return { state: 'absent' }
+  r.env.loginItem.enable()
+  return { state: 'done' }
+}
+
+export const APPIMAGE_NAME = `${BRAND.productName}.AppImage`
+
+/** FR-36: an AppImage still named after 1.x is renamed like FR-33 (1), and APPIMAGE follows it (the swap uses it). */
+async function renameLinuxAppImage(r: Run): Promise<ItemOutcome> {
+  const file = r.env.exe.appImage?.() ?? null
+  if (!file || !/snmulticc/i.test(basename(file))) return { state: 'absent' }
+  const dest = join(dirname(file), APPIMAGE_NAME)
+  const fsx = r.env.fs ?? nodeFsp
+  const adopt = (): void => {
+    r.env.exe.setAppImage?.(dest)
+    r.marker.portableExeRenamedTo = dest
+    r.persist()
+  }
+  if (await lstatOrNull(r, dest)) {
+    if ((await hashFile(r, dest)) !== (await hashFile(r, file))) return { state: 'skipped', reason: 'nameConflict' }
+    // POSIX unlinks a running file fine: the new name already holds the same bytes.
+    adopt()
+    return outcome(await safeRemoveTree(file, r.env.guard, r.rm))
+  }
+  try {
+    await fsx.rename(file, dest)
+  } catch (err) {
+    const code = errCode(err)
+    return code === 'EROFS' || code === 'EACCES' ? { state: 'skipped', reason: 'readOnly' } : { state: 'deferred', reason: code }
+  }
+  adopt()
+  return { state: 'done' }
+}
+
+/**
+ * L21. macOS: SnMultiCC.app in /Applications or ~/Applications whose
+ * CFBundleIdentifier is the 1.x appId goes to the Trash (never deleted);
+ * without permission it is needsElevation (the notice asks to move it by
+ * hand). Linux: the old .deb needs root and is documented (README).
+ */
+const L21: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => env.roots.macApplications.map((d) => join(d, `${LEGACY_BRAND.productName}.app`)),
+  async run(r) {
+    if (r.env.platform === 'linux') return { state: 'absent', reason: 'debNeedsRoot' }
+    if (r.env.platform !== 'darwin') return notThisMode
+    // SingletonLock of the 1.x profile: the bundle is still open.
+    const profile = r.env.legacyDataDir ?? join(r.env.roots.appData, LEGACY_BRAND.packageName)
+    if (r.env.isFolderLocked(profile)) return { state: 'deferred', reason: 'legacyRunning' }
+    const results: ItemOutcome[] = []
+    for (const dir of r.env.roots.macApplications) {
+      const app = join(dir, `${LEGACY_BRAND.productName}.app`)
+      const st = await lstatOrNull(r, app)
+      if (!st) continue
+      if (st.isSymbolicLink()) {
+        results.push({ state: 'skipped', reason: 'reparsePoint' })
+        continue
+      }
+      if (r.env.bundleId?.(app) !== LEGACY_BRAND.appId) {
+        results.push({ state: 'skipped', reason: 'guard' })
+        continue
+      }
+      if (!r.env.trash) {
+        results.push({ state: 'deferred', reason: 'noTrash' })
+        continue
+      }
+      try {
+        await r.env.trash(app)
+        results.push({ state: 'done' })
+      } catch (err) {
+        const code = errCode(err)
+        results.push(code === 'EACCES' || code === 'EPERM' || /permission|not permitted/i.test(String((err as Error)?.message)) ? { state: 'skipped', reason: 'needsElevation' } : { state: 'deferred', reason: code })
+      }
+    }
+    return combineOutcomes(results)
   },
 }
 
 export const INVENTORY: Record<LegacyItemId, InventoryItem> = {
   L01, L02, L03, L04, L05, L06: shortcutItem((env) => env.roots.startMenuPrograms), L07: shortcutItem((env) => env.roots.desktop),
   L08, L09, L10, L11, L12, L13, L14, L15: tempPrefixItem(`${LEGACY_BRAND.tempPrefix}update-`),
-  L16: tempPrefixItem(`${LEGACY_BRAND.tempPrefix}swap-`), L17, L18, L19, L20, L21: notYet,
+  L16: tempPrefixItem(`${LEGACY_BRAND.tempPrefix}swap-`), L17, L18, L19, L20, L21,
 }
 
 // --- Runner -----------------------------------------------------------------
@@ -859,7 +939,7 @@ export async function runCleanup(env: CleanupEnv): Promise<CleanupResult> {
     if (isTerminalItem(current?.state)) continue
     const item = INVENTORY[id]
     let result: ItemOutcome
-    if (item.needsLegacyClosed && (legacyRunning ??= env.isLegacyProcessRunning())) {
+    if (item.needsLegacyClosed && (legacyRunning ??= await env.isLegacyProcessRunning())) {
       result = { state: 'deferred', reason: 'legacyRunning' }
     } else {
       try {
