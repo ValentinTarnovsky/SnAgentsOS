@@ -1,5 +1,7 @@
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import { cn } from '@/lib/cn'
+import { ariaKeyshortcuts, type ActionId } from '@/lib/keymap'
+import { KeyHint, useActionKeys } from './KeyHint'
 
 type Variant = 'primary' | 'ghost'
 type Size = 'sm' | 'md'
@@ -22,19 +24,32 @@ const variants: Record<Variant, string> = {
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant
   size?: Size
+  /**
+   * Shortcut chip after the label (E4-FR-29): fixed keys (['Enter']) or a
+   * keymap action, resolved live. Only for primary actions, never Cancel.
+   */
+  keyHint?: string[] | ActionId
   children: ReactNode
 }
 
 export function Button({
   variant = 'primary',
   size = 'md',
+  keyHint,
   className,
   children,
   ...rest
 }: ButtonProps) {
+  const actionKeys = useActionKeys(typeof keyHint === 'string' ? keyHint : null)
+  const keys = Array.isArray(keyHint) ? keyHint : actionKeys
   return (
-    <button className={cn(base, sizes[size], variants[variant], className)} {...rest}>
+    <button
+      className={cn(base, sizes[size], variants[variant], className)}
+      aria-keyshortcuts={keys.length > 0 ? ariaKeyshortcuts(keys) : undefined}
+      {...rest}
+    >
       {children}
+      {keys.length > 0 && <KeyHint keys={keys} tone={variant === 'primary' ? 'onAccent' : 'muted'} />}
     </button>
   )
 }

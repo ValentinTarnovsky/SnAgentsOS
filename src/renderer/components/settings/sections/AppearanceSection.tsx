@@ -20,7 +20,7 @@ export function AppearanceSection() {
 
   return (
     <div className="space-y-6">
-      <SettingRow title={t('settings.theme')} description={t('settings.themeHint')}>
+      <SettingRow searchId="appearance.theme" title={t('settings.theme')} description={t('settings.themeHint')}>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {THEME_LIST.map((theme) => {
             const selected = settings.theme === theme.name
@@ -60,7 +60,7 @@ export function AppearanceSection() {
         </div>
       </SettingRow>
 
-      <SettingRow title={t('settings.customColors')} description={t('settings.customColorsHint')}>
+      <SettingRow searchId="appearance.customColors" title={t('settings.customColors')} description={t('settings.customColorsHint')}>
         <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
           {UI_TOKENS.map(({ key, label }) => {
             const value = effective[key] ?? '#000000'

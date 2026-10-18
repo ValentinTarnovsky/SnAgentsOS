@@ -42,16 +42,19 @@ export function StartupSection() {
       <ToggleRow
         checked={settings.restoreLastWorkspace}
         onChange={(v) => updateSettings({ restoreLastWorkspace: v })}
+        searchId="startup.restoreLast"
         title={t('settings.restoreLast')}
       />
       <ToggleRow
         checked={settings.confirmCloseRunning}
         onChange={(v) => updateSettings({ confirmCloseRunning: v })}
+        searchId="startup.confirmClose"
         title={t('settings.confirmClose')}
       />
       <ToggleRow
         checked={settings.closeToTray}
         onChange={(v) => updateSettings({ closeToTray: v })}
+        searchId="startup.closeToTray"
         title={t('settings.closeToTray')}
         description={portable ? t('settings.installedOnly') : undefined}
         disabled={portable}
@@ -59,6 +62,7 @@ export function StartupSection() {
       <ToggleRow
         checked={settings.launchOnStartup}
         onChange={setLaunch}
+        searchId="startup.launchOnStartup"
         title={t('settings.launchOnStartup')}
         description={portable ? t('settings.installedOnly') : undefined}
         disabled={portable}
@@ -68,6 +72,7 @@ export function StartupSection() {
         <ToggleRow
           checked={settings.globalHotkeyEnabled}
           onChange={(v) => applyHotkey(v, settings.globalHotkey)}
+          searchId="startup.globalHotkey"
           title={t('settings.globalHotkey')}
           description={t('settings.globalHotkeyHint')}
         />

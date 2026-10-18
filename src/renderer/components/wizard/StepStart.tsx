@@ -29,6 +29,8 @@ export function StepStart({ draft, update }: StepProps) {
           <div className="flex min-w-0 flex-1 items-center gap-2 rounded-btn border border-border bg-bg-primary px-3 py-2">
             <Folder size={15} className="shrink-0 text-accent-violet" />
             <input
+              data-wizard-cwd
+              aria-label={t('wizard.workingFolder')}
               value={draft.cwd}
               onChange={(e) => update({ cwd: e.target.value })}
               placeholder={t('wizard.folderPlaceholder')}
