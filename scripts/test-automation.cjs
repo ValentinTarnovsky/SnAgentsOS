@@ -3,7 +3,8 @@
 // Quick Commands actions. R22-12: initial prompt rules (argv/gate/fallback),
 // submit (paced 64 KB + late CR, split DECSET 2004, multiline_unsafe), the
 // gate, stateOf and running Quick Commands (desktop and the strict phone
-// variant). Same esbuild + vm harness as test-status.cjs.
+// variant). R22-13: composer model, note/taskState store actions, first
+// prompt to the first agent console, fs:dirExists. Same esbuild + vm harness as test-status.cjs.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -646,6 +647,116 @@ async function quickRunChecks() {
   check(toasts().length === count, 'a delivered prompt shows nothing')
 }
 
+// --- R22-13: workspace composer, note and task state (E8-FR-08..10) -------------
+async function composerChecks() {
+  // Note normalization (shared with the CLI later).
+  const N = load('src/shared/workspaceNote.ts')
+  check(N.WORKSPACE_NOTE_MAX === 140 && N.TASK_STATES.join() === 'todo,doing,review,done', 'note max and task states')
+  check(N.normalizeWorkspaceNote('  revisar\nel\r\nlogin\t ok ') === 'revisar el login ok', 'line breaks and tabs become single spaces, ends trimmed')
+  check(N.normalizeWorkspaceNote('   ') === undefined && N.normalizeWorkspaceNote('') === undefined && N.normalizeWorkspaceNote(7) === undefined && N.normalizeWorkspaceNote(null) === undefined, 'blank or non-string is no note')
+  check(N.normalizeWorkspaceNote('x'.repeat(141)).length === 140 && N.normalizeWorkspaceNote('x'.repeat(140)).length === 140, '141 characters are clipped to 140')
+  const emoji = N.normalizeWorkspaceNote('a'.repeat(139) + '\u{1F600}')
+  check(emoji === 'a'.repeat(139), 'the clip never leaves half a surrogate pair')
+  check(N.isTaskState('review') && !N.isTaskState('blocked') && !N.isTaskState(null), 'isTaskState')
+
+  // Composer model.
+  const C = loadRenderer(`export * from '@/components/wizard/composerModel'`)
+  const wss = [{ cwd: 'C:/a' }, { cwd: 'C:/repos/api' }, { cwd: '' }, { cwd: 'c:\\A\\' }, { cwd: 'D:/web' }, { cwd: 'C:/repos/api/' }]
+  check(C.folderSuggestions(wss, '').join('|') === 'C:/repos/api/|D:/web|c:\\A\\', 'suggestions: most recent first, one per folder (normalized), empty cwd skipped')
+  check(C.folderSuggestions(wss, 'REPOS').join('|') === 'C:/repos/api/', 'a query filters case-insensitively')
+  check(C.folderSuggestions(wss, 'C:\\repos\\api').length === 0, 'the folder already typed is not suggested')
+  const many = Array.from({ length: 12 }, (_, i) => ({ cwd: `C:/p${i}` }))
+  check(C.folderSuggestions(many, '').length === 8 && C.folderSuggestions(many, '')[0] === 'C:/p11', 'at most 8 suggestions, the newest first')
+  check(C.basenameOf('C:\\repos\\api\\') === 'api' && C.basenameOf('/home/me/web') === 'web' && C.basenameOf('') === '', 'basenameOf')
+  const presets = [
+    { id: 'sh', name: 'Shell', type: 'shell', command: '', args: [], color: '#111', icon: 'terminal' },
+    { id: 'cx', name: 'Codex', type: 'codex', command: 'codex', args: [], color: '#222', icon: 'codex' },
+    { id: 'cl', name: 'Claude', type: 'claude', command: 'claude', args: [], color: '#333', icon: 'claude' },
+  ]
+  check(C.resolveDefaultPreset(presets, 'cx') === 'cx', 'the saved default agent wins')
+  check(C.resolveDefaultPreset(presets, 'gone') === 'cl' && C.resolveDefaultPreset(presets, '') === 'cl', 'a deleted or empty default falls back to the first claude')
+  check(C.resolveDefaultPreset(presets.slice(0, 2), '') === 'sh' && C.resolveDefaultPreset([], '') === '', 'without claude the first preset, without presets nothing')
+  const ev = (key, o = {}) => ({ key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...o })
+  const el = (tagName, attrs = {}) => ({ tagName, getAttribute: (n) => (n in attrs ? attrs[n] : null) })
+  check(C.composerKeyAction(ev('Enter', { ctrlKey: true }), el('TEXTAREA'), true) === 'create', 'Ctrl+Enter creates from the textarea')
+  check(C.composerKeyAction(ev('Enter', { ctrlKey: true }), el('TEXTAREA'), false) === 'block', 'Ctrl+Enter without a folder is swallowed')
+  check(C.composerKeyAction(ev('Enter'), el('TEXTAREA'), true) === null, 'Enter in the prompt is a newline')
+  check(C.composerKeyAction(ev('Enter'), el('BUTTON', { 'data-composer-agent': 'cl', role: 'radio' }), true) === 'create', 'Enter on the agent selector creates')
+  check(C.composerKeyAction(ev('Enter'), el('INPUT'), true) === 'create' && C.composerKeyAction(ev('Enter'), el('INPUT'), false) === 'block', 'Enter in a text field creates, or is blocked without a folder')
+  check(C.composerKeyAction(ev('Enter'), el('BUTTON'), true) === null && C.composerKeyAction(ev('Enter'), el('SELECT'), true) === null, 'other buttons and the profile select keep their Enter')
+  check(C.composerKeyAction(ev('Enter', { isComposing: true }), el('INPUT'), true) === null && C.composerKeyAction(ev('a'), el('INPUT'), true) === null && C.composerKeyAction(ev('Enter', { altKey: true }), el('INPUT'), true) === null, 'IME, other keys and Alt+Enter are not ours')
+  const panes = C.composerPanes(presets[2], 4)
+  check(panes.length === 4 && panes.every((p) => p.presetId === 'cl' && p.type === 'claude' && p.title === 'Claude') && panes[0] !== panes[1], 'every grid cell gets the same agent (own objects)')
+  check(C.composerPanes(undefined, 1)[0].type === 'shell', 'a missing preset makes a shell')
+  check(C.COMPOSER_GRIDS.join() === '1,2,4', 'grid choices 1 / 2 / 4')
+  check(C.nextAgentIndex('ArrowRight', 2, 3) === 0 && C.nextAgentIndex('ArrowLeft', 0, 3) === 2 && C.nextAgentIndex('End', 0, 3) === 2 && C.nextAgentIndex('x', 0, 3) === null, 'agent selector arrows wrap')
+
+  // Store: note, task state, first prompt, composer and advanced wizard.
+  const r = loadRenderer(`export { useAppStore } from './store'`, {
+    window: { snApi: { config: { save() {} }, pty: { killPanes: async () => 0 } } },
+    document: { hasFocus: () => false },
+  })
+  const S = r.useAppStore
+  S.getState().hydrate({ ...v11(), settings: { ...S.getState().settings } })
+  S.getState().setWorkspaceNote('w1', '  revisar\nlogin ')
+  check(S.getState().workspaces[0].note === 'revisar login', 'setWorkspaceNote normalizes line breaks')
+  S.getState().setWorkspaceNote('w1', 'n'.repeat(141))
+  check(S.getState().workspaces[0].note.length === 140, 'the store never keeps 141 characters')
+  const before = S.getState().workspaces
+  S.getState().setWorkspaceNote('w1', 'n'.repeat(141))
+  check(S.getState().workspaces === before, 'the same note again changes nothing')
+  S.getState().setWorkspaceNote('w1', '  ')
+  check(!('note' in S.getState().workspaces[0]), 'a blank note removes the key')
+  S.getState().setWorkspaceTaskState('w2', 'review')
+  check(S.getState().workspaces[1].taskState === 'review', 'setWorkspaceTaskState sets it')
+  S.getState().setWorkspaceTaskState('w2', 'blocked')
+  check(!('taskState' in S.getState().workspaces[1]), 'an unknown state clears it')
+  S.getState().setWorkspaceTaskState('w2', 'done')
+  S.getState().setWorkspaceTaskState('w2', null)
+  check(!('taskState' in S.getState().workspaces[1]), 'null clears it')
+  S.getState().setWorkspaceNote('nope', 'x')
+  check(S.getState().workspaces.every((w) => !w.note), 'an unknown workspace is ignored')
+
+  const pane = (type, presetId) => ({ type, presetId, title: type, color: '#fff', icon: type })
+  const id1 = S.getState().createWorkspaceFull({ name: 'Nuevo', cwd: 'C:/n', grid: 4, panes: [pane('shell'), pane('claude', 'cl'), pane('claude', 'cl'), pane('codex', 'cx')], firstPrompt: 'arregla el login' })
+  const ws1 = S.getState().workspaces.find((w) => w.id === id1)
+  const pending = S.getState().pendingPrompts
+  check(S.getState().activeWorkspaceId === id1, 'the created workspace is active')
+  check(Object.keys(pending).length === 1 && pending[ws1.panes[1].id] && pending[ws1.panes[1].id].text === 'arregla el login' && pending[ws1.panes[1].id].enter === true && pending[ws1.panes[1].id].source === 'composer', 'the first prompt goes only to the first agent console, with Enter')
+  S.getState().createWorkspaceFull({ name: 'Solo shell', cwd: 'C:/s', grid: 1, panes: [pane('shell')], firstPrompt: 'hola' })
+  S.getState().createWorkspaceFull({ name: 'Blanco', cwd: 'C:/b', grid: 1, panes: [pane('claude', 'cl')], firstPrompt: '   ' })
+  check(Object.keys(S.getState().pendingPrompts).length === 1, 'no agent console or a blank prompt queues nothing')
+  check(S.getState().takePendingPrompt(ws1.panes[1].id).text === 'arregla el login' && S.getState().takePendingPrompt(ws1.panes[1].id) === null, 'the prompt is consumed once')
+
+  S.getState().setWizardOpen(true, { cwd: 'C:/pre' })
+  let st = S.getState()
+  check(st.wizardOpen && st.composerOpen && st.wizardPrefill.cwd === 'C:/pre' && st.wizardDraft === null, 'setWizardOpen(true) opens the composer with the prefill')
+  S.getState().openAdvancedWizard({ name: 'api', cwd: 'C:/api', grid: 2, presetId: 'cl', setupId: '' })
+  st = S.getState()
+  check(st.wizardOpen && !st.composerOpen && st.wizardDraft.cwd === 'C:/api' && st.wizardDraft.grid === 2 && st.wizardPrefill === null, '"Advanced..." swaps in the wizard with the draft, the flow stays open')
+  S.getState().setWizardOpen(false)
+  st = S.getState()
+  check(!st.wizardOpen && !st.composerOpen && st.wizardDraft === null && st.wizardPrefill === null, 'closing clears the whole flow')
+
+  // Persisted fields survive a round trip through the schema.
+  S.getState().setWorkspaceNote('w1', 'nota final')
+  S.getState().setWorkspaceTaskState('w1', 'doing')
+  const round = parseConfig(clone({ ...v11(), workspaces: S.getState().workspaces }))
+  check(round.workspaces[0].note === 'nota final' && round.workspaces[0].taskState === 'doing', 'note and taskState persist through the schema')
+
+  // fs:dirExists probe.
+  const { dirExists } = load('src/main/dirExists.ts')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-direxists-'))
+  try {
+    const file = path.join(tmp, 'f.txt')
+    fs.writeFileSync(file, 'x')
+    check((await dirExists(tmp)) === true && (await dirExists(file)) === false && (await dirExists(path.join(tmp, 'nope'))) === false, 'dirExists: folder yes, file and missing no')
+    check((await dirExists('relative/dir')) === false && (await dirExists('')) === false && (await dirExists(42)) === false && (await dirExists(tmp + '\0x')) === false && (await dirExists('C:/' + 'x'.repeat(5000))) === false, 'relative, empty, non-string, NUL and over-long paths are not folders')
+    const hang = await dirExists(tmp, { stat: () => new Promise(() => {}), timeoutMs: 30 })
+    check(hang === true, 'a stalled probe (unreachable share) answers true after the timeout')
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+}
+
 async function main() {
   schemaChecks()
   helperChecks()
@@ -655,8 +766,9 @@ async function main() {
   await gateChecks()
   stateOfChecks()
   await quickRunChecks()
+  await composerChecks()
   fs.rmSync(shellDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} automation checks (schema 12, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands)`)
+  console.log(`PASS: ${checks} automation checks (schema 12, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state)`)
 }
 main().catch((err) => {
   fs.rmSync(shellDir, { recursive: true, force: true })

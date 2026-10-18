@@ -103,6 +103,9 @@ const api: SnApi = {
   dialog: {
     openDirectory: () => ipcRenderer.invoke(CH.DIALOG_OPEN_DIR) as Promise<string | null>,
   },
+  fs: {
+    dirExists: (path: string) => ipcRenderer.invoke(CH.FS_DIR_EXISTS, path) as Promise<boolean>,
+  },
   clipboard: {
     writeText: (text: string) => ipcRenderer.send(CH.CLIPBOARD_WRITE, text),
     readText: () => ipcRenderer.invoke(CH.CLIPBOARD_READ) as Promise<string>,

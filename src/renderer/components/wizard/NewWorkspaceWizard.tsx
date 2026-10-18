@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Check } from 'lucide-react'
 import type { GridPreset } from '@shared/types'
-import { useAppStore } from '@/lib/store'
+import { useAppStore, type WizardInitialDraft } from '@/lib/store'
 import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { isFromToast } from '@/lib/toast'
@@ -12,6 +12,7 @@ import { StepAgents } from './StepAgents'
 import { WizardFooter } from './WizardFooter'
 import type { WizardDraft } from './types'
 import { initialWizardFocus, trapTabIndex, wizardKeyAction } from './wizardKeys'
+import { takeFlowFocus } from './flowFocus'
 
 function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? 'workspace'
@@ -26,13 +27,20 @@ function focusables(root: HTMLElement): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null || el === document.activeElement)
 }
 
-export function NewWorkspaceWizard() {
+/**
+ * The 3-step wizard: the composer's "Advanced..." (E8-FR-08). It opens on
+ * `initialDraft` (default: the store's `wizardDraft`, folder, name, grid and
+ * agent from the composer); `wizardPrefill` still seeds it when set.
+ */
+export function NewWorkspaceWizard({ initialDraft }: { initialDraft?: WizardInitialDraft | null } = {}) {
   const t = useT()
-  const open = useAppStore((s) => s.wizardOpen)
+  const open = useAppStore((s) => s.wizardOpen && !s.composerOpen)
   const setWizardOpen = useAppStore((s) => s.setWizardOpen)
   const presets = useAppStore((s) => s.presets)
   const createWorkspaceFull = useAppStore((s) => s.createWorkspaceFull)
   const prefill = useAppStore((s) => s.wizardPrefill)
+  const storeDraft = useAppStore((s) => s.wizardDraft)
+  const seed = initialDraft !== undefined ? initialDraft : storeDraft
 
   const defaultPresetId = useMemo(
     () => presets.find((p) => p.type === 'shell')?.id ?? presets[0]?.id ?? '',
@@ -58,23 +66,39 @@ export function NewWorkspaceWizard() {
   // hand focus back unless a workspace was created (its console takes it).
   useEffect(() => {
     if (open) {
-      if (!prevFocus.current && document.activeElement instanceof HTMLElement) prevFocus.current = document.activeElement
+      // Handed over by the composer, else whatever had the focus.
+      const handed = takeFlowFocus()
+      if (!prevFocus.current) prevFocus.current = handed ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
       created.current = false
-      const cwd = prefill?.cwd ?? ''
       setStep(0)
-      setDraft({ name: prefill?.name ?? (cwd ? basename(cwd) : ''), cwd, grid: 1, assignments: [defaultPresetId], setupId: '' })
+      if (seed) {
+        const cell = presets.some((p) => p.id === seed.presetId) ? seed.presetId : defaultPresetId
+        setDraft({
+          name: seed.name || (seed.cwd ? basename(seed.cwd) : ''),
+          cwd: seed.cwd,
+          grid: seed.grid,
+          assignments: Array.from({ length: seed.grid }, () => cell),
+          setupId: seed.setupId,
+        })
+      } else {
+        const cwd = prefill?.cwd ?? ''
+        setDraft({ name: prefill?.name ?? (cwd ? basename(cwd) : ''), cwd, grid: 1, assignments: [defaultPresetId], setupId: '' })
+      }
       setFocusReq((n) => n + 1)
       return
     }
     const prev = prevFocus.current
     prevFocus.current = null
     if (prev && !created.current && prev.isConnected) prev.focus()
-  }, [open, defaultPresetId, prefill])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, defaultPresetId, prefill, seed])
 
   // "Open in SnAgentsOS" never overwrites a folder being set up here (E4-FR-33).
+  const flowOpen = useAppStore((s) => s.wizardOpen)
   useEffect(() => {
-    setWizardDraftCwd(open ? draft.cwd : null)
-  }, [open, draft.cwd])
+    if (open) setWizardDraftCwd(draft.cwd)
+    else if (!flowOpen) setWizardDraftCwd(null)
+  }, [open, flowOpen, draft.cwd])
 
   // Move focus inside once the reset draft rendered: the folder input on an
   // empty draft, the primary button when the folder came prefilled.

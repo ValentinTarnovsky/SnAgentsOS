@@ -15,6 +15,7 @@ import React, {useState} from 'react'; import {createRoot} from 'react-dom/clien
 import {Sidebar} from './src/renderer/components/sidebar/Sidebar';
 import {SettingsModal} from './src/renderer/components/settings/SettingsModal';
 import {NewWorkspaceWizard} from './src/renderer/components/wizard/NewWorkspaceWizard';
+import {WorkspaceComposer} from './src/renderer/components/wizard/WorkspaceComposer';
 import {GlobalPromptDialog} from './src/renderer/components/workspace/GlobalPromptDialog';
 import {ConfirmDialog} from './src/renderer/components/ui/ConfirmDialog';
 import {I18nProvider} from './src/renderer/i18n';
@@ -42,7 +43,7 @@ function Root(){const lang=useAppStore(s=>s.settings.language);const [confirm,sc
  return <I18nProvider lang={lang}><div style={{height:'100vh'}} className="flex bg-bg-primary text-text-primary"><Sidebar/>
  <main className="flex-1 p-6"><div className="xterm"><textarea id="term" className="xterm-helper-textarea" aria-label="term"/></div></main>
  {above&&<input id="above" aria-label="above" className="fixed left-2 top-2 z-[90] w-24"/>}
- <SettingsModal/><NewWorkspaceWizard/><GlobalPromptDialog/>
+ <SettingsModal/><WorkspaceComposer/><NewWorkspaceWizard/><GlobalPromptDialog/>
  <ConfirmDialog open={confirm} title="Borrar" message="Seguro?" confirmLabel="Borrar" cancelLabel="Cancelar" onConfirm={()=>sc(false)} onCancel={()=>sc(false)}/></div></I18nProvider>}
 createRoot(document.getElementById('root')).render(<Root/>);
 // The console behind: a keydown that reaches its textarea counts as typed into the pty.
@@ -62,7 +63,8 @@ window.smoke={calls,created,termKeys,explorerArgs,theme:applyTheme,
  set:p=>useAppStore.setState(p),
  settings:p=>useAppStore.getState().updateSettings(p),
  openSettings:t=>useAppStore.getState().openSettings(t),
- openWizard:p=>useAppStore.getState().setWizardOpen(true,p),
+ // The 3-step wizard is the composer's Advanced... (E8-FR-08).
+ openWizard:p=>useAppStore.getState().openAdvancedWizard(p?{name:'',grid:1,presetId:'',setupId:'',...p}:null),
  confirm:v=>setConfirm(v),
  above:v=>setAbove(v),
  search:q=>setInput(document.querySelector('[data-settings-search]'),q),
@@ -228,10 +230,10 @@ app.whenReady().then(async()=>{
 
  // --- E4-FR-33: "Open in" over Settings ---------------------------------------
  await js("smoke.open('D:/New/proj','open-1')");await frame();await frame();
- eq([(await js('smoke.state()')).open,(await js('smoke.state()')).wizard,await js("document.querySelector('[data-wizard-cwd]')?.value"),(await js('smoke.active()')).primary],[false,true,'D:/New/proj','next'],'a new folder closes Settings and opens the wizard prefilled, focus on Next');
- ok(await js("[...document.querySelectorAll('[data-wizard] input')].some(i=>i.value==='proj')"),'the name is the folder basename');
+ eq([(await js('smoke.state()')).open,(await js('smoke.state()')).wizard,await js("document.querySelector('[data-composer-cwd]')?.value"),await js("document.activeElement.hasAttribute('data-composer-primary')")],[false,true,'D:/New/proj',true],'a new folder closes Settings and opens the composer prefilled, focus on Create');
+ ok(await js("document.querySelector('[data-composer-name]')?.value==='proj'"),'the name is the folder basename');
  await js("smoke.open('E:/Other','open-2')");await frame();
- eq(await js("document.querySelector('[data-wizard-cwd]')?.value"),'D:/New/proj','another folder never overwrites the wizard in progress');
+ eq(await js("document.querySelector('[data-composer-cwd]')?.value"),'D:/New/proj','another folder never overwrites the composer in progress');
  await js("smoke.set({wizardOpen:false})");await frame();
  await js("smoke.openSettings();smoke.set({activeWorkspaceId:null})");await frame();
  await js("smoke.open('c:/W/','open-3')");await frame();

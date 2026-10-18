@@ -5,6 +5,7 @@ import { isPortable } from '../paths'
 import { openExternalSafe } from '../openExternal'
 import type { OpenRequestQueue } from '../openRequest'
 import { applyExplorerMenu, readExplorerMenu } from '../shellIntegration'
+import { dirExists } from '../dirExists'
 
 /**
  * OS login-item integration. No-op on the portable build because the executable
@@ -29,6 +30,9 @@ export function registerSystemIpc(getSender: () => WebContents | null, openReque
     applyExplorerMenu(req?.enabled === true, req?.language === 'es' ? 'es' : 'en'),
   )
   ipcMain.handle(CH.SYSTEM_GET_EXPLORER_MENU, (): Promise<ExplorerMenuResult> => readExplorerMenu())
+
+  // Workspace composer: "folder does not exist" hint, never a blocker (E8-FR-08).
+  ipcMain.handle(CH.FS_DIR_EXISTS, (_e, p: unknown): Promise<boolean> => dirExists(p))
 
   // Terminal hyperlinks (and any renderer "open in browser" action) route here.
   ipcMain.on(CH.SHELL_OPEN_EXTERNAL, (_e, url: unknown) => openExternalSafe(url))
