@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Copy, Minus, Square, X } from 'lucide-react'
 import { BRAND } from '@shared/brand'
 import { LogoMark } from '@/components/ui/Logo'
+import { AwakeIndicator } from '@/components/agents/AwakeIndicator'
 import { useUpdaterStore } from '@/lib/updater'
 import { useT } from '@/i18n'
 
@@ -31,6 +32,7 @@ export function TitleBar() {
       </div>
 
       <div className="app-no-drag flex h-full items-stretch">
+        <AwakeIndicator />
         <button
           onClick={() => window.snApi.window.minimize()}
           title={t('titlebar.minimize')}
