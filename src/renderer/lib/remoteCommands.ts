@@ -3,6 +3,7 @@ import type { RemoteCtlAction } from '@shared/remote-protocol'
 import { useAppStore } from './store'
 import { killPanePtys } from './ptyRegistry'
 import { broadcastToWorkspace } from './broadcastPrompt'
+import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
 
 interface CmdResult {
   ok: boolean
@@ -60,7 +61,8 @@ function run(action: RemoteCtlAction): CmdResult {
         return { ok: false, error: 'not_found' }
       }
       killPanePtys([action.paneId])
-      store.removePane(action.workspaceId, action.paneId)
+      // Through closePane so the desktop can reopen it (E5-FR-14).
+      store.closePane(action.workspaceId, action.paneId)
       return { ok: true }
     }
 
@@ -69,7 +71,11 @@ function run(action: RemoteCtlAction): CmdResult {
       if (!ws || !ws.panes.some((p) => p.id === action.paneId)) {
         return { ok: false, error: 'not_found' }
       }
-      store.restartPane(action.paneId)
+      // E5-FR-11: true resumes (falls back to a new chat with the chip when the
+      // record is gone), false forgets the session, absent = the header button.
+      if (action.resume === true) restartResume(action.paneId)
+      else if (action.resume === false) restartFresh(action.paneId)
+      else restartFromButton(action.paneId)
       return { ok: true }
     }
 
