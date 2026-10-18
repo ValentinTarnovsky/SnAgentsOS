@@ -80,11 +80,11 @@ app.whenReady().then(async()=>{
  ok((await js('smoke.store()')).open,'Agent settings opens the settings');
  eq(await js("[...document.querySelectorAll('[role=radio][data-awake-mode]')].map(e=>[e.textContent,e.getAttribute('aria-checked')])"),[['Auto','false'],['Siempre','true'],['Nunca','false']],'settings radiogroup mirrors the mode');
  ok(await js("document.body.textContent.includes('Comportamiento')&&document.body.textContent.includes('Mantener tambi\\u00e9n la pantalla encendida')"),'Behavior block in Spanish');
- await js("[...document.querySelectorAll('[role=switch]')].find(e=>e.closest('section[aria-labelledby=agents-behavior]')).click()");await frame();
+ await js("document.querySelector('[data-setting-id$=awakeDisplay] [role=switch]').click()");await frame();
  eq(await js('smoke.settings().agents.awakeDisplay'),true,'the display toggle writes settings.agents.awakeDisplay');
  await js("document.querySelector('[data-awake-mode=never]').click()");await frame();
  eq(await js('smoke.settings().awakeMode'),'never','the settings radio writes awakeMode');
- ok(await js("(()=>{const sw=[...document.querySelectorAll('section[aria-labelledby=agents-behavior] [role=switch]')];return sw[0].disabled&&sw.slice(1).every(e=>!e.disabled)})()"),'the display toggle is disabled in Never (the agent row toggles after it are not)');
+ ok(await js("(()=>{const d=document.querySelector('[data-setting-id$=awakeDisplay] [role=switch]');const sw=[...document.querySelectorAll('section[aria-labelledby=agents-behavior] [role=switch]')].filter(e=>e!==d);return d.disabled&&sw.every(e=>!e.disabled)})()"),'the display toggle is disabled in Never (the agent row toggles after it are not)');
  await shot('awake-settings-midnight');
  for(const q of ['despierta','awake','pantalla','sleep']){await js('smoke.search('+JSON.stringify(q)+')');await frame();ok(await js("document.body.textContent.includes('Comportamiento')"),'search finds the block: '+q)}
  await js("smoke.search('zzqx')");await frame();ok(!(await js("document.body.textContent.includes('Comportamiento')")),'a search that matches nothing hides the block');
