@@ -2,7 +2,7 @@
  * The exit strip of the viewed console (E6-FR-20): set by an `exit` frame or
  * by a `replay` of a pane whose shell already ended (`exitCode`), cleared by
  * the next replay that brings `running: true` (restart) or by switching panes.
- * Kept apart from the main store: it only feeds the strip and the drawer.
+ * Kept apart from the main store: it only feeds the strip and the Home rows.
  */
 import { create } from 'zustand'
 import type { TermFrame } from './client'

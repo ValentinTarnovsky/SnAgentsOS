@@ -1,8 +1,8 @@
 // Render the phone's agent status UI (E1-FR-04..06, 40) with the production
 // CSS in an isolated offscreen browser at phone width: the six indicator
-// shapes and their state tokens, the drawer's second line and clamped preview,
-// the "N waiting" pill, the action sheet header, the Alerts toggle, and the
-// spinning ring standing still under prefers-reduced-motion.
+// shapes and their state tokens, the Home rows' second line and one-line
+// preview (E2-FR-05), the "N waiting" pill, the per-pane actions header, and
+// the spinning ring standing still under prefers-reduced-motion.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -16,8 +16,8 @@ import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { StatusIndicator } from './src/mobile/src/components/StatusIndicator';
 import { WaitingPill } from './src/mobile/src/components/WaitingPill';
-import { ConsoleDrawer } from './src/mobile/src/components/ConsoleDrawer';
-import { ActionSheet } from './src/mobile/src/components/ActionSheet';
+import { HomeScreen } from './src/mobile/src/components/HomeScreen';
+import { PaneActionList } from './src/mobile/src/components/PaneActionList';
 import { store } from './src/mobile/src/lib/store';
 import { setLang } from './src/mobile/src/lib/i18n';
 const frames = () => new Promise(r => setTimeout(r, 16));
@@ -64,7 +64,7 @@ window.result = (async () => {
   b1: { state: 'action', reason: 'question', stateSince: now - 2 * MIN },
  };
  flushSync(() => store.getState().update({ phase: 'live', snapshot, paneStatus, activePaneId: 'a1', subscribedPaneId: 'a1', connected: true }));
- flushSync(() => root.render(<div><header style={{ display: 'flex' }}><WaitingPill /></header><ConsoleDrawer open={true} onClose={() => {}} /></div>));
+ flushSync(() => root.render(<div><header style={{ display: 'flex' }}><WaitingPill /></header><HomeScreen /></div>));
  await frames();
  const pill = host.querySelector('[data-waiting]');
  check(pill && pill.textContent === '1 waiting', 'viewing one of two waiting panes, the pill says "1 waiting" (got ' + (pill && pill.textContent) + ')');
@@ -72,18 +72,19 @@ window.result = (async () => {
  const row = id => host.querySelector('[data-pane=' + id + ']');
  check(row('a1').querySelector('[data-status-line]').textContent === 'Waiting for permission', 'a permission row reads "Waiting for permission"');
  check(row('a2').querySelector('[data-status-line]').textContent === 'Done 3m ago', 'a done row reads "Done 3m ago"');
- check(row('b1').querySelector('[data-status-line]').textContent === 'Question', 'a question row reads "Question"');
- check(!row('b2').querySelector('[role=img]') && !row('b2').querySelector('[data-status-line]'), 'a pane without status has no indicator or second line');
+ check(row('b1').querySelector('[data-status-line]').textContent === 'Question pending', 'a question row reads "Question pending"');
+ check(!row('b2').querySelector('[role=img]') && row('b2').querySelector('[data-status-line]').textContent === 'Idle', 'a running pane without status has no indicator and reads Idle');
+ check(!row('a1').querySelector('[data-last-message]'), 'a pane in action shows no preview (only done or idle do)');
  const preview = row('a2').querySelector('[data-last-message]');
  const lh = parseFloat(getComputedStyle(preview).lineHeight);
- check(preview.getBoundingClientRect().height <= lh * 2 + 1, 'the preview is clamped to two lines');
- check(noOverflow(), 'drawer fits 360px without horizontal overflow');
- check(host.querySelector('[data-workspace=w1] span').className.includes('accent-violet'), 'the viewed workspace is highlighted');
+ check(preview.getBoundingClientRect().height <= lh + 1, 'the preview is cut to one line');
+ check(noOverflow(), 'Home fits 360px without horizontal overflow');
+ check(row('a1').className.includes('accent-violet'), 'the viewed console is highlighted');
 
  flushSync(() => store.getState().update({ activePaneId: 'b2', paneStatus: { ...paneStatus } }));
  await frames();
  check(host.querySelector('[data-waiting]').textContent === '2 waiting', 'from another pane both waiting consoles count');
- check(host.querySelector('[data-workspace=w2] span').className.includes('accent-violet'), 'the highlight follows the viewed pane into another workspace');
+ check(row('b2').className.includes('accent-violet') && !row('a1').className.includes('accent-violet'), 'the highlight follows the viewed pane into another workspace');
  flushSync(() => store.getState().update({ paneStatus: {} }));
  await frames();
  check(!host.querySelector('[data-waiting]'), 'with nothing waiting the pill disappears');
@@ -95,11 +96,11 @@ window.result = (async () => {
  check(row('a1').querySelector('[data-status-line]').textContent === 'Esperando permiso', 'the second line is translated');
  setLang('en');
 
- flushSync(() => root.render(<ActionSheet open={true} onClose={() => {}} />));
+ flushSync(() => root.render(<PaneActionList target={{ workspaceId: 'w1', paneId: 'a1' }} onClose={() => {}} />));
  await frames();
- const head = host.querySelector('[data-action-status]');
- check(head && head.textContent.includes('Viewed console') && head.textContent.includes('Waiting for permission') && head.textContent.includes('Run the tests?'), 'the action sheet header shows status and last reply');
- check(noOverflow(), 'action sheet fits 360px');
+ const head = document.querySelector('[data-action-header]');
+ check(head && head.textContent.includes('Viewed console') && head.textContent.includes('Front') && head.textContent.includes('Run the tests?') && head.querySelector('[role=img][data-state=action]'), 'the per-pane actions header shows title, workspace, status and last reply');
+ check(noOverflow(), 'the actions fit 360px');
  return checks;
 })();
 window.reducedCheck = () => {

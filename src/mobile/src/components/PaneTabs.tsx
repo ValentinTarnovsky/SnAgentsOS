@@ -3,9 +3,9 @@
  * workspace in layoutOrder, each with its agent status, the pane type icon and
  * the title cut to 18 characters. The active chip is filled, panes without a
  * pty are dimmed to 50%, and the active chip scrolls into view when it
- * changes. A tap opens the pane through client.switchWorkspaceAndView (lazy
- * spawn aware); the trailing "+" creates a console in this workspace and
- * enters it. Every chip calls preventDefault on pointerdown so the first tap
+ * changes. A tap opens the pane through client.requestOpen (phone-only
+ * navigation, E2-FR-06); the trailing "+" creates a console in this workspace
+ * and enters it. Every chip calls preventDefault on pointerdown so the first tap
  * works with the soft keyboard open (the focused input keeps the focus).
  *
  * A long-press of LONG_PRESS_MS (E1-FR-33) opens the pane's ActionList via
@@ -55,7 +55,7 @@ function PaneChip({
       aria-description={t('tabs.holdHint')}
       title={pane.title}
       {...press}
-      onClick={() => void client.switchWorkspaceAndView(workspaceId, pane.id)}
+      onClick={() => void client.requestOpen(pane.id)}
       className={clsx(
         'flex h-8 max-w-[60vw] shrink-0 select-none items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors',
         active
@@ -81,7 +81,8 @@ export function PaneTabs({ onPaneActions }: { onPaneActions: (ref: PaneRef) => v
 
   const createHere = async (): Promise<void> => {
     const res = await client.sendCtl({ kind: 'createPane', workspaceId })
-    if (res.ok && res.paneId) await client.switchWorkspaceAndView(workspaceId, res.paneId)
+    if (res.ok && res.paneId) client.showPane(res.paneId)
+    else useRemoteStore.getState().setToast(t('toast.createFailed'))
   }
 
   return (
