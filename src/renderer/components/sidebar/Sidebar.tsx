@@ -15,6 +15,8 @@ import {
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { ActionTooltipLabel, KeyHint, useActionKeys } from '@/components/ui/KeyHint'
+import { ariaKeyshortcuts } from '@/lib/keymap'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { UsageBars } from '@/components/sidebar/UsageBars'
@@ -165,6 +167,10 @@ export function Sidebar() {
   const [renameValue, setRenameValue] = useState('')
 
   const onNew = (): void => setWizardOpen(true)
+  // Shortcut chips from the live keymap (E4-FR-30): a rebind shows at once.
+  const newKeys = useActionKeys('newWorkspace')
+  const settingsKeys = useActionKeys('openSettings')
+  const sidebarKeys = useActionKeys('toggleSidebar')
 
   // Favorites float to the top (stable within each group); Alt+1..9 use the same order.
   const sorted = sidebarOrder(workspaces)
@@ -221,9 +227,10 @@ export function Sidebar() {
             {t('sidebar.header')}
           </span>
         )}
-        <Tooltip label={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')} side="right">
+        <Tooltip label={<ActionTooltipLabel label={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')} action="toggleSidebar" />} side="right">
           <button
             onClick={toggleSidebar}
+            aria-keyshortcuts={sidebarKeys.length > 0 ? ariaKeyshortcuts(sidebarKeys) : undefined}
             className="rounded-lg border border-border/70 bg-card/40 p-1 text-text-secondary transition-colors hover:border-accent-violet/40 hover:bg-card hover:text-text-primary"
           >
             {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
@@ -232,11 +239,13 @@ export function Sidebar() {
       </div>
 
       <div className="px-2 pb-2 pt-1">
-        <Tooltip label={sidebarCollapsed ? t('sidebar.newWorkspace') : ''} side="right">
+        <Tooltip label={sidebarCollapsed ? <ActionTooltipLabel label={t('sidebar.newWorkspace')} action="newWorkspace" /> : ''} side="right">
           <button
             onClick={onNew}
+            data-sidebar-new
+            aria-keyshortcuts={newKeys.length > 0 ? ariaKeyshortcuts(newKeys) : undefined}
             className={cn(
-              'flex w-full items-center justify-center overflow-hidden rounded-btn border border-accent-violet/30 bg-accent-violet/10 px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent-violet/50 hover:bg-accent-violet/20',
+              'group relative flex w-full items-center justify-center overflow-hidden rounded-btn border border-accent-violet/30 bg-accent-violet/10 px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent-violet/50 hover:bg-accent-violet/20',
               sidebarCollapsed ? 'gap-0' : 'gap-2',
             )}
           >
@@ -249,6 +258,9 @@ export function Sidebar() {
             >
               {t('sidebar.newWorkspace')}
             </span>
+            {!sidebarCollapsed && (
+              <KeyHint keys={newKeys} className="absolute right-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            )}
           </button>
         </Tooltip>
       </div>
@@ -399,10 +411,12 @@ export function Sidebar() {
       <UsageBars />
 
       <div className="shrink-0 border-t border-border p-2">
-        <Tooltip label={sidebarCollapsed ? t('sidebar.settings') : ''} side="right">
+        <Tooltip label={sidebarCollapsed ? <ActionTooltipLabel label={t('sidebar.settings')} action="openSettings" /> : ''} side="right">
           <button
             onClick={() => setSettingsOpen(true)}
-            className="flex w-full items-center gap-2 overflow-hidden rounded-btn px-[11px] py-2 text-sm text-text-secondary transition-colors hover:bg-card hover:text-text-primary"
+            data-sidebar-settings
+            aria-keyshortcuts={settingsKeys.length > 0 ? ariaKeyshortcuts(settingsKeys) : undefined}
+            className="group flex w-full items-center gap-2 overflow-hidden rounded-btn px-[11px] py-2 text-sm text-text-secondary transition-colors hover:bg-card hover:text-text-primary"
           >
             <Settings size={16} className="shrink-0" />
             <span
@@ -413,6 +427,9 @@ export function Sidebar() {
             >
               {t('sidebar.settings')}
             </span>
+            {!sidebarCollapsed && (
+              <KeyHint keys={settingsKeys} className="ml-auto opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            )}
           </button>
         </Tooltip>
       </div>

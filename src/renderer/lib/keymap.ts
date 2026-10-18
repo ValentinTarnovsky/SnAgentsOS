@@ -122,3 +122,34 @@ export function formatAccel(accel: string): string {
     .map((p) => (p === 'Meta' ? 'Win' : p))
     .join(' + ')
 }
+
+/**
+ * Split an accelerator into its keys for a chip per key (E4-FR-29/30), with
+ * Meta shown as Win like formatAccel. A trailing "++" is the "+" key itself.
+ */
+export function accelParts(accel: string): string[] {
+  if (!accel) return []
+  const plusKey = accel.endsWith('++') || accel === '+'
+  const parts = (plusKey ? accel.slice(0, accel === '+' ? 0 : -2) : accel)
+    .split('+')
+    .filter(Boolean)
+    .map((p) => (p === 'Meta' ? 'Win' : p))
+  return plusKey ? [...parts, '+'] : parts
+}
+
+const ARIA_KEY: Record<string, string> = {
+  Ctrl: 'Control',
+  Win: 'Meta',
+  Esc: 'Escape',
+  Up: 'ArrowUp',
+  Down: 'ArrowDown',
+  Left: 'ArrowLeft',
+  Right: 'ArrowRight',
+  Space: 'Space',
+  '+': 'Plus',
+}
+
+/** The aria-keyshortcuts value for a chip's keys ("Control+Enter"). */
+export function ariaKeyshortcuts(keys: string[]): string {
+  return keys.map((k) => ARIA_KEY[k] ?? k).join('+')
+}
