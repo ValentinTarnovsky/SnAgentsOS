@@ -15,7 +15,9 @@ import { registerPty, unregisterPty } from '@/lib/ptyRegistry'
 import { registerFocuser, setFocusedPane, unregisterFocuser } from '@/lib/focus'
 import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegistry'
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
+import { registerRestarter, unregisterRestarter } from '@/lib/restartRegistry'
 import { prepareAgentLaunch } from '@/lib/agentLaunch'
+import type { ShellKind } from '@shared/ipc-contract'
 import { useT } from '@/i18n'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
@@ -26,6 +28,10 @@ const unicodeVersion = (v11: boolean): string => (v11 ? '11' : '6')
 
 /** A user-supplied string made safe to print inside an ANSI line. */
 const plain = (s: string): string => s.replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+
+/** The message of a failed spawn/restart invoke, without Electron's IPC wrapper. */
+const spawnError = (err: unknown): string =>
+  plain(String(err instanceof Error ? err.message : err).replace(/^Error invoking remote method '[^']*': (?:Error: )?/, ''))
 
 /** Highlight palette for in-pane search matches. */
 const SEARCH_OPTS = {
@@ -223,6 +229,22 @@ export interface XtermController {
   clearSearch: () => void
   /** Focus the terminal input. */
   focus: () => void
+  /** Respawn the shell in this same xterm, keeping the scrollback (E6-FR-18). */
+  restart: () => void
+  /** Hide the exit card; the pane stays dead and the header Restart still works. */
+  hideExitCard: () => void
+  /** Family of the live shell (cd prefix of the "Claude exited" chip), or null. */
+  shellKind: () => ShellKind | null
+}
+
+/** Exit card state of a pane (E6-FR-17/18), owned by the pane, never persisted. */
+export interface XtermExitState {
+  /** Exit code of the shell (-1 when it never started). */
+  code: number
+  /** The (re)spawn failed with this message: the next Restart uses the OS default shell. */
+  error?: string
+  /** Whether the card is shown (Esc hides it). */
+  cardVisible: boolean
 }
 
 export interface UseXtermOptions {
@@ -240,6 +262,8 @@ export interface UseXtermOptions {
    * (display:none) can't be measured by xterm, so we refit when they reveal.
    */
   isActive?: boolean
+  /** Exit card state changes (null = running or restarted). */
+  onExitState?: (state: XtermExitState | null) => void
 }
 
 /**
@@ -263,7 +287,18 @@ export function useXterm(
     search: () => false,
     clearSearch: () => undefined,
     focus: () => undefined,
+    restart: () => undefined,
+    hideExitCard: () => undefined,
+    shellKind: () => null,
   })
+  /** Latest options: an in-place restart relaunches with the current launch props. */
+  const optsRef = useRef(opts)
+  optsRef.current = opts
+  /** Exit card state; read by the key handler (Enter / Esc while it shows). */
+  const exitRef = useRef<XtermExitState | null>(null)
+  /** True while an in-place restart is in flight (the old pty's exit is not this pane's). */
+  const restartingRef = useRef(false)
+  const shellKindRef = useRef<ShellKind | null>(null)
   // Backpressure bookkeeping (kept in refs so the reveal effect can reset it).
   const pendingRef = useRef(0)
   const pausedRef = useRef(false)
@@ -512,10 +547,28 @@ export function useXterm(
     // visible corruption right now.
     registerRedrawer(opts.paneId, () => rendererHandle.reload())
 
+    // Exit card state (E6-FR-17): kept in a ref for the key handler, mirrored
+    // to the pane chrome through onExitState.
+    const emitExit = (next: XtermExitState | null): void => {
+      exitRef.current = next
+      optsRef.current.onExitState?.(next)
+    }
+
     // Terminal copy/paste via the Electron clipboard. Ctrl+C copies the
     // selection (else falls through to ^C / interrupt); Ctrl+V pastes;
     // Ctrl+Shift+C / Ctrl+Shift+V are explicit copy/paste.
     term.attachCustomKeyEventHandler((e) => {
+      // While the exit card shows, Enter restarts and Esc hides it; neither
+      // reaches the (dead) pty, on any event phase (E6-FR-17).
+      const exit = exitRef.current
+      if (exit?.cardVisible && (e.key === 'Enter' || e.key === 'Escape') && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.type === 'keydown') {
+          e.preventDefault()
+          if (e.key === 'Enter') void restart()
+          else emitExit({ ...exit, cardVisible: false })
+        }
+        return false
+      }
       if (e.type !== 'keydown') return true
       const mod = e.ctrlKey || e.metaKey
       if (!mod || e.altKey) return true
@@ -545,6 +598,7 @@ export function useXterm(
       }
       if (key === 'v') {
         e.preventDefault()
+        useAppStore.getState().clearAgentEnded(opts.paneId)
         void window.snApi.clipboard.readText().then((text) => {
           // Route through xterm's paste rather than writing the raw clipboard:
           // it normalizes CRLF/LF to CR and, when the inner app enabled
@@ -563,6 +617,8 @@ export function useXterm(
     let disposed = false
     let offData: () => void = () => undefined
     let offExit: () => void = () => undefined
+    /** The first reattach/spawn; a restart waits for it so a pane never binds two ptys. */
+    let launched: Promise<void> = Promise.resolve()
 
     // Cold start: the first pane can mount before the JetBrains Mono web font
     // finishes loading, so xterm builds its glyph atlas from the fallback font
@@ -663,20 +719,92 @@ export function useXterm(
         })
       })
       offExit = window.snApi.pty.onExit((e) => {
-        if (e.ptyId === ptyId) {
-          term.write(`\r\n\x1b[2m[process exited (${e.exitCode})]\x1b[0m\r\n`)
-        }
+        if (e.ptyId !== ptyId || restartingRef.current) return
+        term.write(`\r\n\x1b[2m[process exited (${e.exitCode})]\x1b[0m\r\n`)
+        // Only a shell that ended on its own gets the card and the "exited"
+        // label; a kill from elsewhere keeps the gray line alone (E6-FR-17).
+        if (e.natural === false) return
+        const app = useAppStore.getState()
+        app.setPaneExit(opts.paneId, e.exitCode)
+        app.clearAgentEnded(opts.paneId)
+        emitExit({ code: e.exitCode, cardVisible: true })
       })
     }
 
+    // In-place restart (E6-FR-18/19, D2): same xterm, so the scrollback stays.
+    // Main kills the old pty (no phone `exit`), spawns the new one seeded with
+    // the kept output and returns `tail` (mode soft reset + separator), which
+    // is all this terminal still has to write. The launch is decided again
+    // (resume intent, current preset), exactly like a mount.
+    const restart = async (): Promise<void> => {
+      if (disposed || restartingRef.current) return
+      restartingRef.current = true
+      await launched
+      const prev = exitRef.current
+      // The old pty's exit is no longer this pane's; its last output still
+      // arrives (ordered before the restart reply) and is written as usual.
+      offExit()
+      offExit = () => undefined
+      const o = optsRef.current
+      const base = { cwd: o.cwd ?? '', initialCommand: o.initialCommand, setup: o.setup }
+      try {
+        const launch = await prepareAgentLaunch(o.paneId, base).catch(() => base)
+        if (disposed) return
+        const res = await window.snApi.pty.restart({
+          paneId: o.paneId,
+          shell: o.shell,
+          cwd: launch.cwd || o.cwd,
+          initialCommand: launch.initialCommand,
+          setup: launch.setup,
+          cols: term.cols,
+          rows: term.rows,
+          // After a failed respawn, retry with the OS default shell.
+          fallbackDefaultShell: prev?.error ? true : undefined,
+        })
+        if (disposed) {
+          void window.snApi.pty.kill(res.ptyId)
+          return
+        }
+        offData()
+        pendingRef.current = 0
+        pausedRef.current = false
+        term.write(res.tail)
+        if (res.warning?.kind === 'shellNotFound') {
+          const text = tRef.current('terminal.shellNotFound', { requested: plain(res.warning.requested), used: plain(res.warning.used) })
+          term.write(`\x1b[33m${text}\x1b[0m\r\n`)
+        }
+        shellKindRef.current = res.shellKind
+        bind(res.ptyId)
+        const app = useAppStore.getState()
+        app.setPaneExit(opts.paneId, null)
+        app.clearAgentEnded(opts.paneId)
+        emitExit(null)
+      } catch (err) {
+        if (disposed) return
+        offData()
+        offData = () => undefined
+        emitExit({ code: prev?.code ?? -1, error: spawnError(err), cardVisible: true })
+      } finally {
+        restartingRef.current = false
+      }
+    }
+    const restartFn = (): void => void restart()
+    registerRestarter(opts.paneId, restartFn)
+    controllerRef.current.restart = restartFn
+    controllerRef.current.hideExitCard = () => {
+      if (exitRef.current) emitExit({ ...exitRef.current, cardVisible: false })
+    }
+    controllerRef.current.shellKind = () => shellKindRef.current
+
     // Rebind to an already-running pty (renderer reload / remount) when one
     // exists for this pane; otherwise spawn a fresh shell.
-    window.snApi.pty
+    launched = window.snApi.pty
       .reattach(opts.paneId)
       .then((existing) => {
         if (disposed) return undefined
         if (existing) {
           if (existing.replay) term.write(existing.replay)
+          shellKindRef.current = existing.shellKind ?? null
           bind(existing.ptyId)
           return undefined
         }
@@ -708,10 +836,21 @@ export function useXterm(
               const text = tRef.current('terminal.shellNotFound', { requested: plain(warning.requested), used: plain(warning.used) })
               term.write(`\x1b[33m${text}\x1b[0m\r\n`)
             }
+            shellKindRef.current = spawned.shellKind
             bind(ptyId)
+            useAppStore.getState().setPaneExit(opts.paneId, null)
           })
       })
-      .catch((err) => term.write(`\r\n\x1b[31mFailed to start shell: ${String(err)}\x1b[0m\r\n`))
+      .catch((err) => {
+        if (disposed) return
+        term.write(`\r\n\x1b[31mFailed to start shell: ${String(err)}\x1b[0m\r\n`)
+        // The card offers Restart, which retries with the OS default shell.
+        emitExit({ code: -1, error: spawnError(err), cardVisible: true })
+      })
+
+    // Any key typed into the pane hides the "Claude exited" chip (E6-FR-22).
+    // onKey, not onData: xterm's automatic replies (DSR, focus) are not typing.
+    const keySub = term.onKey(() => useAppStore.getState().clearAgentEnded(opts.paneId))
 
     const input = term.onData((data) => {
       const id = ptyIdRef.current
@@ -758,6 +897,7 @@ export function useXterm(
       container.removeEventListener('wheel', onWheelSnap)
       container.removeEventListener('mousedown', onMouseDownCapture, true)
       input.dispose()
+      keySub.dispose()
       titleSub.dispose()
       offData()
       offExit()
@@ -767,6 +907,9 @@ export function useXterm(
       unregisterFocuser(opts.paneId)
       unregisterPaster(opts.paneId, paster)
       unregisterRedrawer(opts.paneId)
+      unregisterRestarter(opts.paneId, restartFn)
+      exitRef.current = null
+      shellKindRef.current = null
       ptyIdRef.current = null
       termRef.current = null
       fitRef.current = null
@@ -775,6 +918,9 @@ export function useXterm(
         search: () => false,
         clearSearch: () => undefined,
         focus: () => undefined,
+        restart: () => undefined,
+        hideExitCard: () => undefined,
+        shellKind: () => null,
       }
       refitRef.current = () => undefined
       term.dispose()

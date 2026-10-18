@@ -42,6 +42,16 @@ export function useStatusEvents(): void {
     return () => { alive = false; unsubscribe() }
   }, [])
 
+  // Claude's main session ended with /exit: offer "resume / new" (E6-FR-22).
+  // The chip is drawn by the pane; the setting only hides it, so turning it
+  // back on later never shows a stale chip from long ago.
+  useEffect(() => {
+    return window.snApi.status.onSessionEnd((evt) => {
+      if (useAppStore.getState().settings.terminalAgentEndChip === false) return
+      useAppStore.getState().setAgentEnded(evt)
+    })
+  }, [])
+
   // A status notification was clicked: reveal that console (E5-FR-04).
   useEffect(() => {
     return window.snApi.status.onReveal((paneId) => {

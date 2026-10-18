@@ -22,6 +22,7 @@ import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 import { cn } from '@/lib/cn'
 import { StatusDot } from '@/components/ui/StatusDot'
 import { aggregateStatus } from '@shared/status'
+import { ExitedDot, allExited, exitedLines } from '@/components/sidebar/ExitedDot'
 
 interface MenuState {
   x: number
@@ -60,6 +61,9 @@ export function Sidebar() {
     setSettingsOpen,
     setWizardOpen,
   } = useAppStore()
+
+  // Consoles whose shell ended on its own (E6-FR-38).
+  const paneExit = useAppStore((s) => s.paneExit)
 
   const [menu, setMenu] = useState<MenuState | null>(null)
   const [confirmWs, setConfirmWs] = useState<string | null>(null)
@@ -162,7 +166,9 @@ export function Sidebar() {
           const renaming = renamingId === w.id
           const attentionCount = w.panes.reduce((n, p) => n + Math.max(paneStatus[p.id]?.pendingCount ?? 0, paneAttention[p.id] ? 1 : 0), 0)
           const status = aggregateStatus(w.panes.map(p => paneStatus[p.id]))
-          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${paneStatus[p.id].state}`)}`).join('\n')
+          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${paneStatus[p.id].state}`)}`).concat(exitedLines(w.panes, paneExit, t)).join('\n')
+          // Gray dot when no agent state is shown and every console has exited (E6-FR-38).
+          const exitedDot = !status && allExited(w.panes, paneExit)
           return (
             <div
               key={w.id}
@@ -215,7 +221,7 @@ export function Sidebar() {
                       className="shrink-0"
                       style={{ color: active ? (w.panes[0]?.color ?? '#6366f1') : undefined }}
                     />
-                    {sidebarCollapsed && status && <span className="absolute -bottom-1 -right-1 rounded-full bg-bg-secondary p-0.5"><StatusDot status={status} label={statusLabel} size={6} /></span>}
+                    {sidebarCollapsed && (status || exitedDot) && <span className="absolute -bottom-1 -right-1 rounded-full bg-bg-secondary p-0.5">{status ? <StatusDot status={status} label={statusLabel} size={6} /> : <ExitedDot label={statusLabel} size={6} />}</span>}
                     </span>
                     <span
                       className={cn(
@@ -224,7 +230,7 @@ export function Sidebar() {
                       )}
                     >
                       <span className="flex items-center gap-1">
-                        {!sidebarCollapsed && <StatusDot status={status} label={statusLabel} />}
+                        {!sidebarCollapsed && (exitedDot ? <ExitedDot label={statusLabel} /> : <StatusDot status={status} label={statusLabel} />)}
                         <span className="truncate">{w.name}</span>
                         {w.favorite && (
                           <Star size={11} className="shrink-0 fill-amber-400 text-amber-400" />

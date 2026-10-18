@@ -391,13 +391,14 @@ async function enrichmentChecks() {
       require: id => id === 'electron' ? { Notification: { isSupported: () => false } } : require(id),
       setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id), Date: FakeDate,
     })
-    const manager = new StatusManager(() => ({ isDestroyed: () => false, isFocused: () => false, webContents: { send: (_ch, e) => events.push(e) }, flashFrame() {} }), () => config, () => {}, reader)
+    const sessionEnds = []
+    const manager = new StatusManager(() => ({ isDestroyed: () => false, isFocused: () => false, webContents: { send: (ch, e) => (ch === 'status:sessionEnd' ? sessionEnds : events).push(e) }, flashFrame() {} }), () => config, () => {}, reader)
     manager.setConfig(settings); manager.onSpawn('pty', 'pane')
     const heard = []
     const off = manager.addListener((e, cause) => { heard.push(e); causes.push(cause) })
     const hook = (name, rest = {}) => manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty', sessionId: SID, name, ...rest })
     const flush = () => { while (timers.size) { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) } }
-    return { manager, hook, events, heard, causes, off, flush, tick: ms => { clock += ms }, last: () => events.at(-1) }
+    return { manager, hook, events, sessionEnds, heard, causes, off, flush, tick: ms => { clock += ms }, last: () => events.at(-1) }
   }
 
   // stateSince (E4-FR-09 c, E5-FR-02).
@@ -501,10 +502,48 @@ async function enrichmentChecks() {
     check(h.heard.at(-1).state === null && h.heard.at(-1).paneId === 'pane', 'listeners hear state:null when the pty dies')
     h.off(); h.manager.onSpawn('pty2', 'pane'); h.manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty2', sessionId: SID, name: 'SessionStart' })
     check(h.heard.at(-1).state === null, 'a removed listener hears nothing more')
+    check(h.sessionEnds.length === 1 && h.sessionEnds[0].reason === 'prompt_input_exit' && h.sessionEnds[0].cwd === process.cwd(), 'the SessionEnd also reaches the renderer as status:sessionEnd')
     const boom = rich(); boom.manager.addListener(() => { throw new Error('x') })
     const quiet = console.warn; console.warn = () => {}
     try { boom.hook('SessionStart') } finally { console.warn = quiet }
     check(boom.last().state === 'idle', 'a failing listener never breaks the renderer emission')
+  }
+  // status:sessionEnd allowlist (E6-FR-21).
+  {
+    const ends = (reason, rest = {}) => {
+      const h = rich()
+      h.hook('SessionStart')
+      h.hook('SessionEnd', { endReason: reason, cwd: process.cwd(), ...rest })
+      return h.sessionEnds
+    }
+    const exit = ends('prompt_input_exit')
+    check(exit.length === 1 && exit[0].paneId === 'pane' && exit[0].ptyId === 'pty' && exit[0].provider === 'claude' && exit[0].sessionId === SID && exit[0].cwd === process.cwd() && typeof exit[0].at === 'number', 'prompt_input_exit emits the event with session id and cwd')
+    check(ends('other').length === 1 && ends('other')[0].reason === 'other', 'other emits the event')
+    check(['clear', 'logout', 'xyz', undefined].every(r => ends(r).length === 0), 'clear, logout, unknown and missing reasons emit nothing')
+    check(ends('prompt_input_exit', { ptyId: 'old' }).length === 0, 'a stale ptyId emits nothing')
+    check(ends('prompt_input_exit', { agentId: 'sub-1' }).length === 0, 'a subagent SessionEnd emits nothing')
+    check(ends('prompt_input_exit', { sessionId: 'launch:abcdef12' }).length === 0 && ends('prompt_input_exit', { sessionId: 'x; rm -rf /' }).length === 0, 'an unsafe session id emits nothing')
+    const noCwd = ends('prompt_input_exit', { cwd: undefined })
+    check(noCwd.length === 1 && !('cwd' in noCwd[0]), 'without a hook cwd the event has no cwd')
+  }
+  // "Claude exited" chip commands (E6-FR-22/23): built only from validated parts.
+  {
+    const { agentEndCommands } = loadRenderer("export { agentEndCommands } from './agentEnd'")
+    const UUID = '0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab'
+    const claude = { type: 'claude', command: 'claude', args: ['--model', 'opus'] }
+    let c = agentEndCommands({ evt: { sessionId: UUID, cwd: 'C:\\repo' }, shellKind: 'powershell', preset: claude, initialCommand: 'claude --model opus' })
+    check(c.resume === `Set-Location -LiteralPath 'C:\\repo'; claude --model opus --resume ${UUID}` && c.fresh === 'claude --model opus', 'PowerShell resume = Set-Location prefix + preset flags + --resume, New = the preset command')
+    c = agentEndCommands({ evt: { sessionId: UUID, cwd: "C:\\it's" }, shellKind: 'powershell', preset: { type: 'shell', command: '', args: [] } })
+    check(c.resume === `Set-Location -LiteralPath 'C:\\it''s'; claude --resume ${UUID}` && c.fresh === 'claude', 'a shell pane where claude was typed: bare claude, single quote doubled')
+    c = agentEndCommands({ evt: { sessionId: UUID, cwd: 'C:\\repo' }, shellKind: 'cmd' })
+    check(c.resume === `cd /d "C:\\repo" && claude --resume ${UUID}`, 'cmd prefix')
+    c = agentEndCommands({ evt: { sessionId: UUID, cwd: "/home/me/it's" }, shellKind: 'posix' })
+    check(c.resume === `cd -- '/home/me/it'\\''s' && claude --resume ${UUID}`, 'posix prefix escapes the single quote')
+    check(['x;y', 'has space', 'launch:abcdef12', '', 'a'.repeat(200)].every(id => agentEndCommands({ evt: { sessionId: id, cwd: '/tmp' }, shellKind: 'posix' }).resume === null), 'an unsafe session id leaves only [New]')
+    check(['relative\\dir', 'C:\\a\u0007b', null].every(cwd => agentEndCommands({ evt: { sessionId: UUID, cwd: cwd ?? undefined }, shellKind: 'powershell' }).resume === `claude --resume ${UUID}`), 'a relative, control-char or missing cwd omits the prefix')
+    check(agentEndCommands({ evt: { sessionId: UUID, cwd: 'C:\\100%' }, shellKind: 'cmd' }).resume === `claude --resume ${UUID}`, 'cmd rejects % in the cwd')
+    check(agentEndCommands({ evt: { sessionId: UUID }, shellKind: null, paneCommand: 'npx claude' }).resume === null, 'a wrapper override cannot be resumed safely: only [New]')
+    check(agentEndCommands({ evt: { sessionId: UUID }, shellKind: null, initialCommand: 'codex' }).fresh === 'claude', 'New types claude when the pane launches something else')
   }
   // Transcript fallback when Stop has no last_assistant_message (E1-FR-09).
   {
@@ -626,7 +665,51 @@ async function enrichmentChecks() {
   check(parseConfig(saves[0]).workspaces[0].panes[0].lastSession.sessionId === SID, 'the mirrored lastSession passes the schema 11 validation')
   S.getState().setPaneStatus({ paneId: 'p1', state: null, precise: false, notify: false })
   check(S.getState().paneStatus.p1 === undefined && S.getState().workspaces[0].panes[0].lastSession.sessionId === SID, 'state:null clears the status but keeps the lastSession mirror')
+  // "Claude exited" chip and "exited" label are transient and never persist (E6-FR-22/38).
+  const savesBefore = saves.length
+  const endEvt = { paneId: 'p1', ptyId: 'pty', provider: 'claude', sessionId: SID, reason: 'prompt_input_exit', at: 1 }
+  S.getState().setAgentEnded(endEvt)
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'idle', precise: true, notify: false, provider: 'claude', updatedAt: 20, sessionId: SID })
+  check(S.getState().agentEnded.p1 === endEvt, 'the end status of the same session keeps the chip')
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'idle', precise: true, notify: false, provider: 'claude', updatedAt: 21, sessionId: '1c8d3a5f-2b3c-4d4e-9fa0-123456789abc' })
+  check(S.getState().agentEnded.p1 === undefined, 'a new session hides the chip')
+  S.getState().setAgentEnded(endEvt)
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'working', precise: false, notify: false, provider: 'claude', updatedAt: 22 })
+  check(S.getState().agentEnded.p1 === undefined, 'Claude working again hides the chip')
+  S.getState().setAgentEnded(endEvt)
+  S.getState().clearAgentEnded('p1')
+  const unchanged = S.getState().agentEnded
+  S.getState().clearAgentEnded('p1')
+  check(S.getState().agentEnded.p1 === undefined && S.getState().agentEnded === unchanged, 'clearAgentEnded hides it and is a no-op when clean')
+  S.getState().setPaneExit('p1', 3)
+  const exitRef = S.getState().paneExit
+  S.getState().setPaneExit('p1', 3)
+  check(S.getState().paneExit.p1 === 3 && S.getState().paneExit === exitRef, 'setPaneExit records the code, same reference on repeat')
+  S.getState().setAgentEnded(endEvt)
+  S.getState().removePane('w1', 'p1')
+  check(S.getState().paneExit.p1 === undefined && S.getState().agentEnded.p1 === undefined, 'removing the pane drops its exit and chip')
+  flushSaves()
+  check(saves.slice(savesBefore).every(c => !('paneExit' in c) && !('agentEnded' in c)), 'neither reaches the config file')
   stop()
+
+  // restartPane: in place when the terminal registered a restarter, else remount (E6-FR-18).
+  {
+    const rr = loadRenderer(`export { useAppStore } from './store'; export * from './restartRegistry'`, { window: { snApi: {} }, document: { hasFocus: () => false } })
+    const st = rr.useAppStore.getState()
+    let inPlace = 0
+    const fn = () => { inPlace++ }
+    rr.registerRestarter('p9', fn)
+    st.restartPane('p9')
+    check(inPlace === 1 && rr.useAppStore.getState().paneEpoch.p9 === undefined, 'a mounted terminal restarts in place, no remount')
+    st.restartPaneClean('p9')
+    check(inPlace === 1 && rr.useAppStore.getState().paneEpoch.p9 === 1, 'Restart clean always remounts')
+    rr.unregisterRestarter('p9', () => {})
+    st.restartPane('p9')
+    check(inPlace === 2, 'unregister only drops the restarter it registered')
+    rr.unregisterRestarter('p9', fn)
+    st.restartPane('p9')
+    check(inPlace === 2 && rr.useAppStore.getState().paneEpoch.p9 === 2, 'without a mounted terminal restartPane remounts')
+  }
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })
