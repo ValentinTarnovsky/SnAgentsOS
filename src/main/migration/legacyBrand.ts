@@ -13,6 +13,7 @@ import {
   readMarker,
   writeMarker,
   BACKUP_FILE,
+  BACKUP_TTL_MS,
   PRE_IMPORT_DIR,
   STAGING_DIR,
   type LegacyMigrationMarker,
@@ -20,9 +21,10 @@ import {
   type LegacySource,
 } from './legacyMarker'
 import { overlaps } from './pathUtil'
+import { buildManifest, readBackupZip, verifyBackupZip, writeBackupZip, type BackupEntry } from './backupZip'
 
 /**
- * Detect -> migrate -> verify -> backup -> mark (E0-FR-07, 08, 27, 29). The
+ * Detect -> migrate -> verify -> backup -> mark (E0-FR-07, 08, 27, 28, 29). The
  * synchronous part of the 1.x migration: it runs at the start of bootstrap(),
  * before configStore.load() and before any window exists, because the renderer
  * persists the whole store on a 400 ms debounce and no copy over config.json
@@ -59,6 +61,11 @@ export interface MigrateOptions {
   loadTargetConfig?: () => unknown
   /** Synchronous wait between file retries; Atomics.wait by default. */
   sleep?: (ms: number) => void
+  /**
+   * Legacy files with no data to migrate that still go to the backup zip:
+   * ~/.claude/settings.json.snmulticc.bak and the 1.x dev profile folder.
+   */
+  extras?: { claudeBak?: string | null; devDir?: string | null }
 }
 
 export type PipelineResult =
@@ -511,9 +518,123 @@ function commitNoLegacy(ctx: Ctx, legacyDir: string | null, attempts: number): P
     committedAt: at,
     cleanup: pendingCleanup(),
   }
+  const existing = adoptBackup(ctx)
+  const extras = collectExtras(ctx)
+  if (existing) {
+    // A zip from before a lost marker keeps its own dates; extras join it.
+    m.backup = existing
+    if (extras.length > 0) appendToBackup(ctx.o.targetDir, m, extras, at, ctx.fsx)
+  } else if (extras.length > 0) {
+    // Only no-data items to back up: the zip holds just those (FR-28).
+    m.backup = writePipelineBackup(ctx, extras, at)
+  }
   writeMarker(ctx.o.targetDir, m, ctx.fsx)
   ctx.log(`phase=committed outcome=noLegacy path=${legacyDir ?? '-'}`)
   return { status: 'committed', marker: m }
+}
+
+function backupPath(targetDir: string): string {
+  return join(targetDir, BACKUP_FILE)
+}
+
+/** The extras that exist, read once (they are never migrated, only backed up). */
+function collectExtras(ctx: Ctx): BackupEntry[] {
+  const out: BackupEntry[] = []
+  const add = (name: string, p: string | null | undefined): void => {
+    if (!p) return
+    const data = readIfFile(ctx, p)
+    if (data && data.length <= MAX_SOURCE_BYTES) out.push({ name, data, source: p })
+  }
+  add('claude/settings.json.snmulticc.bak', ctx.o.extras?.claudeBak)
+  const dev = ctx.o.extras?.devDir
+  if (dev && isRealDir(ctx.fsx, dev)) {
+    add('dev/config.json', join(dev, 'config.json'))
+    add('dev/remote-devices.json', join(dev, DEVICES_FILE))
+  }
+  return out
+}
+
+/** Writes the zip, reopens it and checks every entry (FR-28) before the phase may advance. */
+function writePipelineBackup(ctx: Ctx, entries: BackupEntry[], createdAt: number): NonNullable<LegacyMigrationMarker['backup']> {
+  const expiresAt = createdAt + BACKUP_TTL_MS
+  const manifest = buildManifest(entries, ctx.o.appVersion, createdAt, expiresAt)
+  const dest = backupPath(ctx.o.targetDir)
+  let written: { bytes: number; sha256: string }
+  try {
+    ctx.fsx.mkdirSync(ctx.o.targetDir, { recursive: true })
+    written = writeBackupZip(dest, entries, manifest, ctx.fsx)
+  } catch (err) {
+    throw new MigrationError(errCode(err))
+  }
+  if (!verifyBackupZip(dest, manifest, ctx.fsx)) throw new MigrationError('backupVerify')
+  return { file: BACKUP_FILE, bytes: written.bytes, sha256: written.sha256, entries: entries.length, createdAt, expiresAt }
+}
+
+/** A readable zip already in dataDir() (marker lost or rebuilt): adopted with its original dates. */
+function adoptBackup(ctx: Ctx): LegacyMigrationMarker['backup'] {
+  const dest = backupPath(ctx.o.targetDir)
+  if (!isRegularFile(ctx.fsx, dest)) return undefined
+  try {
+    const { manifest } = readBackupZip(dest, ctx.fsx)
+    const data = ctx.fsx.readFileSync(dest) as Buffer
+    return { file: BACKUP_FILE, bytes: data.length, sha256: sha256(data), entries: manifest.entries.length, createdAt: manifest.createdAt, expiresAt: manifest.expiresAt }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Adds entries to the committed backup (post-commit/<ISO>/ copies of sources
+ * that changed after the commit, other/ unknown entries, late extras). Keeps
+ * createdAt and expiresAt; skips an entry whose source and SHA-256 are already
+ * in the manifest, so a retried cleanup item adds nothing twice. When the zip
+ * no longer exists (expired, or there never was one) a new one is started.
+ * Mutates marker.backup and returns how many entries were added; throws with
+ * a code (backupTooLarge, backupVerify, backupFormat...) without touching the
+ * existing zip, which is only replaced by a verified rename.
+ */
+export function appendToBackup(
+  targetDir: string,
+  marker: LegacyMigrationMarker,
+  entries: BackupEntry[],
+  now: number,
+  fsx: PipelineFs = nodeFs,
+): number {
+  const dest = backupPath(targetDir)
+  const live = marker.backup && marker.backup.deletedAt === undefined && fsx.existsSync(dest)
+  const current = live ? readBackupZip(dest, fsx) : null
+  const createdAt = current ? current.manifest.createdAt : now
+  const expiresAt = current ? current.manifest.expiresAt : now + BACKUP_TTL_MS
+  const key = (source: string, hash: string): string => `${source}|${hash}`
+  const known = new Set((current?.manifest.entries ?? []).map((e) => key(e.source, e.sha256)))
+  const fresh = entries.filter((e) => !known.has(key(e.source, sha256(e.data))))
+  if (fresh.length === 0) return 0
+  const all = [...(current?.entries ?? []), ...fresh]
+  fsx.mkdirSync(targetDir, { recursive: true })
+  const manifest = buildManifest(all, current?.manifest.appVersion ?? marker.appVersion, createdAt, expiresAt)
+  const written = writeBackupZip(dest, all, manifest, fsx)
+  if (!verifyBackupZip(dest, manifest, fsx)) throw Object.assign(new Error('backupVerify'), { code: 'backupVerify' })
+  marker.backup = { file: BACKUP_FILE, bytes: written.bytes, sha256: written.sha256, entries: all.length, createdAt, expiresAt }
+  return fresh.length
+}
+
+/**
+ * Deletes the zip on the first check after expiresAt (createdAt + 30 days),
+ * with the marker in committed, cleaning or done: a forever-deferred item must
+ * not keep the zip forever. A clock running behind deletes nothing early.
+ * Returns true when the marker changed (deletedAt written).
+ */
+export function maintainBackup(targetDir: string, now: number, fsx: PipelineFs = nodeFs, log: (line: string) => void = () => {}): boolean {
+  const read = readMarker(targetDir, fsx)
+  if (read.kind !== 'ok') return false
+  const m = read.marker
+  if (!isCommittedPhase(m.phase) || !m.backup || m.backup.deletedAt !== undefined || now <= m.backup.expiresAt) return false
+  fsx.rmSync(backupPath(targetDir), { force: true })
+  m.backup = { ...m.backup, deletedAt: now }
+  m.at = now
+  writeMarker(targetDir, m, fsx)
+  log(`phase=${m.phase} item=backup result=expired path=${BACKUP_FILE}`)
+  return true
 }
 
 export function runPipeline(o: MigrateOptions): PipelineResult {
@@ -564,7 +685,25 @@ export function runPipeline(o: MigrateOptions): PipelineResult {
   clearStaging(ctx, true)
 
   const rels = legacyDir ? listLegacyWhitelist(legacyDir, fsx, ctx.log) : []
-  if (!legacyDir || rels.length === 0) return commitNoLegacy(ctx, legacyDir, prior?.attempts ?? 0)
+  if (!legacyDir || rels.length === 0) {
+    try {
+      return commitNoLegacy(ctx, legacyDir, prior?.attempts ?? 0)
+    } catch (err) {
+      // Read-only data folder or a failed zip: not committed, so nothing gets cleaned.
+      const at = ctx.now()
+      const failed: LegacyMigrationMarker = {
+        ...newMarker({ phase: 'failed', mode: o.mode, from: legacyDir, to: target, appVersion: o.appVersion, now: at, attempts: (prior?.attempts ?? 0) + 1 }),
+        lastError: { phase: 'backedUp', code: errCode(err), at },
+      }
+      try {
+        writeMarker(target, failed, fsx)
+      } catch {
+        /* the folder itself is not writable; the log says why */
+      }
+      ctx.log(`phase=failed during=noLegacy code=${errCode(err)}`)
+      return { status: 'failed', marker: failed }
+    }
+  }
   if (o.isLegacyRunning()) {
     ctx.log('phase=detect result=legacyRunning')
     return { status: 'legacyRunning' }
@@ -576,6 +715,10 @@ export function runPipeline(o: MigrateOptions): PipelineResult {
     ...(prior?.preImportSnapshot ? { preImportSnapshot: prior.preImportSnapshot } : {}),
   }
   let phase: LegacyPhase = 'migrating'
+  // Every rewrite within this run keeps the first createdAt (and so the expiry).
+  let createdAt: number | undefined
+  let wroteBackup = false
+  const extras = collectExtras(ctx)
   try {
     for (let round = 1; ; round++) {
       phase = 'migrating'
@@ -607,9 +750,13 @@ export function runPipeline(o: MigrateOptions): PipelineResult {
       fault(ctx, 'verified')
 
       phase = 'backedUp'
-      m = { ...m, phase, at: ctx.now() }
+      createdAt ??= ctx.now()
+      const entries = [...copied.map((c) => ({ name: c.rel, data: c.data, source: join(legacyDir, c.rel) })), ...extras]
+      wroteBackup = true
+      const backup = writePipelineBackup(ctx, entries, createdAt)
+      m = { ...m, phase, backup, at: ctx.now() }
       writeMarker(target, m, fsx)
-      ctx.log('phase=backedUp')
+      ctx.log(`phase=backedUp entries=${backup.entries} bytes=${backup.bytes}`)
       fault(ctx, 'backedUp')
 
       if (!sourcesUnchanged(ctx, legacyDir, copied)) {
@@ -646,8 +793,14 @@ export function runPipeline(o: MigrateOptions): PipelineResult {
       ctx.log(`phase=failed result=rollbackError code=${errCode(rollbackErr)}`)
     }
     clearStaging(ctx, true)
+    // Not committed, so the zip this run wrote protects nothing yet: drop it with the rest.
+    if (wroteBackup) {
+      fsx.rmSync(backupPath(target), { force: true })
+      fsx.rmSync(`${backupPath(target)}.tmp`, { force: true })
+    }
     const at = ctx.now()
     const failed: LegacyMigrationMarker = { ...m, phase: 'failed', lastError: { phase, code, at }, at }
+    delete failed.backup
     try {
       writeMarker(target, failed, fsx)
     } catch (writeErr) {

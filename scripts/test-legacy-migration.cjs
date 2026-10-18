@@ -487,6 +487,124 @@ async function resumeChecks() {
   }
 }
 
+/**
+ * Extracts a zip with a system tool, the way a user would: Windows' bsdtar
+ * (System32\tar.exe, not Git's GNU tar), bsdtar or tar on macOS, and on Linux
+ * bsdtar, unzip or python's zipfile (GNU tar cannot read zip). Returns the
+ * tool used, or null when none is available.
+ */
+function extractZip(zip, dest) {
+  const { spawnSync } = require('node:child_process')
+  const sys32tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe')
+  const candidates = isWin
+    ? [[sys32tar, ['-xf', zip, '-C', dest]]]
+    : [['bsdtar', ['-xf', zip, '-C', dest]], ...(process.platform === 'darwin' ? [['tar', ['-xf', zip, '-C', dest]]] : []), ['unzip', ['-q', zip, '-d', dest]], ['python3', ['-m', 'zipfile', '-e', zip, dest]]]
+  for (const [cmd, args] of candidates) {
+    const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true })
+    if (!r.error && r.status === 0) return path.basename(cmd)
+  }
+  return null
+}
+
+async function zipChecks() {
+  const L = loadMigration()
+  const Z = load('src/main/migration/backupZip.ts')
+  const dir = freshDir('zip')
+  const entries = [
+    { name: 'config.json', data: Buffer.from(JSON.stringify(makeConfig())), source: path.join(dir, 'src', 'config.json') },
+    { name: 'backups/config-2026-01-01T10-00-00-000Z.json', data: Buffer.from('x'.repeat(5000)), source: 'b' },
+    { name: 'other/notes \u00f1.txt', data: crypto.randomBytes(3000), source: 'n' },
+    { name: 'empty.bin', data: Buffer.alloc(0), source: 'e' },
+  ]
+  const manifest = Z.buildManifest(entries, '2.0.0', 1000, 1000 + 5)
+  const zip = path.join(dir, 'migration-backup-v1.zip')
+  const res = Z.writeBackupZip(zip, entries, manifest)
+  check(res.bytes === fs.statSync(zip).size && res.sha256 === sha(fs.readFileSync(zip)) && !fs.existsSync(zip + '.tmp'), 'zip: written through .tmp + rename, size and hash reported')
+  check(Z.verifyBackupZip(zip, manifest), 'zip: verifies entry by entry')
+  const decoded = Z.readBackupZip(zip)
+  check(decoded.entries.map(e => e.name).join() === entries.map(e => e.name).join() && decoded.entries.every((e, i) => e.data.equals(entries[i].data)), 'zip: reads back every entry, manifest first and not repeated')
+  check(Z.crc32(Buffer.from('123456789')) === 0xcbf43926, 'zip: CRC32 check value')
+  const out = freshDir('unzip')
+  const tool = extractZip(zip, out)
+  if (tool) {
+    const m = JSON.parse(fs.readFileSync(path.join(out, 'manifest.json'), 'utf8'))
+    check(m.entries.length === 4 && m.entries.every(e => sha(fs.readFileSync(path.join(out, ...e.name.split('/')))) === e.sha256), `zip: extracted with ${tool}, every SHA-256 matches the manifest`)
+  } else console.log('zip: no system unzipper found, extraction check skipped')
+  const bytes = fs.readFileSync(zip)
+  const flipped = Buffer.from(bytes); flipped[60] ^= 0xff
+  fs.writeFileSync(zip, flipped)
+  check(!Z.verifyBackupZip(zip, manifest), 'zip: a byte altered in the file fails verification')
+  fs.writeFileSync(zip, bytes)
+  check(!Z.verifyBackupZip(zip, { ...manifest, entries: manifest.entries.slice(1) }), 'zip: a manifest that does not match fails verification')
+  let tooLarge = null
+  try { Z.writeBackupZip(path.join(dir, 'big.zip'), [{ name: 'big', data: crypto.randomBytes(21 * 1024 * 1024), source: 'x' }], Z.buildManifest([], '2.0.0', 1, 2)) } catch (e) { tooLarge = e.code }
+  check(tooLarge === 'backupTooLarge' && !fs.existsSync(path.join(dir, 'big.zip')) && !fs.existsSync(path.join(dir, 'big.zip.tmp')), 'zip: over 20 MB is refused before writing')
+
+  // The pipeline zip: whitelist bytes as they were, extras, never status-bin or Chromium.
+  const base = freshDir('zip-pipe')
+  const legacyDir = seedLegacy(path.join(base, 'snmulticc'), { config: '{corrupt' })
+  const targetDir = path.join(base, 'snagentsos')
+  const claudeBak = path.join(base, 'home', '.claude', 'settings.json.snmulticc.bak'); write(claudeBak, '{"hooks":{}}')
+  const devDir = path.join(base, 'snmulticc-dev'); write(path.join(devDir, 'config.json'), 'dev-config'); write(path.join(devDir, 'remote-devices.json'), 'dev-devices')
+  const before = snapshotTree(legacyDir)
+  const r = pipe(L, { legacyDir, targetDir, extras: { claudeBak, devDir } })
+  const zp = path.join(targetDir, 'migration-backup-v1.zip')
+  check(r.status === 'committed' && r.marker.backup && r.marker.backup.file === 'migration-backup-v1.zip', 'zip pipeline: committed with the backup recorded')
+  const z = Z.readBackupZip(zp)
+  const names = z.entries.map(e => e.name)
+  check(r.marker.sources.every(s => z.manifest.entries.find(e => e.name === s.rel).sha256 === before[s.rel]), 'zip pipeline: every legacy file as it was, also the corrupt config')
+  check(names.includes('claude/settings.json.snmulticc.bak') && names.includes('dev/config.json') && names.includes('dev/remote-devices.json'), 'zip pipeline: claude bak and dev profile files included')
+  check(!names.some(n => /status-bin|Cache|lockfile|\.exe$/i.test(n)), 'zip pipeline: no status-bin, Chromium or executables')
+  check(r.marker.backup.expiresAt === r.marker.backup.createdAt + 30 * 24 * 3600 * 1000 && z.manifest.appVersion === '2.0.0' && r.marker.backup.entries === names.length, 'zip pipeline: manifest dates, version and entry count')
+  check(r.marker.backup.sha256 === sha(fs.readFileSync(zp)), 'zip pipeline: marker hash matches the file')
+
+  // noLegacy: a zip only when there is a no-data item to keep.
+  const nl = pipe(L, { legacyDir: null, targetDir: path.join(freshDir('nl'), 'd'), extras: { claudeBak } })
+  check(nl.marker.backup && nl.marker.backup.entries === 1, 'zip noLegacy: only the claude bak')
+  const none = pipe(L, { legacyDir: null, targetDir: path.join(freshDir('nl'), 'd') })
+  check(!none.marker.backup && !fs.existsSync(path.join(none.marker.to, 'migration-backup-v1.zip')), 'zip noLegacy: nothing to back up, no zip')
+
+  // Over 20 MB of whitelist data fails the phase and leaves no zip.
+  {
+    const b2 = freshDir('zip-big')
+    const big = seedLegacy(path.join(b2, 'snmulticc'), { backups: 0 })
+    for (let i = 0; i < 5; i++) write(path.join(big, 'backups', stamp(i)), crypto.randomBytes(4.9 * 1024 * 1024))
+    const t2 = path.join(b2, 'snagentsos')
+    const rb = pipe(L, { legacyDir: big, targetDir: t2 })
+    check(rb.status === 'failed' && rb.marker.lastError.code === 'backupTooLarge' && rb.marker.lastError.phase === 'backedUp', 'zip pipeline: over 20 MB fails the backup phase')
+    check(!fs.existsSync(path.join(t2, 'migration-backup-v1.zip')) && !fs.existsSync(path.join(t2, 'config.json')), 'zip pipeline: no zip and the destination rolled back')
+  }
+
+  // appendToBackup: post-commit entries keep the dates and are not added twice.
+  {
+    const m = JSON.parse(fs.readFileSync(path.join(targetDir, L.MARKER_FILE), 'utf8'))
+    const created = m.backup.createdAt, expires = m.backup.expiresAt
+    const changed = Buffer.from('changed after commit')
+    const added = L.appendToBackup(targetDir, m, [{ name: 'post-commit/2026-10-19T00-00-00-000Z/config.json', data: changed, source: path.join(legacyDir, 'config.json') }], created + 5000)
+    const z2 = Z.readBackupZip(zp)
+    check(added === 1 && z2.manifest.createdAt === created && z2.manifest.expiresAt === expires && z2.entries.length === names.length + 1, 'zip append: post-commit entry added, createdAt and expiresAt kept')
+    check(Z.verifyBackupZip(zp, z2.manifest) && m.backup.sha256 === sha(fs.readFileSync(zp)) && m.backup.entries === names.length + 1, 'zip append: verified, marker updated')
+    check(L.appendToBackup(targetDir, m, [{ name: 'post-commit/later/config.json', data: changed, source: path.join(legacyDir, 'config.json') }], created + 9000) === 0, 'zip append: same source and hash is not added twice')
+  }
+
+  // Expiry with an injected clock, also while cleaning.
+  {
+    const marker = () => JSON.parse(fs.readFileSync(path.join(targetDir, L.MARKER_FILE), 'utf8'))
+    const m = marker()
+    const day = 24 * 3600 * 1000
+    check(L.maintainBackup(targetDir, m.backup.createdAt + 29 * day) === false && fs.existsSync(zp), 'zip expiry: 29 days keeps the zip')
+    L.writeMarker(targetDir, { ...m, phase: 'cleaning' })
+    const lines = []
+    check(L.maintainBackup(targetDir, m.backup.createdAt + 30 * day + 60000, undefined, l => lines.push(l)) === true && !fs.existsSync(zp), 'zip expiry: 30 days + 1 min deletes it, also in cleaning')
+    check(marker().backup.deletedAt === m.backup.createdAt + 30 * day + 60000 && lines.length === 1, 'zip expiry: deletedAt recorded and logged')
+    check(L.maintainBackup(targetDir, m.backup.createdAt + 60 * day) === false, 'zip expiry: runs once')
+    const f = freshDir('zip-failed')
+    L.writeMarker(f, { ...m, phase: 'failed', to: f })
+    write(path.join(f, 'migration-backup-v1.zip'), 'x')
+    check(L.maintainBackup(f, m.backup.createdAt + 60 * day) === false && fs.existsSync(path.join(f, 'migration-backup-v1.zip')), 'zip expiry: never before the commit')
+  }
+}
+
 async function main() {
   try {
     await markerChecks()
@@ -496,6 +614,7 @@ async function main() {
     await pipelineChecks()
     await verificationChecks()
     await resumeChecks()
+    await zipChecks()
     console.log(`PASS: ${checks} legacy migration and cleanup checks`)
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true })
