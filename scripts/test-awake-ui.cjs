@@ -78,7 +78,7 @@ app.whenReady().then(async()=>{
  await js("smoke.click('#awake-indicator')");await frame();
  await js("smoke.clickText('menuitem','Ajustes de agentes')");await wait(300);
  ok((await js('smoke.store()')).open,'Agent settings opens the settings');
- eq(await js("[...document.querySelectorAll('[role=radiogroup] [role=radio]')].map(e=>[e.textContent,e.getAttribute('aria-checked')])"),[['Auto','false'],['Siempre','true'],['Nunca','false']],'settings radiogroup mirrors the mode');
+ eq(await js("[...document.querySelectorAll('[role=radio][data-awake-mode]')].map(e=>[e.textContent,e.getAttribute('aria-checked')])"),[['Auto','false'],['Siempre','true'],['Nunca','false']],'settings radiogroup mirrors the mode');
  ok(await js("document.body.textContent.includes('Comportamiento')&&document.body.textContent.includes('Mantener tambi\\u00e9n la pantalla encendida')"),'Behavior block in Spanish');
  await js("[...document.querySelectorAll('[role=switch]')].find(e=>e.closest('section[aria-labelledby=agents-behavior]')).click()");await frame();
  eq(await js('smoke.settings().agents.awakeDisplay'),true,'the display toggle writes settings.agents.awakeDisplay');
