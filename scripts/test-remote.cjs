@@ -78,7 +78,10 @@ function world() {
     ptyIdForPane: paneId => 'pty-' + paneId,
     write: (_id, data) => writes.push(data),
   }
-  const manager = new api.RemoteManager(pty, () => null, '2.0.0', () => statuses)
+  // A fake renderer: commands relayed by main land here (E2 executor tests).
+  const commands = []
+  const webContents = { isDestroyed: () => false, setBackgroundThrottling() {}, send: (ch, cmd) => { if (ch === 'remote:controlCmd') commands.push(cmd) } }
+  const manager = new api.RemoteManager(pty, () => webContents, '2.0.0', () => statuses, () => 'MI-PC')
   manager.applyConfig({ enabled: true, port: 4600 })
 
   class FakeSocket {
@@ -91,7 +94,7 @@ function world() {
     of(type) { return this.inbox.filter(m => m.type === type) }
   }
   const socket = () => { const ws = new FakeSocket(); ctx.__server.handlers.onSocket(ws, '100.64.0.9'); return ws }
-  return { api, manager, statuses, writes, socket, advance, get clock() { return clock } }
+  return { api, manager, statuses, writes, commands, socket, advance, get clock() { return clock } }
 }
 
 /** Pair a phone through the pairing route; returns its socket and credentials. */
@@ -254,6 +257,45 @@ async function testDataPlane() {
   check(ws.closed === 1008, 'the third oversized input is the third strike and closes the socket')
 }
 
+/** E2 Home (R22-14): hostName on every frame, promptFallback in the ack, the new ctl schemas. */
+async function testHome() {
+  const w = world()
+  w.manager.pushState(snapshot)
+  const { ws } = await pair(w)
+  check(ws.of('authOk')[0].state.hostName === 'MI-PC', 'authOk carries hostName from main')
+  w.manager.pushState({ ...snapshot, workspaces: snapshot.workspaces.map(x => ({ ...x, name: x.name + '!' })) })
+  const pushed = ws.of('state').at(-1).state
+  check(pushed.hostName === 'MI-PC' && pushed.workspaces[0].name === 'One!', 'a later push (a rename) still carries hostName (overlayRunning, not only authOk)')
+
+  ws.msg({ type: 'ctl', id: 'c1', action: { kind: 'createPane', workspaceId: 'w1', presetId: 'claude', prompt: 'explica "x" y $HOME' } })
+  const relayed = w.commands.at(-1)
+  check(relayed && relayed.action.kind === 'createPane' && relayed.action.prompt === 'explica "x" y $HOME', 'createPane.prompt reaches the renderer executor')
+  w.manager.onControlResult({ id: relayed.id, ok: true, paneId: 'p9', promptFallback: true })
+  await new Promise(resolve => setImmediate(resolve))
+  const ack = ws.of('ctlAck').find(a => a.id === 'c1')
+  check(ack && ack.ok && ack.paneId === 'p9' && ack.promptFallback === true, 'handleCtl copies promptFallback into the ctlAck')
+  ws.msg({ type: 'ctl', id: 'c2', action: { kind: 'mountWorkspace', workspaceId: 'w2' } })
+  w.manager.onControlResult({ id: w.commands.at(-1).id, ok: true, info: 2 })
+  await new Promise(resolve => setImmediate(resolve))
+  const ack2 = ws.of('ctlAck').find(a => a.id === 'c2')
+  check(ack2 && ack2.info === 2 && !('promptFallback' in ack2), 'without the flag the ack carries no promptFallback')
+
+  const { parseRemoteClientMsg } = (() => {
+    const mod = { exports: {} }
+    const src = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/shared/remote-protocol-schemas.ts')], bundle: true, platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
+    vm.runInNewContext(src, { module: mod, exports: mod.exports, require, URL })
+    return mod.exports
+  })()
+  const frame = action => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'ctl', id: 'x', action }))
+  check(frame({ kind: 'createPane', workspaceId: 'w', presetId: 'p', prompt: 'a'.repeat(16384) }), 'createPane accepts a 16384-char prompt')
+  check(!frame({ kind: 'createPane', workspaceId: 'w', prompt: 'a'.repeat(16385) }), 'and rejects 16385')
+  check(frame({ kind: 'mountWorkspace', workspaceId: 'w' }) && !frame({ kind: 'mountWorkspace' }), 'mountWorkspace needs a workspaceId')
+  check(frame({ kind: 'revealPane', paneId: 'p' }) && !frame({ kind: 'revealPane', paneId: '' }), 'revealPane needs a paneId')
+  check(frame({ kind: 'openUrl', url: 'http://localhost:5173/x' }) && frame({ kind: 'openUrl', url: 'https://example.com' }) && frame({ kind: 'openUrl', url: 'mailto:a@b.c' }), 'openUrl accepts http, https and mailto')
+  check(!frame({ kind: 'openUrl', url: 'file:///C:/Windows/System32/calc.exe' }) && !frame({ kind: 'openUrl', url: 'javascript:alert(1)' }) && !frame({ kind: 'openUrl', url: 'ms-settings:network' }) && !frame({ kind: 'openUrl', url: 'not a url' }), 'openUrl rejects file:, javascript:, custom schemes and junk')
+  check(!frame({ kind: 'openUrl', url: 'https://x.co/' + 'a'.repeat(2048) }), 'openUrl rejects more than 2048 characters')
+}
+
 async function main() {
   await bundle()
   const w = world()
@@ -261,6 +303,7 @@ async function main() {
   await testOverlay()
   await testBroadcast()
   await testDataPlane()
+  await testHome()
   fs.rmSync(dataDir, { recursive: true, force: true })
   console.log(`PASS: ${checks} remote overlay and paneStatus checks`)
 }

@@ -857,7 +857,7 @@ export function useXterm(
               cols: term.cols,
               rows: term.rows,
               launchKind: launch.launchKind ?? 'other',
-              ...(pending ? { initialPrompt: { text: pending.text, enter: pending.enter } } : {}),
+              ...(pending ? { initialPrompt: { text: pending.text, enter: pending.enter, ...(pending.mode === 'argvOnly' ? { mode: 'argvOnly' as const } : {}) } } : {}),
               // E6-FR-11/13: the saved history comes back unless this spawn
               // resumes a chat (decideLaunch); main honors it once per session.
               restoreScrollback: !launch.resumed,

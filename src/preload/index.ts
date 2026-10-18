@@ -120,6 +120,7 @@ const api: SnApi = {
     isMaximized: () => ipcRenderer.invoke(CH.WINDOW_IS_MAXIMIZED) as Promise<boolean>,
     onMaximizeChange: (cb: (maximized: boolean) => void) =>
       sub<boolean>(CH.WINDOW_MAXIMIZE_CHANGED, cb),
+    reveal: () => ipcRenderer.send(CH.WINDOW_REVEAL),
   },
   system: {
     setLoginItem: (enabled: boolean) =>
