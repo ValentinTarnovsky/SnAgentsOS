@@ -303,6 +303,7 @@ export class StatusManager implements PtySink {
       track.tool = undefined
       if (!track.firstPrompt) track.firstPrompt = firstLine(evt.prompt, LIMITS.title) || undefined
     }
+    if (evt.firstPrompt && !track.firstPrompt) track.firstPrompt = firstLine(evt.firstPrompt, LIMITS.title) || undefined
     if (evt.reply) { track.reply = evt.reply; track.replyTurn = track.turnId }
   }
 
