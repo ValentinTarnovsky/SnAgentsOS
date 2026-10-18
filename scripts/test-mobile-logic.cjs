@@ -2,8 +2,10 @@
 // Section M2 (E1-FR-10..15, 41): endpointHint, delayFor, classifyConnection and
 // the socket generation / liveness / revive / updated state machine of
 // src/mobile/src/lib/client.ts driven by a fake WebSocket and a fake clock.
-// Section M1 (E1-FR-03..07, 40): statusText, inPageAlerts, the workspace
-// selectors and paneStatus handling.
+// Section M1 (E1-FR-03..07): statusText, the workspace selectors and
+// paneStatus handling.
+// Section M9 (E2-FR-42..44, 52; R22-18): the page notifier (toasts with [Go],
+// vibration, title), deep links, snagentsos.prefs and visibility frames.
 // Section M6 (E2-FR-03..06, 16, 47; R22-14): phone-only navigation (openPane,
 // the mount confirmation, mountAndOpen), goLive picking a deep link > lastPane
 // > nothing, a closed viewed pane going back to Home, Home row order and
@@ -30,7 +32,9 @@ export { store } from './src/mobile/src/lib/store'
 export { classifyConnection, endpointHint, formatAgo } from './src/mobile/src/lib/connectionHealth'
 export { delayFor, RECONNECT_DELAYS } from './src/mobile/src/lib/reconnectSchedule'
 export { relativeAge, statusLine, statusAriaLabel, showsTime, rowLine, rowShowsTime } from './src/mobile/src/lib/statusText'
-export { createInPageAlerts, IN_PAGE_ALERTS_KEY } from './src/mobile/src/lib/inPageAlerts'
+export { createPaneNotifier, remoteTitle, actionTotal } from './src/mobile/src/lib/notify'
+export { parseDeepLink } from './src/mobile/src/lib/deepLink'
+export { loadPagePrefs, savePagePrefs } from './src/mobile/src/lib/prefs'
 export { viewedWorkspaceId, paneOpenable, isWorkspaceMounted, homeRows, isUnread, actionCount, waitingPanes, nextWaitingPane, statusMapOf } from './src/mobile/src/lib/workspace'
 export { withViewed, LAST_VIEWED_MAX } from './src/mobile/src/lib/prefs'
 export { setLang } from './src/mobile/src/lib/i18n'
@@ -102,12 +106,14 @@ function page({ paired = true, hash = '', online = true, session = new Map(), ho
     performance: { now: () => clock }, Date: FakeDate, Math: fakeMath,
     WebSocket: FakeWebSocket, document, window, navigator, location,
     localStorage: mapStorage(local), sessionStorage: mapStorage(session),
-    history: { replaceState() {} }, crypto: require('node:crypto').webcrypto, TextEncoder, TextDecoder,
+    history: { state: null, replaceState: (_s, _t, url) => { location.hash = String(url).includes('#') ? String(url).slice(String(url).indexOf('#')) : '' } }, crypto: require('node:crypto').webcrypto, TextEncoder, TextDecoder,
   })
   const api = mod.exports
   const fire = (bag, type, ev = {}) => (bag[type] || []).forEach(fn => fn(ev))
   return {
-    ...api, sockets, session, timers, vibrations, local,
+    ...api, sockets, session, timers, vibrations, local, document,
+    get hash() { return location.hash },
+    setHash: h => { location.hash = h; fire(listeners.win, 'hashchange') },
     get clock() { return clock },
     get reloads() { return reloads },
     state: () => api.store.getState(),
@@ -444,33 +450,126 @@ function testStatusText(p) {
   p.setLang('en')
 }
 
-function testInPageAlerts(p) {
-  let clock = 0, visible = true, enabled = true
-  const active = 'a', shown = [], vib = []
-  const alerts = p.createInPageAlerts({
-    now: () => clock, isVisible: () => visible, enabled: () => enabled, activePaneId: () => active,
-    describe: id => ({ ws: 'W', pane: id.toUpperCase() }), show: t => shown.push(t), vibrate: ms => vib.push(ms),
+// Section M9 (E2-FR-42..44, 52; R22-18): page toasts, deep links, page prefs, visibility.
+function testPaneNotifier(p) {
+  const cs = (state, rest = {}) => st(state, { provider: 'claude', ...rest })
+  p.setLang('en')
+  let visible = true, screen = 'terminal', active = 'a'
+  const prefs = { toasts: true, vibrate: true, toastDone: false }
+  const shown = [], vib = []
+  const n = p.createPaneNotifier({
+    isVisible: () => visible, prefs: () => ({ ...prefs }), screen: () => screen, activePaneId: () => active,
+    describe: id => ({ ws: 'W', pane: id.toUpperCase() }), show: t => shown.push(t), vibrate: pat => vib.push(pat.join()),
   })
-  const action = st('action', { reason: 'permission' })
-  check(alerts.onPaneStatus('b', st('working'), action) && shown.at(-1) === 'W / B: Waiting for permission' && vib.join() === '80', 'another pane entering action shows "{ws} / {pane}: reason" and vibrates 80ms')
-  check(!alerts.onPaneStatus('b', action, action), 'staying in action is not a transition')
-  clock += 3000; shown.length = 0; vib.length = 0
-  check(!alerts.onPaneStatus('a', st('working'), action) && shown.length === 0, 'the viewed pane entering action never alerts')
-  alerts.onPaneStatus('c', undefined, action); clock += 300
-  alerts.onPaneStatus('d', st('idle'), st('action')); clock += 300
-  alerts.onPaneStatus('e', st('done'), action)
-  check(shown.at(-1) === '3 consoles are waiting for you' && vib.length === 1, 'three panes in 1s make one alert: "3 consoles are waiting for you", one vibration')
-  alerts.onPaneStatus('c', st('working'), action)
-  check(shown.at(-1) === '3 consoles are waiting for you', 'the same pane is counted once per window')
-  clock += 3000; shown.length = 0
-  alerts.onPaneStatus('f', st('working'), st('action'))
-  check(shown.at(-1) === 'W / F: Waiting for you' && vib.length === 2, 'after the 3s window a new single alert (no reason = Waiting for you)')
-  clock += 3000; shown.length = 0; visible = false
-  check(!alerts.onPaneStatus('g', st('working'), action) && shown.length === 0, 'no alert while the page is hidden')
-  visible = true; enabled = false
-  check(!alerts.onPaneStatus('g', st('working'), action) && shown.length === 0, 'no alert with inPageAlerts off')
-  enabled = true
-  check(!alerts.onPaneStatus('g', action, null) && !alerts.onPaneStatus('g', undefined, st('done')), 'only transitions into action alert')
+  const action = cs('action', { reason: 'permission', stateSince: 10 })
+  check(n.onPaneStatus('b', cs('working'), action) === 'toast' && shown.at(-1).text === 'Claude W / B: Waiting for permission' && shown.at(-1).kind === 'action' && shown.at(-1).paneId === 'b', 'in a terminal, another console entering action toasts "<Claude> <ws / console>: <reason>" with its pane for [Go]')
+  check(vib.join('|') === '60,40,60', 'and vibrates [60, 40, 60]')
+  check(n.onPaneStatus('b', action, action) === null, 'staying in action is not a transition')
+  check(n.onPaneStatus('b', cs('working'), action) === null && shown.length === 1, 'the same paneId:stateSince never alerts twice')
+  check(n.onPaneStatus('a', cs('working'), cs('action', { stateSince: 11 })) === null && shown.length === 1 && vib.length === 1, 'the console on screen never alerts')
+  check(n.onPaneStatus('c', cs('working'), cs('error', { provider: 'codex', stateSince: 12 })) === 'toast' && shown.at(-1).text === 'Codex W / C: Error' && shown.at(-1).kind === 'error' && vib.length === 2, 'error toasts and vibrates too (Codex)')
+  check(n.onPaneStatus('d', cs('working'), cs('done', { stateSince: 13 })) === null && shown.length === 2, 'done stays quiet while "Alert when a turn ends" is off')
+  prefs.toastDone = true
+  check(n.onPaneStatus('e', cs('working'), cs('done', { stateSince: 14 })) === 'toast' && shown.at(-1).kind === 'done' && shown.at(-1).text === 'Claude W / E: Done' && vib.length === 2, 'with it on, done toasts without vibrating')
+  screen = 'home'
+  check(n.onPaneStatus('f', cs('working'), cs('action', { stateSince: 15 })) === 'vibrate' && shown.length === 3 && vib.length === 3, 'on Home: no toast, only the vibration')
+  check(n.onPaneStatus('g', cs('working'), cs('done', { stateSince: 16 })) === null, 'on Home a done does nothing')
+  screen = 'terminal'; prefs.vibrate = false
+  check(n.onPaneStatus('h', cs('working'), cs('action', { stateSince: 17 })) === 'toast' && vib.length === 3, 'Vibrate off: the toast alone')
+  prefs.toasts = false; prefs.vibrate = true
+  check(n.onPaneStatus('i', cs('working'), cs('action', { stateSince: 18 })) === 'vibrate' && shown.length === 4, 'On-screen alerts off: only the vibration')
+  prefs.toasts = true; visible = false
+  check(n.onPaneStatus('j', cs('working'), cs('action', { stateSince: 19 })) === null && shown.length === 4 && vib.length === 4, 'nothing while the page is hidden')
+  visible = true
+  check(n.onPaneStatus('k', cs('working'), cs('action', { provider: undefined, stateSince: 20 })) === 'toast' && shown.at(-1).text === 'W / K: Waiting for you', 'without a provider the agent name is left out')
+  check(n.onPaneStatus('k', cs('action'), null) === null && n.onPaneStatus('k', undefined, cs('working')) === null, 'clears and working never alert')
+  check(p.remoteTitle(0) === 'SnAgentsOS Remote' && p.remoteTitle(3) === '(3) SnAgentsOS Remote', 'document title: "(N) SnAgentsOS Remote", bare at 0')
+  check(p.actionTotal(multi(), { a1: st('action'), b1: st('action'), b3: st('working'), ghost: st('action') }) === 2 && p.actionTotal(null, {}) === 0, 'actionTotal counts consoles in action in the snapshot only')
+
+  // Deep links (E2-FR-42).
+  check(JSON.stringify(p.parseDeepLink('#ws=w1&pane=p1')) === '{"ws":"w1","pane":"p1"}', 'parseDeepLink reads #ws=&pane=')
+  check(p.parseDeepLink('#x=1&ws=w%201&pane=p%261').pane === 'p&1' && p.parseDeepLink('#x=1&ws=w%201&pane=p%261').ws === 'w 1', 'ids are URI-decoded and other keys may come first')
+  check(p.parseDeepLink('#pair=AB12&ws=w&pane=p') === null && p.parseDeepLink('#ws=w&pane=p&pair=AB12') === null, 'a pair= hash always wins: no deep link')
+  check(p.parseDeepLink('') === null && p.parseDeepLink('#pane=p&ws=w') === null && p.parseDeepLink('#ws=w') === null && p.parseDeepLink('#ws=%E0&pane=p') === null && p.parseDeepLink('#ws=w&pane=' + 'x'.repeat(129)) === null, 'empty, reordered, partial, malformed or oversized hashes are ignored')
+
+  // Page prefs ('snagentsos.prefs', E2-FR-44), with the E1-FR-40 key as the toasts default.
+  const q = page({ paired: false })
+  check(JSON.stringify(q.loadPagePrefs()) === '{"toasts":true,"vibrate":true,"toastDone":false}', 'defaults: toasts on, vibrate on, turn end off')
+  q.local.set('snagentsos.alerts.inPage', '0')
+  check(q.loadPagePrefs().toasts === false, 'the old alerts.inPage switch seeds toasts')
+  q.local.set('snagentsos.prefs', JSON.stringify({ version: 1, promptCards: false }))
+  q.savePagePrefs({ toastDone: true })
+  const saved = JSON.parse(q.local.get('snagentsos.prefs'))
+  check(saved.version === 1 && saved.toasts === false && saved.vibrate === true && saved.toastDone === true && saved.promptCards === false, 'a save writes the whole object and keeps keys of other features')
+  check(!q.local.has('snagentsos.alerts.inPage'), 'and retires the legacy key')
+  q.local.set('snagentsos.prefs', '{broken')
+  check(q.loadPagePrefs().vibrate === true, 'a corrupt object reads back as defaults')
+}
+
+/** Deep links, visibility, toasts vs vibration and the title through the real client (R22-18). */
+async function testClientNotify() {
+  // A link in the URL waits for the first goLive, beats lastPane, and the hash is cleared.
+  const replaced = []
+  {
+    const p = page({ hash: '#ws=w2&pane=b1' })
+    p.local.set('snagentsos.lastPane', 'a1')
+    p.client.start()
+    const s = p.last(); s.open()
+    s.recv({ type: 'authOk', deviceId: 'dev1', state: multi(), hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+    check(p.state().activePaneId === 'b1' && p.state().screen === 'terminal' && s.sent.some(m => m.type === 'sub' && m.paneId === 'b1'), 'a pending deep link opens its console on the first goLive, before lastPane')
+    check(p.hash === '', 'the hash was cleared with replaceState')
+    check(!s.sent.some(m => m.type === 'ctl'), 'and never sends an action (no switchWorkspace, no mount)')
+    const vis = s.sent.filter(m => m.type === 'visibility')
+    check(vis.length === 1 && vis[0].visible === true, 'after auth the page reports visibility once')
+    p.hide()
+    check(s.sent.filter(m => m.type === 'visibility').at(-1).visible === false, 'hiding the page reports visible:false')
+    p.show()
+    check(s.sent.filter(m => m.type === 'visibility').at(-1).visible === true, 'and showing it reports visible:true')
+  }
+  {
+    const p = page({ hash: '#ws=w2&pane=b2' })
+    p.client.start()
+    const s = p.last(); s.open()
+    s.recv({ type: 'authOk', deviceId: 'dev1', state: multi(), hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+    check(p.state().mountAsk === 'b2' && p.state().screen === 'home' && !s.sent.some(m => m.type === 'ctl'), 'a link to a workspace the desktop has not mounted asks first and never mounts alone')
+  }
+  {
+    const p = page({ hash: '#ws=w9&pane=nope' })
+    p.client.start()
+    const s = p.last(); s.open()
+    s.recv({ type: 'authOk', deviceId: 'dev1', state: multi(), hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+    check(p.state().screen === 'home' && p.state().toast === 'The console no longer exists', 'a link to a console that is gone stays on Home with the toast')
+  }
+  {
+    const p = page({ paired: false, hash: '#pair=AB12CD34&ws=w2&pane=b1' })
+    p.client.start()
+    check(p.state().phase === 'pairForm', 'with pair= in the hash pairing wins')
+  }
+
+  // Live: hashchange applies at once; toasts in the terminal, vibration on Home; the title.
+  const p = page()
+  p.client.start()
+  const s = p.last(); s.open()
+  s.recv({ type: 'authOk', deviceId: 'dev1', state: multi(), hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+  check(p.document.title === '(1) SnAgentsOS Remote', 'the title counts the consoles in action of the snapshot')
+  check(p.vibrations.length === 0 && p.state().toasts.length === 0, 'the authOk snapshot never alerts')
+  p.setHash('#ws=w1&pane=a1')
+  check(p.state().activePaneId === 'a1' && p.state().screen === 'terminal', 'a hashchange while live opens the console at once')
+  s.recv({ type: 'paneStatus', paneId: 'b3', status: st('action', { reason: 'question', stateSince: 50, provider: 'claude' }) })
+  const toast = p.state().toasts.at(-1)
+  check(toast && toast.text === 'Claude Back / B3: Question' && toast.paneId === 'b3' && toast.kind === 'action' && p.vibrations.at(-1).join() === '60,40,60', 'in the terminal another console in action toasts with [Go] and vibrates')
+  check(p.document.title === '(2) SnAgentsOS Remote', 'the title follows a live paneStatus')
+  s.recv({ type: 'paneStatus', paneId: 'a1', status: st('action', { stateSince: 51 }) })
+  check(p.state().toasts.length === 1, 'the console on screen does not toast')
+  p.client.leaveTerminal()
+  const before = p.vibrations.length
+  s.recv({ type: 'paneStatus', paneId: 'a2', status: st('error', { stateSince: 52 }) })
+  check(p.state().toasts.length === 1 && p.vibrations.length === before + 1, 'on Home an error only vibrates')
+  p.state().setPagePref('vibrate', false)
+  s.recv({ type: 'paneStatus', paneId: 'b1', status: st('working', { stateSince: 53 }) })
+  s.recv({ type: 'paneStatus', paneId: 'b1', status: st('action', { stateSince: 54 }) })
+  check(p.vibrations.length === before + 1, 'Vibrate off: no vibration')
+  check(JSON.parse(p.local.get('snagentsos.prefs')).vibrate === false, 'the choice persists in snagentsos.prefs')
 }
 
 function testWorkspaceSelectors(p) {
@@ -502,7 +601,7 @@ async function testClientStatus() {
   check(p.state().toast === null && p.vibrations.length === 0, 'an authOk snapshot with panes in action never alerts')
   s.recv({ type: 'paneStatus', paneId: 'b3', status: st('action', { reason: 'question' }) })
   check(p.state().paneStatus.b3.reason === 'question', 'paneStatus upserts')
-  check(p.state().toast === 'Back / B3: Question' && p.vibrations.length === 1, 'a paneStatus into action of a non-viewed pane alerts')
+  check(p.state().toast === null && p.vibrations.length === 1, 'a paneStatus into action of a non-viewed pane vibrates (on Home no toast, E2-FR-43)')
   s.recv({ type: 'paneStatus', paneId: 'b3', status: null })
   check(!('b3' in p.state().paneStatus), 'paneStatus null deletes')
   s.recv({ type: 'paneStatus', paneId: 'ghost', status: st('action') })
@@ -548,10 +647,11 @@ async function testClientStatus() {
   s.recv({ type: 'state', state: gone })
   check(p.state().activePaneId === null && p.state().screen === 'home' && p.state().toast === null, 'a vanished pane while on Home just clears the view (no toast)')
   p.state().setInPageAlerts(false)
-  check(p.local.get('snagentsos.alerts.inPage') === '0' && p.IN_PAGE_ALERTS_KEY === 'snagentsos.alerts.inPage', 'the preference persists under snagentsos.alerts.inPage')
+  p.state().setPagePref('vibrate', false)
+  check(JSON.parse(p.local.get('snagentsos.prefs')).toasts === false, 'the preference persists in snagentsos.prefs')
   s.recv({ type: 'paneStatus', paneId: 'a2', status: st('working') })
   s.recv({ type: 'paneStatus', paneId: 'a2', status: st('action') })
-  check(p.vibrations.length === 1, 'with the preference off a transition does not alert')
+  check(p.vibrations.length === 1, 'with the preferences off a transition does not alert')
 }
 
 /** Section M4 (E1-FR-24, FR-28): input chunking and the composer storage wiring of client.ts. */
@@ -928,7 +1028,7 @@ async function main() {
   const p = page({ paired: false })
   testPure(p)
   testStatusText(p)
-  testInPageAlerts(p)
+  testPaneNotifier(p)
   testWorkspaceSelectors(p)
   testBackStack(p)
   testLongPress(page())
@@ -937,6 +1037,7 @@ async function main() {
   await testClientStatus()
   testHomeLogic(p)
   await testHomeClient()
+  await testClientNotify()
   testGeneration()
   testBackoff()
   testLiveness()

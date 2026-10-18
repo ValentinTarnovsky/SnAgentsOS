@@ -28,7 +28,7 @@ import { UsageCards } from './home/UsageCards'
 import { NoWorkspaces } from './home/EmptyStates'
 import { Fab, FAB_CLEARANCE_PX } from './home/Fab'
 import { NewConsoleSheet } from './home/NewConsoleSheet'
-import { LiveToasts } from './LiveToasts'
+import { ToastStack } from './ToastStack'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { openDiagnostics } from '../lib/connLog'
@@ -159,7 +159,7 @@ export function HomeScreen(): ReactNode {
             snapshot && <NoWorkspaces />
           )}
         </div>
-        <LiveToasts bottom={FAB_CLEARANCE_PX} />
+        <ToastStack bottom={FAB_CLEARANCE_PX} />
       </main>
 
       {snapshot && snapshot.workspaces.length > 0 && <Fab onClick={() => setNewFor({ workspaceId: null })} />}
