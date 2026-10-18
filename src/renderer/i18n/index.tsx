@@ -16,6 +16,15 @@ function interpolate(template: string, vars?: Vars): string {
   )
 }
 
+/**
+ * Translate outside React (toasts pushed from lib code, remote commands).
+ * Same lookup and fallback as the provider's `t`.
+ */
+export function translate(lang: Language, key: MessageKey, vars?: Vars): string {
+  const dict = DICTIONARIES[lang] ?? en
+  return interpolate(dict[key] ?? en[key] ?? key, vars)
+}
+
 interface I18nValue {
   lang: Language
   t: TFn

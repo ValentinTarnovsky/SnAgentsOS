@@ -5,6 +5,7 @@ import { useT } from '@/i18n'
 import { installErrorText, useUpdaterStore } from '@/lib/updater'
 import { Markdown } from '@/components/ui/Markdown'
 import { cn } from '@/lib/cn'
+import { isFromToast } from '@/lib/toast'
 
 type NoteKey =
   | 'update.portableNote'
@@ -60,7 +61,7 @@ export function UpdateModal() {
 
   return createPortal(
     <div className="fixed inset-0 z-[80] flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-black/60" onClick={close} />
+      <div className="absolute inset-0 bg-black/60" onClick={(e) => { if (!isFromToast(e)) close() }} />
       <div className="relative z-10 flex w-full max-w-md flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]">
         <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
           <div className="flex items-center gap-2.5">

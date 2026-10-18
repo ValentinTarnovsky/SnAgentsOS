@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { FileText, Megaphone, Palette, PanelLeft, Plus, Search, Settings } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { insertToConsole } from '@/lib/insertToConsole'
+import { toast } from '@/lib/toast'
 import { useT } from '@/i18n'
 import { iconFor, type IconComponent } from '@/lib/icons'
 import { THEME_LIST } from '@/themes'
@@ -79,7 +80,15 @@ export function CommandPalette() {
         label: `${t('palette.snippet')}: ${snip.name}`,
         hint: t('palette.snippet'),
         icon: FileText,
-        run: () => insertToConsole(snip.text),
+        run: () => {
+          const paneId = insertToConsole(snip.text)
+          if (!paneId) {
+            toast.error(t('toast.snippet.noTarget'), { dedupeKey: 'snippet' })
+            return
+          }
+          const pane = useAppStore.getState().workspaces.flatMap((w) => w.panes).find((p) => p.id === paneId)
+          toast.success(t('toast.snippet.inserted', { name: snip.name, pane: pane?.title ?? '' }), { dedupeKey: 'snippet' })
+        },
       })
     }
     for (const th of THEME_LIST) {
