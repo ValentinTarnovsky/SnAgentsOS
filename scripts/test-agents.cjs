@@ -700,6 +700,28 @@ async function testResumeModalFlow() {
   h4.S.getState().updateSettings({ agents: { ...h4.S.getState().settings.agents, resumeOnStartup: 'auto' } })
   await h4.L.mountInterruptedAgents()
   check(!h4.A.getState().modal && JSON.stringify(h4.S.getState().mountedWorkspaces.w2) === '["pd"]', 'auto: no dialog, interrupted chats resume and mount right away')
+  // A listed console restarted while the dialog is open (its menu, the phone) starts at once and leaves the dialog.
+  const h5 = build(new Set())
+  await h5.L.mountInterruptedAgents()
+  h5.A.getState().setIntent('pd', 'resume')
+  const r5 = await h5.L.prepareAgentLaunch('pd', h5.base('pd'))
+  check(r5.initialCommand === `claude --resume ${UUID2}` && h5.A.getState().modal.paneIds.join() === 'pa' && !h5.A.getState().gated.pd && h5.A.getState().gated.pa, 'a restarted listed console starts at once, loses its placeholder and leaves the dialog')
+  h5.L.applyResumeChoice({ resume: [] })
+  check(h5.A.getState().launchIntent.pd === undefined && h5.A.getState().launchIntent.pa === 'fresh', 'the later choice leaves no intent behind for the console that already started')
+  const h6 = build(new Set())
+  await h6.L.mountInterruptedAgents()
+  let p6 = null
+  const w6 = h6.L.prepareAgentLaunch('pa', h6.base('pa')).then(v => { p6 = v })
+  await flush(); await flush()
+  h6.A.getState().setIntent('pd', 'fresh')
+  await h6.L.prepareAgentLaunch('pd', h6.base('pd'))
+  check(p6 === null && h6.A.getState().modal && h6.A.getState().modal.paneIds.join() === 'pa', 'one console leaving keeps the dialog open for the rest')
+  h6.A.getState().setIntent('pa', 'fresh')
+  const r6 = await h6.L.prepareAgentLaunch('pa', h6.base('pa'))
+  await w6
+  check(!h6.A.getState().modal && !h6.A.getState().modalPending && p6 !== null && r6.initialCommand === 'claude', 'the last one leaving closes the dialog and releases the held spawns')
+  h6.S.getState().updateSettings({ agents: { ...h6.S.getState().settings.agents, resumeNudgeText: 'Seguí\r\n\x1b[2Jcon\testo' } })
+  check(h6.L.nudgeText() === 'Seguí [2Jcon esto', 'control characters in a hand-edited nudge text never reach the pty (no early Enter, no escape)')
 }
 
 // agents:startupPending: a peek at the unspent startup decisions (never spends one).

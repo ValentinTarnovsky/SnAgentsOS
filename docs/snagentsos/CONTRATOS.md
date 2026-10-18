@@ -144,6 +144,7 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v2.1 | `agents:ready` | main->renderer | `{ paneId, sessionId, phase: 'start' \| 'idle' }` | E5 |
 | v2.1 | `agents:setConfig` | send | `AgentSettings` (`settings.agents`) | E5 |
 | v2.1 | `agents:settingsPatch` | main->renderer | `Partial<AgentSettings>` (cambio desde el tray; el renderer persiste) | E5 |
+| v2.2 | `agents:startupPending` | invoke | `paneIds (string[], <= 1000) -> string[]`: los que todavia no gastaron su decision de arranque, sin gastarla (enmienda R22-09: el modal de retomar no vuelve a preguntar tras recargar el renderer) | E5 |
 | v2.2 | `app:diagnostics` | invoke | `RendererDiagnostics -> string` redactado, <= 64KB, armado por allowlist (enmienda R22-03: el renderer aporta conteos y sus ultimos 10 errores) | E5 |
 | v2.2 | `app:takeRecovery` | invoke | `-> RecoveryInfo \| null` (`{ at, reason, exitCode, consoles, autoReloadsInWindow }`), se consume una vez; reemplaza a `app:rendererRecovered` (pull, enmienda R22-03) | E5 |
 | v2.2 | `app:reload` | send | sin payload; recarga manual, resetea el breaker y descarta la recuperacion pendiente | E5 |

@@ -67,7 +67,8 @@ function ResumeDialogBody({ modal }: { modal: ResumeModalState }) {
 
   // The latest choice, for the countdown and the window key handler.
   const choice = {
-    resume: [...selected],
+    // Only rows still listed: a console restarted meanwhile has left the dialog.
+    resume: rows.filter((r) => selected.has(r.paneId)).map((r) => r.paneId),
     dontAskAgain: dontAsk,
     nudge: anyWorking ? nudge : undefined,
   }
