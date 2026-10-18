@@ -59,6 +59,7 @@ export const remoteClientMsgSchema = z.discriminatedUnion('type', [
   z.object({ v: z.number(), type: z.literal('input'), paneId: id, data: z.string().max(8192) }),
   z.object({ v: z.number(), type: z.literal('ctl'), id, action: ctlActionSchema }),
   z.object({ v: z.number(), type: z.literal('ping'), t: z.number() }),
+  z.object({ v: z.number(), type: z.literal('visibility'), visible: z.boolean() }),
 ])
 
 /** Parse one raw WS frame into a validated client message, or null. */
