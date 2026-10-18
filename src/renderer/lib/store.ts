@@ -24,6 +24,7 @@ import {
   parseQuickCommand,
 } from '@shared/quickCommands'
 import { killPanePtys } from '@/lib/ptyRegistry'
+import { trashSavedScrollback } from '@/lib/scrollback'
 import { restartInPlace } from '@/lib/restartRegistry'
 import { visiblePaneIds } from '@shared/status'
 import { useAgentStore } from '@/lib/agentStore'
@@ -568,6 +569,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         : s.quickCommands
       return { workspaces, activeWorkspaceId, maximized, minimized, mountedWorkspaces, quickCommands }
     })
+    // Their saved scrollback waits in main's trash until the next start (E6-FR-12).
+    if (ws) trashSavedScrollback(ws.panes.map((p) => p.id))
   },
 
   renameWorkspace: (id, name) =>
@@ -622,7 +625,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     return id
   },
 
-  removePane: (workspaceId, paneId) =>
+  removePane: (workspaceId, paneId) => {
     set((s) => {
       const maximized = { ...s.maximized }
       if (maximized[workspaceId] === paneId) maximized[workspaceId] = null
@@ -657,7 +660,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           return { ...w, panes, layout: { grid, order } }
         }),
       }
-    }),
+    })
+    // The pty died with the store change above; its saved scrollback goes to the trash (E6-FR-12).
+    trashSavedScrollback([paneId])
+  },
 
   closePane: (workspaceId, paneId) => {
     const ws = get().workspaces.find((w) => w.id === workspaceId)

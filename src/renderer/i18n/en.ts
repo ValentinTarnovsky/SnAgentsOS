@@ -305,6 +305,7 @@ export const en = {
   'pane.close': 'Close',
   'pane.restart': 'Restart console',
   'pane.redraw': 'Redraw',
+  'pane.clearSavedHistory': 'Clear saved history',
   'pane.restartClean': 'Restart clean',
   'pane.exited': 'exited',
   'pane.exitedTip': '{pane}: exited',
@@ -578,6 +579,19 @@ export const en = {
   'settings.unicode11': 'Unicode 11 widths (emoji and symbols)',
   'settings.unicode11Hint':
     'Improves the alignment of emoji and Claude/Codex borders. Turn it off if you see shifted columns.',
+  'settings.persistGroup': 'Saved history',
+  'settings.persistScrollback': 'Save console history between restarts',
+  'settings.persistScrollbackHint':
+    'After closing, updating or restarting the PC each console shows its previous output under a dated separator. A console that resumes a chat starts clean.',
+  'settings.persistScrollbackOff': 'Turned off by the snapshot engine (Advanced).',
+  'settings.persistLines': 'Lines to save',
+  'settings.clearScrollbackAll': 'Clear all saved history ({count} consoles, {mb} MB)',
+  'settings.clearScrollbackTitle': 'Clear the saved history?',
+  'settings.clearScrollbackMessage': 'The saved history of every console is deleted. What the consoles show now stays on screen.',
+  'settings.clearScrollbackConfirm': 'Clear',
+  'settings.persistOffTitle': 'Stop saving console history?',
+  'settings.persistOffMessage': 'The history already saved is deleted too. What the consoles show now stays on screen.',
+  'settings.persistOffConfirm': 'Turn off and clear',
   'settings.terminalAdvanced': 'Advanced',
   'settings.snapshotMode': 'Snapshot engine',
   'settings.snapshotModeHint':
