@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, ExternalLink, Sparkles, X } from 'lucide-react'
 import { useT } from '@/i18n'
-import { useUpdaterStore } from '@/lib/updater'
+import { installErrorText, useUpdaterStore } from '@/lib/updater'
 import { Markdown } from '@/components/ui/Markdown'
 import { cn } from '@/lib/cn'
 
@@ -121,7 +121,7 @@ export function UpdateModal() {
 
           {opened && <p className="text-xs text-emerald-400">{t('update.openedInstaller')}</p>}
           {error && (
-            <p className="text-xs text-red-400">{t('update.installFailed', { error })}</p>
+            <p className="text-xs text-red-400">{installErrorText(t, error)}</p>
           )}
           {!installing && !opened && (
             <p className="text-xs text-text-secondary">{t(noteKey)}</p>

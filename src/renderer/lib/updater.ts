@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { UpdateInfo, UpdateProgress } from '@shared/ipc-contract'
+import { MISSING_CHECKSUM, type UpdateInfo, type UpdateProgress } from '@shared/ipc-contract'
+import type { TFn } from '@/i18n'
 
 interface UpdaterState {
   /** Last check result. */
@@ -57,13 +58,21 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
       // When relaunching, the app is about to quit; otherwise we opened the file.
       set({ installing: false, opened: !relaunching })
     } catch (err) {
-      set({ installing: false, installError: err instanceof Error ? err.message : String(err) })
+      // IPC wraps the main error ("Error invoking remote method ...: Error:
+      // missing-checksum"), so the known code is matched inside the message.
+      const message = err instanceof Error ? err.message : String(err)
+      set({ installing: false, installError: message.includes(MISSING_CHECKSUM) ? MISSING_CHECKSUM : message })
     }
   },
 
   openPrompt: () => set({ promptOpen: true }),
   closePrompt: () => set({ promptOpen: false }),
 }))
+
+/** User-facing text for an install error (known codes get their own message). */
+export function installErrorText(t: TFn, error: string): string {
+  return error === MISSING_CHECKSUM ? t('update.error.missingChecksum') : t('update.installFailed', { error })
+}
 
 let progressWired = false
 
