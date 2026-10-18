@@ -166,9 +166,9 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('remote.enable', 'remote.enable', 'remote.enableHint', { keywords: ['remote', 'remoto', 'phone', 'celular', 'movil', 'mobile', 'server', 'servidor'], toggle: { path: 'remote.enabled' } }),
   e('remote.devices', 'settings.search.remote', 'settings.search.remoteHint', { summary: true, keywords: ['qr', 'pair', 'vincular', 'device', 'dispositivo', 'port', 'puerto', 'tailscale', 'lan', 'keys', 'botones'] }),
 
-  // Git (the diagnostics block runs git on mount: summary only)
+  // Git
   e('git.chip', 'settings.git.chip', 'settings.git.chipHint', { keywords: ['git', 'branch', 'rama', 'repo', 'chip', 'diff', 'commit', 'cambios', 'changes'], toggle: { path: 'gitChip' } }),
-  e('git.diag', 'settings.git.diag', 'settings.git.refreshHint', { summary: true, keywords: ['git', 'path', 'version', 'detect', 'detectar'] }),
+  e('git.diag', 'settings.git.diag', 'settings.git.refreshHint', { keywords: ['git', 'path', 'version', 'detect', 'detectar'] }),
 
   // Updates (the status block checks on mount: summary only)
   e('updates.status', 'settings.search.updates', 'settings.search.updatesHint', { summary: true, keywords: ['update', 'actualizar', 'actualizacion', 'version', 'upgrade', 'release'] }),
