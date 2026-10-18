@@ -33,6 +33,7 @@ import {
   REMOTE_CLOSE,
   type RemoteClientMsg,
   type RemoteCtlAction,
+  type RemotePaneStatus,
   type RemoteServerMsg,
   type RemoteStateSnapshot,
 } from '@shared/remote-protocol'
@@ -50,6 +51,8 @@ import { store, type UpdateInfo } from './store'
 import { applyRemoteTheme } from './theme'
 import { setLang } from './i18n'
 import { delayFor } from './reconnectSchedule'
+import { createInPageAlerts } from './inPageAlerts'
+import { needsWorkspaceSwitch, paneById, statusMapOf, viewedWorkspaceId, workspaceOfPane } from './workspace'
 
 /** A frame handed to the live terminal. */
 export type TermFrame =
@@ -129,10 +132,28 @@ function paneExists(snap: RemoteStateSnapshot, paneId: string): boolean {
   return snap.workspaces.some((w) => w.panes.some((p) => p.id === paneId))
 }
 
-function workspaceOfPane(snap: RemoteStateSnapshot, paneId: string): string | null {
-  const ws = snap.workspaces.find((w) => w.panes.some((p) => p.id === paneId))
-  return ws ? ws.id : null
-}
+/** E1-FR-40: toast + vibration when another pane starts waiting on the user. */
+const inPageAlerts = createInPageAlerts({
+  now: () => Date.now(),
+  isVisible: pageVisible,
+  enabled: () => store.getState().inPageAlerts,
+  activePaneId: () => store.getState().activePaneId,
+  describe: (paneId) => {
+    const snap = store.getState().snapshot
+    const pane = snap ? paneById(snap, paneId) : null
+    const wsId = snap ? workspaceOfPane(snap, paneId) : null
+    const ws = snap?.workspaces.find((w) => w.id === wsId)
+    return pane && ws ? { ws: ws.name, pane: pane.title } : null
+  },
+  show: (text) => store.getState().setToast(text),
+  vibrate: (ms) => {
+    try {
+      navigator.vibrate?.(ms)
+    } catch {
+      /* not supported (iOS) or blocked */
+    }
+  },
+})
 
 class RemoteClient {
   private ws: WebSocket | null = null
@@ -336,14 +357,17 @@ class RemoteClient {
   }
 
   /**
-   * Switch to a pane that may live in another workspace: ask the desktop to
-   * switch workspace first (which triggers any lazy spawns), then subscribe. A
-   * not-yet-running pane shows a spinner until the server pushes its replay.
+   * Open a pane of any workspace (E1-FR-07). Every path (drawer, waiting pill,
+   * tabs) goes through here. A running pane is only subscribed: the desktop
+   * stays on its workspace and the phone views the pane on its own. A pane
+   * without a pty (or not in the snapshot yet) needs the desktop to switch to
+   * its workspace first, because the renderer spawns it lazily on mount; it
+   * shows a spinner until the server pushes its replay.
    */
   async switchWorkspaceAndView(workspaceId: string, paneId: string): Promise<void> {
-    const snap = store.getState().snapshot
-    const needsSwitch = snap ? workspaceOfPane(snap, paneId) !== snap.activeWorkspaceId : true
-    if (needsSwitch) await this.sendCtl({ kind: 'switchWorkspace', workspaceId })
+    if (needsWorkspaceSwitch(store.getState().snapshot, workspaceId, paneId)) {
+      await this.sendCtl({ kind: 'switchWorkspace', workspaceId })
+    }
     this.viewPane(paneId)
   }
 
@@ -676,6 +700,9 @@ class RemoteClient {
       case 'exit':
         if (msg.paneId === store.getState().subscribedPaneId) this.emit({ type: 'exit', exitCode: msg.exitCode })
         break
+      case 'paneStatus':
+        this.handlePaneStatus(msg.paneId, msg.status)
+        break
       case 'ctlAck':
         this.handleCtlAck(msg)
         break
@@ -760,6 +787,7 @@ class RemoteClient {
       connected: true,
       updateInfo: null,
       snapshot: state,
+      paneStatus: statusMapOf(state),
       xtermTheme,
       terminalUnicode: unicodeOf(state),
       hostPlatform,
@@ -847,14 +875,32 @@ class RemoteClient {
     }
     setLang(state.language)
     const xtermTheme = applyRemoteTheme(state.themeTokens)
-    store.getState().update({ snapshot: state, xtermTheme, terminalUnicode: unicodeOf(state) })
-    // If the viewed pane vanished (closed on desktop), fall back to another.
+    // The viewed workspace is computed before the new snapshot drops the pane.
+    const prev = store.getState()
+    const viewedWs = prev.snapshot ? viewedWorkspaceId(prev.snapshot, prev.activePaneId) : null
+    store.getState().update({ snapshot: state, paneStatus: statusMapOf(state), xtermTheme, terminalUnicode: unicodeOf(state) })
+    // If the viewed pane vanished (closed on desktop), fall back to another of
+    // the same workspace, or of the desktop's active one when that is gone too.
     const cur = store.getState().activePaneId
     if (!cur || !paneExists(state, cur)) {
-      const next = pickPane(state, state.activeWorkspaceId)
+      const fallbackWs = viewedWs && state.workspaces.some((w) => w.id === viewedWs) ? viewedWs : state.activeWorkspaceId
+      const next = pickPane(state, fallbackWs) ?? pickPane(state, state.activeWorkspaceId)
       if (next) this.viewPane(next)
       else store.getState().update({ activePaneId: null, subscribedPaneId: null })
     }
+  }
+
+  /** Live status of one pane (E1-FR-03): upsert or delete, then maybe alert. */
+  private handlePaneStatus(paneId: string, status: RemotePaneStatus | null): void {
+    const s = store.getState()
+    if (s.phase !== 'live') return
+    const prev = s.paneStatus[paneId]
+    const next = { ...s.paneStatus }
+    if (status) next[paneId] = status
+    else delete next[paneId]
+    s.update({ paneStatus: next })
+    // An orphan upsert (status ahead of the state that adds the pane) never alerts.
+    if (s.snapshot && paneById(s.snapshot, paneId)) inPageAlerts.onPaneStatus(paneId, prev, status)
   }
 
   private handleCtlAck(msg: Extract<RemoteServerMsg, { type: 'ctlAck' }>): void {

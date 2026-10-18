@@ -2,6 +2,8 @@
 // Section M2 (E1-FR-10..15, 41): endpointHint, delayFor, classifyConnection and
 // the socket generation / liveness / revive / updated state machine of
 // src/mobile/src/lib/client.ts driven by a fake WebSocket and a fake clock.
+// Section M1 (E1-FR-03..07, 40): statusText, inPageAlerts, the workspace
+// selectors, paneStatus handling and switchWorkspaceAndView.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -18,6 +20,10 @@ export { client, RELOAD_FOR_KEY, IDLE_PROBE_MS, PONG_TIMEOUT, CONNECT_TIMEOUT_MS
 export { store } from './src/mobile/src/lib/store'
 export { classifyConnection, endpointHint, formatAgo } from './src/mobile/src/lib/connectionHealth'
 export { delayFor, RECONNECT_DELAYS } from './src/mobile/src/lib/reconnectSchedule'
+export { relativeAge, statusLine, statusAriaLabel, showsTime } from './src/mobile/src/lib/statusText'
+export { createInPageAlerts, IN_PAGE_ALERTS_KEY } from './src/mobile/src/lib/inPageAlerts'
+export { viewedWorkspaceId, needsWorkspaceSwitch, waitingPanes, nextWaitingPane, statusMapOf } from './src/mobile/src/lib/workspace'
+export { setLang } from './src/mobile/src/lib/i18n'
 ` },
   bundle: true, platform: 'node', format: 'cjs', write: false,
   define: { __APP_VERSION__: JSON.stringify(BUNDLE_VERSION), 'process.env.NODE_ENV': '"production"' },
@@ -66,7 +72,8 @@ function page({ paired = true, hash = '', online = true, session = new Map(), ho
     querySelector: () => null, createElement: () => ({}),
   }
   const window = { addEventListener: on(listeners.win) }
-  const navigator = { onLine: online }
+  const vibrations = []
+  const navigator = { onLine: online, vibrate: ms => { vibrations.push(ms); return true } }
   const mapStorage = map => ({ getItem: k => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)), removeItem: k => map.delete(k) })
   const local = new Map(paired ? [['snagentsos.remote.deviceId', 'dev1'], ['snagentsos.remote.secret', '00'.repeat(32)]] : [])
   const location = { host: `${hostname}:4517`, hostname, hash, pathname: '/', search: '', reload() { reloads++ } }
@@ -85,7 +92,7 @@ function page({ paired = true, hash = '', online = true, session = new Map(), ho
   const api = mod.exports
   const fire = (bag, type, ev = {}) => (bag[type] || []).forEach(fn => fn(ev))
   return {
-    ...api, sockets, session, timers,
+    ...api, sockets, session, timers, vibrations, local,
     get clock() { return clock },
     get reloads() { return reloads },
     state: () => api.store.getState(),
@@ -375,9 +382,149 @@ function testUpdated() {
   }
 }
 
-function main() {
+// --- M1: agent status on the phone (E1-FR-03..07, 40) ---
+
+const MIN = 60000
+const st = (state, rest = {}) => ({ state, stateSince: 0, ...rest })
+const multi = () => ({
+  language: 'en', themeTokens: {}, fontFamily: 'mono', fontSize: 13, keyButtons: [], activeWorkspaceId: 'w1',
+  workspaces: [
+    { id: 'w1', name: 'Front', layoutOrder: ['a2', 'a1'], panes: [
+      { id: 'a1', title: 'A1', type: 'claude', running: true, status: st('working') },
+      { id: 'a2', title: 'A2', type: 'claude', running: true },
+    ] },
+    { id: 'w2', name: 'Back', layoutOrder: ['b1', 'b2', 'b3'], panes: [
+      { id: 'b1', title: 'B1', type: 'claude', running: true, status: st('action', { reason: 'permission' }) },
+      { id: 'b2', title: 'B2', type: 'claude', running: false },
+      { id: 'b3', title: 'B3', type: 'codex', running: true },
+    ] },
+  ],
+})
+
+function testStatusText(p) {
+  p.setLang('en')
+  const now = 10 * 24 * 60 * MIN
+  const ages = [[0, 'now'], [59000, 'now'], [MIN, '1m'], [59 * MIN, '59m'], [60 * MIN, '1h'], [23 * 60 * MIN + 59 * MIN, '23h'], [24 * 60 * MIN, '1d'], [3 * 24 * 60 * MIN, '3d']]
+  for (const [ago, want] of ages) check(p.relativeAge(now - ago, now) === want, `relativeAge ${ago}ms = ${want}`)
+  check(p.relativeAge(now + 5 * MIN, now) === 'now', 'a stateSince in the future clamps to now')
+  check(p.statusLine(st('action', { reason: 'permission' }), now) === 'Waiting for permission', 'reason permission')
+  check(p.statusLine(st('action', { reason: 'question' }), now) === 'Question', 'reason question')
+  check(p.statusLine(st('action', { reason: 'plan' }), now) === 'Approve plan', 'reason plan')
+  check(p.statusLine(st('action', { reason: 'elicitation' }), now) === 'Waiting for an answer', 'reason elicitation')
+  check(p.statusLine(st('working', { stateSince: now - 2 * MIN }), now) === 'Working 2m', 'working with its age')
+  check(p.statusLine(st('working', { stateSince: now - 5000 }), now) === 'Working', 'fresh working has no age')
+  check(p.statusLine(st('done', { stateSince: now - 3 * MIN }), now) === 'Done 3m ago', 'done 3 minutes ago')
+  check(p.statusLine(st('done', { stateSince: now - 3 * MIN }), now + 60000) === 'Done 4m ago', 'two 30s ticks later 3m reads 4m')
+  check(p.statusLine(st('done', { stateSince: now + MIN }), now) === 'Done just now', 'a future done clamps to just now')
+  check(p.statusLine(st('error', { reason: 'failure' }), now) === 'Error', 'a failure reason reads as Error')
+  check(p.statusLine(st('idle'), now) === 'Idle', 'idle')
+  check(p.showsTime(st('working')) && p.showsTime(st('done')) && !p.showsTime(st('idle')) && !p.showsTime(st('action', { reason: 'plan' })) && !p.showsTime(undefined), 'only working/done without a reason drive the ticker')
+  check(p.statusAriaLabel(st('working')) === 'Claude: working', 'aria label "Claude: working"')
+  check(p.statusAriaLabel(st('done', { provider: 'codex', precise: false })) === 'Codex: done (approximate)', 'approximate suffix only for precise:false')
+  p.setLang('es')
+  check(p.statusAriaLabel(st('working')) === 'Claude: trabajando', 'aria label "Claude: trabajando"')
+  check(p.statusLine(st('action', { reason: 'permission' }), now) === 'Esperando permiso' && p.statusLine(st('done', { stateSince: now - 3 * MIN }), now) === 'Listo hace 3m', 'Spanish second line')
+  p.setLang('en')
+}
+
+function testInPageAlerts(p) {
+  let clock = 0, visible = true, enabled = true
+  const active = 'a', shown = [], vib = []
+  const alerts = p.createInPageAlerts({
+    now: () => clock, isVisible: () => visible, enabled: () => enabled, activePaneId: () => active,
+    describe: id => ({ ws: 'W', pane: id.toUpperCase() }), show: t => shown.push(t), vibrate: ms => vib.push(ms),
+  })
+  const action = st('action', { reason: 'permission' })
+  check(alerts.onPaneStatus('b', st('working'), action) && shown.at(-1) === 'W / B: Waiting for permission' && vib.join() === '80', 'another pane entering action shows "{ws} / {pane}: reason" and vibrates 80ms')
+  check(!alerts.onPaneStatus('b', action, action), 'staying in action is not a transition')
+  clock += 3000; shown.length = 0; vib.length = 0
+  check(!alerts.onPaneStatus('a', st('working'), action) && shown.length === 0, 'the viewed pane entering action never alerts')
+  alerts.onPaneStatus('c', undefined, action); clock += 300
+  alerts.onPaneStatus('d', st('idle'), st('action')); clock += 300
+  alerts.onPaneStatus('e', st('done'), action)
+  check(shown.at(-1) === '3 consoles are waiting for you' && vib.length === 1, 'three panes in 1s make one alert: "3 consoles are waiting for you", one vibration')
+  alerts.onPaneStatus('c', st('working'), action)
+  check(shown.at(-1) === '3 consoles are waiting for you', 'the same pane is counted once per window')
+  clock += 3000; shown.length = 0
+  alerts.onPaneStatus('f', st('working'), st('action'))
+  check(shown.at(-1) === 'W / F: Waiting for you' && vib.length === 2, 'after the 3s window a new single alert (no reason = Waiting for you)')
+  clock += 3000; shown.length = 0; visible = false
+  check(!alerts.onPaneStatus('g', st('working'), action) && shown.length === 0, 'no alert while the page is hidden')
+  visible = true; enabled = false
+  check(!alerts.onPaneStatus('g', st('working'), action) && shown.length === 0, 'no alert with inPageAlerts off')
+  enabled = true
+  check(!alerts.onPaneStatus('g', action, null) && !alerts.onPaneStatus('g', undefined, st('done')), 'only transitions into action alert')
+}
+
+function testWorkspaceSelectors(p) {
+  const snap = multi()
+  const map = p.statusMapOf(snap)
+  check(Object.keys(map).join() === 'a1,b1', 'statusMapOf rebuilds the map from panes[].status')
+  check(p.viewedWorkspaceId(snap, 'b2') === 'w2' && p.viewedWorkspaceId(snap, null) === 'w1' && p.viewedWorkspaceId(snap, 'gone') === 'w1', 'viewedWorkspaceId = workspace of the viewed pane, else the active one')
+  check(!p.needsWorkspaceSwitch(snap, 'w2', 'b1'), 'a running pane of another workspace needs no switch')
+  check(p.needsWorkspaceSwitch(snap, 'w2', 'b2'), 'a pane without a pty in another workspace needs the switch')
+  check(p.needsWorkspaceSwitch(snap, 'w2', 'new'), 'a pane missing from the snapshot needs the switch to its workspace')
+  check(!p.needsWorkspaceSwitch(snap, 'w1', 'new') && p.needsWorkspaceSwitch(null, 'w1', 'a1'), 'a new pane of the shown workspace needs none; no snapshot always switches')
+  const statuses = { a1: st('action'), a2: st('action'), b1: st('action'), b3: st('working') }
+  check(p.waitingPanes(snap, statuses, null).map(r => r.paneId).join() === 'a2,a1,b1', 'waiting panes follow workspace then layoutOrder')
+  check(p.waitingPanes(snap, statuses, 'a1').length === 2, 'the viewed pane is not counted')
+  check(p.nextWaitingPane(snap, statuses, 'a1').paneId === 'b1', 'next waiting after a1 is b1')
+  check(p.nextWaitingPane(snap, statuses, 'b1').paneId === 'a2', 'the cycle wraps to the first workspace')
+  check(p.nextWaitingPane(snap, statuses, 'b3').paneId === 'a2', 'from a non-waiting pane the next one in order')
+  check(p.nextWaitingPane(snap, { a1: st('action') }, 'a1') === null, 'nothing else waiting = null')
+}
+
+async function testClientStatus() {
+  const p = page(); p.client.start()
+  const s = p.last(); s.open()
+  s.recv({ type: 'authOk', deviceId: 'dev1', state: multi(), hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+  check(p.state().paneStatus.b1.state === 'action' && p.state().paneStatus.a1.state === 'working', 'authOk rebuilds the status map')
+  check(p.state().toast === null && p.vibrations.length === 0, 'an authOk snapshot with panes in action never alerts')
+  s.recv({ type: 'paneStatus', paneId: 'b3', status: st('action', { reason: 'question' }) })
+  check(p.state().paneStatus.b3.reason === 'question', 'paneStatus upserts')
+  check(p.state().toast === 'Back / B3: Question' && p.vibrations.length === 1, 'a paneStatus into action of a non-viewed pane alerts')
+  s.recv({ type: 'paneStatus', paneId: 'b3', status: null })
+  check(!('b3' in p.state().paneStatus), 'paneStatus null deletes')
+  s.recv({ type: 'paneStatus', paneId: 'ghost', status: st('action') })
+  check(p.state().paneStatus.ghost && p.vibrations.length === 1, 'an orphan upsert is kept but never alerts')
+  const next = multi(); next.workspaces[1].panes[0].status = undefined
+  s.recv({ type: 'state', state: next })
+  check(!p.state().paneStatus.ghost && !p.state().paneStatus.b1, 'a state frame rebuilds the map and drops orphans')
+  check(p.vibrations.length === 1, 'a state frame never alerts')
+
+  // switchWorkspaceAndView (E1-FR-07): running panes never move the desktop.
+  const ctls = () => s.sent.filter(m => m.type === 'ctl')
+  void p.client.switchWorkspaceAndView('w2', 'b1')
+  check(ctls().length === 0 && s.sent.at(-1).type === 'sub' && s.sent.at(-1).paneId === 'b1', 'opening a running pane of another workspace only subscribes')
+  check(p.state().activePaneId === 'b1', 'the phone views b1 on its own')
+  const opening = p.client.switchWorkspaceAndView('w2', 'b2')
+  check(ctls().length === 1 && ctls()[0].action.kind === 'switchWorkspace' && ctls()[0].action.workspaceId === 'w2', 'a pane with running:false sends switchWorkspace first')
+  s.recv({ type: 'ctlAck', id: ctls()[0].id, ok: true })
+  await opening
+  check(p.state().activePaneId === 'b2' && s.sent.at(-1).paneId === 'b2', 'after the ack the pane is subscribed and viewed')
+
+  // b2 closes on the desktop while viewed: fall back inside its workspace (w2), not the desktop's w1.
+  const closed = multi(); closed.workspaces[1].panes = closed.workspaces[1].panes.filter(x => x.id !== 'b2')
+  closed.workspaces[1].layoutOrder = ['b1', 'b3']
+  s.recv({ type: 'state', state: closed })
+  check(['b1', 'b3'].includes(p.state().activePaneId), 'a vanished pane falls back inside the viewed workspace')
+  const gone = multi(); gone.workspaces = [gone.workspaces[0]]
+  s.recv({ type: 'state', state: gone })
+  check(['a1', 'a2'].includes(p.state().activePaneId), 'a vanished workspace falls back to the desktop active one')
+  p.state().setInPageAlerts(false)
+  check(p.local.get('snagentsos.alerts.inPage') === '0' && p.IN_PAGE_ALERTS_KEY === 'snagentsos.alerts.inPage', 'the preference persists under snagentsos.alerts.inPage')
+  s.recv({ type: 'paneStatus', paneId: 'a2', status: st('working') })
+  s.recv({ type: 'paneStatus', paneId: 'a2', status: st('action') })
+  check(p.vibrations.length === 1, 'with the preference off a transition does not alert')
+}
+
+async function main() {
   const p = page({ paired: false })
   testPure(p)
+  testStatusText(p)
+  testInPageAlerts(p)
+  testWorkspaceSelectors(p)
+  await testClientStatus()
   testGeneration()
   testBackoff()
   testLiveness()
@@ -387,4 +534,4 @@ function main() {
   console.log(`PASS: ${checks} mobile logic checks`)
 }
 
-main()
+main().catch(error => { console.error(error); process.exit(1) })
