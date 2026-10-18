@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
-import { useUpdaterStore, initUpdaterEvents } from '@/lib/updater'
+import { initUpdaterEvents, startUpdateScheduler } from '@/lib/updater'
 import { initUsageEvents, syncUsageConfig } from '@/lib/usageStore'
 import { initRemoteEvents, syncRemoteConfig } from '@/lib/remoteStore'
 import { initRemoteCommands } from '@/lib/remoteCommands'
@@ -22,7 +22,8 @@ import { I18nProvider, useT } from '@/i18n'
 import { Sidebar } from '@/components/sidebar/Sidebar'
 import { WorkspaceHost } from '@/components/layout/WorkspaceHost'
 import { SettingsModal } from '@/components/settings/SettingsModal'
-import { UpdateModal } from '@/components/updates/UpdateModal'
+import { ReleaseNotesModal } from '@/components/updates/ReleaseNotesModal'
+import { UpdateCardHost } from '@/components/updates/UpdateCard'
 import { RebrandNotice } from '@/components/rebrand/RebrandNotice'
 import { LegacyBanner } from '@/components/rebrand/LegacyBanner'
 import { RemoteQrModal } from '@/components/remote/RemoteQrModal'
@@ -132,21 +133,12 @@ export function App() {
     return startGitSync()
   }, [hydrated])
 
-  // After config loads, check GitHub for a newer release (if enabled) and, when
-  // one is found, open the "update available" prompt. Slightly delayed so it
-  // never competes with the first paint.
+  // After config loads, check GitHub for a newer release (if enabled): 2.5 s
+  // after hydration, then every 6 h. A find shows the update card in the toast
+  // stack, never a modal, so the console keeps the keyboard (E4-FR-12, 18).
   useEffect(() => {
     if (!hydrated) return
-    if (!useAppStore.getState().settings.autoCheckUpdates) return
-    const timer = setTimeout(() => {
-      void useUpdaterStore
-        .getState()
-        .check()
-        .then((info) => {
-          if (info?.available) useUpdaterStore.getState().openPrompt()
-        })
-    }, 2500)
-    return () => clearTimeout(timer)
+    return startUpdateScheduler(() => useAppStore.getState().settings.autoCheckUpdates)
   }, [hydrated])
 
   if (!hydrated) {
@@ -206,7 +198,8 @@ function AppBody() {
         )}
       </main>
       <SettingsModal />
-      <UpdateModal />
+      <ReleaseNotesModal />
+      <UpdateCardHost />
       <RebrandNotice />
       <RemoteQrModal />
       <RemotePairingPrompt />

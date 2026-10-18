@@ -1,11 +1,13 @@
 import { useEffect } from 'react'
-import { Check, Download, ExternalLink, RefreshCw } from 'lucide-react'
+import { Check, Download, ExternalLink, FileText, RefreshCw } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { installErrorText, useUpdaterStore } from '@/lib/updater'
 import { useAppInfo } from '@/lib/useAppInfo'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { ToggleRow } from '../ui'
+import { closesConsoles, needsDoubleConfirm, newerLabel } from '@/components/updates/update-card-visibility'
+import { impactText, useDoubleConfirm, useUpdateImpact } from '@/components/updates/useUpdateImpact'
 
 export function UpdatesSection() {
   const t = useT()
@@ -22,6 +24,15 @@ export function UpdatesSection() {
   const opened = useUpdaterStore((s) => s.opened)
   const check = useUpdaterStore((s) => s.check)
   const install = useUpdaterStore((s) => s.install)
+  const setNotesOpen = useUpdaterStore((s) => s.setNotesOpen)
+
+  // Settings ignores a dismissed version (E4-FR-13) but keeps the impact
+  // notice and the double confirm of the card (E4-FR-15).
+  const kind = result?.installKind ?? 'none'
+  const offer = !!result?.available && !!result.installable && !installing && !opened
+  const { consoles, busy } = useUpdateImpact(offer && closesConsoles(kind))
+  const confirm = useDoubleConfirm(offer && needsDoubleConfirm({ kind, busyAgents: busy }))
+  const newer = newerLabel(result?.newerCount ?? 0)
 
   // Refresh on open so the status reflects reality without forcing a manual click.
   useEffect(() => {
@@ -66,7 +77,19 @@ export function UpdatesSection() {
           <div className="space-y-3 rounded-card border border-accent-violet/40 bg-accent-violet/5 p-3">
             <p className="text-sm text-text-primary">
               {t('update.newVersion', { version: result.latestVersion ?? '' })}
+              {newer && (
+                <span className="ml-2 text-xs text-accent-violet">
+                  {newer.more ? t('update.card.newerMore', { count: newer.count }) : t('update.card.newer', { count: newer.count })}
+                </span>
+              )}
             </p>
+            <button
+              onClick={() => setNotesOpen(true)}
+              className="flex items-center gap-1.5 text-xs text-text-secondary transition-colors hover:text-text-primary"
+            >
+              <FileText size={13} />
+              {t('update.notes.open')}
+            </button>
 
             {installing && (
               <div className="space-y-1.5">
@@ -85,14 +108,31 @@ export function UpdatesSection() {
               <p className="text-xs text-red-400">{installErrorText(t, installError)}</p>
             )}
 
+            {offer && closesConsoles(kind) && consoles !== null && (
+              <p className={cn('text-xs', busy > 0 ? 'text-amber-400' : 'text-text-secondary')}>
+                {impactText(t, consoles, busy)}
+              </p>
+            )}
+
             {result.installable ? (
               <button
-                onClick={() => void install()}
+                onClick={() => {
+                  if (confirm.click()) void install()
+                }}
                 disabled={installing || opened}
-                className="flex items-center gap-2 rounded-btn bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))] px-3 py-2 text-sm font-medium text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60"
+                className={cn(
+                  'flex items-center gap-2 rounded-btn px-3 py-2 text-sm font-medium text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60',
+                  confirm.armed ? 'bg-red-500' : 'bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))]',
+                )}
               >
                 <Download size={15} />
-                {installing ? t('update.installing') : t('update.updateNow')}
+                {installing
+                  ? t('update.installing')
+                  : confirm.armed
+                    ? Math.max(consoles ?? 0, busy) === 1
+                      ? t('update.impact.confirmOne')
+                      : t('update.impact.confirm', { count: Math.max(consoles ?? 0, busy) })
+                    : t('update.updateNow')}
               </button>
             ) : (
               <p className="text-xs text-text-secondary">{t('update.manualHint')}</p>

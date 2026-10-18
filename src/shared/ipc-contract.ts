@@ -166,6 +166,24 @@ export interface UpdateInfo {
   installKind: InstallKind
   /** Set when the check itself failed (network/API error). */
   error?: string
+  /**
+   * Ready releases newer than the running app (E4-FR-14): published, with this
+   * build's asset and its `.sha256`. 30 means "30 or more"; 0 when unknown.
+   */
+  newerCount: number
+  /** Notes of those releases, newest first, at most 64 KB of notes in total. */
+  missed: ReleaseSummary[]
+  /** Newest published version still missing assets (mid-CI): re-check in 10 min. */
+  newestNotReady?: string
+}
+
+/** One release the user is behind on (E4-FR-14). */
+export interface ReleaseSummary {
+  version: string
+  /** Release body (markdown), possibly cut by the 64 KB notes budget. */
+  notes: string
+  url: string | null
+  publishedAt: string | null
 }
 
 /**
