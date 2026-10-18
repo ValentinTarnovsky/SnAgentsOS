@@ -7,7 +7,7 @@ import { BRAND } from '@shared/brand'
 import type { AppInfo, AppMetrics } from '@shared/ipc-contract'
 import type { AwakeMode, ConfigFile } from '@shared/types'
 import { createMainWindow } from './window'
-import { getConfigPath, isPortable } from './paths'
+import { dataDir, getConfigPath, isPortable } from './paths'
 import { PtyManager } from './pty/PtyManager'
 import { ConfigStore } from './store/ConfigStore'
 import { parseConfig } from './store/schema'
@@ -21,6 +21,10 @@ import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
 import { registerPowerIpc } from './ipc/registerPowerIpc'
 import type { AwakeService } from './agents/AwakeService'
+import { AgentSessionStore } from './agents/AgentSessionStore'
+import { CodexRolloutIndex } from './agents/transcripts'
+import { registerAgentsIpc } from './ipc/registerAgentsIpc'
+import type { ExitTrigger } from '@shared/agents'
 import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
 import { HookServer } from './status/HookServer'
@@ -64,6 +68,17 @@ let statusIpc: StatusIpc | null = null
 // Created in bootstrap: powerSaveBlocker/powerMonitor need app ready.
 let awakeService: AwakeService | null = null
 let trayAwakeMode: AwakeMode | null = null
+// Created in bootstrap, after the legacy migration put dataDir() in place.
+let agentSessions: AgentSessionStore | null = null
+
+/**
+ * Exit snapshot of the agent session registry (E5-FR-06): before the ptys
+ * die, mark who was mid-turn and freeze the store, flushed synchronously.
+ * Idempotent; an update quit is 'update' whatever path gets here first.
+ */
+function snapshotAgentsOnce(trigger: ExitTrigger): void {
+  agentSessions?.snapshotExitOnce(bypassCloseGuards ? 'update' : trigger)
+}
 
 function quitApp(): void {
   isQuitting = true
@@ -283,6 +298,10 @@ function openMainWindow(): void {
     forceClose = true
   })
 
+  // Windows shutdown, restart or log off: Electron emits no before-quit, so the
+  // agent snapshot runs here, synchronously (E5-FR-06).
+  win.on('session-end', () => snapshotAgentsOnce('shutdown'))
+
   win.on('closed', () => {
     mainWindow = null
   })
@@ -336,6 +355,22 @@ async function bootstrap(): Promise<void> {
     remoteEnabled: () => configStore.load()?.settings?.remote?.enabled === true,
   })
   statusIpc = registerStatusIpc(statusManager, hookServer, codexBridge, discordNotifier)
+  const sendToRenderer = (channel: string, payload: unknown): void => {
+    const wc = mainWindow?.webContents
+    if (wc && !wc.isDestroyed()) wc.send(channel, payload)
+  }
+  const sessions = new AgentSessionStore({
+    file: join(dataDir(), 'agent-sessions.json'),
+    getConfig: () => configStore.load(),
+    spawnCwd: (paneId) => ptyManager.getSpawnCwd(paneId),
+    codexIndex: new CodexRolloutIndex(),
+    onChanged: (evt) => sendToRenderer(CH.AGENTS_CHANGED, evt),
+    onReady: (evt) => sendToRenderer(CH.AGENTS_READY, evt),
+  })
+  sessions.load()
+  agentSessions = sessions
+  statusManager.addListener((evt, cause) => sessions.onStatus(evt, cause))
+  registerAgentsIpc(sessions)
   const bootCfg = configStore.load()
   awakeService = registerPowerIpc({
     getSender: () => mainWindow?.webContents ?? null,
@@ -380,7 +415,11 @@ async function bootstrap(): Promise<void> {
   statusIpc?.applyStartup(startupCfg?.settings?.notifications)
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) openMainWindow()
+    if (BrowserWindow.getAllWindows().length === 0) {
+      // macOS: the window closed but the app lived on; record sessions again.
+      agentSessions?.thaw()
+      openMainWindow()
+    }
   })
 }
 
@@ -395,6 +434,7 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on('before-quit', () => {
   isQuitting = true
+  snapshotAgentsOnce('quit')
   // Shut the remote server first (best-effort, non-blocking) so phones get a
   // shutdown frame before the ptys they mirror are torn down.
   remoteManager.shutdown('quit')
@@ -410,6 +450,8 @@ app.on('before-quit', () => {
 app.on('will-quit', () => globalShortcut.unregisterAll())
 
 app.on('window-all-closed', () => {
+  // The ptys die below, so the agent snapshot goes first (E5-FR-06).
+  snapshotAgentsOnce('quit')
   // On darwin the app stays alive with no window; still stop the server so it
   // isn't left listening without any UI to approve pairings.
   remoteManager.shutdown('quit')

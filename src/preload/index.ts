@@ -33,6 +33,7 @@ import type {
   UsageSettings,
 } from '@shared/types'
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
+import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -147,6 +148,12 @@ const api: SnApi = {
   },
   agents: {
     setConfig: (cfg: AgentSettings) => ipcRenderer.send(CH.AGENTS_SET_CONFIG, cfg),
+    list: () => ipcRenderer.invoke(CH.AGENTS_LIST) as Promise<AgentSessionView[]>,
+    startup: () => ipcRenderer.invoke(CH.AGENTS_STARTUP) as Promise<AgentsStartup>,
+    consumeStartup: (paneId: string) => ipcRenderer.invoke(CH.AGENTS_CONSUME_STARTUP, paneId) as Promise<boolean>,
+    forget: (paneId: string) => ipcRenderer.send(CH.AGENTS_FORGET, paneId),
+    onChanged: (cb: (e: AgentsChangedEvt) => void) => sub<AgentsChangedEvt>(CH.AGENTS_CHANGED, cb),
+    onReady: (cb: (e: AgentsReadyEvt) => void) => sub<AgentsReadyEvt>(CH.AGENTS_READY, cb),
   },
 }
 

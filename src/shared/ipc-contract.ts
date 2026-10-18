@@ -13,6 +13,7 @@ import type {
   StatusHooksStatusRes,
   UsageSettings,
 } from './types'
+import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from './agents'
 import type {
   RemoteCtlAction,
   RemoteEndpointKind,
@@ -465,9 +466,21 @@ export interface SnApi {
     /** Every state change, including a mode picked from the tray. Returns unsubscribe. */
     onState(cb: (s: PowerState) => void): () => void
   }
-  /** Agent behavior settings. */
+  /** Agent behavior settings and durable sessions (E5 G2). */
   agents: {
     /** Push settings.agents so main applies awakeDisplay (and later keys). */
     setConfig(cfg: AgentSettings): void
+    /** Every recorded session (availability re-checked in main). */
+    list(): Promise<AgentSessionView[]>
+    /** How the previous run ended and which panes it interrupted (stable for the run). */
+    startup(): Promise<AgentsStartup>
+    /** True only for the first spawn of a pane in this run (survives renderer reloads). */
+    consumeStartup(paneId: string): Promise<boolean>
+    /** Drop a pane's session ("Restart with a new chat"). */
+    forget(paneId: string): void
+    /** A session view changed in a visible field, or was removed. Returns unsubscribe. */
+    onChanged(cb: (e: AgentsChangedEvt) => void): () => void
+    /** A session started, or reached its first idle after a start. Returns unsubscribe. */
+    onReady(cb: (e: AgentsReadyEvt) => void): () => void
   }
 }
