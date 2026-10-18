@@ -238,6 +238,26 @@ function mountActive(map: MountedWorkspaces, wsId: string | null): MountedWorksp
   return wsId ? withMounted(map, wsId, []) : map
 }
 
+/**
+ * `workspaces` with `pane.lastSession` updated from a status event carrying a
+ * session id (main already dropped `launch:` ids and SSH consoles). Returns
+ * the same reference when nothing changes, so status traffic stays transient.
+ */
+function withLastSession(workspaces: Workspace[], evt: PaneStatusEvt): Workspace[] {
+  if (!evt.sessionId || !evt.provider) return workspaces
+  const { sessionId, provider } = evt
+  for (const ws of workspaces) {
+    const pane = ws.panes.find((p) => p.id === evt.paneId)
+    if (!pane) continue
+    const prev = pane.lastSession
+    const cwd = evt.cwd ?? (prev?.sessionId === sessionId ? prev.cwd : '')
+    if (prev && prev.sessionId === sessionId && prev.provider === provider && prev.cwd === cwd) return workspaces
+    const lastSession = { provider, sessionId, cwd, at: evt.updatedAt ?? Date.now() }
+    return workspaces.map((w) => (w === ws ? { ...w, panes: w.panes.map((p) => (p === pane ? { ...p, lastSession } : p)) } : w))
+  }
+  return workspaces
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   workspaces: [],
   activeWorkspaceId: null,
@@ -639,7 +659,15 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         return { paneStatus, paneAttention }
       }
-      paneStatus[evt.paneId] = { state: evt.state, precise: evt.precise, provider: evt.provider, reason: evt.reason, pendingCount: evt.pendingCount, updatedAt: evt.updatedAt }
+      paneStatus[evt.paneId] = {
+        state: evt.state, precise: evt.precise, provider: evt.provider, reason: evt.reason, pendingCount: evt.pendingCount, updatedAt: evt.updatedAt,
+        stateSince: evt.stateSince, lastMessage: evt.lastMessage, activity: evt.activity, pending: evt.pending, sessionId: evt.sessionId, cwd: evt.cwd,
+        detail: evt.detail, topic: evt.topic, firstPrompt: evt.firstPrompt, cacheSince: evt.cacheSince,
+      }
+      // E4-FR-09 (d): mirror a validated session id onto pane.lastSession
+      // (schema 11, a seed for main's agent-sessions.json). Only a change of
+      // session, provider or cwd writes, so plain status traffic never persists.
+      const workspaces = withLastSession(s.workspaces, evt)
       if (evt.state === 'done' || evt.state === 'action' || evt.state === 'error') {
         // Only flag attention when the console is not being looked at right now:
         // other workspace, minimized in the active one, or the window unfocused.
@@ -654,7 +682,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         paneAttention = { ...paneAttention }
         delete paneAttention[evt.paneId]
       }
-      return { paneStatus, paneAttention }
+      return workspaces === s.workspaces ? { paneStatus, paneAttention } : { paneStatus, paneAttention, workspaces }
     }),
 
   clearPaneAttention: (paneId) => {
