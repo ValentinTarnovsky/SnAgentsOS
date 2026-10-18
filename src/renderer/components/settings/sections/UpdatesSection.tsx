@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { Check, Download, ExternalLink, RefreshCw } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
-import { useUpdaterStore } from '@/lib/updater'
+import { installErrorText, useUpdaterStore } from '@/lib/updater'
 import { useAppInfo } from '@/lib/useAppInfo'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -82,7 +82,7 @@ export function UpdatesSection() {
 
             {opened && <p className="text-xs text-emerald-400">{t('update.openedInstaller')}</p>}
             {installError && (
-              <p className="text-xs text-red-400">{t('update.installFailed', { error: installError })}</p>
+              <p className="text-xs text-red-400">{installErrorText(t, installError)}</p>
             )}
 
             {result.installable ? (

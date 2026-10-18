@@ -125,6 +125,7 @@ export const es: Record<keyof typeof en, string> = {
     'Cuando se publica una versión más nueva, te ofrece instalarla automáticamente.',
   'update.failed': 'No se pudo buscar actualizaciones. Revisá tu conexión e intentá de nuevo.',
   'update.installFailed': 'La actualización falló: {error}',
+  'update.error.missingChecksum': 'El release no publica el checksum; no se instala por seguridad.',
   'update.manualHint':
     'Esta versión no puede actualizarse sola. Abrí la página de la publicación para descargarla.',
   'update.openedInstaller': 'Se abrió el instalador. Seguí sus pasos para terminar de actualizar.',

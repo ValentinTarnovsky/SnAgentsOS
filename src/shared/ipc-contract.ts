@@ -63,6 +63,12 @@ export interface UpdateInfo {
   error?: string
 }
 
+/**
+ * Install error raised when the chosen asset has no "<asset>.sha256" sidecar
+ * (E0-FR-25). The renderer shows update.error.missingChecksum for it.
+ */
+export const MISSING_CHECKSUM = 'missing-checksum'
+
 /** Streamed while an update is downloading. */
 export interface UpdateProgress {
   /** 0..100 */
