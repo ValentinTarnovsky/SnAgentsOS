@@ -823,6 +823,23 @@ export const es: Record<keyof typeof en, string> = {
   'remote.qr.tailscaleHint':
     'La dirección de Tailscale no cambia entre redes; conviene usarla para no volver a vincular.',
 
+  // Chequeo del firewall remoto (E2-FR-38/39)
+  'remote.fw.checking': 'Revisando el firewall de Windows...',
+  'remote.fw.ok': 'Firewall OK: los celulares de esta red pueden llegar al puerto {port}.',
+  'remote.fw.public': 'La red "{network}" es Pública: Windows bloquea a los celulares. Marcala como Privada.',
+  'remote.fw.openNetwork': 'Abrir configuración de red',
+  'remote.fw.blocked': 'Una regla del firewall de Windows bloquea {app}.',
+  'remote.fw.fix': 'Arreglar',
+  'remote.fw.blockedManual': 'Hay una regla de bloqueo que no se puede quitar automáticamente: {rule}',
+  'remote.fw.noRule': 'Todavía no hay una regla del firewall que deje llegar a {app} en el puerto {port}.',
+  'remote.fw.createRule': 'Crear regla',
+  'remote.fw.scopePort': 'La regla cubre solo el puerto {port} (versión portable o de desarrollo).',
+  'remote.fw.fixing': 'Esperando la confirmación de Windows (UAC)...',
+  'remote.fw.cancelled': 'Cancelado',
+  'remote.fw.failed': 'No se pudo cambiar el firewall.',
+  'remote.fw.notFixed': 'No se pudo arreglar: sigue una regla de bloqueo que no es nuestra.',
+  'remote.fw.recheck': 'Volver a revisar',
+
   // Remote pairing approval prompt
   'remote.pairing.title': 'Un dispositivo quiere conectarse',
   'remote.pairing.wants': '“{name}” quiere controlar {app}.',

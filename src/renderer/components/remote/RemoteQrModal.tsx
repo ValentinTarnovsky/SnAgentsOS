@@ -6,6 +6,8 @@ import { useRemoteStore } from '@/lib/remoteStore'
 import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { isFromToast, toast } from '@/lib/toast'
+import { useAppInfo } from '@/lib/useAppInfo'
+import { FirewallStatusRow } from './FirewallStatusRow'
 
 const KIND_KEY: Record<RemoteEndpointKind, MessageKey> = {
   lan: 'remote.kind.lan',
@@ -16,7 +18,8 @@ const KIND_KEY: Record<RemoteEndpointKind, MessageKey> = {
 /**
  * Pairing QR modal. Shows one QR per reachable endpoint (selectable), the
  * shared code, the URL, and a countdown that regenerates the code when it
- * expires while open. Closing invalidates the active code.
+ * expires while open. Closing invalidates the active code. On Windows the
+ * firewall / network profile row sits under the QR (E2-FR-38).
  */
 export function RemoteQrModal() {
   const t = useT()
@@ -24,6 +27,7 @@ export function RemoteQrModal() {
   const qr = useRemoteStore((s) => s.qr)
   const refreshQr = useRemoteStore((s) => s.refreshQr)
   const cancelQr = useRemoteStore((s) => s.cancelQr)
+  const info = useAppInfo()
 
   const [sel, setSel] = useState(0)
   const [now, setNow] = useState(() => Date.now())
@@ -119,6 +123,8 @@ export function RemoteQrModal() {
               </div>
             )}
           </div>
+
+          {info?.platform === 'win32' && <FirewallStatusRow />}
 
           {qr && (
             <>

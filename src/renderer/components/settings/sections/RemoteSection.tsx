@@ -10,6 +10,7 @@ import { useRemoteStore } from '@/lib/remoteStore'
 import { useT, useLang, type MessageKey } from '@/i18n'
 import { useAppInfo } from '@/lib/useAppInfo'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { FirewallStatusRow } from '@/components/remote/FirewallStatusRow'
 import { ToggleRow, inputCls, labelCls } from '../ui'
 import { cn } from '@/lib/cn'
 import { toast } from '@/lib/toast'
@@ -218,9 +219,12 @@ export function RemoteSection() {
 
       {/* Platform hints */}
       <div className="space-y-1.5 border-t border-border pt-5">
-        {info?.platform === 'win32' && (
-          <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.firewallHint', { app: BRAND.productName })}</p>
-        )}
+        {info?.platform === 'win32' &&
+          (settings.enabled ? (
+            <FirewallStatusRow />
+          ) : (
+            <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.firewallHint', { app: BRAND.productName })}</p>
+          ))}
         {info?.portable && (
           <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.portableHint')}</p>
         )}
