@@ -266,8 +266,9 @@ async function main() {
     check(fs.readFileSync(file, 'utf8') === '{broken', 'corrupt settings never overwritten')
   } finally { await server.stop(); fs.rmSync(temporary, { recursive: true, force: true }) }
   await schemaV11Checks()
+  ntfyConfigChecks()
   await enrichmentChecks()
-  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11, store and enrichment checks`)
+  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, store and enrichment checks`)
 }
 
 // R21-01: schema 11 (defaults only, no migrate() logic), the config upgrade
@@ -286,15 +287,16 @@ async function schemaV11Checks() {
     connections: [{ id: 'c1', name: 'SSH', steps: [{ send: 'ssh host', waitFor: 'password:', secret: false }] }],
     keyButtons: [{ id: 'k1', label: 'Esc', seq: '\u001b' }],
   }
-  check(CONFIG_VERSION === 11, 'CONFIG_VERSION is 11')
+  check(CONFIG_VERSION === 12, 'CONFIG_VERSION is 12 (R22-01)')
   const c = parseConfig(JSON.parse(JSON.stringify(v10)))
-  check(c && c.version === 11, 'a v10 config parses and is stamped 11')
+  check(c && c.version === 12, 'a v10 config parses and is stamped 12')
   const st = c.settings
   check(st.awakeMode === 'auto' && st.terminalUnicode11 === true && st.terminalAgentEndChip === true && st.notifications.inAppWhenFocused === true, 'v10 gains awakeMode, terminalUnicode11, terminalAgentEndChip and inAppWhenFocused defaults')
-  check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true }), 'v10 gains the settings.agents defaults')
+  check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual' }), 'v10 gains the settings.agents defaults (v11 and v12 keys)')
   check(c.workspaces.every(w => w.agentsCollapsed === undefined && w.panes.every(p => p.lastSession === undefined)), 'agentsCollapsed and lastSession stay absent')
-  const same = (a, b) => { if (a === b) return true; if (typeof a !== 'object' || typeof b !== 'object' || !a || !b) return false; return Object.keys(a).every(k => k === 'version' || same(a[k], b[k])) }
+  const same = (a, b) => { if (a === b) return true; if (typeof a !== 'object' || typeof b !== 'object' || !a || !b) return false; return Object.keys(a).every(k => k === 'version' || k === 'snippets' || same(a[k], b[k])) }
   check(same(v10, c), 'every v10 value survives the parse unchanged')
+  check(c.snippets === undefined && c.quickCommands.length === 1 && c.quickCommands[0].id === 's1' && c.quickCommands[0].action === 'send', 'v10 snippets come back as quick commands (schema 12)')
   check(st.terminalRenderer === 'webgl' && st.keymap.palette === 'Ctrl+P' && c.workspaces[0].panes[0].schedule.prompt === 'hola', 'opt-in renderer, keymap and schedules are kept')
   const v11 = JSON.parse(JSON.stringify(v10)); v11.version = 11
   v11.settings.terminalRenderer = 'dom'; v11.settings.awakeMode = 'sometimes'; v11.settings.terminalUnicode11 = 'yes'
@@ -310,7 +312,7 @@ async function schemaV11Checks() {
   check(d.workspaces[0].agentsCollapsed === true && d.workspaces[1].agentsCollapsed === undefined, 'agentsCollapsed kept, malformed value dropped')
   check(d.workspaces[0].panes[0].lastSession.sessionId.startsWith('0123abcd') && d.workspaces[0].panes[1].lastSession === undefined, 'valid lastSession kept, malformed one dropped instead of failing the whole config')
   check(d.workspaces[1].panes[0].lastSession === undefined, 'a lastSession id with shell syntax (imported config) is dropped')
-  check(parseConfig({ ...v10, version: 12 }).version === 11, 'parse stamps the current version')
+  check(parseConfig({ ...v10, version: 13 }).version === 12, 'parse stamps the current version')
 
   // ConfigStore: only the renderer load (upgrade) stamps an older file, once.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-config-test-'))
@@ -320,13 +322,13 @@ async function schemaV11Checks() {
     const file = path.join(dir, 'config.json'), raw = JSON.stringify(v10)
     fs.writeFileSync(file, raw)
     const store = new ConfigStore()
-    check(store.load().version === 11 && fs.readFileSync(file, 'utf8') === raw, 'a plain load stays read-only (legacy verification safe)')
-    check(store.load({ upgrade: true }).version === 11 && JSON.parse(fs.readFileSync(file, 'utf8')).version === 11, 'the renderer load leaves config.json on v11')
+    check(store.load().version === 12 && fs.readFileSync(file, 'utf8') === raw, 'a plain load stays read-only (legacy verification safe)')
+    check(store.load({ upgrade: true }).version === 12 && JSON.parse(fs.readFileSync(file, 'utf8')).version === 12, 'the renderer load leaves config.json on v12')
     check(fs.readFileSync(file + '.bak', 'utf8') === raw && fs.readdirSync(path.join(dir, 'backups')).length === 1, 'the pre-upgrade v10 file is kept as .bak and in backups/')
     const once = fs.readFileSync(file, 'utf8'); fs.writeFileSync(file + '.bak', 'marker')
     store.load({ upgrade: true })
     check(fs.readFileSync(file + '.bak', 'utf8') === 'marker' && fs.readFileSync(file, 'utf8') === once, 'an already current file is not rewritten')
-    const newer = JSON.stringify({ ...v10, version: 12 }); fs.writeFileSync(file, newer)
+    const newer = JSON.stringify({ ...v10, version: 13 }); fs.writeFileSync(file, newer)
     store.load({ upgrade: true })
     check(fs.readFileSync(file, 'utf8') === newer, 'a newer file (downgrade) is never rewritten')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
@@ -368,7 +370,7 @@ async function schemaV11Checks() {
   S.getState().setActive('w1')
   check(S.getState().mountedWorkspaces.w1 === 'full', 'activating a partially mounted workspace mounts it full')
   flush()
-  check(saves.length === 1 && saves[0].version === 11 && saves[0].activeWorkspaceId === 'w1', 'a persisted slice change writes once, stamped 11')
+  check(saves.length === 1 && saves[0].version === 12 && saves[0].activeWorkspaceId === 'w1', 'a persisted slice change writes once, stamped 12')
   S.getState().renamePane('w1', 'p1', 'Renombrada'); S.getState().updateSettings({ awakeMode: 'always' }); flush()
   check(saves.length === 2 && saves[1].workspaces[0].panes[0].title === 'Renombrada' && saves[1].settings.awakeMode === 'always', 'debounced writes carry the latest state')
   check(!('mountedWorkspaces' in saves[1]) && !('paneStatus' in saves[1]) && saves[1].settings.agents.ctrlDigitFocus === true, 'transient slices never reach config.json, v11 settings do')
@@ -378,6 +380,24 @@ async function schemaV11Checks() {
   S.getState().importConfig({ ...c, workspaces: [{ ...c.workspaces[0], id: 'w3' }, c.workspaces[1]] })
   check(JSON.stringify(S.getState().mountedWorkspaces) === '{"w2":"full","w3":"full"}' && S.getState().activeWorkspaceId === 'w3', 'replace import keeps a surviving workspace mounted (its consoles keep running) and mounts the new active one')
   stop()
+}
+
+// R22-01: schema 12 notification keys (E2-FR-40/41) and the export sanitizer.
+function ntfyConfigChecks() {
+  check(JSON.stringify(settings.ntfy) === JSON.stringify({ enabled: false, server: 'https://ntfy.sh', topic: '', token: '', notifyAction: true, notifyDone: false }), 'ntfy defaults (off, ntfy.sh, action on, done off)')
+  check(settings.onlyWhenAway === false, 'onlyWhenAway defaults to false')
+  const junk = notificationSettingsSchema.parse({ ntfy: { enabled: 'yes', server: 'x'.repeat(600), topic: 'bad topic!', token: 't'.repeat(200), notifyDone: true }, onlyWhenAway: 'sometimes' })
+  check(junk.ntfy.enabled === false && junk.ntfy.server === 'https://ntfy.sh' && junk.ntfy.topic === '' && junk.ntfy.token === '' && junk.ntfy.notifyDone === true && junk.onlyWhenAway === false, 'junk ntfy values fall back field by field')
+  const kept = notificationSettingsSchema.parse({ ntfy: { enabled: true, topic: 'snaos-0123456789abcdef', token: 'tk_1' }, onlyWhenAway: true })
+  check(kept.ntfy.enabled && kept.ntfy.topic === 'snaos-0123456789abcdef' && kept.ntfy.token === 'tk_1' && kept.onlyWhenAway === true, 'valid ntfy values are kept')
+  const { sanitizeExport } = load('src/main/store/exportConfig.ts', { structuredClone })
+  const cfg = { version: 12, workspaces: [], presets: [], snippets: [{ id: 's', name: 'S', text: 't' }], settings: { notifications: { ...settings, hooksEnabled: true, hookToken: 'a'.repeat(32), discord: { ...settings.discord, enabled: true, webhookUrl: 'https://discord.com/api/webhooks/1/x' }, ntfy: { ...settings.ntfy, enabled: true, topic: 'snaos-secret', token: 'tk_secret', notifyDone: true } } } }
+  const out = sanitizeExport(cfg)
+  const text = JSON.stringify(out)
+  check(out.settings.notifications.ntfy.topic === '' && out.settings.notifications.ntfy.token === '' && out.settings.notifications.ntfy.enabled === false, 'the export blanks the ntfy topic and token and disables it')
+  check(!text.includes('snaos-secret') && !text.includes('tk_secret') && !text.includes('webhooks') && !text.includes('a'.repeat(32)), 'no secret survives in the exported text')
+  check(out.settings.notifications.ntfy.server === 'https://ntfy.sh' && out.settings.notifications.ntfy.notifyDone === true && !('snippets' in out), 'non-secret ntfy choices are kept, snippets never exported')
+  check(cfg.settings.notifications.ntfy.topic === 'snaos-secret' && cfg.settings.notifications.discord.enabled === true, 'the live config is not mutated')
 }
 
 // R21-02: status enrichment (E4-FR-09, E5-FR-01/02, E1-FR-01/09, E6-FR-21 parsing).

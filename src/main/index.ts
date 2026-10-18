@@ -11,6 +11,7 @@ import { dataDir, getConfigPath, isPortable } from './paths'
 import { PtyManager } from './pty/PtyManager'
 import { ConfigStore } from './store/ConfigStore'
 import { parseConfig } from './store/schema'
+import { sanitizeExport } from './store/exportConfig'
 import { registerPtyIpc } from './ipc/registerPtyIpc'
 import { registerWindowIpc, wireWindowMaximizeEvents } from './ipc/registerWindowIpc'
 import { registerSystemIpc } from './ipc/registerSystemIpc'
@@ -199,11 +200,7 @@ function registerConfigIpc(): void {
       : await dialog.showSaveDialog(opts)
     if (res.canceled || !res.filePath) return false
     try {
-      const exported = structuredClone(config)
-      exported.settings.notifications.hookToken = ''
-      exported.settings.notifications.hooksEnabled = false
-      exported.settings.notifications.discord.webhookUrl = ''
-      exported.settings.notifications.discord.enabled = false
+      const exported = sanitizeExport(config)
       writeFileSync(res.filePath, JSON.stringify(exported, null, 2), 'utf8')
       return true
     } catch (error) {

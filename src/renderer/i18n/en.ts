@@ -103,6 +103,8 @@ export const en = {
   'data.importChoose': 'How should the imported config be applied?',
   'data.replace': 'Replace',
   'data.merge': 'Merge',
+  'data.mergedQuickLimit': 'Imported (merged). Imported {n} of {m} Quick Commands (limit 100).',
+  'quick.limit': 'Limit of 100 Quick Commands',
   'settings.data.backup.title': 'Backup of {legacy}',
   'settings.data.backup.line': '{path} (deleted on {date})',
   'settings.data.backup.show': 'Show',

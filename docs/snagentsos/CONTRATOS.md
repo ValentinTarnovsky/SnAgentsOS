@@ -197,6 +197,15 @@ El CLI `snaos` ejecuta open/spawn/send reutilizando `remote:controlCmd` / `remot
 | v2.2 (12) | `quickCommands` (top-level) | `QuickCommand[]` | `[]` (migra `snippets`) | E5 |
 | v2.2 (12) | `settings.notifications.ntfy` | `{ enabled, server, topic, token, notifyAction, notifyDone }` | `{ false, 'https://ntfy.sh', '', '', true, false }` | E2 |
 | v2.2 (12) | `settings.notifications.onlyWhenAway` | boolean (umbral fijo 180s, estado desconocido no silencia) | `false` | E2 |
+| v2.2 (12) | `settings.terminalSnapshotMode` | `'auto'|'lazy'|'off'` (`.catch('auto')`) | `'auto'` | E6 |
+| v2.2 (12) | `settings.agents.resumeModalTimeoutSec` | number entero 0..600 (0 = nunca) | `60` | E5 |
+| v2.2 (12) | `settings.agents.resumeNudge` | boolean | `false` | E5 |
+| v2.2 (12) | `settings.agents.resumeNudgeText` | string (max 500; `''` = texto i18n) | `''` | E5 |
+| v2.2 (12) | `settings.agents.sidebarSort` | `'manual'|'smart'` | `'manual'` | E5 |
+| v2.2 (12) | `settings.automation.defaultAgentPresetId` | string (`''` = primer preset `claude`) | `''` | E8 |
+| v2.2 (12) | `settings.automation.composerCreateAnother` | boolean | `false` | E8 |
+| v2.2 (12) | `workspaces[].note` | string opcional (max 140; mas largo se recorta) | ausente | E8 |
+| v2.2 (12) | `workspaces[].taskState` | `'todo'|'doing'|'review'|'done'` opcional | ausente | E8 |
 | v3.0 (13) | `settings.remote.phoneFit` | boolean | `true` | E3 |
 | v3.0 (13) | `settings.remote.https` | `{ enabled, mode: 'tailscaleServe' }` | `{ false, 'tailscaleServe' }` | E3 |
 | v3.0 (13) | `settings.cliEnabled` | boolean | `true` | E6 |
@@ -257,3 +266,4 @@ Ids y combinaciones de v2.1 segun D8 (gana el contrato): `reopenClosedPane` es C
 | Tramo | Cerrada en | Enmiendas |
 |---|---|---|
 | v2.1 | R21-00 | `RemotePaneStatus.precise?` (adoptada); `RemotePaneInfo.resumable?` (D10); `RemoteStateSnapshot.terminalUnicode?`, `replay.exitCode?`, `RemotePaneInfo.exitCode?`; IPC `pty:restart`, `status:sessionEnd`, `agents:*`, `power:getState` y los opcionales de `PowerState`; campos desktop-only de `PaneStatus` (`detail`, `topic`, `firstPrompt`, `cacheSince`); claves `notifications.inAppWhenFocused`, `settings.agents.*` (v11), `workspaces[].agentsCollapsed`, `terminalAgentEndChip`; storage `snagentsos.alerts.inPage` y sessionStorage `snagentsos.reloadFor`; atajos segun D8; archivo `dataDir()/agent-sessions.json` |
+| v2.2 | R22-01 (config) | Claves `terminalSnapshotMode`, `settings.agents.{resumeModalTimeoutSec, resumeNudge, resumeNudgeText, sidebarSort}`, `settings.automation.{defaultAgentPresetId, composerCreateAnother}`, `workspaces[].note`/`taskState`. `CONFIG_VERSION` 12 con la migracion snippets -> quickCommands. Las enmiendas v2.2 de protocolo, IPC y storage se registran con el WP que las implementa |

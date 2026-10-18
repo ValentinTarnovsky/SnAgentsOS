@@ -1,26 +1,31 @@
 import { useState } from 'react'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
-import type { Snippet } from '@shared/types'
+import type { QuickCommand } from '@shared/types'
+import { QUICK_COMMANDS_MAX, QUICK_COMMAND_NAME_MAX, QUICK_COMMAND_TEXT_MAX } from '@shared/quickCommands'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { inputCls, labelCls } from '../ui'
 import { cn } from '@/lib/cn'
 
+/**
+ * Interim editor over the schema 12 Quick Commands (R22-01): edits label and
+ * text and keeps every other field. QuickCommandsSection replaces it (R22-12).
+ */
 export function SnippetsSection() {
   const t = useT()
-  const snippets = useAppStore((s) => s.snippets)
-  const saveSnippet = useAppStore((s) => s.saveSnippet)
-  const deleteSnippet = useAppStore((s) => s.deleteSnippet)
-  const newSnippetId = useAppStore((s) => s.newSnippetId)
-  const [editing, setEditing] = useState<Snippet | null>(null)
+  const snippets = useAppStore((s) => s.quickCommands)
+  const saveSnippet = useAppStore((s) => s.saveQuickCommand)
+  const deleteSnippet = useAppStore((s) => s.deleteQuickCommand)
+  const newSnippetId = useAppStore((s) => s.newQuickCommandId)
+  const [editing, setEditing] = useState<QuickCommand | null>(null)
+  const atLimit = snippets.length >= QUICK_COMMANDS_MAX
 
   if (editing) {
     return (
       <SnippetEditor
         initial={editing}
         onSave={(snip) => {
-          saveSnippet(snip)
-          setEditing(null)
+          if (saveSnippet(snip)) setEditing(null)
         }}
         onCancel={() => setEditing(null)}
       />
@@ -59,9 +64,11 @@ export function SnippetsSection() {
         </div>
       ))}
 
+      {atLimit && <p className="text-xs text-amber-400">{t('quick.limit')}</p>}
       <button
-        onClick={() => setEditing({ id: newSnippetId(), name: '', text: '' })}
-        className="flex w-full items-center justify-center gap-2 rounded-card border border-dashed border-border py-2.5 text-sm text-text-secondary transition-colors hover:border-accent-violet/40 hover:text-text-primary"
+        disabled={atLimit}
+        onClick={() => setEditing({ id: newSnippetId(), name: '', text: '', action: 'send', enter: false })}
+        className="disabled:pointer-events-none disabled:opacity-50 flex w-full items-center justify-center gap-2 rounded-card border border-dashed border-border py-2.5 text-sm text-text-secondary transition-colors hover:border-accent-violet/40 hover:text-text-primary"
       >
         <Plus size={16} />
         {t('snippets.new')}
@@ -75,8 +82,8 @@ function SnippetEditor({
   onSave,
   onCancel,
 }: {
-  initial: Snippet
-  onSave: (snippet: Snippet) => void
+  initial: QuickCommand
+  onSave: (snippet: QuickCommand) => void
   onCancel: () => void
 }) {
   const t = useT()
@@ -87,13 +94,19 @@ function SnippetEditor({
     <div className="space-y-4">
       <div>
         <label className={labelCls}>{t('snippets.name')}</label>
-        <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
+        <input
+          className={inputCls}
+          value={name}
+          maxLength={QUICK_COMMAND_NAME_MAX}
+          onChange={(e) => setName(e.target.value)}
+        />
       </div>
       <div>
         <label className={labelCls}>{t('snippets.text')}</label>
         <textarea
           className={cn(inputCls, 'h-40 resize-none py-2 font-mono')}
           value={text}
+          maxLength={QUICK_COMMAND_TEXT_MAX}
           onChange={(e) => setText(e.target.value)}
         />
       </div>
@@ -105,8 +118,9 @@ function SnippetEditor({
           {t('common.cancel')}
         </button>
         <button
-          onClick={() => onSave({ id: initial.id, name: name.trim() || 'Snippet', text })}
-          className="rounded-btn bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))] px-4 py-2 text-sm font-medium text-white hover:brightness-110"
+          disabled={!text.trim()}
+          onClick={() => onSave({ ...initial, name: name.trim() || 'Snippet', text })}
+          className="disabled:pointer-events-none disabled:opacity-50 rounded-btn bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))] px-4 py-2 text-sm font-medium text-white hover:brightness-110"
         >
           {t('common.save')}
         </button>
