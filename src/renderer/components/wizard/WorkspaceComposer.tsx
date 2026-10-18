@@ -41,7 +41,7 @@ const segBtn = (on: boolean): string =>
 
 const AUTOMATION_BASE: AutomationSettings = { defaultAgentPresetId: '', composerCreateAnother: false }
 
-const fieldLabel ='mb-1.5 block text-xs font-medium text-text-secondary'
+const fieldLabel = 'mb-1.5 block text-xs font-medium text-text-secondary'
 
 /**
  * Workspace composer (E8-FR-08/09): one 560 px card that creates a workspace
@@ -52,7 +52,8 @@ const fieldLabel ='mb-1.5 block text-xs font-medium text-text-secondary'
  */
 export function WorkspaceComposer() {
   const t = useT()
-  const open = useAppStore((s) => s.composerOpen)
+  // The composer shows only while the flow is open (a bare wizardOpen=false closes it too).
+  const open = useAppStore((s) => s.wizardOpen && s.composerOpen)
   const flowOpen = useAppStore((s) => s.wizardOpen)
   const prefill = useAppStore((s) => s.wizardPrefill)
   const presets = useAppStore((s) => s.presets)

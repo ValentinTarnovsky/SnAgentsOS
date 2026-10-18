@@ -194,12 +194,20 @@ app.whenReady().then(async()=>{
  s=await st();
  ok(s.flow&&!s.composer&&await js("smoke.has('[data-wizard]')")&&!(await js("smoke.has('[data-composer]')")),'Advanced... swaps the card for the wizard',s);
  eq([await js("smoke.val('[data-wizard-cwd]')"),await js("[...document.querySelectorAll('[data-wizard] input')].map(i=>i.value)[1]")],['C:/repos/avanzado','avanzado'],'the wizard has the folder and name');
+ await press('N',['control','shift']);await frame();
+ s=await st();
+ ok(s.flow&&!s.composer&&await js("smoke.val('[data-wizard-cwd]')")==='C:/repos/avanzado','Ctrl+Shift+N inside the wizard keeps it and its draft',s);
  await press('Return');await press('Return');
  eq(await js("[...document.querySelectorAll('[data-wizard] .flex.flex-wrap.items-center.gap-3')].length"),2,'the wizard grid is the composer grid (2 cells)');
  eq(await js("[...document.querySelectorAll('[data-wizard] .flex.flex-wrap.items-center.gap-3')].map(r=>r.querySelector('.border-accent-violet')?.textContent)"),['Codex','Codex'],'every cell carries the composer agent');
  await press('Escape');
  ok(!(await st()).flow,'Esc closes the wizard');
  await js("smoke.settings({automation:{defaultAgentPresetId:'',composerCreateAnother:false}})");
+ // A bare wizardOpen=false (what older callers write) closes the composer too.
+ await press('N',['control','shift']);await frame();
+ await js("smoke.set({wizardOpen:false})");await frame();
+ ok(!(await js("smoke.has('[data-composer]')")),'the composer never shows with the flow closed');
+ await js("smoke.set({composerOpen:false})");await frame();
 
  // --- E8-FR-10: note and task state in the sidebar ---------------------------
  await js("smoke.set({activeWorkspaceId:'ws-note'})");await frame();
