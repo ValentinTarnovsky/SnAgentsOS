@@ -10,6 +10,7 @@ import {
   Settings,
   Star,
   StarOff,
+  StickyNote,
   Trash2,
 } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
@@ -37,6 +38,7 @@ import { ExitedDot, allExited, exitedLines } from '@/components/sidebar/ExitedDo
 import { SidebarGitSuffix } from '@/components/git/SidebarGitSuffix'
 import { useGitStore } from '@/lib/gitStore'
 import { compactChip, gitChipEnabled, workspaceGitKey } from '@/lib/gitChip'
+import { NoteInlineEditor, TASK_LABEL_KEY, TaskStateChip, WorkspaceNotePopover } from '@/components/sidebar/WorkspaceNotePopover'
 
 interface MenuState {
   x: number
@@ -77,7 +79,7 @@ const SUMMARY_ORDER: PaneStatus['state'][] = ['action', 'error', 'working', 'don
  * sidebar only), a summary ("3 working, 1 waiting") and one line per console
  * with a state, up to 8 plus "+N". Built when it opens.
  */
-function WorkspaceTip({ ws, paneStatus, showName, extra = [] }: { ws: Workspace; paneStatus: Record<string, PaneStatus>; showName: boolean; extra?: string[] }) {
+function WorkspaceTip({ ws, paneStatus, showName, extra = [], meta = [] }: { ws: Workspace; paneStatus: Record<string, PaneStatus>; showName: boolean; extra?: string[]; meta?: string[] }) {
   const t = useT()
   const lang = useLang()
   const [now] = useState(() => Date.now())
@@ -96,6 +98,12 @@ function WorkspaceTip({ ws, paneStatus, showName, extra = [] }: { ws: Workspace;
   return (
     <span className="flex flex-col" data-workspace-tip>
       {showName && <span>{ws.name}</span>}
+      {/* Task state and note (E8-FR-10), collapsed sidebar only. */}
+      {meta.map((line, i) => (
+        <span key={`m${i}`} className="font-normal text-text-secondary" data-tip-meta>
+          {line}
+        </span>
+      ))}
       {summary && <span className={showName ? 'font-normal' : undefined}>{summary}</span>}
       {lines.map((line, i) => (
         <span key={i} className="font-normal text-text-secondary">
@@ -171,6 +179,12 @@ export function Sidebar() {
   const [confirmWs, setConfirmWs] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  // Note and task state (E8-FR-10): the popover and the inline editor.
+  const [notePopover, setNotePopover] = useState<MenuState | null>(null)
+  const [noteEditingId, setNoteEditingId] = useState<string | null>(null)
+  const setWorkspaceNote = useAppStore((s) => s.setWorkspaceNote)
+  /** Pending console focus of the last row click; a double click cancels it for the inline editor. */
+  const rowFocusCancel = useRef<(() => void) | null>(null)
 
   const onNew = (): void => setWizardOpen(true)
   // Shortcut chips from the live keymap (E4-FR-30): a rebind shows at once.
@@ -223,6 +237,7 @@ export function Sidebar() {
         onClick: () => toggleFavorite(wsId),
       },
       { label: t('ctx.rename'), icon: Pencil, onClick: () => startRename(wsId) },
+      { label: t('note.menu'), icon: StickyNote, onClick: () => setNotePopover(menu ? { ...menu, wsId } : { x: 80, y: 80, wsId }) },
       {
         label: t('ctx.delete'),
         icon: Trash2,
@@ -319,6 +334,9 @@ export function Sidebar() {
           const agents = rowsOn ? workspaceAgents(w, navInput) : []
           const git = gitOn ? gitSummaries[workspaceGitKey(w.id)] : undefined
           const gitLine = git ? compactChip(git) : null
+          // E8-FR-10: the note replaces the console count; state and note join the collapsed tooltip.
+          const noteEditing = noteEditingId === w.id && !sidebarCollapsed
+          const meta = [w.taskState ? t(TASK_LABEL_KEY[w.taskState]) : '', w.note ?? ''].filter(Boolean)
           return (
             <div key={w.id} data-sidebar-ws={w.id}>
               <div
@@ -335,7 +353,22 @@ export function Sidebar() {
                   <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-accent-violet" />
                 )}
 
-                {renaming && !sidebarCollapsed ? (
+                {noteEditing && !renaming ? (
+                  <div className="flex min-w-0 flex-1 items-start gap-2 px-[11px] py-2" data-note-editing={w.id}>
+                    <WsIcon size={16} className="mt-0.5 shrink-0 text-accent-violet" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm text-text-primary">{w.name}</span>
+                      <NoteInlineEditor
+                        initial={w.note ?? ''}
+                        onCommit={(note) => {
+                          setWorkspaceNote(w.id, note)
+                          setNoteEditingId(null)
+                        }}
+                        onCancel={() => setNoteEditingId(null)}
+                      />
+                    </span>
+                  </div>
+                ) : renaming && !sidebarCollapsed ? (
                   <div className="flex min-w-0 flex-1 items-center gap-2 px-[11px] py-2">
                     <WsIcon size={16} className="shrink-0 text-accent-violet" />
                     <input
@@ -352,7 +385,7 @@ export function Sidebar() {
                   </div>
                 ) : (
                   <Tooltip
-                    label={sidebarCollapsed ? (status ? <WorkspaceTip ws={w} paneStatus={paneStatus} showName extra={gitLine ? [gitLine, ...exited] : exited} /> : gitLine ? <span className="flex flex-col"><span>{w.name}</span><span className="font-normal text-text-secondary">{gitLine}</span></span> : w.name) : ''}
+                    label={sidebarCollapsed ? (status ? <WorkspaceTip ws={w} paneStatus={paneStatus} showName meta={meta} extra={gitLine ? [gitLine, ...exited] : exited} /> : gitLine || meta.length > 0 ? <span className="flex flex-col"><span>{w.name}</span>{meta.map((line, i) => <span key={i} className="font-normal text-text-secondary" data-tip-meta>{line}</span>)}{gitLine && <span className="font-normal text-text-secondary">{gitLine}</span>}</span> : w.name) : ''}
                     side="right"
                     delay={sidebarCollapsed && status ? 200 : undefined}
                     className="min-w-0 flex-1"
@@ -366,7 +399,8 @@ export function Sidebar() {
                         // Move focus into the workspace's console right away, even
                         // when re-clicking the already-active one, so the click
                         // never leaves focus parked on this sidebar button.
-                        focusWorkspaceConsole(w.id)
+                        rowFocusCancel.current?.()
+                        rowFocusCancel.current = focusWorkspaceConsole(w.id)
                       }}
                       className={cn(
                         'flex min-w-0 flex-1 items-center gap-2 overflow-hidden px-[11px] py-2 text-left text-sm',
@@ -393,13 +427,32 @@ export function Sidebar() {
                           {w.favorite && (
                             <Star size={11} className="shrink-0 fill-amber-400 text-amber-400" />
                           )}
+                          {w.taskState && !sidebarCollapsed && <TaskStateChip state={w.taskState} />}
                         </span>
-                        <span className="flex min-w-0 text-[11px] text-text-secondary">
-                          <span className="max-w-full shrink-0 truncate">
-                            {w.panes.length === 1
-                              ? t('sidebar.consoleOne', { count: w.panes.length })
-                              : t('sidebar.consoleMany', { count: w.panes.length })}
-                          </span>
+                        <span
+                          className="flex min-w-0 text-[11px] text-text-secondary"
+                          data-ws-second-line={w.id}
+                          onDoubleClick={(e) => {
+                            if (sidebarCollapsed) return
+                            e.preventDefault()
+                            e.stopPropagation()
+                            // The clicks before it queued a console focus: keep the editor's.
+                            rowFocusCancel.current?.()
+                            rowFocusCancel.current = null
+                            setNoteEditingId(w.id)
+                          }}
+                        >
+                          {w.note ? (
+                            <span className={cn('min-w-0 truncate', git ? 'max-w-[70%] shrink' : 'max-w-full')} title={w.note} data-ws-note>
+                              {w.note}
+                            </span>
+                          ) : (
+                            <span className="max-w-full shrink-0 truncate">
+                              {w.panes.length === 1
+                                ? t('sidebar.consoleOne', { count: w.panes.length })
+                                : t('sidebar.consoleMany', { count: w.panes.length })}
+                            </span>
+                          )}
                           {git && <SidebarGitSuffix summary={git} />}
                         </span>
                       </span>
@@ -407,7 +460,7 @@ export function Sidebar() {
                   </Tooltip>
                 )}
 
-                {!sidebarCollapsed && !renaming && (
+                {!sidebarCollapsed && !renaming && !noteEditing && (
                   <AttentionBadge count={attentionCount} className="mr-1" />
                 )}
                 {rowsOn && !renaming && agents.length > 0 && (
@@ -484,6 +537,15 @@ export function Sidebar() {
           y={menu.y}
           items={menuItems(menu.wsId)}
           onClose={() => setMenu(null)}
+        />
+      )}
+
+      {notePopover && (
+        <WorkspaceNotePopover
+          wsId={notePopover.wsId}
+          x={notePopover.x}
+          y={notePopover.y}
+          onClose={() => setNotePopover(null)}
         />
       )}
 
