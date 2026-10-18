@@ -5,6 +5,7 @@ import { useAppStore } from '@/lib/store'
 import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { isFromToast } from '@/lib/toast'
+import { setWizardDraftCwd } from '@/lib/openRequest'
 import { StepStart } from './StepStart'
 import { StepLayout } from './StepLayout'
 import { StepAgents } from './StepAgents'
@@ -69,6 +70,11 @@ export function NewWorkspaceWizard() {
     prevFocus.current = null
     if (prev && !created.current && prev.isConnected) prev.focus()
   }, [open, defaultPresetId, prefill])
+
+  // "Open in SnAgentsOS" never overwrites a folder being set up here (E4-FR-33).
+  useEffect(() => {
+    setWizardDraftCwd(open ? draft.cwd : null)
+  }, [open, draft.cwd])
 
   // Move focus inside once the reset draft rendered: the folder input on an
   // empty draft, the primary button when the folder came prefilled.
