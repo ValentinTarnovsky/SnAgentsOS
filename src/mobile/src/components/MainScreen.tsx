@@ -20,6 +20,7 @@ import { QuickCommandsSheet } from './QuickCommandsSheet'
 import { Composer, openComposerForPaste, toggleInputMode } from './Composer'
 import { DirectInputStrip } from './DirectInputStrip'
 import { ExitStrip } from './ExitStrip'
+import { AgentEndStrip } from './AgentEndStrip'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { openDiagnostics } from '../lib/connLog'
 import { StatusIndicator } from './StatusIndicator'
@@ -124,6 +125,7 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       </main>
 
       <ExitStrip />
+      <AgentEndStrip />
 
       {/* Composer mode docks the composer here; Direct mode shows the strip
           only while the keyboard is down (E1-FR-38). Both stay usable offline:
