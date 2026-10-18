@@ -34,6 +34,7 @@ import { PaneStatusDot } from '@/components/ui/StatusDot'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ScheduleDialog } from '@/components/layout/ScheduleDialog'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
+import { PaneErrorBoundary } from '@/components/common/ErrorBoundary'
 import { ResumeChip } from '@/components/agents/ResumeChip'
 import { useAgentStore } from '@/lib/agentStore'
 import { reopenClosedConsole, restartClean, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
@@ -352,17 +353,21 @@ export function PaneCell({
       <div className="relative min-h-0 flex-1">
         <ResumeChip paneId={pane.id} />
         {mounted ? (
-          <TerminalPane
-            key={epoch}
-            paneId={pane.id}
-            workspaceId={workspace.id}
-            cwd={cwd}
-            shell={shell}
-            initialCommand={initialCommand}
-            setup={setup}
-            fontSize={pane.fontSize}
-            isActive={cellVisible}
-          />
+          // A render failure swaps only the terminal for a fallback; the pty
+          // keeps running and [Reload console] reattaches (E4-FR-19).
+          <PaneErrorBoundary paneId={pane.id} epoch={epoch}>
+            <TerminalPane
+              key={epoch}
+              paneId={pane.id}
+              workspaceId={workspace.id}
+              cwd={cwd}
+              shell={shell}
+              initialCommand={initialCommand}
+              setup={setup}
+              fontSize={pane.fontSize}
+              isActive={cellVisible}
+            />
+          </PaneErrorBoundary>
         ) : (
           <div
             data-pane-placeholder={pane.id}

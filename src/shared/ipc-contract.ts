@@ -48,6 +48,60 @@ export interface AppInfo {
   configPath: string | null
 }
 
+// --- Crash resilience (E4-FR-19..25) ------------------------------------------
+
+/** Where a render error was caught. */
+export type RenderErrorScope = 'pane' | 'paneCell' | 'titlebar' | 'app' | 'root' | 'window'
+
+/** One render error, from a boundary, the root handlers, window.onerror or unhandledrejection. */
+export interface RenderErrorReport {
+  scope: RenderErrorScope
+  paneId?: string
+  message: string
+  /** <= 8KB (main trims again). */
+  stack?: string
+  /** React component stack, <= 8KB. */
+  componentStack?: string
+  at: number
+}
+
+/** Pending "the window recovered" data, consumed once by `app:takeRecovery`. */
+export interface RecoveryInfo {
+  at: number
+  reason: string
+  exitCode: number
+  /** Live consoles when the renderer takes it (after its reconcile). */
+  consoles: number
+  autoReloadsInWindow: number
+}
+
+/** What the renderer adds to `app:diagnostics` (counts only, never contents). */
+export interface RendererDiagnostics {
+  renderErrors: RenderErrorReport[]
+  workspaces: number
+  panes: number
+  connections: number
+  snippets: number
+  lang: string
+}
+
+/** One JSON file under dataDir()/crashes (last 20 kept, <= 16KB each, never uploaded). */
+export interface CrashRecord {
+  id: string
+  kind: 'render-process-gone' | 'render-error' | 'unresponsive'
+  at: number
+  version: string
+  reason?: string
+  exitCode?: number
+  scope?: RenderErrorScope
+  paneId?: string
+  message?: string
+  /** <= 8KB. */
+  stack?: string
+  /** <= 8KB. */
+  componentStack?: string
+}
+
 /** Phases of the 1.x migration marker (mirrors LEGACY_PHASES in main's legacyMarker.ts). */
 export type LegacyPhase = 'migrating' | 'verified' | 'backedUp' | 'committed' | 'cleaning' | 'done' | 'failed'
 
@@ -366,6 +420,14 @@ export interface SnApi {
     legacyOpenLog(): void
     /** Pushed on every marker change. Returns an unsubscribe function. */
     onLegacyStatus(cb: (info: LegacyDataInfo) => void): () => void
+    /** Manual window reload (resets the crash breaker, E4-FR-20). */
+    reload(): void
+    /** Recovery data after an automatic reload, once; null otherwise (E4-FR-22). */
+    takeRecovery(): Promise<RecoveryInfo | null>
+    /** Report a render error to main's crash log (E4-FR-23). */
+    reportRenderError(report: RenderErrorReport): void
+    /** Allowlisted, redacted diagnostics markdown (E4-FR-24). */
+    diagnostics(renderer: RendererDiagnostics): Promise<string>
   }
   pty: {
     spawn(req: PtySpawnReq): Promise<PtySpawnRes>
