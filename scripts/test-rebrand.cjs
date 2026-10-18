@@ -1059,7 +1059,7 @@ async function updaterChecks(BRAND, en, es) {
       try {
         fs.cpSync(path.join(root, 'src/shared'), legacyShared, { recursive: true })
         const legacyBrand = { ...BRAND, productName: LEGACY_BRAND.productName, repo: `ValentinTarnovsky/${LEGACY_BRAND.productName}`, tempPrefix: LEGACY_BRAND.tempPrefix }
-        fs.writeFileSync(path.join(legacyShared, 'brand.ts'), `export const BRAND = ${JSON.stringify(legacyBrand)} as const\n`)
+        fs.writeFileSync(path.join(legacyShared, 'brand.ts'), `export const BRAND = ${JSON.stringify(legacyBrand)} as const\nexport const LEGACY_BRAND = ${JSON.stringify(LEGACY_BRAND)} as const\n`)
         const oldLatest = `https://api.github.com/repos/${legacyBrand.repo}/releases/latest`
         const alias = 'https://api.github.com/repositories/987654321/releases/latest'
         const cdn = name => `https://release-assets.githubusercontent.com/github-production-release-asset/987654321/${name}`
