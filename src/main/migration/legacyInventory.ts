@@ -15,6 +15,7 @@ import {
 import { appendToBackup, listLegacyWhitelist, sha256, CrashFault } from './legacyBrand'
 import {
   combineResults,
+  expandGuard,
   needsElevation,
   removeTombstones,
   safeRemoveTree,
@@ -196,11 +197,13 @@ async function lstatOrNull(r: Run, p: string): Promise<Stats | null> {
   }
 }
 
-/** Link, elevation and guard checks before any backup work (the removal repeats them). */
-function precheck(r: Run, target: string, st: Stats): ItemOutcome | null {
+/** Link, elevation and guard checks (realpaths included) before any backup work; the removal repeats them. */
+async function precheck(r: Run, target: string, st: Stats): Promise<ItemOutcome | null> {
   if (st.isSymbolicLink()) return { state: 'skipped', reason: 'reparsePoint' }
   if (needsElevation(target, r.rm.elevation)) return { state: 'skipped', reason: 'needsElevation' }
-  if (violatesGuard([target], r.env.guard)) return { state: 'skipped', reason: 'guard' }
+  const fsx = r.env.fs ?? nodeFsp
+  const real = await fsx.realpath(target).catch(() => target)
+  if (violatesGuard([target, real], await expandGuard(r.env.guard, fsx))) return { state: 'skipped', reason: 'guard' }
   return null
 }
 
@@ -390,7 +393,7 @@ async function cleanDataFolder(r: Run, id: LegacyItemId, target: string, opts: S
   if (typeof tombs === 'object' && 'deferred' in tombs) return outcome(tombs)
   const st = await lstatOrNull(r, target)
   if (!st) return outcome(tombs)
-  const pre = precheck(r, target, st)
+  const pre = await precheck(r, target, st)
   if (pre) return pre
   if (r.env.isFolderLocked(target)) return { state: 'deferred', reason: 'legacyRunning' }
   const kept = await secureFolder(r, target, target, opts)
@@ -461,7 +464,7 @@ const L03: InventoryItem = {
     const target = join(r.env.roots.appData, LEGACY_BRAND.packageName)
     const st = await lstatOrNull(r, target)
     if (!st) return { state: 'absent' }
-    const pre = precheck(r, target, st)
+    const pre = await precheck(r, target, st)
     if (pre) return pre
     // Data in there (any whitelist file, or anything under backups/), or a
     // registered 1.x install: it belongs to that install, never to the portable.
@@ -502,7 +505,7 @@ const L12: InventoryItem = {
     const target = join(r.env.roots.claudeDir, 'settings.json.snmulticc.bak')
     const st = await lstatOrNull(r, target)
     if (!st) return { state: 'absent' }
-    const pre = precheck(r, target, st)
+    const pre = await precheck(r, target, st)
     if (pre) return pre
     const data = await readFileOrNull(r, target)
     if (!data) return { state: 'deferred', reason: 'unreadable' }
