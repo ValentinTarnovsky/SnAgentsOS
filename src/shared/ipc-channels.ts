@@ -57,6 +57,8 @@ export const CH = {
 
   // Dialogs
   DIALOG_OPEN_DIR: 'dialog:openDirectory',
+  // Workspace composer folder hint (E8-FR-08).
+  FS_DIR_EXISTS: 'fs:dirExists', // invoke (path) -> boolean
 
   // Clipboard (terminal copy/paste)
   CLIPBOARD_WRITE: 'clipboard:write', // send (text)
