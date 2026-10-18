@@ -17,10 +17,12 @@ Fuente unica de verdad para todos los epics. Si un PRD contradice esta seccion, 
 | Release | CONFIG_VERSION | Motivo |
 |---|---|---|
 | v2.0.0 | 10 (sin cambio) | Rebrand: se reubica el directorio de datos y se migra automaticamente desde 1.x. El estado de la migracion (fases, verificacion, respaldo, vencimiento, limpieza, `noticeSeen`) vive en `dataDir()/legacy-migration.json`, nunca en `config.json` |
-| v2.1.0 | 11 | awakeMode, terminalUnicode11, pane.lastSession |
+| v2.1.0 | 11 | awakeMode, terminalUnicode11, pane.lastSession, notifications.inAppWhenFocused, settings.agents.* (v11), workspaces[].agentsCollapsed, terminalAgentEndChip |
 | v2.2.0 | 12 | update, ntfy, scrollback, git, explorer, quickCommands (migracion real de snippets) |
 | v3.0.0 | 13 | phoneFit, https, CLI, worktrees, repoConfigTrust, automations, hibernacion |
 | v3.1+ | 14+ | Items "mas adelante" no agendados |
+
+Entrega consolidada (decision del usuario): todo lo agendado para v2.1, v2.2, v3.0 y v3.1 sale junto en una sola release, 2.0.0 (`package.json` no cambia de version). Los schemas 11 a 14 se conservan como migraciones secuenciales con los numeros de esta tabla, asi una config v10 recorre 11, 12, 13 y 14 en orden. Donde este documento dice "v2.1", "v2.2", etc. nombra el tramo del plan, no un tag publicado.
 
 Las migraciones nuevas siguen el patron de defaults por campo en zod; `migrate()` solo agrega logica cuando hay transformacion (v12: snippets -> quickCommands).
 
@@ -70,9 +72,13 @@ Variables de entorno de la migracion: `SNAOS_FORCE_LEGACY_MIGRATION=1` (corre el
 
 - `LegacyPhase`, `LegacyItemId`, `LegacyItemState`, `LegacyMigrationMarker` y `ReadMarkerResult` (v2.0, E0): en `src/main/migration/legacyMarker.ts`, solo main.
 - `LegacyDataInfo` (v2.0, E0, `src/shared/ipc-contract.ts`): `{ phase: LegacyPhase | null; outcome: 'migrated'|'noLegacy'|null; counts: { workspaces, presets, devices, backups } | null; cleanup: { pending, deferred, done, skipped }; showDeferredBanner: boolean /* algun deferred y cleanupStarts >= 5 */; failure: { phase, attempts } | null; backup: { path, expiresAt } | null; pinRetargeted: boolean | null; manualActions: Array<'uninstallPerMachine'|'trashMacApp'>; firewallHint: boolean; noticeSeen: boolean }`. Las rutas las calcula main; el renderer nunca manda rutas.
-- `RemotePaneStatus` (v2.1, owner E4 datos / E1 transporte): `{ state: ClaudePaneState; provider?: 'claude'|'codex'; reason?: AttentionReason; pendingCount?: number; stateSince: number; lastMessage?: string /* <= 280 */; activity?: string /* tool actual, <= 120 */; pending?: RemotePending[] }`
+- `RemotePaneStatus` (v2.1, owner E4 datos / E1 transporte): `{ state: ClaudePaneState; precise?: boolean; provider?: 'claude'|'codex'; reason?: AttentionReason; pendingCount?: number; stateSince: number; lastMessage?: string /* <= 280 */; activity?: string /* tool actual, <= 120 */; pending?: RemotePending[] }`. `precise` (enmienda v2.1, riesgo 22 de E1) copia `PaneStatus.precise`: `false` = estado inferido del titulo OSC (panes SSH o sin hooks) y el celu agrega "(aproximado)"; ausente se trata como `true`.
 - `RemotePending`: `{ id: string /* toolUseId */; kind: 'permission'|'question'|'plan'|'elicitation'; toolName?: string; summary: string /* <= 200 */; questions?: Array<{ question: string; header?: string; multiSelect: boolean; options: Array<{ label: string; description?: string }> }> }`
 - `PaneStatus` / `PaneStatusEvt` (desktop) ganan los mismos campos mas `sessionId?: string` y `cwd?: string` (solo main -> renderer, nunca al celu). `stateSince` marca la ultima transicion de estado y es distinto de `updatedAt`.
+- Campos desktop-only de `PaneStatus` / `PaneStatusEvt` (enmienda v2.1, owner E4/E5, nunca viajan al celu ni entran en `RemotePaneStatus`): `detail?: AgentDetail` (`{ kind: 'tool'|'prompt'|'question'|'permission'|'plan'|'reply'; text: string /* <= 160, sin C0/C1 ni ANSI */ }`), `topic?: string` (texto del OSC title despues del glifo, <= 60), `firstPrompt?: string` (primera linea del primer UserPromptSubmit, <= 60; se reinicia en `start`) y `cacheSince?: number` (transicion working -> done/idle de Claude). Una emision `state: null` los borra en el renderer.
+- `AgentSessionEndEvt` (v2.1, E6, `src/shared/types.ts`): `{ paneId; ptyId; provider: 'claude'; sessionId; reason: 'prompt_input_exit' | 'other'; cwd?: string; at: number }`. Solo se emite para la sesion principal (sin `agentId`) y con `reason` en la allowlist.
+- `PtyRestartReq` / `PtyRestartRes` (v2.1, E6, `src/shared/ipc-contract.ts`): `PtyRestartReq = PtySpawnReq & { fallbackDefaultShell?: boolean }` (sin `restoreScrollback` cuando ese campo exista en v2.2); `PtyRestartRes = { ptyId; tail: string /* SOFT_RESET + separador localizado */; shellKind: ShellKind; warning?: PtySpawnRes['warning'] }`.
+- `AgentSessionView`, `AgentsStartup`, `ExitTrigger` y `LaunchDecision` (v2.1, E5, `src/shared/agents.ts`): forma completa en E5 "G2 - Retomar". `agent-sessions.json` es main-owned; el renderer solo lo ve por `agents:*`.
 - `QuickCommand` (v2.2, E5): `{ id: string; name: string; text: string; workspaceId?: string /* ausente = global */; action: 'send'|'agent'; enter: boolean; presetId?: string }`
 - `buildAgentArgv({ preset, resume?: { provider, sessionId }, prompt? })` en `src/shared/agent-argv.ts` (v2.1, E4), unico constructor de argv de agentes.
 
@@ -83,6 +89,11 @@ Variables de entorno de la migracion: `SNAOS_FORCE_LEGACY_MIGRATION=1` (corre el
 | v2.1 | S->C | `paneStatus` | `{ paneId, status: RemotePaneStatus \| null }` | E1 (datos E4) |
 | v2.1 | S->C | `RemotePaneInfo.status?` | `RemotePaneStatus` en `state` y `authOk` | E1 |
 | v2.1 | ctl | `restartPane.resume?` | `boolean` (true = relanzar retomando, false = chat nuevo) | E4 |
+| v2.1 | S->C | `RemotePaneStatus.precise?` | `boolean` (ausente = `true`) | E1 (datos E4) |
+| v2.1 | S->C | `RemotePaneInfo.resumable?` | `boolean`, calculado en `remoteSnapshot.ts`: `true` si el pane es de agente, no tiene Connection Profile SSH y hay sesion retomable (D10). Ausente = ocultar "Relanzar retomando" y "Chat nuevo" | E5 (consumen E1/E2) |
+| v2.1 | S->C | `RemoteStateSnapshot.terminalUnicode?` | `'6' \| '11'` (ausente = `'6'`) | E6 |
+| v2.1 | S->C | `replay.exitCode?` | `number`, presente con `running: false` cuando el pty salio solo (no en un spawn lazy pendiente) | E6 |
+| v2.1 | S->C | `RemotePaneInfo.exitCode?` | `number`, superpuesto por main como `running` (`ptyManager.exitedPaneCodes()`) | E6 |
 | v2.2 | S->C | `RemoteStateSnapshot.presets?` | `Array<{ id, name, type, icon, color }>` | E2 |
 | v2.2 | ctl | `createPane.prompt?` | `string` <= 16384 | E2 |
 | v2.2 | ctl | `openPath` | `{ workspaceId, paneId, path }` | E2 |
@@ -121,7 +132,18 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v2.1 | `power:setConfig` | send | `'auto'\|'always'\|'never'` | E4 |
 | v2.1 | `power:state` | main->renderer | `{ blocking: boolean; reason: 'agents'\|'always'\|null }` | E4 |
 | v2.1 | (preload, sin IPC) `snApi.files.pathForFile` | sync | `File -> string` via `webUtils.getPathForFile` | E4 |
-| v2.1 | `status:state` (existente) | main->renderer | `PaneStatusEvt` extendido (stateSince, lastMessage, activity, pending, sessionId, cwd) | E4 |
+| v2.1 | `status:state` (existente) | main->renderer | `PaneStatusEvt` extendido (stateSince, lastMessage, activity, pending, sessionId, cwd, detail, topic, firstPrompt, cacheSince) | E4 |
+| v2.1 | `power:getState` | invoke | `-> { blocking: boolean; reason: 'agents'\|'always'\|null }` (estado inicial; los cambios llegan por `power:state`) | E4 |
+| v2.1 | `pty:restart` | invoke | `PtyRestartReq -> PtyRestartRes`; rechaza con Error si el spawn falla. Reinicio en el lugar: conserva el contenido y no emite `exit` al celu | E6 |
+| v2.1 | `status:sessionEnd` | main->renderer | `AgentSessionEndEvt` | E6 |
+| v2.1 | `agents:list` | invoke | `-> AgentSessionView[]` | E5 |
+| v2.1 | `agents:startup` | invoke | `-> AgentsStartup` (estable durante la ejecucion) | E5 |
+| v2.1 | `agents:consumeStartup` | invoke | `paneId -> boolean` (true solo la primera vez en la ejecucion) | E5 |
+| v2.1 | `agents:changed` | main->renderer | `AgentSessionView \| { paneId: string; removed: true }`, solo si cambia un campo de la vista | E5 |
+| v2.1 | `agents:forget` | send | `paneId` | E5 |
+| v2.1 | `agents:ready` | main->renderer | `{ paneId, sessionId, phase: 'start' \| 'idle' }` | E5 |
+| v2.1 | `agents:setConfig` | send | `AgentSettings` (`settings.agents`) | E5 |
+| v2.1 | `agents:settingsPatch` | main->renderer | `Partial<AgentSettings>` (cambio desde el tray; el renderer persiste) | E5 |
 | v2.2 | `app:diagnostics` | invoke | `-> string` redactado | E5 |
 | v2.2 | `app:rendererRecovered` | main->renderer | `{ reloads: number }` | E5 |
 | v2.2 | `app:openPath` | main->renderer | `{ path }` (second-instance `--open`) | E5 |
@@ -145,6 +167,8 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v3.0 | `git:worktreeRemove` | invoke | `{ path, deleteBranch } -> void` | E6 |
 | v3.0 | `cli:setEnabled` | send | `boolean` | E6 |
 
+Los `agents:awake` / `agents:awakeGet` de E5 no existen: el estado de "PC despierta" usa `power:setConfig`, `power:state` y `power:getState` (R21-06; gana el contrato). `awakeDisplay` viaja en `agents:setConfig`.
+
 No existen (E0-FR-11 retirado, verificacion negativa en E0): `app:legacyOpenDir`, `app:legacyImport` ni `app:legacyCleanup`. Ningun canal de E0 importa, borra ni acepta rutas desde el renderer.
 
 El CLI `snaos` ejecuta open/spawn/send reutilizando `remote:controlCmd` / `remote:controlResult` y el executor de `remoteCommands.ts`.
@@ -157,6 +181,14 @@ El CLI `snaos` ejecuta open/spawn/send reutilizando `remote:controlCmd` / `remot
 | v2.1 (11) | `settings.awakeMode` | `'auto'\|'always'\|'never'` | `'auto'` | E4 |
 | v2.1 (11) | `settings.terminalUnicode11` | boolean | `true` | E4 |
 | v2.1 (11) | `workspaces[].panes[].lastSession` | `{ provider, sessionId, cwd, at }` opcional | ausente | E4 |
+| v2.1 (11) | `settings.notifications.inAppWhenFocused` | boolean | `true` | E4 |
+| v2.1 (11) | `settings.agents.resumeOnStartup` | `'ask'\|'auto'\|'off'` | `'ask'` | E5 |
+| v2.1 (11) | `settings.agents.awakeDisplay` | boolean | `false` | E5 |
+| v2.1 (11) | `settings.agents.sidebarAgentRows` | boolean | `true` | E5 |
+| v2.1 (11) | `settings.agents.topicAsTitle` | boolean | `true` | E5 |
+| v2.1 (11) | `settings.agents.ctrlDigitFocus` | boolean | `true` | E5 |
+| v2.1 (11) | `workspaces[].agentsCollapsed` | boolean opcional | ausente | E5 |
+| v2.1 (11) | `settings.terminalAgentEndChip` | boolean (`.catch(true)`) | `true` | E6 |
 | v2.2 (12) | `settings.updateDismissedVersion` | string | `''` | E5 |
 | v2.2 (12) | `settings.explorerMenu` | boolean | `false` | E5 |
 | v2.2 (12) | `settings.persistScrollback` | boolean | `true` | E5 |
@@ -176,9 +208,9 @@ El CLI `snaos` ejecuta open/spawn/send reutilizando `remote:controlCmd` / `remot
 
 v2.0 no agrega ni quita claves de config. No existe ninguna clave de retencion ni de "conservar datos legados" (el diseno anterior con rollback a 1.x se descarto), y el estado de la migracion, el vencimiento del respaldo y `noticeSeen` viven en el marcador, no en `config.json`. La retencion del zip es la constante `BACKUP_TTL_MS` (30 dias), no un ajuste. E0 solo lee claves existentes de la config migrada: `settings.launchOnStartup` (login item, FR-12), `settings.notifications.hooksEnabled` (FR-14), `settings.remote.enabled` y `settings.remote.port` (aviso de firewall y reconexion, FR-10 y FR-19) y `settings.language` (idioma de los dialogos de main).
 
-Fuera de config.json: estado de la migracion del legado en `dataDir()/legacy-migration.json` y respaldo en `dataDir()/migration-backup-v1.zip` (E0, ver "Migracion del legado"), claves VAPID en `dataDir()/push-keys.json`, runtime del CLI en `dataDir()/runtime.json`, adjuntos en `dataDir()/attachments`, scrollback en `dataDir()/scrollback`.
+Fuera de config.json: estado de la migracion del legado en `dataDir()/legacy-migration.json` y respaldo en `dataDir()/migration-backup-v1.zip` (E0, ver "Migracion del legado"), registro de sesiones de agentes en `dataDir()/agent-sessions.json` (E5, v2.1, main-owned, `version: 1`, no se exporta), claves VAPID en `dataDir()/push-keys.json`, runtime del CLI en `dataDir()/runtime.json`, adjuntos en `dataDir()/attachments`, scrollback en `dataDir()/scrollback`.
 
-Claves localStorage del celu (prefijo `snagentsos.`, siempre con try/catch): `remote.deviceId`, `remote.secret`, `remote.hostPlatform` (E0; migracion unica desde `snmulticc.remote.*`: se copian, se relee para confirmar y recien entonces se borran las legadas; si la escritura falla se usan las legadas en memoria sin borrarlas, L20); `inputMode.<paneId>`, `draft.<paneId>`, `composer.autocorrect`, `composer.agentsDefault` (E1); `keybar`, `lastPane`, `home.collapsed`, `fontScale` (E2); sessionStorage `snagentsos.diag` (E2).
+Claves localStorage del celu (prefijo `snagentsos.`, siempre con try/catch): `remote.deviceId`, `remote.secret`, `remote.hostPlatform` (E0; migracion unica desde `snmulticc.remote.*`: se copian, se relee para confirmar y recien entonces se borran las legadas; si la escritura falla se usan las legadas en memoria sin borrarlas, L20); `inputMode.<paneId>`, `draft.<paneId>`, `composer.autocorrect`, `composer.agentsDefault`, `alerts.inPage` (boolean, default `true`, E1-FR-40) (E1); sessionStorage `snagentsos.reloadFor` (version para la que ya se recargo el bundle, E1-FR-15); `keybar`, `lastPane`, `home.collapsed`, `fontScale` (E2); sessionStorage `snagentsos.diag` (E2).
 
 ### Atajos
 
@@ -197,6 +229,8 @@ Existentes, no reutilizar: Ctrl+K palette, Ctrl+Tab, Ctrl+PageDown, Ctrl+PageUp,
 | v2.2 | Hunk siguiente / anterior | F7 / Shift+F7 | solo con el panel Changes enfocado | E5 |
 | v2.2 | Buscar en ajustes | Ctrl+F | solo dentro del modal de ajustes | E5 |
 | v2.2 | Avanzar en el wizard | Enter | solo dentro del wizard | E5 |
+
+Ids y combinaciones de v2.1 segun D8 (gana el contrato): `reopenClosedPane` es Ctrl+Shift+U (no Ctrl+Shift+Z) y `focusNextPane`/`focusPrevPane` son Ctrl+Alt+Right/Left (no Ctrl+Shift+PageDown/PageUp, que quedan para la navegacion entre prompts de E6). El id de "siguiente que espera" es `nextWaiting` (el plan de R21-05 lo llama `nextAttention`). Ctrl+1..9 respeta `settings.agents.ctrlDigitFocus` y no actua dentro de campos editables.
 
 ### Ownership de piezas compartidas
 
@@ -217,3 +251,9 @@ Existentes, no reutilizar: Ctrl+K palette, Ctrl+Tab, Ctrl+PageDown, Ctrl+PageUp,
 | Marcador `legacy-migration.json`, respaldo zip y nombres reservados de la migracion | E0 v2.0 | nadie mas escribe; el renderer lee por `app:legacyInfo` |
 | `safeRemoveTree` / `tombstoneAndRemove` (`src/main/migration/safeRemove.ts`: no sigue reparse points, guardas de contencion) | E0 v2.0 | borrado de worktrees (`git:worktreeRemove`) |
 | Claves i18n de la migracion: renderer `rebrand.*`, `legacy.banner.*`, `settings.data.backup.*`; main `legacy.running.*`, `legacy.failed.*` (con `{legacy}` / `{app}`, sin literales del nombre viejo). No existen `settings.data.legacy.*` | E0 v2.0 | - |
+
+### Registro de enmiendas
+
+| Tramo | Cerrada en | Enmiendas |
+|---|---|---|
+| v2.1 | R21-00 | `RemotePaneStatus.precise?` (adoptada); `RemotePaneInfo.resumable?` (D10); `RemoteStateSnapshot.terminalUnicode?`, `replay.exitCode?`, `RemotePaneInfo.exitCode?`; IPC `pty:restart`, `status:sessionEnd`, `agents:*`, `power:getState`; campos desktop-only de `PaneStatus` (`detail`, `topic`, `firstPrompt`, `cacheSince`); claves `notifications.inAppWhenFocused`, `settings.agents.*` (v11), `workspaces[].agentsCollapsed`, `terminalAgentEndChip`; storage `snagentsos.alerts.inPage` y sessionStorage `snagentsos.reloadFor`; atajos segun D8; archivo `dataDir()/agent-sessions.json` |
