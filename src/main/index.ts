@@ -34,9 +34,19 @@ import { CodexBridge } from './status/CodexBridge'
 import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
 import { join } from 'path'
+import { homedir } from 'os'
 import { ensureTray, destroyTray, hasTray } from './tray'
 import { mainT, shortTime } from './i18n'
 import { runLegacyMigrationAtBoot, scheduleLegacyCleanup } from './migration/runLegacyMigration'
+import { installLogRing } from './diagnostics/logRing'
+import { CrashStore } from './crash/crashStore'
+import { diagnosticsSecrets } from './diagnostics/buildDiagnostics'
+import { RendererRecovery } from './crash/rendererRecovery'
+import { copyMainDiagnostics, registerCrashIpc, type CrashIpcDeps } from './ipc/registerCrashIpc'
+import { updateState } from './updateState'
+
+// Remember main's warn/error lines for "Copy diagnostics" (E4-FR-24).
+installLogRing()
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 
@@ -76,6 +86,36 @@ let awakeService: AwakeService | null = null
 let trayAwakeMode: AwakeMode | null = null
 // Created in bootstrap, after the legacy migration put dataDir() in place.
 let agentSessions: AgentSessionStore | null = null
+// Crash resilience (E4-FR-21..25). The breaker dialog's [Close] quits without
+// the tray-hide or "active consoles" guards (the button already names N).
+let crashQuit = false
+let crashStore: CrashStore | null = null
+let crashIpcDeps: CrashIpcDeps | null = null
+const rendererRecovery = new RendererRecovery({
+  isQuitting: () => isQuitting,
+  bypassCloseGuards: () => bypassCloseGuards,
+  // The update download finished and it is applying / relaunching: never reload over it.
+  updateRelaunchPending: () => updateState.get().phase === 'installing',
+  consoles: () => ptyManager.count,
+  crashes: { write: (rec) => crashStore?.write(rec) ?? null },
+  t: (key, vars) => mainT(configStore.load(), key, vars),
+  productName: BRAND.productName,
+  showMessageBox: (win, opts) => {
+    const box = { ...opts, title: BRAND.productName, noLink: true }
+    return win ? dialog.showMessageBox(win as BrowserWindow, box) : dialog.showMessageBox(box)
+  },
+  copyDiagnostics: () => {
+    if (crashIpcDeps) copyMainDiagnostics(crashIpcDeps)
+  },
+  hideToBackground: (win) => {
+    ;(win as BrowserWindow).hide()
+    showTray()
+  },
+  quitSkippingGuards: () => {
+    crashQuit = true
+    quitApp()
+  },
+})
 
 /**
  * Exit snapshot of the agent session registry (E5-FR-06): before the ptys
@@ -107,6 +147,8 @@ function showWindow(): void {
   if (mainWindow.isMinimized()) mainWindow.restore()
   mainWindow.show()
   mainWindow.focus()
+  // Left in background after the breaker dialog: bring a live UI back.
+  rendererRecovery.ensureAlive(mainWindow)
 }
 
 /** Shows (or refreshes) the tray with labels in the persisted language. */
@@ -256,14 +298,20 @@ function openMainWindow(): void {
   // stuck paused, which would starve connected phones. Resume them so the
   // remote data plane keeps flowing regardless of the desktop renderer.
   win.webContents.on('render-process-gone', () => ptyManager.resumeRendererPaused())
+  // Crash resilience (E4-FR-21, 25): auto reload behind the breaker; a hang
+  // over 15 s asks [Wait] / [Reload window]. Neither path kills a pty.
+  win.webContents.on('render-process-gone', (_e, details) => rendererRecovery.onGone(win, details))
+  win.on('unresponsive', () => rendererRecovery.onUnresponsive(win))
+  win.on('responsive', () => rendererRecovery.onResponsive())
   win.webContents.on('did-start-navigation', (details) => {
     if (details.isMainFrame) ptyManager.resumeRendererPaused()
   })
 
   let forceClose = false
   win.on('close', (event) => {
-    // Updater is relaunching us: let the window close without any guard.
-    if (bypassCloseGuards) return
+    // Updater is relaunching us, or the crash dialog's [Close] was picked:
+    // let the window close without any guard.
+    if (bypassCloseGuards || crashQuit) return
     // An update is downloading/installing: don't let the user abort it.
     if (isInstalling) {
       event.preventDefault()
@@ -365,6 +413,21 @@ async function bootstrap(): Promise<void> {
     remoteEnabled: () => configStore.load()?.settings?.remote?.enabled === true,
   })
   statusIpc = registerStatusIpc(statusManager, hookServer, codexBridge, discordNotifier)
+  // Crash records live under dataDir(), in place after the legacy migration.
+  // Records are scrubbed like the copied diagnostics (home folder, tokens, sends).
+  crashStore = new CrashStore(join(dataDir(), 'crashes'), app.getVersion(), undefined, () => ({
+    home: homedir(),
+    extraSecrets: diagnosticsSecrets(configStore.load()),
+  }))
+  crashIpcDeps = {
+    recovery: rendererRecovery,
+    crashes: crashStore,
+    getConfig: () => configStore.load(),
+    consoles: () => ptyManager.count,
+    statusHealth: () => statusIpc?.health() ?? null,
+    remoteStatus: () => remoteManager.getUiState().status,
+  }
+  registerCrashIpc(crashIpcDeps)
   const sendToRenderer = (channel: string, payload: unknown): void => {
     const wc = mainWindow?.webContents
     if (wc && !wc.isDestroyed()) wc.send(channel, payload)

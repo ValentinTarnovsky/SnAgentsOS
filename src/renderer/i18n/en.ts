@@ -577,6 +577,24 @@ export const en = {
   'settings.about.version': 'Version',
   'settings.about.platform': 'Platform',
   'settings.about.config': 'Config file',
+  'settings.about.diagnostics': 'Diagnostics',
+  'settings.about.diagnosticsHint': 'Copies a report to paste in an issue. It leaves out settings, connections, quick commands and tokens.',
+
+  // Crash resilience (E4-FR-19..25)
+  'crash.pane.message': 'This console failed to draw. The process is still running.',
+  'crash.pane.reload': 'Reload console',
+  'crash.pane.copyDetail': 'Copy detail',
+  'crash.pane.restart': 'Restart console',
+  'crash.pane.repeated': 'It failed {n} times in the last minute.',
+  'crash.app.message': 'The {app} interface failed. Your consoles keep running.',
+  'crash.app.reload': 'Reload window',
+  'crash.copyDiagnostics': 'Copy diagnostics',
+  'crash.diagCopied': 'Diagnostics copied ({kb} KB)',
+  'crash.diagFailed': 'Could not build the diagnostics',
+  'crash.recovered.title': '{app} recovered from an unexpected window close.',
+  'crash.recovered.bodyNone': 'No consoles were running.',
+  'crash.recovered.bodyOne': 'Your console is still alive.',
+  'crash.recovered.bodyMany': 'Your {n} consoles are still alive.',
 
   // Preset editor
   'preset.name': 'Name',

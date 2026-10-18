@@ -28,6 +28,21 @@ const MESSAGES = {
     'legacy.failed.retry': 'Retry',
     'legacy.failed.quit': 'Quit',
     'pty.restarted': 'restarted {time}',
+    // Crash resilience dialogs (E4-FR-21, 25).
+    'crash.breaker.message': '{app} could not recover the window.',
+    'crash.breaker.detailNone': 'No consoles are running.',
+    'crash.breaker.detailOne': 'Your console keeps running in the background.',
+    'crash.breaker.detailMany': 'Your {n} consoles keep running in the background.',
+    'crash.retry': 'Retry',
+    'crash.copy': 'Copy diagnostics',
+    'crash.background': 'Leave in background',
+    'crash.closeNone': 'Close {app}',
+    'crash.closeOne': 'Close {app} (closes 1 console)',
+    'crash.closeMany': 'Close {app} (closes {n} consoles)',
+    'crash.hang.message': '{app} is not responding',
+    'crash.hang.detail': 'The window has not responded for more than 15 seconds. Your consoles keep running.',
+    'crash.wait': 'Wait',
+    'crash.reload': 'Reload window',
   },
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
@@ -54,10 +69,24 @@ const MESSAGES = {
     'legacy.failed.retry': 'Reintentar',
     'legacy.failed.quit': 'Salir',
     'pty.restarted': 'reiniciado {time}',
+    'crash.breaker.message': '{app} no pudo recuperar la ventana.',
+    'crash.breaker.detailNone': 'No hay consolas en ejecución.',
+    'crash.breaker.detailOne': 'Tu consola sigue corriendo en segundo plano.',
+    'crash.breaker.detailMany': 'Tus {n} consolas siguen corriendo en segundo plano.',
+    'crash.retry': 'Reintentar',
+    'crash.copy': 'Copiar diagnóstico',
+    'crash.background': 'Dejar en segundo plano',
+    'crash.closeNone': 'Cerrar {app}',
+    'crash.closeOne': 'Cerrar {app} (cierra 1 consola)',
+    'crash.closeMany': 'Cerrar {app} (cierra {n} consolas)',
+    'crash.hang.message': '{app} no responde',
+    'crash.hang.detail': 'La ventana no responde hace más de 15 segundos. Tus consolas siguen corriendo.',
+    'crash.wait': 'Esperar',
+    'crash.reload': 'Recargar ventana',
   },
 } as const
 
-type MainKey = keyof (typeof MESSAGES)['en']
+export type MainKey = keyof (typeof MESSAGES)['en']
 
 /** Minimal main-process translator; reads the language from the persisted config. */
 export function mainT(

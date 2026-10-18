@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { StatusTitleReq } from '@shared/ipc-contract'
-import type { NotificationSettings, StatusHooksStatusRes } from '@shared/types'
+import type { NotificationSettings, StatusHealth, StatusHooksStatusRes } from '@shared/types'
 import type { StatusManager } from '../status/StatusManager'
 import type { HookServer } from '../status/HookServer'
 import { hooksStatus, hooksUpToDate, installHooks, uninstallHooks } from '../status/HookInstaller'
@@ -12,6 +12,8 @@ import type { DiscordNotifier } from '../status/DiscordNotifier'
 export interface StatusIpc {
   /** Apply the persisted config once at boot (starts the HookServer if enabled). */
   applyStartup(cfg: NotificationSettings | null | undefined): void
+  /** Same payload as `status:health` (copied diagnostics, E4-FR-24). */
+  health(): StatusHealth
 }
 
 /**
@@ -108,15 +110,17 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
 
   ipcMain.handle(CH.STATUS_HOOKS_STATUS, (): StatusHooksStatusRes => hooksStatus())
   ipcMain.handle(CH.STATUS_SNAPSHOT, () => statusManager.snapshot())
-  ipcMain.handle(CH.STATUS_HEALTH, () => ({
+  const health = (): StatusHealth => ({
     desktop: { error: statusManager.desktopError },
     claude: { ...hooksStatus(), running: hookServer.running, lastEventAt: statusManager.lastClaudeEventAt, ...(lifecycleError ? { error: lifecycleError } : {}) },
     codex: codex.health, discord: discord.health,
-  }))
+  })
+  ipcMain.handle(CH.STATUS_HEALTH, health)
   ipcMain.handle(CH.STATUS_DISCORD_TEST, (_e, cfg) => discord.test(discordSettingsSchema.parse(cfg)))
   ipcMain.handle(CH.STATUS_DESKTOP_TEST, () => statusManager.testDesktop())
 
   return {
+    health,
     applyStartup(cfg) {
       if (!cfg) return
       statusManager.setConfig(cfg)

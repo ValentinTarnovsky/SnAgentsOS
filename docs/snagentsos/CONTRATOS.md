@@ -144,8 +144,10 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v2.1 | `agents:ready` | main->renderer | `{ paneId, sessionId, phase: 'start' \| 'idle' }` | E5 |
 | v2.1 | `agents:setConfig` | send | `AgentSettings` (`settings.agents`) | E5 |
 | v2.1 | `agents:settingsPatch` | main->renderer | `Partial<AgentSettings>` (cambio desde el tray; el renderer persiste) | E5 |
-| v2.2 | `app:diagnostics` | invoke | `-> string` redactado | E5 |
-| v2.2 | `app:rendererRecovered` | main->renderer | `{ reloads: number }` | E5 |
+| v2.2 | `app:diagnostics` | invoke | `RendererDiagnostics -> string` redactado, <= 64KB, armado por allowlist (enmienda R22-03: el renderer aporta conteos y sus ultimos 10 errores) | E5 |
+| v2.2 | `app:takeRecovery` | invoke | `-> RecoveryInfo \| null` (`{ at, reason, exitCode, consoles, autoReloadsInWindow }`), se consume una vez; reemplaza a `app:rendererRecovered` (pull, enmienda R22-03) | E5 |
+| v2.2 | `app:reload` | send | sin payload; recarga manual, resetea el breaker y descarta la recuperacion pendiente | E5 |
+| v2.2 | `app:reportRenderError` | send | `RenderErrorReport` (`{ scope, paneId?, message, stack?, componentStack?, at }`), validado con zod y con throttle en main | E5 |
 | v2.2 | `app:openPath` | main->renderer | `{ path }` (second-instance `--open`) | E5 |
 | v2.2 | `system:setExplorerMenu` | invoke | `boolean -> boolean` | E5 |
 | v2.2 | `pty:scrollbackLoad` | invoke | `paneId -> string \| null` | E5 |
@@ -270,3 +272,4 @@ Ids y combinaciones de v2.1 segun D8 (gana el contrato): `reopenClosedPane` es C
 |---|---|---|
 | v2.1 | R21-00 | `RemotePaneStatus.precise?` (adoptada); `RemotePaneInfo.resumable?` (D10); `RemoteStateSnapshot.terminalUnicode?`, `replay.exitCode?`, `RemotePaneInfo.exitCode?`; IPC `pty:restart`, `status:sessionEnd`, `agents:*`, `power:getState` y los opcionales de `PowerState`; campos desktop-only de `PaneStatus` (`detail`, `topic`, `firstPrompt`, `cacheSince`); claves `notifications.inAppWhenFocused`, `settings.agents.*` (v11), `workspaces[].agentsCollapsed`, `terminalAgentEndChip`; storage `snagentsos.alerts.inPage` y sessionStorage `snagentsos.reloadFor`; atajos segun D8; archivo `dataDir()/agent-sessions.json` |
 | v2.2 | R22-01 (config) | Claves `terminalSnapshotMode`, `settings.agents.{resumeModalTimeoutSec, resumeNudge, resumeNudgeText, sidebarSort}`, `settings.automation.{defaultAgentPresetId, composerCreateAnother}`, `workspaces[].note`/`taskState`. `CONFIG_VERSION` 12 con la migracion snippets -> quickCommands. Las enmiendas v2.2 de protocolo, IPC y storage se registran con el WP que las implementa |
+| v2.2 | R22-03 | IPC `app:takeRecovery` (pull, reemplaza a `app:rendererRecovered`), `app:reload`, `app:reportRenderError` y la forma `RendererDiagnostics -> string` de `app:diagnostics`. Carpeta `dataDir()/crashes` (20 JSON de hasta 16KB, nunca se suben). `src/shared/redact.ts` con `redact(text, { home?, extraSecrets? })` |
