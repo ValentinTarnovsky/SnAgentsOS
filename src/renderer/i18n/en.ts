@@ -122,6 +122,7 @@ export const en = {
   'update.autoCheckHint': 'When a newer version is published, ask to install it automatically.',
   'update.failed': "Couldn't check for updates. Check your connection and try again.",
   'update.installFailed': 'Update failed: {error}',
+  'update.error.missingChecksum': "The release doesn't publish a checksum; not installing for safety.",
   'update.manualHint':
     "This build can't update itself automatically. Open the release page to download it.",
   'update.openedInstaller': 'The installer was opened. Follow its steps to finish updating.',
