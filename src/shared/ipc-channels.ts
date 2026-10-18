@@ -6,6 +6,13 @@ export const CH = {
   // App
   APP_INFO: 'app:info',
 
+  // 1.x migration (E0-FR-10, 28, 35). Main computes every path; none comes from the renderer.
+  APP_LEGACY_INFO: 'app:legacyInfo', // invoke -> LegacyDataInfo
+  APP_LEGACY_ACK: 'app:legacyAck', // send -> noticeSeen = true in the marker
+  APP_LEGACY_SHOW_BACKUP: 'app:legacyShowBackup', // send -> reveal migration-backup-v1.zip
+  APP_LEGACY_OPEN_LOG: 'app:legacyOpenLog', // send -> open logs/legacy-migration.log
+  APP_LEGACY_STATUS: 'app:legacyStatus', // main -> renderer (LegacyDataInfo on every marker change)
+
   // PTY lifecycle (renderer -> main)
   PTY_SPAWN: 'pty:spawn', // invoke -> { ptyId }
   PTY_REATTACH: 'pty:reattach', // invoke (paneId) -> { ptyId, replay } | null

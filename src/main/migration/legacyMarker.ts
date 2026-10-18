@@ -209,12 +209,19 @@ export function readMarker(targetDir: string, fsx: MarkerFs = realFs): ReadMarke
   return { kind: 'corrupt' }
 }
 
-/** Copies the current marker to prev, then writes tmp + rename (UTF-8, no BOM). */
+/**
+ * Copies the current marker to prev, then writes tmp + rename (UTF-8, no BOM).
+ * noticeSeen only ever goes from false to true: the welcome notice is acked
+ * by a separate write while a cleanup pass may still hold an older copy of
+ * the marker, and that pass's next write must not bring the notice back.
+ */
 export function writeMarker(targetDir: string, m: LegacyMigrationMarker, fsx: MarkerFs = realFs): void {
   fsx.mkdirSync(targetDir, { recursive: true })
   const main = join(targetDir, MARKER_FILE)
   const tmp = `${main}.tmp`
-  if (fsx.existsSync(main) && parseMarkerFile(main, fsx).kind === 'ok') {
+  const current = fsx.existsSync(main) ? parseMarkerFile(main, fsx) : null
+  if (current?.kind === 'ok') {
+    if (current.marker.noticeSeen && !m.noticeSeen) m.noticeSeen = true
     fsx.copyFileSync(main, join(targetDir, MARKER_PREV_FILE))
   }
   fsx.writeFileSync(tmp, JSON.stringify(m, null, 2) + '\n', 'utf8')
