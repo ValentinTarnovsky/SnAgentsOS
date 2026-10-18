@@ -31,6 +31,8 @@ export interface ToastItem {
   node?: ReactNode
   /** Bumped when a dedupeKey push replaces the card: restarts its timer. */
   rev?: number
+  /** Only for kind 'card': the node renders its own close controls (the update card). */
+  hideClose?: boolean
 }
 
 export const TOAST_MAX_VISIBLE = 4

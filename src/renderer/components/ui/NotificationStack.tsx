@@ -164,7 +164,10 @@ function ToastCard({ item }: { item: ToastItem }) {
       }}
       onFocus={pause}
       onBlur={(e) => resume(e)}
-      className="relative flex items-start gap-2.5 rounded-card border border-border bg-card px-3 py-2.5 pr-8 text-sm text-text-primary shadow-[0_12px_32px_-12px_rgba(0,0,0,0.6)]"
+      className={cn(
+        'relative flex items-start gap-2.5 rounded-card border border-border bg-card px-3 py-2.5 text-sm text-text-primary shadow-[0_12px_32px_-12px_rgba(0,0,0,0.6)]',
+        !item.hideClose && 'pr-8',
+      )}
     >
       {item.kind === 'card' ? (
         <div className="min-w-0 flex-1">{item.node}</div>
@@ -200,14 +203,16 @@ function ToastCard({ item }: { item: ToastItem }) {
           </div>
         </>
       )}
-      <button
-        type="button"
-        onClick={() => toast.dismiss(item.id)}
-        aria-label={t('toast.close')}
-        className="absolute right-2 top-2 rounded-btn p-0.5 text-text-secondary transition-colors hover:text-text-primary"
-      >
-        <X size={13} />
-      </button>
+      {!item.hideClose && (
+        <button
+          type="button"
+          onClick={() => toast.dismiss(item.id)}
+          aria-label={t('toast.close')}
+          className="absolute right-2 top-2 rounded-btn p-0.5 text-text-secondary transition-colors hover:text-text-primary"
+        >
+          <X size={13} />
+        </button>
+      )}
     </div>
   )
 }
