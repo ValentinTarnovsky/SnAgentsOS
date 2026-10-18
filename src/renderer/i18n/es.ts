@@ -443,6 +443,7 @@ export const es: Record<keyof typeof en, string> = {
   'usage.cpu': 'CPU',
   'usage.processes': 'Procesos',
   'usage.consoles': 'Consolas',
+  'usage.headless': 'Snapshot de consolas: {panes} activos, parseo p95 {parse} ms, snapshot p95 {snap} ms, {hits} reusados',
 
   // Barras de uso de IA (cuotas de Claude + Codex + modelos personalizados)
   'aiusage.title': 'Uso',
@@ -523,6 +524,13 @@ export const es: Record<keyof typeof en, string> = {
   'settings.unicode11': 'Anchos Unicode 11 (emoji y símbolos)',
   'settings.unicode11Hint':
     'Mejora la alineación de emoji y bordes de Claude/Codex. Apagalo si ves columnas corridas.',
+  'settings.terminalAdvanced': 'Avanzado',
+  'settings.snapshotMode': 'Snapshot de consolas',
+  'settings.snapshotModeHint':
+    'Cómo se reconstruye una consola al recargar la ventana o al abrirla en el celu. Desactivado vuelve al historial crudo y apaga el guardado entre reinicios.',
+  'settings.snapshotAuto': 'Automático',
+  'settings.snapshotLazy': 'Diferido',
+  'settings.snapshotOff': 'Desactivado',
   'terminal.shellNotFound': 'Shell configurado no encontrado: {requested}. Se usa {used}.',
   'settings.language': 'Idioma',
   'settings.languageHint': 'Idioma de la interfaz.',

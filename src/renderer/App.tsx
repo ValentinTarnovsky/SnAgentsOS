@@ -9,6 +9,7 @@ import { initLegacyEvents } from '@/lib/legacyStore'
 import { initPowerEvents, syncAgentSettings, syncAwakeMode } from '@/lib/powerStore'
 import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
 import { startGitSync } from '@/lib/gitSync'
+import { engineFromSettings } from '@shared/terminalEngine'
 import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { startPersistence } from '@/lib/persist'
 import { initPtyLifecycle, reconcilePtys } from '@/lib/ptyLifecycle'
@@ -43,6 +44,10 @@ export function App() {
   const remote = useAppStore((s) => s.settings.remote)
   const awakeMode = useAppStore((s) => s.settings.awakeMode)
   const agents = useAppStore((s) => s.settings.agents)
+  const snapshotMode = useAppStore((s) => s.settings.terminalSnapshotMode)
+  const unicode11 = useAppStore((s) => s.settings.terminalUnicode11)
+  const persistScrollback = useAppStore((s) => s.settings.persistScrollback)
+  const persistScrollbackLines = useAppStore((s) => s.settings.persistScrollbackLines)
 
   // Load persisted config once, then start the debounced persistence writer.
   // The pty lifecycle (E4-FR-36) starts right after hydrate: removed panes are
@@ -109,6 +114,14 @@ export function App() {
   useEffect(() => {
     if (hydrated) syncAgentSettings(agents)
   }, [hydrated, agents])
+
+  // Headless mirror settings in main (E6-FR-06): pushed on every engine key change.
+  useEffect(() => {
+    if (!hydrated) return
+    window.snApi.pty.setEngine(
+      engineFromSettings({ terminalSnapshotMode: snapshotMode, terminalUnicode11: unicode11, persistScrollback, persistScrollbackLines }),
+    )
+  }, [hydrated, snapshotMode, unicode11, persistScrollback, persistScrollbackLines])
 
   // Agent sessions (E5-FR-10): load main's registry and start the consoles whose
   // agent was interrupted, even in workspaces not opened yet.
