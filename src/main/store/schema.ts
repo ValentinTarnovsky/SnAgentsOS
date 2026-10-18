@@ -25,7 +25,9 @@ export const notificationSettingsSchema = z.object({
   hookPort: z.number().int().min(1024).max(65535).default(43917), hookToken: z.string().regex(/^(?:[a-f0-9]{32,64})?$/).default(''),
   codexEnabled: z.boolean().default(false), discord: discordSettingsSchema.default({}),
   inAppWhenFocused: z.boolean().default(true), // schema 11
-  ntfy: ntfySettingsSchema.default({}), // schema 12
+  // Schema 12. A non-object value falls back to the defaults instead of
+  // rejecting the whole config (the field-level catches only cover fields).
+  ntfy: ntfySettingsSchema.default({}).catch(() => ntfySettingsSchema.parse({})),
   onlyWhenAway: z.boolean().catch(false).default(false), // schema 12
 })
 
@@ -227,7 +229,7 @@ const settingsSchema = z.object({
   // Schema 11: agent behavior settings, defaulted field by field.
   agents: agentSettingsSchema.default({}),
   // Schema 12: workspace composer defaults.
-  automation: automationSettingsSchema.default({}),
+  automation: automationSettingsSchema.default({}).catch(() => automationSettingsSchema.parse({})),
 })
 
 const keyButtonSchema = z.object({
