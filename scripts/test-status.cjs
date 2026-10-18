@@ -239,7 +239,8 @@ async function main() {
     check(fs.readFileSync(file, 'utf8') === '{broken', 'corrupt settings never overwritten')
   } finally { await server.stop(); fs.rmSync(temporary, { recursive: true, force: true }) }
   await schemaV11Checks()
-  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11 and store checks`)
+  await enrichmentChecks()
+  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11, store and enrichment checks`)
 }
 
 // R21-01: schema 11 (defaults only, no migrate() logic), the config upgrade
@@ -349,6 +350,242 @@ async function schemaV11Checks() {
   check(m.keepMounted({ a: 'full', b: ['p'], c: 'full' }, ['b', 'c', 'z']).a === undefined && JSON.stringify(m.keepMounted({ a: 'full', b: ['p'] }, ['b'])) === '{"b":["p"]}', 'keepMounted keeps only surviving workspace ids')
   S.getState().importConfig({ ...c, workspaces: [{ ...c.workspaces[0], id: 'w3' }, c.workspaces[1]] })
   check(JSON.stringify(S.getState().mountedWorkspaces) === '{"w2":"full","w3":"full"}' && S.getState().activeWorkspaceId === 'w3', 'replace import keeps a surviving workspace mounted (its consoles keep running) and mounts the new active one')
+  stop()
+}
+
+// R21-02: status enrichment (E4-FR-09, E5-FR-01/02, E1-FR-01/09, E6-FR-21 parsing).
+async function enrichmentChecks() {
+  const SID = '0123abcd-0000-4000-8000-000000000000'
+  function rich({ config = null, reader, start = 1000 } = {}) {
+    const events = [], causes = [], timers = new Map()
+    let seq = 0, clock = start
+    class FakeDate extends Date { static now() { return clock } }
+    const { StatusManager } = load('src/main/status/StatusManager.ts', {
+      require: id => id === 'electron' ? { Notification: { isSupported: () => false } } : require(id),
+      setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id), Date: FakeDate,
+    })
+    const manager = new StatusManager(() => ({ isDestroyed: () => false, isFocused: () => false, webContents: { send: (_ch, e) => events.push(e) }, flashFrame() {} }), () => config, () => {}, reader)
+    manager.setConfig(settings); manager.onSpawn('pty', 'pane')
+    const heard = []
+    const off = manager.addListener((e, cause) => { heard.push(e); causes.push(cause) })
+    const hook = (name, rest = {}) => manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty', sessionId: SID, name, ...rest })
+    const flush = () => { while (timers.size) { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) } }
+    return { manager, hook, events, heard, causes, off, flush, tick: ms => { clock += ms }, last: () => events.at(-1) }
+  }
+
+  // stateSince (E4-FR-09 c, E5-FR-02).
+  {
+    const h = rich()
+    h.hook('SessionStart'); h.tick(10); h.hook('UserPromptSubmit', { prompt: 'arregl\u00e1 el login\nm\u00e1s texto' })
+    const since = h.last().stateSince
+    check(h.last().state === 'working' && since === 1010, 'stateSince marks the transition to working')
+    h.tick(600); h.hook('PreToolUse', { toolName: 'Read', toolSummary: 'Read a.ts' }); h.flush()
+    h.tick(600); h.hook('PreToolUse', { toolName: 'Bash', toolSummary: 'Bash: ls' }); h.flush()
+    check(h.last().state === 'working' && h.last().stateSince === since && h.last().updatedAt > since, 'two working events keep stateSince while updatedAt moves')
+    check(h.last().firstPrompt === 'arregl\u00e1 el login', 'firstPrompt is the first line of the first prompt')
+    h.tick(100); h.hook('UserPromptSubmit', { prompt: 'otro pedido' }); h.flush()
+    check(h.last().firstPrompt === 'arregl\u00e1 el login' && h.last().detail.kind === 'prompt' && h.last().detail.text === 'otro pedido', 'later prompts change the detail, not firstPrompt')
+    h.tick(100); h.hook('Stop', { lastAssistantMessage: 'Listo.' }); h.flush()
+    check(h.last().state === 'done' && h.last().stateSince === 1000 + 10 + 600 + 600 + 100 + 100 && h.last().cacheSince === h.last().stateSince, 'working -> done moves stateSince and starts cacheSince')
+    check(h.manager.snapshot()[0].stateSince === h.last().stateSince && h.manager.stateOf('pane').stateSince === h.last().stateSince && h.manager.stateOf('nope') === null, 'snapshot and stateOf carry stateSince (survives a renderer reload)')
+    h.tick(50); h.hook('SessionStart')
+    check(h.last().firstPrompt === undefined && h.last().lastMessage === undefined && h.last().detail === undefined, 'a new start resets firstPrompt, reply and detail')
+    h.tick(50); h.hook('UserPromptSubmit', { prompt: 'nuevo' })
+    check(h.last().firstPrompt === 'nuevo' && h.last().cacheSince === undefined, 'firstPrompt set again after start; working clears cacheSince')
+  }
+  // Clips and pending (E4-FR-09 AC).
+  {
+    const h = rich()
+    h.hook('UserPromptSubmit', { prompt: 'x' })
+    h.hook('Stop', { lastAssistantMessage: 'a'.repeat(1000) }); h.flush()
+    check(h.last().lastMessage.length <= 280 && h.last().lastMessage.endsWith('\u2026'), 'a 1000-char reply becomes a lastMessage of at most 280')
+    h.hook('UserPromptSubmit', { prompt: 'y' })
+    h.hook('PreToolUse', { toolName: 'AskUserQuestion', toolUseId: 'q1', question: 'Cual?', questions: [{ question: 'Cual?', header: 'Elegir', multiSelect: false, options: [{ label: 'A', description: 'la a' }, { label: 'B' }] }] })
+    const q = h.last()
+    check(q.state === 'action' && q.pending[0].kind === 'question' && q.pending[0].id === 'q1' && q.pending[0].questions[0].options.length === 2 && q.detail.kind === 'question', 'AskUserQuestion leaves pending[0] as a question with its questions')
+    h.hook('PostToolUse', { toolUseId: 'q1' })
+    check(h.last().pending === undefined && h.last().pendingCount === 0, 'a resolved request leaves pending[] in the same event')
+    const long = 'Bash: ' + 'echo ' + 'z'.repeat(400)
+    h.hook('PermissionRequest', { toolUseId: 'p1', toolName: 'Bash', toolSummary: long.slice(0, 160), requestSummary: long.slice(0, 200) })
+    const p = h.last()
+    check(p.pending[0].kind === 'permission' && p.pending[0].toolName === 'Bash' && p.pending[0].summary.length <= 200 && p.activity.length <= 120 && p.detail.kind === 'permission', 'a Bash permission keeps summary <= 200 and activity <= 120')
+    h.hook('PostToolUse', { toolUseId: 'p1' }); h.hook('Stop'); h.flush()
+    check(h.last().state === 'done' && h.last().activity === undefined, 'activity disappears once the agent stops')
+    h.hook('UserPromptSubmit', { prompt: 'z' }); h.hook('Notification', { notificationType: 'permission_prompt' })
+    check(h.last().pending[0].id === 'fallback:permission' && h.last().pending[0].summary === '', 'a fallback permission is listed with an empty summary')
+  }
+  // Title-only tracks and topic (E5-FR-02).
+  {
+    const h = rich()
+    h.manager.reportTitle('pane', '\u2802 Fix login')
+    check(h.last().precise === false && h.last().topic === 'Fix login' && h.last().pending === undefined && h.last().lastMessage === undefined, 'approximate tracks get the topic but no reply, tool or pending')
+    h.manager.reportTitle('pane', '\u2733 Fix login')
+    check(h.last().state === 'action' && h.last().pending === undefined, 'a title stop is action without pending detail')
+    h.hook('SessionStart'); h.manager.reportTitle('pane', '\u2802 Refactor auth'); h.flush()
+    check(h.last().precise === true && h.last().topic === 'Refactor auth', 'the topic is captured while the pane is precise')
+    h.manager.reportTitle('pane', '\u2733 Claude Code'); h.manager.reportTitle('pane', 'claude'); h.flush()
+    check(h.last().topic === 'Refactor auth', 'a generic title never overwrites a valid topic')
+  }
+  // Session id rules (E4-FR-09 d).
+  {
+    const h = rich()
+    h.manager.onAgentEvent({ paneId: 'pane', ptyId: 'pty', provider: 'codex', sessionId: 'launch:0011223344556677', kind: 'start' })
+    check(h.last().sessionId === undefined && h.last().state === 'idle', 'a Codex launch: placeholder id is never emitted')
+    h.manager.onAgentEvent({ paneId: 'pane', ptyId: 'pty', provider: 'codex', sessionId: SID, kind: 'start', cwd: process.cwd() })
+    check(h.last().sessionId === SID && h.last().cwd === process.cwd() && h.last().provider === 'codex', 'a valid id and cwd reach the renderer')
+    const ssh = rich({ config: { workspaces: [{ id: 'w', setupId: 'conn', panes: [{ id: 'pane' }] }] } })
+    ssh.hook('SessionStart', { cwd: process.cwd() })
+    check(ssh.last().precise && ssh.last().sessionId === undefined, 'a console behind a Connection Profile never emits its session id')
+    const own = rich({ config: { workspaces: [{ id: 'w', setupId: 'conn', panes: [{ id: 'pane', setupId: '' }] }] } })
+    own.hook('SessionStart')
+    check(own.last().sessionId === SID, 'pane.setupId overrides the workspace profile, as in launch.ts')
+  }
+  // Throttle (E5-FR-02 AC: 10 PreToolUse in 1 s -> at most 2 emissions).
+  {
+    const h = rich()
+    h.hook('UserPromptSubmit', { prompt: 'x' })
+    const before = h.events.length
+    for (let i = 0; i < 10; i++) { h.tick(100); h.hook('PreToolUse', { toolName: 'Read', toolSummary: `Read f${i}.ts` }) }
+    h.flush()
+    check(h.events.length - before <= 2 && h.last().activity === 'Read f9.ts', '10 PreToolUse in one second produce at most 2 emissions, the last tool wins')
+    const n = h.events.length
+    h.hook('PermissionRequest', { toolUseId: 'r', toolName: 'Bash', toolSummary: 'Bash: rm' })
+    check(h.events.length === n + 1 && h.last().state === 'action', 'a state change is emitted at once even inside the throttle window')
+  }
+  // Listener seam (E1-FR-01) and SessionEnd parsing for E6-FR-21.
+  {
+    const h = rich()
+    h.hook('SessionStart', { cwd: process.cwd() }); h.hook('SessionEnd', { endReason: 'prompt_input_exit', cwd: process.cwd() })
+    const end = h.causes.at(-1)
+    check(h.heard.length === h.events.length && end.kind === 'end' && end.endReason === 'prompt_input_exit' && end.cwd === process.cwd(), 'listeners hear every emission with the SessionEnd reason and cwd as cause')
+    h.manager.onExit('pty', 'pane')
+    check(h.heard.at(-1).state === null && h.heard.at(-1).paneId === 'pane', 'listeners hear state:null when the pty dies')
+    h.off(); h.manager.onSpawn('pty2', 'pane'); h.manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty2', sessionId: SID, name: 'SessionStart' })
+    check(h.heard.at(-1).state === null, 'a removed listener hears nothing more')
+    const boom = rich(); boom.manager.addListener(() => { throw new Error('x') })
+    const quiet = console.warn; console.warn = () => {}
+    try { boom.hook('SessionStart') } finally { console.warn = quiet }
+    check(boom.last().state === 'idle', 'a failing listener never breaks the renderer emission')
+  }
+  // Transcript fallback when Stop has no last_assistant_message (E1-FR-09).
+  {
+    const asked = []
+    let resolveRead
+    const h = rich({ reader: (p, s) => { asked.push([p, s]); return new Promise(r => { resolveRead = r }) } })
+    h.hook('UserPromptSubmit', { prompt: 'x', transcriptPath: 'C:/fake/projects/a/' + SID + '.jsonl' })
+    h.hook('Stop')
+    check(asked.length === 1 && asked[0][1] === SID, 'Stop without a reply reads the validated transcript of the session')
+    resolveRead('Respuesta desde el transcript'); await new Promise(r => setImmediate(r)); h.flush()
+    check(h.last().state === 'done' && h.last().lastMessage === 'Respuesta desde el transcript' && h.last().detail.text === 'Respuesta desde el transcript', 'the transcript reply becomes lastMessage and the reply detail')
+    h.hook('Stop', { lastAssistantMessage: 'directo' }); h.flush()
+    check(asked.length === 1, 'a Stop that carries the reply never opens the transcript')
+    const none = rich({ reader: () => { throw new Error('must not read') } }); none.hook('Stop'); none.flush()
+    check(none.last().state === 'done', 'without a validated transcript nothing is read')
+  }
+
+  // Pure helpers.
+  const d = load('src/main/status/statusDetails.ts')
+  check(d.summarizeTool('Edit', { file_path: 'C:\\repo\\src\\app.ts' }) === 'Edit app.ts' && d.summarizeTool('Bash', { command: '\n  npm test -- --watch\nsecond' }) === 'Bash: npm test -- --watch', 'file and Bash tool summaries')
+  check(d.summarizeTool('Grep', { pattern: 'x'.repeat(80) }).length <= 48 && d.summarizeTool('WebFetch', { url: 'https://example.com/a?b' }) === 'WebFetch example.com' && d.summarizeTool('mcp__github__create_issue', {}) === 'mcp github.create_issue' && d.summarizeTool('Task', { description: 'Explore' }) === 'Task: Explore' && d.summarizeTool('Other', {}) === 'Other', 'search, fetch, MCP, Task and generic summaries')
+  check(d.summarizeRequest('Bash', { command: 'git push ' + 'o'.repeat(300) }).length <= 200 && d.summarizeRequest('ExitPlanMode', { plan: '# Plan\n1. hacer' }) === 'Plan', 'request summaries stay within 200')
+  check(d.firstLine('\n\n## **Hecho** con `exito`\nresto') === 'Hecho con exito' && d.sanitize('a\u001b[31mb\u0007c\u009bd') === 'abcd', 'firstLine drops markdown markers; sanitize drops ANSI, C0 and C1')
+  check(d.clip('\ud83d\ude00'.repeat(10), 5).length <= 5 && !/[\ud800-\udbff]\u2026$/.test(d.clip('a\ud83d\ude00\ud83d\ude00', 3)), 'clip never splits a surrogate pair')
+  const qs = d.extractQuestions({ questions: [{ question: 'Q?', header: 'H', multiSelect: true, options: [{ label: 'uno', description: 'd' }, { nope: 1 }] }, { question: '' }, 'x'] })
+  check(qs.length === 1 && qs[0].multiSelect === true && qs[0].options.length === 1 && qs[0].options[0].description === 'd' && d.extractQuestions({}) === undefined, 'questions extracted bounded and validated')
+
+  const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-claude-test-'))
+  try {
+    const projects = path.join(claudeDir, 'projects', 'C--repo')
+    fs.mkdirSync(projects, { recursive: true })
+    const good = path.join(projects, SID + '.jsonl')
+    check(d.isSafeTranscriptPath(good, SID, claudeDir), 'a transcript inside projects is accepted (even before its first write)')
+    check(!d.isSafeTranscriptPath(path.join(claudeDir, 'projects', '..', '..', SID + '.jsonl'), SID, claudeDir) && !d.isSafeTranscriptPath('C:\\Users\\x\\.claude\\projects\\..\\..\\secret.jsonl', 'secret', claudeDir), 'traversal is rejected')
+    check(!d.isSafeTranscriptPath(path.join(projects, SID + '.json'), SID, claudeDir) && !d.isSafeTranscriptPath(path.join(projects, 'other.jsonl'), SID, claudeDir), 'wrong extension or a foreign basename is rejected')
+    check(!d.isSafeTranscriptPath(path.join(os.tmpdir(), SID + '.jsonl'), SID, claudeDir) && !d.isSafeTranscriptPath('relative/' + SID + '.jsonl', SID, claudeDir) && !d.isSafeTranscriptPath(good, '', claudeDir), 'outside projects, relative or without session is rejected')
+    const lines = [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'hola' } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Primera respuesta' }] } }),
+      'x'.repeat(70 * 1024),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Ultima\nrespuesta' }, { type: 'tool_use', name: 'Bash' }] } }),
+      JSON.stringify({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'subagente' }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read' }] } }),
+      '{broken',
+    ]
+    fs.writeFileSync(good, lines.join('\n') + '\n')
+    check(await d.readLastAssistantMessage(good, SID, claudeDir) === 'Ultima\nrespuesta', 'the fallback reads the newest main-thread assistant text from the 64 KB tail')
+    fs.writeFileSync(good, lines.slice(0, 3).join('\n'))
+    check(await d.readLastAssistantMessage(good, SID, claudeDir) === undefined, 'nothing older than the 64 KB tail is read')
+    check(await d.readLastAssistantMessage(path.join(projects, 'missing.jsonl'), 'missing', claudeDir) === undefined && await d.readLastAssistantMessage(path.join(os.tmpdir(), 'x.jsonl'), 'x', claudeDir) === undefined, 'missing or outside files resolve to undefined')
+    check(d.isSafeCwd(claudeDir) && !d.isSafeCwd('relative') && !d.isSafeCwd(path.join(claudeDir, 'nope')) && !d.isSafeCwd(good), 'cwd must be an absolute existing directory')
+
+    // Real HTTP parsing (E5-FR-01 AC): fields bounded, invalid paths dropped, 200 empty, nothing logged.
+    const logged = []
+    const capture = (...a) => logged.push(a.join(' '))
+    const spy = { log: capture, warn: capture, error: capture, info: capture, debug: capture }
+    const { HookServer: RichHookServer } = load('src/main/status/HookServer.ts', { console: spy, process: { ...process, env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir } } })
+    const srv = new RichHookServer(), got = []
+    srv.onEvent(e => got.push(e))
+    const token = 'b'.repeat(32), port = await srv.start(0, token)
+    try {
+      const url = `http://127.0.0.1:${port}/cc-hook/${token}`
+      const post = async body => { const r = await fetch(url, { method: 'POST', headers: { 'X-Console-Id': 'pane', 'X-Pty-Id': 'pty' }, body: typeof body === 'string' ? body : JSON.stringify(body) }); return [r.status, await r.text()] }
+      const secret = 'SECRETO-' + 'p'.repeat(3000)
+      let res = await post({ hook_event_name: 'UserPromptSubmit', session_id: SID, prompt: secret, cwd: claudeDir, transcript_path: good })
+      check(res[0] === 200 && res[1] === '', 'enriched hooks still answer 200 with an empty body')
+      let e = got.at(-1)
+      check(e.prompt.length <= 2000 && e.prompt.startsWith('SECRETO-') && e.cwd === claudeDir && e.transcriptPath === good, 'UserPromptSubmit carries prompt (<= 2000), cwd and the validated transcript')
+      await post({ hook_event_name: 'Stop', session_id: SID, last_assistant_message: 'r'.repeat(5000), transcript_path: path.join(claudeDir, 'projects', '..', '..', 'secret.jsonl'), cwd: 'relative' })
+      e = got.at(-1)
+      check(e.lastAssistantMessage.length <= 2000 && e.transcriptPath === undefined && e.cwd === undefined, 'Stop carries the reply; traversal transcript and relative cwd are dropped')
+      await post({ hook_event_name: 'PreToolUse', session_id: SID, tool_name: 'Bash', tool_input: { command: 'npm run ' + 'x'.repeat(500) }, cwd: path.join(claudeDir, 'missing') })
+      e = got.at(-1)
+      check(e.toolSummary.length <= 160 && e.requestSummary.length <= 200 && e.toolSummary.startsWith('Bash: npm run') && e.cwd === undefined && !('toolInput' in e) && !('tool_input' in e), 'PreToolUse carries bounded summaries and never the raw tool_input')
+      await post({ hook_event_name: 'PreToolUse', session_id: SID, tool_name: 'AskUserQuestion', tool_use_id: 'q', tool_input: { questions: [{ question: 'Seguimos?', multiSelect: false, options: [{ label: 'Si' }, { label: 'No' }] }] } })
+      e = got.at(-1)
+      check(e.question === 'Seguimos?' && e.questions[0].options.length === 2, 'AskUserQuestion carries the question and the structured questions')
+      await post({ hook_event_name: 'SessionEnd', session_id: SID, reason: 'prompt_input_exit', cwd: claudeDir })
+      e = got.at(-1)
+      check(e.endReason === 'prompt_input_exit' && e.cwd === claudeDir, 'SessionEnd carries reason and cwd (E6-FR-21)')
+      await post({ hook_event_name: 'SessionStart', session_id: 'other', transcript_path: good })
+      check(got.at(-1).transcriptPath === undefined, 'a transcript of another session is dropped')
+      const count = got.length
+      res = await post('{"hook_event_name":"Stop","pad":"' + 'q'.repeat(2 * 1024 * 1024) + '"}')
+      check(res[0] === 200 && res[1] === '' && got.length === count, 'a body over 2 MB is ignored with 200 empty')
+      res = await post('{malformed ' + secret)
+      check(res[0] === 200 && got.length === count, 'a malformed body is ignored with 200')
+      check(logged.every(line => !line.includes('SECRETO') && !line.includes('rrrr') && !line.includes('Seguimos')), 'no console output carries hook content')
+    } finally { await srv.stop() }
+  } finally { fs.rmSync(claudeDir, { recursive: true, force: true }) }
+
+  // Renderer mirror: setPaneStatus copies the new fields and writes pane.lastSession on change only.
+  const saves = [], timers = new Map()
+  let seq = 0
+  const r = loadRenderer(`export { startPersistence } from './persist'; export { useAppStore } from './store'`, {
+    window: { snApi: { config: { save: cfg => saves.push(JSON.parse(JSON.stringify(cfg))) } } },
+    document: { hasFocus: () => false },
+    setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
+  })
+  const S = r.useAppStore
+  S.getState().hydrate({ version: 11, workspaces: [{ id: 'w1', name: 'W', cwd: '', panes: [{ id: 'p1', type: 'claude', title: 'Claude', color: '#fff', icon: 'claude' }] }], presets: [], settings: S.getState().settings, activeWorkspaceId: 'w1' })
+  const stop = r.startPersistence()
+  const flushSaves = () => { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) }
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'working', precise: true, notify: false, provider: 'claude', updatedAt: 5, stateSince: 4, lastMessage: 'hola', activity: 'Read a.ts', pending: [{ id: 'x', kind: 'permission', summary: 's' }], detail: { kind: 'tool', text: 'Read a.ts' }, topic: 'T', firstPrompt: 'F', cacheSince: 3 })
+  const ps = S.getState().paneStatus.p1
+  check(ps.stateSince === 4 && ps.lastMessage === 'hola' && ps.activity === 'Read a.ts' && ps.pending[0].id === 'x' && ps.detail.kind === 'tool' && ps.topic === 'T' && ps.firstPrompt === 'F' && ps.cacheSince === 3, 'setPaneStatus copies the enrichment fields')
+  flushSaves()
+  check(saves.length === 0 && S.getState().workspaces[0].panes[0].lastSession === undefined, 'status without a session id never persists')
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'idle', precise: true, notify: false, provider: 'claude', updatedAt: 9, sessionId: SID, cwd: 'C:\\repo' })
+  flushSaves()
+  const ls = S.getState().workspaces[0].panes[0].lastSession
+  check(ls && ls.sessionId === SID && ls.provider === 'claude' && ls.cwd === 'C:\\repo' && ls.at === 9 && saves.length === 1 && saves[0].workspaces[0].panes[0].lastSession.sessionId === SID, 'a valid session id is mirrored to pane.lastSession and persisted once')
+  const ref = S.getState().workspaces
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'working', precise: true, notify: false, provider: 'claude', updatedAt: 12, sessionId: SID, cwd: 'C:\\repo' })
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'working', precise: true, notify: false, provider: 'claude', updatedAt: 13, sessionId: SID })
+  flushSaves()
+  check(S.getState().workspaces === ref && saves.length === 1, 'the same session never rewrites the config')
+  check(parseConfig(saves[0]).workspaces[0].panes[0].lastSession.sessionId === SID, 'the mirrored lastSession passes the schema 11 validation')
+  S.getState().setPaneStatus({ paneId: 'p1', state: null, precise: false, notify: false })
+  check(S.getState().paneStatus.p1 === undefined && S.getState().workspaces[0].panes[0].lastSession.sessionId === SID, 'state:null clears the status but keeps the lastSession mirror')
   stop()
 }
 
