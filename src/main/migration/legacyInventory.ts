@@ -1,6 +1,6 @@
 import { existsSync, promises as nodeFsp, type Stats } from 'fs'
-import { dirname, join } from 'path'
-import { INSTALLER_REG, LEGACY_BRAND } from '@shared/brand'
+import { basename, dirname, join } from 'path'
+import { BRAND, INSTALLER_REG, LEGACY_BRAND } from '@shared/brand'
 import {
   isCommittedPhase,
   isoStamp,
@@ -40,11 +40,11 @@ import type { BackupEntry } from './backupZip'
 
 export type Hive = 'HKCU' | 'HKLM'
 
-/** Registry access; reads return null for an absent value. Errors throw. */
+/** Registry access, asynchronous (never blocks the main thread); reads resolve null for an absent value. Errors reject. */
 export interface RegistryAccess {
-  read(hive: Hive, key: string, name: string): string | Buffer | null
-  deleteValue(hive: Hive, key: string, name: string): 'done' | 'absent'
-  deleteKey(hive: Hive, key: string): 'done' | 'absent'
+  read(hive: Hive, key: string, name: string): Promise<string | Buffer | null>
+  deleteValue(hive: Hive, key: string, name: string): Promise<'done' | 'absent'>
+  deleteKey(hive: Hive, key: string): Promise<'done' | 'absent'>
 }
 
 /** .lnk access (Electron shell.readShortcutLink / writeShortcutLink on Windows). */
@@ -209,14 +209,14 @@ function precheck(r: Run, target: string, st: Stats): ItemOutcome | null {
  * exe (after the 2.x setup that key belongs to 2.x). A registry error counts
  * as registered: the caller then keeps what belongs to that install.
  */
-export function legacyInstallRegistered(env: CleanupEnv): boolean {
+export async function legacyInstallRegistered(env: CleanupEnv): Promise<boolean> {
   const reg = env.registry
   if (!reg) return false
   try {
     for (const hive of ['HKCU', 'HKLM'] as Hive[]) {
-      const name = reg.read(hive, REG.uninstall, 'DisplayName')
+      const name = await reg.read(hive, REG.uninstall, 'DisplayName')
       if (typeof name === 'string' && name.startsWith(LEGACY_BRAND.productName)) return true
-      const loc = reg.read(hive, INSTALLER_REG.key, 'InstallLocation')
+      const loc = await reg.read(hive, INSTALLER_REG.key, 'InstallLocation')
       if (typeof loc === 'string' && loc && existsSync(join(loc, LEGACY_BRAND.winExe))) return true
     }
     return false
@@ -361,7 +361,7 @@ const L03: InventoryItem = {
     if (pre) return pre
     // Data in there, or a registered 1.x install: it belongs to that install, never to the portable.
     const hasData = (await lstatOrNull(r, join(target, 'config.json'))) || (await lstatOrNull(r, join(target, 'remote-devices.json')))
-    if (hasData || legacyInstallRegistered(r.env)) return { state: 'skipped', reason: 'ownedByInstalled' }
+    if (hasData || (await legacyInstallRegistered(r.env))) return { state: 'skipped', reason: 'ownedByInstalled' }
     if (r.env.isFolderLocked(target)) return { state: 'deferred', reason: 'legacyRunning' }
     return outcome(await safeRemoveTree(target, r.env.guard, r.rm))
   },
@@ -404,7 +404,7 @@ const L13: InventoryItem = {
     if (!r.env.roots.localAppData) return notThisMode
     const target = join(r.env.roots.localAppData, LEGACY_BRAND.updaterCacheDir)
     if (!(await lstatOrNull(r, target))) return { state: 'absent' }
-    if (legacyInstallRegistered(r.env)) return { state: 'skipped', reason: 'ownedByInstalled' }
+    if (await legacyInstallRegistered(r.env)) return { state: 'skipped', reason: 'ownedByInstalled' }
     return outcome(await safeRemoveTree(target, r.env.guard, r.rm))
   },
 }
@@ -473,6 +473,326 @@ const L20: InventoryItem = {
   },
 }
 
+// --- Windows: install residue, registry, shortcuts and the portable exe ------
+
+/** Top-level names electron-builder puts in an install folder (E0-FR-34). */
+function isInstallLayoutEntry(name: string, isDir: boolean): boolean {
+  const n = name.toLowerCase()
+  if (isDir) return n === 'resources' || n === 'locales' || n === 'swiftshader'
+  return (
+    n === LEGACY_BRAND.winExe.toLowerCase() ||
+    n === `uninstall ${LEGACY_BRAND.winExe.toLowerCase()}` ||
+    /\.(dll|pak|bin|dat|json)$/.test(n) ||
+    n.startsWith('license')
+  )
+}
+
+async function readString(r: Run, hive: Hive, key: string, name: string): Promise<string | null> {
+  const v = await r.env.registry?.read(hive, key, name)
+  return typeof v === 'string' ? v : null
+}
+
+const L04: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: () => [`HKCU|HKLM\\${INSTALLER_REG.key}\\${INSTALLER_REG.legacyInstallLocation}`],
+  async run(r) {
+    if (r.env.platform !== 'win32' || r.env.mode !== 'installed') return notThisMode
+    if (!r.env.registry) return { state: 'absent', reason: 'noRegistry' }
+    const results: ItemOutcome[] = []
+    for (const hive of ['HKCU', 'HKLM'] as Hive[]) {
+      const loc = await readString(r, hive, INSTALLER_REG.key, INSTALLER_REG.legacyInstallLocation)
+      if (!loc) continue
+      const st = await lstatOrNull(r, loc)
+      if (!st) {
+        results.push({ state: 'absent' })
+        continue
+      }
+      if (st.isSymbolicLink()) {
+        results.push({ state: 'skipped', reason: 'reparsePoint' })
+        continue
+      }
+      // An HKLM install or a Program Files folder needs admin: reported, never a UAC prompt.
+      if (hive === 'HKLM' || needsElevation(loc, r.rm.elevation)) {
+        results.push({ state: 'skipped', reason: 'needsElevation' })
+        continue
+      }
+      // The current app nested in the old folder (custom path): keep it.
+      if (violatesGuard([loc], r.env.guard) || isInside(r.env.exe.execPath, loc)) {
+        results.push({ state: 'skipped', reason: 'guard' })
+        continue
+      }
+      const fsx = r.env.fs ?? nodeFsp
+      let foreign = false
+      for (const n of (await fsx.readdir(loc)).map(String)) {
+        const est = await fsx.lstat(join(loc, n))
+        if (est.isSymbolicLink() || !isInstallLayoutEntry(n, est.isDirectory())) foreign = true
+      }
+      if (foreign) {
+        r.env.log(`phase=cleaning item=L04 result=unknownFiles path=${loc}`)
+        results.push({ state: 'skipped', reason: 'unknownFiles' })
+        continue
+      }
+      results.push(outcome(await safeRemoveTree(loc, r.env.guard, r.rm)))
+    }
+    return combineOutcomes(results)
+  },
+}
+
+/** Same precedence as combineResults, over item outcomes. */
+function combineOutcomes(list: ItemOutcome[]): ItemOutcome {
+  return (
+    list.find((o) => o.state === 'deferred') ??
+    list.find((o) => o.state === 'skipped') ??
+    (list.some((o) => o.state === 'done') ? { state: 'done' } : { state: 'absent' })
+  )
+}
+
+const L05: InventoryItem = {
+  needsLegacyClosed: false,
+  describe: () => [`HKCU|HKLM\\${REG.uninstall}`, `HKCU|HKLM\\${INSTALLER_REG.key}\\Legacy*`],
+  async run(r) {
+    if (r.env.platform !== 'win32' || r.env.mode !== 'installed') return notThisMode
+    const reg = r.env.registry
+    if (!reg) return { state: 'absent', reason: 'noRegistry' }
+    // The installer values feed L04 and L08: kept until both are final (done, absent or skipped).
+    if (!isTerminalItem(r.marker.cleanup.L04?.state) || !isTerminalItem(r.marker.cleanup.L08?.state)) return { state: 'deferred', reason: 'waitingL04L08' }
+    const names: Record<Hive, string | null> = {
+      HKCU: await readString(r, 'HKCU', REG.uninstall, 'DisplayName'),
+      HKLM: await readString(r, 'HKLM', REG.uninstall, 'DisplayName'),
+    }
+    const ours = (['HKCU', 'HKLM'] as Hive[]).find((h) => names[h]?.startsWith(BRAND.productName))
+    if (!ours) {
+      // The GUID entry is 2.x's and is never deleted; anything else there is unexpected: touch nothing.
+      r.env.log(`phase=cleaning item=L05 result=unexpectedUninstallEntry`)
+      return { state: 'skipped', reason: 'unexpectedUninstallEntry' }
+    }
+    let deleted = false
+    for (const hive of ['HKCU', 'HKLM'] as Hive[]) {
+      for (const name of [INSTALLER_REG.legacyInstallLocation, INSTALLER_REG.legacyTaskbarPinned]) {
+        try {
+          if ((await reg.deleteValue(hive, INSTALLER_REG.key, name)) === 'done') deleted = true
+        } catch {
+          // HKLM values of a per-machine install need admin: inert, left as they are.
+          r.env.log(`phase=cleaning item=L05 result=keptValue hive=${hive} name=${name}`)
+        }
+      }
+    }
+    const other: Hive = ours === 'HKCU' ? 'HKLM' : 'HKCU'
+    if (names[other]?.startsWith(LEGACY_BRAND.productName)) {
+      // A 1.x still registered in the other hive (per-machine 1.x under a per-user 2.x): the user uninstalls it.
+      return other === 'HKLM' ? { state: 'skipped', reason: 'needsElevation' } : { state: 'skipped', reason: 'unexpectedUninstallEntry' }
+    }
+    return { state: deleted ? 'done' : 'absent' }
+  },
+}
+
+/** L06, L07: SnMultiCC.lnk in the Start Menu or on the desktop, when its target is the 1.x exe or gone. */
+function shortcutItem(dir: (env: CleanupEnv) => string | null): InventoryItem {
+  return {
+    needsLegacyClosed: false,
+    describe: (env) => [join(dir(env) ?? '-', `${LEGACY_BRAND.productName}.lnk`)],
+    async run(r) {
+      if (r.env.platform !== 'win32' || r.env.mode !== 'installed') return notThisMode
+      const base = dir(r.env)
+      if (!base || !r.env.shortcuts) return { state: 'absent', reason: 'noShell' }
+      const lnk = join(base, `${LEGACY_BRAND.productName}.lnk`)
+      if (!(await lstatOrNull(r, lnk))) return { state: 'absent' }
+      const info = r.env.shortcuts.read(lnk)
+      const ours = info !== null && (basename(info.target).toLowerCase() === LEGACY_BRAND.winExe.toLowerCase() || !existsSync(info.target))
+      if (!ours) return { state: 'skipped', reason: 'guard' }
+      return outcome(await safeRemoveTree(lnk, r.env.guard, r.rm))
+    },
+  }
+}
+
+/** Searches the Taskband Favorites blob for a pin file name (UTF-16, either byte alignment). Unknown means alive. */
+async function pinIsAlive(r: Run, lnkName: string): Promise<boolean> {
+  try {
+    const blob = await r.env.registry?.read('HKCU', REG.taskband, 'Favorites')
+    if (!Buffer.isBuffer(blob)) return true
+    const needle = lnkName.toLowerCase()
+    return [blob, blob.subarray(1)].some((b) => b.toString('utf16le').toLowerCase().includes(needle))
+  } catch {
+    return true
+  }
+}
+
+async function legacyPinnedFlag(r: Run): Promise<boolean> {
+  for (const hive of ['HKCU', 'HKLM'] as Hive[]) {
+    try {
+      if ((await readString(r, hive, INSTALLER_REG.key, INSTALLER_REG.legacyTaskbarPinned)) === '1') return true
+    } catch {
+      /* unknown: no claim */
+    }
+  }
+  return false
+}
+
+/** The exe a retargeted shortcut opens: the installed exe, or the (renamed) portable exe. */
+function currentExe(env: CleanupEnv): string {
+  return env.mode === 'portable' ? env.exe.portableExeFile() ?? env.exe.execPath : env.exe.execPath
+}
+
+const L08: InventoryItem = {
+  needsLegacyClosed: false,
+  describe: (env) => [join(env.roots.taskbarPins ?? '-', '*.lnk')],
+  async run(r) {
+    const dir = r.env.roots.taskbarPins
+    if (r.env.platform !== 'win32') return notThisMode
+    if (!dir || !r.env.shortcuts) return { state: 'absent', reason: 'noShell' }
+    let names: string[]
+    try {
+      names = (await (r.env.fs ?? nodeFsp).readdir(dir)).map(String).filter((n) => n.toLowerCase().endsWith('.lnk'))
+    } catch {
+      names = []
+    }
+    const target = currentExe(r.env)
+    let retargeted = 0
+    let failed = false
+    const results: ItemOutcome[] = []
+    for (const n of names) {
+      const lnk = join(dir, n)
+      const info = r.env.shortcuts.read(lnk)
+      // Only pins of the 1.x exe (installed or its temp extraction); anything else is the user's.
+      if (!info || basename(info.target).toLowerCase() !== LEGACY_BRAND.winExe.toLowerCase()) continue
+      if (await pinIsAlive(r, n)) {
+        // Retargeted in place, same file name: renaming the .lnk would unpin it.
+        if (existsSync(target) && r.env.shortcuts.update(lnk, { target, icon: target, iconIndex: 0, appUserModelId: BRAND.appId })) {
+          retargeted++
+          results.push({ state: 'done' })
+          r.env.log(`phase=cleaning item=L08 result=retargeted path=${lnk}`)
+          continue
+        }
+        failed = true
+      }
+      results.push(outcome(await safeRemoveTree(lnk, r.env.guard, r.rm)))
+    }
+    if (failed || (retargeted === 0 && (await legacyPinnedFlag(r)))) r.marker.pinRetargeted = false
+    else if (retargeted > 0) r.marker.pinRetargeted = true
+    return combineOutcomes(results)
+  },
+}
+
+const L09: InventoryItem = {
+  needsLegacyClosed: false,
+  describe: () => [`HKCU\\${REG.notifications}`],
+  async run(r) {
+    if (r.env.platform !== 'win32') return notThisMode
+    if (!r.env.registry) return { state: 'absent', reason: 'noRegistry' }
+    return { state: await r.env.registry.deleteKey('HKCU', REG.notifications) }
+  },
+}
+
+const L10: InventoryItem = {
+  needsLegacyClosed: false,
+  describe: () => [`HKCU\\${REG.run}\\${LEGACY_BRAND.appId}`, `HKCU\\${REG.startupApproved}\\${LEGACY_BRAND.appId}`],
+  async run(r) {
+    if (r.env.platform !== 'win32' || r.env.mode !== 'installed') return notThisMode
+    if (!r.env.registry || !r.env.loginItem) return { state: 'absent', reason: 'noRegistry' }
+    // New value first, then the legacy ones: StartupSection reads the OS state and must stay ON.
+    let enabled = false
+    if (r.env.readMigratedSettings()?.launchOnStartup) {
+      r.env.loginItem.enable()
+      enabled = true
+    }
+    const run = await r.env.registry.deleteValue('HKCU', REG.run, LEGACY_BRAND.appId)
+    const approved = await r.env.registry.deleteValue('HKCU', REG.startupApproved, LEGACY_BRAND.appId)
+    r.marker.loginItemMigrated = true
+    return { state: enabled || run === 'done' || approved === 'done' ? 'done' : 'absent' }
+  },
+}
+
+/** Retargets .lnk files that open exactly oldExe (desktop, Start Menu first level, taskbar pins) to newExe. */
+async function retargetShortcuts(r: Run, oldExe: string, newExe: string): Promise<void> {
+  const sh = r.env.shortcuts
+  if (!sh) return
+  const dirs = [r.env.roots.desktop, r.env.roots.startMenuPrograms, r.env.roots.taskbarPins].filter((d): d is string => !!d)
+  for (const dir of dirs) {
+    let names: string[]
+    try {
+      names = (await (r.env.fs ?? nodeFsp).readdir(dir)).map(String).filter((n) => n.toLowerCase().endsWith('.lnk'))
+    } catch {
+      continue
+    }
+    for (const n of names) {
+      const lnk = join(dir, n)
+      const info = sh.read(lnk)
+      if (!info || !samePath(info.target, oldExe)) continue
+      const pin = dir === r.env.roots.taskbarPins
+      const ok = sh.update(lnk, pin ? { target: newExe, icon: newExe, iconIndex: 0, appUserModelId: BRAND.appId } : { target: newExe })
+      r.env.log(`phase=cleaning item=L17 result=${ok ? 'retargeted' : 'retargetFailed'} path=${lnk}`)
+    }
+  }
+}
+
+const PORTABLE_LEGACY_EXE = /^snmulticc.*\.exe$/i
+const PORTABLE_LEGACY_SIBLING = /^SnMultiCC-\d+\.\d+\.\d+-portable\.exe$/i
+export const PORTABLE_EXE_NAME = `${BRAND.productName}-portable.exe`
+
+async function hashFile(r: Run, p: string): Promise<string | null> {
+  const data = await readFileOrNull(r, p)
+  return data ? sha256(data) : null
+}
+
+/** E0-FR-33 (1) and (2): rename the running portable exe, delete the old versioned siblings. */
+async function cleanWindowsPortableExe(r: Run): Promise<ItemOutcome> {
+  const exe = r.env.exe.portableExeFile()
+  if (!exe) return { state: 'absent' }
+  const dir = dirname(exe)
+  const results: ItemOutcome[] = []
+  if (PORTABLE_LEGACY_EXE.test(basename(exe))) {
+    const dest = join(dir, PORTABLE_EXE_NAME)
+    const adopt = async (): Promise<void> => {
+      r.env.exe.setPortableExeFile(dest)
+      r.marker.portableExeRenamedTo = dest
+      r.persist()
+      await retargetShortcuts(r, exe, dest)
+    }
+    if (await lstatOrNull(r, dest)) {
+      if ((await hashFile(r, dest)) !== (await hashFile(r, exe))) return { state: 'skipped', reason: 'nameConflict' }
+      // Same bytes under the new name: the running old file can only go once this process exits.
+      if (!r.env.exe.scheduleExitHelper?.({ from: exe })) return { state: 'deferred', reason: 'exitHelper' }
+      await adopt()
+      results.push({ state: 'done' })
+    } else {
+      try {
+        // Windows allows renaming a running image (the loader opens it with FILE_SHARE_DELETE).
+        await (r.env.fs ?? nodeFsp).rename(exe, dest)
+        await adopt()
+        results.push({ state: 'done' })
+      } catch (err) {
+        const code = errCode(err)
+        if (code === 'EROFS' || code === 'EACCES') return { state: 'skipped', reason: 'readOnly' }
+        if (!r.env.exe.scheduleExitHelper?.({ from: exe, to: dest })) return { state: 'deferred', reason: code }
+        await adopt()
+        results.push({ state: 'deferred', reason: 'renameAtExit' })
+      }
+    }
+  }
+  let names: string[] = []
+  try {
+    names = (await (r.env.fs ?? nodeFsp).readdir(dir)).map(String)
+  } catch {
+    /* unreadable folder: nothing to delete */
+  }
+  for (const n of names) {
+    const p = join(dir, n)
+    if (!PORTABLE_LEGACY_SIBLING.test(n) || samePath(p, exe)) continue
+    results.push(outcome(await safeRemoveTree(p, r.env.guard, r.rm)))
+  }
+  return combineOutcomes(results)
+}
+
+const L17: InventoryItem = {
+  needsLegacyClosed: true,
+  describe: (env) => [env.exe.portableExeFile() ?? '-'],
+  async run(r) {
+    if (r.env.mode !== 'portable') return notThisMode
+    if (r.env.platform === 'win32') return cleanWindowsPortableExe(r)
+    return { state: 'deferred', reason: 'notImplemented' }
+  },
+}
+
 /** Placeholder for items whose platform part is not wired yet: they stay open. */
 const notYet: InventoryItem = {
   needsLegacyClosed: false,
@@ -483,9 +803,9 @@ const notYet: InventoryItem = {
 }
 
 export const INVENTORY: Record<LegacyItemId, InventoryItem> = {
-  L01, L02, L03, L04: notYet, L05: notYet, L06: notYet, L07: notYet, L08: notYet, L09: notYet, L10: notYet, L11,
-  L12, L13, L14, L15: tempPrefixItem(`${LEGACY_BRAND.tempPrefix}update-`), L16: tempPrefixItem(`${LEGACY_BRAND.tempPrefix}swap-`),
-  L17: notYet, L18, L19, L20, L21: notYet,
+  L01, L02, L03, L04, L05, L06: shortcutItem((env) => env.roots.startMenuPrograms), L07: shortcutItem((env) => env.roots.desktop),
+  L08, L09, L10, L11, L12, L13, L14, L15: tempPrefixItem(`${LEGACY_BRAND.tempPrefix}update-`),
+  L16: tempPrefixItem(`${LEGACY_BRAND.tempPrefix}swap-`), L17, L18, L19, L20, L21: notYet,
 }
 
 // --- Runner -----------------------------------------------------------------

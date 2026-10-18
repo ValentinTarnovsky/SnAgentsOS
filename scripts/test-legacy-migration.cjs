@@ -180,6 +180,19 @@ function seedProfile(p, o = {}) {
   return { legacyDir, sentinel, dev }
 }
 
+
+/** Shortcut stub: a .lnk is a JSON file { target, ... }; update can be told to fail. */
+function makeShortcuts(failing = []) {
+  const updates = []
+  return {
+    updates,
+    read: lnk => { try { const j = JSON.parse(fs.readFileSync(lnk, 'utf8')); return typeof j.target === 'string' ? { target: j.target } : null } catch { return null } },
+    update: (lnk, o) => { updates.push([lnk, o]); if (failing.includes(path.basename(lnk))) return false; fs.writeFileSync(lnk, JSON.stringify({ ...JSON.parse(fs.readFileSync(lnk, 'utf8')), ...o })); return true },
+  }
+}
+const lnk = (file, target) => write(file, JSON.stringify({ target }))
+const utf16 = s => Buffer.from(s, 'utf16le')
+
 async function markerChecks() {
   const M = load('src/main/migration/legacyMarker.ts')
   const dir = freshDir('marker')
@@ -921,6 +934,209 @@ async function cleanupChecks() {
   }
 }
 
+async function windowsItemChecks() {
+  const L = loadMigration()
+  const I = load('src/main/migration/legacyInventory.ts', withElectron(electronStub(), { process: { ...process, env: {}, argv: ['electron'] } }))
+  const { INSTALLER_REG } = load('src/shared/brand.ts')
+  const G = 'Software\\8c5f793e-c93a-5e95-add6-ae90c4af8c04'
+  check(INSTALLER_REG.key === G, 'windows: installer values live under Software\\<GUID>')
+  const marker = p => JSON.parse(fs.readFileSync(path.join(p.targetDir, 'legacy-migration.json'), 'utf8'))
+  const state = (p, id) => marker(p).cleanup[id]
+  const committed = (o = {}) => { const p = fakeProfile(); check(pipe(L, { legacyDir: null, targetDir: p.targetDir, ...o }).status === 'committed', 'windows: committed'); return p }
+
+  // L04: install residue from LegacyInstallLocation.
+  {
+    const p = committed()
+    const old = path.join(p.roots.localAppData, 'Programs', 'SnMultiCC')
+    for (const f of ['SnMultiCC.exe', 'Uninstall SnMultiCC.exe', 'ffmpeg.dll', 'resources.pak', 'icudtl.dat', 'v8_context_snapshot.bin', 'vk_swiftshader_icd.json', 'LICENSES.chromium.html', 'resources/app.asar', 'locales/es.pak']) write(path.join(old, f), 'x')
+    const custom = path.join(p.base, 'D', 'Apps', 'SnMultiCC'); write(path.join(custom, 'SnMultiCC.exe'), 'x'); write(path.join(custom, 'notas.txt'), 'mine')
+    const reg = makeRegistry({ [`HKCU\\${G}`]: { LegacyInstallLocation: old } })
+    await I.runCleanup(cleanupEnv(p, { registry: reg }))
+    check(state(p, 'L04').state === 'done' && !fs.existsSync(old), 'L04: only the electron-builder layout: the old folder is removed')
+    const p2 = committed()
+    await I.runCleanup(cleanupEnv(p2, { registry: makeRegistry({ [`HKCU\\${G}`]: { LegacyInstallLocation: custom } }) }))
+    check(state(p2, 'L04').state === 'skipped' && state(p2, 'L04').reason === 'unknownFiles' && fs.readFileSync(path.join(custom, 'notas.txt'), 'utf8') === 'mine', 'L04: a foreign file (notas.txt) keeps the folder: unknownFiles')
+    const pf = path.join(p.programFiles, 'SnMultiCC'); write(path.join(pf, 'SnMultiCC.exe'), 'x')
+    const p3 = committed()
+    await I.runCleanup(cleanupEnv(p3, { registry: makeRegistry({ [`HKLM\\${G}`]: { LegacyInstallLocation: pf } }) }))
+    check(state(p3, 'L04').reason === 'needsElevation' && fs.existsSync(pf), 'L04: per-machine (HKLM / Program Files) is needsElevation, untouched')
+    const p4 = committed()
+    const nested = path.join(p4.base, 'X', 'SnMultiCC'); write(path.join(nested, 'SnMultiCC.exe'), 'x')
+    await I.runCleanup(cleanupEnv(p4, { registry: makeRegistry({ [`HKCU\\${G}`]: { LegacyInstallLocation: nested } }), exe: { execPath: path.join(nested, 'SnAgentsOS', 'SnAgentsOS.exe'), portableExeFile: () => null, setPortableExeFile() {} } }))
+    check(state(p4, 'L04').reason === 'guard' && fs.existsSync(nested), 'L04: the running exe inside the old folder keeps it (guard)')
+  }
+  // L05: installer values go once L04 and L08 are final; the uninstall entry is never deleted.
+  {
+    const p = committed()
+    const entries = { [`HKCU\\${I.REG.uninstall}`]: { DisplayName: 'SnAgentsOS 2.0.0' }, [`HKCU\\${G}`]: { InstallLocation: p.exeDir, LegacyInstallLocation: path.join(p.base, 'gone'), LegacyTaskbarPinned: '1' } }
+    const reg = makeRegistry(entries)
+    await I.runCleanup(cleanupEnv(p, { registry: reg, shortcuts: makeShortcuts() }))
+    const m = marker(p)
+    check(m.cleanup.L05.state === 'done' && reg.read('HKCU', G, 'LegacyInstallLocation') === null && reg.read('HKCU', G, 'LegacyTaskbarPinned') === null, 'L05: LegacyInstallLocation and LegacyTaskbarPinned deleted')
+    check(reg.read('HKCU', I.REG.uninstall, 'DisplayName') === 'SnAgentsOS 2.0.0' && reg.read('HKCU', G, 'InstallLocation') === p.exeDir && !reg.ops.some(o => o[0] === 'deleteKey' && o[2] === I.REG.uninstall), 'L05: the 2.x uninstall entry and InstallLocation are never touched')
+    check(m.pinRetargeted === false, 'L08: LegacyTaskbarPinned=1 with no live pin asks to pin again')
+    const p2 = committed()
+    const reg2 = makeRegistry({ [`HKCU\\${I.REG.uninstall}`]: { DisplayName: 'SnAgentsOS 2.0.0' }, [`HKLM\\${I.REG.uninstall}`]: { DisplayName: 'SnMultiCC 1.14.1' } })
+    await I.runCleanup(cleanupEnv(p2, { registry: reg2 }))
+    check(state(p2, 'L05').state === 'skipped' && state(p2, 'L05').reason === 'needsElevation' && reg2.read('HKLM', I.REG.uninstall, 'DisplayName') === 'SnMultiCC 1.14.1', 'L05: a 1.x left in HKLM is needsElevation (manual uninstall), not touched')
+    const p3 = committed()
+    const reg3 = makeRegistry({ [`HKCU\\${I.REG.uninstall}`]: { DisplayName: 'Something Else' }, [`HKCU\\${G}`]: { LegacyInstallLocation: 'x' } })
+    await I.runCleanup(cleanupEnv(p3, { registry: reg3 }))
+    check(state(p3, 'L05').reason === 'unexpectedUninstallEntry' && reg3.read('HKCU', G, 'LegacyInstallLocation') === 'x', 'L05: an unexpected DisplayName deletes nothing')
+  }
+  // L06, L07: legacy shortcuts.
+  {
+    const p = committed()
+    const start = path.join(p.roots.startMenuPrograms, 'SnMultiCC.lnk'); lnk(start, path.join(p.base, 'gone', 'SnMultiCC.exe'))
+    const desk = path.join(p.roots.desktop, 'SnMultiCC.lnk'); lnk(desk, path.join(p.base, 'other', 'tool.exe')); write(path.join(p.base, 'other', 'tool.exe'), 'x')
+    const mine = path.join(p.roots.desktop, 'Notes.lnk'); lnk(mine, path.join(p.base, 'gone', 'SnMultiCC.exe'))
+    await I.runCleanup(cleanupEnv(p, { shortcuts: makeShortcuts() }))
+    check(state(p, 'L06').state === 'done' && !fs.existsSync(start), 'L06: Start Menu SnMultiCC.lnk to the 1.x exe is removed')
+    check(state(p, 'L07').state === 'skipped' && fs.existsSync(desk) && fs.existsSync(mine), 'L07: a SnMultiCC.lnk retargeted by the user is kept, other names are never looked at')
+  }
+  // L08: live pin retargeted in place, orphan removed, foreign untouched.
+  {
+    const p = committed()
+    const dir = p.roots.taskbarPins
+    const live = path.join(dir, 'SnMultiCC.lnk'); lnk(live, path.join(p.base, 'gone', 'SnMultiCC.exe'))
+    const orphan = path.join(dir, 'SnMultiCC (2).lnk'); lnk(orphan, path.join(p.base, 'gone2', 'SnMultiCC.exe'))
+    const foreign = path.join(dir, 'Code.lnk'); lnk(foreign, path.join(p.base, 'code.exe'))
+    const favorites = Buffer.concat([Buffer.from([1, 2, 3]), utf16('Code.lnk'), Buffer.from([0]), utf16('SnMultiCC.lnk')])
+    const sh = makeShortcuts()
+    await I.runCleanup(cleanupEnv(p, { shortcuts: sh, registry: makeRegistry({ [`HKCU\\${I.REG.taskband}`]: { Favorites: favorites } }) }))
+    const j = JSON.parse(fs.readFileSync(live, 'utf8'))
+    check(j.target === path.join(p.exeDir, 'SnAgentsOS.exe') && j.appUserModelId === 'com.sndevelopment.snagentsos' && j.iconIndex === 0, 'L08: the live pin keeps its file name and opens SnAgentsOS with the new AUMID')
+    check(!fs.existsSync(orphan) && JSON.parse(fs.readFileSync(foreign, 'utf8')).target === path.join(p.base, 'code.exe'), 'L08: the orphan pin is removed, a foreign pin untouched')
+    check(marker(p).pinRetargeted === true && state(p, 'L08').state === 'done', 'L08: pinRetargeted true')
+    const p2 = committed()
+    const live2 = path.join(p2.roots.taskbarPins, 'SnMultiCC.lnk'); lnk(live2, 'C:\\gone\\SnMultiCC.exe')
+    await I.runCleanup(cleanupEnv(p2, { shortcuts: makeShortcuts(['SnMultiCC.lnk']), registry: makeRegistry() }))
+    check(!fs.existsSync(live2) && marker(p2).pinRetargeted === false, 'L08: no Favorites value means alive; a failed write removes the pin and asks to pin again')
+  }
+  // L09: the old AUMID notification key.
+  {
+    const p = committed()
+    const reg = makeRegistry({ [`HKCU\\${I.REG.notifications}`]: { ShowInActionCenter: '1' } })
+    await I.runCleanup(cleanupEnv(p, { registry: reg }))
+    check(state(p, 'L09').state === 'done' && !reg.data.has(`HKCU\\${I.REG.notifications}`.toLowerCase()), 'L09: Notifications\\Settings\\<old AUMID> deleted')
+    const p2 = committed()
+    await I.runCleanup(cleanupEnv(p2, { registry: makeRegistry() }))
+    check(state(p2, 'L09').state === 'absent', 'L09: absent counts as success')
+  }
+  // L10: the login item, new value before removing the legacy ones (Run and StartupApproved\Run).
+  {
+    const p = committed()
+    const order = []
+    const reg = makeRegistry({ [`HKCU\\${I.REG.run}`]: { 'com.sndevelopment.snmulticc': '"C:\\old\\SnMultiCC.exe"', Other: 'keep' }, [`HKCU\\${I.REG.startupApproved}`]: { 'com.sndevelopment.snmulticc': 'bin' } })
+    const del = reg.deleteValue
+    reg.deleteValue = (...a) => { order.push(`delete:${a[1].split('\\').pop()}`); return del(...a) }
+    await I.runCleanup(cleanupEnv(p, { registry: reg, loginItem: { enable: () => order.push('enable') }, readMigratedSettings: () => ({ launchOnStartup: true }) }))
+    check(order.slice(0, 3).join() === 'enable,delete:Run,delete:Run', `L10: the new login item is registered before the legacy values go (${order})`)
+    check(reg.read('HKCU', I.REG.run, 'com.sndevelopment.snmulticc') === null && reg.read('HKCU', I.REG.startupApproved, 'com.sndevelopment.snmulticc') === null && reg.read('HKCU', I.REG.run, 'Other') === 'keep', 'L10: both legacy values removed, others kept')
+    check(state(p, 'L10').state === 'done' && marker(p).loginItemMigrated === true, 'L10: done, loginItemMigrated')
+    const p2 = committed()
+    let enabled = 0
+    await I.runCleanup(cleanupEnv(p2, { registry: makeRegistry(), loginItem: { enable: () => enabled++ }, readMigratedSettings: () => ({ launchOnStartup: false }) }))
+    check(enabled === 0 && state(p2, 'L10').state === 'absent', 'L10: launchOnStartup off registers nothing, missing values are absent')
+    const p3 = committed({ mode: 'portable' })
+    const reg3 = makeRegistry({ [`HKCU\\${I.REG.run}`]: { 'com.sndevelopment.snmulticc': 'x' } })
+    await I.runCleanup(cleanupEnv(p3, { mode: 'portable', registry: reg3, loginItem: { enable: () => enabled++ }, readMigratedSettings: () => ({ launchOnStartup: true }) }))
+    check(enabled === 0 && state(p3, 'L10').state === 'absent' && reg3.read('HKCU', I.REG.run, 'com.sndevelopment.snmulticc') === 'x', 'L10: the portable has no login item and touches nothing')
+  }
+  // L17: the portable exe is renamed, siblings removed, shortcuts to it retargeted.
+  {
+    const p = fakeProfile()
+    const usb = path.join(p.base, 'usb')
+    const oldExe = path.join(usb, 'SnMultiCC-1.14.1-portable.exe'); write(oldExe, 'running 2.0 bytes')
+    const sibling = path.join(usb, 'SnMultiCC-1.14.0-portable.exe'); write(sibling, 'older')
+    const userNamed = path.join(usb, 'my-terminal.exe'); write(userNamed, 'user')
+    const deskLnk = path.join(p.roots.desktop, 'Portable.lnk'); lnk(deskLnk, oldExe)
+    const pinLnk = path.join(p.roots.taskbarPins, 'SnMultiCC-1.14.1-portable.lnk'); lnk(pinLnk, oldExe)
+    const target = path.join(usb, 'snagentsos-data')
+    pipe(L, { legacyDir: null, targetDir: target, mode: 'portable' })
+    let current = oldExe
+    const pp = { ...p, targetDir: target }
+    const env = cleanupEnv(pp, { mode: 'portable', portableDir: usb, shortcuts: makeShortcuts(), guard: guardFor(pp, { contain: [usb] }), exe: { execPath: path.join(p.roots.temp, 'SnAgentsOS', 'SnAgentsOS.exe'), portableExeFile: () => current, setPortableExeFile: v => { current = v } } })
+    await I.runCleanup(env)
+    const m = JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8'))
+    const renamed = path.join(usb, 'SnAgentsOS-portable.exe')
+    check(m.cleanup.L17.state === 'done' && fs.readFileSync(renamed, 'utf8') === 'running 2.0 bytes' && !fs.existsSync(oldExe), 'L17: the running exe is renamed to SnAgentsOS-portable.exe')
+    check(current === renamed && m.portableExeRenamedTo === renamed, 'L17: PORTABLE_EXECUTABLE_FILE follows the rename (the updater swap then keeps the new name)')
+    check(!fs.existsSync(sibling) && fs.existsSync(userNamed), 'L17: the versioned 1.x sibling is removed, a user-named exe untouched')
+    check(JSON.parse(fs.readFileSync(deskLnk, 'utf8')).target === renamed && JSON.parse(fs.readFileSync(pinLnk, 'utf8')).target === renamed && JSON.parse(fs.readFileSync(pinLnk, 'utf8')).appUserModelId === 'com.sndevelopment.snagentsos', 'L17: desktop shortcut and pin to the old exe now open the renamed one')
+    check(m.cleanup.L06.state === 'absent' && m.cleanup.L10.state === 'absent', 'L17: the portable registers no shortcuts or login item of its own')
+  }
+  {
+    // Name conflict: a different SnAgentsOS-portable.exe already there deletes nothing.
+    const p = fakeProfile(); const usb = path.join(p.base, 'usb')
+    const oldExe = path.join(usb, 'SnMultiCC-1.14.1-portable.exe'); write(oldExe, 'a')
+    const sibling = path.join(usb, 'SnMultiCC-1.14.0-portable.exe'); write(sibling, 'older')
+    write(path.join(usb, 'SnAgentsOS-portable.exe'), 'different')
+    const target = path.join(usb, 'snagentsos-data'); pipe(L, { legacyDir: null, targetDir: target, mode: 'portable' })
+    const pp = { ...p, targetDir: target }
+    await I.runCleanup(cleanupEnv(pp, { mode: 'portable', portableDir: usb, guard: guardFor(pp, { contain: [usb] }), exe: { execPath: 'x', portableExeFile: () => oldExe, setPortableExeFile() { throw new Error('must not rename') } } }))
+    const m = JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8'))
+    check(m.cleanup.L17.state === 'skipped' && m.cleanup.L17.reason === 'nameConflict' && fs.existsSync(oldExe) && fs.existsSync(sibling), 'L17: nameConflict deletes no exe')
+  }
+  {
+    // Same bytes already under the new name, and a rename refused while running: both go to the exit helper.
+    const p = fakeProfile(); const usb = path.join(p.base, 'usb')
+    const oldExe = path.join(usb, 'snmulticc.exe'); write(oldExe, 'same')
+    write(path.join(usb, 'SnAgentsOS-portable.exe'), 'same')
+    const target = path.join(usb, 'snagentsos-data'); pipe(L, { legacyDir: null, targetDir: target, mode: 'portable' })
+    const helpers = []; let current = oldExe
+    const pp = { ...p, targetDir: target }
+    const exe = { execPath: 'x', portableExeFile: () => current, setPortableExeFile: v => { current = v }, scheduleExitHelper: op => { helpers.push(op); return true } }
+    await I.runCleanup(cleanupEnv(pp, { mode: 'portable', portableDir: usb, guard: guardFor(pp, { contain: [usb] }), exe }))
+    check(helpers.length === 1 && helpers[0].from === oldExe && !helpers[0].to && fs.existsSync(oldExe) && current.endsWith('SnAgentsOS-portable.exe'), 'L17: identical new name: the old running file is deleted by the exit helper')
+    const p2 = fakeProfile(); const usb2 = path.join(p2.base, 'usb'); const old2 = path.join(usb2, 'SnMultiCC-2.exe'); write(old2, 'x')
+    const t2 = path.join(usb2, 'snagentsos-data'); pipe(L, { legacyDir: null, targetDir: t2, mode: 'portable' })
+    const helpers2 = []; let cur2 = old2
+    const busy = new Proxy(fs.promises, { get: (t, k) => (k === 'rename' ? async () => { throw Object.assign(new Error('busy'), { code: 'EBUSY' }) } : t[k]) })
+    const pp2 = { ...p2, targetDir: t2 }
+    await I.runCleanup(cleanupEnv(pp2, { fs: busy, mode: 'portable', portableDir: usb2, guard: guardFor(pp2, { contain: [usb2] }), exe: { execPath: 'x', portableExeFile: () => cur2, setPortableExeFile: v => { cur2 = v }, scheduleExitHelper: op => { helpers2.push(op); return true } } }))
+    const m2 = JSON.parse(fs.readFileSync(path.join(t2, 'legacy-migration.json'), 'utf8'))
+    check(helpers2[0].to.endsWith('SnAgentsOS-portable.exe') && m2.cleanup.L17.state === 'deferred' && m2.cleanup.L17.reason === 'renameAtExit', 'L17: a refused hot rename is done by the exit helper')
+    const ro = new Proxy(fs.promises, { get: (t, k) => (k === 'rename' ? async () => { throw Object.assign(new Error('ro'), { code: 'EROFS' }) } : t[k]) })
+    m2.cleanup.L17 = { state: 'pending', attempts: 0 }; m2.phase = 'cleaning'; fs.writeFileSync(path.join(t2, 'legacy-migration.json'), JSON.stringify(m2)); cur2 = old2
+    await I.runCleanup(cleanupEnv(pp2, { fs: ro, mode: 'portable', portableDir: usb2, guard: guardFor(pp2, { contain: [usb2] }), exe: { execPath: 'x', portableExeFile: () => cur2, setPortableExeFile: v => { cur2 = v } } }))
+    check(JSON.parse(fs.readFileSync(path.join(t2, 'legacy-migration.json'), 'utf8')).cleanup.L17.reason === 'readOnly' && fs.existsSync(old2), 'L17: a read-only folder is skipped: readOnly')
+  }
+  // A full Windows pass (installed) ends in done with the documented exceptions.
+  {
+    const p = fakeProfile(); seedProfile(p)
+    pipe(L, { legacyDir: path.join(p.roots.appData, 'snmulticc'), targetDir: p.targetDir })
+    const reg = makeRegistry({ [`HKCU\\${I.REG.uninstall}`]: { DisplayName: 'SnAgentsOS 2.0.0' } })
+    const env = cleanupEnv(p, { registry: reg, shortcuts: makeShortcuts(), loginItem: { enable() {} }, platform: 'win32' })
+    const res = await I.runCleanup({ ...env, platform: 'win32' })
+    const open = Object.entries(res.marker.cleanup).filter(([, s]) => !['done', 'absent', 'skipped'].includes(s.state)).map(([id]) => id)
+    check(open.join() === 'L21', `windows pass: everything but the mac item is final (${open})`)
+  }
+}
+
+/** The real PowerShell registry accessor, only under a throwaway HKCU test key. */
+async function winRegistryChecks() {
+  if (!isWin) return
+  const { execFileSync } = require('node:child_process')
+  const { createWinRegistry } = load('src/main/migration/winRegistry.ts')
+  const key = `Software\\SnAgentsOSTest-${crypto.randomBytes(6).toString('hex')}`
+  const reg = createWinRegistry(15000)
+  try {
+    execFileSync('reg', ['add', `HKCU\\${key}`, '/v', 'Loc', '/t', 'REG_SZ', '/d', 'C:\\Users\\Jos\u00e9\\SnMultiCC \u00f1', '/f'], { windowsHide: true })
+    execFileSync('reg', ['add', `HKCU\\${key}`, '/v', 'Fav', '/t', 'REG_BINARY', '/d', '0a0b0c', '/f'], { windowsHide: true })
+    execFileSync('reg', ['add', `HKCU\\${key}\\Sub`, '/v', 'X', '/t', 'REG_SZ', '/d', '1', '/f'], { windowsHide: true })
+    check(await reg.read('HKCU', key, 'Loc') === 'C:\\Users\\Jos\u00e9\\SnMultiCC \u00f1', 'winRegistry: a non-ASCII REG_SZ path reads back intact')
+    const fav = await reg.read('HKCU', key, 'Fav')
+    check(Buffer.isBuffer(fav) && fav.toString('hex') === '0a0b0c', 'winRegistry: REG_BINARY reads as bytes')
+    check(await reg.read('HKCU', key, 'Missing') === null && await reg.read('HKCU', `${key}\\Nope`, 'X') === null, 'winRegistry: absent value and key read as null')
+    check(await reg.deleteValue('HKCU', key, 'Loc') === 'done' && await reg.deleteValue('HKCU', key, 'Loc') === 'absent' && await reg.read('HKCU', key, 'Loc') === null, 'winRegistry: deleteValue, then absent')
+    check(await reg.deleteKey('HKCU', `${key}\\Sub`) === 'done' && await reg.deleteKey('HKCU', `${key}\\Sub`) === 'absent', 'winRegistry: deleteKey, then absent')
+    check(await reg.read('HKCU', key, "x'; Remove-Item -Recurse HKCU:\\Software\\Nothing; '") === null, 'winRegistry: names are data, never script')
+  } finally {
+    try { execFileSync('reg', ['delete', `HKCU\\${key}`, '/f'], { windowsHide: true, stdio: 'ignore' }) } catch {}
+  }
+}
+
 async function main() {
   try {
     await markerChecks()
@@ -933,6 +1149,8 @@ async function main() {
     await zipChecks()
     await safeRemoveChecks()
     await cleanupChecks()
+    await windowsItemChecks()
+    await winRegistryChecks()
     console.log(`PASS: ${checks} legacy migration and cleanup checks`)
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true })
