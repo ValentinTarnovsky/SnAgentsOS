@@ -3,9 +3,12 @@ import { resolveTokens } from '@/themes'
 import { type AppState, useAppStore } from './store'
 import { getPtyId, onPtyRegistryChange } from './ptyRegistry'
 import { useUsageStore } from './usageStore'
+import { useAgentStore } from './agentStore'
+import { paneResumable } from './agentLaunch'
 
 /** Build the compact desktop-state mirror pushed to phones. */
 function buildSnapshot(state: AppState): RemoteStateSnapshot {
+  const sessions = useAgentStore.getState().sessions
   const workspaces: RemoteWorkspaceInfo[] = state.workspaces.map((ws) => ({
     id: ws.id,
     name: ws.name,
@@ -18,6 +21,8 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
       icon: pane.icon,
       // main overrides this authoritatively; it's a best-effort hint here.
       running: getPtyId(pane.id) != null,
+      // D10: the phone shows "Relaunch resuming" / "New chat" only when true.
+      ...(paneResumable(pane, ws, state.presets, sessions[pane.id]) ? { resumable: true } : {}),
     })),
   }))
   return {
@@ -41,6 +46,7 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
 function relevant(s: AppState): unknown[] {
   return [
     s.workspaces,
+    s.presets,
     s.activeWorkspaceId,
     s.settings.theme,
     s.settings.customColors,
@@ -82,6 +88,14 @@ export function startRemoteSnapshotSync(): () => void {
   // Usage lives in its own store; it only mutates when the snapshot changes, so
   // subscribing directly (no reference gate) won't over-fire.
   const unsubUsage = useUsageStore.subscribe(schedule)
+  // A session becoming (un)resumable changes `resumable`.
+  let prevSessions = useAgentStore.getState().sessions
+  const unsubAgents = useAgentStore.subscribe((s) => {
+    if (s.sessions !== prevSessions) {
+      prevSessions = s.sessions
+      schedule()
+    }
+  })
 
   // Seed main with the current state right away (post-hydrate).
   window.snApi.remote.pushState(buildSnapshot(useAppStore.getState()))
@@ -91,5 +105,6 @@ export function startRemoteSnapshotSync(): () => void {
     unsubStore()
     unsubPty()
     unsubUsage()
+    unsubAgents()
   }
 }

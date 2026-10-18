@@ -8,6 +8,7 @@ import { initRemoteCommands } from '@/lib/remoteCommands'
 import { initLegacyEvents } from '@/lib/legacyStore'
 import { initPowerEvents, syncAgentSettings, syncAwakeMode } from '@/lib/powerStore'
 import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
+import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { startPersistence } from '@/lib/persist'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
 import { usePaneScheduler } from '@/lib/usePaneScheduler'
@@ -93,6 +94,12 @@ export function App() {
   useEffect(() => {
     if (hydrated) syncAgentSettings(agents)
   }, [hydrated, agents])
+
+  // Agent sessions (E5-FR-10): load main's registry and start the consoles whose
+  // agent was interrupted, even in workspaces not opened yet.
+  useEffect(() => {
+    if (hydrated) void mountInterruptedAgents()
+  }, [hydrated])
 
   // Mirror desktop state to phones once config is loaded (debounced snapshots).
   useEffect(() => {
