@@ -79,9 +79,42 @@ async function main() {
   check(index.includes("mainT(cfg, 'tray.show', { app: BRAND.productName })"), 'tray label interpolates the product name')
   check(/title: BRAND\.productName,\s*message: mainT\(cfg, 'dialog\.activeTitle'\)/.test(index), 'active consoles dialog titled with the product name')
   check(index.includes('defaultPath: BRAND.exportFileName'), 'export suggests snagentsos-config.json')
-  check(read('src/main/window.ts').includes('title: BRAND.productName'), 'window title')
-  check(read('src/main/tray.ts').includes('tray.setToolTip(BRAND.productName)'), 'tray tooltip')
-  check(read('src/main/status/StatusManager.ts').includes('new Notification({ title: BRAND.productName'), 'native toast title')
+  {
+    // Window, tray and native toast run against an electron stub, so the checks
+    // cover what each module hands to Electron, not how the source spells it.
+    const noop = () => {}
+    const fakeWebContents = { on: noop, setWindowOpenHandler: noop, toggleDevTools: noop }
+    let windowOptions = null
+    class BrowserWindow { constructor(opts) { windowOptions = opts; this.webContents = fakeWebContents } once() {} show() {} loadFile() {} loadURL() {} }
+    const { ELECTRON_RENDERER_URL: _dev, ...env } = process.env
+    const { createMainWindow } = load('src/main/window.ts', {
+      require: id => id === 'electron' ? { BrowserWindow, shell: { openExternal: noop } } : require(id),
+      process: { ...process, env }, __dirname: path.join(root, 'out/main'),
+    })
+    createMainWindow()
+    check(windowOptions?.title === BRAND.productName, 'window title')
+
+    let tooltip = null, template = null
+    class Tray { constructor() {} setToolTip(text) { tooltip = text } on() {} setContextMenu() {} destroy() {} }
+    const tray = load('src/main/tray.ts', {
+      require: id => id === 'electron' ? {
+        app: { getAppPath: () => root }, Tray,
+        Menu: { buildFromTemplate: items => { template = items; return items } },
+        nativeImage: { createFromPath: () => ({ isEmpty: () => true }) },
+      } : require(id),
+      process: { ...process, resourcesPath: root },
+    })
+    tray.ensureTray(() => null, noop, { show: mainT(cfg('es'), 'tray.show', { app: BRAND.productName }), quit: mainT(cfg('es'), 'tray.quit') })
+    check(tooltip === BRAND.productName, 'tray tooltip')
+    check(template?.[0]?.label === 'Mostrar SnAgentsOS', 'tray menu shows the interpolated label')
+    tray.destroyTray()
+
+    const toasts = []
+    class Notification { static isSupported() { return true } constructor(opts) { toasts.push(opts) } on() {} show() {} }
+    const { StatusManager } = load('src/main/status/StatusManager.ts', { require: id => id === 'electron' ? { Notification } : require(id) })
+    new StatusManager(() => null, () => cfg('en')).testDesktop()
+    check(toasts.length === 1 && toasts[0].title === BRAND.productName && toasts[0].body === 'Desktop notification test', 'native toast title')
+  }
   {
     const { DiscordNotifier } = load('src/main/status/DiscordNotifier.ts')
     const discord = { enabled: true, notifyDone: true, notifyAction: true, webhookUrl: 'https://discord.com/api/webhooks/123456789012345678/fake-token', userId: '' }
@@ -90,7 +123,7 @@ async function main() {
     check((await notifier.test(discord)).ok && sent[0] === 'SnAgentsOS: notification test / prueba de notificacion', 'Discord test message')
     notifier.setConfig(discord)
     notifier.notify({ paneId: 'unknown', state: 'done', provider: 'claude' }, { settings: { language: 'en' }, workspaces: [] })
-    await new Promise(resolve => setTimeout(resolve, 20))
+    for (let i = 0; i < 100 && sent.length < 2; i++) await new Promise(resolve => setTimeout(resolve, 10))
     check(sent[1]?.split('\n')[1] === BRAND.productName, 'Discord default place')
   }
 
@@ -125,6 +158,9 @@ async function main() {
     'src/main/pty/shellResolver.ts', 'src/shared/types.ts', 'src/shared/ipc-contract.ts',
     'src/renderer/index.html', 'src/renderer/components/titlebar/TitleBar.tsx', 'src/renderer/components/ui/Logo.tsx',
     'src/renderer/components/terminal/useXterm.ts', 'src/renderer/i18n/en.ts', 'src/renderer/i18n/es.ts',
+    'src/renderer/components/remote/RemotePairingPrompt.tsx', 'src/renderer/components/settings/sections/NotificationsSection.tsx',
+    'src/renderer/components/settings/sections/RemoteSection.tsx', 'src/renderer/components/settings/sections/UsageSection.tsx',
+    'src/renderer/components/ui/UsageRing.tsx', 'src/renderer/App.tsx',
     'src/mobile/index.html', 'src/mobile/public/manifest.webmanifest', 'src/mobile/src/lib/i18n.ts',
   ]
   for (const file of scope) check(!LEGACY_RE.test(read(file)), `${file}: no legacy name`)
