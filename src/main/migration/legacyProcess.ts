@@ -52,6 +52,8 @@ export function isLegacyRunningSync(platform: NodeJS.Platform, username: string,
   try {
     return parseLegacyProcess(platform, 0, exec(q.cmd, q.args, { timeout: QUERY_TIMEOUT_MS, windowsHide: true, encoding: 'utf8' }))
   } catch (err) {
+    // No pgrep on a minimal Linux image: not "running" (the SingletonLock check still guards the folders).
+    if (platform !== 'win32' && (err as { code?: unknown }).code === 'ENOENT') return false
     const status = (err as { status?: unknown }).status
     return parseLegacyProcess(platform, typeof status === 'number' ? status : null, '')
   }
@@ -62,6 +64,7 @@ export type AsyncExec = (cmd: string, args: string[]) => Promise<{ code: number 
 export const defaultAsyncExec: AsyncExec = (cmd, args) =>
   new Promise((resolve) => {
     execFile(cmd, args, { timeout: QUERY_TIMEOUT_MS, windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
+      if (err && (err as { code?: unknown }).code === 'ENOENT' && process.platform !== 'win32') return resolve({ code: 1, stdout: '' })
       const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : null) : 0
       resolve({ code, stdout: String(stdout ?? '') })
     })

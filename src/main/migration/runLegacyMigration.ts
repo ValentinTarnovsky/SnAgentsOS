@@ -24,6 +24,15 @@ import { createLegacyLog, legacyLogPath } from './legacyLog'
 import { defaultElevation, type PathGuard } from './safeRemove'
 import { isInside } from './pathUtil'
 
+/** os.userInfo() throws when the uid has no passwd entry (some Linux containers). */
+function safeUserInfo(): { username: string; homedir: string; uid?: number } {
+  try {
+    return userInfo()
+  } catch {
+    return { username: process.env.USER ?? process.env.USERNAME ?? '', homedir: homedir() }
+  }
+}
+
 /**
  * Electron side of the 1.x migration (E0-FR-07..09, 12, 14, 26..36). Two
  * entry points in index.ts:
@@ -173,7 +182,7 @@ interface Policy {
 
 export function cleanupPolicy(): Policy {
   if (app.isPackaged) return { simulate: false, sandbox: null, reason: 'packaged' }
-  const r = devCleanupSandbox({ env: process.env, platform: process.platform, realHome: userInfo().homedir })
+  const r = devCleanupSandbox({ env: process.env, platform: process.platform, realHome: safeUserInfo().homedir })
   return r.ok ? { simulate: false, sandbox: r.roots, reason: 'devSandbox' } : { simulate: true, sandbox: null, reason: r.reason }
 }
 
@@ -210,7 +219,7 @@ export interface BootDeps {
 }
 
 function defaultBootDeps(): BootDeps {
-  const user = userInfo()
+  const user = safeUserInfo()
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   return {
     isLegacyRunning: (legacyDir) => {
@@ -412,7 +421,7 @@ export interface CleanupDeps {
 function defaultCleanupDeps(policy: Policy): CleanupDeps {
   const win = process.platform === 'win32'
   const packaged = app.isPackaged
-  const user = userInfo()
+  const user = safeUserInfo()
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
   return {
     // Dev never touches the real registry, login items or processes, whatever the paths say.

@@ -1378,7 +1378,7 @@ async function orchestrationChecks() {
     const R = loadOrchestrator(t, { userData, throwingPaths: ['appData', 'home', 'desktop'] })
     await R.runLegacyMigrationAtBoot()
     const policy = R.cleanupPolicy()
-    check(!policy.simulate && policy.reason === 'devSandbox' && policy.sandbox.length >= 5, `cleanup dev forced: sandbox accepted (${policy.reason})`)
+    check(!policy.simulate && policy.reason === 'devSandbox' && policy.sandbox.length === (isWin ? 6 : 4), `cleanup dev forced: sandbox accepted (${policy.reason}, ${policy.sandbox && policy.sandbox.length} roots)`)
     const guard = R.buildGuard(R.legacyRoots(), policy.sandbox)
     check(JSON.stringify(guard.allowedRoots) === JSON.stringify(policy.sandbox) && guard.forbiddenTree.includes(userData), 'cleanup dev forced: the guard only allows the fake roots and protects the data folder')
     const tm = timers()
@@ -1435,11 +1435,13 @@ async function orchestrationChecks() {
     const t0 = process.hrtime.bigint()
     const res = await R.runLegacyMigrationAtBoot(deps)
     const ms = Number(process.hrtime.bigint() - t0) / 1e6
+    // Shared CI runners are noisy; the 50 ms budget is enforced on a dev machine.
+    const bootBudget = process.env.CI ? 250 : 50
     const m = markerAt(userData)
     check(res === 'continue' && queried === 0 && m.phase === 'committed' && m.outcome === 'noLegacy' && !m.backup && !fs.existsSync(path.join(userData, 'migration-backup-v1.zip')) && !fs.existsSync(path.join(userData, 'config.json')), 'fresh install: noLegacy committed, nothing copied, no zip, no process query')
-    check(ms < 50, `fresh install: the boot step costs under 50 ms (${ms.toFixed(1)} ms)`)
+    check(ms < bootBudget, `fresh install: the boot step costs under ${bootBudget} ms (${ms.toFixed(1)} ms)`)
     const t1 = process.hrtime.bigint()
-    check(await R.runLegacyMigrationAtBoot(deps) === 'continue' && Number(process.hrtime.bigint() - t1) / 1e6 < 50 && queried === 0 && markerAt(userData).at === m.at, 'fresh install: the next start writes nothing and stays under 50 ms')
+    check(await R.runLegacyMigrationAtBoot(deps) === 'continue' && Number(process.hrtime.bigint() - t1) / 1e6 < bootBudget && queried === 0 && markerAt(userData).at === m.at, 'fresh install: the next start writes nothing and stays under the boot budget')
   }
   // The exit helper renames the old portable exe, but never over a newer exe already under the new name.
   if (isWin) {

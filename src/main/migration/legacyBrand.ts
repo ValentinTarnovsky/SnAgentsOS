@@ -333,7 +333,13 @@ class UndoJournal {
 
 function clearStaging(ctx: Ctx, all: boolean): void {
   const target = all ? join(ctx.o.targetDir, STAGING_DIR) : stagingFiles(ctx.o.targetDir)
-  ctx.fsx.rmSync(target, { recursive: true, force: true })
+  try {
+    ctx.fsx.rmSync(target, { recursive: true, force: true })
+  } catch (err) {
+    // Data folder under a plain file: POSIX says ENOTDIR where Windows says ENOENT, and
+    // Node 22's rmSync rethrows it. Nothing to clear; the next marker write reports the failure.
+    if (errCode(err) !== 'ENOTDIR') throw err
+  }
 }
 
 function copySources(ctx: Ctx, legacyDir: string, rels: string[]): Copied[] {
