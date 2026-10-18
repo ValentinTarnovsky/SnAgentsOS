@@ -5,6 +5,7 @@ import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { PtyDataEvt, PtyExitEvt, PtyReattachRes, PtySpawnReq } from '@shared/ipc-contract'
 import type { SetupStep } from '@shared/types'
+import { AGENT_ENV } from '@shared/brand'
 import { cleanEnv, defaultShell, homeDir } from './shellResolver'
 
 interface Entry {
@@ -129,9 +130,9 @@ export class PtyManager {
   spawn(req: PtySpawnReq): string {
     const ptyId = `pty-${++this.seq}-${randomUUID()}`
     const shell = req.shell || defaultShell()
-    const env = cleanEnv({ ...req.env, ...this.statusEnv(ptyId, req.paneId, req.cwd || homeDir()), SNMULTICC_CONSOLE_ID: req.paneId, SNMULTICC_PTY_ID: ptyId })
+    const env = cleanEnv({ ...req.env, ...this.statusEnv(ptyId, req.paneId, req.cwd || homeDir()), [AGENT_ENV.consoleId]: req.paneId, [AGENT_ENV.ptyId]: ptyId })
     const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH'
-    if (env.SNMULTICC_CODEX_SHIM) env[pathKey] = env.SNMULTICC_CODEX_SHIM + delimiter + (env[pathKey] ?? '')
+    if (env[AGENT_ENV.codexShim]) env[pathKey] = env[AGENT_ENV.codexShim] + delimiter + (env[pathKey] ?? '')
     let proc: IPty
     try { proc = spawn(shell, req.args ?? [], {
       name: 'xterm-256color',

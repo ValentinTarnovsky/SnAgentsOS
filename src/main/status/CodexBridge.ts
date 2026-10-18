@@ -5,9 +5,11 @@ import { delimiter, join } from 'path'
 import { createInterface } from 'readline'
 import type { IncomingMessage } from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
+import { AGENT_ENV } from '@shared/brand'
 import { CodexProtocol } from './CodexProtocol'
 import type { AgentEvent } from './events'
 import type { PtySink } from '../pty/PtyManager'
+import { samePath, statusBinDirs } from '../pty/shellResolver'
 
 interface Binding { paneId: string; ptyId: string; cwd: string; env?: NodeJS.ProcessEnv; sessionId?: string; finished?: boolean; socket?: WebSocket; child?: ChildProcessWithoutNullStreams }
 
@@ -85,7 +87,7 @@ export class CodexBridge implements PtySink {
     if (!this.enabled || !this.server || !this.executable) return {}
     const route = randomBytes(24).toString('hex')
     this.bindings.set(route, { ptyId, paneId, cwd })
-    return { SNMULTICC_CODEX_URL: `ws://127.0.0.1:${this.port}`, SNMULTICC_CODEX_TOKEN: route, SNMULTICC_REAL_CODEX: this.executable, SNMULTICC_CODEX_SHIM: this.directory() }
+    return { [AGENT_ENV.codexUrl]: `ws://127.0.0.1:${this.port}`, [AGENT_ENV.codexToken]: route, [AGENT_ENV.realCodex]: this.executable, [AGENT_ENV.codexShim]: this.directory() }
   }
   onSpawn(): void {}
   onData(): void {}
@@ -138,9 +140,12 @@ export class CodexBridge implements PtySink {
     })
   }
   private findExecutable(): string {
+    // Skip our launcher and the 1.x one an inherited PATH may still carry:
+    // taking a shim for the real CLI would recurse into itself.
+    const shims = [this.directory(), ...statusBinDirs()]
     for (const dir of (process.env.PATH ?? process.env.Path ?? '').split(delimiter)) {
       const path = join(dir.replace(/^"|"$/g, ''), process.platform === 'win32' ? 'codex.exe' : 'codex')
-      if (existsSync(path) && dir !== this.directory()) return path
+      if (existsSync(path) && !shims.some(shim => samePath(dir, shim))) return path
     }
     return ''
   }
@@ -151,7 +156,7 @@ export class CodexBridge implements PtySink {
       const executable = process.execPath.replace(/%/g, '%%')
       const runtime = this.runtimePath.replace(/%/g, '%%')
       const shim = dir.replace(/%/g, '%%')
-      writeFileSync(join(dir, 'codex.cmd'), `@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${executable}" "${runtime}" --snmulticc-prepare %*\r\nif errorlevel 11 exit /b 1\r\nif errorlevel 10 goto passthrough\r\nif errorlevel 1 exit /b 1\r\nset ELECTRON_RUN_AS_NODE=\r\nset "PATH=%PATH:${shim};=%"\r\n"%SNMULTICC_REAL_CODEX%" --remote "%SNMULTICC_CODEX_URL%" --remote-auth-token-env SNMULTICC_CODEX_TOKEN %*\r\nset "SNMULTICC_CODEX_EXIT=%errorlevel%"\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${executable}" "${runtime}" --snmulticc-end\r\nexit /b %SNMULTICC_CODEX_EXIT%\r\n:passthrough\r\nset ELECTRON_RUN_AS_NODE=\r\nset "PATH=%PATH:${shim};=%"\r\n"%SNMULTICC_REAL_CODEX%" %*\r\n`, 'utf8')
+      writeFileSync(join(dir, 'codex.cmd'), `@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${executable}" "${runtime}" --snaos-prepare %*\r\nif errorlevel 11 exit /b 1\r\nif errorlevel 10 goto passthrough\r\nif errorlevel 1 exit /b 1\r\nset ELECTRON_RUN_AS_NODE=\r\nset "PATH=%PATH:${shim};=%"\r\n"%${AGENT_ENV.realCodex}%" --remote "%${AGENT_ENV.codexUrl}%" --remote-auth-token-env ${AGENT_ENV.codexToken} %*\r\nset "${AGENT_ENV.codexExit}=%errorlevel%"\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${executable}" "${runtime}" --snaos-end\r\nexit /b %${AGENT_ENV.codexExit}%\r\n:passthrough\r\nset ELECTRON_RUN_AS_NODE=\r\nset "PATH=%PATH:${shim};=%"\r\n"%${AGENT_ENV.realCodex}%" %*\r\n`, 'utf8')
     } else {
       const quote = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'"
       writeFileSync(join(dir, 'codex'), `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${quote(process.execPath)} ${quote(this.runtimePath)} "$@"\n`, { encoding: 'utf8', mode: 0o700 })
