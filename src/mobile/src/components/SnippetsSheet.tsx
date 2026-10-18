@@ -1,14 +1,23 @@
 /**
- * Lists the desktop's saved snippets and writes the tapped one straight into
- * the subscribed console (no Enter appended, mirroring insertToConsole on the
- * desktop). No input lives in this sheet - it never introduces a second
- * focusable field while the phone is on the live screen.
+ * Lists the desktop's saved snippets. In Direct mode the tapped one is written
+ * straight into the subscribed console (no Enter appended, mirroring
+ * insertToConsole on the desktop); sendInput chunks a long snippet into
+ * several frames (E1-FR-24). In Composer mode it is inserted into the composer
+ * at the caret instead (E1-FR-31). No input lives in this sheet - it never
+ * introduces a second focusable field while the phone is on the live screen.
  */
 import type { ReactNode } from 'react'
 import { Sheet } from './Sheet'
-import { useRemoteStore } from '../lib/store'
+import { selectInputMode, store, useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
+import { getComposerHandle } from '../lib/terminalBus'
 import { t } from '../lib/i18n'
+
+function applySnippet(text: string): void {
+  const composer = getComposerHandle()
+  if (composer && selectInputMode(store.getState()) === 'composer') composer.insert(text)
+  else client.sendInput(text)
+}
 
 export function SnippetsSheet({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
   const snapshot = useRemoteStore((s) => s.snapshot)
@@ -24,7 +33,7 @@ export function SnippetsSheet({ open, onClose }: { open: boolean; onClose: () =>
             <button
               key={snip.id}
               onClick={() => {
-                client.sendInput(snip.text)
+                applySnippet(snip.text)
                 onClose()
               }}
               className="flex flex-col items-start gap-0.5 rounded-btn border border-border bg-bg-secondary px-3 py-2.5 text-left active:bg-card"
