@@ -68,10 +68,28 @@ function migrateLegacyAuthOnce(): void {
     const value = getItem(LEGACY_KEY(k))
     if (value !== null) legacy[k] = value
   }
-  if (!legacy.deviceId) return
-  if (getItem(KEY('deviceId')) !== null) {
+  if (!legacy.deviceId) {
+    // No 1.x pairing to carry over, but 1.x's clearAuth left hostPlatform
+    // behind (and a lone secret is unusable): drop the orphans so no legacy
+    // key survives. hostPlatform is copied first when the new key lacks it.
+    const platform = legacy.hostPlatform
+    if (platform !== undefined && getItem(KEY('hostPlatform')) === null) {
+      try {
+        localStorage.setItem(KEY('hostPlatform'), platform)
+        if (localStorage.getItem(KEY('hostPlatform')) !== platform) throw new Error('write not confirmed')
+      } catch {
+        legacyFallback = { hostPlatform: platform }
+        return
+      }
+    }
+    if (Object.keys(legacy).length > 0) removeKeys(AUTH_KEYS.map(LEGACY_KEY))
+    return
+  }
+  if (getItem(KEY('deviceId')) !== null && getItem(KEY('secret')) !== null) {
     // Already migrated (a removeItem failed last time): the new keys win, the
-    // legacy leftovers only risk resurrecting an older pairing.
+    // legacy leftovers only risk resurrecting an older pairing. A lone new
+    // deviceId is not a usable pairing, so it falls through and is overwritten
+    // instead of costing the legacy secret.
     removeKeys(AUTH_KEYS.map(LEGACY_KEY))
     return
   }
