@@ -11,6 +11,8 @@
  * clamp we can re-run on every visualViewport resize or replay.
  */
 
+import { STORAGE_PREFIX, storageGet, storageSet } from './mobileStorage'
+
 const MIN_FONT = 8
 const MAX_FONT = 20
 const REF_SIZE = 100
@@ -47,23 +49,49 @@ export function resetRatio(): void {
 }
 
 export interface FontSolve {
-  /** Chosen font size in px, clamped to [MIN_FONT, MAX_FONT]. */
+  /** Chosen font size in px, clamped to [SCALED_MIN_FONT, SCALED_MAX_FONT]. */
   fontSize: number
-  /** True when even MIN_FONT overflows the width => container should pan. */
+  /** True when the grid is wider than the viewport => container should pan. */
   overflow: boolean
 }
 
+/** Text size presets of the pinch and of Settings (E2-FR-34). */
+export const FONT_SCALE_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const
+/** Bounds of the final size once the scale applies. */
+export const SCALED_MIN_FONT = 6
+export const SCALED_MAX_FONT = 32
+const FONT_SCALE_KEY = `${STORAGE_PREFIX}fontScale`
+
+/** Nearest preset to a free scale (a pinch release). */
+export function snapFontScale(scale: number): number {
+  if (!Number.isFinite(scale)) return 1
+  let best: number = FONT_SCALE_PRESETS[0]
+  for (const p of FONT_SCALE_PRESETS) if (Math.abs(p - scale) < Math.abs(best - scale)) best = p
+  return best
+}
+
+/** The saved scale ('snagentsos.fontScale'), 1 when missing or not a preset. */
+export function loadFontScale(): number {
+  const n = Number(storageGet(FONT_SCALE_KEY))
+  return (FONT_SCALE_PRESETS as readonly number[]).includes(n) ? n : 1
+}
+
+export function saveFontScale(scale: number): void {
+  storageSet(FONT_SCALE_KEY, String(scale))
+}
+
 /**
- * Solve the font size for `cols` columns across `viewportWidth` px. An optional
- * manual override (user's +/- in settings) wins but is still clamped and still
- * reports overflow so the pan fallback stays correct.
+ * Solve the font size for `cols` columns across `viewportWidth` px: the
+ * fitting size (MIN_FONT..MAX_FONT, the auto-fit range it always had) times
+ * the user's scale, rounded and clamped to [6, 32]. Overflow still reports so the pan fallback stays right.
  */
-export function solveFont(cols: number, viewportWidth: number, override?: number | null): FontSolve {
+export function solveFont(cols: number, viewportWidth: number, scale = 1): FontSolve {
   const ratio = advanceRatio()
   const cellsWidth = Math.max(1, cols) * ratio
   const ideal = Math.floor(viewportWidth / cellsWidth)
-  const base = override != null ? override : ideal
-  const fontSize = Math.max(MIN_FONT, Math.min(MAX_FONT, base))
+  const base = Math.max(MIN_FONT, Math.min(MAX_FONT, ideal))
+  const s = Number.isFinite(scale) && scale > 0 ? scale : 1
+  const fontSize = Math.max(SCALED_MIN_FONT, Math.min(SCALED_MAX_FONT, Math.round(base * s)))
   const overflow = fontSize * cellsWidth > viewportWidth + 0.5
   return { fontSize, overflow }
 }
