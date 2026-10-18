@@ -37,6 +37,11 @@ export const CH = {
   PTY_KILL_PANES: 'pty:killPanes', // invoke (paneIds: string[]) -> number (killed)
   PTY_RECONCILE: 'pty:reconcile', // invoke (livePaneIds: string[]) -> number (killed)
   PTY_SET_ENGINE: 'pty:setEngine', // send (TerminalEngineSettings; E6-FR-06)
+  // Saved scrollback (E6-FR-11/12): the seed itself arrives in PtySpawnRes.
+  PTY_SCROLLBACK_LOAD: 'pty:scrollbackLoad', // invoke (paneId) -> string | null (sanitized saved text, not consumed)
+  SCROLLBACK_CLEAR: 'scrollback:clear', // invoke (paneId, opts?: { trash?: boolean }) -> void
+  SCROLLBACK_CLEAR_ALL: 'scrollback:clearAll', // invoke -> void
+  SCROLLBACK_STATS: 'scrollback:stats', // invoke -> ScrollbackStats
 
   // PTY events (main -> renderer)
   PTY_DATA: 'pty:data', // { ptyId, data }

@@ -25,6 +25,7 @@ import type {
   RenderErrorReport,
   RendererDiagnostics,
   SnApi,
+  ScrollbackStats,
   TerminalEngineSettings,
   UpdateInfo,
   UpdateProgress,
@@ -87,6 +88,12 @@ const api: SnApi = {
     killPanes: (paneIds: string[]) => ipcRenderer.invoke(CH.PTY_KILL_PANES, paneIds) as Promise<number>,
     reconcile: (livePaneIds: string[]) => ipcRenderer.invoke(CH.PTY_RECONCILE, livePaneIds) as Promise<number>,
     setEngine: (settings: TerminalEngineSettings) => ipcRenderer.send(CH.PTY_SET_ENGINE, settings),
+  },
+  scrollback: {
+    clear: (paneId: string, opts?: { trash?: boolean }) => ipcRenderer.invoke(CH.SCROLLBACK_CLEAR, paneId, opts) as Promise<void>,
+    clearAll: () => ipcRenderer.invoke(CH.SCROLLBACK_CLEAR_ALL) as Promise<void>,
+    stats: () => ipcRenderer.invoke(CH.SCROLLBACK_STATS) as Promise<ScrollbackStats>,
+    load: (paneId: string) => ipcRenderer.invoke(CH.PTY_SCROLLBACK_LOAD, paneId) as Promise<string | null>,
   },
   dialog: {
     openDirectory: () => ipcRenderer.invoke(CH.DIALOG_OPEN_DIR) as Promise<string | null>,

@@ -330,11 +330,19 @@ export interface PtySpawnReq {
   setup?: SetupStep[]
   cols: number
   rows: number
+  /**
+   * E6-FR-11: start from the pane's saved scrollback. Main honors it only on
+   * the pane's first spawn in this app session; the renderer leaves it out
+   * when the pane resumes a conversation (E6-FR-13).
+   */
+  restoreScrollback?: boolean
 }
 /** Family of the shell a pty runs, derived from its executable name (E6). */
 export type ShellKind = 'powershell' | 'cmd' | 'posix' | 'other'
 export interface PtySpawnRes {
   ptyId: string
+  /** Sanitized saved history + the "restarted - history from ..." separator, written before bind (E6-FR-11). */
+  seed?: string
   shellKind: ShellKind
   /** E6-FR-32: the configured shell was not found, `used` was launched instead. */
   warning?: { kind: 'shellNotFound'; requested: string; used: string }
@@ -381,7 +389,12 @@ export interface PtyFlowReq {
  * resuming the chat" goes through the same path that keeps the scrollback.
  * `fallbackDefaultShell` ignores `shell` (retry after a failed respawn).
  */
-export type PtyRestartReq = PtySpawnReq & { fallbackDefaultShell?: boolean }
+export type PtyRestartReq = Omit<PtySpawnReq, 'restoreScrollback'> & { fallbackDefaultShell?: boolean }
+/** Saved scrollback on disk (E6-FR-12): live files only, the trash is not counted. */
+export interface ScrollbackStats {
+  files: number
+  bytes: number
+}
 export interface PtyRestartRes {
   ptyId: string
   /** Soft reset of modes + the localized "--- restarted 14:32 ---" separator; written as is. */
@@ -525,6 +538,16 @@ export interface SnApi {
     reconcile(livePaneIds: string[]): Promise<number>
     /** Push the terminal engine settings to main's headless mirrors (E6-FR-06). */
     setEngine(settings: TerminalEngineSettings): void
+  }
+  /** Saved scrollback between restarts (E6-FR-12). */
+  scrollback: {
+    /** Delete a pane's saved history now, or move it to the trash (`trash: true`, pane closed). */
+    clear(paneId: string, opts?: { trash?: boolean }): Promise<void>
+    /** Delete every saved history (the global button, turning persistence off). */
+    clearAll(): Promise<void>
+    stats(): Promise<ScrollbackStats>
+    /** The sanitized saved text of a pane, without consuming its seed; null when none. */
+    load(paneId: string): Promise<string | null>
   }
   dialog: {
     /** Opens a native folder picker; resolves to the chosen path or null. */
