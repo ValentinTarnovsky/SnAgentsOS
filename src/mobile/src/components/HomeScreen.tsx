@@ -159,7 +159,7 @@ export function HomeScreen(): ReactNode {
             snapshot && <NoWorkspaces />
           )}
         </div>
-        <ToastStack bottom={FAB_CLEARANCE_PX} />
+        <ToastStack bottom={FAB_CLEARANCE_PX} notices />
       </main>
 
       {snapshot && snapshot.workspaces.length > 0 && <Fab onClick={() => setNewFor({ workspaceId: null })} />}

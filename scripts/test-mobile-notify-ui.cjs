@@ -103,6 +103,8 @@ window.runMain = async () => {
 
  // --- Settings > Alerts (E2-FR-44) ---
  history.back(); await wait(420);
+ const homeStack = $$('[data-toast-stack]').find(el => !el.closest('[data-terminal-layer]'));
+ check(homeStack && store.getState().toasts.some(x => x.paneId) && !homeStack.querySelector('[data-toast-go]'), 'back on Home, a state toast raised in the terminal is not shown there');
  click($('[data-home-settings]'));
  await wait(420);
  const alerts = $('[data-settings-section=alerts]');

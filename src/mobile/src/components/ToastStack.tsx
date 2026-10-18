@@ -4,7 +4,8 @@
  * lasts TOAST_MS; a console state toast lasts 6s (action, error) or 4s (done)
  * and carries [Go], which opens that console like a row tap. Home and the
  * terminal both mount one inside their content area; only the screen on top
- * is visible.
+ * is visible. Home passes `notices`: a console state toast raised in the
+ * terminal never shows there (E2-FR-43: no toast on Home).
  */
 import { useEffect, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -55,8 +56,9 @@ function ToastItem({ toast }: { toast: MobileToast }): ReactNode {
   )
 }
 
-export function ToastStack({ bottom = 12 }: { bottom?: number }): ReactNode {
-  const toasts = useRemoteStore((s) => s.toasts)
+export function ToastStack({ bottom = 12, notices = false }: { bottom?: number; notices?: boolean }): ReactNode {
+  const all = useRemoteStore((s) => s.toasts)
+  const toasts = notices ? all.filter((x) => !x.paneId) : all
   return (
     <div
       role="status"

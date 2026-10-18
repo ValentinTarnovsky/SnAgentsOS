@@ -2,6 +2,7 @@ import { BRAND } from '@shared/brand'
 import type { ConfigFile, NtfySettings, StatusHealth } from '@shared/types'
 import { isPrivateOrTailnet } from '../remote/network'
 import { describeNotice, type StatusNotice } from './events'
+import { mainT } from '../i18n'
 
 /**
  * The ntfy server base URL a publish goes to (E2-FR-40): https, or http only
@@ -78,7 +79,12 @@ export class NtfyNotifier {
   private abort: AbortController | null = null
   private lastSuccessAt: number | null = null
   private error: string | null = null
-  constructor(private fetcher: Fetcher = fetch, private delay: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))) {}
+  constructor(
+    private fetcher: Fetcher = fetch,
+    private delay: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms)),
+    /** The saved config, for the language of the test push (main/i18n.ts). */
+    private getConfig: () => ConfigFile | null = () => null,
+  ) {}
   get health(): NonNullable<StatusHealth['ntfy']> { return { lastSuccessAt: this.lastSuccessAt, error: this.error, queued: this.queue.length + Number(this.draining) } }
   /** The config the channel delivers with (the saved one, pushed by the renderer). */
   get config(): NtfySettings | null { return this.cfg ? { ...this.cfg } : null }
@@ -100,7 +106,7 @@ export class NtfyNotifier {
   async test(cfg: NtfySettings | null = this.cfg): Promise<{ ok: boolean; error?: string }> {
     if (!cfg) return { ok: false, error: 'ntfy is not configured' }
     try {
-      await this.enqueue(cfg, { title: BRAND.productName, message: 'Notification test / prueba de notificacion', urgent: false })
+      await this.enqueue(cfg, { title: BRAND.productName, message: mainT(this.getConfig(), 'status.push.test'), urgent: false })
       return { ok: true }
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'Delivery failed' } }
   }
