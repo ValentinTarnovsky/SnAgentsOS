@@ -12,6 +12,7 @@ import '@xterm/xterm/css/xterm.css'
 import { useAppStore } from '@/lib/store'
 import { buildXtermTheme } from '@/themes'
 import { registerPty, unregisterPty } from '@/lib/ptyRegistry'
+import { shouldKillLateSpawn } from '@/lib/ptyLifecycle'
 import { registerFocuser, setFocusedPane, unregisterFocuser } from '@/lib/focus'
 import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegistry'
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
@@ -268,9 +269,9 @@ export interface UseXtermOptions {
 
 /**
  * Mounts an xterm Terminal into `containerRef`, spawns a backing pty, and wires
- * the bidirectional data + resize streams. The pty is killed only on real
- * teardown (pane/workspace removal), NOT on theme/font/visibility changes,
- * so running sessions survive workspace switches.
+ * the bidirectional data + resize streams. Unmounting never kills the pty
+ * (E4-FR-36): an error boundary, a reload or a remount reattaches to it. Kills
+ * by removal belong to ptyLifecycle; a clean restart kills explicitly.
  */
 export function useXterm(
   containerRef: RefObject<HTMLDivElement | null>,
@@ -762,7 +763,8 @@ export function useXterm(
           fallbackDefaultShell: prev?.error ? true : undefined,
         })
         if (disposed) {
-          void window.snApi.pty.kill(res.ptyId)
+          // Unmounted mid-restart: the new pty is the pane's unless it is gone.
+          if (shouldKillLateSpawn(o.paneId, res.ptyId)) void window.snApi.pty.kill(res.ptyId)
           return
         }
         offData()
@@ -831,7 +833,9 @@ export function useXterm(
             if (!spawned) return
             const { ptyId, warning } = spawned
             if (disposed) {
-              void window.snApi.pty.kill(ptyId)
+              // Unmounted while spawning (E4-FR-36): keep the pty for the next
+              // mount's reattach unless its pane is gone or bound to another.
+              if (shouldKillLateSpawn(opts.paneId, ptyId)) void window.snApi.pty.kill(ptyId)
               return
             }
             // E6-FR-32: the configured shell is missing, main launched the default.
@@ -902,10 +906,10 @@ export function useXterm(
       input.dispose()
       keySub.dispose()
       titleSub.dispose()
+      // Never kill here (E4-FR-36): the pty outlives this terminal. Removal
+      // kills come from ptyLifecycle, a clean restart kills before remounting.
       offData()
       offExit()
-      const id = ptyIdRef.current
-      if (id) void window.snApi.pty.kill(id)
       unregisterPty(opts.paneId)
       unregisterFocuser(opts.paneId)
       unregisterPaster(opts.paneId, paster)

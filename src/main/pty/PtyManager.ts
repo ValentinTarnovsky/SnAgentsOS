@@ -500,6 +500,36 @@ export class PtyManager {
     }
   }
 
+  /**
+   * Kill the ptys of these panes by paneId (E4-FR-36): the renderer's
+   * registry can be empty after a reload, main's byPane never is. A pane that
+   * goes away also drops the output kept for its natural exit (E6-FR-20).
+   * Returns how many live ptys were killed; unknown panes are a no-op.
+   */
+  killPanes(paneIds: string[]): number {
+    let killed = 0
+    for (const paneId of paneIds) {
+      const ptyId = this.byPane.get(paneId)
+      if (ptyId && this.entries.has(ptyId)) {
+        this.kill(ptyId)
+        killed++
+      }
+      if (this.exited.delete(paneId)) this.onRunningChange?.()
+    }
+    return killed
+  }
+
+  /**
+   * After the renderer hydrates (E4-FR-36): kill every pty whose pane is no
+   * longer in the store (deleted while the UI was gone, or a config that lost
+   * it), and forget exit records of panes that no longer exist.
+   */
+  reconcile(livePaneIds: string[]): number {
+    const live = new Set(livePaneIds)
+    const gone = [...new Set([...this.byPane.keys(), ...this.exited.keys()])].filter((id) => !live.has(id))
+    return this.killPanes(gone)
+  }
+
   /** Mark which panes are in the visible workspace; others throttle output. */
   setActive(paneIds: string[]): void {
     const activeSet = new Set(paneIds)

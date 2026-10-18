@@ -36,4 +36,17 @@ export function registerPtyIpc(manager: PtyManager, restartLabel: () => string =
   ipcMain.on(CH.PTY_FLOW, (_e, req: PtyFlowReq) => manager.setFlow(req.ptyId, req.pause))
 
   ipcMain.handle(CH.PTY_KILL, (_e, ptyId: string) => manager.kill(ptyId))
+
+  // Explicit lifecycle (E4-FR-36): an unmount never kills, these do, by paneId.
+  ipcMain.handle(CH.PTY_KILL_PANES, (_e, paneIds: unknown): number => manager.killPanes(paneIdList(paneIds)))
+  ipcMain.handle(CH.PTY_RECONCILE, (_e, livePaneIds: unknown): number => {
+    // A malformed list must never read as "no panes" and kill everything.
+    if (!Array.isArray(livePaneIds)) return 0
+    return manager.reconcile(paneIdList(livePaneIds))
+  })
+}
+
+/** The string entries of an IPC paneId list (anything else is dropped). */
+function paneIdList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : []
 }

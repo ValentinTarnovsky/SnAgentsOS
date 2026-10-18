@@ -8,7 +8,7 @@ const root = path.resolve(__dirname, '..')
 let checks = 0
 function check(condition, label) { assert.ok(condition, label); checks++ }
 function load(file, overrides = {}) {
-  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws', 'node-pty'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
   const mod = { exports: {} }
   vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console, process, Buffer, URL, setTimeout, clearTimeout, ...overrides })
   return mod.exports
@@ -92,7 +92,7 @@ async function main() {
       export { getFocusedPane, getLastFocusedPaneForWorkspace, registerFocuser } from './focus'
       export { remoteNoticeText, initRemoteCommands } from './remoteCommands'
     `, {
-      window: { snApi: { config: { save() {} }, pty: { write() {} }, remote: { onCommand: cb => { commandCb = cb; return () => {} }, commandResult: res => results.push(res) } } },
+      window: { snApi: { config: { save() {} }, pty: { write() {}, killPanes: async ids => ids.length }, remote: { onCommand: cb => { commandCb = cb; return () => {} }, commandResult: res => results.push(res) } } },
       document: { hasFocus: () => true },
       requestAnimationFrame: fn => { raf.push(fn); return raf.length },
       cancelAnimationFrame() {},
@@ -198,7 +198,162 @@ async function main() {
     check(frames.filter(f => f.type === 'ctlAck').length === 2, 'every ctl is acknowledged')
   }
 
-  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices)`)
+  // --- PtyManager.killPanes / reconcile (E4-FR-36), fake node-pty -------------
+  {
+    const procs = []
+    const impl = (shell, args, opts) => {
+      const exitCbs = []
+      const proc = {
+        cols: opts.cols, rows: opts.rows, killed: false,
+        onData() {}, onExit: cb => exitCbs.push(cb), write() {}, resize() {}, pause() {}, resume() {},
+        kill: () => { proc.killed = true; exitCbs.forEach(cb => cb({ exitCode: 1 })) },
+        exit: code => exitCbs.forEach(cb => cb({ exitCode: code })),
+      }
+      procs.push(proc)
+      return proc
+    }
+    const { PtyManager } = load('src/main/pty/PtyManager.ts', {
+      require: id => id === 'node-pty' ? { spawn: impl } : id === 'electron' ? { app: { getPath: () => require('node:os').tmpdir() } } : require(id),
+      console: { ...console, warn() {} },
+      setInterval, clearInterval,
+    })
+    const sent = []
+    const pm = new PtyManager(() => ({ isDestroyed: () => false, send: (ch, p) => sent.push({ ch, p }) }))
+    let runningChanges = 0
+    pm.setRunningChangeListener(() => { runningChanges++ })
+    for (const id of ['a', 'b', 'c', 'd']) pm.spawn({ paneId: id, cols: 80, rows: 24 })
+    check(pm.count === 4, 'four ptys spawned')
+    check(pm.killPanes(['a', 'missing']) === 1 && pm.count === 3 && procs[0].killed, 'killPanes kills by paneId and counts only live ptys')
+    check(pm.reattach('a') === null, 'a killed pane has nothing to reattach (the next mount spawns)')
+    check(pm.killPanes(['a']) === 0, 'killPanes is idempotent')
+    const exitFrame = sent.find(s => s.ch === 'pty:exit')
+    check(exitFrame && exitFrame.p.natural === false, 'a killPanes kill is not a natural exit (no exit card)')
+    // d ends on its own: main keeps its output for phones until the pane goes away.
+    procs[3].exit(0)
+    check(pm.getExited('d') !== null, 'a natural exit keeps the pane output (E6-FR-20)')
+    runningChanges = 0
+    check(pm.reconcile(['b', 'zzz']) === 1 && pm.count === 1 && procs[2].killed && !procs[1].killed, 'reconcile kills every pty whose pane is not live')
+    check(pm.getExited('d') === null && runningChanges >= 2, 'reconcile forgets exit records of panes that no longer exist')
+    check(pm.reconcile(['b']) === 0 && pm.count === 1, 'reconcile with every pane live kills nothing')
+    procs[1].exit(0)
+    check(pm.getExited('b') !== null && pm.killPanes(['b']) === 0 && pm.getExited('b') === null, 'killPanes drops the exit record of a removed pane')
+    pm.killAll()
+
+    // The IPC: a malformed reconcile list never reads as "no panes".
+    const handlers = {}
+    const { registerPtyIpc } = load('src/main/ipc/registerPtyIpc.ts', {
+      require: id => id === 'electron' ? { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn }, on: (ch, fn) => { handlers[ch] = fn } } } : require(id),
+    })
+    const calls = []
+    registerPtyIpc({ killPanes: ids => { calls.push(['kill', ids]); return ids.length }, reconcile: ids => { calls.push(['rec', ids]); return 0 } })
+    check(handlers['pty:killPanes'](null, ['x', 7, 'y']) === 2 && calls[0][1].join() === 'x,y', 'pty:killPanes keeps only string ids')
+    check(handlers['pty:reconcile'](null, 'nope') === 0 && calls.length === 1, 'pty:reconcile ignores a non-array payload instead of killing everything')
+    handlers['pty:reconcile'](null, ['x'])
+    check(calls[1][0] === 'rec' && calls[1][1].join() === 'x', 'pty:reconcile forwards the live list')
+  }
+
+  // --- ptyLifecycle: remove, delete, import, restart (E4-FR-36) ----------------
+  {
+    const killCalls = []
+    const reconcileCalls = []
+    let epochAtKill = null
+    const r = loadRenderer(`
+      export { useAppStore } from './store'
+      export { initPtyLifecycle, reconcilePtys, shouldKillLateSpawn, allPaneIds, removedPaneIds } from './ptyLifecycle'
+      export { registerPty, getPtyId } from './ptyRegistry'
+      export { registerRestarter } from './restartRegistry'
+    `, {
+      window: { snApi: { config: { save() {} }, pty: {
+        killPanes: async ids => { killCalls.push(ids.slice()); return ids.length },
+        reconcile: async ids => { reconcileCalls.push(ids.slice()); return 0 },
+      } } },
+    })
+    const S = r.useAppStore
+    const pane = id => ({ id, type: 'shell', title: id, icon: 'terminal' })
+    S.setState({
+      hydrated: true, activeWorkspaceId: 'w1',
+      workspaces: [
+        { id: 'w1', name: 'Uno', cwd: '', panes: [pane('p1'), pane('p2')], layout: { grid: 2, order: ['p1', 'p2'] } },
+        { id: 'w2', name: 'Dos', cwd: '', panes: [pane('q1'), pane('q2')], layout: { grid: 2, order: ['q1', 'q2'] } },
+        { id: 'w3', name: 'Tres', cwd: '', panes: [pane('t1')], layout: { grid: 1, order: ['t1'] } },
+      ],
+      mountedWorkspaces: { w1: 'full' },
+    })
+    check(r.removedPaneIds(new Set(['a', 'b', 'c']), new Set(['b'])).join() === 'a,c', 'removedPaneIds lists the panes that left')
+    const stop = r.initPtyLifecycle()
+    check(r.initPtyLifecycle()() === undefined, 'initPtyLifecycle is idempotent')
+    await r.reconcilePtys()
+    check(reconcileCalls.length === 1 && reconcileCalls[0].sort().join() === 'p1,p2,q1,q2,t1', 'reconcile sends every pane of every workspace (visited or not)')
+
+    S.getState().renamePane('w1', 'p1', 'renamed')
+    S.getState().movePane('w1', 'p2', 0)
+    check(killCalls.length === 0, 'renames and moves never kill')
+
+    S.getState().removePane('w1', 'p2')
+    check(killCalls.length === 1 && killCalls[0].join() === 'p2', 'removePane kills exactly the removed pane')
+
+    // A workspace never visited after a reload: the renderer registry is empty,
+    // the kill still goes by paneId to main.
+    check(r.getPtyId('q1') === undefined, 'unvisited workspace has no local pty binding')
+    killCalls.length = 0
+    S.getState().deleteWorkspace('w2')
+    const killed = new Set(killCalls.flat())
+    check(killed.has('q1') && killed.has('q2') && killed.size === 2, 'deleteWorkspace kills every pane of an unvisited workspace by paneId')
+
+    killCalls.length = 0
+    S.getState().importConfig({ workspaces: [
+      { id: 'w1', name: 'Uno', cwd: '', panes: [pane('p1')] },
+      { id: 'w9', name: 'Nueva', cwd: '', panes: [pane('n1')] },
+    ] })
+    check(killCalls.length === 1 && killCalls[0].join() === 't1', 'importConfig kills only the panes that disappear')
+
+    killCalls.length = 0
+    S.getState().mergeConfig({ workspaces: [{ id: 'm', name: 'M', cwd: '', panes: [pane('m1')] }] })
+    check(killCalls.length === 0, 'mergeConfig adds panes and kills nothing')
+
+    // Restart clean: the kill goes out before the epoch rises (the remount's
+    // reattach then finds nothing and spawns).
+    killCalls.length = 0
+    const epochBefore = S.getState().paneEpoch.p1 ?? 0
+    const unsubOrder = S.subscribe(s => { if ((s.paneEpoch.p1 ?? 0) !== epochBefore) epochAtKill = killCalls.length })
+    S.getState().restartPaneClean('p1')
+    unsubOrder()
+    check(killCalls.length === 1 && killCalls[0].join() === 'p1' && epochAtKill === 1, 'restartPaneClean kills before bumping paneEpoch')
+    check(S.getState().paneEpoch.p1 === epochBefore + 1, 'restartPaneClean remounts the console')
+
+    // restartPane with a mounted terminal goes in place (R21-08): no kill, no remount.
+    killCalls.length = 0
+    let inPlace = 0
+    r.registerRestarter('n1', () => { inPlace++ })
+    S.getState().restartPane('n1')
+    check(inPlace === 1 && killCalls.length === 0 && !S.getState().paneEpoch.n1, 'restartPane on a mounted console restarts in place without killing')
+    // ...and an unmounted one falls back to the clean path, which kills first.
+    S.getState().restartPane('p1')
+    check(killCalls.length === 1 && killCalls[0].join() === 'p1', 'restartPane on an unmounted console kills before the remount')
+
+    // A spawn resolving after its terminal unmounted.
+    r.registerPty('p1', 'pty-new')
+    check(r.shouldKillLateSpawn('p1', 'pty-new') === false, 'a late spawn that is the pane binding survives')
+    check(r.shouldKillLateSpawn('p1', 'pty-old') === true, 'a late spawn superseded by another pty is killed')
+    check(r.shouldKillLateSpawn('n1', 'pty-x') === false, 'a late spawn of a live, unbound pane survives for the next mount')
+    check(r.shouldKillLateSpawn('gone', 'pty-y') === true, 'a late spawn of a removed pane is killed')
+
+    stop()
+    killCalls.length = 0
+    S.getState().removePane('w1', 'p1')
+    check(killCalls.length === 0, 'a stopped lifecycle no longer kills')
+  }
+
+  // --- useXterm: the unmount never kills (E4-FR-36) -----------------------------
+  {
+    const fs = require('node:fs')
+    const src = fs.readFileSync(path.join(root, 'src/renderer/components/terminal/useXterm.ts'), 'utf8')
+    const cleanup = src.slice(src.indexOf('    return () => {\n      disposed = true'), src.indexOf('startedRef.current = false'))
+    check(cleanup.length > 0 && !/pty\.kill\(/.test(cleanup), 'the useXterm cleanup has no pty.kill')
+    check((src.match(/shouldKillLateSpawn\(/g) || []).length === 2, 'both late-resolving launches (spawn, restart) use shouldKillLateSpawn')
+  }
+
+  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices, pty lifecycle)`)
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })
