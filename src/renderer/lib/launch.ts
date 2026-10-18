@@ -6,6 +6,8 @@ export interface ResolvedLaunch {
   initialCommand?: string
   /** Pre-launch sequence (e.g. SSH) the pty runs before initialCommand. */
   setup?: SetupStep[]
+  /** Set by prepareAgentLaunch when this spawn resumes a chat: no saved scrollback then (E6-FR-13). */
+  resumed?: boolean
 }
 
 /**

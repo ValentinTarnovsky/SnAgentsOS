@@ -114,7 +114,7 @@ export async function prepareAgentLaunch(paneId: string, base: ResolvedLaunch): 
           }, RESUME_WATCH_MS),
         )
       }
-      return { ...base, cwd: session.spawnCwd || session.cwd || base.cwd, initialCommand: command }
+      return { ...base, cwd: session.spawnCwd || session.cwd || base.cwd, initialCommand: command, resumed: true }
     }
   }
   // The chat that would have come back is gone: say so (explicit resume, or

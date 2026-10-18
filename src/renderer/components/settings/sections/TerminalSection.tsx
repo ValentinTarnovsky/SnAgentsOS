@@ -1,13 +1,46 @@
+import { useCallback, useEffect, useState } from 'react'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { SettingRow, ToggleRow, inputCls } from '../ui'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { cn } from '@/lib/cn'
+import type { ScrollbackStats } from '@shared/ipc-contract'
 import type { TerminalSnapshotMode } from '@shared/types'
+import { PERSIST_LINES_MAX, PERSIST_LINES_MIN } from '@shared/terminalEngine'
+
+/** Megabytes with one decimal, never "0.0" for a non-empty folder. */
+function formatMb(bytes: number): string {
+  if (bytes <= 0) return '0'
+  return Math.max(0.1, Math.round((bytes / (1024 * 1024)) * 10) / 10).toFixed(1)
+}
 
 export function TerminalSection() {
   const t = useT()
   const settings = useAppStore((s) => s.settings)
   const updateSettings = useAppStore((s) => s.updateSettings)
+  // Saved scrollback (E6-FR-08/12): 'off' snapshots turn persistence off as a whole.
+  const snapshotOff = settings.terminalSnapshotMode === 'off'
+  const [stats, setStats] = useState<ScrollbackStats | null>(null)
+  const [confirm, setConfirm] = useState<'clearAll' | 'turnOff' | null>(null)
+  const refreshStats = useCallback(() => {
+    const api = window.snApi.scrollback
+    if (!api) return
+    Promise.resolve()
+      .then(() => api.stats())
+      .then(
+        (r) => setStats(r && typeof r.files === 'number' && typeof r.bytes === 'number' ? { files: r.files, bytes: r.bytes } : null),
+        () => setStats(null),
+      )
+  }, [])
+  useEffect(refreshStats, [refreshStats])
+  const clearAll = (): void => {
+    const api = window.snApi.scrollback
+    if (!api) return
+    void Promise.resolve()
+      .then(() => api.clearAll())
+      .catch(() => undefined)
+      .finally(refreshStats)
+  }
 
   return (
     <div className="space-y-6">
@@ -128,6 +161,51 @@ export function TerminalSection() {
         description={t('settings.agentEndChipHint')}
       />
 
+      <section className="space-y-3 border-t border-border pt-5" aria-labelledby="terminal-persist" data-persist-scrollback>
+        <h4 id="terminal-persist" className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
+          {t('settings.persistGroup')}
+        </h4>
+        <ToggleRow
+          checked={settings.persistScrollback && !snapshotOff}
+          disabled={snapshotOff}
+          onChange={(v) => {
+            // Turning it off deletes what is saved, so it asks first.
+            if (v) updateSettings({ persistScrollback: true })
+            else setConfirm('turnOff')
+          }}
+          searchId="terminal.persistScrollback"
+          title={t('settings.persistScrollback')}
+          description={snapshotOff ? t('settings.persistScrollbackOff') : t('settings.persistScrollbackHint')}
+        />
+        <SettingRow searchId="terminal.persistLines" title={t('settings.persistLines')}>
+          <input
+            type="number"
+            min={PERSIST_LINES_MIN}
+            max={PERSIST_LINES_MAX}
+            step={100}
+            disabled={!settings.persistScrollback || snapshotOff}
+            className={cn(inputCls, 'max-w-[10rem]', (!settings.persistScrollback || snapshotOff) && 'pointer-events-none opacity-50')}
+            value={settings.persistScrollbackLines}
+            onChange={(e) => {
+              const n = Math.round(Number(e.target.value))
+              if (!Number.isFinite(n) || n <= 0) return
+              updateSettings({ persistScrollbackLines: Math.min(PERSIST_LINES_MAX, Math.max(PERSIST_LINES_MIN, n)) })
+            }}
+          />
+        </SettingRow>
+        <div>
+          <button
+            type="button"
+            data-clear-scrollback
+            disabled={!stats || stats.files === 0}
+            onClick={() => setConfirm('clearAll')}
+            className="max-w-full rounded-btn border border-border px-3 py-1.5 text-left text-sm text-text-primary transition-colors hover:border-red-400/50 hover:text-red-400 disabled:pointer-events-none disabled:opacity-50"
+          >
+            {t('settings.clearScrollbackAll', { count: stats?.files ?? 0, mb: formatMb(stats?.bytes ?? 0) })}
+          </button>
+        </div>
+      </section>
+
       <section className="space-y-3 border-t border-border pt-5" aria-labelledby="terminal-advanced">
         <h4 id="terminal-advanced" className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
           {t('settings.terminalAdvanced')}
@@ -144,6 +222,23 @@ export function TerminalSection() {
           </select>
         </SettingRow>
       </section>
+
+      {confirm && (
+        <ConfirmDialog
+          open
+          title={confirm === 'turnOff' ? t('settings.persistOffTitle') : t('settings.clearScrollbackTitle')}
+          message={confirm === 'turnOff' ? t('settings.persistOffMessage') : t('settings.clearScrollbackMessage')}
+          confirmLabel={confirm === 'turnOff' ? t('settings.persistOffConfirm') : t('settings.clearScrollbackConfirm')}
+          cancelLabel={t('common.cancel')}
+          danger
+          onConfirm={() => {
+            if (confirm === 'turnOff') updateSettings({ persistScrollback: false })
+            clearAll()
+            setConfirm(null)
+          }}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
     </div>
   )
 }
