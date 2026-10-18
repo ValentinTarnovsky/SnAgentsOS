@@ -116,6 +116,12 @@ app.whenReady().then(async()=>{
  eq([st.popover,st.panes,st.pending],[false,3,1],'arrows + Enter run the agent: a new console with its prompt pending');
  ok((await js('smoke.toasts()')).some(t=>t.includes('Abriendo Claude Code: Revisar')),'agent feedback toast',await js('smoke.toasts()'));
 
+ // The shortcut toggles it closed and the console gets its focus back.
+ await js("smoke.focus('p1')");await frame();await openQ();
+ ok((await js('smoke.state()')).popover,'Ctrl+Shift+Q opens it again');
+ await js("smoke.focused.length=0");await openQ();await wait(80);
+ eq([(await js('smoke.state()')).popover,await js('smoke.focused'),await js('smoke.active()')],[false,['p1'],'term-p1'],'Ctrl+Shift+Q closes it and gives the focus back to the console');
+
  // Never over a modal.
  await js("smoke.openSettings('quick')");await frame();
  await openQ();

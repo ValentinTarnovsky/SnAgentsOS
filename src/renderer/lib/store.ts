@@ -634,11 +634,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       delete paneExit[paneId]
       const agentEnded = { ...s.agentEnded }
       delete agentEnded[paneId]
+      // A prompt that never reached its spawn goes with the pane: restorePane
+      // brings the same id back, which must not deliver it later (E8-FR-02).
+      let pendingPrompts = s.pendingPrompts
+      if (paneId in pendingPrompts) {
+        pendingPrompts = { ...pendingPrompts }
+        delete pendingPrompts[paneId]
+      }
       return {
         maximized,
         minimized,
         paneExit,
         agentEnded,
+        pendingPrompts,
         workspaces: s.workspaces.map((w) => {
           if (w.id !== workspaceId) return w
           const panes = w.panes.filter((p) => p.id !== paneId)
