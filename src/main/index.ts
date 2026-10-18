@@ -1,3 +1,5 @@
+// Must stay the first import: isolates the dev userData before any path is read (E0-FR-26).
+import './devUserData'
 import { readFileSync, writeFileSync } from 'fs'
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
@@ -25,6 +27,7 @@ import { DiscordNotifier } from './status/DiscordNotifier'
 import { join } from 'path'
 import { ensureTray, destroyTray } from './tray'
 import { mainT } from './i18n'
+import { runLegacyMigrationAtBoot, scheduleLegacyCleanup } from './migration/runLegacyMigration'
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 
@@ -261,6 +264,13 @@ async function bootstrap(): Promise<void> {
   if (process.platform === 'win32' && app.isPackaged) {
     app.setAppUserModelId(BRAND.appId)
   }
+  // 1.x data moves in before anything reads config.json or remote-devices.json,
+  // and before a window exists (its store persists on a debounce). Only the
+  // FR-09 dialog's [Quit] stops the start; a failed migration never does.
+  if ((await runLegacyMigrationAtBoot()) === 'quit') {
+    quitApp()
+    return
+  }
   // No native menu on Windows/Linux: it's a frameless app with a custom
   // in-renderer title bar, so the default menu is invisible anyway, and its
   // accelerators are footguns in a terminal app. CmdOrCtrl+R (Reload) would
@@ -269,6 +279,7 @@ async function bootstrap(): Promise<void> {
   // reach the shell / our remappable redraw action. macOS keeps its menu (its
   // accelerators use Cmd, so they don't collide with the terminal's Ctrl keys).
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+  remoteManager.loadDevices()
   registerCsp()
   registerAppIpc()
   registerConfigIpc()
@@ -311,6 +322,8 @@ async function bootstrap(): Promise<void> {
   const startupCfg = configStore.load()
   await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? false)
   openMainWindow()
+  // Deletes what 1.x left behind, only after a committed migration, in the background.
+  if (mainWindow) scheduleLegacyCleanup(mainWindow)
   if (startupCfg?.settings) {
     applyGlobalHotkey(startupCfg.settings.globalHotkeyEnabled, startupCfg.settings.globalHotkey)
   }

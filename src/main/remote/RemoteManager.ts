@@ -86,6 +86,11 @@ export class RemoteManager {
 
   // --- Config lifecycle -----------------------------------------------------
 
+  /** Loads paired devices; bootstrap() calls it right after the legacy migration. */
+  loadDevices(): void {
+    this.registry.load()
+  }
+
   /** Diff the desired config against the live server; start/stop/restart. */
   applyConfig(cfg: RemoteSettings): void {
     const port = this.clampPort(cfg.port)
