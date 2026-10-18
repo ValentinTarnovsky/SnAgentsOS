@@ -73,6 +73,7 @@ function world() {
   const pty = {
     addSink() {}, removeSink() {}, setRunningChangeListener() {}, setForcedFast() {},
     runningPaneIds: () => ['p1', 'p2'],
+    exitedPaneCodes: () => new Map([['p3', 3]]),
     getReplay: paneId => ({ ptyId: 'pty-' + paneId, replay: 'R:' + paneId, cols: 80, rows: 24 }),
     ptyIdForPane: paneId => 'pty-' + paneId,
     write: (_id, data) => writes.push(data),
@@ -157,6 +158,7 @@ async function testOverlay() {
   check(p.p2.status.state === 'action' && p.p2.status.precise === false, 'authOk carries precise:false for approximate panes')
   check(!p.p3.status, 'a stale renderer status is replaced by main (no status = none)')
   check(p.p1.running === true && p.p3.running === false, 'running stays overlaid from the pty table')
+  check(p.p3.exitCode === 3 && p.p1.exitCode === undefined, 'exitCode (E6-FR-38) is overlaid next to status for exited panes only')
   check(!JSON.stringify(viaPair.state).includes('sessionId') && !JSON.stringify(viaPair.state).includes('cwd'), 'authOk never carries sessionId or cwd')
   const ws2 = reconnect(w, deviceId, secret)
   p = panes(ws2.of('authOk')[0].state)
