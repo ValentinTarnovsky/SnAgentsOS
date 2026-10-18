@@ -9,8 +9,8 @@ const path = require('node:path')
 const root = path.resolve(__dirname, '..')
 let checks = 0
 function check(condition, label) { assert.ok(condition, label); checks++ }
-function load(file, overrides = {}) {
-  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+function load(file, overrides = {}, sharedDir = path.join(root, 'src/shared')) {
+  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws'], alias: { '@shared': sharedDir } }).outputFiles[0].text
   const mod = { exports: {} }
   vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console, process, Buffer, URL, fetch, Response, AbortController, setTimeout, clearTimeout, ...overrides })
   return mod.exports
@@ -199,9 +199,22 @@ async function updaterChecks(BRAND, en, es) {
   const release = names => ({ tag_name: `v${version}`, body: '', html_url: `https://github.com/${BRAND.repo}/releases/tag/v${version}`, assets: names.map(asset) })
   const full = distributables.flatMap(n => [n, `${n}.sha256`])
   check(full.length === 16, 'v2.0.0 fixture has the 16 release assets')
+  {
+    // The fixture follows electron-builder.yml: setup and portable come from its
+    // artifactName templates, dmg / zip / AppImage keep the builder defaults and
+    // the deb is named after package.json "name" (BRAND.packageName).
+    const yml = read('electron-builder.yml')
+    const templates = [...yml.matchAll(/^\s+artifactName:\s*(\S+)\s*$/gm)].map(m => m[1])
+    const rendered = templates.map(t => t.replace(/\$\{productName\}/g, BRAND.productName).replace(/\$\{version\}/g, version).replace(/\$\{ext\}/g, 'exe'))
+    check(templates.length === 2 && rendered.includes('SnAgentsOS-2.0.0-setup.exe') && rendered.includes('SnAgentsOS-2.0.0-portable.exe'), `electron-builder artifactName renders the fixture names: ${rendered.join(', ')}`)
+    check(distributables.includes(`${BRAND.packageName}_${version}_amd64.deb`), 'deb name follows the package name')
+  }
 
-  function loadUpdater({ platform, arch = 'x64', env = {}, rel = release(full), sidecar = () => `${payloadSha}  file\n` }) {
-    const log = { requests: [], downloads: [], spawns: [], opened: [] }
+  // routes(url) may answer a net request with { redirect } or { status, body };
+  // anything it leaves undefined falls through to the release JSON, the sidecar
+  // or a 404. downloadRedirects maps a download URL to the CDN hop GitHub sends.
+  function loadUpdater({ platform, arch = 'x64', env = {}, rel = release(full), sidecar = () => `${payloadSha}  file\n`, routes = () => undefined, downloadRedirects = {}, appVersion = '1.99.0', sharedDir }) {
+    const log = { requests: [], followed: [], aborted: 0, downloads: [], spawns: [], opened: [], errors: [] }
     const respond = (req, status, body) => setImmediate(() => {
       const res = new EventEmitter(); res.statusCode = status
       req.emit('response', res)
@@ -211,14 +224,23 @@ async function updaterChecks(BRAND, en, es) {
       request(opts) {
         const req = new EventEmitter()
         const headers = {}
+        let current = opts.url
+        let pending = null
         req.setHeader = (k, v) => { headers[k] = v }
-        req.followRedirect = () => {}; req.abort = () => {}
-        req.end = () => {
-          log.requests.push({ url: opts.url, redirect: opts.redirect, headers })
-          if (opts.url === latestUrl) respond(req, 200, JSON.stringify(rel))
-          else if (opts.url.endsWith('.sha256')) respond(req, 200, sidecar(opts.url))
+        const dispatch = () => {
+          log.requests.push({ url: current, redirect: opts.redirect, headers })
+          const route = routes(current)
+          if (route?.redirect) {
+            pending = route.redirect
+            setImmediate(() => req.emit('redirect', route.status ?? 301, 'GET', route.redirect))
+          } else if (route) respond(req, route.status, route.body)
+          else if (current === latestUrl) respond(req, 200, JSON.stringify(rel))
+          else if (current.endsWith('.sha256')) respond(req, 200, sidecar(current))
           else respond(req, 404, '')
         }
+        req.followRedirect = () => { log.followed.push(pending); current = pending; dispatch() }
+        req.abort = () => { log.aborted++ }
+        req.end = dispatch
         return req
       },
     }
@@ -226,12 +248,18 @@ async function updaterChecks(BRAND, en, es) {
       get(url, opts, cb) {
         log.downloads.push({ url, headers: opts.headers })
         const req = new EventEmitter(); req.setTimeout = () => req; req.destroy = () => {}
-        setImmediate(() => { const res = Readable.from([payload]); res.statusCode = 200; res.headers = {}; cb(res) })
+        const location = downloadRedirects[url]
+        setImmediate(() => {
+          const res = Readable.from(location ? [] : [payload])
+          res.statusCode = location ? 302 : 200
+          res.headers = location ? { location } : {}
+          cb(res)
+        })
         return req
       },
     }
     const electron = {
-      app: { getVersion: () => '1.99.0', getPath: () => tmp },
+      app: { getVersion: () => appVersion, getPath: () => tmp },
       net,
       shell: { openPath: async f => { log.opened.push(f); return '' }, showItemInFolder: () => {} },
     }
@@ -240,7 +268,8 @@ async function updaterChecks(BRAND, en, es) {
     const mod = load('src/main/updater.ts', {
       require: id => stubs[id] ?? require(id),
       process: { ...process, platform, arch, env, argv: [process.execPath] },
-    })
+      console: { ...console, error: (...args) => log.errors.push(args.join(' ')) },
+    }, sharedDir)
     return { mod, log }
   }
   const tmpEntries = () => fs.readdirSync(tmp)
@@ -325,6 +354,79 @@ async function updaterChecks(BRAND, en, es) {
       check(/SHA-256 verification/.test(error?.message ?? ''), 'mismatched sidecar rejects')
       check(log.spawns.length === 0 && log.opened.length === 0, 'mismatched sidecar runs nothing')
       check(log.downloads.length === 1 && tmpEntries().length === before, 'mismatched download and its folder removed')
+    }
+
+    // FR-36 counterpart of the FR-33 swap: the AppImage target is read at apply
+    // time too, so a rename (and process.env.APPIMAGE rewrite) before the update
+    // is honored.
+    {
+      const env = { APPIMAGE: path.join(tmp, 'Old.AppImage') }
+      const { mod, log } = loadUpdater({ platform: 'linux', env })
+      await mod.checkForUpdate()
+      env.APPIMAGE = path.join(tmp, 'SnAgentsOS.AppImage')
+      const result = await mod.downloadAndInstall(() => {})
+      const [spawn] = log.spawns
+      check(result.relaunching === true && log.spawns.length === 1 && spawn.command === '/bin/bash', 'AppImage swap helper spawned')
+      check(spawn.options.env.DST === env.APPIMAGE, `AppImage swap writes over the current APPIMAGE: ${spawn.options.env.DST}`)
+      check(path.basename(path.dirname(spawn.args[0])).startsWith('snagentsos-swap-'), 'AppImage swap script under snagentsos-swap-')
+    }
+
+    // Redirects on the release query: an allowlisted 301 is followed, anything
+    // else is refused before a single byte of it is read.
+    {
+      const alias = 'https://api.github.com/repositories/987654321/releases/latest'
+      const { mod, log } = loadUpdater({ platform: 'win32', routes: url => url === latestUrl ? { redirect: alias } : url === alias ? { status: 200, body: JSON.stringify(release(full)) } : undefined })
+      const info = await mod.checkForUpdate()
+      check(info.available && info.installKind === 'win-installer' && log.followed.join() === alias, 'allowlisted 301 on the release query is followed')
+      const evil = loadUpdater({ platform: 'win32', routes: url => url === latestUrl ? { redirect: 'https://evil.example.com/releases/latest' } : undefined })
+      const refused = await evil.mod.checkForUpdate()
+      check(!refused.available && /untrusted host/.test(refused.error ?? '') && evil.log.followed.length === 0 && evil.log.aborted === 1 && evil.log.errors.length === 1,`off-list redirect refused: ${refused.error}`)
+      const plain = loadUpdater({ platform: 'win32', routes: url => url === latestUrl ? { redirect: 'http://api.github.com/x' } : undefined })
+      check(!(await plain.mod.checkForUpdate()).available && plain.log.followed.length === 0, 'non-https redirect refused')
+    }
+
+    // An installed 1.14.x after the repo rename (E0-FR-16, W0). updater.ts is
+    // the 1.14.1 code except for the BRAND constants and FR-25, so it is loaded
+    // with a 1.x BRAND: it queries the old repo, follows GitHub's 301 to the
+    // repository id, picks the SnAgentsOS assets by pattern and verifies the
+    // sidecar across the CDN redirects before running the setup.
+    {
+      const { LEGACY_BRAND } = load('src/shared/brand.ts')
+      const legacyShared = fs.mkdtempSync(path.join(os.tmpdir(), 'snaos-r2006-shared-'))
+      try {
+        fs.cpSync(path.join(root, 'src/shared'), legacyShared, { recursive: true })
+        const legacyBrand = { ...BRAND, productName: LEGACY_BRAND.productName, repo: `ValentinTarnovsky/${LEGACY_BRAND.productName}`, tempPrefix: LEGACY_BRAND.tempPrefix }
+        fs.writeFileSync(path.join(legacyShared, 'brand.ts'), `export const BRAND = ${JSON.stringify(legacyBrand)} as const\n`)
+        const oldLatest = `https://api.github.com/repos/${legacyBrand.repo}/releases/latest`
+        const alias = 'https://api.github.com/repositories/987654321/releases/latest'
+        const cdn = name => `https://release-assets.githubusercontent.com/github-production-release-asset/987654321/${name}`
+        const setup = 'SnAgentsOS-2.0.0-setup.exe'
+        const routes = url => {
+          if (url === oldLatest) return { redirect: alias }
+          if (url === alias) return { status: 200, body: JSON.stringify(release(full)) }
+          if (url === base + setup + '.sha256') return { status: 302, redirect: cdn(setup + '.sha256') }
+          if (url === cdn(setup + '.sha256')) return { status: 200, body: `${payloadSha}  ${setup}\n` }
+          if (url === latestUrl) return { status: 404, body: '' }
+          return undefined
+        }
+        for (const c of cases) {
+          const { pickAsset } = loadUpdater({ ...c, sharedDir: legacyShared }).mod
+          const m = pickAsset(full.map(asset))
+          check(m && m.asset.name === c.want && m.kind === c.kind && m.sha256Url === base + c.want + '.sha256', `1.14.x pickAsset ${c.label}: ${m?.asset.name}`)
+        }
+        const { mod, log } = loadUpdater({ platform: 'win32', appVersion: '1.14.1', routes, downloadRedirects: { [base + setup]: cdn(setup) }, sharedDir: legacyShared })
+        const info = await mod.checkForUpdate()
+        check(log.requests[0].url === oldLatest && log.followed[0] === alias, '1.14.x queries the old repo and follows the 301')
+        check(info.available && info.installable && info.installKind === 'win-installer' && info.latestVersion === version, `1.14.x sees 2.0.0 as installable: ${info.error ?? ''}`)
+        const result = await mod.downloadAndInstall(() => {})
+        check(log.followed.includes(cdn(setup + '.sha256')), '1.14.x follows the sidecar to the asset CDN')
+        check(log.downloads.map(d => d.url).join() === [base + setup, cdn(setup)].join(), '1.14.x follows the download to the asset CDN')
+        const [spawn] = log.spawns
+        check(result.relaunching === false && log.spawns.length === 1 && path.basename(spawn.command) === setup, '1.14.x runs the verified SnAgentsOS setup')
+        check(fs.readFileSync(spawn.command).equals(payload), '1.14.x setup bytes match the sidecar')
+      } finally {
+        fs.rmSync(legacyShared, { recursive: true, force: true })
+      }
     }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
