@@ -168,10 +168,77 @@ async function main() {
   const builderYml = read('electron-builder.yml')
   const builder = require('js-yaml').load(builderYml)
   check(builder.appId === BRAND.appId && builder.productName === BRAND.productName, 'electron-builder appId and productName')
+  check(builder.nsis.guid === LEGACY_BRAND.nsisGuid, 'nsis.guid keeps the 1.x GUID (single Apps entry, old uninstaller runs)')
+  check(builder.nsis.include === 'build/installer.nsh' && builder.directories.buildResources === 'build', 'nsis includes build/installer.nsh')
   check(builder.nsis.oneClick === false && builder.nsis.perMachine === false && builder.nsis.allowToChangeInstallationDirectory === true, 'assisted per-user installer as in 1.x')
   check(builder.portable.unpackDirName === BRAND.productName, 'portable unpacks to %TEMP%\\SnAgentsOS')
   check(builder.nsis.artifactName === '${productName}-${version}-setup.${ext}' && builder.portable.artifactName === '${productName}-${version}-portable.${ext}', 'setup and portable artifact names')
   check(!LEGACY_RE.test(builderYml), 'electron-builder.yml has no legacy name (comments included)')
+  {
+    // The NSIS GUID 1.x got is the UUID v5 electron-builder derives from the legacy appId.
+    const { UUID } = require('builder-util-runtime')
+    check(UUID.v5(LEGACY_BRAND.appId, UUID.parse('50e065bc-3134-11e6-9bab-38c9862bdaf3')) === LEGACY_BRAND.nsisGuid, 'legacy GUID derives from the legacy appId')
+  }
+
+  // E0-FR-15: build/installer.nsh, statically (it only runs inside a real setup).
+  const { INSTALLER_REG } = load('src/shared/brand.ts')
+  assert.deepStrictEqual({ ...INSTALLER_REG }, {
+    key: 'Software\\' + LEGACY_BRAND.nsisGuid, legacyInstallLocation: 'LegacyInstallLocation', legacyTaskbarPinned: 'LegacyTaskbarPinned',
+  }); checks++
+  const nsh = read('build/installer.nsh')
+  const nshCode = nsh.split(/\r?\n/).map(line => line.replace(/^\s*[;#].*$/, '').trim()).filter(Boolean)
+  for (const name of ['customInit', 'customPageAfterChangeDir', 'customInstall', 'snPrepareUpgrade', 'snGuardPortableData', 'snRedirectLegacyInstDir']) {
+    check(nshCode.filter(line => line === `!macro ${name}` || line.startsWith(`!macro ${name} `)).length === 1, `installer.nsh defines ${name} once`)
+  }
+  check(!nshCode.some(line => /^!macro customCheckAppRunning\b/.test(line)), 'default running-app check (SnAgentsOS.exe) is not replaced')
+  check(!/\/t\b/i.test(nsh), 'installer.nsh never kills a process tree (no /T, comments included)')
+  const regWrites = nshCode.filter(line => /^WriteReg/i.test(line))
+  const regTokens = line => line.match(/"[^"]*"|`[^`]*`|\S+/g)
+  check(regWrites.length > 0 && regWrites.every(line => regTokens(line)[3] !== 'InstallLocation'), 'installer.nsh never writes InstallLocation (uninstallOldVersion uses it as _?=)')
+  check(regWrites.every(line => regTokens(line)[1] === 'SHCTX' && regTokens(line)[2] === '"Software\\${APP_GUID}"'), 'registry writes go to SHCTX\\Software\\<GUID>')
+  assert.deepStrictEqual(regWrites.map(line => regTokens(line)[3]).sort(), [INSTALLER_REG.legacyInstallLocation, INSTALLER_REG.legacyTaskbarPinned].sort()); checks++
+  const regReads = nshCode.filter(line => /^ReadReg/i.test(line))
+  check(regReads.length > 0 && regReads.every(line => regTokens(line)[2] === 'SHCTX'), 'installer.nsh reads the registry with SHCTX')
+  check(!/\b(HKCU|HKLM|HKEY_CURRENT_USER|HKEY_LOCAL_MACHINE)\b/.test(nshCode.join('\n')), 'installer.nsh never hardcodes a hive')
+  const execs = nshCode.map((line, i) => [line, nshCode[i + 1] ?? '']).filter(([line]) => /^nsExec::Exec\b/.test(line))
+  check(execs.length > 0 && execs.every(([, next]) => /^Pop\s+\$\w+$/.test(next)), 'every nsExec::Exec is followed by Pop')
+  check(execs.every(([line]) => line.includes('/FI "USERNAME eq %USERNAME%"')), 'taskkill only touches the current user')
+  {
+    const block = name => {
+      const start = nshCode.findIndex(line => line === `!macro ${name}` || line.startsWith(`!macro ${name} `))
+      return nshCode.slice(start, nshCode.indexOf('!macroend', start) + 1)
+    }
+    const init = block('customInit')
+    check(init.join('\n') === '!macro customInit\n${If} ${Silent}\n!insertmacro snPrepareUpgrade\n${EndIf}\n!macroend', 'customInit prepares the upgrade only with /S')
+    const page = block('customPageAfterChangeDir').join('\n')
+    check(/Page custom (\w+)\nFunction \1\n!insertmacro snPrepareUpgrade\nAbort\nFunctionEnd/.test(page), 'hidden page after the directory page prepares the upgrade and skips itself')
+    const install = block('customInstall')
+    const rm = install.findIndex(line => line === 'RMDir /r "$LOCALAPPDATA\\' + LEGACY_BRAND.updaterCacheDir + '"')
+    check(rm > 0 && install[rm - 1] === 'SetShellVarContext current', 'customInstall deletes the 1.x updater cache from the user profile')
+    check(install.join('\n').includes('${If} $installMode == "all"\nSetShellVarContext all\n${EndIf}'), 'customInstall restores the all-users context')
+    const prep = block('snPrepareUpgrade').join('\n')
+    check(prep.indexOf('!insertmacro snRedirectLegacyInstDir') < prep.indexOf('!insertmacro snGuardPortableData') && prep.indexOf('!insertmacro snGuardPortableData') < prep.indexOf('nsExec::Exec'), 'redirect, then the portable data guard, then close 1.x')
+    check(prep.includes('SetShellVarContext current\n${If} ${FileExists} "$APPDATA\\Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar\\'), 'pin lookup runs in the user context')
+    const guard = block('snGuardPortableData').join('\n')
+    check(guard.includes(`\${DIR}\\${LEGACY_BRAND.portableDataDir}\\*.*`) && guard.includes(`\${DIR}\\${BRAND.portableDataDir}\\*.*`) && guard.includes('"$(snPortableDataInside)"') && guard.includes('Quit'), 'guard stops on legacy or new portable data')
+    const redirect = block('snRedirectLegacyInstDir').join('\n')
+    check(redirect.includes('${AndIf} $INSTDIR == $snLegacyInstDir') && redirect.includes('StrCpy $INSTDIR "$R9\\${APP_FILENAME}"'), 'redirect only moves the untouched legacy folder to <parent>\\SnAgentsOS')
+    check(nshCode.includes('!define SN_LEGACY_FOLDER "' + LEGACY_BRAND.productName + '"') && nshCode.includes('!define SN_LEGACY_EXE "' + LEGACY_BRAND.winExe + '"'), 'legacy names match LEGACY_BRAND')
+  }
+  {
+    // Helpers, variables and strings only exist in the installer build: the
+    // uninstaller build would fail -WX on an unused variable.
+    const ifndef = nshCode.indexOf('!ifndef BUILD_UNINSTALLER')
+    const endif = nshCode.indexOf('!endif', ifndef)
+    const inside = i => i > ifndef && i < endif
+    check(ifndef >= 0 && nshCode.every((line, i) => !/^(Var|LangString)\b|^!macro sn/.test(line) || inside(i)), 'helpers are wrapped in !ifndef BUILD_UNINSTALLER')
+    // makensis runs with -WX, so the message needs every bundled installer language.
+    const { bundledLanguages, lcid } = require('app-builder-lib/out/util/langs')
+    const langIds = nshCode.filter(line => line.startsWith('LangString snPortableDataInside ')).map(line => Number(line.split(/\s+/)[2]))
+    check(new Set(langIds).size === langIds.length && bundledLanguages.every(l => langIds.includes(lcid[l])) && langIds.length === bundledLanguages.length, 'snPortableDataInside covers every bundled language once')
+    const message = id => nshCode.find(line => line.startsWith(`LangString snPortableDataInside ${id} `))
+    check(message(3082).includes('Movelos a otra carpeta') && message(1033).includes('Move it to another folder'), 'portable data message in es and en')
+  }
 
   // R20-01 scope: every file it rebrands is free of the legacy name.
   const scope = [
