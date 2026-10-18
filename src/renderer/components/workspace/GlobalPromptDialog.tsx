@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Megaphone } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { broadcastToWorkspace } from '@/lib/broadcastPrompt'
+import { isFromToast, toast } from '@/lib/toast'
 import { useT } from '@/i18n'
 
 /**
@@ -37,13 +38,16 @@ export function GlobalPromptDialog() {
   const close = (): void => setOpen(false)
   const send = (): void => {
     if (!canSend) return
-    broadcastToWorkspace(workspace, prompt.trim())
+    const count = broadcastToWorkspace(workspace, prompt.trim())
     close()
+    // N is what actually received the text (live, non-minimized ptys).
+    if (count === 0) toast.warning(t('toast.prompt.none'), { dedupeKey: 'globalPrompt' })
+    else toast.success(t(count === 1 ? 'toast.prompt.one' : 'toast.prompt.many', { count }), { dedupeKey: 'globalPrompt' })
   }
 
   return createPortal(
     <div className="fixed inset-0 z-[75] flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-black/60" onClick={close} />
+      <div className="absolute inset-0 bg-black/60" onClick={(e) => { if (!isFromToast(e)) close() }} />
       <div className="relative z-10 w-full max-w-md overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]">
         <div className="space-y-4 p-5">
           <div className="flex items-center gap-2">
