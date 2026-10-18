@@ -30,7 +30,7 @@ window.snApi=fallback({platform:'win32',
  system:fallback({getMetrics:spy('system.getMetrics',Promise.resolve(null)),getLoginItem:spy('system.getLoginItem',Promise.resolve(false)),openExternal(){},
   getExplorerMenu:spy('system.getExplorerMenu',Promise.resolve({ok:true,registered:true,exe:'D:/Portable/SnAgentsOS-portable.exe',currentExe:'C:/App/SnAgentsOS.exe',mismatch:true})),
   setExplorerMenu:(req)=>{explorerArgs.push(req);return Promise.resolve({ok:true,registered:!!req.enabled,exe:req.enabled?'C:/App/SnAgentsOS.exe':undefined,currentExe:'C:/App/SnAgentsOS.exe',mismatch:false})}}),
- status:fallback({health:spy('status.health',Promise.resolve({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}})),hooksStatus:spy('status.hooksStatus',Promise.resolve({installed:false,settingsPath:'x'}))}),
+ status:fallback({health:spy('status.health',Promise.resolve({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}})),hooksStatus:spy('status.hooksStatus',Promise.resolve({installed:false,settingsPath:'x'})),testNtfy:spy('status.testNtfy',Promise.resolve({ok:true}))}),
  app:fallback({info:async()=>({version:'2.0.0',portable:false,platform:'win32'})}),
  remote:fallback({onStatus:noop,onDevices:noop,getStatus:async()=>({state:'stopped',connectedCount:0}),listDevices:async()=>[]}),
  pty:fallback({write(){}}),config:fallback({save(){}})});
@@ -61,6 +61,7 @@ window.smoke={calls,created,termKeys,explorerArgs,theme:applyTheme,
  clearFlash:()=>{flashLog.length=0},
  state:()=>{const s=useAppStore.getState();return {open:s.settingsOpen,query:s.settingsQuery,anchor:s.settingsAnchor,wizard:s.wizardOpen,sound:s.settings.notifications.sound}},
  set:p=>useAppStore.setState(p),
+ ntfy:()=>useAppStore.getState().settings.notifications.ntfy,
  settings:p=>useAppStore.getState().updateSettings(p),
  openSettings:t=>useAppStore.getState().openSettings(t),
  // The 3-step wizard is the composer's Advanced... (E8-FR-08).
@@ -83,7 +84,7 @@ app.whenReady().then(async()=>{
  const w=new BrowserWindow({width:1200,height:780,show:false,webPreferences:{sandbox:true,backgroundThrottling:false}});
  const failures=[];w.webContents.on('console-message',(_e,level,message)=>{if(process.env.SN_UI_DEBUG)console.log('[renderer]',level,message);if(level>=3)failures.push(message)});
  await w.loadFile(path.join(__dirname,'index.html'));await new Promise(r=>setTimeout(r,400));
- const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>setTimeout(r,ms));
+const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>setTimeout(r,ms));
  // A hidden window throttles rAF: React commits on a MessageChannel, so a short timer is enough.
  const frame=()=>wait(60);
  const shot=async name=>{await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');await wait(150);fs.writeFileSync(path.join(__dirname,name+'.png'),(await w.webContents.capturePage()).toPNG())};
@@ -150,6 +151,20 @@ app.whenReady().then(async()=>{
  ok(ms!==null&&ms>=1100&&ms<=1500&&!(await js("document.querySelector('[data-setting-flash]')")),'the ring lasts about 1.2 s',ms);
  await js("smoke.openSettings('notifications#nope')");await frame();await frame();
  eq([(await js('smoke.state()')).anchor,await js("document.querySelector('[data-settings-nav=notifications]').className.includes('bg-card text')")],[null,true],'an unknown row just opens the category');
+ // --- E2-FR-40/41 (R22-18): the ntfy block and the away toggle ----------------
+ await js("smoke.openSettings('notifications#ntfy')");await frame();await frame();
+ ok(await js("smoke.inView('#setting-notifications-ntfy')"),'the ntfy row is a deep-link target');
+ await js("document.querySelector('[data-ntfy-generate]').click()");await frame();
+ const ntfyTopic=(await js('smoke.ntfy()')).topic;
+ ok(/^snaos-[0-9a-f]{16}$/.test(ntfyTopic)&&await js("document.getElementById('ntfy-topic').value")===ntfyTopic,'Generate proposes snaos-<16 hex> and fills the field',ntfyTopic);
+ await js("document.querySelector('[data-ntfy-test]').click()");await frame();await frame();
+ ok((await js('smoke.calls'))['status.testNtfy']===1&&await js("document.querySelector('[data-ntfy-result]')?.textContent")==='Aceptado por el servidor de ntfy.','Send test calls status:ntfyTest and reports Aceptado');
+ ok(await js("!!document.getElementById('setting-notifications-onlyWhenAway')&&document.getElementById('setting-notifications-onlyWhenAway').textContent.includes('Solo cuando no estoy en la PC')"),'the global away toggle is in Notifications');
+ await js("smoke.search('ausente')");await frame();
+ ok(await js("!!document.querySelector('[data-search-result=\\"notifications.onlyWhenAway\\"]')"),'search "ausente" finds the away toggle');
+ await js("smoke.search('ntfy')");await frame();
+ ok(await js("!!document.querySelector('[data-search-result=\\"notifications.ntfy\\"]')"),'search "ntfy" finds the ntfy row');
+ await js("smoke.search('')");await frame();
  await js("smoke.openSettings('keys#palette')");await frame();await frame();
  ok(await js("smoke.inView('#setting-keys-palette')"),'Keys rows are deep-link targets');
  await js("smoke.set({settingsOpen:false})");await frame();

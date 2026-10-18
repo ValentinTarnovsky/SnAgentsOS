@@ -223,6 +223,8 @@ export type RemoteClientMsg =
   | { v: number; type: 'input'; paneId: string; data: string }
   | { v: number; type: 'ctl'; id: string; action: RemoteCtlAction }
   | { v: number; type: 'ping'; t: number }
+  /** The page became visible/hidden, and once after authOk (E2-FR-52: ntfy quiet while watched). */
+  | { v: number; type: 'visibility'; visible: boolean }
 
 // --- Server -> client messages ---
 

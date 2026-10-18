@@ -12,8 +12,9 @@ import type {
   RemotePaneStatus,
   RemoteStateSnapshot,
 } from '@shared/remote-protocol'
-import { loadInPageAlerts, saveInPageAlerts } from './inPageAlerts'
 import {
+  loadPagePrefs,
+  savePagePrefs,
   loadCollapsed,
   loadInputModes,
   loadLastPane,
@@ -30,6 +31,7 @@ import {
   withViewed,
   type ComposerPref,
   type InputMode,
+  type PagePrefs,
 } from './prefs'
 import { paneById, workspaceOfPane } from './workspace'
 import { loadFontScale, saveFontScale } from './fit'
@@ -84,10 +86,17 @@ export interface UpdateInfo {
  */
 export type LiveScreen = 'home' | 'terminal' | 'settings' | 'diagnostics'
 
-/** One in-page toast (E2-FR-11, 47). `id` orders and dismisses them. */
+/** What a toast is about: a plain notice, or a console's state (E2-FR-43). */
+export type MobileToastKind = 'info' | 'action' | 'error' | 'done'
+
+/** One in-page toast (E2-FR-11, 43, 47). `id` orders and dismisses them. */
 export interface MobileToast {
   id: number
   text: string
+  /** Default 'info'; action and error last 6s, done 4s (ToastStack). */
+  kind?: MobileToastKind
+  /** The console [Go] opens (state toasts only). */
+  paneId?: string
 }
 
 /** Most toasts shown at once; older ones drop first. */
@@ -117,7 +126,7 @@ export interface RemoteState {
   lockUntil: number | null
   /** Ephemeral toast text (e.g. "Sent to 3 consoles"): the newest of `toasts`. */
   toast: string | null
-  /** Toasts on screen, oldest first (E2 Home; D9: R22-18 adds actions and timing). */
+  /** Toasts on screen, oldest first (at most TOASTS_MAX; E2-FR-43 kinds and [Go]). */
   toasts: MobileToast[]
   // --- Home (E2-FR-01..16, 47; R22-14) ---
   screen: LiveScreen
@@ -156,8 +165,12 @@ export interface RemoteState {
    * authOk / state; a live paneStatus upserts or deletes one entry.
    */
   paneStatus: Record<string, RemotePaneStatus>
-  /** Alert with the page open when another console needs the user (E1-FR-40). */
+  /** "On-screen alerts" (E2-FR-44 `toasts`, 'snagentsos.prefs'): state toasts in the terminal. */
   inPageAlerts: boolean
+  /** "Vibrate" on action and error (E2-FR-44). */
+  alertVibrate: boolean
+  /** "Alert when a turn ends": done toasts too (E2-FR-44). */
+  alertDone: boolean
   /** Answer cards for Claude's permissions and questions (E2-FR-13, 19; R22-15). */
   promptCards: boolean
   // --- composer (E1-FR-22..31) ---
@@ -180,6 +193,8 @@ export interface RemoteState {
   setFontScale: (scale: number) => void
   /** Shortcut: push a toast (null clears every toast). */
   setToast: (text: string | null) => void
+  /** Push a toast with a kind and an optional console for [Go] (E2-FR-43). */
+  pushToast: (toast: Omit<MobileToast, 'id'>) => void
   dismissToast: (id: number) => void
   setScreen: (screen: LiveScreen) => void
   /**
@@ -193,8 +208,10 @@ export interface RemoteState {
   toggleCollapsed: (workspaceId: string) => void
   /** Feed keyboard signals from viewport.ts; recomputes kbOpen. */
   setKeyboard: (k: { inset?: number; focus?: string | null }) => void
-  /** Toggle and persist the in-page alerts preference. */
+  /** Toggle and persist the on-screen alerts preference. */
   setInPageAlerts: (on: boolean) => void
+  /** Toggle and persist one page alert preference ('snagentsos.prefs'). */
+  setPagePref: (name: keyof PagePrefs, on: boolean) => void
   /** Toggle and persist the answer cards preference (R22-15). */
   setPromptCards: (on: boolean) => void
   /** Persist an explicit mode for a pane; ends a one-shot on it. */
@@ -204,6 +221,11 @@ export interface RemoteState {
 }
 
 let toastSeq = 0
+
+/** The store fields that project 'snagentsos.prefs'. */
+function pagePrefsState(p: PagePrefs): Pick<RemoteState, 'inPageAlerts' | 'alertVibrate' | 'alertDone'> {
+  return { inPageAlerts: p.toasts, alertVibrate: p.vibrate, alertDone: p.toastDone }
+}
 
 export const useRemoteStore = create<RemoteState>((set) => ({
   phase: 'idle',
@@ -238,7 +260,7 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   kbOpen: false,
   terminalUnicode: '6',
   paneStatus: {},
-  inPageAlerts: loadInPageAlerts(),
+  ...pagePrefsState(loadPagePrefs()),
   promptCards: loadPromptCards(),
   inputModes: loadInputModes(),
   composerDefaultForAgents: loadPref('composerDefaultForAgents'),
@@ -257,6 +279,11 @@ export const useRemoteStore = create<RemoteState>((set) => ({
       if (text == null) return { toast: null, toasts: [] }
       const toasts = [...s.toasts, { id: ++toastSeq, text }].slice(-TOASTS_MAX)
       return { toast: text, toasts }
+    }),
+  pushToast: (toast) =>
+    set((s) => {
+      const toasts = [...s.toasts, { ...toast, id: ++toastSeq }].slice(-TOASTS_MAX)
+      return { toast: toast.text, toasts }
     }),
   dismissToast: (id) =>
     set((s) => {
@@ -293,8 +320,10 @@ export const useRemoteStore = create<RemoteState>((set) => ({
       return { keyboardInset: inset, kbFocus: focus, kbOpen: focus != null && inset > KB_OPEN_MIN_INSET_PX }
     }),
   setInPageAlerts: (on) => {
-    saveInPageAlerts(on)
-    set({ inPageAlerts: on })
+    set(pagePrefsState(savePagePrefs({ toasts: on })))
+  },
+  setPagePref: (name, on) => {
+    set(pagePrefsState(savePagePrefs({ [name]: on })))
   },
   setPromptCards: (on) => {
     savePromptCards(on)

@@ -166,6 +166,7 @@ const api: SnApi = {
     health: () => ipcRenderer.invoke(CH.STATUS_HEALTH),
     testDiscord: (cfg: import('@shared/types').DiscordSettings) => ipcRenderer.invoke(CH.STATUS_DISCORD_TEST, cfg),
     testDesktop: () => ipcRenderer.invoke(CH.STATUS_DESKTOP_TEST),
+    testNtfy: () => ipcRenderer.invoke(CH.STATUS_NTFY_TEST) as Promise<{ ok: boolean; error?: string }>,
     onReveal: (cb: (paneId: string) => void) => sub<string>(CH.STATUS_REVEAL, cb),
     onSessionEnd: (cb: (e: AgentSessionEndEvt) => void) => sub<AgentSessionEndEvt>(CH.STATUS_SESSION_END, cb),
     hooksInstall: (cfg: NotificationSettings) =>

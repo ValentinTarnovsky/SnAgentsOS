@@ -19,6 +19,7 @@ import { CH } from '@shared/ipc-channels'
 import type {
   PairingQrPayload,
   RemoteCommand,
+  RemoteEndpoint,
   RemoteCommandResult,
   RemoteServerState,
   RemoteServerStatus,
@@ -119,6 +120,8 @@ export class RemoteManager {
     private readonly getPaneStatuses: () => PaneStatusEvt[] = () => [],
     /** The PC name the phone's Home header shows (E2-FR-02); injectable for tests. */
     private readonly getHostName: () => string = safeHostName,
+    /** Reachable addresses for a port (deepLinkBase, E2-FR-42); injectable for tests. */
+    private readonly getEndpoints: (port: number) => RemoteEndpoint[] = listEndpoints,
   ) {
     this.pairing = new PairingService({
       registry: this.registry,
@@ -173,7 +176,7 @@ export class RemoteManager {
     // update their dots even without a renderer-driven snapshot push.
     this.ptyManager.setRunningChangeListener(() => this.broadcastSnapshot())
     this.server = new RemoteServer(port, {
-      onSocket: (ws, ip) => this.sessions?.handleSocket(ws, ip),
+      onSocket: (ws, ip, host) => this.sessions?.handleSocket(ws, ip, host),
     })
     this.setStatus('starting')
     this.server
@@ -402,6 +405,28 @@ export class RemoteManager {
     this.sessions?.killByDevice(deviceId)
     if (existed) this.registry.persist()
     this.scheduleUi()
+  }
+
+  // --- Push notifications (E2-FR-42, 52) -------------------------------------
+
+  /**
+   * Base of the deep link an ntfy push opens: 'http://<host>:<port>' on the
+   * most recent host a phone authenticated through that this PC still has,
+   * else the Tailscale endpoint, else the first LAN one. Null while the
+   * server is not running (a push then carries no click).
+   */
+  deepLinkBase(): string | null {
+    if (this.statusState !== 'running') return null
+    const endpoints = this.getEndpoints(this.boundPort)
+    const live = new Set(endpoints.map((e) => e.ip))
+    const recent = this.registry.lastHosts().find((h) => live.has(h.host))
+    const ip = recent?.host ?? endpoints.find((e) => e.kind === 'tailscale')?.ip ?? endpoints.find((e) => e.kind === 'lan')?.ip
+    return ip ? `http://${ip}:${this.boundPort}` : null
+  }
+
+  /** A phone is watching this pane right now (subscribed, page visible, fresh); ntfy skips it. */
+  isPaneViewed(paneId: string): boolean {
+    return this.sessions?.isPaneViewed(paneId) ?? false
   }
 
   // --- UI state -------------------------------------------------------------

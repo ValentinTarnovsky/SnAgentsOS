@@ -1,4 +1,5 @@
-import type { AgentDetail, AgentProvider, AttentionReason, RemotePending } from '@shared/types'
+import type { AgentDetail, AgentProvider, AttentionReason, ConfigFile, RemotePending } from '@shared/types'
+import { mainT } from '../i18n'
 export interface AgentEvent {
   paneId: string
   ptyId: string
@@ -38,4 +39,30 @@ export interface StatusNotice {
   provider: AgentProvider
   state: 'action' | 'done' | 'error'
   reason?: AttentionReason
+}
+
+/**
+ * The words every remote channel (Discord, ntfy) sends for a notice: agent
+ * name, reason in the config language, "workspace / console" and the
+ * workspace id the deep link needs. Never any text of the agent's reply.
+ */
+export interface NoticeText {
+  agent: 'Claude' | 'Codex'
+  message: string
+  /** "workspace / console", or the product name when the pane is unknown. */
+  place: string
+  workspaceId: string | null
+}
+
+export function describeNotice(notice: StatusNotice, config: ConfigFile | null, fallbackPlace: string): NoticeText {
+  let place = fallbackPlace
+  let workspaceId: string | null = null
+  for (const ws of config?.workspaces ?? []) {
+    const pane = ws.panes.find(p => p.id === notice.paneId)
+    if (pane) { place = `${ws.name} / ${pane.title}`; workspaceId = ws.id; break }
+  }
+  const reason: AttentionReason = notice.reason ?? (notice.state === 'error' ? 'failure' : 'question')
+  // The words live in main/i18n.ts, in the config language (E2 i18n).
+  const message = mainT(config, notice.state === 'done' ? 'status.push.done' : `status.push.${reason}`)
+  return { agent: notice.provider === 'codex' ? 'Codex' : 'Claude', message, place, workspaceId }
 }

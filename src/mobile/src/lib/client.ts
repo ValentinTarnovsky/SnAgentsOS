@@ -51,7 +51,8 @@ import { store, type UpdateInfo } from './store'
 import { applyRemoteTheme } from './theme'
 import { setLang, t } from './i18n'
 import { delayFor } from './reconnectSchedule'
-import { createInPageAlerts } from './inPageAlerts'
+import { actionTotal, createPaneNotifier, remoteTitle } from './notify'
+import { takePendingDeepLink } from './deepLink'
 import { paneById, paneOpenable, statusMapOf, workspaceOfPane } from './workspace'
 import { clearMobileStorage } from './mobileStorage'
 import { chunkInput } from './composerSend'
@@ -139,11 +140,14 @@ function paneExists(snap: RemoteStateSnapshot, paneId: string): boolean {
   return snap.workspaces.some((w) => w.panes.some((p) => p.id === paneId))
 }
 
-/** E1-FR-40: toast + vibration when another pane starts waiting on the user. */
-const inPageAlerts = createInPageAlerts({
-  now: () => Date.now(),
+/** E2-FR-43: toast with [Go] and vibration when another console needs the user. */
+const paneNotifier = createPaneNotifier({
   isVisible: pageVisible,
-  enabled: () => store.getState().inPageAlerts,
+  prefs: () => {
+    const s = store.getState()
+    return { toasts: s.inPageAlerts, vibrate: s.alertVibrate, toastDone: s.alertDone }
+  },
+  screen: () => store.getState().screen,
   activePaneId: () => store.getState().activePaneId,
   describe: (paneId) => {
     const snap = store.getState().snapshot
@@ -152,15 +156,26 @@ const inPageAlerts = createInPageAlerts({
     const ws = snap?.workspaces.find((w) => w.id === wsId)
     return pane && ws ? { ws: ws.name, pane: pane.title } : null
   },
-  show: (text) => store.getState().setToast(text),
-  vibrate: (ms) => {
+  show: (toast) => store.getState().pushToast(toast),
+  vibrate: (pattern) => {
     try {
-      navigator.vibrate?.(ms)
+      navigator.vibrate?.(pattern)
     } catch {
       /* not supported (iOS) or blocked */
     }
   },
 })
+
+/** "(N) SnAgentsOS Remote" with N consoles in action (E2-FR-43). */
+function syncTitle(): void {
+  const s = store.getState()
+  const title = remoteTitle(actionTotal(s.phase === 'live' ? s.snapshot : null, s.paneStatus))
+  try {
+    if (document.title !== title) document.title = title
+  } catch {
+    /* no document title (tests) */
+  }
+}
 
 class RemoteClient {
   private ws: WebSocket | null = null
@@ -216,7 +231,7 @@ class RemoteClient {
   private draftsPruned = false
   /**
    * A console a deep link asked for (E2-FR-42), applied on the next goLive
-   * before lastPane. R22-18 fills it from the URL hash; it only picks the view.
+   * before lastPane. Filled from the URL hash at start (deepLink.ts); it only picks the view.
    */
   private pendingDeepLink: string | null = null
   /** A console shown before any state frame listed it (just created), with its deadline. */
@@ -235,8 +250,15 @@ class RemoteClient {
     window.addEventListener('pageshow', this.onPageShow)
     window.addEventListener('online', this.onOnline)
     window.addEventListener('offline', this.onOffline)
+    window.addEventListener('hashchange', this.onHashChange)
     if (!pageVisible()) this.hiddenAt = this.lastHiddenAt = perfNow()
     store.getState().update({ online: browserOnline() })
+    store.subscribe((s, prev) => {
+      if (s.paneStatus !== prev.paneStatus || s.snapshot !== prev.snapshot || s.phase !== prev.phase) syncTitle()
+    })
+    // E2-FR-42: a deep link waits for the first goLive (a #pair= hash wins and is left alone).
+    const link = takePendingDeepLink()
+    if (link) this.pendingDeepLink = link.pane
 
     const auth = getStoredAuth()
     const code = readPairCode()
@@ -580,6 +602,7 @@ class RemoteClient {
 
   private onVisibility = (): void => {
     log('info', pageVisible() ? 'visible' : 'hidden')
+    this.sendVisibility()
     if (pageVisible()) {
       this.onRevive('visible')
       return
@@ -589,6 +612,18 @@ class RemoteClient {
     this.hiddenAt = this.lastHiddenAt = perfNow()
     this.clearIdleWatchdog()
     this.clearDeadline()
+  }
+
+  /** E2-FR-42: a deep link opened while the page was already loaded. */
+  private onHashChange = (): void => {
+    const link = takePendingDeepLink()
+    if (link) this.setPendingDeepLink(link.pane)
+  }
+
+  /** E2-FR-52: tell the desktop whether this page is on screen (ntfy stays quiet then). */
+  private sendVisibility(): void {
+    if (!this.socketAuthed) return
+    this.send({ v: PROTOCOL_VERSION, type: 'visibility', visible: pageVisible() })
   }
 
   private onPageShow = (ev: PageTransitionEvent): void => {
@@ -1046,6 +1081,7 @@ class RemoteClient {
     })
     this.startKeepalive()
     this.armIdleWatchdog()
+    this.sendVisibility()
     if (keep) this.viewPane(keep)
     if (lostViewed) store.getState().setToast(t('toast.paneClosed'))
     if (deepLink) this.requestOpen(deepLink)
@@ -1170,7 +1206,7 @@ class RemoteClient {
     else delete next[paneId]
     s.update({ paneStatus: next })
     // An orphan upsert (status ahead of the state that adds the pane) never alerts.
-    if (s.snapshot && paneById(s.snapshot, paneId)) inPageAlerts.onPaneStatus(paneId, prev, status)
+    if (s.snapshot && paneById(s.snapshot, paneId)) paneNotifier.onPaneStatus(paneId, prev, status)
   }
 
   private handleCtlAck(msg: Extract<RemoteServerMsg, { type: 'ctlAck' }>): void {
