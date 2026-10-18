@@ -2,13 +2,15 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import type { StatusHooksStatusRes } from '@shared/types'
+import { AGENT_ENV, BRAND, LEGACY_BRAND } from '@shared/brand'
 
 /**
- * Installs/removes the SnMultiCC block inside the user's Claude Code settings
+ * Installs/removes our block inside the user's Claude Code settings
  * (~/.claude/settings.json). Ownership marker: any hook handler whose url
- * contains URL_MARKER is ours; nothing else is ever touched. Claude Code
- * AGGREGATES hooks across scopes (they never override each other) and watches
- * the file, so edits apply to running sessions without a restart.
+ * contains URL_MARKER, or whose statusMessage is ours (new or 1.x), is ours;
+ * nothing else is ever touched. Claude Code AGGREGATES hooks across scopes
+ * (they never override each other) and watches the file, so edits apply to
+ * running sessions without a restart.
  */
 const URL_MARKER = '/cc-hook/'
 
@@ -48,24 +50,28 @@ function buildHandler(port: number, token: string): HookHandler {
   return {
     type: 'http',
     url: `http://127.0.0.1:${port}${URL_MARKER}${token}`,
-    headers: { 'X-Console-Id': '$SNMULTICC_CONSOLE_ID', 'X-Pty-Id': '$SNMULTICC_PTY_ID' },
-    allowedEnvVars: ['SNMULTICC_CONSOLE_ID', 'SNMULTICC_PTY_ID'],
+    headers: { 'X-Console-Id': '$' + AGENT_ENV.consoleId, 'X-Pty-Id': '$' + AGENT_ENV.ptyId },
+    allowedEnvVars: [AGENT_ENV.consoleId, AGENT_ENV.ptyId],
     timeout: 3,
   }
 }
 
+/** The SessionStart handler has no url, so the statusMessage (new or 1.x) marks it. */
+const STATUS_MESSAGES: readonly unknown[] = [BRAND.hookStatusMessage, LEGACY_BRAND.hookStatusMessage]
+
 function isOurs(handler: HookHandler): boolean {
-  return !!handler && ((typeof handler.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/cc-hook\//.test(handler.url)) || handler.statusMessage === 'SnMultiCC session status')
+  return !!handler && ((typeof handler.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/cc-hook\//.test(handler.url)) || STATUS_MESSAGES.includes(handler.statusMessage))
 }
 
 /** SessionStart does not support HTTP handlers in current Claude releases. */
 function startHandler(port: number, token: string): HookHandler {
   const url = `http://127.0.0.1:${port}${URL_MARKER}${token}`
+  const id = AGENT_ENV.consoleId, pty = AGENT_ENV.ptyId
   const command = process.platform === 'win32'
     ? 'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + Buffer.from(
-      `[Console]::InputEncoding=[Text.Encoding]::UTF8; $body=[Console]::In.ReadToEnd(); if($env:SNMULTICC_CONSOLE_ID -and $env:SNMULTICC_PTY_ID){try{Invoke-WebRequest -UseBasicParsing -Uri '${url}' -Method POST -TimeoutSec 2 -Headers @{'X-Console-Id'=$env:SNMULTICC_CONSOLE_ID;'X-Pty-Id'=$env:SNMULTICC_PTY_ID} -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json' | Out-Null}catch{}}`, 'utf16le').toString('base64')
-    : `if [ -n "$SNMULTICC_CONSOLE_ID" ] && [ -n "$SNMULTICC_PTY_ID" ]; then curl --silent --max-time 2 --output /dev/null -H "X-Console-Id: $SNMULTICC_CONSOLE_ID" -H "X-Pty-Id: $SNMULTICC_PTY_ID" -H 'Content-Type: application/json' --data-binary @- '${url}'; fi; exit 0`
-  return { type: 'command', command, timeout: 3, statusMessage: 'SnMultiCC session status' }
+      `[Console]::InputEncoding=[Text.Encoding]::UTF8; $body=[Console]::In.ReadToEnd(); if($env:${id} -and $env:${pty}){try{Invoke-WebRequest -UseBasicParsing -Uri '${url}' -Method POST -TimeoutSec 2 -Headers @{'X-Console-Id'=$env:${id};'X-Pty-Id'=$env:${pty}} -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json' | Out-Null}catch{}}`, 'utf16le').toString('base64')
+    : `if [ -n "$${id}" ] && [ -n "$${pty}" ]; then curl --silent --max-time 2 --output /dev/null -H "X-Console-Id: $${id}" -H "X-Pty-Id: $${pty}" -H 'Content-Type: application/json' --data-binary @- '${url}'; fi; exit 0`
+  return { type: 'command', command, timeout: 3, statusMessage: BRAND.hookStatusMessage }
 }
 
 function complete(settings: Record<string, unknown>, port: number, token: string): boolean {
@@ -93,7 +99,7 @@ function readSettings(path: string): Record<string, unknown> {
 /** BOM-less UTF-8, 2-space indent, trailing newline; backs the old file up first. */
 function writeSettings(path: string, settings: Record<string, unknown>): void {
   mkdirSync(dirname(path), { recursive: true })
-  if (existsSync(path)) copyFileSync(path, `${path}.snmulticc.bak`)
+  if (existsSync(path)) copyFileSync(path, `${path}.${BRAND.packageName}.bak`)
   writeFileSync(path, JSON.stringify(settings, null, 2) + '\n', 'utf8')
 }
 
@@ -147,7 +153,7 @@ export function hooksUpToDate(port: number, token: string): boolean {
 
 /**
  * Merges our matcher group into each observed event, replacing any stale
- * SnMultiCC handler (old port/token) in place. User hooks are preserved
+ * handler of ours (old port/token or 1.x names) in place. User hooks are preserved
  * verbatim; the hooks object is extended, never replaced.
  */
 export function installHooks(port: number, token: string): StatusHooksStatusRes {
@@ -175,7 +181,7 @@ export function installHooks(port: number, token: string): StatusHooksStatusRes 
   return { installed: true, settingsPath: path, port, complete: true }
 }
 
-/** Removes every SnMultiCC handler; leaves user hooks and unknown keys intact. */
+/** Removes every handler of ours (1.x ones too); leaves user hooks and unknown keys intact. */
 export function uninstallHooks(): StatusHooksStatusRes {
   const path = settingsPath()
   let settings: Record<string, unknown>

@@ -20,6 +20,7 @@ import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
 import { HookServer } from './status/HookServer'
 import { CodexBridge } from './status/CodexBridge'
+import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
 import { join } from 'path'
 import { ensureTray, destroyTray } from './tray'
@@ -50,7 +51,7 @@ const statusManager = new StatusManager(
   () => configStore.load(),
   notice => discordNotifier.notify(notice, configStore.load()),
 )
-const codexBridge = new CodexBridge(() => join(app.getPath('userData'), 'status-bin'), join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event))
+const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event))
 ptyManager.addSink(statusManager)
 ptyManager.addSink(codexBridge)
 let statusIpc: StatusIpc | null = null

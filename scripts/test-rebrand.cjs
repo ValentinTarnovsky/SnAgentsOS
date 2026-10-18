@@ -5,12 +5,13 @@ const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
 const root = path.resolve(__dirname, '..')
 let checks = 0
 function check(condition, label) { assert.ok(condition, label); checks++ }
-function load(file, overrides = {}) {
-  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+function load(file, overrides = {}, external = []) {
+  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws', ...external], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
   const mod = { exports: {} }
   vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console, process, Buffer, URL, fetch, Response, AbortController, setTimeout, clearTimeout, ...overrides })
   return mod.exports
@@ -151,6 +152,106 @@ async function main() {
   }
   check(read('src/main/remote/RemoteServer.ts').includes("<title>' + BRAND.mobileTitle + '</title>"), 'missing-bundle page title')
 
+  // E0-FR-05: pty env, inherited PATH and the Codex launcher. Every path lives
+  // in a temp tree injected through an electron stub.
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), BRAND.tempPrefix + 'env-test-'))
+    try {
+      const appData = path.join(tmp, 'appdata'), userData = path.join(appData, BRAND.packageName)
+      const electron = { app: { getPath: name => ({ appData, userData })[name] } }
+      const withElectron = id => id === 'electron' ? electron : require(id)
+      const legacyBin = path.join(appData, LEGACY_BRAND.packageName, 'status-bin'), currentBin = path.join(userData, 'status-bin')
+      const tools = path.join(tmp, 'tools')
+      const legacyVar = LEGACY_BRAND.envPrefix + 'CONSOLE_ID'
+      const inherited = { [legacyVar]: 'old-pane', [AGENT_ENV.ptyId]: 'parent-pty', KEEP: 'yes' }
+      const resolver = env => load('src/main/pty/shellResolver.ts', { require: withElectron, process: { ...process, env } })
+
+      check(resolver({}).statusBinDirs().join() === [currentBin, legacyBin].join(), 'status-bin dirs: current userData and the 1.x userData')
+      for (const key of ['PATH', 'Path']) {
+        const { cleanEnv } = resolver({ ...inherited, [key]: [legacyBin, tools, currentBin].join(path.delimiter) })
+        const env = cleanEnv({ SNAOS_FOO: 'preset', [AGENT_ENV.consoleId]: 'pane' })
+        check(!(legacyVar in env) && !(AGENT_ENV.ptyId in env), `${key}: inherited legacy and new prefixed vars dropped`)
+        check(env.SNAOS_FOO === 'preset' && env[AGENT_ENV.consoleId] === 'pane' && env.KEEP === 'yes', `${key}: extra merged unfiltered, unrelated vars kept`)
+        check(env[key] === tools, `${key}: both status-bin entries stripped, the rest kept`)
+      }
+      if (process.platform === 'win32') {
+        const lowerVar = LEGACY_BRAND.envPrefix.toLowerCase() + 'pty_id'
+        const { cleanEnv } = resolver({ Path: ['"' + legacyBin.toUpperCase() + '\\"', tools, ''].join(';'), [lowerVar]: 'x' })
+        const env = cleanEnv()
+        check(env.Path === tools + ';', 'Windows: status-bin match ignores case, quotes and a trailing slash; empty entries untouched')
+        check(!(lowerVar in env), 'Windows: env prefix filter ignores case')
+      }
+
+      // A real spawn through PtyManager with node-pty stubbed.
+      let spawned = null
+      const fakePty = { onData() {}, onExit() {}, write() {}, kill() {}, resize() {}, pause() {}, resume() {} }
+      const { PtyManager } = load('src/main/pty/PtyManager.ts', {
+        require: id => id === 'node-pty' ? { spawn: (_shell, _args, opts) => { spawned = opts; return fakePty } } : withElectron(id),
+        process: { ...process, env: { ...inherited, PATH: [legacyBin, tools].join(path.delimiter) } },
+      }, ['node-pty'])
+      const manager = new PtyManager(() => null, () => ({ [AGENT_ENV.codexShim]: currentBin }))
+      const ptyId = manager.spawn({ paneId: 'pane-1', cols: 80, rows: 24, cwd: tmp })
+      check(spawned.env[AGENT_ENV.consoleId] === 'pane-1' && spawned.env[AGENT_ENV.ptyId] === ptyId, 'pty receives SNAOS_CONSOLE_ID and SNAOS_PTY_ID')
+      check(!Object.keys(spawned.env).some(k => k.startsWith(LEGACY_BRAND.envPrefix)), 'pty env carries no legacy variable')
+      check(spawned.env.PATH === [currentBin, tools].join(path.delimiter), 'pty PATH: own shim first, inherited 1.x status-bin gone')
+
+      // Codex lookup skips both launchers, even when they hold a codex binary.
+      const exe = process.platform === 'win32' ? 'codex.exe' : 'codex'
+      for (const dir of [legacyBin, currentBin, tools]) { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, exe), '') }
+      const bridgeEnv = { PATH: [legacyBin, currentBin, tools].join(path.delimiter) }
+      const { CodexBridge } = load('src/main/status/CodexBridge.ts', { require: withElectron, process: { ...process, env: bridgeEnv } })
+      const lookup = new CodexBridge(() => currentBin, 'runtime.js', () => {})
+      check(lookup.findExecutable() === path.join(tools, exe), 'findExecutable ignores the current and the 1.x status-bin')
+
+      const bridge = new CodexBridge(() => currentBin, path.join(tmp, 'runtime.js'), () => {})
+      bridge.findExecutable = () => process.execPath
+      try {
+        await bridge.configure(true)
+        const env = bridge.environment('pty', 'pane', tmp)
+        check(Object.keys(env).sort().join() === [AGENT_ENV.codexUrl, AGENT_ENV.codexToken, AGENT_ENV.realCodex, AGENT_ENV.codexShim].sort().join(), 'Codex env uses the SNAOS_ names')
+        if (process.platform === 'win32') {
+          const launcher = fs.readFileSync(path.join(currentBin, 'codex.cmd'), 'utf8')
+          check(launcher.includes(' --snaos-prepare %*') && launcher.includes(' --snaos-end\r\n'), 'codex.cmd passes the new flags')
+          check(launcher.includes(`"%${AGENT_ENV.realCodex}%" --remote "%${AGENT_ENV.codexUrl}%" --remote-auth-token-env ${AGENT_ENV.codexToken} %*`), 'codex.cmd runs the real CLI with the new names')
+          check(launcher.includes(`set "${AGENT_ENV.codexExit}=%errorlevel%"`) && launcher.includes(`exit /b %${AGENT_ENV.codexExit}%`), 'codex.cmd keeps the exit code in SNAOS_CODEX_EXIT')
+          check(!LEGACY_RE.test(launcher), 'codex.cmd carries no legacy name')
+        } else {
+          check(!LEGACY_RE.test(fs.readFileSync(path.join(currentBin, 'codex'), 'utf8')), 'codex launcher carries no legacy name')
+        }
+      } finally { bridge.dispose() }
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+  }
+  {
+    // statusRuntime reads only the new names and flags.
+    const run = async (argv, env) => {
+      const sent = [], errors = []
+      let launched = null, exitCode
+      class LaunchSocket extends require('events').EventEmitter {
+        constructor(_url, opts) { super(); this.auth = opts.headers.Authorization; process.nextTick(() => this.emit('open')) }
+        send(raw) { sent.push({ auth: this.auth, ...JSON.parse(raw) }); process.nextTick(() => this.emit('message', Buffer.from('{"ok":true}'))) }
+        close() { this.emit('close') }
+      }
+      const proc = { ...process, argv: ['node', 'runtime', ...argv], env, exit: code => { exitCode = code; throw new Error('exit') } }
+      try {
+        load('src/main/status/statusRuntime.ts', {
+          process: proc, console: { ...console, error: msg => errors.push(msg) },
+          require: id => id === 'ws' ? { WebSocket: LaunchSocket } : id === 'child_process' ? { spawn: (_exe, args) => { launched = args; return new (require('events').EventEmitter)() } } : require(id),
+        })
+      } catch (error) { if (error.message !== 'exit') throw error }
+      for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve))
+      return { sent, errors, launched, exitCode: exitCode ?? proc.exitCode }
+    }
+    const env = { [AGENT_ENV.realCodex]: 'codex', [AGENT_ENV.codexUrl]: 'ws://127.0.0.1:1', [AGENT_ENV.codexToken]: 'tok', [AGENT_ENV.codexExit]: '3' }
+    const end = await run(['--snaos-end'], env)
+    check(end.sent.length === 1 && end.sent[0].exitCode === 3 && end.sent[0].auth === 'Launch tok' && end.launched === null, '--snaos-end reports SNAOS_CODEX_EXIT with the SNAOS_CODEX_TOKEN')
+    const prepare = await run(['--snaos-prepare'], env)
+    check(prepare.sent.length === 1 && typeof prepare.sent[0].cwd === 'string' && prepare.launched === null && prepare.exitCode === 0, '--snaos-prepare sends the context and does not launch')
+    const direct = await run([], env)
+    check(direct.launched?.join(' ') === `--remote ws://127.0.0.1:1 --remote-auth-token-env ${AGENT_ENV.codexToken}`, 'direct launch names SNAOS_CODEX_TOKEN')
+    const legacy = await run(['--' + LEGACY_BRAND.packageName + '-prepare'], { [LEGACY_BRAND.envPrefix + 'REAL_CODEX']: 'codex' })
+    check(legacy.exitCode === 1 && legacy.errors[0] === `${BRAND.productName}: Codex executable unavailable`, 'legacy variables are not read; the error names the product')
+  }
+
   // R20-01 scope: every file it rebrands is free of the legacy name.
   const scope = [
     'src/main/window.ts', 'src/main/index.ts', 'src/main/tray.ts', 'src/main/i18n.ts',
@@ -164,6 +265,12 @@ async function main() {
     'src/mobile/index.html', 'src/mobile/public/manifest.webmanifest', 'src/mobile/src/lib/i18n.ts',
   ]
   for (const file of scope) check(!LEGACY_RE.test(read(file)), `${file}: no legacy name`)
+  // R20-03 scope: the legacy names only come from LEGACY_BRAND.
+  const envScope = [
+    'src/main/pty/PtyManager.ts', 'src/main/status/CodexBridge.ts', 'src/main/status/statusRuntime.ts',
+    'src/main/status/HookInstaller.ts', 'src/main/status/HookServer.ts', 'scripts/test-status.cjs', 'scripts/test-status-ui.cjs', 'scripts/test-mobile-scroll.cjs',
+  ]
+  for (const file of envScope) check(!LEGACY_RE.test(read(file)), `${file}: no legacy name`)
 
   // No en dash or em dash anywhere under src/ (style rule; check-brand extends it to the repo).
   const walk = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)])

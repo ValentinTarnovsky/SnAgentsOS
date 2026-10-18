@@ -14,6 +14,7 @@ function load(file, overrides = {}) {
   return mod.exports
 }
 const { notificationSettingsSchema } = load('src/main/store/schema.ts')
+const { AGENT_ENV } = load('src/shared/brand.ts')
 const settings = notificationSettingsSchema.parse({})
 function harness() {
   const events = [], notices = [], timers = new Map()
@@ -169,14 +170,14 @@ async function main() {
       close() { this.emit('close') }
     }
     load('src/main/status/statusRuntime.ts', {
-      process: { ...process, argv: ['node', 'runtime', ...args], env: { SNMULTICC_REAL_CODEX: 'codex', SNMULTICC_CODEX_URL: 'ws://127.0.0.1:1' } },
+      process: { ...process, argv: ['node', 'runtime', ...args], env: { [AGENT_ENV.realCodex]: 'codex', [AGENT_ENV.codexUrl]: 'ws://127.0.0.1:1' } },
       require: id => id === 'ws' ? { WebSocket: LaunchSocket } : id === 'child_process' ? { spawn: (_exe, actual) => { launched = actual; return new (require('events').EventEmitter)() } } : require(id),
     })
     await new Promise(resolve => setImmediate(resolve))
     check((launched[0] === '--remote') === remote, 'launcher preserves command arguments: ' + args.join(' '))
   }
 
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'snmulticc-hooks-test-'))
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-hooks-test-'))
   const { CodexBridge } = load('src/main/status/CodexBridge.ts')
   const bridge = new CodexBridge(() => path.join(temporary, 'launcher'), 'test-runtime.js', () => {})
   bridge.findExecutable = () => process.execPath
@@ -184,12 +185,12 @@ async function main() {
     await bridge.configure(true)
     const env = bridge.environment('test-pty', 'test-pane', temporary)
     const WebSocket = require('ws')
-    for (const headers of [{}, { Authorization: 'Bearer incorrect' }, { Authorization: 'Bearer ' + env.SNMULTICC_CODEX_TOKEN, Origin: 'https://example.test' }]) {
-      const rejected = await new Promise(resolve => { const socket = new WebSocket(env.SNMULTICC_CODEX_URL, { headers }); socket.once('error', () => resolve(true)); socket.once('open', () => { socket.close(); resolve(false) }) })
+    for (const headers of [{}, { Authorization: 'Bearer incorrect' }, { Authorization: 'Bearer ' + env[AGENT_ENV.codexToken], Origin: 'https://example.test' }]) {
+      const rejected = await new Promise(resolve => { const socket = new WebSocket(env[AGENT_ENV.codexUrl], { headers }); socket.once('error', () => resolve(true)); socket.once('open', () => { socket.close(); resolve(false) }) })
       check(rejected, 'Codex bridge rejects missing/wrong token and browser origins')
     }
     const accepted = await new Promise((resolve, reject) => {
-      const socket = new WebSocket(env.SNMULTICC_CODEX_URL, { headers: { Authorization: 'Launch ' + env.SNMULTICC_CODEX_TOKEN } })
+      const socket = new WebSocket(env[AGENT_ENV.codexUrl], { headers: { Authorization: 'Launch ' + env[AGENT_ENV.codexToken] } })
       socket.once('error', reject); socket.once('open', () => socket.send(JSON.stringify({ cwd: temporary, env: { TEST_CONTEXT: 'preserved' } })))
       socket.once('message', raw => { resolve(JSON.parse(raw.toString()).ok); socket.close() })
     })
@@ -211,7 +212,7 @@ async function main() {
     const body = JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'session-\u00f1' })
     const command = data.hooks.SessionStart[0].hooks[0].command
     await new Promise((resolve, reject) => {
-      const child = require('child_process').spawn(process.platform === 'win32' ? 'powershell.exe' : '/bin/sh', process.platform === 'win32' ? command.split(' ').slice(1) : ['-c', command], { env: { ...process.env, SNMULTICC_CONSOLE_ID: 'pane', SNMULTICC_PTY_ID: 'pty' }, windowsHide: true, timeout: 10000 })
+      const child = require('child_process').spawn(process.platform === 'win32' ? 'powershell.exe' : '/bin/sh', process.platform === 'win32' ? command.split(' ').slice(1) : ['-c', command], { env: { ...process.env, [AGENT_ENV.consoleId]: 'pane', [AGENT_ENV.ptyId]: 'pty' }, windowsHide: true, timeout: 10000 })
       child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error('SessionStart relay exit ' + code)))
       child.stdin.end(body)
     })
@@ -220,7 +221,7 @@ async function main() {
     const response = await fetch(endpoint, { method: 'POST', headers: { 'X-Console-Id': 'pane', 'X-Pty-Id': 'pty' }, body: JSON.stringify({ hook_event_name: 'PermissionRequest', session_id: 'session', tool_use_id: 'tool-id', tool_name: 'Bash' }) })
     check(response.status === 200 && await response.text() === '' && received.at(-1).toolUseId === 'tool-id', 'HTTP observer forwards request identity without returning a decision')
     check((await fetch(endpoint + 'wrong', { method: 'POST', body })).status === 404 && received.length === 2, 'wrong hook token rejected')
-    await fetch(endpoint, { method: 'POST', body }); check(received.length === 2, 'hooks outside SnMultiCC ignored')
+    await fetch(endpoint, { method: 'POST', body }); check(received.length === 2, 'hooks outside the app ignored')
     data.hooks.PermissionRequest = []; fs.writeFileSync(file, JSON.stringify(data))
     check(!installer.hooksUpToDate(port, token), 'partial installation detected')
     installer.installHooks(port, token); installer.uninstallHooks()
