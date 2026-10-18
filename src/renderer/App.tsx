@@ -12,6 +12,7 @@ import { startGitSync } from '@/lib/gitSync'
 import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { startPersistence } from '@/lib/persist'
 import { initPtyLifecycle, reconcilePtys } from '@/lib/ptyLifecycle'
+import { initOpenRequests } from '@/lib/openRequest'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
 import { usePaneScheduler } from '@/lib/usePaneScheduler'
 import { useStatusEvents } from '@/lib/useStatusEvents'
@@ -114,6 +115,13 @@ export function App() {
   // agent was interrupted, even in workspaces not opened yet.
   useEffect(() => {
     if (hydrated) void mountInterruptedAgents()
+  }, [hydrated])
+
+  // "Open in SnAgentsOS" (E4-FR-33): a folder from `--open` waits in main until
+  // the store is hydrated, then activates its workspace or opens the wizard.
+  useEffect(() => {
+    if (!hydrated) return
+    return initOpenRequests()
   }, [hydrated])
 
   // Mirror desktop state to phones once config is loaded (debounced snapshots).

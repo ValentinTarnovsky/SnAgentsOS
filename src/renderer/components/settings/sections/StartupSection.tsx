@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react'
+import type { ExplorerMenuResult } from '@shared/ipc-contract'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { useAppInfo } from '@/lib/useAppInfo'
 import { ToggleRow } from '../ui'
 import { HotkeyInput } from '../HotkeyInput'
+
+const isExplorerResult = (r: unknown): r is ExplorerMenuResult =>
+  !!r && typeof r === 'object' && typeof (r as ExplorerMenuResult).registered === 'boolean'
 
 export function StartupSection() {
   const t = useT()
@@ -12,6 +16,38 @@ export function StartupSection() {
   const info = useAppInfo()
   const portable = info?.portable ?? false
   const [hotkeyFailed, setHotkeyFailed] = useState(false)
+  const [explorer, setExplorer] = useState<ExplorerMenuResult | null>(null)
+  const [explorerBusy, setExplorerBusy] = useState(false)
+
+  // What the Explorer menu keys point at now (E4-FR-34): path, mismatch, availability.
+  useEffect(() => {
+    let alive = true
+    void Promise.resolve()
+      .then(() => window.snApi.system.getExplorerMenu())
+      .then((r) => {
+        if (alive && isExplorerResult(r)) setExplorer(r)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // A failed write leaves the toggle where the registry really is.
+  const setExplorerMenu = (v: boolean): void => {
+    updateSettings({ explorerMenu: v })
+    setExplorerBusy(true)
+    void Promise.resolve()
+      .then(() => window.snApi.system.setExplorerMenu({ enabled: v, language: settings.language }))
+      .then((r) => {
+        if (!isExplorerResult(r)) return
+        setExplorer(r)
+        if (!r.ok && !r.skipped) updateSettings({ explorerMenu: r.registered })
+      })
+      .catch((err: unknown) => setExplorer((prev) => ({ ...(prev ?? { registered: false }), ok: false, error: String(err) })))
+      .finally(() => setExplorerBusy(false))
+  }
+  const explorerUnavailable = explorer?.skipped
 
   // Reflect the real OS login-item state on open (installed build only).
   useEffect(() => {
@@ -82,6 +118,37 @@ export function StartupSection() {
           onChange={(a) => applyHotkey(settings.globalHotkeyEnabled, a)}
         />
         {hotkeyFailed && <p className="text-xs text-red-400">{t('settings.hotkeyFailed')}</p>}
+      </div>
+
+      <div className="space-y-1.5 border-t border-border pt-5">
+        <ToggleRow
+          checked={settings.explorerMenu}
+          onChange={setExplorerMenu}
+          searchId="startup.explorerMenu"
+          title={t('settings.explorerMenu')}
+          description={t('settings.explorerMenuHint')}
+          disabled={explorerBusy || !!explorerUnavailable}
+        />
+        {explorerUnavailable && (
+          <p className="text-xs text-text-secondary" data-explorer-note>
+            {t(explorerUnavailable === 'dev' ? 'settings.explorerMenuDev' : 'settings.explorerMenuWindowsOnly')}
+          </p>
+        )}
+        {explorer?.registered && explorer.exe && !explorer.mismatch && (
+          <p className="truncate font-mono text-[11px] text-text-secondary" title={explorer.exe} data-explorer-path>
+            {t('settings.explorerMenuRegistered', { path: explorer.exe })}
+          </p>
+        )}
+        {explorer?.registered && explorer.mismatch && (
+          <p role="status" className="break-all text-xs text-amber-400" data-explorer-mismatch>
+            {t('settings.explorerMenuMismatch', { path: explorer.exe ?? '?' })}
+          </p>
+        )}
+        {explorer?.error && (
+          <p role="alert" className="break-all text-xs text-red-400" data-explorer-error>
+            {t('settings.explorerMenuError', { error: explorer.error })}
+          </p>
+        )}
       </div>
     </div>
   )
