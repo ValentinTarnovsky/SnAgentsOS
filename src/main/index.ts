@@ -53,6 +53,8 @@ const remoteManager = new RemoteManager(
   ptyManager,
   () => mainWindow?.webContents ?? null,
   app.getVersion(),
+  // Closure: statusManager is constructed below; only read once phones connect.
+  () => statusManager.snapshot(),
 )
 const hookServer = new HookServer()
 const discordNotifier = new DiscordNotifier()
@@ -63,6 +65,8 @@ const statusManager = new StatusManager(
 )
 const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event))
 ptyManager.addSink(statusManager)
+// Agent status reaches phones straight from main (E1-FR-03), not via the renderer.
+statusManager.addListener((evt) => remoteManager.pushPaneStatus(evt))
 ptyManager.addSink(codexBridge)
 let statusIpc: StatusIpc | null = null
 // Created in bootstrap: powerSaveBlocker/powerMonitor need app ready.
