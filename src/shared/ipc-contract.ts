@@ -295,6 +295,11 @@ export interface RemoteUiState {
 export interface RemoteCommand {
   id: string
   action: RemoteCtlAction
+  /**
+   * Name of the paired device that sent it (E4-FR-08). Main fills it from the
+   * authenticated session and the DeviceRegistry, never from the payload.
+   */
+  deviceName?: string
 }
 
 export interface RemoteCommandResult {
