@@ -190,7 +190,7 @@ function fold(text: string): { folded: string; origin: number[] } {
   let folded = ''
   const origin: number[] = []
   for (let i = 0; i < text.length; i++) {
-    const f = text[i].normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+    const f = text[i].normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
     for (let j = 0; j < f.length; j++) {
       folded += f[j]
       origin.push(i)
