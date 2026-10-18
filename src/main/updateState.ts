@@ -32,13 +32,15 @@ export class UpdateStateStore {
 
   /**
    * A check finished. Ignored while a download/apply runs (the running install
-   * keeps its info). A failed check keeps the phase; a good one moves between
-   * 'available' and 'idle' and clears a previous install outcome.
+   * keeps its info). A failed check keeps the phase and the last good info, so
+   * 'available' never pairs with an error result that says nothing is
+   * available; a good one moves between 'available' and 'idle' and clears a
+   * previous install outcome.
    */
   checked(info: UpdateInfo): void {
     if (this.busy) return
     if (info.error) {
-      this.set({ ...this.state, info })
+      if (!this.state.info) this.set({ ...this.state, info })
       return
     }
     this.set({ phase: info.available ? 'available' : 'idle', progress: null, installError: null, info })
