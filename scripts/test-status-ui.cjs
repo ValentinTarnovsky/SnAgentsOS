@@ -4,7 +4,7 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
 const { buildSync } = require('esbuild')
-const root = path.resolve(__dirname, '..'), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snmulticc-ui-'))
+const root = path.resolve(__dirname, '..'), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-ui-'))
 const assets = path.join(root, 'out/renderer/assets')
 const css = fs.readdirSync(assets).find(f => /^index-.*\.css$/.test(f))
 if (!css) throw new Error('Run npm run build first')

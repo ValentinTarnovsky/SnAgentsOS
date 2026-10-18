@@ -105,6 +105,31 @@ export const es: Record<keyof typeof en, string> = {
   'data.importChoose': '¿Cómo aplicar la configuración importada?',
   'data.replace': 'Reemplazar',
   'data.merge': 'Combinar',
+  'settings.data.backup.title': 'Respaldo de {legacy}',
+  'settings.data.backup.line': '{path} (se borra el {date})',
+  'settings.data.backup.show': 'Mostrar',
+
+  // Aviso del rebrand (una vez, después de traer los datos de 1.x)
+  'rebrand.title': '{legacy} ahora es {app}',
+  'rebrand.brought': 'Se trajo todo de {legacy}:',
+  'rebrand.count.workspaces': 'Workspaces',
+  'rebrand.count.devices': 'Celulares emparejados',
+  'rebrand.count.backups': 'Backups de la configuración',
+  'rebrand.cleanup.intro': 'Los restos de {legacy} se borran solos.',
+  'rebrand.cleanup.running': 'Limpieza en curso...',
+  'rebrand.cleanup.done': 'Limpieza terminada.',
+  'rebrand.cleanup.deferred': 'Quedan {n} elementos en uso, se reintenta solo.',
+  'rebrand.backup': 'Hay un respaldo de seguridad en {path} que se borra el {date}.',
+  'rebrand.repin': 'Volvé a fijar {app} en la barra de tareas.',
+  'rebrand.manual.uninstallPerMachine': 'Desinstalá {legacy} desde Configuración > Aplicaciones.',
+  'rebrand.manual.trashMacApp': 'Mové {legacy} a la Papelera.',
+  'rebrand.firewall': 'Windows va a pedir permiso de firewall para {app}. Aceptalo en redes privadas para que tus celulares vuelvan a conectar.',
+  'rebrand.ok': 'Entendido',
+  'rebrand.showBackup': 'Mostrar respaldo',
+  'legacy.banner.failed': 'No se pudieron traer tus datos de {legacy}. Siguen intactos y se reintenta en el próximo inicio.',
+  'legacy.banner.deferred': 'Quedan {n} restos de {legacy} en uso. Se vuelve a intentar solo.',
+  'legacy.banner.viewLog': 'Ver registro',
+  'legacy.banner.dismiss': 'Cerrar',
 
   // Actualizaciones
   'settings.cat.updates': 'Actualizaciones',
@@ -125,6 +150,7 @@ export const es: Record<keyof typeof en, string> = {
     'Cuando se publica una versión más nueva, te ofrece instalarla automáticamente.',
   'update.failed': 'No se pudo buscar actualizaciones. Revisá tu conexión e intentá de nuevo.',
   'update.installFailed': 'La actualización falló: {error}',
+  'update.error.missingChecksum': 'El release no publica el checksum; no se instala por seguridad.',
   'update.manualHint':
     'Esta versión no puede actualizarse sola. Abrí la página de la publicación para descargarla.',
   'update.openedInstaller': 'Se abrió el instalador. Seguí sus pasos para terminar de actualizar.',
@@ -176,7 +202,7 @@ export const es: Record<keyof typeof en, string> = {
   'search.prev': 'Anterior',
 
   // Empty state
-  'empty.title': 'Multi Command Consoles',
+  'empty.title': 'Centro de mando de agentes',
   'empty.subtitle': 'Creá un workspace en el directorio que quieras y abrí varias consolas a la vez.',
 
   // Wizard
@@ -239,7 +265,7 @@ export const es: Record<keyof typeof en, string> = {
   'notif.discord.userHint': 'Copiá tu ID con el modo desarrollador de Discord. Vacío envía el mensaje sin ping.',
   'notif.discord.test': 'Enviar prueba a Discord',
   'notif.desktop.test': 'Probar aviso de escritorio',
-  'notif.desktop.blocked': 'Windows bloqueó el aviso. Activá las notificaciones de SnMultiCC en Configuración de Windows > Sistema > Notificaciones.',
+  'notif.desktop.blocked': 'Windows bloqueó el aviso. Activá las notificaciones de {app} en Configuración de Windows > Sistema > Notificaciones.',
   'notif.desktop.failed': 'El sistema no pudo mostrar el aviso. Revisá los permisos de notificación y, en Windows, usá la app instalada con su acceso en el menú Inicio.',
   'notif.desktop.unavailable': 'Las notificaciones de escritorio no están disponibles en este sistema.',
   'notif.discord.sending': 'Enviando...',
@@ -267,7 +293,7 @@ export const es: Record<keyof typeof en, string> = {
   'settings.cat.aiusage': 'Uso de IA',
   'settings.cat.remote': 'Control remoto',
   'settings.cat.about': 'Acerca de',
-  'usage.hint': 'Uso de recursos de SnMultiCC en tu PC, en tiempo real.',
+  'usage.hint': 'Uso de recursos de {app} en tu PC, en tiempo real.',
   'usage.ram': 'Memoria',
   'usage.cpu': 'CPU',
   'usage.processes': 'Procesos',
@@ -403,7 +429,7 @@ export const es: Record<keyof typeof en, string> = {
   'remote.revokeTitle': '¿Revocar dispositivo?',
   'remote.revokeMessage': '“{name}” se desconectará al instante y tendrá que volver a vincularse para reconectar.',
   'remote.firewallHint':
-    'Windows puede pedir permitir SnMultiCC en redes privadas la primera vez; permitilo para que los celulares lleguen a esta PC.',
+    'Windows puede pedir permitir {app} en redes privadas la primera vez; permitilo para que los celulares lleguen a esta PC.',
   'remote.portableHint': 'En la versión portable, cerrar la app detiene el servidor.',
   'remote.securityHint':
     'El tráfico no va cifrado con TLS; usalo en Wi-Fi de confianza (WPA2) o por Tailscale.',
@@ -421,7 +447,7 @@ export const es: Record<keyof typeof en, string> = {
 
   // Remote pairing approval prompt
   'remote.pairing.title': 'Un dispositivo quiere conectarse',
-  'remote.pairing.wants': '“{name}” quiere controlar SnMultiCC.',
+  'remote.pairing.wants': '“{name}” quiere controlar {app}.',
   'remote.pairing.expiresIn': 'Vence en {seconds}s',
   'remote.pairing.allow': 'Permitir',
   'remote.pairing.deny': 'Denegar',
@@ -429,7 +455,7 @@ export const es: Record<keyof typeof en, string> = {
   // Atajos custom de la barra de teclas del telefono
   'remote.keybar.title': 'Botones de la barra de teclas del telefono',
   'remote.keybar.hint':
-    'Agrega botones custom a la barra de teclas de los telefonos pareados. Cada boton manda una secuencia fija de bytes a la consola - que eso se interprete como "insertar una linea nueva" o algo distinto depende de la app que corre ahi, no de SnMultiCC.',
+    'Agrega botones custom a la barra de teclas de los telefonos pareados. Cada boton manda una secuencia fija de bytes a la consola - que eso se interprete como "insertar una linea nueva" o algo distinto depende de la app que corre ahi, no de {app}.',
   'remote.keybar.new': 'Nuevo boton',
   'remote.keybar.label': 'Etiqueta',
   'remote.keybar.seq': 'Secuencia',
@@ -453,6 +479,5 @@ export const es: Record<keyof typeof en, string> = {
   'titlebar.maximize': 'Maximizar',
   'titlebar.restore': 'Restaurar',
   'titlebar.close': 'Cerrar',
-  'tray.show': 'Mostrar SnMultiCC',
   'tray.quit': 'Salir',
 }

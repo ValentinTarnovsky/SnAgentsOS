@@ -1,7 +1,7 @@
 {
-  "name": "SnMultiCC Remote",
-  "short_name": "SnMultiCC",
-  "description": "Live remote control for SnMultiCC consoles from your phone.",
+  "name": "SnAgentsOS Remote",
+  "short_name": "SnAgentsOS",
+  "description": "Live remote control for SnAgentsOS agents and consoles from your phone.",
   "display": "standalone",
   "orientation": "any",
   "start_url": "./",

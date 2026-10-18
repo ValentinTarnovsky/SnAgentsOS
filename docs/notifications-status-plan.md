@@ -1,3 +1,5 @@
+> SnMultiCC paso a llamarse SnAgentsOS en v2.0.0; este documento conserva el nombre historico.
+
 # Notificaciones y luces de estado: diagnostico y plan
 
 Fecha: 2026-09-27. Base revisada: `f3e2a48`, SnMultiCC 1.13.0, config v9.

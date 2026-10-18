@@ -16,6 +16,7 @@ import type { Duplex } from 'stream'
 import { readFileSync } from 'fs'
 import { extname, join, resolve, sep } from 'path'
 import { app } from 'electron'
+import { BRAND } from '@shared/brand'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { isPrivateOrTailnet, normalizeIp } from './network'
 
@@ -209,7 +210,7 @@ export class RemoteServer {
       'Content-Security-Policy': CSP,
     })
     res.end(
-      '<!doctype html><meta charset="utf-8"><title>SnMultiCC Remote</title>' +
+      '<!doctype html><meta charset="utf-8"><title>' + BRAND.mobileTitle + '</title>' +
         '<body style="font-family:system-ui;padding:2rem;background:#111;color:#eee">' +
         '<h1>Mobile bundle not built</h1>' +
         '<p>Run <code>npm run build:mobile</code> (or a full <code>npm run build</code>) ' +

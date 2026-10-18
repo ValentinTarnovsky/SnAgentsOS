@@ -6,12 +6,22 @@
  * therefore two distinct pairings (see the plan's accepted risks). A DHCP IP
  * change or a port change likewise forces a re-pair - the QR modal hints users
  * toward the stable Tailscale IP.
+ *
+ * Keys live under BRAND.mobileStoragePrefix. A phone paired by 1.x still holds
+ * them under LEGACY_BRAND.mobileStoragePrefix: the first read of each page load
+ * copies those to the new keys, re-reads to confirm and only then removes the
+ * legacy ones (E0-FR-18). If the copy cannot be written (private mode, quota)
+ * the legacy values serve from memory and stay in storage, so the next load
+ * retries. Every storage access is wrapped: a throwing localStorage must never
+ * break the boot.
  */
+import { BRAND, LEGACY_BRAND } from '@shared/brand'
 import { bytesToHex } from './sha256'
 
-const DEVICE_ID_KEY = 'snmulticc.remote.deviceId'
-const SECRET_KEY = 'snmulticc.remote.secret'
-const HOST_PLATFORM_KEY = 'snmulticc.remote.hostPlatform'
+type AuthKey = 'deviceId' | 'secret' | 'hostPlatform'
+const AUTH_KEYS: AuthKey[] = ['deviceId', 'secret', 'hostPlatform']
+const KEY = (k: AuthKey): string => `${BRAND.mobileStoragePrefix}remote.${k}`
+const LEGACY_KEY = (k: AuthKey): string => `${LEGACY_BRAND.mobileStoragePrefix}remote.${k}`
 
 export interface StoredAuth {
   deviceId: string
@@ -19,36 +29,126 @@ export interface StoredAuth {
   secretHex: string
 }
 
+let migrationTried = false
+// Legacy values kept in memory when the migration could not write the new keys.
+// Cleared by storeAuth and clearAuth so a revoked device never comes back.
+let legacyFallback: Partial<Record<AuthKey, string>> = {}
+
+function getItem(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+/** removeItem one key at a time, so one failure never skips the others. */
+function removeKeys(keys: string[]): void {
+  for (const key of keys) {
+    try {
+      localStorage.removeItem(key)
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/**
+ * One-shot migration of the 1.x keys, run on the first read of a page load.
+ * Copies every legacy key that exists, confirms each write by reading it back,
+ * and removes the legacy keys only after all of them are confirmed. A failed or
+ * unconfirmed write rolls back the partial copy (so the next load sees the new
+ * keys missing and retries) and keeps the legacy values in memory.
+ */
+function migrateLegacyAuthOnce(): void {
+  if (migrationTried) return
+  migrationTried = true
+  const legacy: Partial<Record<AuthKey, string>> = {}
+  for (const k of AUTH_KEYS) {
+    const value = getItem(LEGACY_KEY(k))
+    if (value !== null) legacy[k] = value
+  }
+  if (!legacy.deviceId) {
+    // No 1.x pairing to carry over, but 1.x's clearAuth left hostPlatform
+    // behind (and a lone secret is unusable): drop the orphans so no legacy
+    // key survives. hostPlatform is copied first when the new key lacks it.
+    const platform = legacy.hostPlatform
+    if (platform !== undefined && getItem(KEY('hostPlatform')) === null) {
+      try {
+        localStorage.setItem(KEY('hostPlatform'), platform)
+        if (localStorage.getItem(KEY('hostPlatform')) !== platform) throw new Error('write not confirmed')
+      } catch {
+        legacyFallback = { hostPlatform: platform }
+        return
+      }
+    }
+    if (Object.keys(legacy).length > 0) removeKeys(AUTH_KEYS.map(LEGACY_KEY))
+    return
+  }
+  if (getItem(KEY('deviceId')) !== null && getItem(KEY('secret')) !== null) {
+    // Already migrated (a removeItem failed last time): the new keys win, the
+    // legacy leftovers only risk resurrecting an older pairing. A lone new
+    // deviceId is not a usable pairing, so it falls through and is overwritten
+    // instead of costing the legacy secret.
+    removeKeys(AUTH_KEYS.map(LEGACY_KEY))
+    return
+  }
+  const written: string[] = []
+  try {
+    for (const k of AUTH_KEYS) {
+      const value = legacy[k]
+      if (value === undefined) continue
+      written.push(KEY(k))
+      localStorage.setItem(KEY(k), value)
+      if (localStorage.getItem(KEY(k)) !== value) throw new Error('write not confirmed')
+    }
+  } catch {
+    removeKeys(written)
+    legacyFallback = legacy
+    return
+  }
+  removeKeys(AUTH_KEYS.map(LEGACY_KEY))
+}
+
+/** Read one credential: the stored new key, else the in-memory legacy fallback. */
+function readKey(k: AuthKey): string | null {
+  migrateLegacyAuthOnce()
+  return getItem(KEY(k)) ?? legacyFallback[k] ?? null
+}
+
 /** Read the stored device credentials, or null if this origin is unpaired. */
 export function getStoredAuth(): StoredAuth | null {
-  try {
-    const deviceId = localStorage.getItem(DEVICE_ID_KEY)
-    const secretHex = localStorage.getItem(SECRET_KEY)
-    if (deviceId && secretHex) return { deviceId, secretHex }
-  } catch {
-    /* private mode / storage disabled - treat as unpaired */
-  }
+  const deviceId = readKey('deviceId')
+  const secretHex = readKey('secret')
+  if (deviceId && secretHex) return { deviceId, secretHex }
   return null
 }
 
-/** Persist the credentials returned by a successful pairing. */
+/**
+ * Persist the credentials returned by a successful pairing. The legacy keys go
+ * too: left behind they would hold another deviceId's credential.
+ */
 export function storeAuth(deviceId: string, secretHex: string): void {
+  migrationTried = true
+  legacyFallback = {}
   try {
-    localStorage.setItem(DEVICE_ID_KEY, deviceId)
-    localStorage.setItem(SECRET_KEY, secretHex)
+    localStorage.setItem(KEY('deviceId'), deviceId)
+    localStorage.setItem(KEY('secret'), secretHex)
   } catch {
     /* nothing we can do; the session stays authed in memory until reload */
   }
+  removeKeys(AUTH_KEYS.map(LEGACY_KEY))
 }
 
-/** Forget this origin's credentials (revocation or manual unpair). */
+/**
+ * Forget this origin's credentials (revocation or manual unpair). The legacy
+ * keys are removed as well, as a safety net for a migration that never got to
+ * write, so a revoked device cannot come back from them on the next load.
+ */
 export function clearAuth(): void {
-  try {
-    localStorage.removeItem(DEVICE_ID_KEY)
-    localStorage.removeItem(SECRET_KEY)
-  } catch {
-    /* ignore */
-  }
+  migrationTried = true
+  legacyFallback = {}
+  removeKeys([KEY('deviceId'), KEY('secret'), ...AUTH_KEYS.map(LEGACY_KEY)])
 }
 
 /**
@@ -58,7 +158,7 @@ export function clearAuth(): void {
  */
 export function storeHostPlatform(platform: string): void {
   try {
-    if (platform) localStorage.setItem(HOST_PLATFORM_KEY, platform)
+    if (platform) localStorage.setItem(KEY('hostPlatform'), platform)
   } catch {
     /* ignore */
   }
@@ -66,11 +166,7 @@ export function storeHostPlatform(platform: string): void {
 
 /** Read the cached desktop OS, or '' if never learned. */
 export function getStoredHostPlatform(): string {
-  try {
-    return localStorage.getItem(HOST_PLATFORM_KEY) ?? ''
-  } catch {
-    return ''
-  }
+  return readKey('hostPlatform') ?? ''
 }
 
 /**

@@ -1,13 +1,13 @@
 {
-  "name": "snmulticc",
-  "version": "1.14.1",
-  "description": "Multi Command Consoles: a personal command center for the Sn brand. Open sets of multiple terminals and AI CLI sessions (Claude Code, Codex, custom) in a draggable mosaic.",
+  "name": "snagentsos",
+  "version": "2.0.0",
+  "description": "SnAgentsOS: personal command center for AI coding agents (Claude Code, Codex) and terminals, on desktop and phone.",
   "author": "Valentin Tarnovsky",
   "license": "MIT",
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {
-    "test": "node scripts/test-status.cjs",
+    "test": "node scripts/test-status.cjs && node scripts/test-rebrand.cjs && node scripts/test-legacy-migration.cjs && node scripts/check-brand.cjs",
     "test:ui": "node scripts/test-status-ui.cjs",
     "test:mobile": "node scripts/test-mobile-scroll.cjs",
     "dev": "electron-vite dev",

@@ -113,7 +113,7 @@ export interface Snippet {
 /**
  * A custom button in the phone's KeyBar. `seq` is the raw bytes written to the
  * pty when tapped (e.g. "\r", "\x1b", a literal string) - what it does depends
- * on the app reading it, SnMultiCC just forwards the bytes.
+ * on the program reading it, we just forward the bytes.
  */
 export interface KeyButton {
   id: string

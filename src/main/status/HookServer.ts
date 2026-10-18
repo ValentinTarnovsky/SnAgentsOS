@@ -3,7 +3,7 @@ import { timingSafeEqual } from 'crypto'
 
 /** One Claude Code hook event, already attributed to a console. */
 export interface HookEvent {
-  /** SNMULTICC_CONSOLE_ID forwarded by the hook (the paneId). */
+  /** SNAOS_CONSOLE_ID forwarded by the hook (the paneId). */
   consoleId: string
   /** hook_event_name: UserPromptSubmit | Stop | StopFailure | Notification | SessionStart | SessionEnd */
   name: string
@@ -31,7 +31,7 @@ function safeEqual(a: string, b: string): boolean {
  * Loopback-only listener for Claude Code hook POSTs. Claude Code is configured
  * (by HookInstaller) with `type: "http"` hooks pointing at
  * `http://127.0.0.1:<port>/cc-hook/<token>` plus an X-Console-Id header
- * interpolated from the SNMULTICC_CONSOLE_ID env var each pty injects.
+ * interpolated from the SNAOS_CONSOLE_ID env var each pty injects.
  *
  * Contract with Claude Code: ALWAYS answer 200 with an empty body. A non-empty
  * body could be parsed as a hook decision and a non-2xx would surface as a
@@ -119,7 +119,7 @@ export class HookServer {
       res.end()
       if (overflow) return
       const consoleId = String(req.headers['x-console-id'] ?? '').trim()
-      // Empty id => a claude launched outside SnMultiCC; not ours to track.
+      // Empty id => a claude launched outside the app; not ours to track.
       if (!consoleId) return
       try {
         const json = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
