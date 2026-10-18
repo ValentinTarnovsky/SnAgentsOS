@@ -32,6 +32,7 @@ import { LegacyBanner } from '@/components/rebrand/LegacyBanner'
 import { RemoteQrModal } from '@/components/remote/RemoteQrModal'
 import { RemotePairingPrompt } from '@/components/remote/RemotePairingPrompt'
 import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
+import { WorkspaceComposer } from '@/components/wizard/WorkspaceComposer'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { CommandPalette } from '@/components/ui/CommandPalette'
 import { GlobalPromptDialog } from '@/components/workspace/GlobalPromptDialog'
@@ -229,6 +230,7 @@ function AppBody() {
       <RebrandNotice />
       <RemoteQrModal />
       <RemotePairingPrompt />
+      <WorkspaceComposer />
       <NewWorkspaceWizard />
       <CommandPalette />
       <GlobalPromptDialog />

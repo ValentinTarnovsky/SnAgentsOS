@@ -15,7 +15,9 @@ import type {
   Settings,
   Workspace,
   WorkspaceLayout,
+  WorkspaceTaskState,
 } from '@shared/types'
+import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { gridForCount } from '@/components/layout/gridTemplates'
 import {
   QUICK_COMMANDS_MAX,
@@ -156,6 +158,20 @@ export interface WorkspaceDraft {
   panes: WorkspaceDraftPane[]
   /** Connection profile applied to every console in the new workspace. */
   setupId?: string
+  /**
+   * Composer's first prompt (E8-FR-08): queued for the first console that is
+   * not a shell, delivered once through the shared path (E8-FR-02b).
+   */
+  firstPrompt?: string
+}
+
+/** What "Advanced..." hands the 3-step wizard (E8-FR-08); every cell gets `presetId`. */
+export interface WizardInitialDraft {
+  name: string
+  cwd: string
+  grid: GridPreset
+  presetId: string
+  setupId: string
 }
 
 /** What a merge import added, so the caller can warn about the 100 cap. */
@@ -207,9 +223,17 @@ export interface AppState {
   settingsQuery: string
   /** Row to scroll to and ring once its category renders ('notifications.sound', E4-FR-27). */
   settingsAnchor: string | null
+  /**
+   * The new-workspace flow is open (E8-FR-08): the composer card, or the
+   * 3-step wizard it hands off to. Every "a modal is open" check reads this.
+   */
   wizardOpen: boolean
-  /** Values the wizard opens with (cwd/name); null = empty draft. */
+  /** Which surface of the flow shows: the composer (true) or the 3-step wizard (false). */
+  composerOpen: boolean
+  /** Values the composer opens with (cwd/name); null = empty draft. */
   wizardPrefill: WizardPrefill | null
+  /** Draft the 3-step wizard opens with ("Advanced..."); null = its own defaults. */
+  wizardDraft: WizardInitialDraft | null
   paletteOpen: boolean
   globalPromptOpen: boolean
   /** Quick Commands popover, Ctrl+Shift+Q (E8-FR-04; transient). */
@@ -253,6 +277,10 @@ export interface AppState {
   mergeConfig: (config: ConfigFile) => MergeConfigResult
   deleteWorkspace: (id: string) => void
   renameWorkspace: (id: string, name: string) => void
+  /** Set (or clear, with null or blank) a workspace's note, normalized (E8-FR-10). */
+  setWorkspaceNote: (id: string, note: string | null) => void
+  /** Set (or clear, with null) a workspace's task state (E8-FR-10). */
+  setWorkspaceTaskState: (id: string, state: WorkspaceTaskState | null) => void
   toggleFavorite: (id: string) => void
   /** Fold or unfold the sidebar agent rows under a workspace (persisted, E5-FR-19). */
   toggleAgentsCollapsed: (id: string) => void
@@ -329,7 +357,10 @@ export interface AppState {
   openSettings: (target?: string) => void
   setSettingsQuery: (query: string) => void
   setSettingsAnchor: (anchor: string | null) => void
+  /** Open the new-workspace composer (optionally prefilled), or close the whole flow. */
   setWizardOpen: (open: boolean, prefill?: WizardPrefill) => void
+  /** Swap the composer for the 3-step wizard, prefilled with `draft` ("Advanced..."). */
+  openAdvancedWizard: (draft: WizardInitialDraft | null) => void
   setPaletteOpen: (open: boolean) => void
   setGlobalPromptOpen: (open: boolean) => void
   setQuickPopoverOpen: (open: boolean) => void
@@ -396,7 +427,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsQuery: '',
   settingsAnchor: null,
   wizardOpen: false,
+  composerOpen: false,
   wizardPrefill: null,
+  wizardDraft: null,
   paletteOpen: false,
   globalPromptOpen: false,
   quickPopoverOpen: false,
@@ -483,10 +516,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       layout,
       setupId: draft.setupId,
     }
+    // E8-FR-08: the first prompt goes to the first agent console only.
+    const prompt = draft.firstPrompt?.trim() ? draft.firstPrompt : ''
+    const agentPane = prompt ? panes.find((p) => p.type !== 'shell') : undefined
     set((s) => ({
       workspaces: [...s.workspaces, ws],
       activeWorkspaceId: ws.id,
       mountedWorkspaces: mountActive(s.mountedWorkspaces, ws.id),
+      ...(agentPane
+        ? { pendingPrompts: { ...s.pendingPrompts, [agentPane.id]: { text: prompt, enter: true, source: 'composer' as const, createdAt: Date.now() } } }
+        : {}),
     }))
     return ws.id
   },
@@ -579,6 +618,36 @@ export const useAppStore = create<AppState>((set, get) => ({
         w.id === id ? { ...w, name: name.trim() || w.name } : w,
       ),
     })),
+
+  setWorkspaceNote: (id, note) =>
+    set((s) => {
+      const ws = s.workspaces.find((w) => w.id === id)
+      const next = normalizeWorkspaceNote(note)
+      if (!ws || ws.note === next) return {}
+      return {
+        workspaces: s.workspaces.map((w) => {
+          if (w.id !== id) return w
+          if (next) return { ...w, note: next }
+          const { note: _gone, ...rest } = w
+          return rest
+        }),
+      }
+    }),
+
+  setWorkspaceTaskState: (id, state) =>
+    set((s) => {
+      const ws = s.workspaces.find((w) => w.id === id)
+      const next = isTaskState(state) ? state : undefined
+      if (!ws || ws.taskState === next) return {}
+      return {
+        workspaces: s.workspaces.map((w) => {
+          if (w.id !== id) return w
+          if (next) return { ...w, taskState: next }
+          const { taskState: _gone, ...rest } = w
+          return rest
+        }),
+      }
+    }),
 
   toggleFavorite: (id) =>
     set((s) => ({
@@ -1021,7 +1090,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (next !== s.mountedWorkspaces) set({ mountedWorkspaces: next })
   },
 
-  setWizardOpen: (open, prefill) => set({ wizardOpen: open, wizardPrefill: open ? (prefill ?? null) : null }),
+  setWizardOpen: (open, prefill) =>
+    set({ wizardOpen: open, composerOpen: open, wizardPrefill: open ? (prefill ?? null) : null, wizardDraft: null }),
+
+  openAdvancedWizard: (draft) => set({ wizardOpen: true, composerOpen: false, wizardPrefill: null, wizardDraft: draft }),
 
   setPaletteOpen: (open) => set({ paletteOpen: open }),
 
