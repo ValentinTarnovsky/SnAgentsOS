@@ -1,21 +1,21 @@
 /**
  * Phone settings as a pushed screen (E1-FR-37) instead of a sheet over the
- * action sheet. Sections: Appearance (desktop theme, font size), Alerts
+ * action sheet. Sections: Appearance (desktop theme, text size presets of
+ * E2-FR-34), Alerts
  * (in-page alerts, E1-FR-40) and This device (unpair). The Input section of
  * E1-FR-22/30 (AI consoles start in Composer, composer autocorrect) sits
  * between Appearance and Alerts.
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { LogOut, Minus, Plus as PlusSmall } from 'lucide-react'
+import { LogOut } from 'lucide-react'
 import type { ThemeName } from '@shared/types'
 import { PushScreen } from './PushScreen'
 import { ActionList } from './ActionList'
 import { ConfirmSheet } from './ConfirmSheet'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
-import { getActiveTerm } from '../lib/terminalBus'
-import { MAX_FONT, MIN_FONT } from '../lib/fit'
+import { FontScaleRow } from './FontScaleRow'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
 const THEMES = ['midnight', 'light', 'nord', 'dracula', 'solarized'] as const
@@ -75,8 +75,6 @@ export function PrefToggle({
 }
 
 export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
-  const fontOverride = useRemoteStore((s) => s.fontOverride)
-  const setFontOverride = useRemoteStore((s) => s.setFontOverride)
   const themeName = useRemoteStore((s) => s.snapshot?.themeName)
   const inPageAlerts = useRemoteStore((s) => s.inPageAlerts)
   const setInPageAlerts = useRemoteStore((s) => s.setInPageAlerts)
@@ -85,16 +83,6 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const setComposerPref = useRemoteStore((s) => s.setComposerPref)
   const [confirmUnpair, setConfirmUnpair] = useState(false)
 
-  const currentSize = (): number => {
-    if (fontOverride != null) return fontOverride
-    const term = getActiveTerm()
-    const raw = term ? Number(term.options.fontSize) : 14
-    return Number.isFinite(raw) ? Math.round(raw) : 14
-  }
-  const bump = (delta: number): void => {
-    const next = Math.max(MIN_FONT, Math.min(MAX_FONT, currentSize() + delta))
-    setFontOverride(next)
-  }
   const setTheme = (theme: ThemeName): void => {
     void client.sendCtl({ kind: 'setTheme', theme })
   }
@@ -126,32 +114,7 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
                 </span>
               )}
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-text-primary">{t('act.fontSize')}</span>
-              <div className="flex items-center gap-3">
-                <button
-                  onPointerDown={(e) => {
-                    e.preventDefault()
-                    bump(-1)
-                  }}
-                  className="flex h-10 w-10 items-center justify-center rounded-btn border border-border bg-card text-text-primary active:bg-bg-primary"
-                  aria-label={t('set.fontSmaller')}
-                >
-                  <Minus size={16} />
-                </button>
-                <span className="w-8 text-center text-sm font-medium text-text-primary">{currentSize()}</span>
-                <button
-                  onPointerDown={(e) => {
-                    e.preventDefault()
-                    bump(1)
-                  }}
-                  className="flex h-10 w-10 items-center justify-center rounded-btn border border-border bg-card text-text-primary active:bg-bg-primary"
-                  aria-label={t('set.fontLarger')}
-                >
-                  <PlusSmall size={16} />
-                </button>
-              </div>
-            </div>
+            <FontScaleRow />
           </div>
         </SettingsSection>
         <SettingsSection id="input" title={t('input.title')}>

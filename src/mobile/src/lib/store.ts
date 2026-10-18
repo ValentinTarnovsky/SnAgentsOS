@@ -23,6 +23,7 @@ import {
   type InputMode,
 } from './prefs'
 import { paneById } from './workspace'
+import { loadFontScale, saveFontScale } from './fit'
 
 /**
  * E1-FR-20: the soft keyboard counts as open only while an input field has the
@@ -81,8 +82,8 @@ export interface RemoteState {
   subscribedPaneId: string | null
   /** True while waiting for the next printable char to become a control code. */
   ctrlLatch: boolean
-  /** Manual font-size override from the settings sheet (null = auto-fit). */
-  fontOverride: number | null
+  /** Text size multiplier on the auto-fit size (pinch / Settings presets, E2-FR-34). */
+  fontScale: number
   /** Pairing pending deadline (epoch ms) for the countdown. */
   pairExpiresAt: number | null
   pairReason: RemotePairDeniedReason | null
@@ -136,7 +137,8 @@ export interface RemoteState {
   /** Merge a partial state (used by the client for machine transitions). */
   update: (partial: Partial<RemoteState>) => void
   setCtrlLatch: (on: boolean) => void
-  setFontOverride: (size: number | null) => void
+  /** Set and persist the text size preset ('snagentsos.fontScale'). */
+  setFontScale: (scale: number) => void
   setToast: (text: string | null) => void
   /** Feed keyboard signals from viewport.ts; recomputes kbOpen. */
   setKeyboard: (k: { inset?: number; focus?: string | null }) => void
@@ -158,7 +160,7 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   activePaneId: null,
   subscribedPaneId: null,
   ctrlLatch: false,
-  fontOverride: null,
+  fontScale: loadFontScale(),
   pairExpiresAt: null,
   pairReason: null,
   authFailReason: null,
@@ -184,7 +186,10 @@ export const useRemoteStore = create<RemoteState>((set) => ({
 
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
-  setFontOverride: (size) => set({ fontOverride: size }),
+  setFontScale: (scale) => {
+    saveFontScale(scale)
+    set({ fontScale: scale })
+  },
   setToast: (text) => set({ toast: text }),
   setKeyboard: (k) =>
     set((s) => {
