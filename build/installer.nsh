@@ -14,6 +14,7 @@
 
 Var snLegacyInstDir
 Var snLegacyPinned
+Var snLegacyInstalled
 
 ; Shown when a portable data folder sits where the old uninstaller would RMDir /r.
 LangString snPortableDataInside 1033 "There is data from a portable version inside the installation folder. Move it to another folder and run the installer again."
@@ -85,26 +86,46 @@ LangString snPortableDataInside 1066 "There is data from a portable version insi
   ${If} $snLegacyInstDir != ""
     !insertmacro snGuardPortableData "$snLegacyInstDir"
   ${EndIf}
-  !insertmacro snGuardPortableData "$INSTDIR"
-  ; Taskbar pin (E0-FR-31): the old uninstaller probably unpins it, so only
-  ; remember it existed and let the app ask to pin again.
-  SetShellVarContext current
-  ${If} ${FileExists} "$APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\${SN_LEGACY_FOLDER}.lnk"
-    StrCpy $snLegacyPinned "1"
+  ; Guard the folder the files really go to: with the wizard, instFilesPre runs
+  ; after this and appends the app folder when the path lacks it. A portable
+  ; next to the folder the user picked is not inside the install.
+  StrCpy $R6 $INSTDIR
+  !ifdef allowToChangeInstallationDirectory
+    ${IfNot} ${Silent}
+      ${StrContains} $R5 "${APP_FILENAME}" $INSTDIR
+      ${If} $R5 == ""
+        StrCpy $R6 "$INSTDIR\${APP_FILENAME}"
+      ${EndIf}
+    ${EndIf}
+  !endif
+  !insertmacro snGuardPortableData "$R6"
+  ; Only an installed 1.x still has its exe in the registered folder. On 2.x to
+  ; 2.y there is nothing to close or report: the pin the app retargeted keeps the
+  ; name SnMultiCC.lnk (E0-FR-31), and a 2.x folder moved in the wizard is not a
+  ; legacy install for the cleanup.
+  ${If} $snLegacyInstDir != ""
+  ${AndIf} ${FileExists} "$snLegacyInstDir\${SN_LEGACY_EXE}"
+    StrCpy $snLegacyInstalled "1"
+    ; Taskbar pin (E0-FR-31): the old uninstaller probably unpins it, so only
+    ; remember it existed and let the app ask to pin again.
+    SetShellVarContext current
+    ${If} ${FileExists} "$APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\${SN_LEGACY_FOLDER}.lnk"
+      StrCpy $snLegacyPinned "1"
+    ${EndIf}
+    ${If} $installMode == "all"
+      SetShellVarContext all
+    ${EndIf}
+    ; Closes the current user's 1.x before uninstallOldVersion, even if its own
+    ; uninstaller fails later. Only the process itself, never its tree: the 1.14.1
+    ; updater launches this setup as a child of the old exe, so a tree kill would
+    ; take the setup down too. cmd.exe expands %USERNAME% at runtime (same trick
+    ; as FIND_PROCESS in allowOnlyOneInstallerInstance.nsh).
+    nsExec::Exec `"$SYSDIR\cmd.exe" /c taskkill /IM ${SN_LEGACY_EXE} /FI "USERNAME eq %USERNAME%"`
+    Pop $R7
+    Sleep 2000
+    nsExec::Exec `"$SYSDIR\cmd.exe" /c taskkill /IM ${SN_LEGACY_EXE} /F /FI "USERNAME eq %USERNAME%"`
+    Pop $R7
   ${EndIf}
-  ${If} $installMode == "all"
-    SetShellVarContext all
-  ${EndIf}
-  ; Closes the current user's 1.x before uninstallOldVersion, even if its own
-  ; uninstaller fails later. Only the process itself, never its tree: the 1.14.1
-  ; updater launches this setup as a child of the old exe, so a tree kill would
-  ; take the setup down too. cmd.exe expands %USERNAME% at runtime (same trick
-  ; as FIND_PROCESS in allowOnlyOneInstallerInstance.nsh).
-  nsExec::Exec `"$SYSDIR\cmd.exe" /c taskkill /IM ${SN_LEGACY_EXE} /FI "USERNAME eq %USERNAME%"`
-  Pop $R7
-  Sleep 2000
-  nsExec::Exec `"$SYSDIR\cmd.exe" /c taskkill /IM ${SN_LEGACY_EXE} /F /FI "USERNAME eq %USERNAME%"`
-  Pop $R7
 !macroend
 !endif
 
@@ -138,7 +159,7 @@ LangString snPortableDataInside 1066 "There is data from a portable version insi
   ${EndIf}
   ; Read and deleted by the app's legacy cleanup (E0-FR-31, FR-32, FR-34). Value
   ; names must match INSTALLER_REG in src/shared/brand.ts.
-  ${If} $snLegacyInstDir != ""
+  ${If} $snLegacyInstalled == "1"
   ${AndIf} $snLegacyInstDir != $INSTDIR
     WriteRegStr SHCTX "Software\${APP_GUID}" LegacyInstallLocation $snLegacyInstDir
   ${EndIf}
