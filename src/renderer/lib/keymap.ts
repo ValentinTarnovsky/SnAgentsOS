@@ -21,6 +21,8 @@ export type ActionId =
   | 'focusPrevPane'
   // Quick Commands popover (E8-FR-04).
   | 'quickCommands'
+  // Changes panel (E7-FR-11; CONTRATOS "Atajos": toggleChanges, Ctrl+Shift+G is globalPrompt).
+  | 'toggleChanges'
 
 export interface KeyAction {
   id: ActionId
@@ -49,6 +51,7 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'focusNextPane', labelKey: 'keys.focusNextPane', defaultAccel: 'Ctrl+Alt+Right' },
   { id: 'focusPrevPane', labelKey: 'keys.focusPrevPane', defaultAccel: 'Ctrl+Alt+Left' },
   { id: 'quickCommands', labelKey: 'keys.quickCommands', defaultAccel: 'Ctrl+Shift+Q' },
+  { id: 'toggleChanges', labelKey: 'keys.toggleChanges', defaultAccel: 'Ctrl+Shift+D' },
 ]
 
 /** Actions that stay out of text fields so the field keeps the key (E5-FR-18). */

@@ -2,6 +2,8 @@ import type { ClaudePaneState, PaneStatus } from '@shared/types'
 import { useAppStore, type AppState } from './store'
 import { useGitStore } from './gitStore'
 import { agentFinished, buildGitTargets, gitChipEnabled, gitKeysForPane } from './gitChip'
+import { setKnownPathResolver } from './dragNonce'
+import { isListedPath } from './changes'
 
 /**
  * Keeps main's GitService fed (E7-FR-06): the watched targets (derived from
@@ -12,6 +14,11 @@ import { agentFinished, buildGitTargets, gitChipEnabled, gitKeysForPane } from '
 export function startGitSync(): () => void {
   const api = window.snApi.git
   const offUpdate = api.onUpdate((evt) => useGitStore.getState().apply(evt))
+  // E7-FR-04: an in-app path drag is only accepted for a file the Changes panel lists right now.
+  setKnownPathResolver((abs) => {
+    const g = useGitStore.getState()
+    return isListedPath(abs, g.files, g.summaries)
+  })
 
   let lastTargets = ''
   const pushTargets = (s: AppState): void => {
@@ -76,6 +83,7 @@ export function startGitSync(): () => void {
   return () => {
     unsub()
     offUpdate()
+    setKnownPathResolver(null)
   }
 }
 

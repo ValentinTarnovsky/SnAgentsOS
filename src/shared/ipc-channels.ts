@@ -149,6 +149,11 @@ export const CH = {
   GIT_INFO: 'git:info', // invoke ({ force? }) -> GitInfoRes
   GIT_SET_CONFIG: 'git:setConfig', // send ({ gitChip: boolean })
   GIT_REFRESH: 'git:refresh', // send ({ keys?: string[], reason?: 'manual' | 'agent' })
+  // Changes panel (E7-FR-11..16). Keyed like the targets: main resolves the repo and only serves paths it listed.
+  GIT_STATUS: 'git:status', // invoke ({ key }) -> GitChangesRes | null
+  GIT_FILE_DIFF: 'git:fileDiff', // invoke ({ key, path, area, force? }) -> GitDiffReply
+  GIT_OPEN_FILE: 'git:openFile', // invoke ({ key, path, reveal? }) -> boolean
+  GIT_SET_PANEL: 'git:setPanel', // send ({ key: string | null }): the open panel's target, polled every 3 s
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

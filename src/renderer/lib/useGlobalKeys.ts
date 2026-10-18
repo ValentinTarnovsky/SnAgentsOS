@@ -9,6 +9,8 @@ import { reopenClosedConsole } from './agentLaunch'
 import { revealPane } from './revealPane'
 import { toast } from './toast'
 import { translate } from '@/i18n'
+import { toggleChangesPanel } from './changesPanel'
+import { panelKeyOf } from './changes'
 import {
   advanceWaiting,
   allAgents,
@@ -156,6 +158,9 @@ function runAction(id: ActionId): void {
         if (paneId) setTimeout(() => focusPane(paneId), 0)
       } else if (!quickBlocked()) s.setQuickPopoverOpen(true)
       break
+    case 'toggleChanges':
+      toggleChangesPanel()
+      break
   }
 }
 
@@ -204,6 +209,8 @@ export function useGlobalKeys(): void {
 
       const accel = eventToAccel(e)
       if (!accel) return
+      // Inside the Changes panel its own keys (F7, Alt+arrows, Alt+Z, Esc) win over any binding (E7-FR-14).
+      if (panelKeyOf(e) && (e.target as Element | null)?.closest?.('[data-changes-panel]')) return
       const keymap = resolveKeymap(useAppStore.getState().settings.keymap)
       for (const id of Object.keys(keymap) as ActionId[]) {
         if (keymap[id] === accel) {

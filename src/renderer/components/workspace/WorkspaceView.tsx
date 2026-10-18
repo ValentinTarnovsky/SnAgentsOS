@@ -5,6 +5,9 @@ import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
 import { TilingGrid } from '@/components/layout/TilingGrid'
 import { WorkspaceGitLabel } from '@/components/git/WorkspaceGitLabel'
+import { ChangesPanel } from '@/components/changes/ChangesPanel'
+import { useGitStore } from '@/lib/gitStore'
+import { workspaceOfKey } from '@/lib/changes'
 import { useT } from '@/i18n'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ActionTooltipLabel, useActionKeys } from '@/components/ui/KeyHint'
@@ -25,6 +28,10 @@ export function WorkspaceView({
   const activeCount = workspace.panes.filter((p) => !minimizedIds.includes(p.id)).length
   const [open, setOpen] = useState(false)
   const promptKeys = useActionKeys('globalPrompt')
+  // Changes panel (E7-FR-11): over this grid while this workspace is active and owns the panel's target.
+  const panelTarget = useGitStore((s) => s.panel?.targetKey ?? null)
+  const ownsPanel = useAppStore((s) => panelTarget != null && workspaceOfKey(s.workspaces, panelTarget) === workspace.id)
+  const changesKey = isActive && ownsPanel ? panelTarget : null
 
   const launch = (preset: AgentPreset): void => {
     addPane(workspace.id, {
@@ -96,8 +103,9 @@ export function WorkspaceView({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1">
+      <div className="relative min-h-0 flex-1">
         <TilingGrid workspace={workspace} isActive={isActive} />
+        {changesKey && <ChangesPanel key={workspace.id} workspace={workspace} targetKey={changesKey} />}
       </div>
     </div>
   )
