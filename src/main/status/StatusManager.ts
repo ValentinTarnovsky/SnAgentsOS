@@ -376,9 +376,13 @@ export class StatusManager implements PtySink {
     const evt = this.event(paneId, track, false), cfg = this.cfg
     if (fresh && state) {
       this.onNotice({ paneId, provider: track.provider, state, reason: evt.reason })
-      const inView = this.viewed.has(paneId) && (this.getWindow()?.isFocused() ?? false)
+      const focused = this.getWindow()?.isFocused() ?? false
+      const inView = this.viewed.has(paneId) && focused
       evt.notify = !!cfg?.enabled && (state === 'done' ? cfg.notifyDone : cfg.notifyAction) && !inView
-      if (evt.notify) this.showNotification(paneId, track, state)
+      // E4-FR-07: with the window focused, the renderer shows an in-app card
+      // instead of the OS notification (and never flashes the taskbar).
+      evt.delivery = !evt.notify ? 'none' : focused && cfg?.inAppWhenFocused !== false ? 'inApp' : 'native'
+      if (evt.delivery === 'native') this.showNotification(paneId, track, state)
     }
     // Only-detail changes are coalesced to one emission per 500 ms per pane
     // (E5-FR-02); state, pending, session and notifications go out at once.

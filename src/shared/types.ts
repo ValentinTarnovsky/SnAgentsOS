@@ -344,6 +344,11 @@ export interface PaneStatusEvt extends PaneStatusDetails {
   precise: boolean
   /** Main already decided this transition deserves a notification (drives sound too). */
   notify: boolean
+  /**
+   * How main delivered that notification (E4-FR-07): the OS toast, an in-app
+   * card (window focused, console out of view) or nothing. Set on notice events.
+   */
+  delivery?: 'native' | 'inApp' | 'none'
   provider?: AgentProvider
   reason?: AttentionReason
   pendingCount?: number

@@ -105,6 +105,33 @@ async function main() {
     manager.testDesktop(); check(manager.desktopError === 'blocked', 'Windows disabled notifications are reported explicitly')
     failure = 'other native failure'; manager.testDesktop(); check(manager.desktopError === 'failed', 'other native errors are not reported as success')
   }
+  // E4-FR-07: delivery inApp / native / none, and no OS toast or flash for inApp.
+  {
+    let shown = 0, flashes = 0, focused = true
+    class NativeNotification extends require('events').EventEmitter {
+      static isSupported() { return true }
+      show() { shown++ }
+    }
+    const { StatusManager } = load('src/main/status/StatusManager.ts', { require: id => id === 'electron' ? { Notification: NativeNotification } : require(id) })
+    const events = []
+    const win = { isDestroyed: () => false, isFocused: () => focused, webContents: { send: (_ch, e) => events.push(e) }, flashFrame: () => { flashes++ } }
+    const manager = new StatusManager(() => win, () => null)
+    manager.setConfig(settings); manager.onSpawn('pty', 'pane')
+    const hook = (name, rest = {}) => manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty', sessionId: 'session', name, ...rest })
+    const notice = () => events.filter(e => e.delivery).at(-1)
+    hook('PermissionRequest', { toolUseId: 'a' })
+    check(notice().delivery === 'inApp' && notice().notify === true && shown === 0 && flashes === 0, 'focused + out of view: inApp, no OS notification and no taskbar flash')
+    focused = false; hook('PermissionRequest', { toolUseId: 'b' })
+    check(notice().delivery === 'native' && shown === 1 && flashes === 1, 'unfocused: native notification (and flash) as before')
+    focused = true; manager.setViewed(['pane']); hook('PermissionRequest', { toolUseId: 'c' })
+    check(notice().delivery === 'none' && notice().notify === false && shown === 1, 'focused and in view: none')
+    manager.setViewed([]); manager.setConfig({ ...settings, inAppWhenFocused: false }); hook('PermissionRequest', { toolUseId: 'd' })
+    check(notice().delivery === 'native' && shown === 2 && flashes === 1, 'inAppWhenFocused=false brings back the native notification (no flash while focused)')
+    manager.setConfig({ ...settings, enabled: false }); hook('PermissionRequest', { toolUseId: 'e' })
+    check(notice().delivery === 'none' && shown === 2, 'notifications off: none')
+    hook('PostToolUse', { toolUseId: 'e' })
+    check(events.at(-1).delivery === undefined && events.at(-1).state === 'action', 'non-notice status events carry no delivery')
+  }
   const { CodexProtocol } = load('src/main/status/CodexProtocol.ts')
   {
     const events = [], a = new CodexProtocol('a', 'pty-a', e => events.push(e)), b = new CodexProtocol('b', 'pty-b', e => events.push(e))
