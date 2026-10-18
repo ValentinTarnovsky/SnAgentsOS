@@ -7,7 +7,7 @@ import { useAppStore } from './store'
 
 /**
  * "Insert path in the focused console" of the Changes panel (E7-FR-15): the
- * same target as insertToConsole (the last focused console, else the active
+ * same target the old snippet insert used (the last focused console, else the active
  * workspace's first one) and the same format as dropping the file on it
  * (E7-FR-02): agent and bracketed-paste consoles get `term.paste`, a plain
  * one the 1.14.1 quoted write. Never an Enter. Returns the pane id, or null.
