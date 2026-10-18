@@ -89,7 +89,8 @@ function runAction(id: ActionId): void {
       s.setSettingsOpen(true)
       break
     case 'newWorkspace':
-      s.setWizardOpen(true)
+      // Already open (composer or its Advanced wizard): keep that surface and its draft.
+      if (!s.wizardOpen) s.setWizardOpen(true)
       break
     case 'toggleSidebar':
       s.toggleSidebar()
