@@ -3,7 +3,9 @@ import { CH } from '@shared/ipc-channels'
 import type {
   AppInfo,
   AppMetrics,
+  ExplorerMenuResult,
   LegacyDataInfo,
+  OpenRequest,
   PairingQrPayload,
   PowerState,
   PtyDataEvt,
@@ -33,6 +35,7 @@ import type {
   AgentSettings,
   AwakeMode,
   ConfigFile,
+  Language,
   NotificationSettings,
   PaneStatusEvt,
   RemoteSettings,
@@ -65,6 +68,8 @@ const api: SnApi = {
     takeRecovery: () => ipcRenderer.invoke(CH.APP_TAKE_RECOVERY) as Promise<RecoveryInfo | null>,
     reportRenderError: (report: RenderErrorReport) => ipcRenderer.send(CH.APP_REPORT_RENDER_ERROR, report),
     diagnostics: (renderer: RendererDiagnostics) => ipcRenderer.invoke(CH.APP_DIAGNOSTICS, renderer) as Promise<string>,
+    takePendingOpen: () => ipcRenderer.invoke(CH.APP_TAKE_PENDING_OPEN) as Promise<OpenRequest | null>,
+    onOpenPath: (cb: (req: OpenRequest) => void) => sub<OpenRequest>(CH.APP_OPEN_PATH, cb),
   },
   pty: {
     spawn: (req: PtySpawnReq) => ipcRenderer.invoke(CH.PTY_SPAWN, req) as Promise<PtySpawnRes>,
@@ -111,6 +116,9 @@ const api: SnApi = {
     getMetrics: () => ipcRenderer.invoke(CH.SYSTEM_METRICS) as Promise<AppMetrics>,
     openExternal: (url: string) => ipcRenderer.send(CH.SHELL_OPEN_EXTERNAL, url),
     onDisplayRecovered: (cb: () => void) => sub<void>(CH.SYSTEM_DISPLAY_RECOVERED, cb),
+    setExplorerMenu: (req: { enabled: boolean; language: Language }) =>
+      ipcRenderer.invoke(CH.SYSTEM_SET_EXPLORER_MENU, req) as Promise<ExplorerMenuResult>,
+    getExplorerMenu: () => ipcRenderer.invoke(CH.SYSTEM_GET_EXPLORER_MENU) as Promise<ExplorerMenuResult>,
   },
   updates: {
     check: () => ipcRenderer.invoke(CH.UPDATE_CHECK) as Promise<UpdateInfo>,

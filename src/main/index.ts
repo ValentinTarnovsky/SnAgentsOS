@@ -1,10 +1,11 @@
 // Must stay the first import: isolates the dev userData before any path is read (E0-FR-26).
 import './devUserData'
 import { readFileSync, writeFileSync } from 'fs'
+import { stat } from 'fs/promises'
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
-import type { AppInfo, AppMetrics } from '@shared/ipc-contract'
+import type { AppInfo, AppMetrics, OpenRequest } from '@shared/ipc-contract'
 import type { AwakeMode, ConfigFile } from '@shared/types'
 import { createMainWindow } from './window'
 import { dataDir, getConfigPath, isPortable } from './paths'
@@ -47,6 +48,8 @@ import { updateState } from './updateState'
 
 // Remember main's warn/error lines for "Copy diagnostics" (E4-FR-24).
 installLogRing()
+\nimport { makeOpenRequest, OpenRequestQueue, parseOpenArg, validateOpenPath } from './openRequest'
+import { refreshExplorerMenuOnStartup } from './shellIntegration'
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 
@@ -116,6 +119,20 @@ const rendererRecovery = new RendererRecovery({
     quitApp()
   },
 })
+\n// "Open in SnAgentsOS" (E4-FR-32/33): main holds the latest request until the
+// renderer takes it, and pokes it when a window is up.
+const openRequests = new OpenRequestQueue((req) => {
+  const wc = mainWindow?.webContents
+  if (wc && !wc.isDestroyed()) wc.send(CH.APP_OPEN_PATH, req)
+})
+
+/** Parses `--open`, stats the path off the main thread's critical path (3 s deadline) and queues it. */
+async function handleOpenArgv(argv: readonly string[], cwd: string, source: OpenRequest['source']): Promise<void> {
+  const requested = parseOpenArg(argv, cwd)
+  if (!requested) return
+  const dir = await validateOpenPath(requested, (p) => stat(p))
+  if (dir) openRequests.offer(makeOpenRequest(dir, source))
+}
 
 /**
  * Exit snapshot of the agent session registry (E5-FR-06): before the ptys
@@ -390,7 +407,8 @@ async function bootstrap(): Promise<void> {
     return mainT(cfg, 'pty.restarted', { time: shortTime(cfg) })
   })
   registerWindowIpc(() => mainWindow)
-  registerSystemIpc(() => mainWindow?.webContents ?? null)
+  registerSystemIpc(() => mainWindow?.webContents ?? null, openRequests)
+  void handleOpenArgv(process.argv, process.cwd(), 'argv')
   registerUpdateIpc({
     getSender: () => mainWindow?.webContents ?? null,
     quitForUpdate,
@@ -479,6 +497,12 @@ async function bootstrap(): Promise<void> {
   const startupCfg = configStore.load()
   await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? false)
   openMainWindow()
+  // Explorer menu (E4-FR-34): with the toggle on, rewrite the keys when the exe
+  // or the label changed (a moved portable, the language). After the first paint.
+  mainWindow?.once('ready-to-show', () => {
+    const cfg = configStore.load()
+    void refreshExplorerMenuOnStartup(cfg?.settings?.explorerMenu === true, cfg?.settings?.language === 'es' ? 'es' : 'en')
+  })
   // Deletes what 1.x left behind, only after a committed migration, in the background.
   if (mainWindow) scheduleLegacyCleanup(mainWindow)
   if (startupCfg?.settings) {
@@ -501,7 +525,11 @@ async function bootstrap(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', () => showWindow())
+  // A second launch (Explorer menu, shortcut, CLI) focuses this one and hands over its `--open`.
+  app.on('second-instance', (_e, argv, workingDirectory) => {
+    showWindow()
+    void handleOpenArgv(argv, workingDirectory, 'second-instance')
+  })
   app.whenReady().then(bootstrap)
 }
 

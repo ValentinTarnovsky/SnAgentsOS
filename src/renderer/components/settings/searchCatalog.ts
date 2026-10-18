@@ -131,6 +131,7 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('startup.closeToTray', 'settings.closeToTray', undefined, { keywords: ['tray', 'bandeja', 'close', 'cerrar', 'minimize', 'minimizar'] }),
   e('startup.launchOnStartup', 'settings.launchOnStartup', undefined, { keywords: ['startup', 'inicio', 'login', 'windows', 'boot', 'arranque'] }),
   e('startup.globalHotkey', 'settings.globalHotkey', 'settings.globalHotkeyHint', { keywords: ['hotkey', 'shortcut', 'atajo', 'global', 'show', 'mostrar'] }),
+  e('startup.explorerMenu', 'settings.explorerMenu', 'settings.explorerMenuHint', { keywords: ['explorer', 'explorador', 'context', 'contextual', 'menu', 'folder', 'carpeta', 'right click', 'clic derecho', 'open', 'abrir'] }),
 
   // Notifications
   e('notifications.enabled', 'notif.enabled', 'notif.enabledHint', { keywords: ['notifications', 'notificaciones', 'desktop', 'escritorio', 'alert', 'alerta'], toggle: { path: 'notifications.enabled' } }),

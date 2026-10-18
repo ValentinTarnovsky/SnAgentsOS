@@ -7,6 +7,7 @@ import type {
   AgentSettings,
   AwakeMode,
   ConfigFile,
+  Language,
   NotificationSettings,
   PaneStatusEvt,
   RemoteSettings,
@@ -100,6 +101,27 @@ export interface CrashRecord {
   stack?: string
   /** <= 8KB. */
   componentStack?: string
+}
+
+/** A folder to open from `--open` (E4-FR-32/33). The id lets the renderer skip a request it already handled (reload). */
+export interface OpenRequest {
+  id: string
+  path: string
+  source: 'argv' | 'second-instance'
+}
+
+/** State of the Explorer "Open in" menu keys (E4-FR-34). */
+export interface ExplorerMenuResult {
+  ok: boolean
+  registered: boolean
+  /** Exe the registered command launches. */
+  exe?: string
+  /** Exe this run would register. */
+  currentExe?: string
+  /** Registered, but for another exe (a portable and an installed copy, a moved portable). */
+  mismatch?: boolean
+  error?: string
+  skipped?: 'not-windows' | 'dev'
 }
 
 /** Phases of the 1.x migration marker (mirrors LEGACY_PHASES in main's legacyMarker.ts). */
@@ -446,6 +468,10 @@ export interface SnApi {
     reportRenderError(report: RenderErrorReport): void
     /** Allowlisted, redacted diagnostics markdown (E4-FR-24). */
     diagnostics(renderer: RendererDiagnostics): Promise<string>
+    /** Consumes the open request main is holding (E4-FR-33), or null. */
+    takePendingOpen(): Promise<OpenRequest | null>
+    /** A folder arrived through `--open`. Returns an unsubscribe function. */
+    onOpenPath(cb: (req: OpenRequest) => void): () => void
   }
   pty: {
     spawn(req: PtySpawnReq): Promise<PtySpawnRes>
@@ -515,6 +541,10 @@ export interface SnApi {
      * rebuild their glyph atlases on it. Returns an unsubscribe function.
      */
     onDisplayRecovered(cb: () => void): () => void
+    /** Adds or removes the Explorer "Open in" menu (E4-FR-34). */
+    setExplorerMenu(req: { enabled: boolean; language: Language }): Promise<ExplorerMenuResult>
+    /** What the Explorer menu keys point at now. */
+    getExplorerMenu(): Promise<ExplorerMenuResult>
   }
   /** Self-update via GitHub releases. */
   updates: {
