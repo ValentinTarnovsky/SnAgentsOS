@@ -282,17 +282,29 @@ export async function runLegacyMigrationAtBoot(overrides: Partial<BootDeps> = {}
 const exitOps: Array<{ from: string; to?: string }> = []
 let exitHookInstalled = false
 
-const EXIT_SCRIPT = [
+/**
+ * The rename never overwrites: when the new name already exists by the time
+ * the old file is free (an update applied in this session swaps onto the new
+ * name, which PORTABLE_EXECUTABLE_FILE already points at), the old file is
+ * only deleted, so the newer exe is never replaced by the old one.
+ */
+export const EXIT_SCRIPT = [
   '@echo off',
   'set /a tries=0',
   ':wait',
   'ping -n 2 127.0.0.1 >nul',
-  'if defined TO (move /Y "%FROM%" "%TO%" >nul 2>&1) else (del /F /Q "%FROM%" >nul 2>&1)',
+  'if not defined TO goto del',
+  'if exist "%TO%" goto del',
+  'move "%FROM%" "%TO%" >nul 2>&1',
+  'goto check',
+  ':del',
+  'del /F /Q "%FROM%" >nul 2>&1',
+  ':check',
   'if not exist "%FROM%" goto done',
   'set /a tries+=1',
   'if %tries% lss 90 goto wait',
   ':done',
-  '(goto) 2>nul & del "%~f0"',
+  '(goto) 2>nul & del "%~f0" & rmdir "%~dp0"',
   '',
 ].join('\r\n')
 
