@@ -5,6 +5,10 @@ import { useAppStore } from '@/lib/store'
 import { broadcastToWorkspace } from '@/lib/broadcastPrompt'
 import { isFromToast, toast } from '@/lib/toast'
 import { useT } from '@/i18n'
+import { KeyHint } from '@/components/ui/KeyHint'
+import { ariaKeyshortcuts } from '@/lib/keymap'
+
+const SEND_KEYS = ['Ctrl', 'Enter']
 
 /**
  * Global prompt broadcaster: mounted once at the app level, gated on the store's
@@ -89,9 +93,12 @@ export function GlobalPromptDialog() {
           <button
             onClick={send}
             disabled={!canSend}
-            className="rounded-btn bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))] px-4 py-2 text-sm font-medium text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            aria-keyshortcuts={ariaKeyshortcuts(SEND_KEYS)}
+            data-global-prompt-send
+            className="inline-flex items-center gap-2 rounded-btn bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))] px-4 py-2 text-sm font-medium text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {t('globalPrompt.send')}
+            <KeyHint keys={SEND_KEYS} tone="onAccent" />
           </button>
         </div>
       </div>
