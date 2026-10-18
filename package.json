@@ -7,7 +7,7 @@
   "private": true,
   "main": "./out/main/index.js",
   "scripts": {
-    "test": "node scripts/test-status.cjs && node scripts/test-rebrand.cjs && node scripts/test-legacy-migration.cjs && node scripts/check-brand.cjs",
+    "test": "node scripts/test-status.cjs && node scripts/test-rebrand.cjs && node scripts/test-legacy-migration.cjs && node scripts/test-git.cjs && node scripts/check-brand.cjs",
     "test:ui": "node scripts/test-status-ui.cjs",
     "test:mobile": "node scripts/test-mobile-scroll.cjs",
     "dev": "electron-vite dev",
