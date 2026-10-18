@@ -151,6 +151,28 @@ async function main() {
   }
   check(read('src/main/remote/RemoteServer.ts').includes("<title>' + BRAND.mobileTitle + '</title>"), 'missing-bundle page title')
 
+  // E0-FR-02: package identity. No productName in package.json: it would move
+  // userData away from %APPDATA%\snagentsos.
+  const pkg = JSON.parse(read('package.json'))
+  check(pkg.name === BRAND.packageName && pkg.version === '2.0.0', 'package.json name and version')
+  check(!('productName' in pkg), 'package.json has no productName')
+  check(pkg.description.startsWith(`${BRAND.productName}: `) && !LEGACY_RE.test(pkg.description), 'package.json description')
+  check(/^node scripts\/test-status\.cjs && node scripts\/test-rebrand\.cjs\b/.test(pkg.scripts.test), 'npm test chains the status and rebrand suites')
+  const lock = read('package-lock.json')
+  const lockJson = JSON.parse(lock)
+  check(lockJson.name === pkg.name && lockJson.version === pkg.version && lockJson.packages[''].name === pkg.name && lockJson.packages[''].version === pkg.version, 'package-lock.json root matches package.json')
+  check(!LEGACY_RE.test(lock), 'package-lock.json has no legacy name')
+  check(JSON.parse(read('src/mobile/package.json')).name === `${BRAND.packageName}-mobile`, 'mobile package name')
+
+  // E0-FR-02 / FR-15: electron-builder.yml cannot import brand.ts, so compare it here.
+  const builderYml = read('electron-builder.yml')
+  const builder = require('js-yaml').load(builderYml)
+  check(builder.appId === BRAND.appId && builder.productName === BRAND.productName, 'electron-builder appId and productName')
+  check(builder.nsis.oneClick === false && builder.nsis.perMachine === false && builder.nsis.allowToChangeInstallationDirectory === true, 'assisted per-user installer as in 1.x')
+  check(builder.portable.unpackDirName === BRAND.productName, 'portable unpacks to %TEMP%\\SnAgentsOS')
+  check(builder.nsis.artifactName === '${productName}-${version}-setup.${ext}' && builder.portable.artifactName === '${productName}-${version}-portable.${ext}', 'setup and portable artifact names')
+  check(!LEGACY_RE.test(builderYml), 'electron-builder.yml has no legacy name (comments included)')
+
   // R20-01 scope: every file it rebrands is free of the legacy name.
   const scope = [
     'src/main/window.ts', 'src/main/index.ts', 'src/main/tray.ts', 'src/main/i18n.ts',
