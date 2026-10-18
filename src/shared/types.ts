@@ -355,6 +355,24 @@ export interface PaneStatusEvt extends PaneStatusDetails {
   updatedAt?: number
 }
 
+/** SessionEnd reasons that offer "Claude exited [Resume] [New]" (E6-FR-21). */
+export const AGENT_END_REASONS = ['prompt_input_exit', 'other'] as const
+
+/**
+ * Main -> renderer: Claude's main session (no subagent) of the live pty ended
+ * with a reason in AGENT_END_REASONS (E6-FR-21). `cwd` is the hook's validated
+ * session directory, when any.
+ */
+export interface AgentSessionEndEvt {
+  paneId: string
+  ptyId: string
+  provider: 'claude'
+  sessionId: string
+  reason: (typeof AGENT_END_REASONS)[number]
+  cwd?: string
+  at: number
+}
+
 /** Result of installing/uninstalling/inspecting the Claude Code hooks block. */
 export interface StatusHooksStatusRes {
   installed: boolean

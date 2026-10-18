@@ -2,7 +2,7 @@ import { Notification, type BrowserWindow } from 'electron'
 import { isAbsolute } from 'path'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
-import type { AgentDetail, AgentProvider, AttentionReason, ClaudePaneState, ConfigFile, NotificationSettings, PaneStatusEvt, RemotePending } from '@shared/types'
+import { AGENT_END_REASONS, type AgentDetail, type AgentProvider, type AgentSessionEndEvt, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneStatusEvt, type RemotePending } from '@shared/types'
 import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
 import type { HookEvent } from './HookServer'
@@ -188,6 +188,21 @@ export class StatusManager implements PtySink {
       }
     }
     if (event) { this.lastClaudeEventAt = Date.now(); this.onAgentEvent(event) }
+    if (evt.name === 'SessionEnd') this.emitSessionEnd(evt)
+  }
+
+  /**
+   * E6-FR-21: Claude's main session of the live pty ended with a reason that
+   * offers "resume / new" (`/exit`, Ctrl+D). The live-pty and subagent guards
+   * already ran in onHookEvent; `clear`, `logout` and unknown reasons stay silent.
+   */
+  private emitSessionEnd(evt: HookEvent): void {
+    const reason = AGENT_END_REASONS.find((r) => r === evt.endReason)
+    if (!reason || evt.agentId || !evt.ptyId || !evt.sessionId || !SESSION_ID_RE.test(evt.sessionId)) return
+    const end: AgentSessionEndEvt = { paneId: evt.consoleId, ptyId: evt.ptyId, provider: 'claude', sessionId: evt.sessionId, reason, at: Date.now() }
+    if (evt.cwd) end.cwd = evt.cwd
+    const win = this.getWindow()
+    if (win && !win.isDestroyed()) win.webContents.send(CH.STATUS_SESSION_END, end)
   }
 
   onAgentEvent(evt: AgentEvent): void {
