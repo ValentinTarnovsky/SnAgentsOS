@@ -33,6 +33,12 @@ export interface RemotePaneInfo {
   icon: string
   /** True when a live pty is bound to this pane (authoritative in main). */
   running: boolean
+  /**
+   * Agent pane without a Connection Profile whose last session can be resumed
+   * (D10, computed in the renderer's remoteSnapshot). Absent = hide "Relaunch
+   * resuming" and "New chat".
+   */
+  resumable?: boolean
 }
 
 export interface RemoteWorkspaceInfo {
@@ -103,7 +109,11 @@ export type RemoteCtlAction =
   | { kind: 'switchWorkspace'; workspaceId: string }
   | { kind: 'createPane'; workspaceId: string; presetId?: string; paneType?: PaneType }
   | { kind: 'closePane'; workspaceId: string; paneId: string }
-  | { kind: 'restartPane'; workspaceId: string; paneId: string }
+  /**
+   * `resume` (E4/E5-FR-11): true = relaunch resuming the chat, false = new chat
+   * (forgets the session), absent = the header restart button's rule (old bundles).
+   */
+  | { kind: 'restartPane'; workspaceId: string; paneId: string; resume?: boolean }
   | { kind: 'globalPrompt'; workspaceId: string; text: string }
   | { kind: 'setTheme'; theme: ThemeName }
   | { kind: 'renamePane'; workspaceId: string; paneId: string; title: string }

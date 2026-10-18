@@ -27,6 +27,8 @@ interface Entry {
   modes: ModeTracker
   /** Family of the launched shell (E6-FR-32). */
   shellKind: ShellKind
+  /** The cwd handed to node-pty (E5-FR-05 spawnCwd: where a resume must relaunch). */
+  spawnCwd: string
   /** Set by kill() so the exit it causes is not reported as natural (E6-FR-34). */
   killing: boolean
   /** False while the owning workspace is hidden (output is throttled). */
@@ -164,6 +166,8 @@ export class PtyManager {
   private readonly pausedByRenderer = new Set<string>()
   /** Fired after byPane changes (spawn/dispose) so remote can refresh `running`. */
   private onRunningChange: (() => void) | null = null
+  /** paneId -> epoch ms of the last input written (desktop or phone), for hibernation (E5-FR-25). */
+  private readonly lastInput = new Map<string, number>()
 
   constructor(private readonly getSender: () => WebContents | null,
     private readonly statusEnv: (ptyId: string, paneId: string, cwd: string) => Record<string, string> = () => ({}),
@@ -208,6 +212,7 @@ export class PtyManager {
       historyTruncated: false,
       modes: new ModeTracker(),
       shellKind: resolved.shellKind,
+      spawnCwd: req.cwd || homeDir(),
       killing: false,
       active: true,
       setupActive: false,
@@ -305,6 +310,7 @@ export class PtyManager {
   write(ptyId: string, data: string): void {
     const entry = this.entries.get(ptyId)
     if (!entry || !data) return
+    this.lastInput.set(entry.paneId, Date.now())
     // Fast path: a small write with nothing queued goes straight to the pty so
     // interactive typing keeps zero added latency.
     if (entry.writeQueue.length === 0 && data.length <= WRITE_CHUNK) {
@@ -441,6 +447,17 @@ export class PtyManager {
       const ptyId = this.byPane.get(paneId)
       if (ptyId) this.flush(ptyId)
     }
+  }
+
+  /** cwd node-pty got for the pane's live pty (E5 spawnCwd), or undefined. */
+  getSpawnCwd(paneId: string): string | undefined {
+    const ptyId = this.byPane.get(paneId)
+    return ptyId ? this.entries.get(ptyId)?.spawnCwd : undefined
+  }
+
+  /** Epoch ms of the last input written to the pane (desktop or phone), or undefined. */
+  lastInputAt(paneId: string): number | undefined {
+    return this.lastInput.get(paneId)
   }
 
   /** Live pty id bound to a pane, or null. */

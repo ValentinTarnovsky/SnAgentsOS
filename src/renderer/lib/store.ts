@@ -18,6 +18,7 @@ import type {
 import { gridForCount } from '@/components/layout/gridTemplates'
 import { killPanePtys } from '@/lib/ptyRegistry'
 import { visiblePaneIds } from '@shared/status'
+import { useAgentStore } from '@/lib/agentStore'
 import {
   type EnsureMountedOpts,
   type MountedWorkspaces,
@@ -183,6 +184,20 @@ export interface AppState {
   toggleSidebar: () => void
   addPane: (workspaceId: string, pane?: Partial<Pane>) => void
   removePane: (workspaceId: string, paneId: string) => void
+  /**
+   * Close a console the way the user does (grid, phone): remembers it on the
+   * closed stack for reopenClosedPane, then removes it (E5-FR-14).
+   */
+  closePane: (workspaceId: string, paneId: string) => void
+  /** Put a closed pane back with its own id at `orderIndex` of layout.order. */
+  restorePane: (workspaceId: string, pane: Pane, orderIndex: number) => boolean
+  /**
+   * Reopen the most recently closed console still restorable (its workspace
+   * exists). Activates its workspace. Returns the reopened entry, or null.
+   */
+  reopenClosedPane: () => { workspaceId: string; paneId: string } | null
+  /** Drop a pane's lastSession mirror ("Restart with a new chat"). */
+  clearLastSession: (paneId: string) => void
   renamePane: (workspaceId: string, paneId: string, title: string) => void
   setPaneFontSize: (workspaceId: string, paneId: string, fontSize: number) => void
   /** Force a console to relaunch (kills + respawns its pty via remount). */
@@ -487,6 +502,63 @@ export const useAppStore = create<AppState>((set, get) => ({
           const grid = gridForCount(panes.length)
           return { ...w, panes, layout: { grid, order } }
         }),
+      }
+    }),
+
+  closePane: (workspaceId, paneId) => {
+    const ws = get().workspaces.find((w) => w.id === workspaceId)
+    const pane = ws?.panes.find((p) => p.id === paneId)
+    if (!ws || !pane) return
+    const order = ws.layout?.order ?? ws.panes.map((p) => p.id)
+    const orderIndex = Math.max(0, order.indexOf(paneId))
+    useAgentStore.getState().pushClosed({ workspaceId, pane, orderIndex })
+    get().removePane(workspaceId, paneId)
+  },
+
+  restorePane: (workspaceId, pane, orderIndex) => {
+    const ws = get().workspaces.find((w) => w.id === workspaceId)
+    if (!ws || get().workspaces.some((w) => w.panes.some((p) => p.id === pane.id))) return false
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => {
+        if (w.id !== workspaceId) return w
+        const panes = [...w.panes, pane]
+        const order = (w.layout?.order ?? w.panes.map((p) => p.id)).filter((id) => id !== pane.id)
+        order.splice(Math.max(0, Math.min(orderIndex, order.length)), 0, pane.id)
+        return { ...w, panes, layout: { grid: gridForCount(panes.length), order } }
+      }),
+    }))
+    return true
+  },
+
+  reopenClosedPane: () => {
+    const agents = useAgentStore.getState()
+    for (;;) {
+      const entry = agents.popClosed()
+      if (!entry) return null
+      // A deleted workspace drops the entry; try the next one down the stack.
+      if (!get().restorePane(entry.workspaceId, entry.pane, entry.orderIndex)) continue
+      get().setActive(entry.workspaceId)
+      return { workspaceId: entry.workspaceId, paneId: entry.pane.id }
+    }
+  },
+
+  clearLastSession: (paneId) =>
+    set((s) => {
+      const ws = s.workspaces.find((w) => w.panes.some((p) => p.id === paneId && p.lastSession))
+      if (!ws) return {}
+      return {
+        workspaces: s.workspaces.map((w) =>
+          w === ws
+            ? {
+                ...w,
+                panes: w.panes.map((p) => {
+                  if (p.id !== paneId) return p
+                  const { lastSession: _dropped, ...rest } = p
+                  return rest
+                }),
+              }
+            : w,
+        ),
       }
     }),
 

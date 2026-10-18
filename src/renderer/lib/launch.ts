@@ -1,4 +1,5 @@
 import type { AgentPreset, ConnectionProfile, Pane, SetupStep, Workspace } from '@shared/types'
+import { buildAgentArgv } from '@shared/agent-argv'
 
 export interface ResolvedLaunch {
   cwd: string
@@ -22,12 +23,9 @@ export function resolveLaunch(
   const preset = pane.presetId ? presets.find((p) => p.id === pane.presetId) : undefined
   const cwd = pane.cwd ?? preset?.defaultCwd ?? workspace.cwd
 
-  let initialCommand: string | undefined
-  if (pane.command && pane.command.trim()) {
-    initialCommand = pane.command.trim()
-  } else if (preset && preset.type !== 'shell' && preset.command.trim()) {
-    initialCommand = [preset.command, ...preset.args].join(' ').trim()
-  }
+  // buildAgentArgv is the single agent command builder (D1); a resume is
+  // decided later, at spawn time, by agentLaunch.prepareAgentLaunch.
+  const initialCommand = buildAgentArgv({ preset, command: pane.command })
 
   const setupId = pane.setupId ?? workspace.setupId
   const setup = setupId ? connections.find((c) => c.id === setupId)?.steps : undefined

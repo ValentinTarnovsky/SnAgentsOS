@@ -19,7 +19,7 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     paneType: z.enum(['shell', 'claude', 'codex', 'custom']).optional(),
   }),
   z.object({ kind: z.literal('closePane'), workspaceId: id, paneId: id }),
-  z.object({ kind: z.literal('restartPane'), workspaceId: id, paneId: id }),
+  z.object({ kind: z.literal('restartPane'), workspaceId: id, paneId: id, resume: z.boolean().optional() }),
   z.object({ kind: z.literal('globalPrompt'), workspaceId: id, text: z.string().max(16384) }),
   z.object({
     kind: z.literal('setTheme'),
