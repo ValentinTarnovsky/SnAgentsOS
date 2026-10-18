@@ -103,9 +103,14 @@ export class ModeTracker {
     }
   }
 
-  /** Sequences re-enabling every non-default mode; '\x1b[?1049h' first if alt screen. */
-  rehydrate(): string {
-    let out = this.alt ? '\x1b[?1049h' : ''
+  /**
+   * Sequences re-enabling every non-default mode; '\x1b[?1049h' first if alt
+   * screen. `withAlt: false` leaves the alt switch out, for a replay whose own
+   * text already enters the alt screen at the right point (a prefix there would
+   * paint the normal-buffer output before it into the alt buffer).
+   */
+  rehydrate(withAlt = true): string {
+    let out = this.alt && withAlt ? '\x1b[?1049h' : ''
     if (this.appCursor) out += '\x1b[?1h'
     if (this.cursorHidden) out += '\x1b[?25l'
     if (this.mouse) out += `\x1b[?${this.mouse}h`

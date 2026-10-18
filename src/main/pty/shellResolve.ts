@@ -1,4 +1,4 @@
-import { existsSync, statSync } from 'fs'
+import { lstatSync, statSync } from 'fs'
 import { basename, posix, win32 } from 'path'
 import type { PtySpawnRes, ShellKind } from '@shared/ipc-contract'
 
@@ -18,11 +18,23 @@ export interface ResolveShellDeps {
   isFile?: (path: string) => boolean
 }
 
+/**
+ * An existing file. On Windows a Store app (pwsh from the Microsoft Store,
+ * python, wt) is an App Execution Alias in WindowsApps: a reparse point that
+ * stat() rejects with EACCES and lstat() shows as a link, yet CreateProcess
+ * (and node-pty's own GetFileAttributes check) launches it fine.
+ */
 const defaultIsFile = (path: string): boolean => {
   try {
-    return existsSync(path) && statSync(path).isFile()
-  } catch {
-    return false
+    return statSync(path).isFile()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    try {
+      const l = lstatSync(path)
+      return l.isFile() || l.isSymbolicLink()
+    } catch {
+      return false
+    }
   }
 }
 
@@ -42,18 +54,23 @@ export function shellKindOf(shell: string): ShellKind {
 }
 
 /**
- * True when `requested` names an executable that exists: an absolute (or
+ * Where `requested` lives, or null when it does not exist: an absolute (or
  * relative with separators) path must exist; a bare name must be found in PATH,
- * trying the PATHEXT extensions on Windows when it has none of them.
+ * trying the PATHEXT extensions on Windows when it has none of them. On Windows
+ * the hit is returned absolute, because node-pty's own lookup knows no PATHEXT,
+ * no quoted PATH entries and no path relative to the working directory.
  */
-export function shellExists(requested: string, deps: ResolveShellDeps = {}): boolean {
+export function findShell(requested: string, deps: ResolveShellDeps = {}): string | null {
   const platform = deps.platform ?? process.platform
   const env = deps.env ?? process.env
   const isFile = deps.isFile ?? defaultIsFile
   const win = platform === 'win32'
   const p = win ? win32 : posix
   const hasSep = win ? /[\\/]/.test(requested) : requested.includes('/')
-  if (p.isAbsolute(requested) || hasSep) return isFile(requested)
+  if (p.isAbsolute(requested) || hasSep) {
+    if (!isFile(requested)) return null
+    return win && !p.isAbsolute(requested) ? p.resolve(requested) : requested
+  }
   const exts = win
     ? (envValue(env, 'PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
     : []
@@ -64,9 +81,17 @@ export function shellExists(requested: string, deps: ResolveShellDeps = {}): boo
   for (const dir of envValue(env, 'PATH').split(p.delimiter)) {
     const d = dir.trim().replace(/^"|"$/g, '')
     if (!d) continue
-    for (const c of candidates) if (isFile(p.join(d, c))) return true
+    for (const c of candidates) {
+      const hit = p.join(d, c)
+      if (isFile(hit)) return win ? hit : requested
+    }
   }
-  return false
+  return null
+}
+
+/** True when `requested` names an executable that exists (see findShell). */
+export function shellExists(requested: string, deps: ResolveShellDeps = {}): boolean {
+  return findShell(requested, deps) !== null
 }
 
 /**
@@ -77,7 +102,8 @@ export function shellExists(requested: string, deps: ResolveShellDeps = {}): boo
 export function resolveShell(requested: string | undefined, fallback: string, deps: ResolveShellDeps = {}): ResolvedShell {
   const wanted = (requested ?? '').trim().replace(/^"(.*)"$/, '$1').trim()
   if (!wanted) return { shell: fallback, shellKind: shellKindOf(fallback) }
-  if (shellExists(wanted, deps)) return { shell: wanted, shellKind: shellKindOf(wanted) }
+  const found = findShell(wanted, deps)
+  if (found) return { shell: found, shellKind: shellKindOf(found) }
   return {
     shell: fallback,
     shellKind: shellKindOf(fallback),

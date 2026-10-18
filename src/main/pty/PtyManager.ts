@@ -98,6 +98,9 @@ function buildMatcher(pattern: string): (text: string) => boolean {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/** An alt-screen DECSET (?47 / ?1047 / ?1049, alone or inside a list). */
+const ALT_ENTER_RE = /\x1b\[\?(?:[\d;]*;)?(?:47|1047|1049)(?:;[\d;]*)?h/
+
 /**
  * Start of a replay built from the ring. Once the ring has dropped chunks, its
  * first chunk can begin inside an escape sequence (`;2;255m...` printed as
@@ -293,7 +296,10 @@ export class PtyManager {
    * the queries a receiving xterm would answer into the live shell.
    */
   private replayOf(entry: Entry): string {
-    return entry.modes.rehydrate() + sanitizeQueries(trimRingHead(entry.history.join(''), entry.historyTruncated))
+    const body = sanitizeQueries(trimRingHead(entry.history.join(''), entry.historyTruncated))
+    // The body is a suffix of the stream: when it enters the alt screen itself,
+    // that is the last alt transition, so the prefix must not do it earlier.
+    return entry.modes.rehydrate(!ALT_ENTER_RE.test(body)) + body
   }
 
   write(ptyId: string, data: string): void {

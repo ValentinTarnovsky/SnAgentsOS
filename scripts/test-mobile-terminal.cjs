@@ -31,9 +31,14 @@ function buildReplays() {
   emit('\x1b[H> prompt\x1b[6n')
   const replay = pm.getReplay('p').replay
   pm.killAll()
-  return { replay, rawTail: ring.slice(-200 * 1024) + '\x1b[H> prompt' }
+  // A young pane where vim entered the alt screen: the ring has the switch.
+  pm.spawn({ paneId: 'v', cols: 40, rows: 12 })
+  emit('$ ls\r\nfile.txt\r\n$ vim\x1b[?1049h\x1b[?1000h\x1b[H~ vim buffer')
+  const vimReplay = pm.getReplay('v').replay
+  pm.killAll()
+  return { replay, vimReplay, rawTail: ring.slice(-200 * 1024) + '\x1b[H> prompt' }
 }
-const { replay, rawTail } = buildReplays()
+const { replay, vimReplay, rawTail } = buildReplays()
 
 buildSync({ stdin: { resolveDir: root, loader: 'ts', contents: `
 import { Terminal } from '@xterm/xterm';
@@ -42,6 +47,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { attachTouchScroll } from './src/mobile/src/lib/touchScroll';
 const REPLAY = ${JSON.stringify(replay)};
 const RAW_TAIL = ${JSON.stringify(rawTail)};
+const VIM_REPLAY = ${JSON.stringify(vimReplay)};
 window.result = (async () => {
  let checks=0; const check=(ok,label)=>{if(!ok)throw new Error(label);checks++};
  const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -88,6 +94,15 @@ window.result = (async () => {
  touch('touchstart',60,40);touch('touchmove',60,160);touch('touchend',60,160);
  check(data.length>0 && data.every(s=>/^\\x1b\\[<64;/.test(s)), 'the first swipe reaches the TUI as SGR wheel reports, nothing sent before');
  detach(); term.dispose();
+
+ // The alt-screen entry is still in the ring: quitting vim brings the shell back.
+ term = make();
+ await write(VIM_REPLAY);
+ check(term.buffer.active.type==='alternate' && term.modes.mouseTrackingMode==='vt200', 'vim replay: alt screen and mouse active');
+ await write('\\x1b[?1049l');
+ const normal=[0,1].map(i=>term.buffer.active.getLine(i).translateToString(true));
+ check(term.buffer.active.type==='normal' && normal[0]==='$ ls' && normal[1]==='file.txt', 'leaving the alt screen shows the shell output written before vim');
+ term.dispose();
 
  // The same pane replayed from the raw ring alone (pre-fix behavior).
  term = make();

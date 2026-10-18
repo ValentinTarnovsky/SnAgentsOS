@@ -14,7 +14,16 @@
  */
 const QUERY_RE = /\x1b\[(?:[?>=]?[\d;]*[cnt]|\??[\d;]*\$p|>[\d;]*q|\?u)/g
 
-/** Only the CSI queries removed (used for every replay built from the raw ring). */
+/**
+ * The other queries xterm.js 5.5 answers: OSC 4/10/11/12 color reports
+ * (`ESC ] 11 ; ? BEL`, which Codex sends to detect the theme) and DECRQSS
+ * (`ESC P $ q Pt ST`). Only the pure query forms, so a color set is kept.
+ */
+const OSC_DCS_QUERY_RE = /\x1b\](?:4(?:;\d+;\?)+|1[0-2](?:;\?)+)(?:\x07|\x1b\\)|\x1bP\$q[^\x1b\x07]*\x1b\\/g
+
+/** Only the queries removed (used for every replay built from the raw ring). */
 export function sanitizeQueries(raw: string): string {
-  return raw.includes('\x1b[') ? raw.replace(QUERY_RE, '') : raw
+  if (!raw.includes('\x1b')) return raw
+  const csi = raw.includes('\x1b[') ? raw.replace(QUERY_RE, '') : raw
+  return csi.includes('\x1b]') || csi.includes('\x1bP') ? csi.replace(OSC_DCS_QUERY_RE, '') : csi
 }
