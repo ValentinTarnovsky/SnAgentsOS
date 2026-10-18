@@ -39,6 +39,11 @@ export interface RemotePaneInfo {
    * resuming" and "New chat".
    */
   resumable?: boolean
+  /**
+   * Exit code of a console whose shell ended on its own (E6-FR-38), overlaid
+   * by main like `running`; absent while running or never started.
+   */
+  exitCode?: number
 }
 
 export interface RemoteWorkspaceInfo {
@@ -178,6 +183,8 @@ export type RemoteServerMsg =
       data: string
       cols: number
       rows: number
+      /** With running:false: the pty ended on its own and `data` is its last output (E6-FR-20). */
+      exitCode?: number
     }
   | { v: number; type: 'out'; paneId: string; data: string }
   | { v: number; type: 'exit'; paneId: string; exitCode: number }

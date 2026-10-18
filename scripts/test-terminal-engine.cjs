@@ -1,4 +1,5 @@
-// Terminal engine (E6): ModeTracker, replay hygiene, the exit frame and the
+// Terminal engine (E6): ModeTracker, replay hygiene, the exit frame, the
+// in-place restart and the exited record, and the
 // default shell resolution, against the real main-process modules with a fake
 // node-pty. xterm and its addons are pinned exact: a bump must pass this suite.
 const { buildSync } = require('esbuild')
@@ -242,6 +243,96 @@ async function main() {
     pm.killAll()
     check(frames.filter(f => f.type === 'exit').length === 1, 'killAll (app quit / close) sends no exit frame')
   }
+
+  // In-place restart (E6-FR-18/19) and the exited record (E6-FR-20/38).
+  {
+    const { SOFT_RESET, restartTail } = loaded
+    const { SessionManager } = load('src/main/remote/SessionManager.ts', { setInterval: () => 0, clearInterval() {} })
+    const phone = () => {
+      const frames = []
+      return { frames, session: { ws: { readyState: 1, send: s => frames.push(JSON.parse(s)), bufferedAmount: 0 }, authed: true, subs: new Set(), outBuf: new Map(), outTimer: null, congested: new Set(), congestedSince: new Map(), lastSeen: Date.now() } }
+    }
+    const endModes = text => { const t = new ModeTracker(); t.feed(text); return t.rehydrate() }
+    check(restartTail('reiniciado 14:32') === SOFT_RESET + '\r\n\x1b[2m--- reiniciado 14:32 ---\x1b[0m\r\n', 'tail = soft reset + gray separator line')
+    check(restartTail('a\x1b]0;x\x07b') === SOFT_RESET + '\r\n\x1b[2m--- a]0;xb ---\x1b[0m\r\n', 'control characters in the label are dropped')
+    check(endModes('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?1h\x1b[?25l\x1b[?1004h\x1b[?9h' + SOFT_RESET) === '', 'SOFT_RESET turns off every mode the ModeTracker knows')
+
+    // Restart of a live pty: same xterm on the desktop, seeded ring for phones.
+    const { pm, h } = manager()
+    const sm = new SessionManager({ ptyManager: pm })
+    const statusExits = []
+    pm.addSink(sm)
+    pm.addSink({ id: 'status', onSpawn() {}, onData() {}, onExit: (ptyId, paneId, code, info) => statusExits.push({ ptyId, code, ...info }) })
+    const first = pm.spawn({ paneId: 'pane', cols: 90, rows: 30 })
+    h.procs[0].emit('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004hold output\r\n\x1b[6n$ ')
+    await flushAll()
+    const p1 = phone()
+    sm.handleSub(p1.session, 'pane')
+    const res = pm.restart({ paneId: 'pane', cols: 90, rows: 30, initialCommand: 'claude --resume abc' }, 'reiniciado 14:32')
+    check(res.ptyId !== first.ptyId && res.tail === restartTail('reiniciado 14:32') && ['powershell', 'posix', 'other', 'cmd'].includes(res.shellKind), 'restart returns the new pty, its tail and shell kind')
+    check(h.procs[0].killed && !p1.frames.some(f => f.type === 'exit'), 'the old pty is killed and phones get no exit frame')
+    check(statusExits.at(-1).ptyId === first.ptyId && statusExits.at(-1).natural === false && statusExits.at(-1).current === true, 'the status sink still hears the old exit (not natural) to release integrations')
+    const oldExit = h.sent.find(s => s.ch === 'pty:exit' && s.p.ptyId === first.ptyId)
+    check(oldExit && oldExit.p.natural === false, 'the renderer exit event of the old pty is flagged not natural')
+    const seeded = p1.frames.filter(f => f.type === 'replay').at(-1)
+    check(seeded.running && seeded.data.includes('old output') && seeded.data.endsWith(res.tail) && seeded.cols === 90, 'phones get a replay seeded with the kept output + tail')
+    check(endModes(seeded.data) === '' && !seeded.data.includes('\x1b[6n'), 'the seeded replay ends with no mode on and carries no query')
+    const rep = pm.getReplay('pane').replay
+    check(rep.includes('old output') && rep.endsWith(res.tail) && endModes(rep) === '', 'a later replay of the new pty starts from the same seed, modes off')
+    check(pm.getExited('pane') === null && pm.exitedPaneCodes().size === 0, 'restarting a live pty leaves no exited record')
+    h.procs[1].emit('fresh prompt> ')
+    await flushAll()
+    check(pm.getReplay('pane').replay.endsWith(res.tail + 'fresh prompt> '), 'new output follows the seed')
+
+    // Natural exit: the record, the exit frame, a late subscriber, then a restart from it.
+    h.procs[1].emit('\x1b[?2004hbye\r\n')
+    h.procs[1].exit(3)
+    check(p1.frames.filter(f => f.type === 'exit').length === 1 && p1.frames.at(-1).exitCode === 3, 'a natural exit sends exactly one exit frame')
+    const natural = h.sent.find(s => s.ch === 'pty:exit' && s.p.ptyId === res.ptyId)
+    check(natural && natural.p.natural === true && natural.p.exitCode === 3, 'the renderer exit event of a natural exit is flagged natural')
+    const ex = pm.getExited('pane')
+    check(ex && ex.exitCode === 3 && ex.ptyId === res.ptyId && ex.data.includes('bye') && ex.data.endsWith(SOFT_RESET) && endModes(ex.data) === '' && ex.cols === 90, 'a natural exit keeps the clean output with modes off')
+    check(pm.exitedPaneCodes().get('pane') === 3 && pm.ptyIdForPane('pane') === null, 'exitedPaneCodes reports it while no pty runs')
+    const p2 = phone()
+    sm.handleSub(p2.session, 'pane')
+    const late = p2.frames.find(f => f.type === 'replay')
+    check(late && late.running === false && late.exitCode === 3 && late.data === ex.data, 'subscribing after the exit shows the content + exitCode, not a spinner')
+    const res2 = pm.restart({ paneId: 'pane', cols: 90, rows: 30 }, 'restarted 2:32 PM')
+    const after = p2.frames.filter(f => f.type === 'replay').at(-1)
+    check(after.running && after.exitCode === undefined && after.data.startsWith(ex.data) && after.data.endsWith(res2.tail), 'restarting an exited pane seeds its kept output, the next replay is running')
+    check(pm.getExited('pane') === null && !p2.frames.slice(1).some(f => f.type === 'exit'), 'the respawn clears the record and sends no exit')
+
+    // Only natural exits are kept; kill(deadId) from the closing pane drops the record.
+    pm.kill(res2.ptyId)
+    check(pm.getExited('pane') === null, 'a killed pty leaves no record')
+    const other = pm.spawn({ paneId: 'other', cols: 80, rows: 24 })
+    h.procs.at(-1).exit(0)
+    check(pm.getExited('other')?.exitCode === 0, 'exit code 0 is kept too')
+    pm.kill('pty-unrelated')
+    check(pm.getExited('other') !== null, 'killing an unrelated dead id keeps the record')
+    pm.kill(other.ptyId)
+    check(pm.getExited('other') === null && pm.exitedPaneCodes().size === 0, 'killing the dead pty id (pane closed) drops the record')
+
+    // fallbackDefaultShell ignores a configured shell.
+    const missing = process.platform === 'win32' ? 'C:\\snaos-nope\\noexiste.exe' : '/snaos-nope/noexiste'
+    const res3 = pm.restart({ paneId: 'fb', shell: missing, cols: 80, rows: 24, fallbackDefaultShell: true }, 'r')
+    check(!res3.warning && h.spawnCalls.at(-1).shell !== missing, 'fallbackDefaultShell spawns the OS default without a warning')
+    const res4 = pm.restart({ paneId: 'fb', shell: missing, cols: 80, rows: 24 }, 'r')
+    check(res4.warning && res4.warning.kind === 'shellNotFound', 'a restart with a missing shell still reports shellNotFound')
+
+    // A failed respawn throws, and the kept output stays for phones.
+    h.procs.at(-1).emit('kept\r\n')
+    await flushAll()
+    const realImpl = current.impl
+    current.impl = () => { throw new Error('spawn failed') }
+    assert.throws(() => pm.restart({ paneId: 'fb', cols: 80, rows: 24 }, 'r'), /spawn failed/)
+    check(pm.ptyIdForPane('fb') === null && pm.getExited('fb')?.data.includes('kept') && pm.getExited('fb').exitCode === -1, 'a failed restart keeps the output as an exited record (code -1)')
+    current.impl = realImpl
+    const res5 = pm.restart({ paneId: 'fb', cols: 80, rows: 24 }, 'again')
+    check(pm.getReplay('fb').replay.includes('kept') && pm.getReplay('fb').replay.endsWith(res5.tail), 'the retry seeds that output')
+    pm.killAll()
+  }
+
   {
     const failing = load('src/main/pty/PtyManager.ts', {
       require: id => id === 'node-pty' ? { spawn: () => { throw new Error('boom') } } : id === 'electron' ? { app: { getPath: () => os.tmpdir() } } : require(id),

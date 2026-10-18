@@ -3,6 +3,7 @@
  * exposed on `window.snApi`. The SnApi interface grows phase by phase.
  */
 import type {
+  AgentSessionEndEvt,
   AgentSettings,
   AwakeMode,
   ConfigFile,
@@ -217,6 +218,8 @@ export interface PtyExitEvt {
   ptyId: string
   exitCode: number
   signal?: number
+  /** False when kill/killAll/restart caused the exit (E6-FR-17 shows the exit card only for natural exits). */
+  natural?: boolean
 }
 export interface PtyReattachRes {
   ptyId: string
@@ -225,10 +228,25 @@ export interface PtyReattachRes {
    * rehydration (E6-FR-33) + the query-free ring.
    */
   replay: string
+  /** Family of the live shell (E6-FR-22 cd prefix after a reattach). */
+  shellKind?: ShellKind
 }
 export interface PtyFlowReq {
   ptyId: string
   pause: boolean
+}
+/**
+ * In-place restart (E6-FR-18/19, D2): the full launch request, so "restart
+ * resuming the chat" goes through the same path that keeps the scrollback.
+ * `fallbackDefaultShell` ignores `shell` (retry after a failed respawn).
+ */
+export type PtyRestartReq = PtySpawnReq & { fallbackDefaultShell?: boolean }
+export interface PtyRestartRes {
+  ptyId: string
+  /** Soft reset of modes + the localized "--- restarted 14:32 ---" separator; written as is. */
+  tail: string
+  shellKind: ShellKind
+  warning?: PtySpawnRes['warning']
 }
 
 // --- Claude status (state dots, badges, notifications) ---
@@ -346,6 +364,8 @@ export interface SnApi {
     onData(cb: (e: PtyDataEvt) => void): () => void
     /** Returns an unsubscribe function. */
     onExit(cb: (e: PtyExitEvt) => void): () => void
+    /** Restart the pane's shell in place, keeping its output (E6-FR-18). Rejects when the spawn fails. */
+    restart(req: PtyRestartReq): Promise<PtyRestartRes>
   }
   dialog: {
     /** Opens a native folder picker; resolves to the chosen path or null. */
@@ -433,6 +453,8 @@ export interface SnApi {
     testDesktop(): Promise<void>
     /** Fired when a status notification is clicked (reveal that console). */
     onReveal(cb: (paneId: string) => void): () => void
+    /** Claude's main session ended on its own (E6-FR-21). Returns an unsubscribe function. */
+    onSessionEnd(cb: (e: AgentSessionEndEvt) => void): () => void
     /** Write our hook block into ~/.claude/settings.json. */
     hooksInstall(cfg: NotificationSettings): Promise<StatusHooksStatusRes>
     /** Remove every hook handler of ours from ~/.claude/settings.json. */

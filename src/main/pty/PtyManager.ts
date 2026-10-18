@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto'
 import { delimiter } from 'path'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
-import type { PtyDataEvt, PtyExitEvt, PtyReattachRes, PtySpawnReq, PtySpawnRes, ShellKind } from '@shared/ipc-contract'
+import type { PtyDataEvt, PtyExitEvt, PtyReattachRes, PtyRestartReq, PtyRestartRes, PtySpawnReq, PtySpawnRes, ShellKind } from '@shared/ipc-contract'
 import type { SetupStep } from '@shared/types'
 import { AGENT_ENV } from '@shared/brand'
 import { cleanEnv, defaultShell, homeDir } from './shellResolver'
@@ -120,6 +120,32 @@ export function trimRingHead(ring: string, truncated: boolean): string {
   return ring
 }
 
+/**
+ * Turns off what a dead or replaced program may have left on (E6-FR-18/19):
+ * SGR, alt screen, every mouse protocol and encoding, bracketed paste,
+ * application cursor keys, focus reports, and shows the cursor. Written after
+ * the kept output, so a restarted pane (desktop and phone) starts clean.
+ */
+export const SOFT_RESET =
+  '\x1b[0m\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1l\x1b[?25h\x1b[?1004l'
+
+/** Last output of a pane whose pty ended on its own (E6-FR-20), kept for phones and restarts. */
+export interface ExitedPane {
+  /** The dead pty, so a later kill() of that id (pane closed) drops the record. */
+  ptyId: string
+  /** Clean ring + SOFT_RESET, ready to replay. */
+  data: string
+  cols: number
+  rows: number
+  exitCode: number
+  at: number
+}
+
+/** The restart separator line: gray, control characters stripped from the label. */
+export function restartTail(label: string): string {
+  return `${SOFT_RESET}\r\n\x1b[2m--- ${label.replace(/[\x00-\x1f\x7f-\x9f]/g, '')} ---\x1b[0m\r\n`
+}
+
 /** How a pty ended, as seen by each sink (E6-FR-34). */
 export interface PtyExitInfo {
   /** The pty was still the live one bound to its pane. */
@@ -168,6 +194,8 @@ export class PtyManager {
   private onRunningChange: (() => void) | null = null
   /** paneId -> epoch ms of the last input written (desktop or phone), for hibernation (E5-FR-25). */
   private readonly lastInput = new Map<string, number>()
+  /** paneId -> last output of a pty that ended on its own (E6-FR-20); one per pane. */
+  private readonly exited = new Map<string, ExitedPane>()
 
   constructor(private readonly getSender: () => WebContents | null,
     private readonly statusEnv: (ptyId: string, paneId: string, cwd: string) => Record<string, string> = () => ({}),
@@ -179,6 +207,15 @@ export class PtyManager {
   }
 
   spawn(req: PtySpawnReq): PtySpawnRes {
+    return this.spawnSeeded(req, '')
+  }
+
+  /**
+   * spawn() with `seed` pre-loaded into the new ring, before any sink hears of
+   * the pty, so a phone's replay already carries it (E6-FR-19). The seed never
+   * feeds the ModeTracker: the new program starts with default modes.
+   */
+  private spawnSeeded(req: PtySpawnReq, seed: string): PtySpawnRes {
     const ptyId = `pty-${++this.seq}-${randomUUID()}`
     // A configured shell that does not exist falls back to the OS default (E6-FR-32).
     const resolved = resolveShell(req.shell, defaultShell())
@@ -224,8 +261,11 @@ export class PtyManager {
       writeQueue: '',
       writeTimer: null,
     }
+    if (seed) this.pushHistory(entry, seed)
     this.entries.set(ptyId, entry)
     this.byPane.set(req.paneId, ptyId)
+    // A respawn supersedes whatever the previous pty left (E6-FR-20).
+    this.exited.delete(req.paneId)
     for (const sink of this.sinks.values()) {
       try {
         sink.onSpawn(ptyId, req.paneId)
@@ -273,7 +313,7 @@ export class PtyManager {
 
     proc.onExit(({ exitCode, signal }) => {
       this.flush(ptyId)
-      this.send(CH.PTY_EXIT, { ptyId, exitCode, signal } satisfies PtyExitEvt)
+      this.send(CH.PTY_EXIT, { ptyId, exitCode, signal, natural: !entry.killing } satisfies PtyExitEvt)
       // An exit that kill() caused is not natural, even when node-pty fires it
       // synchronously from inside kill().
       this.dispose(ptyId, exitCode, !entry.killing)
@@ -292,7 +332,66 @@ export class PtyManager {
     if (!entry) return null
     // Drain anything pending so post-subscribe output isn't a duplicate of replay.
     this.flush(ptyId)
-    return { ptyId, replay: this.replayOf(entry) }
+    return { ptyId, replay: this.replayOf(entry), shellKind: entry.shellKind }
+  }
+
+  /**
+   * In-place restart (E6-FR-18/19). The kept output is the dead pty's
+   * `exited` record, or the live pty's clean ring; the live one is killed as
+   * not natural (phones get no `exit`). The new pty's ring is seeded with
+   * output + tail, and the renderer writes only `tail` over what it already
+   * shows, so desktop and phone end up identical. Throws when the spawn fails;
+   * the output then stays in `exited` for phones.
+   */
+  restart(req: PtyRestartReq, label: string): PtyRestartRes {
+    const { fallbackDefaultShell, ...spawnReq } = req
+    if (fallbackDefaultShell) delete spawnReq.shell
+    const oldId = this.byPane.get(req.paneId)
+    const old = oldId ? this.entries.get(oldId) : undefined
+    let content = this.exited.get(req.paneId)?.data ?? ''
+    let cols = req.cols, rows = req.rows, exitCode = this.exited.get(req.paneId)?.exitCode ?? -1
+    if (oldId && old) {
+      this.flush(oldId)
+      content = this.keptOutput(old)
+      cols = old.pty.cols
+      rows = old.pty.rows
+      old.killing = true
+      try {
+        old.pty.kill()
+      } catch {
+        /* already gone */
+      }
+      this.dispose(oldId, 0, false)
+    }
+    const tail = restartTail(label)
+    try {
+      const res = this.spawnSeeded(spawnReq, content + tail)
+      const out: PtyRestartRes = { ptyId: res.ptyId, tail, shellKind: res.shellKind }
+      if (res.warning) out.warning = res.warning
+      return out
+    } catch (error) {
+      // Nothing is bound to the pane now: keep its output visible to phones.
+      if (content && !this.exited.has(req.paneId)) {
+        this.exited.set(req.paneId, { ptyId: oldId ?? '', data: content, cols, rows, exitCode, at: Date.now() })
+        this.onRunningChange?.()
+      }
+      throw error
+    }
+  }
+
+  /** Clean ring (head trimmed, queries removed) + SOFT_RESET: what a restart or an exited replay shows. */
+  private keptOutput(entry: Entry): string {
+    return sanitizeQueries(trimRingHead(entry.history.join(''), entry.historyTruncated)) + SOFT_RESET
+  }
+
+  /** Last output of a pane whose pty ended on its own, or null (E6-FR-20). */
+  getExited(paneId: string): ExitedPane | null {
+    return this.exited.get(paneId) ?? null
+  }
+
+  /** paneId -> exit code of every pane whose pty ended on its own (E6-FR-38). */
+  exitedPaneCodes(): Map<string, number> {
+    return new Map([...this.exited].map(([paneId, rec]) => [paneId, rec.exitCode]))
   }
 
   /**
@@ -368,7 +467,16 @@ export class PtyManager {
 
   kill(ptyId: string): void {
     const entry = this.entries.get(ptyId)
-    if (!entry) return
+    if (!entry) {
+      // The renderer kills a dead pty's id when its pane goes away: drop the
+      // output kept for that pane (E6-FR-20), unless a newer exit replaced it.
+      for (const [paneId, rec] of this.exited) {
+        if (rec.ptyId !== ptyId) continue
+        this.exited.delete(paneId)
+        this.onRunningChange?.()
+      }
+      return
+    }
     entry.killing = true
     try {
       entry.pty.kill()
@@ -614,6 +722,11 @@ export class PtyManager {
     this.pausedByRenderer.delete(ptyId)
     const removed = this.byPane.get(entry.paneId) === ptyId
     if (removed) this.byPane.delete(entry.paneId)
+    // Keep the last output of a shell that ended on its own (E6-FR-20): phones
+    // that subscribe later see it instead of a spinner, and a restart reuses it.
+    if (removed && natural) {
+      this.exited.set(entry.paneId, { ptyId, data: this.keptOutput(entry), cols: entry.pty.cols, rows: entry.pty.rows, exitCode, at: Date.now() })
+    }
     for (const sink of this.sinks.values()) {
       try { sink.onExit(ptyId, entry.paneId, exitCode, { current: removed, natural }) } catch { /* sink teardown must not block PTY cleanup */ }
     }
