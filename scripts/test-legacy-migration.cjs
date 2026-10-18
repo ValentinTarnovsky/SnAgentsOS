@@ -1471,6 +1471,26 @@ async function orchestrationChecks() {
     const cfg = fs.readFileSync(path.join(root, 'electron.vite.config.ts'), 'utf8')
     check(cfg.includes("__SNAOS_TEST_FAULTS__: JSON.stringify(process.env.SNAOS_TEST_FAULTS_BUILD === '1')"), 'build: the fault define is false unless SNAOS_TEST_FAULTS_BUILD=1')
   }
+  // A data folder that cannot be written (read-only portable, FR-33): the failure
+  // stays in memory for the session, so the FR-35 banner still shows (R20-05).
+  {
+    const t = fakeTree({ SNAOS_FORCE_LEGACY_MIGRATION: '1' })
+    const legacyDir = seedLegacy(path.join(t.appDataRoot, 'snmulticc')); const before = snapshotTree(legacyDir)
+    const blocker = path.join(t.f, 'blocker')
+    fs.writeFileSync(blocker, 'not a folder')
+    const userData = path.join(blocker, 'snagentsos-dev')
+    const R = loadOrchestrator(t, { userData })
+    const seen = []
+    R.onLegacyStatus(m => seen.push(m))
+    check(await R.runLegacyMigrationAtBoot() === 'continue', 'unwritable data folder: the start continues')
+    const cur = R.currentLegacyMarker()
+    check(R.readLegacyMarker() === null && cur && cur.phase === 'failed' && seen.length === 1 && seen[0] === cur, 'unwritable data folder: the failed result stands for the session (banner)')
+    check(sameTree(snapshotTree(legacyDir), before), 'unwritable data folder: the legacy data is untouched')
+    const ok = fakeTree({ SNAOS_FORCE_LEGACY_MIGRATION: '1' }); seedLegacy(path.join(ok.appDataRoot, 'snmulticc'))
+    const R2 = loadOrchestrator(ok, { userData: path.join(ok.appDataRoot, 'snagentsos-dev') })
+    await R2.runLegacyMigrationAtBoot()
+    check(R2.currentLegacyMarker().phase === 'committed', 'a committed start reads the stored marker')
+  }
   // The log rotates at 256 KB and keeps one file.
   {
     const { createLegacyLog, LOG_MAX_BYTES } = load('src/main/migration/legacyLog.ts')

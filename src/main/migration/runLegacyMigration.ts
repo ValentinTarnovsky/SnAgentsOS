@@ -74,6 +74,19 @@ export function readLegacyMarker(): LegacyMigrationMarker | null {
 }
 
 /**
+ * The failed result of this start's pipeline. A data folder that cannot be
+ * written (a portable on a read-only medium, E0-FR-33) never stores it, and a
+ * failed start never changes the marker again, so it stands for the session.
+ */
+let sessionFailure: LegacyMigrationMarker | null = null
+
+/** What the renderer is told: the stored marker, or this start's failure when the folder could not keep it (FR-35 banner). */
+export function currentLegacyMarker(): LegacyMigrationMarker | null {
+  const disk = readLegacyMarker()
+  return sessionFailure && disk?.phase !== 'failed' ? sessionFailure : disk
+}
+
+/**
  * [Got it] on the welcome notice (app:legacyAck). Only a committed marker
  * carries the notice; writeMarker keeps noticeSeen once it is true, so a
  * cleanup pass holding an older copy cannot reopen it.
@@ -257,6 +270,7 @@ export async function runLegacyMigrationAtBoot(overrides: Partial<BootDeps> = {}
     }
     if (result.status !== 'legacyRunning') {
       flush()
+      sessionFailure = result.status === 'failed' ? result.marker : null
       emit(result.marker)
       return 'continue'
     }

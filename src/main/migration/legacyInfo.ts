@@ -1,5 +1,5 @@
 import type { LegacyDataInfo, LegacyManualAction, LegacyPhase as SharedLegacyPhase } from '@shared/ipc-contract'
-import { isCommittedPhase, LEGACY_ITEM_IDS, type LegacyItemId, type LegacyMigrationMarker, type LegacyPhase } from './legacyMarker'
+import { isCommittedPhase, LEGACY_ITEM_IDS, type LegacyMigrationMarker, type LegacyPhase } from './legacyMarker'
 
 /**
  * Renderer view of the marker (E0-FR-10, 28, 35). Pure: main feeds it the
@@ -15,8 +15,17 @@ void phasesInSync
 /** Starts with something still deferred before the "leftovers in use" banner shows. */
 export const DEFERRED_BANNER_STARTS = 5
 
-/** Items whose needsElevation means "move the app to the Trash" (mac bundle); any other means uninstall. */
-const TRASH_ITEMS: ReadonlySet<LegacyItemId> = new Set<LegacyItemId>(['L21'])
+/**
+ * What the user does about an item left skipped: needsElevation. Windows only
+ * flags Program Files or an HKLM entry (a per-machine 1.x: uninstall it), macOS
+ * only a bundle under /Applications (move it to the Trash). Linux has no such
+ * line: the old .deb is documented in the README and nothing else asks for root.
+ */
+function manualActionFor(platform: NodeJS.Platform): LegacyManualAction | null {
+  if (platform === 'win32') return 'uninstallPerMachine'
+  if (platform === 'darwin') return 'trashMacApp'
+  return null
+}
 
 export interface LegacyInfoInput {
   /** Where migration-backup-v1.zip lives (dataDir()). */
@@ -53,7 +62,8 @@ export function deriveLegacyInfo(marker: LegacyMigrationMarker | null, input: Le
       const state = item?.state ?? 'pending'
       if (state === 'done' || state === 'absent') cleanup.done++
       else cleanup[state]++
-      if (state === 'skipped' && item?.reason === 'needsElevation') manual.add(TRASH_ITEMS.has(id) ? 'trashMacApp' : 'uninstallPerMachine')
+      const action = state === 'skipped' && item?.reason === 'needsElevation' ? manualActionFor(input.platform) : null
+      if (action) manual.add(action)
     }
   }
   const counts = marker.verified

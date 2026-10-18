@@ -1184,6 +1184,7 @@ async function legacyUiChecks(BRAND, LEGACY_BRAND, en, es) {
   check(JSON.stringify(deriveLegacyInfo(withItems({ L05: elev }), input()).manualActions) === '["uninstallPerMachine"]', 'manualActions: per-machine 1.x registered -> uninstall')
   check(JSON.stringify(deriveLegacyInfo(withItems({ L04: elev, L05: elev }), input()).manualActions) === '["uninstallPerMachine"]', 'manualActions: one action per kind')
   check(JSON.stringify(deriveLegacyInfo(withItems({ L21: elev }), input({ platform: 'darwin' })).manualActions) === '["trashMacApp"]', 'manualActions: mac bundle without permission -> Trash')
+  check(deriveLegacyInfo(withItems({ L21: elev }), input({ platform: 'linux' })).manualActions.length === 0, 'manualActions: Linux never gets the Windows uninstall or the mac Trash line')
   check(deriveLegacyInfo(withItems({ L04: { state: 'skipped', attempts: 1, reason: 'unknownFiles' }, L05: { state: 'deferred', attempts: 1, reason: 'needsElevation' } }), input()).manualActions.length === 0, 'manualActions: only skipped needsElevation counts')
   // backup: null after deletedAt, or when the file is gone.
   check(deriveLegacyInfo(marker({ backup: { ...marker().backup, deletedAt: 3000 } }), input()).backup === null, 'backup: null after deletedAt')
