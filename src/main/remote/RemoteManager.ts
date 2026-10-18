@@ -4,9 +4,11 @@
  * RemoteSettings to start/stop/restart at runtime without an app restart.
  *
  * Two invariants it enforces:
- *  - main is authoritative for pane `running`: every snapshot the renderer
- *    pushes has its per-pane running flag overwritten from the live pty table
- *    before it reaches any phone,
+ *  - main is authoritative for pane `running` and `status`: every snapshot the
+ *    renderer pushes has its per-pane running flag overwritten from the live
+ *    pty table, and its agent status from StatusManager, before it reaches any
+ *    phone (E1-FR-03). Status changes also travel on their own as `paneStatus`,
+ *    straight from main, so a throttled or reloading renderer never delays them,
  *  - the renderer is the control-plane executor: control actions are relayed to
  *    it and answered within 10s, or reported as unavailable.
  */
@@ -21,8 +23,8 @@ import type {
   RemoteServerStatus,
   RemoteUiState,
 } from '@shared/ipc-contract'
-import type { RemoteCtlAction, RemoteStateSnapshot } from '@shared/remote-protocol'
-import type { RemoteSettings, ThemeTokens } from '@shared/types'
+import type { RemoteCtlAction, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
+import type { ClaudePaneState, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
 import type { PtyManager } from '../pty/PtyManager'
 import { DeviceRegistry } from './DeviceRegistry'
 import { listEndpoints } from './network'
@@ -35,6 +37,28 @@ const MIN_PORT = 1024
 const MAX_PORT = 65535
 /** How long the renderer has to execute a relayed control command. */
 const COMMAND_TIMEOUT_MS = 10 * 1000
+/** paneStatus coalesce window per pane (E1-FR-03): at most 10 frames/s each. */
+export const PANE_STATUS_COALESCE_MS = 100
+/** Transitions the phone must see at once, never held by the coalesce window. */
+const IMMEDIATE_STATES = new Set<ClaudePaneState | null>(['action', 'done', 'error', null])
+
+/**
+ * The phone's view of a desktop status event (E1-FR-03). Copies only the
+ * CONTRATOS fields of RemotePaneStatus: sessionId, cwd and every desktop-only
+ * enrichment (detail, topic, firstPrompt, cacheSince) never leave main.
+ */
+export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | null | undefined): RemotePaneStatus | null {
+  if (!evt || evt.state == null) return null
+  const out: RemotePaneStatus = { state: evt.state, stateSince: evt.stateSince ?? evt.updatedAt ?? 0 }
+  if (evt.precise === false) out.precise = false
+  if (evt.provider) out.provider = evt.provider
+  if (evt.reason) out.reason = evt.reason
+  if (evt.pendingCount) out.pendingCount = evt.pendingCount
+  if (evt.lastMessage) out.lastMessage = evt.lastMessage
+  if (evt.activity) out.activity = evt.activity
+  if (evt.pending?.length) out.pending = evt.pending
+  return out
+}
 
 /** Placeholder state until the renderer pushes its first real snapshot. */
 const EMPTY_SNAPSHOT: RemoteStateSnapshot = {
@@ -71,11 +95,18 @@ export class RemoteManager {
   /** Phone presence observer (AwakeService: an agent in `action` + a phone keeps the PC awake). */
   private phoneListener: ((connected: boolean) => void) | null = null
   private phoneNotified = false
+  /** paneStatus dedupe: the serialized status each pane last went out with. */
+  private readonly statusSent = new Map<string, string>()
+  /** paneStatus coalesce: latest status held per pane until its timer fires. */
+  private readonly statusHeld = new Map<string, RemotePaneStatus | null>()
+  private readonly statusTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   constructor(
     private readonly ptyManager: PtyManager,
     private readonly getWebContents: () => WebContents | null,
     private readonly appVersion: string,
+    /** Live agent statuses (StatusManager.snapshot), overlaid on every snapshot. */
+    private readonly getPaneStatuses: () => PaneStatusEvt[] = () => [],
   ) {
     this.pairing = new PairingService({
       registry: this.registry,
@@ -152,6 +183,7 @@ export class RemoteManager {
   }
 
   private teardownServer(): void {
+    this.resetPaneStatus()
     if (this.sessions) {
       this.ptyManager.setRunningChangeListener(null)
       this.ptyManager.removeSink(this.sessions.id)
@@ -191,15 +223,83 @@ export class RemoteManager {
     return this.rawSnapshot ? this.overlayRunning(this.rawSnapshot) : EMPTY_SNAPSHOT
   }
 
+  /** Overlay main's authoritative `running` and agent `status` on each pane. */
   private overlayRunning(snap: RemoteStateSnapshot): RemoteStateSnapshot {
     const running = new Set(this.ptyManager.runningPaneIds())
+    const statuses = new Map<string, RemotePaneStatus>()
+    for (const evt of this.getPaneStatuses()) {
+      const status = toRemoteStatus(evt)
+      if (status) statuses.set(evt.paneId, status)
+    }
     return {
       ...snap,
       workspaces: snap.workspaces.map((ws) => ({
         ...ws,
-        panes: ws.panes.map((p) => ({ ...p, running: running.has(p.id) })),
+        panes: ws.panes.map((p) => {
+          const pane = { ...p, running: running.has(p.id) }
+          const status = statuses.get(p.id)
+          if (status) pane.status = status
+          else delete pane.status
+          return pane
+        }),
       })),
     }
+  }
+
+  // --- Live agent status (E1-FR-03) -------------------------------------------
+
+  /**
+   * StatusManager emitted for a pane: relay it to every authed phone as
+   * `paneStatus`. Identical consecutive statuses are dropped (dedupe), and
+   * working/idle/unknown updates are held up to 100ms per pane so a burst of
+   * PreToolUse events costs at most 10 frames/s; action, done, error and the
+   * clearing null go out at once.
+   */
+  pushPaneStatus(evt: PaneStatusEvt): void {
+    if (!this.sessions) return
+    const paneId = evt.paneId
+    const status = toRemoteStatus(evt)
+    if (IMMEDIATE_STATES.has(status?.state ?? null)) {
+      this.cancelHeldStatus(paneId)
+      this.sendPaneStatus(paneId, status)
+      return
+    }
+    this.statusHeld.set(paneId, status)
+    if (this.statusTimers.has(paneId)) return
+    this.statusTimers.set(
+      paneId,
+      setTimeout(() => {
+        this.statusTimers.delete(paneId)
+        if (!this.statusHeld.has(paneId)) return
+        const held = this.statusHeld.get(paneId) ?? null
+        this.statusHeld.delete(paneId)
+        this.sendPaneStatus(paneId, held)
+      }, PANE_STATUS_COALESCE_MS),
+    )
+  }
+
+  private sendPaneStatus(paneId: string, status: RemotePaneStatus | null): void {
+    // A null is only skipped after a sent null: a phone may know this pane's
+    // status from an authOk snapshot that never went through this map.
+    const key = status ? JSON.stringify(status) : 'null'
+    if (this.statusSent.get(paneId) === key) return
+    this.statusSent.set(paneId, key)
+    this.sessions?.broadcastPaneStatus(paneId, status)
+  }
+
+  private cancelHeldStatus(paneId: string): void {
+    const timer = this.statusTimers.get(paneId)
+    if (timer) clearTimeout(timer)
+    this.statusTimers.delete(paneId)
+    this.statusHeld.delete(paneId)
+  }
+
+  /** Server gone: phones re-learn every status from the next authOk snapshot. */
+  private resetPaneStatus(): void {
+    for (const timer of this.statusTimers.values()) clearTimeout(timer)
+    this.statusTimers.clear()
+    this.statusHeld.clear()
+    this.statusSent.clear()
   }
 
   // --- Control-plane relay --------------------------------------------------
