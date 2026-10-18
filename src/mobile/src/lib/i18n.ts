@@ -127,8 +127,6 @@ const en = {
   'main.exited': 'exited',
   'act.promptPlaceholder': 'Prompt sent to every console in this workspace',
   'act.promptSent': 'Sent to {n} console(s)',
-  'act.pasteLabel': 'Paste text into the console',
-  'act.pastePlaceholder': 'Type or paste here, then Paste',
   'act.fontSize': 'Font size',
   'act.unpair': 'Unpair this device',
   'act.unpairConfirm': 'Forget this device? You will need to scan the QR to pair again.',
@@ -176,6 +174,20 @@ const en = {
   'alerts.title': 'Alerts',
   'alerts.inPage': 'Alert when another console needs me',
   'alerts.inPageHint': 'Toast and vibration while this page is open.',
+  // Composer (E1-FR-22..31, 38)
+  'composer.placeholder': 'Write a prompt...',
+  'composer.label': 'Prompt for the console',
+  'composer.send': 'Send',
+  'composer.insertHint': 'Hold to insert without sending',
+  'composer.stop': 'Stop',
+  'composer.typing': 'Typing {done}/{total}',
+  'composer.multiline': 'Several lines: in this console each line runs',
+  'composer.directStrip': 'Direct input - tap to type',
+  'input.title': 'Input',
+  'input.agentsDefault': 'AI consoles start in Composer',
+  'input.agentsDefaultHint': 'Claude, Codex and custom consoles without a saved choice.',
+  'input.autocorrect': 'Autocorrect in the composer',
+  'input.autocorrectHint': 'Spell check, corrections and capitals from the phone keyboard.',
 } as const
 
 type Key = keyof typeof en
@@ -288,8 +300,6 @@ const es: Record<Key, string> = {
   'main.exited': 'terminada',
   'act.promptPlaceholder': 'Prompt enviado a cada consola de este espacio',
   'act.promptSent': 'Enviado a {n} consola(s)',
-  'act.pasteLabel': 'Pegar texto en la consola',
-  'act.pastePlaceholder': 'Escribi o pega aca, despues Pegar',
   'act.fontSize': 'Tamano de fuente',
   'act.unpair': 'Desvincular este dispositivo',
   'act.unpairConfirm': 'Olvidar este dispositivo? Vas a tener que escanear el QR para vincular otra vez.',
@@ -333,6 +343,19 @@ const es: Record<Key, string> = {
   'alerts.title': 'Avisos',
   'alerts.inPage': 'Avisarme cuando otra consola me necesita',
   'alerts.inPageHint': 'Toast y vibracion con esta pagina abierta.',
+  'composer.placeholder': 'Escribi un prompt...',
+  'composer.label': 'Prompt para la consola',
+  'composer.send': 'Enviar',
+  'composer.insertHint': 'Mantener para insertar sin enviar',
+  'composer.stop': 'Detener',
+  'composer.typing': 'Tipeando {done}/{total}',
+  'composer.multiline': 'Varias lineas: en esta consola cada linea se ejecuta',
+  'composer.directStrip': 'Entrada directa - toca para escribir',
+  'input.title': 'Entrada',
+  'input.agentsDefault': 'Las consolas de IA arrancan en Composer',
+  'input.agentsDefaultHint': 'Claude, Codex y personalizadas sin una eleccion guardada.',
+  'input.autocorrect': 'Autocorrector en el compositor',
+  'input.autocorrectHint': 'Corrector, sugerencias y mayusculas del teclado del celular.',
 }
 
 const DICTS: Record<Language, Record<Key, string>> = { en, es }

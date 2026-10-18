@@ -2,9 +2,10 @@
  * The live layout: a flex column sized to the keyboard-aware --vvh so the
  * KeyBar always docks just above the soft keyboard. TopBar (workspace + console
  * title of the viewed pane with its agent status, the "N waiting" pill,
- * connection dot, drawer + actions) / terminal (flex-1, min-h-0) / KeyBar.
- * The drawer, action sheet and paste sheet mount here; the status banner and
- * toast overlay the terminal.
+ * connection dot, drawer + actions) / terminal (flex-1, min-h-0) / composer
+ * or "Direct input" strip (E1-FR-22..31, 38) / KeyBar. The drawer, action
+ * sheet and snippets sheet mount here; the status banner and toast overlay
+ * the terminal. The Paste key opens the composer (PasteSheet is gone, D11).
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -13,13 +14,14 @@ import { RemoteTerminal } from './RemoteTerminal'
 import { KeyBar } from './KeyBar'
 import { ConsoleDrawer } from './ConsoleDrawer'
 import { ActionSheet } from './ActionSheet'
-import { PasteSheet } from './PasteSheet'
 import { SnippetsSheet } from './SnippetsSheet'
+import { Composer, openComposerForPaste, toggleInputMode } from './Composer'
+import { DirectInputStrip } from './DirectInputStrip'
 import { ExitStrip } from './ExitStrip'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { StatusIndicator } from './StatusIndicator'
 import { WaitingPill } from './WaitingPill'
-import { useRemoteStore } from '../lib/store'
+import { selectInputMode, store, useRemoteStore } from '../lib/store'
 import { paneById, viewedWorkspaceId } from '../lib/workspace'
 import { t } from '../lib/i18n'
 
@@ -50,9 +52,16 @@ export function MainScreen(): ReactNode {
   const activePaneId = useRemoteStore((s) => s.activePaneId)
   const activeStatus = useRemoteStore((s) => (s.activePaneId ? s.paneStatus[s.activePaneId] : undefined))
   const connected = useRemoteStore((s) => s.connected)
+  const inputMode = useRemoteStore(selectInputMode)
+  const kbOpen = useRemoteStore((s) => s.kbOpen)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [actionsOpen, setActionsOpen] = useState(false)
-  const [pasteOpen, setPasteOpen] = useState(false)
+
+  // A Paste one-shot belongs to the pane it was opened on: leaving it ends it.
+  useEffect(() => {
+    const s = store.getState()
+    if (s.composerOneShot && s.composerOneShot !== activePaneId) s.update({ composerOneShot: null })
+  }, [activePaneId])
   const [snippetsOpen, setSnippetsOpen] = useState(false)
 
   const { workspaceName, paneTitle } = useMemo(() => {
@@ -106,18 +115,27 @@ export function MainScreen(): ReactNode {
 
       <ExitStrip />
 
+      {/* Composer mode docks the composer here; Direct mode shows the strip
+          only while the keyboard is down (E1-FR-38). Both stay usable offline:
+          the draft is kept and Send is disabled (E1-FR-14). */}
+      {activePaneId && (inputMode === 'composer' ? <Composer /> : !kbOpen && <DirectInputStrip />)}
+
       {/* Offline: the keys are dimmed and inert (E1-FR-14); sendInput refuses too. */}
       <div
         className={clsx('shrink-0 transition-opacity', !connected && 'pointer-events-none opacity-40')}
         aria-disabled={!connected}
         data-connected={connected}
       >
-        <KeyBar onPaste={() => setPasteOpen(true)} onSnippets={() => setSnippetsOpen(true)} />
+        <KeyBar
+          onPaste={openComposerForPaste}
+          onSnippets={() => setSnippetsOpen(true)}
+          inputMode={inputMode}
+          onToggleMode={activePaneId ? toggleInputMode : undefined}
+        />
       </div>
 
       <ConsoleDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <ActionSheet open={actionsOpen} onClose={() => setActionsOpen(false)} />
-      <PasteSheet open={pasteOpen} onClose={() => setPasteOpen(false)} />
       <SnippetsSheet open={snippetsOpen} onClose={() => setSnippetsOpen(false)} />
     </div>
   )

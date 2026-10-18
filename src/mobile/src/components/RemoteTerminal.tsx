@@ -10,19 +10,42 @@
  * when even the minimum size overflows). Input (typing + KeyBar) is forwarded
  * to the pty via the WS client; the Ctrl latch turns the next printable char
  * into its control code.
+ *
+ * Composer mode (E1-FR-29): the helper textarea turns readOnly with
+ * inputmode="none", so tapping the terminal dismisses the keyboard instead of
+ * opening direct input, and xterm's own input is dropped except for the
+ * composer's paste. Back in Direct mode both attributes are restored.
  */
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { CanvasAddon } from '@xterm/addon-canvas'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { client, type TermFrame } from '../lib/client'
-import { useRemoteStore } from '../lib/store'
+import { selectInputMode, useRemoteStore, type RemoteState } from '../lib/store'
+import type { InputMode } from '../lib/prefs'
 import { resetRatio, solveFont } from '../lib/fit'
-import { setActiveTerm } from '../lib/terminalBus'
+import { isComposerPasting, setActiveTerm } from '../lib/terminalBus'
 import { getStoredHostPlatform } from '../lib/auth'
 import { attachTouchScroll } from '../lib/touchScroll'
 import { nextExit, useExitStore } from '../lib/exitState'
+
+/** Apply the input mode to xterm's helper textarea (E1-FR-29). */
+function applyInputMode(helper: HTMLTextAreaElement, mode: InputMode): void {
+  const composer = mode === 'composer'
+  helper.readOnly = composer
+  if (composer) {
+    helper.setAttribute('inputmode', 'none')
+    if (document.activeElement === helper) helper.blur()
+  } else {
+    helper.removeAttribute('inputmode')
+  }
+}
+
+/** Composer mode drops xterm's own input; its paste is let through. */
+function directInputBlocked(st: RemoteState): boolean {
+  return selectInputMode(st) === 'composer' && !isComposerPasting()
+}
 
 export function RemoteTerminal(): ReactNode {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -37,6 +60,7 @@ export function RemoteTerminal(): ReactNode {
   const fontOverride = useRemoteStore((s) => s.fontOverride)
   const subscribedPaneId = useRemoteStore((s) => s.subscribedPaneId)
   const terminalUnicode = useRemoteStore((s) => s.terminalUnicode)
+  const inputMode = useRemoteStore(selectInputMode)
 
   // Mount the terminal once. Frames, resize handling and input wiring all live
   // inside this effect; React state only drives theme/font/pane-switch effects.
@@ -89,6 +113,7 @@ export function RemoteTerminal(): ReactNode {
       helperTextarea.setAttribute('autocorrect', 'off')
       helperTextarea.setAttribute('autocapitalize', 'off')
       helperTextarea.setAttribute('spellcheck', 'false')
+      applyInputMode(helperTextarea, selectInputMode(useRemoteStore.getState()))
     }
 
     const applyFont = (): void => {
@@ -179,6 +204,7 @@ export function RemoteTerminal(): ReactNode {
     const inputSub = term.onData((data) => {
       let out = data
       const st = useRemoteStore.getState()
+      if (directInputBlocked(st)) return
       if (st.ctrlLatch) {
         if (data.length === 1 && data.charCodeAt(0) >= 0x20) {
           out = String.fromCharCode(data.charCodeAt(0) & 0x1f)
@@ -262,6 +288,13 @@ export function RemoteTerminal(): ReactNode {
     // Mount once; theme/font/pane changes are handled by the effects below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Follow the viewed pane's input mode. A layout effect, so a mode toggled
+  // inside flushSync is in place before the caller moves the focus.
+  useLayoutEffect(() => {
+    const helper = containerRef.current?.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea')
+    if (helper) applyInputMode(helper, inputMode)
+  }, [inputMode])
 
   // Live theme swap.
   useEffect(() => {
