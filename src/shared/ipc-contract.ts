@@ -22,9 +22,9 @@ import type {
   RemoteEndpointKind,
   RemoteStateSnapshot,
 } from './remote-protocol'
-import type { GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
+import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
 
-export type { GitArea, GitDiffHunk, GitDiffLine, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
+export type { GitArea, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
 /**
  * "PC awake" state (contract `power:state`). `reason: 'agents'` covers both a
@@ -689,5 +689,13 @@ export interface SnApi {
     info(force?: boolean): Promise<GitInfoRes>
     /** Summaries, only when one changes by value. Returns an unsubscribe function. */
     onUpdate(cb: (e: GitUpdateEvt) => void): () => void
+    /** The open Changes panel's target (main polls it every 3 s while focused), or null when closed. */
+    setPanel(key: string | null): void
+    /** The panel's file list with per-area line counts; null when the target is not a readable repo. */
+    status(key: string): Promise<GitChangesRes | null>
+    /** One listed file's diff; `force` renders a too-large diff anyway. */
+    fileDiff(req: { key: string; path: string; area: GitArea; force?: boolean }): Promise<GitDiffReply>
+    /** Open a listed file with its default app (allowlisted extensions only) or reveal it in its folder. */
+    openFile(req: { key: string; path: string; reveal?: boolean }): Promise<boolean>
   }
 }
