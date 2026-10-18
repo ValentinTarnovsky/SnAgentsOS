@@ -311,7 +311,7 @@ async function main() {
         process: { ...process, env: { ...inherited, PATH: [legacyBin, tools].join(path.delimiter) } },
       }, ['node-pty'])
       const manager = new PtyManager(() => null, () => ({ [AGENT_ENV.codexShim]: currentBin }))
-      const ptyId = manager.spawn({ paneId: 'pane-1', cols: 80, rows: 24, cwd: tmp })
+      const { ptyId } = manager.spawn({ paneId: 'pane-1', cols: 80, rows: 24, cwd: tmp })
       check(spawned.env[AGENT_ENV.consoleId] === 'pane-1' && spawned.env[AGENT_ENV.ptyId] === ptyId, 'pty receives SNAOS_CONSOLE_ID and SNAOS_PTY_ID')
       check(!Object.keys(spawned.env).some(k => k.startsWith(LEGACY_BRAND.envPrefix)), 'pty env carries no legacy variable')
       check(spawned.env.PATH === [currentBin, tools].join(path.delimiter), 'pty PATH: own shim first, inherited 1.x status-bin gone')
