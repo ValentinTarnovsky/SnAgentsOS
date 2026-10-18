@@ -1152,7 +1152,7 @@ Igual para v2.0.0 en adelante, salvo lo marcado como "solo v2.0.0".
   - Valores de registro `LegacyInstallLocation` y `LegacyTaskbarPinned` en `SHCTX\Software\<GUID>`.
   - Variables `SNAOS_FORCE_LEGACY_CLEANUP` y `SNAOS_TEST_FAULT` (esta solo con `__SNAOS_TEST_FAULTS__`).
   - i18n: fuera `settings.data.legacy.*`; nuevas `settings.data.backup.*` y `legacy.banner.*`. Schema sin cambio (v10).
-- **v2.1 (R21-00):**
+- **v2.1 (R21-00, cerradas en `CONTRATOS.md`, ver "Registro de enmiendas"):**
   - `RemotePaneInfo.resumable?` (D10).
   - `RemotePaneStatus.precise?` (recomendado).
   - `RemoteStateSnapshot.terminalUnicode`, `replay.exitCode`, `RemotePaneInfo.exitCode`.
