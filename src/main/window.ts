@@ -30,10 +30,18 @@ export function createMainWindow(): BrowserWindow {
   // which also drops the default DevTools accelerators. Re-add a DevTools
   // toggle in dev only so debugging still works; production stays locked down.
   if (process.env.ELECTRON_RENDERER_URL) {
-    win.webContents.on('before-input-event', (_e, input) => {
+    win.webContents.on('before-input-event', (e, input) => {
       if (input.type !== 'keyDown') return
       const key = input.key
-      if (key === 'F12' || (input.control && input.shift && (key === 'I' || key === 'i'))) {
+      // Ctrl+Shift+Alt+K kills the renderer to exercise the crash recovery
+      // (E4-FR-21). Checked first so the combo never reaches DevTools.
+      if (input.control && input.shift && input.alt && (key === 'K' || key === 'k')) {
+        e.preventDefault()
+        win.webContents.forcefullyCrashRenderer()
+        return
+      }
+      const bareF12 = key === 'F12' && !input.control && !input.shift && !input.alt && !input.meta
+      if (bareF12 || (input.control && input.shift && !input.alt && (key === 'I' || key === 'i'))) {
         win.webContents.toggleDevTools()
       }
     })
