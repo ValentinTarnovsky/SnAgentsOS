@@ -66,8 +66,9 @@ function isRealDir(p: string): boolean {
 }
 
 /**
- * Data folder of 1.x, or null. Installed: <appData>/snmulticc (or the product
- * name on a case-sensitive filesystem). Portable: <exeDir>/snmulticc-data.
+ * Data folder of 1.x, or null. Installed: <appData>/<legacy package name> (or
+ * the legacy product name on a case-sensitive filesystem). Portable:
+ * <exeDir>/<legacy portable data folder>.
  * Only exact names match, so a <name>.deleting-<ISO> tombstone left by an
  * interrupted cleanup is never detected as legacy data, and a link in place of
  * the folder is not followed.

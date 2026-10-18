@@ -27,6 +27,7 @@ import { DiscordNotifier } from './status/DiscordNotifier'
 import { join } from 'path'
 import { ensureTray, destroyTray } from './tray'
 import { mainT } from './i18n'
+import { runLegacyMigrationAtBoot, scheduleLegacyCleanup } from './migration/runLegacyMigration'
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 
@@ -263,6 +264,13 @@ async function bootstrap(): Promise<void> {
   if (process.platform === 'win32' && app.isPackaged) {
     app.setAppUserModelId(BRAND.appId)
   }
+  // 1.x data moves in before anything reads config.json or remote-devices.json,
+  // and before a window exists (its store persists on a debounce). Only the
+  // FR-09 dialog's [Quit] stops the start; a failed migration never does.
+  if ((await runLegacyMigrationAtBoot()) === 'quit') {
+    quitApp()
+    return
+  }
   // No native menu on Windows/Linux: it's a frameless app with a custom
   // in-renderer title bar, so the default menu is invisible anyway, and its
   // accelerators are footguns in a terminal app. CmdOrCtrl+R (Reload) would
@@ -314,6 +322,8 @@ async function bootstrap(): Promise<void> {
   const startupCfg = configStore.load()
   await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? false)
   openMainWindow()
+  // Deletes what 1.x left behind, only after a committed migration, in the background.
+  if (mainWindow) scheduleLegacyCleanup(mainWindow)
   if (startupCfg?.settings) {
     applyGlobalHotkey(startupCfg.settings.globalHotkeyEnabled, startupCfg.settings.globalHotkey)
   }

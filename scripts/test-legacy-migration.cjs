@@ -1248,6 +1248,174 @@ async function processChecks() {
   }
 }
 
+/** A P-LEGACY fake tree: every path variable inside the test temp root, plus the env the app would see. */
+function fakeTree(extraEnv = {}) {
+  const f = freshDir('p-legacy')
+  const env = {
+    APPDATA: path.join(f, 'appdata'), LOCALAPPDATA: path.join(f, 'localappdata'), TEMP: path.join(f, 'temp'), TMP: path.join(f, 'temp'), TMPDIR: path.join(f, 'temp'),
+    USERPROFILE: path.join(f, 'home'), HOME: path.join(f, 'home'), XDG_CONFIG_HOME: path.join(f, 'appdata'), CLAUDE_CONFIG_DIR: path.join(f, 'claude'), ...extraEnv,
+  }
+  for (const k of ['APPDATA', 'LOCALAPPDATA', 'TEMP', 'USERPROFILE', 'CLAUDE_CONFIG_DIR']) if (env[k]) fs.mkdirSync(env[k], { recursive: true })
+  const appDataRoot = process.platform === 'darwin' ? path.join(env.HOME, 'Library', 'Application Support') : env.APPDATA
+  return { f, env, appDataRoot }
+}
+
+/** runLegacyMigration.ts against an electron stub and a fake process environment. */
+function loadOrchestrator(t, o = {}) {
+  const dialogs = []
+  const app = {
+    isPackaged: o.isPackaged ?? false,
+    commandLine: { hasSwitch: () => false },
+    getPath: name => {
+      // A fake profile can leave Windows unable to resolve known folders (seen in the P-DESK smoke).
+      if (o.throwingPaths && o.throwingPaths.includes(name)) throw new Error(`Failed to get '${name}' path`)
+      return ({ userData: o.userData, appData: t.appDataRoot, home: t.env.HOME, desktop: path.join(t.env.HOME, 'Desktop'), exe: path.join(t.f, 'exe', 'SnAgentsOS.exe') })[name]
+    },
+    getVersion: () => '2.0.0', getLocale: () => o.locale ?? 'en-US', getAppPath: () => path.join(t.f, 'app'),
+    exit: code => { throw new Error(`app.exit(${code})`) }, on() {}, setLoginItemSettings() { throw new Error('dev must not register login items') },
+  }
+  const electron = { app, dialog: { showMessageBoxSync: opts => { dialogs.push(opts); return 1 } }, shell: { readShortcutLink() { throw new Error('none') }, writeShortcutLink: () => false, trashItem: async () => {} } }
+  const code = buildSync({ entryPoints: [path.join(root, 'src/main/migration/runLegacyMigration.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws'], alias: { '@shared': path.join(root, 'src/shared') }, define: o.define ?? {} }).outputFiles[0].text
+  const mod = { exports: {} }
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, require: id => (id === 'electron' ? electron : require(id)), console, process: { ...process, env: t.env, argv: ['electron'] }, Buffer, URL, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate })
+  return { ...mod.exports, dialogs }
+}
+
+async function orchestrationChecks() {
+  const markerAt = dir => { const p = path.join(dir, 'legacy-migration.json'); return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : null }
+  const fakeWin = { isVisible: () => true, once() {} }
+  const timers = () => { const list = []; return { list, setTimeout: (fn, ms) => { list.push({ fn, ms }) }, setInterval: () => {} } }
+  // Dev without SNAOS_FORCE_LEGACY_MIGRATION: nothing runs, nothing is written.
+  {
+    const t = fakeTree(); seedLegacy(path.join(t.appDataRoot, 'snmulticc'))
+    const userData = path.join(t.appDataRoot, 'snagentsos-dev')
+    const R = loadOrchestrator(t, { userData })
+    check(await R.runLegacyMigrationAtBoot() === 'continue' && !fs.existsSync(userData), 'boot dev: no migration without SNAOS_FORCE_LEGACY_MIGRATION')
+  }
+  // Dev with SNAOS_FORCE_LEGACY_MIGRATION on a fake tree: migrates into the dev userData; cleanup is a simulation.
+  {
+    const t = fakeTree({ SNAOS_FORCE_LEGACY_MIGRATION: '1' })
+    const legacyDir = seedLegacy(path.join(t.appDataRoot, 'snmulticc'))
+    write(path.join(t.env.CLAUDE_CONFIG_DIR, 'settings.json.snmulticc.bak'), '{"x":1}')
+    const userData = path.join(t.appDataRoot, 'snagentsos-dev')
+    const R = loadOrchestrator(t, { userData })
+    const seen = []
+    R.onLegacyStatus(m => seen.push(m && m.phase))
+    check(await R.runLegacyMigrationAtBoot() === 'continue', 'boot dev forced: continues')
+    const m = markerAt(userData)
+    check(m && m.phase === 'committed' && m.outcome === 'migrated' && fs.existsSync(path.join(userData, 'config.json')) && seen.includes('committed'), 'boot dev forced: migrated into snagentsos-dev, status emitted')
+    const log = fs.readFileSync(path.join(userData, 'logs', 'legacy-migration.log'), 'utf8')
+    check(/phase=committed outcome=migrated/.test(log) && !/s0|"secret"|legacy-0/.test(log), 'boot: log lines per transition, no contents or secrets')
+    check(R.readLegacyMarker().phase === 'committed' && R.legacyBackupFile() === path.join(userData, 'migration-backup-v1.zip') && R.legacyLogFile() === path.join(userData, 'logs', 'legacy-migration.log'), 'boot: marker, zip and log paths are computed in main')
+    const tm = timers()
+    const pass = R.scheduleLegacyCleanup(fakeWin, { setTimeout: tm.setTimeout, setInterval: tm.setInterval })
+    check(tm.list.length === 1 && tm.list[0].ms === 3000, 'cleanup: starts 3 s after the window is shown')
+    await pass()
+    check(fs.existsSync(path.join(legacyDir, 'config.json')) && fs.existsSync(path.join(t.env.CLAUDE_CONFIG_DIR, 'settings.json.snmulticc.bak')) && markerAt(userData).phase === 'committed', 'cleanup dev: without SNAOS_FORCE_LEGACY_CLEANUP nothing is deleted, marker untouched')
+    const log2 = fs.readFileSync(path.join(userData, 'logs', 'legacy-migration.log'), 'utf8')
+    check(/mode=simulation reason=notForced/.test(log2) && /simulate item=L01 path=/.test(log2), 'cleanup dev: the simulation is logged')
+    check(R.scheduleLegacyCleanup(fakeWin, {}) !== pass && tm.list.length === 1, 'cleanup: scheduled once per start')
+  }
+  // Dev with SNAOS_FORCE_LEGACY_CLEANUP=1 and every path in the temp folder: real deletion, inside the fake roots only.
+  {
+    const t = fakeTree({ SNAOS_FORCE_LEGACY_MIGRATION: '1', SNAOS_FORCE_LEGACY_CLEANUP: '1' })
+    const legacyDir = seedLegacy(path.join(t.appDataRoot, 'snmulticc'))
+    write(path.join(t.env.TEMP, 'snmulticc-update-1', 'x.exe'), 'x')
+    const userData = path.join(t.appDataRoot, 'snagentsos-dev')
+    const R = loadOrchestrator(t, { userData, throwingPaths: ['appData', 'home', 'desktop'] })
+    await R.runLegacyMigrationAtBoot()
+    const policy = R.cleanupPolicy()
+    check(!policy.simulate && policy.reason === 'devSandbox' && policy.sandbox.length >= 5, `cleanup dev forced: sandbox accepted (${policy.reason})`)
+    const guard = R.buildGuard(R.legacyRoots(), policy.sandbox)
+    check(JSON.stringify(guard.allowedRoots) === JSON.stringify(policy.sandbox) && guard.forbiddenTree.includes(userData), 'cleanup dev forced: the guard only allows the fake roots and protects the data folder')
+    const tm = timers()
+    const pass = R.scheduleLegacyCleanup(fakeWin, { setTimeout: tm.setTimeout, setInterval: tm.setInterval })
+    await pass()
+    const m = markerAt(userData)
+    check(!fs.existsSync(legacyDir) && !fs.existsSync(path.join(t.env.TEMP, 'snmulticc-update-1')) && m.cleanup.L01.state === 'done', 'cleanup dev forced: the fake legacy folder and temp leftovers are deleted')
+    check(['L04', 'L05', 'L09', 'L10'].every(id => m.cleanup[id].state === 'absent') && m.phase === 'done', 'cleanup dev forced: no registry or login item in dev, phase done')
+    check(tm.list.length === 1, 'cleanup: nothing open, no retry scheduled')
+    const outside = fakeTree({ SNAOS_FORCE_LEGACY_MIGRATION: '1', SNAOS_FORCE_LEGACY_CLEANUP: '1', CLAUDE_CONFIG_DIR: '' })
+    check(loadOrchestrator(outside, { userData }).cleanupPolicy().simulate === true, 'cleanup dev forced: one path variable missing keeps the simulation')
+  }
+  // Deferred items retry at 60 s, then every 5 min; a deferred start counts.
+  {
+    const t = fakeTree({ SNAOS_FORCE_LEGACY_MIGRATION: '1', SNAOS_FORCE_LEGACY_CLEANUP: '1' })
+    seedLegacy(path.join(t.appDataRoot, 'snmulticc'))
+    const userData = path.join(t.appDataRoot, 'snagentsos-dev')
+    const R = loadOrchestrator(t, { userData })
+    await R.runLegacyMigrationAtBoot()
+    const tm = timers()
+    const pass = R.scheduleLegacyCleanup(fakeWin, { setTimeout: tm.setTimeout, setInterval: tm.setInterval, isLegacyProcessRunning: () => true })
+    await pass(); await pass()
+    check(tm.list.map(x => x.ms).join() === '3000,60000,300000' && markerAt(userData).cleanup.L01.state === 'deferred', 'cleanup: deferred items retry at 60 s, then every 5 min')
+  }
+  // Packaged with 1.x open: the only dialog; [Quit] writes nothing, [Close] closes and migrates.
+  {
+    const t = fakeTree()
+    seedLegacy(path.join(t.appDataRoot, 'snmulticc'), { config: JSON.stringify({ ...makeConfig(), settings: { ...makeConfig().settings, language: 'es' } }) })
+    const userData = path.join(t.appDataRoot, 'snagentsos')
+    const R = loadOrchestrator(t, { userData, isPackaged: true })
+    let running = true, closes = 0
+    const quit = await R.runLegacyMigrationAtBoot({ isLegacyRunning: () => running, closeLegacy: async () => { closes++; running = false; return true }, showMessageBox: o => { R.dialogs.push(o); return 1 } })
+    const d = R.dialogs[0]
+    check(quit === 'quit' && closes === 0 && !fs.existsSync(userData), '1.x open, [Quit]: no marker, no log, nothing written')
+    check(d.buttons.length === 2 && d.defaultId === 0 && d.cancelId === 1 && d.message === 'SnMultiCC sigue abierto' && d.buttons[0] === 'Cerrar SnMultiCC y continuar' && !/\{\w+\}/.test(d.detail), '1.x open: dialog in the legacy config language, {legacy} interpolated, default and cancel set')
+    R.dialogs.length = 0
+    const go = await R.runLegacyMigrationAtBoot({ isLegacyRunning: () => running, closeLegacy: async () => { closes++; running = false; return true }, showMessageBox: o => { R.dialogs.push(o); return 0 } })
+    check(go === 'continue' && closes === 1 && markerAt(userData).phase === 'committed', '1.x open, [Close]: closed, then migrated')
+    const t2 = fakeTree(); seedLegacy(path.join(t2.appDataRoot, 'snmulticc'))
+    const u2 = path.join(t2.appDataRoot, 'snagentsos')
+    const R2 = loadOrchestrator(t2, { userData: u2, isPackaged: true, locale: 'en-GB' })
+    let r2 = true; const answers = [0, 0]; let attempts = 0
+    const res2 = await R2.runLegacyMigrationAtBoot({ isLegacyRunning: () => r2, closeLegacy: async () => { attempts++; if (attempts === 2) r2 = false; return attempts === 2 }, showMessageBox: o => { R2.dialogs.push(o); return answers.shift() ?? 1 } })
+    check(res2 === 'continue' && attempts === 2 && R2.dialogs[1].message === 'SnMultiCC could not be closed' && R2.dialogs[1].buttons.join() === 'Retry,Quit', '1.x that will not close: [Retry] [Quit], retry then migrate')
+  }
+  // Fault injection only in a build defining __SNAOS_TEST_FAULTS__ (W16).
+  {
+    const t = fakeTree({ SNAOS_FORCE_LEGACY_MIGRATION: '1', SNAOS_TEST_FAULT: 'verify' })
+    const legacyDir = seedLegacy(path.join(t.appDataRoot, 'snmulticc')); const before = snapshotTree(legacyDir)
+    const userData = path.join(t.appDataRoot, 'snagentsos-dev')
+    await loadOrchestrator(t, { userData, define: { __SNAOS_TEST_FAULTS__: 'true' } }).runLegacyMigrationAtBoot()
+    check(markerAt(userData).phase === 'failed' && sameTree(snapshotTree(legacyDir), before) && !fs.existsSync(path.join(userData, 'config.json')), 'fault build: SNAOS_TEST_FAULT=verify fails and keeps the legacy data (W16)')
+    const t2 = fakeTree({ SNAOS_FORCE_LEGACY_MIGRATION: '1', SNAOS_TEST_FAULT: 'verify' }); seedLegacy(path.join(t2.appDataRoot, 'snmulticc'))
+    const u2 = path.join(t2.appDataRoot, 'snagentsos-dev')
+    await loadOrchestrator(t2, { userData: u2 }).runLegacyMigrationAtBoot()
+    check(markerAt(u2).phase === 'committed', 'release build: SNAOS_TEST_FAULT is ignored')
+    const cfg = fs.readFileSync(path.join(root, 'electron.vite.config.ts'), 'utf8')
+    check(cfg.includes("__SNAOS_TEST_FAULTS__: JSON.stringify(process.env.SNAOS_TEST_FAULTS_BUILD === '1')"), 'build: the fault define is false unless SNAOS_TEST_FAULTS_BUILD=1')
+  }
+  // The log rotates at 256 KB and keeps one file.
+  {
+    const { createLegacyLog, LOG_MAX_BYTES } = load('src/main/migration/legacyLog.ts')
+    const dir = freshDir('log')
+    const log = createLegacyLog(dir, () => 0)
+    const line = 'phase=cleaning item=L01 result=done ' + 'x'.repeat(1000)
+    for (let i = 0; i < 300; i++) log(line)
+    const main = path.join(dir, 'logs', 'legacy-migration.log')
+    check(LOG_MAX_BYTES === 256 * 1024 && fs.existsSync(main + '.1') && fs.statSync(main).size < LOG_MAX_BYTES && fs.statSync(main + '.1').size >= LOG_MAX_BYTES && !fs.existsSync(main + '.2'), 'log: rotated at 256 KB, one previous file kept')
+    check(fs.readFileSync(main, 'utf8').startsWith('1970-01-01T00:00:00.000Z phase=cleaning'), 'log: ISO time stamp per line')
+    const ro = createLegacyLog(path.join(dir, 'logs', 'legacy-migration.log', 'nested'))
+    ro('never throws'); checks++
+  }
+  // Wiring in index.ts: before any IPC, config or device read; cleanup after the window.
+  {
+    const index = fs.readFileSync(path.join(root, 'src/main/index.ts'), 'utf8')
+    const boot = index.slice(index.indexOf('async function bootstrap()'))
+    const at = s => boot.indexOf(s)
+    check(at('runLegacyMigrationAtBoot()') > 0 && at('runLegacyMigrationAtBoot()') < at('remoteManager.loadDevices()') && at('remoteManager.loadDevices()') < at('registerAppIpc()') && at('runLegacyMigrationAtBoot()') < at('configStore.load()'), 'index: the pipeline runs before devices, IPC and config are read')
+    check(at('openMainWindow()') < at('scheduleLegacyCleanup(mainWindow)'), 'index: the cleanup is scheduled after the window opens')
+    check(at("app.setAppUserModelId(BRAND.appId)") < at('runLegacyMigrationAtBoot()'), 'index: after the AUMID')
+  }
+  // The main-process dialog strings carry no legacy literal (they interpolate {legacy}).
+  {
+    const { mainTLang } = load('src/main/i18n.ts')
+    const keys = ['legacy.running.title', 'legacy.running.detail', 'legacy.running.close', 'legacy.running.quit', 'legacy.failed.title', 'legacy.failed.detail', 'legacy.failed.retry', 'legacy.failed.quit']
+    for (const lang of ['en', 'es']) check(keys.every(k => !/\{\w+\}/.test(mainTLang(lang, k, { legacy: 'SnMultiCC', app: 'SnAgentsOS' }))), `i18n ${lang}: legacy dialog keys interpolate`)
+    check(!/snmulticc|multicc/i.test(fs.readFileSync(path.join(root, 'src/main/i18n.ts'), 'utf8')), 'i18n: no legacy literal in main strings')
+  }
+}
+
 async function main() {
   try {
     await markerChecks()
@@ -1264,6 +1432,7 @@ async function main() {
     await winRegistryChecks()
     await posixItemChecks()
     await processChecks()
+    await orchestrationChecks()
     console.log(`PASS: ${checks} legacy migration and cleanup checks`)
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true })
