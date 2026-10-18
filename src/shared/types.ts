@@ -277,7 +277,56 @@ export type ClaudePaneState = 'idle' | 'working' | 'done' | 'action' | 'error' |
 export type AgentProvider = 'claude' | 'codex'
 export type AttentionReason = 'permission' | 'question' | 'plan' | 'elicitation' | 'failure'
 
-export interface PaneStatus {
+/**
+ * One outstanding request of an agent (CONTRATOS RemotePending, E4-FR-09).
+ * Travels to the phone inside RemotePaneStatus; built in main from bounded
+ * hook fields, never from the raw tool_input.
+ */
+export interface RemotePending {
+  /** toolUseId / elicitation id, or a fallback key. */
+  id: string
+  kind: 'permission' | 'question' | 'plan' | 'elicitation'
+  toolName?: string
+  /** <= 200 */
+  summary: string
+  /** AskUserQuestion only. */
+  questions?: Array<{ question: string; header?: string; multiSelect: boolean; options: Array<{ label: string; description?: string }> }>
+}
+
+export type AgentDetailKind = 'tool' | 'prompt' | 'question' | 'permission' | 'plan' | 'reply'
+/** What the agent is on right now (desktop only, E5-FR-02). text <= 160, no C0/C1 or ANSI. */
+export interface AgentDetail {
+  kind: AgentDetailKind
+  text: string
+}
+
+/**
+ * Status enrichment shared by PaneStatus and PaneStatusEvt (E4-FR-09,
+ * E5-FR-02). The first four also reach the phone (RemotePaneStatus); the
+ * rest are desktop only and never leave main -> renderer.
+ */
+export interface PaneStatusDetails {
+  /** Epoch ms of the last change of the effective state (not of updatedAt). */
+  stateSince?: number
+  /** Last assistant reply, <= 280. */
+  lastMessage?: string
+  /** Current tool, summarized, <= 120. */
+  activity?: string
+  pending?: RemotePending[]
+  /** Validated session id (never `launch:`, never on SSH panes). Desktop only. */
+  sessionId?: string
+  /** Absolute existing directory reported by the agent. Desktop only. */
+  cwd?: string
+  detail?: AgentDetail
+  /** Text after the glyph in Claude's OSC title, <= 60. */
+  topic?: string
+  /** First line of the first prompt of the session, <= 60. */
+  firstPrompt?: string
+  /** Claude working -> done/idle transition (cache timer start). */
+  cacheSince?: number
+}
+
+export interface PaneStatus extends PaneStatusDetails {
   state: ClaudePaneState
   precise: boolean
   provider?: AgentProvider
@@ -287,7 +336,7 @@ export interface PaneStatus {
 }
 
 /** Main -> renderer status update for one console. */
-export interface PaneStatusEvt {
+export interface PaneStatusEvt extends PaneStatusDetails {
   paneId: string
   /** null clears the indicator (claude exited / pty died). */
   state: ClaudePaneState | null
