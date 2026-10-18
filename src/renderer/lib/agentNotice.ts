@@ -28,8 +28,11 @@ export function onAgentStatus(evt: PaneStatusEvt): void {
     toast.dismissByKey(key)
   }
   if (!evt.notify || evt.delivery !== 'inApp' || !evt.state) return
-  const textKey = CARD_KEYS[evt.state]
+  let textKey = CARD_KEYS[evt.state]
   if (!textKey) return
+  // A title-only (approximate) stop is not known to be a question: same
+  // generic copy as main's native notification.
+  if (evt.state === 'action' && !evt.precise) textKey = 'toast.agent.generic'
 
   const s = useAppStore.getState()
   const lang = s.settings.language
