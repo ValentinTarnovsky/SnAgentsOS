@@ -6,8 +6,8 @@
  * (the viewed pane's own workspace, E2-FR-47), the "N waiting" pill and a
  * kebab with the console's actions plus Quick Commands (E2-FR-08/16/51).
  * Below: pane tabs of that workspace (E1-FR-32), the terminal (flex-1,
- * min-h-0), the composer or "Direct input" strip (E1-FR-22..31, 38) and the
- * KeyBar. The status banner and the toasts overlay the terminal.
+ * min-h-0), the answer card or the "waiting" strip (E2-FR-17..25), the
+ * composer or "Direct input" strip (E1-FR-22..31, 38) and the KeyBar. The status banner and the toasts overlay the terminal.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -20,6 +20,7 @@ import { QuickCommandsSheet } from './QuickCommandsSheet'
 import { Composer, openComposerForPaste, toggleInputMode } from './Composer'
 import { DirectInputStrip } from './DirectInputStrip'
 import { ExitStrip } from './ExitStrip'
+import { PromptCard } from './prompts/PromptCard'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { openDiagnostics } from '../lib/connLog'
 import { StatusIndicator } from './StatusIndicator'
@@ -124,6 +125,9 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       </main>
 
       <ExitStrip />
+
+      {/* Answer cards for the viewed console (E2-FR-17..25). */}
+      <PromptCard />
 
       {/* Composer mode docks the composer here; Direct mode shows the strip
           only while the keyboard is down (E1-FR-38). Both stay usable offline:

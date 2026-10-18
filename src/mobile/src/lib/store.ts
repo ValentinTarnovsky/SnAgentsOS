@@ -19,12 +19,14 @@ import {
   loadLastPane,
   loadLastViewed,
   loadPref,
+  loadPromptCards,
   resolveInputMode,
   saveCollapsed,
   saveInputMode,
   saveLastPane,
   saveLastViewed,
   savePref,
+  savePromptCards,
   withViewed,
   type ComposerPref,
   type InputMode,
@@ -156,6 +158,8 @@ export interface RemoteState {
   paneStatus: Record<string, RemotePaneStatus>
   /** Alert with the page open when another console needs the user (E1-FR-40). */
   inPageAlerts: boolean
+  /** Answer cards for Claude's permissions and questions (E2-FR-13, 19; R22-15). */
+  promptCards: boolean
   // --- composer (E1-FR-22..31) ---
   /** Saved explicit input mode per pane ('snagentsos.inputMode.<paneId>'). */
   inputModes: Record<string, InputMode>
@@ -191,6 +195,8 @@ export interface RemoteState {
   setKeyboard: (k: { inset?: number; focus?: string | null }) => void
   /** Toggle and persist the in-page alerts preference. */
   setInPageAlerts: (on: boolean) => void
+  /** Toggle and persist the answer cards preference (R22-15). */
+  setPromptCards: (on: boolean) => void
   /** Persist an explicit mode for a pane; ends a one-shot on it. */
   setInputMode: (paneId: string, mode: InputMode) => void
   /** Toggle and persist a composer preference. */
@@ -233,6 +239,7 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   terminalUnicode: '6',
   paneStatus: {},
   inPageAlerts: loadInPageAlerts(),
+  promptCards: loadPromptCards(),
   inputModes: loadInputModes(),
   composerDefaultForAgents: loadPref('composerDefaultForAgents'),
   composerAutocorrect: loadPref('composerAutocorrect'),
@@ -288,6 +295,10 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   setInPageAlerts: (on) => {
     saveInPageAlerts(on)
     set({ inPageAlerts: on })
+  },
+  setPromptCards: (on) => {
+    savePromptCards(on)
+    set({ promptCards: on })
   },
   setInputMode: (paneId, mode) => {
     saveInputMode(paneId, mode)
