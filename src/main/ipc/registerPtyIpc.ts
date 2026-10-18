@@ -11,9 +11,7 @@ import type {
 import type { PtyManager } from '../pty/PtyManager'
 
 export function registerPtyIpc(manager: PtyManager): void {
-  ipcMain.handle(CH.PTY_SPAWN, (_e, req: PtySpawnReq): PtySpawnRes => ({
-    ptyId: manager.spawn(req),
-  }))
+  ipcMain.handle(CH.PTY_SPAWN, (_e, req: PtySpawnReq): PtySpawnRes => manager.spawn(req))
 
   ipcMain.handle(
     CH.PTY_REATTACH,

@@ -2,7 +2,7 @@ import { Notification, type BrowserWindow } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
 import type { AgentProvider, AttentionReason, ClaudePaneState, ConfigFile, NotificationSettings, PaneStatusEvt } from '@shared/types'
-import type { PtySink } from '../pty/PtyManager'
+import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
 import type { HookEvent } from './HookServer'
 import type { AgentEvent, StatusNotice } from './events'
@@ -39,7 +39,8 @@ export class StatusManager implements PtySink {
   ) {}
   onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.ptys.set(paneId, ptyId) }
   onData(): void {}
-  onExit(ptyId: string, paneId: string): void {
+  /** Every exit (natural or not) releases the pane's tracking. */
+  onExit(ptyId: string, paneId: string, _exitCode?: number, _info?: PtyExitInfo): void {
     if (this.ptys.get(paneId) !== ptyId) return
     this.ptys.delete(paneId)
     this.clearPane(paneId)

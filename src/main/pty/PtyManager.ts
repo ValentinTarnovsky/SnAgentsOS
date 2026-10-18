@@ -3,10 +3,13 @@ import { randomUUID } from 'crypto'
 import { delimiter } from 'path'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
-import type { PtyDataEvt, PtyExitEvt, PtyReattachRes, PtySpawnReq } from '@shared/ipc-contract'
+import type { PtyDataEvt, PtyExitEvt, PtyReattachRes, PtySpawnReq, PtySpawnRes, ShellKind } from '@shared/ipc-contract'
 import type { SetupStep } from '@shared/types'
 import { AGENT_ENV } from '@shared/brand'
 import { cleanEnv, defaultShell, homeDir } from './shellResolver'
+import { resolveShell } from './shellResolve'
+import { ModeTracker } from './ModeTracker'
+import { sanitizeQueries } from './ansiSanitize'
 
 interface Entry {
   pty: IPty
@@ -18,6 +21,14 @@ interface Entry {
   /** Bounded recent-output ring, replayed into a fresh terminal on reattach. */
   history: string[]
   historyBytes: number
+  /** The ring dropped its oldest chunk at least once (its head may be mid-sequence). */
+  historyTruncated: boolean
+  /** DEC private modes seen on the full output stream (E6-FR-33). */
+  modes: ModeTracker
+  /** Family of the launched shell (E6-FR-32). */
+  shellKind: ShellKind
+  /** Set by kill() so the exit it causes is not reported as natural (E6-FR-34). */
+  killing: boolean
   /** False while the owning workspace is hidden (output is throttled). */
   active: boolean
   /** True while a setup (expect/send) sequence is running for this pty. */
@@ -56,6 +67,11 @@ const WRITE_PACE_MS = 4
 const HISTORY_CAP = 256 * 1024
 /** Recent-output tail kept for setup `waitFor` matching (bounds memory). */
 const SCRATCH_CAP = 16 * 1024
+/**
+ * How far into a truncated ring trimRingHead looks for a clean start. Past it
+ * the head is kept as is rather than dropping a whole ring of CR-only output.
+ */
+const HEAD_SCAN = 8 * 1024
 /** How long the shell is given to print its first prompt before setup begins. */
 const SHELL_SETTLE_MS = 350
 /** Default cap on waiting for a `waitFor` match before proceeding anyway. */
@@ -83,6 +99,31 @@ function buildMatcher(pattern: string): (text: string) => boolean {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
 /**
+ * Start of a replay built from the ring. Once the ring has dropped chunks, its
+ * first chunk can begin inside an escape sequence (`;2;255m...` printed as
+ * text) or mid-line, so the replay starts after the first line break, or at the
+ * first ESC when there is no line break near the head. An untruncated ring is
+ * the exact stream start and is returned whole.
+ */
+export function trimRingHead(ring: string, truncated: boolean): string {
+  if (!truncated || !ring) return ring
+  const limit = Math.min(ring.length, HEAD_SCAN)
+  const nl = ring.indexOf('\n')
+  if (nl >= 0 && nl < limit) return ring.slice(nl + 1)
+  const esc = ring.indexOf('\x1b')
+  if (esc >= 0 && esc < limit) return ring.slice(esc)
+  return ring
+}
+
+/** How a pty ended, as seen by each sink (E6-FR-34). */
+export interface PtyExitInfo {
+  /** The pty was still the live one bound to its pane. */
+  current: boolean
+  /** The process ended on its own (not kill/killAll/restart or a failed spawn). */
+  natural: boolean
+}
+
+/**
  * An extra consumer of pty lifecycle + output, fed alongside the renderer
  * (remote-control sessions mirror terminals through one of these). Callbacks
  * run synchronously on the pty event path and must never throw or block.
@@ -93,8 +134,11 @@ export interface PtySink {
   onSpawn(ptyId: string, paneId: string): void
   /** Coalesced output, same bytes the renderer receives (unsplit). */
   onData(ptyId: string, paneId: string, data: string): void
-  /** The pty exited. Fired after the final data flush, before teardown. */
-  onExit(ptyId: string, paneId: string, exitCode: number): void
+  /**
+   * The pty exited (or failed to spawn). Fired after the final data flush,
+   * before teardown, for every exit; `info` tells natural current exits apart.
+   */
+  onExit(ptyId: string, paneId: string, exitCode: number, info: PtyExitInfo): void
 }
 
 /**
@@ -127,9 +171,12 @@ export class PtyManager {
     return this.entries.size
   }
 
-  spawn(req: PtySpawnReq): string {
+  spawn(req: PtySpawnReq): PtySpawnRes {
     const ptyId = `pty-${++this.seq}-${randomUUID()}`
-    const shell = req.shell || defaultShell()
+    // A configured shell that does not exist falls back to the OS default (E6-FR-32).
+    const resolved = resolveShell(req.shell, defaultShell())
+    if (resolved.warning) console.warn(`[pty] shell not found: ${resolved.warning.requested}, using ${resolved.shell}`)
+    const shell = resolved.shell
     const env = cleanEnv({ ...req.env, ...this.statusEnv(ptyId, req.paneId, req.cwd || homeDir()), [AGENT_ENV.consoleId]: req.paneId, [AGENT_ENV.ptyId]: ptyId })
     const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH'
     if (env[AGENT_ENV.codexShim]) env[pathKey] = env[AGENT_ENV.codexShim] + delimiter + (env[pathKey] ?? '')
@@ -143,7 +190,7 @@ export class PtyManager {
       env,
     }) } catch (error) {
       for (const sink of this.sinks.values()) {
-        try { sink.onExit(ptyId, req.paneId, -1) } catch { /* release prepared integrations */ }
+        try { sink.onExit(ptyId, req.paneId, -1, { current: false, natural: false }) } catch { /* release prepared integrations */ }
       }
       throw error
     }
@@ -155,6 +202,10 @@ export class PtyManager {
       timer: null,
       history: [],
       historyBytes: 0,
+      historyTruncated: false,
+      modes: new ModeTracker(),
+      shellKind: resolved.shellKind,
+      killing: false,
       active: true,
       setupActive: false,
       cancelled: false,
@@ -199,6 +250,7 @@ export class PtyManager {
     proc.onData((data) => {
       entry.buf.push(data)
       this.pushHistory(entry, data)
+      entry.modes.feed(data)
       if (entry.setupActive) {
         // Feed the setup runner the same bytes the renderer sees, in order.
         entry.scratch += data
@@ -214,10 +266,14 @@ export class PtyManager {
     proc.onExit(({ exitCode, signal }) => {
       this.flush(ptyId)
       this.send(CH.PTY_EXIT, { ptyId, exitCode, signal } satisfies PtyExitEvt)
-      this.dispose(ptyId, exitCode)
+      // An exit that kill() caused is not natural, even when node-pty fires it
+      // synchronously from inside kill().
+      this.dispose(ptyId, exitCode, !entry.killing)
     })
 
-    return ptyId
+    const res: PtySpawnRes = { ptyId, shellKind: resolved.shellKind }
+    if (resolved.warning) res.warning = resolved.warning
+    return res
   }
 
   /** Rebind to a live pty for paneId, returning its id + replay history. */
@@ -228,7 +284,16 @@ export class PtyManager {
     if (!entry) return null
     // Drain anything pending so post-subscribe output isn't a duplicate of replay.
     this.flush(ptyId)
-    return { ptyId, replay: entry.history.join('') }
+    return { ptyId, replay: this.replayOf(entry) }
+  }
+
+  /**
+   * Replay text for a fresh terminal (E6-FR-33): the modes still active that may
+   * have scrolled out of the ring, then the ring with a clean head and without
+   * the queries a receiving xterm would answer into the live shell.
+   */
+  private replayOf(entry: Entry): string {
+    return entry.modes.rehydrate() + sanitizeQueries(trimRingHead(entry.history.join(''), entry.historyTruncated))
   }
 
   write(ptyId: string, data: string): void {
@@ -292,12 +357,13 @@ export class PtyManager {
   kill(ptyId: string): void {
     const entry = this.entries.get(ptyId)
     if (!entry) return
+    entry.killing = true
     try {
       entry.pty.kill()
     } catch {
       /* already gone */
     }
-    this.dispose(ptyId)
+    this.dispose(ptyId, 0, false)
   }
 
   killAll(): void {
@@ -384,7 +450,7 @@ export class PtyManager {
   /**
    * Initial screen for a new remote subscriber: drain pending output to the
    * current listeners first (so the ring is the exact prefix of what follows),
-   * then return the ring + live size. Callers must add their subscription in
+   * then return the replay (replayOf) + live size. Callers must add their subscription in
    * the same synchronous block to avoid a gap or overlap with live `out` data.
    */
   getReplay(paneId: string): { ptyId: string; replay: string; cols: number; rows: number } | null {
@@ -393,7 +459,7 @@ export class PtyManager {
     const entry = this.entries.get(ptyId)
     if (!entry) return null
     this.flush(ptyId)
-    return { ptyId, replay: entry.history.join(''), cols: entry.pty.cols, rows: entry.pty.rows }
+    return { ptyId, replay: this.replayOf(entry), cols: entry.pty.cols, rows: entry.pty.rows }
   }
 
   /**
@@ -473,6 +539,7 @@ export class PtyManager {
     while (entry.historyBytes > HISTORY_CAP && entry.history.length > 1) {
       const dropped = entry.history.shift()
       if (dropped) entry.historyBytes -= dropped.length
+      entry.historyTruncated = true
     }
   }
 
@@ -504,7 +571,7 @@ export class PtyManager {
     }
   }
 
-  private dispose(ptyId: string, exitCode = 0): void {
+  private dispose(ptyId: string, exitCode: number, natural: boolean): void {
     const entry = this.entries.get(ptyId)
     if (!entry) return
     // Abort any in-flight setup sequence: unblock a pending waiter so its async
@@ -525,7 +592,7 @@ export class PtyManager {
     const removed = this.byPane.get(entry.paneId) === ptyId
     if (removed) this.byPane.delete(entry.paneId)
     for (const sink of this.sinks.values()) {
-      try { sink.onExit(ptyId, entry.paneId, exitCode) } catch { /* sink teardown must not block PTY cleanup */ }
+      try { sink.onExit(ptyId, entry.paneId, exitCode, { current: removed, natural }) } catch { /* sink teardown must not block PTY cleanup */ }
     }
     this.entries.delete(ptyId)
     // byPane lost a pane: let remote re-broadcast so its `running` dot clears
