@@ -47,12 +47,12 @@ interface Category {
 // Ordered most-important → least (cosmetic/info sink to the bottom).
 const CATEGORIES: Category[] = [
   { id: 'terminal', labelKey: 'settings.cat.terminal', icon: TerminalSquare, keywords: ['shell', 'font', 'fuente', 'scrollback', 'powershell'] },
-  { id: 'agents', labelKey: 'settings.cat.agents', icon: Bot, keywords: ['preset', 'model', 'modelo', 'agent', 'agente', 'claude', 'codex', 'behavior', 'comportamiento', 'awake', 'despierta', 'sleep', 'suspender', 'suspension', 'suspensión', 'energy', 'energia', 'energía', 'display', 'pantalla', 'resume', 'retomar', 'session', 'sesion', 'sesión', 'chat'] },
+  { id: 'agents', labelKey: 'settings.cat.agents', icon: Bot, keywords: ['preset', 'model', 'modelo', 'agent', 'agente', 'claude', 'codex', 'behavior', 'comportamiento', 'awake', 'despierta', 'sleep', 'suspender', 'suspension', 'suspensión', 'energy', 'energia', 'energía', 'display', 'pantalla', 'resume', 'retomar', 'session', 'sesion', 'sesión', 'chat', 'rows', 'filas', 'sidebar', 'barra lateral', 'topic', 'title', 'titulo', 'título', 'ctrl', 'focus', 'foco'] },
   { id: 'connections', labelKey: 'settings.cat.connections', icon: PlugZap, keywords: ['ssh', 'connection', 'conexion', 'conexión', 'setup', 'login', 'password', 'contraseña', 'dedi', 'server', 'servidor', 'expect'] },
   { id: 'snippets', labelKey: 'settings.cat.snippets', icon: FileText, keywords: ['snippet', 'prompt', 'plantilla', 'texto', 'text'] },
   { id: 'startup', labelKey: 'settings.cat.startup', icon: Power, keywords: ['startup', 'inicio', 'tray', 'bandeja', 'launch', 'close', 'cerrar', 'shortcut', 'atajo', 'hotkey'] },
   { id: 'notifications', labelKey: 'settings.cat.notifications', icon: Bell, keywords: ['notifications', 'notificaciones', 'sound', 'sonido', 'claude', 'codex', 'discord', 'webhook', 'status', 'estado', 'badge', 'hooks', 'toast', 'alerta'] },
-  { id: 'keys', labelKey: 'settings.cat.keys', icon: Keyboard, keywords: ['keys', 'teclas', 'keyboard', 'teclado', 'shortcut', 'atajo', 'keybinding', 'binding', 'palette', 'paleta'] },
+  { id: 'keys', labelKey: 'settings.cat.keys', icon: Keyboard, keywords: ['keys', 'teclas', 'keyboard', 'teclado', 'shortcut', 'atajo', 'keybinding', 'binding', 'palette', 'paleta', 'waiting', 'esperan', 'reopen', 'reabrir', 'focus', 'foco'] },
   { id: 'data', labelKey: 'settings.cat.data', icon: Database, keywords: ['data', 'datos', 'export', 'exportar', 'import', 'importar', 'backup', 'respaldo'] },
   { id: 'appearance', labelKey: 'settings.cat.appearance', icon: Palette, keywords: ['theme', 'color', 'tema', 'apariencia', 'custom'] },
   { id: 'language', labelKey: 'settings.cat.language', icon: Languages, keywords: ['language', 'idioma', 'english', 'español', 'spanish'] },
