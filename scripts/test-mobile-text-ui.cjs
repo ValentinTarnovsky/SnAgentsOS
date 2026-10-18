@@ -124,7 +124,12 @@ window.result = (async () => {
  tapAt(pointOf(find('example.com'))); await wait(350);
  rows = sheetRows();
  check(rows.some(r=>r.id==='openPhone' && r.text.includes('Open on the phone')), 'a public URL can open on the phone');
+ document.execCommand = () => false;
+ document.querySelector('[data-link-sheet] [data-action="copy"]').click(); await wait(400);
+ const fbLink = document.querySelector('[data-copy-fallback]');
+ check(fbLink && fbLink.value==='https://example.com/guide' && toast()!=="Couldn't open it on the PC", 'a refused link copy opens the fallback sheet, not a PC error');
  await closeSheets();
+ document.execCommand = realExec;
  tapAt(pointOf(find('App.tsx'))); await wait(350);
  rows = sheetRows();
  check(document.querySelector('[data-link-sheet="path"]') && rows.map(r=>r.id).join()==='copyPath,insert,revealPc', 'a path offers Copy path, Insert and the PC action');
