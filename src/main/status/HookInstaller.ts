@@ -211,3 +211,52 @@ export function uninstallHooks(): StatusHooksStatusRes {
   }
   return { installed: false, settingsPath: path, port: null }
 }
+
+export type HooksMigrationResult = 'rewritten' | 'notNeeded' | 'pending'
+
+/** Marks of the 1.x handlers: its env prefix (without the underscore) and its statusMessage. */
+const LEGACY_MARKS = [LEGACY_BRAND.envPrefix.replace(/_$/, ''), LEGACY_BRAND.hookStatusMessage]
+
+function isLegacy(handler: HookHandler): boolean {
+  if (!isOurs(handler)) return false
+  const text = JSON.stringify(handler)
+  return LEGACY_MARKS.some(mark => text.includes(mark))
+}
+
+function hasLegacyHandler(settings: Record<string, unknown>): boolean {
+  for (const groups of Object.values(hooksOf(settings))) {
+    if (!Array.isArray(groups)) continue
+    for (const group of groups as MatcherGroup[]) {
+      if ((Array.isArray(group?.hooks) ? group.hooks : []).some(isLegacy)) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Rewrites the 1.x handlers to the current names (E0-FR-14, item L11), whether
+ * or not hooks are enabled: the reconcile only runs with hooksEnabled, so
+ * without this they would stay forever. Keeps the installed port and token;
+ * with no installed url (only the 1.x SessionStart left) they are removed.
+ * Writes nothing when there is nothing legacy or when settings.json does not
+ * parse. The caller (the legacy cleanup) runs it only with 1.x closed.
+ */
+export function migrateLegacyHooks(): HooksMigrationResult {
+  const path = settingsPath()
+  try {
+    const settings = readSettings(path)
+    const found = hasLegacyHandler(settings)
+    if (found) {
+      const url = findInstalledUrl(settings)
+      const m = url ? /^http:\/\/127\.0\.0\.1:(\d+)\//.exec(url) : null
+      if (url && m) installHooks(Number(m[1]), url.split('/').pop() ?? '')
+      else uninstallHooks()
+    }
+    // Verify on disk: done only with no 1.x mark left anywhere in the file.
+    const raw = existsSync(path) ? readFileSync(path, 'utf8') : ''
+    if (LEGACY_MARKS.some(mark => raw.includes(mark))) return 'pending'
+    return found ? 'rewritten' : 'notNeeded'
+  } catch {
+    return 'pending'
+  }
+}
