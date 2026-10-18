@@ -46,7 +46,7 @@ export interface PaneRef {
 }
 
 /** Panes of a workspace in display order (layoutOrder first, then the rest). */
-function orderedPanes(ws: RemoteStateSnapshot['workspaces'][number]): RemotePaneInfo[] {
+export function orderedPanes(ws: RemoteStateSnapshot['workspaces'][number]): RemotePaneInfo[] {
   const byId = new Map(ws.panes.map((p) => [p.id, p]))
   const out: RemotePaneInfo[] = []
   for (const id of ws.layoutOrder) {
@@ -102,4 +102,21 @@ export function statusMapOf(snap: RemoteStateSnapshot): Record<string, RemotePan
   const map: Record<string, RemotePaneStatus> = {}
   for (const ws of snap.workspaces) for (const pane of ws.panes) if (pane.status) map[pane.id] = pane.status
   return map
+}
+
+/** Longest pane title a tab chip shows before it is cut (E1-FR-32). */
+export const TAB_TITLE_MAX = 18
+
+/** A pane title cut to `max` characters (code points) with an ellipsis. */
+export function tabTitle(title: string, max = TAB_TITLE_MAX): string {
+  const chars = Array.from(title.trim())
+  if (chars.length <= max) return chars.join('')
+  return chars.slice(0, max - 1).join('').trimEnd() + '\u2026'
+}
+
+/** Panes of the workspace the phone is looking at, in tab order (E1-FR-32). */
+export function tabPanes(snap: RemoteStateSnapshot, activePaneId: string | null): { workspaceId: string | null; panes: RemotePaneInfo[] } {
+  const workspaceId = viewedWorkspaceId(snap, activePaneId)
+  const ws = snap.workspaces.find((w) => w.id === workspaceId)
+  return { workspaceId: ws ? ws.id : null, panes: ws ? orderedPanes(ws) : [] }
 }
