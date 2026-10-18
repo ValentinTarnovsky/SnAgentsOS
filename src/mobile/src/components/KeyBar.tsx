@@ -25,8 +25,8 @@ import {
   ChevronUp,
   ClipboardPaste,
   Delete,
-  FileText,
   Keyboard,
+  Zap,
 } from 'lucide-react'
 import { client } from '../lib/client'
 import { getActiveTerm } from '../lib/terminalBus'
@@ -44,7 +44,7 @@ const ICONS: Record<KeyIcon, ReactNode> = {
   right: <ChevronRight size={18} />,
   backspace: <Delete size={18} />,
   paste: <ClipboardPaste size={18} />,
-  snippets: <FileText size={18} />,
+  quick: <Zap size={18} />,
 }
 
 /** Live presses, so a pane switch or a hidden tab can stop every repeat. */
@@ -134,12 +134,12 @@ function PressKey({ onFire, repeat = false, ariaLabel, active, dimmed, className
 
 export function KeyBar({
   onPaste,
-  onSnippets,
+  onQuickCommands,
   inputMode = 'direct',
   onToggleMode,
 }: {
   onPaste: () => void
-  onSnippets: () => void
+  onQuickCommands: () => void
   inputMode?: InputMode
   onToggleMode?: () => void
 }): ReactNode {
@@ -177,8 +177,8 @@ export function KeyBar({
       onPaste()
       return true
     }
-    if (def.action === 'snippets') {
-      onSnippets()
+    if (def.action === 'quickCommands') {
+      onQuickCommands()
       return true
     }
     if (def.latch) {
