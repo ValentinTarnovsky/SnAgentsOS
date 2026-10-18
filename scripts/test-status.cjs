@@ -403,7 +403,7 @@ async function pathOpenChecks() {
       workspaces: [
         { id: 'w', name: 'W', cwd: 'C:/ws', panes: [pane('p', { cwd: 'C:/ws/sub' }), pane('s', { setupId: 'ssh' }), pane('q', { presetId: 'pr' }), pane('n')] },
         { id: 'remote', name: 'R', cwd: 'C:/r', setupId: 'ssh', panes: [pane('r')] },
-        { id: 'bare', name: 'B', cwd: '', panes: [pane('b')] },
+        { id: 'bare', name: 'B', cwd: '', panes: [pane('b'), pane('bc', { cwd: 'C:/elsewhere' })] },
       ],
     })
     check(rr.resolvePaneRoot('w', 'p') === 'C:/ws/sub' && rr.resolvePaneRoot('w', 'q') === 'D:/preset' && rr.resolvePaneRoot('w', 'n') === 'C:/ws' && rr.resolvePaneRoot('bare', 'b') === '', 'pane root: pane cwd, then preset defaultCwd, then ws.cwd, else empty (home)')
@@ -417,6 +417,9 @@ async function pathOpenChecks() {
     answer = () => ({ ok: false, error: 'denied_path' })
     res = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'w', paneId: 'n', path: '../x' })
     check(res.error === 'denied_path' && calls.length === 1, 'no retry when the pane root already is ws.cwd')
+    calls.length = 0
+    res = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'bare', paneId: 'bc', path: '../x' })
+    check(res.error === 'denied_path' && calls.length === 1, 'no retry under home when the workspace has no cwd of its own')
     answer = () => ({ ok: false, error: 'not_found' }); calls.length = 0
     res = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'w', paneId: 'p', path: 'nope.md' })
     check(res.error === 'not_found' && calls.length === 1, "main's error is copied to the ack (no retry for not_found)")

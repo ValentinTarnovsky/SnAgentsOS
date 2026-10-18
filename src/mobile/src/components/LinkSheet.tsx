@@ -10,7 +10,8 @@
  *    same way and may still reveal (home or drive root). The ack's error
  *    becomes a toast: outside the workspace, missing file, or wait a second.
  *
- * Copy runs inside the row's click (execCommand needs the gesture).
+ * Copy runs inside the row's click (execCommand needs the gesture); when the
+ * browser refuses, the text opens in the same fallback sheet as a selection.
  */
 import { useRef, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
@@ -49,7 +50,16 @@ function insertInComposer(text: string): void {
   getComposerHandle()?.insert(text)
 }
 
-export function LinkSheet({ link: openLink, onClose }: { link: TerminalLink | null; onClose: () => void }): ReactNode {
+export function LinkSheet({
+  link: openLink,
+  onClose,
+  onCopyFallback,
+}: {
+  link: TerminalLink | null
+  onClose: () => void
+  /** The browser refused to copy: show the text to copy by hand (E2-FR-27). */
+  onCopyFallback: (text: string) => void
+}): ReactNode {
   const hostPlatform = useRemoteStore((s) => s.hostPlatform)
   // The closing sheet keeps showing the last link while it slides out.
   const last = useRef<TerminalLink | null>(null)
@@ -58,9 +68,9 @@ export function LinkSheet({ link: openLink, onClose }: { link: TerminalLink | nu
 
   const toast = (text: string): void => store.getState().setToast(text)
   const copy = (text: string): void => {
-    if (copyText(text)) toast(t('link.copied'))
-    else toast(t('link.err.generic'))
     onClose()
+    if (copyText(text, () => onCopyFallback(text))) toast(t('link.copied'))
+    else onCopyFallback(text)
   }
   const sendToPc = async (action: Parameters<typeof client.sendCtl>[0]): Promise<void> => {
     onClose()

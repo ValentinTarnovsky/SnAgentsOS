@@ -83,7 +83,7 @@ export function RemoteTerminal(): ReactNode {
   const colsRef = useRef(80)
   /** True when even MIN_FONT overflows the viewport (solveFont's overflow flag). */
   const overflowRef = useRef(false)
-  /** Set once by the mount effect; lets the fontOverride effect below re-run
+  /** Set once by the mount effect; lets the fontScale effect below re-run
    * the same cursor-follow pan logic without duplicating it out of scope. */
   const followCursorRef = useRef<() => void>(() => {})
   const xtermTheme = useRemoteStore((s) => s.xtermTheme)
@@ -503,7 +503,7 @@ export function RemoteTerminal(): ReactNode {
       {selection && term && (
         <SelectionOverlay term={term} range={selection} onRange={setSelection} onExit={exitSelection} onCopyFallback={setCopyFallback} />
       )}
-      <LinkSheet link={link} onClose={() => setLink(null)} />
+      <LinkSheet link={link} onClose={() => setLink(null)} onCopyFallback={setCopyFallback} />
       <CopyFallbackSheet text={copyFallback} onClose={() => setCopyFallback(null)} />
     </div>
   )

@@ -28,7 +28,7 @@ export function resolvePaneRoot(workspaceId: string, paneId: string): string | n
  * phone. A pane or workspace behind a Connection Profile (SSH) runs on another
  * machine, so its paths mean nothing here: denied_path without calling main.
  * A denied_path under the pane root is retried once under `ws.cwd` when that
- * root differs. main's error is copied to the ack.
+ * root is set and differs. main's error is copied to the ack.
  */
 export async function runOpenPath(action: OpenPathAction): Promise<OpenCmdResult> {
   const st = useAppStore.getState()
@@ -38,8 +38,10 @@ export async function runOpenPath(action: OpenPathAction): Promise<OpenCmdResult
   if (pane.setupId || ws.setupId) return { ok: false, error: 'denied_path' }
   const paneRoot = resolvePaneRoot(action.workspaceId, action.paneId) ?? ''
   let res = await window.snApi.system.openPath({ cwd: paneRoot, path: action.path })
+  // Only a real workspace folder widens the scope: with no ws.cwd the retry
+  // would fall back to the whole home folder.
   const wsRoot = ws.cwd ?? ''
-  if (!res.ok && res.error === 'denied_path' && wsRoot !== paneRoot) {
+  if (!res.ok && res.error === 'denied_path' && wsRoot && wsRoot !== paneRoot) {
     res = await window.snApi.system.openPath({ cwd: wsRoot, path: action.path })
   }
   return res.ok ? { ok: true } : { ok: false, error: res.error ?? 'error' }
