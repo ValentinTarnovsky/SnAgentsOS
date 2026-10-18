@@ -64,13 +64,21 @@ window.result = (async () => {
  helper.blur(); flushSync(() => store.getState().setKeyboard({ focus:null, inset:0 })); await frames();
  check(!!q('[data-direct-strip]'),'the strip returns with the keyboard closed');
  sent.length=0; term.input('d', true); check(sent[0]==='d','Direct mode forwards xterm input');
+ const keyEnter = () => helper.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true}));
+ const pasteZz = () => { const dt=new DataTransfer(); dt.setData('text/plain','zz'); helper.dispatchEvent(new ClipboardEvent('paste',{clipboardData:dt,bubbles:true,cancelable:true})) };
+ sent.length=0; keyEnter(); check(sent.join('')==='\\r','Direct mode forwards hardware keys typed into the terminal');
+ sent.length=0; pasteZz(); check(sent.join('')==='zz','Direct mode forwards a paste into the terminal');
 
  // Toggle to Composer with the chip.
  tap(key('Input mode')); await frames();
  check(!!composer() && !q('[data-direct-strip]'),'the chip switches to the composer and the strip goes away');
  check(localStorage.getItem('snagentsos.inputMode.c1')==='composer','the mode is saved per pane');
  check(helper.readOnly && helper.getAttribute('inputmode')==='none','Composer mode makes the helper readOnly with inputmode none');
- sent.length=0; term.input('x', true); check(sent.length===0,'xterm input is dropped in Composer mode');
+ sent.length=0; keyEnter(); check(sent.length===0,'hardware keys typed into the terminal are dropped in Composer mode');
+ sent.length=0; pasteZz(); check(sent.length===0,'a paste into the terminal is dropped in Composer mode');
+ sent.length=0; await writeTerm('\\x1b[6n'); await frames();
+ check(sent.some(d=>/^\\x1b\\[\\d+;\\d+R$/.test(d)),'replies to terminal queries still reach the pty in Composer mode');
+ sent.length=0; term.input('w', true); check(sent[0]==='w','data xterm emits on its own (wheel reports) still flows in Composer mode');
  const ta=composer();
  check(getComputedStyle(ta).fontSize==='16px','composer text is 16px');
  check(ta.placeholder==='Write a prompt...' && ta.maxLength===16384,'placeholder and the 16384 limit');
@@ -186,6 +194,12 @@ window.result = (async () => {
  check(!!snip,'the snippets sheet lists the snippet');
  snip.click(); await frames();
  check(composer().value==='aSNIPb' && sent.length===0,'a snippet lands in the composer at the caret, not in the pty');
+ typeInto(composer(),'x'.repeat(16384)); await frames(); composer().setSelectionRange(2,2);
+ tap(key('Snippets')); await frames();
+ [...document.querySelectorAll('button')].find(b=>b.textContent.includes('Greeting')).click(); await frames();
+ check(composer().value.length===16384 && !composer().value.includes('SNIP'),'a full field takes no snippet');
+ typeInto(composer(),'abc'); await frames();
+ check(composer().selectionStart===3,'a snippet that did not fit leaves no stale caret behind');
  typeInto(composer(),''); await frames();
 
  // Paste key: a one-shot composer on a Direct pane.

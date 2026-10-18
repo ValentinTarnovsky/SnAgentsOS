@@ -9,7 +9,7 @@
  * Pure apart from storage (mobileStorage.ts, every access try/catch) and the
  * injectable clock/timers, so the rules run under Node in the tests.
  */
-import { DRAFT_PREFIX, storageGet, storageKeys, storageRemove, storageSet } from './mobileStorage'
+import { DRAFT_PREFIX, storageGet, storageKeys, storageRemove, storageSet, storageWipeGeneration } from './mobileStorage'
 
 export const DRAFT_DEBOUNCE_MS = 300
 export const DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
@@ -113,7 +113,7 @@ export function createDraftWriter(
     clearTimeout: (id) => clearTimeout(id as ReturnType<typeof setTimeout>),
   }
   const save = opts.save ?? saveDraft
-  let pending: { paneId: string; text: string } | null = null
+  let pending: { paneId: string; text: string; gen: number } | null = null
   let timer: unknown = null
 
   const clear = (): void => {
@@ -124,12 +124,13 @@ export function createDraftWriter(
     clear()
     const p = pending
     pending = null
-    if (p) save(p.paneId, p.text, now())
+    // A wipe (unpair, revoke) since the keystroke drops the write.
+    if (p && p.gen === storageWipeGeneration()) save(p.paneId, p.text, now())
   }
   return {
     schedule(paneId, text) {
       if (pending && pending.paneId !== paneId) flush()
-      pending = { paneId, text }
+      pending = { paneId, text, gen: storageWipeGeneration() }
       clear()
       timer = timers.setTimeout(flush, DRAFT_DEBOUNCE_MS)
     },
