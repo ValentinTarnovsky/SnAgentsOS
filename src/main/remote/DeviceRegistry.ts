@@ -12,7 +12,7 @@ import { dirname, join } from 'path'
 import { randomBytes, randomUUID } from 'crypto'
 import { z } from 'zod'
 import type { SanitizedDevice } from '@shared/ipc-contract'
-import { getConfigPath } from '../paths'
+import { dataDir } from '../paths'
 
 export interface StoredDevice {
   id: string
@@ -31,7 +31,8 @@ const deviceSchema = z.object({
   lastSeen: z.number(),
 })
 
-const fileSchema = z.object({
+/** Exported for the legacy migration, which verifies the copied file with it (E0-FR-27). */
+export const fileSchema = z.object({
   version: z.literal(1),
   devices: z.array(deviceSchema),
 })
@@ -39,18 +40,31 @@ const fileSchema = z.object({
 /** Persist a device's lastSeen at most this often (bookkeeping, not critical). */
 const LAST_SEEN_PERSIST_MS = 5 * 60 * 1000
 
+/**
+ * Path and load are lazy: the registry is built at module load (index.ts ->
+ * RemoteManager), before bootstrap() runs the legacy migration that may put
+ * remote-devices.json in place. bootstrap() calls load() after the migration,
+ * and every public member goes through ensureLoaded() as the safety net (a
+ * revocation as the very first operation must find the device to drop it).
+ */
 export class DeviceRegistry {
-  private readonly path = join(dirname(getConfigPath()), 'remote-devices.json')
-  private readonly tmpPath = `${this.path}.tmp`
   private readonly devices = new Map<string, StoredDevice>()
   /** Last time each device's lastSeen was written to disk (throttle). */
   private readonly lastPersistedSeen = new Map<string, number>()
+  private loaded = false
 
-  constructor() {
-    this.load()
+  private get path(): string {
+    return join(dataDir(), 'remote-devices.json')
   }
 
-  private load(): void {
+  private get tmpPath(): string {
+    return `${this.path}.tmp`
+  }
+
+  /** Reads remote-devices.json once; later calls are no-ops. */
+  load(): void {
+    if (this.loaded) return
+    this.loaded = true
     try {
       if (!existsSync(this.path)) return
       const parsed = fileSchema.parse(JSON.parse(readFileSync(this.path, 'utf8')))
@@ -61,8 +75,13 @@ export class DeviceRegistry {
     }
   }
 
+  private ensureLoaded(): void {
+    if (!this.loaded) this.load()
+  }
+
   /** Atomic write (temp file + rename), mirroring ConfigStore's durability trick. */
   persist(): void {
+    this.ensureLoaded()
     try {
       mkdirSync(dirname(this.path), { recursive: true })
       const payload = { version: 1 as const, devices: [...this.devices.values()] }
@@ -74,15 +93,18 @@ export class DeviceRegistry {
   }
 
   get(id: string): StoredDevice | undefined {
+    this.ensureLoaded()
     return this.devices.get(id)
   }
 
   get count(): number {
+    this.ensureLoaded()
     return this.devices.size
   }
 
   /** Create + persist a new device, minting its id and 256-bit secret. */
   add(name: string): StoredDevice {
+    this.ensureLoaded()
     const now = Date.now()
     const device: StoredDevice = {
       id: randomUUID(),
@@ -102,12 +124,14 @@ export class DeviceRegistry {
    * re-authed against a secret already gone from memory.
    */
   deleteInMemory(id: string): boolean {
+    this.ensureLoaded()
     this.lastPersistedSeen.delete(id)
     return this.devices.delete(id)
   }
 
   /** Bump lastSeen; persists at most once per LAST_SEEN_PERSIST_MS per device. */
   touchLastSeen(id: string): void {
+    this.ensureLoaded()
     const device = this.devices.get(id)
     if (!device) return
     const now = Date.now()
@@ -120,6 +144,7 @@ export class DeviceRegistry {
 
   /** Device list safe for the renderer: no secrets, live-connection flag folded in. */
   listSanitized(connectedIds: Set<string>): SanitizedDevice[] {
+    this.ensureLoaded()
     return [...this.devices.values()]
       .map((d) => ({
         id: d.id,
