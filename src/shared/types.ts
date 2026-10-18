@@ -7,7 +7,7 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 11
+export const CONFIG_VERSION = 12
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -119,13 +119,45 @@ export interface Workspace {
   setupId?: string
   /** Sidebar agent rows folded under this workspace (schema 11). */
   agentsCollapsed?: boolean
+  /** Short free-text note shown under the workspace name, max 140 (schema 12). */
+  note?: string
+  /** User task state, distinct from the agent state (schema 12). */
+  taskState?: WorkspaceTaskState
 }
 
-/** A saved, reusable prompt/text snippet inserted into a console (U10). */
+/** Per-workspace task state (E8-FR-10, schema 12). */
+export type WorkspaceTaskState = 'todo' | 'doing' | 'review' | 'done'
+
+/**
+ * A saved, reusable prompt/text snippet inserted into a console (U10).
+ * @deprecated Schema 12 replaced snippets with QuickCommand. Kept only to parse
+ * old configs (migration input) and for the phone snapshot until R22-12.
+ */
 export interface Snippet {
   id: string
   name: string
   text: string
+}
+
+/**
+ * A reusable command (E8-FR-01, schema 12; Contratos compartidos). `send`
+ * writes `text` to a console (Enter optional); `agent` opens a console from
+ * `presetId` and delivers `text` as its first prompt (always with Enter).
+ */
+export interface QuickCommand {
+  /** 'qc-...'; commands migrated from snippets keep their 'snip-...' id. */
+  id: string
+  /** Visible label, 1..60. */
+  name: string
+  /** send: text to write; agent: first prompt. 1..16384. */
+  text: string
+  /** Absent = global. */
+  workspaceId?: string
+  action: 'send' | 'agent'
+  /** send: optional Enter; agent: always true. */
+  enter: boolean
+  /** Required when action === 'agent'. */
+  presetId?: string
 }
 
 /**
@@ -393,6 +425,19 @@ export interface DiscordSettings {
   notifyDone: boolean
 }
 
+/** ntfy push channel (E2-FR-40, schema 12). Topic and token never leave in an export. */
+export interface NtfySettings {
+  enabled: boolean
+  /** https, or http only for a private/tailnet host. Default 'https://ntfy.sh'. */
+  server: string
+  /** [A-Za-z0-9_-]{1,64} or empty. */
+  topic: string
+  /** Optional access token (Bearer). */
+  token: string
+  notifyAction: boolean
+  notifyDone: boolean
+}
+
 export interface StatusHealth {
   desktop: { error: 'blocked' | 'failed' | 'unavailable' | null }
   claude: StatusHooksStatusRes
@@ -429,6 +474,13 @@ export interface NotificationSettings {
    * instead of the OS notification and taskbar flash (schema 11).
    */
   inAppWhenFocused: boolean
+  /** ntfy channel next to Discord (schema 12). */
+  ntfy: NtfySettings
+  /**
+   * Discord and ntfy only while the PC is idle/locked for 180 s (fixed); an
+   * unknown idle state still delivers. Native notifications ignore it (schema 12).
+   */
+  onlyWhenAway: boolean
 }
 
 /** Keep the PC awake while agents work (schema 11). */
@@ -449,7 +501,26 @@ export interface AgentSettings {
   topicAsTitle: boolean
   /** Ctrl+1..9 focuses the Nth visible console instead of reaching the terminal. */
   ctrlDigitFocus: boolean
+  /** Resume modal auto-applies after this many seconds, 0 = never (0..600, schema 12). */
+  resumeModalTimeoutSec: number
+  /** Nudge resumed consoles that were working (schema 12). */
+  resumeNudge: boolean
+  /** Nudge text, max 500; '' = the localized default (schema 12). */
+  resumeNudgeText: string
+  /** Sidebar order: manual (default) or by agent demand (schema 12). */
+  sidebarSort: 'manual' | 'smart'
 }
+
+/** Workspace composer and automation settings (E8, schema 12; v3.0 adds more). */
+export interface AutomationSettings {
+  /** Preselected composer preset; '' = first 'claude' preset, else the first one. */
+  defaultAgentPresetId: string
+  /** Composer "Create another" switch. */
+  composerCreateAnother: boolean
+}
+
+/** Headless snapshot engine (E6-FR-01, schema 12). 'off' also disables scrollback persistence. */
+export type TerminalSnapshotMode = 'auto' | 'lazy' | 'off'
 
 export interface Settings {
   /** Default shell per platform; undefined => resolver picks the OS default. */
@@ -488,6 +559,18 @@ export interface Settings {
   terminalAgentEndChip: boolean
   /** Keep the PC awake while agents work. Schema 11. */
   awakeMode: AwakeMode
+  /** Headless mirror policy for replay and persistence. Schema 12. */
+  terminalSnapshotMode: TerminalSnapshotMode
+  /** Keep console history across restarts. Schema 12. */
+  persistScrollback: boolean
+  /** Lines saved per console, 200..5000. Schema 12. */
+  persistScrollbackLines: number
+  /** Git chip in the workspace header and background git refresh. Schema 12. */
+  gitChip: boolean
+  /** Windows "Open in SnAgentsOS" folder context menu (packaged only). Schema 12. */
+  explorerMenu: boolean
+  /** Update card dismissed for this version (installable ones only). Schema 12. */
+  updateDismissedVersion: string
   restoreLastWorkspace: boolean
   confirmCloseRunning: boolean
   /** Installed build only: hide to tray on window close instead of quitting. */
@@ -511,6 +594,8 @@ export interface Settings {
   notifications: NotificationSettings
   /** Agent behavior (resume, awake display, sidebar rows, shortcuts). Schema 11. */
   agents: AgentSettings
+  /** Workspace composer defaults. Schema 12. */
+  automation: AutomationSettings
 }
 
 export interface ConfigFile {
@@ -519,7 +604,12 @@ export interface ConfigFile {
   presets: AgentPreset[]
   settings: Settings
   activeWorkspaceId?: string | null
-  /** Saved prompt snippets (U10). */
+  /** Reusable commands (schema 12). Replaces `snippets`. */
+  quickCommands?: QuickCommand[]
+  /**
+   * @deprecated Schema <= 11 only: migration input, converted to
+   * `quickCommands` on parse and never written again.
+   */
   snippets?: Snippet[]
   /** Reusable pre-launch connection sequences (e.g. SSH). */
   connections?: ConnectionProfile[]

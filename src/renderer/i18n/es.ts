@@ -105,6 +105,8 @@ export const es: Record<keyof typeof en, string> = {
   'data.importChoose': '¿Cómo aplicar la configuración importada?',
   'data.replace': 'Reemplazar',
   'data.merge': 'Combinar',
+  'data.mergedQuickLimit': 'Importado (combinado). Se importaron {n} de {m} Quick Commands (límite 100).',
+  'quick.limit': 'Límite de 100 Quick Commands',
   'settings.data.backup.title': 'Respaldo de {legacy}',
   'settings.data.backup.line': '{path} (se borra el {date})',
   'settings.data.backup.show': 'Mostrar',
