@@ -93,6 +93,8 @@ export interface RemoteStateSnapshot {
   keyButtons?: KeyButton[]
   /** Live usage bars (undefined/null when the usage widget is off). */
   usage?: RemoteUsageSnapshot | null
+  /** xterm unicode width table the desktop uses (E6-FR-15); absent = '6'. */
+  terminalUnicode?: '6' | '11'
 }
 
 // --- Control actions (phone -> desktop, executed by the renderer) ---

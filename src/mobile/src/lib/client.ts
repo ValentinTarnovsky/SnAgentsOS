@@ -111,6 +111,11 @@ function readPairCode(): string | null {
 }
 
 /** Pick a sensible pane to view in a workspace: a running one, else the first. */
+/** Width table for the terminal: only an explicit '11' opts in (E6-FR-15). */
+function unicodeOf(snap: RemoteStateSnapshot): '6' | '11' {
+  return snap.terminalUnicode === '11' ? '11' : '6'
+}
+
 function pickPane(snap: RemoteStateSnapshot, workspaceId: string | null): string | null {
   const ws = snap.workspaces.find((w) => w.id === workspaceId) ?? snap.workspaces[0]
   if (!ws || ws.panes.length === 0) return null
@@ -756,6 +761,7 @@ class RemoteClient {
       updateInfo: null,
       snapshot: state,
       xtermTheme,
+      terminalUnicode: unicodeOf(state),
       hostPlatform,
       appVersion,
       pairExpiresAt: null,
@@ -841,7 +847,7 @@ class RemoteClient {
     }
     setLang(state.language)
     const xtermTheme = applyRemoteTheme(state.themeTokens)
-    store.getState().update({ snapshot: state, xtermTheme })
+    store.getState().update({ snapshot: state, xtermTheme, terminalUnicode: unicodeOf(state) })
     // If the viewed pane vanished (closed on desktop), fall back to another.
     const cur = store.getState().activePaneId
     if (!cur || !paneExists(state, cur)) {

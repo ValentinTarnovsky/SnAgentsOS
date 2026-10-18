@@ -99,6 +99,8 @@ export interface RemoteState {
   kbFocus: string | null
   /** Derived: kbFocus is set and keyboardInset > KB_OPEN_MIN_INSET_PX. */
   kbOpen: boolean
+  /** xterm unicode width table sent by the desktop (E6-FR-15). */
+  terminalUnicode: '6' | '11'
 
   /** Merge a partial state (used by the client for machine transitions). */
   update: (partial: Partial<RemoteState>) => void
@@ -134,6 +136,7 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   keyboardInset: 0,
   kbFocus: null,
   kbOpen: false,
+  terminalUnicode: '6',
 
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
