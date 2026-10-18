@@ -224,6 +224,31 @@ async function main() {
     auth = loadAuth(s6)
     check(auth.getStoredAuth()?.deviceId === 'dev-new' && !hasLegacy(s6), 'new keys win over legacy leftovers, which are removed')
 
+    // A lone new deviceId (an interrupted write) is not trusted over the full
+    // legacy pairing: the legacy secret is migrated, never dropped.
+    const s6b = fakeStorage({ ...legacyCreds(), [NEW('deviceId')]: 'dev-legacy' })
+    auth = loadAuth(s6b)
+    assert.deepStrictEqual({ ...auth.getStoredAuth() }, { deviceId: 'dev-legacy', secretHex: SECRET }); checks++
+    check(!hasLegacy(s6b) && s6b.map.get(NEW('secret')) === SECRET, 'partial new keys are completed from the legacy pairing')
+
+    // Unpaired in 1.x (its clearAuth kept hostPlatform): the orphan moves to
+    // the new key and no legacy key survives; a lone legacy secret just goes.
+    const s9 = fakeStorage({ [OLD('hostPlatform')]: 'win32', [OLD('secret')]: SECRET })
+    auth = loadAuth(s9)
+    check(auth.getStoredAuth() === null && auth.getStoredHostPlatform() === 'win32', 'orphaned legacy keys read as unpaired with the cached platform')
+    assert.deepStrictEqual(Object.fromEntries(s9.map), { [NEW('hostPlatform')]: 'win32' }); checks++
+    s9.log.length = 0
+    loadAuth(s9).getStoredAuth()
+    check(s9.log.length === 0, 'second load after the orphan cleanup touches nothing')
+    // The orphan copy failing keeps the legacy key for the next load.
+    const s10 = fakeStorage({ [OLD('hostPlatform')]: 'darwin' }, { failSet: () => true })
+    auth = loadAuth(s10)
+    check(auth.getStoredHostPlatform() === 'darwin' && s10.map.get(OLD('hostPlatform')) === 'darwin', 'failed orphan copy serves from memory and keeps the legacy key')
+    // An existing new hostPlatform wins; the orphan is only removed.
+    const s11 = fakeStorage({ [OLD('hostPlatform')]: 'darwin', [NEW('hostPlatform')]: 'linux' })
+    auth = loadAuth(s11)
+    check(auth.getStoredHostPlatform() === 'linux' && !hasLegacy(s11), 'new hostPlatform wins over the orphaned legacy one')
+
     // A storage that throws on every call boots unpaired instead of crashing.
     const denied = () => { throw new Error('denied') }
     auth = load('src/mobile/src/lib/auth.ts', { TextEncoder, localStorage: { getItem: denied, setItem: denied, removeItem: denied } })
