@@ -321,6 +321,120 @@ function testSchema() {
   check(agentSettingsSchema.parse({ awakeDisplay: true }).awakeDisplay === true, 'a persisted awakeDisplay survives a reload')
 }
 
+function testNavigation() {
+  // E5-FR-15..20, E4-FR-10: ranking, rows, next waiting, ages, keys (R21-05).
+  const g = load('src/shared/agents.ts')
+  const P = (id, rank, stateSince, unread = false) => ({ id, rank, stateSince, unread })
+  const sorted = list => [...list].sort(g.compareAgents).map(p => p.id)
+  check(sorted([P('w', 3, 5), P('i', 4, 9), P('d', 2, 1), P('a', 1, 7), P('e', 1, 3)]).join() === 'e,a,d,w,i', 'compareAgents: action/error > done > working > idle, ranks 1-2 waiting longest first')
+  check(sorted([P('seen', 2, 1), P('unread', 2, 9, true)]).join() === 'unread,seen', 'compareAgents: unread done before seen done')
+  check(sorted([P('old', 3, 1), P('new', 3, 9)]).join() === 'new,old' && sorted([P('old', 4, 1), P('new', 4, 9)]).join() === 'new,old', 'compareAgents: ranks 3-4 most recent first')
+  check(sorted([P('b', 1, 5), P('a', 1, 5)]).join() === 'a,b', 'compareAgents: ties fall back to the id (stable)')
+  const lay = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8'].map((id, i) => P(id, i === 6 || i === 7 ? 1 : 4, i))
+  const rows = g.pickAgentRows(lay)
+  check(rows.hidden === 2 && rows.shown.length === 6 && rows.shown.map(r => r.id).join() === 'p3,p4,p5,p6,p7,p8', 'pickAgentRows: with 8, the 6 best (2 waiting + 4 most recent) in layout order plus +2')
+  check(g.pickAgentRows(lay.slice(0, 6)).hidden === 0 && g.pickAgentRows(lay.slice(0, 6)).shown.length === 6, 'pickAgentRows: 6 or fewer show all')
+  check(g.formatAgeShort(20_000, 'es') === 'ahora' && g.formatAgeShort(20_000, 'en') === 'now' && g.formatAgeShort(3 * 60_000, 'en') === '3m' && g.formatAgeShort(2 * HOUR, 'es') === '2h' && g.formatAgeShort(30 * HOUR, 'en') === '1d' && g.formatAgeShort(-5, 'en') === 'now', 'formatAgeShort: now/ahora, 3m, 2h, 1d, skew counts as now')
+
+  const fsn = load('src/renderer/lib/formatSince.ts')
+  const now = 10_000_000
+  const es4 = fsn.formatSince(now - 4 * 60_000, now, 'es')
+  check(/hace/.test(es4) && /4/.test(es4), 'formatSince es: "hace 4 min" (' + es4 + ')')
+  const en2 = fsn.formatSince(now - 2 * HOUR, now, 'en')
+  check(/ago/.test(en2) && /2/.test(en2), 'formatSince en: "2 hr. ago" (' + en2 + ')')
+  check(fsn.formatSince(now + 5000, now, 'en') === fsn.formatSince(now, now, 'en'), 'formatSince: clock skew counts as now')
+  const { en } = load('src/renderer/i18n/en.ts'), { es } = load('src/renderer/i18n/es.ts')
+  const tr = dict => (k, v) => dict[k].replace(/\{(\w+)\}/g, (_m, x) => String(v?.[x]))
+  const lines = fsn.statusTipLines({ state: 'action', precise: false, provider: 'claude', pendingCount: 2, stateSince: now - 4 * 60_000 }, tr(es), 'es', now)
+  check(lines.length === 4 && lines[0] === 'Claude - Requiere tu intervención' && /hace/.test(lines[1]) && lines[2] === '(aproximado)' && lines[3] === '2 solicitudes pendientes', 'statusTipLines: provider - state, since, approximate and pending count as separate lines')
+  check(fsn.statusTipLines({ state: 'working', precise: true, provider: 'codex' }, tr(en), 'en', now).join('|') === 'Codex - Working', 'statusTipLines: a precise single request has one line')
+
+  const nav = load('src/renderer/lib/agentNav.ts')
+  const preset = { id: 'pc', name: 'Claude Code', type: 'claude', command: 'claude', args: [], color: '#d97757', icon: 'claude' }
+  const pane = (id, extra = {}) => ({ id, type: 'claude', presetId: 'pc', title: 'Claude Code', color: '#d97757', icon: 'claude', ...extra })
+  const ws1 = { id: 'w1', name: 'Uno', cwd: '', panes: [pane('a'), pane('b'), pane('c'), pane('m')], layout: { grid: 4, order: ['c', 'a', 'b', 'm'] } }
+  const ws2 = { id: 'w2', name: 'Dos', cwd: '', panes: [pane('x'), pane('y'), pane('s', { setupId: 'ssh' })] }
+  const view = (paneId, extra = {}) => ({ paneId, provider: 'claude', sessionId: '0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab', spawnCwd: 'C:/r', activity: 'idle', updatedAt: 50, available: true, ...extra })
+  const input = {
+    workspaces: [ws1, ws2], presets: [preset], policy: 'ask',
+    mountedWorkspaces: { w1: 'full' },
+    paneStatus: { a: { state: 'action', precise: true, stateSince: 300 }, b: { state: 'done', precise: true, stateSince: 100 }, c: { state: 'working', precise: true, stateSince: 200, detail: { kind: 'tool', text: 'Edit useXterm.ts' } }, m: { state: 'action', precise: true, stateSince: 50 } },
+    paneAttention: { b: true },
+    sessions: { x: view('x', { topic: 'Fix login' }), y: view('y', { endedAt: 9 }), s: view('s') },
+  }
+  const all = nav.allAgents(input)
+  check(all.map(e => e.id).join() === 'c,a,b,m,x', 'allAgents: live panes in layout order plus resumable records of unmounted workspaces (not ended, not SSH)')
+  check(all.find(e => e.id === 'x').notStarted && all.find(e => e.id === 'x').rank === 4, 'a record that resumes on open is "not started", rank 4')
+  check(nav.allAgents({ ...input, policy: 'off' }).every(e => e.id !== 'x'), 'with resumeOnStartup off nothing resumes on open, so no "not started" row')
+  check(nav.allAgents({ ...input, mountedWorkspaces: { w1: 'full', w2: ['y'] } }).some(e => e.id === 'x'), 'a partial mount still lists its unspawned records')
+  check(nav.paletteWaiting(all, null).join() === 'm,a,b,c,x', 'paletteWaiting: urgency order across workspaces')
+  check(nav.paletteWaiting(all, 'm').join() === 'a,b,c,x', 'paletteWaiting: the console being looked at is left out')
+  const many = Array.from({ length: 9 }, (_, i) => ({ id: 'q' + i, rank: 3, stateSince: i, unread: false }))
+  check(nav.paletteWaiting(many, null).length === 6, 'paletteWaiting: at most 6 rows')
+  check(nav.waitingIds(all).join() === 'm,a,b', 'waitingIds: action/error longest waiting first, then unread done')
+  check(nav.waitingIds(nav.allAgents({ ...input, paneAttention: {} })).join() === 'm,a', 'waitingIds: a seen done is not waiting')
+
+  // Next waiting: three in action, three presses walk them, the fourth wraps.
+  const ids = ['p1', 'p2', 'p3']
+  let cursor = null
+  const seen = []
+  for (let i = 0; i < 4; i++) {
+    const step = nav.advanceWaiting(cursor, () => ids, () => true, 1000 + i * 1000)
+    cursor = step.cursor
+    seen.push(step.target)
+  }
+  check(seen.join() === 'p1,p2,p3,p1', 'advanceWaiting: presses within 5 s walk the list and wrap to the first')
+  check(nav.advanceWaiting(cursor, () => ['p9'], () => true, cursor.at + 4999).target === 'p2', 'advanceWaiting: inside the window the frozen list wins over a fresh one')
+  const stale = nav.advanceWaiting(cursor, () => ['p9'], () => true, cursor.at + 5000)
+  check(stale.target === 'p9' && stale.cursor.index === 0, 'advanceWaiting: after 5 s it starts over from a fresh list')
+  check(nav.advanceWaiting({ ids, index: 0, at: 0 }, () => [], id => id !== 'p2', 10).target === 'p3', 'advanceWaiting: closed consoles are skipped')
+  const empty = nav.advanceWaiting(null, () => [], () => true, 0)
+  check(empty.target === null && empty.cursor === null, 'advanceWaiting: nobody waiting returns null')
+
+  check(nav.agentTitle(pane('t'), [preset], { topic: 'Fix login bug', firstPrompt: 'hola' }, true) === 'Fix login bug', 'agentTitle: topic replaces an unrenamed title')
+  check(nav.agentTitle(pane('t'), [preset], { firstPrompt: 'refactor the store' }, true) === 'refactor the store', 'agentTitle: without topic the first prompt is the title')
+  check(nav.agentTitle(pane('t', { title: 'Backend' }), [preset], { topic: 'Fix' }, true) === 'Backend', 'agentTitle: a renamed console keeps its name')
+  check(nav.agentTitle(pane('t'), [preset], { topic: 'Fix' }, false) === 'Claude Code', 'agentTitle: topicAsTitle off keeps the console title')
+
+  const T = tr(es)
+  const entry = (status, extra = {}) => ({ id: 'e', rank: 1, unread: false, stateSince: now - 2 * 60_000, notStarted: false, ws: ws1, pane: pane('e'), status, ...extra })
+  check(nav.agentPhrase(entry({ state: 'working', precise: true, detail: { kind: 'tool', text: 'Edit useXterm.ts' } }), T, 'es', now) === 'Edit useXterm.ts · 2m', 'agentPhrase working: detail plus age')
+  check(nav.agentPhrase(entry({ state: 'working', precise: true }), T, 'es', now) === 'Trabajando · 2m', 'agentPhrase working without detail')
+  check(nav.agentPhrase(entry({ state: 'action', precise: true, reason: 'question', detail: { kind: 'question', text: 'Sigo?' } }), T, 'es', now) === 'Pregunta: Sigo?', 'agentPhrase action question')
+  check(nav.agentPhrase(entry({ state: 'action', precise: true, reason: 'permission', detail: { kind: 'permission', text: 'Bash: npm test' } }), T, 'es', now) === 'Permiso: Bash: npm test', 'agentPhrase action permission')
+  check(nav.agentPhrase(entry({ state: 'action', precise: true, reason: 'plan' }), T, 'es', now) === 'Plan listo para revisar' && nav.agentPhrase(entry({ state: 'action', precise: false }), T, 'es', now) === 'Requiere tu intervención', 'agentPhrase action plan and generic')
+  check(nav.agentPhrase(entry({ state: 'done', precise: true, lastMessage: 'Listo el fix\nmas texto' }), T, 'es', now) === 'Listo: Listo el fix · hace 2m', 'agentPhrase done: first line of the reply and "hace 2m"')
+  check(nav.agentPhrase(entry({ state: 'error', precise: true }), T, 'es', now) === 'Detenido por un error' && nav.agentPhrase(entry({ state: 'unknown', precise: true }), T, 'es', now) === 'Sin conexión con el agente', 'agentPhrase error and unknown have no age')
+  check(nav.agentPhrase(entry({ state: 'idle', precise: true }), T, 'es', now) === 'Inactivo · 2m', 'agentPhrase idle with age')
+  check(nav.agentPhrase(entry(undefined, { notStarted: true }), T, 'es', now) === 'Sin iniciar · se retoma al abrir', 'agentPhrase not started')
+  check(nav.agentPhrase(entry({ state: 'working', precise: true }), T, 'es', now, false) === 'Trabajando', 'agentPhrase without age for the palette')
+
+  check(nav.visibleConsoles(ws1, ['a'], null).join() === 'c,b,m', 'visibleConsoles: grid order without minimized')
+  check(nav.visibleConsoles(ws1, [], 'b').join() === 'b', 'visibleConsoles: only the maximized one while maximized')
+  check(nav.stepPane(['c', 'b', 'm'], 'm', 1) === 'c' && nav.stepPane(['c', 'b', 'm'], 'c', -1) === 'm' && nav.stepPane(['c', 'b', 'm'], null, 1) === 'c' && nav.stepPane([], 'c', 1) === null, 'stepPane wraps both ways')
+
+  const km = load('src/renderer/lib/keymap.ts')
+  const keymap = km.resolveKeymap({})
+  check(keymap.nextWaiting === 'Ctrl+Shift+J' && keymap.reopenClosedPane === 'Ctrl+Shift+U' && keymap.focusNextPane === 'Ctrl+Alt+Right' && keymap.focusPrevPane === 'Ctrl+Alt+Left', 'D8 defaults: Ctrl+Shift+J, Ctrl+Shift+U, Ctrl+Alt+Right/Left')
+  const accels = Object.values(keymap)
+  check(new Set(accels).size === accels.length, 'no default accelerator collides with another')
+  check(!accels.some(a => ['Ctrl+J', 'Ctrl+R', 'Ctrl+Shift+PageUp', 'Ctrl+Shift+PageDown', 'Ctrl+Shift+Z'].includes(a)), 'forbidden or reserved combos stay free (Ctrl+J, Ctrl+R, prompt navigation, redo)')
+  check(km.KEY_ACTIONS.every(a => typeof en[a.labelKey] === 'string' && typeof es[a.labelKey] === 'string'), 'every action has its label in es and en')
+  const target = (tagName, extra = {}) => ({ target: { tagName, isContentEditable: false, classList: { contains: c => (extra.cls ?? []).includes(c) }, ...extra } })
+  check(km.isEditableTarget(target('INPUT')) && km.isEditableTarget(target('textarea')) && km.isEditableTarget(target('DIV', { isContentEditable: true })), 'isEditableTarget: input, textarea, contenteditable')
+  check(!km.isEditableTarget(target('TEXTAREA', { cls: ['xterm-helper-textarea'] })) && !km.isEditableTarget(target('DIV')) && !km.isEditableTarget({ target: null }), 'isEditableTarget: the xterm helper textarea and plain elements are not')
+  const ev = (key, mods = {}) => ({ key, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods })
+  check(km.ctrlDigit(ev('3', { ctrlKey: true })) === 3 && km.ctrlDigit(ev('3')) === null && km.ctrlDigit(ev('3', { ctrlKey: true, shiftKey: true })) === null && km.ctrlDigit(ev('0', { ctrlKey: true })) === null && km.ctrlDigit(ev('3', { ctrlKey: true, altKey: true })) === null, 'ctrlDigit: only plain Ctrl+1..9 (AltGr = Ctrl+Alt is not)')
+  check(km.SKIP_IN_EDITABLE.has('reopenClosedPane') && !km.SKIP_IN_EDITABLE.has('palette'), 'reopenClosedPane stays out of text fields')
+
+  const { sidebarOrder } = load('src/renderer/lib/sidebarOrder.ts')
+  check(sidebarOrder([{ id: 'a' }, { id: 'b', favorite: true }, { id: 'c' }, { id: 'd', favorite: true }]).map(w => w.id).join() === 'b,d,a,c', 'sidebarOrder: favorites first, stable')
+
+  const extra = ['agents.nobodyWaiting', 'status.pendingMany', 'settings.agents.rows', 'settings.agents.rowsHint', 'settings.agents.topicAsTitle', 'settings.agents.topicAsTitleHint', 'settings.agents.ctrlDigit', 'settings.agents.ctrlDigitHint']
+  const navKeys = Object.keys(en).filter(k => /^(agents\.row\.|agents\.glyph\.|sidebar\.sum\.|keys\.|palette\.)/.test(k) || extra.includes(k))
+  check(navKeys.length >= 40 && navKeys.every(k => typeof es[k] === 'string' && es[k].length > 0), 'every navigation string exists in es and en')
+}
+
 testModes()
 testStaleAndPhone()
 testDisplayResumeAndEvents()
@@ -329,4 +443,5 @@ testTray()
 testRemotePhones()
 testRendererHelpers()
 testSchema()
-console.log(`PASS: ${checks} agents checks (AwakeService modes, grace, 2 h lease, action + phone, resume, IPC, tray, renderer sync)`)
+testNavigation()
+console.log(`PASS: ${checks} agents checks (AwakeService modes, grace, 2 h lease, action + phone, resume, IPC, tray, renderer sync, agent navigation)`)

@@ -25,7 +25,8 @@ const headingCls = 'text-xs font-semibold uppercase tracking-wide text-text-seco
 /**
  * Agent "Behavior" block (E5-FR-29). Each key joins when its FR lands; today:
  * resume on startup (E5-FR-10), keep the PC awake and its display variant
- * (E5-FR-23/24).
+ * (E5-FR-23/24), sidebar agent rows and topic as title (E5-FR-19) and
+ * Ctrl+1..9 (E5-FR-18).
  */
 function BehaviorBlock() {
   const t = useT()
@@ -88,6 +89,24 @@ function BehaviorBlock() {
         title={t('settings.agents.awakeDisplay')}
         description={t('settings.agents.awakeDisplayHint')}
         disabled={awakeMode === 'never'}
+      />
+      <ToggleRow
+        checked={agents.sidebarAgentRows}
+        onChange={(v) => updateSettings({ agents: { ...agents, sidebarAgentRows: v } })}
+        title={t('settings.agents.rows')}
+        description={t('settings.agents.rowsHint')}
+      />
+      <ToggleRow
+        checked={agents.topicAsTitle}
+        onChange={(v) => updateSettings({ agents: { ...agents, topicAsTitle: v } })}
+        title={t('settings.agents.topicAsTitle')}
+        description={t('settings.agents.topicAsTitleHint')}
+      />
+      <ToggleRow
+        checked={agents.ctrlDigitFocus}
+        onChange={(v) => updateSettings({ agents: { ...agents, ctrlDigitFocus: v } })}
+        title={t('settings.agents.ctrlDigit')}
+        description={t('settings.agents.ctrlDigitHint')}
       />
     </section>
   )

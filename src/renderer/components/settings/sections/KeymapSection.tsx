@@ -32,6 +32,7 @@ export function KeymapSection() {
   return (
     <div className="space-y-2">
       <p className="text-xs text-text-secondary">{t('keys.hint')}</p>
+      <p className="text-xs text-text-secondary" data-keys-fixed>{t('keys.fixedHint')}</p>
 
       {KEY_ACTIONS.map((a) => {
         const acc = resolved[a.id]

@@ -14,6 +14,11 @@ export type ActionId =
   | 'maximizePane'
   | 'minimizePane'
   | 'redrawPane'
+  // Agent navigation (E5-FR-17/18, CONTRATOS "Atajos" per D8).
+  | 'nextWaiting'
+  | 'reopenClosedPane'
+  | 'focusNextPane'
+  | 'focusPrevPane'
 
 export interface KeyAction {
   id: ActionId
@@ -35,7 +40,38 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'maximizePane', labelKey: 'keys.maximizePane', defaultAccel: 'Ctrl+Shift+Space' },
   { id: 'minimizePane', labelKey: 'keys.minimizePane', defaultAccel: 'Ctrl+Shift+Down' },
   { id: 'redrawPane', labelKey: 'keys.redrawPane', defaultAccel: 'Ctrl+Shift+R' },
+  // Ctrl+J alone is a newline in Claude, hence Shift. Ctrl+Alt+arrows can clash
+  // with AltGr layouts or GPU rotation hotkeys: remappable like the rest.
+  { id: 'nextWaiting', labelKey: 'keys.nextWaiting', defaultAccel: 'Ctrl+Shift+J' },
+  { id: 'reopenClosedPane', labelKey: 'keys.reopenClosedPane', defaultAccel: 'Ctrl+Shift+U' },
+  { id: 'focusNextPane', labelKey: 'keys.focusNextPane', defaultAccel: 'Ctrl+Alt+Right' },
+  { id: 'focusPrevPane', labelKey: 'keys.focusPrevPane', defaultAccel: 'Ctrl+Alt+Left' },
 ]
+
+/** Actions that stay out of text fields so the field keeps the key (E5-FR-18). */
+export const SKIP_IN_EDITABLE: ReadonlySet<ActionId> = new Set<ActionId>(['reopenClosedPane'])
+
+/**
+ * True when a key event targets a text field the user types into: an input,
+ * a textarea or a contenteditable element. xterm's hidden helper textarea is
+ * not one (it is the terminal itself).
+ */
+export function isEditableTarget(e: { target: EventTarget | null }): boolean {
+  const el = e.target as { tagName?: string; isContentEditable?: boolean; classList?: { contains(c: string): boolean } } | null
+  if (!el || typeof el.tagName !== 'string') return false
+  if (el.classList?.contains('xterm-helper-textarea')) return false
+  const tag = el.tagName.toUpperCase()
+  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable === true
+}
+
+/**
+ * Ctrl+1..9 (focus the Nth visible console, E5-FR-18): the digit, or null when
+ * the event is something else. A fixed family, outside the remappable keymap.
+ */
+export function ctrlDigit(e: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>): number | null {
+  if (!e.ctrlKey || e.altKey || e.shiftKey || e.metaKey || !/^[1-9]$/.test(e.key)) return null
+  return Number(e.key)
+}
 
 /** Merge user overrides over the defaults into a full actionId → accel map. */
 export function resolveKeymap(overrides: Record<string, string> | undefined): Record<ActionId, string> {
