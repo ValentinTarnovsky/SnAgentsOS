@@ -14,18 +14,14 @@ import { ConsoleDrawer } from './ConsoleDrawer'
 import { ActionSheet } from './ActionSheet'
 import { PasteSheet } from './PasteSheet'
 import { SnippetsSheet } from './SnippetsSheet'
-import { StatusBanner } from './StatusBanner'
+import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { useRemoteStore } from '../lib/store'
 import { t } from '../lib/i18n'
 
+/** Header dot colored by the connection tier (E1-FR-13). */
 function ConnectionDot(): ReactNode {
-  const banner = useRemoteStore((s) => s.banner)
-  const color = !banner
-    ? 'bg-green-400'
-    : banner.kind === 'reconnecting'
-      ? 'bg-amber-400'
-      : 'bg-red-400'
-  return <span className={clsx('h-2.5 w-2.5 rounded-full', color)} />
+  const { tier } = useConnectionHealth()
+  return <span data-tier={tier} className={clsx('h-2.5 w-2.5 shrink-0 rounded-full', DOT_COLOR[tier])} />
 }
 
 function Toast(): ReactNode {
@@ -47,6 +43,7 @@ function Toast(): ReactNode {
 export function MainScreen(): ReactNode {
   const snapshot = useRemoteStore((s) => s.snapshot)
   const activePaneId = useRemoteStore((s) => s.activePaneId)
+  const connected = useRemoteStore((s) => s.connected)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [actionsOpen, setActionsOpen] = useState(false)
   const [pasteOpen, setPasteOpen] = useState(false)
@@ -95,7 +92,14 @@ export function MainScreen(): ReactNode {
         <Toast />
       </main>
 
-      <KeyBar onPaste={() => setPasteOpen(true)} onSnippets={() => setSnippetsOpen(true)} />
+      {/* Offline: the keys are dimmed and inert (E1-FR-14); sendInput refuses too. */}
+      <div
+        className={clsx('shrink-0 transition-opacity', !connected && 'pointer-events-none opacity-40')}
+        aria-disabled={!connected}
+        data-connected={connected}
+      >
+        <KeyBar onPaste={() => setPasteOpen(true)} onSnippets={() => setSnippetsOpen(true)} />
+      </div>
 
       <ConsoleDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
       <ActionSheet open={actionsOpen} onClose={() => setActionsOpen(false)} />
