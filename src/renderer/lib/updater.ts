@@ -75,6 +75,31 @@ export function mirrorUpdateState(s: UpdateState, prev?: UpdatePhase): Partial<U
   return out
 }
 
+/**
+ * sessionStorage key of the collapsed card: it survives a window reload (not a
+ * restart), so reloading mid-download brings the chip back instead of the
+ * expanded card (E4-FR-16, E4-FR-37). Storage can be missing or throw.
+ */
+const COLLAPSED_KEY = 'snaos.updateCardCollapsed'
+
+function readCollapsed(): boolean {
+  try {
+    return typeof sessionStorage !== 'undefined' && sessionStorage.getItem(COLLAPSED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeCollapsed(collapsed: boolean): void {
+  try {
+    if (typeof sessionStorage === 'undefined') return
+    if (collapsed) sessionStorage.setItem(COLLAPSED_KEY, '1')
+    else sessionStorage.removeItem(COLLAPSED_KEY)
+  } catch {
+    /* per-window convenience only */
+  }
+}
+
 export const useUpdaterStore = create<UpdaterState>((set, get) => ({
   info: null,
   checking: false,
@@ -84,7 +109,7 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
   error: null,
   installError: null,
   opened: false,
-  cardCollapsed: false,
+  cardCollapsed: readCollapsed(),
   userInitiated: false,
   sessionDismissed: null,
   notesOpen: false,
@@ -146,6 +171,10 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
 
   setNotesOpen: (open) => set({ notesOpen: open }),
 }))
+
+useUpdaterStore.subscribe((s, prev) => {
+  if (s.cardCollapsed !== prev.cardCollapsed) writeCollapsed(s.cardCollapsed)
+})
 
 /** User-facing text for an install error (known codes get their own message). */
 export function installErrorText(t: TFn, error: string): string {

@@ -32,7 +32,9 @@ const MAX_BODY_BYTES = 5 * 1024 * 1024
 const SAFE_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 function repo(): string {
   const override = process.env.SNAOS_UPDATE_REPO
-  if (!app.isPackaged && override && SAFE_REPO.test(override)) return override
+  if (!app.isPackaged && override && SAFE_REPO.test(override) && !override.split('/').some((p) => /^\.+$/.test(p))) {
+    return override
+  }
   return BRAND.repo
 }
 /** The release list (E4-FR-14): one call covers "+N versions" and a half-built newest release. */
@@ -516,7 +518,21 @@ function clipBytes(text: string, max: number): string {
 }
 
 function summarize(rel: GhRelease, notes: string): ReleaseSummary {
-  return { version: tagVersion(rel), notes, url: rel.html_url ?? null, publishedAt: rel.published_at ?? null }
+  return {
+    version: tagVersion(rel),
+    notes,
+    url: typeof rel.html_url === 'string' ? rel.html_url : null,
+    publishedAt: typeof rel.published_at === 'string' ? rel.published_at : null,
+  }
+}
+
+/** The well-formed assets of a release (a malformed entry must not sink the whole list). */
+function cleanAssets(assets: unknown): GhAsset[] {
+  if (!Array.isArray(assets)) return []
+  return assets.filter(
+    (a): a is GhAsset =>
+      a !== null && typeof a === 'object' && typeof a.name === 'string' && typeof a.browser_download_url === 'string',
+  )
 }
 
 /** What a release list means for this build (E4-FR-14). */
@@ -561,7 +577,7 @@ export function selectReleases(
 
   const ready: Array<{ rel: GhRelease; match: Match }> = []
   for (const rel of newer) {
-    const match = pick(Array.isArray(rel.assets) ? rel.assets : [])
+    const match = pick(cleanAssets(rel.assets))
     if (match && match.sha256Url) ready.push({ rel, match })
   }
   const first = ready[0]
@@ -595,7 +611,7 @@ function infoFor(current: string, rel: GhRelease | null, match: Match | null, ex
     currentVersion: current,
     latestVersion: latest || null,
     notes: rel && typeof rel.body === 'string' ? clipBytes(rel.body, NOTES_BUDGET) : '',
-    releaseUrl: rel?.html_url ?? null,
+    releaseUrl: rel && typeof rel.html_url === 'string' ? rel.html_url : null,
     installable: Boolean(match),
     installKind: match ? match.kind : available ? 'open' : 'none',
     newerCount: 0,
@@ -629,7 +645,7 @@ async function queryReleases(): Promise<{ info: UpdateInfo; match: Match | null 
   try {
     const rel = await fetchJson<GhRelease>(latestUrl())
     const latest = tagVersion(rel)
-    const match = latest.length > 0 && isNewer(latest, current) ? pickAsset(rel.assets ?? []) : null
+    const match = latest.length > 0 && isNewer(latest, current) ? pickAsset(cleanAssets(rel.assets)) : null
     return { info: infoFor(current, rel, match, {}), match }
   } catch (err) {
     const listMsg = listError instanceof Error ? listError.message : String(listError)

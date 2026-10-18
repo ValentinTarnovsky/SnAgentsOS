@@ -39,6 +39,7 @@ createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div 
 const q=s=>document.querySelector(s);
 window.smoke={
  calls,
+ offerInfo:offer,
  offer:()=>useUpdaterStore.setState({info:offer,phase:'available',installing:false,progress:null,installError:null,cardCollapsed:false,userInitiated:false}),
  set:p=>useUpdaterStore.setState(p),
  store:()=>{const s=useUpdaterStore.getState();return {phase:s.phase,collapsed:s.cardCollapsed,notes:s.notesOpen}},
@@ -152,8 +153,16 @@ app.whenReady().then(async()=>{
  for(const zoom of [1.25,1.5]){w.webContents.setZoomFactor(zoom);await settle();ok(await js('smoke.inViewport()')&&!(await js('smoke.overflow()')),'card fits at zoom '+zoom);if(zoom===1.5)await shot('update-card-150')}
  w.webContents.setZoomFactor(1);await js("smoke.theme('light')");await wait(1000);await shot('update-card-light');
 
+ // Reload mid-download: a collapsed card comes back as the chip (E4-FR-16, 37).
+ await js("smoke.set({phase:'downloading',installing:true,progress:{percent:40,transferred:40,total:100}})");await settle();
+ await until('smoke.card()');await js("smoke.click('[data-update-collapse]')");await settle();await until('smoke.card()===null');
+ w.webContents.reload();await new Promise(r=>w.webContents.once('did-finish-load',r));await wait(300);
+ await js("smoke.set({info:smoke.offerInfo,phase:'downloading',installing:true,progress:{percent:40,transferred:40,total:100}})");await settle();
+ chip=await until('smoke.chip()');
+ ok(chip&&chip.text==='40%'&&(await js('smoke.card()'))===null,'reloading at 40% brings the chip back '+JSON.stringify(chip));
+
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' update card UI checks (offer +3, impact, double confirm, chip 42%/installing/failed, notes, dismiss, 125/150%, light); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' update card UI checks (offer +3, impact, double confirm, chip 42%/installing/failed, notes, dismiss, 125/150%, light, reload at 40%); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
