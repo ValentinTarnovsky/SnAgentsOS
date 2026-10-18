@@ -4,7 +4,7 @@ import { useAgentStore } from './agentStore'
 import { ctrlDigit, eventToAccel, isEditableTarget, resolveKeymap, SKIP_IN_EDITABLE, type ActionId } from './keymap'
 import { getFocusedPane } from './focus'
 import { redrawPane } from './redrawRegistry'
-import { sidebarOrder } from './sidebarOrder'
+import { liveSidebarOrder } from './sidebarOrder'
 import { reopenClosedConsole } from './agentLaunch'
 import { revealPane } from './revealPane'
 import { toast } from './toast'
@@ -20,9 +20,12 @@ import {
   type WaitingCursor,
 } from './agentNav'
 
-/** Sidebar display order (the single helper the Sidebar renders too). */
+/**
+ * Sidebar display order (the single helper the Sidebar renders too): manual
+ * or Smart, frozen while the sidebar has the pointer or the focus (E5-FR-22).
+ */
 function displayOrder() {
-  return sidebarOrder(useAppStore.getState().workspaces)
+  return liveSidebarOrder(useAppStore.getState(), useAgentStore.getState())
 }
 
 /** "Next waiting" walk shared by consecutive presses (E5-FR-17). */
@@ -157,6 +160,8 @@ function runAction(id: ActionId): void {
 export function useGlobalKeys(): void {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      // The resume dialog (E5-FR-12) owns the keyboard until it is decided.
+      if (useAgentStore.getState().modalPending) return
       if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
         const target = displayOrder()[Number(e.key) - 1]
         if (target) {

@@ -99,6 +99,12 @@ export function PaneCell({
   const settings = useAppStore((s) => s.settings)
   const session = useAgentStore((s) => s.sessions[pane.id])
   const closedCount = useAgentStore((s) => s.closedStack.length)
+  // Held back by the "resume interrupted chats?" dialog (E5-FR-12).
+  const gated = useAgentStore((s) => !!s.gated[pane.id])
+  // Agent topic (or first prompt) after the title, dimmed (E5-FR-21).
+  const liveTopic = useAppStore((s) => s.paneStatus[pane.id]?.topic || s.paneStatus[pane.id]?.firstPrompt)
+  const topicRaw = liveTopic || session?.topic || session?.firstPrompt
+  const topic = topicRaw && topicRaw !== pane.title ? topicRaw : undefined
   const resume = resumeMenuState({ workspaces: [workspace], presets, settings }, session ? { [pane.id]: session } : {}, pane.id)
   const epoch = useAppStore((s) => s.paneEpoch[pane.id] ?? 0)
   // The shell ended on its own (E6-FR-17/38): gray "exited" tag in the header.
@@ -286,8 +292,14 @@ export function PaneCell({
             className="min-w-0 flex-1 rounded border border-accent-violet/50 bg-bg-primary px-1.5 py-0.5 text-xs text-text-primary outline-none"
           />
         ) : (
-          <span className="min-w-0 flex-1 truncate text-xs font-medium text-text-secondary">
-            {pane.title}
+          // The topic gives way first: it shrinks to nothing before the title truncates.
+          <span className="flex min-w-0 flex-1 items-baseline overflow-hidden text-xs" title={topic ? `${pane.title} · ${topic}` : undefined}>
+            <span className="min-w-0 truncate font-medium text-text-secondary">{pane.title}</span>
+            {topic && (
+              <span data-pane-topic className="min-w-0 truncate whitespace-pre text-text-secondary/60 [flex-shrink:9999]">
+                {` · ${topic}`}
+              </span>
+            )}
           </span>
         )}
         {exited && (
@@ -352,6 +364,15 @@ export function PaneCell({
       </header>
       <div className="relative min-h-0 flex-1">
         <ResumeChip paneId={pane.id} />
+        {gated && (
+          <div
+            data-pane-gated={pane.id}
+            className="absolute inset-0 z-[5] flex items-center justify-center gap-2 bg-bg-primary px-4 text-center text-xs text-text-secondary"
+          >
+            <History size={13} className="shrink-0 text-accent-violet" />
+            <span>{t('agents.modal.gated')}</span>
+          </div>
+        )}
         {mounted ? (
           // A render failure swaps only the terminal for a fallback; the pty
           // keeps running and [Reload console] reattaches (E4-FR-19).
