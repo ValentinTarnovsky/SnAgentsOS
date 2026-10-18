@@ -1,12 +1,17 @@
 import { useState } from 'react'
-import { Download, Upload } from 'lucide-react'
+import { Download, FolderOpen, Upload } from 'lucide-react'
 import type { ConfigFile } from '@shared/types'
+import { LEGACY_BRAND } from '@shared/brand'
 import { useAppStore } from '@/lib/store'
 import { snapshotConfig } from '@/lib/persist'
-import { useT } from '@/i18n'
+import { useLang, useT } from '@/i18n'
+import { formatBackupDate, useLegacyStore } from '@/lib/legacyStore'
 
 export function DataSection() {
   const t = useT()
+  const lang = useLang()
+  // The 1.x safety zip, while it exists (E0-FR-28); gone after its 30-day expiry.
+  const legacyBackup = useLegacyStore((s) => s.info?.backup ?? null)
   const importConfig = useAppStore((s) => s.importConfig)
   const mergeConfig = useAppStore((s) => s.mergeConfig)
 
@@ -82,6 +87,29 @@ export function DataSection() {
           </div>
         )}
       </section>
+
+      {legacyBackup && (
+        <section className="space-y-2">
+          <div className="text-sm font-medium text-text-primary">
+            {t('settings.data.backup.title', { legacy: LEGACY_BRAND.productName })}
+          </div>
+          <div className="flex items-center gap-2">
+            <p className="min-w-0 flex-1 break-all text-xs text-text-secondary">
+              {t('settings.data.backup.line', {
+                path: legacyBackup.path,
+                date: formatBackupDate(legacyBackup.expiresAt, lang),
+              })}
+            </p>
+            <button
+              onClick={() => window.snApi.app.legacyShowBackup()}
+              className="flex shrink-0 items-center gap-2 rounded-btn border border-border bg-bg-secondary px-3 py-2 text-sm text-text-primary transition-colors hover:border-accent-violet/40"
+            >
+              <FolderOpen size={15} />
+              {t('settings.data.backup.show')}
+            </button>
+          </div>
+        </section>
+      )}
     </div>
   )
 }

@@ -5,6 +5,7 @@ import { useUpdaterStore, initUpdaterEvents } from '@/lib/updater'
 import { initUsageEvents, syncUsageConfig } from '@/lib/usageStore'
 import { initRemoteEvents, syncRemoteConfig } from '@/lib/remoteStore'
 import { initRemoteCommands } from '@/lib/remoteCommands'
+import { initLegacyEvents } from '@/lib/legacyStore'
 import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
 import { startPersistence } from '@/lib/persist'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
@@ -16,6 +17,8 @@ import { Sidebar } from '@/components/sidebar/Sidebar'
 import { WorkspaceHost } from '@/components/layout/WorkspaceHost'
 import { SettingsModal } from '@/components/settings/SettingsModal'
 import { UpdateModal } from '@/components/updates/UpdateModal'
+import { RebrandNotice } from '@/components/rebrand/RebrandNotice'
+import { LegacyBanner } from '@/components/rebrand/LegacyBanner'
 import { RemoteQrModal } from '@/components/remote/RemoteQrModal'
 import { RemotePairingPrompt } from '@/components/remote/RemotePairingPrompt'
 import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
@@ -62,6 +65,9 @@ export function App() {
   useEffect(() => initRemoteEvents(), [])
   useEffect(() => initRemoteCommands(), [])
 
+  // 1.x migration state: welcome notice, banners and the backup line (E0-FR-10, 28, 35).
+  useEffect(() => initLegacyEvents(), [])
+
   // Push usage settings to main (reschedules its pollers) whenever they change.
   useEffect(() => {
     if (hydrated) syncUsageConfig(usage)
@@ -103,6 +109,7 @@ export function App() {
     <I18nProvider lang={language}>
       <div className="flex h-full w-full flex-col bg-bg-primary">
         <TitleBar />
+        <LegacyBanner />
         <AppBody />
       </div>
     </I18nProvider>
@@ -145,6 +152,7 @@ function AppBody() {
       </main>
       <SettingsModal />
       <UpdateModal />
+      <RebrandNotice />
       <RemoteQrModal />
       <RemotePairingPrompt />
       <NewWorkspaceWizard />
