@@ -33,6 +33,34 @@ export function NotificationStack() {
 
   const shown = expanded ? [...items].sort((a, b) => a.createdAt - b.createdAt) : visible
 
+  // A timed toast parked in the "+N" row has no mounted card, so no timer of
+  // its own: expire it on schedule anyway instead of leaving a stale "+1".
+  // A parked toast that becomes visible gets a fresh timer from its card.
+  const parked = useRef(new Map<string, { rev: number; timer: ReturnType<typeof setTimeout> }>())
+  useEffect(() => {
+    const map = parked.current
+    const keep = new Set<string>()
+    if (!expanded) {
+      for (const item of items) {
+        if (item.durationMs === null || visible.includes(item)) continue
+        keep.add(item.id)
+        const cur = map.get(item.id)
+        if (cur && cur.rev === (item.rev ?? 0)) continue
+        if (cur) clearTimeout(cur.timer)
+        const id = item.id
+        map.set(id, { rev: item.rev ?? 0, timer: setTimeout(() => toast.dismiss(id), item.durationMs) })
+      }
+    }
+    for (const [id, cur] of map) {
+      if (keep.has(id)) continue
+      clearTimeout(cur.timer)
+      map.delete(id)
+    }
+  })
+  useEffect(() => () => {
+    for (const cur of parked.current.values()) clearTimeout(cur.timer)
+  }, [])
+
   // The newest card sits at the bottom: keep it in view when the stack scrolls.
   const rootRef = useRef<HTMLDivElement>(null)
   const newest = shown[shown.length - 1]?.id
@@ -57,7 +85,7 @@ export function NotificationStack() {
           className="pointer-events-auto flex items-center justify-center gap-1.5 rounded-card border border-border bg-card px-3 py-1.5 text-xs text-text-secondary shadow-[0_8px_24px_-12px_rgba(0,0,0,0.6)] transition-colors hover:text-text-primary"
         >
           <ChevronUp size={13} className={cn('transition-transform', expanded && 'rotate-180')} />
-          {expanded ? t('toast.collapse') : t('toast.more', { count: overflow })}
+          {expanded ? t('toast.collapse') : overflow === 1 ? t('toast.moreOne') : t('toast.more', { count: overflow })}
         </button>
       )}
       <AnimatePresence initial={false}>

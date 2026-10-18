@@ -31,6 +31,7 @@ createRoot(document.getElementById('root')).render(<Root/>);
 window.smoke={
  toast,
  clear:()=>useToastStore.setState({items:[]}),
+ queued:()=>useToastStore.getState().items.length,
  modal:v=>setModal(v),
  modalOpen:()=>!!document.getElementById('modal-body'),
  pairing:v=>useRemoteStore.setState({pendingPairing:v?{requestId:'r',deviceName:'Pixel',ip:'192.168.0.9',expiresAt:Date.now()+60000}:null}),
@@ -87,6 +88,17 @@ app.whenReady().then(async()=>{
  await js("document.querySelector('[data-toast-root] > button').click()");await settle();
  eq(await count(6),6,'the +N row expands the stack');
  ok(await js('smoke.inViewport()'),'expanded stack scrolls inside its max-height');
+
+ // A timed toast parked behind four persistent ones still expires: no stale "+1".
+ await js('smoke.clear()');
+ await js("for(let i=1;i<=4;i++)smoke.toast.error('Error '+i)");const parkedAt=Date.now();await js("smoke.toast.success('Copiado al portapapeles',{durationMs:4000})");
+ eq(await count(4),4,'four persistent errors keep the visible slots');
+ const moreIs=async(expected,ms)=>{const end=Date.now()+ms;let m;do{m=await js('smoke.more()');if(m===expected)return m;await wait(50)}while(Date.now()<end);return m};
+ eq(await moreIs('+1 aviso',3000),'+1 aviso','a parked success shows the singular +1 row');
+ ok(Date.now()-parkedAt<3500,'the +1 row showed before the parked success expired');
+ eq(await moreIs(null,8000),null,'the parked success expires on schedule and the +1 row goes away');
+ ok(Date.now()-parkedAt>=3900,'the parked success lived its full duration');
+ eq(await js('smoke.queued()'),4,'only the persistent errors remain queued');
 
  // Over a common Modal: on top, and clicking a toast does not close the modal.
  await js('smoke.clear()');await js("smoke.toast.error('Error persistente sobre un modal')");await js('smoke.modal(true)');await settle();
