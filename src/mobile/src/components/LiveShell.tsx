@@ -4,14 +4,17 @@
  * push of E1/M5 and, when Home is on top, stays mounted off screen with
  * translateX(100%) (not display:none), so the xterm keeps its size and its
  * buffer and coming back to the same console is instant. Settings is a
- * PushScreen over Home. Each pushed screen holds a back claim, so the Android
- * back gesture, the chevron and history.back() all return to Home. The mount
- * confirmation (E2-FR-06) is shared by every entry point.
+ * PushScreen over Home; Diagnostics (E2-FR-36) is one over whatever is on top,
+ * so the header dots, the banner and Settings all reach it. Each pushed
+ * screen holds a back claim, so the Android back gesture, the chevron and
+ * history.back() all return to Home. The mount confirmation (E2-FR-06) is
+ * shared by every entry point.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { HomeScreen } from './HomeScreen'
 import { MainScreen } from './MainScreen'
 import { SettingsScreen } from './SettingsScreen'
+import { DiagnosticsScreen } from './DiagnosticsScreen'
 import { MountConfirmSheet } from './MountConfirmSheet'
 import { SLIDE_EASING, SLIDE_MS } from './PushScreen'
 import { useRemoteStore } from '../lib/store'
@@ -73,6 +76,7 @@ export function LiveShell(): ReactNode {
       <TerminalLayer open={screen === 'terminal'} />
       <SettingsScreen open={screen === 'settings'} onClose={() => setScreen('home')} />
       <MountConfirmSheet />
+      <DiagnosticsScreen />
     </BackStackHost>
   )
 }

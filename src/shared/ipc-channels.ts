@@ -130,6 +130,9 @@ export const CH = {
   REMOTE_CONTROL_CMD: 'remote:controlCmd', // main -> renderer (RemoteCommand)
   REMOTE_CONTROL_RESULT: 'remote:controlResult', // send (RemoteCommandResult, renderer -> main)
   REMOTE_EVENT: 'remote:event', // main -> renderer (RemoteUiState: status/devices/pendingPairing)
+  REMOTE_FIREWALL_CHECK: 'remote:firewallCheck', // invoke (force?: boolean) -> FirewallStatus (E2-FR-38)
+  REMOTE_FIREWALL_FIX: 'remote:firewallFix', // invoke -> FirewallFixRes (UAC, E2-FR-39)
+  REMOTE_OPEN_NETWORK_SETTINGS: 'remote:openNetworkSettings', // send (opens ms-settings:network-status)
 
   // Keep the PC awake while agents work (E5-FR-23/24). Main decides; the renderer persists.
   POWER_SET_CONFIG: 'power:setConfig', // send (AwakeMode); main answers with power:state

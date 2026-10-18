@@ -851,6 +851,23 @@ export const en = {
   'remote.qr.tailscaleHint':
     'The Tailscale address stays the same across networks - prefer it to avoid re-pairing.',
 
+  // Remote firewall check (E2-FR-38/39)
+  'remote.fw.checking': 'Checking the Windows firewall...',
+  'remote.fw.ok': 'Firewall OK: phones on this network can reach port {port}.',
+  'remote.fw.public': 'The network "{network}" is Public: Windows blocks phones from connecting. Mark it as Private.',
+  'remote.fw.openNetwork': 'Open network settings',
+  'remote.fw.blocked': 'A Windows firewall rule blocks {app}.',
+  'remote.fw.fix': 'Fix',
+  'remote.fw.blockedManual': 'There is a block rule that cannot be removed automatically: {rule}',
+  'remote.fw.noRule': 'No firewall rule lets phones reach {app} on port {port} yet.',
+  'remote.fw.createRule': 'Create rule',
+  'remote.fw.scopePort': 'The rule covers port {port} only (portable or dev build).',
+  'remote.fw.fixing': 'Waiting for Windows to confirm (UAC)...',
+  'remote.fw.cancelled': 'Cancelled',
+  'remote.fw.failed': 'Could not change the firewall.',
+  'remote.fw.notFixed': 'Could not fix it: a block rule that is not ours is still there.',
+  'remote.fw.recheck': 'Check again',
+
   // Remote pairing approval prompt
   'remote.pairing.title': 'Device wants to connect',
   'remote.pairing.wants': '“{name}” wants to control {app}.',

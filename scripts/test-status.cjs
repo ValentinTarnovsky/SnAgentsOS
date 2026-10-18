@@ -325,7 +325,9 @@ async function main() {
   ntfyConfigChecks()
   await enrichmentChecks()
   await pathOpenChecks()
-  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, store, enrichment and Codex App Server detail checks`)
+  await firewallChecks()
+  connLogRedactChecks()
+  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, store, enrichment, Codex App Server detail, path open, firewall and connection log checks`)
 }
 
 // R22-16 (E2-FR-28..30): shell:openPath containment in main with real files and
@@ -900,6 +902,149 @@ async function enrichmentChecks() {
     st.restartPane('p9')
     check(inPlace === 2 && rr.useAppStore.getState().paneEpoch.p9 === 2, 'without a mounted terminal restartPane remounts')
   }
+}
+
+// R22-17 (E2-FR-38/39): firewall inspection parser on canned JSON, the
+// elevated fix script and its wrapper (built, never executed), the service
+// cache / fix flow with a fake PowerShell runner; E2-FR-35: connLog.redact.
+async function firewallChecks() {
+  const fw = load('src/main/remote/firewall.ts')
+  const decode = (args) => Buffer.from(args[args.indexOf('-EncodedCommand') + 1], 'base64').toString('utf16le')
+  const EXE = 'C:\\Users\\u\\AppData\\Local\\Programs\\SnAgentsOS\\SnAgentsOS.exe'
+  const { LEGACY_BRAND } = load('src/shared/brand.ts')
+  const OLD = `c:\\users\\u\\appdata\\local\\programs\\${LEGACY_BRAND.packageName}\\${LEGACY_BRAND.winExe.toLowerCase()}`
+  check(fw.psQuote("O'Brien") === "'O''Brien'" && fw.psQuote('a\u2019b') === "'a\u2019\u2019b'", 'psQuote doubles ASCII and typographic single quotes')
+  const sample = "Write-Output 'á'"
+  check(decode(fw.psArgs(sample)) === sample && fw.psArgs(sample).slice(0, 2).join() === '-NoProfile,-NonInteractive', 'psArgs: -NoProfile -NonInteractive -EncodedCommand of UTF-16LE base64')
+  const insp = fw.buildInspectScript({ exe: EXE, port: 4517, ips: ['192.168.1.20', "1.2.3.4'; Remove-Item C:\\ #", '100.70.1.2'] })
+  check(insp.includes('$port = 4517') && insp.includes(`$exe = '${EXE}'`) && insp.includes(`$legacy = '${LEGACY_BRAND.winExe}'`), 'inspection script carries port, exe and the legacy exe name')
+  check(insp.includes("$ips = @('192.168.1.20', '100.70.1.2')") && !insp.includes('Remove-Item'), 'only IPv4 literals reach the inspection script')
+  check(insp.includes('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8') && insp.includes('ConvertTo-Json'), 'UTF-8 output and JSON result')
+  check(!/Remove-NetFirewallRule|New-NetFirewallRule|Set-NetFirewall/.test(insp), 'the inspection script is read-only')
+  assert.throws(() => fw.buildInspectScript({ exe: EXE, port: 0, ips: [] })); checks++
+  const fix = fw.buildFixScript({ exe: EXE, port: 4517, programScope: true, tailnet: false, domain: false })
+  check(fix.includes(`-Program '${EXE}'`) && fix.includes("-Name 'SnAgentsOS.Remote.TCP'") && fix.includes('-LocalPort 4517 -Profile Private -RemoteAddress LocalSubnet') && fix.includes('-EdgeTraversalPolicy Block'), 'installed fix: Allow by program and port on Private / LocalSubnet')
+  check(fix.indexOf("Get-NetFirewallRule -Name 'SnAgentsOS.Remote.TCP' -ErrorAction SilentlyContinue | Remove-NetFirewallRule") < fix.indexOf("New-NetFirewallRule -Name 'SnAgentsOS.Remote.TCP'"), 'our rule is removed before it is recreated (running twice never duplicates)')
+  check(fix.includes("[string]$r.Action -ne 'Block'") && fix.includes("$prof -notmatch 'Private'") && fix.includes("$lp -contains 'Any' -or $lp -contains $port") && fix.includes('-ieq $exe'), 'only Block rules on the current exe (TCP/Any, Private/Any, port/Any) are removed')
+  check(!fix.includes("New-NetFirewallRule -Name 'SnAgentsOS.Remote.Tailnet'"), 'no Tailscale rule without a Tailscale endpoint')
+  const portable = fw.buildFixScript({ exe: EXE, port: 4600, programScope: false, tailnet: true, domain: true })
+  check(!portable.includes('-Program') && portable.includes('-LocalPort 4600 -Profile Private,Domain'), 'portable / dev fix: port-only rule, Domain added for a domain network')
+  check(portable.includes("New-NetFirewallRule -Name 'SnAgentsOS.Remote.Tailnet'") && portable.includes('-Profile Any -RemoteAddress 100.64.0.0/10'), 'the Tailscale rule is limited to 100.64.0.0/10 on any profile')
+  check(fix.includes("$prof -notmatch 'Private')") && portable.includes("$prof -notmatch 'Private|Domain|Public')"), 'Public Blocks on the exe are removed only when the Tailscale rule is made (Domain on a domain network)')
+  const wrap = fw.buildElevatedWrapper(fix)
+  check(wrap.includes('-Verb RunAs -Wait -PassThru') && wrap.includes('NativeErrorCode -eq 1223') && wrap.includes("Join-Path $PSHOME 'powershell.exe'"), 'the wrapper elevates, waits and maps a cancelled UAC to 1223')
+  const innerB64 = /'-EncodedCommand', '([A-Za-z0-9+/=]+)'/.exec(wrap)[1]
+  check(Buffer.from(innerB64, 'base64').toString('utf16le') === fix, 'the wrapper carries the fix script verbatim')
+
+  const endpoints = [{ ip: '192.168.1.20', kind: 'lan', url: '' }, { ip: '100.70.1.2', kind: 'tailscale', url: '' }]
+  const ctx = { exe: EXE, port: 4517, programScope: true, endpoints, now: 5 }
+  const ep = (profile, tsProfile = 'Private', name = 'Casa') => [{ ip: '192.168.1.20', profile, name, alias: 'Wi-Fi' }, { ip: '100.70.1.2', profile: tsProfile, name: 'Tailscale', alias: 'Tailscale' }]
+  const rule = (o) => ({ name: 'r', displayName: 'r', action: 'Allow', program: 'Any', protocol: 'TCP', localPort: ['4517'], profile: 'Private', interfaces: ['Any'], localAddress: ['Any'], ...o })
+  const allowExe = rule({ name: 'mine', program: EXE.toLowerCase(), localPort: ['Any'] })
+  const tailAllow = rule({ name: 'tail', profile: 'Any', program: EXE })
+  const parse = (endpointsRaw, rules, c = ctx) => fw.parseInspectOutput(JSON.stringify({ endpoints: endpointsRaw, rules }), c)
+  let st = parse(ep('Private'), [allowExe, tailAllow])
+  check(st.state === 'ok' && st.ok && st.ruleFound && st.profile === 'Private' && st.endpoints[0].networkName === 'Casa', 'Private network + Allow on the exe (any case) = OK')
+  st = parse(ep('Public'), [allowExe, rule({ profile: 'Any', program: EXE })])
+  check(st.state === 'publicProfile' && st.profile === 'Public' && !st.ok, 'a Public LAN is the amber publicProfile state')
+  st = parse(ep('Private'), [rule({ program: OLD, localPort: ['Any'], profile: 'Any' })])
+  check(st.state === 'noRule' && !st.ruleFound, 'an Allow on the exe from before the rebrand does not count')
+  const defenderBlock = rule({ name: 'TCP Query User{X}', displayName: 'snagentsos.exe', action: 'Block', program: EXE.toLowerCase(), localPort: ['Any'], profile: 'Private' })
+  st = parse(ep('Private'), [allowExe, tailAllow, defenderBlock])
+  check(st.state === 'blocked' && st.fixable && st.blockingRules[0].scope === 'currentProgram', 'a Defender Block on the installed exe is blocked and fixable')
+  st = parse(ep('Private'), [allowExe, tailAllow, rule({ action: 'Block', program: OLD, localPort: ['Any'], profile: 'Any' })])
+  check(st.state === 'ok' && st.blockingRules.length === 0, 'Blocks on the 1.x exe are inert and ignored')
+  st = parse(ep('Private'), [allowExe, tailAllow, rule({ name: 'port-block', displayName: 'Corp block', action: 'Block', profile: 'Any' })])
+  check(st.state === 'blocked' && !st.fixable && st.blockingRules[0].scope === 'port', 'a port Block is blocked and never fixable')
+  st = parse(ep('Private'), [allowExe, tailAllow, rule({ action: 'Block', program: 'C:\\Users\\u\\AppData\\Local\\Temp\\old\\SnAgentsOS.exe', profile: 'Any', localPort: ['Any'] })])
+  check(st.state === 'ok' && st.blockingRules[0].scope === 'otherProgram' && st.fixable, 'a Block on another copy of the exe is listed but does not block this one')
+  st = parse(ep('Private'), [allowExe, tailAllow, rule({ action: 'Block', program: EXE, profile: 'Public', localPort: ['Any'] })])
+  check(st.state === 'ok', 'a Public-only Block does not apply on a Private network')
+  st = parse(ep('Private', 'Public'), [allowExe, tailAllow, rule({ name: 'pub', action: 'Block', program: EXE, profile: 'Public', localPort: ['Any'] })])
+  check(st.state === 'blocked' && st.fixable && st.blockingRules[0].scope === 'currentProgram', 'a Public Block on the exe blocks a Public Tailscale endpoint and is fixable')
+  st = parse(ep('Public'), [allowExe, tailAllow, rule({ action: 'Block', program: EXE, profile: 'Public, Private', localPort: ['Any'] })])
+  check(st.state === 'publicProfile' && st.fixable, 'a Public LAN comes before a Block on our exe (mark the network Private first)')
+  st = parse(ep('Public'), [allowExe, tailAllow, rule({ name: 'corp', action: 'Block', profile: 'Any' })])
+  check(st.state === 'blocked' && !st.fixable, 'a port Block still wins over a Public LAN')
+  st = parse(ep('Private'), [rule({ name: 'Tailscale-In', protocol: 'Any', localPort: ['Any'], profile: 'Domain, Private', localAddress: ['100.70.1.2'] })])
+  check(st.state === 'noRule' && st.ruleFound, 'an Allow bound to the Tailscale address leaves the LAN uncovered')
+  st = parse(ep('Private'), [rule({ protocol: 'UDP', localPort: ['Any'], profile: 'Any' })])
+  check(!st.ruleFound && st.state === 'noRule', 'a UDP Allow does not count')
+  st = parse(ep('Private'), [rule({ localPort: ['4000-5000'], profile: 'Any' })])
+  check(st.state === 'ok', 'a port range covering the port counts')
+  st = parse(ep('Private'), [rule({ localPort: ['4518'], profile: 'Any' })])
+  check(!st.ruleFound, 'another port does not count')
+  st = parse([...ep('Private'), { ip: '172.20.0.1', profile: 'Public', name: 'Unidentified', alias: 'vEthernet (WSL)' }], [allowExe, tailAllow])
+  check(st.state === 'ok' && st.endpoints.length === 3, 'a Public vEthernet adapter does not make the state amber')
+  st = fw.parseInspectOutput(JSON.stringify({ endpoints: { ip: '192.168.1.20', profile: 'Private', name: 'Casa', alias: 'Wi-Fi' }, rules: { name: 'one', displayName: 'one', action: 'Allow', program: EXE, protocol: 'TCP', localPort: '4517', profile: 'Private', interfaces: 'Any', localAddress: 'Any' } }), { ...ctx, endpoints: [endpoints[0]] })
+  check(st.state === 'ok' && st.endpoints.length === 1, 'single-element arrays collapsed by ConvertTo-Json still parse')
+  st = fw.parseInspectOutput('WARNING: noise\r\n' + JSON.stringify({ endpoints: ep('DomainAuthenticated', 'DomainAuthenticated'), rules: [rule({ profile: 'Domain', program: EXE, localPort: ['Any'] })] }), ctx)
+  check(st.state === 'ok' && st.profile === 'DomainAuthenticated', 'leading noise is skipped; Domain profile rules cover a domain network')
+  assert.throws(() => fw.parseInspectOutput('Acceso denegado', ctx)); checks++
+  check(fw.localAddressCovers(['192.168.1.0/24'], '192.168.1.20') && !fw.localAddressCovers(['192.168.2.0/255.255.255.0'], '192.168.1.20') && fw.localAddressCovers(['192.168.1.10-192.168.1.30'], '192.168.1.20') && !fw.localAddressCovers(['fd7a::1'], '192.168.1.20'), 'localAddressCovers: CIDR, mask, range, IPv6')
+
+  // Service: cache, unknown, unsupported, fix flow.
+  let clock = 1000, runs = [], next = []
+  const okJson = JSON.stringify({ endpoints: ep('Private'), rules: [allowExe, tailAllow] })
+  const blockedJson = JSON.stringify({ endpoints: ep('Private'), rules: [allowExe, tailAllow, defenderBlock] })
+  const svc = (over = {}) => new fw.FirewallService({ platform: 'win32', exe: () => EXE, port: () => 4517, programScope: () => true, endpoints: () => endpoints, now: () => clock, run: async (args, timeout) => { runs.push({ script: decode(args), timeout }); return next.shift() ?? { code: 0, stdout: okJson, timedOut: false } }, ...over })
+  const s1 = svc()
+  st = await s1.check()
+  check(st.state === 'ok' && runs.length === 1 && runs[0].timeout === 10000, 'check runs the inspection with a 10s timeout')
+  await s1.check(); clock += 59000; await s1.check()
+  check(runs.length === 1, 'the result is cached for 60s')
+  await s1.check(true); check(runs.length === 2, 'force skips the cache')
+  clock += 61000; await s1.check(); check(runs.length === 3, 'the cache expires after 60s')
+  const both = await Promise.all([s1.check(true), s1.check(true)])
+  check(runs.length === 4 && both[0] === both[1], 'concurrent checks share one PowerShell run')
+  next.push({ code: null, stdout: '', timedOut: true })
+  st = await s1.check(true)
+  check(st.state === 'unknown' && st.detail === 'timeout', 'a timed out check is unknown (grey)')
+  await s1.check(); check(runs.length === 6, 'an unknown result is not cached')
+  st = await svc({ platform: 'darwin' }).check()
+  check(st.state === 'unsupported' && runs.length === 6, 'off Windows nothing runs')
+  runs = []; next = [{ code: 0, stdout: blockedJson, timedOut: false }, { code: 1223, stdout: '', timedOut: false }, { code: 0, stdout: blockedJson, timedOut: false }]
+  // A forced check started after a fix never reuses a run from before it.
+  {
+    let release
+    const gate = new Promise(r => { release = r })
+    let n = 0
+    const s3 = svc({ run: async (args) => { const script = decode(args); n++; if (n === 1) { await gate; return { code: 0, stdout: blockedJson, timedOut: false } } if (script.includes('-Verb RunAs')) return { code: 0, stdout: '', timedOut: false }; return { code: 0, stdout: okJson, timedOut: false } } })
+    const stale = s3.check()
+    const fixed = s3.fix()
+    await new Promise(r => setTimeout(r, 0))
+    release()
+    const [a, b] = await Promise.all([stale, fixed])
+    check(a.state === 'blocked' && b.ok && b.status.state === 'ok', 'the re-check after a fix is a fresh run, not one that started before it')
+  }
+  const s2 = svc(); await s2.check()
+  let res = await s2.fix()
+  check(res.cancelled && res.error === 'cancelled' && !res.ok && res.status.state === 'blocked', 'a cancelled UAC is reported as Cancelled')
+  check(runs[1].script.includes('-Verb RunAs') && runs[1].timeout === 180000 && runs.length === 3, 'the fix runs the elevated wrapper and re-checks')
+  next = [{ code: 0, stdout: '', timedOut: false }, { code: 0, stdout: okJson, timedOut: false }]
+  res = await s2.fix()
+  check(res.ok && res.status.state === 'ok', 'an accepted fix re-checks to OK')
+  next = [{ code: 0, stdout: '', timedOut: false }, { code: 0, stdout: JSON.stringify({ endpoints: ep('Private'), rules: [allowExe, tailAllow, rule({ name: 'corp', action: 'Block', profile: 'Any' })] }), timedOut: false }]
+  res = await s2.fix()
+  check(!res.ok && res.error === 'notFixed' && res.status.fixable === false, 'a port Block left behind is "could not fix", never OK')
+  const fixRuns = runs.filter(r => r.script.includes('-Verb RunAs')).map(r => Buffer.from(/'-EncodedCommand', '([A-Za-z0-9+/=]+)'/.exec(r.script)[1], 'base64').toString('utf16le'))
+  check(fixRuns.length === 3 && fixRuns.every(s => s === fixRuns[0]) && fixRuns[0].includes('-Program') && fixRuns[0].includes("New-NetFirewallRule -Name 'SnAgentsOS.Remote.Tailnet'"), 'every fix run builds the same idempotent script (installed: by program, plus the Tailscale rule)')
+  runs = []
+  await svc({ programScope: () => false }).fix()
+  const portableInner = Buffer.from(/'-EncodedCommand', '([A-Za-z0-9+/=]+)'/.exec(runs[0].script)[1], 'base64').toString('utf16le')
+  check(!portableInner.includes('-Program'), 'the portable fix creates a port-only rule')
+  check((await svc({ platform: 'linux' }).fix()).error === 'unsupported', 'fix off Windows is unsupported')
+}
+
+function connLogRedactChecks() {
+  const { redact } = load('src/mobile/src/lib/connLog.ts')
+  const secret = '0f'.repeat(32)
+  const line = `auth secret=${secret} hmac=${'a1'.repeat(32)} {"proof":"beef","nonce":"cafe","clientNonce":"d00d","token":"t0k"}`
+  const out = redact(line)
+  check(!out.includes(secret) && !out.includes('beef') && !out.includes('cafe') && !out.includes('d00d') && !out.includes('t0k'), 'connLog.redact removes secret, hmac, proof, nonce, clientNonce and token values')
+  check(!redact('pair sent code=AB12CD34').includes('AB12CD34') && !redact('pairCode=AB12CD34').includes('AB12CD34') && !redact('open http://x/#pair=AB12CD34').includes('AB12CD34'), 'connLog.redact removes the pairing code (code= on pair lines, pairCode=, #pair=)')
+  check(redact('close=1006 clean=false dur=1234') === 'close=1006 clean=false dur=1234' && redact('err code=version') === 'err code=version', 'connLog.redact keeps close lines and code= outside pair lines')
+  check(redact('dial 192.168.1.20:4517') === 'dial 192.168.1.20:4517', 'connLog.redact keeps the dialed IP')
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })

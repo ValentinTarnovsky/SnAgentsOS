@@ -4,12 +4,12 @@
  * presets of E2-FR-34), Input
  * (E1-FR-22/30: AI consoles start in Composer, composer autocorrect), Alerts
  * (in-page alerts, E1-FR-40), About (desktop and bundle versions) and This
- * device (unpair, with confirmation). Later WPs add their rows here: answer
- * cards (R22-15), Key bar (R22-19) and Diagnostics (R22-17).
+ * device (Diagnostics, E2-FR-36, and unpair with confirmation). Later WPs add
+ * their rows here: answer cards (R22-15) and Key bar (R22-19).
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { LogOut } from 'lucide-react'
+import { Activity, LogOut } from 'lucide-react'
 import type { ThemeName } from '@shared/types'
 import { PushScreen } from './PushScreen'
 import { ActionList } from './ActionList'
@@ -17,6 +17,7 @@ import { ConfirmSheet } from './ConfirmSheet'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { FontScaleRow } from './FontScaleRow'
+import { openDiagnostics } from '../lib/connLog'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
 /** This page's version, baked in by vite.config.ts. */
@@ -164,6 +165,13 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
         <SettingsSection id="device" title={t('set.device')}>
           <ActionList
             items={[
+              {
+                // E2-FR-36: Diagnostics opens over Settings (it is mounted after it).
+                id: 'diagnostics',
+                icon: <Activity size={16} />,
+                label: t('diag.title'),
+                onSelect: openDiagnostics,
+              },
               {
                 id: 'unpair',
                 icon: <LogOut size={16} />,

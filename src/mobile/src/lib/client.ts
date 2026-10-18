@@ -56,6 +56,7 @@ import { paneById, paneOpenable, statusMapOf, workspaceOfPane } from './workspac
 import { clearMobileStorage } from './mobileStorage'
 import { chunkInput } from './composerSend'
 import { pruneDrafts } from './drafts'
+import { log, useDiagStore } from './connLog'
 
 /** A frame handed to the live terminal. */
 export type TermFrame =
@@ -98,6 +99,8 @@ const CTL_TIMEOUT = 10000
  */
 export const AWAIT_NEW_PANE_MS = 5000
 const PAIR_PENDING_MS = 60000
+/** Pairing path: budget to reach pairPending / paired / pairDenied (E2-FR-37). */
+export const PAIR_CEILING_MS = 25000
 /** sessionStorage guard against a reload loop on a stale cached bundle (FR-15). */
 export const RELOAD_FOR_KEY = `${BRAND.mobileStoragePrefix}reloadFor`
 
@@ -175,6 +178,13 @@ class RemoteClient {
   private clientNonce = ''
   private pairCode: string | null = null
   private pairDeviceName = ''
+  /** E2-FR-37: ends the pairing attempt when nothing answered in 25s. */
+  private pairCeilingTimer: ReturnType<typeof setTimeout> | undefined
+  /** Connection log timing (E2-FR-35), wall clock ms. */
+  private dialAt = 0
+  private openAt = 0
+  /** measureRtt() callers waiting for the next pong. */
+  private rttWaiters: Array<(ms: number) => void> = []
 
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
@@ -262,6 +272,8 @@ class RemoteClient {
     this.secretKey = null
     this.noReconnect = false
     this.reconnectAttempt = 0
+    this.clearPairCeiling()
+    useDiagStore.getState().update({ pairTimedOut: false })
     store.getState().update({ phase: 'pairForm', banner: null, pairReason: null, pairExpiresAt: null, connAttempt: 0 })
   }
 
@@ -269,12 +281,60 @@ class RemoteClient {
   submitPairing(deviceName: string): void {
     if (this.mode !== 'pair') return
     this.pairDeviceName = deviceName
-    store.getState().update({ phase: 'connecting' })
+    this.clearReconnectTimer()
+    this.abortSocket()
+    this.reconnectAttempt = 0
+    this.armPairCeiling()
+    store.getState().update({ phase: 'connecting', banner: null, connAttempt: 0 })
     this.connect()
+  }
+
+  /**
+   * E2-FR-37: until pairPending, paired or pairDenied, the pairing attempt
+   * keeps retrying under a 25s ceiling; when it runs out the socket is dropped
+   * and the connecting screen offers Retry and Copy report.
+   */
+  private armPairCeiling(): void {
+    this.clearPairCeiling()
+    const at = Date.now() + PAIR_CEILING_MS
+    useDiagStore.getState().update({ pairCeilingAt: at, pairStartedAt: Date.now(), pairTimedOut: false })
+    this.pairCeilingTimer = setTimeout(() => {
+      this.pairCeilingTimer = undefined
+      // A terminal answer (locked, impostor, ...) already took over the screen.
+      if (store.getState().phase !== 'connecting') {
+        useDiagStore.getState().update({ pairCeilingAt: null })
+        return
+      }
+      log('error', `pair ceiling ${PAIR_CEILING_MS / 1000}s reached without an answer`)
+      this.clearReconnectTimer()
+      this.abortSocket()
+      useDiagStore.getState().update({ pairCeilingAt: null, pairTimedOut: true })
+      store.getState().update({ phase: 'connecting', banner: null, connAttempt: 0 })
+    }, PAIR_CEILING_MS)
+  }
+
+  private clearPairCeiling(): void {
+    if (this.pairCeilingTimer) clearTimeout(this.pairCeilingTimer)
+    this.pairCeilingTimer = undefined
+    if (useDiagStore.getState().pairCeilingAt !== null) useDiagStore.getState().update({ pairCeilingAt: null })
+  }
+
+  /** The pairing attempt reached the desktop (pairPending/paired/pairDenied). */
+  private pairAnswered(): void {
+    this.clearPairCeiling()
+    this.clearReconnectTimer()
+    this.reconnectAttempt = 0
+    store.getState().update({ banner: null, connAttempt: 0 })
   }
 
   /** Manual reconnect (retry button on the locked/connecting screens). */
   retry(): void {
+    log('info', 'retry manual')
+    // A pairing attempt that ran out of time retries with the same code.
+    if (this.mode === 'pair' && this.pairCode && !this.deviceId) {
+      this.submitPairing(this.pairDeviceName)
+      return
+    }
     this.clearReconnectTimer()
     // A lingering socket would make connect() a no-op and the button dead.
     this.abortSocket()
@@ -292,6 +352,7 @@ class RemoteClient {
   reconnectNow(): void {
     if (store.getState().phase === 'updated') return
     if (!this.deviceId) return
+    log('info', 'retry manual')
     this.clearReconnectTimer()
     this.abortSocket()
     this.noReconnect = false
@@ -318,6 +379,31 @@ class RemoteClient {
     this.clearReconnectTimer()
     this.abortSocket()
     location.reload()
+  }
+
+  /**
+   * Diagnostics (E2-FR-36): send one ping on the live socket and resolve with
+   * its round trip, or null without a live socket or after timeoutMs.
+   */
+  measureRtt(timeoutMs = 4000): Promise<number | null> {
+    if (!this.isOpen()) return Promise.resolve(null)
+    return new Promise((resolve) => {
+      let done = false
+      const waiter = (ms: number): void => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve(ms)
+      }
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true
+        this.rttWaiters = this.rttWaiters.filter((w) => w !== waiter)
+        resolve(null)
+      }, timeoutMs)
+      this.rttWaiters.push(waiter)
+      this.sendPing(PONG_TIMEOUT)
+    })
   }
 
   /** An authenticated socket is OPEN, so input and control frames get delivered. */
@@ -480,6 +566,7 @@ class RemoteClient {
   // --- page lifecycle (FR-10/11) ---
 
   private onVisibility = (): void => {
+    log('info', pageVisible() ? 'visible' : 'hidden')
     if (pageVisible()) {
       this.onRevive('visible')
       return
@@ -492,14 +579,17 @@ class RemoteClient {
   }
 
   private onPageShow = (ev: PageTransitionEvent): void => {
+    log('info', `pageshow persisted=${ev.persisted === true}`)
     this.onRevive('pageshow', ev.persisted === true)
   }
 
   private onOnline = (): void => {
+    log('info', 'online')
     this.onRevive('online')
   }
 
   private onOffline = (): void => {
+    log('warn', 'offline')
     store.getState().update({ online: false })
     // No attempts while the phone itself has no network; 'online' resumes.
     this.clearReconnectTimer()
@@ -621,6 +711,7 @@ class RemoteClient {
       return
     }
     // Dead link: abort without waiting for onclose and reconnect now, no backoff.
+    log('warn', `pong timeout ${this.deadlineMs}ms`)
     this.abortSocket()
     this.clearReconnectTimer()
     this.reconnectAttempt = 0
@@ -655,9 +746,13 @@ class RemoteClient {
     this.manualClose = false
     const myGen = ++this.gen
     let ws: WebSocket
+    this.dialAt = Date.now()
+    this.openAt = 0
+    log('info', `dial ${location.host}`)
     try {
       ws = new WebSocket(`ws://${location.host}/ws`)
     } catch {
+      log('error', 'dial failed')
       this.scheduleReconnect()
       return
     }
@@ -682,6 +777,7 @@ class RemoteClient {
     this.connectTimer = setTimeout(() => {
       this.connectTimer = undefined
       if (myGen !== this.gen) return
+      log('warn', `connect timeout ${CONNECT_TIMEOUT_MS}ms (${this.openAt ? 'open, no answer' : 'never opened'})`)
       this.abortSocket()
       this.afterDrop()
     }, CONNECT_TIMEOUT_MS)
@@ -737,6 +833,8 @@ class RemoteClient {
   }
 
   private onOpen(): void {
+    this.openAt = Date.now()
+    log('info', `open +${this.openAt - this.dialAt}ms`)
     this.clientNonce = randomNonceHex(32)
     const hello: RemoteClientMsg =
       this.deviceId != null
@@ -745,6 +843,7 @@ class RemoteClient {
     this.send(hello)
     if (this.mode === 'pair' && this.pairCode) {
       this.send({ v: PROTOCOL_VERSION, type: 'pair', code: this.pairCode, deviceName: this.pairDeviceName })
+      log('info', 'pair sent')
     }
   }
 
@@ -762,6 +861,8 @@ class RemoteClient {
         break
       case 'pairPending':
         // The legitimate approval wait can reach 60s: the connect timeout ends here.
+        log('info', 'pairPending')
+        this.pairAnswered()
         this.clearConnectTimer()
         store.getState().update({ phase: 'pairPending', pairExpiresAt: Date.now() + PAIR_PENDING_MS })
         break
@@ -769,6 +870,8 @@ class RemoteClient {
         this.handlePaired(msg)
         break
       case 'pairDenied':
+        log('warn', `pairDenied reason=${msg.reason}`)
+        this.pairAnswered()
         this.clearConnectTimer()
         this.manualClose = true
         store.getState().update({ phase: 'pairDenied', pairReason: msg.reason })
@@ -800,10 +903,12 @@ class RemoteClient {
         this.handleCtlAck(msg)
         break
       case 'revoked':
+        log('warn', 'revoked')
         this.forgetComposerState()
         store.getState().update({ phase: 'revoked' })
         break
       case 'shutdown':
+        log('warn', `shutdown reason=${msg.reason}`)
         if (msg.reason === 'disabled') {
           this.noReconnect = true
           store.getState().update({ banner: { kind: 'disabled' } })
@@ -813,6 +918,15 @@ class RemoteClient {
         }
         break
       case 'pong':
+        if (typeof msg.t === 'number' && msg.t > 0) {
+          const rtt = Date.now() - msg.t
+          if (rtt >= 0 && rtt < 120000) {
+            useDiagStore.getState().update({ rttMs: rtt })
+            const waiters = this.rttWaiters
+            this.rttWaiters = []
+            for (const w of waiters) w(rtt)
+          }
+        }
         if (this.resyncOnPong) {
           this.resyncOnPong = false
           if (store.getState().phase === 'live') this.resyncPane()
@@ -822,13 +936,18 @@ class RemoteClient {
         // A protocol mismatch means the desktop runs another build (FR-15). The
         // server answers every frame with it and never closes, so park here.
         // rate/unauthorized/bad_msg: nothing actionable beyond the eventual close.
-        if (msg.code === 'version' && store.getState().phase !== 'updated') this.enterUpdated('protocol', '')
+        if (msg.code === 'version' && store.getState().phase !== 'updated') {
+          log('error', 'err version (protocol mismatch)')
+          this.enterUpdated('protocol', '')
+        }
         break
     }
   }
 
   private handleChallenge(msg: Extract<RemoteServerMsg, { type: 'challenge' }>): void {
+    log('info', 'challenge')
     if (!this.secretKey || !this.deviceId) {
+      log('error', 'challenge without a stored secret')
       // No secret but got a challenge (should not happen in the pair path).
       this.abort('impostor')
       return
@@ -836,14 +955,19 @@ class RemoteClient {
     // Mutual auth: the server must prove it knows our secret first.
     const expected = hmacSha256Hex(this.secretKey, this.clientNonce)
     if (!msg.proof || !hexEqual(expected, msg.proof)) {
+      log('error', 'proof mismatch')
       this.abort('impostor')
       return
     }
+    log('info', 'proof ok')
     const hmac = hmacSha256Hex(this.secretKey, msg.nonce)
     this.send({ v: PROTOCOL_VERSION, type: 'auth', deviceId: this.deviceId, hmac })
+    log('info', 'auth sent')
   }
 
   private handlePaired(msg: Extract<RemoteServerMsg, { type: 'paired' }>): void {
+    log('info', 'paired')
+    this.pairAnswered()
     storeAuth(msg.deviceId, msg.secret)
     this.deviceId = msg.deviceId
     this.secretKey = hexToBytes(msg.secret)
@@ -872,6 +996,7 @@ class RemoteClient {
     this.clearConnectTimer()
     this.socketAuthed = true
     this.reconnectAttempt = 0
+    useDiagStore.getState().update({ abnormalStreak: 0, pairTimedOut: false })
     // E2-FR-47: keep the viewed pane across a reconnect; otherwise a pending
     // deep link, else lastPane (subscribed so Resume opens instantly), else
     // nothing. Never a pane picked from the desktop's active workspace, and
@@ -924,6 +1049,7 @@ class RemoteClient {
   }
 
   private handleAuthOk(msg: Extract<RemoteServerMsg, { type: 'authOk' }>): void {
+    log('info', `authOk +${this.openAt ? Date.now() - this.openAt : 0}ms desktop=${msg.appVersion || '?'}`)
     this.clearConnectTimer()
     // Persist the host platform so future sessions (incl. the pairing path, which
     // never learns it) can still enable windowsPty on Windows desktops.
@@ -935,6 +1061,7 @@ class RemoteClient {
       comparableVersion(BUNDLE_VERSION) &&
       msg.appVersion !== BUNDLE_VERSION
     ) {
+      log('warn', `version mismatch desktop=${msg.appVersion} bundle=${BUNDLE_VERSION}`)
       this.enterUpdated('mismatch', msg.appVersion)
       return
     }
@@ -974,6 +1101,7 @@ class RemoteClient {
   }
 
   private handleAuthFail(msg: Extract<RemoteServerMsg, { type: 'authFail' }>): void {
+    log('warn', `authFail reason=${msg.reason}`)
     this.clearConnectTimer()
     this.manualClose = true
     if (msg.reason === 'locked') {
@@ -1081,6 +1209,14 @@ class RemoteClient {
   }
 
   private onClose(ev: CloseEvent): void {
+    const now = Date.now()
+    const clean = ev.wasClean === true
+    log(ev.code === 1000 ? 'info' : 'warn', `close=${ev.code} clean=${clean} dur=${now - (this.openAt || this.dialAt)}`)
+    const diag = useDiagStore.getState()
+    diag.update({
+      lastClose: { code: ev.code, reason: typeof ev.reason === 'string' ? ev.reason.slice(0, 120) : '', clean, at: now },
+      abnormalStreak: ev.code === 1006 ? diag.abnormalStreak + 1 : 0,
+    })
     this.ws = null
     this.stopSocketTimers()
     this.noteDropped()
@@ -1125,8 +1261,14 @@ class RemoteClient {
     }
     if (this.noReconnect) return
 
-    // Pairing socket dropped before it completed: back to the form / welcome.
+    // Pairing socket dropped before it completed: retry while the 25s ceiling
+    // runs (E2-FR-37), else back to the form / welcome.
     if (this.mode === 'pair' && !this.deviceId) {
+      if (this.pairCeilingTimer) {
+        this.scheduleReconnect()
+        return
+      }
+      if (useDiagStore.getState().pairTimedOut) return
       store.getState().update({ phase: this.pairCode ? 'pairForm' : 'welcome' })
       return
     }
@@ -1159,6 +1301,8 @@ class RemoteClient {
     }
     this.reconnectAttempt++
     const delay = delayFor(this.reconnectAttempt, Math.random())
+    log('info', `retry in ${delay}ms attempt=${this.reconnectAttempt}`)
+    useDiagStore.getState().update({ retries: useDiagStore.getState().retries + 1 })
     this.showReconnecting()
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
