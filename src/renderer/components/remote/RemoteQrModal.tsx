@@ -5,6 +5,7 @@ import type { RemoteEndpointKind } from '@shared/remote-protocol'
 import { useRemoteStore } from '@/lib/remoteStore'
 import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
+import { isFromToast, toast } from '@/lib/toast'
 
 const KIND_KEY: Record<RemoteEndpointKind, MessageKey> = {
   lan: 'remote.kind.lan',
@@ -65,7 +66,7 @@ export function RemoteQrModal() {
 
   return createPortal(
     <div className="fixed inset-0 z-[80] flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-black/60" onClick={cancelQr} />
+      <div className="absolute inset-0 bg-black/60" onClick={(e) => { if (!isFromToast(e)) cancelQr() }} />
       <div className="relative z-10 flex w-full max-w-sm flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]">
         <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
           <div className="flex items-center gap-2.5">
@@ -136,7 +137,10 @@ export function RemoteQrModal() {
                     {endpoint.url}
                   </span>
                   <button
-                    onClick={() => window.snApi.clipboard.writeText(endpoint.url)}
+                    onClick={() => {
+                      window.snApi.clipboard.writeText(endpoint.url)
+                      toast.success(t('toast.copied'), { dedupeKey: 'copied' })
+                    }}
                     title={t('remote.copy')}
                     className="shrink-0 rounded p-1 text-text-secondary transition-colors hover:text-text-primary"
                   >

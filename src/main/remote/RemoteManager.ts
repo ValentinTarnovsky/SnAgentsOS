@@ -116,7 +116,7 @@ export class RemoteManager {
       rateLimiter: this.rateLimiter,
       appVersion: this.appVersion,
       getSnapshot: () => this.currentSnapshot(),
-      executeCommand: (action) => this.executeCommand(action),
+      executeCommand: (action, deviceName) => this.executeCommand(action, deviceName),
       onConnectionsChanged: () => this.onConnectionsChanged(),
     })
     this.ptyManager.addSink(this.sessions)
@@ -205,7 +205,7 @@ export class RemoteManager {
   // --- Control-plane relay --------------------------------------------------
 
   /** Relay a control action to the renderer; resolve on its result or timeout. */
-  private executeCommand(action: RemoteCtlAction): Promise<RemoteCommandResult> {
+  private executeCommand(action: RemoteCtlAction, deviceName?: string): Promise<RemoteCommandResult> {
     const wc = this.getWebContents()
     if (!wc || wc.isDestroyed()) {
       return Promise.resolve({ id: '', ok: false, error: 'desktop_unavailable' })
@@ -217,7 +217,8 @@ export class RemoteManager {
         resolve({ id, ok: false, error: 'timeout' })
       }, COMMAND_TIMEOUT_MS)
       this.pendingCommands.set(id, { resolve, timer })
-      wc.send(CH.REMOTE_CONTROL_CMD, { id, action } satisfies RemoteCommand)
+      const cmd: RemoteCommand = deviceName ? { id, action, deviceName: deviceName.slice(0, 48) } : { id, action }
+      wc.send(CH.REMOTE_CONTROL_CMD, cmd)
     })
   }
 

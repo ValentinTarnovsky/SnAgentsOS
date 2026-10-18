@@ -27,6 +27,7 @@ import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { CommandPalette } from '@/components/ui/CommandPalette'
 import { GlobalPromptDialog } from '@/components/workspace/GlobalPromptDialog'
+import { NotificationStack } from '@/components/ui/NotificationStack'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -135,6 +136,8 @@ export function App() {
         <LegacyBanner />
         <AppBody />
       </div>
+      {/* Outside AppBody so toasts stay up even if the body fails (E4-FR-03). */}
+      <NotificationStack />
     </I18nProvider>
   )
 }

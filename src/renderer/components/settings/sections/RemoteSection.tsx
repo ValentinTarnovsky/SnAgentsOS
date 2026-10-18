@@ -12,6 +12,7 @@ import { useAppInfo } from '@/lib/useAppInfo'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { ToggleRow, inputCls, labelCls } from '../ui'
 import { cn } from '@/lib/cn'
+import { toast } from '@/lib/toast'
 
 const MIN_PORT = 1024
 const MAX_PORT = 65535
@@ -164,7 +165,10 @@ export function RemoteSection() {
                   {ep.url}
                 </span>
                 <button
-                  onClick={() => window.snApi.clipboard.writeText(ep.url)}
+                  onClick={() => {
+                    window.snApi.clipboard.writeText(ep.url)
+                    toast.success(t('toast.copied'), { dedupeKey: 'copied' })
+                  }}
                   title={t('remote.copy')}
                   className="shrink-0 rounded p-1 text-text-secondary transition-colors hover:text-text-primary"
                 >

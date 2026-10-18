@@ -114,6 +114,15 @@ export function NotificationsSection() {
         title={t('notif.flash')}
         disabled={!n.enabled}
       />
+      <div id="setting-inAppWhenFocused">
+        <ToggleRow
+          checked={n.inAppWhenFocused}
+          onChange={(v) => patch({ inAppWhenFocused: v })}
+          title={t('notif.inApp')}
+          description={t('notif.inAppHint')}
+          disabled={!n.enabled}
+        />
+      </div>
 
       <div className="space-y-3 border-t border-border pt-5">
         <ToggleRow
