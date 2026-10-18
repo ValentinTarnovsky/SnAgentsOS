@@ -113,6 +113,7 @@ export const CH = {
   STATUS_HEALTH: 'status:health',
   STATUS_DISCORD_TEST: 'status:discordTest',
   STATUS_DESKTOP_TEST: 'status:desktopTest',
+  STATUS_NTFY_TEST: 'status:ntfyTest', // invoke -> { ok, error? } (saved ntfy config, E2-FR-40)
   STATUS_REVEAL: 'status:reveal', // main -> renderer (paneId; notification clicked)
   STATUS_SESSION_END: 'status:sessionEnd', // main -> renderer (AgentSessionEndEvt; E6-FR-21)
   STATUS_HOOKS_INSTALL: 'status:hooksInstall', // invoke -> StatusHooksStatusRes

@@ -5,9 +5,10 @@ import type { NotificationSettings, StatusHealth, StatusHooksStatusRes } from '@
 import type { StatusManager } from '../status/StatusManager'
 import type { HookServer } from '../status/HookServer'
 import { hooksStatus, hooksUpToDate, installHooks, uninstallHooks } from '../status/HookInstaller'
-import { notificationSettingsSchema, discordSettingsSchema } from '../store/schema'
+import { notificationSettingsSchema, discordSettingsSchema, ntfySettingsSchema } from '../store/schema'
 import type { CodexBridge } from '../status/CodexBridge'
 import type { DiscordNotifier } from '../status/DiscordNotifier'
+import type { NtfyNotifier } from '../status/NtfyNotifier'
 
 export interface StatusIpc {
   /** Apply the persisted config once at boot (starts the HookServer if enabled). */
@@ -23,7 +24,7 @@ export interface StatusIpc {
  * or an install racing a boot start can never double-bind the port or leave
  * a stopped flag with a live server.
  */
-export function registerStatusIpc(statusManager: StatusManager, hookServer: HookServer, codex: CodexBridge, discord: DiscordNotifier): StatusIpc {
+export function registerStatusIpc(statusManager: StatusManager, hookServer: HookServer, codex: CodexBridge, discord: DiscordNotifier, ntfy: NtfyNotifier): StatusIpc {
   hookServer.onEvent((evt) => statusManager.onHookEvent(evt))
 
   let chain: Promise<unknown> = Promise.resolve()
@@ -83,6 +84,7 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
     if (!result.success) return
     statusManager.setConfig(result.data)
     discord.setConfig(result.data.discord)
+    ntfy.setConfig(result.data.ntfy)
     void applyHookLifecycle(result.data).catch(() => {})
   })
 
@@ -113,11 +115,14 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
   const health = (): StatusHealth => ({
     desktop: { error: statusManager.desktopError },
     claude: { ...hooksStatus(), running: hookServer.running, lastEventAt: statusManager.lastClaudeEventAt, ...(lifecycleError ? { error: lifecycleError } : {}) },
-    codex: codex.health, discord: discord.health,
+    codex: codex.health, discord: discord.health, ntfy: ntfy.health,
   })
   ipcMain.handle(CH.STATUS_HEALTH, health)
   ipcMain.handle(CH.STATUS_DISCORD_TEST, (_e, cfg) => discord.test(discordSettingsSchema.parse(cfg)))
   ipcMain.handle(CH.STATUS_DESKTOP_TEST, () => statusManager.testDesktop())
+  // E2-FR-40: the test publishes with the saved config main already holds
+  // (the renderer pushes it on every change), never with a renderer payload.
+  ipcMain.handle(CH.STATUS_NTFY_TEST, () => ntfy.test())
 
   return {
     health,
@@ -125,6 +130,7 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
       if (!cfg) return
       statusManager.setConfig(cfg)
       discord.setConfig(cfg.discord)
+      ntfy.setConfig(ntfySettingsSchema.parse(cfg.ntfy ?? {}))
       void applyHookLifecycle(cfg).catch(() => {})
     },
   }
