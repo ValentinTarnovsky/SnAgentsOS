@@ -33,17 +33,22 @@ app.whenReady().then(async()=>{
  await w.loadFile(path.join(__dirname,'index.html'));await new Promise(r=>setTimeout(r,400));
  const shot=async name=>{await w.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');await new Promise(r=>setTimeout(r,200));fs.writeFileSync(path.join(__dirname,name+'.png'),(await w.webContents.capturePage()).toPNG())};
  await shot('sidebar');
- let checks=await w.webContents.executeJavaScript("({dots:document.querySelectorAll('aside [role=img]').length,overflow:document.documentElement.scrollWidth>innerWidth})");
+ let checks=await w.webContents.executeJavaScript("({dots:document.querySelectorAll('aside [data-status-dot]').length,rows:[...document.querySelectorAll('[data-agent-row]')].map(r=>r.dataset.agentState).join(),overflow:document.documentElement.scrollWidth>innerWidth})");
  if(checks.dots!==6||checks.overflow)throw new Error('Sidebar layout '+JSON.stringify(checks));
+ if(checks.rows!=='working,action,done,error,unknown,idle')throw new Error('One agent row per state '+JSON.stringify(checks));
+ await w.webContents.executeJavaScript("document.querySelector('aside [data-status-dot]').dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))");await new Promise(r=>setTimeout(r,280));
+ const dotTip=await w.webContents.executeJavaScript("document.querySelector('[role=tooltip]')?.textContent||''");
+ if(!dotTip.includes('Console 0 - Trabajando'))throw new Error('Status dot tooltip within 300 ms '+JSON.stringify(dotTip));
+ await w.webContents.executeJavaScript("document.querySelector('aside [data-status-dot]').dispatchEvent(new MouseEvent('mouseout',{bubbles:true}))");await new Promise(r=>setTimeout(r,250));
  await w.webContents.executeJavaScript('smoke.set({sidebarCollapsed:true})');await new Promise(r=>setTimeout(r,300));await shot('sidebar-collapsed');
- checks=await w.webContents.executeJavaScript("({dots:document.querySelectorAll('aside [role=img]').length,buttons:[...document.querySelectorAll('aside nav button')].map(e=>e.getBoundingClientRect().width)})");
- if(checks.dots!==6||checks.buttons.some(n=>n<30))throw new Error('Collapsed sidebar '+JSON.stringify(checks));
+ checks=await w.webContents.executeJavaScript("({dots:document.querySelectorAll('aside [data-status-dot]').length,rows:document.querySelectorAll('[data-agent-row]').length,buttons:[...document.querySelectorAll('aside nav button')].map(e=>e.getBoundingClientRect().width)})");
+ if(checks.dots!==6||checks.rows!==0||checks.buttons.some(n=>n<30))throw new Error('Collapsed sidebar '+JSON.stringify(checks));
  await w.webContents.executeJavaScript("document.getElementById('edge-tooltip').dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))");await new Promise(r=>setTimeout(r,500));
  const tipFits=await w.webContents.executeJavaScript("(()=>{const r=document.querySelector('[role=tooltip]')?.getBoundingClientRect();return r&&r.width>=200&&r.left>=7&&r.top>=7&&r.right<=innerWidth-7&&r.bottom<=innerHeight-7})()");await shot('tooltip-edge');if(!tipFits)throw new Error('Tooltip outside viewport '+await w.webContents.executeJavaScript("JSON.stringify({focused:document.activeElement.id,rect:document.querySelector('[role=tooltip]')?.getBoundingClientRect(),viewport:[innerWidth,innerHeight]})"));await w.webContents.executeJavaScript("document.getElementById('edge-tooltip').dispatchEvent(new MouseEvent('mouseout',{bubbles:true}))");
  await w.webContents.executeJavaScript('smoke.open()');await new Promise(r=>setTimeout(r,300));await shot('notifications');
  for(const scale of [1,1.25,1.5]){w.setSize(860,560);w.webContents.setZoomFactor(scale);await new Promise(r=>setTimeout(r,200));const overflow=await w.webContents.executeJavaScript('document.documentElement.scrollWidth>innerWidth');if(overflow)throw new Error('Viewport overflow at '+scale);if(scale===1.5)await shot('notifications-150')}
  w.webContents.setZoomFactor(1);w.setSize(1280,820);await w.webContents.executeJavaScript("smoke.theme('light');document.getElementById('discord-webhook').scrollIntoView({block:'center'})");await new Promise(r=>setTimeout(r,300));await shot('discord-light');
- if(failures.length)throw new Error(failures.join('\\n'));console.log('PASS: six sidebar lights expanded/collapsed, settings at 100/125/150%, light/dark; screenshots '+__dirname);w.destroy();app.quit();
+ if(failures.length)throw new Error(failures.join('\\n'));console.log('PASS: six sidebar lights and agent rows expanded/collapsed, dot tooltip under 300 ms, settings at 100/125/150%, light/dark; screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

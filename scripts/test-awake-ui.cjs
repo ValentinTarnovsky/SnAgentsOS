@@ -84,7 +84,7 @@ app.whenReady().then(async()=>{
  eq(await js('smoke.settings().agents.awakeDisplay'),true,'the display toggle writes settings.agents.awakeDisplay');
  await js("document.querySelector('[data-awake-mode=never]').click()");await frame();
  eq(await js('smoke.settings().awakeMode'),'never','the settings radio writes awakeMode');
- ok(await js("[...document.querySelectorAll('section[aria-labelledby=agents-behavior] [role=switch]')].every(e=>e.disabled)"),'the display toggle is disabled in Never');
+ ok(await js("(()=>{const sw=[...document.querySelectorAll('section[aria-labelledby=agents-behavior] [role=switch]')];return sw[0].disabled&&sw.slice(1).every(e=>!e.disabled)})()"),'the display toggle is disabled in Never (the agent row toggles after it are not)');
  await shot('awake-settings-midnight');
  for(const q of ['despierta','awake','pantalla','sleep']){await js('smoke.search('+JSON.stringify(q)+')');await frame();ok(await js("document.body.textContent.includes('Comportamiento')"),'search finds the block: '+q)}
  await js("smoke.search('zzqx')");await frame();ok(!(await js("document.body.textContent.includes('Comportamiento')")),'a search that matches nothing hides the block');
