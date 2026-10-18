@@ -13,6 +13,16 @@ import type {
   RemoteStateSnapshot,
 } from '@shared/remote-protocol'
 import { loadInPageAlerts, saveInPageAlerts } from './inPageAlerts'
+import {
+  loadInputModes,
+  loadPref,
+  resolveInputMode,
+  saveInputMode,
+  savePref,
+  type ComposerPref,
+  type InputMode,
+} from './prefs'
+import { paneById } from './workspace'
 
 /**
  * E1-FR-20: the soft keyboard counts as open only while an input field has the
@@ -110,6 +120,18 @@ export interface RemoteState {
   paneStatus: Record<string, RemotePaneStatus>
   /** Alert with the page open when another console needs the user (E1-FR-40). */
   inPageAlerts: boolean
+  // --- composer (E1-FR-22..31) ---
+  /** Saved explicit input mode per pane ('snagentsos.inputMode.<paneId>'). */
+  inputModes: Record<string, InputMode>
+  /** AI consoles without a saved mode open in Composer (E1-FR-22). */
+  composerDefaultForAgents: boolean
+  /** Phone keyboard autocorrect in the composer (E1-FR-30). */
+  composerAutocorrect: boolean
+  /** Pane whose composer the Paste key opened for one send while it was in
+   * Direct (E1-FR-31); it returns to Direct after Send or Insert. */
+  composerOneShot: string | null
+  /** Slash command typing progress (E1-FR-25), null while idle. */
+  slashProgress: { done: number; total: number } | null
 
   /** Merge a partial state (used by the client for machine transitions). */
   update: (partial: Partial<RemoteState>) => void
@@ -120,6 +142,10 @@ export interface RemoteState {
   setKeyboard: (k: { inset?: number; focus?: string | null }) => void
   /** Toggle and persist the in-page alerts preference. */
   setInPageAlerts: (on: boolean) => void
+  /** Persist an explicit mode for a pane; ends a one-shot on it. */
+  setInputMode: (paneId: string, mode: InputMode) => void
+  /** Toggle and persist a composer preference. */
+  setComposerPref: (name: ComposerPref, on: boolean) => void
 }
 
 export const useRemoteStore = create<RemoteState>((set) => ({
@@ -150,6 +176,11 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   terminalUnicode: '6',
   paneStatus: {},
   inPageAlerts: loadInPageAlerts(),
+  inputModes: loadInputModes(),
+  composerDefaultForAgents: loadPref('composerDefaultForAgents'),
+  composerAutocorrect: loadPref('composerAutocorrect'),
+  composerOneShot: null,
+  slashProgress: null,
 
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
@@ -166,7 +197,30 @@ export const useRemoteStore = create<RemoteState>((set) => ({
     saveInPageAlerts(on)
     set({ inPageAlerts: on })
   },
+  setInputMode: (paneId, mode) => {
+    saveInputMode(paneId, mode)
+    set((s) => ({
+      inputModes: { ...s.inputModes, [paneId]: mode },
+      composerOneShot: s.composerOneShot === paneId ? null : s.composerOneShot,
+    }))
+  },
+  setComposerPref: (name, on) => {
+    savePref(name, on)
+    set(name === 'composerDefaultForAgents' ? { composerDefaultForAgents: on } : { composerAutocorrect: on })
+  },
 }))
+
+/**
+ * The viewed pane's effective input mode (E1-FR-22, FR-31): a one-shot opened
+ * by the Paste key wins, then the saved choice, then the agents default.
+ */
+export function selectInputMode(s: RemoteState): InputMode {
+  const paneId = s.activePaneId
+  if (!paneId) return 'direct'
+  if (s.composerOneShot === paneId) return 'composer'
+  const pane = s.snapshot ? paneById(s.snapshot, paneId) : undefined
+  return resolveInputMode(s.inputModes[paneId], pane?.type, s.composerDefaultForAgents)
+}
 
 /** Non-hook accessor for the client and imperative callers. */
 export const store = useRemoteStore

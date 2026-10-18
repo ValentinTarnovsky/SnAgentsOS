@@ -4,6 +4,8 @@
 // src/mobile/src/lib/client.ts driven by a fake WebSocket and a fake clock.
 // Section M1 (E1-FR-03..07, 40): statusText, inPageAlerts, the workspace
 // selectors, paneStatus handling and switchWorkspaceAndView.
+// Section M4 (E1-FR-24, 28): sendInput chunking, draft pruning on the first
+// authOk and the composer storage wipe on 4403, revoked and unpair.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -74,7 +76,7 @@ function page({ paired = true, hash = '', online = true, session = new Map(), ho
   const window = { addEventListener: on(listeners.win) }
   const vibrations = []
   const navigator = { onLine: online, vibrate: ms => { vibrations.push(ms); return true } }
-  const mapStorage = map => ({ getItem: k => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)), removeItem: k => map.delete(k) })
+  const mapStorage = map => ({ get length() { return map.size }, key: i => [...map.keys()][i] ?? null, getItem: k => (map.has(k) ? map.get(k) : null), setItem: (k, v) => map.set(k, String(v)), removeItem: k => map.delete(k) })
   const local = new Map(paired ? [['snagentsos.remote.deviceId', 'dev1'], ['snagentsos.remote.secret', '00'.repeat(32)]] : [])
   const location = { host: `${hostname}:4517`, hostname, hash, pathname: '/', search: '', reload() { reloads++ } }
   class FakeDate extends Date { static now() { return 1700000000000 + clock } }
@@ -518,6 +520,56 @@ async function testClientStatus() {
   check(p.vibrations.length === 1, 'with the preference off a transition does not alert')
 }
 
+/** Section M4 (E1-FR-24, FR-28): input chunking and the composer storage wiring of client.ts. */
+function testComposerWiring() {
+  const DAY = 24 * 60 * 60 * 1000, NOW = 1700000000000
+  const draft = (text, at) => JSON.stringify({ text, updatedAt: at })
+  const composerKeys = p => [...p.local.keys()].filter(k => k.startsWith('snagentsos.draft.') || k.startsWith('snagentsos.inputMode.'))
+  const authOk = s => s.recv({ type: 'authOk', deviceId: 'dev1', state: snapshot, hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+  {
+    const { p, s } = live()
+    s.sent.length = 0
+    const big = 'x'.repeat(19990) + '\u{1F600}'.repeat(5)
+    check(p.client.sendInput(big) === true, 'sendInput accepts a 20000-char paste')
+    const frames = s.sent.filter(m => m.type === 'input')
+    check(frames.length === 3 && frames.every(f => f.data.length <= 8192 && f.paneId === 'p'), 'it goes as 3 input frames, none over 8192')
+    check(frames.map(f => f.data).join('') === big && !s.closed, 'the frames arrive in order, complete, and the socket stays open')
+  }
+  {
+    const p = page()
+    p.local.set('snagentsos.draft.gone', draft('a', NOW - 8 * DAY))
+    p.local.set('snagentsos.draft.p', draft('b', NOW - 8 * DAY))
+    p.local.set('snagentsos.draft.recent', draft('c', NOW - DAY))
+    p.client.start(); p.last().open(); authOk(p.last())
+    check(!p.local.has('snagentsos.draft.gone'), 'the first authOk prunes an old draft of a gone pane')
+    check(p.local.has('snagentsos.draft.p') && p.local.has('snagentsos.draft.recent'), 'drafts of live panes and recent drafts stay')
+    p.local.set('snagentsos.draft.gone2', draft('d', NOW - 9 * DAY))
+    p.client.reconnectNow(); p.last().open(); authOk(p.last())
+    check(p.local.has('snagentsos.draft.gone2'), 'drafts are pruned once per page, not on every reconnect')
+  }
+  const seed = p => {
+    p.local.set('snagentsos.draft.p', draft('x', NOW))
+    p.state().setInputMode('p', 'composer')
+    p.local.set('snagentsos.composer.autocorrect', '1')
+  }
+  {
+    const { p, s } = live(); seed(p)
+    s.drop(4403)
+    check(composerKeys(p).length === 0 && Object.keys(p.state().inputModes).length === 0, 'close 4403 wipes every draft and input mode')
+    check(p.local.get('snagentsos.composer.autocorrect') === '1', 'preferences survive the wipe')
+  }
+  {
+    const { p, s } = live(); seed(p)
+    s.recv({ type: 'revoked' })
+    check(composerKeys(p).length === 0 && p.state().phase === 'revoked', 'the revoked message wipes drafts and input modes')
+  }
+  {
+    const { p } = live(); seed(p)
+    p.client.unpair()
+    check(composerKeys(p).length === 0 && p.reloads === 1, 'unpair wipes drafts and input modes before reloading')
+  }
+}
+
 async function main() {
   const p = page({ paired: false })
   testPure(p)
@@ -531,6 +583,7 @@ async function main() {
   testOffline()
   testDesktopGone()
   testUpdated()
+  testComposerWiring()
   console.log(`PASS: ${checks} mobile logic checks`)
 }
 

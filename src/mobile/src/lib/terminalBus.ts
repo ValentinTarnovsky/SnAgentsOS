@@ -15,3 +15,21 @@ export function setActiveTerm(term: Terminal | null): void {
 export function getActiveTerm(): Terminal | null {
   return active
 }
+
+// --- composer (E1-FR-31) ---
+
+/** The mounted composer, so SnippetsSheet can insert at its caret. */
+export interface ComposerHandle {
+  insert(text: string): void
+  focus(): void
+}
+
+let composerHandle: ComposerHandle | null = null
+
+export function setComposerHandle(handle: ComposerHandle | null): void {
+  composerHandle = handle
+}
+
+export function getComposerHandle(): ComposerHandle | null {
+  return composerHandle
+}

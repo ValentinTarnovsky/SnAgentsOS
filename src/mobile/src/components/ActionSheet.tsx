@@ -16,6 +16,7 @@ import { UsageSheet } from './UsageSheet'
 import { StatusIndicator } from './StatusIndicator'
 import { PaneStatusLines } from './PaneStatusLines'
 import { PrimaryButton } from './InfoScreen'
+import { InputPrefsSection } from './InputPrefsSection'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { getActiveTerm } from '../lib/terminalBus'
@@ -204,6 +205,7 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
             </button>
           </div>
         </div>
+        <InputPrefsSection />
         <div className="mb-5">
           <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-text-secondary">{t('alerts.title')}</span>
           <button
