@@ -134,7 +134,7 @@ function registerAppIpc(): void {
 }
 
 function registerConfigIpc(): void {
-  ipcMain.handle(CH.CONFIG_LOAD, (): ConfigFile | null => configStore.load())
+  ipcMain.handle(CH.CONFIG_LOAD, (): ConfigFile | null => configStore.load({ upgrade: true }))
   ipcMain.on(CH.CONFIG_SAVE, (_e, config: ConfigFile) => configStore.save(config))
 
   ipcMain.handle(CH.CONFIG_EXPORT, async (_e, config: ConfigFile): Promise<boolean> => {
