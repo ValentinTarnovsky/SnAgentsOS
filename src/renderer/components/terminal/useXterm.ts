@@ -808,7 +808,20 @@ export function useXterm(
       .then((existing) => {
         if (disposed) return undefined
         if (existing) {
-          if (existing.replay) term.write(existing.replay)
+          // E6-FR-04: the snapshot is laid out for the pty's size, so it is
+          // written at that size; once parsed, the forced refit sends the
+          // container's real size to the pty even when xterm already had it.
+          if (existing.cols > 0 && existing.rows > 0 && (existing.cols !== term.cols || existing.rows !== term.rows)) {
+            term.resize(existing.cols, existing.rows)
+          }
+          // The refit runs after the parse, by then bind() has set the pty id.
+          const refit = (): void => {
+            if (disposed) return
+            lastCols = -1
+            lastRows = -1
+            safeFit()
+          }
+          term.write(existing.replay ?? '', refit)
           shellKindRef.current = existing.shellKind ?? null
           bind(existing.ptyId)
           return undefined
