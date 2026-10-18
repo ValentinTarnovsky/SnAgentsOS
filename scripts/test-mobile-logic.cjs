@@ -6,6 +6,9 @@
 // selectors, paneStatus handling and switchWorkspaceAndView.
 // Section M4 (E1-FR-24, 28): sendInput chunking, draft pruning on the first
 // authOk and the composer storage wipe on 4403, revoked and unpair.
+// Section M5 (E1-FR-32..36, 39; E5-FR-11): backStack with a fake history,
+// createLongPress under fake timers, the sheet drag math, tab order and
+// titles, and which per-pane actions show for a resumable pane.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -26,6 +29,11 @@ export { relativeAge, statusLine, statusAriaLabel, showsTime } from './src/mobil
 export { createInPageAlerts, IN_PAGE_ALERTS_KEY } from './src/mobile/src/lib/inPageAlerts'
 export { viewedWorkspaceId, needsWorkspaceSwitch, waitingPanes, nextWaitingPane, statusMapOf } from './src/mobile/src/lib/workspace'
 export { setLang } from './src/mobile/src/lib/i18n'
+export { createBackStack } from './src/mobile/src/lib/backStack'
+export { createLongPress, LONG_PRESS_MS, LONG_PRESS_SLOP_PX, LONG_PRESS_VIBRATE_MS } from './src/mobile/src/lib/longPress'
+export * as sheetDrag from './src/mobile/src/lib/sheetDrag'
+export { paneActionIds, restartAction } from './src/mobile/src/lib/paneActions'
+export { tabTitle, tabPanes } from './src/mobile/src/lib/workspace'
 ` },
   bundle: true, platform: 'node', format: 'cjs', write: false,
   define: { __APP_VERSION__: JSON.stringify(BUNDLE_VERSION), 'process.env.NODE_ENV': '"production"' },
@@ -570,12 +578,186 @@ function testComposerWiring() {
   }
 }
 
+/**
+ * A fake History: `depth` = entries above the live root. back() and go(n)
+ * queue a traversal like the real API; settle() runs them, one popstate each.
+ */
+function fakeHistory() {
+  const h = { depth: 0, pushes: [], backs: 0, gos: [], queue: [] }
+  h.pushState = state => { h.depth++; h.pushes.push(state.snagentsos) }
+  h.back = () => { h.backs++; h.queue.push(-1) }
+  h.go = n => { h.gos.push(n); h.queue.push(n) }
+  h.settle = stack => {
+    while (h.queue.length) { h.depth = Math.max(0, h.depth + h.queue.shift()); stack.onPopState() }
+  }
+  /** The user presses the browser / Android back. */
+  h.userBack = stack => { h.depth = Math.max(0, h.depth - 1); stack.onPopState() }
+  return h
+}
+
+function testBackStack(p) {
+  // Double pop: closing from the UI pops once; the popstate it causes closes nothing else.
+  let h = fakeHistory(), closed = []
+  let stack = p.createBackStack(h)
+  stack.push('a', () => closed.push('a'))
+  check(h.pushes.join() === 'a' && h.depth === 1, 'a claim pushes one entry {snagentsos:id}')
+  stack.requestClose('a')
+  check(h.backs === 1 && closed.length === 0, 'closing from the UI calls history.back() once and not onClose')
+  h.settle(stack)
+  check(closed.length === 0 && stack.size() === 0 && h.depth === 0, 'its popstate is consumed: no double pop, nothing else closes')
+  stack.requestClose('a')
+  check(h.backs === 1, 'a second requestClose of the same claim is a no-op')
+
+  // Two claims: back closes only the newest.
+  h = fakeHistory(); closed = []
+  stack = p.createBackStack(h)
+  stack.push('drawer', () => closed.push('drawer'))
+  stack.push('actions', () => closed.push('actions'))
+  check(h.depth === 2, 'two stacked sheets own two entries')
+  h.userBack(stack)
+  check(closed.join() === 'actions' && stack.has('drawer') && !stack.has('actions'), 'one back closes only the top sheet')
+  h.userBack(stack)
+  check(closed.join() === 'actions,drawer' && stack.size() === 0 && h.depth === 0, 'the next back closes the one below')
+  h.userBack(stack)
+  check(closed.length === 2, 'a back with nothing claimed closes nothing (the browser leaves the app)')
+
+  // Closing the lower of two from the UI keeps the count exact.
+  h = fakeHistory(); closed = []
+  stack = p.createBackStack(h)
+  stack.push('drawer', () => closed.push('drawer'))
+  stack.push('actions', () => closed.push('actions'))
+  stack.requestClose('drawer')
+  h.settle(stack)
+  check(stack.has('actions') && !stack.has('drawer') && h.depth === 1 && closed.length === 0, 'closing the lower sheet from the UI keeps one entry for the top one')
+  h.userBack(stack)
+  check(closed.join() === 'actions' && h.depth === 0, 'and back still closes the top one')
+
+  // Close one sheet and open the next in the same tick: the push waits for the pop.
+  h = fakeHistory(); closed = []
+  stack = p.createBackStack(h)
+  stack.push('actions', () => closed.push('actions'))
+  stack.requestClose('actions')
+  stack.push('confirm', () => closed.push('confirm'))
+  check(h.pushes.join() === 'actions', 'a push issued while a back is in flight is deferred')
+  h.settle(stack)
+  check(h.pushes.join() === 'actions,confirm' && h.depth === 1 && stack.has('confirm'), 'it lands after the popstate, keeping one entry per claim')
+  h.userBack(stack)
+  check(closed.join() === 'confirm', 'and back then closes the new sheet, not nothing')
+  stack.push('x', () => closed.push('x'))
+  stack.requestClose('x')
+  stack.push('y', () => closed.push('y'))
+  stack.requestClose('y')
+  h.settle(stack)
+  check(h.pushes.at(-1) === 'x' && stack.size() === 0 && h.depth === 0, 'a deferred claim closed before it reached history pushes nothing')
+
+  // pushState refused (sandbox, Safari's rate limit): the claim never pops history.
+  h = fakeHistory(); closed = []
+  h.pushState = () => { throw new Error('SecurityError') }
+  stack = p.createBackStack(h)
+  stack.push('refused', () => closed.push('refused'))
+  stack.requestClose('refused')
+  check(h.backs === 0 && stack.size() === 0, 'a claim whose pushState threw closes without history.back() (which would leave the app)')
+  stack.push('refused2', () => closed.push('refused2'))
+  h.userBack(stack)
+  check(closed.length === 0 && stack.orphanAll() === 0 && h.gos.length === 0, 'a refused claim is never popped by back nor counted by orphanAll')
+
+  // orphanAll: the host unmounts (phase change) with claims open.
+  h = fakeHistory(); closed = []
+  stack = p.createBackStack(h)
+  stack.push('drawer', () => closed.push('drawer'))
+  stack.push('actions', () => closed.push('actions'))
+  const n = stack.orphanAll()
+  check(n === 2 && h.gos.join() === '-2' && stack.size() === 0, 'orphanAll drops every claim and calls history.go(-n)')
+  h.settle(stack)
+  check(closed.length === 0 && h.depth === 0, 'orphaned claims do not run onClose and leave no entry behind (one back exits)')
+  h = fakeHistory()
+  stack = p.createBackStack(h)
+  stack.push('a', () => {}); stack.push('b', () => {}); stack.requestClose('b')
+  check(stack.orphanAll() === 1 && h.gos.join() === '-1', 'a claim already closing is not counted twice')
+  h.settle(stack)
+  check(h.depth === 0, 'the in-flight back plus go(-1) clear both entries')
+  check(p.createBackStack(fakeHistory()).orphanAll() === 0, 'nothing open: no traversal')
+}
+
+function testLongPress(p) {
+  const fired = [], vib = []
+  const lp = p.createLongPress(() => fired.push(p.clock), { vibrate: ms => vib.push(ms) })
+  check(p.LONG_PRESS_MS === 450 && p.LONG_PRESS_SLOP_PX === 10 && p.LONG_PRESS_VIBRATE_MS === 10, 'one long-press constant: 450ms, 10px slop, 10ms buzz')
+  const t0 = p.clock
+  lp.down({ clientX: 0, clientY: 0, pointerId: 1 })
+  p.advance(449)
+  check(fired.length === 0, 'nothing at 449ms')
+  p.advance(1)
+  check(fired.length === 1 && fired[0] - t0 === 450 && vib.join() === '10', 'fires at 450ms and vibrates 10ms')
+  check(lp.up() === true && lp.consumeFired() === true && lp.consumeFired() === false, 'the click after a fired hold is swallowed once')
+
+  lp.down({ clientX: 0, clientY: 0, pointerId: 1 })
+  lp.move({ clientX: 6, clientY: 6, pointerId: 1 })
+  p.advance(500)
+  check(fired.length === 2, 'moving 8.5px stays within the slop and still fires')
+  lp.up()
+  lp.down({ clientX: 0, clientY: 0, pointerId: 1 })
+  lp.move({ clientX: 0, clientY: 11, pointerId: 1 })
+  p.advance(500)
+  check(fired.length === 2 && lp.up() === false, 'moving more than 10px cancels it (a scroll)')
+  lp.down({ clientX: 0, clientY: 0, pointerId: 1 })
+  p.advance(300); lp.up(); p.advance(300)
+  check(fired.length === 2 && lp.consumeFired() === false, 'lifting early is a plain tap: the click goes through')
+  lp.down({ clientX: 0, clientY: 0, pointerId: 1 })
+  p.advance(100); lp.cancel(); p.advance(500)
+  check(fired.length === 2, 'pointercancel stops the timer')
+  lp.down({ clientX: 0, clientY: 0, pointerId: 1 })
+  lp.move({ clientX: 50, clientY: 50, pointerId: 2 })
+  p.advance(450)
+  check(fired.length === 3, 'another finger moving does not cancel the press')
+  lp.up()
+}
+
+function testSheetDrag(p) {
+  const d = p.sheetDrag
+  check(d.DISMISS_PX === 80 && d.DISMISS_VELOCITY === 500 && d.SPRING_MS === 200 && d.CLOSE_MIN_MS === 120 && d.CLOSE_MAX_MS === 300 && d.UNMOUNT_FALLBACK_MS === 350, 'sheet constants match the contract')
+  check(d.shouldDismiss(100, 0) && !d.shouldDismiss(40, 100) && d.shouldDismiss(40, 900), '100px closes, a slow 40px springs back, a fast 40px flick closes')
+  const slow = Array.from({ length: 11 }, (_, i) => ({ t: i * 40, y: 200 + i * 4 }))
+  check(Math.round(d.releaseVelocity(slow, 400)) === 100, 'release speed is measured over the last 100ms (4px / 40ms = 100px/s)')
+  const flick = [{ t: 0, y: 200 }, { t: 500, y: 200 }, { t: 520, y: 215 }, { t: 540, y: 240 }]
+  check(d.releaseVelocity(flick, 540) === 1000, 'a late flick after a pause still reads fast (40px in 40ms)')
+  check(d.releaseVelocity(slow, 600) === 0 && d.releaseVelocity([{ t: 0, y: 0 }], 0) === 0, 'a resting finger or a single sample is 0px/s')
+  check(d.closeDurationMs(300, 1000) === 300 && d.closeDurationMs(300, 5000) === 120 && d.closeDurationMs(200, 1000) === 200, 'exit duration follows the speed, clamped to 120..300ms')
+  check(d.closeDurationMs(400, 0) === d.CLOSE_DEFAULT_MS, 'a close without a drag uses the default duration')
+  check(d.canDragFromContent({ scrollTop: 0, dy: 10, inputFocused: false }), 'content drags at the top, moving down')
+  check(!d.canDragFromContent({ scrollTop: 120, dy: 10, inputFocused: false }), 'a list scrolled halfway scrolls instead of closing')
+  check(!d.canDragFromContent({ scrollTop: 0, dy: -10, inputFocused: false }) && !d.canDragFromContent({ scrollTop: 0, dy: 10, inputFocused: true }), 'never moving up nor with a field focused')
+  check(d.backdropOpacity(0, 400) === 1 && d.backdropOpacity(200, 400) === 0.5 && d.backdropOpacity(800, 400) === 0, 'the backdrop fades with the drag')
+}
+
+function testTabsAndActions(p) {
+  check(p.tabTitle('Short') === 'Short' && p.tabTitle('  padded  ') === 'padded', 'short titles stay whole')
+  const cut = p.tabTitle('A very long console title here')
+  check(Array.from(cut).length === 18 && cut.endsWith('…'), 'titles are cut to 18 characters with an ellipsis')
+  check(Array.from(p.tabTitle('\u{1F680}'.repeat(30))).length === 18, 'the cut counts code points, never splits a surrogate pair')
+  const snap = multi(); snap.workspaces[1].layoutOrder = ['b3', 'b1']
+  const tabs = p.tabPanes(snap, 'b1')
+  check(tabs.workspaceId === 'w2' && tabs.panes.map(x => x.id).join() === 'b3,b1,b2', 'tabs list the viewed workspace in layoutOrder, then the rest')
+  check(p.tabPanes(snap, null).workspaceId === 'w1', 'with nothing viewed the tabs follow the desktop workspace')
+
+  check(p.paneActionIds({ resumable: true }).join() === 'rename,restart,restartResume,restartFresh,close', 'a resumable pane offers Relaunch resuming and New chat')
+  check(p.paneActionIds({}).join() === 'rename,restart,close' && p.paneActionIds({ resumable: false }).join() === 'rename,restart,close', 'without resumable (SSH, no session, old desktop) both are hidden')
+  check(p.paneActionIds({ resumable: true }, { rename: false })[0] === 'restart', 'the main sheet omits Rename')
+  check(JSON.stringify(p.restartAction('w', 'p', 'restartResume')) === '{"kind":"restartPane","workspaceId":"w","paneId":"p","resume":true}', 'Relaunch resuming sends restartPane resume:true')
+  check(JSON.stringify(p.restartAction('w', 'p', 'restartFresh')) === '{"kind":"restartPane","workspaceId":"w","paneId":"p","resume":false}', 'New chat sends restartPane resume:false')
+  check(!('resume' in p.restartAction('w', 'p', 'restart')), 'plain Restart sends no resume (the header button rule)')
+}
+
 async function main() {
   const p = page({ paired: false })
   testPure(p)
   testStatusText(p)
   testInPageAlerts(p)
   testWorkspaceSelectors(p)
+  testBackStack(p)
+  testLongPress(page())
+  testSheetDrag(p)
+  testTabsAndActions(p)
   await testClientStatus()
   testGeneration()
   testBackoff()

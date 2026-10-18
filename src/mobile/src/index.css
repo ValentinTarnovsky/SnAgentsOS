@@ -138,11 +138,55 @@ body {
   animation: sheet-up 0.2s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* Sheet gestures (E1-FR-34): no easing while the finger drives the panel; the
+   exit duration is set inline from the release speed (120..300ms). */
+.sheet-drag {
+  transition: none !important;
+}
+
+.sheet-out {
+  transition-property: transform;
+  transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
+}
+
+/* Pushed screens (E1-FR-37): SLIDE_MS / SLIDE_EASING of PushScreen.tsx. */
+@keyframes push-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes push-out {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.push-in {
+  animation: push-in 300ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.push-out {
+  animation: push-out 300ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .spin,
   .fade-in,
-  .sheet-up {
+  .sheet-up,
+  .push-in,
+  .push-out {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+
+  .sheet-out {
+    transition-duration: 0.01ms !important;
   }
 }

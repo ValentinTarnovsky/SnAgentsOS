@@ -2,10 +2,13 @@
  * The live layout: a flex column sized to the keyboard-aware --vvh so the
  * KeyBar always docks just above the soft keyboard. TopBar (workspace + console
  * title of the viewed pane with its agent status, the "N waiting" pill,
- * connection dot, drawer + actions) / terminal (flex-1, min-h-0) / composer
- * or "Direct input" strip (E1-FR-22..31, 38) / KeyBar. The drawer, action
- * sheet and snippets sheet mount here; the status banner and toast overlay
- * the terminal. The Paste key opens the composer (PasteSheet is gone, D11).
+ * connection dot, drawer + actions) / pane tabs (E1-FR-32) / terminal
+ * (flex-1, min-h-0) / composer or "Direct input" strip (E1-FR-22..31, 38) /
+ * KeyBar. The drawer, action sheet, per-pane actions (long-press on a tab or
+ * drawer row, E1-FR-33/39) and snippets sheet mount here; the status banner
+ * and toast overlay the terminal. The Paste key opens the composer (PasteSheet
+ * is gone, D11). BackStackHost gives every sheet and pushed screen its history
+ * entry (E1-FR-36).
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -14,6 +17,8 @@ import { RemoteTerminal } from './RemoteTerminal'
 import { KeyBar } from './KeyBar'
 import { ConsoleDrawer } from './ConsoleDrawer'
 import { ActionSheet } from './ActionSheet'
+import { PaneTabs } from './PaneTabs'
+import { PaneActionSheet } from './PaneActionSheet'
 import { SnippetsSheet } from './SnippetsSheet'
 import { Composer, openComposerForPaste, toggleInputMode } from './Composer'
 import { DirectInputStrip } from './DirectInputStrip'
@@ -22,7 +27,8 @@ import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { StatusIndicator } from './StatusIndicator'
 import { WaitingPill } from './WaitingPill'
 import { selectInputMode, store, useRemoteStore } from '../lib/store'
-import { paneById, viewedWorkspaceId } from '../lib/workspace'
+import { paneById, viewedWorkspaceId, type PaneRef } from '../lib/workspace'
+import { BackStackHost } from '../lib/useBackClaim'
 import { t } from '../lib/i18n'
 
 /** Header dot colored by the connection tier (E1-FR-13). */
@@ -63,6 +69,7 @@ export function MainScreen(): ReactNode {
     if (s.composerOneShot && s.composerOneShot !== activePaneId) s.update({ composerOneShot: null })
   }, [activePaneId])
   const [snippetsOpen, setSnippetsOpen] = useState(false)
+  const [paneActions, setPaneActions] = useState<PaneRef | null>(null)
 
   const { workspaceName, paneTitle } = useMemo(() => {
     if (!snapshot) return { workspaceName: '', paneTitle: t('main.noConsole') }
@@ -77,6 +84,7 @@ export function MainScreen(): ReactNode {
   }, [snapshot, activePaneId])
 
   return (
+    <BackStackHost>
     <div className="flex flex-col overflow-hidden bg-bg-primary" style={{ height: 'var(--vvh, 100dvh)' }}>
       <header
         className="flex shrink-0 items-center gap-2 border-b border-border bg-bg-secondary px-3 py-2"
@@ -107,6 +115,8 @@ export function MainScreen(): ReactNode {
         </button>
       </header>
 
+      <PaneTabs onPaneActions={setPaneActions} />
+
       <main className="relative min-h-0 flex-1">
         <RemoteTerminal />
         <StatusBanner />
@@ -134,9 +144,11 @@ export function MainScreen(): ReactNode {
         />
       </div>
 
-      <ConsoleDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+      <ConsoleDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} onPaneActions={setPaneActions} />
       <ActionSheet open={actionsOpen} onClose={() => setActionsOpen(false)} />
       <SnippetsSheet open={snippetsOpen} onClose={() => setSnippetsOpen(false)} />
+      <PaneActionSheet target={paneActions} onClose={() => setPaneActions(null)} />
     </div>
+    </BackStackHost>
   )
 }
