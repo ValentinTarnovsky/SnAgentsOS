@@ -45,6 +45,18 @@ export function withoutMounted(map: MountedWorkspaces, wsId: string): MountedWor
   return next
 }
 
+/**
+ * Next map after the workspace list is replaced (config import): mount state
+ * survives only for workspace ids still present, so a re-imported workspace
+ * keeps its running consoles instead of unmounting (and killing its ptys).
+ */
+export function keepMounted(map: MountedWorkspaces, wsIds: readonly string[]): MountedWorkspaces {
+  const keep = new Set(wsIds)
+  const next: MountedWorkspaces = {}
+  for (const [id, state] of Object.entries(map)) if (keep.has(id)) next[id] = state
+  return next
+}
+
 /** True when the workspace renders at all (full or partial). */
 export function isWorkspaceMounted(map: MountedWorkspaces, wsId: string): boolean {
   return map[wsId] !== undefined

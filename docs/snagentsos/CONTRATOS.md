@@ -17,7 +17,7 @@ Fuente unica de verdad para todos los epics. Si un PRD contradice esta seccion, 
 | Release | CONFIG_VERSION | Motivo |
 |---|---|---|
 | v2.0.0 | 10 (sin cambio) | Rebrand: se reubica el directorio de datos y se migra automaticamente desde 1.x. El estado de la migracion (fases, verificacion, respaldo, vencimiento, limpieza, `noticeSeen`) vive en `dataDir()/legacy-migration.json`, nunca en `config.json` |
-| v2.1.0 | 11 | awakeMode, terminalUnicode11, pane.lastSession |
+| v2.1.0 | 11 | awakeMode, terminalUnicode11, terminalAgentEndChip, notifications.inAppWhenFocused, agents, workspace.agentsCollapsed, pane.lastSession |
 | v2.2.0 | 12 | update, ntfy, scrollback, git, explorer, quickCommands (migracion real de snippets) |
 | v3.0.0 | 13 | phoneFit, https, CLI, worktrees, repoConfigTrust, automations, hibernacion |
 | v3.1+ | 14+ | Items "mas adelante" no agendados |
@@ -156,7 +156,7 @@ El CLI `snaos` ejecuta open/spawn/send reutilizando `remote:controlCmd` / `remot
 | v2.0 (10) | ninguna | - | - | E0 |
 | v2.1 (11) | `settings.awakeMode` | `'auto'\|'always'\|'never'` | `'auto'` | E4 |
 | v2.1 (11) | `settings.terminalUnicode11` | boolean | `true` | E4 |
-| v2.1 (11) | `workspaces[].panes[].lastSession` | `{ provider, sessionId, cwd, at }` opcional | ausente | E4 |
+| v2.1 (11) | `workspaces[].panes[].lastSession` | `{ provider, sessionId, cwd, at }` opcional (`sessionId` cumple `SESSION_ID_RE`; un valor invalido se descarta) | ausente | E4 |
 | v2.1 (11) | `settings.terminalAgentEndChip` | boolean | `true` | E6 |
 | v2.1 (11) | `settings.notifications.inAppWhenFocused` | boolean | `true` | E4 |
 | v2.1 (11) | `settings.agents` | `{ resumeOnStartup: 'ask'\|'auto'\|'off', awakeDisplay, sidebarAgentRows, topicAsTitle, ctrlDigitFocus }` | `{ 'ask', false, true, true, true }` | E5 |
