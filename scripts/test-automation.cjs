@@ -110,6 +110,10 @@ function schemaChecks() {
   check(tol && tol.settings.persistScrollbackLines === 5000 && tol.settings.terminalSnapshotMode === 'auto' && tol.settings.gitChip === true && tol.settings.explorerMenu === false && tol.settings.updateDismissedVersion === '', 'junk v12 values normalize without rejecting the config (99999 lines -> 5000)')
   check(tol.settings.agents.resumeModalTimeoutSec === 60 && tol.settings.agents.sidebarSort === 'manual' && tol.settings.agents.resumeNudge === true && tol.settings.agents.resumeNudgeText === 'Segui', 'agents v12 values kept or defaulted field by field')
   check(tol.settings.automation.defaultAgentPresetId === 'preset-claude' && tol.settings.automation.composerCreateAnother === false, 'automation values kept or defaulted field by field')
+  const junkObj = parseConfig(v11({ settings: { ...clone(baseSettings), notifications: { ntfy: 'x' }, automation: 7 } }))
+  check(junkObj && junkObj.settings.notifications.ntfy.server === 'https://ntfy.sh' && junkObj.settings.notifications.ntfy.enabled === false && junkObj.settings.automation.composerCreateAnother === false, 'a non-object ntfy or automation falls back to defaults without rejecting the config')
+  const nullNtfy = parseConfig(v11({ settings: { ...clone(baseSettings), notifications: { ntfy: null } } }))
+  check(nullNtfy && nullNtfy.settings.notifications.ntfy.topic === '' && nullNtfy.settings.notifications.ntfy !== junkObj.settings.notifications.ntfy, 'a null ntfy defaults to a fresh object (no shared fallback instance)')
   const low = parseConfig(v11({ settings: { ...clone(baseSettings), persistScrollbackLines: 10, terminalSnapshotMode: 'lazy', agents: { resumeModalTimeoutSec: 0, sidebarSort: 'smart' } } }))
   check(low.settings.persistScrollbackLines === 200 && low.settings.terminalSnapshotMode === 'lazy' && low.settings.agents.resumeModalTimeoutSec === 0 && low.settings.agents.sidebarSort === 'smart', 'lower bound clamps to 200, valid modes and 0 (never) are kept')
 
