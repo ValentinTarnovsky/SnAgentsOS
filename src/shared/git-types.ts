@@ -103,3 +103,30 @@ export interface RemoteGitChip {
   removed: number
   files: number
 }
+
+// ---- Changes panel (E7-FR-11..16) ------------------------------------------
+
+/** `git:status` result: the target's summary and every listed file with its per-area `+a -d`. */
+export interface GitChangesRes {
+  summary: GitSummary
+  files: GitFileEntry[]
+}
+
+/** One file's unified diff (`git:fileDiff`). Untracked files come as all-added lines. */
+export interface GitDiffRes {
+  path: string
+  oldPath?: string
+  area: GitArea
+  binary: boolean
+  /** sha1 of the raw diff: unchanged rev = unchanged diff (the panel keeps its scroll). */
+  diffRev: string
+  /** Over 5000 lines or 512 KB: no hunks until asked again with `force`. */
+  tooLarge?: { lines: number; bytes: number }
+  hunks: GitDiffHunk[]
+  totalLines: number
+}
+
+/** `gone`: the file has no changes any more. `denied`: not a path main listed for that target. */
+export type GitDiffError = GitError | 'gone' | 'denied'
+
+export type GitDiffReply = GitDiffRes | { error: GitDiffError }

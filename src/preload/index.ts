@@ -45,7 +45,7 @@ import type {
 } from '@shared/types'
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
-import type { GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
+import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -189,6 +189,10 @@ const api: SnApi = {
     refresh: (req?: { keys?: string[]; reason?: 'manual' | 'agent' }) => ipcRenderer.send(CH.GIT_REFRESH, req ?? {}),
     info: (force?: boolean) => ipcRenderer.invoke(CH.GIT_INFO, { force: force === true }) as Promise<GitInfoRes>,
     onUpdate: (cb: (e: GitUpdateEvt) => void) => sub<GitUpdateEvt>(CH.GIT_UPDATE, cb),
+    setPanel: (key: string | null) => ipcRenderer.send(CH.GIT_SET_PANEL, { key }),
+    status: (key: string) => ipcRenderer.invoke(CH.GIT_STATUS, { key }) as Promise<GitChangesRes | null>,
+    fileDiff: (req: { key: string; path: string; area: GitArea; force?: boolean }) => ipcRenderer.invoke(CH.GIT_FILE_DIFF, req) as Promise<GitDiffReply>,
+    openFile: (req: { key: string; path: string; reveal?: boolean }) => ipcRenderer.invoke(CH.GIT_OPEN_FILE, req) as Promise<boolean>,
   },
 }
 
