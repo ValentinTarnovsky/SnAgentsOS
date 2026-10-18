@@ -25,6 +25,8 @@ import type {
   RemoteCommand,
   RemoteCommandResult,
   RemoteUiState,
+  FirewallFixRes,
+  FirewallStatus,
   RenderErrorReport,
   RendererDiagnostics,
   SnApi,
@@ -180,6 +182,10 @@ const api: SnApi = {
     onCommand: (cb: (cmd: RemoteCommand) => void) => sub<RemoteCommand>(CH.REMOTE_CONTROL_CMD, cb),
     commandResult: (res: RemoteCommandResult) => ipcRenderer.send(CH.REMOTE_CONTROL_RESULT, res),
     onEvent: (cb: (s: RemoteUiState) => void) => sub<RemoteUiState>(CH.REMOTE_EVENT, cb),
+    firewallCheck: (force?: boolean) =>
+      ipcRenderer.invoke(CH.REMOTE_FIREWALL_CHECK, force === true) as Promise<FirewallStatus>,
+    firewallFix: () => ipcRenderer.invoke(CH.REMOTE_FIREWALL_FIX) as Promise<FirewallFixRes>,
+    openNetworkSettings: () => ipcRenderer.send(CH.REMOTE_OPEN_NETWORK_SETTINGS),
   },
   power: {
     setConfig: (mode: AwakeMode) => ipcRenderer.send(CH.POWER_SET_CONFIG, mode),

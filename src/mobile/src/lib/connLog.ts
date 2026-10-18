@@ -142,7 +142,8 @@ export function log(level: LogLevel, msg: string): void {
   const next = prev.length >= LOG_CAPACITY ? prev.slice(prev.length - LOG_CAPACITY + 1) : prev.slice()
   next.push({ t: Date.now(), level, msg: clean })
   useDiagStore.getState().update({ entries: next })
-  if (!persistTimer) persistTimer = setTimeout(persist, LOG_PERSIST_DEBOUNCE_MS)
+  // No storage at all (blocked, or a test without it): nothing to mirror.
+  if (!persistTimer && typeof sessionStorage !== 'undefined') persistTimer = setTimeout(persist, LOG_PERSIST_DEBOUNCE_MS)
 }
 
 export function entries(): LogEntry[] {
