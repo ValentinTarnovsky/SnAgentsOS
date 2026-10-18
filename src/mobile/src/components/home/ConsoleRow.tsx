@@ -4,7 +4,8 @@
  * and the title, bold while unread. The grey second line comes from rowLine;
  * a done or idle agent with a last reply adds it as a one-line preview. A tap
  * opens the console (phone-only navigation, E2-FR-06) and a long-press opens
- * its actions (E2-FR-08). Memoized: a paneStatus re-renders only its own row.
+ * its actions (E2-FR-08). A request with an answer card adds its line with
+ * inline buttons (E2-FR-23). Memoized: a paneStatus re-renders only its own row.
  */
 import { memo, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -14,6 +15,7 @@ import { PaneIcon } from '../../lib/paneIcon'
 import { useLongPress } from '../../lib/longPress'
 import { useExitStore } from '../../lib/exitState'
 import { rowLine } from '../../lib/statusText'
+import { RowPrompt } from '../prompts/RowPrompt'
 import { t } from '../../lib/i18n'
 
 export interface ConsoleRowProps {
@@ -77,6 +79,7 @@ function ConsoleRowImpl({ pane, workspaceId, status, unread, mounted, viewed, no
             {preview}
           </span>
         )}
+        <RowPrompt paneId={pane.id} status={status} />
       </span>
     </div>
   )

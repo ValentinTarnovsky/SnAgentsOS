@@ -5,8 +5,8 @@
  * (E1-FR-22/30: AI consoles start in Composer, composer autocorrect), Alerts
  * (in-page alerts, E1-FR-40), About (desktop and bundle versions) and This
  * device (Diagnostics, E2-FR-36, and unpair with confirmation). The Key bar
- * row (E2-FR-45) pushes KeyLayoutScreen over this screen. Answer cards
- * (R22-15) add their row here.
+ * row (E2-FR-45) pushes KeyLayoutScreen over this screen. Answers holds the
+ * answer cards switch (promptCards, E2-FR-13; default on).
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -85,6 +85,8 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const themeName = useRemoteStore((s) => s.snapshot?.themeName)
   const inPageAlerts = useRemoteStore((s) => s.inPageAlerts)
   const setInPageAlerts = useRemoteStore((s) => s.setInPageAlerts)
+  const promptCards = useRemoteStore((s) => s.promptCards)
+  const setPromptCards = useRemoteStore((s) => s.setPromptCards)
   const composerDefaultForAgents = useRemoteStore((s) => s.composerDefaultForAgents)
   const composerAutocorrect = useRemoteStore((s) => s.composerAutocorrect)
   const setComposerPref = useRemoteStore((s) => s.setComposerPref)
@@ -167,6 +169,15 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
             hint={t('alerts.inPageHint')}
             checked={inPageAlerts}
             onChange={setInPageAlerts}
+          />
+        </SettingsSection>
+        <SettingsSection id="prompts" title={t('prompt.settingsTitle')}>
+          <PrefToggle
+            pref="promptCards"
+            label={t('prompt.settingsToggle')}
+            hint={t('prompt.settingsHint')}
+            checked={promptCards}
+            onChange={setPromptCards}
           />
         </SettingsSection>
         <SettingsSection id="about" title={t('set.about')}>

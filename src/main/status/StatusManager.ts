@@ -15,6 +15,13 @@ interface PendingEntry {
   toolName?: string
   summary: string
   questions?: RemotePending['questions']
+  /**
+   * E2-FR-48: when the request was registered, and whether user input reached
+   * the pty after it. They live on the entry (not in side maps on the track),
+   * so every delete and clear of `pending` drops them with the request.
+   */
+  requestAt: number
+  invalidated?: boolean
 }
 
 interface PaneTrack {
@@ -63,6 +70,15 @@ const DETAIL_THROTTLE_MS = 500
 // goes out at once through the state / pending signature.
 const IMMEDIATE_KINDS = new Set<AgentEvent['kind']>(['start', 'end', 'request', 'done', 'error', 'unknown'])
 const GENERIC_TOPICS = /^(claude|claude code)$/i
+/**
+ * Input that is only terminal reports, never an answer (E2-FR-48): focus in /
+ * out, SGR and X10 mouse, plus the replies a terminal sends on its own to the
+ * app's queries (cursor position, device attributes, status, mode reports,
+ * kitty keyboard flags, OSC color answers, DECRQSS), which a phone xterm emits while it
+ * parses a replay.
+ */
+// eslint-disable-next-line no-control-regex
+const REPORTS_ONLY_RE = /^(?:\x1b\[[IO]|\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[M[\s\S]{3}|\x1b\[\??\d+;\d+(?:;\d+)?R|\x1b\[[?>=][\d;]*c|\x1b\[\??\d+n|\x1b\[\??[\d;]+\$y|\x1b\[\?\d+u|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[01]\$r[^\x1b]*\x1b\\)+$/
 
 /** Topic after the spinner / stopped glyph of Claude's OSC title, or undefined for generic titles. */
 function titleTopic(title: string): string | undefined {
@@ -141,7 +157,7 @@ export class StatusManager implements PtySink {
       track.pending.clear()
     } else if (stopped && track.activity === 'working') {
       track.activity = 'idle'
-      track.pending.set('title', { reason: 'question', summary: '' })
+      track.pending.set('title', { reason: 'question', summary: '', requestAt: Date.now() })
       this.publish(paneId, track, `title:${track.turn}`, 'action')
       return
     }
@@ -246,8 +262,12 @@ export class StatusManager implements PtySink {
         const id = evt.requestId ?? `fallback:${evt.reason ?? 'question'}`
         key = evt.requestId ? `request:${id}` : `request:${track.turnId}:${id}`
         if (evt.requestId && track.seen.has(key)) return
-        const promoted = !!evt.requestId && track.pending.delete(`fallback:${evt.reason ?? 'question'}`)
-        track.pending.set(id, { reason: evt.reason ?? 'question', toolName: evt.toolName ? clip(sanitize(evt.toolName, true), 80) : undefined, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions })
+        const fallbackId = `fallback:${evt.reason ?? 'question'}`
+        const fallback = evt.requestId ? track.pending.get(fallbackId) : undefined
+        const promoted = !!evt.requestId && track.pending.delete(fallbackId)
+        // E2-FR-48: the promoted request is the prompt the fallback stood for;
+        // one already answered keeps its mark, so no card comes back for it.
+        track.pending.set(id, { reason: evt.reason ?? 'question', toolName: evt.toolName ? clip(sanitize(evt.toolName, true), 80) : undefined, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions, requestAt: fallback?.requestAt ?? Date.now(), ...(fallback?.invalidated ? { invalidated: true } : {}) })
         if (!promoted) notice = 'action'
         break
       }
@@ -288,6 +308,27 @@ export class StatusManager implements PtySink {
         break
     }
     this.publish(evt.paneId, track, key, notice, evt)
+  }
+
+  /**
+   * E2-FR-48: user input written to the pane's live pty after a request takes
+   * that request out of `pending[]` (the answer cards), so a card answered on
+   * the desktop or on another phone goes away and a second tap finds nothing
+   * to answer. `state`, `reason` and `pendingCount` stay: the request lives
+   * until its normal hook (PostToolUse). Terminal reports never count.
+   */
+  onUserInput(ptyId: string, paneId: string, data: string): void {
+    if (this.ptys.get(paneId) !== ptyId) return
+    const track = this.panes.get(paneId)
+    if (!track || track.pending.size === 0 || REPORTS_ONLY_RE.test(data)) return
+    const now = Date.now()
+    let changed = false
+    for (const entry of track.pending.values()) {
+      if (entry.invalidated || entry.requestAt > now) continue
+      entry.invalidated = true
+      changed = true
+    }
+    if (changed) this.publish(paneId, track)
   }
 
   dispose(): void { for (const id of [...this.panes.keys()]) this.clearPane(id); this.ptys.clear() }
@@ -354,7 +395,7 @@ export class StatusManager implements PtySink {
     if (track.tool && (state === 'working' || state === 'action')) evt.activity = clip(track.tool, LIMITS.activity)
     const pending: RemotePending[] = []
     for (const [id, entry] of track.pending) {
-      if (entry.reason === 'failure') continue
+      if (entry.reason === 'failure' || entry.invalidated) continue
       pending.push({ id, kind: entry.reason, ...(entry.toolName ? { toolName: entry.toolName } : {}), summary: entry.summary, ...(entry.questions ? { questions: entry.questions } : {}) })
     }
     if (pending.length) evt.pending = pending
