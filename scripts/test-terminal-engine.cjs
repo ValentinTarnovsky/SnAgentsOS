@@ -633,6 +633,27 @@ async function main() {
       check(pm.headlessMetrics().panes === 0 && typeof res.ptyId === 'string', 'no mirror outlives its pty')
       pm.killAll()
     }
+    for (const mode of ['lazy', 'off']) {
+      // A restart seed over the 256 KB ring: outside 'off' the respawn builds its
+      // mirror from the whole seed (E6-FR-11/19), not from what the ring kept.
+      const { pm, h } = manager({ snapshotMode: mode })
+      const sm = new SessionManager({ ptyManager: pm })
+      pm.addSink(sm)
+      pm.spawn({ paneId: 'w', cols: 200, rows: 24 })
+      const p = phone()
+      sm.handleSub(p.session, 'w')
+      const wide = 'w'.repeat(150) + '\r\n'
+      for (let i = 0; i < 3000; i++) h.procs[0].emit(wide)
+      await flushAll()
+      pm.restart({ paneId: 'w', cols: 200, rows: 24 }, 'reiniciado')
+      const entry = pm.entries.get(pm.ptyIdForPane('w'))
+      const seeded = p.frames.filter(f => f.type === 'replay').at(-1)
+      const dst = client(200, 24); dst.write(seeded.data)
+      const kept = texts(dst.t.buffer.normal).filter(l => l === 'w'.repeat(150)).length
+      if (mode === 'lazy') check(entry.mirror && entry.historyTruncated && kept >= 1990, `lazy: a seed bigger than the ring creates the mirror at the respawn and the phone keeps all of it (${kept} lines)`)
+      else check(!entry.mirror && pm.headlessMetrics().panes === 0 && kept > 0, "off: a seeded respawn still never builds a mirror")
+      pm.killAll()
+    }
     {
       // Phone replay + next out frame across a partial escape (E6-FR-35, through SessionManager).
       const { pm, h } = manager({ snapshotMode: 'auto', persist: true })

@@ -388,13 +388,17 @@ export function useXterm(
     // never settle on a bad fit. -1 forces the first real fit to propagate.
     let lastCols = -1
     let lastRows = -1
+    // True while a reattach snapshot is being parsed (E6-FR-04): it is laid out
+    // for the pty's size, so a resize-observer or rAF fit landing mid-parse
+    // would reflow the rest of it at another width. The write callback refits.
+    let replaying = false
     // Fit only when the container is actually measurable. A display:none or
     // mid-relayout box yields a bogus tiny geometry, that is the "everything
     // crammed into a narrow column / text floating to one side" bug. We also
     // tell the pty only when cols/rows truly change, so an AI CLI redrawing
     // isn't interrupted by a stream of no-op SIGWINCH resizes.
     const safeFit = (): void => {
-      if (!container || container.clientWidth < 8 || container.clientHeight < 8) return
+      if (replaying || !container || container.clientWidth < 8 || container.clientHeight < 8) return
 
       // Re-anchor the viewport across the refit. A resize reflow (a window drag
       // on fractional-DPI Windows nudges rows/cols by a line) makes xterm pull
@@ -811,11 +815,13 @@ export function useXterm(
           // E6-FR-04: the snapshot is laid out for the pty's size, so it is
           // written at that size; once parsed, the forced refit sends the
           // container's real size to the pty even when xterm already had it.
+          replaying = true
           if (existing.cols > 0 && existing.rows > 0 && (existing.cols !== term.cols || existing.rows !== term.rows)) {
             term.resize(existing.cols, existing.rows)
           }
           // The refit runs after the parse, by then bind() has set the pty id.
           const refit = (): void => {
+            replaying = false
             if (disposed) return
             lastCols = -1
             lastRows = -1

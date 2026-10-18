@@ -69,11 +69,13 @@ async function main() {
 
   // 3. Memory per mirror at 120x40 with 2000 and 5000 lines (full scrollback).
   for (const lines of [2000, 5000]) {
+    // The fixture is built (and flattened) before the baseline, so only the mirrors are measured.
+    let fill = ''
+    for (let i = 0; i < lines + 100; i++) fill += `\x1b[38;2;${i % 255};80;160m${'x'.repeat(110)}\x1b[0m\r\n`
+    fill = Buffer.from(fill, 'utf8').toString('utf8')
     global.gc?.()
     const before = process.memoryUsage().heapUsed + process.memoryUsage().arrayBuffers
     const set = Array.from({ length: 4 }, () => new HeadlessMirror({ cols: 120, rows: 40, scrollback: lines, unicode11: true }))
-    let fill = ''
-    for (let i = 0; i < lines + 100; i++) fill += `\x1b[38;2;${i % 255};80;160m${'x'.repeat(110)}\x1b[0m\r\n`
     for (const m of set) m.write(fill)
     global.gc?.()
     const after = process.memoryUsage().heapUsed + process.memoryUsage().arrayBuffers
