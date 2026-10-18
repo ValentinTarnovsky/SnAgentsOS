@@ -1,4 +1,5 @@
 import type { RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
+import type { GitSummary } from '@shared/git-types'
 import { resolveTokens } from '@/themes'
 import { type AppState, useAppStore } from './store'
 import { getPtyId, onPtyRegistryChange } from './ptyRegistry'
@@ -6,10 +7,28 @@ import { useUsageStore } from './usageStore'
 import { useAgentStore } from './agentStore'
 import { paneResumable } from './agentLaunch'
 import { legacySnippets } from '@shared/quickCommands'
+import { useGitStore } from './gitStore'
+import { gitChipEnabled, remoteGitChip, workspaceGitKey } from './gitChip'
+
+function gitField(summary: GitSummary | undefined): Pick<RemoteWorkspaceInfo, 'git'> {
+  const git = remoteGitChip(summary)
+  return git ? { git } : {}
+}
+
+/** Value signature of what the phone sees of the git summaries (workspace chips only). */
+function remoteGitSig(summaries: Record<string, GitSummary>): string {
+  const out: Record<string, unknown> = {}
+  for (const ws of useAppStore.getState().workspaces) {
+    const chip = remoteGitChip(summaries[workspaceGitKey(ws.id)])
+    if (chip) out[ws.id] = chip
+  }
+  return JSON.stringify(out)
+}
 
 /** Build the compact desktop-state mirror pushed to phones. */
 function buildSnapshot(state: AppState): RemoteStateSnapshot {
   const sessions = useAgentStore.getState().sessions
+  const gitSummaries = gitChipEnabled(state.settings) ? useGitStore.getState().summaries : {}
   const workspaces: RemoteWorkspaceInfo[] = state.workspaces.map((ws) => ({
     id: ws.id,
     name: ws.name,
@@ -25,6 +44,8 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
       // D10: the phone shows "Relaunch resuming" / "New chat" only when true.
       ...(paneResumable(pane, ws, state.presets, sessions[pane.id]) ? { resumable: true } : {}),
     })),
+    // E7-FR-09: branch and counts only, never the cwd or the repo root.
+    ...gitField(gitSummaries[workspaceGitKey(ws.id)]),
   }))
   return {
     workspaces,
@@ -57,6 +78,7 @@ function relevant(s: AppState): unknown[] {
     s.settings.fontSize,
     s.settings.terminalUnicode11,
     s.quickCommands,
+    gitChipEnabled(s.settings),
     s.keyButtons,
   ]
 }
@@ -90,6 +112,20 @@ export function startRemoteSnapshotSync(): () => void {
   // Usage lives in its own store; it only mutates when the snapshot changes, so
   // subscribing directly (no reference gate) won't over-fire.
   const unsubUsage = useUsageStore.subscribe(schedule)
+  // Git summaries: gitStore only swaps `summaries` when one changes by value,
+  // so a quiet poll never pushes a new state to the phone (E7-FR-09).
+  // Only the phone fields of workspace keys count: a staged-only change, a
+  // pane worktree or `updatedAt` never reach the phone, so they push nothing.
+  let prevGit = useGitStore.getState().summaries
+  let prevGitSig = remoteGitSig(prevGit)
+  const unsubGit = useGitStore.subscribe((s) => {
+    if (s.summaries === prevGit) return
+    prevGit = s.summaries
+    const sig = remoteGitSig(s.summaries)
+    if (sig === prevGitSig) return
+    prevGitSig = sig
+    schedule()
+  })
   // A session becoming (un)resumable changes `resumable`.
   let prevSessions = useAgentStore.getState().sessions
   const unsubAgents = useAgentStore.subscribe((s) => {
@@ -108,5 +144,6 @@ export function startRemoteSnapshotSync(): () => void {
     unsubPty()
     unsubUsage()
     unsubAgents()
+    unsubGit()
   }
 }

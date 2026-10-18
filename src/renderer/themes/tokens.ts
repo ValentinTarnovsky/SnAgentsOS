@@ -2,8 +2,9 @@ import type { ThemeTokenKey } from '@shared/types'
 
 /**
  * Maps the UI-chrome tokens to the Tailwind `@theme` CSS custom properties
- * defined in globals.css. Terminal/ansi tokens are not CSS vars, they feed
- * the xterm palette directly (see applyTheme/buildXtermTheme).
+ * defined in globals.css. Terminal/ansi tokens feed the xterm palette directly
+ * (see applyTheme/buildXtermTheme); only ansi green and red are also CSS vars,
+ * for the git chip and diff counts (E7). They stay out of UI_TOKENS.
  */
 export const CSS_VAR_BY_TOKEN: Partial<Record<ThemeTokenKey, string>> = {
   'bg-primary': '--color-bg-primary',
@@ -15,6 +16,8 @@ export const CSS_VAR_BY_TOKEN: Partial<Record<ThemeTokenKey, string>> = {
   accent: '--color-accent-violet',
   'accent-2': '--color-accent-purple',
   'accent-3': '--color-accent-blue',
+  'ansi-green': '--color-ansi-green',
+  'ansi-red': '--color-ansi-red',
 }
 
 /** UI-chrome tokens exposed in the custom-color editor (Settings → Appearance). */

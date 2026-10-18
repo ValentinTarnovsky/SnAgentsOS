@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
-import { Activity, Bell, Bot, Database, DownloadCloud, FileText, Gauge, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, type LucideIcon } from 'lucide-react'
+import { Activity, Bell, Bot, Database, DownloadCloud, FileText, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -34,6 +34,7 @@ import { AiUsageSection } from './sections/AiUsageSection'
 import { RemoteSection } from './sections/RemoteSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
+import { GitSection } from './sections/GitSection'
 
 const ICONS: Record<CategoryId, LucideIcon> = {
   terminal: TerminalSquare,
@@ -49,6 +50,7 @@ const ICONS: Record<CategoryId, LucideIcon> = {
   aiusage: Gauge,
   usage: Activity,
   remote: Smartphone,
+  git: GitBranch,
   updates: DownloadCloud,
   about: Info,
 }
@@ -67,6 +69,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   aiusage: AiUsageSection,
   usage: UsageSection,
   remote: RemoteSection,
+  git: GitSection,
   updates: UpdatesSection,
   about: AboutSection,
 }

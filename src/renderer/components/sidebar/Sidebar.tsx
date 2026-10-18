@@ -34,6 +34,9 @@ import { sidebarOrder } from '@/lib/sidebarOrder'
 import { useLang, type MessageKey } from '@/i18n'
 import { AgentRows } from '@/components/sidebar/AgentRows'
 import { ExitedDot, allExited, exitedLines } from '@/components/sidebar/ExitedDot'
+import { SidebarGitSuffix } from '@/components/git/SidebarGitSuffix'
+import { useGitStore } from '@/lib/gitStore'
+import { compactChip, gitChipEnabled, workspaceGitKey } from '@/lib/gitChip'
 
 interface MenuState {
   x: number
@@ -154,6 +157,9 @@ export function Sidebar() {
   const sessions = useAgentStore((s) => s.sessions)
   // Consoles whose shell ended on its own (E6-FR-38).
   const paneExit = useAppStore((s) => s.paneExit)
+  // Git chip on the second line (E7-FR-08), hidden with settings.gitChip off.
+  const gitOn = useAppStore((s) => gitChipEnabled(s.settings))
+  const gitSummaries = useGitStore((s) => s.summaries)
   // Agent rows (E5-FR-19): expanded sidebar only, unless turned off.
   const rowsOn = !sidebarCollapsed && agentSettings?.sidebarAgentRows !== false
   const navInput = navInputFrom(
@@ -278,6 +284,8 @@ export function Sidebar() {
           const exitedDot = !status && allExited(w.panes, paneExit)
           const exitedLabel = exited.join('\n')
           const agents = rowsOn ? workspaceAgents(w, navInput) : []
+          const git = gitOn ? gitSummaries[workspaceGitKey(w.id)] : undefined
+          const gitLine = git ? compactChip(git) : null
           return (
             <div key={w.id}>
               <div
@@ -311,7 +319,7 @@ export function Sidebar() {
                   </div>
                 ) : (
                   <Tooltip
-                    label={sidebarCollapsed ? (status ? <WorkspaceTip ws={w} paneStatus={paneStatus} showName extra={exited} /> : w.name) : ''}
+                    label={sidebarCollapsed ? (status ? <WorkspaceTip ws={w} paneStatus={paneStatus} showName extra={gitLine ? [gitLine, ...exited] : exited} /> : gitLine ? <span className="flex flex-col"><span>{w.name}</span><span className="font-normal text-text-secondary">{gitLine}</span></span> : w.name) : ''}
                     side="right"
                     delay={sidebarCollapsed && status ? 200 : undefined}
                     className="min-w-0 flex-1"
@@ -353,10 +361,13 @@ export function Sidebar() {
                             <Star size={11} className="shrink-0 fill-amber-400 text-amber-400" />
                           )}
                         </span>
-                        <span className="block truncate text-[11px] text-text-secondary">
-                          {w.panes.length === 1
-                            ? t('sidebar.consoleOne', { count: w.panes.length })
-                            : t('sidebar.consoleMany', { count: w.panes.length })}
+                        <span className="flex min-w-0 text-[11px] text-text-secondary">
+                          <span className="max-w-full shrink-0 truncate">
+                            {w.panes.length === 1
+                              ? t('sidebar.consoleOne', { count: w.panes.length })
+                              : t('sidebar.consoleMany', { count: w.panes.length })}
+                          </span>
+                          {git && <SidebarGitSuffix summary={git} />}
                         </span>
                       </span>
                     </button>

@@ -17,6 +17,7 @@ import { registerWindowIpc, wireWindowMaximizeEvents } from './ipc/registerWindo
 import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
+import { registerGitIpc } from './ipc/registerGitIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
 import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
@@ -352,6 +353,11 @@ async function bootstrap(): Promise<void> {
   registerUsageIpc({
     getSender: () => mainWindow?.webContents ?? null,
     getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
+  })
+  // Git chip (E7-FR-05..10); settings.gitChip is a schema 12 key, absent = on.
+  registerGitIpc({
+    getSender: () => mainWindow?.webContents ?? null,
+    initialGitChip: (configStore.load()?.settings as { gitChip?: unknown } | undefined)?.gitChip !== false,
   })
   registerRemoteIpc(remoteManager)
   registerLegacyIpc({

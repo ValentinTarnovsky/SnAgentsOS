@@ -149,8 +149,11 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v2.2 | `app:openPath` | main->renderer | `{ path }` (second-instance `--open`) | E5 |
 | v2.2 | `system:setExplorerMenu` | invoke | `boolean -> boolean` | E5 |
 | v2.2 | `pty:scrollbackLoad` | invoke | `paneId -> string \| null` | E5 |
-| v2.2 | `git:setWatch` | send | `cwds: string[]` | E5 |
-| v2.2 | `git:update` | main->renderer | `{ cwd, summary }` | E5 |
+| v2.2 | `git:setWatch` | send | `GitTarget[]` = `{ key, cwd, workspaceId, paneId?, active }` (enmienda R22-10: la clave `ws:<id>` / `pane:<id>` y `active` acompanan al cwd) | E5 |
+| v2.2 | `git:update` | main->renderer | `{ key, cwd, summary: GitSummary \| null, error? }`, solo cuando cambia por valor | E5 |
+| v2.2 | `git:info` | invoke | `{ force? } -> GitInfoRes` (enmienda D6) | E5 |
+| v2.2 | `git:setConfig` | send | `{ gitChip: boolean }` (enmienda D6) | E5 |
+| v2.2 | `git:refresh` | send | `{ keys?, reason?: 'manual' \| 'agent' }` (enmienda D6) | E5 |
 | v2.2 | `git:status` | invoke | `cwd -> GitStatusDetail` | E5 |
 | v2.2 | `git:fileDiff` | invoke | `{ cwd, path, staged } -> { diff, truncated }` | E5 |
 | v2.2 | `update:check` (existente) | invoke | `UpdateInfo` + `newerCount: number` | E5 |
