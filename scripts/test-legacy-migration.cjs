@@ -1457,10 +1457,11 @@ async function reviewChecks() {
     const short = shortPath(legacy)
     if (short) check((await S.safeRemoveTree(legacy, { ...guardFor(p), forbiddenTree: [short] }, o)).skipped === 'guard' && fs.existsSync(path.join(legacy, 'config.json')), 'review guard: userData as an 8.3 short name is honored')
     // End to end: the cleanup keeps the folder and its data.
-    seedLegacy(legacy)
+    seedLegacy(legacy); write(path.join(legacy, 'notes.txt'), 'n')
     check(migrate(p).status === 'committed', 'review guard: fixture migrated')
     await I.runCleanup(cleanupEnv(p, { guard: { ...guardFor(p), forbiddenTree: [p.targetDir, alias] } }))
     check(marker(p).cleanup.L01.state === 'skipped' && marker(p).cleanup.L01.reason === 'guard' && fs.existsSync(path.join(legacy, 'config.json')), 'review guard: L01 skipped: guard with userData through a junction')
+    check(!zipOf(p).entries.some(e => e.name.startsWith('other/')), 'review guard: a guarded folder is refused before any backup work')
   }
   // The data folder reached through a junction to the 1.x folder: never migrated into itself.
   {
@@ -1676,6 +1677,27 @@ async function reviewChecks() {
     await I.runCleanup(cleanupEnv(pp, { mode: 'portable', portableDir: usb, guard: guardFor(pp, { contain: [usb], allowedRoots: [p.roots.temp] }), exe: { execPath: 'x', portableExeFile: () => oldExe, setPortableExeFile() { throw new Error('must not rename') } } }))
     const m = JSON.parse(fs.readFileSync(path.join(t, 'legacy-migration.json'), 'utf8'))
     check(m.cleanup.L17.state === 'skipped' && m.cleanup.L17.reason === 'guard' && fs.existsSync(oldExe) && m.cleanup.L02.reason === 'guard' && fs.existsSync(l), 'review L17: outside the dev sandbox nothing is renamed or deleted')
+  }
+  // A junction inside backups/ to an outside folder: removed as a link, never zipped or followed.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p)
+    const outside = path.join(p.base, 'outside-backups'); write(path.join(outside, 'precious.json'), 'outside')
+    fs.symlinkSync(outside, path.join(legacyDir, 'backups', 'linked-dir'), linkType)
+    migrate(p)
+    await I.runCleanup(cleanupEnv(p))
+    check(marker(p).cleanup.L01.state === 'done' && fs.readFileSync(path.join(outside, 'precious.json'), 'utf8') === 'outside' && !zipOf(p).entries.some(e => e.name.includes('linked-dir')), 'review link: a junction in backups/ is unlinked, its target intact and not zipped')
+  }
+  // The portable exe living inside %APPDATA%\snmulticc: L03 never deletes its own folder.
+  {
+    const p = fakeProfile()
+    const roam = path.join(p.roots.appData, 'snmulticc'); write(path.join(roam, 'Cache', 'x'), 'c')
+    const exeDir = path.join(roam, 'tools'); write(path.join(exeDir, 'SnAgentsOS-portable.exe'), 'exe')
+    const t = path.join(exeDir, 'snagentsos-data')
+    pipe(L, { legacyDir: null, targetDir: t, mode: 'portable' })
+    const pp = { ...p, targetDir: t }
+    await I.runCleanup(cleanupEnv(pp, { mode: 'portable', portableDir: exeDir, guard: guardFor(pp, { contain: [exeDir] }) }))
+    const m = JSON.parse(fs.readFileSync(path.join(t, 'legacy-migration.json'), 'utf8'))
+    check(m.cleanup.L03.state === 'skipped' && m.cleanup.L03.reason === 'guard' && fs.existsSync(path.join(exeDir, 'SnAgentsOS-portable.exe')) && fs.existsSync(path.join(t, 'legacy-migration.json')), 'review portable: an exe folder inside %APPDATA%\\snmulticc keeps it (skipped: guard)')
   }
   // L14: a %TEMP%\SnMultiCC that is not the unpacked app (a clone of the old repo) is not deleted.
   {
