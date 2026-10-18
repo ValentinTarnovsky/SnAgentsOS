@@ -86,7 +86,29 @@ body {
   will-change: background-position;
 }
 
+/* Settings deep link (E4-FR-27): an accent ring on the target row for 1200 ms.
+   With reduced motion the global rule below cuts the animation, so the ring
+   stays static until the class is removed. */
+@keyframes setting-flash {
+  0%,
+  60% {
+    outline-color: var(--color-accent-violet);
+  }
+  100% {
+    outline-color: color-mix(in srgb, var(--color-accent-violet) 0%, transparent);
+  }
+}
+
+[data-setting-flash] {
+  outline: 2px solid var(--color-accent-violet);
+  outline-offset: 4px;
+  animation: setting-flash 1.2s ease-out forwards;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  [data-setting-flash] {
+    animation: none !important;
+  }
   *,
   *::before,
   *::after {

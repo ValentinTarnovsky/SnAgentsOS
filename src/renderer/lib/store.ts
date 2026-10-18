@@ -138,6 +138,12 @@ export interface WorkspaceDraft {
   setupId?: string
 }
 
+/** Prefill for the new-workspace wizard (setWizardOpen(true, prefill)). */
+export interface WizardPrefill {
+  cwd?: string
+  name?: string
+}
+
 export interface AppState {
   workspaces: Workspace[]
   activeWorkspaceId: string | null
@@ -152,7 +158,13 @@ export interface AppState {
   settingsOpen: boolean
   /** Deep-link target for the settings modal: the category to open on. */
   settingsCategory: string | null
+  /** Settings search text (E4-FR-26); cleared on close and on every deep link. */
+  settingsQuery: string
+  /** Row to scroll to and ring once its category renders ('notifications.sound', E4-FR-27). */
+  settingsAnchor: string | null
   wizardOpen: boolean
+  /** Values the wizard opens with (cwd/name); null = empty draft. */
+  wizardPrefill: WizardPrefill | null
   paletteOpen: boolean
   globalPromptOpen: boolean
   /** workspaceId -> maximized paneId (transient; never persisted). */
@@ -247,9 +259,14 @@ export interface AppState {
 
   updateSettings: (patch: Partial<Settings>) => void
   setSettingsOpen: (open: boolean) => void
-  /** Open settings, optionally deep-linking to a category (e.g. 'remote'). */
-  openSettings: (category?: string) => void
-  setWizardOpen: (open: boolean) => void
+  /**
+   * Open settings, optionally deep-linking to a category ('remote') or to a
+   * row inside it ('notifications#sound', E4-FR-27).
+   */
+  openSettings: (target?: string) => void
+  setSettingsQuery: (query: string) => void
+  setSettingsAnchor: (anchor: string | null) => void
+  setWizardOpen: (open: boolean, prefill?: WizardPrefill) => void
   setPaletteOpen: (open: boolean) => void
   setGlobalPromptOpen: (open: boolean) => void
 
@@ -307,7 +324,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   settings: DEFAULT_SETTINGS,
   settingsOpen: false,
   settingsCategory: null,
+  settingsQuery: '',
+  settingsAnchor: null,
   wizardOpen: false,
+  wizardPrefill: null,
   paletteOpen: false,
   globalPromptOpen: false,
   maximized: {},
@@ -785,9 +805,21 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
 
-  setSettingsOpen: (open) => set({ settingsOpen: open }),
+  setSettingsOpen: (open) => set(open ? { settingsOpen: true } : { settingsOpen: false, settingsQuery: '', settingsAnchor: null }),
 
-  openSettings: (category) => set({ settingsOpen: true, settingsCategory: category ?? null }),
+  openSettings: (target) => {
+    const [category, row] = (target ?? '').split('#', 2)
+    set({
+      settingsOpen: true,
+      settingsCategory: target ?? null,
+      settingsQuery: '',
+      settingsAnchor: category && row ? `${category}.${row}` : null,
+    })
+  },
+
+  setSettingsQuery: (query) => set({ settingsQuery: query }),
+
+  setSettingsAnchor: (anchor) => set({ settingsAnchor: anchor }),
 
   setPaneStatus: (evt) =>
     set((s) => {
@@ -867,7 +899,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (next !== s.mountedWorkspaces) set({ mountedWorkspaces: next })
   },
 
-  setWizardOpen: (open) => set({ wizardOpen: open }),
+  setWizardOpen: (open, prefill) => set({ wizardOpen: open, wizardPrefill: open ? (prefill ?? null) : null }),
 
   setPaletteOpen: (open) => set({ paletteOpen: open }),
 

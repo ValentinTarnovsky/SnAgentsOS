@@ -11,7 +11,7 @@ export function TerminalSection() {
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <SettingRow title={t('settings.shellWin')}>
+        <SettingRow searchId="terminal.shellWin" title={t('settings.shellWin')}>
           <input
             className={cn(inputCls, 'font-mono')}
             placeholder="powershell.exe"
@@ -23,7 +23,7 @@ export function TerminalSection() {
             }
           />
         </SettingRow>
-        <SettingRow title={t('settings.shellMac')}>
+        <SettingRow searchId="terminal.shellMac" title={t('settings.shellMac')}>
           <input
             className={cn(inputCls, 'font-mono')}
             placeholder="/bin/zsh"
@@ -35,7 +35,7 @@ export function TerminalSection() {
             }
           />
         </SettingRow>
-        <SettingRow title={t('settings.shellLinux')}>
+        <SettingRow searchId="terminal.shellLinux" title={t('settings.shellLinux')}>
           <input
             className={cn(inputCls, 'font-mono')}
             placeholder="/bin/bash"
@@ -49,7 +49,7 @@ export function TerminalSection() {
         </SettingRow>
       </div>
 
-      <SettingRow title={t('settings.fontFamily')}>
+      <SettingRow searchId="terminal.fontFamily" title={t('settings.fontFamily')}>
         <input
           className={cn(inputCls, 'font-mono')}
           value={settings.fontFamily}
@@ -58,7 +58,7 @@ export function TerminalSection() {
       </SettingRow>
 
       <div className="grid grid-cols-2 gap-4">
-        <SettingRow title={t('settings.fontSize')}>
+        <SettingRow searchId="terminal.fontSize" title={t('settings.fontSize')}>
           <input
             type="number"
             min={8}
@@ -68,7 +68,7 @@ export function TerminalSection() {
             onChange={(e) => updateSettings({ fontSize: Number(e.target.value) || 13 })}
           />
         </SettingRow>
-        <SettingRow title={t('settings.scrollback')}>
+        <SettingRow searchId="terminal.scrollback" title={t('settings.scrollback')}>
           <input
             type="number"
             min={500}
@@ -85,11 +85,12 @@ export function TerminalSection() {
       <ToggleRow
         checked={settings.infiniteScrollback}
         onChange={(v) => updateSettings({ infiniteScrollback: v })}
+        searchId="terminal.infiniteScrollback"
         title={t('settings.infiniteScrollback')}
         description={t('settings.infiniteScrollbackHint')}
       />
 
-      <SettingRow title={t('settings.renderer')} description={t('settings.rendererHint')}>
+      <SettingRow searchId="terminal.renderer" title={t('settings.renderer')} description={t('settings.rendererHint')}>
         <select
           className={inputCls}
           value={settings.terminalRenderer}
@@ -105,6 +106,7 @@ export function TerminalSection() {
       <ToggleRow
         checked={settings.terminalSelectionOverride}
         onChange={(v) => updateSettings({ terminalSelectionOverride: v })}
+        searchId="terminal.selectionOverride"
         title={t('settings.selectionOverride')}
         description={t('settings.selectionOverrideHint')}
       />
@@ -112,6 +114,7 @@ export function TerminalSection() {
       <ToggleRow
         checked={settings.terminalUnicode11}
         onChange={(v) => updateSettings({ terminalUnicode11: v })}
+        searchId="terminal.unicode11"
         title={t('settings.unicode11')}
         description={t('settings.unicode11Hint')}
       />
@@ -119,6 +122,7 @@ export function TerminalSection() {
       <ToggleRow
         checked={settings.terminalAgentEndChip !== false}
         onChange={(v) => updateSettings({ terminalAgentEndChip: v })}
+        searchId="terminal.agentEndChip"
         title={t('settings.agentEndChip')}
         description={t('settings.agentEndChipHint')}
       />

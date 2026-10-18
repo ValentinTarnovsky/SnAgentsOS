@@ -116,6 +116,7 @@ export function UpdatesSection() {
         <ToggleRow
           checked={settings.autoCheckUpdates}
           onChange={(v) => updateSettings({ autoCheckUpdates: v })}
+          searchId="updates.autoCheck"
           title={t('update.autoCheck')}
           description={t('update.autoCheckHint')}
         />

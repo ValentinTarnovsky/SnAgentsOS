@@ -39,7 +39,7 @@ function BehaviorBlock() {
       <h4 id="agents-behavior" className={headingCls}>
         {t('settings.agents.behavior')}
       </h4>
-      <SettingRow title={t('settings.agents.resume')} description={t('settings.agents.resumeHint')}>
+      <SettingRow searchId="agents.resume" title={t('settings.agents.resume')} description={t('settings.agents.resumeHint')}>
         <div role="radiogroup" aria-label={t('settings.agents.resume')} className="flex flex-wrap gap-2">
           {RESUME_POLICIES.map(({ policy, key }) => (
             <button
@@ -61,7 +61,7 @@ function BehaviorBlock() {
           ))}
         </div>
       </SettingRow>
-      <SettingRow title={t('settings.agents.awake')} description={t('settings.agents.awakeHint')}>
+      <SettingRow searchId="agents.awake" title={t('settings.agents.awake')} description={t('settings.agents.awakeHint')}>
         <div role="radiogroup" aria-label={t('settings.agents.awake')} className="flex flex-wrap gap-2">
           {AWAKE_MODES.map(({ mode, key }) => (
             <button
@@ -86,6 +86,7 @@ function BehaviorBlock() {
       <ToggleRow
         checked={agents.awakeDisplay}
         onChange={(v) => updateSettings({ agents: { ...agents, awakeDisplay: v } })}
+        searchId="agents.awakeDisplay"
         title={t('settings.agents.awakeDisplay')}
         description={t('settings.agents.awakeDisplayHint')}
         disabled={awakeMode === 'never'}
@@ -93,18 +94,21 @@ function BehaviorBlock() {
       <ToggleRow
         checked={agents.sidebarAgentRows}
         onChange={(v) => updateSettings({ agents: { ...agents, sidebarAgentRows: v } })}
+        searchId="agents.rows"
         title={t('settings.agents.rows')}
         description={t('settings.agents.rowsHint')}
       />
       <ToggleRow
         checked={agents.topicAsTitle}
         onChange={(v) => updateSettings({ agents: { ...agents, topicAsTitle: v } })}
+        searchId="agents.topicAsTitle"
         title={t('settings.agents.topicAsTitle')}
         description={t('settings.agents.topicAsTitleHint')}
       />
       <ToggleRow
         checked={agents.ctrlDigitFocus}
         onChange={(v) => updateSettings({ agents: { ...agents, ctrlDigitFocus: v } })}
+        searchId="agents.ctrlDigit"
         title={t('settings.agents.ctrlDigit')}
         description={t('settings.agents.ctrlDigitHint')}
       />
