@@ -3,7 +3,7 @@
  * from the Home header. Sections: Appearance (desktop theme, text size
  * presets of E2-FR-34), Input
  * (E1-FR-22/30: AI consoles start in Composer, composer autocorrect), Alerts
- * (in-page alerts, E1-FR-40), About (desktop and bundle versions) and This
+ * (E2-FR-44: on-screen alerts, vibrate, turn end), About (desktop and bundle versions) and This
  * device (Diagnostics, E2-FR-36, and unpair with confirmation). The Key bar
  * row (E2-FR-45) pushes KeyLayoutScreen over this screen. Answers holds the
  * answer cards switch (promptCards, E2-FR-13; default on).
@@ -32,6 +32,11 @@ const THEME_KEY: Record<(typeof THEMES)[number], MobileMessageKey> = {
   nord: 'theme.nord',
   dracula: 'theme.dracula',
   solarized: 'theme.solarized',
+}
+
+/** iOS Safari has no navigator.vibrate: the Vibrate row hides there (E2-FR-44). */
+function canVibrate(): boolean {
+  return typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function'
 }
 
 export function SettingsSection({ id, title, children }: { id: string; title: string; children: ReactNode }): ReactNode {
@@ -85,6 +90,9 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const themeName = useRemoteStore((s) => s.snapshot?.themeName)
   const inPageAlerts = useRemoteStore((s) => s.inPageAlerts)
   const setInPageAlerts = useRemoteStore((s) => s.setInPageAlerts)
+  const alertVibrate = useRemoteStore((s) => s.alertVibrate)
+  const alertDone = useRemoteStore((s) => s.alertDone)
+  const setPagePref = useRemoteStore((s) => s.setPagePref)
   const promptCards = useRemoteStore((s) => s.promptCards)
   const setPromptCards = useRemoteStore((s) => s.setPromptCards)
   const composerDefaultForAgents = useRemoteStore((s) => s.composerDefaultForAgents)
@@ -163,13 +171,31 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
           />
         </SettingsSection>
         <SettingsSection id="alerts" title={t('alerts.title')}>
-          <PrefToggle
-            pref="inPageAlerts"
-            label={t('alerts.inPage')}
-            hint={t('alerts.inPageHint')}
-            checked={inPageAlerts}
-            onChange={setInPageAlerts}
-          />
+          <div className="flex flex-col gap-2">
+            <PrefToggle
+              pref="inPageAlerts"
+              label={t('alerts.inPage')}
+              hint={t('alerts.inPageHint')}
+              checked={inPageAlerts}
+              onChange={setInPageAlerts}
+            />
+            {canVibrate() && (
+              <PrefToggle
+                pref="vibrate"
+                label={t('alerts.vibrate')}
+                hint={t('alerts.vibrateHint')}
+                checked={alertVibrate}
+                onChange={(on) => setPagePref('vibrate', on)}
+              />
+            )}
+            <PrefToggle
+              pref="toastDone"
+              label={t('alerts.done')}
+              hint={t('alerts.doneHint')}
+              checked={alertDone}
+              onChange={(on) => setPagePref('toastDone', on)}
+            />
+          </div>
         </SettingsSection>
         <SettingsSection id="prompts" title={t('prompt.settingsTitle')}>
           <PrefToggle

@@ -21,6 +21,9 @@ export interface StoredDevice {
   secret: string
   createdAt: number
   lastSeen: number
+  /** IP literal of the Host this phone last authenticated through (E2-FR-42), never loopback. */
+  lastHost?: string
+  lastHostAt?: number
 }
 
 const deviceSchema = z.object({
@@ -29,6 +32,9 @@ const deviceSchema = z.object({
   secret: z.string().min(1),
   createdAt: z.number(),
   lastSeen: z.number(),
+  // E2-FR-42: optional, so a file written before them still loads.
+  lastHost: z.string().max(64).optional(),
+  lastHostAt: z.number().optional(),
 })
 
 /** Exported for the legacy migration, which verifies the copied file with it (E0-FR-27). */
@@ -140,6 +146,30 @@ export class DeviceRegistry {
     if (now - last < LAST_SEEN_PERSIST_MS) return
     this.lastPersistedSeen.set(id, now)
     this.persist()
+  }
+
+  /**
+   * Remember the host a phone just authenticated through (E2-FR-42). Persists
+   * only when the host changes, without the lastSeen throttle: the deep link
+   * of the next push must point at the address that works now.
+   */
+  setLastHost(id: string, host: string, now: number = Date.now()): void {
+    this.ensureLoaded()
+    const device = this.devices.get(id)
+    if (!device || !host) return
+    const changed = device.lastHost !== host
+    device.lastHost = host
+    device.lastHostAt = now
+    if (changed) this.persist()
+  }
+
+  /** Every remembered host, most recent first (RemoteManager.deepLinkBase). */
+  lastHosts(): Array<{ host: string; at: number }> {
+    this.ensureLoaded()
+    return [...this.devices.values()]
+      .filter((d): d is StoredDevice & { lastHost: string } => typeof d.lastHost === 'string' && d.lastHost.length > 0)
+      .map((d) => ({ host: d.lastHost, at: d.lastHostAt ?? 0 }))
+      .sort((a, b) => b.at - a.at)
   }
 
   /** Device list safe for the renderer: no secrets, live-connection flag folded in. */

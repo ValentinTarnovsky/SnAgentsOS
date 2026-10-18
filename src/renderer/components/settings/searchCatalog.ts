@@ -152,6 +152,10 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('notifications.discord', 'notif.discord.title', 'notif.discord.desc', { keywords: ['discord', 'webhook'], toggle: { path: 'notifications.discord.enabled' } }),
   e('notifications.discordAction', 'notif.action', undefined, { groupKey: 'notif.discord.title', keywords: ['discord', 'webhook'], toggle: { path: 'notifications.discord.notifyAction', disabledUnless: ['notifications.discord.enabled'] } }),
   e('notifications.discordDone', 'notif.done', undefined, { groupKey: 'notif.discord.title', keywords: ['discord', 'webhook'], toggle: { path: 'notifications.discord.notifyDone', disabledUnless: ['notifications.discord.enabled'] } }),
+  e('notifications.ntfy', 'notif.ntfy.title', 'notif.ntfy.desc', { keywords: ['ntfy', 'push', 'phone', 'celular', 'movil', 'topic'], toggle: { path: 'notifications.ntfy.enabled' } }),
+  e('notifications.ntfyAction', 'notif.action', undefined, { groupKey: 'notif.ntfy.title', keywords: ['ntfy', 'push'], toggle: { path: 'notifications.ntfy.notifyAction', disabledUnless: ['notifications.ntfy.enabled'] } }),
+  e('notifications.ntfyDone', 'notif.done', undefined, { groupKey: 'notif.ntfy.title', keywords: ['ntfy', 'push'], toggle: { path: 'notifications.ntfy.notifyDone', disabledUnless: ['notifications.ntfy.enabled'] } }),
+  e('notifications.onlyWhenAway', 'notif.away.title', 'notif.away.desc', { keywords: ['away', 'ausente', 'idle', 'inactivo', 'locked', 'bloqueada', 'discord', 'ntfy'], toggle: { path: 'notifications.onlyWhenAway' } }),
 
   // Data
   e('data.backup', 'settings.search.data', 'settings.search.dataHint', { summary: true, keywords: ['data', 'datos', 'export', 'exportar', 'import', 'importar', 'backup', 'respaldo'] }),

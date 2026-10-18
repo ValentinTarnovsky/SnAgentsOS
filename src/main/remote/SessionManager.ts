@@ -51,6 +51,12 @@ const CLOSE_POLICY = 1008
 /** Normal / going-away close codes. */
 const CLOSE_NORMAL = 1000
 const CLOSE_GOING_AWAY = 1001
+/**
+ * E2-FR-52: a phone counts as watching a pane while its page reported
+ * visible and the socket spoke within this window (pings every 25s keep a
+ * visible page inside it; a frozen iOS page falls out on its own).
+ */
+export const VIEWED_FRESH_MS = 30 * 1000
 
 /** Distributive Omit so callers of send() skip the constant `v` field. */
 type ServerMsgNoV<T = RemoteServerMsg> = T extends unknown ? Omit<T, 'v'> : never
@@ -63,6 +69,10 @@ export type DeliveredPairResult =
 interface Session {
   ws: WebSocket
   ip: string
+  /** IP literal of the validated Host header the phone dialed (E2-FR-42). */
+  host: string
+  /** Last `visibility` the page reported (E2-FR-52); false until it says so. */
+  visible: boolean
   authed: boolean
   deviceId: string | null
   /** Nonce the client must HMAC (single-use per socket). */
@@ -139,7 +149,7 @@ export class SessionManager implements PtySink {
   // --- Connection intake ----------------------------------------------------
 
   /** Adopt a freshly upgraded socket (already Host/Origin validated by server). */
-  handleSocket(ws: WebSocket, ip: string): void {
+  handleSocket(ws: WebSocket, ip: string, host = ''): void {
     const unauthed = this.unauthedByIp.get(ip) ?? 0
     if (unauthed >= MAX_UNAUTHED_PER_IP) {
       try {
@@ -154,6 +164,8 @@ export class SessionManager implements PtySink {
     const session: Session = {
       ws,
       ip,
+      host,
+      visible: false,
       authed: false,
       deviceId: null,
       serverNonce: null,
@@ -240,6 +252,9 @@ export class SessionManager implements PtySink {
         return this.handleInput(msg.paneId, msg.data)
       case 'ctl':
         return void this.handleCtl(session, msg.id, msg.action)
+      case 'visibility':
+        session.visible = msg.visible
+        return
       default:
         return this.send(session, { type: 'err', code: 'unauthorized' })
     }
@@ -321,6 +336,8 @@ export class SessionManager implements PtySink {
     this.clearHandshakeTimer(session)
     this.uncountUnauthed(session)
     this.deps.registry.touchLastSeen(deviceId)
+    // E2-FR-42: the deep link of a push points at the host phones last used.
+    if (session.host && !session.host.startsWith('127.')) this.deps.registry.setLastHost(deviceId, session.host)
     this.deps.onConnectionsChanged()
   }
 
@@ -477,6 +494,17 @@ export class SessionManager implements PtySink {
     let n = 0
     for (const session of this.sessions) if (session.authed) n += 1
     return n
+  }
+
+  /**
+   * E2-FR-52: an authenticated phone is subscribed to the pane with its page
+   * visible, and spoke within VIEWED_FRESH_MS. ntfy stays quiet for it.
+   */
+  isPaneViewed(paneId: string, now: number = Date.now()): boolean {
+    for (const session of this.paneSubs.get(paneId) ?? []) {
+      if (session.authed && session.visible && now - session.lastSeen <= VIEWED_FRESH_MS) return true
+    }
+    return false
   }
 
   connectedDeviceIds(): Set<string> {

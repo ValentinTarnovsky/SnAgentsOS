@@ -37,6 +37,9 @@ import { HookServer } from './status/HookServer'
 import { CodexBridge } from './status/CodexBridge'
 import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
+import { NtfyNotifier } from './status/NtfyNotifier'
+import { createNoticeRouter, type NoticeRouter } from './status/noticeRouter'
+import { isDesktopAway } from './status/desktopAway'
 import { join } from 'path'
 import { homedir } from 'os'
 import { ensureTray, destroyTray, hasTray } from './tray'
@@ -84,11 +87,23 @@ const remoteManager = new RemoteManager(
 )
 const hookServer = new HookServer()
 const discordNotifier = new DiscordNotifier()
+const ntfyNotifier = new NtfyNotifier(undefined, undefined, () => configStore.load())
+// Lazy closure: the router is built right below StatusManager (E2-FR-40..42, 52).
+let noticeRouter: NoticeRouter | null = null
 const statusManager = new StatusManager(
   () => mainWindow,
   () => configStore.load(),
-  notice => discordNotifier.notify(notice, configStore.load()),
+  notice => noticeRouter?.route(notice),
 )
+noticeRouter = createNoticeRouter({
+  discord: discordNotifier,
+  ntfy: ntfyNotifier,
+  loadConfig: () => configStore.load(),
+  // powerMonitor needs app ready; a notice before that reads unknown and delivers.
+  isAway: () => (app.isReady() ? isDesktopAway(powerMonitor) : undefined),
+  isPaneViewed: (paneId) => remoteManager.isPaneViewed(paneId),
+  deepLinkBase: () => remoteManager.deepLinkBase(),
+})
 const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event))
 ptyManager.addSink(statusManager)
 // Agent status reaches phones straight from main (E1-FR-03), not via the renderer.
@@ -504,7 +519,7 @@ async function bootstrap(): Promise<void> {
     getSender: () => mainWindow?.webContents ?? null,
     remoteEnabled: () => configStore.load()?.settings?.remote?.enabled === true,
   })
-  statusIpc = registerStatusIpc(statusManager, hookServer, codexBridge, discordNotifier)
+  statusIpc = registerStatusIpc(statusManager, hookServer, codexBridge, discordNotifier, ntfyNotifier)
   // Crash records live under dataDir(), in place after the legacy migration.
   // Records are scrubbed like the copied diagnostics (home folder, tokens, sends).
   crashStore = new CrashStore(join(dataDir(), 'crashes'), app.getVersion(), undefined, () => ({
@@ -622,6 +637,7 @@ app.on('before-quit', () => {
   statusManager.dispose()
   codexBridge.dispose()
   discordNotifier.dispose()
+  ntfyNotifier.dispose()
   void hookServer.stop()
   destroyTray()
 })

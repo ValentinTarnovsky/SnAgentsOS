@@ -736,6 +736,8 @@ export interface SnApi {
     health(): Promise<import('./types').StatusHealth>
     testDiscord(cfg: import('./types').DiscordSettings): Promise<{ ok: boolean; error?: string }>
     testDesktop(): Promise<void>
+    /** Publish a test push with the saved ntfy config (E2-FR-40). */
+    testNtfy(): Promise<{ ok: boolean; error?: string }>
     /** Fired when a status notification is clicked (reveal that console). */
     onReveal(cb: (paneId: string) => void): () => void
     /** Claude's main session ended on its own (E6-FR-21). Returns an unsubscribe function. */

@@ -25,7 +25,7 @@ import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { openDiagnostics } from '../lib/connLog'
 import { StatusIndicator } from './StatusIndicator'
 import { WaitingPill } from './WaitingPill'
-import { LiveToasts } from './LiveToasts'
+import { ToastStack } from './ToastStack'
 import { selectInputMode, store, useRemoteStore } from '../lib/store'
 import { paneById, viewedWorkspaceId, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
@@ -121,7 +121,7 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       <main className="relative min-h-0 flex-1">
         <RemoteTerminal />
         <StatusBanner />
-        <LiveToasts />
+        <ToastStack />
       </main>
 
       <ExitStrip />

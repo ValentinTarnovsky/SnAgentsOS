@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { NotificationSettings, StatusHealth, DiscordSettings } from '@shared/types'
+import type { NotificationSettings, StatusHealth, DiscordSettings, NtfySettings } from '@shared/types'
 import { BRAND } from '@shared/brand'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
@@ -11,6 +11,13 @@ function randomToken(): string {
   const bytes = new Uint8Array(16)
   crypto.getRandomValues(bytes)
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** A fresh private-looking ntfy topic: 'snaos-' + 16 hex (E2-FR-40). */
+export function generateNtfyTopic(): string {
+  const bytes = new Uint8Array(8)
+  crypto.getRandomValues(bytes)
+  return `snaos-${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`
 }
 
 export function NotificationsSection() {
@@ -26,6 +33,8 @@ export function NotificationsSection() {
   const [health, setHealth] = useState<StatusHealth | null>(null)
   const [testBusy, setTestBusy] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; error?: string } | null>(null)
+  const [ntfyBusy, setNtfyBusy] = useState(false)
+  const [ntfyResult, setNtfyResult] = useState<{ ok: boolean; error?: string } | null>(null)
 
   useEffect(() => {
     window.snApi.status
@@ -48,6 +57,7 @@ export function NotificationsSection() {
     updateSettings({ notifications: { ...useAppStore.getState().settings.notifications, ...p } })
   }
   const patchDiscord = (p: Partial<DiscordSettings>): void => { setTestResult(null); patch({ discord: { ...useAppStore.getState().settings.notifications.discord, ...p } }) }
+  const patchNtfy = (p: Partial<NtfySettings>): void => { setNtfyResult(null); patch({ ntfy: { ...useAppStore.getState().settings.notifications.ntfy, ...p } }) }
 
   const installHooks = async (): Promise<void> => {
     setHooksBusy(true)
@@ -212,6 +222,33 @@ export function NotificationsSection() {
         {testResult && <p role="status" className={`break-words text-xs ${testResult.ok ? 'text-emerald-400' : 'text-red-400'}`}>{testResult.ok ? t('notif.discord.sent') : testResult.error}</p>}
         {health?.discord.error && !testResult && <p className="break-words text-xs text-red-400">{health.discord.error}</p>}
         <p className="text-xs text-text-secondary">{t('notif.discord.privacy')}</p>
+      </div>
+      {/* ntfy (E2-FR-40) and the away gate shared with Discord (E2-FR-41). */}
+      <div className="space-y-3 border-t border-border pt-5" data-ntfy-block>
+        <ToggleRow checked={n.ntfy.enabled} onChange={v => patchNtfy({ enabled: v })} searchId="notifications.ntfy" title={t('notif.ntfy.title')} description={t('notif.ntfy.desc')} />
+        <label className={labelCls} htmlFor="ntfy-server">{t('notif.ntfy.server')}</label>
+        <input id="ntfy-server" autoComplete="off" spellCheck={false} maxLength={512} value={n.ntfy.server} onChange={e => patchNtfy({ server: e.target.value.trim() })} className={inputCls} placeholder="https://ntfy.sh" />
+        <label className={labelCls} htmlFor="ntfy-topic">{t('notif.ntfy.topic')}</label>
+        <div className="flex items-center gap-2">
+          <input id="ntfy-topic" autoComplete="off" spellCheck={false} maxLength={64} value={n.ntfy.topic} onChange={e => patchNtfy({ topic: e.target.value.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) })} className={inputCls} placeholder="snaos-..." />
+          <Button variant="ghost" size="sm" data-ntfy-generate onClick={() => patchNtfy({ topic: generateNtfyTopic() })}>{t('notif.ntfy.generate')}</Button>
+        </div>
+        <p className="text-xs text-text-secondary">{t('notif.ntfy.topicHint')}</p>
+        <label className={labelCls} htmlFor="ntfy-token">{t('notif.ntfy.token')}</label>
+        <input id="ntfy-token" type="password" autoComplete="off" spellCheck={false} maxLength={128} value={n.ntfy.token} onChange={e => patchNtfy({ token: e.target.value.trim() })} className={inputCls} />
+        <ToggleRow checked={n.ntfy.notifyAction} onChange={v => patchNtfy({ notifyAction: v })} searchId="notifications.ntfyAction" title={t('notif.action')} disabled={!n.ntfy.enabled} />
+        <ToggleRow checked={n.ntfy.notifyDone} onChange={v => patchNtfy({ notifyDone: v })} searchId="notifications.ntfyDone" title={t('notif.done')} disabled={!n.ntfy.enabled} />
+        <Button variant="ghost" size="sm" data-ntfy-test disabled={ntfyBusy || !n.ntfy.topic} onClick={() => {
+          setNtfyBusy(true); setNtfyResult(null)
+          void window.snApi.status.testNtfy().then(setNtfyResult).catch(() => setNtfyResult({ ok: false, error: t('notif.ntfy.failed') })).finally(() => setNtfyBusy(false))
+        }}>{ntfyBusy ? t('notif.discord.sending') : t('notif.ntfy.test')}</Button>
+        {ntfyResult && <p role="status" data-ntfy-result className={`break-words text-xs ${ntfyResult.ok ? 'text-emerald-400' : 'text-red-400'}`}>{ntfyResult.ok ? t('notif.ntfy.accepted') : ntfyResult.error}</p>}
+        {health?.ntfy?.error && !ntfyResult && <p className="break-words text-xs text-red-400">{health.ntfy.error}</p>}
+        <p className="text-xs text-text-secondary">{t('notif.ntfy.privacy')}</p>
+        <p className="text-xs text-text-secondary">{t('notif.ntfy.ios')}</p>
+      </div>
+      <div className="space-y-3 border-t border-border pt-5">
+        <ToggleRow checked={n.onlyWhenAway} onChange={v => patch({ onlyWhenAway: v })} searchId="notifications.onlyWhenAway" title={t('notif.away.title')} description={t('notif.away.desc')} />
       </div>
     </div>
   )

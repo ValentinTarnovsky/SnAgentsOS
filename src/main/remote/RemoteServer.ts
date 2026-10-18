@@ -45,8 +45,18 @@ interface CachedFile {
 }
 
 export interface RemoteServerHandlers {
-  /** A validated WS client connected; hand it to the SessionManager. */
-  onSocket: (ws: WebSocket, ip: string) => void
+  /**
+   * A validated WS client connected; hand it to the SessionManager. `host` is
+   * the IP literal of the already validated Host header, without the port: the
+   * address the phone reached us at (E2-FR-42 lastHost).
+   */
+  onSocket: (ws: WebSocket, ip: string, host: string) => void
+}
+
+/** The IP part of a Host header already accepted by validateHost ('192.168.1.5:4517' -> '192.168.1.5'). */
+export function hostIp(hostHeader: string): string {
+  const first = hostHeader.indexOf(':')
+  return first !== -1 && first === hostHeader.lastIndexOf(':') ? hostHeader.slice(0, first) : hostHeader
 }
 
 export class RemoteServer {
@@ -115,7 +125,7 @@ export class RemoteServer {
       // Anti-CSWSH: the Origin must be exactly our own http origin.
       if (req.headers.origin !== `http://${req.headers.host}`) return void socket.destroy()
       this.wss.handleUpgrade(req, socket, head, (ws) => {
-        this.handlers.onSocket(ws, normalizeIp(req.socket.remoteAddress))
+        this.handlers.onSocket(ws, normalizeIp(req.socket.remoteAddress), hostIp(req.headers.host ?? ''))
       })
     } catch {
       socket.destroy()
