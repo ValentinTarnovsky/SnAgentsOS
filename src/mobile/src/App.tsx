@@ -12,7 +12,7 @@ import { PairScreen } from './components/PairScreen'
 import { RevokedScreen } from './components/RevokedScreen'
 import { MainScreen } from './components/MainScreen'
 import { ScanScreen } from './components/ScanScreen'
-import { ConnectingScreen, ImpostorScreen, LockedScreen, RePairScreen } from './components/StatusScreens'
+import { ConnectingScreen, ImpostorScreen, LockedScreen, RePairScreen, UpdatedScreen } from './components/StatusScreens'
 
 function screenFor(phase: ReturnType<typeof useRemoteStore.getState>['phase']): ReactNode {
   switch (phase) {
@@ -32,6 +32,8 @@ function screenFor(phase: ReturnType<typeof useRemoteStore.getState>['phase']): 
       return <ImpostorScreen />
     case 'locked':
       return <LockedScreen />
+    case 'updated':
+      return <UpdatedScreen />
     case 'idle':
     case 'connecting':
     default:

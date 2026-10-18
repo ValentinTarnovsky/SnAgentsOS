@@ -25,12 +25,29 @@ export type Phase =
   | 'rePair'
   | 'impostor'
   | 'locked'
+  /** The desktop runs a different version than this bundle (E1-FR-15). */
+  | 'updated'
 
-/** Transient overlay shown on top of the live terminal. */
+/**
+ * Transient overlay shown on top of the live terminal. desktopGone is sticky: it
+ * stays through the reconnect attempts until the next authOk.
+ */
 export type Banner =
   | { kind: 'reconnecting'; attempt: number }
   | { kind: 'desktopGone' }
   | { kind: 'disabled' }
+
+/** Why the phone entered phase 'updated' (E1-FR-15). */
+export interface UpdateInfo {
+  /** This bundle's version. */
+  from: string
+  /** The desktop's version ('' when unknown, e.g. a protocol error before authOk). */
+  to: string
+  /** mismatch = authOk version differs (can continue); protocol = err:'version'. */
+  kind: 'mismatch' | 'protocol'
+  /** The mismatch survived a reload already (sessionStorage guard). */
+  retried: boolean
+}
 
 export interface RemoteState {
   phase: Phase
@@ -58,6 +75,17 @@ export interface RemoteState {
   toast: string | null
   /** In-app QR scanner overlay (pairing without the #pair= boot fragment). */
   scanOpen: boolean
+  // --- connection health (E1-FR-10..15, 41) ---
+  /** Reconnect attempt counter shown by the banner (0 = none pending). */
+  connAttempt: number
+  /** Epoch ms of the last frame on an authed socket, set when it drops. */
+  lastConnectedAt: number | null
+  /** navigator.onLine as last observed (online/offline events). */
+  online: boolean
+  /** An authed socket is OPEN right now (input can be delivered). */
+  connected: boolean
+  /** Set while phase is 'updated'. */
+  updateInfo: UpdateInfo | null
 
   /** Merge a partial state (used by the client for machine transitions). */
   update: (partial: Partial<RemoteState>) => void
@@ -83,6 +111,11 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   lockUntil: null,
   toast: null,
   scanOpen: false,
+  connAttempt: 0,
+  lastConnectedAt: null,
+  online: true,
+  connected: false,
+  updateInfo: null,
 
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
