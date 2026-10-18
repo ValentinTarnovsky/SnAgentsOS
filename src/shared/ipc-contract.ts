@@ -495,6 +495,52 @@ export interface RemoteUiState {
   pendingPairing: PendingPairingInfo | null
 }
 
+// --- Remote firewall check / fix (E2-FR-38/39, Windows only) ---
+
+/** Network category of an endpoint as Get-NetConnectionProfile reports it. */
+export type FirewallProfile = 'Private' | 'Public' | 'DomainAuthenticated' | 'unknown'
+
+export interface FirewallEndpointCheck {
+  ip: string
+  kind: RemoteEndpointKind
+  profile: FirewallProfile
+  networkName?: string
+}
+
+export interface FirewallBlockingRule {
+  name: string
+  displayName: string
+  /** currentProgram: on the running exe; port: program-less; otherProgram: same file name elsewhere (never applies). */
+  scope: 'currentProgram' | 'otherProgram' | 'port'
+}
+
+export interface FirewallStatus {
+  /** Contract: state === 'ok'. */
+  ok: boolean
+  /** Contract: the worst profile among the endpoints. */
+  profile: FirewallProfile
+  /** Contract: an enabled Allow covers the current exe or the port. */
+  ruleFound: boolean
+  state: 'ok' | 'publicProfile' | 'blocked' | 'noRule' | 'unknown' | 'unsupported'
+  port: number
+  endpoints: FirewallEndpointCheck[]
+  blockingRules: FirewallBlockingRule[]
+  /** What [Fix] creates: a rule by program and port (installed) or by port only. */
+  ruleScope: 'program' | 'port'
+  /** False while a port Block (not ours to remove) applies. */
+  fixable: boolean
+  checkedAt: number
+  detail?: string
+}
+
+export interface FirewallFixRes {
+  ok: boolean
+  /** cancelled (UAC 1223) | failed | timeout | notFixed | unsupported */
+  error?: string
+  cancelled?: boolean
+  status?: FirewallStatus
+}
+
 /** A control action relayed main -> renderer for execution via store actions. */
 export interface RemoteCommand {
   id: string
@@ -722,6 +768,12 @@ export interface SnApi {
     commandResult(res: RemoteCommandResult): void
     /** Server status / device list / pairing events. Returns unsubscribe. */
     onEvent(cb: (s: RemoteUiState) => void): () => void
+    /** Windows firewall + network profile check (cached 60s unless force). */
+    firewallCheck(force?: boolean): Promise<FirewallStatus>
+    /** One-click elevated fix (UAC), then a fresh check. */
+    firewallFix(): Promise<FirewallFixRes>
+    /** Open Windows network settings (ms-settings:network-status). */
+    openNetworkSettings(): void
   }
   /** Keep the PC awake while agents work (E5-FR-23/24). */
   power: {

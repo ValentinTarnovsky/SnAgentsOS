@@ -31,6 +31,7 @@ import { NewConsoleSheet } from './home/NewConsoleSheet'
 import { LiveToasts } from './LiveToasts'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
+import { openDiagnostics } from '../lib/connLog'
 import { rowShowsTime, STATUS_TICK_MS } from '../lib/statusText'
 import { isWorkspaceMounted, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
@@ -46,11 +47,19 @@ function HomeHeader({ onUsage, onSettings }: { onUsage: () => void; onSettings: 
       <span data-wordmark className="shrink-0 text-sm font-bold tracking-tight text-text-primary">
         {BRAND.productName}
       </span>
-      {/* The dot and the PC name; R22-17 makes them open Diagnostics. */}
-      <span data-host className="flex min-w-0 flex-1 items-center gap-1.5 pl-1">
+      {/* The dot and the PC name; with a banner up a tap opens Diagnostics (E2-FR-02, 36). */}
+      <button
+        type="button"
+        data-host
+        data-action="host-diagnostics"
+        disabled={tier === 'ok'}
+        onClick={openDiagnostics}
+        aria-label={tier === 'ok' ? undefined : t('diag.open')}
+        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-btn py-1 pl-1 text-left enabled:active:bg-card"
+      >
         <span data-tier={tier} className={clsx('h-2.5 w-2.5 shrink-0 rounded-full', DOT_COLOR[tier])} />
         <span data-host-name className="truncate text-xs text-text-secondary">{hostName || t('home.thisPc')}</span>
-      </span>
+      </button>
       <button
         data-home-usage-btn
         onClick={onUsage}

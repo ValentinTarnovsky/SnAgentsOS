@@ -14,6 +14,11 @@ const VIRTUAL_ADAPTER = /vethernet|wsl|docker|vmware|virtualbox|hyper-v|vbox|loo
 /** Tailscale names its interface tailscale0 / Tailscale on the platforms we target. */
 const TAILSCALE_ADAPTER = /tailscale/i
 
+/** True for a virtual adapter name (vEthernet/WSL/Docker/...), e.g. for the firewall check. */
+export function isVirtualAdapter(name: string): boolean {
+  return VIRTUAL_ADAPTER.test(name)
+}
+
 /** Parse a dotted IPv4 literal into its four octets, or null if it isn't one. */
 function parseIpv4(ip: string): [number, number, number, number] | null {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip)

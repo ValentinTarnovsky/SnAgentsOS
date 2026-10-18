@@ -21,6 +21,7 @@ import { Composer, openComposerForPaste, toggleInputMode } from './Composer'
 import { DirectInputStrip } from './DirectInputStrip'
 import { ExitStrip } from './ExitStrip'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
+import { openDiagnostics } from '../lib/connLog'
 import { StatusIndicator } from './StatusIndicator'
 import { WaitingPill } from './WaitingPill'
 import { LiveToasts } from './LiveToasts'
@@ -28,10 +29,22 @@ import { selectInputMode, store, useRemoteStore } from '../lib/store'
 import { paneById, viewedWorkspaceId, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
 
-/** Header dot colored by the connection tier (E1-FR-13). */
+/** Header dot colored by the connection tier (E1-FR-13); off 'ok' a tap opens Diagnostics (E2-FR-36). */
 function ConnectionDot(): ReactNode {
   const { tier } = useConnectionHealth()
-  return <span data-tier={tier} className={clsx('h-2.5 w-2.5 shrink-0 rounded-full', DOT_COLOR[tier])} />
+  const dot = <span data-tier={tier} className={clsx('h-2.5 w-2.5 shrink-0 rounded-full', DOT_COLOR[tier])} />
+  if (tier === 'ok') return dot
+  return (
+    <button
+      type="button"
+      data-action="dot-diagnostics"
+      onClick={openDiagnostics}
+      aria-label={t('diag.open')}
+      className="-m-2 flex h-7 w-7 shrink-0 items-center justify-center rounded-full active:bg-card"
+    >
+      {dot}
+    </button>
+  )
 }
 
 export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode {
