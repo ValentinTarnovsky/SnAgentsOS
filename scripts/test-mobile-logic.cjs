@@ -25,7 +25,7 @@ const BUNDLE_VERSION = '2.0.0'
 const code = buildSync({
   stdin: {
     resolveDir: root, loader: 'ts', contents: `
-export { client, RELOAD_FOR_KEY, IDLE_PROBE_MS, PONG_TIMEOUT, CONNECT_TIMEOUT_MS, REVIVE_PROBE_TIMEOUT } from './src/mobile/src/lib/client'
+export { client, RELOAD_FOR_KEY, IDLE_PROBE_MS, PONG_TIMEOUT, CONNECT_TIMEOUT_MS, REVIVE_PROBE_TIMEOUT, AWAIT_NEW_PANE_MS } from './src/mobile/src/lib/client'
 export { store } from './src/mobile/src/lib/store'
 export { classifyConnection, endpointHint, formatAgo } from './src/mobile/src/lib/connectionHealth'
 export { delayFor, RECONNECT_DELAYS } from './src/mobile/src/lib/reconnectSchedule'
@@ -882,6 +882,45 @@ async function testHomeClient() {
     check(p.state().toasts.map(x => x.text).join() === '2,3,4' && p.state().toast === '4', 'at most 3 toasts; toast mirrors the newest')
     p.state().dismissToast(p.state().toasts.at(-1).id)
     check(p.state().toast === '3' && p.state().toasts.length === 2, 'dismissing the newest falls back to the previous one')
+  }
+  {
+    // noteViewed uses the desktop clock only: a phone clock 5 minutes ahead
+    // must not hide a done that lands after the view.
+    const p = page(); p.client.start(); const s = p.last(); s.open()
+    const base = 1700000000000
+    const snap = multi(); snap.workspaces[1].panes[0].status = st('working', { stateSince: base - 10 * MIN })
+    authOk(s, snap)
+    p.client.openPane('b1')
+    check(p.state().lastViewedAt.b1 === base - 10 * MIN, 'a view is stamped at the stateSince of the state it saw, never the phone clock')
+    p.client.leaveTerminal()
+    const done = multi(); done.workspaces[1].panes[0].status = st('done', { stateSince: base - 8 * MIN })
+    s.recv({ type: 'state', state: done })
+    check(p.isUnread(p.state().paneStatus.b1, p.state().lastViewedAt.b1), 'a done after the view reads unread even when it is older than the phone clock')
+    p.client.openPane('b1'); p.client.leaveTerminal()
+    check(!p.isUnread(p.state().paneStatus.b1, p.state().lastViewedAt.b1), 'and read once it was seen')
+    // Switching tabs reads the console being left too.
+    p.client.openPane('a1')
+    const later = multi(); later.workspaces[0].panes[0].status = st('done', { stateSince: base + MIN })
+    s.recv({ type: 'state', state: later })
+    p.client.openPane('a2')
+    check(p.state().lastViewedAt.a1 === base + MIN && !p.isUnread(p.state().paneStatus.a1, p.state().lastViewedAt.a1), 'a tab switch stamps the console left behind (it finished while on screen)')
+  }
+  {
+    // A console just created may be missing from a state frame built before it existed.
+    const p = page(); p.client.start(); const s = p.last(); s.open(); authOk(s, multi())
+    p.client.showPane('n1')
+    check(p.state().screen === 'terminal' && p.state().activePaneId === 'n1', 'the acked console opens before any snapshot lists it')
+    s.recv({ type: 'state', state: multi() })
+    check(p.state().screen === 'terminal' && p.state().activePaneId === 'n1' && p.state().toast !== 'The console was closed', 'a stale frame without it does not read as "the console was closed"')
+    const withNew = multi(); withNew.workspaces[0].panes.push({ id: 'n1', title: 'N1', type: 'claude', running: false })
+    s.recv({ type: 'state', state: withNew })
+    check(p.state().activePaneId === 'n1' && p.state().lastPane === 'n1', 'once listed it stays and becomes lastPane')
+    s.recv({ type: 'state', state: multi() })
+    check(p.state().screen === 'home' && p.state().activePaneId === null && p.state().toast === 'The console was closed', 'after that, a frame without it is a real close')
+    p.client.showPane('n2')
+    p.advance(p.AWAIT_NEW_PANE_MS + 1)
+    s.recv({ type: 'state', state: multi() })
+    check(p.state().screen === 'home' && p.state().activePaneId === null, 'a created console that never shows up gives up after AWAIT_NEW_PANE_MS')
   }
 }
 

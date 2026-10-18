@@ -53,8 +53,12 @@ export function remotePromptFallback(
   return initialPromptFallback({ text, shell: shellKind(shell, platform), platform, hasSetup: !!launch.setup, launchKind: launch.launchKind ?? 'other' })
 }
 
-/** Schemes a phone may open on the PC (E2-FR-28); main filters again in openExternalSafe. */
-function safeRemoteUrl(raw: string): boolean {
+/**
+ * Schemes a phone may open on the PC (E2-FR-28): http and https with a host,
+ * or mailto; anything else acks `denied_url` (the schema only bounds the
+ * length). Main's openExternalSafe filters again. Exported for tests.
+ */
+export function safeRemoteUrl(raw: string): boolean {
   try {
     const url = new URL(raw)
     return url.protocol === 'mailto:' || ((url.protocol === 'http:' || url.protocol === 'https:') && !!url.hostname)

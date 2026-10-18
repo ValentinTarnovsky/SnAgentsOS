@@ -49,11 +49,10 @@ import {
 import { hexEqual, hexToBytes, hmacSha256Hex } from './sha256'
 import { store, type UpdateInfo } from './store'
 import { applyRemoteTheme } from './theme'
-import { setLang } from './i18n'
+import { setLang, t } from './i18n'
 import { delayFor } from './reconnectSchedule'
 import { createInPageAlerts } from './inPageAlerts'
 import { paneById, paneOpenable, statusMapOf, workspaceOfPane } from './workspace'
-import { t } from './i18n'
 import { clearMobileStorage } from './mobileStorage'
 import { chunkInput } from './composerSend'
 import { pruneDrafts } from './drafts'
@@ -92,6 +91,12 @@ export const RESYNC_HIDDEN_MS = 10000
 /** A deadline timer this late means JS was suspended: re-probe, never abort. */
 const SUSPEND_SLACK_MS = 2000
 const CTL_TIMEOUT = 10000
+/**
+ * How long a console the desktop just acked (createPane) may be missing from
+ * the state frames: a push built before it existed (a pty starting elsewhere,
+ * the renderer's 100ms debounce) must not read as "the console was closed".
+ */
+export const AWAIT_NEW_PANE_MS = 5000
 const PAIR_PENDING_MS = 60000
 /** sessionStorage guard against a reload loop on a stale cached bundle (FR-15). */
 export const RELOAD_FOR_KEY = `${BRAND.mobileStoragePrefix}reloadFor`
@@ -204,6 +209,8 @@ class RemoteClient {
    * before lastPane. R22-18 fills it from the URL hash; it only picks the view.
    */
   private pendingDeepLink: string | null = null
+  /** A console shown before any state frame listed it (just created), with its deadline. */
+  private awaitedPane: { id: string; until: number } | null = null
   // Frames that arrived before the terminal mounted (the authOk -> first React
   // render gap). Buffered so the initial replay/out is never lost; a replay
   // supersedes and resets the buffer since it repaints the whole screen.
@@ -398,6 +405,11 @@ class RemoteClient {
 
   /** View a console and slide the terminal in; it becomes lastPane and read (E2-FR-16). */
   showPane(paneId: string): void {
+    const before = store.getState()
+    // Leaving another console from the terminal (a tab) reads it up to now too.
+    if (before.screen === 'terminal' && before.activePaneId && before.activePaneId !== paneId) before.noteViewed(before.activePaneId)
+    const known = !!before.snapshot && !!paneById(before.snapshot, paneId)
+    this.awaitedPane = known ? null : { id: paneId, until: Date.now() + AWAIT_NEW_PANE_MS }
     this.viewPane(paneId)
     const s = store.getState()
     s.noteViewed(paneId)
@@ -987,9 +999,18 @@ class RemoteClient {
     store.getState().update({ snapshot: state, paneStatus: statusMapOf(state), xtermTheme, terminalUnicode: unicodeOf(state) })
     // E2-FR-47: the viewed pane vanished (closed on the desktop): back to Home
     // with a toast. No other pane is picked, least of all from another workspace.
+    // A console just created gets AWAIT_NEW_PANE_MS to appear before that.
     const s = store.getState()
     const cur = s.activePaneId
-    if (cur && !paneExists(state, cur)) {
+    const awaited = this.awaitedPane
+    if (awaited && (awaited.id !== cur || paneExists(state, awaited.id))) {
+      this.awaitedPane = null
+      // The new console made it into the snapshot: now it can be lastPane.
+      if (awaited.id === cur && s.screen === 'terminal') s.noteViewed(cur)
+    }
+    const waiting = !!this.awaitedPane && this.awaitedPane.id === cur && Date.now() < this.awaitedPane.until
+    if (cur && !waiting && !paneExists(state, cur)) {
+      this.awaitedPane = null
       const onTerminal = s.screen === 'terminal'
       if (s.subscribedPaneId) this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId: s.subscribedPaneId })
       s.update({ activePaneId: null, subscribedPaneId: null, ...(onTerminal ? { screen: 'home' as const } : {}) })
