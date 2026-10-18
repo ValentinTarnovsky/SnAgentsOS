@@ -23,7 +23,7 @@ function load(file, overrides = {}) {
 }
 
 const D = load('src/main/git/diff.ts')
-const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp, openRepoFile, readFileDiff, ChangesReader, findListed, DIFF_MAX_LINES, DIFF_MAX_BYTES, UNTRACKED_READ_BYTES } = D
+const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp, openRepoFile, readFileDiff, ChangesReader, findListed, DIFF_MAX_LINES, DIFF_MAX_BYTES, UNTRACKED_READ_BYTES, UNTRACKED_FORCE_BYTES } = D
 
 ;(async () => {
   // ---- unified diff parser -------------------------------------------------
@@ -89,8 +89,10 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
   check(findListed([{ path: 'a', area: 'staged' }], 'a', 'untracked') === null && findListed([], 'a') === null, 'unlisted path or area')
 
   // ---- open allowlist (FR-15) ----------------------------------------------
-  for (const ok of ['a.txt', 'README.MD', 'x.json', 'c.jsonc', 'a.tsx', 'b.Java', 'c.kt', 'p.py', 'q.sql', 'build.gradle', 'app.properties', 'i.png', 'v.svg', 'w.webp', 'run.sh', 'log.log']) check(canOpenWithDefaultApp(ok), `opens: ${ok}`)
+  for (const ok of ['a.txt', 'README.MD', 'x.json', 'c.jsonc', 'a.tsx', 'b.Java', 'c.kt', 'q.sql', 'build.gradle', 'app.properties', 'i.png', 'w.webp', 'log.log']) check(canOpenWithDefaultApp(ok), `opens: ${ok}`)
   for (const no of ['build.bat', 'tool.hta', 'x.reg', 'a.exe', 'b.cmd', 'c.ps1', 'd.vbs', 'e.lnk', 'f.msi', 'g.scr', 'h.js.lnk', 'Makefile', 'noext', '.env', 'x.jar', 'y.url', 'z.com']) check(!canOpenWithDefaultApp(no), `revealed instead: ${no}`)
+  // Code whose default handler runs it (WSH, py launcher, Git Bash, Ruby, file:// scripts) is revealed too, as in E2-FR-30.
+  for (const runs of ['a.js', 'b.MJS', 'c.cjs', 'p.py', 'run.sh', 'r.rb', 'i.html', 'v.svg']) check(!canOpenWithDefaultApp(runs), `revealed, its default app would run it: ${runs}`)
 
   const fakeOpen = (entries) => {
     const calls = []
@@ -131,7 +133,7 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
   {
     const runner = fakeRunner((args) => (args.includes('--cached') ? '@@ -1 +1 @@\n-a\n+b\n' : `@@ -0,0 +1,${DIFF_MAX_LINES + 1} @@\n${H(DIFF_MAX_LINES + 1)}\n`))
     const staged = await readFileDiff({ repoRoot: R, entry: { path: 'new.ts', oldPath: 'old.ts', area: 'staged', status: 'R' }, force: false, runner, platform: 'win32' })
-    same(runner.calls[0].args, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '-U3', '--cached', '-M', '--', 'new.ts', 'old.ts'], 'staged rename: --cached -M with both paths after --, no ext diff, no textconv')
+    same(runner.calls[0].args, ['--literal-pathspecs', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '-U3', '--cached', '-M', '--', 'new.ts', 'old.ts'], 'staged rename: literal pathspecs, --cached -M with both paths after --, no ext diff, no textconv')
     check(runner.calls[0].cwd === R, 'diff runs in the repo root')
     check(staged.path === 'new.ts' && staged.oldPath === 'old.ts' && staged.hunks.length === 1 && /^[0-9a-f]{40}$/.test(staged.diffRev), 'staged diff parsed, rev is a sha1')
     const big = await readFileDiff({ repoRoot: R, entry: { path: 'big.ts', area: 'unstaged', status: 'M' }, force: false, runner, platform: 'win32' })
@@ -143,7 +145,7 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
     check((await readFileDiff({ repoRoot: R, entry: { path: 'w.min.js', area: 'unstaged', status: 'M' }, force: false, runner: wide, platform: 'win32' })).tooLarge.bytes > DIFF_MAX_BYTES, 'more than 512 KB: too large')
     const conflict = fakeRunner(() => 'diff --cc f\n@@@ -1 -1 +1 @@@\n++x\n')
     await readFileDiff({ repoRoot: R, entry: { path: 'f', area: 'conflict', status: 'U' }, force: false, runner: conflict, platform: 'win32' })
-    same(conflict.calls[0].args, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '-U3', '--', 'f'], 'conflict: plain combined diff, no -M')
+    same(conflict.calls[0].args, ['--literal-pathspecs', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '-U3', '--', 'f'], 'conflict: plain combined diff, no -M')
     const empty = fakeRunner(() => '')
     same(await readFileDiff({ repoRoot: R, entry: { path: 'a', area: 'unstaged', status: 'M' }, force: false, runner: empty, platform: 'win32' }), { error: 'gone' }, 'an empty diff means the file has no changes any more')
     const failing = fakeRunner(() => Object.assign(new Error('boom'), { code: 'timeout' }))
@@ -153,14 +155,15 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
     check(failing.calls.length === 1, 'denied requests ran nothing')
 
     // Untracked through a fake fs: size cap, link, gone.
-    const files = { [path.resolve(R, 'u.txt')]: Buffer.from('x\ny\n'), [path.resolve(R, 'huge.log')]: Buffer.alloc(UNTRACKED_READ_BYTES + 1, 0x61) }
+    const reads = []
+    const files = { [path.resolve(R, 'u.txt')]: Buffer.from('x\ny\n'), [path.resolve(R, 'huge.log')]: Buffer.alloc(UNTRACKED_READ_BYTES + 1, 0x61), [path.resolve(R, 'giant.iso')]: { length: UNTRACKED_FORCE_BYTES + 1 } }
     const ufs = {
       lstat: async (p) => {
         if (p === path.resolve(R, 'ln')) return { size: 3, isFile: () => false, isSymbolicLink: () => true, isDirectory: () => false }
         if (!files[p]) throw new Error('ENOENT')
         return { size: files[p].length, isFile: () => true, isSymbolicLink: () => false, isDirectory: () => false }
       },
-      readFile: async (p) => files[p],
+      readFile: async (p) => { reads.push(p); return files[p] },
       readlink: async () => '../outside/secret',
     }
     const u = await readFileDiff({ repoRoot: R, entry: { path: 'u.txt', area: 'untracked', status: '?' }, force: false, runner: failing, fs: ufs, platform: 'win32' })
@@ -169,6 +172,10 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
     check(huge.tooLarge && huge.tooLarge.bytes === UNTRACKED_READ_BYTES + 1 && huge.tooLarge.lines === 0, 'untracked over 512 KB is not read without force')
     const hugeForced = await readFileDiff({ repoRoot: R, entry: { path: 'huge.log', area: 'untracked', status: '?' }, force: true, runner: failing, fs: ufs, platform: 'win32' })
     check(!hugeForced.tooLarge && hugeForced.hunks.length === 1, 'force reads it')
+    const giant = await readFileDiff({ repoRoot: R, entry: { path: 'giant.iso', area: 'untracked', status: '?' }, force: false, runner: failing, fs: ufs, platform: 'win32' })
+    check(giant.tooLarge && giant.tooLarge.bytes === UNTRACKED_FORCE_BYTES + 1, 'an untracked file over 16 MB is too large without force')
+    same(await readFileDiff({ repoRoot: R, entry: { path: 'giant.iso', area: 'untracked', status: '?' }, force: true, runner: failing, fs: ufs, platform: 'win32' }), { error: 'git_error' }, 'even with force, an untracked file over 16 MB is refused')
+    check(!reads.includes(path.resolve(R, 'giant.iso')), 'and never read into memory')
     const ln = await readFileDiff({ repoRoot: R, entry: { path: 'ln', area: 'untracked', status: '?' }, force: false, runner: failing, fs: ufs, platform: 'win32' })
     check(ln.hunks[0].lines[0].text === '../outside/secret', 'an untracked link shows its target, never the file behind it')
     same(await readFileDiff({ repoRoot: R, entry: { path: 'gone.txt', area: 'untracked', status: '?' }, force: false, runner: failing, fs: ufs, platform: 'win32' }), { error: 'gone' }, 'an untracked file deleted meanwhile is gone')
@@ -257,6 +264,8 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
       write(path.join(repo, 'del.txt'), lines(3))
       write(path.join(repo, 'big.txt'), lines(10))
       write(path.join(repo, 'img.bin'), Buffer.from([1, 2, 3, 0, 4]))
+      write(path.join(repo, 'app', '[id]', 'page.tsx'), 'id\n')
+      write(path.join(repo, 'app', 'i', 'page.tsx'), 'i\n')
       git(repo, 'add', '-A'); git(repo, 'commit', '-qm', 'init')
       // staged +1 then modified again (both areas), a staged rename, a deletion, a big rewrite, a binary change, an untracked file.
       write(path.join(repo, 'src', 'both.ts'), lines(10) + 'staged\n'); git(repo, 'add', 'src/both.ts')
@@ -266,6 +275,8 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
       write(path.join(repo, 'big.txt'), lines(6000, 'b'))
       write(path.join(repo, 'img.bin'), Buffer.from([9, 9, 0, 9]))
       write(path.join(repo, '\u00f1 notes.md'), lines(4, 'n'))
+      write(path.join(repo, 'app', '[id]', 'page.tsx'), 'id\nid changed\n')
+      write(path.join(repo, 'app', 'i', 'page.tsx'), 'i\ni changed\n')
       const { svc, reader, opened } = await open(repo)
       const res = await reader.status('ws:x')
       const row = (area, p) => res.files.find((f) => f.area === area && f.path === p)
@@ -285,6 +296,8 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
       check(again.diffRev === dWork.diffRev, 'an unchanged diff keeps its rev (the panel keeps its scroll)')
       const dRen = await reader.fileDiff({ key: 'ws:x', path: 'new name.txt', area: 'staged' })
       check(dRen.oldPath === 'old name.txt' && dRen.hunks.length === 1 && dRen.hunks[0].lines.some((l) => l.text === 'rename from old name.txt'), 'a pure staged rename shows its rename lines')
+      const dBracket = await reader.fileDiff({ key: 'ws:x', path: 'app/[id]/page.tsx', area: 'unstaged' })
+      same(dBracket.hunks.flatMap((h) => h.lines).filter((l) => l.kind !== 'ctx').map((l) => l.text), ['id changed'], 'app/[id]/page.tsx diffs only itself (literal pathspec, not a glob matching app/i/page.tsx)')
       const dDel = await reader.fileDiff({ key: 'ws:x', path: 'del.txt', area: 'unstaged' })
       check(dDel.hunks[0].lines.every((l) => l.kind === 'del') && dDel.hunks[0].lines.length === 3, 'a deleted file is all deletions')
       check((await reader.fileDiff({ key: 'ws:x', path: 'img.bin', area: 'unstaged' })).binary, 'binary file')
