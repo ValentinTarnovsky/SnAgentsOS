@@ -90,6 +90,8 @@ export class RendererRecovery {
       this.suppressGone = false
       return
     }
+    // A hung renderer that died on its own: its [Wait] / [Reload] dialog is moot.
+    this.onResponsive()
     if (details.reason === 'clean-exit' || this.deps.isQuitting() || this.deps.bypassCloseGuards()) return
     const now = this.now()
     this.deps.crashes.write({ kind: 'render-process-gone', at: now, reason: details.reason, exitCode: details.exitCode })

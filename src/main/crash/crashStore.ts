@@ -3,11 +3,13 @@ import { join } from 'path'
 import { randomBytes } from 'crypto'
 import { z } from 'zod'
 import type { CrashRecord, RenderErrorReport } from '@shared/ipc-contract'
+import { redact, type RedactOptions } from '@shared/redact'
 
 /**
  * Local crash log (E4-FR-23): one JSON per event under dataDir()/crashes,
  * the last 20 kept, at most 16KB each, never uploaded. Written atomically
- * (tmp + rename, UTF-8 without BOM). Pattern after Orca's
+ * (tmp + rename, UTF-8 without BOM) and redacted (home folder, tokens,
+ * connection sends) before they touch the disk. Pattern after Orca's
  * crash-report-store.ts (no code taken). Every write is best effort: a full
  * disk or a locked folder never breaks the recovery path.
  */
@@ -49,6 +51,16 @@ function trimRecord(rec: CrashRecord): CrashRecord {
   return out
 }
 
+/** Scrub the free-text fields (message, stacks, reason) of a record. */
+function redactRecord(rec: CrashRecord, opts: RedactOptions): CrashRecord {
+  const out: CrashRecord = { ...rec }
+  for (const k of ['message', 'stack', 'componentStack', 'reason'] as const) {
+    const v = out[k]
+    if (typeof v === 'string') out[k] = redact(v, opts)
+  }
+  return out
+}
+
 let seq = 0
 
 export class CrashStore {
@@ -56,6 +68,8 @@ export class CrashStore {
     private readonly dir: string,
     private readonly version: string,
     private readonly keep = CRASH_KEEP,
+    /** What to scrub (home, secrets of the current config); read on every write. */
+    private readonly redactOptions: () => RedactOptions = () => ({}),
   ) {}
 
   /** Write one record; returns it (trimmed), or null when the write failed. */
@@ -63,16 +77,27 @@ export class CrashStore {
     // Time, then a per-run sequence, so names sort in write order even within one ms.
     seq = (seq + 1) % 10_000
     const id = `${String(Math.max(0, Math.floor(input.at))).padStart(13, '0')}-${String(seq).padStart(4, '0')}-${input.kind}-${randomBytes(3).toString('hex')}`
-    const rec = trimRecord({ ...input, id, version: this.version })
+    const file = join(this.dir, `${id}.json`)
+    const tmp = `${file}.tmp`
     try {
+      let opts: RedactOptions = {}
+      try {
+        opts = this.redactOptions()
+      } catch {
+        /* the built-in patterns still apply */
+      }
+      const rec = trimRecord(redactRecord({ ...input, id, version: this.version }, opts))
       mkdirSync(this.dir, { recursive: true })
-      const file = join(this.dir, `${id}.json`)
-      const tmp = `${file}.tmp`
       writeFileSync(tmp, JSON.stringify(rec, null, 2), 'utf8')
       renameSync(tmp, file)
       this.prune()
       return rec
     } catch (error) {
+      try {
+        unlinkSync(tmp)
+      } catch {
+        /* never written */
+      }
       console.warn('[crash] record write failed:', (error as Error)?.message ?? error)
       return null
     }
