@@ -111,6 +111,7 @@ export function RemoteSection() {
       <ToggleRow
         checked={settings.enabled}
         onChange={setEnabled}
+        searchId="remote.enable"
         title={t('remote.enable')}
         description={t('remote.enableHint')}
       />

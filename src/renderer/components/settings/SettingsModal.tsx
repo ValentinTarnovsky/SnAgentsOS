@@ -1,9 +1,24 @@
-import { useEffect, useMemo, useState, type ComponentType } from 'react'
+import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
 import { Activity, Bell, Bot, Database, DownloadCloud, FileText, Gauge, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
-import { useT, type MessageKey, type TFn } from '@/i18n'
+import { useT, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
 import { cn } from '@/lib/cn'
+import { formatAccel, resolveKeymap } from '@/lib/keymap'
+import { SearchSummaryRow, Toggle } from './ui'
+import {
+  CATEGORY_LABEL,
+  CATEGORY_ORDER,
+  highlightRanges,
+  parseSettingsTarget,
+  readSettingPath,
+  searchSettings,
+  searchTokens,
+  settingDomId,
+  settingsPatchForPath,
+  type CategoryId,
+  type SettingSearchEntry,
+} from './searchCatalog'
 import { AppearanceSection } from './sections/AppearanceSection'
 import { TerminalSection } from './sections/TerminalSection'
 import { LanguageSection } from './sections/LanguageSection'
@@ -20,53 +35,22 @@ import { RemoteSection } from './sections/RemoteSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
 
-type CategoryId =
-  | 'appearance'
-  | 'terminal'
-  | 'language'
-  | 'agents'
-  | 'connections'
-  | 'snippets'
-  | 'startup'
-  | 'notifications'
-  | 'keys'
-  | 'data'
-  | 'aiusage'
-  | 'usage'
-  | 'remote'
-  | 'updates'
-  | 'about'
-
-interface Category {
-  id: CategoryId
-  labelKey: MessageKey
-  icon: LucideIcon
-  keywords: string[]
-}
-
-// Ordered most-important → least (cosmetic/info sink to the bottom).
-const CATEGORIES: Category[] = [
-  { id: 'terminal', labelKey: 'settings.cat.terminal', icon: TerminalSquare, keywords: ['shell', 'font', 'fuente', 'scrollback', 'powershell'] },
-  { id: 'agents', labelKey: 'settings.cat.agents', icon: Bot, keywords: ['preset', 'model', 'modelo', 'agent', 'agente', 'claude', 'codex', 'behavior', 'comportamiento', 'awake', 'despierta', 'sleep', 'suspender', 'suspension', 'suspensión', 'energy', 'energia', 'energía', 'display', 'pantalla', 'resume', 'retomar', 'session', 'sesion', 'sesión', 'chat', 'rows', 'filas', 'sidebar', 'barra lateral', 'topic', 'title', 'titulo', 'título', 'ctrl', 'focus', 'foco'] },
-  { id: 'connections', labelKey: 'settings.cat.connections', icon: PlugZap, keywords: ['ssh', 'connection', 'conexion', 'conexión', 'setup', 'login', 'password', 'contraseña', 'dedi', 'server', 'servidor', 'expect'] },
-  { id: 'snippets', labelKey: 'settings.cat.snippets', icon: FileText, keywords: ['snippet', 'prompt', 'plantilla', 'texto', 'text'] },
-  { id: 'startup', labelKey: 'settings.cat.startup', icon: Power, keywords: ['startup', 'inicio', 'tray', 'bandeja', 'launch', 'close', 'cerrar', 'shortcut', 'atajo', 'hotkey'] },
-  { id: 'notifications', labelKey: 'settings.cat.notifications', icon: Bell, keywords: ['notifications', 'notificaciones', 'sound', 'sonido', 'claude', 'codex', 'discord', 'webhook', 'status', 'estado', 'badge', 'hooks', 'toast', 'alerta'] },
-  { id: 'keys', labelKey: 'settings.cat.keys', icon: Keyboard, keywords: ['keys', 'teclas', 'keyboard', 'teclado', 'shortcut', 'atajo', 'keybinding', 'binding', 'palette', 'paleta', 'waiting', 'esperan', 'reopen', 'reabrir', 'focus', 'foco'] },
-  { id: 'data', labelKey: 'settings.cat.data', icon: Database, keywords: ['data', 'datos', 'export', 'exportar', 'import', 'importar', 'backup', 'respaldo'] },
-  { id: 'appearance', labelKey: 'settings.cat.appearance', icon: Palette, keywords: ['theme', 'color', 'tema', 'apariencia', 'custom'] },
-  { id: 'language', labelKey: 'settings.cat.language', icon: Languages, keywords: ['language', 'idioma', 'english', 'español', 'spanish'] },
-  { id: 'aiusage', labelKey: 'settings.cat.aiusage', icon: Gauge, keywords: ['usage', 'uso', 'tokens', 'token', 'limit', 'limite', 'límite', 'quota', 'cuota', 'claude', 'codex', 'bar', 'barra', 'bars', 'barras'] },
-  { id: 'usage', labelKey: 'settings.cat.usage', icon: Activity, keywords: ['performance', 'rendimiento', 'ram', 'cpu', 'memory', 'memoria', 'resources', 'recursos', 'processes', 'procesos'] },
-  { id: 'remote', labelKey: 'settings.cat.remote', icon: Smartphone, keywords: ['remote', 'phone', 'celular', 'movil', 'móvil', 'qr', 'control', 'tailscale', 'lan'] },
-  { id: 'updates', labelKey: 'settings.cat.updates', icon: DownloadCloud, keywords: ['update', 'updates', 'actualizar', 'actualización', 'actualizacion', 'version', 'versión', 'upgrade', 'release'] },
-  { id: 'about', labelKey: 'settings.cat.about', icon: Info, keywords: ['about', 'acerca', 'version', 'versión'] },
-]
-
-function matches(cat: Category, q: string, t: TFn): boolean {
-  if (!q) return true
-  const needle = q.toLowerCase()
-  return t(cat.labelKey).toLowerCase().includes(needle) || cat.keywords.some((k) => k.includes(needle))
+const ICONS: Record<CategoryId, LucideIcon> = {
+  terminal: TerminalSquare,
+  agents: Bot,
+  connections: PlugZap,
+  snippets: FileText,
+  startup: Power,
+  notifications: Bell,
+  keys: Keyboard,
+  data: Database,
+  appearance: Palette,
+  language: Languages,
+  aiusage: Gauge,
+  usage: Activity,
+  remote: Smartphone,
+  updates: DownloadCloud,
+  about: Info,
 }
 
 const SECTIONS: Record<CategoryId, ComponentType> = {
@@ -87,33 +71,167 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   about: AboutSection,
 }
 
+/** How long a deep-linked row keeps its accent ring (E4-FR-27). */
+const FLASH_MS = 1200
+
+/** `text` with the query tokens wrapped in <mark> (accent- and case-insensitive). */
+function Highlight({ text, query }: { text: string; query: string }) {
+  const ranges = highlightRanges(text, query)
+  if (ranges.length === 0) return <>{text}</>
+  const out: ReactNode[] = []
+  let at = 0
+  ranges.forEach(([s, e], i) => {
+    if (s > at) out.push(text.slice(at, s))
+    out.push(
+      <mark key={i} className="rounded-sm bg-accent-violet/30 px-px text-text-primary">
+        {text.slice(s, e)}
+      </mark>,
+    )
+    at = e
+  })
+  if (at < text.length) out.push(text.slice(at))
+  return <>{out}</>
+}
+
+/** An inline switch for a plain boolean row, bound to the store with no effects. */
+function SearchToggle({ entry }: { entry: SettingSearchEntry }) {
+  const settings = useAppStore((s) => s.settings)
+  const updateSettings = useAppStore((s) => s.updateSettings)
+  const toggle = entry.toggle!
+  const disabled = (toggle.disabledUnless ?? []).some((p) => !readSettingPath(settings, p))
+  return (
+    <Toggle
+      checked={Boolean(readSettingPath(settings, toggle.path))}
+      disabled={disabled}
+      onChange={(v) => updateSettings(settingsPatchForPath(useAppStore.getState().settings, toggle.path, v))}
+    />
+  )
+}
+
+function SearchResults({
+  groups,
+  query,
+  t,
+  onOpen,
+}: {
+  groups: ReturnType<typeof searchSettings>
+  query: string
+  t: TFn
+  onOpen: (entry: SettingSearchEntry) => void
+}) {
+  if (groups.length === 0) {
+    return (
+      <p data-search-empty className="py-10 text-center text-sm text-text-secondary">
+        {t('settings.search.empty', { q: query.trim() })}
+      </p>
+    )
+  }
+  return (
+    <div className="space-y-6">
+      {groups.map((g) => (
+        <section key={g.category} id={`settings-group-${g.category}`} data-search-group={g.category} className="scroll-mt-2">
+          <h4 className="mb-1.5 px-2 text-xs font-semibold uppercase tracking-wide text-text-secondary">
+            <Highlight text={t(CATEGORY_LABEL[g.category])} query={query} />
+          </h4>
+          <div className="space-y-0.5">
+            {g.entries.map((entry) => {
+              const title = t(entry.titleKey)
+              return (
+                <SearchSummaryRow
+                  key={entry.id}
+                  id={entry.id}
+                  title={<Highlight text={title} query={query} />}
+                  description={entry.descriptionKey ? <Highlight text={t(entry.descriptionKey)} query={query} /> : undefined}
+                  crumb={entry.groupKey ? <Highlight text={t(entry.groupKey)} query={query} /> : undefined}
+                  control={entry.toggle ? <SearchToggle entry={entry} /> : undefined}
+                  openLabel={t('settings.search.open', { title })}
+                  onOpen={() => onOpen(entry)}
+                />
+              )
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  )
+}
+
 export function SettingsModal() {
   const t = useT()
   const open = useAppStore((s) => s.settingsOpen)
   const setOpen = useAppStore((s) => s.setSettingsOpen)
   const settingsCategory = useAppStore((s) => s.settingsCategory)
+  const query = useAppStore((s) => s.settingsQuery)
+  const setQuery = useAppStore((s) => s.setSettingsQuery)
+  const anchor = useAppStore((s) => s.settingsAnchor)
+  const setAnchor = useAppStore((s) => s.setSettingsAnchor)
+  const keymap = useAppStore((s) => s.settings.keymap)
 
   const [active, setActive] = useState<CategoryId>('terminal')
-  const [query, setQuery] = useState('')
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Apply a deep-link target (e.g. openSettings('remote')) once, then clear it.
-  // A 'category#row' target opens the category (the row part is a later hook).
+  // Apply a deep-link target (openSettings('remote') or 'notifications#sound')
+  // once, then clear it. The row part stays in settingsAnchor until it renders.
   useEffect(() => {
     if (open && settingsCategory) {
-      setActive(settingsCategory.split('#')[0] as CategoryId)
+      const { category } = parseSettingsTarget(settingsCategory)
+      if (category) setActive(category)
       useAppStore.setState({ settingsCategory: null })
     }
   }, [open, settingsCategory])
 
-  const visible = useMemo(() => CATEGORIES.filter((c) => matches(c, query, t)), [query, t])
-  const current = visible.some((c) => c.id === active) ? active : (visible[0]?.id ?? 'terminal')
-  const Section = SECTIONS[current]
-  const currentLabel = CATEGORIES.find((c) => c.id === current)?.labelKey ?? 'settings.title'
+  const searching = searchTokens(query).length > 0
+  const groups = useMemo(() => {
+    if (!searching) return []
+    const accels = resolveKeymap(keymap)
+    // Key rows also match their current accelerator ("ctrl k").
+    const extraFor = (entry: SettingSearchEntry): string[] => {
+      if (entry.category !== 'keys') return []
+      const accel = accels[entry.id.slice(5) as keyof typeof accels]
+      return accel ? [accel, formatAccel(accel)] : []
+    }
+    return searchSettings(query, t, extraFor)
+  }, [searching, query, t, keymap])
+  const counts = useMemo(() => new Map(groups.map((g) => [g.category, g.entries.length])), [groups])
 
-  const close = (): void => {
+  const current = active
+  const Section = SECTIONS[current]
+
+  // Scroll to the deep-linked row once its section is mounted (effects run
+  // after the commit, so it is in the DOM), ring it for 1200 ms, then drop the
+  // anchor. A missing row just leaves the category open.
+  useEffect(() => {
+    if (!open || !anchor || searching) return
+    if (!anchor.startsWith(current + '.')) return
+    const el = document.getElementById(settingDomId(anchor))
+    setAnchor(null)
+    if (!el) return
+    el.scrollIntoView({ block: 'start' })
+    document.querySelectorAll('[data-setting-flash]').forEach((n) => n.removeAttribute('data-setting-flash'))
+    el.setAttribute('data-setting-flash', '')
+    if (flashTimer.current) clearTimeout(flashTimer.current)
+    flashTimer.current = setTimeout(() => el.removeAttribute('data-setting-flash'), FLASH_MS)
+  }, [open, anchor, current, searching, setAnchor])
+
+  useEffect(() => () => {
+    if (flashTimer.current) clearTimeout(flashTimer.current)
+  }, [])
+
+  const close = (): void => setOpen(false)
+
+  const openEntry = (entry: SettingSearchEntry): void => {
+    setActive(entry.category)
     setQuery('')
-    setOpen(false)
+    setAnchor(entry.summary ? null : entry.id)
   }
+
+  const onNav = (cat: CategoryId): void => {
+    if (searching) document.getElementById(`settings-group-${cat}`)?.scrollIntoView({ block: 'start' })
+    else setActive(cat)
+  }
+
+  const navCats = searching ? CATEGORY_ORDER.filter((c) => counts.has(c)) : CATEGORY_ORDER
+  const total = groups.reduce((n, g) => n + g.entries.length, 0)
 
   return (
     <Modal open={open} onClose={close} title={t('settings.title')} className="max-w-4xl">
@@ -122,9 +240,25 @@ export function SettingsModal() {
           <div className="flex items-center gap-2 rounded-btn border border-border bg-bg-secondary px-3">
             <Search size={15} className="shrink-0 text-text-secondary" />
             <input
+              autoFocus
+              spellCheck={false}
+              data-settings-search
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && query) {
+                  // First Esc clears the query; the next one closes (Modal).
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setQuery('')
+                } else if (e.key === 'Enter' && !e.nativeEvent.isComposing && searching) {
+                  e.preventDefault()
+                  const first = groups[0]?.entries[0]
+                  if (first) openEntry(first)
+                }
+              }}
               placeholder={t('settings.search')}
+              aria-label={t('settings.search')}
               className="h-9 min-w-0 flex-1 bg-transparent text-sm text-text-primary outline-none placeholder:text-text-secondary"
             />
           </div>
@@ -132,13 +266,15 @@ export function SettingsModal() {
 
         <div className="flex h-[62vh]">
           <nav className="w-52 shrink-0 space-y-0.5 overflow-y-auto border-r border-border p-2">
-            {visible.map((cat) => {
-              const Icon = cat.icon
-              const isActive = cat.id === current
+            {navCats.map((id) => {
+              const Icon = ICONS[id]
+              const isActive = !searching && id === current
+              const count = counts.get(id)
               return (
                 <button
-                  key={cat.id}
-                  onClick={() => setActive(cat.id)}
+                  key={id}
+                  data-settings-nav={id}
+                  onClick={() => onNav(id)}
                   className={cn(
                     'flex w-full items-center gap-2.5 rounded-btn px-2.5 py-2 text-left text-sm transition-colors',
                     isActive
@@ -147,15 +283,31 @@ export function SettingsModal() {
                   )}
                 >
                   <Icon size={16} className="shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">{t(cat.labelKey)}</span>
+                  <span className="min-w-0 flex-1 truncate">{t(CATEGORY_LABEL[id])}</span>
+                  {searching && count !== undefined && (
+                    <span data-search-count className="shrink-0 rounded-full bg-bg-secondary px-1.5 text-[11px] tabular-nums text-text-secondary">
+                      {count}
+                    </span>
+                  )}
                 </button>
               )
             })}
           </nav>
 
           <div className="min-w-0 flex-1 overflow-y-auto p-6">
-            <h3 className="mb-5 text-base font-semibold text-text-primary">{t(currentLabel)}</h3>
-            <Section />
+            {searching ? (
+              <>
+                <h3 className="sr-only" aria-live="polite">
+                  {t('settings.search.results', { count: total })}
+                </h3>
+                <SearchResults groups={groups} query={query} t={t} onOpen={openEntry} />
+              </>
+            ) : (
+              <>
+                <h3 className="mb-5 text-base font-semibold text-text-primary">{t(CATEGORY_LABEL[current])}</h3>
+                <Section />
+              </>
+            )}
           </div>
         </div>
       </div>

@@ -10,6 +10,7 @@ import {
   type ActionId,
 } from '@/lib/keymap'
 import { cn } from '@/lib/cn'
+import { settingDomId } from '../searchCatalog'
 
 export function KeymapSection() {
   const t = useT()
@@ -41,7 +42,9 @@ export function KeymapSection() {
         return (
           <div
             key={a.id}
-            className="flex items-center gap-3 rounded-card border border-border bg-bg-secondary px-3 py-2"
+            id={settingDomId(`keys.${a.id}`)}
+            data-setting-id={`keys.${a.id}`}
+            className="flex scroll-mt-6 items-center gap-3 rounded-card border border-border bg-bg-secondary px-3 py-2"
           >
             <span className="min-w-0 flex-1 truncate text-sm text-text-primary">
               {t(a.labelKey)}
