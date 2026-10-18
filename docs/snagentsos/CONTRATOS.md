@@ -130,10 +130,10 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v2.0 | `app:legacyOpenLog` | send | sin payload; `shell.openPath` de `logs/legacy-migration.log` | E0 |
 | v2.0 | `app:legacyStatus` | main->renderer | `LegacyDataInfo` en cada cambio de la limpieza | E0 |
 | v2.1 | `power:setConfig` | send | `'auto'\|'always'\|'never'` | E4 |
-| v2.1 | `power:state` | main->renderer | `{ blocking: boolean; reason: 'agents'\|'always'\|null }` | E4 |
+| v2.1 | `power:state` | main->renderer | `PowerState` = `{ blocking: boolean; reason: 'agents'\|'always'\|null; mode?: 'auto'\|'always'\|'never'; display?: boolean; workingCount?: number; releaseAt?: number /* epoch ms, solo en la gracia de 120 s */ }`. Los opcionales (enmienda v2.1) alimentan el tooltip de E5-FR-24 ("2 agentes trabajando (Auto)", "se libera en 1:45") | E4 |
 | v2.1 | (preload, sin IPC) `snApi.files.pathForFile` | sync | `File -> string` via `webUtils.getPathForFile` | E4 |
 | v2.1 | `status:state` (existente) | main->renderer | `PaneStatusEvt` extendido (stateSince, lastMessage, activity, pending, sessionId, cwd, detail, topic, firstPrompt, cacheSince) | E4 |
-| v2.1 | `power:getState` | invoke | `-> { blocking: boolean; reason: 'agents'\|'always'\|null }` (estado inicial; los cambios llegan por `power:state`) | E4 |
+| v2.1 | `power:getState` | invoke | `-> PowerState` (estado inicial; los cambios llegan por `power:state`) | E4 |
 | v2.1 | `pty:restart` | invoke | `PtyRestartReq -> PtyRestartRes`; rechaza con Error si el spawn falla. Reinicio en el lugar: conserva el contenido y no emite `exit` al celu | E6 |
 | v2.1 | `status:sessionEnd` | main->renderer | `AgentSessionEndEvt` | E6 |
 | v2.1 | `agents:list` | invoke | `-> AgentSessionView[]` | E5 |
@@ -167,7 +167,7 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v3.0 | `git:worktreeRemove` | invoke | `{ path, deleteBranch } -> void` | E6 |
 | v3.0 | `cli:setEnabled` | send | `boolean` | E6 |
 
-Los `agents:awake` / `agents:awakeGet` de E5 no existen: el estado de "PC despierta" usa `power:setConfig`, `power:state` y `power:getState` (R21-06; gana el contrato). `awakeDisplay` viaja en `agents:setConfig`.
+Los `agents:awake` / `agents:awakeGet` de E5 no existen: el estado de "PC despierta" usa `power:setConfig`, `power:state` y `power:getState` (R21-06; gana el contrato). `PowerState` cubre lo que E5 ponia en `AwakeState`: `reason: 'agents'` agrupa `working` y `phone`, y la gracia se ve como `blocking: true` con `releaseAt`. `awakeDisplay` viaja en `agents:setConfig`.
 
 No existen (E0-FR-11 retirado, verificacion negativa en E0): `app:legacyOpenDir`, `app:legacyImport` ni `app:legacyCleanup`. Ningun canal de E0 importa, borra ni acepta rutas desde el renderer.
 
@@ -256,4 +256,4 @@ Ids y combinaciones de v2.1 segun D8 (gana el contrato): `reopenClosedPane` es C
 
 | Tramo | Cerrada en | Enmiendas |
 |---|---|---|
-| v2.1 | R21-00 | `RemotePaneStatus.precise?` (adoptada); `RemotePaneInfo.resumable?` (D10); `RemoteStateSnapshot.terminalUnicode?`, `replay.exitCode?`, `RemotePaneInfo.exitCode?`; IPC `pty:restart`, `status:sessionEnd`, `agents:*`, `power:getState`; campos desktop-only de `PaneStatus` (`detail`, `topic`, `firstPrompt`, `cacheSince`); claves `notifications.inAppWhenFocused`, `settings.agents.*` (v11), `workspaces[].agentsCollapsed`, `terminalAgentEndChip`; storage `snagentsos.alerts.inPage` y sessionStorage `snagentsos.reloadFor`; atajos segun D8; archivo `dataDir()/agent-sessions.json` |
+| v2.1 | R21-00 | `RemotePaneStatus.precise?` (adoptada); `RemotePaneInfo.resumable?` (D10); `RemoteStateSnapshot.terminalUnicode?`, `replay.exitCode?`, `RemotePaneInfo.exitCode?`; IPC `pty:restart`, `status:sessionEnd`, `agents:*`, `power:getState` y los opcionales de `PowerState`; campos desktop-only de `PaneStatus` (`detail`, `topic`, `firstPrompt`, `cacheSince`); claves `notifications.inAppWhenFocused`, `settings.agents.*` (v11), `workspaces[].agentsCollapsed`, `terminalAgentEndChip`; storage `snagentsos.alerts.inPage` y sessionStorage `snagentsos.reloadFor`; atajos segun D8; archivo `dataDir()/agent-sessions.json` |

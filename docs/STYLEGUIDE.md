@@ -15,7 +15,7 @@ Reglas de UI y de copy para el desktop (`src/renderer`) y el cliente mobile (`sr
 
 | Queres... | Usa | No uses |
 |---|---|---|
-| Confirmar algo transitorio ("Copiado", "Enviado a 3 consolas") | Toast (pila de `src/renderer/lib/toast.ts`; en mobile `setToast` del store) | Modal, banner |
+| Confirmar algo transitorio ("Copiado", "Enviado a 3 consolas") | Toast (pila de `src/renderer/lib/toast.ts`, que nace con E4-FR-03; en mobile `setToast` del store) | Modal, banner |
 | Mostrar un estado que sigue vigente ("Puerto ocupado") | Error inline junto al control | Toast (se va solo) |
 | Pedir una decision que bloquea ("Cerrar 3 consolas en ejecucion?") | Modal (`common/Modal.tsx`, `ui/ConfirmDialog.tsx`) | Popover, toast |
 | Nombrar un boton de solo icono | `ui/Tooltip.tsx` | `title=""` nativo |
