@@ -1,6 +1,6 @@
 import { ipcMain, type WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
-import type { UpdateInfo, UpdateProgress, UpdateState } from '@shared/ipc-contract'
+import type { InstallKind, UpdateInfo, UpdateProgress, UpdateState } from '@shared/ipc-contract'
 import { checkForUpdate, downloadAndInstall } from '../updater'
 import { isUpdateBusy, updateState as sharedState, type UpdateStateStore } from '../updateState'
 
@@ -10,9 +10,15 @@ interface UpdateIpcHooks {
   quitForUpdate: () => void
   /** Reports whether an install is in flight so the main process can block close. */
   setInstalling: (installing: boolean) => void
+  /**
+   * Saves the scrollback synchronously right before the NSIS setup starts
+   * (E6-FR-10). Only the Windows installer: the portable swap and the
+   * AppImage quit through before-quit, which saves on its own.
+   */
+  persistBeforeInstall?: () => void
   /** Test seams: the check/install implementations and the state store. */
   check?: () => Promise<UpdateInfo>
-  install?: (onProgress: (p: UpdateProgress) => void) => Promise<{ relaunching: boolean }>
+  install?: (onProgress: (p: UpdateProgress) => void, opts?: { beforeApply?: (kind: InstallKind) => void }) => Promise<{ relaunching: boolean }>
   state?: UpdateStateStore
 }
 
@@ -58,10 +64,17 @@ export function registerUpdateIpc(hooks: UpdateIpcHooks): void {
     const run = async (): Promise<{ relaunching: boolean }> => {
       state.begin()
       try {
-        const result = await install((p) => {
-          state.progress(p)
-          send(CH.UPDATE_PROGRESS, p)
-        })
+        const result = await install(
+          (p) => {
+            state.progress(p)
+            send(CH.UPDATE_PROGRESS, p)
+          },
+          {
+            beforeApply: (kind) => {
+              if (kind === 'win-installer') hooks.persistBeforeInstall?.()
+            },
+          },
+        )
         state.installed(result.relaunching)
         if (result.relaunching) {
           // Give the renderer a tick to settle, then quit so the swap can run.

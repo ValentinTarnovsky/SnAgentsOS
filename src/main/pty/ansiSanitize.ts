@@ -27,3 +27,41 @@ export function sanitizeQueries(raw: string): string {
   const csi = raw.includes('\x1b[') ? raw.replace(QUERY_RE, '') : raw
   return csi.includes('\x1b]') || csi.includes('\x1bP') ? csi.replace(OSC_DCS_QUERY_RE, '') : csi
 }
+
+/**
+ * Strings that end at ST (`ESC \`) or, for OSC, also at BEL: OSC, DCS, SOS, PM
+ * and APC. Any other ESC ends them too (xterm.js dispatches an OSC or DCS cut
+ * by `ESC [`), so the body goes up to it and the ESC stays for what follows.
+ * An unterminated one at the end runs to the end of the text.
+ */
+const STRING_SEQ_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|(?=\x1b)|$)|\x1b[P_^X][^\x1b]*(?:\x1b\\|(?=\x1b)|$)/g
+/** Passes before a text that keeps producing new sequences loses every ESC. */
+const SEED_PASSES = 8
+/**
+ * C1 controls and ENQ. A saved seed comes from addon-serialize, which never
+ * emits them; an 8-bit CSI/OSC/DCS (0x9b/0x9d/0x90) in an edited file would
+ * open a sequence the 7-bit filters above do not see.
+ */
+const C1_ENQ_RE = /[\x05\x80-\x9f]/g
+
+/**
+ * A saved scrollback about to be written into a terminal again (E6-FR-37):
+ * every OSC (titles, hyperlinks, clipboard, color queries), DCS, SOS, PM and
+ * APC string and every CSI query/report goes, so a hand-edited file can
+ * neither answer into the shell, set the title (and through it Claude's state)
+ * nor reach the clipboard. SGR, cursor moves and erases are kept.
+ */
+export function sanitizeSeed(ansi: string): string {
+  if (!ansi) return ''
+  const noC1 = ansi.replace(C1_ENQ_RE, '')
+  if (!noC1.includes('\x1b')) return noC1
+  // A removal can join the halves around it into a new sequence
+  // (`ESC ESC[c ]0;t BEL` becomes an OSC title), so it repeats until stable.
+  let text = noC1
+  for (let pass = 0; pass < SEED_PASSES; pass++) {
+    const next = text.replace(STRING_SEQ_RE, '').replace(QUERY_RE, '')
+    if (next === text) return text
+    text = next
+  }
+  return text.replace(/\x1b/g, '')
+}

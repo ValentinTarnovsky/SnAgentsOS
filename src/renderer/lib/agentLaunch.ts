@@ -115,7 +115,7 @@ export async function prepareAgentLaunch(paneId: string, base: ResolvedLaunch): 
         )
       }
       // A resume command never takes a positional prompt (E8-FR-02b): 'other'.
-      return { ...base, cwd: session.spawnCwd || session.cwd || base.cwd, initialCommand: command, launchKind: 'other' }
+      return { ...base, cwd: session.spawnCwd || session.cwd || base.cwd, initialCommand: command, launchKind: 'other', resumed: true }
     }
   }
   // The chat that would have come back is gone: say so (explicit resume, or

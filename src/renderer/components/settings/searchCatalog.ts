@@ -111,6 +111,8 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('terminal.selectionOverride', 'settings.selectionOverride', 'settings.selectionOverrideHint', { keywords: ['selection', 'seleccion', 'mouse', 'copy', 'copiar'], toggle: { path: 'terminalSelectionOverride' } }),
   e('terminal.unicode11', 'settings.unicode11', 'settings.unicode11Hint', { keywords: ['unicode', 'emoji', 'width', 'ancho'], toggle: { path: 'terminalUnicode11' } }),
   e('terminal.agentEndChip', 'settings.agentEndChip', 'settings.agentEndChipHint', { keywords: ['exit', 'salida', 'claude', 'codex'], toggle: { path: 'terminalAgentEndChip' } }),
+  e('terminal.persistScrollback', 'settings.persistScrollback', 'settings.persistScrollbackHint', { groupKey: 'settings.persistGroup', keywords: ['history', 'historial', 'restart', 'reinicio', 'save', 'guardar', 'scrollback', 'persist'] }),
+  e('terminal.persistLines', 'settings.persistLines', undefined, { groupKey: 'settings.persistGroup', keywords: ['history', 'historial', 'lines', 'lineas', 'scrollback'] }),
   e('terminal.snapshotMode', 'settings.snapshotMode', 'settings.snapshotModeHint', { groupKey: 'settings.terminalAdvanced', keywords: ['snapshot', 'headless', 'replay', 'reattach', 'recarga', 'reload', 'avanzado', 'advanced'] }),
 
   // Agents

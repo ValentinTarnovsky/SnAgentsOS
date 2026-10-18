@@ -1,6 +1,7 @@
 // Terminal engine (E6): ModeTracker, replay hygiene, the exit frame, the
 // in-place restart and the exited record, the phone exit strip state and the
-// default shell resolution, against the real main-process modules with a fake
+// default shell resolution, the saved scrollback (store, checkpoint, seed),
+// against the real main-process modules with a fake
 // node-pty. xterm and its addons are pinned exact: a bump must pass this suite.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -274,7 +275,7 @@ async function main() {
     const p1 = phone()
     sm.handleSub(p1.session, 'pane')
     const res = pm.restart({ paneId: 'pane', cols: 90, rows: 30, initialCommand: 'claude --resume abc' }, 'reiniciado 14:32')
-    check(res.ptyId !== first.ptyId && res.tail === restartTail('reiniciado 14:32') && ['powershell', 'posix', 'other', 'cmd'].includes(res.shellKind), 'restart returns the new pty, its tail and shell kind')
+    check(res.ptyId !== first.ptyId && res.tail === restartTail('reiniciado 14:32', 30) && res.tail.endsWith('\n'.repeat(29) + '\x1b[H') && ['powershell', 'posix', 'other', 'cmd'].includes(res.shellKind), 'restart returns the new pty, its tail and shell kind')
     check(h.procs[0].killed && !p1.frames.some(f => f.type === 'exit'), 'the old pty is killed and phones get no exit frame')
     check(statusExits.at(-1).ptyId === first.ptyId && statusExits.at(-1).natural === false && statusExits.at(-1).current === true, 'the status sink still hears the old exit (not natural) to release integrations')
     const oldExit = h.sent.find(s => s.ch === 'pty:exit' && s.p.ptyId === first.ptyId)
@@ -733,6 +734,414 @@ async function main() {
     const alias = apps && fs.existsSync(apps) ? fs.readdirSync(apps).find(f => f.toLowerCase().endsWith('.exe')) : null
     if (alias) check(!resolveShell(path.join(apps, alias), 'x').warning, 'a Windows App Execution Alias counts as an existing shell')
     else console.log('  (no App Execution Alias on this machine, alias probe skipped)')
+  }
+
+  // --- Saved scrollback (E6-FR-08..13, 36, 37) -------------------------------
+  {
+    const fs = require('node:fs')
+    const { Terminal } = require('@xterm/headless')
+    const { SessionManager } = load('src/main/remote/SessionManager.ts', { setInterval: () => 0, clearInterval() {} })
+    const { sanitizeSeed } = load('src/main/pty/ansiSanitize.ts')
+    // fs as ScrollbackStore sees it: a case can make rename fail with EPERM.
+    const faults = { rename: 0, renameSync: 0 }
+    const eperm = () => Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+    const fakeFs = {
+      ...fs,
+      renameSync: (a, b) => { if (faults.renameSync > 0) { faults.renameSync--; throw eperm() } return fs.renameSync(a, b) },
+      promises: { ...fs.promises, rename: async (a, b) => { if (faults.rename > 0) { faults.rename--; throw eperm() } return fs.promises.rename(a, b) } },
+    }
+    const storeLogs = []
+    const S = load('src/main/pty/ScrollbackStore.ts', { require: id => id === 'fs' ? fakeFs : require(id) })
+    const { ScrollbackCheckpoint } = load('src/main/pty/ScrollbackCheckpoint.ts')
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'snaos-scrollback-'))
+    let dirSeq = 0
+    const newStore = () => new S.ScrollbackStore(path.join(tmpRoot, `s${++dirSeq}`), msg => storeLogs.push(msg))
+    const client = (cols, rows) => {
+      const t = new Terminal({ cols, rows, scrollback: 6000, allowProposedApi: true, logLevel: 'off' })
+      const replies = [], titles = []
+      t.onData(d => replies.push(d))
+      t.onTitleChange(x => titles.push(x))
+      return { t, replies, titles, write: d => t._core.writeSync(d) }
+    }
+    const texts = buf => { const out = []; for (let y = 0; y < buf.length; y++) out.push(buf.getLine(y).translateToString(true)); return out }
+    const snap = (ansi, extra = {}) => ({ ansi, cols: 80, rows: 24, lines: S.countLines(ansi), ...extra })
+    const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'))
+    const ESC = '\x1b'
+
+    try {
+      // Sanitized seed (E6-FR-37): no OSC/DCS/APC/PM/SOS, no CSI queries, no C1.
+      const evil = `ok${ESC}]0;\u2733 Claude\x07a${ESC}]2;t${ESC}\\b${ESC}]52;c;aGk=\x07c${ESC}Pq#0${ESC}\\d${ESC}_apc${ESC}\\e${ESC}^pm${ESC}\\f${ESC}Xsos${ESC}\\g${ESC}[6nh${ESC}[ci${ESC}[>0cj${ESC}[18tk\x9b6nl\x9d0;x\x07m\x05n${ESC}]0;unterminated`
+      const clean = sanitizeSeed(evil)
+      check(clean === 'okabcdefghijk6nl0;x\x07mn', 'sanitizeSeed drops OSC (BEL/ST, clipboard, unterminated), DCS, APC, PM, SOS, CSI queries, C1 and ENQ')
+      const keep = `${ESC}[38;2;1;2;3mred${ESC}[0m ${ESC}[1mbold${ESC}[22m${ESC}[3;5H${ESC}[K text \u00e9\u6f22`
+      check(sanitizeSeed(keep) === keep && sanitizeSeed('') === '', 'SGR, cursor moves, erases and plain text are kept')
+      const c1 = client(80, 24)
+      c1.write(sanitizeSeed(`hist${ESC}[6n${ESC}[c${ESC}]0;\u2733 Claude\x07${ESC}]11;?\x07${ESC}P$qm${ESC}\\\r\n`))
+      check(c1.replies.length === 0 && c1.titles.length === 0, 'writing a sanitized hostile seed makes the terminal answer nothing and keeps the title (no pty.write, no status change)')
+      // Strings cut by another ESC (xterm.js still dispatches them) and removals that join a new sequence.
+      const sneaky = `a${ESC}]0;✳ Claude${ESC}[0mb${ESC}P$qm${ESC}[1mc${ESC}${ESC}[c]0;joined\x07d${ESC}[${ESC}[cce${ESC}${ESC}]0;x\x07[6nf`
+      const raw = client(80, 24)
+      raw.write(sneaky)
+      check(raw.replies.length > 0 && raw.titles.length > 0, 'fixture: unsanitized, these sequences make xterm answer and set the title')
+      const c2 = client(80, 24)
+      c2.write(sanitizeSeed(sneaky))
+      check(c2.replies.length === 0 && c2.titles.length === 0, 'an OSC/DCS ended by another ESC and sequences joined by a removal are dropped too')
+      check(!sanitizeSeed(sneaky).includes(`${ESC}]`) && !sanitizeSeed(sneaky).includes(`${ESC}P`) && sanitizeSeed(sneaky).includes(`${ESC}[0mb`), 'the ESC that ended the string still opens its own SGR')
+
+      // Persisted text and seed helpers.
+      check(S.trimPersistAnsi(`a${ESC}[31mb${ESC}[0m\r\n   \r\n\r\n${ESC}[3A${ESC}[5C`) === `a${ESC}[31mb`, 'trailing blank rows, SGR and cursor moves are trimmed')
+      check(S.countLines('') === 0 && S.countLines('a') === 1 && S.countLines('a\r\nb\r\nc') === 3, 'countLines counts CRLF rows')
+      const big = Array.from({ length: 3000 }, (_, i) => `line ${i} ` + '\u00e9'.repeat(200)).join('\r\n')
+      const capped = S.capBytes(big, 100 * 1024)
+      check(Buffer.byteLength(capped, 'utf8') <= 100 * 1024 && capped.endsWith('line 2999 ' + '\u00e9'.repeat(200)) && capped.startsWith('line '), 'capBytes keeps the newest whole lines within the byte cap')
+      check(S.scrollOff(5) === '\n\n\n\n\x1b[H' && S.scrollOff(1) === '\x1b[H', 'scrollOff pushes rows-1 lines and homes the cursor')
+      const seed = S.buildSeed('row A\r\nrow B', 'reiniciado - historial del 17/10 14:32\x1b]0;x', 5)
+      check(seed === `row A\r\nrow B${ESC}[0m\r\n${ESC}[2m--- reiniciado - historial del 17/10 14:32]0;x ---${ESC}[0m\r\n\n\n\n\n${ESC}[H`, 'seed = history + reset + gray separator (label without controls) + scroll-off')
+      {
+        // ConPTY starts with ESC[2J ESC[H: the separator and the last screen of history survive.
+        const hist = Array.from({ length: 30 }, (_, i) => `hist ${i}`).join('\r\n')
+        const c = client(80, 10)
+        c.write(S.buildSeed(hist, 'restarted - history from 10/17 2:32 PM', 10))
+        c.write(`${ESC}[?9001h${ESC}[?1004h${ESC}[?25l${ESC}[2J${ESC}[m${ESC}[HPS C:\\> `)
+        const rows = texts(c.t.buffer.normal)
+        const sep = rows.indexOf('--- restarted - history from 10/17 2:32 PM ---')
+        check(rows.includes('hist 0') && rows.includes('hist 29') && sep > 0 && rows[sep - 1] === 'hist 29' && rows[sep + 1].startsWith('PS C:\\>'), 'after the ConPTY clear: all history, the separator, and the new prompt right below it')
+      }
+
+      // ScrollbackStore (E6-FR-09/12).
+      {
+        const st = newStore()
+        check(st.fileOf('../x') === null && st.fileOf('a'.repeat(65)) === null && st.fileOf('pane-1').endsWith(path.join(`s${dirSeq}`, 'pane-1.json')), 'only plain pane ids map to a file in the folder')
+        check(await st.save('../evil', snap('x')) === false && !fs.existsSync(path.join(tmpRoot, 'evil.json')), 'an invalid pane id is never written')
+        check(await st.save('pane-1', snap(`hello ${ESC}[32mworld${ESC}[0m`), 1700000000000) === true, 'save writes the file')
+        const f = readJson(st.fileOf('pane-1'))
+        check(f.v === 1 && f.paneId === 'pane-1' && f.savedAt === 1700000000000 && f.cols === 80 && f.rows === 24 && f.lines === 1 && f.ansi.includes('world'), 'ScrollbackFileV1 shape')
+        check(fs.readdirSync(st.dir).every(n => !n.endsWith('.tmp')), 'no tmp file left after an atomic save')
+        const loaded1 = st.load('pane-1')
+        check(loaded1 && loaded1.savedAt === 1700000000000 && loaded1.ansi === `hello ${ESC}[32mworld${ESC}[0m`, 'load returns the saved text and time')
+        // A hand-edited file: queries and a title inside ansi come back sanitized.
+        fs.writeFileSync(st.fileOf('pane-1'), JSON.stringify({ ...f, ansi: `x${ESC}[6ny${ESC}]0;\u2733 Claude\x07z` }))
+        check(st.load('pane-1').ansi === 'xyz', 'an edited file restores without its queries or title (E6-FR-37)')
+        fs.writeFileSync(st.fileOf('pane-1'), JSON.stringify({ ...f, v: 2 }))
+        check(st.load('pane-1') === null && !fs.existsSync(st.fileOf('pane-1')), 'a file with another shape is deleted and gives no seed')
+        fs.writeFileSync(st.fileOf('pane-1'), '{"v":1,"paneId":')
+        check(st.load('pane-1') === null && !fs.existsSync(st.fileOf('pane-1')), 'a truncated file is deleted too')
+        fs.writeFileSync(st.fileOf('pane-1'), JSON.stringify({ ...f, paneId: 'pane-2' }))
+        check(st.load('pane-1') === null && !fs.existsSync(st.fileOf('pane-1')), 'a file whose paneId does not match its name is deleted')
+        check(st.load('pane-9') === null, 'no file, no seed')
+
+        // EPERM on rename (antivirus): retried, then the previous file is kept.
+        await st.save('pane-e', snap('first version'))
+        faults.rename = 2
+        check(await st.save('pane-e', snap('second version')) === true && st.load('pane-e').ansi === 'second version' && faults.rename === 0, 'a rename blocked twice succeeds on the third try (50 + 150 ms)')
+        faults.rename = 99
+        const before = storeLogs.length
+        check(await st.save('pane-e', snap('third version')) === false, 'a rename blocked every time fails the save')
+        faults.rename = 0
+        check(st.load('pane-e').ansi === 'second version' && fs.readdirSync(st.dir).every(n => !n.endsWith('.tmp')) && storeLogs.length === before + 1, 'the previous file stays, the tmp is removed and it is logged once')
+        faults.renameSync = 99
+        check(st.saveSync('pane-e', snap('sync version')) === false && st.load('pane-e').ansi === 'second version' && fs.readdirSync(st.dir).every(n => !n.endsWith('.tmp')), 'the synchronous save keeps the previous file on EPERM too')
+        faults.renameSync = 1
+        check(st.saveSync('pane-e', snap('sync version')) === true && st.load('pane-e').ansi === 'sync version', 'and retries a single blocked rename')
+        faults.renameSync = 0
+        // An async checkpoint still in flight never lands over a newer exit save.
+        const late = st.save('pane-e', snap('older checkpoint'))
+        st.saveSync('pane-e', snap('exit save'))
+        check(await late === false && st.load('pane-e').ansi === 'exit save', 'an older async save is dropped once a newer synchronous save landed')
+
+        // Trash, remove, stats, clearAll.
+        await st.save('pane-t', snap('trash me'))
+        await st.trash('pane-t')
+        check(!fs.existsSync(st.fileOf('pane-t')) && fs.existsSync(path.join(st.dir, '.trash', 'pane-t.json')), 'trash moves the file to .trash/')
+        check(st.load('pane-t').ansi === 'trash me', 'a trashed history still restores (console reopened in this session)')
+        const stats = await st.stats()
+        check(stats.files === 1 && stats.bytes > 0, 'stats counts live files only (not the trash)')
+        await st.remove('pane-t')
+        check(!fs.existsSync(path.join(st.dir, '.trash', 'pane-t.json')) && st.load('pane-t') === null, 'remove deletes the trashed copy at once')
+        await st.save('pane-r', snap('remove me'))
+        await st.remove('pane-r')
+        check(!fs.existsSync(st.fileOf('pane-r')), 'remove deletes the live file at once')
+        await st.save('pane-a', snap('a')); await st.trash('pane-a')
+        await st.clearAll()
+        check((await st.stats()).files === 0 && !fs.existsSync(path.join(st.dir, '.trash')), 'clearAll empties the folder and the trash')
+      }
+      {
+        // Startup GC: orphans and trash only with a primary config; 50 MB cap.
+        const st = newStore()
+        for (const id of ['pane-live', 'pane-orphan', 'pane-old']) await st.save(id, snap(id))
+        await st.save('pane-gone', snap('gone')); await st.trash('pane-gone')
+        fs.writeFileSync(path.join(st.dir, 'pane-live.json.123.9.tmp'), 'partial')
+        fs.writeFileSync(path.join(st.dir, 'notes.txt'), 'not ours')
+        const skipped = await st.gc(null)
+        check(skipped.removed.length === 0 && fs.existsSync(st.fileOf('pane-orphan')) && fs.existsSync(path.join(st.dir, '.trash', 'pane-gone.json')), 'GC is skipped without a primary config (recovered from backup): nothing deleted')
+        const res = await st.gc(new Set(['pane-live', 'pane-old']))
+        check(res.removed.join() === 'pane-orphan' && !fs.existsSync(st.fileOf('pane-orphan')) && fs.existsSync(st.fileOf('pane-live')), 'GC deletes files of panes the config no longer has')
+        check(!fs.existsSync(path.join(st.dir, '.trash')) && !fs.existsSync(path.join(st.dir, 'pane-live.json.123.9.tmp')) && fs.existsSync(path.join(st.dir, 'notes.txt')), 'GC empties the trash and orphan tmp files, other files untouched')
+        const old = new Date(Date.now() - 86400000)
+        fs.utimesSync(st.fileOf('pane-old'), old, old)
+        const sizeLive = fs.statSync(st.fileOf('pane-live')).size
+        const capped = await st.gc(null, sizeLive)
+        check(capped.removed.join() === 'pane-old' && fs.existsSync(st.fileOf('pane-live')), 'over the size cap the oldest files go first')
+      }
+
+      // PtyManager: persist snapshot, seed, dirty tracking.
+      {
+        const { pm, h } = manager({ snapshotMode: 'auto', persist: true, persistLines: 200 })
+        pm.spawn({ paneId: 'pp', cols: 80, rows: 24 })
+        check(pm.dirtyPaneIds().length === 0, 'a fresh pty is not dirty')
+        h.procs[0].emit(`${ESC}[?2004h${ESC}[?1000h`)
+        for (let i = 0; i < 1000; i++) h.procs[0].emit(`${ESC}[38;2;10;20;30mline ${i}${ESC}[0m\r\n`)
+        h.procs[0].emit('prompt$ \r\n\r\n\r\n')
+        check(pm.dirtyPaneIds().join() === 'pp', 'unflushed output already counts as dirty')
+        const p1 = pm.takePersist('pp')
+        check(p1 && p1.lines <= 200 && p1.lines >= 150 && p1.ansi.includes('line 999') && !p1.ansi.includes('line 500') && p1.ansi.endsWith('prompt$'), `persist keeps the last ${p1.lines} rows (<= persistScrollbackLines 200), no trailing blank lines`)
+        check(!p1.ansi.includes('?2004h') && !p1.ansi.includes('?1000h') && p1.cols === 80 && p1.rows === 24, 'no modes in the persisted text')
+        check(pm.dirtyPaneIds().length === 0, 'taking the snapshot clears the dirty flag')
+        h.procs[0].emit(`${ESC}[?1049h${ESC}[2J${ESC}[HVIM-BUFFER ~`)
+        const p2 = pm.takePersist('pp')
+        check(p2.ansi.includes('prompt$') && !p2.ansi.includes('VIM-BUFFER'), 'a pane in the alt screen saves only its normal buffer (E6-FR-13)')
+        pm.markDirty('pp')
+        check(pm.dirtyPaneIds().join() === 'pp', 'markDirty puts a pane back on the list')
+        // 1 MB cap with truecolor-heavy output.
+        pm.setEngine({ snapshotMode: 'auto', persist: true, persistLines: 5000 })
+        h.procs[0].emit(`${ESC}[?1049l`)
+        const cell = i => `${ESC}[38;2;${i % 256};${(i * 7) % 256};${(i * 13) % 256}m#`
+        for (let r = 0; r < 1200; r++) { let row = ''; for (let c = 0; c < 70; c++) row += cell(r + c); h.procs[0].emit(row + `${ESC}[0m R${r}\r\n`) }
+        const p3 = pm.takePersist('pp')
+        check(Buffer.byteLength(p3.ansi, 'utf8') <= S.MAX_FILE_BYTES && p3.ansi.includes(' R1199') && !p3.ansi.includes(' R10\r'), `a heavy pane is cut to 1 MB keeping its newest rows (${p3.lines} rows, ${Buffer.byteLength(p3.ansi)} bytes)`)
+        // Natural exit: the exited record is saved too.
+        h.procs[0].emit('bye\r\n')
+        h.procs[0].exit(0)
+        check(pm.dirtyPaneIds().join() === 'pp' && pm.ptyIdForPane('pp') === null, 'an exited pane with unsaved output is dirty')
+        const p4 = pm.takePersist('pp')
+        check(p4 && p4.ansi.includes('bye') && pm.dirtyPaneIds().length === 0 && pm.headlessMetrics().panes === 0, 'an exited pane persists from its record through a temporary mirror')
+        pm.killAll()
+      }
+      {
+        // lazy without a mirror: a temporary one, dropped; off: nothing.
+        const { pm, h } = manager({ snapshotMode: 'lazy', persist: true })
+        pm.spawn({ paneId: 'lz', cols: 80, rows: 24 })
+        h.procs[0].emit(`lazy out\r\n${ESC}[?1049h${ESC}[2Jalt`)
+        const p = pm.takePersist('lz')
+        check(p && p.ansi.includes('lazy out') && !p.ansi.includes('alt') && pm.headlessMetrics().panes === 0, 'lazy without a mirror: the ring goes through a temporary mirror that is dropped')
+        pm.setEngine({ snapshotMode: 'off', persist: true })
+        h.procs[0].emit('more')
+        check(!pm.persistEnabled() && pm.takePersist('lz') === null, "'off' turns persistence off (kill switch)")
+        pm.setEngine({ snapshotMode: 'auto', persist: false })
+        check(!pm.persistEnabled() && pm.takePersist('lz') === null, 'persistScrollback false: nothing to save')
+        pm.killAll()
+      }
+      {
+        // The seed (E6-FR-11): consumed once, not with restoreScrollback false, creates the mirror.
+        const { pm, h } = manager({ snapshotMode: 'lazy', persist: true })
+        const asked = []
+        pm.setSeedSource((paneId, rows) => { asked.push({ paneId, rows }); return `SEED-${paneId}\r\n` + S.scrollOff(rows) })
+        const r1 = pm.spawn({ paneId: 'sa', cols: 80, rows: 20, restoreScrollback: true })
+        check(r1.seed === 'SEED-sa\r\n' + S.scrollOff(20) && asked.length === 1 && asked[0].rows === 20, 'the first spawn with restoreScrollback gets the seed for its rows')
+        check(pm.headlessMetrics().panes === 1, "a seeded spawn creates the mirror even in 'lazy'")
+        const sm = new SessionManager({ ptyManager: pm })
+        pm.addSink(sm)
+        const frames = []
+        sm.handleSub({ ws: { readyState: 1, send: s => frames.push(JSON.parse(s)), bufferedAmount: 0 }, authed: true, subs: new Set(), outBuf: new Map(), outTimer: null, congested: new Set(), congestedSince: new Map(), lastSeen: Date.now() }, 'sa')
+        check(frames[0].type === 'replay' && frames[0].data.includes('SEED-sa'), 'phones see the seed in their replay')
+        check(pm.dirtyPaneIds().length === 0, 'a seed alone does not make the pane dirty (its file stays as it is)')
+        pm.kill(r1.ptyId)
+        const r2 = pm.spawn({ paneId: 'sa', cols: 80, rows: 20, restoreScrollback: true })
+        check(r2.seed === undefined && asked.length === 1, 'a second spawn in the same session (clean restart) gets no seed')
+        const r3 = pm.spawn({ paneId: 'sb', cols: 80, rows: 20, restoreScrollback: false })
+        pm.kill(r3.ptyId)
+        const r4 = pm.spawn({ paneId: 'sb', cols: 80, rows: 20, restoreScrollback: true })
+        check(r3.seed === undefined && r4.seed === undefined && asked.length === 1, 'a resuming first spawn (restoreScrollback false) consumes the seed without loading it')
+        pm.kill(r4.ptyId)
+        pm.forgetSeed('sb')
+        check(pm.spawn({ paneId: 'sb', cols: 80, rows: 20, restoreScrollback: true }).seed.startsWith('SEED-sb'), 'forgetSeed (pane closed and reopened) lets it restore again')
+        pm.killAll()
+        pm.resetSeeds()
+        check(pm.spawn({ paneId: 'sa', cols: 80, rows: 20, restoreScrollback: true }).seed.startsWith('SEED-sa'), 'resetSeeds (a new window after killAll) restores again')
+        pm.killAll()
+        pm.resetSeeds()
+        const realImpl = current.impl
+        current.impl = () => { throw new Error('spawn failed') }
+        let threw = false
+        try { pm.spawn({ paneId: 'sc', cols: 80, rows: 20, restoreScrollback: true }) } catch { threw = true }
+        current.impl = realImpl
+        check(threw && pm.spawn({ paneId: 'sc', cols: 80, rows: 20, restoreScrollback: true }).seed.startsWith('SEED-sc'), 'a spawn that throws does not consume the seed')
+        pm.setEngine({ snapshotMode: 'off', persist: true })
+        pm.killAll(); pm.resetSeeds()
+        check(pm.spawn({ paneId: 'sd', cols: 80, rows: 20, restoreScrollback: true }).seed === undefined, "no seed while persistence is off ('off' mode)")
+        pm.killAll()
+        void h
+      }
+      {
+        // A 600 KB seed + one chunk + a persist keeps the seed (it lives in the mirror, not the 256 KB ring).
+        const { pm, h } = manager({ snapshotMode: 'auto', persist: true, persistLines: 5000 })
+        const seedRows = Array.from({ length: 4000 }, (_, i) => `seed ${String(i).padStart(4, '0')} ` + 'x'.repeat(150))
+        const seedText = seedRows.join('\r\n') + '\r\n'
+        check(seedText.length > 600 * 1024, 'fixture: the seed is over 600 KB')
+        pm.setSeedSource(() => seedText)
+        const { ptyId } = pm.spawn({ paneId: 'big', cols: 200, rows: 30, restoreScrollback: true })
+        h.procs[0].emit('NEW-CHUNK after restore\r\n')
+        await flushAll()
+        const entry = pm.entries.get(ptyId)
+        check(entry.historyTruncated, 'fixture: the ring already dropped the seed head')
+        const p = pm.takePersist('big')
+        check(p.ansi.includes('seed 0100 ') && p.ansi.includes('seed 3999 ') && p.ansi.includes('NEW-CHUNK after restore'), 'the persisted file keeps the old seed rows and the new output')
+        pm.killAll()
+      }
+      {
+        // Clear saved history: the next save brings no old scrollback back.
+        const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+        pm.spawn({ paneId: 'cl', cols: 80, rows: 10 })
+        for (let i = 0; i < 100; i++) h.procs[0].emit(`OLD-${i}\r\n`)
+        await flushAll()
+        pm.clearPersisted('cl')
+        check(pm.dirtyPaneIds().length === 0, 'clearing leaves nothing dirty')
+        h.procs[0].emit('NEW-1\r\n')
+        const p = pm.takePersist('cl')
+        check(p.ansi.includes('NEW-1') && !p.ansi.includes('OLD-10\r'), 'after a clear the next save holds only the screen and newer output')
+        pm.killAll()
+      }
+
+      // ScrollbackCheckpoint: 60 s checkpoint and the synchronous exit save.
+      {
+        const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+        const st = newStore()
+        const logs = []
+        const cp = new ScrollbackCheckpoint(st, pm, { staggerMs: 0, log: m => logs.push(m) })
+        pm.spawn({ paneId: 'c1', cols: 80, rows: 24 })
+        pm.spawn({ paneId: 'c2', cols: 80, rows: 24 })
+        pm.spawn({ paneId: 'c3', cols: 80, rows: 24 })
+        h.procs[0].emit('one\r\n'); h.procs[1].emit('two\r\n')
+        await cp.runOnce()
+        check(fs.existsSync(st.fileOf('c1')) && fs.existsSync(st.fileOf('c2')) && !fs.existsSync(st.fileOf('c3')), 'a checkpoint saves the dirty panes only')
+        check(st.load('c1').ansi.includes('one') && pm.dirtyPaneIds().length === 0, 'checkpoint content and dirty flags cleared')
+        const m1 = fs.statSync(st.fileOf('c1')).mtimeMs
+        await cp.runOnce()
+        check(fs.statSync(st.fileOf('c1')).mtimeMs === m1, 'no new output, no rewrite')
+        faults.rename = 99
+        h.procs[0].emit('again\r\n')
+        await cp.runOnce()
+        faults.rename = 0
+        check(pm.dirtyPaneIds().join() === 'c1', 'a failed save puts the pane back for the next checkpoint')
+        // Exit save: flushes first (last 8-250 ms of output), includes exited panes.
+        h.procs[1].emit('last bytes before quit')
+        h.procs[2].emit('c3 out\r\n'); h.procs[2].exit(2)
+        const r = cp.persistAllSync()
+        check(r.saved === 3 && r.skipped === 0, 'persistAllSync saves live and exited dirty panes')
+        check(st.load('c2').ansi.includes('last bytes before quit') && st.load('c3').ansi.includes('c3 out') && st.load('c1').ansi.includes('again'), 'including unflushed output and the exited pane')
+        check(cp.persistOnExit() === true && cp.persistOnExit() === false, 'persistOnExit saves once per exit')
+        cp.resetExit()
+        check(cp.persistOnExit() === true, 'after killAll the flag resets and the next exit saves again')
+        pm.setEngine({ snapshotMode: 'auto', persist: false })
+        h.procs[0].emit('ignored\r\n')
+        check(cp.persistAllSync().saved === 0, 'persistence off: the exit save writes nothing')
+        let ticks = 0
+        const timers = { setInterval: (fn, ms) => { ticks = ms; return 7 }, clearInterval: hd => { ticks = hd === 7 ? -1 : ticks }, now: () => Date.now() }
+        const cp2 = new ScrollbackCheckpoint(st, pm, { timers })
+        cp2.start(); cp2.start()
+        check(ticks === 60000, 'the checkpoint runs every 60 s')
+        cp2.stop()
+        check(ticks === -1, 'stop clears the timer')
+        pm.killAll()
+      }
+      {
+        // Budget: 12 panes x 256 KB within 1500 ms, all of them saved (logs the real time).
+        const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+        const st = newStore()
+        const cp = new ScrollbackCheckpoint(st, pm, { log() {} })
+        const row = `${ESC}[38;2;200;100;50m` + 'q'.repeat(100) + `${ESC}[0m\r\n`
+        for (let p = 0; p < 12; p++) {
+          pm.spawn({ paneId: `b${p}`, cols: 120, rows: 40 })
+          const proc = h.procs.at(-1)
+          for (let i = 0; i * row.length < 256 * 1024; i++) proc.emit(row)
+        }
+        await flushAll()
+        const r = cp.persistAllSync()
+        console.log(`  persistAllSync: 12 panes x 256 KB in ${Math.round(r.ms)} ms (budget 1500 ms), saved ${r.saved}, skipped ${r.skipped}`)
+        check(r.ms <= 1500 && r.saved === 12 && r.skipped === 0, 'persistAllSync saves 12 full panes within the 1500 ms budget (E6-FR-10)')
+        // A clock that runs out after the first pane: the rest keep their checkpoint.
+        for (let p = 0; p < 12; p++) h.procs[p].emit('more\r\n')
+        let t = 0
+        const slow = new ScrollbackCheckpoint(st, pm, { log() {}, timers: { setInterval: () => 0, clearInterval() {}, now: () => (t += 1000) } })
+        const rs = slow.persistAllSync()
+        check(rs.saved === 1 && rs.skipped === 11, 'past the 1500 ms budget the remaining panes are skipped')
+        check(pm.dirtyPaneIds().length === 11, 'skipped panes stay dirty for the next save')
+        pm.killAll()
+      }
+
+      // IPC: scrollback:* channels and the installer hook.
+      {
+        const handlers = {}
+        const fakeElectron = { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn }, on() {} } }
+        const ipc = load('src/main/ipc/registerPtyIpc.ts', { require: id => id === 'electron' ? fakeElectron : id === 'fs' ? fakeFs : require(id) })
+        const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+        const st = newStore()
+        ipc.registerPtyIpc(pm, () => 'restarted', st)
+        await st.save('ip1', snap('saved one'))
+        check(await handlers['pty:scrollbackLoad'](null, 'ip1') === 'saved one' && await handlers['pty:scrollbackLoad'](null, 42) === null, 'pty:scrollbackLoad returns the sanitized text (contract), junk ids -> null')
+        pm.spawn({ paneId: 'ip1', cols: 80, rows: 24 })
+        await handlers['scrollback:clear'](null, 'ip1', { trash: true })
+        check(!fs.existsSync(st.fileOf('ip1')) && fs.existsSync(path.join(st.dir, '.trash', 'ip1.json')), 'scrollback:clear with trash moves the file to the trash')
+        await st.save('ip2', snap('saved two'))
+        pm.spawn({ paneId: 'ip2', cols: 80, rows: 24 })
+        h.procs.at(-1).emit('screen text\r\n')
+        await handlers['scrollback:clear'](null, 'ip2')
+        check(!fs.existsSync(st.fileOf('ip2')) && pm.dirtyPaneIds().length === 0, 'scrollback:clear deletes at once and nothing is left dirty')
+        await st.save('ip3', snap('three'))
+        const s1 = await handlers['scrollback:stats']()
+        await handlers['scrollback:clearAll']()
+        const s2 = await handlers['scrollback:stats']()
+        check(s1.files === 1 && s2.files === 0 && s2.bytes === 0, 'scrollback:stats and scrollback:clearAll')
+        await handlers['scrollback:clear'](null, { paneId: 'x' })
+        check(true, 'a malformed clear is ignored')
+        pm.killAll()
+
+        const uh = {}
+        const upd = load('src/main/ipc/registerUpdateIpc.ts', { require: id => id === 'electron' ? { ipcMain: { handle: (ch, fn) => { uh[ch] = fn }, on() {} }, app: { getVersion: () => '2.0.0', isPackaged: false }, net: {}, shell: {} } : require(id), setTimeout: () => 0 })
+        const stateMod = load('src/main/updateState.ts')
+        let persisted = 0
+        let kind = 'win-portable'
+        upd.registerUpdateIpc({
+          getSender: () => null, quitForUpdate() {}, setInstalling() {},
+          persistBeforeInstall: () => { persisted++ },
+          install: async (_p, opts) => { opts.beforeApply(kind); return { relaunching: kind === 'win-portable' } },
+          state: new stateMod.UpdateStateStore(),
+        })
+        await uh['update:install']()
+        check(persisted === 0, 'the portable update does not use the installer hook (before-quit saves)')
+        kind = 'win-installer'
+        await uh['update:install']()
+        check(persisted === 1, 'the NSIS installer saves the scrollback right before the setup runs')
+      }
+
+      // ConfigStore.lastLoadSource drives the GC skip.
+      {
+        const cfgDir = path.join(tmpRoot, 'cfg')
+        fs.mkdirSync(cfgDir, { recursive: true })
+        const { ConfigStore } = load('src/main/store/ConfigStore.ts', { require: id => id === 'electron' ? { app: { getPath: () => cfgDir, isPackaged: false } } : require(id), console: ptyConsole })
+        const { parseConfig } = load('src/main/store/schema.ts')
+        const cs = new ConfigStore()
+        cs.load()
+        check(cs.lastLoadSource === 'none', 'no config: lastLoadSource none')
+        const good = parseConfig({
+          version: 12,
+          workspaces: [{ id: 'w1', name: 'Uno', cwd: 'C:/a', panes: [{ id: 'pane-1', type: 'shell', title: 'Shell', color: '#fff', icon: 'terminal' }] }],
+          presets: [],
+          settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false },
+          activeWorkspaceId: 'w1',
+        })
+        check(good !== null, 'fixture: a minimal config parses')
+        fs.writeFileSync(path.join(cfgDir, 'config.json'), JSON.stringify(good))
+        cs.load()
+        check(cs.lastLoadSource === 'primary', 'readable config.json: primary')
+        fs.writeFileSync(path.join(cfgDir, 'config.json.bak'), JSON.stringify(good))
+        fs.writeFileSync(path.join(cfgDir, 'config.json'), '{"broken"')
+        const rec = cs.load()
+        check(rec !== null && cs.lastLoadSource === 'backup', 'recovered from config.json.bak: backup (the GC is skipped)')
+      }
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true })
+    }
   }
 
   console.log(`PASS: ${checks} terminal engine checks`)

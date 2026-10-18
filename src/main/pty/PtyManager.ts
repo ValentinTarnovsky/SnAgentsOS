@@ -23,6 +23,7 @@ import { resolveShell } from './shellResolve'
 import { ModeTracker } from './ModeTracker'
 import { sanitizeQueries } from './ansiSanitize'
 import { HeadlessMirror } from './HeadlessMirror'
+import { MAX_FILE_BYTES, capBytes, countLines, scrollOff, trimPersistAnsi, type PersistSnapshot } from './ScrollbackStore'
 import { DEFAULT_ENGINE, REPLAY_LINES, mirrorScrollback, normalizeEngine } from '@shared/terminalEngine'
 
 interface Entry {
@@ -189,12 +190,23 @@ export interface ExitedPane {
   rows: number
   exitCode: number
   at: number
+  /** Output arrived since the last scrollback save (carried over from the pty, E6-FR-09). */
+  dirty?: boolean
 }
 
-/** The restart separator line: gray, control characters stripped from the label. */
-export function restartTail(label: string): string {
-  return `${SOFT_RESET}\r\n\x1b[2m--- ${label.replace(/[\x00-\x1f\x7f-\x9f]/g, '')} ---\x1b[0m\r\n`
+/**
+ * The restart separator line: gray, control characters stripped from the
+ * label. With `rows`, the scroll-off follows: the new ConPTY clears the
+ * screen on start (ESC[2J), which would erase the last screen of kept output
+ * and the separator itself.
+ */
+export function restartTail(label: string, rows?: number): string {
+  const line = `${SOFT_RESET}\r\n\x1b[2m--- ${label.replace(/[\x00-\x1f\x7f-\x9f]/g, '')} ---\x1b[0m\r\n`
+  return rows && rows > 0 ? line + scrollOff(rows) : line
 }
+
+/** Restores a pane's saved scrollback: the seed for `rows`, or null (E6-FR-11). */
+export type SeedSource = (paneId: string, rows: number) => string | null
 
 /** Bounded timing samples (ms) with a p95 read (E6-FR-07). */
 class Samples {
@@ -271,6 +283,10 @@ export class PtyManager {
   private bytesParsed = 0
   private snapshotCacheHits = 0
   private debugTimer: ReturnType<typeof setInterval> | null = null
+  /** Saved scrollback loader (E6-FR-11), wired by main once the store exists. */
+  private seedSource: SeedSource | null = null
+  /** Panes that already had their first spawn in this app session: the seed is consumed once. */
+  private readonly seedConsumed = new Set<string>()
 
   private readonly promptListeners = new Set<PromptResultListener>()
 
@@ -288,8 +304,37 @@ export class PtyManager {
     return this.entries.size
   }
 
+  /**
+   * A pane's spawn. The first one in this app session with
+   * `restoreScrollback` starts from the pane's saved history (E6-FR-11): the
+   * seed enters the ring and the mirror before any sink hears of the pty, and
+   * comes back for the renderer to write before it binds.
+   */
   spawn(req: PtySpawnReq): PtySpawnRes {
-    return this.spawnSeeded(req, '')
+    const { restoreScrollback, ...spawnReq } = req
+    const firstSpawn = !this.seedConsumed.has(req.paneId)
+    this.seedConsumed.add(req.paneId)
+    const seed = firstSpawn && restoreScrollback === true ? this.loadSeed(req.paneId, req.rows) : ''
+    let res: PtySpawnRes
+    try {
+      res = this.spawnSeeded(spawnReq, seed)
+    } catch (error) {
+      // The shell never ran: the next spawn of this pane may still restore.
+      if (firstSpawn) this.seedConsumed.delete(req.paneId)
+      throw error
+    }
+    if (seed) res.seed = seed
+    return res
+  }
+
+  private loadSeed(paneId: string, rows: number): string {
+    if (!this.seedSource || !this.persistEnabled()) return ''
+    try {
+      return this.seedSource(paneId, rows > 0 ? rows : 24) ?? ''
+    } catch (error) {
+      console.warn(`[pty] could not restore the saved history of pane ${paneId}: ${String(error)}`)
+      return ''
+    }
   }
 
   /**
@@ -490,7 +535,7 @@ export class PtyManager {
       }
       this.dispose(oldId, 0, false)
     }
-    const tail = restartTail(label)
+    const tail = restartTail(label, rows > 0 ? rows : 24)
     try {
       const res = this.spawnSeeded(spawnReq, content + tail)
       const out: PtyRestartRes = { ptyId: res.ptyId, tail, shellKind: res.shellKind }
@@ -1068,6 +1113,146 @@ export class PtyManager {
     }
   }
 
+  // --- Saved scrollback (E6-FR-08..13, 36, 37) -----------------------------
+
+  /** Wires the saved scrollback loader (main, once ScrollbackStore exists). */
+  setSeedSource(source: SeedSource | null): void {
+    this.seedSource = source
+  }
+
+  /** Persistence on and a snapshot mode other than 'off' (E6-FR-01/08). */
+  persistEnabled(): boolean {
+    return this.engine.persist && this.engine.snapshotMode !== 'off'
+  }
+
+  /** Lets the pane's next spawn restore again (closed and reopened in this session). */
+  forgetSeed(paneId: string): void {
+    this.seedConsumed.delete(paneId)
+  }
+
+  /** After killAll(): the next window is a new session that restores again (macOS). */
+  resetSeeds(): void {
+    this.seedConsumed.clear()
+  }
+
+  /** Drains every pty's pending output to the renderer, sinks and mirror. */
+  flushAll(): void {
+    for (const ptyId of [...this.entries.keys()]) this.flush(ptyId)
+  }
+
+  /** Panes with output since their last save: the live pty of each pane, and exited ones. */
+  dirtyPaneIds(): string[] {
+    const ids: string[] = []
+    for (const [paneId, ptyId] of this.byPane) {
+      const entry = this.entries.get(ptyId)
+      if (entry && (entry.dirty || entry.buf.length > 0)) ids.push(paneId)
+    }
+    for (const [paneId, rec] of this.exited) if (rec.dirty && !this.byPane.has(paneId)) ids.push(paneId)
+    return ids
+  }
+
+  /** A failed save: the pane goes back on the next checkpoint's list. */
+  markDirty(paneId: string): void {
+    const ptyId = this.byPane.get(paneId)
+    const entry = ptyId ? this.entries.get(ptyId) : undefined
+    if (entry) entry.dirty = true
+    else {
+      const rec = this.exited.get(paneId)
+      if (rec) rec.dirty = true
+    }
+  }
+
+  /**
+   * What a save writes for the pane (E6-FR-09): the normal buffer only, no
+   * modes and no alt screen, cut to `persistLines` rows and 1 MB, without
+   * trailing blank lines. From the mirror when there is one; otherwise (lazy,
+   * a failed mirror, an exited pane) from a temporary mirror fed with the
+   * ring or the exited record and dropped right after. Clears the dirty flag.
+   */
+  takePersist(paneId: string): PersistSnapshot | null {
+    if (!this.persistEnabled()) return null
+    const ptyId = this.byPane.get(paneId)
+    const entry = ptyId ? this.entries.get(ptyId) : undefined
+    if (ptyId && entry) {
+      this.flush(ptyId)
+      entry.dirty = false
+      if (entry.mirror) {
+        try {
+          return this.persistOf(entry.mirror)
+        } catch (error) {
+          this.dropMirror(entry, error)
+        }
+      }
+      return this.persistVia(entry.pty.cols, entry.pty.rows, this.replayOf(entry))
+    }
+    const rec = this.exited.get(paneId)
+    if (!rec) return null
+    rec.dirty = false
+    return this.persistVia(rec.cols, rec.rows, rec.data)
+  }
+
+  /**
+   * "Clear saved history" (one pane or all): what the next save could bring
+   * back is dropped too. The mirror loses its scrollback (ED3, the screen
+   * stays) and nothing is dirty, so a later save holds only newer output.
+   */
+  clearPersisted(paneId?: string): void {
+    for (const [ptyId, entry] of this.entries) {
+      if (paneId !== undefined && entry.paneId !== paneId) continue
+      this.flush(ptyId)
+      const mirror = this.ensureMirror(ptyId, entry)
+      if (mirror) {
+        try {
+          this.writeMirror(entry, '\x1b[3J')
+          entry.gen++
+        } catch (error) {
+          this.dropMirror(entry, error)
+        }
+      }
+      entry.dirty = false
+    }
+    for (const [id, rec] of this.exited) if (paneId === undefined || id === paneId) rec.dirty = false
+  }
+
+  private persistVia(cols: number, rows: number, data: string): PersistSnapshot | null {
+    let mirror: HeadlessMirror | null = null
+    try {
+      mirror = new HeadlessMirror({
+        cols: cols > 0 ? cols : 80,
+        rows: rows > 0 ? rows : 24,
+        scrollback: mirrorScrollback(this.engine),
+        unicode11: this.engine.unicode11,
+      })
+      if (data) mirror.write(data)
+      return this.persistOf(mirror)
+    } catch (error) {
+      console.warn(`[pty] could not snapshot a pane for saving: ${String(error)}`)
+      return null
+    } finally {
+      try {
+        mirror?.dispose()
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+
+  private persistOf(mirror: HeadlessMirror): PersistSnapshot {
+    const t0 = nowMs()
+    let scrollback = Math.max(0, this.engine.persistLines - mirror.rows)
+    let ansi = ''
+    // Over 1 MB (truecolor-heavy output): serialize fewer rows instead of cutting mid-style.
+    for (let round = 0; round < 4; round++) {
+      ansi = trimPersistAnsi(mirror.snapshot({ scrollback, purpose: 'persist' }).data)
+      const bytes = Buffer.byteLength(ansi, 'utf8')
+      if (bytes <= MAX_FILE_BYTES || scrollback === 0) break
+      scrollback = Math.floor(scrollback * (MAX_FILE_BYTES / bytes) * 0.9)
+    }
+    ansi = capBytes(ansi)
+    this.snapshotMs.add(nowMs() - t0)
+    return { ansi, cols: mirror.cols, rows: mirror.rows, lines: countLines(ansi) }
+  }
+
   /**
    * Runs an expect/send sequence on a freshly spawned pty, then types the model
    * command. Each step optionally waits for the terminal to print `waitFor`
@@ -1228,7 +1413,7 @@ export class PtyManager {
     // Keep the last output of a shell that ended on its own (E6-FR-20): phones
     // that subscribe later see it instead of a spinner, and a restart reuses it.
     if (removed && natural) {
-      this.exited.set(entry.paneId, { ptyId, data: this.keptOutput(entry), cols: entry.pty.cols, rows: entry.pty.rows, exitCode, at: Date.now() })
+      this.exited.set(entry.paneId, { ptyId, data: this.keptOutput(entry), cols: entry.pty.cols, rows: entry.pty.rows, exitCode, at: Date.now(), dirty: entry.dirty })
     }
     for (const sink of this.sinks.values()) {
       try { sink.onExit(ptyId, entry.paneId, exitCode, { current: removed, natural }) } catch { /* sink teardown must not block PTY cleanup */ }

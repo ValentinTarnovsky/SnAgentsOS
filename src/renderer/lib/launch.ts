@@ -13,6 +13,8 @@ export interface ResolvedLaunch {
    * Absent = 'other'.
    */
   launchKind?: LaunchKind
+  /** Set by prepareAgentLaunch when this spawn resumes a chat: no saved scrollback then (E6-FR-13). */
+  resumed?: boolean
 }
 
 /**
