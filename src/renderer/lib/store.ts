@@ -53,6 +53,9 @@ const DEFAULT_SETTINGS: Settings = {
   infiniteScrollback: true,
   terminalRenderer: 'canvas',
   terminalSelectionOverride: true,
+  terminalUnicode11: true,
+  terminalAgentEndChip: true,
+  awakeMode: 'auto',
   restoreLastWorkspace: true,
   confirmCloseRunning: true,
   autoCheckUpdates: true,
@@ -95,6 +98,14 @@ const DEFAULT_SETTINGS: Settings = {
     hookToken: '',
     codexEnabled: false,
     discord: { enabled: false, webhookUrl: '', userId: '', notifyAction: true, notifyDone: true },
+    inAppWhenFocused: true,
+  },
+  agents: {
+    resumeOnStartup: 'ask',
+    awakeDisplay: false,
+    sidebarAgentRows: true,
+    topicAsTitle: true,
+    ctrlDigitFocus: true,
   },
 }
 

@@ -157,6 +157,10 @@ El CLI `snaos` ejecuta open/spawn/send reutilizando `remote:controlCmd` / `remot
 | v2.1 (11) | `settings.awakeMode` | `'auto'\|'always'\|'never'` | `'auto'` | E4 |
 | v2.1 (11) | `settings.terminalUnicode11` | boolean | `true` | E4 |
 | v2.1 (11) | `workspaces[].panes[].lastSession` | `{ provider, sessionId, cwd, at }` opcional | ausente | E4 |
+| v2.1 (11) | `settings.terminalAgentEndChip` | boolean | `true` | E6 |
+| v2.1 (11) | `settings.notifications.inAppWhenFocused` | boolean | `true` | E4 |
+| v2.1 (11) | `settings.agents` | `{ resumeOnStartup: 'ask'\|'auto'\|'off', awakeDisplay, sidebarAgentRows, topicAsTitle, ctrlDigitFocus }` | `{ 'ask', false, true, true, true }` | E5 |
+| v2.1 (11) | `workspaces[].agentsCollapsed` | boolean opcional | ausente | E5 |
 | v2.2 (12) | `settings.updateDismissedVersion` | string | `''` | E5 |
 | v2.2 (12) | `settings.explorerMenu` | boolean | `false` | E5 |
 | v2.2 (12) | `settings.persistScrollback` | boolean | `true` | E5 |
