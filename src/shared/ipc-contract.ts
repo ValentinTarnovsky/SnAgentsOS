@@ -587,6 +587,11 @@ export interface SnApi {
     /** Opens a native folder picker; resolves to the chosen path or null. */
     openDirectory(): Promise<string | null>
   }
+  /** File system probes (E8-FR-08). */
+  fs: {
+    /** Whether an absolute path is an existing folder (true when the probe times out). */
+    dirExists(path: string): Promise<boolean>
+  }
   /** System clipboard, used for terminal copy/paste. */
   clipboard: {
     writeText(text: string): void
