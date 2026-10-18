@@ -327,7 +327,8 @@ async function main() {
   await pathOpenChecks()
   await firewallChecks()
   connLogRedactChecks()
-  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, store, enrichment, Codex App Server detail, path open, firewall and connection log checks`)
+  promptCardChecks()
+  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, store, enrichment, Codex App Server detail, path open, firewall, connection log and answer card checks`)
 }
 
 // R22-16 (E2-FR-28..30): shell:openPath containment in main with real files and
@@ -1048,3 +1049,131 @@ function connLogRedactChecks() {
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })
+
+// R22-15 (E2-FR-20, 21, 48): input invalidation of answer cards in
+// StatusManager (reports never count, a letter does, state untouched),
+// PtyManager.write notifying it, and buildAskAnswerKeys / sanitizeAskFreeText.
+function promptCardChecks() {
+  const SID = '0123abcd-0000-4000-8000-000000000000'
+  function track(start = 1000) {
+    const events = []
+    let clock = start
+    class FakeDate extends Date { static now() { return clock } }
+    const { StatusManager } = load('src/main/status/StatusManager.ts', {
+      require: id => id === 'electron' ? { Notification: { isSupported: () => false } } : require(id),
+      setTimeout: () => 0, clearTimeout() {}, Date: FakeDate,
+    })
+    const manager = new StatusManager(() => ({ isDestroyed: () => false, isFocused: () => false, webContents: { send: (ch, e) => { if (ch !== 'status:sessionEnd') events.push(e) } }, flashFrame() {} }), () => null, () => {})
+    manager.setConfig(settings); manager.onSpawn('pty', 'pane')
+    const hook = (name, rest = {}) => manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty', sessionId: SID, name, ...rest })
+    const input = (data, ptyId = 'pty') => manager.onUserInput(ptyId, 'pane', data)
+    return { manager, hook, input, events, tick: ms => { clock += ms }, last: () => events.at(-1) }
+  }
+  {
+    const h = track()
+    h.hook('UserPromptSubmit', { prompt: 'x' }); h.tick(5)
+    h.hook('PermissionRequest', { toolUseId: 'p1', toolName: 'Bash', toolSummary: 'Bash: npm test', requestSummary: 'npm test' })
+    check(h.last().pending?.[0]?.id === 'p1', 'a permission is listed in pending[]')
+    const n = h.events.length
+    h.tick(5)
+    for (const report of ['\x1b[I', '\x1b[O', '\x1b[<0;10;5M', '\x1b[<0;10;5m', '\x1b[M !!', '\x1b[I\x1b[O', '\x1b[12;40R', '\x1b[?62;22c', '\x1b[0n', '\x1b]11;rgb:0000/0000/0000\x1b\\', '\x1b]10;rgb:ffff/ffff/ffff\x07']) h.input(report)
+    check(h.events.length === n && h.manager.stateOf('pane').pending?.[0]?.id === 'p1', 'focus, mouse and terminal reports never invalidate the card')
+    h.input('a', 'other-pty')
+    check(h.events.length === n && h.manager.stateOf('pane').pending?.length === 1, 'input of a stale pty is ignored')
+    h.input('a')
+    const after = h.last()
+    check(h.events.length === n + 1 && after.pending === undefined, 'a letter takes the request out of pending[] at once')
+    check(after.state === 'action' && after.reason === 'permission' && after.pendingCount === 1, 'state, reason and pendingCount stay until the hook resolves it')
+    h.input('\r')
+    check(h.events.length === n + 1, 'more input after the invalidation emits nothing new')
+    h.hook('PostToolUse', { toolUseId: 'p1' })
+    check(h.last().state === 'working' && h.last().pendingCount === 0, 'PostToolUse still resolves the invalidated request')
+    h.tick(5); h.input('z'); h.tick(5)
+    h.hook('PermissionRequest', { toolUseId: 'p2', toolName: 'Read', requestSummary: 'a.ts' })
+    check(h.last().pending?.[0]?.id === 'p2', 'input before a request never invalidates it')
+    h.input('\x1b')
+    check(h.last().pending === undefined && h.last().state === 'action', 'Esc (a deny) invalidates the card too')
+    h.hook('PostToolUse', { toolUseId: 'p2' })
+  }
+  {
+    const h = track()
+    h.hook('UserPromptSubmit', { prompt: 'x' })
+    h.hook('PreToolUse', { toolName: 'AskUserQuestion', toolUseId: 'q1', question: 'Cual?', questions: [{ question: 'Cual?', multiSelect: false, options: [{ label: 'A' }, { label: 'B' }] }] })
+    h.tick(1); h.input('1')
+    check(h.last().pending === undefined && h.last().state === 'action' && h.last().reason === 'question', 'a question answered on the desktop leaves action / question without its card')
+    // end clears the request with its marks: a new session lists a fresh one.
+    h.hook('SessionEnd', { endReason: 'other' })
+    h.hook('SessionStart'); h.hook('UserPromptSubmit', { prompt: 'y' }); h.tick(1)
+    h.hook('PermissionRequest', { toolUseId: 'p3', toolName: 'Bash' })
+    check(h.last().pending?.[0]?.id === 'p3', 'after SessionEnd a new request starts visible')
+    // clearPane (pty exit) and a new spawn: nothing carries over.
+    h.tick(1); h.input('y')
+    h.manager.onExit('pty', 'pane'); h.manager.onSpawn('pty2', 'pane')
+    h.manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty2', sessionId: SID, name: 'SessionStart' })
+    h.manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty2', sessionId: SID, name: 'PermissionRequest', toolUseId: 'p4', toolName: 'Bash' })
+    check(h.last().pending?.[0]?.id === 'p4', 'after clearPane and a respawn a new request starts visible')
+    h.manager.onUserInput('pty', 'pane', 'a')
+    check(h.last().pending?.[0]?.id === 'p4', 'input of the old pty never touches the new one')
+    // Two requests: one input invalidates both; a later one stays visible.
+    h.manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty2', sessionId: SID, name: 'PermissionRequest', toolUseId: 'p5', toolName: 'Edit' })
+    h.tick(1); h.manager.onUserInput('pty2', 'pane', 'n')
+    check(h.last().pending === undefined && h.last().pendingCount === 2, 'one input invalidates every earlier request of the pane')
+    h.tick(1)
+    h.manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty2', sessionId: SID, name: 'PermissionRequest', toolUseId: 'p6', toolName: 'Write' })
+    check(h.last().pending?.length === 1 && h.last().pending[0].id === 'p6' && h.last().pendingCount === 3, 'a request after the input is listed alone')
+  }
+  // PtyManager.write notifies the sinks that implement onUserInput, before writing.
+  {
+    const writes = [], order = []
+    const impl = (_shell, _args, opts) => ({ cols: opts.cols, rows: opts.rows, onData() {}, onExit() {}, write: d => { writes.push(d); order.push('pty') }, resize() {}, pause() {}, resume() {}, kill() {} })
+    const code = buildSync({ entryPoints: [path.join(root, 'src/main/pty/PtyManager.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'node-pty', '@xterm/headless', '@xterm/addon-serialize', '@xterm/addon-unicode11'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+    const mod = { exports: {} }
+    vm.runInNewContext(code, { module: mod, exports: mod.exports, Buffer, process, setTimeout, clearTimeout, setInterval, clearInterval, console: { ...console, warn() {} },
+      require: id => id === 'node-pty' ? { spawn: impl } : id === 'electron' ? { app: { getPath: () => os.tmpdir() } } : require(id) })
+    const { PtyManager } = mod.exports
+    const pm = new PtyManager(() => ({ isDestroyed: () => false, send() {} }))
+    const seen = []
+    pm.addSink({ id: 'plain', onSpawn() {}, onData() {}, onExit() {} })
+    pm.addSink({ id: 'status', onSpawn() {}, onData() {}, onExit() {}, onUserInput: (ptyId, paneId, data) => { seen.push([ptyId, paneId, data]); order.push('sink') } })
+    pm.addSink({ id: 'broken', onSpawn() {}, onData() {}, onExit() {}, onUserInput: () => { throw new Error('boom') } })
+    pm.spawn({ paneId: 'p', cols: 80, rows: 24 })
+    const ptyId = pm.ptyIdForPane('p')
+    pm.write(ptyId, 'a')
+    check(seen.length === 1 && seen[0][0] === ptyId && seen[0][1] === 'p' && seen[0][2] === 'a', 'write tells onUserInput the pty, the pane and the data')
+    check(order.join() === 'sink,pty' && writes.includes('a'), 'the sink hears the input before it reaches the pty, and a throwing sink never blocks it')
+    pm.write(ptyId, ''); pm.write('missing', 'x')
+    check(seen.length === 1, 'empty writes and unknown ptys notify nothing')
+    pm.killAll()
+  }
+  // buildAskAnswerKeys (E2-FR-20, 21).
+  {
+    const K = load('src/shared/askAnswerKeys.ts')
+    const keys = groups => groups.map(g => 'raw' in g ? g.raw : `[${g.text}]`)
+    const opts = n => Array.from({ length: n }, (_, i) => ({ label: `Opcion ${i + 1}` }))
+    const single = (n = 3, extra = {}) => ({ question: 'Cual?', header: 'Elegir', multiSelect: false, options: opts(n), ...extra })
+    const multi = (n = 4) => ({ question: 'Cuales?', header: 'Varias', multiSelect: true, options: opts(n) })
+    check(K.ANSWER_STEP_MS === 1000 && K.ASK_AUTO_ADVANCE_MS === 200 && K.MAX_ANSWER_GROUPS === 24 && K.ASK_MAX_OPTIONS === 8 && K.ASK_MAX_QUESTIONS === 8, 'answer constants match the contract')
+    check(keys(K.buildAskAnswerKeys({ questions: [single()] }, [{ options: [1] }])).join('|') === '2', 'a lone single select is its digit (no review tab)')
+    check(keys(K.buildAskAnswerKeys({ questions: [multi()] }, [{ options: [2, 0] }])).join('|') === `1|3|${K.KEY_NEXT}|1`, 'a lone multi select checks each option in its own group, moves on and submits')
+    check(keys(K.buildAskAnswerKeys({ questions: [single()] }, [{ options: [], other: 'mi texto' }])).join('|') === '4|[mi texto]|\r', 'Other in a single select writes its digit, the raw text and Enter')
+    check(keys(K.buildAskAnswerKeys({ questions: [multi(2)] }, [{ options: [1], other: 'extra' }])).join('|') === `2|3|[extra]|\r|${K.KEY_NEXT}|1`, 'Other in a multi select comes after the checked options')
+    const eight = K.buildAskAnswerKeys({ questions: [single(8)] }, [{ options: [], other: 'otra' }])
+    check(keys(eight)[0] === '9' && keys(eight).length === 3, '8 options plus Other: Other writes "9"')
+    check(keys(K.buildAskAnswerKeys({ questions: [single(), multi()] }, [{ options: [0] }, { options: [1, 3] }])).join('|') === `1|2|4|${K.KEY_NEXT}|1`, 'two questions (single then multi) end on the review tab Submit')
+    check(keys(K.buildAskAnswerKeys({ questions: [single(), single()] }, [undefined, { options: [2] }])).join('|') === `${K.KEY_NEXT}|3|1`, 'an unanswered question of a multi question ask skips its tab')
+    check(K.buildAskAnswerKeys({ questions: [single(), single()] }, [undefined, { options: [] }]).length === 0, 'nothing answered builds nothing')
+    check(K.buildAskAnswerKeys({ questions: [single()] }, [{ options: [] }]).length === 0, 'a lone unanswered question builds nothing')
+    check(K.buildAskAnswerKeys({ questions: [single()] }, [{ options: [0, 1] }]).length === 0 && K.buildAskAnswerKeys({ questions: [single()] }, [{ options: [3] }]).length === 0, 'two picks in a single select or an index out of range build nothing')
+    check(K.buildAskAnswerKeys({ questions: [single(9)] }, [{ options: [0] }]).length === 0, 'a question with 9 options is not answerable from the phone')
+    check(K.buildAskAnswerKeys({ questions: Array.from({ length: 9 }, () => single()) }, Array.from({ length: 9 }, () => ({ options: [0] }))).length === 0, 'more than 8 questions are not answerable')
+    check(!K.askQuestionsValid([single(2, { options: [{ label: 'x'.repeat(201) }] })]) && !K.askQuestionsValid([single(2, { options: [{ label: 'a', description: 'd'.repeat(501) }] })]) && K.askQuestionsValid([single(2, { options: [{ label: 'x'.repeat(200), description: 'd'.repeat(500) }] })]), 'label <= 200 and description <= 500')
+    const big = K.buildAskAnswerKeys({ questions: [multi(8), multi(8), multi(8)] }, [{ options: [0, 1, 2, 3, 4, 5, 6, 7] }, { options: [0, 1, 2, 3, 4, 5, 6, 7] }, { options: [0, 1, 2, 3, 4, 5, 6, 7] }])
+    check(big.length > K.MAX_ANSWER_GROUPS, 'three full multi selects pass the 24 group cap (the UI falls back to the terminal)')
+    const seventeen = K.buildAskAnswerKeys({ questions: [multi(8), multi(8)] }, [{ options: [0, 1, 2, 3, 4, 5, 6] }, { options: [0, 1, 2, 3, 4, 5, 6] }])
+    check(seventeen.length === 17 && seventeen.every(g => K.groupData(g).length < 8192), 'a 17 group answer fits under the cap, each group well under the 8192 input limit')
+    check(K.sanitizeAskFreeText('a\x1b[31mb\r\nc\nd\te\u0085f\u2028g') === 'a[31mb c def g', 'sanitizeAskFreeText drops ESC and control characters and turns line breaks into spaces')
+    check(K.sanitizeAskFreeText('x'.repeat(2500)).length === 2000 && K.sanitizeAskFreeText('   ') === '', 'free text caps at 2000 and trims')
+    check(K.buildAskAnswerKeys({ questions: [single()] }, [{ options: [], other: ' \n ' }]).length === 0, 'a blank Other is no answer')
+    check(K.selectionAnswered(single(), { options: [0] }) && !K.selectionAnswered(single(), { options: [] }) && K.selectionAnswered(multi(), { options: [], other: 'x' }), 'selectionAnswered follows the same rules')
+  }
+}
