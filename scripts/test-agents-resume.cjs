@@ -30,6 +30,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-resume-'))
 const DAY = 24 * 60 * 60 * 1000
 const UUID = '0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab'
 const UUID2 = '1c8d3a5f-2b3c-4d4e-9fa0-123456789abc'
+const UUID3 = '2d9e4b6a-3c4d-4e5f-8a1b-23456789abcd'
 
 function testArgv() {
   const a = load('src/shared/agent-argv.ts')
@@ -47,6 +48,10 @@ function testArgv() {
   check(codex('codex -m gpt-5 --profile work "hola"') === `codex -m gpt-5 --profile work resume ${UUID}`, 'codex keeps -m/--profile values, flags go before the resume subcommand')
   check(codex(`codex resume ${UUID2} -c model=o3`) === `codex -c model=o3 resume ${UUID}` && codex('codex resume --last') === `codex resume ${UUID}`, 'codex: an existing resume <id> / --last is replaced; -c is config, not continue')
   check(a.OVERRIDE_RE.test('claude --model opus') && a.OVERRIDE_RE.test('claude.exe --verbose') && a.OVERRIDE_RE.test('codex') && !a.OVERRIDE_RE.test('npx claude') && !a.OVERRIDE_RE.test('claude && x') && !a.OVERRIDE_RE.test('claude "hola"'), 'OVERRIDE_RE: bare CLI plus flags only')
+  check(a.OVERRIDE_RE.test('codex -c model=o3 --full-auto') && a.OVERRIDE_RE.test('codex --config=a=b') && !a.OVERRIDE_RE.test('claude; rm x') && !a.OVERRIDE_RE.test('claude | x'), 'OVERRIDE_RE: codex -c key=value resumes, shell operators do not')
+  const t0 = Date.now()
+  const slow = [a.OVERRIDE_RE.test('claude' + ' --ab-cd'.repeat(5000) + ' "'), a.OVERRIDE_RE.test('claude' + ' ---a'.repeat(5000) + ' !')]
+  check(Date.now() - t0 < 500 && !slow[0] && !slow[1], 'OVERRIDE_RE fails a long run of flags in linear time (no catastrophic backtracking)')
   const preset = { type: 'claude', command: 'claude', args: ['--model', 'opus'] }
   check(a.buildAgentArgv({ preset }) === 'claude --model opus' && a.buildAgentArgv({ preset, command: 'claude --verbose' }) === 'claude --verbose', 'without resume: override > preset command+args')
   check(a.buildAgentArgv({ preset: { type: 'shell', command: 'pwsh', args: [] } }) === undefined, 'shell presets type nothing')
@@ -106,6 +111,8 @@ function fakeTrees() {
 function testTranscripts() {
   const { T, projects, repo, slugDir, codexHome } = fakeTrees()
   check(T.claudeSlug('C:\\Users\\me\\my repo') === 'C--Users-me-my-repo', 'slug: every non alphanumeric becomes -')
+  check(T.claudeSlug('C:\\Users\\me\\repo\\') === 'C--Users-me-repo' && T.claudeSlug('/home/me/repo/') === '-home-me-repo' && T.claudeSlug('C:\\') === 'C--' && T.claudeSlug('/') === '-', 'slug: a trailing separator is dropped, a root keeps it')
+  check(T.claudeAvailability({ sessionId: UUID, spawnCwd: repo + path.sep }, projects).available === true, 'a pane folder typed with a trailing separator still finds its transcript')
   check(T.claudeAvailability({ sessionId: UUID, spawnCwd: repo }, projects).available === true, 'a seeded record finds its transcript under the slug')
   check(T.claudeAvailability({ sessionId: UUID, spawnCwd: repo, transcriptPath: path.join(slugDir, `${UUID}.jsonl`) }, projects).available === true, 'matching slug and transcript: available')
   const other = path.join(tmp, 'work', 'other')
@@ -193,10 +200,17 @@ function testStore() {
   h.tick(10); h.evt('p2', 'idle', { kind: 'start' })
   const views = Object.fromEntries(h.store.list().map(v => [v.paneId, v]))
   check(views.p2.available === true && views.p1.available === false && views.p1.unavailableReason === 'claimed', 'two panes on one session: only the most recent stays available')
+  let mark = h.changed.length
   h.store.forget('p2')
-  check(h.changed.at(-1).removed === true && h.changed.at(-1).paneId === 'p2', 'forget emits a removal')
+  check(h.changed[mark].removed === true && h.changed[mark].paneId === 'p2', 'forget emits a removal')
+  check(h.changed.slice(mark).some(e => e.paneId === 'p1' && e.available === true), 'forgetting the newer pane releases the claimed one (agents:changed available)')
   h.evt('p2', 'working', { kind: 'working' })
   check(!h.store.list().some(v => v.paneId === 'p2'), 'a late event of the forgotten session does not bring it back')
+  h.tick(10); h.evt('p2', 'idle', { kind: 'start' })
+  check(h.changed.some(e => e.paneId === 'p1' && e.unavailableReason === 'claimed') && h.store.list().find(v => v.paneId === 'p1').unavailableReason === 'claimed', 'a new start on the same session claims it again')
+  mark = h.changed.length
+  h.tick(10); h.evt('p2', 'idle', { kind: 'start', sessionId: UUID3 })
+  check(h.changed.slice(mark).some(e => e.paneId === 'p1' && e.available === true), 'the claiming pane moving to another session (/clear) releases the old one')
   check(h.store.consumeStartup('p1') === true && h.store.consumeStartup('p1') === false && h.store.consumeStartup('p3') === true, 'consumeStartup is true once per pane per run')
   // Snapshot + frozen
   h.evt('p1', 'working', { kind: 'working' })
@@ -373,6 +387,9 @@ async function testRenderer() {
   cmdHandler({ id: 'c4', action: { kind: 'restartPane', workspaceId: 'w1', paneId: 'pb', resume: true } })
   launch = await L.prepareAgentLaunch('pb', base('pb'))
   check(launch.initialCommand === 'claude --model opus' && A.getState().resumeChip.pb.kind === 'unavailable', 'resume:true without an available record falls back to a new chat with the chip')
+  cmdHandler({ id: 'c4b', action: { kind: 'restartPane', workspaceId: 'w1', paneId: 'pc', resume: true } })
+  launch = await L.prepareAgentLaunch('pc', base('pc'))
+  check(launch.initialCommand === undefined && !A.getState().resumeChip.pc, 'resume:true on a plain shell without a record just restarts, no "chat unavailable" chip')
 
   // Closed stack
   cmdHandler({ id: 'c5', action: { kind: 'closePane', workspaceId: 'w1', paneId: 'pb' } })

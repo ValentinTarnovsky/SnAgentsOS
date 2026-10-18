@@ -213,6 +213,8 @@ export class AgentSessionStore {
     if (this.forgotten.get(paneId) === sessionId && !isStart) return
     this.forgotten.delete(paneId)
     let rec = this.records.get(paneId)
+    // A pane leaving a session may release another pane it had claimed.
+    const previousSession = rec && rec.sessionId !== sessionId ? rec.sessionId : undefined
     let recheck = false
     if (!rec || rec.sessionId !== sessionId || rec.provider !== provider) {
       if (this.isSshPane(paneId)) return
@@ -258,7 +260,7 @@ export class AgentSessionStore {
       this.deps.onReady?.({ paneId, sessionId, phase: 'idle' })
     }
     this.scheduleSave()
-    this.emitIfChanged(paneId)
+    this.emitIfChanged(paneId, previousSession)
   }
 
   /** "Start fresh" / "Restart with a new chat": the pane forgets its session. */
@@ -272,6 +274,7 @@ export class AgentSessionStore {
     this.idleArmed.delete(paneId)
     this.scheduleSave()
     this.deps.onChanged?.({ paneId, removed: true })
+    this.emitSiblings(paneId, [rec.sessionId])
   }
 
   /** Marks the record so the end that follows a hibernation kill is ignored (E5-FR-25). */
@@ -377,7 +380,9 @@ export class AgentSessionStore {
     return v
   }
 
-  private emitIfChanged(paneId: string): void {
+  /** `previousSession`: the session the pane just left (its other holder may be released). */
+  private emitIfChanged(paneId: string, previousSession?: string): void {
+    if (previousSession) this.emitSiblings(paneId, [previousSession])
     const v = this.view(paneId)
     if (!v) return
     const sig = viewSignature(v)
@@ -385,8 +390,13 @@ export class AgentSessionStore {
     this.sent.set(paneId, sig)
     this.deps.onChanged?.(v)
     // A newer record can claim (or release) another pane's session.
+    this.emitSiblings(paneId, [v.sessionId])
+  }
+
+  /** Re-sends the views of the other panes on `sessionIds` whose claimed state moved. */
+  private emitSiblings(paneId: string, sessionIds: string[]): void {
     for (const [other, r] of this.records) {
-      if (other === paneId || r.sessionId !== v.sessionId) continue
+      if (other === paneId || !sessionIds.includes(r.sessionId)) continue
       const ov = this.view(other)!
       const osig = viewSignature(ov)
       if (this.sent.get(other) !== osig) {

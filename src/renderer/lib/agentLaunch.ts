@@ -56,14 +56,14 @@ export function ensureAgentsLoaded(): Promise<void> {
     cancelWatch(evt.paneId)
     if (useAgentStore.getState().resumeChip[evt.paneId]?.kind === 'failed') useAgentStore.getState().setChip(evt.paneId, null)
   })
-  loading = Promise.all([api.list(), api.startup()])
-    .then(([list, startup]) => {
-      agents.setSessions(list)
-      agents.setStartup(startup)
-    })
-    .catch(() => {
-      agents.setStartup({ trigger: null, interrupted: [] })
-    })
+  // The list is applied the moment its reply lands: an agents:changed that
+  // arrives later (another IPC message) must not be overwritten by it.
+  const list = api.list().then((views) => agents.setSessions(views), () => undefined)
+  const startup = api.startup().then(
+    (info) => agents.setStartup(info),
+    () => agents.setStartup({ trigger: null, interrupted: [] }),
+  )
+  loading = Promise.all([list, startup]).then(() => undefined)
   return loading
 }
 
@@ -121,7 +121,9 @@ export async function prepareAgentLaunch(paneId: string, base: ResolvedLaunch): 
   // the startup policy acting on this pane's own agent).
   const policyWanted =
     startupUnconsumed && policy !== 'off' && !!session && !session.endedAt && session.provider === provider && !hasSetup
-  if (intent === 'resume' || (policyWanted && session?.available === false)) {
+  // A phone resume:true on a plain shell or an SSH console has no chat to miss.
+  const explicitMiss = intent === 'resume' && !hasSetup && (!!session || provider !== null)
+  if (explicitMiss || (policyWanted && session?.available === false)) {
     agents.setChip(paneId, { kind: 'unavailable', shownAt: Date.now() })
   } else if (agents.resumeChip[paneId]) {
     agents.setChip(paneId, null)

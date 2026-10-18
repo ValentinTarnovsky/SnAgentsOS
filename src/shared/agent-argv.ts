@@ -15,9 +15,12 @@ export const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/
  * flags: no leading positional prompt, no wrapper (`npx claude`), no quotes
  * and no shell operators. A flag may carry a plain value, inline or as the
  * next word (`--model opus`, the PRD's own example; its literal regex only
- * allowed `--model=opus`). stripForResume still drops positionals.
+ * allowed `--model=opus`; Codex `-c model=o3` needs the `=`). stripForResume
+ * still drops positionals. A flag name starts with a word character so every
+ * token has one parse: the PRD's `--?[\w-]+` backtracks exponentially on a
+ * long run of flags.
  */
-export const OVERRIDE_RE = /^(claude|codex)(\.exe|\.cmd)?(\s+--?[\w-]+(=[\w.:\/,@+-]+)?(\s+[\w.:\/,@+][\w.:\/,@+-]*)?)*$/
+export const OVERRIDE_RE = /^(claude|codex)(\.exe|\.cmd)?(\s+--?\w[\w-]*(=[\w.:\/,@+=-]+)?(\s+[\w.:\/,@+][\w.:\/,@+=-]*)?)*$/
 
 /** True when `id` can be typed into a shell as a session id. */
 export function isSafeSessionId(id: unknown): id is string {
