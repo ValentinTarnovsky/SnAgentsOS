@@ -6,6 +6,7 @@ import { getPtyId, onPtyRegistryChange } from './ptyRegistry'
 import { useUsageStore } from './usageStore'
 import { useAgentStore } from './agentStore'
 import { paneResumable } from './agentLaunch'
+import { remoteAgentEnded } from './agentEndRun'
 import { useGitStore } from './gitStore'
 import { gitChipEnabled, remoteGitChip, workspaceGitKey } from './gitChip'
 import type { MountedWorkspaces } from './mounting'
@@ -43,17 +44,22 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     id: ws.id,
     name: ws.name,
     layoutOrder: ws.layout?.order ?? ws.panes.map((p) => p.id),
-    panes: ws.panes.map((pane) => ({
-      id: pane.id,
-      title: pane.title,
-      type: pane.type,
-      color: pane.color,
-      icon: pane.icon,
-      // main overrides this authoritatively; it's a best-effort hint here.
-      running: getPtyId(pane.id) != null,
-      // D10: the phone shows "Relaunch resuming" / "New chat" only when true.
-      ...(paneResumable(pane, ws, state.presets, sessions[pane.id]) ? { resumable: true } : {}),
-    })),
+    panes: ws.panes.map((pane) => {
+      // E6-FR-24: the phone mirrors the desktop's "Claude exited" chip.
+      const agentEnded = remoteAgentEnded(state, pane.id)
+      return {
+        id: pane.id,
+        title: pane.title,
+        type: pane.type,
+        color: pane.color,
+        icon: pane.icon,
+        // main overrides this authoritatively; it's a best-effort hint here.
+        running: getPtyId(pane.id) != null,
+        // D10: the phone shows "Relaunch resuming" / "New chat" only when true.
+        ...(paneResumable(pane, ws, state.presets, sessions[pane.id]) ? { resumable: true } : {}),
+        ...(agentEnded ? { agentEnded } : {}),
+      }
+    }),
     // E7-FR-09: branch and counts only, never the cwd or the repo root.
     ...gitField(gitSummaries[workspaceGitKey(ws.id)]),
   }))
@@ -94,6 +100,9 @@ function relevant(s: AppState): unknown[] {
     gitChipEnabled(s.settings),
     s.keyButtons,
     s.mountedWorkspaces,
+    // E6-FR-24: the chip's offer and its setting change `agentEnded`.
+    s.agentEnded,
+    s.settings.terminalAgentEndChip,
   ]
 }
 

@@ -11,6 +11,7 @@ import { broadcastToWorkspace } from './broadcastPrompt'
 import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
 import { runRemoteQuickCommand } from './quickCommands'
 import { runOpenPath, runOpenUrl } from './remoteOpen'
+import { platformDefaultShell, runAgentEnd } from './agentEndRun'
 import { toast } from './toast'
 import { translate } from '@/i18n'
 import type { Language } from '@shared/types'
@@ -24,12 +25,6 @@ interface CmdResult {
   info?: number
   /** createPane: the prompt could not go on the command line (E2-FR-11). */
   promptFallback?: boolean
-}
-
-/** The shell main falls back to when settings.defaultShell is empty (shellResolver.defaultShell). */
-function platformDefaultShell(platform: string): string {
-  if (platform === 'win32') return 'powershell.exe'
-  return platform === 'darwin' ? '/bin/zsh' : '/bin/bash'
 }
 
 /**
@@ -182,6 +177,11 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
 
     case 'openUrl':
       return runOpenUrl(action)
+
+    case 'agentResume':
+      // E6-FR-24: the same text as the desktop chip. Membership is checked like
+      // restartPane; the first action of any device wins, the rest ack stale.
+      return runAgentEnd(action.paneId, action.mode, action.workspaceId)
 
     default:
       return { ok: false, error: 'unknown_action' }

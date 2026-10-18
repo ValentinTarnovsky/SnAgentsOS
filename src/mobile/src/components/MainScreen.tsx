@@ -21,6 +21,7 @@ import { Composer, openComposerForPaste, toggleInputMode } from './Composer'
 import { DirectInputStrip } from './DirectInputStrip'
 import { ExitStrip } from './ExitStrip'
 import { PromptCard } from './prompts/PromptCard'
+import { AgentEndStrip } from './AgentEndStrip'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { openDiagnostics } from '../lib/connLog'
 import { StatusIndicator } from './StatusIndicator'
@@ -125,6 +126,7 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       </main>
 
       <ExitStrip />
+      <AgentEndStrip />
 
       {/* Answer cards for the viewed console (E2-FR-17..25). */}
       <PromptCard />
