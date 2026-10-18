@@ -12,6 +12,12 @@ import type {
   RemoteStateSnapshot,
 } from '@shared/remote-protocol'
 
+/**
+ * E1-FR-20: the soft keyboard counts as open only while an input field has the
+ * focus AND visualViewport says it covers more than this many px.
+ */
+export const KB_OPEN_MIN_INSET_PX = 120
+
 /** Top-level screen routing. Banners overlay the 'live' screen separately. */
 export type Phase =
   | 'idle'
@@ -86,12 +92,21 @@ export interface RemoteState {
   connected: boolean
   /** Set while phase is 'updated'. */
   updateInfo: UpdateInfo | null
+  /** Soft keyboard overlap in px, measured by viewport.ts (keyboardInset). */
+  keyboardInset: number
+  /** Input field holding the focus: 'direct' (xterm helper textarea), the
+   * data-kb-input value of another field (the composer), or null. */
+  kbFocus: string | null
+  /** Derived: kbFocus is set and keyboardInset > KB_OPEN_MIN_INSET_PX. */
+  kbOpen: boolean
 
   /** Merge a partial state (used by the client for machine transitions). */
   update: (partial: Partial<RemoteState>) => void
   setCtrlLatch: (on: boolean) => void
   setFontOverride: (size: number | null) => void
   setToast: (text: string | null) => void
+  /** Feed keyboard signals from viewport.ts; recomputes kbOpen. */
+  setKeyboard: (k: { inset?: number; focus?: string | null }) => void
 }
 
 export const useRemoteStore = create<RemoteState>((set) => ({
@@ -116,11 +131,21 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   online: true,
   connected: false,
   updateInfo: null,
+  keyboardInset: 0,
+  kbFocus: null,
+  kbOpen: false,
 
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
   setFontOverride: (size) => set({ fontOverride: size }),
   setToast: (text) => set({ toast: text }),
+  setKeyboard: (k) =>
+    set((s) => {
+      const inset = k.inset ?? s.keyboardInset
+      const focus = k.focus !== undefined ? k.focus : s.kbFocus
+      if (inset === s.keyboardInset && focus === s.kbFocus) return s
+      return { keyboardInset: inset, kbFocus: focus, kbOpen: focus != null && inset > KB_OPEN_MIN_INSET_PX }
+    }),
 }))
 
 /** Non-hook accessor for the client and imperative callers. */
