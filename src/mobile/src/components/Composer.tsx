@@ -21,7 +21,7 @@ import { clsx } from 'clsx'
 import { SendHorizontal, Square } from 'lucide-react'
 import { client } from '../lib/client'
 import { selectInputMode, store, useRemoteStore } from '../lib/store'
-import { getActiveTerm, getComposerHandle, setComposerHandle, withComposerPaste } from '../lib/terminalBus'
+import { getActiveTerm, getComposerHandle, setComposerHandle } from '../lib/terminalBus'
 import { paneById } from '../lib/workspace'
 import { clearDraft, createDraftWriter, loadDraft } from '../lib/drafts'
 import {
@@ -49,7 +49,7 @@ const io: ComposerIo = {
   currentPaneId: () => store.getState().subscribedPaneId,
   paste: (text) => {
     const term = getActiveTerm()
-    if (term) withComposerPaste(() => term.paste(text))
+    if (term) term.paste(text)
     else client.sendInput(text)
   },
   sendInput: (data) => client.sendInput(data),
@@ -163,8 +163,12 @@ export function Composer(): ReactNode {
         const start = el ? el.selectionStart : textRef.current.length
         const end = el ? el.selectionEnd : start
         const { value, caret } = insertAt(textRef.current, snippet, start, end)
-        pendingCaret.current = caret
-        change(value)
+        // A full field leaves the text as is: no re-render would consume the
+        // caret, and a stale one would jump on the next keystroke.
+        if (value !== textRef.current) {
+          pendingCaret.current = caret
+          change(value)
+        }
         el?.focus({ preventScroll: true })
       },
       focus() {

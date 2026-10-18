@@ -13,8 +13,11 @@
  *
  * Composer mode (E1-FR-29): the helper textarea turns readOnly with
  * inputmode="none", so tapping the terminal dismisses the keyboard instead of
- * opening direct input, and xterm's own input is dropped except for the
- * composer's paste. Back in Direct mode both attributes are restored.
+ * opening direct input, and typing into it (a hardware keyboard still
+ * produces key events) or pasting into it is ignored. Data xterm produces on
+ * its own keeps flowing: wheel reports from the touch scroll in mouse-tracking
+ * apps, replies to terminal queries and the composer's term.paste. Back in
+ * Direct mode both attributes are restored.
  */
 import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { Terminal } from '@xterm/xterm'
@@ -22,10 +25,10 @@ import { CanvasAddon } from '@xterm/addon-canvas'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { client, type TermFrame } from '../lib/client'
-import { selectInputMode, useRemoteStore, type RemoteState } from '../lib/store'
+import { selectInputMode, useRemoteStore } from '../lib/store'
 import type { InputMode } from '../lib/prefs'
 import { resetRatio, solveFont } from '../lib/fit'
-import { isComposerPasting, setActiveTerm } from '../lib/terminalBus'
+import { setActiveTerm } from '../lib/terminalBus'
 import { getStoredHostPlatform } from '../lib/auth'
 import { attachTouchScroll } from '../lib/touchScroll'
 import { nextExit, useExitStore } from '../lib/exitState'
@@ -42,9 +45,9 @@ function applyInputMode(helper: HTMLTextAreaElement, mode: InputMode): void {
   }
 }
 
-/** Composer mode drops xterm's own input; its paste is let through. */
-function directInputBlocked(st: RemoteState): boolean {
-  return selectInputMode(st) === 'composer' && !isComposerPasting()
+/** Composer mode ignores typing and pasting into the terminal (E1-FR-29). */
+function composerModeNow(): boolean {
+  return selectInputMode(useRemoteStore.getState()) === 'composer'
 }
 
 export function RemoteTerminal(): ReactNode {
@@ -103,6 +106,17 @@ export function RemoteTerminal(): ReactNode {
     }
     const detachTouchScroll = attachTouchScroll(term, container)
     setActiveTerm(term)
+
+    // Composer mode (E1-FR-29): a hardware keyboard still sends key events to
+    // the readOnly helper and a paste still fires on it. Only those are
+    // dropped, so wheel reports and query replies keep reaching the pty.
+    term.attachCustomKeyEventHandler(() => !composerModeNow())
+    const onPasteCapture = (e: ClipboardEvent): void => {
+      if (!composerModeNow()) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+    }
+    container.addEventListener('paste', onPasteCapture, true)
 
     // Best-effort hygiene on xterm's hidden input (item 5: iOS's input accessory
     // bar - the prev/next chevrons + close-keyboard button above the keyboard -
@@ -204,7 +218,6 @@ export function RemoteTerminal(): ReactNode {
     const inputSub = term.onData((data) => {
       let out = data
       const st = useRemoteStore.getState()
-      if (directInputBlocked(st)) return
       if (st.ctrlLatch) {
         if (data.length === 1 && data.charCodeAt(0) >= 0x20) {
           out = String.fromCharCode(data.charCodeAt(0) & 0x1f)
@@ -275,6 +288,7 @@ export function RemoteTerminal(): ReactNode {
       if (cursorRaf != null) cancelAnimationFrame(cursorRaf)
       if (settleRaf != null) cancelAnimationFrame(settleRaf)
       cursorSub.dispose()
+      container.removeEventListener('paste', onPasteCapture, true)
       detachTouchScroll()
       inputSub.dispose()
       try {

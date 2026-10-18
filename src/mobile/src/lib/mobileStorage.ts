@@ -54,12 +54,24 @@ export function storageKeys(prefix: string): string[] {
   return keys
 }
 
+let wipeGeneration = 0
+
+/**
+ * Bumped by every clearMobileStorage(). A debounced draft write scheduled
+ * before a wipe checks it and is dropped, so the composer unmounting right
+ * after a revoke (or the pagehide of unpair's reload) cannot write it back.
+ */
+export function storageWipeGeneration(): number {
+  return wipeGeneration
+}
+
 /**
  * Remove every `snagentsos.draft.*` and `snagentsos.inputMode.*` key (unpair,
  * close 4403, `revoked`). Keys are collected first and removed one at a time,
  * so one failure never skips the others. Returns how many were removed.
  */
 export function clearMobileStorage(): number {
+  wipeGeneration++
   const keys = [...storageKeys(DRAFT_PREFIX), ...storageKeys(INPUT_MODE_PREFIX)]
   for (const key of keys) storageRemove(key)
   return keys.length

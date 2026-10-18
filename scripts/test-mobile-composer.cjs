@@ -25,7 +25,15 @@ function fakeStorage({ blocked = false } = {}) {
 }
 
 function load(file, storage = fakeStorage()) {
-  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+  return run(buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text, storage)
+}
+
+/** Several modules sharing one bundle (one module instance each). */
+function loadEntry(contents, storage = fakeStorage()) {
+  return run(buildSync({ stdin: { resolveDir: root, loader: 'ts', contents }, bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text, storage)
+}
+
+function run(code, storage) {
   const mod = { exports: {} }
   vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console, process, setTimeout, clearTimeout, AbortController, localStorage: storage })
   return mod.exports
@@ -237,6 +245,19 @@ function load(file, storage = fakeStorage()) {
     check(storage.map.has('snagentsos.remote.deviceId') && storage.map.has('snagentsos.composer.autocorrect'), 'auth keys and preferences stay')
     const blocked = load('src/mobile/src/lib/mobileStorage.ts', fakeStorage({ blocked: true }))
     check(blocked.clearMobileStorage() === 0 && blocked.storageGet('x') === null && blocked.storageSet('x', 'y') === false, 'blocked storage degrades quietly')
+  }
+  {
+    // A debounced draft typed just before a revoke/unpair never comes back.
+    const storage = fakeStorage()
+    const both = loadEntry("export * from './src/mobile/src/lib/drafts'; export { clearMobileStorage } from './src/mobile/src/lib/mobileStorage'", storage)
+    const w = both.createDraftWriter({ timers: { setTimeout: () => 1, clearTimeout: () => {} } })
+    w.schedule('p1', 'secret')
+    both.clearMobileStorage()
+    w.flush()
+    check(!storage.map.has('snagentsos.draft.p1'), 'a draft pending at the wipe is dropped, not written back')
+    w.schedule('p1', 'after')
+    w.flush()
+    check(both.loadDraft('p1')?.text === 'after', 'drafts typed after the wipe save again')
   }
 
   // --- prefs and input mode ---
