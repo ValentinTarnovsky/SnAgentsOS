@@ -14,6 +14,7 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { CanvasAddon } from '@xterm/addon-canvas'
+import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { client, type TermFrame } from '../lib/client'
 import { useRemoteStore } from '../lib/store'
@@ -34,6 +35,7 @@ export function RemoteTerminal(): ReactNode {
   const xtermTheme = useRemoteStore((s) => s.xtermTheme)
   const fontOverride = useRemoteStore((s) => s.fontOverride)
   const subscribedPaneId = useRemoteStore((s) => s.subscribedPaneId)
+  const terminalUnicode = useRemoteStore((s) => s.terminalUnicode)
 
   // Mount the terminal once. Frames, resize handling and input wiring all live
   // inside this effect; React state only drives theme/font/pane-switch effects.
@@ -66,6 +68,14 @@ export function RemoteTerminal(): ReactNode {
       /* fall back to xterm's DOM renderer if canvas construction fails */
     }
     term.open(container)
+    // Same cell widths as the desktop (E6-FR-15): the desktop says which table it
+    // uses; without the field it is '6', xterm's built-in one.
+    try {
+      term.loadAddon(new Unicode11Addon())
+      term.unicode.activeVersion = useRemoteStore.getState().terminalUnicode
+    } catch {
+      /* keep xterm's built-in v6 table */
+    }
     const detachTouchScroll = attachTouchScroll(term, container)
     setActiveTerm(term)
 
@@ -186,6 +196,9 @@ export function RemoteTerminal(): ReactNode {
         try {
           term.resize(Math.max(1, f.cols), Math.max(1, f.rows))
           term.reset()
+          // Widths must match before the replay is parsed, not after a re-render.
+          const version = useRemoteStore.getState().terminalUnicode
+          if (term.unicode.activeVersion !== version) term.unicode.activeVersion = version
           term.write(f.data)
         } catch {
           /* terminal torn down between frame and handler */
@@ -250,6 +263,19 @@ export function RemoteTerminal(): ReactNode {
     const term = termRef.current
     if (term && xtermTheme) term.options.theme = xtermTheme
   }, [xtermTheme])
+
+  // The desktop toggled its Unicode width table: follow it live.
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    try {
+      if (term.unicode.activeVersion === terminalUnicode) return
+      term.unicode.activeVersion = terminalUnicode
+      term.refresh(0, term.rows - 1)
+    } catch {
+      /* addon missing or terminal torn down */
+    }
+  }, [terminalUnicode])
 
   // Manual font-size override (settings sheet +/-). Must sync overflowRef too:
   // solveFont's overflow flag is what the cursor-follow effect above reads, and
