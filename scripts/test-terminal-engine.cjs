@@ -1,5 +1,5 @@
 // Terminal engine (E6): ModeTracker, replay hygiene, the exit frame, the
-// in-place restart and the exited record, and the
+// in-place restart and the exited record, the phone exit strip state and the
 // default shell resolution, against the real main-process modules with a fake
 // node-pty. xterm and its addons are pinned exact: a bump must pass this suite.
 const { buildSync } = require('esbuild')
@@ -333,6 +333,19 @@ async function main() {
     pm.killAll()
   }
 
+  // Phone exit strip state (E6-FR-20).
+  {
+    const { nextExit } = load('src/mobile/src/lib/exitState.ts')
+    const replay = (running, exitCode) => ({ type: 'replay', data: '', cols: 80, rows: 24, running, ...(exitCode === undefined ? {} : { exitCode }) })
+    const ex = nextExit(null, 'p', { type: 'exit', exitCode: 3 })
+    check(ex && ex.paneId === 'p' && ex.exitCode === 3, 'an exit frame shows the strip with its code')
+    check(nextExit(ex, 'p', { type: 'out', data: 'x' }) === ex, 'output keeps it')
+    check(nextExit(ex, 'p', replay(true)) === null, 'the next running replay (restart) clears it')
+    const late = nextExit(null, 'p', replay(false, 0))
+    check(late && late.exitCode === 0, 'a replay of an already exited pane shows the strip')
+    check(nextExit(null, 'p', replay(false)) === null, 'a pending lazy spawn (no exitCode) shows no strip')
+    check(nextExit(ex, 'q', { type: 'out', data: 'x' }) === null && nextExit(ex, null, { type: 'exit', exitCode: 1 }) === null, 'another pane, or none, never inherits the strip')
+  }
   {
     const failing = load('src/main/pty/PtyManager.ts', {
       require: id => id === 'node-pty' ? { spawn: () => { throw new Error('boom') } } : id === 'electron' ? { app: { getPath: () => os.tmpdir() } } : require(id),

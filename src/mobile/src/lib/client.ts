@@ -53,7 +53,7 @@ import { delayFor } from './reconnectSchedule'
 
 /** A frame handed to the live terminal. */
 export type TermFrame =
-  | { type: 'replay'; data: string; cols: number; rows: number; running: boolean }
+  | { type: 'replay'; data: string; cols: number; rows: number; running: boolean; exitCode?: number }
   | { type: 'out'; data: string }
   | { type: 'exit'; exitCode: number }
 
@@ -667,7 +667,7 @@ class RemoteClient {
         break
       case 'replay':
         if (msg.paneId === store.getState().subscribedPaneId) {
-          this.emit({ type: 'replay', data: msg.data, cols: msg.cols, rows: msg.rows, running: msg.running })
+          this.emit({ type: 'replay', data: msg.data, cols: msg.cols, rows: msg.rows, running: msg.running, exitCode: msg.exitCode })
         }
         break
       case 'out':

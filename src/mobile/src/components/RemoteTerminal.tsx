@@ -22,6 +22,7 @@ import { resetRatio, solveFont } from '../lib/fit'
 import { setActiveTerm } from '../lib/terminalBus'
 import { getStoredHostPlatform } from '../lib/auth'
 import { attachTouchScroll } from '../lib/touchScroll'
+import { nextExit, useExitStore } from '../lib/exitState'
 
 export function RemoteTerminal(): ReactNode {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -190,6 +191,10 @@ export function RemoteTerminal(): ReactNode {
     // Server frames. Every replay resets the terminal then writes the fresh
     // history snapshot, adopting the pty's real cols/rows.
     client.setTermListener((f: TermFrame) => {
+      // Exit strip above the KeyBar (E6-FR-20).
+      const exitStore = useExitStore.getState()
+      const exit = nextExit(exitStore.exit, useRemoteStore.getState().subscribedPaneId, f)
+      if (exit !== exitStore.exit) exitStore.setExit(exit)
       if (f.type === 'replay') {
         colsRef.current = f.cols
         applyFont()
@@ -295,6 +300,9 @@ export function RemoteTerminal(): ReactNode {
   // new pane's replay lands is blank, not the previous console's output.
   useEffect(() => {
     const term = termRef.current
+    // The strip belongs to the previous console; the new one's replay sets its own.
+    const exit = useExitStore.getState().exit
+    if (exit && exit.paneId !== subscribedPaneId) useExitStore.getState().setExit(null)
     if (term && subscribedPaneId) {
       try {
         term.reset()
