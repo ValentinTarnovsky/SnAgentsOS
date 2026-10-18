@@ -219,6 +219,27 @@ async function main() {
     const prep = block('snPrepareUpgrade').join('\n')
     check(prep.indexOf('!insertmacro snRedirectLegacyInstDir') < prep.indexOf('!insertmacro snGuardPortableData') && prep.indexOf('!insertmacro snGuardPortableData') < prep.indexOf('nsExec::Exec'), 'redirect, then the portable data guard, then close 1.x')
     check(prep.includes('SetShellVarContext current\n${If} ${FileExists} "$APPDATA\\Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar\\'), 'pin lookup runs in the user context')
+    {
+      // The pin and the taskkill only run for an installed 1.x: on 2.x to 2.y the
+      // retargeted pin keeps its legacy name and must not be reported again.
+      const lines = block('snPrepareUpgrade')
+      const gate = lines.indexOf('${AndIf} ${FileExists} "$snLegacyInstDir\\${SN_LEGACY_EXE}"')
+      let end = -1
+      for (let i = gate + 1, depth = 1; gate > 0 && i < lines.length; i++) {
+        if (/^\$\{If(Not)?\}/.test(lines[i])) depth++
+        if (lines[i] === '${EndIf}' && --depth === 0) { end = i; break }
+      }
+      const gated = i => i > gate && i < end
+      check(gate > 0 && lines[gate - 1] === '${If} $snLegacyInstDir != ""' && end > gate, 'pin and close are gated on the legacy exe in the registered folder')
+      const pinLine = lines.findIndex(line => line.includes('User Pinned\\TaskBar\\'))
+      const execLines = lines.flatMap((line, i) => /^nsExec::Exec\b/.test(line) ? [i] : [])
+      check(gated(pinLine) && execLines.length === 2 && execLines.every(gated), 'pin lookup and both taskkills sit inside the legacy gate')
+      check(lines[gate + 1] === 'StrCpy $snLegacyInstalled "1"', 'the gate marks a legacy install')
+      check(block('customInstall').join('\n').includes('${If} $snLegacyInstalled == "1"\n${AndIf} $snLegacyInstDir != $INSTDIR\nWriteRegStr SHCTX "Software\\${APP_GUID}" LegacyInstallLocation $snLegacyInstDir'), 'LegacyInstallLocation is only recorded for a 1.x install that moved')
+      // The guard checks the folder instFilesPre will really use with the wizard.
+      check(prep.includes('StrCpy $R6 $INSTDIR\n!ifdef allowToChangeInstallationDirectory\n${IfNot} ${Silent}\n${StrContains} $R5 "${APP_FILENAME}" $INSTDIR\n${If} $R5 == ""\nStrCpy $R6 "$INSTDIR\\${APP_FILENAME}"'), 'guard target follows instFilesPre in the wizard')
+      check(prep.includes('!insertmacro snGuardPortableData "$R6"') && !prep.includes('!insertmacro snGuardPortableData "$INSTDIR"'), 'guard runs on the final install folder')
+    }
     const guard = block('snGuardPortableData').join('\n')
     check(guard.includes(`\${DIR}\\${LEGACY_BRAND.portableDataDir}\\*.*`) && guard.includes(`\${DIR}\\${BRAND.portableDataDir}\\*.*`) && guard.includes('"$(snPortableDataInside)"') && guard.includes('Quit'), 'guard stops on legacy or new portable data')
     const redirect = block('snRedirectLegacyInstDir').join('\n')
@@ -229,7 +250,11 @@ async function main() {
     // Helpers, variables and strings only exist in the installer build: the
     // uninstaller build would fail -WX on an unused variable.
     const ifndef = nshCode.indexOf('!ifndef BUILD_UNINSTALLER')
-    const endif = nshCode.indexOf('!endif', ifndef)
+    let endif = -1
+    for (let i = ifndef + 1, depth = 1; ifndef >= 0 && i < nshCode.length; i++) {
+      if (/^!if(n?def|macro(n?)def)?\b/.test(nshCode[i])) depth++
+      if (nshCode[i] === '!endif' && --depth === 0) { endif = i; break }
+    }
     const inside = i => i > ifndef && i < endif
     check(ifndef >= 0 && nshCode.every((line, i) => !/^(Var|LangString)\b|^!macro sn/.test(line) || inside(i)), 'helpers are wrapped in !ifndef BUILD_UNINSTALLER')
     // makensis runs with -WX, so the message needs every bundled installer language.
