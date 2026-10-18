@@ -5,6 +5,7 @@ import { initUpdaterEvents, startUpdateScheduler } from '@/lib/updater'
 import { initUsageEvents, syncUsageConfig } from '@/lib/usageStore'
 import { initRemoteEvents, syncRemoteConfig } from '@/lib/remoteStore'
 import { initRemoteCommands } from '@/lib/remoteCommands'
+import { initPromptResults } from '@/lib/promptDelivery'
 import { initLegacyEvents } from '@/lib/legacyStore'
 import { initPowerEvents, syncAgentSettings, syncAwakeMode } from '@/lib/powerStore'
 import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
@@ -34,6 +35,7 @@ import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { CommandPalette } from '@/components/ui/CommandPalette'
 import { GlobalPromptDialog } from '@/components/workspace/GlobalPromptDialog'
+import { QuickCommandPopover } from '@/components/workspace/QuickCommandPopover'
 import { NotificationStack } from '@/components/ui/NotificationStack'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
@@ -94,6 +96,8 @@ export function App() {
   // Keep the remote server-status stream + control-command handler wired.
   useEffect(() => initRemoteEvents(), [])
   useEffect(() => initRemoteCommands(), [])
+  // Initial prompt outcomes (E8-FR-02b): toasts for the unconfirmed or undelivered ones.
+  useEffect(() => initPromptResults(), [])
 
   // 1.x migration state: welcome notice, banners and the backup line (E0-FR-10, 28, 35).
   useEffect(() => initLegacyEvents(), [])
@@ -227,6 +231,7 @@ function AppBody() {
       <NewWorkspaceWizard />
       <CommandPalette />
       <GlobalPromptDialog />
+      <QuickCommandPopover />
     </div>
   )
 }

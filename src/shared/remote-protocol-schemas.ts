@@ -31,6 +31,8 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     paneId: id,
     title: z.string().min(1).max(200),
   }),
+  // E8-FR-07. The renderer requires paneId for a `send` command (bad_request).
+  z.object({ kind: z.literal('runQuickCommand'), workspaceId: id, paneId: id.optional(), id }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [

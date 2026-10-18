@@ -12,7 +12,7 @@ import type { KeyButton } from '@shared/types'
 import type { MobileMessageKey } from './i18n'
 
 /** Icon slots resolved to lucide icons by the KeyBar. */
-export type KeyIcon = 'left' | 'up' | 'down' | 'right' | 'backspace' | 'paste' | 'snippets'
+export type KeyIcon = 'left' | 'up' | 'down' | 'right' | 'backspace' | 'paste' | 'quick'
 
 /** The terminal state a sequence may depend on (an xterm Terminal fits). */
 export interface KeyTerm {
@@ -37,7 +37,7 @@ export interface KeyDef {
   /** One-tap Ctrl chip: sending it also releases the Ctrl latch. */
   chip?: boolean
   /** Opens a sheet instead of writing to the pty. */
-  action?: 'paste' | 'snippets'
+  action?: 'paste' | 'quickCommands'
 }
 
 /** One-tap control chips (E1-FR-18). */
@@ -85,7 +85,8 @@ export const SCROLL_KEYS_BEFORE_USER: readonly KeyDef[] = [
 
 export const SCROLL_KEYS_AFTER_USER: readonly KeyDef[] = [
   { id: 'paste', icon: 'paste', ariaKey: 'key.paste', action: 'paste' },
-  { id: 'snippets', icon: 'snippets', ariaKey: 'key.snippets', action: 'snippets' },
+  // E8-FR-07: the old Snippets slot, now the Quick Commands sheet.
+  { id: 'quick', icon: 'quick', ariaKey: 'key.quickCommands', action: 'quickCommands' },
   chip('^D', 'key.ctrlD'),
   chip('^Z', 'key.ctrlZ'),
 ]

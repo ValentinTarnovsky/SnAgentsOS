@@ -1,11 +1,18 @@
 import type { AgentPreset, ConnectionProfile, Pane, SetupStep, Workspace } from '@shared/types'
 import { buildAgentArgv } from '@shared/agent-argv'
+import type { LaunchKind } from '@shared/initialPrompt'
 
 export interface ResolvedLaunch {
   cwd: string
   initialCommand?: string
   /** Pre-launch sequence (e.g. SSH) the pty runs before initialCommand. */
   setup?: SetupStep[]
+  /**
+   * E8-FR-02b: 'claude' / 'codex' only when initialCommand is that preset's
+   * own command (no pane.command override); enables the `argv` prompt.
+   * Absent = 'other'.
+   */
+  launchKind?: LaunchKind
 }
 
 /**
@@ -30,5 +37,9 @@ export function resolveLaunch(
   const setupId = pane.setupId ?? workspace.setupId
   const setup = setupId ? connections.find((c) => c.id === setupId)?.steps : undefined
 
-  return { cwd, initialCommand, setup: setup && setup.length ? setup : undefined }
+  const override = !!pane.command?.trim()
+  const launchKind: LaunchKind =
+    initialCommand && !override && (preset?.type === 'claude' || preset?.type === 'codex') ? preset.type : 'other'
+
+  return { cwd, initialCommand, setup: setup && setup.length ? setup : undefined, launchKind }
 }
