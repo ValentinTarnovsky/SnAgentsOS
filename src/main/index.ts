@@ -17,6 +17,7 @@ import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
+import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
 import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
@@ -300,6 +301,10 @@ async function bootstrap(): Promise<void> {
     getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
   })
   registerRemoteIpc(remoteManager)
+  registerLegacyIpc({
+    getSender: () => mainWindow?.webContents ?? null,
+    remoteEnabled: () => configStore.load()?.settings?.remote?.enabled === true,
+  })
   statusIpc = registerStatusIpc(statusManager, hookServer, codexBridge, discordNotifier)
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),

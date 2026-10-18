@@ -9,7 +9,7 @@ import { ConfigStore, loadLadder } from '../store/ConfigStore'
 import { migrateLegacyHooks } from '../status/HookInstaller'
 import { mainTLang, type Lang } from '../i18n'
 import { maintainBackup, runPipeline, CrashFault, type PipelineResult } from './legacyBrand'
-import { isCommittedPhase, readMarker, BACKUP_FILE, type LegacyMigrationMarker } from './legacyMarker'
+import { isCommittedPhase, readMarker, writeMarker, BACKUP_FILE, type LegacyMigrationMarker } from './legacyMarker'
 import {
   devCleanupSandbox,
   runCleanup,
@@ -51,7 +51,7 @@ const START_DELAY_MS = 3000
 type Listener = (marker: LegacyMigrationMarker | null) => void
 const listeners = new Set<Listener>()
 
-/** Every marker change (pipeline result, each cleanup item, expiry). R20-05 relays it as app:legacyStatus. */
+/** Every marker change (pipeline result, each cleanup item, expiry, notice ack); registerLegacyIpc relays it as app:legacyStatus. */
 export function onLegacyStatus(listener: Listener): () => void {
   listeners.add(listener)
   return () => listeners.delete(listener)
@@ -71,6 +71,26 @@ function emit(marker: LegacyMigrationMarker | null): void {
 export function readLegacyMarker(): LegacyMigrationMarker | null {
   const r = readMarker(dataDir())
   return r.kind === 'ok' ? r.marker : null
+}
+
+/**
+ * [Got it] on the welcome notice (app:legacyAck). Only a committed marker
+ * carries the notice; writeMarker keeps noticeSeen once it is true, so a
+ * cleanup pass holding an older copy cannot reopen it.
+ */
+export function ackLegacyNotice(targetDir: string = dataDir()): LegacyMigrationMarker | null {
+  const r = readMarker(targetDir)
+  if (r.kind !== 'ok' || !isCommittedPhase(r.marker.phase)) return null
+  if (r.marker.noticeSeen) return r.marker
+  const marker = { ...r.marker, noticeSeen: true, at: Date.now() }
+  try {
+    writeMarker(targetDir, marker)
+  } catch {
+    // A read-only data folder: the notice comes back next start, nothing else breaks.
+    return null
+  }
+  emit(marker)
+  return marker
 }
 
 export function legacyBackupFile(): string {

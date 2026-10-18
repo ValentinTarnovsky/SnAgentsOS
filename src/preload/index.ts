@@ -3,6 +3,7 @@ import { CH } from '@shared/ipc-channels'
 import type {
   AppInfo,
   AppMetrics,
+  LegacyDataInfo,
   PairingQrPayload,
   PtyDataEvt,
   PtyExitEvt,
@@ -43,6 +44,11 @@ const api: SnApi = {
     webUtils.getPathForFile(file as Parameters<typeof webUtils.getPathForFile>[0]),
   app: {
     info: () => ipcRenderer.invoke(CH.APP_INFO) as Promise<AppInfo>,
+    legacyInfo: () => ipcRenderer.invoke(CH.APP_LEGACY_INFO) as Promise<LegacyDataInfo>,
+    legacyAck: () => ipcRenderer.send(CH.APP_LEGACY_ACK),
+    legacyShowBackup: () => ipcRenderer.send(CH.APP_LEGACY_SHOW_BACKUP),
+    legacyOpenLog: () => ipcRenderer.send(CH.APP_LEGACY_OPEN_LOG),
+    onLegacyStatus: (cb: (info: LegacyDataInfo) => void) => sub<LegacyDataInfo>(CH.APP_LEGACY_STATUS, cb),
   },
   pty: {
     spawn: (req: PtySpawnReq) => ipcRenderer.invoke(CH.PTY_SPAWN, req) as Promise<PtySpawnRes>,
