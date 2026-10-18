@@ -119,7 +119,7 @@ function PressKey({ onFire, repeat = false, ariaLabel, active, dimmed, className
       }}
       onContextMenu={(e) => e.preventDefault()}
       className={clsx(
-        'flex h-11 min-w-[44px] shrink-0 items-center justify-center rounded-btn border px-3 text-xs font-medium transition select-none',
+        'flex h-11 min-w-[44px] shrink-0 items-center justify-center rounded-btn border px-3 text-xs font-medium transition select-none [-webkit-touch-callout:none]',
         active
           ? 'border-accent-violet bg-accent-violet text-white'
           : 'border-border bg-bg-secondary text-text-primary active:bg-card',
@@ -149,15 +149,19 @@ export function KeyBar({
   const keyButtons = useRemoteStore((s) => s.snapshot?.keyButtons)
   const offline = useRemoteStore((s) => s.banner != null)
   const kbOpen = useRemoteStore((s) => s.kbOpen && s.kbFocus === inputMode)
-  const activePaneId = useRemoteStore((s) => s.activePaneId)
-  const subscribedPaneId = useRemoteStore((s) => s.subscribedPaneId)
   const keys = useMemo(() => buildScrollKeys(keyButtons ?? []), [keyButtons])
   const composer = inputMode === 'composer'
 
-  // Switching panes stops any running repeat (E1-FR-17).
-  useEffect(() => {
-    cancelAllPresses()
-  }, [activePaneId, subscribedPaneId])
+  // Switching panes stops any running repeat (E1-FR-17). A store subscription
+  // runs synchronously inside the pane change, so no repeat tick can slip in
+  // and write a key into the new pane before a post-render effect would run.
+  useEffect(
+    () =>
+      useRemoteStore.subscribe((s, prev) => {
+        if (s.activePaneId !== prev.activePaneId || s.subscribedPaneId !== prev.subscribedPaneId) cancelAllPresses()
+      }),
+    [],
+  )
 
   // So does the tab going to the background (lock screen, app switch).
   useEffect(() => {
@@ -201,7 +205,7 @@ export function KeyBar({
       if (focused instanceof HTMLElement && focused !== document.body) focused.blur()
     } else if (field) {
       if (document.activeElement === field) field.blur()
-      field.focus()
+      field.focus({ preventScroll: true })
     }
     return true
   }

@@ -56,9 +56,9 @@ window.result = (async () => {
  check(sent.length===held,'releasing stops the repeat with no extra send');
 
  sent.length=0; ptr(left,'pointerdown'); await wait(600);
- flushSync(() => store.getState().update({ subscribedPaneId:'p2' })); await frames();
+ store.getState().update({ subscribedPaneId:'p2' });
  const atSwitch=sent.length; await wait(300); ptr(left,'pointerup');
- check(atSwitch>0&&sent.length===atSwitch,'a pane switch stops a running repeat');
+ check(atSwitch>0&&sent.length===atSwitch,'a pane switch stops a running repeat synchronously, before any render');
 
  sent.length=0; const ctrl=key('Ctrl');
  tap(ctrl); await frames();
