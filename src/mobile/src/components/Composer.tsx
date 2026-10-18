@@ -155,7 +155,7 @@ export function Composer(): ReactNode {
     if (paneRef.current) writer.schedule(paneRef.current, next)
   }
 
-  // SnippetsSheet inserts at the caret instead of writing to the pty (FR-31).
+  // QuickCommandsSheet inserts at the caret instead of writing to the pty (FR-31).
   useEffect(() => {
     setComposerHandle({
       insert(snippet) {
