@@ -1012,6 +1012,31 @@ async function windowsItemChecks() {
     const live2 = path.join(p2.roots.taskbarPins, 'SnMultiCC.lnk'); lnk(live2, 'C:\\gone\\SnMultiCC.exe')
     await I.runCleanup(cleanupEnv(p2, { shortcuts: makeShortcuts(['SnMultiCC.lnk']), registry: makeRegistry() }))
     check(!fs.existsSync(live2) && marker(p2).pinRetargeted === false, 'L08: no Favorites value means alive; a failed write removes the pin and asks to pin again')
+    check(j.cwd === p.exeDir, 'L08: the retargeted pin starts in the new exe folder (the old one is deleted)')
+    // Portable whose exe is renamed only at exit: the pin waits for the new name, it is not dropped.
+    const p3 = committed()
+    const live3 = path.join(p3.roots.taskbarPins, 'SnMultiCC.lnk'); lnk(live3, path.join(p3.roots.temp, 'SnMultiCC', 'SnMultiCC.exe'))
+    const pdir = path.join(p3.base, 'usb')
+    const pending = path.join(pdir, 'SnAgentsOS-portable.exe')
+    await I.runCleanup(cleanupEnv(p3, { mode: 'portable', portableDir: pdir, shortcuts: makeShortcuts(), exe: { execPath: path.join(p3.roots.temp, 'SnAgentsOS', 'SnAgentsOS.exe'), portableExeFile: () => pending, setPortableExeFile() {} } }))
+    check(state(p3, 'L08').state === 'deferred' && state(p3, 'L08').reason === 'targetMissing' && fs.existsSync(live3) && marker(p3).pinRetargeted === undefined, 'L08: a live pin whose new exe does not exist yet is kept and retried')
+    write(pending, 'renamed at exit')
+    await I.runCleanup(cleanupEnv(p3, { mode: 'portable', portableDir: pdir, shortcuts: makeShortcuts(), exe: { execPath: path.join(p3.roots.temp, 'SnAgentsOS', 'SnAgentsOS.exe'), portableExeFile: () => pending, setPortableExeFile() {} } }))
+    check(state(p3, 'L08').state === 'done' && JSON.parse(fs.readFileSync(live3, 'utf8')).target === pending && marker(p3).pinRetargeted === true, 'L08: the next pass retargets it to the renamed exe')
+  }
+  // A registry that cannot be read (PowerShell timeout) defers L03 and L13; it never skips them for good.
+  {
+    const p = committed()
+    const upd = path.join(p.roots.localAppData, 'snmulticc-updater'); write(path.join(upd, 'installer.exe'), 'old setup')
+    const broken = { read: async () => { throw Object.assign(new Error('registry'), { code: 'regError' }) }, deleteValue: async () => { throw new Error('x') }, deleteKey: async () => { throw new Error('x') } }
+    await I.runCleanup(cleanupEnv(p, { registry: broken }))
+    check(state(p, 'L13').state === 'deferred' && state(p, 'L13').reason === 'regError' && fs.existsSync(upd), 'L13: registry unreadable: deferred, the folder kept')
+    await I.runCleanup(cleanupEnv(p, { registry: makeRegistry() }))
+    check(state(p, 'L13').state === 'done' && !fs.existsSync(upd), 'L13: the next pass with a readable registry deletes it')
+    const pp = committed({ mode: 'portable' })
+    const ad = path.join(pp.roots.appData, 'snmulticc'); write(path.join(ad, 'status-bin', 'x.cmd'), 'x')
+    await I.runCleanup(cleanupEnv(pp, { mode: 'portable', portableDir: path.join(pp.base, 'usb'), registry: broken }))
+    check(state(pp, 'L03').state === 'deferred' && state(pp, 'L03').reason === 'regError' && fs.existsSync(ad), 'L03: registry unreadable: deferred, not ownedByInstalled')
   }
   // L09: the old AUMID notification key.
   {
@@ -1349,6 +1374,67 @@ async function orchestrationChecks() {
     const pass = R.scheduleLegacyCleanup(fakeWin, { setTimeout: tm.setTimeout, setInterval: tm.setInterval, isLegacyProcessRunning: () => true })
     await pass(); await pass()
     check(tm.list.map(x => x.ms).join() === '3000,60000,300000' && markerAt(userData).cleanup.L01.state === 'deferred', 'cleanup: deferred items retry at 60 s, then every 5 min')
+  }
+  // The daily check expires the zip while the app stays open (here with the marker in cleaning).
+  {
+    const t = fakeTree({ SNAOS_FORCE_LEGACY_MIGRATION: '1', SNAOS_FORCE_LEGACY_CLEANUP: '1' })
+    seedLegacy(path.join(t.appDataRoot, 'snmulticc'))
+    const userData = path.join(t.appDataRoot, 'snagentsos-dev')
+    const R = loadOrchestrator(t, { userData })
+    await R.runLegacyMigrationAtBoot()
+    const m0 = markerAt(userData)
+    const zip = path.join(userData, 'migration-backup-v1.zip')
+    let now = m0.backup.createdAt + 29 * 24 * 3600 * 1000
+    const intervals = []
+    const pass = R.scheduleLegacyCleanup(fakeWin, { setTimeout: () => {}, setInterval: (fn, ms) => intervals.push({ fn, ms }), isLegacyProcessRunning: () => true, now: () => now })
+    await pass()
+    check(intervals.length === 1 && intervals[0].ms === 24 * 3600 * 1000 && markerAt(userData).phase === 'cleaning', 'expiry: a daily check is scheduled with the cleanup')
+    intervals[0].fn()
+    check(fs.existsSync(zip) && markerAt(userData).backup.deletedAt === undefined, 'expiry daily: 29 days keeps the zip')
+    now = m0.backup.createdAt + 30 * 24 * 3600 * 1000 + 60000
+    intervals[0].fn()
+    check(!fs.existsSync(zip) && markerAt(userData).backup.deletedAt === now && markerAt(userData).phase === 'cleaning', 'expiry daily: past expiresAt the zip goes and deletedAt is recorded, also in cleaning')
+  }
+  // Packaged fresh install, no 1.x anywhere: no process query, no zip, no dialog, and cheap.
+  {
+    const t = fakeTree()
+    const userData = path.join(t.appDataRoot, 'snagentsos')
+    const R = loadOrchestrator(t, { userData, isPackaged: true })
+    let queried = 0
+    const deps = { isLegacyRunning: () => { queried++; return false }, closeLegacy: async () => { throw new Error('no close') }, showMessageBox: () => { throw new Error('no dialog') } }
+    await R.runLegacyMigrationAtBoot(deps) // warm-up of the bundle (module init, zod)
+    fs.rmSync(userData, { recursive: true, force: true })
+    const t0 = process.hrtime.bigint()
+    const res = await R.runLegacyMigrationAtBoot(deps)
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6
+    const m = markerAt(userData)
+    check(res === 'continue' && queried === 0 && m.phase === 'committed' && m.outcome === 'noLegacy' && !m.backup && !fs.existsSync(path.join(userData, 'migration-backup-v1.zip')) && !fs.existsSync(path.join(userData, 'config.json')), 'fresh install: noLegacy committed, nothing copied, no zip, no process query')
+    check(ms < 50, `fresh install: the boot step costs under 50 ms (${ms.toFixed(1)} ms)`)
+    const t1 = process.hrtime.bigint()
+    check(await R.runLegacyMigrationAtBoot(deps) === 'continue' && Number(process.hrtime.bigint() - t1) / 1e6 < 50 && queried === 0 && markerAt(userData).at === m.at, 'fresh install: the next start writes nothing and stays under 50 ms')
+  }
+  // The exit helper renames the old portable exe, but never over a newer exe already under the new name.
+  if (isWin) {
+    const { EXIT_SCRIPT } = loadOrchestrator(fakeTree(), { userData: freshDir('exit-ud') })
+    const { execFileSync } = require('node:child_process')
+    const runHelper = (env) => {
+      const dir = freshDir('exit-helper')
+      const script = path.join(dir, 'helper.cmd')
+      fs.writeFileSync(script, EXIT_SCRIPT, 'utf8')
+      const childEnv = { ...process.env, ...env }
+      if (!env.TO) delete childEnv.TO
+      execFileSync('cmd.exe', ['/c', script], { windowsHide: true, env: childEnv, stdio: 'ignore' })
+      return dir
+    }
+    const d1 = freshDir('exit-a'); const from1 = path.join(d1, 'SnMultiCC-1.14.1-portable.exe'); const to1 = path.join(d1, 'SnAgentsOS-portable.exe'); write(from1, 'old name')
+    const h1 = runHelper({ FROM: from1, TO: to1 })
+    check(!fs.existsSync(from1) && fs.readFileSync(to1, 'utf8') === 'old name' && !fs.existsSync(h1), 'exit helper: renames the exe at exit and removes itself and its folder')
+    const d2 = freshDir('exit-b'); const from2 = path.join(d2, 'SnMultiCC-1.14.1-portable.exe'); const to2 = path.join(d2, 'SnAgentsOS-portable.exe'); write(from2, 'old'); write(to2, 'updated in this session')
+    runHelper({ FROM: from2, TO: to2 })
+    check(!fs.existsSync(from2) && fs.readFileSync(to2, 'utf8') === 'updated in this session', 'exit helper: a newer exe under the new name is kept, the old file only deleted')
+    const d3 = freshDir('exit-c'); const from3 = path.join(d3, 'SnMultiCC-1.14.1-portable.exe'); write(from3, 'dup')
+    runHelper({ FROM: from3 })
+    check(!fs.existsSync(from3), 'exit helper: without TO the old file is deleted')
   }
   // Packaged with 1.x open: the only dialog; [Quit] writes nothing, [Close] closes and migrates.
   {

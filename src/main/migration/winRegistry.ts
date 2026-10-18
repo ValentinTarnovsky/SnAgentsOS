@@ -7,9 +7,14 @@ import type { Hive, RegistryAccess } from './legacyInventory'
  * which mangles non-ASCII paths (a LegacyInstallLocation under C:\Users\José),
  * so each call runs a tiny script whose answer is base64 of UTF-8 (or of the
  * raw bytes for REG_BINARY). Key and value names travel in the child's
- * environment, never inside the script text. 3 s timeout per call; any error
- * or timeout rejects, and callers treat that conservatively.
+ * environment, never inside the script text. Any error or timeout rejects,
+ * and callers treat that conservatively (the item is deferred and retried).
+ * The timeout is 10 s, not the 3 s of reg.exe and tasklist: a cold PowerShell
+ * start on a busy login (Defender, AMSI) alone can take seconds, and these
+ * calls only run in the background cleanup, never on the boot path.
  */
+
+export const REGISTRY_TIMEOUT_MS = 10000
 
 const HIVES: Record<Hive, string> = { HKCU: 'HKEY_CURRENT_USER', HKLM: 'HKEY_LOCAL_MACHINE' }
 
@@ -43,7 +48,7 @@ function run(script: string, path: string, name: string, timeoutMs: number): Pro
   })
 }
 
-export function createWinRegistry(timeoutMs = 3000): RegistryAccess {
+export function createWinRegistry(timeoutMs = REGISTRY_TIMEOUT_MS): RegistryAccess {
   const full = (hive: Hive, key: string): string => `${HIVES[hive]}\\${key}`
   return {
     async read(hive, key, name) {

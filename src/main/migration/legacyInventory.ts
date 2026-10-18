@@ -53,7 +53,7 @@ export interface RegistryAccess {
 export interface ShortcutAccess {
   /** Null when the file cannot be read as a shortcut. */
   read(lnk: string): { target: string } | null
-  update(lnk: string, o: { target: string; icon?: string; iconIndex?: number; appUserModelId?: string }): boolean
+  update(lnk: string, o: { target: string; cwd?: string; icon?: string; iconIndex?: number; appUserModelId?: string }): boolean
 }
 
 /** Every root the inventory derives paths from. */
@@ -210,10 +210,11 @@ async function precheck(r: Run, target: string, st: Stats): Promise<ItemOutcome 
 /**
  * A 1.x install registered in either hive: its uninstall entry still says
  * SnMultiCC, or Software\<GUID> points at a folder that still holds the 1.x
- * exe (after the 2.x setup that key belongs to 2.x). A registry error counts
- * as registered: the caller then keeps what belongs to that install.
+ * exe (after the 2.x setup that key belongs to 2.x). Null when the registry
+ * could not be read (a PowerShell timeout on a busy start): the caller defers
+ * and asks again, it neither deletes nor gives up for good (skipped is final).
  */
-export async function legacyInstallRegistered(env: CleanupEnv): Promise<boolean> {
+export async function legacyInstallRegistered(env: CleanupEnv): Promise<boolean | null> {
   const reg = env.registry
   if (!reg) return false
   try {
@@ -225,9 +226,11 @@ export async function legacyInstallRegistered(env: CleanupEnv): Promise<boolean>
     }
     return false
   } catch {
-    return true
+    return null
   }
 }
+
+const registryUnknown: ItemOutcome = { state: 'deferred', reason: 'regError' }
 
 /** Top-level files 1.x keeps its data in (backups/ is the other place). */
 const DATA_FILES = ['config.json', 'config.json.bak', 'remote-devices.json']
@@ -475,7 +478,10 @@ const L03: InventoryItem = {
     } catch {
       /* no backups folder */
     }
-    if (hasData || (await legacyInstallRegistered(r.env))) return { state: 'skipped', reason: 'ownedByInstalled' }
+    if (hasData) return { state: 'skipped', reason: 'ownedByInstalled' }
+    const registered = await legacyInstallRegistered(r.env)
+    if (registered === null) return registryUnknown
+    if (registered) return { state: 'skipped', reason: 'ownedByInstalled' }
     if (r.env.isFolderLocked(target)) return { state: 'deferred', reason: 'legacyRunning' }
     // Whatever is not Chromium's goes to the zip first (or keeps the folder), like L01.
     const kept = await backupUnknown(r, target, target, 'appdata/other/', new Set())
@@ -521,7 +527,9 @@ const L13: InventoryItem = {
     if (!r.env.roots.localAppData) return notThisMode
     const target = join(r.env.roots.localAppData, LEGACY_BRAND.updaterCacheDir)
     if (!(await lstatOrNull(r, target))) return { state: 'absent' }
-    if (await legacyInstallRegistered(r.env)) return { state: 'skipped', reason: 'ownedByInstalled' }
+    const registered = await legacyInstallRegistered(r.env)
+    if (registered === null) return registryUnknown
+    if (registered) return { state: 'skipped', reason: 'ownedByInstalled' }
     return outcome(await safeRemoveTree(target, r.env.guard, r.rm))
   },
 }
@@ -779,8 +787,15 @@ const L08: InventoryItem = {
       // Only pins of the 1.x exe (installed or its temp extraction); anything else is the user's.
       if (!info || basename(info.target).toLowerCase() !== LEGACY_BRAND.winExe.toLowerCase()) continue
       if (await pinIsAlive(r, n)) {
-        // Retargeted in place, same file name: renaming the .lnk would unpin it.
-        if (existsSync(target) && r.env.shortcuts.update(lnk, { target, icon: target, iconIndex: 0, appUserModelId: BRAND.appId })) {
+        // The portable exe renamed only at exit (L17): the pin is retargeted on the next start, never dropped.
+        if (!existsSync(target)) {
+          results.push({ state: 'deferred', reason: 'targetMissing' })
+          continue
+        }
+        // Retargeted in place, same file name: renaming the .lnk would unpin it. The
+        // working folder moves too: the old one (the 1.x install or its temp
+        // extraction) is deleted, and a shortcut whose Start in folder is gone fails to open.
+        if (r.env.shortcuts.update(lnk, { target, cwd: dirname(target), icon: target, iconIndex: 0, appUserModelId: BRAND.appId })) {
           retargeted++
           results.push({ state: 'done' })
           r.env.log(`phase=cleaning item=L08 result=retargeted path=${lnk}`)
