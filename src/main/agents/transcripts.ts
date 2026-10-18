@@ -12,9 +12,13 @@ export function claudeProjectsDir(claudeDir = claudeConfigDir()): string {
  * Claude's project folder name for a launch directory: every character that
  * is not an ASCII letter or digit becomes '-' (C:\Users\me\repo ->
  * C--Users-me-repo). `--resume <id>` looks the transcript up there (E5 risk 3).
+ * Claude sees a normalized cwd, so a trailing separator the user typed in a
+ * pane's folder (C:\repo\) is dropped first; a drive or filesystem root keeps it.
  */
 export function claudeSlug(cwd: string): string {
-  return cwd.replace(/[^A-Za-z0-9]/g, '-')
+  const trimmed = cwd.replace(/[\\/]+$/, '')
+  const dir = trimmed === '' || /^[A-Za-z]:$/.test(trimmed) ? cwd : trimmed
+  return dir.replace(/[^A-Za-z0-9]/g, '-')
 }
 
 /** Expected transcript of a session started in `cwd`. */
