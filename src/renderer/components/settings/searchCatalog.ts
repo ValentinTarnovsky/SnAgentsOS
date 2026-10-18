@@ -175,7 +175,7 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('updates.autoCheck', 'update.autoCheck', 'update.autoCheckHint', { keywords: ['update', 'actualizar', 'startup', 'inicio'], toggle: { path: 'autoCheckUpdates' } }),
 
   // About
-  e('about.info', 'settings.search.about', 'settings.search.aboutHint', { summary: true, keywords: ['about', 'acerca', 'version', 'license', 'licencia'] }),
+  e('about.info', 'settings.search.about', 'settings.search.aboutHint', { summary: true, keywords: ['about', 'acerca', 'version', 'license', 'licencia', 'diagnostics', 'diagnostico', 'crash'] }),
 ]
 
 /** Rows generated from KEY_ACTIONS: every remappable action is searchable. */

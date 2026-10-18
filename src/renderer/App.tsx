@@ -13,6 +13,8 @@ import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { startPersistence } from '@/lib/persist'
 import { initPtyLifecycle, reconcilePtys } from '@/lib/ptyLifecycle'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
+import { showRecoveryCard } from '@/lib/renderErrors'
+import { AppErrorBoundary, TitleBarBoundary } from '@/components/common/ErrorBoundary'
 import { usePaneScheduler } from '@/lib/usePaneScheduler'
 import { useStatusEvents } from '@/lib/useStatusEvents'
 import { applyTheme } from '@/themes'
@@ -56,12 +58,14 @@ export function App() {
       .then((cfg) => {
         hydrate(cfg)
         stopLifecycle = initPtyLifecycle()
-        if (cfg) void reconcilePtys()
+        // The recovery card (E4-FR-22) counts consoles after the reconcile.
+        void (cfg ? reconcilePtys() : Promise.resolve(0)).then(() => showRecoveryCard())
         unsub = startPersistence()
       })
       .catch(() => {
         hydrate(null)
         stopLifecycle = initPtyLifecycle()
+        void showRecoveryCard()
       })
     return () => {
       unsub?.()
@@ -152,9 +156,14 @@ export function App() {
   return (
     <I18nProvider lang={language}>
       <div className="flex h-full w-full flex-col bg-bg-primary">
-        <TitleBar />
+        {/* Crash resilience (E4-FR-20): neither fallback kills a console. */}
+        <TitleBarBoundary>
+          <TitleBar />
+        </TitleBarBoundary>
         <LegacyBanner />
-        <AppBody />
+        <AppErrorBoundary>
+          <AppBody />
+        </AppErrorBoundary>
       </div>
       {/* Outside AppBody so toasts stay up even if the body fails (E4-FR-03). */}
       <NotificationStack />
