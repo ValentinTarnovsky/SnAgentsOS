@@ -1,23 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
-import { homedir } from 'os'
 import type { UsageRow } from '@shared/ipc-contract'
-
-function sessionsRoot(): string {
-  return join(homedir(), '.codex', 'sessions')
-}
-
-/** Numeric child directories (years/months/days), highest value first. */
-function numericDirsDesc(dir: string): string[] {
-  try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && /^\d+$/.test(e.name))
-      .map((e) => e.name)
-      .sort((a, b) => Number(b) - Number(a))
-  } catch {
-    return []
-  }
-}
+import { numericDirsDesc, sessionsRoot } from '../agents/codexPaths'
 
 /**
  * Locate the most recent `rollout-*.jsonl` under sessions/YYYY/MM/DD without
