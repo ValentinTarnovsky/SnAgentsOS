@@ -203,7 +203,13 @@ export type RemoteCtlAction =
   | { kind: 'mountWorkspace'; workspaceId: string }
   /** "Show on the PC": restore and focus the window, then reveal the pane (E2-FR-07). */
   | { kind: 'revealPane'; paneId: string }
-  /** Open a link on the PC (http, https or mailto only, <= 2048). */
+  /**
+   * E2-FR-29/30: a path tapped in the phone terminal. The renderer resolves the
+   * root from its own store (the pane's launch cwd, then `ws.cwd`) and main
+   * opens an inert file or reveals it. Ack errors: denied_path, not_found, rate.
+   */
+  | { kind: 'openPath'; workspaceId: string; paneId: string; path: string }
+  /** E2-FR-28: open a link on the PC (http, https or mailto only, <= 2048; else ack denied_url). */
   | { kind: 'openUrl'; url: string }
 
 // --- Client -> server messages ---

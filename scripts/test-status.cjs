@@ -324,7 +324,119 @@ async function main() {
   await schemaV11Checks()
   ntfyConfigChecks()
   await enrichmentChecks()
+  await pathOpenChecks()
   console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, store, enrichment and Codex App Server detail checks`)
+}
+
+// R22-16 (E2-FR-28..30): shell:openPath containment in main with real files and
+// a real junction, the renderer's openPath/openUrl executor (roots from the
+// store, SSH denied, retry with the workspace root) and the ctl schemas.
+async function pathOpenChecks() {
+  const { createPathOpener, classifyRoot, validatePath, isInside } = load('src/main/remote/pathOpen.ts')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-pathopen-'))
+  try {
+    const root = path.join(tmp, 'ws'), outside = path.join(tmp, 'outside'), home = path.join(tmp, 'home')
+    for (const d of [root, path.join(root, 'src'), outside, home]) fs.mkdirSync(d, { recursive: true })
+    for (const f of [path.join(root, 'notes.md'), path.join(root, 'src', 'App.tsx'), path.join(root, 'run.js'), path.join(root, 'tool.exe'), path.join(outside, 'secret.md'), path.join(home, 'notas.md')]) fs.writeFileSync(f, 'x')
+    fs.symlinkSync(outside, path.join(root, 'escape'), 'junction')
+    const alias = path.join(tmp, 'alias')
+    fs.symlinkSync(root, alias, 'junction')
+    const real = p => fs.realpathSync.native(p)
+    let now = 10000, openErr = ''
+    const opened = [], revealed = []
+    const opener = createPathOpener({ openPath: async p => { opened.push(p); return openErr }, showItemInFolder: p => revealed.push(p), homedir: () => home, now: () => now })
+    const call = async (cwd, p) => { now += 1500; return opener({ cwd, path: p }) }
+
+    let r = await call(root, 'src/App.tsx:12')
+    check(r.ok && revealed.at(-1) === real(path.join(root, 'src', 'App.tsx')) && opened.length === 0, 'src/App.tsx:12 drops the suffix and is revealed, not opened')
+    r = await call(root, 'notes.md')
+    check(r.ok && opened.at(-1) === real(path.join(root, 'notes.md')), 'an inert .md inside the root opens')
+    r = await call(root, 'run.js')
+    check(r.ok && opened.length === 1 && revealed.at(-1) === real(path.join(root, 'run.js')), 'a .js is revealed, never opened (Windows Script Host)')
+    r = await call(root, 'tool.exe:3:4')
+    check(r.ok && opened.length === 1 && revealed.at(-1).endsWith('tool.exe'), 'a .exe is revealed, never run')
+    r = await call(root, path.join('..', '..', 'Windows', 'System32', 'calc.exe'))
+    check(!r.ok && r.error === 'denied_path', '..\\..\\Windows\\System32\\calc.exe is denied_path')
+    r = await call(root, path.join(outside, 'secret.md'))
+    check(!r.ok && r.error === 'denied_path', 'an absolute path outside the root is denied_path even when it exists')
+    r = await call(root, 'escape/secret.md')
+    check(!r.ok && r.error === 'denied_path', 'a junction that escapes the root is denied after realpath')
+    r = await call(root, 'missing.md')
+    check(!r.ok && r.error === 'not_found', 'a missing file is not_found')
+    r = await call(alias, 'notes.md')
+    check(r.ok && opened.at(-1) === real(path.join(root, 'notes.md')), 'a cwd that is itself a junction compares after realpath')
+    const before = opened.length
+    r = await call('', 'notas.md')
+    check(r.ok && opened.length === before && revealed.at(-1) === real(path.join(home, 'notas.md')), 'an empty cwd means home, and under home even an .md is only revealed')
+    check(classifyRoot(real(home), home) === 'home' && classifyRoot(real(root), home) === 'normal', 'classifyRoot tells home from a normal folder')
+    check(classifyRoot(process.platform === 'win32' ? 'C:\\' : '/', home) === 'drive', 'a drive root classifies as drive')
+    check(isInside('C:\\ws', 'c:\\WS\\a.txt', true) && !isInside('C:\\ws', 'C:\\ws2\\a.txt', true) && isInside('C:\\', 'C:\\x', true), 'containment is case-insensitive on win32 and has no prefix confusion')
+    // Rate: one open or reveal per second in total; denied or missing paths do not spend it.
+    now += 5000
+    r = await opener({ cwd: root, path: 'notes.md' })
+    const second = await opener({ cwd: root, path: 'notes.md' })
+    check(r.ok && !second.ok && second.error === 'rate', 'two opens within a second: the second is rate')
+    now += 1500
+    const denied = await opener({ cwd: root, path: 'escape/secret.md' })
+    const retry = await opener({ cwd: root, path: 'notes.md' })
+    check(denied.error === 'denied_path' && retry.ok, 'a denied path does not spend the budget, so the workspace-root retry goes through')
+    check((await opener({ cwd: 1, path: 'x' })).error === 'bad_request' && (await opener({ cwd: root, path: '  ' })).error === 'bad_request' && (await opener(null)).error === 'bad_request', 'malformed requests are bad_request')
+    now += 1500; openErr = 'No application is associated'
+    r = await opener({ cwd: root, path: 'notes.md' })
+    check(r.ok && revealed.at(-1) === real(path.join(root, 'notes.md')), 'an inert file with no handler falls back to reveal')
+    const v = validatePath(root, '"notes.md"', home)
+    check(v.ok && v.rootKind === 'normal', 'surrounding quotes are dropped')
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+
+  // Renderer executor: roots from the store, SSH denied without calling main, retry under ws.cwd.
+  {
+    const calls = [], external = []
+    let answer = () => ({ ok: true })
+    const rr = loadRenderer(`export { useAppStore } from './store'; export { runOpenPath, runOpenUrl, resolvePaneRoot } from './remoteOpen'`, {
+      window: { snApi: { system: { openPath: async req => { calls.push(req); return answer(req) }, openExternal: u => external.push(u) }, pty: { killPanes: async () => 0 } } },
+      document: { hasFocus: () => false },
+      URL,
+    })
+    const pane = (id, extra = {}) => ({ id, type: 'shell', title: id, icon: 'terminal', ...extra })
+    rr.useAppStore.setState({
+      presets: [{ id: 'pr', name: 'P', type: 'claude', command: 'claude', icon: 'bot', color: '#fff', defaultCwd: 'D:/preset' }],
+      workspaces: [
+        { id: 'w', name: 'W', cwd: 'C:/ws', panes: [pane('p', { cwd: 'C:/ws/sub' }), pane('s', { setupId: 'ssh' }), pane('q', { presetId: 'pr' }), pane('n')] },
+        { id: 'remote', name: 'R', cwd: 'C:/r', setupId: 'ssh', panes: [pane('r')] },
+        { id: 'bare', name: 'B', cwd: '', panes: [pane('b'), pane('bc', { cwd: 'C:/elsewhere' })] },
+      ],
+    })
+    check(rr.resolvePaneRoot('w', 'p') === 'C:/ws/sub' && rr.resolvePaneRoot('w', 'q') === 'D:/preset' && rr.resolvePaneRoot('w', 'n') === 'C:/ws' && rr.resolvePaneRoot('bare', 'b') === '', 'pane root: pane cwd, then preset defaultCwd, then ws.cwd, else empty (home)')
+    answer = req => req.cwd === 'C:/ws/sub' ? { ok: false, error: 'denied_path' } : { ok: true }
+    let res = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'w', paneId: 'p', path: '../README.md' })
+    check(res.ok && calls.length === 2 && calls[0].cwd === 'C:/ws/sub' && calls[1].cwd === 'C:/ws', 'denied under the pane root retries once under ws.cwd')
+    calls.length = 0
+    res = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'w', paneId: 's', path: 'a.md' })
+    const res2 = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'remote', paneId: 'r', path: 'a.md' })
+    check(res.error === 'denied_path' && res2.error === 'denied_path' && calls.length === 0, 'a pane or workspace with an SSH profile is denied_path without calling main')
+    answer = () => ({ ok: false, error: 'denied_path' })
+    res = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'w', paneId: 'n', path: '../x' })
+    check(res.error === 'denied_path' && calls.length === 1, 'no retry when the pane root already is ws.cwd')
+    calls.length = 0
+    res = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'bare', paneId: 'bc', path: '../x' })
+    check(res.error === 'denied_path' && calls.length === 1, 'no retry under home when the workspace has no cwd of its own')
+    answer = () => ({ ok: false, error: 'not_found' }); calls.length = 0
+    res = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'w', paneId: 'p', path: 'nope.md' })
+    check(res.error === 'not_found' && calls.length === 1, "main's error is copied to the ack (no retry for not_found)")
+    res = await rr.runOpenPath({ kind: 'openPath', workspaceId: 'w', paneId: 'gone', path: 'a.md' })
+    check(!res.ok && res.error === 'not_found', 'a pane that no longer exists is not_found')
+    check(rr.runOpenUrl({ kind: 'openUrl', url: 'http://localhost:5173' }).ok && external.at(-1) === 'http://localhost:5173/', 'openUrl hands an http URL to openExternal')
+    check(rr.runOpenUrl({ kind: 'openUrl', url: 'file:///C:/Windows/calc.exe' }).error === 'denied_url' && rr.runOpenUrl({ kind: 'openUrl', url: 'javascript:alert(1)' }).error === 'denied_url' && external.length === 1, 'openUrl refuses anything but http(s) and mailto with denied_url (contract R22-14)')
+  }
+
+  // ctl schemas.
+  {
+    const { parseRemoteClientMsg } = load('src/shared/remote-protocol-schemas.ts')
+    const ctl = action => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'ctl', id: 'c1', action }))
+    check(ctl({ kind: 'openPath', workspaceId: 'w', paneId: 'p', path: 'src/App.tsx:12' }) !== null, 'ctl openPath parses')
+    check(ctl({ kind: 'openPath', workspaceId: 'w', path: 'a' }) === null && ctl({ kind: 'openPath', workspaceId: 'w', paneId: 'p', path: '' }) === null && ctl({ kind: 'openPath', workspaceId: 'w', paneId: 'p', path: 'x'.repeat(4097) }) === null, 'ctl openPath needs a pane and a 1..4096 path')
+    check(ctl({ kind: 'openUrl', url: 'https://example.com' }) !== null && ctl({ kind: 'openUrl', url: 'javascript:alert(1)' }) !== null && ctl({ kind: 'openUrl', url: 'https://x.co/' + 'a'.repeat(2048) }) === null, 'ctl openUrl only bounds the length (<= 2048): the executor judges the scheme')
+  }
 }
 
 // R21-01: schema 11 (defaults only, no migrate() logic), the config upgrade

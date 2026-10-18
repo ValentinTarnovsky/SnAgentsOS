@@ -10,6 +10,7 @@ import { killPanePtys } from './ptyRegistry'
 import { broadcastToWorkspace } from './broadcastPrompt'
 import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
 import { runRemoteQuickCommand } from './quickCommands'
+import { runOpenPath, runOpenUrl } from './remoteOpen'
 import { toast } from './toast'
 import { translate } from '@/i18n'
 import type { Language } from '@shared/types'
@@ -51,20 +52,6 @@ export function remotePromptFallback(
   const configured = platform === 'win32' || platform === 'darwin' || platform === 'linux' ? state.settings.defaultShell[platform] : undefined
   const shell = configured?.trim() ? configured : platformDefaultShell(platform)
   return initialPromptFallback({ text, shell: shellKind(shell, platform), platform, hasSetup: !!launch.setup, launchKind: launch.launchKind ?? 'other' })
-}
-
-/**
- * Schemes a phone may open on the PC (E2-FR-28): http and https with a host,
- * or mailto; anything else acks `denied_url` (the schema only bounds the
- * length). Main's openExternalSafe filters again. Exported for tests.
- */
-export function safeRemoteUrl(raw: string): boolean {
-  try {
-    const url = new URL(raw)
-    return url.protocol === 'mailto:' || ((url.protocol === 'http:' || url.protocol === 'https:') && !!url.hostname)
-  } catch {
-    return false
-  }
 }
 
 /**
@@ -189,11 +176,12 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
       return revealPane(action.paneId) ? { ok: true } : { ok: false, error: 'not_found' }
     }
 
-    case 'openUrl': {
-      if (!safeRemoteUrl(action.url)) return { ok: false, error: 'denied_url' }
-      window.snApi.system.openExternal(action.url)
-      return { ok: true }
-    }
+    // E2-FR-28..30: links tapped in the phone terminal.
+    case 'openPath':
+      return runOpenPath(action)
+
+    case 'openUrl':
+      return runOpenUrl(action)
 
     default:
       return { ok: false, error: 'unknown_action' }

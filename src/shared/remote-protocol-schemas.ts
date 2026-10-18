@@ -41,6 +41,8 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('mountWorkspace'), workspaceId: id }),
   z.object({ kind: z.literal('revealPane'), paneId: id }),
   z.object({ kind: z.literal('openUrl'), url: z.string().min(1).max(2048) }),
+  // E2-FR-28..30. Main re-validates the path against the root the renderer resolves.
+  z.object({ kind: z.literal('openPath'), workspaceId: id, paneId: id, path: z.string().min(1).max(4096) }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [
