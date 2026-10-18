@@ -783,6 +783,9 @@ export function useXterm(
         if (disposed) return
         offData()
         offData = () => undefined
+        // No shell runs now: the header and sidebar say "exited", like main's
+        // record that keeps the output for phones (code -1 for a live restart).
+        useAppStore.getState().setPaneExit(opts.paneId, prev?.code ?? -1)
         emitExit({ code: prev?.code ?? -1, error: spawnError(err), cardVisible: true })
       } finally {
         restartingRef.current = false

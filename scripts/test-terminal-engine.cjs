@@ -330,6 +330,22 @@ async function main() {
     current.impl = realImpl
     const res5 = pm.restart({ paneId: 'fb', cols: 80, rows: 24 }, 'again')
     check(pm.getReplay('fb').replay.includes('kept') && pm.getReplay('fb').replay.endsWith(res5.tail), 'the retry seeds that output')
+
+    // A full ring's seed sits at the cap: new output must push out only its
+    // oldest lines, never the whole kept output at once.
+    {
+      const big = pm.spawn({ paneId: 'big', cols: 80, rows: 24 })
+      const line = 'x'.repeat(78) + '\r\n'
+      for (let i = 0; i < 4000; i++) h.procs.at(-1).emit(line)
+      h.procs.at(-1).emit('LAST-OLD-LINE\r\n')
+      await flushAll()
+      const resBig = pm.restart({ paneId: 'big', cols: 80, rows: 24 }, 'r')
+      check(resBig.ptyId !== big.ptyId, 'restart of a pane with a full ring')
+      for (let i = 0; i < 8; i++) h.procs.at(-1).emit('new output line ' + i + '\r\n')
+      await flushAll()
+      const repBig = pm.getReplay('big').replay
+      check(repBig.includes('LAST-OLD-LINE') && repBig.length > 200 * 1024 && repBig.endsWith('new output line 7\r\n'), 'new output after restarting a full ring keeps the kept output (oldest lines trimmed only)')
+    }
     pm.killAll()
   }
 

@@ -67,6 +67,12 @@ const WRITE_CHUNK = 4 * 1024
 const WRITE_PACE_MS = 4
 /** Replay ring-buffer size per pty. */
 const HISTORY_CAP = 256 * 1024
+/**
+ * A restart seed enters the new ring in pieces this size, so new output pushes
+ * out its oldest lines a piece at a time instead of the whole kept output at
+ * once (a seed of a full ring sits right at HISTORY_CAP).
+ */
+const SEED_CHUNK = 16 * 1024
 /** Recent-output tail kept for setup `waitFor` matching (bounds memory). */
 const SCRATCH_CAP = 16 * 1024
 /**
@@ -261,7 +267,7 @@ export class PtyManager {
       writeQueue: '',
       writeTimer: null,
     }
-    if (seed) this.pushHistory(entry, seed)
+    for (let i = 0; i < seed.length; i += SEED_CHUNK) this.pushHistory(entry, seed.slice(i, i + SEED_CHUNK))
     this.entries.set(ptyId, entry)
     this.byPane.set(req.paneId, ptyId)
     // A respawn supersedes whatever the previous pty left (E6-FR-20).

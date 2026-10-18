@@ -197,7 +197,9 @@ export function buildCdPrefix(shellKind: CdShellKind, cwd: string | undefined): 
   if (!/^([A-Za-z]:[\\/]|\\\\|\/)/.test(cwd)) return ''
   switch (shellKind) {
     case 'powershell':
-      return `Set-Location -LiteralPath '${cwd.replace(/'/g, "''")}'; `
+      // PowerShell also ends a single-quoted string at the typographic quotes
+      // U+2018..U+201B; doubling any of them escapes it like ''.
+      return `Set-Location -LiteralPath '${cwd.replace(/['‘’‚‛]/g, '$&$&')}'; `
     case 'cmd':
       return /["%]/.test(cwd) ? '' : `cd /d "${cwd}" && `
     case 'posix':
