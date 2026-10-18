@@ -5,7 +5,7 @@ import { getPtyId } from './ptyRegistry'
 /**
  * Insert the same text into every ACTIVE (non-minimized) console of a workspace
  * that has a live pty. No trailing Enter, the user reviews and runs it in each
- * console (same convention as insertToConsole). Minimized panes and unmounted
+ * console (same convention as a Quick Command without Enter). Minimized and unmounted
  * panes (no pty) are skipped. Returns how many consoles received the text.
  */
 export function broadcastToWorkspace(workspace: Workspace, text: string): number {

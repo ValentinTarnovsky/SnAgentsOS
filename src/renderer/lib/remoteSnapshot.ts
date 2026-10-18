@@ -6,7 +6,6 @@ import { getPtyId, onPtyRegistryChange } from './ptyRegistry'
 import { useUsageStore } from './usageStore'
 import { useAgentStore } from './agentStore'
 import { paneResumable } from './agentLaunch'
-import { legacySnippets } from '@shared/quickCommands'
 import { useGitStore } from './gitStore'
 import { gitChipEnabled, remoteGitChip, workspaceGitKey } from './gitChip'
 
@@ -55,8 +54,8 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     language: state.settings.language,
     fontFamily: state.settings.fontFamily,
     fontSize: state.settings.fontSize,
-    // Interim until the phone gets QuickCommandsSheet (R22-12): global send commands.
-    snippets: legacySnippets(state.quickCommands),
+    // E8-FR-07: the phone lists them and runs them by id (runQuickCommand).
+    quickCommands: state.quickCommands,
     keyButtons: state.keyButtons,
     // Fields are structurally identical to RemoteUsageSnapshot; passthrough.
     usage: useUsageStore.getState().snapshot ?? null,

@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArchiveRestore, BellRing, FileText, Megaphone, Palette, PanelLeft, Plus, Search, Settings } from 'lucide-react'
+import { ArchiveRestore, BellRing, Bot, Megaphone, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
 import { formatAgeShort } from '@shared/agents'
 import { visiblePaneIds } from '@shared/status'
 import { useAppStore } from '@/lib/store'
-import { insertToConsole } from '@/lib/insertToConsole'
+import { runQuickCommand } from '@/lib/quickCommands'
 import { useAgentStore } from '@/lib/agentStore'
 import { reopenClosedConsole } from '@/lib/agentLaunch'
-import { toast } from '@/lib/toast'
 import { useLang, useT } from '@/i18n'
 import { iconFor, type IconComponent } from '@/lib/icons'
 import { THEME_LIST } from '@/themes'
@@ -144,23 +143,14 @@ export function CommandPalette() {
         })
       }
     }
-    // Interim (R22-01): send commands insert their text as snippets did; R22-12
-    // replaces these rows with qc-<id> runners for both actions.
-    for (const snip of orderQuickCommands(quickCommands, activeId).filter((c) => c.action === 'send')) {
+    // E8-FR-06: globals and the active workspace's own, run like the popover.
+    for (const qc of orderQuickCommands(quickCommands, activeId)) {
       cmds.push({
-        id: `snip-${snip.id}`,
-        label: `${t('palette.snippet')}: ${snip.name}`,
-        hint: t('palette.snippet'),
-        icon: FileText,
-        run: () => {
-          const paneId = insertToConsole(snip.text)
-          if (!paneId) {
-            toast.error(t('toast.snippet.noTarget'), { dedupeKey: 'snippet' })
-            return
-          }
-          const pane = useAppStore.getState().workspaces.flatMap((w) => w.panes).find((p) => p.id === paneId)
-          toast.success(t('toast.snippet.inserted', { name: snip.name, pane: pane?.title ?? '' }), { dedupeKey: 'snippet' })
-        },
+        id: `qc-${qc.id}`,
+        label: `${t('palette.run')}: ${qc.name}`,
+        hint: t('palette.quickCommand'),
+        icon: qc.action === 'agent' ? Bot : Type,
+        run: () => void runQuickCommand(qc),
       })
     }
     for (const th of THEME_LIST) {

@@ -14,7 +14,7 @@ export type CategoryId =
   | 'language'
   | 'agents'
   | 'connections'
-  | 'snippets'
+  | 'quick'
   | 'startup'
   | 'notifications'
   | 'keys'
@@ -31,7 +31,7 @@ export const CATEGORY_ORDER: CategoryId[] = [
   'terminal',
   'agents',
   'connections',
-  'snippets',
+  'quick',
   'startup',
   'notifications',
   'keys',
@@ -52,7 +52,7 @@ export const CATEGORY_LABEL: Record<CategoryId, MessageKey> = {
   language: 'settings.cat.language',
   agents: 'settings.cat.agents',
   connections: 'settings.cat.connections',
-  snippets: 'settings.cat.snippets',
+  quick: 'settings.cat.quick',
   startup: 'settings.cat.startup',
   notifications: 'settings.cat.notifications',
   keys: 'settings.cat.keys',
@@ -122,9 +122,9 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('agents.ctrlDigit', 'settings.agents.ctrlDigit', 'settings.agents.ctrlDigitHint', { groupKey: 'settings.agents.behavior', keywords: ['ctrl', 'focus', 'foco', 'shortcut', 'atajo'], toggle: { path: 'agents.ctrlDigitFocus' } }),
   e('agents.presets', 'settings.search.agentsPresets', 'settings.search.agentsPresetsHint', { summary: true, keywords: ['preset', 'model', 'modelo', 'agent', 'agente', 'claude', 'codex', 'command', 'comando'] }),
 
-  // Connections, snippets
+  // Connections, Quick Commands
   e('connections.profiles', 'settings.search.connections', 'settings.search.connectionsHint', { summary: true, keywords: ['ssh', 'connection', 'conexion', 'setup', 'login', 'password', 'contrasena', 'server', 'servidor', 'expect'] }),
-  e('snippets.list', 'settings.search.snippets', 'settings.search.snippetsHint', { summary: true, keywords: ['snippet', 'prompt', 'plantilla', 'template', 'texto', 'text'] }),
+  e('quick.list', 'settings.search.quick', 'settings.search.quickHint', { summary: true, keywords: ['snippet', 'snippets', 'prompt', 'comando', 'command', 'quick', 'plantilla', 'template', 'texto', 'text', 'agente', 'agent'] }),
 
   // Startup
   e('startup.restoreLast', 'settings.restoreLast', undefined, { keywords: ['restore', 'restaurar', 'workspace', 'inicio', 'startup'], toggle: { path: 'restoreLastWorkspace' } }),
@@ -261,7 +261,9 @@ export interface SettingsTarget {
 /** Parse an openSettings target: 'remote' or 'notifications#sound'. Unknown category = null. */
 export function parseSettingsTarget(target: string | null | undefined): SettingsTarget {
   if (!target) return { category: null, anchor: null }
-  const [cat, row] = target.split('#', 2)
+  const [raw, row] = target.split('#', 2)
+  // The category was 'snippets' before Quick Commands (E8-FR-03): old links still land.
+  const cat = raw === 'snippets' ? 'quick' : raw
   if (!(CATEGORY_ORDER as string[]).includes(cat)) return { category: null, anchor: null }
   return { category: cat as CategoryId, anchor: row ? `${cat}.${row}` : null }
 }

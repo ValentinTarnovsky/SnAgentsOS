@@ -167,6 +167,20 @@ function quickCommandsOf(config: ConfigFile): QuickCommand[] {
   return migrateQuickCommandsConfig(config).config.quickCommands ?? []
 }
 
+/**
+ * A one-shot initial prompt waiting for its pane's first spawn (E8-FR-02):
+ * useXterm consumes and deletes it, so a restart never finds it again.
+ */
+export interface PendingPrompt {
+  text: string
+  enter: boolean
+  source: 'quick' | 'composer' | 'cli' | 'repo' | 'schedule'
+  createdAt: number
+}
+
+/** Editor target of Settings > Quick Commands (see AppState.quickEdit). */
+export type QuickEditRequest = { id: string } | { newScope: string | null }
+
 /** Prefill for the new-workspace wizard (setWizardOpen(true, prefill)). */
 export interface WizardPrefill {
   cwd?: string
@@ -197,6 +211,16 @@ export interface AppState {
   wizardPrefill: WizardPrefill | null
   paletteOpen: boolean
   globalPromptOpen: boolean
+  /** Quick Commands popover, Ctrl+Shift+Q (E8-FR-04; transient). */
+  quickPopoverOpen: boolean
+  /**
+   * What the Quick Commands editor opens on (transient): an existing command
+   * (its preset was deleted, E8-FR-05) or a new one scoped to a workspace
+   * (the popover's "Create", E8-FR-03/04).
+   */
+  quickEdit: QuickEditRequest | null
+  /** paneId -> initial prompt for the pane's next real spawn (E8-FR-02; transient). */
+  pendingPrompts: Record<string, PendingPrompt>
   /** workspaceId -> maximized paneId (transient; never persisted). */
   maximized: Record<string, string | null>
   /** workspaceId -> minimized paneIds (transient; never persisted). */
@@ -233,7 +257,8 @@ export interface AppState {
   toggleAgentsCollapsed: (id: string) => void
   setActive: (id: string) => void
   toggleSidebar: () => void
-  addPane: (workspaceId: string, pane?: Partial<Pane>) => void
+  /** Appends a console; returns its new id ('' when the workspace is unknown). */
+  addPane: (workspaceId: string, pane?: Partial<Pane>) => string
   removePane: (workspaceId: string, paneId: string) => void
   /**
    * Close a console the way the user does (grid, phone): remembers it on the
@@ -306,6 +331,12 @@ export interface AppState {
   setWizardOpen: (open: boolean, prefill?: WizardPrefill) => void
   setPaletteOpen: (open: boolean) => void
   setGlobalPromptOpen: (open: boolean) => void
+  setQuickPopoverOpen: (open: boolean) => void
+  setQuickEdit: (req: QuickEditRequest | null) => void
+  /** Queue (or clear, with null) the initial prompt of a pane's next spawn. */
+  setPendingPrompt: (paneId: string, prompt: PendingPrompt | null) => void
+  /** Consume the pane's pending prompt (useXterm, on a real spawn only). */
+  takePendingPrompt: (paneId: string) => PendingPrompt | null
 
   /** Apply a Claude status update pushed by main (also flags attention). */
   setPaneStatus: (evt: PaneStatusEvt) => void
@@ -367,6 +398,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   wizardPrefill: null,
   paletteOpen: false,
   globalPromptOpen: false,
+  quickPopoverOpen: false,
+  quickEdit: null,
+  pendingPrompts: {},
   maximized: {},
   minimized: {},
   paneEpoch: {},
@@ -572,17 +606,21 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
 
-  addPane: (workspaceId, pane) =>
+  addPane: (workspaceId, pane) => {
+    if (!get().workspaces.some((w) => w.id === workspaceId)) return ''
+    const id = uid('pane')
     set((s) => ({
       workspaces: s.workspaces.map((w) => {
         if (w.id !== workspaceId) return w
-        const newPane: Pane = { ...makeShellPane(w.panes.length), ...pane, id: uid('pane') }
+        const newPane: Pane = { ...makeShellPane(w.panes.length), ...pane, id }
         const panes = [...w.panes, newPane]
         const order = [...(w.layout?.order ?? w.panes.map((p) => p.id)), newPane.id]
         const grid = gridForCount(panes.length)
         return { ...w, panes, layout: { grid, order } }
       }),
-    })),
+    }))
+    return id
+  },
 
   removePane: (workspaceId, paneId) =>
     set((s) => {
@@ -974,4 +1012,24 @@ export const useAppStore = create<AppState>((set, get) => ({
   setPaletteOpen: (open) => set({ paletteOpen: open }),
 
   setGlobalPromptOpen: (open) => set({ globalPromptOpen: open }),
+
+  setQuickPopoverOpen: (open) => set({ quickPopoverOpen: open }),
+
+  setQuickEdit: (req) => set({ quickEdit: req }),
+
+  setPendingPrompt: (paneId, prompt) =>
+    set((s) => {
+      if (!prompt && !(paneId in s.pendingPrompts)) return {}
+      const pendingPrompts = { ...s.pendingPrompts }
+      if (prompt) pendingPrompts[paneId] = prompt
+      else delete pendingPrompts[paneId]
+      return { pendingPrompts }
+    }),
+
+  takePendingPrompt: (paneId) => {
+    const prompt = get().pendingPrompts[paneId]
+    if (!prompt) return null
+    get().setPendingPrompt(paneId, null)
+    return prompt
+  },
 }))
