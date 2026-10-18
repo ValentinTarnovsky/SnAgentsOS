@@ -19,6 +19,8 @@ import { AiUsageSection } from './sections/AiUsageSection'
 import { RemoteSection } from './sections/RemoteSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
+import { GitSection } from './sections/GitSection'
+import { GitBranch } from 'lucide-react'
 
 type CategoryId =
   | 'appearance'
@@ -34,6 +36,7 @@ type CategoryId =
   | 'aiusage'
   | 'usage'
   | 'remote'
+  | 'git'
   | 'updates'
   | 'about'
 
@@ -59,6 +62,7 @@ const CATEGORIES: Category[] = [
   { id: 'aiusage', labelKey: 'settings.cat.aiusage', icon: Gauge, keywords: ['usage', 'uso', 'tokens', 'token', 'limit', 'limite', 'límite', 'quota', 'cuota', 'claude', 'codex', 'bar', 'barra', 'bars', 'barras'] },
   { id: 'usage', labelKey: 'settings.cat.usage', icon: Activity, keywords: ['performance', 'rendimiento', 'ram', 'cpu', 'memory', 'memoria', 'resources', 'recursos', 'processes', 'procesos'] },
   { id: 'remote', labelKey: 'settings.cat.remote', icon: Smartphone, keywords: ['remote', 'phone', 'celular', 'movil', 'móvil', 'qr', 'control', 'tailscale', 'lan'] },
+  { id: 'git', labelKey: 'settings.cat.git', icon: GitBranch, keywords: ['git', 'branch', 'rama', 'repo', 'chip', 'diff', 'commit', 'cambios', 'changes'] },
   { id: 'updates', labelKey: 'settings.cat.updates', icon: DownloadCloud, keywords: ['update', 'updates', 'actualizar', 'actualización', 'actualizacion', 'version', 'versión', 'upgrade', 'release'] },
   { id: 'about', labelKey: 'settings.cat.about', icon: Info, keywords: ['about', 'acerca', 'version', 'versión'] },
 ]
@@ -83,6 +87,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   aiusage: AiUsageSection,
   usage: UsageSection,
   remote: RemoteSection,
+  git: GitSection,
   updates: UpdatesSection,
   about: AboutSection,
 }

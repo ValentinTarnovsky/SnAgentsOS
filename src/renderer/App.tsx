@@ -8,6 +8,7 @@ import { initRemoteCommands } from '@/lib/remoteCommands'
 import { initLegacyEvents } from '@/lib/legacyStore'
 import { initPowerEvents, syncAgentSettings, syncAwakeMode } from '@/lib/powerStore'
 import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
+import { startGitSync } from '@/lib/gitSync'
 import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { startPersistence } from '@/lib/persist'
 import { useGlobalKeys } from '@/lib/useGlobalKeys'
@@ -106,6 +107,12 @@ export function App() {
   useEffect(() => {
     if (!hydrated) return
     return startRemoteSnapshotSync()
+  }, [hydrated])
+
+  // Git chip (E7-FR-06): feed main's GitService with targets, settings and agent nudges.
+  useEffect(() => {
+    if (!hydrated) return
+    return startGitSync()
   }, [hydrated])
 
   // After config loads, check GitHub for a newer release (if enabled) and, when
