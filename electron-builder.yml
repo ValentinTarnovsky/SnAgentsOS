@@ -37,6 +37,11 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   artifactName: ${productName}-${version}-setup.${ext}
+  # GUID of the 1.x installs: keeps a single entry in Apps and lets the setup
+  # run the old uninstaller. build/installer.nsh moves the app out of the old
+  # folder (E0-FR-15).
+  guid: 8c5f793e-c93a-5e95-add6-ae90c4af8c04
+  include: build/installer.nsh
 
 portable:
   artifactName: ${productName}-${version}-portable.${ext}
