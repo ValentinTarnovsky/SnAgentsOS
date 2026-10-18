@@ -535,6 +535,8 @@ async function enrichmentChecks() {
     check(c.resume === `Set-Location -LiteralPath 'C:\\repo'; claude --model opus --resume ${UUID}` && c.fresh === 'claude --model opus', 'PowerShell resume = Set-Location prefix + preset flags + --resume, New = the preset command')
     c = agentEndCommands({ evt: { sessionId: UUID, cwd: "C:\\it's" }, shellKind: 'powershell', preset: { type: 'shell', command: '', args: [] } })
     check(c.resume === `Set-Location -LiteralPath 'C:\\it''s'; claude --resume ${UUID}` && c.fresh === 'claude', 'a shell pane where claude was typed: bare claude, single quote doubled')
+    c = agentEndCommands({ evt: { sessionId: UUID, cwd: 'C:\\Val\u2019s; calc; \u2018x' }, shellKind: 'powershell' })
+    check(c.resume === `Set-Location -LiteralPath 'C:\\Val\u2019\u2019s; calc; \u2018\u2018x'; claude --resume ${UUID}`, 'PowerShell typographic quotes in the cwd are doubled too (they end a single-quoted string)')
     c = agentEndCommands({ evt: { sessionId: UUID, cwd: 'C:\\repo' }, shellKind: 'cmd' })
     check(c.resume === `cd /d "C:\\repo" && claude --resume ${UUID}`, 'cmd prefix')
     c = agentEndCommands({ evt: { sessionId: UUID, cwd: "/home/me/it's" }, shellKind: 'posix' })

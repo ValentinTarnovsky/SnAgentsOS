@@ -203,6 +203,9 @@ export function Sidebar() {
               ) : (
                 <Tooltip label={sidebarCollapsed ? w.name : ''} side="right" className="min-w-0 flex-1">
                   <button
+                    // No dot to hover (no agent state, not every console exited):
+                    // the "<pane>: exited" lines go on the row itself (E6-FR-38).
+                    title={!sidebarCollapsed && !status && !exitedDot && statusLabel ? statusLabel : undefined}
                     onClick={() => {
                       setActive(w.id)
                       // Move focus into the workspace's console right away, even
