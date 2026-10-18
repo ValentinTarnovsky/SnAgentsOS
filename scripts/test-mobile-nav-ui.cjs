@@ -204,6 +204,16 @@ window.runMain = async () => {
  await wait(400);
  check(!$('[data-sheet]') && history.state.snagentsos === 'root', 'gone, with its history entry popped');
 
+ // --- leaving 'live' with sheets open (E1-FR-36): the host orphans its claims ---
+ flushSync(() => openDrawer());
+ await frames();
+ await hold($('[data-pane=b1]'));
+ await frames();
+ check($$('[data-sheet][data-open=true]').length === 2 && history.state.snagentsos !== 'root', 'two stacked sheets own their entries before the phase change');
+ flushSync(() => root.render(<span />));
+ await wait(200);
+ check(!$('[data-sheet]') && history.state && history.state.snagentsos === 'root', 'unmounting the host (phase change) drops both entries in one traversal: the next back leaves the app');
+
  // --- content drags (touch events): only at scrollTop 0, never with a field focused ---
  let listOpen = true;
  const renderList = () => flushSync(() => root.render(<BackStackHost><Sheet open={listOpen} onClose={() => { listOpen = false; renderList() }} title="List"><input data-field /><div style={{ height: 2000 }} /></Sheet></BackStackHost>));

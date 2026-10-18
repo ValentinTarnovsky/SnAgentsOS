@@ -42,6 +42,8 @@ interface Claim {
   closing: boolean
   /** Its history entry exists (pushState ran). */
   pushed: boolean
+  /** pushState threw: the claim has no entry, so it never pops history. */
+  detached: boolean
 }
 
 export function createBackStack(h: BackHistory): BackStack {
@@ -52,12 +54,15 @@ export function createBackStack(h: BackHistory): BackStack {
   const flush = (): void => {
     if (pendingPops > 0) return
     for (const c of claims) {
-      if (c.pushed || c.closing) continue
-      c.pushed = true
+      if (c.pushed || c.closing || c.detached) continue
       try {
         h.pushState({ snagentsos: c.id }, '')
+        c.pushed = true
       } catch {
-        /* a sandboxed frame can refuse; the claim still closes from the UI */
+        // A sandboxed frame or Safari's pushState rate limit refused it. The
+        // claim still closes from the UI, but with no entry of its own it must
+        // never call history.back(), which would leave the app.
+        c.detached = true
       }
     }
   }
@@ -70,7 +75,7 @@ export function createBackStack(h: BackHistory): BackStack {
   return {
     push(id, onClose) {
       if (claims.some((c) => c.id === id && !c.closing)) return
-      claims.push({ id, onClose, closing: false, pushed: false })
+      claims.push({ id, onClose, closing: false, pushed: false, detached: false })
       flush()
     },
     requestClose(id) {
@@ -78,7 +83,7 @@ export function createBackStack(h: BackHistory): BackStack {
       if (i < 0) return
       const c = claims[i]
       if (!c.pushed) {
-        // Deferred and never reached history: nothing to pop.
+        // Deferred (or refused) and never reached history: nothing to pop.
         claims.splice(i, 1)
         return
       }

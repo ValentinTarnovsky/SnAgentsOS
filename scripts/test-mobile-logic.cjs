@@ -598,6 +598,17 @@ function testBackStack(p) {
   h.settle(stack)
   check(h.pushes.at(-1) === 'x' && stack.size() === 0 && h.depth === 0, 'a deferred claim closed before it reached history pushes nothing')
 
+  // pushState refused (sandbox, Safari's rate limit): the claim never pops history.
+  h = fakeHistory(); closed = []
+  h.pushState = () => { throw new Error('SecurityError') }
+  stack = p.createBackStack(h)
+  stack.push('refused', () => closed.push('refused'))
+  stack.requestClose('refused')
+  check(h.backs === 0 && stack.size() === 0, 'a claim whose pushState threw closes without history.back() (which would leave the app)')
+  stack.push('refused2', () => closed.push('refused2'))
+  h.userBack(stack)
+  check(closed.length === 0 && stack.orphanAll() === 0 && h.gos.length === 0, 'a refused claim is never popped by back nor counted by orphanAll')
+
   // orphanAll: the host unmounts (phase change) with claims open.
   h = fakeHistory(); closed = []
   stack = p.createBackStack(h)

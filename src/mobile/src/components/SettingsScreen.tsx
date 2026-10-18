@@ -132,7 +132,7 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
                     bump(-1)
                   }}
                   className="flex h-10 w-10 items-center justify-center rounded-btn border border-border bg-card text-text-primary active:bg-bg-primary"
-                  aria-label="Smaller"
+                  aria-label={t('set.fontSmaller')}
                 >
                   <Minus size={16} />
                 </button>
@@ -143,7 +143,7 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
                     bump(1)
                   }}
                   className="flex h-10 w-10 items-center justify-center rounded-btn border border-border bg-card text-text-primary active:bg-bg-primary"
-                  aria-label="Larger"
+                  aria-label={t('set.fontLarger')}
                 >
                   <PlusSmall size={16} />
                 </button>
