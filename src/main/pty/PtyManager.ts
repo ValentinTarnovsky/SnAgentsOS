@@ -3,9 +3,21 @@ import { randomUUID } from 'crypto'
 import { delimiter } from 'path'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
-import type { HeadlessMetrics, PtyDataEvt, PtyExitEvt, PtyReattachRes, PtyRestartReq, PtyRestartRes, PtySpawnReq, PtySpawnRes, ShellKind, TerminalEngineSettings } from '@shared/ipc-contract'
-import type { SetupStep } from '@shared/types'
+import type { HeadlessMetrics, PtyDataEvt, PtyExitEvt, PtyPromptResultEvt, PtyReattachRes, PtyRestartReq, PtyRestartRes, PtySpawnReq, PtySpawnRes, PtySubmitRes, ShellKind, TerminalEngineSettings } from '@shared/ipc-contract'
+import type { ClaudePaneState, SetupStep } from '@shared/types'
 import { AGENT_ENV } from '@shared/brand'
+import { appendPromptRef } from '@shared/agent-argv'
+import {
+  INITIAL_PROMPT_ENV,
+  PROMPT_POLL_MS,
+  PROMPT_READY_TIMEOUT_MS,
+  SUBMIT_DELAY_MS,
+  chooseDelivery,
+  prepareSubmit,
+  sanitizeInitialPrompt,
+  type InitialPromptReq,
+} from '@shared/initialPrompt'
+import { shellKind as promptShellKind } from '@shared/shellKind'
 import { cleanEnv, defaultShell, homeDir } from './shellResolver'
 import { resolveShell } from './shellResolve'
 import { ModeTracker } from './ModeTracker'
@@ -61,7 +73,23 @@ interface Entry {
   gen: number
   /** Last replay snapshot and the gen it was taken at (several phones or a reattach in one tick). */
   snapCache: { gen: number; data: string } | null
+  /** Waiting for writeQueue to drain (a submit's Enter, E8-FR-02a); false = the pty went away. */
+  drained: Array<(alive: boolean) => void>
+  /** Epoch ms of the last output chunk (quiet fallback, `wait`). */
+  lastOutputAt: number
+  /** Epoch ms of the last submit with Enter (E8-FR-02). */
+  lastSubmitAt: number
+  /** Initial prompt still to deliver (E8-FR-02b), consumed once. */
+  prompt: { req: InitialPromptReq; mode: 'argv' | 'gate' } | null
+  /** Gate poll timer. */
+  promptTimer: ReturnType<typeof setTimeout> | null
 }
+
+/** Agent readiness as StatusManager derives it (E8-FR-02b gate). */
+export type AgentStateFn = (paneId: string) => { state: ClaudePaneState; precise: boolean } | null
+
+/** Main-side listener of initial prompt outcomes (the renderer gets pty:promptResult). */
+export type PromptResultListener = (evt: PtyPromptResultEvt) => void
 
 /** Output is coalesced and flushed at ~120Hz for the visible workspace. */
 const FLUSH_MS = 8
@@ -244,8 +272,15 @@ export class PtyManager {
   private snapshotCacheHits = 0
   private debugTimer: ReturnType<typeof setInterval> | null = null
 
+  private readonly promptListeners = new Set<PromptResultListener>()
+
+  /**
+   * `agentState` is a lazy closure (StatusManager is built after this): the
+   * gate of an initial prompt only submits on a precise idle/done.
+   */
   constructor(private readonly getSender: () => WebContents | null,
     private readonly statusEnv: (ptyId: string, paneId: string, cwd: string) => Record<string, string> = () => ({}),
+    private readonly agentState: AgentStateFn = () => null,
   ) {}
 
   /** Number of live ptys. */
@@ -268,7 +303,30 @@ export class PtyManager {
     const resolved = resolveShell(req.shell, defaultShell())
     if (resolved.warning) console.warn(`[pty] shell not found: ${resolved.warning.requested}, using ${resolved.shell}`)
     const shell = resolved.shell
+    // Initial prompt (E8-FR-02b, D1): decided here with the resolved shell.
+    // `argv` puts the sanitized text in SNAOS_INITIAL_PROMPT and appends its
+    // reference to the agent command; otherwise the gate types it later.
+    let initial = req.initialCommand?.trim()
+    const promptReq = validPrompt(req.initialPrompt)
+    let prompt: Entry['prompt'] = null
+    let promptRejected = false
+    const promptEnv: Record<string, string> = {}
+    if (promptReq) {
+      const kind = promptShellKind(shell, process.platform)
+      const argv =
+        !!initial &&
+        chooseDelivery({ text: promptReq.text, shell: kind, platform: process.platform, hasSetup: !!req.setup?.length, launchKind: req.launchKind ?? 'other' }) === 'argv'
+      if (argv && initial) {
+        promptEnv[INITIAL_PROMPT_ENV] = sanitizeInitialPrompt(promptReq.text)
+        initial = appendPromptRef(initial, kind)
+        prompt = { req: promptReq, mode: 'argv' }
+      } else if (promptReq.mode === 'argvOnly') promptRejected = true
+      else prompt = { req: promptReq, mode: 'gate' }
+    }
     const env = cleanEnv({ ...req.env, ...this.statusEnv(ptyId, req.paneId, req.cwd || homeDir()), [AGENT_ENV.consoleId]: req.paneId, [AGENT_ENV.ptyId]: ptyId })
+    // Never inherited from a preset's env: only an argv delivery sets it.
+    delete env[INITIAL_PROMPT_ENV]
+    Object.assign(env, promptEnv)
     const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH'
     if (env[AGENT_ENV.codexShim]) env[pathKey] = env[AGENT_ENV.codexShim] + delimiter + (env[pathKey] ?? '')
     let proc: IPty
@@ -312,6 +370,11 @@ export class PtyManager {
       dirty: false,
       gen: 0,
       snapCache: null,
+      drained: [],
+      lastOutputAt: 0,
+      lastSubmitAt: 0,
+      prompt,
+      promptTimer: null,
     }
     for (let i = 0; i < seed.length; i += SEED_CHUNK) this.pushHistory(entry, seed.slice(i, i + SEED_CHUNK))
     this.entries.set(ptyId, entry)
@@ -333,26 +396,30 @@ export class PtyManager {
     // byPane gained a pane: let remote re-broadcast so its `running` dot flips.
     this.onRunningChange?.()
 
-    const initial = req.initialCommand?.trim()
+    if (promptRejected) this.emitPrompt(req.paneId, 'not_delivered')
     if (req.setup && req.setup.length > 0) {
       // Drive the expect/send sequence (e.g. SSH login), then type the model.
-      void this.runSetup(entry, req.setup, initial)
-    } else if (initial) {
+      void this.runSetup(ptyId, entry, req.setup, initial)
+    } else if (initial || prompt) {
       // No setup: original behavior, type the model command once the shell has
       // settled. A bare CR is exactly what pressing Enter sends; CRLF makes
       // PowerShell emit a spurious ">>" continuation.
       entry.setupTimer = setTimeout(() => {
         entry.setupTimer = null
         if (entry.cancelled) return
-        try {
-          proc.write(initial + '\r')
-        } catch {
-          /* pty may have exited */
+        if (initial) {
+          try {
+            proc.write(initial + '\r')
+          } catch {
+            /* pty may have exited */
+          }
         }
+        this.afterInitialCommand(ptyId, entry)
       }, SHELL_SETTLE_MS)
     }
 
     proc.onData((data) => {
+      entry.lastOutputAt = Date.now()
       entry.buf.push(data)
       this.pushHistory(entry, data)
       entry.modes.feed(data)
@@ -404,6 +471,8 @@ export class PtyManager {
   restart(req: PtyRestartReq, label: string): PtyRestartRes {
     const { fallbackDefaultShell, ...spawnReq } = req
     if (fallbackDefaultShell) delete spawnReq.shell
+    // The initial prompt is spent once: a restart never sends it again (E8-FR-02).
+    delete spawnReq.initialPrompt
     const oldId = this.byPane.get(req.paneId)
     const old = oldId ? this.entries.get(oldId) : undefined
     let content = this.exited.get(req.paneId)?.data ?? ''
@@ -507,7 +576,10 @@ export class PtyManager {
       const e = this.entries.get(ptyId)
       if (!e) return
       e.writeTimer = null
-      if (e.writeQueue.length === 0) return
+      if (e.writeQueue.length === 0) {
+        this.fireDrained(e, true)
+        return
+      }
       let end = Math.min(WRITE_CHUNK, e.writeQueue.length)
       // Never split a surrogate pair across two writes: node-pty would encode
       // each half on its own, corrupting that character.
@@ -519,11 +591,157 @@ export class PtyManager {
         e.pty.write(chunk)
       } catch {
         e.writeQueue = '' // pty exited: drop the rest
+        this.fireDrained(e, false)
         return
       }
       if (e.writeQueue.length > 0) e.writeTimer = setTimeout(pump, WRITE_PACE_MS)
+      else this.fireDrained(e, true)
     }
     pump()
+  }
+
+  /** Runs `cb` once the entry's writeQueue is empty (right away when it already is). */
+  private whenDrained(entry: Entry, cb: (alive: boolean) => void): void {
+    if (entry.writeQueue.length === 0 && !entry.writeTimer) cb(!entry.cancelled)
+    else entry.drained.push(cb)
+  }
+
+  private fireDrained(entry: Entry, alive: boolean): void {
+    if (entry.drained.length === 0) return
+    const cbs = entry.drained
+    entry.drained = []
+    for (const cb of cbs) {
+      try {
+        cb(alive)
+      } catch {
+        /* a waiter must never break the pump */
+      }
+    }
+  }
+
+  /**
+   * The shared delivery path (E8-FR-02a): the text with its line breaks
+   * normalized to `\r`, wrapped in bracketed paste when it has inner breaks
+   * and the pty enabled DECSET 2004 (refused with `multiline_unsafe`, writing
+   * nothing, when it did not). With `enter`, the `\r` goes SUBMIT_DELAY_MS
+   * after the write queue drained, not after queueing, so a 64 KB text paced
+   * in 4 KB chunks still gets its Enter after its last byte.
+   */
+  submit(ptyId: string, text: string, enter: boolean, forcePaste = false): Promise<PtySubmitRes> {
+    const entry = this.entries.get(ptyId)
+    if (!entry || entry.cancelled) return Promise.resolve({ ok: false, error: 'not_running' })
+    const prepared = prepareSubmit(text, entry.modes.bracketedPaste, forcePaste)
+    if (!prepared.ok) return Promise.resolve(prepared)
+    if (prepared.data) this.write(ptyId, prepared.data)
+    if (!enter) return Promise.resolve({ ok: true })
+    return new Promise((resolve) => {
+      this.whenDrained(entry, (alive) => {
+        if (!alive) {
+          resolve({ ok: false, error: 'not_running' })
+          return
+        }
+        setTimeout(() => {
+          if (this.entries.get(ptyId) !== entry || entry.cancelled) {
+            resolve({ ok: false, error: 'not_running' })
+            return
+          }
+          this.write(ptyId, '\r')
+          entry.lastSubmitAt = Date.now()
+          resolve({ ok: true })
+        }, SUBMIT_DELAY_MS)
+      })
+    })
+  }
+
+  /** submit() into the pane's live pty, when `ptyId` is unknown or stale. */
+  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean): Promise<PtySubmitRes> {
+    const id = ptyId && this.entries.has(ptyId) ? ptyId : paneId ? this.byPane.get(paneId) : undefined
+    return id ? this.submit(id, text, enter) : Promise.resolve({ ok: false, error: 'not_running' })
+  }
+
+  /** Whether the pane's live pty has bracketed paste on, or null without one. */
+  bracketedPasteOf(paneId: string): boolean | null {
+    const ptyId = this.byPane.get(paneId)
+    const entry = ptyId ? this.entries.get(ptyId) : undefined
+    return entry ? entry.modes.bracketedPaste : null
+  }
+
+  /** Epoch ms of the pane's last submit with Enter (E8-FR-02), or undefined. */
+  lastSubmitAt(paneId: string): number | undefined {
+    const ptyId = this.byPane.get(paneId)
+    const at = ptyId ? this.entries.get(ptyId)?.lastSubmitAt : undefined
+    return at || undefined
+  }
+
+  /** Epoch ms of the pane's last output chunk, or undefined. */
+  lastOutputAt(paneId: string): number | undefined {
+    const ptyId = this.byPane.get(paneId)
+    const at = ptyId ? this.entries.get(ptyId)?.lastOutputAt : undefined
+    return at || undefined
+  }
+
+  /** Main-side listener of initial prompt outcomes. Returns an unsubscribe function. */
+  addPromptListener(cb: PromptResultListener): () => void {
+    this.promptListeners.add(cb)
+    return () => {
+      this.promptListeners.delete(cb)
+    }
+  }
+
+  private emitPrompt(paneId: string, result: PtyPromptResultEvt['result']): void {
+    const evt: PtyPromptResultEvt = { paneId, result }
+    this.send(CH.PTY_PROMPT_RESULT, evt)
+    for (const cb of this.promptListeners) {
+      try {
+        cb(evt)
+      } catch {
+        /* a listener must never break delivery */
+      }
+    }
+  }
+
+  /**
+   * The agent command was typed (or there was none): an `argv` prompt is
+   * delivered now, a gate one starts polling for a precise ready signal.
+   */
+  private afterInitialCommand(ptyId: string, entry: Entry): void {
+    const prompt = entry.prompt
+    if (!prompt || entry.cancelled) return
+    if (prompt.mode === 'argv') {
+      entry.prompt = null
+      entry.lastSubmitAt = Date.now()
+      this.emitPrompt(entry.paneId, 'sent_argv')
+      return
+    }
+    const deadline = Date.now() + PROMPT_READY_TIMEOUT_MS
+    const tick = (): void => {
+      entry.promptTimer = null
+      if (entry.cancelled || entry.prompt !== prompt) return
+      const state = this.agentState(entry.paneId)
+      // Only a precise signal (SessionStart hook, Codex bridge start) may send
+      // Enter: a title-only `idle` could be a trust dialog or a login screen.
+      if (state?.precise && (state.state === 'idle' || state.state === 'done')) {
+        entry.prompt = null
+        void this.submit(ptyId, prompt.req.text, prompt.req.enter).then((res) =>
+          this.emitPrompt(entry.paneId, res.ok ? 'sent_gate' : res.error === 'not_running' ? 'dropped_exit' : 'not_delivered'),
+        )
+        return
+      }
+      if (Date.now() >= deadline) {
+        entry.prompt = null
+        if (!entry.modes.bracketedPaste) {
+          this.emitPrompt(entry.paneId, 'not_delivered')
+          return
+        }
+        // Inserted as a paste, never submitted: the user reviews and presses Enter.
+        void this.submit(ptyId, prompt.req.text, false, true).then((res) =>
+          this.emitPrompt(entry.paneId, res.ok ? 'inserted_unconfirmed' : res.error === 'not_running' ? 'dropped_exit' : 'not_delivered'),
+        )
+        return
+      }
+      entry.promptTimer = setTimeout(tick, PROMPT_POLL_MS)
+    }
+    tick()
   }
 
   resize(ptyId: string, cols: number, rows: number): void {
@@ -857,7 +1075,16 @@ export class PtyManager {
    * prompt like "password:" is answered automatically. Lives in main so it
    * survives renderer remounts and reads the same byte stream as the terminal.
    */
-  private async runSetup(entry: Entry, steps: SetupStep[], initialCommand?: string): Promise<void> {
+  private async runSetup(ptyId: string, entry: Entry, steps: SetupStep[], initialCommand?: string): Promise<void> {
+    try {
+      await this.runSetupSteps(entry, steps, initialCommand)
+    } finally {
+      // A gate prompt starts once the agent command went out (or the sequence ended).
+      if (!entry.cancelled) this.afterInitialCommand(ptyId, entry)
+    }
+  }
+
+  private async runSetupSteps(entry: Entry, steps: SetupStep[], initialCommand?: string): Promise<void> {
     entry.setupActive = true
     try {
       // Let the shell print its first prompt before we touch it.
@@ -987,6 +1214,14 @@ export class PtyManager {
     if (entry.writeTimer) clearTimeout(entry.writeTimer)
     entry.writeTimer = null
     entry.writeQueue = ''
+    this.fireDrained(entry, false)
+    if (entry.promptTimer) clearTimeout(entry.promptTimer)
+    entry.promptTimer = null
+    // A prompt still waiting for its agent goes with the pty (E8-FR-02b).
+    if (entry.prompt) {
+      entry.prompt = null
+      this.emitPrompt(entry.paneId, 'dropped_exit')
+    }
     this.pausedByRenderer.delete(ptyId)
     const removed = this.byPane.get(entry.paneId) === ptyId
     if (removed) this.byPane.delete(entry.paneId)
@@ -1015,8 +1250,16 @@ export class PtyManager {
     this.onRunningChange = cb
   }
 
-  private send(channel: string, payload: PtyDataEvt | PtyExitEvt): void {
+  private send(channel: string, payload: PtyDataEvt | PtyExitEvt | PtyPromptResultEvt): void {
     const wc = this.getSender()
     if (wc && !wc.isDestroyed()) wc.send(channel, payload)
   }
+}
+
+/** A usable initial prompt from IPC (text 1..16384 after trim), or null. */
+function validPrompt(raw: unknown): InitialPromptReq | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  if (typeof r.text !== 'string' || !r.text.trim() || r.text.length > 16384) return null
+  return { text: r.text, enter: r.enter !== false, mode: r.mode === 'argvOnly' ? 'argvOnly' : 'auto' }
 }

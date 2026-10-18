@@ -37,10 +37,12 @@ export const CH = {
   PTY_KILL_PANES: 'pty:killPanes', // invoke (paneIds: string[]) -> number (killed)
   PTY_RECONCILE: 'pty:reconcile', // invoke (livePaneIds: string[]) -> number (killed)
   PTY_SET_ENGINE: 'pty:setEngine', // send (TerminalEngineSettings; E6-FR-06)
+  PTY_SUBMIT: 'pty:submit', // invoke (PtySubmitReq) -> PtySubmitRes (E8-FR-02a)
 
   // PTY events (main -> renderer)
   PTY_DATA: 'pty:data', // { ptyId, data }
   PTY_EXIT: 'pty:exit', // { ptyId, exitCode, signal }
+  PTY_PROMPT_RESULT: 'pty:promptResult', // PtyPromptResultEvt (E8-FR-02b)
 
   // Config (single blob: workspaces + presets + settings + layout)
   CONFIG_LOAD: 'config:load', // invoke -> ConfigFile | null

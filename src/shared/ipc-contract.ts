@@ -23,6 +23,7 @@ import type {
   RemoteStateSnapshot,
 } from './remote-protocol'
 import type { GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
+import type { InitialPromptReq, LaunchKind, SubmitError } from './initialPrompt'
 
 export type { GitArea, GitDiffHunk, GitDiffLine, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -330,6 +331,35 @@ export interface PtySpawnReq {
   setup?: SetupStep[]
   cols: number
   rows: number
+  /**
+   * E8-FR-02b: 'claude' / 'codex' only when `initialCommand` is that preset's
+   * own command (no `pane.command` override, no resume). Enables `argv`.
+   */
+  launchKind?: LaunchKind
+  /**
+   * One-shot initial prompt (Quick Command agent, composer, phone). Main picks
+   * `argv` or the gate with the resolved shell (D1) and reports the outcome on
+   * `pty:promptResult`. A restart never carries it.
+   */
+  initialPrompt?: InitialPromptReq
+}
+/** E8-FR-02a: write text (and optionally a delayed Enter) into a live pty. */
+export interface PtySubmitReq {
+  ptyId: string
+  /**
+   * Amendment R22-12: the pane whose live pty gets the text when `ptyId` is
+   * empty or stale (a phone Quick Command after a renderer reload, before the
+   * pane remounted and registered its pty).
+   */
+  paneId?: string
+  text: string
+  enter: boolean
+}
+export type PtySubmitRes = { ok: true } | { ok: false; error: SubmitError }
+/** Outcome of a spawn's initial prompt (main -> renderer). */
+export interface PtyPromptResultEvt {
+  paneId: string
+  result: 'sent_argv' | 'sent_gate' | 'inserted_unconfirmed' | 'not_delivered' | 'dropped_exit'
 }
 /** Family of the shell a pty runs, derived from its executable name (E6). */
 export type ShellKind = 'powershell' | 'cmd' | 'posix' | 'other'
@@ -525,6 +555,10 @@ export interface SnApi {
     reconcile(livePaneIds: string[]): Promise<number>
     /** Push the terminal engine settings to main's headless mirrors (E6-FR-06). */
     setEngine(settings: TerminalEngineSettings): void
+    /** The shared delivery path (E8-FR-02a): text, then Enter 150 ms after the queue drained. */
+    submit(req: PtySubmitReq): Promise<PtySubmitRes>
+    /** Initial prompt outcomes (E8-FR-02b). Returns an unsubscribe function. */
+    onPromptResult(cb: (e: PtyPromptResultEvt) => void): () => void
   }
   dialog: {
     /** Opens a native folder picker; resolves to the chosen path or null. */
