@@ -12,6 +12,7 @@ import { Sheet } from './Sheet'
 import { RenameSheet } from './RenameSheet'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
+import { useExitStore } from '../lib/exitState'
 import { t } from '../lib/i18n'
 
 interface RenameTarget {
@@ -23,6 +24,7 @@ interface RenameTarget {
 export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
   const snapshot = useRemoteStore((s) => s.snapshot)
   const activePaneId = useRemoteStore((s) => s.activePaneId)
+  const viewedExit = useExitStore((s) => s.exit)
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
 
   if (!snapshot) return null
@@ -64,6 +66,8 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
               <div className="flex flex-col gap-1">
                 {ws.panes.map((pane) => {
                   const selected = pane.id === activePaneId
+                  // Ended on its own (E6-FR-38): "exited" tag, and no spinner (E6-FR-20).
+                  const exited = !pane.running && (pane.exitCode !== undefined || viewedExit?.paneId === pane.id)
                   return (
                     <div
                       key={pane.id}
@@ -90,10 +94,12 @@ export function ConsoleDrawer({ open, onClose }: { open: boolean; onClose: () =>
                       <span className="min-w-0 flex-1 truncate text-sm text-text-primary">{pane.title}</span>
                       {pane.running ? (
                         <span className="text-[10px] font-medium uppercase text-green-400">{t('main.running')}</span>
+                      ) : exited ? (
+                        <span data-pane-exited className="text-[10px] font-medium uppercase text-text-secondary">{t('main.exited')}</span>
                       ) : (
                         <span className="text-[10px] font-medium uppercase text-text-secondary">{t('main.stopped')}</span>
                       )}
-                      {selected && !pane.running && <Loader2 size={14} className="spin text-accent-violet" />}
+                      {selected && !pane.running && !exited && <Loader2 size={14} className="spin text-accent-violet" />}
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
