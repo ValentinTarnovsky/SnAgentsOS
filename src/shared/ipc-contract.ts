@@ -13,6 +13,7 @@ import type {
   RemoteSettings,
   SetupStep,
   StatusHooksStatusRes,
+  TerminalSnapshotMode,
   UsageSettings,
 } from './types'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from './agents'
@@ -247,6 +248,31 @@ export interface AppMetrics {
   processes: number
   /** Number of running console processes (ptys). */
   consoles: number
+  /** Headless snapshot engine instrumentation (E6-FR-07); absent from older mains. */
+  headless?: HeadlessMetrics
+}
+
+/** Headless mirrors in main (E6-FR-07): live count, p95 timings in ms and counters. */
+export interface HeadlessMetrics {
+  panes: number
+  parseMsP95: number
+  snapshotMsP95: number
+  bytesParsed: number
+  snapshotCacheHits: number
+}
+
+/**
+ * Terminal engine settings main applies to its headless mirrors (E6-FR-01/06/08/14),
+ * pushed on `pty:setEngine` and normalized by `normalizeEngine` (src/shared/terminalEngine.ts).
+ */
+export interface TerminalEngineSettings {
+  snapshotMode: TerminalSnapshotMode
+  unicode11: boolean
+  persist: boolean
+  /** 200..5000; the mirror keeps max(REPLAY_LINES, persistLines) rows. */
+  persistLines: number
+  /** PowerShell integration (E6-FR-25, R31-01); absent until that setting exists. */
+  shellIntegration?: boolean
 }
 
 /** One bar in the live usage widget (a quota window or a custom token counter). */
@@ -336,12 +362,15 @@ export interface PtyExitEvt {
 export interface PtyReattachRes {
   ptyId: string
   /**
-   * Recent output to replay into the freshly-mounted terminal: mode
-   * rehydration (E6-FR-33) + the query-free ring.
+   * Screen to replay into the freshly-mounted terminal: the headless snapshot
+   * (E6-FR-03), or in 'off' the mode rehydration (E6-FR-33) + the query-free ring.
    */
   replay: string
+  /** Size the replay is laid out for (the pty's); the renderer writes it there, then refits (E6-FR-04). */
+  cols: number
+  rows: number
   /** Family of the live shell (E6-FR-22 cd prefix after a reattach). */
-  shellKind?: ShellKind
+  shellKind: ShellKind
 }
 export interface PtyFlowReq {
   ptyId: string
@@ -494,6 +523,8 @@ export interface SnApi {
     killPanes(paneIds: string[]): Promise<number>
     /** Kill every pty whose pane is not in `livePaneIds` (after hydrate, E4-FR-36). */
     reconcile(livePaneIds: string[]): Promise<number>
+    /** Push the terminal engine settings to main's headless mirrors (E6-FR-06). */
+    setEngine(settings: TerminalEngineSettings): void
   }
   dialog: {
     /** Opens a native folder picker; resolves to the chosen path or null. */

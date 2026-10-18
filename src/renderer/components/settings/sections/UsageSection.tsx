@@ -45,6 +45,17 @@ export function UsageSection() {
         <Stat icon={TerminalSquare} label={t('usage.consoles')} value={current ? String(current.consoles) : '-'} />
       </div>
 
+      {current?.headless && (
+        <p data-headless-metrics className="text-xs tabular-nums text-text-secondary">
+          {t('usage.headless', {
+            panes: current.headless.panes,
+            parse: current.headless.parseMsP95,
+            snap: current.headless.snapshotMsP95,
+            hits: current.headless.snapshotCacheHits,
+          })}
+        </p>
+      )}
+
       <Chart title={t('usage.ram')} unit=" MB" data={mem} color="var(--color-accent-violet)" />
       <Chart title={t('usage.cpu')} unit="%" data={cpu} color="var(--color-accent-blue)" max={100} />
     </div>

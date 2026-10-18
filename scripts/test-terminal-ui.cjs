@@ -23,14 +23,14 @@ import {useAppStore} from './src/renderer/lib/store';
 import {registerPty} from './src/renderer/lib/ptyRegistry';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 const listeners={data:new Set(),exit:new Set()};
-const calls={spawn:[],restart:[],writes:[],kills:[],killPanes:[],reattach:[],seq:[]};
+const calls={spawn:[],restart:[],writes:[],kills:[],killPanes:[],reattach:[],seq:[],resize:[]};
 let restartMode='ok';
 let reattachRes=null;
 window.snApi={platform:'win32',
  pty:{reattach:async(id)=>{calls.reattach.push(id);calls.seq.push('reattach');return reattachRes},
   killPanes:async(ids)=>{calls.killPanes.push(ids);calls.seq.push('killPanes');return ids.length},
   spawn:async(req)=>{calls.spawn.push(req);return{ptyId:'pty-'+calls.spawn.length,shellKind:'powershell'}},
-  write:(r)=>{calls.writes.push(r)},resize(){},kill:async(id)=>{calls.kills.push(id)},setActive(){},flow(){},
+  write:(r)=>{calls.writes.push(r)},resize:(r)=>{calls.resize.push(r)},kill:async(id)=>{calls.kills.push(id)},setActive(){},flow(){},
   onData:(cb)=>{listeners.data.add(cb);return()=>listeners.data.delete(cb)},
   onExit:(cb)=>{listeners.exit.add(cb);return()=>listeners.exit.delete(cb)},
   restart:async(req)=>{calls.restart.push(req);if(restartMode==='fail')throw new Error("Error invoking remote method 'pty:restart': Error: File not found: nope.exe");return{ptyId:'pty-r'+calls.restart.length,tail:'--- reiniciado ---'+String.fromCharCode(13,10),shellKind:'powershell'}}},
@@ -143,12 +143,17 @@ app.whenReady().then(async()=>{
  if(await js("smoke.chip('term')")||await js("smoke.app().agentEnded.pa"))fail('a key in the pane hides the chip',null);n++;
  // E4-FR-36: unmounting the terminal never kills; the remount reattaches.
  v=await js("({k:smoke.calls.kills.length,kp:smoke.calls.killPanes.length,s:smoke.calls.spawn.length})");
- await js("smoke.reattachWith({ptyId:'pty-r3',replay:'restored',shellKind:'powershell'});smoke.setShow(false)");await wait(200);
+ await js("smoke.reattachWith({ptyId:'pty-r3',replay:'restored',cols:40,rows:12,shellKind:'powershell'});smoke.setShow(false)");await wait(200);
  let u=await js("({k:smoke.calls.kills.length,kp:smoke.calls.killPanes.length})");
  if(u.k!==v.k||u.kp!==v.kp)fail('an unmount never kills the pty',{before:v,after:u});n++;
+ const rz=await js("smoke.calls.resize.length");
  await js("smoke.setShow(true)");await wait(300);
  u=await js("({s:smoke.calls.spawn.length,r:smoke.calls.reattach.at(-1),k:smoke.calls.kills.length})");
  if(u.s!==v.s||u.r!=='pa'||u.k!==v.k)fail('the remount reattaches to the live pty instead of spawning',u);n++;
+ // E6-FR-04: the snapshot is written at the pty's 40x12, then the forced refit
+ // tells the pty the container's real size (the mount fit alone never would).
+ u=await js("smoke.calls.resize.slice("+rz+").filter(r=>r.ptyId==='pty-r3')");
+ if(!u.length||u.at(-1).cols<=40||u.at(-1).rows<=12)fail('a reattach at 40x12 ends with pty.resize to the container size',u);n++;
  await js("smoke.app().restartPaneClean('pa')");await wait(100);
  u=await js("({kp:smoke.calls.killPanes.at(-1),seq:smoke.calls.seq.at(-1)})");
  if(!u.kp||u.kp.join()!=='pa'||u.seq!=='killPanes')fail('Restart clean kills by paneId',u);n++;
@@ -164,7 +169,7 @@ app.whenReady().then(async()=>{
  }
  n++;
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' terminal UI checks (exit card Enter/Esc, in-place restart and fallback, unmount never kills, Claude exited chip, es/en midnight/light layouts); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' terminal UI checks (exit card Enter/Esc, in-place restart and fallback, unmount never kills, reattach refit, Claude exited chip, es/en midnight/light layouts); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
