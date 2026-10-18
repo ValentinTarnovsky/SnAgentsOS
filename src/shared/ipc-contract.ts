@@ -3,6 +3,8 @@
  * exposed on `window.snApi`. The SnApi interface grows phase by phase.
  */
 import type {
+  AgentSettings,
+  AwakeMode,
   ConfigFile,
   NotificationSettings,
   PaneStatusEvt,
@@ -16,6 +18,22 @@ import type {
   RemoteEndpointKind,
   RemoteStateSnapshot,
 } from './remote-protocol'
+
+/**
+ * "PC awake" state (contract `power:state`). `reason: 'agents'` covers both a
+ * working agent and an agent waiting on a connected phone; the 120 s grace
+ * shows as `blocking: true` with `releaseAt`.
+ */
+export interface PowerState {
+  blocking: boolean
+  reason: 'agents' | 'always' | null
+  mode?: AwakeMode
+  display?: boolean
+  /** Fresh `working` panes counted by Auto. */
+  workingCount?: number
+  /** Epoch ms when the grace ends and the block is released (grace only). */
+  releaseAt?: number
+}
 
 export interface AppInfo {
   version: string
@@ -429,5 +447,19 @@ export interface SnApi {
     commandResult(res: RemoteCommandResult): void
     /** Server status / device list / pairing events. Returns unsubscribe. */
     onEvent(cb: (s: RemoteUiState) => void): () => void
+  }
+  /** Keep the PC awake while agents work (E5-FR-23/24). */
+  power: {
+    /** Push settings.awakeMode; main answers with a power:state. */
+    setConfig(mode: AwakeMode): void
+    /** Current state (later changes arrive on onState). */
+    getState(): Promise<PowerState>
+    /** Every state change, including a mode picked from the tray. Returns unsubscribe. */
+    onState(cb: (s: PowerState) => void): () => void
+  }
+  /** Agent behavior settings. */
+  agents: {
+    /** Push settings.agents so main applies awakeDisplay (and later keys). */
+    setConfig(cfg: AgentSettings): void
   }
 }

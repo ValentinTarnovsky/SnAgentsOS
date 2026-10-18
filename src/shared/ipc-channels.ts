@@ -99,6 +99,14 @@ export const CH = {
   REMOTE_CONTROL_CMD: 'remote:controlCmd', // main -> renderer (RemoteCommand)
   REMOTE_CONTROL_RESULT: 'remote:controlResult', // send (RemoteCommandResult, renderer -> main)
   REMOTE_EVENT: 'remote:event', // main -> renderer (RemoteUiState: status/devices/pendingPairing)
+
+  // Keep the PC awake while agents work (E5-FR-23/24). Main decides; the renderer persists.
+  POWER_SET_CONFIG: 'power:setConfig', // send (AwakeMode); main answers with power:state
+  POWER_STATE: 'power:state', // main -> renderer (PowerState, on every change)
+  POWER_GET_STATE: 'power:getState', // invoke -> PowerState
+
+  // Agent behavior settings (settings.agents). awakeDisplay rides here.
+  AGENTS_SET_CONFIG: 'agents:setConfig', // send (AgentSettings)
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

@@ -5,6 +5,7 @@ import type {
   AppMetrics,
   LegacyDataInfo,
   PairingQrPayload,
+  PowerState,
   PtyDataEvt,
   PtyExitEvt,
   PtyFlowReq,
@@ -22,6 +23,8 @@ import type {
   UsageSnapshot,
 } from '@shared/ipc-contract'
 import type {
+  AgentSettings,
+  AwakeMode,
   ConfigFile,
   NotificationSettings,
   PaneStatusEvt,
@@ -136,6 +139,14 @@ const api: SnApi = {
     onCommand: (cb: (cmd: RemoteCommand) => void) => sub<RemoteCommand>(CH.REMOTE_CONTROL_CMD, cb),
     commandResult: (res: RemoteCommandResult) => ipcRenderer.send(CH.REMOTE_CONTROL_RESULT, res),
     onEvent: (cb: (s: RemoteUiState) => void) => sub<RemoteUiState>(CH.REMOTE_EVENT, cb),
+  },
+  power: {
+    setConfig: (mode: AwakeMode) => ipcRenderer.send(CH.POWER_SET_CONFIG, mode),
+    getState: () => ipcRenderer.invoke(CH.POWER_GET_STATE) as Promise<PowerState>,
+    onState: (cb: (s: PowerState) => void) => sub<PowerState>(CH.POWER_STATE, cb),
+  },
+  agents: {
+    setConfig: (cfg: AgentSettings) => ipcRenderer.send(CH.AGENTS_SET_CONFIG, cfg),
   },
 }
 
