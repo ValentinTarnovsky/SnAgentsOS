@@ -4,7 +4,8 @@
  *
  * Pure types only - no zod, no Node, no DOM - because this file is bundled
  * into three targets: main, renderer and the mobile web client. Runtime
- * validation schemas live in remote-protocol-schemas.ts (main-only).
+ * validation schemas live in remote-protocol-schemas.ts (main-only). It may
+ * import only types.ts and git-types.ts, both import-free of Node and DOM.
  */
 import type {
   AgentProvider,
@@ -18,8 +19,9 @@ import type {
   ThemeName,
   ThemeTokens,
 } from './types'
+import type { RemoteGitChip } from './git-types'
 
-export type { RemotePending }
+export type { RemotePending, RemoteGitChip }
 
 export const PROTOCOL_VERSION = 1
 
@@ -88,6 +90,8 @@ export interface RemoteWorkspaceInfo {
   /** Pane ids in display order (grid placement). */
   layoutOrder: string[]
   panes: RemotePaneInfo[]
+  /** Git chip of the workspace cwd (E7-FR-09). Omitted without a repo, on error or with settings.gitChip off. */
+  git?: RemoteGitChip
 }
 
 /**
