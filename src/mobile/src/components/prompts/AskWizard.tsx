@@ -24,7 +24,7 @@ import { answerCard } from '../../lib/answerLive'
 import { t } from '../../lib/i18n'
 import { openTerminalKeyboard } from './PromptStrip'
 
-interface Pick {
+interface AskPick {
   options: number[]
   otherOn: boolean
   other: string
@@ -34,7 +34,7 @@ export function askTitle(count: number): string {
   return count === 1 ? t('prompt.stripAskOne') : t('prompt.stripAskMany', { n: count })
 }
 
-function toSelection(p: Pick): AskSelection {
+function toSelection(p: AskPick): AskSelection {
   return p.otherOn ? { options: p.options, other: p.other } : { options: p.options }
 }
 
@@ -86,7 +86,7 @@ export function AskWizard({
   onFold: () => void
 }): ReactNode {
   const [step, setStep] = useState(0)
-  const [picks, setPicks] = useState<Pick[]>(() => questions.map(() => ({ options: [], otherOn: false, other: '' })))
+  const [picks, setPicks] = useState<AskPick[]>(() => questions.map(() => ({ options: [], otherOn: false, other: '' })))
   const advance = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => {
     if (advance.current) clearTimeout(advance.current)
@@ -106,7 +106,7 @@ export function AskWizard({
     setStep(Math.max(0, Math.min(questions.length - 1, i)))
   }
 
-  const update = (fn: (p: Pick) => Pick): void => setPicks((prev) => prev.map((p, i) => (i === step ? fn(p) : p)))
+  const update = (fn: (p: AskPick) => AskPick): void => setPicks((prev) => prev.map((p, i) => (i === step ? fn(p) : p)))
 
   const choose = (k: number): void => {
     if (q.multiSelect) {

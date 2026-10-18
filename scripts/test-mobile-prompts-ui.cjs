@@ -180,9 +180,10 @@ window.runMain = async () => {
  check(store.getState().toasts.some(t => t.text === 'Already answered'), 'a request no longer in paneStatus shows "Already answered"');
 
  // promptCards off: only the strip, and the Settings switch.
- setStatus('e', st([perm('pe2', 'Edit', 'x')])); usePromptUi.getState().setAnswer('e', null);
+ setStatus('e', st([perm('pe2', 'Edit', 'x')])); usePromptUi.getState().setAnswer('e', { pendingId: 'pe', kind: 'permission', phase: 'sent', groups: 1 });
  await openPane('e');
- check(card()?.dataset.pending === 'pe2', 'a new request starts unfolded');
+ check(card()?.dataset.pending === 'pe2', 'a new request starts unfolded, even while the previous answer reads "Sent"');
+ usePromptUi.getState().setAnswer('e', null); await frames();
  flushSync(() => store.getState().setPromptCards(false)); await frames();
  check(!card() && strip()?.dataset.promptStrip === 'waiting', 'promptCards off: a Claude permission shows the strip, not the card');
  check(!row('e').querySelector('[data-row-prompt]'), 'and no row buttons');

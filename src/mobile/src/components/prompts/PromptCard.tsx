@@ -25,10 +25,14 @@ import { openTerminalKeyboard, PromptStrip } from './PromptStrip'
 import { PermissionCard } from './PermissionCard'
 import { AnswerInTerminal, AskHeader, AskWizard, askTitle } from './AskWizard'
 
-/** The answer outcome wins over the card while it is sending, or when it is about the same request. */
+/**
+ * The answer outcome wins over the card while it is sending, or when it is
+ * about the same request. A new request (another id) shows its card at once,
+ * even while the previous answer still reads "Sent".
+ */
 export function showsAnswer(answer: AnswerState | undefined, card: PromptCardModel | undefined): answer is AnswerState {
   if (!answer) return false
-  return answer.phase === 'sending' || answer.phase === 'sent' || !card || card.pending.id === answer.pendingId
+  return answer.phase === 'sending' || !card || card.pending.id === answer.pendingId
 }
 
 export function answerText(answer: AnswerState): string {
