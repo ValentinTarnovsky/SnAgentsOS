@@ -5,7 +5,8 @@
 //
 // CLI: node scripts/check-release-assets.cjs <assets.json> <tag> [version]
 // <assets.json> is the output of `gh release view <tag> --json assets` (or a
-// plain array of names). Exit code 0 = publish, 1 = keep the draft.
+// plain array of names). With a version, the tag must match it as well (see
+// tagMatchesVersion). Exit code 0 = publish, 1 = keep the draft.
 const fs = require('node:fs')
 
 const EXPECTED_ASSETS = 16
@@ -24,10 +25,19 @@ const KINDS = [
   ['linux-deb', /^snagentsos_(.+)_amd64\.deb$/],
 ]
 
-function assetNames(input) {
+function assetList(input) {
   const list = Array.isArray(input) ? input : input && Array.isArray(input.assets) ? input.assets : null
   if (!list) throw new Error('expected an array of asset names or { assets: [...] }')
-  return list.map(a => typeof a === 'string' ? a : a && a.name)
+  return list.map(a => typeof a === 'string' ? { name: a } : a || {})
+}
+
+// The tag drives the in-app updater (tag_name vs app.getVersion()), so a stable
+// tag must equal the packaged version or 1.x/2.x clients would loop on an
+// "update" that installs the same version. A prerelease tag (never latest) may
+// also be a rehearsal of the version it prefixes: v2.0.0-rc.1 over 2.0.0.
+function tagMatchesVersion(tag, version) {
+  if (tag === 'v' + version) return true
+  return tag.includes('-') && tag.startsWith('v' + version + '-')
 }
 
 function classify(name) {
@@ -39,8 +49,15 @@ function classify(name) {
 }
 
 function checkReleaseAssets(input, { version } = {}) {
-  const names = assetNames(input)
+  const assets = assetList(input)
+  const names = assets.map(a => a.name)
   const errors = []
+  // gh lists an interrupted upload with state "open"; an empty file is never a
+  // valid distributable or checksum.
+  for (const a of assets) {
+    if (typeof a.state === 'string' && a.state !== 'uploaded') errors.push(`${a.name} is not fully uploaded (state ${a.state})`)
+    if (a.size === 0) errors.push(`${a.name} is empty`)
+  }
   const set = new Set(names)
   if (set.size !== names.length) errors.push('duplicate asset names')
   if (names.length !== EXPECTED_ASSETS) errors.push(`expected ${EXPECTED_ASSETS} assets, found ${names.length}`)
@@ -87,6 +104,10 @@ function main(argv) {
     console.error(`cannot read ${file}: ${error.message}`)
     return 1
   }
+  if (version && !tagMatchesVersion(tag, version)) {
+    console.error(`tag ${tag} does not match package.json version ${version}, it stays a draft`)
+    return 1
+  }
   const result = checkReleaseAssets(input, { version })
   if (!result.ok) {
     console.error(`release ${tag} is not complete, it stays a draft:`)
@@ -97,5 +118,5 @@ function main(argv) {
   return 0
 }
 
-module.exports = { checkReleaseAssets, EXPECTED_ASSETS, TAG_RE, KINDS, main }
+module.exports = { checkReleaseAssets, tagMatchesVersion, EXPECTED_ASSETS, TAG_RE, KINDS, main }
 if (require.main === module) process.exitCode = main(process.argv.slice(2))

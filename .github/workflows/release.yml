@@ -128,12 +128,16 @@ jobs:
           done
           exit 1
 
+      # The file is never empty: softprops treats an empty body as "keep the
+      # existing body", so a re-run after publishing would append a second
+      # changelog. A lone newline still replaces it and renders as nothing.
       - name: Compose release notes
         run: |
           if [ -f "docs/release-notes/$TAG.md" ]; then
             cp "docs/release-notes/$TAG.md" "$RUNNER_TEMP/notes.md"
-          else
-            : > "$RUNNER_TEMP/notes.md"
+          fi
+          if [ ! -s "$RUNNER_TEMP/notes.md" ]; then
+            printf '\n' > "$RUNNER_TEMP/notes.md"
           fi
 
       # Single, authoritative pass that publishes the draft and sets the title
