@@ -605,7 +605,10 @@ async function main() {
         location: { hash, host: '192.168.1.20:4517', pathname: '/', search: '', reload: () => { reloads++ } },
         history: { replaceState() {} },
         document: { addEventListener() {}, visibilityState: 'visible' },
-        setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length }, clearTimeout() {},
+        // The M2 client (E1-FR-10/11/41) also listens on window and reads the perf clock.
+        window: { addEventListener() {} }, navigator: { onLine: true }, performance: { now: () => 0 },
+        setTimeout: (fn, ms) => { const t = { fn, ms }; timers.push(t); return t },
+        clearTimeout: t => { const i = timers.indexOf(t); if (i >= 0) timers.splice(i, 1) },
         setInterval: () => 0, clearInterval() {},
       })
       const open = ws => { ws.readyState = 1; ws.onopen() }
