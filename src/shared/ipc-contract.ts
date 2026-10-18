@@ -357,9 +357,9 @@ export interface SnApi {
     testDesktop(): Promise<void>
     /** Fired when a status notification is clicked (reveal that console). */
     onReveal(cb: (paneId: string) => void): () => void
-    /** Write the SnMultiCC hook block into ~/.claude/settings.json. */
+    /** Write our hook block into ~/.claude/settings.json. */
     hooksInstall(cfg: NotificationSettings): Promise<StatusHooksStatusRes>
-    /** Remove every SnMultiCC hook handler from ~/.claude/settings.json. */
+    /** Remove every hook handler of ours from ~/.claude/settings.json. */
     hooksUninstall(): Promise<StatusHooksStatusRes>
     hooksStatus(): Promise<StatusHooksStatusRes>
   }

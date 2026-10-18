@@ -5,7 +5,7 @@
 export function defaultShell(): string {
   switch (process.platform) {
     case 'win32':
-      // PowerShell is the brand default on Windows ("Multi Command Consoles").
+      // PowerShell is the default shell on Windows.
       return 'powershell.exe'
     case 'darwin':
       return process.env.SHELL || '/bin/zsh'

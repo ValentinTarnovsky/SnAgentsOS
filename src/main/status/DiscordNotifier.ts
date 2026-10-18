@@ -1,3 +1,4 @@
+import { BRAND } from '@shared/brand'
 import type { ConfigFile, DiscordSettings, StatusHealth } from '@shared/types'
 import type { StatusNotice } from './events'
 
@@ -35,7 +36,7 @@ export class DiscordNotifier {
     const cfg = this.cfg
     if (!cfg?.enabled || !(notice.state === 'done' ? cfg.notifyDone : cfg.notifyAction)) return
     const es = config?.settings.language === 'es'
-    let place = 'SnMultiCC'
+    let place: string = BRAND.productName
     for (const ws of config?.workspaces ?? []) {
       const pane = ws.panes.find(p => p.id === notice.paneId)
       if (pane) { place = `${ws.name} / ${pane.title}`; break }
@@ -48,7 +49,7 @@ export class DiscordNotifier {
     void this.enqueue(cfg, text).catch(() => {})
   }
   async test(cfg: DiscordSettings): Promise<{ ok: boolean; error?: string }> {
-    try { await this.enqueue(cfg, 'SnMultiCC: notification test / prueba de notificacion'); return { ok: true } }
+    try { await this.enqueue(cfg, `${BRAND.productName}: notification test / prueba de notificacion`); return { ok: true } }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : 'Delivery failed' } }
   }
   dispose(): void { this.cancel() }

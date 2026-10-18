@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from 'fs'
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
+import { BRAND } from '@shared/brand'
 import type { AppInfo, AppMetrics } from '@shared/ipc-contract'
 import type { ConfigFile } from '@shared/types'
 import { createMainWindow } from './window'
@@ -133,7 +134,7 @@ function registerConfigIpc(): void {
 
   ipcMain.handle(CH.CONFIG_EXPORT, async (_e, config: ConfigFile): Promise<boolean> => {
     const opts = {
-      defaultPath: 'snmulticc-config.json',
+      defaultPath: BRAND.exportFileName,
       filters: [{ name: 'JSON', extensions: ['json'] }],
     }
     const res = mainWindow
@@ -220,7 +221,7 @@ function openMainWindow(): void {
       event.preventDefault()
       win.hide()
       ensureTray(() => mainWindow, quitApp, {
-        show: mainT(cfg, 'tray.show'),
+        show: mainT(cfg, 'tray.show', { app: BRAND.productName }),
         quit: mainT(cfg, 'tray.quit'),
       })
       return
@@ -234,7 +235,7 @@ function openMainWindow(): void {
         defaultId: 1,
         cancelId: 0,
         noLink: true,
-        title: 'SnMultiCC',
+        title: BRAND.productName,
         message: mainT(cfg, 'dialog.activeTitle'),
         detail: mainT(cfg, 'dialog.activeDetail', { n: ptyManager.count }),
       })
@@ -257,7 +258,7 @@ async function bootstrap(): Promise<void> {
   // Packaged only: in dev an AUMID without a Start Menu shortcut can silently
   // suppress notifications, so dev keeps Electron's default.
   if (process.platform === 'win32' && app.isPackaged) {
-    app.setAppUserModelId('com.sndevelopment.snmulticc')
+    app.setAppUserModelId(BRAND.appId)
   }
   // No native menu on Windows/Linux: it's a frameless app with a custom
   // in-renderer title bar, so the default menu is invisible anyway, and its

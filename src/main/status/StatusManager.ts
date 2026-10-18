@@ -1,5 +1,6 @@
 import { Notification, type BrowserWindow } from 'electron'
 import { CH } from '@shared/ipc-channels'
+import { BRAND } from '@shared/brand'
 import type { AgentProvider, AttentionReason, ClaudePaneState, ConfigFile, NotificationSettings, PaneStatusEvt } from '@shared/types'
 import type { PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
@@ -228,7 +229,7 @@ export class StatusManager implements PtySink {
   private showNative(body: string, paneId?: string): void {
     this.desktopError = null
     if (Notification.isSupported()) {
-      const notification = new Notification({ title: 'SnMultiCC', body, silent: true })
+      const notification = new Notification({ title: BRAND.productName, body, silent: true })
       notification.on('click', () => {
         const w = this.getWindow()
         if (!w || w.isDestroyed()) return

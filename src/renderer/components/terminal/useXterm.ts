@@ -1,5 +1,6 @@
 import { useEffect, useRef, type RefObject } from 'react'
 import type { SetupStep } from '@shared/types'
+import { BRAND } from '@shared/brand'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -156,7 +157,7 @@ function loadRenderer(term: Terminal, getRenderer: () => 'canvas' | 'webgl'): Re
     current = null
     currentKind = 'dom'
     console.warn(
-      '[snmulticc] no GPU/2D renderer available; using xterm DOM renderer (known to garble under heavy redraw)',
+      `[${BRAND.packageName}] no GPU/2D renderer available; using xterm DOM renderer (known to garble under heavy redraw)`,
     )
   }
 

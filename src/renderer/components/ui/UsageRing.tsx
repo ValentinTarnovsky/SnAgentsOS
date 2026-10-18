@@ -57,7 +57,7 @@ export function UsageRing({ percent, muted, size = 36 }: UsageRingProps) {
             {Math.round(pct)}
           </span>
         ) : (
-          <span className="text-[10px] leading-none text-text-secondary/60">–</span>
+          <span className="text-[10px] leading-none text-text-secondary/60">-</span>
         )}
       </div>
     </div>

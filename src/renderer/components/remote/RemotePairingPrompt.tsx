@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Smartphone } from 'lucide-react'
+import { BRAND } from '@shared/brand'
 import { useRemoteStore } from '@/lib/remoteStore'
 import { useT } from '@/i18n'
 
@@ -37,7 +38,7 @@ export function RemotePairingPrompt() {
           <div>
             <h2 className="text-sm font-semibold text-text-primary">{t('remote.pairing.title')}</h2>
             <p className="mt-1 text-sm text-text-secondary">
-              {t('remote.pairing.wants', { name: pending.deviceName })}
+              {t('remote.pairing.wants', { name: pending.deviceName, app: BRAND.productName })}
             </p>
           </div>
           <div className="flex items-center gap-2 text-xs text-text-secondary">
