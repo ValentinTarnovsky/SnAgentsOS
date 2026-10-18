@@ -22,6 +22,8 @@ export interface MobilePrefs {
   composerAutocorrect: boolean
   /** Toast and vibration when another console needs the user (E1-FR-40). */
   inPageAlerts: boolean
+  /** Answer cards for Claude's permissions and questions (E2-FR-13, 19; default on). */
+  promptCards: boolean
 }
 
 export type ComposerPref = 'composerDefaultForAgents' | 'composerAutocorrect'
@@ -53,7 +55,22 @@ export function loadPrefs(): MobilePrefs {
     composerDefaultForAgents: loadPref('composerDefaultForAgents'),
     composerAutocorrect: loadPref('composerAutocorrect'),
     inPageAlerts: loadInPageAlerts(),
+    promptCards: loadPromptCards(),
   }
+}
+
+// --- answer cards (E2-FR-13, 19; R22-15) ---
+
+/** 'snagentsos.promptCards': '0' when off; absent (the default) means on. */
+export const PROMPT_CARDS_KEY = `${STORAGE_PREFIX}promptCards`
+
+export function loadPromptCards(): boolean {
+  return storageGet(PROMPT_CARDS_KEY) !== '0'
+}
+
+export function savePromptCards(on: boolean): void {
+  if (on) storageRemove(PROMPT_CARDS_KEY)
+  else storageSet(PROMPT_CARDS_KEY, '0')
 }
 
 export function saveInPageAlertsPref(on: boolean): void {

@@ -437,6 +437,19 @@ class RemoteClient {
     return true
   }
 
+  /**
+   * Keys for one pane whether it is viewed or not: an answer card on Home or
+   * in the terminal (E2-FR-21, 23). Same gate and chunking as sendInput; the
+   * server takes `input` for any pane of the snapshot, subscribed or not.
+   */
+  sendInputTo(paneId: string, data: string): boolean {
+    if (!paneId || !this.isOpen()) return false
+    for (const chunk of chunkInput(data)) {
+      if (!this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data: chunk })) return false
+    }
+    return true
+  }
+
   /** Switch the viewed pane within the current workspace (unsub old, sub new). */
   viewPane(paneId: string): void {
     const s = store.getState()

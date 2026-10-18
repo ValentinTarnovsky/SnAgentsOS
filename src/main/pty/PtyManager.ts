@@ -250,6 +250,12 @@ export interface PtySink {
    * before teardown, for every exit; `info` tells natural current exits apart.
    */
   onExit(ptyId: string, paneId: string, exitCode: number, info: PtyExitInfo): void
+  /**
+   * Optional (E2-FR-48): user input is about to reach the pty through
+   * write() (desktop keyboard, phone `input`, a phone answer card, a global
+   * prompt). Setup sequences write to the pty directly and never land here.
+   */
+  onUserInput?(ptyId: string, paneId: string, data: string): void
 }
 
 /**
@@ -596,6 +602,15 @@ export class PtyManager {
     const entry = this.entries.get(ptyId)
     if (!entry || !data) return
     this.lastInput.set(entry.paneId, Date.now())
+    // E2-FR-48: input invalidates the agent's outstanding answer cards before it lands.
+    for (const sink of this.sinks.values()) {
+      if (!sink.onUserInput) continue
+      try {
+        sink.onUserInput(ptyId, entry.paneId, data)
+      } catch {
+        /* a sink must never block typing */
+      }
+    }
     // Fast path: a small write with nothing queued goes straight to the pty so
     // interactive typing keeps zero added latency.
     if (entry.writeQueue.length === 0 && data.length <= WRITE_CHUNK) {
