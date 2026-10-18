@@ -6,10 +6,10 @@ import { deriveLegacyInfo } from '../migration/legacyInfo'
 import type { LegacyMigrationMarker } from '../migration/legacyMarker'
 import {
   ackLegacyNotice,
+  currentLegacyMarker,
   legacyBackupFile,
   legacyLogFile,
   onLegacyStatus,
-  readLegacyMarker,
 } from '../migration/runLegacyMigration'
 
 interface LegacyIpcHooks {
@@ -37,7 +37,7 @@ export function registerLegacyIpc(hooks: LegacyIpcHooks): () => void {
       platform: process.platform,
     })
 
-  ipcMain.handle(CH.APP_LEGACY_INFO, (): LegacyDataInfo => info(readLegacyMarker()))
+  ipcMain.handle(CH.APP_LEGACY_INFO, (): LegacyDataInfo => info(currentLegacyMarker()))
 
   ipcMain.on(CH.APP_LEGACY_ACK, () => {
     ackLegacyNotice()
