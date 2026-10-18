@@ -74,6 +74,12 @@ export function PaneCell({
   const Icon = iconFor(pane.icon)
   const connections = useAppStore((s) => s.connections)
   const { cwd, initialCommand, setup } = resolveLaunch(pane, workspace, presets, connections)
+  // E6-FR-32: the configured default shell for this OS (main falls back to the
+  // OS default, with a warning line, when it does not exist). Read at mount.
+  const shell = useAppStore((s) => {
+    const p = window.snApi.platform
+    return p === 'win32' || p === 'darwin' || p === 'linux' ? s.settings.defaultShell[p] : undefined
+  })
 
   const isMax = maximizedId === pane.id
   const isMin = minimizedIds.includes(pane.id)
@@ -311,6 +317,7 @@ export function PaneCell({
             paneId={pane.id}
             workspaceId={workspace.id}
             cwd={cwd}
+            shell={shell}
             initialCommand={initialCommand}
             setup={setup}
             fontSize={pane.fontSize}
