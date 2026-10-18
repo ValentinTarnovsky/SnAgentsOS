@@ -149,6 +149,7 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v2.2 | `app:openPath` | main->renderer | `{ path }` (second-instance `--open`) | E5 |
 | v2.2 | `system:setExplorerMenu` | invoke | `boolean -> boolean` | E5 |
 | v2.2 | `pty:scrollbackLoad` | invoke | `paneId -> string \| null` | E5 |
+| v2.2 | `pty:setEngine` | send | `TerminalEngineSettings` = `{ snapshotMode: 'auto' \| 'lazy' \| 'off'; unicode11; persist; persistLines; shellIntegration? }`, normalizado en main (enmienda R22-07). `PtyReattachRes` suma `cols`/`rows`/`shellKind` (E6-FR-04) y `AppMetrics.headless?: { panes, parseMsP95, snapshotMsP95, bytesParsed, snapshotCacheHits }` (E6-FR-07) | E6 |
 | v2.2 | `git:setWatch` | send | `GitTarget[]` = `{ key, cwd, workspaceId, paneId?, active }` (enmienda R22-10: la clave `ws:<id>` / `pane:<id>` y `active` acompanan al cwd) | E5 |
 | v2.2 | `git:update` | main->renderer | `{ key, cwd, summary: GitSummary \| null, error? }`, solo cuando cambia por valor | E5 |
 | v2.2 | `git:info` | invoke | `{ force? } -> GitInfoRes` (enmienda D6) | E5 |
@@ -270,3 +271,4 @@ Ids y combinaciones de v2.1 segun D8 (gana el contrato): `reopenClosedPane` es C
 |---|---|---|
 | v2.1 | R21-00 | `RemotePaneStatus.precise?` (adoptada); `RemotePaneInfo.resumable?` (D10); `RemoteStateSnapshot.terminalUnicode?`, `replay.exitCode?`, `RemotePaneInfo.exitCode?`; IPC `pty:restart`, `status:sessionEnd`, `agents:*`, `power:getState` y los opcionales de `PowerState`; campos desktop-only de `PaneStatus` (`detail`, `topic`, `firstPrompt`, `cacheSince`); claves `notifications.inAppWhenFocused`, `settings.agents.*` (v11), `workspaces[].agentsCollapsed`, `terminalAgentEndChip`; storage `snagentsos.alerts.inPage` y sessionStorage `snagentsos.reloadFor`; atajos segun D8; archivo `dataDir()/agent-sessions.json` |
 | v2.2 | R22-01 (config) | Claves `terminalSnapshotMode`, `settings.agents.{resumeModalTimeoutSec, resumeNudge, resumeNudgeText, sidebarSort}`, `settings.automation.{defaultAgentPresetId, composerCreateAnother}`, `workspaces[].note`/`taskState`. `CONFIG_VERSION` 12 con la migracion snippets -> quickCommands. Las enmiendas v2.2 de protocolo, IPC y storage se registran con el WP que las implementa |
+| v2.2 | R22-07 (headless) | IPC `pty:setEngine` (`TerminalEngineSettings`, `shellIntegration` opcional hasta R31-01); `PtyReattachRes.cols`/`rows`/`shellKind` obligatorios; `AppMetrics.headless?`. Sin cambios en la forma de `replay` ni en `PROTOCOL_VERSION` |
