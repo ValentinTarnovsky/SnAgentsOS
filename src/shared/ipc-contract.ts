@@ -20,6 +20,9 @@ import type {
   RemoteEndpointKind,
   RemoteStateSnapshot,
 } from './remote-protocol'
+import type { GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
+
+export type { GitArea, GitDiffHunk, GitDiffLine, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
 /**
  * "PC awake" state (contract `power:state`). `reason: 'agents'` covers both a
@@ -532,5 +535,18 @@ export interface SnApi {
     onChanged(cb: (e: AgentsChangedEvt) => void): () => void
     /** A session started, or reached its first idle after a start. Returns unsubscribe. */
     onReady(cb: (e: AgentsReadyEvt) => void): () => void
+  }
+  /** Git chip (E7-FR-05..10). Main runs git; the renderer owns the targets and settings.gitChip. */
+  git: {
+    /** Replace the watched targets (workspace cwds and pane worktrees). */
+    setWatch(targets: GitTarget[]): void
+    /** settings.gitChip: off stops the background refresh; on-demand refreshes keep working. */
+    setConfig(cfg: { gitChip: boolean }): void
+    /** Refresh now ('manual', all targets when no keys) or after an agent finished ('agent', debounced). */
+    refresh(req?: { keys?: string[]; reason?: 'manual' | 'agent' }): void
+    /** Which git is on PATH (cached; force re-checks). */
+    info(force?: boolean): Promise<GitInfoRes>
+    /** Summaries, only when one changes by value. Returns an unsubscribe function. */
+    onUpdate(cb: (e: GitUpdateEvt) => void): () => void
   }
 }

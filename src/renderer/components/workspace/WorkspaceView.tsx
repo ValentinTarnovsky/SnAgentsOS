@@ -4,6 +4,7 @@ import type { AgentPreset, Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
 import { TilingGrid } from '@/components/layout/TilingGrid'
+import { WorkspaceGitLabel } from '@/components/git/WorkspaceGitLabel'
 import { useT } from '@/i18n'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ActionTooltipLabel, useActionKeys } from '@/components/ui/KeyHint'
@@ -41,7 +42,7 @@ export function WorkspaceView({
       <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-border px-4">
         <div className="flex min-w-0 items-baseline gap-2">
           <span className="shrink-0 text-sm font-medium text-text-primary">{workspace.name}</span>
-          <span className="truncate font-mono text-xs text-text-secondary">{workspace.cwd}</span>
+          <WorkspaceGitLabel workspace={workspace} />
         </div>
 
         <div className="flex shrink-0 items-center gap-2">

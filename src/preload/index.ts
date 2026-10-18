@@ -38,6 +38,7 @@ import type {
 } from '@shared/types'
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
+import type { GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -164,6 +165,13 @@ const api: SnApi = {
     forget: (paneId: string) => ipcRenderer.send(CH.AGENTS_FORGET, paneId),
     onChanged: (cb: (e: AgentsChangedEvt) => void) => sub<AgentsChangedEvt>(CH.AGENTS_CHANGED, cb),
     onReady: (cb: (e: AgentsReadyEvt) => void) => sub<AgentsReadyEvt>(CH.AGENTS_READY, cb),
+  },
+  git: {
+    setWatch: (targets: GitTarget[]) => ipcRenderer.send(CH.GIT_SET_WATCH, targets),
+    setConfig: (cfg: { gitChip: boolean }) => ipcRenderer.send(CH.GIT_SET_CONFIG, cfg),
+    refresh: (req?: { keys?: string[]; reason?: 'manual' | 'agent' }) => ipcRenderer.send(CH.GIT_REFRESH, req ?? {}),
+    info: (force?: boolean) => ipcRenderer.invoke(CH.GIT_INFO, { force: force === true }) as Promise<GitInfoRes>,
+    onUpdate: (cb: (e: GitUpdateEvt) => void) => sub<GitUpdateEvt>(CH.GIT_UPDATE, cb),
   },
 }
 

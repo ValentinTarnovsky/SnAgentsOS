@@ -122,6 +122,13 @@ export const CH = {
   AGENTS_CHANGED: 'agents:changed', // main -> renderer (AgentSessionView | { paneId, removed: true })
   AGENTS_FORGET: 'agents:forget', // send (paneId)
   AGENTS_READY: 'agents:ready', // main -> renderer ({ paneId, sessionId, phase: 'start' | 'idle' })
+
+  // Git chip (E7-FR-05..10). Names per PLAN D6; a target carries a key (ws:<id> | pane:<id>) besides its cwd.
+  GIT_SET_WATCH: 'git:setWatch', // send (GitTarget[])
+  GIT_UPDATE: 'git:update', // main -> renderer (GitUpdateEvt { key, cwd, summary, error? }, only on change)
+  GIT_INFO: 'git:info', // invoke ({ force? }) -> GitInfoRes
+  GIT_SET_CONFIG: 'git:setConfig', // send ({ gitChip: boolean })
+  GIT_REFRESH: 'git:refresh', // send ({ keys?: string[], reason?: 'manual' | 'agent' })
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]
