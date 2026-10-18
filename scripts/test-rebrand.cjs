@@ -857,6 +857,8 @@ async function updaterChecks(BRAND, en, es) {
   const version = '2.0.0'
   const base = `https://github.com/${BRAND.repo}/releases/download/v${version}/`
   const latestUrl = `https://api.github.com/repos/${BRAND.repo}/releases/latest`
+  // E4-FR-14: the release list is queried first, /releases/latest is its fallback.
+  const releasesUrl = `https://api.github.com/repos/${BRAND.repo}/releases?per_page=30`
   const payload = Buffer.from('fake SnAgentsOS 2.0.0 binary')
   const payloadSha = crypto.createHash('sha256').update(payload).digest('hex')
   // The 16 assets of v2.0.0 as electron-builder names them (FR-21), API order.
@@ -904,6 +906,7 @@ async function updaterChecks(BRAND, en, es) {
             setImmediate(() => req.emit('redirect', route.status ?? 301, 'GET', route.redirect))
           } else if (route) respond(req, route.status, route.body)
           else if (current === latestUrl) respond(req, 200, JSON.stringify(rel))
+          else if (current === releasesUrl) respond(req, 200, JSON.stringify([rel]))
           else if (current.endsWith('.sha256')) respond(req, 200, sidecar(current))
           else respond(req, 404, '')
         }
@@ -977,7 +980,7 @@ async function updaterChecks(BRAND, en, es) {
       const { mod, log } = loadUpdater({ platform: 'win32', env })
       const info = await mod.checkForUpdate()
       check(info.available && info.installable && info.installKind === 'win-portable' && info.latestVersion === version, 'portable sees 2.0.0 as installable')
-      check(log.requests[0].url === latestUrl && log.requests[0].redirect === 'manual', 'latest release queried on the new repo with manual redirects')
+      check(log.requests[0].url === releasesUrl && log.requests[0].redirect === 'manual', 'release list queried on the new repo with manual redirects')
       // R20-04 renames the running exe and rewrites the env after the check.
       env.PORTABLE_EXECUTABLE_FILE = newExe
       const progress = []
@@ -1000,9 +1003,11 @@ async function updaterChecks(BRAND, en, es) {
       check(!tmpEntries().some(e => /snmulticc/i.test(e)), 'no legacy temp prefix created')
     }
 
-    // E0-FR-25: no sidecar, no install, on every installable kind.
+    // E0-FR-25: no sidecar, no install, on every installable kind. The release
+    // list never offers such a release as installable (E4-FR-14), so the list
+    // fails here and the /releases/latest fallback offers it like 1.x did.
     for (const c of cases) {
-      const { mod, log } = loadUpdater({ ...c, rel: release(distributables) })
+      const { mod, log } = loadUpdater({ ...c, rel: release(distributables), routes: url => url === releasesUrl ? { status: 500, body: '' } : undefined })
       const before = tmpEntries().length
       const info = await mod.checkForUpdate()
       check(info.installable && info.installKind === c.kind, `${c.label}: asset found without sidecar`)
@@ -1043,14 +1048,14 @@ async function updaterChecks(BRAND, en, es) {
     // Redirects on the release query: an allowlisted 301 is followed, anything
     // else is refused before a single byte of it is read.
     {
-      const alias = 'https://api.github.com/repositories/987654321/releases/latest'
-      const { mod, log } = loadUpdater({ platform: 'win32', routes: url => url === latestUrl ? { redirect: alias } : url === alias ? { status: 200, body: JSON.stringify(release(full)) } : undefined })
+      const alias = 'https://api.github.com/repositories/987654321/releases?per_page=30'
+      const { mod, log } = loadUpdater({ platform: 'win32', routes: url => url === releasesUrl ? { redirect: alias } : url === alias ? { status: 200, body: JSON.stringify([release(full)]) } : undefined })
       const info = await mod.checkForUpdate()
       check(info.available && info.installKind === 'win-installer' && log.followed.join() === alias, 'allowlisted 301 on the release query is followed')
-      const evil = loadUpdater({ platform: 'win32', routes: url => url === latestUrl ? { redirect: 'https://evil.example.com/releases/latest' } : undefined })
+      const evil = loadUpdater({ platform: 'win32', routes: url => url === latestUrl || url === releasesUrl ? { redirect: 'https://evil.example.com/releases/latest' } : undefined })
       const refused = await evil.mod.checkForUpdate()
-      check(!refused.available && /untrusted host/.test(refused.error ?? '') && evil.log.followed.length === 0 && evil.log.aborted === 1 && evil.log.errors.length === 1,`off-list redirect refused: ${refused.error}`)
-      const plain = loadUpdater({ platform: 'win32', routes: url => url === latestUrl ? { redirect: 'http://api.github.com/x' } : undefined })
+      check(!refused.available && /untrusted host/.test(refused.error ?? '') && evil.log.followed.length === 0 && evil.log.aborted === 2 && evil.log.errors.length === 1,`off-list redirect refused on the list and its fallback: ${refused.error}`)
+      const plain = loadUpdater({ platform: 'win32', routes: url => url === latestUrl || url === releasesUrl ? { redirect: 'http://api.github.com/x' } : undefined })
       check(!(await plain.mod.checkForUpdate()).available && plain.log.followed.length === 0, 'non-https redirect refused')
     }
 
@@ -1085,7 +1090,8 @@ async function updaterChecks(BRAND, en, es) {
         }
         const { mod, log } = loadUpdater({ platform: 'win32', appVersion: '1.14.1', routes, downloadRedirects: { [base + setup]: cdn(setup) }, sharedDir: legacyShared })
         const info = await mod.checkForUpdate()
-        check(log.requests[0].url === oldLatest && log.followed[0] === alias, '1.14.x queries the old repo and follows the 301')
+        // 1.14.1 only knows /releases/latest; the current code reaches it after its list query 404s.
+        check(log.requests.find(r => r.url.endsWith('/releases/latest'))?.url === oldLatest && log.followed[0] === alias, '1.14.x queries the old repo and follows the 301')
         check(info.available && info.installable && info.installKind === 'win-installer' && info.latestVersion === version, `1.14.x sees 2.0.0 as installable: ${info.error ?? ''}`)
         const result = await mod.downloadAndInstall(() => {})
         check(log.followed.includes(cdn(setup + '.sha256')), '1.14.x follows the sidecar to the asset CDN')
@@ -1115,7 +1121,7 @@ async function updaterChecks(BRAND, en, es) {
     check(installErrorText(t, 'HTTP 500') === 'Update failed: HTTP 500', 'other errors keep update.installFailed')
   }
   for (const file of ['src/main/updater.ts', 'src/renderer/lib/updater.ts']) check(!LEGACY_RE.test(read(file)), `${file}: no legacy name`)
-  check(read('src/renderer/components/updates/UpdateModal.tsx').includes('installErrorText(t, error)') && read('src/renderer/components/settings/sections/UpdatesSection.tsx').includes('installErrorText(t, installError)'), 'both update views render installErrorText')
+  check(read('src/renderer/components/updates/UpdateCard.tsx').includes('installErrorText(t, installError)') && read('src/renderer/components/settings/sections/UpdatesSection.tsx').includes('installErrorText(t, installError)'), 'both update views render installErrorText')
 }
 
 // R20-05: welcome notice, banners and the backup line (E0-FR-10, FR-28 line in
