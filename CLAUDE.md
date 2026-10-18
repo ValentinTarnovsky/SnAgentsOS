@@ -8,7 +8,7 @@ Electron 33 + React 19 + xterm.js 5.5 + node-pty. Centro de mando de agentes (Cl
 ## Reglas
 
 - Nunca mandar Enter automatico a una consola sin opt-in explicito del usuario (Quick Commands, composer, CLI, automatizaciones). El texto se inserta; el `\r` solo con la opcion activada y una senal de estado precisa.
-- Canvas es el renderer por defecto del terminal; WebGL es opt-in. `@xterm/xterm` 5.5.0 y sus addons van pineados exactos; no se sube a xterm 6.
+- Canvas es el renderer por defecto del terminal; WebGL es opt-in. `@xterm/xterm` va pineado exacto en 5.5.0 (igual que `addon-canvas`, `headless`, `addon-serialize` y `addon-unicode11`); no se sube a xterm 6.
 - Cada tanda de claves de config nuevas sube `CONFIG_VERSION` (`src/shared/types.ts`) una sola vez, con default de zod por campo en `src/main/store/schema.ts`. `migrate()` solo agrega logica cuando hay transformacion. Los schemas 11 a 14 viajan juntos en 2.0.0 como migraciones secuenciales.
 - `src/shared` no importa nada de Node (`fs`, `path`, `electron`...) ni del DOM: lo consumen main, renderer y mobile.
 - El unmount de un pane nunca mata su pty: los kills son explicitos (`pty.kill`, `killPanePtys`). Hoy el cleanup de `useXterm` todavia mata (lo saca E4-FR-36); no sumar caminos nuevos que dependan de eso.

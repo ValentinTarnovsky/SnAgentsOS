@@ -77,6 +77,9 @@ function main() {
   for (const cmd of ['npm run typecheck', 'npm test', 'npm run test:ui', 'npm run test:mobile']) check(claude.includes(cmd), `verification command ${cmd}`)
   check(/Enter automatico/.test(claude) && /opt-in/.test(claude), 'no automatic Enter without opt-in')
   check(/Canvas es el renderer por defecto/.test(claude), 'Canvas default renderer')
+  const deps = JSON.parse(read('package.json')).dependencies
+  for (const pkg of ['@xterm/xterm', '@xterm/addon-canvas', '@xterm/headless', '@xterm/addon-serialize', '@xterm/addon-unicode11']) check(/^\d+\.\d+\.\d+$/.test(deps[pkg] || ''), `${pkg} pinned exact as CLAUDE.md says (${deps[pkg]})`)
+  check(deps['@xterm/xterm'] === '5.5.0' && claude.includes('5.5.0'), 'xterm stays on 5.5.0')
   check(claude.includes('CONFIG_VERSION') && /zod/.test(claude), 'CONFIG_VERSION rule')
   check(/`src\/shared` no importa nada de Node/.test(claude) && /ni del DOM/.test(claude), 'src/shared rule')
   check(/nunca mata su pty/.test(claude) && /kills son explicitos/.test(claude), 'explicit kills rule')
@@ -121,7 +124,7 @@ function main() {
     'RemotePaneStatus.precise?', 'RemotePaneInfo.resumable?', 'RemoteStateSnapshot.terminalUnicode?', 'replay.exitCode?', 'RemotePaneInfo.exitCode?',
     '`pty:restart`', '`status:sessionEnd`', '`agents:list`', '`agents:changed`', 'cacheSince', 'firstPrompt',
     'settings.notifications.inAppWhenFocused', 'settings.agents.resumeOnStartup', 'workspaces[].agentsCollapsed', 'settings.terminalAgentEndChip',
-    'alerts.inPage', 'snagentsos.reloadFor', 'agent-sessions.json', 'Registro de enmiendas',
+    'alerts.inPage', 'snagentsos.reloadFor', 'agent-sessions.json', 'Registro de enmiendas', '`power:getState` | invoke | `-> PowerState`', 'workingCount?: number', 'releaseAt?: number',
   ]) check(contracts.includes(needle), `contract amendment ${needle}`)
 
   console.log(`PASS: ${checks} docs checks (styleguide, CLAUDE.md, notices, ${adapted} adapted files, contract amendments)`)
