@@ -316,10 +316,11 @@ export class PtyManager {
     for (let i = 0; i < seed.length; i += SEED_CHUNK) this.pushHistory(entry, seed.slice(i, i + SEED_CHUNK))
     this.entries.set(ptyId, entry)
     this.byPane.set(req.paneId, ptyId)
-    // 'auto' with persistence keeps a mirror from the spawn (E6-FR-01), seeded
-    // with the whole seed (the ring may already have dropped its head). Before
-    // the sinks hear of the pty, so a phone's replay already comes from it.
-    if (this.mirrorAtSpawn()) this.ensureMirror(ptyId, entry, seed)
+    // 'auto' with persistence keeps a mirror from the spawn (E6-FR-01), and so
+    // does any spawn with a seed outside 'off' (E6-FR-11/19): it takes the
+    // whole seed, which the 256 KB ring may already have cut. Before the sinks
+    // hear of the pty, so a phone's replay already comes from it.
+    if (this.mirrorAtSpawn() || (seed && this.engine.snapshotMode !== 'off')) this.ensureMirror(ptyId, entry, seed)
     // A respawn supersedes whatever the previous pty left (E6-FR-20).
     this.exited.delete(req.paneId)
     for (const sink of this.sinks.values()) {
