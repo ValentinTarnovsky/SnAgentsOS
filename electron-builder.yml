@@ -19,6 +19,9 @@ files:
 extraResources:
   - from: build/icon.png
     to: icon.png
+  # MIT notices of adapted third-party code ship with every copy (R21-00).
+  - from: THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
 
 # node-pty is N-API (ABI-stable) and ships prebuilt binaries that load in
 # Electron directly, so no native rebuild is needed (and avoids requiring a
