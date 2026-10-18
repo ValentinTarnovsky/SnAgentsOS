@@ -53,6 +53,9 @@ import { setLang } from './i18n'
 import { delayFor } from './reconnectSchedule'
 import { createInPageAlerts } from './inPageAlerts'
 import { needsWorkspaceSwitch, paneById, statusMapOf, viewedWorkspaceId, workspaceOfPane } from './workspace'
+import { clearMobileStorage } from './mobileStorage'
+import { chunkInput } from './composerSend'
+import { pruneDrafts } from './drafts'
 
 /** A frame handed to the live terminal. */
 export type TermFrame =
@@ -198,6 +201,8 @@ class RemoteClient {
 
   private pendingCtl = new Map<string, { resolve: (r: CtlResult) => void; timer: ReturnType<typeof setTimeout> }>()
   private termListener: ((f: TermFrame) => void) | null = null
+  /** Old drafts are pruned once per page, on the first live snapshot (E1-FR-28). */
+  private draftsPruned = false
   // Frames that arrived before the terminal mounted (the authOk -> first React
   // render gap). Buffered so the initial replay/out is never lost; a replay
   // supersedes and resets the buffer since it repaints the whole screen.
@@ -301,6 +306,7 @@ class RemoteClient {
   /** Forget this origin's device and reload to a clean state. */
   unpair(): void {
     clearAuth()
+    this.forgetComposerState()
     this.clearReconnectTimer()
     this.abortSocket()
     location.reload()
@@ -324,12 +330,17 @@ class RemoteClient {
   /**
    * Send keystrokes/paste data to the currently-viewed pane. Returns false (and
    * sends nothing) without an open authenticated socket (FR-14), so callers can
-   * keep the text instead of losing it.
+   * keep the text instead of losing it. Data longer than INPUT_CHUNK goes as
+   * several `input` frames, in order, never splitting a surrogate pair, so a
+   * long paste or snippet stays under the schema's 8192 limit (E1-FR-24).
    */
   sendInput(data: string): boolean {
     const paneId = store.getState().subscribedPaneId
     if (!paneId || !this.isOpen()) return false
-    return this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data })
+    for (const chunk of chunkInput(data)) {
+      if (!this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data: chunk })) return false
+    }
+    return true
   }
 
   /** Switch the viewed pane within the current workspace (unsub old, sub new). */
@@ -707,6 +718,7 @@ class RemoteClient {
         this.handleCtlAck(msg)
         break
       case 'revoked':
+        this.forgetComposerState()
         store.getState().update({ phase: 'revoked' })
         break
       case 'shutdown':
@@ -800,6 +812,16 @@ class RemoteClient {
     this.startKeepalive()
     this.armIdleWatchdog()
     if (keep) this.viewPane(keep)
+    if (!this.draftsPruned) {
+      this.draftsPruned = true
+      pruneDrafts(new Set(state.workspaces.flatMap((w) => w.panes.map((p) => p.id))))
+    }
+  }
+
+  /** Drafts and input modes never outlive the pairing (E1-FR-28). */
+  private forgetComposerState(): void {
+    clearMobileStorage()
+    store.getState().update({ inputModes: {}, composerOneShot: null })
   }
 
   private handleAuthOk(msg: Extract<RemoteServerMsg, { type: 'authOk' }>): void {
@@ -957,6 +979,7 @@ class RemoteClient {
 
     if (ev.code === REMOTE_CLOSE.REVOKED) {
       clearAuth()
+      this.forgetComposerState()
       this.secretKey = null
       this.deviceId = null
       store.getState().update({ phase: 'revoked', banner: null })
