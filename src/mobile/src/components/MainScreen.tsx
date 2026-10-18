@@ -5,7 +5,7 @@
  * connection dot, drawer + actions) / pane tabs (E1-FR-32) / terminal
  * (flex-1, min-h-0) / composer or "Direct input" strip (E1-FR-22..31, 38) /
  * KeyBar. The drawer, action sheet, per-pane actions (long-press on a tab or
- * drawer row, E1-FR-33/39) and snippets sheet mount here; the status banner
+ * drawer row, E1-FR-33/39) and Quick Commands sheet mount here; the status banner
  * and toast overlay the terminal. The Paste key opens the composer (PasteSheet
  * is gone, D11). BackStackHost gives every sheet and pushed screen its history
  * entry (E1-FR-36).
@@ -19,7 +19,7 @@ import { ConsoleDrawer } from './ConsoleDrawer'
 import { ActionSheet } from './ActionSheet'
 import { PaneTabs } from './PaneTabs'
 import { PaneActionSheet } from './PaneActionSheet'
-import { SnippetsSheet } from './SnippetsSheet'
+import { QuickCommandsSheet } from './QuickCommandsSheet'
 import { Composer, openComposerForPaste, toggleInputMode } from './Composer'
 import { DirectInputStrip } from './DirectInputStrip'
 import { ExitStrip } from './ExitStrip'
@@ -68,7 +68,7 @@ export function MainScreen(): ReactNode {
     const s = store.getState()
     if (s.composerOneShot && s.composerOneShot !== activePaneId) s.update({ composerOneShot: null })
   }, [activePaneId])
-  const [snippetsOpen, setSnippetsOpen] = useState(false)
+  const [quickOpen, setQuickOpen] = useState(false)
   const [paneActions, setPaneActions] = useState<PaneRef | null>(null)
 
   const { workspaceName, paneTitle } = useMemo(() => {
@@ -138,7 +138,7 @@ export function MainScreen(): ReactNode {
       >
         <KeyBar
           onPaste={openComposerForPaste}
-          onSnippets={() => setSnippetsOpen(true)}
+          onQuickCommands={() => setQuickOpen(true)}
           inputMode={inputMode}
           onToggleMode={activePaneId ? toggleInputMode : undefined}
         />
@@ -146,7 +146,7 @@ export function MainScreen(): ReactNode {
 
       <ConsoleDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} onPaneActions={setPaneActions} />
       <ActionSheet open={actionsOpen} onClose={() => setActionsOpen(false)} />
-      <SnippetsSheet open={snippetsOpen} onClose={() => setSnippetsOpen(false)} />
+      <QuickCommandsSheet open={quickOpen} onClose={() => setQuickOpen(false)} />
       <PaneActionSheet target={paneActions} onClose={() => setPaneActions(null)} />
     </div>
     </BackStackHost>

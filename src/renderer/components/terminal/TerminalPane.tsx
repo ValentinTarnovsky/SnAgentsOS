@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { ChevronDown, ChevronUp, Search, X } from 'lucide-react'
 import type { SetupStep } from '@shared/types'
+import type { LaunchKind } from '@shared/initialPrompt'
 import { useXterm, type XtermExitState } from './useXterm'
 import { ExitCard } from './ExitCard'
 import { AgentEndChip } from './AgentEndChip'
@@ -22,6 +23,8 @@ export interface TerminalPaneProps {
   cwd?: string
   shell?: string
   initialCommand?: string
+  /** E8-FR-02b: enables the `argv` initial prompt (resolveLaunch). */
+  launchKind?: LaunchKind
   /** Pre-launch sequence (e.g. SSH connect) run before initialCommand. */
   setup?: SetupStep[]
   fontSize?: number
@@ -35,6 +38,7 @@ export function TerminalPane({
   cwd,
   shell,
   initialCommand,
+  launchKind,
   setup,
   fontSize,
   isActive,
@@ -44,7 +48,7 @@ export function TerminalPane({
   const termRef = useRef<HTMLDivElement>(null)
   // Exit card (E6-FR-17): visibility is local to the pane, never persisted.
   const [exit, setExit] = useState<XtermExitState | null>(null)
-  const ctl = useXterm(termRef, { paneId, cwd, shell, initialCommand, setup, fontSize, isActive, onExitState: setExit })
+  const ctl = useXterm(termRef, { paneId, cwd, shell, initialCommand, launchKind, setup, fontSize, isActive, onExitState: setExit })
 
   const setPaneFontSize = useAppStore((s) => s.setPaneFontSize)
   const globalFont = useAppStore((s) => s.settings.fontSize)

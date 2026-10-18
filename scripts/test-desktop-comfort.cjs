@@ -538,7 +538,7 @@ async function main() {
     check(new Set(all.map(e => e.id)).size === all.length, 'catalog ids are unique')
     check(all.every(e => e.id.startsWith(e.category + '.') && c.CATEGORY_ORDER.includes(e.category)), "ids are '<category>.<key>' of a known category")
     check(c.KEY_ACTIONS.every(a => all.some(e => e.id === 'keys.' + a.id && e.titleKey === a.labelKey)), 'every KEY_ACTIONS action is a searchable Keys row')
-    for (const cat of ['agents', 'connections', 'snippets', 'data', 'usage', 'about', 'updates', 'remote']) check(catalog.some(e => e.category === cat && e.summary), `custom block ${cat} has a summary row`)
+    for (const cat of ['agents', 'connections', 'quick', 'data', 'usage', 'about', 'updates', 'remote']) check(catalog.some(e => e.category === cat && e.summary), `custom block ${cat} has a summary row`)
     const keysUsed = all.flatMap(e => [e.titleKey, e.descriptionKey, e.groupKey].filter(Boolean)).concat(Object.values(c.CATEGORY_LABEL))
     check(keysUsed.every(k => k in c.en && k in c.es), 'every catalog message key exists in en and es: ' + keysUsed.filter(k => !(k in c.en && k in c.es)).join())
     check(catalog.filter(e => e.toggle).every(e => typeof c.readSettingPath(c.useAppStore.getState().settings, e.toggle.path) === 'boolean'), 'inline toggles point at boolean settings')

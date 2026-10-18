@@ -27,7 +27,7 @@ window.result = (async () => {
  setActiveTerm({ textarea: helper, modes: { applicationCursorKeysMode:false } });
  const host=document.getElementById('root'); const reactRoot=createRoot(host);
  let pastes=0, modeToggles=0;
- const render = props => flushSync(() => reactRoot.render(<KeyBar onPaste={() => pastes++} onSnippets={() => {}} {...props} />));
+ const render = props => flushSync(() => reactRoot.render(<KeyBar onPaste={() => pastes++} onQuickCommands={() => {}} {...props} />));
  render({}); await frames();
  const key = label => { const b=host.querySelector('button[aria-label="'+label+'"]'); if(!b)throw new Error('missing key '+label); return b };
  const ptr = (el,type,x=0,y=0,extra={}) => { const r=el.getBoundingClientRect(); const e=new PointerEvent(type,{bubbles:true,cancelable:true,pointerId:1,pointerType:'touch',isPrimary:true,clientX:r.left+10+x,clientY:r.top+10+y,...extra}); el.dispatchEvent(e); return e };
@@ -73,7 +73,7 @@ window.result = (async () => {
 
  const scroller=host.querySelector('[data-scrollable]');
  const labels=[...scroller.querySelectorAll('button')].map(b=>b.getAttribute('aria-label'));
- const order=['Esc','Ctrl+C: interrupt','Tab','Ctrl','Left arrow','Up arrow','Down arrow','Right arrow','Backspace','Delete','Enter','\\u21e7Tab','Alt+Enter: newline','Ctrl+L: clear screen','Ctrl+R: search history','F5','Paste','Snippets','Ctrl+D: end of input','Ctrl+Z: suspend'];
+ const order=['Esc','Ctrl+C: interrupt','Tab','Ctrl','Left arrow','Up arrow','Down arrow','Right arrow','Backspace','Delete','Enter','\\u21e7Tab','Alt+Enter: newline','Ctrl+L: clear screen','Ctrl+R: search history','F5','Paste','Quick Commands','Ctrl+D: end of input','Ctrl+Z: suspend'];
  check(JSON.stringify(labels)===JSON.stringify(order),'scroll zone order: '+labels.join(' | '));
  check(getComputedStyle(scroller).touchAction==='pan-x','the scroller only pans horizontally');
  const kb=key('Keyboard');

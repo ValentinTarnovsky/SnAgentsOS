@@ -18,7 +18,7 @@ export function getActiveTerm(): Terminal | null {
 
 // --- composer (E1-FR-31) ---
 
-/** The mounted composer, so SnippetsSheet can insert at its caret. */
+/** The mounted composer, so QuickCommandsSheet can insert at its caret. */
 export interface ComposerHandle {
   insert(text: string): void
   focus(): void

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
-import { Activity, Bell, Bot, Database, DownloadCloud, FileText, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, type LucideIcon } from 'lucide-react'
+import { Activity, Bell, Bot, Database, DownloadCloud, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, Zap, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -26,7 +26,7 @@ import { AgentsSection } from './sections/AgentsSection'
 import { ConnectionsSection } from './sections/ConnectionsSection'
 import { StartupSection } from './sections/StartupSection'
 import { NotificationsSection } from './sections/NotificationsSection'
-import { SnippetsSection } from './sections/SnippetsSection'
+import { QuickCommandsSection } from './sections/QuickCommandsSection'
 import { KeymapSection } from './sections/KeymapSection'
 import { DataSection } from './sections/DataSection'
 import { UsageSection } from './sections/UsageSection'
@@ -40,7 +40,7 @@ const ICONS: Record<CategoryId, LucideIcon> = {
   terminal: TerminalSquare,
   agents: Bot,
   connections: PlugZap,
-  snippets: FileText,
+  quick: Zap,
   startup: Power,
   notifications: Bell,
   keys: Keyboard,
@@ -61,7 +61,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   language: LanguageSection,
   agents: AgentsSection,
   connections: ConnectionsSection,
-  snippets: SnippetsSection,
+  quick: QuickCommandsSection,
   startup: StartupSection,
   notifications: NotificationsSection,
   keys: KeymapSection,

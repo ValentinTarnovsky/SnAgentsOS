@@ -63,7 +63,15 @@ let bypassCloseGuards = false
 // True while an update download/install is in flight: blocks the user closing
 // the window mid-download (which would abort the update).
 let isInstalling = false
-const ptyManager = new PtyManager(() => mainWindow?.webContents ?? null, (ptyId, paneId, cwd) => codexBridge.environment(ptyId, paneId, cwd))
+const ptyManager = new PtyManager(
+  () => mainWindow?.webContents ?? null,
+  (ptyId, paneId, cwd) => codexBridge.environment(ptyId, paneId, cwd),
+  // Closure: statusManager is constructed below; the prompt gate polls it (E8-FR-02b).
+  (paneId) => {
+    const s = statusManager.stateOf(paneId)
+    return s && s.state ? { state: s.state, precise: s.precise } : null
+  },
+)
 const configStore = new ConfigStore()
 const remoteManager = new RemoteManager(
   ptyManager,

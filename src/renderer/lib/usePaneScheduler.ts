@@ -1,11 +1,8 @@
 import { useEffect } from 'react'
+import { translate } from '@/i18n'
 import { useAppStore } from './store'
 import { getPtyId } from './ptyRegistry'
-
-/** Delay between writing the prompt text and the Enter that submits it. Agent
- *  TUIs (Claude Code, Codex) debounce fast text+Enter as a paste, turning the
- *  Enter into a newline instead of a submit, so we space them out like a human. */
-const SUBMIT_DELAY_MS = 150
+import { toast } from './toast'
 
 /**
  * Compute the next epoch-ms occurrence of an "HH:MM" wall-clock time using the
@@ -19,10 +16,15 @@ export function nextOccurrence(time: string, from: Date = new Date()): number {
   return due.getTime()
 }
 
-/** Fire a console's scheduled prompt into its live pty (no-op if no pty yet). */
-function fire(prompt: string, ptyId: string): void {
-  window.snApi.pty.write({ ptyId, data: prompt })
-  setTimeout(() => window.snApi.pty.write({ ptyId, data: '\r' }), SUBMIT_DELAY_MS)
+/**
+ * Fire a console's scheduled prompt into its live pty through the shared
+ * delivery path (E8-FR-02a): the Enter goes 150 ms after the text drained.
+ */
+function fire(prompt: string, ptyId: string, paneId: string): void {
+  void window.snApi.pty.submit({ ptyId, paneId, text: prompt, enter: true }).then((res) => {
+    if (res.ok || res.error !== 'multiline_unsafe') return
+    toast.warning(translate(useAppStore.getState().settings.language, 'quick.toast.multiline'), { dedupeKey: 'schedule' })
+  })
 }
 
 /**
@@ -42,7 +44,7 @@ export function usePaneScheduler(): void {
           if (!sched || now < sched.dueAt) continue
           const ptyId = getPtyId(pane.id)
           if (!ptyId) continue // console not mounted yet; retry next tick
-          fire(sched.prompt, ptyId)
+          fire(sched.prompt, ptyId, pane.id)
           setPaneSchedule(ws.id, pane.id, null)
         }
       }

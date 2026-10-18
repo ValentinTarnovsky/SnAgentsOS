@@ -6,7 +6,7 @@
  * Parsing is item by item: one malformed command is dropped and the rest are
  * kept, so a single bad entry never costs the whole array.
  */
-import type { QuickCommand, Snippet } from './types'
+import type { QuickCommand } from './types'
 
 /** Hard cap on stored commands; the 101st cannot be created. */
 export const QUICK_COMMANDS_MAX = 100
@@ -184,10 +184,27 @@ export function mergeQuickCommands(
   return { list: added.length ? [...existing, ...added] : existing, imported: added.length, total: fresh.length }
 }
 
+export type PopoverKeyAction =
+  | { kind: 'run'; index: number }
+  | { kind: 'runSelected' }
+  | { kind: 'move'; delta: 1 | -1 }
+  | { kind: 'close' }
+  | { kind: 'type' }
+
 /**
- * Interim view for the phone protocol, which still carries `snippets` until the
- * QuickCommandsSheet replaces it (R22-12): global `send` commands only.
+ * What a key does in the Quick Commands popover (E8-FR-04). With the filter
+ * empty a plain 1-9 runs that numbered item; once the filter has text, digits
+ * filter like any other key. Arrows move, Enter runs the selection, Esc closes.
  */
-export function legacySnippets(list: QuickCommand[]): Snippet[] {
-  return list.filter((c) => c.action === 'send' && !c.workspaceId).map(({ id, name, text }) => ({ id, name, text }))
+export function popoverKey(
+  key: string,
+  filter: string,
+  mods: { ctrl?: boolean; alt?: boolean; meta?: boolean } = {},
+): PopoverKeyAction {
+  if (key === 'Escape') return { kind: 'close' }
+  if (key === 'ArrowDown') return { kind: 'move', delta: 1 }
+  if (key === 'ArrowUp') return { kind: 'move', delta: -1 }
+  if (key === 'Enter') return { kind: 'runSelected' }
+  if (!filter && !mods.ctrl && !mods.alt && !mods.meta && /^[1-9]$/.test(key)) return { kind: 'run', index: Number(key) - 1 }
+  return { kind: 'type' }
 }

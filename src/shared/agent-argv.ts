@@ -6,6 +6,8 @@
  * Pure: no Node or DOM imports, safe in main, renderer and tests.
  */
 import type { AgentPreset, AgentProvider } from './types'
+import { initialPromptRef } from './initialPrompt'
+import type { PromptShellKind } from './shellKind'
 
 /** Agent session ids we accept (Claude UUIDs, Codex thread ids). Rejects `launch:` and shell syntax. */
 export const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/
@@ -152,6 +154,11 @@ export interface AgentArgvInput {
   command?: string
   /** Resume this session instead of starting a new one. */
   resume?: { provider: AgentProvider; sessionId: string }
+  /**
+   * Initial prompt in `argv` mode (E2-FR-11, D1): the command gets the
+   * reference to SNAOS_INITIAL_PROMPT for this shell. Never with `resume`.
+   */
+  promptShell?: PromptShellKind
 }
 
 /**
@@ -171,7 +178,10 @@ export function buildAgentArgv(input: AgentArgvInput): string | undefined {
     preset && preset.type !== 'shell' && preset.command.trim()
       ? [preset.command, ...preset.args].join(' ').trim()
       : undefined
-  if (!input.resume) return override || presetLine || undefined
+  if (!input.resume) {
+    const line = override || presetLine || undefined
+    return line && input.promptShell ? appendPromptRef(line, input.promptShell) : line
+  }
   const { provider, sessionId } = input.resume
   let base: string = provider
   if (override) {
@@ -207,4 +217,15 @@ export function buildCdPrefix(shellKind: CdShellKind, cwd: string | undefined): 
     default:
       return ''
   }
+}
+
+/**
+ * `command` with the initial prompt reference for `shell` appended (argv mode,
+ * D1), or the command unchanged when the shell has no known reference. Main
+ * calls it with the resolved shell; the text itself only lives in the pty's
+ * SNAOS_INITIAL_PROMPT variable, never on the command line.
+ */
+export function appendPromptRef(command: string, shell: PromptShellKind): string {
+  const ref = initialPromptRef(shell)
+  return ref ? command.trimEnd() + ref : command
 }
