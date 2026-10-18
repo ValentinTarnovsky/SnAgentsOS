@@ -3,7 +3,7 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
 const root = path.resolve(__dirname, '..')
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snmulticc-touch-'))
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-touch-'))
 const assets = path.join(root, 'out/mobile/assets')
 const mobileCss = fs.readdirSync(assets).find(name => /^index-.*\.css$/.test(name))
 if (!mobileCss) throw new Error('Run npm run build:mobile first')
