@@ -46,11 +46,11 @@ import { diagnosticsSecrets } from './diagnostics/buildDiagnostics'
 import { RendererRecovery } from './crash/rendererRecovery'
 import { copyMainDiagnostics, registerCrashIpc, type CrashIpcDeps } from './ipc/registerCrashIpc'
 import { updateState } from './updateState'
+import { makeOpenRequest, OpenRequestQueue, parseOpenArg, validateOpenPath } from './openRequest'
+import { refreshExplorerMenuOnStartup } from './shellIntegration'
 
 // Remember main's warn/error lines for "Copy diagnostics" (E4-FR-24).
 installLogRing()
-\nimport { makeOpenRequest, OpenRequestQueue, parseOpenArg, validateOpenPath } from './openRequest'
-import { refreshExplorerMenuOnStartup } from './shellIntegration'
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 
@@ -120,7 +120,8 @@ const rendererRecovery = new RendererRecovery({
     quitApp()
   },
 })
-\n// "Open in SnAgentsOS" (E4-FR-32/33): main holds the latest request until the
+
+// "Open in SnAgentsOS" (E4-FR-32/33): main holds the latest request until the
 // renderer takes it, and pokes it when a window is up.
 const openRequests = new OpenRequestQueue((req) => {
   const wc = mainWindow?.webContents
