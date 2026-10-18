@@ -59,28 +59,37 @@ const ICON: Record<PaneActionId, ReactNode> = {
 
 /**
  * Plain-text copy that works on the http origin (no secure context): an
- * off-screen readonly textarea and execCommand inside the tap handler.
+ * off-screen span selected as a document range and execCommand inside the tap
+ * handler. A range (not a textarea) needs no focus, so the soft keyboard and
+ * iOS's readonly-field quirks stay out of it.
  */
 function copyPlain(text: string): boolean {
   if (typeof window !== 'undefined' && window.isSecureContext && navigator.clipboard) {
     void navigator.clipboard.writeText(text).catch(() => undefined)
     return true
   }
-  const area = document.createElement('textarea')
-  area.value = text
-  area.readOnly = true
-  area.style.position = 'fixed'
-  area.style.left = '-9999px'
-  document.body.appendChild(area)
+  const selection = window.getSelection()
+  if (!selection) return false
+  const span = document.createElement('span')
+  span.textContent = text
+  span.style.position = 'fixed'
+  span.style.left = '-9999px'
+  span.style.whiteSpace = 'pre'
+  span.style.userSelect = 'text'
+  span.style.webkitUserSelect = 'text'
+  document.body.appendChild(span)
   let ok = false
   try {
-    area.setSelectionRange(0, text.length)
+    const range = document.createRange()
+    range.selectNodeContents(span)
+    selection.removeAllRanges()
+    selection.addRange(range)
     ok = document.execCommand('copy')
   } catch {
     ok = false
   }
-  area.blur()
-  area.remove()
+  selection.removeAllRanges()
+  span.remove()
   return ok
 }
 

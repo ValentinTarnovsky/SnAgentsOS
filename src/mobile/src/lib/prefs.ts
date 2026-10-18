@@ -108,9 +108,12 @@ export function resolveInputMode(
 export const LAST_PANE_KEY = `${STORAGE_PREFIX}lastPane`
 /** Collapsed workspace sections ('snagentsos.home.collapsed', array of ids). */
 export const COLLAPSED_KEY = `${STORAGE_PREFIX}home.collapsed`
-/** When each console was last seen on this phone ('snagentsos.lastViewed', paneId -> ms). */
+/**
+ * The state each console was last seen in on this phone ('snagentsos.lastViewed',
+ * paneId -> ms): that state's stateSince, on the desktop clock (E2-FR-05).
+ */
 export const LAST_VIEWED_KEY = `${STORAGE_PREFIX}lastViewed`
-/** Entries lastViewed keeps; the least recently viewed go first. */
+/** Entries lastViewed keeps; the oldest stamps go first. */
 export const LAST_VIEWED_MAX = 200
 
 function readJson(key: string): unknown {

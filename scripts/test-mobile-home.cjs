@@ -116,7 +116,13 @@ async function main() {
   ack = await ctl({ kind: 'openUrl', url: 'http://localhost:5173/' })
   check(ack.ok && calls.open.at(-1) === 'http://localhost:5173/', 'openUrl opens an http link on the PC')
   ack = await ctl({ kind: 'openUrl', url: 'file:///C:/Windows/System32/calc.exe' })
-  check(!ack.ok && ack.error === 'denied_url' && calls.open.length === 1, 'openUrl refuses a file: link even past the schema')
+  check(!ack.ok && ack.error === 'denied_url' && calls.open.length === 1, 'openUrl refuses a file: link with denied_url')
+  for (const url of ['javascript:alert(1)', 'ms-settings:network', 'not a url', 'http://']) {
+    ack = await ctl({ kind: 'openUrl', url })
+    check(!ack.ok && ack.error === 'denied_url' && calls.open.length === 1, 'openUrl refuses ' + url)
+  }
+  ack = await ctl({ kind: 'openUrl', url: 'mailto:a@b.c' })
+  check(ack.ok && calls.open.at(-1) === 'mailto:a@b.c', 'openUrl opens a mailto link')
 
   // --- snapshot (E2-FR-12) ---
   const stop = r.startRemoteSnapshotSync()

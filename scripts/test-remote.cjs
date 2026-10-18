@@ -292,7 +292,16 @@ async function testHome() {
   check(frame({ kind: 'mountWorkspace', workspaceId: 'w' }) && !frame({ kind: 'mountWorkspace' }), 'mountWorkspace needs a workspaceId')
   check(frame({ kind: 'revealPane', paneId: 'p' }) && !frame({ kind: 'revealPane', paneId: '' }), 'revealPane needs a paneId')
   check(frame({ kind: 'openUrl', url: 'http://localhost:5173/x' }) && frame({ kind: 'openUrl', url: 'https://example.com' }) && frame({ kind: 'openUrl', url: 'mailto:a@b.c' }), 'openUrl accepts http, https and mailto')
-  check(!frame({ kind: 'openUrl', url: 'file:///C:/Windows/System32/calc.exe' }) && !frame({ kind: 'openUrl', url: 'javascript:alert(1)' }) && !frame({ kind: 'openUrl', url: 'ms-settings:network' }) && !frame({ kind: 'openUrl', url: 'not a url' }), 'openUrl rejects file:, javascript:, custom schemes and junk')
+  check(frame({ kind: 'openUrl', url: 'file:///C:/Windows/System32/calc.exe' }) && !frame({ kind: 'openUrl', url: '' }), 'the schema only bounds openUrl: the scheme is the executor call (denied_url ack)')
+  // A refused scheme is never a malformed frame: it reaches the executor, which acks denied_url.
+  const errsBefore = ws.of('err').length
+  ws.msg({ type: 'ctl', id: 'c3', action: { kind: 'openUrl', url: 'ms-settings:network' } })
+  const relayedUrl = w.commands.at(-1)
+  check(relayedUrl && relayedUrl.action.kind === 'openUrl' && ws.of('err').length === errsBefore, 'a link with a refused scheme is relayed (no bad_msg strike)')
+  w.manager.onControlResult({ id: relayedUrl.id, ok: false, error: 'denied_url' })
+  await new Promise(resolve => setImmediate(resolve))
+  const ack3 = ws.of('ctlAck').find(a => a.id === 'c3')
+  check(ack3 && !ack3.ok && ack3.error === 'denied_url', 'and the phone gets the denied_url ack')
   check(!frame({ kind: 'openUrl', url: 'https://x.co/' + 'a'.repeat(2048) }), 'openUrl rejects more than 2048 characters')
 }
 

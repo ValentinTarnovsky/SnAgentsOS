@@ -178,8 +178,10 @@ export interface RemoteState {
   setScreen: (screen: LiveScreen) => void
   /**
    * The terminal showed (or stopped showing) paneId: it becomes lastPane and
-   * read up to now (E2-FR-16). The stamp never goes below the status's own
-   * stateSince, so a phone clock behind the desktop does not leave it unread.
+   * read up to now (E2-FR-16). The stamp is the status's own stateSince (the
+   * desktop clock), so a phone clock ahead of or behind the desktop never
+   * hides a later state nor leaves a seen one unread; without a status the
+   * previous stamp stays (any status that shows up later is news).
    */
   noteViewed: (paneId: string) => void
   toggleCollapsed: (workspaceId: string) => void
@@ -254,9 +256,12 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   noteViewed: (paneId) =>
     set((s) => {
       if (!s.snapshot || !workspaceOfPane(s.snapshot, paneId)) return s
-      const at = Math.max(Date.now(), s.paneStatus[paneId]?.stateSince ?? 0)
-      const lastViewedAt = withViewed(s.lastViewedAt, paneId, at)
-      saveLastViewed(lastViewedAt)
+      const at = s.paneStatus[paneId]?.stateSince
+      let lastViewedAt = s.lastViewedAt
+      if (at !== undefined && at !== lastViewedAt[paneId]) {
+        lastViewedAt = withViewed(lastViewedAt, paneId, at)
+        saveLastViewed(lastViewedAt)
+      }
       if (s.lastPane !== paneId) saveLastPane(paneId)
       return { lastViewedAt, lastPane: paneId }
     }),

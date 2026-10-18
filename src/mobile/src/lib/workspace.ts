@@ -134,8 +134,8 @@ export function tabPanes(snap: RemoteStateSnapshot, activePaneId: string | null)
 
 /**
  * Unread (E2-FR-05): the console sits in action, done or error since a moment
- * this phone has not seen it (lastViewedAt is stamped at least at stateSince
- * when viewed, so the two clocks never disagree about a view).
+ * this phone has not seen it (lastViewedAt holds the stateSince of the state
+ * last seen, so both sides of the comparison use the desktop clock).
  */
 export function isUnread(status: RemotePaneStatus | undefined, lastViewedAt: number | undefined): boolean {
   if (!status) return false
