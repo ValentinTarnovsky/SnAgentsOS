@@ -64,6 +64,7 @@ export function safeRemoteUrl(raw: string): boolean {
 /** ctl `openUrl` (E2-FR-28): the safeRemoteUrl schemes, else denied_url (contract R22-14). */
 export function runOpenUrl(action: OpenUrlAction): OpenCmdResult {
   if (!safeRemoteUrl(action.url)) return { ok: false, error: 'denied_url' }
-  window.snApi.system.openExternal(action.url)
+  // The parsed href, so main gets the normalized form the check judged.
+  window.snApi.system.openExternal(new URL(action.url).href)
   return { ok: true }
 }
