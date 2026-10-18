@@ -513,6 +513,8 @@ export interface RemoteCommandResult {
   paneId?: string
   /** globalPrompt: number of consoles written to. */
   info?: number
+  /** createPane with a prompt that could not go on the command line (E2-FR-11). */
+  promptFallback?: boolean
 }
 
 /** The object exposed on window.snApi via contextBridge. */
@@ -616,6 +618,11 @@ export interface SnApi {
     isMaximized(): Promise<boolean>
     /** Fires on maximize/unmaximize; returns an unsubscribe function. */
     onMaximizeChange(cb: (maximized: boolean) => void): () => void
+    /**
+     * Restore the window if minimized, show it from the tray and focus it;
+     * flashes the taskbar button when Windows denies the focus (E2-FR-07).
+     */
+    reveal(): void
   }
   /** OS integration. */
   system: {

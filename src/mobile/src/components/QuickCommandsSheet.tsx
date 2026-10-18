@@ -9,6 +9,10 @@
  *
  * In Composer mode a `send` without Enter is inserted at the composer's caret
  * instead, as snippets did (E1-FR-31): the user reviews and sends it.
+ *
+ * From a Home workspace kebab (E2-FR-51) `workspaceId` names that workspace:
+ * its own commands are listed, and a `send` reaches the console open on the
+ * phone only when it belongs to that workspace.
  */
 import { useRef, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -33,14 +37,25 @@ export function quickErrorText(error: string | undefined): string {
   return t(ERRORS[error ?? ''] ?? 'quick.err.generic')
 }
 
-export function QuickCommandsSheet({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
+export function QuickCommandsSheet({
+  open,
+  onClose,
+  workspaceId,
+}: {
+  open: boolean
+  onClose: () => void
+  /** A Home section's workspace; absent = the workspace of the console open here. */
+  workspaceId?: string | null
+}): ReactNode {
   const snapshot = useRemoteStore((s) => s.snapshot)
-  const activePaneId = useRemoteStore((s) => s.activePaneId)
+  const viewedPaneId = useRemoteStore((s) => s.activePaneId)
   const [busy, setBusy] = useState<string | null>(null)
   // Read synchronously: a second tap can land before React re-renders `busy`.
   const inFlight = useRef(false)
   const list = snapshot?.quickCommands ?? []
-  const wsId = snapshot ? viewedWorkspaceId(snapshot, activePaneId) : null
+  const viewedWs = snapshot ? viewedWorkspaceId(snapshot, viewedPaneId) : null
+  const wsId = workspaceId ?? viewedWs
+  const activePaneId = viewedWs === wsId ? viewedPaneId : null
   const own = wsId ? list.filter((c) => c.workspaceId === wsId) : []
   const globals = list.filter((c) => !c.workspaceId)
 
@@ -48,7 +63,7 @@ export function QuickCommandsSheet({ open, onClose }: { open: boolean; onClose: 
     if (inFlight.current) return
     const s = store.getState()
     const composer = getComposerHandle()
-    if (cmd.action === 'send' && !cmd.enter && composer && selectInputMode(s) === 'composer') {
+    if (!workspaceId && cmd.action === 'send' && !cmd.enter && composer && selectInputMode(s) === 'composer') {
       composer.insert(cmd.text)
       onClose()
       return
@@ -72,7 +87,7 @@ export function QuickCommandsSheet({ open, onClose }: { open: boolean; onClose: 
       return
     }
     onClose()
-    if (cmd.action === 'agent' && res.paneId) client.viewPane(res.paneId)
+    if (cmd.action === 'agent' && res.paneId) client.showPane(res.paneId)
     else store.getState().setToast(t('quick.sent', { label: cmd.name }))
   }
 

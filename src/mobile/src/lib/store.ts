@@ -14,15 +14,22 @@ import type {
 } from '@shared/remote-protocol'
 import { loadInPageAlerts, saveInPageAlerts } from './inPageAlerts'
 import {
+  loadCollapsed,
   loadInputModes,
+  loadLastPane,
+  loadLastViewed,
   loadPref,
   resolveInputMode,
+  saveCollapsed,
   saveInputMode,
+  saveLastPane,
+  saveLastViewed,
   savePref,
+  withViewed,
   type ComposerPref,
   type InputMode,
 } from './prefs'
-import { paneById } from './workspace'
+import { paneById, workspaceOfPane } from './workspace'
 
 /**
  * E1-FR-20: the soft keyboard counts as open only while an input field has the
@@ -67,6 +74,22 @@ export interface UpdateInfo {
   retried: boolean
 }
 
+/**
+ * The live screen on top (E2-FR-01, 13). Home is always underneath; the
+ * terminal and Settings slide over it. LiveShell renders the stack and owns
+ * the back claims; the client moves it (open a console, a closed console).
+ */
+export type LiveScreen = 'home' | 'terminal' | 'settings' | 'diagnostics'
+
+/** One in-page toast (E2-FR-11, 47). `id` orders and dismisses them. */
+export interface MobileToast {
+  id: number
+  text: string
+}
+
+/** Most toasts shown at once; older ones drop first. */
+export const TOASTS_MAX = 3
+
 export interface RemoteState {
   phase: Phase
   banner: Banner | null
@@ -89,8 +112,20 @@ export interface RemoteState {
   authFailReason: RemoteAuthFailReason | null
   /** Lockout deadline (epoch ms) for the 'locked' screen countdown. */
   lockUntil: number | null
-  /** Ephemeral toast text (e.g. "Sent to 3 consoles"). */
+  /** Ephemeral toast text (e.g. "Sent to 3 consoles"): the newest of `toasts`. */
   toast: string | null
+  /** Toasts on screen, oldest first (E2 Home; D9: R22-18 adds actions and timing). */
+  toasts: MobileToast[]
+  // --- Home (E2-FR-01..16, 47; R22-14) ---
+  screen: LiveScreen
+  /** Last console the terminal showed ('snagentsos.lastPane'), for the Resume card. */
+  lastPane: string | null
+  /** paneId -> when this phone last saw it ('snagentsos.lastViewed'), for unread rows. */
+  lastViewedAt: Record<string, number>
+  /** Collapsed workspace sections ('snagentsos.home.collapsed'). */
+  homeCollapsed: string[]
+  /** A stopped console of a workspace the desktop has not mounted: confirm first (E2-FR-06). */
+  mountAsk: string | null
   /** In-app QR scanner overlay (pairing without the #pair= boot fragment). */
   scanOpen: boolean
   // --- connection health (E1-FR-10..15, 41) ---
@@ -137,7 +172,19 @@ export interface RemoteState {
   update: (partial: Partial<RemoteState>) => void
   setCtrlLatch: (on: boolean) => void
   setFontOverride: (size: number | null) => void
+  /** Shortcut: push a toast (null clears every toast). */
   setToast: (text: string | null) => void
+  dismissToast: (id: number) => void
+  setScreen: (screen: LiveScreen) => void
+  /**
+   * The terminal showed (or stopped showing) paneId: it becomes lastPane and
+   * read up to now (E2-FR-16). The stamp is the status's own stateSince (the
+   * desktop clock), so a phone clock ahead of or behind the desktop never
+   * hides a later state nor leaves a seen one unread; without a status the
+   * previous stamp stays (any status that shows up later is news).
+   */
+  noteViewed: (paneId: string) => void
+  toggleCollapsed: (workspaceId: string) => void
   /** Feed keyboard signals from viewport.ts; recomputes kbOpen. */
   setKeyboard: (k: { inset?: number; focus?: string | null }) => void
   /** Toggle and persist the in-page alerts preference. */
@@ -147,6 +194,8 @@ export interface RemoteState {
   /** Toggle and persist a composer preference. */
   setComposerPref: (name: ComposerPref, on: boolean) => void
 }
+
+let toastSeq = 0
 
 export const useRemoteStore = create<RemoteState>((set) => ({
   phase: 'idle',
@@ -164,6 +213,12 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   authFailReason: null,
   lockUntil: null,
   toast: null,
+  toasts: [],
+  screen: 'home',
+  lastPane: loadLastPane(),
+  lastViewedAt: loadLastViewed(),
+  homeCollapsed: loadCollapsed(),
+  mountAsk: null,
   scanOpen: false,
   connAttempt: 0,
   lastConnectedAt: null,
@@ -185,7 +240,39 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
   setFontOverride: (size) => set({ fontOverride: size }),
-  setToast: (text) => set({ toast: text }),
+  setToast: (text) =>
+    set((s) => {
+      if (text == null) return { toast: null, toasts: [] }
+      const toasts = [...s.toasts, { id: ++toastSeq, text }].slice(-TOASTS_MAX)
+      return { toast: text, toasts }
+    }),
+  dismissToast: (id) =>
+    set((s) => {
+      const toasts = s.toasts.filter((x) => x.id !== id)
+      if (toasts.length === s.toasts.length) return s
+      return { toasts, toast: toasts.at(-1)?.text ?? null }
+    }),
+  setScreen: (screen) => set({ screen }),
+  noteViewed: (paneId) =>
+    set((s) => {
+      if (!s.snapshot || !workspaceOfPane(s.snapshot, paneId)) return s
+      const at = s.paneStatus[paneId]?.stateSince
+      let lastViewedAt = s.lastViewedAt
+      if (at !== undefined && at !== lastViewedAt[paneId]) {
+        lastViewedAt = withViewed(lastViewedAt, paneId, at)
+        saveLastViewed(lastViewedAt)
+      }
+      if (s.lastPane !== paneId) saveLastPane(paneId)
+      return { lastViewedAt, lastPane: paneId }
+    }),
+  toggleCollapsed: (workspaceId) =>
+    set((s) => {
+      const homeCollapsed = s.homeCollapsed.includes(workspaceId)
+        ? s.homeCollapsed.filter((id) => id !== workspaceId)
+        : [...s.homeCollapsed, workspaceId]
+      saveCollapsed(homeCollapsed)
+      return { homeCollapsed }
+    }),
   setKeyboard: (k) =>
     set((s) => {
       const inset = k.inset ?? s.keyboardInset

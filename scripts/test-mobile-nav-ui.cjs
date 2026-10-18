@@ -2,7 +2,7 @@
 // production CSS in an isolated offscreen browser at phone width: the pane
 // tabs (order, icons, cut titles, dimmed panes, first tap keeps the focus,
 // "+"), the 450ms long-press that opens the per-pane ActionList from a tab and
-// from a drawer row, the resume rows shown or hidden by `resumable` and the
+// from a Home row (E2-FR-08), the resume rows shown or hidden by `resumable` and the
 // restartPane they send, the Sheet drag (100px closes, a slow 40px springs
 // back, a flick closes, mounted until transitionend), the back stack against
 // the real History API, the Settings PushScreen slide, and reduced motion.
@@ -19,9 +19,8 @@ import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { PaneTabs } from './src/mobile/src/components/PaneTabs';
-import { ConsoleDrawer } from './src/mobile/src/components/ConsoleDrawer';
-import { PaneActionSheet } from './src/mobile/src/components/PaneActionSheet';
-import { ActionSheet } from './src/mobile/src/components/ActionSheet';
+import { HomeScreen } from './src/mobile/src/components/HomeScreen';
+import { PaneActionList as PaneActionSheet } from './src/mobile/src/components/PaneActionList';
 import { SettingsScreen } from './src/mobile/src/components/SettingsScreen';
 import { BackStackHost } from './src/mobile/src/lib/useBackClaim';
 import { Sheet } from './src/mobile/src/components/Sheet';
@@ -41,7 +40,8 @@ const RED = (() => { const el = document.createElement('span'); el.className = '
 const translateY = el => new DOMMatrix(getComputedStyle(el).transform).m42;
 const ctls = [], views = [];
 client.sendCtl = async action => { ctls.push(action); return { ok: true, paneId: 'n1' } };
-client.switchWorkspaceAndView = async (ws, paneId) => { views.push(paneId); store.getState().update({ activePaneId: paneId }) };
+client.requestOpen = paneId => { views.push(paneId); store.getState().update({ activePaneId: paneId }); return 'open' };
+client.showPane = paneId => { views.push(paneId); store.getState().update({ activePaneId: paneId }) };
 const lastMessage = 'L'.repeat(269) + ' end-of-msg';
 const snapshot = {
  language: 'en', themeTokens: {}, fontFamily: 'mono', fontSize: 13, activeWorkspaceId: 'w1',
@@ -57,15 +57,13 @@ const snapshot = {
   ] },
  ],
 };
-let openDrawer = () => {};
+const openDrawer = () => click(document.querySelector('[data-workspace=w2] [data-ws-menu]'));
 function Harness() {
  const [target, setTarget] = useState(null);
- const [drawer, setDrawer] = useState(false);
- openDrawer = () => setDrawer(true);
  return <BackStackHost>
   <PaneTabs onPaneActions={setTarget} />
-  <ConsoleDrawer open={drawer} onClose={() => setDrawer(false)} onPaneActions={setTarget} />
   <PaneActionSheet target={target} onClose={() => setTarget(null)} />
+  <HomeScreen />
  </BackStackHost>;
 }
 window.runMain = async () => {
@@ -83,7 +81,7 @@ window.runMain = async () => {
  const a3 = $('[data-tab=a3]');
  check([...a3.textContent].length === 18 && a3.textContent.endsWith('\\u2026'), 'a long title is cut to 18 characters (got ' + a3.textContent + ')');
  check(getComputedStyle(a3).opacity === '0.5', 'a pane without a pty is dimmed to 50%');
- const a1 = $('[data-tab=a1]');
+ let a1 = $('[data-tab=a1]');
  check(a1.dataset.active === 'true' && getComputedStyle(a1).backgroundColor === 'rgb(99, 102, 241)', 'the active tab is filled');
  check(a1.querySelector('[role=img][data-state=action]'), 'the tab shows the pane status indicator');
  check(!ptr($('[data-tab=a2]'), 'pointerdown', 10, 10), 'pointerdown on a tab is preventDefault-ed (first tap with the keyboard open)');
@@ -97,6 +95,7 @@ window.runMain = async () => {
  store.getState().update({ activePaneId: 'a1' });
  await frames();
  check(noOverflow(), 'the tab strip fits 360px without page overflow');
+ a1 = $('[data-tab=a1]'); // the strip remounted while the new console (not in the snapshot) was viewed
 
  // --- long-press (E1-FR-33) ---
  views.length = 0;
@@ -113,7 +112,7 @@ window.runMain = async () => {
  check(head.textContent.includes('Claude main') && head.textContent.includes('Front') && $('[data-action-message]').textContent === lastMessage, 'the header shows title, workspace and the full last reply');
  check(!a1.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })), 'the browser context menu is suppressed');
  const ids = () => $$('[data-pane-actions] [data-action]').map(b => b.dataset.action).join();
- check(ids() === 'rename,restart,restartResume,restartFresh,close', 'a resumable pane lists Relaunch resuming and New chat (got ' + ids() + ')');
+ check(ids() === 'rename,restart,restartResume,restartFresh,reveal,copyTitle,close', 'a resumable pane lists Relaunch resuming, New chat, Show on the PC and Copy title (got ' + ids() + ')');
  check($$('[data-pane-actions] [data-action]').every(b => b.getBoundingClientRect().height >= 48), 'every row is at least 48px tall');
  const closeRow = $('[data-pane-actions] [data-action=close]');
  check(getComputedStyle(closeRow.querySelector('span:nth-child(2)')).color === RED && getComputedStyle($('[data-pane-actions] [data-action=rename] span:nth-child(2)')).color !== RED, 'Close is red, the other rows are not');
@@ -135,7 +134,7 @@ window.runMain = async () => {
  check(ctls.at(-1).kind === 'restartPane' && ctls.at(-1).resume === false, 'New chat sends restartPane resume:false');
  await hold($('[data-tab=a2]'));
  await frames();
- check(ids() === 'rename,restart,close', 'a pane without resumable hides both resume rows (got ' + ids() + ')');
+ check(ids() === 'rename,restart,reveal,copyTitle,close', 'a pane without resumable hides both resume rows (got ' + ids() + ')');
  history.back();
  await wait(400);
  check(!$('[data-sheet]'), 'back closes the pane actions');
@@ -145,28 +144,36 @@ window.runMain = async () => {
  ptr($('[data-tab=a1]'), 'pointerup', 10, 25);
  check(!$('[data-sheet]'), 'moving more than 10px cancels the long-press');
 
- // --- drawer rows (E1-FR-39) and the back stack (E1-FR-36) ---
+ // --- Home rows (E2-FR-08) and the back stack (E1-FR-36) ---
  const depth0 = history.length;
- flushSync(() => openDrawer());
- await frames();
- check(history.state && history.state.snagentsos && history.state.snagentsos !== 'root', 'an open sheet owns a history entry {snagentsos:id}');
  await hold($('[data-pane=b1]'));
  await frames();
- check($('[data-pane-actions=b1]') && $('[data-action-header]').textContent.includes('Back'), 'a long-press on a drawer row opens the same actions, with its workspace');
- check($$('[data-sheet][data-open=true]').length === 2, 'the actions stack over the drawer');
+ check($('[data-pane-actions=b1]') && $('[data-action-header]').textContent.includes('Back'), 'a long-press on a Home row opens the same actions, with its workspace');
+ history.back();
+ await wait(400);
+ check(!$('[data-sheet]'), 'back closes them');
+ openDrawer();
+ await frames();
+ check(history.state && history.state.snagentsos && history.state.snagentsos !== 'root', 'an open sheet (the workspace kebab) owns a history entry {snagentsos:id}');
+ await hold($('[data-tab=a1]'));
+ await frames();
+ check($$('[data-sheet][data-open=true]').length === 2, 'the actions stack over the kebab sheet');
  history.back();
  await wait(400);
  check(!$('[data-pane-actions]') && $$('[data-sheet][data-open=true]').length === 1, 'one back closes only the top sheet');
  history.back();
  await wait(400);
- check(!$('[data-sheet]'), 'the next back closes the drawer');
+ check(!$('[data-sheet]'), 'the next back closes the kebab sheet');
  check(history.state && history.state.snagentsos === 'root', 'and history is back at the live root');
- flushSync(() => openDrawer());
- await frames();
  views.length = 0;
  tap($('[data-pane=a2]'));
+ await wait(100);
+ check(views.join() === 'a2' && !$('[data-sheet]'), 'a tap on a Home row opens the console (phone-only navigation)');
+ openDrawer();
+ await frames();
+ click($('[data-ws-actions] [data-action=showOnPc]'));
  await wait(400);
- check(views.join() === 'a2' && !$('[data-sheet]'), 'a tap on a drawer row opens the console and closes the drawer');
+ check(ctls.at(-1).kind === 'switchWorkspace' && ctls.at(-1).workspaceId === 'w2', 'the kebab "Show on the PC" is the only explicit switchWorkspace');
  await wait(50);
  check(history.state && history.state.snagentsos === 'root', 'closing from the UI pops its entry (no double pop)');
  check(history.length >= depth0, 'history stays consistent');
@@ -205,9 +212,9 @@ window.runMain = async () => {
  check(!$('[data-sheet]') && history.state.snagentsos === 'root', 'gone, with its history entry popped');
 
  // --- leaving 'live' with sheets open (E1-FR-36): the host orphans its claims ---
- flushSync(() => openDrawer());
+ openDrawer();
  await frames();
- await hold($('[data-pane=b1]'));
+ await hold($('[data-tab=a1]'));
  await frames();
  check($$('[data-sheet][data-open=true]').length === 2 && history.state.snagentsos !== 'root', 'two stacked sheets own their entries before the phase change');
  flushSync(() => root.render(<span />));
@@ -236,16 +243,19 @@ window.runMain = async () => {
  check(listOpen === false && $('[data-sheet][data-open=false]'), 'and a 120px content drag closes the sheet');
  await wait(400);
 
- // --- main action sheet: same resume rows for the viewed pane (E5-FR-11) ---
- store.getState().update({ activePaneId: 'a1' });
- flushSync(() => root.render(<BackStackHost><ActionSheet open={true} onClose={() => {}} /></BackStackHost>));
+ // --- the terminal kebab: the viewed pane's rows plus Quick Commands (E2-FR-16) ---
+ const quickRow = [{ id: 'quick', icon: null, label: 'Quick Commands', onSelect: () => {} }];
+ flushSync(() => root.render(<BackStackHost><PaneActionSheet target={{ workspaceId: 'w1', paneId: 'a1' }} onClose={() => {}} extraItems={quickRow} /></BackStackHost>));
  await frames();
  const main = () => $$('[data-action-list] [data-action]').map(b => b.dataset.action).join();
- check(main() === 'newConsole,usage,globalPrompt,restart,restartResume,restartFresh,close,settings', 'the action sheet is an ActionList with the resume rows of a resumable viewed pane (got ' + main() + ')');
- store.getState().update({ activePaneId: 'a2' });
+ check(main() === 'rename,restart,restartResume,restartFresh,reveal,copyTitle,close,quick', 'the kebab lists the pane rows (resume rows for a resumable pane) then Quick Commands (got ' + main() + ')');
+ flushSync(() => root.render(<BackStackHost><PaneActionSheet target={{ workspaceId: 'w1', paneId: 'a2' }} onClose={() => {}} extraItems={quickRow} /></BackStackHost>));
  await frames();
- check(main() === 'newConsole,usage,globalPrompt,restart,close,settings', 'and without them for a pane that is not resumable');
- check(getComputedStyle($('[data-action=close] span:nth-child(2)')).color === RED, 'Close is red in the action sheet too');
+ check(main() === 'rename,restart,reveal,copyTitle,close,quick', 'and without them for a pane that is not resumable');
+ check(getComputedStyle($('[data-action=close] span:nth-child(2)')).color === RED, 'Close is red in the kebab too');
+ click($('[data-action=reveal]'));
+ await wait(50);
+ check(ctls.at(-1).kind === 'revealPane' && ctls.at(-1).paneId === 'a2', 'Show on the PC sends revealPane (E2-FR-07)');
 
  // --- Settings as a PushScreen (E1-FR-37) ---
  flushSync(() => root.render(<span />));

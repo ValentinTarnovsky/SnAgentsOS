@@ -1,4 +1,4 @@
-import type { RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
+import type { RemotePresetInfo, RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
 import type { GitSummary } from '@shared/git-types'
 import { resolveTokens } from '@/themes'
 import { type AppState, useAppStore } from './store'
@@ -8,6 +8,17 @@ import { useAgentStore } from './agentStore'
 import { paneResumable } from './agentLaunch'
 import { useGitStore } from './gitStore'
 import { gitChipEnabled, remoteGitChip, workspaceGitKey } from './gitChip'
+import type { MountedWorkspaces } from './mounting'
+
+/** The presets the phone's console picker lists (E2-FR-10/12): never commands, args or env. */
+function remotePresets(presets: AppState['presets']): RemotePresetInfo[] {
+  return presets.map((p) => ({ id: p.id, name: p.name, type: p.type, icon: p.icon, color: p.color }))
+}
+
+/** Workspaces whose every console is mounted (D4: the 'full' keys); partial mounts do not count. */
+export function fullyMountedIds(mounted: MountedWorkspaces, workspaceIds: readonly string[]): string[] {
+  return workspaceIds.filter((id) => mounted[id] === 'full')
+}
 
 function gitField(summary: GitSummary | undefined): Pick<RemoteWorkspaceInfo, 'git'> {
   const git = remoteGitChip(summary)
@@ -61,6 +72,9 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     usage: useUsageStore.getState().snapshot ?? null,
     // The phone measures cells with the same table as the desktop (E6-FR-15).
     terminalUnicode: state.settings.terminalUnicode11 === false ? '6' : '11',
+    // E2-FR-12: the phone's console picker and its "starts N consoles" confirmation.
+    presets: remotePresets(state.presets),
+    mountedWorkspaceIds: fullyMountedIds(state.mountedWorkspaces, state.workspaces.map((w) => w.id)),
   }
 }
 
@@ -79,6 +93,7 @@ function relevant(s: AppState): unknown[] {
     s.quickCommands,
     gitChipEnabled(s.settings),
     s.keyButtons,
+    s.mountedWorkspaces,
   ]
 }
 

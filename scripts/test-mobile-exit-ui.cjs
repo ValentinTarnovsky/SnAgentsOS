@@ -15,7 +15,7 @@ require('esbuild').buildSync({ stdin: { resolveDir: root, loader: 'tsx', content
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { ExitStrip } from './src/mobile/src/components/ExitStrip';
-import { ConsoleDrawer } from './src/mobile/src/components/ConsoleDrawer';
+import { HomeScreen } from './src/mobile/src/components/HomeScreen';
 import { store } from './src/mobile/src/lib/store';
 import { useExitStore } from './src/mobile/src/lib/exitState';
 import { client } from './src/mobile/src/lib/client';
@@ -51,18 +51,18 @@ window.result = (async () => {
  setLang('es'); flushSync(() => useExitStore.getState().setExit({ paneId: 'a', exitCode: 0 })); await frames();
  check(host.querySelector('[data-exit-strip]').textContent.includes('La consola termino (codigo 0)') && host.textContent.includes('Reiniciar'), 'strip is translated');
  setLang('en');
- // Drawer: exited tag from RemotePaneInfo.exitCode and from the viewed pane's strip, no spinner.
- flushSync(() => root.render(<ConsoleDrawer open onClose={() => {}} />)); await frames();
- const rows = [...document.querySelectorAll('[role=button]')].map(r => ({ t: r.textContent, exited: !!r.querySelector('[data-pane-exited]'), spin: !!r.querySelector('.spin') }));
- const row = t => rows.find(r => r.t.includes(t));
- check(row('PowerShell').exited && !row('PowerShell').spin, 'the viewed pane that exited is tagged and does not spin');
- check(row('Claude').t.includes('running') && !row('Claude').exited, 'a running pane stays running');
- check(row('Build con').exited && row('Build con').t.includes('exited'), 'a pane of another workspace with exitCode is tagged exited');
- check(!row('Nunca').exited && row('Nunca').t.includes('stopped'), 'a never started pane stays stopped');
- check(noOverflow(), 'drawer fits 360 px');
+ // Home rows (E2-FR-05): exited from RemotePaneInfo.exitCode and from the viewed pane's strip.
+ flushSync(() => useExitStore.getState().setExit({ paneId: 'a', exitCode: 3 }));
+ flushSync(() => root.render(<HomeScreen />)); await frames();
+ const rows = () => [...document.querySelectorAll('[data-pane]')].map(r => ({ t: r.textContent, line: r.querySelector('[data-status-line]').textContent, exited: !!r.querySelector('[data-pane-exited]') }));
+ const row = t => rows().find(r => r.t.includes(t));
+ check(row('PowerShell').exited && row('PowerShell').line.startsWith('Exited (code 3)'), 'the viewed pane that exited (strip only) reads "Exited (code 3)"');
+ check(row('Claude').line === 'Idle' && !row('Claude').exited, 'a running pane without status reads Idle');
+ check(row('Build con').exited && row('Build con').line.startsWith('Exited (code 1)'), 'a pane of another workspace with exitCode reads exited');
+ check(!row('Nunca').exited && row('Nunca').line === 'Not started', 'a never started pane of an unmounted workspace reads "Not started"');
+ check(noOverflow(), 'Home fits 360 px');
  flushSync(() => useExitStore.getState().setExit(null)); await frames();
- const viewed = [...document.querySelectorAll('[role=button]')].find(r => r.textContent.includes('PowerShell'));
- check(!viewed.querySelector('[data-pane-exited]') && !!viewed.querySelector('.spin'), 'without an exit the selected stopped pane spins as before (lazy spawn)');
+ check(!row('PowerShell').exited && row('PowerShell').line === 'Stopped', 'without an exit a stopped pane of the mounted workspace reads Stopped');
  return checks;
 })();
 ` }, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', define: { __APP_VERSION__: '"2.0.0"', 'process.env.NODE_ENV': '"production"' }, alias: { '@shared': path.join(root, 'src/shared') }, outfile: path.join(dir, 'renderer.js') })

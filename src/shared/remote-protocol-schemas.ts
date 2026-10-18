@@ -17,6 +17,8 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     workspaceId: id,
     presetId: id.optional(),
     paneType: z.enum(['shell', 'claude', 'codex', 'custom']).optional(),
+    // E2-FR-11: the initial prompt, same bound as globalPrompt.
+    prompt: z.string().max(16384).optional(),
   }),
   z.object({ kind: z.literal('closePane'), workspaceId: id, paneId: id }),
   z.object({ kind: z.literal('restartPane'), workspaceId: id, paneId: id, resume: z.boolean().optional() }),
@@ -33,6 +35,12 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   }),
   // E8-FR-07. The renderer requires paneId for a `send` command (bad_request).
   z.object({ kind: z.literal('runQuickCommand'), workspaceId: id, paneId: id.optional(), id }),
+  // E2 Home (R22-14). The scheme of openUrl is the executor's to judge: a
+  // refused link answers ctlAck `denied_url` (contract) instead of dropping
+  // the frame as malformed, which would cost the phone a strike and no ack.
+  z.object({ kind: z.literal('mountWorkspace'), workspaceId: id }),
+  z.object({ kind: z.literal('revealPane'), paneId: id }),
+  z.object({ kind: z.literal('openUrl'), url: z.string().min(1).max(2048) }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [

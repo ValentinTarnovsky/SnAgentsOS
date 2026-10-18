@@ -5,6 +5,7 @@ import { BRAND } from '@shared/brand'
 import { AGENT_END_REASONS, type AgentDetail, type AgentProvider, type AgentSessionEndEvt, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneStatusEvt, type RemotePending } from '@shared/types'
 import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
+import { revealWindow } from '../window/revealWindow'
 import type { HookEvent } from './HookServer'
 import type { AgentEvent, StatusNotice } from './events'
 import { LIMITS, clip, firstLine, readLastAssistantMessage, sanitize } from './statusDetails'
@@ -438,9 +439,7 @@ export class StatusManager implements PtySink {
       notification.on('click', () => {
         const w = this.getWindow()
         if (!w || w.isDestroyed()) return
-        if (w.isMinimized()) w.restore()
-        w.show(); w.focus()
-        if (paneId) w.webContents.send(CH.STATUS_REVEAL, paneId)
+        revealWindow(w, paneId)
       })
       notification.on('failed', (_event, error) => {
         this.desktopError = /-214342014[03]/.test(error) ? 'blocked' : 'failed'

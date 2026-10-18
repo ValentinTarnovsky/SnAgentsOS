@@ -191,8 +191,13 @@ function quickCommandsOf(config: ConfigFile): QuickCommand[] {
 export interface PendingPrompt {
   text: string
   enter: boolean
-  source: 'quick' | 'composer' | 'cli' | 'repo' | 'schedule'
+  source: 'quick' | 'composer' | 'cli' | 'repo' | 'schedule' | 'remote'
   createdAt: number
+  /**
+   * 'argvOnly' (a phone's createPane.prompt, E2-FR-11): never typed by the
+   * gate; the phone keeps the text in its composer when argv is not possible.
+   */
+  mode?: 'auto' | 'argvOnly'
 }
 
 /** Editor target of Settings > Quick Commands (see AppState.quickEdit). */
