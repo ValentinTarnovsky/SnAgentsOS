@@ -5,6 +5,7 @@ import { killPanePtys } from './ptyRegistry'
 import { broadcastToWorkspace } from './broadcastPrompt'
 import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
 import { runRemoteQuickCommand } from './quickCommands'
+import { runOpenPath, runOpenUrl } from './remoteOpen'
 import { toast } from './toast'
 import { translate } from '@/i18n'
 import type { Language } from '@shared/types'
@@ -107,6 +108,13 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
     case 'runQuickCommand':
       // E8-FR-07: strict variant (the phone's console, its workspace, no activation).
       return runRemoteQuickCommand(action)
+
+    // E2-FR-28..30: links tapped in the phone terminal.
+    case 'openPath':
+      return runOpenPath(action)
+
+    case 'openUrl':
+      return runOpenUrl(action)
 
     default:
       return { ok: false, error: 'unknown_action' }
