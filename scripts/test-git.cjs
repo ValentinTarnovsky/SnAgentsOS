@@ -19,7 +19,7 @@ function load(file, overrides = {}) {
 
 const drop = load('src/renderer/lib/dropPaths.ts')
 const { buildDropPayload: build, isImagePath, canPasteRaw, escapeWindowsPath, hasControlChars } = drop
-const paste = (text) => ({ kind: 'paste', text })
+const paste = (text) => ({ kind: 'paste', text, parts: [text] })
 
 // Image detection and escapes (fixtures adapted from Orca's cases).
 check(['a.png', 'B.PNG', 'c.Jpg', 'd.jpeg', 'e.gif', 'f.WEBP', 'g.bmp'].every(isImagePath), 'image extensions match case-insensitively')
@@ -37,26 +37,29 @@ same(escapeWindowsPath('C:\\tmp\\informe \u00f1.txt'), '"C:\\tmp\\informe \u00f1
 check(hasControlChars('a\x07b') && hasControlChars('a\x00') && hasControlChars('a\x1b[2J') && hasControlChars('a\x7f') && hasControlChars('a\x9b') && hasControlChars('a\r') && hasControlChars('a\n'), 'C0, DEL and C1 are control bytes')
 check(!hasControlChars('C:\\tmp\\\u00f1and\u00fa\u00a0x.png'), 'NBSP and letters are not control bytes')
 
-// Agent mode (E7-FR-01, FR-02a).
-same(build(['C:\\Users\\tarno\\Desktop\\bug.png'], 'agent'), paste('C:\\Users\\tarno\\Desktop\\bug.png'), 'single raw image: no quotes, no space, no Enter')
-same(build(['C:\\tmp\\mi captura.png'], 'agent'), paste('"C:\\tmp\\mi captura.png"'), 'image with a space is double quoted')
-same(build(['C:\\a.png', 'C:\\b.PNG'], 'agent'), paste('C:\\a.pngC:\\b.PNG'), 'two raw images are glued without a space')
-same(build(['C:\\a.png', 'C:\\b c.png'], 'agent'), paste('C:\\a.png "C:\\b c.png"'), 'raw then quoted image are space separated')
-same(build(['C:\\b c.png', 'C:\\a.png'], 'agent'), paste('"C:\\b c.png" C:\\a.png'), 'quoted then raw image are space separated')
-same(build(['a.ts', 'b.png'], 'agent'), paste('a.ts b.png'), 'file, one space, then the image')
-same(build(['b.png', 'a.ts'], 'agent'), paste('b.png a.ts '), 'image then file: space between, file keeps its trailing space')
-same(build(['C:\\x\\a.ts', 'C:\\x\\b c.md'], 'agent'), paste('C:\\x\\a.ts "C:\\x\\b c.md" '), 'files use the Windows escape, each followed by a space')
-same(build(['C:\\repo\\src'], 'agent'), paste('C:\\repo\\src '), 'a folder is a non image file')
-same(build(['C:\\a.png', 'C:\\b.png', 'c.ts', 'C:\\d.png'], 'agent'), paste('C:\\a.pngC:\\b.png c.ts C:\\d.png'), 'mixed sequence keeps every separator rule')
-check(!build(['C:\\a.png'], 'agent').text.includes('\r') && !build(['a.ts'], 'agent').text.startsWith('cd '), 'agent payload never has Enter or cd')
+// Agent mode (E7-FR-01, FR-02a): one term.paste per part, so each image path
+// is a paste event of its own (what Claude and Codex attach as [Image #N]).
+const agent = (...parts) => ({ kind: 'paste', text: parts.join(''), parts })
+same(build(['C:\\Users\\tarno\\Desktop\\bug.png'], 'agent'), agent('C:\\Users\\tarno\\Desktop\\bug.png'), 'single raw image: no quotes, no space, no Enter')
+same(build(['C:\\tmp\\mi captura.png'], 'agent'), agent('"C:\\tmp\\mi captura.png"'), 'image with a space is double quoted')
+same(build(['C:\\a.png', 'C:\\b.PNG'], 'agent'), agent('C:\\a.png', 'C:\\b.PNG'), 'two raw images: two pastes, no space between them')
+same(build(['C:\\a.png', 'C:\\b c.png'], 'agent'), agent('C:\\a.png', ' ', '"C:\\b c.png"'), 'raw then quoted image are space separated')
+same(build(['C:\\b c.png', 'C:\\a.png'], 'agent'), agent('"C:\\b c.png"', ' ', 'C:\\a.png'), 'quoted then raw image are space separated')
+same(build(['a.ts', 'b.png'], 'agent'), agent('a.ts ', 'b.png'), 'file, one space, then the image as its own paste')
+same(build(['b.png', 'a.ts'], 'agent'), agent('b.png', ' ', 'a.ts '), 'image then file: space between, file keeps its trailing space')
+same(build(['C:\\x\\a.ts', 'C:\\x\\b c.md'], 'agent'), agent('C:\\x\\a.ts ', '"C:\\x\\b c.md" '), 'files use the Windows escape, each followed by a space')
+same(build(['C:\\repo\\src'], 'agent'), agent('C:\\repo\\src '), 'a folder is a non image file')
+same(build(['C:\\a.png', 'C:\\b.png', 'c.ts', 'C:\\d.png'], 'agent'), agent('C:\\a.png', 'C:\\b.png', ' ', 'c.ts ', 'C:\\d.png'), 'mixed sequence keeps every separator rule')
+check(build(['C:\\a.png', 'C:\\b c.png', 'x.ts'], 'agent').parts.every((p) => !/[\r\n]/.test(p) && !p.startsWith('cd ')), 'agent payload never has Enter or cd')
+check(build(['C:\\a.png', 'x.ts', 'C:\\b c.png'], 'agent').parts.filter(isImagePath).every((p) => p.trim() === p), 'an image part is exactly its path, no separator inside')
 
 // Safe mode (E7-FR-02b).
 same(build(['C:\\a.png', 'C:\\b.png'], 'safe'), paste('C:\\a.png C:\\b.png '), 'safe shell: two images separated by a space')
 same(build(['/tmp/a b.png', 'x.ts'], 'safe'), paste('"/tmp/a b.png" x.ts '), 'safe shell: Windows escape for every path')
 
 // Plain mode (E7-FR-02c), the 1.14.1 behavior.
-same(build(['a', 'b'], 'plain'), { kind: 'write', text: '"a" "b" ' }, 'plain console writes quoted, space separated, trailing space')
-same(build(['C:\\a.png'], 'plain'), { kind: 'write', text: '"C:\\a.png" ' }, 'plain console quotes images too')
+same(build(['a', 'b'], 'plain'), { kind: 'write', text: '"a" "b" ', parts: ['"a" "b" '] }, 'plain console writes quoted, space separated, trailing space')
+same(build(['C:\\a.png'], 'plain'), { kind: 'write', text: '"C:\\a.png" ', parts: ['"C:\\a.png" '] }, 'plain console quotes images too')
 
 // Control bytes void the whole drop in every mode; empty input writes nothing.
 for (const mode of ['agent', 'safe', 'plain']) {
