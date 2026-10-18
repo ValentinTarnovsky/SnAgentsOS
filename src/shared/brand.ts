@@ -50,3 +50,15 @@ export const AGENT_ENV = {
   codexShim: 'SNAOS_CODEX_SHIM',
   codexExit: 'SNAOS_CODEX_EXIT',
 } as const
+
+/**
+ * Values build/installer.nsh writes under SHCTX\<key> (HKCU per-user, HKLM
+ * per-machine) during the 1.x upgrade. The legacy cleanup reads both hives and
+ * deletes the values once L04 and L08 are terminal (E0-FR-15, FR-31, FR-32,
+ * FR-34). NSIS cannot import TS: scripts/test-rebrand.cjs checks the names.
+ */
+export const INSTALLER_REG = {
+  key: `Software\\${LEGACY_BRAND.nsisGuid}`,
+  legacyInstallLocation: 'LegacyInstallLocation',
+  legacyTaskbarPinned: 'LegacyTaskbarPinned',
+} as const
