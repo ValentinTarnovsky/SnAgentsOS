@@ -18,6 +18,7 @@ import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegist
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
 import { registerRestarter, unregisterRestarter } from '@/lib/restartRegistry'
 import { prepareAgentLaunch } from '@/lib/agentLaunch'
+import type { ResolvedLaunch } from '@/lib/launch'
 import type { ShellKind } from '@shared/ipc-contract'
 import { useT } from '@/i18n'
 
@@ -835,7 +836,7 @@ export function useXterm(
         // A real spawn (not a reattach): an agent console may resume its
         // last chat instead (E5-FR-08); this decides the command and cwd.
         return prepareAgentLaunch(opts.paneId, { cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup })
-          .catch(() => ({ cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup }))
+          .catch((): ResolvedLaunch => ({ cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup }))
           .then((launch) => {
             if (disposed) return null
             return window.snApi.pty.spawn({
@@ -846,17 +847,23 @@ export function useXterm(
               setup: launch.setup,
               cols: term.cols,
               rows: term.rows,
+              // E6-FR-11/13: the saved history comes back unless this spawn
+              // resumes a chat (decideLaunch); main honors it once per session.
+              restoreScrollback: !launch.resumed,
             })
           })
           .then((spawned) => {
             if (!spawned) return
-            const { ptyId, warning } = spawned
+            const { ptyId, warning, seed } = spawned
             if (disposed) {
               // Unmounted while spawning (E4-FR-36): keep the pty for the next
               // mount's reattach unless its pane is gone or bound to another.
               if (shouldKillLateSpawn(opts.paneId, ptyId)) void window.snApi.pty.kill(ptyId)
               return
             }
+            // E6-FR-11: the restored history (sanitized in main) goes in before
+            // bind, so the new shell's first bytes land below its separator.
+            if (seed) term.write(seed)
             // E6-FR-32: the configured shell is missing, main launched the default.
             if (warning?.kind === 'shellNotFound') {
               const text = tRef.current('terminal.shellNotFound', { requested: plain(warning.requested), used: plain(warning.used) })

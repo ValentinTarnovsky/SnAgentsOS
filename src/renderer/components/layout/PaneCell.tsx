@@ -1,6 +1,7 @@
 import { useEffect, useState, type DragEvent } from 'react'
 import {
   ArchiveRestore,
+  ArchiveX,
   Clock,
   Eraser,
   GripVertical,
@@ -21,6 +22,7 @@ import { useAppStore } from '@/lib/store'
 import { isPaneMounted } from '@/lib/mounting'
 import { resolveLaunch } from '@/lib/launch'
 import { getPtyId } from '@/lib/ptyRegistry'
+import { clearSavedScrollback } from '@/lib/scrollback'
 import { redrawPane } from '@/lib/redrawRegistry'
 import { focusPane } from '@/lib/focus'
 import { isBracketedPaste, pasteToPane } from '@/lib/pasteRegistry'
@@ -212,6 +214,10 @@ export function PaneCell({
     // The pre-2.0 restart: remount with an empty screen (E6-FR-18).
     { label: t('pane.restartClean'), icon: Eraser, onClick: () => restartClean(pane.id) },
     { label: t('pane.redraw'), icon: Paintbrush, onClick: () => redrawPane(pane.id) },
+    // Deletes the saved file now; the screen keeps what it shows (E6-FR-12).
+    ...(settings.persistScrollback && settings.terminalSnapshotMode !== 'off'
+      ? [{ label: t('pane.clearSavedHistory'), icon: ArchiveX, onClick: () => clearSavedScrollback(pane.id) }]
+      : []),
     ...(closedCount > 0
       ? [{ label: t('agents.reopenClosed'), icon: ArchiveRestore, separated: true, onClick: () => void reopenClosedConsole() }]
       : []),

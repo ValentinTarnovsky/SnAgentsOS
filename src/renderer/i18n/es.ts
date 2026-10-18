@@ -277,6 +277,7 @@ export const es: Record<keyof typeof en, string> = {
   'pane.close': 'Cerrar',
   'pane.restart': 'Reiniciar consola',
   'pane.redraw': 'Redibujar',
+  'pane.clearSavedHistory': 'Borrar historial guardado',
   'pane.restartClean': 'Reiniciar limpio',
   'pane.exited': 'terminada',
   'pane.exitedTip': '{pane}: terminada',
@@ -552,6 +553,19 @@ export const es: Record<keyof typeof en, string> = {
   'settings.unicode11': 'Anchos Unicode 11 (emoji y símbolos)',
   'settings.unicode11Hint':
     'Mejora la alineación de emoji y bordes de Claude/Codex. Apagalo si ves columnas corridas.',
+  'settings.persistGroup': 'Historial guardado',
+  'settings.persistScrollback': 'Guardar historial de consolas entre reinicios',
+  'settings.persistScrollbackHint':
+    'Al cerrar, actualizar o reiniciar la PC cada consola muestra su salida anterior debajo de un separador con la fecha. Una consola que retoma un chat arranca limpia.',
+  'settings.persistScrollbackOff': 'Desactivado por el modo de snapshot (Avanzado).',
+  'settings.persistLines': 'Líneas a guardar',
+  'settings.clearScrollbackAll': 'Borrar todo el historial guardado ({count} consolas, {mb} MB)',
+  'settings.clearScrollbackTitle': '¿Borrar el historial guardado?',
+  'settings.clearScrollbackMessage': 'Se borra el historial guardado de todas las consolas. Lo que muestran ahora sigue en pantalla.',
+  'settings.clearScrollbackConfirm': 'Borrar',
+  'settings.persistOffTitle': '¿Dejar de guardar el historial de consolas?',
+  'settings.persistOffMessage': 'También se borra el historial ya guardado. Lo que muestran las consolas ahora sigue en pantalla.',
+  'settings.persistOffConfirm': 'Apagar y borrar',
   'settings.terminalAdvanced': 'Avanzado',
   'settings.snapshotMode': 'Snapshot de consolas',
   'settings.snapshotModeHint':
