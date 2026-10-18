@@ -34,10 +34,11 @@ const created=[];
 useAppStore.setState({hydrated:true,activeWorkspaceId:'ws-0',workspaces:[{id:'ws-0',name:'Workspace 0',cwd:'C:/w',panes:[{id:'p0',type:'shell',title:'Console',icon:'terminal'}]}],connections:[{id:'c1',name:'Dedi',setup:[]}],createWorkspaceFull:(d)=>{created.push(d)}});
 useAppStore.getState().updateSettings({language:'es'});
 applyTheme('midnight');
-let setConfirm=()=>{};
-function Root(){const lang=useAppStore(s=>s.settings.language);const [confirm,sc]=useState(false);setConfirm=sc;
+let setConfirm=()=>{};let setAbove=()=>{};
+function Root(){const lang=useAppStore(s=>s.settings.language);const [confirm,sc]=useState(false);setConfirm=sc;const [above,sa]=useState(false);setAbove=sa;
  return <I18nProvider lang={lang}><div style={{height:'100vh'}} className="flex bg-bg-primary text-text-primary"><Sidebar/>
- <main className="flex-1 p-6"><textarea id="term" className="xterm-helper-textarea" aria-label="term"/></main>
+ <main className="flex-1 p-6"><div className="xterm"><textarea id="term" className="xterm-helper-textarea" aria-label="term"/></div></main>
+ {above&&<input id="above" aria-label="above" className="fixed left-2 top-2 z-[90] w-24"/>}
  <SettingsModal/><NewWorkspaceWizard/><GlobalPromptDialog/>
  <ConfirmDialog open={confirm} title="Borrar" message="Seguro?" confirmLabel="Borrar" cancelLabel="Cancelar" onConfirm={()=>sc(false)} onCancel={()=>sc(false)}/></div></I18nProvider>}
 createRoot(document.getElementById('root')).render(<Root/>);
@@ -57,6 +58,7 @@ window.smoke={calls,created,termKeys,theme:applyTheme,
  openSettings:t=>useAppStore.getState().openSettings(t),
  openWizard:p=>useAppStore.getState().setWizardOpen(true,p),
  confirm:v=>setConfirm(v),
+ above:v=>setAbove(v),
  search:q=>setInput(document.querySelector('[data-settings-search]'),q),
  setInput:(sel,v)=>setInput(document.querySelector(sel),v),
  key:(key,opts={})=>document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...opts})),
@@ -169,6 +171,10 @@ app.whenReady().then(async()=>{
  await js("document.getElementById('term').focus()");await press('B');
  const back=await js('smoke.active()');
  eq([await js('smoke.termKeys.length'),back.inDialog],[0,true],'a key aimed at the console behind is swallowed and focus returns inside');
+ // An overlay opened above the wizard (phone pairing prompt, update modal) keeps its keyboard.
+ await js('smoke.above(true)');await frame();await js("document.getElementById('above').focus()");await press('C');
+ eq([await js("document.getElementById('above').value"),await js("document.activeElement.id")],['C','above'],'a key aimed at an overlay above the wizard is not swallowed');
+ await js('smoke.above(false)');await frame();await js("document.querySelector('[data-wizard-cwd]').focus()");
  for(let i=0;i<14;i++)await press('Tab');
  ok((await js('smoke.active()')).inDialog,'Tab never leaves the dialog');
  for(let i=0;i<5;i++)await press('Tab',['shift']);

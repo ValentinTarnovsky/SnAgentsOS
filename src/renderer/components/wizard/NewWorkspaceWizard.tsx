@@ -101,7 +101,11 @@ export function NewWorkspaceWizard() {
     const guard = (e: KeyboardEvent): void => {
       const root = dialogRef.current
       const target = e.target as Element | null
-      if (!root || (target && (root.contains(target) || target.closest?.('[data-toast-root]')))) return
+      // Only what sits behind the wizard: a terminal that kept focus, or the
+      // body. An overlay opened above it (phone pairing prompt, update modal,
+      // a toast) keeps its own keyboard and focus.
+      const behind = !target || target === document.body || target === document.documentElement || !!target.closest?.('.xterm')
+      if (!root || !behind || root.contains(target)) return
       e.preventDefault()
       e.stopPropagation()
       if (e.key === 'Escape') {
