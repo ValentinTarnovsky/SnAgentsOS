@@ -3,13 +3,15 @@ import { randomUUID } from 'crypto'
 import { delimiter } from 'path'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
-import type { PtyDataEvt, PtyExitEvt, PtyReattachRes, PtyRestartReq, PtyRestartRes, PtySpawnReq, PtySpawnRes, ShellKind } from '@shared/ipc-contract'
+import type { HeadlessMetrics, PtyDataEvt, PtyExitEvt, PtyReattachRes, PtyRestartReq, PtyRestartRes, PtySpawnReq, PtySpawnRes, ShellKind, TerminalEngineSettings } from '@shared/ipc-contract'
 import type { SetupStep } from '@shared/types'
 import { AGENT_ENV } from '@shared/brand'
 import { cleanEnv, defaultShell, homeDir } from './shellResolver'
 import { resolveShell } from './shellResolve'
 import { ModeTracker } from './ModeTracker'
 import { sanitizeQueries } from './ansiSanitize'
+import { HeadlessMirror } from './HeadlessMirror'
+import { DEFAULT_ENGINE, REPLAY_LINES, mirrorScrollback, normalizeEngine } from '@shared/terminalEngine'
 
 interface Entry {
   pty: IPty
@@ -49,6 +51,16 @@ interface Entry {
   writeQueue: string
   /** Timer pacing the writeQueue drain (null while idle). */
   writeTimer: ReturnType<typeof setTimeout> | null
+  /** Headless emulator fed with every flush (E6-FR-01); null until the snapshot mode creates it. */
+  mirror: HeadlessMirror | null
+  /** The mirror threw once: this pty stays on ring + ModeTracker replays for good. */
+  mirrorFailed: boolean
+  /** Output arrived since the last scrollback checkpoint (E6-FR-09 clears it). */
+  dirty: boolean
+  /** Bumped on every change a snapshot can see (flush with data, resize, unicode, scrollback). */
+  gen: number
+  /** Last replay snapshot and the gen it was taken at (several phones or a reattach in one tick). */
+  snapCache: { gen: number; data: string } | null
 }
 
 /** Output is coalesced and flushed at ~120Hz for the visible workspace. */
@@ -80,6 +92,10 @@ const SCRATCH_CAP = 16 * 1024
  * the head is kept as is rather than dropping a whole ring of CR-only output.
  */
 const HEAD_SCAN = 8 * 1024
+/** Timing samples kept for the headless p95 metrics (E6-FR-07). */
+const METRIC_SAMPLES = 512
+/** Cadence of the SNAOS_DEBUG_TERMINAL console line. */
+const DEBUG_METRICS_MS = 10_000
 /** How long the shell is given to print its first prompt before setup begins. */
 const SHELL_SETTLE_MS = 350
 /** Default cap on waiting for a `waitFor` match before proceeding anyway. */
@@ -152,6 +168,24 @@ export function restartTail(label: string): string {
   return `${SOFT_RESET}\r\n\x1b[2m--- ${label.replace(/[\x00-\x1f\x7f-\x9f]/g, '')} ---\x1b[0m\r\n`
 }
 
+/** Bounded timing samples (ms) with a p95 read (E6-FR-07). */
+class Samples {
+  private readonly buf: number[] = []
+  private next = 0
+  add(ms: number): void {
+    if (this.buf.length < METRIC_SAMPLES) this.buf.push(ms)
+    else this.buf[this.next] = ms
+    this.next = (this.next + 1) % METRIC_SAMPLES
+  }
+  p95(): number {
+    if (this.buf.length === 0) return 0
+    const sorted = [...this.buf].sort((a, b) => a - b)
+    return Math.round(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] * 1000) / 1000
+  }
+}
+
+const nowMs = (): number => Number(process.hrtime.bigint()) / 1e6
+
 /** How a pty ended, as seen by each sink (E6-FR-34). */
 export interface PtyExitInfo {
   /** The pty was still the live one bound to its pane. */
@@ -202,6 +236,13 @@ export class PtyManager {
   private readonly lastInput = new Map<string, number>()
   /** paneId -> last output of a pty that ended on its own (E6-FR-20); one per pane. */
   private readonly exited = new Map<string, ExitedPane>()
+  /** Headless mirror policy, Unicode and persistence lines (E6-FR-01/06/08), set by setEngine. */
+  private engine: TerminalEngineSettings = { ...DEFAULT_ENGINE }
+  private readonly parseMs = new Samples()
+  private readonly snapshotMs = new Samples()
+  private bytesParsed = 0
+  private snapshotCacheHits = 0
+  private debugTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(private readonly getSender: () => WebContents | null,
     private readonly statusEnv: (ptyId: string, paneId: string, cwd: string) => Record<string, string> = () => ({}),
@@ -266,10 +307,20 @@ export class PtyManager {
       setupTimer: null,
       writeQueue: '',
       writeTimer: null,
+      mirror: null,
+      mirrorFailed: false,
+      dirty: false,
+      gen: 0,
+      snapCache: null,
     }
     for (let i = 0; i < seed.length; i += SEED_CHUNK) this.pushHistory(entry, seed.slice(i, i + SEED_CHUNK))
     this.entries.set(ptyId, entry)
     this.byPane.set(req.paneId, ptyId)
+    // 'auto' with persistence keeps a mirror from the spawn (E6-FR-01), and so
+    // does any spawn with a seed outside 'off' (E6-FR-11/19): it takes the
+    // whole seed, which the 256 KB ring may already have cut. Before the sinks
+    // hear of the pty, so a phone's replay already comes from it.
+    if (this.mirrorAtSpawn() || (seed && this.engine.snapshotMode !== 'off')) this.ensureMirror(ptyId, entry, seed)
     // A respawn supersedes whatever the previous pty left (E6-FR-20).
     this.exited.delete(req.paneId)
     for (const sink of this.sinks.values()) {
@@ -338,7 +389,8 @@ export class PtyManager {
     if (!entry) return null
     // Drain anything pending so post-subscribe output isn't a duplicate of replay.
     this.flush(ptyId)
-    return { ptyId, replay: this.replayOf(entry), shellKind: entry.shellKind }
+    const replay = this.snapshotReplay(ptyId, entry)
+    return { ptyId, replay, cols: entry.pty.cols, rows: entry.pty.rows, shellKind: entry.shellKind }
   }
 
   /**
@@ -385,8 +437,22 @@ export class PtyManager {
     }
   }
 
-  /** Clean ring (head trimmed, queries removed) + SOFT_RESET: what a restart or an exited replay shows. */
+  /**
+   * What a restart or an exited replay shows, + SOFT_RESET: the mirror's normal
+   * buffer when there is one (E6-FR-19), else the clean ring (head trimmed,
+   * queries removed).
+   */
   private keptOutput(entry: Entry): string {
+    if (entry.mirror) {
+      try {
+        const t0 = nowMs()
+        const snap = entry.mirror.snapshot({ scrollback: mirrorScrollback(this.engine), purpose: 'persist' })
+        this.snapshotMs.add(nowMs() - t0)
+        return snap.data + SOFT_RESET
+      } catch (error) {
+        this.dropMirror(entry, error)
+      }
+    }
     return sanitizeQueries(trimRingHead(entry.history.join(''), entry.historyTruncated)) + SOFT_RESET
   }
 
@@ -467,6 +533,15 @@ export class PtyManager {
         entry.pty.resize(cols, rows)
       } catch {
         /* pty may have already exited */
+      }
+      // The mirror follows every resize, phone-fit included (E6-FR-06).
+      if (entry.mirror) {
+        try {
+          entry.mirror.resize(cols, rows)
+        } catch (error) {
+          this.dropMirror(entry, error)
+        }
+        entry.gen++
       }
     }
   }
@@ -629,7 +704,150 @@ export class PtyManager {
     const entry = this.entries.get(ptyId)
     if (!entry) return null
     this.flush(ptyId)
-    return { ptyId, replay: this.replayOf(entry), cols: entry.pty.cols, rows: entry.pty.rows }
+    const replay = this.snapshotReplay(ptyId, entry)
+    return { ptyId, replay, cols: entry.pty.cols, rows: entry.pty.rows }
+  }
+
+  // --- Headless mirror (E6-FR-01..07, FR-35) ---------------------------------
+
+  /**
+   * Applies the engine settings pushed by the renderer (and read from the
+   * config at startup). 'off' drops every mirror; 'auto' with persistence gives
+   * every live pty one; Unicode and the scrollback size reach the live mirrors.
+   */
+  setEngine(raw: unknown): void {
+    const next = normalizeEngine(raw)
+    this.engine = next
+    for (const [ptyId, entry] of this.entries) {
+      if (next.snapshotMode === 'off') {
+        if (entry.mirror) this.disposeMirror(entry)
+        continue
+      }
+      if (!entry.mirror && this.mirrorAtSpawn()) this.ensureMirror(ptyId, entry)
+      if (!entry.mirror) continue
+      try {
+        entry.mirror.setUnicode(next.unicode11)
+        entry.mirror.setScrollback(mirrorScrollback(next))
+        entry.gen++
+      } catch (error) {
+        this.dropMirror(entry, error)
+      }
+    }
+    this.syncDebugTimer()
+  }
+
+  /** The engine settings in force (normalized). */
+  getEngine(): TerminalEngineSettings {
+    return { ...this.engine }
+  }
+
+  /** Instrumentation for AppMetrics.headless (E6-FR-07). */
+  headlessMetrics(): HeadlessMetrics {
+    let panes = 0
+    for (const entry of this.entries.values()) if (entry.mirror) panes++
+    return {
+      panes,
+      parseMsP95: this.parseMs.p95(),
+      snapshotMsP95: this.snapshotMs.p95(),
+      bytesParsed: this.bytesParsed,
+      snapshotCacheHits: this.snapshotCacheHits,
+    }
+  }
+
+  /** 'auto' creates the mirror at spawn while persistence is on; otherwise on the first replay. */
+  private mirrorAtSpawn(): boolean {
+    return this.engine.snapshotMode === 'auto' && this.engine.persist
+  }
+
+  /**
+   * Creates the pty's mirror if the mode allows it, seeded with `seed` when
+   * given, else with what a ring replay would show (mode rehydration first,
+   * then the clean ring, E6-FR-02/33). Pending output is flushed first so the
+   * ring and the mirror never both get the same bytes.
+   */
+  private ensureMirror(ptyId: string, entry: Entry, seed?: string): HeadlessMirror | null {
+    if (entry.mirror || entry.mirrorFailed || this.engine.snapshotMode === 'off') return entry.mirror
+    if (seed === undefined) this.flush(ptyId)
+    try {
+      const mirror = new HeadlessMirror({
+        cols: entry.pty.cols > 0 ? entry.pty.cols : 80,
+        rows: entry.pty.rows > 0 ? entry.pty.rows : 24,
+        scrollback: mirrorScrollback(this.engine),
+        unicode11: this.engine.unicode11,
+      })
+      entry.mirror = mirror
+      const initial = seed ?? this.replayOf(entry)
+      if (initial) this.writeMirror(entry, initial)
+      entry.gen++
+      entry.snapCache = null
+    } catch (error) {
+      this.dropMirror(entry, error)
+    }
+    return entry.mirror
+  }
+
+  /** Feeds the mirror, timing the parse (writeSync is synchronous). */
+  private writeMirror(entry: Entry, data: string): void {
+    const mirror = entry.mirror
+    if (!mirror) return
+    const t0 = nowMs()
+    mirror.write(data)
+    this.parseMs.add(nowMs() - t0)
+    this.bytesParsed += data.length
+  }
+
+  /**
+   * The replay for a fresh terminal: the mirror's snapshot (cached while no
+   * output arrived), or the ring replay in 'off' and after a mirror failure.
+   */
+  private snapshotReplay(ptyId: string, entry: Entry): string {
+    const mirror = this.ensureMirror(ptyId, entry)
+    if (mirror) {
+      if (entry.snapCache && entry.snapCache.gen === entry.gen) {
+        this.snapshotCacheHits++
+        return entry.snapCache.data
+      }
+      try {
+        const t0 = nowMs()
+        const { data } = mirror.snapshot({ scrollback: REPLAY_LINES, purpose: 'replay' })
+        this.snapshotMs.add(nowMs() - t0)
+        entry.snapCache = { gen: entry.gen, data }
+        return data
+      } catch (error) {
+        this.dropMirror(entry, error)
+      }
+    }
+    return this.replayOf(entry)
+  }
+
+  private disposeMirror(entry: Entry): void {
+    const mirror = entry.mirror
+    entry.mirror = null
+    entry.snapCache = null
+    try {
+      mirror?.dispose()
+    } catch {
+      /* already torn down */
+    }
+  }
+
+  /** A mirror that threw: back to ring + ModeTracker for this pty, logged once. */
+  private dropMirror(entry: Entry, error: unknown): void {
+    this.disposeMirror(entry)
+    if (!entry.mirrorFailed) console.warn(`[pty] headless mirror failed for pane ${entry.paneId}, using the raw ring: ${String(error)}`)
+    entry.mirrorFailed = true
+  }
+
+  /** SNAOS_DEBUG_TERMINAL=1 prints the headless metrics to main's console while mirrors are on. */
+  private syncDebugTimer(): void {
+    const want = process.env.SNAOS_DEBUG_TERMINAL === '1' && this.engine.snapshotMode !== 'off'
+    if (want && !this.debugTimer) {
+      this.debugTimer = setInterval(() => console.log('[pty] headless', JSON.stringify(this.headlessMetrics())), DEBUG_METRICS_MS)
+      this.debugTimer.unref?.()
+    } else if (!want && this.debugTimer) {
+      clearInterval(this.debugTimer)
+      this.debugTimer = null
+    }
   }
 
   /**
@@ -723,6 +941,17 @@ export class PtyManager {
     if (entry.buf.length === 0) return
     const data = entry.buf.join('')
     entry.buf = []
+    entry.dirty = true
+    entry.gen++
+    // The mirror parses the burst before any sink sees it (E6-FR-02), so a
+    // snapshot taken right after a flush is the exact prefix of what follows.
+    if (entry.mirror) {
+      try {
+        this.writeMirror(entry, data)
+      } catch (error) {
+        this.dropMirror(entry, error)
+      }
+    }
     // Sinks get the unsplit burst; MAX_CHUNK framing is an IPC-only concern.
     for (const sink of this.sinks.values()) {
       try {
@@ -770,6 +999,8 @@ export class PtyManager {
       try { sink.onExit(ptyId, entry.paneId, exitCode, { current: removed, natural }) } catch { /* sink teardown must not block PTY cleanup */ }
     }
     this.entries.delete(ptyId)
+    // The mirror lives until the pty is gone (E6-FR-01); keptOutput above used it last.
+    this.disposeMirror(entry)
     // byPane lost a pane: let remote re-broadcast so its `running` dot clears
     // even on a natural shell exit (which never triggers a renderer state push).
     if (removed) this.onRunningChange?.()

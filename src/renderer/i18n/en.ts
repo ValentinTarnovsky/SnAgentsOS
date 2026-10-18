@@ -468,6 +468,7 @@ export const en = {
   'usage.cpu': 'CPU',
   'usage.processes': 'Processes',
   'usage.consoles': 'Consoles',
+  'usage.headless': 'Snapshot engine: {panes} active, parse p95 {parse} ms, snapshot p95 {snap} ms, {hits} reused',
 
   // AI usage bars (Claude + Codex quotas + custom models)
   'aiusage.title': 'Usage',
@@ -548,6 +549,13 @@ export const en = {
   'settings.unicode11': 'Unicode 11 widths (emoji and symbols)',
   'settings.unicode11Hint':
     'Improves the alignment of emoji and Claude/Codex borders. Turn it off if you see shifted columns.',
+  'settings.terminalAdvanced': 'Advanced',
+  'settings.snapshotMode': 'Snapshot engine',
+  'settings.snapshotModeHint':
+    'How a console is rebuilt when the window reloads or a phone opens it. Off goes back to the raw history and turns off saving between restarts.',
+  'settings.snapshotAuto': 'Automatic',
+  'settings.snapshotLazy': 'Deferred',
+  'settings.snapshotOff': 'Off',
   'terminal.shellNotFound': 'Configured shell not found: {requested}. Using {used}.',
   'settings.language': 'Language',
   'settings.languageHint': 'Interface language.',

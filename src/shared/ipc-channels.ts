@@ -36,6 +36,7 @@ export const CH = {
   // Explicit pty lifecycle (E4-FR-36): kills by paneId, so they work with an empty renderer registry.
   PTY_KILL_PANES: 'pty:killPanes', // invoke (paneIds: string[]) -> number (killed)
   PTY_RECONCILE: 'pty:reconcile', // invoke (livePaneIds: string[]) -> number (killed)
+  PTY_SET_ENGINE: 'pty:setEngine', // send (TerminalEngineSettings; E6-FR-06)
 
   // PTY events (main -> renderer)
   PTY_DATA: 'pty:data', // { ptyId, data }

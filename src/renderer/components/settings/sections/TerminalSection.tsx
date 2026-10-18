@@ -2,6 +2,7 @@ import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { SettingRow, ToggleRow, inputCls } from '../ui'
 import { cn } from '@/lib/cn'
+import type { TerminalSnapshotMode } from '@shared/types'
 
 export function TerminalSection() {
   const t = useT()
@@ -126,6 +127,23 @@ export function TerminalSection() {
         title={t('settings.agentEndChip')}
         description={t('settings.agentEndChipHint')}
       />
+
+      <section className="space-y-3 border-t border-border pt-5" aria-labelledby="terminal-advanced">
+        <h4 id="terminal-advanced" className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
+          {t('settings.terminalAdvanced')}
+        </h4>
+        <SettingRow searchId="terminal.snapshotMode" title={t('settings.snapshotMode')} description={t('settings.snapshotModeHint')}>
+          <select
+            className={inputCls}
+            value={settings.terminalSnapshotMode}
+            onChange={(e) => updateSettings({ terminalSnapshotMode: e.target.value as TerminalSnapshotMode })}
+          >
+            <option value="auto">{t('settings.snapshotAuto')}</option>
+            <option value="lazy">{t('settings.snapshotLazy')}</option>
+            <option value="off">{t('settings.snapshotOff')}</option>
+          </select>
+        </SettingRow>
+      </section>
     </div>
   )
 }

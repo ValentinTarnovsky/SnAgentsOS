@@ -111,6 +111,7 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('terminal.selectionOverride', 'settings.selectionOverride', 'settings.selectionOverrideHint', { keywords: ['selection', 'seleccion', 'mouse', 'copy', 'copiar'], toggle: { path: 'terminalSelectionOverride' } }),
   e('terminal.unicode11', 'settings.unicode11', 'settings.unicode11Hint', { keywords: ['unicode', 'emoji', 'width', 'ancho'], toggle: { path: 'terminalUnicode11' } }),
   e('terminal.agentEndChip', 'settings.agentEndChip', 'settings.agentEndChipHint', { keywords: ['exit', 'salida', 'claude', 'codex'], toggle: { path: 'terminalAgentEndChip' } }),
+  e('terminal.snapshotMode', 'settings.snapshotMode', 'settings.snapshotModeHint', { groupKey: 'settings.terminalAdvanced', keywords: ['snapshot', 'headless', 'replay', 'reattach', 'recarga', 'reload', 'avanzado', 'advanced'] }),
 
   // Agents
   e('agents.resume', 'settings.agents.resume', 'settings.agents.resumeHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'session', 'sesion', 'chat', 'restart', 'reinicio'] }),
