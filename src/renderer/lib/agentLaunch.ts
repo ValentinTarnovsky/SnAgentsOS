@@ -48,7 +48,32 @@ function getNudger(): Nudger {
 /** Text the nudge writes: the user's own, or the default of the UI language. */
 export function nudgeText(): string {
   const s = useAppStore.getState().settings
-  return s.agents?.resumeNudgeText?.trim() || translate(s.language, 'agents.nudge.default')
+  // One line: a control character from a hand-edited config (a CR above all) never reaches the pty.
+  // eslint-disable-next-line no-control-regex
+  const own = (s.agents?.resumeNudgeText ?? '').replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ').trim()
+  return own || translate(s.language, 'agents.nudge.default')
+}
+
+/** Closes the resume dialog and lets every spawn it held go. */
+function closeModal(): void {
+  useAgentStore.getState().setModal(null)
+  const waiters = modalWaiters
+  modalWaiters = []
+  for (const release of waiters) release()
+}
+
+/**
+ * A listed console that started anyway (a restart from its menu or the phone
+ * while the dialog is open) leaves the dialog: its placeholder lifts off the
+ * running console and the dialog's later choice does not linger as an intent
+ * for its next restart. The last one leaving closes the dialog.
+ */
+function leaveModal(paneId: string): void {
+  const modal = useAgentStore.getState().modal
+  if (!modal || !modal.paneIds.includes(paneId)) return
+  const paneIds = modal.paneIds.filter((id) => id !== paneId)
+  if (paneIds.length === 0) closeModal()
+  else useAgentStore.getState().setModal({ ...modal, paneIds })
 }
 
 /** Resolves once the resume dialog is closed (at once when none is open). */
@@ -131,16 +156,13 @@ export function applyResumeChoice(choice: ResumeChoice): void {
       app.clearLastSession(paneId)
     }
   }
-  useAgentStore.getState().setModal(null)
+  closeModal()
   const byWs = new Map<string, string[]>()
   for (const paneId of resume) {
     const found = findPane(useAppStore.getState(), paneId)
     if (found) byWs.set(found.ws.id, [...(byWs.get(found.ws.id) ?? []), paneId])
   }
   for (const [wsId, only] of byWs) useAppStore.getState().ensureMounted(wsId, { only })
-  const waiters = modalWaiters
-  modalWaiters = []
-  for (const release of waiters) release()
 }
 
 function findPane(s: Pick<AppState, 'workspaces'>, paneId: string): { ws: Workspace; pane: Pane } | null {
@@ -230,6 +252,8 @@ export async function prepareAgentLaunch(paneId: string, base: ResolvedLaunch): 
     intent = useAgentStore.getState().takeIntent(paneId)
     session = useAgentStore.getState().sessions[paneId]
     decision = decideLaunch({ pane, provider, hasSetup, session, intent, startupUnconsumed, policy, modalPending: false })
+  } else {
+    leaveModal(paneId)
   }
   if (decision !== 'fresh' && session) {
     const command = buildAgentArgv({ preset, command: pane.command, resume: { provider: session.provider, sessionId: session.sessionId } })
