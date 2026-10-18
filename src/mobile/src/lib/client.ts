@@ -110,12 +110,12 @@ function readPairCode(): string | null {
   return m ? decodeURIComponent(m[1]) : null
 }
 
-/** Pick a sensible pane to view in a workspace: a running one, else the first. */
 /** Width table for the terminal: only an explicit '11' opts in (E6-FR-15). */
 function unicodeOf(snap: RemoteStateSnapshot): '6' | '11' {
   return snap.terminalUnicode === '11' ? '11' : '6'
 }
 
+/** Pick a sensible pane to view in a workspace: a running one, else the first. */
 function pickPane(snap: RemoteStateSnapshot, workspaceId: string | null): string | null {
   const ws = snap.workspaces.find((w) => w.id === workspaceId) ?? snap.workspaces[0]
   if (!ws || ws.panes.length === 0) return null

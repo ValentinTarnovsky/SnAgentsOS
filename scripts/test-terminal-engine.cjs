@@ -95,6 +95,10 @@ const { sanitizeQueries } = load('src/main/pty/ansiSanitize.ts')
   check(sanitizeQueries(raw) === 'a b c d e f g h i j k l m n', 'DA1/DA2/DA3, DSR, window reports, DECRQM, XTVERSION and kitty queries are removed')
   const keep = '\x1b[?25l\x1b[38;2;255;0;0mred\x1b[0m\x1b[2J\x1b[H\x1b[?1049h\x1b[>1u\x1b]0;title\x07'
   check(sanitizeQueries(keep) === keep, 'SGR, modes, cursor moves, kitty push and OSC are kept')
+  const osc = 'a\x1b]11;?\x1b\\b\x1b]10;?;?\x07c\x1b]4;1;?;2;?\x07d\x1bP$qm\x1b\\e'
+  check(sanitizeQueries(osc) === 'abcde', 'OSC 4/10/11 color queries and DECRQSS (answered by xterm.js 5.5) are removed')
+  const sets = '\x1b]11;#101010\x07\x1b]4;1;rgb:ff/00/00\x1b\\\x1bPqsixel\x1b\\\x1b]8;;https://x\x07'
+  check(sanitizeQueries(sets) === sets, 'color sets, other DCS and hyperlinks are kept')
 }
 let current = null
 const loaded = load('src/main/pty/PtyManager.ts', {
@@ -187,6 +191,17 @@ async function main() {
     check(pm.getReplay('alt').replay.startsWith('\x1b[?1049h\x1b[?1002h'), 'alt screen comes first in the rehydration')
     pm.killAll()
   }
+  {
+    // vim in a young pane: the ring itself enters the alt screen after shell
+    // output, so the prefix must not move that output into the alt buffer.
+    const { pm, h } = manager()
+    pm.spawn({ paneId: 'vim', cols: 80, rows: 24 })
+    h.procs[0].emit('$ ls\r\nfile.txt\r\n$ vim\x1b[?1049h\x1b[?1000;1006h\x1b[Hbuffer')
+    await flushAll()
+    const rep = pm.getReplay('vim').replay
+    check(rep.startsWith('\x1b[?1000h\x1b[?1006h$ ls') && rep.indexOf('\x1b[?1049h') > rep.indexOf('file.txt'), 'an alt-screen entry still in the ring is not prefixed, the other modes are')
+    pm.killAll()
+  }
 
   // The exit frame (E6-FR-34) through the real SessionManager sink.
   {
@@ -250,8 +265,11 @@ async function main() {
     const r2 = resolveShell('noexiste.exe', 'powershell.exe', win)
     check(r2.shell === 'powershell.exe' && r2.warning && r2.warning.kind === 'shellNotFound', 'a name not in PATH falls back with a warning')
     const r3 = resolveShell('pwsh', 'powershell.exe', win)
-    check(r3.shell === 'pwsh' && !r3.warning && r3.shellKind === 'powershell', 'a bare name found via PATH + PATHEXT (quoted PATH entry) is used')
-    check(resolveShell('cmd.exe', 'powershell.exe', win).shellKind === 'cmd', 'cmd.exe in PATH resolves with kind cmd')
+    check(r3.shell === 'C:\\Tools\\pwsh.exe' && !r3.warning && r3.shellKind === 'powershell', 'a bare name found via PATH + PATHEXT (quoted PATH entry) is launched by its absolute path (node-pty knows neither)')
+    const r5 = resolveShell('cmd.exe', 'powershell.exe', win)
+    check(r5.shellKind === 'cmd' && r5.shell === 'C:\\Win\\System32\\cmd.exe', 'cmd.exe in PATH resolves absolute with kind cmd')
+    const rel = resolveShell('tools\\pwsh.exe', 'powershell.exe', { ...win, isFile: p => p === 'tools\\pwsh.exe' })
+    check(!rel.warning && path.win32.isAbsolute(rel.shell), 'a relative Windows path is handed to node-pty absolute')
     check(resolveShell('"C:\\Tools\\pwsh.exe"', 'powershell.exe', win).shell === 'C:\\Tools\\pwsh.exe', 'surrounding quotes are stripped')
     const r4 = resolveShell('   ', 'powershell.exe', win)
     check(r4.shell === 'powershell.exe' && !r4.warning, 'an empty setting means the OS default, silently')
@@ -261,6 +279,14 @@ async function main() {
     check(!shellExists('fish.exe', posix), 'no PATHEXT guessing on POSIX')
     check(shellKindOf('C:\\Program Files\\PowerShell\\7\\pwsh.exe') === 'powershell' && shellKindOf('/bin/zsh') === 'posix' && shellKindOf('wsl.exe') === 'posix' && shellKindOf('node') === 'other', 'shellKindOf by executable name')
     check(resolveShell(process.execPath, 'x').shell === process.execPath, 'real filesystem lookup finds an existing executable')
+    check(resolveShell(path.join(os.tmpdir(), `snaos-nope-${Date.now()}.exe`), 'x').warning, 'real filesystem lookup rejects a missing file')
+    // Store apps (pwsh, python, wt) are App Execution Aliases: stat() fails with
+    // EACCES on them, yet they launch. Read-only probe of the real WindowsApps.
+    const fs = require('node:fs')
+    const apps = process.platform === 'win32' && process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WindowsApps') : null
+    const alias = apps && fs.existsSync(apps) ? fs.readdirSync(apps).find(f => f.toLowerCase().endsWith('.exe')) : null
+    if (alias) check(!resolveShell(path.join(apps, alias), 'x').warning, 'a Windows App Execution Alias counts as an existing shell')
+    else console.log('  (no App Execution Alias on this machine, alias probe skipped)')
   }
 
   console.log(`PASS: ${checks} terminal engine checks`)
