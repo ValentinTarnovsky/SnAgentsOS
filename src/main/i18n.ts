@@ -28,6 +28,7 @@ const MESSAGES = {
     'legacy.failed.retry': 'Retry',
     'legacy.failed.quit': 'Quit',
     'pty.restarted': 'restarted {time}',
+    'pty.historyRestored': 'restarted - history from {date}',
     // Crash resilience dialogs (E4-FR-21, 25).
     'crash.breaker.message': '{app} could not recover the window.',
     'crash.breaker.detailNone': 'No consoles are running.',
@@ -70,6 +71,7 @@ const MESSAGES = {
     'legacy.failed.retry': 'Reintentar',
     'legacy.failed.quit': 'Salir',
     'pty.restarted': 'reiniciado {time}',
+    'pty.historyRestored': 'reiniciado - historial del {date}',
     'crash.breaker.message': '{app} no pudo recuperar la ventana.',
     'crash.breaker.detailNone': 'No hay consolas en ejecución.',
     'crash.breaker.detailOne': 'Tu consola sigue corriendo en segundo plano.',
@@ -104,6 +106,16 @@ export function shortTime(cfg: ConfigFile | null, date: Date = new Date()): stri
   const h = date.getHours(), mm = String(date.getMinutes()).padStart(2, '0')
   if (cfg?.settings?.language === 'es') return `${String(h).padStart(2, '0')}:${mm}`
   return `${h % 12 || 12}:${mm} ${h < 12 ? 'AM' : 'PM'}`
+}
+
+/**
+ * Short local date + time of a saved history (E6-FR-11): 17/10 14:32 in
+ * Spanish, 10/17 2:32 PM in English.
+ */
+export function shortDateTime(cfg: ConfigFile | null, date: Date): string {
+  const d = date.getDate(), m = date.getMonth() + 1
+  const day = cfg?.settings?.language === 'es' ? `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}` : `${m}/${d}`
+  return `${day} ${shortTime(cfg, date)}`
 }
 
 /** Same, with an explicit language (the legacy dialogs run before any config of this app is loaded). */
