@@ -131,6 +131,7 @@ export const CH = {
   AGENTS_LIST: 'agents:list', // invoke -> AgentSessionView[]
   AGENTS_STARTUP: 'agents:startup', // invoke -> AgentsStartup (stable for the run)
   AGENTS_CONSUME_STARTUP: 'agents:consumeStartup', // invoke (paneId) -> boolean (true once per run)
+  AGENTS_STARTUP_PENDING: 'agents:startupPending', // invoke (paneIds) -> the ones whose startup decision is unspent (peek, E5-FR-12)
   AGENTS_CHANGED: 'agents:changed', // main -> renderer (AgentSessionView | { paneId, removed: true })
   AGENTS_FORGET: 'agents:forget', // send (paneId)
   AGENTS_READY: 'agents:ready', // main -> renderer ({ paneId, sessionId, phase: 'start' | 'idle' })

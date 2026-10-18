@@ -179,6 +179,7 @@ const api: SnApi = {
     list: () => ipcRenderer.invoke(CH.AGENTS_LIST) as Promise<AgentSessionView[]>,
     startup: () => ipcRenderer.invoke(CH.AGENTS_STARTUP) as Promise<AgentsStartup>,
     consumeStartup: (paneId: string) => ipcRenderer.invoke(CH.AGENTS_CONSUME_STARTUP, paneId) as Promise<boolean>,
+    startupPending: (paneIds: string[]) => ipcRenderer.invoke(CH.AGENTS_STARTUP_PENDING, paneIds) as Promise<string[]>,
     forget: (paneId: string) => ipcRenderer.send(CH.AGENTS_FORGET, paneId),
     onChanged: (cb: (e: AgentsChangedEvt) => void) => sub<AgentsChangedEvt>(CH.AGENTS_CHANGED, cb),
     onReady: (cb: (e: AgentsReadyEvt) => void) => sub<AgentsReadyEvt>(CH.AGENTS_READY, cb),
