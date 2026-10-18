@@ -28,6 +28,7 @@ const MESSAGES = {
     'legacy.failed.retry': 'Retry',
     'legacy.failed.quit': 'Quit',
     'pty.restarted': 'restarted {time}',
+    'explorer.menuLabel': 'Open in {app}',
   },
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
@@ -54,6 +55,7 @@ const MESSAGES = {
     'legacy.failed.retry': 'Reintentar',
     'legacy.failed.quit': 'Salir',
     'pty.restarted': 'reiniciado {time}',
+    'explorer.menuLabel': 'Abrir en {app}',
   },
 } as const
 
