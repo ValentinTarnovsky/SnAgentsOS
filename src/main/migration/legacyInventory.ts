@@ -1,5 +1,5 @@
 import { existsSync, promises as nodeFsp, realpathSync, type Stats } from 'fs'
-import { basename, dirname, join } from 'path'
+import { basename, dirname, join, posix, win32 } from 'path'
 import { BRAND, INSTALLER_REG, LEGACY_BRAND } from '@shared/brand'
 import {
   isCommittedPhase,
@@ -203,7 +203,7 @@ async function precheck(r: Run, target: string, st: Stats): Promise<ItemOutcome 
   if (needsElevation(target, r.rm.elevation)) return { state: 'skipped', reason: 'needsElevation' }
   const fsx = r.env.fs ?? nodeFsp
   const real = await fsx.realpath(target).catch(() => target)
-  if (violatesGuard([target, real], await expandGuard(r.env.guard, fsx))) return { state: 'skipped', reason: 'guard' }
+  if (violatesGuard([target, real], await expandGuard(r.env.guard, fsx), [real])) return { state: 'skipped', reason: 'guard' }
   return null
 }
 
@@ -1118,11 +1118,24 @@ export function devCleanupSandbox(input: {
   realpath?: (p: string) => string
 }): { ok: true; roots: string[] } | { ok: false; reason: string } {
   const { env, platform } = input
+  // A fake tree that does not exist yet resolves through its nearest existing
+  // ancestor, so /tmp/x compares as /private/tmp/x on macOS like the base does.
+  // Another platform's paths (tests) are compared as written.
+  const P = platform === 'win32' ? win32 : posix
+  const realpath = input.realpath ?? (platform === process.platform ? realpathSync.native : null)
   const real = (p: string): string => {
-    try {
-      return (input.realpath ?? realpathSync.native)(p)
-    } catch {
-      return p
+    if (!realpath) return p
+    const rest: string[] = []
+    let cur = P.resolve(p)
+    for (;;) {
+      try {
+        return P.join(realpath(cur), ...rest.reverse())
+      } catch {
+        const parent = P.dirname(cur)
+        if (parent === cur) return p
+        rest.push(P.basename(cur))
+        cur = parent
+      }
     }
   }
   if (env.SNAOS_FORCE_LEGACY_CLEANUP !== '1') return { ok: false, reason: 'notForced' }
