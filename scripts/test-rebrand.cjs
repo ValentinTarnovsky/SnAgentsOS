@@ -17,7 +17,7 @@ function load(file, overrides = {}) {
 }
 const read = file => fs.readFileSync(path.join(root, file), 'utf8')
 const LEGACY_RE = /snmulticc|multicc|multi command/i
-const DASH_RE = /[–—]/
+const DASH_RE = new RegExp('[' + String.fromCharCode(0x2013, 0x2014) + ']')
 
 async function main() {
   // E0-FR-01: brand constants.
