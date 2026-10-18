@@ -1,9 +1,10 @@
 /**
- * Phone settings as a pushed screen (E1-FR-37) instead of a sheet over the
- * action sheet. Sections: Appearance (desktop theme, font size), Alerts
- * (in-page alerts, E1-FR-40) and This device (unpair). The Input section of
- * E1-FR-22/30 (AI consoles start in Composer, composer autocorrect) sits
- * between Appearance and Alerts.
+ * Phone settings as a pushed screen over Home (E1-FR-37, E2-FR-13), opened
+ * from the Home header. Sections: Appearance (desktop theme, font size), Input
+ * (E1-FR-22/30: AI consoles start in Composer, composer autocorrect), Alerts
+ * (in-page alerts, E1-FR-40), About (desktop and bundle versions) and This
+ * device (unpair, with confirmation). Later WPs add their rows here: answer
+ * cards (R22-15), Key bar (R22-19) and Diagnostics (R22-17).
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -17,6 +18,9 @@ import { client } from '../lib/client'
 import { getActiveTerm } from '../lib/terminalBus'
 import { MAX_FONT, MIN_FONT } from '../lib/fit'
 import { t, type MobileMessageKey } from '../lib/i18n'
+
+/** This page's version, baked in by vite.config.ts. */
+const BUNDLE_VERSION: string = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''
 
 const THEMES = ['midnight', 'light', 'nord', 'dracula', 'solarized'] as const
 const THEME_KEY: Record<(typeof THEMES)[number], MobileMessageKey> = {
@@ -84,6 +88,7 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const composerAutocorrect = useRemoteStore((s) => s.composerAutocorrect)
   const setComposerPref = useRemoteStore((s) => s.setComposerPref)
   const [confirmUnpair, setConfirmUnpair] = useState(false)
+  const desktopVersion = useRemoteStore((s) => s.appVersion)
 
   const currentSize = (): number => {
     if (fontOverride != null) return fontOverride
@@ -180,6 +185,18 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
             checked={inPageAlerts}
             onChange={setInPageAlerts}
           />
+        </SettingsSection>
+        <SettingsSection id="about" title={t('set.about')}>
+          <div className="rounded-card border border-border bg-bg-secondary px-4 py-1">
+            <div data-version="desktop" className="flex min-h-11 items-center justify-between text-sm">
+              <span className="text-text-primary">{t('set.desktopVersion')}</span>
+              <span className="font-mono text-xs text-text-secondary">{desktopVersion || '-'}</span>
+            </div>
+            <div data-version="bundle" className="flex min-h-11 items-center justify-between border-t-[0.5px] border-border text-sm">
+              <span className="text-text-primary">{t('set.bundleVersion')}</span>
+              <span className="font-mono text-xs text-text-secondary">{BUNDLE_VERSION || '-'}</span>
+            </div>
+          </div>
         </SettingsSection>
         <SettingsSection id="device" title={t('set.device')}>
           <ActionList

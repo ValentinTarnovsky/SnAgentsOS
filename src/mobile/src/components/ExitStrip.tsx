@@ -7,7 +7,7 @@
  */
 import { useState, type ReactNode } from 'react'
 import { RotateCcw, X } from 'lucide-react'
-import { ConfirmSheet, type ConfirmState } from './ActionSheet'
+import { ConfirmSheet, type ConfirmState } from './ConfirmSheet'
 import { useRemoteStore } from '../lib/store'
 import { useExitStore } from '../lib/exitState'
 import { client } from '../lib/client'

@@ -1,8 +1,8 @@
 /**
  * Text for an agent status on the phone (E1-FR-04/05): the localized state
- * label, the accessible name of the indicator and the drawer's second line
+ * label, the accessible name of the indicator and the status second line
  * (attention reason, else time in the current state). Pure: callers pass the
- * clock, so the drawer's single 30s ticker drives every refresh.
+ * clock, so a single 30s ticker drives every refresh (Home: rowLine below).
  *
  * Relative time uses the phone's clock against the desktop's stateSince, with
  * no skew correction (no serverTime in the contract, E1 risk 24): an instant
@@ -71,7 +71,7 @@ export function showsTime(status: RemotePaneStatus | undefined): boolean {
 }
 
 /**
- * The drawer row's second line: the reason when there is one ("Waiting for
+ * The status second line: the reason when there is one ("Waiting for
  * permission"), else the state with its age ("Working 2m", "Done 3m ago").
  */
 export function statusLine(status: RemotePaneStatus, now: number): string {
@@ -88,4 +88,62 @@ export function statusLine(status: RemotePaneStatus, now: number): string {
     default:
       return stateLabel(status.state)
   }
+}
+
+// --- Home row second line (E2-FR-05, table "Textos de la segunda linea") ---
+
+const ROW_REASON_KEY: Record<'permission' | 'question' | 'plan' | 'elicitation', MobileMessageKey> = {
+  permission: 'row.permission',
+  question: 'row.question',
+  plan: 'row.plan',
+  elicitation: 'row.elicitation',
+}
+
+export interface RowLineInput {
+  status: RemotePaneStatus | undefined
+  running: boolean
+  /** The pane's own exit code when its shell ended (E6-FR-38). */
+  exitCode?: number
+  /** Its workspace is mounted on the desktop (E2-FR-06). */
+  mounted: boolean
+}
+
+/** True while a row's second line shows a relative time (drives the 30s ticker). */
+export function rowShowsTime(status: RemotePaneStatus | undefined): boolean {
+  if (!status) return false
+  if (status.state === 'action') return false
+  return status.state === 'working' || status.state === 'done' || status.state === 'error'
+}
+
+/**
+ * The Home row's second line: the attention reason, the state with its age
+ * ("Working 2m", "Done 3m ago", "Error 1m ago"), "Lost connection to agent",
+ * else from the pty: Idle (running), Exited (code), Stopped, or Not started
+ * when its workspace is not mounted on the desktop.
+ */
+export function rowLine(input: RowLineInput, now: number): string {
+  const { status } = input
+  if (status) {
+    const reason = status.reason
+    if (status.state === 'action') {
+      return reason && reason !== 'failure' ? t(ROW_REASON_KEY[reason]) : t('row.action')
+    }
+    const fresh = now - status.stateSince < 60000
+    const age = relativeAge(status.stateSince, now)
+    switch (status.state) {
+      case 'working':
+        return fresh ? t('row.working') : t('row.workingFor', { t: age })
+      case 'done':
+        return fresh ? t('row.doneNow') : t('row.doneAgo', { t: age })
+      case 'error':
+        return fresh ? t('row.errorNow') : t('row.errorAgo', { t: age })
+      case 'unknown':
+        return t('row.unknown')
+      default:
+        break
+    }
+  }
+  if (input.running) return t('row.idle')
+  if (input.exitCode !== undefined) return t('row.exited', { code: input.exitCode })
+  return input.mounted ? t('row.stopped') : t('row.notStarted')
 }

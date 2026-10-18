@@ -1,5 +1,5 @@
 /**
- * Long-press detector shared by the pane tabs, the console drawer rows and
+ * Long-press detector shared by the pane tabs, the Home rows and
  * the composer's Send (E1-FR-26/33/39). One constant, LONG_PRESS_MS, so every
  * hold on the phone feels the same (risk 18 of E1).
  *

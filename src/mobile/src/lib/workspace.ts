@@ -1,9 +1,9 @@
 /**
- * Pure snapshot selectors for the phone (E1-FR-06/07). The workspace the phone
- * is looking at is the one that owns the viewed pane, which may differ from
- * the desktop's active workspace: opening a running pane of another workspace
- * never moves the desktop. Every consumer that used snapshot.activeWorkspaceId
- * to act on "the current workspace" goes through viewedWorkspaceId instead.
+ * Pure snapshot selectors for the phone (E1-FR-06/07, E2-FR-04/06/47). The
+ * workspace the phone is looking at is the one that owns the viewed pane,
+ * never the desktop's active workspace: navigation is phone-only and opening
+ * a console never moves the desktop. activeWorkspaceId only feeds the "On the
+ * PC" chip and the last default of the new-console picker.
  */
 import type { RemotePaneInfo, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
 
@@ -21,23 +21,32 @@ export function paneById(snap: RemoteStateSnapshot, paneId: string | null): Remo
   return null
 }
 
-/** The workspace of the viewed pane, else the desktop's active one. */
+/** The workspace of the viewed pane (E2-FR-47); null on Home with nothing viewed. */
 export function viewedWorkspaceId(snap: RemoteStateSnapshot, activePaneId: string | null): string | null {
-  return (activePaneId ? workspaceOfPane(snap, activePaneId) : null) ?? snap.activeWorkspaceId
+  return activePaneId ? workspaceOfPane(snap, activePaneId) : null
 }
 
 /**
- * Whether opening `paneId` needs the desktop to switch workspace first. A
- * running pane is streamed from its pty wherever it lives, so the desktop stays
- * put. A pane without a pty (or not in the snapshot yet, e.g. just created)
- * spawns lazily when the renderer mounts its workspace, so that one still
- * needs the switch unless the desktop already shows that workspace.
+ * Whether the desktop has every console of the workspace mounted (D4). A
+ * snapshot without the field (an older desktop) counts only its active one.
  */
-export function needsWorkspaceSwitch(snap: RemoteStateSnapshot | null, workspaceId: string, paneId: string): boolean {
-  if (!snap) return true
+export function isWorkspaceMounted(snap: RemoteStateSnapshot, workspaceId: string): boolean {
+  if (snap.mountedWorkspaceIds) return snap.mountedWorkspaceIds.includes(workspaceId)
+  return snap.activeWorkspaceId === workspaceId
+}
+
+/**
+ * Whether the phone can open `paneId` as is (E2-FR-06): a running pane streams
+ * from its pty wherever it lives, and a stopped one of a mounted workspace is
+ * one the desktop already shows (exited) or is spawning. Any other needs the
+ * user to confirm `mountWorkspace` first. False for a pane not in the snapshot.
+ */
+export function paneOpenable(snap: RemoteStateSnapshot, paneId: string): boolean {
   const pane = paneById(snap, paneId)
-  if (pane?.running) return false
-  return (pane ? workspaceOfPane(snap, paneId) : workspaceId) !== snap.activeWorkspaceId
+  if (!pane) return false
+  if (pane.running) return true
+  const wsId = workspaceOfPane(snap, paneId)
+  return wsId != null && isWorkspaceMounted(snap, wsId)
 }
 
 export interface PaneRef {
@@ -119,4 +128,55 @@ export function tabPanes(snap: RemoteStateSnapshot, activePaneId: string | null)
   const workspaceId = viewedWorkspaceId(snap, activePaneId)
   const ws = snap.workspaces.find((w) => w.id === workspaceId)
   return { workspaceId: ws ? ws.id : null, panes: ws ? orderedPanes(ws) : [] }
+}
+
+// --- Home rows (E2-FR-04/05) ---
+
+/**
+ * Unread (E2-FR-05): the console sits in action, done or error since a moment
+ * this phone has not seen it (lastViewedAt is stamped at least at stateSince
+ * when viewed, so the two clocks never disagree about a view).
+ */
+export function isUnread(status: RemotePaneStatus | undefined, lastViewedAt: number | undefined): boolean {
+  if (!status) return false
+  if (status.state !== 'action' && status.state !== 'done' && status.state !== 'error') return false
+  return status.stateSince > (lastViewedAt ?? 0)
+}
+
+/** action > error > unread done > working > the rest (E2-FR-04). */
+export function rowRank(status: RemotePaneStatus | undefined, unread: boolean): number {
+  switch (status?.state) {
+    case 'action':
+      return 0
+    case 'error':
+      return 1
+    case 'done':
+      return unread ? 2 : 4
+    case 'working':
+      return 3
+    default:
+      return 4
+  }
+}
+
+/**
+ * A workspace's consoles in Home order (E2-FR-04): by rank, then layoutOrder.
+ * Stable by construction: two rows only swap when a status changes.
+ */
+export function homeRows(
+  ws: RemoteStateSnapshot['workspaces'][number],
+  statuses: Record<string, RemotePaneStatus>,
+  lastViewedAt: Record<string, number>,
+): RemotePaneInfo[] {
+  const ordered = orderedPanes(ws)
+  const rank = new Map(ordered.map((p) => [p.id, rowRank(statuses[p.id], isUnread(statuses[p.id], lastViewedAt[p.id]))]))
+  return ordered
+    .map((pane, index) => ({ pane, index }))
+    .sort((a, b) => (rank.get(a.pane.id) ?? 4) - (rank.get(b.pane.id) ?? 4) || a.index - b.index)
+    .map((x) => x.pane)
+}
+
+/** Consoles of a workspace in action: the red badge of its header (E2-FR-04). */
+export function actionCount(ws: RemoteStateSnapshot['workspaces'][number], statuses: Record<string, RemotePaneStatus>): number {
+  return ws.panes.reduce((n, p) => (statuses[p.id]?.state === 'action' ? n + 1 : n), 0)
 }

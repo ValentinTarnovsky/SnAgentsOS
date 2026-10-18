@@ -109,6 +109,9 @@ async function main() {
   check(ack.ok && calls.reveal === 1, 'revealPane asks main to restore, show and focus the window')
   check(S.getState().activeWorkspaceId === 'w2', 'and then reveals the console on the desktop (its workspace becomes active)')
 
+  ack = await ctl({ kind: 'switchWorkspace', workspaceId: 'w1' })
+  check(ack.ok && S.getState().activeWorkspaceId === 'w1' && calls.reveal === 2, 'switchWorkspace (the workspace kebab\'s "Show on the PC") activates it and brings the window up')
+
   // --- openUrl ---
   ack = await ctl({ kind: 'openUrl', url: 'http://localhost:5173/' })
   check(ack.ok && calls.open.at(-1) === 'http://localhost:5173/', 'openUrl opens an http link on the PC')

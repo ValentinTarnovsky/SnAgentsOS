@@ -75,6 +75,10 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
       const ws = store.workspaces.find((w) => w.id === action.workspaceId)
       if (!ws) return { ok: false, error: 'not_found' }
       store.setActive(action.workspaceId)
+      // The phone's "Show on the PC" of a workspace (E2-FR-09): the phone no
+      // longer switches to navigate, so this is always an explicit ask and the
+      // window comes up with it.
+      window.snApi.window.reveal()
       return { ok: true }
     }
 

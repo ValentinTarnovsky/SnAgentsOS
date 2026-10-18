@@ -2,9 +2,9 @@
  * "N waiting" pill in the header (E1-FR-06). N counts the panes in 'action'
  * across every workspace, without the one being viewed; it hides at 0. A tap
  * opens the next waiting pane (workspace order, then layoutOrder, cycling from
- * the current one) through client.switchWorkspaceAndView, so a running pane
- * of another workspace never moves the desktop. The wrapper stays mounted as a
- * polite live region so changes of N are announced.
+ * the current one) through client.requestOpen, so opening it never moves the
+ * desktop (E2-FR-06). The wrapper stays mounted as a polite live region so
+ * changes of N are announced.
  */
 import { useMemo, type ReactNode } from 'react'
 import { useRemoteStore } from '../lib/store'
@@ -24,7 +24,7 @@ export function WaitingPill(): ReactNode {
   const openNext = (): void => {
     if (!snapshot) return
     const ref = nextWaitingPane(snapshot, paneStatus, activePaneId)
-    if (ref) void client.switchWorkspaceAndView(ref.workspaceId, ref.paneId)
+    if (ref) client.requestOpen(ref.paneId)
   }
 
   return (

@@ -1,21 +1,26 @@
 /**
- * Per-pane actions opened with a long-press on a tab or a drawer row
- * (E1-FR-33/39): Rename, Restart, Relaunch resuming, New chat and Close (red),
- * each restart or close behind a ConfirmSheet. The header carries the pane's
- * title, its workspace and its full last reply (<= 280 chars). Every ctl uses
- * the pane's own workspace, which may not be the desktop's active one.
+ * Per-pane actions (E1-FR-33/39, E2-FR-08/16/49), opened with a long-press on
+ * a Home row, the Resume card or a tab chip, and from the terminal's kebab.
+ * Rows, in order: Rename, Restart, Relaunch resuming, New chat, Show on the
+ * PC, Copy title and Close (red); every restart or close sits behind a
+ * ConfirmSheet. The header carries the pane's title, its workspace and its
+ * full last reply (<= 280 chars). Every ctl uses the pane's own workspace,
+ * which may not be the desktop's active one (E2-FR-47).
  *
  * "Relaunch resuming" / "New chat" send restartPane with resume true / false
- * (E5-FR-11, contract of R21-03) and only show for a `resumable` pane (D10).
+ * (E5-FR-11) and only show for a `resumable` pane (D10); an error ack (no
+ * saved session any more) shows a toast. "Show on the PC" sends revealPane:
+ * the desktop restores its window and focuses the console (E2-FR-07).
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { History, MessageSquarePlus, Pencil, RotateCcw, Trash2 } from 'lucide-react'
+import { Copy, History, MessageSquarePlus, MonitorUp, Pencil, RotateCcw, Trash2 } from 'lucide-react'
+import type { RemoteCtlAction } from '@shared/remote-protocol'
 import { Sheet } from './Sheet'
 import { ActionList, type ActionItem } from './ActionList'
 import { ConfirmSheet, type ConfirmState } from './ConfirmSheet'
 import { RenameSheet } from './RenameSheet'
 import { StatusIndicator } from './StatusIndicator'
-import { useRemoteStore } from '../lib/store'
+import { store, useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { PaneIcon } from '../lib/paneIcon'
 import { paneActionIds, restartAction, type PaneActionId } from '../lib/paneActions'
@@ -30,10 +35,12 @@ const LABEL: Record<PaneActionId, MobileMessageKey> = {
   restart: 'act.restart',
   restartResume: 'act.restartResume',
   restartFresh: 'act.restartFresh',
+  reveal: 'act.reveal',
+  copyTitle: 'act.copyTitle',
   close: 'act.close',
 }
 
-const CONFIRM: Record<Exclude<PaneActionId, 'rename'>, MobileMessageKey> = {
+const CONFIRM: Record<'restart' | 'restartResume' | 'restartFresh' | 'close', MobileMessageKey> = {
   restart: 'act.restartConfirm',
   restartResume: 'act.restartResumeConfirm',
   restartFresh: 'act.restartFreshConfirm',
@@ -45,12 +52,49 @@ const ICON: Record<PaneActionId, ReactNode> = {
   restart: <RotateCcw size={16} />,
   restartResume: <History size={16} />,
   restartFresh: <MessageSquarePlus size={16} />,
+  reveal: <MonitorUp size={16} />,
+  copyTitle: <Copy size={16} />,
   close: <Trash2 size={16} />,
 }
 
 /**
- * The action rows for one pane, shared with the main action sheet. `onPick`
- * runs before the action (the caller closes its sheet there).
+ * Plain-text copy that works on the http origin (no secure context): an
+ * off-screen readonly textarea and execCommand inside the tap handler.
+ */
+function copyPlain(text: string): boolean {
+  if (typeof window !== 'undefined' && window.isSecureContext && navigator.clipboard) {
+    void navigator.clipboard.writeText(text).catch(() => undefined)
+    return true
+  }
+  const area = document.createElement('textarea')
+  area.value = text
+  area.readOnly = true
+  area.style.position = 'fixed'
+  area.style.left = '-9999px'
+  document.body.appendChild(area)
+  let ok = false
+  try {
+    area.setSelectionRange(0, text.length)
+    ok = document.execCommand('copy')
+  } catch {
+    ok = false
+  }
+  area.blur()
+  area.remove()
+  return ok
+}
+
+/** Send a pane ctl and turn a failed ack into a toast. */
+async function sendPaneCtl(action: RemoteCtlAction): Promise<void> {
+  const res = await client.sendCtl(action)
+  if (res.ok) return
+  const resume = action.kind === 'restartPane' && action.resume !== undefined
+  store.getState().setToast(t(resume ? 'toast.noSession' : 'toast.actionFailed'))
+}
+
+/**
+ * The action rows for one pane. `onPick` runs before the action (the caller
+ * closes its sheet there).
  */
 export function usePaneActionItems(
   ref: PaneRef | null,
@@ -78,11 +122,20 @@ export function usePaneActionItems(
               setRenaming({ ref, title: pane.title })
               return
             }
+            if (id === 'reveal') {
+              void sendPaneCtl({ kind: 'revealPane', paneId: ref.paneId })
+              return
+            }
+            if (id === 'copyTitle') {
+              // Inside the tap: iOS only lets execCommand copy from a user gesture.
+              if (copyPlain(pane.title)) store.getState().setToast(t('toast.copied'))
+              return
+            }
             const action =
               id === 'close'
                 ? ({ kind: 'closePane', workspaceId: ref.workspaceId, paneId: ref.paneId } as const)
                 : restartAction(ref.workspaceId, ref.paneId, id)
-            setConfirm({ message: t(CONFIRM[id]), onConfirm: () => void client.sendCtl(action) })
+            setConfirm({ message: t(CONFIRM[id]), onConfirm: () => void sendPaneCtl(action) })
           },
         }))
       : []
@@ -105,7 +158,16 @@ export function usePaneActionItems(
   return { items, overlays }
 }
 
-export function PaneActionSheet({ target, onClose }: { target: PaneRef | null; onClose: () => void }): ReactNode {
+export function PaneActionList({
+  target,
+  onClose,
+  extraItems,
+}: {
+  target: PaneRef | null
+  onClose: () => void
+  /** Rows appended after the pane's own (the terminal kebab adds Quick Commands, E2-FR-16). */
+  extraItems?: ActionItem[]
+}): ReactNode {
   // Keep the last pane on screen through the exit animation.
   const last = useRef<PaneRef | null>(null)
   if (target) last.current = target
@@ -123,6 +185,7 @@ export function PaneActionSheet({ target, onClose }: { target: PaneRef | null; o
   }, [gone, onClose])
 
   const message = status?.lastMessage ? status.lastMessage.slice(0, MESSAGE_MAX) : undefined
+  const all = extraItems?.length ? [...items, ...extraItems] : items
 
   return (
     <>
@@ -135,12 +198,12 @@ export function PaneActionSheet({ target, onClose }: { target: PaneRef | null; o
             leading={
               pane ? (
                 <>
-                  <PaneIcon type={pane.type} size={16} />
+                  <PaneIcon type={status?.provider ?? pane.type} size={16} />
                   <StatusIndicator status={status} />
                 </>
               ) : undefined
             }
-            items={items}
+            items={all}
           />
         </div>
       </Sheet>

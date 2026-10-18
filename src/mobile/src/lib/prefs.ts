@@ -99,3 +99,73 @@ export function resolveInputMode(
   if (agentsDefault && (paneType === 'claude' || paneType === 'codex' || paneType === 'custom')) return 'composer'
   return 'direct'
 }
+
+// --- Home (E2-FR-03, 04, 05; R22-14) ---
+// Per origin like everything here: the LAN and the Tailscale address keep
+// their own copy. Every read survives a blocked storage (defaults back).
+
+/** The last console the terminal showed ('snagentsos.lastPane'), for the Resume card. */
+export const LAST_PANE_KEY = `${STORAGE_PREFIX}lastPane`
+/** Collapsed workspace sections ('snagentsos.home.collapsed', array of ids). */
+export const COLLAPSED_KEY = `${STORAGE_PREFIX}home.collapsed`
+/** When each console was last seen on this phone ('snagentsos.lastViewed', paneId -> ms). */
+export const LAST_VIEWED_KEY = `${STORAGE_PREFIX}lastViewed`
+/** Entries lastViewed keeps; the least recently viewed go first. */
+export const LAST_VIEWED_MAX = 200
+
+function readJson(key: string): unknown {
+  const raw = storageGet(key)
+  if (raw == null) return null
+  try {
+    return JSON.parse(raw) as unknown
+  } catch {
+    return null
+  }
+}
+
+export function loadLastPane(): string | null {
+  const raw = storageGet(LAST_PANE_KEY)
+  return raw && raw.length <= 128 ? raw : null
+}
+
+export function saveLastPane(paneId: string): void {
+  storageSet(LAST_PANE_KEY, paneId)
+}
+
+export function loadCollapsed(): string[] {
+  const v = readJson(COLLAPSED_KEY)
+  return Array.isArray(v) ? v.filter((id): id is string => typeof id === 'string').slice(0, 500) : []
+}
+
+export function saveCollapsed(ids: readonly string[]): void {
+  if (ids.length === 0) storageRemove(COLLAPSED_KEY)
+  else storageSet(COLLAPSED_KEY, JSON.stringify(ids))
+}
+
+export function loadLastViewed(): Record<string, number> {
+  const v = readJson(LAST_VIEWED_KEY)
+  const out: Record<string, number> = {}
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out
+  for (const [id, at] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof at === 'number' && Number.isFinite(at)) out[id] = at
+  }
+  return out
+}
+
+/**
+ * `map` with paneId stamped at `at`, trimmed to the LAST_VIEWED_MAX most
+ * recent entries (LRU by timestamp). Pure; the caller persists the result.
+ */
+export function withViewed(map: Readonly<Record<string, number>>, paneId: string, at: number): Record<string, number> {
+  const next: Record<string, number> = { ...map, [paneId]: at }
+  const ids = Object.keys(next)
+  if (ids.length <= LAST_VIEWED_MAX) return next
+  ids.sort((a, b) => next[b] - next[a])
+  const kept: Record<string, number> = {}
+  for (const id of ids.slice(0, LAST_VIEWED_MAX)) kept[id] = next[id]
+  return kept
+}
+
+export function saveLastViewed(map: Readonly<Record<string, number>>): void {
+  storageSet(LAST_VIEWED_KEY, JSON.stringify(map))
+}

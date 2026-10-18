@@ -24,7 +24,7 @@ export const COMPOSER_MAX = 16384
 /** The character counter shows from this length. */
 export const COMPOSER_COUNTER_FROM = 14000
 /** Hold on Send this long to Insert without Enter (E1-FR-26). Same value as
- * the tabs/drawer long-press of E1-FR-33. */
+ * the tabs/Home rows long-press of E1-FR-33. */
 export const LONG_PRESS_MS = 450
 /** Haptic tick when the long-press fires. */
 export const INSERT_VIBRATE_MS = 10
