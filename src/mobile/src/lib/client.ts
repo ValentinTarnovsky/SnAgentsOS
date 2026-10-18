@@ -237,6 +237,8 @@ class RemoteClient {
   /** Manual reconnect (retry button on the locked/connecting screens). */
   retry(): void {
     this.clearReconnectTimer()
+    // A lingering socket would make connect() a no-op and the button dead.
+    this.abortSocket()
     this.noReconnect = false
     this.reconnectAttempt = 0
     store.getState().update({ phase: this.deviceId ? 'connecting' : 'welcome', banner: null, lockUntil: null, connAttempt: 0 })
@@ -410,8 +412,18 @@ class RemoteClient {
       this.armIdleWatchdog()
       return
     }
-    // A socket still CONNECTING is covered by the connect timeout.
-    if (ws || this.noReconnect) return
+    // CONNECTING is covered by the connect timeout and CLOSING by its onclose.
+    if (ws && ws.readyState !== WebSocket.CLOSED) return
+    if (ws) {
+      // CLOSED with no onclose delivered (the browser sets readyState and fires
+      // close in one task, so a bfcache restore or a freeze swallowed it): no
+      // timer covers this socket any more, so drop it here.
+      this.abortSocket()
+      if (this.noReconnect) return
+      this.reconnectAttempt = 0
+      this.showReconnecting()
+    }
+    if (this.noReconnect) return
     this.clearReconnectTimer()
     this.connect()
   }
@@ -481,7 +493,7 @@ class RemoteClient {
       this.deadlineTimer = setTimeout(this.onDeadline, this.deadlineMs - elapsed)
       return
     }
-    if (elapsed > this.deadlineMs + SUSPEND_SLACK_MS) {
+    if (elapsed > this.deadlineMs + SUSPEND_SLACK_MS && this.ws.readyState === WebSocket.OPEN) {
       // Fired far too late: JS was frozen without a visibilitychange. Probe again.
       this.sendPing(REVIVE_PROBE_TIMEOUT)
       return

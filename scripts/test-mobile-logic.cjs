@@ -267,6 +267,33 @@ function testLiveness() {
     check(s.closed && p.sockets.length === 2 && p.clock - t0 <= 4000, 'a dead socket after unlock reconnects within 4s')
   }
   {
+    // bfcache restore that swallowed onclose: readyState CLOSED, handler never ran.
+    const { p, s } = live()
+    p.hide(); p.advance(60000); s.readyState = 3; p.pageshow(true)
+    check(p.sockets.length === 2 && s.onclose === null, 'a CLOSED socket whose onclose never fired is dropped and replaced on revive')
+    check(p.state().banner && p.state().banner.kind === 'reconnecting' && p.state().phase === 'live', 'that revive shows the reconnecting banner over the live screen')
+  }
+  {
+    // A CLOSING socket is left to its onclose (it may carry a revoke/re-pair code).
+    const { p, s } = live()
+    s.readyState = 2; p.pageshow(true)
+    check(p.sockets.length === 1 && s.onclose !== null, 'revive does not pre-empt a CLOSING socket')
+  }
+  {
+    // Overdue deadline on a socket that is no longer OPEN: abort, do not re-probe.
+    const { p, s } = live()
+    p.advance(p.IDLE_PROBE_MS); s.readyState = 2; p.freeze(5 * 60000); p.advance(0)
+    check(s.closed && p.sockets.length === 2, 'an overdue deadline on a non-OPEN socket aborts and reconnects')
+  }
+  {
+    // Locked screen Retry with a socket still lingering must not be a dead button.
+    const p = page(); p.client.start(); const s = p.last(); s.open()
+    s.recv({ type: 'authFail', reason: 'locked', retryAfterMs: 1000 })
+    check(p.state().phase === 'locked', 'authFail locked shows the locked screen')
+    p.client.retry()
+    check(s.closed && p.sockets.length === 2 && p.state().phase === 'connecting', 'retry aborts a lingering socket and connects again')
+  }
+  {
     const { p, s } = live(); s.autoPong = true
     p.pageshow(true); p.advance(1000)
     check(s.count('unsub') === 1, 'pageshow from the bfcache re-syncs')
