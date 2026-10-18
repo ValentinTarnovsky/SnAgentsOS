@@ -49,10 +49,10 @@ import {
 import { hexEqual, hexToBytes, hmacSha256Hex } from './sha256'
 import { store, type UpdateInfo } from './store'
 import { applyRemoteTheme } from './theme'
-import { setLang } from './i18n'
+import { setLang, t } from './i18n'
 import { delayFor } from './reconnectSchedule'
 import { createInPageAlerts } from './inPageAlerts'
-import { needsWorkspaceSwitch, paneById, statusMapOf, viewedWorkspaceId, workspaceOfPane } from './workspace'
+import { paneById, paneOpenable, statusMapOf, workspaceOfPane } from './workspace'
 import { clearMobileStorage } from './mobileStorage'
 import { chunkInput } from './composerSend'
 import { pruneDrafts } from './drafts'
@@ -69,7 +69,12 @@ export interface CtlResult {
   error?: string
   paneId?: string
   info?: number
+  /** createPane with a prompt that could not go on the command line (E2-FR-11). */
+  promptFallback?: boolean
 }
+
+/** What happened when the phone tried to open a console (E2-FR-06). */
+export type OpenResult = 'open' | 'needsMount' | 'gone'
 
 /** Fixed keepalive; the server drops a session after 60s of silence. */
 export const PING_INTERVAL = 25000
@@ -86,6 +91,12 @@ export const RESYNC_HIDDEN_MS = 10000
 /** A deadline timer this late means JS was suspended: re-probe, never abort. */
 const SUSPEND_SLACK_MS = 2000
 const CTL_TIMEOUT = 10000
+/**
+ * How long a console the desktop just acked (createPane) may be missing from
+ * the state frames: a push built before it existed (a pty starting elsewhere,
+ * the renderer's 100ms debounce) must not read as "the console was closed".
+ */
+export const AWAIT_NEW_PANE_MS = 5000
 const PAIR_PENDING_MS = 60000
 /** sessionStorage guard against a reload loop on a stale cached bundle (FR-15). */
 export const RELOAD_FOR_KEY = `${BRAND.mobileStoragePrefix}reloadFor`
@@ -119,16 +130,6 @@ function readPairCode(): string | null {
 /** Width table for the terminal: only an explicit '11' opts in (E6-FR-15). */
 function unicodeOf(snap: RemoteStateSnapshot): '6' | '11' {
   return snap.terminalUnicode === '11' ? '11' : '6'
-}
-
-/** Pick a sensible pane to view in a workspace: a running one, else the first. */
-function pickPane(snap: RemoteStateSnapshot, workspaceId: string | null): string | null {
-  const ws = snap.workspaces.find((w) => w.id === workspaceId) ?? snap.workspaces[0]
-  if (!ws || ws.panes.length === 0) return null
-  const running = ws.panes.find((p) => p.running)
-  if (running) return running.id
-  const firstOrdered = ws.layoutOrder.find((id) => ws.panes.some((p) => p.id === id))
-  return firstOrdered ?? ws.panes[0].id
 }
 
 function paneExists(snap: RemoteStateSnapshot, paneId: string): boolean {
@@ -203,6 +204,13 @@ class RemoteClient {
   private termListener: ((f: TermFrame) => void) | null = null
   /** Old drafts are pruned once per page, on the first live snapshot (E1-FR-28). */
   private draftsPruned = false
+  /**
+   * A console a deep link asked for (E2-FR-42), applied on the next goLive
+   * before lastPane. R22-18 fills it from the URL hash; it only picks the view.
+   */
+  private pendingDeepLink: string | null = null
+  /** A console shown before any state frame listed it (just created), with its deadline. */
+  private awaitedPane: { id: string; until: number } | null = null
   // Frames that arrived before the terminal mounted (the authOk -> first React
   // render gap). Buffered so the initial replay/out is never lost; a replay
   // supersedes and resets the buffer since it repaints the whole screen.
@@ -367,29 +375,103 @@ class RemoteClient {
     this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
   }
 
+  // --- phone-only navigation (E2-FR-01, 06, 16, 47) ---
+
   /**
-   * Open a pane of any workspace (E1-FR-07). Every path (drawer, waiting pill,
-   * tabs) goes through here. A running pane is only subscribed: the desktop
-   * stays on its workspace and the phone views the pane on its own. A pane
-   * without a pty (or not in the snapshot yet) needs the desktop to switch to
-   * its workspace first, because the renderer spawns it lazily on mount; it
-   * shows a spinner until the server pushes its replay.
+   * Open a console of any workspace without ever moving the desktop
+   * (E2-FR-06). A running pane, or a stopped one of a mounted workspace, is
+   * viewed at once and the terminal slides in. A stopped pane of a workspace
+   * the desktop has not mounted answers 'needsMount' so the UI confirms
+   * `mountWorkspace` first; a pane not in the snapshot answers 'gone'.
    */
-  async switchWorkspaceAndView(workspaceId: string, paneId: string): Promise<void> {
-    if (needsWorkspaceSwitch(store.getState().snapshot, workspaceId, paneId)) {
-      await this.sendCtl({ kind: 'switchWorkspace', workspaceId })
-    }
-    this.viewPane(paneId)
+  openPane(paneId: string): OpenResult {
+    const snap = store.getState().snapshot
+    if (!snap || !paneById(snap, paneId)) return 'gone'
+    if (!paneOpenable(snap, paneId)) return 'needsMount'
+    this.showPane(paneId)
+    return 'open'
   }
 
-  /** Send a control request and await its ack (10s local timeout). */
-  sendCtl(action: RemoteCtlAction): Promise<CtlResult> {
+  /**
+   * openPane for the UI: 'needsMount' opens the confirmation sheet
+   * (store.mountAsk) and 'gone' shows the toast.
+   */
+  requestOpen(paneId: string): OpenResult {
+    const res = this.openPane(paneId)
+    if (res === 'needsMount') store.getState().update({ mountAsk: paneId })
+    else if (res === 'gone') store.getState().setToast(t('toast.paneGone'))
+    return res
+  }
+
+  /** View a console and slide the terminal in; it becomes lastPane and read (E2-FR-16). */
+  showPane(paneId: string): void {
+    const before = store.getState()
+    // Leaving another console from the terminal (a tab) reads it up to now too.
+    if (before.screen === 'terminal' && before.activePaneId && before.activePaneId !== paneId) before.noteViewed(before.activePaneId)
+    const known = !!before.snapshot && !!paneById(before.snapshot, paneId)
+    this.awaitedPane = known ? null : { id: paneId, until: Date.now() + AWAIT_NEW_PANE_MS }
+    this.viewPane(paneId)
+    const s = store.getState()
+    s.noteViewed(paneId)
+    if (s.screen !== 'terminal') s.setScreen('terminal')
+  }
+
+  /**
+   * Back to Home from the terminal (E2-FR-01, 16). The pane stays subscribed
+   * and the terminal mounted off screen, so coming back is instant.
+   */
+  leaveTerminal(): void {
+    const s = store.getState()
+    if (s.activePaneId) s.noteViewed(s.activePaneId)
+    if (s.screen === 'terminal') s.setScreen('home')
+  }
+
+  /**
+   * "Start" on the confirmation (E2-FR-06): mount every console of the pane's
+   * workspace on the desktop (it keeps its own workspace on screen) and open
+   * the pane; its replay arrives once the pty exists, with a spinner meanwhile.
+   */
+  async mountAndOpen(paneId: string): Promise<CtlResult> {
+    const snap = store.getState().snapshot
+    const workspaceId = snap ? workspaceOfPane(snap, paneId) : null
+    if (!workspaceId) {
+      store.getState().setToast(t('toast.paneGone'))
+      return { ok: false, error: 'not_found' }
+    }
+    const res = await this.sendCtl({ kind: 'mountWorkspace', workspaceId })
+    if (!res.ok) {
+      store.getState().setToast(t('toast.mountFailed'))
+      return res
+    }
+    const now = store.getState().snapshot
+    if (now && paneById(now, paneId)) this.showPane(paneId)
+    else store.getState().setToast(t('toast.paneGone'))
+    return res
+  }
+
+  /**
+   * Ask for a console from a deep link (E2-FR-42): applied at once while
+   * live, else on the next goLive with priority over lastPane. It only picks
+   * the view: a workspace that is not mounted asks first and never mounts alone.
+   */
+  setPendingDeepLink(paneId: string | null): void {
+    const s = store.getState()
+    if (paneId && s.phase === 'live' && s.snapshot) {
+      this.pendingDeepLink = null
+      this.requestOpen(paneId)
+      return
+    }
+    this.pendingDeepLink = paneId
+  }
+
+  /** Send a control request and await its ack (10s local timeout by default). */
+  sendCtl(action: RemoteCtlAction, timeoutMs: number = CTL_TIMEOUT): Promise<CtlResult> {
     const id = randomNonceHex(8)
     return new Promise<CtlResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingCtl.delete(id)
         resolve({ ok: false, error: 'timeout' })
-      }, CTL_TIMEOUT)
+      }, timeoutMs)
       this.pendingCtl.set(id, { resolve, timer })
       this.send({ v: PROTOCOL_VERSION, type: 'ctl', id, action })
     })
@@ -790,8 +872,22 @@ class RemoteClient {
     this.clearConnectTimer()
     this.socketAuthed = true
     this.reconnectAttempt = 0
-    const cur = store.getState().activePaneId
-    const keep = cur && paneExists(state, cur) ? cur : pickPane(state, state.activeWorkspaceId)
+    // E2-FR-47: keep the viewed pane across a reconnect; otherwise a pending
+    // deep link, else lastPane (subscribed so Resume opens instantly), else
+    // nothing. Never a pane picked from the desktop's active workspace, and
+    // the screen stays where it is (Home on the first connection).
+    const prev = store.getState()
+    const cur = prev.activePaneId
+    const deepLink = this.pendingDeepLink
+    this.pendingDeepLink = null
+    const lastPane = prev.lastPane
+    const keep =
+      cur && paneExists(state, cur)
+        ? cur
+        : lastPane && !deepLink && paneExists(state, lastPane) && paneOpenable(state, lastPane)
+          ? lastPane
+          : null
+    const lostViewed = !!cur && keep !== cur && prev.screen === 'terminal'
     store.getState().update({
       phase: 'live',
       banner: null,
@@ -808,10 +904,13 @@ class RemoteClient {
       // Force viewPane below to (re)issue a sub even on reconnect to the same pane.
       subscribedPaneId: null,
       activePaneId: keep ?? null,
+      ...(lostViewed ? { screen: 'home' as const } : {}),
     })
     this.startKeepalive()
     this.armIdleWatchdog()
     if (keep) this.viewPane(keep)
+    if (lostViewed) store.getState().setToast(t('toast.paneClosed'))
+    if (deepLink) this.requestOpen(deepLink)
     if (!this.draftsPruned) {
       this.draftsPruned = true
       pruneDrafts(new Set(state.workspaces.flatMap((w) => w.panes.map((p) => p.id))))
@@ -897,19 +996,27 @@ class RemoteClient {
     }
     setLang(state.language)
     const xtermTheme = applyRemoteTheme(state.themeTokens)
-    // The viewed workspace is computed before the new snapshot drops the pane.
-    const prev = store.getState()
-    const viewedWs = prev.snapshot ? viewedWorkspaceId(prev.snapshot, prev.activePaneId) : null
     store.getState().update({ snapshot: state, paneStatus: statusMapOf(state), xtermTheme, terminalUnicode: unicodeOf(state) })
-    // If the viewed pane vanished (closed on desktop), fall back to another of
-    // the same workspace, or of the desktop's active one when that is gone too.
-    const cur = store.getState().activePaneId
-    if (!cur || !paneExists(state, cur)) {
-      const fallbackWs = viewedWs && state.workspaces.some((w) => w.id === viewedWs) ? viewedWs : state.activeWorkspaceId
-      const next = pickPane(state, fallbackWs) ?? pickPane(state, state.activeWorkspaceId)
-      if (next) this.viewPane(next)
-      else store.getState().update({ activePaneId: null, subscribedPaneId: null })
+    // E2-FR-47: the viewed pane vanished (closed on the desktop): back to Home
+    // with a toast. No other pane is picked, least of all from another workspace.
+    // A console just created gets AWAIT_NEW_PANE_MS to appear before that.
+    const s = store.getState()
+    const cur = s.activePaneId
+    const awaited = this.awaitedPane
+    if (awaited && (awaited.id !== cur || paneExists(state, awaited.id))) {
+      this.awaitedPane = null
+      // The new console made it into the snapshot: now it can be lastPane.
+      if (awaited.id === cur && s.screen === 'terminal') s.noteViewed(cur)
     }
+    const waiting = !!this.awaitedPane && this.awaitedPane.id === cur && Date.now() < this.awaitedPane.until
+    if (cur && !waiting && !paneExists(state, cur)) {
+      this.awaitedPane = null
+      const onTerminal = s.screen === 'terminal'
+      if (s.subscribedPaneId) this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId: s.subscribedPaneId })
+      s.update({ activePaneId: null, subscribedPaneId: null, ...(onTerminal ? { screen: 'home' as const } : {}) })
+      if (onTerminal) s.setToast(t('toast.paneClosed'))
+    }
+    if (s.mountAsk && !paneExists(state, s.mountAsk)) s.update({ mountAsk: null })
   }
 
   /** Live status of one pane (E1-FR-03): upsert or delete, then maybe alert. */
@@ -930,7 +1037,13 @@ class RemoteClient {
     if (!pending) return
     clearTimeout(pending.timer)
     this.pendingCtl.delete(msg.id)
-    pending.resolve({ ok: msg.ok, error: msg.error, paneId: msg.paneId, info: msg.info })
+    pending.resolve({
+      ok: msg.ok,
+      error: msg.error,
+      paneId: msg.paneId,
+      info: msg.info,
+      ...(msg.promptFallback ? { promptFallback: true } : {}),
+    })
   }
 
   private emit(frame: TermFrame): void {

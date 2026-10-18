@@ -127,6 +127,15 @@ export interface RemoteUsageSnapshot {
   services?: 'operational' | 'degraded' | 'down' | null
 }
 
+/** An agent preset as the phone's console picker shows it (E2-FR-10/12). */
+export interface RemotePresetInfo {
+  id: string
+  name: string
+  type: PaneType
+  icon: string
+  color: string
+}
+
 /** Compact mirror of the desktop state, pushed to every authed phone. */
 export interface RemoteStateSnapshot {
   workspaces: RemoteWorkspaceInfo[]
@@ -150,13 +159,28 @@ export interface RemoteStateSnapshot {
   usage?: RemoteUsageSnapshot | null
   /** xterm unicode width table the desktop uses (E6-FR-15); absent = '6'. */
   terminalUnicode?: '6' | '11'
+  /** Agent presets in their desktop order, for the phone's console picker (E2-FR-10/12). */
+  presets?: RemotePresetInfo[]
+  /** os.hostname() of the desktop, injected by main into every snapshot it emits (E2-FR-02/12). */
+  hostName?: string
+  /**
+   * Workspaces fully mounted on the desktop (D4: the 'full' keys of
+   * mountedWorkspaces). Opening a stopped pane of any other workspace asks the
+   * phone to confirm `mountWorkspace` first (E2-FR-06/12).
+   */
+  mountedWorkspaceIds?: string[]
 }
 
 // --- Control actions (phone -> desktop, executed by the renderer) ---
 
 export type RemoteCtlAction =
   | { kind: 'switchWorkspace'; workspaceId: string }
-  | { kind: 'createPane'; workspaceId: string; presetId?: string; paneType?: PaneType }
+  /**
+   * `prompt` (E2-FR-11, <= 16384): initial prompt of a claude/codex preset,
+   * delivered only through the SNAOS_INITIAL_PROMPT variable. When that is not
+   * possible the console opens without it and the ack says `promptFallback`.
+   */
+  | { kind: 'createPane'; workspaceId: string; presetId?: string; paneType?: PaneType; prompt?: string }
   | { kind: 'closePane'; workspaceId: string; paneId: string }
   /**
    * `resume` (E4/E5-FR-11): true = relaunch resuming the chat, false = new chat
@@ -174,6 +198,13 @@ export type RemoteCtlAction =
    * `workspaceId`, else `not_found`.
    */
   | { kind: 'runQuickCommand'; workspaceId: string; paneId?: string; id: string }
+  // --- E2 Home (R22-14) ---
+  /** Mount every console of a workspace without activating it (E2-FR-06). */
+  | { kind: 'mountWorkspace'; workspaceId: string }
+  /** "Show on the PC": restore and focus the window, then reveal the pane (E2-FR-07). */
+  | { kind: 'revealPane'; paneId: string }
+  /** Open a link on the PC (http, https or mailto only, <= 2048). */
+  | { kind: 'openUrl'; url: string }
 
 // --- Client -> server messages ---
 
@@ -252,6 +283,11 @@ export type RemoteServerMsg =
       paneId?: string
       /** globalPrompt: number of consoles the text was sent to. */
       info?: number
+      /**
+       * createPane with `prompt`: the console opened without it (E2-FR-11);
+       * the phone keeps the text in that console's composer draft.
+       */
+      promptFallback?: boolean
     }
   | { v: number; type: 'revoked' }
   | { v: number; type: 'shutdown'; reason: 'quit' | 'disabled' }

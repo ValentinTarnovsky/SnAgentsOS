@@ -10,16 +10,16 @@ import { Sheet } from './Sheet'
 import { useRemoteStore } from '../lib/store'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
-const PROVIDER_ORDER = ['claude', 'codex', 'custom'] as const
+export const PROVIDER_ORDER = ['claude', 'codex', 'custom'] as const
 
-const PROVIDER_LABEL: Record<(typeof PROVIDER_ORDER)[number], MobileMessageKey> = {
+export const PROVIDER_LABEL: Record<(typeof PROVIDER_ORDER)[number], MobileMessageKey> = {
   claude: 'usage.claude',
   codex: 'usage.codex',
   custom: 'usage.custom',
 }
 
 /** Bar fill color by utilization, matching the desktop UsageMeter thresholds. */
-function barColor(percent: number): string {
+export function barColor(percent: number): string {
   if (percent >= 85) return 'bg-red-400'
   if (percent >= 60) return 'bg-amber-400'
   return 'bg-green-400'

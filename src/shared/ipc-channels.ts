@@ -70,6 +70,7 @@ export const CH = {
   WINDOW_CLOSE: 'window:close', // send
   WINDOW_IS_MAXIMIZED: 'window:isMaximized', // invoke -> boolean
   WINDOW_MAXIMIZE_CHANGED: 'window:maximizeChanged', // main -> renderer (boolean)
+  WINDOW_REVEAL: 'window:reveal', // send (restore, show and focus; flash when focus is denied; E2-FR-07)
 
   // System integration (installed build only)
   SYSTEM_SET_LOGIN_ITEM: 'system:setLoginItem', // invoke (boolean) -> void

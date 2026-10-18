@@ -1,6 +1,11 @@
 import type { RemoteCommand } from '@shared/ipc-contract'
 import type { RemoteCtlAction } from '@shared/remote-protocol'
-import { useAppStore } from './store'
+import type { AgentPreset, Workspace } from '@shared/types'
+import { initialPromptFallback } from '@shared/initialPrompt'
+import { shellKind } from '@shared/shellKind'
+import { type AppState, useAppStore } from './store'
+import { resolveLaunch } from './launch'
+import { revealPane } from './revealPane'
 import { killPanePtys } from './ptyRegistry'
 import { broadcastToWorkspace } from './broadcastPrompt'
 import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
@@ -16,6 +21,50 @@ interface CmdResult {
   paneId?: string
   /** globalPrompt: number of consoles the text was inserted into. */
   info?: number
+  /** createPane: the prompt could not go on the command line (E2-FR-11). */
+  promptFallback?: boolean
+}
+
+/** The shell main falls back to when settings.defaultShell is empty (shellResolver.defaultShell). */
+function platformDefaultShell(platform: string): string {
+  if (platform === 'win32') return 'powershell.exe'
+  return platform === 'darwin' ? '/bin/zsh' : '/bin/bash'
+}
+
+/**
+ * Predicts E2-FR-11's fallback for a phone prompt before the console spawns:
+ * a preset that is not claude/codex, a Connection Profile, a shell we cannot
+ * quote for, more than 2000 sanitized characters or a `%` on win32. Main
+ * decides again with the resolved shell (the spawn carries mode 'argvOnly',
+ * so a miss is never typed by the gate). Exported for tests.
+ */
+export function remotePromptFallback(
+  state: Pick<AppState, 'presets' | 'connections' | 'settings'>,
+  ws: Workspace,
+  preset: AgentPreset | undefined,
+  text: string,
+  platform: string,
+): boolean {
+  if (!preset || (preset.type !== 'claude' && preset.type !== 'codex')) return true
+  const pane = { id: '', type: preset.type, presetId: preset.id, title: preset.name, color: preset.color, icon: preset.icon }
+  const launch = resolveLaunch(pane, ws, state.presets, state.connections)
+  const configured = platform === 'win32' || platform === 'darwin' || platform === 'linux' ? state.settings.defaultShell[platform] : undefined
+  const shell = configured?.trim() ? configured : platformDefaultShell(platform)
+  return initialPromptFallback({ text, shell: shellKind(shell, platform), platform, hasSetup: !!launch.setup, launchKind: launch.launchKind ?? 'other' })
+}
+
+/**
+ * Schemes a phone may open on the PC (E2-FR-28): http and https with a host,
+ * or mailto; anything else acks `denied_url` (the schema only bounds the
+ * length). Main's openExternalSafe filters again. Exported for tests.
+ */
+export function safeRemoteUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw)
+    return url.protocol === 'mailto:' || ((url.protocol === 'http:' || url.protocol === 'https:') && !!url.hostname)
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -30,18 +79,22 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
       const ws = store.workspaces.find((w) => w.id === action.workspaceId)
       if (!ws) return { ok: false, error: 'not_found' }
       store.setActive(action.workspaceId)
+      // The phone's "Show on the PC" of a workspace (E2-FR-09): the phone no
+      // longer switches to navigate, so this is always an explicit ask and the
+      // window comes up with it.
+      window.snApi.window.reveal()
       return { ok: true }
     }
 
     case 'createPane': {
       const ws = store.workspaces.find((w) => w.id === action.workspaceId)
       if (!ws) return { ok: false, error: 'not_found' }
-      const before = new Set(ws.panes.map((p) => p.id))
       const preset = action.presetId
         ? store.presets.find((p) => p.id === action.presetId)
         : undefined
+      let paneId: string
       if (preset) {
-        store.addPane(action.workspaceId, {
+        paneId = store.addPane(action.workspaceId, {
           type: preset.type,
           presetId: preset.id,
           title: preset.name,
@@ -49,14 +102,24 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
           icon: preset.icon,
         })
       } else if (action.paneType) {
-        store.addPane(action.workspaceId, { type: action.paneType })
+        paneId = store.addPane(action.workspaceId, { type: action.paneType })
       } else {
-        store.addPane(action.workspaceId)
+        paneId = store.addPane(action.workspaceId)
       }
-      // addPane is synchronous; diff the panes to recover the new id.
-      const after = useAppStore.getState().workspaces.find((w) => w.id === action.workspaceId)
-      const created = after?.panes.find((p) => !before.has(p.id))
-      return { ok: true, paneId: created?.id }
+      if (!paneId) return { ok: false, error: 'not_found' }
+      // E2-FR-11: line breaks become spaces (the variable is one line) and the
+      // spawn never falls back to typing it: the phone keeps it instead.
+      const text = action.prompt?.replace(/\r\n|\r|\n/g, ' ').trim() ?? ''
+      let promptFallback = false
+      if (text) {
+        promptFallback = remotePromptFallback(store, ws, preset, text, window.snApi.platform)
+        if (!promptFallback) {
+          useAppStore.getState().setPendingPrompt(paneId, { text, enter: true, source: 'remote', createdAt: Date.now(), mode: 'argvOnly' })
+        }
+      }
+      // Only the new console spawns; the desktop keeps its workspace (E2-FR-06).
+      useAppStore.getState().ensureMounted(action.workspaceId, { only: [paneId] })
+      return { ok: true, paneId, ...(promptFallback ? { promptFallback: true } : {}) }
     }
 
     case 'closePane': {
@@ -107,6 +170,30 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
     case 'runQuickCommand':
       // E8-FR-07: strict variant (the phone's console, its workspace, no activation).
       return runRemoteQuickCommand(action)
+
+    case 'mountWorkspace': {
+      // E2-FR-06: start every console of the workspace without activating it.
+      const ws = store.workspaces.find((w) => w.id === action.workspaceId)
+      if (!ws) return { ok: false, error: 'not_found' }
+      store.ensureMounted(ws.id)
+      return { ok: true, info: ws.panes.length }
+    }
+
+    case 'revealPane': {
+      // E2-FR-07: bring the window up first, then the console (workspace,
+      // maximize, minimize, focus) through the shared revealPane().
+      if (!store.workspaces.some((w) => w.panes.some((p) => p.id === action.paneId))) {
+        return { ok: false, error: 'not_found' }
+      }
+      window.snApi.window.reveal()
+      return revealPane(action.paneId) ? { ok: true } : { ok: false, error: 'not_found' }
+    }
+
+    case 'openUrl': {
+      if (!safeRemoteUrl(action.url)) return { ok: false, error: 'denied_url' }
+      window.snApi.system.openExternal(action.url)
+      return { ok: true }
+    }
 
     default:
       return { ok: false, error: 'unknown_action' }

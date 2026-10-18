@@ -3,7 +3,11 @@
 // the socket generation / liveness / revive / updated state machine of
 // src/mobile/src/lib/client.ts driven by a fake WebSocket and a fake clock.
 // Section M1 (E1-FR-03..07, 40): statusText, inPageAlerts, the workspace
-// selectors, paneStatus handling and switchWorkspaceAndView.
+// selectors and paneStatus handling.
+// Section M6 (E2-FR-03..06, 16, 47; R22-14): phone-only navigation (openPane,
+// the mount confirmation, mountAndOpen), goLive picking a deep link > lastPane
+// > nothing, a closed viewed pane going back to Home, Home row order and
+// unread, the row second line, lastViewed LRU and the collapsed sections.
 // Section M4 (E1-FR-24, 28): sendInput chunking, draft pruning on the first
 // authOk and the composer storage wipe on 4403, revoked and unpair.
 // Section M5 (E1-FR-32..36, 39; E5-FR-11): backStack with a fake history,
@@ -21,13 +25,14 @@ const BUNDLE_VERSION = '2.0.0'
 const code = buildSync({
   stdin: {
     resolveDir: root, loader: 'ts', contents: `
-export { client, RELOAD_FOR_KEY, IDLE_PROBE_MS, PONG_TIMEOUT, CONNECT_TIMEOUT_MS, REVIVE_PROBE_TIMEOUT } from './src/mobile/src/lib/client'
+export { client, RELOAD_FOR_KEY, IDLE_PROBE_MS, PONG_TIMEOUT, CONNECT_TIMEOUT_MS, REVIVE_PROBE_TIMEOUT, AWAIT_NEW_PANE_MS } from './src/mobile/src/lib/client'
 export { store } from './src/mobile/src/lib/store'
 export { classifyConnection, endpointHint, formatAgo } from './src/mobile/src/lib/connectionHealth'
 export { delayFor, RECONNECT_DELAYS } from './src/mobile/src/lib/reconnectSchedule'
-export { relativeAge, statusLine, statusAriaLabel, showsTime } from './src/mobile/src/lib/statusText'
+export { relativeAge, statusLine, statusAriaLabel, showsTime, rowLine, rowShowsTime } from './src/mobile/src/lib/statusText'
 export { createInPageAlerts, IN_PAGE_ALERTS_KEY } from './src/mobile/src/lib/inPageAlerts'
-export { viewedWorkspaceId, needsWorkspaceSwitch, waitingPanes, nextWaitingPane, statusMapOf } from './src/mobile/src/lib/workspace'
+export { viewedWorkspaceId, paneOpenable, isWorkspaceMounted, homeRows, isUnread, actionCount, waitingPanes, nextWaitingPane, statusMapOf } from './src/mobile/src/lib/workspace'
+export { withViewed, LAST_VIEWED_MAX } from './src/mobile/src/lib/prefs'
 export { setLang } from './src/mobile/src/lib/i18n'
 export { createBackStack } from './src/mobile/src/lib/backStack'
 export { createLongPress, LONG_PRESS_MS, LONG_PRESS_SLOP_PX, LONG_PRESS_VIBRATE_MS } from './src/mobile/src/lib/longPress'
@@ -124,6 +129,8 @@ function page({ paired = true, hash = '', online = true, session = new Map(), ho
 function live(opts = {}, appVersion = BUNDLE_VERSION) {
   const p = page(opts); p.client.start()
   const s = p.last(); s.open(); s.recv({ type: 'authOk', deviceId: 'dev1', state: snapshot, hostPlatform: 'win32', appVersion })
+  // E2-FR-01: going live lands on Home with nothing viewed; open the console.
+  if (p.state().phase === 'live') p.client.openPane('p')
   return { p, s }
 }
 
@@ -470,11 +477,14 @@ function testWorkspaceSelectors(p) {
   const snap = multi()
   const map = p.statusMapOf(snap)
   check(Object.keys(map).join() === 'a1,b1', 'statusMapOf rebuilds the map from panes[].status')
-  check(p.viewedWorkspaceId(snap, 'b2') === 'w2' && p.viewedWorkspaceId(snap, null) === 'w1' && p.viewedWorkspaceId(snap, 'gone') === 'w1', 'viewedWorkspaceId = workspace of the viewed pane, else the active one')
-  check(!p.needsWorkspaceSwitch(snap, 'w2', 'b1'), 'a running pane of another workspace needs no switch')
-  check(p.needsWorkspaceSwitch(snap, 'w2', 'b2'), 'a pane without a pty in another workspace needs the switch')
-  check(p.needsWorkspaceSwitch(snap, 'w2', 'new'), 'a pane missing from the snapshot needs the switch to its workspace')
-  check(!p.needsWorkspaceSwitch(snap, 'w1', 'new') && p.needsWorkspaceSwitch(null, 'w1', 'a1'), 'a new pane of the shown workspace needs none; no snapshot always switches')
+  check(p.viewedWorkspaceId(snap, 'b2') === 'w2' && p.viewedWorkspaceId(snap, null) === null && p.viewedWorkspaceId(snap, 'gone') === null, 'viewedWorkspaceId = workspace of the viewed pane, never the desktop active one (E2-FR-47)')
+  check(p.paneOpenable(snap, 'b1'), 'a running pane of another workspace opens as is')
+  check(!p.paneOpenable(snap, 'b2'), 'a stopped pane of a workspace the desktop has not mounted needs the confirmation')
+  check(!p.paneOpenable(snap, 'new'), 'a pane missing from the snapshot is not openable')
+  snap.mountedWorkspaceIds = ['w1', 'w2']
+  check(p.paneOpenable(snap, 'b2') && p.isWorkspaceMounted(snap, 'w2'), 'once w2 is mounted its stopped pane opens (the desktop shows or spawns it)')
+  snap.mountedWorkspaceIds = []
+  check(!p.isWorkspaceMounted(snap, 'w1'), 'mountedWorkspaceIds wins over activeWorkspaceId when present')
   const statuses = { a1: st('action'), a2: st('action'), b1: st('action'), b3: st('working') }
   check(p.waitingPanes(snap, statuses, null).map(r => r.paneId).join() === 'a2,a1,b1', 'waiting panes follow workspace then layoutOrder')
   check(p.waitingPanes(snap, statuses, 'a1').length === 2, 'the viewed pane is not counted')
@@ -502,25 +512,41 @@ async function testClientStatus() {
   check(!p.state().paneStatus.ghost && !p.state().paneStatus.b1, 'a state frame rebuilds the map and drops orphans')
   check(p.vibrations.length === 1, 'a state frame never alerts')
 
-  // switchWorkspaceAndView (E1-FR-07): running panes never move the desktop.
+  // Phone-only navigation (E2-FR-06): opening never sends switchWorkspace.
   const ctls = () => s.sent.filter(m => m.type === 'ctl')
-  void p.client.switchWorkspaceAndView('w2', 'b1')
-  check(ctls().length === 0 && s.sent.at(-1).type === 'sub' && s.sent.at(-1).paneId === 'b1', 'opening a running pane of another workspace only subscribes')
-  check(p.state().activePaneId === 'b1', 'the phone views b1 on its own')
-  const opening = p.client.switchWorkspaceAndView('w2', 'b2')
-  check(ctls().length === 1 && ctls()[0].action.kind === 'switchWorkspace' && ctls()[0].action.workspaceId === 'w2', 'a pane with running:false sends switchWorkspace first')
-  s.recv({ type: 'ctlAck', id: ctls()[0].id, ok: true })
+  check(p.state().screen === 'home' && p.state().activePaneId === null, 'going live shows Home with nothing viewed (no pane picked from the desktop workspace)')
+  check(p.client.openPane('b1') === 'open', 'openPane on a running pane of another workspace opens it')
+  check(ctls().length === 0 && s.sent.at(-1).type === 'sub' && s.sent.at(-1).paneId === 'b1', 'it only subscribes: the desktop never moves')
+  check(p.state().activePaneId === 'b1' && p.state().screen === 'terminal', 'the phone views b1 and the terminal slides in')
+  check(p.state().lastPane === 'b1' && p.local.get('snagentsos.lastPane') === 'b1', 'it becomes lastPane (snagentsos.lastPane)')
+  check(p.client.openPane('b2') === 'needsMount' && p.state().activePaneId === 'b1' && ctls().length === 0, 'a stopped pane of a workspace the desktop has not mounted answers needsMount and changes nothing')
+  check(p.client.requestOpen('b2') === 'needsMount' && p.state().mountAsk === 'b2', 'requestOpen opens the confirmation (mountAsk)')
+  check(p.client.requestOpen('nope') === 'gone' && p.state().toast === 'The console no longer exists', 'a pane that is not in the snapshot shows the toast')
+  const opening = p.client.mountAndOpen('b2')
+  check(ctls().length === 1 && ctls()[0].action.kind === 'mountWorkspace' && ctls()[0].action.workspaceId === 'w2', 'Start sends mountWorkspace for the pane workspace, never switchWorkspace')
+  s.recv({ type: 'ctlAck', id: ctls()[0].id, ok: true, info: 3 })
   await opening
-  check(p.state().activePaneId === 'b2' && s.sent.at(-1).paneId === 'b2', 'after the ack the pane is subscribed and viewed')
+  check(p.state().activePaneId === 'b2' && s.sent.at(-1).paneId === 'b2' && p.state().screen === 'terminal', 'after the ack the pane is subscribed and viewed')
+  const failing = p.client.mountAndOpen('b2')
+  s.recv({ type: 'ctlAck', id: ctls().at(-1).id, ok: false, error: 'not_found' })
+  await failing
+  check(p.state().toast === 'Could not start the consoles', 'a failed mount shows a toast')
+  p.client.leaveTerminal()
+  check(p.state().screen === 'home' && p.state().activePaneId === 'b2' && p.state().subscribedPaneId === 'b2', 'back to Home keeps the pane subscribed (instant return)')
+  p.client.showPane('b2')
 
-  // b2 closes on the desktop while viewed: fall back inside its workspace (w2), not the desktop's w1.
+  // b2 closes on the desktop while viewed: back to Home with a toast, no other pane picked (E2-FR-47).
   const closed = multi(); closed.workspaces[1].panes = closed.workspaces[1].panes.filter(x => x.id !== 'b2')
   closed.workspaces[1].layoutOrder = ['b1', 'b3']
   s.recv({ type: 'state', state: closed })
-  check(['b1', 'b3'].includes(p.state().activePaneId), 'a vanished pane falls back inside the viewed workspace')
-  const gone = multi(); gone.workspaces = [gone.workspaces[0]]
+  check(p.state().activePaneId === null && p.state().screen === 'home', 'a vanished viewed pane returns to Home without picking another')
+  check(p.state().toast === 'The console was closed' && s.sent.at(-1).type === 'unsub' && s.sent.at(-1).paneId === 'b2', 'with the toast "The console was closed", and its subscription dropped')
+  p.client.openPane('a1')
+  p.client.leaveTerminal()
+  p.state().setToast(null)
+  const gone = multi(); gone.workspaces = [gone.workspaces[1]]
   s.recv({ type: 'state', state: gone })
-  check(['a1', 'a2'].includes(p.state().activePaneId), 'a vanished workspace falls back to the desktop active one')
+  check(p.state().activePaneId === null && p.state().screen === 'home' && p.state().toast === null, 'a vanished pane while on Home just clears the view (no toast)')
   p.state().setInPageAlerts(false)
   check(p.local.get('snagentsos.alerts.inPage') === '0' && p.IN_PAGE_ALERTS_KEY === 'snagentsos.alerts.inPage', 'the preference persists under snagentsos.alerts.inPage')
   s.recv({ type: 'paneStatus', paneId: 'a2', status: st('working') })
@@ -738,14 +764,164 @@ function testTabsAndActions(p) {
   const snap = multi(); snap.workspaces[1].layoutOrder = ['b3', 'b1']
   const tabs = p.tabPanes(snap, 'b1')
   check(tabs.workspaceId === 'w2' && tabs.panes.map(x => x.id).join() === 'b3,b1,b2', 'tabs list the viewed workspace in layoutOrder, then the rest')
-  check(p.tabPanes(snap, null).workspaceId === 'w1', 'with nothing viewed the tabs follow the desktop workspace')
+  check(p.tabPanes(snap, null).workspaceId === null && p.tabPanes(snap, null).panes.length === 0, 'with nothing viewed there are no tabs (never the desktop workspace)')
 
-  check(p.paneActionIds({ resumable: true }).join() === 'rename,restart,restartResume,restartFresh,close', 'a resumable pane offers Relaunch resuming and New chat')
-  check(p.paneActionIds({}).join() === 'rename,restart,close' && p.paneActionIds({ resumable: false }).join() === 'rename,restart,close', 'without resumable (SSH, no session, old desktop) both are hidden')
+  check(p.paneActionIds({ resumable: true }).join() === 'rename,restart,restartResume,restartFresh,reveal,copyTitle,close', 'a resumable pane offers Relaunch resuming and New chat, then Show on the PC and Copy title (E2-FR-08)')
+  check(p.paneActionIds({}).join() === 'rename,restart,reveal,copyTitle,close' && p.paneActionIds({ resumable: false }).join() === 'rename,restart,reveal,copyTitle,close', 'without resumable (SSH, no session, old desktop) both are hidden')
   check(p.paneActionIds({ resumable: true }, { rename: false })[0] === 'restart', 'the main sheet omits Rename')
   check(JSON.stringify(p.restartAction('w', 'p', 'restartResume')) === '{"kind":"restartPane","workspaceId":"w","paneId":"p","resume":true}', 'Relaunch resuming sends restartPane resume:true')
   check(JSON.stringify(p.restartAction('w', 'p', 'restartFresh')) === '{"kind":"restartPane","workspaceId":"w","paneId":"p","resume":false}', 'New chat sends restartPane resume:false')
   check(!('resume' in p.restartAction('w', 'p', 'restart')), 'plain Restart sends no resume (the header button rule)')
+}
+
+/** Section M6: pure Home logic (rows, unread, second line, LRU). */
+function testHomeLogic(p) {
+  p.setLang('en')
+  const now = 10 * 24 * 60 * MIN
+  const ws = { id: 'w', name: 'W', layoutOrder: ['a', 'b', 'c', 'd', 'e', 'f'], panes: ['f', 'e', 'd', 'c', 'b', 'a'].map(id => ({ id, title: id, type: 'claude', running: true })) }
+  const statuses = { b: st('working'), c: st('done', { stateSince: 50 }), d: st('error'), e: st('done', { stateSince: 50 }), f: st('action', { reason: 'question' }) }
+  const lastViewed = { e: 100 }
+  const order = (map, seen) => p.homeRows(ws, map, seen).map(x => x.id).join()
+  check(order(statuses, lastViewed) === 'f,d,c,b,a,e', 'rows: action > error > unread done > working > rest, layoutOrder inside each rank (got ' + order(statuses, lastViewed) + ')')
+  check(order({ ...statuses, a: st('action') }, lastViewed).startsWith('a,f'), 'two in action keep layoutOrder between them')
+  check(order({}, {}) === 'a,b,c,d,e,f', 'without statuses the order is layoutOrder (stable)')
+  check(p.isUnread(st('done', { stateSince: 50 }), undefined) && !p.isUnread(st('done', { stateSince: 50 }), 50) && !p.isUnread(st('working', { stateSince: 50 }), 0) && !p.isUnread(undefined, 0), 'unread = action/done/error newer than the last view')
+  check(p.actionCount(ws, { ...statuses, a: st('action') }) === 2, 'actionCount counts the consoles in action (the red badge)')
+
+  const line = (status, rest = {}) => p.rowLine({ status, running: true, mounted: true, ...rest }, now)
+  check(line(st('action', { reason: 'permission' })) === 'Waiting for permission' && line(st('action', { reason: 'question' })) === 'Question pending', 'permission / question')
+  check(line(st('action', { reason: 'plan' })) === 'Plan to approve' && line(st('action', { reason: 'elicitation' })) === 'MCP response pending', 'plan / elicitation')
+  check(line(st('working', { stateSince: now - 2 * MIN })) === 'Working 2m' && line(st('done', { stateSince: now - 3 * MIN })) === 'Done 3m ago' && line(st('error', { stateSince: now - MIN })) === 'Error 1m ago', 'working / done / error with their age')
+  check(line(st('unknown')) === 'Lost connection to agent', 'unknown')
+  check(line(undefined) === 'Idle' && line(undefined, { running: false }) === 'Stopped' && line(undefined, { running: false, mounted: false }) === 'Not started', 'no status: Idle (running), Stopped, Not started (workspace not mounted)')
+  check(line(undefined, { running: false, exitCode: 3 }) === 'Exited (code 3)', 'a shell that ended on its own says so')
+  check(p.rowShowsTime(st('error')) && p.rowShowsTime(st('working')) && !p.rowShowsTime(st('action')) && !p.rowShowsTime(undefined), 'working, done and error drive the 30s ticker')
+  p.setLang('es')
+  check(line(st('action', { reason: 'question' })) === 'Pregunta pendiente' && line(undefined, { running: false, mounted: false }) === 'Sin iniciar' && line(st('unknown')) === 'Se perdio la conexion con el agente', 'Spanish row lines')
+  p.setLang('en')
+
+  let map = {}
+  for (let i = 0; i < p.LAST_VIEWED_MAX + 5; i++) map = p.withViewed(map, 'p' + i, 1000 + i)
+  check(Object.keys(map).length === p.LAST_VIEWED_MAX && !('p0' in map) && !('p4' in map) && 'p5' in map, 'lastViewed keeps the 200 most recent entries (LRU)')
+  map = p.withViewed(map, 'p5', 99999)
+  map = p.withViewed(map, 'new', 5000000)
+  check('p5' in map && !('p6' in map), 'viewing again refreshes an entry so it survives the trim')
+}
+
+/** Section M6: the client's goLive / storage side of Home. */
+async function testHomeClient() {
+  const authOk = (s, state) => s.recv({ type: 'authOk', deviceId: 'dev1', state, hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+  {
+    // goLive: lastPane is viewed (subscribed) but the screen stays Home.
+    const p = page()
+    p.state().update({ lastPane: 'b1' })
+    p.client.start(); const s = p.last(); s.open(); authOk(s, multi())
+    check(p.state().activePaneId === 'b1' && s.sent.some(m => m.type === 'sub' && m.paneId === 'b1') && p.state().screen === 'home', 'goLive subscribes lastPane and stays on Home')
+    check(!s.sent.some(m => m.type === 'ctl'), 'and never asks the desktop to switch')
+  }
+  {
+    // lastPane of a stopped pane of an unmounted workspace is not pre-opened.
+    const p = page()
+    p.state().update({ lastPane: 'b2' })
+    p.client.start(); const s = p.last(); s.open(); authOk(s, multi())
+    check(p.state().activePaneId === null, 'a lastPane that would need a mount is not subscribed')
+  }
+  {
+    // A pending deep link wins over lastPane and opens the terminal.
+    const p = page()
+    p.state().update({ lastPane: 'b1' })
+    p.client.setPendingDeepLink('a1')
+    p.client.start(); const s = p.last(); s.open(); authOk(s, multi())
+    check(p.state().activePaneId === 'a1' && p.state().screen === 'terminal' && !s.sent.some(m => m.type === 'sub' && m.paneId === 'b1'), 'a pending deep link is applied in goLive before lastPane')
+    p.client.leaveTerminal()
+    p.client.setPendingDeepLink('b2')
+    check(p.state().mountAsk === 'b2' && p.state().activePaneId === 'a1' && !s.sent.some(m => m.type === 'ctl'), 'a deep link to an unmounted workspace only asks, it never mounts alone')
+    p.state().update({ mountAsk: null })
+    p.client.setPendingDeepLink('ghost')
+    check(p.state().toast === 'The console no longer exists' && p.state().screen === 'home', 'a deep link to a gone pane shows the toast and stays on Home')
+  }
+  {
+    // Reconnect while the viewed pane was closed: Home + toast.
+    const p = page(); p.client.start(); let s = p.last(); s.open(); authOk(s, multi())
+    p.client.openPane('b3')
+    s.drop(1006); p.advance(1000); s = p.last(); s.open()
+    const without = multi(); without.workspaces[1].panes = without.workspaces[1].panes.filter(x => x.id !== 'b3')
+    authOk(s, without)
+    check(p.state().activePaneId === null && p.state().screen === 'home' && p.state().toast === 'The console was closed', 'a reconnect that finds the viewed pane gone returns to Home with the toast')
+    const again = p.client.openPane('b1')
+    s.drop(1006); p.advance(1000); s = p.last(); s.open(); authOk(s, multi())
+    check(again === 'open' && p.state().activePaneId === 'b1' && p.state().screen === 'terminal', 'a reconnect keeps the viewed pane and the terminal')
+  }
+  {
+    // noteViewed: stamped at least at stateSince (desktop clock ahead of the phone).
+    const p = page(); p.client.start(); const s = p.last(); s.open()
+    const snap = multi(); snap.workspaces[1].panes[0].status = st('done', { stateSince: 1700000000000 + 10 * MIN })
+    authOk(s, snap)
+    p.client.openPane('b1')
+    check(p.state().lastViewedAt.b1 === 1700000000000 + 10 * MIN, 'a view is stamped at the status stateSince when the desktop clock runs ahead')
+    check(JSON.parse(p.local.get('snagentsos.lastViewed')).b1 === 1700000000000 + 10 * MIN, 'and persisted in snagentsos.lastViewed')
+    p.state().toggleCollapsed('w2')
+    check(JSON.parse(p.local.get('snagentsos.home.collapsed')).join() === 'w2', 'collapsing persists snagentsos.home.collapsed')
+    p.state().toggleCollapsed('w2')
+    check(!p.local.has('snagentsos.home.collapsed') && p.state().homeCollapsed.length === 0, 'expanding everything removes the key (default: all expanded)')
+    // promptFallback travels from the ack to the caller.
+    const res = p.client.sendCtl({ kind: 'createPane', workspaceId: 'w1', presetId: 'c', prompt: 'x' })
+    const ctl = s.sent.filter(m => m.type === 'ctl').at(-1)
+    check(ctl.action.prompt === 'x', 'createPane carries the prompt')
+    s.recv({ type: 'ctlAck', id: ctl.id, ok: true, paneId: 'n1', promptFallback: true })
+    const r = await res
+    check(r.ok && r.paneId === 'n1' && r.promptFallback === true, 'the ack promptFallback reaches the caller')
+    let settled = false
+    void p.client.sendCtl({ kind: 'mountWorkspace', workspaceId: 'w1' }, 30000).then(() => { settled = true })
+    p.advance(15000); await Promise.resolve()
+    check(!settled, 'sendCtl takes a per-action timeout')
+    p.advance(16000); await Promise.resolve(); await Promise.resolve()
+    check(settled, 'and times out after it')
+    // Toasts: newest last, at most 3, dismissable.
+    for (const x of ['1', '2', '3', '4']) p.state().setToast(x)
+    check(p.state().toasts.map(x => x.text).join() === '2,3,4' && p.state().toast === '4', 'at most 3 toasts; toast mirrors the newest')
+    p.state().dismissToast(p.state().toasts.at(-1).id)
+    check(p.state().toast === '3' && p.state().toasts.length === 2, 'dismissing the newest falls back to the previous one')
+  }
+  {
+    // noteViewed uses the desktop clock only: a phone clock 5 minutes ahead
+    // must not hide a done that lands after the view.
+    const p = page(); p.client.start(); const s = p.last(); s.open()
+    const base = 1700000000000
+    const snap = multi(); snap.workspaces[1].panes[0].status = st('working', { stateSince: base - 10 * MIN })
+    authOk(s, snap)
+    p.client.openPane('b1')
+    check(p.state().lastViewedAt.b1 === base - 10 * MIN, 'a view is stamped at the stateSince of the state it saw, never the phone clock')
+    p.client.leaveTerminal()
+    const done = multi(); done.workspaces[1].panes[0].status = st('done', { stateSince: base - 8 * MIN })
+    s.recv({ type: 'state', state: done })
+    check(p.isUnread(p.state().paneStatus.b1, p.state().lastViewedAt.b1), 'a done after the view reads unread even when it is older than the phone clock')
+    p.client.openPane('b1'); p.client.leaveTerminal()
+    check(!p.isUnread(p.state().paneStatus.b1, p.state().lastViewedAt.b1), 'and read once it was seen')
+    // Switching tabs reads the console being left too.
+    p.client.openPane('a1')
+    const later = multi(); later.workspaces[0].panes[0].status = st('done', { stateSince: base + MIN })
+    s.recv({ type: 'state', state: later })
+    p.client.openPane('a2')
+    check(p.state().lastViewedAt.a1 === base + MIN && !p.isUnread(p.state().paneStatus.a1, p.state().lastViewedAt.a1), 'a tab switch stamps the console left behind (it finished while on screen)')
+  }
+  {
+    // A console just created may be missing from a state frame built before it existed.
+    const p = page(); p.client.start(); const s = p.last(); s.open(); authOk(s, multi())
+    p.client.showPane('n1')
+    check(p.state().screen === 'terminal' && p.state().activePaneId === 'n1', 'the acked console opens before any snapshot lists it')
+    s.recv({ type: 'state', state: multi() })
+    check(p.state().screen === 'terminal' && p.state().activePaneId === 'n1' && p.state().toast !== 'The console was closed', 'a stale frame without it does not read as "the console was closed"')
+    const withNew = multi(); withNew.workspaces[0].panes.push({ id: 'n1', title: 'N1', type: 'claude', running: false })
+    s.recv({ type: 'state', state: withNew })
+    check(p.state().activePaneId === 'n1' && p.state().lastPane === 'n1', 'once listed it stays and becomes lastPane')
+    s.recv({ type: 'state', state: multi() })
+    check(p.state().screen === 'home' && p.state().activePaneId === null && p.state().toast === 'The console was closed', 'after that, a frame without it is a real close')
+    p.client.showPane('n2')
+    p.advance(p.AWAIT_NEW_PANE_MS + 1)
+    s.recv({ type: 'state', state: multi() })
+    check(p.state().screen === 'home' && p.state().activePaneId === null, 'a created console that never shows up gives up after AWAIT_NEW_PANE_MS')
+  }
 }
 
 async function main() {
@@ -759,6 +935,8 @@ async function main() {
   testSheetDrag(p)
   testTabsAndActions(p)
   await testClientStatus()
+  testHomeLogic(p)
+  await testHomeClient()
   testGeneration()
   testBackoff()
   testLiveness()
