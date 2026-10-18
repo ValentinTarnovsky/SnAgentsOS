@@ -142,6 +142,8 @@ async function main() {
       check(rec.takeRecovery()?.reason === 'unresponsive', 'the hang recovery shows the card')
       st.answers.push('abort'); rec.onUnresponsive(win); rec.onResponsive(); await flush(); await flush()
       check(st.kills === 1 && st.reloads === 1, 'the renderer answering again closes the dialog without reloading')
+      st.answers.push('abort'); rec.onUnresponsive(win); rec.onGone(win, { reason: 'crashed', exitCode: 2 }); await flush(); await flush()
+      check(st.boxes.at(-1).opts.signal.aborted && st.kills === 1 && st.reloads === 1 && st.timers.some(t => t.ms === 300), 'a hung renderer that crashes closes its dialog and takes the normal reload path')
       st.quitting = true; const before = st.boxes.length; rec.onUnresponsive(win)
       check(st.boxes.length === before, 'no hang dialog during the quit')
     }
@@ -182,6 +184,13 @@ async function main() {
     check(raw.length <= CRASH_MAX_BYTES && big.message.length === 1024, 'each record stays under 16KB, message trimmed')
     check(raw[0] !== 0xef, 'records are written without a BOM')
     check(!fs.readdirSync(path.join(dir, 'crashes')).some(f => f.endsWith('.tmp')), 'no temp file is left behind (atomic rename)')
+    const home = 'C:\\Users\\Tester'
+    const scrubbed = new CrashStore(path.join(dir, 'scrubbed'), '2.0.0', 20, () => ({ home, extraSecrets: ['hunter2'] }))
+    const red = scrubbed.write({ kind: 'render-error', at: 1_800_000_000_001, scope: 'window', message: 'login hunter2 failed', stack: 'at f (c:\\users\\tester\\app\\x.js:1:2)\nat g (C:\\Users\\Tester\\y.js:3:4)' })
+    const redRaw = fs.readFileSync(path.join(dir, 'scrubbed', red.id + '.json'), 'utf8')
+    check(!redRaw.includes('hunter2') && !/tester/i.test(redRaw) && redRaw.includes('~'), 'crash records are redacted on disk (secrets and home folder)')
+    const throwing = new CrashStore(path.join(dir, 'throwing'), '2.0.0', 20, () => { throw new Error('config unreadable') })
+    check(throwing.write({ kind: 'unresponsive', at: 2 }) !== null, 'a failing redact source never blocks the record')
     const blocked = new CrashStore(path.join(dir, 'crashes', big.id + '.json', 'sub'), '2.0.0')
     check(blocked.write({ kind: 'unresponsive', at: 1 }) === null, 'a failed write returns null instead of throwing')
     fs.rmSync(dir, { recursive: true, force: true })

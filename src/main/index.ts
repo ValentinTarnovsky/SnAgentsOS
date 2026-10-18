@@ -34,11 +34,13 @@ import { CodexBridge } from './status/CodexBridge'
 import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
 import { join } from 'path'
+import { homedir } from 'os'
 import { ensureTray, destroyTray, hasTray } from './tray'
 import { mainT, shortTime } from './i18n'
 import { runLegacyMigrationAtBoot, scheduleLegacyCleanup } from './migration/runLegacyMigration'
 import { installLogRing } from './diagnostics/logRing'
 import { CrashStore } from './crash/crashStore'
+import { diagnosticsSecrets } from './diagnostics/buildDiagnostics'
 import { RendererRecovery } from './crash/rendererRecovery'
 import { copyMainDiagnostics, registerCrashIpc, type CrashIpcDeps } from './ipc/registerCrashIpc'
 import { updateState } from './updateState'
@@ -412,7 +414,11 @@ async function bootstrap(): Promise<void> {
   })
   statusIpc = registerStatusIpc(statusManager, hookServer, codexBridge, discordNotifier)
   // Crash records live under dataDir(), in place after the legacy migration.
-  crashStore = new CrashStore(join(dataDir(), 'crashes'), app.getVersion())
+  // Records are scrubbed like the copied diagnostics (home folder, tokens, sends).
+  crashStore = new CrashStore(join(dataDir(), 'crashes'), app.getVersion(), undefined, () => ({
+    home: homedir(),
+    extraSecrets: diagnosticsSecrets(configStore.load()),
+  }))
   crashIpcDeps = {
     recovery: rendererRecovery,
     crashes: crashStore,
