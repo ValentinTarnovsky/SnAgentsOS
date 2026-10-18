@@ -180,6 +180,8 @@ export interface AppState {
   deleteWorkspace: (id: string) => void
   renameWorkspace: (id: string, name: string) => void
   toggleFavorite: (id: string) => void
+  /** Fold or unfold the sidebar agent rows under a workspace (persisted, E5-FR-19). */
+  toggleAgentsCollapsed: (id: string) => void
   setActive: (id: string) => void
   toggleSidebar: () => void
   addPane: (workspaceId: string, pane?: Partial<Pane>) => void
@@ -456,6 +458,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   toggleFavorite: (id) =>
     set((s) => ({
       workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, favorite: !w.favorite } : w)),
+    })),
+
+  toggleAgentsCollapsed: (id) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => {
+        if (w.id !== id) return w
+        if (w.agentsCollapsed) {
+          const { agentsCollapsed: _open, ...rest } = w
+          return rest
+        }
+        return { ...w, agentsCollapsed: true }
+      }),
     })),
 
   setActive: (id) => {
