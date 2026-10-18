@@ -14,6 +14,16 @@ function gitField(summary: GitSummary | undefined): Pick<RemoteWorkspaceInfo, 'g
   return git ? { git } : {}
 }
 
+/** Value signature of what the phone sees of the git summaries (workspace chips only). */
+function remoteGitSig(summaries: Record<string, GitSummary>): string {
+  const out: Record<string, unknown> = {}
+  for (const ws of useAppStore.getState().workspaces) {
+    const chip = remoteGitChip(summaries[workspaceGitKey(ws.id)])
+    if (chip) out[ws.id] = chip
+  }
+  return JSON.stringify(out)
+}
+
 /** Build the compact desktop-state mirror pushed to phones. */
 function buildSnapshot(state: AppState): RemoteStateSnapshot {
   const sessions = useAgentStore.getState().sessions
@@ -102,12 +112,17 @@ export function startRemoteSnapshotSync(): () => void {
   const unsubUsage = useUsageStore.subscribe(schedule)
   // Git summaries: gitStore only swaps `summaries` when one changes by value,
   // so a quiet poll never pushes a new state to the phone (E7-FR-09).
+  // Only the phone fields of workspace keys count: a staged-only change, a
+  // pane worktree or `updatedAt` never reach the phone, so they push nothing.
   let prevGit = useGitStore.getState().summaries
+  let prevGitSig = remoteGitSig(prevGit)
   const unsubGit = useGitStore.subscribe((s) => {
-    if (s.summaries !== prevGit) {
-      prevGit = s.summaries
-      schedule()
-    }
+    if (s.summaries === prevGit) return
+    prevGit = s.summaries
+    const sig = remoteGitSig(s.summaries)
+    if (sig === prevGitSig) return
+    prevGitSig = sig
+    schedule()
   })
   // A session becoming (un)resumable changes `resumable`.
   let prevSessions = useAgentStore.getState().sessions

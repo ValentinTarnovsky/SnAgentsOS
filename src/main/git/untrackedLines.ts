@@ -3,7 +3,8 @@
  * repo full of logs never stalls a refresh: files up to 1 MB, at most 200
  * files and 8 MB read per run, binaries (a NUL in the first 8 KB) skipped.
  * Results are cached by (path, size, mtimeMs), so an unchanged file is never
- * read twice. Anything left uncounted marks the summary `approx`.
+ * read twice. Anything left uncounted marks the summary `approx`. Symlinks
+ * are not followed (lstat), so an untracked link never reads outside the repo.
  */
 import { promises as fsp } from 'fs'
 import { join } from 'path'
@@ -47,7 +48,7 @@ export class UntrackedCounter {
   private fs: UntrackedFs
 
   constructor(fs?: UntrackedFs) {
-    this.fs = fs ?? { stat: (p) => fsp.stat(p), readFile: (p) => fsp.readFile(p) }
+    this.fs = fs ?? { stat: (p) => fsp.lstat(p), readFile: (p) => fsp.readFile(p) }
   }
 
   /** Cached entries (tests). */
