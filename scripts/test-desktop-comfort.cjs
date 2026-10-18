@@ -601,7 +601,266 @@ async function main() {
     check(c.trapTabIndex(3, 2, false) === 0 && c.trapTabIndex(3, 0, true) === 2 && c.trapTabIndex(3, -1, false) === 0 && c.trapTabIndex(3, -1, true) === 2 && c.trapTabIndex(0, 0, false) === -1, 'Tab wraps inside the dialog both ways')
   }
 
-  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices, pty lifecycle, update state, settings search, key chips, wizard keys)`)
+  // --- "Open in SnAgentsOS": --open parsing and validation (E4-FR-32) ----------
+  {
+    const o = load('src/main/openRequest.ts')
+    const p = (argv, cwd = '') => o.parseOpenArg(['C:\\App\\SnAgentsOS.exe', ...argv], cwd)
+    check(p(['--open', 'C:\\repo']) === 'C:\\repo' && p(['--open=C:\\repo']) === 'C:\\repo', '--open X and --open=X')
+    check(p(['--open', 'C:\\repo\\']) === 'C:\\repo' && p(['--open=D:/work/app/']) === 'D:\\work\\app', 'trailing separator dropped, slashes unified')
+    check(p(['--open', 'C:"']) === 'C:\\' && p(['--open=C:"']) === 'C:\\' && p(['--open', 'D:\\sub\\"']) === 'D:\\sub', 'drive root quoting: C:" is C:\\')
+    check(p(['--open', '"C:\\Program Files\\repo"']) === 'C:\\Program Files\\repo', 'surrounding quotes are removed')
+    check(p(['--open', 'repo'], 'C:\\work') === 'C:\\work\\repo' && p(['--open', '..\\other'], 'C:\\work\\a') === 'C:\\work\\other' && p(['--open=.'], 'C:\\work') === 'C:\\work', 'relative paths resolve against the event cwd')
+    check(p(['--open', '--allow-file-access-from-files', '--original-process-start-time=1337', 'C:\\repo']) === 'C:\\repo', 'Chromium switches between --open and its value are skipped')
+    check(p(['--allow-file-access-from-files', '--open=C:\\repo', '--enable-features=X']) === 'C:\\repo', 'switches before and after --open=')
+    check(p(['--open']) === null && p(['--open', '--x']) === null && p(['--open=']) === null && p([]) === null && p(['C:\\repo']) === null, 'no value, or no --open, is null')
+    check(p(['--open', '\\\\wsl$\\Ubuntu\\home\\me']) === '\\\\wsl$\\Ubuntu\\home\\me' && p(['--open', '\\\\wsl.localhost\\Ubuntu\\']) === '\\\\wsl.localhost\\Ubuntu' && p(['--open=\\\\server\\share\\dir']) === '\\\\server\\share\\dir', 'UNC and \\\\wsl$ survive')
+    check(o.isAcceptableOpenPath('C:\\repo') && o.isAcceptableOpenPath('\\\\wsl$\\Ubuntu') && o.isAcceptableOpenPath('\\\\server\\share\\x') && o.isAcceptableOpenPath('/home/me'), 'absolute drive, UNC and posix paths are acceptable')
+    check(!o.isAcceptableOpenPath('repo') && !o.isAcceptableOpenPath('\\repo') && !o.isAcceptableOpenPath('\\\\server') && !o.isAcceptableOpenPath('\\\\.\\PhysicalDrive0') && !o.isAcceptableOpenPath('\\\\?\\C:\\x') && !o.isAcceptableOpenPath('C:\\' + 'a'.repeat(1030)) && !o.isAcceptableOpenPath(''), 'relative, rootless, device and over-long paths are refused')
+
+    const warns = []
+    const warn = msg => warns.push(msg)
+    const fakeStat = map => async q => {
+      if (!(q in map)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      return { isDirectory: () => map[q] === 'dir', isFile: () => map[q] === 'file' }
+    }
+    const stat = fakeStat({ 'C:\\repo': 'dir', 'C:\\repo\\a.txt': 'file', '\\\\wsl$\\Ubuntu\\home': 'dir', 'C:\\dev': 'other' })
+    check(await o.validateOpenPath('C:\\repo', stat, 3000, warn) === 'C:\\repo', 'an existing folder is valid')
+    check(await o.validateOpenPath('C:\\repo\\a.txt', stat, 3000, warn) === 'C:\\repo', 'a file opens its folder')
+    check(await o.validateOpenPath('\\\\wsl$\\Ubuntu\\home', stat, 3000, warn) === '\\\\wsl$\\Ubuntu\\home', '\\\\wsl$ folder is valid')
+    check(await o.validateOpenPath('C:\\missing', stat, 3000, warn) === null && /does not exist/.test(warns.at(-1)), 'a missing path is null with a warning')
+    check(await o.validateOpenPath('C:\\dev', stat, 3000, warn) === null && /not a folder/.test(warns.at(-1)), 'neither file nor folder is null')
+    check(await o.validateOpenPath('relative', stat, 3000, warn) === null && await o.validateOpenPath(null, stat, 3000, warn) === null, 'unacceptable paths never reach the stat')
+    const t0 = Date.now()
+    const hung = await o.validateOpenPath('\\\\deadserver\\share', () => new Promise(() => {}), 60, warn)
+    const took = Date.now() - t0
+    check(hung === null && /within 60 ms/.test(warns.at(-1)) && took < 1000, `a stat that never answers times out (${took} ms)`)
+
+    const pushed = []
+    const q = new o.OpenRequestQueue(req => pushed.push(req))
+    check(q.take() === null, 'empty queue')
+    const r1 = o.makeOpenRequest('C:\\repo', 'argv'), r2 = o.makeOpenRequest('C:\\other', 'second-instance')
+    check(typeof r1.id === 'string' && r1.id.length >= 16 && r1.id !== r2.id && r2.source === 'second-instance', 'requests get unique ids')
+    q.offer(r1); q.offer(r2)
+    check(pushed.length === 2 && q.take() === r2 && q.take() === null, 'every offer pushes; take consumes the latest once')
+
+    const n = o.normalizeOpenPath
+    check(n('C:\\Repos\\App\\') === 'c:\\repos\\app' && n('c:/repos/app') === 'c:\\repos\\app' && n('C:\\Repos\\.\\x\\..\\App') === 'c:\\repos\\app', 'normalize: case, trailing separator, slashes, dot segments')
+    check(n('C:\\') === 'c:' && n('C:') === 'c:' && n('C:\\..\\..') === 'c:', 'drive root, never above it')
+    check(n('\\\\Server\\Share\\Dir\\') === '\\\\server\\share\\dir' && n('//wsl$/Ubuntu/home') === '\\\\wsl$\\ubuntu\\home' && n('\\\\srv\\share\\..\\..') === '\\\\srv\\share', 'UNC keeps its prefix and root')
+    check(n('') === '' && n('  ') === '', 'empty')
+  }
+
+  // --- "Open in SnAgentsOS": matching and dispatch in the renderer (E4-FR-33) ---
+  {
+    const raf = []
+    const storage = new Map()
+    const sessionStorage = { getItem: k => storage.has(k) ? storage.get(k) : null, setItem: (k, v) => storage.set(k, String(v)), removeItem: k => storage.delete(k) }
+    let pending = null, openCb = null, takes = 0
+    const snApi = {
+      config: { save() {} }, pty: { write() {} },
+      app: { takePendingOpen: async () => { takes++; const r = pending; pending = null; return r }, onOpenPath: cb => { openCb = cb; return () => { openCb = null } } },
+    }
+    const overrides = {
+      window: { snApi }, sessionStorage, document: { hasFocus: () => true },
+      requestAnimationFrame: fn => { raf.push(fn); return raf.length }, cancelAnimationFrame() {},
+    }
+    const src = `
+      export { useAppStore } from './store'
+      export { useToastStore } from './toast'
+      export { pickOpenWorkspace, dispatchOpenRequest, initOpenRequests, setWizardDraftCwd } from './openRequest'
+    `
+    const r = loadRenderer(src, overrides)
+    const S = r.useAppStore
+    const ws = (id, cwd, extra = {}) => ({ id, name: id, cwd, panes: [{ id: id + '-p', type: 'shell', title: 'c', icon: 'terminal' }], ...extra })
+    const workspaces = [
+      ws('wa', 'C:\\Repos\\App', { setupId: 'conn1' }),
+      ws('wb', 'c:/repos/app/'),
+      ws('wc', 'C:\\Other'),
+      ws('wd', 'C:\\Other\\', { favorite: true }),
+      ws('we', '\\\\srv\\share\\proj', { setupId: 'conn1' }),
+      ws('wf', '\\\\SRV\\Share\\Proj\\', { setupId: 'conn2' }),
+    ]
+    const pick = (path, active = null) => r.pickOpenWorkspace(workspaces, active, path)?.id ?? null
+    check(pick('C:\\REPOS\\APP') === 'wb' && pick('c:\\repos\\app\\', 'wa') === 'wb', 'same folder in any case or trailing slash; no setupId wins even over the active one')
+    check(pick('C:\\Other', 'wc') === 'wc' && pick('C:\\Other', 'wd') === 'wd', 'tie: the active workspace first')
+    check(pick('c:/other') === 'wd', 'tie without the active: sidebar order (favorites first)')
+    check(pick('\\\\srv\\share\\proj', 'wf') === 'wf' && pick('\\\\srv\\share\\proj') === 'we', 'only setupId workspaces still match, active then order')
+    check(pick('C:\\Nope') === null && pick('') === null, 'no match')
+
+    S.setState({ hydrated: true, workspaces, activeWorkspaceId: 'wc', mountedWorkspaces: { wc: 'full' }, settingsOpen: true, paletteOpen: true })
+    S.getState().updateSettings({ language: 'es' })
+    check(r.dispatchOpenRequest({ id: 'r1', path: 'C:\\repos\\app', source: 'argv' }) === 'activated', 'an existing folder activates its workspace')
+    let st = S.getState()
+    check(st.activeWorkspaceId === 'wb' && st.mountedWorkspaces.wb && !st.settingsOpen && !st.paletteOpen && !st.wizardOpen, 'workspace mounted and active, palette and Settings closed')
+    check(r.dispatchOpenRequest({ id: 'r1', path: 'C:\\repos\\app', source: 'argv' }) === 'duplicate', 'the same id never runs twice')
+    check(r.dispatchOpenRequest({ path: 'C:\\x' }) === 'ignored' && r.dispatchOpenRequest(null) === 'ignored' && r.dispatchOpenRequest({ id: 'z', path: '' }) === 'ignored', 'malformed requests are ignored')
+
+    S.setState({ settingsOpen: true, paletteOpen: true })
+    check(r.dispatchOpenRequest({ id: 'r2', path: 'D:\\New\\proj', source: 'second-instance' }) === 'wizard', 'a new folder opens the wizard')
+    st = S.getState()
+    check(st.wizardOpen && st.wizardPrefill.cwd === 'D:\\New\\proj' && st.wizardPrefill.name === 'proj' && !st.settingsOpen && !st.paletteOpen, 'wizard prefilled with cwd and basename, above a closed Settings and palette')
+
+    r.setWizardDraftCwd('D:\\New\\proj')
+    check(r.dispatchOpenRequest({ id: 'r3', path: 'd:/new/proj/', source: 'second-instance' }) === 'wizard' && S.getState().wizardPrefill.cwd === 'D:\\New\\proj', 'the same folder again leaves the wizard alone')
+    check(r.dispatchOpenRequest({ id: 'r4', path: 'E:\\Work\\api', source: 'second-instance' }) === 'busy', 'another folder does not overwrite the wizard')
+    const busy = r.useToastStore.getState().items.find(t => t.dedupeKey === 'open:wizardBusy')
+    check(busy && busy.kind === 'info' && busy.title === 'Terminá o cancelá el workspace en creación para abrir api' && S.getState().wizardPrefill.cwd === 'D:\\New\\proj', 'info toast names the folder; the draft survives')
+    r.setWizardDraftCwd('')
+    check(r.dispatchOpenRequest({ id: 'r5', path: 'F:\\y', source: 'second-instance' }) === 'wizard' && S.getState().wizardPrefill.cwd === 'F:\\y', 'an open wizard with no folder yet takes the new one')
+    r.setWizardDraftCwd(null)
+
+    S.setState({ hydrated: false, wizardOpen: false, wizardPrefill: null })
+    check(r.dispatchOpenRequest({ id: 'r6', path: 'C:\\Other', source: 'argv' }) === 'ignored', 'before hydrate nothing runs')
+    S.setState({ hydrated: true })
+    check(r.dispatchOpenRequest({ id: 'r6', path: 'C:\\Other', source: 'argv' }) === 'activated' && S.getState().activeWorkspaceId === 'wd', 'the same request runs once hydrated')
+
+    // A reload: fresh module state, same sessionStorage.
+    const r2 = loadRenderer(src, overrides)
+    r2.useAppStore.setState({ hydrated: true, workspaces, activeWorkspaceId: 'wa' })
+    check(r2.dispatchOpenRequest({ id: 'r1', path: 'C:\\repos\\app', source: 'argv' }) === 'duplicate' && r2.useAppStore.getState().activeWorkspaceId === 'wa', 'a request handled before a reload is not handled again')
+
+    // initOpenRequests: pulls what main holds, then follows pushes.
+    pending = { id: 'p1', path: 'C:\\Repos\\App', source: 'argv' }
+    r2.useAppStore.setState({ activeWorkspaceId: 'wc' })
+    const stop = r2.initOpenRequests()
+    await new Promise(res => setTimeout(res, 10))
+    check(takes === 1 && r2.useAppStore.getState().activeWorkspaceId === 'wb' && typeof openCb === 'function', 'init takes the pending request and subscribes')
+    pending = { id: 'p2', path: 'C:\\Other', source: 'second-instance' }
+    openCb(pending)
+    await new Promise(res => setTimeout(res, 10))
+    check(takes === 2 && pending === null && r2.useAppStore.getState().activeWorkspaceId === 'wd', 'a push is handled and then cleared from main (dedupe skips the echo)')
+    stop()
+    check(openCb === null, 'stop unsubscribes')
+  }
+
+  // --- Explorer context menu keys (E4-FR-34) -----------------------------------
+  {
+    const si = load('src/main/shellIntegration.ts')
+    const exe = 'C:\\Program Files\\SnAgentsOS\\SnAgentsOS.exe'
+    const F = 'HKCU\\Software\\Classes\\Directory\\shell\\SnAgentsOS', B = 'HKCU\\Software\\Classes\\Directory\\Background\\shell\\SnAgentsOS'
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(si.buildExplorerRegOps(exe, 'Abrir en SnAgentsOS'))), [
+      ['add', F, '/ve', '/t', 'REG_SZ', '/d', 'Abrir en SnAgentsOS', '/f'],
+      ['add', F, '/v', 'Icon', '/t', 'REG_SZ', '/d', '"C:\\Program Files\\SnAgentsOS\\SnAgentsOS.exe",0', '/f'],
+      ['add', F + '\\command', '/ve', '/t', 'REG_SZ', '/d', '"C:\\Program Files\\SnAgentsOS\\SnAgentsOS.exe" --open "%V"', '/f'],
+      ['add', B, '/ve', '/t', 'REG_SZ', '/d', 'Abrir en SnAgentsOS', '/f'],
+      ['add', B, '/v', 'Icon', '/t', 'REG_SZ', '/d', '"C:\\Program Files\\SnAgentsOS\\SnAgentsOS.exe",0', '/f'],
+      ['add', B + '\\command', '/ve', '/t', 'REG_SZ', '/d', '"C:\\Program Files\\SnAgentsOS\\SnAgentsOS.exe" --open "%V"', '/f'],
+    ]); checks++
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(si.buildExplorerDeleteOps())), [['delete', F, '/f'], ['delete', B, '/f']]); checks++
+    check(si.explorerLabel('es') === 'Abrir en SnAgentsOS' && si.explorerLabel('en') === 'Open in SnAgentsOS', 'label localized in es and en')
+    const out = (name, value) => `\r\nHKEY_CURRENT_USER\\Software\\Classes\\Directory\\shell\\SnAgentsOS\\command\r\n    ${name}    REG_SZ    ${value}\r\n\r\n`
+    check(si.parseRegDefault(out('(Default)', '"C:\\a b\\x.exe" --open "%V"')) === '"C:\\a b\\x.exe" --open "%V"' && si.parseRegDefault(out('(Predeterminado)', 'Abrir en SnAgentsOS')) === 'Abrir en SnAgentsOS', 'reg query default value in any Windows language')
+    check(si.parseRegDefault('\r\nHKEY_CURRENT_USER\\X\r\n') === null && si.parseRegDefault(out('(Default)', '')) === '', 'no value line is null; an empty value is empty')
+    check(si.exeFromCommand('"C:\\a b\\x.exe" --open "%V"') === 'C:\\a b\\x.exe' && si.exeFromCommand('x.exe --open') === null && si.exeFromCommand(null) === null, 'exe from the registered command')
+    check(si.sameExe('C:\\A\\x.exe', 'c:/a/X.EXE') && !si.sameExe('C:\\A\\x.exe', 'C:\\B\\x.exe') && !si.sameExe(null, 'x'), 'exe comparison ignores case and slash style')
+
+    // In-memory reg.exe: add / delete (with subkeys) / query /ve.
+    const fakeReg = () => {
+      const keys = new Map()
+      const calls = []
+      let failAdd = false
+      const run = async args => {
+        calls.push(args)
+        const [op, key] = args
+        const k = key.toLowerCase()
+        if (op === 'add') {
+          if (failAdd) return { ok: false, stdout: '', stderr: 'ERROR: Access is denied.\r\n' }
+          const vals = keys.get(k) ?? {}
+          vals[args.includes('/ve') ? '' : args[args.indexOf('/v') + 1]] = args[args.indexOf('/d') + 1]
+          keys.set(k, vals)
+          return { ok: true, stdout: '', stderr: '' }
+        }
+        if (op === 'delete') {
+          const hit = [...keys.keys()].filter(x => x === k || x.startsWith(k + '\\'))
+          hit.forEach(x => keys.delete(x))
+          return hit.length ? { ok: true, stdout: '', stderr: '' } : { ok: false, stdout: '', stderr: 'ERROR: not found' }
+        }
+        const vals = keys.get(k)
+        if (!vals || !('' in vals)) return { ok: false, stdout: '', stderr: 'ERROR: not found' }
+        return { ok: true, stdout: out('(Default)', vals['']), stderr: '' }
+      }
+      return { run, keys, calls, setFailAdd: v => { failAdd = v } }
+    }
+    const reg = fakeReg()
+    const env = (over = {}) => ({ platform: 'win32', packaged: true, exe, root: si.EXPLORER_ROOT, run: reg.run, ...over })
+    const skipNW = await si.applyExplorerMenu(true, 'es', env({ platform: 'linux' }))
+    const skipDev = await si.readExplorerMenu(env({ packaged: false }))
+    check(skipNW.skipped === 'not-windows' && skipNW.ok && !skipNW.registered && skipDev.skipped === 'dev' && reg.calls.length === 0, 'not Windows / dev: skipped without touching the registry')
+    check(await si.refreshExplorerMenuOnStartup(true, 'es', env({ packaged: false })) === null && await si.refreshExplorerMenuOnStartup(false, 'es', env()) === null && reg.calls.length === 0, 'startup refresh does nothing in dev or with the toggle off')
+
+    let res = await si.applyExplorerMenu(true, 'es', env())
+    check(res.ok && res.registered && res.exe === exe && res.currentExe === exe && res.mismatch === false && !res.error, 'enable registers this exe')
+    check(reg.keys.get(F.toLowerCase())[''] === 'Abrir en SnAgentsOS' && reg.keys.get((B + '\\command').toLowerCase())[''] === '"' + exe + '" --open "%V"', 'both keys written')
+    res = await si.readExplorerMenu(env({ exe: 'D:\\Portable\\SnAgentsOS-2.0.0-portable.exe' }))
+    check(res.registered && res.mismatch === true && res.exe === exe && res.currentExe === 'D:\\Portable\\SnAgentsOS-2.0.0-portable.exe', 'another exe sees the mismatch')
+
+    reg.calls.length = 0
+    res = await si.refreshExplorerMenuOnStartup(true, 'es', env())
+    check(res && res.registered && !res.mismatch && !reg.calls.some(a => a[0] === 'add'), 'startup refresh with nothing changed writes nothing')
+    res = await si.refreshExplorerMenuOnStartup(true, 'en', env())
+    check(res && reg.keys.get(F.toLowerCase())[''] === 'Open in SnAgentsOS' && reg.keys.get(B.toLowerCase())[''] === 'Open in SnAgentsOS', 'a language change rewrites the label')
+    const moved = 'E:\\Moved\\SnAgentsOS-2.0.0-portable.exe'
+    res = await si.refreshExplorerMenuOnStartup(true, 'en', env({ exe: moved }))
+    check(res.exe === moved && !res.mismatch && reg.keys.get((F + '\\command').toLowerCase())[''] === '"' + moved + '" --open "%V"', 'a moved portable rewrites the command (last started wins)')
+    reg.keys.delete((B + '\\command').toLowerCase())
+    reg.calls.length = 0
+    await si.refreshExplorerMenuOnStartup(true, 'en', env({ exe: moved }))
+    check(reg.calls.some(a => a[0] === 'add') && reg.keys.has((B + '\\command').toLowerCase()), 'a missing background key is restored')
+
+    res = await si.applyExplorerMenu(false, 'en', env({ exe: moved }))
+    check(res.ok && !res.registered && reg.keys.size === 0, 'disable removes both keys with their subkeys')
+    res = await si.applyExplorerMenu(false, 'en', env())
+    check(res.ok && !res.registered && !res.error, 'disabling twice is fine (missing keys are the goal)')
+    reg.setFailAdd(true)
+    res = await si.applyExplorerMenu(true, 'es', env())
+    check(!res.ok && !res.registered && res.error === 'ERROR: Access is denied.', 'a failed write reports the reg.exe error')
+    reg.setFailAdd(false)
+
+    // Real reg.exe round trip, only on Windows, under a throwaway key.
+    if (process.platform === 'win32') {
+      const root = 'HKCU\\Software\\SnAgentsOSTest-' + require('node:crypto').randomBytes(6).toString('hex')
+      const realEnv = over => ({ platform: 'win32', packaged: true, exe, root, run: si.runReg, ...over })
+      try {
+        res = await si.applyExplorerMenu(true, 'es', realEnv())
+        check(res.ok && res.registered && res.exe === exe && res.mismatch === false, 'reg.exe: enable under the test root')
+        const q = async (key, args) => si.parseRegDefault((await si.runReg(['query', key, ...args])).stdout)
+        const keys = si.explorerKeys(root)
+        check(await q(keys.folder + '\\command', ['/ve']) === '"' + exe + '" --open "%V"' && await q(keys.background + '\\command', ['/ve']) === '"' + exe + '" --open "%V"', 'reg.exe: the command keeps its quotes and %V through execFile')
+        check(await q(keys.folder, ['/v', 'Icon']) === '"' + exe + '",0' && await q(keys.folder, ['/ve']) === 'Abrir en SnAgentsOS', 'reg.exe: icon and label')
+        res = await si.readExplorerMenu(realEnv({ exe: 'D:\\Other\\SnAgentsOS.exe' }))
+        check(res.mismatch === true, 'reg.exe: mismatch from another exe')
+        res = await si.applyExplorerMenu(false, 'es', realEnv())
+        check(res.ok && !res.registered && (await si.runReg(['query', keys.folder])).ok === false && (await si.runReg(['query', keys.background])).ok === false, 'reg.exe: disable removes both keys')
+      } finally {
+        await si.runReg(['delete', root, '/f'])
+      }
+      check((await si.runReg(['query', root])).ok === false, 'reg.exe: test root removed')
+    }
+  }
+
+  // --- NSIS customUnInstall (E4-FR-35), statically -----------------------------
+  {
+    const fs = require('node:fs')
+    const { BRAND } = load('src/shared/brand.ts')
+    const si = load('src/main/shellIntegration.ts')
+    const code = fs.readFileSync(path.join(root, 'build/installer.nsh'), 'utf8').split(/\r?\n/).map(l => l.replace(/^\s*[;#].*$/, '').trim()).filter(Boolean)
+    const starts = code.flatMap((l, i) => l === '!macro customUnInstall' ? [i] : [])
+    check(starts.length === 1, 'installer.nsh defines customUnInstall once')
+    const block = code.slice(starts[0], code.indexOf('!macroend', starts[0]) + 1)
+    const keys = si.explorerKeys(si.EXPLORER_ROOT)
+    const rel = k => k.replace(/^HKCU\\/, '')
+    check(block[1] === '${IfNot} ${isUpdated}' && block.at(-2) === '${EndIf}', 'an update never removes the keys')
+    const read = block.findIndex(l => l.startsWith('ReadRegStr'))
+    check(block.indexOf('SetShellVarContext current') > 0 && block.indexOf('SetShellVarContext current') < read && block.join('\n').includes('${If} $installMode == "all"\nSetShellVarContext all\n${EndIf}'), 'keys read in the user hive (SHCTX current), all-users context restored')
+    check(block[read] === `ReadRegStr $R0 SHCTX "${rel(keys.folder)}\\command" ""` && rel(keys.folder).endsWith('\\' + BRAND.productName), 'reads the registered command of the app key')
+    check(block.includes('StrCpy $R1 `"$INSTDIR\\`'), 'needle is the quoted install folder with its separator')
+    const gate = block.indexOf('${If} $R5 == "1"')
+    const dels = block.flatMap((l, i) => l.startsWith('DeleteRegKey') ? [i] : [])
+    check(gate > read && dels.length === 2 && dels.every(i => i > gate && i < gate + 3), 'deletes only inside the containment gate')
+    assert.deepStrictEqual([...dels.map(i => block[i])], [`DeleteRegKey SHCTX "${rel(keys.folder)}"`, `DeleteRegKey SHCTX "${rel(keys.background)}"`]); checks++
+  }
+
+  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices, pty lifecycle, update state, settings search, key chips, wizard keys, open requests, Explorer menu)`)
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })
