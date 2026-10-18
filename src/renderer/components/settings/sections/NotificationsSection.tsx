@@ -89,12 +89,14 @@ export function NotificationsSection() {
       <ToggleRow
         checked={n.enabled}
         onChange={(v) => patch({ enabled: v })}
+        searchId="notifications.enabled"
         title={t('notif.enabled')}
         description={t('notif.enabledHint')}
       />
       <ToggleRow
         checked={n.notifyDone}
         onChange={(v) => patch({ notifyDone: v })}
+        searchId="notifications.done"
         title={t('notif.done')}
         disabled={!n.enabled}
       />
@@ -105,29 +107,31 @@ export function NotificationsSection() {
       <ToggleRow
         checked={n.notifyAction}
         onChange={(v) => patch({ notifyAction: v })}
+        searchId="notifications.action"
         title={t('notif.action')}
         disabled={!n.enabled}
       />
       <ToggleRow
         checked={n.flashTaskbar}
         onChange={(v) => patch({ flashTaskbar: v })}
+        searchId="notifications.flash"
         title={t('notif.flash')}
         disabled={!n.enabled}
       />
-      <div id="setting-inAppWhenFocused">
-        <ToggleRow
-          checked={n.inAppWhenFocused}
-          onChange={(v) => patch({ inAppWhenFocused: v })}
-          title={t('notif.inApp')}
-          description={t('notif.inAppHint')}
-          disabled={!n.enabled}
-        />
-      </div>
+      <ToggleRow
+        checked={n.inAppWhenFocused}
+        onChange={(v) => patch({ inAppWhenFocused: v })}
+        searchId="notifications.inAppWhenFocused"
+        title={t('notif.inApp')}
+        description={t('notif.inAppHint')}
+        disabled={!n.enabled}
+      />
 
       <div className="space-y-3 border-t border-border pt-5">
         <ToggleRow
           checked={n.sound}
           onChange={(v) => patch({ sound: v })}
+          searchId="notifications.sound"
           title={t('notif.sound')}
           disabled={!n.enabled}
         />
@@ -169,7 +173,7 @@ export function NotificationsSection() {
       </div>
 
       <div className="space-y-3 border-t border-border pt-5">
-        <SettingRow title={t('notif.hooks.title')} description={t('notif.hooks.desc')}>
+        <SettingRow searchId="notifications.hooks" title={t('notif.hooks.title')} description={t('notif.hooks.desc')}>
           <div className="flex items-center gap-3">
             <Button
               variant="primary"
@@ -188,19 +192,19 @@ export function NotificationsSection() {
         </SettingRow>
       </div>
       <div className="space-y-3 border-t border-border pt-5">
-        <ToggleRow checked={n.codexEnabled} onChange={v => patch({ codexEnabled: v })} title={t('notif.codex.title')} description={t('notif.codex.desc')} />
+        <ToggleRow checked={n.codexEnabled} onChange={v => patch({ codexEnabled: v })} searchId="notifications.codex" title={t('notif.codex.title')} description={t('notif.codex.desc')} />
         <p className="text-xs text-text-secondary">{!n.codexEnabled ? t('notif.health.disabled') : health?.codex.connected ? t('notif.codex.connected', { count: health.codex.connected }) : t('notif.health.waiting')}</p>
         {n.codexEnabled && health?.codex.error && <p className="text-xs text-red-400">{health.codex.error}</p>}
       </div>
       <div className="space-y-3 border-t border-border pt-5">
-        <ToggleRow checked={n.discord.enabled} onChange={v => patchDiscord({ enabled: v })} title={t('notif.discord.title')} description={t('notif.discord.desc')} />
+        <ToggleRow checked={n.discord.enabled} onChange={v => patchDiscord({ enabled: v })} searchId="notifications.discord" title={t('notif.discord.title')} description={t('notif.discord.desc')} />
         <label className={labelCls} htmlFor="discord-webhook">{t('notif.discord.url')}</label>
         <input id="discord-webhook" type="password" autoComplete="off" spellCheck={false} maxLength={2048} value={n.discord.webhookUrl} onChange={e => patchDiscord({ webhookUrl: e.target.value.trim() })} className={inputCls} placeholder="https://discord.com/api/webhooks/..." />
         <label className={labelCls} htmlFor="discord-user">{t('notif.discord.user')}</label>
         <input id="discord-user" inputMode="numeric" maxLength={20} value={n.discord.userId} onChange={e => patchDiscord({ userId: e.target.value.trim() })} className={inputCls} />
         <p className="text-xs text-text-secondary">{t('notif.discord.userHint')}</p>
-        <ToggleRow checked={n.discord.notifyAction} onChange={v => patchDiscord({ notifyAction: v })} title={t('notif.action')} disabled={!n.discord.enabled} />
-        <ToggleRow checked={n.discord.notifyDone} onChange={v => patchDiscord({ notifyDone: v })} title={t('notif.done')} disabled={!n.discord.enabled} />
+        <ToggleRow checked={n.discord.notifyAction} onChange={v => patchDiscord({ notifyAction: v })} searchId="notifications.discordAction" title={t('notif.action')} disabled={!n.discord.enabled} />
+        <ToggleRow checked={n.discord.notifyDone} onChange={v => patchDiscord({ notifyDone: v })} searchId="notifications.discordDone" title={t('notif.done')} disabled={!n.discord.enabled} />
         <Button variant="ghost" size="sm" disabled={testBusy || !n.discord.webhookUrl.trim()} onClick={() => {
           setTestBusy(true); setTestResult(null)
           void window.snApi.status.testDiscord(n.discord).then(setTestResult).catch(() => setTestResult({ ok: false, error: t('notif.discord.failed') })).finally(() => setTestBusy(false))

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Check } from 'lucide-react'
 import type { GridPreset } from '@shared/types'
 import { useAppStore } from '@/lib/store'
@@ -10,6 +10,7 @@ import { StepLayout } from './StepLayout'
 import { StepAgents } from './StepAgents'
 import { WizardFooter } from './WizardFooter'
 import type { WizardDraft } from './types'
+import { initialWizardFocus, trapTabIndex, wizardKeyAction } from './wizardKeys'
 
 function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? 'workspace'
@@ -17,12 +18,20 @@ function basename(p: string): string {
 
 const STEP_KEYS: MessageKey[] = ['wizard.stepStart', 'wizard.stepLayout', 'wizard.stepAgents']
 
+const FOCUSABLE =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+
+function focusables(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null || el === document.activeElement)
+}
+
 export function NewWorkspaceWizard() {
   const t = useT()
   const open = useAppStore((s) => s.wizardOpen)
   const setWizardOpen = useAppStore((s) => s.setWizardOpen)
   const presets = useAppStore((s) => s.presets)
   const createWorkspaceFull = useAppStore((s) => s.createWorkspaceFull)
+  const prefill = useAppStore((s) => s.wizardPrefill)
 
   const defaultPresetId = useMemo(
     () => presets.find((p) => p.type === 'shell')?.id ?? presets[0]?.id ?? '',
@@ -38,22 +47,79 @@ export function NewWorkspaceWizard() {
     setupId: '',
   })
 
-  // Reset whenever the wizard opens.
+  const dialogRef = useRef<HTMLDivElement>(null)
+  /** Element focused before opening; focus returns there on cancel (E4-FR-31). */
+  const prevFocus = useRef<HTMLElement | null>(null)
+  const created = useRef(false)
+  const [focusReq, setFocusReq] = useState(0)
+
+  // Reset whenever the wizard opens (with the prefill, if any); on close,
+  // hand focus back unless a workspace was created (its console takes it).
   useEffect(() => {
     if (open) {
+      if (!prevFocus.current && document.activeElement instanceof HTMLElement) prevFocus.current = document.activeElement
+      created.current = false
+      const cwd = prefill?.cwd ?? ''
       setStep(0)
-      setDraft({ name: '', cwd: '', grid: 1, assignments: [defaultPresetId], setupId: '' })
+      setDraft({ name: prefill?.name ?? (cwd ? basename(cwd) : ''), cwd, grid: 1, assignments: [defaultPresetId], setupId: '' })
+      setFocusReq((n) => n + 1)
+      return
     }
-  }, [open, defaultPresetId])
+    const prev = prevFocus.current
+    prevFocus.current = null
+    if (prev && !created.current && prev.isConnected) prev.focus()
+  }, [open, defaultPresetId, prefill])
 
-  // Escape closes.
+  // Move focus inside once the reset draft rendered: the folder input on an
+  // empty draft, the primary button when the folder came prefilled.
+  useEffect(() => {
+    if (!open || focusReq === 0) return
+    const root = dialogRef.current
+    if (!root) return
+    const where = initialWizardFocus(draft.cwd)
+    const el = root.querySelector<HTMLElement>(where === 'cwd' ? '[data-wizard-cwd]' : '[data-wizard-primary]')
+    ;(el ?? root).focus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusReq])
+
+  // A step change can unmount the focused field (Enter in the folder input):
+  // keep focus inside on the primary so the next Enter continues.
+  useEffect(() => {
+    const root = dialogRef.current
+    if (!open || !root || root.contains(document.activeElement)) return
+    root.querySelector<HTMLElement>('[data-wizard-primary]')?.focus()
+  }, [open, step])
+
+  // Escape closes. While open no key reaches the console behind: a keydown
+  // aimed outside the dialog (a terminal that kept focus) is swallowed in the
+  // capture phase and focus is pulled back in.
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') setWizardOpen(false)
     }
+    const guard = (e: KeyboardEvent): void => {
+      const root = dialogRef.current
+      const target = e.target as Element | null
+      // Only what sits behind the wizard: a terminal that kept focus, or the
+      // body. An overlay opened above it (phone pairing prompt, update modal,
+      // a toast) keeps its own keyboard and focus.
+      const behind = !target || target === document.body || target === document.documentElement || !!target.closest?.('.xterm')
+      if (!root || !behind || root.contains(target)) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.key === 'Escape') {
+        setWizardOpen(false)
+        return
+      }
+      ;(root.querySelector<HTMLElement>('[data-wizard-cwd]') ?? root.querySelector<HTMLElement>('[data-wizard-primary]') ?? root).focus()
+    }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', guard, true)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keydown', guard, true)
+    }
   }, [open, setWizardOpen])
 
   if (!open) return null
@@ -71,7 +137,8 @@ export function NewWorkspaceWizard() {
     })
   }
 
-  const canAdvance = step === 0 ? draft.cwd.trim().length > 0 : true
+  const hasCwd = draft.cwd.trim().length > 0
+  const canAdvance = step === 0 ? hasCwd : true
   const isLast = step === 2
 
   const onCreate = (): void => {
@@ -88,6 +155,7 @@ export function NewWorkspaceWizard() {
         icon: preset.icon,
       }
     })
+    created.current = true
     createWorkspaceFull({
       name: draft.name.trim() || basename(draft.cwd) || 'workspace',
       cwd: draft.cwd.trim(),
@@ -98,10 +166,48 @@ export function NewWorkspaceWizard() {
     setWizardOpen(false)
   }
 
+  const onNext = (): void => setStep((s) => Math.min(2, s + 1))
+
+  // Enter runs the step's primary, Ctrl+Enter creates with the defaults, Tab
+  // stays inside (E4-FR-31). Native Enter targets are left alone.
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (e.key === 'Tab') {
+      const root = dialogRef.current
+      if (!root) return
+      const items = focusables(root)
+      e.preventDefault()
+      const next = trapTabIndex(items.length, items.indexOf(document.activeElement as HTMLElement), e.shiftKey)
+      items[next]?.focus()
+      return
+    }
+    const action = wizardKeyAction(
+      { key: e.key, ctrlKey: e.ctrlKey, metaKey: e.metaKey, altKey: e.altKey, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing },
+      e.target as HTMLElement,
+      { canAdvance, hasCwd },
+    )
+    if (!action) return
+    e.preventDefault()
+    e.stopPropagation()
+    if (action === 'create') onCreate()
+    else if (action === 'advance') {
+      if (isLast) onCreate()
+      else onNext()
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
       <div className="absolute inset-0 bg-black/60" onClick={(e) => { if (!isFromToast(e)) setWizardOpen(false) }} />
-      <div className="relative z-10 flex max-h-[86vh] w-full max-w-3xl flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="wizard-title"
+        tabIndex={-1}
+        data-wizard
+        onKeyDown={onKeyDown}
+        className="relative z-10 flex max-h-[86vh] w-full max-w-3xl flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)] outline-none"
+      >
         {/* Header + stepper */}
         <div className="shrink-0 border-b border-border px-6 pb-4 pt-5 text-center">
           <div className="mx-auto mb-4 flex max-w-md items-center justify-center">
@@ -138,7 +244,7 @@ export function NewWorkspaceWizard() {
               </div>
             ))}
           </div>
-          <h2 className="text-lg font-semibold text-text-primary">{t('wizard.title')}</h2>
+          <h2 id="wizard-title" className="text-lg font-semibold text-text-primary">{t('wizard.title')}</h2>
           <p className="mt-0.5 text-sm text-text-secondary">{t('wizard.subtitle')}</p>
         </div>
 
@@ -154,7 +260,7 @@ export function NewWorkspaceWizard() {
           isLast={isLast}
           canAdvance={canAdvance}
           onBack={() => setStep((s) => Math.max(0, s - 1))}
-          onNext={() => setStep((s) => Math.min(2, s + 1))}
+          onNext={onNext}
           onCreate={onCreate}
           onCancel={() => setWizardOpen(false)}
         />

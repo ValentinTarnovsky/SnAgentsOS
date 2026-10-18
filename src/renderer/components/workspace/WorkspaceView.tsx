@@ -5,6 +5,9 @@ import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
 import { TilingGrid } from '@/components/layout/TilingGrid'
 import { useT } from '@/i18n'
+import { Tooltip } from '@/components/ui/Tooltip'
+import { ActionTooltipLabel, useActionKeys } from '@/components/ui/KeyHint'
+import { ariaKeyshortcuts } from '@/lib/keymap'
 
 export function WorkspaceView({
   workspace,
@@ -20,6 +23,7 @@ export function WorkspaceView({
   const minimizedIds = useAppStore((s) => s.minimized[workspace.id]) ?? []
   const activeCount = workspace.panes.filter((p) => !minimizedIds.includes(p.id)).length
   const [open, setOpen] = useState(false)
+  const promptKeys = useActionKeys('globalPrompt')
 
   const launch = (preset: AgentPreset): void => {
     addPane(workspace.id, {
@@ -41,15 +45,18 @@ export function WorkspaceView({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <button
-            onClick={() => setGlobalPromptOpen(true)}
-            disabled={activeCount === 0}
-            title={t('globalPrompt.button')}
-            className="flex items-center gap-1.5 rounded-btn border border-border bg-card px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:border-accent-violet/40 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Megaphone size={14} className="text-accent-violet" />
-            {t('globalPrompt.button')}
-          </button>
+          <Tooltip label={<ActionTooltipLabel label={t('globalPrompt.button')} action="globalPrompt" />} side="bottom">
+            <button
+              onClick={() => setGlobalPromptOpen(true)}
+              disabled={activeCount === 0}
+              aria-keyshortcuts={promptKeys.length > 0 ? ariaKeyshortcuts(promptKeys) : undefined}
+              data-global-prompt-button
+              className="flex items-center gap-1.5 rounded-btn border border-border bg-card px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:border-accent-violet/40 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Megaphone size={14} className="text-accent-violet" />
+              {t('globalPrompt.button')}
+            </button>
+          </Tooltip>
 
           <div className="relative">
             <button

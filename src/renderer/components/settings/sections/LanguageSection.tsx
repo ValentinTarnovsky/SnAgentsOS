@@ -16,7 +16,7 @@ export function LanguageSection() {
 
   return (
     <div className="space-y-6">
-      <SettingRow title={t('settings.language')} description={t('settings.languageHint')}>
+      <SettingRow searchId="language.language" title={t('settings.language')} description={t('settings.languageHint')}>
         <div className="flex gap-2">
           {LANGS.map((l) => (
             <button

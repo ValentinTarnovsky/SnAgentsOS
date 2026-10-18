@@ -1,6 +1,10 @@
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/cn'
+import { ariaKeyshortcuts } from '@/lib/keymap'
+import { KeyHint } from './KeyHint'
+
+const CONFIRM_KEYS = ['Enter']
 
 interface ConfirmDialogProps {
   open: boolean
@@ -60,14 +64,17 @@ export function ConfirmDialog({
           <button
             autoFocus
             onClick={onConfirm}
+            aria-keyshortcuts={ariaKeyshortcuts(CONFIRM_KEYS)}
+            data-confirm
             className={cn(
-              'rounded-btn px-4 py-2 text-sm font-medium text-white transition-[filter]',
+              'inline-flex items-center gap-2 rounded-btn px-4 py-2 text-sm font-medium text-white transition-[filter]',
               danger
                 ? 'bg-red-500 hover:brightness-110'
                 : 'bg-[linear-gradient(135deg,var(--color-accent-violet),var(--color-accent-blue))] hover:brightness-110',
             )}
           >
             {confirmLabel}
+            <KeyHint keys={CONFIRM_KEYS} tone="onAccent" />
           </button>
         </div>
       </div>

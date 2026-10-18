@@ -43,7 +43,7 @@ export function RemoteIndicator() {
 
   const onClick = (): void => {
     if (running) setQrOpen(true)
-    else openSettings('remote')
+    else openSettings('remote#enable')
   }
 
   if (collapsed) {
