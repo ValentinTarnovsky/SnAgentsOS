@@ -152,7 +152,7 @@ function cleanupEnv(p, o = {}) {
   const env = {
     targetDir: p.targetDir, mode: 'installed', platform: 'win32', roots: p.roots, legacyDataDir: null, portableDir: null,
     exe: { execPath: path.join(p.exeDir, 'SnAgentsOS.exe'), portableExeFile: () => null, setPortableExeFile() {} },
-    guard: guardFor(p), elevation: { platform: 'win32', programFiles: [p.programFiles] },
+    guard: o.guard ?? guardFor(p), elevation: { platform: 'win32', programFiles: [p.programFiles] },
     registry: makeRegistry(), shortcuts: null, loginItem: null,
     isLegacyProcessRunning: () => false, isFolderLocked: () => false, migrateLegacyHooks: () => 'notNeeded', readMigratedSettings: () => null,
     now: () => (t += 1000), log: l => lines.push(l), simulate: false, delayMs: 0, ...o,
@@ -791,7 +791,7 @@ async function cleanupChecks() {
     const m = marker(p)
     check(['L01', 'L12', 'L13', 'L14', 'L15', 'L16', 'L18'].every(id => m.cleanup[id].state === 'done'), 'cleanup: disk items done')
     check(m.cleanup.L02.state === 'absent' && m.cleanup.L03.state === 'absent' && m.cleanup.L19.state === 'absent' && m.cleanup.L20.state === 'absent', 'cleanup: items of the other mode and the documented exceptions are absent')
-    check(m.phase === 'cleaning', 'cleanup: phase cleaning while items stay open')
+    check(m.phase === 'done' && m.cleanup.L05.reason === 'unexpectedUninstallEntry', 'cleanup: every item final, phase done')
     const Z = load('src/main/migration/backupZip.ts')
     const z = Z.readBackupZip(path.join(p.targetDir, 'migration-backup-v1.zip'))
     const names = z.entries.map(e => e.name)
@@ -912,7 +912,7 @@ async function cleanupChecks() {
     await I.runCleanup({ ...env, registry: reg })
     check(JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8')).cleanup.L03.reason === 'ownedByInstalled' && fs.existsSync(roam), 'cleanup portable: a registered 1.x install keeps it too')
     const m2 = JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8'))
-    m2.cleanup.L03 = { state: 'pending', attempts: 2 }
+    m2.cleanup.L03 = { state: 'pending', attempts: 2 }; m2.phase = 'cleaning'
     fs.writeFileSync(path.join(target, 'legacy-migration.json'), JSON.stringify(m2))
     await I.runCleanup(env)
     check(JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8')).cleanup.L03.state === 'done' && !fs.existsSync(roam), 'cleanup portable: no data, no install: removed')
@@ -1110,7 +1110,7 @@ async function windowsItemChecks() {
     const env = cleanupEnv(p, { registry: reg, shortcuts: makeShortcuts(), loginItem: { enable() {} }, platform: 'win32' })
     const res = await I.runCleanup({ ...env, platform: 'win32' })
     const open = Object.entries(res.marker.cleanup).filter(([, s]) => !['done', 'absent', 'skipped'].includes(s.state)).map(([id]) => id)
-    check(open.join() === 'L21', `windows pass: everything but the mac item is final (${open})`)
+    check(open.length === 0 && res.marker.phase === 'done' && res.marker.cleanup.L05.state === 'absent', `windows pass: every item final, phase done (${open})`)
   }
 }
 
@@ -1137,6 +1137,117 @@ async function winRegistryChecks() {
   }
 }
 
+async function posixItemChecks() {
+  const L = loadMigration()
+  const I = load('src/main/migration/legacyInventory.ts', withElectron(electronStub(), { process: { ...process, env: {}, argv: ['electron'] } }))
+  const marker = d => JSON.parse(fs.readFileSync(path.join(d, 'legacy-migration.json'), 'utf8'))
+  // macOS: ~/Library/Application Support/snmulticc through the same pipeline, SnMultiCC.app to the Trash.
+  {
+    const p = fakeProfile()
+    const appSupport = path.join(p.home, 'Library', 'Application Support')
+    const roots = { ...p.roots, appData: appSupport, localAppData: null, startMenuPrograms: null, taskbarPins: null, desktop: null }
+    const legacyDir = seedLegacy(path.join(appSupport, 'snmulticc'), { launchOnStartup: true })
+    const targetDir = path.join(appSupport, 'snagentsos')
+    check(pipe(L, { legacyDir, targetDir }).status === 'committed', 'mac: migrated from Application Support')
+    const [sysApps, userApps] = p.roots.macApplications
+    const legacyApp = path.join(sysApps, 'SnMultiCC.app'); write(path.join(legacyApp, 'Contents', 'Info.plist'), 'legacy')
+    const otherApp = path.join(userApps, 'SnMultiCC.app'); write(path.join(otherApp, 'Contents', 'Info.plist'), 'other')
+    const trashed = []; let enabled = 0
+    const pp = { ...p, roots, targetDir }
+    const env = cleanupEnv(pp, {
+      platform: 'darwin', roots, registry: null, elevation: { platform: 'darwin', programFiles: [] },
+      guard: { forbiddenExact: [appSupport, p.home], forbiddenTree: [targetDir], forbiddenContain: [p.exeDir] },
+      bundleId: a => (a === legacyApp ? 'com.sndevelopment.snmulticc' : 'com.example.other'),
+      trash: async a => { trashed.push(a); fs.renameSync(a, path.join(p.base, 'Trash-' + trashed.length)) },
+      loginItem: { enable: () => enabled++ }, readMigratedSettings: () => ({ launchOnStartup: true }),
+    })
+    await I.runCleanup(env)
+    const m = marker(targetDir)
+    check(m.cleanup.L01.state === 'done' && !fs.existsSync(legacyDir), 'mac: L01 removes ~/Library/Application Support/snmulticc')
+    check(trashed.length === 1 && trashed[0] === legacyApp && fs.existsSync(otherApp) && m.cleanup.L21.state === 'skipped' && m.cleanup.L21.reason === 'guard', 'mac: only the bundle with the 1.x id goes to the Trash')
+    check(enabled === 1 && m.cleanup.L10.state === 'done' && m.loginItemMigrated, 'mac: launchOnStartup registers the new login item')
+    check(m.phase === 'done' && ['L04', 'L05', 'L06', 'L08', 'L09', 'L14'].every(id => m.cleanup[id].state === 'absent'), 'mac: Windows-only items are absent, phase done')
+    // A foreign-owned bundle that cannot be trashed is needsElevation; a held profile defers.
+    const p2 = fakeProfile(); const t2 = path.join(p2.base, 'data'); pipe(L, { legacyDir: null, targetDir: t2 })
+    const app2 = path.join(p2.roots.macApplications[0], 'SnMultiCC.app'); write(path.join(app2, 'x'), 'x')
+    const pp2 = { ...p2, targetDir: t2 }
+    const base2 = { platform: 'darwin', registry: null, bundleId: () => 'com.sndevelopment.snmulticc', elevation: { platform: 'darwin', programFiles: [] } }
+    await I.runCleanup(cleanupEnv(pp2, { ...base2, isFolderLocked: () => true }))
+    check(marker(t2).cleanup.L21.state === 'deferred' && marker(t2).cleanup.L21.reason === 'legacyRunning', 'mac: SingletonLock held defers the bundle')
+    await I.runCleanup(cleanupEnv(pp2, { ...base2, trash: async () => { throw Object.assign(new Error('Operation not permitted'), { code: 'EPERM' }) } }))
+    check(marker(t2).cleanup.L21.state === 'skipped' && marker(t2).cleanup.L21.reason === 'needsElevation' && fs.existsSync(app2), 'mac: no permission to trash is needsElevation (manual action)')
+  }
+  // Linux: ~/.config/snmulticc, the AppImage renamed, the .deb documented.
+  {
+    const p = fakeProfile()
+    const config = path.join(p.home, '.config')
+    const roots = { ...p.roots, appData: config, localAppData: null, startMenuPrograms: null, taskbarPins: null, desktop: null }
+    const legacyDir = seedLegacy(path.join(config, 'snmulticc'))
+    const targetDir = path.join(config, 'snagentsos')
+    pipe(L, { legacyDir, targetDir })
+    const apps = path.join(p.home, 'Apps'); const image = path.join(apps, 'SnMultiCC-1.14.1.AppImage'); write(image, 'appimage 2.0')
+    let current = image
+    const pp = { ...p, roots, targetDir }
+    const env = cleanupEnv(pp, {
+      platform: 'linux', roots, registry: null, elevation: { platform: 'linux', programFiles: [] },
+      guard: { forbiddenExact: [config, p.home], forbiddenTree: [targetDir], forbiddenContain: [p.exeDir] },
+      exe: { execPath: path.join(p.base, 'tmp-mount', 'snagentsos'), portableExeFile: () => null, setPortableExeFile() {}, appImage: () => current, setAppImage: v => { current = v } },
+    })
+    await I.runCleanup(env)
+    const m = marker(targetDir)
+    check(m.cleanup.L01.state === 'done' && !fs.existsSync(legacyDir), 'linux: L01 removes ~/.config/snmulticc')
+    check(current === path.join(apps, 'SnAgentsOS.AppImage') && fs.readFileSync(current, 'utf8') === 'appimage 2.0' && !fs.existsSync(image) && m.cleanup.L17.state === 'done', 'linux: the AppImage is renamed and APPIMAGE follows')
+    check(m.cleanup.L21.state === 'absent' && m.cleanup.L21.reason === 'debNeedsRoot' && m.phase === 'done', 'linux: the .deb is documented, not removed; phase done')
+    const p2 = fakeProfile(); const t2 = path.join(p2.base, 'data'); pipe(L, { legacyDir: null, targetDir: t2 })
+    const img2 = path.join(p2.home, 'SnMultiCC.AppImage'); write(img2, 'a'); write(path.join(p2.home, 'SnAgentsOS.AppImage'), 'b')
+    await I.runCleanup(cleanupEnv({ ...p2, targetDir: t2 }, { platform: 'linux', registry: null, exe: { execPath: 'x', portableExeFile: () => null, setPortableExeFile() {}, appImage: () => img2, setAppImage() { throw new Error('no') } } }))
+    check(marker(t2).cleanup.L17.reason === 'nameConflict' && fs.existsSync(img2), 'linux: a different SnAgentsOS.AppImage is a nameConflict')
+  }
+}
+
+async function processChecks() {
+  const P = load('src/main/migration/legacyProcess.ts')
+  const win = P.legacyProcessQuery('win32', 'ana')
+  check(win.cmd === 'tasklist' && win.args.join(' ') === '/FI IMAGENAME eq SnMultiCC.exe /FI USERNAME eq ana /FO CSV /NH', 'process: tasklist filtered by image and current user')
+  check(P.legacyProcessQuery('darwin', 'ana', 501).args.join(' ') === '-U 501 -x SnMultiCC' && P.legacyProcessQuery('linux', 'ana').args.join(' ') === '-x snmulticc', 'process: pgrep -x SnMultiCC on mac, snmulticc on Linux')
+  check(P.parseLegacyProcess('win32', 0, '"SnMultiCC.exe","1234","Console","1","90.000 K"') && !P.parseLegacyProcess('win32', 0, 'INFORMACION: no hay tareas ejecutandose'), 'process: tasklist output parsed (localized "none" is not running)')
+  check(!P.parseLegacyProcess('linux', 1, '') && P.parseLegacyProcess('linux', 0, '4321\n') && P.parseLegacyProcess('linux', null, ''), 'process: pgrep 1 is none, a pid is running, an error counts as running')
+  const throwing = status => () => { throw Object.assign(new Error('x'), status === undefined ? {} : { status }) }
+  check(P.isLegacyRunningSync('linux', 'u', undefined, throwing(1)) === false && P.isLegacyRunningSync('win32', 'u', undefined, throwing(undefined)) === true, 'process: no match is not running, a timeout is running (defer, never delete)')
+  check(await P.isLegacyRunningAsync('win32', 'u', undefined, async () => ({ code: 0, stdout: '"SnMultiCC.exe","1"' })) === true, 'process: async variant')
+  // Profile locks.
+  const ebusy = { openSync: () => { throw Object.assign(new Error('b'), { code: 'EBUSY' }) }, closeSync() {}, readlinkSync() {} }
+  const enoent = { openSync: () => { throw Object.assign(new Error('n'), { code: 'ENOENT' }) }, closeSync() {}, readlinkSync() {} }
+  check(P.isProfileLocked('x', 'win32', { fs: ebusy }) && !P.isProfileLocked('x', 'win32', { fs: enoent }), 'lock: a held lockfile is running, no lockfile is not')
+  if (isWin) {
+    const d = freshDir('lock'); write(path.join(d, 'lockfile'), '')
+    check(!P.isProfileLocked(d, 'win32'), 'lock: a free lockfile on disk is not running')
+  }
+  const link = target => ({ openSync() {}, closeSync() {}, readlinkSync: () => target })
+  check(P.isProfileLocked('x', 'linux', { fs: link('box-42'), host: 'box', kill: () => {} }), 'lock: SingletonLock with a live pid is running')
+  check(!P.isProfileLocked('x', 'linux', { fs: link('box-42'), host: 'box', kill: () => { throw Object.assign(new Error('s'), { code: 'ESRCH' }) } }), 'lock: a dead pid is not running')
+  check(P.isProfileLocked('x', 'darwin', { fs: link('other-42'), host: 'box', kill: () => { throw new Error('unused') } }), 'lock: another host holds it')
+  check(!P.isProfileLocked('x', 'linux', { fs: { readlinkSync: () => { throw Object.assign(new Error('n'), { code: 'ENOENT' }) } } }), 'lock: no SingletonLock is not running')
+  if (!isWin) {
+    const d = freshDir('singleton')
+    fs.symlinkSync(`${os.hostname()}-${process.pid}`, path.join(d, 'SingletonLock'))
+    check(P.isProfileLocked(d, process.platform), 'lock: a real SingletonLock to this live process is running')
+  }
+  // Closing 1.x: polite, then forced; the user's processes only, never the tree.
+  {
+    const calls = []; let alive = true
+    const exec = async (cmd, args) => { calls.push([cmd, ...args]); if (cmd === 'taskkill' && args.includes('/F')) alive = false; return cmd === 'tasklist' ? { code: 0, stdout: alive ? '"SnMultiCC.exe","9"' : 'INFO' } : { code: 0, stdout: '' } }
+    const ok = await P.closeLegacyApp({ platform: 'win32', username: 'ana', exec, sleep: async () => {} })
+    const kills = calls.filter(c => c[0] === 'taskkill')
+    check(ok && kills.length === 2 && kills.every(k => !k.includes('/T') && k.includes('USERNAME eq ana') && k.includes('SnMultiCC.exe')) && kills[1].includes('/F') && !kills[0].includes('/F'), 'close: taskkill without /T, current user only, /F after the polite try')
+    const stuck = await P.closeLegacyApp({ platform: 'win32', username: 'ana', exec: async c => (c === 'tasklist' ? { code: 0, stdout: '"SnMultiCC.exe"' } : { code: 0, stdout: '' }), sleep: async () => {} })
+    check(stuck === false, 'close: still running after the forced try reports failure (retry dialog)')
+    const signals = []; let live = true
+    const ok2 = await P.closeLegacyApp({ platform: 'linux', username: 'u', uid: 1000, exec: async () => (live ? { code: 0, stdout: '77\n' } : { code: 1, stdout: '' }), kill: (pid, sig) => { signals.push([pid, sig]); if (sig === 'SIGKILL') live = false }, sleep: async () => {} })
+    check(ok2 && signals.map(s => s.join(':')).join() === '77:SIGTERM,77:SIGKILL', 'close: POSIX SIGTERM then SIGKILL to the pgrep pids')
+  }
+}
+
 async function main() {
   try {
     await markerChecks()
@@ -1151,6 +1262,8 @@ async function main() {
     await cleanupChecks()
     await windowsItemChecks()
     await winRegistryChecks()
+    await posixItemChecks()
+    await processChecks()
     console.log(`PASS: ${checks} legacy migration and cleanup checks`)
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true })
