@@ -698,6 +698,138 @@ async function main() {
 
   await updaterChecks(BRAND, en, es)
 
+  // E0-FR-21 / FR-24 (R20-08): release.yml uploads to a draft and publishes only
+  // after the 16-asset gate. js-yaml ships with electron-builder (dev tree).
+  {
+    const yaml = require('js-yaml')
+    const workflowText = read('.github/workflows/release.yml')
+    const workflow = yaml.load(workflowText)
+    const tagExpr = '${{ env.TAG }}', prereleaseExpr = "${{ contains(env.TAG, '-') }}"
+    check(!LEGACY_RE.test(workflowText) && !DASH_RE.test(workflowText), 'release.yml: no legacy name and no en/em dash')
+    check(workflow.env.TAG === '${{ github.event.inputs.tag || github.ref_name }}', 'release.yml: one TAG for push and workflow_dispatch')
+    check(Object.keys(workflow.on).sort().join() === 'push,workflow_dispatch', 'release.yml: tag push and manual re-run triggers')
+    const step = (job, name) => workflow.jobs[job].steps.find(s => s.name === name)
+    const build = workflow.jobs.build
+    check(build.strategy.matrix.include.map(l => l.os).join() === 'windows-2022,macos-latest,ubuntu-latest', 'release.yml: three build legs')
+    const attach = step('build', 'Attach artifacts to draft release')
+    check(attach && attach.uses === 'softprops/action-gh-release@v3', 'build: uploads with softprops')
+    check(attach.with.draft === true, 'build: draft: true, the release stays invisible while legs upload')
+    check(attach.with.tag_name === tagExpr && attach.with.prerelease === prereleaseExpr, 'build: same tag, rc tags are prereleases')
+    check(!('generate_release_notes' in attach.with), 'build: no per-leg changelog')
+    const stepIndex = name => build.steps.findIndex(s => s.name === name)
+    check(stepIndex('Status regression tests') < stepIndex('Package artifacts') && stepIndex('Generate SHA-256 checksums') < stepIndex('Attach artifacts to draft release'), 'build: tests before packaging, checksums before upload')
+
+    const notes = workflow.jobs['release-notes']
+    check(notes.needs === 'build' && !notes.if, 'release-notes: runs only after every leg succeeds')
+    const names = notes.steps.map(s => s.name)
+    check(names.join() === 'Checkout,Verify release assets,Compose release notes,Publish release', 'release-notes: verify, compose, then publish')
+    check(step('release-notes', 'Checkout').with.ref === tagExpr, 'release-notes: checks out the tag')
+    const verify = step('release-notes', 'Verify release assets')
+    check(verify.env.GH_TOKEN === '${{ github.token }}' && /gh release view "\$TAG" -R "\$GITHUB_REPOSITORY" --json assets/.test(verify.run), 'verify: reads the draft asset list')
+    check(/node scripts\/check-release-assets\.cjs "\$RUNNER_TEMP\/assets\.json" "\$TAG" "\$version"/.test(verify.run) && /exit 1\s*$/.test(verify.run), 'verify: the 16-asset gate fails the job')
+    check(!/\$\{\{/.test(verify.run) && !/\$\{\{/.test(step('release-notes', 'Compose release notes').run), 'release-notes: shell steps read the tag from env, no expression injection')
+    const compose = step('release-notes', 'Compose release notes').run
+    check(compose.includes('docs/release-notes/$TAG.md'), 'compose: body from docs/release-notes/<tag>.md')
+    check(compose.includes(`[ ! -s "$RUNNER_TEMP/notes.md" ]`) && compose.includes(`printf '\\n' > "$RUNNER_TEMP/notes.md"`) && !compose.includes(': >'), 'compose: notes.md is never empty, so a re-run replaces the body instead of appending a second changelog')
+    // Run the step for real where bash is the system shell (the Linux and mac
+    // CI legs); on Windows "bash" can resolve to WSL, so only the text check runs.
+    if (process.platform !== 'win32') {
+      const { spawnSync } = require('node:child_process')
+      const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'snaos-notes-'))
+      try {
+        const runCompose = (tag, notes) => {
+          const cwd = path.join(tmp, tag), out = path.join(cwd, 'runner')
+          fs.mkdirSync(path.join(cwd, 'docs/release-notes'), { recursive: true }); fs.mkdirSync(out)
+          if (notes !== undefined) fs.writeFileSync(path.join(cwd, 'docs/release-notes', tag + '.md'), notes)
+          const r = spawnSync('bash', ['-e', '-c', compose], { cwd, env: { ...process.env, TAG: tag, RUNNER_TEMP: out }, encoding: 'utf8' })
+          return r.status === 0 ? fs.readFileSync(path.join(out, 'notes.md'), 'utf8') : null
+        }
+        check(runCompose('v2.0.0', '## Rebrand\n') === '## Rebrand\n', 'compose (bash): copies docs/release-notes/<tag>.md')
+        check(runCompose('v2.0.1') === '\n' && runCompose('v2.0.2', '') === '\n', 'compose (bash): a missing or empty notes file becomes a newline')
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+    }
+    const publish = step('release-notes', 'Publish release')
+    check(publish.uses === 'softprops/action-gh-release@v3' && publish.with.draft === false, 'publish: draft: false')
+    check(publish.with.name === 'SnAgentsOS ' + tagExpr && publish.with.tag_name === tagExpr, 'publish: titled SnAgentsOS <tag>')
+    check(publish.with.body_path === '${{ runner.temp }}/notes.md' && publish.with.generate_release_notes === true && publish.with.append_body === false, 'publish: notes file plus changelog, replaced not appended')
+    check(publish.with.prerelease === prereleaseExpr, 'publish: rc tags stay prereleases, never latest')
+
+    // The checksum and upload globs pick exactly the 8 distributables out of a
+    // realistic electron-builder output tree.
+    const globRe = glob => new RegExp('^' + glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$')
+    const v = '2.0.0'
+    const distributables = [
+      `SnAgentsOS-${v}-setup.exe`, `SnAgentsOS-${v}-portable.exe`, `SnAgentsOS-${v}.dmg`, `SnAgentsOS-${v}-arm64.dmg`,
+      `SnAgentsOS-${v}-mac.zip`, `SnAgentsOS-${v}-arm64-mac.zip`, `SnAgentsOS-${v}.AppImage`, `snagentsos_${v}_amd64.deb`,
+    ]
+    const tree = [
+      ...distributables, `SnAgentsOS-${v}-setup.exe.blockmap`, `SnAgentsOS-${v}.dmg.blockmap`, `SnAgentsOS-${v}-mac.zip.blockmap`,
+      'latest.yml', 'latest-mac.yml', 'latest-linux.yml', 'builder-debug.yml', 'builder-effective-config.yaml', '__uninstaller-nsis-snagentsos.exe',
+      'win-unpacked/SnAgentsOS.exe', 'win-unpacked/resources/elevate.exe', 'win-unpacked/resources/app.asar.unpacked/node_modules/node-pty/build/Release/OpenConsole.exe',
+      'linux-unpacked/snagentsos', 'mac/SnAgentsOS.app/Contents/MacOS/SnAgentsOS',
+    ]
+    const findNames = [...step('build', 'Generate SHA-256 checksums').run.matchAll(/-name '([^']+)'/g)].map(m => m[1])
+    check(findNames.length === 5, 'checksums: five name patterns')
+    const hashed = tree.filter(p => findNames.some(n => globRe(n).test(path.posix.basename(p))))
+    check(hashed.sort().join() === [...distributables].sort().join(), 'checksums: only the 8 distributables get a .sha256')
+    const uploadGlobs = attach.with.files.trim().split('\n').map(s => s.trim())
+    check(uploadGlobs.every(g => g.startsWith('release/**/')), 'upload: globs under release/')
+    const uploadTree = [...tree, ...hashed.map(p => p + '.sha256')]
+    const uploaded = uploadTree.filter(p => uploadGlobs.some(g => globRe(g.slice('release/**/'.length)).test(path.posix.basename(p))))
+    check(uploaded.length === 16, `upload: exactly 16 files leave the runners (${uploaded.length})`)
+
+    // The gate itself.
+    const gate = require(path.join(root, 'scripts/check-release-assets.cjs'))
+    const healthy = ver => {
+      const d = distributables.map(n => n.split(v).join(ver))
+      return [...d, ...d.map(n => n + '.sha256')]
+    }
+    check(gate.EXPECTED_ASSETS === 16 && gate.KINDS.length === 8, 'gate: 8 distributables, 16 assets')
+    check(gate.checkReleaseAssets(uploaded.map(p => path.posix.basename(p)), { version: v }).ok, 'gate: the uploaded set passes')
+    const rc = gate.checkReleaseAssets({ assets: healthy('2.0.0-rc.1').map(name => ({ name, size: 1 })) })
+    check(rc.ok && rc.version === '2.0.0-rc.1', 'gate: gh JSON shape and a prerelease version')
+    const fails = (list, needle, opts) => { const r = gate.checkReleaseAssets(list, opts); return !r.ok && r.errors.some(e => e.includes(needle)) }
+    const good = healthy(v)
+    check(fails(good.filter(n => n !== `SnAgentsOS-${v}-setup.exe.sha256`), `SnAgentsOS-${v}-setup.exe is missing its .sha256`), 'gate: a missing .sha256 keeps the draft')
+    check(fails(good.filter(n => !n.startsWith(`snagentsos_${v}`)), 'missing linux-deb'), 'gate: a missing leg keeps the draft (14 assets)')
+    check(fails([...good, 'notes.txt'], 'expected 16 assets, found 17') && fails([...good, 'notes.txt'], 'unexpected asset notes.txt'), 'gate: an extra asset keeps the draft')
+    const legacy = good.map(n => n.replace('SnAgentsOS-', 'SnMultiCC-').replace('snagentsos_', 'snmulticc_'))
+    check(legacy.length === 16 && fails(legacy, 'unexpected asset SnMultiCC-'), 'gate: legacy-named assets are rejected')
+    const swapped = good.filter(n => n !== `SnAgentsOS-${v}-arm64.dmg`).concat(`SnAgentsOS-${v}-x.dmg`)
+    check(fails(swapped, 'mac-dmg-x64 appears 2 times') && fails(swapped, 'missing mac-dmg-arm64'), 'gate: every kind exactly once')
+    const mixed = good.map(n => n.startsWith(`SnAgentsOS-${v}-portable`) ? n.replace(v, '1.14.1') : n)
+    check(fails(mixed, 'mix versions'), 'gate: one version across distributables')
+    check(fails(good, 'expected 2.0.1', { version: '2.0.1' }), 'gate: version must match package.json at the tag')
+    check(fails([...good.slice(0, 15), good[0]], 'duplicate asset names'), 'gate: duplicate names rejected')
+    const ghShape = good.map(name => ({ name, size: 10, state: 'uploaded' }))
+    check(gate.checkReleaseAssets({ assets: ghShape }, { version: v }).ok, 'gate: uploaded, non-empty gh assets pass')
+    const setup = `SnAgentsOS-${v}-setup.exe`
+    check(fails({ assets: ghShape.map(a => a.name === setup ? { ...a, state: 'open' } : a) }, `${setup} is not fully uploaded`), 'gate: an interrupted upload keeps the draft')
+    check(fails({ assets: ghShape.map(a => a.name === setup + '.sha256' ? { ...a, size: 0 } : a) }, `${setup}.sha256 is empty`), 'gate: an empty checksum keeps the draft')
+    check(gate.tagMatchesVersion('v2.0.0', '2.0.0') && gate.tagMatchesVersion('v2.0.0-rc.1', '2.0.0') && gate.tagMatchesVersion('v2.0.0-rc.1', '2.0.0-rc.1'), 'gate: tag matches the version, or rehearses it as a prerelease')
+    check(!gate.tagMatchesVersion('v2.0.1', '2.0.0') && !gate.tagMatchesVersion('v2.0.10', '2.0.1') && !gate.tagMatchesVersion('v2.0.0', '2.0.0-rc.1') && !gate.tagMatchesVersion('v2.0.0-rc.1', '2.0.0-rc'), 'gate: a stable tag over another version is rejected (updater loop)')
+    check(gate.TAG_RE.test('v2.0.0') && gate.TAG_RE.test('v2.0.0-rc.1') && !gate.TAG_RE.test('v2.0') && !gate.TAG_RE.test('../v2.0.0') && !gate.TAG_RE.test('v2.0.0-rc/../x'), 'gate: tag format')
+
+    // CLI exit codes, as the workflow runs it.
+    const { spawnSync } = require('node:child_process')
+    const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'snaos-release-'))
+    try {
+      const run = (list, tag, ver) => {
+        const file = path.join(tmp, 'assets.json')
+        fs.writeFileSync(file, JSON.stringify({ assets: list.map(name => ({ name })) }))
+        return spawnSync(process.execPath, [path.join(root, 'scripts/check-release-assets.cjs'), file, tag, ...(ver ? [ver] : [])], { encoding: 'utf8' })
+      }
+      const ok = run(good, 'v2.0.0', v)
+      check(ok.status === 0 && ok.stdout.includes('16 assets'), 'cli: healthy release exits 0')
+      const bad = run(good.slice(1), 'v2.0.0', v)
+      check(bad.status === 1 && bad.stderr.includes('stays a draft'), 'cli: incomplete release exits 1')
+      check(run(good, '../../etc', v).status === 1, 'cli: invalid tag exits 1')
+      const drift = run(good, 'v2.0.1', v)
+      check(drift.status === 1 && drift.stderr.includes('does not match package.json version'), 'cli: tag and package.json version drift exits 1')
+      check(run(good, 'v2.0.0-rc.1', v).status === 0, 'cli: rc rehearsal tag over 2.0.0 exits 0')
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+  }
+
   // No en dash or em dash anywhere under src/ (style rule; check-brand extends it to the repo).
   const walk = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)])
   const offenders = walk(path.join(root, 'src')).filter(f => /\.(tsx?|html|css|json|webmanifest)$/.test(f) && DASH_RE.test(fs.readFileSync(f, 'utf8')))
