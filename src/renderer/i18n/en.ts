@@ -375,6 +375,10 @@ export const en = {
   'settings.selectionOverride': 'Text selection wins over app mouse capture',
   'settings.selectionOverrideHint':
     'Select and copy with a plain drag even while a full-screen app (like Claude Code) is using the mouse. Wheel scrolling still reaches the app. Turn off to send plain clicks to the app; Shift+drag always selects.',
+  'settings.unicode11': 'Unicode 11 widths (emoji and symbols)',
+  'settings.unicode11Hint':
+    'Improves the alignment of emoji and Claude/Codex borders. Turn it off if you see shifted columns.',
+  'terminal.shellNotFound': 'Configured shell not found: {requested}. Using {used}.',
   'settings.language': 'Language',
   'settings.languageHint': 'Interface language.',
   'settings.restoreLast': 'Restore the last workspace on open',

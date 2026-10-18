@@ -191,8 +191,13 @@ export interface PtySpawnReq {
   cols: number
   rows: number
 }
+/** Family of the shell a pty runs, derived from its executable name (E6). */
+export type ShellKind = 'powershell' | 'cmd' | 'posix' | 'other'
 export interface PtySpawnRes {
   ptyId: string
+  shellKind: ShellKind
+  /** E6-FR-32: the configured shell was not found, `used` was launched instead. */
+  warning?: { kind: 'shellNotFound'; requested: string; used: string }
 }
 export interface PtyWriteReq {
   ptyId: string
@@ -214,7 +219,10 @@ export interface PtyExitEvt {
 }
 export interface PtyReattachRes {
   ptyId: string
-  /** Recent raw output to replay into the freshly-mounted terminal. */
+  /**
+   * Recent output to replay into the freshly-mounted terminal: mode
+   * rehydration (E6-FR-33) + the query-free ring.
+   */
   replay: string
 }
 export interface PtyFlowReq {

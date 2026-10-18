@@ -7,6 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { CanvasAddon } from '@xterm/addon-canvas'
 import { SearchAddon } from '@xterm/addon-search'
+import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { useAppStore } from '@/lib/store'
 import { buildXtermTheme } from '@/themes'
@@ -14,9 +15,16 @@ import { registerPty, unregisterPty } from '@/lib/ptyRegistry'
 import { registerFocuser, setFocusedPane, unregisterFocuser } from '@/lib/focus'
 import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegistry'
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
+import { useT } from '@/i18n'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
 const INFINITE_SCROLLBACK = 100000
+
+/** xterm unicode version for the terminalUnicode11 setting (E6-FR-14). */
+const unicodeVersion = (v11: boolean): string => (v11 ? '11' : '6')
+
+/** A user-supplied string made safe to print inside an ANSI line. */
+const plain = (s: string): string => s.replace(/[\x00-\x1f\x7f-\x9f]/g, '')
 
 /** Highlight palette for in-pane search matches. */
 const SEARCH_OPTS = {
@@ -269,7 +277,12 @@ export function useXterm(
   const fontSize = useAppStore((s) => s.settings.fontSize)
   const infiniteScrollback = useAppStore((s) => s.settings.infiniteScrollback)
   const scrollback = useAppStore((s) => s.settings.scrollback)
+  const unicode11 = useAppStore((s) => s.settings.terminalUnicode11)
   const effectiveFontSize = opts.fontSize ?? fontSize
+  // Latest translator for text the mount effect writes into the terminal.
+  const t = useT()
+  const tRef = useRef(t)
+  tRef.current = t
 
   useEffect(() => {
     const container = containerRef.current
@@ -320,6 +333,15 @@ export function useXterm(
     term.loadAddon(new WebLinksAddon((_event, uri) => window.snApi.system.openExternal(uri)))
     term.loadAddon(search)
     term.open(container)
+    // Unicode 11 widths (emoji and Claude/Codex box glyphs take 2 cells), loaded
+    // before the renderer so the first paint already measures with them. It only
+    // changes cell widths, never the renderer policy (E6-FR-16: Canvas default).
+    try {
+      term.loadAddon(new Unicode11Addon())
+      term.unicode.activeVersion = unicodeVersion(settings.terminalUnicode11 !== false)
+    } catch {
+      /* keep xterm's built-in v6 table */
+    }
     // Reading the preference inside the closure means mount() AND reload() always
     // re-read the CURRENT setting, so toggling the renderer then redrawing a pane
     // actually switches engine.
@@ -667,10 +689,15 @@ export function useXterm(
             cols: term.cols,
             rows: term.rows,
           })
-          .then(({ ptyId }) => {
+          .then(({ ptyId, warning }) => {
             if (disposed) {
               void window.snApi.pty.kill(ptyId)
               return
+            }
+            // E6-FR-32: the configured shell is missing, main launched the default.
+            if (warning?.kind === 'shellNotFound') {
+              const text = tRef.current('terminal.shellNotFound', { requested: plain(warning.requested), used: plain(warning.used) })
+              term.write(`\x1b[33m${text}\x1b[0m\r\n`)
             }
             bind(ptyId)
           })
@@ -773,6 +800,21 @@ export function useXterm(
       term.options.scrollback = infiniteScrollback ? INFINITE_SCROLLBACK : (scrollback ?? 5000)
     }
   }, [infiniteScrollback, scrollback])
+
+  // Live Unicode width switch (E6-FR-14): new output uses the new table at once;
+  // the refresh repaints what is on screen.
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    const next = unicodeVersion(unicode11 !== false)
+    try {
+      if (term.unicode.activeVersion === next) return
+      term.unicode.activeVersion = next
+      term.refresh(0, term.rows - 1)
+    } catch {
+      /* addon missing or terminal mid-teardown */
+    }
+  }, [unicode11])
 
   // Track visibility for backpressure; on reveal, drop any stale pending count
   // (a hidden xterm may not have fired its write callbacks) and unpause.
