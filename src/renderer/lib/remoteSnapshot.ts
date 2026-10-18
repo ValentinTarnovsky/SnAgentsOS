@@ -32,6 +32,8 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     keyButtons: state.keyButtons,
     // Fields are structurally identical to RemoteUsageSnapshot; passthrough.
     usage: useUsageStore.getState().snapshot ?? null,
+    // The phone measures cells with the same table as the desktop (E6-FR-15).
+    terminalUnicode: state.settings.terminalUnicode11 === false ? '6' : '11',
   }
 }
 
@@ -45,6 +47,7 @@ function relevant(s: AppState): unknown[] {
     s.settings.language,
     s.settings.fontFamily,
     s.settings.fontSize,
+    s.settings.terminalUnicode11,
     s.snippets,
     s.keyButtons,
   ]

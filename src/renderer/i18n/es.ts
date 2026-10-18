@@ -378,6 +378,10 @@ export const es: Record<keyof typeof en, string> = {
   'settings.selectionOverride': 'La seleccion de texto gana a la captura de mouse de la app',
   'settings.selectionOverrideHint':
     'Selecciona y copia arrastrando normal aunque una app a pantalla completa (como Claude Code) este usando el mouse. La rueda sigue llegando a la app. Desactivalo para enviar los clics a la app; Shift+arrastrar siempre selecciona.',
+  'settings.unicode11': 'Anchos Unicode 11 (emoji y símbolos)',
+  'settings.unicode11Hint':
+    'Mejora la alineación de emoji y bordes de Claude/Codex. Apagalo si ves columnas corridas.',
+  'terminal.shellNotFound': 'Shell configurado no encontrado: {requested}. Se usa {used}.',
   'settings.language': 'Idioma',
   'settings.languageHint': 'Idioma de la interfaz.',
   'settings.restoreLast': 'Restaurar el último workspace al abrir',

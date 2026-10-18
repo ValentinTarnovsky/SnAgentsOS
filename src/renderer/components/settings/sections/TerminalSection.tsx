@@ -108,6 +108,13 @@ export function TerminalSection() {
         title={t('settings.selectionOverride')}
         description={t('settings.selectionOverrideHint')}
       />
+
+      <ToggleRow
+        checked={settings.terminalUnicode11}
+        onChange={(v) => updateSettings({ terminalUnicode11: v })}
+        title={t('settings.unicode11')}
+        description={t('settings.unicode11Hint')}
+      />
     </div>
   )
 }

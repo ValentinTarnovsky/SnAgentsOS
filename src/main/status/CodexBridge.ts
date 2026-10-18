@@ -8,7 +8,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import { AGENT_ENV } from '@shared/brand'
 import { CodexProtocol } from './CodexProtocol'
 import type { AgentEvent } from './events'
-import type { PtySink } from '../pty/PtyManager'
+import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import { samePath, statusBinDirs } from '../pty/shellResolver'
 
 interface Binding { paneId: string; ptyId: string; cwd: string; env?: NodeJS.ProcessEnv; sessionId?: string; finished?: boolean; socket?: WebSocket; child?: ChildProcessWithoutNullStreams }
@@ -91,7 +91,8 @@ export class CodexBridge implements PtySink {
   }
   onSpawn(): void {}
   onData(): void {}
-  onExit(ptyId: string): void {
+  /** Every exit (natural or not) tears down the pty's Codex bridge. */
+  onExit(ptyId: string, _paneId?: string, _exitCode?: number, _info?: PtyExitInfo): void {
     for (const [child, owner] of this.children) if (owner === ptyId) child.kill()
     for (const [route, b] of this.bindings) if (b.ptyId === ptyId) {
       b.socket?.close(); b.child?.kill(); this.bindings.delete(route)

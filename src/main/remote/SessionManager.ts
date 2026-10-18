@@ -21,7 +21,7 @@ import {
   type RemoteStateSnapshot,
 } from '@shared/remote-protocol'
 import { parseRemoteClientMsg } from '@shared/remote-protocol-schemas'
-import type { PtyManager, PtySink } from '../pty/PtyManager'
+import type { PtyExitInfo, PtyManager, PtySink } from '../pty/PtyManager'
 import type { DeviceRegistry } from './DeviceRegistry'
 import type { PairingService, RateLimiter } from './PairingService'
 
@@ -435,9 +435,12 @@ export class SessionManager implements PtySink {
     for (const session of subs) this.bufferOut(session, paneId, data)
   }
 
-  onExit(ptyId: string, paneId: string, exitCode: number): void {
-    // Ignore a stale exit whose pane already rebound to a newer pty.
-    if (this.deps.ptyManager.ptyIdForPane(paneId) !== ptyId) return
+  onExit(_ptyId: string, paneId: string, exitCode: number, info: PtyExitInfo): void {
+    // Only a natural exit of the pane's live pty reaches phones (E6-FR-34). A
+    // kill/restart/close is not an exit the phone should report, and a stale
+    // pty whose pane already rebound is not current. (PtyManager has already
+    // unbound the pane when this runs, so ptyIdForPane can no longer tell.)
+    if (!info.current || !info.natural) return
     const subs = this.paneSubs.get(paneId)
     if (!subs) return
     for (const session of subs) {
