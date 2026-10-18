@@ -33,6 +33,9 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   }),
   // E8-FR-07. The renderer requires paneId for a `send` command (bad_request).
   z.object({ kind: z.literal('runQuickCommand'), workspaceId: id, paneId: id.optional(), id }),
+  // E2-FR-28..30. Main re-validates the path against the root the renderer resolves.
+  z.object({ kind: z.literal('openPath'), workspaceId: id, paneId: id, path: z.string().min(1).max(4096) }),
+  z.object({ kind: z.literal('openUrl'), url: z.string().regex(/^https?:\/\//i).max(4096) }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [

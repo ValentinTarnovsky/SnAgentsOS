@@ -1,8 +1,9 @@
-import { app, ipcMain, powerMonitor, screen, type WebContents } from 'electron'
+import { app, ipcMain, powerMonitor, screen, shell, type WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { ExplorerMenuResult } from '@shared/ipc-contract'
 import { isPortable } from '../paths'
 import { openExternalSafe } from '../openExternal'
+import { createPathOpener } from '../remote/pathOpen'
 import type { OpenRequestQueue } from '../openRequest'
 import { applyExplorerMenu, readExplorerMenu } from '../shellIntegration'
 
@@ -32,6 +33,9 @@ export function registerSystemIpc(getSender: () => WebContents | null, openReque
 
   // Terminal hyperlinks (and any renderer "open in browser" action) route here.
   ipcMain.on(CH.SHELL_OPEN_EXTERNAL, (_e, url: unknown) => openExternalSafe(url))
+  // A path tapped on the phone (E2-FR-30): contained in the root, inert opens, the rest reveals.
+  const openPath = createPathOpener({ openPath: (p) => shell.openPath(p), showItemInFolder: (p) => shell.showItemInFolder(p) })
+  ipcMain.handle(CH.SHELL_OPEN_PATH, (_e, req: unknown) => openPath(req))
 
   // Sleep/resume, screen unlock, GPU process crashes, and monitor/DPI changes
   // can bring WebGL back with a context that is alive but invalid (trashed

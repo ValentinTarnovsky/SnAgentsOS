@@ -174,6 +174,14 @@ export type RemoteCtlAction =
    * `workspaceId`, else `not_found`.
    */
   | { kind: 'runQuickCommand'; workspaceId: string; paneId?: string; id: string }
+  /**
+   * E2-FR-29/30: a path tapped in the phone terminal. The renderer resolves the
+   * root from its own store (the pane's launch cwd, then `ws.cwd`) and main
+   * opens an inert file or reveals it. Ack errors: denied_path, not_found, rate.
+   */
+  | { kind: 'openPath'; workspaceId: string; paneId: string; path: string }
+  /** E2-FR-28: open an http(s) URL in the desktop's browser (openExternalSafe). */
+  | { kind: 'openUrl'; url: string }
 
 // --- Client -> server messages ---
 
