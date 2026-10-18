@@ -187,9 +187,10 @@ async function testBroadcast() {
   check(frames().length === 0, 'working updates are held inside the 100 ms window')
   w.advance(80)
   check(frames().length === 1 && frames()[0].status.activity === 'Edit', 'the coalesced frame carries the latest activity after 100 ms')
+  ws.inbox.length = 0
   for (let i = 0; i < 20; i++) { w.manager.pushPaneStatus(evt('p2', 'working', { activity: 'T' + i })); w.advance(50) }
   w.advance(200)
-  check(frames().length <= 1 + 11, 'a 1s burst of tool changes stays at <= 10 frames/s per pane')
+  check(frames().length >= 9 && frames().length <= 11 && frames().at(-1).status.activity === 'T19', 'a 1s burst of 20 tool changes costs about 10 frames and ends on the latest')
   ws.inbox.length = 0
   w.manager.pushPaneStatus(evt('p2', 'working', { activity: 'Z' }))
   w.advance(20)
@@ -208,9 +209,29 @@ async function testBroadcast() {
   check(frames().length === 1 && !('sessionId' in frames()[0].status) && !('cwd' in frames()[0].status), 'paneStatus never carries sessionId or cwd')
   w.manager.applyConfig({ enabled: false, port: 4600 })
   w.manager.applyConfig({ enabled: true, port: 4600 })
-  const { ws: fresh } = await pair(w)
+  const { ws: fresh, deviceId, secret } = await pair(w)
   w.manager.pushPaneStatus(evt('p1', 'done', { sessionId: '11111111-2222-3333-4444-555555555555' }))
   check(fresh.of('paneStatus').length === 1, 'a restarted server forgets the dedupe memory')
+
+  // A state frame that overtakes a held update becomes the dedupe baseline.
+  const last = (sock, paneId) => sock.of('paneStatus').filter(f => f.paneId === paneId).at(-1)
+  const set = activity => { w.statuses.length = 0; w.statuses.push(evt('p2', 'working', { activity })); w.manager.pushPaneStatus(w.statuses[0]) }
+  set('A'); w.advance(100)
+  check(last(fresh, 'p2').status.activity === 'A', 'baseline A was sent')
+  set('B')
+  w.manager.pushState(snapshot)
+  const viaState = fresh.of('state').at(-1).state.workspaces[1].panes[0]
+  check(viaState.status.activity === 'B', 'the state frame carries the held B')
+  const before = fresh.of('paneStatus').length
+  set('A'); w.advance(100)
+  check(fresh.of('paneStatus').length === before + 1 && last(fresh, 'p2').status.activity === 'A', 'going back to A after a state frame showed B still sends A')
+
+  // A phone authenticating mid-window learns a status the others were never sent.
+  set('B')
+  const late = reconnect(w, deviceId, secret)
+  check(late.of('authOk')[0].state.workspaces[1].panes[0].status.activity === 'B', 'authOk carries the held B')
+  set('A'); w.advance(100)
+  check(last(late, 'p2')?.status.activity === 'A', 'going back to A after an authOk showed B still reaches the new phone')
 }
 
 async function testDataPlane() {

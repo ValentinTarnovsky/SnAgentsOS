@@ -2,8 +2,9 @@
  * The live layout: a flex column sized to the keyboard-aware --vvh so the
  * KeyBar always docks just above the soft keyboard. TopBar (workspace + console
  * title of the viewed pane with its agent status, the "N waiting" pill,
- * connection dot, drawer + actions) / terminal (flex-1, min-h-0) / KeyBar. The drawer, action sheet and paste sheet mount here; the status
- * banner and toast overlay the terminal.
+ * connection dot, drawer + actions) / terminal (flex-1, min-h-0) / KeyBar.
+ * The drawer, action sheet and paste sheet mount here; the status banner and
+ * toast overlay the terminal.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'

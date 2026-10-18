@@ -146,16 +146,20 @@ export class RemoteManager {
       pairing: this.pairing,
       rateLimiter: this.rateLimiter,
       appVersion: this.appVersion,
-      getSnapshot: () => this.currentSnapshot(),
+      // authOk: the new phone learns every status from this snapshot, which may
+      // be ahead of what the others were sent, so the dedupe memory is dropped
+      // and the next emit of each pane goes out (a repeat is harmless).
+      getSnapshot: () => {
+        this.statusSent.clear()
+        return this.currentSnapshot()
+      },
       executeCommand: (action, deviceName) => this.executeCommand(action, deviceName),
       onConnectionsChanged: () => this.onConnectionsChanged(),
     })
     this.ptyManager.addSink(this.sessions)
     // A pty spawning/exiting flips a pane's `running`; re-broadcast so phones
     // update their dots even without a renderer-driven snapshot push.
-    this.ptyManager.setRunningChangeListener(() =>
-      this.sessions?.broadcastState(this.currentSnapshot()),
-    )
+    this.ptyManager.setRunningChangeListener(() => this.broadcastSnapshot())
     this.server = new RemoteServer(port, {
       onSocket: (ws, ip) => this.sessions?.handleSocket(ws, ip),
     })
@@ -216,7 +220,23 @@ export class RemoteManager {
   /** Renderer pushed a fresh snapshot: cache it and broadcast to every phone. */
   pushState(snapshot: RemoteStateSnapshot): void {
     this.rawSnapshot = snapshot
-    this.sessions?.broadcastState(this.overlayRunning(snapshot))
+    this.broadcastSnapshot()
+  }
+
+  /**
+   * Send the overlaid snapshot to every authed phone. Each pane's overlaid
+   * status is now what every phone holds, so it becomes the paneStatus dedupe
+   * baseline: a later emit that differs from it always goes out, even when it
+   * equals the last paneStatus frame (a held update a state frame overtook).
+   */
+  private broadcastSnapshot(): void {
+    if (!this.sessions) return
+    const snap = this.currentSnapshot()
+    this.statusSent.clear()
+    for (const ws of snap.workspaces) {
+      for (const pane of ws.panes) this.statusSent.set(pane.id, pane.status ? JSON.stringify(pane.status) : 'null')
+    }
+    this.sessions.broadcastState(snap)
   }
 
   private currentSnapshot(): RemoteStateSnapshot {
@@ -279,8 +299,8 @@ export class RemoteManager {
   }
 
   private sendPaneStatus(paneId: string, status: RemotePaneStatus | null): void {
-    // A null is only skipped after a sent null: a phone may know this pane's
-    // status from an authOk snapshot that never went through this map.
+    // The key is what every phone last got for this pane, by a paneStatus or
+    // a state frame; an unknown pane (no entry) always goes out.
     const key = status ? JSON.stringify(status) : 'null'
     if (this.statusSent.get(paneId) === key) return
     this.statusSent.set(paneId, key)
