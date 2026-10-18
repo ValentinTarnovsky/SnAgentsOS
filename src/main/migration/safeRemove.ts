@@ -1,5 +1,5 @@
 import { promises as nodeFsp, type Stats } from 'fs'
-import { basename, dirname, join, parse } from 'path'
+import { basename, dirname, join, parse, resolve } from 'path'
 import { isInside, isSameOrInside, overlaps, samePath } from './pathUtil'
 import { isoStamp } from './legacyMarker'
 
@@ -53,8 +53,13 @@ export interface RemoveOptions {
   /** Wait between retries in ms (default 200). */
   delayMs?: number
   now?: () => number
-  /** Test seam: runs right after the tombstone rename (a crash there leaves only the tombstone). */
-  afterRename?: (tombstone: string) => void
+  /**
+   * Runs right after the tombstone rename, before anything is deleted (and is
+   * the test seam for a crash there, which leaves only the tombstone). A
+   * returned deferred or skipped result stops the removal: the folder is
+   * renamed back to its own name when possible and that result is returned.
+   */
+  afterRename?: (tombstone: string) => void | RemoveResult | Promise<void | RemoveResult>
 }
 
 const RETRY = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY'])
@@ -115,6 +120,41 @@ async function realOf(fsx: RemoveFs, p: string): Promise<string> {
   }
 }
 
+/**
+ * Every guard path in its written form and in its realpath form. userData,
+ * dataDir() or the exe folder may be spelled through a junction, a symlink, a
+ * subst drive or an 8.3 short name (C:\Users\TARNO~1): compared only as
+ * written, a target reached by its real path would slip past them.
+ */
+export async function expandGuard(guard: PathGuard, fsx: RemoveFs = nodeFsp): Promise<PathGuard> {
+  // A guard path that does not exist yet resolves through its nearest existing ancestor.
+  const realDeep = async (p: string): Promise<string> => {
+    const rest: string[] = []
+    let cur = resolve(p)
+    for (;;) {
+      try {
+        return join(await fsx.realpath(cur), ...rest.reverse())
+      } catch {
+        const parent = dirname(cur)
+        if (parent === cur) return p
+        rest.push(basename(cur))
+        cur = parent
+      }
+    }
+  }
+  const both = async (list: string[]): Promise<string[]> => {
+    const out = new Set(list)
+    for (const p of list) out.add(await realDeep(p))
+    return [...out]
+  }
+  return {
+    forbiddenExact: await both(guard.forbiddenExact),
+    forbiddenTree: await both(guard.forbiddenTree),
+    forbiddenContain: await both(guard.forbiddenContain),
+    ...(guard.allowedRoots ? { allowedRoots: await both(guard.allowedRoots) } : {}),
+  }
+}
+
 /** lstat + link/elevation/guard checks shared by both entry points. */
 async function precheck(target: string, guard: PathGuard, o: RemoveOptions): Promise<RemoveResult | Stats> {
   const fsx = o.fs ?? nodeFsp
@@ -126,7 +166,7 @@ async function precheck(target: string, guard: PathGuard, o: RemoveOptions): Pro
   }
   if (st.isSymbolicLink()) return { skipped: 'reparsePoint' }
   if (needsElevation(target, o.elevation)) return { skipped: 'needsElevation' }
-  if (violatesGuard([target, await realOf(fsx, target)], guard)) return { skipped: 'guard' }
+  if (violatesGuard([target, await realOf(fsx, target)], await expandGuard(guard, fsx))) return { skipped: 'guard' }
   return st
 }
 
@@ -215,12 +255,27 @@ export async function tombstoneAndRemove(target: string, guard: PathGuard, o: Re
     const c = code(err)
     return c === 'EROFS' ? { skipped: 'readOnly' } : { deferred: c }
   }
-  o.afterRename?.(tombstone)
+  const stop = await o.afterRename?.(tombstone)
+  if (stop && typeof stop === 'object') {
+    // Back under its own name, so detection and the next pass see the folder as it was.
+    await fsx.rename(tombstone, target).catch(() => {})
+    return stop
+  }
   return safeRemoveTree(tombstone, guard, o)
 }
 
-/** Finishes tombstones a crash left next to target (<name>.deleting-*). */
-export async function removeTombstones(target: string, guard: PathGuard, o: RemoveOptions = {}): Promise<RemoveResult> {
+/**
+ * Finishes tombstones a crash left next to target (<name>.deleting-*). A crash
+ * may have come between the rename and the checks that run before deleting,
+ * so secure (when given) runs on each tombstone first, and a deferred or
+ * skipped answer keeps that tombstone.
+ */
+export async function removeTombstones(
+  target: string,
+  guard: PathGuard,
+  o: RemoveOptions = {},
+  secure?: (tombstone: string) => Promise<void | RemoveResult>,
+): Promise<RemoveResult> {
   const fsx = o.fs ?? nodeFsp
   const prefix = `${basename(target)}.deleting-`.toLowerCase()
   let names: string[]
@@ -231,7 +286,10 @@ export async function removeTombstones(target: string, guard: PathGuard, o: Remo
   }
   const results: RemoveResult[] = []
   for (const n of names) {
-    if (n.toLowerCase().startsWith(prefix)) results.push(await safeRemoveTree(join(dirname(target), n), guard, o))
+    if (!n.toLowerCase().startsWith(prefix)) continue
+    const tomb = join(dirname(target), n)
+    const stop = secure ? await secure(tomb) : undefined
+    results.push(stop && typeof stop === 'object' ? stop : await safeRemoveTree(tomb, guard, o))
   }
   return combineResults(results)
 }

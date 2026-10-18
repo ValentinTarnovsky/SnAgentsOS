@@ -7,6 +7,7 @@ import {
   isTerminalItem,
   readMarker,
   writeMarker,
+  BACKUP_FILE,
   type LegacyItemId,
   type LegacyItemState,
   type LegacyMigrationMarker,
@@ -26,7 +27,7 @@ import {
   type RemoveResult,
 } from './safeRemove'
 import { isInside, samePath } from './pathUtil'
-import type { BackupEntry } from './backupZip'
+import { readBackupZip, type BackupEntry } from './backupZip'
 
 /**
  * Inventory L01-L21 of what 1.x leaves behind and the cleanup that walks it
@@ -225,44 +226,87 @@ export async function legacyInstallRegistered(env: CleanupEnv): Promise<boolean>
   }
 }
 
-/** Sources that changed (or appeared) after the commit go to post-commit/<ISO>/ in the zip; 2.x data wins. */
-async function backupPostCommit(r: Run, folder: string): Promise<void> {
+/** Top-level files 1.x keeps its data in (backups/ is the other place). */
+const DATA_FILES = ['config.json', 'config.json.bak', 'remote-devices.json']
+
+/**
+ * SHA-256 of every entry the live zip really holds (hashed from the
+ * decompressed bytes, not taken from its manifest). Empty when there is no
+ * live zip (none yet, or expired); throws when the file is unreadable, so the
+ * item defers instead of deleting with a broken backup.
+ */
+function liveZipHashes(r: Run): Set<string> {
+  const dest = join(r.env.targetDir, BACKUP_FILE)
+  const b = r.marker.backup
+  if (!b || b.deletedAt !== undefined || !existsSync(dest)) return new Set()
+  return new Set(readBackupZip(dest).entries.map((e) => sha256(e.data)))
+}
+
+/**
+ * The whitelist files of folder must all be in the zip before it goes.
+ * Sources that changed (or appeared) after the commit go to post-commit/<ISO>/
+ * (2.x data wins, nothing is migrated again). An unchanged source whose bytes
+ * the zip does not hold (the zip expired while the item stayed deferred, or it
+ * was lost) goes back in under its own name. sourceBase names the files in the
+ * manifest: the folder's own path, also while it already is a tombstone.
+ * Returns the relative paths now covered by the zip.
+ */
+async function backupPostCommit(r: Run, folder: string, sourceBase: string): Promise<Set<string>> {
   const m = r.marker
-  const known = new Map(m.from && samePath(m.from, folder) ? m.sources.map((s) => [s.rel, s.sha256]) : [])
+  const known = new Map(m.from && samePath(m.from, sourceBase) ? m.sources.map((s) => [s.rel, s.sha256]) : [])
   const rels = new Set([...listLegacyWhitelist(folder), ...known.keys()])
+  const inZip = liveZipHashes(r)
   const stamp = isoStamp(r.env.now())
   const changed: BackupEntry[] = []
+  const missing: BackupEntry[] = []
+  const covered = new Set<string>()
   const fsx = r.env.fs ?? nodeFsp
   for (const rel of rels) {
     let data: Buffer
     try {
+      const st = await fsx.lstat(join(folder, rel))
+      if (!st.isFile()) continue
       data = await fsx.readFile(join(folder, rel))
     } catch {
       continue
     }
-    if (known.get(rel) !== sha256(data)) changed.push({ name: `post-commit/${stamp}/${rel}`, data, source: join(folder, rel) })
+    covered.add(rel)
+    const h = sha256(data)
+    if (known.get(rel) !== h) changed.push({ name: `post-commit/${stamp}/${rel}`, data, source: join(sourceBase, rel) })
+    else if (!inZip.has(h)) missing.push({ name: rel, data, source: join(sourceBase, rel) })
   }
-  if (changed.length === 0) return
+  if (missing.length > 0 && appendToBackup(r.env.targetDir, m, missing, r.env.now()) > 0) {
+    r.persist()
+    r.env.log(`phase=cleaning result=backupRestored entries=${missing.length} path=${sourceBase}`)
+  }
+  if (changed.length === 0) return covered
   const added = appendToBackup(r.env.targetDir, m, changed, r.env.now())
   if (added > 0) {
     m.postCommitBackup = { at: r.env.now(), entries: (m.postCommitBackup?.entries ?? 0) + added }
     r.persist()
-    r.env.log(`phase=cleaning result=postCommitBackup entries=${added} path=${folder}`)
+    r.env.log(`phase=cleaning result=postCommitBackup entries=${added} path=${sourceBase}`)
   }
+  return covered
 }
 
 /**
- * Unknown top-level entries (not ours, not Chromium's) go to the zip under
- * prefix when they add up to 5 MB or less. Over that the folder is kept:
- * returns skipped: unknownFiles and logs the names (never the contents).
+ * Everything in folder that is neither Chromium's nor disposable nor already
+ * covered by the zip goes to the zip under prefix when it adds up to 5 MB or
+ * less: unknown top-level entries, and our own data files the whitelist left
+ * out (backups past the newest 12, anything else under backups/, a whitelist
+ * file over 5 MB). Over that the folder is kept: skipped: unknownFiles, with
+ * the names logged (never the contents). Links are removed as links, so they
+ * hold nothing to keep.
  */
-async function backupUnknown(r: Run, folder: string, prefix: string): Promise<ItemOutcome | null> {
+async function backupUnknown(r: Run, folder: string, sourceBase: string, prefix: string, covered: Set<string>): Promise<ItemOutcome | null> {
   const fsx = r.env.fs ?? nodeFsp
   const files: Array<{ rel: string; abs: string }> = []
+  const names: string[] = []
   let bytes = 0
   const walk = async (abs: string, rel: string): Promise<void> => {
+    if (covered.has(rel)) return
     const st = await fsx.lstat(abs)
-    if (st.isSymbolicLink()) return // removed as a link, nothing to keep
+    if (st.isSymbolicLink()) return
     if (st.isDirectory()) {
       for (const n of await fsx.readdir(abs)) await walk(join(abs, String(n)), `${rel}/${String(n)}`)
     } else if (st.isFile()) {
@@ -270,46 +314,106 @@ async function backupUnknown(r: Run, folder: string, prefix: string): Promise<It
       files.push({ rel, abs })
     }
   }
-  const unknown = (await fsx.readdir(folder)).map(String).filter((n) => !isKnownEntry(n))
-  for (const n of unknown) await walk(join(folder, n), n)
-  if (unknown.length === 0) return null
+  for (const n of (await fsx.readdir(folder)).map(String)) {
+    const ours = DATA_FILES.includes(n) || n.toLowerCase() === 'backups'
+    if (isKnownEntry(n) && !ours) continue
+    const before = files.length
+    await walk(join(folder, n), n)
+    if (files.length > before) names.push(n)
+  }
+  if (files.length === 0) return null
   if (bytes > MAX_UNKNOWN_BYTES) {
-    r.env.log(`phase=cleaning result=unknownFiles bytes=${bytes} names=${unknown.join('|')} path=${folder}`)
+    r.env.log(`phase=cleaning result=unknownFiles bytes=${bytes} names=${names.join('|')} path=${sourceBase}`)
     return { state: 'skipped', reason: 'unknownFiles' }
   }
   const entries: BackupEntry[] = []
-  for (const f of files) entries.push({ name: `${prefix}${f.rel}`, data: await fsx.readFile(f.abs), source: f.abs })
-  if (entries.length > 0 && appendToBackup(r.env.targetDir, r.marker, entries, r.env.now()) > 0) r.persist()
+  for (const f of files) entries.push({ name: `${prefix}${f.rel}`, data: await fsx.readFile(f.abs), source: join(sourceBase, f.rel) })
+  if (appendToBackup(r.env.targetDir, r.marker, entries, r.env.now()) > 0) r.persist()
   return null
 }
 
-function tombstoneOpts(r: Run, id: LegacyItemId): RemoveOptions {
-  return {
-    ...r.rm,
-    afterRename: () => {
-      if (r.env.faultAt === `crash:tombstone:${id}`) throw new CrashFault(`tombstone:${id}`)
-    },
+interface SecureOpts {
+  /** Compare the whitelist with the migrated sources (L01, L02). */
+  postCommit: boolean
+  unknownPrefix: string
+  /** L18: config.json and remote-devices.json go to the zip under this prefix (dev/). */
+  devPrefix?: string
+}
+
+/**
+ * Puts in the verified zip everything of folder that deleting it would lose
+ * (FR-28, FR-30). Null when the folder may go; skipped or deferred otherwise.
+ */
+async function secureFolder(r: Run, folder: string, sourceBase: string, opts: SecureOpts): Promise<ItemOutcome | null> {
+  const covered = opts.postCommit ? await backupPostCommit(r, folder, sourceBase) : new Set<string>()
+  if (opts.devPrefix) {
+    const extras: BackupEntry[] = []
+    for (const name of ['config.json', 'remote-devices.json']) {
+      const st = await lstatOrNull(r, join(folder, name))
+      const data = st && st.isFile() ? await readFileOrNull(r, join(folder, name)) : null
+      if (!data) continue
+      extras.push({ name: `${opts.devPrefix}${name}`, data, source: join(sourceBase, name) })
+      covered.add(name)
+    }
+    if (extras.length > 0 && appendToBackup(r.env.targetDir, r.marker, extras, r.env.now()) > 0) r.persist()
+  }
+  return backupUnknown(r, folder, sourceBase, opts.unknownPrefix, covered)
+}
+
+function toRemoveResult(o: ItemOutcome | null): RemoveResult | undefined {
+  if (!o) return undefined
+  if (o.state === 'skipped') return { skipped: o.reason ?? 'skipped' }
+  if (o.state === 'deferred') return { deferred: o.reason ?? 'deferred' }
+  return undefined
+}
+
+/** secureFolder for a folder already renamed to a tombstone: any error keeps it (deferred). */
+async function secureTombstone(r: Run, tomb: string, sourceBase: string, opts: SecureOpts): Promise<RemoveResult | undefined> {
+  const st = await lstatOrNull(r, tomb)
+  if (!st || st.isSymbolicLink() || !st.isDirectory()) return undefined // safeRemoveTree decides
+  try {
+    return toRemoveResult(await secureFolder(r, tomb, sourceBase, opts))
+  } catch (err) {
+    if (err instanceof CrashFault) throw err
+    return { deferred: errCode(err) }
   }
 }
 
-/** L01, L02, L18: a 1.x data folder. Back up what changed and what is unknown, then tombstone and delete. */
-async function cleanDataFolder(r: Run, id: LegacyItemId, target: string, opts: { postCommit: boolean; unknownPrefix: string; extras?: BackupEntry[] }): Promise<ItemOutcome> {
-  const tombs = await removeTombstones(target, r.env.guard, r.rm)
+/**
+ * L01, L02, L18: a 1.x data folder. Everything deleting it would lose goes to
+ * the verified zip first; then the folder is renamed to a tombstone, checked
+ * again (1.x may have written in between) and only then deleted. Tombstones a
+ * crash left behind get the same check before they go.
+ */
+async function cleanDataFolder(r: Run, id: LegacyItemId, target: string, opts: SecureOpts): Promise<ItemOutcome> {
+  const tombs = await removeTombstones(target, r.env.guard, r.rm, (t) => secureTombstone(r, t, target, opts))
   if (typeof tombs === 'object' && 'deferred' in tombs) return outcome(tombs)
   const st = await lstatOrNull(r, target)
-  if (!st) return { state: tombs === 'done' ? 'done' : 'absent' }
+  if (!st) return outcome(tombs)
   const pre = precheck(r, target, st)
   if (pre) return pre
   if (r.env.isFolderLocked(target)) return { state: 'deferred', reason: 'legacyRunning' }
-  if (opts.postCommit) await backupPostCommit(r, target)
-  if (opts.extras && opts.extras.length > 0 && appendToBackup(r.env.targetDir, r.marker, opts.extras, r.env.now()) > 0) r.persist()
-  const unknown = await backupUnknown(r, target, opts.unknownPrefix)
-  if (unknown) return unknown
-  return outcome(await tombstoneAndRemove(target, r.env.guard, tombstoneOpts(r, id)))
+  const kept = await secureFolder(r, target, target, opts)
+  if (kept) return kept
+  const res = await tombstoneAndRemove(target, r.env.guard, {
+    ...r.rm,
+    afterRename: async (tomb) => {
+      if (r.env.faultAt === `crash:tombstone:${id}`) throw new CrashFault(`tombstone:${id}`)
+      return secureTombstone(r, tomb, target, opts)
+    },
+  })
+  return outcome(combineResults([res, tombs]))
 }
 
+/**
+ * The 1.x folder L01 may delete: always <appData>/<legacy name>, computed
+ * here. The marker's from (a path read back from a file) is only taken when
+ * it is exactly that, in either spelling of the name.
+ */
 function installedLegacyDir(env: CleanupEnv, m: LegacyMigrationMarker): string {
-  return env.legacyDataDir ?? (m.mode === 'installed' && m.from ? m.from : join(env.roots.appData, LEGACY_BRAND.packageName))
+  const allowed = [join(env.roots.appData, LEGACY_BRAND.packageName), join(env.roots.appData, LEGACY_BRAND.productName)]
+  const pick = (p: string | null | undefined): string | undefined => (p ? allowed.find((a) => samePath(a, p)) && p : undefined)
+  return pick(env.legacyDataDir) ?? (m.mode === 'installed' ? pick(m.from) : undefined) ?? allowed[0]
 }
 
 function portableLegacyDir(env: CleanupEnv): string | null {
@@ -359,10 +463,20 @@ const L03: InventoryItem = {
     if (!st) return { state: 'absent' }
     const pre = precheck(r, target, st)
     if (pre) return pre
-    // Data in there, or a registered 1.x install: it belongs to that install, never to the portable.
-    const hasData = (await lstatOrNull(r, join(target, 'config.json'))) || (await lstatOrNull(r, join(target, 'remote-devices.json')))
+    // Data in there (any whitelist file, or anything under backups/), or a
+    // registered 1.x install: it belongs to that install, never to the portable.
+    let hasData = false
+    for (const name of DATA_FILES) if (await lstatOrNull(r, join(target, name))) hasData = true
+    try {
+      if ((await (r.env.fs ?? nodeFsp).readdir(join(target, 'backups'))).length > 0) hasData = true
+    } catch {
+      /* no backups folder */
+    }
     if (hasData || (await legacyInstallRegistered(r.env))) return { state: 'skipped', reason: 'ownedByInstalled' }
     if (r.env.isFolderLocked(target)) return { state: 'deferred', reason: 'legacyRunning' }
+    // Whatever is not Chromium's goes to the zip first (or keeps the folder), like L01.
+    const kept = await backupUnknown(r, target, target, 'appdata/other/', new Set())
+    if (kept) return kept
     return outcome(await safeRemoveTree(target, r.env.guard, r.rm))
   },
 }
@@ -414,7 +528,16 @@ const L14: InventoryItem = {
   describe: (env) => [join(env.roots.temp, LEGACY_BRAND.portableUnpackDir)],
   async run(r) {
     if (r.env.platform !== 'win32') return notThisMode
-    return outcome(await safeRemoveTree(join(r.env.roots.temp, LEGACY_BRAND.portableUnpackDir), r.env.guard, r.rm))
+    const target = join(r.env.roots.temp, LEGACY_BRAND.portableUnpackDir)
+    const st = await lstatOrNull(r, target)
+    if (!st) return { state: 'absent' }
+    // Only the unpacked app (the electron-builder layout): a folder of the
+    // same name with anything else in it (a clone of the old repo) is not ours.
+    if (st.isDirectory() && !st.isSymbolicLink() && (await foreignEntries(r, target)).length > 0) {
+      r.env.log(`phase=cleaning item=L14 result=unknownFiles path=${target}`)
+      return { state: 'skipped', reason: 'unknownFiles' }
+    }
+    return outcome(await safeRemoveTree(target, r.env.guard, r.rm))
   },
 }
 
@@ -443,17 +566,9 @@ const L18: InventoryItem = {
   describe: (env) => [join(env.roots.appData, `${LEGACY_BRAND.packageName}-dev`)],
   async run(r) {
     const target = join(r.env.roots.appData, `${LEGACY_BRAND.packageName}-dev`)
-    // Its config and devices go to the zip first (dev/...), whatever the pipeline saw.
-    const extras: BackupEntry[] = []
-    for (const name of ['config.json', 'remote-devices.json']) {
-      const p = join(target, name)
-      const st = await lstatOrNull(r, p)
-      if (st && st.isFile()) {
-        const data = await readFileOrNull(r, p)
-        if (data) extras.push({ name: `dev/${name}`, data, source: p })
-      }
-    }
-    return cleanDataFolder(r, 'L18', target, { postCommit: false, unknownPrefix: 'dev/other/', extras })
+    // Its config and devices go to the zip first (dev/...), whatever the pipeline
+    // saw; its .bak, backups/ and unknown entries under dev/other/.
+    return cleanDataFolder(r, 'L18', target, { postCommit: false, unknownPrefix: 'dev/other/', devPrefix: 'dev/' })
   },
 }
 
@@ -485,6 +600,17 @@ function isInstallLayoutEntry(name: string, isDir: boolean): boolean {
     /\.(dll|pak|bin|dat|json)$/.test(n) ||
     n.startsWith('license')
   )
+}
+
+/** Top-level entries of dir outside the electron-builder layout (links count as foreign). */
+async function foreignEntries(r: Run, dir: string): Promise<string[]> {
+  const fsx = r.env.fs ?? nodeFsp
+  const out: string[] = []
+  for (const n of (await fsx.readdir(dir)).map(String)) {
+    const est = await fsx.lstat(join(dir, n))
+    if (est.isSymbolicLink() || !isInstallLayoutEntry(n, est.isDirectory())) out.push(n)
+  }
+  return out
 }
 
 async function readString(r: Run, hive: Hive, key: string, name: string): Promise<string | null> {
@@ -521,13 +647,7 @@ const L04: InventoryItem = {
         results.push({ state: 'skipped', reason: 'guard' })
         continue
       }
-      const fsx = r.env.fs ?? nodeFsp
-      let foreign = false
-      for (const n of (await fsx.readdir(loc)).map(String)) {
-        const est = await fsx.lstat(join(loc, n))
-        if (est.isSymbolicLink() || !isInstallLayoutEntry(n, est.isDirectory())) foreign = true
-      }
-      if (foreign) {
+      if ((await foreignEntries(r, loc)).length > 0) {
         r.env.log(`phase=cleaning item=L04 result=unknownFiles path=${loc}`)
         results.push({ state: 'skipped', reason: 'unknownFiles' })
         continue
@@ -743,6 +863,8 @@ async function cleanWindowsPortableExe(r: Run): Promise<ItemOutcome> {
   const results: ItemOutcome[] = []
   if (PORTABLE_LEGACY_EXE.test(basename(exe))) {
     const dest = join(dir, PORTABLE_EXE_NAME)
+    // Same guards as a deletion (and the dev sandbox): a rename is a change too.
+    if (violatesGuard([exe, dest], r.env.guard)) return { state: 'skipped', reason: 'guard' }
     const adopt = async (): Promise<void> => {
       r.env.exe.setPortableExeFile(dest)
       r.marker.portableExeRenamedTo = dest
@@ -816,6 +938,7 @@ async function renameLinuxAppImage(r: Run): Promise<ItemOutcome> {
   const file = r.env.exe.appImage?.() ?? null
   if (!file || !/snmulticc/i.test(basename(file))) return { state: 'absent' }
   const dest = join(dirname(file), APPIMAGE_NAME)
+  if (violatesGuard([file, dest], r.env.guard)) return { state: 'skipped', reason: 'guard' }
   const fsx = r.env.fs ?? nodeFsp
   const adopt = (): void => {
     r.env.exe.setAppImage?.(dest)

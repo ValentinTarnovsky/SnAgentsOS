@@ -1416,6 +1416,277 @@ async function orchestrationChecks() {
   }
 }
 
+/** 8.3 short form of an existing Windows path, or null where short names are off. */
+function shortPath(p) {
+  if (!isWin) return null
+  const { spawnSync } = require('node:child_process')
+  const r = spawnSync('cmd.exe', [`/d /c for %I in ("${p}") do @echo %~sI`], { encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true, shell: false })
+  const s = String(r.stdout || '').trim()
+  return s && s.toLowerCase() !== p.toLowerCase() && fs.existsSync(s) ? s : null
+}
+
+/**
+ * Data-safety review of R20-04: sequences that tried to delete data that was
+ * not verified and backed up, or anything outside the allowlist.
+ */
+async function reviewChecks() {
+  const L = loadMigration()
+  const Z = load('src/main/migration/backupZip.ts')
+  const S = load('src/main/migration/safeRemove.ts')
+  const I = load('src/main/migration/legacyInventory.ts', withElectron(electronStub(), { process: { ...process, env: {}, argv: ['electron'] } }))
+  const linkType = isWin ? 'junction' : 'dir'
+  const migrate = (p, o = {}) => pipe(L, { legacyDir: path.join(p.roots.appData, 'snmulticc'), targetDir: p.targetDir, extras: { claudeBak: path.join(p.roots.claudeDir, 'settings.json.snmulticc.bak'), devDir: path.join(p.roots.appData, 'snmulticc-dev') }, ...o })
+  const marker = p => JSON.parse(fs.readFileSync(path.join(p.targetDir, 'legacy-migration.json'), 'utf8'))
+  const zipOf = p => Z.readBackupZip(path.join(p.targetDir, 'migration-backup-v1.zip'))
+  const zipHas = (p, buf) => zipOf(p).entries.some(e => e.data.equals(buf))
+
+  // userData (or dataDir) spelled through a junction to the 1.x folder: the guard still holds.
+  {
+    const p = fakeProfile()
+    const legacy = path.join(p.roots.appData, 'snmulticc'); write(path.join(legacy, 'config.json'), 'live data')
+    const alias = path.join(p.base, 'userdata-alias'); fs.symlinkSync(legacy, alias, linkType)
+    const o = { delayMs: 0, elevation: { platform: 'win32', programFiles: [p.programFiles] } }
+    const g = { ...guardFor(p), forbiddenTree: [p.targetDir, alias] }
+    check((await S.safeRemoveTree(legacy, g, o)).skipped === 'guard' && fs.existsSync(path.join(legacy, 'config.json')), 'review guard: userData through a junction to the legacy folder is honored')
+    check((await S.tombstoneAndRemove(legacy, g, o)).skipped === 'guard' && fs.existsSync(path.join(legacy, 'config.json')), 'review guard: the tombstone path honors it too, nothing renamed')
+    const inner = path.join(p.base, 'exe-alias'); fs.symlinkSync(p.roots.appData, inner, linkType)
+    check((await S.safeRemoveTree(legacy, { ...guardFor(p), forbiddenContain: [path.join(inner, 'snmulticc', 'app')] }, o)).skipped === 'guard', 'review guard: an exe folder spelled through a junction inside the target is honored')
+    const allowedAlias = path.join(p.base, 'allowed-alias'); fs.symlinkSync(p.roots.temp, allowedAlias, linkType)
+    write(path.join(p.roots.temp, 'del-me', 'x'), 'x')
+    check(await S.safeRemoveTree(path.join(p.roots.temp, 'del-me'), { ...guardFor(p), allowedRoots: [allowedAlias] }, o) === 'done', 'review guard: allowedRoots spelled through a junction still allows its real children')
+    const short = shortPath(legacy)
+    if (short) check((await S.safeRemoveTree(legacy, { ...guardFor(p), forbiddenTree: [short] }, o)).skipped === 'guard' && fs.existsSync(path.join(legacy, 'config.json')), 'review guard: userData as an 8.3 short name is honored')
+    // End to end: the cleanup keeps the folder and its data.
+    seedLegacy(legacy)
+    check(migrate(p).status === 'committed', 'review guard: fixture migrated')
+    await I.runCleanup(cleanupEnv(p, { guard: { ...guardFor(p), forbiddenTree: [p.targetDir, alias] } }))
+    check(marker(p).cleanup.L01.state === 'skipped' && marker(p).cleanup.L01.reason === 'guard' && fs.existsSync(path.join(legacy, 'config.json')), 'review guard: L01 skipped: guard with userData through a junction')
+  }
+  // The data folder reached through a junction to the 1.x folder: never migrated into itself.
+  {
+    const base = freshDir('review-alias')
+    const legacyDir = seedLegacy(path.join(base, 'snmulticc'))
+    const before = snapshotTree(legacyDir)
+    const alias = path.join(base, 'alias'); fs.symlinkSync(legacyDir, alias, linkType)
+    for (const targetDir of [alias, path.join(alias, 'nested', 'deeper')]) {
+      const r = pipe(L, { legacyDir, targetDir })
+      check(r.status === 'committed' && r.marker.outcome === 'noLegacy' && r.lines.some(l => l.includes('skip=overlap')), `review alias: ${path.basename(targetDir)} through a junction is an overlap, nothing copied`)
+      const after = snapshotTree(legacyDir)
+      check(Object.keys(before).every(k => after[k] === before[k]), `review alias: ${path.basename(targetDir)} leaves every legacy file as it was`)
+    }
+  }
+  // The legacy config loads from config.json.bak (no config.json): it still wins over the destination's.
+  {
+    const base = freshDir('review-bak')
+    const legacyDir = path.join(base, 'snmulticc'), targetDir = path.join(base, 'snagentsos')
+    const legacyCfg = JSON.stringify(makeConfig({ tag: 'legacy-bak', ws: 3 }))
+    write(path.join(legacyDir, 'config.json.bak'), legacyCfg); write(path.join(legacyDir, 'remote-devices.json'), devicesJson())
+    const own = JSON.stringify(makeConfig({ tag: 'own', ws: 1 }))
+    write(path.join(targetDir, 'config.json'), own)
+    const r = pipe(L, { legacyDir, targetDir })
+    check(r.status === 'committed' && L.ladder(targetDir).config.workspaces[0].name === 'legacy-bak-0', `review bak: committed and the legacy config wins (${r.marker.lastError && r.marker.lastError.code})`)
+    check(r.marker.preImportSnapshot && fs.readFileSync(path.join(targetDir, r.marker.preImportSnapshot), 'utf8') === own && !fs.existsSync(path.join(targetDir, 'config.json')), 'review bak: the destination config is in pre-import/, not shadowing the legacy one')
+    // Legacy loading only from backups/; the destination has a lone config.json.bak.
+    const base2 = freshDir('review-bak2')
+    const l2 = path.join(base2, 'snmulticc'), t2 = path.join(base2, 'snagentsos')
+    write(path.join(l2, 'backups', stamp(0)), JSON.stringify(makeConfig({ tag: 'legacy-hist' })))
+    write(path.join(t2, 'config.json.bak'), 'own lone bak')
+    const r2 = pipe(L, { legacyDir: l2, targetDir: t2 })
+    const pre = fs.existsSync(path.join(t2, 'pre-import')) ? fs.readdirSync(path.join(t2, 'pre-import')) : []
+    check(r2.status === 'committed' && L.ladder(t2).config.workspaces[0].name === 'legacy-hist-0', 'review bak: a legacy config from backups/ wins too')
+    check(pre.some(n => n.endsWith('.json.bak') && fs.readFileSync(path.join(t2, 'pre-import', n), 'utf8') === 'own lone bak'), 'review bak: the lone destination .bak is kept in pre-import/')
+    // A failure after the displacement puts the destination back.
+    const base3 = freshDir('review-bak3')
+    const l3 = path.join(base3, 'snmulticc'), t3 = path.join(base3, 'snagentsos')
+    write(path.join(l3, 'config.json.bak'), legacyCfg)
+    write(path.join(t3, 'config.json'), own)
+    check(pipe(L, { legacyDir: l3, targetDir: t3, faultAt: 'move:1' }).status === 'failed' && fs.readFileSync(path.join(t3, 'config.json'), 'utf8') === own, 'review bak: a failed run restores the displaced destination config')
+  }
+  // A crash leaves a torn journal: the originals moved aside are put back, never dropped with the staging.
+  {
+    const base = freshDir('review-journal')
+    const legacyDir = seedLegacy(path.join(base, 'snmulticc')), targetDir = path.join(base, 'snagentsos')
+    const own = JSON.stringify(makeConfig({ tag: 'own' }))
+    write(path.join(targetDir, 'config.json'), own); write(path.join(targetDir, 'config.json.bak'), 'own-bak')
+    let crashed = false
+    try { pipe(L, { legacyDir, targetDir, faultAt: 'crash:move:3' }) } catch (e) { crashed = /crash at move:3/.test(e.message) }
+    const journal = path.join(targetDir, '.legacy-staging', 'undo', 'journal.json')
+    check(crashed && fs.existsSync(journal) && !fs.existsSync(journal + '.tmp'), 'review journal: written through tmp + rename')
+    fs.writeFileSync(journal, '{"entries":[{"rel":"conf')
+    const r = pipe(L, { legacyDir: null, targetDir })
+    check(r.status === 'committed' && fs.readFileSync(path.join(targetDir, 'config.json'), 'utf8') === own && fs.readFileSync(path.join(targetDir, 'config.json.bak'), 'utf8') === 'own-bak', 'review journal: an unreadable journal still restores the destination originals')
+  }
+  // A rollback that cannot finish keeps undo/ for the next start.
+  {
+    const base = freshDir('review-rollback')
+    const legacyDir = seedLegacy(path.join(base, 'snmulticc')), targetDir = path.join(base, 'snagentsos')
+    const own = JSON.stringify(makeConfig({ tag: 'own' }))
+    write(path.join(targetDir, 'config.json'), own)
+    const undo = `${path.sep}undo${path.sep}files${path.sep}`
+    const fsx = hookedFs({ renameSync: (a, b) => { if (String(a).includes(undo) && !String(b).includes(undo)) throw Object.assign(new Error('busy'), { code: 'EPERM' }); return fs.renameSync(a, b) } })
+    const r = pipe(L, { legacyDir, targetDir, fs: fsx, faultAt: 'move:2' })
+    check(r.status === 'failed' && fs.readFileSync(path.join(targetDir, '.legacy-staging', 'undo', 'files', 'config.json'), 'utf8') === own, 'review rollback: the original stays in undo/ when it cannot be put back')
+    const r2 = pipe(L, { legacyDir: null, targetDir })
+    check(r2.status === 'committed' && fs.readFileSync(path.join(targetDir, 'config.json'), 'utf8') === own, 'review rollback: the next start restores it')
+  }
+  // The marker is lost after a commit: the zip there may hold the only copy of cleaned items. It is carried, never overwritten.
+  {
+    const p = fakeProfile(); seedProfile(p)
+    check(migrate(p).status === 'committed', 'review lost marker: migrated')
+    await I.runCleanup(cleanupEnv(p, { isFolderLocked: d => d.endsWith('snmulticc') }))
+    check(marker(p).cleanup.L12.state === 'done' && marker(p).cleanup.L18.state === 'done' && fs.existsSync(path.join(p.roots.appData, 'snmulticc')), 'review lost marker: claude bak and dev profile cleaned, L01 still there')
+    const oldZip = fs.readFileSync(path.join(p.targetDir, 'migration-backup-v1.zip'))
+    for (const f of ['legacy-migration.json', 'legacy-migration.prev.json']) fs.rmSync(path.join(p.targetDir, f))
+    // First a run that fails after writing its zip: the old zip comes back byte for byte.
+    let markerRenames = 0
+    const failing = hookedFs({ renameSync: (a, b) => { if (String(a).endsWith('legacy-migration.json.tmp') && ++markerRenames === 3) throw Object.assign(new Error('busy'), { code: 'EBUSY' }); return fs.renameSync(a, b) } })
+    const f = migrate(p, { fs: failing })
+    check(f.status === 'failed' && fs.readFileSync(path.join(p.targetDir, 'migration-backup-v1.zip')).equals(oldZip), 'review lost marker: a failed re-run puts the previous zip back')
+    const r = migrate(p)
+    const prev = zipOf(p).entries.find(e => e.name === 'previous/migration-backup-v1.zip')
+    check(r.status === 'committed' && prev && prev.data.equals(oldZip), 'review lost marker: the new zip carries the previous one whole')
+    check(Z.readBackupZip(path.join(p.targetDir, 'migration-backup-v1.zip')).entries.length === r.marker.backup.entries && Z.decodeZip(prev.data).entries.some(e => e.name === 'claude/settings.json.snmulticc.bak'), 'review lost marker: the claude bak survives inside it')
+  }
+  // 1.x writes between the last check and the tombstone rename: the late bytes reach the zip before anything is deleted.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p); migrate(p)
+    let done = false
+    const late = new Proxy(fs.promises, { get: (t, k) => (k === 'rename' ? async (a, b) => { if (!done && String(b).includes('snmulticc.deleting-')) { done = true; fs.writeFileSync(path.join(String(a), 'config.json'), 'written by 1.x at the last moment'); fs.writeFileSync(path.join(String(a), 'late-notes.txt'), 'late') } return t.rename(a, b) } : t[k]) })
+    await I.runCleanup(cleanupEnv(p, { fs: late }))
+    const names = zipOf(p).entries.map(e => e.name)
+    check(done && marker(p).cleanup.L01.state === 'done' && !fs.existsSync(legacyDir), 'review late write: L01 done')
+    check(zipHas(p, Buffer.from('written by 1.x at the last moment')) && names.some(n => /^post-commit\/.+\/config\.json$/.test(n)) && names.includes('other/late-notes.txt'), 'review late write: the late config and the late unknown file are in the zip')
+    check(Z.verifyBackupZip(path.join(p.targetDir, 'migration-backup-v1.zip'), zipOf(p).manifest), 'review late write: the zip verifies')
+  }
+  // A backup that fails right after the rename: the folder goes back under its own name, nothing deleted.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p); migrate(p)
+    const before = snapshotTree(legacyDir)
+    let done = false
+    const late = new Proxy(fs.promises, { get: (t, k) => (k === 'rename' ? async (a, b) => { if (!done && String(b).includes('snmulticc.deleting-')) { done = true; write(path.join(String(a), 'big-late', 'x.bin'), crypto.randomBytes(5 * 1024 * 1024 + 1)) } return t.rename(a, b) } : t[k]) })
+    await I.runCleanup(cleanupEnv(p, { fs: late }))
+    const after = snapshotTree(legacyDir)
+    check(marker(p).cleanup.L01.reason === 'unknownFiles' && Object.keys(before).every(k => after[k] === before[k]) && fs.readdirSync(p.roots.appData).every(n => !n.includes('.deleting-')), 'review late write: over 5 MB after the rename keeps the folder under its own name')
+  }
+  // The zip expired while L01 stayed deferred: when L01 finally goes, its data is in a zip again.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p)
+    const m0 = migrate(p).marker
+    await I.runCleanup(cleanupEnv(p, { isFolderLocked: d => d.endsWith('snmulticc') }))
+    check(marker(p).cleanup.L01.state === 'deferred', 'review expiry: L01 deferred by the lock')
+    const legacyCfg = fs.readFileSync(path.join(legacyDir, 'config.json'))
+    check(L.maintainBackup(p.targetDir, m0.backup.createdAt + 31 * 24 * 3600 * 1000) && !fs.existsSync(path.join(p.targetDir, 'migration-backup-v1.zip')), 'review expiry: the zip expired while cleaning')
+    await I.runCleanup(cleanupEnv(p))
+    check(marker(p).cleanup.L01.state === 'done' && !fs.existsSync(legacyDir) && zipHas(p, legacyCfg) && marker(p).backup.deletedAt === undefined, 'review expiry: the legacy data went back into a zip before L01 deleted it')
+  }
+  // An unreadable zip: L01 never deletes against it.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p); migrate(p)
+    fs.writeFileSync(path.join(p.targetDir, 'migration-backup-v1.zip'), 'not a zip')
+    await I.runCleanup(cleanupEnv(p))
+    check(marker(p).cleanup.L01.state === 'deferred' && fs.existsSync(path.join(legacyDir, 'config.json')), 'review zip: a corrupt zip defers L01, the folder stays')
+  }
+  // Our own data the whitelist leaves out: older backups, files under backups/, an oversized config.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p, { backups: 15 })
+    write(path.join(legacyDir, 'backups', 'readme.txt'), 'my note in backups')
+    migrate(p)
+    const oldest = [0, 1, 2].map(i => fs.readFileSync(path.join(legacyDir, 'backups', stamp(i))))
+    await I.runCleanup(cleanupEnv(p))
+    const names = zipOf(p).entries.map(e => e.name)
+    check(marker(p).cleanup.L01.state === 'done' && [0, 1, 2].every(i => names.includes(`other/backups/${stamp(i)}`)) && oldest.every(b => zipHas(p, b)), 'review whitelist: backups past the newest 12 are in the zip before L01 goes')
+    check(names.includes('other/backups/readme.txt') && !names.some(n => n === `other/backups/${stamp(14)}`), 'review whitelist: other files under backups/ too, the copied ones not twice')
+    const extracted = freshDir('review-unzip')
+    const tool = extractZip(path.join(p.targetDir, 'migration-backup-v1.zip'), extracted)
+    if (tool) {
+      const man = JSON.parse(fs.readFileSync(path.join(extracted, 'manifest.json'), 'utf8'))
+      check(man.entries.length === names.length && man.entries.every(e => sha(fs.readFileSync(path.join(extracted, ...e.name.split('/')))) === e.sha256), `review whitelist: the rewritten zip extracts with ${tool} and every SHA-256 matches`)
+    }
+  }
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p)
+    const huge = Buffer.concat([Buffer.from('{corrupt '), crypto.randomBytes(5 * 1024 * 1024 + 10)])
+    fs.writeFileSync(path.join(legacyDir, 'config.json'), huge)
+    check(migrate(p).status === 'committed', 'review oversized: a config over 5 MB is not copied, the .bak is')
+    await I.runCleanup(cleanupEnv(p))
+    check(marker(p).cleanup.L01.state === 'skipped' && marker(p).cleanup.L01.reason === 'unknownFiles' && fs.readFileSync(path.join(legacyDir, 'config.json')).equals(huge), 'review oversized: the uncopied config keeps the folder (skipped: unknownFiles)')
+  }
+  // L18: the dev profile's .bak and backups/ go to the zip too.
+  {
+    const p = fakeProfile(); const { dev } = seedProfile(p)
+    write(path.join(dev, 'config.json.bak'), 'dev-bak'); write(path.join(dev, 'backups', stamp(0)), 'dev-history')
+    migrate(p)
+    await I.runCleanup(cleanupEnv(p))
+    const names = zipOf(p).entries.map(e => e.name)
+    check(marker(p).cleanup.L18.state === 'done' && names.includes('dev/config.json') && names.includes('dev/other/config.json.bak') && names.includes(`dev/other/backups/${stamp(0)}`), 'review dev: config, .bak and backups of snmulticc-dev are in the zip')
+  }
+  // Leftover tombstones are secured before they go.
+  {
+    const p = fakeProfile(); const { legacyDir } = seedProfile(p); migrate(p)
+    const tomb = path.join(p.roots.appData, 'snmulticc.deleting-2026-10-18T00-00-00-000Z')
+    fs.renameSync(legacyDir, tomb)
+    fs.writeFileSync(path.join(tomb, 'config.json'), 'changed before the crash')
+    write(path.join(tomb, 'diary.txt'), 'unknown in a tombstone')
+    await I.runCleanup(cleanupEnv(p))
+    check(marker(p).cleanup.L01.state === 'done' && !fs.existsSync(tomb) && zipHas(p, Buffer.from('changed before the crash')) && zipHas(p, Buffer.from('unknown in a tombstone')), 'review tombstone: a crash leftover is backed up, then deleted')
+    const p2 = fakeProfile(); const s2 = seedProfile(p2); migrate(p2)
+    const tomb2 = path.join(p2.roots.appData, 'snmulticc.deleting-2026-10-18T00-00-00-000Z')
+    fs.renameSync(s2.legacyDir, tomb2)
+    write(path.join(tomb2, 'videos', 'big.bin'), crypto.randomBytes(5 * 1024 * 1024 + 1))
+    await I.runCleanup(cleanupEnv(p2))
+    check(marker(p2).cleanup.L01.reason === 'unknownFiles' && fs.existsSync(path.join(tomb2, 'videos', 'big.bin')) && fs.existsSync(path.join(tomb2, 'config.json')), 'review tombstone: over 5 MB unknown keeps the tombstone')
+  }
+  // L03 (portable): unknown files go to the zip first; backups/ alone means data.
+  {
+    const p = fakeProfile()
+    const exeDir = path.join(p.base, 'usb')
+    const legacyDir = seedLegacy(path.join(exeDir, 'snmulticc-data'))
+    const target = path.join(exeDir, 'snagentsos-data')
+    pipe(L, { legacyDir, targetDir: target, mode: 'portable' })
+    const roam = path.join(p.roots.appData, 'snmulticc'); write(path.join(roam, 'Cache', 'x'), 'c'); write(path.join(roam, 'my-script.ps1'), 'keep me')
+    const pp = { ...p, targetDir: target }
+    await I.runCleanup(cleanupEnv(pp, { mode: 'portable', portableDir: exeDir, guard: guardFor(pp, { contain: [exeDir] }) }))
+    const m = JSON.parse(fs.readFileSync(path.join(target, 'legacy-migration.json'), 'utf8'))
+    check(m.cleanup.L03.state === 'done' && !fs.existsSync(roam) && Z.readBackupZip(path.join(target, 'migration-backup-v1.zip')).entries.some(e => e.name === 'appdata/other/my-script.ps1'), 'review L03: an unknown file in %APPDATA%\\snmulticc is in the zip before deletion')
+    const p2 = fakeProfile()
+    const exe2 = path.join(p2.base, 'usb'); const l2 = seedLegacy(path.join(exe2, 'snmulticc-data')); const t2 = path.join(exe2, 'snagentsos-data')
+    pipe(L, { legacyDir: l2, targetDir: t2, mode: 'portable' })
+    const roam2 = path.join(p2.roots.appData, 'snmulticc'); write(path.join(roam2, 'backups', stamp(0)), 'history of an installed 1.x')
+    const pp2 = { ...p2, targetDir: t2 }
+    await I.runCleanup(cleanupEnv(pp2, { mode: 'portable', portableDir: exe2, guard: guardFor(pp2, { contain: [exe2] }) }))
+    check(JSON.parse(fs.readFileSync(path.join(t2, 'legacy-migration.json'), 'utf8')).cleanup.L03.reason === 'ownedByInstalled' && fs.existsSync(path.join(roam2, 'backups', stamp(0))), 'review L03: backups/ alone is data of an install, kept')
+  }
+  // L01 deletes only the computed <appData>\snmulticc, never a marker "from" that points elsewhere.
+  {
+    const p = fakeProfile(); seedProfile(p); migrate(p)
+    fs.renameSync(path.join(p.roots.appData, 'snmulticc'), path.join(p.base, 'moved-away'))
+    const docs = path.join(p.home, 'Documents'); write(path.join(docs, 'thesis.txt'), 'irreplaceable')
+    const m = marker(p); m.from = docs
+    fs.writeFileSync(path.join(p.targetDir, 'legacy-migration.json'), JSON.stringify(m))
+    await I.runCleanup(cleanupEnv(p, { legacyDataDir: null }))
+    check(marker(p).cleanup.L01.state === 'absent' && fs.readFileSync(path.join(docs, 'thesis.txt'), 'utf8') === 'irreplaceable', 'review L01: a marker from outside <appData>\\snmulticc is never deleted')
+  }
+  // L17 in a dev sandbox: the portable exe outside the fake roots is not renamed.
+  {
+    const p = fakeProfile()
+    const usb = path.join(p.base, 'real-usb'); const oldExe = path.join(usb, 'SnMultiCC-1.14.1-portable.exe'); write(oldExe, 'exe')
+    const l = seedLegacy(path.join(usb, 'snmulticc-data')); const t = path.join(usb, 'snagentsos-data')
+    pipe(L, { legacyDir: l, targetDir: t, mode: 'portable' })
+    const pp = { ...p, targetDir: t }
+    await I.runCleanup(cleanupEnv(pp, { mode: 'portable', portableDir: usb, guard: guardFor(pp, { contain: [usb], allowedRoots: [p.roots.temp] }), exe: { execPath: 'x', portableExeFile: () => oldExe, setPortableExeFile() { throw new Error('must not rename') } } }))
+    const m = JSON.parse(fs.readFileSync(path.join(t, 'legacy-migration.json'), 'utf8'))
+    check(m.cleanup.L17.state === 'skipped' && m.cleanup.L17.reason === 'guard' && fs.existsSync(oldExe) && m.cleanup.L02.reason === 'guard' && fs.existsSync(l), 'review L17: outside the dev sandbox nothing is renamed or deleted')
+  }
+  // L14: a %TEMP%\SnMultiCC that is not the unpacked app (a clone of the old repo) is not deleted.
+  {
+    const p = fakeProfile(); seedProfile(p); migrate(p)
+    const clone = path.join(p.roots.temp, 'SnMultiCC')
+    write(path.join(clone, '.git', 'HEAD'), 'ref: refs/heads/main'); write(path.join(clone, 'src', 'main', 'index.ts'), 'code')
+    await I.runCleanup(cleanupEnv(p))
+    check(marker(p).cleanup.L14.state === 'skipped' && marker(p).cleanup.L14.reason === 'unknownFiles' && fs.existsSync(path.join(clone, '.git', 'HEAD')), 'review L14: a folder that is not the electron-builder layout is kept')
+  }
+}
+
 async function main() {
   try {
     await markerChecks()
@@ -1433,6 +1704,7 @@ async function main() {
     await posixItemChecks()
     await processChecks()
     await orchestrationChecks()
+    await reviewChecks()
     console.log(`PASS: ${checks} legacy migration and cleanup checks`)
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true })
