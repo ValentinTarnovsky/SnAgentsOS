@@ -8,7 +8,7 @@ const root = path.resolve(__dirname, '..')
 let checks = 0
 function check(condition, label) { assert.ok(condition, label); checks++ }
 function load(file, overrides = {}) {
-  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws', 'node-pty'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
   const mod = { exports: {} }
   vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console, process, Buffer, URL, setTimeout, clearTimeout, ...overrides })
   return mod.exports
@@ -92,7 +92,7 @@ async function main() {
       export { getFocusedPane, getLastFocusedPaneForWorkspace, registerFocuser } from './focus'
       export { remoteNoticeText, initRemoteCommands } from './remoteCommands'
     `, {
-      window: { snApi: { config: { save() {} }, pty: { write() {} }, remote: { onCommand: cb => { commandCb = cb; return () => {} }, commandResult: res => results.push(res) } } },
+      window: { snApi: { config: { save() {} }, pty: { write() {}, killPanes: async ids => ids.length }, remote: { onCommand: cb => { commandCb = cb; return () => {} }, commandResult: res => results.push(res) } } },
       document: { hasFocus: () => true },
       requestAnimationFrame: fn => { raf.push(fn); return raf.length },
       cancelAnimationFrame() {},
@@ -198,7 +198,292 @@ async function main() {
     check(frames.filter(f => f.type === 'ctlAck').length === 2, 'every ctl is acknowledged')
   }
 
-  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices)`)
+  // --- PtyManager.killPanes / reconcile (E4-FR-36), fake node-pty -------------
+  {
+    const procs = []
+    const impl = (shell, args, opts) => {
+      const exitCbs = []
+      const proc = {
+        cols: opts.cols, rows: opts.rows, killed: false,
+        onData() {}, onExit: cb => exitCbs.push(cb), write() {}, resize() {}, pause() {}, resume() {},
+        kill: () => { proc.killed = true; exitCbs.forEach(cb => cb({ exitCode: 1 })) },
+        exit: code => exitCbs.forEach(cb => cb({ exitCode: code })),
+      }
+      procs.push(proc)
+      return proc
+    }
+    const { PtyManager } = load('src/main/pty/PtyManager.ts', {
+      require: id => id === 'node-pty' ? { spawn: impl } : id === 'electron' ? { app: { getPath: () => require('node:os').tmpdir() } } : require(id),
+      console: { ...console, warn() {} },
+      setInterval, clearInterval,
+    })
+    const sent = []
+    const pm = new PtyManager(() => ({ isDestroyed: () => false, send: (ch, p) => sent.push({ ch, p }) }))
+    let runningChanges = 0
+    pm.setRunningChangeListener(() => { runningChanges++ })
+    for (const id of ['a', 'b', 'c', 'd']) pm.spawn({ paneId: id, cols: 80, rows: 24 })
+    check(pm.count === 4, 'four ptys spawned')
+    check(pm.killPanes(['a', 'missing']) === 1 && pm.count === 3 && procs[0].killed, 'killPanes kills by paneId and counts only live ptys')
+    check(pm.reattach('a') === null, 'a killed pane has nothing to reattach (the next mount spawns)')
+    check(pm.killPanes(['a']) === 0, 'killPanes is idempotent')
+    const exitFrame = sent.find(s => s.ch === 'pty:exit')
+    check(exitFrame && exitFrame.p.natural === false, 'a killPanes kill is not a natural exit (no exit card)')
+    // d ends on its own: main keeps its output for phones until the pane goes away.
+    procs[3].exit(0)
+    check(pm.getExited('d') !== null, 'a natural exit keeps the pane output (E6-FR-20)')
+    runningChanges = 0
+    check(pm.reconcile(['b', 'zzz']) === 1 && pm.count === 1 && procs[2].killed && !procs[1].killed, 'reconcile kills every pty whose pane is not live')
+    check(pm.getExited('d') === null && runningChanges >= 2, 'reconcile forgets exit records of panes that no longer exist')
+    check(pm.reconcile(['b']) === 0 && pm.count === 1, 'reconcile with every pane live kills nothing')
+    procs[1].exit(0)
+    check(pm.getExited('b') !== null && pm.killPanes(['b']) === 0 && pm.getExited('b') === null, 'killPanes drops the exit record of a removed pane')
+    // A pty superseded by a second spawn for the same pane is killed with it.
+    const before = procs.length
+    pm.spawn({ paneId: 'o', cols: 80, rows: 24 })
+    pm.spawn({ paneId: 'o', cols: 80, rows: 24 })
+    check(pm.killPanes(['o']) === 2 && procs[before].killed && procs[before + 1].killed, 'killPanes kills every live pty of the pane, superseded ones too')
+    pm.spawn({ paneId: 'o2', cols: 80, rows: 24 })
+    pm.spawn({ paneId: 'o2', cols: 80, rows: 24 })
+    check(pm.reconcile(['b']) === 2 && pm.count === 0, 'reconcile also catches a superseded pty of a removed pane')
+    pm.killAll()
+
+    // The IPC: a malformed reconcile list never reads as "no panes".
+    const handlers = {}
+    const { registerPtyIpc } = load('src/main/ipc/registerPtyIpc.ts', {
+      require: id => id === 'electron' ? { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn }, on: (ch, fn) => { handlers[ch] = fn } } } : require(id),
+    })
+    const calls = []
+    registerPtyIpc({ killPanes: ids => { calls.push(['kill', ids]); return ids.length }, reconcile: ids => { calls.push(['rec', ids]); return 0 } })
+    check(handlers['pty:killPanes'](null, ['x', 7, 'y']) === 2 && calls[0][1].join() === 'x,y', 'pty:killPanes keeps only string ids')
+    check(handlers['pty:reconcile'](null, 'nope') === 0 && calls.length === 1, 'pty:reconcile ignores a non-array payload instead of killing everything')
+    handlers['pty:reconcile'](null, ['x'])
+    check(calls[1][0] === 'rec' && calls[1][1].join() === 'x', 'pty:reconcile forwards the live list')
+  }
+
+  // --- ptyLifecycle: remove, delete, import, restart (E4-FR-36) ----------------
+  {
+    const killCalls = []
+    const reconcileCalls = []
+    let epochAtKill = null
+    const r = loadRenderer(`
+      export { useAppStore } from './store'
+      export { initPtyLifecycle, reconcilePtys, shouldKillLateSpawn, allPaneIds, removedPaneIds } from './ptyLifecycle'
+      export { registerPty, getPtyId } from './ptyRegistry'
+      export { registerRestarter } from './restartRegistry'
+    `, {
+      window: { snApi: { config: { save() {} }, pty: {
+        killPanes: async ids => { killCalls.push(ids.slice()); return ids.length },
+        reconcile: async ids => { reconcileCalls.push(ids.slice()); return 0 },
+      } } },
+    })
+    const S = r.useAppStore
+    const pane = id => ({ id, type: 'shell', title: id, icon: 'terminal' })
+    S.setState({
+      hydrated: true, activeWorkspaceId: 'w1',
+      workspaces: [
+        { id: 'w1', name: 'Uno', cwd: '', panes: [pane('p1'), pane('p2')], layout: { grid: 2, order: ['p1', 'p2'] } },
+        { id: 'w2', name: 'Dos', cwd: '', panes: [pane('q1'), pane('q2')], layout: { grid: 2, order: ['q1', 'q2'] } },
+        { id: 'w3', name: 'Tres', cwd: '', panes: [pane('t1')], layout: { grid: 1, order: ['t1'] } },
+      ],
+      mountedWorkspaces: { w1: 'full' },
+    })
+    check(r.removedPaneIds(new Set(['a', 'b', 'c']), new Set(['b'])).join() === 'a,c', 'removedPaneIds lists the panes that left')
+    const stop = r.initPtyLifecycle()
+    check(r.initPtyLifecycle()() === undefined, 'initPtyLifecycle is idempotent')
+    await r.reconcilePtys()
+    check(reconcileCalls.length === 1 && reconcileCalls[0].sort().join() === 'p1,p2,q1,q2,t1', 'reconcile sends every pane of every workspace (visited or not)')
+
+    S.getState().renamePane('w1', 'p1', 'renamed')
+    S.getState().movePane('w1', 'p2', 0)
+    check(killCalls.length === 0, 'renames and moves never kill')
+
+    S.getState().removePane('w1', 'p2')
+    check(killCalls.length === 1 && killCalls[0].join() === 'p2', 'removePane kills exactly the removed pane')
+
+    // A workspace never visited after a reload: the renderer registry is empty,
+    // the kill still goes by paneId to main.
+    check(r.getPtyId('q1') === undefined, 'unvisited workspace has no local pty binding')
+    killCalls.length = 0
+    S.getState().deleteWorkspace('w2')
+    const killed = new Set(killCalls.flat())
+    check(killed.has('q1') && killed.has('q2') && killed.size === 2, 'deleteWorkspace kills every pane of an unvisited workspace by paneId')
+
+    killCalls.length = 0
+    S.getState().importConfig({ workspaces: [
+      { id: 'w1', name: 'Uno', cwd: '', panes: [pane('p1')] },
+      { id: 'w9', name: 'Nueva', cwd: '', panes: [pane('n1')] },
+    ] })
+    check(killCalls.length === 1 && killCalls[0].join() === 't1', 'importConfig kills only the panes that disappear')
+
+    killCalls.length = 0
+    S.getState().mergeConfig({ workspaces: [{ id: 'm', name: 'M', cwd: '', panes: [pane('m1')] }] })
+    check(killCalls.length === 0, 'mergeConfig adds panes and kills nothing')
+
+    // Restart clean of a console outside the mounted set (phone, a workspace not
+    // revisited since a reload): it kills and then mounts, so a shell comes back.
+    const merged = S.getState().workspaces.at(-1)
+    const mPane = merged.panes[0].id
+    check(!(S.getState().mountedWorkspaces[merged.id]), 'the merged workspace is not mounted')
+    S.getState().restartPaneClean(mPane)
+    const mm = S.getState().mountedWorkspaces[merged.id]
+    check(killCalls.length === 1 && killCalls[0].join() === mPane && Array.isArray(mm) && mm.includes(mPane), 'restartPaneClean on an unmounted console kills it and mounts it')
+
+    // Restart clean: the kill goes out before the epoch rises (the remount's
+    // reattach then finds nothing and spawns).
+    killCalls.length = 0
+    const epochBefore = S.getState().paneEpoch.p1 ?? 0
+    const unsubOrder = S.subscribe(s => { if ((s.paneEpoch.p1 ?? 0) !== epochBefore) epochAtKill = killCalls.length })
+    S.getState().restartPaneClean('p1')
+    unsubOrder()
+    check(killCalls.length === 1 && killCalls[0].join() === 'p1' && epochAtKill === 1, 'restartPaneClean kills before bumping paneEpoch')
+    check(S.getState().paneEpoch.p1 === epochBefore + 1, 'restartPaneClean remounts the console')
+
+    // restartPane with a mounted terminal goes in place (R21-08): no kill, no remount.
+    killCalls.length = 0
+    let inPlace = 0
+    r.registerRestarter('n1', () => { inPlace++ })
+    S.getState().restartPane('n1')
+    check(inPlace === 1 && killCalls.length === 0 && !S.getState().paneEpoch.n1, 'restartPane on a mounted console restarts in place without killing')
+    // ...and an unmounted one falls back to the clean path, which kills first.
+    S.getState().restartPane('p1')
+    check(killCalls.length === 1 && killCalls[0].join() === 'p1', 'restartPane on an unmounted console kills before the remount')
+
+    // A spawn resolving after its terminal unmounted.
+    r.registerPty('p1', 'pty-new')
+    check(r.shouldKillLateSpawn('p1', 'pty-new') === false, 'a late spawn that is the pane binding survives')
+    check(r.shouldKillLateSpawn('p1', 'pty-old') === true, 'a late spawn superseded by another pty is killed')
+    check(r.shouldKillLateSpawn('n1', 'pty-x') === false, 'a late spawn of a live, unbound pane survives for the next mount')
+    check(r.shouldKillLateSpawn('gone', 'pty-y') === true, 'a late spawn of a removed pane is killed')
+
+    stop()
+    killCalls.length = 0
+    S.getState().removePane('w1', 'p1')
+    check(killCalls.length === 0, 'a stopped lifecycle no longer kills')
+  }
+
+  // --- useXterm: the unmount never kills (E4-FR-36) -----------------------------
+  {
+    const fs = require('node:fs')
+    const src = fs.readFileSync(path.join(root, 'src/renderer/components/terminal/useXterm.ts'), 'utf8')
+    const cleanup = src.slice(src.indexOf('    return () => {\n      disposed = true'), src.indexOf('startedRef.current = false'))
+    check(cleanup.length > 0 && !/pty\.kill\(/.test(cleanup), 'the useXterm cleanup has no pty.kill')
+    check((src.match(/shouldKillLateSpawn\(/g) || []).length === 2, 'both late-resolving launches (spawn, restart) use shouldKillLateSpawn')
+  }
+
+  // --- update state in main + the UPDATE_INSTALL guard (E4-FR-37) --------------
+  {
+    const handlers = {}
+    const timers = []
+    const fakeElectron = { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn }, on() {} }, app: { getVersion: () => '2.0.0', isPackaged: false }, net: {}, shell: {} }
+    const mod = load('src/main/ipc/registerUpdateIpc.ts', {
+      require: id => id === 'electron' ? fakeElectron : require(id),
+      setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
+    })
+    const stateMod = load('src/main/updateState.ts')
+    const state = new stateMod.UpdateStateStore()
+    const sent = []
+    const installing = []
+    let quits = 0
+    let installCalls = 0
+    let pending = null
+    mod.registerUpdateIpc({
+      getSender: () => ({ isDestroyed: () => false, send: (ch, p) => sent.push({ ch, p }) }),
+      quitForUpdate: () => { quits++ },
+      setInstalling: v => installing.push(v),
+      check: async () => ({ available: true }),
+      install: onProgress => { installCalls++; pending = { onProgress }; return new Promise((resolve, reject) => { pending.resolve = resolve; pending.reject = reject }) },
+      state,
+    })
+    const info = { available: true, currentVersion: '2.0.0', latestVersion: '2.1.0', notes: '', releaseUrl: null, installable: true, installKind: 'win-portable' }
+    state.checked(info)
+    check(handlers['update:getState']().phase === 'available' && handlers['update:getState']().info.latestVersion === '2.1.0', 'a good check moves main to available with its info')
+    const p1 = handlers['update:install']()
+    const p2 = handlers['update:install']()
+    check(p1 === p2 && installCalls === 1, 'a second update:install joins the running one (same promise, one download)')
+    check(state.get().phase === 'downloading' && installing.at(-1) === true, 'install starts downloading and blocks close')
+    const stateFrames = () => sent.filter(s => s.ch === 'update:state').map(s => s.p.phase)
+    check(stateFrames().join() === 'available,downloading', 'update:state is pushed on every phase change')
+    pending.onProgress({ percent: 42, transferred: 42, total: 100 })
+    check(state.get().progress.percent === 42 && sent.at(-1).ch === 'update:progress', 'progress is stored in main and streamed')
+    check(stateFrames().length === 2, 'progress alone does not push a state frame')
+    // A reload mid-download: getState hands the phase and the live percent back.
+    const reloaded = handlers['update:getState']()
+    check(reloaded.phase === 'downloading' && reloaded.progress.percent === 42 && reloaded.info.latestVersion === '2.1.0', 'getState after a reload returns downloading at 42%')
+    state.checked({ ...info, latestVersion: '2.2.0' })
+    check(state.get().info.latestVersion === '2.1.0' && state.get().phase === 'downloading', 'a check during the download changes nothing')
+    pending.onProgress({ percent: 100, transferred: 100, total: 100 })
+    check(state.get().phase === 'installing' && installing.at(-1) === true, '100% with the apply pending is installing (close still blocked)')
+    pending.resolve({ relaunching: false })
+    const res = await p1
+    check(res.relaunching === false && state.get().phase === 'opened' && installing.at(-1) === false, 'an opened installer ends in opened and unblocks close')
+    check(timers.length === 0 && quits === 0, 'no relaunch when the installer only opened')
+
+    // After it settles a new install really starts again.
+    const p3 = handlers['update:install']()
+    check(p3 !== p1 && installCalls === 2, 'a finished install releases the guard')
+    pending.reject(new Error('missing-checksum'))
+    let failed = null
+    try { await p3 } catch (err) { failed = err }
+    check(failed && state.get().phase === 'failed' && state.get().installError === 'missing-checksum' && installing.at(-1) === false, 'a failed install ends in failed with its error')
+
+    const p4 = handlers['update:install']()
+    check(state.get().installError === null, 'a retry clears the previous error')
+    pending.resolve({ relaunching: true })
+    await p4
+    check(state.get().phase === 'installing' && timers.length === 1 && timers[0].ms === 400, 'a relaunching install keeps installing and schedules the quit')
+    timers[0].fn()
+    check(quits === 1, 'quitForUpdate runs')
+
+    // A failed check keeps the phase; a good one after an outcome resets it.
+    const s2 = new stateMod.UpdateStateStore()
+    s2.checked(info); s2.begin(); s2.failed('boom')
+    s2.checked({ ...info, available: false, error: 'offline' })
+    check(s2.get().phase === 'failed' && s2.get().installError === 'boom', 'a failed check keeps the install outcome')
+    const s3 = new stateMod.UpdateStateStore()
+    const s3frames = []
+    s3.onChange(s => s3frames.push(s.phase))
+    s3.checked({ ...info, available: false, error: 'offline' })
+    check(s3.get().phase === 'idle' && s3.get().info.error === 'offline', 'a first failed check records its error info')
+    s3.checked(info)
+    s3.checked({ ...info, available: false, latestVersion: null, error: 'offline' })
+    check(s3.get().phase === 'available' && s3.get().info.available && s3.get().info.latestVersion === '2.1.0' && s3frames.length === 2, 'a failed recheck keeps available with its good info (no contradictory state)')
+    s2.checked({ ...info, available: false })
+    check(s2.get().phase === 'idle' && s2.get().installError === null, 'a good check with nothing newer goes idle')
+    check(stateMod.isUpdateBusy('downloading') && stateMod.isUpdateBusy('installing') && !stateMod.isUpdateBusy('opened'), 'busy phases are downloading and installing')
+  }
+
+  // --- renderer mirror of main's update state (E4-FR-37) -----------------------
+  {
+    let stateCb = null
+    let progressCb = null
+    const r = loadRenderer(`export { useUpdaterStore, initUpdaterEvents, mirrorUpdateState, isInstallPhase } from './updater'`, {
+      window: { snApi: { updates: {
+        getState: async () => ({ phase: 'downloading', progress: { percent: 40, transferred: 4, total: 10 }, installError: null, info: { available: true, latestVersion: '2.1.0' } }),
+        onState: cb => { stateCb = cb; return () => { stateCb = null } },
+        onProgress: cb => { progressCb = cb; return () => { progressCb = null } },
+        check: async () => ({ available: true, latestVersion: '9.9.9' }),
+      } } },
+    })
+    const U = r.useUpdaterStore
+    const off = r.initUpdaterEvents()
+    await new Promise(res => setTimeout(res, 0))
+    let st = U.getState()
+    check(st.phase === 'downloading' && st.installing && st.progress.percent === 40 && st.info.latestVersion === '2.1.0', 'a reload rehydrates downloading at 40% from main')
+    progressCb({ percent: 55, transferred: 5, total: 10 })
+    check(U.getState().progress.percent === 55, 'the live percent keeps streaming')
+    await U.getState().check()
+    check(U.getState().info.latestVersion === '2.1.0', 'a check during the download keeps the info being installed')
+    stateCb({ phase: 'failed', progress: null, installError: "Error invoking remote method 'update:install': Error: missing-checksum", info: null })
+    st = U.getState()
+    check(st.phase === 'failed' && !st.installing && st.installError === 'missing-checksum' && st.info.latestVersion === '2.1.0', 'a failed phase from main maps the checksum code and keeps the info')
+    stateCb({ phase: 'opened', progress: null, installError: null, info: null })
+    check(U.getState().opened && !U.getState().installing, 'opened mirrors from main')
+    check(r.isInstallPhase('installing') && !r.isInstallPhase('available'), 'the close button is blocked only while downloading/installing')
+    off()
+    check(stateCb === null && progressCb === null, 'initUpdaterEvents unsubscribes')
+  }
+
+  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices, pty lifecycle, update state)`)
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })

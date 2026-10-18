@@ -23,10 +23,12 @@ import {useAppStore} from './src/renderer/lib/store';
 import {registerPty} from './src/renderer/lib/ptyRegistry';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 const listeners={data:new Set(),exit:new Set()};
-const calls={spawn:[],restart:[],writes:[],kills:[]};
+const calls={spawn:[],restart:[],writes:[],kills:[],killPanes:[],reattach:[],seq:[]};
 let restartMode='ok';
+let reattachRes=null;
 window.snApi={platform:'win32',
- pty:{reattach:async()=>null,
+ pty:{reattach:async(id)=>{calls.reattach.push(id);calls.seq.push('reattach');return reattachRes},
+  killPanes:async(ids)=>{calls.killPanes.push(ids);calls.seq.push('killPanes');return ids.length},
   spawn:async(req)=>{calls.spawn.push(req);return{ptyId:'pty-'+calls.spawn.length,shellKind:'powershell'}},
   write:(r)=>{calls.writes.push(r)},resize(){},kill:async(id)=>{calls.kills.push(id)},setActive(){},flow(){},
   onData:(cb)=>{listeners.data.add(cb);return()=>listeners.data.delete(cb)},
@@ -45,8 +47,9 @@ applyTheme('midnight');
 const noop=()=>{};
 const cell='relative min-h-0 min-w-0 overflow-hidden rounded border border-border';
 function Root(){const [lang,setLang]=React.useState('es');window.smoke.setLang=setLang;
+ const [show,setShow]=React.useState(true);window.smoke.setShow=setShow;
  return <I18nProvider lang={lang}><div style={{height:'100vh',display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gridTemplateRows:'repeat(2,minmax(0,1fr))',gap:6,padding:6}} className="bg-bg-primary text-text-primary">
-  <div data-cell="term" className={cell}><TerminalPane paneId="pa" workspaceId="w1" cwd="C:/repo" initialCommand="claude --model opus" isActive/></div>
+  <div data-cell="term" className={cell}>{show&&<TerminalPane paneId="pa" workspaceId="w1" cwd="C:/repo" initialCommand="claude --model opus" isActive/>}</div>
   <div data-cell="exit" className={cell}><ExitCard code={3} onRestart={noop} onClose={noop}/></div>
   <div data-cell="error" className={cell}><ExitCard code={-1} error="File not found: C:/Program Files/PowerShell/7/pwsh-que-no-existe-en-esta-maquina.exe" onRestart={noop} onClose={noop}/></div>
   <div data-cell="chip" className={cell}><AgentEndChip paneId="pd" initialCommand="claude --model opus" shellKind={()=>'powershell'} onDone={noop}/></div>
@@ -55,6 +58,7 @@ window.smoke={calls,theme:applyTheme,app:useAppStore.getState,set:useAppStore.se
  exit:(ptyId,exitCode,natural)=>listeners.exit.forEach(cb=>cb({ptyId,exitCode,natural})),
  data:(ptyId,data)=>listeners.data.forEach(cb=>cb({ptyId,data})),
  restartMode:(m)=>{restartMode=m},
+ reattachWith:(r)=>{reattachRes=r},
  key:(key,keyCode)=>{const ta=document.querySelector('[data-cell=term] .xterm-helper-textarea');ta.focus();ta.dispatchEvent(new KeyboardEvent('keydown',{key,code:key,keyCode,which:keyCode,bubbles:true,cancelable:true}))},
  card:(c)=>{const el=document.querySelector('[data-cell='+c+'] [data-exit-card]');return el?{kind:el.dataset.exitCard,text:el.textContent}:null},
  chip:(c)=>{const el=document.querySelector('[data-cell='+c+'] [data-agent-end-chip]');return el?{state:el.dataset.agentEndChip,text:el.textContent,buttons:[...el.querySelectorAll('button')].map(b=>({k:b.dataset.agentEnd||'x',t:b.textContent,d:b.disabled}))}:null},
@@ -137,6 +141,17 @@ app.whenReady().then(async()=>{
  if(!(await js("smoke.chip('term')")))fail('chip over the live terminal',null);
  await js("smoke.key('Enter',13)");await wait(100);
  if(await js("smoke.chip('term')")||await js("smoke.app().agentEnded.pa"))fail('a key in the pane hides the chip',null);n++;
+ // E4-FR-36: unmounting the terminal never kills; the remount reattaches.
+ v=await js("({k:smoke.calls.kills.length,kp:smoke.calls.killPanes.length,s:smoke.calls.spawn.length})");
+ await js("smoke.reattachWith({ptyId:'pty-r3',replay:'restored',shellKind:'powershell'});smoke.setShow(false)");await wait(200);
+ let u=await js("({k:smoke.calls.kills.length,kp:smoke.calls.killPanes.length})");
+ if(u.k!==v.k||u.kp!==v.kp)fail('an unmount never kills the pty',{before:v,after:u});n++;
+ await js("smoke.setShow(true)");await wait(300);
+ u=await js("({s:smoke.calls.spawn.length,r:smoke.calls.reattach.at(-1),k:smoke.calls.kills.length})");
+ if(u.s!==v.s||u.r!=='pa'||u.k!==v.k)fail('the remount reattaches to the live pty instead of spawning',u);n++;
+ await js("smoke.app().restartPaneClean('pa')");await wait(100);
+ u=await js("({kp:smoke.calls.killPanes.at(-1),seq:smoke.calls.seq.at(-1)})");
+ if(!u.kp||u.kp.join()!=='pa'||u.seq!=='killPanes')fail('Restart clean kills by paneId',u);n++;
  // Layout: es/en, midnight/light, wide and narrow, 100% and 150%.
  await js("smoke.exit('pty-r3',2,true)");await wait(100);
  for(const lang of ['es','en'])for(const theme of ['midnight','light'])for(const [W,H,zoom] of [[1280,720,1],[760,520,1],[860,560,1.5]]){
@@ -149,7 +164,7 @@ app.whenReady().then(async()=>{
  }
  n++;
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' terminal UI checks (exit card Enter/Esc, in-place restart and fallback, Claude exited chip, es/en midnight/light layouts); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' terminal UI checks (exit card Enter/Esc, in-place restart and fallback, unmount never kills, Claude exited chip, es/en midnight/light layouts); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

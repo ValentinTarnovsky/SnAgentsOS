@@ -125,6 +125,21 @@ export interface UpdateProgress {
   total: number
 }
 
+/**
+ * Where the self-update stands, owned by main (E4-FR-37). 'installing' means
+ * the download reached 100% and the apply step has not resolved yet; 'opened'
+ * means an installer/file was opened and the app keeps running.
+ */
+export type UpdatePhase = 'idle' | 'available' | 'downloading' | 'installing' | 'opened' | 'failed'
+
+/** main's update state, rehydrated by the renderer after a reload (E4-FR-37). */
+export interface UpdateState {
+  phase: UpdatePhase
+  progress: UpdateProgress | null
+  installError: string | null
+  info: UpdateInfo | null
+}
+
 /** Live resource usage of the app (its own Electron processes). */
 export interface AppMetrics {
   /** Total working-set memory across all app processes, in MB. */
@@ -366,6 +381,10 @@ export interface SnApi {
     onExit(cb: (e: PtyExitEvt) => void): () => void
     /** Restart the pane's shell in place, keeping its output (E6-FR-18). Rejects when the spawn fails. */
     restart(req: PtyRestartReq): Promise<PtyRestartRes>
+    /** Kill the ptys of these panes in main, by paneId (E4-FR-36). Resolves to how many were live. */
+    killPanes(paneIds: string[]): Promise<number>
+    /** Kill every pty whose pane is not in `livePaneIds` (after hydrate, E4-FR-36). */
+    reconcile(livePaneIds: string[]): Promise<number>
   }
   dialog: {
     /** Opens a native folder picker; resolves to the chosen path or null. */
@@ -425,6 +444,10 @@ export interface SnApi {
     downloadAndInstall(): Promise<{ relaunching: boolean }>
     /** Subscribe to download progress; returns an unsubscribe function. */
     onProgress(cb: (p: UpdateProgress) => void): () => void
+    /** main's update state (phase, progress, error, info), for a reload mid-download (E4-FR-37). */
+    getState(): Promise<UpdateState>
+    /** Subscribe to main's update state on every phase change; returns an unsubscribe function. */
+    onState(cb: (s: UpdateState) => void): () => void
   }
   /** Live usage / quota bars (Claude OAuth + Codex rollout + custom models). */
   usage: {

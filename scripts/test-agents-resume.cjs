@@ -308,7 +308,7 @@ async function testRenderer() {
       consumeStartup: async (id) => { if (sent.consume.has(id)) return false; sent.consume.add(id); return true },
       forget: (id) => sent.forget.push(id), onChanged: (cb) => { onChanged = cb; return () => {} }, onReady: (cb) => { onReady = cb; return () => {} },
     },
-    pty: { kill: async () => {} },
+    pty: { kill: async () => {}, killPanes: async () => 0 },
     config: { save() {} },
   }
   const r = loadRenderer(`export * as launch from './agentLaunch'; export { useAppStore } from './store'; export { useAgentStore, CLOSED_STACK_MAX } from './agentStore'; export { initRemoteCommands } from './remoteCommands'; export { resolveLaunch } from './launch'`, {

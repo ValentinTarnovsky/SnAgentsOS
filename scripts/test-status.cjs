@@ -351,7 +351,7 @@ async function schemaV11Checks() {
   let seq = 0
   const flush = () => { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) }
   const r = loadRenderer(`export { startPersistence } from './persist'; export { useAppStore } from './store'`, {
-    window: { snApi: { config: { save: cfg => saves.push(JSON.parse(JSON.stringify(cfg))) } } },
+    window: { snApi: { config: { save: cfg => saves.push(JSON.parse(JSON.stringify(cfg))) }, pty: { killPanes: async () => 0 } } },
     document: { hasFocus: () => false },
     setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
   })
@@ -661,7 +661,7 @@ async function enrichmentChecks() {
   const saves = [], timers = new Map()
   let seq = 0
   const r = loadRenderer(`export { startPersistence } from './persist'; export { useAppStore } from './store'`, {
-    window: { snApi: { config: { save: cfg => saves.push(JSON.parse(JSON.stringify(cfg))) } } },
+    window: { snApi: { config: { save: cfg => saves.push(JSON.parse(JSON.stringify(cfg))) }, pty: { killPanes: async () => 0 } } },
     document: { hasFocus: () => false },
     setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
   })
@@ -716,7 +716,7 @@ async function enrichmentChecks() {
 
   // restartPane: in place when the terminal registered a restarter, else remount (E6-FR-18).
   {
-    const rr = loadRenderer(`export { useAppStore } from './store'; export * from './restartRegistry'`, { window: { snApi: {} }, document: { hasFocus: () => false } })
+    const rr = loadRenderer(`export { useAppStore } from './store'; export * from './restartRegistry'`, { window: { snApi: { pty: { killPanes: async () => 0 } } }, document: { hasFocus: () => false } })
     const st = rr.useAppStore.getState()
     let inPlace = 0
     const fn = () => { inPlace++ }
