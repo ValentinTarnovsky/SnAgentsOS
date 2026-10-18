@@ -1,8 +1,11 @@
 /**
- * Action menu for the current workspace/console, plus the confirm / global
- * prompt / settings sub-sheets it opens. All actions go through the WS control
- * plane (client.sendCtl) and reflect their ack: New console auto-subscribes to
- * the pane id returned in the ack; Global prompt shows a "sent to N" toast.
+ * Action menu for the viewed workspace/console, plus the confirm / global
+ * prompt / settings sub-sheets it opens. "Viewed" is the workspace of the pane
+ * on screen (E1-FR-07), not the desktop's active one, so Restart and Close
+ * reach a pane of another workspace. The header shows that pane's agent status
+ * and last reply (E1-FR-02/05). All actions go through the WS control plane
+ * (client.sendCtl) and reflect their ack: New console auto-subscribes to the
+ * pane id returned in the ack; Global prompt shows a "sent to N" toast.
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -10,11 +13,14 @@ import { Megaphone, Plus, RotateCcw, Settings as SettingsIcon, Trash2, Minus, Pl
 import type { ThemeName } from '@shared/types'
 import { Sheet } from './Sheet'
 import { UsageSheet } from './UsageSheet'
+import { StatusIndicator } from './StatusIndicator'
+import { PaneStatusLines } from './PaneStatusLines'
 import { PrimaryButton } from './InfoScreen'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { getActiveTerm } from '../lib/terminalBus'
 import { MAX_FONT, MIN_FONT } from '../lib/fit'
+import { paneById, viewedWorkspaceId } from '../lib/workspace'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
 const THEMES = ['midnight', 'light', 'nord', 'dracula', 'solarized'] as const
@@ -127,6 +133,8 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   const setFontOverride = useRemoteStore((s) => s.setFontOverride)
   const snapshot = useRemoteStore((s) => s.snapshot)
   const themeName = snapshot?.themeName
+  const inPageAlerts = useRemoteStore((s) => s.inPageAlerts)
+  const setInPageAlerts = useRemoteStore((s) => s.setInPageAlerts)
   const [confirmUnpair, setConfirmUnpair] = useState(false)
 
   const currentSize = (): number => {
@@ -196,6 +204,34 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
             </button>
           </div>
         </div>
+        <div className="mb-5">
+          <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-text-secondary">{t('alerts.title')}</span>
+          <button
+            role="switch"
+            aria-checked={inPageAlerts}
+            data-pref="inPageAlerts"
+            onClick={() => setInPageAlerts(!inPageAlerts)}
+            className="flex w-full items-center gap-3 rounded-btn border border-border bg-bg-secondary px-3 py-3 text-left active:bg-card"
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm text-text-primary">{t('alerts.inPage')}</span>
+              <span className="block text-[11px] text-text-secondary">{t('alerts.inPageHint')}</span>
+            </span>
+            <span
+              className={clsx(
+                'relative h-6 w-10 shrink-0 rounded-full transition-colors',
+                inPageAlerts ? 'bg-accent-violet' : 'bg-border',
+              )}
+            >
+              <span
+                className={clsx(
+                  'absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform',
+                  inPageAlerts ? 'translate-x-[18px]' : 'translate-x-0.5',
+                )}
+              />
+            </span>
+          </button>
+        </div>
         <Row icon={<LogOut size={18} />} label={t('act.unpair')} danger onClick={() => setConfirmUnpair(true)} />
       </Sheet>
       <ConfirmSheet
@@ -213,14 +249,16 @@ export function ActionSheet({ open, onClose }: { open: boolean; onClose: () => v
   const [promptOpen, setPromptOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [usageOpen, setUsageOpen] = useState(false)
+  const activeStatus = useRemoteStore((s) => (s.activePaneId ? s.paneStatus[s.activePaneId] : undefined))
 
-  const workspaceId = snapshot?.activeWorkspaceId ?? null
+  const workspaceId = snapshot ? viewedWorkspaceId(snapshot, activePaneId) : null
+  const activePane = snapshot ? paneById(snapshot, activePaneId) : null
 
   const newConsole = async (): Promise<void> => {
     if (!workspaceId) return
     onClose()
     const res = await client.sendCtl({ kind: 'createPane', workspaceId })
-    if (res.ok && res.paneId) client.viewPane(res.paneId)
+    if (res.ok && res.paneId) await client.switchWorkspaceAndView(workspaceId, res.paneId)
   }
 
   const restart = (): void => {
@@ -242,6 +280,17 @@ export function ActionSheet({ open, onClose }: { open: boolean; onClose: () => v
   return (
     <>
       <Sheet open={open} onClose={onClose} title={t('main.actions')}>
+        {activePane && activeStatus && (
+          <div data-action-status className="mb-3 flex items-start gap-2 rounded-btn border border-border bg-bg-secondary px-3 py-2.5">
+            <span className="pt-0.5">
+              <StatusIndicator status={activeStatus} />
+            </span>
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="truncate text-sm font-medium text-text-primary">{activePane.title}</span>
+              <PaneStatusLines status={activeStatus} now={Date.now()} />
+            </span>
+          </div>
+        )}
         <div className="flex flex-col gap-2">
           <Row icon={<Plus size={18} />} label={t('act.newConsole')} onClick={() => void newConsole()} />
           <Row

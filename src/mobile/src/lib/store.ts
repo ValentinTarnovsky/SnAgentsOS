@@ -9,8 +9,10 @@ import type { ITheme } from '@xterm/xterm'
 import type {
   RemoteAuthFailReason,
   RemotePairDeniedReason,
+  RemotePaneStatus,
   RemoteStateSnapshot,
 } from '@shared/remote-protocol'
+import { loadInPageAlerts, saveInPageAlerts } from './inPageAlerts'
 
 /**
  * E1-FR-20: the soft keyboard counts as open only while an input field has the
@@ -101,6 +103,13 @@ export interface RemoteState {
   kbOpen: boolean
   /** xterm unicode width table sent by the desktop (E6-FR-15). */
   terminalUnicode: '6' | '11'
+  /**
+   * Agent status per pane (E1-FR-03). Rebuilt from panes[].status on every
+   * authOk / state; a live paneStatus upserts or deletes one entry.
+   */
+  paneStatus: Record<string, RemotePaneStatus>
+  /** Alert with the page open when another console needs the user (E1-FR-40). */
+  inPageAlerts: boolean
 
   /** Merge a partial state (used by the client for machine transitions). */
   update: (partial: Partial<RemoteState>) => void
@@ -109,6 +118,8 @@ export interface RemoteState {
   setToast: (text: string | null) => void
   /** Feed keyboard signals from viewport.ts; recomputes kbOpen. */
   setKeyboard: (k: { inset?: number; focus?: string | null }) => void
+  /** Toggle and persist the in-page alerts preference. */
+  setInPageAlerts: (on: boolean) => void
 }
 
 export const useRemoteStore = create<RemoteState>((set) => ({
@@ -137,6 +148,8 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   kbFocus: null,
   kbOpen: false,
   terminalUnicode: '6',
+  paneStatus: {},
+  inPageAlerts: loadInPageAlerts(),
 
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
@@ -149,6 +162,10 @@ export const useRemoteStore = create<RemoteState>((set) => ({
       if (inset === s.keyboardInset && focus === s.kbFocus) return s
       return { keyboardInset: inset, kbFocus: focus, kbOpen: focus != null && inset > KB_OPEN_MIN_INSET_PX }
     }),
+  setInPageAlerts: (on) => {
+    saveInPageAlerts(on)
+    set({ inPageAlerts: on })
+  },
 }))
 
 /** Non-hook accessor for the client and imperative callers. */
