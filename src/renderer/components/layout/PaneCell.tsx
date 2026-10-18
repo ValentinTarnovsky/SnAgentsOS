@@ -1,4 +1,4 @@
-import { useState, type DragEvent } from 'react'
+import { useEffect, useState, type DragEvent } from 'react'
 import {
   Clock,
   GripVertical,
@@ -18,6 +18,12 @@ import { isPaneMounted } from '@/lib/mounting'
 import { resolveLaunch } from '@/lib/launch'
 import { getPtyId } from '@/lib/ptyRegistry'
 import { redrawPane } from '@/lib/redrawRegistry'
+import { focusPane } from '@/lib/focus'
+import { isBracketedPaste, pasteToPane } from '@/lib/pasteRegistry'
+import { isAgentPane } from '@/lib/agentPane'
+import { buildDropPayload, type DropMode } from '@/lib/dropPaths'
+import { INTERNAL_PATH_MIME, parseInternalPath } from '@/lib/dragNonce'
+import { isPathDrag, nextDragDepth, type DragHoverEvent } from '@/lib/dropHover'
 import { iconFor } from '@/lib/icons'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { PaneStatusDot } from '@/components/ui/StatusDot'
@@ -98,21 +104,64 @@ export function PaneCell({
     setRenaming(false)
   }
 
-  // Drop file(s)/folder(s) onto the console: paste every dropped path (quoted,
-  // space-separated) into the prompt. We never prefix `cd` or send Enter, so the
-  // user keeps control over what to do with the path(s).
+  // Drop feedback (E7-FR-03): a depth counter of dragenter/dragleave, so the
+  // overlay stays put while the pointer crosses the header or the xterm canvas.
+  const [dragDepth, setDragDepth] = useState(0)
+  const dropHover = dragDepth > 0
+  const stepDrag = (event: DragHoverEvent): void => setDragDepth((d) => nextDragDepth(d, event))
+  useEffect(() => {
+    if (!dropHover) return
+    // A drag that ends elsewhere (Esc, drop on another target) may never send
+    // the last dragleave here; any window-level end clears the overlay.
+    const reset = (): void => setDragDepth(0)
+    window.addEventListener('dragend', reset, true)
+    window.addEventListener('drop', reset, true)
+    return () => {
+      window.removeEventListener('dragend', reset, true)
+      window.removeEventListener('drop', reset, true)
+    }
+  }, [dropHover])
+
+  // Drop file(s)/folder(s) onto the console (E7-FR-01..02): paste the path(s)
+  // in the format the console understands. An agent pane gets images it can
+  // attach as [Image #N], a bracketed-paste shell gets escaped paths, a plain
+  // console keeps the 1.14.1 quoted write. Never a `cd`, never an Enter.
   const onDropFolder = (e: DragEvent): void => {
-    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return
+    const files = e.dataTransfer.files
+    const internal = e.dataTransfer.types.includes(INTERNAL_PATH_MIME)
+    if ((!files || files.length === 0) && !internal) return
     e.preventDefault()
     e.stopPropagation()
-    const paths = Array.from(e.dataTransfer.files)
-      .map((f) => window.snApi.filePath(f))
-      .filter(Boolean)
+    stepDrag('reset')
+    let paths: string[]
+    if (files && files.length > 0) {
+      paths = Array.from(files)
+        .map((f) => window.snApi.filePath(f))
+        .filter(Boolean)
+    } else {
+      // In-app path drag: nonce + currently listed path, else ignored silently.
+      const path = parseInternalPath(e.dataTransfer.getData(INTERNAL_PATH_MIME))
+      paths = path ? [path] : []
+    }
     if (paths.length === 0) return
     const ptyId = getPtyId(pane.id)
     if (!ptyId) return
-    const data = `${paths.map((p) => `"${p}"`).join(' ')} `
-    window.snApi.pty.write({ ptyId, data })
+    const bracketed = isBracketedPaste(pane.id)
+    if (bracketed === null) return // no xterm mounted: nothing to paste into
+    const status = useAppStore.getState().paneStatus[pane.id]
+    const mode: DropMode = !bracketed ? 'plain' : isAgentPane(pane, status, bracketed) ? 'agent' : 'safe'
+    const payload = buildDropPayload(paths, mode)
+    if (!payload) return
+    if (payload.kind === 'paste') {
+      // One xterm paste per part: an agent sees each image as its own paste.
+      for (const part of payload.parts) {
+        if (!pasteToPane(pane.id, part)) return
+      }
+    } else {
+      window.snApi.pty.write({ ptyId, data: payload.text })
+    }
+    const target = pane.id
+    requestAnimationFrame(() => focusPane(target))
   }
 
   const menuItems: ContextMenuItem[] = [
@@ -140,11 +189,21 @@ export function PaneCell({
       // measure a transient wrong width on mount → the narrow-column glitch.
       layout="position"
       transition={{ type: 'spring', stiffness: 500, damping: 40 }}
-      onDragOver={(e) => e.preventDefault()}
-      onDragEnter={onDragEnterCell}
+      onDragOver={(e) => {
+        e.preventDefault()
+        if (isPathDrag(e.dataTransfer.types)) e.dataTransfer.dropEffect = 'copy'
+      }}
+      onDragEnter={(e) => {
+        if (isPathDrag(e.dataTransfer.types)) stepDrag('enter')
+        onDragEnterCell()
+      }}
+      onDragLeave={(e) => {
+        if (isPathDrag(e.dataTransfer.types)) stepDrag('leave')
+      }}
       onDrop={onDropFolder}
+      data-drop-hover={dropHover || undefined}
       className={cn(
-        'flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border bg-bg-primary',
+        'relative flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border bg-bg-primary',
         hidden && 'hidden',
         isDragging ? 'border-accent-violet opacity-40' : 'border-border',
       )}
@@ -273,6 +332,18 @@ export function PaneCell({
           </div>
         )}
       </div>
+
+      {dropHover && (
+        <div
+          aria-hidden
+          data-drop-overlay
+          className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-lg border-2 border-accent-violet bg-accent-violet/10"
+        >
+          <span className="rounded-md border border-accent-violet/40 bg-card px-3 py-1.5 text-xs font-medium text-text-primary shadow-lg">
+            {t('drop.hint')}
+          </span>
+        </div>
+      )}
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />

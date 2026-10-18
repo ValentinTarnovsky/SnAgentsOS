@@ -170,6 +170,7 @@ export const en = {
   'pane.notStarted': 'Console not started',
   'pane.start': 'Start',
   'pane.schedule': 'Schedule prompt',
+  'drop.hint': 'Drop to paste path',
 
   // Scheduled prompt (per console)
   'schedule.title': 'Schedule a prompt',

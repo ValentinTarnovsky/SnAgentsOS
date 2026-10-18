@@ -12,6 +12,7 @@ import { useAppStore } from '@/lib/store'
 import { buildXtermTheme } from '@/themes'
 import { registerPty, unregisterPty } from '@/lib/ptyRegistry'
 import { registerFocuser, setFocusedPane, unregisterFocuser } from '@/lib/focus'
+import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegistry'
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
@@ -477,6 +478,12 @@ export function useXterm(
     controllerRef.current.clearSearch = () => search.clearDecorations()
     controllerRef.current.focus = () => term.focus()
     registerFocuser(opts.paneId, () => term.focus())
+    // Paste path for drops and review notes: same xterm paste a Ctrl+V uses.
+    const paster: Paster = {
+      paste: (text) => term.paste(text),
+      bracketed: () => term.modes.bracketedPasteMode,
+    }
+    registerPaster(opts.paneId, paster)
     // Manual escape hatch for garbled glyphs (pane menu / keybinding): rebuild
     // the renderer immediately, no debounce, since the user is reacting to
     // visible corruption right now.
@@ -722,6 +729,7 @@ export function useXterm(
       if (id) void window.snApi.pty.kill(id)
       unregisterPty(opts.paneId)
       unregisterFocuser(opts.paneId)
+      unregisterPaster(opts.paneId, paster)
       unregisterRedrawer(opts.paneId)
       ptyIdRef.current = null
       termRef.current = null
