@@ -350,7 +350,7 @@ export function Sidebar() {
                           )}
                         </span>
                         <span className="flex min-w-0 text-[11px] text-text-secondary">
-                          <span className="min-w-0 truncate">
+                          <span className="max-w-full shrink-0 truncate">
                             {w.panes.length === 1
                               ? t('sidebar.consoleOne', { count: w.panes.length })
                               : t('sidebar.consoleMany', { count: w.panes.length })}

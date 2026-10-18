@@ -77,7 +77,7 @@ export function GitChip({
         onClick={onClick}
         aria-label={gitAriaLabel(summary, t)}
         data-git-chip
-        className="flex min-w-0 items-center gap-2 rounded-btn px-1.5 py-0.5 text-xs transition-colors hover:bg-card"
+        className="flex min-w-0 items-center gap-2 overflow-hidden rounded-btn px-1.5 py-0.5 text-xs transition-colors hover:bg-card"
       >
         <span className={cn('flex min-w-0 items-center gap-1 font-mono', dirty ? 'text-text-primary' : 'text-text-secondary')}>
           <GitBranch size={13} className="shrink-0" />
