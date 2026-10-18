@@ -1,3 +1,5 @@
+// Must stay the first import: isolates the dev userData before any path is read (E0-FR-26).
+import './devUserData'
 import { readFileSync, writeFileSync } from 'fs'
 import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
@@ -269,6 +271,7 @@ async function bootstrap(): Promise<void> {
   // reach the shell / our remappable redraw action. macOS keeps its menu (its
   // accelerators use Cmd, so they don't collide with the terminal's Ctrl keys).
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+  remoteManager.loadDevices()
   registerCsp()
   registerAppIpc()
   registerConfigIpc()
