@@ -615,6 +615,23 @@ async function ntfyChannelChecks() {
     check((await none.test()).error === 'Invalid ntfy server URL', 'an http public server is refused before any request')
   }
 
+  {
+    // Real fetch against a fake local ntfy server (loopback is a private host, so http is allowed).
+    const got = []
+    const server = require('node:http').createServer((req, res) => {
+      let body = ''
+      req.on('data', c => { body += c })
+      req.on('end', () => { got.push({ method: req.method, url: req.url, auth: req.headers.authorization, type: req.headers['content-type'], body: JSON.parse(body) }); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"id":"x"}') })
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const notifier = new NtfyNotifier()
+      notifier.setConfig({ ...base, server: 'http://127.0.0.1:' + server.address().port })
+      const res = await notifier.test()
+      check(res.ok && got.length === 1 && got[0].method === 'POST' && got[0].url === '/' && got[0].auth === 'Bearer tk_live' && got[0].type === 'application/json' && got[0].body.topic === base.topic, 'a real publish reaches a local ntfy server: POST / with JSON and the token')
+    } finally { server.close() }
+  }
+
   const { isDesktopAway, AWAY_IDLE_THRESHOLD_SEC } = load('src/main/status/desktopAway.ts')
   let asked = 0
   const monitor = state => ({ getSystemIdleState: sec => { asked = sec; if (state === 'throw') throw new Error('x'); return state } })
