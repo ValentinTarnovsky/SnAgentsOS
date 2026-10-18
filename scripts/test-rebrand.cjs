@@ -195,7 +195,26 @@ async function main() {
     check(verify.env.GH_TOKEN === '${{ github.token }}' && /gh release view "\$TAG" -R "\$GITHUB_REPOSITORY" --json assets/.test(verify.run), 'verify: reads the draft asset list')
     check(/node scripts\/check-release-assets\.cjs "\$RUNNER_TEMP\/assets\.json" "\$TAG" "\$version"/.test(verify.run) && /exit 1\s*$/.test(verify.run), 'verify: the 16-asset gate fails the job')
     check(!/\$\{\{/.test(verify.run) && !/\$\{\{/.test(step('release-notes', 'Compose release notes').run), 'release-notes: shell steps read the tag from env, no expression injection')
-    check(step('release-notes', 'Compose release notes').run.includes('docs/release-notes/$TAG.md'), 'compose: body from docs/release-notes/<tag>.md')
+    const compose = step('release-notes', 'Compose release notes').run
+    check(compose.includes('docs/release-notes/$TAG.md'), 'compose: body from docs/release-notes/<tag>.md')
+    check(compose.includes(`[ ! -s "$RUNNER_TEMP/notes.md" ]`) && compose.includes(`printf '\\n' > "$RUNNER_TEMP/notes.md"`) && !compose.includes(': >'), 'compose: notes.md is never empty, so a re-run replaces the body instead of appending a second changelog')
+    // Run the step for real where bash is the system shell (the Linux and mac
+    // CI legs); on Windows "bash" can resolve to WSL, so only the text check runs.
+    if (process.platform !== 'win32') {
+      const { spawnSync } = require('node:child_process')
+      const tmp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'snaos-notes-'))
+      try {
+        const runCompose = (tag, notes) => {
+          const cwd = path.join(tmp, tag), out = path.join(cwd, 'runner')
+          fs.mkdirSync(path.join(cwd, 'docs/release-notes'), { recursive: true }); fs.mkdirSync(out)
+          if (notes !== undefined) fs.writeFileSync(path.join(cwd, 'docs/release-notes', tag + '.md'), notes)
+          const r = spawnSync('bash', ['-e', '-c', compose], { cwd, env: { ...process.env, TAG: tag, RUNNER_TEMP: out }, encoding: 'utf8' })
+          return r.status === 0 ? fs.readFileSync(path.join(out, 'notes.md'), 'utf8') : null
+        }
+        check(runCompose('v2.0.0', '## Rebrand\n') === '## Rebrand\n', 'compose (bash): copies docs/release-notes/<tag>.md')
+        check(runCompose('v2.0.1') === '\n' && runCompose('v2.0.2', '') === '\n', 'compose (bash): a missing or empty notes file becomes a newline')
+      } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
+    }
     const publish = step('release-notes', 'Publish release')
     check(publish.uses === 'softprops/action-gh-release@v3' && publish.with.draft === false, 'publish: draft: false')
     check(publish.with.name === 'SnAgentsOS ' + tagExpr && publish.with.tag_name === tagExpr, 'publish: titled SnAgentsOS <tag>')
@@ -249,6 +268,13 @@ async function main() {
     check(fails(mixed, 'mix versions'), 'gate: one version across distributables')
     check(fails(good, 'expected 2.0.1', { version: '2.0.1' }), 'gate: version must match package.json at the tag')
     check(fails([...good.slice(0, 15), good[0]], 'duplicate asset names'), 'gate: duplicate names rejected')
+    const ghShape = good.map(name => ({ name, size: 10, state: 'uploaded' }))
+    check(gate.checkReleaseAssets({ assets: ghShape }, { version: v }).ok, 'gate: uploaded, non-empty gh assets pass')
+    const setup = `SnAgentsOS-${v}-setup.exe`
+    check(fails({ assets: ghShape.map(a => a.name === setup ? { ...a, state: 'open' } : a) }, `${setup} is not fully uploaded`), 'gate: an interrupted upload keeps the draft')
+    check(fails({ assets: ghShape.map(a => a.name === setup + '.sha256' ? { ...a, size: 0 } : a) }, `${setup}.sha256 is empty`), 'gate: an empty checksum keeps the draft')
+    check(gate.tagMatchesVersion('v2.0.0', '2.0.0') && gate.tagMatchesVersion('v2.0.0-rc.1', '2.0.0') && gate.tagMatchesVersion('v2.0.0-rc.1', '2.0.0-rc.1'), 'gate: tag matches the version, or rehearses it as a prerelease')
+    check(!gate.tagMatchesVersion('v2.0.1', '2.0.0') && !gate.tagMatchesVersion('v2.0.10', '2.0.1') && !gate.tagMatchesVersion('v2.0.0', '2.0.0-rc.1') && !gate.tagMatchesVersion('v2.0.0-rc.1', '2.0.0-rc'), 'gate: a stable tag over another version is rejected (updater loop)')
     check(gate.TAG_RE.test('v2.0.0') && gate.TAG_RE.test('v2.0.0-rc.1') && !gate.TAG_RE.test('v2.0') && !gate.TAG_RE.test('../v2.0.0') && !gate.TAG_RE.test('v2.0.0-rc/../x'), 'gate: tag format')
 
     // CLI exit codes, as the workflow runs it.
@@ -265,6 +291,9 @@ async function main() {
       const bad = run(good.slice(1), 'v2.0.0', v)
       check(bad.status === 1 && bad.stderr.includes('stays a draft'), 'cli: incomplete release exits 1')
       check(run(good, '../../etc', v).status === 1, 'cli: invalid tag exits 1')
+      const drift = run(good, 'v2.0.1', v)
+      check(drift.status === 1 && drift.stderr.includes('does not match package.json version'), 'cli: tag and package.json version drift exits 1')
+      check(run(good, 'v2.0.0-rc.1', v).status === 0, 'cli: rc rehearsal tag over 2.0.0 exits 0')
     } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
   }
 
