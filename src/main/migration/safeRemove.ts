@@ -100,15 +100,23 @@ function isFsRoot(p: string): boolean {
   return samePath(r.root, p)
 }
 
-/** True when the path breaks a guard (checked on the lexical path and on its realpath). */
-export function violatesGuard(paths: string[], guard: PathGuard): boolean {
-  return paths.some(
-    (p) =>
-      isFsRoot(p) ||
-      guard.forbiddenExact.some((x) => samePath(p, x)) ||
-      guard.forbiddenTree.some((x) => overlaps(p, x)) ||
-      guard.forbiddenContain.some((x) => isSameOrInside(x, p)) ||
-      (guard.allowedRoots !== undefined && !guard.allowedRoots.some((r) => isInside(p, r))),
+/**
+ * True when the path breaks a guard. The forbidden lists are checked on every
+ * spelling in `paths` (lexical and realpath). allowedRoots is checked on
+ * `allowedCheck`, which callers set to the realpath alone: the lexical form may
+ * use an 8.3 short name (C:\Users\RUNNER~1) that no allowed spelling matches,
+ * and the realpath is where the delete actually lands.
+ */
+export function violatesGuard(paths: string[], guard: PathGuard, allowedCheck: string[] = paths): boolean {
+  return (
+    paths.some(
+      (p) =>
+        isFsRoot(p) ||
+        guard.forbiddenExact.some((x) => samePath(p, x)) ||
+        guard.forbiddenTree.some((x) => overlaps(p, x)) ||
+        guard.forbiddenContain.some((x) => isSameOrInside(x, p)),
+    ) ||
+    (guard.allowedRoots !== undefined && allowedCheck.some((p) => !guard.allowedRoots!.some((r) => isInside(p, r))))
   )
 }
 
@@ -166,7 +174,8 @@ async function precheck(target: string, guard: PathGuard, o: RemoveOptions): Pro
   }
   if (st.isSymbolicLink()) return { skipped: 'reparsePoint' }
   if (needsElevation(target, o.elevation)) return { skipped: 'needsElevation' }
-  if (violatesGuard([target, await realOf(fsx, target)], await expandGuard(guard, fsx))) return { skipped: 'guard' }
+  const real = await realOf(fsx, target)
+  if (violatesGuard([target, real], await expandGuard(guard, fsx), [real])) return { skipped: 'guard' }
   return st
 }
 

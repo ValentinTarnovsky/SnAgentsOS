@@ -592,17 +592,19 @@ async function resumeChecks() {
 /**
  * Extracts a zip with a system tool, the way a user would: Windows' bsdtar
  * (System32\tar.exe, not Git's GNU tar), bsdtar or tar on macOS, and on Linux
- * bsdtar, unzip or python's zipfile (GNU tar cannot read zip). Returns the
- * tool used, or null when none is available.
+ * bsdtar, python's zipfile or unzip (GNU tar cannot read zip). Info-ZIP unzip
+ * maps UTF-8 names to the locale charset, so it runs last and with a UTF-8
+ * locale (CI runners default to C). Returns the tool used, or null when none
+ * is available.
  */
 function extractZip(zip, dest) {
   const { spawnSync } = require('node:child_process')
   const sys32tar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe')
   const candidates = isWin
     ? [[sys32tar, ['-xf', zip, '-C', dest]]]
-    : [['bsdtar', ['-xf', zip, '-C', dest]], ...(process.platform === 'darwin' ? [['tar', ['-xf', zip, '-C', dest]]] : []), ['unzip', ['-q', zip, '-d', dest]], ['python3', ['-m', 'zipfile', '-e', zip, dest]]]
+    : [['bsdtar', ['-xf', zip, '-C', dest]], ...(process.platform === 'darwin' ? [['tar', ['-xf', zip, '-C', dest]]] : []), ['python3', ['-m', 'zipfile', '-e', zip, dest]], ['unzip', ['-q', zip, '-d', dest]]]
   for (const [cmd, args] of candidates) {
-    const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true })
+    const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, env: { ...process.env, LC_ALL: 'C.UTF-8', PYTHONUTF8: '1' } })
     if (!r.error && r.status === 0) return path.basename(cmd)
   }
   return null
@@ -740,6 +742,15 @@ async function safeRemoveChecks() {
   check((await S.safeRemoveTree(p.roots.appData, guard, o)).skipped === 'guard', 'safeRemove guard: a profile root itself')
   check((await S.safeRemoveTree(path.parse(tmpRoot).root, guard, o)).skipped === 'guard', 'safeRemove guard: a filesystem root')
   check(S.violatesGuard([legacy], { ...guard, allowedRoots: [p.roots.appData] }) === false, 'safeRemove guard: inside allowedRoots passes')
+  {
+    // 8.3 short name in the lexical path (Windows CI temp): allowedRoots is judged on the realpath.
+    const longRoot = path.join(p.base, 'runneradmin', 'Temp'), shortT = path.join(p.base, 'RUNNER~1', 'Temp', 'del-me'), longT = path.join(longRoot, 'del-me')
+    const g0 = { forbiddenExact: [], forbiddenTree: [], forbiddenContain: [], allowedRoots: [longRoot] }
+    check(S.violatesGuard([shortT, longT], g0, [longT]) === false, 'safeRemove guard: short-name spelling with its realpath inside allowedRoots passes')
+    const escaped = path.join(p.base, 'elsewhere', 'del-me')
+    check(S.violatesGuard([longT, escaped], g0, [escaped]) === true, 'safeRemove guard: lexically inside but realpath outside allowedRoots is refused')
+    check(S.violatesGuard([shortT, longT], { ...g0, allowedRoots: [longRoot], forbiddenTree: [shortT] }, [longT]) === true, 'safeRemove guard: forbidden lists still apply to every spelling')
+  }
   // needsElevation: skipped before touching anything.
   const pf = path.join(p.programFiles, 'SnMultiCC'); write(path.join(pf, 'SnMultiCC.exe'), 'x')
   let touched = 0
@@ -944,6 +955,9 @@ async function cleanupChecks() {
     check(I.devCleanupSandbox({ env: { ...winEnv, TEMP: tempBase }, platform: 'win32', realHome }).reason === 'outsideTemp:TEMP', 'dev sandbox: the temp folder itself is not inside it')
     check(I.devCleanupSandbox({ env: { ...winEnv, CLAUDE_CONFIG_DIR: undefined }, platform: 'win32', realHome }).reason === 'missing:CLAUDE_CONFIG_DIR', 'dev sandbox: an unset path is refused (the real ~/.claude)')
     check(I.devCleanupSandbox({ env: { SNAOS_FORCE_LEGACY_CLEANUP: '1', HOME: '/tmp/snaos-fake/home', CLAUDE_CONFIG_DIR: '/tmp/snaos-fake/claude' }, platform: 'linux', realHome: '/home/u' }).ok, 'dev sandbox: POSIX fake tree under /tmp')
+    const macReal = q => { if (q === '/tmp' || q.startsWith('/tmp/')) return '/private' + q; if (q === '/' || q.startsWith('/private') || q.startsWith('/var') || q.startsWith('/Users')) return q; throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
+    check(I.devCleanupSandbox({ env: { SNAOS_FORCE_LEGACY_CLEANUP: '1', HOME: '/tmp/snaos-fake/home', CLAUDE_CONFIG_DIR: '/tmp/snaos-fake/claude' }, platform: 'darwin', realHome: '/Users/u', realpath: macReal }).ok, 'dev sandbox: macOS /tmp fake tree that does not exist yet resolves through /private/tmp')
+    check(I.devCleanupSandbox({ env: { SNAOS_FORCE_LEGACY_CLEANUP: '1', HOME: '/Users/u', CLAUDE_CONFIG_DIR: '/tmp/snaos-fake/claude' }, platform: 'darwin', realHome: '/Users/u', realpath: macReal }).reason === 'outsideTemp:HOME', 'dev sandbox: macOS real HOME is refused')
     check(I.devCleanupSandbox({ env: { SNAOS_FORCE_LEGACY_CLEANUP: '1', HOME: '/home/u', CLAUDE_CONFIG_DIR: '/tmp/x/claude' }, platform: 'linux', realHome: '/home/u' }).reason === 'outsideTemp:HOME', 'dev sandbox: the real HOME is refused')
   }
 }
