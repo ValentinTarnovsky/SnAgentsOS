@@ -25,18 +25,25 @@ export const DIFF_MAX_LINES = 5000
 export const DIFF_MAX_BYTES = 512 * 1024
 /** Untracked files are read up to this size; a bigger one only reports its size. */
 export const UNTRACKED_READ_BYTES = 512 * 1024
+/** Even with force, an untracked file is never read past git's own output cap (gitExec maxBuffer). */
+export const UNTRACKED_FORCE_BYTES = 16 * 1024 * 1024
 const BINARY_SNIFF = 8192
 const MAX_REL_PATH = 4096
 
 /**
  * Extensions "Open with the default app" may open (E7-FR-15): text, code and
- * images. Everything else (.bat, .cmd, .exe, .hta, .reg, .lnk, .ps1, .vbs, no
- * extension...) is revealed in its folder instead.
+ * images whose default handler only shows them. Everything else (.bat, .cmd,
+ * .exe, .hta, .reg, .lnk, .ps1, .vbs, no extension...) is revealed in its
+ * folder instead. E7's list also had .js .mjs .cjs .py .sh .rb .html .svg, but
+ * their default handler runs them (.js in Windows Script Host, .py in the
+ * launcher, .sh in Git Bash, .rb in Ruby, .html/.svg as local scripts over
+ * file://), the same reason E2-FR-30 keeps them out of its allowlist; they
+ * are revealed too.
  */
 export const OPEN_EXTENSIONS: ReadonlySet<string> = new Set([
-  '.txt', '.md', '.json', '.jsonc', '.yml', '.yaml', '.toml', '.ini', '.xml', '.html', '.css', '.scss',
-  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.kt', '.py', '.go', '.rs', '.c', '.h', '.cpp',
-  '.hpp', '.cs', '.rb', '.php', '.sql', '.sh', '.gradle', '.properties', '.csv', '.log', '.svg', '.png',
+  '.txt', '.md', '.json', '.jsonc', '.yml', '.yaml', '.toml', '.ini', '.xml', '.css', '.scss',
+  '.ts', '.tsx', '.jsx', '.java', '.kt', '.go', '.rs', '.c', '.h', '.cpp',
+  '.hpp', '.cs', '.php', '.sql', '.gradle', '.properties', '.csv', '.log', '.png',
   '.jpg', '.jpeg', '.gif', '.webp',
 ])
 
@@ -202,6 +209,11 @@ export interface FileDiffReq {
 }
 
 const DIFF_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv', '-U3']
+/**
+ * Paths after `--` are literal: as pathspecs `app/[id]/page.tsx` would also
+ * match `app/i/page.tsx` and mix another file's hunks into the diff.
+ */
+const LITERAL = '--literal-pathspecs'
 
 /** One listed file's diff (E7-FR-13). The entry must come from main's own list. */
 export async function readFileDiff(req: FileDiffReq): Promise<GitDiffReply> {
@@ -224,6 +236,7 @@ export async function readFileDiff(req: FileDiffReq): Promise<GitDiffReply> {
         return { ...base, binary: false, diffRev: diffRevOf(`link:${target}`), hunks, totalLines: 2 }
       }
       if (!st.isFile()) return { ...base, binary: true, diffRev: diffRevOf(`dir:${st.size}`), hunks: [], totalLines: 0 }
+      if (force && st.size > UNTRACKED_FORCE_BYTES) return { error: 'git_error' }
       if (st.size > UNTRACKED_READ_BYTES && !force) {
         return { ...base, binary: false, diffRev: diffRevOf(`size:${st.size}`), tooLarge: { lines: 0, bytes: st.size }, hunks: [], totalLines: 0 }
       }
@@ -234,7 +247,7 @@ export async function readFileDiff(req: FileDiffReq): Promise<GitDiffReply> {
       }
       return { ...base, binary: parsed.binary, diffRev: diffRevOf(buf), hunks: parsed.hunks, totalLines: parsed.totalLines }
     }
-    const args = ['diff', ...DIFF_FLAGS]
+    const args = [LITERAL, 'diff', ...DIFF_FLAGS]
     if (entry.area === 'staged') args.push('--cached')
     if (entry.area !== 'conflict') args.push('-M')
     args.push('--', entry.path)
