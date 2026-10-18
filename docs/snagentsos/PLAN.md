@@ -399,7 +399,7 @@ Integracion: todos los WP se hacen como PR hacia la rama `feat/rebrand-snagentso
 - **Archivos:** `README.md` (badges y seccion "Antes SnMultiCC" entre marcadores: migracion y limpieza automaticas, que se borra, `migration-backup-v1.zip` con su ubicacion, su vencimiento a los 30 dias y el procedimiento de recuperacion, firewall con la regla vieja inerte, pin segun el resultado de W1 (Q13), notas per-machine, "no guardes una portable dentro de la carpeta de instalacion", PWA de iOS, `SnMultiCC.app` a la Papelera en mac, `sudo apt remove snmulticc` en Linux y **volver a 1.x no esta soportado**), `docs/notifications-status-plan.md` (una linea), `docs/release-notes/v2.0.0.md` (nuevo), `.gitignore` (`snagentsos-data/`), `scripts/check-brand.cjs` (nuevo, con allowlist), `docs/screenshot.png` (P2).
 - **Agregado del plan:** `check-brand.cjs` tambien falla ante U+2014/U+2013 en archivos trackeados, sin allowlist. Asi se cumple la regla de estilo en todos los epics siguientes.
 - **Schema:** sin cambio.
-- **Tests:** `npm test` = `test-status.cjs && test-rebrand.cjs && check-brand.cjs`. Un literal "SnMultiCC" plantado en `src/` hace fallar la suite.
+- **Tests:** `npm test` = `test-status.cjs && test-rebrand.cjs && test-legacy-migration.cjs && check-brand.cjs` (R20-04 sumo `test-legacy-migration.cjs`). Un literal "SnMultiCC" plantado en `src/` hace fallar la suite.
 - **Verificacion manual:** el README se renderiza en GitHub y los badges cargan despues del rename.
 - **Esfuerzo:** S. **Paralelo con:** termina al final, cuando R20-02..08 ya aterrizaron en la rama de integracion.
 
