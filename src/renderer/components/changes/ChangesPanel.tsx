@@ -15,7 +15,7 @@ import { insertPathToConsole } from '@/lib/insertPath'
 import { closeChangesPanel } from '@/lib/changesPanel'
 import { absRepoPath, loadWrap, PANEL_POLL_MS, panelKeyOf, panelTargets, rowKey, saveWrap, splitName, stepRow, visibleRows } from '@/lib/changes'
 import { Tooltip } from '@/components/ui/Tooltip'
-import { anchorNotes, newSideLines, noteCountsByRow, notesForFile, pendingNotes, useReviewNotesStore, workspaceNotes } from '@/lib/reviewNotesStore'
+import { anchorNotes, lineSnapshot, newSideLines, noteCountsByRow, notesForFile, pendingNotes, useReviewNotesStore, workspaceNotes } from '@/lib/reviewNotesStore'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { FileList, type RowActions } from './FileList'
 import { DiffView, type DiffNotesLayer, type DiffViewHandle } from './DiffView'
@@ -346,7 +346,11 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
             {editorLine === line && editor && <NoteEditor key={`new:${line}`} label={editorLabel(editor)} onSave={(b) => void saveNote(b)} onCancel={cancelNote} />}
           </>
         ),
-        onAdd: (line, startLine) => setEditor({ line, ...(startLine ? { startLine } : {}), lineText: lineSide.get(line) }),
+        onAdd: (line, startLine) => {
+          // A minified line can be 500 KB: keep only the snapshot main stores (zod refuses past 64 KB).
+          const text = lineSide.get(line)
+          setEditor({ line, ...(startLine ? { startLine } : {}), ...(text !== undefined ? { lineText: lineSnapshot(text) } : {}) })
+        },
       }
     : null
   const topNotes =

@@ -6,6 +6,7 @@ import {
   noteLines,
   REVIEW_BATCH_MAX_BYTES,
   REVIEW_BATCH_MAX_NOTES,
+  REVIEW_NOTE_MAX_LINE_TEXT,
   type ReviewNote,
   type ReviewNotesListRes,
 } from '@shared/review-notes'
@@ -105,6 +106,11 @@ export function newSideLines(hunks: readonly GitDiffHunk[]): Map<number, string>
   return out
 }
 
+/** The `lineText` a note keeps of its line: the first 1000 characters, as main stores it. */
+export function lineSnapshot(text: string): string {
+  return text.slice(0, REVIEW_NOTE_MAX_LINE_TEXT)
+}
+
 /** Where the notes of one file go in its diff, and which ones are outdated. */
 export function anchorNotes(notes: readonly ReviewNote[], hunks: readonly GitDiffHunk[]): DiffAnchors {
   const lines = newSideLines(hunks)
@@ -123,7 +129,8 @@ export function anchorNotes(notes: readonly ReviewNote[], hunks: readonly GitDif
       stale.add(n.id)
       continue
     }
-    if (n.lineText !== undefined && n.lineText !== text) stale.add(n.id)
+    // Main keeps only the first 1000 characters: compare the same prefix (a long line is not always outdated).
+    if (n.lineText !== undefined && n.lineText !== lineSnapshot(text)) stale.add(n.id)
     const at = byLine.get(n.line) ?? []
     at.push(n)
     byLine.set(n.line, at)

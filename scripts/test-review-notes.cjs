@@ -214,6 +214,13 @@ const storeChecks = checks - formatChecks
   same(anchors.top.map((n) => n.id), ['f', 'c'], 'file notes, then notes whose line left the diff, go above it')
   same([...anchors.stale].sort(), ['b', 'c'], 'a changed line text or a line gone from the diff is outdated; same text is not')
   same([...R.newSideLines(hunks).keys()], [1, 2, 3], 'only add and context lines take notes')
+  // A minified line past main's 1000-character snapshot: same text is not outdated, a change past the cut is not seen either.
+  const longLine = 'a'.repeat(70 * 1024)
+  const longHunks = [{ header: '@@ -0,0 +1 @@', oldStart: 0, newStart: 1, lines: [{ kind: 'add', newNo: 1, text: longLine }] }]
+  const snap = R.lineSnapshot(longLine)
+  check(snap.length === 1000 && R.anchorNotes([note({ id: 'L', line: 1, lineText: snap })], longHunks).stale.size === 0, 'a long line compares its 1000-character snapshot, so an unchanged line is not outdated')
+  check(R.anchorNotes([note({ id: 'L', line: 1, lineText: 'b' + snap.slice(1) })], longHunks).stale.has('L'), 'a change inside the snapshot of a long line is outdated')
+  check(h.store.upsert({ ...base, workspaceId: 'wLong', targetKey: 'ws:wLong', line: 1, lineText: snap, body: 'minified' }).lineText === snap, 'the snapshot the panel sends is accepted as is')
   same(R.noteCountsByRow([note({ id: 'a' }), note({ id: 'b', resolvedAt: 1 }), note({ id: 'c', area: 'staged' }), note({ id: 'e', targetKey: 'pane:p1' })], 'ws:w1'), { 'unstaged:src/a.ts': 1, 'staged:src/a.ts': 1 }, 'row badges count unresolved notes of the target')
   same(R.pendingNotes([note({ id: 'a' }), note({ id: 'b', sentAt: 1 }), note({ id: 'c', resolvedAt: 1 })]).map((n) => n.id), ['a'], 'pending = not sent, not resolved')
   same(R.toPayload(note({ id: 'a', line: 52, startLine: 40, body: 'x' })), { file: 'src/a.ts', lines: '40-52', comment: 'x' }, 'the desktop note maps to the shared shape')
