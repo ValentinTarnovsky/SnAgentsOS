@@ -753,6 +753,19 @@ export class SessionManager implements PtySink {
     return false
   }
 
+  /**
+   * Panes an authenticated phone is subscribed to (E5-FR-25): hibernation
+   * never puts them to sleep. A sub itself never wakes a sleeping pane.
+   */
+  subscribedPaneIds(): Set<string> {
+    const ids = new Set<string>()
+    for (const session of this.sessions) {
+      if (!session.authed) continue
+      for (const paneId of session.subs) ids.add(paneId)
+    }
+    return ids
+  }
+
   connectedDeviceIds(): Set<string> {
     const ids = new Set<string>()
     for (const session of this.sessions) {

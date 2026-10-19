@@ -17,6 +17,7 @@ import type {
   UsageSettings,
 } from './types'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from './agents'
+import type { AgentsHibernateEvt, HibernationConfig } from './hibernation'
 import type { SessionSummary, SessionsListReq } from './session-history'
 import type {
   RemoteCtlAction,
@@ -860,6 +861,10 @@ export interface SnApi {
     onChanged(cb: (e: AgentsChangedEvt) => void): () => void
     /** A session started, or reached its first idle after a start. Returns unsubscribe. */
     onReady(cb: (e: AgentsReadyEvt) => void): () => void
+    /** Hibernation setting and the consoles to keep awake (visible or about to run), E5-FR-25. */
+    setHibernation(cfg: HibernationConfig): void
+    /** Main put a console to sleep (its pty is gone). Returns unsubscribe. */
+    onHibernate(cb: (e: AgentsHibernateEvt) => void): () => void
   }
   /** Session history (E3-FR-36..40): Claude transcripts and Codex rollouts indexed by main. */
   sessions: {

@@ -286,6 +286,11 @@ export class AgentSessionStore {
     this.emitIfChanged(paneId)
   }
 
+  /** The pane's chat can be resumed right now (available === true): hibernation's last rule (E5-FR-25). */
+  isAvailable(paneId: string): boolean {
+    return !this.frozen && this.view(paneId)?.available === true
+  }
+
   /** Every record as the renderer sees it (availability re-checked). */
   list(): AgentSessionView[] {
     this.avail.clear()
