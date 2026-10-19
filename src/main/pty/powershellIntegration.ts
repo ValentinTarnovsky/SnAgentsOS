@@ -11,7 +11,8 @@ import { BRAND } from '@shared/brand'
  *
  * Marks (OSC 133, BEL terminated): A prompt start, B prompt end, C command
  * start (from PSConsoleHostReadLine, so only with PSReadLine), D;<code>
- * command end, written before the next A.
+ * command end, written before the next A. Before each A, an OSC 7 with the
+ * current folder (file system locations only) feeds the console's git chip.
  */
 
 /** Environment variable a console with the integration gets (and the script sets). */
@@ -72,6 +73,11 @@ const SCRIPT = [
   '    $s.Ran = $false',
   '    $s.First = $false',
   '    & $s.Hook',
+  '    $loc = $ExecutionContext.SessionState.Path.CurrentLocation',
+  "    if ($loc.Provider.Name -eq 'FileSystem') {",
+  "      $u = (($loc.ProviderPath -replace '\\\\', '/') -replace '%', '%25') -replace ' ', '%20'",
+  "      [Console]::Write($e + ']7;file://localhost/' + $u + $b)",
+  '    }',
   "    [Console]::Write($e + ']133;A' + $b)",
   '    $Global:LASTEXITCODE = $lec',
   "    if (-not $ok) { Write-Error 'failure' -ErrorAction Ignore }",
@@ -119,10 +125,10 @@ export function shouldIntegrate(req: IntegrationReq): boolean {
   return req.enabled && req.platform === 'win32' && isPowerShellExe(req.shell) && (!req.args || req.args.length === 0)
 }
 
-/** A complete OSC 133 sequence, BEL or ST terminated. */
-const OSC133_RE = /\x1b\]133;[^\x07\x1b]*(?:\x07|\x1b\\)/g
-/** An OSC 133 cut at the end of the text (the rest arrives with the next chunk). */
-const OSC133_TAIL_RE = /\x1b(?:\]1(?:3(?:3(?:;[^\x07\x1b]*)?)?)?)?$/
+/** A complete OSC 133 (or the OSC 7 the prompt writes next to it), BEL or ST terminated. */
+const OSC133_RE = /\x1b\](?:133|7);[^\x07\x1b]*(?:\x07|\x1b\\)/g
+/** An OSC 133 or OSC 7 cut at the end of the text (the rest arrives with the next chunk). */
+const OSC133_TAIL_RE = /\x1b(?:\](?:1(?:3(?:3(?:;[^\x07\x1b]*)?)?)?|7(?:;[^\x07\x1b]*)?)?)?$/
 
 /**
  * The text without OSC 133 marks (E6-FR-31), so a `waitFor` regex anchored at
