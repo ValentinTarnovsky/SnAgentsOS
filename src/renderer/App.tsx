@@ -47,6 +47,7 @@ import { Button } from '@/components/ui/Button'
 
 export function App() {
   const hydrated = useAppStore((s) => s.hydrated)
+  const cliEnabled = useAppStore((s) => s.settings.cliEnabled !== false)
   const hydrate = useAppStore((s) => s.hydrate)
   const theme = useAppStore((s) => s.settings.theme)
   const customColors = useAppStore((s) => s.settings.customColors)
@@ -121,6 +122,11 @@ export function App() {
   useEffect(() => {
     if (hydrated) syncRemoteConfig(remote)
   }, [hydrated, remote])
+
+  // snaos CLI switch (E8-FR-22): main starts or stops the control server.
+  useEffect(() => {
+    if (hydrated) window.snApi.cli.setEnabled(cliEnabled)
+  }, [hydrated, cliEnabled])
 
   // "PC awake": wire main's state stream once config is loaded (a tray pick is
   // persisted from it), then push the mode and the agent settings on change.

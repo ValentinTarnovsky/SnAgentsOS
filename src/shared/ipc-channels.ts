@@ -182,6 +182,13 @@ export const CH = {
   GIT_WORKTREE_INSPECT: 'git:worktreeInspect', // invoke ({ path, base? }) -> WorktreeInspectRes
   GIT_WORKTREE_LIST: 'git:worktreeList', // invoke () -> WorktreeListRes
   GIT_WORKTREE_REVEAL: 'git:worktreeReveal', // invoke ({ path }) -> boolean (manifest paths only)
+
+  // snaos CLI (E8-FR-12..22). setEnabled is the contract name; state, skill and userPath are amendments.
+  // The CLI's renderer ops ride REMOTE_CONTROL_CMD / REMOTE_CONTROL_RESULT (CONTRATOS).
+  CLI_SET_ENABLED: 'cli:setEnabled', // send (boolean)
+  CLI_STATE: 'cli:state', // invoke -> CliUiState (never a token)
+  CLI_SKILL: 'cli:skill', // invoke (SkillOp) -> SkillStatus
+  CLI_USER_PATH: 'cli:userPath', // invoke (boolean) -> boolean
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

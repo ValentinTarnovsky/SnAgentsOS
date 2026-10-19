@@ -17,6 +17,7 @@ import { shouldKillLateSpawn } from '@/lib/ptyLifecycle'
 import { registerFocuser, setFocusedPane, unregisterFocuser } from '@/lib/focus'
 import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegistry'
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
+import { readBufferLines, registerTermReader, unregisterTermReader, type TermReader } from '@/lib/termReaders'
 import { registerRestarter, unregisterRestarter } from '@/lib/restartRegistry'
 import { prepareAgentLaunch } from '@/lib/agentLaunch'
 import { rememberPrompt } from '@/lib/promptDelivery'
@@ -643,6 +644,9 @@ export function useXterm(
     // the renderer immediately, no debounce, since the user is reacting to
     // visible corruption right now.
     registerRedrawer(opts.paneId, () => rendererHandle.reload())
+    // `snaos read` (E8-FR-17): scrollback + screen as plain lines, wraps joined.
+    const termReader: TermReader = (n) => readBufferLines(term.buffer.active, n)
+    registerTermReader(opts.paneId, termReader)
 
     // Exit card state (E6-FR-17): kept in a ref for the key handler, mirrored
     // to the pane chrome through onExitState.
@@ -961,6 +965,8 @@ export function useXterm(
               // E6-FR-11/13: the saved history comes back unless this spawn
               // resumes a chat (decideLaunch); main honors it once per session.
               restoreScrollback: !launch.resumed,
+              // The CLI's console token carries the workspace (SNAOS_WORKSPACE_ID).
+              workspaceId: useAppStore.getState().workspaces.find((w) => w.panes.some((p) => p.id === opts.paneId))?.id,
             })
           })
           .then((spawned) => {
@@ -1083,6 +1089,7 @@ export function useXterm(
       unregisterFocuser(opts.paneId)
       unregisterPaster(opts.paneId, paster)
       unregisterRedrawer(opts.paneId)
+      unregisterTermReader(opts.paneId, termReader)
       unregisterRestarter(opts.paneId, restartFn)
       exitRef.current = null
       shellKindRef.current = null

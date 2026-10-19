@@ -15,6 +15,7 @@ export type CategoryId =
   | 'agents'
   | 'connections'
   | 'quick'
+  | 'automation'
   | 'startup'
   | 'notifications'
   | 'keys'
@@ -32,6 +33,7 @@ export const CATEGORY_ORDER: CategoryId[] = [
   'agents',
   'connections',
   'quick',
+  'automation',
   'startup',
   'notifications',
   'keys',
@@ -53,6 +55,7 @@ export const CATEGORY_LABEL: Record<CategoryId, MessageKey> = {
   agents: 'settings.cat.agents',
   connections: 'settings.cat.connections',
   quick: 'settings.cat.quick',
+  automation: 'settings.cat.automation',
   startup: 'settings.cat.startup',
   notifications: 'settings.cat.notifications',
   keys: 'settings.cat.keys',
@@ -131,6 +134,13 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   // Connections, Quick Commands
   e('connections.profiles', 'settings.search.connections', 'settings.search.connectionsHint', { summary: true, keywords: ['ssh', 'connection', 'conexion', 'setup', 'login', 'password', 'contrasena', 'server', 'servidor', 'expect'] }),
   e('quick.list', 'settings.search.quick', 'settings.search.quickHint', { summary: true, keywords: ['snippet', 'snippets', 'prompt', 'comando', 'command', 'quick', 'plantilla', 'template', 'texto', 'text', 'agente', 'agent'] }),
+
+  // Automation: the snaos CLI (E8-FR-21/22)
+  e('automation.cli', 'settings.cli.enabled', 'settings.cli.enabledHint', { keywords: ['cli', 'snaos', 'terminal', 'consola', 'command line', 'linea de comandos', 'script'], toggle: { path: 'cliEnabled' } }),
+  e('automation.protectSsh', 'settings.cli.protectSsh', 'settings.cli.protectSshHint', { keywords: ['cli', 'snaos', 'ssh', 'connection', 'conexion', 'profile', 'perfil', 'protect', 'proteger'], toggle: { path: 'automation.cliProtectSsh' } }),
+  e('automation.userPath', 'settings.cli.userPath', undefined, { keywords: ['cli', 'snaos', 'path', 'windows terminal', 'environment', 'entorno', 'variable'] }),
+  e('automation.server', 'settings.cli.server', 'settings.cli.serverHint', { keywords: ['cli', 'snaos', 'server', 'servidor', 'pipe', 'endpoint', 'runtime'] }),
+  e('automation.skill', 'settings.cli.skill', 'settings.cli.skillHint', { keywords: ['skill', 'claude', 'snaos', 'cli', 'agent', 'agente'] }),
 
   // Startup
   e('startup.restoreLast', 'settings.restoreLast', undefined, { keywords: ['restore', 'restaurar', 'workspace', 'inicio', 'startup'], toggle: { path: 'restoreLastWorkspace' } }),
