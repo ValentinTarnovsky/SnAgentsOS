@@ -265,6 +265,17 @@ function testClient() {
     s.recv({ type: 'fitState', paneId: 'p', owner: 'desktop', cols: 121, rows: 40 })
     check(p.api.selectPaneMode(p.state(), 'p') === 'desktop', 'past the grace the PC taking it back counts again')
 
+    // The re-claim closes the grace: a desktop release after its ack is honored at once.
+    p.state().setPaneMode('p', 'phone')
+    s.recv({ type: 'replay', paneId: 'p', running: true, data: '', cols: 120, rows: 40 })
+    const reclaim = client.sendFitPane('p', 50, 40)
+    const c3 = s.sent.filter(m => m.type === 'ctl').at(-1)
+    s.recv({ type: 'fitState', paneId: 'p', owner: 'phone', cols: 50, rows: 40 })
+    s.recv({ type: 'ctlAck', id: c3.id, ok: true })
+    await reclaim
+    s.recv({ type: 'fitState', paneId: 'p', owner: 'desktop', cols: 120, rows: 40 })
+    check(p.api.selectPaneMode(p.state(), 'p') === 'desktop', 'after the re-claim was acked, a desktop release inside 1.5s still switches to desktop')
+
     // A pane this phone does not view still learns the release.
     p.state().setPaneMode('q', 'phone')
     s.recv({ type: 'fitState', paneId: 'q', owner: 'desktop', cols: 100, rows: 30 })

@@ -289,7 +289,9 @@ export function RemoteTerminal(): ReactNode {
       },
       narrow: () => {
         const st = useRemoteStore.getState()
-        if (st.subscribedPaneId) st.setPaneMode(st.subscribedPaneId, 'desktop')
+        // Not saved: a narrow screen (split view, portrait on a small phone)
+        // is transient, so the pane's own choice survives a reload.
+        if (st.subscribedPaneId) st.setPaneMode(st.subscribedPaneId, 'desktop', false)
         st.setToast(t('fit.narrow'))
         applyFont()
       },

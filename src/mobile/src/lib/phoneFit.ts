@@ -100,7 +100,9 @@ export function keyboardBlocksFit(innerHeight: number, vvHeight: number | null |
  * After a running replay (a respawn, a reconnect, a pane switch) the pane is
  * about to be claimed again, so a desktop fitState inside this window is
  * recorded without leaving phone mode (a restarted pty is born at the
- * desktop size, FR-20, and the phone re-sends its fitPane, FR-15).
+ * desktop size, FR-20, and the phone re-sends its fitPane, FR-15). The window
+ * closes early when that fitPane goes out, so a real desktop release right
+ * after the re-claim is not swallowed.
  */
 export const FIT_REPLAY_GRACE_MS = 1500
 
