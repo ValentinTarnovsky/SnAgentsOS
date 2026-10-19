@@ -43,9 +43,10 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
   or stdin: \`--prompt-file\`, \`--file\` or \`-\`. Quoting through PowerShell 5.1 and cmd mangles
   inline text.
 - Set \`snaos status "<what you are doing>"\` at checkpoints so the user sees your progress.
-- \`wait\` can block for minutes. The Bash tool of Claude Code stops a command after 120 s by
-  default: use \`snaos wait <c> --idle --timeout 110\` and repeat, or raise the tool timeout (up
-  to 600 s), or run the wait with run_in_background.
+- \`wait\` can block for minutes, and the shell tool of an agent (Claude Code, Codex) cuts a
+  command short after its own timeout (Claude Code's Bash tool: 120 s by default). Keep each
+  call short: use \`snaos wait <c> --idle --timeout 110\` and repeat, or raise your shell tool's
+  timeout, or run the wait in the background if your tool can.
 - \`send --enter\` followed by \`wait --idle\` returns only after the new turn started and ended;
   \`noTurnObserved: true\` means nothing happened in 10 s (check the console with \`read\`).
 - Consoles with a Connection Profile (SSH) are protected by default: \`ssh_protected\`. Do not

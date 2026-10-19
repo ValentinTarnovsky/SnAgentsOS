@@ -1,12 +1,14 @@
 /**
  * Inline usage on Home (E2-FR-14): when the snapshot carries usage, one
- * compact card per provider with its 5h and 7d bars (the same thresholds as
- * UsageSheet). A tap anywhere opens the full UsageSheet.
+ * compact card per provider with whichever quota bars it has (session and/or
+ * weekly: a weekly-only plan has just one; same thresholds as UsageSheet). A
+ * tap anywhere opens the full UsageSheet.
  */
 import type { ReactNode } from 'react'
 import { clsx } from 'clsx'
 import type { RemoteUsageRow } from '@shared/remote-protocol'
-import { barColor, PROVIDER_LABEL, PROVIDER_ORDER } from '../UsageSheet'
+import { isQuotaKind, visibleUsageRows } from '@shared/usageRows'
+import { barColor, PROVIDER_LABEL, PROVIDER_ORDER, rowLabel } from '../UsageSheet'
 import { useRemoteStore } from '../../lib/store'
 import { t } from '../../lib/i18n'
 
@@ -15,7 +17,7 @@ function MiniBar({ row }: { row: RemoteUsageRow }): ReactNode {
   const muted = row.status !== 'ok' || pct == null
   return (
     <span data-usage-bar={row.kind} className="flex min-w-0 flex-1 items-center gap-1.5">
-      <span className="shrink-0 text-[10px] font-medium uppercase text-text-secondary">{row.kind}</span>
+      <span className="max-w-[4.5rem] shrink-0 truncate text-[10px] font-medium text-text-secondary">{rowLabel(row)}</span>
       <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-bg-primary">
         <span className={clsx('block h-full rounded-full', muted ? 'bg-border' : barColor(pct))} style={{ width: `${pct ?? 0}%` }} />
       </span>
@@ -26,7 +28,7 @@ function MiniBar({ row }: { row: RemoteUsageRow }): ReactNode {
 
 export function UsageCards({ onOpen }: { onOpen: () => void }): ReactNode {
   const rows = useRemoteStore((s) => s.snapshot?.usage?.rows)
-  const quota = (rows ?? []).filter((r) => r.kind === '5h' || r.kind === '7d')
+  const quota = visibleUsageRows(rows ?? []).filter((r) => isQuotaKind(r.kind))
   if (quota.length === 0) return null
   return (
     <section data-home-usage className="mb-4">

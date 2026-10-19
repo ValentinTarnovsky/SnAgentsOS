@@ -232,9 +232,9 @@ const schema13Start = checks
     settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false, gitChip: false },
     activeWorkspaceId: 'w1',
   })
-  check(CONFIG_VERSION === 14, 'schema 14 still carries the schema 13 worktree keys')
+  check(CONFIG_VERSION === 15, 'schema 14 still carries the schema 13 worktree keys')
   const up = parseConfig(v12())
-  check(up.version === 14 && up.settings.worktreesRoot === '' && up.settings.gitChip === false && up.workspaces[0].panes[0].cwd === wt.path, 'v12 -> v14: worktreesRoot defaults to empty (dataDir()/worktrees), gitChip and pane cwd kept')
+  check(up.version === 15 && up.settings.worktreesRoot === '' && up.settings.gitChip === false && up.workspaces[0].panes[0].cwd === wt.path, 'v12 -> v14: worktreesRoot defaults to empty (dataDir()/worktrees), gitChip and pane cwd kept')
   check(up.workspaces[0].panes.every((p) => !('worktree' in p)), 'a pane without worktree stays without one')
   const cfg = v12(); cfg.version = 13; cfg.workspaces[0].panes[0].worktree = { ...wt }; cfg.settings.worktreesRoot = 'D:\\wt'
   const once = parseConfig(JSON.parse(JSON.stringify(cfg)))
@@ -267,7 +267,7 @@ const schema13Start = checks
     fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(v12()))
     new ConfigStore().load({ upgrade: true })
     const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'))
-    check(onDisk.version === 14 && onDisk.settings.worktreesRoot === '' && onDisk.workspaces[0].panes.length === 2, 'a v12 file upgrades on disk to 14 keeping its panes')
+    check(onDisk.version === 15 && onDisk.settings.worktreesRoot === '' && onDisk.workspaces[0].panes.length === 2, 'a v12 file upgrades on disk to 15 keeping its panes')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 
   // Renderer store -> persisted blob -> schema keeps the worktree.
@@ -286,7 +286,7 @@ const schema13Start = checks
   for (const fn of [...timers.values()]) fn()
   timers.clear()
   const blob = saves.at(-1)
-  check(blob && blob.version === 14, 'the store writes a v14 blob')
+  check(blob && blob.version === 15, 'the store writes a v15 blob')
   same(blob.workspaces[0].panes[0].worktree, wt, 'the persisted blob carries pane.worktree')
   same(parseConfig(blob).workspaces[0].panes[0].worktree, wt, 'and the reload keeps it')
   check(parseConfig(blob).settings.worktreesRoot === 'D:\\wt', 'worktreesRoot persists through the store')
@@ -1040,6 +1040,24 @@ process.on('exit', (code) => {
     { key: 'ws:w1', cwd: 'C:\\a', workspaceId: 'w1', active: true },
     { key: 'pane:p2', cwd: 'C:\\wt\\x', workspaceId: 'w1', paneId: 'p2', active: true },
   ], 'targets: workspace cwd and pane worktrees; a workspace without cwd has none')
+  // A folder of many repos: each console's own folder (agent hook cwd or shell OSC 7) is its own target.
+  const multi = [
+    { id: 'w1', name: 'Plugins', cwd: 'C:\\plugins', panes: [{ id: 'p1', type: 'shell' }, { id: 'p2', type: 'shell' }, { id: 'p3', type: 'shell' }, { id: 'p4', type: 'shell', cwd: 'C:\\plugins\\SnTags' }] },
+  ]
+  same(chip.buildGitTargets(multi, 'w1', { p1: 'C:\\plugins\\SnKits', p2: 'c:/Plugins/' }, 'win32'), [
+    { key: 'ws:w1', cwd: 'C:\\plugins', workspaceId: 'w1', active: true },
+    { key: 'pane:p1', cwd: 'C:\\plugins\\SnKits', workspaceId: 'w1', paneId: 'p1', active: true },
+    { key: 'pane:p4', cwd: 'C:\\plugins\\SnTags', workspaceId: 'w1', paneId: 'p4', active: true },
+  ], 'per-console targets: a live folder or a pane cwd away from the workspace; the workspace folder itself (any case or slash) is not repeated')
+  check(chip.paneOwnRepo(sum({ repoRoot: 'C:\\plugins\\SnKits' }), undefined)?.repoRoot === 'C:\\plugins\\SnKits', 'a console in a repo of a non-repo workspace shows its own')
+  check(chip.paneOwnRepo(sum(), sum()) === null && chip.paneOwnRepo(undefined, sum()) === null, 'a console in its workspace repo shows nothing of its own')
+  check(chip.repoName('C:\\plugins\\SnKits\\') === 'SnKits' && chip.repoName('/home/u/repo') === 'repo', 'repo name is the root folder name')
+  const osc7 = load('src/shared/osc7.ts')
+  check(osc7.parseOsc7('file://localhost/C:/Users/me/My%20Repo', 'win32') === 'C:\\Users\\me\\My Repo', 'OSC 7 on Windows: drive path, decoded')
+  check(osc7.parseOsc7('file://host/C:', 'win32') === 'C:\\' && osc7.parseOsc7('file:////server/share/x', 'win32') === '\\\\server\\share\\x', 'drive root and UNC')
+  check(osc7.parseOsc7('file://box/home/u/x', 'linux') === '/home/u/x' && osc7.parseOsc7('file://box/home/u/100%', 'linux') === '/home/u/100%', 'POSIX path; a bad escape stays literal')
+  check(osc7.parseOsc7('http://x/y', 'linux') === null && osc7.parseOsc7('file://h/a\nb', 'linux') === null && osc7.parseOsc7('file://h/relative', 'win32') === null, 'not a file URL, control characters or a non-absolute Windows path: ignored')
+  check(osc7.samePath('C:\\A\\b\\', 'c:/a/B', 'win32') && !osc7.samePath('/a/B', '/a/b', 'linux') && osc7.samePath('/a/b/', '/a/b', 'linux'), 'samePath: Windows ignores case and slashes, POSIX only the trailing separator')
   check(chip.agentFinished('working', 'done') && chip.agentFinished('working', 'idle') && chip.agentFinished('working', 'action'), 'working -> done/idle/action is a finish')
   check(!chip.agentFinished('idle', 'done') && !chip.agentFinished('working', 'error') && !chip.agentFinished('working', undefined) && !chip.agentFinished(undefined, 'done'), 'other transitions are not')
 

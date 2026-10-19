@@ -1,9 +1,10 @@
 import { ipcMain, type WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { UsageRow, UsageSnapshot } from '@shared/ipc-contract'
-import type { UsageSettings } from '@shared/types'
-import { fetchClaudeRows } from '../usage/claude'
-import { fetchCodexRows } from '../usage/codex'
+import type { PaneStatusEvt, UsageSettings } from '@shared/types'
+import { fetchClaudeUsage } from '../usage/claude'
+import { ClaudePoll } from '../usage/claudePoll'
+import { CodexUsage } from '../usage/codexUsage'
 import { computeCustomRows } from '../usage/custom'
 import { fetchServiceStatus, type ServiceStatus } from '../usage/status'
 
@@ -11,6 +12,8 @@ interface UsageIpcHooks {
   getSender: () => WebContents | null
   /** Usage settings from the persisted config at startup (before the renderer connects). */
   getInitialConfig: () => UsageSettings | null
+  /** Agent status stream (StatusManager.addListener): a finished Codex turn triggers a Codex refresh. */
+  onStatus?: (cb: (evt: PaneStatusEvt) => void) => () => void
 }
 
 const DEFAULTS: UsageSettings = {
@@ -30,9 +33,13 @@ const DEFAULTS: UsageSettings = {
   custom: [],
 }
 
-// The Claude endpoint is remote (don't hammer it); Codex is a cheap local read.
+// The Claude endpoint is remote (don't hammer it). The Codex minimum applies to
+// the local-rollout fallback, a cheap tail read; the remote Codex endpoint is
+// separately held to max(60s, codexIntervalMs) inside CodexUsage.
 const MIN_CLAUDE_MS = 30000
 const MIN_CODEX_MS = 3000
+/** Wait after a Codex turn finishes before re-reading (the quota lands a moment after the turn). */
+const CODEX_TURN_DEBOUNCE_MS = 2000
 
 function normalize(c: UsageSettings | null): UsageSettings {
   const merged = { ...DEFAULTS, ...(c ?? {}) }
@@ -48,8 +55,10 @@ function normalize(c: UsageSettings | null): UsageSettings {
 /**
  * Usage-bars IPC. Owns two pollers in the main process:
  *  - Claude (remote OAuth endpoint) + custom-model parsing + service status, on
- *    `claudeIntervalMs`.
- *  - Codex (local rollout file), on `codexIntervalMs`.
+ *    `claudeIntervalMs`, with back-off after failures (see ClaudePoll).
+ *  - Codex, on `codexIntervalMs`: the live `wham/usage` endpoint when available
+ *    (at most every max(60s, interval)), else the local rollout files (see
+ *    CodexUsage). A finished Codex turn forces a debounced refresh.
  * Each tick refreshes its own cache and pushes a merged `UsageSnapshot` on
  * `usage:update`. Tokens/cookies never leave the main process; only computed
  * percentages and labels are sent.
@@ -58,7 +67,8 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
   const { getSender, getInitialConfig } = hooks
   let cfg = normalize(getInitialConfig())
 
-  let claudeRows: UsageRow[] = []
+  const claudePoll = new ClaudePoll()
+  const codexUsage = new CodexUsage()
   let codexRows: UsageRow[] = []
   let customRows: UsageRow[] = []
   let services: ServiceStatus | null = null
@@ -67,16 +77,12 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
   let claudeTimer: NodeJS.Timeout | null = null
   let codexTimer: NodeJS.Timeout | null = null
   let claudeBusy = false
-  let claudeErrorStreak = 0
+  let codexInFlight: Promise<void> | null = null
   let configDebounce: NodeJS.Timeout | null = null
-
-  // Consecutive all-error Claude polls tolerated before the UI shows "Error".
-  const CLAUDE_ERROR_GRACE = 3
-  const isAllError = (rows: UsageRow[]): boolean =>
-    rows.length > 0 && rows.every((r) => r.status === 'error')
+  let codexTurnDebounce: NodeJS.Timeout | null = null
 
   const snapshot = (): UsageSnapshot => ({
-    rows: [...claudeRows, ...codexRows, ...customRows],
+    rows: [...claudePoll.rows, ...codexRows, ...customRows],
     updatedAt: lastUpdated || Date.now(),
     services: cfg.showStatus ? services : null,
   })
@@ -86,23 +92,39 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
     if (wc && !wc.isDestroyed()) wc.send(CH.USAGE_UPDATE, snapshot())
   }
 
-  async function refreshClaude(): Promise<void> {
+  /** (Re)arm the single Claude timer; every Claude refresh re-arms it with the policy's next delay. */
+  function armClaude(delayMs: number): void {
+    if (claudeTimer) {
+      clearTimeout(claudeTimer)
+      claudeTimer = null
+    }
+    if (!cfg.enabled) return
+    claudeTimer = setTimeout(() => {
+      claudeTimer = null
+      void refreshClaude().then(emit)
+    }, delayMs)
+  }
+
+  /**
+   * `bypassBackoff` is only for a changed row selection: the user asked for
+   * rows the cache does not hold. Timer, focus and Refresh ticks never call
+   * the endpoint while it asked us to back off (the cache stays, flagged stale).
+   */
+  async function refreshClaude(bypassBackoff = false): Promise<void> {
     if (claudeBusy) return
     claudeBusy = true
+    let next = cfg.claudeIntervalMs
     try {
-      const fresh = await fetchClaudeRows(cfg.rows)
-      // A lone transient failure (timeout/5xx/429) used to flip the bars to
-      // "Error" for one cycle. Hold the last-good rows through a short grace
-      // window so only a sustained outage surfaces. Expired/nodata aren't
-      // all-error, so those legitimate states still show immediately.
-      if (isAllError(fresh)) {
-        claudeErrorStreak += 1
-        const holdLastGood =
-          claudeRows.length > 0 && !isAllError(claudeRows) && claudeErrorStreak < CLAUDE_ERROR_GRACE
-        if (!holdLastGood) claudeRows = fresh
+      const t = Date.now()
+      if (bypassBackoff || claudePoll.canFetch(t)) {
+        const res = await fetchClaudeUsage(cfg.rows)
+        // A lone transient failure (timeout/5xx/429) used to flip the bars to
+        // "Error" for one cycle. ClaudePoll holds the last-good rows (flagged
+        // stale) through a short grace window so only a sustained outage
+        // surfaces. Expired/nodata aren't all-error, so those still show at once.
+        next = claudePoll.apply(res, cfg.claudeIntervalMs, Date.now())
       } else {
-        claudeErrorStreak = 0
-        claudeRows = fresh
+        next = claudePoll.skipDelay(cfg.claudeIntervalMs, t)
       }
       customRows = computeCustomRows(cfg.custom)
       services = cfg.showStatus ? await fetchServiceStatus() : null
@@ -111,41 +133,53 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
       console.error('[usage] claude refresh failed:', err)
     } finally {
       claudeBusy = false
+      armClaude(next)
     }
   }
 
-  function refreshCodex(): void {
-    try {
-      codexRows = fetchCodexRows(cfg.rows)
-      lastUpdated = Date.now()
-    } catch (err) {
-      console.error('[usage] codex refresh failed:', err)
-    }
+  /** Concurrent callers share the in-flight read; a forced one runs once more right after it. */
+  function refreshCodex(force = false): Promise<void> {
+    if (codexInFlight) return force ? codexInFlight.then(() => refreshCodex(true)) : codexInFlight
+    const run = (async (): Promise<void> => {
+      try {
+        codexRows = await codexUsage.refresh(cfg.rows, cfg.codexIntervalMs, force)
+        lastUpdated = Date.now()
+      } catch (err) {
+        console.error('[usage] codex refresh failed:', err)
+      }
+    })()
+    codexInFlight = run.finally(() => {
+      codexInFlight = null
+    })
+    return codexInFlight
   }
 
-  async function refreshAll(): Promise<void> {
-    refreshCodex()
-    await refreshClaude()
+  async function refreshAll(force = false, bypassBackoff = false): Promise<void> {
+    await Promise.all([refreshCodex(force), refreshClaude(bypassBackoff)])
   }
 
   function schedule(): void {
-    if (claudeTimer) {
-      clearInterval(claudeTimer)
-      claudeTimer = null
-    }
     if (codexTimer) {
       clearInterval(codexTimer)
       codexTimer = null
     }
+    armClaude(cfg.claudeIntervalMs)
     if (!cfg.enabled) return
-    claudeTimer = setInterval(() => {
-      void refreshClaude().then(emit)
-    }, cfg.claudeIntervalMs)
     codexTimer = setInterval(() => {
-      refreshCodex()
-      emit()
+      void refreshCodex().then(emit)
     }, cfg.codexIntervalMs)
   }
+
+  // Window focus / Refresh button already force a full refresh through USAGE_REFRESH.
+  // A finished Codex turn is the other moment the quota visibly changes.
+  hooks.onStatus?.((evt) => {
+    if (!cfg.enabled || evt.provider !== 'codex' || evt.state !== 'done') return
+    if (codexTurnDebounce) clearTimeout(codexTurnDebounce)
+    codexTurnDebounce = setTimeout(() => {
+      codexTurnDebounce = null
+      void refreshCodex(true).then(emit)
+    }, CODEX_TURN_DEBOUNCE_MS)
+  })
 
   // Initial kick + scheduling.
   if (cfg.enabled) {
@@ -159,7 +193,7 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
   })
 
   ipcMain.handle(CH.USAGE_REFRESH, async (): Promise<UsageSnapshot> => {
-    await refreshAll()
+    await refreshAll(true)
     emit()
     return snapshot()
   })
@@ -180,7 +214,7 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
     // (which the caches don't hold yet) are fetched.
     if (configDebounce) clearTimeout(configDebounce)
     configDebounce = setTimeout(() => {
-      void refreshAll().then(emit)
+      void refreshAll(false, true).then(emit)
     }, 400)
   })
 }

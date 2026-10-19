@@ -459,9 +459,9 @@ async function schemaV11Checks() {
     connections: [{ id: 'c1', name: 'SSH', steps: [{ send: 'ssh host', waitFor: 'password:', secret: false }] }],
     keyButtons: [{ id: 'k1', label: 'Esc', seq: '\u001b' }],
   }
-  check(CONFIG_VERSION === 14, 'CONFIG_VERSION is 14 (R31-00)')
+  check(CONFIG_VERSION === 15, 'CONFIG_VERSION is 15 (R31-00)')
   const c = parseConfig(JSON.parse(JSON.stringify(v10)))
-  check(c && c.version === 14, 'a v10 config parses and is stamped 14')
+  check(c && c.version === 15, 'a v10 config parses and is stamped 15')
   const st = c.settings
   check(st.awakeMode === 'auto' && st.terminalUnicode11 === true && st.terminalAgentEndChip === true && st.notifications.inAppWhenFocused === true, 'v10 gains awakeMode, terminalUnicode11, terminalAgentEndChip and inAppWhenFocused defaults')
   check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual', cacheTimer: { enabled: false, ttlMinutes: 5 } }), 'v10 gains the settings.agents defaults (v11, v12 and v13 keys)')
@@ -484,7 +484,7 @@ async function schemaV11Checks() {
   check(d.workspaces[0].agentsCollapsed === true && d.workspaces[1].agentsCollapsed === undefined, 'agentsCollapsed kept, malformed value dropped')
   check(d.workspaces[0].panes[0].lastSession.sessionId.startsWith('0123abcd') && d.workspaces[0].panes[1].lastSession === undefined, 'valid lastSession kept, malformed one dropped instead of failing the whole config')
   check(d.workspaces[1].panes[0].lastSession === undefined, 'a lastSession id with shell syntax (imported config) is dropped')
-  check(parseConfig({ ...v10, version: 15 }).version === 14, 'parse stamps the current version')
+  check(parseConfig({ ...v10, version: 16 }).version === 15, 'parse stamps the current version')
 
   // ConfigStore: only the renderer load (upgrade) stamps an older file, once.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-config-test-'))
@@ -494,13 +494,13 @@ async function schemaV11Checks() {
     const file = path.join(dir, 'config.json'), raw = JSON.stringify(v10)
     fs.writeFileSync(file, raw)
     const store = new ConfigStore()
-    check(store.load().version === 14 && fs.readFileSync(file, 'utf8') === raw, 'a plain load stays read-only (legacy verification safe)')
-    check(store.load({ upgrade: true }).version === 14 && JSON.parse(fs.readFileSync(file, 'utf8')).version === 14, 'the renderer load leaves config.json on v14')
+    check(store.load().version === 15 && fs.readFileSync(file, 'utf8') === raw, 'a plain load stays read-only (legacy verification safe)')
+    check(store.load({ upgrade: true }).version === 15 && JSON.parse(fs.readFileSync(file, 'utf8')).version === 15, 'the renderer load leaves config.json on v15')
     check(fs.readFileSync(file + '.bak', 'utf8') === raw && fs.readdirSync(path.join(dir, 'backups')).length === 1, 'the pre-upgrade v10 file is kept as .bak and in backups/')
     const once = fs.readFileSync(file, 'utf8'); fs.writeFileSync(file + '.bak', 'marker')
     store.load({ upgrade: true })
     check(fs.readFileSync(file + '.bak', 'utf8') === 'marker' && fs.readFileSync(file, 'utf8') === once, 'an already current file is not rewritten')
-    const newer = JSON.stringify({ ...v10, version: 14 }); fs.writeFileSync(file, newer)
+    const newer = JSON.stringify({ ...v10, version: 16 }); fs.writeFileSync(file, newer)
     store.load({ upgrade: true })
     check(fs.readFileSync(file, 'utf8') === newer, 'a newer file (downgrade) is never rewritten')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
@@ -542,7 +542,7 @@ async function schemaV11Checks() {
   S.getState().setActive('w1')
   check(S.getState().mountedWorkspaces.w1 === 'full', 'activating a partially mounted workspace mounts it full')
   flush()
-  check(saves.length === 1 && saves[0].version === 14 && saves[0].activeWorkspaceId === 'w1', 'a persisted slice change writes once, stamped 14')
+  check(saves.length === 1 && saves[0].version === 15 && saves[0].activeWorkspaceId === 'w1', 'a persisted slice change writes once, stamped 15')
   S.getState().renamePane('w1', 'p1', 'Renombrada'); S.getState().updateSettings({ awakeMode: 'always' }); flush()
   check(saves.length === 2 && saves[1].workspaces[0].panes[0].title === 'Renombrada' && saves[1].settings.awakeMode === 'always', 'debounced writes carry the latest state')
   check(!('mountedWorkspaces' in saves[1]) && !('paneStatus' in saves[1]) && saves[1].settings.agents.ctrlDigitFocus === true, 'transient slices never reach config.json, v11 settings do')

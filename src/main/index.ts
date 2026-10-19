@@ -552,6 +552,8 @@ async function bootstrap(): Promise<void> {
   registerUsageIpc({
     getSender: () => mainWindow?.webContents ?? null,
     getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
+    // A finished Codex turn refreshes the Codex usage bar.
+    onStatus: (cb) => statusManager.addListener(cb),
   })
   // Git chip (E7-FR-05..10); settings.gitChip is a schema 12 key, absent = on.
   registerGitIpc({

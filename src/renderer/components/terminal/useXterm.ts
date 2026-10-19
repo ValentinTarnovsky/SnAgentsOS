@@ -31,6 +31,7 @@ import { registerShellMarks, unregisterShellMarks, type ShellMarksApi } from '@/
 import { toast } from '@/lib/toast'
 import { forgetPrompts, notePrompt } from '@/lib/shellReady'
 import { ShellMarks } from './shellMarks'
+import { parseOsc7 } from '@shared/osc7'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
 const INFINITE_SCROLLBACK = 100000
@@ -675,6 +676,12 @@ export function useXterm(
       },
     }
     registerShellMarks(opts.paneId, marksApi)
+    // The shell's working folder (OSC 7) gives the console its own git chip in the sidebar.
+    const cwdOsc = term.parser.registerOscHandler(7, (data) => {
+      const dir = parseOsc7(data, window.snApi.platform)
+      if (dir) useAppStore.getState().setPaneCwd(opts.paneId, dir)
+      return true
+    })
     controllerRef.current.prompt = marksApi.prompt
     controllerRef.current.copyLastOutput = marksApi.copyLastOutput
 
@@ -1130,6 +1137,7 @@ export function useXterm(
       unregisterRestarter(opts.paneId, restartFn)
       unregisterShellMarks(opts.paneId, marksApi)
       marks.dispose()
+      cwdOsc.dispose()
       forgetPrompts(opts.paneId)
       exitRef.current = null
       shellKindRef.current = null

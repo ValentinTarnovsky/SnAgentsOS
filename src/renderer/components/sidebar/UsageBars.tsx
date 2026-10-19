@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { ChevronDown, ChevronUp, RefreshCw } from 'lucide-react'
 import type { UsageRow } from '@shared/ipc-contract'
+import { visibleUsageRows } from '@shared/usageRows'
 import { useAppStore } from '@/lib/store'
 import { useUsageStore } from '@/lib/usageStore'
 import { useT, type MessageKey, type TFn } from '@/i18n'
@@ -35,13 +36,15 @@ function fmtClock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
-const ROW_LABEL_KEYS: Record<string, MessageKey> = {
-  'claude.5h': 'aiusage.session',
-  'claude.7d': 'aiusage.weekly',
+/** Labels follow what the window IS (its kind), never the row id or its position in the plan. */
+const KIND_LABEL_KEYS: Partial<Record<UsageRow['kind'], MessageKey>> = {
+  '5h': 'aiusage.session',
+  '7d': 'aiusage.weekly',
+}
+/** Per-model weekly buckets share kind '7d' but name their model. */
+const MODEL_LABEL_KEYS: Record<string, MessageKey> = {
   'claude.opus7d': 'aiusage.weeklyOpus',
   'claude.sonnet7d': 'aiusage.weeklySonnet',
-  'codex.5h': 'aiusage.session',
-  'codex.7d': 'aiusage.weekly',
 }
 
 export interface RowView {
@@ -49,11 +52,13 @@ export interface RowView {
   percent: number | null
   valueText: string
   subText?: string
+  /** Tooltip: set when main is holding the last good value through a failed poll. */
+  title?: string
   muted: boolean
 }
 
 export function viewRow(row: UsageRow, t: TFn): RowView {
-  const labelKey = ROW_LABEL_KEYS[row.id]
+  const labelKey = MODEL_LABEL_KEYS[row.id] ?? KIND_LABEL_KEYS[row.kind]
   const label = labelKey ? t(labelKey) : row.label
   if (row.status !== 'ok') {
     const valueText = t(
@@ -79,6 +84,7 @@ export function viewRow(row: UsageRow, t: TFn): RowView {
     percent: row.percent,
     valueText,
     subText: when ? t('aiusage.resets', { when }) : undefined,
+    title: row.stale ? t('aiusage.stale') : undefined,
     muted: false,
   }
 }
@@ -120,18 +126,40 @@ function Group({
   )
 }
 
-/** Always-expanded live usage bars docked at the bottom of the sidebar. */
+/** One ring with its row's label, value, reset and stale note in the tooltip. */
+function RingCell({ row, t, size, Icon, side }: { row: UsageRow; t: TFn; size: number; Icon?: IconComponent; side: 'right' | 'top' }) {
+  const v = viewRow(row, t)
+  const tip = [v.label, v.valueText, v.subText, v.title].filter(Boolean).join(' · ')
+  return (
+    <Tooltip label={tip} side={side}>
+      <div className="flex flex-col items-center gap-0.5" data-usage-ring={row.id}>
+        {Icon && <Icon size={10} className="text-text-secondary/80" />}
+        <UsageRing percent={v.percent} muted={v.muted} size={size} />
+      </div>
+    </Tooltip>
+  )
+}
+
+/**
+ * Live usage docked at the bottom of the sidebar: bars, or folded down to one
+ * row of rings (`settings.usage.collapsed`); a column of rings in the
+ * collapsed rail.
+ */
 export function UsageBars() {
   const t = useT()
   const usage = useAppStore((s) => s.settings.usage)
   const collapsed = useAppStore((s) => s.sidebarCollapsed)
+  const updateSettings = useAppStore((s) => s.updateSettings)
+  const folded = usage.collapsed === true
+  const setFolded = (next: boolean): void => updateSettings({ usage: { ...useAppStore.getState().settings.usage, collapsed: next } })
   const snapshot = useUsageStore((s) => s.snapshot)
   const refreshing = useUsageStore((s) => s.refreshing)
   const refresh = useUsageStore((s) => s.refresh)
 
   if (!usage.enabled) return null
 
-  const rows = snapshot?.rows ?? []
+  // A window the plan does not have (nodata beside an answered sibling) is not shown.
+  const rows = visibleUsageRows(snapshot?.rows ?? [])
   const claude = rows.filter((r) => r.provider === 'claude')
   const codex = rows.filter((r) => r.provider === 'codex')
   const custom = rows.filter((r) => r.provider === 'custom')
@@ -147,40 +175,67 @@ export function UsageBars() {
     ].filter((g) => g.list.length > 0)
     if (groups.length === 0) return null
     return (
-      <div className="shrink-0 space-y-3 border-t border-border px-2 py-3">
+      <div className="shrink-0 space-y-2 border-t border-border px-2 py-2.5" data-usage-rail>
         {groups.map((g, gi) => (
-          <div key={gi} className="flex flex-col items-center gap-1.5">
-            {g.Icon && <g.Icon size={13} className="text-text-secondary" />}
-            {g.list.map((r) => {
-              const v = viewRow(r, t)
-              return (
-                <Tooltip key={r.id} label={`${v.label} · ${v.valueText}`} side="right">
-                  <div className="flex justify-center">
-                    <UsageRing percent={v.percent} muted={v.muted} size={36} />
-                  </div>
-                </Tooltip>
-              )
-            })}
+          <div key={gi} className="flex flex-col items-center gap-1">
+            {g.Icon && <g.Icon size={12} className="text-text-secondary" />}
+            {g.list.map((r) => (
+              <RingCell key={r.id} row={r} t={t} size={30} side="right" />
+            ))}
           </div>
         ))}
       </div>
     )
   }
 
+  const header = (
+    <div className={cn('flex items-center gap-1', !folded && 'mb-1.5')}>
+      <span className="mr-auto text-[10px] font-semibold uppercase tracking-wider text-text-secondary/60">
+        {t('aiusage.title')}
+      </span>
+      <button
+        onClick={() => void refresh()}
+        title={t('aiusage.refresh')}
+        className="rounded p-0.5 text-text-secondary transition-colors hover:text-text-primary"
+      >
+        <RefreshCw size={12} className={cn(refreshing && 'animate-spin')} />
+      </button>
+      <button
+        onClick={() => setFolded(!folded)}
+        data-usage-fold={folded ? 'folded' : 'open'}
+        aria-expanded={!folded}
+        title={folded ? t('aiusage.expand') : t('aiusage.collapse')}
+        className="rounded p-0.5 text-text-secondary transition-colors hover:text-text-primary"
+      >
+        {folded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+      </button>
+    </div>
+  )
+
+  // Folded: one row of rings, each with its provider's icon; the bars come back with the chevron.
+  if (folded) {
+    const ringRows: Array<{ row: UsageRow; Icon?: IconComponent }> = [
+      ...claude.map((row) => ({ row, Icon: ClaudeIcon })),
+      ...codex.map((row) => ({ row, Icon: CodexIcon })),
+      ...custom.map((row) => ({ row, Icon: undefined })),
+    ]
+    return (
+      <div className="shrink-0 border-t border-border px-2.5 py-2" data-usage-folded>
+        {header}
+        {ringRows.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap items-end justify-around gap-x-1 gap-y-1.5">
+            {ringRows.map(({ row, Icon }) => (
+              <RingCell key={row.id} row={row} t={t} size={30} Icon={Icon} side="top" />
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="shrink-0 border-t border-border px-2.5 py-2.5">
-      <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-text-secondary/60">
-          {t('aiusage.title')}
-        </span>
-        <button
-          onClick={() => void refresh()}
-          title={t('aiusage.refresh')}
-          className="rounded p-0.5 text-text-secondary transition-colors hover:text-text-primary"
-        >
-          <RefreshCw size={12} className={cn(refreshing && 'animate-spin')} />
-        </button>
-      </div>
+      {header}
 
       {rows.length === 0 ? (
         <p className="px-0.5 py-1 text-[10px] text-text-secondary/70">{t('aiusage.empty')}</p>

@@ -2,7 +2,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import type { WebContents } from 'electron'
 import { CLI_ENV } from '@shared/brand'
-import type { CliUiState, SkillOp, SkillStatus, SnaosRuntimeFile } from '@shared/ctl-protocol'
+import type { CliUiState, SkillOp, SkillStatus, SkillTarget, SnaosRuntimeFile } from '@shared/ctl-protocol'
 import type { ConfigFile } from '@shared/types'
 import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import type { CustomNotice } from '../status/events'
@@ -31,7 +31,7 @@ export interface CliServiceDeps {
   /** noticeRouter.routeCustom: Discord / ntfy (kind custom). */
   routeCustom: (notice: CustomNotice) => void
   registry?: RegistryOps
-  /** Env the skill path is read from (CLAUDE_CONFIG_DIR); tests point it at a temp tree. */
+  /** Env the skill paths are read from (CLAUDE_CONFIG_DIR, CODEX_HOME); tests point it at a temp tree. */
   skillEnv?: NodeJS.ProcessEnv
   platform?: NodeJS.Platform
   /** Test seam for the handlers' clock and timings. */
@@ -93,7 +93,7 @@ export class CliService {
   /**
    * Startup work that does not depend on the switch: rewrite the shim (the
    * portable's execPath changes per run), refresh an installed skill of
-   * another version, and re-add the PATH entry when the setting is on (an
+   * another version (Claude and Codex), and re-add the PATH entry when the setting is on (an
    * update's uninstaller may have removed it).
    */
   init(): void {
@@ -221,18 +221,19 @@ export class CliService {
     }
   }
 
-  skill(op: SkillOp): SkillStatus {
+  /** Skill op on one agent's skills folder (Claude Code by default, or Codex). */
+  skill(op: SkillOp, target: SkillTarget = 'claude'): SkillStatus {
     const v = this.deps.appVersion
     const env = this.deps.skillEnv ?? process.env
     switch (op) {
       case 'install':
-        return installSkill(v, env)
+        return installSkill(target, v, env)
       case 'remove':
-        return removeSkill(v, env)
+        return removeSkill(target, v, env)
       case 'repair':
-        return repairSkill(v, env)
+        return repairSkill(target, v, env)
       default:
-        return skillStatus(v, env)
+        return skillStatus(target, v, env)
     }
   }
 

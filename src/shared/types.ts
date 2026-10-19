@@ -10,7 +10,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 14
+export const CONFIG_VERSION = 15
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -343,6 +343,8 @@ export interface UsageSettings {
     codex7d: boolean
   }
   custom: UsageCustomRow[]
+  /** Sidebar usage panel folded down to one row of rings (schema 15). */
+  collapsed?: boolean
 }
 
 /**

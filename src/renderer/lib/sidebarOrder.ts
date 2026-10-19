@@ -62,6 +62,27 @@ export function sidebarOrder(workspaces: readonly Workspace[], opts: SidebarOrde
   return [...workspaces].sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0) || within(a, b))
 }
 
+/**
+ * Display order after dropping workspace `dragId` into gap `to` (0 = above
+ * the first row, n = below the last) of `shown`, the order on screen. The
+ * drop stays inside the workspace's group: favorites always come first, so a
+ * plain workspace never lands above a favorite or the other way round. Null
+ * when nothing changes.
+ */
+export function dropWorkspace(shown: readonly Workspace[], dragId: string, to: number): string[] | null {
+  const ids = shown.map((w) => w.id)
+  const from = ids.indexOf(dragId)
+  if (from === -1) return null
+  const favCount = shown.filter((w) => w.favorite).length
+  const [lo, hi] = shown[from].favorite ? [0, favCount] : [favCount, ids.length]
+  let gap = Math.max(lo, Math.min(to, hi))
+  if (gap > from) gap -= 1
+  if (gap === from) return null
+  ids.splice(from, 1)
+  ids.splice(gap, 0, dragId)
+  return ids
+}
+
 /** Freeze of the smart order while the sidebar has the pointer or the focus. */
 export const useSidebarFreeze = create<{ frozen: string[] | null }>(() => ({ frozen: null }))
 

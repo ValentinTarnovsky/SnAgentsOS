@@ -5,6 +5,7 @@
  */
 import type { GitSummary, GitTarget, RemoteGitChip } from '@shared/git-types'
 import type { ClaudePaneState, Pane, Workspace } from '@shared/types'
+import { samePath } from '@shared/osc7'
 
 export const workspaceGitKey = (workspaceId: string): string => `ws:${workspaceId}`
 export const paneGitKey = (paneId: string): string => `pane:${paneId}`
@@ -22,26 +23,51 @@ export function paneWorktreePath(pane: Pane): string | null {
 
 /**
  * Targets the renderer asks main to watch: every workspace with a cwd
- * (`ws:<id>`) and every pane worktree (`pane:<id>`). Only the active
- * workspace and its worktrees are `active` (polled).
+ * (`ws:<id>`), every pane worktree (`pane:<id>`) and every console working
+ * in another folder than its workspace (`pane:<id>` on `paneCwds`, the
+ * folder its agent or shell reported, else its own `cwd`): a workspace that
+ * holds many repos without being one shows each console's repo. Only the
+ * active workspace and its consoles are `active` (polled).
  */
-export function buildGitTargets(workspaces: Workspace[], activeWorkspaceId: string | null): GitTarget[] {
+export function buildGitTargets(
+  workspaces: Workspace[],
+  activeWorkspaceId: string | null,
+  paneCwds: Readonly<Record<string, string>> = {},
+  platform = 'win32',
+): GitTarget[] {
   const out: GitTarget[] = []
   for (const ws of workspaces) {
     const active = ws.id === activeWorkspaceId
     if (ws.cwd) out.push({ key: workspaceGitKey(ws.id), cwd: ws.cwd, workspaceId: ws.id, active })
     for (const pane of ws.panes) {
-      const path = paneWorktreePath(pane)
-      if (path) out.push({ key: paneGitKey(pane.id), cwd: path, workspaceId: ws.id, paneId: pane.id, active })
+      const worktree = paneWorktreePath(pane)
+      const path = worktree ?? paneCwds[pane.id] ?? pane.cwd
+      if (!path || (!worktree && ws.cwd && samePath(path, ws.cwd, platform))) continue
+      out.push({ key: paneGitKey(pane.id), cwd: path, workspaceId: ws.id, paneId: pane.id, active })
     }
   }
   return out
 }
 
-/** Keys an agent pane's work can change: its workspace and its own worktree. */
-export function gitKeysForPane(ws: Workspace, pane: Pane): string[] {
+/**
+ * The repo a console works in when it is not its workspace's (another repo,
+ * or the workspace is no repo at all): the sidebar shows it on the console's
+ * row. Null for a console in its workspace's own repo.
+ */
+export function paneOwnRepo(pane: GitSummary | undefined, ws: GitSummary | undefined): GitSummary | null {
+  if (!pane) return null
+  return ws && ws.repoRoot === pane.repoRoot ? null : pane
+}
+
+/** Last folder of a repo root, the name the sidebar shows ("C:/x/SnKits" gives "SnKits"). */
+export function repoName(repoRoot: string): string {
+  return repoRoot.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || repoRoot
+}
+
+/** Keys an agent pane's work can change: its workspace and its own target (worktree or folder), when watched. */
+export function gitKeysForPane(ws: Workspace, pane: Pane, watched?: ReadonlySet<string>): string[] {
   const keys = ws.cwd ? [workspaceGitKey(ws.id)] : []
-  if (paneWorktreePath(pane)) keys.push(paneGitKey(pane.id))
+  if (paneWorktreePath(pane) || watched?.has(paneGitKey(pane.id))) keys.push(paneGitKey(pane.id))
   return keys
 }
 

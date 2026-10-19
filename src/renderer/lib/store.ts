@@ -32,6 +32,7 @@ import { trashSavedScrollback } from '@/lib/scrollback'
 import { restartInPlace } from '@/lib/restartRegistry'
 import { visiblePaneIds } from '@shared/status'
 import { useAgentStore } from '@/lib/agentStore'
+import { orderIndexOf, transferPane, type PaneHome, type PaneHomes } from '@/lib/paneHome'
 import {
   type EnsureMountedOpts,
   type MountedWorkspaces,
@@ -111,6 +112,7 @@ const DEFAULT_SETTINGS: Settings = {
       codex7d: true,
     },
     custom: [],
+    collapsed: false,
   },
   remote: {
     enabled: false,
@@ -321,6 +323,10 @@ export interface AppState {
   maximized: Record<string, string | null>
   /** workspaceId -> minimized paneIds (transient; never persisted). */
   minimized: Record<string, string[]>
+  /** paneId -> home of a console shown in another workspace ("Move to workspace", transient; persist.ts writes it back home). */
+  paneHome: PaneHomes
+  /** paneId -> folder the console's shell reported last (OSC 7, transient): its own git chip. */
+  paneCwd: Record<string, string>
   /** paneId -> relaunch counter (transient; bumping it remounts the console). */
   paneEpoch: Record<string, number>
   /** paneId -> live Claude state (transient; fed by main over STATUS_STATE). */
@@ -417,6 +423,15 @@ export interface AppState {
   setPaneWorktree: (workspaceId: string, paneId: string, worktree: PaneWorktree | null) => void
   setGrid: (workspaceId: string, grid: GridPreset) => void
   movePane: (workspaceId: string, paneId: string, toIndex: number) => void
+  /** Puts the workspaces in this order (sidebar drag); ids it leaves out keep their place after them. */
+  setWorkspaceOrder: (ids: string[]) => void
+  /**
+   * Show a console in another workspace for this session (its pty keeps
+   * running). Moving it back home forgets the move. False when nothing moved.
+   */
+  movePaneToWorkspace: (paneId: string, toWorkspaceId: string) => boolean
+  /** The shell of a console reported its working folder (OSC 7). */
+  setPaneCwd: (paneId: string, cwd: string) => void
   toggleMaximize: (workspaceId: string, paneId: string) => void
   clearMaximize: (workspaceId: string) => void
   toggleMinimize: (workspaceId: string, paneId: string) => void
@@ -587,6 +602,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   pendingPrompts: {},
   maximized: {},
   minimized: {},
+  paneHome: {},
+  paneCwd: {},
   paneEpoch: {},
   paneStatus: {},
   paneAttention: {},
@@ -623,6 +640,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         sidebarCollapsed: settings.sidebarCollapsed,
         activeWorkspaceId,
         mountedWorkspaces: mountActive(s.mountedWorkspaces, activeWorkspaceId),
+        paneHome: {},
         hydrated: true,
       }
     }),
@@ -792,6 +810,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       sidebarCollapsed: config.settings?.sidebarCollapsed ?? s.sidebarCollapsed,
       activeWorkspaceId: config.workspaces?.[0]?.id ?? null,
       previousWorkspaceId: null,
+      paneHome: {},
     })),
 
   mergeConfig: (config) => {
@@ -834,6 +853,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   deleteWorkspace: (id) => {
+    // Consoles only shown here go back to their homes instead of dying with it.
+    const visiting = get().workspaces.find((w) => w.id === id)?.panes.filter((p) => {
+      const home = get().paneHome[p.id]
+      return home && home.workspaceId !== id
+    })
+    for (const p of visiting ?? []) get().movePaneToWorkspace(p.id, get().paneHome[p.id].workspaceId)
     // Force-kill the workspace's consoles so nothing lingers in the background
     // (ptyLifecycle would too; both are idempotent, E4-FR-36).
     const ws = get().workspaces.find((w) => w.id === id)
@@ -851,7 +876,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const quickCommands = s.quickCommands.some((c) => c.workspaceId === id)
         ? s.quickCommands.filter((c) => c.workspaceId !== id)
         : s.quickCommands
-      return { workspaces, activeWorkspaceId, maximized, minimized, mountedWorkspaces, quickCommands }
+      // Consoles away from this home stay where they are, now theirs.
+      const paneHome = Object.fromEntries(Object.entries(s.paneHome).filter(([, h]) => h.workspaceId !== id))
+      return { workspaces, activeWorkspaceId, maximized, minimized, mountedWorkspaces, quickCommands, paneHome }
     })
     // Their saved scrollback waits in main's trash until the next start (E6-FR-12).
     if (ws) trashSavedScrollback(ws.panes.map((p) => p.id))
@@ -968,9 +995,21 @@ export const useAppStore = create<AppState>((set, get) => ({
         pendingPrompts = { ...pendingPrompts }
         delete pendingPrompts[paneId]
       }
+      let paneHome = s.paneHome
+      if (paneId in paneHome) {
+        paneHome = { ...paneHome }
+        delete paneHome[paneId]
+      }
+      let paneCwd = s.paneCwd
+      if (paneId in paneCwd) {
+        paneCwd = { ...paneCwd }
+        delete paneCwd[paneId]
+      }
       return {
         maximized,
         minimized,
+        paneHome,
+        paneCwd,
         paneExit,
         agentEnded,
         pendingPrompts,
@@ -995,9 +1034,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     const ws = get().workspaces.find((w) => w.id === workspaceId)
     const pane = ws?.panes.find((p) => p.id === paneId)
     if (!ws || !pane) return
+    // A moved console reopens at home: the move was for this session only.
+    const home = get().paneHome[paneId]
     const order = ws.layout?.order ?? ws.panes.map((p) => p.id)
-    const orderIndex = Math.max(0, order.indexOf(paneId))
-    useAgentStore.getState().pushClosed({ workspaceId, pane, orderIndex })
+    const orderIndex = home ? home.orderIndex : Math.max(0, order.indexOf(paneId))
+    useAgentStore.getState().pushClosed({ workspaceId: home?.workspaceId ?? workspaceId, pane, orderIndex })
     get().removePane(workspaceId, paneId)
   },
 
@@ -1167,20 +1208,54 @@ export const useAppStore = create<AppState>((set, get) => ({
     })),
 
   movePane: (workspaceId, paneId, toIndex) =>
-    set((s) => ({
-      workspaces: s.workspaces.map((w) => {
-        if (w.id !== workspaceId) return w
-        const order = (w.layout?.order ?? w.panes.map((p) => p.id)).slice()
-        const from = order.indexOf(paneId)
-        if (from === -1) return w
-        const to = Math.max(0, Math.min(toIndex, order.length - 1))
-        if (from === to) return w
-        order.splice(from, 1)
-        order.splice(to, 0, paneId)
-        const grid = gridForCount(w.panes.length)
-        return { ...w, layout: { grid, order } }
-      }),
-    })),
+    set((s) => {
+      const ws = s.workspaces.find((w) => w.id === workspaceId)
+      if (!ws) return s
+      // The order as rendered (panes missing from layout.order appended), so
+      // toIndex means the same slot the grid shows.
+      const order = orderPanes(ws.panes, ws.layout?.order).map((p) => p.id)
+      const from = order.indexOf(paneId)
+      const to = Math.max(0, Math.min(toIndex, order.length - 1))
+      // A drag reports the same slot many times: no new state, no re-render.
+      if (from === -1 || from === to) return s
+      order.splice(from, 1)
+      order.splice(to, 0, paneId)
+      const grid = gridForCount(ws.panes.length)
+      return { workspaces: s.workspaces.map((w) => (w.id === workspaceId ? { ...w, layout: { grid, order } } : w)) }
+    }),
+
+  setWorkspaceOrder: (ids) =>
+    set((s) => {
+      const rank = new Map(ids.map((id, i) => [id, i]))
+      const at = (w: Workspace): number => rank.get(w.id) ?? ids.length + s.workspaces.indexOf(w)
+      const workspaces = [...s.workspaces].sort((a, b) => at(a) - at(b))
+      return workspaces.every((w, i) => w === s.workspaces[i]) ? s : { workspaces }
+    }),
+
+  setPaneCwd: (paneId, cwd) =>
+    set((s) => (s.paneCwd[paneId] === cwd ? s : { paneCwd: { ...s.paneCwd, [paneId]: cwd } })),
+
+  movePaneToWorkspace: (paneId, toWorkspaceId) => {
+    const s = get()
+    const from = s.workspaces.find((w) => w.panes.some((p) => p.id === paneId))
+    if (!from || from.id === toWorkspaceId) return false
+    const prev = s.paneHome[paneId]
+    const back = prev?.workspaceId === toWorkspaceId
+    const home: PaneHome = prev ?? { workspaceId: from.id, orderIndex: orderIndexOf(from, paneId) }
+    // One set: the pane id never leaves the workspaces, so its pty lives on.
+    const workspaces = transferPane(s.workspaces, paneId, toWorkspaceId, back ? home.orderIndex : undefined)
+    if (!workspaces) return false
+    const paneHome = { ...s.paneHome }
+    if (back) delete paneHome[paneId]
+    else paneHome[paneId] = home
+    const maximized = { ...s.maximized }
+    if (maximized[from.id] === paneId) maximized[from.id] = null
+    const minimized = { ...s.minimized }
+    if (minimized[from.id]?.includes(paneId)) minimized[from.id] = minimized[from.id].filter((id) => id !== paneId)
+    set({ workspaces, paneHome, maximized, minimized })
+    get().ensureMounted(toWorkspaceId, { only: [paneId] })
+    return true
+  },
 
   toggleMaximize: (workspaceId, paneId) =>
     set((s) => ({
