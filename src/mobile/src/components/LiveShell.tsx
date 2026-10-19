@@ -10,7 +10,8 @@
  * screen holds a back claim, so the Android back gesture, the chevron and
  * history.back() all return to Home. Changes (E3-FR-52) is one too, from a
  * workspace's git chip or the terminal's kebab, with a file's diff pushed over
- * it and the notes sheets above both. The mount confirmation (E2-FR-06) is
+ * it and the notes sheets above both. Automations (E8-FR-32, v3.1) is one too,
+ * from the Home header or Settings. The mount confirmation (E2-FR-06) is
  * shared by every entry point.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
@@ -19,6 +20,7 @@ import { MainScreen } from './MainScreen'
 import { SettingsScreen } from './SettingsScreen'
 import { DiagnosticsScreen } from './DiagnosticsScreen'
 import { HistoryScreen } from './HistoryScreen'
+import { AutomationsScreen } from './AutomationsScreen'
 import { ChangesScreen } from './changes/ChangesScreen'
 import { DiffScreen } from './changes/DiffScreen'
 import { NotesList } from './changes/NotesList'
@@ -85,6 +87,7 @@ export function LiveShell(): ReactNode {
       <SettingsScreen open={screen === 'settings'} onClose={() => setScreen('home')} />
       <MountConfirmSheet />
       <HistoryScreen />
+      <AutomationsScreen />
       <ChangesScreen />
       <DiffScreen />
       <NotesList />

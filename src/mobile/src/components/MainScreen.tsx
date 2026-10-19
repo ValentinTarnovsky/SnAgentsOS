@@ -3,7 +3,8 @@
  * column sized to the keyboard-aware --vvh so the KeyBar always docks just
  * above the soft keyboard. Header: a back chevron (to Home), the viewed
  * console's title with its agent status and its workspace as the meta line
- * (the viewed pane's own workspace, E2-FR-47), the phone mode chip (E3-FR-13),
+ * (the viewed pane's own workspace, E2-FR-47; after it the console's `snaos
+ * status` line, else the workspace note: E8-FR-19/11, v3.1), the phone mode chip (E3-FR-13),
  * the "N waiting" pill and a kebab with the console's actions plus Quick Commands (E2-FR-08/16/51).
  * Below: pane tabs of that workspace (E1-FR-32), the terminal (flex-1,
  * min-h-0), the answer card or the "waiting" strip (E2-FR-17..25), the
@@ -78,8 +79,8 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
     if (s.composerOneShot && s.composerOneShot !== activePaneId) s.update({ composerOneShot: null })
   }, [activePaneId])
 
-  const { workspaceId, workspaceName, paneTitle } = useMemo(() => {
-    if (!snapshot) return { workspaceId: null, workspaceName: '', paneTitle: t('main.noConsole') }
+  const { workspaceId, workspaceName, paneTitle, statusLine, note } = useMemo(() => {
+    if (!snapshot) return { workspaceId: null, workspaceName: '', paneTitle: t('main.noConsole'), statusLine: undefined, note: undefined }
     // The viewed pane's own workspace (E2-FR-47), never the desktop's.
     const wsId = viewedWorkspaceId(snapshot, activePaneId)
     const ws = snapshot.workspaces.find((w) => w.id === wsId)
@@ -88,6 +89,8 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       workspaceId: ws?.id ?? null,
       workspaceName: ws?.name ?? '',
       paneTitle: pane?.title ?? t('main.noConsole'),
+      statusLine: pane?.statusLine,
+      note: ws?.note,
     }
   }, [snapshot, activePaneId])
 
@@ -114,7 +117,24 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
             <StatusIndicator status={activeStatus} />
             {activePaneId && <CacheChip paneId={activePaneId} />}
           </div>
-          {workspaceName && <div data-ws-name className="truncate text-[11px] leading-tight text-text-secondary">{workspaceName}</div>}
+          {workspaceName && (
+            <div className="flex min-w-0 text-[11px] leading-tight text-text-secondary">
+              <span data-ws-name className={clsx('truncate', (statusLine || note) && 'max-w-[45%] shrink-0')}>{workspaceName}</span>
+              {statusLine ? (
+                <span data-pane-statusline title={statusLine} className="min-w-0 truncate text-text-primary/80">
+                  {' · '}
+                  {statusLine}
+                </span>
+              ) : (
+                note && (
+                  <span data-ws-note title={note} className="min-w-0 truncate">
+                    {' · '}
+                    {note}
+                  </span>
+                )
+              )}
+            </div>
+          )}
         </div>
         <ViewToggle />
         <FitModeChip />
