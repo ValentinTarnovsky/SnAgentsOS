@@ -115,7 +115,8 @@ function BoardBody() {
   const agentSettings = useAppStore((s) => s.settings.agents)
   const sessions = useAgentStore((s) => s.sessions)
   const sleeping = useAgentStore((s) => s.sleeping)
-  const [idleOpen, setIdleOpen] = useState(false)
+  // Idle opens expanded; the header toggle still collapses it for this visit.
+  const [idleOpen, setIdleOpen] = useState(true)
   const [selected, setSelected] = useState<string | null>(null)
   const cards = useRef(new Map<string, HTMLButtonElement>())
   const rootRef = useRef<HTMLDivElement | null>(null)

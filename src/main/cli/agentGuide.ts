@@ -49,6 +49,20 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
   timeout, or run the wait in the background if your tool can.
 - \`send --enter\` followed by \`wait --idle\` returns only after the new turn started and ended;
   \`noTurnObserved: true\` means nothing happened in 10 s (check the console with \`read\`).
+
+## Waiting on other consoles, drivers and background work
+
+SnAgentsOS shows your console as done when your turn ends. If you are not done yet:
+
+- Never end your turn just saying you will wait. Wait for real: run \`snaos wait <console> --idle\`
+  in the foreground (in short calls, see above) or as a background task of your shell tool. While a
+  background \`snaos wait\`, a background subagent or a driver runs, your console shows "Waiting"
+  instead of done, and no "turn finished" notice goes out.
+- Set \`snaos status "waiting for <what>"\` so the user sees what you wait on.
+- A \`claude -p\` you start (a driver script, a sub-task) is tracked as a sub-session of your
+  console: it keeps your console "Waiting" and never replaces you. A \`codex exec\` is not tracked
+  at all. Either way, say so with \`snaos status\` when you start one.
+- A background dev server or watcher does not hold your console: it still shows done.
 - Consoles with a Connection Profile (SSH) are protected by default: \`ssh_protected\`. Do not
   retry; tell the user.
 - If a command says SnAgentsOS is not running or unreachable, or your sandbox blocks the

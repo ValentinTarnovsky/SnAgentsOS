@@ -1383,6 +1383,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         state: evt.state, precise: evt.precise, provider: evt.provider, reason: evt.reason, pendingCount: evt.pendingCount, updatedAt: evt.updatedAt,
         stateSince: evt.stateSince, lastMessage: evt.lastMessage, activity: evt.activity, pending: evt.pending, sessionId: evt.sessionId, cwd: evt.cwd,
         detail: evt.detail, topic: evt.topic, firstPrompt: evt.firstPrompt, cacheSince: evt.cacheSince,
+        waiting: evt.waiting, backgroundOther: evt.backgroundOther,
       }
       // A new session (or Claude working again) hides the "Claude exited" chip (E6-FR-22).
       let agentEnded = s.agentEnded

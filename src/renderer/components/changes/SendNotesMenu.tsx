@@ -9,7 +9,7 @@ import { iconFor } from '@/lib/icons'
 import { toast } from '@/lib/toast'
 import { getFocusHistoryForWorkspace } from '@/lib/focus'
 import { checkBatch, firstBatch, toPayload } from '@/lib/reviewNotesStore'
-import { claudePresetFor, MAX_WORKSPACE_PANES, notesTargetOf, sendReviewNotes, sendReviewNotesToNewClaude, type NotesTarget } from '@/lib/sendReviewNotes'
+import { agentPresetFor, MAX_WORKSPACE_PANES, notesTargetOf, sendReviewNotes, sendReviewNotesToNewAgent, type NotesTarget } from '@/lib/sendReviewNotes'
 import { buildReviewNotesText } from '@shared/review-notes-format'
 import { PaneStatusDot } from '@/components/ui/StatusDot'
 
@@ -45,7 +45,7 @@ export function SendNotesMenu({ workspace, pending, cwd }: { workspace: Workspac
   const panes = orderedPanes(workspace)
   const kinds = new Map<string, NotesTarget>(panes.map((p) => [p.id, notesTargetOf(p)]))
   const full = workspace.panes.length >= MAX_WORKSPACE_PANES
-  const claudePreset = claudePresetFor({ presets, settings })
+  const agentPreset = agentPresetFor({ presets, settings })
   const count = pending.length
   const batch = useMemo(() => checkBatch(pending.map(toPayload)), [pending])
   const part = useMemo(() => (batch.ok ? pending : firstBatch(pending)), [batch.ok, pending])
@@ -94,8 +94,8 @@ export function SendNotesMenu({ workspace, pending, cwd }: { workspace: Workspac
     const submit = enter && enterAllowed
     setOpen(false)
     if (choice === NEW_CLAUDE) {
-      toast.info(t('notes.toast.opening'), { dedupeKey: 'review-notes' })
-      void sendReviewNotesToNewClaude(workspace.id, { noteIds: ids, submit, ...(cwd ? { cwd } : {}) }).then((res) => {
+      toast.info(t('notes.toast.opening', { name: agentPreset?.name ?? 'Claude' }), { dedupeKey: 'review-notes' })
+      void sendReviewNotesToNewAgent(workspace.id, { noteIds: ids, submit, ...(cwd ? { cwd } : {}) }).then((res) => {
         const title = res.paneId ? useAppStore.getState().workspaces.flatMap((w) => w.panes).find((p) => p.id === res.paneId)?.title ?? '' : ''
         if (res.ok) {
           if ('late' in res && res.late) toast.warning(t('notes.toast.sentLate', { pane: title }), { dedupeKey: 'review-notes' })
@@ -190,20 +190,20 @@ export function SendNotesMenu({ workspace, pending, cwd }: { workspace: Workspac
               type="button"
               role="radio"
               aria-checked={choice === NEW_CLAUDE}
-              disabled={full || !claudePreset}
+              disabled={full || !agentPreset}
               onClick={() => setChoice(NEW_CLAUDE)}
               className={cn(
                 'mt-0.5 flex w-full items-center gap-2 rounded-btn border-t border-border/60 px-1.5 py-1 text-left',
                 choice === NEW_CLAUDE ? 'bg-accent-violet/15 text-text-primary' : 'text-text-primary hover:bg-bg-secondary',
-                (full || !claudePreset) && 'cursor-not-allowed opacity-50 hover:bg-transparent',
+                (full || !agentPreset) && 'cursor-not-allowed opacity-50 hover:bg-transparent',
               )}
               data-notes-target={NEW_CLAUDE}
             >
               <span className="w-2 shrink-0" />
               <Sparkles size={13} className="shrink-0 text-accent-violet" />
               <span className="min-w-0 flex-1">
-                <span className="block truncate">{t('notes.menu.newClaude')}</span>
-                {(full || !claudePreset) && <span className="block truncate text-[10px] text-text-secondary">{full ? t('notes.menu.full') : t('notes.menu.noPreset')}</span>}
+                <span className="block truncate">{t('notes.menu.newAgent', { name: agentPreset?.name ?? 'Claude' })}</span>
+                {(full || !agentPreset) && <span className="block truncate text-[10px] text-text-secondary">{full ? t('notes.menu.full') : t('notes.menu.noPreset')}</span>}
               </span>
             </button>
           </div>

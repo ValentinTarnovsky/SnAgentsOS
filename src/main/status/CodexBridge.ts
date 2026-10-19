@@ -112,7 +112,10 @@ export class CodexBridge implements PtySink {
     })
     // An isolated stdio server gives this TUI exclusive, observable ownership.
     // The shared daemon control socket uses a different framing protocol.
-    const child = spawn(this.executable, ['app-server', '--stdio'], { cwd: binding.cwd, windowsHide: true, stdio: 'pipe', env: { ...(binding.env ?? process.env), ELECTRON_RUN_AS_NODE: undefined } })
+    // The app server runs Codex's commands: a `claude -p` among them reports
+    // its hooks as a sub-session of this console (AGENT_ENV.agentParent).
+    const env = { ...(binding.env ?? process.env), ELECTRON_RUN_AS_NODE: undefined, [AGENT_ENV.agentParent]: `codex:${binding.paneId}` }
+    const child = spawn(this.executable, ['app-server', '--stdio'], { cwd: binding.cwd, windowsHide: true, stdio: 'pipe', env })
     binding.child = child
     this.children.set(child, binding.ptyId)
     child.once('exit', () => this.children.delete(child))

@@ -35,8 +35,8 @@ async function main() {
     mobileStoragePrefix: 'snmulticc.', hookStatusMessage: 'SnMultiCC session status', tempPrefix: 'snmulticc-',
     updaterCacheDir: 'snmulticc-updater', portableUnpackDir: 'SnMultiCC',
   }); checks++
-  check(Object.keys(AGENT_ENV).length === 7 && Object.values(AGENT_ENV).every(v => v.startsWith(BRAND.envPrefix)), 'every agent env var uses the new prefix')
-  check(new Set(Object.values(AGENT_ENV)).size === 7, 'agent env vars are distinct')
+  check(Object.keys(AGENT_ENV).length === 8 && Object.values(AGENT_ENV).every(v => v.startsWith(BRAND.envPrefix)), 'every agent env var uses the new prefix')
+  check(new Set(Object.values(AGENT_ENV)).size === 8, 'agent env vars are distinct')
   check(!Object.values(BRAND).some(v => LEGACY_RE.test(v)), 'BRAND carries no legacy value')
   check(Object.values(LEGACY_BRAND).every(v => /snmulticc|8c5f793e/i.test(v)), 'LEGACY_BRAND carries only legacy values')
 
@@ -404,7 +404,7 @@ async function main() {
       check(ours(data).length === 12 && Object.keys(data.hooks).length === 12, 'one handler per observed event, no duplicates')
       check(data.custom === 'keep' && handlers(data).filter(h => h.command === 'user-command').length === 1, 'user hook and unrelated settings kept')
       const http = ours(data).find(h => h.type === 'http')
-      check(http.headers['X-Console-Id'] === '$' + AGENT_ENV.consoleId && http.headers['X-Pty-Id'] === '$' + AGENT_ENV.ptyId && http.allowedEnvVars.join() === [AGENT_ENV.consoleId, AGENT_ENV.ptyId].join(), 'http handlers use the SNAOS_ variables')
+      check(http.headers['X-Console-Id'] === '$' + AGENT_ENV.consoleId && http.headers['X-Pty-Id'] === '$' + AGENT_ENV.ptyId && http.headers['X-Agent-Parent'] === '$' + AGENT_ENV.agentParent && http.allowedEnvVars.join() === [AGENT_ENV.consoleId, AGENT_ENV.ptyId, 'CLAUDE_CODE_CHILD_SESSION', AGENT_ENV.agentParent].join(), 'http handlers use the SNAOS_ variables')
       const start = data.hooks.SessionStart[0].hooks[0]
       const startScript = process.platform === 'win32' ? Buffer.from(start.command.split(' ').pop(), 'base64').toString('utf16le') : start.command
       check(start.statusMessage === BRAND.hookStatusMessage && startScript.includes(AGENT_ENV.consoleId) && startScript.includes(AGENT_ENV.ptyId), 'SessionStart uses the new statusMessage and variables')

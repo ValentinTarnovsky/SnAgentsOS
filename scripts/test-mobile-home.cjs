@@ -51,6 +51,7 @@ async function main() {
     export { useAppStore } from './store'
     export { initRemoteCommands, remotePromptFallback } from './remoteCommands'
     export { startRemoteSnapshotSync, fullyMountedIds } from './remoteSnapshot'
+    export { freezeSidebarOrder, releaseSidebarOrder } from './sidebarOrder'
   `, { window: { snApi }, document: { hasFocus: () => true, querySelector: () => null }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} })
   const S = r.useAppStore
   S.getState().hydrate(config())
@@ -131,6 +132,35 @@ async function main() {
   check(snap.presets.every((p) => Object.keys(p).sort().join() === 'color,icon,id,name,type'), 'a preset travels as id, name, type, icon and color only (never command, args or env)')
   check(JSON.stringify(snap.mountedWorkspaceIds) === JSON.stringify(['w1', 'w2']), 'mountedWorkspaceIds lists the fully mounted workspaces')
   check(!('hostName' in snap), 'hostName is main\'s to add, not the renderer\'s')
+
+  // --- sidebar order: the phone lists the workspaces exactly like the sidebar ---
+  const order = () => calls.states.at(-1).workspaces.map((w) => w.id).join()
+  const settle = () => new Promise((res) => setTimeout(res, 150))
+  check(order() === 'w1,w2,w3', 'the snapshot starts in the sidebar order')
+  S.getState().setWorkspaceOrder(['w3', 'w1', 'w2'])
+  await settle()
+  check(order() === 'w3,w1,w2', 'a drag reorder in the sidebar moves the workspace on the phone')
+  S.getState().toggleFavorite('w2')
+  await settle()
+  check(order() === 'w2,w3,w1', 'a favorite goes first on the phone too')
+  check(calls.states.at(-1).mountedWorkspaceIds.join() === 'w2,w1', 'mountedWorkspaceIds follows the same order')
+  S.getState().updateSettings({ agents: { ...S.getState().settings.agents, sidebarSort: 'smart' } })
+  await settle()
+  check(order() === 'w2,w3,w1', 'smart order without agent states keeps the manual order inside each group')
+  const now = Date.now()
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'action', precise: true, notify: false, provider: 'claude', reason: 'permission', pendingCount: 1, updatedAt: now, stateSince: now })
+  await settle()
+  check(order() === 'w2,w1,w3', 'smart order: a workspace whose agent needs action moves up (favorites still first)')
+  r.freezeSidebarOrder(['w2', 'w3', 'w1'])
+  await settle()
+  check(order() === 'w2,w3,w1', 'while the sidebar is frozen the phone keeps the frozen order')
+  r.releaseSidebarOrder()
+  await settle()
+  check(order() === 'w2,w1,w3', 'releasing the freeze pushes the live smart order')
+  const pushes = calls.states.length
+  S.getState().setPaneStatus({ paneId: 'p1', state: 'action', precise: true, notify: false, provider: 'claude', reason: 'permission', pendingCount: 1, updatedAt: now + 1, stateSince: now })
+  await settle()
+  check(calls.states.length === pushes, 'a status update that keeps the order pushes nothing')
   stop()
   check(JSON.stringify(r.fullyMountedIds({ a: 'full', b: ['x'], c: 'full' }, ['c', 'b', 'a', 'z'])) === '["c","a"]', 'a partial mount does not count as mounted; workspace order wins')
 

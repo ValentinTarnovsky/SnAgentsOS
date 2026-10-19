@@ -32,6 +32,8 @@ import {
   type RemoteHistorySession,
   type RemoteGitReply,
   type RemoteGitRequest,
+  type RemoteNotesReply,
+  type RemoteNotesRequest,
   type RemotePairDeniedReason,
   type RemotePaneStatus,
   type RemoteServerMsg,
@@ -84,7 +86,7 @@ const LAST_HOST_MAX = 64
 // schema is limited from its first frame without touching the gate.
 
 /** Phone -> desktop message types behind the per-session token bucket. */
-export const RATE_LIMITED_MSG_TYPES: ReadonlySet<string> = new Set(['chatSub', 'chatUnsub', 'chatMore', 'historyReq', 'gitReq'])
+export const RATE_LIMITED_MSG_TYPES: ReadonlySet<string> = new Set(['chatSub', 'chatUnsub', 'chatMore', 'historyReq', 'gitReq', 'notesReq'])
 /**
  * E3 M12: panes one session may read as Chat at once. The phone reads one;
  * the cap keeps a misbehaving device from holding a hub entry per pane id.
@@ -136,6 +138,10 @@ export const GIT_REQ_MAX = 10
 export const GIT_REQ_WINDOW_MS = 5 * 1000
 /** gitReq a session may have waiting on git at once. */
 export const GIT_REQ_IN_FLIGHT = 2
+/** v2.2 (E9): notesReq answered per session inside NOTES_REQ_WINDOW_MS; the next one gets `rate`. */
+export const NOTES_REQ_MAX = 20
+export const NOTES_REQ_WINDOW_MS = 5 * 1000
+export const NOTES_REQ_IN_FLIGHT = 2
 
 // --- E3-FR-56 (R30-09b): diffs only of paths this session was listed ----------
 
@@ -221,6 +227,9 @@ interface Session {
   gitTimes: number[]
   /** E7-FR-26: gitReq waiting on git right now. */
   gitInFlight: number
+  /** v2.2 (E9): when the notesReq of the last NOTES_REQ_WINDOW_MS were accepted, and how many wait. */
+  notesTimes: number[]
+  notesInFlight: number
   /** E3-FR-56: per workspace, the paths the last status answer listed to this session. */
   gitPaths: Map<string, Set<string>>
 }
@@ -267,6 +276,11 @@ export interface SessionManagerDeps {
    * = no git service in this build: every gitReq answers not_found.
    */
   git?: (req: RemoteGitRequest) => Promise<RemoteGitReply>
+  /**
+   * v2.2 (E9): the workspace notes (WsNoteStore via RemoteManager). Absent =
+   * every notesReq answers not_found.
+   */
+  notes?: (req: RemoteNotesRequest) => Promise<RemoteNotesReply>
   /**
    * E3 M12: the Chat view (ChatHub via RemoteManager). Absent = every chatSub
    * answers the noTranscript notice, so the phone falls back to Terminal.
@@ -347,6 +361,8 @@ export class SessionManager implements PtySink {
       httpToken: null,
       gitTimes: [],
       gitInFlight: 0,
+      notesTimes: [],
+      notesInFlight: 0,
       gitPaths: new Map(),
     }
     this.sessions.add(session)
@@ -435,6 +451,8 @@ export class SessionManager implements PtySink {
         return void this.handleHistory(session, msg.id, msg.query, msg.workspaceId)
       case 'gitReq':
         return void this.handleGitReq(session, msg)
+      case 'notesReq':
+        return void this.handleNotesReq(session, msg)
       case 'chatSub':
         return this.handleChatSub(session, msg.paneId)
       case 'chatUnsub':
@@ -767,6 +785,43 @@ export class SessionManager implements PtySink {
       recordGitPaths(session.gitPaths, req, reply)
     }
     this.send(session, { type: 'gitRes', id: msg.id, ...reply })
+  }
+
+  /**
+   * v2.2 (E9): one notes request. Over NOTES_REQ_MAX per NOTES_REQ_WINDOW_MS,
+   * or with NOTES_REQ_IN_FLIGHT waiting, the answer is `rate` (no strike).
+   */
+  private async handleNotesReq(session: Session, msg: RemoteClientMsgOf<'notesReq'>): Promise<void> {
+    const now = Date.now()
+    session.notesTimes = session.notesTimes.filter((t) => now - t < NOTES_REQ_WINDOW_MS)
+    if (session.notesTimes.length >= NOTES_REQ_MAX || session.notesInFlight >= NOTES_REQ_IN_FLIGHT) {
+      return this.send(session, { type: 'notesRes', id: msg.id, ok: false, error: 'rate' })
+    }
+    session.notesTimes.push(now)
+    const req: RemoteNotesRequest = { workspaceId: msg.workspaceId, op: msg.op }
+    if (msg.noteId !== undefined) req.noteId = msg.noteId
+    if (msg.text !== undefined) req.text = msg.text
+    if (msg.baseRev !== undefined) req.baseRev = msg.baseRev
+    let reply: RemoteNotesReply
+    if (!this.deps.notes) reply = { ok: false, error: 'not_found' }
+    else {
+      session.notesInFlight += 1
+      try {
+        reply = await this.deps.notes(req)
+      } catch {
+        reply = { ok: false, error: 'io' }
+      } finally {
+        session.notesInFlight -= 1
+      }
+    }
+    this.send(session, { type: 'notesRes', id: msg.id, ...reply })
+  }
+
+  /** v2.2 (E9): a note changed (on the PC or another phone): the phones reload what they show. */
+  broadcastNotesChanged(workspaceId: string, noteId?: string): void {
+    for (const session of this.sessions) {
+      if (session.authed) this.send(session, { type: 'notesChanged', workspaceId, ...(noteId ? { noteId } : {}) })
+    }
   }
 
   // --- PtySink (fan-out from PtyManager) ------------------------------------

@@ -428,6 +428,26 @@ export interface PaneStatusDetails {
   firstPrompt?: string
   /** Claude working -> done/idle transition (cache timer start). */
   cacheSince?: number
+  /**
+   * v2.2: the agent ended its turn but waits on work it started, so the state
+   * reads `working` meanwhile (no "done" notice, no hibernation, `snaos wait`
+   * keeps waiting). Absent = not waiting.
+   */
+  waiting?: AgentWaiting
+  /** v2.2: background tasks that do not hold the console (a dev server), next to `done`. */
+  backgroundOther?: number
+}
+
+/**
+ * What a console's agent waits on after its turn (v2.2): `background` =
+ * subagents, workflows, a `snaos wait` or a driver it left running (Stop
+ * `background_tasks`); `subsessions` = `claude -p` sub-sessions started from
+ * the console (hooks marked X-Agent-Child / X-Agent-Parent). `count` >= 1,
+ * except a short grace between two sub-sessions of a driver (0).
+ */
+export interface AgentWaiting {
+  kind: 'background' | 'subsessions'
+  count: number
 }
 
 export interface PaneStatus extends PaneStatusDetails {
@@ -459,18 +479,21 @@ export interface PaneStatusEvt extends PaneStatusDetails {
   updatedAt?: number
 }
 
-/** SessionEnd reasons that offer "Claude exited [Resume] [New]" (E6-FR-21). */
-export const AGENT_END_REASONS = ['prompt_input_exit', 'other'] as const
+/**
+ * SessionEnd reasons that offer "Claude exited [Resume] [New]" (E6-FR-21);
+ * `exit` (v2.2) is Codex's: its launcher ended with code 0.
+ */
+export const AGENT_END_REASONS = ['prompt_input_exit', 'other', 'exit'] as const
 
 /**
- * Main -> renderer: Claude's main session (no subagent) of the live pty ended
- * with a reason in AGENT_END_REASONS (E6-FR-21). `cwd` is the hook's validated
- * session directory, when any.
+ * Main -> renderer: the agent's main session (no subagent, no sub-session) of
+ * the live pty ended with a reason in AGENT_END_REASONS (E6-FR-21; Codex since
+ * v2.2). `cwd` is the validated session directory, when any.
  */
 export interface AgentSessionEndEvt {
   paneId: string
   ptyId: string
-  provider: 'claude'
+  provider: AgentProvider
   sessionId: string
   reason: (typeof AGENT_END_REASONS)[number]
   cwd?: string

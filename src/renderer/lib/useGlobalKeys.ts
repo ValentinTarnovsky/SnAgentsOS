@@ -11,6 +11,7 @@ import { revealPane } from './revealPane'
 import { toast } from './toast'
 import { translate } from '@/i18n'
 import { toggleChangesPanel } from './changesPanel'
+import { toggleSidePanel } from './sidePanels'
 import { panelKeyOf } from './changes'
 import {
   advanceWaiting,
@@ -169,6 +170,12 @@ function runAction(id: ActionId): void {
       break
     case 'toggleChanges':
       toggleChangesPanel()
+      break
+    case 'toggleFiles':
+      toggleSidePanel('files')
+      break
+    case 'toggleNotes':
+      toggleSidePanel('notes')
       break
     case 'agentsBoard': {
       // E5-FR-27: never over a modal; the board closes itself on Esc or a pick.

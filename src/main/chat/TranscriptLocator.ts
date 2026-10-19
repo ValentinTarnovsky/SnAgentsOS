@@ -11,13 +11,16 @@
  *     (then the rest of the tree, names only).
  *
  * A console behind a Connection Profile or running WSL is `notLocal`: its
- * agent writes on another machine. Every path is admitted only when its
+ * agent writes on another machine. A local agent console whose transcript
+ * does not exist yet (Claude and Codex create it with the first message) is
+ * `pending`: its session is known (or it just spawned), so the chat opens
+ * empty and the file is picked up when it appears. Every path is admitted only when its
  * realpath is a `.jsonl` inside `<claudeRoot>/projects` or `<codexHome>/sessions`
  * (compared case-insensitively on Windows and macOS), so a symlink out of
  * those roots never opens.
  */
 import { readdir, realpath, stat } from 'fs/promises'
-import { basename, isAbsolute, join, relative, sep } from 'path'
+import { basename, dirname, isAbsolute, join, relative, sep } from 'path'
 import type { ChatUnavailableReason } from '@shared/chat-types'
 import type { AgentProvider, ConfigFile, Pane, Workspace } from '@shared/types'
 import { claudeSlug } from '../agents/transcripts'
@@ -28,10 +31,17 @@ import type { PaneTranscriptInfo } from '../status/StatusManager'
 export const SPAWN_SLACK_MS = 5000
 /** Day folders the Codex fallback walks at most (names only). */
 const CODEX_WALK_DAYS = 400
+/** A console with no session reported yet waits this long for one (the agent still booting). */
+export const PENDING_BOOT_MS = 2 * 60 * 1000
 
+/**
+ * `pending`: no transcript yet, but one is coming (a known session whose file
+ * the agent has not created, or an agent console that just spawned). `reason`
+ * is what to tell the phone if the wait gives up.
+ */
 export type LocateResult =
   | { ok: true; path: string; provider: AgentProvider }
-  | { ok: false; reason: ChatUnavailableReason }
+  | { ok: false; reason: ChatUnavailableReason; pending?: true }
 
 export interface TranscriptLocatorDeps {
   /** <CLAUDE_CONFIG_DIR or ~/.claude>. */
@@ -97,6 +107,34 @@ export async function admit(root: string, p: string, platform: NodeJS.Platform =
   }
 }
 
+/**
+ * True when `p` names a `.jsonl` that does not exist yet and would land inside
+ * `root`: the deepest folder of it that exists is realpath'd, so a symlink on
+ * the way out of the root never counts.
+ */
+export async function awaitable(root: string, p: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  if (!p || !isAbsolute(p) || !/\.jsonl$/i.test(p)) return false
+  try {
+    await stat(p)
+    return false
+  } catch {
+    /* not there yet */
+  }
+  const realRoot = await realOrNull(root)
+  if (!realRoot) return false
+  let dir = dirname(p)
+  const rest: string[] = [basename(p)]
+  for (let i = 0; i < 8; i++) {
+    const real = await realOrNull(dir)
+    if (real) return isInside(realRoot, join(real, ...rest), platform)
+    const up = dirname(dir)
+    if (up === dir) return false
+    rest.unshift(basename(dir))
+    dir = up
+  }
+  return false
+}
+
 function findPane(cfg: ConfigFile | null, paneId: string): { pane: Pane; ws: Workspace } | null {
   for (const ws of cfg?.workspaces ?? []) {
     const pane = ws.panes.find((p) => p.id === paneId)
@@ -148,14 +186,31 @@ export class TranscriptLocator {
     if (isNotLocal(cfg, pane, ws, this.platform)) return { ok: false, reason: 'notLocal' }
     const st = this.deps.status(paneId)
     const provider = st?.provider ?? configProvider(cfg, pane)
-    if (provider === 'codex') return this.locateCodex(st?.sessionId ?? '')
+    if (provider === 'codex') return this.orPending(paneId, st, await this.locateCodex(st?.sessionId ?? ''))
     if (provider !== 'claude') return { ok: false, reason: 'noTranscript' }
     const projects = join(this.deps.claudeRoot(), 'projects')
     if (st?.transcriptPath) {
       const real = await admit(projects, st.transcriptPath, this.platform)
       if (real) return { ok: true, path: real, provider }
+      // The session is known and its file is not written yet (first message).
+      if (this.deps.spawnedAt(paneId) !== undefined && (await awaitable(projects, st.transcriptPath, this.platform))) {
+        return { ok: false, reason: 'noTranscript', pending: true }
+      }
     }
-    return this.locateBySlug(paneId, cfg, pane, ws, projects)
+    return this.orPending(paneId, st, await this.locateBySlug(paneId, cfg, pane, ws, projects))
+  }
+
+  /**
+   * A `noTranscript` of a live local agent console becomes `pending` when its
+   * agent reported a session (the file comes with the first message) or the
+   * pty spawned less than PENDING_BOOT_MS ago (the session is on its way).
+   */
+  private orPending(paneId: string, st: PaneTranscriptInfo | null, res: LocateResult): LocateResult {
+    if (res.ok || res.reason !== 'noTranscript') return res
+    const spawned = this.deps.spawnedAt(paneId)
+    if (spawned === undefined) return res
+    const now = this.deps.now?.().getTime() ?? Date.now()
+    return st || now - spawned < PENDING_BOOT_MS ? { ...res, pending: true } : res
   }
 
   /** Step 2: one local Claude console in the folder and one fresh unclaimed file. */

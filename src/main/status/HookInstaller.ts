@@ -46,12 +46,21 @@ function settingsPath(): string {
   return join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'settings.json')
 }
 
+/**
+ * Claude sets CLAUDE_CODE_CHILD_SESSION=1 in its Bash and PowerShell tools,
+ * so a `claude -p` a console's agent starts (a driver) inherits it; a Codex
+ * console's commands inherit SNAOS_AGENT_PARENT (CodexBridge). Either header
+ * marks the hooks of such a sub-session, which never stand for the console's
+ * own agent.
+ */
+const CHILD_ENV = 'CLAUDE_CODE_CHILD_SESSION'
+
 function buildHandler(port: number, token: string): HookHandler {
   return {
     type: 'http',
     url: `http://127.0.0.1:${port}${URL_MARKER}${token}`,
-    headers: { 'X-Console-Id': '$' + AGENT_ENV.consoleId, 'X-Pty-Id': '$' + AGENT_ENV.ptyId },
-    allowedEnvVars: [AGENT_ENV.consoleId, AGENT_ENV.ptyId],
+    headers: { 'X-Console-Id': '$' + AGENT_ENV.consoleId, 'X-Pty-Id': '$' + AGENT_ENV.ptyId, 'X-Agent-Child': '$' + CHILD_ENV, 'X-Agent-Parent': '$' + AGENT_ENV.agentParent },
+    allowedEnvVars: [AGENT_ENV.consoleId, AGENT_ENV.ptyId, CHILD_ENV, AGENT_ENV.agentParent],
     timeout: 3,
   }
 }
@@ -63,14 +72,18 @@ function isOurs(handler: HookHandler): boolean {
   return !!handler && ((typeof handler.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/cc-hook\//.test(handler.url)) || STATUS_MESSAGES.includes(handler.statusMessage))
 }
 
-/** SessionStart does not support HTTP handlers in current Claude releases. */
+/**
+ * SessionStart does not support HTTP handlers in current Claude releases. A
+ * hook command always runs with CLAUDE_CODE_CHILD_SESSION set, so only the
+ * parent header travels here (StatusManager settles the rest).
+ */
 function startHandler(port: number, token: string): HookHandler {
   const url = `http://127.0.0.1:${port}${URL_MARKER}${token}`
-  const id = AGENT_ENV.consoleId, pty = AGENT_ENV.ptyId
+  const id = AGENT_ENV.consoleId, pty = AGENT_ENV.ptyId, parent = AGENT_ENV.agentParent
   const command = process.platform === 'win32'
     ? 'powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ' + Buffer.from(
-      `[Console]::InputEncoding=[Text.Encoding]::UTF8; $body=[Console]::In.ReadToEnd(); if($env:${id} -and $env:${pty}){try{Invoke-WebRequest -UseBasicParsing -Uri '${url}' -Method POST -TimeoutSec 2 -Headers @{'X-Console-Id'=$env:${id};'X-Pty-Id'=$env:${pty}} -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json' | Out-Null}catch{}}`, 'utf16le').toString('base64')
-    : `if [ -n "$${id}" ] && [ -n "$${pty}" ]; then curl --silent --max-time 2 --output /dev/null -H "X-Console-Id: $${id}" -H "X-Pty-Id: $${pty}" -H 'Content-Type: application/json' --data-binary @- '${url}'; fi; exit 0`
+      `[Console]::InputEncoding=[Text.Encoding]::UTF8; $body=[Console]::In.ReadToEnd(); if($env:${id} -and $env:${pty}){$h=@{'X-Console-Id'=$env:${id};'X-Pty-Id'=$env:${pty}}; if($env:${parent}){$h['X-Agent-Parent']=$env:${parent}}; try{Invoke-WebRequest -UseBasicParsing -Uri '${url}' -Method POST -TimeoutSec 2 -Headers $h -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType 'application/json' | Out-Null}catch{}}`, 'utf16le').toString('base64')
+    : `if [ -n "$${id}" ] && [ -n "$${pty}" ]; then curl --silent --max-time 2 --output /dev/null -H "X-Console-Id: $${id}" -H "X-Pty-Id: $${pty}" -H "X-Agent-Parent: $${parent}" -H 'Content-Type: application/json' --data-binary @- '${url}'; fi; exit 0`
   return { type: 'command', command, timeout: 3, statusMessage: BRAND.hookStatusMessage }
 }
 

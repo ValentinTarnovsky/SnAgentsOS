@@ -11,6 +11,7 @@ import {
   type RepoConfigWarning,
 } from '@shared/repo-config'
 import { parseRepoConfig } from './schema'
+import { writeAtomic } from '../fsAtomic'
 
 /** A repo on a slow network drive must not stall the composer (E8-FR-23). */
 export const READ_TIMEOUT_MS = 2000
@@ -198,18 +199,6 @@ export function serializeRepoConfig(file: unknown): SerializeRes {
     if (problem) return { ok: false, error: `consoles[${i}].cwd: ${problem}` }
   }
   return { ok: true, json: JSON.stringify(parsed.config, null, 2) + '\n', config: parsed.config }
-}
-
-/** Atomic write: a temp file next to the target, then rename over it. */
-async function writeAtomic(file: string, text: string): Promise<void> {
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-  try {
-    await fsp.writeFile(tmp, text, 'utf8')
-    await fsp.rename(tmp, file)
-  } catch (err) {
-    await fsp.rm(tmp, { force: true }).catch(() => undefined)
-    throw err
-  }
 }
 
 async function exists(p: string): Promise<boolean> {

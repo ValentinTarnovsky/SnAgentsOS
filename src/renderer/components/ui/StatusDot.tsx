@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { Check, Moon } from 'lucide-react'
+import { Check, Hourglass, Moon } from 'lucide-react'
 import type { ClaudePaneState, PaneStatus } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { useLang, useT, type MessageKey } from '@/i18n'
@@ -90,13 +90,14 @@ export function StatusDot({
   )
 }
 
-/** Glyph kinds (E5-FR-20): the agent states plus sleeping and not started. */
-export type GlyphKind = ClaudePaneState | 'sleeping' | 'notStarted'
+/** Glyph kinds (E5-FR-20): the agent states plus sleeping, not started and waiting (v2.2). */
+export type GlyphKind = ClaudePaneState | 'sleeping' | 'notStarted' | 'waiting'
 
 const GLYPH_LABEL: Record<GlyphKind, MessageKey> = {
   ...STATUS_LABEL_KEY,
   sleeping: 'agents.glyph.sleeping',
   notStarted: 'agents.glyph.notStarted',
+  waiting: 'agents.glyph.waiting',
 }
 
 /**
@@ -104,7 +105,8 @@ const GLYPH_LABEL: Record<GlyphKind, MessageKey> = {
  * board (E5-FR-20): a ring spinner while working (static with reduced
  * motion), an amber "?" waiting on you, an emerald check for an unread done
  * (a dot once seen), a gray dot idle, a red "!" on error, a dotted ring when
- * unknown or not started, and a moon while sleeping. Every glyph has an
+ * unknown or not started, a moon while sleeping and a violet hourglass while
+ * a finished turn waits on work it started (v2.2). Every glyph has an
  * aria-label and a 200 ms tooltip (unless `noTooltip`).
  */
 export function StatusGlyph({
@@ -162,6 +164,9 @@ export function StatusGlyph({
       break
     case 'sleeping':
       body = <Moon size={size - 2} className="text-text-secondary" />
+      break
+    case 'waiting':
+      body = <Hourglass size={size - 2} className="text-[#8B5CF6]" />
       break
     default:
       body = <span className="block rounded-full border border-dashed border-text-secondary" style={{ width: inner, height: inner }} />

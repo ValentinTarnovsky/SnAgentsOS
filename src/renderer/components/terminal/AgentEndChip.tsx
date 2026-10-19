@@ -73,7 +73,7 @@ export function AgentEndChip({ paneId, initialCommand, shellKind, onDone }: Agen
         className="pointer-events-auto flex min-w-0 max-w-full flex-wrap items-center justify-center gap-2 rounded-lg border border-border bg-card/95 px-3 py-1 text-xs text-text-primary shadow-lg backdrop-blur"
       >
         <History size={13} className="shrink-0 text-accent-violet" />
-        <span className="min-w-0 break-words">{t('agentEnd.title')}</span>
+        <span className="min-w-0 break-words">{t('agentEnd.title', { agent: evt.provider === 'codex' ? 'Codex' : 'Claude' })}</span>
         {cmds.resume && (
           <button type="button" data-agent-end="resume" disabled={!ready} onClick={() => take('resume')} className={btn}>
             <History size={11} />

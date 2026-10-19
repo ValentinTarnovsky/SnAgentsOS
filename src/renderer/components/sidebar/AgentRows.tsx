@@ -32,7 +32,8 @@ export function useNow(ms: number): number {
 /** Glyph of an entry: not started shows the dotted ring. */
 export function glyphOf(e: AgentEntry): GlyphKind {
   if (e.sleeping) return 'sleeping'
-  return e.notStarted || !e.status ? 'notStarted' : e.status.state
+  if (e.notStarted || !e.status) return 'notStarted'
+  return e.status.waiting && e.status.state === 'working' ? 'waiting' : e.status.state
 }
 
 /**

@@ -30,6 +30,8 @@ import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRe
 import type { OpenPathReq, OpenPathRes } from './inertOpen'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from './repo-config'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from './review-notes'
+import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResult, WsNoteWriteReq, WsNotesChangedEvt, WsNotesListRes } from './ws-notes'
+import type { FileCreateReq, FileReadRes, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesRootRes } from './files'
 import type { CliCtlAction, CliUiState, SkillOp, SkillStatus, SkillTarget } from './ctl-protocol'
 
 export type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
@@ -928,6 +930,34 @@ export interface SnApi {
     /** Drop the notes of workspaces that no longer exist. */
     prune(workspaceIds: string[]): void
     onChanged(cb: (e: ReviewNotesChangedEvt) => void): () => void
+  }
+  /** Workspace notes (v2.2, E9): .md files main keeps per workspace; ids only. */
+  wsNotes: {
+    list(workspaceId: string): Promise<WsNotesListRes>
+    read(req: WsNoteReadReq): Promise<WsNoteResult<{ note: WsNoteDoc }>>
+    write(req: WsNoteWriteReq): Promise<WsNoteResult<{ note: WsNoteMeta }>>
+    create(req: WsNoteCreateReq): Promise<WsNoteResult<{ note: WsNoteMeta }>>
+    delete(req: WsNoteReadReq): Promise<WsNoteResult<Record<never, never>>>
+    /** Opens the .md with the user's app. */
+    open(req: WsNoteReadReq): Promise<boolean>
+    /** Moves the notes of workspaces that no longer exist to the trash. */
+    prune(workspaceIds: string[]): void
+    onChanged(cb: (e: WsNotesChangedEvt) => void): () => void
+  }
+  /** Files drawer (v2.2, E9): a workspace id and a relative path, resolved and contained by main. */
+  files: {
+    root(workspaceId: string): Promise<FilesRootRes>
+    list(req: FilesListReq): Promise<FilesListRes>
+    read(req: { workspaceId: string; rel: string }): Promise<FileReadRes>
+    write(req: FileWriteReq): Promise<FileWriteRes>
+    create(req: FileCreateReq): Promise<FilesOpRes>
+    rename(req: FileRenameReq): Promise<FilesOpRes>
+    trash(req: { workspaceId: string; rel: string }): Promise<FilesOpRes>
+    reveal(req: { workspaceId: string; rel: string }): Promise<FilesOpRes>
+    open(req: { workspaceId: string; rel: string }): Promise<FilesOpRes>
+    /** The one folder watched (null: none). */
+    watch(workspaceId: string | null): void
+    onChanged(cb: (e: FilesChangedEvt) => void): () => void
   }
   /** Git chip (E7-FR-05..10). Main runs git; the renderer owns the targets and settings.gitChip. */
   git: {

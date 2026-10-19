@@ -37,6 +37,52 @@ export interface HookEvent {
   question?: string
   /** AskUserQuestion questions in the RemotePending shape. */
   questions?: RemotePending['questions']
+  /**
+   * A sub-session: a `claude -p` the console's own agent started (a driver),
+   * marked by the X-Agent-Child / X-Agent-Parent headers. Never the console's agent.
+   */
+  nested?: boolean
+  /** SessionStart json.source ('startup' | 'resume' | 'clear' | 'compact' | 'fork'). */
+  source?: string
+  /** Stop json.background_tasks still running, by what the stop means for the console. */
+  background?: BackgroundTasks
+}
+
+/**
+ * Work a turn left running when it stopped (Stop `background_tasks`). `waits`:
+ * tasks that come back to the agent (subagents, workflows, teammates, a
+ * `snaos wait` or a driver), so the agent is not done; `other`: the rest
+ * (a dev server, a monitor), which never hold the console.
+ */
+export interface BackgroundTasks {
+  waits: number
+  other: number
+}
+
+/** A shell task that waits on other consoles or drives sub-sessions. */
+const WAITING_SHELL_RE = /\bsnaos(?:\.cmd)?\s+wait\b|\bclaude(?:\.exe)?\s+(?:.*\s)?(?:-p|--print)\b|\bcodex(?:\.exe)?\s+exec\b|\bsn-drive\b/i
+const PARENT_RE = /^(?:claude|codex):[A-Za-z0-9_-]{1,64}$/
+
+/** Classifies Stop `background_tasks` (an array of { type, status, description }). Undefined when none run. */
+export function backgroundTasks(raw: unknown): BackgroundTasks | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: BackgroundTasks = { waits: 0, other: 0 }
+  for (const task of raw.slice(0, 64)) {
+    if (!task || typeof task !== 'object') continue
+    const { type, status, description, command } = task as Record<string, unknown>
+    if (typeof status === 'string' && /^(?:completed|failed|killed|stopped|cancell?ed|done)$/i.test(status)) continue
+    const kind = typeof type === 'string' ? type.toLowerCase() : ''
+    const text = [description, command].filter((v): v is string => typeof v === 'string').join(' ').slice(0, 2000)
+    if (/agent|teammate|workflow|cloud|remote/.test(kind)) out.waits++
+    else if (/bash|shell/.test(kind) && WAITING_SHELL_RE.test(text)) out.waits++
+    else out.other++
+  }
+  return out.waits || out.other ? out : undefined
+}
+
+/** True when the request headers mark a sub-session (see HookEvent.nested). */
+export function nestedFromHeaders(child: unknown, parent: unknown): boolean {
+  return String(child ?? '').trim() === '1' || PARENT_RE.test(String(parent ?? '').trim())
 }
 
 const MAX_BODY = 2 * 1024 * 1024
@@ -147,7 +193,9 @@ export class HookServer {
         const json = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
         const name = typeof json.hook_event_name === 'string' ? json.hook_event_name : ''
         if (!name) return
-        this.listener?.(parseHookPayload(consoleId, String(req.headers['x-pty-id'] ?? ''), name, json))
+        const evt = parseHookPayload(consoleId, String(req.headers['x-pty-id'] ?? ''), name, json)
+        if (nestedFromHeaders(req.headers['x-agent-child'], req.headers['x-agent-parent'])) evt.nested = true
+        this.listener?.(evt)
       } catch {
         console.warn('[hooks] discarded malformed hook payload')
       }
@@ -177,8 +225,12 @@ export function parseHookPayload(consoleId: string, ptyId: string, name: string,
   if (isSafeCwd(json.cwd)) evt.cwd = json.cwd
   if (sessionId && isSafeTranscriptPath(json.transcript_path, sessionId, claudeDir)) evt.transcriptPath = json.transcript_path
   if (name === 'UserPromptSubmit') evt.prompt = cleanString(json.prompt, LIMITS.text)
-  if (name === 'Stop') evt.lastAssistantMessage = cleanString(json.last_assistant_message, LIMITS.text)
+  if (name === 'Stop') {
+    evt.lastAssistantMessage = cleanString(json.last_assistant_message, LIMITS.text)
+    evt.background = backgroundTasks(json.background_tasks)
+  }
   if (name === 'SessionEnd') evt.endReason = cleanString(json.reason, 64, true)
+  if (name === 'SessionStart') evt.source = cleanString(json.source, 32, true)
   if ((name === 'PreToolUse' || name === 'PermissionRequest') && toolName) {
     evt.toolSummary = summarizeTool(toolName, json.tool_input) || undefined
     evt.requestSummary = summarizeRequest(toolName, json.tool_input) || undefined
