@@ -8,7 +8,9 @@
  *    read again, and only its first and last 64KB (title, cwd, last message,
  *    date). At most 1000 files per provider, the most recently written.
  *  - The exact message count is a background job (one file every 50ms),
- *    cached with the entry and exposed only by `sessions:list`.
+ *    cached with the entry and exposed only by `sessions:list`. A file that
+ *    grew (transcripts are append-only) is counted from where the last count
+ *    stopped, so a live session of hundreds of MB is never read whole again.
  *  - Sessions without a real prompt (only slash commands, an empty start)
  *    and sessions without an absolute cwd are never listed.
  *  - Workspace scope (E3-FR-36): the workspace cwd plus each pane's
@@ -23,7 +25,6 @@
  */
 import { open, readdir, stat } from 'fs/promises'
 import { join, posix, win32 } from 'path'
-import { StringDecoder } from 'string_decoder'
 import type { AgentProvider, ConfigFile, PaneStatusEvt } from '@shared/types'
 import type { RemoteHistorySession } from '@shared/remote-protocol'
 import { isHistorySessionId, type SessionSummary, type SessionsListReq } from '@shared/session-history'
@@ -350,8 +351,8 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 
 export class SessionHistory {
   private entries = new Map<string, Entry>()
-  /** path -> message count, valid for the (mtime, size) it was counted at. */
-  private counts = new Map<string, { mtimeMs: number; size: number; count: number }>()
+  /** path -> message count, valid for the (mtime, size) it was counted at; `progress` resumes a grown file. */
+  private counts = new Map<string, { mtimeMs: number; size: number; count: number; progress: CountProgress }>()
   private scanning: Promise<void> | null = null
   private scannedAt = -Infinity
   private countTimer: unknown = null
@@ -583,8 +584,11 @@ export class SessionHistory {
     if (!e) return false
     this.counting = true
     try {
-      const count = await countMessages(e.path, e.provider)
-      this.counts.set(e.path, { mtimeMs: e.mtimeMs, size: e.size, count: count ?? 0 })
+      // Grown since the last count: carry on from its last complete line.
+      const prev = this.counts.get(e.path)
+      const from = prev && e.size >= prev.progress.offset ? prev.progress : undefined
+      const res = await countMessagesFrom(e.path, e.provider, from)
+      this.counts.set(e.path, res ? { mtimeMs: e.mtimeMs, size: e.size, count: res.count, progress: res.progress } : { mtimeMs: e.mtimeMs, size: e.size, count: 0, progress: { offset: 0, count: 0 } })
     } finally {
       this.counting = false
     }
@@ -603,39 +607,70 @@ function newest(refs: FileRef[]): FileRef[] {
   return refs.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, HISTORY_MAX_PER_SCOPE)
 }
 
+/** Where a count stopped: the byte after its last complete line, and the messages before it. */
+export interface CountProgress {
+  offset: number
+  count: number
+}
+
 /** Exact message count of one file, read in chunks; null when it cannot be read. */
 export async function countMessages(path: string, provider: AgentProvider): Promise<number | null> {
+  return (await countMessagesFrom(path, provider))?.count ?? null
+}
+
+/**
+ * countMessages from `from` on (a file that only grew since): `count` also
+ * holds an unterminated last line, `progress` stops before it so the next
+ * count reads that line again once it is complete. Null when unreadable.
+ */
+export async function countMessagesFrom(
+  path: string,
+  provider: AgentProvider,
+  from?: CountProgress,
+): Promise<{ count: number; progress: CountProgress } | null> {
   let handle: Awaited<ReturnType<typeof open>> | null = null
   try {
     handle = await open(path, 'r')
     const buf = Buffer.alloc(COUNT_CHUNK)
-    // A chunk can end inside a multi-byte character: the decoder carries it over.
-    const decoder = new StringDecoder('utf8')
-    let pos = 0
-    let rest = ''
-    let count = 0
-    const take = (line: string): void => {
-      const s = line.trim()
-      if (!s || s[0] !== '{') return
+    let pos = from?.offset ?? 0
+    let lineStart = pos
+    let count = from?.count ?? 0
+    // Bytes of the line being read, split across chunks. Lines are cut at
+    // newline bytes, which never sit inside a multi-byte UTF-8 character.
+    let pending: Buffer[] = []
+    const take = (bytes: Buffer): boolean => {
+      // Byte-level pre-filter: most lines are never decoded at all.
+      if (provider === 'claude' ? bytes.indexOf('"user"') === -1 && bytes.indexOf('"assistant"') === -1 : bytes.indexOf('user_message') === -1 && bytes.indexOf('agent_message') === -1) return false
+      const s = bytes.toString('utf8').trim()
+      if (!s || s[0] !== '{') return false
       // Cheap pre-filter before JSON.parse: every counted record names its type.
-      if (provider === 'claude' ? !/"type"\s*:\s*"(user|assistant)"/.test(s) : !/"(user_message|agent_message)"/.test(s)) return
+      if (provider === 'claude' ? !/"type"\s*:\s*"(user|assistant)"/.test(s) : !/"(user_message|agent_message)"/.test(s)) return false
       try {
-        if (countsAsMessage(provider, JSON.parse(s))) count++
+        return countsAsMessage(provider, JSON.parse(s))
       } catch {
-        /* partial line */
+        return false
       }
     }
     for (;;) {
       const { bytesRead } = await handle.read(buf, 0, buf.length, pos)
       if (bytesRead <= 0) break
+      const chunk = buf.subarray(0, bytesRead)
+      let start = 0
+      for (let nl = chunk.indexOf(10, start); nl !== -1; nl = chunk.indexOf(10, start)) {
+        const piece = chunk.subarray(start, nl)
+        const line = pending.length ? Buffer.concat([...pending, piece]) : piece
+        pending = []
+        if (take(line)) count++
+        start = nl + 1
+        lineStart = pos + start
+      }
+      // The buffer is reused: keep a copy of the unfinished line.
+      if (start < bytesRead) pending.push(Buffer.from(chunk.subarray(start)))
       pos += bytesRead
-      const text = rest + decoder.write(buf.subarray(0, bytesRead))
-      const lines = text.split('\n')
-      rest = lines.pop() ?? ''
-      for (const line of lines) take(line)
     }
-    take(rest + decoder.end())
-    return count
+    const progress = { offset: lineStart, count }
+    const last = pending.length && take(Buffer.concat(pending)) ? 1 : 0
+    return { count: count + last, progress }
   } catch {
     return null
   } finally {

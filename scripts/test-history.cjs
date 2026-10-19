@@ -202,6 +202,28 @@ async function testIndex() {
   await history.refresh(true)
   const after = (await history.list({ query: UUID_A }))[0]
   check(after.messageCount === null && after.lastMessage === 'one more' && after.updatedAt === T0 + 30000, 'a changed file (mtime, size) is read again and recounted')
+  while (await history.countNext()) { /* the grown file only */ }
+  check((await history.list({ query: UUID_A }))[0].messageCount === 3, 'the grown file is recounted to the exact total')
+
+  // Incremental count: a grown file resumes from the last complete line, and
+  // an unterminated last line is counted now and read again once complete.
+  const inc = path.join(tmp, 'count', 'inc.jsonl')
+  writeJsonl(inc, [user('one', 'C:\\x', T0), reply('two', T0 + 1)])
+  const first = await H.countMessagesFrom(inc, 'claude')
+  check(first.count === 2 && first.progress.offset === fs.statSync(inc).size && first.progress.count === 2, 'a count stops after the last complete line: ' + JSON.stringify(first))
+  const partial = JSON.stringify(reply('three', T0 + 2))
+  fs.appendFileSync(inc, partial.slice(0, 20))
+  const mid = await H.countMessagesFrom(inc, 'claude', first.progress)
+  check(mid.count === 2 && mid.progress.offset === first.progress.offset, 'a half-written last line is not counted and not skipped')
+  fs.appendFileSync(inc, partial.slice(20))
+  const unterminated = await H.countMessagesFrom(inc, 'claude', mid.progress)
+  check(unterminated.count === 3 && unterminated.progress.count === 2, 'a complete but unterminated last line counts without moving the resume point')
+  fs.appendFileSync(inc, '\n' + JSON.stringify(user('ü four €', 'C:\\x', T0 + 3)) + '\n')
+  const grown = await H.countMessagesFrom(inc, 'claude', unterminated.progress)
+  check(grown.count === 4 && grown.count === (await H.countMessages(inc, 'claude')) && grown.progress.offset === fs.statSync(inc).size, 'resuming gives the same total as a full count: ' + JSON.stringify(grown))
+  // From an offset past every record the old lines are never read again.
+  const skip = await H.countMessagesFrom(inc, 'claude', { offset: fs.statSync(inc).size, count: 7 })
+  check(skip.count === 7, 'a count from the end reads nothing before it')
   history.dispose()
   return H
 }
