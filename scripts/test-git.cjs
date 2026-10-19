@@ -399,7 +399,7 @@ process.on('exit', (code) => {
         const cwd = o.cwd
         if (args[0] === 'rev-parse') {
           if (opts.notRepo?.has(cwd)) { const e = new gx.GitExecError('not_repo', 'nope'); throw e }
-          return `${cwd}\n${cwd}\\.git\n.git\n`
+          return `${cwd}\n${cwd}${opts.platform === 'linux' ? '/' : '\\'}.git\n.git\n`
         }
         if (args[0] === 'status') return statusOut.get(cwd) ?? Z(`# branch.oid ${H}`, '# branch.head main')
         if (args[0] === 'diff') return '5\t1\tx.ts\0'
@@ -407,7 +407,7 @@ process.on('exit', (code) => {
       },
     }
     const emitted = []
-    const svc = new GitService({ runner, emit: (e) => emitted.push(e), now: () => now, timers: t, watch, exists: () => false, mtimeOf: () => indexMtime, platform: 'win32', untracked: { count: async () => ({ lines: 0, approx: false, bytesRead: 0 }), forget() {} } })
+    const svc = new GitService({ runner, emit: (e) => emitted.push(e), now: () => now, timers: t, watch, exists: () => false, mtimeOf: () => indexMtime, platform: opts.platform ?? 'win32', untracked: { count: async () => ({ lines: 0, approx: false, bytesRead: 0 }), forget() {} } })
     const flush = async () => { for (let i = 0; i < 6; i++) { await tick(); await svc.idle() } }
     const advance = async (ms) => {
       const end = now + ms
@@ -486,7 +486,7 @@ process.on('exit', (code) => {
     const gitdir = h.watches.find((w) => w.dir === 'C:\\w\\.git' && !w.recursive && h.watches.indexOf(w) === 0)
     const common = h.watches.filter((w) => w.dir === 'C:\\w\\.git')[1]
     const refs = h.watches.find((w) => w.recursive)
-    check(gitdir && common && refs && refs.dir === path.join('C:\\w\\.git', 'refs'), 'watchers: gitdir, common dir and recursive refs')
+    check(gitdir && common && refs && refs.dir === 'C:\\w\\.git\\refs', 'watchers: gitdir, common dir and recursive refs (win32 paths on any host)')
     const runs = h.svc.stats.runs
     gitdir.onEvent('index')
     await h.advance(WATCH_DEBOUNCE_MS * 4)
@@ -546,6 +546,77 @@ process.on('exit', (code) => {
     check(h.watches.filter((w) => !w.closed).length === 3, 'gitChip on again reopens the watchers')
     h.svc.dispose()
     check(h.watches.every((w) => w.closed), 'dispose closes every watcher')
+  }
+  {
+    // A new repo has no index at the end of the first run: the first git add
+    // creates it, and that event inside the self-event window is not ours.
+    const h = harness()
+    h.svc.setTargets([T('ws:a', 'C:\\fresh', true)])
+    await h.flush()
+    const runs = h.svc.stats.runs
+    h.setIndexMtime(7)
+    h.watches[0].onEvent('index')
+    await h.advance(WATCH_DEBOUNCE_MS + MIN_RUN_GAP_MS)
+    check(h.svc.stats.runs === runs + 1, 'an index that appears right after a run (first git add of a new repo) refreshes')
+    h.svc.dispose()
+  }
+  {
+    // The injected platform owns the path rules, whatever the host is: POSIX
+    // paths stay POSIX on a Windows host and win32 paths stay win32 on CI's
+    // Linux and macOS (the host path module turned them into cwd-relative junk).
+    const h = harness({ platform: 'linux' })
+    h.svc.setTargets([T('ws:a', '/home/u/w', true), T('ws:b', '/home/u/W', false)])
+    await h.flush()
+    same(h.watches.map((w) => `${w.dir}${w.recursive ? ' (recursive)' : ''}`).sort(), ['/home/u/W/.git', '/home/u/W/.git', '/home/u/W/.git/refs (recursive)', '/home/u/w/.git', '/home/u/w/.git', '/home/u/w/.git/refs (recursive)'], `linux: POSIX gitdir, common dir and refs on a ${process.platform} host`)
+    check(h.statusCalls() === 2 && h.emitted.find((e) => e.key === 'ws:a').summary.repoRoot === '/home/u/w', 'linux: folders differing only in case are two repos, repoRoot keeps its POSIX spelling')
+    h.svc.dispose()
+  }
+  {
+    // Directory tree watch: the recursive refs watch where fs.watch is not
+    // natively recursive (Linux: Node 22 emulates it with one watcher per file).
+    const tw = loadMain('src/main/git/treeWatch.ts')
+    check(tw.nativeRecursiveWatch('win32') && tw.nativeRecursiveWatch('darwin') && !tw.nativeRecursiveWatch('linux') && !tw.nativeRecursiveWatch('aix'), 'recursive fs.watch is native only on Windows and macOS')
+    const dirs = new Map([['R', ['heads', 'remotes']], ['R/heads', ['sn', 'sn-old']], ['R/heads/sn', []], ['R/heads/sn-old', []], ['R/remotes', ['origin']], ['R/remotes/origin', []]])
+    const open = new Map()
+    const deps = {
+      watch: (dir, onEvent, onError) => {
+        if (!dirs.has(dir)) return null
+        const hd = { onEvent, onError, close() { open.delete(dir) } }
+        open.set(dir, hd)
+        return hd
+      },
+      listDirs: (dir) => { if (!dirs.has(dir)) throw new Error('ENOENT'); return dirs.get(dir) },
+      isDir: (p) => dirs.has(p),
+      join: (a, b) => `${a}/${b}`,
+    }
+    const seen = []
+    let errors = 0
+    const w = tw.watchDirTree('R', (n) => seen.push(n), () => errors++, deps)
+    same([...open.keys()].sort(), ['R', 'R/heads', 'R/heads/sn', 'R/heads/sn-old', 'R/remotes', 'R/remotes/origin'], 'tree watch: one non-recursive watcher per directory, never one per file')
+    open.get('R/heads/sn').onEvent('x.lock'); open.get('R/heads/sn').onEvent('x'); open.get('R/remotes/origin').onEvent('main'); open.get('R').onEvent(null)
+    same(seen, ['heads/sn/x.lock', 'heads/sn/x', 'remotes/origin/main', null], 'tree watch: names relative to the root with /, like a native recursive watch')
+    dirs.set('R/heads/feat', []); dirs.get('R/heads').push('feat')
+    open.get('R/heads').onEvent('feat')
+    check(open.has('R/heads/feat') && seen.at(-1) === 'heads/feat', 'tree watch: a new subdirectory is reported and gets its own watcher')
+    open.get('R/heads/feat').onEvent('y')
+    check(seen.at(-1) === 'heads/feat/y', 'tree watch: and its files are reported')
+    dirs.delete('R/heads/sn')
+    open.get('R/heads').onEvent('sn')
+    check(!open.has('R/heads/sn') && open.has('R/heads/sn-old') && seen.at(-1) === 'heads/sn', 'tree watch: a removed subdirectory drops its watcher, a sibling sharing its prefix keeps its own')
+    open.get('R/remotes').onError()
+    check(!open.has('R/remotes') && !open.has('R/remotes/origin') && open.has('R') && errors === 0, 'tree watch: a failing subdirectory drops its subtree, the watch goes on')
+    open.get('R').onError()
+    check(errors === 1 && open.size === 0, 'tree watch: a failing root reports the error and closes everything')
+    w.close()
+    const w2 = tw.watchDirTree('R', () => {}, () => {}, deps)
+    w2.close()
+    check(open.size === 0, 'tree watch: close releases every watcher')
+    check(tw.watchDirTree('missing', () => {}, () => {}, deps) === null, 'tree watch: a root that cannot be watched gives null')
+    for (let i = 0; i < 400; i++) dirs.set(`R/heads/b${i}`, [])
+    dirs.set('R/heads', Array.from({ length: 400 }, (_, i) => `b${i}`))
+    const w3 = tw.watchDirTree('R', () => {}, () => {}, deps)
+    check(open.size === tw.TREE_MAX_DIRS, `tree watch: at most ${tw.TREE_MAX_DIRS} directories (got ${open.size})`)
+    w3.close()
   }
   {
     const h = harness()
@@ -695,6 +766,10 @@ process.on('exit', (code) => {
     const write = (p, s) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, s) }
     const lines = (n, tag = 'l') => Array.from({ length: n }, (_, i) => `${tag}${i}`).join('\n') + '\n'
     const realRunner = gx.createGitRunner({ env: () => gx.gitEnv(cleanEnv) })
+    // git reports the toplevel by its realpath: the long name behind an 8.3
+    // TEMP (C:\Users\RUNNER~1 on CI) and /private/var behind macOS's /var.
+    // Compare folders by realpath, caseless only on Windows.
+    const canonDir = (p) => { const r = fs.realpathSync.native(p); return process.platform === 'win32' ? r.toLowerCase() : r }
     async function summarize(cwd, runner = realRunner, untracked) {
       const emitted = []
       const svc = new GitService({ runner, emit: (e) => emitted.push(e), ...(untracked ? { untracked } : {}), watch: () => null })
@@ -720,7 +795,8 @@ process.on('exit', (code) => {
       check(s && s.files === 4 && s.staged === 2 && s.unstaged === 1 && s.untracked === 1, `staged + unstaged + rename + untracked: files=4 (got ${JSON.stringify(s && { files: s.files, staged: s.staged, unstaged: s.unstaged, untracked: s.untracked })})`)
       check(s.added === 12 && s.removed === 1, `lines: +2 staged +10 untracked, -1 unstaged (got +${s.added} -${s.removed})`)
       check(s.branch === 'main' && !s.detached && !s.unborn && s.headShort.length === 7 && s.upstream === null && s.op === null && !s.approx, 'branch main, no upstream, no operation')
-      check(path.resolve(s.repoRoot).toLowerCase() === path.resolve(mix).toLowerCase(), 'repoRoot resolved')
+      check(canonDir(s.repoRoot) === canonDir(mix), `repoRoot is the repo folder by realpath (${s.repoRoot} vs ${mix})`)
+      check(path.isAbsolute(s.repoRoot) && s.repoRoot === path.resolve(s.repoRoot), 'repoRoot is absolute and normalized for this platform')
       check(v.files.some((f) => f.path === '\u00f1 dir/un tracked.txt') && v.files.some((f) => f.path === 'new name.txt' && f.oldPath === 'old name.txt'), 'unicode untracked path and rename in the file list')
 
       // +10 staged whose lines are rewritten afterwards: +10 against HEAD, not +20 -10.
@@ -770,7 +846,7 @@ process.on('exit', (code) => {
       // GIT_DIR polluted in the app env: the summary is still the cwd's.
       const polluted = gx.createGitRunner({ env: () => gx.gitEnv({ ...cleanEnv, GIT_DIR: path.join(mix, '.git'), git_work_tree: mix }) })
       const pv = (await summarize(sm, polluted)).summary
-      check(pv && pv.files === 1 && pv.added === 10 && path.resolve(pv.repoRoot).toLowerCase() === path.resolve(sm).toLowerCase(), 'GIT_DIR / GIT_WORK_TREE in the env never redirect the query')
+      check(pv && pv.files === 1 && pv.added === 10 && canonDir(pv.repoRoot) === canonDir(sm), 'GIT_DIR / GIT_WORK_TREE in the env never redirect the query')
 
       // A folder holding its own git.exe never runs it (Windows searches the cwd first for a bare name).
       check(path.isAbsolute((await realRunner.info()).path || ''), 'the runner reports git by its absolute path')
@@ -825,7 +901,57 @@ process.on('exit', (code) => {
       const settled = watched.stats.runs
       await new Promise((r) => setTimeout(r, 2500))
       check(watched.stats.runs === settled, `no refresh loop from our own runs (runs ${settled} -> ${watched.stats.runs})`)
+      git(mix, 'branch', 'sn/only-ref')
+      check(await waitFor(() => watched.stats.runs > settled), `a branch created without checkout (refs/heads only) refreshes through the refs watcher (${process.platform})`)
       watched.dispose()
+
+      // An 8.3 spelling of the repo (what CI's C:\Users\RUNNER~1 TEMP gives):
+      // libuv asserts the event path starts with the watched one, so watching a
+      // short spelling aborted the whole process on the first event.
+      check(svcMod.canonicalDir('C:\\SHORT~1\\.git', () => 'C:\\Short Name\\.git') === 'C:\\Short Name\\.git' && svcMod.canonicalDir('gone', () => { throw new Error('ENOENT') }) === 'gone', 'watched folders go through their realpath (the input when it cannot be resolved)')
+      if (process.platform === 'win32') {
+        const longDir = path.join(base, 'long name repo')
+        fs.mkdirSync(longDir)
+        let shortDir = ''
+        try { shortDir = execFileSync('cmd.exe', ['/d', '/s', '/c', `"for %I in ("${longDir}") do @echo %~sI"`], { windowsVerbatimArguments: true }).toString().trim() } catch { shortDir = '' }
+        if (!shortDir || shortDir.toLowerCase() === longDir.toLowerCase() || !fs.existsSync(shortDir)) {
+          console.log(`SKIP: no 8.3 alias on this volume for ${longDir}, short path watch check skipped`)
+        } else {
+          git(shortDir, 'init', '-q', '-b', 'main')
+          write(path.join(shortDir, 'a.txt'), 'a\n')
+          const shortLive = []
+          const shortSvc = new GitService({ runner: realRunner, emit: (e) => shortLive.push(e) })
+          shortSvc.setTargets([{ key: 'ws:s', cwd: shortDir, workspaceId: 's', active: false }])
+          await shortSvc.idle()
+          git(shortDir, 'add', 'a.txt')
+          check(await waitFor(() => shortLive.at(-1)?.summary?.staged === 1), `a repo opened by its 8.3 path (${shortDir}) refreshes through its watchers and the process survives`)
+          git(shortDir, 'commit', '-qm', 'one')
+          git(shortDir, 'branch', 'sn/short')
+          await new Promise((r) => setTimeout(r, 1000))
+          check(shortSvc.watchedCount() === 1, 'and keeps its watchers after refs events')
+          shortSvc.dispose()
+        }
+      }
+
+      // The same through the directory tree fallback (what Linux runs), on any host.
+      {
+        const treeLive = []
+        const tree = new GitService({ runner: realRunner, emit: (e) => treeLive.push(e), watch: svcMod.createDefaultWatch(false) })
+        tree.setTargets([{ key: 'ws:x', cwd: mix, workspaceId: 'x', active: false }])
+        await tree.idle()
+        await new Promise((r) => setTimeout(r, MIN_RUN_GAP_MS + 100))
+        git(mix, 'reset', '-q', 'work.txt')
+        check(await waitFor(() => treeLive.at(-1)?.summary?.staged === 2), 'tree fallback: an index change refreshes')
+        await new Promise((r) => setTimeout(r, MIN_RUN_GAP_MS + 100))
+        const r0 = tree.stats.runs
+        git(mix, 'branch', 'feat/one')
+        check(await waitFor(() => tree.stats.runs > r0), 'tree fallback: a branch in a new refs/heads folder refreshes')
+        await new Promise((r) => setTimeout(r, MIN_RUN_GAP_MS + 100))
+        const r1 = tree.stats.runs
+        git(mix, 'branch', 'feat/two')
+        check(await waitFor(() => tree.stats.runs > r1), 'tree fallback: the new folder got its own watcher (a second branch in it refreshes)')
+        tree.dispose()
+      }
 
       // gitInfo on the real PATH.
       const info = await realRunner.info()
