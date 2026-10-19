@@ -1144,6 +1144,243 @@ async function main() {
     }
   }
 
+  await shellIntegrationChecks()
+
   console.log(`PASS: ${checks} terminal engine checks`)
+}
+
+// --- PowerShell shell integration (E6-FR-25..31) -------------------------------
+async function shellIntegrationChecks() {
+  const PI = load('src/main/pty/powershellIntegration.ts')
+  // FR-25: the encoded argument is the static bootstrap.
+  {
+    const args = PI.buildIntegrationArgs()
+    check(args.length === 3 && args[0] === '-NoExit' && args[1] === '-EncodedCommand', 'integration args are -NoExit -EncodedCommand <payload>')
+    const script = Buffer.from(args[2], 'base64').toString('utf16le')
+    check(script === PI.integrationScript(), 'the payload is base64 UTF-16LE of the bootstrap')
+    check(script.includes("]133;A") && script.includes("]133;B") && script.includes("]133;C") && script.includes("]133;D;"), 'the bootstrap writes the A, B, C and D marks')
+    check(script.includes("LanguageMode -eq 'FullLanguage'") && script.startsWith("if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {") && script.trimEnd().endsWith('}'), 'everything runs inside the FullLanguage guard')
+    check(script.includes('New-Object System.Text.UTF8Encoding($false)') && script.includes('[Console]::OutputEncoding') && script.includes('[Console]::InputEncoding') && script.includes('$Global:OutputEncoding'), 'UTF-8 without BOM for console output, input and $OutputEncoding')
+    check(script.includes('$Global:__SnaosOsc133') && script.includes("$env:SNAOS_SHELL_INTEGRATION = '1'") && script.includes('function Global:PSConsoleHostReadLine') && script.includes('function Global:prompt'), 'state, env flag, PSReadLine and prompt wrappers')
+    check(script.indexOf("Remove-Variable -Name '__snaosEnc', '__snaosPrompt'") > script.indexOf('Prompt = $__snaosPrompt'), 'the global temporaries are removed once the state holds them')
+    check(/\$ok = \$\?\n/.test(script) && script.indexOf('$ok = $?') < script.indexOf('$lec = $Global:LASTEXITCODE'), '$? is captured as the first statement of the prompt')
+    check(!/[\u2013\u2014]/.test(script) && !script.includes('`') && Buffer.from(args[2], 'base64').length < 16000, 'the payload is plain ASCII PowerShell well under the command line limit')
+    check(PI.buildIntegrationArgs() !== args && PI.buildIntegrationArgs().join() === args.join(), 'each call gets its own copy of the same args')
+  }
+  // FR-25: only a bare PowerShell on Windows with the setting on.
+  {
+    const ok = (shell, extra = {}) => PI.shouldIntegrate({ shell, args: undefined, platform: 'win32', enabled: true, ...extra })
+    check(ok('powershell.exe') && ok('pwsh') && ok('C:\\Program Files\\PowerShell\\7\\pwsh.exe') && ok('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\POWERSHELL.EXE') && ok('"C:\\Tools\\pwsh.exe"'), 'powershell(.exe) and pwsh(.exe), any folder or case')
+    check(!ok('cmd.exe') && !ok('bash') && !ok('powershell_ise.exe') && !ok('C:\\pwsh\\nu.exe') && !ok('pwsh-preview.exe'), 'other shells never get the integration')
+    check(!ok('pwsh.exe', { args: ['-NoLogo'] }) && !ok('powershell.exe', { args: '-NoProfile' }) && ok('pwsh.exe', { args: [] }) && ok('pwsh.exe', { args: '' }), 'a shell launched with its own args keeps exactly them')
+    check(!ok('pwsh.exe', { enabled: false }) && !ok('pwsh', { platform: 'linux' }) && !ok('pwsh', { platform: 'darwin' }), 'setting off or not Windows: no integration')
+  }
+  // FR-31: the marks are stripped before a waitFor match.
+  {
+    const s = PI.stripOsc133
+    check(s('PS C:\\> \x1b]133;B\x07') === 'PS C:\\> ' && s('\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x1b\\') === 'PS> ', 'BEL and ST terminated marks are removed')
+    check(s('x \x1b]0;title\x07 \x1b[32mgreen\x1b[0m') === 'x \x1b]0;title\x07 \x1b[32mgreen\x1b[0m' && s('plain') === 'plain', 'other escapes and plain text are untouched')
+    check(s('PS> \x1b]133') === 'PS> ' && s('PS> \x1b]133;B') === 'PS> ' && s('PS> \x1b') === 'PS> ', 'a mark cut at the end is dropped until it completes')
+    check(/> $/.test(s('user@host:~> \x1b]133;B\x07')) && !/> $/.test('user@host:~> \x1b]133;B\x07'), 'an anchored /> $/ matches only after stripping')
+  }
+
+  // PtyManager under a Windows process with a fake clock and node-pty.
+  const clock = (() => {
+    let now = 1_000_000, seq = 0
+    const queue = new Map()
+    const setT = (fn, ms = 0) => { const id = ++seq; queue.set(id, { at: now + Math.max(0, ms || 0), fn }); return id }
+    const clearT = id => { queue.delete(id) }
+    const micro = () => new Promise(r => setImmediate(r))
+    async function advance(ms) {
+      const end = now + ms
+      for (;;) {
+        await micro()
+        let next = null
+        for (const [id, t] of queue) if (t.at <= end && (!next || t.at < next.t.at || (t.at === next.t.at && id < next.id))) next = { id, t }
+        if (!next) break
+        queue.delete(next.id)
+        now = next.t.at
+        next.t.fn()
+      }
+      now = end
+      await micro()
+    }
+    return { setT, clearT, advance }
+  })()
+  const winProcess = new Proxy(process, { get: (t, k) => (k === 'platform' ? 'win32' : t[k]) })
+  const winMod = load('src/main/pty/PtyManager.ts', {
+    require: id => id === 'node-pty' ? { spawn: (...a) => current.impl(...a) } : id === 'electron' ? { app: { getPath: () => os.tmpdir() } } : require(id),
+    console: ptyConsole, process: winProcess, setTimeout: clock.setT, clearTimeout: clock.clearT, setInterval: () => 0, clearInterval() {},
+  })
+  const winManager = (engine) => {
+    current = fakeHarness()
+    const pm = new winMod.PtyManager(() => ({ isDestroyed: () => false, send() {} }))
+    pm.setEngine(engine)
+    return { pm, h: current }
+  }
+  const typed = proc => proc.writes.join('')
+  {
+    const { pm, h } = winManager({ snapshotMode: 'off', shellIntegration: true })
+    pm.spawn({ paneId: 'i1', cols: 80, rows: 24 })
+    check(h.spawnCalls[0].shell === 'powershell.exe' && h.spawnCalls[0].args.join() === PI.buildIntegrationArgs().join(), 'a bare default PowerShell spawns with the integration args')
+    check(h.spawnCalls[0].opts.env.SNAOS_SHELL_INTEGRATION === '1', 'and SNAOS_SHELL_INTEGRATION=1 in its env')
+    pm.spawn({ paneId: 'i2', args: ['-NoLogo'], cols: 80, rows: 24 })
+    check(h.spawnCalls[1].args.join() === '-NoLogo' && !('SNAOS_SHELL_INTEGRATION' in h.spawnCalls[1].opts.env), 'a spawn with args keeps them, without the flag')
+    pm.setEngine({ snapshotMode: 'off', shellIntegration: false })
+    pm.spawn({ paneId: 'i3', cols: 80, rows: 24 })
+    check(h.spawnCalls[2].args.length === 0 && !('SNAOS_SHELL_INTEGRATION' in h.spawnCalls[2].opts.env), 'with the setting off PowerShell launches without extra args')
+    pm.setEngine({ snapshotMode: 'off' })
+    pm.spawn({ paneId: 'i4', cols: 80, rows: 24 })
+    check(h.spawnCalls[3].args.length === 0, 'an engine payload without shellIntegration leaves it off')
+    pm.killAll()
+  }
+  // FR-30: the initial command waits for the first prompt mark.
+  {
+    const { pm, h } = winManager({ snapshotMode: 'off', shellIntegration: true })
+    pm.spawn({ paneId: 'r1', cols: 80, rows: 24, initialCommand: 'claude' })
+    await clock.advance(2000)
+    check(typed(h.procs[0]) === '', 'a slow profile: nothing typed before the prompt shows (2 s)')
+    h.procs[0].emit('Loading profile...\r\n\x1b]13')
+    h.procs[0].emit('3;A\x07PS C:\\> \x1b]133;B\x07')
+    check(typed(h.procs[0]) === 'claude\r', 'the first 133;A (split across chunks) types the command')
+    await clock.advance(5000)
+    check(typed(h.procs[0]) === 'claude\r', 'typed once')
+    pm.spawn({ paneId: 'r2', cols: 80, rows: 24, initialCommand: 'codex' })
+    await clock.advance(400)
+    check(typed(h.procs[1]) === '', 'with marks known to work, the next pane waits for its own mark too')
+    h.procs[1].emit('\x1b]133;A\x07PS> ')
+    check(typed(h.procs[1]) === 'codex\r', 'and types on it')
+    pm.killAll()
+  }
+  {
+    const { pm, h } = winManager({ snapshotMode: 'off', shellIntegration: true })
+    pm.spawn({ paneId: 't1', cols: 80, rows: 24, initialCommand: 'claude' })
+    await clock.advance(2499)
+    check(typed(h.procs[0]) === '', 'no mark yet at 2499 ms')
+    await clock.advance(1)
+    check(typed(h.procs[0]) === 'claude\r', 'at 2500 ms without a mark the command is typed anyway')
+    h.procs[0].emit('\x1b]133;A\x07PS> ')
+    check(typed(h.procs[0]) === 'claude\r', 'a late mark does not type it again')
+    pm.spawn({ paneId: 't2', cols: 80, rows: 24, initialCommand: 'claude' })
+    await clock.advance(350)
+    check(typed(h.procs[1]) === 'claude\r', 'after one pane timed out, the next uses the 350 ms timer')
+    pm.setEngine({ snapshotMode: 'off', shellIntegration: false })
+    pm.spawn({ paneId: 't3', cols: 80, rows: 24, initialCommand: 'claude' })
+    await clock.advance(349)
+    check(typed(h.procs[2]) === '', 'without the integration: nothing before 350 ms')
+    await clock.advance(1)
+    check(typed(h.procs[2]) === 'claude\r', 'and the command at 350 ms, as before')
+    pm.spawn({ paneId: 't4', cols: 80, rows: 24, initialCommand: 'claude' })
+    h.procs[3].exit(0)
+    await clock.advance(3000)
+    check(typed(h.procs[3]) === '', 'a pty that exits while waiting never gets the command')
+    pm.killAll()
+  }
+  // FR-31: an anchored waitFor still matches a prompt that ends in a mark.
+  {
+    const { pm, h } = winManager({ snapshotMode: 'off', shellIntegration: true })
+    pm.spawn({ paneId: 'w1', cols: 80, rows: 24, setup: [{ send: 'ssh host', waitFor: '/> $/', timeoutMs: 10000, delayMs: 10 }, { send: 'secret', waitFor: '/password: $/', timeoutMs: 10000, delayMs: 10 }] })
+    await clock.advance(400)
+    h.procs[0].emit('Loading...\r\n> not yet\r\n')
+    await clock.advance(50)
+    check(typed(h.procs[0]) === '', 'no prompt at the end yet: the step waits')
+    h.procs[0].emit('\x1b]133;D;0\x07\x1b]133;A\x07PS C:\\> \x1b]133;B\x07')
+    await clock.advance(50)
+    check(typed(h.procs[0]) === 'ssh host\r', '/> $/ matches the local prompt with the marks on')
+    h.procs[0].emit('user@host password: ')
+    await clock.advance(50)
+    check(typed(h.procs[0]) === 'ssh host\rsecret\r', 'the next step matches as usual')
+    pm.killAll()
+  }
+
+  // Schema 14 key (R31-00 owns the bump): tolerant of junk, default on.
+  {
+    const { parseConfig } = load('src/main/store/schema.ts')
+    const base = {
+      version: 13,
+      workspaces: [], presets: [], activeWorkspaceId: null,
+      settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false },
+    }
+    const withKey = v => parseConfig({ ...base, settings: { ...base.settings, terminalShellIntegration: v } })
+    check(parseConfig(base).settings.terminalShellIntegration === true && withKey('x').settings.terminalShellIntegration === true && withKey(false).settings.terminalShellIntegration === false, 'terminalShellIntegration defaults to true, junk falls back, false is kept')
+    const { engineFromSettings } = load('src/shared/terminalEngine.ts')
+    check(engineFromSettings({}).shellIntegration === true && engineFromSettings({ terminalShellIntegration: false }).shellIntegration === false && engineFromSettings(null).shellIntegration === true, 'engineFromSettings carries the setting (on unless turned off)')
+  }
+
+  // Keymap (E6-FR-27): the prompt jumps on Ctrl+Shift+PageUp/PageDown, remappable.
+  {
+    const { KEY_ACTIONS, resolveKeymap } = load('src/renderer/lib/keymap.ts')
+    const km = resolveKeymap(undefined)
+    check(km.promptPrev === 'Ctrl+Shift+PageUp' && km.promptNext === 'Ctrl+Shift+PageDown', 'promptPrev/promptNext defaults per D8')
+    const accels = KEY_ACTIONS.map(a => a.defaultAccel)
+    check(new Set(accels).size === accels.length && km.workspacePrev === 'Ctrl+PageUp' && km.focusPrevPane === 'Ctrl+Alt+Left', 'no default accelerator is shared')
+    check(resolveKeymap({ promptPrev: 'Alt+Up' }).promptPrev === 'Alt+Up', 'the prompt jumps can be remapped')
+  }
+
+  // Renderer marks (E6-FR-26..29) on a real headless xterm 5.5.
+  {
+    const SM = load('src/renderer/components/terminal/shellMarks.ts', { TextEncoder, TextDecoder })
+    const { Terminal } = require('@xterm/headless')
+    const make = (cols = 40, rows = 10) => {
+      const term = new Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true })
+      const marks = new SM.ShellMarks(term, { exitTitle: c => 'Exited with code ' + c })
+      const write = d => new Promise(r => term.write(d, r))
+      return { term, marks, write }
+    }
+    const A = '\x1b]133;A\x07', B = '\x1b]133;B\x07', C = '\x1b]133;C\x07', D = c => `\x1b]133;D;${c}\x07`
+    {
+      const { term, marks, write } = make()
+      check(!marks.hasLastOutput() && marks.lastOutput() === null && !marks.navigate(-1) && !marks.navigate(1), 'without marks every action is inert')
+      await write(`${A}PS C:\\> ${B}dir\r\n${C}\r\n    Directory: C:\\\r\n\r\nfile1.txt   \r\nfile2.txt\r\n\r\n${D(0)}${A}PS C:\\> ${B}`)
+      check(marks.commands.length === 2 && marks.commands[0].exitCode === 0 && marks.commands[0].start && marks.commands[0].end && !marks.commands[1].start, 'A/C/D make one finished command plus the live prompt')
+      check(marks.hasLastOutput() && marks.lastOutput() === '    Directory: C:\\\n\nfile1.txt\nfile2.txt', 'the last output is the text between C and D, trimmed, without the prompt')
+      await write(`cmd /c exit 7\r\n${C}${D(7)}${A}PS C:\\> ${B}`)
+      check(marks.commands[1].exitCode === 7 && marks.lastOutput() === '', 'a failing command records its code; an empty output copies empty')
+      await write(`echo ${'x'.repeat(70)}\r\n${C}${'y'.repeat(70)}\r\n${D(0)}${A}PS C:\\> ${B}`)
+      check(marks.lastOutput() === 'y'.repeat(70), 'a soft-wrapped output line is joined')
+      await write(`\x1b[?1049h${A}${C}${D(3)}\x1b[?1049l`)
+      check(marks.commands.length === 4 && marks.commands[2].exitCode === 0, 'marks inside the alternate screen are ignored')
+      term.dispose()
+    }
+    {
+      // FR-27: jumps put the prompt on the first row of the viewport.
+      const { term, marks, write } = make(40, 10)
+      for (let i = 0; i < 5; i++) {
+        let out = ''
+        for (let j = 0; j < 30; j++) out += `cmd${i} line ${j}\r\n`
+        await write(`${A}PS> ${B}cmd${i}\r\n${C}${out}${D(0)}`)
+      }
+      await write(`${A}PS> ${B}`)
+      const lines = marks.promptLines()
+      const buf = () => term.buffer.active
+      check(lines.length === 6 && buf().viewportY === buf().baseY, 'six prompts, viewport at the bottom')
+      check(marks.navigate(-1) && buf().viewportY === lines[4], 'previous: the last command prompt on the first row')
+      check(marks.navigate(-1) && buf().viewportY === lines[3], 'previous again: the one before')
+      check(marks.navigate(1) && buf().viewportY === lines[4], 'next: back down one prompt')
+      check(marks.navigate(1) && buf().viewportY === buf().baseY, 'next past the last command: capped at the live bottom')
+      term.scrollToLine(lines[0])
+      check(!marks.navigate(-1) && buf().viewportY === lines[0], 'no prompt above the first: nothing moves')
+      check(SM.navTarget([2, 10, 20], 15, 30, -1) === 10 && SM.navTarget([2, 10, 20], 15, 30, 1) === 20 && SM.navTarget([2, 10, 40], 15, 30, 1) === 30 && SM.navTarget([], 5, 9, 1) === null && SM.navTarget([-1, 3], 5, 9, -1) === 3, 'navTarget picks the closest prompt and skips trimmed markers')
+      term.dispose()
+    }
+    {
+      // FR-26: 1000 commands per pane, the oldest markers disposed.
+      const { term, marks, write } = make(40, 10)
+      let chunk = ''
+      for (let i = 0; i < 1200; i++) chunk += `${A}> ${B}c\r\n${C}o${i}\r\n${D(i % 2)}`
+      await write(chunk.slice(0, chunk.length / 2))
+      const first = marks.commands[0].prompt
+      await write(chunk.slice(chunk.length / 2))
+      check(marks.commands.length === 1000 && first.isDisposed, 'after 1200 commands 1000 records stay and the old markers are disposed')
+      check(marks.lastOutput() === 'o1199' && marks.commands.at(-1).exitCode === 1, 'the newest record is intact')
+      marks.dispose()
+      check(marks.commands.length === 0, 'dispose drops every record')
+      await write(`${A}> `)
+      check(marks.commands.length === 0, 'a disposed parser no longer handles marks')
+      term.dispose()
+    }
+    // FR-29: the 1 MB cap never splits a character.
+    check(SM.capBytes('abc', 10) === 'abc' && SM.capBytes('aé€', 4) === 'aé' && SM.capBytes('€€', 5) === '€' && SM.MAX_COPY_BYTES === 1048576, 'capBytes cuts at a UTF-8 character boundary')
+  }
 }
 main().catch(e => { console.error(e); process.exit(1) })

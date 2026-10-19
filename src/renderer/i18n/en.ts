@@ -510,6 +510,8 @@ export const en = {
   'keys.quickCommands': 'Quick Commands',
   'keys.toggleChanges': 'Show or hide the Changes panel',
   'keys.agentsBoard': 'Agents board',
+  'keys.promptPrev': 'Previous prompt',
+  'keys.promptNext': 'Next prompt',
   'keys.fixedHint': 'Fixed: Alt+1..9 opens the Nth workspace and Ctrl+1..9 focuses the Nth visible console (Settings > Agents can turn it off).',
   'palette.waiting': 'Waiting for you',
   'palette.consoleItem': 'Console',
@@ -575,6 +577,7 @@ export const en = {
   'pane.close': 'Close',
   'pane.restart': 'Restart console',
   'pane.redraw': 'Redraw',
+  'pane.copyLastOutput': 'Copy last command output',
   'pane.clearSavedHistory': 'Clear saved history',
   'pane.restartClean': 'Restart clean',
   'pane.exited': 'exited',
@@ -1000,6 +1003,9 @@ export const en = {
   'settings.unicode11': 'Unicode 11 widths (emoji and symbols)',
   'settings.unicode11Hint':
     'Improves the alignment of emoji and Claude/Codex borders. Turn it off if you see shifted columns.',
+  'settings.shellIntegration': 'PowerShell integration (prompt marks and UTF-8)',
+  'settings.shellIntegrationHint':
+    'Marks each prompt and command: the Previous/Next prompt shortcuts jump between them, a red bar flags a failed command and the pane menu copies the last output. Also sets UTF-8 without BOM. Windows only. Applies to new or restarted consoles.',
   'settings.persistGroup': 'Saved history',
   'settings.persistScrollback': 'Save console history between restarts',
   'settings.persistScrollbackHint':
@@ -1021,6 +1027,8 @@ export const en = {
   'settings.snapshotLazy': 'Deferred',
   'settings.snapshotOff': 'Off',
   'terminal.shellNotFound': 'Configured shell not found: {requested}. Using {used}.',
+  'terminal.exitCodeTitle': 'Exited with code {code}',
+  'terminal.outputCopied': 'Copied',
   'settings.language': 'Language',
   'settings.languageHint': 'Interface language.',
   'settings.restoreLast': 'Restore the last workspace on open',

@@ -280,6 +280,7 @@ Existentes, no reutilizar: Ctrl+K palette, Ctrl+Tab, Ctrl+PageDown, Ctrl+PageUp,
 | v2.2 | Buscar en ajustes | Ctrl+F | solo dentro del modal de ajustes | E5 |
 | v2.2 | Avanzar en el wizard | Enter | solo dentro del wizard | E5 |
 | v3.0 | `agentsBoard` | Ctrl+Shift+A | remapeable (enmienda D8, R30-14) | E6 |
+| v3.1 | `promptPrev` / `promptNext` | Ctrl+Shift+PageUp / Ctrl+Shift+PageDown | remapeable; inertes sin marcas OSC 133 (E6-FR-27, R31-01) | E6 |
 
 Ids y combinaciones de v2.1 segun D8 (gana el contrato): `reopenClosedPane` es Ctrl+Shift+U (no Ctrl+Shift+Z) y `focusNextPane`/`focusPrevPane` son Ctrl+Alt+Right/Left (no Ctrl+Shift+PageDown/PageUp, que quedan para la navegacion entre prompts de E6). El id de "siguiente que espera" es `nextWaiting` (el plan de R21-05 lo llama `nextAttention`). Ctrl+1..9 respeta `settings.agents.ctrlDigitFocus` y no actua dentro de campos editables.
 
