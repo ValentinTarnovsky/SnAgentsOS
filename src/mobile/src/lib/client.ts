@@ -33,6 +33,7 @@ import {
   REMOTE_CLOSE,
   type RemoteClientMsg,
   type RemoteCtlAction,
+  type RemoteHistorySession,
   type RemotePaneStatus,
   type RemoteServerMsg,
   type RemoteStateSnapshot,
@@ -642,6 +643,14 @@ class RemoteClient {
     return wait as Promise<PendingOutcome<T>>
   }
 
+  /**
+   * E3-FR-36: ask for the session history (pending by id, 10s). `workspaceId`
+   * = "This workspace"; the answer is newest first, at most 100 sessions.
+   */
+  requestHistory(req: { query?: string; workspaceId?: string }): Promise<PendingOutcome<RemoteHistorySession[]>> {
+    return this.request<RemoteHistorySession[]>((id) => ({ v: PROTOCOL_VERSION, type: 'historyReq', id, ...req }))
+  }
+
   /** The answer to an id-keyed request arrived; false when nothing waits (late). */
   settleRequest(id: string, value: unknown): boolean {
     return this.pendingById.resolve(id, value)
@@ -1003,6 +1012,9 @@ class RemoteClient {
         break
       case 'ctlAck':
         this.handleCtlAck(msg)
+        break
+      case 'historyRes':
+        this.pendingById.resolve(msg.id, Array.isArray(msg.sessions) ? msg.sessions : [])
         break
       case 'revoked':
         log('warn', 'revoked')

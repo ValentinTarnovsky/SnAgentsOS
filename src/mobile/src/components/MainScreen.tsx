@@ -11,7 +11,7 @@
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { ChevronLeft, MoreVertical, Zap } from 'lucide-react'
+import { ChevronLeft, History, MoreVertical, Zap } from 'lucide-react'
 import { RemoteTerminal } from './RemoteTerminal'
 import { KeyBar } from './KeyBar'
 import { PaneTabs } from './PaneTabs'
@@ -24,6 +24,7 @@ import { PromptCard } from './prompts/PromptCard'
 import { AgentEndStrip } from './AgentEndStrip'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { openDiagnostics } from '../lib/connLog'
+import { openHistory } from '../lib/history'
 import { StatusIndicator } from './StatusIndicator'
 import { WaitingPill } from './WaitingPill'
 import { ToastStack } from './ToastStack'
@@ -163,6 +164,17 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
             onSelect: () => {
               setKebab(null)
               setQuickOpen(true)
+            },
+          },
+          {
+            // E3-FR-36: the session history of the viewed console's workspace.
+            id: 'history',
+            icon: <History size={16} />,
+            label: t('history.open'),
+            onSelect: () => {
+              const wsId = kebab?.workspaceId
+              setKebab(null)
+              if (wsId) openHistory(wsId)
             },
           },
         ]}
