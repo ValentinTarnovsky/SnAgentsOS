@@ -2,8 +2,8 @@
  * One workspace on Home (E2-FR-04, 09, 15, 50). The header shows the chevron,
  * the name, how many consoles it has, a red badge with the ones in action
  * (visible while collapsed too), the "On the PC" chip when it is the desktop's
- * active workspace, the git chip under the name and a kebab. A tap on the
- * header collapses or expands it (persisted in snagentsos.home.collapsed;
+ * active workspace, the git chip under the name (a tap opens Changes,
+ * E3-FR-52) and a kebab. A tap on the header collapses or expands it (persisted in snagentsos.home.collapsed;
  * everything starts expanded). Rows follow homeRows: action > error > unread
  * done > working > the rest, layoutOrder inside each rank.
  */
@@ -41,37 +41,44 @@ function WorkspaceSectionImpl(props: WorkspaceSectionProps): ReactNode {
   const Chevron = collapsed ? ChevronRight : ChevronDown
   return (
     <section data-workspace={ws.id} data-collapsed={collapsed} className="mb-4">
-      <div className="mb-1.5 flex items-center gap-1">
-        <button
-          data-ws-toggle
-          onClick={() => props.onToggle(ws.id)}
-          aria-expanded={!collapsed}
-          aria-label={t(collapsed ? 'home.expand' : 'home.collapse', { ws: ws.name })}
-          className="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded-btn px-1 text-left active:bg-card"
-        >
-          <Chevron size={16} className="shrink-0 text-text-secondary" />
-          <span className="flex min-w-0 flex-1 flex-col">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="truncate text-xs font-semibold uppercase tracking-wide text-text-primary">{ws.name}</span>
-              <span data-ws-count className="shrink-0 text-[11px] text-text-secondary">{ws.panes.length}</span>
-              {waiting > 0 && (
-                <span
-                  data-ws-badge={waiting}
-                  aria-label={t('home.actionBadge', { n: waiting })}
-                  className="flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white"
-                >
-                  {waiting}
-                </span>
-              )}
-              {onPc && (
-                <span data-on-pc className="shrink-0 rounded-full bg-card px-1.5 py-0.5 text-[10px] font-medium text-text-secondary ring-1 ring-border">
-                  {t('home.onPc')}
-                </span>
-              )}
+      <div className="mb-1.5 flex items-start gap-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <button
+            data-ws-toggle
+            onClick={() => props.onToggle(ws.id)}
+            aria-expanded={!collapsed}
+            aria-label={t(collapsed ? 'home.expand' : 'home.collapse', { ws: ws.name })}
+            className={clsx('flex min-w-0 items-center gap-1.5 rounded-btn px-1 text-left active:bg-card', ws.git ? 'min-h-9' : 'min-h-11')}
+          >
+            <Chevron size={16} className="shrink-0 text-text-secondary" />
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate text-xs font-semibold uppercase tracking-wide text-text-primary">{ws.name}</span>
+                <span data-ws-count className="shrink-0 text-[11px] text-text-secondary">{ws.panes.length}</span>
+                {waiting > 0 && (
+                  <span
+                    data-ws-badge={waiting}
+                    aria-label={t('home.actionBadge', { n: waiting })}
+                    className="flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white"
+                  >
+                    {waiting}
+                  </span>
+                )}
+                {onPc && (
+                  <span data-on-pc className="shrink-0 rounded-full bg-card px-1.5 py-0.5 text-[10px] font-medium text-text-secondary ring-1 ring-border">
+                    {t('home.onPc')}
+                  </span>
+                )}
+              </span>
             </span>
-            <GitChip git={ws.git} />
-          </span>
-        </button>
+          </button>
+          {/* Its own button (a tap opens Changes), so it sits under the toggle, not inside it. */}
+          {ws.git && (
+            <span className="flex min-w-0 pl-[22px]">
+              <GitChip git={ws.git} workspaceId={ws.id} />
+            </span>
+          )}
+        </div>
         <button
           data-ws-menu
           onClick={() => props.onMenu(ws.id)}

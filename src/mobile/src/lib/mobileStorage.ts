@@ -13,6 +13,8 @@ import { BRAND } from '@shared/brand'
 export const STORAGE_PREFIX = BRAND.mobileStoragePrefix
 export const DRAFT_PREFIX = `${STORAGE_PREFIX}draft.`
 export const INPUT_MODE_PREFIX = `${STORAGE_PREFIX}inputMode.`
+/** E3-FR-54: review notes written on this phone, one key per workspace. */
+export const REMOTE_NOTES_PREFIX = `${STORAGE_PREFIX}remote.notes.`
 
 export function storageGet(key: string): string | null {
   try {
@@ -66,13 +68,15 @@ export function storageWipeGeneration(): number {
 }
 
 /**
- * Remove every `snagentsos.draft.*` and `snagentsos.inputMode.*` key (unpair,
- * close 4403, `revoked`). Keys are collected first and removed one at a time,
- * so one failure never skips the others. Returns how many were removed.
+ * Remove every `snagentsos.draft.*`, `snagentsos.inputMode.*` and
+ * `snagentsos.remote.notes.*` key (unpair, close 4403, `revoked`): a phone
+ * that lost its pairing keeps no review notes about the PC's code. Keys are
+ * collected first and removed one at a time, so one failure never skips the
+ * others. Returns how many were removed.
  */
 export function clearMobileStorage(): number {
   wipeGeneration++
-  const keys = [...storageKeys(DRAFT_PREFIX), ...storageKeys(INPUT_MODE_PREFIX)]
+  const keys = [...storageKeys(DRAFT_PREFIX), ...storageKeys(INPUT_MODE_PREFIX), ...storageKeys(REMOTE_NOTES_PREFIX)]
   for (const key of keys) storageRemove(key)
   return keys.length
 }

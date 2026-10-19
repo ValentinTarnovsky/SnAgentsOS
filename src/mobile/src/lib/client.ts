@@ -37,6 +37,8 @@ import {
   REMOTE_CLOSE,
   type RemoteClientMsg,
   type RemoteCtlAction,
+  type RemoteGitReply,
+  type RemoteGitRequest,
   type RemoteHistorySession,
   type RemotePaneStatus,
   type RemoteServerMsg,
@@ -63,6 +65,7 @@ import { actionTotal, createPaneNotifier, remoteTitle } from './notify'
 import { takePendingDeepLink } from './deepLink'
 import { paneById, paneOpenable, statusMapOf, workspaceOfPane } from './workspace'
 import { clearMobileStorage } from './mobileStorage'
+import { useNotesStore } from './notesStore'
 import { chunkInput } from './composerSend'
 import { PendingMap, type PendingOutcome } from './pending'
 import { pruneDrafts } from './drafts'
@@ -842,6 +845,14 @@ class RemoteClient {
     return this.request<RemoteHistorySession[]>((id) => ({ v: PROTOCOL_VERSION, type: 'historyReq', id, ...req }))
   }
 
+  /**
+   * E3-FR-52/53: one page of a workspace's change list or of a file's diff
+   * (pending by id, 10s). The answer is the gitRes without its envelope.
+   */
+  requestGit(req: RemoteGitRequest): Promise<PendingOutcome<RemoteGitReply>> {
+    return this.request<RemoteGitReply>((id) => ({ v: PROTOCOL_VERSION, type: 'gitReq', id, ...req }))
+  }
+
   /** The answer to an id-keyed request arrived; false when nothing waits (late). */
   settleRequest(id: string, value: unknown): boolean {
     return this.pendingById.resolve(id, value)
@@ -1217,6 +1228,9 @@ class RemoteClient {
       case 'chatAppend':
         this.handleChatAppend(msg)
         break
+      case 'gitRes':
+        this.pendingById.resolve(msg.id, { ok: msg.ok, data: msg.data, page: msg.page, done: msg.done } satisfies RemoteGitReply)
+        break
       case 'revoked':
         log('warn', 'revoked')
         this.forgetComposerState()
@@ -1363,9 +1377,11 @@ class RemoteClient {
     }
   }
 
-  /** Drafts and input modes never outlive the pairing (E1-FR-28). */
+  /** Drafts, input modes and review notes never outlive the pairing (E1-FR-28, E3-FR-54). */
   private forgetComposerState(): void {
     clearMobileStorage()
+    // Else the notes still in memory would be written back on the next edit.
+    useNotesStore.getState().forgetAll()
     store.getState().update({ inputModes: {}, composerOneShot: null, httpToken: null, pushKey: null, secureUrl: null })
   }
 
