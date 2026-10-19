@@ -49,6 +49,7 @@ import { WorktreeMissingCard } from '@/components/layout/WorktreeMissingCard'
 import { reopenClosedConsole, restartClean, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
+import { PaneStatusLine } from './PaneStatusLine'
 
 interface PaneCellProps {
   workspace: Workspace
@@ -352,6 +353,7 @@ export function PaneCell({
           // The topic gives way first: it shrinks to nothing before the title truncates.
           <span className="flex min-w-0 flex-1 items-baseline overflow-hidden text-xs" title={topic ? `${pane.title} · ${topic}` : undefined}>
             <span className="min-w-0 truncate font-medium text-text-secondary">{pane.title}</span>
+            <PaneStatusLine paneId={pane.id} />
             {topic && (
               <span data-pane-topic className="min-w-0 truncate whitespace-pre text-text-secondary/60 [flex-shrink:9999]">
                 {` · ${topic}`}
