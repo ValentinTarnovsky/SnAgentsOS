@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArchiveRestore, BellRing, Bot, FileDiff, Megaphone, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
+import { ArchiveRestore, BellRing, Bot, FileDiff, GitBranch, Megaphone, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
 import { formatAgeShort } from '@shared/agents'
 import { visiblePaneIds } from '@shared/status'
 import { useAppStore } from '@/lib/store'
@@ -20,6 +20,11 @@ import { StatusGlyph } from '@/components/ui/StatusDot'
 import { glyphOf, useNow } from '@/components/sidebar/AgentRows'
 import { orderQuickCommands } from '@shared/quickCommands'
 import { openChangesPanel } from '@/lib/changesPanel'
+import { useGitStore } from '@/lib/gitStore'
+import { workspaceGitKey } from '@/lib/gitChip'
+import { useWorktreeStore } from '@/lib/worktreeStore'
+import { templateFromPreset, worktreeOffer } from '@/lib/worktrees'
+import { toast } from '@/lib/toast'
 
 interface Command {
   id: string
@@ -74,6 +79,7 @@ export function CommandPalette() {
   const setOpen = useAppStore((s) => s.setPaletteOpen)
   const workspaces = useAppStore((s) => s.workspaces)
   const presets = useAppStore((s) => s.presets)
+  const connections = useAppStore((s) => s.connections)
   const quickCommands = useAppStore((s) => s.quickCommands)
   const activeId = useAppStore((s) => s.activeWorkspaceId)
   const setActive = useAppStore((s) => s.setActive)
@@ -145,6 +151,24 @@ export function CommandPalette() {
           run: () => addPane(activeId, { type: p.type, presetId: p.id, title: p.name, color: p.color, icon: p.icon }),
         })
       }
+      // E7-FR-27c: the same presets in an isolated worktree of the workspace cwd.
+      const ws = workspaces.find((w) => w.id === activeId)
+      const git = useGitStore.getState()
+      const offer = ws ? worktreeOffer(ws, null, presets, connections, { summary: git.summaries[workspaceGitKey(ws.id)], error: git.errors[workspaceGitKey(ws.id)] }) : null
+      if (ws && offer?.show) {
+        for (const p of presets) {
+          cmds.push({
+            id: `wt-${p.id}`,
+            label: `${t('worktree.paletteNew')}: ${p.name}`,
+            hint: offer.blocked ? t(offer.blocked) : t('palette.console'),
+            icon: GitBranch,
+            run: () => {
+              if (offer.blocked) toast.warning(t(offer.blocked))
+              else useWorktreeStore.getState().openLaunch({ workspaceId: ws.id, repoCwd: offer.repoCwd, template: templateFromPreset(p) })
+            },
+          })
+        }
+      }
     }
     // E8-FR-06: globals and the active workspace's own, run like the popover.
     for (const qc of orderQuickCommands(quickCommands, activeId)) {
@@ -160,7 +184,7 @@ export function CommandPalette() {
       cmds.push({ id: `theme-${th.name}`, label: `${t('palette.theme')}: ${th.label}`, hint: t('palette.appearance'), icon: Palette, run: () => updateSettings({ theme: th.name }) })
     }
     return cmds
-  }, [workspaces, presets, quickCommands, activeId, canReopen, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
+  }, [workspaces, presets, connections, quickCommands, activeId, canReopen, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
 
   // E5-FR-16: with a query every console is searchable by title, workspace,
   // its agent's topic and first prompt.
