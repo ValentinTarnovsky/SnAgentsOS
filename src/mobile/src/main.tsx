@@ -13,9 +13,14 @@ import '@fontsource/jetbrains-mono/700.css'
 import { App } from './App'
 import { initViewport } from './lib/viewport'
 import { client } from './lib/client'
+import { registerServiceWorker } from './lib/serviceWorker'
+import { startWakeLock } from './lib/wakeLock'
 
 initViewport()
 client.start()
+// E3-FR-47 / FR-49: both only act in a secure context.
+registerServiceWorker()
+startWakeLock()
 
 const root = document.getElementById('root')
 if (root) createRoot(root).render(<App />)
