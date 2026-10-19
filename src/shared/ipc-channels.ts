@@ -152,6 +152,14 @@ export const CH = {
   AGENTS_FORGET: 'agents:forget', // send (paneId)
   AGENTS_READY: 'agents:ready', // main -> renderer ({ paneId, sessionId, phase: 'start' | 'idle' })
 
+  // Review notes (E7-FR-17..21): main owns dataDir()/review-notes.json; the renderer mirrors it per workspace.
+  GIT_NOTES_LIST: 'git:notesList', // invoke (workspaceId) -> ReviewNotesListRes { notes, rev }
+  GIT_NOTES_UPSERT: 'git:notesUpsert', // invoke (ReviewNoteInput) -> ReviewNote (rejects 'invalid' | 'limit')
+  GIT_NOTES_DELETE: 'git:notesDelete', // invoke ({ ids?, workspaceId? }) -> void
+  GIT_NOTES_MARK_SENT: 'git:notesMarkSent', // invoke ({ ids, paneId, sentAt }) -> void
+  GIT_NOTES_PRUNE: 'git:notesPrune', // send (workspaceIds still in the store)
+  GIT_NOTES_CHANGED: 'git:notesChanged', // main -> renderer ({ workspaceId, rev })
+
   // Git chip (E7-FR-05..10). Names per PLAN D6; a target carries a key (ws:<id> | pane:<id>) besides its cwd.
   GIT_SET_WATCH: 'git:setWatch', // send (GitTarget[])
   GIT_UPDATE: 'git:update', // main -> renderer (GitUpdateEvt { key, cwd, summary, error? }, only on change)
