@@ -8,6 +8,7 @@ import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { StatusGlyph, STATUS_TIP_DELAY, type GlyphKind } from '@/components/ui/StatusDot'
+import { useStatusLines } from '@/lib/statusLineStore'
 
 /** Ages on the rows move on their own this often. */
 const AGE_TICK_MS = 30_000
@@ -38,6 +39,8 @@ export function AgentRows({ entries, presets, topicAsTitle }: { entries: AgentEn
   const lang = useLang()
   const now = useNow(AGE_TICK_MS)
   const [expanded, setExpanded] = useState(false)
+  // `snaos status` lines (E8-FR-19) replace the phrase on the second line.
+  const statusLines = useStatusLines((s) => s.lines)
   if (entries.length === 0) return null
   const { shown, hidden } = expanded ? { shown: entries, hidden: 0 } : pickAgentRows(entries)
 
@@ -47,7 +50,9 @@ export function AgentRows({ entries, presets, topicAsTitle }: { entries: AgentEn
         const info = e.status ?? e.session
         const title = agentTitle(e.pane, presets, info, topicAsTitle)
         const phrase = agentPhrase(e, t, lang, now)
-        const full = e.status?.detail?.text && !phrase.includes(e.status.detail.text) ? `${phrase}\n${e.status.detail.text}` : phrase
+        const statusLine = statusLines[e.id]
+        const detailed = e.status?.detail?.text && !phrase.includes(e.status.detail.text) ? `${phrase}\n${e.status.detail.text}` : phrase
+        const full = statusLine ? `${statusLine}\n${detailed}` : detailed
         const Icon = iconFor(e.pane.icon)
         return (
           <Tooltip
@@ -79,7 +84,7 @@ export function AgentRows({ entries, presets, topicAsTitle }: { entries: AgentEn
                   <Icon size={11} className="shrink-0" style={{ color: e.pane.color }} />
                   <span className={cn('truncate text-[12px] leading-4', e.unread ? 'font-semibold text-text-primary' : 'text-text-primary/90')}>{title}</span>
                 </span>
-                <span className="block truncate text-[11px] leading-4 text-text-secondary">{phrase}</span>
+                <span className="block truncate text-[11px] leading-4 text-text-secondary" {...(statusLine ? { 'data-agent-status-line': '' } : {})}>{statusLine ?? phrase}</span>
               </span>
             </button>
           </Tooltip>

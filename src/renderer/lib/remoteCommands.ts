@@ -12,6 +12,7 @@ import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
 import { runRemoteQuickCommand } from './quickCommands'
 import { runOpenPath, runOpenUrl } from './remoteOpen'
 import { platformDefaultShell, runAgentEnd } from './agentEndRun'
+import { runCtlOp } from './ctlCommands'
 import { toast } from './toast'
 import { translate } from '@/i18n'
 import type { Language } from '@shared/types'
@@ -231,16 +232,28 @@ export function initRemoteCommands(): () => void {
   if (wired) return () => undefined
   wired = true
   const off = window.snApi.remote.onCommand((cmd: RemoteCommand) => {
-    const title = targetTitle(cmd.action)
+    // snaos CLI bus (R30-11): main-only ops on the same relay, no phone toast.
+    if (cmd.action.kind === 'cli') {
+      let res: ReturnType<typeof runCtlOp>
+      try {
+        res = runCtlOp(cmd.action.op)
+      } catch (err) {
+        res = { ok: false, error: err instanceof Error ? err.message : 'internal' }
+      }
+      window.snApi.remote.commandResult({ id: cmd.id, ...res })
+      return
+    }
+    const action = cmd.action
+    const title = targetTitle(action)
     const report = (result: CmdResult): void => {
       window.snApi.remote.commandResult({ id: cmd.id, ...result })
-      const notice = remoteNoticeText(cmd.action, result, cmd.deviceName, title, useAppStore.getState().settings.language)
+      const notice = remoteNoticeText(action, result, cmd.deviceName, title, useAppStore.getState().settings.language)
       if (notice) toast.info(notice)
     }
     const failed = (err: unknown): CmdResult => ({ ok: false, error: err instanceof Error ? err.message : 'error' })
     let out: CmdResult | Promise<CmdResult>
     try {
-      out = run(cmd.action)
+      out = run(action)
     } catch (err) {
       out = failed(err)
     }
