@@ -58,7 +58,10 @@ window.result = (async () => {
  setLang('en');
 
  // Pairing path: live log under the spinner, then the 25s timeout.
- flushSync(() => useDiagStore.getState().update({ pairCeilingAt: Date.now() + 20000, pairStartedAt: Date.now() - 1000, pairTimedOut: false }));
+ // Start the attempt strictly after the earlier entries (a fast runner logs them within the same second).
+ await wait(5);
+ flushSync(() => useDiagStore.getState().update({ pairCeilingAt: Date.now() + 20000, pairStartedAt: Date.now(), pairTimedOut: false }));
+ await wait(5);
  log('info', 'pair sent');
  flushSync(() => root.render(<ConnectingScreen />)); await wait();
  const pairLog = host.querySelector('[data-pair-log]');
