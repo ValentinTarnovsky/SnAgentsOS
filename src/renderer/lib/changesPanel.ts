@@ -11,13 +11,13 @@ import { workspaceGitKey } from './gitChip'
  * panel lives over the active workspace's grid; closing it gives the keyboard
  * back to the console the user was in.
  */
-export function openChangesPanel(targetKey?: string): void {
+export function openChangesPanel(targetKey?: string, opts: { base?: string } = {}): void {
   const s = useAppStore.getState()
   const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId)
   if (!ws) return
   const key = targetKey ?? panelTargets(ws)[0]?.key ?? workspaceGitKey(ws.id)
   refreshGit([key])
-  useGitStore.getState().openChanges(key)
+  useGitStore.getState().openChanges(key, key.startsWith('pane:') ? opts.base : undefined)
 }
 
 export function closeChangesPanel(): void {

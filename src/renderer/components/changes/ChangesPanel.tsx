@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
-import { LoaderCircle, MessageSquare, MessageSquarePlus, RefreshCw, WrapText, X } from 'lucide-react'
+import { GitCompareArrows, LoaderCircle, MessageSquare, MessageSquarePlus, RefreshCw, WrapText, X } from 'lucide-react'
 import type { GitArea, GitChangesRes, GitDiffReply, GitFileEntry } from '@shared/git-types'
 import type { Workspace } from '@shared/types'
 import type { ReviewNote, ReviewNoteArea, ReviewNoteInput } from '@shared/review-notes'
@@ -63,7 +63,7 @@ function storage(): Storage | null {
  * selection, the collapsed sections and (for an unchanged diff) the scroll,
  * and never blanks the panel: the old content stays up with a 12 px spinner.
  */
-export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; targetKey: string }) {
+export function ChangesPanel({ workspace, targetKey, base }: { workspace: Workspace; targetKey: string; base?: string }) {
   const t = useT()
   const reduced = useReducedMotion()
   const api = window.snApi.git
@@ -111,7 +111,7 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
     return () => api.setPanel(null)
   }, [api, targetKey])
 
-  // A new target starts clean.
+  // A new target (or a switch to / from "against base") starts clean.
   useEffect(() => {
     setData(null)
     setLoaded(false)
@@ -119,13 +119,13 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
     setDiff(null)
     setForced(new Set())
     autoPicked.current = false
-  }, [targetKey])
+  }, [targetKey, base])
 
   const load = useCallback(async () => {
     const seq = ++listSeq.current
     setLoading(true)
     try {
-      const res = await api.status(targetKey)
+      const res = await (base ? api.status(targetKey, base) : api.status(targetKey))
       if (seq !== listSeq.current) return
       setData(res)
       setFiles(targetKey, res?.files ?? [])
@@ -137,7 +137,7 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
         setLoaded(true)
       }
     }
-  }, [api, targetKey, setFiles])
+  }, [api, targetKey, base, setFiles])
 
   // First load, every summary change main pushes, and the panel poll while the window has focus.
   useEffect(() => {
@@ -177,7 +177,7 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
     const seq = ++diffSeq.current
     const force = forced.has(rowKey(selected))
     void api
-      .fileDiff({ key: targetKey, path: selected.path, area: selected.area, force })
+      .fileDiff({ key: targetKey, path: selected.path, area: selected.area, force, ...(base ? { base } : {}) })
       .then((res) => {
         if (seq !== diffSeq.current) return
         setDiff((prev) => (prev && !('error' in prev) && !('error' in res) && prev.diffRev === res.diffRev && prev.path === res.path && prev.area === res.area && !!prev.tooLarge === !!res.tooLarge ? prev : res))
@@ -185,7 +185,7 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
       .catch(() => {
         if (seq === diffSeq.current) setDiff({ error: 'git_error' })
       })
-  }, [api, targetKey, files, listed, selected, forced])
+  }, [api, targetKey, base, files, listed, selected, forced])
 
   const select = (f: GitFileEntry): void => {
     if (selected && selected.path === f.path && selected.area === f.area) return
@@ -205,12 +205,12 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
       toast.success(t('changes.copied'), { dedupeKey: 'changes-copy' })
     },
     open: (f) => {
-      void api.openFile({ key: targetKey, path: f.path }).then((ok) => {
+      void api.openFile({ key: targetKey, path: f.path, ...(base ? { base } : {}) }).then((ok) => {
         if (!ok) toast.error(t('changes.openFailed'), { dedupeKey: 'changes-open' })
       })
     },
     reveal: (f) => {
-      void api.openFile({ key: targetKey, path: f.path, reveal: true }).then((ok) => {
+      void api.openFile({ key: targetKey, path: f.path, reveal: true, ...(base ? { base } : {}) }).then((ok) => {
         if (!ok) toast.error(t('changes.openFailed'), { dedupeKey: 'changes-open' })
       })
     },
@@ -261,10 +261,12 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
     return t('changes.targetPane', { branch: branch || '?', pane: paneTitle })
   }
 
-  const total = data ? data.summary.staged + data.summary.unstaged + data.summary.untracked + data.summary.conflicts : 0
+  // Against base the list is its own set (committed work included): the status counts do not describe it.
+  const total = !data ? 0 : base ? data.files.length : data.summary.staged + data.summary.unstaged + data.summary.untracked + data.summary.conflicts
 
   // ---- review notes ----
-  const noteArea: ReviewNoteArea | null = selected && selected.area !== 'conflict' ? selected.area : null
+  // Notes anchor on the uncommitted diff: none in "against base" mode, where a line may be committed work.
+  const noteArea: ReviewNoteArea | null = selected && selected.area !== 'conflict' && !base ? selected.area : null
   const fileNotes = useMemo(() => {
     if (!selected || !noteArea) return []
     const list = notesForFile(allNotes, targetKey, selected.path, noteArea)
@@ -360,18 +362,18 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
         {editor && !editor.noteId && editor.line === 0 && <NoteEditor key="new:file" label={t('notes.file')} onSave={(b) => void saveNote(b)} onCancel={cancelNote} />}
       </div>
     ) : null
-  const worktreeCwd = (() => {
-    if (!targetKey.startsWith('pane:')) return undefined
-    const pane = workspace.panes.find((p) => p.id === targetKey.slice(5))
-    return pane ? paneWorktreePath(pane) ?? undefined : undefined
-  })()
+  const targetPane = targetKey.startsWith('pane:') ? workspace.panes.find((p) => p.id === targetKey.slice(5)) : undefined
+  const worktreeCwd = targetPane ? paneWorktreePath(targetPane) ?? undefined : undefined
+  // E7-FR-35: a worktree console can be read against the commit it started from.
+  const worktreeBase = targetPane?.worktree?.base
+  const sectionLabel = base ? (area: GitArea): string | undefined => (area === 'unstaged' ? t('changes.section.base', { sha: base.slice(0, 7) }) : undefined) : undefined
 
   let listBody: ReactNode
   if (!workspace.cwd && targetKey.startsWith('ws:')) listBody = <Empty text={t('changes.noCwd')} />
   else if (!data && gitError === 'unsafe_repo') listBody = <Empty text={t('git.err.unsafe', { path: (workspace.cwd ?? '').replace(/\\/g, '/') })} />
   else if (!data && gitError) listBody = <Empty text={t(`changes.err.${gitError}`)} />
   else if (!data) listBody = <Empty text={loaded ? t('changes.err.not_repo') : t('changes.loading')} />
-  else if (data.files.length === 0) listBody = <Empty text={t('changes.clean')} />
+  else if (data.files.length === 0) listBody = <Empty text={base ? t('changes.cleanBase') : t('changes.clean')} />
   else
     listBody = (
       <FileList
@@ -384,6 +386,7 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
         onSelect={select}
         actions={actions}
         noteCounts={noteCounts}
+        sectionLabel={sectionLabel}
       />
     )
 
@@ -460,6 +463,20 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
         <span className="flex w-3 shrink-0 justify-center" aria-hidden>
           {loading && <LoaderCircle size={12} className="animate-spin text-text-secondary" data-changes-spinner />}
         </span>
+        {worktreeBase && (
+          <Tooltip label={base ? t('changes.baseOff') : t('changes.baseOn', { sha: worktreeBase.slice(0, 7) })} side="bottom">
+            <button
+              type="button"
+              onClick={() => openChanges(targetKey, base ? undefined : worktreeBase)}
+              aria-label={t('changes.baseToggle')}
+              aria-pressed={!!base}
+              className={cn('rounded-btn p-1 hover:bg-card', base ? 'text-accent-violet' : 'text-text-secondary hover:text-text-primary')}
+              data-changes-base={base ? 'on' : 'off'}
+            >
+              <GitCompareArrows size={14} />
+            </button>
+          </Tooltip>
+        )}
         <Tooltip label={t('changes.refresh')} side="bottom">
           <button
             type="button"
@@ -542,7 +559,7 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
               <span className="min-w-0 truncate font-semibold text-text-primary">
                 {listed?.oldPath ? `${listed.oldPath} -> ${selected.path}` : selected.path}
               </span>
-              <span className="shrink-0 text-text-secondary">{t(`changes.section.${selected.area}`)}</span>
+              <span className="shrink-0 text-text-secondary">{sectionLabel?.(selected.area) ?? t(`changes.section.${selected.area}`)}</span>
               <span className="flex-1" />
               {noteArea && (
                 <button

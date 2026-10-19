@@ -169,6 +169,8 @@ export interface WorkspaceDraftPane {
   cwd?: string
   /** One-shot first prompt of this console (a repo file's, E8-FR-25), source 'repo'. */
   prompt?: string
+  /** The isolated worktree this console runs in (a race contestant, E7-FR-34); `cwd` is its path. */
+  worktree?: PaneWorktree
 }
 
 /** A repo file's one-time setup console (E8-FR-25). */
@@ -518,6 +520,7 @@ function buildDraftPanes(draft: WorkspaceDraft): { panes: Pane[]; prompts: Recor
       color: p.color,
       icon: p.icon,
       ...(p.cwd ? { cwd: p.cwd } : {}),
+      ...(p.worktree ? { worktree: { ...p.worktree } } : {}),
     }
     // E8-FR-25: a repo console's prompt goes through E8-FR-02 like any other.
     if (p.prompt?.trim()) prompts[pane.id] = { text: p.prompt, enter: true, source: 'repo', createdAt: now }

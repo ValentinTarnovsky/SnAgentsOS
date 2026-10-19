@@ -227,7 +227,7 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
 
  // --- FR-29: global prompt and confirm chips ----------------------------------
  await js("smoke.set({globalPromptOpen:true})");await frame();
- ok(await js("document.querySelector('[data-global-prompt-send]').getAttribute('aria-keyshortcuts')==='Control+Enter'&&document.querySelector('[data-global-prompt-send] [data-key-hint]').dataset.keyHint==='Ctrl+Enter'"),'"Enviar a todas" shows Ctrl+Enter');
+ ok(await js("document.querySelector('[data-global-prompt-send]').getAttribute('aria-keyshortcuts')==='Control+Enter'&&document.querySelector('[data-global-prompt-send] [data-key-hint]').dataset.keyHint==='Ctrl+Enter'"),'"Enviar" shows Ctrl+Enter');
  await js("smoke.set({globalPromptOpen:false})");await frame();
  await js('smoke.confirm(true)');await frame();
  ok(await js("document.querySelector('[data-confirm] [data-key-hint]')?.dataset.keyHint==='Enter'&&document.querySelector('[data-confirm]').getAttribute('aria-keyshortcuts')==='Enter'"),'ConfirmDialog confirm shows Enter');

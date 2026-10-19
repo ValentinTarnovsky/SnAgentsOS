@@ -42,6 +42,7 @@ export function FileList({
   onSelect,
   actions,
   noteCounts,
+  sectionLabel,
 }: {
   files: GitFileEntry[]
   /** Every changed entry (more than `files.length` when truncated). */
@@ -54,8 +55,11 @@ export function FileList({
   actions: RowActions
   /** Unresolved review notes per row (`area:path`), shown as a badge (E7-FR-17). */
   noteCounts?: Record<string, number>
+  /** Overrides a section title ("Against base" for the tracked files of that mode, E7-FR-35). */
+  sectionLabel?: (area: GitArea) => string | undefined
 }) {
   const t = useT()
+  const labelOf = (area: GitArea): string => sectionLabel?.(area) ?? t(`changes.section.${area}`)
   const [cursor, setCursor] = useState<string | null>(selected)
   const [menu, setMenu] = useState<{ x: number; y: number; file: GitFileEntry } | null>(null)
   const rowRefs = useRef(new Map<string, HTMLButtonElement>())
@@ -116,7 +120,7 @@ export function FileList({
       {sections.map((sec) => {
         const isCollapsed = collapsed.has(sec.area)
         return (
-          <div key={sec.area} role="group" aria-label={t(`changes.section.${sec.area}`)} data-changes-section={sec.area}>
+          <div key={sec.area} role="group" aria-label={labelOf(sec.area)} data-changes-section={sec.area}>
             <button
               type="button"
               onClick={() => onToggleSection(sec.area)}
@@ -124,7 +128,7 @@ export function FileList({
               className="flex w-full items-center gap-1 px-2 py-1 text-left text-[11px] font-semibold uppercase tracking-wide text-text-secondary hover:text-text-primary"
             >
               <ChevronRight size={12} className={cn('shrink-0 transition-transform', !isCollapsed && 'rotate-90')} />
-              <span className="truncate">{t(`changes.section.${sec.area}`)}</span>
+              <span className="truncate">{labelOf(sec.area)}</span>
               <span className="ml-1 rounded-full bg-bg-secondary px-1.5 font-mono text-[10px] font-normal leading-4">{sec.files.length}</span>
             </button>
             {!isCollapsed &&

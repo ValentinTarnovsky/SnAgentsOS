@@ -55,7 +55,7 @@ import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
 import type { AgentsHibernateEvt, HibernationConfig } from '@shared/hibernation'
 import type { SessionSummary, SessionsListReq } from '@shared/session-history'
-import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
+import type { GitArea, GitBaseStat, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
@@ -251,9 +251,10 @@ const api: SnApi = {
     info: (force?: boolean) => ipcRenderer.invoke(CH.GIT_INFO, { force: force === true }) as Promise<GitInfoRes>,
     onUpdate: (cb: (e: GitUpdateEvt) => void) => sub<GitUpdateEvt>(CH.GIT_UPDATE, cb),
     setPanel: (key: string | null) => ipcRenderer.send(CH.GIT_SET_PANEL, { key }),
-    status: (key: string) => ipcRenderer.invoke(CH.GIT_STATUS, { key }) as Promise<GitChangesRes | null>,
-    fileDiff: (req: { key: string; path: string; area: GitArea; force?: boolean }) => ipcRenderer.invoke(CH.GIT_FILE_DIFF, req) as Promise<GitDiffReply>,
-    openFile: (req: { key: string; path: string; reveal?: boolean }) => ipcRenderer.invoke(CH.GIT_OPEN_FILE, req) as Promise<boolean>,
+    status: (key: string, base?: string) => ipcRenderer.invoke(CH.GIT_STATUS, base ? { key, base } : { key }) as Promise<GitChangesRes | null>,
+    fileDiff: (req: { key: string; path: string; area: GitArea; force?: boolean; base?: string }) => ipcRenderer.invoke(CH.GIT_FILE_DIFF, req) as Promise<GitDiffReply>,
+    openFile: (req: { key: string; path: string; reveal?: boolean; base?: string }) => ipcRenderer.invoke(CH.GIT_OPEN_FILE, req) as Promise<boolean>,
+    baseStat: (req: { key: string; base: string }) => ipcRenderer.invoke(CH.GIT_BASE_STAT, req) as Promise<GitBaseStat | null>,
     worktreeAdd: (req: WorktreeAddReq) => ipcRenderer.invoke(CH.GIT_WORKTREE_ADD, req) as Promise<WorktreeAddRes>,
     worktreeRemove: (req: WorktreeRemoveReq) => ipcRenderer.invoke(CH.GIT_WORKTREE_REMOVE, req) as Promise<WorktreeRemoveRes>,
     worktreeProbe: (repoCwd: string) => ipcRenderer.invoke(CH.GIT_WORKTREE_PROBE, { repoCwd }) as Promise<WorktreeProbeRes>,
