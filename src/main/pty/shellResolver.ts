@@ -55,6 +55,9 @@ export function samePath(a: string, b: string): boolean {
  * from the inherited env only, so a console of another instance does not leak its identity; `extra` (the
  * preset env and our own status env) is merged afterwards, unfiltered.
  */
+/** What Claude Code sets in the processes it starts (its tools, hooks); never inherited by a console. */
+const AGENT_SESSION_ENV = new Set(['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_ENV_FILE'])
+
 export function cleanEnv(extra?: Record<string, string>, stripDirs: string[] = statusBinDirs()): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
@@ -63,6 +66,9 @@ export function cleanEnv(extra?: Record<string, string>, stripDirs: string[] = s
     if (upper.startsWith(LEGACY_BRAND.envPrefix) || upper.startsWith(BRAND.envPrefix)) continue
     // A parent's `snaos` shim or Codex launcher may leak Node mode into a shell (E8-FR-13).
     if (upper === 'ELECTRON_RUN_AS_NODE') continue
+    // The app started from inside an agent session (a dev run from Claude):
+    // its consoles' agents are not that session's sub-sessions.
+    if (AGENT_SESSION_ENV.has(upper)) continue
     out[key] = upper === 'PATH'
       ? value.split(delimiter).filter(entry => !stripDirs.some(dir => samePath(entry, dir))).join(delimiter)
       : value

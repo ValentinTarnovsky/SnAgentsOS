@@ -6,6 +6,7 @@
  */
 import { z } from 'zod'
 import type { RemoteClientMsg } from './remote-protocol'
+import { WS_NOTE_ID_RE, WS_NOTE_PHONE_MAX } from './ws-notes'
 
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/)
 const id = z.string().min(1).max(128)
@@ -19,6 +20,8 @@ const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/
  * fixed, so the 48KB page budget holds for any id the schema lets in.
  */
 const gitReqId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/)
+/** Workspace and note ids of notesReq: they name a folder and a file under dataDir()/notes. */
+const noteId = z.string().regex(WS_NOTE_ID_RE)
 /** A note's file: repo-relative, no `..` segment, no control character. */
 const noteFile = z
   .string()
@@ -122,6 +125,17 @@ export const remoteClientMsgSchema = z.discriminatedUnion('type', [
     path: z.string().min(1).max(1024).optional(),
     staged: z.boolean().optional(),
     page: z.number().int().min(0).max(999).optional(),
+  }),
+  // v2.2 (E9): workspace notes; ids are folder-safe, the text fits one frame.
+  z.object({
+    v: z.number(),
+    type: z.literal('notesReq'),
+    id: gitReqId,
+    workspaceId: noteId,
+    op: z.enum(['list', 'read', 'write', 'create', 'delete']),
+    noteId: noteId.optional(),
+    text: z.string().max(WS_NOTE_PHONE_MAX).optional(),
+    baseRev: z.string().max(64).optional(),
   }),
   // E3 M12 Chat view (R30-05); behind the per-session bucket by name. Main
   // clamps `before` to [0, size] and aligns it to the next line start.

@@ -96,11 +96,14 @@ export function sendReviewNotes(workspaceId: string, paneId: string, opts: SendR
 export type NewConsoleError = 'full' | 'no_preset' | 'not_found' | 'timeout' | 'closed'
 export type NewConsoleResult = (SendReviewNotesResult & { paneId: string; late?: boolean }) | { ok: false; sent: 0; error: NewConsoleError; paneId?: string }
 
-/** The Claude preset a new console uses: the default agent preset when it is Claude, else the first Claude preset. */
-export function claudePresetFor(s: Pick<ReturnType<typeof useAppStore.getState>, 'presets' | 'settings'>) {
+/**
+ * The agent preset a new console uses: the default agent preset when it is
+ * Claude or Codex, else the first Claude preset, else the first Codex one.
+ */
+export function agentPresetFor(s: Pick<ReturnType<typeof useAppStore.getState>, 'presets' | 'settings'>) {
   const preferred = s.settings.automation?.defaultAgentPresetId
-  const byDefault = preferred ? s.presets.find((p) => p.id === preferred && p.type === 'claude') : undefined
-  return byDefault ?? s.presets.find((p) => p.type === 'claude')
+  const byDefault = preferred ? s.presets.find((p) => p.id === preferred && (p.type === 'claude' || p.type === 'codex')) : undefined
+  return byDefault ?? s.presets.find((p) => p.type === 'claude') ?? s.presets.find((p) => p.type === 'codex')
 }
 
 function sleep(ms: number): Promise<void> {
@@ -108,13 +111,13 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * "New Claude console" as the destination (E7-FR-21): adds a pane with the
- * Claude preset in the same folder (`cwd` for a pane worktree), waits until it
+ * "New agent console" as the destination (E7-FR-21): adds a pane with the
+ * agent preset (agentPresetFor: Claude or Codex) in the same folder (`cwd` for a pane worktree), waits until it
  * is ready (a first status and bracketed paste on, at most 20 s) and pastes
  * the notes chosen now. Past the timeout it still sends when the console
  * takes a safe paste (`late`), else nothing is written.
  */
-export async function sendReviewNotesToNewClaude(
+export async function sendReviewNotesToNewAgent(
   workspaceId: string,
   opts: { noteIds: string[]; submit: boolean; cwd?: string },
   timing: { readyMs?: number; pollMs?: number; settleMs?: number } = {},
@@ -123,7 +126,7 @@ export async function sendReviewNotesToNewClaude(
   const ws = s.workspaces.find((w) => w.id === workspaceId)
   if (!ws) return { ok: false, sent: 0, error: 'not_found' }
   if (ws.panes.length >= MAX_WORKSPACE_PANES) return { ok: false, sent: 0, error: 'full' }
-  const preset = claudePresetFor(s)
+  const preset = agentPresetFor(s)
   if (!preset) return { ok: false, sent: 0, error: 'no_preset' }
   const paneId = s.addPane(workspaceId, {
     type: preset.type,

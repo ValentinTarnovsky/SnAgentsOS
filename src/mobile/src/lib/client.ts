@@ -39,6 +39,8 @@ import {
   type RemoteCtlAction,
   type RemoteGitReply,
   type RemoteGitRequest,
+  type RemoteNotesReply,
+  type RemoteNotesRequest,
   type RemoteHistorySession,
   type RemotePaneStatus,
   type RemoteServerMsg,
@@ -66,6 +68,7 @@ import { takePendingDeepLink } from './deepLink'
 import { paneById, paneOpenable, statusMapOf, workspaceOfPane } from './workspace'
 import { clearMobileStorage } from './mobileStorage'
 import { useNotesStore } from './notesStore'
+import { noteChanged } from './wsNotes'
 import { chunkInput } from './composerSend'
 import { PendingMap, type PendingOutcome } from './pending'
 import { pruneDrafts } from './drafts'
@@ -853,6 +856,11 @@ class RemoteClient {
     return this.request<RemoteGitReply>((id) => ({ v: PROTOCOL_VERSION, type: 'gitReq', id, ...req }))
   }
 
+  /** v2.2 (E9): the workspace's .md notes (pending by id, 10s); the answer is the notesRes without its envelope. */
+  requestNotes(req: RemoteNotesRequest): Promise<PendingOutcome<RemoteNotesReply>> {
+    return this.request<RemoteNotesReply>((id) => ({ v: PROTOCOL_VERSION, type: 'notesReq', id, ...req }))
+  }
+
   /** The answer to an id-keyed request arrived; false when nothing waits (late). */
   settleRequest(id: string, value: unknown): boolean {
     return this.pendingById.resolve(id, value)
@@ -1230,6 +1238,14 @@ class RemoteClient {
         break
       case 'gitRes':
         this.pendingById.resolve(msg.id, { ok: msg.ok, data: msg.data, page: msg.page, done: msg.done } satisfies RemoteGitReply)
+        break
+      case 'notesRes': {
+        const { v: _v, type: _type, id, ...reply } = msg
+        this.pendingById.resolve(id, reply satisfies RemoteNotesReply)
+        break
+      }
+      case 'notesChanged':
+        noteChanged(msg.workspaceId, msg.noteId)
         break
       case 'revoked':
         log('warn', 'revoked')

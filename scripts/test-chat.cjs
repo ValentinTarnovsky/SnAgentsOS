@@ -54,8 +54,8 @@ export { decodeClaude, patchOf } from './src/main/chat/decodeClaude'
 export { decodeCodex } from './src/main/chat/decodeCodex'
 export { toolSummary } from './src/main/chat/toolSummary'
 export { readPage, readAppend, TranscriptWatcher, MAX_RECORD_BYTES, PAGE_SCAN_MAX } from './src/main/chat/TranscriptWatcher'
-export { TranscriptLocator, cwdKey, pathKey, admit } from './src/main/chat/TranscriptLocator'
-export { ChatHub, noticePage, CHAT_CLOSE_DELAY_MS } from './src/main/chat/ChatHub'
+export { TranscriptLocator, cwdKey, pathKey, admit, awaitable, PENDING_BOOT_MS } from './src/main/chat/TranscriptLocator'
+export { ChatHub, noticePage, emptyPage, CHAT_CLOSE_DELAY_MS, CHAT_PENDING_POLL_MS, CHAT_PENDING_MAX_MS } from './src/main/chat/ChatHub'
 export { shrinkMessage, splitAppend, jsonBytes } from './src/main/chat/chatFrames'
 export { claudeConfigDir } from './src/main/status/statusDetails'
 export { claudeSlug } from './src/main/agents/transcripts'
@@ -433,6 +433,94 @@ async function testLocator() {
   fs.copyFileSync(path.join(fixtures, 'codex-rollout.jsonl'), path.join(older, 'rollout-2026-01-02T09-00-00-11111111-2222-3333-4444-555555555555.jsonl'))
   status.cx = { provider: 'codex', sessionId: '11111111-2222-3333-4444-555555555555' }
   check((await loc.locate('cx')).ok, 'an older thread is found by walking the day folders')
+
+  // Pending: the transcript of a new session is written with its first message.
+  const fixedNow = new Date(2026, 9, 19, 12, 0, 0).getTime()
+  const unborn = path.join(slugDir, '5f6a7b8c-1a2b-4c3d-8e9f-0123456789ab.jsonl')
+  status.a = { provider: 'claude', sessionId: '5f6a7b8c-1a2b-4c3d-8e9f-0123456789ab', transcriptPath: unborn }
+  r = await loc.locate('a')
+  check(!r.ok && r.pending === true && r.reason === 'noTranscript', 'a reported transcript that is not written yet is pending (the chat opens empty)')
+  status.a = { ...status.a, transcriptPath: path.join(claudeRoot, 'projects', 'C--brand-new-folder', 'x.jsonl') }
+  check((await loc.locate('a')).pending === true, 'pending even when its project folder does not exist yet')
+  check((await api.awaitable(projects, path.join(outside, 'new.jsonl'))) === false, 'a path outside the root is never awaited')
+  if (linked) check((await api.awaitable(projects, path.join(link, 'new.jsonl'))) === false, 'a path through a link out of the root is never awaited')
+  check((await api.awaitable(projects, hooked)) === false, 'an existing file is not awaited (it is admitted)')
+  const spawnedA2 = spawned.a
+  delete spawned.a
+  status.a = { provider: 'claude', sessionId: '5f6a7b8c-1a2b-4c3d-8e9f-0123456789ab', transcriptPath: unborn }
+  check(!(await loc.locate('a')).pending, 'without a live pty nothing is pending')
+  spawned.a = spawnedA2
+  status.cx = { provider: 'codex', sessionId: '99999999-8888-7777-6666-555555555555' }
+  spawned.cx = fixedNow - 10 * 60000
+  check((await loc.locate('cx')).pending === true, 'a Codex thread without its rollout yet is pending')
+  delete status.cx
+  spawned.cx = fixedNow - 1000
+  check((await loc.locate('cx')).pending === true, 'an agent console that just spawned (no session reported yet) is pending')
+  spawned.cx = fixedNow - api.PENDING_BOOT_MS - 1000
+  r = await loc.locate('cx')
+  check(!r.ok && !r.pending && r.reason === 'noTranscript', 'after the boot window without a session it is the plain notice again')
+  delete spawned.cx
+  check(!(await loc.locate('ssh')).pending && !(await loc.locate('s')).pending, 'notLocal and non-agent consoles are never pending')
+  status.a = { provider: 'claude', sessionId: '' }
+}
+
+// --- Pending transcripts: empty first page, then the real one -------------------------
+
+async function testHubPending() {
+  const { api, advance } = load(true)
+  const file = path.join(tmp, 'pending.jsonl')
+  fs.rmSync(file, { force: true })
+  let result = { ok: false, reason: 'noTranscript', pending: true }
+  const watchers = []
+  const hub = new api.ChatHub({
+    locate: async () => result,
+    createWatcher: deps => { const w = new api.TranscriptWatcher({ ...deps, watchFile: () => ({ close() {} }), pollMs: 60000 }); watchers.push(w); return w },
+  })
+  const got = []
+  hub.sub({}, 'p1', f => got.push(f))
+  await until(() => got.length > 0)
+  check(got[0].type === 'chatPage' && got[0].items.length === 0 && got[0].done && api.chatNoticeOf(got[0].items) === null, 'a pending transcript answers an empty first page, not the notice (the phone stays in Chat)')
+  check(hub.openWatchers === 0, 'nothing is watched yet')
+  advance(api.CHAT_PENDING_POLL_MS)
+  await settle()
+  check(got.length === 1, 'a poll that still finds nothing sends nothing')
+  // The first message writes the file: the next poll opens it.
+  fs.writeFileSync(file, userLine('primer mensaje') + '\n')
+  result = { ok: true, path: file, provider: 'claude' }
+  advance(api.CHAT_PENDING_POLL_MS)
+  await until(() => got.length > 1)
+  check(got.at(-1).type === 'chatPage' && got.at(-1).items.length === 1 && got.at(-1).items[0].blocks[0].text === 'primer mensaje', 'when the file appears the reader gets its first page')
+  fs.appendFileSync(file, asstLine('respuesta') + '\n')
+  await watchers.at(-1).check()
+  await settle()
+  check(got.at(-1).type === 'chatAppend' && got.at(-1).items[0].blocks[0].text === 'respuesta', 'and then its appends')
+  // /clear: a new session whose file is not written yet empties the chat.
+  result = { ok: false, reason: 'noTranscript', pending: true }
+  let n = got.length
+  hub.transcriptChanged('p1')
+  await until(() => got.length > n)
+  check(got.at(-1).type === 'chatPage' && got.at(-1).items.length === 0 && api.chatNoticeOf(got.at(-1).items) === null && hub.openWatchers === 0, 'a new session not written yet empties the chat instead of sending the notice')
+  // A transcript that never comes gives up with the notice.
+  n = got.length
+  for (let i = 0; i < 700 && got.length === n; i++) { advance(api.CHAT_PENDING_POLL_MS); await settle(3) }
+  check(got.length === n + 1 && api.chatNoticeOf(got.at(-1).items) === 'noTranscript', 'after 10 minutes the wait ends with the notice')
+  const after = got.length
+  advance(api.CHAT_PENDING_POLL_MS * 5)
+  await settle()
+  check(got.length === after, 'and the polling stops')
+  // No reader, no polling.
+  result = { ok: false, reason: 'noTranscript', pending: true }
+  const got2 = []
+  const owner = {}
+  hub.sub(owner, 'p2', f => got2.push(f))
+  await until(() => got2.length > 0)
+  let calls = 0
+  hub.deps.locate = async () => { calls++; return result }
+  hub.unsub(owner, 'p2')
+  advance(api.CHAT_PENDING_POLL_MS * 3)
+  await settle()
+  check(calls === 0, 'a pending chat nobody reads is not polled')
+  hub.dispose()
 }
 
 // --- ChatHub through RemoteManager + SessionManager ------------------------------------
@@ -740,12 +828,13 @@ async function main() {
   await testWatcher()
   await testLocator()
   await testHub()
+  await testHubPending()
   await testWatcherCap()
   await testHubRaces()
   await testChatSubCap()
   await testMobileModel()
   fs.rmSync(tmp, { recursive: true, force: true })
-  console.log(`PASS: ${checks} chat checks (schemas, Claude and Codex decoders, tool summaries, pages under 48KB, 8MB scan cap, 50MB first page, tail, locator, ChatHub with phone-fit presence)`)
+  console.log(`PASS: ${checks} chat checks (schemas, Claude and Codex decoders, tool summaries, pages under 48KB, 8MB scan cap, 50MB first page, tail, locator, pending transcripts, ChatHub with phone-fit presence)`)
 }
 
 main().catch(error => { console.error(error); fs.rmSync(tmp, { recursive: true, force: true }); process.exit(1) })

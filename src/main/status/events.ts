@@ -1,5 +1,6 @@
 import type { AgentDetail, AgentProvider, AttentionReason, ConfigFile, RemotePending } from '@shared/types'
 import { mainT } from '../i18n'
+import type { BackgroundTasks } from './HookServer'
 export interface AgentEvent {
   paneId: string
   ptyId: string
@@ -33,6 +34,8 @@ export interface AgentEvent {
   questions?: RemotePending['questions']
   /** Event of a subagent: never changes the main detail. */
   subagent?: boolean
+  /** Stop: background work the turn left running (v2.2). */
+  background?: BackgroundTasks
 }
 export interface StatusNotice {
   paneId: string

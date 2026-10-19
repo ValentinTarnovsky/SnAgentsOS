@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { ChevronDown, GitBranch, Megaphone, Plus } from 'lucide-react'
+import { Suspense, lazy, useState } from 'react'
+import { ChevronDown, FolderTree, GitBranch, Megaphone, NotebookPen, Plus } from 'lucide-react'
 import type { AgentPreset, Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
@@ -17,6 +17,11 @@ import { workspaceGitKey } from '@/lib/gitChip'
 import { useWorktreeStore } from '@/lib/worktreeStore'
 import { templateFromPreset, worktreeOffer } from '@/lib/worktrees'
 import { cn } from '@/lib/cn'
+import { toggleSidePanel, useSidePanels } from '@/lib/sidePanels'
+
+// The Notes and Files drawers (v2.2, E9) carry the code editor: loaded on first open.
+const NotesPanel = lazy(() => import('@/components/notes/NotesPanel'))
+const FilesPanel = lazy(() => import('@/components/files/FilesPanel'))
 
 export function WorkspaceView({
   workspace,
@@ -38,6 +43,11 @@ export function WorkspaceView({
   const panelBase = useGitStore((s) => s.panel?.base)
   const ownsPanel = useAppStore((s) => panelTarget != null && workspaceOfKey(s.workspaces, panelTarget) === workspace.id)
   const changesKey = isActive && ownsPanel ? panelTarget : null
+  // Notes / Files (v2.2): over this grid while this workspace is active and owns the drawer.
+  const side = useSidePanels((s) => s.open)
+  const sideKind = isActive && side?.workspaceId === workspace.id ? side.kind : null
+  const filesKeys = useActionKeys('toggleFiles')
+  const notesKeys = useActionKeys('toggleNotes')
   // E7-FR-27a: each preset can also start in an isolated worktree of workspace.cwd.
   const connections = useAppStore((s) => s.connections)
   const wsGitSummary = useGitStore((s) => s.summaries[workspaceGitKey(workspace.id)])
@@ -65,6 +75,36 @@ export function WorkspaceView({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
+          <Tooltip label={<ActionTooltipLabel label={t('files.title')} action="toggleFiles" />} side="bottom">
+            <button
+              onClick={() => toggleSidePanel('files')}
+              aria-label={t('files.title')}
+              aria-pressed={sideKind === 'files'}
+              aria-keyshortcuts={filesKeys.length > 0 ? ariaKeyshortcuts(filesKeys) : undefined}
+              data-files-button
+              className={cn(
+                'flex h-[30px] w-[30px] items-center justify-center rounded-btn border transition-colors',
+                sideKind === 'files' ? 'border-accent-violet/60 bg-accent-violet/15 text-text-primary' : 'border-border bg-card text-text-secondary hover:border-accent-violet/40 hover:text-text-primary',
+              )}
+            >
+              <FolderTree size={15} />
+            </button>
+          </Tooltip>
+          <Tooltip label={<ActionTooltipLabel label={t('wsnotes.title')} action="toggleNotes" />} side="bottom">
+            <button
+              onClick={() => toggleSidePanel('notes')}
+              aria-label={t('wsnotes.title')}
+              aria-pressed={sideKind === 'notes'}
+              aria-keyshortcuts={notesKeys.length > 0 ? ariaKeyshortcuts(notesKeys) : undefined}
+              data-notes-button
+              className={cn(
+                'flex h-[30px] w-[30px] items-center justify-center rounded-btn border transition-colors',
+                sideKind === 'notes' ? 'border-accent-violet/60 bg-accent-violet/15 text-text-primary' : 'border-border bg-card text-text-secondary hover:border-accent-violet/40 hover:text-text-primary',
+              )}
+            >
+              <NotebookPen size={15} />
+            </button>
+          </Tooltip>
           <Tooltip label={<ActionTooltipLabel label={t('globalPrompt.button')} action="globalPrompt" />} side="bottom">
             <button
               onClick={() => setGlobalPromptOpen(true)}
@@ -142,6 +182,10 @@ export function WorkspaceView({
       <div className="relative min-h-0 flex-1">
         <TilingGrid workspace={workspace} isActive={isActive} />
         {changesKey && <ChangesPanel key={workspace.id} workspace={workspace} targetKey={changesKey} base={panelBase} />}
+        <Suspense fallback={null}>
+          {sideKind === 'notes' && <NotesPanel key={workspace.id} workspace={workspace} />}
+          {sideKind === 'files' && <FilesPanel key={workspace.id} workspace={workspace} />}
+        </Suspense>
       </div>
     </div>
   )

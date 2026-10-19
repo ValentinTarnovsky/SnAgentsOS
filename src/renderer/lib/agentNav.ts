@@ -17,6 +17,7 @@ import {
 } from '@shared/agents'
 import type { TFn } from '@/i18n'
 import { isPaneMounted, type MountedWorkspaces } from './mounting'
+import { waitingPhrase } from './formatSince'
 
 export interface NavInput {
   workspaces: readonly Workspace[]
@@ -208,6 +209,7 @@ export function agentPhrase(e: AgentEntry, t: TFn, lang: Language, now: number, 
   const detail = firstLine(s.detail?.text)
   switch (s.state) {
     case 'working':
+      if (s.waiting) return tail(waitingPhrase(s.waiting, t))
       return tail(detail || t('agents.row.working'))
     case 'action':
       if (s.reason === 'permission') return detail ? t('agents.row.permission', { text: detail }) : t('agents.row.action')
@@ -216,7 +218,9 @@ export function agentPhrase(e: AgentEntry, t: TFn, lang: Language, now: number, 
       return t('agents.row.action')
     case 'done': {
       const reply = firstLine(s.lastMessage) || (s.detail?.kind === 'reply' ? detail : '')
-      const text = reply ? t('agents.row.doneReply', { text: reply }) : t('agents.row.done')
+      const done = reply ? t('agents.row.doneReply', { text: reply }) : t('agents.row.done')
+      // v2.2: work left running that does not hold the console (a dev server).
+      const text = s.backgroundOther ? `${done} · ${t('agents.row.backgroundOther', { count: s.backgroundOther })}` : done
       return withAge && e.stateSince ? `${text} · ${t('agents.row.ago', { age })}` : text
     }
     case 'error':

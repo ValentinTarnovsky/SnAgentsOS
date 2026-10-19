@@ -299,7 +299,7 @@ const storeChecks = checks - formatChecks
   // FR-21: a new Claude console.
   R.useAppStore.setState((s) => ({ presets: [{ id: 'pc', name: 'Claude', type: 'claude', command: 'claude', args: [], color: '#f80', icon: 'claude' }, ...s.presets.filter((p) => p.type !== 'claude')], settings: { ...s.settings, automation: { ...s.settings.automation, defaultAgentPresetId: '' } } }))
   R.useReviewNotesStore.getState().apply('w1', { notes: [note({ id: 'q1', line: 2, body: 'new console' })], rev: 4 })
-  const fresh = R.sendReviewNotesToNewClaude('w1', { noteIds: ['q1'], submit: true, cwd: 'C:\\wt\\sn-claude' }, { readyMs: 2000, pollMs: 20, settleMs: 10 })
+  const fresh = R.sendReviewNotesToNewAgent('w1', { noteIds: ['q1'], submit: true, cwd: 'C:\\wt\\sn-claude' }, { readyMs: 2000, pollMs: 20, settleMs: 10 })
   await sleep(10)
   const ws1 = R.useAppStore.getState().workspaces[0]
   const created = ws1.panes.at(-1)
@@ -316,9 +316,9 @@ const storeChecks = checks - formatChecks
   same(writes.at(-1), { ptyId: 'pty-new', data: '\r' }, 'with Enter checked the turn starts')
   writes.length = 0; pastes.length = 0
 
-  const slow = await R.sendReviewNotesToNewClaude('w1', { noteIds: ['q1'], submit: true }, { readyMs: 80, pollMs: 20, settleMs: 0 })
+  const slow = await R.sendReviewNotesToNewAgent('w1', { noteIds: ['q1'], submit: true }, { readyMs: 80, pollMs: 20, settleMs: 0 })
   check(!slow.ok && slow.error === 'timeout' && pastes.length === 0 && writes.length === 0, 'not ready in time and no safe paste: timeout, nothing written')
-  const late = R.sendReviewNotesToNewClaude('w1', { noteIds: ['q1'], submit: true }, { readyMs: 80, pollMs: 20, settleMs: 0 })
+  const late = R.sendReviewNotesToNewAgent('w1', { noteIds: ['q1'], submit: true }, { readyMs: 80, pollMs: 20, settleMs: 0 })
   await sleep(5)
   const lateId = R.useAppStore.getState().workspaces[0].panes.at(-1).id
   R.registerPty(lateId, 'pty-late')
@@ -328,17 +328,19 @@ const storeChecks = checks - formatChecks
   await sleep(260)
   check(writes.length === 0, 'a late console with no status gets no Enter')
   pastes.length = 0
-  const closing = R.sendReviewNotesToNewClaude('w1', { noteIds: ['q1'], submit: false }, { readyMs: 500, pollMs: 20 })
+  const closing = R.sendReviewNotesToNewAgent('w1', { noteIds: ['q1'], submit: false }, { readyMs: 500, pollMs: 20 })
   await sleep(5)
   const closingId = R.useAppStore.getState().workspaces[0].panes.at(-1).id
   R.useAppStore.getState().removePane('w1', closingId)
   same((await closing).error, 'closed', 'closing the new console while it starts aborts the send')
   R.useAppStore.setState((s) => ({ workspaces: s.workspaces.map((w) => ({ ...w, panes: [...w.panes, ...Array.from({ length: 12 - w.panes.length }, (_, i) => pane(`fill${i}`, 'shell'))] })) }))
   const before = R.useAppStore.getState().workspaces[0].panes.length
-  same((await R.sendReviewNotesToNewClaude('w1', { noteIds: ['q1'], submit: false })).error, 'full', 'with 12 consoles the workspace is full')
+  same((await R.sendReviewNotesToNewAgent('w1', { noteIds: ['q1'], submit: false })).error, 'full', 'with 12 consoles the workspace is full')
   check(R.useAppStore.getState().workspaces[0].panes.length === before && before === 12, 'and no pane is added')
-  R.useAppStore.setState((s) => ({ presets: s.presets.filter((p) => p.type !== 'claude'), workspaces: s.workspaces.map((w) => ({ ...w, panes: w.panes.slice(0, 4) })) }))
-  same((await R.sendReviewNotesToNewClaude('w1', { noteIds: ['q1'], submit: false })).error, 'no_preset', 'no Claude preset: no_preset')
+  R.useAppStore.setState((s) => ({ presets: [...s.presets.filter((p) => p.type !== 'claude'), { id: 'px', name: 'Codex', type: 'codex', command: 'codex', args: [], color: '#10a37f', icon: 'codex' }], workspaces: s.workspaces.map((w) => ({ ...w, panes: w.panes.slice(0, 4) })) }))
+  check(R.agentPresetFor(R.useAppStore.getState())?.type === 'codex', 'without a Claude preset the new console is Codex (v2.2)')
+  R.useAppStore.setState((s) => ({ presets: s.presets.filter((p) => p.type !== 'claude' && p.type !== 'codex') }))
+  same((await R.sendReviewNotesToNewAgent('w1', { noteIds: ['q1'], submit: false })).error, 'no_preset', 'no Claude or Codex preset: no_preset')
 
   // Sync: prune after a real load, delete the notes of a removed workspace, reload on change.
   R.useAppStore.setState({ workspaces: [{ id: 'w1', name: 'A', panes: [] }, { id: 'w2', name: 'B', panes: [] }] })

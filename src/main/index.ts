@@ -24,6 +24,8 @@ import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerGitIpc } from './ipc/registerGitIpc'
 import { registerReviewNotesIpc } from './ipc/registerReviewNotesIpc'
+import { registerWsNotesIpc } from './ipc/registerWsNotesIpc'
+import { registerFilesIpc } from './ipc/registerFilesIpc'
 import type { ReviewNoteStore } from './git/ReviewNoteStore'
 import { registerWorktreeIpc } from './ipc/registerWorktreeIpc'
 import { registerRepoConfigIpc } from './ipc/registerRepoConfigIpc'
@@ -564,6 +566,11 @@ async function bootstrap(): Promise<void> {
   })
   // Review notes of the Changes panel (E7-FR-17..20): dataDir()/review-notes.json.
   reviewNotes = registerReviewNotesIpc({ getSender: () => mainWindow?.webContents ?? null })
+  // Workspace notes (v2.2, E9): dataDir()/notes/<workspace>/<note>.md, also read and written by the phones.
+  const wsNotes = registerWsNotesIpc({ getSender: () => mainWindow?.webContents ?? null, onChanged: (evt) => remoteManager.notesChanged(evt) })
+  remoteManager.setNotes(wsNotes)
+  // Files drawer (v2.2, E9): the workspace folder from the config, every target contained.
+  registerFilesIpc({ getSender: () => mainWindow?.webContents ?? null, config: () => configStore.load() })
   // Worktree per console (E7-FR-27..32, 36): worktrees.json under dataDir().
   registerWorktreeIpc({
     loadConfig: () => configStore.load(),

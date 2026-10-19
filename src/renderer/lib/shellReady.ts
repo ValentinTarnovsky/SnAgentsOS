@@ -15,6 +15,12 @@ import { AGENT_END_READY_MS } from './agentEnd'
 
 /** With integration, the longest the offer waits for the prompt mark. */
 export const AGENT_END_PROMPT_CAP_MS = 2500
+/**
+ * v2.2: how long a SessionEnd with the catch-all reason `other` waits for the
+ * shell prompt before it counts as "the agent did not leave" (a driver's
+ * `claude -p` ending inside a running script).
+ */
+export const AGENT_END_OTHER_CAP_MS = 3000
 
 interface PromptTrack {
   /** Date.now() of the newest OSC 133;A. */
@@ -49,6 +55,35 @@ export function forgetPrompts(paneId: string): void {
 /** Whether the pane's current shell has emitted prompt marks. */
 export function hasPromptMarks(paneId: string): boolean {
   return tracks.has(paneId)
+}
+
+/**
+ * v2.2: calls `back` only if the pane's shell shows a prompt mark at or after
+ * `since` within `cap` ms (synchronously when one already came); otherwise
+ * never. Callers check hasPromptMarks first: without integration there is no
+ * mark to wait for. Returns the cancel.
+ */
+export function whenPromptReturns(paneId: string, since: number, cap: number, back: () => void): () => void {
+  const track = tracks.get(paneId)
+  if (!track) return () => undefined
+  if (track.lastPromptAt >= since) {
+    back()
+    return () => undefined
+  }
+  const wait = cap - (Date.now() - since)
+  if (wait <= 0) return () => undefined
+  const fire = (): void => {
+    if (track.lastPromptAt < since) return
+    clearTimeout(timer)
+    track.waiters.delete(fire)
+    back()
+  }
+  const timer = setTimeout(() => track.waiters.delete(fire), wait)
+  track.waiters.add(fire)
+  return () => {
+    clearTimeout(timer)
+    track.waiters.delete(fire)
+  }
 }
 
 /**

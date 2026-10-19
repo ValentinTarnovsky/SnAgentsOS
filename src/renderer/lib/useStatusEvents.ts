@@ -4,6 +4,7 @@ import { playStatusSound } from '@/lib/sound'
 import { visiblePaneIds } from '@shared/status'
 import { revealPane } from './revealPane'
 import { dismissAgentCardsInView, onAgentStatus } from './agentNotice'
+import { AGENT_END_OTHER_CAP_MS, hasPromptMarks, whenPromptReturns } from './shellReady'
 
 /**
  * Wires the Claude status feature on the renderer side. Mounted once inside
@@ -46,10 +47,27 @@ export function useStatusEvents(): void {
   // The chip is drawn by the pane; the setting only hides it, so turning it
   // back on later never shows a stale chip from long ago.
   useEffect(() => {
-    return window.snApi.status.onSessionEnd((evt) => {
+    const waits = new Map<string, () => void>()
+    const off = window.snApi.status.onSessionEnd((evt) => {
       if (useAppStore.getState().settings.terminalAgentEndChip === false) return
+      waits.get(evt.paneId)?.()
+      waits.delete(evt.paneId)
+      // v2.2: `other` is a catch-all (a driver's `claude -p` ending inside a
+      // script that keeps running): with shell integration the offer waits
+      // for the shell prompt to come back, and never shows without it.
+      if (evt.reason === 'other' && hasPromptMarks(evt.paneId)) {
+        waits.set(evt.paneId, whenPromptReturns(evt.paneId, evt.at, AGENT_END_OTHER_CAP_MS, () => {
+          waits.delete(evt.paneId)
+          useAppStore.getState().setAgentEnded(evt)
+        }))
+        return
+      }
       useAppStore.getState().setAgentEnded(evt)
     })
+    return () => {
+      off()
+      for (const cancel of waits.values()) cancel()
+    }
   }, [])
 
   // A status notification was clicked: reveal that console (E5-FR-04).

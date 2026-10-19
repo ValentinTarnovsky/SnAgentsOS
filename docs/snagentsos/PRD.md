@@ -91,8 +91,8 @@ Condensado de la síntesis ("Lo que NO copiar"), con el motivo:
 - **Onboarding, tips y feature walls.** El único usuario ya conoce todo.
 - **Detección de estado o permisos por regex sobre la salida, y sesiones estructuradas (ACP).** Chocan con la idea de TUIs reales. Los hooks ya dan señales exactas.
 - **Decidir permisos dejando abierto el hook PermissionRequest.** Rompe el contrato de respuesta vacía con timeout de 3 s y deja a Claude colgado si el celular se desconecta. Mandar "1" o Esc al PTY es más seguro.
-- **STT local o dictado por el desktop.** Alcanza el micrófono del teclado del celular dentro del composer.
-- **Superficie de IDE o de forge (PR pages, Jira/Linear/GitLab, commit/push desde la UI, Monaco, diff combinado, browser embebido, orquestación DAG).** Queda fuera del alcance de un centro de mando personal. Git se limita a lectura, revisión y worktrees.
+- **STT local o dictado por el desktop.** Alcanza el micrófono del teclado del celular dentro del composer. Enmienda app 2.2.0 ([E9](epics/E9.md)): el celu suma un botón de dictado con el reconocimiento del navegador (solo HTTPS); el desktop sigue sin dictado.
+- **Superficie de IDE o de forge (PR pages, Jira/Linear/GitLab, commit/push desde la UI, Monaco, diff combinado, browser embebido, orquestación DAG).** Queda fuera del alcance de un centro de mando personal. Git se limita a lectura, revisión y worktrees. Enmienda app 2.2.0 ([E9](epics/E9.md)): entra un panel Archivos con un editor liviano (CodeMirror 6, sin LSP ni búsqueda global) para leer y corregir lo que tocan los agentes.
 - **Auto-merge y títulos generados por LLM.** Son riesgosos o innecesarios. Se abre el diff o se hace checkout de la rama, y el título sale del topic del OSC title.
 - **Coalescer de escritura en el cliente y librería de componentes.** El server ya agrupa a 16 ms, y los tokens de Tailwind alcanzan.
 

@@ -28,6 +28,9 @@ export type ActionId =
   // Prompt navigation (E6-FR-27; Ctrl+Shift+PageUp/PageDown left free by D8).
   | 'promptPrev'
   | 'promptNext'
+  // Files and Notes drawers (v2.2, E9).
+  | 'toggleFiles'
+  | 'toggleNotes'
 
 export interface KeyAction {
   id: ActionId
@@ -61,6 +64,9 @@ export const KEY_ACTIONS: KeyAction[] = [
   // Shift+PageUp/PageDown alone keep scrolling the terminal.
   { id: 'promptPrev', labelKey: 'keys.promptPrev', defaultAccel: 'Ctrl+Shift+PageUp' },
   { id: 'promptNext', labelKey: 'keys.promptNext', defaultAccel: 'Ctrl+Shift+PageDown' },
+  // VS Code's explorer key; M for Markdown notes.
+  { id: 'toggleFiles', labelKey: 'keys.toggleFiles', defaultAccel: 'Ctrl+Shift+E' },
+  { id: 'toggleNotes', labelKey: 'keys.toggleNotes', defaultAccel: 'Ctrl+Shift+M' },
 ]
 
 /** Actions that stay out of text fields so the field keeps the key (E5-FR-18). */

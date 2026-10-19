@@ -21,6 +21,10 @@ Reglas de UI y de copy para el desktop (`src/renderer`) y el cliente mobile (`sr
 | Nombrar un boton de solo icono | `ui/Tooltip.tsx` | `title=""` nativo |
 | Acciones por clic derecho | `ui/ContextMenu.tsx` | Menu armado a mano |
 | Panel desde abajo en el celu | `Sheet.tsx` / `ActionSheet.tsx` | Modal centrado |
+| Panel sobre el grid de consolas (Notas, Archivos) | `ui/RightDrawer.tsx` (uno a la vez, junto con Cambios; `lib/sidePanels.ts`) | Modal, un panel fijo que achica el grid |
+| Mostrar Markdown en el desktop | `ui/MarkdownDoc.tsx` (tokens de `marked`, nunca HTML inyectado) | `dangerouslySetInnerHTML` |
+| Editar texto o codigo en el desktop | `editor/CodeEditor.tsx` (CodeMirror 6 con el tema de la app) | `<textarea>` para codigo |
+| Dictar en un campo del celu | `MicButton.tsx` + `VoiceInterim` (inserta en el cursor, nunca Enter) | Reconocimiento propio por campo |
 
 Si un primitivo se esta estilando para parecer otro, frenar: el manejo de foco es distinto y confunde al siguiente.
 

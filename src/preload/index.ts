@@ -57,6 +57,8 @@ import type { AgentsHibernateEvt, HibernationConfig } from '@shared/hibernation'
 import type { SessionSummary, SessionsListReq } from '@shared/session-history'
 import type { GitArea, GitBaseStat, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
+import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResult, WsNoteWriteReq, WsNotesChangedEvt, WsNotesListRes } from '@shared/ws-notes'
+import type { FileCreateReq, FileReadRes, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesRootRes } from '@shared/files'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 import type { CliUiState, SkillOp, SkillStatus, SkillTarget } from '@shared/ctl-protocol'
@@ -243,6 +245,29 @@ const api: SnApi = {
     markSent: (req: ReviewNotesMarkSentReq) => ipcRenderer.invoke(CH.GIT_NOTES_MARK_SENT, req) as Promise<void>,
     prune: (workspaceIds: string[]) => ipcRenderer.send(CH.GIT_NOTES_PRUNE, workspaceIds),
     onChanged: (cb: (e: ReviewNotesChangedEvt) => void) => sub<ReviewNotesChangedEvt>(CH.GIT_NOTES_CHANGED, cb),
+  },
+  wsNotes: {
+    list: (workspaceId: string) => ipcRenderer.invoke(CH.WS_NOTES_LIST, workspaceId) as Promise<WsNotesListRes>,
+    read: (req: WsNoteReadReq) => ipcRenderer.invoke(CH.WS_NOTES_READ, req) as Promise<WsNoteResult<{ note: WsNoteDoc }>>,
+    write: (req: WsNoteWriteReq) => ipcRenderer.invoke(CH.WS_NOTES_WRITE, req) as Promise<WsNoteResult<{ note: WsNoteMeta }>>,
+    create: (req: WsNoteCreateReq) => ipcRenderer.invoke(CH.WS_NOTES_CREATE, req) as Promise<WsNoteResult<{ note: WsNoteMeta }>>,
+    delete: (req: WsNoteReadReq) => ipcRenderer.invoke(CH.WS_NOTES_DELETE, req) as Promise<WsNoteResult<Record<never, never>>>,
+    open: (req: WsNoteReadReq) => ipcRenderer.invoke(CH.WS_NOTES_OPEN, req) as Promise<boolean>,
+    prune: (workspaceIds: string[]) => ipcRenderer.send(CH.WS_NOTES_PRUNE, workspaceIds),
+    onChanged: (cb: (e: WsNotesChangedEvt) => void) => sub<WsNotesChangedEvt>(CH.WS_NOTES_CHANGED, cb),
+  },
+  files: {
+    root: (workspaceId: string) => ipcRenderer.invoke(CH.FILES_ROOT, workspaceId) as Promise<FilesRootRes>,
+    list: (req: FilesListReq) => ipcRenderer.invoke(CH.FILES_LIST, req) as Promise<FilesListRes>,
+    read: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_READ, req) as Promise<FileReadRes>,
+    write: (req: FileWriteReq) => ipcRenderer.invoke(CH.FILES_WRITE, req) as Promise<FileWriteRes>,
+    create: (req: FileCreateReq) => ipcRenderer.invoke(CH.FILES_CREATE, req) as Promise<FilesOpRes>,
+    rename: (req: FileRenameReq) => ipcRenderer.invoke(CH.FILES_RENAME, req) as Promise<FilesOpRes>,
+    trash: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_TRASH, req) as Promise<FilesOpRes>,
+    reveal: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_REVEAL, req) as Promise<FilesOpRes>,
+    open: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_OPEN, req) as Promise<FilesOpRes>,
+    watch: (workspaceId: string | null) => ipcRenderer.send(CH.FILES_WATCH, workspaceId),
+    onChanged: (cb: (e: FilesChangedEvt) => void) => sub<FilesChangedEvt>(CH.FILES_CHANGED, cb),
   },
   git: {
     setWatch: (targets: GitTarget[]) => ipcRenderer.send(CH.GIT_SET_WATCH, targets),

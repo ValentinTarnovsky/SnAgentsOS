@@ -48,6 +48,9 @@ window.result = (async () => {
  setSnap(snap({ canResume: true })); await frames();
  check(strip() && strip().textContent.includes('Claude exited') && btn('resume') && btn('new') && btn('hide'), 'the offer of the viewed pane shows Claude exited with Resume, New and Hide');
  check(noOverflow() && strip().getBoundingClientRect().right <= 360, 'strip fits 360 px');
+ setSnap(snap({ canResume: true, provider: 'codex' })); await frames();
+ check(strip() && strip().textContent.includes('Codex exited'), 'a Codex that quit says Codex exited (v2.2)');
+ setSnap(snap({ canResume: true })); await frames();
  btn('resume').click(); await frames();
  check(sent.length === 1 && JSON.stringify(sent[0]) === JSON.stringify({ kind: 'agentResume', workspaceId: 'w1', paneId: 'a', mode: 'resume' }), 'Resume sends agentResume resume for the viewed pane and its workspace');
  check(!strip(), 'a taken offer hides at once, before the push that drops it');
@@ -89,7 +92,7 @@ window.result = (async () => {
  check(sent.at(-1).workspaceId === 'w2' && sent.at(-1).paneId === 'c', 'the ctl carries the viewed pane\\'s own workspace');
  setSnap(snap()); await frames();
  setLang('es'); setSnap({ ...snap(undefined, undefined, { canResume: true }), language: 'es' }); mount(); await frames();
- check(strip().textContent.includes('Claude termino') && btn('resume').textContent.includes('Retomar') && btn('new').textContent.includes('Nueva'), 'strip is translated');
+ check(strip().textContent.includes('Claude terminó') && btn('resume').textContent.includes('Retomar') && btn('new').textContent.includes('Nueva'), 'strip is translated');
  setLang('en');
  return checks;
 })();

@@ -22,6 +22,7 @@ Programa de cambios que renombra SnMultiCC a SnAgentsOS e incorpora el roadmap i
 | E6 | [Motor de terminal](epics/E6.md) |
 | E7 | [Git](epics/E7.md) |
 | E8 | [Automatizacion y CLI](epics/E8.md) |
+| E9 | [Workspace: Notas, Archivos y estado de agentes (app 2.2.0)](epics/E9.md) |
 
 ## Como se armo
 

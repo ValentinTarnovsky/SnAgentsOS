@@ -294,5 +294,54 @@ function run(code, storage) {
     check(blocked.loadPrefs().inPageAlerts === true && Object.keys(blocked.loadInputModes()).length === 0, 'blocked storage reads defaults')
   }
 
+  // --- v2.2: dictation (lib/voice.ts) ---
+  {
+    const storage = fakeStorage()
+    const v = load('src/mobile/src/lib/voice.ts', storage)
+    class FakeRec { constructor() { FakeRec.last = this; this.started = 0; this.stopped = 0 } start() { this.started++ } stop() { this.stopped++ } }
+    check(v.voiceSupport({ isSecureContext: false, webkitSpeechRecognition: FakeRec }) === 'insecure', 'plain http: insecure even with the API there')
+    check(v.voiceSupport({ isSecureContext: true }) === 'unsupported' && v.voiceSupport({ isSecureContext: true, SpeechRecognition: FakeRec }) === 'ok' && v.voiceSupport({ isSecureContext: true, webkitSpeechRecognition: FakeRec }) === 'ok', 'secure: ok with either constructor, else unsupported')
+    check(v.voiceLang('auto', 'es', 'es-AR') === 'es-AR' && v.voiceLang('auto', 'es', 'en-US') === 'es-ES' && v.voiceLang('auto', 'en', '') === 'en-US' && v.voiceLang('en-GB', 'es', 'es-AR') === 'en-GB' && v.voiceLang('xx', 'en', 'en-AU') === 'en-AU', 'language: the saved one, else the phone\'s when it matches the app, else a default')
+    check(v.loadVoiceLang() === 'auto', 'auto by default')
+    v.saveVoiceLang('es-MX'); check(v.loadVoiceLang() === 'es-MX' && storage.map.get('snagentsos.remote.voiceLang') === 'es-MX', 'the language is kept on the phone')
+    storage.setItem('snagentsos.remote.voiceLang', 'bogus'); check(v.loadVoiceLang() === 'auto', 'a bogus value reads auto')
+    check(v.spaced('', ' hola  mundo ') === 'hola mundo' && v.spaced('arreglá', 'el login') === ' el login' && v.spaced('fin\n', 'otra') === 'otra' && v.spaced('hola', ', che') === ', che' && v.spaced('x', '   ') === '', 'spacing: one space between words, none before punctuation or after whitespace')
+    let s = v.nextFinal('', 'hola'); check(s.fresh === 'hola' && s.committed === 'hola', 'first final')
+    s = v.nextFinal(s.committed, 'hola como'); check(s.fresh === 'como' && s.committed === 'hola como', 'a final that repeats the session (Android) only adds the new words')
+    s = v.nextFinal(s.committed, 'otra frase'); check(s.fresh === 'otra frase' && s.committed === 'hola como otra frase', 'a separate final is new as a whole')
+    // A session: finals go out, interim shows, a stop keeps the last words, a discard drops them.
+    const got = [], errors = []
+    check(v.startDictation('composer', 'es-AR', { onFinal: (x) => got.push(x), onError: (e) => errors.push(e) }, FakeRec) === true, 'starts')
+    const rec = FakeRec.last
+    check(rec.lang === 'es-AR' && rec.continuous === true && rec.interimResults === true && rec.started === 1 && v.useVoiceStore.getState().owner === 'composer', 'continuous, interim results, owned by the field')
+    const res = (i, list) => ({ resultIndex: i, results: list.map(([t, f]) => ({ isFinal: f, 0: { transcript: t } })) })
+    rec.onresult(res(0, [['revisá', false]]))
+    check(v.useVoiceStore.getState().interim === 'revisá' && got.length === 0, 'interim words show, nothing is inserted yet')
+    rec.onresult(res(0, [['revisá el login', true], ['y', false]]))
+    check(got.join('|') === 'revisá el login' && v.useVoiceStore.getState().interim === 'y', 'a final result is inserted')
+    rec.onerror({ error: 'no-speech' }); rec.onerror({ error: 'aborted' }); rec.onerror({ error: 'not-allowed' })
+    check(errors.join() === 'noSpeech,denied', 'errors: no speech, denied; our own abort is silent')
+    v.stopDictation('other')
+    check(v.useVoiceStore.getState().owner === 'composer' && rec.stopped === 0, 'another field cannot stop it')
+    v.stopDictation('composer')
+    check(v.useVoiceStore.getState().owner === null && rec.stopped === 1, 'tap again: stops')
+    rec.onresult(res(1, [['revisá el login', true], ['por favor', true]]))
+    check(got.join('|') === 'revisá el login|por favor', 'the words finalized on the way out still arrive')
+    rec.onend()
+    v.startDictation('composer', 'es-AR', { onFinal: (x) => got.push(x) }, FakeRec)
+    const rec2 = FakeRec.last
+    v.stopDictation('composer', true)
+    rec2.onresult(res(0, [['no va', true]]))
+    check(got.length === 2 && rec2.stopped === 1, 'a Send discards what is still coming (what went out is what the field showed)')
+    v.startDictation('globalPrompt', 'en-US', { onFinal: (x) => got.push(x) }, FakeRec)
+    const rec3 = FakeRec.last
+    v.startDictation('composer', 'en-US', { onFinal: (x) => got.push(x) }, FakeRec)
+    rec3.onresult(res(0, [['ghost', true]]))
+    check(rec3.stopped === 1 && v.useVoiceStore.getState().owner === 'composer' && !got.includes('ghost'), 'one dictation at a time: a new one ends the old')
+    check(v.startDictation('x', 'en-US', { onFinal() {} }, null) === false, 'no constructor: cannot start')
+    class Throws { start() { throw new Error('busy') } stop() {} }
+    check(v.startDictation('x', 'en-US', { onFinal() {} }, Throws) === false && v.useVoiceStore.getState().owner === null, 'a start that throws leaves nothing listening')
+  }
+
   console.log(`PASS: ${checks} mobile composer checks`)
 })().catch(e => { console.error(e); process.exit(1) })

@@ -11,7 +11,8 @@
  * history.back() all return to Home. Changes (E3-FR-52) is one too, from a
  * workspace's git chip or the terminal's kebab, with a file's diff pushed over
  * it and the notes sheets above both. Automations (E8-FR-32, v3.1) is one too,
- * from the Home header or Settings. The mount confirmation (E2-FR-06) is
+ * from the Home header or Settings. Notes (v2.2, E9) is one too, from a
+ * workspace's menu. The mount confirmation (E2-FR-06) is
  * shared by every entry point.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
@@ -26,6 +27,7 @@ import { DiffScreen } from './changes/DiffScreen'
 import { NotesList } from './changes/NotesList'
 import { SendNotesSheet } from './changes/SendNotesSheet'
 import { MountConfirmSheet } from './MountConfirmSheet'
+import { WsNotesScreen } from './notes/WsNotesScreen'
 import { SLIDE_EASING, SLIDE_MS } from './PushScreen'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
@@ -92,6 +94,7 @@ export function LiveShell(): ReactNode {
       <DiffScreen />
       <NotesList />
       <SendNotesSheet />
+      <WsNotesScreen />
       <DiagnosticsScreen />
     </BackStackHost>
   )
