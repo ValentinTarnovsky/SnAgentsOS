@@ -178,13 +178,15 @@ app.whenReady().then(async()=>{
  let b=await js("(()=>{const r=document.querySelector('[data-agents-board]');if(!r)return null;return {cols:[...r.querySelectorAll('[data-board-column]')].map(c=>c.dataset.boardColumn),titles:[...r.querySelectorAll('[data-board-column] h3')].map(h=>h.textContent),cards:[...r.querySelectorAll('[data-board-card]')].map(c=>c.dataset.boardCard),idle:document.querySelector('[data-board-count=idle]').textContent,focused:document.activeElement?.dataset?.boardCard,cache:r.querySelector('[data-board-cache]')?.textContent}})()");
  ok(b&&b.cols.join()==='waiting,working,done,idle','four columns in order',b);
  ok(b.titles[0].startsWith('Te esperan')&&b.titles[1].startsWith('Trabajando')&&b.titles[2].startsWith('Listos')&&b.titles[3].startsWith('Inactivos'),'column titles in Spanish',b.titles);
- ok(b.cards.join()==='a2,a1,b2'&&b.idle==='1','cards: action, working, done; the idle column is collapsed with its count (the sleeping one)',b);
+ ok(b.cards.join()==='a2,a1,b2,b1'&&b.idle==='1','cards: action, working, done and the idle column expanded by default (the sleeping one)',b);
  ok(b.focused==='a2','the keyboard lands on the first card',b);
  ok(/^Caché (4:00|3:59)$/.test(b.cache),'header: the most urgent cache countdown',b);
  const card=await js("(()=>{const c=document.querySelector('[data-board-card=b2]');return {text:c.textContent,glyph:c.querySelector('[data-glyph]')?.dataset.glyph,ws:c.textContent.includes('Dos'),detail:c.querySelector('[data-board-detail]')?.textContent}})()");
  ok(card.ws&&card.detail.includes('Listo')&&card.glyph,'card: glyph, title, workspace and detail',card);
+ ok(await js("!!document.querySelector('[data-board-card=b1][data-board-state=sleeping]')"),'Inactivos shows the sleeping console with its moon');
  await js("document.querySelector('[data-board-idle-toggle]').click()");await frames();
- ok(await js("!!document.querySelector('[data-board-card=b1][data-board-state=sleeping]')"),'expanding Inactivos shows the sleeping console with its moon');
+ ok(await js("!document.querySelector('[data-board-card=b1]')&&document.querySelector('[data-board-idle-toggle]').getAttribute('aria-expanded')==='false'"),'the toggle still collapses Inactivos');
+ await js("document.querySelector('[data-board-idle-toggle]').click()");await frames();
  await js("smoke.key('[data-board-card=a2]','ArrowRight')");await frames();
  ok((await js('document.activeElement?.dataset?.boardCard'))==='a1','ArrowRight moves to the next column');
  await js("smoke.key('[data-board-card=a1]','ArrowRight')");await js("smoke.key('[data-board-card=b2]','ArrowRight')");await frames();
