@@ -4,7 +4,9 @@
 // submit (paced 64 KB + late CR, split DECSET 2004, multiline_unsafe), the
 // gate, stateOf and running Quick Commands (desktop and the strict phone
 // variant). R22-13: composer model, note/taskState store actions, first
-// prompt to the first agent console, fs:dirExists. Same esbuild + vm harness as test-status.cjs.
+// prompt to the first agent console, fs:dirExists. R30-01: schema 13 (v12 ->
+// v13 keeps everything, new defaults, PaneSchedule automation fields,
+// repoConfig, junk tolerance). Same esbuild + vm harness as test-status.cjs.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -50,13 +52,13 @@ function v11(extra = {}) {
 const qc = (i, extra = {}) => ({ id: `qc-${i}`, name: `Cmd ${i}`, text: `echo ${i}`, action: 'send', enter: false, ...extra })
 
 function schemaChecks() {
-  check(CONFIG_VERSION === 12, 'CONFIG_VERSION is 12')
+  check(CONFIG_VERSION === 13, 'CONFIG_VERSION is 13')
 
   // E8-FR-01: 3 snippets -> 3 global send commands, same order and ids, no Enter.
   const snippets = [{ id: 'snip-a', name: 'Continua', text: 'continua' }, { id: 'snip-b', name: 'Compact', text: '/compact' }, { id: 'snip-c', name: 'Tests', text: 'corre los tests\ny arregla' }]
   const raw = v11({ snippets: clone(snippets) })
   const a = parseConfig(clone(raw))
-  check(a && a.version === 12, 'a v11 config with snippets parses and is stamped 12')
+  check(a && a.version === 13, 'a v11 config with snippets parses and is stamped 13')
   check(a.quickCommands.length === 3 && a.quickCommands.map(c => c.id).join() === 'snip-a,snip-b,snip-c', 'snippets migrate in order, keeping their ids')
   check(a.quickCommands.every((c, i) => c.action === 'send' && c.enter === false && c.workspaceId === undefined && c.presetId === undefined && c.name === snippets[i].name && c.text === snippets[i].text), 'migrated commands are global send without Enter, same label and text')
   check(!('snippets' in a), 'the parsed config (the next save) no longer carries snippets')
@@ -107,7 +109,7 @@ function schemaChecks() {
   // Schema 12 settings defaults and tolerance.
   const st = a.settings
   check(st.updateDismissedVersion === '' && st.explorerMenu === false && st.persistScrollback === true && st.persistScrollbackLines === 2000 && st.gitChip === true && st.terminalSnapshotMode === 'auto', 'v11 gains the schema 12 settings defaults')
-  check(JSON.stringify(st.automation) === JSON.stringify({ defaultAgentPresetId: '', composerCreateAnother: false }), 'automation defaults')
+  check(st.automation.defaultAgentPresetId === '' && st.automation.composerCreateAnother === false, 'automation defaults (schema 12 keys)')
   check(st.agents.resumeModalTimeoutSec === 60 && st.agents.resumeNudge === false && st.agents.resumeNudgeText === '' && st.agents.sidebarSort === 'manual', 'agents v12 defaults')
   check(st.notifications.ntfy.server === 'https://ntfy.sh' && st.notifications.onlyWhenAway === false, 'notification v12 defaults')
   const tol = parseConfig(v11({ settings: { ...clone(baseSettings), persistScrollbackLines: 99999, terminalSnapshotMode: 'x', gitChip: 'on', explorerMenu: 1, updateDismissedVersion: 'v'.repeat(100), agents: { resumeModalTimeoutSec: 9999, sidebarSort: 'random', resumeNudge: true, resumeNudgeText: 'Segui' }, automation: { defaultAgentPresetId: 'preset-claude', composerCreateAnother: 'yes' } } }))
@@ -132,10 +134,152 @@ function schemaChecks() {
     check(store.load().quickCommands.length === 3 && JSON.parse(fs.readFileSync(file, 'utf8')).snippets.length === 3, 'a plain load migrates in memory and leaves the file untouched')
     store.load({ upgrade: true })
     const written = JSON.parse(fs.readFileSync(file, 'utf8'))
-    check(written.version === 12 && !('snippets' in written) && written.quickCommands.map(c => c.id).join() === 'snip-a,snip-b,snip-c', 'the upgrade write stores quickCommands and drops snippets')
+    check(written.version === 13 && !('snippets' in written) && written.quickCommands.map(c => c.id).join() === 'snip-a,snip-b,snip-c', 'the upgrade write stores quickCommands and drops snippets')
     check(JSON.parse(fs.readFileSync(file + '.bak', 'utf8')).snippets.length === 3, 'the pre-upgrade file with snippets stays in .bak')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 }
+
+// ---- R30-01: schema 13 (v12 -> v13 keeps everything, defaults only) --------
+// A v12 config as the 2.0 renderer writes it: every schema 12 key set to a
+// non-default value, quick commands, a one-shot schedule, note and taskState.
+function v12Real(extra = {}) {
+  return {
+    version: 12,
+    workspaces: [
+      { id: 'w1', name: 'Uno', cwd: 'C:/a', favorite: true, layout: { grid: 2, order: ['p1', 'p2'] }, setupId: 'c1', agentsCollapsed: true, note: 'revisar login', taskState: 'doing', panes: [
+        { id: 'p1', type: 'claude', presetId: 'preset-claude', title: 'Claude', color: '#d97757', icon: 'claude', fontSize: 15, schedule: { time: '09:30', prompt: 'segui con el plan', dueAt: 1760000000000 }, lastSession: { provider: 'claude', sessionId: '0123abcd-0000-4000-8000-000000000000', cwd: 'C:/a', at: 7 } },
+        { id: 'p2', type: 'shell', cwd: 'C:/a/sub', command: 'pwsh.exe', setupId: 'c1', title: 'Shell', color: '#fff', icon: 'terminal' },
+      ] },
+    ],
+    presets: [{ id: 'preset-claude', name: 'Claude Code', type: 'claude', command: 'claude', args: ['--verbose'], color: '#d97757', icon: 'claude', env: { A: '1' } }],
+    settings: {
+      ...clone(baseSettings), language: 'es', theme: 'nord', terminalRenderer: 'webgl', keymap: { palette: 'Ctrl+P' },
+      terminalUnicode11: false, terminalAgentEndChip: false, awakeMode: 'always', terminalSnapshotMode: 'lazy', persistScrollback: false, persistScrollbackLines: 3000, gitChip: false, explorerMenu: true, updateDismissedVersion: '2.0.1',
+      remote: { enabled: true, port: 4600 },
+      notifications: { enabled: false, hooksEnabled: true, hookToken: 'a'.repeat(32), inAppWhenFocused: false, onlyWhenAway: true, ntfy: { enabled: true, server: 'https://ntfy.example', topic: 'mi-topic', token: 'tk', notifyAction: false, notifyDone: true } },
+      agents: { resumeOnStartup: 'off', awakeDisplay: true, sidebarAgentRows: false, topicAsTitle: false, ctrlDigitFocus: false, resumeModalTimeoutSec: 0, resumeNudge: true, resumeNudgeText: 'Segui', sidebarSort: 'smart' },
+      automation: { defaultAgentPresetId: 'preset-claude', composerCreateAnother: true },
+    },
+    activeWorkspaceId: 'w1',
+    quickCommands: [qc(1), qc(2, { workspaceId: 'w1', action: 'agent', enter: true, presetId: 'preset-claude' })],
+    connections: [{ id: 'c1', name: 'SSH', steps: [{ send: 'ssh host', waitFor: 'password:', secret: false }] }],
+    keyButtons: [{ id: 'k1', label: 'Esc', seq: '\u001b' }],
+    ...extra,
+  }
+}
+// Every input value survives (new keys may appear next to them).
+function survives(input, output, at = '') {
+  if (input === output) return true
+  if (typeof input !== 'object' || input === null || typeof output !== 'object' || output === null) throw new Error(`value changed at ${at || '<root>'}: ${JSON.stringify(input)} -> ${JSON.stringify(output)}`)
+  for (const k of Object.keys(input)) if (k !== 'version') survives(input[k], output[k], `${at}.${k}`)
+  return true
+}
+const run = (at, extra = {}) => ({ at, scheduledFor: at - 5, trigger: 'scheduled', status: 'sent', ...extra })
+
+async function schema13Checks() {
+  check(CONFIG_VERSION === 13, 'CONFIG_VERSION is 13 (R30-01)')
+  const raw = v12Real()
+  const a = parseConfig(clone(raw))
+  check(a && a.version === 13, 'a real v12 config parses and is stamped 13')
+  check(survives(raw, a), 'every v12 value survives v12 -> v13 unchanged')
+  const st = a.settings
+  check(st.remote.phoneFit === true && JSON.stringify(st.remote.https) === '{"enabled":false,"mode":"tailscaleServe"}' && st.remote.enabled === true && st.remote.port === 4600, 'remote gains phoneFit on and https off (tailscaleServe), keeping enabled and port')
+  check(st.cliEnabled === true && st.worktreesRoot === '' && st.hibernateIdleMinutes === 0, 'cliEnabled on, worktreesRoot empty (= dataDir()/worktrees) and hibernation off')
+  check(JSON.stringify(st.agents.cacheTimer) === '{"enabled":false,"ttlMinutes":5}' && st.agents.sidebarSort === 'smart', 'agents gain cacheTimer off/5 min next to the kept v12 values')
+  check(JSON.stringify(st.automation) === JSON.stringify({ defaultAgentPresetId: 'preset-claude', composerCreateAnother: true, cliProtectSsh: true, cliUserPath: false, scheduleGraceMin: 120, scheduleMaxWaitMin: 30, scheduleNotify: false }), 'automation gains the cli/schedule defaults (120 grace, 30 max wait)')
+  const sch = a.workspaces[0].panes[0].schedule
+  check(JSON.stringify(sch) === JSON.stringify(raw.workspaces[0].panes[0].schedule), 'an old one-shot schedule parses with no new keys (stays one-shot)')
+  check(a.workspaces[0].repoConfig === undefined && !('repoConfig' in a.workspaces[0]) && a.workspaces[0].panes.every(p => !('worktree' in p)), 'repoConfig and pane.worktree stay absent')
+  check(JSON.stringify(parseConfig(clone(a))) === JSON.stringify(a), 'v13 parse is idempotent')
+
+  // Contract amendment: no top-level repoConfigTrust or automations in config.json.
+  const forged = parseConfig(v12Real({ repoConfigTrust: { 'C:/evil': 'f'.repeat(64) }, automations: [{ id: 'x' }] }))
+  check(forged && !('repoConfigTrust' in forged) && !('automations' in forged), 'a stray top-level repoConfigTrust or automations is stripped (trust is main-owned)')
+
+  // Values kept, junk values fall back field by field without rejecting the config.
+  const set = (patch) => { const c = v12Real(); Object.assign(c.settings, patch); return parseConfig(c) }
+  const ok = set({ remote: { enabled: false, port: 4517, phoneFit: false, https: { enabled: true, mode: 'tailscaleServe' } }, cliEnabled: false, worktreesRoot: 'D:/wt', hibernateIdleMinutes: 30, agents: { cacheTimer: { enabled: true, ttlMinutes: 60 } }, automation: { cliProtectSsh: false, cliUserPath: true, scheduleGraceMin: 0, scheduleMaxWaitMin: 240, scheduleNotify: true } })
+  check(ok.settings.remote.phoneFit === false && ok.settings.remote.https.enabled === true && ok.settings.cliEnabled === false && ok.settings.worktreesRoot === 'D:/wt' && ok.settings.hibernateIdleMinutes === 30, 'valid v13 settings are kept')
+  check(ok.settings.agents.cacheTimer.enabled === true && ok.settings.agents.cacheTimer.ttlMinutes === 60, 'cacheTimer 60 min is kept')
+  check(JSON.stringify(ok.settings.automation) === JSON.stringify({ defaultAgentPresetId: '', composerCreateAnother: false, cliProtectSsh: false, cliUserPath: true, scheduleGraceMin: 0, scheduleMaxWaitMin: 240, scheduleNotify: true }), 'automation bounds 0 grace and 240 max wait are kept')
+  check(set({ hibernateIdleMinutes: 5 }).settings.hibernateIdleMinutes === 5 && set({ hibernateIdleMinutes: 1440 }).settings.hibernateIdleMinutes === 1440, 'hibernation 5 and 1440 minutes are kept')
+  for (const bad of [3, 1441, 12.5, -1, '30', null]) check(set({ hibernateIdleMinutes: bad }).settings.hibernateIdleMinutes === 0, `hibernation ${JSON.stringify(bad)} turns it off`)
+  const junk = set({ remote: { enabled: true, port: 4517, phoneFit: 'si', https: { enabled: 'yes', mode: 'manualCert' } }, cliEnabled: 1, worktreesRoot: 5, agents: { cacheTimer: { enabled: true, ttlMinutes: 15 } }, automation: { cliProtectSsh: 'no', cliUserPath: 1, scheduleGraceMin: 2000, scheduleMaxWaitMin: 0, scheduleNotify: 'x' } })
+  check(junk && junk.settings.remote.enabled === true && junk.settings.remote.phoneFit === true && JSON.stringify(junk.settings.remote.https) === '{"enabled":false,"mode":"tailscaleServe"}', 'junk phoneFit and https fields fall back (manualCert is not a mode)')
+  check(junk.settings.cliEnabled === true && junk.settings.worktreesRoot === '' && junk.settings.agents.cacheTimer.enabled === true && junk.settings.agents.cacheTimer.ttlMinutes === 5, 'junk cliEnabled/worktreesRoot default, cacheTimer 15 min falls back to 5 keeping enabled')
+  check(junk.settings.automation.cliProtectSsh === true && junk.settings.automation.cliUserPath === false && junk.settings.automation.scheduleGraceMin === 120 && junk.settings.automation.scheduleMaxWaitMin === 30 && junk.settings.automation.scheduleNotify === false, 'out-of-range grace/max wait and junk booleans fall back to defaults')
+  const nonObj = set({ remote: { enabled: true, port: 4517, https: 'on' }, agents: { cacheTimer: 'x' } })
+  check(nonObj && nonObj.settings.remote.https.enabled === false && nonObj.settings.agents.cacheTimer.ttlMinutes === 5, 'a non-object https or cacheTimer falls back to defaults')
+  check(set({ worktreesRoot: 'x'.repeat(5000) }).settings.worktreesRoot === '' && set({ automation: { scheduleMaxWaitMin: 1.5 } }).settings.automation.scheduleMaxWaitMin === 30, 'an over-long root and a fractional wait fall back')
+
+  // PaneSchedule automation fields (E8-FR-28..31), the contract's `automations`.
+  const withSchedule = (schedule) => { const c = v12Real(); c.workspaces[0].panes[0].schedule = schedule; return parseConfig(c) }
+  const base = { time: '09:30', prompt: 'segui', dueAt: 1760000000000 }
+  const fullSch = { ...base, recurrence: { kind: 'weekly', days: [1, 3, 5] }, waitIdle: false, enabled: false, waitingSince: 1759999990000, history: [run(1), run(2, { status: 'failed', reason: 'agent_not_running' }), run(3, { trigger: 'manual', status: 'skipped_busy' })] }
+  const f = withSchedule(clone(fullSch))
+  check(JSON.stringify(f.workspaces[0].panes[0].schedule) === JSON.stringify(fullSch), 'a full v13 schedule (weekly, waitIdle, paused, waitingSince, history) round-trips')
+  for (const kind of ['once', 'daily', 'weekdays', 'hourly']) check(withSchedule({ ...base, recurrence: { kind } }).workspaces[0].panes[0].schedule.recurrence.kind === kind, `recurrence ${kind} is kept`)
+  for (const bad of [{ kind: 'weekly', days: [] }, { kind: 'weekly', days: [1, 1] }, { kind: 'weekly', days: [7] }, { kind: 'weekly' }, { kind: 'monthly' }, 'daily']) {
+    const p = withSchedule({ ...base, recurrence: bad })
+    check(p && p.workspaces[0].panes[0].schedule.prompt === 'segui' && p.workspaces[0].panes[0].schedule.recurrence === undefined, `a junk recurrence ${JSON.stringify(bad)} is dropped, the schedule stays`)
+  }
+  const jf = withSchedule({ ...base, waitIdle: 'x', enabled: 0, waitingSince: 'ayer', history: 'nope' }).workspaces[0].panes[0].schedule
+  check(jf.prompt === 'segui' && jf.waitIdle === undefined && jf.enabled === undefined && jf.waitingSince === undefined && jf.history === undefined, 'junk waitIdle, enabled, waitingSince and history are dropped field by field')
+  const hist = withSchedule({ ...base, history: [run(1), 'basura', run(2, { status: 'exploded' }), run(3, { reason: 'weird' }), { at: 4 }] }).workspaces[0].panes[0].schedule.history
+  check(hist.length === 2 && hist[0].at === 1 && hist[1].at === 3 && hist[1].reason === undefined, 'history parses item by item; an unknown reason is dropped, the run kept')
+  const many = withSchedule({ ...base, history: Array.from({ length: 25 }, (_, i) => run(100 + i)) }).workspaces[0].panes[0].schedule.history
+  check(many.length === 20 && many[0].at === 105 && many[19].at === 124, '25 runs keep the 20 most recent, oldest first')
+  const desc = withSchedule({ ...base, history: Array.from({ length: 25 }, (_, i) => run(200 - i)) }).workspaces[0].panes[0].schedule.history
+  check(desc.length === 20 && desc[0].at === 200 && desc[19].at === 181, 'newest-first history also keeps the 20 most recent in its order')
+
+  // Workspace repoConfig trace (E8-FR-25).
+  const sha = 'ab'.repeat(32)
+  const withRepo = (repoConfig) => { const c = v12Real(); c.workspaces[0].repoConfig = repoConfig; return parseConfig(c) }
+  const rc = withRepo({ sha256: sha, appliedAt: 5, quickCommandIds: ['qc-1', 'qc-2'] })
+  check(JSON.stringify(rc.workspaces[0].repoConfig) === JSON.stringify({ sha256: sha, appliedAt: 5, quickCommandIds: ['qc-1', 'qc-2'] }), 'repoConfig is kept')
+  check(withRepo({ sha256: sha, appliedAt: 5, quickCommandIds: Array.from({ length: 25 }, (_, i) => `qc-${i}`) }).workspaces[0].repoConfig.quickCommandIds.length === 20, 'repoConfig keeps at most 20 quick command ids')
+  for (const bad of [{ sha256: 'xyz', appliedAt: 1, quickCommandIds: [] }, { sha256: sha, quickCommandIds: [] }, { sha256: sha, appliedAt: 1, quickCommandIds: 'qc-1' }, 'trusted']) {
+    const p = withRepo(bad)
+    check(p && p.workspaces[0].name === 'Uno' && p.workspaces[0].repoConfig === undefined, `a malformed repoConfig ${JSON.stringify(bad).slice(0, 40)} is dropped without rejecting the config`)
+  }
+
+  // ConfigStore: the renderer load upgrades a real v12 file to 13 once, .bak keeps v12.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-schema13-test-'))
+  try {
+    const app = { getPath: () => dir, isPackaged: false }
+    const { ConfigStore } = load('src/main/store/ConfigStore.ts', { require: id => (id === 'electron' ? { app } : require(id)), process: { ...process, env: {}, argv: ['electron'] } })
+    const file = path.join(dir, 'config.json'), text = JSON.stringify(raw)
+    fs.writeFileSync(file, text)
+    const store = new ConfigStore()
+    check(store.load().version === 13 && fs.readFileSync(file, 'utf8') === text, 'a plain load reads v12 as 13 and leaves the file untouched')
+    store.load({ upgrade: true })
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'))
+    check(written.version === 13 && survives(raw, written) && written.settings.remote.phoneFit === true && written.settings.automation.scheduleGraceMin === 120, 'the upgrade write stores v13 with every v12 value and the new defaults')
+    check(fs.readFileSync(file + '.bak', 'utf8') === text, 'the pre-upgrade v12 file stays in .bak')
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+
+  // Renderer round trip: hydrate -> persist -> parse keeps the v13 fields.
+  const saves = [], timers = new Map()
+  let seq = 0
+  const flush = () => { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) }
+  const r = loadRenderer(`export { startPersistence } from './persist'; export { useAppStore } from './store'`, {
+    window: { snApi: { config: { save: cfg => saves.push(clone(cfg)) }, pty: { killPanes: async () => 0 } } },
+    document: { hasFocus: () => false },
+    setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
+  })
+  const S = r.useAppStore
+  check(S.getState().settings.remote.phoneFit === true && S.getState().settings.cliEnabled === true && S.getState().settings.automation.scheduleMaxWaitMin === 30 && S.getState().settings.agents.cacheTimer.ttlMinutes === 5, 'the store defaults carry the v13 keys')
+  S.getState().hydrate(rc)
+  const stop = r.startPersistence()
+  S.getState().setPaneSchedule('w1', 'p1', clone(fullSch))
+  S.getState().updateSettings({ hibernateIdleMinutes: 45, remote: { ...S.getState().settings.remote, phoneFit: false } })
+  flush()
+  const back = parseConfig(saves.at(-1))
+  check(back && back.version === 13 && JSON.stringify(back.workspaces[0].panes[0].schedule) === JSON.stringify(fullSch) && back.workspaces[0].repoConfig.sha256 === sha, 'schedule fields and repoConfig persist through the store and the schema')
+  check(back.settings.hibernateIdleMinutes === 45 && back.settings.remote.phoneFit === false && back.settings.remote.https.mode === 'tailscaleServe', 'v13 settings persist through the store')
+  stop()
+}
+// ---- end R30-01 -------------------------------------------------------------
 
 function helperChecks() {
   const list = [qc(1), qc(2, { workspaceId: 'w2' }), qc(3), qc(4, { workspaceId: 'w1' }), qc(5, { workspaceId: 'w2' })]
@@ -178,7 +322,7 @@ function storeChecks() {
   check(S.getState().newQuickCommandId().startsWith('qc-'), 'new ids use the qc- prefix')
   flush()
   const last = saves.at(-1)
-  check(last && last.version === 12 && last.quickCommands.length === 3 && !('snippets' in last), 'the persisted blob writes quickCommands and never snippets')
+  check(last && last.version === 13 && last.quickCommands.length === 3 && !('snippets' in last), 'the persisted blob writes quickCommands and never snippets')
   S.getState().moveQuickCommand('qc-2', -1)
   check(S.getState().quickCommands.map(c => c.id).join() === 'snip-a,qc-2,qc-1', 'moveQuickCommand moves one slot')
   const before = S.getState().quickCommands
@@ -759,6 +903,7 @@ async function composerChecks() {
 
 async function main() {
   schemaChecks()
+  await schema13Checks()
   helperChecks()
   storeChecks()
   promptRuleChecks()
@@ -768,7 +913,7 @@ async function main() {
   await quickRunChecks()
   await composerChecks()
   fs.rmSync(shellDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} automation checks (schema 12, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state)`)
+  console.log(`PASS: ${checks} automation checks (schema 12 and 13, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state)`)
 }
 main().catch((err) => {
   fs.rmSync(shellDir, { recursive: true, force: true })

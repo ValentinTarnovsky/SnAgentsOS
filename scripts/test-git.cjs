@@ -215,6 +215,86 @@ check(gx.GIT_PREFIX.join(' ') === '-c core.quotePath=false -c core.fsmonitor=fal
   check(gx.resolveGitBin({ PATH: 'C:\\Git\\cmd' }, 'win32', (p) => p === 'C:\\Git\\cmd\\git.cmd') === null, 'windows: a git.cmd alone is not run (no shell)')
 }
 
+// ---- R30-01: schema 13 git keys (pane.worktree, worktreesRoot) --------------
+const schema13Start = checks
+// zod's z.object() strips unknown keys, so without paneWorktreeSchema the
+// link to a worktree would vanish on the next reload (E7 Diseno F).
+{
+  const { parseConfig, CONFIG_VERSION } = load('src/main/store/schema.ts', { console: { ...console, warn() {} } })
+  const wt = { repoRoot: 'C:\\repo\\app', path: 'C:\\data\\worktrees\\app-3f2a1b\\claude-3f2a', branch: 'sn/claude-3f2a', base: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' }
+  const v12 = () => ({
+    version: 12,
+    workspaces: [{ id: 'w1', name: 'App', cwd: 'C:\\repo\\app', layout: { grid: 2, order: ['p1', 'p2'] }, panes: [
+      { id: 'p1', type: 'claude', presetId: 'preset-claude', cwd: wt.path, title: 'Claude \u00b7 claude-3f2a', color: '#d97757', icon: 'claude' },
+      { id: 'p2', type: 'shell', title: 'Shell', color: '#fff', icon: 'terminal' },
+    ] }],
+    presets: [{ id: 'preset-claude', name: 'Claude Code', type: 'claude', command: 'claude', args: [], color: '#d97757', icon: 'claude' }],
+    settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false, gitChip: false },
+    activeWorkspaceId: 'w1',
+  })
+  check(CONFIG_VERSION === 13, 'schema 13 carries the worktree keys')
+  const up = parseConfig(v12())
+  check(up.version === 13 && up.settings.worktreesRoot === '' && up.settings.gitChip === false && up.workspaces[0].panes[0].cwd === wt.path, 'v12 -> v13: worktreesRoot defaults to empty (dataDir()/worktrees), gitChip and pane cwd kept')
+  check(up.workspaces[0].panes.every((p) => !('worktree' in p)), 'a pane without worktree stays without one')
+  const cfg = v12(); cfg.version = 13; cfg.workspaces[0].panes[0].worktree = { ...wt }; cfg.settings.worktreesRoot = 'D:\\wt'
+  const once = parseConfig(JSON.parse(JSON.stringify(cfg)))
+  same(once.workspaces[0].panes[0].worktree, wt, 'pane.worktree survives the parse')
+  check(once.settings.worktreesRoot === 'D:\\wt', 'a custom worktreesRoot is kept')
+  same(parseConfig(JSON.parse(JSON.stringify(once))), JSON.parse(JSON.stringify(once)), 'a second parse (reload) changes nothing')
+  for (const [label, bad] of [
+    ['a branch outside sn/', { ...wt, branch: 'main' }],
+    ['a non-hex base', { ...wt, base: 'HEAD' }],
+    ['an empty path', { ...wt, path: '' }],
+    ['a missing repoRoot', { path: wt.path, branch: wt.branch, base: wt.base }],
+    ['a string', 'C:\\x'],
+  ]) {
+    const c = v12(); c.workspaces[0].panes[0].worktree = bad
+    const p = parseConfig(c)
+    check(p && p.workspaces[0].panes[0].title.startsWith('Claude') && p.workspaces[0].panes[0].worktree === undefined, `${label} drops only the worktree, never the config`)
+  }
+
+  // ConfigStore on a temp dir: save, then a fresh store (an app restart) reloads it.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-wt-schema-'))
+  try {
+    const app = { getPath: () => dir, isPackaged: false }
+    const csCode = buildSync({ entryPoints: [path.join(root, 'src/main/store/ConfigStore.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+    const csMod = { exports: {} }
+    vm.runInNewContext(csCode, { module: csMod, exports: csMod.exports, require: (id) => (id === 'electron' ? { app } : require(id)), process: { ...process, env: {}, argv: ['electron'] }, console: { ...console, warn() {} }, Buffer })
+    const { ConfigStore } = csMod.exports
+    new ConfigStore().save(once)
+    const reloaded = new ConfigStore().load({ upgrade: true })
+    same(reloaded.workspaces[0].panes[0].worktree, wt, 'the worktree is still there after a save and a restart')
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify(v12()))
+    new ConfigStore().load({ upgrade: true })
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'))
+    check(onDisk.version === 13 && onDisk.settings.worktreesRoot === '' && onDisk.workspaces[0].panes.length === 2, 'a v12 file upgrades on disk to 13 keeping its panes')
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+
+  // Renderer store -> persisted blob -> schema keeps the worktree.
+  const code = buildSync({ stdin: { contents: `export { startPersistence } from './persist'; export { useAppStore } from './store'`, resolveDir: path.join(root, 'src/renderer/lib'), loader: 'ts' }, bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, define: { 'process.env.NODE_ENV': '"production"' } }).outputFiles[0].text
+  const saves = [], timers = new Map()
+  let seq = 0
+  const mod = { exports: {} }
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console, process, crypto: globalThis.crypto,
+    window: { snApi: { config: { save: (c) => saves.push(JSON.parse(JSON.stringify(c))) }, pty: { killPanes: async () => 0 } } },
+    document: { hasFocus: () => false },
+    setTimeout: (fn) => { timers.set(++seq, fn); return seq }, clearTimeout: (id) => timers.delete(id) })
+  const S = mod.exports.useAppStore
+  S.getState().hydrate(once)
+  const stop = mod.exports.startPersistence()
+  S.getState().renamePane('w1', 'p2', 'Shell 2')
+  for (const fn of [...timers.values()]) fn()
+  timers.clear()
+  const blob = saves.at(-1)
+  check(blob && blob.version === 13, 'the store writes a v13 blob')
+  same(blob.workspaces[0].panes[0].worktree, wt, 'the persisted blob carries pane.worktree')
+  same(parseConfig(blob).workspaces[0].panes[0].worktree, wt, 'and the reload keeps it')
+  check(parseConfig(blob).settings.worktreesRoot === 'D:\\wt', 'worktreesRoot persists through the store')
+  stop()
+}
+const schema13Checks = checks - schema13Start
+// ---- end R30-01 -------------------------------------------------------------
+
 function fakeExec() {
   const calls = []
   const fn = (file, args, opts, cb) => calls.push({ file, args, opts, done: (out = '', err = null, stderr = '') => cb(err, out, stderr) })
@@ -818,7 +898,7 @@ process.on('exit', (code) => {
   stopGit()
 
   asyncDone = true
-  console.log(`PASS: ${checks} git checks (${dropChecks} drop/paste, ${checks - dropChecks} GitService: porcelain, numstat, exec env + semaphore, untracked budget, refresh policy, watchers, real repos, chip, snapshot)`)
+  console.log(`PASS: ${checks} git checks (${dropChecks} drop/paste, ${schema13Checks} schema 13 worktree, ${checks - dropChecks - schema13Checks} GitService: porcelain, numstat, exec env + semaphore, untracked budget, refresh policy, watchers, real repos, chip, snapshot)`)
 })().catch((e) => {
   console.error(e)
   process.exit(1)
