@@ -40,7 +40,8 @@ function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
     window.snApi.git
       .worktreeInspect({ path: req.path, ...(req.base ? { base: req.base } : {}) })
       .then((r) => live && setInfo(r))
-      .catch(() => live && setInfo({ exists: false, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false }))
+      // Unknown is not "gone": deleting still asks for the checkbox.
+      .catch(() => live && setInfo({ exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false, incomplete: true }))
     return () => {
       live = false
     }
@@ -129,12 +130,17 @@ function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
               </li>
               <li className={commits > 0 ? 'text-state-action' : undefined}>{t('worktree.close.ahead', { count: info.commitsAhead })}</li>
               <li>{info.mergedIntoHead ? t('worktree.close.merged') : t('worktree.close.notMerged')}</li>
+              {info.incomplete && (
+                <li data-worktree-close-incomplete className="text-state-action">
+                  {t('worktree.close.incomplete')}
+                </li>
+              )}
             </ul>
           )}
           {needsAck && (
             <label className="flex items-start gap-2 rounded-btn border border-state-error/40 bg-state-error/10 px-3 py-2 text-xs text-text-primary">
               <input type="checkbox" data-worktree-ack checked={ack} onChange={(e) => setAck(e.target.checked)} className="mt-0.5 accent-[var(--color-state-error)]" />
-              {t('worktree.close.ack', { files, commits })}
+              {info?.incomplete ? t('worktree.close.ackUnknown') : t('worktree.close.ack', { files, commits })}
             </label>
           )}
           {error && (

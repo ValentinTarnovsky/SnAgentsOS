@@ -357,6 +357,9 @@ export class WorktreeService {
       return empty
     }
     const entry = this.deps.manifest.find(path)
+    // A step git could not answer must never read as "nothing to lose": the
+    // close dialog then asks for the checkbox anyway (FR-30).
+    let incomplete = false
     let dirtyFiles = 0
     try {
       const st = parseStatusV2(await this.git(['status', '--porcelain=v2', '-z', '--untracked-files=normal'], path))
@@ -365,6 +368,7 @@ export class WorktreeService {
       dirtyFiles = new Set(st.entries.map((e) => e.path.replace(/\/$/, '')).filter((p) => !linked.has(p))).size
     } catch {
       dirtyFiles = 0
+      incomplete = true
     }
     const base = entry?.baseSha || (typeof req.base === 'string' && SHA_RE.test(req.base) ? req.base : '')
     let commitsAhead = 0
@@ -373,6 +377,7 @@ export class WorktreeService {
         commitsAhead = Number((await this.git(['rev-list', '--count', `${base}..HEAD`], path)).trim()) || 0
       } catch {
         commitsAhead = 0
+        incomplete = true
       }
     }
     let mergedIntoHead = false
@@ -380,7 +385,9 @@ export class WorktreeService {
     if (repoRoot && WORKTREE_BRANCH_RE.test(entry.branch)) {
       mergedIntoHead = await this.gitOk(['merge-base', '--is-ancestor', `refs/heads/${entry.branch}`, 'HEAD'], repoRoot)
     }
-    return { exists: true, dirtyFiles, commitsAhead, mergedIntoHead }
+    // Without a base the commits over it are unknown, unless the branch is merged.
+    if (!base && !mergedIntoHead) incomplete = true
+    return { exists: true, dirtyFiles, commitsAhead, mergedIntoHead, ...(incomplete ? { incomplete: true } : {}) }
   }
 
   private async listed(repoRoot: string): Promise<Array<{ path: string; branch: string | null; prunable: boolean }>> {

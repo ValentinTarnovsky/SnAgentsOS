@@ -33,6 +33,8 @@ function loadRenderer(contents, overrides = {}) {
 }
 
 const shared = load('src/shared/worktree-types.ts')
+// deleteNeedsAck is pure; bundled alone so the real repo block can use it before the renderer checks.
+const r_deleteNeedsAckProbe = (info) => loadRenderer(`export { deleteNeedsAck } from './worktrees'`, { window: { snApi: {} }, document: { hasFocus: () => true, querySelector: () => null } }).deleteNeedsAck(info)
 const W = load('src/main/git/WorktreeService.ts')
 const M = load('src/main/git/WorktreeManifest.ts')
 const gx = load('src/main/git/gitExec.ts')
@@ -168,6 +170,9 @@ async function realRepoChecks() {
   same(await s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 2, commitsAhead: 0, mergedIntoHead: true }, 'inspect dirty: 2 files')
   git(wt.path, 'add', 'src/app.js'); git(wt.path, 'commit', '-qm', 'work')
   same(await s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 1, commitsAhead: 1, mergedIntoHead: false }, 'inspect: 1 commit over the base, not merged')
+  const blind = make({ deps: { runner: { run: (args, o) => (args.includes('status') ? Promise.reject(Object.assign(new Error('fatal: unsafe repository'), { code: 'unsafe_repo' })) : runner.run(args, o)) } } })
+  same(await blind.s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 0, commitsAhead: 1, mergedIntoHead: false, incomplete: true }, 'inspect: a git status that fails is incomplete, never a silent clean')
+  check(r_deleteNeedsAckProbe({ exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: true, incomplete: true }), 'an incomplete inspect still requires the checkbox')
   same(await s.inspect({ path: path.join(base, 'nope') }), { exists: false, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false }, 'inspect of a missing folder')
   same(await s.inspect({ path: 'rel' }), { exists: false, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false }, 'inspect of a relative path')
 

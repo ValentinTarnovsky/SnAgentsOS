@@ -156,8 +156,8 @@ export function noteSpawnFailure(paneId: string, message: string | undefined): v
 }
 
 /** The checkbox of the close dialog is required when deleting loses work. */
-export function deleteNeedsAck(info: { dirtyFiles: number; commitsAhead: number; mergedIntoHead: boolean }): boolean {
-  return info.dirtyFiles > 0 || (info.commitsAhead > 0 && !info.mergedIntoHead)
+export function deleteNeedsAck(info: { dirtyFiles: number; commitsAhead: number; mergedIntoHead: boolean; incomplete?: boolean }): boolean {
+  return info.incomplete === true || info.dirtyFiles > 0 || (info.commitsAhead > 0 && !info.mergedIntoHead)
 }
 
 /** Commits deleting the branch would lose (merged ones survive in the repo HEAD). */
