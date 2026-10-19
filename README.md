@@ -19,7 +19,7 @@ Open *sets* of multiple terminals and AI CLI sessions (Claude Code, Codex, custo
 
 ---
 
-> **Status:** `v2.0.0`, stable. Upgrading from a 1.x version? Your data moves over by itself, see [Upgrading from 1.x](#upgrading-from-1x). Built in public as a VibeCoding showcase, open source under MIT.
+> **Status:** `v2.1.0`, stable. Upgrading from a 1.x version? Your data moves over by itself, see [Upgrading from 1.x](#upgrading-from-1x). Built in public as a VibeCoding showcase, open source under MIT.
 
 ## What it is
 
