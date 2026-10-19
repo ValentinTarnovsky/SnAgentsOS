@@ -4,6 +4,7 @@ import { refreshGit } from './gitSync'
 import { focusPane, getFocusedPane, getLastFocusedPaneForWorkspace } from './focus'
 import { panelTargets, workspaceOfKey } from './changes'
 import { workspaceGitKey } from './gitChip'
+import { dropSidePanel } from './sidePanels'
 
 /**
  * Open / close the Changes panel (E7-FR-11): the chip, the `toggleChanges`
@@ -16,6 +17,8 @@ export function openChangesPanel(targetKey?: string, opts: { base?: string } = {
   const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId)
   if (!ws) return
   const key = targetKey ?? panelTargets(ws)[0]?.key ?? workspaceGitKey(ws.id)
+  // One drawer at a time (v2.2): Changes replaces Notes or Files.
+  dropSidePanel()
   refreshGit([key])
   useGitStore.getState().openChanges(key, key.startsWith('pane:') ? opts.base : undefined)
 }

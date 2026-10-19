@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Clock, Gauge, History, Megaphone, MonitorUp, Plus, Settings as SettingsIcon, Zap } from 'lucide-react'
+import { Clock, Gauge, History, Megaphone, MonitorUp, NotebookPen, Plus, Settings as SettingsIcon, Zap } from 'lucide-react'
 import { BRAND } from '@shared/brand'
 import { Sheet } from './Sheet'
 import { ActionList } from './ActionList'
@@ -34,6 +34,7 @@ import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { openDiagnostics } from '../lib/connLog'
 import { openHistory } from '../lib/history'
+import { openWsNotes } from '../lib/wsNotes'
 import { openAutomations } from '../lib/automations'
 import { rowShowsTime, STATUS_TICK_MS } from '../lib/statusText'
 import { isWorkspaceMounted, type PaneRef } from '../lib/workspace'
@@ -192,6 +193,7 @@ export function HomeScreen(): ReactNode {
               { id: 'promptAll', icon: <Megaphone size={16} />, label: t('home.promptAll'), onSelect: () => { setPromptFor(menuFor); setMenuFor(null) } },
               { id: 'quick', icon: <Zap size={16} />, label: t('quick.title'), onSelect: () => { setQuickFor(menuFor); setMenuFor(null) } },
               { id: 'history', icon: <History size={16} />, label: t('history.open'), onSelect: () => { const id = menuFor; setMenuFor(null); if (id) openHistory(id) } },
+              { id: 'notes', icon: <NotebookPen size={16} />, label: t('wsnotes.open'), onSelect: () => { const id = menuFor; setMenuFor(null); if (id) openWsNotes(id) } },
               { id: 'showOnPc', icon: <MonitorUp size={16} />, label: t('home.showOnPc'), onSelect: () => { const id = menuFor; setMenuFor(null); if (id) showOnPc(id) } },
             ]}
           />

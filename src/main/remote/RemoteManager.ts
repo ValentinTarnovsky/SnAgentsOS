@@ -43,7 +43,9 @@ import type {
   RemoteUiState,
   SecureModeStatus,
 } from '@shared/ipc-contract'
-import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemoteHistorySession, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
+import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemoteHistorySession, RemoteNote, RemoteNotesReply, RemoteNotesRequest, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
+import { WS_NOTE_PHONE_MAX, type WsNoteDoc, type WsNotesChangedEvt } from '@shared/ws-notes'
+import type { WsNoteStore } from '../notes/WsNoteStore'
 import type { AgentProvider, ClaudePaneState, ConfigFile, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
 import { isHistorySessionId } from '@shared/session-history'
 import type { PtyManager } from '../pty/PtyManager'
@@ -169,6 +171,8 @@ export class RemoteManager {
   private history: RemoteHistoryProvider | null = null
   /** E7-FR-22..26: answers the phone's gitReq (GitRemote, set by index.ts at boot). */
   private gitHandler: ((req: RemoteGitRequest) => Promise<RemoteGitReply>) | null = null
+  /** v2.2 (E9): the workspace notes the phones read and write (set by index.ts at boot). */
+  private notes: Pick<WsNoteStore, 'list' | 'read' | 'write' | 'create' | 'delete'> | null = null
   /** E3 M12: the phones' Chat view (ChatHub, set by index.ts at boot). */
   private chat: ChatHooks | null = null
   private readonly chatRelay: ChatHooks = {
@@ -451,6 +455,7 @@ export class RemoteManager {
       fit: this.fit,
       queryHistory: (req) => this.history?.forRemote(req) ?? Promise.resolve([]),
       git: (req) => this.gitRequest(req),
+      notes: (req) => this.notesRequest(req),
       chat: this.chatRelay,
       // E3-FR-44/46: the VAPID key only while https is on.
       getPushKey: () => (this.httpsWanted ? this.push.publicKey() : null),
@@ -796,6 +801,48 @@ export class RemoteManager {
     return this.gitHandler(req)
   }
 
+  // --- Workspace notes for the phone (v2.2, E9) -----------------------------------
+
+  setNotes(store: Pick<WsNoteStore, 'list' | 'read' | 'write' | 'create' | 'delete'> | null): void {
+    this.notes = store
+  }
+
+  /** A note changed on the PC or on a phone: every phone reloads what it shows of that workspace. */
+  notesChanged(evt: WsNotesChangedEvt): void {
+    this.sessions?.broadcastNotesChanged(evt.workspaceId, evt.noteId)
+  }
+
+  /** One notesReq. The phone is never trusted: only a workspace the desktop has, ids only, never a path back. */
+  private async notesRequest(req: RemoteNotesRequest): Promise<RemoteNotesReply> {
+    const store = this.notes
+    if (!store || !this.currentSnapshot().workspaces.some((w) => w.id === req.workspaceId)) return { ok: false, error: 'not_found' }
+    const { workspaceId, noteId } = req
+    switch (req.op) {
+      case 'list': {
+        const res = await store.list(workspaceId)
+        return res.ok ? { ok: true, notes: res.notes } : { ok: false, error: 'invalid' }
+      }
+      case 'read': {
+        const res = await store.read({ workspaceId, noteId })
+        return res.ok ? { ok: true, note: phoneNote(res.note) } : { ok: false, error: res.error }
+      }
+      case 'write': {
+        if (typeof req.text !== 'string') return { ok: false, error: 'invalid' }
+        const res = await store.write({ workspaceId, noteId, text: req.text, ...(req.baseRev !== undefined ? { baseRev: req.baseRev } : {}) })
+        if (res.ok) return { ok: true, note: res.note }
+        return { ok: false, error: res.error, ...(res.current ? { current: phoneNote(res.current) } : {}) }
+      }
+      case 'create': {
+        const res = await store.create({ workspaceId, text: req.text ?? '' })
+        return res.ok ? { ok: true, note: res.note } : { ok: false, error: res.error }
+      }
+      case 'delete': {
+        const res = await store.delete({ workspaceId, noteId })
+        return res.ok ? { ok: true } : { ok: false, error: res.error }
+      }
+    }
+  }
+
   // --- HTTP auth (E3-FR-01) ---------------------------------------------------
 
   /**
@@ -890,4 +937,15 @@ export class RemoteManager {
     if (code === 'EACCES') return `Port ${port} needs elevated privileges. Choose a port above 1024.`
     return err instanceof Error ? err.message : 'Failed to start the remote server.'
   }
+}
+
+/**
+ * A note as the phone gets it: never its path; one past WS_NOTE_PHONE_MAX
+ * UTF-8 bytes travels cut there (whole characters) and read-only.
+ */
+export function phoneNote(doc: WsNoteDoc): RemoteNote {
+  const { path: _path, text, ...meta } = doc
+  const bytes = Buffer.from(text, 'utf8')
+  if (bytes.length <= WS_NOTE_PHONE_MAX) return { ...meta, text }
+  return { ...meta, text: bytes.subarray(0, WS_NOTE_PHONE_MAX).toString('utf8').replace(/�+$/, ''), readOnly: true }
 }

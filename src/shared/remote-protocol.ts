@@ -26,6 +26,7 @@ import type {
 } from './types'
 import type { GitArea, GitDiffHunk, GitFileEntry, RemoteGitChip } from './git-types'
 import type { ChatMessage } from './chat-types'
+import type { WsNoteError, WsNoteMeta } from './ws-notes'
 
 export type { RemotePending, RemoteGitChip }
 
@@ -394,6 +395,35 @@ export interface RemoteGitReply {
   done: boolean
 }
 
+// --- Workspace notes for the phone (v2.2, E9) ---
+
+/** The request half of `notesReq`: a workspace the desktop has, and a note of it by id. */
+export interface RemoteNotesRequest {
+  workspaceId: string
+  op: 'list' | 'read' | 'write' | 'create' | 'delete'
+  noteId?: string
+  /** write / create, <= WS_NOTE_PHONE_MAX. */
+  text?: string
+  /** write: the rev the phone loaded; another one on the PC is a conflict. */
+  baseRev?: string
+}
+
+/** A note as the phone gets it: never its path; past WS_NOTE_PHONE_MAX only its start, read-only. */
+export interface RemoteNote extends WsNoteMeta {
+  text?: string
+  readOnly?: boolean
+}
+
+/** The answer half of `notesRes`, <= 48KB once framed. */
+export interface RemoteNotesReply {
+  ok: boolean
+  error?: WsNoteError
+  notes?: WsNoteMeta[]
+  note?: RemoteNote
+  /** conflict: the note as it is now on the PC. */
+  current?: RemoteNote
+}
+
 // --- Client -> server messages ---
 
 export type RemoteClientMsg =
@@ -411,6 +441,8 @@ export type RemoteClientMsg =
   | { v: number; type: 'historyReq'; id: string; query?: string; workspaceId?: string }
   /** E7-FR-22/23: one page of the change list or of a file's diff; answered by `gitRes` with the same id. */
   | ({ v: number; type: 'gitReq'; id: string } & RemoteGitRequest)
+  /** v2.2 (E9): the workspace's .md notes; answered by `notesRes` with the same id. */
+  | ({ v: number; type: 'notesReq'; id: string } & RemoteNotesRequest)
   // --- E3 M12 Chat view (R30-05) ---
   /** E3-FR-25: read the pane as a chat; answered by a first `chatPage`. */
   | { v: number; type: 'chatSub'; paneId: string }
@@ -514,6 +546,10 @@ export type RemoteServerMsg =
   | { v: number; type: 'historyRes'; id: string; sessions: RemoteHistorySession[] }
   /** E7-FR-22..26: the answer to one `gitReq`, each frame <= 48KB. */
   | ({ v: number; type: 'gitRes'; id: string } & RemoteGitReply)
+  /** v2.2 (E9): the answer to one `notesReq`. */
+  | ({ v: number; type: 'notesRes'; id: string } & RemoteNotesReply)
+  /** v2.2 (E9): a note of the workspace changed on the PC or on another phone. */
+  | { v: number; type: 'notesChanged'; workspaceId: string; noteId?: string }
   /**
    * E3-FR-26/30/33: a page of the pane's chat, oldest first, <= 48KB. One that
    * arrives without a chatMore pending is a first page and replaces the list

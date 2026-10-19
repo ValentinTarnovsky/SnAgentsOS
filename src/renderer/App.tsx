@@ -11,6 +11,7 @@ import { initPowerEvents, syncAgentSettings, syncAwakeMode } from '@/lib/powerSt
 import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
 import { startGitSync } from '@/lib/gitSync'
 import { startReviewNotesSync } from '@/lib/reviewNotesStore'
+import { startWsNotesSync } from '@/lib/wsNotesSync'
 import { engineFromSettings } from '@shared/terminalEngine'
 import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { initHibernation } from '@/lib/hibernation'
@@ -74,6 +75,7 @@ export function App() {
     let unsub: (() => void) | undefined
     let stopLifecycle: (() => void) | undefined
     let stopNotes: (() => void) | undefined
+    let stopWsNotes: (() => void) | undefined
     window.snApi.config
       .load()
       .then((cfg) => {
@@ -81,6 +83,8 @@ export function App() {
         stopLifecycle = initPtyLifecycle()
         // Review notes (E7-FR-18): prune those of deleted workspaces only after a real load.
         stopNotes = startReviewNotesSync({ prune: cfg != null })
+        // Workspace notes (v2.2): never against a store that failed to load (it would look empty).
+        if (cfg) stopWsNotes = startWsNotesSync({ prune: true })
         // The recovery card (E4-FR-22) counts consoles after the reconcile.
         void (cfg ? reconcilePtys() : Promise.resolve(0)).then(() => showRecoveryCard())
         unsub = startPersistence()
@@ -95,6 +99,7 @@ export function App() {
       unsub?.()
       stopLifecycle?.()
       stopNotes?.()
+      stopWsNotes?.()
     }
   }, [hydrate])
 

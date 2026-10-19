@@ -201,6 +201,29 @@ export const CH = {
   REPO_CONFIG_TRUST: 'repoConfig:trust', // invoke ({ dir, sha256 }) -> RepoConfigTrustRes (main re-hashes the file first)
   REPO_CONFIG_PREVIEW_EXPORT: 'repoConfig:previewExport', // invoke ({ dir, file }) -> RepoConfigPreviewRes
   REPO_CONFIG_EXPORT: 'repoConfig:export', // invoke ({ dir, file, overwrite }) -> RepoConfigExportRes (the written hash is trusted)
+
+  // Workspace notes (v2.2, E9): .md files under dataDir()/notes; ids only, never a path from the renderer.
+  WS_NOTES_LIST: 'wsNotes:list', // invoke (workspaceId) -> WsNotesListRes
+  WS_NOTES_READ: 'wsNotes:read', // invoke (WsNoteReadReq) -> WsNoteResult<{ note: WsNoteDoc }>
+  WS_NOTES_WRITE: 'wsNotes:write', // invoke (WsNoteWriteReq) -> WsNoteResult<{ note: WsNoteMeta }> (conflict carries the current note)
+  WS_NOTES_CREATE: 'wsNotes:create', // invoke (WsNoteCreateReq) -> WsNoteResult<{ note: WsNoteMeta }>
+  WS_NOTES_DELETE: 'wsNotes:delete', // invoke (WsNoteReadReq) -> WsNoteResult<{}> (to dataDir()/notes/.trash)
+  WS_NOTES_OPEN: 'wsNotes:open', // invoke (WsNoteReadReq) -> boolean (opens the .md with its app)
+  WS_NOTES_PRUNE: 'wsNotes:prune', // send (workspaceIds still in the store)
+  WS_NOTES_CHANGED: 'wsNotes:changed', // main -> renderer (WsNotesChangedEvt)
+
+  // Files drawer (v2.2, E9): a workspace id and a relative path; main resolves the folder and contains every target.
+  FILES_ROOT: 'files:root', // invoke (workspaceId) -> FilesRootRes
+  FILES_LIST: 'files:list', // invoke (FilesListReq) -> FilesListRes
+  FILES_READ: 'files:read', // invoke ({ workspaceId, rel }) -> FileReadRes
+  FILES_WRITE: 'files:write', // invoke (FileWriteReq) -> FileWriteRes
+  FILES_CREATE: 'files:create', // invoke (FileCreateReq) -> FilesOpRes
+  FILES_RENAME: 'files:rename', // invoke (FileRenameReq) -> FilesOpRes
+  FILES_TRASH: 'files:trash', // invoke ({ workspaceId, rel }) -> FilesOpRes (to the OS trash)
+  FILES_REVEAL: 'files:reveal', // invoke ({ workspaceId, rel }) -> FilesOpRes
+  FILES_OPEN: 'files:open', // invoke ({ workspaceId, rel }) -> FilesOpRes (inert formats open with their app, the rest is revealed)
+  FILES_WATCH: 'files:watch', // send (workspaceId | null): the one folder watched
+  FILES_CHANGED: 'files:changed', // main -> renderer (FilesChangedEvt)
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

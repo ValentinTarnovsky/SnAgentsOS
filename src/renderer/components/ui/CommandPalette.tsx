@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArchiveRestore, BellRing, Bot, FileDiff, GitBranch, LayoutDashboard, Megaphone, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
+import { ArchiveRestore, BellRing, Bot, FileDiff, FolderTree, GitBranch, LayoutDashboard, Megaphone, NotebookPen, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
 import { formatAgeShort } from '@shared/agents'
 import { visiblePaneIds } from '@shared/status'
 import { useAppStore } from '@/lib/store'
@@ -20,6 +20,7 @@ import { StatusGlyph } from '@/components/ui/StatusDot'
 import { glyphOf, useNow } from '@/components/sidebar/AgentRows'
 import { orderQuickCommands } from '@shared/quickCommands'
 import { openChangesPanel } from '@/lib/changesPanel'
+import { openSidePanel } from '@/lib/sidePanels'
 import { useGitStore } from '@/lib/gitStore'
 import { workspaceGitKey } from '@/lib/gitChip'
 import { useWorktreeStore } from '@/lib/worktreeStore'
@@ -145,6 +146,9 @@ export function CommandPalette() {
       })
       // E7-FR-11: the Changes panel of the active workspace.
       cmds.push({ id: 'view-changes', label: t('changes.viewChanges'), hint: t('palette.workspace'), icon: FileDiff, action: 'toggleChanges', run: () => openChangesPanel() })
+      // v2.2 (E9): the Files and Notes drawers of the active workspace.
+      cmds.push({ id: 'view-files', label: t('files.paletteOpen'), hint: t('palette.workspace'), icon: FolderTree, action: 'toggleFiles', run: () => openSidePanel('files') })
+      cmds.push({ id: 'view-notes', label: t('wsnotes.paletteOpen'), hint: t('palette.workspace'), icon: NotebookPen, action: 'toggleNotes', run: () => openSidePanel('notes') })
       for (const p of presets) {
         cmds.push({
           id: `pane-${p.id}`,
