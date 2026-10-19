@@ -86,6 +86,7 @@ const DEFAULT_SETTINGS: Settings = {
   cliEnabled: true,
   worktreesRoot: '',
   hibernateIdleMinutes: 0,
+  terminalShellIntegration: true,
   restoreLastWorkspace: true,
   confirmCloseRunning: true,
   autoCheckUpdates: true,
