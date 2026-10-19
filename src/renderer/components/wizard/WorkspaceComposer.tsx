@@ -39,7 +39,15 @@ const segBtn = (on: boolean): string =>
     on ? 'bg-accent-violet text-white' : 'text-text-secondary hover:text-text-primary',
   )
 
-const AUTOMATION_BASE: AutomationSettings = { defaultAgentPresetId: '', composerCreateAnother: false }
+const AUTOMATION_BASE: AutomationSettings = {
+  defaultAgentPresetId: '',
+  composerCreateAnother: false,
+  cliProtectSsh: true,
+  cliUserPath: false,
+  scheduleGraceMin: 120,
+  scheduleMaxWaitMin: 30,
+  scheduleNotify: false,
+}
 
 const fieldLabel = 'mb-1.5 block text-xs font-medium text-text-secondary'
 

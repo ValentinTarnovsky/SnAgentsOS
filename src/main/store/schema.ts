@@ -31,6 +31,12 @@ export const notificationSettingsSchema = z.object({
   onlyWhenAway: z.boolean().catch(false).default(false), // schema 12
 })
 
+// Schema 13 (E5-FR-28): Claude prompt cache countdown.
+export const cacheTimerSettingsSchema = z.object({
+  enabled: z.boolean().catch(false).default(false),
+  ttlMinutes: z.union([z.literal(5), z.literal(60)]).catch(5).default(5),
+})
+
 // Schema 11. Field-level defaults are the whole migration (migrate() only re-stamps).
 export const agentSettingsSchema = z.object({
   resumeOnStartup: z.enum(['ask', 'auto', 'off']).catch('ask').default('ask'),
@@ -43,21 +49,114 @@ export const agentSettingsSchema = z.object({
   resumeNudge: z.boolean().catch(false).default(false),
   resumeNudgeText: z.string().max(500).catch('').default(''),
   sidebarSort: z.enum(['manual', 'smart']).catch('manual').default('manual'),
+  // Schema 13 (E5-FR-28).
+  cacheTimer: cacheTimerSettingsSchema.default({}).catch(() => cacheTimerSettingsSchema.parse({})),
 })
 
-// Schema 12 (E8-FR-08/09). v3.0 adds the CLI and schedule fields here.
+// Schema 12 (E8-FR-08/09).
 export const automationSettingsSchema = z.object({
   defaultAgentPresetId: z.string().max(128).catch('').default(''),
   composerCreateAnother: z.boolean().catch(false).default(false),
+  // Schema 13 (E8-FR-22/29/30/31, R30-01 amendment). An out-of-range number
+  // falls back to its default, like the schema 12 agent keys.
+  cliProtectSsh: z.boolean().catch(true).default(true),
+  cliUserPath: z.boolean().catch(false).default(false),
+  scheduleGraceMin: z.number().int().min(0).max(1440).catch(120).default(120),
+  scheduleMaxWaitMin: z.number().int().min(1).max(240).catch(30).default(30),
+  scheduleNotify: z.boolean().catch(false).default(false),
+})
+
+// Schema 13 (E3-FR-42). Only `tailscaleServe` exists (manualCert retired, E3-FR-51).
+export const remoteHttpsSettingsSchema = z.object({
+  enabled: z.boolean().catch(false).default(false),
+  mode: z.literal('tailscaleServe').catch('tailscaleServe').default('tailscaleServe'),
 })
 
 const paneType = z.enum(['shell', 'claude', 'codex', 'custom'])
+
+// ---- Schema 13: PaneSchedule automation fields (E8-FR-28..31) -------------
+// They replace the contract's top-level `automations` (R30-01 amendment). All
+// optional: an old one-shot schedule parses unchanged, and a junk value in a
+// new field is dropped on its own instead of losing the schedule.
+const SCHEDULE_HISTORY_MAX = 20
+
+export const scheduleRecurrenceSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('once') }),
+  z.object({ kind: z.literal('daily') }),
+  z.object({ kind: z.literal('weekdays') }),
+  z.object({
+    kind: z.literal('weekly'),
+    days: z
+      .array(z.number().int().min(0).max(6))
+      .min(1)
+      .max(7)
+      .refine((d) => new Set(d).size === d.length, 'duplicate day'),
+  }),
+  z.object({ kind: z.literal('hourly') }),
+])
+
+export const scheduleRunSchema = z.object({
+  at: z.number(),
+  scheduledFor: z.number(),
+  trigger: z.enum(['scheduled', 'manual']),
+  status: z.enum(['sent', 'sent_unconfirmed', 'skipped_busy', 'missed', 'failed']),
+  reason: z.enum(['agent_not_running', 'multiline_unsafe', 'not_delivered']).optional().catch(undefined),
+})
+
+type ScheduleRunParsed = z.infer<typeof scheduleRunSchema>
+
+/**
+ * Item by item: a malformed run is dropped and the rest kept. Over the cap,
+ * the 20 most recent (by `at`) survive in their stored order, whichever end
+ * the writer appends to.
+ */
+const scheduleHistorySchema = z.array(z.unknown()).transform((items) => {
+  const runs: ScheduleRunParsed[] = []
+  for (const item of items) {
+    const r = scheduleRunSchema.safeParse(item)
+    if (r.success) runs.push(r.data)
+  }
+  if (runs.length <= SCHEDULE_HISTORY_MAX) return runs
+  const keep = new Set(
+    runs
+      .map((_, i) => i)
+      .sort((a, b) => runs[b].at - runs[a].at || b - a)
+      .slice(0, SCHEDULE_HISTORY_MAX),
+  )
+  return runs.filter((_, i) => keep.has(i))
+})
 
 const paneScheduleSchema = z.object({
   time: z.string(),
   prompt: z.string(),
   dueAt: z.number(),
+  recurrence: scheduleRecurrenceSchema.optional().catch(undefined),
+  waitIdle: z.boolean().optional().catch(undefined),
+  enabled: z.boolean().optional().catch(undefined),
+  waitingSince: z.number().optional().catch(undefined),
+  history: scheduleHistorySchema.optional().catch(undefined),
 })
+
+// Schema 13 (E7-FR-28, Contratos compartidos). Without this field zod's
+// z.object() would strip `pane.worktree` and the link to the worktree would
+// be lost on the next reload. A malformed value is dropped on its own.
+export const paneWorktreeSchema = z.object({
+  repoRoot: z.string().min(1).max(4096),
+  path: z.string().min(1).max(4096),
+  branch: z.string().max(255).regex(/^sn\/\S+$/),
+  base: z.string().regex(/^[0-9a-fA-F]{4,64}$/),
+})
+
+// Schema 13 (E8-FR-25): trace of the applied repo file. The trust is never
+// here (main-owned trusted-repos.json, R30-01 amendment).
+const workspaceRepoConfigSchema = z.object({
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  appliedAt: z.number(),
+  quickCommandIds: z
+    .array(z.string().max(128))
+    .transform((ids) => ids.slice(0, 20)),
+})
+// ---- end schema 13 pane/workspace fields ----------------------------------
 
 const paneSchema = z.object({
   id: z.string(),
@@ -84,6 +183,7 @@ const paneSchema = z.object({
     })
     .optional()
     .catch(undefined),
+  worktree: paneWorktreeSchema.optional().catch(undefined), // schema 13
 })
 
 const setupStepSchema = z.object({
@@ -122,6 +222,7 @@ const workspaceSchema = z.object({
   // Schema 12 (E8-FR-10): an over-long note is clipped, a junk value dropped.
   note: z.string().transform((v) => v.slice(0, 140)).optional().catch(undefined),
   taskState: z.enum(['todo', 'doing', 'review', 'done']).optional().catch(undefined),
+  repoConfig: workspaceRepoConfigSchema.optional().catch(undefined), // schema 13
 })
 
 const presetSchema = z.object({
@@ -207,6 +308,14 @@ const settingsSchema = z.object({
   gitChip: z.boolean().catch(true).default(true),
   explorerMenu: z.boolean().catch(false).default(false),
   updateDismissedVersion: z.string().max(64).catch('').default(''),
+  // Schema 13 (E8-FR-12, E7-FR-28, E5-FR-25): same pattern. Hibernation is 0
+  // (off) or 5..1440 minutes; anything else turns it off.
+  cliEnabled: z.boolean().catch(true).default(true),
+  worktreesRoot: z.string().max(4096).catch('').default(''),
+  hibernateIdleMinutes: z
+    .union([z.literal(0), z.number().int().min(5).max(1440)])
+    .catch(0)
+    .default(0),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
   autoCheckUpdates: z.boolean().default(true),
@@ -222,13 +331,16 @@ const settingsSchema = z.object({
     .object({
       enabled: z.boolean().default(false),
       port: z.number().int().min(1024).max(65535).default(4517),
+      // Schema 13 (E3-FR-12..23, E3-FR-42).
+      phoneFit: z.boolean().catch(true).default(true),
+      https: remoteHttpsSettingsSchema.default({}).catch(() => remoteHttpsSettingsSchema.parse({})),
     })
     .default({}),
   // Field-level defaults migrate configs that predate the notifications feature.
   notifications: notificationSettingsSchema.default({}),
   // Schema 11: agent behavior settings, defaulted field by field.
   agents: agentSettingsSchema.default({}),
-  // Schema 12: workspace composer defaults.
+  // Schema 12: workspace composer defaults; schema 13: CLI and schedule options.
   automation: automationSettingsSchema.default({}).catch(() => automationSettingsSchema.parse({})),
 })
 
@@ -269,6 +381,12 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * v11 -> v12 is the one real transformation: `snippets` become global `send`
  * quick commands (once, only while `quickCommands` is missing) and `snippets`
  * is never carried forward. Idempotent: a second parse changes nothing.
+ * v12 -> v13 is again defaults only (no logic): phoneFit, https, cliEnabled,
+ * worktreesRoot, pane.worktree, hibernation, cacheTimer, the automation
+ * cli/schedule options, the PaneSchedule fields and workspace.repoConfig. A
+ * stray top-level `repoConfigTrust` or `automations` is stripped (R30-01
+ * amendment: trust is main-owned in trusted-repos.json, automations extend
+ * PaneSchedule).
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)
