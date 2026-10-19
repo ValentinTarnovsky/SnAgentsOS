@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Copy, Pencil, Plus, QrCode, Smartphone, Trash2 } from 'lucide-react'
-import type { RemoteServerState } from '@shared/ipc-contract'
+import { Copy, ExternalLink, Loader2, Lock, Pencil, Plus, QrCode, Smartphone, Trash2 } from 'lucide-react'
+import type { RemoteServerState, SecureModeError, SecureModeStatus } from '@shared/ipc-contract'
 import type { RemoteEndpointKind } from '@shared/remote-protocol'
 import type { KeyButton } from '@shared/types'
 import { BRAND } from '@shared/brand'
@@ -10,8 +10,10 @@ import { useRemoteStore } from '@/lib/remoteStore'
 import { useT, useLang, type MessageKey } from '@/i18n'
 import { useAppInfo } from '@/lib/useAppInfo'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { FirewallStatusRow } from '@/components/remote/FirewallStatusRow'
 import { ToggleRow, inputCls, labelCls } from '../ui'
 import { cn } from '@/lib/cn'
+import { toast } from '@/lib/toast'
 
 const MIN_PORT = 1024
 const MAX_PORT = 65535
@@ -34,6 +36,7 @@ const KIND_KEY: Record<RemoteEndpointKind, MessageKey> = {
   lan: 'remote.kind.lan',
   tailscale: 'remote.kind.tailscale',
   other: 'remote.kind.other',
+  tailscaleHttps: 'remote.kind.tailscaleHttps',
 }
 
 /** Renders control bytes in caret notation (^J, ^[, ^?) so a sequence is readable. */
@@ -110,9 +113,21 @@ export function RemoteSection() {
       <ToggleRow
         checked={settings.enabled}
         onChange={setEnabled}
+        searchId="remote.enable"
         title={t('remote.enable')}
         description={t('remote.enableHint')}
       />
+
+      {/* E3-FR-20: off = main refuses every fitPane ('disabled'). */}
+      <ToggleRow
+        checked={settings.phoneFit !== false}
+        onChange={(phoneFit) => updateSettings({ remote: { ...settings, phoneFit } })}
+        searchId="remote.phoneFit"
+        title={t('remote.phoneFit')}
+        description={t('remote.phoneFitHint')}
+      />
+
+      <SecureModeRow />
 
       <div className="max-w-[200px]">
         <label className={labelCls}>{t('remote.port')}</label>
@@ -164,7 +179,10 @@ export function RemoteSection() {
                   {ep.url}
                 </span>
                 <button
-                  onClick={() => window.snApi.clipboard.writeText(ep.url)}
+                  onClick={() => {
+                    window.snApi.clipboard.writeText(ep.url)
+                    toast.success(t('toast.copied'), { dedupeKey: 'copied' })
+                  }}
                   title={t('remote.copy')}
                   className="shrink-0 rounded p-1 text-text-secondary transition-colors hover:text-text-primary"
                 >
@@ -213,9 +231,12 @@ export function RemoteSection() {
 
       {/* Platform hints */}
       <div className="space-y-1.5 border-t border-border pt-5">
-        {info?.platform === 'win32' && (
-          <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.firewallHint', { app: BRAND.productName })}</p>
-        )}
+        {info?.platform === 'win32' &&
+          (settings.enabled ? (
+            <FirewallStatusRow />
+          ) : (
+            <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.firewallHint', { app: BRAND.productName })}</p>
+          ))}
         {info?.portable && (
           <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.portableHint')}</p>
         )}
@@ -298,6 +319,108 @@ export function RemoteSection() {
           onCancel={() => setRevoking(null)}
         />
       )}
+    </div>
+  )
+}
+
+/** Where MagicDNS and HTTPS certificates are turned on (E3-FR-42). */
+const TAILSCALE_DNS_CONSOLE = 'https://login.tailscale.com/admin/dns'
+
+const ERROR_KEY: Record<SecureModeError, MessageKey> = {
+  not_installed: 'remote.secure.err.notInstalled',
+  not_running: 'remote.secure.err.notRunning',
+  no_https: 'remote.secure.err.noHttps',
+  port_busy: 'remote.secure.err.portBusy',
+  funnel: 'remote.secure.err.funnel',
+  cli: 'remote.secure.err.cli',
+  server_off: 'remote.secure.err.serverOff',
+}
+
+/**
+ * "Secure mode" (E3-FR-42): an https origin for the phone through `tailscale
+ * serve`. The switch asks main to run the CLI first and saves
+ * `settings.remote.https` only after it worked (or after turning it off), so
+ * a tailnet without certificates never leaves the setting on. The status
+ * line shows the https URL, or the reason with the console link.
+ */
+function SecureModeRow() {
+  const t = useT()
+  const settings = useAppStore((s) => s.settings.remote)
+  const updateSettings = useAppStore((s) => s.updateSettings)
+  const status = useRemoteStore((s) => s.status)
+  const [busy, setBusy] = useState(false)
+  const [lastError, setLastError] = useState<SecureModeStatus | null>(null)
+  const enabled = settings.https?.enabled === true
+  const live = status.secure
+  const running = status.state === 'running'
+
+  const toggle = async (on: boolean): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    setLastError(null)
+    try {
+      const res = await window.snApi.remote.secureSet(on)
+      if (on && res.state !== 'on') {
+        setLastError(res)
+        return
+      }
+      updateSettings({ remote: { ...settings, https: { enabled: on, mode: 'tailscaleServe' } } })
+      if (!on && res.error) toast.error(t('remote.secure.offFailed', { error: res.message || t(ERROR_KEY[res.error]) }))
+    } catch {
+      setLastError({ state: 'error', error: 'cli' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // With the server off main removes the handler, so there is nothing to check.
+  const shown: SecureModeStatus | null = lastError ?? (enabled && running ? (live ?? { state: 'checking' }) : null)
+  const error = shown?.state === 'error' ? shown : null
+
+  return (
+    <div className="space-y-2" data-secure-mode={shown?.state ?? 'off'}>
+      <ToggleRow
+        checked={enabled}
+        onChange={(on) => void toggle(on)}
+        disabled={busy || (!enabled && !running)}
+        searchId="remote.secure"
+        title={t('remote.secure')}
+        description={t('remote.secureHint')}
+      />
+      {busy && (
+        <p className="flex items-center gap-1.5 text-xs text-text-secondary">
+          <Loader2 size={13} className="animate-spin" />
+          {t('remote.secure.checking')}
+        </p>
+      )}
+      {!busy && shown?.state === 'checking' && (
+        <p className="flex items-center gap-1.5 text-xs text-text-secondary">
+          <Loader2 size={13} className="animate-spin" />
+          {t('remote.secure.checking')}
+        </p>
+      )}
+      {!busy && shown?.state === 'on' && shown.url && (
+        <p className="flex items-center gap-1.5 text-xs text-emerald-400" data-secure-url={shown.url}>
+          <Lock size={13} />
+          <span className="min-w-0 truncate">{t('remote.secure.on', { url: shown.url })}</span>
+        </p>
+      )}
+      {!busy && error && error.error && (
+        <div className="space-y-1.5 rounded-btn border border-red-400/30 bg-red-400/5 px-3 py-2" data-secure-error={error.error}>
+          <p className="text-xs text-red-400">{t(ERROR_KEY[error.error])}</p>
+          {error.message && <p className="break-words font-mono text-[11px] text-text-secondary">{error.message}</p>}
+          {error.error === 'no_https' && (
+            <button
+              onClick={() => window.snApi.system.openExternal(TAILSCALE_DNS_CONSOLE)}
+              className="flex items-center gap-1.5 text-xs text-accent-violet hover:underline"
+            >
+              <ExternalLink size={12} />
+              {t('remote.secure.openConsole')}
+            </button>
+          )}
+        </div>
+      )}
+      {enabled && <p className="text-[11px] leading-relaxed text-text-secondary">{t('remote.secure.repairHint')}</p>}
     </div>
   )
 }

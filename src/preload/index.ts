@@ -3,26 +3,48 @@ import { CH } from '@shared/ipc-channels'
 import type {
   AppInfo,
   AppMetrics,
+  ExplorerMenuResult,
   LegacyDataInfo,
+  OpenRequest,
   PairingQrPayload,
+  PowerState,
   PtyDataEvt,
   PtyExitEvt,
   PtyFlowReq,
   PtyReattachRes,
   PtyResizeReq,
+  PtyRestartReq,
+  PtyRestartRes,
+  PtyPromptResultEvt,
   PtySpawnReq,
   PtySpawnRes,
+  PtySubmitReq,
+  PtySubmitRes,
   PtyWriteReq,
+  RecoveryInfo,
   RemoteCommand,
   RemoteCommandResult,
+  RemoteFitReleaseReq,
   RemoteUiState,
+  SecureModeStatus,
+  FirewallFixRes,
+  FirewallStatus,
+  RenderErrorReport,
+  RendererDiagnostics,
   SnApi,
+  ScrollbackStats,
+  TerminalEngineSettings,
   UpdateInfo,
   UpdateProgress,
+  UpdateState,
   UsageSnapshot,
 } from '@shared/ipc-contract'
 import type {
+  AgentSessionEndEvt,
+  AgentSettings,
+  AwakeMode,
   ConfigFile,
+  Language,
   NotificationSettings,
   PaneStatusEvt,
   RemoteSettings,
@@ -30,6 +52,15 @@ import type {
   UsageSettings,
 } from '@shared/types'
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
+import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
+import type { AgentsHibernateEvt, HibernationConfig } from '@shared/hibernation'
+import type { SessionSummary, SessionsListReq } from '@shared/session-history'
+import type { GitArea, GitBaseStat, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
+import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
+import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
+import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
+import type { CliUiState, SkillOp, SkillStatus } from '@shared/ctl-protocol'
+import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from '@shared/repo-config'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -49,6 +80,12 @@ const api: SnApi = {
     legacyShowBackup: () => ipcRenderer.send(CH.APP_LEGACY_SHOW_BACKUP),
     legacyOpenLog: () => ipcRenderer.send(CH.APP_LEGACY_OPEN_LOG),
     onLegacyStatus: (cb: (info: LegacyDataInfo) => void) => sub<LegacyDataInfo>(CH.APP_LEGACY_STATUS, cb),
+    reload: () => ipcRenderer.send(CH.APP_RELOAD),
+    takeRecovery: () => ipcRenderer.invoke(CH.APP_TAKE_RECOVERY) as Promise<RecoveryInfo | null>,
+    reportRenderError: (report: RenderErrorReport) => ipcRenderer.send(CH.APP_REPORT_RENDER_ERROR, report),
+    diagnostics: (renderer: RendererDiagnostics) => ipcRenderer.invoke(CH.APP_DIAGNOSTICS, renderer) as Promise<string>,
+    takePendingOpen: () => ipcRenderer.invoke(CH.APP_TAKE_PENDING_OPEN) as Promise<OpenRequest | null>,
+    onOpenPath: (cb: (req: OpenRequest) => void) => sub<OpenRequest>(CH.APP_OPEN_PATH, cb),
   },
   pty: {
     spawn: (req: PtySpawnReq) => ipcRenderer.invoke(CH.PTY_SPAWN, req) as Promise<PtySpawnRes>,
@@ -61,9 +98,30 @@ const api: SnApi = {
     flow: (req: PtyFlowReq) => ipcRenderer.send(CH.PTY_FLOW, req),
     onData: (cb: (e: PtyDataEvt) => void) => sub<PtyDataEvt>(CH.PTY_DATA, cb),
     onExit: (cb: (e: PtyExitEvt) => void) => sub<PtyExitEvt>(CH.PTY_EXIT, cb),
+    restart: (req: PtyRestartReq) => ipcRenderer.invoke(CH.PTY_RESTART, req) as Promise<PtyRestartRes>,
+    killPanes: (paneIds: string[]) => ipcRenderer.invoke(CH.PTY_KILL_PANES, paneIds) as Promise<number>,
+    reconcile: (livePaneIds: string[]) => ipcRenderer.invoke(CH.PTY_RECONCILE, livePaneIds) as Promise<number>,
+    setEngine: (settings: TerminalEngineSettings) => ipcRenderer.send(CH.PTY_SET_ENGINE, settings),
+    submit: (req: PtySubmitReq) => ipcRenderer.invoke(CH.PTY_SUBMIT, req) as Promise<PtySubmitRes>,
+    onPromptResult: (cb: (e: PtyPromptResultEvt) => void) => sub<PtyPromptResultEvt>(CH.PTY_PROMPT_RESULT, cb),
+  },
+  scrollback: {
+    clear: (paneId: string, opts?: { trash?: boolean }) => ipcRenderer.invoke(CH.SCROLLBACK_CLEAR, paneId, opts) as Promise<void>,
+    clearAll: () => ipcRenderer.invoke(CH.SCROLLBACK_CLEAR_ALL) as Promise<void>,
+    stats: () => ipcRenderer.invoke(CH.SCROLLBACK_STATS) as Promise<ScrollbackStats>,
+    load: (paneId: string) => ipcRenderer.invoke(CH.PTY_SCROLLBACK_LOAD, paneId) as Promise<string | null>,
   },
   dialog: {
     openDirectory: () => ipcRenderer.invoke(CH.DIALOG_OPEN_DIR) as Promise<string | null>,
+  },
+  fs: {
+    dirExists: (path: string) => ipcRenderer.invoke(CH.FS_DIR_EXISTS, path) as Promise<boolean>,
+  },
+  repoConfig: {
+    read: (dir: string) => ipcRenderer.invoke(CH.REPO_CONFIG_READ, dir) as Promise<RepoConfigReadRes>,
+    trust: (req: { dir: string; sha256: string }) => ipcRenderer.invoke(CH.REPO_CONFIG_TRUST, req) as Promise<RepoConfigTrustRes>,
+    previewExport: (req: { dir: string; file: RepoConfigFile }) => ipcRenderer.invoke(CH.REPO_CONFIG_PREVIEW_EXPORT, req) as Promise<RepoConfigPreviewRes>,
+    export: (req: { dir: string; file: RepoConfigFile; overwrite: boolean }) => ipcRenderer.invoke(CH.REPO_CONFIG_EXPORT, req) as Promise<RepoConfigExportRes>,
   },
   clipboard: {
     writeText: (text: string) => ipcRenderer.send(CH.CLIPBOARD_WRITE, text),
@@ -82,6 +140,7 @@ const api: SnApi = {
     isMaximized: () => ipcRenderer.invoke(CH.WINDOW_IS_MAXIMIZED) as Promise<boolean>,
     onMaximizeChange: (cb: (maximized: boolean) => void) =>
       sub<boolean>(CH.WINDOW_MAXIMIZE_CHANGED, cb),
+    reveal: () => ipcRenderer.send(CH.WINDOW_REVEAL),
   },
   system: {
     setLoginItem: (enabled: boolean) =>
@@ -91,13 +150,19 @@ const api: SnApi = {
       ipcRenderer.invoke(CH.SYSTEM_SET_HOTKEY, { enabled, accelerator }) as Promise<boolean>,
     getMetrics: () => ipcRenderer.invoke(CH.SYSTEM_METRICS) as Promise<AppMetrics>,
     openExternal: (url: string) => ipcRenderer.send(CH.SHELL_OPEN_EXTERNAL, url),
+    openPath: (req: OpenPathReq) => ipcRenderer.invoke(CH.SHELL_OPEN_PATH, req) as Promise<OpenPathRes>,
     onDisplayRecovered: (cb: () => void) => sub<void>(CH.SYSTEM_DISPLAY_RECOVERED, cb),
+    setExplorerMenu: (req: { enabled: boolean; language: Language }) =>
+      ipcRenderer.invoke(CH.SYSTEM_SET_EXPLORER_MENU, req) as Promise<ExplorerMenuResult>,
+    getExplorerMenu: () => ipcRenderer.invoke(CH.SYSTEM_GET_EXPLORER_MENU) as Promise<ExplorerMenuResult>,
   },
   updates: {
     check: () => ipcRenderer.invoke(CH.UPDATE_CHECK) as Promise<UpdateInfo>,
     downloadAndInstall: () =>
       ipcRenderer.invoke(CH.UPDATE_INSTALL) as Promise<{ relaunching: boolean }>,
     onProgress: (cb: (p: UpdateProgress) => void) => sub<UpdateProgress>(CH.UPDATE_PROGRESS, cb),
+    getState: () => ipcRenderer.invoke(CH.UPDATE_GET_STATE) as Promise<UpdateState>,
+    onState: (cb: (s: UpdateState) => void) => sub<UpdateState>(CH.UPDATE_STATE, cb),
   },
   usage: {
     get: () => ipcRenderer.invoke(CH.USAGE_GET) as Promise<UsageSnapshot>,
@@ -115,7 +180,9 @@ const api: SnApi = {
     health: () => ipcRenderer.invoke(CH.STATUS_HEALTH),
     testDiscord: (cfg: import('@shared/types').DiscordSettings) => ipcRenderer.invoke(CH.STATUS_DISCORD_TEST, cfg),
     testDesktop: () => ipcRenderer.invoke(CH.STATUS_DESKTOP_TEST),
+    testNtfy: () => ipcRenderer.invoke(CH.STATUS_NTFY_TEST) as Promise<{ ok: boolean; error?: string }>,
     onReveal: (cb: (paneId: string) => void) => sub<string>(CH.STATUS_REVEAL, cb),
+    onSessionEnd: (cb: (e: AgentSessionEndEvt) => void) => sub<AgentSessionEndEvt>(CH.STATUS_SESSION_END, cb),
     hooksInstall: (cfg: NotificationSettings) =>
       ipcRenderer.invoke(CH.STATUS_HOOKS_INSTALL, cfg) as Promise<StatusHooksStatusRes>,
     hooksUninstall: () =>
@@ -136,6 +203,64 @@ const api: SnApi = {
     onCommand: (cb: (cmd: RemoteCommand) => void) => sub<RemoteCommand>(CH.REMOTE_CONTROL_CMD, cb),
     commandResult: (res: RemoteCommandResult) => ipcRenderer.send(CH.REMOTE_CONTROL_RESULT, res),
     onEvent: (cb: (s: RemoteUiState) => void) => sub<RemoteUiState>(CH.REMOTE_EVENT, cb),
+    firewallCheck: (force?: boolean) =>
+      ipcRenderer.invoke(CH.REMOTE_FIREWALL_CHECK, force === true) as Promise<FirewallStatus>,
+    firewallFix: () => ipcRenderer.invoke(CH.REMOTE_FIREWALL_FIX) as Promise<FirewallFixRes>,
+    openNetworkSettings: () => ipcRenderer.send(CH.REMOTE_OPEN_NETWORK_SETTINGS),
+    fitRelease: (req: RemoteFitReleaseReq) => ipcRenderer.send(CH.REMOTE_FIT_RELEASE, req),
+    secureSet: (enabled: boolean) => ipcRenderer.invoke(CH.REMOTE_SECURE_SET, enabled === true) as Promise<SecureModeStatus>,
+  },
+  power: {
+    setConfig: (mode: AwakeMode) => ipcRenderer.send(CH.POWER_SET_CONFIG, mode),
+    getState: () => ipcRenderer.invoke(CH.POWER_GET_STATE) as Promise<PowerState>,
+    onState: (cb: (s: PowerState) => void) => sub<PowerState>(CH.POWER_STATE, cb),
+  },
+  agents: {
+    setConfig: (cfg: AgentSettings) => ipcRenderer.send(CH.AGENTS_SET_CONFIG, cfg),
+    list: () => ipcRenderer.invoke(CH.AGENTS_LIST) as Promise<AgentSessionView[]>,
+    startup: () => ipcRenderer.invoke(CH.AGENTS_STARTUP) as Promise<AgentsStartup>,
+    consumeStartup: (paneId: string) => ipcRenderer.invoke(CH.AGENTS_CONSUME_STARTUP, paneId) as Promise<boolean>,
+    startupPending: (paneIds: string[]) => ipcRenderer.invoke(CH.AGENTS_STARTUP_PENDING, paneIds) as Promise<string[]>,
+    forget: (paneId: string) => ipcRenderer.send(CH.AGENTS_FORGET, paneId),
+    onChanged: (cb: (e: AgentsChangedEvt) => void) => sub<AgentsChangedEvt>(CH.AGENTS_CHANGED, cb),
+    onReady: (cb: (e: AgentsReadyEvt) => void) => sub<AgentsReadyEvt>(CH.AGENTS_READY, cb),
+    setHibernation: (cfg: HibernationConfig) => ipcRenderer.send(CH.AGENTS_SET_HIBERNATION, cfg),
+    onHibernate: (cb: (e: AgentsHibernateEvt) => void) => sub<AgentsHibernateEvt>(CH.AGENTS_HIBERNATE, cb),
+  },
+  sessions: {
+    list: (req?: SessionsListReq) => ipcRenderer.invoke(CH.SESSIONS_LIST, req ?? {}) as Promise<SessionSummary[]>,
+  },
+  cli: {
+    setEnabled: (enabled: boolean) => ipcRenderer.send(CH.CLI_SET_ENABLED, enabled === true),
+    state: () => ipcRenderer.invoke(CH.CLI_STATE) as Promise<CliUiState>,
+    skill: (op: SkillOp) => ipcRenderer.invoke(CH.CLI_SKILL, op) as Promise<SkillStatus>,
+    userPath: (enabled: boolean) => ipcRenderer.invoke(CH.CLI_USER_PATH, enabled === true) as Promise<boolean>,
+  },
+  reviewNotes: {
+    list: (workspaceId: string) => ipcRenderer.invoke(CH.GIT_NOTES_LIST, workspaceId) as Promise<ReviewNotesListRes>,
+    upsert: (note: ReviewNoteInput) => ipcRenderer.invoke(CH.GIT_NOTES_UPSERT, note) as Promise<ReviewNote>,
+    delete: (req: ReviewNotesDeleteReq) => ipcRenderer.invoke(CH.GIT_NOTES_DELETE, req) as Promise<void>,
+    markSent: (req: ReviewNotesMarkSentReq) => ipcRenderer.invoke(CH.GIT_NOTES_MARK_SENT, req) as Promise<void>,
+    prune: (workspaceIds: string[]) => ipcRenderer.send(CH.GIT_NOTES_PRUNE, workspaceIds),
+    onChanged: (cb: (e: ReviewNotesChangedEvt) => void) => sub<ReviewNotesChangedEvt>(CH.GIT_NOTES_CHANGED, cb),
+  },
+  git: {
+    setWatch: (targets: GitTarget[]) => ipcRenderer.send(CH.GIT_SET_WATCH, targets),
+    setConfig: (cfg: { gitChip: boolean }) => ipcRenderer.send(CH.GIT_SET_CONFIG, cfg),
+    refresh: (req?: { keys?: string[]; reason?: 'manual' | 'agent' }) => ipcRenderer.send(CH.GIT_REFRESH, req ?? {}),
+    info: (force?: boolean) => ipcRenderer.invoke(CH.GIT_INFO, { force: force === true }) as Promise<GitInfoRes>,
+    onUpdate: (cb: (e: GitUpdateEvt) => void) => sub<GitUpdateEvt>(CH.GIT_UPDATE, cb),
+    setPanel: (key: string | null) => ipcRenderer.send(CH.GIT_SET_PANEL, { key }),
+    status: (key: string, base?: string) => ipcRenderer.invoke(CH.GIT_STATUS, base ? { key, base } : { key }) as Promise<GitChangesRes | null>,
+    fileDiff: (req: { key: string; path: string; area: GitArea; force?: boolean; base?: string }) => ipcRenderer.invoke(CH.GIT_FILE_DIFF, req) as Promise<GitDiffReply>,
+    openFile: (req: { key: string; path: string; reveal?: boolean; base?: string }) => ipcRenderer.invoke(CH.GIT_OPEN_FILE, req) as Promise<boolean>,
+    baseStat: (req: { key: string; base: string }) => ipcRenderer.invoke(CH.GIT_BASE_STAT, req) as Promise<GitBaseStat | null>,
+    worktreeAdd: (req: WorktreeAddReq) => ipcRenderer.invoke(CH.GIT_WORKTREE_ADD, req) as Promise<WorktreeAddRes>,
+    worktreeRemove: (req: WorktreeRemoveReq) => ipcRenderer.invoke(CH.GIT_WORKTREE_REMOVE, req) as Promise<WorktreeRemoveRes>,
+    worktreeProbe: (repoCwd: string) => ipcRenderer.invoke(CH.GIT_WORKTREE_PROBE, { repoCwd }) as Promise<WorktreeProbeRes>,
+    worktreeInspect: (req: { path: string; base?: string }) => ipcRenderer.invoke(CH.GIT_WORKTREE_INSPECT, req) as Promise<WorktreeInspectRes>,
+    worktreeList: () => ipcRenderer.invoke(CH.GIT_WORKTREE_LIST) as Promise<WorktreeListRes>,
+    worktreeReveal: (path: string) => ipcRenderer.invoke(CH.GIT_WORKTREE_REVEAL, { path }) as Promise<boolean>,
   },
 }
 

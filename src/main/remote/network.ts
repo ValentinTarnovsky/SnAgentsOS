@@ -14,6 +14,11 @@ const VIRTUAL_ADAPTER = /vethernet|wsl|docker|vmware|virtualbox|hyper-v|vbox|loo
 /** Tailscale names its interface tailscale0 / Tailscale on the platforms we target. */
 const TAILSCALE_ADAPTER = /tailscale/i
 
+/** True for a virtual adapter name (vEthernet/WSL/Docker/...), e.g. for the firewall check. */
+export function isVirtualAdapter(name: string): boolean {
+  return VIRTUAL_ADAPTER.test(name)
+}
+
 /** Parse a dotted IPv4 literal into its four octets, or null if it isn't one. */
 function parseIpv4(ip: string): [number, number, number, number] | null {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip)
@@ -68,15 +73,33 @@ function classify(name: string, o: [number, number, number, number]): RemoteEndp
   return 'other'
 }
 
-const KIND_ORDER: Record<RemoteEndpointKind, number> = { lan: 0, tailscale: 1, other: 2 }
+const KIND_ORDER: Record<RemoteEndpointKind, number> = { tailscaleHttps: -1, lan: 0, tailscale: 1, other: 2 }
+
+/**
+ * A MagicDNS name the secure mode serves (E3-FR-42/43): lowercase labels of
+ * letters, digits and hyphens under `.ts.net`, no trailing dot. Anything else
+ * is never accepted as a Host nor listed.
+ */
+export function isTailnetDnsName(name: string): boolean {
+  return name.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+ts\.net$/.test(name)
+}
+
+/** True for a loopback socket address (the `tailscale serve` proxy reaches us there). */
+export function isLoopbackAddress(addr: string | undefined): boolean {
+  const ip = normalizeIp(addr)
+  if (ip === '::1') return true
+  const o = parseIpv4(ip)
+  return !!o && isLoopback(o)
+}
 
 /**
  * Every IPv4 address the desktop can be reached at, as ready-to-use URLs. Real
  * adapters sort before virtual ones (vEthernet/WSL/Docker/...), and within that
  * LAN sorts first, then Tailscale, then anything else, so the QR modal's first
- * suggestion is the address most likely to work.
+ * suggestion is the address most likely to work. With the secure mode on,
+ * `secureHost` (its MagicDNS name) goes first as `https://<host>` (E3-FR-43).
  */
-export function listEndpoints(port: number): RemoteEndpoint[] {
+export function listEndpoints(port: number, secureHost?: string | null): RemoteEndpoint[] {
   const out: Array<RemoteEndpoint & { virtual: boolean; kindRank: number }> = []
   const ifaces = networkInterfaces()
   for (const name of Object.keys(ifaces)) {
@@ -97,5 +120,7 @@ export function listEndpoints(port: number): RemoteEndpoint[] {
     }
   }
   out.sort((a, b) => (a.virtual ? 1 : 0) - (b.virtual ? 1 : 0) || a.kindRank - b.kindRank)
-  return out.map(({ ip, kind, url }) => ({ ip, kind, url }))
+  const list: RemoteEndpoint[] = out.map(({ ip, kind, url }) => ({ ip, kind, url }))
+  if (secureHost && isTailnetDnsName(secureHost)) list.unshift({ kind: 'tailscaleHttps', host: secureHost, url: `https://${secureHost}` })
+  return list
 }

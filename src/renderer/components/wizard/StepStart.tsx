@@ -3,6 +3,7 @@ import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { iconFor } from '@/lib/icons'
 import type { StepProps } from './types'
+import { RepoConfigCard } from './RepoConfigCard'
 
 function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? 'workspace'
@@ -29,6 +30,8 @@ export function StepStart({ draft, update }: StepProps) {
           <div className="flex min-w-0 flex-1 items-center gap-2 rounded-btn border border-border bg-bg-primary px-3 py-2">
             <Folder size={15} className="shrink-0 text-accent-violet" />
             <input
+              data-wizard-cwd
+              aria-label={t('wizard.workingFolder')}
               value={draft.cwd}
               onChange={(e) => update({ cwd: e.target.value })}
               placeholder={t('wizard.folderPlaceholder')}
@@ -44,6 +47,9 @@ export function StepStart({ draft, update }: StepProps) {
           </button>
         </div>
       </div>
+
+      {/* The folder's .snagentsos.json, when it has one (E8-FR-23). */}
+      <RepoConfigCard cwd={draft.cwd} onApplied={() => useAppStore.getState().setWizardOpen(false)} />
 
       <div>
         <label className="mb-1.5 block text-sm font-medium text-text-primary">

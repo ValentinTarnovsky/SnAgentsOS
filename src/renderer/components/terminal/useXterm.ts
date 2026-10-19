@@ -1,5 +1,6 @@
 import { useEffect, useRef, type RefObject } from 'react'
 import type { SetupStep } from '@shared/types'
+import type { LaunchKind } from '@shared/initialPrompt'
 import { BRAND } from '@shared/brand'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -7,15 +8,66 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { CanvasAddon } from '@xterm/addon-canvas'
 import { SearchAddon } from '@xterm/addon-search'
+import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { useAppStore } from '@/lib/store'
 import { buildXtermTheme } from '@/themes'
 import { registerPty, unregisterPty } from '@/lib/ptyRegistry'
+import { shouldKillLateSpawn } from '@/lib/ptyLifecycle'
 import { registerFocuser, setFocusedPane, unregisterFocuser } from '@/lib/focus'
+import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegistry'
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
+import { readBufferLines, registerTermReader, unregisterTermReader, type TermReader } from '@/lib/termReaders'
+import { registerRestarter, unregisterRestarter } from '@/lib/restartRegistry'
+import { prepareAgentLaunch } from '@/lib/agentLaunch'
+import { rememberPrompt } from '@/lib/promptDelivery'
+import type { ResolvedLaunch } from '@/lib/launch'
+import type { ShellKind } from '@shared/ipc-contract'
+import { useT } from '@/i18n'
+import { noteSpawnFailure } from '@/lib/worktrees'
+import { FIT_MIN_FONT, fitBaselineOf, fitGeometry, fitOwnerOf, releaseFitFromDesktop, setFitBaseline, useFitStore, type FitOwnerEntry } from '@/lib/fitStore'
+import { oneShotLaunch } from '@/lib/repoConfig'
+import { registerShellMarks, unregisterShellMarks, type ShellMarksApi } from '@/lib/shellMarksRegistry'
+import { toast } from '@/lib/toast'
+import { forgetPrompts, notePrompt } from '@/lib/shellReady'
+import { ShellMarks } from './shellMarks'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
 const INFINITE_SCROLLBACK = 100000
+
+/** xterm unicode version for the terminalUnicode11 setting (E6-FR-14). */
+const unicodeVersion = (v11: boolean): string => (v11 ? '11' : '6')
+
+/** A user-supplied string made safe to print inside an ANSI line. */
+const plain = (s: string): string => s.replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+
+/** The message of a failed spawn/restart invoke, without Electron's IPC wrapper. */
+const spawnError = (err: unknown): string =>
+  plain(String(err instanceof Error ? err.message : err).replace(/^Error invoking remote method '[^']*': (?:Error: )?/, ''))
+
+/** Keys that alone are not typing: they never take a phone-sized pane back (E3-FR-19). */
+const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'OS'])
+
+interface CellPx {
+  w: number
+  h: number
+}
+
+/**
+ * The css cell size xterm is rendering with (the same private path FitAddon
+ * reads), or null before the renderer measured.
+ */
+function cellOf(term: Terminal): CellPx | null {
+  const core = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } } })._core
+  const cell = core?._renderService?.dimensions?.css?.cell
+  return cell && cell.width > 0 && cell.height > 0 ? { w: cell.width, h: cell.height } : null
+}
+
+/** Width of the viewport's scrollbar, which FitAddon leaves out of the grid. */
+function scrollBarWidth(term: Terminal): number {
+  const core = (term as unknown as { _core?: { viewport?: { scrollBarWidth?: number } } })._core
+  return term.options.scrollback === 0 ? 0 : (core?.viewport?.scrollBarWidth ?? 0)
+}
 
 /** Highlight palette for in-pane search matches. */
 const SEARCH_OPTS = {
@@ -213,6 +265,26 @@ export interface XtermController {
   clearSearch: () => void
   /** Focus the terminal input. */
   focus: () => void
+  /** Respawn the shell in this same xterm, keeping the scrollback (E6-FR-18). */
+  restart: () => void
+  /** Hide the exit card; the pane stays dead and the header Restart still works. */
+  hideExitCard: () => void
+  /** Family of the live shell (cd prefix of the "Claude exited" chip), or null. */
+  shellKind: () => ShellKind | null
+  /** Scroll the previous (-1) / next (1) prompt to the first row (E6-FR-27); false without marks. */
+  prompt: (dir: -1 | 1) => boolean
+  /** Copy the newest finished command's output (E6-FR-29); false when there is none. */
+  copyLastOutput: () => boolean
+}
+
+/** Exit card state of a pane (E6-FR-17/18), owned by the pane, never persisted. */
+export interface XtermExitState {
+  /** Exit code of the shell (-1 when it never started). */
+  code: number
+  /** The (re)spawn failed with this message: the next Restart uses the OS default shell. */
+  error?: string
+  /** Whether the card is shown (Esc hides it). */
+  cardVisible: boolean
 }
 
 export interface UseXtermOptions {
@@ -222,6 +294,8 @@ export interface UseXtermOptions {
   shell?: string
   /** Command line typed into the shell after spawn (e.g. an AI CLI). */
   initialCommand?: string
+  /** E8-FR-02b: 'claude' / 'codex' when initialCommand is that preset's own command. */
+  launchKind?: LaunchKind
   /** Pre-launch sequence (e.g. SSH connect) run before initialCommand. */
   setup?: SetupStep[]
   fontSize?: number
@@ -230,13 +304,15 @@ export interface UseXtermOptions {
    * (display:none) can't be measured by xterm, so we refit when they reveal.
    */
   isActive?: boolean
+  /** Exit card state changes (null = running or restarted). */
+  onExitState?: (state: XtermExitState | null) => void
 }
 
 /**
  * Mounts an xterm Terminal into `containerRef`, spawns a backing pty, and wires
- * the bidirectional data + resize streams. The pty is killed only on real
- * teardown (pane/workspace removal), NOT on theme/font/visibility changes,
- * so running sessions survive workspace switches.
+ * the bidirectional data + resize streams. Unmounting never kills the pty
+ * (E4-FR-36): an error boundary, a reload or a remount reattaches to it. Kills
+ * by removal belong to ptyLifecycle; a clean restart kills explicitly.
  */
 export function useXterm(
   containerRef: RefObject<HTMLDivElement | null>,
@@ -253,7 +329,20 @@ export function useXterm(
     search: () => false,
     clearSearch: () => undefined,
     focus: () => undefined,
+    restart: () => undefined,
+    hideExitCard: () => undefined,
+    shellKind: () => null,
+    prompt: () => false,
+    copyLastOutput: () => false,
   })
+  /** Latest options: an in-place restart relaunches with the current launch props. */
+  const optsRef = useRef(opts)
+  optsRef.current = opts
+  /** Exit card state; read by the key handler (Enter / Esc while it shows). */
+  const exitRef = useRef<XtermExitState | null>(null)
+  /** True while an in-place restart is in flight (the old pty's exit is not this pane's). */
+  const restartingRef = useRef(false)
+  const shellKindRef = useRef<ShellKind | null>(null)
   // Backpressure bookkeeping (kept in refs so the reveal effect can reset it).
   const pendingRef = useRef(0)
   const pausedRef = useRef(false)
@@ -268,7 +357,12 @@ export function useXterm(
   const fontSize = useAppStore((s) => s.settings.fontSize)
   const infiniteScrollback = useAppStore((s) => s.settings.infiniteScrollback)
   const scrollback = useAppStore((s) => s.settings.scrollback)
+  const unicode11 = useAppStore((s) => s.settings.terminalUnicode11)
   const effectiveFontSize = opts.fontSize ?? fontSize
+  // Latest translator for text the mount effect writes into the terminal.
+  const t = useT()
+  const tRef = useRef(t)
+  tRef.current = t
 
   useEffect(() => {
     const container = containerRef.current
@@ -319,6 +413,15 @@ export function useXterm(
     term.loadAddon(new WebLinksAddon((_event, uri) => window.snApi.system.openExternal(uri)))
     term.loadAddon(search)
     term.open(container)
+    // Unicode 11 widths (emoji and Claude/Codex box glyphs take 2 cells), loaded
+    // before the renderer so the first paint already measures with them. It only
+    // changes cell widths, never the renderer policy (E6-FR-16: Canvas default).
+    try {
+      term.loadAddon(new Unicode11Addon())
+      term.unicode.activeVersion = unicodeVersion(settings.terminalUnicode11 !== false)
+    } catch {
+      /* keep xterm's built-in v6 table */
+    }
     // Reading the preference inside the closure means mount() AND reload() always
     // re-read the CURRENT setting, so toggling the renderer then redrawing a pane
     // actually switches engine.
@@ -328,13 +431,75 @@ export function useXterm(
     // never settle on a bad fit. -1 forces the first real fit to propagate.
     let lastCols = -1
     let lastRows = -1
+    // True while a reattach snapshot is being parsed (E6-FR-04): it is laid out
+    // for the pty's size, so a resize-observer or rAF fit landing mid-parse
+    // would reflow the rest of it at another width. The write callback refits.
+    let replaying = false
+    // Phone-fit (E3-FR-17/18/23): the normal-font cell, measured on the last
+    // desktop fit, so the baseline and the shrink are computed from it.
+    let normalCell: { cell: CellPx; font: number } | null = null
+    const normalFont = (): number => optsRef.current.fontSize ?? useAppStore.getState().settings.fontSize ?? 13
+    let fitOverflow = false
+    const setFitOverflow = (on: boolean): void => {
+      if (fitOverflow === on) return
+      fitOverflow = on
+      container.style.overflow = on ? 'auto' : ''
+    }
+    // A phone owns this pane's size: the grid is the phone's, the font shrinks
+    // until it fits (6px minimum, then the area scrolls), the pty is never
+    // resized to the container and the desktop size is only measured as the baseline.
+    const fitToOwner = (owner: FitOwnerEntry): void => {
+      if (container.clientWidth >= 8 && container.clientHeight >= 8) {
+        const normal = normalFont()
+        const cur = term.options.fontSize ?? normal
+        const now = cellOf(term)
+        const base = normalCell && normalCell.font === normal ? normalCell.cell : now ? { w: (now.w * normal) / cur, h: (now.h * normal) / cur } : null
+        if (base) {
+          const avail = { w: container.clientWidth - scrollBarWidth(term), h: container.clientHeight }
+          const geo = fitGeometry(owner, avail, base, normal)
+          setFitBaseline(opts.paneId, geo.baseline)
+          let font = geo.fontSize
+          if (term.options.fontSize !== font) term.options.fontSize = font
+          // Cells round to device pixels, so the linear guess can be a pixel
+          // too wide: step down while the measured grid still overflows.
+          for (let i = 0; i < 4 && font > FIT_MIN_FONT; i++) {
+            const c = cellOf(term)
+            if (!c || (owner.cols * c.w <= avail.w + 0.5 && owner.rows * c.h <= avail.h + 0.5)) break
+            font -= 1
+            term.options.fontSize = font
+          }
+          const c = cellOf(term)
+          setFitOverflow(!!c && (owner.cols * c.w > avail.w + 0.5 || owner.rows * c.h > avail.h + 0.5))
+          // Read by the UI tests and handy in devtools: the font the phone grid got.
+          container.dataset.fitFont = String(font)
+        }
+      }
+      if (term.cols !== owner.cols || term.rows !== owner.rows) term.resize(owner.cols, owner.rows)
+      if (term.cols === lastCols && term.rows === lastRows) return
+      lastCols = term.cols
+      lastRows = term.rows
+      // The executor already resized the pty; the same size again is a no-op in main.
+      const id = ptyIdRef.current
+      if (id) window.snApi.pty.resize({ ptyId: id, cols: term.cols, rows: term.rows })
+    }
     // Fit only when the container is actually measurable. A display:none or
     // mid-relayout box yields a bogus tiny geometry, that is the "everything
     // crammed into a narrow column / text floating to one side" bug. We also
     // tell the pty only when cols/rows truly change, so an AI CLI redrawing
     // isn't interrupted by a stream of no-op SIGWINCH resizes.
     const safeFit = (): void => {
-      if (!container || container.clientWidth < 8 || container.clientHeight < 8) return
+      if (replaying || !container) return
+      const owner = fitOwnerOf(opts.paneId)
+      if (owner) {
+        fitToOwner(owner)
+        return
+      }
+      if (container.clientWidth < 8 || container.clientHeight < 8) return
+      // Back from a phone grid: the pane's own font and no scrolling area.
+      setFitOverflow(false)
+      delete container.dataset.fitFont
+      const normal = normalFont()
+      if (term.options.fontSize !== normal) term.options.fontSize = normal
 
       // Re-anchor the viewport across the refit. A resize reflow (a window drag
       // on fractional-DPI Windows nudges rows/cols by a line) makes xterm pull
@@ -350,6 +515,9 @@ export function useXterm(
       }
       if (fromBottom <= 0) term.scrollToBottom()
       else term.scrollToLine(Math.max(0, term.buffer.active.baseY - fromBottom))
+      setFitBaseline(opts.paneId, { cols: term.cols, rows: term.rows })
+      const cell = cellOf(term)
+      if (cell) normalCell = { cell, font: normal }
       if (term.cols === lastCols && term.rows === lastRows) return
       lastCols = term.cols
       lastRows = term.rows
@@ -477,15 +645,65 @@ export function useXterm(
     controllerRef.current.clearSearch = () => search.clearDecorations()
     controllerRef.current.focus = () => term.focus()
     registerFocuser(opts.paneId, () => term.focus())
+    // Paste path for drops and review notes: same xterm paste a Ctrl+V uses.
+    const paster: Paster = {
+      paste: (text) => term.paste(text),
+      bracketed: () => term.modes.bracketedPasteMode,
+    }
+    registerPaster(opts.paneId, paster)
     // Manual escape hatch for garbled glyphs (pane menu / keybinding): rebuild
     // the renderer immediately, no debounce, since the user is reacting to
     // visible corruption right now.
     registerRedrawer(opts.paneId, () => rendererHandle.reload())
+    // `snaos read` (E8-FR-17): scrollback + screen as plain lines, wraps joined.
+    const termReader: TermReader = (n) => readBufferLines(term.buffer.active, n)
+    registerTermReader(opts.paneId, termReader)
+    // PowerShell prompt marks (E6-FR-26..29): passive, inert without OSC 133.
+    const marks = new ShellMarks(term, {
+      exitTitle: (code) => tRef.current('terminal.exitCodeTitle', { code }),
+      onPrompt: () => notePrompt(opts.paneId),
+    })
+    const marksApi: ShellMarksApi = {
+      prompt: (dir) => marks.navigate(dir),
+      hasLastOutput: () => marks.hasLastOutput(),
+      copyLastOutput: () => {
+        const text = marks.lastOutput()
+        if (text === null) return false
+        window.snApi.clipboard.writeText(text)
+        toast.success(tRef.current('terminal.outputCopied'), { dedupeKey: 'copy-last-output' })
+        return true
+      },
+    }
+    registerShellMarks(opts.paneId, marksApi)
+    controllerRef.current.prompt = marksApi.prompt
+    controllerRef.current.copyLastOutput = marksApi.copyLastOutput
+
+    // Exit card state (E6-FR-17): kept in a ref for the key handler, mirrored
+    // to the pane chrome through onExitState.
+    const emitExit = (next: XtermExitState | null): void => {
+      exitRef.current = next
+      optsRef.current.onExitState?.(next)
+    }
 
     // Terminal copy/paste via the Electron clipboard. Ctrl+C copies the
     // selection (else falls through to ^C / interrupt); Ctrl+V pastes;
     // Ctrl+Shift+C / Ctrl+Shift+V are explicit copy/paste.
     term.attachCustomKeyEventHandler((e) => {
+      // E3-FR-19: a real key takes a phone-sized pane back before it is
+      // written (the local owner clears and the refit runs synchronously).
+      // xterm's own replies (DA/DSR, focus, mouse) never come through here.
+      if (e.type === 'keydown' && !MODIFIER_KEYS.has(e.key)) releaseFitFromDesktop(opts.paneId)
+      // While the exit card shows, Enter restarts and Esc hides it; neither
+      // reaches the (dead) pty, on any event phase (E6-FR-17).
+      const exit = exitRef.current
+      if (exit?.cardVisible && (e.key === 'Enter' || e.key === 'Escape') && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (e.type === 'keydown') {
+          e.preventDefault()
+          if (e.key === 'Enter') void restart()
+          else emitExit({ ...exit, cardVisible: false })
+        }
+        return false
+      }
       if (e.type !== 'keydown') return true
       const mod = e.ctrlKey || e.metaKey
       if (!mod || e.altKey) return true
@@ -515,6 +733,7 @@ export function useXterm(
       }
       if (key === 'v') {
         e.preventDefault()
+        useAppStore.getState().clearAgentEnded(opts.paneId)
         void window.snApi.clipboard.readText().then((text) => {
           // Route through xterm's paste rather than writing the raw clipboard:
           // it normalizes CRLF/LF to CR and, when the inner app enabled
@@ -533,6 +752,8 @@ export function useXterm(
     let disposed = false
     let offData: () => void = () => undefined
     let offExit: () => void = () => undefined
+    /** The first reattach/spawn; a restart waits for it so a pane never binds two ptys. */
+    let launched: Promise<void> = Promise.resolve()
 
     // Cold start: the first pane can mount before the JetBrains Mono web font
     // finishes loading, so xterm builds its glyph atlas from the fallback font
@@ -633,42 +854,191 @@ export function useXterm(
         })
       })
       offExit = window.snApi.pty.onExit((e) => {
-        if (e.ptyId === ptyId) {
-          term.write(`\r\n\x1b[2m[process exited (${e.exitCode})]\x1b[0m\r\n`)
-        }
+        if (e.ptyId !== ptyId || restartingRef.current) return
+        term.write(`\r\n\x1b[2m[process exited (${e.exitCode})]\x1b[0m\r\n`)
+        // Only a shell that ended on its own gets the card and the "exited"
+        // label; a kill from elsewhere keeps the gray line alone (E6-FR-17).
+        if (e.natural === false) return
+        const app = useAppStore.getState()
+        app.setPaneExit(opts.paneId, e.exitCode)
+        app.clearAgentEnded(opts.paneId)
+        emitExit({ code: e.exitCode, cardVisible: true })
       })
     }
 
+    // In-place restart (E6-FR-18/19, D2): same xterm, so the scrollback stays.
+    // Main kills the old pty (no phone `exit`), spawns the new one seeded with
+    // the kept output and returns `tail` (mode soft reset + separator), which
+    // is all this terminal still has to write. The launch is decided again
+    // (resume intent, current preset), exactly like a mount.
+    const restart = async (): Promise<void> => {
+      if (disposed || restartingRef.current) return
+      restartingRef.current = true
+      await launched
+      const prev = exitRef.current
+      // The old pty's exit is no longer this pane's; its last output still
+      // arrives (ordered before the restart reply) and is written as usual.
+      offExit()
+      offExit = () => undefined
+      const o = optsRef.current
+      const base = { cwd: o.cwd ?? '', initialCommand: o.initialCommand, setup: o.setup }
+      try {
+        const launch = await prepareAgentLaunch(o.paneId, base).catch(() => base)
+        if (disposed) return
+        // E3-FR-20: a restart ends any phone-fit, so the new pty is born at the
+        // desktop size (the baseline) rather than at the phone grid.
+        const born = fitOwnerOf(o.paneId) ? fitBaselineOf(o.paneId) : null
+        const res = await window.snApi.pty.restart({
+          paneId: o.paneId,
+          shell: o.shell,
+          cwd: launch.cwd || o.cwd,
+          initialCommand: launch.initialCommand,
+          setup: launch.setup,
+          cols: born?.cols ?? term.cols,
+          rows: born?.rows ?? term.rows,
+          // After a failed respawn, retry with the OS default shell.
+          fallbackDefaultShell: prev?.error ? true : undefined,
+        })
+        if (disposed) {
+          // Unmounted mid-restart: the new pty is the pane's unless it is gone.
+          if (shouldKillLateSpawn(o.paneId, res.ptyId)) void window.snApi.pty.kill(res.ptyId)
+          return
+        }
+        offData()
+        pendingRef.current = 0
+        pausedRef.current = false
+        term.write(res.tail)
+        if (res.warning?.kind === 'shellNotFound') {
+          const text = tRef.current('terminal.shellNotFound', { requested: plain(res.warning.requested), used: plain(res.warning.used) })
+          term.write(`\x1b[33m${text}\x1b[0m\r\n`)
+        }
+        shellKindRef.current = res.shellKind
+        // The new shell may run without integration: its own marks decide.
+        forgetPrompts(opts.paneId)
+        bind(res.ptyId)
+        // The new pty was spawned at this terminal's size; a phone-fit owner
+        // may have changed meanwhile (a restart clears it, E3-FR-20): re-send.
+        lastCols = -1
+        lastRows = -1
+        safeFit()
+        const app = useAppStore.getState()
+        app.setPaneExit(opts.paneId, null)
+        app.clearAgentEnded(opts.paneId)
+        emitExit(null)
+      } catch (err) {
+        if (disposed) return
+        offData()
+        offData = () => undefined
+        // No shell runs now: the header and sidebar say "exited", like main's
+        // record that keeps the output for phones (code -1 for a live restart).
+        useAppStore.getState().setPaneExit(opts.paneId, prev?.code ?? -1)
+        emitExit({ code: prev?.code ?? -1, error: spawnError(err), cardVisible: true })
+        noteSpawnFailure(opts.paneId, spawnError(err)) // E7-FR-36
+      } finally {
+        restartingRef.current = false
+      }
+    }
+    const restartFn = (): void => void restart()
+    registerRestarter(opts.paneId, restartFn)
+    controllerRef.current.restart = restartFn
+    controllerRef.current.hideExitCard = () => {
+      if (exitRef.current) emitExit({ ...exitRef.current, cardVisible: false })
+    }
+    controllerRef.current.shellKind = () => shellKindRef.current
+
     // Rebind to an already-running pty (renderer reload / remount) when one
     // exists for this pane; otherwise spawn a fresh shell.
-    window.snApi.pty
+    launched = window.snApi.pty
       .reattach(opts.paneId)
       .then((existing) => {
         if (disposed) return undefined
         if (existing) {
-          if (existing.replay) term.write(existing.replay)
+          // E6-FR-04: the snapshot is laid out for the pty's size, so it is
+          // written at that size; once parsed, the forced refit sends the
+          // container's real size to the pty even when xterm already had it.
+          replaying = true
+          if (existing.cols > 0 && existing.rows > 0 && (existing.cols !== term.cols || existing.rows !== term.rows)) {
+            term.resize(existing.cols, existing.rows)
+          }
+          // The refit runs after the parse, by then bind() has set the pty id.
+          const refit = (): void => {
+            replaying = false
+            if (disposed) return
+            lastCols = -1
+            lastRows = -1
+            safeFit()
+          }
+          term.write(existing.replay ?? '', refit)
+          shellKindRef.current = existing.shellKind ?? null
           bind(existing.ptyId)
           return undefined
         }
-        return window.snApi.pty
-          .spawn({
-            paneId: opts.paneId,
-            shell: opts.shell,
-            cwd: opts.cwd,
-            initialCommand: opts.initialCommand,
-            setup: opts.setup,
-            cols: term.cols,
-            rows: term.rows,
+        // A real spawn (not a reattach): an agent console may resume its
+        // last chat instead (E5-FR-08); this decides the command and cwd.
+        const base: ResolvedLaunch = { cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup, launchKind: opts.launchKind }
+        return prepareAgentLaunch(opts.paneId, base)
+          .catch(() => base)
+          .then((launch) => {
+            if (disposed) return null
+            // E8-FR-02: the pane's one-shot prompt is consumed by this spawn
+            // only; a later restart (or remount + reattach) never finds it.
+            const pending = useAppStore.getState().takePendingPrompt(opts.paneId)
+            if (pending) rememberPrompt(opts.paneId, pending.text)
+            // E8-FR-25: a repo setup console runs its command once, as the
+            // shell's argument so the shell exits with the command's code.
+            const setupCmd = useAppStore.getState().takeRepoSetupCommand(opts.paneId)
+            const shot = setupCmd ? oneShotLaunch(setupCmd, opts.shell, window.snApi.platform, !!launch.setup?.length) : null
+            return window.snApi.pty.spawn({
+              paneId: opts.paneId,
+              shell: opts.shell,
+              ...(shot?.args ? { args: shot.args } : {}),
+              cwd: launch.cwd || opts.cwd,
+              initialCommand: shot ? shot.initialCommand : launch.initialCommand,
+              setup: launch.setup,
+              cols: term.cols,
+              rows: term.rows,
+              launchKind: launch.launchKind ?? 'other',
+              ...(pending ? { initialPrompt: { text: pending.text, enter: pending.enter, ...(pending.mode === 'argvOnly' ? { mode: 'argvOnly' as const } : {}) } } : {}),
+              // E6-FR-11/13: the saved history comes back unless this spawn
+              // resumes a chat (decideLaunch); main honors it once per session.
+              restoreScrollback: !launch.resumed,
+              // The CLI's console token carries the workspace (SNAOS_WORKSPACE_ID).
+              workspaceId: useAppStore.getState().workspaces.find((w) => w.panes.some((p) => p.id === opts.paneId))?.id,
+            })
           })
-          .then(({ ptyId }) => {
+          .then((spawned) => {
+            if (!spawned) return
+            const { ptyId, warning, seed } = spawned
             if (disposed) {
-              void window.snApi.pty.kill(ptyId)
+              // Unmounted while spawning (E4-FR-36): keep the pty for the next
+              // mount's reattach unless its pane is gone or bound to another.
+              if (shouldKillLateSpawn(opts.paneId, ptyId)) void window.snApi.pty.kill(ptyId)
               return
             }
+            // E6-FR-11: the restored history (sanitized in main) goes in before
+            // bind, so the new shell's first bytes land below its separator.
+            if (seed) term.write(seed)
+            // E6-FR-32: the configured shell is missing, main launched the default.
+            if (warning?.kind === 'shellNotFound') {
+              const text = tRef.current('terminal.shellNotFound', { requested: plain(warning.requested), used: plain(warning.used) })
+              term.write(`\x1b[33m${text}\x1b[0m\r\n`)
+            }
+            shellKindRef.current = spawned.shellKind
             bind(ptyId)
+            useAppStore.getState().setPaneExit(opts.paneId, null)
           })
       })
-      .catch((err) => term.write(`\r\n\x1b[31mFailed to start shell: ${String(err)}\x1b[0m\r\n`))
+      .catch((err) => {
+        if (disposed) return
+        term.write(`\r\n\x1b[31mFailed to start shell: ${String(err)}\x1b[0m\r\n`)
+        // The card offers Restart, which retries with the OS default shell.
+        emitExit({ code: -1, error: spawnError(err), cardVisible: true })
+        noteSpawnFailure(opts.paneId, spawnError(err)) // E7-FR-36
+      })
+
+    // Any key typed into the pane hides the "Claude exited" chip (E6-FR-22).
+    // onKey, not onData: xterm's automatic replies (DSR, focus) are not typing.
+    const keySub = term.onKey(() => useAppStore.getState().clearAgentEnded(opts.paneId))
 
     const input = term.onData((data) => {
       const id = ptyIdRef.current
@@ -698,12 +1068,43 @@ export function useXterm(
     // does NOT fire the ResizeObserver, so re-fit once the box has settled.
     const mountRaf = requestAnimationFrame(() => requestAnimationFrame(safeFit))
 
+    // Phone-fit owner changes (E3-FR-17/18): adopt the phone grid or give the
+    // size back to the container; the forced refit re-sends the geometry.
+    const offFit = useFitStore.subscribe((s, prev) => {
+      if (s.owners[opts.paneId] === prev.owners[opts.paneId]) return
+      lastCols = -1
+      lastRows = -1
+      safeFit()
+    })
+    // A real paste takes the size back too (E3-FR-19); Ctrl+V already did on keydown.
+    const onPasteFit = (): void => {
+      releaseFitFromDesktop(opts.paneId)
+    }
+    container.addEventListener('paste', onPasteFit, true)
+    // A zoom or a display change re-measures xterm's cells without resizing
+    // the box: a phone grid re-checks its font and the scroll fallback once
+    // xterm has the new cell size (two frames later).
+    let zoomRaf = 0
+    const onWindowResize = (): void => {
+      if (!fitOwnerOf(opts.paneId)) return
+      cancelAnimationFrame(zoomRaf)
+      zoomRaf = requestAnimationFrame(() => {
+        zoomRaf = requestAnimationFrame(safeFit)
+      })
+    }
+    window.addEventListener('resize', onWindowResize)
+
     return () => {
       disposed = true
       cancelAnimationFrame(roRaf)
       cancelAnimationFrame(mountRaf)
       cancelAnimationFrame(snapRaf)
       resizeObserver.disconnect()
+      offFit()
+      cancelAnimationFrame(zoomRaf)
+      window.removeEventListener('resize', onWindowResize)
+      container.removeEventListener('paste', onPasteFit, true)
+      container.style.overflow = ''
       rendererHandle.dispose()
       clearTimeout(healTimer)
       offDisplayRecovered()
@@ -715,14 +1116,23 @@ export function useXterm(
       container.removeEventListener('wheel', onWheelSnap)
       container.removeEventListener('mousedown', onMouseDownCapture, true)
       input.dispose()
+      keySub.dispose()
       titleSub.dispose()
+      // Never kill here (E4-FR-36): the pty outlives this terminal. Removal
+      // kills come from ptyLifecycle, a clean restart kills before remounting.
       offData()
       offExit()
-      const id = ptyIdRef.current
-      if (id) void window.snApi.pty.kill(id)
       unregisterPty(opts.paneId)
       unregisterFocuser(opts.paneId)
+      unregisterPaster(opts.paneId, paster)
       unregisterRedrawer(opts.paneId)
+      unregisterTermReader(opts.paneId, termReader)
+      unregisterRestarter(opts.paneId, restartFn)
+      unregisterShellMarks(opts.paneId, marksApi)
+      marks.dispose()
+      forgetPrompts(opts.paneId)
+      exitRef.current = null
+      shellKindRef.current = null
       ptyIdRef.current = null
       termRef.current = null
       fitRef.current = null
@@ -731,6 +1141,11 @@ export function useXterm(
         search: () => false,
         clearSearch: () => undefined,
         focus: () => undefined,
+        restart: () => undefined,
+        hideExitCard: () => undefined,
+        shellKind: () => null,
+        prompt: () => false,
+        copyLastOutput: () => false,
       }
       refitRef.current = () => undefined
       term.dispose()
@@ -765,6 +1180,21 @@ export function useXterm(
       term.options.scrollback = infiniteScrollback ? INFINITE_SCROLLBACK : (scrollback ?? 5000)
     }
   }, [infiniteScrollback, scrollback])
+
+  // Live Unicode width switch (E6-FR-14): new output uses the new table at once;
+  // the refresh repaints what is on screen.
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    const next = unicodeVersion(unicode11 !== false)
+    try {
+      if (term.unicode.activeVersion === next) return
+      term.unicode.activeVersion = next
+      term.refresh(0, term.rows - 1)
+    } catch {
+      /* addon missing or terminal mid-teardown */
+    }
+  }, [unicode11])
 
   // Track visibility for backpressure; on reveal, drop any stale pending count
   // (a hidden xterm may not have fired its write callbacks) and unpause.

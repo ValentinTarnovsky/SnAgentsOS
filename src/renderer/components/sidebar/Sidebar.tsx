@@ -1,18 +1,26 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState, type FocusEvent } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  FileOutput,
+  LayoutDashboard,
   MoreVertical,
+  RefreshCcw,
   Pencil,
   Plus,
   Settings,
   Star,
   StarOff,
+  StickyNote,
   Trash2,
 } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { ActionTooltipLabel, KeyHint, useActionKeys } from '@/components/ui/KeyHint'
+import { ariaKeyshortcuts } from '@/lib/keymap'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { UsageBars } from '@/components/sidebar/UsageBars'
@@ -22,6 +30,19 @@ import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 import { cn } from '@/lib/cn'
 import { StatusDot } from '@/components/ui/StatusDot'
 import { aggregateStatus } from '@shared/status'
+import type { PaneStatus, Workspace } from '@shared/types'
+import { useAgentStore } from '@/lib/agentStore'
+import { navInputFrom, workspaceAgents } from '@/lib/agentNav'
+import { formatSince, STATUS_LABEL_KEY } from '@/lib/formatSince'
+import { freezeSidebarOrder, releaseSidebarOrder, sidebarOrder, useSidebarFreeze } from '@/lib/sidebarOrder'
+import { useLang, type MessageKey } from '@/i18n'
+import { AgentRows } from '@/components/sidebar/AgentRows'
+import { ExitedDot, allExited, exitedLines } from '@/components/sidebar/ExitedDot'
+import { SidebarGitSuffix } from '@/components/git/SidebarGitSuffix'
+import { useGitStore } from '@/lib/gitStore'
+import { compactChip, gitChipEnabled, workspaceGitKey } from '@/lib/gitChip'
+import { NoteInlineEditor, TASK_LABEL_KEY, TaskStateChip, WorkspaceNotePopover } from '@/components/sidebar/WorkspaceNotePopover'
+import { openRepoExport, reloadFromRepo } from '@/lib/repoConfigFlow'
 
 interface MenuState {
   x: number
@@ -44,6 +65,68 @@ function AttentionBadge({ count, className }: { count: number; className?: strin
   )
 }
 
+/** Most console lines in a workspace's combined tooltip before "+N" (E4-FR-11). */
+const TIP_MAX_LINES = 8
+
+const SUMMARY_KEY: Record<PaneStatus['state'], MessageKey> = {
+  working: 'sidebar.sum.working',
+  action: 'sidebar.sum.action',
+  done: 'sidebar.sum.done',
+  error: 'sidebar.sum.error',
+  idle: 'sidebar.sum.idle',
+  unknown: 'sidebar.sum.unknown',
+}
+const SUMMARY_ORDER: PaneStatus['state'][] = ['action', 'error', 'working', 'done', 'idle', 'unknown']
+
+/**
+ * Combined status tooltip of a workspace (E4-FR-11): its name (collapsed
+ * sidebar only), a summary ("3 working, 1 waiting") and one line per console
+ * with a state, up to 8 plus "+N". Built when it opens.
+ */
+function WorkspaceTip({ ws, paneStatus, showName, extra = [], meta = [] }: { ws: Workspace; paneStatus: Record<string, PaneStatus>; showName: boolean; extra?: string[]; meta?: string[] }) {
+  const t = useT()
+  const lang = useLang()
+  const [now] = useState(() => Date.now())
+  const withStatus = ws.panes.filter((p) => paneStatus[p.id])
+  const counts = new Map<PaneStatus['state'], number>()
+  for (const p of withStatus) counts.set(paneStatus[p.id].state, (counts.get(paneStatus[p.id].state) ?? 0) + 1)
+  const summary = SUMMARY_ORDER.filter((st) => counts.get(st))
+    .map((st) => t(SUMMARY_KEY[st], { count: counts.get(st) ?? 0 }))
+    .join(', ')
+  const lines = withStatus.slice(0, TIP_MAX_LINES).map((p) => {
+    const st = paneStatus[p.id]
+    return [p.title, t(STATUS_LABEL_KEY[st.state]), st.stateSince ? formatSince(st.stateSince, now, lang) : '']
+      .filter(Boolean)
+      .join(' - ')
+  })
+  return (
+    <span className="flex flex-col" data-workspace-tip>
+      {showName && <span>{ws.name}</span>}
+      {/* Task state and note (E8-FR-10), collapsed sidebar only. */}
+      {meta.map((line, i) => (
+        <span key={`m${i}`} className="font-normal text-text-secondary" data-tip-meta>
+          {line}
+        </span>
+      ))}
+      {summary && <span className={showName ? 'font-normal' : undefined}>{summary}</span>}
+      {lines.map((line, i) => (
+        <span key={i} className="font-normal text-text-secondary">
+          {line}
+        </span>
+      ))}
+      {withStatus.length > TIP_MAX_LINES && (
+        <span className="font-normal text-text-secondary">+{withStatus.length - TIP_MAX_LINES}</span>
+      )}
+      {/* "<pane>: exited" lines (E6-FR-38). */}
+      {extra.map((line, i) => (
+        <span key={`x${i}`} className="font-normal text-text-secondary">
+          {line}
+        </span>
+      ))}
+    </span>
+  )
+}
+
 export function Sidebar() {
   const t = useT()
   const {
@@ -52,24 +135,91 @@ export function Sidebar() {
     sidebarCollapsed,
     paneAttention,
     paneStatus,
+    mountedWorkspaces,
+    presets,
+    agentSettings,
     setActive,
     deleteWorkspace,
     renameWorkspace,
     toggleFavorite,
+    toggleAgentsCollapsed,
     toggleSidebar,
     setSettingsOpen,
     setWizardOpen,
-  } = useAppStore()
+  } = useAppStore(
+    useShallow((s) => ({
+      workspaces: s.workspaces,
+      activeWorkspaceId: s.activeWorkspaceId,
+      sidebarCollapsed: s.sidebarCollapsed,
+      paneAttention: s.paneAttention,
+      paneStatus: s.paneStatus,
+      mountedWorkspaces: s.mountedWorkspaces,
+      presets: s.presets,
+      agentSettings: s.settings.agents,
+      setActive: s.setActive,
+      deleteWorkspace: s.deleteWorkspace,
+      renameWorkspace: s.renameWorkspace,
+      toggleFavorite: s.toggleFavorite,
+      toggleAgentsCollapsed: s.toggleAgentsCollapsed,
+      toggleSidebar: s.toggleSidebar,
+      setSettingsOpen: s.setSettingsOpen,
+      setWizardOpen: s.setWizardOpen,
+    })),
+  )
+  const sessions = useAgentStore((s) => s.sessions)
+  const sleeping = useAgentStore((s) => s.sleeping)
+  // Agents board (E5-FR-27): the header button toggles it like Ctrl+Shift+A.
+  const boardOpen = useAgentStore((s) => s.view === 'board')
+  const boardKeys = useActionKeys('agentsBoard')
+  // Consoles whose shell ended on its own (E6-FR-38).
+  const paneExit = useAppStore((s) => s.paneExit)
+  // Git chip on the second line (E7-FR-08), hidden with settings.gitChip off.
+  const gitOn = useAppStore((s) => gitChipEnabled(s.settings))
+  const gitSummaries = useGitStore((s) => s.summaries)
+  // Agent rows (E5-FR-19): expanded sidebar only, unless turned off.
+  const rowsOn = !sidebarCollapsed && agentSettings?.sidebarAgentRows !== false
+  const navInput = navInputFrom(
+    { workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, settings: { agents: agentSettings } },
+    { sessions, sleeping },
+  )
 
   const [menu, setMenu] = useState<MenuState | null>(null)
   const [confirmWs, setConfirmWs] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  // Note and task state (E8-FR-10): the popover and the inline editor.
+  const [notePopover, setNotePopover] = useState<MenuState | null>(null)
+  const [noteEditingId, setNoteEditingId] = useState<string | null>(null)
+  const setWorkspaceNote = useAppStore((s) => s.setWorkspaceNote)
+  /** Pending console focus of the last row click; a double click cancels it for the inline editor. */
+  const rowFocusCancel = useRef<(() => void) | null>(null)
 
   const onNew = (): void => setWizardOpen(true)
+  // Shortcut chips from the live keymap (E4-FR-30): a rebind shows at once.
+  const newKeys = useActionKeys('newWorkspace')
+  const settingsKeys = useActionKeys('openSettings')
+  const sidebarKeys = useActionKeys('toggleSidebar')
 
-  // Favorites float to the top (stable within each group).
-  const sorted = [...workspaces].sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0))
+  // Favorites float to the top (stable within each group); Alt+1..9 use the same
+  // order. Smart (E5-FR-22) ranks by the most demanding agent and holds still
+  // while the pointer is over the sidebar or the focus is inside it.
+  const frozen = useSidebarFreeze((s) => s.frozen)
+  const smart = agentSettings?.sidebarSort === 'smart'
+  const sorted = sidebarOrder(workspaces, smart ? { sort: 'smart', nav: navInput, frozen } : undefined)
+  const shownIds = useRef<string[]>([])
+  shownIds.current = sorted.map((w) => w.id)
+  const hovering = useRef(false)
+  const focusInside = useRef(false)
+  const syncFreeze = (): void => {
+    if (hovering.current || focusInside.current) freezeSidebarOrder(shownIds.current)
+    else releaseSidebarOrder()
+  }
+  useEffect(() => () => releaseSidebarOrder(), [])
+  const onBlurAside = (e: FocusEvent<HTMLElement>): void => {
+    if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return
+    focusInside.current = false
+    syncFreeze()
+  }
 
   const openMenu = (e: { clientX: number; clientY: number }, wsId: string): void => {
     setMenu({ x: e.clientX, y: e.clientY, wsId })
@@ -95,6 +245,14 @@ export function Sidebar() {
         onClick: () => toggleFavorite(wsId),
       },
       { label: t('ctx.rename'), icon: Pencil, onClick: () => startRename(wsId) },
+      { label: t('note.menu'), icon: StickyNote, onClick: () => setNotePopover(menu ? { ...menu, wsId } : { x: 80, y: 80, wsId }) },
+      // Per-repo .snagentsos.json (E8-FR-26/27): reload only for a workspace made or exported with one.
+      ...(ws?.cwd
+        ? [
+            { label: t('repo.export.menu'), icon: FileOutput, separated: true, onClick: () => openRepoExport(wsId) },
+            ...(ws.repoConfig ? [{ label: t('repo.reload.menu'), icon: RefreshCcw, onClick: () => void reloadFromRepo(wsId, t) }] : []),
+          ]
+        : []),
       {
         label: t('ctx.delete'),
         icon: Trash2,
@@ -107,6 +265,21 @@ export function Sidebar() {
 
   return (
     <aside
+      data-sidebar
+      data-sidebar-frozen={frozen ? '' : undefined}
+      onPointerEnter={() => {
+        hovering.current = true
+        syncFreeze()
+      }}
+      onPointerLeave={() => {
+        hovering.current = false
+        syncFreeze()
+      }}
+      onFocus={() => {
+        focusInside.current = true
+        syncFreeze()
+      }}
+      onBlur={onBlurAside}
       className={cn(
         'flex h-full shrink-0 flex-col overflow-hidden border-r border-border bg-bg-secondary transition-[width] duration-200 ease-out',
         sidebarCollapsed ? 'w-[60px]' : 'w-[260px]',
@@ -123,9 +296,30 @@ export function Sidebar() {
             {t('sidebar.header')}
           </span>
         )}
-        <Tooltip label={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')} side="right">
+        {!sidebarCollapsed && (
+          <Tooltip label={<ActionTooltipLabel label={t('agents.board.toggle')} action="agentsBoard" />} side="right">
+            <button
+              type="button"
+              data-agents-board-toggle
+              aria-pressed={boardOpen}
+              aria-label={t('agents.board.toggle')}
+              aria-keyshortcuts={boardKeys.length > 0 ? ariaKeyshortcuts(boardKeys) : undefined}
+              onClick={() => useAgentStore.getState().setView(boardOpen ? 'grid' : 'board')}
+              className={cn(
+                'ml-auto mr-1.5 rounded-lg border p-1 transition-colors',
+                boardOpen
+                  ? 'border-accent-violet/60 bg-accent-violet/15 text-text-primary'
+                  : 'border-border/70 bg-card/40 text-text-secondary hover:border-accent-violet/40 hover:bg-card hover:text-text-primary',
+              )}
+            >
+              <LayoutDashboard size={16} />
+            </button>
+          </Tooltip>
+        )}
+        <Tooltip label={<ActionTooltipLabel label={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')} action="toggleSidebar" />} side="right">
           <button
             onClick={toggleSidebar}
+            aria-keyshortcuts={sidebarKeys.length > 0 ? ariaKeyshortcuts(sidebarKeys) : undefined}
             className="rounded-lg border border-border/70 bg-card/40 p-1 text-text-secondary transition-colors hover:border-accent-violet/40 hover:bg-card hover:text-text-primary"
           >
             {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
@@ -134,11 +328,13 @@ export function Sidebar() {
       </div>
 
       <div className="px-2 pb-2 pt-1">
-        <Tooltip label={sidebarCollapsed ? t('sidebar.newWorkspace') : ''} side="right">
+        <Tooltip label={sidebarCollapsed ? <ActionTooltipLabel label={t('sidebar.newWorkspace')} action="newWorkspace" /> : ''} side="right">
           <button
             onClick={onNew}
+            data-sidebar-new
+            aria-keyshortcuts={newKeys.length > 0 ? ariaKeyshortcuts(newKeys) : undefined}
             className={cn(
-              'flex w-full items-center justify-center overflow-hidden rounded-btn border border-accent-violet/30 bg-accent-violet/10 px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent-violet/50 hover:bg-accent-violet/20',
+              'group relative flex w-full items-center justify-center overflow-hidden rounded-btn border border-accent-violet/30 bg-accent-violet/10 px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent-violet/50 hover:bg-accent-violet/20',
               sidebarCollapsed ? 'gap-0' : 'gap-2',
             )}
           >
@@ -151,6 +347,9 @@ export function Sidebar() {
             >
               {t('sidebar.newWorkspace')}
             </span>
+            {!sidebarCollapsed && (
+              <KeyHint keys={newKeys} className="absolute right-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            )}
           </button>
         </Tooltip>
       </div>
@@ -162,104 +361,178 @@ export function Sidebar() {
           const renaming = renamingId === w.id
           const attentionCount = w.panes.reduce((n, p) => n + Math.max(paneStatus[p.id]?.pendingCount ?? 0, paneAttention[p.id] ? 1 : 0), 0)
           const status = aggregateStatus(w.panes.map(p => paneStatus[p.id]))
-          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${paneStatus[p.id].state}`)}`).join('\n')
+          const exited = exitedLines(w.panes, paneExit, t)
+          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${paneStatus[p.id].state}`)}`).concat(exited).join(', ')
+          // Gray dot when no agent state is shown and every console has exited (E6-FR-38).
+          const exitedDot = !status && allExited(w.panes, paneExit)
+          const exitedLabel = exited.join('\n')
+          const agents = rowsOn ? workspaceAgents(w, navInput) : []
+          const git = gitOn ? gitSummaries[workspaceGitKey(w.id)] : undefined
+          const gitLine = git ? compactChip(git) : null
+          // E8-FR-10: the note replaces the console count; state and note join the collapsed tooltip.
+          const noteEditing = noteEditingId === w.id && !sidebarCollapsed
+          const meta = [w.taskState ? t(TASK_LABEL_KEY[w.taskState]) : '', w.note ?? ''].filter(Boolean)
           return (
-            <div
-              key={w.id}
-              onContextMenu={(e) => {
-                e.preventDefault()
-                openMenu(e, w.id)
-              }}
-              className={cn(
-                'group relative flex items-center rounded-btn',
-                active ? 'bg-card' : 'hover:bg-card/60',
-              )}
-            >
-              {active && (
-                <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-accent-violet" />
-              )}
+            <div key={w.id} data-sidebar-ws={w.id}>
+              <div
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  openMenu(e, w.id)
+                }}
+                className={cn(
+                  'group relative flex items-center rounded-btn',
+                  active ? 'bg-card' : 'hover:bg-card/60',
+                )}
+              >
+                {active && (
+                  <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-accent-violet" />
+                )}
 
-              {renaming && !sidebarCollapsed ? (
-                <div className="flex min-w-0 flex-1 items-center gap-2 px-[11px] py-2">
-                  <WsIcon size={16} className="shrink-0 text-accent-violet" />
-                  <input
-                    autoFocus
-                    value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
-                    onBlur={commitRename}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') commitRename()
-                      if (e.key === 'Escape') setRenamingId(null)
-                    }}
-                    className="min-w-0 flex-1 rounded border border-accent-violet/50 bg-bg-primary px-1.5 py-0.5 text-sm text-text-primary outline-none"
-                  />
-                </div>
-              ) : (
-                <Tooltip label={sidebarCollapsed ? w.name : ''} side="right" className="min-w-0 flex-1">
-                  <button
-                    onClick={() => {
-                      setActive(w.id)
-                      // Move focus into the workspace's console right away, even
-                      // when re-clicking the already-active one, so the click
-                      // never leaves focus parked on this sidebar button.
-                      focusWorkspaceConsole(w.id)
-                    }}
-                    className={cn(
-                      'flex min-w-0 flex-1 items-center gap-2 overflow-hidden px-[11px] py-2 text-left text-sm',
-                      active ? 'text-text-primary' : 'text-text-secondary',
-                    )}
-                  >
-                    <span className="relative shrink-0">
-                    <WsIcon
-                      size={16}
-                      className="shrink-0"
-                      style={{ color: active ? (w.panes[0]?.color ?? '#6366f1') : undefined }}
-                    />
-                    {sidebarCollapsed && status && <span className="absolute -bottom-1 -right-1 rounded-full bg-bg-secondary p-0.5"><StatusDot status={status} label={statusLabel} size={6} /></span>}
+                {noteEditing && !renaming ? (
+                  <div className="flex min-w-0 flex-1 items-start gap-2 px-[11px] py-2" data-note-editing={w.id}>
+                    <WsIcon size={16} className="mt-0.5 shrink-0 text-accent-violet" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm text-text-primary">{w.name}</span>
+                      <NoteInlineEditor
+                        initial={w.note ?? ''}
+                        onCommit={(note) => {
+                          setWorkspaceNote(w.id, note)
+                          setNoteEditingId(null)
+                        }}
+                        onCancel={() => setNoteEditingId(null)}
+                      />
                     </span>
-                    <span
+                  </div>
+                ) : renaming && !sidebarCollapsed ? (
+                  <div className="flex min-w-0 flex-1 items-center gap-2 px-[11px] py-2">
+                    <WsIcon size={16} className="shrink-0 text-accent-violet" />
+                    <input
+                      autoFocus
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitRename()
+                        if (e.key === 'Escape') setRenamingId(null)
+                      }}
+                      className="min-w-0 flex-1 rounded border border-accent-violet/50 bg-bg-primary px-1.5 py-0.5 text-sm text-text-primary outline-none"
+                    />
+                  </div>
+                ) : (
+                  <Tooltip
+                    label={sidebarCollapsed ? (status ? <WorkspaceTip ws={w} paneStatus={paneStatus} showName meta={meta} extra={gitLine ? [gitLine, ...exited] : exited} /> : gitLine || meta.length > 0 ? <span className="flex flex-col"><span>{w.name}</span>{meta.map((line, i) => <span key={i} className="font-normal text-text-secondary" data-tip-meta>{line}</span>)}{gitLine && <span className="font-normal text-text-secondary">{gitLine}</span>}</span> : w.name) : ''}
+                    side="right"
+                    delay={sidebarCollapsed && status ? 200 : undefined}
+                    className="min-w-0 flex-1"
+                  >
+                    <button
+                      // No dot to hover (no agent state, not every console exited):
+                      // the "<pane>: exited" lines go on the row itself (E6-FR-38).
+                      title={!sidebarCollapsed && !status && !exitedDot && exitedLabel ? exitedLabel : undefined}
+                      onClick={() => {
+                        setActive(w.id)
+                        // Move focus into the workspace's console right away, even
+                        // when re-clicking the already-active one, so the click
+                        // never leaves focus parked on this sidebar button.
+                        rowFocusCancel.current?.()
+                        rowFocusCancel.current = focusWorkspaceConsole(w.id)
+                      }}
                       className={cn(
-                        'min-w-0 flex-1 transition-opacity duration-150',
-                        sidebarCollapsed ? 'pointer-events-none opacity-0' : 'opacity-100',
+                        'flex min-w-0 flex-1 items-center gap-2 overflow-hidden px-[11px] py-2 text-left text-sm',
+                        active ? 'text-text-primary' : 'text-text-secondary',
                       )}
                     >
-                      <span className="flex items-center gap-1">
-                        {!sidebarCollapsed && <StatusDot status={status} label={statusLabel} />}
-                        <span className="truncate">{w.name}</span>
-                        {w.favorite && (
-                          <Star size={11} className="shrink-0 fill-amber-400 text-amber-400" />
+                      <span className="relative shrink-0">
+                      <WsIcon
+                        size={16}
+                        className="shrink-0"
+                        style={{ color: active ? (w.panes[0]?.color ?? '#6366f1') : undefined }}
+                      />
+                      {sidebarCollapsed && (status || exitedDot) && <span className="absolute -bottom-1 -right-1 rounded-full bg-bg-secondary p-0.5">{status ? <StatusDot status={status} label={statusLabel} size={6} noTooltip /> : <ExitedDot label={exitedLabel} size={6} />}</span>}
+                      </span>
+                      <span
+                        className={cn(
+                          'min-w-0 flex-1 transition-opacity duration-150',
+                          sidebarCollapsed ? 'pointer-events-none opacity-0' : 'opacity-100',
                         )}
+                      >
+                        <span className="flex items-center gap-1">
+                          {!sidebarCollapsed && (exitedDot ? <ExitedDot label={exitedLabel} /> : <StatusDot status={status} label={statusLabel} tip={<WorkspaceTip ws={w} paneStatus={paneStatus} showName={false} extra={exited} />} />)}
+                          <span className="truncate">{w.name}</span>
+                          {w.favorite && (
+                            <Star size={11} className="shrink-0 fill-amber-400 text-amber-400" />
+                          )}
+                          {w.taskState && !sidebarCollapsed && <TaskStateChip state={w.taskState} />}
+                        </span>
+                        <span
+                          className="flex min-w-0 text-[11px] text-text-secondary"
+                          data-ws-second-line={w.id}
+                          onDoubleClick={(e) => {
+                            if (sidebarCollapsed) return
+                            e.preventDefault()
+                            e.stopPropagation()
+                            // The clicks before it queued a console focus: keep the editor's.
+                            rowFocusCancel.current?.()
+                            rowFocusCancel.current = null
+                            setNoteEditingId(w.id)
+                          }}
+                        >
+                          {w.note ? (
+                            <span className={cn('min-w-0 truncate', git ? 'max-w-[70%] shrink' : 'max-w-full')} title={w.note} data-ws-note>
+                              {w.note}
+                            </span>
+                          ) : (
+                            <span className="max-w-full shrink-0 truncate">
+                              {w.panes.length === 1
+                                ? t('sidebar.consoleOne', { count: w.panes.length })
+                                : t('sidebar.consoleMany', { count: w.panes.length })}
+                            </span>
+                          )}
+                          {git && <SidebarGitSuffix summary={git} />}
+                        </span>
                       </span>
-                      <span className="block truncate text-[11px] text-text-secondary">
-                        {w.panes.length === 1
-                          ? t('sidebar.consoleOne', { count: w.panes.length })
-                          : t('sidebar.consoleMany', { count: w.panes.length })}
-                      </span>
-                    </span>
-                  </button>
-                </Tooltip>
-              )}
+                    </button>
+                  </Tooltip>
+                )}
 
-              {!sidebarCollapsed && !renaming && (
-                <AttentionBadge count={attentionCount} className="mr-1" />
-              )}
-              {sidebarCollapsed && (
-                <AttentionBadge
-                  count={attentionCount}
-                  className="pointer-events-none absolute right-0.5 top-0.5"
-                />
-              )}
-              {!sidebarCollapsed && !renaming && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    openMenu(e, w.id)
-                  }}
-                  aria-label={t('ctx.moreActions')}
-                  className="mr-1 shrink-0 rounded p-1 text-text-secondary opacity-0 transition-opacity hover:bg-bg-secondary hover:text-text-primary focus:opacity-100 group-hover:opacity-100"
-                >
-                  <MoreVertical size={15} />
-                </button>
+                {!sidebarCollapsed && !renaming && !noteEditing && (
+                  <AttentionBadge count={attentionCount} className="mr-1" />
+                )}
+                {rowsOn && !renaming && agents.length > 0 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      toggleAgentsCollapsed(w.id)
+                    }}
+                    aria-label={w.agentsCollapsed ? t('agents.row.expand') : t('agents.row.collapse')}
+                    aria-expanded={!w.agentsCollapsed}
+                    data-agents-chevron={w.id}
+                    className="shrink-0 rounded p-1 text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
+                  >
+                    {w.agentsCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                  </button>
+                )}
+                {sidebarCollapsed && (
+                  <AttentionBadge
+                    count={attentionCount}
+                    className="pointer-events-none absolute right-0.5 top-0.5"
+                  />
+                )}
+                {!sidebarCollapsed && !renaming && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      openMenu(e, w.id)
+                    }}
+                    aria-label={t('ctx.moreActions')}
+                    className="mr-1 shrink-0 rounded p-1 text-text-secondary opacity-0 transition-opacity hover:bg-bg-secondary hover:text-text-primary focus:opacity-100 group-hover:opacity-100"
+                  >
+                    <MoreVertical size={15} />
+                  </button>
+                )}
+              </div>
+              {rowsOn && !w.agentsCollapsed && (
+                <AgentRows entries={agents} presets={presets} topicAsTitle={agentSettings?.topicAsTitle !== false} />
               )}
             </div>
           )
@@ -270,10 +543,12 @@ export function Sidebar() {
       <UsageBars />
 
       <div className="shrink-0 border-t border-border p-2">
-        <Tooltip label={sidebarCollapsed ? t('sidebar.settings') : ''} side="right">
+        <Tooltip label={sidebarCollapsed ? <ActionTooltipLabel label={t('sidebar.settings')} action="openSettings" /> : ''} side="right">
           <button
             onClick={() => setSettingsOpen(true)}
-            className="flex w-full items-center gap-2 overflow-hidden rounded-btn px-[11px] py-2 text-sm text-text-secondary transition-colors hover:bg-card hover:text-text-primary"
+            data-sidebar-settings
+            aria-keyshortcuts={settingsKeys.length > 0 ? ariaKeyshortcuts(settingsKeys) : undefined}
+            className="group flex w-full items-center gap-2 overflow-hidden rounded-btn px-[11px] py-2 text-sm text-text-secondary transition-colors hover:bg-card hover:text-text-primary"
           >
             <Settings size={16} className="shrink-0" />
             <span
@@ -284,6 +559,9 @@ export function Sidebar() {
             >
               {t('sidebar.settings')}
             </span>
+            {!sidebarCollapsed && (
+              <KeyHint keys={settingsKeys} className="ml-auto opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            )}
           </button>
         </Tooltip>
       </div>
@@ -294,6 +572,15 @@ export function Sidebar() {
           y={menu.y}
           items={menuItems(menu.wsId)}
           onClose={() => setMenu(null)}
+        />
+      )}
+
+      {notePopover && (
+        <WorkspaceNotePopover
+          wsId={notePopover.wsId}
+          x={notePopover.x}
+          y={notePopover.y}
+          onClose={() => setNotePopover(null)}
         />
       )}
 

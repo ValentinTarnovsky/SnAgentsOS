@@ -1,10 +1,20 @@
 import type { AgentPreset, ConnectionProfile, Pane, SetupStep, Workspace } from '@shared/types'
+import { buildAgentArgv } from '@shared/agent-argv'
+import type { LaunchKind } from '@shared/initialPrompt'
 
 export interface ResolvedLaunch {
   cwd: string
   initialCommand?: string
   /** Pre-launch sequence (e.g. SSH) the pty runs before initialCommand. */
   setup?: SetupStep[]
+  /**
+   * E8-FR-02b: 'claude' / 'codex' only when initialCommand is that preset's
+   * own command (no pane.command override); enables the `argv` prompt.
+   * Absent = 'other'.
+   */
+  launchKind?: LaunchKind
+  /** Set by prepareAgentLaunch when this spawn resumes a chat: no saved scrollback then (E6-FR-13). */
+  resumed?: boolean
 }
 
 /**
@@ -22,15 +32,16 @@ export function resolveLaunch(
   const preset = pane.presetId ? presets.find((p) => p.id === pane.presetId) : undefined
   const cwd = pane.cwd ?? preset?.defaultCwd ?? workspace.cwd
 
-  let initialCommand: string | undefined
-  if (pane.command && pane.command.trim()) {
-    initialCommand = pane.command.trim()
-  } else if (preset && preset.type !== 'shell' && preset.command.trim()) {
-    initialCommand = [preset.command, ...preset.args].join(' ').trim()
-  }
+  // buildAgentArgv is the single agent command builder (D1); a resume is
+  // decided later, at spawn time, by agentLaunch.prepareAgentLaunch.
+  const initialCommand = buildAgentArgv({ preset, command: pane.command })
 
   const setupId = pane.setupId ?? workspace.setupId
   const setup = setupId ? connections.find((c) => c.id === setupId)?.steps : undefined
 
-  return { cwd, initialCommand, setup: setup && setup.length ? setup : undefined }
+  const override = !!pane.command?.trim()
+  const launchKind: LaunchKind =
+    initialCommand && !override && (preset?.type === 'claude' || preset?.type === 'codex') ? preset.type : 'other'
+
+  return { cwd, initialCommand, setup: setup && setup.length ? setup : undefined, launchKind }
 }

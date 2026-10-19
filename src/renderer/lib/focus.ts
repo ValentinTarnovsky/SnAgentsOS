@@ -1,6 +1,6 @@
 /**
  * Tracks the most recently focused console pane and exposes a way to refocus a
- * pane's terminal from elsewhere (command palette, snippets, workspace switch),
+ * pane's terminal from elsewhere (command palette, Quick Commands, workspace switch),
  * so the user can keep typing right after an action without clicking back into
  * the console.
  */
@@ -8,10 +8,22 @@ let lastFocusedPaneId: string | null = null
 const focusers = new Map<string, () => void>()
 /** workspaceId -> last pane the user focused inside it (drives switch focus). */
 const lastFocusedByWorkspace = new Map<string, string>()
+/** workspaceId -> panes focused in it, most recent first (review notes preselect the last agent, E7-FR-19). */
+const focusHistoryByWorkspace = new Map<string, string[]>()
+const FOCUS_HISTORY_MAX = 12
 
 export function setFocusedPane(paneId: string, workspaceId?: string): void {
   lastFocusedPaneId = paneId
-  if (workspaceId) lastFocusedByWorkspace.set(workspaceId, paneId)
+  if (workspaceId) {
+    lastFocusedByWorkspace.set(workspaceId, paneId)
+    const prev = focusHistoryByWorkspace.get(workspaceId) ?? []
+    focusHistoryByWorkspace.set(workspaceId, [paneId, ...prev.filter((id) => id !== paneId)].slice(0, FOCUS_HISTORY_MAX))
+  }
+}
+
+/** Panes the user focused in a workspace, most recent first. */
+export function getFocusHistoryForWorkspace(workspaceId: string): readonly string[] {
+  return focusHistoryByWorkspace.get(workspaceId) ?? []
 }
 
 export function getFocusedPane(): string | null {
