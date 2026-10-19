@@ -255,8 +255,14 @@ window.runMain = async () => {
  const fbBtn = card()?.querySelector('[data-plan-feedback]');
  check(fbBtn && fbBtn.textContent === 'Tell Claude what to change' && $$('[data-terminal-layer] [data-plan-option]').length === 3, 'the free text row becomes "Tell Claude what to change"');
  check($('[data-terminal-layer] [data-plan-option="1"]').textContent === 'Yes, clear the context and auto-accept edits', 'the later layout labels are translated too');
+ if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
  click(fbBtn); await frames();
- check(inputs.length === 0, '"Tell Claude what to change" writes nothing (the user types in the terminal)');
+ check(inputs.length === 1 && inputs[0].paneId === 'l' && inputs[0].data === '4', '"Tell Claude what to change" writes its digit, so an Enter from the composer never picks the first approval');
+ check(phase()?.dataset.answerPhase === 'sending' && document.activeElement?.tagName === 'TEXTAREA', 'and brings the keyboard up for the feedback in the same tap');
+ await wait(1100);
+ setStatus('l', st([plan('pl3', 'Add the parser and wire it')], { reason: 'plan' })); await polled();
+ check(card()?.dataset.pending === 'pl3', 'the next plan request shows its card again');
+ inputs.length = 0;
  click($('[data-terminal-layer] [data-plan-option="3"]')); await frames();
  check(inputs.length === 1 && inputs[0].paneId === 'l' && inputs[0].data === '3', 'a plan option writes its digit');
  check(!inputs.some(i => i.data.includes('\\r')) && phase()?.dataset.answerPhase === 'sending', 'no Enter after a plan answer, and "Sending answer..."');
