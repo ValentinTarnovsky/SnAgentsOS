@@ -8,7 +8,9 @@
  * so the header dots, the banner and Settings all reach it; History
  * (E3-FR-36) is one too, from a workspace's menu or the terminal's kebab. Each pushed
  * screen holds a back claim, so the Android back gesture, the chevron and
- * history.back() all return to Home. The mount confirmation (E2-FR-06) is
+ * history.back() all return to Home. Changes (E3-FR-52) is one too, from a
+ * workspace's git chip or the terminal's kebab, with a file's diff pushed over
+ * it and the notes sheets above both. The mount confirmation (E2-FR-06) is
  * shared by every entry point.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
@@ -17,6 +19,10 @@ import { MainScreen } from './MainScreen'
 import { SettingsScreen } from './SettingsScreen'
 import { DiagnosticsScreen } from './DiagnosticsScreen'
 import { HistoryScreen } from './HistoryScreen'
+import { ChangesScreen } from './changes/ChangesScreen'
+import { DiffScreen } from './changes/DiffScreen'
+import { NotesList } from './changes/NotesList'
+import { SendNotesSheet } from './changes/SendNotesSheet'
 import { MountConfirmSheet } from './MountConfirmSheet'
 import { SLIDE_EASING, SLIDE_MS } from './PushScreen'
 import { useRemoteStore } from '../lib/store'
@@ -79,6 +85,10 @@ export function LiveShell(): ReactNode {
       <SettingsScreen open={screen === 'settings'} onClose={() => setScreen('home')} />
       <MountConfirmSheet />
       <HistoryScreen />
+      <ChangesScreen />
+      <DiffScreen />
+      <NotesList />
+      <SendNotesSheet />
       <DiagnosticsScreen />
     </BackStackHost>
   )

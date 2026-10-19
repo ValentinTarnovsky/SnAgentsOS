@@ -11,7 +11,7 @@
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { ChevronLeft, History, MoreVertical, Zap } from 'lucide-react'
+import { ChevronLeft, GitCompare, History, MoreVertical, Zap } from 'lucide-react'
 import { RemoteTerminal } from './RemoteTerminal'
 import { KeyBar } from './KeyBar'
 import { PaneTabs } from './PaneTabs'
@@ -25,6 +25,7 @@ import { AgentEndStrip } from './AgentEndStrip'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { openDiagnostics } from '../lib/connLog'
 import { openHistory } from '../lib/history'
+import { openChanges } from '../lib/changes'
 import { StatusIndicator } from './StatusIndicator'
 import { WaitingPill } from './WaitingPill'
 import { FitModeChip } from './FitModeChip'
@@ -180,6 +181,17 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
               const wsId = kebab?.workspaceId
               setKebab(null)
               if (wsId) openHistory(wsId)
+            },
+          },
+          {
+            // E3-FR-52: the change list of the viewed console's workspace.
+            id: 'changes',
+            icon: <GitCompare size={16} />,
+            label: t('changes.open'),
+            onSelect: () => {
+              const wsId = kebab?.workspaceId
+              setKebab(null)
+              if (wsId) openChanges(wsId)
             },
           },
         ]}
