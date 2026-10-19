@@ -129,6 +129,8 @@ export interface RemoteState {
   httpToken: string | null
   /** E3-FR-01: VAPID public key from the last authOk, only while https is on. */
   pushKey: string | null
+  /** E3-FR-43: the desktop's https origin from the last authOk, while its secure mode is on. */
+  secureUrl: string | null
   /** Pane the phone is currently viewing. */
   activePaneId: string | null
   /** Pane the server subscription is registered for (may lag activePaneId briefly). */
@@ -272,6 +274,7 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   appVersion: '',
   httpToken: null,
   pushKey: null,
+  secureUrl: null,
   activePaneId: null,
   subscribedPaneId: null,
   ctrlLatch: false,
