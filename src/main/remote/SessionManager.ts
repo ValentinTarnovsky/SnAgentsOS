@@ -90,8 +90,12 @@ export const RATE_LIMITED_MSG_TYPES: ReadonlySet<string> = new Set(['chatSub', '
  * the cap keeps a misbehaving device from holding a hub entry per pane id.
  */
 export const MAX_CHAT_SUBS = 8
-/** ctl kinds behind the bucket (plus `createPane` carrying `resume`). */
-export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set(['fitPane', 'releaseFit', 'sendReviewNotes'])
+/**
+ * ctl kinds behind the bucket (plus `createPane` carrying `resume`). The v3.1
+ * schedule ctl join it (R31-00): a run sends a stored prompt to an agent and
+ * every toggle rewrites config.json and re-pushes the snapshot to all devices.
+ */
+export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set(['fitPane', 'releaseFit', 'sendReviewNotes', 'scheduleRun', 'scheduleToggle'])
 
 /** A parsed phone frame the bucket applies to (E3-FR-03). */
 export function isRateLimitedMsg(msg: { type: string; action?: unknown }): boolean {

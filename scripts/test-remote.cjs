@@ -612,6 +612,8 @@ function testRateUnits(api) {
   const limited = m => api.isRateLimitedMsg(m)
   check(['chatSub', 'chatUnsub', 'chatMore', 'historyReq', 'gitReq'].every(type => limited({ type })), 'the v3.0 message types are limited')
   check(['fitPane', 'releaseFit', 'sendReviewNotes'].every(kind => limited({ type: 'ctl', action: { kind } })), 'the v3.0 ctl kinds are limited')
+  check(['scheduleRun', 'scheduleToggle'].every(kind => limited({ type: 'ctl', action: { kind, workspaceId: 'w1', paneId: 'p1' } })), 'the v3.1 schedule ctl kinds are limited (R31-00)')
+  check(!limited({ type: 'ctl', action: { kind: 'runQuickCommand' } }), 'runQuickCommand (v2.2) stays outside the bucket')
   check(limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1', resume: { provider: 'claude', sessionId: 'x' } } }), 'createPane with resume is limited')
   check(!limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1' } }), 'a plain createPane is not')
   check(['sub', 'unsub', 'input', 'ping', 'visibility', 'hello', 'auth'].every(type => !limited({ type })), 'the v1 messages are never limited')
