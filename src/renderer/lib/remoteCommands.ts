@@ -11,6 +11,7 @@ import { broadcastToWorkspace } from './broadcastPrompt'
 import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
 import { runRemoteQuickCommand } from './quickCommands'
 import { runOpenPath, runOpenUrl } from './remoteOpen'
+import { runCreatePaneResume } from './remoteResume'
 import { platformDefaultShell, runAgentEnd } from './agentEndRun'
 import { toast } from './toast'
 import { translate } from '@/i18n'
@@ -69,6 +70,8 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
     }
 
     case 'createPane': {
+      // E3-FR-38/39: a history session in a new local console (or its open one).
+      if (action.resume) return runCreatePaneResume({ ...action, resume: action.resume })
       const ws = store.workspaces.find((w) => w.id === action.workspaceId)
       if (!ws) return { ok: false, error: 'not_found' }
       const preset = action.presetId

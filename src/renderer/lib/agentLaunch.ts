@@ -230,12 +230,28 @@ export async function prepareAgentLaunch(paneId: string, base: ResolvedLaunch): 
   const found = findPane(app, paneId)
   const agents = useAgentStore.getState()
   let intent = agents.takeIntent(paneId)
+  const target = agents.takeResumeTarget(paneId)
   cancelWatch(paneId)
   getNudger().cancel(paneId)
   if (!found) return base
   const { pane } = found
   const preset = presetOf(app, pane)
   const provider = effectiveProvider(pane, preset)
+  // E3-FR-39: a console the phone opened from the history resumes that session
+  // on its first spawn only, in the session's own folder; it is never written
+  // to pane.command, so later spawns follow the usual rules (lastSession).
+  if (target && !base.setup) {
+    const command = buildAgentArgv({ preset, command: pane.command, resume: { provider: target.provider, sessionId: target.sessionId } })
+    if (command) {
+      try {
+        await window.snApi.agents.consumeStartup(paneId)
+      } catch {
+        /* a new console has no startup decision to spend */
+      }
+      armResumed(paneId, target.provider, target.updatedAt)
+      return { ...base, cwd: target.cwd || base.cwd, initialCommand: command, launchKind: 'other', resumed: true }
+    }
+  }
   let session: AgentSessionView | undefined = agents.sessions[paneId]
   const hasSetup = !!base.setup
   let startupUnconsumed = false
@@ -288,6 +304,19 @@ export async function prepareAgentLaunch(paneId: string, base: ResolvedLaunch): 
     agents.setChip(paneId, null)
   }
   return base
+}
+
+/** The "resumed" chip and, when the provider can confirm it, the 20 s watch (E5-FR-08). */
+function armResumed(paneId: string, provider: AgentProvider, updatedAt: number): void {
+  useAgentStore.getState().setChip(paneId, { kind: 'resumed', provider, updatedAt, shownAt: Date.now() })
+  if (!hasReadySignal(provider)) return
+  watches.set(
+    paneId,
+    setTimeout(() => {
+      watches.delete(paneId)
+      useAgentStore.getState().setChip(paneId, { kind: 'failed', shownAt: Date.now() })
+    }, RESUME_WATCH_MS),
+  )
 }
 
 /** Resume menu state for a pane (E5-FR-09). `show: false` hides both entries. */
