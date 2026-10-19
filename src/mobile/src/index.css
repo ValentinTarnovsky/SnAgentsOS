@@ -20,6 +20,11 @@
   --color-accent-purple: #8b5cf6;
   --color-accent-blue: #60a5fa;
 
+  /* Diff additions and deletions (Changes, E3-FR-52/53); themeable like the
+     desktop's, applyRemoteTheme() sets them from the ansi tokens. */
+  --color-ansi-green: #22c55e;
+  --color-ansi-red: #ef4444;
+
   /* Agent state colors (docs/STYLEGUIDE.md section 8): same values on desktop
      and mobile, only for state, never decoration. Not themeable on purpose. */
   --color-state-working: #8b5cf6;

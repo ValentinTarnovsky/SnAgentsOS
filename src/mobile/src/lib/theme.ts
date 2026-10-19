@@ -9,7 +9,11 @@ import type { ITheme } from '@xterm/xterm'
 import type { ThemeTokenKey, ThemeTokens } from '@shared/types'
 import { xtermThemeFromTokens } from '@shared/xtermTheme'
 
-/** Same mapping the desktop uses; UI-chrome tokens only (ansi tokens feed xterm). */
+/**
+ * Same mapping the desktop uses: the UI-chrome tokens, plus ansi green and red
+ * for the diff rows and counts of Changes (E3-FR-52/53). The other ansi tokens
+ * only feed xterm.
+ */
 const CSS_VAR_BY_TOKEN: Partial<Record<ThemeTokenKey, string>> = {
   'bg-primary': '--color-bg-primary',
   'bg-secondary': '--color-bg-secondary',
@@ -20,6 +24,8 @@ const CSS_VAR_BY_TOKEN: Partial<Record<ThemeTokenKey, string>> = {
   accent: '--color-accent-violet',
   'accent-2': '--color-accent-purple',
   'accent-3': '--color-accent-blue',
+  'ansi-green': '--color-ansi-green',
+  'ansi-red': '--color-ansi-red',
 }
 
 function setMeta(name: string, content: string): void {

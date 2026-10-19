@@ -6,7 +6,7 @@
  * back and the header's back arrow both pop it. Stays mounted until its exit
  * animation ends (fallback SLIDE_MS + 50ms).
  */
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react'
 import { ChevronLeft } from 'lucide-react'
 import { useBackClaim } from '../lib/useBackClaim'
 import { prefersReducedMotion } from '../lib/sheetDrag'
@@ -23,6 +23,10 @@ export function PushScreen({
   title,
   children,
   id,
+  actions,
+  flush,
+  bodyRef,
+  onScroll,
 }: {
   open: boolean
   onClose: () => void
@@ -30,6 +34,13 @@ export function PushScreen({
   children: ReactNode
   /** data-push-screen value, for tests and styling hooks. */
   id?: string
+  /** Buttons at the right end of the header (Changes: notes badge, refresh). */
+  actions?: ReactNode
+  /** No side padding in the body: rows that run edge to edge (a diff). */
+  flush?: boolean
+  /** The scrolling body element. */
+  bodyRef?: Ref<HTMLDivElement>
+  onScroll?: (el: HTMLDivElement) => void
 }): ReactNode {
   const { requestClose } = useBackClaim(open, onClose)
   const [mounted, setMounted] = useState(open)
@@ -104,10 +115,13 @@ export function PushScreen({
           <ChevronLeft size={22} />
         </button>
         <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-text-primary">{title}</h2>
+        {actions && <div className="flex shrink-0 items-center gap-1 pr-1">{actions}</div>}
       </header>
       <div
         data-scrollable
-        className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
+        ref={bodyRef}
+        onScroll={onScroll ? (e) => onScroll(e.currentTarget) : undefined}
+        className={'min-h-0 flex-1 overflow-y-auto ' + (flush ? 'py-0' : 'px-4 py-4')}
         style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 16px)' }}
       >
         {children}
