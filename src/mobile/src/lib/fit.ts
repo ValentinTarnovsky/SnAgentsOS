@@ -1,7 +1,7 @@
 /**
  * Font-size solver for the phone terminal.
  *
- * The phone NEVER resizes the pty (v1 decision): the desktop owns the real
+ * In desktop mode the phone never resizes the pty: the desktop owns the real
  * cols/rows and the phone renders that fixed grid. Instead of an xterm FitAddon
  * we pick a fontSize so `cols` columns fit the viewport width, and if even the
  * minimum size overflows we let the terminal container pan horizontally.
@@ -9,6 +9,10 @@
  * JetBrains Mono's advance-width ratio (glyph advance / fontSize) is measured
  * once via canvas measureText and cached, so the solver is a cheap arithmetic
  * clamp we can re-run on every visualViewport resize or replay.
+ *
+ * Phone mode (E3 M11, FR-14) reverses that per pane: phoneGrid() turns the
+ * container and the phone-mode text size into the cols/rows the phone asks
+ * the pty for with the fitPane ctl.
  */
 
 import { STORAGE_PREFIX, storageGet, storageSet } from './mobileStorage'
@@ -97,3 +101,37 @@ export function solveFont(cols: number, viewportWidth: number, scale = 1): FontS
 }
 
 export { MIN_FONT, MAX_FONT }
+
+// --- Phone mode grid (E3-FR-14) ------------------------------------------------
+// MIN_COLS / MIN_ROWS are the constants Orca's terminal grid fit uses; no code
+// was ported. The desktop refuses anything outside [20, 500] x [8, 300].
+
+export const PHONE_MIN_COLS = 20
+export const PHONE_MIN_ROWS = 8
+export const PHONE_MAX_COLS = 500
+export const PHONE_MAX_ROWS = 300
+/** Text sizes of phone mode ('snagentsos.remote.phoneFontSize'), 13 by default. */
+export const PHONE_FONT_SIZES = [11, 12, 13, 14, 16] as const
+export const PHONE_FONT_DEFAULT = 13
+
+export interface GridSize {
+  cols: number
+  rows: number
+}
+
+/**
+ * The grid of a phone-mode pane (E3-FR-14): cols = floor(width / cellW) and
+ * rows = floor(height / cellH) at `fontSize`, with rows clamped to [8, 300]
+ * and cols to 500 at most. Null under 20 columns ("turn the phone"). `cell`
+ * is the measured cell when there is one; otherwise the advance ratio gives
+ * the width and ceil(fontSize * 1.17) the row height.
+ */
+export function phoneGrid(width: number, height: number, fontSize: number, cell?: { w?: number; h?: number } | null): GridSize | null {
+  if (!(width > 0) || !(height > 0) || !(fontSize > 0)) return null
+  const cw = cell?.w && cell.w > 0 ? cell.w : fontSize * advanceRatio()
+  const ch = cell?.h && cell.h > 0 ? cell.h : Math.ceil(fontSize * 1.17)
+  const cols = Math.floor(width / cw)
+  if (cols < PHONE_MIN_COLS) return null
+  const rows = Math.max(PHONE_MIN_ROWS, Math.min(PHONE_MAX_ROWS, Math.floor(height / ch)))
+  return { cols: Math.min(PHONE_MAX_COLS, cols), rows }
+}
