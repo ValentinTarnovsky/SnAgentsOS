@@ -179,6 +179,8 @@ export const CH = {
   GIT_FILE_DIFF: 'git:fileDiff', // invoke ({ key, path, area, force? }) -> GitDiffReply
   GIT_OPEN_FILE: 'git:openFile', // invoke ({ key, path, reveal? }) -> boolean
   GIT_SET_PANEL: 'git:setPanel', // send ({ key: string | null }): the open panel's target, polled every 3 s
+  // Against base (E7-FR-35, amendment): status/fileDiff/openFile also take an optional `base` (full sha, pane targets only).
+  GIT_BASE_STAT: 'git:baseStat', // invoke ({ key, base }) -> GitBaseStat | null
   // Worktree per console (E7-FR-27..32, 36). Add/Remove are contract names; Probe, Inspect, List, Reveal are amendments.
   GIT_WORKTREE_ADD: 'git:worktreeAdd', // invoke (WorktreeAddReq) -> WorktreeAddRes
   GIT_WORKTREE_REMOVE: 'git:worktreeRemove', // invoke (WorktreeRemoveReq) -> WorktreeRemoveRes
