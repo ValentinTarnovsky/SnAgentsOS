@@ -74,16 +74,19 @@ export async function runQuickCommand(cmd: QuickCommand): Promise<QuickRunResult
     const paneId = sendTarget(s)
     const ptyId = paneId ? getPtyId(paneId) : undefined
     if (!paneId || !ptyId) {
-      toast.warning(tr('quick.toast.noConsole'), { dedupeKey: 'quick' })
+      toast.error(tr('quick.toast.noConsole'), { dedupeKey: 'quick' })
       return { ok: false, error: 'no_console' }
     }
     setTimeout(() => focusPane(paneId), 0)
     const res = await window.snApi.pty.submit({ ptyId, paneId, text: cmd.text, enter: cmd.enter })
     if (!res.ok) {
-      toast.warning(tr(res.error === 'multiline_unsafe' ? 'quick.toast.multiline' : 'quick.toast.noConsole'), { dedupeKey: 'quick' })
+      if (res.error === 'multiline_unsafe') toast.warning(tr('quick.toast.multiline'), { dedupeKey: 'quick' })
+      else toast.error(tr('quick.toast.noConsole'), { dedupeKey: 'quick' })
       return { ok: false, error: res.error }
     }
-    toast.success(tr('quick.toast.sent', { label: cmd.name }), { dedupeKey: 'quick' })
+    // E4-FR-06: the toast names the command and the console it went to.
+    const pane = s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.panes.find((p) => p.id === paneId)
+    toast.success(tr('quick.toast.sent', { label: cmd.name, pane: pane?.title ?? '' }), { dedupeKey: 'quick' })
     return { ok: true, paneId }
   }
   const scoped = cmd.workspaceId && s.workspaces.some((w) => w.id === cmd.workspaceId) ? cmd.workspaceId : null

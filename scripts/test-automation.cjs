@@ -797,11 +797,11 @@ async function quickRunChecks() {
 
   // Desktop send (E8-FR-05).
   let res = await r.runQuickCommand(qcOf('g'))
-  check(!res.ok && res.error === 'no_console' && submits.length === 0 && toasts().at(-1).title === 'No hay consola activa', 'send without live consoles shows the toast and writes nothing')
+  check(!res.ok && res.error === 'no_console' && submits.length === 0 && toasts().at(-1).title === 'No hay consola activa' && toasts().at(-1).kind === 'error', 'send without live consoles shows the toast and writes nothing')
   r.registerPty('p1', 'pty-p1'); r.registerPty('p2', 'pty-p2'); r.registerPty('q1', 'pty-q1')
   res = await r.runQuickCommand(qcOf('g'))
   check(res.ok && submits.at(-1).ptyId === 'pty-p2' && submits.at(-1).text === 'echo g' && submits.at(-1).enter === false, 'send without a focused console goes to the first live console in grid order')
-  check(toasts().at(-1).title === 'Enviado: Cmd g', 'send feedback toast')
+  check(toasts().at(-1).title === 'Enviado: Cmd g a Dos', 'send feedback toast names the command and the console (E4-FR-06)')
   r.setFocusedPane('q1', 'w2')
   await r.runQuickCommand(qcOf('g'))
   check(submits.at(-1).ptyId === 'pty-p2', 'a focused console outside the active workspace is not the target')

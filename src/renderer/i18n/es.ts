@@ -351,7 +351,7 @@ export const es: Record<keyof typeof en, string> = {
   'quick.toast.noConsole': 'No hay consola activa',
   'quick.toast.noWorkspace': 'No hay un workspace activo',
   'quick.toast.multiline': 'Texto multilínea: esta consola no acepta pegado seguro',
-  'quick.toast.sent': 'Enviado: {label}',
+  'quick.toast.sent': 'Enviado: {label} a {pane}',
   'quick.toast.opening': 'Abriendo {preset}: {label}',
   'quick.toast.presetMissing': 'El preset de este Quick Command ya no existe',
   'quick.toast.insertedUnconfirmed': 'Prompt insertado sin Enter: no se confirmó que el agente estuviera listo',
