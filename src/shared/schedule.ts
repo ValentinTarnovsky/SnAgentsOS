@@ -23,6 +23,12 @@ export const WEEK_ORDER: readonly number[] = [1, 2, 3, 4, 5, 6, 0]
 
 const HOUR_MS = 3_600_000
 const MIN_MS = 60_000
+/**
+ * Lateness that never counts against the grace: the 1 s ticker, and Chromium
+ * slowing timers to about one per minute while the window sits hidden in the
+ * tray. Without it a grace of 0 would log every run as missed.
+ */
+export const SCHEDULE_DUE_SLACK_MS = 2 * MIN_MS
 
 /** "HH:MM" (00..23, 00..59) to numbers, or null when malformed. */
 export function parseTime(time: string): { h: number; m: number } | null {
@@ -126,14 +132,16 @@ export interface DecideInput {
  * from the title). Busy: working, or a precise `action` (a real permission,
  * question or plan): nothing is ever typed over it. No state (or `unknown`)
  * is free only in a shell/custom pane; in an agent pane the agent may have
- * exited and the text would run in the shell, so it waits.
+ * exited and the text would run in the shell, so it waits. With `waitIdle`
+ * off a working agent is typed over, but a precise `action` still blocks:
+ * the text plus Enter would answer a real permission or question.
  */
 function blocker(input: DecideInput): 'busy' | 'no_agent' | null {
   if (!input.live) return 'no_agent'
   const st = input.status
   if (!st || st.state === 'unknown') return input.agent ? 'no_agent' : null
-  if (!waitsForIdle(input.schedule)) return null
-  if (st.state === 'working' || (st.state === 'action' && st.precise)) return 'busy'
+  if (st.state === 'action' && st.precise) return 'busy'
+  if (st.state === 'working' && waitsForIdle(input.schedule)) return 'busy'
   return null
 }
 
@@ -153,9 +161,10 @@ export function decide(input: DecideInput): ScheduleDecision {
   if (!manual) {
     if (!isScheduleEnabled(schedule) || now < schedule.dueAt) return 'idle'
     const late = now - schedule.dueAt
-    if (since === undefined && late > input.graceMin * MIN_MS) return 'missed'
+    const grace = input.graceMin * MIN_MS + SCHEDULE_DUE_SLACK_MS
+    if (since === undefined && late > grace) return 'missed'
     // A legit wait starts within the grace and lasts at most maxWait.
-    if (since !== undefined && late > (input.graceMin + input.maxWaitMin) * MIN_MS) return 'missed'
+    if (since !== undefined && late > grace + input.maxWaitMin * MIN_MS) return 'missed'
   }
   const block = blocker(input)
   if (!block) return 'fire'

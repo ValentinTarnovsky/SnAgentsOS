@@ -516,7 +516,6 @@ export const en = {
   // Scheduled prompt (per console)
   'schedule.title': 'Schedule a prompt',
   'schedule.edit': 'Edit scheduled prompt',
-  'schedule.active': 'Scheduled for {time}',
   'schedule.time': 'Time',
   'schedule.prompt': 'Prompt',
   'schedule.promptPlaceholder': 'Text to run in this console…',

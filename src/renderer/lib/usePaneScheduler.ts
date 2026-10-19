@@ -250,6 +250,16 @@ export function schedulerTick(now: number = Date.now()): void {
           break
         }
       }
+      // A "Run now" holds the pane: a scheduled occurrence that comes due
+      // meanwhile starts its own wait clock, so it is served (or skipped as
+      // busy) afterwards instead of logged as missed once the grace is over.
+      if (manual && sched.waitingSince === undefined) {
+        const scheduled = decide({ schedule: sched, now, status: app.paneStatus[pane.id], agent, live: !!ptyId, graceMin, maxWaitMin })
+        const cur = findPane(pane.id)?.pane.schedule
+        if (scheduled !== 'idle' && scheduled !== 'missed' && cur && cur.dueAt === sched.dueAt && cur.waitingSince === undefined) {
+          useAppStore.getState().setPaneSchedule(ws.id, pane.id, { ...cur, waitingSince: now })
+        }
+      }
     }
   }
 }
