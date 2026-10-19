@@ -216,6 +216,14 @@ window.result = (async () => {
  feed({ paneId:'c1', items, cursor:null, done:true }); await frames();
  check(qa('[data-chat-row]').length > 5 && !q('[data-no-reply]'),'and the page it answers renders');
 
+ // A new session whose transcript is not written yet (a console just created,
+ // a /clear): the PC answers an empty first page and the phone stays in Chat.
+ feed({ paneId:'c1', items:[], cursor:null, done:true }); await frames(); await wait(50);
+ const empty = q('[data-chat-empty]')?.textContent;
+ check(store.getState().chatPaneId === 'c1' && !!q('[data-chat-view="c1"]') && ['No messages yet. Write the first one below.','Todavía no hay mensajes. Escribí el primero abajo.'].includes(empty) && !!q('[data-kb-input="composer"]'),'an empty first page stays in Chat, invites the first message and keeps the composer: ' + empty);
+ feed({ paneId:'c1', items:[{ id:'10', role:'user', ts:null, blocks:[{ t:'text', text:'primer mensaje' }] }], cursor:null, done:true }); await frames(); await wait(50);
+ check(qa('[data-chat-row]').length === 1 && !q('[data-chat-empty]'),'the first page with that message replaces the empty state');
+
  reactRoot.unmount(); return checks;
 })();
 ` }, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"', __APP_VERSION__: '"test"' }, alias: { '@shared': path.join(root, 'src/shared') }, loader: { '.css': 'empty' }, outfile: path.join(dir, 'renderer.js') })

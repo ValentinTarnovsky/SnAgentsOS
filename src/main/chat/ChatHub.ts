@@ -11,6 +11,10 @@
  *    resume, the hooks starting to report), sends a new first page, and an
  *    assignment that is lost sends the notice (StatusManager.onTranscriptChange).
  *  - At most 4 watchers stay open (LRU, idle ones go first).
+ *  - A transcript that is coming (`pending`: a new console, or a /clear,
+ *    before the first message) answers an empty first page instead of the
+ *    notice, so the phone stays in Chat, and is located again every second
+ *    while someone reads; after 10 minutes the wait ends with the notice.
  *
  * RemoteManager hands it to SessionManager; it never sees sockets, only an
  * owner object (the session) and the function that sends to it.
@@ -27,6 +31,10 @@ import { TranscriptWatcher, type ChatPageData, type TranscriptDecoder, type Tran
 export const CHAT_CLOSE_DELAY_MS = 30 * 1000
 /** Open watchers at most (NFR). */
 export const CHAT_MAX_WATCHERS = 4
+/** A pending transcript is located again this often while a phone reads. */
+export const CHAT_PENDING_POLL_MS = 1000
+/** A pending transcript that never appears gives up after this (then the notice). */
+export const CHAT_PENDING_MAX_MS = 10 * 60 * 1000
 
 /** The chat frames a session sends (SessionManager adds `v`). */
 export type ChatFrame =
@@ -50,6 +58,9 @@ export interface ChatHubDeps {
   createWatcher?: (deps: TranscriptWatcherDeps) => TranscriptWatcher
   closeDelayMs?: number
   maxWatchers?: number
+  pendingPollMs?: number
+  pendingMaxMs?: number
+  now?: () => number
 }
 
 interface Reader {
@@ -74,6 +85,14 @@ interface PaneChat {
   /** Readers with a chatMore in flight: a repeat waits for the answer (one scan at a time each). */
   moreBusy: Set<object>
   usedAt: number
+  /** When the transcript started to be pending (null: not pending). */
+  pendingSince: number | null
+  pollTimer: ReturnType<typeof setTimeout> | null
+}
+
+/** The first page of a chat whose transcript is not written yet. */
+export function emptyPage(paneId: string): Extract<ChatFrame, { type: 'chatPage' }> {
+  return { type: 'chatPage', paneId, items: [], cursor: null, done: true }
 }
 
 /** The FR-33 notice as a chatPage. */
@@ -122,7 +141,7 @@ export class ChatHub implements ChatHooks {
     await this.ensure(pc)
     if (!pc.readers.has(owner)) return
     if (!pc.watcher) {
-      send(noticePage(pc.paneId, pc.unavailable ?? 'noTranscript'))
+      send(pc.pendingSince !== null ? emptyPage(pc.paneId) : noticePage(pc.paneId, pc.unavailable ?? 'noTranscript'))
       return
     }
     try {
@@ -171,6 +190,7 @@ export class ChatHub implements ChatHooks {
   dispose(): void {
     for (const pc of this.panes.values()) {
       this.cancelClose(pc)
+      this.cancelPoll(pc)
       pc.watcher?.close()
       pc.watcher = null
     }
@@ -182,7 +202,7 @@ export class ChatHub implements ChatHooks {
   private paneOf(paneId: string): PaneChat {
     let pc = this.panes.get(paneId)
     if (!pc) {
-      pc = { paneId, readers: new Map(), path: null, provider: null, unavailable: null, watcher: null, closeTimer: null, gen: 0, locating: null, relocating: null, moreBusy: new Set(), usedAt: 0 }
+      pc = { paneId, readers: new Map(), path: null, provider: null, unavailable: null, watcher: null, closeTimer: null, gen: 0, locating: null, relocating: null, moreBusy: new Set(), usedAt: 0, pendingSince: null, pollTimer: null }
       this.panes.set(paneId, pc)
     }
     return pc
@@ -212,12 +232,45 @@ export class ChatHub implements ChatHooks {
       pc.path = null
       pc.provider = null
       pc.unavailable = res.reason
+      this.notePending(pc, !!res.pending)
       return
     }
     pc.unavailable = null
+    pc.pendingSince = null
     pc.path = res.path
     pc.provider = res.provider
     this.open(pc)
+  }
+
+  /**
+   * Starts (or keeps) the wait of a pending transcript; false when it is not
+   * pending, or the wait just ran out (then the notice applies).
+   */
+  private notePending(pc: PaneChat, pending: boolean): boolean {
+    const now = this.deps.now?.() ?? Date.now()
+    if (pending && pc.pendingSince === null) pc.pendingSince = now
+    if (!pending || now - pc.pendingSince! >= (this.deps.pendingMaxMs ?? CHAT_PENDING_MAX_MS)) {
+      pc.pendingSince = null
+      this.cancelPoll(pc)
+      return false
+    }
+    return true
+  }
+
+  /** Locate a pending transcript again shortly, while someone reads. */
+  private schedulePoll(pc: PaneChat): void {
+    if (pc.pollTimer) return
+    pc.pollTimer = setTimeout(() => {
+      pc.pollTimer = null
+      if (pc.readers.size === 0 || pc.watcher || pc.pendingSince === null) return
+      void this.relocate(pc)
+    }, this.deps.pendingPollMs ?? CHAT_PENDING_POLL_MS)
+    pc.pollTimer.unref?.()
+  }
+
+  private cancelPoll(pc: PaneChat): void {
+    if (pc.pollTimer) clearTimeout(pc.pollTimer)
+    pc.pollTimer = null
   }
 
   private open(pc: PaneChat): void {
@@ -259,6 +312,13 @@ export class ChatHub implements ChatHooks {
     const reader = pc.readers.get(owner)
     if (!reader) return
     if (!pc.watcher) {
+      if (pc.pendingSince !== null) {
+        // The transcript is coming: an empty chat now, the first page when it appears.
+        reader.send(emptyPage(pc.paneId))
+        reader.live = true
+        this.schedulePoll(pc)
+        return
+      }
       reader.send(noticePage(pc.paneId, pc.unavailable ?? 'noTranscript'))
       return
     }
@@ -286,6 +346,7 @@ export class ChatHub implements ChatHooks {
   private async relocateNow(pc: PaneChat): Promise<void> {
     const before = pc.path
     const wasUnavailable = pc.unavailable
+    const wasPending = pc.pendingSince !== null
     const gen = ++pc.gen
     let res: LocateResult
     try {
@@ -295,17 +356,43 @@ export class ChatHub implements ChatHooks {
     }
     if (gen !== pc.gen || pc.readers.size === 0) return
     if (res.ok && before && pathKey(res.path) === pathKey(before) && pc.watcher) return
-    if (!res.ok && !before && wasUnavailable === res.reason) return
-    pc.watcher?.close()
-    pc.watcher = null
     if (!res.ok) {
+      const pending = this.notePending(pc, !!res.pending)
+      if (!before) {
+        pc.unavailable = res.reason
+        if (pending) {
+          // Still waiting for the first message: the readers already have an empty chat.
+          if (!wasPending) for (const r of pc.readers.values()) { r.send(emptyPage(pc.paneId)); r.live = true }
+          this.schedulePoll(pc)
+          return
+        }
+        if (!wasPending && wasUnavailable === res.reason) return
+        // The wait ran out (or stopped being a wait): FR-33 notice.
+        for (const r of pc.readers.values()) r.send(noticePage(pc.paneId, res.reason))
+        return
+      }
+      pc.watcher?.close()
+      pc.watcher = null
       pc.path = null
       pc.provider = null
       pc.unavailable = res.reason
-      // FR-33: the chat open on the phone lost its transcript.
-      for (const r of pc.readers.values()) r.send(noticePage(pc.paneId, res.reason))
+      for (const r of pc.readers.values()) {
+        if (pending) {
+          // A new session (/clear, a resume) whose file is not written yet: an empty chat.
+          r.send(emptyPage(pc.paneId))
+          r.live = true
+        } else {
+          // FR-33: the chat open on the phone lost its transcript.
+          r.send(noticePage(pc.paneId, res.reason))
+        }
+      }
+      if (pending) this.schedulePoll(pc)
       return
     }
+    pc.watcher?.close()
+    pc.watcher = null
+    pc.pendingSince = null
+    this.cancelPoll(pc)
     pc.path = res.path
     pc.provider = res.provider
     pc.unavailable = null
@@ -339,6 +426,7 @@ export class ChatHub implements ChatHooks {
     pc.closeTimer = setTimeout(() => {
       pc.closeTimer = null
       if (pc.readers.size > 0) return
+      this.cancelPoll(pc)
       pc.watcher?.close()
       pc.watcher = null
       pc.gen++
