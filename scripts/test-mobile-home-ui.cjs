@@ -171,7 +171,7 @@ window.runMain = async () => {
  // --- workspace kebab (E2-FR-09/51) ---
  click($('[data-workspace=w2] [data-ws-menu]'));
  await wait(300);
- check($$('[data-ws-actions] [data-action]').map(b => b.dataset.action).join() === 'newHere,promptAll,quick,showOnPc', 'the kebab offers New console here, Prompt to every console, Quick Commands and Show on the PC');
+ check($$('[data-ws-actions] [data-action]').map(b => b.dataset.action).join() === 'newHere,promptAll,quick,history,showOnPc', 'the kebab offers New console here, Prompt to every console, Quick Commands, History (E3-FR-36) and Show on the PC');
  click($('[data-ws-actions] [data-action=promptAll]'));
  await wait(420);
  setValue($('[data-global-prompt=w2]'), 'git status');

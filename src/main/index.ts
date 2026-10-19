@@ -33,6 +33,8 @@ import type { AwakeService } from './agents/AwakeService'
 import { AgentSessionStore } from './agents/AgentSessionStore'
 import { CodexRolloutIndex } from './agents/transcripts'
 import { registerAgentsIpc } from './ipc/registerAgentsIpc'
+import { SessionHistory, openSessionsOf } from './history/SessionHistory'
+import { registerHistoryIpc } from './ipc/registerHistoryIpc'
 import type { ExitTrigger } from '@shared/agents'
 import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
@@ -569,6 +571,14 @@ async function bootstrap(): Promise<void> {
   agentSessions = sessions
   statusManager.addListener((evt, cause) => sessions.onStatus(evt, cause))
   registerAgentsIpc(sessions)
+  // Session history (E3-FR-36..40): transcripts and rollouts indexed on demand,
+  // for the phone's History screen and the createPane.resume check.
+  const history = new SessionHistory({
+    getConfig: () => configStore.load(),
+    openSessions: () => openSessionsOf(statusManager.snapshot(), configStore.load()),
+  })
+  registerHistoryIpc(history)
+  remoteManager.setHistory(history)
   const bootCfg = configStore.load()
   awakeService = registerPowerIpc({
     getSender: () => mainWindow?.webContents ?? null,

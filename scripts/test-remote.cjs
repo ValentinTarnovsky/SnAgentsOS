@@ -622,10 +622,11 @@ async function testRateLimit() {
   const { ws } = await pair(w)
   const since = ws.inbox.length
   for (let i = 0; i < 41; i++) ws.msg({ type: 'historyReq', id: 'h' + i })
-  // No owner handles historyReq yet, so a frame past the gate meets the
-  // dispatcher's default (err unauthorized): one reply per frame let through.
+  // Every historyReq let through gets its (empty, no index here) historyRes
+  // on the next turn: one reply per frame past the gate (R30-06).
+  await new Promise(resolve => setImmediate(resolve))
   const replies = ws.inbox.slice(since)
-  check(replies.length === 40 && replies.every(m => m.type === 'err' && m.code === 'unauthorized'), 'a burst of 41 historyReq: the 41st gets no answer at all')
+  check(replies.length === 40 && replies.every(m => m.type === 'historyRes') && !replies.some(m => m.id === 'h40'), 'a burst of 41 historyReq: the 41st gets no answer at all')
   check(!ws.inbox.some(m => m.type === 'err' && m.code === 'rate'), 'a limited message is dropped in silence (no err rate)')
   check(ws.closed === null, 'the socket stays open')
   const relayed = w.commands.length

@@ -8,12 +8,12 @@
  * stopped console of a workspace it has not mounted asks first.
  *
  * The workspace kebab (E2-FR-09) offers New console here, Prompt to every
- * console (that workspace only), Quick Commands (E2-FR-51) and Show on the PC
+ * console (that workspace only), Quick Commands (E2-FR-51), History (E3-FR-36) and Show on the PC
  * (an explicit switchWorkspace, which also brings the window up).
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Gauge, Megaphone, MonitorUp, Plus, Settings as SettingsIcon, Zap } from 'lucide-react'
+import { Gauge, History, Megaphone, MonitorUp, Plus, Settings as SettingsIcon, Zap } from 'lucide-react'
 import { BRAND } from '@shared/brand'
 import { Sheet } from './Sheet'
 import { ActionList } from './ActionList'
@@ -32,6 +32,7 @@ import { ToastStack } from './ToastStack'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { openDiagnostics } from '../lib/connLog'
+import { openHistory } from '../lib/history'
 import { rowShowsTime, STATUS_TICK_MS } from '../lib/statusText'
 import { isWorkspaceMounted, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
@@ -174,6 +175,7 @@ export function HomeScreen(): ReactNode {
               { id: 'newHere', icon: <Plus size={16} />, label: t('home.newHere'), onSelect: () => { const id = menuFor; setMenuFor(null); if (id) setNewFor({ workspaceId: id }) } },
               { id: 'promptAll', icon: <Megaphone size={16} />, label: t('home.promptAll'), onSelect: () => { setPromptFor(menuFor); setMenuFor(null) } },
               { id: 'quick', icon: <Zap size={16} />, label: t('quick.title'), onSelect: () => { setQuickFor(menuFor); setMenuFor(null) } },
+              { id: 'history', icon: <History size={16} />, label: t('history.open'), onSelect: () => { const id = menuFor; setMenuFor(null); if (id) openHistory(id) } },
               { id: 'showOnPc', icon: <MonitorUp size={16} />, label: t('home.showOnPc'), onSelect: () => { const id = menuFor; setMenuFor(null); if (id) showOnPc(id) } },
             ]}
           />

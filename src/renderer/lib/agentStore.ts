@@ -26,6 +26,18 @@ export type ResumeChipState =
   | { kind: 'unavailable'; shownAt: number }
   | { kind: 'failed'; shownAt: number }
 
+/**
+ * A history session a new console resumes on its first spawn (E3-FR-39,
+ * phone `createPane.resume`). The cwd comes from main's index.
+ */
+export interface ResumeTarget {
+  provider: AgentProvider
+  sessionId: string
+  cwd: string
+  /** The session's last activity (the "resumed" chip shows it). */
+  updatedAt: number
+}
+
 /** The open "resume interrupted chats?" dialog (E5-FR-12). */
 export interface ResumeModalState {
   /** Interrupted panes it lists, in workspace and layout order. */
@@ -48,6 +60,8 @@ export interface AgentState {
   modal: ResumeModalState | null
   /** Panes the dialog holds back: they show a placeholder and do not spawn until it is decided. */
   gated: Record<string, true>
+  /** paneId -> history session its first spawn resumes (E3-FR-39), consumed once. */
+  resumeTarget: Record<string, ResumeTarget>
 
   setSessions: (list: AgentSessionView[]) => void
   applyChanged: (evt: AgentsChangedEvt) => void
@@ -61,6 +75,9 @@ export interface AgentState {
   setChip: (paneId: string, chip: ResumeChipState | null) => void
   /** Opens the dialog and gates its panes, or (null) closes it and releases them. */
   setModal: (modal: ResumeModalState | null) => void
+  setResumeTarget: (paneId: string, target: ResumeTarget) => void
+  /** Returns and clears the pane's resume target. */
+  takeResumeTarget: (paneId: string) => ResumeTarget | undefined
 }
 
 export const useAgentStore = create<AgentState>((set, get) => ({
@@ -72,6 +89,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   modalPending: false,
   modal: null,
   gated: {},
+  resumeTarget: {},
 
   setSessions: (list) => set({ sessions: Object.fromEntries(list.map((v) => [v.paneId, v])) }),
 
@@ -123,4 +141,18 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         ? { modal, modalPending: true, gated: Object.fromEntries(modal.paneIds.map((id) => [id, true as const])) }
         : { modal: null, modalPending: false, gated: {} },
     ),
+
+  setResumeTarget: (paneId, target) => set((s) => ({ resumeTarget: { ...s.resumeTarget, [paneId]: target } })),
+
+  takeResumeTarget: (paneId) => {
+    const target = get().resumeTarget[paneId]
+    if (target) {
+      set((s) => {
+        const resumeTarget = { ...s.resumeTarget }
+        delete resumeTarget[paneId]
+        return { resumeTarget }
+      })
+    }
+    return target
+  },
 }))

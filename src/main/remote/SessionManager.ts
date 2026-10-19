@@ -24,6 +24,7 @@ import {
   REMOTE_CLOSE,
   type RemoteAuthFailReason,
   type RemoteCtlAction,
+  type RemoteHistorySession,
   type RemotePairDeniedReason,
   type RemotePaneStatus,
   type RemoteServerMsg,
@@ -85,6 +86,29 @@ export function isRateLimitedMsg(msg: { type: string; action?: unknown }): boole
   if (typeof action.kind !== 'string') return false
   if (RATE_LIMITED_CTL_KINDS.has(action.kind)) return true
   return action.kind === 'createPane' && action.resume != null
+}
+
+// --- E3-FR-37: historyRes bounds ------------------------------------------------
+
+/** Sessions one historyRes carries at most. */
+export const HISTORY_RES_MAX = 100
+/** Serialized size cap of every new desktop -> phone frame (E3-FR-02). */
+export const REMOTE_FRAME_MAX_BYTES = 48 * 1024
+
+/**
+ * The historyRes frame for `sessions` (newest first): the first 100 at most,
+ * then the oldest dropped until the serialized frame fits in 48KB. Exported
+ * for tests.
+ */
+export function fitHistoryRes(id: string, sessions: RemoteHistorySession[]): Extract<RemoteServerMsg, { type: 'historyRes' }> {
+  const frame = { v: PROTOCOL_VERSION, type: 'historyRes' as const, id, sessions: sessions.slice(0, HISTORY_RES_MAX) }
+  let bytes = Buffer.byteLength(JSON.stringify(frame))
+  while (bytes > REMOTE_FRAME_MAX_BYTES && frame.sessions.length > 0) {
+    const dropped = frame.sessions.pop()!
+    // Each item costs its JSON plus the separating comma.
+    bytes -= Buffer.byteLength(JSON.stringify(dropped)) + (frame.sessions.length > 0 ? 1 : 0)
+  }
+  return frame
 }
 
 /** sha256 of an httpToken: the lookup key, so the map never holds the token itself. */
@@ -166,6 +190,11 @@ export interface SessionManagerDeps {
   getPushKey?: () => string | null
   /** E3 M11: phone-fit ownership. Absent = fitPane/releaseFit go to the executor as is. */
   fit?: FitHooks
+  /**
+   * E3-FR-36: the session history for historyReq (SessionHistory.forRemote).
+   * Absent = an empty answer, so the phone never waits on it.
+   */
+  queryHistory?: (req: { query?: string; workspaceId?: string }) => Promise<RemoteHistorySession[]>
 }
 
 /**
@@ -321,6 +350,8 @@ export class SessionManager implements PtySink {
       case 'visibility':
         session.visible = msg.visible
         return
+      case 'historyReq':
+        return void this.handleHistory(session, msg.id, msg.query, msg.workspaceId)
       default:
         return this.send(session, { type: 'err', code: 'unauthorized' })
     }
@@ -554,6 +585,22 @@ export class SessionManager implements PtySink {
       // E2-FR-11: the phone keeps the prompt in the new console's composer.
       ...(result.promptFallback ? { promptFallback: true } : {}),
     })
+  }
+
+  /**
+   * E3-FR-36/37: answer a historyReq with at most 100 sessions in 48KB. A
+   * failing index answers empty rather than leaving the phone to time out.
+   */
+  private async handleHistory(session: Session, id: string, query?: string, workspaceId?: string): Promise<void> {
+    let sessions: RemoteHistorySession[] = []
+    try {
+      sessions = (await this.deps.queryHistory?.({ query, workspaceId })) ?? []
+    } catch {
+      sessions = []
+    }
+    if (!session.authed) return
+    const { v: _v, ...frame } = fitHistoryRes(id, sessions)
+    this.send(session, frame)
   }
 
   // --- PtySink (fan-out from PtyManager) ------------------------------------

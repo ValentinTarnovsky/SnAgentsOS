@@ -19,6 +19,9 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     paneType: z.enum(['shell', 'claude', 'codex', 'custom']).optional(),
     // E2-FR-11: the initial prompt, same bound as globalPrompt.
     prompt: z.string().max(16384).optional(),
+    // E3-FR-39: the id format and its presence in the history are main's to
+    // judge (ack notFound), so an unknown id never counts as a malformed frame.
+    resume: z.object({ provider: z.enum(['claude', 'codex']), sessionId: z.string().min(1).max(128) }).optional(),
   }),
   z.object({ kind: z.literal('closePane'), workspaceId: id, paneId: id }),
   z.object({ kind: z.literal('restartPane'), workspaceId: id, paneId: id, resume: z.boolean().optional() }),
@@ -72,6 +75,8 @@ export const remoteClientMsgSchema = z.discriminatedUnion('type', [
   z.object({ v: z.number(), type: z.literal('ctl'), id, action: ctlActionSchema }),
   z.object({ v: z.number(), type: z.literal('ping'), t: z.number() }),
   z.object({ v: z.number(), type: z.literal('visibility'), visible: z.boolean() }),
+  // E3-FR-36; behind the per-session bucket by name (SessionManager).
+  z.object({ v: z.number(), type: z.literal('historyReq'), id, query: z.string().max(200).optional(), workspaceId: id.optional() }),
 ])
 
 /** Parse one raw WS frame into a validated client message, or null. */
