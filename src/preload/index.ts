@@ -51,6 +51,7 @@ import type {
 } from '@shared/types'
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
+import type { SessionSummary, SessionsListReq } from '@shared/session-history'
 import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
@@ -210,6 +211,9 @@ const api: SnApi = {
     forget: (paneId: string) => ipcRenderer.send(CH.AGENTS_FORGET, paneId),
     onChanged: (cb: (e: AgentsChangedEvt) => void) => sub<AgentsChangedEvt>(CH.AGENTS_CHANGED, cb),
     onReady: (cb: (e: AgentsReadyEvt) => void) => sub<AgentsReadyEvt>(CH.AGENTS_READY, cb),
+  },
+  sessions: {
+    list: (req?: SessionsListReq) => ipcRenderer.invoke(CH.SESSIONS_LIST, req ?? {}) as Promise<SessionSummary[]>,
   },
   reviewNotes: {
     list: (workspaceId: string) => ipcRenderer.invoke(CH.GIT_NOTES_LIST, workspaceId) as Promise<ReviewNotesListRes>,

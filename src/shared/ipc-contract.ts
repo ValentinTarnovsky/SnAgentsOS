@@ -17,6 +17,7 @@ import type {
   UsageSettings,
 } from './types'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from './agents'
+import type { SessionSummary, SessionsListReq } from './session-history'
 import type {
   RemoteCtlAction,
   RemoteEndpointKind,
@@ -806,6 +807,11 @@ export interface SnApi {
     onChanged(cb: (e: AgentsChangedEvt) => void): () => void
     /** A session started, or reached its first idle after a start. Returns unsubscribe. */
     onReady(cb: (e: AgentsReadyEvt) => void): () => void
+  }
+  /** Session history (E3-FR-36..40): Claude transcripts and Codex rollouts indexed by main. */
+  sessions: {
+    /** Newest first; empty sessions are never listed. */
+    list(req?: SessionsListReq): Promise<SessionSummary[]>
   }
   /** Review notes of the Changes panel (E7-FR-17..21), stored by main per workspace. */
   reviewNotes: {
