@@ -76,8 +76,9 @@ export async function listAgainstBase(
   if (!isBaseSha(base)) throw new Error('bad base')
   const opts = { cwd: repoRoot }
   const [names, nums] = await Promise.all([
-    runner.run(['diff', ...FLAGS, '--name-status', '-M', base], opts).then(parseNameStatusZ),
-    runner.run(['diff', ...FLAGS, '--numstat', '-M', base], opts).then(parseNumstatZ),
+    // `--` ends the revisions: a file named like the sha can never make it ambiguous.
+    runner.run(['diff', ...FLAGS, '--name-status', '-M', base, '--'], opts).then(parseNameStatusZ),
+    runner.run(['diff', ...FLAGS, '--numstat', '-M', base, '--'], opts).then(parseNumstatZ),
   ])
   const byPath = new Map<string, NumstatEntry>()
   for (const n of nums) byPath.set(n.path, n)

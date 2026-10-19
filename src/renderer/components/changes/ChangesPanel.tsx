@@ -261,7 +261,8 @@ export function ChangesPanel({ workspace, targetKey, base }: { workspace: Worksp
     return t('changes.targetPane', { branch: branch || '?', pane: paneTitle })
   }
 
-  const total = data ? data.summary.staged + data.summary.unstaged + data.summary.untracked + data.summary.conflicts : 0
+  // Against base the list is its own set (committed work included): the status counts do not describe it.
+  const total = !data ? 0 : base ? data.files.length : data.summary.staged + data.summary.unstaged + data.summary.untracked + data.summary.conflicts
 
   // ---- review notes ----
   // Notes anchor on the uncommitted diff: none in "against base" mode, where a line may be committed work.
