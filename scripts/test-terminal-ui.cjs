@@ -21,9 +21,10 @@ import {AgentEndChip} from './src/renderer/components/terminal/AgentEndChip';
 import {I18nProvider} from './src/renderer/i18n';
 import {useAppStore} from './src/renderer/lib/store';
 import {registerPty} from './src/renderer/lib/ptyRegistry';
+import {promptNav,hasLastOutput,copyLastOutput} from './src/renderer/lib/shellMarksRegistry';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 const listeners={data:new Set(),exit:new Set()};
-const calls={spawn:[],restart:[],writes:[],kills:[],killPanes:[],reattach:[],seq:[],resize:[]};
+const calls={spawn:[],restart:[],writes:[],kills:[],killPanes:[],reattach:[],seq:[],resize:[],clip:[]};
 let restartMode='ok';
 let reattachRes=null;
 window.snApi={platform:'win32',
@@ -36,7 +37,7 @@ window.snApi={platform:'win32',
   restart:async(req)=>{calls.restart.push(req);if(restartMode==='fail')throw new Error("Error invoking remote method 'pty:restart': Error: File not found: nope.exe");return{ptyId:'pty-r'+calls.restart.length,tail:'--- reiniciado ---'+String.fromCharCode(13,10),shellKind:'powershell'}}},
  system:{openExternal(){},onDisplayRecovered:()=>()=>{}},
  status:{reportTitle(){}},
- clipboard:{writeText(){},readText:async()=>''},
+ clipboard:{writeText:(t)=>{calls.clip.push(t)},readText:async()=>''},
  agents:{list:async()=>[],startup:async()=>({trigger:null,interrupted:[]}),consumeStartup:async()=>false,onChanged:()=>()=>{},onReady:()=>()=>{},forget(){}},
 };
 const preset={id:'preset-claude',name:'Claude Code',type:'claude',command:'claude',args:['--model','opus'],color:'#d97757',icon:'claude'};
@@ -58,6 +59,9 @@ window.smoke={calls,theme:applyTheme,app:useAppStore.getState,set:useAppStore.se
  exit:(ptyId,exitCode,natural)=>listeners.exit.forEach(cb=>cb({ptyId,exitCode,natural})),
  data:(ptyId,data)=>listeners.data.forEach(cb=>cb({ptyId,data})),
  restartMode:(m)=>{restartMode=m},
+ marks:{nav:(d)=>promptNav('pa',d),has:()=>hasLastOutput('pa'),copy:()=>copyLastOutput('pa')},
+ scrollTop:()=>document.querySelector('[data-cell=term] .xterm-viewport').scrollTop,
+ bars:()=>[...document.querySelectorAll('[data-cell=term] .snaos-exit-bar')].map(e=>({title:e.title,w:e.style.width,code:e.dataset.exitCode})),
  reattachWith:(r)=>{reattachRes=r},
  key:(key,keyCode)=>{const ta=document.querySelector('[data-cell=term] .xterm-helper-textarea');ta.focus();ta.dispatchEvent(new KeyboardEvent('keydown',{key,code:key,keyCode,which:keyCode,bubbles:true,cancelable:true}))},
  card:(c)=>{const el=document.querySelector('[data-cell='+c+'] [data-exit-card]');return el?{kind:el.dataset.exitCard,text:el.textContent}:null},
@@ -80,10 +84,29 @@ app.whenReady().then(async()=>{
  const js=c=>w.webContents.executeJavaScript(c);
  const fail=(what,v)=>{throw new Error(what+' '+JSON.stringify(v))};
  const shot=async name=>{await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');await wait(150);fs.writeFileSync(path.join(__dirname,name+'.png'),(await w.webContents.capturePage()).toPNG())};
+ // A hidden window paints (and runs xterm's decoration and scroll frames) only when asked.
+ const paint=async()=>{await w.webContents.capturePage();await wait(50)};
  let n=0;
  // Mount spawns with the pane launch.
  let v=await js("smoke.calls.spawn.map(r=>({p:r.paneId,c:r.cwd,i:r.initialCommand}))");
  if(v.length!==1||v[0].p!=='pa'||v[0].c!=='C:/repo'||v[0].i!=='claude --model opus')fail('mount spawn',v);n++;
+ // E6-FR-26..29: OSC 133 prompt marks from the PowerShell integration.
+ v=await js("({has:smoke.marks.has(),nav:smoke.marks.nav(-1),copy:smoke.marks.copy()})");
+ if(v.has||v.nav||v.copy)fail('without marks the prompt actions are inert',v);n++;
+ await js("(()=>{const E=smoke.ESC,G=String.fromCharCode(7),N=String.fromCharCode(13,10),M=k=>E+']133;'+k+G;smoke.data('pty-1',M('A')+'PS C:/> '+M('B')+'dir'+N+M('C')+N+'    Directory: C:/'+N+N+'file1.txt'+N+'file2.txt'+N+N+M('D;0')+M('A')+'PS C:/> '+M('B'))})()");await wait(150);
+ v=await js("({has:smoke.marks.has(),copy:smoke.marks.copy(),clip:smoke.calls.clip.at(-1)})");
+ if(!v.has||!v.copy||v.clip!=='    Directory: C:/'+String.fromCharCode(10,10)+'file1.txt'+String.fromCharCode(10)+'file2.txt')fail('copy last output copies exactly the dir output without the prompt',v);n++;
+ if((await js("smoke.bars().length"))!==0)fail('a successful command shows no bar',await js("smoke.bars()"));n++;
+ await js("(()=>{const E=smoke.ESC,G=String.fromCharCode(7),N=String.fromCharCode(13,10),M=k=>E+']133;'+k+G;smoke.data('pty-1','cmd /c exit 7'+N+M('C')+M('D;7')+M('A')+'PS C:/> '+M('B'))})()");await paint();
+ v=await js("({bars:smoke.bars(),ruler:!!document.querySelector('[data-cell=term] .xterm-decoration-overview-ruler')})");
+ if(v.bars.length!==1||v.bars[0].title!=='Salió con código 7'||v.bars[0].w!=='2px'||v.bars[0].code!=='7'||!v.ruler)fail('a failed command gets the 2 px red bar with its title and a ruler tick',v);n++;
+ await js("(()=>{const E=smoke.ESC,G=String.fromCharCode(7),N=String.fromCharCode(13,10),M=k=>E+']133;'+k+G;let out='';for(let i=0;i<80;i++)out+='line '+i+N;smoke.data('pty-1','long'+N+M('C')+out+M('D;0')+M('A')+'PS C:/> '+M('B'))})()");await wait(150);await paint();
+ const bottom=await js("smoke.scrollTop()");
+ v=await js("smoke.marks.nav(-1)");await paint();
+ const up=await js("smoke.scrollTop()");
+ if(!v||!(up<bottom))fail('previous prompt scrolls the viewport up',{v,bottom,up});n++;
+ await js("smoke.marks.nav(1)");await js("smoke.marks.nav(1)");await paint();
+ if((await js("smoke.scrollTop()"))!==bottom)fail('next prompt returns to the live bottom',{bottom,now:await js("smoke.scrollTop()")});n++;
  // E6-FR-17: a natural exit shows the card and the exited flag.
  await js("smoke.data('pty-1','hola');smoke.exit('pty-1',3,true)");await wait(150);
  v=await js("({card:smoke.card('term'),exit:smoke.app().paneExit.pa})");
@@ -169,7 +192,7 @@ app.whenReady().then(async()=>{
  }
  n++;
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' terminal UI checks (exit card Enter/Esc, in-place restart and fallback, unmount never kills, reattach refit, Claude exited chip, es/en midnight/light layouts); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' terminal UI checks (prompt marks: copy output, red exit bar, prompt jumps; exit card Enter/Esc, in-place restart and fallback, unmount never kills, reattach refit, Claude exited chip, es/en midnight/light layouts); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
