@@ -179,6 +179,18 @@ body {
   background-color: color-mix(in srgb, var(--color-text-secondary) 45%, transparent);
 }
 
+/* Phone-fit (E3-FR-17): the phone's grid sits top-left at full contrast and
+   the rest of the terminal area is dimmed. The area clips the shadow, so the
+   strip above stays untouched (useXterm switches it to auto to scroll a grid
+   that does not fit even at 6px). */
+[data-phone-fit] {
+  overflow: hidden;
+}
+
+[data-phone-fit] .xterm .xterm-screen {
+  box-shadow: 0 0 0 100vmax color-mix(in srgb, #000 38%, transparent);
+}
+
 /* ── Frameless window drag regions (custom title bar) ────────────────────── */
 .app-drag {
   -webkit-app-region: drag;

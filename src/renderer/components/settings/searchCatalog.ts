@@ -176,6 +176,7 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
 
   // Remote
   e('remote.enable', 'remote.enable', 'remote.enableHint', { keywords: ['remote', 'remoto', 'phone', 'celular', 'movil', 'mobile', 'server', 'servidor'], toggle: { path: 'remote.enabled' } }),
+  e('remote.phoneFit', 'remote.phoneFit', 'remote.phoneFitHint', { keywords: ['phone', 'celular', 'fit', 'ajustar', 'size', 'tamano', 'columns', 'columnas', 'mobile'], toggle: { path: 'remote.phoneFit' } }),
   e('remote.devices', 'settings.search.remote', 'settings.search.remoteHint', { summary: true, keywords: ['qr', 'pair', 'vincular', 'device', 'dispositivo', 'port', 'puerto', 'tailscale', 'lan', 'keys', 'botones'] }),
 
   // Git
