@@ -25,7 +25,8 @@ import {applyTheme} from './src/renderer/themes/applyTheme';
 window.__submits=[];window.__mounted=[];window.__bubbleEsc=0;
 window.addEventListener('keydown',e=>{if(e.key==='Escape')window.__bubbleEsc++});
 window.snApi={platform:'win32',agents:{forget(){},list:async()=>[],startup:async()=>({trigger:null,interrupted:[]}),startupPending:async()=>[],consumeStartup:async()=>false,onChanged:()=>()=>{},onReady:()=>()=>{}},
- pty:{kill:async()=>{},write(){},submit:async(req)=>{window.__submits.push(req);return {ok:true}},onPromptResult:()=>()=>{}},config:{save(){}}};
+ pty:{kill:async()=>{},write(){},submit:async(req)=>{window.__submits.push(req);return {ok:true}},onPromptResult:()=>()=>{}},config:{save(){}},
+ app:{info:async()=>null},cli:{setEnabled(){},state:async()=>null,skill:async()=>null,userPath:async()=>false}};
 const preset={id:'preset-claude',name:'Claude Code',type:'claude',command:'claude',args:[],color:'#d97757',icon:'claude'};
 const now=Date.now();
 const nextWeekday=(()=>{const d=new Date(now);for(let i=0;i<9;i++){const c=new Date(now);c.setDate(c.getDate()+i);c.setHours(9,0,0,0);if(c.getTime()>now&&c.getDay()>=1&&c.getDay()<=5)return c.getTime()}return now+3600000})();
