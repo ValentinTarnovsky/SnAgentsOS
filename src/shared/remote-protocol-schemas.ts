@@ -88,6 +88,9 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     notes: z.array(reviewNotePayload).min(1).max(50),
     enter: z.boolean(),
   }),
+  // v3.1 amendment (E8-FR-32): pane membership and the schedule itself are the executor's.
+  z.object({ kind: z.literal('scheduleRun'), workspaceId: id, paneId: id }),
+  z.object({ kind: z.literal('scheduleToggle'), workspaceId: id, paneId: id, enabled: z.boolean() }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [
