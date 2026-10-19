@@ -27,6 +27,7 @@ import type { InitialPromptReq, LaunchKind, SubmitError } from './initialPrompt'
 import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from './worktree-types'
 import type { OpenPathReq, OpenPathRes } from './inertOpen'
+import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from './repo-config'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from './review-notes'
 import type { CliCtlAction, CliUiState, SkillOp, SkillStatus } from './ctl-protocol'
 
@@ -318,7 +319,12 @@ export interface PtySpawnReq {
   paneId: string
   /** Absolute path or command; undefined => OS default shell. */
   shell?: string
-  args?: string[]
+  /**
+   * Shell arguments. A string is a raw Windows command line handed to
+   * node-pty as is (cmd.exe `/s /c "..."` needs its own quoting; the array
+   * form escapes every `"` as `\"`, which cmd does not understand).
+   */
+  args?: string[] | string
   cwd?: string
   env?: Record<string, string>
   /**
@@ -670,6 +676,20 @@ export interface SnApi {
   fs: {
     /** Whether an absolute path is an existing folder (true when the probe times out). */
     dirExists(path: string): Promise<boolean>
+  }
+  /**
+   * Per-repo `.snagentsos.json` (E8-FR-23..27). Main reads, hashes and keeps
+   * the trust (dataDir()/trusted-repos.json); the renderer only asks.
+   */
+  repoConfig: {
+    /** Read and validate `<dir>/.snagentsos.json` (2 s timeout = `none`). */
+    read(dir: string): Promise<RepoConfigReadRes>
+    /** Approve the file; main re-hashes it first and answers `changed` when it moved on. */
+    trust(req: { dir: string; sha256: string }): Promise<RepoConfigTrustRes>
+    /** The exact JSON an export would write, and whether the file exists. */
+    previewExport(req: { dir: string; file: RepoConfigFile }): Promise<RepoConfigPreviewRes>
+    /** Write the file (never over an existing one without `overwrite`); the written hash is trusted. */
+    export(req: { dir: string; file: RepoConfigFile; overwrite: boolean }): Promise<RepoConfigExportRes>
   }
   /** System clipboard, used for terminal copy/paste. */
   clipboard: {

@@ -189,6 +189,12 @@ export const CH = {
   CLI_STATE: 'cli:state', // invoke -> CliUiState (never a token)
   CLI_SKILL: 'cli:skill', // invoke (SkillOp) -> SkillStatus
   CLI_USER_PATH: 'cli:userPath', // invoke (boolean) -> boolean
+
+  // Per-repo .snagentsos.json (E8-FR-23..27). Trust lives in main's dataDir()/trusted-repos.json; previewExport is an amendment.
+  REPO_CONFIG_READ: 'repoConfig:read', // invoke (dir) -> RepoConfigReadRes
+  REPO_CONFIG_TRUST: 'repoConfig:trust', // invoke ({ dir, sha256 }) -> RepoConfigTrustRes (main re-hashes the file first)
+  REPO_CONFIG_PREVIEW_EXPORT: 'repoConfig:previewExport', // invoke ({ dir, file }) -> RepoConfigPreviewRes
+  REPO_CONFIG_EXPORT: 'repoConfig:export', // invoke ({ dir, file, overwrite }) -> RepoConfigExportRes (the written hash is trusted)
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

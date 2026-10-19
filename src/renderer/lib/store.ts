@@ -16,10 +16,11 @@ import type {
   Settings,
   Workspace,
   WorkspaceLayout,
+  WorkspaceRepoConfig,
   WorkspaceTaskState,
 } from '@shared/types'
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
-import { gridForCount } from '@/components/layout/gridTemplates'
+import { gridForCount, orderPanes } from '@/components/layout/gridTemplates'
 import {
   QUICK_COMMANDS_MAX,
   mergeQuickCommands,
@@ -164,7 +165,22 @@ export interface WorkspaceDraftPane {
   color: string
   icon: string
   command?: string
+  /** Absolute folder override (a repo file's console cwd, E8-FR-25). */
+  cwd?: string
+  /** One-shot first prompt of this console (a repo file's, E8-FR-25), source 'repo'. */
+  prompt?: string
 }
+
+/** A repo file's one-time setup console (E8-FR-25). */
+export interface WorkspaceDraftSetup {
+  command: string
+  title?: string
+  /** The other consoles wait for exit code 0 (only when the shell's exit is observable). */
+  wait: boolean
+}
+
+/** A Quick Command a repo file brings; the store gives it an id and the new workspace's scope. */
+export type DraftQuickCommand = Omit<QuickCommand, 'id' | 'workspaceId'>
 
 export interface WorkspaceDraft {
   name: string
@@ -178,6 +194,38 @@ export interface WorkspaceDraft {
    * not a shell, delivered once through the shared path (E8-FR-02b).
    */
   firstPrompt?: string
+  /** Repo file setup console, placed first (E8-FR-25). */
+  setup?: WorkspaceDraftSetup
+  /** Repo file Quick Commands, scoped to the new workspace and listed in its repoConfig. */
+  quickCommands?: DraftQuickCommand[]
+  /** Hash of the applied repo file: the workspace gets `repoConfig` (E8-FR-25). */
+  repoConfig?: { sha256: string }
+}
+
+/**
+ * A console held back until its repo setup ends (E8-FR-25; transient): it
+ * shows "Waiting for setup..." or "Setup failed (code N)" instead of a terminal.
+ */
+export interface HeldPane {
+  setupPaneId: string
+  state: 'waiting' | 'failed'
+  code?: number
+}
+
+/** The one-time setup of a workspace created from a repo file (transient, never persisted). */
+export interface RepoSetupRun {
+  workspaceId: string
+  command: string
+  /** pending: the next spawn of the setup console runs it; running: spawned; ok/failed: exited. */
+  status: 'pending' | 'running' | 'ok' | 'failed'
+  code?: number
+  heldPaneIds: string[]
+}
+
+/** What reloadWorkspaceFromRepo did (E8-FR-27). */
+export interface RepoReloadResult {
+  /** Consoles with a live pty that were left alone. */
+  kept: number
 }
 
 /** What "Advanced..." hands the 3-step wizard (E8-FR-08); every cell gets `presetId`. */
@@ -286,12 +334,30 @@ export interface AppState {
    * and nothing unmounts except deleting the workspace.
    */
   mountedWorkspaces: MountedWorkspaces
+  /** paneId -> console waiting for its repo setup (E8-FR-25; transient). */
+  heldPanes: Record<string, HeldPane>
+  /** setup paneId -> its one-time repo setup (E8-FR-25; transient). */
+  repoSetups: Record<string, RepoSetupRun>
   /** False until persisted config has been loaded (gates the persistence writer). */
   hydrated: boolean
 
   hydrate: (config: ConfigFile | null) => void
   createWorkspace: (name: string, cwd: string) => string
   createWorkspaceFull: (draft: WorkspaceDraft) => string
+  /**
+   * "Reload from .snagentsos.json" (E8-FR-27): replaces the grid, the consoles
+   * without a live pty and the Quick Commands listed in `repoConfig`. Live
+   * consoles and hand-made commands stay. No setup console on a reload.
+   */
+  reloadWorkspaceFromRepo: (workspaceId: string, draft: WorkspaceDraft, livePaneIds: string[]) => RepoReloadResult
+  /** Set (or clear, with null) the repo file trace of a workspace (export, E8-FR-26). */
+  setWorkspaceRepoConfig: (workspaceId: string, repoConfig: WorkspaceRepoConfig | null) => void
+  /** The setup command for this console's next spawn, once (pending -> running). */
+  takeRepoSetupCommand: (paneId: string) => string | null
+  /** Let held consoles start ("Start now", "Start anyway"). */
+  releaseHeldPanes: (paneIds: string[]) => void
+  /** Run a failed setup again; its still-held consoles go back to waiting. */
+  retryRepoSetup: (setupPaneId: string) => void
   importConfig: (config: ConfigFile) => void
   /** Appends the imported config; reports a Quick Commands import cut by the limit. */
   mergeConfig: (config: ConfigFile) => MergeConfigResult
@@ -438,6 +504,60 @@ function withLastSession(workspaces: Workspace[], evt: PaneStatusEvt): Workspace
   return workspaces
 }
 
+/** Panes and their queued prompts for a draft (composer, wizard, repo file). */
+function buildDraftPanes(draft: WorkspaceDraft): { panes: Pane[]; prompts: Record<string, PendingPrompt> } {
+  const prompts: Record<string, PendingPrompt> = {}
+  const now = Date.now()
+  const panes = draft.panes.map((p) => {
+    const pane: Pane = {
+      id: uid('pane'),
+      type: p.type,
+      presetId: p.presetId,
+      command: p.command,
+      title: p.title,
+      color: p.color,
+      icon: p.icon,
+      ...(p.cwd ? { cwd: p.cwd } : {}),
+    }
+    // E8-FR-25: a repo console's prompt goes through E8-FR-02 like any other.
+    if (p.prompt?.trim()) prompts[pane.id] = { text: p.prompt, enter: true, source: 'repo', createdAt: now }
+    return pane
+  })
+  return { panes, prompts }
+}
+
+/**
+ * Append a repo file's Quick Commands scoped to `workspaceId`, up to the 100
+ * cap and 20 per file. Returns the new list and the ids that made it in.
+ */
+function importRepoQuick(list: QuickCommand[], items: DraftQuickCommand[], workspaceId: string): { list: QuickCommand[]; ids: string[] } {
+  const out = [...list]
+  const ids: string[] = []
+  for (const item of items) {
+    if (out.length >= QUICK_COMMANDS_MAX || ids.length >= 20) break
+    const cmd = parseQuickCommand({ ...item, id: uid('qc'), workspaceId })
+    if (!cmd) continue
+    out.push(cmd)
+    ids.push(cmd.id)
+  }
+  return { list: out, ids }
+}
+
+type StoreSet = (partial: (s: AppState) => Partial<AppState>) => void
+
+/** A running repo setup exited (E8-FR-25): 0 releases its held consoles, anything else marks them failed. */
+function settleRepoSetup(set: StoreSet, setupPaneId: string, run: RepoSetupRun, code: number): void {
+  set((s) => {
+    const heldPanes = { ...s.heldPanes }
+    for (const id of run.heldPaneIds) {
+      if (heldPanes[id]?.setupPaneId !== setupPaneId) continue
+      if (code === 0) delete heldPanes[id]
+      else heldPanes[id] = { setupPaneId, state: 'failed', code }
+    }
+    return { heldPanes, repoSetups: { ...s.repoSetups, [setupPaneId]: { ...run, status: code === 0 ? 'ok' : 'failed', code } } }
+  })
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   workspaces: [],
   activeWorkspaceId: null,
@@ -469,6 +589,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   paneExit: {},
   agentEnded: {},
   mountedWorkspaces: {},
+  heldPanes: {},
+  repoSetups: {},
   hydrated: false,
 
   hydrate: (config) =>
@@ -520,40 +642,133 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   createWorkspaceFull: (draft) => {
-    const panes: Pane[] =
-      draft.panes.length > 0
-        ? draft.panes.map((p) => ({
-            id: uid('pane'),
-            type: p.type,
-            presetId: p.presetId,
-            command: p.command,
-            title: p.title,
-            color: p.color,
-            icon: p.icon,
-          }))
-        : [makeShellPane(0)]
-    const layout: WorkspaceLayout = { grid: draft.grid, order: panes.map((p) => p.id) }
+    const built = buildDraftPanes(draft)
+    let panes: Pane[] = built.panes.length > 0 ? built.panes : [makeShellPane(0)]
+    // E8-FR-25: the repo setup console goes first and runs its command once.
+    const setupPane: Pane | null = draft.setup ? { ...makeShellPane(0), title: draft.setup.title?.trim() || 'Setup' } : null
+    if (setupPane) panes = [setupPane, ...panes]
+    const grid: GridPreset = draft.grid >= panes.length ? draft.grid : gridForCount(panes.length)
+    const layout: WorkspaceLayout = { grid, order: panes.map((p) => p.id) }
+    const wsId = uid('ws')
+    const repoQuick = draft.quickCommands ? importRepoQuick(get().quickCommands, draft.quickCommands, wsId) : null
     const ws: Workspace = {
-      id: uid('ws'),
+      id: wsId,
       name: draft.name,
       cwd: draft.cwd,
       panes,
       favorite: false,
       layout,
       setupId: draft.setupId,
+      ...(draft.repoConfig
+        ? { repoConfig: { sha256: draft.repoConfig.sha256, appliedAt: Date.now(), quickCommandIds: repoQuick?.ids ?? [] } }
+        : {}),
     }
     // E8-FR-08: the first prompt goes to the first agent console only.
     const prompt = draft.firstPrompt?.trim() ? draft.firstPrompt : ''
-    const agentPane = prompt ? panes.find((p) => p.type !== 'shell') : undefined
-    set((s) => ({
-      workspaces: [...s.workspaces, ws],
-      activeWorkspaceId: ws.id,
-      mountedWorkspaces: mountActive(s.mountedWorkspaces, ws.id),
-      ...(agentPane
-        ? { pendingPrompts: { ...s.pendingPrompts, [agentPane.id]: { text: prompt, enter: true, source: 'composer' as const, createdAt: Date.now() } } }
-        : {}),
-    }))
+    const agentPane = prompt ? built.panes.find((p) => p.type !== 'shell') : undefined
+    const now = Date.now()
+    set((s) => {
+      const pendingPrompts = { ...s.pendingPrompts, ...built.prompts }
+      if (agentPane) pendingPrompts[agentPane.id] = { text: prompt, enter: true, source: 'composer', createdAt: now }
+      let heldPanes = s.heldPanes
+      let repoSetups = s.repoSetups
+      if (setupPane && draft.setup) {
+        const heldPaneIds = draft.setup.wait ? built.panes.map((p) => p.id) : []
+        repoSetups = { ...repoSetups, [setupPane.id]: { workspaceId: wsId, command: draft.setup.command, status: 'pending', heldPaneIds } }
+        if (heldPaneIds.length > 0) {
+          heldPanes = { ...heldPanes }
+          for (const id of heldPaneIds) heldPanes[id] = { setupPaneId: setupPane.id, state: 'waiting' }
+        }
+      }
+      return {
+        workspaces: [...s.workspaces, ws],
+        activeWorkspaceId: ws.id,
+        mountedWorkspaces: mountActive(s.mountedWorkspaces, ws.id),
+        pendingPrompts,
+        heldPanes,
+        repoSetups,
+        ...(repoQuick ? { quickCommands: repoQuick.list } : {}),
+      }
+    })
     return ws.id
+  },
+
+  reloadWorkspaceFromRepo: (workspaceId, draft, livePaneIds) => {
+    const ws = get().workspaces.find((w) => w.id === workspaceId)
+    if (!ws) return { kept: 0 }
+    const live = new Set(livePaneIds)
+    const kept = orderPanes(ws.panes, ws.layout?.order).filter((p) => live.has(p.id))
+    const dropped = ws.panes.filter((p) => !live.has(p.id)).map((p) => p.id)
+    const built = buildDraftPanes(draft)
+    const panes = [...kept, ...built.panes].slice(0, 12)
+    const grid: GridPreset = draft.grid >= panes.length ? draft.grid : gridForCount(panes.length)
+    // Only the commands this file brought before are replaced; hand-made ones stay.
+    const listed = new Set(ws.repoConfig?.quickCommandIds ?? [])
+    const base = get().quickCommands.filter((c) => !listed.has(c.id))
+    const repoQuick = importRepoQuick(base, draft.quickCommands ?? [], workspaceId)
+    // A dropped console without a live pty may still own one in main (a pane
+    // never remounted after a reload): kill by pane id, idempotent.
+    killPanePtys(dropped)
+    set((s) => {
+      const pendingPrompts = { ...s.pendingPrompts }
+      for (const id of dropped) delete pendingPrompts[id]
+      Object.assign(pendingPrompts, built.prompts)
+      return {
+        pendingPrompts,
+        quickCommands: repoQuick.list,
+        workspaces: s.workspaces.map((w) =>
+          w.id === workspaceId
+            ? {
+                ...w,
+                panes,
+                layout: { grid, order: panes.map((p) => p.id) },
+                setupId: draft.setupId,
+                repoConfig: { sha256: draft.repoConfig?.sha256 ?? w.repoConfig?.sha256 ?? '', appliedAt: Date.now(), quickCommandIds: repoQuick.ids },
+              }
+            : w,
+        ),
+      }
+    })
+    trashSavedScrollback(dropped)
+    return { kept: kept.length }
+  },
+
+  setWorkspaceRepoConfig: (workspaceId, repoConfig) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => {
+        if (w.id !== workspaceId) return w
+        if (repoConfig) return { ...w, repoConfig: { ...repoConfig, quickCommandIds: repoConfig.quickCommandIds.slice(0, 20) } }
+        const { repoConfig: _gone, ...rest } = w
+        return rest
+      }),
+    })),
+
+  takeRepoSetupCommand: (paneId) => {
+    const run = get().repoSetups[paneId]
+    if (!run || run.status !== 'pending') return null
+    set((s) => ({ repoSetups: { ...s.repoSetups, [paneId]: { ...run, status: 'running', code: undefined } } }))
+    return run.command
+  },
+
+  releaseHeldPanes: (paneIds) =>
+    set((s) => {
+      if (!paneIds.some((id) => id in s.heldPanes)) return {}
+      const heldPanes = { ...s.heldPanes }
+      for (const id of paneIds) delete heldPanes[id]
+      return { heldPanes }
+    }),
+
+  retryRepoSetup: (setupPaneId) => {
+    const run = get().repoSetups[setupPaneId]
+    if (!run) return
+    set((s) => {
+      const heldPanes = { ...s.heldPanes }
+      for (const id of run.heldPaneIds) {
+        if (heldPanes[id]?.setupPaneId === setupPaneId) heldPanes[id] = { setupPaneId, state: 'waiting' }
+      }
+      return { heldPanes, repoSetups: { ...s.repoSetups, [setupPaneId]: { ...run, status: 'pending', code: undefined } } }
+    })
+    get().restartPaneClean(setupPaneId)
   },
 
   importConfig: (config) =>
@@ -732,6 +947,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       delete paneExit[paneId]
       const agentEnded = { ...s.agentEnded }
       delete agentEnded[paneId]
+      // E8-FR-25: a closed setup console lets its held consoles start.
+      let heldPanes = s.heldPanes
+      let repoSetups = s.repoSetups
+      if (paneId in heldPanes || paneId in repoSetups) {
+        heldPanes = { ...heldPanes }
+        delete heldPanes[paneId]
+        for (const [id, h] of Object.entries(heldPanes)) if (h.setupPaneId === paneId) delete heldPanes[id]
+        repoSetups = { ...repoSetups }
+        delete repoSetups[paneId]
+      }
       // A prompt that never reached its spawn goes with the pane: restorePane
       // brings the same id back, which must not deliver it later (E8-FR-02).
       let pendingPrompts = s.pendingPrompts
@@ -745,6 +970,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         paneExit,
         agentEnded,
         pendingPrompts,
+        heldPanes,
+        repoSetups,
         workspaces: s.workspaces.map((w) => {
           if (w.id !== workspaceId) return w
           const panes = w.panes.filter((p) => p.id !== paneId)
@@ -876,6 +1103,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       else paneExit[paneId] = code
       return { paneExit }
     })
+    // E8-FR-25: a repo setup console exited; exit 0 releases its held consoles.
+    const run = code === null ? undefined : get().repoSetups[paneId]
+    if (run && run.status === 'running' && code !== null) settleRepoSetup(set, paneId, run, code)
   },
 
   setAgentEnded: (evt) => set((s) => ({ agentEnded: { ...s.agentEnded, [evt.paneId]: evt } })),

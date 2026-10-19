@@ -46,6 +46,7 @@ import { useWorktreeStore } from '@/lib/worktreeStore'
 import { templateFromPane, worktreeOffer } from '@/lib/worktrees'
 import { PaneWorktreeChip } from '@/components/git/PaneWorktreeChip'
 import { WorktreeMissingCard } from '@/components/layout/WorktreeMissingCard'
+import { RepoSetupPlaceholder } from '@/components/layout/RepoSetupPlaceholder'
 import { reopenClosedConsole, restartClean, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -125,6 +126,8 @@ export function PaneCell({
     (s) => workspaceActive || isPaneMounted(s.mountedWorkspaces, workspace.id, pane.id),
   )
   const ensureMounted = useAppStore((s) => s.ensureMounted)
+  // E8-FR-25: held back until the repo setup console exits with 0.
+  const held = useAppStore((s) => s.heldPanes[pane.id])
 
   // Worktree console (E7-FR-27..36): "Duplicate in worktree" uses the pane's
   // resolved cwd; a pane on a connection profile never offers it.
@@ -433,7 +436,9 @@ export function PaneCell({
             <span>{t('agents.modal.gated')}</span>
           </div>
         )}
-        {wt && wtMissing ? (
+        {held ? (
+          <RepoSetupPlaceholder paneId={pane.id} held={held} />
+        ) : wt && wtMissing ? (
           <WorktreeMissingCard workspace={workspace} pane={pane} presets={presets} />
         ) : wtPending ? (
           <div data-pane-worktree-checking={pane.id} className="flex h-full items-center justify-center text-xs text-text-secondary">
