@@ -135,6 +135,11 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('connections.profiles', 'settings.search.connections', 'settings.search.connectionsHint', { summary: true, keywords: ['ssh', 'connection', 'conexion', 'setup', 'login', 'password', 'contrasena', 'server', 'servidor', 'expect'] }),
   e('quick.list', 'settings.search.quick', 'settings.search.quickHint', { summary: true, keywords: ['snippet', 'snippets', 'prompt', 'comando', 'command', 'quick', 'plantilla', 'template', 'texto', 'text', 'agente', 'agent'] }),
 
+  // Automation: pane schedules (E8-FR-29..32)
+  e('automation.schedules', 'settings.search.automationSchedules', 'settings.search.automationSchedulesHint', { summary: true, keywords: ['schedule', 'programar', 'programado', 'recurring', 'recurrente', 'cron', 'automation', 'automatizacion', 'reloj', 'clock', 'diario', 'daily', 'hourly', 'cada hora'] }),
+  e('automation.scheduleGrace', 'settings.automation.scheduleGrace', 'settings.automation.scheduleGraceHint', { keywords: ['missed', 'perdida', 'suspend', 'suspendida', 'apagada', 'grace', 'gracia', 'schedule', 'programar'] }),
+  e('automation.scheduleMaxWait', 'settings.automation.scheduleMaxWait', 'settings.automation.scheduleMaxWaitHint', { keywords: ['busy', 'ocupado', 'wait', 'esperar', 'schedule', 'programar'] }),
+  e('automation.scheduleNotify', 'settings.automation.scheduleNotify', 'settings.automation.scheduleNotifyHint', { keywords: ['notification', 'notificacion', 'schedule', 'programar', 'automation'], toggle: { path: 'automation.scheduleNotify' } }),
   // Automation: the snaos CLI (E8-FR-21/22)
   e('automation.cli', 'settings.cli.enabled', 'settings.cli.enabledHint', { keywords: ['cli', 'snaos', 'terminal', 'consola', 'command line', 'linea de comandos', 'script'], toggle: { path: 'cliEnabled' } }),
   e('automation.protectSsh', 'settings.cli.protectSsh', 'settings.cli.protectSshHint', { keywords: ['cli', 'snaos', 'ssh', 'connection', 'conexion', 'profile', 'perfil', 'protect', 'proteger'], toggle: { path: 'automation.cliProtectSsh' } }),
