@@ -59,6 +59,15 @@ const paneScheduleSchema = z.object({
   dueAt: z.number(),
 })
 
+// Schema 13 (E7-FR-28): a malformed value is dropped (the pane falls back to
+// its plain cwd resolution) instead of failing the whole config.
+const paneWorktreeSchema = z.object({
+  repoRoot: z.string().min(1).max(4096),
+  path: z.string().min(1).max(4096),
+  branch: z.string().regex(/^sn\/[a-z0-9-]{1,40}$/),
+  base: z.string().regex(/^[0-9a-f]{7,64}$/i),
+})
+
 const paneSchema = z.object({
   id: z.string(),
   type: paneType,
@@ -84,6 +93,7 @@ const paneSchema = z.object({
     })
     .optional()
     .catch(undefined),
+  worktree: paneWorktreeSchema.optional().catch(undefined), // schema 13
 })
 
 const setupStepSchema = z.object({
@@ -205,6 +215,7 @@ const settingsSchema = z.object({
     .catch(2000)
     .default(2000),
   gitChip: z.boolean().catch(true).default(true),
+  worktreesRoot: z.string().max(4096).catch('').default(''), // schema 13 (E7-FR-28)
   explorerMenu: z.boolean().catch(false).default(false),
   updateDismissedVersion: z.string().max(64).catch('').default(''),
   restoreLastWorkspace: z.boolean(),

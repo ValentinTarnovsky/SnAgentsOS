@@ -22,6 +22,7 @@ import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerGitIpc } from './ipc/registerGitIpc'
+import { registerWorktreeIpc } from './ipc/registerWorktreeIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
 import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
@@ -513,6 +514,11 @@ async function bootstrap(): Promise<void> {
   registerGitIpc({
     getSender: () => mainWindow?.webContents ?? null,
     initialGitChip: (configStore.load()?.settings as { gitChip?: unknown } | undefined)?.gitChip !== false,
+  })
+  // Worktree per console (E7-FR-27..32, 36): worktrees.json under dataDir().
+  registerWorktreeIpc({
+    loadConfig: () => configStore.load(),
+    killPane: (paneId) => ptyManager.killPaneAndWait(paneId),
   })
   registerRemoteIpc(remoteManager)
   registerLegacyIpc({

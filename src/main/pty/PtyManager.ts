@@ -1,5 +1,6 @@
 import { spawn, type IPty } from 'node-pty'
 import { randomUUID } from 'crypto'
+import { existsSync } from 'fs'
 import { delimiter } from 'path'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
@@ -18,6 +19,7 @@ import {
   type InitialPromptReq,
 } from '@shared/initialPrompt'
 import { shellKind as promptShellKind } from '@shared/shellKind'
+import { CWD_MISSING } from '@shared/worktree-types'
 import { cleanEnv, defaultShell, homeDir } from './shellResolver'
 import { resolveShell } from './shellResolve'
 import { ModeTracker } from './ModeTracker'
@@ -232,6 +234,8 @@ export interface PtyExitInfo {
   current: boolean
   /** The process ended on its own (not kill/killAll/restart or a failed spawn). */
   natural: boolean
+  /** A spawn refused before node-pty ran: its cwd is gone (a pane worktree deleted by hand, E7-FR-36). */
+  error?: typeof CWD_MISSING
 }
 
 /**
@@ -380,6 +384,15 @@ export class PtyManager {
     Object.assign(env, promptEnv)
     const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH'
     if (env[AGENT_ENV.codexShim]) env[pathKey] = env[AGENT_ENV.codexShim] + delimiter + (env[pathKey] ?? '')
+    // E7-FR-36 defense: a cwd deleted outside the app (a pane worktree) is a
+    // typed failure instead of node-pty's opaque one; the renderer shows the
+    // "worktree was deleted" card for it.
+    if (req.cwd && !existsSync(req.cwd)) {
+      for (const sink of this.sinks.values()) {
+        try { sink.onExit(ptyId, req.paneId, -1, { current: false, natural: false, error: CWD_MISSING }) } catch { /* release prepared integrations */ }
+      }
+      throw Object.assign(new Error(`${CWD_MISSING}: ${req.cwd}`), { code: CWD_MISSING })
+    }
     let proc: IPty
     try { proc = spawn(shell, req.args ?? [], {
       name: 'xterm-256color',
@@ -958,6 +971,29 @@ export class PtyManager {
   /** Epoch ms of the last input written to the pane (desktop or phone), or undefined. */
   lastInputAt(paneId: string): number | undefined {
     return this.lastInput.get(paneId)
+  }
+
+  /**
+   * Kill every pty of the pane and wait (at most timeoutMs) until their
+   * processes are gone, so Windows releases the handles a folder delete needs
+   * (E7-FR-30). Resolves either way; the caller retries on a busy file.
+   */
+  async killPaneAndWait(paneId: string, timeoutMs = 3000): Promise<void> {
+    const pids = [...this.entries.values()]
+      .filter((e) => e.paneId === paneId)
+      .map((e) => e.pty.pid)
+      .filter((pid): pid is number => typeof pid === 'number' && pid > 0)
+    this.killPanes([paneId])
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch (e) {
+        return (e as { code?: unknown }).code === 'EPERM'
+      }
+    }
+    const deadline = Date.now() + timeoutMs
+    while (pids.some(alive) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100))
   }
 
   /** Live pty id bound to a pane, or null. */

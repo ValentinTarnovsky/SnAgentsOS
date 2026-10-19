@@ -10,6 +10,7 @@ import type {
   Pane,
   PaneSchedule,
   PaneStatusEvt,
+  PaneWorktree,
   PaneType,
   QuickCommand,
   Settings,
@@ -79,6 +80,7 @@ const DEFAULT_SETTINGS: Settings = {
   persistScrollback: true,
   persistScrollbackLines: 2000,
   gitChip: true,
+  worktreesRoot: '',
   explorerMenu: false,
   updateDismissedVersion: '',
   restoreLastWorkspace: true,
@@ -325,6 +327,12 @@ export interface AppState {
   clearAgentEnded: (paneId: string) => void
   /** Set (or clear, with null) a console's one-shot scheduled prompt. */
   setPaneSchedule: (workspaceId: string, paneId: string, schedule: PaneSchedule | null) => void
+  /**
+   * Move a console onto a worktree (its path becomes the cwd) or, with null,
+   * off it: the cwd override goes too, so it runs in its normal folder again
+   * (E7-FR-36 Recreate / Remove from pane).
+   */
+  setPaneWorktree: (workspaceId: string, paneId: string, worktree: PaneWorktree | null) => void
   setGrid: (workspaceId: string, grid: GridPreset) => void
   movePane: (workspaceId: string, paneId: string, toIndex: number) => void
   toggleMaximize: (workspaceId: string, paneId: string) => void
@@ -878,6 +886,23 @@ export const useAppStore = create<AppState>((set, get) => ({
               panes: w.panes.map((p) =>
                 p.id === paneId ? { ...p, schedule: schedule ?? undefined } : p,
               ),
+            }
+          : w,
+      ),
+    })),
+
+  setPaneWorktree: (workspaceId, paneId, worktree) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) =>
+        w.id === workspaceId
+          ? {
+              ...w,
+              panes: w.panes.map((p) => {
+                if (p.id !== paneId) return p
+                if (worktree) return { ...p, cwd: worktree.path, worktree: { ...worktree } }
+                const { worktree: _gone, cwd: _cwd, ...rest } = p
+                return rest
+              }),
             }
           : w,
       ),
