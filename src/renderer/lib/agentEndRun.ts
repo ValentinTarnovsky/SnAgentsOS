@@ -78,7 +78,7 @@ function commandsFor(state: AppState, paneId: string) {
  */
 export function remoteAgentEnded(state: AppState, paneId: string): RemotePaneInfo['agentEnded'] {
   const found = commandsFor(state, paneId)
-  return found ? { canResume: found.cmds.resume !== null } : undefined
+  return found ? { canResume: found.cmds.resume !== null, ...(found.evt.provider === 'codex' ? { provider: 'codex' as const } : {}) } : undefined
 }
 
 /**

@@ -381,7 +381,7 @@ const en = {
   'exit.closeConfirm': 'Close this console? Its output will be lost.',
   'main.exited': 'exited',
   // "Claude exited" strip, mirror of the desktop chip (E6-FR-24)
-  'agentEnd.title': 'Claude exited',
+  'agentEnd.title': '{agent} exited',
   'agentEnd.resume': 'Resume',
   'agentEnd.new': 'New',
   'agentEnd.dismiss': 'Hide',
@@ -1052,7 +1052,7 @@ const es: Record<Key, string> = {
   'exit.close': 'Cerrar',
   'exit.closeConfirm': 'Cerrar esta consola? Se pierde su salida.',
   'main.exited': 'terminada',
-  'agentEnd.title': 'Claude termino',
+  'agentEnd.title': '{agent} terminó',
   'agentEnd.resume': 'Retomar',
   'agentEnd.new': 'Nueva',
   'agentEnd.dismiss': 'Ocultar',

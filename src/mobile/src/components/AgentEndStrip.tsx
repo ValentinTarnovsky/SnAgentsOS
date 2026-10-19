@@ -15,12 +15,12 @@ import { useExitStore } from '../lib/exitState'
 import { client } from '../lib/client'
 import { t } from '../lib/i18n'
 
-/** The viewed pane's offer: its workspace and whether [Resume] applies, or null. */
-function offerOf(snapshot: RemoteStateSnapshot | null | undefined, paneId: string | null): { workspaceId: string; canResume: boolean } | null {
+/** The viewed pane's offer: its workspace, whether [Resume] applies and whose agent exited, or null. */
+function offerOf(snapshot: RemoteStateSnapshot | null | undefined, paneId: string | null): { workspaceId: string; canResume: boolean; agent: 'Claude' | 'Codex' } | null {
   if (!paneId) return null
   for (const ws of snapshot?.workspaces ?? []) {
     const pane = ws.panes.find((p) => p.id === paneId)
-    if (pane) return pane.agentEnded ? { workspaceId: ws.id, canResume: pane.agentEnded.canResume } : null
+    if (pane) return pane.agentEnded ? { workspaceId: ws.id, canResume: pane.agentEnded.canResume, agent: pane.agentEnded.provider === 'codex' ? 'Codex' : 'Claude' } : null
   }
   return null
 }
@@ -30,6 +30,7 @@ export function AgentEndStrip(): ReactNode {
   // Primitive selectors: a fresh object per read would re-render forever.
   const workspaceId = useRemoteStore((s) => offerOf(s.snapshot, paneId)?.workspaceId ?? null)
   const canResume = useRemoteStore((s) => offerOf(s.snapshot, paneId)?.canResume ?? false)
+  const agent = useRemoteStore((s) => offerOf(s.snapshot, paneId)?.agent ?? 'Claude')
   const exited = useExitStore((s) => !!paneId && s.exit?.paneId === paneId)
   const [hidden, setHidden] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -69,7 +70,7 @@ export function AgentEndStrip(): ReactNode {
       className="flex shrink-0 items-center gap-2 border-t border-border bg-bg-secondary px-3 py-2"
     >
       <History size={14} className="shrink-0 text-accent-violet" />
-      <span className="min-w-0 flex-1 truncate text-xs text-text-secondary">{t('agentEnd.title')}</span>
+      <span className="min-w-0 flex-1 truncate text-xs text-text-secondary">{t('agentEnd.title', { agent })}</span>
       <button
         data-agent-end="new"
         disabled={busy}

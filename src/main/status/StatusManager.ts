@@ -397,9 +397,11 @@ export class StatusManager implements PtySink {
    */
   private emitSessionEnd(evt: HookEvent): void {
     const reason = AGENT_END_REASONS.find((r) => r === evt.endReason)
-    if (!reason || evt.agentId || !evt.ptyId || !evt.sessionId || !SESSION_ID_RE.test(evt.sessionId)) return
-    const end: AgentSessionEndEvt = { paneId: evt.consoleId, ptyId: evt.ptyId, provider: 'claude', sessionId: evt.sessionId, reason, at: Date.now() }
-    if (evt.cwd) end.cwd = evt.cwd
+    if (!reason || reason === 'exit' || evt.agentId || !evt.ptyId || !evt.sessionId || !SESSION_ID_RE.test(evt.sessionId)) return
+    this.sendSessionEnd({ paneId: evt.consoleId, ptyId: evt.ptyId, provider: 'claude', sessionId: evt.sessionId, reason, at: Date.now(), ...(evt.cwd ? { cwd: evt.cwd } : {}) })
+  }
+
+  private sendSessionEnd(end: AgentSessionEndEvt): void {
     const win = this.getWindow()
     if (win && !win.isDestroyed()) win.webContents.send(CH.STATUS_SESSION_END, end)
   }
@@ -499,6 +501,11 @@ export class StatusManager implements PtySink {
         track.retired.add(`${evt.provider}:${evt.sessionId}`)
         track.pending.clear(); track.activity = 'idle'; track.ended = true
         track.detail = undefined; track.tool = undefined
+        // v2.2: Codex quit (its launcher ended with code 0): the same
+        // "exited [Resume] [New]" offer Claude's SessionEnd raises.
+        if (evt.provider === 'codex' && SESSION_ID_RE.test(evt.sessionId)) {
+          this.sendSessionEnd({ paneId: evt.paneId, ptyId: evt.ptyId, provider: 'codex', sessionId: evt.sessionId, reason: 'exit', at: Date.now(), ...(track.cwd ? { cwd: track.cwd } : {}) })
+        }
         break
     }
     this.publish(evt.paneId, track, key, notice, evt)

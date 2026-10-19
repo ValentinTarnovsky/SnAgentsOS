@@ -138,6 +138,16 @@ async function main() {
     check(h.last().state === 'done' && !h.last().waiting, 'a sub-session silent past its TTL is dropped')
   }
   {
+    // v2.2: Codex quitting (launcher exit code 0) offers "Codex exited [Resume] [New]".
+    const h = harness()
+    const THREAD = '7c4390bf-8192-43a4-9f60-789abcdef012'
+    h.event('start', { provider: 'codex', sessionId: THREAD, cwd: process.cwd() }); h.event('end', { provider: 'codex', sessionId: THREAD })
+    const end = h.ends().at(-1)
+    check(end && end.provider === 'codex' && end.reason === 'exit' && end.sessionId === THREAD && end.paneId === 'pane' && end.cwd === process.cwd(), 'a Codex exit sends the exited offer with its thread and directory')
+    h.event('start', { provider: 'codex', sessionId: 'launch:0123456789abcdef' }); h.event('end', { provider: 'codex', sessionId: 'launch:0123456789abcdef' })
+    check(h.ends().length === 1, 'a Codex that never opened a thread offers nothing')
+  }
+  {
     // v2.2: a held startup whose first hook is unmarked is the console's new Claude (the old one died silently).
     const h = harness()
     h.hook('SessionStart', { source: 'startup' }); h.hook('UserPromptSubmit'); h.hook('Stop'); h.flush()
@@ -1010,6 +1020,11 @@ async function enrichmentChecks() {
     check(c.resume === `Set-Location -LiteralPath 'C:\\Val\u2019\u2019s; calc; \u2018\u2018x'; claude --resume ${UUID}`, 'PowerShell typographic quotes in the cwd are doubled too (they end a single-quoted string)')
     c = agentEndCommands({ evt: { sessionId: UUID, cwd: 'C:\\repo' }, shellKind: 'cmd' })
     check(c.resume === `cd /d "C:\\repo" && claude --resume ${UUID}`, 'cmd prefix')
+    // v2.2: Codex quits too.
+    c = agentEndCommands({ evt: { sessionId: UUID, cwd: 'C:\\repo', provider: 'codex' }, shellKind: 'powershell', preset: { type: 'codex', command: 'codex', args: ['--search'] }, initialCommand: 'codex --search' })
+    check(c.resume === `Set-Location -LiteralPath 'C:\\repo'; codex --search resume ${UUID}` && c.fresh === 'codex --search', 'Codex: resume = codex <flags> resume <id>, New = its preset command')
+    c = agentEndCommands({ evt: { sessionId: UUID, provider: 'codex' }, shellKind: 'powershell', initialCommand: 'claude' })
+    check(c.resume === `codex resume ${UUID}` && c.fresh === 'codex', 'a Codex exit in a pane that launches Claude types bare codex')
     c = agentEndCommands({ evt: { sessionId: UUID, cwd: "/home/me/it's" }, shellKind: 'posix' })
     check(c.resume === `cd -- '/home/me/it'\\''s' && claude --resume ${UUID}`, 'posix prefix escapes the single quote')
     check(['x;y', 'has space', 'launch:abcdef12', '', 'a'.repeat(200)].every(id => agentEndCommands({ evt: { sessionId: id, cwd: '/tmp' }, shellKind: 'posix' }).resume === null), 'an unsafe session id leaves only [New]')

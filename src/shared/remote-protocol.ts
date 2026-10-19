@@ -90,12 +90,13 @@ export interface RemotePaneInfo {
    */
   exitCode?: number
   /**
-   * The pane's Claude session ended with /exit and the desktop offers the
-   * "Claude exited [Resume] [New]" chip (E6-FR-24, renderer-computed, absent
-   * with the chip setting off). `canResume` false = only [New] (unsafe id or
-   * command). The phone mirrors it with `agentResume`.
+   * The pane's Claude session ended with /exit (or its Codex quit, v2.2) and
+   * the desktop offers the "<agent> exited [Resume] [New]" chip (E6-FR-24,
+   * renderer-computed, absent with the chip setting off). `canResume` false =
+   * only [New] (unsafe id or command); `provider` absent = Claude. The phone
+   * mirrors it with `agentResume`.
    */
-  agentEnded?: { canResume: boolean }
+  agentEnded?: { canResume: boolean; provider?: AgentProvider }
   /** Agent status overlaid by main on every state / authOk (E1-FR-03). */
   status?: RemotePaneStatus
   /**
