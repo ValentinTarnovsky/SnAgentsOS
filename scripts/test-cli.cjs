@@ -1,7 +1,8 @@
 // snaos CLI suite (E8-FR-12..22, R30-11): addresses (ctlRefs), ANSI fallback,
 // console tokens, cleanEnv, runtime.json, the shim (static and executed with
 // the repo's Electron against a test server), user PATH with an injected
-// registry, the skill in a temp CLAUDE_CONFIG_DIR, `notify` custom notices
+// registry, the skill for Claude and Codex in a temp CLAUDE_CONFIG_DIR and
+// CODEX_HOME (and the cli:skill payload), `notify` custom notices
 // (Discord, ntfy, router, native), CtlServer over a real temp pipe (401, 403,
 // 413, caller from the token), every handler (ls, open, spawn, send, read,
 // wait incl. noTurnObserved / timeout / cancel / 32 waiters, status, notify
@@ -228,26 +229,56 @@ async function userPathChecks() {
 
 function skillChecks() {
   const K = load('src/main/cli/skillInstaller.ts')
-  const env = { CLAUDE_CONFIG_DIR: tmp('claude') }
+  const env = { CLAUDE_CONFIG_DIR: tmp('claude'), CODEX_HOME: tmp('codex') }
   const dir = path.join(env.CLAUDE_CONFIG_DIR, 'skills', 'snagentsos')
-  check(K.skillDir(env) === dir, 'the skill lives under CLAUDE_CONFIG_DIR/skills/snagentsos')
-  check(K.skillStatus('2.0.0', env).state === 'missing', 'not installed by default (never installs on its own)')
-  check(K.refreshSkillOnStartup('2.0.0', env).state === 'missing' && !fs.existsSync(dir), 'the startup refresh never installs')
-  const st = K.installSkill('2.0.0', env)
+  const cdir = path.join(env.CODEX_HOME, 'skills', 'snagentsos')
+  check(K.skillDir('claude', env) === dir, 'the Claude skill lives under CLAUDE_CONFIG_DIR/skills/snagentsos')
+  check(K.skillDir('codex', env) === cdir, 'the Codex skill lives under CODEX_HOME/skills/snagentsos')
+  check(K.skillStatus('claude', '2.0.0', env).state === 'missing' && K.skillStatus('claude', '2.0.0', env).target === 'claude', 'not installed by default (never installs on its own)')
+  check(K.skillStatus('codex', '2.0.0', env).state === 'missing' && K.skillStatus('codex', '2.0.0', env).target === 'codex', 'Codex: not installed by default and the status carries its target')
+  const none = K.refreshSkillOnStartup('2.0.0', env)
+  check(none.length === 2 && none.every((s) => s.state === 'missing') && !fs.existsSync(dir) && !fs.existsSync(cdir), 'the startup refresh never installs, for either agent')
+  const st = K.installSkill('claude', '2.0.0', env)
   const md = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8')
-  check(st.state === 'installed' && st.version === '2.0.0', 'install writes it and reports installed v2.0.0')
+  check(st.state === 'installed' && st.version === '2.0.0' && st.target === 'claude', 'install writes it and reports installed v2.0.0')
   check(md.startsWith('---\nname: snagentsos\ndescription: ') && md.includes('<!-- managed-by: snagentsos v2.0.0 -->') && md.includes('snaos help --agent'), 'SKILL.md has the front matter, our marker and the pointer to the guide')
-  check(K.skillStatus('2.1.0', env).state === 'outdated', 'another app version reads as outdated')
+  check(K.skillStatus('codex', '2.0.0', env).state === 'missing' && !fs.existsSync(cdir), 'installing for Claude never touches the Codex folder')
+  const cst = K.installSkill('codex', '2.0.0', env)
+  const cmd = fs.readFileSync(path.join(cdir, 'SKILL.md'), 'utf8')
+  check(cst.state === 'installed' && cst.version === '2.0.0' && cst.target === 'codex' && cst.path === cdir, 'Codex: install writes <CODEX_HOME>/skills/snagentsos/SKILL.md')
+  check(cmd === md, 'both agents get the same stub')
+  // Codex needs name + description in a one-line YAML front matter (name <= 64, description <= 1024).
+  const fm = cmd.split('\n')
+  const nameLine = fm[1], descLine = fm[2]
+  check(fm[0] === '---' && fm[3] === '---' && /^name: [a-z0-9-]{1,64}$/.test(nameLine) && descLine.startsWith('description: ') && descLine.length - 'description: '.length <= 1024, 'the front matter is name + one-line description within the Codex limits')
+  check(!/: |\s#/.test(descLine.slice('description: '.length)) && !/^description: ["'|>\[{&*!%@`]/.test(descLine), 'the description parses as a plain YAML scalar (no ": ", no " #", no leading indicator)')
+  check(K.skillStatus('claude', '2.1.0', env).state === 'outdated' && K.skillStatus('codex', '2.1.0', env).state === 'outdated', 'another app version reads as outdated, per agent')
   const ref = K.refreshSkillOnStartup('2.1.0', env)
-  check(ref.state === 'installed' && fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8').includes('v2.1.0'), 'after an update the stub is rewritten with the new version')
-  check(K.removeSkill('2.1.0', env).state === 'missing' && !fs.existsSync(dir), 'remove deletes our folder')
+  check(ref[0].target === 'claude' && ref[0].state === 'installed' && ref[1].target === 'codex' && ref[1].state === 'installed', 'the startup refresh rewrites both agents')
+  check(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8').includes('v2.1.0') && fs.readFileSync(path.join(cdir, 'SKILL.md'), 'utf8').includes('v2.1.0'), 'after an update both stubs carry the new version')
+  check(K.removeSkill('claude', '2.1.0', env).state === 'missing' && !fs.existsSync(dir) && fs.existsSync(cdir), 'remove deletes only the selected agent\'s folder')
+  check(K.repairSkill('codex', '2.2.0', env).version === '2.2.0' && K.skillStatus('codex', '2.2.0', env).state === 'installed', 'Codex: repair rewrites an outdated stub')
+  check(K.removeSkill('codex', '2.2.0', env).state === 'missing' && !fs.existsSync(cdir), 'Codex: remove deletes our folder')
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: snagentsos\n---\nmine')
-  check(K.skillStatus('2.0.0', env).state === 'foreign', 'a folder without our marker is foreign')
-  check(K.removeSkill('2.0.0', env).error === 'foreign' && fs.existsSync(path.join(dir, 'SKILL.md')), 'remove never deletes a foreign folder')
-  check(K.installSkill('2.0.0', env).error === 'foreign' && fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8').endsWith('mine'), 'install never overwrites a foreign folder')
-  check(K.repairSkill('2.0.0', env).state === 'foreign', 'repair leaves a foreign folder alone')
+  check(K.skillStatus('claude', '2.0.0', env).state === 'foreign', 'a folder without our marker is foreign')
+  check(K.removeSkill('claude', '2.0.0', env).error === 'foreign' && fs.existsSync(path.join(dir, 'SKILL.md')), 'remove never deletes a foreign folder')
+  check(K.installSkill('claude', '2.0.0', env).error === 'foreign' && fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8').endsWith('mine'), 'install never overwrites a foreign folder')
+  check(K.repairSkill('claude', '2.0.0', env).state === 'foreign', 'repair leaves a foreign folder alone')
+  check(K.refreshSkillOnStartup('2.5.0', env)[0].state === 'foreign' && fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8').endsWith('mine'), 'the startup refresh leaves a foreign folder alone')
+  fs.mkdirSync(cdir, { recursive: true })
+  fs.writeFileSync(path.join(cdir, 'SKILL.md'), '---\nname: snagentsos\n---\ncodex mine')
+  check(K.skillStatus('codex', '2.0.0', env).state === 'foreign' && K.removeSkill('codex', '2.0.0', env).error === 'foreign' && K.installSkill('codex', '2.0.0', env).error === 'foreign' && fs.readFileSync(path.join(cdir, 'SKILL.md'), 'utf8').endsWith('codex mine'), 'Codex: a foreign folder is never overwritten or removed')
+  // Without CODEX_HOME the Codex folder is ~/.codex/skills/snagentsos (path only: nothing is read or written).
+  check(K.skillDir('codex', {}) === path.join(os.homedir(), '.codex', 'skills', 'snagentsos') && K.skillDir('claude', {}) === path.join(os.homedir(), '.claude', 'skills', 'snagentsos'), 'default folders are ~/.codex and ~/.claude')
   check(K.skillStub('9.9.9').includes('If a command says SnAgentsOS is not running'), 'the stub tells the agent to stop when the app is down')
+  // cli:skill payload: { op, target }, the old bare op string means Claude, an unknown target never writes.
+  const P = K.parseSkillRequest
+  const same = (a, b) => a.op === b.op && a.target === b.target
+  check(same(P({ op: 'install', target: 'codex' }), { op: 'install', target: 'codex' }) && same(P({ op: 'remove', target: 'claude' }), { op: 'remove', target: 'claude' }), 'the payload carries op and target')
+  check(same(P('repair'), { op: 'repair', target: 'claude' }) && same(P({ op: 'install' }), { op: 'install', target: 'claude' }) && same(P({ op: 'install', target: null }), { op: 'install', target: 'claude' }), 'the old bare op and a missing target mean claude')
+  check(same(P({ op: 'install', target: 'gemini' }), { op: 'status', target: 'claude' }) && same(P({ op: 'install', target: 7 }), { op: 'status', target: 'claude' }), 'an unknown target downgrades to a read-only status')
+  check(same(P({ op: 'format', target: 'codex' }), { op: 'status', target: 'codex' }) && same(P(undefined), { op: 'status', target: 'claude' }) && same(P(42), { op: 'status', target: 'claude' }), 'an unknown op, undefined or junk is status')
 }
 
 // --- G. notify: custom notices ---------------------------------------------------
@@ -763,8 +794,8 @@ function makeService(dataDir, extra = {}) {
     status: { ...world.status, notifyCustom: () => true },
     config: () => world.config,
     routeCustom: (n) => routed.push(n),
-    // Never the real ~/.claude: the skill refresh at init reads this tree.
-    skillEnv: { CLAUDE_CONFIG_DIR: path.join(dataDir, 'claude') },
+    // Never the real ~/.claude or ~/.codex: the skill refresh at init reads these trees.
+    skillEnv: { CLAUDE_CONFIG_DIR: path.join(dataDir, 'claude'), CODEX_HOME: path.join(dataDir, 'codex') },
     handlerOverrides: { timing: { settleMs: 50, recentWorkingMs: 100, noTurnMs: 200, tickMs: 20 } },
     ...extra,
   })
@@ -846,7 +877,10 @@ async function serviceChecks() {
   const ui = await service.uiState()
   check(ui.enabled && ui.running && ui.endpoint === service.transport.endpoint && !JSON.stringify(ui).includes(runtime.token) && !JSON.stringify(ui).includes(env1.SNAOS_CTL_TOKEN), 'the Settings state never carries a token')
   check((await service.setUserPath(true)) === false, 'a failing registry write reports false (and never touches the real HKCU)')
-  check(service.skill('install').state === 'installed' && fs.existsSync(path.join(dataDir, 'claude', 'skills', 'snagentsos', 'SKILL.md')) && service.skill('remove').state === 'missing', 'the service skill ops use the injected CLAUDE_CONFIG_DIR')
+  check(service.skill('install').state === 'installed' && fs.existsSync(path.join(dataDir, 'claude', 'skills', 'snagentsos', 'SKILL.md')) && service.skill('remove').state === 'missing', 'the service skill ops use the injected CLAUDE_CONFIG_DIR (claude by default)')
+  const cxSkill = path.join(dataDir, 'codex', 'skills', 'snagentsos', 'SKILL.md')
+  check(service.skill('install', 'codex').state === 'installed' && service.skill('status', 'codex').target === 'codex' && fs.existsSync(cxSkill) && service.skill('status').state === 'missing', 'the service skill ops with target codex use the injected CODEX_HOME and leave Claude alone')
+  check(service.skill('remove', 'codex').state === 'missing' && !fs.existsSync(cxSkill), 'the service removes the Codex skill')
   service.shutdown()
   check(!fs.existsSync(path.join(dataDir, 'runtime.json')), 'quit removes runtime.json')
   await sleep(50)

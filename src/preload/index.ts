@@ -59,7 +59,7 @@ import type { GitArea, GitBaseStat, GitChangesRes, GitDiffReply, GitInfoRes, Git
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
-import type { CliUiState, SkillOp, SkillStatus } from '@shared/ctl-protocol'
+import type { CliUiState, SkillOp, SkillStatus, SkillTarget } from '@shared/ctl-protocol'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from '@shared/repo-config'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
@@ -233,7 +233,7 @@ const api: SnApi = {
   cli: {
     setEnabled: (enabled: boolean) => ipcRenderer.send(CH.CLI_SET_ENABLED, enabled === true),
     state: () => ipcRenderer.invoke(CH.CLI_STATE) as Promise<CliUiState>,
-    skill: (op: SkillOp) => ipcRenderer.invoke(CH.CLI_SKILL, op) as Promise<SkillStatus>,
+    skill: (op: SkillOp, target?: SkillTarget) => ipcRenderer.invoke(CH.CLI_SKILL, { op, target: target ?? 'claude' }) as Promise<SkillStatus>,
     userPath: (enabled: boolean) => ipcRenderer.invoke(CH.CLI_USER_PATH, enabled === true) as Promise<boolean>,
   },
   reviewNotes: {

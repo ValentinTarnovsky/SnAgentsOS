@@ -224,8 +224,15 @@ export interface CliUiState {
 
 export type SkillState = 'missing' | 'installed' | 'outdated' | 'foreign'
 
+/** Which agent's skills folder a skill op acts on: Claude Code or Codex. */
+export type SkillTarget = 'claude' | 'codex'
+
+export const SKILL_TARGETS: readonly SkillTarget[] = ['claude', 'codex']
+
 export interface SkillStatus {
   state: SkillState
+  /** The agent this status is about. */
+  target: SkillTarget
   /** Version written in our marker, when there is one. */
   version?: string
   path: string
@@ -233,3 +240,11 @@ export interface SkillStatus {
 }
 
 export type SkillOp = 'status' | 'install' | 'remove' | 'repair'
+
+export const SKILL_OPS: readonly SkillOp[] = ['status', 'install', 'remove', 'repair']
+
+/** cli:skill payload. `target` is optional: absent means 'claude' (the pre-Codex form). */
+export interface SkillRequest {
+  op: SkillOp
+  target?: SkillTarget
+}

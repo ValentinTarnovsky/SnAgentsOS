@@ -30,7 +30,7 @@ import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRe
 import type { OpenPathReq, OpenPathRes } from './inertOpen'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from './repo-config'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from './review-notes'
-import type { CliCtlAction, CliUiState, SkillOp, SkillStatus } from './ctl-protocol'
+import type { CliCtlAction, CliUiState, SkillOp, SkillStatus, SkillTarget } from './ctl-protocol'
 
 export type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -912,7 +912,8 @@ export interface SnApi {
     /** settings.cliEnabled: starts or stops the control server (same endpoint and tokens). */
     setEnabled(enabled: boolean): void
     state(): Promise<CliUiState>
-    skill(op: SkillOp): Promise<SkillStatus>
+    /** Skill op on one agent's skills folder; `target` defaults to 'claude'. */
+    skill(op: SkillOp, target?: SkillTarget): Promise<SkillStatus>
     /** Adds (true) or removes (false) <dataDir>\bin in the user PATH; false when it failed or is not available. */
     userPath(enabled: boolean): Promise<boolean>
   }

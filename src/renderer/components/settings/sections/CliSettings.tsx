@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Copy, RefreshCw, Wrench } from 'lucide-react'
-import type { CliUiState, SkillOp, SkillStatus } from '@shared/ctl-protocol'
+import { SKILL_TARGETS, type CliUiState, type SkillOp, type SkillStatus, type SkillTarget } from '@shared/ctl-protocol'
+import { cn } from '@/lib/cn'
 import { useAppStore } from '@/lib/store'
 import { useAppInfo } from '@/lib/useAppInfo'
 import { toast } from '@/lib/toast'
@@ -10,14 +11,22 @@ import { SettingRow, ToggleRow } from '../ui'
 const btnCls =
   'flex shrink-0 items-center gap-1.5 rounded-btn border border-border bg-card px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:border-accent-violet/40 disabled:cursor-not-allowed disabled:opacity-50'
 
+/** Segmented-control button, same look as the composer's and the note popover's. */
+const segBtn = (on: boolean): string =>
+  cn(
+    'whitespace-nowrap rounded-[6px] px-3 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+    on ? 'bg-accent-violet text-white' : 'text-text-secondary hover:text-text-primary',
+  )
+
 /** The example "Copy example" puts on the clipboard. */
 export const CLI_EXAMPLE = 'snaos ls'
 
 /**
  * Settings > Automation, CLI block (E8-FR-21/22): the snaos switch, the SSH
  * protection, the user PATH (Windows, never in the portable), the server
- * state with "Copy example" and the Claude skill row. Nothing here installs
- * or edits anything on its own: every side effect is a click.
+ * state with "Copy example" and the skill row (Claude or Codex, picked with a
+ * selector). Nothing here installs or edits anything on its own: every side
+ * effect is a click.
  */
 export function CliSettings() {
   const t = useT()
@@ -27,8 +36,11 @@ export function CliSettings() {
   const userPath = useAppStore((s) => s.settings.automation?.cliUserPath === true)
   const updateSettings = useAppStore((s) => s.updateSettings)
   const [state, setState] = useState<CliUiState | null>(null)
-  const [skill, setSkill] = useState<SkillStatus | null>(null)
+  // One status per agent, so flipping the selector never shows the other one's state.
+  const [skills, setSkills] = useState<Partial<Record<SkillTarget, SkillStatus | null>>>({})
+  const [target, setTarget] = useState<SkillTarget>('claude')
   const [busy, setBusy] = useState(false)
+  const skill = skills[target] ?? null
 
   const refresh = useCallback(() => {
     window.snApi.cli
@@ -45,10 +57,20 @@ export function CliSettings() {
   }, [cliEnabled, refresh])
 
   useEffect(() => {
-    window.snApi.cli
-      .skill('status')
-      .then(setSkill)
-      .catch(() => setSkill(null))
+    let alive = true
+    for (const tg of SKILL_TARGETS) {
+      window.snApi.cli
+        .skill('status', tg)
+        .then((next) => {
+          if (alive) setSkills((prev) => ({ ...prev, [tg]: next }))
+        })
+        .catch(() => {
+          if (alive) setSkills((prev) => ({ ...prev, [tg]: null }))
+        })
+    }
+    return () => {
+      alive = false
+    }
   }, [])
 
   const automation = useAppStore((s) => s.settings.automation)
@@ -71,10 +93,11 @@ export function CliSettings() {
   }
 
   const runSkill = async (op: SkillOp): Promise<void> => {
+    const tg = target
     setBusy(true)
     try {
-      const next = await window.snApi.cli.skill(op)
-      setSkill(next)
+      const next = await window.snApi.cli.skill(op, tg)
+      setSkills((prev) => ({ ...prev, [tg]: next }))
       if (next.error) toast.error(next.error === 'foreign' ? t('settings.cli.skill.foreignError') : t('settings.cli.skill.failed'), { dedupeKey: 'cli-skill' })
     } finally {
       setBusy(false)
@@ -144,26 +167,35 @@ export function CliSettings() {
         </div>
       </SettingRow>
       <SettingRow searchId="automation.skill" title={t('settings.cli.skill')} description={t('settings.cli.skillHint')}>
-        <div className="flex flex-wrap items-center gap-2">
-          <p data-cli-skill={skill?.state ?? 'unknown'} className="mr-auto min-w-0 break-all text-xs text-text-primary">
-            {skillText}
-          </p>
-          {(skill?.state === 'missing' || !skill) && (
-            <button type="button" data-cli-skill-install disabled={busy} onClick={() => void runSkill('install')} className={btnCls}>
-              {t('settings.cli.skill.install')}
-            </button>
-          )}
-          {(skill?.state === 'installed' || skill?.state === 'outdated') && (
-            <button type="button" data-cli-skill-repair disabled={busy} onClick={() => void runSkill('repair')} className={btnCls}>
-              <Wrench size={13} className="text-accent-violet" />
-              {t('settings.cli.skill.repair')}
-            </button>
-          )}
-          {(skill?.state === 'installed' || skill?.state === 'outdated') && (
-            <button type="button" data-cli-skill-remove disabled={busy} onClick={() => void runSkill('remove')} className={btnCls}>
-              {t('settings.cli.skill.remove')}
-            </button>
-          )}
+        <div className="space-y-2">
+          <div role="radiogroup" aria-label={t('settings.cli.skill.target')} className="flex w-fit gap-1 rounded-btn border border-border bg-bg-primary p-1">
+            {SKILL_TARGETS.map((tg) => (
+              <button key={tg} type="button" role="radio" aria-checked={target === tg} data-cli-skill-target={tg} disabled={busy} onClick={() => setTarget(tg)} className={segBtn(target === tg)}>
+                {t(`settings.cli.skill.target.${tg}`)}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <p data-cli-skill={skill?.state ?? 'unknown'} title={skill?.path} className="mr-auto min-w-0 break-all text-xs text-text-primary">
+              {skillText}
+            </p>
+            {(skill?.state === 'missing' || !skill) && (
+              <button type="button" data-cli-skill-install disabled={busy} onClick={() => void runSkill('install')} className={btnCls}>
+                {t('settings.cli.skill.install')}
+              </button>
+            )}
+            {(skill?.state === 'installed' || skill?.state === 'outdated') && (
+              <button type="button" data-cli-skill-repair disabled={busy} onClick={() => void runSkill('repair')} className={btnCls}>
+                <Wrench size={13} className="text-accent-violet" />
+                {t('settings.cli.skill.repair')}
+              </button>
+            )}
+            {(skill?.state === 'installed' || skill?.state === 'outdated') && (
+              <button type="button" data-cli-skill-remove disabled={busy} onClick={() => void runSkill('remove')} className={btnCls}>
+                {t('settings.cli.skill.remove')}
+              </button>
+            )}
+          </div>
         </div>
       </SettingRow>
     </div>
