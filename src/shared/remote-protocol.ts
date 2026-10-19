@@ -225,6 +225,16 @@ export type RemoteCtlAction =
    * (pane outside workspaceId), no_resume, not_running.
    */
   | { kind: 'agentResume'; workspaceId: string; paneId: string; mode: 'resume' | 'new' }
+  // --- E3 M11 phone-fit (R30-04) ---
+  /**
+   * E3-FR-14/20: the phone sizes the pty to its own grid (cols 20..500, rows
+   * 8..300). Main records the owner (FitController) before the executor
+   * applies it; acks: disabled (settings.remote.phoneFit off, plus a
+   * fitState desktop), notSubscribed (the session does not watch the pane), rate.
+   */
+  | { kind: 'fitPane'; workspaceId: string; paneId: string; cols: number; rows: number }
+  /** E3-FR-18: give the size back to the desktop (its latest baseline). */
+  | { kind: 'releaseFit'; paneId: string }
 
 // --- Client -> server messages ---
 
@@ -302,6 +312,11 @@ export type RemoteServerMsg =
   | { v: number; type: 'exit'; paneId: string; exitCode: number }
   /** Live agent status change, straight from main (E1-FR-03); null clears it. */
   | { v: number; type: 'paneStatus'; paneId: string; status: RemotePaneStatus | null }
+  /**
+   * E3-FR-12: every effective pty resize, to each phone subscribed to the
+   * pane. `owner` says who sized it; it never names the device (FR-16).
+   */
+  | { v: number; type: 'fitState'; paneId: string; owner: 'phone' | 'desktop'; cols: number; rows: number }
   | {
       v: number
       type: 'ctlAck'

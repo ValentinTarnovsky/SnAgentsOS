@@ -11,6 +11,10 @@
  * E3 transversal (R30-02): every authOk carries a per-session `httpToken`
  * (the Bearer of the HTTP routes, dropped with the socket or the device), and
  * the v3.0 message types and ctl actions share a per-session token bucket.
+ *
+ * E3 M11 (R30-04): sub/unsub/close and the fitPane/releaseFit ctls report to
+ * the FitController, and every effective pty resize goes out as fitState to
+ * the sessions subscribed to that pane.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto'
 import { WebSocket, type RawData } from 'ws'
@@ -28,6 +32,7 @@ import {
 import { parseRemoteClientMsg } from '@shared/remote-protocol-schemas'
 import type { PtyExitInfo, PtyManager, PtySink } from '../pty/PtyManager'
 import type { DeviceRegistry } from './DeviceRegistry'
+import type { FitHooks, FitOwner } from './FitController'
 import type { PairingService, RateLimiter } from './PairingService'
 import { TokenBucket } from './TokenBucket'
 
@@ -159,6 +164,8 @@ export interface SessionManagerDeps {
    * until the push service exists; authOk then carries no pushKey.
    */
   getPushKey?: () => string | null
+  /** E3 M11: phone-fit ownership. Absent = fitPane/releaseFit go to the executor as is. */
+  fit?: FitHooks
 }
 
 /**
@@ -498,6 +505,7 @@ export class SessionManager implements PtySink {
     set.add(session)
     this.sendReplay(session, paneId, replay)
     this.recomputeForcedFast()
+    this.deps.fit?.joined(session, paneId, false)
   }
 
   private handleUnsub(session: Session, paneId: string): void {
@@ -509,6 +517,9 @@ export class SessionManager implements PtySink {
     }
     this.discardPane(session, paneId)
     this.recomputeForcedFast()
+    // E3 M11: an owner that leaves starts the 250ms grace (a chatSub or a
+    // re-sub inside it keeps the size).
+    this.deps.fit?.left(session, paneId)
   }
 
   private handleInput(paneId: string, data: string): void {
@@ -520,7 +531,19 @@ export class SessionManager implements PtySink {
     // The device name is looked up from the authenticated session, never taken
     // from the client payload (E4-FR-08).
     const deviceName = session.deviceId ? this.deps.registry.get(session.deviceId)?.name : undefined
-    const result = await this.deps.executeCommand(action, deviceName || undefined)
+    const fit = this.deps.fit
+    let result: RemoteCommandResult
+    if (fit && (action.kind === 'fitPane' || action.kind === 'releaseFit')) {
+      // E3-FR-20: main records the owner before the executor applies the size.
+      result = await fit.ctl(session, action, session.subs.has(action.paneId))
+      if (!result.ok && result.error === 'disabled') {
+        // The phone goes back to desktop mode with the size the pty has.
+        const size = this.deps.ptyManager.sizeOf(action.paneId)
+        if (size) this.send(session, { type: 'fitState', paneId: action.paneId, owner: 'desktop', cols: size.cols, rows: size.rows })
+      }
+    } else {
+      result = await this.deps.executeCommand(action, deviceName || undefined)
+    }
     this.send(session, {
       type: 'ctlAck',
       id,
@@ -557,6 +580,9 @@ export class SessionManager implements PtySink {
   }
 
   onExit(_ptyId: string, paneId: string, exitCode: number, info: PtyExitInfo): void {
+    // E3-FR-20: the pane's live pty ended (exit, restart, close): its size
+    // returns to the desktop and the next pty spawns at the desktop's.
+    if (info.current) this.deps.fit?.paneGone(paneId)
     // Only a natural exit of the pane's live pty reaches phones (E6-FR-34). A
     // kill/restart/close is not an exit the phone should report, and a stale
     // pty whose pane already rebound is not current. (PtyManager has already
@@ -570,7 +596,27 @@ export class SessionManager implements PtySink {
     }
   }
 
+  /** E3-FR-12: an effective resize reaches every phone subscribed to the pane. */
+  onResize(_ptyId: string, paneId: string, cols: number, rows: number): void {
+    this.broadcastFitState(paneId, this.deps.fit?.ownerOf(paneId) ?? 'desktop', cols, rows)
+  }
+
   // --- Broadcast / lifecycle exposed to RemoteManager -----------------------
+
+  /**
+   * fitState to the sessions subscribed to a pane (`everyone`: to every
+   * authenticated session). Buffered `out` for the pane goes first: those
+   * bytes were laid out for the previous size.
+   */
+  broadcastFitState(paneId: string, owner: FitOwner, cols: number, rows: number, everyone = false): void {
+    const targets = everyone ? this.sessions : this.paneSubs.get(paneId)
+    if (!targets) return
+    for (const session of targets) {
+      if (!session.authed) continue
+      if (session.subs.has(paneId)) this.flushPane(session, paneId)
+      this.send(session, { type: 'fitState', paneId, owner, cols, rows })
+    }
+  }
 
   broadcastState(snapshot: RemoteStateSnapshot): void {
     for (const session of this.sessions) {
@@ -827,6 +873,8 @@ export class SessionManager implements PtySink {
       if (set.size === 0) this.paneSubs.delete(paneId)
     }
     session.subs.clear()
+    // E3 M11: an owner whose socket closed keeps the size through the grace, then held.
+    this.deps.fit?.closed(session)
     if (session.pendingRequestId) {
       this.pendingPairSessions.delete(session.pendingRequestId)
       this.deps.pairing.cancelPending(session.pendingRequestId)
