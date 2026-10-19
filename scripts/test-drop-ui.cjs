@@ -29,7 +29,7 @@ useAppStore.setState({hydrated:true,activeWorkspaceId:'ws-1',workspaces:[ws]});
 applyTheme('midnight');
 const noopFn=()=>{};
 createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div style={{height:'100vh',display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,padding:6}} className="bg-bg-primary text-text-primary">
- {ws.panes.map((p,i)=><PaneCell key={p.id} workspace={ws} pane={p} presets={[]} workspaceActive maximizedId={null} minimizedIds={[]} index={i} isDragging={false} draggable onToggleMax={noopFn} onToggleMin={noopFn} onClose={noopFn} onDragStartCell={noopFn} onDragEnterCell={noopFn} onDragEndCell={noopFn}/>)}
+ {ws.panes.map((p,i)=><PaneCell key={p.id} workspace={ws} pane={p} presets={[]} workspaceActive maximizedId={null} minimizedIds={[]} index={i} isDragging={false} draggable onToggleMax={noopFn} onToggleMin={noopFn} onClose={noopFn} onDragStartCell={noopFn} onDragEndCell={noopFn}/>)}
 </div></I18nProvider>);
 const dt=(names,internal)=>{const d=new DataTransfer();for(const n of names)d.items.add(new File(['x'],n,{type:'image/png'}));if(internal)d.setData('application/x-snaos-path',internal);return d};
 const fire=(el,type,d)=>el.dispatchEvent(new DragEvent(type,{bubbles:true,cancelable:true,dataTransfer:d}));

@@ -163,6 +163,8 @@ export interface RemoteUsageRow {
   /** Subscription/plan label (Codex: plus/pro/...). */
   planType?: string | null
   status: 'ok' | 'expired' | 'error' | 'nodata' | 'loading'
+  /** True when the desktop is holding the last good value through a failed poll. */
+  stale?: boolean
 }
 
 /** Snapshot of the desktop's live usage bars, mirrored to the phone. */

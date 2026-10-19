@@ -1,4 +1,5 @@
 import { useAppStore } from './store'
+import { useAgentStore } from './agentStore'
 import { focusPaneWhenReady, setFocusedPane } from './focus'
 import { toast } from './toast'
 
@@ -18,12 +19,15 @@ export function agentToastKey(paneId: string): string {
  * 4. restore it if minimized;
  * 5. clear its attention flag (and close its agent card);
  * 6. focus its terminal once mounted.
+ * The agents board closes first: it covers the grid, so a reveal under it
+ * would land on a console nobody can see.
  * Returns false when the pane no longer exists.
  */
 export function revealPane(paneId: string): boolean {
   const s = useAppStore.getState()
   const ws = s.workspaces.find((w) => w.panes.some((p) => p.id === paneId))
   if (!ws) return false
+  useAgentStore.getState().setView('grid')
   setFocusedPane(paneId, ws.id)
   s.ensureMounted(ws.id)
   if (s.activeWorkspaceId !== ws.id) s.setActive(ws.id)

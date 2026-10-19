@@ -275,6 +275,7 @@ const usageSettingsSchema = z
       })
       .default({}),
     custom: z.array(usageCustomRowSchema).default([]),
+    collapsed: z.boolean().catch(false).default(false),
   })
   .default({})
 
@@ -401,6 +402,7 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * PaneSchedule).
  * v13 -> v14 is defaults only as well (no logic, R31-00): the single new key
  * is settings.terminalShellIntegration (default true).
+ * v14 -> v15 is defaults only (no logic): settings.usage.collapsed (default false).
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)

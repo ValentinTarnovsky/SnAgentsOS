@@ -150,7 +150,7 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('automation.protectSsh', 'settings.cli.protectSsh', 'settings.cli.protectSshHint', { keywords: ['cli', 'snaos', 'ssh', 'connection', 'conexion', 'profile', 'perfil', 'protect', 'proteger'], toggle: { path: 'automation.cliProtectSsh' } }),
   e('automation.userPath', 'settings.cli.userPath', undefined, { keywords: ['cli', 'snaos', 'path', 'windows terminal', 'environment', 'entorno', 'variable'] }),
   e('automation.server', 'settings.cli.server', 'settings.cli.serverHint', { keywords: ['cli', 'snaos', 'server', 'servidor', 'pipe', 'endpoint', 'runtime'] }),
-  e('automation.skill', 'settings.cli.skill', 'settings.cli.skillHint', { keywords: ['skill', 'claude', 'snaos', 'cli', 'agent', 'agente'] }),
+  e('automation.skill', 'settings.cli.skill', 'settings.cli.skillHint', { keywords: ['skill', 'claude', 'codex', 'snaos', 'cli', 'agent', 'agente'] }),
 
   // Startup
   e('startup.restoreLast', 'settings.restoreLast', undefined, { keywords: ['restore', 'restaurar', 'workspace', 'inicio', 'startup'], toggle: { path: 'restoreLastWorkspace' } }),

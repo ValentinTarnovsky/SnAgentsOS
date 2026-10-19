@@ -6,6 +6,7 @@
 import { type ReactNode } from 'react'
 import { clsx } from 'clsx'
 import type { RemoteUsageRow } from '@shared/remote-protocol'
+import { visibleUsageRows } from '@shared/usageRows'
 import { Sheet } from './Sheet'
 import { useRemoteStore } from '../lib/store'
 import { t, type MobileMessageKey } from '../lib/i18n'
@@ -45,8 +46,13 @@ function fmtUntil(iso: string): string | null {
   return `${Math.round(hr / 24)}d`
 }
 
-/** Display label: localized session/weekly for quota rows, else the row's own. */
-function rowLabel(row: RemoteUsageRow): string {
+/**
+ * Display label: localized session/weekly chosen by the window's kind (what it
+ * is, not its id or position), else the row's own. Per-model weekly buckets
+ * (Opus, Sonnet) keep the label that names their model.
+ */
+export function rowLabel(row: RemoteUsageRow): string {
+  if (/^claude\.(opus|sonnet)7d$/.test(row.id)) return row.label
   if (row.kind === '5h') return t('usage.session')
   if (row.kind === '7d') return t('usage.weekly')
   return row.label
@@ -96,7 +102,8 @@ function UsageRowView({ row }: { row: RemoteUsageRow }): ReactNode {
 }
 
 export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
-  const rows = useRemoteStore((s) => s.snapshot?.usage?.rows) ?? []
+  // A window the plan does not have (nodata beside an answered sibling) is not shown.
+  const rows = visibleUsageRows(useRemoteStore((s) => s.snapshot?.usage?.rows) ?? [])
 
   return (
     <Sheet open={open} onClose={onClose} title={t('usage.title')}>

@@ -21,13 +21,18 @@ export function startGitSync(): () => void {
   })
 
   let lastTargets = ''
+  let watched = new Set<string>()
   const pushTargets = (s: AppState): void => {
-    const targets = buildGitTargets(s.workspaces, s.activeWorkspaceId)
+    // Each console's own folder: its agent's (hook cwd) first, else its shell's (OSC 7).
+    const paneCwds: Record<string, string> = { ...s.paneCwd }
+    for (const [id, st] of Object.entries(s.paneStatus)) if (st.cwd) paneCwds[id] = st.cwd
+    const targets = buildGitTargets(s.workspaces, s.activeWorkspaceId, paneCwds, window.snApi.platform)
     const json = JSON.stringify(targets)
     if (json === lastTargets) return
     lastTargets = json
+    watched = new Set(targets.map((t) => t.key))
     api.setWatch(targets)
-    useGitStore.getState().retain(new Set(targets.map((t) => t.key)))
+    useGitStore.getState().retain(watched)
   }
 
   let lastChip: boolean | null = null
@@ -52,7 +57,7 @@ export function startGitSync(): () => void {
     const keys = new Set<string>()
     for (const ws of s.workspaces) {
       for (const pane of ws.panes) {
-        if (agentFinished(prevStates.get(pane.id), next.get(pane.id))) for (const k of gitKeysForPane(ws, pane)) keys.add(k)
+        if (agentFinished(prevStates.get(pane.id), next.get(pane.id))) for (const k of gitKeysForPane(ws, pane, watched)) keys.add(k)
       }
     }
     prevStates = next
@@ -67,10 +72,14 @@ export function startGitSync(): () => void {
   let prevWorkspaces = initial.workspaces
   let prevActive = initial.activeWorkspaceId
   let prevSettings = initial.settings
+  let prevCwd = initial.paneCwd
+  let prevCwdStatus = initial.paneStatus
   const unsub = useAppStore.subscribe((s) => {
-    if (s.workspaces !== prevWorkspaces || s.activeWorkspaceId !== prevActive) {
+    if (s.workspaces !== prevWorkspaces || s.activeWorkspaceId !== prevActive || s.paneCwd !== prevCwd || s.paneStatus !== prevCwdStatus) {
       prevWorkspaces = s.workspaces
       prevActive = s.activeWorkspaceId
+      prevCwd = s.paneCwd
+      prevCwdStatus = s.paneStatus
       pushTargets(s)
     }
     if (s.settings !== prevSettings) {

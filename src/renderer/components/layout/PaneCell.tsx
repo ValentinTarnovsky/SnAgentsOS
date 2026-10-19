@@ -2,6 +2,7 @@ import { useEffect, useState, type DragEvent } from 'react'
 import {
   ArchiveRestore,
   ArchiveX,
+  ArrowRightLeft,
   Clock,
   ClipboardCopy,
   Eraser,
@@ -16,6 +17,7 @@ import {
   Play,
   RotateCw,
   SquarePen,
+  Undo2,
   X,
 } from 'lucide-react'
 import { motion } from 'framer-motion'
@@ -33,6 +35,7 @@ import { isAgentPane } from '@/lib/agentPane'
 import { buildDropPayload, type DropMode } from '@/lib/dropPaths'
 import { INTERNAL_PATH_MIME, parseInternalPath } from '@/lib/dragNonce'
 import { isPathDrag, nextDragDepth, type DragHoverEvent } from '@/lib/dropHover'
+import { PANE_DRAG_MIME, setPaneDragId } from '@/lib/paneDrag'
 import { iconFor } from '@/lib/icons'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { PaneStatusDot } from '@/components/ui/StatusDot'
@@ -52,6 +55,7 @@ import { templateFromPane, worktreeOffer } from '@/lib/worktrees'
 import { PaneWorktreeChip } from '@/components/git/PaneWorktreeChip'
 import { WorktreeMissingCard } from '@/components/layout/WorktreeMissingCard'
 import { RepoSetupPlaceholder } from '@/components/layout/RepoSetupPlaceholder'
+import { revealPane } from '@/lib/revealPane'
 import { reopenClosedConsole, restartClean, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
 import { useLang, useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -74,7 +78,6 @@ interface PaneCellProps {
   onToggleMin: () => void
   onClose: () => void
   onDragStartCell: () => void
-  onDragEnterCell: () => void
   onDragEndCell: () => void
 }
 
@@ -91,14 +94,20 @@ export function PaneCell({
   onToggleMin,
   onClose,
   onDragStartCell,
-  onDragEnterCell,
   onDragEndCell,
 }: PaneCellProps) {
   const t = useT()
   const lang = useLang()
   const Icon = iconFor(pane.icon)
   const connections = useAppStore((s) => s.connections)
-  const { cwd, initialCommand, setup, launchKind } = resolveLaunch(pane, workspace, presets, connections)
+  // A console moved here from another workspace keeps launching as at home
+  // (folder, connection profile): the move only changes where it is shown.
+  const homeWs = useAppStore((s) => {
+    const home = s.paneHome[pane.id]
+    return home ? s.workspaces.find((w) => w.id === home.workspaceId) : undefined
+  })
+  const launchWs = homeWs ?? workspace
+  const { cwd, initialCommand, setup, launchKind } = resolveLaunch(pane, launchWs, presets, connections)
   // E6-FR-32: the configured default shell for this OS (main falls back to the
   // OS default, with a warning line, when it does not exist). Read at mount.
   const shell = useAppStore((s) => {
@@ -139,10 +148,10 @@ export function PaneCell({
 
   // Worktree console (E7-FR-27..36): "Duplicate in worktree" uses the pane's
   // resolved cwd; a pane on a connection profile never offers it.
-  const wsGitSummary = useGitStore((s) => s.summaries[workspaceGitKey(workspace.id)])
-  const wsGitError = useGitStore((s) => s.errors[workspaceGitKey(workspace.id)])
+  const wsGitSummary = useGitStore((s) => s.summaries[workspaceGitKey(launchWs.id)])
+  const wsGitError = useGitStore((s) => s.errors[workspaceGitKey(launchWs.id)])
   const openWorktreeLaunch = useWorktreeStore((s) => s.openLaunch)
-  const offer = worktreeOffer(workspace, pane, presets, connections, { summary: wsGitSummary, error: wsGitError })
+  const offer = worktreeOffer(launchWs, pane, presets, connections, { summary: wsGitSummary, error: wsGitError })
   const wt = pane.worktree
   const wtMissing = useWorktreeStore((s) => !!s.missing[pane.id])
   // FR-36: before a worktree console spawns (mount, remount, restart clean),
@@ -169,6 +178,12 @@ export function PaneCell({
   }, [wtCheckKey])
   const wtPending = !!wt && wtCheckKey !== null && wtChecked !== wtCheckKey
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  // "Move to workspace" picker (session only, see paneHome.ts), opened from the menu.
+  const [movePicker, setMovePicker] = useState<{ x: number; y: number } | null>(null)
+  const allWorkspaces = useAppStore((s) => s.workspaces)
+  const moveTo = (toId: string): void => {
+    if (useAppStore.getState().movePaneToWorkspace(pane.id, toId)) revealPane(pane.id)
+  }
   const [renaming, setRenaming] = useState(false)
   const [nameVal, setNameVal] = useState(pane.title)
   const [scheduling, setScheduling] = useState(false)
@@ -255,6 +270,10 @@ export function PaneCell({
       onClick: onToggleMax,
     },
     { label: t('pane.minimize'), icon: Minus, onClick: onToggleMin },
+    ...(allWorkspaces.length > 1
+      ? [{ label: t('pane.moveTo'), icon: ArrowRightLeft, onClick: () => setMovePicker(menu ?? { x: 120, y: 80 }) }]
+      : []),
+    ...(homeWs ? [{ label: t('pane.moveBack', { name: homeWs.name }), icon: Undo2, onClick: () => moveTo(homeWs.id) }] : []),
     {
       label: hasSchedule ? t('schedule.edit') : t('pane.schedule'),
       icon: Clock,
@@ -312,7 +331,6 @@ export function PaneCell({
       }}
       onDragEnter={(e) => {
         if (isPathDrag(e.dataTransfer.types)) stepDrag('enter')
-        onDragEnterCell()
       }}
       onDragLeave={(e) => {
         if (isPathDrag(e.dataTransfer.types)) stepDrag('leave')
@@ -330,9 +348,15 @@ export function PaneCell({
         draggable={draggable && !renaming}
         onDragStart={(e) => {
           e.dataTransfer.effectAllowed = 'move'
+          // The grid reorders on it; a sidebar workspace row takes it as "move here".
+          e.dataTransfer.setData(PANE_DRAG_MIME, pane.id)
+          setPaneDragId(pane.id)
           onDragStartCell()
         }}
-        onDragEnd={onDragEndCell}
+        onDragEnd={() => {
+          setPaneDragId(null)
+          onDragEndCell()
+        }}
         onAuxClick={(e) => {
           if (e.button === 1) {
             e.preventDefault()
@@ -377,6 +401,20 @@ export function PaneCell({
               </span>
             )}
           </span>
+        )}
+        {homeWs && (
+          <Tooltip label={t('pane.moveBack', { name: homeWs.name })}>
+            <button
+              draggable={false}
+              data-pane-moved={homeWs.id}
+              aria-label={t('pane.moveBack', { name: homeWs.name })}
+              onClick={() => moveTo(homeWs.id)}
+              className="flex min-w-0 max-w-[140px] shrink items-center gap-1 rounded border border-border px-1 text-[10px] leading-4 text-text-secondary transition-colors hover:border-accent-violet/50 hover:text-text-primary"
+            >
+              <Undo2 size={10} className="shrink-0" />
+              <span className="truncate">{homeWs.name}</span>
+            </button>
+          </Tooltip>
         )}
         {wt && <PaneWorktreeChip pane={pane} />}
         <CacheChip paneId={pane.id} />
@@ -513,6 +551,20 @@ export function PaneCell({
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+      )}
+
+      {movePicker && (
+        <ContextMenu
+          x={movePicker.x}
+          y={movePicker.y}
+          items={allWorkspaces.map((w) => ({
+            label: w.id === homeWs?.id ? `${w.name} (${t('pane.moveHomeTag')})` : w.name,
+            disabled: w.id === workspace.id,
+            checked: w.id === workspace.id,
+            onClick: () => moveTo(w.id),
+          }))}
+          onClose={() => setMovePicker(null)}
+        />
       )}
 
       {scheduling && (

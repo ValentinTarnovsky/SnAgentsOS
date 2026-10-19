@@ -193,7 +193,7 @@ export const CH = {
   // The CLI's renderer ops ride REMOTE_CONTROL_CMD / REMOTE_CONTROL_RESULT (CONTRATOS).
   CLI_SET_ENABLED: 'cli:setEnabled', // send (boolean)
   CLI_STATE: 'cli:state', // invoke -> CliUiState (never a token)
-  CLI_SKILL: 'cli:skill', // invoke (SkillOp) -> SkillStatus
+  CLI_SKILL: 'cli:skill', // invoke ({ op: SkillOp, target?: SkillTarget }; a bare SkillOp still means claude) -> SkillStatus
   CLI_USER_PATH: 'cli:userPath', // invoke (boolean) -> boolean
 
   // Per-repo .snagentsos.json (E8-FR-23..27). Trust lives in main's dataDir()/trusted-repos.json; previewExport is an amendment.

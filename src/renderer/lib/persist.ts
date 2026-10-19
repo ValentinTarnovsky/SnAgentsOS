@@ -1,10 +1,12 @@
 import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
 import { type AppState, useAppStore } from './store'
+import { withPanesHome } from './paneHome'
 
 function toConfig(state: AppState): ConfigFile {
   return {
     version: CONFIG_VERSION,
-    workspaces: state.workspaces,
+    // A console moved to another workspace is saved at home: the move lasts this session only.
+    workspaces: withPanesHome(state.workspaces, state.paneHome),
     presets: state.presets,
     settings: { ...state.settings, sidebarCollapsed: state.sidebarCollapsed },
     activeWorkspaceId: state.activeWorkspaceId,

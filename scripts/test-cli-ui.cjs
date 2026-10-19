@@ -1,6 +1,6 @@
 // snaos CLI desktop UI (E8-FR-15..22, R30-11): Settings > Automation (switch,
 // SSH protection, user PATH incl. the portable lock, server state, Copy
-// example, skill install/remove), the settings search, and the renderer side
+// example, skill install/repair/remove for Claude and Codex), the settings search, and the renderer side
 // of the CLI bus (list in sidebar order, spawn without focus, --no-profile,
 // read from a real xterm buffer, status line in the pane header and the agent
 // row, attention, note). Isolated hidden Electron window; main is a fake.
@@ -27,13 +27,13 @@ import {applyTheme} from './src/renderer/themes/applyTheme';
 const noop=()=>()=>{};
 const fallback=(base)=>new Proxy(base,{get:(t,k)=>k in t?t[k]:(typeof k==='string'?fallback(noop):undefined)});
 const calls={clipboard:[],userPath:[],skill:[],enabled:[],reveal:0};
-const env={portable:false,skill:{state:'missing',path:'C:/fake/.claude/skills/snagentsos'}};
+const env={portable:false,skill:{claude:{state:'missing',target:'claude',path:'C:/fake/.claude/skills/snagentsos'},codex:{state:'missing',target:'codex',path:'C:/fake/.codex/skills/snagentsos'}}};
 window.snApi=fallback({platform:'win32',
  clipboard:{writeText:(t)=>calls.clipboard.push(t),readText:async()=>''},
  window:fallback({reveal:()=>{calls.reveal++}}),
  cli:{setEnabled:(v)=>calls.enabled.push(v),
   state:async()=>({enabled:true,running:true,endpoint:'\\\\\\\\.\\\\pipe\\\\snagentsos-ctl-0123456789abcdef',startedAt:Date.UTC(2026,9,18,12,0),shimPath:'C:/data/bin/snaos.cmd',binDir:'C:/data/bin',portable:env.portable,inUserPath:false}),
-  skill:async(op)=>{calls.skill.push(op);if(op==='install')env.skill={state:'installed',version:'2.0.0',path:env.skill.path};if(op==='remove')env.skill={state:'missing',path:env.skill.path};return env.skill},
+  skill:async(op,target)=>{const tg=target??'claude';calls.skill.push(op+':'+tg);const cur=env.skill[tg];if(op==='install'||op==='repair')env.skill[tg]={state:'installed',target:tg,version:'2.0.0',path:cur.path};if(op==='remove')env.skill[tg]={state:'missing',target:tg,path:cur.path};return env.skill[tg]},
   userPath:async(v)=>{calls.userPath.push(v);return true}},
  pty:fallback({write(){}}),config:fallback({save(){}}),
  updates:fallback({check:async()=>({available:false,currentVersion:'2.0.0'}),onProgress:noop}),
@@ -110,11 +110,25 @@ app.whenReady().then(async()=>{
  await js("smoke.toggle('automation.userPath')");await wait(200);
  eq([await js('smoke.calls.userPath'),(await js('smoke.st()')).settings.auto.cliUserPath],[[true],true],'the PATH switch asks main first, then saves settings.automation.cliUserPath');
  eq(await js("smoke.attr('[data-cli-skill]','data-cli-skill')"),'missing','the skill starts as not installed');
+ eq(await js("[...document.querySelectorAll('[data-cli-skill-target]')].map(b=>[b.getAttribute('data-cli-skill-target'),b.getAttribute('aria-checked')])"),[['claude','true'],['codex','false']],'the Claude | Codex selector defaults to Claude');
+ eq(await js('smoke.calls.skill'),['status:claude','status:codex'],'both statuses are read on open, nothing is written');
  await js("smoke.click('[data-cli-skill-install]')");await wait(150);
  eq([await js("smoke.attr('[data-cli-skill]','data-cli-skill')"),await js("smoke.text('[data-cli-skill]')"),await js("smoke.has('[data-cli-skill-remove]')"),await js("smoke.has('[data-cli-skill-repair]')")],['installed','Instalada v2.0.0',true,true],'Install writes it (only on the click); Remove and Repair appear');
  await shot('automation-cli');
+ await js("smoke.click('[data-cli-skill-target=codex]')");await frame();
+ eq([await js("smoke.attr('[data-cli-skill-target=codex]','aria-checked')"),await js("smoke.attr('[data-cli-skill]','data-cli-skill')"),await js("smoke.has('[data-cli-skill-install]')"),await js("smoke.has('[data-cli-skill-remove]')")],['true','missing',true,false],'selecting Codex shows its own status (not installed) with Install; Claude stays installed');
+ eq(await js('smoke.calls.skill.length'),3,'switching the selector writes nothing and asks nothing more');
+ await js("smoke.click('[data-cli-skill-install]')");await wait(150);
+ eq([await js("smoke.attr('[data-cli-skill]','data-cli-skill')"),await js("smoke.attr('[data-cli-skill]','title')"),await js("smoke.text('[data-cli-skill]')")],['installed','C:/fake/.codex/skills/snagentsos','Instalada v2.0.0'],'Install on Codex acts on the Codex folder');
+ await js("document.querySelector('[data-cli-skill-target]').scrollIntoView({block:'center'})");
+ await shot('automation-cli-codex');
+ await js("smoke.click('[data-cli-skill-repair]')");await wait(150);
  await js("smoke.click('[data-cli-skill-remove]')");await wait(150);
- eq([await js('smoke.calls.skill')],[['status','install','remove']],'skill ops go to main: status, install, remove');
+ eq(await js("smoke.attr('[data-cli-skill]','data-cli-skill')"),'missing','Remove on Codex leaves it not installed');
+ await js("smoke.click('[data-cli-skill-target=claude]')");await frame();
+ eq([await js("smoke.attr('[data-cli-skill]','data-cli-skill')"),await js("smoke.has('[data-cli-skill-remove]')")],['installed',true],'back on Claude: still installed, untouched by the Codex ops');
+ await js("smoke.click('[data-cli-skill-remove]')");await wait(150);
+ eq(await js('smoke.calls.skill'),['status:claude','status:codex','install:claude','install:codex','repair:codex','remove:codex','remove:claude'],'skill ops go to main with the selected target: both statuses first, then install, repair and remove');
  await js('smoke.close()');await frame();
  await js("smoke.env.portable=true");
  await js("smoke.open('automation')");await wait(700);

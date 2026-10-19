@@ -34,15 +34,17 @@ import type { PaneStatus, Workspace } from '@shared/types'
 import { useAgentStore } from '@/lib/agentStore'
 import { navInputFrom, workspaceAgents } from '@/lib/agentNav'
 import { formatSince, STATUS_LABEL_KEY } from '@/lib/formatSince'
-import { freezeSidebarOrder, releaseSidebarOrder, sidebarOrder, useSidebarFreeze } from '@/lib/sidebarOrder'
+import { dropWorkspace, freezeSidebarOrder, releaseSidebarOrder, sidebarOrder, useSidebarFreeze } from '@/lib/sidebarOrder'
 import { useLang, type MessageKey } from '@/i18n'
 import { AgentRows } from '@/components/sidebar/AgentRows'
 import { ExitedDot, allExited, exitedLines } from '@/components/sidebar/ExitedDot'
 import { SidebarGitSuffix } from '@/components/git/SidebarGitSuffix'
 import { useGitStore } from '@/lib/gitStore'
-import { compactChip, gitChipEnabled, workspaceGitKey } from '@/lib/gitChip'
+import { compactChip, gitChipEnabled, paneGitKey, workspaceGitKey } from '@/lib/gitChip'
 import { NoteInlineEditor, TASK_LABEL_KEY, TaskStateChip, WorkspaceNotePopover } from '@/components/sidebar/WorkspaceNotePopover'
 import { openRepoExport, reloadFromRepo } from '@/lib/repoConfigFlow'
+import { PANE_DRAG_MIME, isPaneDrag, paneDragId } from '@/lib/paneDrag'
+import { revealPane } from '@/lib/revealPane'
 
 interface MenuState {
   x: number
@@ -64,6 +66,12 @@ function AttentionBadge({ count, className }: { count: number; className?: strin
     </span>
   )
 }
+
+/** DataTransfer type of a workspace row being dragged to reorder. */
+const WS_DRAG_MIME = 'application/x-snaos-workspace'
+
+/** Keyboard focus ring of the sidebar's buttons, in place of Chromium's white default. */
+const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-violet/60'
 
 /** Most console lines in a workspace's combined tooltip before "+N" (E4-FR-11). */
 const TIP_MAX_LINES = 8
@@ -139,6 +147,7 @@ export function Sidebar() {
     presets,
     agentSettings,
     setActive,
+    setWorkspaceOrder,
     deleteWorkspace,
     renameWorkspace,
     toggleFavorite,
@@ -157,6 +166,7 @@ export function Sidebar() {
       presets: s.presets,
       agentSettings: s.settings.agents,
       setActive: s.setActive,
+      setWorkspaceOrder: s.setWorkspaceOrder,
       deleteWorkspace: s.deleteWorkspace,
       renameWorkspace: s.renameWorkspace,
       toggleFavorite: s.toggleFavorite,
@@ -184,6 +194,27 @@ export function Sidebar() {
   )
 
   const [menu, setMenu] = useState<MenuState | null>(null)
+  // Workspace row under a console being dragged by its header.
+  const [paneDropWs, setPaneDropWs] = useState<string | null>(null)
+  // Workspace reorder by drag (manual order only): the dragged row and the gap
+  // it would land in. Rows never move during the drag, only a line shows the
+  // gap, and the order changes once on drop.
+  const wsDragId = useRef<string | null>(null)
+  const [wsDrop, setWsDrop] = useState<{ id: string; after: boolean } | null>(null)
+  useEffect(() => {
+    if (!paneDropWs && !wsDrop) return
+    const reset = (): void => {
+      setPaneDropWs(null)
+      setWsDrop(null)
+      wsDragId.current = null
+    }
+    window.addEventListener('dragend', reset, true)
+    window.addEventListener('drop', reset, true)
+    return () => {
+      window.removeEventListener('dragend', reset, true)
+      window.removeEventListener('drop', reset, true)
+    }
+  }, [paneDropWs, wsDrop])
   const [confirmWs, setConfirmWs] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -206,6 +237,8 @@ export function Sidebar() {
   const frozen = useSidebarFreeze((s) => s.frozen)
   const smart = agentSettings?.sidebarSort === 'smart'
   const sorted = sidebarOrder(workspaces, smart ? { sort: 'smart', nav: navInput, frozen } : undefined)
+  // Drag to reorder only in manual order: the smart order places rows itself.
+  const reorderable = !smart && workspaces.length > 1
   const shownIds = useRef<string[]>([])
   shownIds.current = sorted.map((w) => w.id)
   const hovering = useRef(false)
@@ -296,46 +329,34 @@ export function Sidebar() {
             {t('sidebar.header')}
           </span>
         )}
-        {!sidebarCollapsed && (
-          <Tooltip label={<ActionTooltipLabel label={t('agents.board.toggle')} action="agentsBoard" />} side="right">
-            <button
-              type="button"
-              data-agents-board-toggle
-              aria-pressed={boardOpen}
-              aria-label={t('agents.board.toggle')}
-              aria-keyshortcuts={boardKeys.length > 0 ? ariaKeyshortcuts(boardKeys) : undefined}
-              onClick={() => useAgentStore.getState().setView(boardOpen ? 'grid' : 'board')}
-              className={cn(
-                'ml-auto mr-1.5 rounded-lg border p-1 transition-colors',
-                boardOpen
-                  ? 'border-accent-violet/60 bg-accent-violet/15 text-text-primary'
-                  : 'border-border/70 bg-card/40 text-text-secondary hover:border-accent-violet/40 hover:bg-card hover:text-text-primary',
-              )}
-            >
-              <LayoutDashboard size={16} />
-            </button>
-          </Tooltip>
-        )}
         <Tooltip label={<ActionTooltipLabel label={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')} action="toggleSidebar" />} side="right">
           <button
             onClick={toggleSidebar}
+            data-sidebar-toggle
+            aria-label={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')}
             aria-keyshortcuts={sidebarKeys.length > 0 ? ariaKeyshortcuts(sidebarKeys) : undefined}
-            className="rounded-lg border border-border/70 bg-card/40 p-1 text-text-secondary transition-colors hover:border-accent-violet/40 hover:bg-card hover:text-text-primary"
+            className={cn(
+              'rounded-lg border border-border/70 bg-card/40 p-1 text-text-secondary transition-colors hover:border-accent-violet/40 hover:bg-card hover:text-text-primary',
+              FOCUS_RING,
+            )}
           >
             {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           </button>
         </Tooltip>
       </div>
 
-      <div className="px-2 pb-2 pt-1">
+      {/* New workspace and the agents board (E5-FR-27) share a row; collapsed they stack. */}
+      <div className={cn('flex gap-1.5 px-2 pb-2 pt-1', sidebarCollapsed ? 'flex-col items-center' : 'items-stretch')}>
         <Tooltip label={sidebarCollapsed ? <ActionTooltipLabel label={t('sidebar.newWorkspace')} action="newWorkspace" /> : ''} side="right">
           <button
             onClick={onNew}
             data-sidebar-new
+            aria-label={sidebarCollapsed ? t('sidebar.newWorkspace') : undefined}
             aria-keyshortcuts={newKeys.length > 0 ? ariaKeyshortcuts(newKeys) : undefined}
             className={cn(
-              'group relative flex w-full items-center justify-center overflow-hidden rounded-btn border border-accent-violet/30 bg-accent-violet/10 px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent-violet/50 hover:bg-accent-violet/20',
-              sidebarCollapsed ? 'gap-0' : 'gap-2',
+              'group relative flex items-center justify-center overflow-hidden rounded-btn border border-accent-violet/30 bg-accent-violet/10 text-sm font-medium text-text-primary transition-colors hover:border-accent-violet/50 hover:bg-accent-violet/20',
+              FOCUS_RING,
+              sidebarCollapsed ? 'h-9 w-10 gap-0' : 'min-w-0 flex-1 gap-2 px-3 py-2',
             )}
           >
             <Plus size={16} className="shrink-0 text-accent-violet" />
@@ -350,6 +371,26 @@ export function Sidebar() {
             {!sidebarCollapsed && (
               <KeyHint keys={newKeys} className="absolute right-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
             )}
+          </button>
+        </Tooltip>
+        <Tooltip label={<ActionTooltipLabel label={t('agents.board.toggle')} action="agentsBoard" />} side="right" className="shrink-0">
+          <button
+            type="button"
+            data-agents-board-toggle
+            aria-pressed={boardOpen}
+            aria-label={t('agents.board.toggle')}
+            aria-keyshortcuts={boardKeys.length > 0 ? ariaKeyshortcuts(boardKeys) : undefined}
+            onClick={() => useAgentStore.getState().setView(boardOpen ? 'grid' : 'board')}
+            className={cn(
+              'flex items-center justify-center rounded-btn border transition-colors',
+              FOCUS_RING,
+              sidebarCollapsed ? 'h-9 w-10' : 'w-9',
+              boardOpen
+                ? 'border-accent-violet/60 bg-accent-violet/15 text-text-primary'
+                : 'border-border/70 bg-card/40 text-text-secondary hover:border-accent-violet/40 hover:bg-card hover:text-text-primary',
+            )}
+          >
+            <LayoutDashboard size={16} />
           </button>
         </Tooltip>
       </div>
@@ -369,19 +410,87 @@ export function Sidebar() {
           const agents = rowsOn ? workspaceAgents(w, navInput) : []
           const git = gitOn ? gitSummaries[workspaceGitKey(w.id)] : undefined
           const gitLine = git ? compactChip(git) : null
+          // A workspace that is no repo but holds several (one per console): how many its consoles work in.
+          const repoCount = gitOn && !git ? new Set(w.panes.map((p) => gitSummaries[paneGitKey(p.id)]?.repoRoot).filter(Boolean)).size : 0
           // E8-FR-10: the note replaces the console count; state and note join the collapsed tooltip.
           const noteEditing = noteEditingId === w.id && !sidebarCollapsed
           const meta = [w.taskState ? t(TASK_LABEL_KEY[w.taskState]) : '', w.note ?? ''].filter(Boolean)
           return (
-            <div key={w.id} data-sidebar-ws={w.id}>
+            <div
+              key={w.id}
+              data-sidebar-ws={w.id}
+              className="relative"
+              onDragOver={(e) => {
+                const dragId = wsDragId.current
+                if (!dragId || !e.dataTransfer.types.includes(WS_DRAG_MIME)) return
+                const dragged = workspaces.find((x) => x.id === dragId)
+                // Favorites and plain workspaces reorder only among themselves.
+                if (!dragged || !!dragged.favorite !== !!w.favorite) return
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                const r = e.currentTarget.getBoundingClientRect()
+                const after = e.clientY > r.top + r.height / 2
+                if (wsDrop?.id !== w.id || wsDrop.after !== after) setWsDrop({ id: w.id, after })
+              }}
+              onDrop={(e) => {
+                const dragId = wsDragId.current
+                if (!dragId || !wsDrop || !e.dataTransfer.types.includes(WS_DRAG_MIME)) return
+                e.preventDefault()
+                const target = sorted.findIndex((x) => x.id === wsDrop.id)
+                const next = target === -1 ? null : dropWorkspace(sorted, dragId, target + (wsDrop.after ? 1 : 0))
+                if (next) setWorkspaceOrder(next)
+                setWsDrop(null)
+                wsDragId.current = null
+              }}
+            >
+              {wsDrop?.id === w.id && (
+                <span
+                  aria-hidden
+                  data-ws-drop-line={wsDrop.after ? 'after' : 'before'}
+                  className={cn('pointer-events-none absolute inset-x-1 z-10 h-0.5 rounded bg-accent-violet', wsDrop.after ? '-bottom-px' : '-top-px')}
+                />
+              )}
               <div
+                draggable={reorderable && renamingId !== w.id && noteEditingId !== w.id}
+                onDragStart={(e) => {
+                  // Only the row itself: the agent rows below are not handles.
+                  e.dataTransfer.effectAllowed = 'move'
+                  e.dataTransfer.setData(WS_DRAG_MIME, w.id)
+                  wsDragId.current = w.id
+                }}
+                onDragEnd={() => {
+                  wsDragId.current = null
+                  setWsDrop(null)
+                }}
                 onContextMenu={(e) => {
                   e.preventDefault()
                   openMenu(e, w.id)
                 }}
+                // A console dragged by its header onto another workspace moves there (session only).
+                onDragOver={(e) => {
+                  if (!isPaneDrag(e.dataTransfer.types) || w.panes.some((p) => p.id === paneDragId())) return
+                  e.preventDefault()
+                  e.dataTransfer.dropEffect = 'move'
+                  if (paneDropWs !== w.id) setPaneDropWs(w.id)
+                }}
+                onDragLeave={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+                  if (paneDropWs === w.id) setPaneDropWs(null)
+                }}
+                onDrop={(e) => {
+                  const paneId = e.dataTransfer.getData(PANE_DRAG_MIME)
+                  setPaneDropWs(null)
+                  if (!paneId) return
+                  e.preventDefault()
+                  // After the drag settles: the source cell unmounts with the move.
+                  setTimeout(() => {
+                    if (useAppStore.getState().movePaneToWorkspace(paneId, w.id)) revealPane(paneId)
+                  }, 0)
+                }}
+                data-pane-drop={paneDropWs === w.id || undefined}
                 className={cn(
                   'group relative flex items-center rounded-btn',
-                  active ? 'bg-card' : 'hover:bg-card/60',
+                  paneDropWs === w.id ? 'bg-accent-violet/15 ring-1 ring-accent-violet/60' : active ? 'bg-card' : 'hover:bg-card/60',
                 )}
               >
                 {active && (
@@ -430,6 +539,7 @@ export function Sidebar() {
                       // the "<pane>: exited" lines go on the row itself (E6-FR-38).
                       title={!sidebarCollapsed && !status && !exitedDot && exitedLabel ? exitedLabel : undefined}
                       onClick={() => {
+                        useAgentStore.getState().setView('grid')
                         setActive(w.id)
                         // Move focus into the workspace's console right away, even
                         // when re-clicking the already-active one, so the click
@@ -438,7 +548,10 @@ export function Sidebar() {
                         rowFocusCancel.current = focusWorkspaceConsole(w.id)
                       }}
                       className={cn(
-                        'flex min-w-0 flex-1 items-center gap-2 overflow-hidden px-[11px] py-2 text-left text-sm',
+                        'flex min-w-0 flex-1 items-center overflow-hidden rounded-btn py-2 text-left text-sm',
+                        FOCUS_RING,
+                        // Collapsed, the icon alone is centered on the rail's axis.
+                        sidebarCollapsed ? 'justify-center gap-0 px-0' : 'gap-2 px-[11px]',
                         active ? 'text-text-primary' : 'text-text-secondary',
                       )}
                     >
@@ -448,12 +561,12 @@ export function Sidebar() {
                         className="shrink-0"
                         style={{ color: active ? (w.panes[0]?.color ?? '#6366f1') : undefined }}
                       />
-                      {sidebarCollapsed && (status || exitedDot) && <span className="absolute -bottom-1 -right-1 rounded-full bg-bg-secondary p-0.5">{status ? <StatusDot status={status} label={statusLabel} size={6} noTooltip /> : <ExitedDot label={exitedLabel} size={6} />}</span>}
+                      {sidebarCollapsed && (status || exitedDot) && <span className={cn('absolute -bottom-1 -right-1 rounded-full p-0.5', active ? 'bg-card' : 'bg-bg-secondary')}>{status ? <StatusDot status={status} label={statusLabel} size={6} noTooltip /> : <ExitedDot label={exitedLabel} size={6} />}</span>}
                       </span>
                       <span
                         className={cn(
-                          'min-w-0 flex-1 transition-opacity duration-150',
-                          sidebarCollapsed ? 'pointer-events-none opacity-0' : 'opacity-100',
+                          'min-w-0 transition-opacity duration-150',
+                          sidebarCollapsed ? 'pointer-events-none w-0 flex-none overflow-hidden opacity-0' : 'flex-1 opacity-100',
                         )}
                       >
                         <span className="flex items-center gap-1">
@@ -489,6 +602,12 @@ export function Sidebar() {
                             </span>
                           )}
                           {git && <SidebarGitSuffix summary={git} />}
+                          {repoCount > 0 && (
+                            <span className="min-w-0 truncate pl-1" data-sidebar-repos={repoCount}>
+                              {'· '}
+                              {repoCount === 1 ? t('sidebar.reposOne', { count: repoCount }) : t('sidebar.reposMany', { count: repoCount })}
+                            </span>
+                          )}
                         </span>
                       </span>
                     </button>
@@ -532,7 +651,7 @@ export function Sidebar() {
                 )}
               </div>
               {rowsOn && !w.agentsCollapsed && (
-                <AgentRows entries={agents} presets={presets} topicAsTitle={agentSettings?.topicAsTitle !== false} />
+                <AgentRows entries={agents} presets={presets} topicAsTitle={agentSettings?.topicAsTitle !== false} wsGit={git} gitOn={gitOn} />
               )}
             </div>
           )
@@ -543,18 +662,23 @@ export function Sidebar() {
       <UsageBars />
 
       <div className="shrink-0 border-t border-border p-2">
-        <Tooltip label={sidebarCollapsed ? <ActionTooltipLabel label={t('sidebar.settings')} action="openSettings" /> : ''} side="right">
+        <Tooltip label={sidebarCollapsed ? <ActionTooltipLabel label={t('sidebar.settings')} action="openSettings" /> : ''} side="right" className="w-full">
           <button
             onClick={() => setSettingsOpen(true)}
             data-sidebar-settings
+            aria-label={sidebarCollapsed ? t('sidebar.settings') : undefined}
             aria-keyshortcuts={settingsKeys.length > 0 ? ariaKeyshortcuts(settingsKeys) : undefined}
-            className="group flex w-full items-center gap-2 overflow-hidden rounded-btn px-[11px] py-2 text-sm text-text-secondary transition-colors hover:bg-card hover:text-text-primary"
+            className={cn(
+              'group flex w-full items-center overflow-hidden rounded-btn py-2 text-sm text-text-secondary transition-colors hover:bg-card hover:text-text-primary',
+              FOCUS_RING,
+              sidebarCollapsed ? 'justify-center gap-0 px-0' : 'gap-2 px-[11px]',
+            )}
           >
             <Settings size={16} className="shrink-0" />
             <span
               className={cn(
-                'whitespace-nowrap transition-opacity duration-150',
-                sidebarCollapsed ? 'pointer-events-none opacity-0' : 'opacity-100',
+                'overflow-hidden whitespace-nowrap transition-opacity duration-150',
+                sidebarCollapsed ? 'pointer-events-none w-0 opacity-0' : 'opacity-100',
               )}
             >
               {t('sidebar.settings')}

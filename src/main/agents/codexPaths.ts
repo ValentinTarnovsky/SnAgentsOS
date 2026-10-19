@@ -3,8 +3,8 @@ import { join } from 'path'
 import { homedir } from 'os'
 
 /** Codex's home, honoring CODEX_HOME (the CLI's own override). */
-export function codexHome(): string {
-  return process.env.CODEX_HOME || join(homedir(), '.codex')
+export function codexHome(env: NodeJS.ProcessEnv = process.env): string {
+  return env.CODEX_HOME || join(homedir(), '.codex')
 }
 
 /** Root of the dated rollout tree: <CODEX_HOME>/sessions/YYYY/MM/DD/rollout-*.jsonl. */

@@ -11,6 +11,10 @@ import { StatusGlyph, STATUS_TIP_DELAY, type GlyphKind } from '@/components/ui/S
 import { useStatusLines } from '@/lib/statusLineStore'
 import { useAppStore } from '@/lib/store'
 import { CountdownChip, paneCacheDeadline } from '@/components/agents/CacheChip'
+import { GitCounts } from '@/components/git/GitChip'
+import { useGitStore } from '@/lib/gitStore'
+import { chipBranch, chipDirty, compactChip, paneGitKey, paneOwnRepo, repoName } from '@/lib/gitChip'
+import type { GitSummary } from '@shared/git-types'
 
 /** Ages on the rows move on their own this often. */
 const AGE_TICK_MS = 30_000
@@ -37,7 +41,20 @@ export function glyphOf(e: AgentEntry): GlyphKind {
  * is doing. With 7 or more, the 6 most urgent in layout order plus "+N more".
  * A click or Enter reveals the console.
  */
-export function AgentRows({ entries, presets, topicAsTitle }: { entries: AgentEntry[]; presets: readonly AgentPreset[]; topicAsTitle: boolean }) {
+export function AgentRows({
+  entries,
+  presets,
+  topicAsTitle,
+  wsGit,
+  gitOn = false,
+}: {
+  entries: AgentEntry[]
+  presets: readonly AgentPreset[]
+  topicAsTitle: boolean
+  /** The workspace's own git summary; a console in another repo shows its own on its row. */
+  wsGit?: GitSummary
+  gitOn?: boolean
+}) {
   const t = useT()
   const lang = useLang()
   const now = useNow(AGE_TICK_MS)
@@ -46,6 +63,7 @@ export function AgentRows({ entries, presets, topicAsTitle }: { entries: AgentEn
   const statusLines = useStatusLines((s) => s.lines)
   // Claude cache countdown (E5-FR-28): on a row it takes the place of the age.
   const cacheTimer = useAppStore((s) => s.settings.agents?.cacheTimer)
+  const gitSummaries = useGitStore((s) => s.summaries)
   if (entries.length === 0) return null
   const { shown, hidden } = expanded ? { shown: entries, hidden: 0 } : pickAgentRows(entries)
 
@@ -61,6 +79,8 @@ export function AgentRows({ entries, presets, topicAsTitle }: { entries: AgentEn
         const detailed = e.status?.detail?.text && !phrase.includes(e.status.detail.text) ? `${phrase}\n${e.status.detail.text}` : phrase
         const full = statusLine ? `${statusLine}\n${detailed}` : detailed
         const Icon = iconFor(e.pane.icon)
+        // The console's own repo when it is not the workspace's (a folder of many repos).
+        const ownGit = gitOn ? paneOwnRepo(gitSummaries[paneGitKey(e.id)], wsGit) : null
         return (
           <Tooltip
             key={e.id}
@@ -70,6 +90,11 @@ export function AgentRows({ entries, presets, topicAsTitle }: { entries: AgentEn
             label={
               <span className="flex flex-col">
                 <span>{title}</span>
+                {ownGit && (
+                  <span className="font-normal text-text-secondary" data-agent-git-tip>
+                    {`${repoName(ownGit.repoRoot)} · ${compactChip(ownGit)}`}
+                  </span>
+                )}
                 {full.split('\n').map((line, i) => (
                   <span key={i} className="font-normal text-text-secondary">
                     {line}
@@ -90,6 +115,19 @@ export function AgentRows({ entries, presets, topicAsTitle }: { entries: AgentEn
                 <span className="flex min-w-0 items-center gap-1">
                   <Icon size={11} className="shrink-0" style={{ color: e.pane.color }} />
                   <span className={cn('truncate text-[12px] leading-4', e.unread ? 'font-semibold text-text-primary' : 'text-text-primary/90')}>{title}</span>
+                  {ownGit && (
+                    <span className="ml-auto min-w-0 max-w-[65%] shrink truncate pl-1 text-[10.5px] leading-4 text-text-secondary" data-agent-git={e.id}>
+                      {repoName(ownGit.repoRoot)}
+                      {' · '}
+                      <span className="font-mono">{chipBranch(ownGit)}</span>
+                      {chipDirty(ownGit) && (
+                        <>
+                          {' '}
+                          <GitCounts summary={ownGit} />
+                        </>
+                      )}
+                    </span>
+                  )}
                 </span>
                 <span className="flex min-w-0 items-center gap-1">
                   <span className="block min-w-0 flex-1 truncate text-[11px] leading-4 text-text-secondary" {...(statusLine ? { 'data-agent-status-line': '' } : {})}>{statusLine ?? phrase}</span>

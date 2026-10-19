@@ -3,8 +3,9 @@ import { net, type ClientRequest } from 'electron'
 /**
  * Hosts the usage feature is ever allowed to reach. Redirects are followed
  * manually and re-checked against this list so a 3xx can't smuggle us off-list.
+ * `chatgpt.com` serves the Codex quota (`/backend-api/wham/usage`).
  */
-const ALLOWED_HOSTS = new Set(['api.anthropic.com', 'status.anthropic.com'])
+const ALLOWED_HOSTS = new Set(['api.anthropic.com', 'status.anthropic.com', 'chatgpt.com'])
 
 function isAllowedHost(host: string): boolean {
   return ALLOWED_HOSTS.has(host)
@@ -13,6 +14,19 @@ function isAllowedHost(host: string): boolean {
 export interface JsonResponse<T> {
   status: number
   json: T | null
+  /** Parsed `Retry-After` in milliseconds (429/503 hints), when the server sent a usable one. */
+  retryAfterMs?: number
+}
+
+/** `Retry-After` is either delta-seconds or an HTTP-date; anything else is ignored. */
+export function parseRetryAfter(value: string | string[] | undefined, nowMs: number = Date.now()): number | undefined {
+  const raw = Array.isArray(value) ? value[0] : value
+  if (!raw) return undefined
+  const trimmed = raw.trim()
+  if (/^\d+$/.test(trimmed)) return Math.min(Number(trimmed), 24 * 3600) * 1000
+  const at = Date.parse(trimmed)
+  if (!Number.isFinite(at)) return undefined
+  return Math.max(0, Math.min(at - nowMs, 24 * 3600_000))
 }
 
 /**
@@ -86,7 +100,8 @@ export function getJson<T>(
         } catch {
           json = null
         }
-        ok({ status, json })
+        const retryAfterMs = parseRetryAfter(res.headers['retry-after'])
+        ok(retryAfterMs !== undefined ? { status, json, retryAfterMs } : { status, json })
       })
       res.on('error', bad)
     })

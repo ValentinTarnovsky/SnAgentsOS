@@ -19,14 +19,16 @@ export interface UsageMeterProps {
   muted?: boolean
   /** Thin, label-less variant for the collapsed sidebar. */
   compact?: boolean
+  /** Native tooltip over the whole meter (e.g. "last known value"). */
+  title?: string
 }
 
-export function UsageMeter({ label, percent, valueText, subText, muted, compact }: UsageMeterProps) {
+export function UsageMeter({ label, percent, valueText, subText, muted, compact, title }: UsageMeterProps) {
   const pct = percent === null ? 0 : Math.max(0, Math.min(100, percent))
   const fillColor = muted ? 'var(--color-border)' : barColor(pct)
 
   return (
-    <div className={compact ? '' : 'space-y-1'}>
+    <div className={compact ? '' : 'space-y-1'} title={title}>
       {!compact && (
         <div className="flex items-baseline justify-between gap-2">
           <span className="min-w-0 truncate text-[11px] font-medium text-text-primary">{label}</span>

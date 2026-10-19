@@ -43,12 +43,19 @@ export function initUsageEvents(): () => void {
 }
 
 let focusHandler: (() => void) | null = null
+/** The poll settings main got last (JSON), so a view-only change sends nothing. */
+let lastSynced = ''
 
 /**
  * Push the latest usage settings to main (so it can reschedule its pollers) and
  * (re)bind the focus-refresh listener. Call whenever settings.usage changes.
  */
 export function syncUsageConfig(cfg: UsageSettings): void {
+  // Folding the sidebar panel (`collapsed`) is view state: it must not cost a poll.
+  const { collapsed: _view, ...poll } = cfg
+  const key = JSON.stringify(poll)
+  if (key === lastSynced) return
+  lastSynced = key
   window.snApi.usage.setConfig(cfg)
   if (focusHandler) {
     window.removeEventListener('focus', focusHandler)

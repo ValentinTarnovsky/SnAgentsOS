@@ -260,6 +260,25 @@ async function main() {
     check(calls[1][0] === 'rec' && calls[1][1].join() === 'x', 'pty:reconcile forwards the live list')
   }
 
+  // --- Drag geometry: console grid slots and workspace reorder (pure) ----------
+  {
+    const { gridSlotAt, dropWorkspace } = loadRenderer(`
+      export { gridSlotAt } from '@/components/layout/gridTemplates'
+      export { dropWorkspace } from './sidebarOrder'
+    `)
+    const box = { width: 1006, height: 606 } // 2x2 of 500x300 cells with a 6 px gap
+    check(gridSlotAt(250, 150, box, 2, 4, 6) === 0 && gridSlotAt(756, 150, box, 2, 4, 6) === 1 && gridSlotAt(250, 456, box, 2, 4, 6) === 2 && gridSlotAt(756, 456, box, 2, 4, 6) === 3, 'cell centers map to their slots')
+    check(gridSlotAt(503, 303, box, 2, 4, 6) === null && gridSlotAt(495, 150, box, 2, 4, 6) === null && gridSlotAt(250, 295, box, 2, 4, 6) === null, 'the junction, the gap and the edges keep the current target (no flicker)')
+    check(gridSlotAt(756, 456, box, 2, 3, 6) === null && gridSlotAt(-1, 10, box, 2, 4, 6) === null, 'an empty last slot or a point outside is no target')
+    const w = (id, favorite = false) => ({ id, name: id, cwd: '', panes: [], favorite })
+    const shown = [w('f1', true), w('f2', true), w('a'), w('b'), w('c')]
+    check(dropWorkspace(shown, 'c', 2)?.join() === 'f1,f2,c,a,b', 'a plain workspace moves up to the first plain slot')
+    check(dropWorkspace(shown, 'c', 0)?.join() === 'f1,f2,c,a,b', 'it never lands above a favorite')
+    check(dropWorkspace(shown, 'f1', 5)?.join() === 'f2,f1,a,b,c', 'a favorite never lands below a plain workspace')
+    check(dropWorkspace(shown, 'a', 2) === null && dropWorkspace(shown, 'a', 3) === null, 'dropping in its own gaps changes nothing')
+    check(dropWorkspace(shown, 'a', 5)?.join() === 'f1,f2,b,c,a', 'down to the end')
+  }
+
   // --- ptyLifecycle: remove, delete, import, restart (E4-FR-36) ----------------
   {
     const killCalls = []
@@ -270,6 +289,7 @@ async function main() {
       export { initPtyLifecycle, reconcilePtys, shouldKillLateSpawn, allPaneIds, removedPaneIds } from './ptyLifecycle'
       export { registerPty, getPtyId } from './ptyRegistry'
       export { registerRestarter } from './restartRegistry'
+      export { withPanesHome } from './paneHome'
     `, {
       window: { snApi: { config: { save() {} }, pty: {
         killPanes: async ids => { killCalls.push(ids.slice()); return ids.length },
@@ -296,6 +316,26 @@ async function main() {
     S.getState().renamePane('w1', 'p1', 'renamed')
     S.getState().movePane('w1', 'p2', 0)
     check(killCalls.length === 0, 'renames and moves never kill')
+    const before = S.getState().workspaces
+    S.getState().movePane('w1', 'p2', 0)
+    check(S.getState().workspaces === before, 'a drag reporting the slot the console already has changes nothing')
+
+    // Move to workspace (session only): one store change, the pty lives on, config.json keeps it at home.
+    const ws = id => S.getState().workspaces.find(w => w.id === id)
+    check(S.getState().movePaneToWorkspace('q2', 'w3') === true && killCalls.length === 0, 'moving a console to another workspace never kills it')
+    check(ws('w3').panes.map(p => p.id).join() === 't1,q2' && ws('w3').layout.order.join() === 't1,q2' && !ws('w2').panes.some(p => p.id === 'q2'), 'the console shows last in the target workspace')
+    check(S.getState().paneHome.q2?.workspaceId === 'w2' && S.getState().paneHome.q2.orderIndex === 1, 'its home and slot are remembered')
+    const saved = r.withPanesHome(S.getState().workspaces, S.getState().paneHome)
+    check(saved.find(w => w.id === 'w2').layout.order.join() === 'q1,q2' && saved.find(w => w.id === 'w3').panes.length === 1, 'what config.json gets has it back at home, same slot')
+    S.getState().movePaneToWorkspace('q2', 'w2')
+    check(!S.getState().paneHome.q2 && ws('w2').layout.order.join() === 'q1,q2', 'moving it home forgets the move and restores its slot')
+    S.getState().movePaneToWorkspace('q2', 'w3')
+    S.getState().closePane('w3', 'q2')
+    check(!S.getState().paneHome.q2, 'closing a moved console forgets its home')
+    const reopened = S.getState().reopenClosedPane()
+    check(reopened?.workspaceId === 'w2' && ws('w2').panes.some(p => p.id === 'q2') && !ws('w3').panes.some(p => p.id === 'q2'), 'reopen brings a moved console back at home, not where it was shown')
+    S.getState().movePaneToWorkspace('p1', 'w2')
+    killCalls.length = 0
 
     S.getState().removePane('w1', 'p2')
     check(killCalls.length === 1 && killCalls[0].join() === 'p2', 'removePane kills exactly the removed pane')
@@ -307,6 +347,7 @@ async function main() {
     S.getState().deleteWorkspace('w2')
     const killed = new Set(killCalls.flat())
     check(killed.has('q1') && killed.has('q2') && killed.size === 2, 'deleteWorkspace kills every pane of an unvisited workspace by paneId')
+    check(ws('w1').panes.some(p => p.id === 'p1') && !S.getState().paneHome.p1, 'a console only shown in a deleted workspace goes back home alive')
 
     killCalls.length = 0
     S.getState().importConfig({ workspaces: [

@@ -234,6 +234,9 @@ async function tickerChecks() {
   check(lastRun('p2').status === 'sent' && schedOf('p2').enabled === false && !('waitingSince' in schedOf('p2')), 'a one-shot pauses after it fired and its wait ends')
 
   // Agent exited (no state) -> agent_not_running after max wait.
+  // p1's daily 09:00 would fire inside the 30 min jump when the suite runs
+  // between 08:30 and 09:00 (New York): pause it so the check is clock-free.
+  setSched('p1', { ...schedOf('p1'), enabled: false })
   submits.length = 0
   now = Date.now()
   setSched('p2', { time: '10:00', prompt: 'p', dueAt: now - 1000 })
