@@ -666,6 +666,21 @@ process.on('exit', (code) => {
   ], 'setWatch payload: absolute cwds, known key shapes, no duplicates')
   same(sanitizeTargets('nope', path.isAbsolute), [], 'non array payload')
 
+  // Against base parsers (E7-FR-35).
+  {
+    const bd = loadMain('src/main/git/baseDiff.ts')
+    same(bd.parseNameStatusZ('M\0a.ts\0A\0ñ b.txt\0R087\0old name.ts\0new name.ts\0D\0gone.txt\0X\0weird\0C100\0src.ts\0copy.ts\0'), [
+      { status: 'M', path: 'a.ts' }, { status: 'A', path: 'ñ b.txt' }, { status: 'R', path: 'new name.ts', oldPath: 'old name.ts' },
+      { status: 'D', path: 'gone.txt' }, { status: 'C', path: 'copy.ts', oldPath: 'src.ts' },
+    ], 'name-status -z: letters, unicode, renames and copies; unknown letters skipped with their path')
+    check(bd.isBaseSha('a'.repeat(40)) && bd.isBaseSha('B'.repeat(64)) && !bd.isBaseSha('abc1234') && !bd.isBaseSha('-' + 'a'.repeat(39)) && !bd.isBaseSha(null), 'base must be a full sha')
+    same(bd.sumBase([
+      { path: 'a', area: 'unstaged', status: 'M', added: 3, removed: 1, binary: false },
+      { path: 'b.png', area: 'unstaged', status: 'A', added: null, removed: null, binary: true },
+      { path: 'u', area: 'untracked', status: '?', added: null, removed: null, binary: false },
+    ], { approx: false, truncated: false }), { added: 3, removed: 1, files: 3, approx: true }, 'sumBase: binaries add 0, an uncounted untracked file makes it approximate')
+  }
+
   // Real repositories in temp (E7-FR-05 acceptance).
   let gitOk = true
   try { execFileSync('git', ['--version'], { stdio: 'ignore' }) } catch { gitOk = false }
@@ -817,6 +832,65 @@ process.on('exit', (code) => {
       check(info.available && /^\d+\.\d+/.test(info.version) && info.tooOld === false, `git info: ${info.version} at ${info.path}`)
       const noGit = await gx.createGitRunner({ gitBin: 'git-does-not-exist-snaos' }).info()
       check(noGit.available === false, 'missing git binary: available=false ("git not found")')
+
+      // Against base (E7-FR-35): a race contestant's work since its base sha, committed or not.
+      {
+        const { ChangesReader } = loadMain('src/main/git/diff.ts')
+        const rc = path.join(base, 'race')
+        fs.mkdirSync(rc)
+        git(rc, 'init', '-q', '-b', 'main')
+        write(path.join(rc, 'keep.txt'), lines(4)); write(path.join(rc, 'edit.txt'), lines(6)); write(path.join(rc, 'gone.txt'), lines(2)); write(path.join(rc, 'old.txt'), lines(8, 'o'))
+        git(rc, 'add', '-A'); git(rc, 'commit', '-qm', 'base')
+        const baseSha = git(rc, 'rev-parse', 'HEAD').trim()
+        git(rc, 'checkout', '-q', '-b', 'sn/race-claude-1-abcd')
+        // Committed on the branch: +3 in a new file, -2 from a deleted one, a rename.
+        write(path.join(rc, 'new.txt'), lines(3, 'n')); git(rc, 'rm', '-q', 'gone.txt'); git(rc, 'mv', 'old.txt', 'renamed.txt')
+        git(rc, 'add', '-A'); git(rc, 'commit', '-qm', 'agent work')
+        // Uncommitted: edit.txt -1 +2, plus an untracked file of 5 lines.
+        write(path.join(rc, 'edit.txt'), lines(5) + lines(2, 'e'))
+        write(path.join(rc, 'scratch', 'notes.md'), lines(5, 's'))
+        const { UntrackedCounter } = loadMain('src/main/git/untrackedLines.ts')
+        const ut = new UntrackedCounter()
+        const svc2 = new GitService({ runner: realRunner, emit: () => {}, watch: () => null, untracked: ut })
+        svc2.setTargets([{ key: 'pane:p1', cwd: rc, workspaceId: 'w', paneId: 'p1', active: false }, { key: 'ws:w', cwd: rc, workspaceId: 'w', active: false }])
+        await svc2.idle()
+        const reader = new ChangesReader({ source: svc2, runner: realRunner, untrackedPeek: (abs) => ut.peek(abs), open: { openPath: async () => '', showItemInFolder: () => {} } })
+        const stat = await reader.baseStat({ key: 'pane:p1', base: baseSha })
+        same(stat, { added: 3 + 2 + 5, removed: 2 + 1, files: 5, approx: false }, `diffstat against base counts commits, edits and untracked (got ${JSON.stringify(stat)})`)
+        const headOnly = svc2.get('pane:p1').summary
+        check(headOnly.added === 7 && headOnly.removed === 1, `the chip (against HEAD) only sees the uncommitted part (+${headOnly.added} -${headOnly.removed})`)
+        const list = await reader.status('pane:p1', baseSha)
+        const byPath = Object.fromEntries(list.files.map((f) => [f.path, f]))
+        check(byPath['new.txt']?.status === 'A' && byPath['new.txt'].area === 'unstaged' && byPath['new.txt'].added === 3, 'base list: a committed new file')
+        check(byPath['gone.txt']?.status === 'D' && byPath['gone.txt'].removed === 2, 'base list: a committed delete')
+        check(byPath['renamed.txt']?.status === 'R' && byPath['renamed.txt'].oldPath === 'old.txt', 'base list: a committed rename keeps its old path')
+        check(byPath['edit.txt']?.status === 'M' && byPath['edit.txt'].added === 2 && byPath['edit.txt'].removed === 1, 'base list: an uncommitted edit')
+        check(byPath['scratch/notes.md']?.area === 'untracked' && byPath['scratch/notes.md'].added === 5, 'base list: the untracked file with its lines')
+        check(!byPath['keep.txt'], 'an untouched file is not listed')
+        const d = await reader.fileDiff({ key: 'pane:p1', path: 'new.txt', area: 'unstaged', base: baseSha })
+        check(!d.error && d.hunks.length === 1 && d.hunks[0].lines.filter((l) => l.kind === 'add').length === 3, 'a committed file diffs against the base')
+        const plain = await reader.fileDiff({ key: 'pane:p1', path: 'new.txt', area: 'unstaged' })
+        check(plain.error === 'gone', 'without the base, a committed file is not in the uncommitted list')
+        check((await reader.fileDiff({ key: 'pane:p1', path: 'keep.txt', area: 'unstaged', base: baseSha })).error === 'gone', 'a file the base list does not have is refused')
+        check((await reader.baseStat({ key: 'ws:w', base: baseSha })) === null && (await reader.status('ws:w', baseSha)) === null, 'only pane targets have a base mode')
+        check((await reader.baseStat({ key: 'pane:p1', base: baseSha.slice(0, 7) })) === null, 'an abbreviated base is refused')
+        check((await reader.baseStat({ key: 'pane:p1', base: '--output=x' })) === null && (await reader.fileDiff({ key: 'pane:p1', path: 'new.txt', area: 'unstaged', base: '-p' })).error === 'denied', 'an option-looking base never reaches git')
+        check((await reader.baseStat({ key: 'pane:p1', base: 'f'.repeat(40) })) === null, 'an unknown sha gives null (git refuses it)')
+        check(await reader.openFile({ key: 'pane:p1', path: 'new.txt', base: baseSha, reveal: true }) === true && await reader.openFile({ key: 'pane:p1', path: 'new.txt', reveal: true }) === false, 'openFile accepts a base-listed file only in base mode')
+        git(rc, 'add', '-A'); git(rc, 'commit', '-qm', 'more')
+        svc2.refresh(['pane:p1'], 'manual')
+        await new Promise((r) => setTimeout(r, 1700))
+        await svc2.idle()
+        same(await reader.baseStat({ key: 'pane:p1', base: baseSha }), { added: 10, removed: 3, files: 5, approx: false }, 'committing the rest keeps the same diffstat against base')
+        // A file named like the base sha: without `--` git would call the revision ambiguous.
+        write(path.join(rc, baseSha), lines(1, 'z'))
+        git(rc, 'add', '-A'); git(rc, 'commit', '-qm', 'sha-named file')
+        svc2.refresh(['pane:p1'], 'manual')
+        await new Promise((r) => setTimeout(r, 1700))
+        await svc2.idle()
+        same(await reader.baseStat({ key: 'pane:p1', base: baseSha }), { added: 11, removed: 3, files: 6, approx: false }, 'a file named like the base sha does not make the revision ambiguous')
+        svc2.dispose()
+      }
     } finally {
       fs.rmSync(base, { recursive: true, force: true, maxRetries: 3 })
     }
@@ -898,7 +972,7 @@ process.on('exit', (code) => {
   stopGit()
 
   asyncDone = true
-  console.log(`PASS: ${checks} git checks (${dropChecks} drop/paste, ${schema13Checks} schema 13 worktree, ${checks - dropChecks - schema13Checks} GitService: porcelain, numstat, exec env + semaphore, untracked budget, refresh policy, watchers, real repos, chip, snapshot)`)
+  console.log(`PASS: ${checks} git checks (${dropChecks} drop/paste, ${schema13Checks} schema 13 worktree, ${checks - dropChecks - schema13Checks} GitService: porcelain, numstat, exec env + semaphore, untracked budget, refresh policy, watchers, real repos, against base, chip, snapshot)`)
 })().catch((e) => {
   console.error(e)
   process.exit(1)

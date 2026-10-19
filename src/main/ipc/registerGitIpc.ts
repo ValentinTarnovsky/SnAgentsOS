@@ -58,7 +58,8 @@ export function registerGitIpc(deps: GitIpcDeps): GitService {
     open: { openPath: (p) => shell.openPath(p), showItemInFolder: (p) => shell.showItemInFolder(p) },
   })
   ipcMain.on(CH.GIT_SET_PANEL, (_e, p: { key?: unknown } | null) => service.setPanelTarget(typeof p?.key === 'string' ? p.key : null))
-  ipcMain.handle(CH.GIT_STATUS, (_e, p: { key?: unknown } | null) => reader.status(p?.key))
+  ipcMain.handle(CH.GIT_STATUS, (_e, p: { key?: unknown; base?: unknown } | null) => reader.status(p?.key, p?.base))
+  ipcMain.handle(CH.GIT_BASE_STAT, (_e, p: unknown) => reader.baseStat(p))
   ipcMain.handle(CH.GIT_FILE_DIFF, (_e, p: unknown) => reader.fileDiff(p))
   ipcMain.handle(CH.GIT_OPEN_FILE, (_e, p: unknown) => reader.openFile(p))
 

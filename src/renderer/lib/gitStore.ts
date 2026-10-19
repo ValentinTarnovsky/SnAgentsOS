@@ -11,15 +11,15 @@ interface GitState {
   summaries: Record<string, GitSummary>
   errors: Record<string, GitError>
   info: GitInfoRes | null
-  /** Changes panel target (E7-FR-11). */
-  panel: { targetKey: string } | null
+  /** Changes panel target (E7-FR-11); `base` = "against base" mode of a worktree console (E7-FR-35). */
+  panel: { targetKey: string; base?: string } | null
   /** Last file list the Changes panel loaded, per target: what an in-app path drag is checked against (E7-FR-04). */
   files: Record<string, GitFileEntry[]>
   apply: (evt: GitUpdateEvt) => void
   /** Forget keys that are no longer targets. */
   retain: (keys: ReadonlySet<string>) => void
   loadInfo: (force?: boolean) => Promise<void>
-  openChanges: (targetKey: string) => void
+  openChanges: (targetKey: string, base?: string) => void
   closeChanges: () => void
   setFiles: (key: string, files: GitFileEntry[]) => void
 }
@@ -70,7 +70,8 @@ export const useGitStore = create<GitState>((set, get) => ({
       set({ info: { available: false } })
     }
   },
-  openChanges: (targetKey) => set((s) => (s.panel?.targetKey === targetKey ? s : { panel: { targetKey } })),
+  openChanges: (targetKey, base) =>
+    set((s) => (s.panel?.targetKey === targetKey && s.panel.base === base ? s : { panel: base ? { targetKey, base } : { targetKey } })),
   // Closing drops the listed files too: a row drag only validates against a list on screen.
   closeChanges: () => set({ panel: null, files: {} }),
   setFiles: (key, files) => set((s) => (s.files[key] === files ? s : { files: { ...s.files, [key]: files } })),
