@@ -10,6 +10,10 @@ const MESSAGES = {
     'dialog.closeAnyway': 'Close anyway',
     'tray.show': 'Show {app}',
     'tray.quit': 'Quit',
+    'tray.awake': 'Keep PC awake',
+    'tray.awakeAuto': 'Auto (while agents work)',
+    'tray.awakeAlways': 'Always',
+    'tray.awakeNever': 'Never',
     'status.notif.test': 'Desktop notification test',
     'status.notif.done': '{provider} finished in "{pane}"',
     'status.notif.action': '{provider} needs your input in "{pane}"',
@@ -23,6 +27,39 @@ const MESSAGES = {
     'legacy.failed.detail': 'Close {legacy} yourself and try again, or quit {app}.',
     'legacy.failed.retry': 'Retry',
     'legacy.failed.quit': 'Quit',
+    'pty.restarted': 'restarted {time}',
+    'pty.historyRestored': 'restarted - history from {date}',
+    // Crash resilience dialogs (E4-FR-21, 25).
+    'crash.breaker.message': '{app} could not recover the window.',
+    'crash.breaker.detailNone': 'No consoles are running.',
+    'crash.breaker.detailOne': 'Your console keeps running in the background.',
+    'crash.breaker.detailMany': 'Your {n} consoles keep running in the background.',
+    'crash.retry': 'Retry',
+    'crash.copy': 'Copy diagnostics',
+    'crash.background': 'Leave in background',
+    'crash.closeNone': 'Close {app}',
+    'crash.closeOne': 'Close {app} (closes 1 console)',
+    'crash.closeMany': 'Close {app} (closes {n} consoles)',
+    'crash.hang.message': '{app} is not responding',
+    'crash.hang.detail': 'The window has not responded for more than 15 seconds. Your consoles keep running.',
+    'crash.wait': 'Wait',
+    'crash.reload': 'Reload window',
+    'explorer.menuLabel': 'Open in {app}',
+    // Remote channels, Discord and ntfy (E2-FR-40): the reason only, never reply text.
+    'status.push.permission': 'Permission requested',
+    'status.push.question': 'Question pending',
+    'status.push.plan': 'Plan approval requested',
+    'status.push.elicitation': 'MCP response requested',
+    'status.push.failure': 'Agent stopped with an error',
+    'status.push.done': 'Turn complete',
+    'status.push.test': 'ntfy notification test',
+    // Web Push titles (E3-FR-45): agent and reason only, never reply text.
+    'webpush.permission': '{agent} needs permission',
+    'webpush.question': '{agent} has a question',
+    'webpush.plan': '{agent} wants a plan approved',
+    'webpush.elicitation': '{agent} needs an answer',
+    'webpush.done': '{agent} finished',
+    'webpush.failure': '{agent} failed',
   },
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
@@ -31,6 +68,10 @@ const MESSAGES = {
     'dialog.closeAnyway': 'Cerrar de todos modos',
     'tray.show': 'Mostrar {app}',
     'tray.quit': 'Salir',
+    'tray.awake': 'Mantener PC despierta',
+    'tray.awakeAuto': 'Auto (mientras trabajan los agentes)',
+    'tray.awakeAlways': 'Siempre',
+    'tray.awakeNever': 'Nunca',
     'status.notif.test': 'Prueba de notificacion de escritorio',
     'status.notif.done': '{provider} terminó en "{pane}"',
     'status.notif.action': '{provider} requiere tu acción en "{pane}"',
@@ -44,10 +85,40 @@ const MESSAGES = {
     'legacy.failed.detail': 'Cerrá {legacy} a mano y volvé a intentar, o salí de {app}.',
     'legacy.failed.retry': 'Reintentar',
     'legacy.failed.quit': 'Salir',
+    'pty.restarted': 'reiniciado {time}',
+    'pty.historyRestored': 'reiniciado - historial del {date}',
+    'crash.breaker.message': '{app} no pudo recuperar la ventana.',
+    'crash.breaker.detailNone': 'No hay consolas en ejecución.',
+    'crash.breaker.detailOne': 'Tu consola sigue corriendo en segundo plano.',
+    'crash.breaker.detailMany': 'Tus {n} consolas siguen corriendo en segundo plano.',
+    'crash.retry': 'Reintentar',
+    'crash.copy': 'Copiar diagnóstico',
+    'crash.background': 'Dejar en segundo plano',
+    'crash.closeNone': 'Cerrar {app}',
+    'crash.closeOne': 'Cerrar {app} (cierra 1 consola)',
+    'crash.closeMany': 'Cerrar {app} (cierra {n} consolas)',
+    'crash.hang.message': '{app} no responde',
+    'crash.hang.detail': 'La ventana no responde hace más de 15 segundos. Tus consolas siguen corriendo.',
+    'crash.wait': 'Esperar',
+    'crash.reload': 'Recargar ventana',
+    'explorer.menuLabel': 'Abrir en {app}',
+    'status.push.permission': 'Permiso pendiente',
+    'status.push.question': 'Pregunta pendiente',
+    'status.push.plan': 'Plan para aprobar',
+    'status.push.elicitation': 'Respuesta MCP pendiente',
+    'status.push.failure': 'El agente se detuvo por un error',
+    'status.push.done': 'Turno terminado',
+    'status.push.test': 'Prueba de notificación de ntfy',
+    'webpush.permission': '{agent} necesita permiso',
+    'webpush.question': '{agent} tiene una pregunta',
+    'webpush.plan': '{agent} espera que apruebes un plan',
+    'webpush.elicitation': '{agent} necesita una respuesta',
+    'webpush.done': '{agent} terminó',
+    'webpush.failure': '{agent} falló',
   },
 } as const
 
-type MainKey = keyof (typeof MESSAGES)['en']
+export type MainKey = keyof (typeof MESSAGES)['en']
 
 /** Minimal main-process translator; reads the language from the persisted config. */
 export function mainT(
@@ -56,6 +127,23 @@ export function mainT(
   vars?: Record<string, string | number>,
 ): string {
   return mainTLang(cfg?.settings?.language === 'es' ? 'es' : 'en', key, vars)
+}
+
+/** Local wall-clock time for short labels: 14:32 in Spanish, 2:32 PM in English. */
+export function shortTime(cfg: ConfigFile | null, date: Date = new Date()): string {
+  const h = date.getHours(), mm = String(date.getMinutes()).padStart(2, '0')
+  if (cfg?.settings?.language === 'es') return `${String(h).padStart(2, '0')}:${mm}`
+  return `${h % 12 || 12}:${mm} ${h < 12 ? 'AM' : 'PM'}`
+}
+
+/**
+ * Short local date + time of a saved history (E6-FR-11): 17/10 14:32 in
+ * Spanish, 10/17 2:32 PM in English.
+ */
+export function shortDateTime(cfg: ConfigFile | null, date: Date): string {
+  const d = date.getDate(), m = date.getMonth() + 1
+  const day = cfg?.settings?.language === 'es' ? `${String(d).padStart(2, '0')}/${String(m).padStart(2, '0')}` : `${m}/${d}`
+  return `${day} ${shortTime(cfg, date)}`
 }
 
 /** Same, with an explicit language (the legacy dialogs run before any config of this app is loaded). */

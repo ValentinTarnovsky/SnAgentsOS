@@ -15,3 +15,25 @@ export function setActiveTerm(term: Terminal | null): void {
 export function getActiveTerm(): Terminal | null {
   return active
 }
+
+// --- composer (E1-FR-31) ---
+
+/** The mounted composer, so QuickCommandsSheet can insert at its caret. */
+export interface ComposerHandle {
+  insert(text: string): void
+  focus(): void
+  /** The pane whose draft the field shows (E3-FR-09). */
+  paneId(): string | null
+  /** Append to the end of the draft (an image reference, E3-FR-09); false when it does not fit. */
+  append(text: string): boolean
+}
+
+let composerHandle: ComposerHandle | null = null
+
+export function setComposerHandle(handle: ComposerHandle | null): void {
+  composerHandle = handle
+}
+
+export function getComposerHandle(): ComposerHandle | null {
+  return composerHandle
+}

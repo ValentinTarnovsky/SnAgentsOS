@@ -58,6 +58,7 @@ export function AiUsageSection() {
       <ToggleRow
         checked={usage.enabled}
         onChange={(v) => patch({ enabled: v })}
+        searchId="aiusage.enable"
         title={t('aiusage.enable')}
         description={t('aiusage.enableHint')}
       />
@@ -78,6 +79,7 @@ export function AiUsageSection() {
         <ToggleRow
           checked={usage.showStatus}
           onChange={(v) => patch({ showStatus: v })}
+          searchId="aiusage.showStatus"
           title={t('aiusage.showStatus')}
           description={t('aiusage.showStatusHint')}
         />
@@ -117,6 +119,7 @@ export function AiUsageSection() {
         <ToggleRow
           checked={usage.refreshOnFocus}
           onChange={(v) => patch({ refreshOnFocus: v })}
+          searchId="aiusage.refreshOnFocus"
           title={t('aiusage.refreshOnFocus')}
           description={t('aiusage.refreshOnFocusHint')}
         />
@@ -132,7 +135,7 @@ export function AiUsageSection() {
 
       {/* Custom models */}
       <section className={cn('space-y-3', !usage.enabled && 'pointer-events-none opacity-50')}>
-        <SettingRow title={t('aiusage.customTitle')} description={t('aiusage.customHint')} />
+        <SettingRow searchId="aiusage.custom" title={t('aiusage.customTitle')} description={t('aiusage.customHint')} />
         {usage.custom.map((row) => (
           <div key={row.id} className="space-y-3 rounded-card border border-border bg-bg-secondary p-3">
             <div className="flex items-center gap-2">

@@ -1,14 +1,83 @@
 import { useEffect } from 'react'
 import { useAppStore } from './store'
-import { eventToAccel, resolveKeymap, type ActionId } from './keymap'
-import { getFocusedPane } from './focus'
+import { useAgentStore } from './agentStore'
+import { ctrlDigit, eventToAccel, isEditableTarget, resolveKeymap, SKIP_IN_EDITABLE, type ActionId } from './keymap'
+import { focusPane, getFocusedPane } from './focus'
 import { redrawPane } from './redrawRegistry'
+import { promptNav } from './shellMarksRegistry'
+import { liveSidebarOrder } from './sidebarOrder'
+import { reopenClosedConsole } from './agentLaunch'
+import { revealPane } from './revealPane'
+import { toast } from './toast'
+import { translate } from '@/i18n'
+import { toggleChangesPanel } from './changesPanel'
+import { panelKeyOf } from './changes'
+import {
+  advanceWaiting,
+  allAgents,
+  navigablePanes,
+  navInputFrom,
+  stepPane,
+  visibleConsoles,
+  waitingIds,
+  type WaitingCursor,
+} from './agentNav'
 
-/** Sidebar display order: favorites first (matches the Sidebar). */
+/**
+ * Sidebar display order (the single helper the Sidebar renders too): manual
+ * or Smart, frozen while the sidebar has the pointer or the focus (E5-FR-22).
+ */
 function displayOrder() {
-  return [...useAppStore.getState().workspaces].sort(
-    (a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0),
-  )
+  return liveSidebarOrder(useAppStore.getState(), useAgentStore.getState())
+}
+
+/** "Next waiting" walk shared by consecutive presses (E5-FR-17). */
+let waitingCursor: WaitingCursor | null = null
+
+/**
+ * Reveal the next console waiting on the user: action/error first, then
+ * unread done, longest waiting first; presses within 5 s keep walking the same
+ * list. With nobody waiting, a toast (announced by the stack's aria-live).
+ */
+export function goToNextWaiting(now = Date.now()): string | null {
+  const app = useAppStore.getState()
+  // A frozen entry still counts while its console exists and is still waiting
+  // or done (revealing a done one clears its unread flag, not its state).
+  const exists = (id: string): boolean => {
+    const s = useAppStore.getState()
+    const state = s.paneStatus[id]?.state
+    return (state === 'action' || state === 'error' || state === 'done') && s.workspaces.some((w) => w.panes.some((p) => p.id === id))
+  }
+  const step = advanceWaiting(waitingCursor, () => waitingIds(allAgents(navInputFrom(app, useAgentStore.getState()))), exists, now)
+  waitingCursor = step.cursor
+  if (!step.target) {
+    toast.info(translate(app.settings.language, 'agents.nobodyWaiting'), { dedupeKey: 'next-waiting' })
+    return null
+  }
+  revealPane(step.target)
+  return step.target
+}
+
+/** Focus the next/previous console of the active workspace in grid order. */
+function focusStep(dir: 1 | -1): void {
+  const s = useAppStore.getState()
+  const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId)
+  if (!ws) return
+  const ids = navigablePanes(ws, s.minimized[ws.id] ?? [])
+  const current = getFocusedPane()
+  const target = stepPane(ids, current && ids.includes(current) ? current : null, dir)
+  if (target) revealPane(target)
+}
+
+/**
+ * Whether Ctrl+1..9 must stay out of the way: turned off, inside a text field
+ * (the palette handles its own Ctrl+1..6) or with a modal open.
+ */
+function ctrlDigitBlocked(e: KeyboardEvent): boolean {
+  const s = useAppStore.getState()
+  if (s.settings.agents?.ctrlDigitFocus === false) return true
+  if (s.paletteOpen || s.settingsOpen || s.wizardOpen || s.globalPromptOpen || s.quickPopoverOpen || useAgentStore.getState().modalPending) return true
+  return isEditableTarget(e)
 }
 
 function runAction(id: ActionId): void {
@@ -21,7 +90,8 @@ function runAction(id: ActionId): void {
       s.setSettingsOpen(true)
       break
     case 'newWorkspace':
-      s.setWizardOpen(true)
+      // Already open (composer or its Advanced wizard): keep that surface and its draft.
+      if (!s.wizardOpen) s.setWizardOpen(true)
       break
     case 'toggleSidebar':
       s.toggleSidebar()
@@ -49,6 +119,13 @@ function runAction(id: ActionId): void {
       if (pane) redrawPane(pane)
       break
     }
+    case 'promptPrev':
+    case 'promptNext': {
+      // E6-FR-27: the focused pane's prompt marks; without marks nothing moves.
+      const pane = getFocusedPane()
+      if (pane) promptNav(pane, id === 'promptPrev' ? -1 : 1)
+      break
+    }
     case 'workspaceFlip': {
       const prev = s.previousWorkspaceId
       if (prev && prev !== s.activeWorkspaceId && s.workspaces.some((w) => w.id === prev)) {
@@ -69,18 +146,58 @@ function runAction(id: ActionId): void {
       s.setActive(list[to].id)
       break
     }
+    case 'nextWaiting':
+      goToNextWaiting()
+      break
+    case 'reopenClosedPane':
+      reopenClosedConsole()
+      break
+    case 'focusNextPane':
+      focusStep(1)
+      break
+    case 'focusPrevPane':
+      focusStep(-1)
+      break
+    case 'quickCommands':
+      // E8-FR-04: never over another modal (settings, wizard, palette, prompt).
+      if (s.quickPopoverOpen) {
+        // Closing with the shortcut gives the console its focus back, like Esc.
+        s.setQuickPopoverOpen(false)
+        const paneId = getFocusedPane()
+        if (paneId) setTimeout(() => focusPane(paneId), 0)
+      } else if (!quickBlocked()) s.setQuickPopoverOpen(true)
+      break
+    case 'toggleChanges':
+      toggleChangesPanel()
+      break
+    case 'agentsBoard': {
+      // E5-FR-27: never over a modal; the board closes itself on Esc or a pick.
+      const agents = useAgentStore.getState()
+      if (agents.view === 'board') agents.setView('grid')
+      else if (!quickBlocked() && !s.quickPopoverOpen) agents.setView('board')
+      break
+    }
   }
+}
+
+/** A modal is open: the Quick Commands popover stays closed (E8-FR-04). */
+export function quickBlocked(): boolean {
+  const s = useAppStore.getState()
+  return s.paletteOpen || s.settingsOpen || s.wizardOpen || s.globalPromptOpen || useAgentStore.getState().modalPending
 }
 
 /**
  * Central keyboard dispatcher (S13). Resolves each keydown against the active
  * keymap (defaults + user overrides) and runs the matching action. Attached on
- * the capture phase so it wins over xterm. Alt+1..9 (jump to Nth workspace) is
- * a fixed numeric family, not part of the remappable keymap.
+ * the capture phase so it wins over xterm. Alt+1..9 (jump to Nth workspace) and
+ * Ctrl+1..9 (focus the Nth visible console of the active workspace) are fixed
+ * numeric families, not part of the remappable keymap.
  */
 export function useGlobalKeys(): void {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      // The resume dialog (E5-FR-12) owns the keyboard until it is decided.
+      if (useAgentStore.getState().modalPending) return
       if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
         const target = displayOrder()[Number(e.key) - 1]
         if (target) {
@@ -91,11 +208,30 @@ export function useGlobalKeys(): void {
         return
       }
 
+      const digit = ctrlDigit(e)
+      if (digit !== null && !ctrlDigitBlocked(e)) {
+        const s = useAppStore.getState()
+        const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId)
+        const target = ws ? visibleConsoles(ws, s.minimized[ws.id] ?? [], s.maximized[ws.id])[digit - 1] : undefined
+        if (target) {
+          e.preventDefault()
+          e.stopPropagation()
+          revealPane(target)
+          return
+        }
+      }
+      // A Ctrl+digit left unhandled falls through to a user binding, if any;
+      // otherwise Ctrl+3..8 reach xterm as control bytes (Ctrl+3 = ESC).
+
       const accel = eventToAccel(e)
       if (!accel) return
+      // Inside the Changes panel its own keys (F7, Alt+arrows, Alt+Z, Esc) win over any binding (E7-FR-14).
+      if (panelKeyOf(e) && (e.target as Element | null)?.closest?.('[data-changes-panel]')) return
       const keymap = resolveKeymap(useAppStore.getState().settings.keymap)
       for (const id of Object.keys(keymap) as ActionId[]) {
         if (keymap[id] === accel) {
+          // Ctrl+Shift+U inside a text field stays the field's key.
+          if (SKIP_IN_EDITABLE.has(id) && isEditableTarget(e)) return
           e.preventDefault()
           e.stopPropagation()
           runAction(id)

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { LucideIcon } from 'lucide-react'
+import { Check, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/cn'
 
 export interface ContextMenuItem {
@@ -10,6 +10,12 @@ export interface ContextMenuItem {
   danger?: boolean
   /** Renders a divider above this item. */
   separated?: boolean
+  /** Radio item: a check mark when true, an empty slot when false. */
+  checked?: boolean
+  /** Shown but not clickable; `hint` says why (tooltip). */
+  disabled?: boolean
+  /** Tooltip, e.g. the reason a disabled item cannot run. */
+  hint?: string
 }
 
 interface ContextMenuProps {
@@ -17,10 +23,12 @@ interface ContextMenuProps {
   y: number
   items: ContextMenuItem[]
   onClose: () => void
+  /** Accessible name for the menu. */
+  label?: string
 }
 
 /** A small floating menu anchored at (x, y), clamped to the viewport. */
-export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
+export function ContextMenu({ x, y, items, onClose, label }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState({ x, y })
 
@@ -50,23 +58,35 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
         ref={ref}
         style={{ left: pos.x, top: pos.y }}
         onMouseDown={(e) => e.stopPropagation()}
+        role="menu"
+        aria-label={label}
         className="fixed min-w-[180px] overflow-hidden rounded-card border border-border bg-card py-1 shadow-[0_12px_32px_-12px_rgba(0,0,0,0.7)]"
       >
         {items.map((item, i) => (
           <div key={i}>
             {item.separated && <div className="my-1 h-px bg-border" />}
             <button
+              role={item.checked === undefined ? 'menuitem' : 'menuitemradio'}
+              aria-checked={item.checked}
+              aria-disabled={item.disabled || undefined}
+              title={item.hint}
               onClick={() => {
+                if (item.disabled) return
                 item.onClick()
                 onClose()
               }}
               className={cn(
-                'flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm transition-colors',
-                item.danger
-                  ? 'text-red-400 hover:bg-red-400/10'
-                  : 'text-text-primary hover:bg-bg-secondary',
+                'flex w-full items-center gap-2.5 whitespace-nowrap px-3 py-1.5 text-left text-sm transition-colors',
+                item.disabled
+                  ? 'cursor-default text-text-secondary/50'
+                  : item.danger
+                    ? 'text-red-400 hover:bg-red-400/10'
+                    : 'text-text-primary hover:bg-bg-secondary',
               )}
             >
+              {item.checked !== undefined && (
+                <Check size={14} className={cn('shrink-0', !item.checked && 'invisible')} />
+              )}
               {item.icon && <item.icon size={15} className="shrink-0" />}
               {item.label}
             </button>

@@ -8,10 +8,16 @@ import {
 } from 'react'
 import { ChevronDown, ChevronUp, Search, X } from 'lucide-react'
 import type { SetupStep } from '@shared/types'
-import { useXterm } from './useXterm'
+import type { LaunchKind } from '@shared/initialPrompt'
+import { useXterm, type XtermExitState } from './useXterm'
+import { ExitCard } from './ExitCard'
+import { AgentEndChip } from './AgentEndChip'
+import { MobileDriverBanner } from './MobileDriverBanner'
+import { useFitStore } from '@/lib/fitStore'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
+import { requestClosePane } from '@/lib/worktrees'
 
 export interface TerminalPaneProps {
   paneId: string
@@ -20,6 +26,8 @@ export interface TerminalPaneProps {
   cwd?: string
   shell?: string
   initialCommand?: string
+  /** E8-FR-02b: enables the `argv` initial prompt (resolveLaunch). */
+  launchKind?: LaunchKind
   /** Pre-launch sequence (e.g. SSH connect) run before initialCommand. */
   setup?: SetupStep[]
   fontSize?: number
@@ -33,6 +41,7 @@ export function TerminalPane({
   cwd,
   shell,
   initialCommand,
+  launchKind,
   setup,
   fontSize,
   isActive,
@@ -40,8 +49,12 @@ export function TerminalPane({
   const t = useT()
   const wrapRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<HTMLDivElement>(null)
-  const ctl = useXterm(termRef, { paneId, cwd, shell, initialCommand, setup, fontSize, isActive })
+  // Exit card (E6-FR-17): visibility is local to the pane, never persisted.
+  const [exit, setExit] = useState<XtermExitState | null>(null)
+  const ctl = useXterm(termRef, { paneId, cwd, shell, initialCommand, launchKind, setup, fontSize, isActive, onExitState: setExit })
 
+  // E3-FR-17: a phone sizes this pane (strip on top, the rest dimmed).
+  const phoneFit = useFitStore((s) => !!s.owners[paneId])
   const setPaneFontSize = useAppStore((s) => s.setPaneFontSize)
   const globalFont = useAppStore((s) => s.settings.fontSize)
 
@@ -112,7 +125,25 @@ export function TerminalPane({
       onKeyDownCapture={onKeyDownCapture}
       className="relative h-full w-full overflow-hidden bg-bg-primary p-2"
     >
-      <div ref={termRef} className="h-full w-full" />
+      <div className="flex h-full w-full flex-col">
+        <MobileDriverBanner paneId={paneId} onDone={ctl.focus} />
+        <div ref={termRef} data-phone-fit={phoneFit ? '' : undefined} className="min-h-0 w-full flex-1" />
+      </div>
+
+      {exit?.cardVisible ? (
+        <ExitCard
+          code={exit.code}
+          error={exit.error}
+          onRestart={() => {
+            ctl.restart()
+            ctl.focus()
+          }}
+          // A dead console closes without the running-process confirmation.
+          onClose={() => requestClosePane(workspaceId, paneId)}
+        />
+      ) : (
+        !exit && <AgentEndChip paneId={paneId} initialCommand={initialCommand} shellKind={ctl.shellKind} onDone={ctl.focus} />
+      )}
 
       {findOpen && (
         <div className="absolute right-3 top-3 z-10 flex items-center gap-1 rounded-btn border border-border bg-card/95 px-2 py-1 shadow-lg backdrop-blur">

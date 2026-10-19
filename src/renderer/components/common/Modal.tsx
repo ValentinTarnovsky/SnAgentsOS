@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect } from 'react'
 import { X } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { isFromToast } from '@/lib/toast'
 
 export interface ModalProps {
   open: boolean
@@ -24,7 +25,8 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      {/* A click that starts on a toast never closes the modal (E4-FR-03). */}
+      <div className="absolute inset-0 bg-black/60" onClick={(e) => { if (!isFromToast(e)) onClose() }} />
       <div
         className={cn(
           'relative z-10 flex max-h-[82vh] w-full max-w-2xl flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]',

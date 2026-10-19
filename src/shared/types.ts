@@ -2,12 +2,15 @@
  * Core domain model, shared by main and renderer.
  * Must stay free of Node/DOM imports so it is safe in the renderer bundle.
  */
+import type { PaneWorktree } from './worktree-types'
+
+export type { PaneWorktree }
 
 /**
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 10
+export const CONFIG_VERSION = 14
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -47,9 +50,38 @@ export interface ConnectionProfile {
 }
 
 /**
- * A one-shot prompt scheduled to run in a single console at a wall-clock time.
- * The renderer ticker writes `prompt` (then Enter) into the pane once `dueAt`
- * is reached, using the local PC clock, then clears the schedule.
+ * How a pane schedule repeats (E8-FR-28, schema 13). Absent = `once`.
+ * `weekly.days`: 0 = Sunday .. 6 = Saturday, 1..7 distinct entries; `hourly`
+ * takes the minute from `PaneSchedule.time`.
+ */
+export type ScheduleRecurrence =
+  | { kind: 'once' }
+  | { kind: 'daily' }
+  | { kind: 'weekdays' }
+  | { kind: 'weekly'; days: number[] }
+  | { kind: 'hourly' }
+
+/** Outcome of one schedule run (E8-FR-31, schema 13). */
+export type ScheduleRunStatus = 'sent' | 'sent_unconfirmed' | 'skipped_busy' | 'missed' | 'failed'
+
+/** One entry of a pane schedule's run history (E8-FR-31, schema 13). */
+export interface ScheduleRun {
+  /** Epoch ms of the run. */
+  at: number
+  /** Epoch ms of the occurrence it served. */
+  scheduledFor: number
+  trigger: 'scheduled' | 'manual'
+  status: ScheduleRunStatus
+  reason?: 'agent_not_running' | 'multiline_unsafe' | 'not_delivered'
+}
+
+/**
+ * A prompt scheduled to run in a single console at a wall-clock time. The
+ * renderer ticker writes `prompt` (then Enter) into the pane once `dueAt` is
+ * reached, using the local PC clock. Without `recurrence` it is one-shot and
+ * cleared after firing. Schema 13 adds the optional automation fields (they
+ * replace the contract's top-level `automations`, R30-01 amendment); an old
+ * schedule without them keeps its one-shot behavior.
  */
 export interface PaneSchedule {
   /** "HH:MM" wall-clock time the user picked (for display/editing). */
@@ -58,6 +90,16 @@ export interface PaneSchedule {
   prompt: string
   /** Epoch ms of the next occurrence; the ticker fires when Date.now() >= dueAt. */
   dueAt: number
+  /** Repeat rule (schema 13). Absent = `{ kind: 'once' }`. */
+  recurrence?: ScheduleRecurrence
+  /** Wait for the agent to be free before sending (schema 13). Absent = true. */
+  waitIdle?: boolean
+  /** Paused when false (schema 13). Absent = true. */
+  enabled?: boolean
+  /** Epoch ms since the run waits for a busy agent; persisted to survive reloads (schema 13). */
+  waitingSince?: number
+  /** Last runs, at most 20 (schema 13). */
+  history?: ScheduleRun[]
 }
 
 export interface Pane {
@@ -78,6 +120,24 @@ export interface Pane {
   fontSize?: number
   /** One-shot prompt scheduled to run in this console at a set time. */
   schedule?: PaneSchedule
+  /**
+   * Last agent session seen in this console (schema 11). A mirror written by
+   * the renderer; main's agent-sessions.json is the source of truth and only
+   * seeds from this when that file is missing or corrupt.
+   */
+  lastSession?: PaneLastSession
+  /** Isolated worktree this console runs in (schema 13, E7-FR-28); its path is also `cwd`. */
+  worktree?: PaneWorktree
+}
+
+/** Agent session mirrored onto a pane so it can be resumed later (schema 11). */
+export interface PaneLastSession {
+  provider: AgentProvider
+  sessionId: string
+  /** Directory the agent was spawned in. */
+  cwd: string
+  /** Epoch ms of the status update that carried the session id. */
+  at: number
 }
 
 /** Number of terminals in a workspace grid; maps to a fixed CSS grid template. */
@@ -101,13 +161,63 @@ export interface Workspace {
   layout?: WorkspaceLayout
   /** Connection profile run in every console before its model command. */
   setupId?: string
+  /** Sidebar agent rows folded under this workspace (schema 11). */
+  agentsCollapsed?: boolean
+  /** Short free-text note shown under the workspace name, max 140 (schema 12). */
+  note?: string
+  /** User task state, distinct from the agent state (schema 12). */
+  taskState?: WorkspaceTaskState
+  /** Repo file (.snagentsos.json) this workspace was created from (schema 13). */
+  repoConfig?: WorkspaceRepoConfig
 }
 
-/** A saved, reusable prompt/text snippet inserted into a console (U10). */
+/**
+ * Trace of the repo config applied to a workspace (E8-FR-25, schema 13). The
+ * trust itself lives in main's `trusted-repos.json`, never in config.json
+ * (R30-01 amendment: the renderer cannot forge it).
+ */
+export interface WorkspaceRepoConfig {
+  /** sha256 (hex) of the normalized file that was applied. */
+  sha256: string
+  /** Epoch ms of the apply. */
+  appliedAt: number
+  /** Quick Commands imported from the file, at most 20. */
+  quickCommandIds: string[]
+}
+
+/** Per-workspace task state (E8-FR-10, schema 12). */
+export type WorkspaceTaskState = 'todo' | 'doing' | 'review' | 'done'
+
+/**
+ * A saved, reusable prompt/text snippet inserted into a console (U10).
+ * @deprecated Schema 12 replaced snippets with QuickCommand. Kept only to parse
+ * old configs (migration input) and for the phone snapshot until R22-12.
+ */
 export interface Snippet {
   id: string
   name: string
   text: string
+}
+
+/**
+ * A reusable command (E8-FR-01, schema 12; Contratos compartidos). `send`
+ * writes `text` to a console (Enter optional); `agent` opens a console from
+ * `presetId` and delivers `text` as its first prompt (always with Enter).
+ */
+export interface QuickCommand {
+  /** 'qc-...'; commands migrated from snippets keep their 'snip-...' id. */
+  id: string
+  /** Visible label, 1..60. */
+  name: string
+  /** send: text to write; agent: first prompt. 1..16384. */
+  text: string
+  /** Absent = global. */
+  workspaceId?: string
+  action: 'send' | 'agent'
+  /** send: optional Enter; agent: always true. */
+  enter: boolean
+  /** Required when action === 'agent'. */
+  presetId?: string
 }
 
 /**
@@ -246,6 +356,16 @@ export interface RemoteSettings {
   enabled: boolean
   /** TCP port the server binds on 0.0.0.0. */
   port: number
+  /** Accept phone-fit requests (fitPane) from the phone (E3, schema 13). */
+  phoneFit: boolean
+  /** Secure mode through `tailscale serve` (E3-FR-42, schema 13). */
+  https: RemoteHttpsSettings
+}
+
+/** Secure remote mode (E3-FR-42, schema 13). Only `tailscaleServe` exists. */
+export interface RemoteHttpsSettings {
+  enabled: boolean
+  mode: 'tailscaleServe'
 }
 
 /**
@@ -259,7 +379,56 @@ export type ClaudePaneState = 'idle' | 'working' | 'done' | 'action' | 'error' |
 export type AgentProvider = 'claude' | 'codex'
 export type AttentionReason = 'permission' | 'question' | 'plan' | 'elicitation' | 'failure'
 
-export interface PaneStatus {
+/**
+ * One outstanding request of an agent (CONTRATOS RemotePending, E4-FR-09).
+ * Travels to the phone inside RemotePaneStatus; built in main from bounded
+ * hook fields, never from the raw tool_input.
+ */
+export interface RemotePending {
+  /** toolUseId / elicitation id, or a fallback key. */
+  id: string
+  kind: 'permission' | 'question' | 'plan' | 'elicitation'
+  toolName?: string
+  /** <= 200 */
+  summary: string
+  /** AskUserQuestion only. */
+  questions?: Array<{ question: string; header?: string; multiSelect: boolean; options: Array<{ label: string; description?: string }> }>
+}
+
+export type AgentDetailKind = 'tool' | 'prompt' | 'question' | 'permission' | 'plan' | 'reply'
+/** What the agent is on right now (desktop only, E5-FR-02). text <= 160, no C0/C1 or ANSI. */
+export interface AgentDetail {
+  kind: AgentDetailKind
+  text: string
+}
+
+/**
+ * Status enrichment shared by PaneStatus and PaneStatusEvt (E4-FR-09,
+ * E5-FR-02). The first four also reach the phone (RemotePaneStatus); the
+ * rest are desktop only and never leave main -> renderer.
+ */
+export interface PaneStatusDetails {
+  /** Epoch ms of the last change of the effective state (not of updatedAt). */
+  stateSince?: number
+  /** Last assistant reply, <= 280. */
+  lastMessage?: string
+  /** Current tool, summarized, <= 120. */
+  activity?: string
+  pending?: RemotePending[]
+  /** Validated session id (never `launch:`, never on SSH panes). Desktop only. */
+  sessionId?: string
+  /** Absolute existing directory reported by the agent. Desktop only. */
+  cwd?: string
+  detail?: AgentDetail
+  /** Text after the glyph in Claude's OSC title, <= 60. */
+  topic?: string
+  /** First line of the first prompt of the session, <= 60. */
+  firstPrompt?: string
+  /** Claude working -> done/idle transition (cache timer start). */
+  cacheSince?: number
+}
+
+export interface PaneStatus extends PaneStatusDetails {
   state: ClaudePaneState
   precise: boolean
   provider?: AgentProvider
@@ -269,7 +438,7 @@ export interface PaneStatus {
 }
 
 /** Main -> renderer status update for one console. */
-export interface PaneStatusEvt {
+export interface PaneStatusEvt extends PaneStatusDetails {
   paneId: string
   /** null clears the indicator (claude exited / pty died). */
   state: ClaudePaneState | null
@@ -277,10 +446,33 @@ export interface PaneStatusEvt {
   precise: boolean
   /** Main already decided this transition deserves a notification (drives sound too). */
   notify: boolean
+  /**
+   * How main delivered that notification (E4-FR-07): the OS toast, an in-app
+   * card (window focused, console out of view) or nothing. Set on notice events.
+   */
+  delivery?: 'native' | 'inApp' | 'none'
   provider?: AgentProvider
   reason?: AttentionReason
   pendingCount?: number
   updatedAt?: number
+}
+
+/** SessionEnd reasons that offer "Claude exited [Resume] [New]" (E6-FR-21). */
+export const AGENT_END_REASONS = ['prompt_input_exit', 'other'] as const
+
+/**
+ * Main -> renderer: Claude's main session (no subagent) of the live pty ended
+ * with a reason in AGENT_END_REASONS (E6-FR-21). `cwd` is the hook's validated
+ * session directory, when any.
+ */
+export interface AgentSessionEndEvt {
+  paneId: string
+  ptyId: string
+  provider: 'claude'
+  sessionId: string
+  reason: (typeof AGENT_END_REASONS)[number]
+  cwd?: string
+  at: number
 }
 
 /** Result of installing/uninstalling/inspecting the Claude Code hooks block. */
@@ -303,11 +495,26 @@ export interface DiscordSettings {
   notifyDone: boolean
 }
 
+/** ntfy push channel (E2-FR-40, schema 12). Topic and token never leave in an export. */
+export interface NtfySettings {
+  enabled: boolean
+  /** https, or http only for a private/tailnet host. Default 'https://ntfy.sh'. */
+  server: string
+  /** [A-Za-z0-9_-]{1,64} or empty. */
+  topic: string
+  /** Optional access token (Bearer). */
+  token: string
+  notifyAction: boolean
+  notifyDone: boolean
+}
+
 export interface StatusHealth {
   desktop: { error: 'blocked' | 'failed' | 'unavailable' | null }
   claude: StatusHooksStatusRes
   codex: { enabled: boolean; available: boolean; connected: number; error?: string }
   discord: { lastSuccessAt: number | null; error: string | null; queued: number }
+  /** ntfy channel (E2-FR-40), same shape as discord. */
+  ntfy?: { lastSuccessAt: number | null; error: string | null; queued: number }
 }
 
 /** Desktop notifications, sounds and Claude status integration. */
@@ -334,7 +541,77 @@ export interface NotificationSettings {
   /** Private per-console Codex transport for new local terminals. */
   codexEnabled: boolean
   discord: DiscordSettings
+  /**
+   * With the window focused but the console out of view, show an in-app card
+   * instead of the OS notification and taskbar flash (schema 11).
+   */
+  inAppWhenFocused: boolean
+  /** ntfy channel next to Discord (schema 12). */
+  ntfy: NtfySettings
+  /**
+   * Discord and ntfy only while the PC is idle/locked for 180 s (fixed); an
+   * unknown idle state still delivers. Native notifications ignore it (schema 12).
+   */
+  onlyWhenAway: boolean
 }
+
+/** Keep the PC awake while agents work (schema 11). */
+export type AwakeMode = 'auto' | 'always' | 'never'
+
+/** What to do with interrupted agent sessions on startup (schema 11). */
+export type ResumeOnStartup = 'ask' | 'auto' | 'off'
+
+/** Agent behavior settings (schema 11). */
+export interface AgentSettings {
+  /** Startup decision for consoles whose agent session was interrupted. */
+  resumeOnStartup: ResumeOnStartup
+  /** Awake mode also keeps the display on (prevent-display-sleep). */
+  awakeDisplay: boolean
+  /** One row per agent console under each workspace in the expanded sidebar. */
+  sidebarAgentRows: boolean
+  /** Show the agent's topic as the console title. */
+  topicAsTitle: boolean
+  /** Ctrl+1..9 focuses the Nth visible console instead of reaching the terminal. */
+  ctrlDigitFocus: boolean
+  /** Resume modal auto-applies after this many seconds, 0 = never (0..600, schema 12). */
+  resumeModalTimeoutSec: number
+  /** Nudge resumed consoles that were working (schema 12). */
+  resumeNudge: boolean
+  /** Nudge text, max 500; '' = the localized default (schema 12). */
+  resumeNudgeText: string
+  /** Sidebar order: manual (default) or by agent demand (schema 12). */
+  sidebarSort: 'manual' | 'smart'
+  /** Claude prompt cache countdown chip (E5-FR-28, schema 13). */
+  cacheTimer: CacheTimerSettings
+}
+
+/** Claude prompt cache timer (E5-FR-28, schema 13). */
+export interface CacheTimerSettings {
+  enabled: boolean
+  /** Cache TTL the countdown starts from. */
+  ttlMinutes: 5 | 60
+}
+
+/** Workspace composer and automation settings (E8, schema 12 and 13). */
+export interface AutomationSettings {
+  /** Preselected composer preset; '' = first 'claude' preset, else the first one. */
+  defaultAgentPresetId: string
+  /** Composer "Create another" switch. */
+  composerCreateAnother: boolean
+  /** The CLI never reads, writes or creates consoles with a Connection Profile (schema 13). */
+  cliProtectSsh: boolean
+  /** Add `<dataDir>/bin` to the user PATH (schema 13; forced off in the portable). */
+  cliUserPath: boolean
+  /** A missed run still fires once if it is at most this late, 0..1440 min (schema 13). */
+  scheduleGraceMin: number
+  /** Max wait for a busy agent before `skipped_busy`, 1..240 min (schema 13). */
+  scheduleMaxWaitMin: number
+  /** Desktop notification per schedule run (schema 13). */
+  scheduleNotify: boolean
+}
+
+/** Headless snapshot engine (E6-FR-01, schema 12). 'off' also disables scrollback persistence. */
+export type TerminalSnapshotMode = 'auto' | 'lazy' | 'off'
 
 export interface Settings {
   /** Default shell per platform; undefined => resolver picks the OS default. */
@@ -367,6 +644,35 @@ export interface Settings {
    * clicks reach the TUI (previous behavior).
    */
   terminalSelectionOverride: boolean
+  /** Unicode 11 character widths in the terminal (emoji and symbols). Schema 11. */
+  terminalUnicode11: boolean
+  /** Offer Resume / New under a console when Claude exits. Schema 11. */
+  terminalAgentEndChip: boolean
+  /** Keep the PC awake while agents work. Schema 11. */
+  awakeMode: AwakeMode
+  /** Headless mirror policy for replay and persistence. Schema 12. */
+  terminalSnapshotMode: TerminalSnapshotMode
+  /** Keep console history across restarts. Schema 12. */
+  persistScrollback: boolean
+  /** Lines saved per console, 200..5000. Schema 12. */
+  persistScrollbackLines: number
+  /** Git chip in the workspace header and background git refresh. Schema 12. */
+  gitChip: boolean
+  /** Windows "Open in SnAgentsOS" folder context menu (packaged only). Schema 12. */
+  explorerMenu: boolean
+  /** Update card dismissed for this version (installable ones only). Schema 12. */
+  updateDismissedVersion: string
+  /** `snaos` CLI available in the consoles (E8-FR-12). Schema 13. */
+  cliEnabled: boolean
+  /** Root for console worktrees; '' = dataDir()/worktrees (E7-FR-28). Schema 13. */
+  worktreesRoot: string
+  /** Hibernate idle agent consoles after N minutes; 0 = off, else 5..1440 (E5-FR-25). Schema 13. */
+  hibernateIdleMinutes: number
+  /**
+   * PowerShell shell integration: prompt marks (OSC 133), prompt navigation
+   * and "copy the last command output" (E6-FR-25..31). Schema 14.
+   */
+  terminalShellIntegration: boolean
   restoreLastWorkspace: boolean
   confirmCloseRunning: boolean
   /** Installed build only: hide to tray on window close instead of quitting. */
@@ -388,6 +694,10 @@ export interface Settings {
   remote: RemoteSettings
   /** Desktop notifications, sounds and Claude status integration. */
   notifications: NotificationSettings
+  /** Agent behavior (resume, awake display, sidebar rows, shortcuts). Schema 11. */
+  agents: AgentSettings
+  /** Workspace composer defaults (schema 12), CLI and schedule options (schema 13). */
+  automation: AutomationSettings
 }
 
 export interface ConfigFile {
@@ -396,7 +706,12 @@ export interface ConfigFile {
   presets: AgentPreset[]
   settings: Settings
   activeWorkspaceId?: string | null
-  /** Saved prompt snippets (U10). */
+  /** Reusable commands (schema 12). Replaces `snippets`. */
+  quickCommands?: QuickCommand[]
+  /**
+   * @deprecated Schema <= 11 only: migration input, converted to
+   * `quickCommands` on parse and never written again.
+   */
   snippets?: Snippet[]
   /** Reusable pre-launch connection sequences (e.g. SSH). */
   connections?: ConnectionProfile[]

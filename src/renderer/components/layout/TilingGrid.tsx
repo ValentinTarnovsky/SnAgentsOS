@@ -4,8 +4,10 @@ import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { iconFor } from '@/lib/icons'
 import { focusPane, setFocusedPane } from '@/lib/focus'
+import { requestClosePane } from '@/lib/worktrees'
 import { GRID_COLS, gridForCount, orderPanes } from './gridTemplates'
 import { PaneCell } from './PaneCell'
+import { PaneCellBoundary } from '@/components/common/ErrorBoundary'
 import { PaneStatusDot } from '@/components/ui/StatusDot'
 
 /** Stable empty array so the minimized selector keeps a constant reference. */
@@ -19,7 +21,6 @@ const NO_MINIMIZED: string[] = []
 export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isActive: boolean }) {
   const t = useT()
   const presets = useAppStore((s) => s.presets)
-  const removePane = useAppStore((s) => s.removePane)
   const toggleMaximize = useAppStore((s) => s.toggleMaximize)
   const toggleMinimize = useAppStore((s) => s.toggleMinimize)
   const movePane = useAppStore((s) => s.movePane)
@@ -52,26 +53,35 @@ export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isAc
         }}
       >
         {ordered.map((pane, index) => (
-          <PaneCell
+          // Outer boundary (E4-FR-19b): a header failure leaves a minimal
+          // header with the title and X; the pty keeps running.
+          <PaneCellBoundary
             key={pane.id}
-            workspace={workspace}
-            pane={pane}
-            presets={presets}
-            workspaceActive={isActive}
-            maximizedId={maximizedId}
-            minimizedIds={minimizedIds}
-            index={index}
-            isDragging={draggingId === pane.id}
-            draggable={!maximizedId}
-            onToggleMax={() => toggleMaximize(workspace.id, pane.id)}
-            onToggleMin={() => toggleMinimize(workspace.id, pane.id)}
-            onClose={() => removePane(workspace.id, pane.id)}
-            onDragStartCell={() => setDraggingId(pane.id)}
-            onDragEnterCell={() => {
-              if (draggingId && draggingId !== pane.id) movePane(workspace.id, draggingId, index)
-            }}
-            onDragEndCell={() => setDraggingId(null)}
-          />
+            paneId={pane.id}
+            title={pane.title}
+            hidden={(maximizedId !== null && maximizedId !== pane.id) || minimizedIds.includes(pane.id)}
+            onClose={() => requestClosePane(workspace.id, pane.id)}
+          >
+            <PaneCell
+              workspace={workspace}
+              pane={pane}
+              presets={presets}
+              workspaceActive={isActive}
+              maximizedId={maximizedId}
+              minimizedIds={minimizedIds}
+              index={index}
+              isDragging={draggingId === pane.id}
+              draggable={!maximizedId}
+              onToggleMax={() => toggleMaximize(workspace.id, pane.id)}
+              onToggleMin={() => toggleMinimize(workspace.id, pane.id)}
+              onClose={() => requestClosePane(workspace.id, pane.id)}
+              onDragStartCell={() => setDraggingId(pane.id)}
+              onDragEnterCell={() => {
+                if (draggingId && draggingId !== pane.id) movePane(workspace.id, draggingId, index)
+              }}
+              onDragEndCell={() => setDraggingId(null)}
+            />
+          </PaneCellBoundary>
         ))}
       </div>
       {minimizedPanes.length > 0 && (

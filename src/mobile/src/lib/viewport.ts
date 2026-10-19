@@ -12,17 +12,66 @@
  *    --vvh every frame instead of waiting on that one late event. This does
  *    NOT know the keyboard's final height any sooner - iOS still controls
  *    that timing - it just narrows the "typing blind" window.
+ *  - keyboardInset (E1-FR-20): how much of the layout viewport the soft
+ *    keyboard covers, innerHeight - (vv.height + vv.offsetTop), sampled by the
+ *    same listeners. Together with which input field holds the focus it feeds
+ *    the store's kbOpen, so a keyboard the OS hid without a blur (iOS "done",
+ *    Android Back) still reads as closed.
  *
  * initViewport() is idempotent-ish (safe to call once at startup) and returns a
  * teardown, though in practice the client lives for the whole page lifetime.
  */
 
+import { store } from './store'
+
 type Cleanup = () => void
+
+let inset = 0
+const insetListeners = new Set<(px: number) => void>()
+
+/** Current soft keyboard overlap in px (0 when closed or unmeasurable). */
+export function keyboardInset(): number {
+  return inset
+}
+
+/** Subscribe to keyboardInset changes. Returns an unsubscribe fn. */
+export function onKeyboardInset(listener: (px: number) => void): Cleanup {
+  insetListeners.add(listener)
+  return () => {
+    insetListeners.delete(listener)
+  }
+}
+
+/** Pure: the keyboard overlap for the given viewport metrics. */
+export function measureKeyboardInset(
+  innerHeight: number,
+  vv: { height: number; offsetTop: number } | null | undefined,
+): number {
+  if (!vv) return 0
+  return Math.max(0, Math.round(innerHeight - (vv.height + vv.offsetTop)))
+}
+
+/**
+ * Which keyboard-owning field an element is: the xterm helper textarea is
+ * 'direct'; any other field opts in with a data-kb-input attribute (the
+ * composer uses data-kb-input="composer"). Null for everything else.
+ */
+export function kbFieldOf(el: EventTarget | null): string | null {
+  if (!(el instanceof HTMLElement)) return null
+  if (el.classList.contains('xterm-helper-textarea')) return 'direct'
+  return el.dataset.kbInput ?? null
+}
 
 function applyHeight(): void {
   const vv = window.visualViewport
   const h = vv ? vv.height : window.innerHeight
   document.documentElement.style.setProperty('--vvh', `${Math.round(h)}px`)
+  const next = measureKeyboardInset(window.innerHeight, vv)
+  if (next !== inset) {
+    inset = next
+    store.getState().setKeyboard({ inset })
+    for (const listener of insetListeners) listener(inset)
+  }
 }
 
 const FOCUS_SETTLE_MS = 450
@@ -59,8 +108,15 @@ export function initViewport(): Cleanup {
   window.addEventListener('orientationchange', onResize)
 
   // Start resampling --vvh immediately on focus, ahead of iOS's late resize.
-  const onFocusIn = (): void => startSettleLoop(FOCUS_SETTLE_MS)
-  const onFocusOut = (): void => startSettleLoop(BLUR_SETTLE_MS)
+  // focusin/focusout also track which input field owns the keyboard (kbOpen).
+  const onFocusIn = (e: FocusEvent): void => {
+    store.getState().setKeyboard({ focus: kbFieldOf(e.target) })
+    startSettleLoop(FOCUS_SETTLE_MS)
+  }
+  const onFocusOut = (e: FocusEvent): void => {
+    store.getState().setKeyboard({ focus: kbFieldOf(e.relatedTarget) })
+    startSettleLoop(BLUR_SETTLE_MS)
+  }
   document.addEventListener('focusin', onFocusIn)
   document.addEventListener('focusout', onFocusOut)
 

@@ -167,3 +167,48 @@ LangString snPortableDataInside 1066 "There is data from a portable version insi
     WriteRegStr SHCTX "Software\${APP_GUID}" LegacyTaskbarPinned "1"
   ${EndIf}
 !macroend
+
+; Explorer "Open in SnAgentsOS" keys (E4-FR-35), written by the app in the
+; user's hive (src/main/shellIntegration.ts). A real uninstall removes them only
+; when the registered command launches the exe of this install folder: an
+; update (isUpdated) keeps them, and a portable's keys are never touched. The
+; quoted, separator-terminated folder avoids matching a sibling like SnAgentsOS2.
+!macro customUnInstall
+  ${IfNot} ${isUpdated}
+    SetShellVarContext current
+    ReadRegStr $R0 SHCTX "Software\Classes\Directory\shell\SnAgentsOS\command" ""
+    StrCpy $R1 `"$INSTDIR\`
+    StrLen $R2 $R1
+    StrLen $R3 $R0
+    StrCpy $R4 0
+    StrCpy $R5 ""
+    ${While} $R4 < $R3
+      StrCpy $R6 $R0 $R2 $R4
+      ${If} $R6 == $R1
+        StrCpy $R5 "1"
+        ${ExitWhile}
+      ${EndIf}
+      IntOp $R4 $R4 + 1
+    ${EndWhile}
+    ${If} $R5 == "1"
+      DeleteRegKey SHCTX "Software\Classes\Directory\shell\SnAgentsOS"
+      DeleteRegKey SHCTX "Software\Classes\Directory\Background\shell\SnAgentsOS"
+    ${EndIf}
+    ${If} $installMode == "all"
+      SetShellVarContext all
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+; snaos CLI user PATH (E8-FR-22, PLAN D7). A real uninstall runs the app once
+; with --cleanup-user-path while the exe still exists: it removes only its own
+; <data folder>\bin entry from the user PATH and exits without a window or the
+; single-instance lock. An update (isUpdated) keeps the entry; the new version
+; re-adds it at start anyway while the setting is on.
+!macro customUnInit
+  ${IfNot} ${isUpdated}
+    ${If} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+      ExecWait '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --cleanup-user-path'
+    ${EndIf}
+  ${EndIf}
+!macroend

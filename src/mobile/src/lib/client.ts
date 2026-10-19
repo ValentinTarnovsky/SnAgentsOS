@@ -13,15 +13,38 @@
  *    and shows the impostor screen; nothing is sent to an unproven server.
  *  - Only close code 4403 (REVOKED) wipes the stored secret. 4401 keeps it and
  *    asks to re-pair (a different desktop instance may have answered).
+ *
+ * Connection reliability (E1-FR-10..15, 41):
+ *  - Every socket carries a generation number and each handler bails unless its
+ *    generation is current, so a late onclose of an aborted socket can never
+ *    null out or reschedule its successor. Forced closes (liveness, revive
+ *    probe, Retry, connect timeout) go through abortSocket(), which detaches the
+ *    handlers instead of waiting for an onclose a dead TCP may never deliver.
+ *  - Liveness: 20s without an inbound frame while visible sends a ping, and
+ *    every ping arms a pong deadline measured with performance.now(). Deadlines
+ *    never span a hidden interval (iOS suspends JS and fires stale timers late).
+ *  - Revive triggers (visible, pageshow, online) probe an OPEN socket with a 3s
+ *    deadline and re-sync the viewed pane on the pong after a long absence.
+ *  - A desktop on another version than this bundle parks the client on phase
+ *    'updated' with the socket closed and every reconnect path disabled.
+ *
+ * Chat view (E3 M12, FR-25): the viewed pane is either streamed (`sub`) or
+ * read as Chat (`chatSub`, its xterm stream paused), never both; viewPane
+ * and syncView keep that invariant and `chatPaneId` says which one holds.
  */
 import {
   PROTOCOL_VERSION,
   REMOTE_CLOSE,
   type RemoteClientMsg,
   type RemoteCtlAction,
+  type RemoteGitReply,
+  type RemoteGitRequest,
+  type RemoteHistorySession,
+  type RemotePaneStatus,
   type RemoteServerMsg,
   type RemoteStateSnapshot,
 } from '@shared/remote-protocol'
+import { BRAND } from '@shared/brand'
 import {
   clearAuth,
   getStoredAuth,
@@ -31,15 +54,33 @@ import {
   storeHostPlatform,
 } from './auth'
 import { hexEqual, hexToBytes, hmacSha256Hex } from './sha256'
-import { store } from './store'
+import { selectPaneMode, selectPaneView, store, type UpdateInfo } from './store'
+import { chatNoticeOf } from '@shared/chat-types'
+import { chatStore, type ChatLoad } from './chatStore'
+import type { PaneView } from './chatView'
 import { applyRemoteTheme } from './theme'
-import { setLang } from './i18n'
+import { setLang, t } from './i18n'
+import { delayFor } from './reconnectSchedule'
+import { actionTotal, createPaneNotifier, remoteTitle } from './notify'
+import { takePendingDeepLink } from './deepLink'
+import { paneById, paneOpenable, statusMapOf, workspaceOfPane } from './workspace'
+import { clearMobileStorage } from './mobileStorage'
+import { useNotesStore } from './notesStore'
+import { chunkInput } from './composerSend'
+import { PendingMap, type PendingOutcome } from './pending'
+import { pruneDrafts } from './drafts'
+import { log, useDiagStore } from './connLog'
+import { FIT_REPLAY_GRACE_MS, decideFitState } from './phoneFit'
+import { syncPush } from './push'
+import { wsUrlFor } from './wsUrl'
 
 /** A frame handed to the live terminal. */
 export type TermFrame =
-  | { type: 'replay'; data: string; cols: number; rows: number; running: boolean }
+  | { type: 'replay'; data: string; cols: number; rows: number; running: boolean; exitCode?: number }
   | { type: 'out'; data: string }
   | { type: 'exit'; exitCode: number }
+  /** E3-FR-12: the pty took a new size (the terminal adopts it without a replay). */
+  | { type: 'fitState'; owner: 'phone' | 'desktop'; cols: number; rows: number }
 
 /** Result of a control request, resolved by the matching ctlAck (or a timeout). */
 export interface CtlResult {
@@ -47,12 +88,58 @@ export interface CtlResult {
   error?: string
   paneId?: string
   info?: number
+  /** createPane with a prompt that could not go on the command line (E2-FR-11). */
+  promptFallback?: boolean
 }
 
-const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 15000]
-const PING_INTERVAL = 25000
-const CTL_TIMEOUT = 10000
+/** What happened when the phone tried to open a console (E2-FR-06). */
+export type OpenResult = 'open' | 'needsMount' | 'gone'
+
+/** Fixed keepalive; the server drops a session after 60s of silence. */
+export const PING_INTERVAL = 25000
+/** Idle time (visible page) before an extra liveness ping (FR-10). */
+export const IDLE_PROBE_MS = 20000
+/** Pong deadline for keepalive and idle pings (FR-10). */
+export const PONG_TIMEOUT = 8000
+/** Pong deadline for the probe sent when the page revives (FR-11). */
+export const REVIVE_PROBE_TIMEOUT = 3000
+/** new WebSocket -> authOk/pairPending/authFail/pairDenied budget (FR-41). */
+export const CONNECT_TIMEOUT_MS = 8000
+/** Hidden longer than this re-syncs the viewed pane on revive (FR-11). */
+export const RESYNC_HIDDEN_MS = 10000
+/** A deadline timer this late means JS was suspended: re-probe, never abort. */
+const SUSPEND_SLACK_MS = 2000
+/**
+ * How long a console the desktop just acked (createPane) may be missing from
+ * the state frames: a push built before it existed (a pty starting elsewhere,
+ * the renderer's 100ms debounce) must not read as "the console was closed".
+ */
+export const AWAIT_NEW_PANE_MS = 5000
 const PAIR_PENDING_MS = 60000
+/** Pairing path: budget to reach pairPending / paired / pairDenied (E2-FR-37). */
+export const PAIR_CEILING_MS = 25000
+/** sessionStorage guard against a reload loop on a stale cached bundle (FR-15). */
+export const RELOAD_FOR_KEY = `${BRAND.mobileStoragePrefix}reloadFor`
+
+/** This bundle's version, baked in by vite.config.ts. */
+const BUNDLE_VERSION: string = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''
+
+/** A version string worth comparing (dev builds and unknowns never mismatch). */
+function comparableVersion(v: string | undefined): v is string {
+  return !!v && v !== 'dev'
+}
+
+function perfNow(): number {
+  return performance.now()
+}
+
+function pageVisible(): boolean {
+  return document.visibilityState === 'visible'
+}
+
+function browserOnline(): boolean {
+  return typeof navigator === 'undefined' || navigator.onLine !== false
+}
 
 /** Read the one-time pairing code from the URL fragment (#pair=CODE). */
 function readPairCode(): string | null {
@@ -60,27 +147,58 @@ function readPairCode(): string | null {
   return m ? decodeURIComponent(m[1]) : null
 }
 
-/** Pick a sensible pane to view in a workspace: a running one, else the first. */
-function pickPane(snap: RemoteStateSnapshot, workspaceId: string | null): string | null {
-  const ws = snap.workspaces.find((w) => w.id === workspaceId) ?? snap.workspaces[0]
-  if (!ws || ws.panes.length === 0) return null
-  const running = ws.panes.find((p) => p.running)
-  if (running) return running.id
-  const firstOrdered = ws.layoutOrder.find((id) => ws.panes.some((p) => p.id === id))
-  return firstOrdered ?? ws.panes[0].id
+/** Width table for the terminal: only an explicit '11' opts in (E6-FR-15). */
+function unicodeOf(snap: RemoteStateSnapshot): '6' | '11' {
+  return snap.terminalUnicode === '11' ? '11' : '6'
 }
 
 function paneExists(snap: RemoteStateSnapshot, paneId: string): boolean {
   return snap.workspaces.some((w) => w.panes.some((p) => p.id === paneId))
 }
 
-function workspaceOfPane(snap: RemoteStateSnapshot, paneId: string): string | null {
-  const ws = snap.workspaces.find((w) => w.panes.some((p) => p.id === paneId))
-  return ws ? ws.id : null
+/** E2-FR-43: toast with [Go] and vibration when another console needs the user. */
+const paneNotifier = createPaneNotifier({
+  isVisible: pageVisible,
+  prefs: () => {
+    const s = store.getState()
+    return { toasts: s.inPageAlerts, vibrate: s.alertVibrate, toastDone: s.alertDone }
+  },
+  screen: () => store.getState().screen,
+  activePaneId: () => store.getState().activePaneId,
+  describe: (paneId) => {
+    const snap = store.getState().snapshot
+    const pane = snap ? paneById(snap, paneId) : null
+    const wsId = snap ? workspaceOfPane(snap, paneId) : null
+    const ws = snap?.workspaces.find((w) => w.id === wsId)
+    return pane && ws ? { ws: ws.name, pane: pane.title } : null
+  },
+  show: (toast) => store.getState().pushToast(toast),
+  vibrate: (pattern) => {
+    try {
+      navigator.vibrate?.(pattern)
+    } catch {
+      /* not supported (iOS) or blocked */
+    }
+  },
+})
+
+/** "(N) SnAgentsOS Remote" with N consoles in action (E2-FR-43). */
+function syncTitle(): void {
+  const s = store.getState()
+  const title = remoteTitle(actionTotal(s.phase === 'live' ? s.snapshot : null, s.paneStatus))
+  try {
+    if (document.title !== title) document.title = title
+  } catch {
+    /* no document title (tests) */
+  }
 }
 
 class RemoteClient {
   private ws: WebSocket | null = null
+  /** Bumped by every connect() and abortSocket(); stale handlers compare and bail. */
+  private gen = 0
+  /** The current socket reached authOk (or the pairing path's first state). */
+  private socketAuthed = false
   private mode: 'auth' | 'pair' | 'idle' = 'idle'
   private deviceId: string | null = null
   // HMAC key = the device secret hex-DECODED to its raw 32 bytes. This matches
@@ -91,20 +209,65 @@ class RemoteClient {
   private clientNonce = ''
   private pairCode: string | null = null
   private pairDeviceName = ''
+  /** E2-FR-37: ends the pairing attempt when nothing answered in 25s. */
+  private pairCeilingTimer: ReturnType<typeof setTimeout> | undefined
+  /** Connection log timing (E2-FR-35), wall clock ms. */
+  private dialAt = 0
+  private openAt = 0
+  /** measureRtt() callers waiting for the next pong. */
+  private rttWaiters: Array<(ms: number) => void> = []
+  /** Notified with the pane id after this phone sends it input (onInputSent). */
+  private inputListeners = new Set<(paneId: string) => void>()
 
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  private connectTimer: ReturnType<typeof setTimeout> | undefined
   private pingTimer: ReturnType<typeof setInterval> | undefined
   private manualClose = false
   private noReconnect = false
   private started = false
+  /** "Continue anyway" on the updated screen; lasts for this page only (FR-15). */
+  private ignoreVersionMismatch = false
 
-  private pendingCtl = new Map<string, { resolve: (r: CtlResult) => void; timer: ReturnType<typeof setTimeout> }>()
+  // Liveness (FR-10/11). All perf-clock values are performance.now() ms.
+  private lastInboundAt = 0
+  private lastInboundWall = 0
+  private idleTimer: ReturnType<typeof setTimeout> | undefined
+  private deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  private pingSentAt = 0
+  private deadlineMs = 0
+  /** When the page last went hidden (perf clock), null while visible. */
+  private hiddenAt: number | null = null
+  /** Most recent hide (perf clock), kept after revive to discard spanning deadlines. */
+  private lastHiddenAt: number | null = null
+  /** Re-sync the viewed pane when the revive probe's pong arrives. */
+  private resyncOnPong = false
+
+  /** E3-FR-04: requests waiting on the desktop by id (ctl, historyReq, gitReq). */
+  private readonly pendingById = new PendingMap<unknown>()
+  /** E3-FR-04: requests waiting by pane (chatSub, chatMore), one per pane. */
+  private readonly pendingByPane = new PendingMap<unknown>()
   private termListener: ((f: TermFrame) => void) | null = null
+  /** Old drafts are pruned once per page, on the first live snapshot (E1-FR-28). */
+  private draftsPruned = false
+  /**
+   * A console a deep link asked for (E2-FR-42), applied on the next goLive
+   * before lastPane. Filled from the URL hash at start (deepLink.ts); it only picks the view.
+   */
+  private pendingDeepLink: string | null = null
+  /** A console shown before any state frame listed it (just created), with its deadline. */
+  private awaitedPane: { id: string; until: number } | null = null
   // Frames that arrived before the terminal mounted (the authOk -> first React
   // render gap). Buffered so the initial replay/out is never lost; a replay
   // supersedes and resets the buffer since it repaints the whole screen.
   private frameBuffer: TermFrame[] = []
+  /** Panes with a fitPane of this phone still waiting for its ack (E3-FR-16). */
+  private readonly fitPending = new Map<string, number>()
+  /** Last running replay per pane (perf clock), for FIT_REPLAY_GRACE_MS. */
+  private readonly fitReplayAt = new Map<string, number>()
+  /** E3 M12: what the chat request pending per pane asked for (first page or earlier). */
+  private readonly chatPending = new Map<string, { kind: ChatLoad; token: number }>()
+  private chatToken = 0
 
   /** Boot the client from stored auth or a pairing code. Idempotent. */
   start(): void {
@@ -112,6 +275,18 @@ class RemoteClient {
     this.started = true
 
     document.addEventListener('visibilitychange', this.onVisibility)
+    window.addEventListener('pageshow', this.onPageShow)
+    window.addEventListener('online', this.onOnline)
+    window.addEventListener('offline', this.onOffline)
+    window.addEventListener('hashchange', this.onHashChange)
+    if (!pageVisible()) this.hiddenAt = this.lastHiddenAt = perfNow()
+    store.getState().update({ online: browserOnline() })
+    store.subscribe((s, prev) => {
+      if (s.paneStatus !== prev.paneStatus || s.snapshot !== prev.snapshot || s.phase !== prev.phase) syncTitle()
+    })
+    // E2-FR-42: a deep link waits for the first goLive (a #pair= hash wins and is left alone).
+    const link = takePendingDeepLink()
+    if (link) this.pendingDeepLink = link.pane
 
     const auth = getStoredAuth()
     const code = readPairCode()
@@ -139,54 +314,151 @@ class RemoteClient {
    * state so the next socket runs the pair path exactly like a #pair= boot.
    */
   startPairing(code: string): void {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = undefined
-    }
-    if (this.ws) {
-      this.manualClose = true
-      try {
-        this.ws.close()
-      } catch {
-        /* ignore */
-      }
-      this.ws = null
-    }
+    this.clearReconnectTimer()
+    this.abortSocket()
     this.mode = 'pair'
     this.pairCode = code
     this.deviceId = null
     this.secretKey = null
     this.noReconnect = false
     this.reconnectAttempt = 0
-    store.getState().update({ phase: 'pairForm', banner: null, pairReason: null, pairExpiresAt: null })
+    this.clearPairCeiling()
+    useDiagStore.getState().update({ pairTimedOut: false })
+    store.getState().update({ phase: 'pairForm', banner: null, pairReason: null, pairExpiresAt: null, connAttempt: 0 })
   }
 
   /** Submit the pairing form: open the socket and request pairing. */
   submitPairing(deviceName: string): void {
     if (this.mode !== 'pair') return
     this.pairDeviceName = deviceName
-    store.getState().update({ phase: 'connecting' })
+    this.clearReconnectTimer()
+    this.abortSocket()
+    this.reconnectAttempt = 0
+    this.armPairCeiling()
+    store.getState().update({ phase: 'connecting', banner: null, connAttempt: 0 })
     this.connect()
+  }
+
+  /**
+   * E2-FR-37: until pairPending, paired or pairDenied, the pairing attempt
+   * keeps retrying under a 25s ceiling; when it runs out the socket is dropped
+   * and the connecting screen offers Retry and Copy report.
+   */
+  private armPairCeiling(): void {
+    this.clearPairCeiling()
+    const at = Date.now() + PAIR_CEILING_MS
+    useDiagStore.getState().update({ pairCeilingAt: at, pairStartedAt: Date.now(), pairTimedOut: false })
+    this.pairCeilingTimer = setTimeout(() => {
+      this.pairCeilingTimer = undefined
+      // A terminal answer (locked, impostor, ...) already took over the screen.
+      if (store.getState().phase !== 'connecting') {
+        useDiagStore.getState().update({ pairCeilingAt: null })
+        return
+      }
+      log('error', `pair ceiling ${PAIR_CEILING_MS / 1000}s reached without an answer`)
+      this.clearReconnectTimer()
+      this.abortSocket()
+      useDiagStore.getState().update({ pairCeilingAt: null, pairTimedOut: true })
+      store.getState().update({ phase: 'connecting', banner: null, connAttempt: 0 })
+    }, PAIR_CEILING_MS)
+  }
+
+  private clearPairCeiling(): void {
+    if (this.pairCeilingTimer) clearTimeout(this.pairCeilingTimer)
+    this.pairCeilingTimer = undefined
+    if (useDiagStore.getState().pairCeilingAt !== null) useDiagStore.getState().update({ pairCeilingAt: null })
+  }
+
+  /** The pairing attempt reached the desktop (pairPending/paired/pairDenied). */
+  private pairAnswered(): void {
+    this.clearPairCeiling()
+    this.clearReconnectTimer()
+    this.reconnectAttempt = 0
+    store.getState().update({ banner: null, connAttempt: 0 })
   }
 
   /** Manual reconnect (retry button on the locked/connecting screens). */
   retry(): void {
+    log('info', 'retry manual')
+    // A pairing attempt that ran out of time retries with the same code.
+    if (this.mode === 'pair' && this.pairCode && !this.deviceId) {
+      this.submitPairing(this.pairDeviceName)
+      return
+    }
+    this.clearReconnectTimer()
+    // A lingering socket would make connect() a no-op and the button dead.
+    this.abortSocket()
     this.noReconnect = false
     this.reconnectAttempt = 0
-    store.getState().update({ phase: this.deviceId ? 'connecting' : 'welcome', banner: null, lockUntil: null })
+    store.getState().update({ phase: this.deviceId ? 'connecting' : 'welcome', banner: null, lockUntil: null, connAttempt: 0 })
     if (this.deviceId) this.connect()
+  }
+
+  /**
+   * "Retry" on the connection banner (FR-13): abort whatever socket exists (OPEN
+   * or still CONNECTING), cancel the backoff timer, reset the attempt counter and
+   * connect right away. Never touches phase, so the live screen stays up.
+   */
+  reconnectNow(): void {
+    if (store.getState().phase === 'updated') return
+    if (!this.deviceId) return
+    log('info', 'retry manual')
+    this.clearReconnectTimer()
+    this.abortSocket()
+    this.noReconnect = false
+    this.reconnectAttempt = 0
+    this.showReconnecting()
+    this.connect()
+  }
+
+  /** "Continue anyway" on the updated screen (FR-15, mismatch case only). */
+  continueAnyway(): void {
+    const s = store.getState()
+    if (s.phase !== 'updated' || s.updateInfo?.kind !== 'mismatch') return
+    this.ignoreVersionMismatch = true
+    this.noReconnect = false
+    this.manualClose = false
+    s.update({ phase: 'connecting', updateInfo: null })
+    this.reconnectNow()
   }
 
   /** Forget this origin's device and reload to a clean state. */
   unpair(): void {
     clearAuth()
-    this.manualClose = true
-    try {
-      this.ws?.close()
-    } catch {
-      /* ignore */
-    }
+    this.forgetComposerState()
+    this.clearReconnectTimer()
+    this.abortSocket()
     location.reload()
+  }
+
+  /**
+   * Diagnostics (E2-FR-36): send one ping on the live socket and resolve with
+   * its round trip, or null without a live socket or after timeoutMs.
+   */
+  measureRtt(timeoutMs = 4000): Promise<number | null> {
+    if (!this.isOpen()) return Promise.resolve(null)
+    return new Promise((resolve) => {
+      let done = false
+      const waiter = (ms: number): void => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve(ms)
+      }
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true
+        this.rttWaiters = this.rttWaiters.filter((w) => w !== waiter)
+        resolve(null)
+      }, timeoutMs)
+      this.rttWaiters.push(waiter)
+      this.sendPing(PONG_TIMEOUT)
+    })
+  }
+
+  /** An authenticated socket is OPEN, so input and control frames get delivered. */
+  isOpen(): boolean {
+    return this.socketAuthed && this.ws !== null && this.ws.readyState === WebSocket.OPEN
   }
 
   /** Register the live terminal's frame handler (RemoteTerminal on mount). */
@@ -199,10 +471,47 @@ class RemoteClient {
     }
   }
 
-  /** Send keystrokes/paste data to the currently-viewed pane. */
-  sendInput(data: string): void {
+  /**
+   * Send keystrokes/paste data to the currently-viewed pane. Returns false (and
+   * sends nothing) without an open authenticated socket (FR-14), so callers can
+   * keep the text instead of losing it. Data longer than INPUT_CHUNK goes as
+   * several `input` frames, in order, never splitting a surrogate pair, so a
+   * long paste or snippet stays under the schema's 8192 limit (E1-FR-24).
+   */
+  sendInput(data: string): boolean {
     const paneId = store.getState().subscribedPaneId
-    if (paneId) this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data })
+    if (!paneId || !this.isOpen()) return false
+    for (const chunk of chunkInput(data)) {
+      if (!this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data: chunk })) return false
+    }
+    for (const cb of this.inputListeners) cb(paneId)
+    return true
+  }
+
+  /**
+   * Keys for one pane whether it is viewed or not: an answer card on Home or
+   * in the terminal (E2-FR-21, 23). Same gate and chunking as sendInput; the
+   * server takes `input` for any pane of the snapshot, subscribed or not.
+   */
+  sendInputTo(paneId: string, data: string): boolean {
+    if (!paneId || !this.isOpen()) return false
+    for (const chunk of chunkInput(data)) {
+      if (!this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data: chunk })) return false
+    }
+    for (const cb of this.inputListeners) cb(paneId)
+    return true
+  }
+
+  /**
+   * Called with the pane id after each input this phone sends. A key typed
+   * here hides the "Claude exited" strip on this phone, like any key in the
+   * desktop pane hides its chip (E6-FR-22/24). Returns the unsubscribe.
+   */
+  onInputSent(cb: (paneId: string) => void): () => void {
+    this.inputListeners.add(cb)
+    return () => {
+      this.inputListeners.delete(cb)
+    }
   }
 
   /** Switch the viewed pane within the current workspace (unsub old, sub new). */
@@ -212,78 +521,633 @@ class RemoteClient {
       s.update({ activePaneId: paneId })
       return
     }
-    if (s.subscribedPaneId) this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId: s.subscribedPaneId })
-    this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
-    s.update({ activePaneId: paneId, subscribedPaneId: paneId })
+    if (s.subscribedPaneId) this.leaveStream(s.subscribedPaneId)
+    // E3-FR-24/25: an agent console saved as Chat opens as Chat (chatSub, no sub).
+    const chat = selectPaneView(s, paneId) === 'chat'
+    s.update({ activePaneId: paneId, subscribedPaneId: paneId, chatPaneId: chat ? paneId : null })
+    if (chat) this.requestChatFirst(paneId)
+    else this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
+  }
+
+  /** Stop watching a pane the way it is watched (chatUnsub in Chat, unsub in Terminal). */
+  private leaveStream(paneId: string): void {
+    const s = store.getState()
+    if (s.chatPaneId === paneId) {
+      this.cancelChat(paneId)
+      this.send({ v: PROTOCOL_VERSION, type: 'chatUnsub', paneId })
+      s.update({ chatPaneId: null })
+    } else {
+      this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
+    }
+  }
+
+  // --- Chat view (E3 M12, FR-24..33) ---
+
+  /** The [Terminal | Chat] control: save the choice and switch the subscription. */
+  setPaneView(paneId: string, view: PaneView): void {
+    store.getState().setPaneView(paneId, view)
+    this.syncView()
   }
 
   /**
-   * Switch to a pane that may live in another workspace: ask the desktop to
-   * switch workspace first (which triggers any lazy spawns), then subscribe. A
-   * not-yet-running pane shows a spinner until the server pushes its replay.
+   * Make the viewed pane's subscription match its view (FR-25): into Chat =
+   * `unsub` then `chatSub`; back to Terminal = `chatUnsub` then `sub`, whose
+   * replay repaints the terminal. Also runs when a status change makes the
+   * pane (in)eligible.
    */
-  async switchWorkspaceAndView(workspaceId: string, paneId: string): Promise<void> {
-    const snap = store.getState().snapshot
-    const needsSwitch = snap ? workspaceOfPane(snap, paneId) !== snap.activeWorkspaceId : true
-    if (needsSwitch) await this.sendCtl({ kind: 'switchWorkspace', workspaceId })
-    this.viewPane(paneId)
+  syncView(): void {
+    const s = store.getState()
+    const paneId = s.subscribedPaneId
+    if (!paneId || s.phase !== 'live' || !this.isOpen()) return
+    const want = selectPaneView(s, paneId)
+    const inChat = s.chatPaneId === paneId
+    if (want === 'chat' && !inChat) {
+      this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
+      s.update({ chatPaneId: paneId })
+      this.requestChatFirst(paneId)
+    } else if (want === 'terminal' && inChat) {
+      this.cancelChat(paneId)
+      this.send({ v: PROTOCOL_VERSION, type: 'chatUnsub', paneId })
+      s.update({ chatPaneId: null })
+      this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
+    }
   }
 
-  /** Send a control request and await its ack (10s local timeout). */
-  sendCtl(action: RemoteCtlAction): Promise<CtlResult> {
-    const id = randomNonceHex(8)
-    return new Promise<CtlResult>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingCtl.delete(id)
-        resolve({ ok: false, error: 'timeout' })
-      }, CTL_TIMEOUT)
-      this.pendingCtl.set(id, { resolve, timer })
-      this.send({ v: PROTOCOL_VERSION, type: 'ctl', id, action })
+  /** chatSub: the first page (pending by pane, 10s; a repeat while one waits is a no-op). */
+  requestChatFirst(paneId: string): void {
+    this.requestChat(paneId, 'first', { v: PROTOCOL_VERSION, type: 'chatSub', paneId })
+  }
+
+  /** "Load earlier" (FR-26): the page before the oldest message held. */
+  requestChatMore(paneId: string): void {
+    const pane = chatStore.getState().chats[paneId]
+    const cursor = pane?.list.cursor
+    if (!pane || !cursor || pane.list.done || pane.list.capped || pane.loading) return
+    this.requestChat(paneId, 'more', { v: PROTOCOL_VERSION, type: 'chatMore', paneId, before: cursor })
+  }
+
+  private requestChat(paneId: string, kind: ChatLoad, msg: RemoteClientMsg): void {
+    const wait = this.requestForPane<unknown>(paneId, msg)
+    if (!wait) return
+    const token = ++this.chatToken
+    this.chatPending.set(paneId, { kind, token })
+    chatStore.getState().begin(paneId, kind)
+    void wait.then((outcome) => {
+      const mine = this.chatPending.get(paneId)?.token === token
+      if (mine) this.chatPending.delete(paneId)
+      // No answer in 10s, or the rate limit: "The PC did not answer [Retry]".
+      // A request this phone dropped itself (left Chat) leaves no error.
+      if (!outcome.ok && (mine || outcome.error !== 'offline')) chatStore.getState().fail(paneId, kind)
     })
   }
 
-  // --- internals ---
-
-  private onVisibility = (): void => {
-    if (document.visibilityState !== 'visible') return
-    // Reconnect immediately instead of waiting out the backoff timer.
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = undefined
-      this.connect()
-    }
+  /** Drop the chat request a pane still waits on (leaving Chat). */
+  private cancelChat(paneId: string): void {
+    if (!this.chatPending.has(paneId)) return
+    this.chatPending.delete(paneId)
+    this.pendingByPane.fail(paneId, 'offline')
   }
 
-  private send(msg: RemoteClientMsg): void {
+  /**
+   * chatPage (FR-26/30/33): an answer to "Load earlier" goes in front; any
+   * other page (the first one, a reset) replaces the list. A lone notice
+   * means no chat: back to Terminal for this page, with the toast.
+   */
+  private handleChatPage(msg: Extract<RemoteServerMsg, { type: 'chatPage' }>): void {
+    const pending = this.chatPending.get(msg.paneId)
+    this.chatPending.delete(msg.paneId)
+    this.pendingByPane.resolve(msg.paneId, msg)
+    const s = store.getState()
+    if (s.chatPaneId !== msg.paneId) return
+    const items = Array.isArray(msg.items) ? msg.items : []
+    const notice = chatNoticeOf(items)
+    if (notice) {
+      chatStore.getState().clear(msg.paneId)
+      s.setPaneView(msg.paneId, 'terminal', false)
+      this.syncView()
+      s.setToast(notice === 'notLocal' ? t('chat.unavailable') : `${t('chat.unavailable')}. ${t('chat.installHooks')}`)
+      return
+    }
+    const page = { items, cursor: typeof msg.cursor === 'string' ? msg.cursor : null, done: msg.done === true }
+    if (pending?.kind === 'more') chatStore.getState().prepend(msg.paneId, page)
+    else chatStore.getState().replace(msg.paneId, page)
+  }
+
+  private handleChatAppend(msg: Extract<RemoteServerMsg, { type: 'chatAppend' }>): void {
+    if (store.getState().chatPaneId !== msg.paneId || !Array.isArray(msg.items)) return
+    chatStore.getState().append(msg.paneId, msg.items)
+  }
+
+  /**
+   * Ask for a fresh replay of the viewed pane. The server ignores a repeated
+   * `sub` for a pane it already streams, so this sends `unsub` then `sub`:
+   * handleUnsub drops the buffer and handleSub answers with a new replay.
+   */
+  resyncPane(): void {
+    const paneId = store.getState().subscribedPaneId
+    if (!paneId || !this.isOpen()) return
+    // In Chat a repeated chatSub is the fresh first page (no stream to resync).
+    if (store.getState().chatPaneId === paneId) return this.requestChatFirst(paneId)
+    this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
+    this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
+  }
+
+  // --- phone-only navigation (E2-FR-01, 06, 16, 47) ---
+
+  /**
+   * Open a console of any workspace without ever moving the desktop
+   * (E2-FR-06). A running pane, or a stopped one of a mounted workspace, is
+   * viewed at once and the terminal slides in. A stopped pane of a workspace
+   * the desktop has not mounted answers 'needsMount' so the UI confirms
+   * `mountWorkspace` first; a pane not in the snapshot answers 'gone'.
+   */
+  openPane(paneId: string): OpenResult {
+    const snap = store.getState().snapshot
+    if (!snap || !paneById(snap, paneId)) return 'gone'
+    if (!paneOpenable(snap, paneId)) return 'needsMount'
+    this.showPane(paneId)
+    return 'open'
+  }
+
+  /**
+   * openPane for the UI: 'needsMount' opens the confirmation sheet
+   * (store.mountAsk) and 'gone' shows the toast.
+   */
+  requestOpen(paneId: string): OpenResult {
+    const res = this.openPane(paneId)
+    if (res === 'needsMount') store.getState().update({ mountAsk: paneId })
+    else if (res === 'gone') store.getState().setToast(t('toast.paneGone'))
+    return res
+  }
+
+  /** View a console and slide the terminal in; it becomes lastPane and read (E2-FR-16). */
+  showPane(paneId: string): void {
+    const before = store.getState()
+    // Leaving another console from the terminal (a tab) reads it up to now too.
+    if (before.screen === 'terminal' && before.activePaneId && before.activePaneId !== paneId) before.noteViewed(before.activePaneId)
+    const known = !!before.snapshot && !!paneById(before.snapshot, paneId)
+    this.awaitedPane = known ? null : { id: paneId, until: Date.now() + AWAIT_NEW_PANE_MS }
+    this.viewPane(paneId)
+    const s = store.getState()
+    s.noteViewed(paneId)
+    if (s.screen !== 'terminal') s.setScreen('terminal')
+  }
+
+  /**
+   * Back to Home from the terminal (E2-FR-01, 16). The pane stays subscribed
+   * and the terminal mounted off screen, so coming back is instant.
+   */
+  leaveTerminal(): void {
+    const s = store.getState()
+    if (s.activePaneId) s.noteViewed(s.activePaneId)
+    if (s.screen === 'terminal') s.setScreen('home')
+  }
+
+  /**
+   * "Start" on the confirmation (E2-FR-06): mount every console of the pane's
+   * workspace on the desktop (it keeps its own workspace on screen) and open
+   * the pane; its replay arrives once the pty exists, with a spinner meanwhile.
+   */
+  async mountAndOpen(paneId: string): Promise<CtlResult> {
+    const snap = store.getState().snapshot
+    const workspaceId = snap ? workspaceOfPane(snap, paneId) : null
+    if (!workspaceId) {
+      store.getState().setToast(t('toast.paneGone'))
+      return { ok: false, error: 'not_found' }
+    }
+    const res = await this.sendCtl({ kind: 'mountWorkspace', workspaceId })
+    if (!res.ok) {
+      store.getState().setToast(t('toast.mountFailed'))
+      return res
+    }
+    const now = store.getState().snapshot
+    if (now && paneById(now, paneId)) this.showPane(paneId)
+    else store.getState().setToast(t('toast.paneGone'))
+    return res
+  }
+
+  /**
+   * Ask for a console from a deep link (E2-FR-42): applied at once while
+   * live, else on the next goLive with priority over lastPane. It only picks
+   * the view: a workspace that is not mounted asks first and never mounts alone.
+   */
+  setPendingDeepLink(paneId: string | null): void {
+    const s = store.getState()
+    if (paneId && s.phase === 'live' && s.snapshot) {
+      this.pendingDeepLink = null
+      this.requestOpen(paneId)
+      return
+    }
+    this.pendingDeepLink = paneId
+  }
+
+  /**
+   * Send a control request and await its ack (E3-FR-04: pending by id, 10s).
+   * No ack resolves error 'timeout'; over the desktop's rate limit the ack
+   * itself says 'rate' (isNoReply: "The PC did not answer [Retry]"). A frame
+   * that cannot leave the phone resolves 'offline' at once. A retry is a new
+   * call, so it always goes under a new id.
+   */
+  async sendCtl(action: RemoteCtlAction): Promise<CtlResult> {
+    const outcome = await this.request<CtlResult>((id) => ({ v: PROTOCOL_VERSION, type: 'ctl', id, action }))
+    return outcome.ok ? outcome.value : { ok: false, error: outcome.error }
+  }
+
+  // --- phone mode (E3 M11, FR-12..20) ---
+
+  /**
+   * Ask the desktop to size a pane to this phone's grid. The size becomes
+   * this phone's lastFitSent first (FR-16). A refusal because the PC does not
+   * allow phone-fit puts the pane back in desktop mode with its toast (FR-20).
+   */
+  async sendFitPane(paneId: string, cols: number, rows: number): Promise<CtlResult> {
+    const snap = store.getState().snapshot
+    const workspaceId = snap ? workspaceOfPane(snap, paneId) : null
+    if (!workspaceId) return { ok: false, error: 'not_found' }
+    store.getState().setLastFitSent(paneId, { cols, rows })
+    // The re-claim after a replay is going out: from here the pending count
+    // covers it, and once acked a desktop release must count again (FR-18).
+    this.fitReplayAt.delete(paneId)
+    this.fitPending.set(paneId, (this.fitPending.get(paneId) ?? 0) + 1)
+    log('info', `fitPane ${cols}x${rows}`)
+    let res: CtlResult
+    try {
+      res = await this.sendCtl({ kind: 'fitPane', workspaceId, paneId, cols, rows })
+    } finally {
+      const left = (this.fitPending.get(paneId) ?? 1) - 1
+      if (left > 0) this.fitPending.set(paneId, left)
+      else this.fitPending.delete(paneId)
+    }
+    if (!res.ok && res.error === 'disabled') {
+      const s = store.getState()
+      s.setPaneMode(paneId, 'desktop')
+      s.setToast(t('fit.disabled'))
+      // The fitState desktop that came with the refusal was held while pending: adopt it now.
+      const info = s.sizeInfo[paneId]
+      if (info && paneId === s.subscribedPaneId) this.emit({ type: 'fitState', owner: info.owner, cols: info.cols, rows: info.rows })
+    }
+    return res
+  }
+
+  /** Give a pane's size back to the desktop (switching to desktop mode, FR-18). */
+  releaseFit(paneId: string): Promise<CtlResult> {
+    return this.sendCtl({ kind: 'releaseFit', paneId })
+  }
+
+  /**
+   * fitState (FR-12/16/18): record the size, switch to desktop mode when the
+   * PC took it back (saved, with its toast) and hand the new size to the
+   * terminal when it is the viewed pane.
+   */
+  private handleFitState(msg: Extract<RemoteServerMsg, { type: 'fitState' }>): void {
+    const s = store.getState()
+    const mode = selectPaneMode(s, msg.paneId)
+    const replayAt = this.fitReplayAt.get(msg.paneId)
+    const settling = replayAt !== undefined && perfNow() - replayAt < FIT_REPLAY_GRACE_MS
+    const d = decideFitState(mode, s.lastFitSent[msg.paneId] ?? null, this.fitPending.has(msg.paneId) || settling, msg)
+    s.setSizeInfo(msg.paneId, d.info)
+    if (d.mode !== mode) s.setPaneMode(msg.paneId, d.mode, d.persist)
+    if (d.toast === 'reclaimed') s.setToast(t('fit.reclaimed'))
+    if (msg.paneId === s.subscribedPaneId) this.emit({ type: 'fitState', owner: msg.owner, cols: msg.cols, rows: msg.rows })
+  }
+
+  // --- pending requests (E3-FR-04) ---
+
+  /**
+   * Send a request keyed by a fresh id (historyReq, gitReq, ctl) and wait for
+   * settleRequest(id) from its answer, PENDING_TIMEOUT_MS at most.
+   */
+  request<T>(make: (id: string) => RemoteClientMsg): Promise<PendingOutcome<T>> {
+    const id = randomNonceHex(8)
+    const wait = this.pendingById.begin(id)
+    // A random id never collides in practice; if it did, the caller retries.
+    if (!wait) return Promise.resolve({ ok: false, error: 'offline' })
+    if (!this.send(make(id))) this.pendingById.fail(id, 'offline')
+    return wait as Promise<PendingOutcome<T>>
+  }
+
+  /**
+   * Send a request keyed by its pane (chatSub, chatMore): one at a time per
+   * pane, so null (and nothing sent) while that pane already waits.
+   */
+  requestForPane<T>(paneId: string, msg: RemoteClientMsg): Promise<PendingOutcome<T>> | null {
+    const wait = this.pendingByPane.begin(paneId)
+    if (!wait) return null
+    if (!this.send(msg)) this.pendingByPane.fail(paneId, 'offline')
+    return wait as Promise<PendingOutcome<T>>
+  }
+
+  /**
+   * E3-FR-36: ask for the session history (pending by id, 10s). `workspaceId`
+   * = "This workspace"; the answer is newest first, at most 100 sessions.
+   */
+  requestHistory(req: { query?: string; workspaceId?: string }): Promise<PendingOutcome<RemoteHistorySession[]>> {
+    return this.request<RemoteHistorySession[]>((id) => ({ v: PROTOCOL_VERSION, type: 'historyReq', id, ...req }))
+  }
+
+  /**
+   * E3-FR-52/53: one page of a workspace's change list or of a file's diff
+   * (pending by id, 10s). The answer is the gitRes without its envelope.
+   */
+  requestGit(req: RemoteGitRequest): Promise<PendingOutcome<RemoteGitReply>> {
+    return this.request<RemoteGitReply>((id) => ({ v: PROTOCOL_VERSION, type: 'gitReq', id, ...req }))
+  }
+
+  /** The answer to an id-keyed request arrived; false when nothing waits (late). */
+  settleRequest(id: string, value: unknown): boolean {
+    return this.pendingById.resolve(id, value)
+  }
+
+  /** The answer to a pane-keyed request arrived; false when nothing waits (late). */
+  settlePaneRequest(paneId: string, value: unknown): boolean {
+    return this.pendingByPane.resolve(paneId, value)
+  }
+
+  // --- page lifecycle (FR-10/11) ---
+
+  private onVisibility = (): void => {
+    log('info', pageVisible() ? 'visible' : 'hidden')
+    this.sendVisibility()
+    if (pageVisible()) {
+      this.onRevive('visible')
+      return
+    }
+    // Hidden: iOS suspends JS and fires stale timers on resume, so liveness
+    // checks stop here. The fixed 25s keepalive keeps running.
+    this.hiddenAt = this.lastHiddenAt = perfNow()
+    this.clearIdleWatchdog()
+    this.clearDeadline()
+  }
+
+  /** E2-FR-42: a deep link opened while the page was already loaded. */
+  private onHashChange = (): void => {
+    const link = takePendingDeepLink()
+    if (link) this.setPendingDeepLink(link.pane)
+  }
+
+  /** E2-FR-52: tell the desktop whether this page is on screen (ntfy stays quiet then). */
+  private sendVisibility(): void {
+    if (!this.socketAuthed) return
+    this.send({ v: PROTOCOL_VERSION, type: 'visibility', visible: pageVisible() })
+  }
+
+  private onPageShow = (ev: PageTransitionEvent): void => {
+    log('info', `pageshow persisted=${ev.persisted === true}`)
+    this.onRevive('pageshow', ev.persisted === true)
+  }
+
+  private onOnline = (): void => {
+    log('info', 'online')
+    this.onRevive('online')
+  }
+
+  private onOffline = (): void => {
+    log('warn', 'offline')
+    store.getState().update({ online: false })
+    // No attempts while the phone itself has no network; 'online' resumes.
+    this.clearReconnectTimer()
+  }
+
+  /**
+   * The page came back (visible, bfcache restore) or the network returned.
+   * Probe an OPEN socket instead of trusting it; reconnect at once otherwise.
+   */
+  private onRevive(trigger: 'visible' | 'pageshow' | 'online', persisted = false): void {
+    const t = perfNow()
+    const hiddenFor = this.hiddenAt != null ? t - this.hiddenAt : 0
+    if (trigger === 'visible') this.hiddenAt = null
+    const online = browserOnline()
+    if (store.getState().online !== online) store.getState().update({ online })
+
+    const phase = store.getState().phase
+    if (phase === 'updated') return
+    if (phase !== 'live' && phase !== 'connecting') return
+    if (this.mode === 'idle' || (this.mode === 'pair' && !this.deviceId)) return
+    if (!online) return
+
+    this.lastInboundAt = t
+    const wantResync = hiddenFor > RESYNC_HIDDEN_MS || trigger === 'online' || (trigger === 'pageshow' && persisted)
+    const ws = this.ws
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      if (!pageVisible()) return
+      if (wantResync && this.socketAuthed) this.resyncOnPong = true
+      // The probe replaces any pending deadline: its base was just reset.
+      this.clearDeadline()
+      this.sendPing(REVIVE_PROBE_TIMEOUT)
+      this.armIdleWatchdog()
+      return
+    }
+    // CONNECTING is covered by the connect timeout and CLOSING by its onclose.
+    if (ws && ws.readyState !== WebSocket.CLOSED) return
+    if (ws) {
+      // CLOSED with no onclose delivered (the browser sets readyState and fires
+      // close in one task, so a bfcache restore or a freeze swallowed it): no
+      // timer covers this socket any more, so drop it here.
+      this.abortSocket()
+      if (this.noReconnect) return
+      this.reconnectAttempt = 0
+      this.showReconnecting()
+    }
+    if (this.noReconnect) return
+    this.clearReconnectTimer()
+    this.connect()
+  }
+
+  // --- liveness (FR-10) ---
+
+  private noteInbound(): void {
+    this.lastInboundAt = perfNow()
+    this.lastInboundWall = Date.now()
+    this.clearDeadline()
+    this.armIdleWatchdog()
+  }
+
+  private armIdleWatchdog(): void {
+    if (this.idleTimer || !this.socketAuthed || !pageVisible()) return
+    const wait = Math.max(0, IDLE_PROBE_MS - (perfNow() - this.lastInboundAt))
+    this.idleTimer = setTimeout(this.onIdleTimer, wait)
+  }
+
+  private onIdleTimer = (): void => {
+    this.idleTimer = undefined
+    if (!this.isOpen() || !pageVisible()) return
+    if (perfNow() - this.lastInboundAt < IDLE_PROBE_MS) {
+      this.armIdleWatchdog()
+      return
+    }
+    // The pong (or any frame) re-arms the watchdog; silence trips the deadline.
+    this.sendPing(PONG_TIMEOUT)
+  }
+
+  private clearIdleWatchdog(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer)
+    this.idleTimer = undefined
+  }
+
+  private sendPing(deadlineMs: number): void {
+    if (!this.send({ v: PROTOCOL_VERSION, type: 'ping', t: Date.now() })) return
+    if (pageVisible()) this.armDeadline(deadlineMs)
+  }
+
+  /** Arm a pong deadline; an already-pending stricter one wins. */
+  private armDeadline(ms: number): void {
+    const t = perfNow()
+    if (this.deadlineTimer) {
+      if (this.pingSentAt + this.deadlineMs - t <= ms) return
+      clearTimeout(this.deadlineTimer)
+    }
+    this.pingSentAt = t
+    this.deadlineMs = ms
+    this.deadlineTimer = setTimeout(this.onDeadline, ms)
+  }
+
+  private clearDeadline(): void {
+    if (this.deadlineTimer) clearTimeout(this.deadlineTimer)
+    this.deadlineTimer = undefined
+  }
+
+  private onDeadline = (): void => {
+    this.deadlineTimer = undefined
+    if (!pageVisible() || !this.ws) return
+    // Any frame since the ping proves the socket alive.
+    if (this.lastInboundAt > this.pingSentAt) return
+    // A deadline that spans a hidden interval measures the suspension, not the link.
+    if (this.lastHiddenAt != null && this.lastHiddenAt >= this.pingSentAt) return
+    const elapsed = perfNow() - this.pingSentAt
+    if (elapsed < this.deadlineMs - 50) {
+      this.deadlineTimer = setTimeout(this.onDeadline, this.deadlineMs - elapsed)
+      return
+    }
+    if (elapsed > this.deadlineMs + SUSPEND_SLACK_MS && this.ws.readyState === WebSocket.OPEN) {
+      // Fired far too late: JS was frozen without a visibilitychange. Probe again.
+      this.sendPing(REVIVE_PROBE_TIMEOUT)
+      return
+    }
+    // Dead link: abort without waiting for onclose and reconnect now, no backoff.
+    log('warn', `pong timeout ${this.deadlineMs}ms`)
+    this.abortSocket()
+    this.clearReconnectTimer()
+    this.reconnectAttempt = 0
+    this.showReconnecting()
+    this.connect()
+  }
+
+  // --- socket ---
+
+  private send(msg: RemoteClientMsg): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
         this.ws.send(JSON.stringify(msg))
+        return true
       } catch {
-        /* socket dying; onclose will drive recovery */
+        /* socket dying; liveness or onclose will drive recovery */
       }
     }
+    return false
   }
 
   private connect(): void {
     if (this.ws) return
+    if (store.getState().phase === 'updated') return
+    if (!browserOnline()) {
+      // No attempt while the phone is offline (FR-11); the 'online' event resumes.
+      store.getState().update({ online: false })
+      return
+    }
     this.noReconnect = false
+    // Any manualClose belonged to a socket whose handlers are already detached.
+    this.manualClose = false
+    const myGen = ++this.gen
     let ws: WebSocket
+    this.dialAt = Date.now()
+    this.openAt = 0
+    log('info', `dial ${location.host}`)
     try {
-      ws = new WebSocket(`ws://${location.host}/ws`)
+      ws = new WebSocket(wsUrlFor(location.protocol, location.host))
     } catch {
+      log('error', 'dial failed')
       this.scheduleReconnect()
       return
     }
     this.ws = ws
-    ws.onopen = this.onOpen
-    ws.onmessage = this.onMessage
-    ws.onclose = this.onClose
+    this.socketAuthed = false
+    ws.onopen = () => {
+      if (myGen !== this.gen) return
+      this.onOpen()
+    }
+    ws.onmessage = (ev: MessageEvent) => {
+      if (myGen !== this.gen) return
+      this.onMessage(ev)
+    }
+    ws.onclose = (ev: CloseEvent) => {
+      if (myGen !== this.gen) return
+      this.onClose(ev)
+    }
     ws.onerror = () => {
       /* onclose always follows; recovery happens there */
     }
+    this.clearConnectTimer()
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = undefined
+      if (myGen !== this.gen) return
+      log('warn', `connect timeout ${CONNECT_TIMEOUT_MS}ms (${this.openAt ? 'open, no answer' : 'never opened'})`)
+      this.abortSocket()
+      this.afterDrop()
+    }, CONNECT_TIMEOUT_MS)
   }
 
-  private onOpen = (): void => {
+  private clearConnectTimer(): void {
+    if (this.connectTimer) clearTimeout(this.connectTimer)
+    this.connectTimer = undefined
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = undefined
+  }
+
+  /** Stop every timer bound to the current socket. */
+  private stopSocketTimers(): void {
+    this.clearConnectTimer()
+    this.stopKeepalive()
+    this.clearIdleWatchdog()
+    this.clearDeadline()
+    this.resyncOnPong = false
+  }
+
+  /** Record the end of an authenticated socket for the banner. */
+  private noteDropped(): void {
+    if (!this.socketAuthed) return
+    this.socketAuthed = false
+    store.getState().update({ connected: false, lastConnectedAt: this.lastInboundWall || Date.now() })
+  }
+
+  /**
+   * Force-close the current socket without waiting for onclose (FR-41): detach
+   * its handlers, close it, drop the reference and stop its timers. The caller
+   * decides what follows (connect now, schedule a retry, or nothing).
+   */
+  private abortSocket(): void {
+    const ws = this.ws
+    this.gen++
+    this.ws = null
+    this.stopSocketTimers()
+    this.noteDropped()
+    if (!ws) return
+    ws.onopen = null
+    ws.onmessage = null
+    ws.onclose = null
+    ws.onerror = null
+    try {
+      ws.close()
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private onOpen(): void {
+    this.openAt = Date.now()
+    log('info', `open +${this.openAt - this.dialAt}ms`)
     this.clientNonce = randomNonceHex(32)
     const hello: RemoteClientMsg =
       this.deviceId != null
@@ -292,27 +1156,36 @@ class RemoteClient {
     this.send(hello)
     if (this.mode === 'pair' && this.pairCode) {
       this.send({ v: PROTOCOL_VERSION, type: 'pair', code: this.pairCode, deviceName: this.pairDeviceName })
+      log('info', 'pair sent')
     }
   }
 
-  private onMessage = (ev: MessageEvent): void => {
+  private onMessage(ev: MessageEvent): void {
     let msg: RemoteServerMsg
     try {
       msg = JSON.parse(typeof ev.data === 'string' ? ev.data : '') as RemoteServerMsg
     } catch {
       return
     }
+    this.noteInbound()
     switch (msg.type) {
       case 'challenge':
         this.handleChallenge(msg)
         break
       case 'pairPending':
+        // The legitimate approval wait can reach 60s: the connect timeout ends here.
+        log('info', 'pairPending')
+        this.pairAnswered()
+        this.clearConnectTimer()
         store.getState().update({ phase: 'pairPending', pairExpiresAt: Date.now() + PAIR_PENDING_MS })
         break
       case 'paired':
         this.handlePaired(msg)
         break
       case 'pairDenied':
+        log('warn', `pairDenied reason=${msg.reason}`)
+        this.pairAnswered()
+        this.clearConnectTimer()
         this.manualClose = true
         store.getState().update({ phase: 'pairDenied', pairReason: msg.reason })
         break
@@ -326,8 +1199,9 @@ class RemoteClient {
         this.handleState(msg.state)
         break
       case 'replay':
+        if (msg.running) this.fitReplayAt.set(msg.paneId, perfNow())
         if (msg.paneId === store.getState().subscribedPaneId) {
-          this.emit({ type: 'replay', data: msg.data, cols: msg.cols, rows: msg.rows, running: msg.running })
+          this.emit({ type: 'replay', data: msg.data, cols: msg.cols, rows: msg.rows, running: msg.running, exitCode: msg.exitCode })
         }
         break
       case 'out':
@@ -336,31 +1210,73 @@ class RemoteClient {
       case 'exit':
         if (msg.paneId === store.getState().subscribedPaneId) this.emit({ type: 'exit', exitCode: msg.exitCode })
         break
+      case 'paneStatus':
+        this.handlePaneStatus(msg.paneId, msg.status)
+        break
+      case 'fitState':
+        this.handleFitState(msg)
+        break
       case 'ctlAck':
         this.handleCtlAck(msg)
         break
+      case 'historyRes':
+        this.pendingById.resolve(msg.id, Array.isArray(msg.sessions) ? msg.sessions : [])
+        break
+      case 'chatPage':
+        this.handleChatPage(msg)
+        break
+      case 'chatAppend':
+        this.handleChatAppend(msg)
+        break
+      case 'gitRes':
+        this.pendingById.resolve(msg.id, { ok: msg.ok, data: msg.data, page: msg.page, done: msg.done } satisfies RemoteGitReply)
+        break
       case 'revoked':
+        log('warn', 'revoked')
+        this.forgetComposerState()
         store.getState().update({ phase: 'revoked' })
         break
       case 'shutdown':
+        log('warn', `shutdown reason=${msg.reason}`)
         if (msg.reason === 'disabled') {
           this.noReconnect = true
           store.getState().update({ banner: { kind: 'disabled' } })
         } else {
+          // Sticky until the next authOk; the reconnect attempts count beside it.
           store.getState().update({ banner: { kind: 'desktopGone' } })
         }
         break
       case 'pong':
+        if (typeof msg.t === 'number' && msg.t > 0) {
+          const rtt = Date.now() - msg.t
+          if (rtt >= 0 && rtt < 120000) {
+            useDiagStore.getState().update({ rttMs: rtt })
+            const waiters = this.rttWaiters
+            this.rttWaiters = []
+            for (const w of waiters) w(rtt)
+          }
+        }
+        if (this.resyncOnPong) {
+          this.resyncOnPong = false
+          if (store.getState().phase === 'live') this.resyncPane()
+        }
         break
       case 'err':
-        // version/rate/unauthorized: nothing actionable on the phone beyond the
-        // eventual close; bad_msg should never happen from our own encoder.
+        // A protocol mismatch means the desktop runs another build (FR-15). The
+        // server answers every frame with it and never closes, so park here.
+        // rate/unauthorized/bad_msg: nothing actionable beyond the eventual close.
+        if (msg.code === 'version' && store.getState().phase !== 'updated') {
+          log('error', 'err version (protocol mismatch)')
+          this.enterUpdated('protocol', '')
+        }
         break
     }
   }
 
   private handleChallenge(msg: Extract<RemoteServerMsg, { type: 'challenge' }>): void {
+    log('info', 'challenge')
     if (!this.secretKey || !this.deviceId) {
+      log('error', 'challenge without a stored secret')
       // No secret but got a challenge (should not happen in the pair path).
       this.abort('impostor')
       return
@@ -368,14 +1284,19 @@ class RemoteClient {
     // Mutual auth: the server must prove it knows our secret first.
     const expected = hmacSha256Hex(this.secretKey, this.clientNonce)
     if (!msg.proof || !hexEqual(expected, msg.proof)) {
+      log('error', 'proof mismatch')
       this.abort('impostor')
       return
     }
+    log('info', 'proof ok')
     const hmac = hmacSha256Hex(this.secretKey, msg.nonce)
     this.send({ v: PROTOCOL_VERSION, type: 'auth', deviceId: this.deviceId, hmac })
+    log('info', 'auth sent')
   }
 
   private handlePaired(msg: Extract<RemoteServerMsg, { type: 'paired' }>): void {
+    log('info', 'paired')
+    this.pairAnswered()
     storeAuth(msg.deviceId, msg.secret)
     this.deviceId = msg.deviceId
     this.secretKey = hexToBytes(msg.secret)
@@ -386,49 +1307,148 @@ class RemoteClient {
     } catch {
       /* ignore */
     }
-    // On the pairing path the socket is ALREADY authed: there is no authOk, the
-    // server just pushes a 'state' frame next. Show a brief connecting state
-    // until that arrives (handleState then takes us live). hostPlatform/appVersion
-    // never arrive on this path, so windowsPty defaults off until a later
-    // reconnect's authOk fills it in (and persists it for next time).
+    // The server follows 'paired' with a full authOk on this same socket
+    // (SessionManager.deliverPairResult), so the phone goes live through the
+    // same path as a reconnect. Show a brief connecting state until it lands;
+    // handleState still covers a desktop that only pushes a 'state' frame.
     store.getState().update({ phase: 'connecting', pairExpiresAt: null })
   }
 
   /**
    * Adopt a state snapshot as the live screen: apply theme/lang, pick a pane and
-   * subscribe, start keepalive. Shared by the reconnect authOk path (with
-   * hostPlatform/appVersion) and the pairing path's first 'state' frame (without).
+   * subscribe, start keepalive. Shared by the authOk path (with hostPlatform/
+   * appVersion) and a bare first 'state' frame (without).
    */
   private goLive(state: RemoteStateSnapshot, hostPlatform: string, appVersion: string): void {
     setLang(state.language)
     const xtermTheme = applyRemoteTheme(state.themeTokens)
+    this.clearConnectTimer()
+    this.socketAuthed = true
     this.reconnectAttempt = 0
-    const cur = store.getState().activePaneId
-    const keep = cur && paneExists(state, cur) ? cur : pickPane(state, state.activeWorkspaceId)
+    useDiagStore.getState().update({ abnormalStreak: 0, pairTimedOut: false })
+    // E2-FR-47: keep the viewed pane across a reconnect; otherwise a pending
+    // deep link, else lastPane (subscribed so Resume opens instantly), else
+    // nothing. Never a pane picked from the desktop's active workspace, and
+    // the screen stays where it is (Home on the first connection).
+    const prev = store.getState()
+    const cur = prev.activePaneId
+    const deepLink = this.pendingDeepLink
+    this.pendingDeepLink = null
+    const lastPane = prev.lastPane
+    const keep =
+      cur && paneExists(state, cur)
+        ? cur
+        : lastPane && !deepLink && paneExists(state, lastPane) && paneOpenable(state, lastPane)
+          ? lastPane
+          : null
+    const lostViewed = !!cur && keep !== cur && prev.screen === 'terminal'
+    // A chat request sent on the old socket never gets its answer: drop it, or
+    // the chatSub below would be refused as "already waiting" for up to 10s.
+    for (const paneId of [...this.chatPending.keys()]) this.cancelChat(paneId)
     store.getState().update({
       phase: 'live',
       banner: null,
+      connAttempt: 0,
+      connected: true,
+      updateInfo: null,
       snapshot: state,
+      paneStatus: statusMapOf(state),
       xtermTheme,
+      terminalUnicode: unicodeOf(state),
       hostPlatform,
       appVersion,
       pairExpiresAt: null,
       // Force viewPane below to (re)issue a sub even on reconnect to the same pane.
       subscribedPaneId: null,
+      // A new socket holds no chatSub yet; viewPane sends it again for a Chat pane.
+      chatPaneId: null,
       activePaneId: keep ?? null,
+      ...(lostViewed ? { screen: 'home' as const } : {}),
     })
     this.startKeepalive()
+    this.armIdleWatchdog()
+    this.sendVisibility()
     if (keep) this.viewPane(keep)
+    if (lostViewed) store.getState().setToast(t('toast.paneClosed'))
+    if (deepLink) this.requestOpen(deepLink)
+    if (!this.draftsPruned) {
+      this.draftsPruned = true
+      pruneDrafts(new Set(state.workspaces.flatMap((w) => w.panes.map((p) => p.id))))
+    }
+  }
+
+  /** Drafts, input modes and review notes never outlive the pairing (E1-FR-28, E3-FR-54). */
+  private forgetComposerState(): void {
+    clearMobileStorage()
+    // Else the notes still in memory would be written back on the next edit.
+    useNotesStore.getState().forgetAll()
+    store.getState().update({ inputModes: {}, composerOneShot: null, httpToken: null, pushKey: null, secureUrl: null })
   }
 
   private handleAuthOk(msg: Extract<RemoteServerMsg, { type: 'authOk' }>): void {
+    log('info', `authOk +${this.openAt ? Date.now() - this.openAt : 0}ms desktop=${msg.appVersion || '?'}`)
+    this.clearConnectTimer()
     // Persist the host platform so future sessions (incl. the pairing path, which
     // never learns it) can still enable windowsPty on Windows desktops.
     storeHostPlatform(msg.hostPlatform)
+    // FR-15: a cached old bundle talking to an updated desktop must not go live.
+    if (
+      !this.ignoreVersionMismatch &&
+      comparableVersion(msg.appVersion) &&
+      comparableVersion(BUNDLE_VERSION) &&
+      msg.appVersion !== BUNDLE_VERSION
+    ) {
+      log('warn', `version mismatch desktop=${msg.appVersion} bundle=${BUNDLE_VERSION}`)
+      this.enterUpdated('mismatch', msg.appVersion)
+      return
+    }
+    try {
+      sessionStorage.removeItem(RELOAD_FOR_KEY)
+    } catch {
+      /* ignore */
+    }
+    // E3-FR-01: the features ride on these fields, never on a version check.
+    store.getState().update({
+      httpToken: msg.httpToken || null,
+      pushKey: msg.pushKey || null,
+      // E3-FR-43: only an https URL is ever offered as the secure origin.
+      secureUrl: typeof msg.secureUrl === 'string' && /^https:\/\/[a-z0-9.-]+$/i.test(msg.secureUrl) ? msg.secureUrl : null,
+    })
     this.goLive(msg.state, msg.hostPlatform, msg.appVersion)
+    // E3-FR-44: a subscription this phone already allowed goes to the desktop again.
+    void syncPush()
+  }
+
+  /**
+   * Park on the 'updated' screen (FR-15): cancel every timer, close the socket
+   * for good (manualClose + noReconnect) and never go live. handleState,
+   * scheduleReconnect, connect and the revive triggers all no-op meanwhile.
+   */
+  private enterUpdated(kind: UpdateInfo['kind'], to: string): void {
+    const guard = to || kind
+    let retried = false
+    try {
+      retried = sessionStorage.getItem(RELOAD_FOR_KEY) === guard
+      sessionStorage.setItem(RELOAD_FOR_KEY, guard)
+    } catch {
+      /* storage blocked: no loop guard, the screen still works */
+    }
+    this.clearReconnectTimer()
+    this.manualClose = true
+    this.noReconnect = true
+    this.abortSocket()
+    store.getState().update({
+      phase: 'updated',
+      updateInfo: { from: BUNDLE_VERSION, to, kind, retried },
+      banner: null,
+      connAttempt: 0,
+      connected: false,
+    })
   }
 
   private handleAuthFail(msg: Extract<RemoteServerMsg, { type: 'authFail' }>): void {
+    log('warn', `authFail reason=${msg.reason}`)
+    this.clearConnectTimer()
     this.manualClose = true
     if (msg.reason === 'locked') {
       const lockUntil = Date.now() + (msg.retryAfterMs ?? 30000)
@@ -440,29 +1460,64 @@ class RemoteClient {
   }
 
   private handleState(state: RemoteStateSnapshot): void {
-    // Pairing path: the first 'state' (no preceding authOk) is what takes us live.
-    if (store.getState().phase !== 'live') {
+    const phase = store.getState().phase
+    // A state frame racing the close must not pull the phone off the updated screen.
+    if (phase === 'updated') return
+    // A bare first 'state' (no preceding authOk) is what takes us live.
+    if (phase !== 'live') {
       this.goLive(state, getStoredHostPlatform(), store.getState().appVersion)
       return
     }
     setLang(state.language)
     const xtermTheme = applyRemoteTheme(state.themeTokens)
-    store.getState().update({ snapshot: state, xtermTheme })
-    // If the viewed pane vanished (closed on desktop), fall back to another.
-    const cur = store.getState().activePaneId
-    if (!cur || !paneExists(state, cur)) {
-      const next = pickPane(state, state.activeWorkspaceId)
-      if (next) this.viewPane(next)
-      else store.getState().update({ activePaneId: null, subscribedPaneId: null })
+    store.getState().update({ snapshot: state, paneStatus: statusMapOf(state), xtermTheme, terminalUnicode: unicodeOf(state) })
+    // E2-FR-47: the viewed pane vanished (closed on the desktop): back to Home
+    // with a toast. No other pane is picked, least of all from another workspace.
+    // A console just created gets AWAIT_NEW_PANE_MS to appear before that.
+    const s = store.getState()
+    const cur = s.activePaneId
+    const awaited = this.awaitedPane
+    if (awaited && (awaited.id !== cur || paneExists(state, awaited.id))) {
+      this.awaitedPane = null
+      // The new console made it into the snapshot: now it can be lastPane.
+      if (awaited.id === cur && s.screen === 'terminal') s.noteViewed(cur)
     }
+    const waiting = !!this.awaitedPane && this.awaitedPane.id === cur && Date.now() < this.awaitedPane.until
+    if (cur && !waiting && !paneExists(state, cur)) {
+      this.awaitedPane = null
+      const onTerminal = s.screen === 'terminal'
+      if (s.subscribedPaneId) this.leaveStream(s.subscribedPaneId)
+      s.update({ activePaneId: null, subscribedPaneId: null, ...(onTerminal ? { screen: 'home' as const } : {}) })
+      if (onTerminal) s.setToast(t('toast.paneClosed'))
+    }
+    if (s.mountAsk && !paneExists(state, s.mountAsk)) s.update({ mountAsk: null })
+    this.syncView()
+  }
+
+  /** Live status of one pane (E1-FR-03): upsert or delete, then maybe alert. */
+  private handlePaneStatus(paneId: string, status: RemotePaneStatus | null): void {
+    const s = store.getState()
+    if (s.phase !== 'live') return
+    const prev = s.paneStatus[paneId]
+    const next = { ...s.paneStatus }
+    if (status) next[paneId] = status
+    else delete next[paneId]
+    s.update({ paneStatus: next })
+    // A console that becomes (or stops being) an agent switches view (FR-24).
+    if (paneId === s.subscribedPaneId) this.syncView()
+    // An orphan upsert (status ahead of the state that adds the pane) never alerts.
+    if (s.snapshot && paneById(s.snapshot, paneId)) paneNotifier.onPaneStatus(paneId, prev, status)
   }
 
   private handleCtlAck(msg: Extract<RemoteServerMsg, { type: 'ctlAck' }>): void {
-    const pending = this.pendingCtl.get(msg.id)
-    if (!pending) return
-    clearTimeout(pending.timer)
-    this.pendingCtl.delete(msg.id)
-    pending.resolve({ ok: msg.ok, error: msg.error, paneId: msg.paneId, info: msg.info })
+    const result: CtlResult = {
+      ok: msg.ok,
+      error: msg.error,
+      paneId: msg.paneId,
+      info: msg.info,
+      ...(msg.promptFallback ? { promptFallback: true } : {}),
+    }
+    this.pendingById.resolve(msg.id, result)
   }
 
   private emit(frame: TermFrame): void {
@@ -481,20 +1536,16 @@ class RemoteClient {
   }
 
   private abort(phase: 'impostor'): void {
-    this.manualClose = true
+    this.clearReconnectTimer()
     this.noReconnect = true
-    try {
-      this.ws?.close()
-    } catch {
-      /* ignore */
-    }
+    this.abortSocket()
     store.getState().update({ phase })
   }
 
   private startKeepalive(): void {
     this.stopKeepalive()
     this.pingTimer = setInterval(() => {
-      this.send({ v: PROTOCOL_VERSION, type: 'ping', t: Date.now() })
+      this.sendPing(PONG_TIMEOUT)
     }, PING_INTERVAL)
   }
 
@@ -503,9 +1554,18 @@ class RemoteClient {
     this.pingTimer = undefined
   }
 
-  private onClose = (ev: CloseEvent): void => {
-    this.stopKeepalive()
+  private onClose(ev: CloseEvent): void {
+    const now = Date.now()
+    const clean = ev.wasClean === true
+    log(ev.code === 1000 ? 'info' : 'warn', `close=${ev.code} clean=${clean} dur=${now - (this.openAt || this.dialAt)}`)
+    const diag = useDiagStore.getState()
+    diag.update({
+      lastClose: { code: ev.code, reason: typeof ev.reason === 'string' ? ev.reason.slice(0, 120) : '', clean, at: now },
+      abnormalStreak: ev.code === 1006 ? diag.abnormalStreak + 1 : 0,
+    })
     this.ws = null
+    this.stopSocketTimers()
+    this.noteDropped()
 
     if (this.manualClose) {
       this.manualClose = false
@@ -514,6 +1574,7 @@ class RemoteClient {
 
     if (ev.code === REMOTE_CLOSE.REVOKED) {
       clearAuth()
+      this.forgetComposerState()
       this.secretKey = null
       this.deviceId = null
       store.getState().update({ phase: 'revoked', banner: null })
@@ -528,15 +1589,32 @@ class RemoteClient {
       store.getState().update({ phase: 'locked', lockUntil })
       return
     }
+    this.afterDrop()
+  }
 
+  /** What follows an unexpected drop (onclose or a connect timeout). */
+  private afterDrop(): void {
     const phase = store.getState().phase
-    if (phase === 'impostor' || phase === 'pairDenied' || phase === 'revoked' || phase === 'rePair' || phase === 'locked') {
+    if (
+      phase === 'impostor' ||
+      phase === 'pairDenied' ||
+      phase === 'revoked' ||
+      phase === 'rePair' ||
+      phase === 'locked' ||
+      phase === 'updated'
+    ) {
       return
     }
     if (this.noReconnect) return
 
-    // Pairing socket dropped before it completed: back to the form / welcome.
+    // Pairing socket dropped before it completed: retry while the 25s ceiling
+    // runs (E2-FR-37), else back to the form / welcome.
     if (this.mode === 'pair' && !this.deviceId) {
+      if (this.pairCeilingTimer) {
+        this.scheduleReconnect()
+        return
+      }
+      if (useDiagStore.getState().pairTimedOut) return
       store.getState().update({ phase: this.pairCode ? 'pairForm' : 'welcome' })
       return
     }
@@ -544,18 +1622,34 @@ class RemoteClient {
     this.scheduleReconnect()
   }
 
+  /**
+   * Reflect a pending or running reconnect in the banner state (a sticky
+   * desktopGone/disabled stays). Over a live screen it is the overlay; before
+   * the first snapshot the connecting screen reads the same tier.
+   */
+  private showReconnecting(): void {
+    const s = store.getState()
+    const attempt = this.reconnectAttempt
+    const sticky = s.banner?.kind === 'desktopGone' || s.banner?.kind === 'disabled'
+    const banner = sticky ? s.banner : { kind: 'reconnecting' as const, attempt }
+    if (s.snapshot !== null) s.update({ connAttempt: attempt, banner })
+    else s.update({ connAttempt: attempt, banner, phase: 'connecting' })
+  }
+
   private scheduleReconnect(): void {
+    if (store.getState().phase === 'updated') return
     if (this.reconnectTimer) return
-    const base = RECONNECT_DELAYS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS.length - 1)]
-    // +-30% jitter to avoid a reconnect thundering-herd across devices.
-    const delay = Math.round(base * (0.7 + Math.random() * 0.6))
-    this.reconnectAttempt++
-    const wasLive = store.getState().snapshot !== null
-    if (wasLive) {
-      store.getState().update({ banner: { kind: 'reconnecting', attempt: this.reconnectAttempt } })
-    } else {
-      store.getState().update({ phase: 'connecting' })
+    if (!browserOnline()) {
+      // Offline phone: no attempts (FR-11). The 'online' event reconnects.
+      store.getState().update({ online: false })
+      this.showReconnecting()
+      return
     }
+    this.reconnectAttempt++
+    const delay = delayFor(this.reconnectAttempt, Math.random())
+    log('info', `retry in ${delay}ms attempt=${this.reconnectAttempt}`)
+    useDiagStore.getState().update({ retries: useDiagStore.getState().retries + 1 })
+    this.showReconnecting()
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
       this.connect()

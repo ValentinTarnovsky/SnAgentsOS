@@ -5,17 +5,22 @@ import type { RemoteEndpointKind } from '@shared/remote-protocol'
 import { useRemoteStore } from '@/lib/remoteStore'
 import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
+import { isFromToast, toast } from '@/lib/toast'
+import { useAppInfo } from '@/lib/useAppInfo'
+import { FirewallStatusRow } from './FirewallStatusRow'
 
 const KIND_KEY: Record<RemoteEndpointKind, MessageKey> = {
   lan: 'remote.kind.lan',
   tailscale: 'remote.kind.tailscale',
   other: 'remote.kind.other',
+  tailscaleHttps: 'remote.kind.tailscaleHttps',
 }
 
 /**
  * Pairing QR modal. Shows one QR per reachable endpoint (selectable), the
  * shared code, the URL, and a countdown that regenerates the code when it
- * expires while open. Closing invalidates the active code.
+ * expires while open. Closing invalidates the active code. On Windows the
+ * firewall / network profile row sits under the QR (E2-FR-38).
  */
 export function RemoteQrModal() {
   const t = useT()
@@ -23,6 +28,7 @@ export function RemoteQrModal() {
   const qr = useRemoteStore((s) => s.qr)
   const refreshQr = useRemoteStore((s) => s.refreshQr)
   const cancelQr = useRemoteStore((s) => s.cancelQr)
+  const info = useAppInfo()
 
   const [sel, setSel] = useState(0)
   const [now, setNow] = useState(() => Date.now())
@@ -65,7 +71,7 @@ export function RemoteQrModal() {
 
   return createPortal(
     <div className="fixed inset-0 z-[80] flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-black/60" onClick={cancelQr} />
+      <div className="absolute inset-0 bg-black/60" onClick={(e) => { if (!isFromToast(e)) cancelQr() }} />
       <div className="relative z-10 flex w-full max-w-sm flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]">
         <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
           <div className="flex items-center gap-2.5">
@@ -99,7 +105,7 @@ export function RemoteQrModal() {
                       : 'border-border text-text-secondary hover:text-text-primary',
                   )}
                 >
-                  {t(KIND_KEY[ep.kind])} · {ep.ip}
+                  {t(KIND_KEY[ep.kind])} · {ep.ip ?? ep.host}
                 </button>
               ))}
             </div>
@@ -119,6 +125,8 @@ export function RemoteQrModal() {
             )}
           </div>
 
+          {info?.platform === 'win32' && <FirewallStatusRow />}
+
           {qr && (
             <>
               <div className="text-center">
@@ -130,13 +138,23 @@ export function RemoteQrModal() {
                 </div>
               </div>
 
+              {/* E3-FR-43: another origin, so the phone pairs again as a new device. */}
+              {endpoint?.kind === 'tailscaleHttps' && (
+                <p data-qr-secure className="text-[11px] leading-relaxed text-text-secondary">
+                  {t('remote.qr.secureHint')}
+                </p>
+              )}
+
               {endpoint && (
                 <div className="flex items-center gap-2 rounded-btn border border-border bg-bg-secondary px-2.5 py-1.5">
                   <span className="min-w-0 flex-1 truncate font-mono text-xs text-text-primary">
                     {endpoint.url}
                   </span>
                   <button
-                    onClick={() => window.snApi.clipboard.writeText(endpoint.url)}
+                    onClick={() => {
+                      window.snApi.clipboard.writeText(endpoint.url)
+                      toast.success(t('toast.copied'), { dedupeKey: 'copied' })
+                    }}
                     title={t('remote.copy')}
                     className="shrink-0 rounded p-1 text-text-secondary transition-colors hover:text-text-primary"
                   >
