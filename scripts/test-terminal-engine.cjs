@@ -1045,6 +1045,58 @@ async function main() {
         pm.killAll()
       }
       {
+        // E6-FR-36: the OS session end (Windows window 'session-end') and
+        // powerMonitor 'shutdown' (macOS/Linux) run the exit save through the
+        // same once-per-exit flag, re-armed after 10 s for a cancelled shutdown.
+        const { EventEmitter } = require('node:events')
+        const sd = load('src/main/pty/shutdownPersist.ts')
+        const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
+        const st = newStore()
+        const cp = new ScrollbackCheckpoint(st, pm, { staggerMs: 0, log() {} })
+        let saves = 0
+        const realPersist = cp.persistAllSync.bind(cp)
+        cp.persistAllSync = () => { saves++; return realPersist() }
+        const order = [], rearms = [], logs = []
+        const persist = sd.createShutdownPersist({
+          checkpoint: () => cp,
+          flush: () => order.push('flush'),
+          log: (m, e) => logs.push(m + String(e)),
+          setTimer: (fn, ms) => rearms.push({ fn, ms }),
+        })
+        const win = new EventEmitter(), power = new EventEmitter()
+        sd.wireSessionEnd(win, () => order.push('agents'), () => { order.push('persist'); persist() })
+        sd.wirePowerShutdown(power, persist)
+        check(win.listenerCount('session-end') === 1 && power.listenerCount('shutdown') === 1, 'the window listens to session-end and powerMonitor to shutdown')
+        pm.spawn({ paneId: 's1', cols: 80, rows: 24 })
+        h.procs[0].emit('seconds before the shutdown')
+        win.emit('session-end')
+        check(saves === 1 && st.load('s1').ansi.includes('seconds before the shutdown'), 'session-end saves the unflushed output synchronously')
+        check(order.join() === 'agents,persist,flush', 'session-end snapshots the agents first, then saves and flushes')
+        check(rearms.length === 1 && rearms[0].ms === sd.SHUTDOWN_REARM_MS && sd.SHUTDOWN_REARM_MS === 10000, 'and schedules the 10 s re-arm')
+        power.emit('shutdown')
+        check(saves === 1 && cp.persistOnExit() === false, 'a second shutdown event or a quit path in the window does not save again (same flag)')
+        rearms.forEach(r => r.fn())
+        h.procs[0].emit(' and after a cancelled shutdown')
+        check(cp.persistOnExit() === true && saves === 2 && st.load('s1').ansi.includes('after a cancelled shutdown'), 'after the re-arm (cancelled shutdown) the next quit saves again')
+        cp.resetExit()
+        power.emit('shutdown')
+        check(saves === 3, 'powerMonitor shutdown saves through the same path')
+        cp.resetExit()
+        const broken = sd.createShutdownPersist({ checkpoint: () => ({ persistOnExit() { throw new Error('disk gone') }, resetExit() {} }), flush: () => order.push('flush2'), log: (m, e) => logs.push(m + String(e)), setTimer: (fn, ms) => rearms.push({ fn, ms }) })
+        broken()
+        check(order.at(-1) === 'flush2' && logs.some(l => l.includes('disk gone')) && rearms.length === 4, 'a failing exit save is logged and still flushes and re-arms')
+        let unrefd = false
+        const viaDefault = load('src/main/pty/shutdownPersist.ts', { setTimeout: (fn, ms) => ({ unref() { unrefd = ms === 10000 } }) })
+        viaDefault.createShutdownPersist({ checkpoint: () => null })()
+        check(unrefd, 'the default re-arm timer is unref\'d so it never holds the app open')
+        // The composition root wires both events to this one save.
+        const index = require('node:fs').readFileSync(path.join(root, 'src/main/index.ts'), 'utf8')
+        check(/const persistScrollbackForShutdown = createShutdownPersist\(\{\s*checkpoint: \(\) => scrollbackCheckpoint,\s*flush: \(\) => reviewNotes\?\.flush\(\)/.test(index), 'main builds the shutdown save over the live checkpoint and review notes')
+        check(index.includes("wireSessionEnd(win, () => snapshotAgentsOnce('shutdown'), persistScrollbackForShutdown)") && index.includes('wirePowerShutdown(powerMonitor, persistScrollbackForShutdown)'), 'main wires the window session-end and powerMonitor shutdown to it')
+        check(!/\.on\('session-end'|\.on\('shutdown'/.test(index), 'no other session-end or shutdown handler bypasses it')
+        pm.killAll()
+      }
+      {
         // Budget: 12 panes x 256 KB within 1500 ms, all of them saved (logs the real time).
         const { pm, h } = manager({ snapshotMode: 'auto', persist: true })
         const st = newStore()
