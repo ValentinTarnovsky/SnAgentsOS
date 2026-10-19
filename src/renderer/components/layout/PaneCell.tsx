@@ -36,6 +36,7 @@ import { Tooltip } from '@/components/ui/Tooltip'
 import { PaneStatusDot } from '@/components/ui/StatusDot'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ScheduleDialog } from '@/components/layout/ScheduleDialog'
+import { scheduleNextLabel } from '@/lib/scheduleFormat'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { PaneErrorBoundary } from '@/components/common/ErrorBoundary'
 import { ResumeChip } from '@/components/agents/ResumeChip'
@@ -47,7 +48,7 @@ import { templateFromPane, worktreeOffer } from '@/lib/worktrees'
 import { PaneWorktreeChip } from '@/components/git/PaneWorktreeChip'
 import { WorktreeMissingCard } from '@/components/layout/WorktreeMissingCard'
 import { reopenClosedConsole, restartClean, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
-import { useT } from '@/i18n'
+import { useLang, useT } from '@/i18n'
 import { cn } from '@/lib/cn'
 
 interface PaneCellProps {
@@ -88,6 +89,7 @@ export function PaneCell({
   onDragEndCell,
 }: PaneCellProps) {
   const t = useT()
+  const lang = useLang()
   const Icon = iconFor(pane.icon)
   const connections = useAppStore((s) => s.connections)
   const { cwd, initialCommand, setup, launchKind } = resolveLaunch(pane, workspace, presets, connections)
@@ -160,7 +162,11 @@ export function PaneCell({
   const [renaming, setRenaming] = useState(false)
   const [nameVal, setNameVal] = useState(pane.title)
   const [scheduling, setScheduling] = useState(false)
-  const isScheduled = pane.schedule != null
+  // E8-FR-28: the clock is lit only for an active schedule; a paused one
+  // (or a fired one-shot) is dimmed and its tooltip says "Paused".
+  const hasSchedule = pane.schedule != null
+  const isScheduled = hasSchedule && pane.schedule!.enabled !== false
+  const scheduleTip = pane.schedule ? scheduleNextLabel(pane.schedule, t, lang) : t('pane.schedule')
 
   const startRename = (): void => {
     setNameVal(pane.title)
@@ -240,7 +246,7 @@ export function PaneCell({
     },
     { label: t('pane.minimize'), icon: Minus, onClick: onToggleMin },
     {
-      label: isScheduled ? t('schedule.edit') : t('pane.schedule'),
+      label: hasSchedule ? t('schedule.edit') : t('pane.schedule'),
       icon: Clock,
       onClick: () => setScheduling(true),
     },
@@ -368,15 +374,19 @@ export function PaneCell({
             {t('pane.exited')}
           </span>
         )}
-        <Tooltip label={isScheduled ? t('schedule.active', { time: pane.schedule!.time }) : t('pane.schedule')}>
+        <Tooltip label={scheduleTip}>
           <button
             draggable={false}
+            aria-label={scheduleTip}
+            data-pane-clock={isScheduled ? 'active' : hasSchedule ? 'paused' : 'none'}
             onClick={() => setScheduling(true)}
             className={cn(
               'rounded p-1 transition-colors hover:bg-bg-secondary',
               isScheduled
                 ? 'text-accent-violet hover:text-accent-violet'
-                : 'text-text-secondary hover:text-text-primary',
+                : hasSchedule
+                  ? 'text-accent-violet/40 hover:text-accent-violet/70'
+                  : 'text-text-secondary hover:text-text-primary',
             )}
           >
             <Clock size={13} />
