@@ -24,6 +24,7 @@ import type { ResolvedLaunch } from '@/lib/launch'
 import type { ShellKind } from '@shared/ipc-contract'
 import { useT } from '@/i18n'
 import { noteSpawnFailure } from '@/lib/worktrees'
+import { oneShotLaunch } from '@/lib/repoConfig'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
 const INFINITE_SCROLLBACK = 100000
@@ -850,11 +851,16 @@ export function useXterm(
             // only; a later restart (or remount + reattach) never finds it.
             const pending = useAppStore.getState().takePendingPrompt(opts.paneId)
             if (pending) rememberPrompt(opts.paneId, pending.text)
+            // E8-FR-25: a repo setup console runs its command once, as the
+            // shell's argument so the shell exits with the command's code.
+            const setupCmd = useAppStore.getState().takeRepoSetupCommand(opts.paneId)
+            const shot = setupCmd ? oneShotLaunch(setupCmd, opts.shell, window.snApi.platform, !!launch.setup?.length) : null
             return window.snApi.pty.spawn({
               paneId: opts.paneId,
               shell: opts.shell,
+              ...(shot?.args ? { args: shot.args } : {}),
               cwd: launch.cwd || opts.cwd,
-              initialCommand: launch.initialCommand,
+              initialCommand: shot ? shot.initialCommand : launch.initialCommand,
               setup: launch.setup,
               cols: term.cols,
               rows: term.rows,

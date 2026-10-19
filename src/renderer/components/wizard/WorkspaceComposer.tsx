@@ -21,6 +21,7 @@ import {
 } from './composerModel'
 import { initialWizardFocus, trapTabIndex } from './wizardKeys'
 import { rememberFlowFocus } from './flowFocus'
+import { RepoConfigCard } from './RepoConfigCard'
 
 const CREATE_KEYS = ['Ctrl', 'Enter']
 /** Wait after the last keystroke before asking main whether the folder exists. */
@@ -419,6 +420,15 @@ export function WorkspaceComposer() {
               </p>
             )}
           </div>
+
+          {/* The folder's .snagentsos.json, when it has one (E8-FR-23). */}
+          <RepoConfigCard
+            cwd={cwd}
+            onApplied={() => {
+              handedOff.current = true
+              setWizardOpen(false)
+            }}
+          />
 
           {/* Name */}
           <div>
