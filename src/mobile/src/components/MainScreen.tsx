@@ -27,6 +27,7 @@ import { openDiagnostics } from '../lib/connLog'
 import { StatusIndicator } from './StatusIndicator'
 import { WaitingPill } from './WaitingPill'
 import { ToastStack } from './ToastStack'
+import { UploadChip } from './UploadChip'
 import { selectInputMode, store, useRemoteStore } from '../lib/store'
 import { paneById, viewedWorkspaceId, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
@@ -134,6 +135,8 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       {/* Composer mode docks the composer here; Direct mode shows the strip
           only while the keyboard is down (E1-FR-38). Both stay usable offline:
           the draft is kept and Send is disabled (E1-FR-14). */}
+      {/* Image upload progress / retry / copy path (E3-FR-08). */}
+      <UploadChip />
       {activePaneId && (inputMode === 'composer' ? <Composer /> : !kbOpen && <DirectInputStrip />)}
 
       {/* Offline: the keys are dimmed and inert (E1-FR-14); sendInput refuses too. */}
