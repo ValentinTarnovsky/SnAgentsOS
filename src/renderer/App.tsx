@@ -13,6 +13,7 @@ import { startGitSync } from '@/lib/gitSync'
 import { startReviewNotesSync } from '@/lib/reviewNotesStore'
 import { engineFromSettings } from '@shared/terminalEngine'
 import { mountInterruptedAgents } from '@/lib/agentLaunch'
+import { initHibernation } from '@/lib/hibernation'
 import { startPersistence } from '@/lib/persist'
 import { initPtyLifecycle, reconcilePtys } from '@/lib/ptyLifecycle'
 import { initOpenRequests } from '@/lib/openRequest'
@@ -44,6 +45,7 @@ import { WorktreeCloseDialog } from '@/components/layout/WorktreeCloseDialog'
 import { QuickCommandPopover } from '@/components/workspace/QuickCommandPopover'
 import { NotificationStack } from '@/components/ui/NotificationStack'
 import { ResumeDialog } from '@/components/agents/ResumeDialog'
+import { AgentsBoard } from '@/components/agents/AgentsBoard'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -157,6 +159,12 @@ export function App() {
     if (hydrated) void mountInterruptedAgents()
   }, [hydrated])
 
+  // Hibernation (E5-FR-25/26): main plans; the renderer reports what is on screen and wakes.
+  useEffect(() => {
+    if (!hydrated) return
+    return initHibernation()
+  }, [hydrated])
+
   // "Open in SnAgentsOS" (E4-FR-33): a folder from `--open` waits in main until
   // the store is hydrated, then activates its workspace or opens the wizard.
   useEffect(() => {
@@ -223,7 +231,7 @@ function AppBody() {
   return (
     <div className="flex min-h-0 w-full flex-1 overflow-hidden bg-bg-primary">
       <Sidebar />
-      <main className="min-w-0 flex-1">
+      <main className="relative min-w-0 flex-1">
         {workspaces.length > 0 ? (
           <WorkspaceHost />
         ) : (
@@ -239,6 +247,8 @@ function AppBody() {
             </Button>
           </div>
         )}
+        {/* Agents board (E5-FR-27): over the workspace area; the terminals stay mounted below. */}
+        <AgentsBoard />
       </main>
       <SettingsModal />
       <ReleaseNotesModal />

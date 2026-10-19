@@ -1081,6 +1081,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   restartPaneClean: (paneId) => {
+    // Any restart wakes a sleeping console (E5-FR-26): the overlay gives way to a new terminal.
+    useAgentStore.getState().setSleeping(paneId, null)
     // Unmounting never kills (E4-FR-36), so kill first, by paneId in main: IPC
     // from one renderer is handled in order and the kill is synchronous, so the
     // new mount's reattach finds nothing and spawns a fresh shell.
