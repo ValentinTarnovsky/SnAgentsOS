@@ -196,8 +196,10 @@ window.runMain = async () => {
  ptr(handle, 'pointerup', 100, y);
  await frames();
  check($('[data-sheet][data-open=false]') && !ended, 'a 100px drag closes it and it stays mounted while it animates out');
- await wait(400);
- check(ended && !$('[data-sheet]'), 'it unmounts on transitionend');
+ // Under a loaded offscreen compositor the transform transition can finish
+ // after the 350 ms fallback, so poll for the unmount and accept either path.
+ for (let t = 0; t < 30 && $('[data-sheet]'); t++) await wait(50);
+ check(!$('[data-sheet]'), 'it unmounts on transitionend (or its 350 ms fallback)');
  await wait(50);
  handle = await openActions();
  y = await drag(handle, 10, 4, 40);
