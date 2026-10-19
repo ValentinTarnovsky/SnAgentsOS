@@ -882,6 +882,13 @@ process.on('exit', (code) => {
         await new Promise((r) => setTimeout(r, 1700))
         await svc2.idle()
         same(await reader.baseStat({ key: 'pane:p1', base: baseSha }), { added: 10, removed: 3, files: 5, approx: false }, 'committing the rest keeps the same diffstat against base')
+        // A file named like the base sha: without `--` git would call the revision ambiguous.
+        write(path.join(rc, baseSha), lines(1, 'z'))
+        git(rc, 'add', '-A'); git(rc, 'commit', '-qm', 'sha-named file')
+        svc2.refresh(['pane:p1'], 'manual')
+        await new Promise((r) => setTimeout(r, 1700))
+        await svc2.idle()
+        same(await reader.baseStat({ key: 'pane:p1', base: baseSha }), { added: 11, removed: 3, files: 6, approx: false }, 'a file named like the base sha does not make the revision ambiguous')
         svc2.dispose()
       }
     } finally {

@@ -122,8 +122,10 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   check(R.raceWorkspaceName('   ', 'Race') === 'Race', 'an empty task names it with the prefix alone')
   const slug = R.raceSlug('codex', 2, () => 0.5)
   check(slug === 'race-codex-3-8000' && /^[a-z0-9-]{1,40}$/.test(slug), `slug race-<agent>-<n>-<hex> is a valid worktree slug (${slug})`)
-  check(R.raceReady('claude', { state: 'idle', provider: 'claude' }, true) && !R.raceReady('claude', undefined, true) && !R.raceReady('claude', { state: 'idle' }, false), 'Claude: first status plus bracketed paste')
-  check(R.raceReady('codex', { state: 'idle', provider: 'codex' }, true) && !R.raceReady('codex', { state: 'idle', provider: 'claude' }, true), 'Codex: a status from the Codex bridge')
+  check(R.raceReady('claude', { state: 'idle', precise: true, provider: 'claude' }, true) && !R.raceReady('claude', undefined, true) && !R.raceReady('claude', { state: 'idle', precise: true, provider: 'claude' }, false), 'Claude: a precise idle (SessionStart hook) plus bracketed paste')
+  check(!R.raceReady('claude', { state: 'idle', precise: false, provider: 'claude' }, true), 'a title-only status is not ready (it can be the folder trust dialog)')
+  check(!R.raceReady('claude', { state: 'working', precise: true, provider: 'claude' }, true) && R.raceReady('claude', { state: 'done', precise: true, provider: 'claude' }, true), 'only idle or done count, as in the initial prompt gate')
+  check(R.raceReady('codex', { state: 'idle', precise: true, provider: 'codex' }, true) && !R.raceReady('codex', { state: 'idle', precise: true, provider: 'claude' }, true) && !R.raceReady('claude', { state: 'idle', precise: true, provider: 'codex' }, true), 'Codex: the Codex bridge start, and each agent only by its own provider')
   check(R.checkoutCommand('sn/race-claude-1-3f2a') === 'git checkout sn/race-claude-1-3f2a', 'copy git checkout text')
   same(Object.keys(R.racePresets({ presets: [claude, codex], settings: {} })), ['claude', 'codex'], 'presets per agent')
 
@@ -168,10 +170,12 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   bracket[c3] = true
   S.getState().setPaneStatus({ paneId: c1, state: 'idle', precise: true, notify: false, provider: 'claude' })
   S.getState().setPaneStatus({ paneId: c3, state: 'idle', precise: false, notify: false, provider: 'claude' })
+  S.getState().setPaneStatus({ paneId: c2, state: 'idle', precise: false, notify: false, provider: 'claude' })
   await sleep(80)
   check(pasted[c1].length === 1 && pasted[c3].length === 0, 'a ready Claude gets the task; a Codex without its codex status waits')
-  S.getState().setPaneStatus({ paneId: c3, state: 'idle', precise: false, notify: false, provider: 'codex' })
-  S.getState().setPaneStatus({ paneId: c2, state: 'working', precise: true, notify: false, provider: 'claude' })
+  check(pasted[c2].length === 0, 'a Claude with a title-only status waits for its SessionStart')
+  S.getState().setPaneStatus({ paneId: c3, state: 'idle', precise: true, notify: false, provider: 'codex' })
+  S.getState().setPaneStatus({ paneId: c2, state: 'idle', precise: true, notify: false, provider: 'claude' })
   const outcome = await started.done
   same(outcome, { sent: 3, late: 0, failed: 0 }, 'the task went to all three')
   check(started.paneIds.every((id) => pasted[id].length === 1 && pasted[id][0] === 'Make the login faster\nand add a test'), 'each agent got the whole task as one paste')
@@ -199,6 +203,30 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   fake.removeRes = { ok: true }
   check((await R.discardOthers('w1', plan)) === 1 && !ws().panes.some((p) => p.id === c2) && ws().panes.some((p) => p.id === c3), 'the others go, the kept one stays')
 
+  // ---- the workspace changed while the worktrees were being created ----
+  calls.add.length = 0
+  calls.remove.length = 0
+  S.setState({ workspaces: [{ id: 'w1', name: 'Repo', cwd: 'C:\repo', panes: Array.from({ length: 9 }, (_, i) => pane(`r${i}`)), favorite: false }], activeWorkspaceId: 'w1' })
+  const realAdd = snApi.git.worktreeAdd
+  snApi.git.worktreeAdd = async (r) => {
+    const res = await realAdd(r)
+    if (calls.add.length === 1) S.getState().addPane('w1', pane('late-extra'))
+    return res
+  }
+  const filled = await R.startRace({ workspaceId: 'w1', task: 'x', counts: { claude: 2, codex: 1 }, destination: 'here' })
+  same(filled, { ok: false, error: 'full' }, 'a workspace that filled up meanwhile refuses the race')
+  check(calls.remove.length === calls.add.length && calls.add.length === 3 && ws().panes.length === 10, 'its worktrees are removed and no console is added')
+  calls.add.length = 0
+  calls.remove.length = 0
+  snApi.git.worktreeAdd = async (r) => {
+    const res = await realAdd(r)
+    if (calls.add.length === 1) S.setState({ workspaces: [] })
+    return res
+  }
+  same(await R.startRace({ workspaceId: 'w1', task: 'x', counts: { claude: 1, codex: 1 }, destination: 'here' }), { ok: false, error: 'not_found' }, 'a workspace deleted meanwhile refuses the race')
+  check(calls.remove.length === 2, 'and leaves no orphan worktree behind')
+  snApi.git.worktreeAdd = realAdd
+
   // ---- late agent and a new workspace ----
   calls.add.length = 0
   calls.writes.length = 0
@@ -215,7 +243,7 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   same(late, { sent: 0, late: 2, failed: 0 }, 'past the timeout the task goes anyway, marked late')
   same(pasted[l1], ['Rename the config loader please'], 'a late console with bracketed paste gets the task')
   await sleep(260)
-  same(calls.writes.map((w) => w.ptyId), [`pty-${l1}`], 'Enter only to the late console that takes a bracketed paste')
+  same(calls.writes, [], 'a late console never gets an Enter (it could answer a trust or login screen)')
   same(pasted[l2], ['Rename the config loader please'], 'the other gets it on one line, waiting in its input')
   // A contestant closed before its agent is up gets nothing.
   calls.add.length = 0

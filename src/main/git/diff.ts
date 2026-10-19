@@ -482,7 +482,7 @@ export class ChangesReader {
   async openFile(req: unknown): Promise<boolean> {
     const { key, path, reveal, base } = (req && typeof req === 'object' ? req : {}) as Record<string, unknown>
     if (typeof key !== 'string' || typeof path !== 'string') return false
-    if (base !== undefined && !isBaseSha(base)) return false
+    if (base !== undefined && (!key.startsWith('pane:') || !isBaseSha(base))) return false
     const view = this.deps.source.get(key)
     const list = typeof base === 'string' ? this.listedAgainst(key, base) : view?.files
     if (!view?.summary || !list || !findListed(list, path)) return false

@@ -6,12 +6,15 @@
  * with Enter) and the bar's actions. Nothing here ever merges: the user picks
  * a contestant by copying its `git checkout` and discards the others.
  *
- * Readiness per agent: Claude is ready on its first status (hooks or OSC
- * title), Codex on its first status from the Codex bridge (provider codex);
- * both also need bracketed paste on (the input box is up). Past 20 s the task
- * goes anyway with a warning, with Enter only when the console takes a
- * bracketed paste. The race lives in memory: after a restart the consoles and
- * their worktrees stay, the bar does not.
+ * Readiness per agent, the same rule as the initial prompt gate (PtyManager):
+ * only a precise signal may send Enter, so Claude is ready on its SessionStart
+ * hook and Codex on the Codex bridge start (a precise idle of that provider).
+ * A title-only status is not enough: in a fresh worktree folder it can be
+ * Claude's folder trust dialog, which an Enter would answer. Both also need
+ * bracketed paste on (the input box is up). Past 20 s the task goes anyway
+ * with a warning, pasted without Enter so it waits in the input for the user.
+ * The race lives in memory: after a restart the consoles and their worktrees
+ * stay, the bar does not.
  */
 import { create } from 'zustand'
 import type { AgentPreset, Pane, PaneStatus, PaneWorktree, Workspace } from '@shared/types'
@@ -135,10 +138,10 @@ export function raceSlug(agent: RaceAgent, index: number, rand: () => number = M
   return `race-${agent}-${index + 1}-${hex}`
 }
 
-/** Whether a contestant's agent is up (see the module comment). */
-export function raceReady(agent: RaceAgent, status: Pick<PaneStatus, 'provider'> | null | undefined, bracketed: boolean | null): boolean {
-  if (bracketed !== true || !status) return false
-  return agent === 'claude' ? true : status.provider === 'codex'
+/** Whether a contestant's agent is up (see the module comment): a precise idle of its own provider plus bracketed paste. */
+export function raceReady(agent: RaceAgent, status: Pick<PaneStatus, 'provider' | 'precise' | 'state'> | null | undefined, bracketed: boolean | null): boolean {
+  if (bracketed !== true || !status || status.precise !== true) return false
+  return status.provider === agent && (status.state === 'idle' || status.state === 'done')
 }
 
 /** What "Copy git checkout" puts on the clipboard. */
@@ -240,6 +243,14 @@ export async function startRace(req: StartRaceReq, timing: RaceTiming = {}): Pro
     created.push(res.worktree)
   }
 
+  // The worktrees took a while: the workspace may be gone, or (this workspace) filled up meanwhile.
+  const now = useAppStore.getState().workspaces.find((w) => w.id === ws.id)
+  const lost: StartRaceError | null = !now ? 'not_found' : req.destination === 'here' && !raceFitsHere(now.panes.length, req.counts) ? 'full' : null
+  if (lost) {
+    await rollback()
+    return { ok: false, error: lost }
+  }
+
   const templates = slots.map((a) => templateFromPreset(presets[a] as AgentPreset))
   let workspaceId = ws.id
   let paneIds: string[]
@@ -295,9 +306,10 @@ async function sendWhenReady(workspaceId: string, c: RaceContestant, task: strin
   const late = !ready()
   if (!late) await sleep(timing.settleMs ?? READY_SETTLE_MS)
   if (!exists()) return finish('failed')
-  // Late: Enter only when the console takes a bracketed paste; otherwise one line waits in its input.
+  // Late: never an Enter (it could answer a trust or login screen); the task waits in the input,
+  // whole with bracketed paste on, else on one line.
   const agent = !late || isBracketedPaste(c.paneId) === true
-  if (!deliverPrompt(c.paneId, task, { agent, enter: true })) return finish('failed')
+  if (!deliverPrompt(c.paneId, task, { agent, enter: !late })) return finish('failed')
   return finish(late ? 'late' : 'sent')
 }
 
