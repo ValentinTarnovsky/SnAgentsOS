@@ -326,12 +326,13 @@ export type RemoteCtlAction =
    * (`dueAt`) never moves and the phone sends no text (the desktop uses the
    * stored prompt). Idempotent while a run waits (ack ok, `info: 'pending'`).
    * Ack errors: not_found (pane outside workspaceId), no_schedule (no
-   * schedule or an empty prompt).
+   * schedule or an empty prompt), rate (per-session bucket, E3-FR-03).
    */
   | { kind: 'scheduleRun'; workspaceId: string; paneId: string }
   /**
    * The Active switch: pauses without deleting; turning it on re-arms the
-   * next run like the desktop switch. Ack errors: not_found, no_schedule.
+   * next run like the desktop switch. Ack errors: not_found, no_schedule,
+   * rate.
    */
   | { kind: 'scheduleToggle'; workspaceId: string; paneId: string; enabled: boolean }
 
