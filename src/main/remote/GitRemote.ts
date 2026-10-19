@@ -12,7 +12,8 @@
  *    snapshot for DIFF_CACHE_MS, so a refresh between two pages never shifts
  *    entries from one page to the next.
  *  - diff: the file must be in the target's current list (one refresh first
- *    when it is not, then not_found). The parsed diff is cached per
+ *    when it is not, or when a stale entry shows no changes left, then
+ *    not_found). The parsed diff is cached per
  *    (key, path, staged) for DIFF_CACHE_MS, so every page of one read comes
  *    from one version. Any GitService run since the entry was read makes the
  *    next page read the diff again: an unchanged file keeps its `diffRev` and
@@ -23,7 +24,8 @@
  * files their repo-relative paths. Git runs at `remote` priority, so a phone
  * can hold at most one of the two git slots (gitExec) and the desktop chip
  * keeps refreshing while a phone reads. Rate and in-flight limits per session
- * live in SessionManager.
+ * live in SessionManager; GIT_REMOTE_BACKLOG_MAX caps the reads still running
+ * across sessions, timed out ones included.
  */
 import type { GitArea, GitDiffHunk, GitDiffLine, GitDiffRes, GitError, GitFileEntry, GitSummary } from '@shared/git-types'
 import type { RemoteGitChanges, RemoteGitDiffPage, RemoteGitError, RemoteGitReply, RemoteGitRequest } from '@shared/remote-protocol'
@@ -45,6 +47,13 @@ export const DIFF_CACHE_MAX = 32
 export const LINE_MAX_BYTES = 8 * 1024
 /** Suffix of a line cut to LINE_MAX_BYTES. */
 export const LINE_CUT_MARK = ' [...]'
+/**
+ * Phone reads still running, counted across sessions and including the ones
+ * that already answered `timeout` (git has no cancel: their runs stay queued).
+ * Past this, new requests answer `rate`, so a slow repo can never pile up an
+ * unbounded backlog behind the remote git slot.
+ */
+export const GIT_REMOTE_BACKLOG_MAX = 4
 
 /** Widest id the schema lets in (`^[A-Za-z0-9_-]{1,64}$`) and the highest page: the envelope's worst case. */
 const WORST_ID = 'x'.repeat(64)
@@ -56,6 +65,9 @@ export interface GitRemoteSource {
   get(key: string): { summary: GitSummary | null; error?: GitError; files: GitFileEntry[] } | null
   markHot(key: string): void
 }
+
+/** One target's result as GitRemoteSource hands it out. */
+type SourceView = NonNullable<ReturnType<GitRemoteSource['get']>>
 
 type Handle = unknown
 export interface GitRemoteTimers {
@@ -219,6 +231,8 @@ interface DiffSnap {
 }
 
 const fail = (error: RemoteGitError['error']): RemoteGitReply => ({ ok: false, data: { error }, page: 0, done: true })
+/** A listed entry whose diff came back empty (readFileDiff 'gone'). */
+const GONE = Symbol('gone')
 
 /** Areas a diff without `staged` may come from, in order: the working tree first. */
 const WORKTREE_AREAS: readonly GitArea[] = ['unstaged', 'conflict', 'untracked']
@@ -231,6 +245,8 @@ export class GitRemote {
   private readonly runner: Pick<GitRunner, 'run'>
   private readonly now: () => number
   private readonly timers: GitRemoteTimers
+  /** Reads still running, timed out or not (GIT_REMOTE_BACKLOG_MAX). */
+  private running = 0
 
   constructor(private readonly deps: GitRemoteDeps) {
     const base = deps.runner
@@ -244,10 +260,20 @@ export class GitRemote {
     const key = `ws:${req.workspaceId}`
     const page = req.page ?? 0
     if (req.op === 'diff' && !req.path) return fail('not_found')
+    if (this.running >= GIT_REMOTE_BACKLOG_MAX) return fail('rate')
     this.deps.source.markHot(key)
+    this.running += 1
     const work = req.op === 'status' ? this.statusPage(key, page) : this.diffPage(key, req.path as string, req.staged === true, page)
-    const reply = await this.withTimeout(work, req.op === 'status' ? GIT_STATUS_TIMEOUT_MS : GIT_DIFF_TIMEOUT_MS)
-    return reply
+    const done = (): void => {
+      this.running -= 1
+    }
+    work.then(done, done)
+    return this.withTimeout(work, req.op === 'status' ? GIT_STATUS_TIMEOUT_MS : GIT_DIFF_TIMEOUT_MS)
+  }
+
+  /** Reads still running, timed out or not (tests). */
+  backlog(): number {
+    return this.running
   }
 
   /** Drop every cached snapshot (the server stopped). */
@@ -316,14 +342,31 @@ export class GitRemote {
     let view = this.deps.source.get(key) ?? (await this.deps.source.ensureFresh(key, STATUS_MAX_AGE_MS))
     if (!view) return fail('not_found')
     let entry = view.summary ? listedFor(view.files, path, staged) : null
+    let refreshed = false
     if (!entry) {
       // A file newer than the cached list: one refresh before not_found.
+      refreshed = true
       view = await this.deps.source.ensureFresh(key, 0)
       if (!view) return fail('not_found')
       if (!view.summary) return fail(view.error ?? 'git_error')
       entry = listedFor(view.files, path, staged)
       if (!entry) return fail('not_found')
     }
+    const reply = await this.diffOf(key, view, entry, path, staged, page)
+    if (reply !== GONE || refreshed) return reply === GONE ? fail('not_found') : reply
+    // Listed in a stale list but its changes moved (staged, reverted): the
+    // same single refresh, then the area it is in now or not_found.
+    view = await this.deps.source.ensureFresh(key, 0)
+    if (!view) return fail('not_found')
+    if (!view.summary) return fail(view.error ?? 'git_error')
+    entry = listedFor(view.files, path, staged)
+    if (!entry) return fail('not_found')
+    const again = await this.diffOf(key, view, entry, path, staged, page)
+    return again === GONE ? fail('not_found') : again
+  }
+
+  /** The page of one listed entry's diff, through the cache; GONE when git shows no changes left. */
+  private async diffOf(key: string, view: SourceView, entry: GitFileEntry, path: string, staged: boolean, page: number): Promise<RemoteGitReply | typeof GONE> {
     const summary = view.summary as GitSummary
     const cacheKey = `${key}\0${staged ? 's' : 'w'}\0${path}`
     const t = this.now()
@@ -334,8 +377,9 @@ export class GitRemote {
       const res = await readFileDiff({ repoRoot: summary.repoRoot, entry, force: false, runner: this.runner, fs: this.deps.fs, platform: this.deps.platform })
       if ('error' in res) {
         this.diffs.delete(cacheKey)
-        // 'gone' (no changes left) and 'denied' (not a path main listed) both read as not_found.
-        return fail(res.error === 'gone' || res.error === 'denied' ? 'not_found' : res.error)
+        if (res.error === 'gone') return GONE
+        // 'denied' (not a path main listed) reads as not_found.
+        return fail(res.error === 'denied' ? 'not_found' : res.error)
       }
       snap = { files: view.files, at: this.now(), pages: pageDiff(res) }
     }

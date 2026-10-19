@@ -239,7 +239,14 @@ async function testGitRemote() {
   w.content['src/a.ts'] = undefined
   delete w.content['src/a.ts']
   w.state.view = { summary: w.sum(), files: [...files] }
+  const ensures3 = w.calls.ensure.length
   same((await w.remote.handle({ workspaceId: 'w1', op: 'diff', path: 'src/a.ts' })).data, { error: 'not_found' }, 'a listed file whose diff is gone answers not_found')
+  check(w.calls.ensure.length === ensures3 + 1 && w.calls.ensure.at(-1)[1] === 0, 'after exactly one refresh')
+  // Stale list: the file is listed unstaged, but by now its change is an untracked copy.
+  w.state.view = { summary: w.sum(), files: [entry('moved.ts', 'unstaged')] }
+  w.state.refreshTo = { summary: w.sum(), files: [entry('moved.ts', 'untracked')] }
+  const mv = await w.remote.handle({ workspaceId: 'w1', op: 'diff', path: 'moved.ts' })
+  check(mv.ok && mv.data.area === 'untracked' && mv.data.hunks[0].lines[0].text === 'new', 'a stale entry whose diff is gone refreshes once and reads the area it is in now')
 
   // Timeouts (FR-26): git 10 s, diff 15 s.
   const t = fakeWorld()
@@ -263,7 +270,16 @@ async function testGitRemote() {
   hangTimers[0].fn()
   await tick()
   same(out?.data, { error: 'timeout' }, 'and then answers timeout')
-  check(slowRunner instanceof GR.GitRemote, 'the service keeps answering after a timeout')
+  check(t.remote.backlog() === 1, 'a timed out read whose git never returns still counts as running')
+  const after = await slowRunner.handle({ workspaceId: 'w1', op: 'status' })
+  check(after.ok && after.data.files.length === 1 && t.remote.backlog() === 1, 'the service keeps answering after a timeout')
+  // Backlog across sessions (git has no cancel): past GIT_REMOTE_BACKLOG_MAX running reads, rate.
+  check(GR.GIT_REMOTE_BACKLOG_MAX === 4, 'at most 4 phone reads running at once')
+  for (let i = 0; i < 3; i++) void hangRemote.handle({ workspaceId: 'w1', op: 'diff', path: 'slow.ts' })
+  await tick()
+  check(hangRemote.backlog() === 4, '4 hung reads are running')
+  same(await hangRemote.handle({ workspaceId: 'w1', op: 'diff', path: 'slow.ts' }), { ok: false, data: { error: 'rate' }, page: 0, done: true }, 'the 5th answers rate at once, without touching git')
+  check(hangTimers.length === 4, 'the refused read started no timer')
 }
 
 // ---------------------------------------------------------------------------
