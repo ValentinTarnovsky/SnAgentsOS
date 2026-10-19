@@ -27,6 +27,9 @@ import { useT } from '@/i18n'
 import { noteSpawnFailure } from '@/lib/worktrees'
 import { FIT_MIN_FONT, fitBaselineOf, fitGeometry, fitOwnerOf, releaseFitFromDesktop, setFitBaseline, useFitStore, type FitOwnerEntry } from '@/lib/fitStore'
 import { oneShotLaunch } from '@/lib/repoConfig'
+import { registerShellMarks, unregisterShellMarks, type ShellMarksApi } from '@/lib/shellMarksRegistry'
+import { toast } from '@/lib/toast'
+import { ShellMarks } from './shellMarks'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
 const INFINITE_SCROLLBACK = 100000
@@ -267,6 +270,10 @@ export interface XtermController {
   hideExitCard: () => void
   /** Family of the live shell (cd prefix of the "Claude exited" chip), or null. */
   shellKind: () => ShellKind | null
+  /** Scroll the previous (-1) / next (1) prompt to the first row (E6-FR-27); false without marks. */
+  prompt: (dir: -1 | 1) => boolean
+  /** Copy the newest finished command's output (E6-FR-29); false when there is none. */
+  copyLastOutput: () => boolean
 }
 
 /** Exit card state of a pane (E6-FR-17/18), owned by the pane, never persisted. */
@@ -324,6 +331,8 @@ export function useXterm(
     restart: () => undefined,
     hideExitCard: () => undefined,
     shellKind: () => null,
+    prompt: () => false,
+    copyLastOutput: () => false,
   })
   /** Latest options: an in-place restart relaunches with the current launch props. */
   const optsRef = useRef(opts)
@@ -648,6 +657,22 @@ export function useXterm(
     // `snaos read` (E8-FR-17): scrollback + screen as plain lines, wraps joined.
     const termReader: TermReader = (n) => readBufferLines(term.buffer.active, n)
     registerTermReader(opts.paneId, termReader)
+    // PowerShell prompt marks (E6-FR-26..29): passive, inert without OSC 133.
+    const marks = new ShellMarks(term, { exitTitle: (code) => tRef.current('terminal.exitCodeTitle', { code }) })
+    const marksApi: ShellMarksApi = {
+      prompt: (dir) => marks.navigate(dir),
+      hasLastOutput: () => marks.hasLastOutput(),
+      copyLastOutput: () => {
+        const text = marks.lastOutput()
+        if (text === null) return false
+        window.snApi.clipboard.writeText(text)
+        toast.success(tRef.current('terminal.outputCopied'), { dedupeKey: 'copy-last-output' })
+        return true
+      },
+    }
+    registerShellMarks(opts.paneId, marksApi)
+    controllerRef.current.prompt = marksApi.prompt
+    controllerRef.current.copyLastOutput = marksApi.copyLastOutput
 
     // Exit card state (E6-FR-17): kept in a ref for the key handler, mirrored
     // to the pane chrome through onExitState.
@@ -1097,6 +1122,8 @@ export function useXterm(
       unregisterRedrawer(opts.paneId)
       unregisterTermReader(opts.paneId, termReader)
       unregisterRestarter(opts.paneId, restartFn)
+      unregisterShellMarks(opts.paneId, marksApi)
+      marks.dispose()
       exitRef.current = null
       shellKindRef.current = null
       ptyIdRef.current = null
@@ -1110,6 +1137,8 @@ export function useXterm(
         restart: () => undefined,
         hideExitCard: () => undefined,
         shellKind: () => null,
+        prompt: () => false,
+        copyLastOutput: () => false,
       }
       refitRef.current = () => undefined
       term.dispose()
