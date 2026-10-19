@@ -1,7 +1,10 @@
 /**
  * Sending an answer card (E2-FR-21, 24): plain `input` frames, no new WS
  * message. Allow is "1", Deny is Esc (never followed by Enter); an
- * AskUserQuestion answer is the key groups of buildAskAnswerKeys.
+ * AskUserQuestion answer is the key groups of buildAskAnswerKeys. "Always
+ * allow" is "2" (E2-FR-53) and a Plan card option is its digit (E2-FR-54),
+ * both one group with no Enter, offered only once the menu validated on
+ * screen (promptMenu.ts).
  *
  *  - Before the first group the request must still be in the last paneStatus
  *    (else the toast "Already answered"). Main takes it out of pending[] as
@@ -38,6 +41,10 @@ export const SENT_VISIBLE_MS = 1500
 export type AnswerPayload =
   | { kind: 'allow' }
   | { kind: 'deny' }
+  /** Option 2 of a validated permission menu (E2-FR-53). */
+  | { kind: 'always' }
+  /** The digit of a validated plan menu option (E2-FR-54). */
+  | { kind: 'menu'; option: number }
   | { kind: 'ask'; selections: readonly (AskSelection | undefined)[] }
 
 export type AnswerPhase = 'sending' | 'sent' | 'unconfirmed' | 'disconnected'
@@ -45,7 +52,7 @@ export type AnswerPhase = 'sending' | 'sent' | 'unconfirmed' | 'disconnected'
 /** The send in progress (or its outcome) for one pane. */
 export interface AnswerState {
   pendingId: string
-  kind: 'permission' | 'question'
+  kind: 'permission' | 'question' | 'plan'
   phase: AnswerPhase
   groups: number
 }
@@ -53,10 +60,15 @@ export interface AnswerState {
 /** What a tap did: started a sequence, or why it did not. */
 export type AnswerResult = 'started' | 'busy' | 'stale' | 'invalid' | 'tooLong' | 'offline'
 
-/** The key groups of an answer, [] when it cannot be built. Allow and Deny never carry "\r". */
+/** The key groups of an answer, [] when it cannot be built. Single key answers never carry "\r". */
 export function answerGroups(pending: RemotePending, payload: AnswerPayload): AnswerKeyGroup[] {
   if (payload.kind === 'allow') return pending.kind === 'permission' ? [{ raw: '1' }] : []
   if (payload.kind === 'deny') return pending.kind === 'permission' ? [{ raw: '\x1b' }] : []
+  if (payload.kind === 'always') return pending.kind === 'permission' ? [{ raw: '2' }] : []
+  if (payload.kind === 'menu') {
+    const ok = pending.kind === 'plan' && Number.isInteger(payload.option) && payload.option >= 1 && payload.option <= 9
+    return ok ? [{ raw: String(payload.option) }] : []
+  }
   return pending.kind === 'question' ? buildAskAnswerKeys(pending, payload.selections) : []
 }
 
@@ -114,7 +126,7 @@ export function createAnswerer(deps: AnswerDeps): Answerer {
   const afterLast = (paneId: string, state: AnswerState): void => {
     const sent: AnswerState = { ...state, phase: 'sent' }
     finish(paneId, sent)
-    if (state.kind === 'permission') {
+    if (state.kind !== 'question') {
       after.set(paneId, deps.setTimeout(() => {
         after.delete(paneId)
         deps.setState(paneId, null)
@@ -142,7 +154,8 @@ export function createAnswerer(deps: AnswerDeps): Answerer {
       const groups = answerGroups(pending, payload)
       if (groups.length === 0) return 'invalid'
       if (groups.length > MAX_ANSWER_GROUPS) return 'tooLong'
-      const state: AnswerState = { pendingId, kind: pending.kind === 'question' ? 'question' : 'permission', phase: 'sending', groups: groups.length }
+      const kind = pending.kind === 'question' ? 'question' : pending.kind === 'plan' ? 'plan' : 'permission'
+      const state: AnswerState = { pendingId, kind, phase: 'sending', groups: groups.length }
       clearAfter(paneId)
       if (!deps.isOpen()) {
         deps.setState(paneId, { ...state, phase: 'disconnected' })
