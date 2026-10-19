@@ -135,6 +135,7 @@ export const CH = {
   REMOTE_FIREWALL_FIX: 'remote:firewallFix', // invoke -> FirewallFixRes (UAC, E2-FR-39)
   REMOTE_OPEN_NETWORK_SETTINGS: 'remote:openNetworkSettings', // send (opens ms-settings:network-status)
   REMOTE_FIT_RELEASE: 'remote:fitRelease', // send ({ paneId } | { all: true }; phone-fit back to the desktop, E3-FR-17/19)
+  REMOTE_SECURE_SET: 'remote:secureSet', // invoke (enabled: boolean) -> SecureModeStatus (tailscale serve, E3-FR-42)
 
   // Keep the PC awake while agents work (E5-FR-23/24). Main decides; the renderer persists.
   POWER_SET_CONFIG: 'power:setConfig', // send (AwakeMode); main answers with power:state

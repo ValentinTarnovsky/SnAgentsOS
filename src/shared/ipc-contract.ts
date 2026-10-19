@@ -461,11 +461,38 @@ export interface StatusTitleReq {
 
 export type RemoteServerState = 'stopped' | 'starting' | 'running' | 'error'
 
-/** One reachable address the phone can use (LAN NIC, Tailscale, ...). */
+/**
+ * One reachable address the phone can use (LAN NIC, Tailscale, ...). The
+ * secure mode's `tailscaleHttps` endpoint has a `host` (the MagicDNS name)
+ * and no `ip` (E3-FR-43); every other kind has an `ip`.
+ */
 export interface RemoteEndpoint {
-  ip: string
+  ip?: string
+  host?: string
   kind: RemoteEndpointKind
   url: string
+}
+
+/** Why turning the secure mode on failed or stopped working (E3-FR-42). */
+export type SecureModeError =
+  | 'not_installed' // no tailscale CLI
+  | 'not_running' // tailscale is logged out or stopped
+  | 'no_https' // MagicDNS or HTTPS certificates are off in the tailnet
+  | 'port_busy' // another handler already serves https:443
+  | 'funnel' // https:443 is exposed with Funnel: never touched
+  | 'cli' // the CLI failed: `message` carries its stderr as is
+  | 'server_off' // the remote server is not running
+
+/** The secure mode as main sees it (`RemoteServerStatus.secure`, E3-FR-42). */
+export interface SecureModeStatus {
+  state: 'off' | 'checking' | 'on' | 'error'
+  /** MagicDNS name (`machine.tailnet.ts.net`), while on. */
+  dnsName?: string
+  /** `https://<dnsName>`, while on. */
+  url?: string
+  error?: SecureModeError
+  /** Raw CLI output for `cli`, the foreign handler for `port_busy`. */
+  message?: string
 }
 
 export interface RemoteServerStatus {
@@ -476,6 +503,8 @@ export interface RemoteServerStatus {
   connectedCount: number
   /** Bind/start failure detail (e.g. port in use). */
   error?: string
+  /** Secure mode through `tailscale serve` (E3-FR-42). Absent = off. */
+  secure?: SecureModeStatus
 }
 
 /** Device info safe to show in the renderer (never includes the secret). */
@@ -500,7 +529,7 @@ export interface PendingPairingInfo {
 export interface PairingQrPayload {
   code: string
   expiresAt: number
-  endpoints: Array<{ ip: string; kind: RemoteEndpointKind; url: string; qrDataUrl: string }>
+  endpoints: Array<{ ip?: string; host?: string; kind: RemoteEndpointKind; url: string; qrDataUrl: string }>
 }
 
 /** Pushed to the renderer whenever server status / devices / pairing change. */
@@ -832,6 +861,12 @@ export interface SnApi {
      * A no-op without the remote server.
      */
     fitRelease(req: RemoteFitReleaseReq): void
+    /**
+     * Turn the secure mode on or off (E3-FR-42): main runs the tailscale CLI
+     * and answers with the result. The renderer saves `settings.remote.https`
+     * only after an `on` (or after turning it off).
+     */
+    secureSet(enabled: boolean): Promise<SecureModeStatus>
   }
   /** Keep the PC awake while agents work (E5-FR-23/24). */
   power: {

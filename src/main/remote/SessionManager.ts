@@ -71,6 +71,8 @@ const CLOSE_GOING_AWAY = 1001
  * visible page inside it; a frozen iOS page falls out on its own).
  */
 export const VIEWED_FRESH_MS = 30 * 1000
+/** remote-devices.json caps lastHost at 64 characters (a longer name is never saved). */
+const LAST_HOST_MAX = 64
 
 // --- E3-FR-03: rate-limited v3.0 traffic ---------------------------------------
 // Matched by name, not by type, so a WP that adds one of these messages to the
@@ -205,6 +207,11 @@ export interface SessionManagerDeps {
    * until the push service exists; authOk then carries no pushKey.
    */
   getPushKey?: () => string | null
+  /**
+   * E3-FR-43 (R30-07): `https://<MagicDNS name>` while the secure mode is on,
+   * else null. authOk carries it so a phone on http can offer the switch.
+   */
+  getSecureUrl?: () => string | null
   /** E3 M11: phone-fit ownership. Absent = fitPane/releaseFit go to the executor as is. */
   fit?: FitHooks
   /**
@@ -436,6 +443,7 @@ export class SessionManager implements PtySink {
    */
   private sendAuthOk(session: Session, deviceId: string): void {
     const pushKey = this.deps.getPushKey?.() ?? null
+    const secureUrl = this.deps.getSecureUrl?.() ?? null
     this.send(session, {
       type: 'authOk',
       deviceId,
@@ -444,6 +452,7 @@ export class SessionManager implements PtySink {
       appVersion: this.deps.appVersion,
       httpToken: this.issueHttpToken(session),
       ...(pushKey ? { pushKey } : {}),
+      ...(secureUrl ? { secureUrl } : {}),
     })
   }
 
@@ -501,8 +510,11 @@ export class SessionManager implements PtySink {
     this.clearHandshakeTimer(session)
     this.uncountUnauthed(session)
     this.deps.registry.touchLastSeen(deviceId)
-    // E2-FR-42: the deep link of a push points at the host phones last used.
-    if (session.host && !session.host.startsWith('127.')) this.deps.registry.setLastHost(deviceId, session.host)
+    // E2-FR-42: the deep link of a push points at the host phones last used
+    // (an IP literal, or the secure mode's MagicDNS name when it fits the file).
+    if (session.host && !session.host.startsWith('127.') && session.host.length <= LAST_HOST_MAX) {
+      this.deps.registry.setLastHost(deviceId, session.host)
+    }
     this.deps.onConnectionsChanged()
   }
 
@@ -751,6 +763,27 @@ export class SessionManager implements PtySink {
       if (session.authed && session.visible && now - session.lastSeen <= VIEWED_FRESH_MS) return true
     }
     return false
+  }
+
+  /**
+   * E3-FR-44: the device has a visible session right now, so Web Push skips
+   * it: an authenticated socket whose page reported itself visible (the
+   * `visibility` message of E2-FR-52, sent on every visibilitychange), that
+   * watches at least one console and spoke within VIEWED_FRESH_MS (a frozen
+   * iOS page falls out on its own).
+   */
+  isDeviceVisible(deviceId: string, now: number = Date.now()): boolean {
+    for (const session of this.sessions) {
+      if (session.deviceId !== deviceId || !session.authed || !session.visible) continue
+      if (now - session.lastSeen > VIEWED_FRESH_MS) continue
+      if (this.watchesAny(session)) return true
+    }
+    return false
+  }
+
+  /** At least one `sub` (the Chat view's `chatSub` joins here when it lands). */
+  private watchesAny(session: Session): boolean {
+    return session.subs.size > 0
   }
 
   connectedDeviceIds(): Set<string> {

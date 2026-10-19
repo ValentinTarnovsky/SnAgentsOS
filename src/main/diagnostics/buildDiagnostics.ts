@@ -181,8 +181,10 @@ function render(i: DiagnosticsInput, b: Budget): string {
   L.push('', '### Remote')
   const rs = i.remote
   if (rs) {
-    const eps = rs.endpoints.map((e) => `${e.kind} ${maskEndpointIp(e.ip)}`).join(', ') || '-'
-    L.push(`- state ${rs.state}, port ${rs.port}, phones connected ${rs.connectedCount}, endpoints ${eps}` + (rs.error ? `, error ${clip(rs.error, 200)}` : ''))
+    // The secure mode's MagicDNS name names the tailnet: never copied (E3-FR-43).
+    const eps = rs.endpoints.map((e) => `${e.kind} ${e.ip ? maskEndpointIp(e.ip) : 'ts.net'}`).join(', ') || '-'
+    const secure = rs.secure ? `, secure ${rs.secure.state}${rs.secure.error ? ` (${rs.secure.error})` : ''}` : ''
+    L.push(`- state ${rs.state}, port ${rs.port}, phones connected ${rs.connectedCount}, endpoints ${eps}${secure}` + (rs.error ? `, error ${clip(rs.error, 200)}` : ''))
   } else L.push('-')
 
   const errors = (r ? r.renderErrors : i.mainRenderErrors).slice(-10)
