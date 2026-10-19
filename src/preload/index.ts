@@ -55,6 +55,7 @@ import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUp
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
+import type { CliUiState, SkillOp, SkillStatus } from '@shared/ctl-protocol'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -210,6 +211,12 @@ const api: SnApi = {
     forget: (paneId: string) => ipcRenderer.send(CH.AGENTS_FORGET, paneId),
     onChanged: (cb: (e: AgentsChangedEvt) => void) => sub<AgentsChangedEvt>(CH.AGENTS_CHANGED, cb),
     onReady: (cb: (e: AgentsReadyEvt) => void) => sub<AgentsReadyEvt>(CH.AGENTS_READY, cb),
+  },
+  cli: {
+    setEnabled: (enabled: boolean) => ipcRenderer.send(CH.CLI_SET_ENABLED, enabled === true),
+    state: () => ipcRenderer.invoke(CH.CLI_STATE) as Promise<CliUiState>,
+    skill: (op: SkillOp) => ipcRenderer.invoke(CH.CLI_SKILL, op) as Promise<SkillStatus>,
+    userPath: (enabled: boolean) => ipcRenderer.invoke(CH.CLI_USER_PATH, enabled === true) as Promise<boolean>,
   },
   reviewNotes: {
     list: (workspaceId: string) => ipcRenderer.invoke(CH.GIT_NOTES_LIST, workspaceId) as Promise<ReviewNotesListRes>,

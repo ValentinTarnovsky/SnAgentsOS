@@ -1,12 +1,12 @@
 import { spawn, type IPty } from 'node-pty'
 import { randomUUID } from 'crypto'
 import { existsSync } from 'fs'
-import { delimiter } from 'path'
+import { delimiter, dirname } from 'path'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { HeadlessMetrics, PtyDataEvt, PtyExitEvt, PtyPromptResultEvt, PtyReattachRes, PtyRestartReq, PtyRestartRes, PtySpawnReq, PtySpawnRes, PtySubmitRes, ShellKind, TerminalEngineSettings } from '@shared/ipc-contract'
 import type { ClaudePaneState, SetupStep } from '@shared/types'
-import { AGENT_ENV } from '@shared/brand'
+import { AGENT_ENV, CLI_ENV } from '@shared/brand'
 import { appendPromptRef } from '@shared/agent-argv'
 import {
   INITIAL_PROMPT_ENV,
@@ -305,7 +305,7 @@ export class PtyManager {
    * gate of an initial prompt only submits on a precise idle/done.
    */
   constructor(private readonly getSender: () => WebContents | null,
-    private readonly statusEnv: (ptyId: string, paneId: string, cwd: string) => Record<string, string> = () => ({}),
+    private readonly statusEnv: (ptyId: string, paneId: string, cwd: string, workspaceId?: string) => Record<string, string> = () => ({}),
     private readonly agentState: AgentStateFn = () => null,
   ) {}
 
@@ -378,12 +378,14 @@ export class PtyManager {
       } else if (promptReq.mode === 'argvOnly') promptRejected = true
       else prompt = { req: promptReq, mode: 'gate' }
     }
-    const env = cleanEnv({ ...req.env, ...this.statusEnv(ptyId, req.paneId, req.cwd || homeDir()), [AGENT_ENV.consoleId]: req.paneId, [AGENT_ENV.ptyId]: ptyId })
+    const env = cleanEnv({ ...req.env, ...this.statusEnv(ptyId, req.paneId, req.cwd || homeDir(), req.workspaceId), [AGENT_ENV.consoleId]: req.paneId, [AGENT_ENV.ptyId]: ptyId })
     // Never inherited from a preset's env: only an argv delivery sets it.
     delete env[INITIAL_PROMPT_ENV]
     Object.assign(env, promptEnv)
     const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH'
     if (env[AGENT_ENV.codexShim]) env[pathKey] = env[AGENT_ENV.codexShim] + delimiter + (env[pathKey] ?? '')
+    // snaos CLI (E8-FR-13): its bin folder first, so `snaos` resolves in every shell.
+    if (env[CLI_ENV.cli]) env[pathKey] = dirname(env[CLI_ENV.cli]) + delimiter + (env[pathKey] ?? '')
     // E7-FR-36 defense: a cwd deleted outside the app (a pane worktree) is a
     // typed failure instead of node-pty's opaque one; the renderer shows the
     // "worktree was deleted" card for it.
@@ -744,6 +746,16 @@ export class PtyManager {
     const ptyId = this.byPane.get(paneId)
     const at = ptyId ? this.entries.get(ptyId)?.lastSubmitAt : undefined
     return at || undefined
+  }
+
+  /**
+   * The pane's live pty ring as raw text, or null without one (`snaos read`
+   * fallback, E8-FR-17). Reads only: no flush, no mirror, no state change.
+   */
+  tail(paneId: string): string | null {
+    const ptyId = this.byPane.get(paneId)
+    const entry = ptyId ? this.entries.get(ptyId) : undefined
+    return entry ? trimRingHead(entry.history.join(''), entry.historyTruncated) : null
   }
 
   /** Epoch ms of the pane's last output chunk, or undefined. */

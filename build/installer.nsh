@@ -199,3 +199,16 @@ LangString snPortableDataInside 1066 "There is data from a portable version insi
     ${EndIf}
   ${EndIf}
 !macroend
+
+; snaos CLI user PATH (E8-FR-22, PLAN D7). A real uninstall runs the app once
+; with --cleanup-user-path while the exe still exists: it removes only its own
+; <data folder>\bin entry from the user PATH and exits without a window or the
+; single-instance lock. An update (isUpdated) keeps the entry; the new version
+; re-adds it at start anyway while the setting is on.
+!macro customUnInit
+  ${IfNot} ${isUpdated}
+    ${If} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+      ExecWait '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --cleanup-user-path'
+    ${EndIf}
+  ${EndIf}
+!macroend

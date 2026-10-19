@@ -129,6 +129,16 @@ export class StatusManager implements PtySink {
     return () => { this.listeners.delete(cb) }
   }
   testDesktop(): void { this.showNative(mainT(this.getConfig(), 'status.notif.test')) }
+  /**
+   * `snaos notify` (E8-FR-19): a native notification with the caller's title
+   * and text, only with notifications.enabled; a click reveals the console.
+   * Discord and ntfy go through the notice router, not through here.
+   */
+  notifyCustom(paneId: string | null, title: string, body: string): boolean {
+    if (!this.cfg?.enabled) return false
+    this.showNative(body, paneId ?? undefined, title)
+    return true
+  }
 
   reportTitle(paneId: string, title: string): void {
     if (!this.ptys.has(paneId)) return
@@ -473,10 +483,10 @@ export class StatusManager implements PtySink {
     this.showNative(mainT(cfg, key, { pane, provider: track.provider === 'codex' ? 'Codex' : 'Claude' }), paneId)
     if (this.cfg?.flashTaskbar && win && !win.isFocused()) win.flashFrame(true)
   }
-  private showNative(body: string, paneId?: string): void {
+  private showNative(body: string, paneId?: string, title: string = BRAND.productName): void {
     this.desktopError = null
     if (Notification.isSupported()) {
-      const notification = new Notification({ title: BRAND.productName, body, silent: true })
+      const notification = new Notification({ title, body, silent: true })
       notification.on('click', () => {
         const w = this.getWindow()
         if (!w || w.isDestroyed()) return
