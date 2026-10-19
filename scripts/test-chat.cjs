@@ -54,7 +54,7 @@ export { decodeClaude, patchOf } from './src/main/chat/decodeClaude'
 export { decodeCodex } from './src/main/chat/decodeCodex'
 export { toolSummary } from './src/main/chat/toolSummary'
 export { readPage, readAppend, TranscriptWatcher, MAX_RECORD_BYTES, PAGE_SCAN_MAX } from './src/main/chat/TranscriptWatcher'
-export { TranscriptLocator, cwdKey, admit } from './src/main/chat/TranscriptLocator'
+export { TranscriptLocator, cwdKey, pathKey, admit } from './src/main/chat/TranscriptLocator'
 export { ChatHub, noticePage, CHAT_CLOSE_DELAY_MS } from './src/main/chat/ChatHub'
 export { shrinkMessage, splitAppend, jsonBytes } from './src/main/chat/chatFrames'
 export { claudeConfigDir } from './src/main/status/statusDetails'
@@ -321,6 +321,10 @@ async function testWatcher() {
 
 async function testLocator() {
   const { api } = load()
+  // The locator answers with fs.promises.realpath, which is the native
+  // realpath: on Windows it expands 8.3 short names (C:\Users\RUNNER~1 on CI)
+  // that the JS fs.realpathSync keeps, so expectations use the native one.
+  const real = p => fs.realpathSync.native(p)
   check(api.claudeSlug('C:\\Users\\tarno\\Desktop\\Repo') === 'C--Users-tarno-Desktop-Repo', 'the slug matches the ~/.claude/projects folder names')
   const prev = process.env.CLAUDE_CONFIG_DIR
   process.env.CLAUDE_CONFIG_DIR = path.join(tmp, 'claude')
@@ -362,7 +366,12 @@ async function testLocator() {
   // Hooks path.
   status.a = { provider: 'claude', sessionId: '0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab', transcriptPath: hooked }
   let r = await loc.locate('a')
-  check(r.ok && api.cwdKey(r.path) === api.cwdKey(fs.realpathSync(hooked)), 'with hooks the reported path is used')
+  check(r.ok && api.pathKey(r.path) === api.pathKey(real(hooked)), 'with hooks the reported path is used')
+  // The root and the file may be spelled differently (an 8.3 TEMP on Windows,
+  // /var vs /private/var on macOS): both resolve to the same admitted file.
+  const projects = path.join(claudeRoot, 'projects')
+  const viaReal = await api.admit(real(projects), hooked), viaRaw = await api.admit(projects, real(hooked))
+  check(viaReal && viaRaw && api.pathKey(viaReal) === api.pathKey(viaRaw) && api.pathKey(viaRaw) === api.pathKey(r.path), 'a root and a path in different spellings of one folder still admit the same realpath')
   // A hooks path through a link that leaves the root is refused.
   const outside = path.join(tmp, 'outside')
   fs.mkdirSync(outside, { recursive: true })
@@ -379,7 +388,7 @@ async function testLocator() {
   // Without hooks: the one fresh file of the slug folder.
   status.a = { provider: 'claude', sessionId: '' }
   r = await loc.locate('a')
-  check(r.ok && r.path.toLowerCase() === fs.realpathSync(hooked).toLowerCase(), 'without hooks one console and one fresh file: assigned')
+  check(r.ok && api.pathKey(r.path) === api.pathKey(real(hooked)), 'without hooks one console and one fresh file: assigned')
   // An old file does not count.
   const old = path.join(slugDir, 'old.jsonl')
   fs.writeFileSync(old, userLine('old') + '\n')
@@ -389,7 +398,7 @@ async function testLocator() {
   spawned.a = Date.now() - 60000
   r = await loc.locate('a')
   check(!r.ok && r.reason === 'ambiguous', 'two fresh files: ambiguous')
-  claims.set(process.platform === 'win32' || process.platform === 'darwin' ? fs.realpathSync(old).toLowerCase() : fs.realpathSync(old), 'b')
+  claims.set(api.pathKey(real(old)), 'b')
   r = await loc.locate('a')
   check(r.ok && r.path.toLowerCase().endsWith('0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab.jsonl'), 'a file another console holds is never reassigned')
   claims.clear()
@@ -416,7 +425,7 @@ async function testLocator() {
   fs.copyFileSync(path.join(fixtures, 'codex-rollout.jsonl'), rollout)
   status.cx = { provider: 'codex', sessionId: '7c4390bf-8192-43a4-9f60-789abcdef012' }
   r = await loc.locate('cx')
-  check(r.ok && r.provider === 'codex' && r.path.toLowerCase() === fs.realpathSync(rollout).toLowerCase(), 'a Codex thread finds its rollout in yesterday\'s folder')
+  check(r.ok && r.provider === 'codex' && api.pathKey(r.path) === api.pathKey(real(rollout)), 'a Codex thread finds its rollout in yesterday\'s folder')
   status.cx = { provider: 'codex', sessionId: '' }
   check((await loc.locate('cx')).reason === 'noTranscript', 'a Codex console without a thread id has no chat yet')
   const older = path.join(codexRoot, '2026', '01', '02')
