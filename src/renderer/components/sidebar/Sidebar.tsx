@@ -52,7 +52,7 @@ interface MenuState {
   wsId: string
 }
 
-/** Discord-style unread pill: consoles in this workspace awaiting the user. */
+/** Discord-style unread pill: how many consoles in this workspace await the user. */
 function AttentionBadge({ count, className }: { count: number; className?: string }) {
   if (count <= 0) return null
   return (
@@ -400,7 +400,8 @@ export function Sidebar() {
           const active = w.id === activeWorkspaceId
           const WsIcon = iconFor(w.panes[0]?.icon)
           const renaming = renamingId === w.id
-          const attentionCount = w.panes.reduce((n, p) => n + Math.max(paneStatus[p.id]?.pendingCount ?? 0, paneAttention[p.id] ? 1 : 0), 0)
+          // One per console that needs the user, however many requests it holds.
+          const attentionCount = w.panes.filter((p) => (paneStatus[p.id]?.pendingCount ?? 0) > 0 || paneAttention[p.id]).length
           const status = aggregateStatus(w.panes.map(p => paneStatus[p.id]))
           const exited = exitedLines(w.panes, paneExit, t)
           const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${paneStatus[p.id].state}`)}`).concat(exited).join(', ')

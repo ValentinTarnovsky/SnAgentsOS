@@ -88,6 +88,24 @@ async function main() {
     h.hook('PermissionRequest', { agentId: 'child', toolUseId: 'child-request' }); check(h.last().state === 'action', 'child approval still reaches user')
   }
   {
+    // The workspace badge read 2: AskUserQuestion and ExitPlanMode also go
+    // through a permission prompt, and PermissionRequest carries no tool_use_id.
+    const h = harness(); h.hook('UserPromptSubmit')
+    h.hook('PreToolUse', { toolName: 'AskUserQuestion', toolUseId: 'q' })
+    h.hook('PermissionRequest', { toolName: 'AskUserQuestion' })
+    h.hook('Notification', { notificationType: 'permission_prompt' })
+    check(h.last().pendingCount === 1 && h.notices.length === 1, 'a question plus its permission prompt and its notification is one request and one notice')
+    h.hook('PostToolUse', { toolUseId: 'q' }); check(h.last().state === 'working' && h.last().pendingCount === 0, 'answering the question clears it')
+    h.hook('PermissionRequest', { toolName: 'ExitPlanMode' })
+    h.hook('PreToolUse', { toolName: 'ExitPlanMode', toolUseId: 'p' })
+    check(h.last().pendingCount === 1 && h.last().reason === 'plan' && h.notices.length === 2, 'a plan whose permission prompt came first is promoted, not doubled')
+    h.hook('PostToolUse', { toolUseId: 'p' })
+    h.hook('PermissionRequest', { toolName: 'Bash' })
+    check(h.last().pendingCount === 1 && h.notices.length === 3, 'a plain permission without tool_use_id is still one request')
+    h.hook('Notification', { notificationType: 'elicitation_dialog' })
+    check(h.last().pendingCount === 1 && h.notices.length === 3, 'a notification while anything is pending adds nothing')
+  }
+  {
     const h = harness(); h.manager.setViewed(['pane']); h.focused(true); h.hook('PermissionRequest', { toolUseId: 'a' })
     check(h.last().notify === false && h.notices.length === 1, 'Discord routing independent of desktop focus')
     h.manager.setConfig({ ...settings, enabled: false }); h.hook('PermissionRequest', { toolUseId: 'b' })

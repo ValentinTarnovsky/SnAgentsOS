@@ -83,6 +83,8 @@ const DETAIL_THROTTLE_MS = 500
 // goes out at once through the state / pending signature.
 const IMMEDIATE_KINDS = new Set<AgentEvent['kind']>(['start', 'end', 'request', 'done', 'error', 'unknown'])
 const GENERIC_TOPICS = /^(claude|claude code)$/i
+/** Tools whose PreToolUse is the request itself (question, plan); their permission prompt is the same request. */
+const PROMPT_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode'])
 /**
  * Input that is only terminal reports, never an answer (E2-FR-48): focus in /
  * out, SGR and X10 mouse, plus the replies a terminal sends on its own to the
@@ -260,6 +262,9 @@ export class StatusManager implements PtySink {
         break
       case 'StopFailure': event = { ...base, kind: 'error', reason: 'failure' }; break
       case 'PermissionRequest':
+        // AskUserQuestion and ExitPlanMode also go through a permission prompt
+        // (with no tool_use_id): their PreToolUse already registered the request.
+        if (!requestId && PROMPT_TOOLS.has(evt.toolName ?? '') && this.hasPendingTool(evt.consoleId, evt.toolName!)) break
         event = { ...base, ...tool, kind: 'request', requestId, reason: 'permission', detail: { kind: 'permission', text: evt.toolSummary ?? '' } }
         break
       case 'Elicitation': event = { ...base, kind: 'request', requestId, reason: 'elicitation' }; break
@@ -272,13 +277,21 @@ export class StatusManager implements PtySink {
       case 'PostToolUse':
       case 'PostToolUseFailure': event = { ...base, kind: 'resolved', requestId }; break
       case 'Notification': {
+        // A fallback for a prompt no other hook reported: any request already
+        // pending is the prompt this notification is about.
         const reason = evt.notificationType === 'permission_prompt' ? 'permission' : evt.notificationType === 'elicitation_dialog' ? 'elicitation' : undefined
-        if (reason && ![...(this.panes.get(evt.consoleId)?.pending.values() ?? [])].some(p => p.reason === reason)) event = { ...base, kind: 'request', reason }
+        if (reason && !this.panes.get(evt.consoleId)?.pending.size) event = { ...base, kind: 'request', reason }
         break
       }
     }
     if (event) { this.lastClaudeEventAt = Date.now(); this.onAgentEvent(event) }
     if (evt.name === 'SessionEnd') this.emitSessionEnd(evt)
+  }
+
+  /** A request of this tool (AskUserQuestion, ExitPlanMode) is already pending on the pane. */
+  private hasPendingTool(paneId: string, toolName: string): boolean {
+    for (const p of this.panes.get(paneId)?.pending.values() ?? []) if (p.toolName === toolName) return true
+    return false
   }
 
   /**
@@ -335,12 +348,16 @@ export class StatusManager implements PtySink {
         const id = evt.requestId ?? `fallback:${evt.reason ?? 'question'}`
         key = evt.requestId ? `request:${id}` : `request:${track.turnId}:${id}`
         if (evt.requestId && track.seen.has(key)) return
-        const fallbackId = `fallback:${evt.reason ?? 'question'}`
+        // The fallback this request stands for: same reason, or the permission
+        // prompt of this same AskUserQuestion / ExitPlanMode reported first.
+        const toolName = evt.toolName ? clip(sanitize(evt.toolName, true), 80) : undefined
+        const permission = track.pending.get('fallback:permission')
+        const fallbackId = evt.requestId && toolName && PROMPT_TOOLS.has(toolName) && permission?.toolName === toolName ? 'fallback:permission' : `fallback:${evt.reason ?? 'question'}`
         const fallback = evt.requestId ? track.pending.get(fallbackId) : undefined
         const promoted = !!evt.requestId && track.pending.delete(fallbackId)
         // E2-FR-48: the promoted request is the prompt the fallback stood for;
         // one already answered keeps its mark, so no card comes back for it.
-        track.pending.set(id, { reason: evt.reason ?? 'question', toolName: evt.toolName ? clip(sanitize(evt.toolName, true), 80) : undefined, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions, requestAt: fallback?.requestAt ?? Date.now(), ...(fallback?.invalidated ? { invalidated: true } : {}) })
+        track.pending.set(id, { reason: evt.reason ?? 'question', toolName, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions, requestAt: fallback?.requestAt ?? Date.now(), ...(fallback?.invalidated ? { invalidated: true } : {}) })
         if (!promoted) notice = 'action'
         break
       }
