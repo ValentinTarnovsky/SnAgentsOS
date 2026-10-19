@@ -1,4 +1,5 @@
 import { app, ipcMain, shell } from 'electron'
+import { promises as fsp } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { dirname, isAbsolute, join } from 'path'
 import { CH } from '@shared/ipc-channels'
@@ -65,6 +66,12 @@ export function registerWorktreeIpc(deps: WorktreeIpcDeps): WorktreeService {
   ipcMain.handle(CH.GIT_WORKTREE_REVEAL, async (_e, p: { path?: unknown } | null): Promise<boolean> => {
     const path = p?.path
     if (!service.isManaged(path)) return false
+    // Only ever a folder: openPath on a file would run it with its default app.
+    try {
+      if (!(await fsp.stat(path)).isDirectory()) return false
+    } catch {
+      return false
+    }
     return (await shell.openPath(path)) === ''
   })
   return service

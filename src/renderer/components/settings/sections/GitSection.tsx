@@ -5,7 +5,7 @@ import { useAppStore } from '@/lib/store'
 import { useGitStore } from '@/lib/gitStore'
 import { gitChipEnabled } from '@/lib/gitChip'
 import { useWorktreeStore } from '@/lib/worktreeStore'
-import { orphanWorktrees } from '@/lib/worktrees'
+import { MAX_PANES, orphanWorktrees } from '@/lib/worktrees'
 import { useT } from '@/i18n'
 import { SettingRow, ToggleRow } from '../ui'
 
@@ -135,6 +135,8 @@ function OrphanWorktrees() {
   }, [deleting, load])
 
   const orphans = entries ? orphanWorktrees(entries, workspaces) : null
+  // Same cap as the other worktree entries (FR-27): gridForCount stops at 12.
+  const activeFull = (workspaces.find((w) => w.id === activeId)?.panes.length ?? 0) >= MAX_PANES
 
   const openHere = (e: WorktreeListEntry): void => {
     const wt = paneWorktreeOf(e)
@@ -163,21 +165,23 @@ function OrphanWorktrees() {
         ) : (
           <ul className="space-y-1.5" data-worktrees-orphans>
             {orphans.map((e) => {
-              const canOpen = !!activeId && e.exists && paneWorktreeOf(e) != null
+              const canOpen = !!activeId && !activeFull && e.exists && paneWorktreeOf(e) != null
               const status = !e.managed
                 ? t('settings.git.worktreeUnmanaged')
                 : !e.exists
                   ? t('settings.git.worktreeGone')
-                  : e.dirty
-                    ? t('settings.git.worktreeDirty')
-                    : t('settings.git.worktreeClean')
+                  : e.dirty === null
+                    ? t('settings.git.worktreeUnknown')
+                    : e.dirty
+                      ? t('settings.git.worktreeDirty')
+                      : t('settings.git.worktreeClean')
               return (
                 <li key={e.path} data-worktree-orphan={e.branch} className="flex min-w-0 items-center gap-2 rounded-btn border border-border bg-bg-primary px-3 py-2">
                   <div className="min-w-0 flex-1">
                     <p className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-text-primary">
                       <GitBranch size={12} className="shrink-0 text-accent-violet" />
                       <span className="truncate">{e.branch}</span>
-                      <span className={e.dirty || !e.exists ? 'shrink-0 font-sans text-[11px] text-state-action' : 'shrink-0 font-sans text-[11px] text-text-secondary'}>
+                      <span className={e.dirty !== false || !e.exists ? 'shrink-0 font-sans text-[11px] text-state-action' : 'shrink-0 font-sans text-[11px] text-text-secondary'}>
                         {e.repoName} · {status}
                       </span>
                     </p>
@@ -188,7 +192,7 @@ function OrphanWorktrees() {
                   <button
                     type="button"
                     disabled={!canOpen}
-                    title={!activeId ? t('settings.git.worktreeNoWorkspace') : undefined}
+                    title={!activeId ? t('settings.git.worktreeNoWorkspace') : activeFull ? t('worktree.full') : undefined}
                     onClick={() => openHere(e)}
                     className="flex shrink-0 items-center gap-1 rounded-btn border border-border bg-card px-2 py-1 text-xs text-text-primary transition-colors hover:border-accent-violet/40 disabled:cursor-not-allowed disabled:opacity-40"
                   >

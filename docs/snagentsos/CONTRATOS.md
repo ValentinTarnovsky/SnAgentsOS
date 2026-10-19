@@ -182,7 +182,7 @@ Sin mensaje nuevo: respuestas a permisos/preguntas (`input` con "1", Esc, digito
 | v3.0 | `git:worktreeAdd` | invoke | `WorktreeAddReq` = `{ repoCwd, slug, base?, copyEnv, linkNodeModules } -> WorktreeAddRes` = `{ ok: true, worktree: { repoRoot, path, branch, base } } \| { ok: false, error, detail? }` (enmienda R30-10; `repoCwd` puede ser cualquier carpeta del repo o un worktree suyo) | E6 |
 | v3.0 | `git:worktreeRemove` | invoke | `{ path, paneId?, deleteBranch } -> { ok: true } \| { ok: false, error: 'not_managed' \| 'unlink_failed' \| 'busy' \| 'git_error', detail? }` (enmienda R30-10) | E6 |
 | v3.0 | `git:worktreeProbe` | invoke | `{ repoCwd } -> { ok: true, repoName, head, headShort } \| { ok: false, error: 'not_repo' \| 'unborn' \| 'git_error' }` (enmienda R30-10) | E7 |
-| v3.0 | `git:worktreeInspect` | invoke | `{ path, base? } -> { exists, dirtyFiles, commitsAhead, mergedIntoHead }` (enmienda) | E7 |
+| v3.0 | `git:worktreeInspect` | invoke | `{ path, base? } -> { exists, dirtyFiles, commitsAhead, mergedIntoHead, incomplete? }` (enmienda; `incomplete: true` cuando git no pudo leer el estado o falta la base: el borrado exige el checkbox igual) | E7 |
 | v3.0 | `git:worktreeList` | invoke | `-> { entries: { path, branch, repoName, dirty, managed, exists, repoRoot?, base? }[] }` (enmienda) | E7 |
 | v3.0 | `git:worktreeReveal` | invoke | `{ path } -> boolean` (solo rutas del manifiesto; enmienda R30-10) | E7 |
 | v3.0 | `cli:setEnabled` | send | `boolean` | E6 |

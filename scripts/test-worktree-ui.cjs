@@ -153,7 +153,9 @@ app.whenReady().then(async()=>{
  await setInput('[data-worktrees-root]','E:\\\\worktrees');
  await js("document.querySelector('[data-worktrees-root]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))");await wait(80);
  ok((await js("smoke.app.getState().settings.worktreesRoot"))==='E:\\\\worktrees','the root input writes settings.worktreesRoot');
+ await js("smoke.fake.inspect={exists:true,dirtyFiles:0,commitsAhead:0,mergedIntoHead:true,incomplete:true}");
  await js("document.querySelector('[data-worktree-orphan-delete]').click()");await wait(250);
+ ok((await js("!!document.querySelector('[data-worktree-close-incomplete]')&&document.querySelector('[data-worktree-delete]').disabled&&document.querySelector('[data-worktree-ack]')?.parentElement?.textContent==='Entiendo que puedo perder trabajo de este worktree'")),'a state git could not read shows a warning and still needs the checkbox');
  ok((await js("!!document.querySelector('[data-worktree-close]')&&!document.querySelector('[data-worktree-keep]')&&document.querySelector('#worktree-close-title').textContent==='Borrar worktree'")),'Delete of an orphan uses the same check, without Keep');
  await js("smoke.fake.removeRes={ok:true}");
  await js("document.querySelector('[data-worktree-ack]').click()");await js("document.querySelector('[data-worktree-delete]').click()");await wait(200);

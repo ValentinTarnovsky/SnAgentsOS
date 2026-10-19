@@ -58,6 +58,8 @@ export interface WorktreeInspectRes {
   dirtyFiles: number
   commitsAhead: number
   mergedIntoHead: boolean
+  /** Set when git could not read the state (status or rev-list failed, base unknown): treat it as work that may be lost. */
+  incomplete?: true
 }
 
 /** `git:worktreeRemove`: the renderer sends the path and the pane, main completes the rest from its manifest. */
