@@ -49,7 +49,7 @@ async function run({ check, load, loadRenderer }) {
     // --- needsTrust -----------------------------------------------------------
     check(SH.repoConfigNeedsTrust({ version: 1, grid: 4, connectionProfile: 'dedi', consoles: [{ title: 'a' }] }) === true, 'a file with only a grid and a connectionProfile needs trust')
     check(SH.repoConfigNeedsTrust({ version: 1, grid: 2, consoles: [{ title: 'a' }, { title: 'b', agent: 'shell' }] }) === false, 'grid and shell titles only: no trust')
-    check(SH.repoConfigNeedsTrust({ version: 1, consoles: [{ agent: 'claude' }] }) === false, 'an agent console alone runs a local preset: no trust')
+    check(SH.repoConfigNeedsTrust({ version: 1, consoles: [{ agent: 'claude' }] }) === true && SH.repoConfigNeedsTrust({ version: 1, consoles: [{ agent: ' Shell ' }] }) === false, 'an agent console asks for trust (E8-FR-24: only shells without command skip it)')
     check(SH.repoConfigNeedsTrust({ version: 1, consoles: [{ agent: 'claude', prompt: 'hola' }] }) && SH.repoConfigNeedsTrust({ version: 1, consoles: [{ command: 'npm run dev' }] }), 'a prompt or a command needs trust')
     check(SH.repoConfigNeedsTrust({ version: 1, setup: { command: 'pnpm i' }, consoles: [{}] }) && SH.repoConfigNeedsTrust({ version: 1, consoles: [{}], quickCommands: [{ label: 'x', action: 'send', text: 'y' }] }), 'a setup or quick commands need trust')
 
@@ -183,7 +183,7 @@ async function run({ check, load, loadRenderer }) {
     check(unk.unknown && unk.preset.id === 'preset-shell' && !L.resolveRepoAgent(undefined, presets).unknown, 'an unknown preset falls back to a shell')
     check(L.exportAgentName(presets[1], presets) === 'claude' && L.exportAgentName(presets[3], presets) === 'Git Bash', 'export names: type keyword for the first of its type, else the preset name')
     check(L.oneShotLaunch('pnpm i', undefined, 'win32', false).args.join('|') === '-NoLogo|-Command|pnpm i', 'setup: PowerShell gets -Command (default shell on Windows)')
-    check(L.oneShotLaunch('pnpm i', 'C:\\Windows\\System32\\cmd.exe', 'win32', false).args.join('|') === '/d|/s|/c|pnpm i', 'setup: cmd gets /d /s /c')
+    check(L.oneShotLaunch('npm run "a b"', 'C:\\Windows\\System32\\cmd.exe', 'win32', false).args === '/d /s /c "npm run "a b""', 'setup: cmd gets a raw /d /s /c "..." line (inner quotes kept, no node-pty escaping)')
     check(L.oneShotLaunch('pnpm i', '/bin/zsh', 'darwin', false).args.join('|') === '-lc|pnpm i' && L.oneShotLaunch('pnpm i', undefined, 'linux', false).args[0] === '-lc', 'setup: POSIX shells get -lc')
     check(L.oneShotLaunch('pnpm i', 'nu.exe', 'win32', false).initialCommand === 'pnpm i' && L.oneShotLaunch('pnpm i', undefined, 'win32', true).initialCommand === 'pnpm i', 'unknown shell or a profile: typed as the initial command')
 
@@ -216,6 +216,9 @@ async function run({ check, load, loadRenderer }) {
     const items = L.trustItemsFor(full, 'dedi', 4)
     check(items[0].kind === 'profile' && items[0].count === 4 && items[1].kind === 'setup' && items.map((i) => i.kind).join() === 'profile,setup,command,agent,agent,quickSend,quickAgent', 'trust lines: profile first, then setup, commands, agents + prompts, quick commands')
     check(L.trustItemsFor({ version: 1, grid: 4, connectionProfile: 'dedi', consoles: [{ title: 'x' }] }, 'dedi', 1)[0].kind === 'profile', 'a file with only a profile shows the profile line first')
+    const sneaky = L.trustItemsFor({ version: 1, setup: { command: 'echo ok \u202E;rm -rf x\u202C\u200B' }, consoles: [{ title: 'a\u001b[2Jb', command: 'npm i\nnpm test' }] }, undefined, 2)
+    check(sneaky[0].command === 'echo ok <U+202E>;rm -rf x<U+202C><U+200B>' && sneaky[1].title === 'a<U+001B>[2Jb' && sneaky[1].command === 'npm i\nnpm test', 'bidi, zero-width and control characters are spelled out in the trust lines (newlines stay)')
+    check(L.trustItemsFor({ version: 1, consoles: [{ agent: 'Shell' }, { agent: 'codex' }] }, undefined, 2).map((x) => x.kind).join() === 'agent', 'the shell keyword is no agent line, any case')
     const okRes = (extra) => ({ status: 'ok', config: { version: 1, consoles: [{}] }, sha256: okSha, needsTrust: true, trusted: false, warnings: [], ...extra })
     check(L.trustDialogNeeded(okRes(), undefined).dialog && L.trustDialogNeeded(okRes(), undefined).store, 'executable and untrusted: dialog and store')
     check(!L.trustDialogNeeded(okRes({ trusted: true }), undefined).dialog, 'the same hash again: no dialog')

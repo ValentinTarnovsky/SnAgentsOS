@@ -317,7 +317,12 @@ export interface PtySpawnReq {
   paneId: string
   /** Absolute path or command; undefined => OS default shell. */
   shell?: string
-  args?: string[]
+  /**
+   * Shell arguments. A string is a raw Windows command line handed to
+   * node-pty as is (cmd.exe `/s /c "..."` needs its own quoting; the array
+   * form escapes every `"` as `\"`, which cmd does not understand).
+   */
+  args?: string[] | string
   cwd?: string
   env?: Record<string, string>
   /**
