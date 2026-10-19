@@ -542,6 +542,7 @@ export const en = {
   'agents.cache.label': 'Claude cache expires in {time}',
   'agents.board.toggle': 'Agents board',
   'agents.board.title': 'Agents',
+  'agents.board.countOne': '{count} console',
   'agents.board.count': '{count} consoles',
   'agents.board.close': 'Back to the grid (Esc)',
   'agents.board.waiting': 'Waiting on you',

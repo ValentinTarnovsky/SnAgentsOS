@@ -172,7 +172,7 @@ function BoardBody() {
     >
       <header className="flex h-11 shrink-0 items-center gap-3 border-b border-border px-4">
         <h2 className="text-sm font-semibold text-text-primary">{t('agents.board.title')}</h2>
-        <span className="text-xs text-text-secondary">{t('agents.board.count', { count: entries.length })}</span>
+        <span className="text-xs text-text-secondary">{t(entries.length === 1 ? 'agents.board.countOne' : 'agents.board.count', { count: entries.length })}</span>
         <UrgentCache deadlines={deadlines} />
         <button
           type="button"

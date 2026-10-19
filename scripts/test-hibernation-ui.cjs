@@ -126,8 +126,10 @@ app.whenReady().then(async()=>{
  await js("smoke.setAgents({launchIntent:{}})");
  await js("smoke.hibernate({paneId:'b1',at:smoke.now,idleMinutes:30})");await frames();
  await js("smoke.command({id:'c1',action:{kind:'restartPane',workspaceId:'w2',paneId:'b1',resume:true}})");await frames();
- s=await js("({sleep:!!smoke.agents().sleeping.b1,intent:smoke.agents().launchIntent.b1,res:log.results.at(-1)})");
+ s=await js("({sleep:!!smoke.agents().sleeping.b1,intent:smoke.agents().launchIntent.b1,res:log.results.at(-1),waking:smoke.isWaking('b1')})");
  ok(!s.sleep&&s.intent==='resume'&&s.res.ok===true&&s.res.id==='c1','the phone\\'s "Relaunch resuming" wakes a sleeping console',s);
+ ok(s.waking,'the phone wake holds scheduled prompts like the overlay',s);
+ await js("smoke.ready({paneId:'b1',sessionId:'x',phase:'idle'})");
 
  // Wake 4: a schedule 30 s away; its prompt waits for the resumed agent.
  await js("smoke.setAgents({launchIntent:{}})");
