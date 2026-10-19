@@ -15,7 +15,7 @@ import { execFile } from 'child_process'
 import { join } from 'path'
 import { app, ipcMain, shell } from 'electron'
 import { CH } from '@shared/ipc-channels'
-import type { FirewallFixRes, FirewallStatus, PairingQrPayload, RemoteCommandResult, RemoteUiState } from '@shared/ipc-contract'
+import type { FirewallFixRes, FirewallStatus, PairingQrPayload, RemoteCommandResult, RemoteUiState, SecureModeStatus } from '@shared/ipc-contract'
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { RemoteSettings } from '@shared/types'
 import type { RemoteManager } from '../remote/RemoteManager'
@@ -99,6 +99,9 @@ export function registerRemoteIpc(manager: RemoteManager): void {
     if (r.all === true) manager.fitRelease({ all: true })
     else if (typeof r.paneId === 'string' && r.paneId.length > 0 && r.paneId.length <= 128) manager.fitRelease({ paneId: r.paneId })
   })
+
+  // E3-FR-42: the secure mode toggle runs the tailscale CLI in main.
+  ipcMain.handle(CH.REMOTE_SECURE_SET, (_e, enabled: unknown): Promise<SecureModeStatus> => manager.setSecure(enabled === true))
 
   ipcMain.on(CH.REMOTE_OPEN_NETWORK_SETTINGS, () => {
     if (process.platform === 'win32') void shell.openExternal('ms-settings:network-status').catch(() => undefined)

@@ -53,6 +53,13 @@ const MESSAGES = {
     'status.push.failure': 'Agent stopped with an error',
     'status.push.done': 'Turn complete',
     'status.push.test': 'ntfy notification test',
+    // Web Push titles (E3-FR-45): agent and reason only, never reply text.
+    'webpush.permission': '{agent} needs permission',
+    'webpush.question': '{agent} has a question',
+    'webpush.plan': '{agent} wants a plan approved',
+    'webpush.elicitation': '{agent} needs an answer',
+    'webpush.done': '{agent} finished',
+    'webpush.failure': '{agent} failed',
   },
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
@@ -102,6 +109,12 @@ const MESSAGES = {
     'status.push.failure': 'El agente se detuvo por un error',
     'status.push.done': 'Turno terminado',
     'status.push.test': 'Prueba de notificación de ntfy',
+    'webpush.permission': '{agent} necesita permiso',
+    'webpush.question': '{agent} tiene una pregunta',
+    'webpush.plan': '{agent} espera que apruebes un plan',
+    'webpush.elicitation': '{agent} necesita una respuesta',
+    'webpush.done': '{agent} terminó',
+    'webpush.failure': '{agent} falló',
   },
 } as const
 
