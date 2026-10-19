@@ -203,6 +203,19 @@ window.result = (async () => {
  store.getState().update({ paneStatus:{} }); client.syncView(); await frames();
  check(store.getState().chatPaneId === null && sent.map(m => m.type).join(',') === 'chatUnsub,sub' && !q('[data-view-toggle]'),'a console that is no longer an agent returns to Terminal and hides the control');
 
+ // A reconnect while the first page is still pending: the new socket gets
+ // its chatSub at once (the old request never answers).
+ store.getState().update({ paneStatus:{ c1:{ state:'idle', provider:'claude', stateSince:5 } } });
+ store.getState().setPaneView('c1','chat');
+ client.syncView(); await frames();
+ check(store.getState().chatPaneId === 'c1' && ofType('chatSub').length === 1,'back in Chat with the first page pending');
+ sent.length = 0;
+ const live = { ...snapshot, language:'en', workspaces: snapshot.workspaces.map(w => ({ ...w, panes: w.panes.map(p => p.id === 'c1' ? { ...p, status:{ state:'idle', provider:'claude', stateSince:6 } } : p) })) };
+ client.goLive(live, 'win32', 'test'); await frames();
+ check(sent.some(m => m.type === 'chatSub' && m.paneId === 'c1') && store.getState().chatPaneId === 'c1','a reconnect re-sends chatSub even though the old one never answered: ' + JSON.stringify(sent.map(m => m.type)));
+ feed({ paneId:'c1', items, cursor:null, done:true }); await frames();
+ check(qa('[data-chat-row]').length > 5 && !q('[data-no-reply]'),'and the page it answers renders');
+
  reactRoot.unmount(); return checks;
 })();
 ` }, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"', __APP_VERSION__: '"test"' }, alias: { '@shared': path.join(root, 'src/shared') }, loader: { '.css': 'empty' }, outfile: path.join(dir, 'renderer.js') })
