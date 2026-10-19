@@ -169,6 +169,18 @@ window.result = (async () => {
  check($$('[data-diff-line]').length===160 && $$('[data-diff-hunk]').length===1,'the restarted read holds the new version only once');
  useChangesStore.getState().update({ diff:null }); await wait(400);
 
+ // A file that keeps changing stops the read ('unstable'): a note on a line it never reached stays fresh.
+ const far = useNotesStore.getState().add('w1', { file:'src/app.ts', line:150, lineText:'line 150', comment:'far down' });
+ reqs.length=0; let n=0;
+ answer = req => { if (req.op!=='diff') return null; n++; return req.page===0 ? reply(tall('u'+n,1,false)) : reply({ ...tall('u'+n,81,true), page:req.page }) };
+ openDiff({ path:'src/app.ts', area:'unstaged', staged:false }); await frames(); await wait(200);
+ const ubody=$('[data-push-screen="diff"] [data-scrollable]');
+ for (let i=0;i<3 && $('[data-diff-body]')?.dataset.diffStatus!=='unstable';i++) { ubody.scrollTop=ubody.scrollHeight*0.85-ubody.clientHeight; ubody.dispatchEvent(new Event('scroll')); await wait(200); }
+ check($('[data-diff-body]').dataset.diffStatus==='unstable' && !!$('[data-diff-unstable]'),'a file that changes on every page ends "unstable"');
+ check(!useNotesStore.getState().byWs.w1.find(x=>x.id===far.id).stale,'an unstable read is not complete: the note on an unread line is not "Outdated"');
+ useNotesStore.getState().remove('w1',[far.id]);
+ useChangesStore.getState().update({ diff:null }); await wait(400);
+
  // Notes list: pending ones, outdated tag, delete.
  useNotesStore.getState().add('w1', { file:'src/app.ts', line:41, lineText:'x', comment:'name it' });
  useNotesStore.getState().add('w1', { file:'docs/old.md', line:3, comment:'drop me' });
