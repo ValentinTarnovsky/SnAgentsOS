@@ -15,6 +15,10 @@
  * E3 M11 (R30-04): sub/unsub/close and the fitPane/releaseFit ctls report to
  * the FitController, and every effective pty resize goes out as fitState to
  * the sessions subscribed to that pane.
+ *
+ * E3 M12 (R30-05): chatSub / chatUnsub / chatMore go to the ChatHub, and a
+ * chatSub counts as presence for phone-fit (FR-21): the owner that switches
+ * to Chat (unsub + chatSub) keeps the size without grace or auto restore.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto'
 import { WebSocket, type RawData } from 'ws'
@@ -37,6 +41,7 @@ import { parseRemoteClientMsg } from '@shared/remote-protocol-schemas'
 import type { PtyExitInfo, PtyManager, PtySink } from '../pty/PtyManager'
 import type { DeviceRegistry } from './DeviceRegistry'
 import type { FitHooks, FitOwner } from './FitController'
+import type { ChatFrame, ChatHooks } from '../chat/ChatHub'
 import type { PairingService, RateLimiter } from './PairingService'
 import { TokenBucket } from './TokenBucket'
 
@@ -78,6 +83,11 @@ export const VIEWED_FRESH_MS = 30 * 1000
 
 /** Phone -> desktop message types behind the per-session token bucket. */
 export const RATE_LIMITED_MSG_TYPES: ReadonlySet<string> = new Set(['chatSub', 'chatUnsub', 'chatMore', 'historyReq', 'gitReq'])
+/**
+ * E3 M12: panes one session may read as Chat at once. The phone reads one;
+ * the cap keeps a misbehaving device from holding a hub entry per pane id.
+ */
+export const MAX_CHAT_SUBS = 8
 /** ctl kinds behind the bucket (plus `createPane` carrying `resume`). */
 export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set(['fitPane', 'releaseFit', 'sendReviewNotes'])
 
@@ -161,6 +171,8 @@ interface Session {
   countedUnauthed: boolean
   /** Subscribed pane ids (data plane). */
   subs: Set<string>
+  /** E3 M12: panes this session reads as Chat (its xterm stream is paused). */
+  chatSubs: Set<string>
   /** Per-pane coalesce buffer, joined and flushed on the socket timer. */
   outBuf: Map<string, string>
   outTimer: ReturnType<typeof setTimeout> | null
@@ -217,6 +229,11 @@ export interface SessionManagerDeps {
    * = no git service in this build: every gitReq answers not_found.
    */
   git?: (req: RemoteGitRequest) => Promise<RemoteGitReply>
+  /**
+   * E3 M12: the Chat view (ChatHub via RemoteManager). Absent = every chatSub
+   * answers the noTranscript notice, so the phone falls back to Terminal.
+   */
+  chat?: ChatHooks
 }
 
 /**
@@ -280,6 +297,7 @@ export class SessionManager implements PtySink {
       pendingRequestId: null,
       countedUnauthed: true,
       subs: new Set(),
+      chatSubs: new Set(),
       outBuf: new Map(),
       outTimer: null,
       congested: new Set(),
@@ -378,6 +396,12 @@ export class SessionManager implements PtySink {
         return void this.handleHistory(session, msg.id, msg.query, msg.workspaceId)
       case 'gitReq':
         return void this.handleGitReq(session, msg)
+      case 'chatSub':
+        return this.handleChatSub(session, msg.paneId)
+      case 'chatUnsub':
+        return this.handleChatUnsub(session, msg.paneId)
+      case 'chatMore':
+        return this.handleChatMore(session, msg.paneId, msg.before)
       default:
         return this.send(session, { type: 'err', code: 'unauthorized' })
     }
@@ -575,8 +599,46 @@ export class SessionManager implements PtySink {
     this.discardPane(session, paneId)
     this.recomputeForcedFast()
     // E3 M11: an owner that leaves starts the 250ms grace (a chatSub or a
-    // re-sub inside it keeps the size).
-    this.deps.fit?.left(session, paneId)
+    // re-sub inside it keeps the size). Still reading it as Chat = still there.
+    if (!session.chatSubs.has(paneId)) this.deps.fit?.left(session, paneId)
+  }
+
+  // --- Chat view (E3 M12) -------------------------------------------------------
+
+  /** The chat frames of one session, while it stays authenticated. */
+  private chatSender(session: Session): (frame: ChatFrame) => void {
+    return (frame) => {
+      if (session.authed) this.send(session, frame)
+    }
+  }
+
+  /** E3-FR-25: the phone reads the pane as Chat; FR-21: the owner stays the owner. */
+  private handleChatSub(session: Session, paneId: string): void {
+    const noChat = (): void =>
+      this.send(session, { type: 'chatPage', paneId, items: [{ id: 'notice', role: 'system', ts: null, blocks: [{ t: 'notice', code: 'noTranscript' }] }], cursor: null, done: true })
+    // Past the cap the chat is refused (the phone falls back to Terminal).
+    if (!session.chatSubs.has(paneId) && session.chatSubs.size >= MAX_CHAT_SUBS) return noChat()
+    session.chatSubs.add(paneId)
+    this.deps.fit?.joined(session, paneId, true)
+    if (this.deps.chat) this.deps.chat.sub(session, paneId, this.chatSender(session))
+    else noChat()
+  }
+
+  private handleChatUnsub(session: Session, paneId: string): void {
+    if (!session.chatSubs.delete(paneId)) return
+    this.deps.chat?.unsub(session, paneId)
+    // Back to Terminal (chatUnsub + sub): a sub that already arrived keeps the
+    // owner with the chat flag off; otherwise the 250ms grace starts (FR-21).
+    if (session.subs.has(paneId)) this.deps.fit?.joined(session, paneId, false)
+    else this.deps.fit?.left(session, paneId)
+  }
+
+  /** E3-FR-26: only for a pane this session reads as Chat; main aligns `before`. */
+  private handleChatMore(session: Session, paneId: string, before: string): void {
+    if (!session.chatSubs.has(paneId)) return
+    const offset = Number(before)
+    if (!Number.isSafeInteger(offset) || offset < 0) return
+    this.deps.chat?.more(session, paneId, offset, this.chatSender(session))
   }
 
   private handleInput(paneId: string, data: string): void {
@@ -804,6 +866,8 @@ export class SessionManager implements PtySink {
     for (const session of [...this.sessions]) {
       if (session.outTimer) clearTimeout(session.outTimer)
       this.clearHandshakeTimer(session)
+      if (session.chatSubs.size) this.deps.chat?.closed(session)
+      session.chatSubs.clear()
       try {
         session.ws.terminate()
       } catch {
@@ -978,6 +1042,9 @@ export class SessionManager implements PtySink {
       if (set.size === 0) this.paneSubs.delete(paneId)
     }
     session.subs.clear()
+    // E3 M12: its chats end (a watcher with no reader closes 30s later).
+    if (session.chatSubs.size) this.deps.chat?.closed(session)
+    session.chatSubs.clear()
     // E3 M11: an owner whose socket closed keeps the size through the grace, then held.
     this.deps.fit?.closed(session)
     if (session.pendingRequestId) {

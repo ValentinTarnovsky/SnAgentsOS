@@ -118,6 +118,11 @@ export const remoteClientMsgSchema = z.discriminatedUnion('type', [
     staged: z.boolean().optional(),
     page: z.number().int().min(0).max(999).optional(),
   }),
+  // E3 M12 Chat view (R30-05); behind the per-session bucket by name. Main
+  // clamps `before` to [0, size] and aligns it to the next line start.
+  z.object({ v: z.number(), type: z.literal('chatSub'), paneId: id }),
+  z.object({ v: z.number(), type: z.literal('chatUnsub'), paneId: id }),
+  z.object({ v: z.number(), type: z.literal('chatMore'), paneId: id, before: z.string().regex(/^\d{1,15}$/) }),
 ])
 
 /** Parse one raw WS frame into a validated client message, or null. */
