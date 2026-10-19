@@ -1,4 +1,4 @@
-import type { RemoteCommand } from '@shared/ipc-contract'
+import type { RemoteCommand, RemoteCommandFit } from '@shared/ipc-contract'
 import type { RemoteCtlAction } from '@shared/remote-protocol'
 import type { AgentPreset, Workspace } from '@shared/types'
 import { initialPromptFallback } from '@shared/initialPrompt'
@@ -6,7 +6,8 @@ import { shellKind } from '@shared/shellKind'
 import { type AppState, useAppStore } from './store'
 import { resolveLaunch } from './launch'
 import { revealPane } from './revealPane'
-import { killPanePtys } from './ptyRegistry'
+import { getPtyId, killPanePtys } from './ptyRegistry'
+import { fitBaselineOf, useFitStore } from './fitStore'
 import { broadcastToWorkspace } from './broadcastPrompt'
 import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
 import { runRemoteQuickCommand } from './quickCommands'
@@ -53,7 +54,7 @@ export function remotePromptFallback(
  * Execute a phone control action through the existing store actions. Ids are
  * validated first so a stale phone view can't act on a deleted workspace/pane.
  */
-function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
+function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promise<CmdResult> {
   const store = useAppStore.getState()
 
   switch (action.kind) {
@@ -185,9 +186,45 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
       // restartPane; the first action of any device wins, the rest ack stale.
       return runAgentEnd(action.paneId, action.mode, action.workspaceId)
 
+    // E3 M11 (R30-04): main already decided the owner; this applies the size.
+    case 'fitPane':
+      return runFitPane(action, fit)
+
+    case 'releaseFit':
+      return runReleaseFit(action.paneId, fit)
+
     default:
       return { ok: false, error: 'unknown_action' }
   }
+}
+
+/**
+ * fitPane (E3-FR-14/17/23): the owner goes to fitStore, where a mounted
+ * terminal picks it up (grid and smaller font) and a later mount reads it
+ * before its first fit; the pty is resized here too, so a pane that is not
+ * mounted (another workspace) still takes the phone size. Exported for tests.
+ */
+export function runFitPane(action: Extract<RemoteCtlAction, { kind: 'fitPane' }>, fit?: RemoteCommandFit): CmdResult {
+  const ws = useAppStore.getState().workspaces.find((w) => w.id === action.workspaceId)
+  if (!ws || !ws.panes.some((p) => p.id === action.paneId)) return { ok: false, error: 'not_found' }
+  useFitStore.getState().setOwner(action.paneId, { cols: action.cols, rows: action.rows, chat: fit?.chat === true })
+  const ptyId = fit?.ptyId ?? getPtyId(action.paneId)
+  if (ptyId) window.snApi.pty.resize({ ptyId, cols: action.cols, rows: action.rows })
+  return { ok: true }
+}
+
+/**
+ * releaseFit (E3-FR-18/19/20): the owner leaves fitStore and the pty gets the
+ * latest baseline the desktop measured (main's pre-phone size when this
+ * renderer never measured the pane). A visible terminal refits right after
+ * and corrects any drift. Idempotent; a pane nobody owned is still ok.
+ */
+export function runReleaseFit(paneId: string, fit?: RemoteCommandFit): CmdResult {
+  useFitStore.getState().clearOwner(paneId)
+  const base = fitBaselineOf(paneId) ?? fit?.baseline ?? null
+  const ptyId = fit?.ptyId ?? getPtyId(paneId)
+  if (ptyId && base && base.cols > 0 && base.rows > 0) window.snApi.pty.resize({ ptyId, cols: base.cols, rows: base.rows })
+  return { ok: true }
 }
 
 /**
@@ -240,7 +277,7 @@ export function initRemoteCommands(): () => void {
     const failed = (err: unknown): CmdResult => ({ ok: false, error: err instanceof Error ? err.message : 'error' })
     let out: CmdResult | Promise<CmdResult>
     try {
-      out = run(cmd.action)
+      out = run(cmd.action, cmd.fit)
     } catch (err) {
       out = failed(err)
     }

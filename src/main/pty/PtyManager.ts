@@ -40,6 +40,13 @@ interface Entry {
   historyBytes: number
   /** The ring dropped its oldest chunk at least once (its head may be mid-sequence). */
   historyTruncated: boolean
+  /** Chunks the ring has dropped so far: history[i] is chunk number historyDropped + i. */
+  historyDropped: number
+  /**
+   * Chunk number where the output after the last effective resize starts, or
+   * null (never resized). The ring replay drops what came before (E3-FR-22).
+   */
+  resizeMark: number | null
   /** DEC private modes seen on the full output stream (E6-FR-33). */
   modes: ModeTracker
   /** Family of the launched shell (E6-FR-32). */
@@ -153,6 +160,9 @@ function buildMatcher(pattern: string): (text: string) => boolean {
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+/** Clear screen + scrollback + home: the head of a ring replay cut at a resize (E3-FR-22). */
+export const REPLAY_CLEAR = '\x1b[2J\x1b[3J\x1b[H'
+
 /** An alt-screen DECSET (?47 / ?1047 / ?1049, alone or inside a list). */
 const ALT_ENTER_RE = /\x1b\[\?(?:[\d;]*;)?(?:47|1047|1049)(?:;[\d;]*)?h/
 
@@ -254,6 +264,11 @@ export interface PtySink {
    * before teardown, for every exit; `info` tells natural current exits apart.
    */
   onExit(ptyId: string, paneId: string, exitCode: number, info: PtyExitInfo): void
+  /**
+   * Optional (E3-FR-12): an effective resize of the pty (cols or rows really
+   * changed), after the output emitted at the old size was flushed to sinks.
+   */
+  onResize?(ptyId: string, paneId: string, cols: number, rows: number): void
   /**
    * Optional (E2-FR-48): user input is about to reach the pty through
    * write() (desktop keyboard, phone `input`, a phone answer card, a global
@@ -416,6 +431,8 @@ export class PtyManager {
       history: [],
       historyBytes: 0,
       historyTruncated: false,
+      historyDropped: 0,
+      resizeMark: null,
       modes: new ModeTracker(),
       shellKind: resolved.shellKind,
       spawnCwd: req.cwd || homeDir(),
@@ -605,6 +622,14 @@ export class PtyManager {
    * the queries a receiving xterm would answer into the live shell.
    */
   private replayOf(entry: Entry): string {
+    // E3-FR-22 fallback (no headless mirror): bytes laid out for an older size
+    // repaint as garbage at the current one, so a ring that spans a resize
+    // replays a clear plus only what came after it (TUIs redraw on SIGWINCH).
+    const mark = entry.resizeMark
+    if (mark !== null && mark > entry.historyDropped) {
+      const tail = sanitizeQueries(entry.history.slice(mark - entry.historyDropped).join(''))
+      return entry.modes.rehydrate(!ALT_ENTER_RE.test(tail)) + REPLAY_CLEAR + tail
+    }
     const body = sanitizeQueries(trimRingHead(entry.history.join(''), entry.historyTruncated))
     // The body is a suffix of the stream: when it enters the alt screen itself,
     // that is the last alt transition, so the prefix must not do it earlier.
@@ -820,6 +845,10 @@ export class PtyManager {
   resize(ptyId: string, cols: number, rows: number): void {
     const entry = this.entries.get(ptyId)
     if (entry && cols > 0 && rows > 0) {
+      const changed = entry.pty.cols !== cols || entry.pty.rows !== rows
+      // Output emitted at the old size reaches the ring, the mirror and every
+      // sink before the resize, so the mark and fitState come after it (E3-FR-12/22).
+      if (changed) this.flush(ptyId)
       try {
         entry.pty.resize(cols, rows)
       } catch {
@@ -833,6 +862,16 @@ export class PtyManager {
           this.dropMirror(entry, error)
         }
         entry.gen++
+      }
+      if (changed) {
+        entry.resizeMark = entry.historyDropped + entry.history.length
+        for (const sink of this.sinks.values()) {
+          try {
+            sink.onResize?.(ptyId, entry.paneId, cols, rows)
+          } catch {
+            /* a sink must never break the resize */
+          }
+        }
       }
     }
   }
@@ -999,6 +1038,15 @@ export class PtyManager {
   /** Live pty id bound to a pane, or null. */
   ptyIdForPane(paneId: string): string | null {
     return this.byPane.get(paneId) ?? null
+  }
+
+  /** Live size of a pane's pty, else of its exited record, else null (E3-FR-20). */
+  sizeOf(paneId: string): { cols: number; rows: number } | null {
+    const ptyId = this.byPane.get(paneId)
+    const entry = ptyId ? this.entries.get(ptyId) : undefined
+    if (entry) return { cols: entry.pty.cols, rows: entry.pty.rows }
+    const exited = this.exited.get(paneId)
+    return exited ? { cols: exited.cols, rows: exited.rows } : null
   }
 
   /** Pane ids that currently have a live pty (drives snapshot `running`). */
@@ -1391,6 +1439,7 @@ export class PtyManager {
       const dropped = entry.history.shift()
       if (dropped) entry.historyBytes -= dropped.length
       entry.historyTruncated = true
+      entry.historyDropped++
     }
   }
 

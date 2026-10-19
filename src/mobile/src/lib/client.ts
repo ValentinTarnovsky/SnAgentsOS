@@ -47,7 +47,7 @@ import {
   storeHostPlatform,
 } from './auth'
 import { hexEqual, hexToBytes, hmacSha256Hex } from './sha256'
-import { store, type UpdateInfo } from './store'
+import { selectPaneMode, store, type UpdateInfo } from './store'
 import { applyRemoteTheme } from './theme'
 import { setLang, t } from './i18n'
 import { delayFor } from './reconnectSchedule'
@@ -59,12 +59,15 @@ import { chunkInput } from './composerSend'
 import { PendingMap, type PendingOutcome } from './pending'
 import { pruneDrafts } from './drafts'
 import { log, useDiagStore } from './connLog'
+import { FIT_REPLAY_GRACE_MS, decideFitState } from './phoneFit'
 
 /** A frame handed to the live terminal. */
 export type TermFrame =
   | { type: 'replay'; data: string; cols: number; rows: number; running: boolean; exitCode?: number }
   | { type: 'out'; data: string }
   | { type: 'exit'; exitCode: number }
+  /** E3-FR-12: the pty took a new size (the terminal adopts it without a replay). */
+  | { type: 'fitState'; owner: 'phone' | 'desktop'; cols: number; rows: number }
 
 /** Result of a control request, resolved by the matching ctlAck (or a timeout). */
 export interface CtlResult {
@@ -245,6 +248,10 @@ class RemoteClient {
   // render gap). Buffered so the initial replay/out is never lost; a replay
   // supersedes and resets the buffer since it repaints the whole screen.
   private frameBuffer: TermFrame[] = []
+  /** Panes with a fitPane of this phone still waiting for its ack (E3-FR-16). */
+  private readonly fitPending = new Map<string, number>()
+  /** Last running replay per pane (perf clock), for FIT_REPLAY_GRACE_MS. */
+  private readonly fitReplayAt = new Map<string, number>()
 
   /** Boot the client from stored auth or a pairing code. Idempotent. */
   start(): void {
@@ -614,6 +621,64 @@ class RemoteClient {
   async sendCtl(action: RemoteCtlAction): Promise<CtlResult> {
     const outcome = await this.request<CtlResult>((id) => ({ v: PROTOCOL_VERSION, type: 'ctl', id, action }))
     return outcome.ok ? outcome.value : { ok: false, error: outcome.error }
+  }
+
+  // --- phone mode (E3 M11, FR-12..20) ---
+
+  /**
+   * Ask the desktop to size a pane to this phone's grid. The size becomes
+   * this phone's lastFitSent first (FR-16). A refusal because the PC does not
+   * allow phone-fit puts the pane back in desktop mode with its toast (FR-20).
+   */
+  async sendFitPane(paneId: string, cols: number, rows: number): Promise<CtlResult> {
+    const snap = store.getState().snapshot
+    const workspaceId = snap ? workspaceOfPane(snap, paneId) : null
+    if (!workspaceId) return { ok: false, error: 'not_found' }
+    store.getState().setLastFitSent(paneId, { cols, rows })
+    // The re-claim after a replay is going out: from here the pending count
+    // covers it, and once acked a desktop release must count again (FR-18).
+    this.fitReplayAt.delete(paneId)
+    this.fitPending.set(paneId, (this.fitPending.get(paneId) ?? 0) + 1)
+    log('info', `fitPane ${cols}x${rows}`)
+    let res: CtlResult
+    try {
+      res = await this.sendCtl({ kind: 'fitPane', workspaceId, paneId, cols, rows })
+    } finally {
+      const left = (this.fitPending.get(paneId) ?? 1) - 1
+      if (left > 0) this.fitPending.set(paneId, left)
+      else this.fitPending.delete(paneId)
+    }
+    if (!res.ok && res.error === 'disabled') {
+      const s = store.getState()
+      s.setPaneMode(paneId, 'desktop')
+      s.setToast(t('fit.disabled'))
+      // The fitState desktop that came with the refusal was held while pending: adopt it now.
+      const info = s.sizeInfo[paneId]
+      if (info && paneId === s.subscribedPaneId) this.emit({ type: 'fitState', owner: info.owner, cols: info.cols, rows: info.rows })
+    }
+    return res
+  }
+
+  /** Give a pane's size back to the desktop (switching to desktop mode, FR-18). */
+  releaseFit(paneId: string): Promise<CtlResult> {
+    return this.sendCtl({ kind: 'releaseFit', paneId })
+  }
+
+  /**
+   * fitState (FR-12/16/18): record the size, switch to desktop mode when the
+   * PC took it back (saved, with its toast) and hand the new size to the
+   * terminal when it is the viewed pane.
+   */
+  private handleFitState(msg: Extract<RemoteServerMsg, { type: 'fitState' }>): void {
+    const s = store.getState()
+    const mode = selectPaneMode(s, msg.paneId)
+    const replayAt = this.fitReplayAt.get(msg.paneId)
+    const settling = replayAt !== undefined && perfNow() - replayAt < FIT_REPLAY_GRACE_MS
+    const d = decideFitState(mode, s.lastFitSent[msg.paneId] ?? null, this.fitPending.has(msg.paneId) || settling, msg)
+    s.setSizeInfo(msg.paneId, d.info)
+    if (d.mode !== mode) s.setPaneMode(msg.paneId, d.mode, d.persist)
+    if (d.toast === 'reclaimed') s.setToast(t('fit.reclaimed'))
+    if (msg.paneId === s.subscribedPaneId) this.emit({ type: 'fitState', owner: msg.owner, cols: msg.cols, rows: msg.rows })
   }
 
   // --- pending requests (E3-FR-04) ---
@@ -988,6 +1053,7 @@ class RemoteClient {
         this.handleState(msg.state)
         break
       case 'replay':
+        if (msg.running) this.fitReplayAt.set(msg.paneId, perfNow())
         if (msg.paneId === store.getState().subscribedPaneId) {
           this.emit({ type: 'replay', data: msg.data, cols: msg.cols, rows: msg.rows, running: msg.running, exitCode: msg.exitCode })
         }
@@ -1000,6 +1066,9 @@ class RemoteClient {
         break
       case 'paneStatus':
         this.handlePaneStatus(msg.paneId, msg.status)
+        break
+      case 'fitState':
+        this.handleFitState(msg)
         break
       case 'ctlAck':
         this.handleCtlAck(msg)

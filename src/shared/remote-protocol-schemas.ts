@@ -45,6 +45,16 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('openPath'), workspaceId: id, paneId: id, path: z.string().min(1).max(4096) }),
   // E6-FR-24 (R22-20): pane membership and the stale check are the executor's.
   z.object({ kind: z.literal('agentResume'), workspaceId: id, paneId: id, mode: z.enum(['resume', 'new']) }),
+  // E3-FR-20 (R30-04): a grid out of range is a malformed frame (bad_msg,
+  // one strike); the phone never builds one because phoneGrid clamps.
+  z.object({
+    kind: z.literal('fitPane'),
+    workspaceId: id,
+    paneId: id,
+    cols: z.number().int().min(20).max(500),
+    rows: z.number().int().min(8).max(300),
+  }),
+  z.object({ kind: z.literal('releaseFit'), paneId: id }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [
