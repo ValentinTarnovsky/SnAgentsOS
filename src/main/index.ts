@@ -12,6 +12,7 @@ import { dataDir, getConfigPath, isPortable } from './paths'
 import { PtyManager } from './pty/PtyManager'
 import { ScrollbackStore, buildSeed } from './pty/ScrollbackStore'
 import { ScrollbackCheckpoint } from './pty/ScrollbackCheckpoint'
+import { createShutdownPersist, wirePowerShutdown, wireSessionEnd } from './pty/shutdownPersist'
 import { engineFromSettings } from '@shared/terminalEngine'
 import { ConfigStore } from './store/ConfigStore'
 import { parseConfig } from './store/schema'
@@ -229,13 +230,13 @@ function afterPtysKilled(): void {
 
 /**
  * The OS is ending the session: save now, but if the shutdown is cancelled
- * the app lives on, so a later quit must save again.
+ * the app lives on, so a later quit must save again (shutdownPersist).
  */
-function persistScrollbackForShutdown(): void {
-  persistScrollbackOnExit()
-  reviewNotes?.flush()
-  setTimeout(() => scrollbackCheckpoint?.resetExit(), 10_000).unref?.()
-}
+const persistScrollbackForShutdown = createShutdownPersist({
+  checkpoint: () => scrollbackCheckpoint,
+  flush: () => reviewNotes?.flush(),
+  log: (msg, error) => console.warn(msg, error),
+})
 
 function quitApp(): void {
   isQuitting = true
@@ -466,10 +467,7 @@ function openMainWindow(): void {
 
   // Windows shutdown, restart or log off: Electron emits no before-quit, so the
   // agent snapshot runs here, synchronously (E5-FR-06).
-  win.on('session-end', () => {
-    snapshotAgentsOnce('shutdown')
-    persistScrollbackForShutdown()
-  })
+  wireSessionEnd(win, () => snapshotAgentsOnce('shutdown'), persistScrollbackForShutdown)
 
   win.on('closed', () => {
     mainWindow = null
@@ -534,7 +532,7 @@ async function bootstrap(): Promise<void> {
     void scrollbackStore.gc(live).catch(() => undefined)
   }
   // macOS/Linux shutdown (Windows uses the window's session-end, E6-FR-36).
-  powerMonitor.on('shutdown', () => persistScrollbackForShutdown())
+  wirePowerShutdown(powerMonitor, persistScrollbackForShutdown)
   registerWindowIpc(() => mainWindow)
   registerSystemIpc(() => mainWindow?.webContents ?? null, openRequests)
   void handleOpenArgv(process.argv, process.cwd(), 'argv')
