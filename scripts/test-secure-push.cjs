@@ -422,6 +422,15 @@ async function testManager(api) {
     await tick(5)
     const last = w.secureCalls[w.secureCalls.length - 1]
     check(last[0] === 'enable' && last[1] === 4602 && last[2] === 4601, 'port change: enable(new, previous)')
+    // The remote server turned off with https on: nothing stays published on the tailnet
+    w.manager.applyConfig({ enabled: false, port: 4602, phoneFit: true, https: { enabled: true, mode: 'tailscaleServe' } })
+    await tick(5)
+    let tail = w.secureCalls[w.secureCalls.length - 1]
+    check(tail[0] === 'disable' && tail[1] === 4602 && !w.manager.getUiState().status.secure, 'server off with https on: our tailscale serve handler is removed')
+    w.manager.applyConfig({ enabled: true, port: 4602, phoneFit: true, https: { enabled: true, mode: 'tailscaleServe' } })
+    await tick(5)
+    tail = w.secureCalls[w.secureCalls.length - 1]
+    check(tail[0] === 'enable' && tail[1] === 4602 && w.manager.getUiState().status.secure.state === 'on', 'server back on: the secure mode applies again')
     // An import turning it off
     w.manager.applyConfig({ enabled: true, port: 4602, phoneFit: true, https: { enabled: false, mode: 'tailscaleServe' } })
     await tick(5)
@@ -434,6 +443,7 @@ async function testManager(api) {
     await tick(5)
     const st = await w.manager.setSecure(true)
     check(st.state === 'error' && st.error === 'no_https', 'setSecure reports no_https')
+    check(!w.manager.getUiState().status.secure, 'a failed toggle leaves no stale error in the server status')
     const { ws } = await pair(w)
     check(!('pushKey' in ws.of('authOk')[0]) && srv().handlers.secureHost() === null, 'a failed toggle leaves push and the name off')
   }
@@ -472,6 +482,7 @@ export { pushSupport, base64UrlToBytes, sameKey, postSubscription, isIosUserAgen
 export { pasteFromClipboard } from './src/mobile/src/lib/clipboardPaste'
 export { wantsWakeLock, WAKE_LOCK_KEY } from './src/mobile/src/lib/wakeLock'
 export { openHashOf } from './src/mobile/src/lib/serviceWorker'
+export { wsUrlFor } from './src/mobile/src/lib/wsUrl'
 export { fillServiceWorker, precacheList } from './src/mobile/swBuild'
 ` },
     bundle: true, platform: 'node', format: 'cjs', write: false,
@@ -525,6 +536,11 @@ async function testPhoneLogic(api) {
   const wl = o => api.wantsWakeLock({ pref: true, secure: true, supported: true, live: true, screen: 'terminal', visible: true, ...o })
   check(wl({}) && !wl({ screen: 'home' }) && !wl({ visible: false }) && !wl({ secure: false }) && !wl({ pref: false }) && !wl({ live: false }) && !wl({ screen: 'settings' }), 'wake lock: only in a console, visible, secure, with the setting on')
   check(api.WAKE_LOCK_KEY === 'snagentsos.remote.wakeLock', 'the setting key is snagentsos.remote.wakeLock')
+
+  // The socket of the https origin (FR-42): ws: from an https page is mixed content
+  check(api.wsUrlFor('https:', DNS) === `wss://${DNS}/ws` && api.wsUrlFor('http:', '192.168.1.5:4517') === 'ws://192.168.1.5:4517/ws', 'the https origin dials wss:, the http origin ws:')
+  const clientSrc = fs.readFileSync(path.join(root, 'src/mobile/src/lib/client.ts'), 'utf8') + fs.readFileSync(path.join(root, 'src/mobile/src/lib/diagnostics.ts'), 'utf8')
+  check(!/new WebSocket\(`ws:/.test(clientSrc) && (clientSrc.match(/new WebSocket\(wsUrlFor\(location\.protocol/g) || []).length === 2, 'the client and the diagnostics probe build the socket URL from the page protocol')
 
   // SW message filter (FR-45)
   check(api.openHashOf({ type: 'snaos-open', hash: '#ws=w%201&pane=p1' }) === '#ws=w%201&pane=p1', 'a snaos-open message carries the deep link hash')

@@ -373,7 +373,8 @@ function SecureModeRow() {
     }
   }
 
-  const shown: SecureModeStatus | null = lastError ?? (enabled ? (live ?? { state: 'checking' }) : null)
+  // With the server off main removes the handler, so there is nothing to check.
+  const shown: SecureModeStatus | null = lastError ?? (enabled && running ? (live ?? { state: 'checking' }) : null)
   const error = shown?.state === 'error' ? shown : null
 
   return (

@@ -169,6 +169,12 @@ export class RemoteManager {
   readonly push: PushService
   /** settings.remote.https.enabled as last applied (push is active with it, FR-46). */
   private httpsWanted = false
+  /**
+   * `tailscale serve` should point at us: https on and the remote server
+   * enabled. With the server off nothing stays published on the tailnet (a
+   * handler to a closed loopback port, or to whatever binds it next).
+   */
+  private serveWanted = false
   /** The MagicDNS name while the secure mode is on (accepted as Host, listed first). */
   private secureHost: string | null = null
   /** Port the current `tailscale serve` handler points at. */
@@ -243,7 +249,7 @@ export class RemoteManager {
     if (this.phoneFit && !phoneFit) void this.fit.releaseAll()
     this.phoneFit = phoneFit
     const port = this.clampPort(cfg.port)
-    this.syncSecure(cfg.https?.enabled === true, port)
+    this.syncSecure(cfg.https?.enabled === true, port, cfg.enabled === true)
     if (!cfg.enabled) {
       this.stopServer('disabled')
       return
@@ -268,8 +274,7 @@ export class RemoteManager {
    * change). The toggle itself goes through setSecure, which already leaves
    * this state in place, so its config echo is a no-op here.
    */
-  private syncSecure(wanted: boolean, port: number): void {
-    const was = this.httpsWanted
+  private syncSecure(wanted: boolean, port: number, serverEnabled: boolean): void {
     this.httpsWanted = wanted
     if (wanted) {
       // The keys exist from the first time https is on (E3 M14).
@@ -278,6 +283,10 @@ export class RemoteManager {
       } catch {
         /* unreadable data dir: push stays without a key */
       }
+    }
+    const was = this.serveWanted
+    this.serveWanted = wanted && serverEnabled
+    if (this.serveWanted) {
       if (was && this.securePort === port && this.secureStatus.state !== 'error') return
       void this.applySecure(port)
       return
@@ -303,12 +312,12 @@ export class RemoteManager {
         res = { ok: false, error: 'cli', message: err instanceof Error ? err.message : String(err) }
       }
       // Turned off (or moved to another port) while the CLI ran: that call wins.
-      if (!this.httpsWanted) return this.secureStatus
+      if (!this.serveWanted) return this.secureStatus
       this.onSecureResult(res, port)
       if (!res.ok) {
         this.secureRetry = setTimeout(() => {
           this.secureRetry = null
-          if (this.httpsWanted && this.secureStatus.state === 'error') void this.applySecure(this.boundPort)
+          if (this.serveWanted && this.secureStatus.state === 'error') void this.applySecure(this.boundPort)
         }, SECURE_RETRY_MS)
         this.secureRetry.unref?.()
       }
@@ -350,6 +359,7 @@ export class RemoteManager {
     if (enabled) {
       if (this.statusState !== 'running') return { state: 'error', error: 'server_off' }
       this.httpsWanted = true
+      this.serveWanted = true
       try {
         this.push.ensureKeys()
       } catch {
@@ -357,16 +367,18 @@ export class RemoteManager {
       }
       const status = await this.applySecure(this.boundPort)
       // A failed attempt from the toggle leaves the setting off: no retry loop.
+      // The renderer shows the returned error; main's status goes back to off
+      // so the status line and the diagnostics never report a setting that is off.
       if (status.state !== 'on') {
         this.httpsWanted = false
+        this.serveWanted = false
         this.clearSecureRetry()
-        this.secureHost = null
-        this.securePort = null
-        this.scheduleUi()
+        this.markSecureOff()
       }
       return status
     }
     this.httpsWanted = false
+    this.serveWanted = false
     this.clearSecureRetry()
     const port = this.securePort ?? this.boundPort
     this.markSecureOff()
