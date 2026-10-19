@@ -278,7 +278,9 @@ export function RemoteTerminal(): ReactNode {
         const st = useRemoteStore.getState()
         const paneId = st.subscribedPaneId
         return {
-          mode: selectPaneMode(st, paneId),
+          // In Chat the terminal is hidden and paused: no fitPane (the owner
+          // keeps its size, FR-21); the replay on the way back re-claims it.
+          mode: paneId && st.chatPaneId === paneId ? 'desktop' : selectPaneMode(st, paneId),
           info: paneId ? (st.sizeInfo[paneId] ?? null) : null,
           lastSent: paneId ? (st.lastFitSent[paneId] ?? null) : null,
         }

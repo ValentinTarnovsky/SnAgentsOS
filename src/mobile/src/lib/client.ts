@@ -27,6 +27,10 @@
  *    deadline and re-sync the viewed pane on the pong after a long absence.
  *  - A desktop on another version than this bundle parks the client on phase
  *    'updated' with the socket closed and every reconnect path disabled.
+ *
+ * Chat view (E3 M12, FR-25): the viewed pane is either streamed (`sub`) or
+ * read as Chat (`chatSub`, its xterm stream paused), never both; viewPane
+ * and syncView keep that invariant and `chatPaneId` says which one holds.
  */
 import {
   PROTOCOL_VERSION,
@@ -48,7 +52,10 @@ import {
   storeHostPlatform,
 } from './auth'
 import { hexEqual, hexToBytes, hmacSha256Hex } from './sha256'
-import { selectPaneMode, store, type UpdateInfo } from './store'
+import { selectPaneMode, selectPaneView, store, type UpdateInfo } from './store'
+import { chatNoticeOf } from '@shared/chat-types'
+import { chatStore, type ChatLoad } from './chatStore'
+import type { PaneView } from './chatView'
 import { applyRemoteTheme } from './theme'
 import { setLang, t } from './i18n'
 import { delayFor } from './reconnectSchedule'
@@ -253,6 +260,9 @@ class RemoteClient {
   private readonly fitPending = new Map<string, number>()
   /** Last running replay per pane (perf clock), for FIT_REPLAY_GRACE_MS. */
   private readonly fitReplayAt = new Map<string, number>()
+  /** E3 M12: what the chat request pending per pane asked for (first page or earlier). */
+  private readonly chatPending = new Map<string, { kind: ChatLoad; token: number }>()
+  private chatToken = 0
 
   /** Boot the client from stored auth or a pairing code. Idempotent. */
   start(): void {
@@ -506,9 +516,121 @@ class RemoteClient {
       s.update({ activePaneId: paneId })
       return
     }
-    if (s.subscribedPaneId) this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId: s.subscribedPaneId })
-    this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
-    s.update({ activePaneId: paneId, subscribedPaneId: paneId })
+    if (s.subscribedPaneId) this.leaveStream(s.subscribedPaneId)
+    // E3-FR-24/25: an agent console saved as Chat opens as Chat (chatSub, no sub).
+    const chat = selectPaneView(s, paneId) === 'chat'
+    s.update({ activePaneId: paneId, subscribedPaneId: paneId, chatPaneId: chat ? paneId : null })
+    if (chat) this.requestChatFirst(paneId)
+    else this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
+  }
+
+  /** Stop watching a pane the way it is watched (chatUnsub in Chat, unsub in Terminal). */
+  private leaveStream(paneId: string): void {
+    const s = store.getState()
+    if (s.chatPaneId === paneId) {
+      this.cancelChat(paneId)
+      this.send({ v: PROTOCOL_VERSION, type: 'chatUnsub', paneId })
+      s.update({ chatPaneId: null })
+    } else {
+      this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
+    }
+  }
+
+  // --- Chat view (E3 M12, FR-24..33) ---
+
+  /** The [Terminal | Chat] control: save the choice and switch the subscription. */
+  setPaneView(paneId: string, view: PaneView): void {
+    store.getState().setPaneView(paneId, view)
+    this.syncView()
+  }
+
+  /**
+   * Make the viewed pane's subscription match its view (FR-25): into Chat =
+   * `unsub` then `chatSub`; back to Terminal = `chatUnsub` then `sub`, whose
+   * replay repaints the terminal. Also runs when a status change makes the
+   * pane (in)eligible.
+   */
+  syncView(): void {
+    const s = store.getState()
+    const paneId = s.subscribedPaneId
+    if (!paneId || s.phase !== 'live' || !this.isOpen()) return
+    const want = selectPaneView(s, paneId)
+    const inChat = s.chatPaneId === paneId
+    if (want === 'chat' && !inChat) {
+      this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
+      s.update({ chatPaneId: paneId })
+      this.requestChatFirst(paneId)
+    } else if (want === 'terminal' && inChat) {
+      this.cancelChat(paneId)
+      this.send({ v: PROTOCOL_VERSION, type: 'chatUnsub', paneId })
+      s.update({ chatPaneId: null })
+      this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
+    }
+  }
+
+  /** chatSub: the first page (pending by pane, 10s; a repeat while one waits is a no-op). */
+  requestChatFirst(paneId: string): void {
+    this.requestChat(paneId, 'first', { v: PROTOCOL_VERSION, type: 'chatSub', paneId })
+  }
+
+  /** "Load earlier" (FR-26): the page before the oldest message held. */
+  requestChatMore(paneId: string): void {
+    const pane = chatStore.getState().chats[paneId]
+    const cursor = pane?.list.cursor
+    if (!pane || !cursor || pane.list.done || pane.list.capped || pane.loading) return
+    this.requestChat(paneId, 'more', { v: PROTOCOL_VERSION, type: 'chatMore', paneId, before: cursor })
+  }
+
+  private requestChat(paneId: string, kind: ChatLoad, msg: RemoteClientMsg): void {
+    const wait = this.requestForPane<unknown>(paneId, msg)
+    if (!wait) return
+    const token = ++this.chatToken
+    this.chatPending.set(paneId, { kind, token })
+    chatStore.getState().begin(paneId, kind)
+    void wait.then((outcome) => {
+      const mine = this.chatPending.get(paneId)?.token === token
+      if (mine) this.chatPending.delete(paneId)
+      // No answer in 10s, or the rate limit: "The PC did not answer [Retry]".
+      // A request this phone dropped itself (left Chat) leaves no error.
+      if (!outcome.ok && (mine || outcome.error !== 'offline')) chatStore.getState().fail(paneId, kind)
+    })
+  }
+
+  /** Drop the chat request a pane still waits on (leaving Chat). */
+  private cancelChat(paneId: string): void {
+    if (!this.chatPending.has(paneId)) return
+    this.chatPending.delete(paneId)
+    this.pendingByPane.fail(paneId, 'offline')
+  }
+
+  /**
+   * chatPage (FR-26/30/33): an answer to "Load earlier" goes in front; any
+   * other page (the first one, a reset) replaces the list. A lone notice
+   * means no chat: back to Terminal for this page, with the toast.
+   */
+  private handleChatPage(msg: Extract<RemoteServerMsg, { type: 'chatPage' }>): void {
+    const pending = this.chatPending.get(msg.paneId)
+    this.chatPending.delete(msg.paneId)
+    this.pendingByPane.resolve(msg.paneId, msg)
+    const s = store.getState()
+    if (s.chatPaneId !== msg.paneId) return
+    const items = Array.isArray(msg.items) ? msg.items : []
+    const notice = chatNoticeOf(items)
+    if (notice) {
+      chatStore.getState().clear(msg.paneId)
+      s.setPaneView(msg.paneId, 'terminal', false)
+      this.syncView()
+      s.setToast(notice === 'notLocal' ? t('chat.unavailable') : `${t('chat.unavailable')}. ${t('chat.installHooks')}`)
+      return
+    }
+    const page = { items, cursor: typeof msg.cursor === 'string' ? msg.cursor : null, done: msg.done === true }
+    if (pending?.kind === 'more') chatStore.getState().prepend(msg.paneId, page)
+    else chatStore.getState().replace(msg.paneId, page)
+  }
+
+  private handleChatAppend(msg: Extract<RemoteServerMsg, { type: 'chatAppend' }>): void {
+    if (store.getState().chatPaneId !== msg.paneId || !Array.isArray(msg.items)) return
+    chatStore.getState().append(msg.paneId, msg.items)
   }
 
   /**
@@ -519,6 +641,8 @@ class RemoteClient {
   resyncPane(): void {
     const paneId = store.getState().subscribedPaneId
     if (!paneId || !this.isOpen()) return
+    // In Chat a repeated chatSub is the fresh first page (no stream to resync).
+    if (store.getState().chatPaneId === paneId) return this.requestChatFirst(paneId)
     this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
     this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
   }
@@ -1085,6 +1209,12 @@ class RemoteClient {
       case 'historyRes':
         this.pendingById.resolve(msg.id, Array.isArray(msg.sessions) ? msg.sessions : [])
         break
+      case 'chatPage':
+        this.handleChatPage(msg)
+        break
+      case 'chatAppend':
+        this.handleChatAppend(msg)
+        break
       case 'revoked':
         log('warn', 'revoked')
         this.forgetComposerState()
@@ -1196,6 +1326,9 @@ class RemoteClient {
           ? lastPane
           : null
     const lostViewed = !!cur && keep !== cur && prev.screen === 'terminal'
+    // A chat request sent on the old socket never gets its answer: drop it, or
+    // the chatSub below would be refused as "already waiting" for up to 10s.
+    for (const paneId of [...this.chatPending.keys()]) this.cancelChat(paneId)
     store.getState().update({
       phase: 'live',
       banner: null,
@@ -1211,6 +1344,8 @@ class RemoteClient {
       pairExpiresAt: null,
       // Force viewPane below to (re)issue a sub even on reconnect to the same pane.
       subscribedPaneId: null,
+      // A new socket holds no chatSub yet; viewPane sends it again for a Chat pane.
+      chatPaneId: null,
       activePaneId: keep ?? null,
       ...(lostViewed ? { screen: 'home' as const } : {}),
     })
@@ -1326,11 +1461,12 @@ class RemoteClient {
     if (cur && !waiting && !paneExists(state, cur)) {
       this.awaitedPane = null
       const onTerminal = s.screen === 'terminal'
-      if (s.subscribedPaneId) this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId: s.subscribedPaneId })
+      if (s.subscribedPaneId) this.leaveStream(s.subscribedPaneId)
       s.update({ activePaneId: null, subscribedPaneId: null, ...(onTerminal ? { screen: 'home' as const } : {}) })
       if (onTerminal) s.setToast(t('toast.paneClosed'))
     }
     if (s.mountAsk && !paneExists(state, s.mountAsk)) s.update({ mountAsk: null })
+    this.syncView()
   }
 
   /** Live status of one pane (E1-FR-03): upsert or delete, then maybe alert. */
@@ -1342,6 +1478,8 @@ class RemoteClient {
     if (status) next[paneId] = status
     else delete next[paneId]
     s.update({ paneStatus: next })
+    // A console that becomes (or stops being) an agent switches view (FR-24).
+    if (paneId === s.subscribedPaneId) this.syncView()
     // An orphan upsert (status ahead of the state that adds the pane) never alerts.
     if (s.snapshot && paneById(s.snapshot, paneId)) paneNotifier.onPaneStatus(paneId, prev, status)
   }

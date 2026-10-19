@@ -46,6 +46,7 @@ import {
   type PaneFitMode,
   type SizeInfo,
 } from './phoneFit'
+import { chatEligible, loadChatDefault, loadPaneViews, resolvePaneView, saveChatDefault, savePaneView, type PaneView } from './chatView'
 
 /**
  * E1-FR-20: the soft keyboard counts as open only while an input field has the
@@ -215,6 +216,13 @@ export interface RemoteState {
   sizeInfo: Record<string, SizeInfo>
   /** cols/rows of this phone's last fitPane per pane (FR-16: who owns it). */
   lastFitSent: Record<string, GridSize>
+  // --- Chat view (E3 M12, FR-24..33) ---
+  /** Saved view per pane ('snagentsos.remote.paneView.<paneId>'). */
+  paneViews: Record<string, PaneView>
+  /** "Open agent consoles in Chat" ('snagentsos.remote.chatDefault', off). */
+  chatDefault: boolean
+  /** The pane this phone reads as Chat on the desktop (chatSub sent, xterm stream paused). */
+  chatPaneId: string | null
 
   /** Merge a partial state (used by the client for machine transitions). */
   update: (partial: Partial<RemoteState>) => void
@@ -254,6 +262,9 @@ export interface RemoteState {
   setPhoneFontSize: (size: number) => void
   setSizeInfo: (paneId: string, info: SizeInfo) => void
   setLastFitSent: (paneId: string, grid: GridSize) => void
+  /** Set a pane's view; `persist` false keeps it for this page only (FR-33 fallback). */
+  setPaneView: (paneId: string, view: PaneView, persist?: boolean) => void
+  setChatDefault: (on: boolean) => void
 }
 
 let toastSeq = 0
@@ -310,6 +321,9 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   phoneFontSize: loadPhoneFontSize(),
   sizeInfo: {},
   lastFitSent: {},
+  paneViews: loadPaneViews(),
+  chatDefault: loadChatDefault(),
+  chatPaneId: null,
 
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
@@ -402,7 +416,26 @@ export const useRemoteStore = create<RemoteState>((set) => ({
       return { sizeInfo: { ...s.sizeInfo, [paneId]: info } }
     }),
   setLastFitSent: (paneId, grid) => set((s) => ({ lastFitSent: { ...s.lastFitSent, [paneId]: { cols: grid.cols, rows: grid.rows } } })),
+  setPaneView: (paneId, view, persist = true) => {
+    if (persist) savePaneView(paneId, view)
+    set((s) => (s.paneViews[paneId] === view ? s : { paneViews: { ...s.paneViews, [paneId]: view } }))
+  },
+  setChatDefault: (on) => {
+    saveChatDefault(on)
+    set({ chatDefault: on })
+  },
 }))
+
+/** A pane's effective view (FR-24): Terminal unless its agent is Claude or Codex. */
+export function selectPaneView(s: RemoteState, paneId: string | null): PaneView {
+  if (!paneId) return 'terminal'
+  return resolvePaneView(s.paneViews[paneId], s.chatDefault, chatEligible(s.paneStatus[paneId]))
+}
+
+/** The viewed pane is shown as Chat right now (its chatSub is active). */
+export function selectInChat(s: RemoteState): boolean {
+  return !!s.subscribedPaneId && s.chatPaneId === s.subscribedPaneId
+}
 
 /** A pane's effective phone-fit mode (FR-13): its saved choice, else phoneFitDefault. */
 export function selectPaneMode(s: RemoteState, paneId: string | null): PaneFitMode {

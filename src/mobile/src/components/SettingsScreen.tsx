@@ -2,7 +2,7 @@
  * Phone settings as a pushed screen over Home (E1-FR-37, E2-FR-13), opened
  * from the Home header. Sections: Appearance (desktop theme, text size
  * presets of E2-FR-34), Phone mode (E3-FR-13/14: the phoneFitDefault switch
- * and the phone-mode text size), Input
+ * and the phone-mode text size), Chat (E3-FR-24: the chatDefault switch), Input
  * (E1-FR-22/30: AI consoles start in Composer, composer autocorrect), Alerts
  * (E2-FR-44: on-screen alerts, vibrate, turn end), About (desktop and bundle versions) and This
  * device (Diagnostics, E2-FR-36, and unpair with confirmation). The Key bar
@@ -104,6 +104,8 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const setPhoneFitDefault = useRemoteStore((s) => s.setPhoneFitDefault)
   const phoneFontSize = useRemoteStore((s) => s.phoneFontSize)
   const setPhoneFontSize = useRemoteStore((s) => s.setPhoneFontSize)
+  const chatDefault = useRemoteStore((s) => s.chatDefault)
+  const setChatDefault = useRemoteStore((s) => s.setChatDefault)
   const [confirmUnpair, setConfirmUnpair] = useState(false)
   const desktopVersion = useRemoteStore((s) => s.appVersion)
   const [keyLayoutOpen, setKeyLayoutOpen] = useState(false)
@@ -176,6 +178,19 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
               </div>
             </div>
           </div>
+        </SettingsSection>
+        <SettingsSection id="chat" title={t('chat.settings.title')}>
+          <PrefToggle
+            pref="chatDefault"
+            label={t('chat.settings.default')}
+            hint={t('chat.settings.defaultHint')}
+            checked={chatDefault}
+            onChange={(on) => {
+              setChatDefault(on)
+              // The console on screen follows at once when it has no choice of its own.
+              client.syncView()
+            }}
+          />
         </SettingsSection>
         <SettingsSection id="input" title={t('input.title')}>
           <div className="flex flex-col gap-2">

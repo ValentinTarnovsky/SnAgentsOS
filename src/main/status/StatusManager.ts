@@ -62,6 +62,19 @@ interface PaneTrack {
 /** Called on every emission, `state: null` included (E1-FR-01). `cause` is the agent event behind it, when any. */
 export type StatusListener = (evt: PaneStatusEvt, cause?: AgentEvent) => void
 
+/**
+ * The agent session behind a console as the Chat view needs it (E3 M12):
+ * `sessionId` is '' for an approximate (title-only) track or a Codex
+ * `launch:` placeholder; `transcriptPath` only from a main-session hook,
+ * already checked by isSafeTranscriptPath. Main only.
+ */
+export interface PaneTranscriptInfo {
+  provider: AgentProvider
+  sessionId: string
+  transcriptPath?: string
+  cwd?: string
+}
+
 /** Same charset as schema 11 `lastSession.sessionId`: rejects `launch:` ids and shell syntax. */
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]{7,127}$/
 const DETAIL_THROTTLE_MS = 500
@@ -99,6 +112,11 @@ export class StatusManager implements PtySink {
   private readonly listeners = new Set<StatusListener>()
   private readonly sshPanes = new Map<string, boolean>()
   private readonly sshMisses = new Map<string, number>()
+  /** E3 M12: when each pane's live pty spawned (the no-hooks transcript match). */
+  private readonly spawnTimes = new Map<string, number>()
+  /** E3 M12: provider|session|transcript each pane last reported, and who listens. */
+  private readonly transcriptKeys = new Map<string, string>()
+  private readonly transcriptListeners = new Set<(paneId: string) => void>()
   lastClaudeEventAt: number | null = null
   desktopError: 'blocked' | 'failed' | 'unavailable' | null = null
   constructor(
@@ -107,12 +125,13 @@ export class StatusManager implements PtySink {
     private readonly onNotice: (notice: StatusNotice) => void = () => {},
     private readonly readTranscript: (path: string, sessionId: string) => Promise<string | undefined> = (path, sessionId) => readLastAssistantMessage(path, sessionId),
   ) {}
-  onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.ptys.set(paneId, ptyId) }
+  onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.ptys.set(paneId, ptyId); this.spawnTimes.set(paneId, Date.now()) }
   onData(): void {}
   /** Every exit (natural or not) releases the pane's tracking. */
   onExit(ptyId: string, paneId: string, _exitCode?: number, _info?: PtyExitInfo): void {
     if (this.ptys.get(paneId) !== ptyId) return
     this.ptys.delete(paneId)
+    this.spawnTimes.delete(paneId)
     this.clearPane(paneId)
   }
   setConfig(cfg: NotificationSettings): void { this.cfg = cfg }
@@ -128,6 +147,50 @@ export class StatusManager implements PtySink {
     this.listeners.add(cb)
     return () => { this.listeners.delete(cb) }
   }
+  // --- E3 M12 Chat view seams ------------------------------------------------
+
+  /** The session and transcript a console's agent reported, or null without a track. */
+  transcriptFor(paneId: string): PaneTranscriptInfo | null {
+    const track = this.panes.get(paneId)
+    if (!track) return null
+    const out: PaneTranscriptInfo = { provider: track.provider, sessionId: track.precise && SESSION_ID_RE.test(track.sessionId) ? track.sessionId : '' }
+    if (track.transcriptPath) out.transcriptPath = track.transcriptPath
+    if (track.cwd) out.cwd = track.cwd
+    return out
+  }
+
+  /** The console whose live track holds this session id, or null. */
+  paneForSession(sessionId: string): string | null {
+    if (!sessionId) return null
+    for (const [paneId, track] of this.panes) if (track.precise && track.sessionId === sessionId) return paneId
+    return null
+  }
+
+  /** When the pane's live pty spawned (epoch ms), or undefined. */
+  spawnedAt(paneId: string): number | undefined {
+    return this.spawnTimes.get(paneId)
+  }
+
+  /**
+   * Called with a pane id whenever its provider, session or transcript path
+   * changes, including when its track goes away (/clear, a resume, an exit).
+   */
+  onTranscriptChange(cb: (paneId: string) => void): () => void {
+    this.transcriptListeners.add(cb)
+    return () => { this.transcriptListeners.delete(cb) }
+  }
+
+  private noteTranscript(paneId: string): void {
+    const t = this.transcriptFor(paneId)
+    const key = t ? `${t.provider}|${t.sessionId}|${t.transcriptPath ?? ''}` : ''
+    if ((this.transcriptKeys.get(paneId) ?? '') === key) return
+    if (key) this.transcriptKeys.set(paneId, key)
+    else this.transcriptKeys.delete(paneId)
+    for (const cb of this.transcriptListeners) {
+      try { cb(paneId) } catch { console.warn('[status] a transcript listener failed') }
+    }
+  }
+
   testDesktop(): void { this.showNative(mainT(this.getConfig(), 'status.notif.test')) }
   /**
    * `snaos notify` (E8-FR-19): a native notification with the caller's title
@@ -505,5 +568,6 @@ export class StatusManager implements PtySink {
     for (const listener of this.listeners) {
       try { listener(evt, cause) } catch { console.warn('[status] a status listener failed') }
     }
+    this.noteTranscript(evt.paneId)
   }
 }

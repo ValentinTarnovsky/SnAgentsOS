@@ -15,6 +15,10 @@
  * Phone-fit (E3 M11): fitPane / releaseFit go through the FitController
  * first (owner, grace, auto restore); it outlives a server restart so the
  * server going off can give every pane back before the sockets close.
+ *
+ * Chat view (E3 M12): index.ts injects the ChatHub (setChat); the sessions
+ * reach it through a relay, so a hub set after the server started still
+ * answers, and none answers every chatSub with the noTranscript notice.
  */
 import { randomUUID } from 'crypto'
 import { hostname } from 'os'
@@ -44,6 +48,7 @@ import { PairingService, RateLimiter } from './PairingService'
 import { RemoteServer } from './RemoteServer'
 import { SessionManager, type HttpTokenOwner } from './SessionManager'
 import { ATTACHMENT_CLEANUP_INTERVAL_MS, UploadService } from './UploadService'
+import { noticePage, type ChatHooks } from '../chat/ChatHub'
 
 const DEFAULT_PORT = 4517
 const MIN_PORT = 1024
@@ -144,6 +149,14 @@ export class RemoteManager {
   private history: RemoteHistoryProvider | null = null
   /** E7-FR-22..26: answers the phone's gitReq (GitRemote, set by index.ts at boot). */
   private gitHandler: ((req: RemoteGitRequest) => Promise<RemoteGitReply>) | null = null
+  /** E3 M12: the phones' Chat view (ChatHub, set by index.ts at boot). */
+  private chat: ChatHooks | null = null
+  private readonly chatRelay: ChatHooks = {
+    sub: (owner, paneId, send) => (this.chat ? this.chat.sub(owner, paneId, send) : send(noticePage(paneId, 'noTranscript'))),
+    unsub: (owner, paneId) => this.chat?.unsub(owner, paneId),
+    more: (owner, paneId, before, send) => (this.chat ? this.chat.more(owner, paneId, before, send) : send(noticePage(paneId, 'noTranscript'))),
+    closed: (owner) => this.chat?.closed(owner),
+  }
 
   constructor(
     private readonly ptyManager: PtyManager,
@@ -238,6 +251,7 @@ export class RemoteManager {
       fit: this.fit,
       queryHistory: (req) => this.history?.forRemote(req) ?? Promise.resolve([]),
       git: (req) => this.gitRequest(req),
+      chat: this.chatRelay,
     })
     this.ptyManager.addSink(this.sessions)
     // A pty spawning/exiting flips a pane's `running`; re-broadcast so phones
@@ -444,6 +458,11 @@ export class RemoteManager {
   }
 
   // --- Control-plane relay --------------------------------------------------
+
+  /** Wire the Chat view (index.ts, once the ChatHub exists). */
+  setChat(chat: ChatHooks | null): void {
+    this.chat = chat
+  }
 
   /** Wire the session history (index.ts, once SessionHistory exists). */
   setHistory(history: RemoteHistoryProvider | null): void {
