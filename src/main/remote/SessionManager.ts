@@ -19,7 +19,10 @@ import {
   PROTOCOL_VERSION,
   REMOTE_CLOSE,
   type RemoteAuthFailReason,
+  type RemoteClientMsg,
   type RemoteCtlAction,
+  type RemoteGitReply,
+  type RemoteGitRequest,
   type RemotePairDeniedReason,
   type RemotePaneStatus,
   type RemoteServerMsg,
@@ -82,6 +85,14 @@ export function isRateLimitedMsg(msg: { type: string; action?: unknown }): boole
   return action.kind === 'createPane' && action.resume != null
 }
 
+// --- E7-FR-26 (R30-09a): git API limits per session ---------------------------
+
+/** gitReq answered per session inside GIT_REQ_WINDOW_MS; the next one gets `rate`. */
+export const GIT_REQ_MAX = 10
+export const GIT_REQ_WINDOW_MS = 5 * 1000
+/** gitReq a session may have waiting on git at once. */
+export const GIT_REQ_IN_FLIGHT = 2
+
 /** sha256 of an httpToken: the lookup key, so the map never holds the token itself. */
 function tokenKey(token: string): string {
   return createHash('sha256').update(token).digest('hex')
@@ -89,6 +100,9 @@ function tokenKey(token: string): string {
 
 /** An httpToken is 64 lowercase hex. */
 const HTTP_TOKEN_RE = /^[0-9a-f]{64}$/
+
+/** One client message type, narrowed by its `type`. */
+type RemoteClientMsgOf<T extends RemoteClientMsg['type']> = Extract<RemoteClientMsg, { type: T }>
 
 /** Distributive Omit so callers of send() skip the constant `v` field. */
 type ServerMsgNoV<T = RemoteServerMsg> = T extends unknown ? Omit<T, 'v'> : never
@@ -132,6 +146,10 @@ interface Session {
   bucket: TokenBucket
   /** E3-FR-01: Bearer of the HTTP routes, issued with authOk; null before and after. */
   httpToken: string | null
+  /** E7-FR-26: when the gitReq of the last GIT_REQ_WINDOW_MS were accepted. */
+  gitTimes: number[]
+  /** E7-FR-26: gitReq waiting on git right now. */
+  gitInFlight: number
 }
 
 /** Who an httpToken belongs to (RemoteManager.resolveHttpToken). */
@@ -159,6 +177,11 @@ export interface SessionManagerDeps {
    * until the push service exists; authOk then carries no pushKey.
    */
   getPushKey?: () => string | null
+  /**
+   * E7-FR-22..26: answer one gitReq page (GitRemote via RemoteManager). Absent
+   * = no git service in this build: every gitReq answers not_found.
+   */
+  git?: (req: RemoteGitRequest) => Promise<RemoteGitReply>
 }
 
 /**
@@ -231,6 +254,8 @@ export class SessionManager implements PtySink {
       badMsgStrikes: 0,
       bucket: new TokenBucket(),
       httpToken: null,
+      gitTimes: [],
+      gitInFlight: 0,
     }
     this.sessions.add(session)
     session.handshakeTimer = setTimeout(() => {
@@ -314,6 +339,8 @@ export class SessionManager implements PtySink {
       case 'visibility':
         session.visible = msg.visible
         return
+      case 'gitReq':
+        return void this.handleGitReq(session, msg)
       default:
         return this.send(session, { type: 'err', code: 'unauthorized' })
     }
@@ -531,6 +558,38 @@ export class SessionManager implements PtySink {
       // E2-FR-11: the phone keeps the prompt in the new console's composer.
       ...(result.promptFallback ? { promptFallback: true } : {}),
     })
+  }
+
+  /**
+   * E7-FR-22..26: one page of the change list or a diff. Past 10 accepted in
+   * 5s, or with 2 already waiting on git, the answer is gitRes rate: no `err`,
+   * no strike, the socket stays open.
+   */
+  private async handleGitReq(session: Session, msg: RemoteClientMsgOf<'gitReq'>): Promise<void> {
+    const now = Date.now()
+    session.gitTimes = session.gitTimes.filter((t) => now - t < GIT_REQ_WINDOW_MS)
+    if (session.gitTimes.length >= GIT_REQ_MAX || session.gitInFlight >= GIT_REQ_IN_FLIGHT) {
+      return this.send(session, { type: 'gitRes', id: msg.id, ok: false, data: { error: 'rate' }, page: 0, done: true })
+    }
+    session.gitTimes.push(now)
+    const req: RemoteGitRequest = { workspaceId: msg.workspaceId, op: msg.op }
+    if (msg.path !== undefined) req.path = msg.path
+    if (msg.staged !== undefined) req.staged = msg.staged
+    if (msg.page !== undefined) req.page = msg.page
+    let reply: RemoteGitReply
+    if (!this.deps.git) {
+      reply = { ok: false, data: { error: 'not_found' }, page: 0, done: true }
+    } else {
+      session.gitInFlight += 1
+      try {
+        reply = await this.deps.git(req)
+      } catch {
+        reply = { ok: false, data: { error: 'git_error' }, page: 0, done: true }
+      } finally {
+        session.gitInFlight -= 1
+      }
+    }
+    this.send(session, { type: 'gitRes', id: msg.id, ...reply })
   }
 
   // --- PtySink (fan-out from PtyManager) ------------------------------------
