@@ -25,6 +25,7 @@ import { registerGitIpc } from './ipc/registerGitIpc'
 import { registerReviewNotesIpc } from './ipc/registerReviewNotesIpc'
 import type { ReviewNoteStore } from './git/ReviewNoteStore'
 import { registerWorktreeIpc } from './ipc/registerWorktreeIpc'
+import { registerRepoConfigIpc } from './ipc/registerRepoConfigIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
 import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
@@ -530,6 +531,8 @@ async function bootstrap(): Promise<void> {
     loadConfig: () => configStore.load(),
     killPane: (paneId) => ptyManager.killPaneAndWait(paneId),
   })
+  // Per-repo .snagentsos.json (E8-FR-23..27): trusted-repos.json under dataDir().
+  registerRepoConfigIpc()
   registerRemoteIpc(remoteManager)
   registerLegacyIpc({
     getSender: () => mainWindow?.webContents ?? null,
