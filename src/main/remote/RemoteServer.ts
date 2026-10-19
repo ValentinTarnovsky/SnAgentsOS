@@ -1,13 +1,21 @@
 /**
  * The embedded HTTP + WebSocket server. Its unauthenticated attack surface is
- * exactly two things: a hardened static file server for the mobile bundle, and
- * a WebSocket upgrade on `/ws`. There are no REST endpoints, so there is no
- * CSRF surface; all control flows through the authenticated WS protocol.
+ * a hardened static file server for the mobile bundle and a WebSocket upgrade
+ * on `/ws`; all control flows through the authenticated WS protocol.
+ *
+ * The only REST routes live under `/api/` and break the old "no REST" rule on
+ * purpose (E3 design note 9): `POST /api/upload` (E3-FR-08) takes an image
+ * from the phone. It is compensated by the `httpToken` Bearer (32 random
+ * bytes bound to one authenticated WS session, dead once that socket closes
+ * or the device is revoked) plus the same Host and an exact Origin check, so
+ * a foreign page can neither forge nor read it. Any other `/api/` request is
+ * a 404, and attachments are never served back.
  *
  * Defenses baked in here (the plan's security posture, minus TLS):
  *  - Host header must be one of our own private/tailnet IP literals on the
  *    configured port (anti DNS-rebinding),
- *  - WS upgrades require an Origin exactly equal to `http://<Host>`,
+ *  - WS upgrades and `/api/` POSTs require an Origin exactly equal to
+ *    `http://<Host>`,
  *  - static paths are decoded, NUL-rejected, and confined under the bundle root,
  *  - responses carry nosniff + a strict CSP and leak no server version.
  */
@@ -36,8 +44,10 @@ const MIME: Record<string, string> = {
   '.map': 'application/json; charset=utf-8',
 }
 
+// img-src blob: (E3 M10): the upload chip previews the picked image, and the
+// image decode fallback loads it through an object URL.
 const CSP =
-  "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws:; img-src 'self' data:; font-src 'self'"
+  "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws:; img-src 'self' data: blob:; font-src 'self'"
 
 interface CachedFile {
   body: Buffer
@@ -51,6 +61,12 @@ export interface RemoteServerHandlers {
    * address the phone reached us at (E2-FR-42 lastHost).
    */
   onSocket: (ws: WebSocket, ip: string, host: string) => void
+  /**
+   * `POST /api/upload` with its Host and Origin already accepted (E3-FR-08):
+   * UploadService checks the Bearer, type and size and answers. Absent, the
+   * route is a 404.
+   */
+  onUpload?: (req: IncomingMessage, res: ServerResponse) => void
 }
 
 /** The IP part of a Host header already accepted by validateHost ('192.168.1.5:4517' -> '192.168.1.5'). */
@@ -144,6 +160,7 @@ export class RemoteServer {
       return this.sendStatus(res, 400, 'Bad Request')
     }
     if (pathname.includes('\0')) return this.sendStatus(res, 400, 'Bad Request')
+    if (pathname === '/api' || pathname.startsWith('/api/')) return this.handleApi(req, res, pathname)
     if (pathname === '/') pathname = '/index.html'
 
     const resolved = resolve(this.root, '.' + pathname)
@@ -169,6 +186,19 @@ export class RemoteServer {
       'Cache-Control': 'no-cache',
     })
     res.end(file.body)
+  }
+
+  // --- REST routes (E3 M10) ---------------------------------------------------
+
+  /**
+   * `/api/*`, after the Host check. Only `POST /api/upload` exists; it needs an
+   * Origin exactly equal to our own (403), then UploadService takes over.
+   */
+  private handleApi(req: IncomingMessage, res: ServerResponse, pathname: string): void {
+    const upload = this.handlers.onUpload
+    if (pathname !== '/api/upload' || req.method !== 'POST' || !upload) return this.sendStatus(res, 404, 'Not Found', true)
+    if (req.headers.origin !== `http://${req.headers.host}`) return this.sendStatus(res, 403, 'Forbidden', true)
+    upload(req, res)
   }
 
   /** Read a file (cached in production, re-read each request in dev). */
@@ -208,8 +238,13 @@ export class RemoteServer {
     return isPrivateOrTailnet(host)
   }
 
-  private sendStatus(res: ServerResponse, code: number, text: string): void {
-    res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' })
+  /** A plain-text status; `close` ends the connection so an unread request body is not drained. */
+  private sendStatus(res: ServerResponse, code: number, text: string, close = false): void {
+    res.writeHead(code, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'X-Content-Type-Options': 'nosniff',
+      ...(close ? { 'Cache-Control': 'no-store', Connection: 'close' } : {}),
+    })
     res.end(text)
   }
 

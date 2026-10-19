@@ -17,6 +17,9 @@
  *
  * The mode chip only renders once a parent passes onToggleMode (the composer
  * owns the direct/composer mode); until then the bar runs in 'direct'.
+ *
+ * In Direct mode the pinned left zone also carries the image button (E3-FR-06,
+ * only with an httpToken); in Composer mode it lives in the composer instead.
  */
 import { useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -37,6 +40,7 @@ import { t } from '../lib/i18n'
 import { createKeyPress, type PressHandlers } from '../lib/keyPress'
 import { resolveSeq, visibleKeyDefs, type KeyDef, type KeyIcon } from '../lib/keys'
 import { useKeyLayout } from '../lib/keyLayout'
+import { ImageButton } from './UploadChip'
 
 export type InputMode = 'direct' | 'composer'
 
@@ -154,6 +158,8 @@ export function KeyBar({
   const kbOpen = useRemoteStore((s) => s.kbOpen && s.kbFocus === inputMode)
   const keys = useMemo(() => visibleKeyDefs(layout, deskButtons), [layout, deskButtons])
   const composer = inputMode === 'composer'
+  const activePaneId = useRemoteStore((s) => s.activePaneId)
+  const imagePane = !composer ? activePaneId : null
 
   // A latch the user hid from the bar (E2-FR-45) could no longer be seen or
   // released, and would silently turn the next letter typed into a control
@@ -226,18 +232,21 @@ export function KeyBar({
       className="flex shrink-0 items-center border-t border-border bg-card py-2"
       style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 8px)' }}
     >
-      {onToggleMode && (
-        <div className="shrink-0 pl-2">
-          <PressKey
-            ariaLabel={t('key.mode')}
-            active={composer}
-            onFire={() => {
-              onToggleMode()
-              return true
-            }}
-          >
-            {'>>'}
-          </PressKey>
+      {(onToggleMode || imagePane) && (
+        <div className="flex shrink-0 items-center gap-1.5 pl-2">
+          {onToggleMode && (
+            <PressKey
+              ariaLabel={t('key.mode')}
+              active={composer}
+              onFire={() => {
+                onToggleMode()
+                return true
+              }}
+            >
+              {'>>'}
+            </PressKey>
+          )}
+          {imagePane && <ImageButton paneId={imagePane} origin="direct" />}
         </div>
       )}
       <div
