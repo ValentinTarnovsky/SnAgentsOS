@@ -153,6 +153,9 @@ export const CH = {
   AGENTS_FORGET: 'agents:forget', // send (paneId)
   AGENTS_READY: 'agents:ready', // main -> renderer ({ paneId, sessionId, phase: 'start' | 'idle' })
 
+  // Session history (E3-FR-36..40): Claude transcripts + Codex rollouts indexed by main.
+  SESSIONS_LIST: 'sessions:list', // invoke ({ query?, cwd? }) -> SessionSummary[]
+
   // Review notes (E7-FR-17..21): main owns dataDir()/review-notes.json; the renderer mirrors it per workspace.
   GIT_NOTES_LIST: 'git:notesList', // invoke (workspaceId) -> ReviewNotesListRes { notes, rev }
   GIT_NOTES_UPSERT: 'git:notesUpsert', // invoke (ReviewNoteInput) -> ReviewNote (rejects 'invalid' | 'limit')

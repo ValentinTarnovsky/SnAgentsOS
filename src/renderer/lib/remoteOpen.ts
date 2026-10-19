@@ -35,7 +35,8 @@ export async function runOpenPath(action: OpenPathAction): Promise<OpenCmdResult
   const ws = st.workspaces.find((w) => w.id === action.workspaceId)
   const pane = ws?.panes.find((p) => p.id === action.paneId)
   if (!ws || !pane) return { ok: false, error: 'not_found' }
-  if (pane.setupId || ws.setupId) return { ok: false, error: 'denied_path' }
+  // Same precedence as resolveLaunch: setupId '' (a resumed history console, E3-FR-39) runs local.
+  if (pane.setupId ?? ws.setupId) return { ok: false, error: 'denied_path' }
   const paneRoot = resolvePaneRoot(action.workspaceId, action.paneId) ?? ''
   let res = await window.snApi.system.openPath({ cwd: paneRoot, path: action.path })
   // Only a real workspace folder widens the scope: with no ws.cwd the retry

@@ -32,8 +32,9 @@ import type {
   RemoteServerStatus,
   RemoteUiState,
 } from '@shared/ipc-contract'
-import type { RemoteCtlAction, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
-import type { ClaudePaneState, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
+import type { RemoteCtlAction, RemoteHistorySession, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
+import type { AgentProvider, ClaudePaneState, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
+import { isHistorySessionId } from '@shared/session-history'
 import type { PtyManager } from '../pty/PtyManager'
 import { DeviceRegistry } from './DeviceRegistry'
 import { FitController } from './FitController'
@@ -93,6 +94,12 @@ const EMPTY_SNAPSHOT: RemoteStateSnapshot = {
   fontSize: 14,
 }
 
+/** The session history as RemoteManager uses it (E3-FR-36..39; SessionHistory in main). */
+export interface RemoteHistoryProvider {
+  forRemote(req: { query?: string; workspaceId?: string }): Promise<RemoteHistorySession[]>
+  has(provider: AgentProvider, sessionId: string): Promise<boolean>
+}
+
 interface PendingCommand {
   resolve: (res: RemoteCommandResult) => void
   timer: ReturnType<typeof setTimeout>
@@ -133,6 +140,8 @@ export class RemoteManager {
     resolveToken: (token) => this.resolveHttpToken(token),
   })
   private cleanupTimer: ReturnType<typeof setInterval> | null = null
+  /** Session history for historyReq and the createPane.resume check (E3-FR-36..39). */
+  private history: RemoteHistoryProvider | null = null
 
   constructor(
     private readonly ptyManager: PtyManager,
@@ -225,6 +234,7 @@ export class RemoteManager {
       executeCommand: (action, deviceName) => this.executeCommand(action, deviceName),
       onConnectionsChanged: () => this.onConnectionsChanged(),
       fit: this.fit,
+      queryHistory: (req) => this.history?.forRemote(req) ?? Promise.resolve([]),
     })
     this.ptyManager.addSink(this.sessions)
     // A pty spawning/exiting flips a pane's `running`; re-broadcast so phones
@@ -432,8 +442,32 @@ export class RemoteManager {
 
   // --- Control-plane relay --------------------------------------------------
 
-  /** Relay a control action to the renderer; resolve on its result or timeout. */
-  private executeCommand(action: RemoteCtlAction, deviceName?: string, fit?: RemoteCommandFit): Promise<RemoteCommandResult> {
+  /** Wire the session history (index.ts, once SessionHistory exists). */
+  setHistory(history: RemoteHistoryProvider | null): void {
+    this.history = history
+  }
+
+  /**
+   * Relay a control action to the renderer; resolve on its result or timeout.
+   * A createPane carrying `resume` is checked here first (E3-FR-39): the id
+   * must have the history format and be in the index, else it acks
+   * `notFound` and the renderer never sees it.
+   */
+  private async executeCommand(action: RemoteCtlAction, deviceName?: string, fit?: RemoteCommandFit): Promise<RemoteCommandResult> {
+    if (action.kind === 'createPane' && action.resume) {
+      const { provider, sessionId } = action.resume
+      let known = false
+      try {
+        known = isHistorySessionId(sessionId) && !!this.history && (await this.history.has(provider, sessionId))
+      } catch {
+        known = false
+      }
+      if (!known) return { id: '', ok: false, error: 'notFound' }
+    }
+    return this.relayCommand(action, deviceName, fit)
+  }
+
+  private relayCommand(action: RemoteCtlAction, deviceName?: string, fit?: RemoteCommandFit): Promise<RemoteCommandResult> {
     const wc = this.getWebContents()
     if (!wc || wc.isDestroyed()) {
       return Promise.resolve({ id: '', ok: false, error: 'desktop_unavailable' })
