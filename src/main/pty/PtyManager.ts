@@ -333,10 +333,15 @@ export class PtyManager {
   /**
    * `agentState` is a lazy closure (StatusManager is built after this): the
    * gate of an initial prompt only submits on a precise idle/done.
+   * `platform` is the OS the shells run on: it decides the initial prompt
+   * delivery (a `%` forces the gate on win32 only) and the PowerShell
+   * integration. Always process.platform in the app; tests inject it to pin
+   * one OS's rules whatever the host.
    */
   constructor(private readonly getSender: () => WebContents | null,
     private readonly statusEnv: (ptyId: string, paneId: string, cwd: string, workspaceId?: string) => Record<string, string> = () => ({}),
     private readonly agentState: AgentStateFn = () => null,
+    private readonly platform: NodeJS.Platform = process.platform,
   ) {}
 
   /** Number of live ptys. */
@@ -397,10 +402,10 @@ export class PtyManager {
     let promptRejected = false
     const promptEnv: Record<string, string> = {}
     if (promptReq) {
-      const kind = promptShellKind(shell, process.platform)
+      const kind = promptShellKind(shell, this.platform)
       const argv =
         !!initial &&
-        chooseDelivery({ text: promptReq.text, shell: kind, platform: process.platform, hasSetup: !!req.setup?.length, launchKind: req.launchKind ?? 'other' }) === 'argv'
+        chooseDelivery({ text: promptReq.text, shell: kind, platform: this.platform, hasSetup: !!req.setup?.length, launchKind: req.launchKind ?? 'other' }) === 'argv'
       if (argv && initial) {
         promptEnv[INITIAL_PROMPT_ENV] = sanitizeInitialPrompt(promptReq.text)
         initial = appendPromptRef(initial, kind)
@@ -426,7 +431,7 @@ export class PtyManager {
       throw Object.assign(new Error(`${CWD_MISSING}: ${req.cwd}`), { code: CWD_MISSING })
     }
     // PowerShell integration (E6-FR-25): only a bare PowerShell on Windows.
-    const integrated = shouldIntegrate({ shell, args: req.args, platform: process.platform, enabled: this.engine.shellIntegration === true })
+    const integrated = shouldIntegrate({ shell, args: req.args, platform: this.platform, enabled: this.engine.shellIntegration === true })
     if (integrated) env[SHELL_INTEGRATION_ENV] = '1'
     let proc: IPty
     try { proc = spawn(shell, integrated ? buildIntegrationArgs() : (req.args ?? []), {
