@@ -27,12 +27,17 @@ A collapsible sidebar lists **workspaces** (not chats). Opening a workspace show
 
 ## Features
 
-- 🖥️ **Real terminals**: true PTYs via `node-pty` + `xterm.js`, GPU-accelerated (WebGL, with an automatic Canvas fallback so heavy AI-CLI redraws never glitch).
+- 🖥️ **Real terminals**: true PTYs via `node-pty` + `xterm.js` on the Canvas renderer (WebGL opt-in), Unicode 11 widths, scrollback that survives a restart, an exit card with in-place restart, and PowerShell shell integration (prompt marks, jumps, per-command exit codes, copy output).
 - 🧩 **Tiling mosaic**: a fixed, drag-to-reorder grid (1 to 12 panes). Maximize a pane, reorder by dragging its header, middle-click to close. Layout is saved per workspace.
 - 🤖 **Models**: Shell / Claude Code / Codex out of the box. Define your own custom AI CLIs (command, args, env, default directory) in Settings.
 - 🔌 **Connection profiles**: reusable pre-launch sequences (for example, SSH into a server). Each step waits for the console to print something (like `password:`) and then sends the next line, so a whole login flow runs automatically across every console in the workspace.
 - 📁 **Per-workspace directory**: pick any folder, every console opens there.
-- 🔎 **Built for long sessions**: infinite (or capped) scrollback, in-pane find, a command palette (`Ctrl/Cmd+K`), and saved prompt snippets.
+- 🔎 **Built for long sessions**: infinite (or capped) scrollback, in-pane find, a command palette (`Ctrl/Cmd+K`) and per-row settings search.
+- 🚦 **Agents first**: `Ctrl+K` opens on the consoles waiting for you, `Ctrl+Shift+J` jumps to the next one, sessions resume after a restart, an agents board (`Ctrl+Shift+A`) with idle hibernation, agent races across worktrees, and the PC stays awake while agents work.
+- 🌿 **Git built in**: a branch and changes chip in the header and sidebar, a Changes panel (`Ctrl+Shift+D`) with diffs and review notes sent to a console in one paste, and consoles in isolated git worktrees.
+- ⚡ **Quick Commands**: saved prompts and actions, global or per workspace, from a `Ctrl+Shift+Q` popover, the palette or the phone.
+- 🛠️ **Automation**: the `snaos` CLI inside every console (`ls`, `spawn`, `send`, `read`, `wait`, `status`, `notify`, `note`) so agents can drive the app, a `.snagentsos.json` per repo (consoles, grid, setup, Quick Commands, trusted by hash), and recurring per-console schedules that wait for the agent to be free.
+- 📱 **Phone control**: pair a phone over LAN or Tailscale and get a Home with every workspace, a docked composer, tap-to-answer permission, question and plan cards, a Chat view of agent consoles, phone-fit sizing, a Changes screen, session history with resume, image upload and Web Push to the locked phone (secure mode via `tailscale serve`) or ntfy.
 - ⌨️ **Remappable keyboard shortcuts** and an optional global hotkey to summon the window from anywhere.
 - 🎨 **Themes + i18n**: Midnight, Light, Nord, Dracula, Solarized and a fully custom palette. English and Spanish.
 - 🪟 **Native feel**: frameless custom title bar, tray integration, launch on startup, crash-safe config with automatic backups.
