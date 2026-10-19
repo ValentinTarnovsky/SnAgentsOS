@@ -206,7 +206,7 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   // ---- the workspace changed while the worktrees were being created ----
   calls.add.length = 0
   calls.remove.length = 0
-  S.setState({ workspaces: [{ id: 'w1', name: 'Repo', cwd: 'C:\repo', panes: Array.from({ length: 9 }, (_, i) => pane(`r${i}`)), favorite: false }], activeWorkspaceId: 'w1' })
+  S.setState({ workspaces: [{ id: 'w1', name: 'Repo', cwd: 'C:\\repo', panes: Array.from({ length: 9 }, (_, i) => pane(`r${i}`)), favorite: false }], activeWorkspaceId: 'w1' })
   const realAdd = snApi.git.worktreeAdd
   snApi.git.worktreeAdd = async (r) => {
     const res = await realAdd(r)

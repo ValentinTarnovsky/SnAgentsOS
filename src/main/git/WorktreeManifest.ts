@@ -13,6 +13,7 @@ import { dirname } from 'path'
 import { z } from 'zod'
 import { WORKTREE_BRANCH_RE } from '@shared/worktree-types'
 import { pathKey } from '../migration/pathUtil'
+import { canonicalPath, type RealpathFn } from './canonicalPath'
 
 export const MANIFEST_VERSION = 1
 /** Hard cap: far above what a person creates, keeps the file small. */
@@ -55,11 +56,30 @@ const nodeFs: ManifestFs = { readFileSync, writeFileSync, renameSync, mkdirSync 
 
 export class WorktreeManifest {
   private entries: ManifestEntry[] | null = null
+  /** Path as written -> comparable key; a manifest holds at most 500 paths. */
+  private readonly keys = new Map<string, string>()
 
   constructor(
     readonly file: string,
     private readonly fsx: ManifestFs = nodeFs,
+    private readonly realpath?: RealpathFn,
   ) {}
+
+  /**
+   * Paths compare in git's spelling (canonicalPath), case-insensitive where
+   * the filesystem is: an entry written as C:\Users\RUNNER~1\... (or by a
+   * version that kept the settings' spelling) is the same folder as the
+   * C:\Users\runneradmin\... that git and the service use.
+   */
+  private key(p: string): string {
+    let k = this.keys.get(p)
+    if (k === undefined) {
+      k = pathKey(canonicalPath(p, this.realpath))
+      if (this.keys.size >= MAX_MANIFEST_ENTRIES * 4) this.keys.clear()
+      this.keys.set(p, k)
+    }
+    return k
+  }
 
   private load(): ManifestEntry[] {
     if (this.entries) return this.entries
@@ -91,25 +111,25 @@ export class WorktreeManifest {
     return this.load().map((e) => ({ ...e, linkedPaths: [...e.linkedPaths] }))
   }
 
-  /** The entry for this path, compared like the filesystem does (case-insensitive on Windows). */
+  /** The entry for this path, compared like the filesystem does (any spelling of the folder, case-insensitive on Windows and macOS). */
   find(path: string): ManifestEntry | null {
-    const key = pathKey(path)
-    const hit = this.load().find((e) => pathKey(e.path) === key)
+    const key = this.key(path)
+    const hit = this.load().find((e) => this.key(e.path) === key)
     return hit ? { ...hit, linkedPaths: [...hit.linkedPaths] } : null
   }
 
   /** Adds or replaces the entry of `entry.path`. */
   put(entry: ManifestEntry): void {
-    const key = pathKey(entry.path)
-    const rest = this.load().filter((e) => pathKey(e.path) !== key)
+    const key = this.key(entry.path)
+    const rest = this.load().filter((e) => this.key(e.path) !== key)
     this.entries = [...rest, { ...entry, linkedPaths: [...entry.linkedPaths] }].slice(-MAX_MANIFEST_ENTRIES)
     this.save()
   }
 
   remove(path: string): boolean {
-    const key = pathKey(path)
+    const key = this.key(path)
     const list = this.load()
-    const next = list.filter((e) => pathKey(e.path) !== key)
+    const next = list.filter((e) => this.key(e.path) !== key)
     if (next.length === list.length) return false
     this.entries = next
     this.save()
