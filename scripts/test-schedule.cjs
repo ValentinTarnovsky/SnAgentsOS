@@ -89,14 +89,19 @@ function decideChecks() {
   check(d({ status: { state: 'idle', precise: true }, live: false }) === 'wait', 'no live pty waits')
   check(S.decide({ ...base, schedule: sched({ waitIdle: false }), status: { state: 'working', precise: true } }) === 'fire', 'waitIdle off sends over a busy agent')
   check(S.decide({ ...base, schedule: sched({ waitIdle: false }), status: null }) === 'wait', 'waitIdle off still never types into the shell of an agent pane')
+  check(S.decide({ ...base, schedule: sched({ waitIdle: false }), status: { state: 'action', precise: true } }) === 'wait', 'waitIdle off never answers a real permission or question (precise action)')
+  check(S.decide({ ...base, trigger: 'manual', schedule: sched({ waitIdle: false }), status: { state: 'action', precise: true } }) === 'wait', 'run now with waitIdle off never answers a precise action either')
   check(d({ now: local(2026, 10, 16, 8, 59), status: { state: 'idle', precise: true } }) === 'idle', 'not due: idle')
   check(S.decide({ ...base, schedule: sched({ enabled: false }), status: { state: 'idle', precise: true } }) === 'idle', 'enabled:false does nothing')
   // Grace (E8-FR-30).
   const at = (late, extra = {}) => S.decide({ ...base, now: sched().dueAt + late, schedule: sched(extra), status: { state: 'idle', precise: true } })
   check(at(60 * MIN) === 'fire', 'one hour late (app opened late) fires once')
-  check(at(120 * MIN) === 'fire' && at(120 * MIN + 1) === 'missed', 'the grace bound is inclusive (120 min)')
+  check(S.SCHEDULE_DUE_SLACK_MS === 2 * MIN, 'tick slack is 2 min')
+  check(at(122 * MIN) === 'fire' && at(122 * MIN + 1) === 'missed', 'the grace bound (120 min plus the 2 min tick slack) is inclusive')
   check(at(5 * HOUR) === 'missed', 'five hours late is missed')
-  check(S.decide({ ...base, graceMin: 0, now: sched().dueAt + 2000, schedule: sched(), status: { state: 'idle', precise: true } }) === 'missed', 'grace 0 misses anything late beyond the same instant')
+  const g0 = (late) => S.decide({ ...base, graceMin: 0, now: sched().dueAt + late, schedule: sched(), status: { state: 'idle', precise: true } })
+  check(g0(2000) === 'fire' && g0(61_000) === 'fire', 'grace 0 still fires a run seen a tick (or a throttled minute) late')
+  check(g0(2 * MIN + 1) === 'missed', 'grace 0 misses anything later than the tick slack')
   // Max wait.
   const wait = (since, now2, status, extra = {}) => S.decide({ ...base, now: now2, schedule: sched({ waitingSince: since, ...extra }), status, ...extra.input })
   const due = sched().dueAt
@@ -291,6 +296,26 @@ async function tickerChecks() {
   r.schedulerTick(Date.now())
   check(submits.length === 0, 'a cancelled run now sends nothing')
   check(r.runScheduleNow('q3') === false, 'run now on a pane without a schedule is refused')
+
+  // A run now waiting on a busy agent while the scheduled occurrence comes due:
+  // the occurrence starts its own wait clock and is served afterwards, not missed.
+  submits.length = 0
+  now = Date.now()
+  st().updateSettings({ automation: { ...st().settings.automation, scheduleGraceMin: 5 } })
+  setSched('p2', { time: '10:00', prompt: 'programado', dueAt: now + 60_000, recurrence: { kind: 'daily' } })
+  status('p2', 'working')
+  r.runScheduleNow('p2', 'manual')
+  r.schedulerTick(now + 61_000)
+  check(schedOf('p2').waitingSince === now + 61_000 && submits.length === 0, 'the due occurrence starts waiting while run now holds the pane')
+  status('p2', 'idle')
+  r.schedulerTick(now + 20 * MIN)
+  check(submits.length === 1 && submits[0].text === 'manual', 'run now goes first once free')
+  await flush()
+  r.schedulerTick(now + 20 * MIN + 1000)
+  check(submits.length === 2 && submits[1].text === 'programado', 'then the held occurrence fires instead of being missed (grace 5 min, 19 min late)')
+  await flush()
+  check(lastRun('p2').status === 'sent' && lastRun('p2').trigger === 'scheduled' && !('waitingSince' in schedOf('p2')), 'the occurrence is logged as sent and its wait ends')
+  st().updateSettings({ automation: { ...st().settings.automation, scheduleGraceMin: 120 } })
 
   // multiline_unsafe.
   submits.length = 0

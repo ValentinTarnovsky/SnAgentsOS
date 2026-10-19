@@ -519,7 +519,6 @@ export const es: Record<keyof typeof en, string> = {
   // Prompt programado (por consola)
   'schedule.title': 'Programar un prompt',
   'schedule.edit': 'Editar prompt programado',
-  'schedule.active': 'Programado para las {time}',
   'schedule.time': 'Hora',
   'schedule.prompt': 'Prompt',
   'schedule.promptPlaceholder': 'Texto a ejecutar en esta consola…',
