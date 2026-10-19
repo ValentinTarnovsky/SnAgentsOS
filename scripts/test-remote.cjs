@@ -645,6 +645,8 @@ async function testRateLimit() {
   w.advance(1000)
   const mark = ws.inbox.length
   for (let i = 0; i < 30; i++) ws.msg({ type: 'gitReq', id: 'g' + i, workspaceId: 'w1', op: 'status' })
+  // Past the bucket each gitReq gets its gitRes (R30-09a), some after a tick.
+  await new Promise(resolve => setImmediate(resolve))
   check(ws.inbox.length - mark === 20, 'one second later 20 more pass (20/s refill)')
   // The bucket is per session: a second phone starts full.
   const other = await pair(w)
