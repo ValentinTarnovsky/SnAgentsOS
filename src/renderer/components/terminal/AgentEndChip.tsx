@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { History, Plus, X } from 'lucide-react'
 import type { ShellKind } from '@shared/ipc-contract'
 import { useAppStore } from '@/lib/store'
-import { AGENT_END_READY_MS, agentEndCommands } from '@/lib/agentEnd'
+import { agentEndCommands } from '@/lib/agentEnd'
 import { type AgentEndMode, registerAgentEndShell, runAgentEnd } from '@/lib/agentEndRun'
+import { whenShellReady } from '@/lib/shellReady'
 import { useT } from '@/i18n'
 
 export interface AgentEndChipProps {
@@ -20,7 +21,8 @@ export interface AgentEndChipProps {
  * "Claude exited [Resume] [New] [x]" under a console whose Claude session
  * ended with /exit (E6-FR-22), from main's status:sessionEnd. Resume types the
  * cd prefix + `claude ... --resume <id>`, New the pane's Claude command, each
- * with Enter. The buttons enable once the shell had time to print its prompt.
+ * with Enter. The buttons enable once the shell is ready: its first prompt
+ * mark (OSC 133;A) after the event with shell integration, else 800 ms.
  * Hidden by any key in the pane, a new session, the pty exit, [x] or an
  * action; never shown with the setting off.
  */
@@ -46,9 +48,8 @@ export function AgentEndChip({ paneId, initialCommand, shellKind, onDone }: Agen
 
   useEffect(() => {
     if (!evt) return
-    const timer = setTimeout(() => setReadyAt(evt.at), Math.max(0, AGENT_END_READY_MS - (Date.now() - evt.at)))
-    return () => clearTimeout(timer)
-  }, [evt])
+    return whenShellReady(paneId, evt.at, () => setReadyAt(evt.at))
+  }, [evt, paneId])
 
   if (!evt || !enabled) return null
   const ready = readyAt === evt.at

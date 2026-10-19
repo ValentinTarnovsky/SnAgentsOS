@@ -39,6 +39,8 @@ export interface ShellCommand {
 export interface ShellMarksOptions {
   /** Tooltip of the red bar ("Exited with code N"). */
   exitTitle: (code: number) => string
+  /** Every recorded prompt mark (A), for the agent-end readiness (E6-FR-22). */
+  onPrompt?: () => void
 }
 
 /**
@@ -196,6 +198,7 @@ export class ShellMarks implements IDisposable {
       const old = this.commands.shift()
       if (old) disposeCommand(old)
     }
+    this.opts.onPrompt?.()
   }
 
   /** 2 px red bar left of the prompt line, with a title, and a red ruler tick (E6-FR-28). */

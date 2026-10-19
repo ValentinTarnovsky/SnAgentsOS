@@ -447,6 +447,7 @@ async function testAgentResume() {
     export { registerPty, unregisterPty } from './ptyRegistry'
     export { registerAgentEndShell, runAgentEnd } from './agentEndRun'
     export { agentEndCommands, AGENT_END_READY_MS } from './agentEnd'
+    export { notePrompt, forgetPrompts, AGENT_END_PROMPT_CAP_MS } from './shellReady'
   `, resolveDir: path.join(root, 'src/renderer/lib'), loader: 'ts' }, bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, define: { 'process.env.NODE_ENV': '"production"' } }).outputFiles[0].text
   const rmod = { exports: {} }
   vm.runInNewContext(rcode, { module: rmod, exports: rmod.exports, require, console, process, crypto: globalThis.crypto, setTimeout: fakeSet, clearTimeout() {}, URL, window: { snApi }, document: { hasFocus: () => true, querySelector: () => null }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} })
@@ -538,6 +539,24 @@ async function testAgentResume() {
   check(res.ok && ptyWrites.length === writesBefore && early && S.getState().agentEnded.p1 === undefined, 'an action right after the exit acks ok, clears the offer and defers the write')
   flush()
   check(ptyWrites.length === writesBefore + 1 && ptyWrites.at(-1).data === 'claude --model opus\r', 'and types it once the ready delay elapses')
+
+  // With shell integration (E6-FR-22): the early write waits for the first
+  // prompt mark after the event, not for the 800 ms timer.
+  r.notePrompt('p1', Date.now() - 60000)
+  offer('p1', { at: Date.now() })
+  timers.length = 0
+  res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'new' })
+  const cap = timers.find(t => t.ms > r.AGENT_END_READY_MS && t.ms <= r.AGENT_END_PROMPT_CAP_MS)
+  check(res.ok && ptyWrites.length === writesBefore + 1 && cap && !timers.some(t => t.ms > 0 && t.ms <= r.AGENT_END_READY_MS), 'with prompt marks the early write waits for the prompt (capped at 2500 ms), not 800 ms')
+  r.notePrompt('p1')
+  check(ptyWrites.length === writesBefore + 2 && ptyWrites.at(-1).data === 'claude --model opus\r', 'the first prompt mark after the event types it')
+  flush()
+  check(ptyWrites.length === writesBefore + 2, 'the cap timer then types nothing more')
+  offer('p1', { at: Date.now() - 1 })
+  r.notePrompt('p1')
+  res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'new' })
+  check(res.ok && ptyWrites.length === writesBefore + 3, 'after the prompt came the write is immediate')
+  r.forgetPrompts('p1')
 
   // Snapshot marker.
   const stop = r.startRemoteSnapshotSync()

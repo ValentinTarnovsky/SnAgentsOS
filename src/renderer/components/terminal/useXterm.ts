@@ -29,6 +29,7 @@ import { FIT_MIN_FONT, fitBaselineOf, fitGeometry, fitOwnerOf, releaseFitFromDes
 import { oneShotLaunch } from '@/lib/repoConfig'
 import { registerShellMarks, unregisterShellMarks, type ShellMarksApi } from '@/lib/shellMarksRegistry'
 import { toast } from '@/lib/toast'
+import { forgetPrompts, notePrompt } from '@/lib/shellReady'
 import { ShellMarks } from './shellMarks'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
@@ -658,7 +659,10 @@ export function useXterm(
     const termReader: TermReader = (n) => readBufferLines(term.buffer.active, n)
     registerTermReader(opts.paneId, termReader)
     // PowerShell prompt marks (E6-FR-26..29): passive, inert without OSC 133.
-    const marks = new ShellMarks(term, { exitTitle: (code) => tRef.current('terminal.exitCodeTitle', { code }) })
+    const marks = new ShellMarks(term, {
+      exitTitle: (code) => tRef.current('terminal.exitCodeTitle', { code }),
+      onPrompt: () => notePrompt(opts.paneId),
+    })
     const marksApi: ShellMarksApi = {
       prompt: (dir) => marks.navigate(dir),
       hasLastOutput: () => marks.hasLastOutput(),
@@ -909,6 +913,8 @@ export function useXterm(
           term.write(`\x1b[33m${text}\x1b[0m\r\n`)
         }
         shellKindRef.current = res.shellKind
+        // The new shell may run without integration: its own marks decide.
+        forgetPrompts(opts.paneId)
         bind(res.ptyId)
         // The new pty was spawned at this terminal's size; a phone-fit owner
         // may have changed meanwhile (a restart clears it, E3-FR-20): re-send.
@@ -1124,6 +1130,7 @@ export function useXterm(
       unregisterRestarter(opts.paneId, restartFn)
       unregisterShellMarks(opts.paneId, marksApi)
       marks.dispose()
+      forgetPrompts(opts.paneId)
       exitRef.current = null
       shellKindRef.current = null
       ptyIdRef.current = null
