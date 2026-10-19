@@ -12,6 +12,9 @@
  * appended to that pane's draft (the live field when it is mounted on that
  * pane, else the saved draft); from the KeyBar in Direct mode it is typed into
  * that pane with the safe paste of E3-FR-05, never with Enter.
+ *
+ * Every outcome also goes to the connection log (E2 M9) as a short line with
+ * the type, size and error code only: never the token nor the PC path.
  */
 import { create } from 'zustand'
 import { client } from './client'
@@ -22,6 +25,7 @@ import { loadDraft, saveDraft } from './drafts'
 import { COMPOSER_MAX, abortableSleep } from './composerSend'
 import { pasteBracketed, safePaste } from './safePaste'
 import { copyText } from './clipboard'
+import { log } from './connLog'
 import { t } from './i18n'
 import {
   TOKEN_WAIT_MS,
@@ -131,6 +135,7 @@ export function startUpload(file: File, paneId: string, origin: UploadOrigin): v
     } catch (err) {
       if (ac.signal.aborted) return
       const code = err instanceof UploadError ? err.code : 'decode'
+      log('warn', `upload prepare failed: ${code}`)
       if (code === 'tooBig') {
         // E3-FR-07: a toast, not a chip; there is nothing to retry.
         clearJob()
@@ -155,10 +160,12 @@ async function send(id: number, ac: AbortController): Promise<void> {
       createXhr: xhrFactory,
     })
     if (ac.signal.aborted) return
+    log('info', `upload ok ${img.type} ${img.width}x${img.height} ${Math.ceil(img.blob.size / 1024)}KB`)
     await deliver(id, path)
   } catch (err) {
     if (ac.signal.aborted) return
     const code = err instanceof UploadError ? err.code : 'network'
+    log('warn', `upload failed: ${code}`)
     if (code === 'tooBig') {
       clearJob()
       store.getState().setToast(t('upload.tooBig'))
@@ -214,12 +221,14 @@ async function deliver(id: number, path: string): Promise<void> {
   if (!job || job.id !== id) return
   const s = store.getState()
   if (!s.snapshot || !paneById(s.snapshot, job.paneId)) {
+    log('warn', 'upload not inserted: console closed')
     patch(id, { phase: 'paneGone', path })
     return
   }
   const ref = attachmentRef(path)
   const ok = job.origin === 'composer' ? appendToDraft(job.paneId, ref) : await typeIntoPane(job.paneId, ref)
   if (!ok) {
+    log('warn', `upload not inserted: ${job.origin}`)
     patch(id, { phase: 'undelivered', path })
     return
   }
