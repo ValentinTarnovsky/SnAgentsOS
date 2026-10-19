@@ -51,6 +51,9 @@ const en = {
   'conn.revoked': 'This device was removed',
   'conn.revokedBody': 'Access was revoked on the desktop. Scan the QR to pair again.',
   'conn.retry': 'Retry',
+  // A request the desktop never answered (E3-FR-04)
+  'pending.noReply': 'The PC did not answer',
+  'pending.retry': 'Retry',
   // Answer cards (E2-FR-17..25; R22-15)
   'prompt.permTitle': 'Claude wants to use {tool}',
   'prompt.permGeneric': 'Claude asks for a permission',
@@ -498,6 +501,9 @@ const es: Record<Key, string> = {
   'conn.revoked': 'Este dispositivo fue eliminado',
   'conn.revokedBody': 'El acceso fue revocado en la PC. Escanea el QR para vincular de nuevo.',
   'conn.retry': 'Reintentar',
+  // Pedido que la PC no contesto (E3-FR-04)
+  'pending.noReply': 'No respondio la PC',
+  'pending.retry': 'Reintentar',
   // Tarjetas de respuesta (E2-FR-17..25; R22-15)
   'prompt.permTitle': 'Claude quiere usar {tool}',
   'prompt.permGeneric': 'Claude pide un permiso',

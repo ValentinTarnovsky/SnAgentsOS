@@ -2,7 +2,9 @@
  * Composer delivery (E1-FR-24..27). No new WS message: text travels as
  * ordinary `input` frames, chunked under the 8192-char limit of
  * remoteClientMsgSchema, Enter goes as its own `\r` frame ENTER_DELAY_MS
- * later, and Stop is an `input` frame with ESC.
+ * later, and Stop is an `input` frame with ESC. Pasted text goes through
+ * safePaste.ts (E3-FR-05): sanitized, `\r` line breaks, bracketed when the
+ * pane has it, never through term.paste.
  *
  * Kept free of React, the DOM and the socket: the caller passes a ComposerIo
  * bound to the WS client and the live xterm, so every rule (open-socket check,
@@ -10,15 +12,16 @@
  */
 import type { PaneType } from '@shared/types'
 import type { RemotePaneStatus } from '@shared/remote-protocol'
+import { PASTE_ENTER_DELAY_MS, PASTE_FRAME_MAX, safePaste, sanitizePasteText } from './safePaste'
 
 /** Chunk size for `input` frames: under the schema's 8192 with margin. */
-export const INPUT_CHUNK = 8000
+export const INPUT_CHUNK = PASTE_FRAME_MAX
 /** One typed character per frame this often for slash commands. */
 export const SLASH_KEY_MS = 16
 /** Longest text still typed as a slash command (longer goes by paste). */
 export const SLASH_MAX = 200
 /** Gap between the pasted text and its Enter frame. */
-export const ENTER_DELAY_MS = 50
+export const ENTER_DELAY_MS = PASTE_ENTER_DELAY_MS
 /** Composer field limit. */
 export const COMPOSER_MAX = 16384
 /** The character counter shows from this length. */
@@ -99,8 +102,11 @@ export interface ComposerIo {
   isOpen(): boolean
   /** The pane input frames currently go to (subscribedPaneId). */
   currentPaneId(): string | null
-  /** Bracketed-paste aware paste through xterm (term.paste). */
-  paste(text: string): void
+  /**
+   * Whether the viewed pane takes a bracketed paste (safePaste's
+   * pasteBracketed: a claude/codex status, else the xterm's last mode).
+   */
+  bracketed(): boolean | undefined
   /** Raw input frames (client.sendInput, which chunks). */
   sendInput(data: string): boolean
   /** Turn the Ctrl latch off before a paste (it only acts on 1-char data). */
@@ -146,7 +152,10 @@ export async function typeSlash(
   signal: AbortSignal,
   onProgress?: (done: number, total: number) => void,
 ): Promise<boolean> {
-  const chars = Array.from(text.trim())
+  // Sanitized like safePaste (E3-FR-05): a key typed here is never ESC or
+  // another control that would cancel the prompt or inject a sequence.
+  const chars = Array.from(sanitizePasteText(text).trim())
+  if (!chars.length) return false
   io.releaseLatch()
   for (let i = 0; i < chars.length; i++) {
     if (!live(io, paneId, signal)) return false
@@ -161,21 +170,18 @@ export async function typeSlash(
 /**
  * FR-24 Send / FR-26 Insert. Offline (or another pane subscribed) nothing is
  * pasted and false keeps the draft. Otherwise the latch is released, the text
- * goes through term.paste (bracketed paste + newline normalization) and, for
- * Send, a separate `\r` frame follows ENTER_DELAY_MS later unless the pane
- * changed or the send was aborted meanwhile. True means the text was
- * delivered, so the caller clears the field and the draft.
+ * goes through safePaste (E3-FR-05: sanitized, `\r` line breaks, bracketed
+ * when the pane has it, frames that never split a marker) and, for Send, a
+ * separate `\r` frame follows ENTER_DELAY_MS later unless the pane changed or
+ * the send was aborted meanwhile. True means the text was delivered, so the
+ * caller clears the field and the draft.
  */
 export async function sendComposer(text: string, opts: SendOpts, io: ComposerIo): Promise<boolean> {
   const { enter, paneId, signal } = opts
   if (!text || !live(io, paneId, signal)) return false
   if (opts.slash && enter) return typeSlash(text, paneId, io, signal, opts.onProgress)
   io.releaseLatch()
-  io.paste(text)
-  if (!enter) return true
-  await pause(io, ENTER_DELAY_MS, signal)
-  if (live(io, paneId, signal)) io.sendInput('\r')
-  return true
+  return safePaste(text, { bracketed: io.bracketed(), enter, signal, live: () => live(io, paneId, signal) }, io)
 }
 
 /** Abortable sleep for the default ComposerIo. */
