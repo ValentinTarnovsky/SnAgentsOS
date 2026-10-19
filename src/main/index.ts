@@ -522,6 +522,8 @@ async function bootstrap(): Promise<void> {
   registerGitIpc({
     getSender: () => mainWindow?.webContents ?? null,
     initialGitChip: (configStore.load()?.settings as { gitChip?: unknown } | undefined)?.gitChip !== false,
+    // The phone's gitReq (E7-FR-22..26) reads through the same GitService.
+    setRemoteGit: (handler) => remoteManager.setGitHandler(handler),
   })
   // Review notes of the Changes panel (E7-FR-17..20): dataDir()/review-notes.json.
   reviewNotes = registerReviewNotesIpc({ getSender: () => mainWindow?.webContents ?? null })

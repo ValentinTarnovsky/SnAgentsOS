@@ -25,7 +25,7 @@ import type {
   RemoteServerStatus,
   RemoteUiState,
 } from '@shared/ipc-contract'
-import type { RemoteCtlAction, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
+import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { ClaudePaneState, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
 import type { PtyManager } from '../pty/PtyManager'
 import { DeviceRegistry } from './DeviceRegistry'
@@ -111,6 +111,8 @@ export class RemoteManager {
   /** paneStatus coalesce: latest status held per pane until its timer fires. */
   private readonly statusHeld = new Map<string, RemotePaneStatus | null>()
   private readonly statusTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** E7-FR-22..26: answers the phone's gitReq (GitRemote, set by index.ts at boot). */
+  private gitHandler: ((req: RemoteGitRequest) => Promise<RemoteGitReply>) | null = null
 
   constructor(
     private readonly ptyManager: PtyManager,
@@ -170,6 +172,7 @@ export class RemoteManager {
       },
       executeCommand: (action, deviceName) => this.executeCommand(action, deviceName),
       onConnectionsChanged: () => this.onConnectionsChanged(),
+      git: (req) => this.gitRequest(req),
     })
     this.ptyManager.addSink(this.sessions)
     // A pty spawning/exiting flips a pane's `running`; re-broadcast so phones
@@ -427,6 +430,18 @@ export class RemoteManager {
   /** A phone is watching this pane right now (subscribed, page visible, fresh); ntfy skips it. */
   isPaneViewed(paneId: string): boolean {
     return this.sessions?.isPaneViewed(paneId) ?? false
+  }
+
+  // --- Git API for the phone (E7-FR-22..26) ------------------------------------
+
+  /** Who answers gitReq (index.ts injects GitRemote over the app's GitService). */
+  setGitHandler(handler: ((req: RemoteGitRequest) => Promise<RemoteGitReply>) | null): void {
+    this.gitHandler = handler
+  }
+
+  private gitRequest(req: RemoteGitRequest): Promise<RemoteGitReply> {
+    if (!this.gitHandler) return Promise.resolve({ ok: false, data: { error: 'not_found' }, page: 0, done: true })
+    return this.gitHandler(req)
   }
 
   // --- HTTP auth (E3-FR-01) ---------------------------------------------------
