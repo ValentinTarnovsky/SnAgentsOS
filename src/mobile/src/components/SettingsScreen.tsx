@@ -1,7 +1,8 @@
 /**
  * Phone settings as a pushed screen over Home (E1-FR-37, E2-FR-13), opened
  * from the Home header. Sections: Appearance (desktop theme, text size
- * presets of E2-FR-34), Input
+ * presets of E2-FR-34), Phone mode (E3-FR-13/14: the phoneFitDefault switch
+ * and the phone-mode text size), Input
  * (E1-FR-22/30: AI consoles start in Composer, composer autocorrect), Alerts
  * (E2-FR-44: on-screen alerts, vibrate, turn end), About (desktop and bundle versions) and This
  * device (Diagnostics, E2-FR-36, and unpair with confirmation). The Key bar
@@ -19,6 +20,7 @@ import { KeyLayoutScreen } from './KeyLayoutScreen'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { FontScaleRow } from './FontScaleRow'
+import { PHONE_FONT_SIZES } from '../lib/fit'
 import { openDiagnostics } from '../lib/connLog'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
@@ -98,6 +100,10 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const composerDefaultForAgents = useRemoteStore((s) => s.composerDefaultForAgents)
   const composerAutocorrect = useRemoteStore((s) => s.composerAutocorrect)
   const setComposerPref = useRemoteStore((s) => s.setComposerPref)
+  const phoneFitDefault = useRemoteStore((s) => s.phoneFitDefault)
+  const setPhoneFitDefault = useRemoteStore((s) => s.setPhoneFitDefault)
+  const phoneFontSize = useRemoteStore((s) => s.phoneFontSize)
+  const setPhoneFontSize = useRemoteStore((s) => s.setPhoneFontSize)
   const [confirmUnpair, setConfirmUnpair] = useState(false)
   const desktopVersion = useRemoteStore((s) => s.appVersion)
   const [keyLayoutOpen, setKeyLayoutOpen] = useState(false)
@@ -136,6 +142,39 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
               )}
             </div>
             <FontScaleRow />
+          </div>
+        </SettingsSection>
+        <SettingsSection id="phoneFit" title={t('fit.settings.title')}>
+          <div className="flex flex-col gap-2">
+            <PrefToggle
+              pref="phoneFitDefault"
+              label={t('fit.settings.default')}
+              hint={t('fit.settings.defaultHint')}
+              checked={phoneFitDefault}
+              onChange={setPhoneFitDefault}
+            />
+            <div data-phone-font={phoneFontSize} className="rounded-card border border-border bg-bg-secondary px-4 py-3">
+              <span className="mb-2 block text-sm text-text-primary">{t('fit.settings.fontSize', { px: phoneFontSize })}</span>
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={t('fit.settings.title')}>
+                {PHONE_FONT_SIZES.map((px) => (
+                  <button
+                    key={px}
+                    role="radio"
+                    aria-checked={phoneFontSize === px}
+                    data-px={px}
+                    onClick={() => setPhoneFontSize(px)}
+                    className={clsx(
+                      'min-h-10 min-w-12 rounded-btn border px-2.5 py-1.5 text-xs font-medium transition',
+                      phoneFontSize === px
+                        ? 'border-accent-violet bg-accent-violet text-white'
+                        : 'border-border bg-card text-text-primary active:bg-bg-primary',
+                    )}
+                  >
+                    {px}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </SettingsSection>
         <SettingsSection id="input" title={t('input.title')}>

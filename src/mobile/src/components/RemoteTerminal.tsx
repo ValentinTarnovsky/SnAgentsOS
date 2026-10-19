@@ -4,10 +4,16 @@
  * anti-mojibake reason the desktop defaults to it), and drives it entirely from
  * the server's replay/out/exit frames.
  *
- * The phone never resizes the pty: term.resize(cols, rows) adopts the geometry
- * carried by each replay frame, and the fit solver picks a font size so those
- * fixed columns fit the viewport width (with horizontal pan as the fallback
- * when even the minimum size overflows). Input (typing + KeyBar) is forwarded
+ * Desktop mode (the default) never resizes the pty: term.resize(cols, rows)
+ * adopts the geometry of each replay and fitState frame, and the fit solver
+ * picks a font size so those fixed columns fit the viewport width (with
+ * horizontal pan as the fallback when even the minimum size overflows).
+ *
+ * Phone mode (E3 M11, FR-13..16): the pane asks the pty for this phone's own
+ * grid (fitPane, debounced, never while the keyboard is open) and, once the
+ * desktop's fitState confirms it, renders at the phone-mode text size. A
+ * phone fitState of another size means another device took control: the
+ * pane renders like desktop mode until the header chip takes it back. Input (typing + KeyBar) is forwarded
  * to the pty via the WS client; the Ctrl latch turns the next printable char
  * into its control code.
  *
@@ -33,7 +39,10 @@ import '@xterm/xterm/css/xterm.css'
 import { client, type TermFrame } from '../lib/client'
 import { selectInputMode, useRemoteStore } from '../lib/store'
 import type { InputMode } from '../lib/prefs'
-import { FONT_SCALE_PRESETS, resetRatio, snapFontScale, solveFont } from '../lib/fit'
+import { FONT_SCALE_PRESETS, phoneGrid, resetRatio, snapFontScale, solveFont } from '../lib/fit'
+import { PhoneFitScheduler, keyboardBlocksFit, setPhoneFitRequester } from '../lib/phoneFit'
+import { selectPaneMode } from '../lib/store'
+import { t } from '../lib/i18n'
 import { setActiveTerm } from '../lib/terminalBus'
 import { getStoredHostPlatform } from '../lib/auth'
 import { attachTouchScroll } from '../lib/touchScroll'
@@ -70,6 +79,23 @@ function vibrate(ms: number): void {
   }
 }
 
+/** The css cell xterm renders with (the private path FitAddon reads), or null. */
+function cellOf(term: Terminal): { w: number; h: number } | null {
+  const core = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } } })._core
+  const cell = core?._renderService?.dimensions?.css?.cell
+  return cell && cell.width > 0 && cell.height > 0 ? { w: cell.width, h: cell.height } : null
+}
+
+/** The viewed pane is in phone mode and the pty has this phone's grid (FR-14/16). */
+function phoneOwned(): boolean {
+  const st = useRemoteStore.getState()
+  const paneId = st.subscribedPaneId
+  if (!paneId || selectPaneMode(st, paneId) !== 'phone') return false
+  const info = st.sizeInfo[paneId]
+  const sent = st.lastFitSent[paneId]
+  return !!info && !!sent && info.owner === 'phone' && !info.other && info.cols === sent.cols && info.rows === sent.rows
+}
+
 interface ScrollInfo {
   viewportY: number
   baseY: number
@@ -86,6 +112,9 @@ export function RemoteTerminal(): ReactNode {
   /** Set once by the mount effect; lets the fontScale effect below re-run
    * the same cursor-follow pan logic without duplicating it out of scope. */
   const followCursorRef = useRef<() => void>(() => {})
+  /** Phone mode (E3 M11): the mount effect's font layout and fitPane scheduler. */
+  const applyFontRef = useRef<() => void>(() => {})
+  const fitSchedulerRef = useRef<PhoneFitScheduler | null>(null)
   const xtermTheme = useRemoteStore((s) => s.xtermTheme)
   const fontScale = useRemoteStore((s) => s.fontScale)
   // Selection mode (E2-FR-26) and the link sheet (E2-FR-28/29).
@@ -101,6 +130,8 @@ export function RemoteTerminal(): ReactNode {
   const subscribedPaneId = useRemoteStore((s) => s.subscribedPaneId)
   const terminalUnicode = useRemoteStore((s) => s.terminalUnicode)
   const inputMode = useRemoteStore(selectInputMode)
+  const paneMode = useRemoteStore((s) => selectPaneMode(s, s.subscribedPaneId))
+  const phoneFontSize = useRemoteStore((s) => s.phoneFontSize)
 
   // Mount the terminal once. Frames, resize handling and input wiring all live
   // inside this effect; React state only drives theme/font/pane-switch effects.
@@ -207,13 +238,71 @@ export function RemoteTerminal(): ReactNode {
 
     const applyFont = (): void => {
       const width = container.clientWidth || window.innerWidth
-      const { fontSize, overflow } = solveFont(colsRef.current, width, useRemoteStore.getState().fontScale)
+      // Phone mode with this phone's grid: its own text size, which fits by construction.
+      const owned = phoneOwned()
+      const { fontSize, overflow } = owned
+        ? { fontSize: useRemoteStore.getState().phoneFontSize, overflow: false }
+        : solveFont(colsRef.current, width, useRemoteStore.getState().fontScale)
       if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize
       overflowRef.current = overflow
       // Re-sync the pan immediately on any transition (not just overflow->fit):
       // a resize/rotation can also flip fit->overflow with the caret already
       // outside the new, narrower width.
       followCursorRef.current()
+    }
+
+    applyFontRef.current = applyFont
+
+    // Phone mode (E3-FR-14/15): one debounced fitPane at a time for the
+    // viewed pane. The grid is measured with the real cell of the phone-mode
+    // size: the font is switched for the measure and put back in the same
+    // task when the pane is not ours yet (nothing paints in between).
+    const keyboardOpen = (): boolean => keyboardBlocksFit(window.innerHeight, window.visualViewport?.height, document.activeElement)
+    const scheduler = new PhoneFitScheduler({
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+      keyboardOpen,
+      measure: () => {
+        const size = useRemoteStore.getState().phoneFontSize
+        const prev = term.options.fontSize ?? size
+        let cell: { w: number; h: number } | null = null
+        try {
+          if (prev !== size) term.options.fontSize = size
+          cell = cellOf(term)
+        } finally {
+          if (prev !== size && !phoneOwned()) term.options.fontSize = prev
+        }
+        return phoneGrid(container.clientWidth || window.innerWidth, container.clientHeight, size, cell)
+      },
+      state: () => {
+        const st = useRemoteStore.getState()
+        const paneId = st.subscribedPaneId
+        return {
+          mode: selectPaneMode(st, paneId),
+          info: paneId ? (st.sizeInfo[paneId] ?? null) : null,
+          lastSent: paneId ? (st.lastFitSent[paneId] ?? null) : null,
+        }
+      },
+      send: (grid) => {
+        const paneId = useRemoteStore.getState().subscribedPaneId
+        if (paneId) void client.sendFitPane(paneId, grid.cols, grid.rows)
+      },
+      narrow: () => {
+        const st = useRemoteStore.getState()
+        if (st.subscribedPaneId) st.setPaneMode(st.subscribedPaneId, 'desktop')
+        st.setToast(t('fit.narrow'))
+        applyFont()
+      },
+    })
+    fitSchedulerRef.current = scheduler
+    setPhoneFitRequester((reason) => scheduler.request(reason))
+    let kbWasOpen = keyboardOpen()
+    let lastWidth = container.clientWidth
+    /** The keyboard just closed: one recalculation if a fitPane waited for it. */
+    const checkKeyboard = (): void => {
+      const open = keyboardOpen()
+      if (kbWasOpen && !open) scheduler.keyboardClosed()
+      kbWasOpen = open
     }
 
     // Cursor-follow: when the grid overflows the viewport on either axis, pan the
@@ -322,8 +411,15 @@ export function RemoteTerminal(): ReactNode {
       }
       settleRaf = requestAnimationFrame(tick)
     }
-    const onFocusIn = (): void => startSettle(500)
-    const onFocusOut = (): void => startSettle(300)
+    const onFocusIn = (): void => {
+      startSettle(500)
+      kbWasOpen = kbWasOpen || keyboardOpen()
+    }
+    const onFocusOut = (): void => {
+      startSettle(300)
+      // The focus is already elsewhere when this runs a frame later.
+      requestAnimationFrame(checkKeyboard)
+    }
     document.addEventListener('focusin', onFocusIn)
     document.addEventListener('focusout', onFocusOut)
 
@@ -361,6 +457,22 @@ export function RemoteTerminal(): ReactNode {
         } catch {
           /* terminal torn down between frame and handler */
         }
+        // A respawned or reconnected pty in phone mode is claimed again (FR-15).
+        const st = useRemoteStore.getState()
+        if (f.running && selectPaneMode(st, st.subscribedPaneId) === 'phone') scheduler.request('replay')
+      } else if (f.type === 'fitState') {
+        // FR-12: adopt the new size at once, no replay needed.
+        const before = term.options.fontSize
+        colsRef.current = f.cols
+        try {
+          if (term.cols !== f.cols || term.rows !== f.rows) term.resize(Math.max(1, f.cols), Math.max(1, f.rows))
+        } catch {
+          /* torn down */
+        }
+        applyFont()
+        // First frame at the phone-mode size: measure the real cell once and
+        // correct a grid that was guessed from the previous font.
+        if (phoneOwned() && term.options.fontSize !== before) scheduler.request('resize')
       } else if (f.type === 'out') {
         term.write(f.data)
       } else if (f.type === 'exit') {
@@ -384,7 +496,21 @@ export function RemoteTerminal(): ReactNode {
       }
     })
 
-    const onResize = (): void => applyFont()
+    const onResize = (): void => {
+      applyFont()
+      checkKeyboard()
+      // A width change is a rotation (or a split screen); height alone is the
+      // keyboard or the address bar, never a refit (FR-15).
+      const width = container.clientWidth
+      if (width !== lastWidth) {
+        lastWidth = width
+        scheduler.request('rotate')
+      }
+    }
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') scheduler.request('foreground')
+    }
+    document.addEventListener('visibilitychange', onVisible)
     const vv = window.visualViewport
     vv?.addEventListener('resize', onResize)
     window.addEventListener('resize', onResize)
@@ -394,6 +520,11 @@ export function RemoteTerminal(): ReactNode {
       disposed = true
       client.setTermListener(null)
       setActiveTerm(null)
+      scheduler.reset()
+      setPhoneFitRequester(null)
+      fitSchedulerRef.current = null
+      applyFontRef.current = () => {}
+      document.removeEventListener('visibilitychange', onVisible)
       vv?.removeEventListener('resize', onResize)
       window.removeEventListener('resize', onResize)
       window.removeEventListener('orientationchange', onResize)
@@ -451,15 +582,29 @@ export function RemoteTerminal(): ReactNode {
   // solveFont's overflow flag is what the cursor-follow effect above reads, and
   // this is the only other place fontSize (hence overflow) can change.
   useEffect(() => {
-    const term = termRef.current
-    const container = containerRef.current
-    if (!term || !container) return
-    const width = container.clientWidth || window.innerWidth
-    const { fontSize, overflow } = solveFont(colsRef.current, width, fontScale)
-    term.options.fontSize = fontSize
-    overflowRef.current = overflow
-    followCursorRef.current()
+    if (!termRef.current || !containerRef.current) return
+    // Same layout as every other trigger (a phone-mode grid keeps its own size).
+    applyFontRef.current()
   }, [fontScale])
+
+  // Phone mode on (FR-13/14): ask for this phone's grid. Off: back to the
+  // desktop grid's layout (the chip already released the size).
+  useEffect(() => {
+    if (paneMode === 'phone') fitSchedulerRef.current?.request('enter')
+    else applyFontRef.current()
+  }, [paneMode])
+
+  // Phone mode text size changed (FR-15): a new grid.
+  const firstFontRef = useRef(true)
+  useEffect(() => {
+    if (firstFontRef.current) {
+      firstFontRef.current = false
+      return
+    }
+    const st = useRemoteStore.getState()
+    if (selectPaneMode(st, st.subscribedPaneId) === 'phone') fitSchedulerRef.current?.request('font')
+    else applyFontRef.current()
+  }, [phoneFontSize])
 
   // Switching panes: clear the stale content immediately so the gap before the
   // new pane's replay lands is blank, not the previous console's output.
@@ -471,6 +616,8 @@ export function RemoteTerminal(): ReactNode {
     setSelection(null)
     setLink(null)
     setNewLines(false)
+    // A queued fitPane belonged to the previous console.
+    fitSchedulerRef.current?.reset()
     if (term && subscribedPaneId) {
       try {
         term.reset()

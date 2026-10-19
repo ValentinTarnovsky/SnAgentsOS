@@ -34,7 +34,18 @@ import {
   type PagePrefs,
 } from './prefs'
 import { paneById, workspaceOfPane } from './workspace'
-import { loadFontScale, saveFontScale } from './fit'
+import { loadFontScale, saveFontScale, type GridSize } from './fit'
+import {
+  loadPaneModes,
+  loadPhoneFitDefault,
+  loadPhoneFontSize,
+  resolvePaneMode,
+  savePaneMode,
+  savePhoneFitDefault,
+  savePhoneFontSize,
+  type PaneFitMode,
+  type SizeInfo,
+} from './phoneFit'
 
 /**
  * E1-FR-20: the soft keyboard counts as open only while an input field has the
@@ -193,6 +204,17 @@ export interface RemoteState {
   composerOneShot: string | null
   /** Slash command typing progress (E1-FR-25), null while idle. */
   slashProgress: { done: number; total: number } | null
+  // --- phone mode (E3 M11, FR-13..16) ---
+  /** Saved explicit mode per pane ('snagentsos.remote.paneMode.<paneId>'). */
+  paneModes: Record<string, PaneFitMode>
+  /** "Fit consoles to the phone" ('snagentsos.remote.phoneFitDefault', off). */
+  phoneFitDefault: boolean
+  /** Phone mode text size ('snagentsos.remote.phoneFontSize', 13). */
+  phoneFontSize: number
+  /** Last fitState (or replay size) per pane. */
+  sizeInfo: Record<string, SizeInfo>
+  /** cols/rows of this phone's last fitPane per pane (FR-16: who owns it). */
+  lastFitSent: Record<string, GridSize>
 
   /** Merge a partial state (used by the client for machine transitions). */
   update: (partial: Partial<RemoteState>) => void
@@ -226,6 +248,12 @@ export interface RemoteState {
   setInputMode: (paneId: string, mode: InputMode) => void
   /** Toggle and persist a composer preference. */
   setComposerPref: (name: ComposerPref, on: boolean) => void
+  /** Set a pane's mode; `persist` false keeps it for this page only. */
+  setPaneMode: (paneId: string, mode: PaneFitMode, persist?: boolean) => void
+  setPhoneFitDefault: (on: boolean) => void
+  setPhoneFontSize: (size: number) => void
+  setSizeInfo: (paneId: string, info: SizeInfo) => void
+  setLastFitSent: (paneId: string, grid: GridSize) => void
 }
 
 let toastSeq = 0
@@ -277,6 +305,11 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   composerAutocorrect: loadPref('composerAutocorrect'),
   composerOneShot: null,
   slashProgress: null,
+  paneModes: loadPaneModes(),
+  phoneFitDefault: loadPhoneFitDefault(),
+  phoneFontSize: loadPhoneFontSize(),
+  sizeInfo: {},
+  lastFitSent: {},
 
   update: (partial) => set(partial),
   setCtrlLatch: (on) => set({ ctrlLatch: on }),
@@ -350,7 +383,32 @@ export const useRemoteStore = create<RemoteState>((set) => ({
     savePref(name, on)
     set(name === 'composerDefaultForAgents' ? { composerDefaultForAgents: on } : { composerAutocorrect: on })
   },
+  setPaneMode: (paneId, mode, persist = true) => {
+    if (persist) savePaneMode(paneId, mode)
+    set((s) => (s.paneModes[paneId] === mode ? s : { paneModes: { ...s.paneModes, [paneId]: mode } }))
+  },
+  setPhoneFitDefault: (on) => {
+    savePhoneFitDefault(on)
+    set({ phoneFitDefault: on })
+  },
+  setPhoneFontSize: (size) => {
+    savePhoneFontSize(size)
+    set({ phoneFontSize: size })
+  },
+  setSizeInfo: (paneId, info) =>
+    set((s) => {
+      const cur = s.sizeInfo[paneId]
+      if (cur && cur.owner === info.owner && cur.cols === info.cols && cur.rows === info.rows && cur.other === info.other) return s
+      return { sizeInfo: { ...s.sizeInfo, [paneId]: info } }
+    }),
+  setLastFitSent: (paneId, grid) => set((s) => ({ lastFitSent: { ...s.lastFitSent, [paneId]: { cols: grid.cols, rows: grid.rows } } })),
 }))
+
+/** A pane's effective phone-fit mode (FR-13): its saved choice, else phoneFitDefault. */
+export function selectPaneMode(s: RemoteState, paneId: string | null): PaneFitMode {
+  if (!paneId) return 'desktop'
+  return resolvePaneMode(s.paneModes[paneId], s.phoneFitDefault)
+}
 
 /**
  * The viewed pane's effective input mode (E1-FR-22, FR-31): a one-shot opened
