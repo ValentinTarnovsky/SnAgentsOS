@@ -26,6 +26,8 @@ import { saveDraft } from '../../lib/drafts'
 import { PaneIcon } from '../../lib/paneIcon'
 import { workspaceOfPane } from '../../lib/workspace'
 import { t } from '../../lib/i18n'
+import { MicButton, VoiceInterim } from '../MicButton'
+import { spaced, stopDictation } from '../../lib/voice'
 
 /** Longest prompt the ctl accepts (createPane.prompt, the contract bound). */
 export const PROMPT_MAX = 16384
@@ -92,6 +94,7 @@ export function NewConsoleSheet({
   const submit = async (): Promise<void> => {
     if (!wsId || busy) return
     setBusy(true)
+    stopDictation('newConsole', true)
     const prompt = showPrompt && text.trim() ? text : undefined
     const res = await client.sendCtl({
       kind: 'createPane',
@@ -164,15 +167,20 @@ export function NewConsoleSheet({
             <label className="mb-1.5 block px-1 text-[11px] font-semibold uppercase tracking-wide text-text-secondary" htmlFor="new-console-prompt">
               {t('newConsole.prompt')}
             </label>
-            <textarea
-              id="new-console-prompt"
-              data-new-prompt
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              maxLength={PROMPT_MAX}
-              rows={Math.min(6, Math.max(1, text.split('\n').length))}
-              className="w-full resize-none rounded-btn border border-border bg-bg-secondary px-3 py-2 text-base text-text-primary outline-none focus:border-accent-violet"
-            />
+            <VoiceInterim owner="newConsole" />
+            <div className="flex items-start gap-2">
+              <textarea
+                id="new-console-prompt"
+                data-new-prompt
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                maxLength={PROMPT_MAX}
+                rows={Math.min(6, Math.max(1, text.split('\n').length))}
+                className="min-w-0 flex-1 resize-none rounded-btn border border-border bg-bg-secondary px-3 py-2 text-base text-text-primary outline-none focus:border-accent-violet"
+              />
+              {/* v2.2: dictation fills the prompt; the console opens only from the button below. */}
+              {open && <MicButton owner="newConsole" resetKey={preset?.id} onFinal={(chunk) => setText((prev) => (prev + spaced(prev, chunk)).slice(0, PROMPT_MAX))} />}
+            </div>
             {text.length > PROMPT_ARGV_HINT && (
               <p data-prompt-hint className="mt-1 px-1 text-[11px] text-text-secondary">
                 {t('newConsole.toComposer')}

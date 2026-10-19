@@ -12,6 +12,7 @@
  *  - Working agent + empty field: the button becomes Stop (ESC).
  *  - Drafts per pane, debounced, restored when the pane is viewed again.
  *  - Paste key one-shot: after Send or Insert the pane goes back to Direct.
+ *  - Mic (v2.2): dictation lands at the caret, never with Enter; Send ends it.
  *
  * Delivery rules live in lib/composerSend.ts; this file binds them to the WS
  * client, the live xterm and the store.
@@ -42,6 +43,8 @@ import { pasteBracketed } from '../lib/safePaste'
 import { appendRef } from '../lib/upload'
 import { t } from '../lib/i18n'
 import { ImageButton } from './UploadChip'
+import { MicButton, VoiceInterim } from './MicButton'
+import { spaced, stopDictation } from '../lib/voice'
 
 /** 16px text on a 22px line: the 6-line cap is measured from these. */
 const LINE_PX = 22
@@ -213,11 +216,27 @@ export function Composer(): ReactNode {
     el.style.overflowY = needed > max ? 'auto' : 'hidden'
   }, [text])
 
+  // Dictated words go to the caret (or the end), spaced, without moving the focus.
+  const dictated = (chunk: string): void => {
+    const el = ref.current
+    const current = textRef.current
+    const start = el && document.activeElement === el ? el.selectionStart : current.length
+    const end = el && document.activeElement === el ? el.selectionEnd : start
+    const piece = spaced(current.slice(0, start), chunk)
+    if (!piece) return
+    const { value, caret } = insertAt(current, piece, start, end)
+    if (value === current) return
+    pendingCaret.current = caret
+    change(value)
+  }
+
   const run = async (enter: boolean, confirmed = false): Promise<void> => {
     const value = textRef.current
     const id = paneRef.current
     const s = store.getState()
     if (!id || !value.trim() || s.slashProgress || !client.isOpen()) return
+    // What goes out is what the field shows: a dictation still running ends here.
+    stopDictation('composer', true)
     const pane = s.snapshot ? paneById(s.snapshot, id) : null
     const slash = enter && shouldTypeSlash(value, pane?.type, s.paneStatus[id])
     if (!slash && !confirmed && needsMultilineConfirm(value, viewedBracketed())) {
@@ -307,9 +326,11 @@ export function Composer(): ReactNode {
           </button>
         </div>
       )}
+      <VoiceInterim owner="composer" />
       <div className="flex items-end gap-2">
         {/* E3-FR-06: only with an httpToken; the reference lands in this pane's draft. */}
         {paneId && <ImageButton paneId={paneId} origin="composer" />}
+        <MicButton owner="composer" resetKey={paneId} onFinal={dictated} />
         <div className="relative min-w-0 flex-1">
           <textarea
             ref={ref}

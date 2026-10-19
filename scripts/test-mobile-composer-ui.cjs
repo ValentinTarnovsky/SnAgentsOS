@@ -236,6 +236,35 @@ window.result = (async () => {
  flushSync(() => store.getState().update({ activePaneId:'s1', subscribedPaneId:'s1' })); await frames();
  check(!composer(),'a shell still opens in Direct');
 
+ // v2.2: dictation into the composer (fake speech recognition).
+ class FakeRec { constructor(){ window.__rec=this; this.stops=0 } start(){} stop(){ this.stops++ } }
+ window.webkitSpeechRecognition = FakeRec;
+ let secureOverride = false;
+ try { Object.defineProperty(window,'isSecureContext',{ value:true, configurable:true }); secureOverride = window.isSecureContext === true } catch {}
+ flushSync(() => { store.getState().setInputMode('c1','composer'); store.getState().update({ snapshot, activePaneId:'c1', subscribedPaneId:'c1' }) }); await frames();
+ const mic = () => q('[data-mic-button="composer"]');
+ check(!!mic() && mic().getBoundingClientRect().width>=44 && mic().getAttribute('aria-label')==='Dictate','the composer has a 44px Dictate button');
+ typeInto(composer(),''); await frames();
+ sent.length=0;
+ mic().click(); await frames();
+ check(mic().dataset.listening==='true' && !!window.__rec && window.__rec.lang.startsWith('en') && window.__rec.continuous===true,'tap: listening in the app language');
+ check(q('[data-voice-interim]')?.textContent.includes('Listening...'),'the interim line says it is listening');
+ window.__rec.onresult({ resultIndex:0, results:[{ isFinal:false, 0:{ transcript:'fix the' } }] }); await frames();
+ check(q('[data-voice-interim]').textContent.includes('fix the') && composer().value==='','interim words show above the field, nothing typed yet');
+ window.__rec.onresult({ resultIndex:0, results:[{ isFinal:true, 0:{ transcript:'fix the login' } }] }); await frames();
+ check(composer().value==='fix the login' && sent.length===0,'final words land in the composer and nothing reaches the pty (no Enter)');
+ window.__rec.onresult({ resultIndex:1, results:[{ isFinal:true, 0:{ transcript:'fix the login' } },{ isFinal:true, 0:{ transcript:'please' } }] }); await frames();
+ check(composer().value==='fix the login please','the next words are spaced');
+ tap(sendBtn()); await wait(200);
+ check(window.__rec.stops===1 && mic().dataset.listening==='false' && sent.some(d=>d.includes('fix the login please')) && sent.at(-1)==='\\r','Send ends the dictation and sends what the field showed, Enter only from Send');
+ if (secureOverride) {
+  Object.defineProperty(window,'isSecureContext',{ value:false, configurable:true });
+  mic().click(); await frames(); await wait(50);
+  check(!!document.querySelector('[data-voice-help]') && !!document.querySelector('[data-voice-no-secure]') && mic().dataset.listening==='false','on http the mic explains the secure connection instead of listening');
+  flushSync(() => store.getState().update({ secureUrl:'https://pc.tailnet.ts.net' })); await frames();
+  check(document.querySelector('[data-voice-secure]')?.getAttribute('href')==='https://pc.tailnet.ts.net','and offers the PC\\'s secure address when it has one');
+ } else console.log('  (isSecureContext not overridable here: http path covered by the logic suite)');
+
  reactRoot.unmount(); return checks;
 })();
 ` }, bundle: true, platform: 'browser', format: 'iife', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"', __APP_VERSION__: '"test"' }, alias: { '@shared': path.join(root, 'src/shared') }, loader: { '.css': 'empty' }, outfile: path.join(dir, 'renderer.js') })

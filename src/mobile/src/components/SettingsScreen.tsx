@@ -26,6 +26,7 @@ import { openDiagnostics } from '../lib/connLog'
 import { openAutomations } from '../lib/automations'
 import { useCacheTimer } from '../lib/cacheTimer'
 import { t, type MobileMessageKey } from '../lib/i18n'
+import { loadVoiceLang, saveVoiceLang, VOICE_LANGS, type VoiceLangPref } from '../lib/voice'
 
 /** This page's version, baked in by vite.config.ts. */
 const BUNDLE_VERSION: string = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : ''
@@ -54,6 +55,35 @@ export function SettingsSection({ id, title, children }: { id: string; title: st
 }
 
 /** One on/off preference row: label, grey hint and a switch. */
+/** v2.2: the dictation language (MicButton), kept on this phone. */
+function VoiceLangRow(): ReactNode {
+  const [lang, setLang] = useState<VoiceLangPref>(loadVoiceLang)
+  return (
+    <label className="flex min-h-12 w-full items-center gap-3 rounded-card border border-border bg-bg-secondary px-4 py-3">
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm text-text-primary">{t('voice.lang')}</span>
+        <span className="block text-[11px] text-text-secondary">{t('voice.langHint')}</span>
+      </span>
+      <select
+        data-voice-lang
+        value={lang}
+        onChange={(e) => {
+          const next = e.target.value as VoiceLangPref
+          saveVoiceLang(next)
+          setLang(next)
+        }}
+        className="h-10 shrink-0 rounded-btn border border-border bg-bg-primary px-2 text-sm text-text-primary outline-none focus:border-accent-violet"
+      >
+        {VOICE_LANGS.map((l) => (
+          <option key={l} value={l}>
+            {l === 'auto' ? t('voice.langAuto') : l}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
 export function PrefToggle({
   pref,
   label,
@@ -218,6 +248,7 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
               checked={composerAutocorrect}
               onChange={(on) => setComposerPref('composerAutocorrect', on)}
             />
+            <VoiceLangRow />
           </div>
         </SettingsSection>
         {/* E8-FR-32 (v3.1): the PC's console automations, pushed over Settings. */}
