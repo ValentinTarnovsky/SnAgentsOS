@@ -22,6 +22,7 @@ import { client } from './src/mobile/src/lib/client';
 import { store } from './src/mobile/src/lib/store';
 import { setLang } from './src/mobile/src/lib/i18n';
 import { setUploadXhrFactory, useUploadStore } from './src/mobile/src/lib/uploadJob';
+import { entries } from './src/mobile/src/lib/connLog';
 window.result = (async () => {
  let checks=0; const check=(ok,label)=>{if(!ok)throw new Error(label);checks++};
  const frames = () => new Promise(r => setTimeout(r, 30));
@@ -182,6 +183,10 @@ window.result = (async () => {
  flushSync(() => store.getState().update({ httpToken:null })); await frames();
  check(!q('[data-upload-button]'),'without a token the button disappears');
  check(document.documentElement.scrollWidth<=430,'nothing overflows the phone width');
+ // E2 M9: each outcome is in the connection log, without the token or the PC path.
+ const diag=entries().map(e=>e.msg);
+ check(diag.some(m=>m.startsWith('upload ok image/png 924x2000 ') && m.endsWith('KB')) && diag.includes('upload failed: server') && diag.includes('upload not inserted: console closed'),'upload outcomes reach the connection log');
+ check(!diag.some(m=>m.includes('attachments') || m.includes(T1) || m.includes(T2)),'the log never holds the token or the path');
 
  reactRoot.unmount(); return checks;
 })();
