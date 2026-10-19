@@ -10,8 +10,11 @@
  *    a question or an elicitation (so an ExitPlanMode menu never gets "Allow");
  *  - question: the AskUserQuestion wizard when the questions pass the phone's
  *    limits, else the card only says "Answer in the terminal";
- *  - plan (ExitPlanMode), elicitation and every other tool: no card (the
- *    generic "waiting for your answer" strip covers them, E2-FR-25).
+ *  - plan (ExitPlanMode): the Plan card (E2-FR-54). Its buttons need
+ *    Claude's menu validated on screen (promptMenu.ts); until then, or with
+ *    a layout the phone does not know, the card shows as the generic strip;
+ *  - elicitation and every other tool: no card (the generic "waiting for
+ *    your answer" strip covers them, E2-FR-25).
  *
  * Cards are for Claude only (`status.provider`, not the pane type: a shell
  * where `claude` was started by hand gets hooks too) and only while the
@@ -44,6 +47,8 @@ export type PromptCardModel =
   | { kind: 'permission'; pending: RemotePending; generic: boolean }
   /** `questions` is null when the phone cannot answer them ("Answer in the terminal"). */
   | { kind: 'question'; pending: RemotePending; questions: AskQuestion[] | null }
+  /** ExitPlanMode (E2-FR-54): the buttons come from the menu read off the screen. */
+  | { kind: 'plan'; pending: RemotePending }
 
 /** The card for this pane status, or undefined (E2-FR-17, 18). */
 export function cardFor(status: RemotePaneStatus | undefined, enabled: boolean): PromptCardModel | undefined {
@@ -58,12 +63,18 @@ export function cardFor(status: RemotePaneStatus | undefined, enabled: boolean):
       }
     } else if (pending.kind === 'question') {
       return { kind: 'question', pending, questions: askQuestionsValid(pending.questions) ? pending.questions : null }
+    } else if (pending.kind === 'plan') {
+      return { kind: 'plan', pending }
     }
   }
   return undefined
 }
 
-/** E2-FR-25: the pane waits on the user but there is no card to show. */
-export function needsGenericStrip(status: RemotePaneStatus | undefined, card: PromptCardModel | undefined): boolean {
-  return !!status && status.state === 'action' && !card
+/**
+ * E2-FR-25: the pane waits on the user but there is no card to show. A plan
+ * card whose menu did not validate on screen (`menuOk` false) counts as no
+ * card, so the strip is the fallback when Claude changes its layout.
+ */
+export function needsGenericStrip(status: RemotePaneStatus | undefined, card: PromptCardModel | undefined, menuOk = true): boolean {
+  return !!status && status.state === 'action' && (!card || (card.kind === 'plan' && !menuOk))
 }

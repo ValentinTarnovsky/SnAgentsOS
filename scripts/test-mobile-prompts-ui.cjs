@@ -7,11 +7,17 @@
 // and the generic strip (plan, Codex, promptCards off), the wizard (auto
 // advance, multi select, Send, abort once the pane stops asking), "Answer in
 // the terminal" for invalid asks and for more than 24 groups, the dropped
-// socket, "Already answered", the Settings switch and Spanish.
+// socket, "Already answered", the Settings switch and Spanish. R31-03
+// (E2-FR-53, 54): with Claude's menu written into the phone's xterm, "Always
+// allow" sends "2" with no Enter and the Plan card sends the option digit,
+// only for the layouts the phone validates; another layout falls back to the
+// hint / the generic strip, and a menu that changes before the tap sends
+// nothing.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
 const root = path.resolve(__dirname, '..')
+const menus = require('./fixtures/claude-menus.cjs')
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-mobile-prompts-ui-'))
 const assets = path.join(root, 'out/mobile/assets')
 const mobileCss = fs.existsSync(assets) && fs.readdirSync(assets).find(name => /^index-.*\.css$/.test(name))
@@ -25,6 +31,8 @@ import { client } from './src/mobile/src/lib/client';
 import { usePromptUi } from './src/mobile/src/lib/answer';
 import { answerCard } from './src/mobile/src/lib/answerLive';
 import { setLang } from './src/mobile/src/lib/i18n';
+import { getActiveTerm } from './src/mobile/src/lib/terminalBus';
+const MENUS = ${JSON.stringify(menus)};
 const wait = ms => new Promise(r => setTimeout(r, ms));
 const frames = () => wait(40);
 let checks = 0; const check = (ok, label) => { if (!ok) throw new Error(label); checks++ };
@@ -45,6 +53,7 @@ const single = (n = 3) => ({ question: 'Que framework?', header: 'Framework', mu
 const multi = (n = 4, header = 'Extras') => ({ question: 'Que extras?', header, multiSelect: true, options: opts(n) });
 const perm = (id, toolName, summary) => ({ id, kind: 'permission', ...(toolName ? { toolName } : {}), summary: summary ?? '' });
 const ask = (id, questions) => ({ id, kind: 'question', summary: questions[0].question, questions });
+const plan = (id, summary) => ({ id, kind: 'plan', toolName: 'ExitPlanMode', summary: summary ?? '' });
 const st = (pending, extra = {}) => ({ state: 'action', provider: 'claude', reason: pending[0] ? pending[0].kind : 'permission', pendingCount: pending.length, stateSince: now, pending, ...extra });
 const long = 'npm run build && ' + 'echo una linea bastante larga que no entra '.repeat(5);
 const statuses = {
@@ -57,6 +66,8 @@ const statuses = {
  g: st([perm('fallback:permission', undefined, '')]),
  h: st([ask('qh', [multi(8, 'Uno'), multi(8, 'Dos'), multi(8, 'Tres')])], { reason: 'question' }),
  j: st([ask('qj', [multi(3), multi(3, 'Mas')])], { reason: 'question' }),
+ k: st([perm('pk', 'Bash', 'Bash: npm test')]),
+ l: st([plan('pl', 'Add the parser and wire it')], { reason: 'plan' }),
 };
 const pane = (id, title, type) => ({ id, title, type, color: '', icon: '', running: true });
 const ids = Object.keys(statuses);
@@ -68,6 +79,9 @@ const openPane = async id => { flushSync(() => client.requestOpen(id)); await fr
 const card = () => $('[data-terminal-layer] [data-prompt-card]');
 const strip = () => $('[data-terminal-layer] [data-prompt-strip]');
 const phase = () => $('[data-terminal-layer] [data-answer-phase]');
+// Claude's menu on the phone's screen (E2-FR-53, 54); resolves once parsed.
+const screen = rows => new Promise(res => { const term = getActiveTerm(); term.resize(80, 30); term.write('\\x1bc' + rows.join('\\r\\n'), res) });
+const polled = () => wait(450);
 window.runMain = async () => {
  try { localStorage.clear() } catch {}
  setLang('en');
@@ -81,7 +95,9 @@ window.runMain = async () => {
  const allow = ra.querySelector('[data-row-allow]'), deny = ra.querySelector('[data-row-deny]');
  check(Math.round(allow.getBoundingClientRect().height) === 36 && Math.round(deny.getBoundingClientRect().height) === 36, 'row Allow / Deny are 36 px tall');
  check(row('b').querySelector('[data-row-prompt="question"] [data-row-answer-open]') && row('b').textContent.includes('Question: Que framework?'), 'a question row offers [Answer]');
- check(!row('c').querySelector('[data-row-prompt]') && !row('f').querySelector('[data-row-prompt]'), 'Codex and plan rows get no inline buttons');
+ check(!row('c').querySelector('[data-row-prompt]'), 'Codex rows get no inline buttons');
+ check(row('f').querySelector('[data-row-prompt="plan"] [data-row-answer-open]')?.textContent === 'Review' && row('f').querySelector('[data-row-prompt-text]').textContent === 'Plan to approve', 'a plan row offers [Review], never Allow / Deny');
+ check(row('l').querySelector('[data-row-prompt-text]').textContent === 'Plan: Add the parser and wire it' && !row('l').querySelector('[data-row-allow]'), 'a plan row shows the first line of the plan');
  check(noOverflow(), 'Home with request lines fits 360 px');
  click(allow); await frames();
  check(inputs.length === 1 && inputs[0].paneId === 'a' && inputs[0].data === '1', 'row Allow writes "1" to that pane');
@@ -140,7 +156,7 @@ window.runMain = async () => {
  await openPane('g');
  check(card()?.dataset.promptCard === 'permission' && card().querySelector('[data-prompt-title]').textContent === 'Claude asks for a permission' && !card().querySelector('[data-prompt-summary]'), 'a permission without tool gets the generic card');
  await openPane('f');
- check(!card() && strip()?.dataset.promptStrip === 'waiting' && strip().textContent === 'Claude is waiting for your answer - open terminal', 'a plan with a generic permission shows only the waiting strip');
+ check(!card() && strip()?.dataset.promptStrip === 'waiting' && strip().textContent === 'Claude is waiting for your answer - open terminal', 'a plan with no menu on screen shows only the waiting strip');
  await openPane('c');
  check(!card() && strip()?.textContent === 'Codex is waiting for your answer - open terminal', 'a Codex pane in action shows the strip');
  await openPane('d');
@@ -194,9 +210,73 @@ window.runMain = async () => {
  check(store.getState().promptCards === true && localStorage.getItem('snagentsos.promptCards') === null, 'the switch turns it back on (default removes the key)');
  flushSync(() => store.getState().setScreen('terminal')); await frames();
 
+ // --- "Always allow" (E2-FR-53) ---
+ await openPane('k');
+ check(card()?.dataset.promptCard === 'permission' && !card().querySelector('[data-prompt-always]') && card().querySelector('[data-prompt-always-hint]'), 'no menu on screen: the hint, no "Always allow"');
+ await screen(MENUS.changedPermission); await polled();
+ check(!card().querySelector('[data-prompt-always]') && card().querySelector('[data-prompt-always-hint]'), 'a permission layout the phone does not know keeps the hint');
+ await screen(MENUS.twoOptionPermission); await polled();
+ check(!card().querySelector('[data-prompt-always]'), 'a two option menu (2 = No) gets no "Always allow"');
+ await screen(MENUS.bashPermission); await polled();
+ const alwaysBtn = card().querySelector('[data-prompt-always]');
+ check(alwaysBtn && alwaysBtn.textContent.includes('Always allow') && !card().querySelector('[data-prompt-always-hint]'), 'the validated Bash menu shows "Always allow" instead of the hint');
+ check(alwaysBtn.querySelector('[data-prompt-always-scope]').textContent.startsWith("Yes, and don't ask again for npm test commands in"), 'the button repeats the scope text of Claude');
+ check(alwaysBtn.getBoundingClientRect().height >= 44 && noOverflow() && card().getBoundingClientRect().right <= 360, '"Always allow" is a 44 px target and the card fits 360 px');
+ // The menu changes between the last read and the tap: nothing is sent.
+ inputs.length = 0;
+ await screen(MENUS.changedPermission); click(alwaysBtn); await frames();
+ check(inputs.length === 0 && store.getState().toasts.some(t => t.text === 'The menu changed, check the terminal'), 'a menu that changed before the tap sends nothing and says so');
+ await screen(MENUS.editPermission); await polled();
+ check(card().querySelector('[data-prompt-always-scope]')?.textContent === 'Yes, allow all edits during this session', 'the boxed Edit menu validates too');
+ click(card().querySelector('[data-prompt-always]')); await frames();
+ check(inputs.length === 1 && inputs[0].paneId === 'k' && inputs[0].data === '2', '"Always allow" writes "2" to the pane');
+ check(!inputs.some(i => i.data.includes('\\r')) && phase()?.dataset.answerPhase === 'sending', 'no Enter, and "Sending answer..." replaces the card');
+
+ // --- Plan card (E2-FR-54) ---
+ await openPane('l');
+ await screen([]); await polled();
+ check(!card() && strip()?.dataset.promptStrip === 'waiting', 'a plan before Claude draws its menu: the generic strip');
+ await screen(MENUS.changedPlan); await polled();
+ check(!card() && strip()?.dataset.promptStrip === 'waiting', 'a plan layout of another Claude version falls back to the strip');
+ await screen(MENUS.plan); await polled();
+ check(card()?.dataset.promptCard === 'plan' && card().dataset.pending === 'pl' && card().querySelector('[data-prompt-title]').textContent === 'Claude has a plan ready', 'the validated plan menu shows the Plan card');
+ check(card().querySelector('[data-prompt-summary-text]').textContent === 'Add the parser and wire it' && card().textContent.includes('The full plan is in the terminal'), 'the card shows the first line of the plan and points to the terminal');
+ const planBtns = $$('[data-terminal-layer] [data-plan-option]');
+ check(planBtns.map(b => b.textContent).join('|') === 'Yes, and auto-accept edits|Yes, and approve each edit|No, keep planning', 'one button per menu option, known labels translated');
+ check(planBtns[0].className.includes('bg-accent-violet') && !planBtns[1].className.includes('bg-accent-violet') && planBtns[2].dataset.planClass === 'reject', 'the first approval is the primary');
+ check(noOverflow() && card().getBoundingClientRect().right <= 360, 'the Plan card fits 360 px');
+ click(card().querySelector('[data-prompt-fold]')); await frames();
+ check(!card() && strip()?.dataset.promptStrip === 'folded' && strip().textContent === 'Claude has a plan to approve - tap to answer', 'the Plan card folds to a strip');
+ click(strip()); await frames();
+ inputs.length = 0;
+ await screen(MENUS.changedPlan); click(card().querySelector('[data-plan-option="3"]')); await frames();
+ check(inputs.length === 0 && store.getState().toasts.filter(t => t.text === 'The menu changed, check the terminal').length >= 1, 'a plan menu that changed before the tap sends nothing');
+ await screen(MENUS.planWithFeedback); await polled();
+ const fbBtn = card()?.querySelector('[data-plan-feedback]');
+ check(fbBtn && fbBtn.textContent === 'Tell Claude what to change' && $$('[data-terminal-layer] [data-plan-option]').length === 3, 'the free text row becomes "Tell Claude what to change"');
+ check($('[data-terminal-layer] [data-plan-option="1"]').textContent === 'Yes, clear the context and auto-accept edits', 'the later layout labels are translated too');
+ if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+ click(fbBtn); await frames();
+ check(inputs.length === 1 && inputs[0].paneId === 'l' && inputs[0].data === '4', '"Tell Claude what to change" writes its digit, so an Enter from the composer never picks the first approval');
+ check(phase()?.dataset.answerPhase === 'sending' && document.activeElement?.tagName === 'TEXTAREA', 'and brings the keyboard up for the feedback in the same tap');
+ await wait(1100);
+ setStatus('l', st([plan('pl3', 'Add the parser and wire it')], { reason: 'plan' })); await polled();
+ check(card()?.dataset.pending === 'pl3', 'the next plan request shows its card again');
+ inputs.length = 0;
+ click($('[data-terminal-layer] [data-plan-option="3"]')); await frames();
+ check(inputs.length === 1 && inputs[0].paneId === 'l' && inputs[0].data === '3', 'a plan option writes its digit');
+ check(!inputs.some(i => i.data.includes('\\r')) && phase()?.dataset.answerPhase === 'sending', 'no Enter after a plan answer, and "Sending answer..."');
+ setStatus('l', st([], { reason: 'plan', pendingCount: 1 })); await wait(1100);
+ check(phase()?.dataset.answerPhase === 'sent' && inputs.length === 1, '"Sent" once the request leaves pending[], nothing more written');
+
  // Spanish.
+ await openPane('e'); await screen([]); await polled();
  setLang('es'); setStatus('e', st([perm('pe3', 'Edit', 'x')])); await frames();
  check(card()?.querySelector('[data-prompt-title]').textContent === 'Claude quiere usar Edit' && card().textContent.includes('Permitir') && card().textContent.includes('Denegar') && card().textContent.includes("Para 'permitir siempre' usá la terminal"), 'the card is translated');
+ await screen(MENUS.bashPermission); await polled();
+ check(card()?.querySelector('[data-prompt-always]')?.textContent.includes('Permitir siempre'), '"Permitir siempre" in Spanish');
+ setStatus('l', st([plan('pl2', 'Plan')], { reason: 'plan' })); await openPane('l'); await screen(MENUS.plan); await polled();
+ check(card()?.dataset.promptCard === 'plan' && card().querySelector('[data-prompt-title]').textContent === 'Claude tiene un plan listo' && $$('[data-terminal-layer] [data-plan-option]').map(b => b.textContent).join('|') === 'Sí, y aceptar las ediciones solas|Sí, y aprobar cada edición|No, seguir planificando', 'the Plan card in Spanish');
  r.unmount();
  return checks;
 };
