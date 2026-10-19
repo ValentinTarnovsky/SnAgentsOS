@@ -23,6 +23,7 @@ import { rememberPrompt } from '@/lib/promptDelivery'
 import type { ResolvedLaunch } from '@/lib/launch'
 import type { ShellKind } from '@shared/ipc-contract'
 import { useT } from '@/i18n'
+import { noteSpawnFailure } from '@/lib/worktrees'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
 const INFINITE_SCROLLBACK = 100000
@@ -798,6 +799,7 @@ export function useXterm(
         // record that keeps the output for phones (code -1 for a live restart).
         useAppStore.getState().setPaneExit(opts.paneId, prev?.code ?? -1)
         emitExit({ code: prev?.code ?? -1, error: spawnError(err), cardVisible: true })
+        noteSpawnFailure(opts.paneId, spawnError(err)) // E7-FR-36
       } finally {
         restartingRef.current = false
       }
@@ -890,6 +892,7 @@ export function useXterm(
         term.write(`\r\n\x1b[31mFailed to start shell: ${String(err)}\x1b[0m\r\n`)
         // The card offers Restart, which retries with the OS default shell.
         emitExit({ code: -1, error: spawnError(err), cardVisible: true })
+        noteSpawnFailure(opts.paneId, spawnError(err)) // E7-FR-36
       })
 
     // Any key typed into the pane hides the "Claude exited" chip (E6-FR-22).

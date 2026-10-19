@@ -53,6 +53,7 @@ import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
 import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
+import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
@@ -228,6 +229,12 @@ const api: SnApi = {
     status: (key: string) => ipcRenderer.invoke(CH.GIT_STATUS, { key }) as Promise<GitChangesRes | null>,
     fileDiff: (req: { key: string; path: string; area: GitArea; force?: boolean }) => ipcRenderer.invoke(CH.GIT_FILE_DIFF, req) as Promise<GitDiffReply>,
     openFile: (req: { key: string; path: string; reveal?: boolean }) => ipcRenderer.invoke(CH.GIT_OPEN_FILE, req) as Promise<boolean>,
+    worktreeAdd: (req: WorktreeAddReq) => ipcRenderer.invoke(CH.GIT_WORKTREE_ADD, req) as Promise<WorktreeAddRes>,
+    worktreeRemove: (req: WorktreeRemoveReq) => ipcRenderer.invoke(CH.GIT_WORKTREE_REMOVE, req) as Promise<WorktreeRemoveRes>,
+    worktreeProbe: (repoCwd: string) => ipcRenderer.invoke(CH.GIT_WORKTREE_PROBE, { repoCwd }) as Promise<WorktreeProbeRes>,
+    worktreeInspect: (req: { path: string; base?: string }) => ipcRenderer.invoke(CH.GIT_WORKTREE_INSPECT, req) as Promise<WorktreeInspectRes>,
+    worktreeList: () => ipcRenderer.invoke(CH.GIT_WORKTREE_LIST) as Promise<WorktreeListRes>,
+    worktreeReveal: (path: string) => ipcRenderer.invoke(CH.GIT_WORKTREE_REVEAL, { path }) as Promise<boolean>,
   },
 }
 

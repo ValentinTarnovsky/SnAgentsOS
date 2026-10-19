@@ -2,6 +2,9 @@
  * Core domain model, shared by main and renderer.
  * Must stay free of Node/DOM imports so it is safe in the renderer bundle.
  */
+import type { PaneWorktree } from './worktree-types'
+
+export type { PaneWorktree }
 
 /**
  * Persisted config schema version. Single source of truth for both the main
@@ -99,21 +102,6 @@ export interface PaneSchedule {
   history?: ScheduleRun[]
 }
 
-/**
- * Isolated git worktree a console runs in (E7-FR-28, schema 13). `baseRef`,
- * `linkedPaths` and `createdAt` live only in main's `worktrees.json` manifest.
- */
-export interface PaneWorktree {
-  /** Main repo root the worktree belongs to. */
-  repoRoot: string
-  /** Worktree folder (also the pane cwd). */
-  path: string
-  /** Branch, always 'sn/<slug>'. */
-  branch: string
-  /** Sha of the base commit. */
-  base: string
-}
-
 export interface Pane {
   id: string
   type: PaneType
@@ -138,7 +126,7 @@ export interface Pane {
    * seeds from this when that file is missing or corrupt.
    */
   lastSession?: PaneLastSession
-  /** Isolated git worktree this console runs in (schema 13). */
+  /** Isolated worktree this console runs in (schema 13, E7-FR-28); its path is also `cwd`. */
   worktree?: PaneWorktree
 }
 

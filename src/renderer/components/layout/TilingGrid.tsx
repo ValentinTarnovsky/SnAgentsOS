@@ -4,6 +4,7 @@ import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { iconFor } from '@/lib/icons'
 import { focusPane, setFocusedPane } from '@/lib/focus'
+import { requestClosePane } from '@/lib/worktrees'
 import { GRID_COLS, gridForCount, orderPanes } from './gridTemplates'
 import { PaneCell } from './PaneCell'
 import { PaneCellBoundary } from '@/components/common/ErrorBoundary'
@@ -20,7 +21,6 @@ const NO_MINIMIZED: string[] = []
 export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isActive: boolean }) {
   const t = useT()
   const presets = useAppStore((s) => s.presets)
-  const closePane = useAppStore((s) => s.closePane)
   const toggleMaximize = useAppStore((s) => s.toggleMaximize)
   const toggleMinimize = useAppStore((s) => s.toggleMinimize)
   const movePane = useAppStore((s) => s.movePane)
@@ -60,7 +60,7 @@ export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isAc
             paneId={pane.id}
             title={pane.title}
             hidden={(maximizedId !== null && maximizedId !== pane.id) || minimizedIds.includes(pane.id)}
-            onClose={() => closePane(workspace.id, pane.id)}
+            onClose={() => requestClosePane(workspace.id, pane.id)}
           >
             <PaneCell
               workspace={workspace}
@@ -74,7 +74,7 @@ export function TilingGrid({ workspace, isActive }: { workspace: Workspace; isAc
               draggable={!maximizedId}
               onToggleMax={() => toggleMaximize(workspace.id, pane.id)}
               onToggleMin={() => toggleMinimize(workspace.id, pane.id)}
-              onClose={() => closePane(workspace.id, pane.id)}
+              onClose={() => requestClosePane(workspace.id, pane.id)}
               onDragStartCell={() => setDraggingId(pane.id)}
               onDragEnterCell={() => {
                 if (draggingId && draggingId !== pane.id) movePane(workspace.id, draggingId, index)

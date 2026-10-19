@@ -37,6 +37,8 @@ import { WorkspaceComposer } from '@/components/wizard/WorkspaceComposer'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { CommandPalette } from '@/components/ui/CommandPalette'
 import { GlobalPromptDialog } from '@/components/workspace/GlobalPromptDialog'
+import { WorktreeLaunchDialog } from '@/components/workspace/WorktreeLaunchDialog'
+import { WorktreeCloseDialog } from '@/components/layout/WorktreeCloseDialog'
 import { QuickCommandPopover } from '@/components/workspace/QuickCommandPopover'
 import { NotificationStack } from '@/components/ui/NotificationStack'
 import { ResumeDialog } from '@/components/agents/ResumeDialog'
@@ -243,6 +245,9 @@ function AppBody() {
       <QuickCommandPopover />
       {/* "Resume interrupted chats?" (E5-FR-12): opened by the agent loader after hydrate. */}
       <ResumeDialog />
+      {/* Worktree per console (E7-FR-27/30/31/36): launch and close dialogs. */}
+      <WorktreeLaunchDialog />
+      <WorktreeCloseDialog />
     </div>
   )
 }

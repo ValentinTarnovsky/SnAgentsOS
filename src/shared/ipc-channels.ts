@@ -171,6 +171,13 @@ export const CH = {
   GIT_FILE_DIFF: 'git:fileDiff', // invoke ({ key, path, area, force? }) -> GitDiffReply
   GIT_OPEN_FILE: 'git:openFile', // invoke ({ key, path, reveal? }) -> boolean
   GIT_SET_PANEL: 'git:setPanel', // send ({ key: string | null }): the open panel's target, polled every 3 s
+  // Worktree per console (E7-FR-27..32, 36). Add/Remove are contract names; Probe, Inspect, List, Reveal are amendments.
+  GIT_WORKTREE_ADD: 'git:worktreeAdd', // invoke (WorktreeAddReq) -> WorktreeAddRes
+  GIT_WORKTREE_REMOVE: 'git:worktreeRemove', // invoke (WorktreeRemoveReq) -> WorktreeRemoveRes
+  GIT_WORKTREE_PROBE: 'git:worktreeProbe', // invoke ({ repoCwd }) -> WorktreeProbeRes
+  GIT_WORKTREE_INSPECT: 'git:worktreeInspect', // invoke ({ path, base? }) -> WorktreeInspectRes
+  GIT_WORKTREE_LIST: 'git:worktreeList', // invoke () -> WorktreeListRes
+  GIT_WORKTREE_REVEAL: 'git:worktreeReveal', // invoke ({ path }) -> boolean (manifest paths only)
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

@@ -1,5 +1,7 @@
 /**
- * The only way main runs git (E7 Design B). Read-only and side-effect free:
+ * The only way main runs git (E7 Design B). The chip and the panel only read;
+ * WorktreeService (E7 Design F) runs its few writes (worktree add / prune,
+ * branch -D) through the same binary resolution, env and semaphore:
  *  - the env drops GIT_DIR and friends, so a polluted app env never points a
  *    query at another repo, and adds GIT_OPTIONAL_LOCKS=0 (status never takes
  *    index.lock while an agent commits), GIT_TERMINAL_PROMPT=0 (no credential
