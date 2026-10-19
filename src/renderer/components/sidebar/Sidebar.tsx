@@ -4,7 +4,9 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  FileOutput,
   MoreVertical,
+  RefreshCcw,
   Pencil,
   Plus,
   Settings,
@@ -39,6 +41,7 @@ import { SidebarGitSuffix } from '@/components/git/SidebarGitSuffix'
 import { useGitStore } from '@/lib/gitStore'
 import { compactChip, gitChipEnabled, workspaceGitKey } from '@/lib/gitChip'
 import { NoteInlineEditor, TASK_LABEL_KEY, TaskStateChip, WorkspaceNotePopover } from '@/components/sidebar/WorkspaceNotePopover'
+import { openRepoExport, reloadFromRepo } from '@/lib/repoConfigFlow'
 
 interface MenuState {
   x: number
@@ -238,6 +241,13 @@ export function Sidebar() {
       },
       { label: t('ctx.rename'), icon: Pencil, onClick: () => startRename(wsId) },
       { label: t('note.menu'), icon: StickyNote, onClick: () => setNotePopover(menu ? { ...menu, wsId } : { x: 80, y: 80, wsId }) },
+      // Per-repo .snagentsos.json (E8-FR-26/27): reload only for a workspace made or exported with one.
+      ...(ws?.cwd
+        ? [
+            { label: t('repo.export.menu'), icon: FileOutput, separated: true, onClick: () => openRepoExport(wsId) },
+            ...(ws.repoConfig ? [{ label: t('repo.reload.menu'), icon: RefreshCcw, onClick: () => void reloadFromRepo(wsId, t) }] : []),
+          ]
+        : []),
       {
         label: t('ctx.delete'),
         icon: Trash2,
