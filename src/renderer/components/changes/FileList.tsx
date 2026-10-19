@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
-import { ChevronRight, Copy, ExternalLink, FolderOpen, SquareTerminal } from 'lucide-react'
+import { ChevronRight, Copy, ExternalLink, FolderOpen, MessageSquare, SquareTerminal } from 'lucide-react'
 import type { GitArea, GitFileEntry } from '@shared/git-types'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -41,6 +41,7 @@ export function FileList({
   onToggleSection,
   onSelect,
   actions,
+  noteCounts,
 }: {
   files: GitFileEntry[]
   /** Every changed entry (more than `files.length` when truncated). */
@@ -51,6 +52,8 @@ export function FileList({
   onToggleSection: (area: GitArea) => void
   onSelect: (f: GitFileEntry) => void
   actions: RowActions
+  /** Unresolved review notes per row (`area:path`), shown as a badge (E7-FR-17). */
+  noteCounts?: Record<string, number>
 }) {
   const t = useT()
   const [cursor, setCursor] = useState<string | null>(selected)
@@ -175,6 +178,12 @@ export function FileList({
                       )}
                       {dir && <span className="min-w-0 truncate text-text-secondary">{dir}</span>}
                     </span>
+                    {!!noteCounts?.[k] && (
+                      <span className="flex shrink-0 items-center gap-0.5 text-[10px] text-accent-violet" aria-label={t('notes.rowCount', { count: noteCounts[k] })} data-row-notes={noteCounts[k]}>
+                        <MessageSquare size={10} />
+                        {noteCounts[k]}
+                      </span>
+                    )}
                     {counts && (
                       <span className="shrink-0 whitespace-nowrap font-mono text-[11px]">
                         {counts === 'bin' ? (
