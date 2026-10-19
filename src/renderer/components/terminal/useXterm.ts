@@ -24,6 +24,7 @@ import type { ResolvedLaunch } from '@/lib/launch'
 import type { ShellKind } from '@shared/ipc-contract'
 import { useT } from '@/i18n'
 import { noteSpawnFailure } from '@/lib/worktrees'
+import { FIT_MIN_FONT, fitBaselineOf, fitGeometry, fitOwnerOf, releaseFitFromDesktop, setFitBaseline, useFitStore, type FitOwnerEntry } from '@/lib/fitStore'
 
 /** Line cap used to emulate "infinite" scrollback (like a normal terminal). */
 const INFINITE_SCROLLBACK = 100000
@@ -37,6 +38,30 @@ const plain = (s: string): string => s.replace(/[\x00-\x1f\x7f-\x9f]/g, '')
 /** The message of a failed spawn/restart invoke, without Electron's IPC wrapper. */
 const spawnError = (err: unknown): string =>
   plain(String(err instanceof Error ? err.message : err).replace(/^Error invoking remote method '[^']*': (?:Error: )?/, ''))
+
+/** Keys that alone are not typing: they never take a phone-sized pane back (E3-FR-19). */
+const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'OS'])
+
+interface CellPx {
+  w: number
+  h: number
+}
+
+/**
+ * The css cell size xterm is rendering with (the same private path FitAddon
+ * reads), or null before the renderer measured.
+ */
+function cellOf(term: Terminal): CellPx | null {
+  const core = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } } })._core
+  const cell = core?._renderService?.dimensions?.css?.cell
+  return cell && cell.width > 0 && cell.height > 0 ? { w: cell.width, h: cell.height } : null
+}
+
+/** Width of the viewport's scrollbar, which FitAddon leaves out of the grid. */
+function scrollBarWidth(term: Terminal): number {
+  const core = (term as unknown as { _core?: { viewport?: { scrollBarWidth?: number } } })._core
+  return term.options.scrollback === 0 ? 0 : (core?.viewport?.scrollBarWidth ?? 0)
+}
 
 /** Highlight palette for in-pane search matches. */
 const SEARCH_OPTS = {
@@ -398,13 +423,71 @@ export function useXterm(
     // for the pty's size, so a resize-observer or rAF fit landing mid-parse
     // would reflow the rest of it at another width. The write callback refits.
     let replaying = false
+    // Phone-fit (E3-FR-17/18/23): the normal-font cell, measured on the last
+    // desktop fit, so the baseline and the shrink are computed from it.
+    let normalCell: { cell: CellPx; font: number } | null = null
+    const normalFont = (): number => optsRef.current.fontSize ?? useAppStore.getState().settings.fontSize ?? 13
+    let fitOverflow = false
+    const setFitOverflow = (on: boolean): void => {
+      if (fitOverflow === on) return
+      fitOverflow = on
+      container.style.overflow = on ? 'auto' : ''
+    }
+    // A phone owns this pane's size: the grid is the phone's, the font shrinks
+    // until it fits (6px minimum, then the area scrolls), the pty is never
+    // resized to the container and the desktop size is only measured as the baseline.
+    const fitToOwner = (owner: FitOwnerEntry): void => {
+      if (container.clientWidth >= 8 && container.clientHeight >= 8) {
+        const normal = normalFont()
+        const cur = term.options.fontSize ?? normal
+        const now = cellOf(term)
+        const base = normalCell && normalCell.font === normal ? normalCell.cell : now ? { w: (now.w * normal) / cur, h: (now.h * normal) / cur } : null
+        if (base) {
+          const avail = { w: container.clientWidth - scrollBarWidth(term), h: container.clientHeight }
+          const geo = fitGeometry(owner, avail, base, normal)
+          setFitBaseline(opts.paneId, geo.baseline)
+          let font = geo.fontSize
+          if (term.options.fontSize !== font) term.options.fontSize = font
+          // Cells round to device pixels, so the linear guess can be a pixel
+          // too wide: step down while the measured grid still overflows.
+          for (let i = 0; i < 4 && font > FIT_MIN_FONT; i++) {
+            const c = cellOf(term)
+            if (!c || (owner.cols * c.w <= avail.w + 0.5 && owner.rows * c.h <= avail.h + 0.5)) break
+            font -= 1
+            term.options.fontSize = font
+          }
+          const c = cellOf(term)
+          setFitOverflow(!!c && (owner.cols * c.w > avail.w + 0.5 || owner.rows * c.h > avail.h + 0.5))
+          // Read by the UI tests and handy in devtools: the font the phone grid got.
+          container.dataset.fitFont = String(font)
+        }
+      }
+      if (term.cols !== owner.cols || term.rows !== owner.rows) term.resize(owner.cols, owner.rows)
+      if (term.cols === lastCols && term.rows === lastRows) return
+      lastCols = term.cols
+      lastRows = term.rows
+      // The executor already resized the pty; the same size again is a no-op in main.
+      const id = ptyIdRef.current
+      if (id) window.snApi.pty.resize({ ptyId: id, cols: term.cols, rows: term.rows })
+    }
     // Fit only when the container is actually measurable. A display:none or
     // mid-relayout box yields a bogus tiny geometry, that is the "everything
     // crammed into a narrow column / text floating to one side" bug. We also
     // tell the pty only when cols/rows truly change, so an AI CLI redrawing
     // isn't interrupted by a stream of no-op SIGWINCH resizes.
     const safeFit = (): void => {
-      if (replaying || !container || container.clientWidth < 8 || container.clientHeight < 8) return
+      if (replaying || !container) return
+      const owner = fitOwnerOf(opts.paneId)
+      if (owner) {
+        fitToOwner(owner)
+        return
+      }
+      if (container.clientWidth < 8 || container.clientHeight < 8) return
+      // Back from a phone grid: the pane's own font and no scrolling area.
+      setFitOverflow(false)
+      delete container.dataset.fitFont
+      const normal = normalFont()
+      if (term.options.fontSize !== normal) term.options.fontSize = normal
 
       // Re-anchor the viewport across the refit. A resize reflow (a window drag
       // on fractional-DPI Windows nudges rows/cols by a line) makes xterm pull
@@ -420,6 +503,9 @@ export function useXterm(
       }
       if (fromBottom <= 0) term.scrollToBottom()
       else term.scrollToLine(Math.max(0, term.buffer.active.baseY - fromBottom))
+      setFitBaseline(opts.paneId, { cols: term.cols, rows: term.rows })
+      const cell = cellOf(term)
+      if (cell) normalCell = { cell, font: normal }
       if (term.cols === lastCols && term.rows === lastRows) return
       lastCols = term.cols
       lastRows = term.rows
@@ -569,6 +655,10 @@ export function useXterm(
     // selection (else falls through to ^C / interrupt); Ctrl+V pastes;
     // Ctrl+Shift+C / Ctrl+Shift+V are explicit copy/paste.
     term.attachCustomKeyEventHandler((e) => {
+      // E3-FR-19: a real key takes a phone-sized pane back before it is
+      // written (the local owner clears and the refit runs synchronously).
+      // xterm's own replies (DA/DSR, focus, mouse) never come through here.
+      if (e.type === 'keydown' && !MODIFIER_KEYS.has(e.key)) releaseFitFromDesktop(opts.paneId)
       // While the exit card shows, Enter restarts and Esc hides it; neither
       // reaches the (dead) pty, on any event phase (E6-FR-17).
       const exit = exitRef.current
@@ -761,14 +851,17 @@ export function useXterm(
       try {
         const launch = await prepareAgentLaunch(o.paneId, base).catch(() => base)
         if (disposed) return
+        // E3-FR-20: a restart ends any phone-fit, so the new pty is born at the
+        // desktop size (the baseline) rather than at the phone grid.
+        const born = fitOwnerOf(o.paneId) ? fitBaselineOf(o.paneId) : null
         const res = await window.snApi.pty.restart({
           paneId: o.paneId,
           shell: o.shell,
           cwd: launch.cwd || o.cwd,
           initialCommand: launch.initialCommand,
           setup: launch.setup,
-          cols: term.cols,
-          rows: term.rows,
+          cols: born?.cols ?? term.cols,
+          rows: born?.rows ?? term.rows,
           // After a failed respawn, retry with the OS default shell.
           fallbackDefaultShell: prev?.error ? true : undefined,
         })
@@ -787,6 +880,11 @@ export function useXterm(
         }
         shellKindRef.current = res.shellKind
         bind(res.ptyId)
+        // The new pty was spawned at this terminal's size; a phone-fit owner
+        // may have changed meanwhile (a restart clears it, E3-FR-20): re-send.
+        lastCols = -1
+        lastRows = -1
+        safeFit()
         const app = useAppStore.getState()
         app.setPaneExit(opts.paneId, null)
         app.clearAgentEnded(opts.paneId)
@@ -927,12 +1025,43 @@ export function useXterm(
     // does NOT fire the ResizeObserver, so re-fit once the box has settled.
     const mountRaf = requestAnimationFrame(() => requestAnimationFrame(safeFit))
 
+    // Phone-fit owner changes (E3-FR-17/18): adopt the phone grid or give the
+    // size back to the container; the forced refit re-sends the geometry.
+    const offFit = useFitStore.subscribe((s, prev) => {
+      if (s.owners[opts.paneId] === prev.owners[opts.paneId]) return
+      lastCols = -1
+      lastRows = -1
+      safeFit()
+    })
+    // A real paste takes the size back too (E3-FR-19); Ctrl+V already did on keydown.
+    const onPasteFit = (): void => {
+      releaseFitFromDesktop(opts.paneId)
+    }
+    container.addEventListener('paste', onPasteFit, true)
+    // A zoom or a display change re-measures xterm's cells without resizing
+    // the box: a phone grid re-checks its font and the scroll fallback once
+    // xterm has the new cell size (two frames later).
+    let zoomRaf = 0
+    const onWindowResize = (): void => {
+      if (!fitOwnerOf(opts.paneId)) return
+      cancelAnimationFrame(zoomRaf)
+      zoomRaf = requestAnimationFrame(() => {
+        zoomRaf = requestAnimationFrame(safeFit)
+      })
+    }
+    window.addEventListener('resize', onWindowResize)
+
     return () => {
       disposed = true
       cancelAnimationFrame(roRaf)
       cancelAnimationFrame(mountRaf)
       cancelAnimationFrame(snapRaf)
       resizeObserver.disconnect()
+      offFit()
+      cancelAnimationFrame(zoomRaf)
+      window.removeEventListener('resize', onWindowResize)
+      container.removeEventListener('paste', onPasteFit, true)
+      container.style.overflow = ''
       rendererHandle.dispose()
       clearTimeout(healTimer)
       offDisplayRecovered()

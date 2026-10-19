@@ -984,6 +984,13 @@ export const en = {
   'remote.securityHint':
     'Traffic is not encrypted with TLS; use it on trusted Wi-Fi (WPA2) or over Tailscale.',
   'remote.indicator.connected': '{count} connected',
+  // Phone-fit (E3 M11)
+  'remote.phoneFit': 'Allow fitting consoles to the phone',
+  'remote.phoneFitHint': 'A phone can size a console to its own screen. The PC keeps its size and gets it back with Recover, a key typed here or after 5 minutes without the phone.',
+  'fit.banner.phone': 'Your phone controls this console',
+  'fit.banner.chat': 'Your phone controls this console (Chat)',
+  'fit.banner.recover': 'Recover',
+  'fit.banner.restoreAll': 'Restore all',
 
   // Remote pairing QR modal
   'remote.qr.title': 'Pair a phone',

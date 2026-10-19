@@ -987,6 +987,13 @@ export const es: Record<keyof typeof en, string> = {
   'remote.securityHint':
     'El tráfico no va cifrado con TLS; usalo en Wi-Fi de confianza (WPA2) o por Tailscale.',
   'remote.indicator.connected': '{count} conectado(s)',
+  // Modo celular (E3 M11)
+  'remote.phoneFit': 'Permitir ajustar consolas al celular',
+  'remote.phoneFitHint': 'Un celular puede ajustar una consola a su pantalla. La PC guarda su tamaño y lo recupera con Recuperar, con una tecla escrita acá o a los 5 minutos sin el celular.',
+  'fit.banner.phone': 'Tu celular controla esta consola',
+  'fit.banner.chat': 'Tu celular controla esta consola (Chat)',
+  'fit.banner.recover': 'Recuperar',
+  'fit.banner.restoreAll': 'Restaurar todas',
 
   // Remote pairing QR modal
   'remote.qr.title': 'Vincular un celular',
