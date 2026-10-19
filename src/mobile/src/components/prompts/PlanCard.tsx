@@ -8,9 +8,11 @@
  *
  *  - An approval or a rejection ("No, keep planning") sends its digit, one
  *    group, no Enter. The first approval is the primary button.
- *  - The free text row ("Type here to tell Claude what to change") sends
- *    nothing: its button brings the keyboard up on the terminal, where the
- *    user picks it and types.
+ *  - The free text row ("Type here to tell Claude what to change") also
+ *    sends its digit, so Claude's cursor leaves the first approval, and then
+ *    brings the keyboard up where the user types the feedback. Without the
+ *    digit, the composer's Send ends in an Enter that would pick option 1
+ *    and approve the plan the user wanted to change.
  *  - Known labels are translated; an approval the phone does not know keeps
  *    Claude's text. The menu is read again at tap time and a change cancels
  *    the tap.
@@ -64,7 +66,9 @@ export function PlanCard({
       menuChanged()
       return
     }
-    answerCard(paneId, card.pending.id, { kind: 'menu', option: option.n })
+    const sent = answerCard(paneId, card.pending.id, { kind: 'menu', option: option.n })
+    // Same tap (the gesture iOS needs for the keyboard), only once the digit went out.
+    if (option.cls === 'feedback' && sent === 'started') openTerminalKeyboard()
   }
   return (
     <div
@@ -85,7 +89,7 @@ export function PlanCard({
               type="button"
               data-plan-feedback={option.n}
               onPointerDown={(e) => e.preventDefault()}
-              onClick={openTerminalKeyboard}
+              onClick={() => pick(option)}
               className="h-10 w-full truncate rounded-btn border border-dashed border-border px-3 text-sm font-medium text-text-secondary active:bg-card"
             >
               {planLabel(option)}
