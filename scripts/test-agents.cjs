@@ -418,7 +418,9 @@ function testNavigation() {
   check(keymap.nextWaiting === 'Ctrl+Shift+J' && keymap.reopenClosedPane === 'Ctrl+Shift+U' && keymap.focusNextPane === 'Ctrl+Alt+Right' && keymap.focusPrevPane === 'Ctrl+Alt+Left', 'D8 defaults: Ctrl+Shift+J, Ctrl+Shift+U, Ctrl+Alt+Right/Left')
   const accels = Object.values(keymap)
   check(new Set(accels).size === accels.length, 'no default accelerator collides with another')
-  check(!accels.some(a => ['Ctrl+J', 'Ctrl+R', 'Ctrl+Shift+PageUp', 'Ctrl+Shift+PageDown', 'Ctrl+Shift+Z'].includes(a)), 'forbidden or reserved combos stay free (Ctrl+J, Ctrl+R, prompt navigation, redo)')
+  check(!accels.some(a => ['Ctrl+J', 'Ctrl+R', 'Ctrl+Shift+Z'].includes(a)), 'forbidden or reserved combos stay free (Ctrl+J, Ctrl+R, redo)')
+  // The combos D8 reserved for E6 prompt navigation now belong to it (R31-01).
+  check(keymap.promptPrev === 'Ctrl+Shift+PageUp' && keymap.promptNext === 'Ctrl+Shift+PageDown' && accels.filter(a => a.startsWith('Ctrl+Shift+Page')).length === 2, 'Ctrl+Shift+PageUp/PageDown go only to promptPrev/promptNext')
   check(km.KEY_ACTIONS.every(a => typeof en[a.labelKey] === 'string' && typeof es[a.labelKey] === 'string'), 'every action has its label in es and en')
   const target = (tagName, extra = {}) => ({ target: { tagName, isContentEditable: false, classList: { contains: c => (extra.cls ?? []).includes(c) }, ...extra } })
   check(km.isEditableTarget(target('INPUT')) && km.isEditableTarget(target('textarea')) && km.isEditableTarget(target('DIV', { isContentEditable: true })), 'isEditableTarget: input, textarea, contenteditable')
