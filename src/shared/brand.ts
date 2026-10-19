@@ -51,6 +51,14 @@ export const AGENT_ENV = {
   codexExit: 'SNAOS_CODEX_EXIT',
 } as const
 
+/** Extra environment of each pty while the snaos CLI is on (E8-FR-13); its bin folder goes first in PATH. */
+export const CLI_ENV = {
+  workspaceId: 'SNAOS_WORKSPACE_ID',
+  ctlEndpoint: 'SNAOS_CTL_ENDPOINT',
+  ctlToken: 'SNAOS_CTL_TOKEN',
+  cli: 'SNAOS_CLI',
+} as const
+
 /**
  * Values build/installer.nsh writes under SHCTX\<key> (HKCU per-user, HKLM
  * per-machine) during the 1.x upgrade. The legacy cleanup reads both hives and

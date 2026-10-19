@@ -27,6 +27,7 @@ import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUp
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from './worktree-types'
 import type { OpenPathReq, OpenPathRes } from './inertOpen'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from './review-notes'
+import type { CliCtlAction, CliUiState, SkillOp, SkillStatus } from './ctl-protocol'
 
 export type { GitArea, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -351,6 +352,11 @@ export interface PtySpawnReq {
    * `pty:promptResult`. A restart never carries it.
    */
   initialPrompt?: InitialPromptReq
+  /**
+   * Workspace of the pane (reserved for the CLI, R30-11): the console token
+   * and SNAOS_WORKSPACE_ID carry it. Absent = main looks it up in the config.
+   */
+  workspaceId?: string
 }
 /** E8-FR-02a: write text (and optionally a delayed Enter) into a live pty. */
 export interface PtySubmitReq {
@@ -546,7 +552,8 @@ export interface FirewallFixRes {
 /** A control action relayed main -> renderer for execution via store actions. */
 export interface RemoteCommand {
   id: string
-  action: RemoteCtlAction
+  /** A phone action, or an op of the snaos CLI bus (main-only, R30-11; the phone schema never accepts `cli`). */
+  action: RemoteCtlAction | CliCtlAction
   /**
    * Name of the paired device that sent it (E4-FR-08). Main fills it from the
    * authenticated session and the DeviceRegistry, never from the payload.
@@ -564,6 +571,8 @@ export interface RemoteCommandResult {
   info?: number
   /** createPane with a prompt that could not go on the command line (E2-FR-11). */
   promptFallback?: boolean
+  /** A CLI bus op's payload (R30-11); never relayed to phones. */
+  data?: unknown
 }
 
 /** The object exposed on window.snApi via contextBridge. */
@@ -808,6 +817,15 @@ export interface SnApi {
     onReady(cb: (e: AgentsReadyEvt) => void): () => void
   }
   /** Review notes of the Changes panel (E7-FR-17..21), stored by main per workspace. */
+  /** snaos CLI (E8-FR-12..22, R30-11). Nothing here ever carries a token. */
+  cli: {
+    /** settings.cliEnabled: starts or stops the control server (same endpoint and tokens). */
+    setEnabled(enabled: boolean): void
+    state(): Promise<CliUiState>
+    skill(op: SkillOp): Promise<SkillStatus>
+    /** Adds (true) or removes (false) <dataDir>\bin in the user PATH; false when it failed or is not available. */
+    userPath(enabled: boolean): Promise<boolean>
+  }
   reviewNotes: {
     list(workspaceId: string): Promise<ReviewNotesListRes>
     /** Create or edit; editing the text drops `sentAt`. Rejects on invalid input or past 500 notes. */

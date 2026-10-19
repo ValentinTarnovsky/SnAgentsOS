@@ -51,8 +51,8 @@ export function samePath(a: string, b: string): boolean {
 
 /**
  * A clean env map (node-pty requires string values, no undefined). Variables
- * with our env prefix (new or legacy) are dropped from the inherited env only,
- * so a console of another instance does not leak its identity; `extra` (the
+ * with our env prefix (new or legacy) and ELECTRON_RUN_AS_NODE are dropped
+ * from the inherited env only, so a console of another instance does not leak its identity; `extra` (the
  * preset env and our own status env) is merged afterwards, unfiltered.
  */
 export function cleanEnv(extra?: Record<string, string>, stripDirs: string[] = statusBinDirs()): Record<string, string> {
@@ -61,6 +61,8 @@ export function cleanEnv(extra?: Record<string, string>, stripDirs: string[] = s
     if (value === undefined) continue
     const upper = key.toUpperCase()
     if (upper.startsWith(LEGACY_BRAND.envPrefix) || upper.startsWith(BRAND.envPrefix)) continue
+    // A parent's `snaos` shim or Codex launcher may leak Node mode into a shell (E8-FR-13).
+    if (upper === 'ELECTRON_RUN_AS_NODE') continue
     out[key] = upper === 'PATH'
       ? value.split(delimiter).filter(entry => !stripDirs.some(dir => samePath(entry, dir))).join(delimiter)
       : value
