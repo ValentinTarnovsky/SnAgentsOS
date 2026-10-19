@@ -220,6 +220,14 @@ function testNotes(m, storage, diffLoad) {
 
   // Unpair wipes them; blocked storage degrades.
   check(m.clearMobileStorage() >= 1 && storage.getItem(KEY) === null, 'unpair or revoke wipes the phone notes')
+  S().forgetAll()
+  check(S().ensure('w1').length === 0 && storage.getItem(KEY) === null, 'and forgetAll drops the copy in memory, so no later edit writes them back')
+
+  // Repo files named like Object.prototype members are plain keys.
+  for (const file of ['constructor', '__proto__', 'toString']) check(!!S().add('w7', { file, line: 1, comment: 'odd name ' + file }), `a note on a file named ${file} is stored`)
+  const odd = load(entry, storage).readNotes('w7')
+  same(odd.map((n) => [n.file, n.comment]), [['constructor', 'odd name constructor'], ['__proto__', 'odd name __proto__'], ['toString', 'odd name toString']], 'and read back after a reload')
+  storage.removeItem('snagentsos.remote.notes.w7')
   storage.blocked = true
   const m3 = load(entry, storage)
   check(m3.readNotes('w1').length === 0 && !!m3.useNotesStore.getState().add('w1', { file: 'a.ts', line: 1, comment: 'kept in memory' }), 'blocked storage: notes still work for this page')

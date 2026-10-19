@@ -95,7 +95,8 @@ export function writeNotes(workspaceId: string, notes: readonly PhoneNote[]): bo
     storageRemove(keyOf(workspaceId))
     return true
   }
-  const files: StoredNotes['files'] = {}
+  // No prototype: a repo file named `constructor` or `__proto__` is a plain key.
+  const files: StoredNotes['files'] = Object.create(null) as StoredNotes['files']
   for (const { file, ...rest } of notes) (files[file] ??= []).push(rest)
   return storageSet(keyOf(workspaceId), JSON.stringify({ v: 1, files } satisfies StoredNotes))
 }
@@ -185,6 +186,8 @@ interface NotesState {
   refreshStale: (workspaceId: string, file: string, lines: ReadonlyMap<number, string>, complete: boolean) => void
   /** Notes of files that left a complete change list turn "Outdated". */
   markGoneFiles: (workspaceId: string, listed: ReadonlySet<string>) => void
+  /** Drop every note held in memory (the pairing ended and storage was wiped). */
+  forgetAll: () => void
 }
 
 export const useNotesStore = create<NotesState>((set, get) => {
@@ -251,5 +254,6 @@ export const useNotesStore = create<NotesState>((set, get) => {
       if (!notes.some((n) => !listed.has(n.file) && !n.stale)) return
       commit(workspaceId, notes.map((n) => (!listed.has(n.file) && !n.stale ? { ...n, stale: true } : n)))
     },
+    forgetAll: () => set({ byWs: {} }),
   }
 })

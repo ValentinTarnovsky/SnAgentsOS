@@ -202,11 +202,14 @@ export function DiffBody({ workspaceId, target, scrollRef }: { workspaceId: stri
   }, [load, status, maybeMore])
 
   // FR-54: notes against the lines read so far ("Outdated" once the line changed or left).
+  // A read cut short by a file that kept changing ('unstable') is not complete:
+  // the lines it never reached do not make their notes outdated.
   const textDiff = !!load.head && !load.head.binary && !load.head.tooLarge
+  const complete = load.done && status !== 'unstable'
   useEffect(() => {
     if (!textDiff) return
-    useNotesStore.getState().refreshStale(workspaceId, target.path, newSideLines(load.hunks), load.done)
-  }, [textDiff, load, workspaceId, target.path])
+    useNotesStore.getState().refreshStale(workspaceId, target.path, newSideLines(load.hunks), complete)
+  }, [textDiff, load, complete, workspaceId, target.path])
 
   const rows = diffRows(load.hunks)
   const fileNotes = (notes ?? []).filter((n) => n.file === target.path && !isSent(n))
