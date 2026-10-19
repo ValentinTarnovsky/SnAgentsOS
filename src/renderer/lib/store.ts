@@ -112,6 +112,7 @@ const DEFAULT_SETTINGS: Settings = {
       codex7d: true,
     },
     custom: [],
+    collapsed: false,
   },
   remote: {
     enabled: false,

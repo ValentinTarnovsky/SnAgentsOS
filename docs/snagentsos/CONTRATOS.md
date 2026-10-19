@@ -21,7 +21,8 @@ Fuente unica de verdad para todos los epics. Si un PRD contradice esta seccion, 
 | v2.2.0 | 12 | update, ntfy, scrollback, git, explorer, quickCommands (migracion real de snippets) |
 | v3.0.0 | 13 | phoneFit, https, CLI, worktrees, repoConfig (el trust vive fuera de config, enmienda R30-01), automatizaciones por pane (`PaneSchedule`), hibernacion, cacheTimer |
 | v3.1.0 | 14 | `settings.terminalShellIntegration` (shell integration de PowerShell, E6-FR-25..31). Solo defaults de zod, sin logica en `migrate()` (R31-00) |
-| v3.x | 15+ | Items "mas adelante" no agendados |
+| v2.1.0 (post 2.0.0) | 15 | `settings.usage.collapsed` (panel de uso plegado a una fila de anillos). Solo default de zod, sin logica en `migrate()` |
+| siguiente | 16+ | Items "mas adelante" no agendados |
 
 Entrega consolidada (decision del usuario): todo lo agendado para v2.1, v2.2, v3.0 y v3.1 sale junto en una sola release, 2.0.0 (`package.json` no cambia de version). Los schemas 11 a 14 se conservan como migraciones secuenciales con los numeros de esta tabla, asi una config v10 recorre 11, 12, 13 y 14 en orden. Donde este documento dice "v2.1", "v2.2", etc. nombra el tramo del plan, no un tag publicado.
 

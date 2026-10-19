@@ -55,13 +55,13 @@ function v11(extra = {}) {
 const qc = (i, extra = {}) => ({ id: `qc-${i}`, name: `Cmd ${i}`, text: `echo ${i}`, action: 'send', enter: false, ...extra })
 
 function schemaChecks() {
-  check(CONFIG_VERSION === 14, 'CONFIG_VERSION is 14')
+  check(CONFIG_VERSION === 15, 'CONFIG_VERSION is 15')
 
   // E8-FR-01: 3 snippets -> 3 global send commands, same order and ids, no Enter.
   const snippets = [{ id: 'snip-a', name: 'Continua', text: 'continua' }, { id: 'snip-b', name: 'Compact', text: '/compact' }, { id: 'snip-c', name: 'Tests', text: 'corre los tests\ny arregla' }]
   const raw = v11({ snippets: clone(snippets) })
   const a = parseConfig(clone(raw))
-  check(a && a.version === 14, 'a v11 config with snippets parses and is stamped 14')
+  check(a && a.version === 15, 'a v11 config with snippets parses and is stamped 15')
   check(a.quickCommands.length === 3 && a.quickCommands.map(c => c.id).join() === 'snip-a,snip-b,snip-c', 'snippets migrate in order, keeping their ids')
   check(a.quickCommands.every((c, i) => c.action === 'send' && c.enter === false && c.workspaceId === undefined && c.presetId === undefined && c.name === snippets[i].name && c.text === snippets[i].text), 'migrated commands are global send without Enter, same label and text')
   check(!('snippets' in a), 'the parsed config (the next save) no longer carries snippets')
@@ -137,7 +137,7 @@ function schemaChecks() {
     check(store.load().quickCommands.length === 3 && JSON.parse(fs.readFileSync(file, 'utf8')).snippets.length === 3, 'a plain load migrates in memory and leaves the file untouched')
     store.load({ upgrade: true })
     const written = JSON.parse(fs.readFileSync(file, 'utf8'))
-    check(written.version === 14 && !('snippets' in written) && written.quickCommands.map(c => c.id).join() === 'snip-a,snip-b,snip-c', 'the upgrade write stores quickCommands and drops snippets')
+    check(written.version === 15 && !('snippets' in written) && written.quickCommands.map(c => c.id).join() === 'snip-a,snip-b,snip-c', 'the upgrade write stores quickCommands and drops snippets')
     check(JSON.parse(fs.readFileSync(file + '.bak', 'utf8')).snippets.length === 3, 'the pre-upgrade file with snippets stays in .bak')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 }
@@ -255,10 +255,10 @@ async function schema13Checks() {
     const file = path.join(dir, 'config.json'), text = JSON.stringify(raw)
     fs.writeFileSync(file, text)
     const store = new ConfigStore()
-    check(store.load().version === 14 && fs.readFileSync(file, 'utf8') === text, 'a plain load reads v12 as 14 and leaves the file untouched')
+    check(store.load().version === 15 && fs.readFileSync(file, 'utf8') === text, 'a plain load reads v12 as 15 and leaves the file untouched')
     store.load({ upgrade: true })
     const written = JSON.parse(fs.readFileSync(file, 'utf8'))
-    check(written.version === 14 && survives(raw, written) && written.settings.remote.phoneFit === true && written.settings.automation.scheduleGraceMin === 120, 'the upgrade write stores v14 with every v12 value and the v13 defaults')
+    check(written.version === 15 && survives(raw, written) && written.settings.remote.phoneFit === true && written.settings.automation.scheduleGraceMin === 120, 'the upgrade write stores v14 with every v12 value and the v13 defaults')
     check(fs.readFileSync(file + '.bak', 'utf8') === text, 'the pre-upgrade v12 file stays in .bak')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 
@@ -279,7 +279,7 @@ async function schema13Checks() {
   S.getState().updateSettings({ hibernateIdleMinutes: 45, remote: { ...S.getState().settings.remote, phoneFit: false } })
   flush()
   const back = parseConfig(saves.at(-1))
-  check(back && back.version === 14 && JSON.stringify(back.workspaces[0].panes[0].schedule) === JSON.stringify(fullSch) && back.workspaces[0].repoConfig.sha256 === sha, 'schedule fields and repoConfig persist through the store and the schema')
+  check(back && back.version === 15 && JSON.stringify(back.workspaces[0].panes[0].schedule) === JSON.stringify(fullSch) && back.workspaces[0].repoConfig.sha256 === sha, 'schedule fields and repoConfig persist through the store and the schema')
   check(back.settings.hibernateIdleMinutes === 45 && back.settings.remote.phoneFit === false && back.settings.remote.https.mode === 'tailscaleServe', 'v13 settings persist through the store')
   stop()
 }
@@ -303,16 +303,25 @@ function v13Real(extra = {}) {
 }
 
 async function schema14Checks() {
-  check(CONFIG_VERSION === 14, 'CONFIG_VERSION is 14 (R31-00)')
+  check(CONFIG_VERSION === 15, 'CONFIG_VERSION is 15 (R31-00)')
   const raw = v13Real()
   const a = parseConfig(clone(raw))
-  check(a && a.version === 14, 'a real v13 config parses and is stamped 14')
+  check(a && a.version === 15, 'a real v13 config parses and is stamped 15')
   check(survives(raw, a), 'every v13 value survives v13 -> v14 unchanged (schedule, worktree, repoConfig, remote, cacheTimer, automation)')
   check(a.settings.terminalShellIntegration === true, 'settings.terminalShellIntegration defaults to true')
   check(!('terminalShellIntegration' in raw.settings) && Object.keys(a.workspaces[0]).sort().join() === Object.keys(raw.workspaces[0]).sort().join(), 'the v14 key is the only addition: workspaces keep exactly their v13 keys')
   check(JSON.stringify(parseConfig(clone(a))) === JSON.stringify(a), 'v14 parse is idempotent')
   const fromV10 = parseConfig({ version: 10, workspaces: [], presets: [], settings: clone(baseSettings) })
-  check(fromV10 && fromV10.version === 14 && fromV10.settings.terminalShellIntegration === true && fromV10.settings.hibernateIdleMinutes === 0, 'a v10 config walks 11..14 in one parse and gains the v14 default')
+  check(fromV10 && fromV10.version === 15 && fromV10.settings.terminalShellIntegration === true && fromV10.settings.hibernateIdleMinutes === 0, 'a v10 config walks 11..14 in one parse and gains the v14 default')
+  // Schema 15: settings.usage.collapsed, default only.
+  check(a.settings.usage.collapsed === false && fromV10.settings.usage.collapsed === false, 'v15: usage.collapsed defaults to false')
+  const v14 = clone(a); v14.version = 14; delete v14.settings.usage.collapsed
+  const up15 = parseConfig(v14)
+  check(up15.version === 15 && up15.settings.usage.collapsed === false && survives(v14, up15), 'v14 -> v15 keeps every value and only adds the default')
+  const junk = clone(a); junk.settings.usage.collapsed = 'yes'
+  check(parseConfig(junk).settings.usage.collapsed === false, 'a junk usage.collapsed falls back to false')
+  const kept = clone(a); kept.settings.usage.collapsed = true
+  check(parseConfig(kept).settings.usage.collapsed === true, 'usage.collapsed true is kept')
 
   // Values kept, junk values fall back without rejecting the config.
   const set = (v) => { const c = v13Real(); c.settings.terminalShellIntegration = v; return parseConfig(c) }
@@ -330,13 +339,13 @@ async function schema14Checks() {
     const file = path.join(dir, 'config.json'), text = JSON.stringify(raw)
     fs.writeFileSync(file, text)
     const store = new ConfigStore()
-    check(store.load().version === 14 && fs.readFileSync(file, 'utf8') === text, 'a plain load reads v13 as 14 and leaves the file untouched')
+    check(store.load().version === 15 && fs.readFileSync(file, 'utf8') === text, 'a plain load reads v13 as 15 and leaves the file untouched')
     store.load({ upgrade: true })
     const written = JSON.parse(fs.readFileSync(file, 'utf8'))
-    check(written.version === 14 && survives(raw, written) && written.settings.terminalShellIntegration === true, 'the upgrade write stores v14 with every v13 value and the new default')
+    check(written.version === 15 && survives(raw, written) && written.settings.terminalShellIntegration === true, 'the upgrade write stores v14 with every v13 value and the new default')
     check(fs.readFileSync(file + '.bak', 'utf8') === text, 'the pre-upgrade v13 file stays in .bak')
     store.load({ upgrade: true })
-    check(fs.readFileSync(file + '.bak', 'utf8') === text && JSON.parse(fs.readFileSync(file, 'utf8')).version === 14, 'a second upgrade load rewrites nothing (.bak still v13)')
+    check(fs.readFileSync(file + '.bak', 'utf8') === text && JSON.parse(fs.readFileSync(file, 'utf8')).version === 15, 'a second upgrade load rewrites nothing (.bak still v13)')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 
   // Renderer: the store default and a persisted toggle round-trip through the schema.
@@ -355,7 +364,7 @@ async function schema14Checks() {
   S.getState().updateSettings({ terminalShellIntegration: false })
   flush()
   const back = parseConfig(saves.at(-1))
-  check(back && back.version === 14 && back.settings.terminalShellIntegration === false && survives(raw.workspaces, back.workspaces), 'turning shell integration off persists as v14 and keeps the v13 workspaces')
+  check(back && back.version === 15 && back.settings.terminalShellIntegration === false && survives(raw.workspaces, back.workspaces), 'turning shell integration off persists as v14 and keeps the v13 workspaces')
   stop()
 }
 
@@ -423,7 +432,7 @@ function storeChecks() {
   check(S.getState().newQuickCommandId().startsWith('qc-'), 'new ids use the qc- prefix')
   flush()
   const last = saves.at(-1)
-  check(last && last.version === 14 && last.quickCommands.length === 3 && !('snippets' in last), 'the persisted blob writes quickCommands and never snippets')
+  check(last && last.version === 15 && last.quickCommands.length === 3 && !('snippets' in last), 'the persisted blob writes quickCommands and never snippets')
   S.getState().moveQuickCommand('qc-2', -1)
   check(S.getState().quickCommands.map(c => c.id).join() === 'snip-a,qc-2,qc-1', 'moveQuickCommand moves one slot')
   const before = S.getState().quickCommands
