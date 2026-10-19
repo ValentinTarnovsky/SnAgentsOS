@@ -43,18 +43,31 @@ const { parseConfig } = load('src/main/store/schema.ts')
 // --- Pure helpers ------------------------------------------------------------
 check(['claude-3f2a', 'a', 'x-1-2', 'a'.repeat(40)].every(shared.isValidSlug), 'valid slugs')
 check(!['', 'A', 'a b', '../x', 'a/b', 'a'.repeat(41), 'ñ', null, 3].some(shared.isValidSlug), 'invalid slugs (case, space, slash, length, non ASCII, non string)')
-const f1 = W.repoFolderName('C:\\Users\\tarno\\Desktop\\Mi Repo')
+// The repo root comes from git on the host, so the helper uses the host's path
+// flavor; a Windows or POSIX path is named here with an explicit platform, so
+// every case runs on every OS.
+const winFolder = (p) => W.repoFolderName(p, { platform: 'win32' })
+const f1 = winFolder('C:\\Users\\tarno\\Desktop\\Mi Repo')
 check(/^Mi-Repo-[0-9a-f]{6}$/.test(f1), `repo folder is <name>-<hash6> (${f1})`)
-check(W.repoFolderName('C:\\Users\\tarno\\Desktop\\Mi Repo').toLowerCase() === W.repoFolderName('c:\\users\\TARNO\\desktop\\mi repo\\').toLowerCase() || process.platform !== 'win32', 'same repo, same folder, whatever the spelling (Windows)')
-check(W.repoFolderName('C:\\a\\repo') !== W.repoFolderName('C:\\b\\repo'), 'two repos of one name get different folders')
+check(f1 === `Mi-Repo-${require('node:crypto').createHash('sha1').update('c:\\users\\tarno\\desktop\\mi repo').digest('hex').slice(0, 6)}`, 'the hash is of the lower-cased resolved path, as before (existing folders keep their name)')
+check(f1.toLowerCase() === winFolder('c:\\users\\TARNO\\desktop\\mi repo\\').toLowerCase() && f1 === winFolder('C:/Users/tarno/Desktop/Mi Repo'), 'same repo, same folder, whatever the spelling (Windows: case, trailing slash, slashes)')
+check(winFolder('C:\\a\\repo') !== winFolder('C:\\b\\repo'), 'two repos of one name get different folders')
+const f2 = W.repoFolderName('/home/u/Mi Repo', { platform: 'linux' })
+check(/^Mi-Repo-[0-9a-f]{6}$/.test(f2) && f2 !== W.repoFolderName('/home/u/mi repo', { platform: 'linux' }), `POSIX: <name>-<hash6>, and case is part of the path on Linux (${f2})`)
+check(W.repoFolderName('/Users/u/Mi Repo', { platform: 'darwin' }).toLowerCase() === W.repoFolderName('/users/U/mi repo/', { platform: 'darwin' }).toLowerCase(), 'macOS folds case like its default filesystem')
+check(W.repoFolderName('/x/C:\\odd', { platform: 'linux' }).startsWith('C--odd-'), 'a backslash is a name character on POSIX, not a separator')
 same(W.parseWorktreeList('worktree C:/r\nHEAD abc\nbranch refs/heads/main\n\nworktree C:/w/x\nHEAD def\nbranch refs/heads/sn/x\nprunable gitdir file points to non-existent location\n\nworktree C:/w/d\nHEAD 123\ndetached\n'), [
   { path: 'C:/r', branch: 'refs/heads/main', prunable: false },
   { path: 'C:/w/x', branch: 'refs/heads/sn/x', prunable: true },
   { path: 'C:/w/d', branch: null, prunable: false },
 ], 'worktree list --porcelain: path, branch, prunable, detached')
-const gitFileRoot = W.repoRootFromGitFile('gitdir: C:/Users/x/repo/.git/worktrees/claude-1\n', 'C:\\wt\\repo-abc123\\claude-1')
-check(gitFileRoot && path.resolve(gitFileRoot).toLowerCase() === path.resolve('C:/Users/x/repo').toLowerCase(), 'the .git file of a linked worktree names its repo')
-check(W.repoRootFromGitFile('gitdir: C:/x/repo/.git\n', 'C:\\wt') === null && W.repoRootFromGitFile('nope', 'C:\\wt') === null && W.repoRootFromGitFile('gitdir: C:/bare.git/worktrees/a', 'C:\\wt') === null, 'a submodule, junk or a bare repo is not a linked worktree of a checkout')
+const winGitFile = (c, p) => W.repoRootFromGitFile(c, p, 'win32')
+check(winGitFile('gitdir: C:/Users/x/repo/.git/worktrees/claude-1\n', 'C:\\wt\\repo-abc123\\claude-1') === 'C:\\Users\\x\\repo', 'the .git file of a linked worktree names its repo')
+check(winGitFile('gitdir: //server/share/repo/.git/worktrees/a\n', '\\\\server\\share\\wt\\r-1\\a') === '\\\\server\\share\\repo', 'a repo on a UNC share keeps its \\\\server prefix')
+check(winGitFile('gitdir: C:/x/repo/.git\n', 'C:\\wt') === null && winGitFile('nope', 'C:\\wt') === null && winGitFile('gitdir: C:/bare.git/worktrees/a', 'C:\\wt') === null, 'a submodule, junk or a bare repo is not a linked worktree of a checkout')
+check(W.repoRootFromGitFile('gitdir: /home/u/repo/.git/worktrees/claude-1\n', '/data/wt/repo-abc123/claude-1', 'linux') === '/home/u/repo', 'POSIX: the same, with POSIX paths')
+check(W.repoRootFromGitFile('gitdir: ../../../repo/.git/worktrees/claude-1\n', '/data/wt/repo-abc123/claude-1', 'linux') === '/data/repo', 'a relative gitdir (worktree.useRelativePaths) resolves from the worktree')
+check(W.repoRootFromGitFile('gitdir: /home/u/a\\b/.git/worktrees/x\n', '/wt/r/x', 'darwin') === '/home/u/a\\b' && W.repoRootFromGitFile('gitdir: /.git/worktrees/x\n', '/wt/r/x', 'linux') === '/', 'POSIX: a backslash stays in the name; a repo at / still resolves')
 const sha = 'a'.repeat(40)
 same(shared.paneWorktreeOf({ path: 'C:\\w', branch: 'sn/x', repoName: 'r', dirty: false, managed: true, exists: true, repoRoot: 'C:\\r', base: sha }), { repoRoot: 'C:\\r', path: 'C:\\w', branch: 'sn/x', base: sha }, 'a managed row rebuilds pane.worktree')
 check(shared.paneWorktreeOf({ path: 'C:\\w', branch: 'feat', repoName: 'r', dirty: false, managed: false, exists: true, repoRoot: 'C:\\r', base: sha }) === null, 'an unmanaged row never becomes a pane worktree')
@@ -84,6 +97,31 @@ check(shared.paneWorktreeOf({ path: 'C:\\w', branch: 'feat', repoName: 'r', dirt
 
 // --- Manifest ----------------------------------------------------------------
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'snaos-wt-'))
+// git prints realpaths (8.3 names expanded, links resolved: CI's TEMP is
+// C:\Users\RUNNER~1\..., macOS's tmpdir is /var -> /private/var), while base
+// keeps os.tmpdir()'s spelling. Locations are compared through canon(), the
+// test's own realpath; equal strings are never assumed.
+function canon(p) {
+  const rest = []
+  let cur = path.resolve(p)
+  for (;;) {
+    try {
+      const r = path.join(fs.realpathSync.native(cur), ...rest.reverse())
+      return process.platform === 'win32' || process.platform === 'darwin' ? r.toLowerCase() : r
+    } catch {
+      const parent = path.dirname(cur)
+      if (parent === cur) return path.resolve(p)
+      rest.push(path.basename(cur))
+      cur = parent
+    }
+  }
+}
+// A second spelling of base on every machine (a junction on Windows, a
+// symlink elsewhere), so the spelling checks run even where TEMP has no alias.
+let alias = path.join(os.tmpdir(), `snaos-wt-alias-${process.pid}-${Date.now()}`)
+try { fs.symlinkSync(base, alias, 'junction') } catch (e) { console.log(`NOTE: no link alias for base (${e.code}), link spelling checks skipped`); alias = null }
+// Removed as a link (never followed into base) however the run ends, a failed top-level check included.
+process.on('exit', () => { try { if (alias) fs.unlinkSync(alias) } catch { /* already gone */ } })
 {
   const file = path.join(base, 'mf', 'worktrees.json')
   const m = new M.WorktreeManifest(file)
@@ -94,6 +132,15 @@ const base = fs.mkdtempSync(path.join(os.tmpdir(), 'snaos-wt-'))
   check(new M.WorktreeManifest(file).find(process.platform === 'win32' ? 'c:\\data\\wt\\REPO-1\\a\\' : entry.path) !== null, 'find compares paths like the filesystem')
   m.put({ ...entry, baseSha: 'b'.repeat(40) })
   check(new M.WorktreeManifest(file).list().length === 1, 'put replaces the entry of the same path')
+  if (alias) {
+    const viaBase = path.join(base, 'mf', 'r-1', 'a')
+    const viaAlias = path.join(alias, 'mf', 'r-1', 'a')
+    m.put({ ...entry, path: viaBase })
+    check(new M.WorktreeManifest(file).find(viaAlias) !== null && new M.WorktreeManifest(file).find(viaAlias).path === viaBase, 'find matches another spelling of the folder (8.3 name, link, /private/var)')
+    m.put({ ...entry, path: viaAlias })
+    check(new M.WorktreeManifest(file).list().length === 2, 'put through another spelling replaces, never duplicates')
+    check(m.remove(viaBase) && new M.WorktreeManifest(file).list().length === 1, 'remove through another spelling')
+  }
   fs.writeFileSync(file, JSON.stringify({ version: 1, entries: [entry, { ...entry, path: 'C:\\x', branch: 'main' }, 'junk'] }))
   check(new M.WorktreeManifest(file).list().length === 1, 'an entry on a non sn/ branch or junk is dropped one by one')
   fs.writeFileSync(file, '{broken')
@@ -113,7 +160,7 @@ async function realRepoChecks() {
   const gitOkSync = (cwd, ...args) => { try { git(cwd, ...args); return true } catch { return false } }
   const write = (p, s) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, s) }
   const runner = gx.createGitRunner({ env: () => gx.gitEnv(cleanEnv) })
-  const listed = (repo) => git(repo, 'worktree', 'list', '--porcelain').split(/\r?\n/).filter((l) => l.startsWith('worktree ')).map((l) => path.resolve(l.slice(9)).toLowerCase())
+  const listed = (repo) => git(repo, 'worktree', 'list', '--porcelain').split(/\r?\n/).filter((l) => l.startsWith('worktree ')).map((l) => canon(l.slice(9)))
 
   const repo = path.join(base, 'repo')
   write(path.join(repo, 'src', 'app.js'), 'console.log(1)\n')
@@ -153,14 +200,15 @@ async function realRepoChecks() {
   check(res.ok, `create ok (${JSON.stringify(res)})`)
   const wt = res.worktree
   const folder = W.repoFolderName(repo)
-  check(path.resolve(wt.path).toLowerCase() === path.join(wtRoot, folder, 'claude-ab12').toLowerCase(), `created at <root>/<repo>-<hash6>/<slug> (${wt.path})`)
-  check(wt.branch === 'sn/claude-ab12' && wt.base === head && path.resolve(wt.repoRoot).toLowerCase() === path.resolve(repo).toLowerCase(), 'pane.worktree: branch sn/<slug>, base sha, repoRoot (from a subfolder)')
+  check(canon(wt.path) === canon(path.join(wtRoot, folder, 'claude-ab12')), `created at <root>/<repo>-<hash6>/<slug> (${wt.path})`)
+  check(wt.path === fs.realpathSync.native(wt.path) && wt.repoRoot === fs.realpathSync.native(repo), `pane.worktree is spelled as git spells it, the realpath (${wt.path}, ${wt.repoRoot})`)
+  check(wt.branch === 'sn/claude-ab12' && wt.base === head && canon(wt.repoRoot) === canon(repo), 'pane.worktree: branch sn/<slug>, base sha, repoRoot (from a subfolder)')
   check(!gitOkSync(repo, 'rev-parse', '--abbrev-ref', 'sn/claude-ab12@{upstream}'), 'the branch has no upstream (--no-track)')
   check(fs.readFileSync(path.join(wt.path, '.env'), 'utf8') === 'SECRET=1\n' && fs.existsSync(path.join(wt.path, '.env.local')), '.env and .env.local copied')
   check(!fs.existsSync(path.join(wt.path, 'dirty-in-main.txt')), 'uncommitted files of the main checkout are not copied')
   check(fs.lstatSync(path.join(wt.path, 'node_modules')).isSymbolicLink() && fs.existsSync(path.join(wt.path, 'node_modules', 'pkg', 'sentinel.txt')), 'node_modules is a junction to the repo')
   const ent = manifest.find(wt.path)
-  check(ent && ent.branch === 'sn/claude-ab12' && ent.baseSha === head && ent.baseRef === 'HEAD' && ent.linkedPaths.length === 1 && path.dirname(ent.linkedPaths[0]).toLowerCase() === path.resolve(wt.path).toLowerCase(), 'manifest entry with baseRef, baseSha and the junction')
+  check(ent && ent.branch === 'sn/claude-ab12' && ent.baseSha === head && ent.baseRef === 'HEAD' && ent.linkedPaths.length === 1 && canon(path.dirname(ent.linkedPaths[0])) === canon(wt.path),'manifest entry with baseRef, baseSha and the junction')
   check(fs.existsSync(mfFile), 'the manifest is dataDir()/worktrees.json')
 
   // Inspect (FR-30 / 36).
@@ -178,7 +226,7 @@ async function realRepoChecks() {
 
   // Duplicate from a worktree pane lands in the main repo.
   const dup = await s.create({ repoCwd: wt.path, slug: 'dup-1', copyEnv: false, linkNodeModules: false })
-  check(dup.ok && path.resolve(dup.worktree.repoRoot).toLowerCase() === path.resolve(repo).toLowerCase() && path.dirname(dup.worktree.path).toLowerCase() === path.join(wtRoot, folder).toLowerCase(), 'a worktree as repoCwd resolves to the main checkout')
+  check(dup.ok && canon(dup.worktree.repoRoot) === canon(repo) && canon(path.dirname(dup.worktree.path)) === canon(path.join(wtRoot, folder)),'a worktree as repoCwd resolves to the main checkout')
   check(!fs.existsSync(path.join(dup.worktree.path, '.env')) && !fs.existsSync(path.join(dup.worktree.path, 'node_modules')), 'copyEnv/linkNodeModules off: nothing copied or linked')
 
   // Refusals that touch nothing.
@@ -203,7 +251,7 @@ async function realRepoChecks() {
   const rb = await failing.s.create({ repoCwd: repo, slug: 'rollback-1', copyEnv: true, linkNodeModules: true })
   check(!rb.ok && rb.error === 'git_error', `a failed step reports git_error (${JSON.stringify(rb)})`)
   const rbPath = path.join(wtRoot, folder, 'rollback-1')
-  check(!fs.existsSync(rbPath) && !gitOkSync(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/sn/rollback-1') && !listed(repo).includes(rbPath.toLowerCase()) && !manifest.find(rbPath), 'rollback removed folder, branch, git record and manifest entry')
+  check(!fs.existsSync(rbPath) && !gitOkSync(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/sn/rollback-1') && !listed(repo).includes(canon(rbPath)) && !manifest.find(rbPath), 'rollback removed folder, branch, git record and manifest entry')
   check(fs.existsSync(sentinel) && git(repo, 'rev-parse', 'refs/heads/sn/taken').trim() === before, 'rollback left the repo node_modules and other branches alone')
 
   // Remove guards (FR-30): not_managed touches nothing.
@@ -229,7 +277,7 @@ async function realRepoChecks() {
   let treeCalls = 0
   const noUnlink = make({ deps: { fs: { ...fs.promises, unlink: async () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }) }, rmdir: async () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }) } }, removeTree: async () => { treeCalls++; return 'done' } } })
   same(await noUnlink.s.remove({ path: wt.path, paneId: 'p1', deleteBranch: true }), { ok: false, error: 'unlink_failed', detail: 'EACCES' }, 'a junction that cannot be unlinked is unlink_failed')
-  check(treeCalls === 0 && fs.existsSync(wt.path) && listed(repo).includes(path.resolve(wt.path).toLowerCase()) && gitOkSync(repo, 'rev-parse', '--verify', 'refs/heads/sn/claude-ab12') && manifest.find(wt.path), 'unlink_failed: no folder delete, no git, no branch, entry kept')
+  check(treeCalls === 0 && fs.existsSync(wt.path) && listed(repo).includes(canon(wt.path)) && gitOkSync(repo, 'rev-parse', '--verify', 'refs/heads/sn/claude-ab12') && manifest.find(wt.path), 'unlink_failed: no folder delete, no git, no branch, entry kept')
 
   // Busy: files still locked after the retries.
   const busy = make({ deps: { removeTree: async () => ({ deferred: 'EBUSY' }) } })
@@ -241,7 +289,7 @@ async function realRepoChecks() {
   const okRm = await s.remove({ path: wt.path, paneId: 'pane-7', deleteBranch: true })
   check(okRm.ok, `remove ok (${JSON.stringify(okRm)})`)
   check(kills.includes('pane-7'), 'main killed the pane pty before deleting')
-  check(!fs.existsSync(wt.path) && !gitOkSync(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/sn/claude-ab12') && !listed(repo).includes(path.resolve(wt.path).toLowerCase()) && !manifest.find(wt.path), 'folder, branch, git record and manifest entry gone')
+  check(!fs.existsSync(wt.path) && !gitOkSync(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/sn/claude-ab12') && !listed(repo).includes(canon(wt.path)) && !manifest.find(wt.path), 'folder, branch, git record and manifest entry gone')
   check(fs.readFileSync(sentinel, 'utf8') === 'keep me\n', 'the repo node_modules sentinel survives (the junction was unlinked, not followed)')
   check(fs.readFileSync(path.join(repo, '.env'), 'utf8') === 'SECRET=1\n' && git(repo, 'rev-parse', 'HEAD').trim() === head, 'the repo .env and HEAD are untouched')
   check((await s.remove({ path: dup.worktree.path, deleteBranch: false })).ok && gitOkSync(repo, 'rev-parse', '--verify', 'refs/heads/sn/dup-1'), 'deleteBranch:false removes the folder and keeps the branch')
@@ -272,6 +320,24 @@ async function realRepoChecks() {
   check(rows.some((e) => e.branch === 'sn/from-base' && e.managed && e.dirty === false), 'manifest entries are listed with their state')
   check((await fresh.s.remove({ path: manualPath, deleteBranch: true })).ok && !fs.existsSync(manualPath) && !gitOkSync(repo2, 'rev-parse', '--verify', '--quiet', 'refs/heads/sn/manual'), 'an adopted orphan can be deleted from Settings')
   check(fresh.s.isManaged(fromBase.worktree.path) && !fresh.s.isManaged(foreign) && !fresh.s.isManaged(repo), 'reveal is offered only for manifest paths')
+
+  // Another spelling of the same folders (CI's 8.3 TEMP, macOS's /var): git
+  // answers with realpaths, so a repo, a root and a remove path spelled
+  // through the link must still meet git's records and the manifest.
+  if (alias) {
+    const aRepo = path.join(alias, 'repo')
+    const aRoot = path.join(alias, 'data', 'worktrees')
+    const viaLink = make({ root: aRoot })
+    const ar = await viaLink.s.create({ repoCwd: aRepo, slug: 'alias-1', copyEnv: false, linkNodeModules: true })
+    check(ar.ok && canon(ar.worktree.path) === canon(path.join(wtRoot, folder, 'alias-1')) && ar.worktree.path === fs.realpathSync.native(ar.worktree.path), `a repo and a root spelled through a link land in the one <root>/<repo>-<hash6>, spelled as git spells it (${JSON.stringify(ar)})`)
+    same(await viaLink.s.inspect({ path: path.join(aRoot, folder, 'alias-1') }), { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: true }, 'inspect through the link spelling finds the entry (its junction is not dirty)')
+    same(await make({ root: path.join(aRepo, 'inner2') }).s.create({ repoCwd: repo, slug: 'x5', copyEnv: false, linkNodeModules: false }), { ok: false, error: 'root_inside_repo' }, 'a root inside the repo spelled through a link is still refused')
+    check(!fs.existsSync(path.join(repo, 'inner2')), 'and writes nothing in the repo')
+    const viaRows = (await viaLink.s.list()).entries
+    check(viaRows.filter((e) => e.branch === 'sn/alias-1').length === 1 && new Set(viaRows.map((e) => canon(e.path))).size === viaRows.length, 'one row per worktree whatever spelling the roots use')
+    check((await viaLink.s.remove({ path: path.join(aRoot, folder, 'alias-1'), deleteBranch: true })).ok && !fs.existsSync(ar.worktree.path) && !gitOkSync(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/sn/alias-1') && !new M.WorktreeManifest(mfFile).find(ar.worktree.path),'remove through the link spelling: git lists it, folder, branch and entry go')
+    check(fs.readFileSync(sentinel, 'utf8') === 'keep me\n', 'and its node_modules junction was unlinked, not followed')
+  }
 
   return { repo, fromBase: fromBase.worktree, git }
 }
@@ -421,7 +487,7 @@ async function rendererChecks(real) {
   await new Promise((res) => setImmediate(res))
   check(snApi._results.at(-1).ok && !pane('w1', 'pw'), 'the phone closes the worktree console')
   check(removes.length === 0 && WS.getState().close === null, 'no worktreeRemove and no dialog')
-  if (real) check(fs.existsSync(wt.path) && execFileSync('git', ['rev-parse', '--verify', `refs/heads/${wt.branch}`], { cwd: real.repo, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim().length === 40, 'folder and branch are still there')
+  if (real) check(fs.existsSync(wt.path) && real.git(real.repo, 'rev-parse', '--verify', `refs/heads/${wt.branch}`).trim().length === 40, 'folder and branch are still there')
   const closed = r.useAgentStore.getState().closedStack.at(-1)
   check(closed && closed.pane.worktree && closed.pane.worktree.path === wt.path, 'the closed console keeps its worktree for Reopen')
 }
@@ -432,6 +498,9 @@ async function rendererChecks(real) {
   else real = await realRepoChecks()
   await ptyChecks()
   await rendererChecks(real)
+  // The link first, as a link: never followed into base.
+  if (alias) fs.unlinkSync(alias)
+  alias = null
   fs.rmSync(base, { recursive: true, force: true })
   console.log(`PASS: ${checks} worktree checks (helpers, schema 13, manifest, create/inspect/remove/list on real repos, rollback, junction sentinel, not_managed, cwd_missing, renderer offer/close/orphans, phone closePane)`)
 })().catch((e) => {

@@ -18,7 +18,7 @@
  */
 import { createHash } from 'crypto'
 import { constants as fsConstants, promises as nodeFsp } from 'fs'
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path'
+import { basename, dirname, isAbsolute, join, posix, resolve, sep, win32 } from 'path'
 import {
   SHA_RE,
   WORKTREE_BRANCH_RE,
@@ -32,6 +32,7 @@ import {
   type WorktreeRemoveReq,
   type WorktreeRemoveRes,
 } from '@shared/worktree-types'
+import { canonicalPath, type RealpathFn } from './canonicalPath'
 import { gitErrorCode, type GitRunner } from './gitExec'
 import { parseStatusV2 } from './porcelain'
 import type { ManifestEntry, WorktreeManifest } from './WorktreeManifest'
@@ -66,6 +67,8 @@ export interface WorktreeServiceDeps {
   removeTree?: (target: string, guard: PathGuard, o: RemoveOptions) => Promise<RemoveResult>
   removeOptions?: RemoveOptions
   now?: () => number
+  /** Test seam over fs.realpathSync.native (see canonicalPath). */
+  realpath?: RealpathFn
 }
 
 type Fail<E extends string> = { ok: false; error: E; detail?: string }
@@ -84,10 +87,32 @@ function errCode(e: unknown): string {
   return typeof c === 'string' ? c : 'error'
 }
 
-/** `<repo name>-<hash6>`: a stable folder per repo, readable and collision free. */
-export function repoFolderName(repoRoot: string): string {
-  const name = basename(resolve(repoRoot)).replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[.-]+/, '').slice(0, 40) || 'repo'
-  const hash = createHash('sha1').update(pathKey(repoRoot)).digest('hex').slice(0, 6)
+/** Path functions of a platform; a host path always uses the host's own flavor. */
+function flavor(platform: NodeJS.Platform): typeof posix {
+  return platform === 'win32' ? win32 : posix
+}
+
+/** pathKey in the platform's own path flavor: resolved, no trailing separator, lower-cased where the filesystem folds case. */
+function flavorKey(p: string, platform: NodeJS.Platform): string {
+  const P = flavor(platform)
+  let r = P.resolve(p)
+  if (r.length > 1 && r.endsWith(P.sep) && !/^[A-Za-z]:\\$/.test(r)) r = r.slice(0, -1)
+  return platform === 'win32' || platform === 'darwin' ? r.toLowerCase() : r
+}
+
+/**
+ * `<repo name>-<hash6>`: a stable folder per repo, readable and collision
+ * free. The repo is first brought to git's spelling (canonicalPath), so an
+ * 8.3 short name, a junction or /var vs /private/var give the same folder.
+ * The repo root always comes from git on this machine; `platform` only lets a
+ * test name another OS's path, which is then taken as written.
+ */
+export function repoFolderName(repoRoot: string, opts: { platform?: NodeJS.Platform; realpath?: RealpathFn } = {}): string {
+  const platform = opts.platform ?? process.platform
+  const P = flavor(platform)
+  const full = platform === process.platform ? canonicalPath(repoRoot, opts.realpath) : P.resolve(repoRoot)
+  const name = P.basename(full).replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[.-]+/, '').slice(0, 40) || 'repo'
+  const hash = createHash('sha1').update(flavorKey(full, platform)).digest('hex').slice(0, 6)
   return `${name}-${hash}`
 }
 
@@ -111,16 +136,16 @@ export function parseWorktreeList(out: string): Array<{ path: string; branch: st
 }
 
 /** `gitdir: <common>/worktrees/<name>` of a linked worktree's `.git` file -> the main checkout, or null. */
-export function repoRootFromGitFile(content: string, worktreePath: string): string | null {
+export function repoRootFromGitFile(content: string, worktreePath: string, platform: NodeJS.Platform = process.platform): string | null {
+  const P = flavor(platform)
   const m = /^gitdir:\s*(.+?)\s*$/m.exec(content)
   if (!m) return null
-  const gitdir = resolve(worktreePath, m[1])
-  const parts = gitdir.split(/[\\/]+/)
-  const i = parts.lastIndexOf('worktrees')
-  if (i < 1 || i !== parts.length - 2) return null
-  const common = parts.slice(0, i).join(sep)
-  if (basename(common).toLowerCase() !== '.git') return null
-  return dirname(common)
+  // Walked with dirname, not split and joined: a UNC prefix (\\server\share) keeps both slashes.
+  const admin = P.dirname(P.resolve(worktreePath, m[1]))
+  if (P.basename(admin) !== 'worktrees') return null
+  const common = P.dirname(admin)
+  if (common === admin || P.basename(common).toLowerCase() !== '.git') return null
+  return P.dirname(common)
 }
 
 export class WorktreeService {
@@ -152,6 +177,15 @@ export class WorktreeService {
     }
   }
 
+  /**
+   * git's spelling of a path (canonicalPath). Every path that comes from the
+   * user, the settings or the renderer goes through it before it is compared
+   * with a path git printed or the manifest holds.
+   */
+  private canon(p: string): string {
+    return canonicalPath(p, this.deps.realpath)
+  }
+
   private async exists(p: string): Promise<boolean> {
     try {
       await this.fsx.lstat(p)
@@ -167,23 +201,25 @@ export class WorktreeService {
    * new folder lands beside the others and the manifest names the real repo.
    */
   private async resolveRepo(cwd: string): Promise<string> {
-    const top = resolve((await this.git(['rev-parse', '--show-toplevel'], cwd)).trim())
+    const top = this.canon((await this.git(['rev-parse', '--show-toplevel'], cwd)).trim())
+    // Not canon() on .git itself: a .git that is a link must still read as .git.
     const common = resolve(top, (await this.git(['rev-parse', '--git-common-dir'], top)).trim())
     if (basename(common).toLowerCase() !== '.git') return top
-    return dirname(common)
+    return this.canon(dirname(common))
   }
 
   private rootsFor(entry: ManifestEntry | null): string[] {
     const roots = [this.deps.root(), this.deps.defaultRoot()]
     if (entry?.root) roots.push(entry.root)
-    return roots.filter(Boolean).map((r) => resolve(r))
+    return roots.filter(Boolean).map((r) => this.canon(r))
   }
 
   /** Exactly `<root>/<repo>-<hash>/<slug>` under one of the roots, or null. */
   private rootOf(path: string, roots: string[]): string | null {
     for (const r of roots) {
       if (!isInside(path, r)) continue
-      const rel = relative(r, path).split(/[\\/]+/).filter(Boolean)
+      // Counted on the keys isInside compared: relative() is case-sensitive on macOS.
+      const rel = pathKey(path).slice(pathKey(r).length).split(sep).filter(Boolean)
       if (rel.length === 2) return r
     }
     return null
@@ -225,7 +261,8 @@ export class WorktreeService {
       const c = gitErrorCode(e)
       return c === 'not_repo' ? { ok: false, error: 'not_repo' } : { ok: false, error: c === 'timeout' ? 'timeout' : 'git_error', detail: c }
     }
-    const root = resolve(this.deps.root())
+    // Both in git's spelling: a root typed through an 8.3 name or a link still counts as inside the repo.
+    const root = this.canon(this.deps.root())
     if (isSameOrInside(root, repoRoot)) return { ok: false, error: 'root_inside_repo' }
 
     let baseSha: string
@@ -349,7 +386,7 @@ export class WorktreeService {
     const req = (raw && typeof raw === 'object' ? raw : {}) as { path?: unknown; base?: unknown }
     const empty: WorktreeInspectRes = { exists: false, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false }
     if (typeof req.path !== 'string' || !isAbsolute(req.path)) return empty
-    const path = resolve(req.path)
+    const path = this.canon(req.path)
     try {
       if (!(await this.fsx.stat(path)).isDirectory()) return empty
       await this.fsx.lstat(join(path, '.git'))
@@ -402,7 +439,7 @@ export class WorktreeService {
     const req = (raw && typeof raw === 'object' ? raw : {}) as Partial<WorktreeRemoveReq>
     const notManaged = (detail: string): Fail<'not_managed'> => ({ ok: false, error: 'not_managed', detail })
     if (typeof req.path !== 'string' || !isAbsolute(req.path)) return notManaged('path')
-    const path = resolve(req.path)
+    const path = this.canon(req.path)
     const entry = this.deps.manifest.find(path)
     if (!entry) return notManaged('manifest')
     const root = this.rootOf(path, this.rootsFor(entry))
@@ -416,7 +453,7 @@ export class WorktreeService {
     } catch (e) {
       return { ok: false, error: 'git_error', detail: gitErrorCode(e) }
     }
-    const row = list.find((w) => samePath(w.path, path))
+    const row = list.find((w) => samePath(this.canon(w.path), path))
     const onDisk = await this.exists(path)
     if (!row) {
       // Gone by hand and already pruned: nothing on disk to delete, only the
@@ -432,7 +469,8 @@ export class WorktreeService {
 
     // Every recorded link must still be a link, directly inside the worktree.
     for (const link of entry.linkedPaths) {
-      if (!samePath(dirname(resolve(link)), path)) return notManaged('linked_path')
+      // The folder holding the link, never the link itself: canon() would follow it.
+      if (!samePath(this.canon(dirname(resolve(link))), path)) return notManaged('linked_path')
       try {
         if (!(await this.fsx.lstat(link)).isSymbolicLink()) return notManaged('linked_path')
       } catch (e) {
@@ -510,13 +548,13 @@ export class WorktreeService {
           }
           const repoRoot = repoRootFromGitFile(content, path)
           if (!repoRoot) continue
-          await this.adopt(path, repoRoot, root, out)
+          await this.adopt(path, this.canon(repoRoot), root, out)
         }
       }
     }
     for (const e of this.deps.manifest.list()) {
       const exists = await this.exists(e.path)
-      out.set(pathKey(e.path), {
+      out.set(pathKey(this.canon(e.path)), {
         path: e.path,
         branch: e.branch,
         repoName: basename(e.repoRoot),
@@ -533,7 +571,7 @@ export class WorktreeService {
   private async adopt(path: string, repoRoot: string, root: string, out: Map<string, WorktreeListEntry>): Promise<void> {
     let row: { path: string; branch: string | null } | undefined
     try {
-      row = (await this.listed(repoRoot)).find((w) => samePath(w.path, path))
+      row = (await this.listed(repoRoot)).find((w) => samePath(this.canon(w.path), path))
     } catch {
       row = undefined
     }
