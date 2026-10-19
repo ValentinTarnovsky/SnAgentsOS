@@ -88,6 +88,11 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     notes: z.array(reviewNotePayload).min(1).max(50),
     enter: z.boolean(),
   }),
+  // E8-FR-32 (v3.1, R31-00): pane membership and the schedule itself are the
+  // executor's to check (ack not_found / no_schedule). scheduleRun carries no
+  // text: a stray field is stripped, never sent.
+  z.object({ kind: z.literal('scheduleRun'), workspaceId: id, paneId: id }),
+  z.object({ kind: z.literal('scheduleToggle'), workspaceId: id, paneId: id, enabled: z.boolean() }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [
