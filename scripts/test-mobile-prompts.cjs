@@ -4,7 +4,9 @@
 // E2-FR-21 sequence under a fake clock (lock, "already answered", the 24 group
 // cap, one group per second, the checks before each later group, the abort
 // on a dropped socket, "Sent" and "Not confirmed"). Also the promptCards
-// preference (default on). No socket, no DOM.
+// preference (default on), and Claude's menu read off the screen (R31-03,
+// E2-FR-53, 54): "Always allow" = "2" and the Plan card only with a layout
+// the phone validates, the fallback for any other. No socket, no DOM.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -20,6 +22,7 @@ export { cardFor, needsGenericStrip, isSimplePermissionTool, SIMPLE_PERMISSION_T
 export { createAnswerer, answerGroups, usePromptUi, ASK_CONFIRM_MS, SENT_VISIBLE_MS } from './src/mobile/src/lib/answer'
 export { ANSWER_STEP_MS, MAX_ANSWER_GROUPS, KEY_NEXT } from './src/shared/askAnswerKeys'
 export { loadPromptCards, savePromptCards, PROMPT_CARDS_KEY, loadPrefs } from './src/mobile/src/lib/prefs'
+export { parseMenu, classify, alwaysOption, planOptions, screenRows, readMenu, sameOption, cleanRow, MENU_TAIL_MAX } from './src/mobile/src/lib/promptMenu'
 ` },
   bundle: true, platform: 'node', format: 'cjs', write: false,
   define: { 'process.env.NODE_ENV': '"production"' },
@@ -48,9 +51,13 @@ const status = (pending, extra = {}) => ({ state: 'action', provider: 'claude', 
   check(P.cardFor(status([perm('t', 'Task'), perm('b', 'Bash')]), true)?.pending.id === 'b', 'the first request that makes a card wins')
   const generic = P.cardFor(status([perm('fallback:permission', undefined, '')]), true)
   check(generic?.kind === 'permission' && generic.generic, 'a permission without toolName gets the generic card')
-  check(P.cardFor(status([{ id: 'p', kind: 'plan', toolName: 'ExitPlanMode', summary: '' }, perm('fallback:permission', undefined, '')]), true) === undefined, 'with a plan request in the pane the generic permission makes no card')
+  const planFirst = P.cardFor(status([{ id: 'p', kind: 'plan', toolName: 'ExitPlanMode', summary: '' }, perm('fallback:permission', undefined, '')]), true)
+  check(planFirst?.kind === 'plan' && planFirst.pending.id === 'p', 'with a plan request in the pane the generic permission makes no card: the plan does')
+  const planAfter = P.cardFor(status([perm('fallback:permission', undefined, ''), { id: 'p', kind: 'plan', toolName: 'ExitPlanMode', summary: '' }]), true)
+  check(planAfter?.kind === 'plan', 'a generic permission listed before the plan still yields to it')
   check(P.cardFor(status([{ id: 'e', kind: 'elicitation', summary: '' }, perm('fallback:permission', undefined, '')]), true) === undefined, 'an elicitation also blocks the generic card')
-  check(P.cardFor(status([{ id: 'p', kind: 'plan', toolName: 'ExitPlanMode', summary: '' }]), true) === undefined, 'ExitPlanMode makes no card')
+  check(P.cardFor(status([{ id: 'p', kind: 'plan', toolName: 'ExitPlanMode', summary: 'Plan' }]), true)?.kind === 'plan', 'ExitPlanMode makes the Plan card (E2-FR-54)')
+  check(P.cardFor(status([{ id: 'p', kind: 'plan', toolName: 'ExitPlanMode', summary: '' }], { provider: 'codex' }), true) === undefined && P.cardFor(status([{ id: 'p', kind: 'plan', toolName: 'ExitPlanMode', summary: '' }]), false) === undefined, 'no Plan card for Codex or with promptCards off')
   check(P.cardFor(status([{ id: 'e', kind: 'elicitation', summary: '' }]), true) === undefined, 'an elicitation makes no card')
   const q = P.cardFor(status([ask('q', [single(), multi()])]), true)
   check(q?.kind === 'question' && q.questions.length === 2, 'a valid AskUserQuestion gets the wizard')
@@ -211,6 +218,63 @@ function rig() {
   check(r.answerer.answerCard('o', 'b', { kind: 'deny' }) === 'started' && r.sent.at(-1).paneId === 'o' && r.sent.at(-1).data === '\x1b', 'the lock is per pane: another pane answers at once')
 }
 
+// --- Claude's menu on screen (E2-FR-53, 54) ---
+{
+  const M = require('./fixtures/claude-menus.cjs')
+  const bash = P.parseMenu(M.bashPermission)
+  check(bash?.length === 3 && bash[0].label === 'Yes' && bash[2].label === 'No, and tell Claude what to do differently', 'the Bash dialog parses to 3 options, key hint dropped')
+  check(bash[1].label === "Yes, and don't ask again for npm test commands in C:\\Users\\dev\\repo", 'a long option wrapped by Ink is joined with its next row')
+  const always = P.alwaysOption(bash)
+  check(always?.n === 2 && always.label.startsWith("Yes, and don't ask again"), '"1. Yes / 2. Yes, <scope> / 3. No" validates "Always allow" as option 2')
+  const edit = P.parseMenu(M.editPermission)
+  check(P.alwaysOption(edit)?.label === 'Yes, allow all edits during this session', 'the boxed Edit dialog validates too (borders stripped, "(shift+tab)" dropped)')
+  check(P.alwaysOption(P.parseMenu(M.twoOptionPermission)) === null, 'a two option permission (2 = No) never offers "Always allow"')
+  check(P.alwaysOption(P.parseMenu(M.changedPermission)) === null, 'an unknown option 2 label: no "Always allow" (the hint stays)')
+  check(P.alwaysOption(P.parseMenu(M.plan)) === null && P.planOptions(bash) === null, 'a plan menu is not a permission menu and the other way round')
+  const plan = P.planOptions(P.parseMenu(M.plan))
+  check(plan?.length === 3 && plan.map(o => o.cls).join(',') === 'approve,approve,reject' && plan[0].label === 'Yes, and auto-accept edits', 'the 2.0 plan menu validates: two approvals and "No, keep planning"')
+  check(plan[2].label === 'No, keep planning' && plan[2].n === 3, 'the numbered plan body above the menu is not read as options')
+  const fb = P.planOptions(P.parseMenu(M.planWithFeedback))
+  check(fb?.length === 4 && fb[3].cls === 'feedback' && fb[0].label === 'Yes, clear context and auto-accept edits', 'the later plan layout with the free text row validates')
+  check(P.planOptions(P.parseMenu(M.changedPlan)) === null, 'a plan layout the phone does not know falls back (no buttons)')
+  check(P.parseMenu(M.staleMenu) === null, `a menu with more than ${P.MENU_TAIL_MAX} rows of output below it is stale`)
+  check(P.parseMenu(M.brokenNumbers) === null, 'numbers that do not run 1..N are no menu')
+  check(P.parseMenu(['hello', 'world']) === null && P.parseMenu([]) === null, 'no numbered rows, no menu')
+  check(P.parseMenu([' 1. Only one']) === null, 'a single option is no menu')
+  check(P.planOptions(P.parseMenu([' 1. Yes, go', ' 2. Yes, go faster'])) === null, 'a plan menu needs a way back (reject or free text)')
+  check(P.classify('Yes') === 'yes' && P.classify('Yes, and x') === 'approve' && P.classify('No') === 'reject' && P.classify('Type here to tell Claude') === 'feedback' && P.classify('Maybe') === null, 'option classes')
+  check(P.cleanRow('\u2502 \u276f 1. Yes   \u2502') === '\u276f 1. Yes' && !/[\x00-\x1f]/.test(P.cleanRow('a\x1bb')), 'cleanRow strips box borders and controls')
+  check(P.sameOption(bash, { n: 2, label: bash[1].label }) && !P.sameOption(bash, { n: 2, label: 'Yes' }) && !P.sameOption(null, bash[0]), 'sameOption compares digit and label')
+  // screenRows on a fake xterm buffer: the pty screen only, soft wraps joined.
+  const lines = ['old scrollback', ' Do you want to proceed?', ' \u276f 1. Yes', "   2. Yes, and don't ask again for npm", ' test commands', '   3. No']
+  const wrapped = new Set([4])
+  const term = { rows: 5, buffer: { active: { baseY: 1, length: lines.length, getLine: y => ({ isWrapped: wrapped.has(y), translateToString: () => lines[y] }) } } }
+  const rows = P.screenRows(term)
+  check(rows.length === 4 && rows[0] === ' Do you want to proceed?' && rows[2] === "   2. Yes, and don't ask again for npm test commands", 'screenRows reads baseY..baseY+rows and joins soft wraps')
+  check(P.alwaysOption(P.readMenu(term))?.n === 2 && P.readMenu(null) === null && P.readMenu({}) === null, 'readMenu binds the parser to a terminal and survives a torn down one')
+  // The answers: "2" and the plan digit, one group, no Enter.
+  const planReq = { id: 'pl', kind: 'plan', toolName: 'ExitPlanMode', summary: 'Plan' }
+  check(P.answerGroups(perm('a', 'Bash'), { kind: 'always' }).map(g => g.raw).join('|') === '2', '"Always allow" is the single group "2"')
+  check(P.answerGroups(planReq, { kind: 'menu', option: 3 }).map(g => g.raw).join('|') === '3', 'a plan option is its digit')
+  check(P.answerGroups(planReq, { kind: 'always' }).length === 0 && P.answerGroups(perm('a', 'Bash'), { kind: 'menu', option: 1 }).length === 0, 'always only answers a permission, a menu digit only a plan')
+  check(P.answerGroups(planReq, { kind: 'menu', option: 0 }).length === 0 && P.answerGroups(planReq, { kind: 'menu', option: 10 }).length === 0 && P.answerGroups(planReq, { kind: 'menu', option: 1.5 }).length === 0, 'menu digits stay within 1..9')
+  check(P.needsGenericStrip(status([planReq], { reason: 'plan' }), P.cardFor(status([planReq]), true), false), 'a plan whose menu did not validate shows the generic strip')
+  check(!P.needsGenericStrip(status([planReq], { reason: 'plan' }), P.cardFor(status([planReq]), true), true), 'a validated plan menu shows the card, no strip')
+  // The sequence: one group, "Sent", then cleared like a permission.
+  const r = rig()
+  r.statuses.p = status([perm('a', 'Bash')])
+  check(r.answerer.answerCard('p', 'a', { kind: 'always' }) === 'started' && r.sent.length === 1 && r.sent[0].data === '2', '"Always allow" writes "2" at once')
+  r.advance(1000)
+  check(r.last().phase === 'sent' && r.sent.every(x => !x.data.includes('\r')), '"Sent" after one step and never an Enter')
+  const r2 = rig()
+  r2.statuses.p = status([planReq], { reason: 'plan' })
+  check(r2.answerer.answerCard('p', 'pl', { kind: 'menu', option: 2 }) === 'started' && r2.sent[0].data === '2' && r2.last().kind === 'plan', 'a plan option starts a "plan" answer')
+  r2.advance(1000)
+  check(r2.last().phase === 'sent', 'the plan answer reads "Sent"')
+  r2.advance(P.SENT_VISIBLE_MS)
+  check(r2.last() === null && r2.sent.length === 1, '"Sent" clears with no ask confirmation and no retry')
+}
+
 // --- folded cards, wizard resets and the preference ---
 {
   const ui = P.usePromptUi
@@ -229,4 +293,4 @@ function rig() {
   check(!local.has(P.PROMPT_CARDS_KEY) && P.loadPromptCards() === true, 'on removes the key')
 }
 
-console.log(`PASS: ${checks} mobile answer card checks (cardFor, answer sequence, folding, promptCards)`)
+console.log(`PASS: ${checks} mobile answer card checks (cardFor, answer sequence, folding, promptCards, Claude menus)`)
