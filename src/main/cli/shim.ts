@@ -24,16 +24,25 @@ const sh = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'"
  * The Windows shim. `setlocal` keeps ELECTRON_RUN_AS_NODE out of the calling
  * shell; the exe check first, so a closed portable (its temp extraction is
  * gone) exits 5 with a clear message.
+ *
+ * cmd decodes a batch file with the console code page (850, 437...), so a
+ * UTF-8 path with an accent (C:\Users\Martín\...) would never be found. When
+ * a path is not plain ASCII the shim switches to code page 65001 for its own
+ * lines and restores the caller's page before leaving.
  */
 export function windowsShim(t: ShimTarget): string {
   const exe = batch(t.execPath)
+  // eslint-disable-next-line no-control-regex
+  const utf8 = /[^\x00-\x7f]/.test(t.execPath + t.cliPath + t.runtimePath)
+  const restore = utf8 ? 'chcp %_snaos_cp% >nul & ' : ''
   return [
     '@echo off',
     'setlocal',
-    `if not exist "${exe}" (echo ${SHIM_NOT_RUNNING} 1>&2 & exit /b ${SHIM_NOT_RUNNING_EXIT})`,
+    ...(utf8 ? ['for /f "tokens=2 delims=:." %%a in (\'chcp\') do set "_snaos_cp=%%a"', 'chcp 65001 >nul'] : []),
+    `if not exist "${exe}" (echo ${SHIM_NOT_RUNNING} 1>&2 & ${restore}exit /b ${SHIM_NOT_RUNNING_EXIT})`,
     'set ELECTRON_RUN_AS_NODE=1',
     `"${exe}" "${batch(t.cliPath)}" --runtime "${batch(t.runtimePath)}" %*`,
-    'exit /b %errorlevel%',
+    ...(utf8 ? ['set "_snaos_rc=%errorlevel%"', 'chcp %_snaos_cp% >nul', 'exit /b %_snaos_rc%'] : ['exit /b %errorlevel%']),
     '',
   ].join('\r\n')
 }

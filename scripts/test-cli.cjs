@@ -164,8 +164,39 @@ function runtimeAndShimChecks() {
 
 async function userPathChecks() {
   const U = load('src/main/cli/userPath.ts')
-  check(U.parseRegQuery('\r\nHKEY_CURRENT_USER\\Environment\r\n    Path    REG_EXPAND_SZ    %USERPROFILE%\\bin;C:\\Tools\r\n\r\n') === '%USERPROFILE%\\bin;C:\\Tools', 'reg query output parses to the raw value')
-  check(U.parseRegQuery('nothing here') === '', 'a missing value reads as empty')
+  const raw = '%USERPROFILE%\\bin;C:\\Users\\Martín\\tools;C:\\Tools'
+  check(U.parseReadOutput(`\r\n=${Buffer.from(raw, 'utf8').toString('base64')}\r\n`) === raw, 'the registry read output (base64 of UTF-8) parses to the raw value, accents included')
+  check(U.parseReadOutput('@\r\n') === '', 'a missing value reads as empty')
+  let threw = 0
+  for (const bad of ['', 'Access denied', '=not base64!']) { try { U.parseReadOutput(bad) } catch { threw++ } }
+  check(threw === 3, 'a failed or garbled read throws instead of reading as an empty PATH (a write would wipe the user PATH)')
+  check(U.writeScript(raw).includes(Buffer.from(raw, 'utf8').toString('base64')) && !U.writeScript(raw).includes('%USERPROFILE%') && /ExpandString/.test(U.writeScript(raw)), 'the write script carries the value as base64 and stores REG_EXPAND_SZ')
+  let rejected = 0
+  for (const bad of ["Environment'; rm x", 'a b']) { try { U.readScript(bad) } catch { rejected++ } }
+  check(rejected === 2, 'only plain subkey paths reach a script')
+  const failing = { read: async () => { throw new Error('reg unavailable') }, write: async () => { throw new Error('must not write') }, broadcast: async () => {} }
+  let addFailed = false
+  try { await U.addToUserPath('C:\\x\\bin', failing) } catch { addFailed = true }
+  check(addFailed, 'a failed read aborts the add without writing')
+  if (win) {
+    // The real PowerShell path against a throwaway HKCU test key (never Environment), removed afterwards.
+    const subKey = `Software\\SnAgentsOSTest-${rand()}`
+    const reg = U.powershellRegistry(subKey, false)
+    try {
+      check((await reg.read()) === '', 'a test key without Path reads as empty')
+      const value = '%USERPROFILE%\\.local\\bin;C:\\Users\\Martín Ñandú\\bin;C:\\Tools'
+      await reg.write(value)
+      check((await reg.read()) === value, 'PowerShell write + read round-trips accents and keeps %VAR% unexpanded')
+      const q = spawnSync('reg.exe', ['query', `HKCU\\${subKey}`, '/v', 'Path'], { encoding: 'utf8', windowsHide: true })
+      check(/REG_EXPAND_SZ/.test(q.stdout), 'the value is stored as REG_EXPAND_SZ')
+      await U.addToUserPath('C:\\Data\\snagentsos\\bin', reg)
+      check((await reg.read()) === `${value};C:\\Data\\snagentsos\\bin`, 'add through the real registry path keeps every other entry as written')
+      await U.removeFromUserPath('C:\\Data\\snagentsos\\bin', reg)
+      check((await reg.read()) === value, 'remove through the real registry path restores the value')
+    } finally {
+      spawnSync('reg.exe', ['delete', `HKCU\\${subKey}`, '/f'], { windowsHide: true })
+    }
+  }
   const dir = 'C:\\Users\\x\\AppData\\Roaming\\snagentsos\\bin'
   let value = '%USERPROFILE%\\.local\\bin;C:\\Tools;%JAVA_HOME%\\bin'
   const writes = []
@@ -849,6 +880,31 @@ async function shimRunChecks() {
     if (win) {
       const leak = await runAsync(cmdExe, ['/d', '/s', '/c', `"call "${shim}" ping & set ELECTRON_RUN_AS_NODE"`])
       check(leak.stdout.includes('pong') && !/ELECTRON_RUN_AS_NODE=1/.test(leak.stdout), 'after snaos, ELECTRON_RUN_AS_NODE is not left in the shell (setlocal)')
+      // A user folder with an accent (C:\Users\Martín): cmd reads the batch in the
+      // console code page, so the shim must switch to 65001 and restore it.
+      const accented = path.join(dir, 'Martín Ñandú')
+      const junction = spawnSync(cmdExe, ['/d', '/c', 'mklink', '/J', accented, path.dirname(electronExe)], { windowsHide: true })
+      if (junction.status === 0) {
+        try {
+          const data = path.join(dir, 'Datos José')
+          fs.mkdirSync(data, { recursive: true })
+          const accCli = path.join(data, 'cli.js')
+          fs.copyFileSync(cliPath, accCli)
+          const accShim = S.writeShim(path.join(data, 'bin'), { execPath: path.join(accented, path.basename(electronExe)), cliPath: accCli, runtimePath })
+          check(/chcp 65001/.test(fs.readFileSync(accShim, 'utf8')) && !/chcp/.test(fs.readFileSync(shim, 'utf8')), 'only a shim with non-ASCII paths switches the code page')
+          const before = await runAsync(cmdExe, ['/d', '/s', '/c', '"chcp"'])
+          const acc = await runAsync(cmdExe, ['/d', '/s', '/c', `"call "${accShim}" ping --json & chcp"`])
+          const pong = acc.stdout.split(/\r?\n/).find((l) => l.startsWith('{'))
+          check(!!pong && JSON.parse(pong).data.pong === true, 'a shim whose exe and cli.js live under accented folders still runs', acc)
+          const cp = (s) => (s.match(/(\d+)\.?\s*$/m) ?? [])[1]
+          check(cp(acc.stdout) === cp(before.stdout), 'the caller code page is restored after the shim', { before: before.stdout, after: acc.stdout })
+          const accGone = S.writeShim(path.join(data, 'bin-gone'), { execPath: path.join(accented, 'missing.exe'), cliPath: accCli, runtimePath })
+          const accClosed = await viaShim(accGone, ['ping'])
+          check(accClosed.status === 5 && /not running/.test(accClosed.stderr), 'the accented shim still exits 5 when the exe is gone')
+        } finally {
+          spawnSync(cmdExe, ['/d', '/c', 'rmdir', accented], { windowsHide: true })
+        }
+      } else console.log('skip: could not create a junction, accented shim checks skipped')
     }
     const gone = S.writeShim(path.join(dir, 'bin-gone'), { execPath: path.join(dir, 'missing', 'SnAgentsOS.exe'), cliPath, runtimePath })
     const closed = await viaShim(gone, ['ping'])
