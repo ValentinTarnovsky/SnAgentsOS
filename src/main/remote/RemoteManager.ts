@@ -32,7 +32,7 @@ import { DeviceRegistry } from './DeviceRegistry'
 import { listEndpoints } from './network'
 import { PairingService, RateLimiter } from './PairingService'
 import { RemoteServer } from './RemoteServer'
-import { SessionManager } from './SessionManager'
+import { SessionManager, type HttpTokenOwner } from './SessionManager'
 
 const DEFAULT_PORT = 4517
 const MIN_PORT = 1024
@@ -427,6 +427,17 @@ export class RemoteManager {
   /** A phone is watching this pane right now (subscribed, page visible, fresh); ntfy skips it. */
   isPaneViewed(paneId: string): boolean {
     return this.sessions?.isPaneViewed(paneId) ?? false
+  }
+
+  // --- HTTP auth (E3-FR-01) ---------------------------------------------------
+
+  /**
+   * The device behind an `Authorization: Bearer` token of the HTTP routes
+   * (upload, push subscribe), or null: unknown token, a socket that already
+   * closed, a revoked device, or the server stopped (which drops them all).
+   */
+  resolveHttpToken(token: string): HttpTokenOwner | null {
+    return this.sessions?.resolveHttpToken(token) ?? null
   }
 
   // --- UI state -------------------------------------------------------------

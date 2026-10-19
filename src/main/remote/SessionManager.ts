@@ -7,8 +7,12 @@
  * It is the desktop trusting nobody: every inbound frame is schema-validated,
  * `authed` is re-checked at a single choke point, and unauthenticated sockets
  * are capped, timed out, and rate-limited per IP.
+ *
+ * E3 transversal (R30-02): every authOk carries a per-session `httpToken`
+ * (the Bearer of the HTTP routes, dropped with the socket or the device), and
+ * the v3.0 message types and ctl actions share a per-session token bucket.
  */
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto'
 import { WebSocket, type RawData } from 'ws'
 import type { RemoteCommandResult } from '@shared/ipc-contract'
 import {
@@ -25,6 +29,7 @@ import { parseRemoteClientMsg } from '@shared/remote-protocol-schemas'
 import type { PtyExitInfo, PtyManager, PtySink } from '../pty/PtyManager'
 import type { DeviceRegistry } from './DeviceRegistry'
 import type { PairingService, RateLimiter } from './PairingService'
+import { TokenBucket } from './TokenBucket'
 
 /** Coalesce `out` bytes at ~60Hz per socket (mirror of the desktop cadence). */
 const OUT_COALESCE_MS = 16
@@ -57,6 +62,33 @@ const CLOSE_GOING_AWAY = 1001
  * visible page inside it; a frozen iOS page falls out on its own).
  */
 export const VIEWED_FRESH_MS = 30 * 1000
+
+// --- E3-FR-03: rate-limited v3.0 traffic ---------------------------------------
+// Matched by name, not by type, so a WP that adds one of these messages to the
+// schema is limited from its first frame without touching the gate.
+
+/** Phone -> desktop message types behind the per-session token bucket. */
+export const RATE_LIMITED_MSG_TYPES: ReadonlySet<string> = new Set(['chatSub', 'chatUnsub', 'chatMore', 'historyReq', 'gitReq'])
+/** ctl kinds behind the bucket (plus `createPane` carrying `resume`). */
+export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set(['fitPane', 'releaseFit', 'sendReviewNotes'])
+
+/** A parsed phone frame the bucket applies to (E3-FR-03). */
+export function isRateLimitedMsg(msg: { type: string; action?: unknown }): boolean {
+  if (RATE_LIMITED_MSG_TYPES.has(msg.type)) return true
+  if (msg.type !== 'ctl' || !msg.action || typeof msg.action !== 'object') return false
+  const action = msg.action as { kind?: unknown; resume?: unknown }
+  if (typeof action.kind !== 'string') return false
+  if (RATE_LIMITED_CTL_KINDS.has(action.kind)) return true
+  return action.kind === 'createPane' && action.resume != null
+}
+
+/** sha256 of an httpToken: the lookup key, so the map never holds the token itself. */
+function tokenKey(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
+}
+
+/** An httpToken is 64 lowercase hex. */
+const HTTP_TOKEN_RE = /^[0-9a-f]{64}$/
 
 /** Distributive Omit so callers of send() skip the constant `v` field. */
 type ServerMsgNoV<T = RemoteServerMsg> = T extends unknown ? Omit<T, 'v'> : never
@@ -96,6 +128,15 @@ interface Session {
   lastSeen: number
   handshakeTimer: ReturnType<typeof setTimeout> | null
   badMsgStrikes: number
+  /** E3-FR-03: shared by the rate-limited message types and ctl kinds. */
+  bucket: TokenBucket
+  /** E3-FR-01: Bearer of the HTTP routes, issued with authOk; null before and after. */
+  httpToken: string | null
+}
+
+/** Who an httpToken belongs to (RemoteManager.resolveHttpToken). */
+export interface HttpTokenOwner {
+  deviceId: string
 }
 
 export interface SessionManagerDeps {
@@ -113,6 +154,11 @@ export interface SessionManagerDeps {
   executeCommand: (action: RemoteCtlAction, deviceName?: string) => Promise<RemoteCommandResult>
   /** Authed-session count changed (toggles throttling + pushes UI state). */
   onConnectionsChanged: () => void
+  /**
+   * E3-FR-01: public VAPID key for authOk, or null while https is off. Absent
+   * until the push service exists; authOk then carries no pushKey.
+   */
+  getPushKey?: () => string | null
 }
 
 /**
@@ -140,6 +186,8 @@ export class SessionManager implements PtySink {
   /** requestId -> the socket waiting on that pairing approval. */
   private readonly pendingPairSessions = new Map<string, Session>()
   private readonly unauthedByIp = new Map<string, number>()
+  /** E3-FR-01: tokenKey(httpToken) -> the session that holds it. */
+  private readonly httpTokens = new Map<string, Session>()
   private readonly maintenanceTimer: ReturnType<typeof setInterval>
 
   constructor(private readonly deps: SessionManagerDeps) {
@@ -181,6 +229,8 @@ export class SessionManager implements PtySink {
       lastSeen: Date.now(),
       handshakeTimer: null,
       badMsgStrikes: 0,
+      bucket: new TokenBucket(),
+      httpToken: null,
     }
     this.sessions.add(session)
     session.handshakeTimer = setTimeout(() => {
@@ -239,6 +289,15 @@ export class SessionManager implements PtySink {
         default:
           return this.send(session, { type: 'err', code: 'unauthorized' })
       }
+    }
+
+    // E3-FR-03: past 20/s (burst 40) a rate-limited ctl answers the usual
+    // ctlAck with error 'rate' and any other limited message is dropped in
+    // silence (the phone's 10s pending timeout makes it visible). No `err`,
+    // no strike: the socket stays as healthy as before.
+    if (isRateLimitedMsg(msg) && !session.bucket.take()) {
+      if (msg.type === 'ctl') this.send(session, { type: 'ctlAck', id: msg.id, ok: false, error: 'rate' })
+      return
     }
 
     switch (msg.type) {
@@ -304,13 +363,55 @@ export class SessionManager implements PtySink {
     }
     this.deps.rateLimiter.clear(session.ip)
     this.finishAuth(session, deviceId)
+    this.sendAuthOk(session, deviceId)
+  }
+
+  /**
+   * authOk with a fresh httpToken (E3-FR-01) and, while https is on, the push
+   * key. Older bundles ignore both fields, so PROTOCOL_VERSION stays 1.
+   */
+  private sendAuthOk(session: Session, deviceId: string): void {
+    const pushKey = this.deps.getPushKey?.() ?? null
     this.send(session, {
       type: 'authOk',
       deviceId,
       state: this.deps.getSnapshot(),
       hostPlatform: process.platform,
       appVersion: this.deps.appVersion,
+      httpToken: this.issueHttpToken(session),
+      ...(pushKey ? { pushKey } : {}),
     })
+  }
+
+  // --- HTTP token (E3-FR-01) ----------------------------------------------------
+
+  /** A new random token for this session; any previous one stops working. */
+  private issueHttpToken(session: Session): string {
+    this.dropHttpToken(session)
+    const token = randomBytes(32).toString('hex')
+    session.httpToken = token
+    this.httpTokens.set(tokenKey(token), session)
+    return token
+  }
+
+  private dropHttpToken(session: Session): void {
+    if (!session.httpToken) return
+    this.httpTokens.delete(tokenKey(session.httpToken))
+    session.httpToken = null
+  }
+
+  /**
+   * The device behind a Bearer token, or null: unknown, malformed, from a
+   * closed socket or of a device that is no longer paired. The map is keyed
+   * by the token's hash and the final match is a constant-time compare.
+   */
+  resolveHttpToken(token: string): HttpTokenOwner | null {
+    if (typeof token !== 'string' || !HTTP_TOKEN_RE.test(token)) return null
+    const session = this.httpTokens.get(tokenKey(token))
+    if (!session || !session.authed || !session.deviceId || !session.httpToken) return null
+    if (!timingSafeEqualHex(session.httpToken, token)) return null
+    if (!this.deps.registry.get(session.deviceId)) return null
+    return { deviceId: session.deviceId }
   }
 
   private failAuth(session: Session, reason: RemoteAuthFailReason): void {
@@ -373,13 +474,7 @@ export class SessionManager implements PtySink {
       this.finishAuth(session, result.deviceId)
       // Full authOk (not just a state frame) so the freshly paired client goes
       // live through the same path as a reconnect and learns hostPlatform.
-      this.send(session, {
-        type: 'authOk',
-        deviceId: result.deviceId,
-        state: this.deps.getSnapshot(),
-        hostPlatform: process.platform,
-        appVersion: this.deps.appVersion,
-      })
+      this.sendAuthOk(session, result.deviceId)
       return
     }
     this.send(session, { type: 'pairDenied', reason: result.reason })
@@ -526,6 +621,8 @@ export class SessionManager implements PtySink {
       // close frame would otherwise keep hitting the authed choke point. Flip
       // authed off NOW so any further sub/input/ctl is rejected immediately.
       session.authed = false
+      // Same for HTTP: the token dies now, not when the TCP finally closes.
+      this.dropHttpToken(session)
       changed = true
       this.closeSession(session, REMOTE_CLOSE.REVOKED, 'revoked')
     }
@@ -534,7 +631,9 @@ export class SessionManager implements PtySink {
 
   /** Best-effort shutdown frame + close; never awaits (must not delay quit). */
   shutdownAll(reason: 'quit' | 'disabled'): void {
+    this.httpTokens.clear()
     for (const session of this.sessions) {
+      session.httpToken = null
       this.send(session, { type: 'shutdown', reason })
       try {
         session.ws.close(CLOSE_GOING_AWAY, reason)
@@ -562,6 +661,7 @@ export class SessionManager implements PtySink {
     }
     this.sessions.clear()
     this.paneSubs.clear()
+    this.httpTokens.clear()
     this.pendingPairSessions.clear()
     this.unauthedByIp.clear()
     this.deps.ptyManager.setForcedFast([])
@@ -693,6 +793,8 @@ export class SessionManager implements PtySink {
   }
 
   private closeSession(session: Session, code: number, reason: string): void {
+    // A closing socket's token is dead already, even while the TCP lingers.
+    this.dropHttpToken(session)
     try {
       session.ws.close(code, reason)
     } catch {
@@ -711,6 +813,7 @@ export class SessionManager implements PtySink {
 
   private removeSession(session: Session): void {
     if (!this.sessions.delete(session)) return
+    this.dropHttpToken(session)
     this.clearHandshakeTimer(session)
     if (session.outTimer) {
       clearTimeout(session.outTimer)
