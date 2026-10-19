@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { RefreshCw } from 'lucide-react'
 import type { UsageRow } from '@shared/ipc-contract'
+import { visibleUsageRows } from '@shared/usageRows'
 import { useAppStore } from '@/lib/store'
 import { useUsageStore } from '@/lib/usageStore'
 import { useT, type MessageKey, type TFn } from '@/i18n'
@@ -35,13 +36,15 @@ function fmtClock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
-const ROW_LABEL_KEYS: Record<string, MessageKey> = {
-  'claude.5h': 'aiusage.session',
-  'claude.7d': 'aiusage.weekly',
+/** Labels follow what the window IS (its kind), never the row id or its position in the plan. */
+const KIND_LABEL_KEYS: Partial<Record<UsageRow['kind'], MessageKey>> = {
+  '5h': 'aiusage.session',
+  '7d': 'aiusage.weekly',
+}
+/** Per-model weekly buckets share kind '7d' but name their model. */
+const MODEL_LABEL_KEYS: Record<string, MessageKey> = {
   'claude.opus7d': 'aiusage.weeklyOpus',
   'claude.sonnet7d': 'aiusage.weeklySonnet',
-  'codex.5h': 'aiusage.session',
-  'codex.7d': 'aiusage.weekly',
 }
 
 export interface RowView {
@@ -49,11 +52,13 @@ export interface RowView {
   percent: number | null
   valueText: string
   subText?: string
+  /** Tooltip: set when main is holding the last good value through a failed poll. */
+  title?: string
   muted: boolean
 }
 
 export function viewRow(row: UsageRow, t: TFn): RowView {
-  const labelKey = ROW_LABEL_KEYS[row.id]
+  const labelKey = MODEL_LABEL_KEYS[row.id] ?? KIND_LABEL_KEYS[row.kind]
   const label = labelKey ? t(labelKey) : row.label
   if (row.status !== 'ok') {
     const valueText = t(
@@ -79,6 +84,7 @@ export function viewRow(row: UsageRow, t: TFn): RowView {
     percent: row.percent,
     valueText,
     subText: when ? t('aiusage.resets', { when }) : undefined,
+    title: row.stale ? t('aiusage.stale') : undefined,
     muted: false,
   }
 }
@@ -131,7 +137,8 @@ export function UsageBars() {
 
   if (!usage.enabled) return null
 
-  const rows = snapshot?.rows ?? []
+  // A window the plan does not have (nodata beside an answered sibling) is not shown.
+  const rows = visibleUsageRows(snapshot?.rows ?? [])
   const claude = rows.filter((r) => r.provider === 'claude')
   const codex = rows.filter((r) => r.provider === 'codex')
   const custom = rows.filter((r) => r.provider === 'custom')
@@ -154,7 +161,7 @@ export function UsageBars() {
             {g.list.map((r) => {
               const v = viewRow(r, t)
               return (
-                <Tooltip key={r.id} label={`${v.label} · ${v.valueText}`} side="right">
+                <Tooltip key={r.id} label={`${v.label} · ${v.valueText}${v.title ? ` · ${v.title}` : ''}`} side="right">
                   <div className="flex justify-center">
                     <UsageRing percent={v.percent} muted={v.muted} size={36} />
                   </div>

@@ -302,6 +302,8 @@ export interface UsageRow {
   /** Subscription/plan label (Codex: plus/pro/...). */
   planType?: string | null
   status: 'ok' | 'expired' | 'error' | 'nodata' | 'loading'
+  /** True when main is holding the last good value through a failed poll (grace window). */
+  stale?: boolean
 }
 
 /** A full snapshot of every enabled usage row, pushed to the renderer. */

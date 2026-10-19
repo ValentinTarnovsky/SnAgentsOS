@@ -949,6 +949,7 @@ export const es: Record<keyof typeof en, string> = {
   'aiusage.noData': 'Sin datos',
   'aiusage.empty': 'Aún no hay datos de uso.',
   'aiusage.updated': 'Actualizado {time}',
+  'aiusage.stale': 'Último valor conocido (no se pudo actualizar)',
   'aiusage.hint':
     'Uso de tokens y cuotas en vivo de Claude Code y Codex, como barras al pie de la barra lateral.',
   'aiusage.enable': 'Mostrar barras de uso',

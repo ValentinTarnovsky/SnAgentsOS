@@ -946,6 +946,7 @@ export const en = {
   'aiusage.noData': 'No data',
   'aiusage.empty': 'No usage data yet.',
   'aiusage.updated': 'Updated {time}',
+  'aiusage.stale': 'Last known value (could not refresh)',
   'aiusage.hint':
     'Live token and quota usage for Claude Code and Codex, shown as bars at the bottom of the sidebar.',
   'aiusage.enable': 'Show usage bars',
