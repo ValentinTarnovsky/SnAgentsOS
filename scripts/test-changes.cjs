@@ -78,13 +78,16 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
 
   // ---- path validation (git:fileDiff / git:openFile) -------------------------
   const R = 'C:\\repo'
-  same(resolveRepoPath(R, 'src/a.ts', 'win32'), path.resolve(R, 'src/a.ts'), 'nested relative path resolves inside the repo')
+  same(resolveRepoPath(R, 'src/a.ts', 'win32'), path.win32.resolve(R, 'src/a.ts'), 'nested relative path resolves inside the repo')
   for (const bad of ['', '..\\x', 'src/../../x', '../x', 'C:\\Windows\\win.ini', 'D:x', '/etc/passwd', '\\\\srv\\share\\x', 'a\0b', 'a\nb', 'a\rb', 'x\u2028y', 'x\u009by', 'a/..']) {
     check(resolveRepoPath(R, bad, 'win32') === null, `rejected: ${JSON.stringify(bad)}`)
   }
   check(resolveRepoPath(R, 'x'.repeat(5000), 'win32') === null, 'a path over 4096 chars is rejected')
   check(resolveRepoPath(R, 'a..b/c..d.txt', 'win32') !== null, 'dots inside a name are fine')
   check(resolveRepoPath('/home/u/repo', 'src/a.ts', 'linux') !== null && resolveRepoPath('/home/u/repo', '../repo2/a', 'linux') === null, 'POSIX root')
+  // The injected platform picks the path rules, whatever the host runs (CI runs this on Linux and macOS too).
+  check(resolveRepoPath(R, 'src/a.ts', 'win32') === 'C:\\repo\\src\\a.ts' && resolveRepoPath('/home/u/repo', 'src/a.ts', 'linux') === '/home/u/repo/src/a.ts', `win32 and POSIX roots resolve with their own rules on any host (${process.platform})`)
+  check(resolveRepoPath('/home/u/Repo', 'a', 'linux') === '/home/u/Repo/a' && resolveRepoPath('C:\\Repo', 'a', 'win32') === 'C:\\Repo\\a', 'the root keeps its spelling')
   same(findListed([{ path: 'a', area: 'staged' }, { path: 'a', area: 'unstaged' }], 'a', 'unstaged'), { path: 'a', area: 'unstaged' }, 'a listed entry is found by path and area')
   check(findListed([{ path: 'a', area: 'staged' }], 'a', 'untracked') === null && findListed([], 'a') === null, 'unlisted path or area')
 
@@ -106,7 +109,7 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
     return { calls, deps }
   }
   {
-    const A = (rel) => path.resolve(R, rel)
+    const A = (rel) => path.win32.resolve(R, rel)
     const f = fakeOpen({ [A('src/a.ts')]: 'file', [A('build.bat')]: 'file', [A('link.txt')]: 'link', [A('src')]: 'dir', [A('tool.hta')]: 'file', [A('x.reg')]: 'file' })
     check(await openRepoFile(R, 'src/a.ts', false, f.deps), 'allowlisted file opens')
     check(await openRepoFile(R, 'build.bat', false, f.deps) && await openRepoFile(R, 'tool.hta', false, f.deps) && await openRepoFile(R, 'x.reg', false, f.deps), '.bat / .hta / .reg answer true')
@@ -156,10 +159,10 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
 
     // Untracked through a fake fs: size cap, link, gone.
     const reads = []
-    const files = { [path.resolve(R, 'u.txt')]: Buffer.from('x\ny\n'), [path.resolve(R, 'huge.log')]: Buffer.alloc(UNTRACKED_READ_BYTES + 1, 0x61), [path.resolve(R, 'giant.iso')]: { length: UNTRACKED_FORCE_BYTES + 1 } }
+    const files = { [path.win32.resolve(R, 'u.txt')]: Buffer.from('x\ny\n'), [path.win32.resolve(R, 'huge.log')]: Buffer.alloc(UNTRACKED_READ_BYTES + 1, 0x61), [path.win32.resolve(R, 'giant.iso')]: { length: UNTRACKED_FORCE_BYTES + 1 } }
     const ufs = {
       lstat: async (p) => {
-        if (p === path.resolve(R, 'ln')) return { size: 3, isFile: () => false, isSymbolicLink: () => true, isDirectory: () => false }
+        if (p === path.win32.resolve(R, 'ln')) return { size: 3, isFile: () => false, isSymbolicLink: () => true, isDirectory: () => false }
         if (!files[p]) throw new Error('ENOENT')
         return { size: files[p].length, isFile: () => true, isSymbolicLink: () => false, isDirectory: () => false }
       },
@@ -175,7 +178,7 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
     const giant = await readFileDiff({ repoRoot: R, entry: { path: 'giant.iso', area: 'untracked', status: '?' }, force: false, runner: failing, fs: ufs, platform: 'win32' })
     check(giant.tooLarge && giant.tooLarge.bytes === UNTRACKED_FORCE_BYTES + 1, 'an untracked file over 16 MB is too large without force')
     same(await readFileDiff({ repoRoot: R, entry: { path: 'giant.iso', area: 'untracked', status: '?' }, force: true, runner: failing, fs: ufs, platform: 'win32' }), { error: 'git_error' }, 'even with force, an untracked file over 16 MB is refused')
-    check(!reads.includes(path.resolve(R, 'giant.iso')), 'and never read into memory')
+    check(!reads.includes(path.win32.resolve(R, 'giant.iso')), 'and never read into memory')
     const ln = await readFileDiff({ repoRoot: R, entry: { path: 'ln', area: 'untracked', status: '?' }, force: false, runner: failing, fs: ufs, platform: 'win32' })
     check(ln.hunks[0].lines[0].text === '../outside/secret', 'an untracked link shows its target, never the file behind it')
     same(await readFileDiff({ repoRoot: R, entry: { path: 'gone.txt', area: 'untracked', status: '?' }, force: false, runner: failing, fs: ufs, platform: 'win32' }), { error: 'gone' }, 'an untracked file deleted meanwhile is gone')
@@ -195,7 +198,7 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
     const source = { ensureFresh: async (key, age) => { fresh.push([key, age]); return key === 'ws:a' ? view : null }, get: (key) => (key === 'ws:a' ? view : null) }
     const runner = fakeRunner((args) => (!args.includes('--numstat') ? '@@ -1 +1 @@\n-a\n+b\n' : args.includes('--cached') ? '10\t2\tboth.ts\0' : '3\t1\tboth.ts\0-\t-\tbuild.bat\0'))
     const opened = []
-    const peeks = { [path.resolve(R, 'new.txt')]: 7, [path.resolve(R, 'pic.png')]: null }
+    const peeks = { [path.win32.resolve(R, 'new.txt')]: 7, [path.win32.resolve(R, 'pic.png')]: null }
     const reader = new ChangesReader({ source, runner, untrackedPeek: (abs) => peeks[abs], open: { openPath: async (p) => { opened.push(['open', p]); return '' }, showItemInFolder: (p) => opened.push(['reveal', p]) }, platform: 'win32', fs: { lstat: async () => ({ size: 1, isFile: () => true, isSymbolicLink: () => false, isDirectory: () => false }), readFile: async () => Buffer.from('a\n'), readlink: async () => '' } })
     const res = await reader.status('ws:a')
     same(res.files.map((f) => [f.area, f.path, f.added, f.removed, f.binary]), [
@@ -227,7 +230,7 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
     check(await reader.openFile({ key: 'ws:a', path: 'build.bat' }), 'openFile on a listed .bat answers')
     check(await reader.openFile({ key: 'ws:a', path: 'new.txt' }), 'openFile on a listed .txt answers')
     check(await reader.openFile({ key: 'ws:a', path: 'new.txt', reveal: true }), 'reveal')
-    same(opened, [['reveal', path.resolve(R, 'build.bat')], ['open', path.resolve(R, 'new.txt')], ['reveal', path.resolve(R, 'new.txt')]], 'openFile: .bat revealed, .txt opened, reveal honored')
+    same(opened, [['reveal', path.win32.resolve(R, 'build.bat')], ['open', path.win32.resolve(R, 'new.txt')], ['reveal', path.win32.resolve(R, 'new.txt')]], 'openFile: .bat revealed, .txt opened, reveal honored')
   }
 
   // ---- real repositories in temp --------------------------------------------

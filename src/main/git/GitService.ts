@@ -29,12 +29,13 @@
  * Clock, timers, fs.watch, file checks and the git runner are injected so the
  * policy runs under fakes in scripts/test-git.cjs.
  */
-import { existsSync, statSync, watch as fsWatch } from 'fs'
-import { join, resolve as resolvePath } from 'path'
+import { existsSync, realpathSync, statSync, watch as fsWatch } from 'fs'
+import { posix, win32 } from 'path'
 import type { GitError, GitFileEntry, GitSummary, GitTarget, GitUpdateEvt } from '@shared/git-types'
 import { GitExecError, gitErrorCode, type GitRunner } from './gitExec'
 import { parseNumstatZ, parseStatusV2, sumNumstat } from './porcelain'
 import { UntrackedCounter } from './untrackedLines'
+import { nativeRecursiveWatch, watchDirTree } from './treeWatch'
 
 export const ACTIVE_POLL_MS = 10000
 export const PANEL_POLL_MS = 3000
@@ -129,13 +130,37 @@ const defaultTimers: GitTimers = {
   clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 }
 
-const defaultWatch: GitWatchFn = (dir, recursive, onEvent, onError) => {
+/** The real, long spelling of a directory, or the input when it can't be resolved. */
+export function canonicalDir(dir: string, realpath: (p: string) => string = realpathSync.native): string {
   try {
-    const w = fsWatch(dir, { recursive, persistent: false }, (_ev, name) => onEvent(name == null ? null : String(name)))
-    w.on('error', onError)
-    return w
+    return realpath(dir)
   } catch {
-    return null
+    return dir
+  }
+}
+
+/**
+ * fs.watch for the chip. A recursive watch (refs) is native on Windows and
+ * macOS; elsewhere it goes through watchDirTree (one watcher per directory).
+ *
+ * The directory is watched by its realpath. On Windows libuv rebuilds every
+ * event's path with GetLongPathNameW and asserts it still starts with the
+ * watched path, so watching an 8.3 spelling (C:\Users\RUNNER~1\..., what a
+ * short TEMP or a cwd typed that way gives) aborts the whole process on the
+ * first event. The common dir is resolved from the cwd, so it carries
+ * whatever spelling the cwd had.
+ */
+export function createDefaultWatch(nativeRecursive: boolean, realpath?: (p: string) => string): GitWatchFn {
+  return (rawDir, recursive, onEvent, onError) => {
+    const dir = canonicalDir(rawDir, realpath)
+    if (recursive && !nativeRecursive) return watchDirTree(dir, onEvent, onError)
+    try {
+      const w = fsWatch(dir, { recursive, persistent: false }, (_ev, name) => onEvent(name == null ? null : String(name)))
+      w.on('error', onError)
+      return w
+    } catch {
+      return recursive ? watchDirTree(dir, onEvent, onError) : null
+    }
   }
 }
 
@@ -183,12 +208,15 @@ export class GitService {
   private readonly mtimeOf: (p: string) => number | null
   private readonly untracked: UntrackedCounter
   private readonly caseless: boolean
+  /** Path rules of the platform the paths come from (injected in tests). */
+  private readonly P: typeof win32
   readonly stats = { runs: 0, watchEvents: 0 }
 
   constructor(private deps: GitServiceDeps) {
     this.now = deps.now ?? Date.now
     this.timers = deps.timers ?? defaultTimers
-    this.watchFn = deps.watch ?? defaultWatch
+    const platform = deps.platform ?? process.platform
+    this.watchFn = deps.watch ?? createDefaultWatch(nativeRecursiveWatch(platform))
     this.exists = deps.exists ?? existsSync
     this.mtimeOf =
       deps.mtimeOf ??
@@ -200,7 +228,8 @@ export class GitService {
         }
       })
     this.untracked = deps.untracked ?? new UntrackedCounter()
-    this.caseless = (deps.platform ?? process.platform) === 'win32'
+    this.caseless = platform === 'win32'
+    this.P = platform === 'win32' ? win32 : posix
   }
 
   // ---- public surface -------------------------------------------------
@@ -369,7 +398,7 @@ export class GitService {
     u.inflight = this.run(u).finally(() => {
       u.inflight = null
       u.ignoreIndexUntil = this.now() + SELF_EVENT_MS
-      u.indexMtime = u.resolved ? this.mtimeOf(join(u.resolved.gitDir, 'index')) : null
+      u.indexMtime = u.resolved ? this.mtimeOf(this.P.join(u.resolved.gitDir, 'index')) : null
       const ready = u.waiters.filter((w) => w.after <= startedAt)
       u.waiters = u.waiters.filter((w) => w.after > startedAt)
       for (const w of ready) w.resolve()
@@ -441,7 +470,7 @@ export class GitService {
         const out = await this.deps.runner.run(['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'], opts)
         const [top, gitDir, common] = out.split(/\r?\n/)
         if (!top || !gitDir || !common) throw new GitExecError('git_error', 'unexpected rev-parse output')
-        u.resolved = { repoRoot: resolvePath(top), gitDir: resolvePath(gitDir), commonDir: resolvePath(u.cwd, common) }
+        u.resolved = { repoRoot: this.P.resolve(top), gitDir: this.P.resolve(gitDir), commonDir: this.P.resolve(u.cwd, common) }
         this.rebalanceWatchers()
       }
       const repo = u.resolved
@@ -493,9 +522,9 @@ export class GitService {
   }
 
   private opOf(gitDir: string): GitSummary['op'] {
-    if (this.exists(join(gitDir, 'rebase-merge')) || this.exists(join(gitDir, 'rebase-apply'))) return 'rebase'
-    if (this.exists(join(gitDir, 'MERGE_HEAD'))) return 'merge'
-    if (this.exists(join(gitDir, 'CHERRY_PICK_HEAD'))) return 'cherry-pick'
+    if (this.exists(this.P.join(gitDir, 'rebase-merge')) || this.exists(this.P.join(gitDir, 'rebase-apply'))) return 'rebase'
+    if (this.exists(this.P.join(gitDir, 'MERGE_HEAD'))) return 'merge'
+    if (this.exists(this.P.join(gitDir, 'CHERRY_PICK_HEAD'))) return 'cherry-pick'
     return null
   }
 
@@ -551,7 +580,7 @@ export class GitService {
       const top = this.watchFn(dir, false, (name) => name && COMMON_NAMES.has(name) && this.onCommonEvent(id), () => undefined)
       if (top) handles.push(top)
       const refs = this.watchFn(
-        join(dir, 'refs'),
+        this.P.join(dir, 'refs'),
         true,
         (name) => {
           const n = (name ?? '').replace(/\\/g, '/')
@@ -586,8 +615,9 @@ export class GitService {
   }
 
   private indexChanged(u: Unit): boolean {
-    if (!u.resolved || u.indexMtime === null) return false
-    const m = this.mtimeOf(join(u.resolved.gitDir, 'index'))
+    if (!u.resolved) return false
+    const m = this.mtimeOf(this.P.join(u.resolved.gitDir, 'index'))
+    // An index that appeared since the run (the first git add of a new repo) moved too.
     return m !== null && m !== u.indexMtime
   }
 
@@ -603,7 +633,7 @@ export class GitService {
   // ---- helpers --------------------------------------------------------
 
   private norm(p: string): string {
-    const abs = resolvePath(p)
+    const abs = this.P.resolve(p)
     return this.caseless ? abs.toLowerCase() : abs
   }
 
