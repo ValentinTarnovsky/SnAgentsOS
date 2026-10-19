@@ -279,7 +279,7 @@ export interface TerminalEngineSettings {
   persist: boolean
   /** 200..5000; the mirror keeps max(REPLAY_LINES, persistLines) rows. */
   persistLines: number
-  /** PowerShell integration (E6-FR-25, R31-01); absent until that setting exists. */
+  /** PowerShell integration (E6-FR-25, R31-01): `terminalShellIntegration`; absent = off. */
   shellIntegration?: boolean
 }
 

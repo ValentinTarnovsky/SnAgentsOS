@@ -326,6 +326,8 @@ const settingsSchema = z.object({
     .union([z.literal(0), z.number().int().min(5).max(1440)])
     .catch(0)
     .default(0),
+  // Schema 14 (E6-FR-25): PowerShell integration, same pattern.
+  terminalShellIntegration: z.boolean().catch(true).default(true),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
   autoCheckUpdates: z.boolean().default(true),

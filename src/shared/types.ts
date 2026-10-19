@@ -668,6 +668,8 @@ export interface Settings {
   worktreesRoot: string
   /** Hibernate idle agent consoles after N minutes; 0 = off, else 5..1440 (E5-FR-25). Schema 13. */
   hibernateIdleMinutes: number
+  /** PowerShell prompt marks and UTF-8 in new consoles (E6-FR-25). Schema 14. */
+  terminalShellIntegration: boolean
   restoreLastWorkspace: boolean
   confirmCloseRunning: boolean
   /** Installed build only: hide to tray on window close instead of quitting. */

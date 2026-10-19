@@ -66,6 +66,7 @@ const FEATURE_PATHS: string[] = [
   'terminalSelectionOverride',
   'terminalRenderer',
   'terminalSnapshotMode',
+  'terminalShellIntegration',
   'awakeMode',
   'language',
   'theme',
