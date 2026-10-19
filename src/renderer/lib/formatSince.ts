@@ -3,7 +3,7 @@
  * "4 min. ago", from Intl.RelativeTimeFormat in the active language, and the
  * tooltip lines of one console's status dot. Pure: no store, no DOM.
  */
-import type { Language, PaneStatus } from '@shared/types'
+import type { AgentWaiting, Language, PaneStatus } from '@shared/types'
 import type { MessageKey, TFn } from '@/i18n'
 
 const formatters = new Map<Language, Intl.RelativeTimeFormat>()
@@ -41,6 +41,16 @@ export const STATUS_LABEL_KEY: Record<PaneStatus['state'], MessageKey> = {
   unknown: 'status.unknown',
 }
 
+/**
+ * v2.2: what a finished turn waits on, "Esperando · 2 en segundo plano",
+ * "Esperando a sus sub-sesiones (1)" or, between two of a driver, "Esperando
+ * la próxima sub-sesión".
+ */
+export function waitingPhrase(waiting: AgentWaiting, t: TFn): string {
+  if (waiting.kind === 'background') return t('agents.row.waitingBackground', { count: waiting.count })
+  return waiting.count > 0 ? t('agents.row.waitingSub', { count: waiting.count }) : t('agents.row.waitingSubNext')
+}
+
 /** Display name of the agent behind a status ("Claude" unless Codex). */
 export function providerName(status: Pick<PaneStatus, 'provider'>): string {
   return status.provider === 'codex' ? 'Codex' : 'Claude'
@@ -53,6 +63,7 @@ export function providerName(status: Pick<PaneStatus, 'provider'>): string {
  */
 export function statusTipLines(status: PaneStatus, t: TFn, lang: Language, now: number): string[] {
   const lines = [`${providerName(status)} - ${t(STATUS_LABEL_KEY[status.state])}`]
+  if (status.waiting && status.state === 'working') lines.push(waitingPhrase(status.waiting, t))
   if (status.stateSince) lines.push(formatSince(status.stateSince, now, lang))
   if (!status.precise) lines.push(`(${t('status.approximate')})`)
   if ((status.pendingCount ?? 0) > 1) lines.push(t('status.pendingMany', { count: status.pendingCount ?? 0 }))

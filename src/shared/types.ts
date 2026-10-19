@@ -428,6 +428,26 @@ export interface PaneStatusDetails {
   firstPrompt?: string
   /** Claude working -> done/idle transition (cache timer start). */
   cacheSince?: number
+  /**
+   * v2.2: the agent ended its turn but waits on work it started, so the state
+   * reads `working` meanwhile (no "done" notice, no hibernation, `snaos wait`
+   * keeps waiting). Absent = not waiting.
+   */
+  waiting?: AgentWaiting
+  /** v2.2: background tasks that do not hold the console (a dev server), next to `done`. */
+  backgroundOther?: number
+}
+
+/**
+ * What a console's agent waits on after its turn (v2.2): `background` =
+ * subagents, workflows, a `snaos wait` or a driver it left running (Stop
+ * `background_tasks`); `subsessions` = `claude -p` sub-sessions started from
+ * the console (hooks marked X-Agent-Child / X-Agent-Parent). `count` >= 1,
+ * except a short grace between two sub-sessions of a driver (0).
+ */
+export interface AgentWaiting {
+  kind: 'background' | 'subsessions'
+  count: number
 }
 
 export interface PaneStatus extends PaneStatusDetails {

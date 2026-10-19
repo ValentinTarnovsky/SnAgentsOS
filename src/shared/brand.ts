@@ -49,6 +49,11 @@ export const AGENT_ENV = {
   realCodex: 'SNAOS_REAL_CODEX',
   codexShim: 'SNAOS_CODEX_SHIM',
   codexExit: 'SNAOS_CODEX_EXIT',
+  /**
+   * `codex:<paneId>` in the environment of the commands a console's Codex
+   * runs, so a `claude -p` it starts reports its hooks as a sub-session.
+   */
+  agentParent: 'SNAOS_AGENT_PARENT',
 } as const
 
 /** Extra environment of each pty while the snaos CLI is on (E8-FR-13); its bin folder goes first in PATH. */

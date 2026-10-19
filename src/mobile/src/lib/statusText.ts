@@ -57,6 +57,14 @@ export function statusAriaLabel(status: RemotePaneStatus): string {
   return status.precise === false ? `${base} (${t('status.approximate')})` : base
 }
 
+/** v2.2: what a finished turn waits on (the state reads working meanwhile), or null. */
+export function waitingText(status: RemotePaneStatus): string | null {
+  const w = status.waiting
+  if (!w || status.state !== 'working') return null
+  if (w.kind === 'background') return t('row.waitingBackground', { count: w.count })
+  return w.count > 0 ? t('row.waitingSub', { count: w.count }) : t('row.waitingSubNext')
+}
+
 /** The attention reason as text, or null when the status carries none. */
 export function reasonText(status: RemotePaneStatus): string | null {
   const reason = status.reason
@@ -77,6 +85,8 @@ export function showsTime(status: RemotePaneStatus | undefined): boolean {
 export function statusLine(status: RemotePaneStatus, now: number): string {
   const reason = reasonText(status)
   if (reason) return reason
+  const waiting = waitingText(status)
+  if (waiting) return waiting
   const fresh = now - status.stateSince < 60000
   switch (status.state) {
     case 'working':
@@ -130,6 +140,8 @@ export function rowLine(input: RowLineInput, now: number): string {
     }
     const fresh = now - status.stateSince < 60000
     const age = relativeAge(status.stateSince, now)
+    const waiting = waitingText(status)
+    if (waiting) return waiting
     switch (status.state) {
       case 'working':
         return fresh ? t('row.working') : t('row.workingFor', { t: age })

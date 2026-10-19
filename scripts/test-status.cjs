@@ -23,19 +23,24 @@ function loadRenderer(contents, overrides = {}) {
 }
 const { AGENT_ENV } = load('src/shared/brand.ts')
 const settings = notificationSettingsSchema.parse({})
-function harness() {
+function harness(opts = {}) {
   const events = [], notices = [], timers = new Map()
   let seq = 0, focused = false
-  const { StatusManager } = load('src/main/status/StatusManager.ts', {
+  // `now`: a controllable clock for Date.now() inside StatusManager (v2.2 waits and TTLs).
+  const clock = opts.now ? { Date: class extends Date { static now() { return opts.now() } } } : {}
+  const { StatusManager, SUB_SESSION_GRACE_MS, SUB_SESSION_TTL_MS, BACKGROUND_WAIT_TTL_MS } = load('src/main/status/StatusManager.ts', {
     require: id => id === 'electron' ? { Notification: { isSupported: () => false } } : require(id),
     setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
+    ...clock,
   })
   const manager = new StatusManager(() => ({ isDestroyed: () => false, isFocused: () => focused, webContents: { send: (_ch, e) => events.push(e) }, flashFrame() {} }), () => null, n => notices.push(n))
   manager.setConfig(settings); manager.onSpawn('pty', 'pane')
   const event = (kind, rest = {}) => manager.onAgentEvent({ paneId: 'pane', ptyId: 'pty', provider: 'claude', sessionId: 'session', kind, ...rest })
   const hook = (name, rest = {}) => manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty', sessionId: 'session', name, ...rest })
   const flush = () => { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) }
-  return { manager, event, hook, events, notices, flush, focused: v => { focused = v }, last: () => events.at(-1) }
+  const states = () => events.filter(e => 'state' in e)
+  const ends = () => events.filter(e => !('state' in e) && 'reason' in e && 'at' in e)
+  return { manager, event, hook, events, notices, flush, focused: v => { focused = v }, last: () => states().at(-1), ends, SUB_SESSION_GRACE_MS, SUB_SESSION_TTL_MS, BACKGROUND_WAIT_TTL_MS }
 }
 
 async function main() {
@@ -104,6 +109,77 @@ async function main() {
     check(h.last().pendingCount === 1 && h.notices.length === 3, 'a plain permission without tool_use_id is still one request')
     h.hook('Notification', { notificationType: 'elicitation_dialog' })
     check(h.last().pendingCount === 1 && h.notices.length === 3, 'a notification while anything is pending adds nothing')
+  }
+  {
+    // v2.2: a driver's `claude -p` (a sub-session) never stands for the console's own Claude.
+    let clock = 1_000_000
+    const h = harness({ now: () => clock })
+    const done = () => h.notices.filter(n => n.state === 'done').length
+    h.hook('SessionStart', { source: 'startup' }); h.hook('UserPromptSubmit'); h.hook('PreToolUse', { toolName: 'Bash' })
+    h.hook('SessionStart', { sessionId: 'sub-1', source: 'startup' })
+    check(h.manager.paneForSession('session') === 'pane' && h.last().state === 'working', 'a startup of another session while the console\'s own lives is held, not adopted')
+    h.hook('UserPromptSubmit', { sessionId: 'sub-1', nested: true }); h.hook('PreToolUse', { sessionId: 'sub-1', nested: true, toolName: 'Read' })
+    h.hook('Stop', { sessionId: 'sub-1', nested: true }); h.flush()
+    check(h.manager.paneForSession('session') === 'pane' && h.manager.paneForSession('sub-1') === null && h.last().state === 'working' && done() === 0, 'its marked hooks never stand for the console (no done, no notice)')
+    h.hook('SessionEnd', { sessionId: 'sub-1', nested: true, endReason: 'other' })
+    check(h.ends().length === 0 && h.manager.paneForSession('session') === 'pane', 'its SessionEnd raises no "Claude exited" and keeps the console\'s session')
+    // The console's Claude ends its turn while the driver runs in the background.
+    h.hook('SessionStart', { sessionId: 'sub-2', source: 'startup', nested: true })
+    h.hook('Stop'); h.flush()
+    check(h.last().state === 'working' && h.last().waiting?.kind === 'subsessions' && h.last().waiting.count === 1 && done() === 0, 'a turn that ends with a sub-session alive is waiting, not done, and sends no notice')
+    clock += 1000
+    h.hook('SessionEnd', { sessionId: 'sub-2', nested: true, endReason: 'other' })
+    check(h.last().state === 'working' && h.last().waiting.count === 0, 'between two sub-sessions of a driver the console keeps waiting (grace)')
+    clock += h.SUB_SESSION_GRACE_MS + 10; h.flush()
+    check(h.last().state === 'done' && !h.last().waiting && h.ends().length === 0, 'after the grace with no sub-session it reads done')
+    h.hook('SessionStart', { sessionId: 'sub-3', source: 'startup', nested: true })
+    check(h.last().state === 'working' && h.last().waiting.count === 1, 'a Codex-started sub-session (parent mark on SessionStart) waits at once')
+    clock += h.SUB_SESSION_TTL_MS + 10; h.flush()
+    check(h.last().state === 'done' && !h.last().waiting, 'a sub-session silent past its TTL is dropped')
+  }
+  {
+    // v2.2: a held startup whose first hook is unmarked is the console's new Claude (the old one died silently).
+    const h = harness()
+    h.hook('SessionStart', { source: 'startup' }); h.hook('UserPromptSubmit'); h.hook('Stop'); h.flush()
+    h.hook('SessionStart', { sessionId: 'fresh-session', source: 'startup' })
+    check(h.manager.paneForSession('session') === 'pane', 'held until its first hook says what it is')
+    h.hook('UserPromptSubmit', { sessionId: 'fresh-session' })
+    check(h.manager.paneForSession('fresh-session') === 'pane' && h.manager.paneForSession('session') === null && h.last().state === 'working', 'an unmarked first hook makes it the console\'s session')
+    h.hook('SessionStart', { sessionId: 'cleared-session', source: 'clear' })
+    check(h.manager.paneForSession('cleared-session') === 'pane', 'a /clear switches at once (never held)')
+  }
+  {
+    // v2.2: background work (Stop background_tasks) and turns the agent starts on its own.
+    let clock = 5_000_000
+    const h = harness({ now: () => clock })
+    const done = () => h.notices.filter(n => n.state === 'done').length
+    h.hook('UserPromptSubmit'); h.hook('Stop', { background: { waits: 1, other: 0 } }); h.flush()
+    check(h.last().state === 'working' && h.last().waiting?.kind === 'background' && h.last().waiting.count === 1 && done() === 0, 'a turn that left a subagent or a snaos wait running is waiting, with no notice')
+    h.hook('PreToolUse', { toolName: 'Read' }); h.hook('Stop'); h.flush()
+    check(h.last().state === 'done' && !h.last().waiting && done() === 1, 'the turn it wakes up for (no UserPromptSubmit) notifies when it ends')
+    h.hook('PreToolUse', { toolName: 'Bash' }); h.hook('Stop'); h.flush()
+    check(done() === 2, 'every wake-up turn notifies again (the done key used to repeat)')
+    h.hook('UserPromptSubmit'); h.hook('Stop', { background: { waits: 0, other: 2 } }); h.flush()
+    check(h.last().state === 'done' && h.last().backgroundOther === 2 && done() === 3, 'a dev server left running does not hold the console: done, with the hint')
+    h.hook('UserPromptSubmit'); h.hook('Stop', { background: { waits: 2, other: 0 } }); h.flush()
+    check(h.last().waiting?.count === 2, 'two background tasks that come back')
+    clock += h.BACKGROUND_WAIT_TTL_MS + 10; h.flush()
+    check(h.last().state === 'done' && !h.last().waiting, 'the wait gives up after its TTL')
+  }
+  {
+    // v2.2: Esc fires no Stop; a stopped title glyph with no hook for 2 s is idle.
+    let clock = 9_000_000
+    const h = harness({ now: () => clock })
+    h.hook('UserPromptSubmit'); h.hook('PreToolUse', { toolName: 'Bash' })
+    h.manager.reportTitle('pane', '✳ Topic'); clock += 2500; h.flush()
+    check(h.last().state === 'idle' && h.notices.length === 0, 'an interrupted turn ends as idle without a notice')
+    clock += 10; h.hook('UserPromptSubmit')
+    h.manager.reportTitle('pane', '✳ Topic'); clock += 10; h.hook('PreToolUse', { toolName: 'Read' }); h.flush()
+    check(h.last().state === 'working', 'a hook inside the window calls it off')
+    h.manager.reportTitle('pane', '✳ Topic'); h.manager.reportTitle('pane', '⠂ Topic'); clock += 2500; h.flush()
+    check(h.last().state === 'working', 'a working glyph calls it off')
+    clock += 10; h.hook('Stop'); h.manager.reportTitle('pane', '✳ Topic'); h.flush()
+    check(h.last().state === 'done', 'a normal Stop with the stopped glyph is done, not idle')
   }
   {
     const h = harness(); h.manager.setViewed(['pane']); h.focused(true); h.hook('PermissionRequest', { toolUseId: 'a' })
@@ -304,7 +380,22 @@ async function main() {
     })
     check(accepted, 'authenticated launch context accepted without starting a model')
   } finally { bridge.dispose() }
-  const { HookServer } = load('src/main/status/HookServer.ts')
+  const { HookServer, backgroundTasks, nestedFromHeaders, parseHookPayload } = load('src/main/status/HookServer.ts')
+  // v2.2: Stop background_tasks and the sub-session marks.
+  const bg = backgroundTasks([
+    { type: 'local_agent', status: 'running', description: 'Explore the repo' },
+    { type: 'shell', status: 'running', description: 'snaos wait 2 --idle --timeout 110' },
+    { type: 'local_bash', status: 'running', command: 'bash sn-drive.sh' },
+    { type: 'shell', status: 'running', description: 'npm run dev' },
+    { type: 'shell', status: 'completed', description: 'snaos wait 3 --idle' },
+    { type: 'monitor', status: 'running', description: 'watch logs' },
+    null, 'x',
+  ])
+  check(bg.waits === 3 && bg.other === 2, 'background tasks: a subagent, a snaos wait and a driver come back; a dev server and a monitor do not; finished ones are gone')
+  check(backgroundTasks([]) === undefined && backgroundTasks(null) === undefined && backgroundTasks([{ type: 'shell', status: 'killed' }]) === undefined, 'nothing running is no background')
+  check(parseHookPayload('pane', 'pty', 'Stop', { session_id: 's', background_tasks: [{ type: 'subagent', status: 'running' }] }).background.waits === 1, 'Stop carries its background tasks')
+  check(parseHookPayload('pane', 'pty', 'SessionStart', { session_id: 's', source: 'startup' }).source === 'startup', 'SessionStart carries its source')
+  check(nestedFromHeaders('1', '') && nestedFromHeaders(undefined, 'codex:pane-1') && !nestedFromHeaders('', '') && !nestedFromHeaders('0', 'codex:bad id') && !nestedFromHeaders(undefined, undefined), 'sub-session marks: child 1 or a valid parent')
   const server = new HookServer(), received = []
   server.onEvent(e => received.push(e))
   try {
@@ -330,6 +421,22 @@ async function main() {
     check(response.status === 200 && await response.text() === '' && received.at(-1).toolUseId === 'tool-id', 'HTTP observer forwards request identity without returning a decision')
     check((await fetch(endpoint + 'wrong', { method: 'POST', body })).status === 404 && received.length === 2, 'wrong hook token rejected')
     await fetch(endpoint, { method: 'POST', body }); check(received.length === 2, 'hooks outside the app ignored')
+    // v2.2: sub-session marks.
+    const stopBody = JSON.stringify({ hook_event_name: 'Stop', session_id: 'sub' })
+    check(data.hooks.Stop.some(g => g.hooks.some(hk => hk.headers?.['X-Agent-Child'] === '$CLAUDE_CODE_CHILD_SESSION' && hk.headers?.['X-Agent-Parent'] === '$' + AGENT_ENV.agentParent && hk.allowedEnvVars.includes('CLAUDE_CODE_CHILD_SESSION'))), 'HTTP handlers forward the sub-session marks')
+    await fetch(endpoint, { method: 'POST', headers: { 'X-Console-Id': 'pane', 'X-Pty-Id': 'pty', 'X-Agent-Child': '1' }, body: stopBody })
+    check(received.at(-1).nested === true, 'X-Agent-Child: 1 marks a sub-session')
+    await fetch(endpoint, { method: 'POST', headers: { 'X-Console-Id': 'pane', 'X-Pty-Id': 'pty', 'X-Agent-Child': '', 'X-Agent-Parent': '' }, body: stopBody })
+    check(received.at(-1).nested === undefined, 'empty marks are the console\'s own agent')
+    await fetch(endpoint, { method: 'POST', headers: { 'X-Console-Id': 'pane', 'X-Pty-Id': 'pty', 'X-Agent-Child': '$CLAUDE_CODE_CHILD_SESSION', 'X-Agent-Parent': '$SNAOS_AGENT_PARENT' }, body: stopBody })
+    check(received.at(-1).nested === undefined, 'uninterpolated marks are not a sub-session')
+    await new Promise((resolve, reject) => {
+      const child = require('child_process').spawn(process.platform === 'win32' ? 'powershell.exe' : '/bin/sh', process.platform === 'win32' ? command.split(' ').slice(1) : ['-c', command], { env: { ...process.env, [AGENT_ENV.consoleId]: 'pane', [AGENT_ENV.ptyId]: 'pty', [AGENT_ENV.agentParent]: 'codex:pane-1' }, windowsHide: true, timeout: 10000 })
+      child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error('SessionStart relay exit ' + code)))
+      child.stdin.end(JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'codex-sub', source: 'startup' }))
+    })
+    check(received.at(-1).sessionId === 'codex-sub' && received.at(-1).nested === true && received.at(-1).source === 'startup', 'the SessionStart command forwards the parent mark of a Codex console')
+    received.length = 2
     data.hooks.PermissionRequest = []; fs.writeFileSync(file, JSON.stringify(data))
     check(!installer.hooksUpToDate(port, token), 'partial installation detected')
     installer.installHooks(port, token); installer.uninstallHooks()
@@ -916,7 +1023,7 @@ async function enrichmentChecks() {
   {
     let now = 10_000, seq = 0
     const timers = new Map()
-    const sr = loadRenderer("export { notePrompt, forgetPrompts, hasPromptMarks, whenShellReady, AGENT_END_PROMPT_CAP_MS } from './shellReady'; export { AGENT_END_READY_MS } from './agentEnd'", {
+    const sr = loadRenderer("export { notePrompt, forgetPrompts, hasPromptMarks, whenShellReady, whenPromptReturns, AGENT_END_PROMPT_CAP_MS, AGENT_END_OTHER_CAP_MS } from './shellReady'; export { AGENT_END_READY_MS } from './agentEnd'", {
       Date: { now: () => now },
       setTimeout: (fn, ms) => { timers.set(++seq, { fn, ms }); return seq }, clearTimeout: id => timers.delete(id),
     })
@@ -970,6 +1077,25 @@ async function enrichmentChecks() {
     sr.whenShellReady('ps', now, () => fired++)
     advance(800)
     check(!sr.hasPromptMarks('ps') && fired === 1, 'a forgotten pane (new shell, unmount) is back on the 800 ms timer')
+
+    // v2.2: a SessionEnd `other` offers the chip only when the prompt comes back.
+    sr.notePrompt('drv')
+    advance(10)
+    let back = 0
+    sr.whenPromptReturns('drv', now, sr.AGENT_END_OTHER_CAP_MS, () => back++)
+    advance(sr.AGENT_END_OTHER_CAP_MS + 10)
+    check(back === 0 && timers.size === 0, 'no prompt within the cap: never (a driver script keeps running)')
+    sr.notePrompt('drv')
+    check(back === 0, 'a mark after the cap fires nothing')
+    advance(10)
+    sr.whenPromptReturns('drv', now, sr.AGENT_END_OTHER_CAP_MS, () => back++)
+    advance(500); sr.notePrompt('drv')
+    check(back === 1 && timers.size === 0, 'the prompt coming back within the cap offers it')
+    sr.whenPromptReturns('drv', now - 600, 3000, () => back++)
+    check(back === 2, 'a prompt already back after the event offers it at once')
+    sr.whenPromptReturns('none', now, 3000, () => back++)
+    advance(4000)
+    check(back === 2, 'a pane without marks never fires (callers check hasPromptMarks)')
   }
   // Transcript fallback when Stop has no last_assistant_message (E1-FR-09).
   {

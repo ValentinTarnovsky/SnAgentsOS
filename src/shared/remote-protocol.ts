@@ -10,6 +10,7 @@
  */
 import type {
   AgentProvider,
+  AgentWaiting,
   AttentionReason,
   ClaudePaneState,
   KeyButton,
@@ -65,6 +66,8 @@ export interface RemotePaneStatus {
   /** Current tool, <= 120. */
   activity?: string
   pending?: RemotePending[]
+  /** v2.2: the agent waits on work it started; the state reads `working` meanwhile. */
+  waiting?: AgentWaiting
 }
 
 export interface RemotePaneInfo {

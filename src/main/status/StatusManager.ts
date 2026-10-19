@@ -2,11 +2,11 @@ import { Notification, type BrowserWindow } from 'electron'
 import { isAbsolute } from 'path'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
-import { AGENT_END_REASONS, type AgentDetail, type AgentProvider, type AgentSessionEndEvt, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneStatusEvt, type RemotePending } from '@shared/types'
+import { AGENT_END_REASONS, type AgentDetail, type AgentProvider, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneStatusEvt, type RemotePending } from '@shared/types'
 import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
 import { revealWindow } from '../window/revealWindow'
-import type { HookEvent } from './HookServer'
+import type { BackgroundTasks, HookEvent } from './HookServer'
 import type { AgentEvent, StatusNotice } from './events'
 import { LIMITS, clip, firstLine, readLastAssistantMessage, sanitize } from './statusDetails'
 
@@ -57,7 +57,22 @@ interface PaneTrack {
   emittedAt: number
   detailTimer: NodeJS.Timeout | null
   deferredCause?: AgentEvent
+  // v2.2: what a finished turn still waits on.
+  /** Sub-sessions alive on the console (a driver's `claude -p`): session id -> last hook. */
+  subSessions: Map<string, number>
+  /** When the last sub-session ended: a short grace bridges two of a driver. */
+  subEndedAt?: number
+  /** Stop `background_tasks` of the last turn, and when it stopped. */
+  background?: BackgroundTasks & { at: number }
+  /** Re-evaluates the wait when its next piece expires. */
+  waitTimer: NodeJS.Timeout | null
+  /** Last hook of the main session (the Esc interrupt watch). */
+  lastHookAt: number
+  interruptTimer: NodeJS.Timeout | null
 }
+
+/** A hook of the live pty with its session: what onHookEvent passes on. */
+type LiveHook = HookEvent & { ptyId: string; sessionId: string }
 
 /** Called on every emission, `state: null` included (E1-FR-01). `cause` is the agent event behind it, when any. */
 export type StatusListener = (evt: PaneStatusEvt, cause?: AgentEvent) => void
@@ -85,6 +100,14 @@ const IMMEDIATE_KINDS = new Set<AgentEvent['kind']>(['start', 'end', 'request', 
 const GENERIC_TOPICS = /^(claude|claude code)$/i
 /** Tools whose PreToolUse is the request itself (question, plan); their permission prompt is the same request. */
 const PROMPT_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode'])
+/** A sub-session silent this long is gone (its SessionEnd never came). */
+export const SUB_SESSION_TTL_MS = 10 * 60 * 1000
+/** Between two sub-sessions of a driver the console keeps waiting this long. */
+export const SUB_SESSION_GRACE_MS = 15 * 1000
+/** Background work that comes back to the agent holds the console at most this long. */
+export const BACKGROUND_WAIT_TTL_MS = 2 * 60 * 60 * 1000
+/** Stopped title glyph with no hook for this long after an Esc: the turn is over. */
+export const INTERRUPT_SETTLE_MS = 2000
 /**
  * Input that is only terminal reports, never an answer (E2-FR-48): focus in /
  * out, SGR and X10 mouse, plus the replies a terminal sends on its own to the
@@ -119,6 +142,12 @@ export class StatusManager implements PtySink {
   /** E3 M12: provider|session|transcript each pane last reported, and who listens. */
   private readonly transcriptKeys = new Map<string, string>()
   private readonly transcriptListeners = new Set<(paneId: string) => void>()
+  /**
+   * v2.2: a `startup` SessionStart of another session while the console's
+   * own session lives, held until that session's first hook says whether it
+   * is a sub-session (a driver's `claude -p`) or a new agent of the console.
+   */
+  private readonly candidates = new Map<string, LiveHook>()
   lastClaudeEventAt: number | null = null
   desktopError: 'blocked' | 'failed' | 'unavailable' | null = null
   constructor(
@@ -127,13 +156,14 @@ export class StatusManager implements PtySink {
     private readonly onNotice: (notice: StatusNotice) => void = () => {},
     private readonly readTranscript: (path: string, sessionId: string) => Promise<string | undefined> = (path, sessionId) => readLastAssistantMessage(path, sessionId),
   ) {}
-  onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.ptys.set(paneId, ptyId); this.spawnTimes.set(paneId, Date.now()) }
+  onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.candidates.delete(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.ptys.set(paneId, ptyId); this.spawnTimes.set(paneId, Date.now()) }
   onData(): void {}
   /** Every exit (natural or not) releases the pane's tracking. */
   onExit(ptyId: string, paneId: string, _exitCode?: number, _info?: PtyExitInfo): void {
     if (this.ptys.get(paneId) !== ptyId) return
     this.ptys.delete(paneId)
     this.spawnTimes.delete(paneId)
+    this.candidates.delete(paneId)
     this.clearPane(paneId)
   }
   setConfig(cfg: NotificationSettings): void { this.cfg = cfg }
@@ -214,6 +244,7 @@ export class StatusManager implements PtySink {
     const topic = titleTopic(t)
     if (current?.precise) {
       if (topic && topic !== current.topic) { current.topic = topic; this.publish(paneId, current) }
+      this.watchInterrupt(paneId, current, cp)
       return
     }
     const working = cp >= 0x2800 && cp <= 0x28ff, stopped = cp === 0x2733
@@ -239,8 +270,73 @@ export class StatusManager implements PtySink {
     this.publish(paneId, track)
   }
 
+  /**
+   * v2.2: Claude fires no Stop when the user interrupts a turn (Esc). A
+   * precise Claude track stuck in `working` with nothing pending, whose title
+   * shows the stopped glyph for INTERRUPT_SETTLE_MS while no hook arrives, is
+   * idle (no notice). A working glyph, or any hook, calls it off.
+   */
+  private watchInterrupt(paneId: string, track: PaneTrack, glyph: number): void {
+    if (glyph !== 0x2733 || track.provider !== 'claude' || track.activity !== 'working' || track.pending.size) {
+      if (track.interruptTimer) { clearTimeout(track.interruptTimer); track.interruptTimer = null }
+      return
+    }
+    if (track.interruptTimer) return
+    const since = track.lastHookAt
+    track.interruptTimer = setTimeout(() => {
+      track.interruptTimer = null
+      if (this.panes.get(paneId) !== track || track.timer || track.activity !== 'working' || track.pending.size || track.lastHookAt !== since) return
+      track.activity = 'idle'
+      track.tool = undefined
+      this.publish(paneId, track)
+    }, INTERRUPT_SETTLE_MS)
+  }
+
   onHookEvent(evt: HookEvent): void {
     if (!evt.ptyId || !evt.sessionId || this.ptys.get(evt.consoleId) !== evt.ptyId) return
+    const live = evt as LiveHook
+    if (this.routeSubSession(live)) return
+    this.acceptHook(live)
+  }
+
+  /**
+   * v2.2: hooks of a sub-session (a `claude -p` a driver started from this
+   * console, marked by its headers) never stand for the console's agent: they
+   * only keep it waiting. A `startup` of another session while the console's
+   * own session lives is held as a candidate (a hook command cannot carry the
+   * child mark): its first marked hook makes it a sub-session, an unmarked one
+   * a new agent of the console (the old one died without SessionEnd). True
+   * when the event was consumed here.
+   */
+  private routeSubSession(evt: LiveHook): boolean {
+    const paneId = evt.consoleId, sid = evt.sessionId
+    const track = this.panes.get(paneId)
+    const candidate = this.candidates.get(paneId)
+    if (!evt.nested && !track?.subSessions.has(sid)) {
+      if (candidate?.sessionId === sid) {
+        if (evt.name === 'SessionStart') return true
+        this.candidates.delete(paneId)
+        this.acceptHook(candidate)
+        return false
+      }
+      if (evt.name === 'SessionStart' && evt.source === 'startup' && track?.precise && !track.ended && track.sessionId && track.sessionId !== sid) {
+        this.candidates.set(paneId, evt)
+        return true
+      }
+      return false
+    }
+    if (candidate?.sessionId === sid) this.candidates.delete(paneId)
+    if (!track) return true
+    const now = Date.now()
+    if (evt.name === 'SessionEnd') {
+      if (track.subSessions.delete(sid)) track.subEndedAt = now
+    } else track.subSessions.set(sid, now)
+    this.publish(paneId, track)
+    this.armWait(paneId, track)
+    return true
+  }
+
+  private acceptHook(evt: LiveHook): void {
     if (evt.agentId && !['PermissionRequest', 'Elicitation', 'ElicitationResult', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Notification'].includes(evt.name)) return
     if (evt.agentId && evt.name === 'PreToolUse' && !['AskUserQuestion', 'ExitPlanMode'].includes(evt.toolName ?? '')) return
     const base = {
@@ -258,7 +354,7 @@ export class StatusManager implements PtySink {
         event = { ...base, kind: 'working', turnId: `prompt:${++this.promptSequence}`, prompt: evt.prompt, detail: evt.prompt ? { kind: 'prompt', text: firstLine(evt.prompt, LIMITS.detail) } : undefined }
         break
       case 'Stop':
-        event = { ...base, kind: 'done', reply: evt.lastAssistantMessage, detail: { kind: 'reply', text: firstLine(evt.lastAssistantMessage, LIMITS.detail) } }
+        event = { ...base, kind: 'done', reply: evt.lastAssistantMessage, detail: { kind: 'reply', text: firstLine(evt.lastAssistantMessage, LIMITS.detail) }, background: evt.background }
         break
       case 'StopFailure': event = { ...base, kind: 'error', reason: 'failure' }; break
       case 'PermissionRequest':
@@ -320,8 +416,7 @@ export class StatusManager implements PtySink {
       const retired = track.retired
       retired.add(`${track.provider}:${track.sessionId}`)
       if (retired.size > 64) retired.delete(retired.values().next().value!)
-      this.cancelTimer(track)
-      this.cancelDetail(track)
+      this.stopTimers(track)
       track = this.createTrack(evt.provider, evt.sessionId)
       track.retired = retired
     }
@@ -330,6 +425,11 @@ export class StatusManager implements PtySink {
     track.precise = true
     this.panes.set(evt.paneId, track)
     this.cancelTimer(track)
+    track.lastHookAt = Date.now()
+    // A turn the agent starts on its own (a background task came back) has no
+    // UserPromptSubmit: its first event after a settled Stop opens a new turn,
+    // so its own Stop notifies again.
+    if (!evt.turnId && track.activity === 'done' && (evt.kind === 'working' || evt.kind === 'request')) track.turnId = `wake:${++this.promptSequence}`
     if (evt.turnId) track.turnId = evt.turnId
     if (evt.kind === 'start') {
       // A new session starts clean (E5-FR-02: firstPrompt resets on start).
@@ -383,7 +483,11 @@ export class StatusManager implements PtySink {
             target.activity = 'done'
             target.pending.clear()
             target.tool = undefined
-            this.publish(evt.paneId, target, `done:${target.turnId}`, 'done', evt)
+            target.background = evt.background ? { ...evt.background, at: Date.now() } : undefined
+            // v2.2: a turn that left work coming back to it is not done: no notice.
+            const waiting = !!this.waitingOf(target)
+            this.publish(evt.paneId, target, `done:${target.turnId}`, waiting ? undefined : 'done', evt)
+            this.armWait(evt.paneId, target)
           }, 700)
           return
         }
@@ -456,18 +560,56 @@ export class StatusManager implements PtySink {
 
   private createTrack(provider: AgentProvider, sessionId: string): PaneTrack {
     const now = Date.now()
-    return { provider, sessionId, retired: new Set(), precise: false, activity: 'idle', pending: new Map(), seen: new Set(), turnId: '', turn: 0, timer: null, updatedAt: now, ended: false, lastState: 'idle', stateSince: now, emittedAt: 0, detailTimer: null }
+    return { provider, sessionId, retired: new Set(), precise: false, activity: 'idle', pending: new Map(), seen: new Set(), turnId: '', turn: 0, timer: null, updatedAt: now, ended: false, lastState: 'idle', stateSince: now, emittedAt: 0, detailTimer: null, subSessions: new Map(), waitTimer: null, lastHookAt: 0, interruptTimer: null }
   }
   private cancelTimer(track: PaneTrack): void { if (track.timer) clearTimeout(track.timer); track.timer = null }
   private cancelDetail(track: PaneTrack): void { if (track.detailTimer) clearTimeout(track.detailTimer); track.detailTimer = null; track.deferredCause = undefined }
+  /** Every timer of a track that is going away. */
+  private stopTimers(track: PaneTrack): void {
+    this.cancelTimer(track); this.cancelDetail(track)
+    if (track.waitTimer) clearTimeout(track.waitTimer)
+    if (track.interruptTimer) clearTimeout(track.interruptTimer)
+    track.waitTimer = null; track.interruptTimer = null
+  }
   private clearPane(paneId: string): void {
     const track = this.panes.get(paneId)
     if (!track) return
-    this.cancelTimer(track); this.cancelDetail(track); this.panes.delete(paneId)
+    this.stopTimers(track); this.panes.delete(paneId)
     this.emit({ paneId, state: null, precise: false, notify: false })
   }
+  /**
+   * v2.2: what a finished turn still waits on, or undefined. Only a turn that
+   * ended (done / idle) of a live session waits; expired pieces are dropped.
+   */
+  private waitingOf(track: PaneTrack, now = Date.now()): AgentWaiting | undefined {
+    if (track.ended || (track.activity !== 'done' && track.activity !== 'idle')) return undefined
+    for (const [sid, at] of track.subSessions) if (now - at >= SUB_SESSION_TTL_MS) track.subSessions.delete(sid)
+    if (track.subSessions.size || (track.subEndedAt !== undefined && now - track.subEndedAt < SUB_SESSION_GRACE_MS)) return { kind: 'subsessions', count: track.subSessions.size }
+    if (track.background?.waits && now - track.background.at < BACKGROUND_WAIT_TTL_MS) return { kind: 'background', count: track.background.waits }
+    return undefined
+  }
+  /** Publishes again when the next piece of the wait expires (a sub-session TTL, the grace, the background TTL). */
+  private armWait(paneId: string, track: PaneTrack): void {
+    if (track.waitTimer) clearTimeout(track.waitTimer)
+    track.waitTimer = null
+    const now = Date.now()
+    const due: number[] = [...track.subSessions.values()].map(at => at + SUB_SESSION_TTL_MS)
+    if (track.subEndedAt !== undefined) due.push(track.subEndedAt + SUB_SESSION_GRACE_MS)
+    if (track.background?.waits) due.push(track.background.at + BACKGROUND_WAIT_TTL_MS)
+    const next = due.filter(t => t > now)
+    if (!next.length) return
+    track.waitTimer = setTimeout(() => {
+      track.waitTimer = null
+      if (this.panes.get(paneId) !== track) return
+      this.publish(paneId, track)
+      this.armWait(paneId, track)
+    }, Math.min(...next) - now + 5)
+  }
   private stateOfTrack(track: PaneTrack): ClaudePaneState {
-    return track.activity === 'error' || track.activity === 'unknown' ? track.activity : track.pending.size ? 'action' : track.activity
+    if (track.activity === 'error' || track.activity === 'unknown') return track.activity
+    if (track.pending.size) return 'action'
+    // v2.2: a turn waiting on work it started reads as working.
+    return this.waitingOf(track) ? 'working' : track.activity
   }
   private event(paneId: string, track: PaneTrack, notify: boolean): PaneStatusEvt {
     const state = this.stateOfTrack(track)
@@ -491,6 +633,9 @@ export class StatusManager implements PtySink {
     if (pending.length) evt.pending = pending
     if (track.detail) evt.detail = track.detail
     if (track.cwd) evt.cwd = track.cwd
+    const waiting = this.waitingOf(track)
+    if (waiting) evt.waiting = waiting
+    else if (state === 'done' && track.background?.other) evt.backgroundOther = track.background.other
     // Never a Codex `launch:` placeholder, never a console behind a Connection Profile.
     if (SESSION_ID_RE.test(track.sessionId) && !this.isSshPane(paneId)) evt.sessionId = track.sessionId
     return evt
@@ -534,7 +679,7 @@ export class StatusManager implements PtySink {
     }
     // Only-detail changes are coalesced to one emission per 500 ms per pane
     // (E5-FR-02); state, pending, session and notifications go out at once.
-    const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.precise, evt.sessionId, evt.cwd])
+    const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.precise, evt.sessionId, evt.cwd, evt.waiting])
     const immediate = transition || !!key || evt.notify || (!!cause && IMMEDIATE_KINDS.has(cause.kind)) || signature !== track.emitted
     if (immediate || now - track.emittedAt >= DETAIL_THROTTLE_MS) {
       this.cancelDetail(track)

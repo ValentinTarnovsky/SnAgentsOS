@@ -85,6 +85,7 @@ export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | n
   if (evt.lastMessage) out.lastMessage = evt.lastMessage
   if (evt.activity) out.activity = evt.activity
   if (evt.pending?.length) out.pending = evt.pending
+  if (evt.waiting) out.waiting = evt.waiting
   return out
 }
 
