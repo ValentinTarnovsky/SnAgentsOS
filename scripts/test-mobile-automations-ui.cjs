@@ -122,6 +122,10 @@ window.runMain = async () => {
  ackFor = () => ({ ok: false, error: 'no_schedule' });
  click(sw('d1')); await frames();
  check(sw('d1').getAttribute('aria-checked') === 'false' && store.getState().toasts.some(t => t.text === 'That automation no longer exists on the PC'), 'a toggle refused with no_schedule says it is gone');
+ store.getState().update({ toasts: [] });
+ ackFor = () => ({ ok: false, error: 'rate' });
+ click(sw('d1')); await frames();
+ check(sw('d1').getAttribute('aria-checked') === 'false' && store.getState().toasts.some(t => t.text === 'The PC did not answer'), 'a rate-limited toggle snaps back with the no-reply toast');
  ackFor = () => ({ ok: true });
 
  // Run now: sent once, then "Waiting..." while the desktop's run waits.

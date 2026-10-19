@@ -9,6 +9,7 @@ import type { RemoteScheduleInfo, RemoteStateSnapshot } from '@shared/remote-pro
 import type { ScheduleRunStatus, WorkspaceTaskState } from '@shared/types'
 import { WEEK_ORDER } from '@shared/schedule'
 import { getLang, t, type MobileMessageKey } from './i18n'
+import { isNoReply } from './pending'
 
 interface AutomationsState {
   open: boolean
@@ -113,10 +114,13 @@ export function nextText(schedule: Pick<RemoteScheduleInfo, 'enabled' | 'dueAt'>
 
 /**
  * The toast of a failed scheduleRun / scheduleToggle ack. For a run,
- * `no_schedule` also covers an empty saved prompt (CONTRATOS v3.1).
+ * `no_schedule` also covers an empty saved prompt; both ctl sit behind the
+ * session's token bucket (`rate`, CONTRATOS v3.1), worded like every other
+ * request the PC did not answer.
  */
 export function automationErrorText(kind: 'scheduleRun' | 'scheduleToggle', error: string | undefined): string {
   if (error === 'not_found') return t('auto.gone')
+  if (isNoReply(error)) return t('pending.noReply')
   if (error === 'no_schedule') return t(kind === 'scheduleRun' ? 'auto.noPrompt' : 'auto.gone')
   return t('auto.failed')
 }
