@@ -110,7 +110,9 @@ function run(action: RemoteCtlAction): CmdResult | Promise<CmdResult> {
         return { ok: false, error: 'not_found' }
       }
       killPanePtys([action.paneId])
-      // Through closePane so the desktop can reopen it (E5-FR-14).
+      // Through closePane so the desktop can reopen it (E5-FR-14). A worktree
+      // console keeps its folder and branch (E7-FR-32): never the delete
+      // dialog, never git:worktreeRemove; it shows up as an orphan in Settings.
       store.closePane(action.workspaceId, action.paneId)
       return { ok: true }
     }

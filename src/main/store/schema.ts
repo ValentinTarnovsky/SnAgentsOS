@@ -139,12 +139,14 @@ const paneScheduleSchema = z.object({
 
 // Schema 13 (E7-FR-28, Contratos compartidos). Without this field zod's
 // z.object() would strip `pane.worktree` and the link to the worktree would
-// be lost on the next reload. A malformed value is dropped on its own.
+// be lost on the next reload. A malformed value is dropped on its own (the
+// pane falls back to its plain cwd resolution). Same regexes as
+// WORKTREE_BRANCH_RE / SHA_RE in src/shared/worktree-types.ts.
 export const paneWorktreeSchema = z.object({
   repoRoot: z.string().min(1).max(4096),
   path: z.string().min(1).max(4096),
-  branch: z.string().max(255).regex(/^sn\/\S+$/),
-  base: z.string().regex(/^[0-9a-fA-F]{4,64}$/),
+  branch: z.string().regex(/^sn\/[a-z0-9-]{1,40}$/),
+  base: z.string().regex(/^[0-9a-f]{7,64}$/i),
 })
 
 // Schema 13 (E8-FR-25): trace of the applied repo file. The trust is never

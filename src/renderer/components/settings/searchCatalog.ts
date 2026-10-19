@@ -181,6 +181,8 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   // Git
   e('git.chip', 'settings.git.chip', 'settings.git.chipHint', { keywords: ['git', 'branch', 'rama', 'repo', 'chip', 'diff', 'commit', 'cambios', 'changes'], toggle: { path: 'gitChip' } }),
   e('git.diag', 'settings.git.diag', 'settings.git.refreshHint', { keywords: ['git', 'path', 'version', 'detect', 'detectar'] }),
+  e('git.worktreesRoot', 'settings.git.worktreesRoot', 'settings.git.worktreesRootHint', { keywords: ['worktree', 'worktrees', 'root', 'raiz', 'carpeta', 'folder', 'branch', 'rama'] }),
+  e('git.worktrees', 'settings.git.worktrees', 'settings.git.worktreesHint', { keywords: ['worktree', 'worktrees', 'orphan', 'huerfano', 'huerfanos', 'branch', 'rama', 'borrar', 'delete'] }),
 
   // Updates (the status block checks on mount: summary only)
   e('updates.status', 'settings.search.updates', 'settings.search.updatesHint', { summary: true, keywords: ['update', 'actualizar', 'actualizacion', 'version', 'upgrade', 'release'] }),

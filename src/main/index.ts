@@ -24,6 +24,7 @@ import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerGitIpc } from './ipc/registerGitIpc'
 import { registerReviewNotesIpc } from './ipc/registerReviewNotesIpc'
 import type { ReviewNoteStore } from './git/ReviewNoteStore'
+import { registerWorktreeIpc } from './ipc/registerWorktreeIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
 import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
@@ -524,6 +525,11 @@ async function bootstrap(): Promise<void> {
   })
   // Review notes of the Changes panel (E7-FR-17..20): dataDir()/review-notes.json.
   reviewNotes = registerReviewNotesIpc({ getSender: () => mainWindow?.webContents ?? null })
+  // Worktree per console (E7-FR-27..32, 36): worktrees.json under dataDir().
+  registerWorktreeIpc({
+    loadConfig: () => configStore.load(),
+    killPane: (paneId) => ptyManager.killPaneAndWait(paneId),
+  })
   registerRemoteIpc(remoteManager)
   registerLegacyIpc({
     getSender: () => mainWindow?.webContents ?? null,
