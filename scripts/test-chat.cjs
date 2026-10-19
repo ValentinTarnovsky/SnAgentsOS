@@ -617,6 +617,46 @@ async function testWatcherCap() {
   check(hub.openWatchers === 0, 'dispose closes them all')
 }
 
+// --- The phone's list model (src/mobile/src/lib/chatModel.ts, chatView.ts) -------------
+
+async function testMobileModel() {
+  const r = await build({
+    stdin: { resolveDir: root, loader: 'ts', contents: `export * from './src/mobile/src/lib/chatModel'; export { resolvePaneView, chatEligible } from './src/mobile/src/lib/chatView'` },
+    bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared') },
+  })
+  const mod = { exports: {} }
+  vm.runInNewContext(r.outputFiles[0].text, { module: mod, exports: mod.exports, console })
+  const m = mod.exports
+  const msg = (off, role = 'assistant', text = 'x' + off) => ({ id: String(off), role, ts: null, blocks: [{ t: 'text', text }] })
+  // Caps at 500.
+  let list = m.replaceList({ items: Array.from({ length: 50 }, (_, i) => msg(1000 + i)), cursor: '1000', done: false })
+  list = m.appendList(list, Array.from({ length: 460 }, (_, i) => msg(5000 + i)))
+  check(list.items.length === 500 && list.items[0].id === '1010' && list.cursor === '1010' && !list.done, 'appends keep 500 messages and move the cursor to the oldest kept')
+  const capped = m.prependList(list, { items: [msg(900), msg(950)], cursor: '900', done: false })
+  check(capped.items.length === 500 && capped.capped && capped.items[0].id === '1010', 'a prepend at the cap keeps the list and stops offering more')
+  let small = m.replaceList({ items: [msg(300), msg(400)], cursor: '300', done: false })
+  small = m.prependList(small, { items: [msg(100), msg(200)], cursor: null, done: true })
+  check(small.items.map(x => x.id).join() === '100,200,300,400' && small.done && small.cursor === null, 'a prepend goes in front and takes the page cursor')
+  check(m.appendList(small, [{ ...msg(400), blocks: [{ t: 'text', text: 'edited' }] }]).items.at(-1).blocks[0].text === 'edited', 'an id seen again replaces its message')
+  // Rows and labels.
+  const tr = (k, v) => ({ 'chat.tools.files': `${v?.name} ${v?.n} files`, 'chat.tools.commands': `${v?.name} ${v?.n} commands`, 'chat.tools.times': `${v?.name} x${v?.n}`, 'chat.tools.mixed': `${v?.n} tools: ${v?.names}`, 'chat.tools.result': `${v?.n} results` })[k] ?? k
+  const use = (id, name, summary) => ({ id, role: 'assistant', ts: null, blocks: [{ t: 'toolUse', id: 'u' + id, name, summary }] })
+  const res = (id, extra = {}) => ({ id: id + '.r', role: 'tool', ts: null, blocks: [{ t: 'toolResult', toolUseId: 'u' + id, isError: false, text: 'ok', ...extra }] })
+  const rows = m.buildRows([msg(1, 'user', 'go'), use(2, 'Read', 'a.ts'), res(2), use(3, 'Read', 'b.ts'), res(3), use(4, 'Read', 'c.ts'), res(4), use(5, 'Edit', 'App.tsx'), res(5, { patch: { hunks: [{ oldStart: 1, oldLines: 3, newStart: 1, newLines: 14, lines: [...Array(12).fill('+n'), ...Array(3).fill('-o')] }] } }), use(6, 'Bash', 'npm test'), msg(7, 'assistant', 'done')])
+  check(rows.map(x => x.kind).join() === 'message,tools,tools,tools,message', 'three Reads, then the Edit, then the Bash: one row per tool run')
+  check(m.runLabel(rows[1].calls, tr) === 'Read 3 files' && m.runLabel(rows[2].calls, tr) === 'Edit App.tsx +12 -3' && m.runLabel(rows[3].calls, tr) === 'Bash npm test', 'labels: "Read 3 files", "Edit App.tsx +12 -3", "Bash npm test"')
+  check(m.runStatus(rows[3].calls) === 'pending' && m.runStatus(rows[1].calls) === 'done' && m.runStatus([{ id: 'x', name: 'Bash', summary: '', result: { t: 'toolResult', toolUseId: 'x', isError: true, text: '' } }]) === 'error', 'a call without a result is pending, an error wins')
+  const late = m.buildRows([use(2, 'Read', 'a.ts'), msg(3), res(2)])
+  check(late.length === 2 && late[0].calls[0].result && late[0].calls[0].result.text === 'ok', 'a result after other messages completes its earlier call')
+  const orphan = m.buildRows([res(9)])
+  check(orphan.length === 1 && orphan[0].calls[0].name === '' && m.runLabel(orphan[0].calls, tr) === '1 results', 'a result whose call is not loaded shows alone')
+  check(m.safeHref('https://a.b/c') === 'https://a.b/c' && m.safeHref('javascript:alert(1)') === null && m.safeHref('data:text/html,x') === null && m.safeHref(' HTTP://x ') === 'HTTP://x', 'only http and https links open')
+  check(m.systemKey('[Request interrupted by user for tool use]') === 'chat.interrupted' && m.systemKey('[Record skipped: too large]') === 'chat.skipped' && m.systemKey('Set model') === null, 'interrupt and skipped rows are translated on the phone')
+  check(m.needsFold('a\nb\nc\nd\ne') && !m.needsFold('a\nb\nc\nd'), 'a prompt folds past 4 lines')
+  check(m.resolvePaneView(undefined, false, true) === 'terminal' && m.resolvePaneView(undefined, true, true) === 'chat' && m.resolvePaneView('chat', false, false) === 'terminal' && m.resolvePaneView('terminal', true, true) === 'terminal', 'Chat only for an eligible console: saved choice, then chatDefault')
+  check(m.chatEligible({ provider: 'claude' }) && m.chatEligible({ provider: 'codex' }) && !m.chatEligible({}) && !m.chatEligible(null), 'eligible = status provider claude or codex')
+}
+
 async function main() {
   code = await build({
     stdin: { resolveDir: root, loader: 'ts', contents: entry },
@@ -635,6 +675,7 @@ async function main() {
   await testLocator()
   await testHub()
   await testWatcherCap()
+  await testMobileModel()
   fs.rmSync(tmp, { recursive: true, force: true })
   console.log(`PASS: ${checks} chat checks (schemas, Claude and Codex decoders, tool summaries, pages under 48KB, 8MB scan cap, 50MB first page, tail, locator, ChatHub with phone-fit presence)`)
 }

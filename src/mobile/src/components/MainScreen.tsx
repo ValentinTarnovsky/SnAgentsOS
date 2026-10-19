@@ -8,6 +8,9 @@
  * Below: pane tabs of that workspace (E1-FR-32), the terminal (flex-1,
  * min-h-0), the answer card or the "waiting" strip (E2-FR-17..25), the
  * composer or "Direct input" strip (E1-FR-22..31, 38) and the KeyBar. The status banner and the toasts overlay the terminal.
+ * Chat view (E3 M12): the [Terminal | Chat] control sits in the header; in
+ * Chat the transcript covers the paused terminal (kept mounted, hidden), the
+ * composer is always docked (FR-31) and the KeyBar steps aside.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -30,7 +33,9 @@ import { WaitingPill } from './WaitingPill'
 import { FitModeChip } from './FitModeChip'
 import { ToastStack } from './ToastStack'
 import { UploadChip } from './UploadChip'
-import { selectInputMode, store, useRemoteStore } from '../lib/store'
+import { ChatView } from './chat/ChatView'
+import { ViewToggle } from './chat/ViewToggle'
+import { selectInChat, selectInputMode, store, useRemoteStore } from '../lib/store'
 import { paneById, viewedWorkspaceId, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
 
@@ -59,6 +64,7 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
   const connected = useRemoteStore((s) => s.connected)
   const inputMode = useRemoteStore(selectInputMode)
   const kbOpen = useRemoteStore((s) => s.kbOpen)
+  const inChat = useRemoteStore(selectInChat)
   const [quickOpen, setQuickOpen] = useState(false)
   const [paneActions, setPaneActions] = useState<PaneRef | null>(null)
   const [kebab, setKebab] = useState<PaneRef | null>(null)
@@ -106,6 +112,7 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
           </div>
           {workspaceName && <div data-ws-name className="truncate text-[11px] leading-tight text-text-secondary">{workspaceName}</div>}
         </div>
+        <ViewToggle />
         <FitModeChip />
         <WaitingPill />
         <button
@@ -124,7 +131,11 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       <PaneTabs onPaneActions={setPaneActions} />
 
       <main className="relative min-h-0 flex-1">
-        <RemoteTerminal />
+        {/* The terminal stays mounted under the Chat view (its stream is paused, FR-25). */}
+        <div className={clsx('h-full w-full', inChat && 'invisible')} aria-hidden={inChat || undefined}>
+          <RemoteTerminal />
+        </div>
+        {inChat && activePaneId && <ChatView paneId={activePaneId} />}
         <StatusBanner />
         <ToastStack />
       </main>
@@ -140,10 +151,12 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       {/* Composer mode docks the composer here; Direct mode shows the strip
           only while the keyboard is down (E1-FR-38). Both stay usable offline:
           the draft is kept and Send is disabled (E1-FR-14). */}
-      {activePaneId && (inputMode === 'composer' ? <Composer /> : !kbOpen && <DirectInputStrip />)}
+      {activePaneId && (inChat || inputMode === 'composer' ? <Composer /> : !kbOpen && <DirectInputStrip />)}
 
-      {/* Offline: the keys are dimmed and inert (E1-FR-14); sendInput refuses too. */}
+      {/* Offline: the keys are dimmed and inert (E1-FR-14); sendInput refuses too.
+          In Chat there is no terminal to type keys into: the composer is the input. */}
       <div
+        hidden={inChat}
         className={clsx('shrink-0 transition-opacity', !connected && 'pointer-events-none opacity-40')}
         aria-disabled={!connected}
         data-connected={connected}
