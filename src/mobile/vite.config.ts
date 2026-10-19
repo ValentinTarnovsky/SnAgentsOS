@@ -43,6 +43,10 @@ function serviceWorkerPlugin(): Plugin {
  * `__APP_VERSION__` bakes the desktop version (root package.json; the mobile
  * package.json has none) into the bundle so the client can tell a cached old
  * bundle from the desktop it talks to (authOk.appVersion, E1-FR-15).
+ *
+ * Fonts are never inlined: Vite turns small subsets (JetBrains Mono
+ * cyrillic-ext / vietnamese) into data: URIs, which the served CSP
+ * (`font-src 'self'`) blocks on the phone.
  */
 export default defineConfig({
   root: __dirname,
@@ -60,5 +64,6 @@ export default defineConfig({
     outDir: OUT_DIR,
     emptyOutDir: true,
     target: 'es2020',
+    assetsInlineLimit: (filePath) => (/\.(woff2?|ttf|otf)$/i.test(filePath) ? false : undefined),
   },
 })
