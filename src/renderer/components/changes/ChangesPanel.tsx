@@ -1,21 +1,51 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
-import { LoaderCircle, RefreshCw, WrapText, X } from 'lucide-react'
+import { LoaderCircle, MessageSquare, MessageSquarePlus, RefreshCw, WrapText, X } from 'lucide-react'
 import type { GitArea, GitChangesRes, GitDiffReply, GitFileEntry } from '@shared/git-types'
 import type { Workspace } from '@shared/types'
+import type { ReviewNote, ReviewNoteArea, ReviewNoteInput } from '@shared/review-notes'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { useAppStore } from '@/lib/store'
 import { useGitStore } from '@/lib/gitStore'
 import { refreshGit } from '@/lib/gitSync'
 import { toast } from '@/lib/toast'
-import { chipBranch } from '@/lib/gitChip'
+import { chipBranch, paneWorktreePath } from '@/lib/gitChip'
 import { insertPathToConsole } from '@/lib/insertPath'
 import { closeChangesPanel } from '@/lib/changesPanel'
 import { absRepoPath, loadWrap, PANEL_POLL_MS, panelKeyOf, panelTargets, rowKey, saveWrap, splitName, stepRow, visibleRows } from '@/lib/changes'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { anchorNotes, newSideLines, noteCountsByRow, notesForFile, pendingNotes, useReviewNotesStore, workspaceNotes } from '@/lib/reviewNotesStore'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { FileList, type RowActions } from './FileList'
-import { DiffView, type DiffViewHandle } from './DiffView'
+import { DiffView, type DiffNotesLayer, type DiffViewHandle } from './DiffView'
+import { NoteEditor } from './NoteEditor'
+import { NoteCard, noteAnchorLabel } from './NoteCard'
+import { SendNotesMenu } from './SendNotesMenu'
+
+/** Where the note editor is open: a new note on `line` (0 = file note) or an existing one. */
+interface EditorAt {
+  line: number
+  startLine?: number
+  lineText?: string
+  noteId?: string
+}
+
+/** What `notesUpsert` takes for an existing note (main owns times and `sentAt`). */
+function inputOf(n: ReviewNote): ReviewNoteInput {
+  return {
+    id: n.id,
+    workspaceId: n.workspaceId,
+    targetKey: n.targetKey,
+    filePath: n.filePath,
+    area: n.area,
+    line: n.line,
+    ...(n.startLine !== undefined ? { startLine: n.startLine } : {}),
+    ...(n.lineText !== undefined ? { lineText: n.lineText } : {}),
+    body: n.body,
+    ...(n.resolvedAt !== undefined ? { resolvedAt: n.resolvedAt } : {}),
+  }
+}
 
 function storage(): Storage | null {
   try {
@@ -60,6 +90,20 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
 
   const targets = useMemo(() => panelTargets(workspace), [workspace])
   const selKey = selected ? rowKey(selected) : null
+
+  // Review notes (E7-FR-17..21): the workspace's notes from main, the editor, the filter.
+  const allNotes = useReviewNotesStore((s) => workspaceNotes(s.notes, workspace.id))
+  const pending = useMemo(() => pendingNotes(allNotes), [allNotes])
+  const [editor, setEditor] = useState<EditorAt | null>(null)
+  const [noteFilter, setNoteFilter] = useState<'all' | 'pending'>('all')
+  const [confirmClear, setConfirmClear] = useState(false)
+  useEffect(() => {
+    void useReviewNotesStore.getState().load(workspace.id)
+  }, [workspace.id])
+  // The editor belongs to one file of one target.
+  useEffect(() => {
+    setEditor(null)
+  }, [targetKey, selKey])
 
   // Main polls the open panel's target (FR-06e) for as long as it is mounted.
   useEffect(() => {
@@ -182,6 +226,7 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (confirmClear) return
     const k = panelKeyOf(e)
     if (!k) return
     // A native select keeps its own Esc (closing its dropdown); an open row menu closes first.
@@ -218,6 +263,105 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
 
   const total = data ? data.summary.staged + data.summary.unstaged + data.summary.untracked + data.summary.conflicts : 0
 
+  // ---- review notes ----
+  const noteArea: ReviewNoteArea | null = selected && selected.area !== 'conflict' ? selected.area : null
+  const fileNotes = useMemo(() => {
+    if (!selected || !noteArea) return []
+    const list = notesForFile(allNotes, targetKey, selected.path, noteArea)
+    return noteFilter === 'pending' ? pendingNotes(list) : list
+  }, [allNotes, targetKey, selected, noteArea, noteFilter])
+  const diffOk = diff && !('error' in diff) && !diff.binary && !diff.tooLarge ? diff : null
+  const anchors = useMemo(() => anchorNotes(fileNotes, diffOk?.hunks ?? []), [fileNotes, diffOk])
+  const noteCounts = useMemo(() => noteCountsByRow(allNotes, targetKey), [allNotes, targetKey])
+  const sentOrResolved = allNotes.filter((n) => n.sentAt !== undefined || n.resolvedAt !== undefined)
+
+  const focusAfterEdit = (line: number): void => {
+    requestAnimationFrame(() => {
+      const row = line ? rootRef.current?.querySelector<HTMLElement>(`[data-new-line="${line}"]`) : null
+      ;(row ?? rootRef.current)?.focus({ preventScroll: true })
+    })
+  }
+  const saveNote = async (body: string): Promise<void> => {
+    const ed = editor
+    if (!ed || !selected || !noteArea) return
+    const existing = ed.noteId ? allNotes.find((n) => n.id === ed.noteId) : undefined
+    const input: ReviewNoteInput = existing
+      ? { ...inputOf(existing), body }
+      : {
+          workspaceId: workspace.id,
+          targetKey,
+          filePath: selected.path,
+          area: noteArea,
+          line: ed.line,
+          ...(ed.startLine ? { startLine: ed.startLine } : {}),
+          ...(ed.line && ed.lineText !== undefined ? { lineText: ed.lineText } : {}),
+          body,
+        }
+    try {
+      await window.snApi.reviewNotes.upsert(input)
+      setEditor(null)
+      focusAfterEdit(ed.line)
+    } catch (err) {
+      toast.error(t(String(err).includes('limit') ? 'notes.toast.limit' : 'notes.toast.saveFailed'), { dedupeKey: 'review-notes' })
+    }
+  }
+  const cancelNote = (): void => {
+    const line = editor?.line ?? 0
+    setEditor(null)
+    focusAfterEdit(line)
+  }
+  const deleteNote = (n: ReviewNote): void => {
+    void window.snApi.reviewNotes.delete({ ids: [n.id], workspaceId: workspace.id }).catch(() => toast.error(t('notes.toast.saveFailed'), { dedupeKey: 'review-notes' }))
+  }
+  const toggleResolve = (n: ReviewNote): void => {
+    const base = inputOf(n)
+    delete base.resolvedAt
+    void window.snApi.reviewNotes
+      .upsert(n.resolvedAt === undefined ? { ...base, resolvedAt: Date.now() } : base)
+      .catch(() => toast.error(t('notes.toast.saveFailed'), { dedupeKey: 'review-notes' }))
+  }
+  const editorLabel = (ed: EditorAt): string => noteAnchorLabel(t, ed)
+  const renderNote = (n: ReviewNote, showAnchor: boolean): ReactNode =>
+    editor?.noteId === n.id ? (
+      <NoteEditor key={n.id} label={noteAnchorLabel(t, n)} initial={n.body} onSave={(b) => void saveNote(b)} onCancel={cancelNote} />
+    ) : (
+      <NoteCard
+        key={n.id}
+        note={n}
+        stale={anchors.stale.has(n.id)}
+        showAnchor={showAnchor}
+        onEdit={() => setEditor({ line: n.line, startLine: n.startLine, noteId: n.id })}
+        onDelete={() => deleteNote(n)}
+        onToggleResolve={() => toggleResolve(n)}
+      />
+    )
+  const lineSide = useMemo(() => newSideLines(diffOk?.hunks ?? []), [diffOk])
+  const editorLine = editor && !editor.noteId && editor.line > 0 ? editor.line : null
+  const notesLayer: DiffNotesLayer | null = noteArea
+    ? {
+        lines: new Set([...anchors.byLine.keys(), ...(editorLine ? [editorLine] : [])]),
+        after: (line) => (
+          <>
+            {(anchors.byLine.get(line) ?? []).map((n) => renderNote(n, false))}
+            {editorLine === line && editor && <NoteEditor key={`new:${line}`} label={editorLabel(editor)} onSave={(b) => void saveNote(b)} onCancel={cancelNote} />}
+          </>
+        ),
+        onAdd: (line, startLine) => setEditor({ line, ...(startLine ? { startLine } : {}), lineText: lineSide.get(line) }),
+      }
+    : null
+  const topNotes =
+    noteArea && (anchors.top.length > 0 || (editor && !editor.noteId && editor.line === 0)) ? (
+      <div className="max-h-[40%] shrink-0 overflow-y-auto border-b border-border/60 py-0.5" data-notes-top>
+        {anchors.top.map((n) => renderNote(n, true))}
+        {editor && !editor.noteId && editor.line === 0 && <NoteEditor key="new:file" label={t('notes.file')} onSave={(b) => void saveNote(b)} onCancel={cancelNote} />}
+      </div>
+    ) : null
+  const worktreeCwd = (() => {
+    if (!targetKey.startsWith('pane:')) return undefined
+    const pane = workspace.panes.find((p) => p.id === targetKey.slice(5))
+    return pane ? paneWorktreePath(pane) ?? undefined : undefined
+  })()
+
   let listBody: ReactNode
   if (!workspace.cwd && targetKey.startsWith('ws:')) listBody = <Empty text={t('changes.noCwd')} />
   else if (!data && gitError === 'unsafe_repo') listBody = <Empty text={t('git.err.unsafe', { path: (workspace.cwd ?? '').replace(/\\/g, '/') })} />
@@ -235,6 +379,7 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
         onToggleSection={toggleSection}
         onSelect={select}
         actions={actions}
+        noteCounts={noteCounts}
       />
     )
 
@@ -268,7 +413,7 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
         </div>
       )
     else if (diff.hunks.length === 0) diffBody = <Empty text={t('changes.emptyFile')} />
-    else diffBody = <DiffView ref={diffRef} diff={diff} wrap={wrap} fontFamily={fontFamily} fontSize={12} />
+    else diffBody = <DiffView ref={diffRef} diff={diff} wrap={wrap} fontFamily={fontFamily} fontSize={12} notes={notesLayer} />
   }
 
   const sel = selected ? splitName(selected.path) : null
@@ -349,6 +494,41 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
         </Tooltip>
       </div>
 
+      {allNotes.length > 0 && (
+        <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-3 text-[11px]" data-notes-bar>
+          <MessageSquare size={12} className="shrink-0 text-accent-violet" />
+          <span className="shrink-0 text-text-primary" data-notes-pending>
+            {pending.length === 1 ? t('notes.pendingOne') : t('notes.pendingMany', { count: pending.length })}
+          </span>
+          <div role="radiogroup" aria-label={t('notes.filter.label')} className="flex shrink-0 overflow-hidden rounded-btn border border-border">
+            {(['all', 'pending'] as const).map((f) => (
+              <button
+                key={f}
+                type="button"
+                role="radio"
+                aria-checked={noteFilter === f}
+                onClick={() => setNoteFilter(f)}
+                className={cn('px-1.5 py-px', noteFilter === f ? 'bg-accent-violet/15 text-text-primary' : 'text-text-secondary hover:text-text-primary')}
+                data-notes-filter={f}
+              >
+                {t(`notes.filter.${f}`)}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => setConfirmClear(true)}
+            disabled={sentOrResolved.length === 0}
+            className="shrink-0 truncate text-text-secondary hover:text-text-primary disabled:opacity-40"
+            data-notes-clear
+          >
+            {t('notes.clearSent')}
+          </button>
+          <span className="flex-1" />
+          <SendNotesMenu workspace={workspace} pending={pending} cwd={worktreeCwd} />
+        </div>
+      )}
+
       <div className={cn('flex min-h-0 shrink-0 flex-col border-b border-border', data && data.files.length > 0 ? 'max-h-[38%]' : 'flex-1')}>{listBody}</div>
 
       {data && data.files.length > 0 && (
@@ -359,11 +539,42 @@ export function ChangesPanel({ workspace, targetKey }: { workspace: Workspace; t
                 {listed?.oldPath ? `${listed.oldPath} -> ${selected.path}` : selected.path}
               </span>
               <span className="shrink-0 text-text-secondary">{t(`changes.section.${selected.area}`)}</span>
+              <span className="flex-1" />
+              {noteArea && (
+                <button
+                  type="button"
+                  onClick={() => setEditor({ line: 0 })}
+                  className="flex shrink-0 items-center gap-1 rounded-btn px-1 py-px text-text-secondary hover:bg-card hover:text-text-primary"
+                  data-note-file
+                >
+                  <MessageSquarePlus size={12} />
+                  {t('notes.fileNote')}
+                </button>
+              )}
             </div>
           )}
+          {topNotes}
           {diffBody}
         </div>
       )}
+      <ConfirmDialog
+        open={confirmClear}
+        title={t('notes.clearTitle')}
+        message={t('notes.clearMsg', { count: sentOrResolved.length })}
+        confirmLabel={t('notes.clearSent')}
+        cancelLabel={t('common.cancel')}
+        danger
+        onConfirm={() => {
+          setConfirmClear(false)
+          const ids = sentOrResolved.map((n) => n.id)
+          if (ids.length) void window.snApi.reviewNotes.delete({ ids, workspaceId: workspace.id }).catch(() => undefined)
+          rootRef.current?.focus({ preventScroll: true })
+        }}
+        onCancel={() => {
+          setConfirmClear(false)
+          rootRef.current?.focus({ preventScroll: true })
+        }}
+      />
     </motion.div>
   )
 }

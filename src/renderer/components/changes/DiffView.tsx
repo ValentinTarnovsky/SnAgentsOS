@@ -1,4 +1,5 @@
-import { forwardRef, memo, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { Plus } from 'lucide-react'
 import type { GitDiffRes } from '@shared/git-types'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -12,7 +13,21 @@ export interface DiffViewHandle {
 /** Row height without wrap: placeholders of unrendered chunks use it. */
 const ROW_PX = 18
 
-const Row = memo(function Row({ row, wrap, current }: { row: DiffRow; wrap: boolean; current: boolean }) {
+/**
+ * Review notes over the diff (E7-FR-17): what renders under a new-side line
+ * (cards, the editor) and how a note starts there.
+ */
+export interface DiffNotesLayer {
+  /** New-side lines with something under them. */
+  lines: ReadonlySet<number>
+  after: (line: number) => ReactNode
+  /** Gutter "+", the `c` key or Shift+click: open the editor on `line` (a range from `startLine`). */
+  onAdd: (line: number, startLine?: number) => void
+}
+
+type AddFn = (line: number, e: MouseEvent | null) => void
+
+const Row = memo(function Row({ row, wrap, current, onAdd }: { row: DiffRow; wrap: boolean; current: boolean; onAdd: AddFn | null }) {
   if (row.type === 'hunk') {
     return (
       <div
@@ -29,8 +44,31 @@ const Row = memo(function Row({ row, wrap, current }: { row: DiffRow; wrap: bool
   const l = row.line
   const bg = l.kind === 'add' ? 'bg-ansi-green/15' : l.kind === 'del' ? 'bg-ansi-red/15' : ''
   const gutter = l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' '
+  // Notes go on the new side: added and context lines (E7-FR-17).
+  const newNo = onAdd && (l.kind === 'add' || l.kind === 'ctx') ? l.newNo : undefined
   return (
-    <div className={cn('flex min-h-[18px]', bg)} data-line={l.kind}>
+    <div
+      className={cn('group/line relative flex min-h-[18px]', bg, newNo !== undefined && 'outline-none focus:outline focus:outline-1 focus:-outline-offset-1 focus:outline-accent-violet/60')}
+      data-line={l.kind}
+      data-new-line={newNo}
+      tabIndex={newNo !== undefined ? -1 : undefined}
+      onClick={newNo !== undefined ? (e) => e.shiftKey && onAdd?.(newNo, e) : undefined}
+    >
+      {newNo !== undefined && (
+        <button
+          type="button"
+          tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => {
+            e.stopPropagation()
+            onAdd?.(newNo, e)
+          }}
+          className="absolute left-0.5 top-0 z-[1] hidden h-[18px] w-4 items-center justify-center rounded-sm bg-accent-violet text-white group-hover/line:flex"
+          data-note-add={newNo}
+        >
+          <Plus size={11} />
+        </button>
+      )}
       <span className="w-11 shrink-0 select-none pr-1 text-right text-text-secondary/60">{l.oldNo ?? ''}</span>
       <span className="w-11 shrink-0 select-none pr-1 text-right text-text-secondary/60">{l.newNo ?? ''}</span>
       <span className={cn('w-4 shrink-0 select-none text-center', l.kind === 'add' ? 'text-ansi-green' : l.kind === 'del' ? 'text-ansi-red' : 'text-text-secondary')}>
@@ -44,7 +82,7 @@ const Row = memo(function Row({ row, wrap, current }: { row: DiffRow; wrap: bool
 })
 
 /** A render chunk: real rows once it scrolled near the viewport, a sized placeholder before. */
-function Chunk({ rows, start, end, wrap, current, forced, root }: { rows: DiffRow[]; start: number; end: number; wrap: boolean; current: number; forced: boolean; root: HTMLElement | null }) {
+function Chunk({ rows, start, end, wrap, current, forced, root, onAdd, notes }: { rows: DiffRow[]; start: number; end: number; wrap: boolean; current: number; forced: boolean; root: HTMLElement | null; onAdd: AddFn | null; notes: DiffNotesLayer | null }) {
   const ref = useRef<HTMLDivElement>(null)
   const [seen, setSeen] = useState(false)
   const visible = seen || forced
@@ -61,9 +99,20 @@ function Chunk({ rows, start, end, wrap, current, forced, root }: { rows: DiffRo
   if (!visible) return <div ref={ref} style={{ height: (end - start) * ROW_PX }} data-chunk-pending />
   return (
     <div data-chunk={start}>
-      {rows.slice(start, end).map((r, i) => (
-        <Row key={start + i} row={r} wrap={wrap} current={r.type === 'hunk' && r.hunk === current} />
-      ))}
+      {rows.slice(start, end).map((r, i) => {
+        const newNo = r.type === 'line' && r.line.kind !== 'del' ? r.line.newNo : undefined
+        const under = notes && newNo !== undefined && notes.lines.has(newNo) ? notes.after(newNo) : null
+        const row = <Row key={start + i} row={r} wrap={wrap} current={r.type === 'hunk' && r.hunk === current} onAdd={onAdd} />
+        if (!under) return row
+        return (
+          <div key={start + i} data-line-group>
+            {row}
+            <div className="whitespace-normal" data-line-notes={newNo}>
+              {under}
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -76,8 +125,8 @@ function Chunk({ rows, start, end, wrap, current, forced, root }: { rows: DiffRo
  * hunks (scroll, focus border, aria-live "Hunk 2 of 5"); the parent owns the
  * keys. The scroll position is kept while the diff's rev stays the same.
  */
-export const DiffView = forwardRef<DiffViewHandle, { diff: GitDiffRes; wrap: boolean; fontFamily: string; fontSize: number }>(function DiffView(
-  { diff, wrap, fontFamily, fontSize },
+export const DiffView = forwardRef<DiffViewHandle, { diff: GitDiffRes; wrap: boolean; fontFamily: string; fontSize: number; notes?: DiffNotesLayer | null }>(function DiffView(
+  { diff, wrap, fontFamily, fontSize, notes = null },
   ref,
 ) {
   const t = useT()
@@ -89,6 +138,47 @@ export const DiffView = forwardRef<DiffViewHandle, { diff: GitDiffRes; wrap: boo
   const [forcedChunk, setForcedChunk] = useState<number | null>(null)
   const [announce, setAnnounce] = useState('')
   const pendingScroll = useRef<number | null>(null)
+  // Notes: the latest layer behind a stable callback (rows stay memoized), and
+  // the last line clicked or focused, where a Shift+click range starts.
+  const notesRef = useRef(notes)
+  notesRef.current = notes
+  const anchor = useRef<number | null>(null)
+  const addAt = useCallback<AddFn>((line, e) => {
+    const layer = notesRef.current
+    if (!layer) return
+    if (e?.shiftKey && anchor.current !== null && anchor.current !== line) {
+      layer.onAdd(Math.max(line, anchor.current), Math.min(line, anchor.current))
+    } else {
+      layer.onAdd(line)
+    }
+    anchor.current = line
+  }, [])
+  const onAdd = notes ? addAt : null
+  useEffect(() => {
+    anchor.current = null
+  }, [diff.path, diff.area])
+
+  const onNotesKey = (e: KeyboardEvent<HTMLDivElement>): void => {
+    const el = e.target as HTMLElement
+    const line = el.dataset?.newLine
+    if (!notesRef.current || line === undefined || e.ctrlKey || e.altKey || e.metaKey) return
+    if (e.key === 'c' || e.key === 'C') {
+      e.preventDefault()
+      e.stopPropagation()
+      anchor.current = Number(line)
+      notesRef.current.onAdd(Number(line))
+    } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !e.shiftKey) {
+      // Walk the lines a note can go on.
+      const all = [...(scroller.current?.querySelectorAll<HTMLElement>('[data-new-line]') ?? [])]
+      const next = all[all.indexOf(el) + (e.key === 'ArrowDown' ? 1 : -1)]
+      if (next) {
+        e.preventDefault()
+        anchor.current = Number(next.dataset.newLine)
+        next.focus()
+        next.scrollIntoView({ block: 'nearest' })
+      }
+    }
+  }
 
   // A different file or new content restarts the hunk walk; same rev keeps everything.
   useEffect(() => {
@@ -142,10 +232,18 @@ export const DiffView = forwardRef<DiffViewHandle, { diff: GitDiffRes; wrap: boo
         style={{ fontFamily, fontSize, lineHeight: `${ROW_PX}px` }}
         data-changes-diff
         data-wrap={wrap || undefined}
+        onKeyDown={onNotesKey}
+        onMouseDown={(e) => {
+          // A plain click on a line sets where a Shift+click range starts.
+          const line = (e.target as HTMLElement).closest<HTMLElement>('[data-new-line]')?.dataset.newLine
+          if (line === undefined || !notesRef.current) return
+          if (e.shiftKey) e.preventDefault() // no text selection on a range click
+          else anchor.current = Number(line)
+        }}
       >
         <div className={cn(wrap ? 'w-full' : 'w-max min-w-full')}>
           {chunks.map(([s, e], i) => (
-            <Chunk key={`${diff.diffRev}:${s}`} rows={rows} start={s} end={e} wrap={wrap} current={current} forced={chunks.length === 1 || forcedChunk === i} root={scroller.current} />
+            <Chunk key={`${diff.diffRev}:${s}`} rows={rows} start={s} end={e} wrap={wrap} current={current} forced={chunks.length === 1 || forcedChunk === i} root={scroller.current} onAdd={onAdd} notes={notes} />
           ))}
         </div>
       </div>
