@@ -91,8 +91,8 @@ function run(code, storage) {
       open, pane, latch: true,
       isOpen: () => io.open,
       currentPaneId: () => io.pane,
-      paste: text => log.push(['paste', text, io.latch]),
-      sendInput: data => { if (!io.open) return false; log.push(['input', data]); return true },
+      bracketed: () => bracketed,
+      sendInput: data => { if (!io.open) return false; log.push(['input', data, io.latch]); return true },
       releaseLatch: () => { io.latch = false },
       sleeps: [],
       onSleep: null,
@@ -109,14 +109,15 @@ function run(code, storage) {
     const { io, log } = fakeIo()
     const ok = await cs.sendComposer('line 1\nline 2\nline 3', { enter: true, paneId: 'p1', signal: new AbortController().signal }, io)
     check(ok && log.length === 2, 'Send pastes then writes Enter')
-    check(log[0][0] === 'paste' && log[0][2] === false, 'the latch is released before the paste')
+    check(log[0][1] === '\x1b[200~line 1\rline 2\rline 3\x1b[201~', 'the paste goes through safePaste: one bracketed frame, \\r line breaks (E3-FR-05)')
+    check(log[0][2] === false, 'the latch is released before the paste')
     check(log[1][0] === 'input' && log[1][1] === '\r', 'Enter goes as its own \\r frame')
     check(io.sleeps[0] === 50, 'Enter waits ENTER_DELAY_MS')
   }
   {
     const { io, log } = fakeIo()
     const ok = await cs.sendComposer('keep it', { enter: false, paneId: 'p1', signal: new AbortController().signal }, io)
-    check(ok && log.length === 1 && log[0][0] === 'paste', 'Insert pastes without Enter')
+    check(ok && log.length === 1 && log[0][1] === '\x1b[200~keep it\x1b[201~', 'Insert pastes without Enter')
   }
   {
     const { io, log } = fakeIo()

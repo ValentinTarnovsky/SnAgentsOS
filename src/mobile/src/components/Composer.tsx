@@ -5,8 +5,9 @@
  *
  *  - Grows from 1 to 6 lines, then scrolls inside. 16px text for legibility,
  *    COMPOSER_MAX chars, a counter from COMPOSER_COUNTER_FROM.
- *  - Send: term.paste (bracketed paste aware) + a separate `\r` frame. Slash
- *    commands in agent panes are typed key by key with visible progress.
+ *  - Send: safePaste (E3-FR-05: sanitized, bracketed when the pane has it) + a
+ *    separate `\r` frame. Slash commands in agent panes are typed key by key
+ *    with visible progress.
  *  - Hold Send LONG_PRESS_MS: Insert, the text lands without Enter.
  *  - Working agent + empty field: the button becomes Stop (ESC).
  *  - Drafts per pane, debounced, restored when the pane is viewed again.
@@ -37,6 +38,7 @@ import {
   shouldTypeSlash,
   type ComposerIo,
 } from '../lib/composerSend'
+import { pasteBracketed } from '../lib/safePaste'
 import { t } from '../lib/i18n'
 
 /** 16px text on a 22px line: the 6-line cap is measured from these. */
@@ -44,14 +46,17 @@ const LINE_PX = 22
 const MAX_LINES = 6
 const PRESS_SLOP_PX = 10
 
+/** E3-FR-05: the viewed pane's bracketed paste (claude/codex status, else the xterm's mode). */
+function viewedBracketed(): boolean | undefined {
+  const s = store.getState()
+  const status = s.subscribedPaneId ? s.paneStatus[s.subscribedPaneId] : null
+  return pasteBracketed(getActiveTerm()?.modes.bracketedPasteMode, status)
+}
+
 const io: ComposerIo = {
   isOpen: () => client.isOpen(),
   currentPaneId: () => store.getState().subscribedPaneId,
-  paste: (text) => {
-    const term = getActiveTerm()
-    if (term) term.paste(text)
-    else client.sendInput(text)
-  },
+  bracketed: viewedBracketed,
   sendInput: (data) => client.sendInput(data),
   releaseLatch: () => {
     if (store.getState().ctrlLatch) store.getState().setCtrlLatch(false)
@@ -203,7 +208,7 @@ export function Composer(): ReactNode {
     if (!id || !value.trim() || s.slashProgress || !client.isOpen()) return
     const pane = s.snapshot ? paneById(s.snapshot, id) : null
     const slash = enter && shouldTypeSlash(value, pane?.type, s.paneStatus[id])
-    if (!slash && !confirmed && needsMultilineConfirm(value, getActiveTerm()?.modes.bracketedPasteMode)) {
+    if (!slash && !confirmed && needsMultilineConfirm(value, viewedBracketed())) {
       setConfirm({ enter })
       return
     }

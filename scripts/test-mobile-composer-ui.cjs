@@ -166,6 +166,16 @@ window.result = (async () => {
  [...q('[data-composer-confirm]').querySelectorAll('button')].find(b=>b.textContent==='Confirm').click();
  await wait(120);
  check(sent.length===2 && sent[1]==='\\r','confirming sends it');
+ check(sent[0]==='a\\rb','without bracketed paste the text goes bare, with \\\\r line breaks');
+
+ // E3-FR-05: a claude status pastes bracketed even when the xterm saw the mode
+ // off, so no confirm; an embedded closing marker loses its ESC.
+ flushSync(() => store.getState().update({ paneStatus:{ c1:{ state:'idle', stateSince:Date.now(), provider:'claude' } } })); await frames();
+ sent.length=0; typeInto(composer(),'one\\ntwo\\x1b[201~three'); await frames();
+ tap(sendBtn()); await wait(120); await frames();
+ check(!q('[data-composer-confirm]'),'a claude pane never asks the multi-line confirm');
+ check(sent.length===2 && sent[0]==='\\x1b[200~one\\rtwo[201~three\\x1b[201~' && sent[1]==='\\r','safePaste: one bracketed frame, the injected marker without ESC, then Enter');
+ flushSync(() => store.getState().update({ paneStatus:{} })); await frames();
 
  // Counter and growth.
  typeInto(composer(),'x'.repeat(13999)); await frames();
