@@ -155,7 +155,7 @@ async function main() {
   // E0-FR-02: package identity. No productName in package.json: it would move
   // userData away from %APPDATA%\snagentsos.
   const pkg = JSON.parse(read('package.json'))
-  check(pkg.name === BRAND.packageName && pkg.version === '2.0.0', 'package.json name and version')
+  check(pkg.name === BRAND.packageName && Number(pkg.version.split('.')[0]) >= 2, 'package.json name and a 2.x or later version')
   check(!('productName' in pkg), 'package.json has no productName')
   check(pkg.description.startsWith(`${BRAND.productName}: `) && !LEGACY_RE.test(pkg.description), 'package.json description')
   check(/^node scripts\/test-status\.cjs && node scripts\/test-rebrand\.cjs\b/.test(pkg.scripts.test), 'npm test chains the status and rebrand suites')
@@ -1427,8 +1427,11 @@ function docsBrandChecks(BRAND) {
   check(/iOS keeps the old name/.test(legacy) && legacy.includes('`SnMultiCC.app` is moved to the Trash') && legacy.includes('`sudo apt remove snmulticc`'), 'README: iOS home-screen app, macOS Trash and Linux .deb')
   check(!DASH_RE.test(readme), 'README: no en/em dash')
 
-  // E0-FR-24: release notes (the release-notes job puts them above the changelog).
-  const notes = read(`docs/release-notes/v${pkg.version}.md`)
+  // E0-FR-24: the rebrand release notes (2.0.0; the release-notes job puts them above the changelog).
+  const notes = read('docs/release-notes/v2.0.0.md')
+  // Every later release ships its own notes, also without an H1 or dashes.
+  const current = read(`docs/release-notes/v${pkg.version}.md`)
+  check(current.startsWith('## ') && !/^# /m.test(current) && !DASH_RE.test(current), 'release notes of the package version: present, no H1, no en/em dash')
   check(notes.startsWith('## Rebrand\n') && !/^# /m.test(notes), 'release notes: open with the Rebrand section, no H1 above the changelog')
   check(notes.includes('**What moves over.**') && notes.includes('**What is deleted by itself.**'), 'release notes: what migrates and what is deleted')
   check(notes.includes('migration-backup-v1.zip') && notes.includes('deleted automatically 30 days after the migration'), 'release notes: the 30-day backup')
