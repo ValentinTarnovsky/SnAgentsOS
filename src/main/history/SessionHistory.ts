@@ -38,6 +38,11 @@ export const HISTORY_MAX_PER_SCOPE = 1000
 export const HISTORY_COUNT_INTERVAL_MS = 50
 /** A query within this long of the last scan reuses it. */
 export const HISTORY_RESCAN_MS = 2000
+/**
+ * A resume id missing from the index rescans at once, but not more often
+ * than this: a phone cannot turn unknown ids into back-to-back full scans.
+ */
+export const HISTORY_FORCED_RESCAN_MS = 1000
 /** First prompt used as a title, in characters (E3-FR-37). */
 export const HISTORY_PROMPT_TITLE_MAX = 60
 const TITLE_MAX = 120
@@ -310,6 +315,8 @@ export interface SessionHistoryDeps {
   openSessions?: () => OpenSessionRef[]
   platform?: NodeJS.Platform
   now?: () => number
+  /** Floor between two forced rescans (HISTORY_FORCED_RESCAN_MS; tests pass 0). */
+  forcedRescanMs?: number
   /** Background count timer (tests pass their own). */
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (handle: unknown) => void
@@ -426,7 +433,8 @@ export class SessionHistory {
   /** Rescan unless the last scan is fresh; concurrent callers share one scan. */
   refresh(force = false): Promise<void> {
     if (this.scanning) return this.scanning
-    if (!force && this.now() - this.scannedAt < HISTORY_RESCAN_MS) return Promise.resolve()
+    const age = this.now() - this.scannedAt
+    if (age < (force ? (this.deps.forcedRescanMs ?? HISTORY_FORCED_RESCAN_MS) : HISTORY_RESCAN_MS)) return Promise.resolve()
     this.scanning = this.scan()
       .catch(() => undefined)
       .finally(() => {

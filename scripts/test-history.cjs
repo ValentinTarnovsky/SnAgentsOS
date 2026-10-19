@@ -134,6 +134,7 @@ async function testIndex() {
     getConfig: () => config,
     openSessions: () => H.openSessionsOf(statuses, config),
     platform: 'win32',
+    forcedRescanMs: 0,
     setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.length },
     clearTimer() {},
   })
