@@ -5,10 +5,13 @@
  *  - while an answer goes out: "Sending answer..." then "Sent"; afterwards
  *    "Not confirmed" or "The connection dropped" until dismissed or the pane
  *    stops waiting (E2-FR-21, 24);
- *  - else the card picked by cardFor (E2-FR-17, 18): permission, the ask
- *    wizard, or "Answer in the terminal". A folded card is a one-line strip
- *    (E2-FR-22) and every new card starts unfolded;
- *  - else, with the pane in 'action', the generic strip (E2-FR-25).
+ *  - else the card picked by cardFor (E2-FR-17, 18): permission (with
+ *    "Always allow" when Claude's menu validated on screen, E2-FR-53), the
+ *    ask wizard, "Answer in the terminal", or the Plan card (E2-FR-54, only
+ *    with a validated menu). A folded card is a one-line strip (E2-FR-22)
+ *    and every new card starts unfolded;
+ *  - else, with the pane in 'action', the generic strip (E2-FR-25), also for
+ *    a plan whose menu the phone does not recognise.
  *
  * The card goes away with the paneStatus that drops its request from
  * pending[], which the answer itself triggers in main (E2-FR-48).
@@ -17,6 +20,7 @@ import type { ReactNode } from 'react'
 import { AlertTriangle, Check, Loader2, X } from 'lucide-react'
 import { useRemoteStore } from '../../lib/store'
 import { cardFor, needsGenericStrip, type PromptCardModel } from '../../lib/promptRules'
+import { alwaysOption, planOptions } from '../../lib/promptMenu'
 import { usePromptUi, type AnswerState } from '../../lib/answer'
 import { answerer } from '../../lib/answerLive'
 import { agentName } from '../../lib/statusText'
@@ -24,6 +28,8 @@ import { t } from '../../lib/i18n'
 import { openTerminalKeyboard, PromptStrip } from './PromptStrip'
 import { PermissionCard } from './PermissionCard'
 import { AnswerInTerminal, AskHeader, AskWizard, askTitle } from './AskWizard'
+import { PlanCard } from './PlanCard'
+import { usePromptMenu } from './usePromptMenu'
 
 /**
  * The answer outcome wins over the card while it is sending, or when it is
@@ -51,6 +57,7 @@ export function answerText(answer: AnswerState): string {
 /** One-line text of a folded card (E2-FR-22). */
 export function foldedText(card: PromptCardModel): string {
   if (card.kind === 'question') return askTitle(card.questions?.length ?? card.pending.questions?.length ?? 1)
+  if (card.kind === 'plan') return t('prompt.stripPlan')
   return card.generic ? t('prompt.stripPermGeneric') : t('prompt.stripPerm', { tool: card.pending.toolName ?? '' })
 }
 
@@ -100,14 +107,18 @@ export function PromptCard(): ReactNode {
   const folded = usePromptUi((s) => s.folded)
   const wizardSeq = usePromptUi((s) => s.wizardSeq)
   const setFolded = usePromptUi((s) => s.setFolded)
+  const card = paneId ? cardFor(status, enabled) : undefined
+  // Claude's menu matters for a permission ("Always allow") and a plan.
+  const menu = usePromptMenu(paneId, card && card.kind !== 'question' ? card.pending.id : null)
   if (!paneId) return null
-  const card = cardFor(status, enabled)
+  const plan = card?.kind === 'plan' ? planOptions(menu) : null
   if (showsAnswer(answer, card)) return <AnswerStatus paneId={paneId} answer={answer} />
-  if (card) {
+  if (card && (card.kind !== 'plan' || plan)) {
     const id = card.pending.id
     if (folded[id]) return <PromptStrip variant="folded" text={foldedText(card)} onTap={() => setFolded(id, false)} />
     const fold = (): void => setFolded(id, true)
-    if (card.kind === 'permission') return <PermissionCard key={id} paneId={paneId} card={card} onFold={fold} />
+    if (card.kind === 'permission') return <PermissionCard key={id} paneId={paneId} card={card} always={alwaysOption(menu)} onFold={fold} />
+    if (card.kind === 'plan') return <PlanCard key={id} paneId={paneId} card={card} options={plan!} onFold={fold} />
     if (!card.questions) {
       return (
         <div data-prompt-card="terminal" data-pending={id} className="shrink-0 border-t border-state-action/40 bg-bg-secondary px-3 pb-2 pt-2.5">
@@ -118,7 +129,7 @@ export function PromptCard(): ReactNode {
     }
     return <AskWizard key={`${id}:${wizardSeq[id] ?? 0}`} paneId={paneId} pending={card.pending} questions={card.questions} onFold={fold} />
   }
-  if (status && needsGenericStrip(status, card)) {
+  if (status && needsGenericStrip(status, card, !!plan)) {
     return <PromptStrip variant="waiting" text={t('prompt.waiting', { agent: agentName(status) })} onTap={openTerminalKeyboard} />
   }
   return null

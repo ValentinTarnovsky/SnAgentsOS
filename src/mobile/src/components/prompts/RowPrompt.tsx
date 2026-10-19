@@ -3,8 +3,11 @@
  * test") with inline buttons. A permission gets [Allow] / [Deny], 36px tall,
  * answered through the same sequence as the terminal card without opening
  * the terminal; a question gets [Answer], which opens the terminal with the
- * wizard unfolded at step 1. While an answer goes out the line shows its
- * state instead. Taps here never reach the row (no open, no long-press).
+ * wizard unfolded at step 1, and a plan (E2-FR-54) gets [Review], which opens
+ * the terminal on the Plan card (its buttons need Claude's menu on screen,
+ * so the row never answers a plan by itself). While an answer goes out the
+ * line shows its state instead. Taps here never reach the row (no open, no
+ * long-press).
  */
 import type { ReactNode, SyntheticEvent } from 'react'
 import type { RemotePaneStatus } from '@shared/remote-protocol'
@@ -33,6 +36,7 @@ export function RowPrompt({ paneId, status }: { paneId: string; status: RemotePa
   const id = card.pending.id
   let text: string
   if (card.kind === 'question') text = t('prompt.rowAsk', { q: card.pending.questions?.[0]?.question || card.pending.summary })
+  else if (card.kind === 'plan') text = card.pending.summary ? t('prompt.rowPlan', { summary: card.pending.summary }) : t('prompt.rowPlanShort')
   else if (card.generic) text = t('prompt.permGeneric')
   else if (card.pending.summary) text = t('prompt.rowPerm', { tool: card.pending.toolName ?? '', summary: card.pending.summary })
   else text = t('prompt.rowPermShort', { tool: card.pending.toolName ?? '' })
@@ -76,7 +80,7 @@ export function RowPrompt({ paneId, status }: { paneId: string; status: RemotePa
           }}
           className="h-9 shrink-0 rounded-btn bg-accent-violet px-3 text-xs font-semibold text-white active:brightness-110"
         >
-          {t('prompt.answer')}
+          {card.kind === 'plan' ? t('prompt.review') : t('prompt.answer')}
         </button>
       )}
     </span>
