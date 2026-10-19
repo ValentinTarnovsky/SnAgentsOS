@@ -22,6 +22,7 @@ import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerGitIpc } from './ipc/registerGitIpc'
+import { registerReviewNotesIpc } from './ipc/registerReviewNotesIpc'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
 import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
@@ -514,6 +515,8 @@ async function bootstrap(): Promise<void> {
     getSender: () => mainWindow?.webContents ?? null,
     initialGitChip: (configStore.load()?.settings as { gitChip?: unknown } | undefined)?.gitChip !== false,
   })
+  // Review notes of the Changes panel (E7-FR-17..20): dataDir()/review-notes.json.
+  registerReviewNotesIpc({ getSender: () => mainWindow?.webContents ?? null })
   registerRemoteIpc(remoteManager)
   registerLegacyIpc({
     getSender: () => mainWindow?.webContents ?? null,

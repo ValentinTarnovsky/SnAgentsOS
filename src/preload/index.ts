@@ -52,6 +52,7 @@ import type {
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
 import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
+import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
@@ -208,6 +209,14 @@ const api: SnApi = {
     forget: (paneId: string) => ipcRenderer.send(CH.AGENTS_FORGET, paneId),
     onChanged: (cb: (e: AgentsChangedEvt) => void) => sub<AgentsChangedEvt>(CH.AGENTS_CHANGED, cb),
     onReady: (cb: (e: AgentsReadyEvt) => void) => sub<AgentsReadyEvt>(CH.AGENTS_READY, cb),
+  },
+  reviewNotes: {
+    list: (workspaceId: string) => ipcRenderer.invoke(CH.GIT_NOTES_LIST, workspaceId) as Promise<ReviewNotesListRes>,
+    upsert: (note: ReviewNoteInput) => ipcRenderer.invoke(CH.GIT_NOTES_UPSERT, note) as Promise<ReviewNote>,
+    delete: (req: ReviewNotesDeleteReq) => ipcRenderer.invoke(CH.GIT_NOTES_DELETE, req) as Promise<void>,
+    markSent: (req: ReviewNotesMarkSentReq) => ipcRenderer.invoke(CH.GIT_NOTES_MARK_SENT, req) as Promise<void>,
+    prune: (workspaceIds: string[]) => ipcRenderer.send(CH.GIT_NOTES_PRUNE, workspaceIds),
+    onChanged: (cb: (e: ReviewNotesChangedEvt) => void) => sub<ReviewNotesChangedEvt>(CH.GIT_NOTES_CHANGED, cb),
   },
   git: {
     setWatch: (targets: GitTarget[]) => ipcRenderer.send(CH.GIT_SET_WATCH, targets),
