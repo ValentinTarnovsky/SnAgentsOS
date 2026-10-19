@@ -26,6 +26,7 @@ import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { openDiagnostics } from '../lib/connLog'
 import { openHistory } from '../lib/history'
 import { StatusIndicator } from './StatusIndicator'
+import { CacheChip } from './CacheChip'
 import { WaitingPill } from './WaitingPill'
 import { FitModeChip } from './FitModeChip'
 import { ToastStack } from './ToastStack'
@@ -103,6 +104,7 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
           <div className="flex min-w-0 items-center gap-1.5">
             <span data-pane-title className="truncate text-sm font-semibold leading-tight text-text-primary">{paneTitle}</span>
             <StatusIndicator status={activeStatus} />
+            {activePaneId && <CacheChip paneId={activePaneId} />}
           </div>
           {workspaceName && <div data-ws-name className="truncate text-[11px] leading-tight text-text-secondary">{workspaceName}</div>}
         </div>
