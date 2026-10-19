@@ -259,6 +259,14 @@ async function testRefused() {
   other.msg({ type: 'sub', paneId: 'p1' })
   const c = await claim(w, other, 'n2', 'p1', 50, 40)
   check(c && c.error === 'not_found' && w.manager.fit.ownerOf('p1') === 'desktop', 'an executor not_found leaves no owner behind')
+
+  // A pane whose pty is gone (exited, not respawned yet) has nothing to size.
+  w.setReply(() => ({ ok: true }))
+  other.msg({ type: 'sub', paneId: 'p2' })
+  w.sizes.delete('p2')
+  const before = w.commands.length
+  const d = await claim(w, other, 'n3', 'p2', 50, 40)
+  check(d && d.ok === false && d.error === 'not_running' && w.commands.length === before && w.manager.fit.ownerOf('p2') === 'desktop' && fitStates(other, 'p2').length === 0, 'a pane without a live pty answers not_running: no owner, no executor call, no fitState')
 }
 
 async function testTwoDevices() {
@@ -574,10 +582,10 @@ async function testRenderer() {
   check(!r.releaseFitFromDesktop('p1', 1100) && releases.length === 1, 'with no owner left, further keys send nothing')
   r.runFitPane({ kind: 'fitPane', workspaceId: 'w1', paneId: 'p1', cols: 50, rows: 40 }, {})
   r.releaseFitFromDesktop('p1', 1200)
-  check(releases.length === 1 && !r.fitOwnerOf('p1'), 'inside 500ms the IPC is throttled but the pane still refits locally')
+  check(releases.length === 2 && !r.fitOwnerOf('p1'), 'a phone that claimed the pane again inside 500ms is still released in main (no desync)')
   r.runFitPane({ kind: 'fitPane', workspaceId: 'w1', paneId: 'p1', cols: 50, rows: 40 }, {})
   r.releaseFitFromDesktop('p1', 1600)
-  check(releases.length === 2, 'past 500ms the next key asks main again')
+  check(releases.length === 3, 'every new owner gets its own release')
   r.runFitPane({ kind: 'fitPane', workspaceId: 'w1', paneId: 'p1', cols: 50, rows: 40 }, {})
   r.releaseAllFitsFromDesktop()
   check(releases.at(-1).all === true && Object.keys(r.useFitStore.getState().owners).length === 0, 'Restore all sends {all:true} and clears every owner')

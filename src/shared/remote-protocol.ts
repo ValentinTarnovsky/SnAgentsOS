@@ -230,7 +230,8 @@ export type RemoteCtlAction =
    * E3-FR-14/20: the phone sizes the pty to its own grid (cols 20..500, rows
    * 8..300). Main records the owner (FitController) before the executor
    * applies it; acks: disabled (settings.remote.phoneFit off, plus a
-   * fitState desktop), notSubscribed (the session does not watch the pane), rate.
+   * fitState desktop), notSubscribed (the session does not watch the pane),
+   * not_running (no live pty to size), rate.
    */
   | { kind: 'fitPane'; workspaceId: string; paneId: string; cols: number; rows: number }
   /** E3-FR-18: give the size back to the desktop (its latest baseline). */

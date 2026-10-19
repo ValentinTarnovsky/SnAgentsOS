@@ -635,6 +635,9 @@ class RemoteClient {
     const workspaceId = snap ? workspaceOfPane(snap, paneId) : null
     if (!workspaceId) return { ok: false, error: 'not_found' }
     store.getState().setLastFitSent(paneId, { cols, rows })
+    // The re-claim after a replay is going out: from here the pending count
+    // covers it, and once acked a desktop release must count again (FR-18).
+    this.fitReplayAt.delete(paneId)
     this.fitPending.set(paneId, (this.fitPending.get(paneId) ?? 0) + 1)
     log('info', `fitPane ${cols}x${rows}`)
     let res: CtlResult

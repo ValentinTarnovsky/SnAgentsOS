@@ -152,6 +152,10 @@ export class FitController implements FitHooks {
     if (!this.deps.enabled()) return Promise.resolve({ id: '', ok: false, error: 'disabled' })
     if (!subscribed) return Promise.resolve({ id: '', ok: false, error: 'notSubscribed' })
     const { paneId } = action
+    // An exited (or not yet spawned) pane has no pty to size: owning it would
+    // show the strip on a dead pane and confirm a size the phone never sent
+    // ("another device"). The phone claims it again on the new pty's replay.
+    if (!this.deps.ptyIdOf(paneId)) return Promise.resolve({ id: '', ok: false, error: 'not_running' })
     const prev = this.panes.get(paneId)
     const baseline = prev ? prev.baseline : this.deps.sizeOf(paneId)
     this.clearTimers(paneId)

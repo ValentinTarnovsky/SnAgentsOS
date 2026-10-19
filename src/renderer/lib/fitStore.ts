@@ -61,9 +61,9 @@ export function fitBaselineOf(paneId: string): FitSize | null {
   return baselines.get(paneId) ?? null
 }
 
-/** A real key or paste asks at most this often per pane (E3 M11). */
+/** A real key or paste asks at most this often per pane and owner (E3 M11). */
 export const FIT_RELEASE_THROTTLE_MS = 500
-const lastAsk = new Map<string, number>()
+const lastAsk = new Map<string, { at: number; owner: FitOwnerEntry }>()
 
 /**
  * Give a phone-sized pane back to the desktop from the desktop itself: the
@@ -71,13 +71,16 @@ const lastAsk = new Map<string, number>()
  * first (so the resize that follows is reported as the desktop's), then the
  * local owner clears and the terminal refits synchronously, before the key is
  * written. Main's releaseFit coming back is idempotent here. False when no
- * phone owned the pane.
+ * phone owned the pane. The throttle only skips a repeat for the same owner:
+ * a phone that claimed the pane again inside 500ms must reach main too, or
+ * main would keep an owner the desktop already dropped.
  */
 export function releaseFitFromDesktop(paneId: string, now: number = Date.now()): boolean {
-  if (!fitOwnerOf(paneId)) return false
-  const last = lastAsk.get(paneId) ?? -Infinity
-  if (now - last >= FIT_RELEASE_THROTTLE_MS) {
-    lastAsk.set(paneId, now)
+  const owner = fitOwnerOf(paneId)
+  if (!owner) return false
+  const last = lastAsk.get(paneId)
+  if (!last || last.owner !== owner || now - last.at >= FIT_RELEASE_THROTTLE_MS) {
+    lastAsk.set(paneId, { at: now, owner })
     window.snApi.remote.fitRelease({ paneId })
   }
   useFitStore.getState().clearOwner(paneId)
