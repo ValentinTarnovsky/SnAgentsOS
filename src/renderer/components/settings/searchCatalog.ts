@@ -15,6 +15,7 @@ export type CategoryId =
   | 'agents'
   | 'connections'
   | 'quick'
+  | 'automation'
   | 'startup'
   | 'notifications'
   | 'keys'
@@ -32,6 +33,7 @@ export const CATEGORY_ORDER: CategoryId[] = [
   'agents',
   'connections',
   'quick',
+  'automation',
   'startup',
   'notifications',
   'keys',
@@ -53,6 +55,7 @@ export const CATEGORY_LABEL: Record<CategoryId, MessageKey> = {
   agents: 'settings.cat.agents',
   connections: 'settings.cat.connections',
   quick: 'settings.cat.quick',
+  automation: 'settings.cat.automation',
   startup: 'settings.cat.startup',
   notifications: 'settings.cat.notifications',
   keys: 'settings.cat.keys',
@@ -131,6 +134,12 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   // Connections, Quick Commands
   e('connections.profiles', 'settings.search.connections', 'settings.search.connectionsHint', { summary: true, keywords: ['ssh', 'connection', 'conexion', 'setup', 'login', 'password', 'contrasena', 'server', 'servidor', 'expect'] }),
   e('quick.list', 'settings.search.quick', 'settings.search.quickHint', { summary: true, keywords: ['snippet', 'snippets', 'prompt', 'comando', 'command', 'quick', 'plantilla', 'template', 'texto', 'text', 'agente', 'agent'] }),
+
+  // Automation: pane schedules (E8-FR-29..32)
+  e('automation.schedules', 'settings.search.automationSchedules', 'settings.search.automationSchedulesHint', { summary: true, keywords: ['schedule', 'programar', 'programado', 'recurring', 'recurrente', 'cron', 'automation', 'automatizacion', 'reloj', 'clock', 'diario', 'daily', 'hourly', 'cada hora'] }),
+  e('automation.scheduleGrace', 'settings.automation.scheduleGrace', 'settings.automation.scheduleGraceHint', { keywords: ['missed', 'perdida', 'suspend', 'suspendida', 'apagada', 'grace', 'gracia', 'schedule', 'programar'] }),
+  e('automation.scheduleMaxWait', 'settings.automation.scheduleMaxWait', 'settings.automation.scheduleMaxWaitHint', { keywords: ['busy', 'ocupado', 'wait', 'esperar', 'schedule', 'programar'] }),
+  e('automation.scheduleNotify', 'settings.automation.scheduleNotify', 'settings.automation.scheduleNotifyHint', { keywords: ['notification', 'notificacion', 'schedule', 'programar', 'automation'], toggle: { path: 'automation.scheduleNotify' } }),
 
   // Startup
   e('startup.restoreLast', 'settings.restoreLast', undefined, { keywords: ['restore', 'restaurar', 'workspace', 'inicio', 'startup'], toggle: { path: 'restoreLastWorkspace' } }),

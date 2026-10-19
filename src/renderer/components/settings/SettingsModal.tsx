@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
-import { Activity, Bell, Bot, Database, DownloadCloud, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, Zap, type LucideIcon } from 'lucide-react'
+import { Activity, Bell, Bot, Database, DownloadCloud, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, Workflow, Zap, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -27,6 +27,7 @@ import { ConnectionsSection } from './sections/ConnectionsSection'
 import { StartupSection } from './sections/StartupSection'
 import { NotificationsSection } from './sections/NotificationsSection'
 import { QuickCommandsSection } from './sections/QuickCommandsSection'
+import { AutomationSection } from './sections/AutomationSection'
 import { KeymapSection } from './sections/KeymapSection'
 import { DataSection } from './sections/DataSection'
 import { UsageSection } from './sections/UsageSection'
@@ -41,6 +42,7 @@ const ICONS: Record<CategoryId, LucideIcon> = {
   agents: Bot,
   connections: PlugZap,
   quick: Zap,
+  automation: Workflow,
   startup: Power,
   notifications: Bell,
   keys: Keyboard,
@@ -62,6 +64,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   agents: AgentsSection,
   connections: ConnectionsSection,
   quick: QuickCommandsSection,
+  automation: AutomationSection,
   startup: StartupSection,
   notifications: NotificationsSection,
   keys: KeymapSection,
