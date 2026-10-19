@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   FileOutput,
+  LayoutDashboard,
   MoreVertical,
   RefreshCcw,
   Pencil,
@@ -166,6 +167,10 @@ export function Sidebar() {
     })),
   )
   const sessions = useAgentStore((s) => s.sessions)
+  const sleeping = useAgentStore((s) => s.sleeping)
+  // Agents board (E5-FR-27): the header button toggles it like Ctrl+Shift+A.
+  const boardOpen = useAgentStore((s) => s.view === 'board')
+  const boardKeys = useActionKeys('agentsBoard')
   // Consoles whose shell ended on its own (E6-FR-38).
   const paneExit = useAppStore((s) => s.paneExit)
   // Git chip on the second line (E7-FR-08), hidden with settings.gitChip off.
@@ -175,7 +180,7 @@ export function Sidebar() {
   const rowsOn = !sidebarCollapsed && agentSettings?.sidebarAgentRows !== false
   const navInput = navInputFrom(
     { workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, settings: { agents: agentSettings } },
-    { sessions },
+    { sessions, sleeping },
   )
 
   const [menu, setMenu] = useState<MenuState | null>(null)
@@ -290,6 +295,26 @@ export function Sidebar() {
           <span className="pl-1 text-[11px] font-semibold uppercase tracking-wider text-text-secondary/60">
             {t('sidebar.header')}
           </span>
+        )}
+        {!sidebarCollapsed && (
+          <Tooltip label={<ActionTooltipLabel label={t('agents.board.toggle')} action="agentsBoard" />} side="right">
+            <button
+              type="button"
+              data-agents-board-toggle
+              aria-pressed={boardOpen}
+              aria-label={t('agents.board.toggle')}
+              aria-keyshortcuts={boardKeys.length > 0 ? ariaKeyshortcuts(boardKeys) : undefined}
+              onClick={() => useAgentStore.getState().setView(boardOpen ? 'grid' : 'board')}
+              className={cn(
+                'ml-auto mr-1.5 rounded-lg border p-1 transition-colors',
+                boardOpen
+                  ? 'border-accent-violet/60 bg-accent-violet/15 text-text-primary'
+                  : 'border-border/70 bg-card/40 text-text-secondary hover:border-accent-violet/40 hover:bg-card hover:text-text-primary',
+              )}
+            >
+              <LayoutDashboard size={16} />
+            </button>
+          </Tooltip>
         )}
         <Tooltip label={<ActionTooltipLabel label={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')} action="toggleSidebar" />} side="right">
           <button

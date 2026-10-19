@@ -773,6 +773,11 @@ export class RemoteManager {
     return ip ? `http://${ip}:${this.boundPort}` : null
   }
 
+  /** Panes some phone is subscribed to (hibernation keeps them awake, E5-FR-25). */
+  subscribedPaneIds(): Set<string> {
+    return this.sessions?.subscribedPaneIds() ?? new Set()
+  }
+
   /** A phone is watching this pane right now (subscribed, page visible, fresh); ntfy skips it. */
   isPaneViewed(paneId: string): boolean {
     return this.sessions?.isPaneViewed(paneId) ?? false

@@ -47,6 +47,17 @@ export interface ResumeModalState {
   openedAt: number
 }
 
+/** A console main put to sleep (E5-FR-25): its pty is gone and the chat waits in its transcript. */
+export interface SleepInfo {
+  /** Epoch ms it went to sleep. */
+  at: number
+  /** Idle threshold that put it to sleep. */
+  idleMinutes: number
+}
+
+/** What the workspace area shows: the grid, or the agents board over it (E5-FR-27). */
+export type AgentsView = 'grid' | 'board'
+
 export interface AgentState {
   /** paneId -> session view from main. */
   sessions: Record<string, AgentSessionView>
@@ -62,6 +73,9 @@ export interface AgentState {
   gated: Record<string, true>
   /** paneId -> history session its first spawn resumes (E3-FR-39), consumed once. */
   resumeTarget: Record<string, ResumeTarget>
+  /** Sleeping consoles (E5-FR-25). Transient: a restart of the app mounts them as usual. */
+  sleeping: Record<string, SleepInfo>
+  view: AgentsView
 
   setSessions: (list: AgentSessionView[]) => void
   applyChanged: (evt: AgentsChangedEvt) => void
@@ -78,6 +92,9 @@ export interface AgentState {
   setResumeTarget: (paneId: string, target: ResumeTarget) => void
   /** Returns and clears the pane's resume target. */
   takeResumeTarget: (paneId: string) => ResumeTarget | undefined
+  /** Marks a console asleep, or (null) awake again. */
+  setSleeping: (paneId: string, info: SleepInfo | null) => void
+  setView: (view: AgentsView) => void
 }
 
 export const useAgentStore = create<AgentState>((set, get) => ({
@@ -90,6 +107,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   modal: null,
   gated: {},
   resumeTarget: {},
+  sleeping: {},
+  view: 'grid',
 
   setSessions: (list) => set({ sessions: Object.fromEntries(list.map((v) => [v.paneId, v])) }),
 
@@ -155,4 +174,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
     return target
   },
+
+  setSleeping: (paneId, info) =>
+    set((s) => {
+      if (!info && !(paneId in s.sleeping)) return {}
+      const sleeping = { ...s.sleeping }
+      if (info) sleeping[paneId] = info
+      else delete sleeping[paneId]
+      return { sleeping }
+    }),
+
+  setView: (view) => set((s) => (s.view === view ? {} : { view })),
 }))

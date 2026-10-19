@@ -23,6 +23,7 @@ import { client } from '../lib/client'
 import { FontScaleRow } from './FontScaleRow'
 import { PHONE_FONT_SIZES } from '../lib/fit'
 import { openDiagnostics } from '../lib/connLog'
+import { useCacheTimer } from '../lib/cacheTimer'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
 /** This page's version, baked in by vite.config.ts. */
@@ -114,6 +115,9 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const [confirmUnpair, setConfirmUnpair] = useState(false)
   const desktopVersion = useRemoteStore((s) => s.appVersion)
   const [keyLayoutOpen, setKeyLayoutOpen] = useState(false)
+  // Claude cache countdown (E5-FR-28): this phone's own switch and TTL.
+  const cachePrefs = useCacheTimer((s) => s.prefs)
+  const setCachePrefs = useCacheTimer((s) => s.setPrefs)
   // Settings closing takes the Key bar screen with it, so reopening starts at Settings.
   if (!open && keyLayoutOpen) setKeyLayoutOpen(false)
 
@@ -267,6 +271,40 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
             checked={promptCards}
             onChange={setPromptCards}
           />
+        </SettingsSection>
+        <SettingsSection id="cacheTimer" title={t('cache.title')}>
+          <div className="flex flex-col gap-2">
+            <PrefToggle
+              pref="cacheTimer"
+              label={t('cache.toggle')}
+              hint={t('cache.toggleHint')}
+              checked={cachePrefs.enabled}
+              onChange={(on) => setCachePrefs({ enabled: on })}
+            />
+            <div data-cache-ttl={cachePrefs.ttlMinutes} className={clsx('rounded-card border border-border bg-bg-secondary px-4 py-3', !cachePrefs.enabled && 'opacity-50')}>
+              <span className="mb-2 block text-sm text-text-primary">{t('cache.ttl')}</span>
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={t('cache.ttl')}>
+                {([5, 60] as const).map((min) => (
+                  <button
+                    key={min}
+                    role="radio"
+                    aria-checked={cachePrefs.ttlMinutes === min}
+                    data-ttl={min}
+                    disabled={!cachePrefs.enabled}
+                    onClick={() => setCachePrefs({ ttlMinutes: min })}
+                    className={clsx(
+                      'min-h-10 min-w-12 rounded-btn border px-2.5 py-1.5 text-xs font-medium transition',
+                      cachePrefs.ttlMinutes === min
+                        ? 'border-accent-violet bg-accent-violet text-white'
+                        : 'border-border bg-card text-text-primary active:bg-bg-primary',
+                    )}
+                  >
+                    {t('cache.ttlMin', { min })}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         </SettingsSection>
         <SettingsSection id="about" title={t('set.about')}>
           <div className="rounded-card border border-border bg-bg-secondary px-4 py-1">

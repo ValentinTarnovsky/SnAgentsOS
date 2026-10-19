@@ -153,6 +153,9 @@ export const CH = {
   AGENTS_CHANGED: 'agents:changed', // main -> renderer (AgentSessionView | { paneId, removed: true })
   AGENTS_FORGET: 'agents:forget', // send (paneId)
   AGENTS_READY: 'agents:ready', // main -> renderer ({ paneId, sessionId, phase: 'start' | 'idle' })
+  // Hibernation (E5-FR-25/26). Main plans and kills; the renderer shows the sleeping overlay and wakes.
+  AGENTS_SET_HIBERNATION: 'agents:setHibernation', // send (HibernationConfig { idleMinutes, keep })
+  AGENTS_HIBERNATE: 'agents:hibernate', // main -> renderer (AgentsHibernateEvt { paneId, at, idleMinutes })
 
   // Session history (E3-FR-36..40): Claude transcripts + Codex rollouts indexed by main.
   SESSIONS_LIST: 'sessions:list', // invoke ({ query?, cwd? }) -> SessionSummary[]

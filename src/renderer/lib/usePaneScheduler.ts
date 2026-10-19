@@ -2,12 +2,15 @@ import { useEffect } from 'react'
 import { create } from 'zustand'
 import type { PtyPromptResultEvt } from '@shared/ipc-contract'
 import type { AgentPreset, Pane, PaneSchedule, ScheduleRun, ScheduleRunStatus } from '@shared/types'
-import { afterRun, decide, nextOccurrence, withEnabled } from '@shared/schedule'
+import { afterRun, decide, isScheduleEnabled, nextOccurrence, withEnabled } from '@shared/schedule'
+import { SCHEDULE_WAKE_LEAD_MS } from '@shared/hibernation'
 import { PROMPT_READY_TIMEOUT_MS } from '@shared/initialPrompt'
 import { translate, type MessageKey } from '@/i18n'
 import { useAppStore } from './store'
 import { getPtyId } from './ptyRegistry'
 import { isPaneMounted } from './mounting'
+import { useAgentStore } from './agentStore'
+import { isWaking, wakePane } from './hibernation'
 import { toast } from './toast'
 
 /** Kept for callers of the one-shot era; the rule now lives in @shared/schedule. */
@@ -207,6 +210,9 @@ export function schedulerTick(now: number = Date.now()): void {
       const trigger: Trigger = manual ? 'manual' : 'scheduled'
       const ptyId = getPtyId(pane.id)
       const agent = isAgentKind(pane, app.presets)
+      // A console woken from sleep is not live for a prompt until its resumed agent is ready (E5-FR-26).
+      const sleeping = !!useAgentStore.getState().sleeping[pane.id]
+      const live = !!ptyId && !sleeping && !isWaking(pane.id)
       const decision = decide({
         schedule: sched,
         now,
@@ -214,10 +220,15 @@ export function schedulerTick(now: number = Date.now()): void {
         manualSince: manual?.since,
         status: app.paneStatus[pane.id],
         agent,
-        live: !!ptyId,
+        live,
         graceMin,
         maxWaitMin,
       })
+      // A sleeping console wakes (resuming its chat) when its run is 30 s away or due, never for a missed one.
+      if (sleeping && decision !== 'missed' && (manual || (isScheduleEnabled(sched) && sched.dueAt - now <= SCHEDULE_WAKE_LEAD_MS))) {
+        wakePane(pane.id)
+        if (decision === 'idle') continue
+      }
       const scheduledFor = manual ? manual.askedAt : sched.dueAt
       switch (decision) {
         case 'idle':

@@ -23,6 +23,8 @@ export type ActionId =
   | 'quickCommands'
   // Changes panel (E7-FR-11; CONTRATOS "Atajos": toggleChanges, Ctrl+Shift+G is globalPrompt).
   | 'toggleChanges'
+  // Agents board (E5-FR-27; D8 amendment for v3.0).
+  | 'agentsBoard'
 
 export interface KeyAction {
   id: ActionId
@@ -52,6 +54,7 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'focusPrevPane', labelKey: 'keys.focusPrevPane', defaultAccel: 'Ctrl+Alt+Left' },
   { id: 'quickCommands', labelKey: 'keys.quickCommands', defaultAccel: 'Ctrl+Shift+Q' },
   { id: 'toggleChanges', labelKey: 'keys.toggleChanges', defaultAccel: 'Ctrl+Shift+D' },
+  { id: 'agentsBoard', labelKey: 'keys.agentsBoard', defaultAccel: 'Ctrl+Shift+A' },
 ]
 
 /** Actions that stay out of text fields so the field keeps the key (E5-FR-18). */
