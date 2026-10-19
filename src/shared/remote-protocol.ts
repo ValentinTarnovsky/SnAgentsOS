@@ -276,6 +276,13 @@ export type RemoteServerMsg =
       /** Desktop OS (drives e.g. xterm windowsPty on the phone). */
       hostPlatform: string
       appVersion: string
+      /**
+       * E3-FR-01: per-session Bearer for the HTTP routes (64 hex, dies with
+       * the socket or the device). Absent = an older desktop: no image button.
+       */
+      httpToken?: string
+      /** E3-FR-01: public VAPID key, only while https is on. Absent = no "Enable notifications". */
+      pushKey?: string
     }
   | { v: number; type: 'authFail'; reason: RemoteAuthFailReason; retryAfterMs?: number }
   | { v: number; type: 'state'; state: RemoteStateSnapshot }

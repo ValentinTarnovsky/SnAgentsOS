@@ -56,6 +56,7 @@ import { takePendingDeepLink } from './deepLink'
 import { paneById, paneOpenable, statusMapOf, workspaceOfPane } from './workspace'
 import { clearMobileStorage } from './mobileStorage'
 import { chunkInput } from './composerSend'
+import { PendingMap, type PendingOutcome } from './pending'
 import { pruneDrafts } from './drafts'
 import { log, useDiagStore } from './connLog'
 
@@ -92,7 +93,6 @@ export const CONNECT_TIMEOUT_MS = 8000
 export const RESYNC_HIDDEN_MS = 10000
 /** A deadline timer this late means JS was suspended: re-probe, never abort. */
 const SUSPEND_SLACK_MS = 2000
-const CTL_TIMEOUT = 10000
 /**
  * How long a console the desktop just acked (createPane) may be missing from
  * the state frames: a push built before it existed (a pty starting elsewhere,
@@ -227,7 +227,10 @@ class RemoteClient {
   /** Re-sync the viewed pane when the revive probe's pong arrives. */
   private resyncOnPong = false
 
-  private pendingCtl = new Map<string, { resolve: (r: CtlResult) => void; timer: ReturnType<typeof setTimeout> }>()
+  /** E3-FR-04: requests waiting on the desktop by id (ctl, historyReq, gitReq). */
+  private readonly pendingById = new PendingMap<unknown>()
+  /** E3-FR-04: requests waiting by pane (chatSub, chatMore), one per pane. */
+  private readonly pendingByPane = new PendingMap<unknown>()
   private termListener: ((f: TermFrame) => void) | null = null
   /** Old drafts are pruned once per page, on the first live snapshot (E1-FR-28). */
   private draftsPruned = false
@@ -601,17 +604,52 @@ class RemoteClient {
     this.pendingDeepLink = paneId
   }
 
-  /** Send a control request and await its ack (10s local timeout by default). */
-  sendCtl(action: RemoteCtlAction, timeoutMs: number = CTL_TIMEOUT): Promise<CtlResult> {
+  /**
+   * Send a control request and await its ack (E3-FR-04: pending by id, 10s).
+   * No ack resolves error 'timeout'; over the desktop's rate limit the ack
+   * itself says 'rate' (isNoReply: "The PC did not answer [Retry]"). A frame
+   * that cannot leave the phone resolves 'offline' at once. A retry is a new
+   * call, so it always goes under a new id.
+   */
+  async sendCtl(action: RemoteCtlAction): Promise<CtlResult> {
+    const outcome = await this.request<CtlResult>((id) => ({ v: PROTOCOL_VERSION, type: 'ctl', id, action }))
+    return outcome.ok ? outcome.value : { ok: false, error: outcome.error }
+  }
+
+  // --- pending requests (E3-FR-04) ---
+
+  /**
+   * Send a request keyed by a fresh id (historyReq, gitReq, ctl) and wait for
+   * settleRequest(id) from its answer, PENDING_TIMEOUT_MS at most.
+   */
+  request<T>(make: (id: string) => RemoteClientMsg): Promise<PendingOutcome<T>> {
     const id = randomNonceHex(8)
-    return new Promise<CtlResult>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingCtl.delete(id)
-        resolve({ ok: false, error: 'timeout' })
-      }, timeoutMs)
-      this.pendingCtl.set(id, { resolve, timer })
-      this.send({ v: PROTOCOL_VERSION, type: 'ctl', id, action })
-    })
+    const wait = this.pendingById.begin(id)
+    // A random id never collides in practice; if it did, the caller retries.
+    if (!wait) return Promise.resolve({ ok: false, error: 'offline' })
+    if (!this.send(make(id))) this.pendingById.fail(id, 'offline')
+    return wait as Promise<PendingOutcome<T>>
+  }
+
+  /**
+   * Send a request keyed by its pane (chatSub, chatMore): one at a time per
+   * pane, so null (and nothing sent) while that pane already waits.
+   */
+  requestForPane<T>(paneId: string, msg: RemoteClientMsg): Promise<PendingOutcome<T>> | null {
+    const wait = this.pendingByPane.begin(paneId)
+    if (!wait) return null
+    if (!this.send(msg)) this.pendingByPane.fail(paneId, 'offline')
+    return wait as Promise<PendingOutcome<T>>
+  }
+
+  /** The answer to an id-keyed request arrived; false when nothing waits (late). */
+  settleRequest(id: string, value: unknown): boolean {
+    return this.pendingById.resolve(id, value)
+  }
+
+  /** The answer to a pane-keyed request arrived; false when nothing waits (late). */
+  settlePaneRequest(paneId: string, value: unknown): boolean {
+    return this.pendingByPane.resolve(paneId, value)
   }
 
   // --- page lifecycle (FR-10/11) ---
@@ -1110,7 +1148,7 @@ class RemoteClient {
   /** Drafts and input modes never outlive the pairing (E1-FR-28). */
   private forgetComposerState(): void {
     clearMobileStorage()
-    store.getState().update({ inputModes: {}, composerOneShot: null })
+    store.getState().update({ inputModes: {}, composerOneShot: null, httpToken: null, pushKey: null })
   }
 
   private handleAuthOk(msg: Extract<RemoteServerMsg, { type: 'authOk' }>): void {
@@ -1135,6 +1173,8 @@ class RemoteClient {
     } catch {
       /* ignore */
     }
+    // E3-FR-01: the features ride on these fields, never on a version check.
+    store.getState().update({ httpToken: msg.httpToken || null, pushKey: msg.pushKey || null })
     this.goLive(msg.state, msg.hostPlatform, msg.appVersion)
   }
 
@@ -1226,17 +1266,14 @@ class RemoteClient {
   }
 
   private handleCtlAck(msg: Extract<RemoteServerMsg, { type: 'ctlAck' }>): void {
-    const pending = this.pendingCtl.get(msg.id)
-    if (!pending) return
-    clearTimeout(pending.timer)
-    this.pendingCtl.delete(msg.id)
-    pending.resolve({
+    const result: CtlResult = {
       ok: msg.ok,
       error: msg.error,
       paneId: msg.paneId,
       info: msg.info,
       ...(msg.promptFallback ? { promptFallback: true } : {}),
-    })
+    }
+    this.pendingById.resolve(msg.id, result)
   }
 
   private emit(frame: TermFrame): void {
