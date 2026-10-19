@@ -4,6 +4,7 @@ import {
   ArchiveX,
   Clock,
   Eraser,
+  GitBranch,
   GripVertical,
   History,
   Maximize2,
@@ -39,6 +40,12 @@ import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { PaneErrorBoundary } from '@/components/common/ErrorBoundary'
 import { ResumeChip } from '@/components/agents/ResumeChip'
 import { useAgentStore } from '@/lib/agentStore'
+import { useGitStore } from '@/lib/gitStore'
+import { workspaceGitKey } from '@/lib/gitChip'
+import { useWorktreeStore } from '@/lib/worktreeStore'
+import { templateFromPane, worktreeOffer } from '@/lib/worktrees'
+import { PaneWorktreeChip } from '@/components/git/PaneWorktreeChip'
+import { WorktreeMissingCard } from '@/components/layout/WorktreeMissingCard'
 import { reopenClosedConsole, restartClean, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -117,6 +124,38 @@ export function PaneCell({
     (s) => workspaceActive || isPaneMounted(s.mountedWorkspaces, workspace.id, pane.id),
   )
   const ensureMounted = useAppStore((s) => s.ensureMounted)
+
+  // Worktree console (E7-FR-27..36): "Duplicate in worktree" uses the pane's
+  // resolved cwd; a pane on a connection profile never offers it.
+  const wsGitSummary = useGitStore((s) => s.summaries[workspaceGitKey(workspace.id)])
+  const wsGitError = useGitStore((s) => s.errors[workspaceGitKey(workspace.id)])
+  const openWorktreeLaunch = useWorktreeStore((s) => s.openLaunch)
+  const offer = worktreeOffer(workspace, pane, presets, connections, { summary: wsGitSummary, error: wsGitError })
+  const wt = pane.worktree
+  const wtMissing = useWorktreeStore((s) => !!s.missing[pane.id])
+  // FR-36: before a worktree console spawns (mount, remount, restart clean),
+  // ask main whether its folder still exists; the terminal waits for the answer.
+  const [wtChecked, setWtChecked] = useState<string | null>(null)
+  const wtCheckKey = wt && mounted ? `${wt.path}|${epoch}` : null
+  useEffect(() => {
+    if (!wt || !wtCheckKey) return
+    let live = true
+    const done = (exists: boolean): void => {
+      if (!live) return
+      if (exists) useWorktreeStore.getState().clearMissing(pane.id)
+      else useWorktreeStore.getState().markMissing(pane.id)
+      setWtChecked(wtCheckKey)
+    }
+    window.snApi.git
+      .worktreeInspect({ path: wt.path, base: wt.base })
+      .then((r) => done(r.exists))
+      .catch(() => done(true))
+    return () => {
+      live = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wtCheckKey])
+  const wtPending = !!wt && wtCheckKey !== null && wtChecked !== wtCheckKey
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const [renaming, setRenaming] = useState(false)
   const [nameVal, setNameVal] = useState(pane.title)
@@ -205,6 +244,17 @@ export function PaneCell({
       icon: Clock,
       onClick: () => setScheduling(true),
     },
+    ...(offer.show
+      ? [
+          {
+            label: t('worktree.duplicate'),
+            icon: GitBranch,
+            disabled: !!offer.blocked,
+            hint: offer.blocked ? t(offer.blocked) : undefined,
+            onClick: () => openWorktreeLaunch({ workspaceId: workspace.id, repoCwd: offer.repoCwd, template: templateFromPane(pane, presets) }),
+          },
+        ]
+      : []),
     ...(resume.show
       ? [
           {
@@ -309,6 +359,7 @@ export function PaneCell({
             )}
           </span>
         )}
+        {wt && <PaneWorktreeChip pane={pane} />}
         {exited && (
           <span
             data-pane-exited
@@ -380,7 +431,13 @@ export function PaneCell({
             <span>{t('agents.modal.gated')}</span>
           </div>
         )}
-        {mounted ? (
+        {wt && wtMissing ? (
+          <WorktreeMissingCard workspace={workspace} pane={pane} presets={presets} />
+        ) : wtPending ? (
+          <div data-pane-worktree-checking={pane.id} className="flex h-full items-center justify-center text-xs text-text-secondary">
+            {t('worktree.checking')}
+          </div>
+        ) : mounted ? (
           // A render failure swaps only the terminal for a fallback; the pty
           // keeps running and [Reload console] reattaches (E4-FR-19).
           <PaneErrorBoundary paneId={pane.id} epoch={epoch}>

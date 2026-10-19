@@ -15,6 +15,7 @@ import { AgentEndChip } from './AgentEndChip'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
+import { requestClosePane } from '@/lib/worktrees'
 
 export interface TerminalPaneProps {
   paneId: string
@@ -131,7 +132,7 @@ export function TerminalPane({
             ctl.focus()
           }}
           // A dead console closes without the running-process confirmation.
-          onClose={() => useAppStore.getState().closePane(workspaceId, paneId)}
+          onClose={() => requestClosePane(workspaceId, paneId)}
         />
       ) : (
         !exit && <AgentEndChip paneId={paneId} initialCommand={initialCommand} shellKind={ctl.shellKind} onDone={ctl.focus} />
