@@ -56,21 +56,23 @@ export function exportAgentName(preset: AgentPreset, presets: AgentPreset[]): st
  * How the setup console runs its command once (E8-FR-25): as the shell's own
  * argument, so the shell exits with the command's code. A shell we cannot
  * drive that way, or a connection profile (the command must run after the
- * login), types it instead and its exit cannot release anything.
+ * login), types it instead and its exit cannot release anything. cmd.exe
+ * gets a raw command line: `/s` strips the outer quotes and keeps the inner
+ * ones, which node-pty's array quoting (`\"`) would break.
  */
 export function oneShotLaunch(
   command: string,
   shell: string | undefined,
   platform: string,
   hasProfile: boolean,
-): { args?: string[]; initialCommand?: string } {
+): { args?: string[] | string; initialCommand?: string } {
   if (hasProfile) return { initialCommand: command }
   const kind = shell?.trim() ? shellKind(shell, platform) : platform === 'win32' ? 'powershell' : 'posix'
   switch (kind) {
     case 'powershell':
       return { args: ['-NoLogo', '-Command', command] }
     case 'cmd':
-      return { args: ['/d', '/s', '/c', command] }
+      return { args: `/d /s /c "${command}"` }
     case 'posix':
       return { args: ['-lc', command] }
     default:
@@ -301,26 +303,43 @@ export type TrustItem =
   | { kind: 'quickAgent'; label: string; agent: string; prompt: string }
 
 /**
+ * Characters that hide or reorder what a line shows (E8-FR-24): C0/C1
+ * controls (newline and tab stay), bidi overrides and isolates (a
+ * "Trojan Source" command reads differently than it runs) and zero-width
+ * marks. The trust dialog shows them as `<U+XXXX>` instead.
+ */
+const HIDDEN_RE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g
+
+/** `text` with every hiding character spelled out, so the dialog shows what runs. */
+export function visibleText(text: string): string {
+  return text.replace(HIDDEN_RE, (ch) => `<U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}>`)
+}
+
+/**
  * Every executable line of a file, in the dialog's order (E8-FR-24): the
  * profile first, then the setup, each console's command, each agent + prompt,
- * and each Quick Command.
+ * and each Quick Command. Every file-provided string goes through
+ * `visibleText`.
  */
 export function trustItemsFor(cfg: RepoConfigFile, profileName: string | undefined, consoleCount: number): TrustItem[] {
+  const v = visibleText
   const out: TrustItem[] = []
-  if (profileName) out.push({ kind: 'profile', name: profileName, count: consoleCount })
-  if (cfg.setup) out.push({ kind: 'setup', command: cfg.setup.command })
+  if (profileName) out.push({ kind: 'profile', name: v(profileName), count: consoleCount })
+  if (cfg.setup) out.push({ kind: 'setup', command: v(cfg.setup.command) })
   cfg.consoles.forEach((c, index) => {
-    const title = c.title?.trim() || `#${index + 1}`
-    if (c.command?.trim()) out.push({ kind: 'command', index, title, command: c.command })
+    const title = v(c.title?.trim() || `#${index + 1}`)
+    if (c.command?.trim()) out.push({ kind: 'command', index, title, command: v(c.command) })
   })
   cfg.consoles.forEach((c, index) => {
-    const title = c.title?.trim() || `#${index + 1}`
+    const title = v(c.title?.trim() || `#${index + 1}`)
     const agent = c.agent?.trim() || 'shell'
-    if (agent !== 'shell' || c.prompt?.trim()) out.push({ kind: 'agent', index, title, agent, ...(c.prompt?.trim() ? { prompt: c.prompt } : {}) })
+    if (agent.toLowerCase() !== 'shell' || c.prompt?.trim()) {
+      out.push({ kind: 'agent', index, title, agent: v(agent), ...(c.prompt?.trim() ? { prompt: v(c.prompt) } : {}) })
+    }
   })
   for (const q of cfg.quickCommands ?? []) {
-    if (q.action === 'send') out.push({ kind: 'quickSend', label: q.label, text: q.text, enter: q.enter === true })
-    else out.push({ kind: 'quickAgent', label: q.label, agent: q.agent, prompt: q.prompt })
+    if (q.action === 'send') out.push({ kind: 'quickSend', label: v(q.label), text: v(q.text), enter: q.enter === true })
+    else out.push({ kind: 'quickAgent', label: v(q.label), agent: v(q.agent), prompt: v(q.prompt) })
   }
   return out
 }

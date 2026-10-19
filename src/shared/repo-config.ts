@@ -101,14 +101,21 @@ export type RepoConfigExportRes =
 
 /**
  * E8-FR-24: only a file with nothing executable (grid, titles and shells
- * without `command`) opens without the trust dialog. An agent console alone
- * runs the user's own local preset, so it does not ask.
+ * without `command`) opens without the trust dialog. An agent console asks
+ * too: it starts an agent inside a repo nobody approved yet. Any `agent`
+ * other than the `shell` keyword counts (a custom shell preset name included,
+ * the shared rule cannot tell preset types apart).
  */
 export function repoConfigNeedsTrust(cfg: RepoConfigFile): boolean {
   if (cfg.setup) return true
   if (cfg.connectionProfile) return true
   if (cfg.quickCommands && cfg.quickCommands.length > 0) return true
-  return cfg.consoles.some((c) => !!c.command || !!c.prompt)
+  return cfg.consoles.some((c) => !!c.command || !!c.prompt || isAgentConsole(c.agent))
+}
+
+function isAgentConsole(agent: string | undefined): boolean {
+  const name = agent?.trim().toLowerCase() ?? ''
+  return name !== '' && name !== 'shell'
 }
 
 /**
