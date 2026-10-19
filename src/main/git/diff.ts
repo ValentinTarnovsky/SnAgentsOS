@@ -16,9 +16,10 @@
 import { createHash } from 'crypto'
 import { promises as fsp } from 'fs'
 import { dirname, extname, isAbsolute, relative, resolve as resolvePath } from 'path'
-import type { GitArea, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitFileEntry, GitSummary } from '@shared/git-types'
+import type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitFileEntry, GitSummary } from '@shared/git-types'
 import { gitErrorCode, type GitRunner } from './gitExec'
 import { parseNumstatZ, type NumstatEntry } from './porcelain'
+import { isBaseSha, listAgainstBase, sumBase } from './baseDiff'
 
 /** Above either limit a diff is "too large" until the user asks for it anyway. */
 export const DIFF_MAX_LINES = 5000
@@ -206,6 +207,8 @@ export interface FileDiffReq {
   runner: Pick<GitRunner, 'run'>
   fs?: DiffFs
   platform?: NodeJS.Platform
+  /** "Against base" mode (E7-FR-35): a tracked entry diffs the working tree against this full sha. */
+  base?: string
 }
 
 const DIFF_FLAGS = ['--no-color', '--no-ext-diff', '--no-textconv', '-U3']
@@ -248,10 +251,16 @@ export async function readFileDiff(req: FileDiffReq): Promise<GitDiffReply> {
       return { ...base, binary: parsed.binary, diffRev: diffRevOf(buf), hunks: parsed.hunks, totalLines: parsed.totalLines }
     }
     const args = [LITERAL, 'diff', ...DIFF_FLAGS]
-    if (entry.area === 'staged') args.push('--cached')
-    if (entry.area !== 'conflict') args.push('-M')
-    args.push('--', entry.path)
-    if (entry.oldPath && entry.area === 'staged') args.push(entry.oldPath)
+    if (req.base !== undefined) {
+      if (!isBaseSha(req.base)) return { error: 'denied' }
+      args.push('-M', req.base, '--', entry.path)
+      if (entry.oldPath) args.push(entry.oldPath)
+    } else {
+      if (entry.area === 'staged') args.push('--cached')
+      if (entry.area !== 'conflict') args.push('-M')
+      args.push('--', entry.path)
+      if (entry.oldPath && entry.area === 'staged') args.push(entry.oldPath)
+    }
     const raw = await req.runner.run(args, { cwd: repoRoot, timeoutMs: 15000 })
     const rev = diffRevOf(raw)
     const lines = countRawLines(raw)
@@ -370,18 +379,80 @@ export interface ChangesReaderDeps {
 
 const AREAS: ReadonlySet<string> = new Set<GitArea>(['staged', 'unstaged', 'untracked', 'conflict'])
 
-/** `git:status`, `git:fileDiff`, `git:openFile` over a GitService (E7-FR-12, 13, 15). */
+/** One "against base" list per (target, base): the allowlist of its diffs, rebuilt when the target's status list changes. */
+interface BaseList {
+  base: string
+  of: GitFileEntry[]
+  files: Promise<GitFileEntry[]>
+  /** The resolved list, once it is in. */
+  done?: GitFileEntry[]
+}
+
+/** Base lists kept at most (targets come and go with the consoles). */
+const MAX_BASE_LISTS = 64
+
+/**
+ * `git:status`, `git:fileDiff`, `git:openFile` over a GitService (E7-FR-12,
+ * 13, 15), plus their "against base" form and `git:baseStat` for worktree
+ * consoles (E7-FR-35): only `pane:` targets, only a full sha.
+ */
 export class ChangesReader {
   /** Area counts per listed array: a list is replaced on every run, so its identity is the cache key. */
   private counts = new WeakMap<GitFileEntry[], Promise<GitFileEntry[]>>()
+  private bases = new Map<string, BaseList>()
 
   constructor(private deps: ChangesReaderDeps) {}
 
-  async status(key: unknown): Promise<GitChangesRes | null> {
+  /** The base list of a pane target, from cache while its status list and base stay the same. */
+  private baseList(key: string, base: string, summary: GitSummary, files: GitFileEntry[]): Promise<GitFileEntry[]> {
+    const id = `${key}\0${base.toLowerCase()}`
+    const prev = this.bases.get(id)
+    if (prev && prev.of === files) return prev.files
+    const repoRoot = summary.repoRoot
+    const entry: BaseList = {
+      base,
+      of: files,
+      files: listAgainstBase(repoRoot, base, files, this.deps.runner, (rel) => {
+        const abs = resolveRepoPath(repoRoot, rel, this.deps.platform)
+        return abs ? this.deps.untrackedPeek(abs) : undefined
+      }),
+      // While it rebuilds, the last list stays the allowlist (a diff click never sees a gap).
+      ...(prev?.done ? { done: prev.done } : {}),
+    }
+    entry.files.then(
+      (list) => {
+        entry.done = list
+      },
+      () => {
+        if (this.bases.get(id) !== entry) return
+        if (prev) this.bases.set(id, prev)
+        else this.bases.delete(id)
+      },
+    )
+    this.bases.delete(id)
+    this.bases.set(id, entry)
+    if (this.bases.size > MAX_BASE_LISTS) this.bases.delete(this.bases.keys().next().value as string)
+    return entry.files
+  }
+
+  /** The last resolved base list of a target for exactly this base, if any. */
+  private listedAgainst(key: string, base: string): GitFileEntry[] | null {
+    return this.bases.get(`${key}\0${base.toLowerCase()}`)?.done ?? null
+  }
+
+  async status(key: unknown, base?: unknown): Promise<GitChangesRes | null> {
     if (typeof key !== 'string') return null
+    if (base !== undefined && (!key.startsWith('pane:') || !isBaseSha(base))) return null
     const view = await this.deps.source.ensureFresh(key, this.deps.maxAgeMs ?? 2500)
     if (!view || !view.summary) return null
     const { summary, files } = view
+    if (typeof base === 'string') {
+      try {
+        return { summary, files: await this.baseList(key, base, summary, files) }
+      } catch {
+        return null
+      }
+    }
     let pending = this.counts.get(files)
     if (!pending) {
       const repoRoot = summary.repoRoot
@@ -395,20 +466,39 @@ export class ChangesReader {
   }
 
   async fileDiff(req: unknown): Promise<GitDiffReply> {
-    const { key, path, area, force } = (req && typeof req === 'object' ? req : {}) as Record<string, unknown>
+    const { key, path, area, force, base } = (req && typeof req === 'object' ? req : {}) as Record<string, unknown>
     if (typeof key !== 'string' || typeof path !== 'string' || typeof area !== 'string' || !AREAS.has(area)) return { error: 'denied' }
+    if (base !== undefined && (!key.startsWith('pane:') || !isBaseSha(base))) return { error: 'denied' }
     const view = this.deps.source.get(key)
     if (!view?.summary) return { error: 'gone' }
-    const entry = findListed(view.files, path, area as GitArea)
+    const list = typeof base === 'string' ? this.listedAgainst(key, base) : view.files
+    const entry = list ? findListed(list, path, area as GitArea) : null
     if (!entry) return { error: 'gone' }
-    return readFileDiff({ repoRoot: view.summary.repoRoot, entry, force: force === true, runner: this.deps.runner, fs: this.deps.fs, platform: this.deps.platform })
+    // An untracked file reads the same with or without a base: no git diff runs for it.
+    const withBase = typeof base === 'string' && entry.area !== 'untracked' ? { base } : {}
+    return readFileDiff({ repoRoot: view.summary.repoRoot, entry, force: force === true, runner: this.deps.runner, fs: this.deps.fs, platform: this.deps.platform, ...withBase })
   }
 
   async openFile(req: unknown): Promise<boolean> {
-    const { key, path, reveal } = (req && typeof req === 'object' ? req : {}) as Record<string, unknown>
+    const { key, path, reveal, base } = (req && typeof req === 'object' ? req : {}) as Record<string, unknown>
     if (typeof key !== 'string' || typeof path !== 'string') return false
+    if (base !== undefined && !isBaseSha(base)) return false
     const view = this.deps.source.get(key)
-    if (!view?.summary || !findListed(view.files, path)) return false
+    const list = typeof base === 'string' ? this.listedAgainst(key, base) : view?.files
+    if (!view?.summary || !list || !findListed(list, path)) return false
     return openRepoFile(view.summary.repoRoot, path, reveal === true, { ...this.deps.open, fs: this.deps.fs, platform: this.deps.platform })
+  }
+
+  /** `git:baseStat`: a worktree console's `+a -d N files` against its base (the race bar); null when unreadable. */
+  async baseStat(req: unknown): Promise<GitBaseStat | null> {
+    const { key, base } = (req && typeof req === 'object' ? req : {}) as Record<string, unknown>
+    if (typeof key !== 'string' || !key.startsWith('pane:') || !isBaseSha(base)) return null
+    const view = await this.deps.source.ensureFresh(key, this.deps.maxAgeMs ?? 2500)
+    if (!view?.summary) return null
+    try {
+      return sumBase(await this.baseList(key, base, view.summary, view.files), view.summary)
+    } catch {
+      return null
+    }
   }
 }

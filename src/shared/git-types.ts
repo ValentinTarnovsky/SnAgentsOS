@@ -130,3 +130,17 @@ export interface GitDiffRes {
 export type GitDiffError = GitError | 'gone' | 'denied'
 
 export type GitDiffReply = GitDiffRes | { error: GitDiffError }
+
+// ---- Against base (E7-FR-35) -------------------------------------------------
+
+/**
+ * `git:baseStat` (amendment): a worktree console's `+a -d N files` against
+ * `pane.worktree.base`, committed work included (the race bar).
+ */
+export interface GitBaseStat {
+  added: number
+  removed: number
+  files: number
+  /** Some untracked file was not counted (budget) or the status list was cut short. */
+  approx: boolean
+}

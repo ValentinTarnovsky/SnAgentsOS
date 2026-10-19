@@ -25,14 +25,14 @@ import type {
   RemoteStateSnapshot,
 } from './remote-protocol'
 import type { InitialPromptReq, LaunchKind, SubmitError } from './initialPrompt'
-import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
+import type { GitArea, GitBaseStat, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from './worktree-types'
 import type { OpenPathReq, OpenPathRes } from './inertOpen'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from './repo-config'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from './review-notes'
 import type { CliCtlAction, CliUiState, SkillOp, SkillStatus } from './ctl-protocol'
 
-export type { GitArea, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
+export type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
 /**
  * "PC awake" state (contract `power:state`). `reason: 'agents'` covers both a
@@ -940,12 +940,17 @@ export interface SnApi {
     onUpdate(cb: (e: GitUpdateEvt) => void): () => void
     /** The open Changes panel's target (main polls it every 3 s while focused), or null when closed. */
     setPanel(key: string | null): void
-    /** The panel's file list with per-area line counts; null when the target is not a readable repo. */
-    status(key: string): Promise<GitChangesRes | null>
-    /** One listed file's diff; `force` renders a too-large diff anyway. */
-    fileDiff(req: { key: string; path: string; area: GitArea; force?: boolean }): Promise<GitDiffReply>
+    /**
+     * The panel's file list with per-area line counts; null when the target is not a readable repo.
+     * With `base` (a worktree console's full base sha, E7-FR-35) it lists everything that differs from that commit.
+     */
+    status(key: string, base?: string): Promise<GitChangesRes | null>
+    /** One listed file's diff; `force` renders a too-large diff anyway; `base` diffs against that commit. */
+    fileDiff(req: { key: string; path: string; area: GitArea; force?: boolean; base?: string }): Promise<GitDiffReply>
     /** Open a listed file with its default app (allowlisted extensions only) or reveal it in its folder. */
-    openFile(req: { key: string; path: string; reveal?: boolean }): Promise<boolean>
+    openFile(req: { key: string; path: string; reveal?: boolean; base?: string }): Promise<boolean>
+    /** A worktree console's `+a -d N files` against its base, committed work included (the race bar, E7-FR-35). */
+    baseStat(req: { key: string; base: string }): Promise<GitBaseStat | null>
     /** Create an isolated worktree on a new sn/<slug> branch (E7-FR-28). */
     worktreeAdd(req: WorktreeAddReq): Promise<WorktreeAddRes>
     /** Delete a managed worktree (and its branch); main kills the pane's pty first (E7-FR-30). */
