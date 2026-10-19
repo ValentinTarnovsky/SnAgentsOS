@@ -7,6 +7,8 @@
 // prompt to the first agent console, fs:dirExists. R30-01: schema 13 (v12 ->
 // v13 keeps everything, new defaults, PaneSchedule automation fields,
 // repoConfig, junk tolerance). R30-12: .snagentsos.json (test-automation-repo.cjs).
+// R31-00: schema 14 (v13 -> v14 keeps everything, terminalShellIntegration)
+// and the zod of the v3.1 ctl scheduleRun / scheduleToggle.
 // Same esbuild + vm harness as test-status.cjs.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -53,13 +55,13 @@ function v11(extra = {}) {
 const qc = (i, extra = {}) => ({ id: `qc-${i}`, name: `Cmd ${i}`, text: `echo ${i}`, action: 'send', enter: false, ...extra })
 
 function schemaChecks() {
-  check(CONFIG_VERSION === 13, 'CONFIG_VERSION is 13')
+  check(CONFIG_VERSION === 14, 'CONFIG_VERSION is 14')
 
   // E8-FR-01: 3 snippets -> 3 global send commands, same order and ids, no Enter.
   const snippets = [{ id: 'snip-a', name: 'Continua', text: 'continua' }, { id: 'snip-b', name: 'Compact', text: '/compact' }, { id: 'snip-c', name: 'Tests', text: 'corre los tests\ny arregla' }]
   const raw = v11({ snippets: clone(snippets) })
   const a = parseConfig(clone(raw))
-  check(a && a.version === 13, 'a v11 config with snippets parses and is stamped 13')
+  check(a && a.version === 14, 'a v11 config with snippets parses and is stamped 14')
   check(a.quickCommands.length === 3 && a.quickCommands.map(c => c.id).join() === 'snip-a,snip-b,snip-c', 'snippets migrate in order, keeping their ids')
   check(a.quickCommands.every((c, i) => c.action === 'send' && c.enter === false && c.workspaceId === undefined && c.presetId === undefined && c.name === snippets[i].name && c.text === snippets[i].text), 'migrated commands are global send without Enter, same label and text')
   check(!('snippets' in a), 'the parsed config (the next save) no longer carries snippets')
@@ -135,7 +137,7 @@ function schemaChecks() {
     check(store.load().quickCommands.length === 3 && JSON.parse(fs.readFileSync(file, 'utf8')).snippets.length === 3, 'a plain load migrates in memory and leaves the file untouched')
     store.load({ upgrade: true })
     const written = JSON.parse(fs.readFileSync(file, 'utf8'))
-    check(written.version === 13 && !('snippets' in written) && written.quickCommands.map(c => c.id).join() === 'snip-a,snip-b,snip-c', 'the upgrade write stores quickCommands and drops snippets')
+    check(written.version === 14 && !('snippets' in written) && written.quickCommands.map(c => c.id).join() === 'snip-a,snip-b,snip-c', 'the upgrade write stores quickCommands and drops snippets')
     check(JSON.parse(fs.readFileSync(file + '.bak', 'utf8')).snippets.length === 3, 'the pre-upgrade file with snippets stays in .bak')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 }
@@ -178,11 +180,10 @@ function survives(input, output, at = '') {
 const run = (at, extra = {}) => ({ at, scheduledFor: at - 5, trigger: 'scheduled', status: 'sent', ...extra })
 
 async function schema13Checks() {
-  check(CONFIG_VERSION === 13, 'CONFIG_VERSION is 13 (R30-01)')
   const raw = v12Real()
   const a = parseConfig(clone(raw))
-  check(a && a.version === 13, 'a real v12 config parses and is stamped 13')
-  check(survives(raw, a), 'every v12 value survives v12 -> v13 unchanged')
+  check(a && a.version === CONFIG_VERSION, 'a real v12 config parses and is stamped with the current version')
+  check(survives(raw, a), 'every v12 value survives v12 -> v13 -> v14 unchanged')
   const st = a.settings
   check(st.remote.phoneFit === true && JSON.stringify(st.remote.https) === '{"enabled":false,"mode":"tailscaleServe"}' && st.remote.enabled === true && st.remote.port === 4600, 'remote gains phoneFit on and https off (tailscaleServe), keeping enabled and port')
   check(st.cliEnabled === true && st.worktreesRoot === '' && st.hibernateIdleMinutes === 0, 'cliEnabled on, worktreesRoot empty (= dataDir()/worktrees) and hibernation off')
@@ -254,10 +255,10 @@ async function schema13Checks() {
     const file = path.join(dir, 'config.json'), text = JSON.stringify(raw)
     fs.writeFileSync(file, text)
     const store = new ConfigStore()
-    check(store.load().version === 13 && fs.readFileSync(file, 'utf8') === text, 'a plain load reads v12 as 13 and leaves the file untouched')
+    check(store.load().version === 14 && fs.readFileSync(file, 'utf8') === text, 'a plain load reads v12 as 14 and leaves the file untouched')
     store.load({ upgrade: true })
     const written = JSON.parse(fs.readFileSync(file, 'utf8'))
-    check(written.version === 13 && survives(raw, written) && written.settings.remote.phoneFit === true && written.settings.automation.scheduleGraceMin === 120, 'the upgrade write stores v13 with every v12 value and the new defaults')
+    check(written.version === 14 && survives(raw, written) && written.settings.remote.phoneFit === true && written.settings.automation.scheduleGraceMin === 120, 'the upgrade write stores v13 with every v12 value and the new defaults')
     check(fs.readFileSync(file + '.bak', 'utf8') === text, 'the pre-upgrade v12 file stays in .bak')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 
@@ -278,11 +279,108 @@ async function schema13Checks() {
   S.getState().updateSettings({ hibernateIdleMinutes: 45, remote: { ...S.getState().settings.remote, phoneFit: false } })
   flush()
   const back = parseConfig(saves.at(-1))
-  check(back && back.version === 13 && JSON.stringify(back.workspaces[0].panes[0].schedule) === JSON.stringify(fullSch) && back.workspaces[0].repoConfig.sha256 === sha, 'schedule fields and repoConfig persist through the store and the schema')
+  check(back && back.version === 14 && JSON.stringify(back.workspaces[0].panes[0].schedule) === JSON.stringify(fullSch) && back.workspaces[0].repoConfig.sha256 === sha, 'schedule fields and repoConfig persist through the store and the schema')
   check(back.settings.hibernateIdleMinutes === 45 && back.settings.remote.phoneFit === false && back.settings.remote.https.mode === 'tailscaleServe', 'v13 settings persist through the store')
   stop()
 }
 // ---- end R30-01 -------------------------------------------------------------
+
+// ---- R31-00: schema 14 (v13 -> v14 keeps everything) and the v3.1 ctl -------
+// A v13 config as the 2.0 renderer writes it: the v12 fixture plus every
+// schema 13 key set to a non-default value, a full PaneSchedule, a worktree
+// pane and a repoConfig trace.
+function v13Real(extra = {}) {
+  const c = v12Real()
+  c.version = 13
+  Object.assign(c.settings, { cliEnabled: false, worktreesRoot: 'D:/wt', hibernateIdleMinutes: 30 })
+  c.settings.remote = { enabled: true, port: 4600, phoneFit: false, https: { enabled: true, mode: 'tailscaleServe' } }
+  c.settings.agents.cacheTimer = { enabled: true, ttlMinutes: 60 }
+  Object.assign(c.settings.automation, { cliProtectSsh: false, cliUserPath: true, scheduleGraceMin: 0, scheduleMaxWaitMin: 240, scheduleNotify: true })
+  c.workspaces[0].repoConfig = { sha256: 'cd'.repeat(32), appliedAt: 9, quickCommandIds: ['qc-1'] }
+  c.workspaces[0].panes[0].schedule = { time: '09:30', prompt: 'segui', dueAt: 1760000000000, recurrence: { kind: 'weekdays' }, waitIdle: false, enabled: false, waitingSince: 1759999990000, history: [run(1), run(2, { trigger: 'manual', status: 'failed', reason: 'not_delivered' })] }
+  c.workspaces[0].panes[1].worktree = { repoRoot: 'C:/a', path: 'D:/wt/a-fix', branch: 'sn/a-fix', base: 'ab12cd34' }
+  return Object.assign(c, extra)
+}
+
+async function schema14Checks() {
+  check(CONFIG_VERSION === 14, 'CONFIG_VERSION is 14 (R31-00)')
+  const raw = v13Real()
+  const a = parseConfig(clone(raw))
+  check(a && a.version === 14, 'a real v13 config parses and is stamped 14')
+  check(survives(raw, a), 'every v13 value survives v13 -> v14 unchanged (schedule, worktree, repoConfig, remote, cacheTimer, automation)')
+  check(a.settings.terminalShellIntegration === true, 'settings.terminalShellIntegration defaults to true')
+  check(!('terminalShellIntegration' in raw.settings) && Object.keys(a.workspaces[0]).sort().join() === Object.keys(raw.workspaces[0]).sort().join(), 'the v14 key is the only addition: workspaces keep exactly their v13 keys')
+  check(JSON.stringify(parseConfig(clone(a))) === JSON.stringify(a), 'v14 parse is idempotent')
+  const fromV10 = parseConfig({ version: 10, workspaces: [], presets: [], settings: clone(baseSettings) })
+  check(fromV10 && fromV10.version === 14 && fromV10.settings.terminalShellIntegration === true && fromV10.settings.hibernateIdleMinutes === 0, 'a v10 config walks 11..14 in one parse and gains the v14 default')
+
+  // Values kept, junk values fall back without rejecting the config.
+  const set = (v) => { const c = v13Real(); c.settings.terminalShellIntegration = v; return parseConfig(c) }
+  check(set(false).settings.terminalShellIntegration === false && set(true).settings.terminalShellIntegration === true, 'terminalShellIntegration false and true are kept')
+  for (const bad of ['off', 0, 1, null, { on: false }]) {
+    const p = set(bad)
+    check(p && p.settings.terminalShellIntegration === true && p.settings.cliEnabled === false, `a junk terminalShellIntegration ${JSON.stringify(bad)} falls back to true, the rest kept`)
+  }
+
+  // ConfigStore: the renderer load upgrades a real v13 file to 14 once, .bak keeps v13.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-schema14-test-'))
+  try {
+    const app = { getPath: () => dir, isPackaged: false }
+    const { ConfigStore } = load('src/main/store/ConfigStore.ts', { require: id => (id === 'electron' ? { app } : require(id)), process: { ...process, env: {}, argv: ['electron'] } })
+    const file = path.join(dir, 'config.json'), text = JSON.stringify(raw)
+    fs.writeFileSync(file, text)
+    const store = new ConfigStore()
+    check(store.load().version === 14 && fs.readFileSync(file, 'utf8') === text, 'a plain load reads v13 as 14 and leaves the file untouched')
+    store.load({ upgrade: true })
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'))
+    check(written.version === 14 && survives(raw, written) && written.settings.terminalShellIntegration === true, 'the upgrade write stores v14 with every v13 value and the new default')
+    check(fs.readFileSync(file + '.bak', 'utf8') === text, 'the pre-upgrade v13 file stays in .bak')
+    store.load({ upgrade: true })
+    check(fs.readFileSync(file + '.bak', 'utf8') === text && JSON.parse(fs.readFileSync(file, 'utf8')).version === 14, 'a second upgrade load rewrites nothing (.bak still v13)')
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+
+  // Renderer: the store default and a persisted toggle round-trip through the schema.
+  const saves = [], timers = new Map()
+  let seq = 0
+  const flush = () => { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) }
+  const r = loadRenderer(`export { startPersistence } from './persist'; export { useAppStore } from './store'`, {
+    window: { snApi: { config: { save: cfg => saves.push(clone(cfg)) }, pty: { killPanes: async () => 0 } } },
+    document: { hasFocus: () => false },
+    setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
+  })
+  const S = r.useAppStore
+  check(S.getState().settings.terminalShellIntegration === true, 'the store default carries terminalShellIntegration on')
+  S.getState().hydrate(a)
+  const stop = r.startPersistence()
+  S.getState().updateSettings({ terminalShellIntegration: false })
+  flush()
+  const back = parseConfig(saves.at(-1))
+  check(back && back.version === 14 && back.settings.terminalShellIntegration === false && survives(raw.workspaces, back.workspaces), 'turning shell integration off persists as v14 and keeps the v13 workspaces')
+  stop()
+}
+
+/** v3.1 WS amendments (R31-00): the two Automations ctl through the real zod schema. */
+function v31ContractChecks() {
+  const { parseRemoteClientMsg } = load('src/shared/remote-protocol-schemas.ts', { URL })
+  const frame = (action) => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'ctl', id: 'c1', action }))
+  const run = frame({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'p1' })
+  check(run && run.action.kind === 'scheduleRun' && run.action.workspaceId === 'w1' && run.action.paneId === 'p1', 'scheduleRun { workspaceId, paneId } parses')
+  const withText = frame({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'p1', text: 'rm -rf /', prompt: 'x' })
+  check(withText && !('text' in withText.action) && !('prompt' in withText.action), 'scheduleRun never carries text: stray text/prompt fields are stripped')
+  for (const bad of [{ kind: 'scheduleRun', paneId: 'p1' }, { kind: 'scheduleRun', workspaceId: 'w1' }, { kind: 'scheduleRun', workspaceId: '', paneId: 'p1' }, { kind: 'scheduleRun', workspaceId: 'w1', paneId: 'x'.repeat(129) }, { kind: 'scheduleRun', workspaceId: 1, paneId: 'p1' }]) {
+    check(frame(bad) === null, `scheduleRun rejects ${JSON.stringify(bad).slice(0, 60)}`)
+  }
+  for (const enabled of [true, false]) {
+    const t = frame({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled })
+    check(t && t.action.kind === 'scheduleToggle' && t.action.enabled === enabled, `scheduleToggle enabled ${enabled} parses`)
+  }
+  for (const bad of [{ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1' }, { kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: 'true' }, { kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: 1 }, { kind: 'scheduleToggle', paneId: 'p1', enabled: true }, { kind: 'scheduleToggle', workspaceId: 'w1', enabled: false }]) {
+    check(frame(bad) === null, `scheduleToggle rejects ${JSON.stringify(bad).slice(0, 70)}`)
+  }
+  check(frame({ kind: 'scheduleEdit', workspaceId: 'w1', paneId: 'p1', prompt: 'x' }) === null, 'there is no ctl to edit a schedule from the phone')
+  check(frame({ kind: 'runQuickCommand', workspaceId: 'w1', id: 'qc-1' }) && frame({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'new' }), 'the earlier ctl kinds still parse next to the v3.1 ones')
+}
+// ---- end R31-00 -------------------------------------------------------------
 
 function helperChecks() {
   const list = [qc(1), qc(2, { workspaceId: 'w2' }), qc(3), qc(4, { workspaceId: 'w1' }), qc(5, { workspaceId: 'w2' })]
@@ -325,7 +423,7 @@ function storeChecks() {
   check(S.getState().newQuickCommandId().startsWith('qc-'), 'new ids use the qc- prefix')
   flush()
   const last = saves.at(-1)
-  check(last && last.version === 13 && last.quickCommands.length === 3 && !('snippets' in last), 'the persisted blob writes quickCommands and never snippets')
+  check(last && last.version === 14 && last.quickCommands.length === 3 && !('snippets' in last), 'the persisted blob writes quickCommands and never snippets')
   S.getState().moveQuickCommand('qc-2', -1)
   check(S.getState().quickCommands.map(c => c.id).join() === 'snip-a,qc-2,qc-1', 'moveQuickCommand moves one slot')
   const before = S.getState().quickCommands
@@ -907,6 +1005,8 @@ async function composerChecks() {
 async function main() {
   schemaChecks()
   await schema13Checks()
+  await schema14Checks()
+  v31ContractChecks()
   helperChecks()
   storeChecks()
   promptRuleChecks()
@@ -917,7 +1017,7 @@ async function main() {
   await composerChecks()
   await require('./test-automation-repo.cjs').run({ check, load, loadRenderer }) // R30-12 .snagentsos.json
   fs.rmSync(shellDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} automation checks (schema 12 and 13, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state, .snagentsos.json)`)
+  console.log(`PASS: ${checks} automation checks (schema 12, 13 and 14, v3.1 schedule ctl, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state, .snagentsos.json)`)
 }
 main().catch((err) => {
   fs.rmSync(shellDir, { recursive: true, force: true })
