@@ -1,7 +1,7 @@
 /**
  * Home, the first screen of the live phase (E2-FR-01..15, 47, 50, 51). Header:
- * the wordmark, the connection dot with the PC name (snapshot.hostName), Usage
- * and Settings. Body: the Resume card, inline usage, then one collapsible
+ * the wordmark, the connection dot with the PC name (snapshot.hostName),
+ * Automations (only while the PC has one, E8-FR-32), Usage and Settings. Body: the Resume card, inline usage, then one collapsible
  * section per workspace in snapshot order, or the "no workspaces" hero. The
  * FAB opens the console picker. Every tap on a console is phone-only
  * navigation (client.requestOpen): the desktop never changes workspace, and a
@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Gauge, History, Megaphone, MonitorUp, Plus, Settings as SettingsIcon, Zap } from 'lucide-react'
+import { Clock, Gauge, History, Megaphone, MonitorUp, Plus, Settings as SettingsIcon, Zap } from 'lucide-react'
 import { BRAND } from '@shared/brand'
 import { Sheet } from './Sheet'
 import { ActionList } from './ActionList'
@@ -34,6 +34,7 @@ import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { openDiagnostics } from '../lib/connLog'
 import { openHistory } from '../lib/history'
+import { openAutomations } from '../lib/automations'
 import { rowShowsTime, STATUS_TICK_MS } from '../lib/statusText'
 import { isWorkspaceMounted, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
@@ -41,6 +42,8 @@ import { t } from '../lib/i18n'
 function HomeHeader({ onUsage, onSettings }: { onUsage: () => void; onSettings: () => void }): ReactNode {
   const { tier } = useConnectionHealth()
   const hostName = useRemoteStore((s) => s.snapshot?.hostName)
+  // E8-FR-32 (v3.1): the Automations entry shows only while the PC has one.
+  const hasAutomations = useRemoteStore((s) => (s.snapshot?.schedules?.length ?? 0) > 0)
   return (
     <header
       className="flex shrink-0 items-center gap-2 border-b border-border bg-bg-secondary px-3 py-2"
@@ -62,6 +65,16 @@ function HomeHeader({ onUsage, onSettings }: { onUsage: () => void; onSettings: 
         <span data-tier={tier} className={clsx('h-2.5 w-2.5 shrink-0 rounded-full', DOT_COLOR[tier])} />
         <span data-host-name className="truncate text-xs text-text-secondary">{hostName || t('home.thisPc')}</span>
       </button>
+      {hasAutomations && (
+        <button
+          data-home-automations
+          onClick={openAutomations}
+          className="flex h-10 w-10 items-center justify-center rounded-btn text-text-secondary active:bg-card"
+          aria-label={t('auto.open')}
+        >
+          <Clock size={20} />
+        </button>
+      )}
       <button
         data-home-usage-btn
         onClick={onUsage}

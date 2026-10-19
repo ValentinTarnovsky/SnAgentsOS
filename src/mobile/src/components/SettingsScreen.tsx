@@ -11,7 +11,7 @@
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Activity, Keyboard, LogOut } from 'lucide-react'
+import { Activity, Clock, Keyboard, LogOut } from 'lucide-react'
 import type { ThemeName } from '@shared/types'
 import { PushScreen } from './PushScreen'
 import { ActionList } from './ActionList'
@@ -23,6 +23,7 @@ import { client } from '../lib/client'
 import { FontScaleRow } from './FontScaleRow'
 import { PHONE_FONT_SIZES } from '../lib/fit'
 import { openDiagnostics } from '../lib/connLog'
+import { openAutomations } from '../lib/automations'
 import { useCacheTimer } from '../lib/cacheTimer'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
@@ -218,6 +219,20 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
               onChange={(on) => setComposerPref('composerAutocorrect', on)}
             />
           </div>
+        </SettingsSection>
+        {/* E8-FR-32 (v3.1): the PC's console automations, pushed over Settings. */}
+        <SettingsSection id="automations" title={t('auto.title')}>
+          <ActionList
+            items={[
+              {
+                id: 'automations',
+                icon: <Clock size={16} />,
+                label: t('auto.open'),
+                hint: t('auto.entryHint'),
+                onSelect: openAutomations,
+              },
+            ]}
+          />
         </SettingsSection>
         {/* E2-FR-45: Key bar layout */}
         <SettingsSection id="keybar" title={t('keybar.title')}>
