@@ -178,6 +178,25 @@ export interface RemoteStateSnapshot {
   mountedWorkspaceIds?: string[]
 }
 
+// --- Session history (E3-FR-36..40) ---
+
+/** One session of historyRes: a Claude transcript or a Codex rollout on the PC. */
+export interface RemoteHistorySession {
+  provider: AgentProvider
+  sessionId: string
+  /** Directory the session ran in; a resumed console starts there. */
+  cwd: string
+  /** Custom title, else Claude's summary, else the first real prompt cut to 60. */
+  title: string
+  /** Epoch ms of its last record. */
+  updatedAt: number
+  /**
+   * Amendment (E3-FR-38): the console that already holds this session, so the
+   * phone offers "Go to the console" instead of a second resume.
+   */
+  paneId?: string
+}
+
 // --- Control actions (phone -> desktop, executed by the renderer) ---
 
 export type RemoteCtlAction =
@@ -186,8 +205,20 @@ export type RemoteCtlAction =
    * `prompt` (E2-FR-11, <= 16384): initial prompt of a claude/codex preset,
    * delivered only through the SNAOS_INITIAL_PROMPT variable. When that is not
    * possible the console opens without it and the ack says `promptFallback`.
+   *
+   * `resume` (E3-FR-39): resume a session of the history in a new local
+   * console. Main checks the id against SessionHistory first (else ack
+   * `notFound`); the cwd comes from main's index, never from the phone. A
+   * console that already holds the session acks its own id instead.
    */
-  | { kind: 'createPane'; workspaceId: string; presetId?: string; paneType?: PaneType; prompt?: string }
+  | {
+      kind: 'createPane'
+      workspaceId: string
+      presetId?: string
+      paneType?: PaneType
+      prompt?: string
+      resume?: { provider: AgentProvider; sessionId: string }
+    }
   | { kind: 'closePane'; workspaceId: string; paneId: string }
   /**
    * `resume` (E4/E5-FR-11): true = relaunch resuming the chat, false = new chat
@@ -239,6 +270,8 @@ export type RemoteClientMsg =
   | { v: number; type: 'ping'; t: number }
   /** The page became visible/hidden, and once after authOk (E2-FR-52: ntfy quiet while watched). */
   | { v: number; type: 'visibility'; visible: boolean }
+  /** E3-FR-36: the session history filtered by `query`; with `workspaceId` = "This workspace". */
+  | { v: number; type: 'historyReq'; id: string; query?: string; workspaceId?: string }
 
 // --- Server -> client messages ---
 
@@ -322,3 +355,5 @@ export type RemoteServerMsg =
   | { v: number; type: 'shutdown'; reason: 'quit' | 'disabled' }
   | { v: number; type: 'pong'; t: number }
   | { v: number; type: 'err'; code: RemoteErrCode; msg?: string }
+  /** E3-FR-37: answer to historyReq, newest first, at most 100 sessions and 48KB. */
+  | { v: number; type: 'historyRes'; id: string; sessions: RemoteHistorySession[] }
