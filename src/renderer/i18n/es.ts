@@ -545,6 +545,7 @@ export const es: Record<keyof typeof en, string> = {
   'agents.cache.label': 'La caché de Claude vence en {time}',
   'agents.board.toggle': 'Tablero de agentes',
   'agents.board.title': 'Agentes',
+  'agents.board.countOne': '{count} consola',
   'agents.board.count': '{count} consolas',
   'agents.board.close': 'Volver a la grilla (Esc)',
   'agents.board.waiting': 'Te esperan',
