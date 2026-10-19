@@ -1,4 +1,4 @@
-import { resolve as resolvePath } from 'path'
+import { posix, win32 } from 'path'
 import { BRAND } from '@shared/brand'
 import {
   CTL_MAX_PROMPT,
@@ -78,6 +78,8 @@ export interface CtlHandlerDeps {
   appVersion: string
   now?: () => number
   timing?: Partial<CtlTiming>
+  /** OS whose path rules `open --path` follows (default process.platform; tests pin one). */
+  platform?: NodeJS.Platform
 }
 
 const FREE_STATES = new Set<ClaudePaneState>(['idle', 'done', 'action', 'error'])
@@ -115,10 +117,19 @@ export function oneLine(text: string, max: number): string {
   return out
 }
 
-/** A path compared the way Windows does (case-insensitive) or POSIX does. */
+/** Node's path rules of `platform`, never the host's (a test may pin another OS). */
+function pathFor(platform: NodeJS.Platform): typeof win32 {
+  return platform === 'win32' ? win32 : posix
+}
+
+/**
+ * A path compared the way Windows does (both separators, case-insensitive,
+ * no trailing separator) or POSIX does (case-sensitive, a backslash is part of
+ * a name), with the rules of `platform` whatever OS runs this.
+ */
 export function samePathKey(p: string, platform: NodeJS.Platform = process.platform): string {
-  const abs = resolvePath(p.trim()).replace(/[\\/]+$/, '')
-  return platform === 'win32' ? abs.toLowerCase() : abs
+  const abs = pathFor(platform).resolve(p.trim())
+  return platform === 'win32' ? abs.replace(/[\\/]+$/, '').toLowerCase() : abs.replace(/\/+$/, '')
 }
 
 interface Waiter {
@@ -315,10 +326,11 @@ export class CtlHandlers {
     const dir = str(params.path)
     if (dir !== undefined) {
       if (!dir.trim() || dir.includes('\0') || dir.length > 4096) return err('bad_request', 'invalid --path')
-      const key = samePathKey(dir)
-      const hit = list.workspaces.find((w) => w.cwd && samePathKey(w.cwd) === key)
+      const platform = this.deps.platform ?? process.platform
+      const key = samePathKey(dir, platform)
+      const hit = list.workspaces.find((w) => w.cwd && samePathKey(w.cwd, platform) === key)
       if (!hit) {
-        const res = await this.deps.bus.request({ kind: 'composer', cwd: resolvePath(dir.trim()) })
+        const res = await this.deps.bus.request({ kind: 'composer', cwd: pathFor(platform).resolve(dir.trim()) })
         return res.ok ? ok({ created: false, composer: true }) : this.busErr(res)
       }
       const res = await this.deps.bus.request({ kind: 'open', workspaceId: hit.id })

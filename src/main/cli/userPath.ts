@@ -1,5 +1,5 @@
 import { execFile } from 'child_process'
-import { join, resolve } from 'path'
+import { win32 } from 'path'
 
 /**
  * "Add snaos to the user PATH" (E8-FR-22, Windows). Reads the raw value of
@@ -24,7 +24,7 @@ export interface RegistryOps {
 /** powershell.exe from System32 (not whatever PATH resolves first). */
 function powershellExe(): string {
   const root = process.env.SystemRoot || process.env.windir
-  return root ? join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'powershell.exe'
+  return root ? win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'powershell.exe'
 }
 
 /** Runs a one-line PowerShell script given on stdin; resolves its stdout. */
@@ -97,12 +97,12 @@ export function powershellRegistry(subKey = 'Environment', broadcast = true): Re
 /** HKCU\Environment, with the WM_SETTINGCHANGE broadcast. */
 export const realRegistry: RegistryOps = powershellRegistry()
 
-/** Comparable form of a PATH entry: unquoted, no trailing separator, case-folded. */
+/** Comparable form of a PATH entry (Windows rules on any host): unquoted, no trailing separator, case-folded. */
 function norm(entry: string): string {
   const raw = entry.trim().replace(/^"|"$/g, '')
   if (!raw) return ''
   // An entry with an unexpanded %VAR% is compared as written.
-  const abs = raw.includes('%') ? raw : resolve(raw)
+  const abs = raw.includes('%') ? raw : win32.resolve(raw)
   return abs.replace(/[\\/]+$/, '').toLowerCase()
 }
 

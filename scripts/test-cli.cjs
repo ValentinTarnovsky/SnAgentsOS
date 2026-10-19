@@ -32,7 +32,11 @@ function load(file, overrides = {}) {
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-cli-test-'))
 const tmp = (name) => { const d = path.join(tmpRoot, name); fs.mkdirSync(d, { recursive: true }); return d }
 const rand = () => Math.random().toString(16).slice(2, 10)
-const pipeName = () => (win ? `\\\\.\\pipe\\snaos-test-${rand()}` : path.join(tmp('sock'), `s-${rand()}.sock`))
+// A unix socket path is capped near 104 bytes on macOS, whose tmpdir alone
+// (/var/folders/xx/<28 chars>/T) takes about 50: keep the sockets in a short
+// folder of their own instead of under tmpRoot.
+const sockRoot = win ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'sn-'))
+const pipeName = () => (win ? `\\\\.\\pipe\\snaos-test-${rand()}` : path.join(sockRoot, `s-${rand()}.sock`))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // --- A. Pure helpers ---------------------------------------------------------
@@ -85,7 +89,9 @@ function ansiChecks() {
   check(H.oneLine('  dos\nlineas\t y\u0007 bell ', 120) === 'dos lineas y bell', 'oneLine flattens controls and whitespace')
   const clipped = H.oneLine('a'.repeat(119) + '\u{1F600}', 120)
   check(clipped.length === 119, 'oneLine never splits a surrogate pair at the cap')
-  check(H.samePathKey('C:\\Repo\\', 'win32') === H.samePathKey('c:/repo', 'win32'), 'paths compare case-insensitively without trailing separators on Windows')
+  // The rules come from the platform argument, never the host: every OS runs both.
+  check(H.samePathKey('C:\\Repo\\', 'win32') === H.samePathKey('c:/repo', 'win32') && H.samePathKey('C:\\Repo\\', 'win32') === 'c:\\repo', 'paths compare case-insensitively without trailing separators on Windows')
+  check(H.samePathKey('/srv/Repo/', 'linux') === '/srv/Repo' && H.samePathKey('/srv/Repo', 'linux') !== H.samePathKey('/srv/repo', 'linux') && H.samePathKey('/srv/a/../Repo//', 'darwin') === '/srv/Repo', 'POSIX paths keep their case and lose the trailing slash')
 }
 
 // --- B/C. Tokens and env ---------------------------------------------------
@@ -371,9 +377,9 @@ function fakeWorld() {
   return { list, ops, bus, running, pty, states, status, notices, config }
 }
 
-function makeHandlers(world, timing = { settleMs: 120, recentWorkingMs: 200, noTurnMs: 300, tickMs: 20 }) {
+function makeHandlers(world, timing = { settleMs: 120, recentWorkingMs: 200, noTurnMs: 300, tickMs: 20 }, extra = {}) {
   const { CtlHandlers } = H()
-  return new CtlHandlers({ bus: world.bus, pty: world.pty, status: world.status, config: () => world.config, notify: (n) => world.notices.push(n), appVersion: '2.0.0', timing })
+  return new CtlHandlers({ bus: world.bus, pty: world.pty, status: world.status, config: () => world.config, notify: (n) => world.notices.push(n), appVersion: '2.0.0', timing, ...extra })
 }
 
 const never = () => new AbortController().signal
@@ -438,10 +444,10 @@ async function handlerChecks() {
     w.bus.unavailable = true
     check((await call(h, 'ls')).error.code === 'desktop_unavailable', 'no renderer: desktop_unavailable')
   }
-  // open
+  // open (Windows path rules pinned: the fake cwds are Windows folders)
   {
     const w = fakeWorld()
-    const h = makeHandlers(w)
+    const h = makeHandlers(w, undefined, { platform: 'win32' })
     const r = await call(h, 'open', { workspace: '2' })
     check(r.ok && w.ops.at(-1).kind === 'open' && w.ops.at(-1).workspaceId === 'w2', 'open 2 activates the second sidebar workspace')
     await call(h, 'open', { workspace: 'api', console: '3' })
@@ -451,6 +457,16 @@ async function handlerChecks() {
     const fresh = await call(h, 'open', { path: 'C:\\repos\\new' })
     check(fresh.ok && fresh.data.composer === true && fresh.data.created === false && w.ops.at(-1).kind === 'composer', 'open --path of a new folder opens the composer')
     check((await call(h, 'open', {})).error.code === 'bad_request', 'open without anything is bad_request')
+  }
+  // open --path with POSIX rules: case-sensitive, a trailing slash ignored.
+  {
+    const w = fakeWorld()
+    w.list.workspaces[0].cwd = '/srv/api'
+    const h = makeHandlers(w, undefined, { platform: 'linux' })
+    const known = await call(h, 'open', { path: '/srv/api/' })
+    check(known.ok && known.data.workspaceId === 'w1', 'open --path on POSIX matches the same folder with a trailing slash')
+    const other = await call(h, 'open', { path: '/SRV/api' })
+    check(other.ok && other.data.composer === true && w.ops.at(-1).kind === 'composer' && w.ops.at(-1).cwd === '/SRV/api', 'open --path on POSIX is case-sensitive: another case is another folder')
   }
   // spawn
   {
@@ -716,7 +732,8 @@ async function cliEntryChecks() {
   const missing = (() => { try { C.resolveConnection({ runtime: 'nope.json' }, {}, () => { throw new Error('ENOENT') }); return null } catch (e) { return e } })()
   check(missing instanceof C.AppUnavailable, 'no runtime.json: not running')
   check(C.pidAlive(process.pid) === true && C.pidAlive(0) === false, 'pidAlive')
-  check(C.defaultRuntimePath({ APPDATA: 'C:\\AD' }, 'win32') === path.join('C:\\AD', 'snagentsos', 'runtime.json'), 'default runtime path on Windows')
+  check(C.defaultRuntimePath({ APPDATA: 'C:\\AD' }, 'win32') === 'C:\\AD\\snagentsos\\runtime.json', 'default runtime path on Windows')
+  check(C.defaultRuntimePath({ XDG_CONFIG_HOME: '/x/cfg' }, 'linux') === '/x/cfg/snagentsos/runtime.json' && C.defaultRuntimePath({}, 'darwin', () => '/Users/u') === '/Users/u/Library/Application Support/snagentsos/runtime.json', 'default runtime path on Linux and macOS, POSIX separators on any host')
   check(/spawned console 4/.test(C.formatHuman('spawn', { paneId: 'p', index: 4, promptDelivery: 'gate' })) && C.formatHuman('wait', { state: 'idle', precise: true, noTurnObserved: true }) === 'idle (no turn observed)', 'human output')
 }
 
@@ -969,6 +986,7 @@ async function main() {
     ptyChecks()
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true })
+    if (sockRoot) fs.rmSync(sockRoot, { recursive: true, force: true })
   }
   console.log(`PASS: ${checks} cli checks (refs, ANSI, tokens, env, runtime.json, shim static and executed, user PATH, skill, custom notify, CtlServer, handlers, wait, cliEntry, CliService end to end, pty tail)`)
 }
