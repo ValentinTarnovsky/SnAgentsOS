@@ -15,6 +15,7 @@ import { gitChipEnabled, remoteGitChip, workspaceGitKey } from './gitChip'
 import type { MountedWorkspaces } from './mounting'
 import { useStatusLines } from './statusLineStore'
 import { isManualRunPending, useScheduleRuntime } from './usePaneScheduler'
+import { liveSidebarOrder, useSidebarFreeze } from './sidebarOrder'
 
 /** Longest `snaos status` line the phone gets (E8-FR-19, same cap as the CLI). */
 export const REMOTE_STATUS_LINE_MAX = 120
@@ -86,13 +87,28 @@ function remoteGitSig(summaries: Record<string, GitSummary>): string {
   return JSON.stringify(out)
 }
 
+/**
+ * The workspaces in the order the sidebar shows them (favorites first, the
+ * manual drag order or the smart order and its freeze), so the phone lists
+ * them exactly like the desktop.
+ */
+function phoneOrder(state: AppState): Workspace[] {
+  return liveSidebarOrder(state, useAgentStore.getState())
+}
+
+/** Value signature of the sidebar order: a smart reorder pushes, a status change that keeps the order does not. */
+function orderSig(state: AppState): string {
+  return phoneOrder(state).map((w) => w.id).join(',')
+}
+
 /** Build the compact desktop-state mirror pushed to phones. */
 function buildSnapshot(state: AppState): RemoteStateSnapshot {
   const sessions = useAgentStore.getState().sessions
   const gitSummaries = gitChipEnabled(state.settings) ? useGitStore.getState().summaries : {}
   const statusLines = useStatusLines.getState().lines
   const runtime = useScheduleRuntime.getState()
-  const workspaces: RemoteWorkspaceInfo[] = state.workspaces.map((ws) => ({
+  const ordered = phoneOrder(state)
+  const workspaces: RemoteWorkspaceInfo[] = ordered.map((ws) => ({
     id: ws.id,
     name: ws.name,
     layoutOrder: ws.layout?.order ?? ws.panes.map((p) => p.id),
@@ -134,8 +150,8 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     terminalUnicode: state.settings.terminalUnicode11 === false ? '6' : '11',
     // E2-FR-12: the phone's console picker and its "starts N consoles" confirmation.
     presets: remotePresets(state.presets),
-    mountedWorkspaceIds: fullyMountedIds(state.mountedWorkspaces, state.workspaces.map((w) => w.id)),
-    schedules: remoteSchedules(state.workspaces, (paneId) => isManualRunPending(runtime, paneId)),
+    mountedWorkspaceIds: fullyMountedIds(state.mountedWorkspaces, ordered.map((w) => w.id)),
+    schedules: remoteSchedules(ordered, (paneId) => isManualRunPending(runtime, paneId)),
   }
 }
 
@@ -158,6 +174,7 @@ function relevant(s: AppState): unknown[] {
     // E6-FR-24: the chip's offer and its setting change `agentEnded`.
     s.agentEnded,
     s.settings.terminalAgentEndChip,
+    s.settings.agents?.sidebarSort,
   ]
 }
 
@@ -179,13 +196,25 @@ export function startRemoteSnapshotSync(): () => void {
     timer = setTimeout(push, 100)
   }
 
+  // The sidebar order also moves with the agent states (smart order) and the
+  // sidebar freeze, which live in other stores: compared by value.
+  let prevOrder = orderSig(useAppStore.getState())
+  const checkOrder = (): void => {
+    const sig = orderSig(useAppStore.getState())
+    if (sig === prevOrder) return
+    prevOrder = sig
+    schedule()
+  }
+
   const unsubStore = useAppStore.subscribe((state) => {
     const next = relevant(state)
     if (next.some((v, i) => v !== prev[i])) {
       prev = next
       schedule()
     }
+    checkOrder()
   })
+  const unsubFreeze = useSidebarFreeze.subscribe(checkOrder)
   const unsubPty = onPtyRegistryChange(schedule)
   // Usage lives in its own store; it only mutates when the snapshot changes, so
   // subscribing directly (no reference gate) won't over-fire.
@@ -211,6 +240,7 @@ export function startRemoteSnapshotSync(): () => void {
       prevSessions = s.sessions
       schedule()
     }
+    checkOrder()
   })
 
   // v3.1: a `snaos status` line (E8-FR-19) and a pending "Run now" (E8-FR-32)
@@ -230,6 +260,7 @@ export function startRemoteSnapshotSync(): () => void {
   return () => {
     if (timer) clearTimeout(timer)
     unsubStore()
+    unsubFreeze()
     unsubPty()
     unsubUsage()
     unsubAgents()
