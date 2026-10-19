@@ -6,6 +6,7 @@ import { iconFor } from '@/lib/icons'
 import { TilingGrid } from '@/components/layout/TilingGrid'
 import { WorkspaceGitLabel } from '@/components/git/WorkspaceGitLabel'
 import { ChangesPanel } from '@/components/changes/ChangesPanel'
+import { RaceBar } from './RaceBar'
 import { useGitStore } from '@/lib/gitStore'
 import { workspaceOfKey } from '@/lib/changes'
 import { useT } from '@/i18n'
@@ -34,6 +35,7 @@ export function WorkspaceView({
   const promptKeys = useActionKeys('globalPrompt')
   // Changes panel (E7-FR-11): over this grid while this workspace is active and owns the panel's target.
   const panelTarget = useGitStore((s) => s.panel?.targetKey ?? null)
+  const panelBase = useGitStore((s) => s.panel?.base)
   const ownsPanel = useAppStore((s) => panelTarget != null && workspaceOfKey(s.workspaces, panelTarget) === workspace.id)
   const changesKey = isActive && ownsPanel ? panelTarget : null
   // E7-FR-27a: each preset can also start in an isolated worktree of workspace.cwd.
@@ -134,9 +136,12 @@ export function WorkspaceView({
         </div>
       </div>
 
+      {/* E7-FR-35: the race over this grid, when one runs here. */}
+      <RaceBar workspace={workspace} />
+
       <div className="relative min-h-0 flex-1">
         <TilingGrid workspace={workspace} isActive={isActive} />
-        {changesKey && <ChangesPanel key={workspace.id} workspace={workspace} targetKey={changesKey} />}
+        {changesKey && <ChangesPanel key={workspace.id} workspace={workspace} targetKey={changesKey} base={panelBase} />}
       </div>
     </div>
   )
