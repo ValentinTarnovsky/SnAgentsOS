@@ -39,6 +39,8 @@ const SCRIPT = [
   '  $__snaosPrompt = $function:prompt',
   "  if ($null -eq $__snaosPrompt) { $__snaosPrompt = { 'PS ' + $ExecutionContext.SessionState.Path.CurrentLocation + ('>' * ($NestedPromptLevel + 1)) + ' ' } }",
   '  $Global:__SnaosOsc133 = @{ LecAtC = $null; Ran = $false; First = $true; Prompt = $__snaosPrompt; ReadLine = $null }',
+  // -EncodedCommand runs in the global scope: drop the temporaries so they never show up in the session.
+  "  Remove-Variable -Name '__snaosEnc', '__snaosPrompt' -ErrorAction Ignore",
   '  $Global:__SnaosOsc133.Hook = {',
   '    $s = $Global:__SnaosOsc133',
   '    if ($null -ne $s.ReadLine -or -not (Test-Path Function:\\PSConsoleHostReadLine)) { return }',

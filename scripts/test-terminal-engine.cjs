@@ -1162,6 +1162,7 @@ async function shellIntegrationChecks() {
     check(script.includes("LanguageMode -eq 'FullLanguage'") && script.startsWith("if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {") && script.trimEnd().endsWith('}'), 'everything runs inside the FullLanguage guard')
     check(script.includes('New-Object System.Text.UTF8Encoding($false)') && script.includes('[Console]::OutputEncoding') && script.includes('[Console]::InputEncoding') && script.includes('$Global:OutputEncoding'), 'UTF-8 without BOM for console output, input and $OutputEncoding')
     check(script.includes('$Global:__SnaosOsc133') && script.includes("$env:SNAOS_SHELL_INTEGRATION = '1'") && script.includes('function Global:PSConsoleHostReadLine') && script.includes('function Global:prompt'), 'state, env flag, PSReadLine and prompt wrappers')
+    check(script.indexOf("Remove-Variable -Name '__snaosEnc', '__snaosPrompt'") > script.indexOf('Prompt = $__snaosPrompt'), 'the global temporaries are removed once the state holds them')
     check(/\$ok = \$\?\n/.test(script) && script.indexOf('$ok = $?') < script.indexOf('$lec = $Global:LASTEXITCODE'), '$? is captured as the first statement of the prompt')
     check(!/[\u2013\u2014]/.test(script) && !script.includes('`') && Buffer.from(args[2], 'base64').length < 16000, 'the payload is plain ASCII PowerShell well under the command line limit')
     check(PI.buildIntegrationArgs() !== args && PI.buildIntegrationArgs().join() === args.join(), 'each call gets its own copy of the same args')
