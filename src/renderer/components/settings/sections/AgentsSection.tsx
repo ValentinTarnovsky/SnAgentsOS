@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
 import type { AgentPreset, AgentSettings, AwakeMode, ResumeOnStartup } from '@shared/types'
+import { HIBERNATE_MAX_MINUTES, HIBERNATE_MIN_MINUTES, HIBERNATE_SUGGESTED_MINUTES, normalizeIdleMinutes } from '@shared/hibernation'
 import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
@@ -25,6 +26,8 @@ const SIDEBAR_SORTS: Array<{ sort: AgentSettings['sidebarSort']; key: MessageKey
   { sort: 'smart', key: 'settings.agents.sort.smart' },
 ]
 
+const CACHE_TTLS: Array<5 | 60> = [5, 60]
+
 const headingCls = 'text-xs font-semibold uppercase tracking-wide text-text-secondary'
 
 /** Whole seconds 0..600 for settings.agents.resumeModalTimeoutSec (0 = never). */
@@ -33,12 +36,66 @@ function clampTimeout(value: string): number {
   return Number.isFinite(n) ? Math.min(600, Math.max(0, n)) : 60
 }
 
+/** Typed minutes for hibernation, clamped to 5..1440 (a non-number keeps `fallback`). */
+export function clampIdleMinutes(value: string, fallback: number): number {
+  const n = Math.round(Number(value))
+  if (!value.trim() || !Number.isFinite(n)) return fallback
+  return Math.min(HIBERNATE_MAX_MINUTES, Math.max(HIBERNATE_MIN_MINUTES, n))
+}
+
+/**
+ * Hibernation (E5-FR-25): off by default; turning it on proposes 30 minutes.
+ * The minutes field commits on blur or Enter, so typing "1" on the way to
+ * "120" never clamps mid-word.
+ */
+function HibernateRows() {
+  const t = useT()
+  const minutes = useAppStore((s) => normalizeIdleMinutes(s.settings.hibernateIdleMinutes))
+  const updateSettings = useAppStore((s) => s.updateSettings)
+  const [draft, setDraft] = useState<string | null>(null)
+  const on = minutes > 0
+  const commit = (): void => {
+    if (draft === null) return
+    updateSettings({ hibernateIdleMinutes: clampIdleMinutes(draft, minutes || HIBERNATE_SUGGESTED_MINUTES) })
+    setDraft(null)
+  }
+  return (
+    <>
+      <ToggleRow
+        checked={on}
+        onChange={(v) => updateSettings({ hibernateIdleMinutes: v ? HIBERNATE_SUGGESTED_MINUTES : 0 })}
+        searchId="agents.hibernate"
+        title={t('settings.agents.hibernate')}
+        description={t('settings.agents.hibernateHint')}
+      />
+      <SettingRow searchId="agents.hibernateMinutes" title={t('settings.agents.hibernateMinutes')} description={t('settings.agents.hibernateMinutesHint')}>
+        <input
+          type="number"
+          min={HIBERNATE_MIN_MINUTES}
+          max={HIBERNATE_MAX_MINUTES}
+          step={5}
+          data-hibernate-minutes
+          disabled={!on}
+          className={cn(inputCls, 'w-28', !on && 'pointer-events-none opacity-50')}
+          value={draft ?? (on ? String(minutes) : String(HIBERNATE_SUGGESTED_MINUTES))}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commit()
+          }}
+        />
+      </SettingRow>
+    </>
+  )
+}
+
 /**
  * Agent "Behavior" block (E5-FR-29). Each key joins when its FR lands; today:
  * resume on startup (E5-FR-10), the resume dialog countdown (E5-FR-12) and
  * nudge (E5-FR-13), keep the PC awake and its display variant (E5-FR-23/24),
  * sidebar agent rows and topic as title (E5-FR-19), the sidebar order
- * (E5-FR-22) and Ctrl+1..9 (E5-FR-18).
+ * (E5-FR-22), Ctrl+1..9 (E5-FR-18), hibernation (E5-FR-25) and the Claude
+ * cache timer (E5-FR-28).
  */
 function BehaviorBlock() {
   const t = useT()
@@ -179,6 +236,38 @@ function BehaviorBlock() {
         title={t('settings.agents.ctrlDigit')}
         description={t('settings.agents.ctrlDigitHint')}
       />
+      <HibernateRows />
+      <ToggleRow
+        checked={agents.cacheTimer.enabled}
+        onChange={(v) => updateSettings({ agents: { ...agents, cacheTimer: { ...agents.cacheTimer, enabled: v } } })}
+        searchId="agents.cacheTimer"
+        title={t('settings.agents.cacheTimer')}
+        description={t('settings.agents.cacheTimerHint')}
+      />
+      <SettingRow searchId="agents.cacheTtl" title={t('settings.agents.cacheTtl')} description={t('settings.agents.cacheTtlHint')}>
+        <div role="radiogroup" aria-label={t('settings.agents.cacheTtl')} className="flex flex-wrap gap-2">
+          {CACHE_TTLS.map((ttl) => (
+            <button
+              key={ttl}
+              type="button"
+              role="radio"
+              aria-checked={agents.cacheTimer.ttlMinutes === ttl}
+              data-cache-ttl={ttl}
+              disabled={!agents.cacheTimer.enabled}
+              onClick={() => updateSettings({ agents: { ...agents, cacheTimer: { ...agents.cacheTimer, ttlMinutes: ttl } } })}
+              className={cn(
+                'rounded-btn border px-3 py-1 text-xs transition-colors',
+                !agents.cacheTimer.enabled && 'pointer-events-none opacity-50',
+                agents.cacheTimer.ttlMinutes === ttl
+                  ? 'border-accent-violet bg-accent-violet text-white'
+                  : 'border-border bg-bg-secondary text-text-primary hover:border-accent-violet/40',
+              )}
+            >
+              {t('settings.agents.cacheTtlMin', { min: ttl })}
+            </button>
+          ))}
+        </div>
+      </SettingRow>
     </section>
   )
 }

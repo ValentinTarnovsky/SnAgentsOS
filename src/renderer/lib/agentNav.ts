@@ -26,6 +26,8 @@ export interface NavInput {
   sessions: Record<string, AgentSessionView>
   presets: readonly AgentPreset[]
   policy: ResumeOnStartup
+  /** Sleeping consoles (E5-FR-25): paneId -> when they went to sleep. */
+  sleeping?: Record<string, { at: number }>
 }
 
 /** One agent console the navigation surfaces can show. */
@@ -35,6 +37,8 @@ export interface AgentEntry extends RankedPane {
   status?: PaneStatus
   /** Not spawned yet (workspace not mounted) and resumes its chat on open. */
   notStarted: boolean
+  /** Put to sleep by hibernation (E5-FR-25): rank 4, the moon glyph. */
+  sleeping?: boolean
   session?: AgentSessionView
 }
 
@@ -84,7 +88,10 @@ export function workspaceAgents(ws: Workspace, input: NavInput): AgentEntry[] {
   for (const pane of orderedPanes(ws)) {
     const status = input.paneStatus[pane.id]
     const session = input.sessions[pane.id]
-    if (status) {
+    const sleep = input.sleeping?.[pane.id]
+    if (sleep) {
+      out.push({ id: pane.id, ws, pane, session, notStarted: false, sleeping: true, rank: 4, unread: false, stateSince: sleep.at })
+    } else if (status) {
       out.push({
         id: pane.id,
         ws,
@@ -193,6 +200,7 @@ function firstLine(text: string | undefined): string {
  * palette already shows it on the first line).
  */
 export function agentPhrase(e: AgentEntry, t: TFn, lang: Language, now: number, withAge = true): string {
+  if (e.sleeping) return withAge && e.stateSince ? `${t('agents.row.sleeping')} · ${formatAgeShort(now - e.stateSince, lang)}` : t('agents.row.sleeping')
   if (e.notStarted || !e.status) return t('agents.row.notStarted')
   const s = e.status
   const age = formatAgeShort(now - e.stateSince, lang)
@@ -248,7 +256,7 @@ export function stepPane(ids: readonly string[], current: string | null, dir: 1 
 /** NavInput from the app and agent stores' current values. */
 export function navInputFrom(
   app: Pick<NavInput, 'workspaces' | 'paneStatus' | 'paneAttention' | 'mountedWorkspaces' | 'presets'> & { settings: { agents?: { resumeOnStartup?: ResumeOnStartup } } },
-  agents: { sessions: Record<string, AgentSessionView> },
+  agents: { sessions: Record<string, AgentSessionView>; sleeping?: Record<string, { at: number }> },
 ): NavInput {
   return {
     workspaces: app.workspaces,
@@ -258,5 +266,6 @@ export function navInputFrom(
     sessions: agents.sessions,
     presets: app.presets,
     policy: app.settings.agents?.resumeOnStartup ?? 'ask',
+    sleeping: agents.sleeping,
   }
 }

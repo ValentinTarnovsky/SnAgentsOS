@@ -129,6 +129,10 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('agents.sort', 'settings.agents.sort', 'settings.agents.sortHint', { groupKey: 'settings.agents.behavior', keywords: ['sort', 'orden', 'smart', 'inteligente', 'sidebar', 'barra lateral', 'workspace'] }),
   e('agents.topicAsTitle', 'settings.agents.topicAsTitle', 'settings.agents.topicAsTitleHint', { groupKey: 'settings.agents.behavior', keywords: ['topic', 'tema', 'title', 'titulo'], toggle: { path: 'agents.topicAsTitle' } }),
   e('agents.ctrlDigit', 'settings.agents.ctrlDigit', 'settings.agents.ctrlDigitHint', { groupKey: 'settings.agents.behavior', keywords: ['ctrl', 'focus', 'foco', 'shortcut', 'atajo'], toggle: { path: 'agents.ctrlDigitFocus' } }),
+  e('agents.hibernate', 'settings.agents.hibernate', 'settings.agents.hibernateHint', { groupKey: 'settings.agents.behavior', keywords: ['hibernate', 'hibernar', 'sleep', 'dormir', 'memory', 'memoria', 'ram', 'idle', 'inactivo'] }),
+  e('agents.hibernateMinutes', 'settings.agents.hibernateMinutes', 'settings.agents.hibernateMinutesHint', { groupKey: 'settings.agents.behavior', keywords: ['hibernate', 'hibernar', 'sleep', 'dormir', 'minutes', 'minutos', 'idle', 'inactivo'] }),
+  e('agents.cacheTimer', 'settings.agents.cacheTimer', 'settings.agents.cacheTimerHint', { groupKey: 'settings.agents.behavior', keywords: ['cache', 'timer', 'countdown', 'cuenta regresiva', 'claude', 'prompt'], toggle: { path: 'agents.cacheTimer.enabled' } }),
+  e('agents.cacheTtl', 'settings.agents.cacheTtl', 'settings.agents.cacheTtlHint', { groupKey: 'settings.agents.behavior', keywords: ['cache', 'ttl', 'minutes', 'minutos', 'claude'] }),
   e('agents.presets', 'settings.search.agentsPresets', 'settings.search.agentsPresetsHint', { summary: true, keywords: ['preset', 'model', 'modelo', 'agent', 'agente', 'claude', 'codex', 'command', 'comando'] }),
 
   // Connections, Quick Commands

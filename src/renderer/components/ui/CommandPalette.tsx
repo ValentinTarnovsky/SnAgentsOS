@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArchiveRestore, BellRing, Bot, FileDiff, GitBranch, Megaphone, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
+import { ArchiveRestore, BellRing, Bot, FileDiff, GitBranch, LayoutDashboard, Megaphone, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
 import { formatAgeShort } from '@shared/agents'
 import { visiblePaneIds } from '@shared/status'
 import { useAppStore } from '@/lib/store'
@@ -95,6 +95,7 @@ export function CommandPalette() {
   const mountedWorkspaces = useAppStore((s) => s.mountedWorkspaces)
   const agentSettings = useAppStore((s) => s.settings.agents)
   const sessions = useAgentStore((s) => s.sessions)
+  const sleeping = useAgentStore((s) => s.sleeping)
   const canReopen = useAgentStore((s) => s.closedStack.length > 0)
 
   const [query, setQuery] = useState('')
@@ -111,9 +112,9 @@ export function CommandPalette() {
   const topicAsTitle = agentSettings?.topicAsTitle !== false
   const entries = useMemo(() => {
     if (!open) return new Map<string, AgentEntry>()
-    const input = navInputFrom({ workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, settings: { agents: agentSettings } }, { sessions })
+    const input = navInputFrom({ workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, settings: { agents: agentSettings } }, { sessions, sleeping })
     return new Map(allAgents(input).map((e) => [e.id, e]))
-  }, [open, workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, agentSettings, sessions])
+  }, [open, workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, agentSettings, sessions, sleeping])
   // Closed consoles (or ones whose agent went away) drop out of the frozen list.
   const waiting = query.trim() ? [] : frozen.map((id) => entries.get(id)).filter((e): e is AgentEntry => !!e)
 
@@ -123,6 +124,8 @@ export function CommandPalette() {
       { id: 'settings', label: t('sidebar.settings'), hint: t('palette.general'), icon: Settings, action: 'openSettings', run: () => setSettingsOpen(true) },
       { id: 'toggle-sidebar', label: t('palette.toggleSidebar'), hint: t('palette.general'), icon: PanelLeft, action: 'toggleSidebar', run: () => toggleSidebar() },
       { id: 'next-waiting', label: t('keys.nextWaiting'), hint: t('palette.console'), icon: BellRing, action: 'nextWaiting', run: () => void goToNextWaiting() },
+      // E5-FR-27: the agents board over the workspace area.
+      { id: 'agents-board', label: t('agents.board.toggle'), hint: t('palette.general'), icon: LayoutDashboard, action: 'agentsBoard', run: () => useAgentStore.getState().setView('board') },
     ]
     if (canReopen) {
       // E5-FR-14: the last closed console, same id and place, resuming its chat.
