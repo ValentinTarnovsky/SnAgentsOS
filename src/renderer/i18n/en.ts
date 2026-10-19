@@ -932,6 +932,8 @@ export const en = {
   // AI usage bars (Claude + Codex quotas + custom models)
   'aiusage.title': 'Usage',
   'aiusage.refresh': 'Refresh',
+  'aiusage.collapse': 'Fold into rings',
+  'aiusage.expand': 'Show bars',
   'aiusage.claude': 'Claude',
   'aiusage.codex': 'Codex',
   'aiusage.session': 'Session',
