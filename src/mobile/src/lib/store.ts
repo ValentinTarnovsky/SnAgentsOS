@@ -110,6 +110,14 @@ export interface RemoteState {
   xtermTheme: ITheme | null
   hostPlatform: string
   appVersion: string
+  /**
+   * E3-FR-01: Bearer of the desktop's HTTP routes from the last authOk, null
+   * when the desktop sent none (older version: no image button). The next
+   * authOk replaces it; the desktop drops the old one with its socket.
+   */
+  httpToken: string | null
+  /** E3-FR-01: VAPID public key from the last authOk, only while https is on. */
+  pushKey: string | null
   /** Pane the phone is currently viewing. */
   activePaneId: string | null
   /** Pane the server subscription is registered for (may lag activePaneId briefly). */
@@ -234,6 +242,8 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   xtermTheme: null,
   hostPlatform: '',
   appVersion: '',
+  httpToken: null,
+  pushKey: null,
   activePaneId: null,
   subscribedPaneId: null,
   ctrlLatch: false,
