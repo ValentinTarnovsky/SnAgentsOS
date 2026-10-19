@@ -19,7 +19,7 @@ import type {
   ThemeName,
   ThemeTokens,
 } from './types'
-import type { RemoteGitChip } from './git-types'
+import type { GitArea, GitDiffHunk, GitFileEntry, RemoteGitChip } from './git-types'
 
 export type { RemotePending, RemoteGitChip }
 
@@ -267,6 +267,66 @@ export type RemoteCtlAction =
   | { kind: 'fitPane'; workspaceId: string; paneId: string; cols: number; rows: number }
   /** E3-FR-18: give the size back to the desktop (its latest baseline). */
   | { kind: 'releaseFit'; paneId: string }
+  /**
+   * E7-FR-25: review notes written on the phone, sent inline (never stored in
+   * the desktop's ReviewNoteStore). The renderer formats and pastes them like
+   * the desktop's own send; ack `info` = notes sent. Errors: not_found,
+   * no_pty, not_agent (plain console, or `enter` on a non-agent one),
+   * no_notes, too_large (over 50 notes or 32KB of text).
+   */
+  | { kind: 'sendReviewNotes'; workspaceId: string; paneId: string; notes: Array<{ file: string; lines: string; comment: string }>; enter: boolean }
+
+// --- Git API for the phone's Changes screen (E7-FR-22..26) ---
+
+/** Why a `gitReq` got no data. `rate`: over 10 per 5s or 2 in flight per session. */
+export interface RemoteGitError {
+  error: 'not_found' | 'not_repo' | 'git_missing' | 'git_old' | 'unsafe_repo' | 'too_large' | 'rate' | 'timeout' | 'git_error'
+}
+
+/**
+ * One page of the workspace's change list (E7-FR-22). Every page repeats the
+ * summary; `total` counts the whole list, `truncated` = git listed over 5000
+ * entries. Paths are relative to the repo; the repo root never travels.
+ */
+export interface RemoteGitChanges {
+  summary: RemoteGitChip & { approx: boolean; conflicts: number; op: 'merge' | 'rebase' | 'cherry-pick' | null }
+  files: GitFileEntry[]
+  total: number
+  truncated: boolean
+}
+
+/**
+ * One page of a file's diff (E7-FR-23). Every page of one read carries the
+ * same `diffRev`; a different one means the file changed and the phone starts
+ * again at page 0. A hunk cut at a page edge goes on in the next page with its
+ * header repeated and `continued: true`.
+ */
+export interface RemoteGitDiffPage {
+  path: string
+  oldPath?: string
+  area: GitArea
+  diffRev: string
+  binary: boolean
+  tooLarge?: { lines: number }
+  hunks: GitDiffHunk[]
+}
+
+/** The request half of `gitReq` (without the envelope). `gitReq` has no paneId: the target is `ws:<workspaceId>`. */
+export interface RemoteGitRequest {
+  workspaceId: string
+  op: 'status' | 'diff'
+  path?: string
+  staged?: boolean
+  page?: number
+}
+
+/** The answer half of `gitRes` (without the envelope), at most 48KB once framed. */
+export interface RemoteGitReply {
+  ok: boolean
+  data: RemoteGitChanges | RemoteGitDiffPage | RemoteGitError
+  page: number
+  done: boolean
+}
 
 // --- Client -> server messages ---
 
@@ -283,6 +343,8 @@ export type RemoteClientMsg =
   | { v: number; type: 'visibility'; visible: boolean }
   /** E3-FR-36: the session history filtered by `query`; with `workspaceId` = "This workspace". */
   | { v: number; type: 'historyReq'; id: string; query?: string; workspaceId?: string }
+  /** E7-FR-22/23: one page of the change list or of a file's diff; answered by `gitRes` with the same id. */
+  | ({ v: number; type: 'gitReq'; id: string } & RemoteGitRequest)
 
 // --- Server -> client messages ---
 
@@ -373,3 +435,5 @@ export type RemoteServerMsg =
   | { v: number; type: 'err'; code: RemoteErrCode; msg?: string }
   /** E3-FR-37: answer to historyReq, newest first, at most 100 sessions and 48KB. */
   | { v: number; type: 'historyRes'; id: string; sessions: RemoteHistorySession[] }
+  /** E7-FR-22..26: the answer to one `gitReq`, each frame <= 48KB. */
+  | ({ v: number; type: 'gitRes'; id: string } & RemoteGitReply)

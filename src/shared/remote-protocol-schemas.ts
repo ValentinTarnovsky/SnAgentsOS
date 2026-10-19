@@ -10,6 +10,27 @@ import type { RemoteClientMsg } from './remote-protocol'
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/)
 const id = z.string().min(1).max(128)
 
+// --- E7-FR-22..25 (R30-09a): git API and inline review notes ---------------
+
+/** C0, DEL, C1 and the Unicode line/paragraph separators. */
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/
+/**
+ * A gitReq id is echoed in every gitRes: plain ASCII keeps its JSON size
+ * fixed, so the 48KB page budget holds for any id the schema lets in.
+ */
+const gitReqId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/)
+/** A note's file: repo-relative, no `..` segment, no control character. */
+const noteFile = z
+  .string()
+  .min(1)
+  .max(1024)
+  .refine((f) => !CONTROL_RE.test(f) && !/^([a-zA-Z]:|[\\/])/.test(f) && !f.split(/[\\/]/).includes('..'), 'relative path')
+const reviewNotePayload = z.object({
+  file: noteFile,
+  lines: z.string().regex(/^(\d{1,8}(-\d{1,8})?)?$/),
+  comment: z.string().min(1).max(4000),
+})
+
 const ctlActionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('switchWorkspace'), workspaceId: id }),
   z.object({
@@ -58,6 +79,15 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     rows: z.number().int().min(8).max(300),
   }),
   z.object({ kind: z.literal('releaseFit'), paneId: id }),
+  // E7-FR-25 (R30-09a): the whole frame stays under MAX_PAYLOAD (64KB), so the
+  // phone splits a bigger batch over several ctl.
+  z.object({
+    kind: z.literal('sendReviewNotes'),
+    workspaceId: id,
+    paneId: id,
+    notes: z.array(reviewNotePayload).min(1).max(50),
+    enter: z.boolean(),
+  }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [
@@ -77,6 +107,17 @@ export const remoteClientMsgSchema = z.discriminatedUnion('type', [
   z.object({ v: z.number(), type: z.literal('visibility'), visible: z.boolean() }),
   // E3-FR-36; behind the per-session bucket by name (SessionManager).
   z.object({ v: z.number(), type: z.literal('historyReq'), id, query: z.string().max(200).optional(), workspaceId: id.optional() }),
+  // E7-FR-22/23 (R30-09a). A diff without `path` answers not_found, not bad_msg.
+  z.object({
+    v: z.number(),
+    type: z.literal('gitReq'),
+    id: gitReqId,
+    workspaceId: id,
+    op: z.enum(['status', 'diff']),
+    path: z.string().min(1).max(1024).optional(),
+    staged: z.boolean().optional(),
+    page: z.number().int().min(0).max(999).optional(),
+  }),
 ])
 
 /** Parse one raw WS frame into a validated client message, or null. */

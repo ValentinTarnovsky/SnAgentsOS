@@ -14,6 +14,7 @@ import { runRemoteQuickCommand } from './quickCommands'
 import { runOpenPath, runOpenUrl } from './remoteOpen'
 import { runCreatePaneResume } from './remoteResume'
 import { platformDefaultShell, runAgentEnd } from './agentEndRun'
+import { sendReviewNotes } from './sendReviewNotes'
 import { toast } from './toast'
 import { translate } from '@/i18n'
 import type { Language } from '@shared/types'
@@ -195,6 +196,13 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
 
     case 'releaseFit':
       return runReleaseFit(action.paneId, fit)
+    case 'sendReviewNotes': {
+      // E7-FR-25: the phone's notes come inline and are never stored on the
+      // desktop; same checks, format and bracketed paste as the desktop send.
+      // Enter only with the phone's explicit checkbox, only to an agent.
+      const res = sendReviewNotes(action.workspaceId, action.paneId, { notes: action.notes, submit: action.enter })
+      return res.ok ? { ok: true, info: res.sent } : { ok: false, error: res.error }
+    }
 
     default:
       return { ok: false, error: 'unknown_action' }
