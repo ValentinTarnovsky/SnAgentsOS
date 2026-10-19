@@ -42,6 +42,30 @@ export interface StatusNotice {
 }
 
 /**
+ * A `snaos notify` for the remote channels (E8-FR-19, kind `custom`). Kept
+ * apart from StatusNotice so every agent-notice consumer stays as it is.
+ * Title (<= 80) and body (<= 300) arrive already sanitized to one line each.
+ */
+export interface CustomNotice {
+  kind: 'custom'
+  /** The calling console, or null from an external terminal (master token). */
+  paneId: string | null
+  title: string
+  body: string
+}
+
+/** "workspace / console" of a pane and its workspace id, or the fallback. */
+export function describePlace(paneId: string | null, config: ConfigFile | null, fallbackPlace: string): { place: string; workspaceId: string | null } {
+  if (paneId) {
+    for (const ws of config?.workspaces ?? []) {
+      const pane = ws.panes.find(p => p.id === paneId)
+      if (pane) return { place: `${ws.name} / ${pane.title}`, workspaceId: ws.id }
+    }
+  }
+  return { place: fallbackPlace, workspaceId: null }
+}
+
+/**
  * The words every remote channel (Discord, ntfy) sends for a notice: agent
  * name, reason in the config language, "workspace / console" and the
  * workspace id the deep link needs. Never any text of the agent's reply.

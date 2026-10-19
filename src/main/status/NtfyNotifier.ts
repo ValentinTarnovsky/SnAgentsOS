@@ -1,7 +1,7 @@
 import { BRAND } from '@shared/brand'
 import type { ConfigFile, NtfySettings, StatusHealth } from '@shared/types'
 import { isPrivateOrTailnet } from '../remote/network'
-import { describeNotice, type StatusNotice } from './events'
+import { describeNotice, describePlace, type CustomNotice, type StatusNotice } from './events'
 import { mainT } from '../i18n'
 
 /**
@@ -101,6 +101,19 @@ export class NtfyNotifier {
     const cfg = this.cfg
     if (!cfg || !this.wants(notice)) return
     void this.enqueue(cfg, ntfyNoticeMessage(notice, config, click)).catch(() => {})
+  }
+  /** True when a `snaos notify` would be published (enabled and a valid topic). */
+  wantsCustom(): boolean {
+    const cfg = this.cfg
+    return !!cfg?.enabled && NTFY_TOPIC_RE.test(cfg.topic.trim())
+  }
+  /** `snaos notify` (kind custom, E8-FR-19): the caller's title, its text and the console. */
+  notifyCustom(notice: CustomNotice, config: ConfigFile | null, click?: string): void {
+    const cfg = this.cfg
+    if (!cfg || !this.wantsCustom()) return
+    const { place } = describePlace(notice.paneId, config, BRAND.productName)
+    const message = notice.paneId ? `${notice.body}\n${place}` : notice.body
+    void this.enqueue(cfg, { title: notice.title, message, urgent: false, ...(click ? { click } : {}) }).catch(() => {})
   }
   /** [Send test] on the saved config: 'Accepted' or the HTTP error. */
   async test(cfg: NtfySettings | null = this.cfg): Promise<{ ok: boolean; error?: string }> {

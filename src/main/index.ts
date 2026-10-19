@@ -58,6 +58,9 @@ import { copyMainDiagnostics, registerCrashIpc, type CrashIpcDeps } from './ipc/
 import { updateState } from './updateState'
 import { makeOpenRequest, OpenRequestQueue, parseOpenArg, validateOpenPath } from './openRequest'
 import { refreshExplorerMenuOnStartup } from './shellIntegration'
+import { CliService } from './cli/CliService'
+import { removeFromUserPath } from './cli/userPath'
+import { registerCliIpc } from './ipc/registerCliIpc'
 
 // Remember main's warn/error lines for "Copy diagnostics" (E4-FR-24).
 installLogRing()
@@ -73,9 +76,10 @@ let bypassCloseGuards = false
 // True while an update download/install is in flight: blocks the user closing
 // the window mid-download (which would abort the update).
 let isInstalling = false
-const ptyManager = new PtyManager(
+const ptyManager: PtyManager = new PtyManager(
   () => mainWindow?.webContents ?? null,
-  (ptyId, paneId, cwd) => codexBridge.environment(ptyId, paneId, cwd),
+  // Codex bridge + snaos CLI (E8-FR-13); cliService is constructed below, read at spawn time.
+  (ptyId, paneId, cwd, workspaceId): Record<string, string> => ({ ...codexBridge.environment(ptyId, paneId, cwd), ...cliService.envFor(ptyId, paneId, workspaceId) }),
   // Closure: statusManager is constructed below; the prompt gate polls it (E8-FR-02b).
   (paneId) => {
     const s = statusManager.stateOf(paneId)
@@ -114,6 +118,21 @@ ptyManager.addSink(statusManager)
 // Agent status reaches phones straight from main (E1-FR-03), not via the renderer.
 statusManager.addListener((evt) => remoteManager.pushPaneStatus(evt))
 ptyManager.addSink(codexBridge)
+// snaos CLI (E8-FR-12..22): control server, console tokens, runtime.json and shim under dataDir().
+const cliService: CliService = new CliService({
+  dataDir,
+  appVersion: app.getVersion(),
+  execPath: process.execPath,
+  cliPath: join(__dirname, 'cli.js'),
+  portable: isPortable(),
+  getSender: () => mainWindow?.webContents ?? null,
+  pty: ptyManager,
+  status: statusManager,
+  config: () => configStore.load(),
+  routeCustom: (notice) => noticeRouter?.routeCustom(notice),
+})
+ptyManager.addSink(cliService.sink)
+statusManager.addListener((evt) => cliService.handlers.onStatus(evt))
 let statusIpc: StatusIpc | null = null
 // Created in bootstrap: powerSaveBlocker/powerMonitor need app ready.
 let awakeService: AwakeService | null = null
@@ -616,6 +635,10 @@ async function bootstrap(): Promise<void> {
   })
   const startupCfg = configStore.load()
   await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? false)
+  // snaos CLI: shim, skill refresh and PATH first; switched on before the first console spawns.
+  registerCliIpc(cliService)
+  cliService.init()
+  void cliService.setEnabled(startupCfg?.settings?.cliEnabled !== false)
   openMainWindow()
   // Explorer menu (E4-FR-34): with the toggle on, rewrite the keys when the exe
   // or the label changed (a moved portable, the language). After the first paint.
@@ -642,9 +665,16 @@ async function bootstrap(): Promise<void> {
   })
 }
 
-// Single-instance lock: if another copy is already running (e.g. hidden in the
-// system tray), hand off to it and quit this one instead of opening a duplicate.
-if (!app.requestSingleInstanceLock()) {
+// The uninstaller (build/installer.nsh customUnInit) runs the exe with
+// --cleanup-user-path: drop <dataDir>/bin from the user PATH and exit, no
+// window, no lock (E8-FR-22). Only that entry; a portable never added one.
+if (process.argv.includes('--cleanup-user-path')) {
+  void removeFromUserPath(join(dataDir(), 'bin'))
+    .catch(() => false)
+    .finally(() => app.exit(0))
+} else if (!app.requestSingleInstanceLock()) {
+  // Single-instance lock: if another copy is already running (e.g. hidden in the
+  // system tray), hand off to it and quit this one instead of opening a duplicate.
   app.quit()
 } else {
   // A second launch (Explorer menu, shortcut, CLI) focuses this one and hands over its `--open`.
@@ -661,6 +691,8 @@ app.on('before-quit', () => {
   // Shut the remote server first (best-effort, non-blocking) so phones get a
   // shutdown frame before the ptys they mirror are torn down.
   remoteManager.shutdown('quit')
+  // runtime.json goes (only when it is ours) and the control server closes.
+  cliService.shutdown()
   persistScrollbackOnExit()
   ptyManager.killAll()
   afterPtysKilled()

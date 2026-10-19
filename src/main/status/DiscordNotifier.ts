@@ -1,6 +1,6 @@
 import { BRAND } from '@shared/brand'
 import type { ConfigFile, DiscordSettings, StatusHealth } from '@shared/types'
-import { describeNotice, type StatusNotice } from './events'
+import { describeNotice, describePlace, type CustomNotice, type StatusNotice } from './events'
 
 export function discordUrl(value: string): string {
   const url = new URL(value.trim())
@@ -37,6 +37,19 @@ export class DiscordNotifier {
     if (!cfg?.enabled || !(notice.state === 'done' ? cfg.notifyDone : cfg.notifyAction)) return
     const { agent, message, place } = describeNotice(notice, config, BRAND.productName)
     const text = `${agent}: ${message}\n${place}\n${new Date().toISOString()}`
+    void this.enqueue(cfg, text).catch(() => {})
+  }
+  /**
+   * `snaos notify` (kind custom, E8-FR-19): only needs the channel enabled.
+   * Same payload rules as the fixed texts (allowed_mentions parses nothing),
+   * the caller's text clipped again to 80 / 300 and stripped of controls.
+   */
+  notifyCustom(notice: CustomNotice, config: ConfigFile | null): void {
+    const cfg = this.cfg
+    if (!cfg?.enabled) return
+    const clean = (s: string, max: number): string => s.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, max)
+    const { place } = describePlace(notice.paneId, config, BRAND.productName)
+    const text = `${clean(notice.title, 80)}: ${clean(notice.body, 300)}\n${place}\n${new Date().toISOString()}`
     void this.enqueue(cfg, text).catch(() => {})
   }
   async test(cfg: DiscordSettings): Promise<{ ok: boolean; error?: string }> {
