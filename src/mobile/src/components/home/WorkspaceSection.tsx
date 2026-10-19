@@ -2,8 +2,9 @@
  * One workspace on Home (E2-FR-04, 09, 15, 50). The header shows the chevron,
  * the name, how many consoles it has, a red badge with the ones in action
  * (visible while collapsed too), the "On the PC" chip when it is the desktop's
- * active workspace, the git chip under the name (a tap opens Changes,
- * E3-FR-52) and a kebab. A tap on the header collapses or expands it (persisted in snagentsos.home.collapsed;
+ * active workspace, the task state chip (amber while in review) and the
+ * workspace note on one truncated line under the name (E8-FR-11, v3.1), the
+ * git chip under that (a tap opens Changes, E3-FR-52) and a kebab. A tap on the header collapses or expands it (persisted in snagentsos.home.collapsed;
  * everything starts expanded). Rows follow homeRows: action > error > unread
  * done > working > the rest, layoutOrder inside each rank.
  */
@@ -15,6 +16,7 @@ import { ConsoleRow } from './ConsoleRow'
 import { GitChip } from './GitChip'
 import { NoConsoles } from './EmptyStates'
 import { actionCount, homeRows, isUnread } from '../../lib/workspace'
+import { TASK_STATE_KEY } from '../../lib/automations'
 import { t } from '../../lib/i18n'
 
 export interface WorkspaceSectionProps {
@@ -64,12 +66,28 @@ function WorkspaceSectionImpl(props: WorkspaceSectionProps): ReactNode {
                     {waiting}
                   </span>
                 )}
+                {ws.taskState && (
+                  <span
+                    data-ws-task={ws.taskState}
+                    className={clsx(
+                      'shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ring-1',
+                      ws.taskState === 'review' ? 'bg-amber-500/15 text-amber-500 ring-amber-500/40' : 'bg-card text-text-secondary ring-border',
+                    )}
+                  >
+                    {t(TASK_STATE_KEY[ws.taskState])}
+                  </span>
+                )}
                 {onPc && (
                   <span data-on-pc className="shrink-0 rounded-full bg-card px-1.5 py-0.5 text-[10px] font-medium text-text-secondary ring-1 ring-border">
                     {t('home.onPc')}
                   </span>
                 )}
               </span>
+              {ws.note && (
+                <span data-ws-note title={ws.note} className="truncate text-[11px] leading-tight text-text-secondary">
+                  {ws.note}
+                </span>
+              )}
             </span>
           </button>
           {/* Its own button (a tap opens Changes), so it sits under the toggle, not inside it. */}

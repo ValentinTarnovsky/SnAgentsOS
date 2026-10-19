@@ -1,5 +1,8 @@
-import type { RemotePresetInfo, RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
+import type { RemotePaneInfo, RemotePresetInfo, RemoteScheduleInfo, RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
 import type { GitSummary } from '@shared/git-types'
+import type { Workspace } from '@shared/types'
+import { isScheduleEnabled, recentRuns, recurrenceOf, waitsForIdle } from '@shared/schedule'
+import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { resolveTokens } from '@/themes'
 import { type AppState, useAppStore } from './store'
 import { getPtyId, onPtyRegistryChange } from './ptyRegistry'
@@ -10,6 +13,11 @@ import { remoteAgentEnded } from './agentEndRun'
 import { useGitStore } from './gitStore'
 import { gitChipEnabled, remoteGitChip, workspaceGitKey } from './gitChip'
 import type { MountedWorkspaces } from './mounting'
+import { useStatusLines } from './statusLineStore'
+import { isManualRunPending, useScheduleRuntime } from './usePaneScheduler'
+
+/** Longest `snaos status` line the phone gets (E8-FR-19, same cap as the CLI). */
+export const REMOTE_STATUS_LINE_MAX = 120
 
 /** The presets the phone's console picker lists (E2-FR-10/12): never commands, args or env. */
 function remotePresets(presets: AppState['presets']): RemotePresetInfo[] {
@@ -26,6 +34,48 @@ function gitField(summary: GitSummary | undefined): Pick<RemoteWorkspaceInfo, 'g
   return git ? { git } : {}
 }
 
+/** E8-FR-11 (v3.1): the note and task state the phone shows, normalized again on the way out. */
+function noteFields(ws: Workspace): Pick<RemoteWorkspaceInfo, 'note' | 'taskState'> {
+  const note = normalizeWorkspaceNote(ws.note)
+  return { ...(note ? { note } : {}), ...(isTaskState(ws.taskState) ? { taskState: ws.taskState } : {}) }
+}
+
+/** E8-FR-19 (v3.1): one line, control characters out, at most 120. */
+function statusLineField(line: string | undefined): Pick<RemotePaneInfo, 'statusLine'> {
+  if (typeof line !== 'string') return {}
+  // eslint-disable-next-line no-control-regex
+  const text = line.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, REMOTE_STATUS_LINE_MAX)
+  return text ? { statusLine: text } : {}
+}
+
+/**
+ * E8-FR-32 (v3.1): every console automation in sidebar order, for the phone's
+ * Automations section. The prompt and the history stay on the desktop; only
+ * the last run travels. Exported for tests.
+ */
+export function remoteSchedules(workspaces: readonly Workspace[], pendingRun: (paneId: string) => boolean): RemoteScheduleInfo[] {
+  const out: RemoteScheduleInfo[] = []
+  for (const ws of workspaces) {
+    for (const pane of ws.panes) {
+      const sched = pane.schedule
+      if (!sched) continue
+      const last = recentRuns(sched.history)[0]
+      out.push({
+        workspaceId: ws.id,
+        paneId: pane.id,
+        time: sched.time,
+        recurrence: recurrenceOf(sched),
+        dueAt: sched.dueAt,
+        enabled: isScheduleEnabled(sched),
+        waitIdle: waitsForIdle(sched),
+        ...(last ? { lastRun: { at: last.at, status: last.status, trigger: last.trigger } } : {}),
+        ...(pendingRun(pane.id) ? { runPending: true } : {}),
+      })
+    }
+  }
+  return out
+}
+
 /** Value signature of what the phone sees of the git summaries (workspace chips only). */
 function remoteGitSig(summaries: Record<string, GitSummary>): string {
   const out: Record<string, unknown> = {}
@@ -40,6 +90,8 @@ function remoteGitSig(summaries: Record<string, GitSummary>): string {
 function buildSnapshot(state: AppState): RemoteStateSnapshot {
   const sessions = useAgentStore.getState().sessions
   const gitSummaries = gitChipEnabled(state.settings) ? useGitStore.getState().summaries : {}
+  const statusLines = useStatusLines.getState().lines
+  const runtime = useScheduleRuntime.getState()
   const workspaces: RemoteWorkspaceInfo[] = state.workspaces.map((ws) => ({
     id: ws.id,
     name: ws.name,
@@ -58,10 +110,12 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
         // D10: the phone shows "Relaunch resuming" / "New chat" only when true.
         ...(paneResumable(pane, ws, state.presets, sessions[pane.id]) ? { resumable: true } : {}),
         ...(agentEnded ? { agentEnded } : {}),
+        ...statusLineField(statusLines[pane.id]),
       }
     }),
     // E7-FR-09: branch and counts only, never the cwd or the repo root.
     ...gitField(gitSummaries[workspaceGitKey(ws.id)]),
+    ...noteFields(ws),
   }))
   return {
     workspaces,
@@ -81,6 +135,7 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     // E2-FR-12: the phone's console picker and its "starts N consoles" confirmation.
     presets: remotePresets(state.presets),
     mountedWorkspaceIds: fullyMountedIds(state.mountedWorkspaces, state.workspaces.map((w) => w.id)),
+    schedules: remoteSchedules(state.workspaces, (paneId) => isManualRunPending(runtime, paneId)),
   }
 }
 
@@ -158,6 +213,17 @@ export function startRemoteSnapshotSync(): () => void {
     }
   })
 
+  // v3.1: a `snaos status` line (E8-FR-19) and a pending "Run now" (E8-FR-32)
+  // live in their own transient stores; both only swap state on a change.
+  const unsubLines = useStatusLines.subscribe(schedule)
+  let prevRunPending = runPendingSig()
+  const unsubRuntime = useScheduleRuntime.subscribe(() => {
+    const sig = runPendingSig()
+    if (sig === prevRunPending) return
+    prevRunPending = sig
+    schedule()
+  })
+
   // Seed main with the current state right away (post-hydrate).
   window.snApi.remote.pushState(buildSnapshot(useAppStore.getState()))
 
@@ -168,5 +234,14 @@ export function startRemoteSnapshotSync(): () => void {
     unsubUsage()
     unsubAgents()
     unsubGit()
+    unsubLines()
+    unsubRuntime()
   }
+}
+
+/** Panes whose "Run now" is pending: the only part of the scheduler runtime the phone sees. */
+function runPendingSig(): string {
+  const runtime = useScheduleRuntime.getState()
+  const ids = new Set([...Object.keys(runtime.manual), ...Object.keys(runtime.inflight).filter((id) => runtime.inflight[id].trigger === 'manual')])
+  return [...ids].sort().join(',')
 }
