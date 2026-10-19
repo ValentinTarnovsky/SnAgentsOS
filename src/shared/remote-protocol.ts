@@ -17,8 +17,11 @@ import type {
   PaneType,
   QuickCommand,
   RemotePending,
+  ScheduleRecurrence,
+  ScheduleRunStatus,
   ThemeName,
   ThemeTokens,
+  WorkspaceTaskState,
 } from './types'
 import type { GitArea, GitDiffHunk, GitFileEntry, RemoteGitChip } from './git-types'
 import type { ChatMessage } from './chat-types'
@@ -92,6 +95,11 @@ export interface RemotePaneInfo {
   agentEnded?: { canResume: boolean }
   /** Agent status overlaid by main on every state / authOk (E1-FR-03). */
   status?: RemotePaneStatus
+  /**
+   * v3.1 amendment (E8-FR-19): the console's `snaos status` line, <= 120,
+   * transient (gone after a restart or close). Absent = none.
+   */
+  statusLine?: string
 }
 
 export interface RemoteWorkspaceInfo {
@@ -102,6 +110,32 @@ export interface RemoteWorkspaceInfo {
   panes: RemotePaneInfo[]
   /** Git chip of the workspace cwd (E7-FR-09). Omitted without a repo, on error or with settings.gitChip off. */
   git?: RemoteGitChip
+  // --- v3.1 amendment (E8-FR-11) ---
+  /** The workspace note, normalized and <= 140. Absent = none. */
+  note?: string
+  /** The user's task state (not the agent state). Absent = none. */
+  taskState?: WorkspaceTaskState
+}
+
+/**
+ * v3.1 amendment (E8-FR-32): one console automation as the phone's
+ * Automations section lists it. Never carries the prompt text or the run
+ * history, only what the row shows.
+ */
+export interface RemoteScheduleInfo {
+  workspaceId: string
+  paneId: string
+  /** "HH:MM" local to the desktop (hourly: only the minute counts). */
+  time: string
+  recurrence: ScheduleRecurrence
+  /** false = paused ("Paused" instead of the next run). */
+  enabled: boolean
+  /** Next run, desktop clock (epoch ms). */
+  dueAt: number
+  /** The most recent run. Absent = never ran. */
+  last?: { at: number; status: ScheduleRunStatus }
+  /** A "Run now" waits for a free agent or is being sent. */
+  runPending?: boolean
 }
 
 /**
@@ -179,6 +213,8 @@ export interface RemoteStateSnapshot {
    * phone to confirm `mountWorkspace` first (E2-FR-06/12).
    */
   mountedWorkspaceIds?: string[]
+  /** v3.1 amendment (E8-FR-32): every console automation, in sidebar order. Absent = an older desktop. */
+  schedules?: RemoteScheduleInfo[]
 }
 
 // --- Session history (E3-FR-36..40) ---
@@ -278,6 +314,15 @@ export type RemoteCtlAction =
    * no_notes, too_large (over 50 notes or 32KB of text).
    */
   | { kind: 'sendReviewNotes'; workspaceId: string; paneId: string; notes: Array<{ file: string; lines: string; comment: string }>; enter: boolean }
+  // --- v3.1 amendment (E8-FR-32): the phone's Automations section ---
+  /**
+   * "Run now" of a console's automation: the desktop's own manual run (waits
+   * for a free agent, never moves the next run). Acks: not_found (pane outside
+   * workspaceId), no_schedule, no_prompt (an empty saved prompt).
+   */
+  | { kind: 'scheduleRun'; workspaceId: string; paneId: string }
+  /** The "Active" switch: pauses or resumes (a resume re-arms a past time). Acks: not_found, no_schedule. */
+  | { kind: 'scheduleToggle'; workspaceId: string; paneId: string; enabled: boolean }
 
 // --- Git API for the phone's Changes screen (E7-FR-22..26) ---
 

@@ -17,6 +17,7 @@ import { runCreatePaneResume } from './remoteResume'
 import { platformDefaultShell, runAgentEnd } from './agentEndRun'
 import { sendReviewNotes } from './sendReviewNotes'
 import { runCtlOp } from './ctlCommands'
+import { runScheduleNow, setScheduleEnabled } from './usePaneScheduler'
 import { toast } from './toast'
 import { translate } from '@/i18n'
 import type { Language } from '@shared/types'
@@ -210,9 +211,34 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
       return res.ok ? { ok: true, info: res.sent } : { ok: false, error: res.error }
     }
 
+    // v3.1 (E8-FR-32): the phone's Automations section.
+    case 'scheduleRun':
+    case 'scheduleToggle':
+      return runScheduleCtl(action)
+
     default:
       return { ok: false, error: 'unknown_action' }
   }
+}
+
+/**
+ * scheduleRun / scheduleToggle (E8-FR-32, v3.1): the same paths as the
+ * desktop's Automations table. "Run now" is the manual run of R30-13 (waits
+ * for a free agent, mounts a console of a workspace that is not mounted,
+ * never moves `dueAt`); the switch pauses or re-arms. The pane must belong to
+ * `workspaceId` (not_found) and have a schedule (no_schedule); a run also
+ * needs a saved prompt (no_prompt). Exported for tests.
+ */
+export function runScheduleCtl(action: Extract<RemoteCtlAction, { kind: 'scheduleRun' | 'scheduleToggle' }>): CmdResult {
+  const ws = useAppStore.getState().workspaces.find((w) => w.id === action.workspaceId)
+  const pane = ws?.panes.find((p) => p.id === action.paneId)
+  if (!pane) return { ok: false, error: 'not_found' }
+  if (!pane.schedule) return { ok: false, error: 'no_schedule' }
+  if (action.kind === 'scheduleToggle') {
+    setScheduleEnabled(pane.id, action.enabled)
+    return { ok: true }
+  }
+  return runScheduleNow(pane.id) ? { ok: true } : { ok: false, error: 'no_prompt' }
 }
 
 /**

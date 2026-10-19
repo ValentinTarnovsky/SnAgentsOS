@@ -753,6 +753,174 @@ async function testSafePaste() {
   check(r.ok && r.sent.length === 4 && r.sent[3] === '\r' && r.sent.slice(0, 3).join('') === START + 'y'.repeat(20000) + END, 'a 20000-char Send is 3 paste frames then Enter')
 }
 
+// --- R31-02 (v3.1): note, statusLine and automations on the phone -------------
+// E8-FR-11/19/32 amendments: the renderer's snapshot fields (note, taskState,
+// statusLine, schedules) and the scheduleRun / scheduleToggle executor with
+// its membership check, in a vm with a fake window.snApi; then the zod schema
+// of both ctl and main's relay through the real SessionManager.
+
+function loadRendererLib(contents, overrides) {
+  const src = require('esbuild').buildSync({
+    stdin: { contents, resolveDir: path.join(root, 'src/renderer/lib'), loader: 'ts' },
+    bundle: true, platform: 'node', format: 'cjs', write: false,
+    alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') },
+    define: { 'process.env.NODE_ENV': '"production"' },
+  }).outputFiles[0].text
+  const mod = { exports: {} }
+  vm.runInNewContext(src, { module: mod, exports: mod.exports, require, console, process, crypto: globalThis.crypto, setTimeout, clearTimeout, setInterval, clearInterval, URL, ...overrides })
+  return mod.exports
+}
+
+async function testAutomationSurface() {
+  const submits = [], states = [], results = []
+  const snApi = {
+    platform: 'win32',
+    config: { save() {} },
+    pty: { killPanes: async () => 0, submit: async req => { submits.push(req); return { ok: true } }, onPromptResult: () => () => {} },
+    window: { reveal() {} },
+    remote: { onCommand: cb => { snApi._cmd = cb; return () => {} }, commandResult: res => results.push(res), pushState: st => states.push(st) },
+    clipboard: { writeText() {} },
+  }
+  const r = loadRendererLib(`
+    export { useAppStore } from './store'
+    export { initRemoteCommands, runScheduleCtl } from './remoteCommands'
+    export { startRemoteSnapshotSync, remoteSchedules, REMOTE_STATUS_LINE_MAX } from './remoteSnapshot'
+    export { useStatusLines } from './statusLineStore'
+    export { useScheduleRuntime } from './usePaneScheduler'
+    export { registerPty } from './ptyRegistry'
+  `, { window: { snApi }, document: { hasFocus: () => true, querySelector: () => null }, requestAnimationFrame: () => 0, cancelAnimationFrame() {} })
+  const S = r.useAppStore
+  const DUE = Date.now() + 3 * 3600000
+  const sched = (o = {}) => ({ time: '09:00', prompt: 'corre los tests', dueAt: DUE, recurrence: { kind: 'weekdays' }, ...o })
+  const history = [
+    { at: 1000, scheduledFor: 1000, trigger: 'scheduled', status: 'missed' },
+    { at: 5000, scheduledFor: 5000, trigger: 'manual', status: 'sent' },
+    { at: 3000, scheduledFor: 3000, trigger: 'scheduled', status: 'failed', reason: 'not_delivered' },
+  ]
+  S.getState().hydrate({
+    version: 13,
+    workspaces: [
+      { id: 'w1', name: 'Api', cwd: 'C:/a', note: '  esperando\nCI  ', taskState: 'review', panes: [
+        { id: 'c1', type: 'claude', title: 'Claude', color: '#fff', icon: 'claude', schedule: sched({ history }) },
+        { id: 'c2', type: 'shell', title: 'Shell', color: '#fff', icon: 'terminal' },
+      ] },
+      { id: 'w2', name: 'Web', cwd: 'C:/b', taskState: 'bogus', panes: [
+        { id: 'd1', type: 'shell', title: 'Cron', color: '#fff', icon: 'terminal', schedule: sched({ time: '07:15', recurrence: { kind: 'hourly' }, enabled: false }) },
+      ] },
+    ],
+    presets: [], connections: [],
+    settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false, language: 'es' },
+    activeWorkspaceId: 'w1',
+  })
+  r.useStatusLines.getState().setLine('c1', 'corriendo\u001b[31m tests\r\n' + 'x'.repeat(200))
+  const stop = r.startRemoteSnapshotSync()
+  const wait = ms => new Promise(res => setTimeout(res, ms))
+  const snap = states.at(-1)
+  const ws1 = snap.workspaces.find(w => w.id === 'w1'), ws2 = snap.workspaces.find(w => w.id === 'w2')
+  check(ws1.note === 'esperando CI' && ws1.taskState === 'review', 'the snapshot carries the normalized note and the task state (E8-FR-11)')
+  check(!('note' in ws2) && !('taskState' in ws2), 'no note and an unknown task state travel as absent')
+  const c1 = ws1.panes.find(p => p.id === 'c1'), c2 = ws1.panes.find(p => p.id === 'c2')
+  check(c1.statusLine.startsWith('corriendo') && !/[\u0000-\u001f]/.test(c1.statusLine) && c1.statusLine.length === r.REMOTE_STATUS_LINE_MAX, 'statusLine is one line without control characters, at most 120 (E8-FR-19)')
+  check(!('statusLine' in c2), 'a console without a line has no statusLine')
+  check(Array.isArray(snap.schedules) && snap.schedules.map(s => s.paneId).join() === 'c1,d1', 'schedules lists every console automation in sidebar order (E8-FR-32)')
+  const s1 = snap.schedules[0], s2 = snap.schedules[1]
+  check(s1.workspaceId === 'w1' && s1.time === '09:00' && s1.recurrence.kind === 'weekdays' && s1.enabled === true && s1.dueAt === DUE, 'a row carries time, recurrence, enabled and dueAt')
+  check(s1.last.at === 5000 && s1.last.status === 'sent' && Object.keys(s1.last).length === 2, 'last is the newest run, status and time only')
+  check(!JSON.stringify(snap.schedules).includes('corre los tests') && !('history' in s1) && !('prompt' in s1), 'neither the prompt nor the history leave the desktop')
+  check(s2.workspaceId === 'w2' && s2.enabled === false && s2.recurrence.kind === 'hourly' && !('last' in s2) && !('runPending' in s2), 'a paused schedule that never ran')
+  const legacy = r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedule: { time: '10:00', prompt: 'p', dueAt: 1 } }] }], () => false)
+  check(legacy[0].recurrence.kind === 'once' && legacy[0].enabled === true, 'a one-shot schedule without the schema 13 fields reads as once and active')
+
+  // The transient line lives in its own store: clearing it pushes again.
+  const before = states.length
+  r.useStatusLines.getState().setLine('c1', null)
+  await wait(150)
+  check(states.length === before + 1 && !('statusLine' in states.at(-1).workspaces[0].panes[0]), 'clearing the line (restart or close) pushes a snapshot without it')
+
+  // The executor (E8-FR-32): membership first, then the schedule.
+  r.initRemoteCommands()
+  const ctl = async action => { snApi._cmd({ id: `c${results.length}`, action }); await new Promise(res => setImmediate(res)); return results.at(-1) }
+  const pane = id => S.getState().workspaces.flatMap(w => w.panes).find(p => p.id === id)
+  let ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w2', paneId: 'c1', enabled: false })
+  check(!ack.ok && ack.error === 'not_found' && pane('c1').schedule.enabled !== false, 'a pane outside workspaceId is not_found and nothing changes')
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w2', paneId: 'c1' })
+  check(!ack.ok && ack.error === 'not_found' && submits.length === 0, 'scheduleRun checks membership too')
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'gone', paneId: 'c1' })
+  check(!ack.ok && ack.error === 'not_found', 'an unknown workspace is not_found')
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c2' })
+  check(!ack.ok && ack.error === 'no_schedule', 'a console without a schedule is no_schedule')
+  ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: false })
+  check(ack.ok && pane('c1').schedule.enabled === false && pane('c1').schedule.dueAt === DUE, 'scheduleToggle pauses it')
+  await wait(150)
+  check(states.at(-1).schedules[0].enabled === false, 'the next snapshot shows it paused')
+  S.getState().setPaneSchedule('w2', 'd1', { ...pane('d1').schedule, dueAt: Date.now() - 1000 })
+  ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w2', paneId: 'd1', enabled: true })
+  check(ack.ok && pane('d1').schedule.enabled === true && pane('d1').schedule.dueAt > Date.now(), 'resuming re-arms a past time to its next occurrence')
+  await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: true })
+  check(pane('c1').schedule.enabled === true && pane('c1').schedule.dueAt === DUE, 'resuming a future time keeps it')
+
+  // "Run now" (E8-FR-31 path): a working agent waits, a free one gets the prompt; dueAt never moves.
+  r.registerPty('c1', 'pty-c1')
+  S.setState({ paneStatus: { c1: { state: 'working', precise: true, stateSince: 0 } } })
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' })
+  check(ack.ok && submits.length === 0 && 'c1' in r.useScheduleRuntime.getState().manual, 'scheduleRun on a working agent acks ok and waits like the desktop "Run now"')
+  await wait(150)
+  check(states.at(-1).schedules[0].runPending === true, 'the snapshot marks the waiting run (runPending)')
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' })
+  check(ack.ok && Object.keys(r.useScheduleRuntime.getState().manual).length === 1, 'a second tap does not queue a second run')
+  r.useScheduleRuntime.setState({ manual: {}, inflight: {} })
+  await wait(150)
+  check(!('runPending' in states.at(-1).schedules[0]), 'a run that stopped waiting clears runPending')
+  S.setState({ paneStatus: { c1: { state: 'idle', precise: true, stateSince: 0 } } })
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' })
+  await wait(20)
+  const ran = pane('c1').schedule
+  check(ack.ok && submits.length === 1 && submits[0].ptyId === 'pty-c1' && submits[0].text === 'corre los tests' && submits[0].enter === true, 'a free agent gets the saved prompt with Enter')
+  check(ran.dueAt === DUE && ran.history.length === 4 && ran.history.some(h => h.trigger === 'manual' && h.status === 'sent' && h.at > 5000), 'the run is logged as manual and the next run does not move')
+  await wait(150)
+  check(states.at(-1).schedules[0].last.status === 'sent' && states.at(-1).schedules[0].last.at > 5000 && states.at(-1).schedules[0].dueAt === DUE, 'the phone sees the new last run and the same next run')
+  stop()
+  S.getState().setPaneSchedule('w2', 'd1', { ...pane('d1').schedule, prompt: '' })
+  check(r.runScheduleCtl({ kind: 'scheduleRun', workspaceId: 'w2', paneId: 'd1' }).error === 'no_prompt', 'a schedule with an empty prompt answers no_prompt')
+}
+
+async function testAutomationRelay() {
+  const { parseRemoteClientMsg } = (() => {
+    const mod = { exports: {} }
+    const src = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/shared/remote-protocol-schemas.ts')], bundle: true, platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
+    vm.runInNewContext(src, { module: mod, exports: mod.exports, require, URL })
+    return mod.exports
+  })()
+  const frame = action => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'ctl', id: 'x', action }))
+  check(!!frame({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' }) && !!frame({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: false }), 'the ctl schema accepts scheduleRun and scheduleToggle')
+  check(!frame({ kind: 'scheduleRun', workspaceId: 'w1' }) && !frame({ kind: 'scheduleRun', paneId: 'c1' }) && !frame({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'x'.repeat(129) }), 'scheduleRun needs workspaceId and paneId within 128')
+  check(!frame({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1' }) && !frame({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: 'true' }), 'scheduleToggle needs a boolean enabled')
+  check(!('prompt' in frame({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1', prompt: 'rm -rf /' }).action), 'a phone can never send the text of a run')
+
+  // Main relays both to the renderer as they are and keeps the new snapshot fields.
+  const w = world()
+  const snap = {
+    ...snapshot,
+    workspaces: snapshot.workspaces.map((x, i) => (i === 0 ? { ...x, note: 'esperando CI', taskState: 'review', panes: x.panes.map(p => ({ ...p, statusLine: 'corriendo tests' })) } : x)),
+    schedules: [{ workspaceId: 'w1', paneId: 'p1', time: '09:00', recurrence: { kind: 'weekdays' }, enabled: true, dueAt: 1, runPending: true }],
+  }
+  w.manager.pushState(snap)
+  const { ws } = await pair(w)
+  const state = ws.of('authOk')[0].state
+  check(state.workspaces[0].note === 'esperando CI' && state.workspaces[0].taskState === 'review' && state.workspaces[0].panes[0].statusLine === 'corriendo tests', 'main overlays running/status and keeps note, taskState and statusLine')
+  check(state.schedules.length === 1 && state.schedules[0].runPending === true, 'and passes schedules through')
+  ws.msg({ type: 'ctl', id: 'a1', action: { kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: false } })
+  const relayed = w.commands.at(-1)
+  check(relayed && relayed.action.kind === 'scheduleToggle' && relayed.action.enabled === false && relayed.action.paneId === 'p1', 'scheduleToggle reaches the renderer executor')
+  w.manager.onControlResult({ id: relayed.id, ok: false, error: 'no_schedule' })
+  await new Promise(resolve => setImmediate(resolve))
+  const ack = ws.of('ctlAck').find(a => a.id === 'a1')
+  check(ack && !ack.ok && ack.error === 'no_schedule', 'the executor error comes back in the ctlAck')
+  const count = w.commands.length
+  ws.msg({ type: 'ctl', id: 'a2', action: { kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: 1 } })
+  check(w.commands.length === count && !ws.of('ctlAck').some(a => a.id === 'a2'), 'a malformed scheduleToggle never reaches the renderer')
+}
+
 async function main() {
   await bundle()
   const w = world()
@@ -769,8 +937,10 @@ async function main() {
   await testRateLimit()
   await testPendingMap()
   await testSafePaste()
+  await testAutomationSurface()
+  await testAutomationRelay()
   fs.rmSync(dataDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} remote overlay, paneStatus, lastHost, visibility, agentResume, httpToken, rate limit, pending and safePaste checks`)
+  console.log(`PASS: ${checks} remote overlay, paneStatus, lastHost, visibility, agentResume, httpToken, rate limit, pending, safePaste and phone automation checks`)
 }
 
 main().catch(error => { console.error(error); fs.rmSync(dataDir, { recursive: true, force: true }); process.exit(1) })
