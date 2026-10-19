@@ -2,7 +2,8 @@
 // rendered from the production TerminalPane (real xterm + Canvas), ExitCard and
 // AgentEndChip in an isolated hidden Electron window with a fake window.snApi:
 // Enter/Esc on the card never reach the pty, Restart goes through pty.restart
-// (fallback shell after a failure), the chip types the validated resume line,
+// (fallback shell after a failure), the chip waits for the first prompt mark
+// after the event (800 ms without marks) and types the validated resume line,
 // and nothing overflows in es/en, midnight/light, wide and narrow. No pty,
 // user config or real agent is touched.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
@@ -107,6 +108,22 @@ app.whenReady().then(async()=>{
  if(!v||!(up<bottom))fail('previous prompt scrolls the viewport up',{v,bottom,up});n++;
  await js("smoke.marks.nav(1)");await js("smoke.marks.nav(1)");await paint();
  if((await js("smoke.scrollTop()"))!==bottom)fail('next prompt returns to the live bottom',{bottom,now:await js("smoke.scrollTop()")});n++;
+ // E6-FR-22 with shell integration: over a terminal that has seen prompt
+ // marks, the chip waits for the first 133;A after the event, not 800 ms.
+ await js("smoke.end('pa','"+UUID+"')");await wait(1000);
+ v=await js("smoke.chip('term')");
+ if(!v||v.state!=='waiting'||v.buttons.filter(b=>b.k!=='x').some(b=>!b.d))fail('with prompt marks the chip still waits after 800 ms',v);n++;
+ await js("(()=>{const E=smoke.ESC,G=String.fromCharCode(7),M=k=>E+']133;'+k+G;smoke.data('pty-1',M('A')+'PS C:/> '+M('B'))})()");await wait(100);
+ v=await js("smoke.chip('term')");
+ if(!v||v.state!=='ready'||v.buttons.some(b=>b.d))fail('the first prompt mark after the event enables the chip',v);n++;
+ await js("smoke.app().clearAgentEnded('pa')");
+ await js("smoke.end('pa','"+UUID+"')");await wait(1200);
+ v=await js("smoke.chip('term')");
+ if(!v||v.state!=='waiting')fail('a lost prompt mark keeps the chip waiting past 800 ms',v);
+ await wait(1500);
+ v=await js("smoke.chip('term')");
+ if(!v||v.state!=='ready')fail('a lost prompt mark falls back at 2500 ms',v);n++;
+ await js("smoke.app().clearAgentEnded('pa')");await wait(50);
  // E6-FR-17: a natural exit shows the card and the exited flag.
  await js("smoke.data('pty-1','hola');smoke.exit('pty-1',3,true)");await wait(150);
  v=await js("({card:smoke.card('term'),exit:smoke.app().paneExit.pa})");
@@ -192,7 +209,7 @@ app.whenReady().then(async()=>{
  }
  n++;
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' terminal UI checks (prompt marks: copy output, red exit bar, prompt jumps; exit card Enter/Esc, in-place restart and fallback, unmount never kills, reattach refit, Claude exited chip, es/en midnight/light layouts); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' terminal UI checks (prompt marks: copy output, red exit bar, prompt jumps; exit card Enter/Esc, in-place restart and fallback, unmount never kills, reattach refit, Claude exited chip with prompt-mark and 800 ms readiness, es/en midnight/light layouts); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

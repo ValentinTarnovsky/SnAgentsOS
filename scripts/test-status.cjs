@@ -893,6 +893,66 @@ async function enrichmentChecks() {
     check(agentEndCommands({ evt: { sessionId: UUID }, shellKind: null, paneCommand: 'npx claude' }).resume === null, 'a wrapper override cannot be resumed safely: only [New]')
     check(agentEndCommands({ evt: { sessionId: UUID }, shellKind: null, initialCommand: 'codex' }).fresh === 'claude', 'New types claude when the pane launches something else')
   }
+  // When the chip's buttons enable (E6-FR-22): the first prompt mark after the
+  // event with shell integration, else 800 ms; a lost mark falls back at 2500 ms.
+  {
+    let now = 10_000, seq = 0
+    const timers = new Map()
+    const sr = loadRenderer("export { notePrompt, forgetPrompts, hasPromptMarks, whenShellReady, AGENT_END_PROMPT_CAP_MS } from './shellReady'; export { AGENT_END_READY_MS } from './agentEnd'", {
+      Date: { now: () => now },
+      setTimeout: (fn, ms) => { timers.set(++seq, { fn, ms }); return seq }, clearTimeout: id => timers.delete(id),
+    })
+    const advance = ms => { now += ms; for (const [id, t] of [...timers]) { t.ms -= ms; if (t.ms <= 0) { timers.delete(id); t.fn() } } }
+    check(sr.AGENT_END_READY_MS === 800 && sr.AGENT_END_PROMPT_CAP_MS === 2500, '800 ms without integration, 2500 ms cap with it (the FR-30 cap)')
+    let fired = 0
+    sr.whenShellReady('plain', now, () => fired++)
+    advance(799)
+    check(fired === 0 && !sr.hasPromptMarks('plain'), 'without integration nothing is ready before 800 ms')
+    advance(1)
+    check(fired === 1, 'without integration it is ready at 800 ms')
+    fired = 0
+    sr.whenShellReady('plain', now - 5000, () => fired++)
+    check(fired === 1 && timers.size === 0, 'an old event is ready at once')
+
+    sr.notePrompt('ps')
+    check(sr.hasPromptMarks('ps'), 'a prompt mark turns integration on for that pane')
+    advance(3000)
+    fired = 0
+    const evtAt = now
+    sr.whenShellReady('ps', evtAt, () => fired++)
+    advance(1500)
+    check(fired === 0, 'with integration 800 ms are not enough: it waits for the prompt mark')
+    sr.notePrompt('ps')
+    check(fired === 1 && timers.size === 0, 'the first prompt mark after the event makes it ready and drops the cap timer')
+    sr.notePrompt('ps')
+    check(fired === 1, 'later prompt marks fire nothing more')
+    fired = 0
+    sr.whenShellReady('ps', evtAt, () => fired++)
+    check(fired === 1, 'a prompt mark that already came after the event is ready at once')
+
+    advance(100)
+    fired = 0
+    sr.whenShellReady('ps', now, () => fired++)
+    advance(2499)
+    check(fired === 0, 'a lost prompt mark waits up to the cap')
+    advance(1)
+    check(fired === 1, 'and falls back at 2500 ms')
+    sr.notePrompt('ps')
+    check(fired === 1, 'a late mark after the fallback fires nothing')
+
+    advance(10)
+    fired = 0
+    const cancel = sr.whenShellReady('ps', now, () => fired++)
+    cancel()
+    sr.notePrompt('ps'); advance(3000)
+    check(fired === 0 && timers.size === 0, 'a cancelled wait never fires')
+
+    sr.forgetPrompts('ps')
+    fired = 0
+    sr.whenShellReady('ps', now, () => fired++)
+    advance(800)
+    check(!sr.hasPromptMarks('ps') && fired === 1, 'a forgotten pane (new shell, unmount) is back on the 800 ms timer')
+  }
   // Transcript fallback when Stop has no last_assistant_message (E1-FR-09).
   {
     const asked = []

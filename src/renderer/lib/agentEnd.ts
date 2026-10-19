@@ -7,7 +7,7 @@ import { buildAgentArgv, buildCdPrefix, isSafeSessionId, providerOfCommand } fro
 import type { ShellKind } from '@shared/ipc-contract'
 import type { AgentPreset, AgentSessionEndEvt } from '@shared/types'
 
-/** Without shell integration the buttons enable this long after the event (E6-FR-22). */
+/** Without shell integration the buttons enable this long after the event (E6-FR-22, shellReady). */
 export const AGENT_END_READY_MS = 800
 
 export interface AgentEndInput {

@@ -14,7 +14,8 @@ import { shellKind as shellKindOf } from '@shared/shellKind'
 import { type AppState, useAppStore } from './store'
 import { getPtyId } from './ptyRegistry'
 import { resolveLaunch } from './launch'
-import { AGENT_END_READY_MS, agentEndCommands } from './agentEnd'
+import { agentEndCommands } from './agentEnd'
+import { whenShellReady } from './shellReady'
 
 export type AgentEndMode = 'resume' | 'new'
 
@@ -82,9 +83,10 @@ export function remoteAgentEnded(state: AppState, paneId: string): RemotePaneInf
 
 /**
  * Take the offer of `paneId`: clear it, then type the command and Enter into
- * its pty. Before the shell had AGENT_END_READY_MS to print its prompt the
- * write waits for it (the desktop buttons stay disabled that long; the phone
- * cannot see that clock). `workspaceId`, when given, must own the pane.
+ * its pty. Before the shell is ready (its first prompt mark after the event
+ * with shell integration, else AGENT_END_READY_MS) the write waits for it:
+ * the desktop buttons stay disabled until then; the phone cannot see that
+ * moment (shellReady). `workspaceId`, when given, must own the pane.
  */
 export function runAgentEnd(paneId: string, mode: AgentEndMode, workspaceId?: string): AgentEndResult {
   const state = useAppStore.getState()
@@ -103,8 +105,6 @@ export function runAgentEnd(paneId: string, mode: AgentEndMode, workspaceId?: st
   if (!ptyId) return { ok: false, error: 'not_running' }
   // A bare CR is exactly what Enter sends (CRLF makes PowerShell print ">>").
   const write = (): void => window.snApi.pty.write({ ptyId, data: text + '\r' })
-  const wait = AGENT_END_READY_MS - (Date.now() - found.evt.at)
-  if (wait > 0) setTimeout(write, wait)
-  else write()
+  whenShellReady(paneId, found.evt.at, write)
   return { ok: true }
 }
