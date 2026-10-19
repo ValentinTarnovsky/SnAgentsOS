@@ -24,6 +24,7 @@ import type {
 } from './remote-protocol'
 import type { InitialPromptReq, LaunchKind, SubmitError } from './initialPrompt'
 import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
+import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from './worktree-types'
 import type { OpenPathReq, OpenPathRes } from './inertOpen'
 
 export type { GitArea, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
@@ -825,5 +826,17 @@ export interface SnApi {
     fileDiff(req: { key: string; path: string; area: GitArea; force?: boolean }): Promise<GitDiffReply>
     /** Open a listed file with its default app (allowlisted extensions only) or reveal it in its folder. */
     openFile(req: { key: string; path: string; reveal?: boolean }): Promise<boolean>
+    /** Create an isolated worktree on a new sn/<slug> branch (E7-FR-28). */
+    worktreeAdd(req: WorktreeAddReq): Promise<WorktreeAddRes>
+    /** Delete a managed worktree (and its branch); main kills the pane's pty first (E7-FR-30). */
+    worktreeRemove(req: WorktreeRemoveReq): Promise<WorktreeRemoveRes>
+    /** Is this folder a repo with commits; its HEAD for the launch dialog (E7-FR-27). */
+    worktreeProbe(repoCwd: string): Promise<WorktreeProbeRes>
+    /** Exists, dirty files, commits over the base, merged into the repo HEAD (E7-FR-30/36). */
+    worktreeInspect(req: { path: string; base?: string }): Promise<WorktreeInspectRes>
+    /** Manifest entries plus scanned folders under the roots (E7-FR-31). */
+    worktreeList(): Promise<WorktreeListRes>
+    /** Open a managed worktree folder in the file manager. */
+    worktreeReveal(path: string): Promise<boolean>
   }
 }

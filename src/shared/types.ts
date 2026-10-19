@@ -2,6 +2,9 @@
  * Core domain model, shared by main and renderer.
  * Must stay free of Node/DOM imports so it is safe in the renderer bundle.
  */
+import type { PaneWorktree } from './worktree-types'
+
+export type { PaneWorktree }
 
 /**
  * Persisted config schema version. Single source of truth for both the main
@@ -84,6 +87,8 @@ export interface Pane {
    * seeds from this when that file is missing or corrupt.
    */
   lastSession?: PaneLastSession
+  /** Isolated worktree this console runs in (schema 13, E7-FR-28); its path is also `cwd`. */
+  worktree?: PaneWorktree
 }
 
 /** Agent session mirrored onto a pane so it can be resumed later (schema 11). */
@@ -569,6 +574,8 @@ export interface Settings {
   persistScrollbackLines: number
   /** Git chip in the workspace header and background git refresh. Schema 12. */
   gitChip: boolean
+  /** Root of the pane worktrees; '' = dataDir()/worktrees. Schema 13 (E7-FR-28). */
+  worktreesRoot: string
   /** Windows "Open in SnAgentsOS" folder context menu (packaged only). Schema 12. */
   explorerMenu: boolean
   /** Update card dismissed for this version (installable ones only). Schema 12. */
