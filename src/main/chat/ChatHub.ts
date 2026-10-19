@@ -69,6 +69,10 @@ interface PaneChat {
   /** Bumped by every (re)locate: stale async results are dropped. */
   gen: number
   locating: Promise<void> | null
+  /** A re-locate in flight (transcriptChanged): a new reader waits for it. */
+  relocating: Promise<void> | null
+  /** Readers with a chatMore in flight: a repeat waits for the answer (one scan at a time each). */
+  moreBusy: Set<object>
   usedAt: number
 }
 
@@ -107,23 +111,27 @@ export class ChatHub implements ChatHooks {
 
   more(owner: object, paneId: string, before: number, send: ChatSend): void {
     const pc = this.panes.get(paneId)
-    if (!pc || !pc.readers.has(owner)) return
+    if (!pc || !pc.readers.has(owner) || pc.moreBusy.has(owner)) return
     pc.usedAt = ++useSeq
-    void (async () => {
-      await this.ensure(pc)
-      if (!pc.readers.has(owner)) return
-      if (!pc.watcher) {
-        send(noticePage(paneId, pc.unavailable ?? 'noTranscript'))
-        return
-      }
-      try {
-        const page = await pc.watcher.pageBefore(before)
-        if (pc.readers.has(owner)) send({ type: 'chatPage', paneId, ...page })
-      } catch {
-        // An unreadable file reads as no chat rather than a hung spinner.
-        if (pc.readers.has(owner)) send(noticePage(paneId, 'noTranscript'))
-      }
-    })()
+    pc.moreBusy.add(owner)
+    void this.answerMore(pc, owner, before, send).finally(() => pc.moreBusy.delete(owner))
+  }
+
+  /** One chatMore: the page before `before`, or the notice when the chat is gone. */
+  private async answerMore(pc: PaneChat, owner: object, before: number, send: ChatSend): Promise<void> {
+    await this.ensure(pc)
+    if (!pc.readers.has(owner)) return
+    if (!pc.watcher) {
+      send(noticePage(pc.paneId, pc.unavailable ?? 'noTranscript'))
+      return
+    }
+    try {
+      const page = await pc.watcher.pageBefore(before)
+      if (pc.readers.has(owner)) send({ type: 'chatPage', paneId: pc.paneId, ...page })
+    } catch {
+      // An unreadable file reads as no chat rather than a hung spinner.
+      if (pc.readers.has(owner)) send(noticePage(pc.paneId, 'noTranscript'))
+    }
   }
 
   closed(owner: object): void {
@@ -174,7 +182,7 @@ export class ChatHub implements ChatHooks {
   private paneOf(paneId: string): PaneChat {
     let pc = this.panes.get(paneId)
     if (!pc) {
-      pc = { paneId, readers: new Map(), path: null, provider: null, unavailable: null, watcher: null, closeTimer: null, gen: 0, locating: null, usedAt: 0 }
+      pc = { paneId, readers: new Map(), path: null, provider: null, unavailable: null, watcher: null, closeTimer: null, gen: 0, locating: null, relocating: null, moreBusy: new Set(), usedAt: 0 }
       this.panes.set(paneId, pc)
     }
     return pc
@@ -245,6 +253,9 @@ export class ChatHub implements ChatHooks {
 
   private async deliverFirst(pc: PaneChat, owner: object): Promise<void> {
     await this.ensure(pc)
+    // A re-locate that started meanwhile supersedes the locate above (its
+    // result was dropped): answer from what the re-locate decides.
+    while (!pc.watcher && pc.relocating) await pc.relocating
     const reader = pc.readers.get(owner)
     if (!reader) return
     if (!pc.watcher) {
@@ -264,7 +275,15 @@ export class ChatHub implements ChatHooks {
     }
   }
 
-  private async relocate(pc: PaneChat): Promise<void> {
+  private relocate(pc: PaneChat): Promise<void> {
+    const run = this.relocateNow(pc).finally(() => {
+      if (pc.relocating === run) pc.relocating = null
+    })
+    pc.relocating = run
+    return run
+  }
+
+  private async relocateNow(pc: PaneChat): Promise<void> {
     const before = pc.path
     const wasUnavailable = pc.unavailable
     const gen = ++pc.gen

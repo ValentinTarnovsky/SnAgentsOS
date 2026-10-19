@@ -1326,6 +1326,9 @@ class RemoteClient {
           ? lastPane
           : null
     const lostViewed = !!cur && keep !== cur && prev.screen === 'terminal'
+    // A chat request sent on the old socket never gets its answer: drop it, or
+    // the chatSub below would be refused as "already waiting" for up to 10s.
+    for (const paneId of [...this.chatPending.keys()]) this.cancelChat(paneId)
     store.getState().update({
       phase: 'live',
       banner: null,

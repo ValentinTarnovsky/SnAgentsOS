@@ -83,6 +83,11 @@ export const VIEWED_FRESH_MS = 30 * 1000
 
 /** Phone -> desktop message types behind the per-session token bucket. */
 export const RATE_LIMITED_MSG_TYPES: ReadonlySet<string> = new Set(['chatSub', 'chatUnsub', 'chatMore', 'historyReq', 'gitReq'])
+/**
+ * E3 M12: panes one session may read as Chat at once. The phone reads one;
+ * the cap keeps a misbehaving device from holding a hub entry per pane id.
+ */
+export const MAX_CHAT_SUBS = 8
 /** ctl kinds behind the bucket (plus `createPane` carrying `resume`). */
 export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set(['fitPane', 'releaseFit', 'sendReviewNotes'])
 
@@ -609,10 +614,14 @@ export class SessionManager implements PtySink {
 
   /** E3-FR-25: the phone reads the pane as Chat; FR-21: the owner stays the owner. */
   private handleChatSub(session: Session, paneId: string): void {
+    const noChat = (): void =>
+      this.send(session, { type: 'chatPage', paneId, items: [{ id: 'notice', role: 'system', ts: null, blocks: [{ t: 'notice', code: 'noTranscript' }] }], cursor: null, done: true })
+    // Past the cap the chat is refused (the phone falls back to Terminal).
+    if (!session.chatSubs.has(paneId) && session.chatSubs.size >= MAX_CHAT_SUBS) return noChat()
     session.chatSubs.add(paneId)
     this.deps.fit?.joined(session, paneId, true)
     if (this.deps.chat) this.deps.chat.sub(session, paneId, this.chatSender(session))
-    else this.send(session, { type: 'chatPage', paneId, items: [{ id: 'notice', role: 'system', ts: null, blocks: [{ t: 'notice', code: 'noTranscript' }] }], cursor: null, done: true })
+    else noChat()
   }
 
   private handleChatUnsub(session: Session, paneId: string): void {

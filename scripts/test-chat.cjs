@@ -47,6 +47,7 @@ export class RemoteServer {
 }
 const entry = `
 export { RemoteManager } from './src/main/remote/RemoteManager'
+export { MAX_CHAT_SUBS } from './src/main/remote/SessionManager'
 export { FIT_GRACE_MS, FIT_COALESCE_MS } from './src/main/remote/FitController'
 export { parseRemoteClientMsg } from './src/shared/remote-protocol-schemas'
 export { decodeClaude, patchOf } from './src/main/chat/decodeClaude'
@@ -393,6 +394,12 @@ async function testLocator() {
   check(r.ok && r.path.toLowerCase().endsWith('0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab.jsonl'), 'a file another console holds is never reassigned')
   claims.clear()
   fs.rmSync(old)
+  // A console without a live pty has no spawn time to date the files against.
+  const spawnedA = spawned.a
+  delete spawned.a
+  r = await loc.locate('a')
+  check(!r.ok && r.reason === 'noTranscript', 'without a live pty the folder match is refused (no old transcript passes for this console)')
+  spawned.a = spawnedA
   // Two Claude consoles in the same folder.
   running = ['a', 'b']
   status.b = { provider: 'claude', sessionId: '' }
@@ -617,6 +624,56 @@ async function testWatcherCap() {
   check(hub.openWatchers === 0, 'dispose closes them all')
 }
 
+async function testHubRaces() {
+  const file = path.join(tmp, 'race.jsonl')
+  fs.writeFileSync(file, userLine('race') + '\n')
+  const { api } = load()
+  const gates = []
+  const hub = new api.ChatHub({
+    locate: () => new Promise(res => gates.push(() => res({ ok: true, path: file, provider: 'claude' }))),
+    createWatcher: deps => new api.TranscriptWatcher({ ...deps, watchFile: () => ({ close() {} }), pollMs: 60000 }),
+  })
+  const reader = {}
+  const got = []
+  hub.sub(reader, 'p', f => got.push(f))
+  // The hooks report a session while the chatSub is still locating: the
+  // re-locate supersedes it and the first answer must come from it.
+  hub.transcriptChanged('p')
+  gates[0]()
+  await settle()
+  check(got.length === 0, 'a chatSub whose locate was superseded waits for the re-locate instead of answering "no chat"')
+  gates[1]()
+  await until(() => got.length > 0)
+  await settle()
+  check(got.every(f => f.type === 'chatPage' && api.chatNoticeOf(f.items) === null && f.items.length === 1), 'and then it gets the first page')
+  // One chatMore at a time per reader: a repeat while one scans is dropped.
+  const mores = []
+  hub.more(reader, 'p', 0, f => mores.push(f))
+  hub.more(reader, 'p', 0, f => mores.push(f))
+  await until(() => mores.length > 0)
+  await settle()
+  check(mores.length === 1, 'a second chatMore while one is in flight is dropped')
+  hub.more(reader, 'p', 0, f => mores.push(f))
+  await until(() => mores.length > 1)
+  check(mores.length === 2, 'the next chatMore after the answer is served')
+  hub.dispose()
+}
+
+async function testChatSubCap() {
+  const w = world(async () => ({ ok: false, reason: 'ambiguous' }))
+  const ws = await w.pair()
+  const max = w.api.MAX_CHAT_SUBS
+  for (let i = 0; i <= max; i++) ws.msg({ type: 'chatSub', paneId: 'q' + i })
+  await until(() => ws.of('chatPage').length > max)
+  const codes = ws.of('chatPage').map(p => p.paneId + ':' + w.api.chatNoticeOf(p.items))
+  check(codes.filter(c => c.endsWith(':ambiguous')).length === max && codes.includes(`q${max}:noTranscript`), 'past ' + max + ' chats per session a chatSub is refused with the notice, not registered: ' + codes.join(','))
+  ws.msg({ type: 'chatUnsub', paneId: 'q0' })
+  ws.msg({ type: 'chatSub', paneId: 'q' + max })
+  await until(() => ws.of('chatPage').length > max + 1)
+  check(w.api.chatNoticeOf(ws.of('chatPage').at(-1).items) === 'ambiguous', 'after a chatUnsub there is room again')
+  ws.close()
+}
+
 // --- The phone's list model (src/mobile/src/lib/chatModel.ts, chatView.ts) -------------
 
 async function testMobileModel() {
@@ -675,6 +732,8 @@ async function main() {
   await testLocator()
   await testHub()
   await testWatcherCap()
+  await testHubRaces()
+  await testChatSubCap()
   await testMobileModel()
   fs.rmSync(tmp, { recursive: true, force: true })
   console.log(`PASS: ${checks} chat checks (schemas, Claude and Codex decoders, tool summaries, pages under 48KB, 8MB scan cap, 50MB first page, tail, locator, ChatHub with phone-fit presence)`)

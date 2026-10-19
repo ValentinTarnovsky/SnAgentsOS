@@ -6,7 +6,7 @@
  *     when exactly one local Claude console runs in that folder and exactly
  *     one file there was created after its spawn (minus 5s) and is not held
  *     by another console. Otherwise `ambiguous` (two consoles, or two files)
- *     or `noTranscript` (none).
+ *     or `noTranscript` (none, or no live pty to date the files against).
  *  3. Codex: `rollout-*-<threadId>.jsonl` in today's and yesterday's folders
  *     (then the rest of the tree, names only).
  *
@@ -181,7 +181,11 @@ export class TranscriptLocator {
     } catch {
       return { ok: false, reason: 'noTranscript' }
     }
-    const since = (this.deps.spawnedAt(paneId) ?? 0) - SPAWN_SLACK_MS
+    // No live pty, no session to match: without a spawn time every file of
+    // the folder would count, and an old transcript could pass for this one.
+    const spawned = this.deps.spawnedAt(paneId)
+    if (spawned === undefined) return { ok: false, reason: 'noTranscript' }
+    const since = spawned - SPAWN_SLACK_MS
     const claims = this.deps.claims()
     const fresh: string[] = []
     await Promise.all(
