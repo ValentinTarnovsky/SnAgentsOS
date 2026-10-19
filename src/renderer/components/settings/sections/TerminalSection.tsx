@@ -175,6 +175,14 @@ export function TerminalSection() {
         description={t('settings.agentEndChipHint')}
       />
 
+      <ToggleRow
+        checked={settings.terminalShellIntegration !== false}
+        onChange={(v) => updateSettings({ terminalShellIntegration: v })}
+        searchId="terminal.shellIntegration"
+        title={t('settings.shellIntegration')}
+        description={t('settings.shellIntegrationHint')}
+      />
+
       <section className="space-y-3 border-t border-border pt-5" aria-labelledby="terminal-persist" data-persist-scrollback>
         <h4 id="terminal-persist" className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
           {t('settings.persistGroup')}

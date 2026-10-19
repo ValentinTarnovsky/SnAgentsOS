@@ -513,6 +513,8 @@ export const es: Record<keyof typeof en, string> = {
   'keys.quickCommands': 'Quick Commands',
   'keys.toggleChanges': 'Mostrar u ocultar el panel Cambios',
   'keys.agentsBoard': 'Tablero de agentes',
+  'keys.promptPrev': 'Prompt anterior',
+  'keys.promptNext': 'Prompt siguiente',
   'keys.fixedHint': 'Fijos: Alt+1..9 abre el workspace N y Ctrl+1..9 enfoca la consola visible N (se puede apagar en Ajustes > Agentes).',
   'palette.waiting': 'Te esperan',
   'palette.consoleItem': 'Consola',
@@ -578,6 +580,7 @@ export const es: Record<keyof typeof en, string> = {
   'pane.close': 'Cerrar',
   'pane.restart': 'Reiniciar consola',
   'pane.redraw': 'Redibujar',
+  'pane.copyLastOutput': 'Copiar salida del último comando',
   'pane.clearSavedHistory': 'Borrar historial guardado',
   'pane.restartClean': 'Reiniciar limpio',
   'pane.exited': 'terminada',
@@ -1003,6 +1006,9 @@ export const es: Record<keyof typeof en, string> = {
   'settings.unicode11': 'Anchos Unicode 11 (emoji y símbolos)',
   'settings.unicode11Hint':
     'Mejora la alineación de emoji y bordes de Claude/Codex. Apagalo si ves columnas corridas.',
+  'settings.shellIntegration': 'Integración de PowerShell (marcas de prompt y UTF-8)',
+  'settings.shellIntegrationHint':
+    'Marca cada prompt y comando: los atajos Prompt anterior/siguiente saltan entre ellos, una barra roja señala un comando que falló y el menú de la consola copia la última salida. También fija UTF-8 sin BOM. Solo Windows. Aplica a consolas nuevas o reiniciadas.',
   'settings.persistGroup': 'Historial guardado',
   'settings.persistScrollback': 'Guardar historial de consolas entre reinicios',
   'settings.persistScrollbackHint':
@@ -1024,6 +1030,8 @@ export const es: Record<keyof typeof en, string> = {
   'settings.snapshotLazy': 'Diferido',
   'settings.snapshotOff': 'Desactivado',
   'terminal.shellNotFound': 'Shell configurado no encontrado: {requested}. Se usa {used}.',
+  'terminal.exitCodeTitle': 'Salió con código {code}',
+  'terminal.outputCopied': 'Copiado',
   'settings.language': 'Idioma',
   'settings.languageHint': 'Idioma de la interfaz.',
   'settings.restoreLast': 'Restaurar el último workspace al abrir',

@@ -25,6 +25,9 @@ export type ActionId =
   | 'toggleChanges'
   // Agents board (E5-FR-27; D8 amendment for v3.0).
   | 'agentsBoard'
+  // Prompt navigation (E6-FR-27; Ctrl+Shift+PageUp/PageDown left free by D8).
+  | 'promptPrev'
+  | 'promptNext'
 
 export interface KeyAction {
   id: ActionId
@@ -55,6 +58,9 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'quickCommands', labelKey: 'keys.quickCommands', defaultAccel: 'Ctrl+Shift+Q' },
   { id: 'toggleChanges', labelKey: 'keys.toggleChanges', defaultAccel: 'Ctrl+Shift+D' },
   { id: 'agentsBoard', labelKey: 'keys.agentsBoard', defaultAccel: 'Ctrl+Shift+A' },
+  // Shift+PageUp/PageDown alone keep scrolling the terminal.
+  { id: 'promptPrev', labelKey: 'keys.promptPrev', defaultAccel: 'Ctrl+Shift+PageUp' },
+  { id: 'promptNext', labelKey: 'keys.promptNext', defaultAccel: 'Ctrl+Shift+PageDown' },
 ]
 
 /** Actions that stay out of text fields so the field keeps the key (E5-FR-18). */
