@@ -14,6 +14,7 @@
  */
 import { randomUUID } from 'crypto'
 import { hostname } from 'os'
+import { join } from 'path'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type {
@@ -30,9 +31,11 @@ import type { ClaudePaneState, PaneStatusEvt, RemoteSettings, ThemeTokens } from
 import type { PtyManager } from '../pty/PtyManager'
 import { DeviceRegistry } from './DeviceRegistry'
 import { listEndpoints } from './network'
+import { dataDir } from '../paths'
 import { PairingService, RateLimiter } from './PairingService'
 import { RemoteServer } from './RemoteServer'
 import { SessionManager, type HttpTokenOwner } from './SessionManager'
+import { ATTACHMENT_CLEANUP_INTERVAL_MS, UploadService } from './UploadService'
 
 const DEFAULT_PORT = 4517
 const MIN_PORT = 1024
@@ -111,6 +114,12 @@ export class RemoteManager {
   /** paneStatus coalesce: latest status held per pane until its timer fires. */
   private readonly statusHeld = new Map<string, RemotePaneStatus | null>()
   private readonly statusTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** Phone image uploads (E3-FR-08..10): `POST /api/upload` and the attachments cleanup. */
+  private readonly uploads = new UploadService({
+    dir: () => join(dataDir(), 'attachments'),
+    resolveToken: (token) => this.resolveHttpToken(token),
+  })
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(
     private readonly ptyManager: PtyManager,
@@ -138,6 +147,19 @@ export class RemoteManager {
   /** Loads paired devices; bootstrap() calls it right after the legacy migration. */
   loadDevices(): void {
     this.registry.load()
+    this.startAttachmentCleanup()
+  }
+
+  /**
+   * E3-FR-10: prune old phone attachments now and every 6h, whether or not
+   * the server is on (the folder outlives a disabled remote). Runs once.
+   */
+  private startAttachmentCleanup(): void {
+    if (this.cleanupTimer) return
+    const run = (): void => void this.uploads.cleanup().catch(() => undefined)
+    run()
+    this.cleanupTimer = setInterval(run, ATTACHMENT_CLEANUP_INTERVAL_MS)
+    this.cleanupTimer.unref?.()
   }
 
   /** Diff the desired config against the live server; start/stop/restart. */
@@ -177,6 +199,7 @@ export class RemoteManager {
     this.ptyManager.setRunningChangeListener(() => this.broadcastSnapshot())
     this.server = new RemoteServer(port, {
       onSocket: (ws, ip, host) => this.sessions?.handleSocket(ws, ip, host),
+      onUpload: (req, res) => this.uploads.handle(req, res),
     })
     this.setStatus('starting')
     this.server
@@ -226,6 +249,8 @@ export class RemoteManager {
     this.pairing.dispose()
     for (const pending of this.pendingCommands.values()) clearTimeout(pending.timer)
     this.pendingCommands.clear()
+    if (this.cleanupTimer) clearInterval(this.cleanupTimer)
+    this.cleanupTimer = null
     this.teardownServer()
     this.statusState = 'stopped'
   }
