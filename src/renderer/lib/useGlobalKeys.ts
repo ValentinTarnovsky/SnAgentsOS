@@ -4,6 +4,7 @@ import { useAgentStore } from './agentStore'
 import { ctrlDigit, eventToAccel, isEditableTarget, resolveKeymap, SKIP_IN_EDITABLE, type ActionId } from './keymap'
 import { focusPane, getFocusedPane } from './focus'
 import { redrawPane } from './redrawRegistry'
+import { promptNav } from './shellMarksRegistry'
 import { liveSidebarOrder } from './sidebarOrder'
 import { reopenClosedConsole } from './agentLaunch'
 import { revealPane } from './revealPane'
@@ -116,6 +117,13 @@ function runAction(id: ActionId): void {
     case 'redrawPane': {
       const pane = getFocusedPane()
       if (pane) redrawPane(pane)
+      break
+    }
+    case 'promptPrev':
+    case 'promptNext': {
+      // E6-FR-27: the focused pane's prompt marks; without marks nothing moves.
+      const pane = getFocusedPane()
+      if (pane) promptNav(pane, id === 'promptPrev' ? -1 : 1)
       break
     }
     case 'workspaceFlip': {

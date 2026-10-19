@@ -27,6 +27,7 @@ import { sanitizeQueries } from './ansiSanitize'
 import { HeadlessMirror } from './HeadlessMirror'
 import { MAX_FILE_BYTES, capBytes, countLines, scrollOff, trimPersistAnsi, type PersistSnapshot } from './ScrollbackStore'
 import { DEFAULT_ENGINE, REPLAY_LINES, mirrorScrollback, normalizeEngine } from '@shared/terminalEngine'
+import { OSC133_PROMPT_START, SHELL_INTEGRATION_ENV, buildIntegrationArgs, shouldIntegrate, stripOsc133 } from './powershellIntegration'
 
 interface Entry {
   pty: IPty
@@ -93,6 +94,12 @@ interface Entry {
   prompt: { req: InitialPromptReq; mode: 'argv' | 'gate' } | null
   /** Gate poll timer. */
   promptTimer: ReturnType<typeof setTimeout> | null
+  /** Launched with the PowerShell integration (E6-FR-25). */
+  integrated: boolean
+  /** Types the initial command on the first prompt mark (E6-FR-30); null when not waiting. */
+  readyWait: (() => void) | null
+  /** Last bytes of the previous chunk, so a mark split across chunks is still seen. */
+  readyTail: string
 }
 
 /** Agent readiness as StatusManager derives it (E8-FR-02b gate). */
@@ -136,6 +143,8 @@ const METRIC_SAMPLES = 512
 const DEBUG_METRICS_MS = 10_000
 /** How long the shell is given to print its first prompt before setup begins. */
 const SHELL_SETTLE_MS = 350
+/** With the PowerShell integration, the most the initial command waits for the first prompt mark (E6-FR-30). */
+const READY_MARKER_TIMEOUT_MS = 2500
 /** Default cap on waiting for a `waitFor` match before proceeding anyway. */
 const DEFAULT_WAIT_MS = 15000
 
@@ -314,6 +323,12 @@ export class PtyManager {
   private readonly seedConsumed = new Set<string>()
 
   private readonly promptListeners = new Set<PromptResultListener>()
+  /**
+   * Whether ConPTY relays the prompt mark in this process (E6-FR-30): null
+   * until a pane tells, true once a mark arrived, false after a pane timed out
+   * (every later pane goes back to the 350 ms timer).
+   */
+  private oscReadySupported: boolean | null = null
 
   /**
    * `agentState` is a lazy closure (StatusManager is built after this): the
@@ -410,8 +425,11 @@ export class PtyManager {
       }
       throw Object.assign(new Error(`${CWD_MISSING}: ${req.cwd}`), { code: CWD_MISSING })
     }
+    // PowerShell integration (E6-FR-25): only a bare PowerShell on Windows.
+    const integrated = shouldIntegrate({ shell, args: req.args, platform: process.platform, enabled: this.engine.shellIntegration === true })
+    if (integrated) env[SHELL_INTEGRATION_ENV] = '1'
     let proc: IPty
-    try { proc = spawn(shell, req.args ?? [], {
+    try { proc = spawn(shell, integrated ? buildIntegrationArgs() : (req.args ?? []), {
       name: 'xterm-256color',
       cols: req.cols > 0 ? req.cols : 80,
       rows: req.rows > 0 ? req.rows : 24,
@@ -458,6 +476,9 @@ export class PtyManager {
       lastSubmitAt: 0,
       prompt,
       promptTimer: null,
+      integrated,
+      readyWait: null,
+      readyTail: '',
     }
     for (let i = 0; i < seed.length; i += SEED_CHUNK) this.pushHistory(entry, seed.slice(i, i + SEED_CHUNK))
     this.entries.set(ptyId, entry)
@@ -487,8 +508,10 @@ export class PtyManager {
       // No setup: original behavior, type the model command once the shell has
       // settled. A bare CR is exactly what pressing Enter sends; CRLF makes
       // PowerShell emit a spurious ">>" continuation.
-      entry.setupTimer = setTimeout(() => {
+      const typeInitial = (): void => {
+        if (entry.setupTimer) clearTimeout(entry.setupTimer)
         entry.setupTimer = null
+        entry.readyWait = null
         if (entry.cancelled) return
         if (initial) {
           try {
@@ -498,7 +521,19 @@ export class PtyManager {
           }
         }
         this.afterInitialCommand(ptyId, entry)
-      }, SHELL_SETTLE_MS)
+      }
+      if (integrated && this.oscReadySupported !== false) {
+        // E6-FR-30: a slow profile (2 s) still gets the command after its
+        // prompt. The first mark types it; the timeout types it anyway and
+        // sends every later pane of this process back to the 350 ms timer.
+        entry.readyWait = typeInitial
+        entry.setupTimer = setTimeout(() => {
+          if (entry.readyWait) this.oscReadySupported = false
+          typeInitial()
+        }, READY_MARKER_TIMEOUT_MS)
+      } else {
+        entry.setupTimer = setTimeout(typeInitial, SHELL_SETTLE_MS)
+      }
     }
 
     proc.onData((data) => {
@@ -506,6 +541,15 @@ export class PtyManager {
       entry.buf.push(data)
       this.pushHistory(entry, data)
       entry.modes.feed(data)
+      if (entry.readyWait) {
+        // A plain string search (E6-FR-30), with the previous chunk's tail.
+        const hay = entry.readyTail + data
+        if (hay.includes(OSC133_PROMPT_START)) {
+          this.oscReadySupported = true
+          entry.readyTail = ''
+          entry.readyWait()
+        } else entry.readyTail = hay.slice(-(OSC133_PROMPT_START.length - 1))
+      }
       if (entry.setupActive) {
         // Feed the setup runner the same bytes the renderer sees, in order.
         entry.scratch += data
@@ -1419,9 +1463,14 @@ export class PtyManager {
     }
   }
 
-  /** Resolves when `entry.scratch` matches `pattern`, or after `timeoutMs`. */
+  /**
+   * Resolves when `entry.scratch` matches `pattern`, or after `timeoutMs`. The
+   * OSC 133 marks are stripped first (E6-FR-31): an anchored `/> $/` still
+   * matches a prompt that ends in a mark.
+   */
   private waitForOutput(entry: Entry, pattern: string, timeoutMs: number): Promise<void> {
-    const matches = buildMatcher(pattern)
+    const test = buildMatcher(pattern)
+    const matches = (text: string): boolean => test(stripOsc133(text))
     return new Promise<void>((resolve) => {
       const finish = (): void => {
         if (entry.setupTimer) {
@@ -1507,6 +1556,7 @@ export class PtyManager {
     if (resolveWait) resolveWait()
     if (entry.setupTimer) clearTimeout(entry.setupTimer)
     entry.setupTimer = null
+    entry.readyWait = null
     if (entry.timer) clearTimeout(entry.timer)
     if (entry.writeTimer) clearTimeout(entry.writeTimer)
     entry.writeTimer = null

@@ -64,6 +64,7 @@ export function App() {
   const unicode11 = useAppStore((s) => s.settings.terminalUnicode11)
   const persistScrollback = useAppStore((s) => s.settings.persistScrollback)
   const persistScrollbackLines = useAppStore((s) => s.settings.persistScrollbackLines)
+  const shellIntegration = useAppStore((s) => s.settings.terminalShellIntegration)
 
   // Load persisted config once, then start the debounced persistence writer.
   // The pty lifecycle (E4-FR-36) starts right after hydrate: removed panes are
@@ -149,9 +150,9 @@ export function App() {
   useEffect(() => {
     if (!hydrated) return
     window.snApi.pty.setEngine(
-      engineFromSettings({ terminalSnapshotMode: snapshotMode, terminalUnicode11: unicode11, persistScrollback, persistScrollbackLines }),
+      engineFromSettings({ terminalSnapshotMode: snapshotMode, terminalUnicode11: unicode11, persistScrollback, persistScrollbackLines, terminalShellIntegration: shellIntegration }),
     )
-  }, [hydrated, snapshotMode, unicode11, persistScrollback, persistScrollbackLines])
+  }, [hydrated, snapshotMode, unicode11, persistScrollback, persistScrollbackLines, shellIntegration])
 
   // Agent sessions (E5-FR-10): load main's registry and start the consoles whose
   // agent was interrupted, even in workspaces not opened yet.

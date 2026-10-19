@@ -36,15 +36,20 @@ export function normalizeEngine(raw: unknown): TerminalEngineSettings {
   return out
 }
 
-type EngineKeys = 'terminalSnapshotMode' | 'terminalUnicode11' | 'persistScrollback' | 'persistScrollbackLines'
+type EngineKeys = 'terminalSnapshotMode' | 'terminalUnicode11' | 'persistScrollback' | 'persistScrollbackLines' | 'terminalShellIntegration'
 
-/** The engine settings a config's `settings` describe (missing keys take the defaults). */
+/**
+ * The engine settings a config's `settings` describe (missing keys take the
+ * defaults). `shellIntegration` is always present here (schema 14, default on);
+ * a payload without it (an older sender) leaves the integration off in main.
+ */
 export function engineFromSettings(s: Partial<Pick<Settings, EngineKeys>> | null | undefined): TerminalEngineSettings {
   return normalizeEngine({
     snapshotMode: s?.terminalSnapshotMode,
     unicode11: s?.terminalUnicode11,
     persist: s?.persistScrollback,
     persistLines: s?.persistScrollbackLines,
+    shellIntegration: s?.terminalShellIntegration !== false,
   })
 }
 
