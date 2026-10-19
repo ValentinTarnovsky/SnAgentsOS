@@ -25,6 +25,7 @@ import type {
 import type { InitialPromptReq, LaunchKind, SubmitError } from './initialPrompt'
 import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from './git-types'
 import type { OpenPathReq, OpenPathRes } from './inertOpen'
+import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from './review-notes'
 
 export type { GitArea, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -804,6 +805,17 @@ export interface SnApi {
     onChanged(cb: (e: AgentsChangedEvt) => void): () => void
     /** A session started, or reached its first idle after a start. Returns unsubscribe. */
     onReady(cb: (e: AgentsReadyEvt) => void): () => void
+  }
+  /** Review notes of the Changes panel (E7-FR-17..21), stored by main per workspace. */
+  reviewNotes: {
+    list(workspaceId: string): Promise<ReviewNotesListRes>
+    /** Create or edit; editing the text drops `sentAt`. Rejects on invalid input or past 500 notes. */
+    upsert(note: ReviewNoteInput): Promise<ReviewNote>
+    delete(req: ReviewNotesDeleteReq): Promise<void>
+    markSent(req: ReviewNotesMarkSentReq): Promise<void>
+    /** Drop the notes of workspaces that no longer exist. */
+    prune(workspaceIds: string[]): void
+    onChanged(cb: (e: ReviewNotesChangedEvt) => void): () => void
   }
   /** Git chip (E7-FR-05..10). Main runs git; the renderer owns the targets and settings.gitChip. */
   git: {
