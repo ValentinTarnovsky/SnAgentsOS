@@ -2,15 +2,19 @@ import { app, BrowserWindow, ipcMain, shell, type WebContents } from 'electron'
 import { isAbsolute } from 'path'
 import { CH } from '@shared/ipc-channels'
 import type { GitInfoRes, GitUpdateEvt } from '@shared/git-types'
+import type { RemoteGitReply, RemoteGitRequest } from '@shared/remote-protocol'
 import { gitRunner } from '../git/gitExec'
 import { GitService, sanitizeTargets } from '../git/GitService'
 import { ChangesReader } from '../git/diff'
 import { UntrackedCounter } from '../git/untrackedLines'
+import { GitRemote } from '../remote/GitRemote'
 
 export interface GitIpcDeps {
   getSender: () => WebContents | null
   /** settings.gitChip at boot (the renderer re-pushes it once hydrated). */
   initialGitChip: boolean
+  /** E7-FR-22..26: hands the phone's gitReq handler to RemoteManager. */
+  setRemoteGit?: (handler: (req: RemoteGitRequest) => Promise<RemoteGitReply>) => void
 }
 
 /** Debug counters go to the log at most this often, and only when they moved. */
@@ -20,7 +24,8 @@ const STATS_LOG_MS = 5 * 60 * 1000
  * Git chip channels (E7-FR-05..10, names per PLAN D6): `git:setWatch`,
  * `git:setConfig`, `git:refresh`, `git:info` in, `git:update` out. The
  * Changes panel (E7-FR-11..16) adds `git:setPanel`, `git:status`,
- * `git:fileDiff` and `git:openFile`. Creates the
+ * `git:fileDiff` and `git:openFile`. The phone's gitReq (E7-FR-22..26) reads
+ * through a GitRemote over the same service. Creates the
  * GitService and follows window focus for its focus refresh and active poll.
  */
 export function registerGitIpc(deps: GitIpcDeps): GitService {
@@ -56,6 +61,10 @@ export function registerGitIpc(deps: GitIpcDeps): GitService {
   ipcMain.handle(CH.GIT_STATUS, (_e, p: { key?: unknown } | null) => reader.status(p?.key))
   ipcMain.handle(CH.GIT_FILE_DIFF, (_e, p: unknown) => reader.fileDiff(p))
   ipcMain.handle(CH.GIT_OPEN_FILE, (_e, p: unknown) => reader.openFile(p))
+
+  // The phone's Changes screen (E7-FR-22..26): same service, `remote` git priority.
+  const remote = new GitRemote({ source: service, runner: gitRunner, untrackedPeek: (abs) => untracked.peek(abs) })
+  deps.setRemoteGit?.((req) => remote.handle(req))
 
   app.on('browser-window-focus', () => service.setFocused(true))
   app.on('browser-window-blur', () => service.setFocused(BrowserWindow.getFocusedWindow() != null))
