@@ -345,7 +345,8 @@ async function testSessionLimits() {
 
   // A handler that answers at once: 10 per 5 s, the 11th is rate, the socket lives.
   const seen = []
-  manager.setGitHandler(async (req) => { seen.push(req); return { ok: true, data: { summary: { branch: 'main', ahead: 0, behind: 0, added: 0, removed: 0, files: 0, approx: false, conflicts: 0, op: null }, files: [], total: 0, truncated: false }, page: req.page ?? 0, done: true } })
+  // The status lists src/a.ts, so the diff below is one the session was shown (E3-FR-56).
+  manager.setGitHandler(async (req) => { seen.push(req); return { ok: true, data: { summary: { branch: 'main', ahead: 0, behind: 0, added: 0, removed: 0, files: 1, approx: false, conflicts: 0, op: null }, files: [entry('src/a.ts', 'staged')], total: 1, truncated: false }, page: req.page ?? 0, done: true } })
   clock += 6000
   const before = ws.of('gitRes').length
   for (let i = 1; i <= 9; i++) { git('g' + i, { page: 0 }); await tick() }
@@ -404,6 +405,43 @@ async function testSessionLimits() {
   manager.onControlResult({ id: commands.at(-1).id, ok: true, info: 1 })
   await tick()
   same(other.of('ctlAck').at(-1), { v: 1, type: 'ctlAck', id: 'n1', ok: true, info: 1 }, 'ctlAck info = notes sent')
+
+  // E3-FR-56 (R30-09b): a diff only of a path the session's last status listed.
+  const asked = []
+  const statusPages = [[entry('src/a.ts'), entry('docs/b.md')], [entry('src/c.ts')]]
+  manager.setGitHandler(async (req) => {
+    asked.push(req)
+    if (req.op === 'diff') return { ok: true, data: { path: req.path, area: 'untracked', diffRev: 'r1', binary: false, hunks: [] }, page: 0, done: true }
+    const page = req.page ?? 0
+    return { ok: true, data: { summary, files: statusPages[page] ?? [], total: 3, truncated: false }, page, done: page >= statusPages.length - 1 }
+  })
+  clock += 6000
+  const phone = await pair()
+  const preq = (id, o) => { phone.msg({ type: 'gitReq', id, workspaceId: 'w1', ...o }); return tick().then(() => phone.of('gitRes').find((r) => r.id === id)) }
+  same((await preq('d0', { op: 'diff', path: 'src/a.ts' })).data, { error: 'not_found' }, 'FR-56: before any status, a diff answers not_found')
+  check(asked.length === 0, 'FR-56: and never reaches git')
+  await preq('s0', { op: 'status' })
+  check((await preq('d1', { op: 'diff', path: 'src/a.ts' })).ok, 'FR-56: a path listed on status page 0 opens its diff')
+  same(await preq('d2', { op: 'diff', path: '../../secreto.txt' }), { v: 1, type: 'gitRes', id: 'd2', ok: false, data: { error: 'not_found' }, page: 0, done: true }, 'FR-56: ../../secreto.txt answers gitRes not_found')
+  same((await preq('d3', { op: 'diff', path: 'src/c.ts' })).data, { error: 'not_found' }, 'FR-56: a path of a status page not read yet is not_found')
+  same(asked.map((r) => r.path ?? r.op), ['status', 'src/a.ts'], 'FR-56: the refused diffs never reached git')
+  clock += 6000
+  await preq('s1', { op: 'status', page: 1 })
+  check((await preq('d4', { op: 'diff', path: 'src/c.ts' })).ok && (await preq('d5', { op: 'diff', path: 'docs/b.md', staged: true })).ok, 'FR-56: a later status page adds its paths to the same set')
+  same((await preq('d6', { workspaceId: 'w2', op: 'diff', path: 'src/a.ts' })).data, { error: 'not_found' }, 'FR-56: the set is per workspace')
+  clock += 6000
+  statusPages.splice(0, 2, [entry('src/new.ts')])
+  await preq('s2', { op: 'status' })
+  same((await preq('d8', { op: 'diff', path: 'src/c.ts' })).data, { error: 'not_found' }, 'FR-56: a new status page 0 starts the set over')
+  check((await preq('d9', { op: 'diff', path: 'src/new.ts' })).ok, 'FR-56: with the paths of the new list')
+  manager.setGitHandler(async () => ({ ok: false, data: { error: 'timeout' }, page: 0, done: true }))
+  await preq('s3', { op: 'status' })
+  manager.setGitHandler(async (req) => ({ ok: true, data: { path: req.path, area: 'untracked', diffRev: 'r2', binary: false, hunks: [] }, page: 0, done: true }))
+  check((await preq('d10', { op: 'diff', path: 'src/new.ts' })).ok, 'FR-56: a status that failed keeps the list the phone still shows')
+  clock += 6000
+  other.msg({ type: 'gitReq', id: 'od', workspaceId: 'w1', op: 'diff', path: 'src/new.ts' })
+  await tick()
+  same(other.of('gitRes').at(-1).data, { error: 'not_found' }, 'FR-56: another session has its own set')
   manager.applyConfig({ enabled: false, port: 4600 })
   fs.rmSync(dataDir, { recursive: true, force: true })
 }

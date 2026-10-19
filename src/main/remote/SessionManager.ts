@@ -121,6 +121,31 @@ export const GIT_REQ_WINDOW_MS = 5 * 1000
 /** gitReq a session may have waiting on git at once. */
 export const GIT_REQ_IN_FLIGHT = 2
 
+// --- E3-FR-56 (R30-09b): diffs only of paths this session was listed ----------
+
+/**
+ * Record the paths a status answer listed to this session: page 0 starts the
+ * workspace's set over (a fresh snapshot), later pages add to it. A failed
+ * status (timeout, rate) keeps the list the phone still shows readable, and
+ * diff answers leave it as it is.
+ */
+export function recordGitPaths(paths: Map<string, Set<string>>, req: RemoteGitRequest, reply: RemoteGitReply): void {
+  if (req.op !== 'status' || !reply.ok || !('files' in reply.data)) return
+  const files = reply.data.files
+  let set = (req.page ?? 0) === 0 ? undefined : paths.get(req.workspaceId)
+  if (!set) {
+    set = new Set<string>()
+    paths.set(req.workspaceId, set)
+  }
+  for (const f of files) set.add(f.path)
+}
+
+/** A diff of a path the session's last status of that workspace did not list is refused. */
+export function gitPathAllowed(paths: Map<string, Set<string>>, req: RemoteGitRequest): boolean {
+  if (req.op !== 'diff') return true
+  return !!req.path && !!paths.get(req.workspaceId)?.has(req.path)
+}
+
 /** sha256 of an httpToken: the lookup key, so the map never holds the token itself. */
 function tokenKey(token: string): string {
   return createHash('sha256').update(token).digest('hex')
@@ -178,6 +203,8 @@ interface Session {
   gitTimes: number[]
   /** E7-FR-26: gitReq waiting on git right now. */
   gitInFlight: number
+  /** E3-FR-56: per workspace, the paths the last status answer listed to this session. */
+  gitPaths: Map<string, Set<string>>
 }
 
 /** Who an httpToken belongs to (RemoteManager.resolveHttpToken). */
@@ -291,6 +318,7 @@ export class SessionManager implements PtySink {
       httpToken: null,
       gitTimes: [],
       gitInFlight: 0,
+      gitPaths: new Map(),
     }
     this.sessions.add(session)
     session.handshakeTimer = setTimeout(() => {
@@ -632,7 +660,8 @@ export class SessionManager implements PtySink {
   /**
    * E7-FR-22..26: one page of the change list or a diff. Past 10 accepted in
    * 5s, or with 2 already waiting on git, the answer is gitRes rate: no `err`,
-   * no strike, the socket stays open.
+   * no strike, the socket stays open. A diff of a path the session's last
+   * status did not list answers not_found without reaching git (E3-FR-56).
    */
   private async handleGitReq(session: Session, msg: RemoteClientMsgOf<'gitReq'>): Promise<void> {
     const now = Date.now()
@@ -646,7 +675,7 @@ export class SessionManager implements PtySink {
     if (msg.staged !== undefined) req.staged = msg.staged
     if (msg.page !== undefined) req.page = msg.page
     let reply: RemoteGitReply
-    if (!this.deps.git) {
+    if (!this.deps.git || !gitPathAllowed(session.gitPaths, req)) {
       reply = { ok: false, data: { error: 'not_found' }, page: 0, done: true }
     } else {
       session.gitInFlight += 1
@@ -657,6 +686,7 @@ export class SessionManager implements PtySink {
       } finally {
         session.gitInFlight -= 1
       }
+      recordGitPaths(session.gitPaths, req, reply)
     }
     this.send(session, { type: 'gitRes', id: msg.id, ...reply })
   }
