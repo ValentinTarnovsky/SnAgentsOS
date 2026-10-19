@@ -22,6 +22,8 @@ import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
 import { registerGitIpc } from './ipc/registerGitIpc'
+import { registerReviewNotesIpc } from './ipc/registerReviewNotesIpc'
+import type { ReviewNoteStore } from './git/ReviewNoteStore'
 import { registerRemoteIpc } from './ipc/registerRemoteIpc'
 import { registerLegacyIpc } from './ipc/registerLegacyIpc'
 import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
@@ -117,6 +119,8 @@ let trayAwakeMode: AwakeMode | null = null
 let agentSessions: AgentSessionStore | null = null
 // Saved scrollback (E6-FR-08..13, 36): created in bootstrap, under dataDir().
 let scrollbackCheckpoint: ScrollbackCheckpoint | null = null
+// Review notes (E7-FR-18): created in bootstrap; flushed on the exits that skip before-quit.
+let reviewNotes: ReviewNoteStore | null = null
 // Crash resilience (E4-FR-21..25). The breaker dialog's [Close] quits without
 // the tray-hide or "active consoles" guards (the button already names N).
 let crashQuit = false
@@ -196,6 +200,7 @@ function afterPtysKilled(): void {
  */
 function persistScrollbackForShutdown(): void {
   persistScrollbackOnExit()
+  reviewNotes?.flush()
   setTimeout(() => scrollbackCheckpoint?.resetExit(), 10_000).unref?.()
 }
 
@@ -503,7 +508,10 @@ async function bootstrap(): Promise<void> {
     },
     // The NSIS setup closes the app without a before-quit (E6-FR-10). Leaves
     // the exit flag alone: a cancelled wizard still saves on the next quit.
-    persistBeforeInstall: () => scrollbackCheckpoint?.persistAllSync(),
+    persistBeforeInstall: () => {
+      reviewNotes?.flush()
+      scrollbackCheckpoint?.persistAllSync()
+    },
   })
   registerUsageIpc({
     getSender: () => mainWindow?.webContents ?? null,
@@ -514,6 +522,8 @@ async function bootstrap(): Promise<void> {
     getSender: () => mainWindow?.webContents ?? null,
     initialGitChip: (configStore.load()?.settings as { gitChip?: unknown } | undefined)?.gitChip !== false,
   })
+  // Review notes of the Changes panel (E7-FR-17..20): dataDir()/review-notes.json.
+  reviewNotes = registerReviewNotesIpc({ getSender: () => mainWindow?.webContents ?? null })
   registerRemoteIpc(remoteManager)
   registerLegacyIpc({
     getSender: () => mainWindow?.webContents ?? null,

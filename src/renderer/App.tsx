@@ -10,6 +10,7 @@ import { initLegacyEvents } from '@/lib/legacyStore'
 import { initPowerEvents, syncAgentSettings, syncAwakeMode } from '@/lib/powerStore'
 import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
 import { startGitSync } from '@/lib/gitSync'
+import { startReviewNotesSync } from '@/lib/reviewNotesStore'
 import { engineFromSettings } from '@shared/terminalEngine'
 import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { startPersistence } from '@/lib/persist'
@@ -64,11 +65,14 @@ export function App() {
   useEffect(() => {
     let unsub: (() => void) | undefined
     let stopLifecycle: (() => void) | undefined
+    let stopNotes: (() => void) | undefined
     window.snApi.config
       .load()
       .then((cfg) => {
         hydrate(cfg)
         stopLifecycle = initPtyLifecycle()
+        // Review notes (E7-FR-18): prune those of deleted workspaces only after a real load.
+        stopNotes = startReviewNotesSync({ prune: cfg != null })
         // The recovery card (E4-FR-22) counts consoles after the reconcile.
         void (cfg ? reconcilePtys() : Promise.resolve(0)).then(() => showRecoveryCard())
         unsub = startPersistence()
@@ -76,11 +80,13 @@ export function App() {
       .catch(() => {
         hydrate(null)
         stopLifecycle = initPtyLifecycle()
+        stopNotes = startReviewNotesSync({ prune: false })
         void showRecoveryCard()
       })
     return () => {
       unsub?.()
       stopLifecycle?.()
+      stopNotes?.()
     }
   }, [hydrate])
 
