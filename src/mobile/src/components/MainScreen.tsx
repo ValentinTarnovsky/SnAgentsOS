@@ -28,6 +28,7 @@ import { StatusIndicator } from './StatusIndicator'
 import { WaitingPill } from './WaitingPill'
 import { FitModeChip } from './FitModeChip'
 import { ToastStack } from './ToastStack'
+import { UploadChip } from './UploadChip'
 import { selectInputMode, store, useRemoteStore } from '../lib/store'
 import { paneById, viewedWorkspaceId, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
@@ -133,6 +134,8 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       {/* Answer cards for the viewed console (E2-FR-17..25). */}
       <PromptCard />
 
+      {/* Image upload progress / retry / copy path (E3-FR-08). */}
+      <UploadChip />
       {/* Composer mode docks the composer here; Direct mode shows the strip
           only while the keyboard is down (E1-FR-38). Both stay usable offline:
           the draft is kept and Send is disabled (E1-FR-14). */}

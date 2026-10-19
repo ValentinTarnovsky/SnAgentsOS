@@ -39,7 +39,9 @@ import {
   type ComposerIo,
 } from '../lib/composerSend'
 import { pasteBracketed } from '../lib/safePaste'
+import { appendRef } from '../lib/upload'
 import { t } from '../lib/i18n'
+import { ImageButton } from './UploadChip'
 
 /** 16px text on a 22px line: the 6-line cap is measured from these. */
 const LINE_PX = 22
@@ -179,6 +181,16 @@ export function Composer(): ReactNode {
       focus() {
         ref.current?.focus({ preventScroll: true })
       },
+      paneId: () => paneRef.current,
+      append(snippet) {
+        const value = appendRef(textRef.current, snippet, COMPOSER_MAX)
+        if (value == null) return false
+        if (value !== textRef.current) {
+          pendingCaret.current = value.length
+          change(value)
+        }
+        return true
+      },
     })
     return () => setComposerHandle(null)
   })
@@ -296,6 +308,8 @@ export function Composer(): ReactNode {
         </div>
       )}
       <div className="flex items-end gap-2">
+        {/* E3-FR-06: only with an httpToken; the reference lands in this pane's draft. */}
+        {paneId && <ImageButton paneId={paneId} origin="composer" />}
         <div className="relative min-w-0 flex-1">
           <textarea
             ref={ref}
