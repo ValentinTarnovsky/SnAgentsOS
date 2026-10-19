@@ -136,7 +136,7 @@ function fakeWorld() {
     now = end
     await tick()
   }
-  const sum = (o = {}) => ({ repoRoot: path.join(os.tmpdir(), 'fixture-secret-root'), branch: 'main', detached: false, unborn: false, headShort: 'abc1234', upstream: 'origin/main', ahead: 1, behind: 0, files: 2, added: 3, removed: 1, approx: false, staged: 1, unstaged: 1, untracked: 0, conflicts: 0, op: null, truncated: false, updatedAt: 1, ...o })
+  const sum = (o = {}) => ({ repoRoot: 'C:\\fixture-secret-root', branch: 'main', detached: false, unborn: false, headShort: 'abc1234', upstream: 'origin/main', ahead: 1, behind: 0, files: 2, added: 3, removed: 1, approx: false, staged: 1, unstaged: 1, untracked: 0, conflicts: 0, op: null, truncated: false, updatedAt: 1, ...o })
   const state = { view: { summary: sum(), files: [entry('src/a.ts', 'unstaged'), entry('src/a.ts', 'staged')] }, refreshTo: null, hang: false }
   const calls = { ensure: [], hot: [], run: [] }
   const source = {

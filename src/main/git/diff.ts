@@ -15,7 +15,7 @@
  */
 import { createHash } from 'crypto'
 import { promises as fsp } from 'fs'
-import { dirname, extname, isAbsolute, relative, resolve as resolvePath } from 'path'
+import { extname, posix, win32 } from 'path'
 import type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitFileEntry, GitSummary } from '@shared/git-types'
 import { gitErrorCode, type GitRunner } from './gitExec'
 import { parseNumstatZ, type NumstatEntry } from './porcelain'
@@ -70,14 +70,20 @@ function hasControl(text: string): boolean {
  */
 export function resolveRepoPath(repoRoot: string, rel: string, platform: NodeJS.Platform = process.platform): string | null {
   if (typeof rel !== 'string' || !rel || rel.length > MAX_REL_PATH || hasControl(rel)) return null
-  if (isAbsolute(rel) || /^[a-zA-Z]:/.test(rel) || rel.startsWith('/') || rel.startsWith('\\')) return null
+  // The path rules of the platform the root comes from (injected in tests), not the host's.
+  const P = pathFor(platform)
+  if (P.isAbsolute(rel) || /^[a-zA-Z]:/.test(rel) || rel.startsWith('/') || rel.startsWith('\\')) return null
   if (rel.split(/[\\/]/).some((seg) => seg === '..')) return null
-  const root = resolvePath(repoRoot)
-  const abs = resolvePath(root, rel)
+  const root = P.resolve(repoRoot)
+  const abs = P.resolve(root, rel)
   const caseless = platform === 'win32'
-  const r = relative(caseless ? root.toLowerCase() : root, caseless ? abs.toLowerCase() : abs)
-  if (!r || r.startsWith('..') || isAbsolute(r)) return null
+  const r = P.relative(caseless ? root.toLowerCase() : root, caseless ? abs.toLowerCase() : abs)
+  if (!r || r.startsWith('..') || P.isAbsolute(r)) return null
   return abs
+}
+
+function pathFor(platform: NodeJS.Platform): typeof win32 {
+  return platform === 'win32' ? win32 : posix
 }
 
 /** The listed entry for (path, area), if main listed it. */
@@ -342,7 +348,7 @@ export async function openRepoFile(repoRoot: string, rel: string, reveal: boolea
   }
   if (!st) {
     // Deleted: its folder (inside the repo, resolveRepoPath checked) if it is still there.
-    const dir = dirname(abs)
+    const dir = pathFor(deps.platform ?? process.platform).dirname(abs)
     try {
       if (!(await fs.lstat(dir)).isDirectory()) return false
     } catch {
