@@ -18,7 +18,7 @@
  * keeps a page and the tail offset consistent (no line both paged and appended).
  */
 import { open, stat, type FileHandle } from 'fs/promises'
-import { watch, type FSWatcher } from 'fs'
+import { realpathSync, watch, type FSWatcher } from 'fs'
 import { CHAT_SKIPPED_TEXT, type ChatMessage } from '@shared/chat-types'
 import { FrameBudget, shrinkMessage } from './chatFrames'
 
@@ -274,7 +274,9 @@ export interface TranscriptWatcherDeps {
 
 function defaultWatch(path: string, onChange: () => void): FSWatcher | null {
   try {
-    const w = watch(path, { persistent: false }, () => onChange())
+    // Watch the realpath: on Windows an 8.3 spelling (C:\Users\RUNNER~1) aborts the
+    // process inside libuv on the first event. The locator already admits realpaths.
+    const w = watch(realpathSync.native(path), { persistent: false }, () => onChange())
     w.on('error', () => undefined)
     return w
   } catch {
