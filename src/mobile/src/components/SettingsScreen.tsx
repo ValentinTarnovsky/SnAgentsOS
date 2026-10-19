@@ -17,6 +17,7 @@ import { PushScreen } from './PushScreen'
 import { ActionList } from './ActionList'
 import { ConfirmSheet } from './ConfirmSheet'
 import { KeyLayoutScreen } from './KeyLayoutScreen'
+import { PushSettings, WakeLockSettings } from './SecureSettings'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { FontScaleRow } from './FontScaleRow'
@@ -57,20 +58,24 @@ export function PrefToggle({
   hint,
   checked,
   onChange,
+  disabled,
 }: {
   pref: string
   label: string
   hint?: string
   checked: boolean
   onChange: (on: boolean) => void
+  /** Greyed and inert (E3-FR-49 over http). */
+  disabled?: boolean
 }): ReactNode {
   return (
     <button
       role="switch"
       aria-checked={checked}
       data-pref={pref}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="flex min-h-12 w-full items-center gap-3 rounded-card border border-border bg-bg-secondary px-4 py-3 text-left active:bg-card"
+      className="flex min-h-12 w-full items-center gap-3 rounded-card border border-border bg-bg-secondary px-4 py-3 text-left active:bg-card disabled:opacity-50"
     >
       <span className="min-w-0 flex-1">
         <span className="block text-sm text-text-primary">{label}</span>
@@ -251,6 +256,9 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
             />
           </div>
         </SettingsSection>
+        {/* E3-FR-44 / FR-49: the rows of the secure mode's https origin. */}
+        <PushSettings />
+        <WakeLockSettings />
         <SettingsSection id="prompts" title={t('prompt.settingsTitle')}>
           <PrefToggle
             pref="promptCards"

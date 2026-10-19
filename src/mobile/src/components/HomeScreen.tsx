@@ -24,6 +24,7 @@ import { PaneActionList } from './PaneActionList'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { WorkspaceSection } from './home/WorkspaceSection'
 import { ResumeCard } from './home/ResumeCard'
+import { SecureCard } from './home/SecureCard'
 import { UsageCards } from './home/UsageCards'
 import { NoWorkspaces } from './home/EmptyStates'
 import { Fab, FAB_CLEARANCE_PX } from './home/Fab'
@@ -133,6 +134,8 @@ export function HomeScreen(): ReactNode {
           className="h-full overflow-y-auto px-3 pt-3"
           style={{ paddingBottom: `calc(${FAB_CLEARANCE_PX}px + env(safe-area-inset-bottom))` }}
         >
+          {/* E3-FR-43: the desktop's https origin, offered while this page is http. */}
+          <SecureCard />
           {snapshot && snapshot.workspaces.length > 0 ? (
             <>
               <ResumeCard now={now} onOpen={onOpen} onActions={onActions} />

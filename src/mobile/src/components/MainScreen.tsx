@@ -20,7 +20,8 @@ import { KeyBar } from './KeyBar'
 import { PaneTabs } from './PaneTabs'
 import { PaneActionList } from './PaneActionList'
 import { QuickCommandsSheet } from './QuickCommandsSheet'
-import { Composer, openComposerForPaste, toggleInputMode } from './Composer'
+import { Composer, toggleInputMode } from './Composer'
+import { pasteKey } from './pasteKey'
 import { DirectInputStrip } from './DirectInputStrip'
 import { ExitStrip } from './ExitStrip'
 import { PromptCard } from './prompts/PromptCard'
@@ -162,7 +163,7 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
         data-connected={connected}
       >
         <KeyBar
-          onPaste={openComposerForPaste}
+          onPaste={pasteKey}
           onQuickCommands={() => setQuickOpen(true)}
           inputMode={inputMode}
           onToggleMode={activePaneId ? toggleInputMode : undefined}

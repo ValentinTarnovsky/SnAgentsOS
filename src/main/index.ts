@@ -117,6 +117,8 @@ noticeRouter = createNoticeRouter({
   isAway: () => (app.isReady() ? isDesktopAway(powerMonitor) : undefined),
   isPaneViewed: (paneId) => remoteManager.isPaneViewed(paneId),
   deepLinkBase: () => remoteManager.deepLinkBase(),
+  // Web Push to the PWA (E3-FR-44): devices with a visible session are skipped.
+  push: (notice, config) => void remoteManager.notifyPush(notice, config),
 })
 const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event))
 ptyManager.addSink(statusManager)

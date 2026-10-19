@@ -38,7 +38,8 @@ export const REMOTE_CLOSE = {
   RATE_LIMITED: 4429,
 } as const
 
-export type RemoteEndpointKind = 'lan' | 'tailscale' | 'other'
+/** `tailscaleHttps` (E3-FR-43): the `tailscale serve` origin of the secure mode, listed first. */
+export type RemoteEndpointKind = 'lan' | 'tailscale' | 'other' | 'tailscaleHttps'
 
 // --- State snapshot (desktop -> phone) ---
 
@@ -397,6 +398,11 @@ export type RemoteServerMsg =
       httpToken?: string
       /** E3-FR-01: public VAPID key, only while https is on. Absent = no "Enable notifications". */
       pushKey?: string
+      /**
+       * E3-FR-43 (R30-07 amendment): `https://<machine>.<tailnet>.ts.net` while
+       * the secure mode is on. A phone on the http origin offers it in a card.
+       */
+      secureUrl?: string
     }
   | { v: number; type: 'authFail'; reason: RemoteAuthFailReason; retryAfterMs?: number }
   | { v: number; type: 'state'; state: RemoteStateSnapshot }

@@ -13,6 +13,7 @@ const KIND_KEY: Record<RemoteEndpointKind, MessageKey> = {
   lan: 'remote.kind.lan',
   tailscale: 'remote.kind.tailscale',
   other: 'remote.kind.other',
+  tailscaleHttps: 'remote.kind.tailscaleHttps',
 }
 
 /**
@@ -104,7 +105,7 @@ export function RemoteQrModal() {
                       : 'border-border text-text-secondary hover:text-text-primary',
                   )}
                 >
-                  {t(KIND_KEY[ep.kind])} · {ep.ip}
+                  {t(KIND_KEY[ep.kind])} · {ep.ip ?? ep.host}
                 </button>
               ))}
             </div>
@@ -136,6 +137,13 @@ export function RemoteQrModal() {
                   {qr.code}
                 </div>
               </div>
+
+              {/* E3-FR-43: another origin, so the phone pairs again as a new device. */}
+              {endpoint?.kind === 'tailscaleHttps' && (
+                <p data-qr-secure className="text-[11px] leading-relaxed text-text-secondary">
+                  {t('remote.qr.secureHint')}
+                </p>
+              )}
 
               {endpoint && (
                 <div className="flex items-center gap-2 rounded-btn border border-border bg-bg-secondary px-2.5 py-1.5">

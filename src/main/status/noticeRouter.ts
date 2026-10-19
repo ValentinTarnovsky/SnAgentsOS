@@ -5,7 +5,8 @@
  * unknown or failing idle read delivers anyway. ntfy also stays quiet for a
  * pane a phone is watching right now (authenticated, subscribed, page visible
  * in the last 30s), and its tap opens that console through a deep link on the
- * host the phones last reached the desktop at. Native notifications never
+ * host the phones last reached the desktop at. Web Push to the installed PWA
+ * (E3-FR-44) passes the same gate. Native notifications never
  * pass through here. Kept free of Electron so the future `snaos notify` of the
  * CLI can reuse it and the tests run it with fakes.
  */
@@ -25,6 +26,11 @@ export interface NoticeRouterDeps {
   isPaneViewed: (paneId: string) => boolean
   /** RemoteManager.deepLinkBase(): 'http://<host>:<port>' or null when the server is off. */
   deepLinkBase: () => string | null
+  /**
+   * Web Push to the PWA (E3-FR-44, RemoteManager.notifyPush): behind the same
+   * away gate; it skips devices with a visible session on its own.
+   */
+  push?: (notice: StatusNotice, config: ConfigFile | null) => void
 }
 
 export interface NoticeRouter {
@@ -49,6 +55,7 @@ export function createNoticeRouter(deps: NoticeRouterDeps): NoticeRouter {
         // Only a definite "active" silences; unknown delivers (E2-FR-41).
         if (away === false) return
       }
+      try { deps.push?.(notice, config) } catch { /* push never blocks the other channels */ }
       deps.discord.notify(notice, config)
       if (!deps.ntfy.wants(notice)) return
       let viewed = false

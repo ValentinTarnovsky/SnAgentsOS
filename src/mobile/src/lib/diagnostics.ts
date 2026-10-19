@@ -9,6 +9,7 @@ import { REMOTE_CLOSE } from '@shared/remote-protocol'
 import { BRAND } from '@shared/brand'
 import { endpointHint, formatAgo, type ConnHint } from './connectionHealth'
 import { formatEntry, type LastClose, type LogEntry } from './connLog'
+import { wsUrlFor } from './wsUrl'
 
 export const PROBE_TIMEOUT_MS = 4000
 /** Lines of the log in the copied report. */
@@ -201,7 +202,7 @@ export function probeServer(host: string, timeoutMs = PROBE_TIMEOUT_MS): Promise
     }
     const timer = setTimeout(() => finish({ kind: 'fail' }), timeoutMs)
     try {
-      ws = new WebSocket(`ws://${host}/ws`)
+      ws = new WebSocket(wsUrlFor(location.protocol, host))
     } catch {
       finish({ kind: 'fail' })
       return

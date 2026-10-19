@@ -135,8 +135,11 @@ export class PairingService {
 
   constructor(private readonly deps: PairingDeps) {}
 
-  /** Mint a fresh code + one QR per reachable endpoint. Re-enumerates NICs. */
-  async begin(port: number): Promise<PairingQrPayload> {
+  /**
+   * Mint a fresh code + one QR per reachable endpoint. Re-enumerates NICs.
+   * With the secure mode on, its https origin is the first QR (E3-FR-43).
+   */
+  async begin(port: number, secureHost?: string | null): Promise<PairingQrPayload> {
     this.clearCode()
     const code = this.mintCode()
     const expiresAt = Date.now() + CODE_TTL_MS
@@ -147,8 +150,9 @@ export class PairingService {
       timer: setTimeout(() => this.clearCode(true), CODE_TTL_MS),
     }
     const endpoints = await Promise.all(
-      listEndpoints(port).map(async (ep) => ({
-        ip: ep.ip,
+      listEndpoints(port, secureHost).map(async (ep) => ({
+        ...(ep.ip ? { ip: ep.ip } : {}),
+        ...(ep.host ? { host: ep.host } : {}),
         kind: ep.kind,
         url: ep.url,
         qrDataUrl: await QRCode.toDataURL(`${ep.url}/#pair=${code}`, { margin: 1, width: 512 }),

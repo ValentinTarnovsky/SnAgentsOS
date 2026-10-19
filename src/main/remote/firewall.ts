@@ -554,7 +554,7 @@ export class FirewallService {
     const endpoints = this.deps.endpoints(port)
     let status: FirewallStatus
     try {
-      const res = await this.deps.run(psArgs(buildInspectScript({ exe, port, ips: endpoints.map((e) => e.ip) })), FIREWALL_CHECK_TIMEOUT_MS)
+      const res = await this.deps.run(psArgs(buildInspectScript({ exe, port, ips: endpoints.flatMap((e) => (e.ip ? [e.ip] : [])) })), FIREWALL_CHECK_TIMEOUT_MS)
       if (res.timedOut) status = baseStatus('unknown', port, programScope, this.deps.now(), 'timeout')
       else if (res.code !== 0) status = baseStatus('unknown', port, programScope, this.deps.now(), `exit ${res.code}`)
       else status = parseInspectOutput(res.stdout, { exe, port, programScope, endpoints, now: this.deps.now() })
