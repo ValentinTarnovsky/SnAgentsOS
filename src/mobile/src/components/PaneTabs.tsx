@@ -16,6 +16,7 @@ import { clsx } from 'clsx'
 import { Plus } from 'lucide-react'
 import type { RemotePaneInfo } from '@shared/remote-protocol'
 import { StatusIndicator } from './StatusIndicator'
+import { CacheChip } from './CacheChip'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { PaneIcon } from '../lib/paneIcon'
@@ -68,6 +69,7 @@ function PaneChip({
       <StatusIndicator status={status} size={10} />
       <PaneIcon type={pane.type} size={13} />
       <span className="truncate whitespace-nowrap">{tabTitle(pane.title)}</span>
+      <CacheChip paneId={pane.id} active={active} />
     </button>
   )
 }

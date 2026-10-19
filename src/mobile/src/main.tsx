@@ -13,9 +13,12 @@ import '@fontsource/jetbrains-mono/700.css'
 import { App } from './App'
 import { initViewport } from './lib/viewport'
 import { client } from './lib/client'
+import { startCacheTimer } from './lib/cacheTimer'
 
 initViewport()
 client.start()
+// Claude cache countdown (E5-FR-28): follows every paneStatus from the first frame.
+startCacheTimer()
 
 const root = document.getElementById('root')
 if (root) createRoot(root).render(<App />)

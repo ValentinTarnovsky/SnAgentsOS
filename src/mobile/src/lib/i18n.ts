@@ -104,6 +104,13 @@ const en = {
   'prompt.settingsTitle': 'Answers',
   'prompt.settingsToggle': 'Answer cards',
   'prompt.settingsHint': "Allow, deny and answer Claude's questions with a tap",
+  // Claude cache timer (E5-FR-28)
+  'cache.title': 'Claude cache',
+  'cache.toggle': 'Cache countdown',
+  'cache.toggleHint': 'Next to the console name while Claude keeps your prompt cached after a turn',
+  'cache.ttl': 'Cache duration',
+  'cache.ttlMin': '{min} min',
+  'cache.label': 'Claude cache expires in {time}',
   // Connection health banner (E1-FR-13/14)
   'conn.cantConnect': "Can't connect",
   'conn.unreachable': "Can't reach the PC",
@@ -600,6 +607,13 @@ const es: Record<Key, string> = {
   'prompt.settingsTitle': 'Respuestas',
   'prompt.settingsToggle': 'Tarjetas de respuesta',
   'prompt.settingsHint': 'Permitir, denegar y responder preguntas de Claude con un toque',
+  // Timer de caché de Claude (E5-FR-28)
+  'cache.title': 'Caché de Claude',
+  'cache.toggle': 'Cuenta regresiva de la caché',
+  'cache.toggleHint': 'Junto al nombre de la consola mientras Claude mantiene tu prompt en caché después de un turno',
+  'cache.ttl': 'Duración de la caché',
+  'cache.ttlMin': '{min} min',
+  'cache.label': 'La caché de Claude vence en {time}',
   'conn.cantConnect': 'No se puede conectar',
   'conn.unreachable': 'No se alcanza la PC',
   'conn.offline': 'Sin conexion en el celular',
