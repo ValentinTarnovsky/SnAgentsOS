@@ -598,7 +598,9 @@ async function bootstrap(): Promise<void> {
   if (startupCfg?.settings) {
     applyGlobalHotkey(startupCfg.settings.globalHotkeyEnabled, startupCfg.settings.globalHotkey)
   }
-  remoteManager.applyConfig(startupCfg?.settings?.remote ?? { enabled: false, port: 4517 })
+  remoteManager.applyConfig(
+    startupCfg?.settings?.remote ?? { enabled: false, port: 4517, phoneFit: true, https: { enabled: false, mode: 'tailscaleServe' } },
+  )
   statusIpc?.applyStartup(startupCfg?.settings?.notifications)
 
   app.on('activate', () => {
