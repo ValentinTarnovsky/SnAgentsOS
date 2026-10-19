@@ -19,7 +19,7 @@ Fuente unica de verdad para todos los epics. Si un PRD contradice esta seccion, 
 | v2.0.0 | 10 (sin cambio) | Rebrand: se reubica el directorio de datos y se migra automaticamente desde 1.x. El estado de la migracion (fases, verificacion, respaldo, vencimiento, limpieza, `noticeSeen`) vive en `dataDir()/legacy-migration.json`, nunca en `config.json` |
 | v2.1.0 | 11 | awakeMode, terminalUnicode11, pane.lastSession, notifications.inAppWhenFocused, settings.agents.* (v11), workspaces[].agentsCollapsed, terminalAgentEndChip |
 | v2.2.0 | 12 | update, ntfy, scrollback, git, explorer, quickCommands (migracion real de snippets) |
-| v3.0.0 | 13 | phoneFit, https, CLI, worktrees, repoConfigTrust, automations, hibernacion |
+| v3.0.0 | 13 | phoneFit, https, CLI, worktrees, repoConfig (el trust vive fuera de config, enmienda R30-01), automatizaciones por pane (`PaneSchedule`), hibernacion, cacheTimer |
 | v3.1+ | 14+ | Items "mas adelante" no agendados |
 
 Entrega consolidada (decision del usuario): todo lo agendado para v2.1, v2.2, v3.0 y v3.1 sale junto en una sola release, 2.0.0 (`package.json` no cambia de version). Los schemas 11 a 14 se conservan como migraciones secuenciales con los numeros de esta tabla, asi una config v10 recorre 11, 12, 13 y 14 en orden. Donde este documento dice "v2.1", "v2.2", etc. nombra el tramo del plan, no un tag publicado.
@@ -237,7 +237,7 @@ El CLI `snaos` ejecuta open/spawn/send reutilizando `remote:controlCmd` / `remot
 | v3.0 (13) | `settings.automation.scheduleMaxWaitMin` | number entero 1..240 (fuera de rango -> default) | `30` | E8 |
 | v3.0 (13) | `settings.automation.scheduleNotify` | boolean | `false` | E8 |
 | v3.0 (13) | `workspaces[].panes[].schedule.{recurrence, waitIdle, enabled, waitingSince, history}` | opcionales (`PaneSchedule` de E8; `history` <= 20, item por item, quedan las 20 mas recientes por `at`) | ausentes (= una vez, espera on, activa) | E8 |
-| v3.0 (13) | `workspaces[].repoConfig` | `{ sha256, appliedAt, quickCommandIds }` opcional (`quickCommandIds` <= 20) | ausente | E8 |
+| v3.0 (13) | `workspaces[].repoConfig` | `{ sha256, appliedAt, quickCommandIds }` opcional (`quickCommandIds` <= 20, id por id: un id invalido o repetido se descarta solo) | ausente | E8 |
 
 v2.0 no agrega ni quita claves de config. No existe ninguna clave de retencion ni de "conservar datos legados" (el diseno anterior con rollback a 1.x se descarto), y el estado de la migracion, el vencimiento del respaldo y `noticeSeen` viven en el marcador, no en `config.json`. La retencion del zip es la constante `BACKUP_TTL_MS` (30 dias), no un ajuste. E0 solo lee claves existentes de la config migrada: `settings.launchOnStartup` (login item, FR-12), `settings.notifications.hooksEnabled` (FR-14), `settings.remote.enabled` y `settings.remote.port` (aviso de firewall y reconexion, FR-10 y FR-19) y `settings.language` (idioma de los dialogos de main).
 

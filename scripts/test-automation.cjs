@@ -238,6 +238,8 @@ async function schema13Checks() {
   const rc = withRepo({ sha256: sha, appliedAt: 5, quickCommandIds: ['qc-1', 'qc-2'] })
   check(JSON.stringify(rc.workspaces[0].repoConfig) === JSON.stringify({ sha256: sha, appliedAt: 5, quickCommandIds: ['qc-1', 'qc-2'] }), 'repoConfig is kept')
   check(withRepo({ sha256: sha, appliedAt: 5, quickCommandIds: Array.from({ length: 25 }, (_, i) => `qc-${i}`) }).workspaces[0].repoConfig.quickCommandIds.length === 20, 'repoConfig keeps at most 20 quick command ids')
+  const mixed = withRepo({ sha256: sha, appliedAt: 5, quickCommandIds: ['qc-1', 7, '', 'x'.repeat(129), 'qc-1', 'qc-2', null] })
+  check(mixed && JSON.stringify(mixed.workspaces[0].repoConfig.quickCommandIds) === '["qc-1","qc-2"]', 'repoConfig ids parse one by one: junk, empty, over-long and duplicate ids are dropped, the trace kept')
   for (const bad of [{ sha256: 'xyz', appliedAt: 1, quickCommandIds: [] }, { sha256: sha, quickCommandIds: [] }, { sha256: sha, appliedAt: 1, quickCommandIds: 'qc-1' }, 'trusted']) {
     const p = withRepo(bad)
     check(p && p.workspaces[0].name === 'Uno' && p.workspaces[0].repoConfig === undefined, `a malformed repoConfig ${JSON.stringify(bad).slice(0, 40)} is dropped without rejecting the config`)

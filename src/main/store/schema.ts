@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
-import { migrateQuickCommandsConfig } from '@shared/quickCommands'
+import { migrateQuickCommandsConfig, QUICK_COMMAND_ID_MAX } from '@shared/quickCommands'
 
 export { CONFIG_VERSION }
 
@@ -152,9 +152,17 @@ export const paneWorktreeSchema = z.object({
 const workspaceRepoConfigSchema = z.object({
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
   appliedAt: z.number(),
-  quickCommandIds: z
-    .array(z.string().max(128))
-    .transform((ids) => ids.slice(0, 20)),
+  // Id by id, like the Quick Commands themselves: a junk or duplicate id is
+  // dropped instead of losing the whole trace (and with it "Reload from repo").
+  quickCommandIds: z.array(z.unknown()).transform((ids) => {
+    const out: string[] = []
+    for (const id of ids) {
+      if (typeof id !== 'string' || !id || id.length > QUICK_COMMAND_ID_MAX || out.includes(id)) continue
+      out.push(id)
+      if (out.length === 20) break
+    }
+    return out
+  }),
 })
 // ---- end schema 13 pane/workspace fields ----------------------------------
 
