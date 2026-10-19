@@ -11,7 +11,7 @@ Electron 33 + React 19 + xterm.js 5.5 + node-pty. Centro de mando de agentes (Cl
 - Canvas es el renderer por defecto del terminal; WebGL es opt-in. `@xterm/xterm` va pineado exacto en 5.5.0 (igual que `addon-canvas`, `headless`, `addon-serialize` y `addon-unicode11`); no se sube a xterm 6.
 - Cada tanda de claves de config nuevas sube `CONFIG_VERSION` (`src/shared/types.ts`) una sola vez, con default de zod por campo en `src/main/store/schema.ts`. `migrate()` solo agrega logica cuando hay transformacion. Los schemas 11 a 14 viajan juntos en 2.0.0 como migraciones secuenciales.
 - `src/shared` no importa nada de Node (`fs`, `path`, `electron`...) ni del DOM: lo consumen main, renderer y mobile.
-- El unmount de un pane nunca mata su pty: los kills son explicitos (`pty.kill`, `killPanePtys`). Hoy el cleanup de `useXterm` todavia mata (lo saca E4-FR-36); no sumar caminos nuevos que dependan de eso.
+- El unmount de un pane nunca mata su pty: los kills son explicitos (`pty.kill`, `killPanePtys`). El cleanup de `useXterm` ya no mata (E4-FR-36): un remount, un error boundary o un reload se reengancha al pty vivo; los kills por cierre son de `ptyLifecycle`.
 - Todo archivo persistente nuevo vive bajo `dataDir()` (`src/main/paths.ts`), nunca bajo `app.getPath('userData')` directo. Logs en `dataDir()/logs/<nombre>.log`. Escritura atomica `tmp` + `rename`, UTF-8 sin BOM.
 - Todo archivo que porte o adapte codigo de stablyai/orca lleva en la primera linea `// Adaptado de stablyai/orca (MIT) - <ruta original>`; la licencia esta en `THIRD_PARTY_NOTICES.md`. No se usa su nombre ni su marca en la UI.
 - Main es autoritativo (estado de agentes, procesos, archivos). Ningun canal acepta rutas del renderer o del celu sin validarlas en main.

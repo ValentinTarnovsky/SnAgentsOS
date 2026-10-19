@@ -349,7 +349,7 @@ export const en = {
   'quick.toast.noConsole': 'No active console',
   'quick.toast.noWorkspace': 'No active workspace',
   'quick.toast.multiline': 'Multi-line text: this console does not accept a safe paste',
-  'quick.toast.sent': 'Sent: {label}',
+  'quick.toast.sent': 'Sent: {label} to {pane}',
   'quick.toast.opening': 'Opening {preset}: {label}',
   'quick.toast.presetMissing': "This Quick Command's preset no longer exists",
   'quick.toast.insertedUnconfirmed': 'Prompt inserted without Enter: the agent was not confirmed ready',
