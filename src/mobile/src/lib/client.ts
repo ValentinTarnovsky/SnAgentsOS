@@ -62,6 +62,7 @@ import { pruneDrafts } from './drafts'
 import { log, useDiagStore } from './connLog'
 import { FIT_REPLAY_GRACE_MS, decideFitState } from './phoneFit'
 import { syncPush } from './push'
+import { wsUrlFor } from './wsUrl'
 
 /** A frame handed to the live terminal. */
 export type TermFrame =
@@ -927,7 +928,7 @@ class RemoteClient {
     this.openAt = 0
     log('info', `dial ${location.host}`)
     try {
-      ws = new WebSocket(`ws://${location.host}/ws`)
+      ws = new WebSocket(wsUrlFor(location.protocol, location.host))
     } catch {
       log('error', 'dial failed')
       this.scheduleReconnect()
