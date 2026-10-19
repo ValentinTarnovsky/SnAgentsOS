@@ -111,9 +111,12 @@ export function nextText(schedule: Pick<RemoteScheduleInfo, 'enabled' | 'dueAt'>
   return schedule.enabled ? t('auto.next', { when: formatWhen(schedule.dueAt) }) : t('auto.paused')
 }
 
-/** The toast of a failed scheduleRun / scheduleToggle ack. */
-export function automationErrorText(error: string | undefined): string {
-  if (error === 'not_found' || error === 'no_schedule') return t('auto.gone')
-  if (error === 'no_prompt') return t('auto.noPrompt')
+/**
+ * The toast of a failed scheduleRun / scheduleToggle ack. For a run,
+ * `no_schedule` also covers an empty saved prompt (CONTRATOS v3.1).
+ */
+export function automationErrorText(kind: 'scheduleRun' | 'scheduleToggle', error: string | undefined): string {
+  if (error === 'not_found') return t('auto.gone')
+  if (error === 'no_schedule') return t(kind === 'scheduleRun' ? 'auto.noPrompt' : 'auto.gone')
   return t('auto.failed')
 }

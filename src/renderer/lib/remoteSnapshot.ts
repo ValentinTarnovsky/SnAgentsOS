@@ -1,7 +1,7 @@
 import type { RemotePaneInfo, RemotePresetInfo, RemoteScheduleInfo, RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
 import type { GitSummary } from '@shared/git-types'
 import type { Workspace } from '@shared/types'
-import { isScheduleEnabled, recentRuns, recurrenceOf } from '@shared/schedule'
+import { isScheduleEnabled, recentRuns, recurrenceOf, waitsForIdle } from '@shared/schedule'
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { resolveTokens } from '@/themes'
 import { type AppState, useAppStore } from './store'
@@ -65,9 +65,10 @@ export function remoteSchedules(workspaces: readonly Workspace[], pendingRun: (p
         paneId: pane.id,
         time: sched.time,
         recurrence: recurrenceOf(sched),
-        enabled: isScheduleEnabled(sched),
         dueAt: sched.dueAt,
-        ...(last ? { last: { at: last.at, status: last.status } } : {}),
+        enabled: isScheduleEnabled(sched),
+        waitIdle: waitsForIdle(sched),
+        ...(last ? { lastRun: { at: last.at, status: last.status, trigger: last.trigger } } : {}),
         ...(pendingRun(pane.id) ? { runPending: true } : {}),
       })
     }
