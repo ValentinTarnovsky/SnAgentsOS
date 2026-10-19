@@ -68,6 +68,8 @@ import { PendingMap, type PendingOutcome } from './pending'
 import { pruneDrafts } from './drafts'
 import { log, useDiagStore } from './connLog'
 import { FIT_REPLAY_GRACE_MS, decideFitState } from './phoneFit'
+import { syncPush } from './push'
+import { wsUrlFor } from './wsUrl'
 
 /** A frame handed to the live terminal. */
 export type TermFrame =
@@ -1050,7 +1052,7 @@ class RemoteClient {
     this.openAt = 0
     log('info', `dial ${location.host}`)
     try {
-      ws = new WebSocket(`ws://${location.host}/ws`)
+      ws = new WebSocket(wsUrlFor(location.protocol, location.host))
     } catch {
       log('error', 'dial failed')
       this.scheduleReconnect()
@@ -1364,7 +1366,7 @@ class RemoteClient {
   /** Drafts and input modes never outlive the pairing (E1-FR-28). */
   private forgetComposerState(): void {
     clearMobileStorage()
-    store.getState().update({ inputModes: {}, composerOneShot: null, httpToken: null, pushKey: null })
+    store.getState().update({ inputModes: {}, composerOneShot: null, httpToken: null, pushKey: null, secureUrl: null })
   }
 
   private handleAuthOk(msg: Extract<RemoteServerMsg, { type: 'authOk' }>): void {
@@ -1390,8 +1392,15 @@ class RemoteClient {
       /* ignore */
     }
     // E3-FR-01: the features ride on these fields, never on a version check.
-    store.getState().update({ httpToken: msg.httpToken || null, pushKey: msg.pushKey || null })
+    store.getState().update({
+      httpToken: msg.httpToken || null,
+      pushKey: msg.pushKey || null,
+      // E3-FR-43: only an https URL is ever offered as the secure origin.
+      secureUrl: typeof msg.secureUrl === 'string' && /^https:\/\/[a-z0-9.-]+$/i.test(msg.secureUrl) ? msg.secureUrl : null,
+    })
     this.goLive(msg.state, msg.hostPlatform, msg.appVersion)
+    // E3-FR-44: a subscription this phone already allowed goes to the desktop again.
+    void syncPush()
   }
 
   /**

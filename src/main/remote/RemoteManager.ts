@@ -19,6 +19,12 @@
  * Chat view (E3 M12): index.ts injects the ChatHub (setChat); the sessions
  * reach it through a relay, so a hub set after the server started still
  * answers, and none answers every chatSub with the noTranscript notice.
+ *
+ * Secure mode and Web Push (E3 M14, R30-07): SecureMode drives `tailscale
+ * serve`; while it is on, the MagicDNS name is a valid Host (RemoteServer),
+ * the first QR endpoint and authOk's `secureUrl`. PushService holds the VAPID
+ * keys and the subscriptions; it is active with `settings.remote.https.enabled`
+ * (FR-46) and pushes each StatusNotice to the devices without a visible session.
  */
 import { randomUUID } from 'crypto'
 import { hostname } from 'os'
@@ -35,9 +41,10 @@ import type {
   RemoteServerState,
   RemoteServerStatus,
   RemoteUiState,
+  SecureModeStatus,
 } from '@shared/ipc-contract'
 import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemoteHistorySession, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
-import type { AgentProvider, ClaudePaneState, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
+import type { AgentProvider, ClaudePaneState, ConfigFile, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
 import { isHistorySessionId } from '@shared/session-history'
 import type { PtyManager } from '../pty/PtyManager'
 import { DeviceRegistry } from './DeviceRegistry'
@@ -49,6 +56,9 @@ import { RemoteServer } from './RemoteServer'
 import { SessionManager, type HttpTokenOwner } from './SessionManager'
 import { ATTACHMENT_CLEANUP_INTERVAL_MS, UploadService } from './UploadService'
 import { noticePage, type ChatHooks } from '../chat/ChatHub'
+import { SecureMode, type SecureResult } from './SecureMode'
+import { PushService, buildPushMessage } from './PushService'
+import type { StatusNotice } from '../status/events'
 
 const DEFAULT_PORT = 4517
 const MIN_PORT = 1024
@@ -97,6 +107,15 @@ const EMPTY_SNAPSHOT: RemoteStateSnapshot = {
   language: 'en',
   fontFamily: '',
   fontSize: 14,
+}
+
+/** A failed secure mode is retried this often while the setting stays on (tailscale may start after us). */
+export const SECURE_RETRY_MS = 60 * 1000
+
+/** Injectable services (tests); defaults are the real ones. */
+export interface RemoteServices {
+  secure?: Pick<SecureMode, 'enable' | 'disable'>
+  push?: PushService
 }
 
 /** The session history as RemoteManager uses it (E3-FR-36..39; SessionHistory in main). */
@@ -157,6 +176,25 @@ export class RemoteManager {
     more: (owner, paneId, before, send) => (this.chat ? this.chat.more(owner, paneId, before, send) : send(noticePage(paneId, 'noTranscript'))),
     closed: (owner) => this.chat?.closed(owner),
   }
+  /** E3-FR-42: `tailscale serve` (CLI calls run one at a time on secureQueue). */
+  private readonly secure: Pick<SecureMode, 'enable' | 'disable'>
+  /** E3-FR-44..46: VAPID keys, subscriptions and sending. */
+  readonly push: PushService
+  /** settings.remote.https.enabled as last applied (push is active with it, FR-46). */
+  private httpsWanted = false
+  /**
+   * `tailscale serve` should point at us: https on and the remote server
+   * enabled. With the server off nothing stays published on the tailnet (a
+   * handler to a closed loopback port, or to whatever binds it next).
+   */
+  private serveWanted = false
+  /** The MagicDNS name while the secure mode is on (accepted as Host, listed first). */
+  private secureHost: string | null = null
+  /** Port the current `tailscale serve` handler points at. */
+  private securePort: number | null = null
+  private secureStatus: SecureModeStatus = { state: 'off' }
+  private secureQueue: Promise<unknown> = Promise.resolve()
+  private secureRetry: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly ptyManager: PtyManager,
@@ -167,8 +205,11 @@ export class RemoteManager {
     /** The PC name the phone's Home header shows (E2-FR-02); injectable for tests. */
     private readonly getHostName: () => string = safeHostName,
     /** Reachable addresses for a port (deepLinkBase, E2-FR-42); injectable for tests. */
-    private readonly getEndpoints: (port: number) => RemoteEndpoint[] = listEndpoints,
+    private readonly getEndpoints: (port: number, secureHost?: string | null) => RemoteEndpoint[] = listEndpoints,
+    services: RemoteServices = {},
   ) {
+    this.secure = services.secure ?? new SecureMode()
+    this.push = services.push ?? new PushService({ file: () => join(dataDir(), 'push-keys.json') })
     this.fit = new FitController({
       dispatch: (action, fit) => this.executeCommand(action, undefined, fit),
       enabled: () => this.phoneFit,
@@ -221,6 +262,7 @@ export class RemoteManager {
     if (this.phoneFit && !phoneFit) void this.fit.releaseAll()
     this.phoneFit = phoneFit
     const port = this.clampPort(cfg.port)
+    this.syncSecure(cfg.https?.enabled === true, port, cfg.enabled === true)
     if (!cfg.enabled) {
       this.stopServer('disabled')
       return
@@ -229,6 +271,163 @@ export class RemoteManager {
     if (this.server && this.statusState !== 'error' && this.boundPort === port) return
     this.stopServer('disabled') // no-op when nothing is running
     this.startServer(port)
+  }
+
+  // --- Secure mode (E3-FR-42/43) ------------------------------------------------
+
+  /** Run one CLI job after the previous one, so enable/disable never interleave. */
+  private enqueueSecure<T>(job: () => Promise<T>): Promise<T> {
+    const next = this.secureQueue.then(job, job)
+    this.secureQueue = next.catch(() => undefined)
+    return next
+  }
+
+  /**
+   * The config says what the secure mode should be (boot, an import, a port
+   * change). The toggle itself goes through setSecure, which already leaves
+   * this state in place, so its config echo is a no-op here.
+   */
+  private syncSecure(wanted: boolean, port: number, serverEnabled: boolean): void {
+    this.httpsWanted = wanted
+    if (wanted) {
+      // The keys exist from the first time https is on (E3 M14).
+      try {
+        this.push.ensureKeys()
+      } catch {
+        /* unreadable data dir: push stays without a key */
+      }
+    }
+    const was = this.serveWanted
+    this.serveWanted = wanted && serverEnabled
+    if (this.serveWanted) {
+      if (was && this.securePort === port && this.secureStatus.state !== 'error') return
+      void this.applySecure(port)
+      return
+    }
+    if (!was) return
+    this.clearSecureRetry()
+    const previous = this.securePort
+    this.markSecureOff()
+    if (previous !== null) void this.enqueueSecure(() => this.secure.disable(previous)).catch(() => undefined)
+  }
+
+  /** enable(port) in the background with the 'checking' state, retried while it fails. */
+  private applySecure(port: number): Promise<SecureModeStatus> {
+    const previous = this.securePort ?? undefined
+    this.clearSecureRetry()
+    this.secureStatus = { state: 'checking' }
+    this.scheduleUi()
+    return this.enqueueSecure(async () => {
+      let res: SecureResult
+      try {
+        res = await this.secure.enable(port, previous)
+      } catch (err) {
+        res = { ok: false, error: 'cli', message: err instanceof Error ? err.message : String(err) }
+      }
+      // Turned off (or moved to another port) while the CLI ran: that call wins.
+      if (!this.serveWanted) return this.secureStatus
+      this.onSecureResult(res, port)
+      if (!res.ok) {
+        this.secureRetry = setTimeout(() => {
+          this.secureRetry = null
+          if (this.serveWanted && this.secureStatus.state === 'error') void this.applySecure(this.boundPort)
+        }, SECURE_RETRY_MS)
+        this.secureRetry.unref?.()
+      }
+      return this.secureStatus
+    })
+  }
+
+  private onSecureResult(res: SecureResult, port: number): void {
+    if (res.ok) {
+      this.secureHost = res.dnsName
+      this.securePort = port
+      this.secureStatus = { state: 'on', dnsName: res.dnsName, url: `https://${res.dnsName}` }
+    } else {
+      this.secureHost = null
+      this.secureStatus = { state: 'error', error: res.error, ...(res.message ? { message: res.message } : {}) }
+    }
+    this.scheduleUi()
+  }
+
+  private markSecureOff(): void {
+    this.secureHost = null
+    this.securePort = null
+    this.secureStatus = { state: 'off' }
+    this.scheduleUi()
+  }
+
+  private clearSecureRetry(): void {
+    if (this.secureRetry) clearTimeout(this.secureRetry)
+    this.secureRetry = null
+  }
+
+  /**
+   * remote:secureSet, the Settings toggle (E3-FR-42). On: needs the server
+   * running, then `tailscale serve`; the answer says whether the renderer may
+   * save `https.enabled = true`. Off: removes our handler (only ours) and
+   * always ends off locally, with the CLI's error if the removal failed.
+   */
+  async setSecure(enabled: boolean): Promise<SecureModeStatus> {
+    if (enabled) {
+      if (this.statusState !== 'running') return { state: 'error', error: 'server_off' }
+      this.httpsWanted = true
+      this.serveWanted = true
+      try {
+        this.push.ensureKeys()
+      } catch {
+        /* push stays without a key */
+      }
+      const status = await this.applySecure(this.boundPort)
+      // A failed attempt from the toggle leaves the setting off: no retry loop.
+      // The renderer shows the returned error; main's status goes back to off
+      // so the status line and the diagnostics never report a setting that is off.
+      if (status.state !== 'on') {
+        this.httpsWanted = false
+        this.serveWanted = false
+        this.clearSecureRetry()
+        this.markSecureOff()
+      }
+      return status
+    }
+    this.httpsWanted = false
+    this.serveWanted = false
+    this.clearSecureRetry()
+    const port = this.securePort ?? this.boundPort
+    this.markSecureOff()
+    let res: Awaited<ReturnType<SecureMode['disable']>>
+    try {
+      res = await this.enqueueSecure(() => this.secure.disable(port))
+    } catch (err) {
+      res = { ok: false, error: 'cli', message: err instanceof Error ? err.message : String(err) }
+    }
+    if (res.ok) return { state: 'off' }
+    return { state: 'off', error: res.error, ...(res.message ? { message: res.message } : {}) }
+  }
+
+  /** `https://<name>` while the secure mode is on (authOk.secureUrl, E3-FR-43). */
+  private secureUrl(): string | null {
+    return this.secureHost ? `https://${this.secureHost}` : null
+  }
+
+  // --- Web Push (E3-FR-44..46) --------------------------------------------------
+
+  /**
+   * A StatusNotice that passed the away gate (noticeRouter): push it to every
+   * paired device without a visible session, with the desktop's notifyAction
+   * / notifyDone preferences. Nothing while https is off (FR-46).
+   */
+  notifyPush(notice: StatusNotice, config: ConfigFile | null): Promise<number> {
+    if (!this.httpsWanted) return Promise.resolve(0)
+    const prefs = config?.settings?.notifications
+    if (prefs && !(notice.state === 'done' ? prefs.notifyDone : prefs.notifyAction)) return Promise.resolve(0)
+    return this.push
+      .notify(buildPushMessage(notice, config), {
+        enabled: this.httpsWanted,
+        isDeviceVisible: (deviceId) => this.sessions?.isDeviceVisible(deviceId) ?? false,
+        isPaired: (deviceId) => this.registry.get(deviceId) !== undefined,
+      })
+      .catch(() => 0)
   }
 
   private startServer(port: number): void {
@@ -252,6 +451,9 @@ export class RemoteManager {
       queryHistory: (req) => this.history?.forRemote(req) ?? Promise.resolve([]),
       git: (req) => this.gitRequest(req),
       chat: this.chatRelay,
+      // E3-FR-44/46: the VAPID key only while https is on.
+      getPushKey: () => (this.httpsWanted ? this.push.publicKey() : null),
+      getSecureUrl: () => this.secureUrl(),
     })
     this.ptyManager.addSink(this.sessions)
     // A pty spawning/exiting flips a pane's `running`; re-broadcast so phones
@@ -260,6 +462,9 @@ export class RemoteManager {
     this.server = new RemoteServer(port, {
       onSocket: (ws, ip, host) => this.sessions?.handleSocket(ws, ip, host),
       onUpload: (req, res) => this.uploads.handle(req, res),
+      onPushSubscribe: (req, res) =>
+        this.push.handleSubscribe(req, res, { enabled: this.httpsWanted, resolveToken: (token) => this.resolveHttpToken(token) }),
+      secureHost: () => this.secureHost,
     })
     this.setStatus('starting')
     this.server
@@ -313,6 +518,8 @@ export class RemoteManager {
     this.pairing.dispose()
     for (const pending of this.pendingCommands.values()) clearTimeout(pending.timer)
     this.pendingCommands.clear()
+    // `tailscale serve --bg` persists on its own: quitting leaves it in place.
+    this.clearSecureRetry()
     if (this.cleanupTimer) clearInterval(this.cleanupTimer)
     this.cleanupTimer = null
     this.teardownServer()
@@ -520,7 +727,7 @@ export class RemoteManager {
 
   async pairingBegin(): Promise<PairingQrPayload | null> {
     if (this.statusState !== 'running') return null
-    const payload = await this.pairing.begin(this.boundPort)
+    const payload = await this.pairing.begin(this.boundPort, this.secureHost)
     this.scheduleUi()
     return payload
   }
@@ -542,6 +749,8 @@ export class RemoteManager {
     const existed = this.registry.deleteInMemory(deviceId)
     this.sessions?.killByDevice(deviceId)
     if (existed) this.registry.persist()
+    // E3 M14: its push subscriptions go with it.
+    this.push.removeDevice(deviceId)
     this.scheduleUi()
   }
 
@@ -555,9 +764,11 @@ export class RemoteManager {
    */
   deepLinkBase(): string | null {
     if (this.statusState !== 'running') return null
-    const endpoints = this.getEndpoints(this.boundPort)
-    const live = new Set(endpoints.map((e) => e.ip))
+    const endpoints = this.getEndpoints(this.boundPort, this.secureHost)
+    const live = new Set(endpoints.map((e) => e.ip ?? e.host))
     const recent = this.registry.lastHosts().find((h) => live.has(h.host))
+    // A phone that last came in through the secure mode opens its https origin (E3-FR-43).
+    if (recent && recent.host === this.secureHost) return `https://${recent.host}`
     const ip = recent?.host ?? endpoints.find((e) => e.kind === 'tailscale')?.ip ?? endpoints.find((e) => e.kind === 'lan')?.ip
     return ip ? `http://${ip}:${this.boundPort}` : null
   }
@@ -604,9 +815,10 @@ export class RemoteManager {
     return {
       state: this.statusState,
       port: this.boundPort,
-      endpoints: this.statusState === 'running' ? listEndpoints(this.boundPort) : [],
+      endpoints: this.statusState === 'running' ? listEndpoints(this.boundPort, this.secureHost) : [],
       connectedCount: this.sessions?.connectedCount ?? 0,
       error: this.statusError,
+      ...(this.secureStatus.state !== 'off' || this.secureStatus.error ? { secure: this.secureStatus } : {}),
     }
   }
 

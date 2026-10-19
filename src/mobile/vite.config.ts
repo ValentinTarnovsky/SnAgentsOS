@@ -1,10 +1,34 @@
-import { readFileSync } from 'fs'
+import { readFileSync, readdirSync, writeFileSync } from 'fs'
 import { resolve } from 'path'
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { fillServiceWorker, precacheList } from './swBuild'
 
 const APP_VERSION = JSON.parse(readFileSync(resolve(__dirname, '../../package.json'), 'utf8')).version as string
+const OUT_DIR = resolve(__dirname, '../../out/mobile')
+
+/**
+ * E3-FR-47: after the bundle is written (public/ is already copied), fill
+ * out/mobile/sw.js with the version and the precache list of this build.
+ */
+function serviceWorkerPlugin(): Plugin {
+  return {
+    name: 'snaos-service-worker',
+    apply: 'build',
+    writeBundle(_options, bundle) {
+      const file = resolve(OUT_DIR, 'sw.js')
+      let icons: string[] = []
+      try {
+        icons = readdirSync(resolve(OUT_DIR, 'icons')).map((f) => `icons/${f}`)
+      } catch {
+        icons = []
+      }
+      const names = [...Object.keys(bundle), 'manifest.webmanifest', ...icons]
+      writeFileSync(file, fillServiceWorker(readFileSync(file, 'utf8'), APP_VERSION, precacheList(names)), 'utf8')
+    },
+  }
+}
 
 /**
  * Standalone Vite build for the mobile web client. This is NOT electron-vite:
@@ -23,7 +47,7 @@ const APP_VERSION = JSON.parse(readFileSync(resolve(__dirname, '../../package.js
 export default defineConfig({
   root: __dirname,
   base: './',
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), serviceWorkerPlugin()],
   define: {
     __APP_VERSION__: JSON.stringify(APP_VERSION),
   },
@@ -33,7 +57,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: resolve(__dirname, '../../out/mobile'),
+    outDir: OUT_DIR,
     emptyOutDir: true,
     target: 'es2020',
   },

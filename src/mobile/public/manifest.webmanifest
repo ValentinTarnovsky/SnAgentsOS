@@ -4,6 +4,7 @@
   "description": "Live remote control for SnAgentsOS agents and consoles from your phone.",
   "display": "standalone",
   "orientation": "any",
+  "id": "./",
   "start_url": "./",
   "scope": "./",
   "background_color": "#0b0f19",
