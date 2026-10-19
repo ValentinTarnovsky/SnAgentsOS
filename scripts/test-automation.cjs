@@ -554,7 +554,10 @@ function fakeClock() {
   return { now: () => now, advance, setT, clearT, FakeDate }
 }
 
-function ptyHarness(agentState) {
+// The delivery rules depend on the OS the shells run on (a `%` forces the gate
+// on win32 only): the harness pins it, Windows by default since these checks
+// spell out PowerShell / cmd.exe behavior, so every CI host runs the same rules.
+function ptyHarness(agentState, platform = 'win32') {
   const clock = fakeClock()
   const procs = [], sent = [], spawnCalls = []
   const impl = (shell, args, opts) => {
@@ -579,19 +582,20 @@ function ptyHarness(agentState) {
     require: (id) => (id === 'node-pty' ? { spawn: impl } : id === 'electron' ? { app: { getPath: () => os.tmpdir() } } : require(id)),
     setTimeout: clock.setT, clearTimeout: clock.clearT, setInterval: () => 0, clearInterval() {}, Date: clock.FakeDate,
   })
-  const pm = new mod.exports.PtyManager(() => ({ isDestroyed: () => false, send: (ch, p) => sent.push({ ch, p }) }), () => ({}), agentState)
+  const pm = new mod.exports.PtyManager(() => ({ isDestroyed: () => false, send: (ch, p) => sent.push({ ch, p }) }), () => ({}), agentState, platform)
   pm.setEngine({ snapshotMode: 'off' })
   const results = () => sent.filter((e) => e.ch === 'pty:promptResult').map((e) => e.p.result)
   return { pm, procs, sent, spawnCalls, clock, results }
 }
 
-// Real files so resolveShell accepts them; the name decides the shell family.
+// Real files so resolveShell (host lookup) accepts them; the name decides the
+// shell family under the pinned platform, so cmd.exe is covered on every host.
 const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-qc-shells-'))
 const win = process.platform === 'win32'
 const fakeShell = (name) => { const f = path.join(shellDir, win ? `${name}.exe` : name); fs.writeFileSync(f, ''); return f }
 const PWSH = fakeShell('pwsh')
 const BASH = fakeShell('bash')
-const CMD = win ? fakeShell('cmd') : null
+const CMD = fakeShell('cmd')
 
 async function submitChecks() {
   {
@@ -664,11 +668,9 @@ async function gateChecks() {
     pm.spawn({ paneId: 'a2', shell: BASH, cols: 80, rows: 24, initialCommand: 'codex', launchKind: 'codex', initialPrompt: prompt('dice "hola"') })
     await clock.advance(400)
     check(procs[1].text() === 'codex "$SNAOS_INITIAL_PROMPT"\r' && spawnCalls[1].opts.env.SNAOS_INITIAL_PROMPT === "dice 'hola'", 'argv in bash quotes the variable; the text is sanitized')
-    if (CMD) {
-      pm.spawn({ paneId: 'a3', shell: CMD, cols: 80, rows: 24, initialCommand: 'claude', launchKind: 'claude', initialPrompt: prompt('update') })
-      await clock.advance(400)
-      check(procs[2].text() === 'claude "%SNAOS_INITIAL_PROMPT%"\r' && spawnCalls[2].opts.env.SNAOS_INITIAL_PROMPT === ' update', 'argv in cmd.exe; a single word gets its leading space')
-    }
+    pm.spawn({ paneId: 'a3', shell: CMD, cols: 80, rows: 24, initialCommand: 'claude', launchKind: 'claude', initialPrompt: prompt('update') })
+    await clock.advance(400)
+    check(procs[2].text() === 'claude "%SNAOS_INITIAL_PROMPT%"\r' && spawnCalls[2].opts.env.SNAOS_INITIAL_PROMPT === ' update', 'argv in cmd.exe; a single word gets its leading space')
     pm.spawn({ paneId: 'a4', shell: PWSH, cols: 80, rows: 24, initialCommand: 'claude', launchKind: 'claude', env: { SNAOS_INITIAL_PROMPT: 'leak' } })
     check(!('SNAOS_INITIAL_PROMPT' in spawnCalls.at(-1).opts.env), 'without a prompt the variable is never inherited from a preset env')
     pm.killAll()
@@ -729,6 +731,22 @@ async function gateChecks() {
     check(results().at(-1) === 'not_delivered', 'argvOnly without argv reports not_delivered at spawn')
     await clock.advance(30_000)
     check(procs[4].text() === 'claude\r', 'and types nothing but the agent')
+    pm.killAll()
+  }
+  {
+    // The same spawns on Linux / macOS: `%` is plain text there, so argv stays;
+    // a POSIX name matches exactly (no .exe) and `cmd` is no known shell.
+    const posixShell = (name) => { const f = path.join(shellDir, name); fs.writeFileSync(f, ''); return f }
+    const { pm, procs, spawnCalls, clock, results } = ptyHarness(() => null, 'linux')
+    pm.spawn({ paneId: 'x1', shell: posixShell('bash'), cols: 80, rows: 24, initialCommand: 'claude', launchKind: 'claude', initialPrompt: prompt('usa 50% de cpu') })
+    await clock.advance(400)
+    check(procs[0].text() === 'claude "$SNAOS_INITIAL_PROMPT"\r' && spawnCalls[0].opts.env.SNAOS_INITIAL_PROMPT === 'usa 50% de cpu' && JSON.stringify(results()) === '["sent_argv"]', 'a % prompt off Windows goes through argv')
+    pm.spawn({ paneId: 'x2', shell: posixShell('pwsh'), cols: 80, rows: 24, initialCommand: 'claude', launchKind: 'claude', initialPrompt: prompt('100% listo', { mode: 'argvOnly' }) })
+    await clock.advance(400)
+    check(procs[1].text() === 'claude $env:SNAOS_INITIAL_PROMPT\r' && results().at(-1) === 'sent_argv', 'argvOnly with a % off Windows is delivered by argv')
+    pm.spawn({ paneId: 'x3', shell: posixShell('cmd'), cols: 80, rows: 24, initialCommand: 'claude', launchKind: 'claude', initialPrompt: prompt('hola') })
+    await clock.advance(400)
+    check(procs[2].text() === 'claude\r' && !('SNAOS_INITIAL_PROMPT' in spawnCalls[2].opts.env), 'off Windows `cmd` is an unknown shell: the gate, no variable')
     pm.killAll()
   }
 }

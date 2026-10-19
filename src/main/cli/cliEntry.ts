@@ -8,7 +8,7 @@
 import { readFileSync } from 'fs'
 import { request } from 'http'
 import { homedir } from 'os'
-import { join, resolve } from 'path'
+import { posix, resolve, win32 } from 'path'
 import { CLI_ENV } from '@shared/brand'
 import {
   CTL_EXIT,
@@ -234,15 +234,19 @@ export interface Connection {
 
 export class AppUnavailable extends Error {}
 
-/** Default dataDir()/runtime.json of an installed build (the shim always passes --runtime). */
-export function defaultRuntimePath(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+/**
+ * Default dataDir()/runtime.json of an installed build (the shim always passes
+ * --runtime), joined with the separators of `platform`, not the host's.
+ */
+export function defaultRuntimePath(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home: () => string = homedir): string {
+  const p = platform === 'win32' ? win32 : posix
   const base =
     platform === 'win32'
-      ? env.APPDATA || join(homedir(), 'AppData', 'Roaming')
+      ? env.APPDATA || p.join(home(), 'AppData', 'Roaming')
       : platform === 'darwin'
-        ? join(homedir(), 'Library', 'Application Support')
-        : env.XDG_CONFIG_HOME || join(homedir(), '.config')
-  return join(base, 'snagentsos', 'runtime.json')
+        ? p.join(home(), 'Library', 'Application Support')
+        : env.XDG_CONFIG_HOME || p.join(home(), '.config')
+  return p.join(base, 'snagentsos', 'runtime.json')
 }
 
 export function pidAlive(pid: number): boolean {
