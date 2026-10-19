@@ -34,6 +34,8 @@ import { RemoteQrModal } from '@/components/remote/RemoteQrModal'
 import { RemotePairingPrompt } from '@/components/remote/RemotePairingPrompt'
 import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
 import { WorkspaceComposer } from '@/components/wizard/WorkspaceComposer'
+import { TrustDialog } from '@/components/ui/TrustDialog'
+import { ExportRepoConfigDialog } from '@/components/ui/ExportRepoConfigDialog'
 import { TitleBar } from '@/components/titlebar/TitleBar'
 import { CommandPalette } from '@/components/ui/CommandPalette'
 import { GlobalPromptDialog } from '@/components/workspace/GlobalPromptDialog'
@@ -246,6 +248,8 @@ function AppBody() {
       <RemotePairingPrompt />
       <WorkspaceComposer />
       <NewWorkspaceWizard />
+      <ExportRepoConfigDialog />
+      <TrustDialog />
       <CommandPalette />
       <GlobalPromptDialog />
       <QuickCommandPopover />

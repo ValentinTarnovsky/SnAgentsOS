@@ -6,7 +6,8 @@
 // variant). R22-13: composer model, note/taskState store actions, first
 // prompt to the first agent console, fs:dirExists. R30-01: schema 13 (v12 ->
 // v13 keeps everything, new defaults, PaneSchedule automation fields,
-// repoConfig, junk tolerance). Same esbuild + vm harness as test-status.cjs.
+// repoConfig, junk tolerance). R30-12: .snagentsos.json (test-automation-repo.cjs).
+// Same esbuild + vm harness as test-status.cjs.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -914,8 +915,9 @@ async function main() {
   stateOfChecks()
   await quickRunChecks()
   await composerChecks()
+  await require('./test-automation-repo.cjs').run({ check, load, loadRenderer }) // R30-12 .snagentsos.json
   fs.rmSync(shellDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} automation checks (schema 12 and 13, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state)`)
+  console.log(`PASS: ${checks} automation checks (schema 12 and 13, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state, .snagentsos.json)`)
 }
 main().catch((err) => {
   fs.rmSync(shellDir, { recursive: true, force: true })

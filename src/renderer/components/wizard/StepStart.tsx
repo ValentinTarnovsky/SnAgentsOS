@@ -3,6 +3,7 @@ import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { iconFor } from '@/lib/icons'
 import type { StepProps } from './types'
+import { RepoConfigCard } from './RepoConfigCard'
 
 function basename(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? 'workspace'
@@ -46,6 +47,9 @@ export function StepStart({ draft, update }: StepProps) {
           </button>
         </div>
       </div>
+
+      {/* The folder's .snagentsos.json, when it has one (E8-FR-23). */}
+      <RepoConfigCard cwd={draft.cwd} onApplied={() => useAppStore.getState().setWizardOpen(false)} />
 
       <div>
         <label className="mb-1.5 block text-sm font-medium text-text-primary">
