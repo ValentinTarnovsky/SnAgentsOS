@@ -117,6 +117,15 @@ export function RemoteSection() {
         description={t('remote.enableHint')}
       />
 
+      {/* E3-FR-20: off = main refuses every fitPane ('disabled'). */}
+      <ToggleRow
+        checked={settings.phoneFit !== false}
+        onChange={(phoneFit) => updateSettings({ remote: { ...settings, phoneFit } })}
+        searchId="remote.phoneFit"
+        title={t('remote.phoneFit')}
+        description={t('remote.phoneFitHint')}
+      />
+
       <div className="max-w-[200px]">
         <label className={labelCls}>{t('remote.port')}</label>
         <input

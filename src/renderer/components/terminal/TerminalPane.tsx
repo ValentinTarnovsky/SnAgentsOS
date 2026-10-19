@@ -12,6 +12,8 @@ import type { LaunchKind } from '@shared/initialPrompt'
 import { useXterm, type XtermExitState } from './useXterm'
 import { ExitCard } from './ExitCard'
 import { AgentEndChip } from './AgentEndChip'
+import { MobileDriverBanner } from './MobileDriverBanner'
+import { useFitStore } from '@/lib/fitStore'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -51,6 +53,8 @@ export function TerminalPane({
   const [exit, setExit] = useState<XtermExitState | null>(null)
   const ctl = useXterm(termRef, { paneId, cwd, shell, initialCommand, launchKind, setup, fontSize, isActive, onExitState: setExit })
 
+  // E3-FR-17: a phone sizes this pane (strip on top, the rest dimmed).
+  const phoneFit = useFitStore((s) => !!s.owners[paneId])
   const setPaneFontSize = useAppStore((s) => s.setPaneFontSize)
   const globalFont = useAppStore((s) => s.settings.fontSize)
 
@@ -121,7 +125,10 @@ export function TerminalPane({
       onKeyDownCapture={onKeyDownCapture}
       className="relative h-full w-full overflow-hidden bg-bg-primary p-2"
     >
-      <div ref={termRef} className="h-full w-full" />
+      <div className="flex h-full w-full flex-col">
+        <MobileDriverBanner paneId={paneId} onDone={ctl.focus} />
+        <div ref={termRef} data-phone-fit={phoneFit ? '' : undefined} className="min-h-0 w-full flex-1" />
+      </div>
 
       {exit?.cardVisible ? (
         <ExitCard
