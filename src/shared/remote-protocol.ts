@@ -5,7 +5,8 @@
  * Pure types only - no zod, no Node, no DOM - because this file is bundled
  * into three targets: main, renderer and the mobile web client. Runtime
  * validation schemas live in remote-protocol-schemas.ts (main-only). It may
- * import only types.ts and git-types.ts, both import-free of Node and DOM.
+ * import only types.ts, git-types.ts and chat-types.ts, all import-free of
+ * Node and DOM.
  */
 import type {
   AgentProvider,
@@ -20,6 +21,7 @@ import type {
   ThemeTokens,
 } from './types'
 import type { GitArea, GitDiffHunk, GitFileEntry, RemoteGitChip } from './git-types'
+import type { ChatMessage } from './chat-types'
 
 export type { RemotePending, RemoteGitChip }
 
@@ -345,6 +347,12 @@ export type RemoteClientMsg =
   | { v: number; type: 'historyReq'; id: string; query?: string; workspaceId?: string }
   /** E7-FR-22/23: one page of the change list or of a file's diff; answered by `gitRes` with the same id. */
   | ({ v: number; type: 'gitReq'; id: string } & RemoteGitRequest)
+  // --- E3 M12 Chat view (R30-05) ---
+  /** E3-FR-25: read the pane as a chat; answered by a first `chatPage`. */
+  | { v: number; type: 'chatSub'; paneId: string }
+  | { v: number; type: 'chatUnsub'; paneId: string }
+  /** E3-FR-26: the page before `before` (the `cursor` of the oldest page held, a byte offset). */
+  | { v: number; type: 'chatMore'; paneId: string; before: string }
 
 // --- Server -> client messages ---
 
@@ -437,3 +445,12 @@ export type RemoteServerMsg =
   | { v: number; type: 'historyRes'; id: string; sessions: RemoteHistorySession[] }
   /** E7-FR-22..26: the answer to one `gitReq`, each frame <= 48KB. */
   | ({ v: number; type: 'gitRes'; id: string } & RemoteGitReply)
+  /**
+   * E3-FR-26/30/33: a page of the pane's chat, oldest first, <= 48KB. One that
+   * arrives without a chatMore pending is a first page and replaces the list
+   * (reset after /clear, a resume or a truncated file). `cursor` = byte offset
+   * of its first line (null with nothing before); a lone notice block = no chat.
+   */
+  | { v: number; type: 'chatPage'; paneId: string; items: ChatMessage[]; cursor: string | null; done: boolean }
+  /** E3-FR-30: messages written to the transcript since, <= 48KB per frame. */
+  | { v: number; type: 'chatAppend'; paneId: string; items: ChatMessage[] }

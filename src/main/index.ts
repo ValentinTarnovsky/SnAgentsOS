@@ -35,6 +35,10 @@ import { AgentSessionStore } from './agents/AgentSessionStore'
 import { CodexRolloutIndex } from './agents/transcripts'
 import { registerAgentsIpc } from './ipc/registerAgentsIpc'
 import { SessionHistory, openSessionsOf } from './history/SessionHistory'
+import { ChatHub } from './chat/ChatHub'
+import { TranscriptLocator } from './chat/TranscriptLocator'
+import { claudeConfigDir } from './status/statusDetails'
+import { sessionsRoot } from './agents/codexPaths'
 import { registerHistoryIpc } from './ipc/registerHistoryIpc'
 import type { ExitTrigger } from '@shared/agents'
 import { RemoteManager } from './remote/RemoteManager'
@@ -603,6 +607,21 @@ async function bootstrap(): Promise<void> {
   })
   registerHistoryIpc(history)
   remoteManager.setHistory(history)
+  // Chat view of the phone (E3 M12): transcripts located per console and
+  // watched only while a phone reads them.
+  const chatLocator: TranscriptLocator = new TranscriptLocator({
+    claudeRoot: claudeConfigDir,
+    codexSessions: sessionsRoot,
+    config: () => configStore.load(),
+    status: (paneId) => statusManager.transcriptFor(paneId),
+    spawnCwd: (paneId) => ptyManager.getSpawnCwd(paneId),
+    spawnedAt: (paneId) => statusManager.spawnedAt(paneId),
+    runningPanes: () => ptyManager.runningPaneIds(),
+    claims: () => chatHub.claims(),
+  })
+  const chatHub: ChatHub = new ChatHub({ locate: (paneId) => chatLocator.locate(paneId) })
+  statusManager.onTranscriptChange((paneId) => chatHub.transcriptChanged(paneId))
+  remoteManager.setChat(chatHub)
   const bootCfg = configStore.load()
   awakeService = registerPowerIpc({
     getSender: () => mainWindow?.webContents ?? null,

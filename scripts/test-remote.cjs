@@ -652,7 +652,8 @@ async function testRateLimit() {
   // The bucket is per session: a second phone starts full.
   const other = await pair(w)
   const start = other.ws.inbox.length
-  for (let i = 0; i < 45; i++) other.ws.msg({ type: 'chatMore', paneId: 'p1', before: 'c' })
+  // chatSub always answers (a chatPage; the notice without a ChatHub, R30-05).
+  for (let i = 0; i < 45; i++) other.ws.msg({ type: 'chatSub', paneId: 'p1' })
   check(other.ws.inbox.length - start === 40, 'another session has its own full bucket')
 }
 
