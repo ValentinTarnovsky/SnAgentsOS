@@ -7,7 +7,7 @@
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 12
+export const CONFIG_VERSION = 13
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -47,9 +47,38 @@ export interface ConnectionProfile {
 }
 
 /**
- * A one-shot prompt scheduled to run in a single console at a wall-clock time.
- * The renderer ticker writes `prompt` (then Enter) into the pane once `dueAt`
- * is reached, using the local PC clock, then clears the schedule.
+ * How a pane schedule repeats (E8-FR-28, schema 13). Absent = `once`.
+ * `weekly.days`: 0 = Sunday .. 6 = Saturday, 1..7 distinct entries; `hourly`
+ * takes the minute from `PaneSchedule.time`.
+ */
+export type ScheduleRecurrence =
+  | { kind: 'once' }
+  | { kind: 'daily' }
+  | { kind: 'weekdays' }
+  | { kind: 'weekly'; days: number[] }
+  | { kind: 'hourly' }
+
+/** Outcome of one schedule run (E8-FR-31, schema 13). */
+export type ScheduleRunStatus = 'sent' | 'sent_unconfirmed' | 'skipped_busy' | 'missed' | 'failed'
+
+/** One entry of a pane schedule's run history (E8-FR-31, schema 13). */
+export interface ScheduleRun {
+  /** Epoch ms of the run. */
+  at: number
+  /** Epoch ms of the occurrence it served. */
+  scheduledFor: number
+  trigger: 'scheduled' | 'manual'
+  status: ScheduleRunStatus
+  reason?: 'agent_not_running' | 'multiline_unsafe' | 'not_delivered'
+}
+
+/**
+ * A prompt scheduled to run in a single console at a wall-clock time. The
+ * renderer ticker writes `prompt` (then Enter) into the pane once `dueAt` is
+ * reached, using the local PC clock. Without `recurrence` it is one-shot and
+ * cleared after firing. Schema 13 adds the optional automation fields (they
+ * replace the contract's top-level `automations`, R30-01 amendment); an old
+ * schedule without them keeps its one-shot behavior.
  */
 export interface PaneSchedule {
   /** "HH:MM" wall-clock time the user picked (for display/editing). */
@@ -58,6 +87,31 @@ export interface PaneSchedule {
   prompt: string
   /** Epoch ms of the next occurrence; the ticker fires when Date.now() >= dueAt. */
   dueAt: number
+  /** Repeat rule (schema 13). Absent = `{ kind: 'once' }`. */
+  recurrence?: ScheduleRecurrence
+  /** Wait for the agent to be free before sending (schema 13). Absent = true. */
+  waitIdle?: boolean
+  /** Paused when false (schema 13). Absent = true. */
+  enabled?: boolean
+  /** Epoch ms since the run waits for a busy agent; persisted to survive reloads (schema 13). */
+  waitingSince?: number
+  /** Last runs, at most 20 (schema 13). */
+  history?: ScheduleRun[]
+}
+
+/**
+ * Isolated git worktree a console runs in (E7-FR-28, schema 13). `baseRef`,
+ * `linkedPaths` and `createdAt` live only in main's `worktrees.json` manifest.
+ */
+export interface PaneWorktree {
+  /** Main repo root the worktree belongs to. */
+  repoRoot: string
+  /** Worktree folder (also the pane cwd). */
+  path: string
+  /** Branch, always 'sn/<slug>'. */
+  branch: string
+  /** Sha of the base commit. */
+  base: string
 }
 
 export interface Pane {
@@ -84,6 +138,8 @@ export interface Pane {
    * seeds from this when that file is missing or corrupt.
    */
   lastSession?: PaneLastSession
+  /** Isolated git worktree this console runs in (schema 13). */
+  worktree?: PaneWorktree
 }
 
 /** Agent session mirrored onto a pane so it can be resumed later (schema 11). */
@@ -123,6 +179,22 @@ export interface Workspace {
   note?: string
   /** User task state, distinct from the agent state (schema 12). */
   taskState?: WorkspaceTaskState
+  /** Repo file (.snagentsos.json) this workspace was created from (schema 13). */
+  repoConfig?: WorkspaceRepoConfig
+}
+
+/**
+ * Trace of the repo config applied to a workspace (E8-FR-25, schema 13). The
+ * trust itself lives in main's `trusted-repos.json`, never in config.json
+ * (R30-01 amendment: the renderer cannot forge it).
+ */
+export interface WorkspaceRepoConfig {
+  /** sha256 (hex) of the normalized file that was applied. */
+  sha256: string
+  /** Epoch ms of the apply. */
+  appliedAt: number
+  /** Quick Commands imported from the file, at most 20. */
+  quickCommandIds: string[]
 }
 
 /** Per-workspace task state (E8-FR-10, schema 12). */
@@ -296,6 +368,16 @@ export interface RemoteSettings {
   enabled: boolean
   /** TCP port the server binds on 0.0.0.0. */
   port: number
+  /** Accept phone-fit requests (fitPane) from the phone (E3, schema 13). */
+  phoneFit: boolean
+  /** Secure mode through `tailscale serve` (E3-FR-42, schema 13). */
+  https: RemoteHttpsSettings
+}
+
+/** Secure remote mode (E3-FR-42, schema 13). Only `tailscaleServe` exists. */
+export interface RemoteHttpsSettings {
+  enabled: boolean
+  mode: 'tailscaleServe'
 }
 
 /**
@@ -511,14 +593,33 @@ export interface AgentSettings {
   resumeNudgeText: string
   /** Sidebar order: manual (default) or by agent demand (schema 12). */
   sidebarSort: 'manual' | 'smart'
+  /** Claude prompt cache countdown chip (E5-FR-28, schema 13). */
+  cacheTimer: CacheTimerSettings
 }
 
-/** Workspace composer and automation settings (E8, schema 12; v3.0 adds more). */
+/** Claude prompt cache timer (E5-FR-28, schema 13). */
+export interface CacheTimerSettings {
+  enabled: boolean
+  /** Cache TTL the countdown starts from. */
+  ttlMinutes: 5 | 60
+}
+
+/** Workspace composer and automation settings (E8, schema 12 and 13). */
 export interface AutomationSettings {
   /** Preselected composer preset; '' = first 'claude' preset, else the first one. */
   defaultAgentPresetId: string
   /** Composer "Create another" switch. */
   composerCreateAnother: boolean
+  /** The CLI never reads, writes or creates consoles with a Connection Profile (schema 13). */
+  cliProtectSsh: boolean
+  /** Add `<dataDir>/bin` to the user PATH (schema 13; forced off in the portable). */
+  cliUserPath: boolean
+  /** A missed run still fires once if it is at most this late, 0..1440 min (schema 13). */
+  scheduleGraceMin: number
+  /** Max wait for a busy agent before `skipped_busy`, 1..240 min (schema 13). */
+  scheduleMaxWaitMin: number
+  /** Desktop notification per schedule run (schema 13). */
+  scheduleNotify: boolean
 }
 
 /** Headless snapshot engine (E6-FR-01, schema 12). 'off' also disables scrollback persistence. */
@@ -573,6 +674,12 @@ export interface Settings {
   explorerMenu: boolean
   /** Update card dismissed for this version (installable ones only). Schema 12. */
   updateDismissedVersion: string
+  /** `snaos` CLI available in the consoles (E8-FR-12). Schema 13. */
+  cliEnabled: boolean
+  /** Root for console worktrees; '' = dataDir()/worktrees (E7-FR-28). Schema 13. */
+  worktreesRoot: string
+  /** Hibernate idle agent consoles after N minutes; 0 = off, else 5..1440 (E5-FR-25). Schema 13. */
+  hibernateIdleMinutes: number
   restoreLastWorkspace: boolean
   confirmCloseRunning: boolean
   /** Installed build only: hide to tray on window close instead of quitting. */
@@ -596,7 +703,7 @@ export interface Settings {
   notifications: NotificationSettings
   /** Agent behavior (resume, awake display, sidebar rows, shortcuts). Schema 11. */
   agents: AgentSettings
-  /** Workspace composer defaults. Schema 12. */
+  /** Workspace composer defaults (schema 12), CLI and schedule options (schema 13). */
   automation: AutomationSettings
 }
 

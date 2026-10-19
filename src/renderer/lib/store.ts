@@ -81,6 +81,9 @@ const DEFAULT_SETTINGS: Settings = {
   gitChip: true,
   explorerMenu: false,
   updateDismissedVersion: '',
+  cliEnabled: true,
+  worktreesRoot: '',
+  hibernateIdleMinutes: 0,
   restoreLastWorkspace: true,
   confirmCloseRunning: true,
   autoCheckUpdates: true,
@@ -109,6 +112,8 @@ const DEFAULT_SETTINGS: Settings = {
   remote: {
     enabled: false,
     port: 4517,
+    phoneFit: true,
+    https: { enabled: false, mode: 'tailscaleServe' },
   },
   notifications: {
     enabled: true,
@@ -137,8 +142,17 @@ const DEFAULT_SETTINGS: Settings = {
     resumeNudge: false,
     resumeNudgeText: '',
     sidebarSort: 'manual',
+    cacheTimer: { enabled: false, ttlMinutes: 5 },
   },
-  automation: { defaultAgentPresetId: '', composerCreateAnother: false },
+  automation: {
+    defaultAgentPresetId: '',
+    composerCreateAnother: false,
+    cliProtectSsh: true,
+    cliUserPath: false,
+    scheduleGraceMin: 120,
+    scheduleMaxWaitMin: 30,
+    scheduleNotify: false,
+  },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */
