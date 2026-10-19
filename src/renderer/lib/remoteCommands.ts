@@ -10,6 +10,7 @@ import { getPtyId, killPanePtys } from './ptyRegistry'
 import { fitBaselineOf, useFitStore } from './fitStore'
 import { broadcastToWorkspace } from './broadcastPrompt'
 import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
+import { wakePane } from './hibernation'
 import { runRemoteQuickCommand } from './quickCommands'
 import { runOpenPath, runOpenUrl } from './remoteOpen'
 import { runCreatePaneResume } from './remoteResume'
@@ -130,7 +131,11 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
       }
       // E5-FR-11: true resumes (falls back to a new chat with the chip when the
       // record is gone), false forgets the session, absent = the header button.
-      if (action.resume === true) restartResume(action.paneId)
+      // A sleeping console wakes through the overlay's path (E5-FR-26), so a
+      // scheduled prompt waits for the resumed agent; a phone `sub` never gets here.
+      if (action.resume === true) {
+        if (!wakePane(action.paneId)) restartResume(action.paneId)
+      }
       else if (action.resume === false) restartFresh(action.paneId)
       else restartFromButton(action.paneId)
       return { ok: true }

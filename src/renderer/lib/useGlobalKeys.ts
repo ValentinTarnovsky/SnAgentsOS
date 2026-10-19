@@ -162,6 +162,13 @@ function runAction(id: ActionId): void {
     case 'toggleChanges':
       toggleChangesPanel()
       break
+    case 'agentsBoard': {
+      // E5-FR-27: never over a modal; the board closes itself on Esc or a pick.
+      const agents = useAgentStore.getState()
+      if (agents.view === 'board') agents.setView('grid')
+      else if (!quickBlocked() && !s.quickPopoverOpen) agents.setView('board')
+      break
+    }
   }
 }
 

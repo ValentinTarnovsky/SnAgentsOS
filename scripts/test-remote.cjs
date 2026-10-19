@@ -354,7 +354,9 @@ async function testNotify() {
 
   // E2-FR-52: subscribed + visible + fresh.
   check(!w.manager.isPaneViewed('p1'), 'an authed phone that is not subscribed does not watch p1')
+  check(w.manager.subscribedPaneIds().size === 0, 'E5-FR-25: no phone subscription yet')
   ws.msg({ type: 'sub', paneId: 'p1' })
+  check(w.manager.subscribedPaneIds().has('p1') && !w.manager.subscribedPaneIds().has('p2'), 'E5-FR-25: a sub (visible or not) keeps p1 out of hibernation')
   check(!w.manager.isPaneViewed('p1'), 'subscribed but no visibility yet: not watching')
   ws.msg({ type: 'visibility', visible: true })
   check(w.manager.isPaneViewed('p1') && !w.manager.isPaneViewed('p2'), 'subscribed and visible: watching p1 only')
@@ -377,6 +379,7 @@ async function testNotify() {
   check(parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'visibility', visible: true })) && !parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'visibility', visible: 'yes' })), 'the visibility schema takes a boolean only')
   w.manager.applyConfig({ enabled: false, port: 4600 })
   check(w.manager.deepLinkBase() === null && !w.manager.isPaneViewed('p1'), 'server off: no deep link and nobody watching')
+  check(w.manager.subscribedPaneIds().size === 0, 'server off: no subscriptions hold hibernation back')
 }
 
 /**

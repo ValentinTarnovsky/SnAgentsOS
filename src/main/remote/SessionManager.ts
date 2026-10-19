@@ -873,9 +873,24 @@ export class SessionManager implements PtySink {
     return false
   }
 
-  /** At least one `sub` (the Chat view's `chatSub` joins here when it lands). */
+  /** At least one `sub` or `chatSub` (FR-44: either one makes a visible session). */
   private watchesAny(session: Session): boolean {
-    return session.subs.size > 0
+    return session.subs.size > 0 || session.chatSubs.size > 0
+  }
+
+  /**
+   * Panes an authenticated phone is subscribed to (E5-FR-25): hibernation
+   * never puts them to sleep. A sub itself never wakes a sleeping pane. The
+   * Chat view counts too (it swaps the `sub` for a `chatSub`).
+   */
+  subscribedPaneIds(): Set<string> {
+    const ids = new Set<string>()
+    for (const session of this.sessions) {
+      if (!session.authed) continue
+      for (const paneId of session.subs) ids.add(paneId)
+      for (const paneId of session.chatSubs) ids.add(paneId)
+    }
+    return ids
   }
 
   connectedDeviceIds(): Set<string> {

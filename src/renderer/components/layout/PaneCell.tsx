@@ -40,6 +40,8 @@ import { scheduleNextLabel } from '@/lib/scheduleFormat'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { PaneErrorBoundary } from '@/components/common/ErrorBoundary'
 import { ResumeChip } from '@/components/agents/ResumeChip'
+import { SleepingOverlay } from '@/components/agents/SleepingOverlay'
+import { CacheChip } from '@/components/agents/CacheChip'
 import { useAgentStore } from '@/lib/agentStore'
 import { useGitStore } from '@/lib/gitStore'
 import { workspaceGitKey } from '@/lib/gitChip'
@@ -114,6 +116,8 @@ export function PaneCell({
   const closedCount = useAgentStore((s) => s.closedStack.length)
   // Held back by the "resume interrupted chats?" dialog (E5-FR-12).
   const gated = useAgentStore((s) => !!s.gated[pane.id])
+  // Put to sleep by hibernation (E5-FR-25): the overlay stands in for the terminal.
+  const sleepInfo = useAgentStore((s) => s.sleeping[pane.id])
   // Agent topic (or first prompt) after the title, dimmed (E5-FR-21).
   const liveTopic = useAppStore((s) => s.paneStatus[pane.id]?.topic || s.paneStatus[pane.id]?.firstPrompt)
   const topicRaw = liveTopic || session?.topic || session?.firstPrompt
@@ -371,6 +375,7 @@ export function PaneCell({
           </span>
         )}
         {wt && <PaneWorktreeChip pane={pane} />}
+        <CacheChip paneId={pane.id} />
         {exited && (
           <span
             data-pane-exited
@@ -454,6 +459,8 @@ export function PaneCell({
           <div data-pane-worktree-checking={pane.id} className="flex h-full items-center justify-center text-xs text-text-secondary">
             {t('worktree.checking')}
           </div>
+        ) : sleepInfo ? (
+          <SleepingOverlay paneId={pane.id} workspaceId={workspace.id} info={sleepInfo} />
         ) : mounted ? (
           // A render failure swaps only the terminal for a fallback; the pty
           // keeps running and [Reload console] reattaches (E4-FR-19).
