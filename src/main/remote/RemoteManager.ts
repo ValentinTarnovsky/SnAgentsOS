@@ -11,6 +11,10 @@
  *    straight from main, so a throttled or reloading renderer never delays them,
  *  - the renderer is the control-plane executor: control actions are relayed to
  *    it and answered within 10s, or reported as unavailable.
+ *
+ * Phone-fit (E3 M11): fitPane / releaseFit go through the FitController
+ * first (owner, grace, auto restore); it outlives a server restart so the
+ * server going off can give every pane back before the sockets close.
  */
 import { randomUUID } from 'crypto'
 import { hostname } from 'os'
@@ -19,8 +23,10 @@ import { CH } from '@shared/ipc-channels'
 import type {
   PairingQrPayload,
   RemoteCommand,
+  RemoteCommandFit,
   RemoteEndpoint,
   RemoteCommandResult,
+  RemoteFitReleaseReq,
   RemoteServerState,
   RemoteServerStatus,
   RemoteUiState,
@@ -29,6 +35,7 @@ import type { RemoteCtlAction, RemotePaneStatus, RemoteStateSnapshot } from '@sh
 import type { ClaudePaneState, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
 import type { PtyManager } from '../pty/PtyManager'
 import { DeviceRegistry } from './DeviceRegistry'
+import { FitController } from './FitController'
 import { listEndpoints } from './network'
 import { PairingService, RateLimiter } from './PairingService'
 import { RemoteServer } from './RemoteServer'
@@ -111,6 +118,12 @@ export class RemoteManager {
   /** paneStatus coalesce: latest status held per pane until its timer fires. */
   private readonly statusHeld = new Map<string, RemotePaneStatus | null>()
   private readonly statusTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** settings.remote.phoneFit (E3-FR-20), from the last applyConfig. */
+  private phoneFit = true
+  /** The renderer navigated (reload, crash recovery): its next snapshot re-learns the owners (FR-23). */
+  private refitPending = false
+  /** Phone-fit owners, grace and auto restore (E3 M11). */
+  readonly fit: FitController
 
   constructor(
     private readonly ptyManager: PtyManager,
@@ -123,6 +136,21 @@ export class RemoteManager {
     /** Reachable addresses for a port (deepLinkBase, E2-FR-42); injectable for tests. */
     private readonly getEndpoints: (port: number) => RemoteEndpoint[] = listEndpoints,
   ) {
+    this.fit = new FitController({
+      dispatch: (action, fit) => this.executeCommand(action, undefined, fit),
+      enabled: () => this.phoneFit,
+      sizeOf: (paneId) => this.ptyManager.sizeOf(paneId),
+      ptyIdOf: (paneId) => this.ptyManager.ptyIdForPane(paneId),
+      onReleased: (paneId) => {
+        // Every phone, viewing the pane or not (FR-18), even without a resize.
+        const size = this.ptyManager.sizeOf(paneId)
+        if (size) this.sessions?.broadcastFitState(paneId, 'desktop', size.cols, size.rows, true)
+      },
+      onFitted: (paneId) => {
+        const size = this.ptyManager.sizeOf(paneId)
+        if (size) this.sessions?.broadcastFitState(paneId, 'phone', size.cols, size.rows)
+      },
+    })
     this.pairing = new PairingService({
       registry: this.registry,
       onChange: () => this.scheduleUi(),
@@ -142,6 +170,10 @@ export class RemoteManager {
 
   /** Diff the desired config against the live server; start/stop/restart. */
   applyConfig(cfg: RemoteSettings): void {
+    const phoneFit = cfg.phoneFit !== false
+    // Turning phone-fit off gives every phone-sized pane back at once.
+    if (this.phoneFit && !phoneFit) void this.fit.releaseAll()
+    this.phoneFit = phoneFit
     const port = this.clampPort(cfg.port)
     if (!cfg.enabled) {
       this.stopServer('disabled')
@@ -170,6 +202,7 @@ export class RemoteManager {
       },
       executeCommand: (action, deviceName) => this.executeCommand(action, deviceName),
       onConnectionsChanged: () => this.onConnectionsChanged(),
+      fit: this.fit,
     })
     this.ptyManager.addSink(this.sessions)
     // A pty spawning/exiting flips a pane's `running`; re-broadcast so phones
@@ -193,6 +226,8 @@ export class RemoteManager {
       if (this.statusState !== 'stopped') this.setStatus('stopped')
       return
     }
+    // E3-FR-20: every phone-sized pane goes back to the desktop first.
+    void this.fit.releaseAll()
     this.sessions?.shutdownAll(reason)
     // dispose (not just cancelCode) so a pending 60s approval + its timer are
     // cleared too; otherwise it would block all new pairings until it expires.
@@ -222,6 +257,8 @@ export class RemoteManager {
    * but never awaits socket closes, so it cannot delay the quit.
    */
   shutdown(reason: 'quit' | 'disabled'): void {
+    // Quitting: the renderer goes too, so there is nothing to restore into.
+    this.fit.dispose()
     this.sessions?.shutdownAll(reason)
     this.pairing.dispose()
     for (const pending of this.pendingCommands.values()) clearTimeout(pending.timer)
@@ -235,7 +272,26 @@ export class RemoteManager {
   /** Renderer pushed a fresh snapshot: cache it and broadcast to every phone. */
   pushState(snapshot: RemoteStateSnapshot): void {
     this.rawSnapshot = snapshot
+    // E3-FR-23: the first snapshot of a reloaded renderer means its executor is
+    // wired again; it gets the fitPane of every pane a phone still sizes.
+    if (this.refitPending) {
+      this.refitPending = false
+      this.fit.refitAll()
+    }
     this.broadcastSnapshot()
+  }
+
+  /** The window's main frame navigated (reload, crash recovery). */
+  onRendererNavigate(): void {
+    this.refitPending = true
+  }
+
+  // --- Phone-fit (E3 M11) -------------------------------------------------------
+
+  /** remote:fitRelease: the strip's [Recover] / [Restore all] or a real key/paste (FR-17/19). */
+  fitRelease(req: RemoteFitReleaseReq): void {
+    if ('all' in req) void this.fit.releaseAll()
+    else void this.fit.release(req.paneId)
   }
 
   /**
@@ -352,7 +408,7 @@ export class RemoteManager {
   // --- Control-plane relay --------------------------------------------------
 
   /** Relay a control action to the renderer; resolve on its result or timeout. */
-  private executeCommand(action: RemoteCtlAction, deviceName?: string): Promise<RemoteCommandResult> {
+  private executeCommand(action: RemoteCtlAction, deviceName?: string, fit?: RemoteCommandFit): Promise<RemoteCommandResult> {
     const wc = this.getWebContents()
     if (!wc || wc.isDestroyed()) {
       return Promise.resolve({ id: '', ok: false, error: 'desktop_unavailable' })
@@ -365,6 +421,7 @@ export class RemoteManager {
       }, COMMAND_TIMEOUT_MS)
       this.pendingCommands.set(id, { resolve, timer })
       const cmd: RemoteCommand = deviceName ? { id, action, deviceName: deviceName.slice(0, 48) } : { id, action }
+      if (fit) cmd.fit = fit
       wc.send(CH.REMOTE_CONTROL_CMD, cmd)
     })
   }

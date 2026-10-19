@@ -552,7 +552,25 @@ export interface RemoteCommand {
    * authenticated session and the DeviceRegistry, never from the payload.
    */
   deviceName?: string
+  /** fitPane / releaseFit only (E3 M11, R30-04): what main knows about the pane. */
+  fit?: RemoteCommandFit
 }
+
+/**
+ * Main's extra data for the phone-fit ctls (amendment R30-04, additive): the
+ * executor resizes the pty by `ptyId` even when the pane is not mounted;
+ * `chat` = the owner reads it as Chat (the strip says "(Chat)", E3-FR-21);
+ * `baseline` = the pty size before the phone took it, the fallback when the
+ * renderer has not measured the pane since.
+ */
+export interface RemoteCommandFit {
+  ptyId?: string
+  chat?: boolean
+  baseline?: { cols: number; rows: number }
+}
+
+/** remote:fitRelease (E3-FR-17/19): one pane or every phone-sized pane. */
+export type RemoteFitReleaseReq = { paneId: string } | { all: true }
 
 export interface RemoteCommandResult {
   id: string
@@ -778,6 +796,12 @@ export interface SnApi {
     firewallFix(): Promise<FirewallFixRes>
     /** Open Windows network settings (ms-settings:network-status). */
     openNetworkSettings(): void
+    /**
+     * Give a phone-sized pane (or all of them) back to the desktop (E3-FR-17/19):
+     * the strip's [Recover] / [Restore all] and a real key or paste in the pane.
+     * A no-op without the remote server.
+     */
+    fitRelease(req: RemoteFitReleaseReq): void
   }
   /** Keep the PC awake while agents work (E5-FR-23/24). */
   power: {

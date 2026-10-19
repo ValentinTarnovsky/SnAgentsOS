@@ -91,6 +91,15 @@ export function registerRemoteIpc(manager: RemoteManager): void {
 
   ipcMain.handle(CH.REMOTE_FIREWALL_FIX, (): Promise<FirewallFixRes> => firewall.fix())
 
+  // E3-FR-17/19: the strip or a real key/paste gives the size back. The shape
+  // is checked here; anything else is dropped.
+  ipcMain.on(CH.REMOTE_FIT_RELEASE, (_e, req: unknown) => {
+    if (!req || typeof req !== 'object') return
+    const r = req as { paneId?: unknown; all?: unknown }
+    if (r.all === true) manager.fitRelease({ all: true })
+    else if (typeof r.paneId === 'string' && r.paneId.length > 0 && r.paneId.length <= 128) manager.fitRelease({ paneId: r.paneId })
+  })
+
   ipcMain.on(CH.REMOTE_OPEN_NETWORK_SETTINGS, () => {
     if (process.platform === 'win32') void shell.openExternal('ms-settings:network-status').catch(() => undefined)
   })

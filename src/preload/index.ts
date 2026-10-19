@@ -24,6 +24,7 @@ import type {
   RecoveryInfo,
   RemoteCommand,
   RemoteCommandResult,
+  RemoteFitReleaseReq,
   RemoteUiState,
   FirewallFixRes,
   FirewallStatus,
@@ -195,6 +196,7 @@ const api: SnApi = {
       ipcRenderer.invoke(CH.REMOTE_FIREWALL_CHECK, force === true) as Promise<FirewallStatus>,
     firewallFix: () => ipcRenderer.invoke(CH.REMOTE_FIREWALL_FIX) as Promise<FirewallFixRes>,
     openNetworkSettings: () => ipcRenderer.send(CH.REMOTE_OPEN_NETWORK_SETTINGS),
+    fitRelease: (req: RemoteFitReleaseReq) => ipcRenderer.send(CH.REMOTE_FIT_RELEASE, req),
   },
   power: {
     setConfig: (mode: AwakeMode) => ipcRenderer.send(CH.POWER_SET_CONFIG, mode),

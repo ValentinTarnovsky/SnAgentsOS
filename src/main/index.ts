@@ -384,6 +384,8 @@ function openMainWindow(): void {
   win.on('responsive', () => rendererRecovery.onResponsive())
   win.webContents.on('did-start-navigation', (details) => {
     if (details.isMainFrame) ptyManager.resumeRendererPaused()
+    // E3-FR-23: a reloaded renderer re-learns which panes a phone sizes.
+    if (details.isMainFrame && !details.isSameDocument) remoteManager.onRendererNavigate()
   })
 
   let forceClose = false
