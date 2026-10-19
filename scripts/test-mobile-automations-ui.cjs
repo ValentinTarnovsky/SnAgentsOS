@@ -55,9 +55,9 @@ const base = {
   { id: 'w3', name: 'Docs', taskState: 'done', layoutOrder: [], panes: [] },
  ],
  schedules: [
-  { workspaceId: 'w1', paneId: 'c1', time: '09:00', recurrence: { kind: 'weekdays' }, enabled: true, dueAt: due.getTime(), last: { at: now - 3 * HOUR, status: 'sent' } },
-  { workspaceId: 'w2', paneId: 'd1', time: '07:15', recurrence: { kind: 'hourly' }, enabled: false, dueAt: due.getTime() },
-  { workspaceId: 'w2', paneId: 'gone', time: '07:15', recurrence: { kind: 'daily' }, enabled: true, dueAt: due.getTime() },
+  { workspaceId: 'w1', paneId: 'c1', time: '09:00', recurrence: { kind: 'weekdays' }, dueAt: due.getTime(), enabled: true, waitIdle: true, lastRun: { at: now - 3 * HOUR, status: 'sent', trigger: 'scheduled' } },
+  { workspaceId: 'w2', paneId: 'd1', time: '07:15', recurrence: { kind: 'hourly' }, dueAt: due.getTime(), enabled: false, waitIdle: true },
+  { workspaceId: 'w2', paneId: 'gone', time: '07:15', recurrence: { kind: 'daily' }, dueAt: due.getTime(), enabled: true, waitIdle: true },
  ],
 };
 const setSnap = snap => flushSync(() => store.getState().update({ snapshot: snap }));
@@ -118,6 +118,12 @@ window.runMain = async () => {
  check(sw('d1').getAttribute('aria-checked') === 'false' && store.getState().toasts.some(t => t.text === 'That automation no longer exists on the PC'), 'a failed ack snaps back with a toast');
  ackFor = () => ({ ok: true });
 
+ store.getState().update({ toasts: [] });
+ ackFor = () => ({ ok: false, error: 'no_schedule' });
+ click(sw('d1')); await frames();
+ check(sw('d1').getAttribute('aria-checked') === 'false' && store.getState().toasts.some(t => t.text === 'That automation no longer exists on the PC'), 'a toggle refused with no_schedule says it is gone');
+ ackFor = () => ({ ok: true });
+
  // Run now: sent once, then "Waiting..." while the desktop's run waits.
  ackFor = () => 'hold';
  const run = () => row('c1').querySelector('[data-auto-run]');
@@ -131,9 +137,9 @@ window.runMain = async () => {
  check(run().textContent === 'Waiting...' && run().disabled && run().dataset.pending === 'true', '"Waiting..." while the desktop waits for a free agent');
  setSnap(paused); await frames();
  check(run().textContent === 'Run now' && !run().disabled, 'back to Run now when it is done');
- ackFor = () => ({ ok: false, error: 'no_prompt' });
+ ackFor = () => ({ ok: false, error: 'no_schedule' });
  click(row('d1').querySelector('[data-auto-run]')); await frames();
- check(store.getState().toasts.some(t => t.text === 'This automation has no prompt to send'), 'no_prompt has its own toast');
+ check(store.getState().toasts.some(t => t.text === 'That automation no longer exists or has no prompt to send'), 'a run refused with no_schedule (gone or an empty prompt) has its own toast');
  ackFor = () => ({ ok: true });
 
  // Empty state, then back to Home.

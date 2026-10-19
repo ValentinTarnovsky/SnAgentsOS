@@ -96,8 +96,8 @@ export interface RemotePaneInfo {
   /** Agent status overlaid by main on every state / authOk (E1-FR-03). */
   status?: RemotePaneStatus
   /**
-   * v3.1 amendment (E8-FR-19): the console's `snaos status` line, <= 120,
-   * transient (gone after a restart or close). Absent = none.
+   * E8-FR-19 (v3.1, R31-00): the console's `snaos status` line, <= 120 and
+   * one line, from the renderer's transient statusLineStore. Absent = none.
    */
   statusLine?: string
 }
@@ -110,31 +110,34 @@ export interface RemoteWorkspaceInfo {
   panes: RemotePaneInfo[]
   /** Git chip of the workspace cwd (E7-FR-09). Omitted without a repo, on error or with settings.gitChip off. */
   git?: RemoteGitChip
-  // --- v3.1 amendment (E8-FR-11) ---
-  /** The workspace note, normalized and <= 140. Absent = none. */
+  /** E8-FR-11 (v3.1, R31-00): the workspace note (`workspaces[].note`, <= 140). Absent = none. */
   note?: string
-  /** The user's task state (not the agent state). Absent = none. */
+  /** E8-FR-11 (v3.1, R31-00): the user task state (`workspaces[].taskState`). Absent = none. */
   taskState?: WorkspaceTaskState
 }
 
 /**
- * v3.1 amendment (E8-FR-32): one console automation as the phone's
- * Automations section lists it. Never carries the prompt text or the run
- * history, only what the row shows.
+ * E8-FR-32 (v3.1, R31-00): one console schedule as the phone's Automations
+ * section shows it. Read-only mirror of `pane.schedule` with the absent
+ * fields resolved; it never carries the prompt text (the phone can only
+ * toggle it and run it now, never edit it).
  */
 export interface RemoteScheduleInfo {
   workspaceId: string
   paneId: string
-  /** "HH:MM" local to the desktop (hourly: only the minute counts). */
+  /** "HH:MM" wall-clock time the user picked, on the desktop clock. */
   time: string
+  /** Repeat rule; an absent `recurrence` travels as `{ kind: 'once' }`. */
   recurrence: ScheduleRecurrence
-  /** false = paused ("Paused" instead of the next run). */
-  enabled: boolean
-  /** Next run, desktop clock (epoch ms). */
+  /** Epoch ms of the next run (desktop clock). Meaningless while `enabled` is false. */
   dueAt: number
-  /** The most recent run. Absent = never ran. */
-  last?: { at: number; status: ScheduleRunStatus }
-  /** A "Run now" waits for a free agent or is being sent. */
+  /** The Active switch (`schedule.enabled`, absent = true). */
+  enabled: boolean
+  /** Wait for the agent to be free before sending (`schedule.waitIdle`, absent = true). */
+  waitIdle: boolean
+  /** Most recent run of `schedule.history`, if any. */
+  lastRun?: { at: number; status: ScheduleRunStatus; trigger: 'scheduled' | 'manual' }
+  /** A "Run now" (desktop or phone) is waiting for the agent; nothing was sent yet. */
   runPending?: boolean
 }
 
@@ -213,7 +216,10 @@ export interface RemoteStateSnapshot {
    * phone to confirm `mountWorkspace` first (E2-FR-06/12).
    */
   mountedWorkspaceIds?: string[]
-  /** v3.1 amendment (E8-FR-32): every console automation, in sidebar order. Absent = an older desktop. */
+  /**
+   * E8-FR-32 (v3.1, R31-00): every console with a schedule, in sidebar order
+   * (workspaces, then panes). Absent = an older desktop; `[]` = none.
+   */
   schedules?: RemoteScheduleInfo[]
 }
 
@@ -314,14 +320,19 @@ export type RemoteCtlAction =
    * no_notes, too_large (over 50 notes or 32KB of text).
    */
   | { kind: 'sendReviewNotes'; workspaceId: string; paneId: string; notes: Array<{ file: string; lines: string; comment: string }>; enter: boolean }
-  // --- v3.1 amendment (E8-FR-32): the phone's Automations section ---
+  // --- E8-FR-32 phone Automations (v3.1, R31-00) ---
   /**
-   * "Run now" of a console's automation: the desktop's own manual run (waits
-   * for a free agent, never moves the next run). Acks: not_found (pane outside
-   * workspaceId), no_schedule, no_prompt (an empty saved prompt).
+   * "Run now": the same path as the desktop's button, so the next run
+   * (`dueAt`) never moves and the phone sends no text (the desktop uses the
+   * stored prompt). Idempotent while a run waits (ack ok, `info: 'pending'`).
+   * Ack errors: not_found (pane outside workspaceId), no_schedule (no
+   * schedule or an empty prompt).
    */
   | { kind: 'scheduleRun'; workspaceId: string; paneId: string }
-  /** The "Active" switch: pauses or resumes (a resume re-arms a past time). Acks: not_found, no_schedule. */
+  /**
+   * The Active switch: pauses without deleting; turning it on re-arms the
+   * next run like the desktop switch. Ack errors: not_found, no_schedule.
+   */
   | { kind: 'scheduleToggle'; workspaceId: string; paneId: string; enabled: boolean }
 
 // --- Git API for the phone's Changes screen (E7-FR-22..26) ---

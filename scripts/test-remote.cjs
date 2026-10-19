@@ -824,12 +824,14 @@ async function testAutomationSurface() {
   check(!('statusLine' in c2), 'a console without a line has no statusLine')
   check(Array.isArray(snap.schedules) && snap.schedules.map(s => s.paneId).join() === 'c1,d1', 'schedules lists every console automation in sidebar order (E8-FR-32)')
   const s1 = snap.schedules[0], s2 = snap.schedules[1]
-  check(s1.workspaceId === 'w1' && s1.time === '09:00' && s1.recurrence.kind === 'weekdays' && s1.enabled === true && s1.dueAt === DUE, 'a row carries time, recurrence, enabled and dueAt')
-  check(s1.last.at === 5000 && s1.last.status === 'sent' && Object.keys(s1.last).length === 2, 'last is the newest run, status and time only')
+  check(s1.workspaceId === 'w1' && s1.time === '09:00' && s1.recurrence.kind === 'weekdays' && s1.enabled === true && s1.waitIdle === true && s1.dueAt === DUE, 'a row carries time, recurrence, enabled, waitIdle and dueAt')
+  check(s1.lastRun.at === 5000 && s1.lastRun.status === 'sent' && s1.lastRun.trigger === 'manual' && Object.keys(s1.lastRun).sort().join() === 'at,status,trigger', 'lastRun is the newest run: time, status and trigger only (no reason)')
+  check(!('last' in s1), 'the row uses the contract name lastRun')
   check(!JSON.stringify(snap.schedules).includes('corre los tests') && !('history' in s1) && !('prompt' in s1), 'neither the prompt nor the history leave the desktop')
-  check(s2.workspaceId === 'w2' && s2.enabled === false && s2.recurrence.kind === 'hourly' && !('last' in s2) && !('runPending' in s2), 'a paused schedule that never ran')
+  check(s2.workspaceId === 'w2' && s2.enabled === false && s2.recurrence.kind === 'hourly' && !('lastRun' in s2) && !('runPending' in s2), 'a paused schedule that never ran')
   const legacy = r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedule: { time: '10:00', prompt: 'p', dueAt: 1 } }] }], () => false)
-  check(legacy[0].recurrence.kind === 'once' && legacy[0].enabled === true, 'a one-shot schedule without the schema 13 fields reads as once and active')
+  check(legacy[0].recurrence.kind === 'once' && legacy[0].enabled === true && legacy[0].waitIdle === true, 'a one-shot schedule without the schema 13 fields reads as once, active and waiting for idle')
+  check(r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedule: { time: '10:00', prompt: 'p', dueAt: 1, waitIdle: false } }] }], () => false)[0].waitIdle === false, 'waitIdle false travels as false')
 
   // The transient line lives in its own store: clearing it pushes again.
   const before = states.length
@@ -878,10 +880,11 @@ async function testAutomationSurface() {
   check(ack.ok && submits.length === 1 && submits[0].ptyId === 'pty-c1' && submits[0].text === 'corre los tests' && submits[0].enter === true, 'a free agent gets the saved prompt with Enter')
   check(ran.dueAt === DUE && ran.history.length === 4 && ran.history.some(h => h.trigger === 'manual' && h.status === 'sent' && h.at > 5000), 'the run is logged as manual and the next run does not move')
   await wait(150)
-  check(states.at(-1).schedules[0].last.status === 'sent' && states.at(-1).schedules[0].last.at > 5000 && states.at(-1).schedules[0].dueAt === DUE, 'the phone sees the new last run and the same next run')
+  check(states.at(-1).schedules[0].lastRun.status === 'sent' && states.at(-1).schedules[0].lastRun.at > 5000 && states.at(-1).schedules[0].dueAt === DUE, 'the phone sees the new last run and the same next run')
   stop()
   S.getState().setPaneSchedule('w2', 'd1', { ...pane('d1').schedule, prompt: '' })
-  check(r.runScheduleCtl({ kind: 'scheduleRun', workspaceId: 'w2', paneId: 'd1' }).error === 'no_prompt', 'a schedule with an empty prompt answers no_prompt')
+  check(r.runScheduleCtl({ kind: 'scheduleRun', workspaceId: 'w2', paneId: 'd1' }).error === 'no_schedule', 'a schedule with an empty prompt answers no_schedule (CONTRATOS v3.1)')
+  check(r.runScheduleCtl({ kind: 'scheduleToggle', workspaceId: 'w2', paneId: 'd1', enabled: false }).ok, 'an empty prompt can still be paused')
 }
 
 async function testAutomationRelay() {
@@ -899,10 +902,11 @@ async function testAutomationRelay() {
 
   // Main relays both to the renderer as they are and keeps the new snapshot fields.
   const w = world()
+  check(!w.api.isRateLimitedMsg({ type: 'ctl', action: { kind: 'scheduleRun' } }) && !w.api.isRateLimitedMsg({ type: 'ctl', action: { kind: 'scheduleToggle' } }), 'neither ctl sits behind the token bucket (CONTRATOS R31-00, like runQuickCommand)')
   const snap = {
     ...snapshot,
     workspaces: snapshot.workspaces.map((x, i) => (i === 0 ? { ...x, note: 'esperando CI', taskState: 'review', panes: x.panes.map(p => ({ ...p, statusLine: 'corriendo tests' })) } : x)),
-    schedules: [{ workspaceId: 'w1', paneId: 'p1', time: '09:00', recurrence: { kind: 'weekdays' }, enabled: true, dueAt: 1, runPending: true }],
+    schedules: [{ workspaceId: 'w1', paneId: 'p1', time: '09:00', recurrence: { kind: 'weekdays' }, dueAt: 1, enabled: true, waitIdle: true, runPending: true }],
   }
   w.manager.pushState(snap)
   const { ws } = await pair(w)

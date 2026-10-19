@@ -227,7 +227,10 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
  * for a free agent, mounts a console of a workspace that is not mounted,
  * never moves `dueAt`); the switch pauses or re-arms. The pane must belong to
  * `workspaceId` (not_found) and have a schedule (no_schedule); a run also
- * needs a saved prompt (no_prompt). Exported for tests.
+ * needs a saved prompt (no_schedule as well, CONTRATOS v3.1). A run asked
+ * again while one waits is a no-op ok ack (the contract's `info: 'pending'`
+ * cannot travel: `ctlAck.info` is a number; the phone reads `runPending`).
+ * Exported for tests.
  */
 export function runScheduleCtl(action: Extract<RemoteCtlAction, { kind: 'scheduleRun' | 'scheduleToggle' }>): CmdResult {
   const ws = useAppStore.getState().workspaces.find((w) => w.id === action.workspaceId)
@@ -238,7 +241,7 @@ export function runScheduleCtl(action: Extract<RemoteCtlAction, { kind: 'schedul
     setScheduleEnabled(pane.id, action.enabled)
     return { ok: true }
   }
-  return runScheduleNow(pane.id) ? { ok: true } : { ok: false, error: 'no_prompt' }
+  return runScheduleNow(pane.id) ? { ok: true } : { ok: false, error: 'no_schedule' }
 }
 
 /**

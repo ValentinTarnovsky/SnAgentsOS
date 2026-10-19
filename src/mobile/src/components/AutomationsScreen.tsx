@@ -70,7 +70,7 @@ function AutomationCard({
 }): ReactNode {
   const { schedule, workspaceName, paneTitle } = row
   const pending = !!schedule.runPending
-  const last = schedule.last
+  const last = schedule.lastRun
   return (
     <div
       data-auto-row={schedule.paneId}
@@ -165,7 +165,7 @@ export function AutomationsBody(): ReactNode {
       delete next[paneId]
       return next
     })
-    store.getState().setToast(automationErrorText(res.error))
+    store.getState().setToast(automationErrorText('scheduleToggle', res.error))
   }
 
   const run = async (row: AutomationRow): Promise<void> => {
@@ -177,7 +177,7 @@ export function AutomationsBody(): ReactNode {
     const res = await client.sendCtl({ kind: 'scheduleRun', workspaceId, paneId })
     inFlight.current.delete(paneId)
     patch(setRunning, paneId, false)
-    store.getState().setToast(res.ok ? t('auto.runStarted', { pane: row.paneTitle }) : automationErrorText(res.error))
+    store.getState().setToast(res.ok ? t('auto.runStarted', { pane: row.paneTitle }) : automationErrorText('scheduleRun', res.error))
   }
 
   if (rows.length === 0) {

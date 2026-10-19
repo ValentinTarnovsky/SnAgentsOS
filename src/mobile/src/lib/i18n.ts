@@ -72,7 +72,6 @@ const en = {
   'history.notFound': 'That session no longer exists on the PC',
   'history.resumeFailed': 'Could not resume the session',
   // v3.1: workspace note and task state (E8-FR-11), console automations (E8-FR-32)
-  'note.label': 'Workspace note',
   'task.todo': 'To do',
   'task.doing': 'Doing',
   'task.review': 'In review',
@@ -91,7 +90,7 @@ const en = {
   'auto.waitingHint': 'Waiting on the PC for the agent to be free',
   'auto.runStarted': 'Run started on the PC: {pane}',
   'auto.gone': 'That automation no longer exists on the PC',
-  'auto.noPrompt': 'This automation has no prompt to send',
+  'auto.noPrompt': 'That automation no longer exists or has no prompt to send',
   'auto.failed': 'Could not change the automation',
   'auto.rec.once': 'Once',
   'auto.rec.daily': 'Daily',
@@ -735,7 +734,6 @@ const es: Record<Key, string> = {
   'history.notFound': 'Esa sesion ya no existe en la PC',
   'history.resumeFailed': 'No se pudo retomar la sesion',
   // v3.1: nota y estado del workspace (E8-FR-11), automatizaciones (E8-FR-32)
-  'note.label': 'Nota del workspace',
   'task.todo': 'Por hacer',
   'task.doing': 'En curso',
   'task.review': 'En revision',
@@ -754,7 +752,7 @@ const es: Record<Key, string> = {
   'auto.waitingHint': 'En la PC, esperando a que el agente este libre',
   'auto.runStarted': 'Ejecucion iniciada en la PC: {pane}',
   'auto.gone': 'Esa automatizacion ya no existe en la PC',
-  'auto.noPrompt': 'Esta automatizacion no tiene prompt para enviar',
+  'auto.noPrompt': 'Esa automatizacion ya no existe o no tiene prompt para enviar',
   'auto.failed': 'No se pudo cambiar la automatizacion',
   'auto.rec.once': 'Una vez',
   'auto.rec.daily': 'Diario',
