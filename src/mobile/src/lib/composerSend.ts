@@ -12,7 +12,7 @@
  */
 import type { PaneType } from '@shared/types'
 import type { RemotePaneStatus } from '@shared/remote-protocol'
-import { PASTE_ENTER_DELAY_MS, PASTE_FRAME_MAX, safePaste } from './safePaste'
+import { PASTE_ENTER_DELAY_MS, PASTE_FRAME_MAX, safePaste, sanitizePasteText } from './safePaste'
 
 /** Chunk size for `input` frames: under the schema's 8192 with margin. */
 export const INPUT_CHUNK = PASTE_FRAME_MAX
@@ -152,7 +152,10 @@ export async function typeSlash(
   signal: AbortSignal,
   onProgress?: (done: number, total: number) => void,
 ): Promise<boolean> {
-  const chars = Array.from(text.trim())
+  // Sanitized like safePaste (E3-FR-05): a key typed here is never ESC or
+  // another control that would cancel the prompt or inject a sequence.
+  const chars = Array.from(sanitizePasteText(text).trim())
+  if (!chars.length) return false
   io.releaseLatch()
   for (let i = 0; i < chars.length; i++) {
     if (!live(io, paneId, signal)) return false

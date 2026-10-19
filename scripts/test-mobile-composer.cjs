@@ -158,6 +158,16 @@ function run(code, storage) {
     check(ok && log[1][1] === '\u{1F600}', 'slash typing sends a surrogate pair as one key')
   }
   {
+    const { io, log } = fakeIo()
+    const ok = await cs.typeSlash('/co\x1b[2Jm\x07', 'p1', io, new AbortController().signal)
+    check(ok && log.map(e => e[1]).join('') === '/co[2Jm\r' && !log.some(e => /[\x00-\x08\x1b]/.test(e[1])), 'slash typing drops ESC and C0 like safePaste (E3-FR-05)')
+  }
+  {
+    const { io, log } = fakeIo()
+    const ok = await cs.typeSlash('\x1b\x07', 'p1', io, new AbortController().signal)
+    check(!ok && log.length === 0, 'a slash text with nothing left after sanitizing types nothing, not even Enter')
+  }
+  {
     const ac = new AbortController()
     const t0 = Date.now()
     const p = cs.abortableSleep(5000, ac.signal)
