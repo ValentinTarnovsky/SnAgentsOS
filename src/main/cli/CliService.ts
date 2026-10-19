@@ -69,6 +69,7 @@ export class CliService {
       status: deps.status,
       config: deps.config,
       appVersion: deps.appVersion,
+      platform: deps.platform ?? process.platform,
       notify: (n) => {
         deps.status.notifyCustom(n.paneId, n.title, n.body)
         if (!n.local) deps.routeCustom({ kind: 'custom', paneId: n.paneId, title: n.title, body: n.body })
