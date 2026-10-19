@@ -326,6 +326,8 @@ const settingsSchema = z.object({
     .union([z.literal(0), z.number().int().min(5).max(1440)])
     .catch(0)
     .default(0),
+  // Schema 14 (E6-FR-25..31): same pattern; a junk value leaves it on.
+  terminalShellIntegration: z.boolean().catch(true).default(true),
   restoreLastWorkspace: z.boolean(),
   confirmCloseRunning: z.boolean(),
   autoCheckUpdates: z.boolean().default(true),
@@ -397,6 +399,8 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * stray top-level `repoConfigTrust` or `automations` is stripped (R30-01
  * amendment: trust is main-owned in trusted-repos.json, automations extend
  * PaneSchedule).
+ * v13 -> v14 is defaults only as well (no logic, R31-00): the single new key
+ * is settings.terminalShellIntegration (default true).
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)

@@ -10,7 +10,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 13
+export const CONFIG_VERSION = 14
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -668,6 +668,11 @@ export interface Settings {
   worktreesRoot: string
   /** Hibernate idle agent consoles after N minutes; 0 = off, else 5..1440 (E5-FR-25). Schema 13. */
   hibernateIdleMinutes: number
+  /**
+   * PowerShell shell integration: prompt marks (OSC 133), prompt navigation
+   * and "copy the last command output" (E6-FR-25..31). Schema 14.
+   */
+  terminalShellIntegration: boolean
   restoreLastWorkspace: boolean
   confirmCloseRunning: boolean
   /** Installed build only: hide to tray on window close instead of quitting. */
