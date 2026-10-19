@@ -2,6 +2,8 @@
 
 Programa de cambios que renombra SnMultiCC a SnAgentsOS e incorpora el roadmap inspirado en el analisis de [stablyai/orca](https://github.com/stablyai/orca) (MIT). Base: `main` `4c521f9` (SnMultiCC 1.14.1). Fecha: 2026-10-18.
 
+> **Como se publico:** todo el programa (v2.1, v2.2, v3.0 y v3.1 del plan) salio junto en una sola release, SnAgentsOS 2.0.0. La version de `package.json` sigue en `2.0.0`; los schemas de config 11 a 14 se mantienen como migraciones secuenciales y los work packages "Release vX" del plan no se ejecutaron por separado.
+
 ## Como leerlo
 
 1. [PRD.md](PRD.md): vision, objetivos con metricas, no objetivos, principios, requisitos no funcionales globales, mapa de epics y glosario.
