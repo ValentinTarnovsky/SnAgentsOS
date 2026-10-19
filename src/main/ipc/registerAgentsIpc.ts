@@ -2,6 +2,7 @@ import { ipcMain } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { AgentSessionView, AgentsStartup } from '@shared/agents'
 import type { AgentSessionStore } from '../agents/AgentSessionStore'
+import type { HibernationCoordinator } from '../agents/Hibernation'
 
 /**
  * `agents:*` channels over main's AgentSessionStore (E5 G2). The renderer
@@ -9,7 +10,7 @@ import type { AgentSessionStore } from '../agents/AgentSessionStore'
  * store or activity. Pushes (agents:changed / agents:ready) are wired by the
  * store's onChanged / onReady callbacks in index.ts.
  */
-export function registerAgentsIpc(store: AgentSessionStore): void {
+export function registerAgentsIpc(store: AgentSessionStore, hibernation?: HibernationCoordinator): void {
   ipcMain.handle(CH.AGENTS_LIST, (): AgentSessionView[] => store.list())
   ipcMain.handle(CH.AGENTS_STARTUP, (): AgentsStartup => store.startup())
   ipcMain.handle(CH.AGENTS_CONSUME_STARTUP, (_e, paneId: unknown): boolean =>
@@ -23,4 +24,6 @@ export function registerAgentsIpc(store: AgentSessionStore): void {
   ipcMain.on(CH.AGENTS_FORGET, (_e, paneId: unknown) => {
     if (typeof paneId === 'string' && paneId && paneId.length <= 128) store.forget(paneId)
   })
+  // Hibernation (E5-FR-25): the setting and the consoles to keep awake; the coordinator validates both.
+  if (hibernation) ipcMain.on(CH.AGENTS_SET_HIBERNATION, (_e, cfg: unknown) => hibernation.setConfig(cfg as Parameters<HibernationCoordinator['setConfig']>[0]))
 }

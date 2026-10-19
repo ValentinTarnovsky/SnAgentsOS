@@ -32,6 +32,7 @@ import { registerStatusIpc, type StatusIpc } from './ipc/registerStatusIpc'
 import { registerPowerIpc } from './ipc/registerPowerIpc'
 import type { AwakeService } from './agents/AwakeService'
 import { AgentSessionStore } from './agents/AgentSessionStore'
+import { HibernationCoordinator } from './agents/Hibernation'
 import { CodexRolloutIndex } from './agents/transcripts'
 import { registerAgentsIpc } from './ipc/registerAgentsIpc'
 import { SessionHistory, openSessionsOf } from './history/SessionHistory'
@@ -140,6 +141,7 @@ let awakeService: AwakeService | null = null
 let trayAwakeMode: AwakeMode | null = null
 // Created in bootstrap, after the legacy migration put dataDir() in place.
 let agentSessions: AgentSessionStore | null = null
+let hibernation: HibernationCoordinator | null = null
 // Saved scrollback (E6-FR-08..13, 36): created in bootstrap, under dataDir().
 let scrollbackCheckpoint: ScrollbackCheckpoint | null = null
 // Review notes (E7-FR-18): created in bootstrap; flushed on the exits that skip before-quit.
@@ -197,6 +199,8 @@ async function handleOpenArgv(argv: readonly string[], cwd: string, source: Open
  */
 function snapshotAgentsOnce(trigger: ExitTrigger): void {
   agentSessions?.snapshotExitOnce(bypassCloseGuards ? 'update' : trigger)
+  // No console goes to sleep while the app exits (the next window pushes its view again).
+  hibernation?.rendererGone()
 }
 
 /**
@@ -399,6 +403,8 @@ function openMainWindow(): void {
   // stuck paused, which would starve connected phones. Resume them so the
   // remote data plane keeps flowing regardless of the desktop renderer.
   win.webContents.on('render-process-gone', () => ptyManager.resumeRendererPaused())
+  // Hibernation waits for the new renderer's view before it plans again (E5-FR-25).
+  win.webContents.on('render-process-gone', () => hibernation?.rendererGone())
   // Crash resilience (E4-FR-21, 25): auto reload behind the breaker; a hang
   // over 15 s asks [Wait] / [Reload window]. Neither path kills a pty.
   win.webContents.on('render-process-gone', (_e, details) => rendererRecovery.onGone(win, details))
@@ -408,6 +414,7 @@ function openMainWindow(): void {
     if (details.isMainFrame) ptyManager.resumeRendererPaused()
     // E3-FR-23: a reloaded renderer re-learns which panes a phone sizes.
     if (details.isMainFrame && !details.isSameDocument) remoteManager.onRendererNavigate()
+    if (details.isMainFrame && !details.isSameDocument) hibernation?.rendererGone()
   })
 
   let forceClose = false
@@ -594,7 +601,22 @@ async function bootstrap(): Promise<void> {
   sessions.load()
   agentSessions = sessions
   statusManager.addListener((evt, cause) => sessions.onStatus(evt, cause))
-  registerAgentsIpc(sessions)
+  // Hibernation (E5-FR-25, D3): explicit kill after the record is marked, so
+  // the end that follows never closes the chat. Off (no interval) by default.
+  hibernation = new HibernationCoordinator({
+    statuses: () => statusManager.snapshot(),
+    lastInputAt: (paneId) => ptyManager.lastInputAt(paneId),
+    hasPty: (paneId) => ptyManager.ptyIdForPane(paneId) !== null,
+    subscribedPaneIds: () => remoteManager.subscribedPaneIds(),
+    isAvailable: (paneId) => sessions.isAvailable(paneId),
+    getConfig: () => configStore.load(),
+    hibernate: (evt) => {
+      sessions.markHibernated(evt.paneId)
+      sendToRenderer(CH.AGENTS_HIBERNATE, evt)
+      ptyManager.killPanes([evt.paneId])
+    },
+  })
+  registerAgentsIpc(sessions, hibernation)
   // Session history (E3-FR-36..40): transcripts and rollouts indexed on demand,
   // for the phone's History screen and the createPane.resume check.
   const history = new SessionHistory({
