@@ -258,7 +258,7 @@ async function schema13Checks() {
     check(store.load().version === 14 && fs.readFileSync(file, 'utf8') === text, 'a plain load reads v12 as 14 and leaves the file untouched')
     store.load({ upgrade: true })
     const written = JSON.parse(fs.readFileSync(file, 'utf8'))
-    check(written.version === 14 && survives(raw, written) && written.settings.remote.phoneFit === true && written.settings.automation.scheduleGraceMin === 120, 'the upgrade write stores v13 with every v12 value and the new defaults')
+    check(written.version === 14 && survives(raw, written) && written.settings.remote.phoneFit === true && written.settings.automation.scheduleGraceMin === 120, 'the upgrade write stores v14 with every v12 value and the v13 defaults')
     check(fs.readFileSync(file + '.bak', 'utf8') === text, 'the pre-upgrade v12 file stays in .bak')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 
