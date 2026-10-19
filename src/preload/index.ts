@@ -55,6 +55,7 @@ import type { GitArea, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUp
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
+import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from '@shared/repo-config'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -110,6 +111,12 @@ const api: SnApi = {
   },
   fs: {
     dirExists: (path: string) => ipcRenderer.invoke(CH.FS_DIR_EXISTS, path) as Promise<boolean>,
+  },
+  repoConfig: {
+    read: (dir: string) => ipcRenderer.invoke(CH.REPO_CONFIG_READ, dir) as Promise<RepoConfigReadRes>,
+    trust: (req: { dir: string; sha256: string }) => ipcRenderer.invoke(CH.REPO_CONFIG_TRUST, req) as Promise<RepoConfigTrustRes>,
+    previewExport: (req: { dir: string; file: RepoConfigFile }) => ipcRenderer.invoke(CH.REPO_CONFIG_PREVIEW_EXPORT, req) as Promise<RepoConfigPreviewRes>,
+    export: (req: { dir: string; file: RepoConfigFile; overwrite: boolean }) => ipcRenderer.invoke(CH.REPO_CONFIG_EXPORT, req) as Promise<RepoConfigExportRes>,
   },
   clipboard: {
     writeText: (text: string) => ipcRenderer.send(CH.CLIPBOARD_WRITE, text),
