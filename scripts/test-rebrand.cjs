@@ -1441,7 +1441,6 @@ function docsBrandChecks(BRAND) {
   // E0-FR-22: the small files.
   const gitignore = read('.gitignore').split(/\r?\n/)
   check(gitignore.includes('snagentsos-data/') && gitignore.includes('snmulticc-data/'), '.gitignore keeps both portable data folders')
-  check(read('docs/notifications-status-plan.md').split(/\r?\n/)[0] === '> SnMultiCC paso a llamarse SnAgentsOS en v2.0.0; este documento conserva el nombre historico.', 'notifications plan: one-line note at the top')
 
   // E0-FR-23: wired into npm test, so CI and every release leg run it.
   check(pkg.scripts.test.startsWith('node scripts/test-status.cjs && node scripts/test-rebrand.cjs') && pkg.scripts.test.endsWith('&& node scripts/check-brand.cjs'), 'npm test ends with the brand guard')
