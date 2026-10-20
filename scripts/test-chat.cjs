@@ -54,7 +54,7 @@ export { decodeClaude, patchOf } from './src/main/chat/decodeClaude'
 export { decodeCodex } from './src/main/chat/decodeCodex'
 export { toolSummary } from './src/main/chat/toolSummary'
 export { readPage, readAppend, TranscriptWatcher, MAX_RECORD_BYTES, PAGE_SCAN_MAX } from './src/main/chat/TranscriptWatcher'
-export { TranscriptLocator, cwdKey, pathKey, admit, awaitable, PENDING_BOOT_MS } from './src/main/chat/TranscriptLocator'
+export { TranscriptLocator, cwdKey, pathKey, admit, awaitable, codexSessionMeta, PENDING_BOOT_MS } from './src/main/chat/TranscriptLocator'
 export { ChatHub, noticePage, emptyPage, CHAT_CLOSE_DELAY_MS, CHAT_PENDING_POLL_MS, CHAT_PENDING_MAX_MS } from './src/main/chat/ChatHub'
 export { shrinkMessage, splitAppend, jsonBytes } from './src/main/chat/chatFrames'
 export { claudeConfigDir } from './src/main/status/statusDetails'
@@ -464,6 +464,114 @@ async function testLocator() {
   status.a = { provider: 'claude', sessionId: '' }
 }
 
+// --- v2.2.1: Codex without a thread id (bridge off, --no-daemon) and title-only ambiguity --
+
+async function testCodexByCwd() {
+  const { api } = load()
+  const real = p => fs.realpathSync.native(p)
+  const base = path.join(tmp, 'by-cwd')
+  const codexRoot = path.join(base, 'codex', 'sessions')
+  const repo = path.join(base, 'repo'), other = path.join(base, 'other')
+  fs.mkdirSync(repo, { recursive: true }); fs.mkdirSync(other, { recursive: true })
+  const today = path.join(codexRoot, '2026', '10', '19'), yesterday = path.join(codexRoot, '2026', '10', '18')
+  const fixedNow = new Date(2026, 9, 19, 12, 0, 0).getTime()
+  const cfg = {
+    presets: [{ id: 'pc', name: 'Claude', type: 'claude', command: 'claude' }, { id: 'px', name: 'cdx', type: 'codex', command: 'cdx' }],
+    settings: { defaultShell: { win32: 'powershell.exe', linux: 'bash', darwin: 'zsh' } },
+    workspaces: [{ id: 'w', name: 'W', cwd: repo, panes: [
+      { id: 'cx', type: 'codex', presetId: 'px', title: 'Codex', color: '', icon: '' },
+      { id: 'cx2', type: 'codex', title: 'Codex 2', color: '', icon: '' },
+      { id: 'ca', type: 'claude', presetId: 'pc', title: 'A', color: '', icon: '' },
+      { id: 'cb', type: 'claude', presetId: 'pc', title: 'B', color: '', icon: '' },
+    ] }],
+  }
+  let running = ['cx', 'ca']
+  const status = {}, claims = new Map(), cwds = { cx: repo, cx2: repo, ca: repo, cb: repo }
+  const spawned = { cx: Date.now() - 1000, ca: Date.now() - 1000, cb: Date.now() - 1000 }
+  const loc = new api.TranscriptLocator({
+    claudeRoot: () => path.join(base, 'claude'), codexSessions: () => codexRoot, config: () => cfg,
+    status: id => status[id] ?? null, spawnCwd: id => cwds[id], spawnedAt: id => spawned[id], runningPanes: () => running,
+    claims: () => claims, now: () => new Date(fixedNow),
+  })
+  let n = 0
+  const rollout = (dir, cwd, extra = {}, pad = 0) => {
+    fs.mkdirSync(dir, { recursive: true })
+    const id = `01a1595b-9b51-7ee2-ad61-${String(++n).padStart(12, '0')}`
+    const p = path.join(dir, `rollout-2026-10-19T11-00-0${n % 10}-${id}.jsonl`)
+    const meta = { timestamp: '2026-10-19T14:00:00.000Z', type: 'session_meta', payload: { id, session_id: id, cwd, originator: 'codex-tui', cli_version: '0.163.0', source: 'cli', base_instructions: { text: 'x'.repeat(pad) }, ...extra } }
+    fs.writeFileSync(p, JSON.stringify(meta) + '\n' + JSON.stringify({ timestamp: '2026-10-19T14:00:01.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hola' }] } }) + '\n')
+    return p
+  }
+  const reset = () => fs.rmSync(codexRoot, { recursive: true, force: true })
+
+  const mine = rollout(today, repo)
+  let r = await loc.locate('cx')
+  check(r.ok && r.provider === 'codex' && api.pathKey(r.path) === api.pathKey(real(mine)), 'no thread id and no status: the one fresh rollout of the console\'s folder is its chat')
+  status.cx = { provider: 'codex', sessionId: '' }
+  r = await loc.locate('cx')
+  check(r.ok && api.pathKey(r.path) === api.pathKey(real(mine)), 'a title-only Codex track (no session id) goes to the folder match too')
+  check(api.pathKey((await api.codexSessionMeta(mine)).cwd) === api.pathKey(repo), 'the session_meta payload is read from the first line')
+  reset(); const prev = rollout(yesterday, repo.toUpperCase() + path.sep)
+  r = await loc.locate('cx')
+  check(process.platform !== 'win32' || (r.ok && api.pathKey(r.path) === api.pathKey(real(prev))), 'yesterday\'s folder counts, and the folder compares like a cwd (case, trailing separator)')
+
+  reset(); rollout(today, other)
+  r = await loc.locate('cx')
+  check(!r.ok && r.reason === 'noTranscript' && r.pending === true, 'a rollout of another folder is not a match (pending while it boots)')
+  rollout(today, repo); rollout(today, repo)
+  r = await loc.locate('cx')
+  check(!r.ok && r.reason === 'ambiguous', 'two matching rollouts: ambiguous')
+  reset(); const tui = rollout(today, repo); rollout(today, repo, { source: 'vscode', originator: 'Codex Desktop' })
+  r = await loc.locate('cx')
+  check(r.ok && api.pathKey(r.path) === api.pathKey(real(tui)), 'between the TUI rollout and a Codex Desktop one, the TUI one is the console\'s')
+  reset(); rollout(today, repo, { source: 'exec' }); rollout(today, repo, { source: { subagent: { thread_spawn: { parent_thread_id: 'x', depth: 1 } } } }); rollout(today, repo, { source: 'mcp' })
+  r = await loc.locate('cx')
+  check(!r.ok && r.reason === 'noTranscript', 'a codex exec, an MCP run or a subagent in the folder never passes for the console')
+  reset(); rollout(today, repo, {}, 70 * 1024)
+  r = await loc.locate('cx')
+  check(!r.ok && r.reason === 'noTranscript', 'a first line over 64KB is not read')
+  reset(); const held = rollout(today, repo)
+  claims.set(api.pathKey(real(held)), 'cx2')
+  r = await loc.locate('cx')
+  check(!r.ok && r.reason === 'noTranscript', 'a rollout another console holds is skipped')
+  claims.set(api.pathKey(real(held)), 'cx')
+  check((await loc.locate('cx')).ok, 'its own claim does not hide it')
+  claims.clear()
+  spawned.cx = Date.now() + 60000
+  r = await loc.locate('cx')
+  check(!r.ok && r.reason === 'noTranscript', 'a rollout created before the spawn (minus 5s) is not a candidate')
+  spawned.cx = Date.now() - 1000
+  running = ['cx', 'cx2', 'ca']
+  r = await loc.locate('cx')
+  check(!r.ok && r.reason === 'ambiguous' && r.pending === true, 'another Codex console in the folder: ambiguous, pending while a title-only track boots')
+  spawned.cx = fixedNow - api.PENDING_BOOT_MS - 1000
+  r = await loc.locate('cx')
+  check(!r.ok && r.reason === 'ambiguous' && !r.pending, 'past the boot window the peer is the plain ambiguous notice')
+  delete status.cx; spawned.cx = Date.now() - 1000
+  r = await loc.locate('cx')
+  check(!r.ok && r.reason === 'ambiguous' && !r.pending, 'with no track at all, ambiguous stays ambiguous')
+  running = ['cx', 'ca']
+  delete spawned.cx
+  check((await loc.locate('cx')).reason === 'noTranscript', 'without a live pty the folder match is refused')
+  spawned.cx = Date.now() - 1000
+
+  // The orPending rule shared with Claude (bug 8): a title-only track whose folder another Claude console shares.
+  running = ['ca', 'cb']
+  status.ca = { provider: 'claude', sessionId: '' }
+  r = await loc.locate('ca')
+  check(!r.ok && r.reason === 'ambiguous' && r.pending === true, 'a title-only Claude track sharing its folder is pending while it boots, not the notice')
+  spawned.ca = fixedNow - api.PENDING_BOOT_MS - 1000
+  r = await loc.locate('ca')
+  check(!r.ok && r.reason === 'ambiguous' && !r.pending, 'past PENDING_BOOT_MS it is the ambiguous notice again')
+  spawned.ca = Date.now() - 1000
+  delete status.ca
+  r = await loc.locate('ca')
+  check(!r.ok && r.reason === 'ambiguous' && !r.pending, 'with no status at all it stays ambiguous')
+  status.ca = { provider: 'claude', sessionId: '0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab' }
+  r = await loc.locate('ca')
+  check(!r.ok && r.reason === 'ambiguous' && !r.pending, 'a reported session never turns ambiguous into pending')
+}
+
 // --- Pending transcripts: empty first page, then the real one -------------------------
 
 async function testHubPending() {
@@ -680,7 +788,7 @@ async function testHub() {
   await settle()
   const back = w.manager.fit.stateOf('p1')
   check(back.state === 'phone' && back.chat === false && ws.of('replay').at(-1).paneId === 'p1', 'back to Terminal the owner stays, without "(Chat)", and the replay repaints')
-  // Chat again, then chatUnsub without a sub: held after the grace.
+  // Chat again, then chatUnsub without a sub: released after the grace (v2.2.1).
   n = ws.of('chatPage').length
   ws.msg({ type: 'unsub', paneId: 'p1' })
   ws.msg({ type: 'chatSub', paneId: 'p1' })
@@ -688,7 +796,7 @@ async function testHub() {
   ws.msg({ type: 'chatUnsub', paneId: 'p1' })
   w.advance(w.api.FIT_GRACE_MS)
   await settle()
-  check(w.manager.fit.stateOf('p1').state === 'held', 'chatUnsub without a sub within 250ms holds the size')
+  check(w.manager.fit.stateOf('p1') === null && w.manager.fit.ownerOf('p1') === 'desktop', 'chatUnsub without a sub within 250ms gives the size back to the PC')
 
   // The watcher closes 30s after its last reader.
   const open = w.hub.openWatchers
@@ -809,6 +917,10 @@ async function testMobileModel() {
   check(m.needsFold('a\nb\nc\nd\ne') && !m.needsFold('a\nb\nc\nd'), 'a prompt folds past 4 lines')
   check(m.resolvePaneView(undefined, false, true) === 'terminal' && m.resolvePaneView(undefined, true, true) === 'chat' && m.resolvePaneView('chat', false, false) === 'terminal' && m.resolvePaneView('terminal', true, true) === 'terminal', 'Chat only for an eligible console: saved choice, then chatDefault')
   check(m.chatEligible({ provider: 'claude' }) && m.chatEligible({ provider: 'codex' }) && !m.chatEligible({}) && !m.chatEligible(null), 'eligible = status provider claude or codex')
+  // v2.2.1: a Claude or Codex console whose status names no provider is eligible by type.
+  check(m.chatEligible(null, 'codex') && m.chatEligible({}, 'claude') && m.chatEligible(undefined, 'claude'), 'no provider in the status: a claude or codex pane type is eligible')
+  check(!m.chatEligible({}, 'shell') && !m.chatEligible(null, 'custom') && !m.chatEligible(null) && m.chatEligible({ provider: 'codex' }, 'shell'), 'a shell needs its status to name the agent; a status provider wins over the type')
+  check(m.resolvePaneView(undefined, true, true, true) === 'terminal' && m.resolvePaneView(undefined, true, true, false) === 'chat' && m.resolvePaneView('chat', true, true, true) === 'terminal', 'a chat refused on this open (FR-33) shows Terminal, even over chatDefault or a saved Chat')
 }
 
 async function main() {
@@ -827,6 +939,7 @@ async function main() {
   await testPages()
   await testWatcher()
   await testLocator()
+  await testCodexByCwd()
   await testHub()
   await testHubPending()
   await testWatcherCap()

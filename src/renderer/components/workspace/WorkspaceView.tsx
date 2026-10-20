@@ -118,9 +118,12 @@ export function WorkspaceView({
             </button>
           </Tooltip>
 
-          <div className="relative">
+          {/* z-30 lifts the menu and its backdrop over the z-20 drawers below (v2.2.1). */}
+          <div className="relative z-30">
             <button
               onClick={() => setOpen((v) => !v)}
+              aria-expanded={open}
+              data-new-console-button
               className="flex items-center gap-1.5 rounded-btn border border-border bg-card px-2.5 py-1.5 text-xs text-text-primary transition-colors hover:border-accent-violet/40"
             >
               <Plus size={14} className="text-accent-violet" />
@@ -131,7 +134,7 @@ export function WorkspaceView({
             {open && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-                <div className="absolute right-0 z-20 mt-1.5 w-60 overflow-hidden rounded-card border border-border bg-card py-1 shadow-[0_8px_24px_-12px_rgba(0,0,0,0.6)]">
+                <div data-new-console-menu className="absolute right-0 z-20 mt-1.5 w-60 overflow-hidden rounded-card border border-border bg-card py-1 shadow-[0_8px_24px_-12px_rgba(0,0,0,0.6)]">
                   {presets.map((preset) => {
                     const Icon = iconFor(preset.icon)
                     return (
@@ -179,7 +182,9 @@ export function WorkspaceView({
       {/* E7-FR-35: the race over this grid, when one runs here. */}
       <RaceBar workspace={workspace} />
 
-      <div className="relative min-h-0 flex-1">
+      {/* overflow-clip: a drawer sliding in from translateX(100%) is clipped here without making this
+          box a scroll container, so focus() or scrollIntoView inside a drawer cannot shift the app shell. */}
+      <div className="relative min-h-0 flex-1 overflow-clip">
         <TilingGrid workspace={workspace} isActive={isActive} />
         {changesKey && <ChangesPanel key={workspace.id} workspace={workspace} targetKey={changesKey} base={panelBase} />}
         <Suspense fallback={null}>

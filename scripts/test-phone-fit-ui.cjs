@@ -4,7 +4,9 @@
 // window.snApi: in a 4-pane grid a 50x40 phone grid fits (font of 6px or
 // more, strip of 28px at most), the pty is never resized to the container
 // while a phone owns it, the strip shows "(Chat)", [Recover] / [Restore all]
-// and a real key give the size back before the key is written, a pane that
+// and a real key give the size back before the key is written, the release
+// main dispatches as soon as the phone leaves the console (v2.2.1, no 5 min
+// hold) restores the desktop size without echoing back to main, a pane that
 // mounts while owned starts at the phone grid, in es/en and light/dark.
 // No pty, user config or remote server is touched.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
@@ -21,7 +23,7 @@ import {TerminalPane} from './src/renderer/components/terminal/TerminalPane';
 import {I18nProvider} from './src/renderer/i18n';
 import {useAppStore} from './src/renderer/lib/store';
 import {useFitStore} from './src/renderer/lib/fitStore';
-import {runFitPane} from './src/renderer/lib/remoteCommands';
+import {runFitPane,runReleaseFit} from './src/renderer/lib/remoteCommands';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 const listeners={data:new Set(),exit:new Set()};
 const calls={spawn:[],writes:[],resize:[],release:[],seq:[]};
@@ -51,6 +53,7 @@ function Root(){const [lang,setLang]=React.useState('es');window.smoke.setLang=s
  </div></I18nProvider>}
 window.smoke={calls,theme:applyTheme,
  fit:(paneId,cols,rows,chat)=>runFitPane({kind:'fitPane',workspaceId:'w1',paneId,cols,rows},{ptyId:'pty-'+paneId,chat}),
+ release:(paneId)=>runReleaseFit(paneId,{ptyId:'pty-'+paneId}),
  owners:()=>useFitStore.getState().owners,
  geom:(id)=>{const c=document.querySelector('[data-cell='+id+'] [data-phone-fit]')||document.querySelector('[data-cell='+id+'] .xterm')?.parentElement;const s=document.querySelector('[data-cell='+id+'] .xterm-screen');const b=document.querySelector('[data-cell='+id+'] [data-mobile-driver]');
   if(!c||!s)return null;const cr=c.getBoundingClientRect(),sr=s.getBoundingClientRect();
@@ -111,6 +114,14 @@ app.whenReady().then(async()=>{
  v=await js("({seq:smoke.calls.seq,owners:smoke.owners()})");
  const iRel=v.seq.indexOf('release:pb'),iRes=v.seq.findIndex(s=>s.startsWith('resize:pty-pb:')),iW=v.seq.indexOf('write');
  if(v.owners.pb||iRel<0||iRes<0||iW<0||!(iRel<iRes&&iRes<iW))fail('a key: release, then the resize, then the write',v);n++;
+ // v2.2.1: the phone left the console (another console, Home): main dispatches
+ // releaseFit right after its 250ms grace; the strip goes and the pty gets the
+ // desktop size back at once, with no fitRelease echoed to main.
+ await js("smoke.fit('pa',50,40)");await wait(200);
+ await js("smoke.calls.seq.length=0;window.__rel=smoke.calls.release.length;smoke.release('pa')");await wait(250);
+ v=await js("({seq:smoke.calls.seq,owners:smoke.owners(),g:smoke.geom('pa'),echo:smoke.calls.release.length-window.__rel})");
+ const left=v.seq.find(s=>s.startsWith('resize:pty-pa:'));
+ if(v.owners.pa||v.g.banner||v.g.dim||!left||left==='resize:pty-pa:50x40'||v.echo!==0)fail('the release after the phone left restores the desktop size, drops the strip and tells main nothing',v);n++;
  // [Restore all].
  await js("smoke.fit('pa',50,40);smoke.fit('pc',40,20)");await wait(200);
  await js("smoke.click('[data-cell=pc] [data-fit-action=restoreAll]')");await wait(250);
@@ -124,7 +135,7 @@ app.whenReady().then(async()=>{
  for(const scale of [1.25,1.5]){w.webContents.setZoomFactor(scale);await wait(300);/* a hidden window paints (and runs rAF) only on a capture */await shot('fit-zoom-'+scale);await wait(300);v=await js("smoke.geom('pd')");if(!v.banner||v.banner.h>28.5||v.banner.over||v.font<6||((v.sw>v.cw+1||v.sh>v.ch+1)&&v.overflow!=='auto'))fail('strip and grid (or the scroll fallback) at '+scale,v)}n++;
  w.webContents.setZoomFactor(1);await shot('fit-mounted');
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' phone-fit desktop checks (strip 28px, grid fits at 6px+, no pty resize while owned, (Chat), Recover, a real key, Restore all, mount while owned, 100/125/150%, es/en, light/dark); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' phone-fit desktop checks (strip 28px, grid fits at 6px+, no pty resize while owned, (Chat), Recover, a real key, phone left, Restore all, mount while owned, 100/125/150%, es/en, light/dark); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

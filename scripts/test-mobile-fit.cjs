@@ -2,9 +2,12 @@
 // browser globals: phoneGrid at 360/390/430px and 12/13/16px with the 20x8
 // floor and the 500x300 ceiling, the keyboard rule (a reduced visualViewport
 // or a focused field emits no fitPane), the 150ms scheduler (rotation, forced
-// reasons, another device, too narrow), the fitState decisions, the per-pane
-// storage, and the real client against a fake WebSocket (lastFitSent,
-// another device, the PC taking the size back, a refusal, the replay grace).
+// reasons, another device, too narrow), the fitState decisions, the
+// phone-wide mode and the migration of the old per-pane keys (v2.2.1), and
+// the real client against a fake WebSocket (lastFitSent, another device, the
+// PC taking the size back, a refusal, the replay grace, reopening a console,
+// Home leaving the stream, a reconnect that is not a new open, the release of
+// a pane left while offline) and the one-time reset of the saved Chat views.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -31,7 +34,7 @@ export { setLang } from './src/mobile/src/lib/i18n'
 const snapshot = { language: 'en', themeTokens: {}, fontFamily: 'mono', fontSize: 13, keyButtons: [], activeWorkspaceId: 'w', workspaces: [{ id: 'w', name: 'W', layoutOrder: ['p', 'q'], panes: [{ id: 'p', title: 'P', type: 'claude', running: true }, { id: 'q', title: 'Q', type: 'shell', running: true }] }] }
 
 /** A fresh page (fake clock, timers, storage, WebSocket); `local` survives "reloads". */
-function page(local = new Map([['snagentsos.remote.deviceId', 'dev1'], ['snagentsos.remote.secret', '00'.repeat(32)]])) {
+function page(local = new Map([['snagentsos.remote.deviceId', 'dev1'], ['snagentsos.remote.secret', '00'.repeat(32)]]), session = new Map()) {
   let clock = 0, seq = 0
   const timers = new Map()
   const add = (fn, ms) => { const id = ++seq; timers.set(id, { at: clock + Math.max(0, ms || 0), fn }); return id }
@@ -55,6 +58,7 @@ function page(local = new Map([['snagentsos.remote.deviceId', 'dev1'], ['snagent
     send(data) { this.sent.push(JSON.parse(data)) }
     close() { this.readyState = 3 }
     open() { this.readyState = 1; this.onopen && this.onopen({}) }
+    drop(code = 1006) { this.readyState = 3; this.onclose && this.onclose({ code, wasClean: false, reason: '' }) }
     recv(msg) { this.onmessage && this.onmessage({ data: JSON.stringify({ v: 1, ...msg }) }) }
   }
   const on = () => () => {}
@@ -69,10 +73,10 @@ function page(local = new Map([['snagentsos.remote.deviceId', 'dev1'], ['snagent
     setInterval: () => 0, clearInterval: () => {},
     performance: { now: () => clock }, Date: FakeDate,
     WebSocket: FakeWebSocket, document, window: { addEventListener: on() }, navigator: { onLine: true }, location,
-    localStorage: mapStorage(local), sessionStorage: mapStorage(new Map()),
+    localStorage: mapStorage(local), sessionStorage: mapStorage(session),
     history: { state: null, replaceState() {} }, crypto: require('node:crypto').webcrypto, TextEncoder, TextDecoder,
   })
-  return { api: mod.exports, sockets, local, advance, last: () => sockets.at(-1), state: () => mod.exports.store.getState() }
+  return { api: mod.exports, sockets, local, session, advance, last: () => sockets.at(-1), state: () => mod.exports.store.getState() }
 }
 
 function testGrid(api) {
@@ -197,7 +201,7 @@ function testDecide(api) {
   d = api.decideFitState('phone', mine, true, { owner: 'phone', cols: 44, rows: 36 })
   check(!d.info.other, 'while this phone waits for its own ack, a foreign size is not "another device" yet')
   d = api.decideFitState('phone', mine, false, { owner: 'desktop', cols: 120, rows: 40 })
-  check(d.mode === 'desktop' && d.persist && d.toast === 'reclaimed', 'fitState desktop: phone mode ends, saved as desktop, "The PC took the size back" (FR-18)')
+  check(d.mode === 'desktop' && !('persist' in d) && d.toast === 'reclaimed', 'fitState desktop: phone mode ends for this open (never saved, v2.2.1), "The PC took the size back" (FR-18)')
   d = api.decideFitState('phone', mine, true, { owner: 'desktop', cols: 120, rows: 40 })
   check(d.mode === 'phone' && !d.toast && d.info.owner === 'desktop', 'while pending (or right after a replay) the desktop size is only recorded')
   d = api.decideFitState('desktop', null, false, { owner: 'desktop', cols: 132, rows: 44 })
@@ -207,18 +211,38 @@ function testDecide(api) {
 function testStorage() {
   const p = page()
   const api = p.api
-  check(api.resolvePaneMode(undefined, false) === 'desktop' && api.resolvePaneMode(undefined, true) === 'phone' && api.resolvePaneMode('desktop', true) === 'desktop', 'a saved choice wins; without one, phoneFitDefault (off = desktop)')
+  check(api.resolvePaneMode(undefined, false) === 'desktop' && api.resolvePaneMode(undefined, true) === 'phone' && api.resolvePaneMode('desktop', true) === 'desktop', 'an in-memory override wins; without one, phoneFitDefault (off = desktop)')
   check(p.state().phoneFitDefault === false && p.state().phoneFontSize === 13 && api.selectPaneMode(p.state(), 'p') === 'desktop', 'defaults: desktop mode, 13px')
+
+  // v2.2.1: one phone-wide mode (chip and Settings), overrides only in memory.
   p.state().setPaneMode('p', 'phone')
+  check(api.selectPaneMode(p.state(), 'p') === 'phone' && !p.local.has('snagentsos.remote.paneMode.p'), 'a pane override is kept in memory only, never saved')
+  p.state().setPhoneModeGlobal('phone')
   p.state().setPhoneFontSize(16)
-  p.state().setPhoneFitDefault(true)
-  check(p.local.get('snagentsos.remote.paneMode.p') === 'phone' && p.local.get('snagentsos.remote.phoneFontSize') === '16' && p.local.get('snagentsos.remote.phoneFitDefault') === 'true', 'the choices land under snagentsos.remote.*')
+  check(p.local.get('snagentsos.remote.phoneFitDefault') === 'true' && p.local.get('snagentsos.remote.phoneFontSize') === '16', 'setPhoneModeGlobal saves snagentsos.remote.phoneFitDefault')
+  check(Object.keys(p.state().paneModes).length === 0 && api.selectPaneMode(p.state(), 'never-seen') === 'phone', 'and drops every override: a console never opened is in phone mode too')
+  p.state().setPaneMode('p', 'desktop')
+  check(api.selectPaneMode(p.state(), 'p') === 'desktop' && api.selectPaneMode(p.state(), 'q') === 'phone', 'an override (the PC took p back) touches only that pane')
+  p.state().clearPaneOverride('p')
+  check(api.selectPaneMode(p.state(), 'p') === 'phone', 'clearPaneOverride puts the pane back on the phone-wide mode')
+  p.state().setPaneMode('q', 'desktop')
   const again = page(p.local)
-  check(again.api.selectPaneMode(again.state(), 'p') === 'phone' && again.state().phoneFontSize === 16 && again.api.selectPaneMode(again.state(), 'q') === 'phone', 'the pane choice and the settings survive a reload (FR-13)')
+  check(again.api.selectPaneMode(again.state(), 'q') === 'phone' && again.state().phoneFontSize === 16 && again.api.selectPaneMode(again.state(), 'p') === 'phone', 'after a reload the setting survives and no override does (FR-13)')
+  p.state().setPaneMode('q', 'phone')
+  p.state().setPhoneModeGlobal('desktop')
+  check(p.local.get('snagentsos.remote.phoneFitDefault') === 'false' && api.selectPaneMode(p.state(), 'q') === 'desktop', 'switching to desktop also drops the overrides')
+
+  // Migration: the old per-pane keys go away on load and never beat the setting.
+  const old = new Map(p.local)
+  old.set('snagentsos.remote.phoneFitDefault', 'true')
+  old.set('snagentsos.remote.paneMode.p', 'desktop')
+  old.set('snagentsos.remote.paneMode.q', 'phone')
+  const migrated = page(old)
+  check(![...old.keys()].some(k => k.startsWith('snagentsos.remote.paneMode.')) && Object.keys(migrated.state().paneModes).length === 0, 'the snagentsos.remote.paneMode.* keys are removed on load')
+  check(migrated.api.selectPaneMode(migrated.state(), 'p') === 'phone', 'a stale saved desktop no longer beats the phone-wide mode')
   p.local.set('snagentsos.remote.phoneFontSize', '15')
-  p.local.set('snagentsos.remote.paneMode.q', 'tablet')
   const junk = page(p.local)
-  check(junk.state().phoneFontSize === 13 && !('q' in junk.state().paneModes), 'unknown stored values fall back')
+  check(junk.state().phoneFontSize === 13, 'unknown stored values fall back')
 }
 
 function testClient() {
@@ -244,7 +268,8 @@ function testClient() {
     s.recv({ type: 'fitState', paneId: 'p', owner: 'phone', cols: 44, rows: 36 })
     check(p.state().sizeInfo.p.other === true && p.api.selectPaneMode(p.state(), 'p') === 'phone', 'another size: "Another device controls the size", still phone mode')
     s.recv({ type: 'fitState', paneId: 'p', owner: 'desktop', cols: 120, rows: 40 })
-    check(p.api.selectPaneMode(p.state(), 'p') === 'desktop' && p.local.get('snagentsos.remote.paneMode.p') === 'desktop' && toasts().includes('The PC took the size back'), 'the PC recovering the size: desktop mode, saved, with its toast (FR-18)')
+    check(p.api.selectPaneMode(p.state(), 'p') === 'desktop' && toasts().includes('The PC took the size back'), 'the PC recovering the size: desktop mode, with its toast (FR-18)')
+    check(!p.local.has('snagentsos.remote.paneMode.p') && !p.local.has('snagentsos.remote.phoneFitDefault'), 'and nothing is saved: neither a pane key nor the phone-wide setting (v2.2.1)')
 
     // A refusal: the fitState desktop that comes first is held until the ack.
     p.state().setPaneMode('p', 'phone')
@@ -255,6 +280,7 @@ function testClient() {
     s.recv({ type: 'ctlAck', id: c2.id, ok: false, error: 'disabled' })
     const res = await refused
     check(res.error === 'disabled' && p.api.selectPaneMode(p.state(), 'p') === 'desktop' && toasts().includes('The PC does not allow fitting to the phone'), 'disabled: back to desktop with "The PC does not allow fitting to the phone" (FR-20)')
+    check(!p.local.has('snagentsos.remote.paneMode.p') && !p.local.has('snagentsos.remote.phoneFitDefault'), 'the refusal is not saved either')
 
     // A restarted pty is born at the desktop size: right after its replay the phone stays in phone mode.
     p.state().setPaneMode('p', 'phone')
@@ -284,7 +310,148 @@ function testClient() {
     client.releaseFit('p')
     const rel = s.sent.filter(m => m.type === 'ctl').at(-1)
     check(rel.action.kind === 'releaseFit' && rel.action.paneId === 'p', 'releaseFit goes out as its ctl')
+
+    // v2.2.1: phone-wide phone mode; the PC taking p back lasts until p is opened again.
+    p.state().setPhoneModeGlobal('phone')
+    p.advance(p.api.FIT_REPLAY_GRACE_MS + 1)
+    s.recv({ type: 'fitState', paneId: 'p', owner: 'desktop', cols: 120, rows: 40 })
+    check(p.api.selectPaneMode(p.state(), 'p') === 'desktop' && p.local.get('snagentsos.remote.phoneFitDefault') === 'true', 'a reclaim under the phone-wide mode is a pane override, the setting stays phone')
+    client.viewPane('p')
+    check(p.api.selectPaneMode(p.state(), 'p') === 'desktop', 'viewing the same console again (no switch) keeps the override, so the PC and the phone never fight')
+    client.viewPane('q')
+    check(s.sent.at(-2).type === 'unsub' && s.sent.at(-2).paneId === 'p' && s.sent.at(-1).type === 'sub' && s.sent.at(-1).paneId === 'q', 'switching consoles leaves the old stream (unsub p, sub q)')
+    client.viewPane('p')
+    check(p.api.selectPaneMode(p.state(), 'p') === 'phone', 'opening p again drops its override: phone mode again')
+
+    // Home leaves the stream so the PC gets its size back; coming back re-subscribes.
+    client.leaveTerminal()
+    check(s.sent.at(-1).type === 'unsub' && s.sent.at(-1).paneId === 'p' && p.state().subscribedPaneId === null && p.state().screen === 'home', 'going Home sends unsub and drops the subscription')
+    check(p.state().activePaneId === 'p', 'the console is still remembered for the way back')
+    client.showPane('p')
+    check(s.sent.at(-1).type === 'sub' && s.sent.at(-1).paneId === 'p' && p.state().subscribedPaneId === 'p' && p.state().screen === 'terminal', 'opening it again subscribes (a fresh replay re-claims the size)')
   })
+}
+
+function testHomeReconnect() {
+  // A reconnect while on Home remembers the console but streams nothing (v2.2.1).
+  const local = new Map([['snagentsos.remote.deviceId', 'dev1'], ['snagentsos.remote.secret', '00'.repeat(32)], ['snagentsos.lastPane', 'p'], ['snagentsos.remote.phoneFitDefault', 'true']])
+  const p = page(local)
+  p.api.client.start()
+  const s = p.last()
+  s.open()
+  s.recv({ type: 'authOk', deviceId: 'dev1', state: snapshot, hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+  check(p.state().screen === 'home' && p.state().activePaneId === 'p' && p.state().subscribedPaneId === null && !s.sent.some(m => m.type === 'sub'), 'going live on Home remembers lastPane without subscribing it (no fitPane from Home)')
+  p.api.client.showPane('p')
+  check(s.sent.at(-1).type === 'sub' && s.sent.at(-1).paneId === 'p', 'Resume subscribes it')
+}
+
+const FIT_OWNED = 'snagentsos.fitOwned'
+const authOk = { type: 'authOk', deviceId: 'dev1', state: snapshot, hostPlatform: 'win32', appVersion: BUNDLE_VERSION }
+const pairedLocal = (extra = []) => new Map([['snagentsos.remote.deviceId', 'dev1'], ['snagentsos.remote.secret', '00'.repeat(32)], ...extra])
+const ctls = (s, kind) => s.sent.filter(m => m.type === 'ctl' && m.action.kind === kind)
+
+/** Drop the socket, wait for the reconnect (fake clock), open it and go live again. */
+function relive(p, between = () => {}) {
+  const before = p.sockets.length
+  p.last().drop()
+  between()
+  for (let i = 0; i < 600 && p.sockets.length === before; i++) p.advance(100)
+  check(p.sockets.length === before + 1, 'the client reconnects after the drop')
+  const s = p.last()
+  s.open()
+  s.recv(authOk)
+  return s
+}
+
+/** This phone sends fitPane for p and gets its own fitState phone and the ack. */
+async function ownP(p, s) {
+  const done = p.api.client.sendFitPane('p', 50, 40)
+  const ctl = s.sent.filter(m => m.type === 'ctl').at(-1)
+  s.recv({ type: 'fitState', paneId: 'p', owner: 'phone', cols: 50, rows: 40 })
+  s.recv({ type: 'ctlAck', id: ctl.id, ok: true })
+  await done
+}
+
+async function testReconnectIsNotAnOpen() {
+  // v2.2.1: the per-open flags (the PC's reclaim, a refused chat) survive a socket drop.
+  const p = page(pairedLocal([['snagentsos.remote.phoneFitDefault', 'true']]))
+  const { client } = p.api
+  p.api.setLang('en')
+  client.start()
+  let s = p.last()
+  s.open()
+  s.recv(authOk)
+  client.showPane('p')
+  await ownP(p, s)
+  check(p.session.get(FIT_OWNED) === '["p"]', 'its own fitState phone records p in sessionStorage snagentsos.fitOwned')
+  p.advance(p.api.FIT_REPLAY_GRACE_MS + 1)
+  s.recv({ type: 'fitState', paneId: 'p', owner: 'desktop', cols: 120, rows: 40 })
+  check(p.api.selectPaneMode(p.state(), 'p') === 'desktop' && !p.session.has(FIT_OWNED), 'the PC took p back: a desktop override, and p is no longer owned')
+  p.state().setChatRefused('p', true)
+  s = relive(p)
+  check(s.sent.some(m => m.type === 'sub' && m.paneId === 'p') && p.state().subscribedPaneId === 'p', 'the console still on screen is subscribed again')
+  check(p.api.selectPaneMode(p.state(), 'p') === 'desktop', 'the reconnect keeps the override, so the phone does not shrink the PC again while its user types')
+  check(p.state().chatRefused.p === true, 'and a refused chat stays refused (no chatSub, no toast again)')
+  check(ctls(s, 'releaseFit').length === 0, 'nothing owned, nothing released')
+  client.showPane('q')
+  client.showPane('p')
+  check(p.api.selectPaneMode(p.state(), 'p') === 'phone' && !p.state().chatRefused.p, 'opening p again on purpose drops both')
+}
+
+async function testReleaseLeftWhileOffline() {
+  // v2.2.1: a leave that never reached the PC (socket closed) is given back on the next goLive.
+  const p = page(pairedLocal([['snagentsos.remote.phoneFitDefault', 'true']]))
+  const { client } = p.api
+  p.api.setLang('en')
+  client.start()
+  let s = p.last()
+  s.open()
+  s.recv(authOk)
+  client.showPane('p')
+  await ownP(p, s)
+  s = relive(p, () => {
+    client.leaveTerminal()
+    check(p.state().screen === 'home' && p.state().subscribedPaneId === null && p.session.get(FIT_OWNED) === '["p"]', 'Home while offline: the unsub is lost, so p stays owned')
+  })
+  const rel = ctls(s, 'releaseFit')
+  check(rel.length === 1 && rel[0].action.paneId === 'p' && !s.sent.some(m => m.type === 'sub'), 'going live on Home sends releaseFit for p (no sub)')
+  check(!p.session.has(FIT_OWNED), 'and forgets it')
+  s.recv({ type: 'fitState', paneId: 'p', owner: 'desktop', cols: 120, rows: 40 })
+  s.recv({ type: 'ctlAck', id: rel[0].id, ok: true })
+  await Promise.resolve()
+  check(!p.state().toasts.some(x => x.text === 'The PC took the size back') && p.api.selectPaneMode(p.state(), 'p') === 'phone', 'its fitState desktop is no "PC took it back": p stays in phone mode for the next open')
+
+  // A leave the desktop did receive needs no release later.
+  client.showPane('p')
+  await ownP(p, s)
+  client.leaveTerminal()
+  check(s.sent.at(-1).type === 'unsub' && !p.session.has(FIT_OWNED), 'Home online: the unsub reached main (it releases), p is no longer owned')
+  s = relive(p)
+  check(ctls(s, 'releaseFit').length === 0, 'so the next goLive releases nothing')
+}
+
+function testReleaseAfterReload() {
+  // A page the browser reloaded starts on Home: sessionStorage still names what it held.
+  const session = new Map([[FIT_OWNED, '["p","gone"]']])
+  const p = page(pairedLocal([['snagentsos.lastPane', 'p']]), session)
+  p.api.client.start()
+  const s = p.last()
+  s.open()
+  s.recv(authOk)
+  const rel = ctls(s, 'releaseFit')
+  check(p.state().screen === 'home' && rel.length === 1 && rel[0].action.paneId === 'p', 'after a reload on Home, goLive releases the held pane (a pane no longer in the snapshot is skipped)')
+  check(!session.has(FIT_OWNED), 'and clears snagentsos.fitOwned')
+}
+
+function testPaneViewReset() {
+  // v2.2.1 (bug 8): the paneView keys saved up to v2.2.0 go away once, then real exceptions stay.
+  const local = pairedLocal([['snagentsos.remote.chatDefault', 'true'], ['snagentsos.remote.paneView.p', 'terminal'], ['snagentsos.remote.paneView.q', 'chat']])
+  const p = page(local)
+  check(Object.keys(p.state().paneViews).length === 0 && ![...local.keys()].some(k => k.startsWith('snagentsos.remote.paneView.')), 'the old snagentsos.remote.paneView.* keys are removed on load')
+  check(local.get('snagentsos.remote.paneViewReset') === '1' && local.get('snagentsos.remote.chatDefault') === 'true', 'the reset is marked done and chatDefault is kept')
+  local.set('snagentsos.remote.paneView.p', 'terminal')
+  const again = page(local)
+  check(again.state().paneViews.p === 'terminal', 'once marked, a saved exception survives the next load')
 }
 
 async function main() {
@@ -295,7 +462,12 @@ async function main() {
   testDecide(p.api)
   testStorage()
   await testClient()
-  console.log(`PASS: ${checks} phone mode checks (phoneGrid, keyboard rule, scheduler, fitState decisions, storage, client)`)
+  testHomeReconnect()
+  await testReconnectIsNotAnOpen()
+  await testReleaseLeftWhileOffline()
+  testReleaseAfterReload()
+  testPaneViewReset()
+  console.log(`PASS: ${checks} phone mode checks (phoneGrid, keyboard rule, scheduler, fitState decisions, phone-wide mode and migration, client, Home, reconnect, release left offline, Chat view reset)`)
 }
 
 main().catch(error => { console.error(error); process.exit(1) })

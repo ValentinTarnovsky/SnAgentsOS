@@ -36,17 +36,26 @@ import {
 import { paneById, workspaceOfPane } from './workspace'
 import { loadFontScale, saveFontScale, type GridSize } from './fit'
 import {
-  loadPaneModes,
   loadPhoneFitDefault,
   loadPhoneFontSize,
+  migratePaneModes,
   resolvePaneMode,
-  savePaneMode,
   savePhoneFitDefault,
   savePhoneFontSize,
   type PaneFitMode,
   type SizeInfo,
 } from './phoneFit'
-import { chatEligible, loadChatDefault, loadPaneViews, resolvePaneView, saveChatDefault, savePaneView, type PaneView } from './chatView'
+import {
+  chatEligible,
+  clearPaneViews,
+  loadChatDefault,
+  migratePaneViews,
+  removePaneView,
+  resolvePaneView,
+  saveChatDefault,
+  savePaneView,
+  type PaneView,
+} from './chatView'
 
 /**
  * E1-FR-20: the soft keyboard counts as open only while an input field has the
@@ -208,9 +217,13 @@ export interface RemoteState {
   /** Slash command typing progress (E1-FR-25), null while idle. */
   slashProgress: { done: number; total: number } | null
   // --- phone mode (E3 M11, FR-13..16) ---
-  /** Saved explicit mode per pane ('snagentsos.remote.paneMode.<paneId>'). */
+  /**
+   * In-memory override per pane, never saved (v2.2.1): the PC took the size
+   * back, refused phone-fit or the screen is too narrow. Opening the console
+   * again drops it, so it follows phoneFitDefault.
+   */
   paneModes: Record<string, PaneFitMode>
-  /** "Fit consoles to the phone" ('snagentsos.remote.phoneFitDefault', off). */
+  /** The phone-wide mode, chip and Settings ('snagentsos.remote.phoneFitDefault', off). */
   phoneFitDefault: boolean
   /** Phone mode text size ('snagentsos.remote.phoneFontSize', 13). */
   phoneFontSize: number
@@ -219,10 +232,15 @@ export interface RemoteState {
   /** cols/rows of this phone's last fitPane per pane (FR-16: who owns it). */
   lastFitSent: Record<string, GridSize>
   // --- Chat view (E3 M12, FR-24..33) ---
-  /** Saved view per pane ('snagentsos.remote.paneView.<paneId>'). */
+  /** Saved view per pane when it differs from chatDefault ('snagentsos.remote.paneView.<paneId>'). */
   paneViews: Record<string, PaneView>
   /** "Open agent consoles in Chat" ('snagentsos.remote.chatDefault', off). */
   chatDefault: boolean
+  /**
+   * Panes whose chat the desktop refused on this open (FR-33 notice), in
+   * memory only: the next open, the toggle or a precise status try Chat again.
+   */
+  chatRefused: Record<string, true>
   /** The pane this phone reads as Chat on the desktop (chatSub sent, xterm stream paused). */
   chatPaneId: string | null
 
@@ -258,15 +276,20 @@ export interface RemoteState {
   setInputMode: (paneId: string, mode: InputMode) => void
   /** Toggle and persist a composer preference. */
   setComposerPref: (name: ComposerPref, on: boolean) => void
-  /** Set a pane's mode; `persist` false keeps it for this page only. */
-  setPaneMode: (paneId: string, mode: PaneFitMode, persist?: boolean) => void
-  setPhoneFitDefault: (on: boolean) => void
+  /** Override one pane's mode in memory (never saved). */
+  setPaneMode: (paneId: string, mode: PaneFitMode) => void
+  /** The pane follows the phone-wide mode again (it was opened again). */
+  clearPaneOverride: (paneId: string) => void
+  /** Chip and Settings: save the phone-wide mode and drop every override. */
+  setPhoneModeGlobal: (mode: PaneFitMode) => void
   setPhoneFontSize: (size: number) => void
   setSizeInfo: (paneId: string, info: SizeInfo) => void
   setLastFitSent: (paneId: string, grid: GridSize) => void
-  /** Set a pane's view; `persist` false keeps it for this page only (FR-33 fallback). */
-  setPaneView: (paneId: string, view: PaneView, persist?: boolean) => void
+  /** Set a pane's view; saved only when it differs from chatDefault. */
+  setPaneView: (paneId: string, view: PaneView) => void
+  /** Set the default and drop every per-pane choice (the switch is global). */
   setChatDefault: (on: boolean) => void
+  setChatRefused: (paneId: string, on: boolean) => void
 }
 
 let toastSeq = 0
@@ -319,13 +342,14 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   composerAutocorrect: loadPref('composerAutocorrect'),
   composerOneShot: null,
   slashProgress: null,
-  paneModes: loadPaneModes(),
+  paneModes: migratePaneModes(),
   phoneFitDefault: loadPhoneFitDefault(),
   phoneFontSize: loadPhoneFontSize(),
   sizeInfo: {},
   lastFitSent: {},
-  paneViews: loadPaneViews(),
+  paneViews: migratePaneViews(),
   chatDefault: loadChatDefault(),
+  chatRefused: {},
   chatPaneId: null,
 
   update: (partial) => set(partial),
@@ -400,13 +424,18 @@ export const useRemoteStore = create<RemoteState>((set) => ({
     savePref(name, on)
     set(name === 'composerDefaultForAgents' ? { composerDefaultForAgents: on } : { composerAutocorrect: on })
   },
-  setPaneMode: (paneId, mode, persist = true) => {
-    if (persist) savePaneMode(paneId, mode)
-    set((s) => (s.paneModes[paneId] === mode ? s : { paneModes: { ...s.paneModes, [paneId]: mode } }))
-  },
-  setPhoneFitDefault: (on) => {
+  setPaneMode: (paneId, mode) => set((s) => (s.paneModes[paneId] === mode ? s : { paneModes: { ...s.paneModes, [paneId]: mode } })),
+  clearPaneOverride: (paneId) =>
+    set((s) => {
+      if (!(paneId in s.paneModes)) return s
+      const paneModes = { ...s.paneModes }
+      delete paneModes[paneId]
+      return { paneModes }
+    }),
+  setPhoneModeGlobal: (mode) => {
+    const on = mode === 'phone'
     savePhoneFitDefault(on)
-    set({ phoneFitDefault: on })
+    set({ phoneFitDefault: on, paneModes: {} })
   },
   setPhoneFontSize: (size) => {
     savePhoneFontSize(size)
@@ -419,20 +448,44 @@ export const useRemoteStore = create<RemoteState>((set) => ({
       return { sizeInfo: { ...s.sizeInfo, [paneId]: info } }
     }),
   setLastFitSent: (paneId, grid) => set((s) => ({ lastFitSent: { ...s.lastFitSent, [paneId]: { cols: grid.cols, rows: grid.rows } } })),
-  setPaneView: (paneId, view, persist = true) => {
-    if (persist) savePaneView(paneId, view)
-    set((s) => (s.paneViews[paneId] === view ? s : { paneViews: { ...s.paneViews, [paneId]: view } }))
-  },
+  setPaneView: (paneId, view) =>
+    set((s) => {
+      // Only a real exception to the default stays saved (v2.2.1).
+      if (view === (s.chatDefault ? 'chat' : 'terminal')) {
+        removePaneView(paneId)
+        if (!(paneId in s.paneViews)) return s
+        const paneViews = { ...s.paneViews }
+        delete paneViews[paneId]
+        return { paneViews }
+      }
+      savePaneView(paneId, view)
+      return s.paneViews[paneId] === view ? s : { paneViews: { ...s.paneViews, [paneId]: view } }
+    }),
   setChatDefault: (on) => {
     saveChatDefault(on)
-    set({ chatDefault: on })
+    clearPaneViews()
+    set({ chatDefault: on, paneViews: {} })
   },
+  setChatRefused: (paneId, on) =>
+    set((s) => {
+      if (!!s.chatRefused[paneId] === on) return s
+      const chatRefused = { ...s.chatRefused }
+      if (on) chatRefused[paneId] = true
+      else delete chatRefused[paneId]
+      return { chatRefused }
+    }),
 }))
+
+/** A pane can show as Chat (FR-24): its status names Claude or Codex, else its type does. */
+export function selectChatEligible(s: RemoteState, paneId: string | null): boolean {
+  if (!paneId) return false
+  return chatEligible(s.paneStatus[paneId], s.snapshot ? paneById(s.snapshot, paneId)?.type : null)
+}
 
 /** A pane's effective view (FR-24): Terminal unless its agent is Claude or Codex. */
 export function selectPaneView(s: RemoteState, paneId: string | null): PaneView {
   if (!paneId) return 'terminal'
-  return resolvePaneView(s.paneViews[paneId], s.chatDefault, chatEligible(s.paneStatus[paneId]))
+  return resolvePaneView(s.paneViews[paneId], s.chatDefault, selectChatEligible(s, paneId), !!s.chatRefused[paneId])
 }
 
 /** The viewed pane is shown as Chat right now (its chatSub is active). */
@@ -440,7 +493,7 @@ export function selectInChat(s: RemoteState): boolean {
   return !!s.subscribedPaneId && s.chatPaneId === s.subscribedPaneId
 }
 
-/** A pane's effective phone-fit mode (FR-13): its saved choice, else phoneFitDefault. */
+/** A pane's effective phone-fit mode (FR-13): its in-memory override, else phoneFitDefault. */
 export function selectPaneMode(s: RemoteState, paneId: string | null): PaneFitMode {
   if (!paneId) return 'desktop'
   return resolvePaneMode(s.paneModes[paneId], s.phoneFitDefault)

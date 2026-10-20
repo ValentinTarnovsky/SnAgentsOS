@@ -935,6 +935,41 @@ async function enrichmentChecks() {
     h.manager.reportTitle('pane', '\u2733 Claude Code'); h.manager.reportTitle('pane', 'claude'); h.flush()
     check(h.last().topic === 'Refactor auth', 'a generic title never overwrites a valid topic')
   }
+  // v2.2.1: the title-only fallback of a Codex console (no bridge) keeps its row.
+  {
+    const codexCfg = (type = 'codex', presetId) => ({ workspaces: [{ id: 'w', name: 'W', panes: [{ id: 'pane', type, title: 'Codex', ...(presetId ? { presetId } : {}) }] }], presets: [{ id: 'p-cdx', name: 'cdx', type: 'codex', command: 'cdx' }] })
+    const h = rich({ config: codexCfg() })
+    h.manager.reportTitle('pane', '⠋ SnAgentsOS')
+    check(h.last().state === 'working' && h.last().provider === 'codex' && h.last().precise === false && h.last().topic === 'SnAgentsOS', 'a Codex spinner title is a working codex track, not a claude one')
+    h.tick(1000); h.manager.reportTitle('pane', 'SnAgentsOS'); h.flush()
+    check(h.last().state === 'done' && h.last().provider === 'codex' && h.manager.snapshot().length === 1, 'the spinner text back without the spinner is done and the track stays')
+    check(h.last().cacheSince === undefined, 'a Codex track never carries the Claude cache countdown')
+    h.manager.reportTitle('pane', '✳ SnAgentsOS')
+    check(h.events.every(e => e.state !== 'action') && h.manager.snapshot().length === 1, 'the Claude stopped glyph means nothing on a Codex console')
+    h.manager.reportTitle('pane', '⠙ SnAgentsOS')
+    check(h.last().state === 'working', 'the next spinner opens a new turn')
+    h.manager.reportTitle('pane', 'SnAgentsOS · Ready'); h.flush()
+    check(h.last().state === 'done', 'extra status words after the idle title still read as done')
+    h.manager.reportTitle('pane', 'Windows PowerShell'); h.flush()
+    check(h.last().state === null && h.manager.snapshot().length === 0, 'any other title (the shell after codex quit) clears the track after 3 s')
+    h.manager.reportTitle('pane', 'SnAgentsOS'); h.flush()
+    check(h.manager.snapshot().length === 0, 'an idle title with no track creates nothing')
+    h.manager.reportTitle('pane', '⠋ SnAgentsOS')
+    h.manager.onAgentEvent({ paneId: 'pane', ptyId: 'pty', provider: 'codex', sessionId: '019a0000-1111-2222-3333-444455556666', kind: 'start' })
+    check(h.last().precise === true && h.last().provider === 'codex', 'a precise Codex event takes over the title-only track')
+    h.manager.reportTitle('pane', 'Windows PowerShell'); h.manager.reportTitle('pane', '⠋ other'); h.flush()
+    check(h.last().precise === true && h.last().state === 'idle' && h.manager.snapshot().length === 1, 'titles never move a precise Codex track')
+
+    const preset = rich({ config: codexCfg('custom', 'p-cdx') })
+    preset.manager.reportTitle('pane', '⠋ repo')
+    check(preset.last().provider === 'codex', 'the provider comes from the preset (effectiveProvider)')
+    const claude = rich({ config: codexCfg('claude') })
+    claude.manager.reportTitle('pane', '⠋ repo'); claude.manager.reportTitle('pane', 'repo'); claude.flush()
+    check(claude.events.some(e => e.provider === 'claude') && claude.last().state === null, 'a Claude console keeps the Claude title rules')
+    const shell = rich({ config: codexCfg('shell') })
+    shell.manager.reportTitle('pane', '⠋ repo')
+    check(shell.last().provider === 'claude', 'a pane with no agent keeps today\'s fallback')
+  }
   // Session id rules (E4-FR-09 d).
   {
     const h = rich()

@@ -1,13 +1,16 @@
 // Phone mode chip and settings (E3-FR-13..18) rendered with the production
 // mobile CSS in an isolated offscreen window at 360x640: the header chip
 // (Monitor by default) fits next to the title, a tap switches to phone mode
-// (saved per pane) and the real RemoteTerminal sends one fitPane for its grid
-// after 150ms; the confirming fitState renders the grid without horizontal
-// pan; another device's size turns the chip into "Another device controls
-// the size" and a tap takes it back; the PC taking the size back returns to
-// desktop mode with its toast; leaving phone mode sends releaseFit; Settings
-// has the "Fit consoles to the phone" switch and the 11..16 text sizes, in
-// en/es. The WS client's sendCtl is stubbed; no socket opens.
+// (one phone-wide mode, the same as the Settings switch, v2.2.1) and the real
+// RemoteTerminal sends one fitPane for its grid after 150ms; the confirming
+// fitState renders the grid without horizontal pan; another device's size
+// turns the chip into "Another device controls the size" and a tap takes it
+// back; the PC taking the size back returns to desktop mode with its toast
+// without saving anything; another console opens in phone mode and reopening
+// the console the PC took back claims it again; leaving phone mode sends
+// releaseFit; Settings has the "Fit consoles to the phone" switch and the
+// 11..16 text sizes, in en/es. The WS client's sendCtl is stubbed; no socket
+// opens.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -43,7 +46,8 @@ window.result = (async () => {
  const fits = sent.filter(a => a.kind === 'fitPane');
  check(fits.length === 0, 'desktop mode sends no fitPane');
  chip().click(); await wait(80);
- check(chip().dataset.fitMode === 'phone' && localStorage.getItem('snagentsos.remote.paneMode.a') === 'phone', 'a tap switches to phone mode and saves it for the pane');
+ check(chip().dataset.fitMode === 'phone' && localStorage.getItem('snagentsos.remote.phoneFitDefault') === 'true' && store.getState().phoneFitDefault === true, 'a tap switches to phone mode and saves it for every console (phoneFitDefault)');
+ check(!Object.keys(localStorage).some(k => k.startsWith('snagentsos.remote.paneMode.')), 'no per-console key is written');
  check(sent.filter(a => a.kind === 'fitPane').length === 0, 'nothing before the 150ms debounce');
  await wait(200);
  const fp = sent.filter(a => a.kind === 'fitPane');
@@ -66,21 +70,32 @@ window.result = (async () => {
  check(chip().dataset.fitMode === 'phone', 'back to phone mode as owner');
  // The PC takes the size back (FR-18).
  fitState('desktop', 120, 40); await wait(150);
- check(chip().dataset.fitMode === 'desktop' && localStorage.getItem('snagentsos.remote.paneMode.a') === 'desktop' && document.body.textContent.includes('The PC took the size back'), 'fitState desktop: desktop mode, saved, with the toast');
+ check(chip().dataset.fitMode === 'desktop' && document.body.textContent.includes('The PC took the size back'), 'fitState desktop: desktop mode, with the toast');
+ check(localStorage.getItem('snagentsos.remote.phoneFitDefault') === 'true' && !Object.keys(localStorage).some(k => k.startsWith('snagentsos.remote.paneMode.')), 'the PC taking the size back saves nothing: the phone-wide mode stays phone');
+ // Another console follows the phone-wide mode; reopening the console the PC took back claims it again.
+ client.viewPane('b'); await wait(100);
+ check(chip().dataset.fitMode === 'phone', 'another console opens in phone mode without a tap');
+ client.viewPane('a'); await wait(100);
+ check(chip().dataset.fitMode === 'phone', 'reopening the console the PC took back follows the phone mode again');
+ const n0 = sent.filter(a => a.kind === 'fitPane').length;
+ client['emit']({ type: 'replay', data: '', cols: 120, rows: 40, running: true }); await wait(300);
+ const reclaim = sent.filter(a => a.kind === 'fitPane');
+ check(reclaim.length === n0 + 1 && reclaim.at(-1).paneId === 'a', 'its replay sends the fitPane again without a tap');
  // Leaving phone mode as owner sends releaseFit.
- chip().click(); await wait(250);
- const own = sent.filter(a => a.kind === 'fitPane').at(-1);
+ const own = reclaim.at(-1);
  fitState('phone', own.cols, own.rows); await wait(100);
  chip().click(); await wait(80);
  check(sent.at(-1).kind === 'releaseFit' && sent.at(-1).paneId === 'a' && chip().dataset.fitMode === 'desktop', 'switching to desktop mode while owning sends releaseFit');
+ check(localStorage.getItem('snagentsos.remote.phoneFitDefault') === 'false' && store.getState().phoneFitDefault === false, 'and saves desktop mode for every console');
  // Settings (FR-13/14).
  flushSync(() => root.render(<SettingsScreen open onClose={() => {}} />)); await wait(400);
  const sec = document.querySelector('[data-settings-section=phoneFit]');
  check(sec && sec.textContent.includes('Fit consoles to the phone') && sec.textContent.includes('Phone mode text size: 13px'), 'Settings: the switch and the text size row');
+ check(sec.textContent.includes('only while the phone shows it') && sec.querySelector('[data-pref=phoneFitDefault]').getAttribute('aria-checked') !== 'true', 'the hint says the PC follows only while the phone shows the console; the switch shows the chip choice (off)');
  const sizes = [...sec.querySelectorAll('[data-px]')].map(b => b.dataset.px).join();
  check(sizes === '11,12,13,14,16', 'text sizes 11/12/13/14/16');
  sec.querySelector('[data-px="16"]').click(); sec.querySelector('[data-pref=phoneFitDefault]').click(); await wait(80);
- check(store.getState().phoneFontSize === 16 && localStorage.getItem('snagentsos.remote.phoneFontSize') === '16' && store.getState().phoneFitDefault === true, 'choices are applied and saved');
+ check(store.getState().phoneFontSize === 16 && localStorage.getItem('snagentsos.remote.phoneFontSize') === '16' && store.getState().phoneFitDefault === true && localStorage.getItem('snagentsos.remote.phoneFitDefault') === 'true', 'choices are applied and saved');
  check(noOverflow(), 'Settings fits 360 px');
  setLang('es'); flushSync(() => root.render(<SettingsScreen open onClose={() => {}} key="es" />)); await wait(300);
  const es = document.querySelector('[data-settings-section=phoneFit]').textContent;

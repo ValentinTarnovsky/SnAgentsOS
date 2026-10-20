@@ -131,7 +131,7 @@ window.runMain = async () => {
  click(layer.querySelector('[data-terminal-back]'));
  await wait(420);
  check(layer.dataset.open === 'false' && store.getState().screen === 'home' && history.state.snagentsos === 'root', 'the chevron returns to Home and pops its entry');
- check(store.getState().subscribedPaneId === 'b1', 'the console stays subscribed while off screen (instant return)');
+ check(store.getState().subscribedPaneId === null && store.getState().activePaneId === 'b1', 'Home leaves the console stream (v2.2.1) but remembers the console');
  check($('[data-resume=b1]') && $('[data-resume=b1]').textContent.includes('Back'), 'the Resume card shows the console just viewed, with its workspace');
  tap($('[data-resume=b1]'));
  await wait(380);

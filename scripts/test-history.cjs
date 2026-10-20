@@ -228,6 +228,50 @@ async function testIndex() {
   return H
 }
 
+async function testCodex0163(H) {
+  // v2.2.1: Codex 0.163 rollouts carry no event_msg user/agent messages; the
+  // response_item messages give the title, the last message and the count.
+  const root0163 = path.join(tmp, 'codex-0163', 'sessions')
+  const NEWID = '01a15954-7814-71b1-b6bf-6ce27ebfe8a9'
+  const file = path.join(root0163, '2026', '10', '20', `rollout-2026-10-20T09-41-10-${NEWID}.jsonl`)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.copyFileSync(path.join(__dirname, 'fixtures', 'history', 'codex-rollout-0.163.jsonl'), file)
+  // A Codex Desktop session whose request follows its attachments, and one with only injected context.
+  const DESK = '01a15952-ac54-7ec1-8101-ca51e078d98f', EMPTY = '01a1595b-9b51-7ee2-ad61-d8a432a27ba5'
+  const item = (role, text, at) => ({ timestamp: iso(at), type: 'response_item', payload: { type: 'message', role, content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }] } })
+  writeJsonl(path.join(root0163, '2026', '10', '20', `rollout-2026-10-20T09-39-12-${DESK}.jsonl`), [
+    { timestamp: iso(T0), type: 'session_meta', payload: { id: DESK, cwd: 'C:\\Repo', originator: 'Codex Desktop', source: 'vscode' } },
+    item('user', '<external_codex_apps_open_page>\nx\n</external_codex_apps_open_page>', T0 + 1),
+    item('user', '# Files mentioned by the user:\n\n## shot.png: C:\\tmp\\shot.png\n\n## My request:\nCrop the screenshot', T0 + 2),
+    item('assistant', 'Cropped.', T0 + 3),
+  ], T0 + 3)
+  writeJsonl(path.join(root0163, '2026', '10', '20', `rollout-2026-10-20T09-48-58-${EMPTY}.jsonl`), [
+    { timestamp: iso(T0), type: 'session_meta', payload: { id: EMPTY, cwd: 'C:\\Repo', source: 'cli' } },
+    item('user', '<environment_context>\n  <cwd>C:\\Repo</cwd>\n</environment_context>', T0 + 1),
+  ], T0 + 1)
+  const history = new H.SessionHistory({ claudeProjectsDir: () => path.join(tmp, 'none'), codexSessionsRoot: () => root0163, getConfig: () => config, platform: 'win32', setTimer: () => 0 })
+  const all = await history.list()
+  const byId = Object.fromEntries(all.map(s => [s.sessionId, s]))
+  const s = byId[NEWID]
+  check(s && s.title === 'Fix the flaky login test and explain the cause' && s.cwd === 'C:\\Repo', 'Codex 0.163: the title is the first typed prompt (AGENTS.md, environment and <tag> blocks skipped): ' + JSON.stringify(s))
+  check(s.lastMessage === 'Fixed: the test raced the session cookie.' && s.updatedAt === Date.parse('2026-10-20T12:41:16.200Z'), 'Codex 0.163: the last message is the final assistant reply')
+  check(byId[DESK]?.title === 'Crop the screenshot' && byId[DESK].lastMessage === 'Cropped.', 'a Codex Desktop message with attachments is titled by its request')
+  check(!byId[EMPTY] && all.length === 2, 'a rollout with only injected context is not listed')
+  check(H.codexItemPrompt({ type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'x' }] } }) === null && H.codexItemReply({ type: 'event_msg', payload: { type: 'agent_message', message: 'x' } }) === null, 'developer messages and event records are not response_item prompts or replies')
+  check((await H.countMessages(file, 'codex')) === 3, 'Codex 0.163: one prompt and two replies are counted')
+  // Before 0.163 a rollout writes both: the response_item twins are never counted or read on top.
+  const legacy = path.join(tmp, 'codex-legacy', 'rollout-2026-10-02T10-00-00-' + CODEX_X + '.jsonl')
+  writeJsonl(legacy, [meta(CODEX_X, 'C:\\Repo', T0), item('user', 'twin prompt', T0 + 1), ev('user_message', 'twin prompt', T0 + 1), item('assistant', 'twin reply', T0 + 2), ev('agent_message', 'twin reply', T0 + 2)])
+  check((await H.countMessages(legacy, 'codex')) === 2, 'a rollout with event_msg messages counts them alone (no doubled twins)')
+  const draft = H.summarizeCodex(fs.readFileSync(legacy, 'utf8'), null, false)
+  check(draft.firstPrompt === 'twin prompt' && draft.lastMessage === 'twin reply', 'and its summary still reads the event_msg messages')
+  const first = await H.countMessagesFrom(file, 'codex')
+  fs.appendFileSync(file, JSON.stringify(item('user', 'and the logout test?', T0 + 9)) + '\n')
+  const grown = await H.countMessagesFrom(file, 'codex', first.progress)
+  check(grown.count === 4 && grown.count === (await H.countMessages(file, 'codex')), 'a grown 0.163 rollout resumes its count: ' + JSON.stringify(grown))
+  history.dispose()
+}
+
 async function testScale(H) {
   // 300 sessions: the search answers well within 500ms on a warm index.
   const big = path.join(tmp, 'scale', 'projects')
@@ -474,6 +518,7 @@ async function main() {
   try {
     const H = await testIndex()
     await testScale(H)
+    await testCodex0163(H)
     await testRemote()
     await testExecutor()
     await testMobileHelpers()

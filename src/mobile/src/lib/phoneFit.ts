@@ -1,5 +1,5 @@
 /**
- * Phone mode logic (E3 M11, FR-13..16): the per-pane mode and its storage,
+ * Phone mode logic (E3 M11, FR-13..16): the phone-wide mode and its storage,
  * the keyboard rule, how a fitState changes this phone's view, and the
  * debounced scheduler that decides when a fitPane goes out. Pure or
  * env-injected, so scripts/test-mobile-fit.cjs drives it without a browser.
@@ -9,7 +9,7 @@
  * names the device, so each phone remembers what it last sent (lastFitSent)
  * and a phone fitState of another size means another phone took over (FR-16).
  */
-import { STORAGE_PREFIX, storageGet, storageKeys, storageSet } from './mobileStorage'
+import { STORAGE_PREFIX, storageGet, storageKeys, storageRemove, storageSet } from './mobileStorage'
 import { PHONE_FONT_DEFAULT, PHONE_FONT_SIZES, type GridSize } from './fit'
 
 export type PaneFitMode = 'phone' | 'desktop'
@@ -25,25 +25,27 @@ export interface SizeInfo {
 
 // --- Storage ('snagentsos.remote.*', always behind try/catch in mobileStorage) ---
 
+/** Retired per-pane choice (up to v2.2.0): only migrated away, never written. */
 export const PANE_MODE_PREFIX = `${STORAGE_PREFIX}remote.paneMode.`
 const FIT_DEFAULT_KEY = `${STORAGE_PREFIX}remote.phoneFitDefault`
 const PHONE_FONT_KEY = `${STORAGE_PREFIX}remote.phoneFontSize`
 
-/** Every saved per-pane choice (FR-13). */
-export function loadPaneModes(): Record<string, PaneFitMode> {
-  const out: Record<string, PaneFitMode> = {}
-  for (const key of storageKeys(PANE_MODE_PREFIX)) {
-    const v = storageGet(key)
-    if (v === 'phone' || v === 'desktop') out[key.slice(PANE_MODE_PREFIX.length)] = v
-  }
-  return out
+/**
+ * One-time migration (v2.2.1): the mode is phone-wide now, so the old
+ * per-pane keys ('snagentsos.remote.paneMode.<paneId>') go away, or a stale
+ * 'desktop' saved when the PC took a size back would beat the setting. The
+ * per-pane overrides that remain live in memory only. Returns them empty.
+ */
+export function migratePaneModes(): Record<string, PaneFitMode> {
+  for (const key of storageKeys(PANE_MODE_PREFIX)) storageRemove(key)
+  return {}
 }
 
-export function savePaneMode(paneId: string, mode: PaneFitMode): void {
-  storageSet(`${PANE_MODE_PREFIX}${paneId}`, mode)
-}
-
-/** "Fit consoles to the phone" (phoneFitDefault): off, so desktop mode, by default. */
+/**
+ * "Fit consoles to the phone" (phoneFitDefault): off, so desktop mode, by
+ * default. The chip and the Settings switch both write it (one mode for every
+ * console on this phone).
+ */
 export function loadPhoneFitDefault(): boolean {
   return storageGet(FIT_DEFAULT_KEY) === 'true'
 }
@@ -62,9 +64,38 @@ export function savePhoneFontSize(size: number): void {
   storageSet(PHONE_FONT_KEY, String(size))
 }
 
-/** The pane's effective mode: its saved choice, else the phoneFitDefault setting. */
-export function resolvePaneMode(saved: PaneFitMode | undefined, fitDefault: boolean): PaneFitMode {
-  return saved ?? (fitDefault ? 'phone' : 'desktop')
+/**
+ * sessionStorage: the panes this phone holds at its size right now (its own
+ * fitState phone), so a page the browser reloaded or discarded still knows
+ * what to give back to the PC on the next goLive (v2.2.1). Per tab, never
+ * synced; a blocked storage just reads as empty.
+ */
+export const FIT_OWNED_KEY = `${STORAGE_PREFIX}fitOwned`
+
+export function loadFitOwned(): Set<string> {
+  try {
+    const raw: unknown = JSON.parse(sessionStorage.getItem(FIT_OWNED_KEY) ?? '[]')
+    return new Set(Array.isArray(raw) ? raw.filter((id): id is string => typeof id === 'string').slice(0, 50) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+export function saveFitOwned(ids: ReadonlySet<string>): void {
+  try {
+    if (ids.size) sessionStorage.setItem(FIT_OWNED_KEY, JSON.stringify([...ids]))
+    else sessionStorage.removeItem(FIT_OWNED_KEY)
+  } catch {
+    /* storage blocked: memory only */
+  }
+}
+
+/**
+ * The pane's effective mode: its in-memory override (the PC took the size
+ * back, the PC refused, a narrow screen), else the phoneFitDefault setting.
+ */
+export function resolvePaneMode(override: PaneFitMode | undefined, fitDefault: boolean): PaneFitMode {
+  return override ?? (fitDefault ? 'phone' : 'desktop')
 }
 
 // --- Keyboard rule (E3-FR-15) -----------------------------------------------------
@@ -107,10 +138,12 @@ export function keyboardBlocksFit(innerHeight: number, vvHeight: number | null |
 export const FIT_REPLAY_GRACE_MS = 1500
 
 export interface FitStateDecision {
-  /** The pane's mode after the frame. */
+  /**
+   * The pane's mode after the frame. A change is an in-memory override only:
+   * the PC taking the size back never touches the saved setting (v2.2.1), and
+   * the next open of the console follows the setting again.
+   */
   mode: PaneFitMode
-  /** True = save the mode (the PC took the size back: FR-18 stores 'desktop'). */
-  persist: boolean
   info: SizeInfo
   /** Toast to show: the PC recovered the size. */
   toast: 'reclaimed' | null
@@ -129,12 +162,12 @@ export function decideFitState(
 ): FitStateDecision {
   if (msg.owner === 'desktop') {
     const info: SizeInfo = { owner: 'desktop', cols: msg.cols, rows: msg.rows, other: false }
-    if (mode === 'phone' && !pending) return { mode: 'desktop', persist: true, info, toast: 'reclaimed' }
-    return { mode, persist: false, info, toast: null }
+    if (mode === 'phone' && !pending) return { mode: 'desktop', info, toast: 'reclaimed' }
+    return { mode, info, toast: null }
   }
   const mine = !!lastSent && lastSent.cols === msg.cols && lastSent.rows === msg.rows
   const other = mode === 'phone' && !pending && !mine
-  return { mode, persist: false, info: { owner: 'phone', cols: msg.cols, rows: msg.rows, other }, toast: null }
+  return { mode, info: { owner: 'phone', cols: msg.cols, rows: msg.rows, other }, toast: null }
 }
 
 // --- Scheduler (E3-FR-15) -------------------------------------------------------------

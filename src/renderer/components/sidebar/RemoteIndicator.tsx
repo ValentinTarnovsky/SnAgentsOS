@@ -48,11 +48,13 @@ export function RemoteIndicator() {
 
   if (collapsed) {
     return (
-      <div className="shrink-0 border-t border-border px-2 py-3">
+      // A flex row centers the button: Tooltip wraps it in a shrink-to-fit inline-flex span, so mx-auto had no room to work.
+      <div className="flex shrink-0 justify-center border-t border-border px-2 py-3">
         <Tooltip label={`${t('settings.cat.remote')} · ${label}`} side="right">
           <button
             onClick={onClick}
-            className="relative mx-auto flex h-8 w-8 items-center justify-center rounded-btn text-text-secondary transition-colors hover:bg-card hover:text-text-primary"
+            data-remote-indicator
+            className="relative flex h-8 w-8 items-center justify-center rounded-btn text-text-secondary transition-colors hover:bg-card hover:text-text-primary"
           >
             <Smartphone size={16} />
             <span

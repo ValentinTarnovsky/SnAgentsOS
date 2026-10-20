@@ -126,14 +126,17 @@ function Group({
   )
 }
 
-/** One ring with its row's label, value, reset and stale note in the tooltip. */
-function RingCell({ row, t, size, Icon, side }: { row: UsageRow; t: TFn; size: number; Icon?: IconComponent; side: 'right' | 'top' }) {
+/** A row's label, value, reset and stale note, for the tooltip of a ring or a compact row. */
+export function tipOf(v: RowView): string {
+  return [v.label, v.valueText, v.subText, v.title].filter(Boolean).join(' · ')
+}
+
+/** One ring with its row's details in the tooltip. */
+function RingCell({ row, t, size, side }: { row: UsageRow; t: TFn; size: number; side: 'right' | 'top' }) {
   const v = viewRow(row, t)
-  const tip = [v.label, v.valueText, v.subText, v.title].filter(Boolean).join(' · ')
   return (
-    <Tooltip label={tip} side={side}>
+    <Tooltip label={tipOf(v)} side={side}>
       <div className="flex flex-col items-center gap-0.5" data-usage-ring={row.id}>
-        {Icon && <Icon size={10} className="text-text-secondary/80" />}
         <UsageRing percent={v.percent} muted={v.muted} size={size} />
       </div>
     </Tooltip>
@@ -141,9 +144,9 @@ function RingCell({ row, t, size, Icon, side }: { row: UsageRow; t: TFn; size: n
 }
 
 /**
- * Live usage docked at the bottom of the sidebar: bars, or folded down to one
- * row of rings (`settings.usage.collapsed`); a column of rings in the
- * collapsed rail.
+ * Live usage docked at the bottom of the sidebar: grouped bars, or folded down
+ * to a compact list, one line per metric (`settings.usage.collapsed`); a column
+ * of rings in the collapsed rail.
  */
 export function UsageBars() {
   const t = useT()
@@ -212,9 +215,9 @@ export function UsageBars() {
     </div>
   )
 
-  // Folded: one row of rings, each with its provider's icon; the bars come back with the chevron.
+  // Folded: one line per metric (provider icon, label, thin bar, percent); the details come back with the chevron.
   if (folded) {
-    const ringRows: Array<{ row: UsageRow; Icon?: IconComponent }> = [
+    const compactRows: Array<{ row: UsageRow; Icon?: IconComponent }> = [
       ...claude.map((row) => ({ row, Icon: ClaudeIcon })),
       ...codex.map((row) => ({ row, Icon: CodexIcon })),
       ...custom.map((row) => ({ row, Icon: undefined })),
@@ -222,11 +225,19 @@ export function UsageBars() {
     return (
       <div className="shrink-0 border-t border-border px-2.5 py-2" data-usage-folded>
         {header}
-        {ringRows.length > 0 && (
-          <div className="mt-1.5 flex flex-wrap items-end justify-around gap-x-1 gap-y-1.5">
-            {ringRows.map(({ row, Icon }) => (
-              <RingCell key={row.id} row={row} t={t} size={30} Icon={Icon} side="top" />
-            ))}
+        {compactRows.length > 0 && (
+          <div className="mt-1.5 flex flex-col gap-1">
+            {compactRows.map(({ row, Icon }) => {
+              const v = viewRow(row, t)
+              // The stale note rides in the tooltip with the rest, not as a second native title.
+              return (
+                <Tooltip key={row.id} label={tipOf(v)} side="top" className="w-full min-w-0">
+                  <div data-usage-row={row.id} className="w-full min-w-0">
+                    <UsageMeter {...v} title={undefined} variant="row" icon={Icon} />
+                  </div>
+                </Tooltip>
+              )
+            })}
           </div>
         )}
       </div>

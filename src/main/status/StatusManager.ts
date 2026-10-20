@@ -2,6 +2,7 @@ import { Notification, type BrowserWindow } from 'electron'
 import { isAbsolute } from 'path'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
+import { effectiveProvider } from '@shared/agents'
 import { AGENT_END_REASONS, type AgentDetail, type AgentProvider, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneStatusEvt, type RemotePending } from '@shared/types'
 import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
@@ -49,6 +50,8 @@ interface PaneTrack {
   tool?: string
   detail?: AgentDetail
   topic?: string
+  /** v2.2.1: a title-only Codex track's text after the spinner (its idle title). */
+  titleText?: string
   firstPrompt?: string
   cwd?: string
   transcriptPath?: string
@@ -126,6 +129,11 @@ function titleTopic(title: string): string | undefined {
   return topic && !GENERIC_TOPICS.test(topic) ? topic : undefined
 }
 
+/** Codex's idle title is its working title without the spinner (extra status words on either side tolerated). */
+function sameTitle(a: string, b: string): boolean {
+  return a === b || (!!a && !!b && (a.startsWith(`${b} `) || b.startsWith(`${a} `)))
+}
+
 /** Requests survive title changes, renderer reloads and concurrent background work. */
 export class StatusManager implements PtySink {
   readonly id = 'status'
@@ -137,6 +145,9 @@ export class StatusManager implements PtySink {
   private readonly listeners = new Set<StatusListener>()
   private readonly sshPanes = new Map<string, boolean>()
   private readonly sshMisses = new Map<string, number>()
+  /** v2.2.1: the agent each pane's preset runs (title-only fallback), cached per spawn like sshPanes. */
+  private readonly paneProviders = new Map<string, AgentProvider | null>()
+  private readonly providerMisses = new Map<string, number>()
   /** E3 M12: when each pane's live pty spawned (the no-hooks transcript match). */
   private readonly spawnTimes = new Map<string, number>()
   /** E3 M12: provider|session|transcript each pane last reported, and who listens. */
@@ -156,7 +167,7 @@ export class StatusManager implements PtySink {
     private readonly onNotice: (notice: StatusNotice) => void = () => {},
     private readonly readTranscript: (path: string, sessionId: string) => Promise<string | undefined> = (path, sessionId) => readLastAssistantMessage(path, sessionId),
   ) {}
-  onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.candidates.delete(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.ptys.set(paneId, ptyId); this.spawnTimes.set(paneId, Date.now()) }
+  onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.candidates.delete(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.paneProviders.delete(paneId); this.providerMisses.delete(paneId); this.ptys.set(paneId, ptyId); this.spawnTimes.set(paneId, Date.now()) }
   onData(): void {}
   /** Every exit (natural or not) releases the pane's tracking. */
   onExit(ptyId: string, paneId: string, _exitCode?: number, _info?: PtyExitInfo): void {
@@ -164,6 +175,7 @@ export class StatusManager implements PtySink {
     this.ptys.delete(paneId)
     this.spawnTimes.delete(paneId)
     this.candidates.delete(paneId)
+    this.paneProviders.delete(paneId); this.providerMisses.delete(paneId)
     this.clearPane(paneId)
   }
   setConfig(cfg: NotificationSettings): void { this.cfg = cfg }
@@ -248,7 +260,9 @@ export class StatusManager implements PtySink {
       return
     }
     const working = cp >= 0x2800 && cp <= 0x28ff, stopped = cp === 0x2733
-    const present = /^(claude|Claude Code|claude daemon)$/.test(t) || t.startsWith('claude · ')
+    // v2.2.1: a Codex console's title has its own shape (no Claude glyph or names).
+    if (this.providerOf(paneId) === 'codex') { this.codexTitle(paneId, current, t, working); return }
+    const present =/^(claude|Claude Code|claude daemon)$/.test(t) || t.startsWith('claude · ')
     if (!working && !stopped && !present) {
       if (current && !current.timer) current.timer = setTimeout(() => this.clearPane(paneId), 3000)
       return
@@ -267,6 +281,38 @@ export class StatusManager implements PtySink {
       this.publish(paneId, track, `title:${track.turn}`, 'action')
       return
     }
+    this.publish(paneId, track)
+  }
+
+  /**
+   * v2.2.1: the title-only fallback of a Codex console (no bridge: the
+   * integration is off or the command passes `--no-daemon`). A spinner is a
+   * working turn and the text after it is kept; that same text with no spinner
+   * is Codex back at its prompt (done, the track stays); any other title is
+   * the shell after codex quit, cleared after 3 s like Claude's.
+   */
+  private codexTitle(paneId: string, current: PaneTrack | undefined, title: string, working: boolean): void {
+    if (!working) {
+      if (!current) return
+      if (current.titleText !== undefined && sameTitle(sanitize(title, true), current.titleText)) {
+        this.cancelTimer(current)
+        if (current.activity !== 'done') current.activity = current.activity === 'working' ? 'done' : 'idle'
+        current.pending.clear()
+        this.publish(paneId, current)
+      } else if (!current.timer) current.timer = setTimeout(() => this.clearPane(paneId), 3000)
+      return
+    }
+    // A track made by the Claude rules before the config named the preset is relabelled.
+    const track = current ?? this.createTrack('codex', '')
+    track.provider = 'codex'
+    this.panes.set(paneId, track)
+    this.cancelTimer(track)
+    track.titleText = sanitize(title.slice(1), true)
+    const topic = titleTopic(title)
+    if (topic) track.topic = topic
+    if (track.activity !== 'working') track.turn++
+    track.activity = 'working'
+    track.pending.clear()
     this.publish(paneId, track)
   }
 
@@ -658,6 +704,23 @@ export class StatusManager implements PtySink {
     }
     this.sshMisses.set(paneId, Date.now())
     return false
+  }
+  /** effectiveProvider of the pane and its preset (same reading as resolveLaunch), or null. Cached per spawn; misses retried after 5 s. */
+  private providerOf(paneId: string): AgentProvider | null {
+    const cached = this.paneProviders.get(paneId)
+    if (cached !== undefined) return cached
+    if (Date.now() - (this.providerMisses.get(paneId) ?? -Infinity) < 5000) return null
+    const cfg = this.getConfig()
+    for (const ws of cfg?.workspaces ?? []) {
+      const pane = ws.panes.find(p => p.id === paneId)
+      if (!pane) continue
+      const preset = pane.presetId ? cfg?.presets?.find(p => p.id === pane.presetId) : undefined
+      const provider = effectiveProvider(pane, preset)
+      this.paneProviders.set(paneId, provider)
+      return provider
+    }
+    this.providerMisses.set(paneId, Date.now())
+    return null
   }
   private publish(paneId: string, track: PaneTrack, key?: string, state?: StatusNotice['state'], cause?: AgentEvent): void {
     const now = Date.now()

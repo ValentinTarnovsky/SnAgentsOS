@@ -352,7 +352,7 @@ export function formatHuman(method: CtlMethod, data: unknown): string {
     case 'spawn':
       return `spawned console ${String(d.index)} (${String(d.paneId)}), prompt: ${String(d.promptDelivery)}`
     case 'send':
-      return d.enter ? 'sent with Enter' : 'sent'
+      return d.enter ? 'sent with Enter' : 'typed, not submitted (add --enter to submit)'
     case 'read':
       return ((d.lines as string[]) ?? []).join('\n')
     case 'wait':

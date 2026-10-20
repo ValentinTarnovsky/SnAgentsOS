@@ -568,8 +568,16 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
 function TabButton({ tab, active, onPick, onClose, closeLabel }: { tab: FileTab; active: boolean; onPick: () => void; onClose: () => void; closeLabel: string }) {
   const dirty = isDirty(tab)
   const ref = useRef<HTMLDivElement | null>(null)
+  // Scrolls the tab strip only: scrollIntoView would also scroll every ancestor, and while
+  // the drawer slides in from translateX(100%) that shifted the whole app shell (v2.2.1).
   useEffect(() => {
-    if (active) ref.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    const el = ref.current
+    const strip = el?.parentElement
+    if (!active || !el || !strip) return
+    const tab = el.getBoundingClientRect()
+    const box = strip.getBoundingClientRect()
+    if (tab.left < box.left) strip.scrollLeft -= box.left - tab.left
+    else if (tab.right > box.right) strip.scrollLeft += tab.right - box.right
   }, [active])
   return (
     <div

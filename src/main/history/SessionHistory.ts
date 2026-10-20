@@ -18,6 +18,9 @@
  *    precedence), compared resolved, without a trailing separator and
  *    case-insensitively on win32. Codex filters by the cwd of its first
  *    `session_meta` record (E3-FR-40).
+ *  - Codex prompts and replies come from `event_msg` user / agent messages,
+ *    or, in a rollout without them (Codex 0.163 on), from the `response_item`
+ *    messages, injected context skipped.
  *
  * Only regular files directly inside the scanned folders are read (a symlink
  * or a subagent folder is skipped), and nothing read here is ever written
@@ -63,6 +66,14 @@ const CONTROL_RE = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g
 const CLAUDE_SYNTHETIC_RE = /^(<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|bash-stdout|bash-stderr|system-reminder|user-prompt-submit-hook)>|Caveat: |\[Request interrupted by user)/
 /** Context blocks Codex sends as user messages. */
 const CODEX_SYNTHETIC_RE = /^<(environment_context|user_instructions|user_shell_command|turn_aborted)>/
+/**
+ * v2.2.1: context Codex 0.163 writes as a user `response_item` that nobody
+ * typed: AGENTS.md, the environment, and any `<tag>` block an app injects
+ * (heartbeat, skills, delegation...).
+ */
+const CODEX_ITEM_INJECTED_RE = /^(# AGENTS\.md instructions|<INSTRUCTIONS>|<[a-z][a-z0-9_-]*>)/
+/** Codex Desktop puts the attachments first and the request under this heading. */
+const CODEX_REQUEST_RE = /\n## My request(?: for Codex)?:[ \t]*\n([\s\S]*)$/
 
 /** One line of text: control characters out, runs of whitespace collapsed. */
 function oneLine(text: string): string {
@@ -213,7 +224,7 @@ export function summarizeClaude(head: string, tail: string | null, truncatedHead
   return draft
 }
 
-/** A prompt the user typed in a Codex session (event_msg user_message), or null. */
+/** A prompt the user typed in a Codex session (event_msg user_message, before Codex 0.163), or null. */
 export function codexPrompt(entry: unknown): string | null {
   const r = rec(entry)
   const p = r && r.type === 'event_msg' ? rec(r.payload) : null
@@ -222,7 +233,7 @@ export function codexPrompt(entry: unknown): string | null {
   return text && !CODEX_SYNTHETIC_RE.test(text) ? text : null
 }
 
-/** Reply text of a Codex record (event_msg agent_message), or null. */
+/** Reply text of a Codex record (event_msg agent_message, before Codex 0.163), or null. */
 export function codexReply(entry: unknown): string | null {
   const r = rec(entry)
   const p = r && r.type === 'event_msg' ? rec(r.payload) : null
@@ -230,7 +241,56 @@ export function codexReply(entry: unknown): string | null {
   return p.message.trim() || null
 }
 
-function applyCodex(draft: SessionDraft, entries: unknown[], fromHead: boolean): void {
+/** An event_msg user / agent message record of any text (the format before Codex 0.163). */
+function isCodexEventMessage(entry: unknown): boolean {
+  const r = rec(entry)
+  const p = r && r.type === 'event_msg' ? rec(r.payload) : null
+  return !!p && (p.type === 'user_message' || p.type === 'agent_message')
+}
+
+/** Text of a `response_item` message of `role` (its text parts joined, as decodeCodex reads them), or null. */
+function codexItemText(entry: unknown, role: 'user' | 'assistant'): string | null {
+  const r = rec(entry)
+  const p = r && r.type === 'response_item' ? rec(r.payload) : null
+  if (!p || p.type !== 'message' || p.role !== role) return null
+  const parts: string[] = []
+  if (typeof p.content === 'string') parts.push(p.content)
+  else if (Array.isArray(p.content)) {
+    for (const part of p.content) {
+      const b = rec(part)
+      if (b && typeof b.text === 'string' && /^(input_text|output_text|text)$/.test(String(b.type))) parts.push(b.text)
+    }
+  }
+  return parts.join('\n').trim() || null
+}
+
+/**
+ * v2.2.1: a prompt the user typed, from a Codex 0.163 rollout (no event_msg
+ * user_message any more): a user `response_item` message that is not
+ * injected context; a Codex Desktop message with attachments gives its request.
+ */
+export function codexItemPrompt(entry: unknown): string | null {
+  const text = codexItemText(entry, 'user')
+  if (!text || CODEX_ITEM_INJECTED_RE.test(text)) return null
+  const request = CODEX_REQUEST_RE.exec(text)
+  return request ? request[1].trim() || null : text
+}
+
+/** v2.2.1: reply text of a Codex 0.163 rollout (an assistant `response_item` message), or null. */
+export function codexItemReply(entry: unknown): string | null {
+  return codexItemText(entry, 'assistant')
+}
+
+/**
+ * True when the records hold no event_msg user / agent message (Codex 0.163
+ * on): their response_item twins stand in. Older rollouts write both, so the
+ * twins are never read there (no doubled messages).
+ */
+function codexUsesItems(entries: unknown[]): boolean {
+  return !entries.some(isCodexEventMessage)
+}
+
+function applyCodex(draft: SessionDraft, entries: unknown[], fromHead: boolean, items: boolean): void {
   for (const entry of entries) {
     const r = rec(entry)
     if (!r) continue
@@ -242,9 +302,9 @@ function applyCodex(draft: SessionDraft, entries: unknown[], fromHead: boolean):
     }
     const at = timeOf(r)
     if (at !== undefined && (draft.lastAt === undefined || at > draft.lastAt)) draft.lastAt = at
-    const prompt = codexPrompt(r)
+    const prompt = items ? codexItemPrompt(r) : codexPrompt(r)
     if (prompt && fromHead && draft.firstPrompt === undefined) draft.firstPrompt = prompt
-    const message = prompt ?? codexReply(r)
+    const message = prompt ?? (items ? codexItemReply(r) : codexReply(r))
     if (message) draft.lastMessage = message
   }
 }
@@ -252,8 +312,11 @@ function applyCodex(draft: SessionDraft, entries: unknown[], fromHead: boolean):
 /** Summary of a Codex rollout from its head (and tail, for a file past 64KB). */
 export function summarizeCodex(head: string, tail: string | null, truncatedHead: boolean): SessionDraft {
   const draft: SessionDraft = {}
-  applyCodex(draft, parseLines(head, false, truncatedHead), true)
-  if (tail != null) applyCodex(draft, parseLines(tail, true, false), draft.firstPrompt === undefined)
+  const headEntries = parseLines(head, false, truncatedHead)
+  const tailEntries = tail != null ? parseLines(tail, true, false) : []
+  const items = codexUsesItems([...headEntries, ...tailEntries])
+  applyCodex(draft, headEntries, true, items)
+  if (tail != null) applyCodex(draft, tailEntries, draft.firstPrompt === undefined, items)
   return draft
 }
 
@@ -611,6 +674,11 @@ function newest(refs: FileRef[]): FileRef[] {
 export interface CountProgress {
   offset: number
   count: number
+  /**
+   * v2.2.1, Codex only: the response_item messages before `offset`, the
+   * count of a rollout with no event_msg message (Codex 0.163 on).
+   */
+  items?: number
 }
 
 /** Exact message count of one file, read in chunks; null when it cannot be read. */
@@ -635,20 +703,26 @@ export async function countMessagesFrom(
     let pos = from?.offset ?? 0
     let lineStart = pos
     let count = from?.count ?? 0
+    // v2.2.1: Codex 0.163 messages (response_item), counted on the side.
+    let items = from?.items ?? 0
+    const codex = provider === 'codex'
     // Bytes of the line being read, split across chunks. Lines are cut at
     // newline bytes, which never sit inside a multi-byte UTF-8 character.
     let pending: Buffer[] = []
-    const take = (bytes: Buffer): boolean => {
+    /** 'message': a counted record; 'item': a Codex response_item message. */
+    const take = (bytes: Buffer): 'message' | 'item' | null => {
       // Byte-level pre-filter: most lines are never decoded at all.
-      if (provider === 'claude' ? bytes.indexOf('"user"') === -1 && bytes.indexOf('"assistant"') === -1 : bytes.indexOf('user_message') === -1 && bytes.indexOf('agent_message') === -1) return false
+      if (!codex ? bytes.indexOf('"user"') === -1 && bytes.indexOf('"assistant"') === -1 : bytes.indexOf('user_message') === -1 && bytes.indexOf('agent_message') === -1 && bytes.indexOf('"role"') === -1) return null
       const s = bytes.toString('utf8').trim()
-      if (!s || s[0] !== '{') return false
+      if (!s || s[0] !== '{') return null
       // Cheap pre-filter before JSON.parse: every counted record names its type.
-      if (provider === 'claude' ? !/"type"\s*:\s*"(user|assistant)"/.test(s) : !/"(user_message|agent_message)"/.test(s)) return false
+      if (!codex ? !/"type"\s*:\s*"(user|assistant)"/.test(s) : !/"(user_message|agent_message)"|"role"\s*:\s*"(user|assistant)"/.test(s)) return null
       try {
-        return countsAsMessage(provider, JSON.parse(s))
+        const entry: unknown = JSON.parse(s)
+        if (countsAsMessage(provider, entry)) return 'message'
+        return codex && (codexItemPrompt(entry) != null || codexItemReply(entry) != null) ? 'item' : null
       } catch {
-        return false
+        return null
       }
     }
     for (;;) {
@@ -660,7 +734,9 @@ export async function countMessagesFrom(
         const piece = chunk.subarray(start, nl)
         const line = pending.length ? Buffer.concat([...pending, piece]) : piece
         pending = []
-        if (take(line)) count++
+        const kind = take(line)
+        if (kind === 'message') count++
+        else if (kind === 'item') items++
         start = nl + 1
         lineStart = pos + start
       }
@@ -668,9 +744,11 @@ export async function countMessagesFrom(
       if (start < bytesRead) pending.push(Buffer.from(chunk.subarray(start)))
       pos += bytesRead
     }
-    const progress = { offset: lineStart, count }
-    const last = pending.length && take(Buffer.concat(pending)) ? 1 : 0
-    return { count: count + last, progress }
+    const progress: CountProgress = codex ? { offset: lineStart, count, items } : { offset: lineStart, count }
+    const last = pending.length ? take(Buffer.concat(pending)) : null
+    const total = count + (last === 'message' ? 1 : 0), totalItems = items + (last === 'item' ? 1 : 0)
+    // A rollout with no event_msg message (Codex 0.163 on) counts its response_item messages.
+    return { count: codex && total === 0 ? totalItems : total, progress }
   } catch {
     return null
   } finally {

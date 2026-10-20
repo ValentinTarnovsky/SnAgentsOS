@@ -73,7 +73,7 @@ import { chunkInput } from './composerSend'
 import { PendingMap, type PendingOutcome } from './pending'
 import { pruneDrafts } from './drafts'
 import { log, useDiagStore } from './connLog'
-import { FIT_REPLAY_GRACE_MS, decideFitState } from './phoneFit'
+import { FIT_REPLAY_GRACE_MS, decideFitState, loadFitOwned, saveFitOwned } from './phoneFit'
 import { syncPush } from './push'
 import { wsUrlFor } from './wsUrl'
 
@@ -268,6 +268,13 @@ class RemoteClient {
   private readonly fitPending = new Map<string, number>()
   /** Last running replay per pane (perf clock), for FIT_REPLAY_GRACE_MS. */
   private readonly fitReplayAt = new Map<string, number>()
+  /**
+   * Panes this phone holds at its size (its own fitState phone), mirrored to
+   * sessionStorage. A leave that reached the desktop (unsub, chatUnsub) drops
+   * one; a goLive gives back every one it does not view again (v2.2.1), since
+   * a dropped socket left them held on the PC for 5 minutes.
+   */
+  private readonly fitOwned = loadFitOwned()
   /** E3 M12: what the chat request pending per pane asked for (first page or earlier). */
   private readonly chatPending = new Map<string, { kind: ChatLoad; token: number }>()
   private chatToken = 0
@@ -517,16 +524,26 @@ class RemoteClient {
     }
   }
 
-  /** Switch the viewed pane within the current workspace (unsub old, sub new). */
-  viewPane(paneId: string): void {
+  /**
+   * Switch the viewed pane within the current workspace (unsub old, sub new).
+   * `reconnect` (goLive re-subscribing the console still on screen) keeps the
+   * open's in-memory flags: a socket drop is not opening the console again.
+   */
+  viewPane(paneId: string, opts: { reconnect?: boolean } = {}): void {
     const s = store.getState()
     if (s.subscribedPaneId === paneId) {
       s.update({ activePaneId: paneId })
       return
     }
     if (s.subscribedPaneId) this.leaveStream(s.subscribedPaneId)
+    // v2.2.1: every open follows the phone-wide settings again: a PC that took
+    // the size back, or a chat the desktop refused, only lasted for that open.
+    if (!opts.reconnect) {
+      s.clearPaneOverride(paneId)
+      s.setChatRefused(paneId, false)
+    }
     // E3-FR-24/25: an agent console saved as Chat opens as Chat (chatSub, no sub).
-    const chat = selectPaneView(s, paneId) === 'chat'
+    const chat = selectPaneView(store.getState(), paneId) === 'chat'
     s.update({ activePaneId: paneId, subscribedPaneId: paneId, chatPaneId: chat ? paneId : null })
     if (chat) this.requestChatFirst(paneId)
     else this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
@@ -535,20 +552,59 @@ class RemoteClient {
   /** Stop watching a pane the way it is watched (chatUnsub in Chat, unsub in Terminal). */
   private leaveStream(paneId: string): void {
     const s = store.getState()
+    let sent: boolean
     if (s.chatPaneId === paneId) {
       this.cancelChat(paneId)
-      this.send({ v: PROTOCOL_VERSION, type: 'chatUnsub', paneId })
+      sent = this.send({ v: PROTOCOL_VERSION, type: 'chatUnsub', paneId })
       s.update({ chatPaneId: null })
     } else {
-      this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
+      sent = this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
     }
+    // Main gives the PC its size back on a leave it received (v2.2.1); one
+    // lost with the socket stays owned, for the next goLive to release.
+    if (sent) this.markFitOwned(paneId, false)
+  }
+
+  /** Track one pane in fitOwned (memory + sessionStorage). */
+  private markFitOwned(paneId: string, owned: boolean): void {
+    if (this.fitOwned.has(paneId) === owned) return
+    if (owned) this.fitOwned.add(paneId)
+    else this.fitOwned.delete(paneId)
+    saveFitOwned(this.fitOwned)
+  }
+
+  /**
+   * goLive (v2.2.1): give back every pane this phone still holds except the
+   * one it views again (that one re-claims on its replay). The socket dropped
+   * before the leave reached the desktop (back to Home offline, a discarded
+   * page that reloads on Home), so the PC kept it held. The release counts
+   * as pending, so its fitState desktop reads as no "PC took it back".
+   */
+  private releaseLeftFits(state: RemoteStateSnapshot, viewing: string | null): void {
+    for (const paneId of [...this.fitOwned]) {
+      if (paneId === viewing) continue
+      this.markFitOwned(paneId, false)
+      if (!paneExists(state, paneId)) continue
+      log('info', `releaseFit ${paneId} (left while offline)`)
+      this.fitPending.set(paneId, (this.fitPending.get(paneId) ?? 0) + 1)
+      void this.releaseFit(paneId).finally(() => this.endFitPending(paneId))
+    }
+  }
+
+  private endFitPending(paneId: string): void {
+    const left = (this.fitPending.get(paneId) ?? 1) - 1
+    if (left > 0) this.fitPending.set(paneId, left)
+    else this.fitPending.delete(paneId)
   }
 
   // --- Chat view (E3 M12, FR-24..33) ---
 
   /** The [Terminal | Chat] control: save the choice and switch the subscription. */
   setPaneView(paneId: string, view: PaneView): void {
-    store.getState().setPaneView(paneId, view)
+    const s = store.getState()
+    // A tap on Chat asks the desktop again, even after a notice on this open.
+    s.setChatRefused(paneId, false)
+    s.setPaneView(paneId, view)
     this.syncView()
   }
 
@@ -614,7 +670,8 @@ class RemoteClient {
   /**
    * chatPage (FR-26/30/33): an answer to "Load earlier" goes in front; any
    * other page (the first one, a reset) replaces the list. A lone notice
-   * means no chat: back to Terminal for this page, with the toast.
+   * means no chat: back to Terminal for this open only (chatRefused, never
+   * saved), with the toast that names the fix for the console's agent.
    */
   private handleChatPage(msg: Extract<RemoteServerMsg, { type: 'chatPage' }>): void {
     const pending = this.chatPending.get(msg.paneId)
@@ -626,14 +683,21 @@ class RemoteClient {
     const notice = chatNoticeOf(items)
     if (notice) {
       chatStore.getState().clear(msg.paneId)
-      s.setPaneView(msg.paneId, 'terminal', false)
+      s.setChatRefused(msg.paneId, true)
       this.syncView()
-      s.setToast(notice === 'notLocal' ? t('chat.unavailable') : `${t('chat.unavailable')}. ${t('chat.installHooks')}`)
+      s.setToast(notice === 'notLocal' ? t('chat.unavailable') : `${t('chat.unavailable')}. ${t(this.chatFixKey(msg.paneId))}`)
       return
     }
     const page = { items, cursor: typeof msg.cursor === 'string' ? msg.cursor : null, done: msg.done === true }
     if (pending?.kind === 'more') chatStore.getState().prepend(msg.paneId, page)
     else chatStore.getState().replace(msg.paneId, page)
+  }
+
+  /** What turns the chat on for this console: the Codex integration, else the status hooks (Claude). */
+  private chatFixKey(paneId: string): 'chat.enableCodex' | 'chat.installHooks' {
+    const s = store.getState()
+    const provider = s.paneStatus[paneId]?.provider ?? (s.snapshot ? paneById(s.snapshot, paneId)?.type : undefined)
+    return provider === 'codex' ? 'chat.enableCodex' : 'chat.installHooks'
   }
 
   private handleChatAppend(msg: Extract<RemoteServerMsg, { type: 'chatAppend' }>): void {
@@ -697,12 +761,18 @@ class RemoteClient {
   }
 
   /**
-   * Back to Home from the terminal (E2-FR-01, 16). The pane stays subscribed
-   * and the terminal mounted off screen, so coming back is instant.
+   * Back to Home from the terminal (E2-FR-01, 16). The terminal stays mounted
+   * off screen, but the pane's stream is left (v2.2.1): a console this phone
+   * sized goes back to the PC's size right away, and coming back re-subscribes
+   * (a fresh replay) and claims the size again in phone mode.
    */
   leaveTerminal(): void {
     const s = store.getState()
     if (s.activePaneId) s.noteViewed(s.activePaneId)
+    if (s.subscribedPaneId) {
+      this.leaveStream(s.subscribedPaneId)
+      s.update({ subscribedPaneId: null })
+    }
     if (s.screen === 'terminal') s.setScreen('home')
   }
 
@@ -777,12 +847,11 @@ class RemoteClient {
     try {
       res = await this.sendCtl({ kind: 'fitPane', workspaceId, paneId, cols, rows })
     } finally {
-      const left = (this.fitPending.get(paneId) ?? 1) - 1
-      if (left > 0) this.fitPending.set(paneId, left)
-      else this.fitPending.delete(paneId)
+      this.endFitPending(paneId)
     }
     if (!res.ok && res.error === 'disabled') {
       const s = store.getState()
+      // For this open only: the phone-wide setting stays as the user left it.
       s.setPaneMode(paneId, 'desktop')
       s.setToast(t('fit.disabled'))
       // The fitState desktop that came with the refusal was held while pending: adopt it now.
@@ -799,8 +868,9 @@ class RemoteClient {
 
   /**
    * fitState (FR-12/16/18): record the size, switch to desktop mode when the
-   * PC took it back (saved, with its toast) and hand the new size to the
-   * terminal when it is the viewed pane.
+   * PC took it back (an in-memory override until the console is opened again,
+   * with its toast) and hand the new size to the terminal when it is the
+   * viewed pane.
    */
   private handleFitState(msg: Extract<RemoteServerMsg, { type: 'fitState' }>): void {
     const s = store.getState()
@@ -809,7 +879,9 @@ class RemoteClient {
     const settling = replayAt !== undefined && perfNow() - replayAt < FIT_REPLAY_GRACE_MS
     const d = decideFitState(mode, s.lastFitSent[msg.paneId] ?? null, this.fitPending.has(msg.paneId) || settling, msg)
     s.setSizeInfo(msg.paneId, d.info)
-    if (d.mode !== mode) s.setPaneMode(msg.paneId, d.mode, d.persist)
+    const sent = s.lastFitSent[msg.paneId]
+    this.markFitOwned(msg.paneId, msg.owner === 'phone' && !!sent && sent.cols === msg.cols && sent.rows === msg.rows)
+    if (d.mode !== mode) s.setPaneMode(msg.paneId, d.mode)
     if (d.toast === 'reclaimed') s.setToast(t('fit.reclaimed'))
     if (msg.paneId === s.subscribedPaneId) this.emit({ type: 'fitState', owner: msg.owner, cols: msg.cols, rows: msg.rows })
   }
@@ -1343,9 +1415,11 @@ class RemoteClient {
     this.reconnectAttempt = 0
     useDiagStore.getState().update({ abnormalStreak: 0, pairTimedOut: false })
     // E2-FR-47: keep the viewed pane across a reconnect; otherwise a pending
-    // deep link, else lastPane (subscribed so Resume opens instantly), else
-    // nothing. Never a pane picked from the desktop's active workspace, and
-    // the screen stays where it is (Home on the first connection).
+    // deep link, else lastPane, else nothing. Never a pane picked from the
+    // desktop's active workspace, and the screen stays where it is (Home on
+    // the first connection). Only the terminal subscribes (v2.2.1): on Home
+    // the pane is remembered, not streamed, so a console in phone mode is
+    // never sized from Home.
     const prev = store.getState()
     const cur = prev.activePaneId
     const deepLink = this.pendingDeepLink
@@ -1384,7 +1458,10 @@ class RemoteClient {
     this.startKeepalive()
     this.armIdleWatchdog()
     this.sendVisibility()
-    if (keep) this.viewPane(keep)
+    const viewing = keep && store.getState().screen === 'terminal' ? keep : null
+    this.releaseLeftFits(state, viewing)
+    // A reconnect is not a new open: the PC's reclaim and a refused chat stay.
+    if (viewing) this.viewPane(viewing, { reconnect: true })
     if (lostViewed) store.getState().setToast(t('toast.paneClosed'))
     if (deepLink) this.requestOpen(deepLink)
     if (!this.draftsPruned) {
@@ -1519,6 +1596,9 @@ class RemoteClient {
     if (status) next[paneId] = status
     else delete next[paneId]
     s.update({ paneStatus: next })
+    // The hooks took over from the title (precise after precise:false): the
+    // exact transcript is known now, so a chat refused on this open is tried again.
+    if (prev?.precise === false && status && status.precise !== false) s.setChatRefused(paneId, false)
     // A console that becomes (or stops being) an agent switches view (FR-24).
     if (paneId === s.subscribedPaneId) this.syncView()
     // An orphan upsert (status ahead of the state that adds the pane) never alerts.

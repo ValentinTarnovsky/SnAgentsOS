@@ -919,22 +919,17 @@ export class SessionManager implements PtySink {
   /**
    * E3-FR-44: the device has a visible session right now, so Web Push skips
    * it: an authenticated socket whose page reported itself visible (the
-   * `visibility` message of E2-FR-52, sent on every visibilitychange), that
-   * watches at least one console and spoke within VIEWED_FRESH_MS (a frozen
-   * iOS page falls out on its own).
+   * `visibility` message of E2-FR-52, sent on every visibilitychange) that
+   * spoke within VIEWED_FRESH_MS (a frozen iOS page falls out on its own).
+   * No `sub` is needed (v2.2.1): Home holds none now, and a phone open on Home
+   * already vibrates in the page (R22-18), so a push on top would double it.
    */
   isDeviceVisible(deviceId: string, now: number = Date.now()): boolean {
     for (const session of this.sessions) {
       if (session.deviceId !== deviceId || !session.authed || !session.visible) continue
-      if (now - session.lastSeen > VIEWED_FRESH_MS) continue
-      if (this.watchesAny(session)) return true
+      if (now - session.lastSeen <= VIEWED_FRESH_MS) return true
     }
     return false
-  }
-
-  /** At least one `sub` or `chatSub` (FR-44: either one makes a visible session). */
-  private watchesAny(session: Session): boolean {
-    return session.subs.size > 0 || session.chatSubs.size > 0
   }
 
   /**
