@@ -1019,8 +1019,8 @@ export const es: Record<keyof typeof en, string> = {
   // Barras de uso de IA (cuotas de Claude + Codex + modelos personalizados)
   'aiusage.title': 'Uso',
   'aiusage.refresh': 'Actualizar',
-  'aiusage.collapse': 'Plegar en anillos',
-  'aiusage.expand': 'Mostrar barras',
+  'aiusage.collapse': 'Vista compacta',
+  'aiusage.expand': 'Mostrar detalle',
   'aiusage.claude': 'Claude',
   'aiusage.codex': 'Codex',
   'aiusage.session': 'Sesión',

@@ -192,6 +192,16 @@ app.whenReady().then(async()=>{
  ok(!(await js("!!document.querySelector('[data-agent-row]')")),'sidebarAgentRows off hides the rows');
  await js("smoke.set({settings:{...smoke.app().settings,agents:{...smoke.app().settings.agents,sidebarAgentRows:true}}})");
 
+ // v2.2.1: a Codex console with only its title (no bridge) keeps its row when its turn ends.
+ await js("smoke.set({workspaces:[...smoke.app().workspaces,{id:'wd',name:'Delta',cwd:'C:/d',panes:[{id:'d1',type:'claude',presetId:'pc',title:'Claude Code',color:'#d97757',icon:'claude'},{id:'d2',type:'codex',title:'Codex',color:'#10a37f',icon:'openai'}]}],mountedWorkspaces:{...smoke.app().mountedWorkspaces,wd:'full'}})");
+ await js("smoke.app().setPaneStatus({paneId:'d1',state:'idle',precise:true,provider:'claude',notify:false,pendingCount:0,updatedAt:Date.now(),stateSince:Date.now()})");
+ await js("smoke.app().setPaneStatus({paneId:'d2',state:'working',precise:false,provider:'codex',notify:false,pendingCount:0,topic:'SnAgentsOS',updatedAt:Date.now(),stateSince:Date.now()})");await frames();
+ ok(await js("document.querySelector('[data-agent-row=d2]')?.dataset.agentState")==='working','a title-only Codex track has a working row');
+ await js("smoke.app().setPaneStatus({paneId:'d2',state:'done',precise:false,provider:'codex',notify:false,pendingCount:0,topic:'SnAgentsOS',updatedAt:Date.now(),stateSince:Date.now()})");await frames();
+ const codexRow=await js("({state:document.querySelector('[data-agent-row=d2]')?.dataset.agentState,claude:!!document.querySelector('[data-agent-row=d1]')})");
+ ok(codexRow.state==='done'&&codexRow.claude,'its done turn keeps the Codex row next to the Claude one',codexRow);
+ await js("smoke.set({workspaces:smoke.app().workspaces.filter(w=>w.id!=='wd'),mountedWorkspaces:Object.fromEntries(Object.entries(smoke.app().mountedWorkspaces).filter(([k])=>k!=='wd'))})");await frames();
+
  for(const theme of ['midnight','light'])for(const scale of [1,1.25,1.5]){
   await js("smoke.theme('"+theme+"')");w.setSize(900,600);w.webContents.setZoomFactor(scale);await wait(200);
   const fit=await js("[...document.querySelectorAll('[data-agent-row]')].every(b=>{const r=b.getBoundingClientRect(),a=document.querySelector('aside').getBoundingClientRect();return r.right<=a.right+1&&r.left>=a.left-1})&&document.documentElement.scrollWidth<=innerWidth");

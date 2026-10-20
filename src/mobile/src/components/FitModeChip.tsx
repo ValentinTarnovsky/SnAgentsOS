@@ -1,10 +1,11 @@
 /**
  * Phone mode chip in the terminal header (E3-FR-13/16). Smartphone = phone
- * mode (the PC console takes this screen's grid), Monitor = desktop mode (the
- * phone renders the PC's grid). A tap switches and saves the choice per pane;
- * leaving phone mode gives the size back (releaseFit) when this phone holds
- * it. When another phone controls the size, the chip says so and a tap takes
- * control back.
+ * mode (the PC console takes this screen's grid while the phone shows it),
+ * Monitor = desktop mode (the phone renders the PC's grid). A tap switches
+ * the phone-wide mode, the same one as the Settings switch (v2.2.1), so every
+ * console follows it; leaving phone mode gives the size back (releaseFit)
+ * when this phone holds it. When another phone controls the size, the chip
+ * says so and a tap takes control back.
  */
 import type { ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -40,10 +41,10 @@ export function FitModeChip(): ReactNode {
       const info = s.sizeInfo[paneId]
       const sent = s.lastFitSent[paneId]
       const mine = !!info && !!sent && info.owner === 'phone' && info.cols === sent.cols && info.rows === sent.rows
-      s.setPaneMode(paneId, 'desktop')
+      s.setPhoneModeGlobal('desktop')
       if (mine) void client.releaseFit(paneId)
     } else {
-      s.setPaneMode(paneId, 'phone')
+      s.setPhoneModeGlobal('phone')
     }
   }
   const label = t(mode === 'phone' ? 'fit.modePhone' : 'fit.modeDesktop')

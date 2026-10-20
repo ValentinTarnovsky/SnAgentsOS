@@ -291,9 +291,9 @@ export function RemoteTerminal(): ReactNode {
       },
       narrow: () => {
         const st = useRemoteStore.getState()
-        // Not saved: a narrow screen (split view, portrait on a small phone)
-        // is transient, so the pane's own choice survives a reload.
-        if (st.subscribedPaneId) st.setPaneMode(st.subscribedPaneId, 'desktop', false)
+        // An in-memory override: a narrow screen (split view, portrait on a
+        // small phone) is transient, so the phone-wide mode stays as it is.
+        if (st.subscribedPaneId) st.setPaneMode(st.subscribedPaneId, 'desktop')
         st.setToast(t('fit.narrow'))
         applyFont()
       },

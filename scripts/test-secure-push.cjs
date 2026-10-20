@@ -402,7 +402,8 @@ async function testManager(api) {
     const cfg = { settings: { language: 'en', notifications: { notifyAction: true, notifyDone: false } }, workspaces: [{ id: 'w', name: 'W', panes: [{ id: 'p1', title: 'api' }] }] }
     check((await w.manager.notifyPush(notice, cfg)) === 1 && w.sent[0].payload.title === 'Claude needs permission', 'a hidden phone gets the push')
     ws.msg({ type: 'visibility', visible: true })
-    check((await w.manager.notifyPush(notice, cfg)) === 1, 'visible but watching no console: still a push (FR-44)')
+    // v2.2.1: Home holds no sub, and a phone open on Home only vibrates in the page (R22-18).
+    check((await w.manager.notifyPush(notice, cfg)) === 0, 'visible on Home, watching no console: no push (FR-44, v2.2.1)')
     ws.msg({ type: 'sub', paneId: 'p1' })
     check((await w.manager.notifyPush(notice, cfg)) === 0, 'visible and subscribed: no push')
     ws.msg({ type: 'visibility', visible: false })

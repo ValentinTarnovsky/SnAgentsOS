@@ -3,14 +3,18 @@
  * size, the renderer applies it. One small state machine per pane:
  *
  *   desktop (no entry) --fitPane--> phone{session, cols, rows, chat}
- *   phone --owner left (unsub without chatSub, chatUnsub without sub, socket
- *           closed) + 250ms grace--> held{cols, rows, since}
+ *   phone --owner left (unsub without chatSub, chatUnsub without sub)
+ *           + 250ms grace--> desktop (released at once, no "PC took it back")
+ *   phone --socket closed + 250ms grace--> held{cols, rows, since}
  *   held --5 min--> desktop (auto restore)
  *   phone | held --releaseFit, remote:fitRelease, pty exit, server off--> desktop
  *
  * The last phone that sent fitPane wins. A re-sub (or chatSub, FR-21) inside
  * the grace keeps the owner without oscillating, and an owner in Chat runs no
- * timer at all. Restoring is dispatching the `releaseFit` ctl to the renderer
+ * timer at all. A phone that leaves the console on purpose (another console,
+ * Home) gives the PC its size back right away (v2.2.1); only a lost socket
+ * (a drop, the phone locked) holds the size, so a short drop never reflows
+ * the PC. Restoring is dispatching the `releaseFit` ctl to the renderer
  * executor, which applies the desktop's latest baseline; the resize that
  * follows reaches phones as fitState {owner:'desktop'} (and onReleased covers
  * a baseline equal to the phone size, where no resize happens).
@@ -21,9 +25,9 @@
 import type { RemoteCommandFit, RemoteCommandResult } from '@shared/ipc-contract'
 import type { RemoteCtlAction } from '@shared/remote-protocol'
 
-/** Grace before an owner that left becomes `held` (E3 M11). */
+/** Grace before an owner that left is released (unsub) or `held` (socket closed) (E3 M11). */
 export const FIT_GRACE_MS = 250
-/** A held size returns to the desktop on its own after this (E3-FR-19, constant). */
+/** A held size (socket closed) returns to the desktop on its own after this (E3-FR-19, constant). */
 export const FIT_AUTO_RESTORE_MS = 5 * 60 * 1000
 /** fitPane bursts per pane are coalesced server-side to the last one. */
 export const FIT_COALESCE_MS = 50
@@ -112,21 +116,20 @@ export class FitController implements FitHooks {
     void this.forward(paneId, st)
   }
 
+  /**
+   * The owner stopped watching on purpose (unsub, chatUnsub): with no re-sub
+   * or chatSub inside the grace the PC gets its size back at once, without
+   * the "PC took it back" broadcast (notify false); phones still on the pane
+   * get fitState desktop from the resize.
+   */
   left(session: object, paneId: string): void {
-    const st = this.panes.get(paneId)
-    if (!st || st.state !== 'phone' || st.session !== session || this.graceTimers.has(paneId)) return
-    this.graceTimers.set(
-      paneId,
-      setTimeout(() => {
-        this.graceTimers.delete(paneId)
-        this.hold(paneId)
-      }, FIT_GRACE_MS),
-    )
+    this.afterGrace(session, paneId, () => void this.release(paneId, false))
   }
 
+  /** The owner's socket is gone: after the grace the size is held (5 min auto restore). */
   closed(session: object): void {
     for (const [paneId, st] of this.panes) {
-      if (st.state === 'phone' && st.session === session) this.left(session, paneId)
+      if (st.state === 'phone' && st.session === session) this.afterGrace(session, paneId, () => this.hold(paneId))
     }
   }
 
@@ -282,6 +285,20 @@ export class FitController implements FitHooks {
     if (ptyId) fit.ptyId = ptyId
     if (st.state === 'phone' && st.chat) fit.chat = true
     return fit
+  }
+
+  /** Runs `then` after FIT_GRACE_MS unless the owner comes back (joined) or another fitPane lands. */
+  private afterGrace(session: object, paneId: string, then: () => void): void {
+    const st = this.panes.get(paneId)
+    if (!st || st.state !== 'phone' || st.session !== session || this.graceTimers.has(paneId)) return
+    this.graceTimers.set(
+      paneId,
+      setTimeout(() => {
+        this.graceTimers.delete(paneId)
+        const cur = this.panes.get(paneId)
+        if (cur?.state === 'phone' && cur.session === session) then()
+      }, FIT_GRACE_MS),
+    )
   }
 
   private hold(paneId: string): void {

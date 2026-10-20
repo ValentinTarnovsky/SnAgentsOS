@@ -631,7 +631,7 @@ async function testClientStatus() {
   await failing
   check(p.state().toast === 'Could not start the consoles', 'a failed mount shows a toast')
   p.client.leaveTerminal()
-  check(p.state().screen === 'home' && p.state().activePaneId === 'b2' && p.state().subscribedPaneId === 'b2', 'back to Home keeps the pane subscribed (instant return)')
+  check(p.state().screen === 'home' && p.state().activePaneId === 'b2' && p.state().subscribedPaneId === null && s.sent.at(-1).type === 'unsub' && s.sent.at(-1).paneId === 'b2', 'back to Home leaves the stream (unsub, v2.2.1) and remembers the pane')
   p.client.showPane('b2')
 
   // b2 closes on the desktop while viewed: back to Home with a toast, no other pane picked (E2-FR-47).
@@ -912,11 +912,11 @@ function testHomeLogic(p) {
 async function testHomeClient() {
   const authOk = (s, state) => s.recv({ type: 'authOk', deviceId: 'dev1', state, hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
   {
-    // goLive: lastPane is viewed (subscribed) but the screen stays Home.
+    // goLive: lastPane is remembered but not streamed while the screen stays Home (v2.2.1).
     const p = page()
     p.state().update({ lastPane: 'b1' })
     p.client.start(); const s = p.last(); s.open(); authOk(s, multi())
-    check(p.state().activePaneId === 'b1' && s.sent.some(m => m.type === 'sub' && m.paneId === 'b1') && p.state().screen === 'home', 'goLive subscribes lastPane and stays on Home')
+    check(p.state().activePaneId === 'b1' && !s.sent.some(m => m.type === 'sub') && p.state().subscribedPaneId === null && p.state().screen === 'home', 'goLive remembers lastPane without subscribing it and stays on Home')
     check(!s.sent.some(m => m.type === 'ctl'), 'and never asks the desktop to switch')
   }
   {

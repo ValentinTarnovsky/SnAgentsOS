@@ -751,6 +751,14 @@ async function cliEntryChecks() {
   check((await C.run(['ping'], deps({ connect: () => { throw new C.AppUnavailable('SnAgentsOS is not running') } }))) === 5 && /not running/.test(err.at(-1)), 'no app: exit 5 with "SnAgentsOS is not running"')
   out.length = 0
   check((await C.run(['help', '--agent'], deps())) === 0 && /120 s/.test(out.join('\n')) && out.join('\n').includes('snaos 2.0.0'), 'help --agent prints the versioned guide with the 120 s Bash note')
+  // v2.2.1: agent to agent messages need --enter, and the guide says how to ask for a reply.
+  const guide = out.join('\n')
+  check(/without `--enter` the text waits there, unsent/i.test(guide), 'guide: text without --enter stays unsent')
+  check(guide.includes('## Talking to another agent') && guide.includes('snaos send <console> - --enter') && guide.includes('snaos send <console> --file <path> --enter'), 'guide: follow-ups and replies go through send with --enter')
+  check(guide.includes('$SNAOS_CONSOLE_ID') && guide.includes('snaos send <your id> - --enter'), 'guide: ask for a reply with your own console id and --enter')
+  check(guide.includes('prompt: gate') && guide.includes('empty `snaos send <console> --enter`') && /never type the text again/i.test(guide), 'guide: a gated prompt left unsent is submitted with an empty send --enter')
+  const emptyEnter = await b(['send', '3', '--enter'])
+  check(emptyEnter.method === 'send' && emptyEnter.params.text === '' && emptyEnter.params.enter === true, 'an empty send --enter (the guide\'s gate recovery) parses')
 
   // resolveConnection: env first, then --runtime; a dead pid means not running.
   const rt = JSON.stringify({ version: 1, pid: 4242, appVersion: '2.0.0', startedAt: 1, transport: { kind: 'named-pipe', endpoint: '\\\\.\\pipe\\m' }, token: 'm'.repeat(64) })
@@ -766,6 +774,7 @@ async function cliEntryChecks() {
   check(C.defaultRuntimePath({ APPDATA: 'C:\\AD' }, 'win32') === 'C:\\AD\\snagentsos\\runtime.json', 'default runtime path on Windows')
   check(C.defaultRuntimePath({ XDG_CONFIG_HOME: '/x/cfg' }, 'linux') === '/x/cfg/snagentsos/runtime.json' && C.defaultRuntimePath({}, 'darwin', () => '/Users/u') === '/Users/u/Library/Application Support/snagentsos/runtime.json', 'default runtime path on Linux and macOS, POSIX separators on any host')
   check(/spawned console 4/.test(C.formatHuman('spawn', { paneId: 'p', index: 4, promptDelivery: 'gate' })) && C.formatHuman('wait', { state: 'idle', precise: true, noTurnObserved: true }) === 'idle (no turn observed)', 'human output')
+  check(C.formatHuman('send', { paneId: 'p', enter: true }) === 'sent with Enter' && C.formatHuman('send', { paneId: 'p', enter: false }) === 'typed, not submitted (add --enter to submit)', 'human output of send says when the text was not submitted')
 }
 
 // --- K. CliService end to end ------------------------------------------------------

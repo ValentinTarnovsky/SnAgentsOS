@@ -24,7 +24,8 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
 - \`snaos ls [--workspace <ws>]\`: workspaces and consoles with agent state.
 - \`snaos spawn <claude|codex|shell|preset> [--prompt <text> | --prompt-file <path> | --prompt -] [--workspace <ws>] [--title <t>] [--focus] [--no-profile]\`:
   opens a console and returns its index and id right away, without waiting for the agent.
-- \`snaos send <console> <text|-> [--file <path>] [--enter]\`: types text; Enter only with \`--enter\`.
+- \`snaos send <console> <text|-> [--file <path>] [--enter]\`: types text into the console's input;
+  \`--enter\` submits it. Without \`--enter\` the text waits there, unsent, until a person presses Enter.
 - \`snaos read <console> [--lines N]\`: last N lines (default 100, max 2000) without colors.
 - \`snaos wait <console> --idle [--timeout <s>] [--quiet-ms <ms>]\`: blocks until the agent is
   idle, done, asking or failed (shells: no output for --quiet-ms).
@@ -49,6 +50,22 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
   timeout, or run the wait in the background if your tool can.
 - \`send --enter\` followed by \`wait --idle\` returns only after the new turn started and ended;
   \`noTurnObserved: true\` means nothing happened in 10 s (check the console with \`read\`).
+
+## Talking to another agent
+
+- The first message to a new agent goes in \`spawn --prompt\` (or \`--prompt-file\`, \`--prompt -\`): it is
+  submitted for you once the agent is ready. Do not spawn and then \`send\` the same task.
+- Every follow-up or reply to an agent is \`snaos send <console> - --enter\` (text on stdin) or
+  \`snaos send <console> --file <path> --enter\`. Leave out \`--enter\` only when the user wants to
+  review the text before it goes.
+- To get an answer back, put in your message the exact command the other agent must run, with your
+  own console id and \`--enter\`, for example: reply with \`snaos send <your id> - --enter\`. Your id is
+  in \`$SNAOS_CONSOLE_ID\` (PowerShell: \`$env:SNAOS_CONSOLE_ID\`, cmd: \`%SNAOS_CONSOLE_ID%\`); \`snaos ls\`
+  also marks your console as \`self\`. Write the real id, not the variable: the other agent runs in
+  another console.
+- \`spawn\` prints \`prompt: argv\`, \`gate\` or \`none\`. If it printed \`prompt: gate\` and \`snaos read\` shows
+  the text sitting unsent in the new console, submit it with an empty \`snaos send <console> --enter\`.
+  Never type the text again.
 
 ## Waiting on other consoles, drivers and background work
 

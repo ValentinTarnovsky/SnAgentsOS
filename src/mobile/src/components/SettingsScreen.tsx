@@ -138,7 +138,7 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
   const composerAutocorrect = useRemoteStore((s) => s.composerAutocorrect)
   const setComposerPref = useRemoteStore((s) => s.setComposerPref)
   const phoneFitDefault = useRemoteStore((s) => s.phoneFitDefault)
-  const setPhoneFitDefault = useRemoteStore((s) => s.setPhoneFitDefault)
+  const setPhoneModeGlobal = useRemoteStore((s) => s.setPhoneModeGlobal)
   const phoneFontSize = useRemoteStore((s) => s.phoneFontSize)
   const setPhoneFontSize = useRemoteStore((s) => s.setPhoneFontSize)
   const chatDefault = useRemoteStore((s) => s.chatDefault)
@@ -193,7 +193,8 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
               label={t('fit.settings.default')}
               hint={t('fit.settings.defaultHint')}
               checked={phoneFitDefault}
-              onChange={setPhoneFitDefault}
+              // The same phone-wide mode as the terminal chip (v2.2.1).
+              onChange={(on) => setPhoneModeGlobal(on ? 'phone' : 'desktop')}
             />
             <div data-phone-font={phoneFontSize} className="rounded-card border border-border bg-bg-secondary px-4 py-3">
               <span className="mb-2 block text-sm text-text-primary">{t('fit.settings.fontSize', { px: phoneFontSize })}</span>
@@ -227,7 +228,7 @@ export function SettingsScreen({ open, onClose }: { open: boolean; onClose: () =
             checked={chatDefault}
             onChange={(on) => {
               setChatDefault(on)
-              // The console on screen follows at once when it has no choice of its own.
+              // Every per-console choice is gone: the console on screen follows at once.
               client.syncView()
             }}
           />

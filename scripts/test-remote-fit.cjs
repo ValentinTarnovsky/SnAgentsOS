@@ -297,29 +297,37 @@ async function testGraceHeldRestore() {
   w.advance(1000)
   check(w.manager.fit.stateOf('p1').state === 'phone' && w.ofKind('releaseFit').length === 0, 'a re-sub inside the 250ms grace keeps the owner (no held, no release)')
 
+  // v2.2.1: an explicit unsub (another console, Home) gives the size back
+  // right after the grace, with no "PC took it back" for the phone that left.
   ws.msg({ type: 'unsub', paneId: 'p1' })
+  const seen = fitStates(ws, 'p1').length
   w.advance(w.api.FIT_GRACE_MS - 1)
   check(w.manager.fit.stateOf('p1').state === 'phone', 'still phone until the grace ends')
   w.advance(1)
-  const held = w.manager.fit.stateOf('p1')
-  check(held.state === 'held' && held.cols === 50 && held.rows === 40 && w.sizes.get('p1').cols === 50, 'after 250ms the size is held, the pty keeps the phone grid')
-  idle(w, [ws], w.api.FIT_AUTO_RESTORE_MS - 1)
-  check(w.ofKind('releaseFit').length === 0, 'nothing is restored before 5 minutes')
-  w.advance(1)
   await tick(); await tick()
   const rel = w.ofKind('releaseFit')
-  check(rel.length === 1 && rel[0].fit.ptyId === 'pty-p1' && rel[0].fit.baseline.cols === 120 && rel[0].fit.baseline.rows === 40, 'at 5 minutes main dispatches releaseFit with the pre-phone baseline')
-  check(w.manager.fit.ownerOf('p1') === 'desktop' && w.sizes.get('p1').cols === 120, 'the pane is the desktop\'s again, at its size')
-  check(fitStates(ws, 'p1').at(-1).owner === 'desktop', 'a phone that is not watching the pane still learns the release (FR-18)')
+  check(w.manager.fit.stateOf('p1') === null && w.manager.fit.ownerOf('p1') === 'desktop', 'after 250ms without a re-sub the owner is released at once (no held)')
+  check(rel.length === 1 && rel[0].fit.ptyId === 'pty-p1' && rel[0].fit.baseline.cols === 120 && rel[0].fit.baseline.rows === 40 && w.sizes.get('p1').cols === 120, 'main dispatches releaseFit with the pre-phone baseline, the pty is back at the desktop size')
+  check(fitStates(ws, 'p1').length === seen, 'the phone that left gets no fitState desktop (notify false: no reclaimed toast, no saved desktop)')
 
-  // Closing the socket also goes through the grace.
+  // Closing the socket goes through the grace, then holds for 5 minutes.
   const second = await pair(w)
   second.ws.msg({ type: 'sub', paneId: 'p2' })
   await claim(w, second.ws, 'g2', 'p2', 40, 20)
   second.ws.close(1000)
   check(w.manager.fit.stateOf('p2').state === 'phone', 'a closed socket keeps the owner during the grace')
   w.advance(w.api.FIT_GRACE_MS)
-  check(w.manager.fit.stateOf('p2').state === 'held', 'then the size is held, the strip stays (FR-17)')
+  const held = w.manager.fit.stateOf('p2')
+  check(held.state === 'held' && held.cols === 40 && held.rows === 20 && w.sizes.get('p2').cols === 40, 'then the size is held, the pty keeps the phone grid, the strip stays (FR-17)')
+  const before = w.ofKind('releaseFit').length
+  idle(w, [ws], w.api.FIT_AUTO_RESTORE_MS - w.api.FIT_GRACE_MS - 1)
+  check(w.ofKind('releaseFit').length === before, 'nothing is restored before 5 minutes')
+  idle(w, [ws], w.api.FIT_GRACE_MS + 1)
+  await tick(); await tick()
+  const back = w.ofKind('releaseFit').slice(before)
+  check(back.length === 1 && back[0].fit.baseline.cols === 100 && back[0].fit.baseline.rows === 30, 'at 5 minutes main dispatches releaseFit with the pre-phone baseline')
+  check(w.manager.fit.ownerOf('p2') === 'desktop' && w.sizes.get('p2').cols === 100, 'the pane is the desktop\'s again, at its size')
+  check(fitStates(ws, 'p2').at(-1).owner === 'desktop', 'a phone that is not watching the pane still learns the auto restore (FR-18)')
 }
 
 async function testChatPresence() {
@@ -339,11 +347,21 @@ async function testChatPresence() {
   check(chatCmd.fit.chat === true && chatCmd.action.cols === 50, 'the executor hears chat:true so the strip says "(Chat)"')
   idle(w, [ws], 10 * 60 * 1000)
   check(w.manager.fit.stateOf('p1').state === 'phone' && w.ofKind('releaseFit').length === 0, 'ten minutes in Chat start no timer and restore nothing')
-  // chatUnsub without a sub within 250ms: held, and the strip loses "(Chat)".
+  // chatUnsub without a sub within 250ms: released at once (v2.2.1), the strip goes away.
+  const n = w.ofKind('releaseFit').length
   w.manager.fit.left(owner, 'p1')
   w.advance(w.api.FIT_GRACE_MS)
+  await tick(); await tick()
+  check(w.manager.fit.stateOf('p1') === null && w.ofKind('releaseFit').length === n + 1 && w.sizes.get('p1').cols === 120, 'chatUnsub without a sub releases the size right after the grace')
+  // A socket lost while the owner reads Chat holds the size, and the strip loses "(Chat)".
+  ws.msg({ type: 'sub', paneId: 'p1' })
+  await claim(w, ws, 'h2', 'p1', 50, 40)
+  w.manager.fit.joined(w.manager.fit.stateOf('p1').session, 'p1', true)
   await tick()
-  check(w.manager.fit.stateOf('p1').state === 'held' && w.ofKind('fitPane').at(-1).fit.chat !== true, 'chatUnsub without a sub holds the size and clears the chat flag')
+  ws.close(1000)
+  w.advance(w.api.FIT_GRACE_MS)
+  await tick()
+  check(w.manager.fit.stateOf('p1')?.state === 'held' && w.ofKind('fitPane').at(-1).fit.chat !== true, 'a closed socket in Chat holds the size and clears the chat flag')
 }
 
 async function testReleasePaths() {

@@ -98,8 +98,10 @@ const ws = { id: 'w1', name: 'Repo', cwd: ROOT, panes: [{ id: 'shell', type: 'sh
 useAppStore.setState({ hydrated: true, activeWorkspaceId: 'w1', workspaces: [ws] });
 applyTheme('midnight');
 function Keys() { useGlobalKeys(); return null }
+// The real shell around the workspace (App.tsx): an overflow-hidden row with the sidebar and main,
+// so a drawer that scrolls its ancestors shows up as a shifted shell (v2.2.1).
 function App() {
-  return <div style={{ height: '100vh' }} className="flex flex-col bg-bg-primary text-text-primary"><Keys /><WorkspaceView workspace={ws} isActive /><CommandPalette /></div>;
+  return <div style={{ height: '100vh' }} className="flex flex-col bg-bg-primary text-text-primary"><Keys /><div data-shell className="flex min-h-0 w-full flex-1 overflow-hidden bg-bg-primary"><aside style={{ width: 220, flexShrink: 0 }} /><main className="relative min-w-0 flex-1"><WorkspaceView workspace={ws} isActive /></main></div><CommandPalette /></div>;
 }
 createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><App /></I18nProvider>);
 const q = (s) => document.querySelector(s);
@@ -129,6 +131,15 @@ window.smoke = {
   openChanges: () => openChangesPanel(),
   side: () => useSidePanels.getState().open,
   overflow: () => document.documentElement.scrollWidth > innerWidth,
+  shellScroll: () => Math.max(q('[data-shell]').scrollLeft, q('[data-shell]').scrollTop, document.scrollingElement.scrollLeft, document.body.scrollLeft),
+  // Samples the shell's scroll every frame for ms, across a drawer's 150 ms slide-in.
+  sampleShift: (ms) => { window.__maxShift = 0; const end = performance.now() + ms; const tick = () => { window.__maxShift = Math.max(window.__maxShift, smoke.shellScroll()); if (performance.now() < end) requestAnimationFrame(tick); else window.__sampled = true }; window.__sampled = false; tick() },
+  maximize: (v) => useSidePanels.setState({ maximized: v }),
+  newConsole: () => q('[data-new-console-button]').click(),
+  menuOpen: () => !!q('[data-new-console-menu]'),
+  // Is the menu what paints at a point inside it? The drawer sits right under it.
+  menuOnTop: () => { const m = q('[data-new-console-menu]'); if (!m) return false; const r = m.getBoundingClientRect(); return m.contains(document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height - 4, 20))) },
+  drawerPoint: () => { const r = q('[data-drawer]').getBoundingClientRect(); return { x: Math.round(r.left + 40), y: Math.round(r.bottom - 40) } },
   palette: () => useAppStore.getState().setPaletteOpen(true),
 };
 `
@@ -222,8 +233,11 @@ app.whenReady().then(async()=>{
  ok(!(await js('smoke.overflow()')),'no horizontal overflow');
 
  // Notes: Ctrl+Shift+M replaces Files, a first note, autosave and the preview.
+ await js('smoke.sampleShift(500)');
  await press('M',['control','shift']);
  await until("smoke.drawer()==='notes'",'Ctrl+Shift+M opens Notes (one drawer at a time)');
+ await until('window.__sampled','the Notes slide-in sampler ran');
+ eq(await js('window.__maxShift'),0,'opening Notes does not scroll the app shell');
  eq(await js('smoke.calls.watch.at(-1)'),null,'closing Files stops the watch');
  await js('smoke.notesNew()');
  await until('smoke.calls.noteCreates.length===1&&smoke.focusEditor()','a new note opens in the editor');
@@ -240,8 +254,30 @@ app.whenReady().then(async()=>{
  // Changes takes over; Esc closes a drawer; the palette lists both.
  await js('smoke.openChanges()');
  await until('smoke.side()===null','opening Changes closes Notes');
+ // Reopening Files with tabs still open (they live in filesStore) mounts the active tab while the
+ // drawer is off-screen: neither it nor the editor's focus may scroll the shell (v2.2.1).
+ await js('smoke.sampleShift(500)');
  await press('E',['control','shift']);
  await until("smoke.drawer()==='files'",'Files again');
+ await until('window.__sampled','the Files slide-in sampler ran');
+ ok((await js('smoke.tabs().length'))===2,'the Files tabs survived closing the drawer');
+ eq(await js('window.__maxShift'),0,'opening Files with open tabs does not scroll the app shell');
+ eq(await js('smoke.shellScroll()'),0,'and the shell stays in place after the slide-in');
+
+ // The New console menu paints above the drawer, and a click on the drawer closes it (v2.2.1).
+ const click=async(x,y)=>{w.webContents.sendInputEvent({type:'mouseDown',x,y,button:'left',clickCount:1});w.webContents.sendInputEvent({type:'mouseUp',x,y,button:'left',clickCount:1});await frame();await wait(60)};
+ for(const max of [false,true]){
+  await js('smoke.maximize('+max+')');await frame();
+  await js('smoke.newConsole()');
+  await until('smoke.menuOpen()','the New console menu opens'+(max?' (drawer maximized)':''));
+  ok(await js('smoke.menuOnTop()'),'New console menu paints above the drawer'+(max?' (maximized)':''));
+  if(!max)await shot('new-console-over-drawer');
+  const pt=await js('smoke.drawerPoint()');
+  await click(pt.x,pt.y);
+  await until('!smoke.menuOpen()','a click on the drawer closes the menu'+(max?' (maximized)':''));
+  ok((await js('smoke.drawer()'))==='files','and the drawer stays open'+(max?' (maximized)':''));
+ }
+ await js('smoke.maximize(false)');await frame();
  await js("document.querySelector('[data-drawer]').focus()");
  await press('Escape');
  await until('smoke.drawer()===null','Esc closes the drawer');
@@ -251,7 +287,7 @@ app.whenReady().then(async()=>{
  await press('Escape');
 
  if(failures.length)throw new Error(failures.join('\n'));
- console.log('PASS: '+n+' files and notes drawer UI checks (Ctrl+Shift+E/M, tree, open, type, Ctrl+S with rev, Ctrl+F search, CRLF + BOM, agent changes clean and dirty, context menu, autosaved note + preview, one drawer at a time, Esc, palette); screenshots '+__dirname);
+ console.log('PASS: '+n+' files and notes drawer UI checks (Ctrl+Shift+E/M, tree, open, type, Ctrl+S with rev, Ctrl+F search, CRLF + BOM, agent changes clean and dirty, context menu, autosaved note + preview, one drawer at a time, Esc, palette, no shell shift on open, New console menu over the drawer); screenshots '+__dirname);
  w.destroy();app.quit();
 }).catch((e)=>{console.error(e);app.exit(1)});
 `

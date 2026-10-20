@@ -562,7 +562,8 @@ export function Sidebar() {
                         className="shrink-0"
                         style={{ color: active ? (w.panes[0]?.color ?? '#6366f1') : undefined }}
                       />
-                      {sidebarCollapsed && (status || exitedDot) && <span className={cn('absolute -bottom-1 -right-1 rounded-full p-0.5', active ? 'bg-card' : 'bg-bg-secondary')}>{status ? <StatusDot status={status} label={statusLabel} size={6} noTooltip /> : <ExitedDot label={exitedLabel} size={6} />}</span>}
+                      {/* Beside the glyph, with no backing disc: an opaque cutout bit the icon's corner (v2.2.1). */}
+                      {sidebarCollapsed && (status || exitedDot) && <span className="pointer-events-none absolute -bottom-0.5 -right-2 flex" data-rail-status>{status ? <StatusDot status={status} label={statusLabel} size={7} noTooltip /> : <ExitedDot label={exitedLabel} size={7} />}</span>}
                       </span>
                       <span
                         className={cn(

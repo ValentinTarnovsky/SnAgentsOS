@@ -9,7 +9,11 @@
 // earlier" with its chatMore cursor, the composer sending a bracketed paste
 // as `input` (never term.paste), "Claude is working...", "The PC did not
 // answer", the notice falling back to Terminal with its toast, Spanish
-// labels, and 500 messages with the time it took reported.
+// labels, and 500 messages with the time it took reported. v2.2.1: a Codex
+// console with no status is eligible by type and opens in Chat with "Open
+// agent consoles in Chat", its notice toast names the Codex integration, the
+// fallback is not sticky (the next open, a precise status), and a choice equal
+// to the default is not saved.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -54,10 +58,12 @@ window.result = (async () => {
   workspaces:[{ id:'w1', name:'Front', layoutOrder:['c1','s1'], panes:[
    { id:'c1', title:'Claude', type:'claude', color:'', icon:'', running:true },
    { id:'s1', title:'Shell', type:'shell', color:'', icon:'', running:true },
+   { id:'x1', title:'Codex', type:'codex', color:'', icon:'', running:true },
   ] }],
  };
  setLang('en');
- store.getState().update({ phase:'live', banner:null, connected:true, snapshot, activePaneId:'s1', subscribedPaneId:'s1', chatPaneId:null, paneStatus:{ c1:{ state:'idle', provider:'claude', stateSince:1 } } });
+ // screen 'terminal': the console is on screen (a reconnect on Home subscribes nothing, v2.2.1).
+ store.getState().update({ phase:'live', banner:null, connected:true, screen:'terminal', snapshot, activePaneId:'s1', subscribedPaneId:'s1', chatPaneId:null, paneStatus:{ c1:{ state:'idle', provider:'claude', stateSince:1 } } });
  const host=document.getElementById('root'); const reactRoot=createRoot(host);
  flushSync(() => reactRoot.render(<MainScreen />)); await frames(); await wait(50);
  const q = sel => host.querySelector(sel);
@@ -184,11 +190,10 @@ window.result = (async () => {
  check(store.getState().chatPaneId === null && sent.map(m => m.type).join(',') === 'chatUnsub,sub' && !q('[data-chat-view]'),'a notice goes back to Terminal: chatUnsub then sub');
  const toast = store.getState().toasts.at(-1)?.text;
  check(toast === 'Chat not available for this console. Install the status hooks to enable it','the toast says why and suggests the hooks: ' + toast);
- check(localStorage.getItem('snagentsos.remote.paneView.c1') === 'chat' && q('[data-view-toggle]').dataset.viewToggle === 'terminal','the fallback is not saved (the console shows Terminal for now)');
+ check(localStorage.getItem('snagentsos.remote.paneView.c1') === 'chat' && q('[data-view-toggle]').dataset.viewToggle === 'terminal' && store.getState().chatRefused.c1 === true,'the fallback is not saved (the console shows Terminal for this open only)');
 
- // Spanish labels.
+ // Spanish labels. A tap on Chat asks the desktop again after the notice.
  setLang('es'); flushSync(() => store.getState().update({ snapshot:{ ...snapshot, language:'es' } }));
- store.getState().setPaneView('c1','terminal',false);
  sent.length = 0;
  q('[data-view-option="chat"]').click(); await frames();
  feed({ paneId:'c1', items, cursor:null, done:true }); await frames(); await wait(50);
@@ -198,10 +203,19 @@ window.result = (async () => {
  check(q('[data-chat-working]')?.textContent === 'Claude esta trabajando...','es: "Claude esta trabajando..."');
  { const wide=[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1 && !e.closest('[data-scrollable]')).slice(0,5).map(e=>e.tagName+'.'+String(e.className).slice(0,60)); check(document.documentElement.scrollWidth<=innerWidth && wide.length===0,'no horizontal overflow in Spanish '+JSON.stringify(wide)) }
 
- // The status losing its provider (agent gone) goes back to Terminal on its own.
+ // A shell where an agent was started by hand: its status names the agent, so
+ // the control shows; losing that status goes back to Terminal on its own.
+ store.getState().update({ paneStatus:{ c1:{ state:'idle', provider:'claude', stateSince:4 }, s1:{ state:'idle', provider:'claude', stateSince:4 } } });
+ client.viewPane('s1'); await frames();
+ check(!!q('[data-view-toggle]'),'a shell whose status names Claude shows the control');
+ q('[data-view-option="chat"]').click(); await frames();
+ check(store.getState().chatPaneId === 's1','and opens as Chat');
  sent.length = 0;
- store.getState().update({ paneStatus:{} }); client.syncView(); await frames();
- check(store.getState().chatPaneId === null && sent.map(m => m.type).join(',') === 'chatUnsub,sub' && !q('[data-view-toggle]'),'a console that is no longer an agent returns to Terminal and hides the control');
+ store.getState().update({ paneStatus:{ c1:{ state:'idle', provider:'claude', stateSince:4 } } }); client.syncView(); await frames();
+ check(store.getState().chatPaneId === null && sent.map(m => m.type).join(',') === 'chatUnsub,sub' && !q('[data-view-toggle]'),'a shell that is no longer an agent returns to Terminal and hides the control');
+ // A Claude console keeps the control by its type even with no status (v2.2.1).
+ store.getState().update({ paneStatus:{} }); client.viewPane('c1'); await frames();
+ check(!!q('[data-view-toggle]'),'a Claude console that lost its status keeps the control (eligible by type)');
 
  // A reconnect while the first page is still pending: the new socket gets
  // its chatSub at once (the old request never answers).
@@ -223,6 +237,50 @@ window.result = (async () => {
  check(store.getState().chatPaneId === 'c1' && !!q('[data-chat-view="c1"]') && ['No messages yet. Write the first one below.','Todavía no hay mensajes. Escribí el primero abajo.'].includes(empty) && !!q('[data-kb-input="composer"]'),'an empty first page stays in Chat, invites the first message and keeps the composer: ' + empty);
  feed({ paneId:'c1', items:[{ id:'10', role:'user', ts:null, blocks:[{ t:'text', text:'primer mensaje' }] }], cursor:null, done:true }); await frames(); await wait(50);
  check(qa('[data-chat-row]').length === 1 && !q('[data-chat-empty]'),'the first page with that message replaces the empty state');
+
+ // v2.2.1: "Open agent consoles in Chat" is global: turning it on clears every per-console choice.
+ setLang('en'); flushSync(() => store.getState().update({ snapshot }));
+ store.getState().setChatDefault(true);
+ const viewKeys = () => Object.keys(localStorage).filter(k => k.startsWith('snagentsos.remote.paneView.'));
+ check(localStorage.getItem('snagentsos.remote.chatDefault') === 'true' && Object.keys(store.getState().paneViews).length === 0 && viewKeys().length === 0,'turning "Open agent consoles in Chat" on clears every saved per-console choice: ' + JSON.stringify(viewKeys()));
+ // A Codex console without its integration (no status at all) is eligible by its type and opens straight into Chat.
+ check(!store.getState().paneStatus.x1,'the Codex console has no status');
+ sent.length = 0;
+ client.viewPane('x1'); await frames();
+ check(ofType('chatSub').at(-1)?.paneId === 'x1' && !sent.some(m => m.type === 'sub' && m.paneId === 'x1') && store.getState().chatPaneId === 'x1','a Codex console with no status opens in Chat (chatSub, no sub): ' + JSON.stringify(sent.map(m => m.type + ':' + m.paneId)));
+ check(q('[data-view-toggle]')?.dataset.viewToggle === 'chat','and shows the [Terminal | Chat] control on Chat');
+ // Its notice names the Codex integration, not the hooks.
+ sent.length = 0;
+ feed({ paneId:'x1', items:[{ id:'notice', role:'system', ts:null, blocks:[{ t:'notice', code:'noTranscript' }] }], cursor:null, done:true }); await frames();
+ check(store.getState().chatPaneId === null && sent.map(m => m.type + ':' + m.paneId).join(',') === 'chatUnsub:x1,sub:x1','a Codex notice goes back to Terminal');
+ const codexToast = store.getState().toasts.at(-1)?.text;
+ check(codexToast === 'Chat not available for this console. Turn on the Codex integration in the PC settings to enable it','the Codex toast names the Codex integration: ' + codexToast);
+ check(localStorage.getItem('snagentsos.remote.paneView.x1') === null && q('[data-view-toggle]')?.dataset.viewToggle === 'terminal','the fallback is not saved');
+ // Not sticky: the next open tries Chat again.
+ client.viewPane('c1'); await frames();
+ check(store.getState().chatPaneId === 'c1','a Claude console opens in Chat with the default on');
+ sent.length = 0;
+ client.viewPane('x1'); await frames();
+ check(sent.some(m => m.type === 'chatSub' && m.paneId === 'x1') && store.getState().chatPaneId === 'x1','opening the Codex console again tries Chat again (the notice only lasted for that open)');
+ // Spanish toast, after a title-only status (precise:false).
+ client.handlePaneStatus('x1', { state:'working', provider:'codex', precise:false, stateSince:7 }); await frames();
+ setLang('es');
+ feed({ paneId:'x1', items:[{ id:'notice', role:'system', ts:null, blocks:[{ t:'notice', code:'ambiguous' }] }], cursor:null, done:true }); await frames();
+ const esToast = store.getState().toasts.at(-1)?.text;
+ check(esToast === 'Chat no disponible para esta consola. Activa la integracion de Codex en los ajustes de la PC para habilitarlo','es: the Codex toast: ' + esToast);
+ setLang('en');
+ // The status turning precise (the integration or hooks took over) retries Chat live.
+ sent.length = 0;
+ client.handlePaneStatus('x1', { state:'idle', provider:'codex', stateSince:8 }); await frames();
+ check(sent.map(m => m.type + ':' + m.paneId).join(',') === 'unsub:x1,chatSub:x1' && store.getState().chatPaneId === 'x1','a status that turns precise retries Chat: ' + JSON.stringify(sent.map(m => m.type + ':' + m.paneId)));
+ feed({ paneId:'x1', items, cursor:null, done:true }); await frames();
+ // A choice equal to the default is not saved; a real exception is.
+ q('[data-view-option="terminal"]').click(); await frames();
+ check(localStorage.getItem('snagentsos.remote.paneView.x1') === 'terminal' && store.getState().chatPaneId === null,'with Chat as the default, tapping Terminal saves the exception');
+ q('[data-view-option="chat"]').click(); await frames();
+ check(localStorage.getItem('snagentsos.remote.paneView.x1') === null && !('x1' in store.getState().paneViews) && store.getState().chatPaneId === 'x1','tapping Chat again removes the key (it equals the default)');
+ store.getState().setChatDefault(false);
+ check(localStorage.getItem('snagentsos.remote.chatDefault') === 'false' && viewKeys().length === 0,'turning the default off clears the choices too');
 
  reactRoot.unmount(); return checks;
 })();

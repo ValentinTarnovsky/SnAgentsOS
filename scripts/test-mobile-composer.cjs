@@ -306,9 +306,20 @@ function run(code, storage) {
     v.saveVoiceLang('es-MX'); check(v.loadVoiceLang() === 'es-MX' && storage.map.get('snagentsos.remote.voiceLang') === 'es-MX', 'the language is kept on the phone')
     storage.setItem('snagentsos.remote.voiceLang', 'bogus'); check(v.loadVoiceLang() === 'auto', 'a bogus value reads auto')
     check(v.spaced('', ' hola  mundo ') === 'hola mundo' && v.spaced('arreglá', 'el login') === ' el login' && v.spaced('fin\n', 'otra') === 'otra' && v.spaced('hola', ', che') === ', che' && v.spaced('x', '   ') === '', 'spacing: one space between words, none before punctuation or after whitespace')
+    // v2.2.1: the engine capitalizes every final; mid-sentence the first word goes lowercase.
+    check(v.spaced('', 'Hola') === 'Hola' && v.spaced('Hola', 'Hola') === ' hola', 'case: the field start keeps the capital, mid-sentence it goes lowercase')
+    let fold = ''
+    for (let i = 0; i < 3; i++) fold += v.spaced(fold, 'Hola')
+    check(fold === 'Hola hola hola', 'case: "Hola Hola Hola" folds into "Hola hola hola"')
+    check(v.spaced('listo.', 'Ahora') === ' Ahora' && v.spaced('listo?', 'Ahora') === ' Ahora' && v.spaced('listo!', 'Ahora') === ' Ahora' && v.spaced('listo…', 'Ahora') === ' Ahora' && v.spaced('listo. ', 'Ahora') === 'Ahora' && v.spaced('fin\n', 'Otra') === 'Otra', 'case: a sentence end or a new line keeps the capital')
+    check(v.spaced('arreglá', 'Ánimo che') === ' ánimo che' && v.spaced('dale', 'Hola Juan') === ' hola Juan', 'case: accented letters, and only the first word changes')
+    check(v.spaced('hola', 'API rota') === ' API rota' && v.spaced('hola', 'GitHub') === ' GitHub' && v.spaced('hola', 'iPhone') === ' iPhone' && v.spaced('so', "I'm here") === " I'm here" && v.spaced('and', 'I think') === ' I think', 'case: acronyms, mixed case and "I" stay')
+    check(v.spaced('hola', ', Che') === ', Che' && v.spaced('hola', '¿Qué?') === ' ¿Qué?' && v.spaced('hola', '42 Cosas') === ' 42 Cosas', 'case: a chunk that does not start with a letter is unchanged')
+    check(v.cased('hola', 'Mundo') === 'mundo' && v.cased('', 'Mundo') === 'Mundo', 'cased on its own')
     let s = v.nextFinal('', 'hola'); check(s.fresh === 'hola' && s.committed === 'hola', 'first final')
     s = v.nextFinal(s.committed, 'hola como'); check(s.fresh === 'como' && s.committed === 'hola como', 'a final that repeats the session (Android) only adds the new words')
     s = v.nextFinal(s.committed, 'otra frase'); check(s.fresh === 'otra frase' && s.committed === 'hola como otra frase', 'a separate final is new as a whole')
+    s = v.nextFinal('hola', 'holanda queda'); check(s.fresh === 'holanda queda' && s.committed === 'hola holanda queda', 'a final that only shares letters with the session is new (word boundary)')
     // A session: finals go out, interim shows, a stop keeps the last words, a discard drops them.
     const got = [], errors = []
     check(v.startDictation('composer', 'es-AR', { onFinal: (x) => got.push(x), onError: (e) => errors.push(e) }, FakeRec) === true, 'starts')
@@ -338,6 +349,25 @@ function run(code, storage) {
     v.startDictation('composer', 'en-US', { onFinal: (x) => got.push(x) }, FakeRec)
     rec3.onresult(res(0, [['ghost', true]]))
     check(rec3.stopped === 1 && v.useVoiceStore.getState().owner === 'composer' && !got.includes('ghost'), 'one dictation at a time: a new one ends the old')
+    // End to end: the engine capitalizes each final; onFinal stays raw, placement fixes the case.
+    v.stopDictation('composer', true)
+    const finals = []
+    v.startDictation('composer', 'es-AR', { onFinal: (x) => finals.push(x) }, FakeRec)
+    const rec4 = FakeRec.last
+    rec4.onresult(res(0, [['Hola', true]]))
+    rec4.onresult(res(1, [['Hola', true], ['Buenas tardes', true]]))
+    rec4.onresult(res(2, [['Hola', true], ['Buenas tardes', true], ['Cómo va', true]]))
+    v.stopDictation('composer')
+    check(finals.join('|') === 'Hola|Buenas tardes|Cómo va' && finals.reduce((t, x) => t + v.spaced(t, x), '') === 'Hola buenas tardes cómo va', 'one capitalized final per pause arrives raw and lands mid-sentence in lowercase')
+    rec4.onend()
+    const repeats = []
+    v.startDictation('composer', 'es-AR', { onFinal: (x) => repeats.push(x) }, FakeRec)
+    const rec5 = FakeRec.last
+    rec5.onresult(res(0, [['Hola', true]]))
+    rec5.onresult(res(0, [['Hola Hola', true]]))
+    rec5.onresult(res(0, [['Hola Hola Hola', true]]))
+    v.stopDictation('composer')
+    check(repeats.join('|') === 'Hola|Hola|Hola' && repeats.reduce((t, x) => t + v.spaced(t, x), '') === 'Hola hola hola', 'a session repeated in every final (Android) lands as "Hola hola hola"')
     check(v.startDictation('x', 'en-US', { onFinal() {} }, null) === false, 'no constructor: cannot start')
     class Throws { start() { throw new Error('busy') } stop() {} }
     check(v.startDictation('x', 'en-US', { onFinal() {} }, Throws) === false && v.useVoiceStore.getState().owner === null, 'a start that throws leaves nothing listening')
