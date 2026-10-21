@@ -13,6 +13,7 @@ import { useXterm, type XtermExitState } from './useXterm'
 import { ExitCard } from './ExitCard'
 import { AgentEndChip } from './AgentEndChip'
 import { MobileDriverBanner } from './MobileDriverBanner'
+import { ShareHostBanner } from '@/components/share/ShareHostBanner'
 import { DictationOverlay } from './DictationControls'
 import { useFitStore } from '@/lib/fitStore'
 import { useAppStore } from '@/lib/store'
@@ -127,6 +128,7 @@ export function TerminalPane({
       className="relative h-full w-full overflow-hidden bg-bg-primary p-2"
     >
       <div className="flex h-full w-full flex-col">
+        <ShareHostBanner paneId={paneId} />
         <MobileDriverBanner paneId={paneId} onDone={ctl.focus} />
         <div ref={termRef} data-phone-fit={phoneFit ? '' : undefined} className="min-h-0 w-full flex-1" />
       </div>

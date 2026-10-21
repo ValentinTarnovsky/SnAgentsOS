@@ -44,8 +44,25 @@ export function unregisterFocuser(paneId: string): void {
   focusers.delete(paneId)
 }
 
+/**
+ * Listeners told each time something asks to focus a local console (reveal,
+ * Ctrl+digit, a sidebar row, a palette pick). The shared-workspace overlay
+ * (app 2.4.0) leaves on it, so a local console never takes keys unseen.
+ */
+const focusRequestListeners = new Set<(paneId: string) => void>()
+
+export function onPaneFocusRequest(cb: (paneId: string) => void): () => void {
+  focusRequestListeners.add(cb)
+  return () => focusRequestListeners.delete(cb)
+}
+
+function noteFocusRequest(paneId: string): void {
+  for (const cb of [...focusRequestListeners]) cb(paneId)
+}
+
 /** Focus a pane's terminal, if it's mounted. */
 export function focusPane(paneId: string): void {
+  noteFocusRequest(paneId)
   focusers.get(paneId)?.()
 }
 
@@ -56,6 +73,7 @@ export function focusPane(paneId: string): void {
  * a cancel fn so a rapid re-switch never lands focus on the wrong workspace.
  */
 export function focusPaneWhenReady(paneId: string, maxAttempts = 20): () => void {
+  noteFocusRequest(paneId)
   let raf = 0
   let cancelled = false
   const tick = (attempts: number): void => {

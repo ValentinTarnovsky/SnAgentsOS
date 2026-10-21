@@ -329,8 +329,19 @@ export class ShareHost {
       }
     }
     for (const [grantId, m] of this.extras) {
-      for (const [paneId, at] of m) if (now - at > SHARE_EXTRA_PANE_MS) m.delete(paneId)
+      let dropped = false
+      for (const [paneId, at] of m) {
+        if (now - at <= SHARE_EXTRA_PANE_MS) continue
+        m.delete(paneId)
+        dropped = true
+      }
       if (m.size === 0) this.extras.delete(grantId)
+      // A createPane pane no snapshot ever listed leaves the scope with its grace.
+      const grant = dropped ? this.deps.grants.get(grantId) : undefined
+      if (grant && this.snap) {
+        this.allowed.set(grantId, this.computeAllowed(grant))
+        for (const s of this.sessions.admitted()) if (s.grantId === grantId) this.applyScope(s)
+      }
     }
     if (changed) {
       this.syncListener()
@@ -668,9 +679,25 @@ export class ShareHost {
     }
   }
 
+  /**
+   * A perm change took a cap away (full -> type or view): the chats it read
+   * end now, so no transcript keeps flowing to a session that may not read
+   * it. Ctl, git and notes check the caps on every request.
+   */
+  private enforceCaps(s: HostSession): void {
+    const g = this.deps.grants.get(s.grantId)
+    if (g && this.capsFor(s, g).chat) return
+    for (const paneId of [...s.chatSubs]) {
+      s.chatSubs.delete(paneId)
+      this.deps.chat?.()?.unsub(s, paneId)
+    }
+  }
+
   private chatSender(s: HostSession): (frame: ChatFrame) => void {
     return (frame) => {
       if (s.phase !== 'admitted' || !s.chatSubs.has(frame.paneId) || this.isPaused(s)) return
+      const g = this.deps.grants.get(s.grantId)
+      if (!g || !this.capsFor(s, g).chat) return
       if (frame.type === 'chatPage') this.sessions.send(s, { t: 'chatPage', paneId: frame.paneId, items: frame.items, cursor: frame.cursor, done: frame.done })
       else this.sessions.send(s, { t: 'chatAppend', paneId: frame.paneId, items: frame.items })
     }
@@ -967,6 +994,7 @@ export class ShareHost {
         if (s.grantId !== g.id || s.perm === g.perm) continue
         s.perm = g.perm
         this.sessions.send(s, { t: 'permChanged', perm: s.perm })
+        this.enforceCaps(s)
       }
     }
     this.syncPause()
@@ -1041,6 +1069,7 @@ export class ShareHost {
       s.perm = perm
       this.sessions.setTicketPerm(s.grantId, s.guestKey, perm)
       this.sessions.send(s, { t: 'permChanged', perm })
+      this.enforceCaps(s)
       this.pushState(s)
     }
     this.scheduleUi()

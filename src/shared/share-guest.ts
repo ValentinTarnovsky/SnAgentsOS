@@ -120,6 +120,11 @@ export interface ShareLinksRes {
   /** This PC's guest key fingerprint, as hosts see it (null until the first join). */
   guestFingerprint: string | null
   links: ShareLinkView[]
+  /**
+   * The latest filtered scope of each live link (S3): a reloaded renderer
+   * rebuilds its views from it instead of waiting for the next `state`.
+   */
+  states?: Record<string, ShareState>
 }
 
 export interface SharePasswordReq {

@@ -3,6 +3,7 @@ import { useAppStore } from '@/lib/store'
 import { WorkspaceView } from '@/components/workspace/WorkspaceView'
 import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 import { isWorkspaceMounted } from '@/lib/mounting'
+import { useShareGuestStore } from '@/lib/shareGuestStore'
 
 /**
  * Keeps every visited workspace MOUNTED so its terminals (and ptys) survive
@@ -18,6 +19,8 @@ export function WorkspaceHost() {
   const activeId = useAppStore((s) => s.activeWorkspaceId)
   const mounted = useAppStore((s) => s.mountedWorkspaces)
   const ensureMounted = useAppStore((s) => s.ensureMounted)
+  // app 2.4.0: a shared workspace covers this grid; the local consoles stay mounted below it.
+  const sharedActive = useShareGuestStore((s) => s.activeLinkId !== null && !!s.links[s.activeLinkId])
 
   // The store already mounts on activation; this keeps any other path that
   // sets the active id honest (no-op when it is already 'full').
@@ -29,8 +32,8 @@ export function WorkspaceHost() {
   const activeWs = workspaces.find((w) => w.id === activeId)
   const activePaneKey = activeWs ? activeWs.panes.map((p) => p.id).join(',') : ''
   useEffect(() => {
-    window.snApi.pty.setActive(activePaneKey ? activePaneKey.split(',') : [])
-  }, [activePaneKey])
+    window.snApi.pty.setActive(activePaneKey && !sharedActive ? activePaneKey.split(',') : [])
+  }, [activePaneKey, sharedActive])
 
   // Auto-focus the active workspace's last-used console whenever we switch to it
   // (sidebar click, Alt+1..9, next/prev, quick-flip, programmatic). Without this
@@ -40,9 +43,9 @@ export function WorkspaceHost() {
   const settingsOpen = useAppStore((s) => s.settingsOpen)
   const wizardOpen = useAppStore((s) => s.wizardOpen)
   useEffect(() => {
-    if (!activeId || paletteOpen || settingsOpen || wizardOpen) return
+    if (!activeId || paletteOpen || settingsOpen || wizardOpen || sharedActive) return
     return focusWorkspaceConsole(activeId)
-  }, [activeId, paletteOpen, settingsOpen, wizardOpen])
+  }, [activeId, paletteOpen, settingsOpen, wizardOpen, sharedActive])
 
   return (
     <div className="relative h-full w-full">

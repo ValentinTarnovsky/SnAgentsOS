@@ -14,6 +14,8 @@ import { toggleChangesPanel } from './changesPanel'
 import { toggleSidePanel } from './sidePanels'
 import { runDictateShortcut } from './dictation'
 import { panelKeyOf } from './changes'
+import { sharedOverlayActive } from './shareGuestStore'
+import { focusWorkspaceConsole } from './focusWorkspace'
 import { waitsOnUser } from '@shared/status'
 import {
   advanceWaiting,
@@ -83,6 +85,28 @@ function ctrlDigitBlocked(e: KeyboardEvent): boolean {
   if (s.paletteOpen || s.settingsOpen || s.wizardOpen || s.globalPromptOpen || s.quickPopoverOpen || useAgentStore.getState().modalPending) return true
   return isEditableTarget(e)
 }
+
+/**
+ * Keymap actions that target the focused LOCAL console or the active local
+ * workspace. While the shared view covers the grid (app 2.4.0) they are
+ * swallowed: they would act on a console the user cannot see.
+ */
+const PANE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
+  'newConsole',
+  'globalPrompt',
+  'maximizePane',
+  'minimizePane',
+  'redrawPane',
+  'promptPrev',
+  'promptNext',
+  'focusNextPane',
+  'focusPrevPane',
+  'quickCommands',
+  'toggleChanges',
+  'toggleFiles',
+  'toggleNotes',
+  'dictate',
+])
 
 function runAction(id: ActionId): void {
   const s = useAppStore.getState()
@@ -216,13 +240,20 @@ export function useGlobalKeys(): void {
         if (target) {
           e.preventDefault()
           e.stopPropagation()
+          // Over the shared view (app 2.4.0) the active workspace itself is a way back:
+          // the focus request makes the overlay guard leave even when the id does not change.
+          const back = sharedOverlayActive()
           useAppStore.getState().setActive(target.id)
+          if (back) focusWorkspaceConsole(target.id)
         }
         return
       }
 
+      // The shared view (app 2.4.0) covers the local grid: Ctrl+1..9 would
+      // focus a hidden local console, so it is left to the shared terminal.
+      const overlay = sharedOverlayActive()
       const digit = ctrlDigit(e)
-      if (digit !== null && !ctrlDigitBlocked(e)) {
+      if (digit !== null && !overlay && !ctrlDigitBlocked(e)) {
         const s = useAppStore.getState()
         const ws = s.workspaces.find((w) => w.id === s.activeWorkspaceId)
         const target = ws ? visibleConsoles(ws, s.minimized[ws.id] ?? [], s.maximized[ws.id])[digit - 1] : undefined
@@ -247,6 +278,7 @@ export function useGlobalKeys(): void {
           if (SKIP_IN_EDITABLE.has(id) && isEditableTarget(e)) return
           e.preventDefault()
           e.stopPropagation()
+          if (overlay && PANE_ACTIONS.has(id)) return
           runAction(id)
           return
         }

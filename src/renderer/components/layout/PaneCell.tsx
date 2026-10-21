@@ -17,6 +17,7 @@ import {
   Pencil,
   Play,
   RotateCw,
+  Share2,
   SquarePen,
   Undo2,
   X,
@@ -60,6 +61,7 @@ import { PaneWorktreeChip } from '@/components/git/PaneWorktreeChip'
 import { WorktreeMissingCard } from '@/components/layout/WorktreeMissingCard'
 import { RepoSetupPlaceholder } from '@/components/layout/RepoSetupPlaceholder'
 import { revealPane } from '@/lib/revealPane'
+import { openShareDialog } from '@/lib/shareHostStore'
 import { reopenClosedConsole, restartClean, restartFresh, restartFromButton, restartResume, resumeMenuState } from '@/lib/agentLaunch'
 import { useLang, useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -289,6 +291,8 @@ export function PaneCell({
       icon: Clock,
       onClick: () => setScheduling(true),
     },
+    // Share (app 2.4.0, item 8): opens the global Share dialog on this console.
+    { label: t('shareHost.menu.sharePane'), icon: Share2, onClick: () => openShareDialog({ kind: 'pane', paneId: pane.id, workspaceId: workspace.id }) },
     ...(window.snApi.platform === 'win32'
       ? [
           {

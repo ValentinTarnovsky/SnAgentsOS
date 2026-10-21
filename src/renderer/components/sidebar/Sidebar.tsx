@@ -11,6 +11,7 @@ import {
   Pencil,
   Plus,
   Settings,
+  Share2,
   Star,
   StarOff,
   StickyNote,
@@ -25,6 +26,9 @@ import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { UsageBars } from '@/components/sidebar/UsageBars'
 import { RemoteIndicator } from '@/components/sidebar/RemoteIndicator'
+import { SharedWithMeSection } from '@/components/share/SharedWithMeSection'
+import { ShareHostIndicator } from '@/components/sidebar/ShareHostIndicator'
+import { openShareDialog } from '@/lib/shareHostStore'
 import { iconFor } from '@/lib/icons'
 import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 import { cn } from '@/lib/cn'
@@ -280,6 +284,8 @@ export function Sidebar() {
       },
       { label: t('ctx.rename'), icon: Pencil, onClick: () => startRename(wsId) },
       { label: t('note.menu'), icon: StickyNote, onClick: () => setNotePopover(menu ? { ...menu, wsId } : { x: 80, y: 80, wsId }) },
+      // Share (app 2.4.0, item 8): the Share dialog on the whole workspace.
+      { label: t('shareHost.menu.shareWorkspace'), icon: Share2, onClick: () => openShareDialog({ kind: 'workspace', workspaceId: wsId }) },
       // Per-repo .snagentsos.json (E8-FR-26/27): reload only for a workspace made or exported with one.
       ...(ws?.cwd
         ? [
@@ -662,6 +668,9 @@ export function Sidebar() {
         })}
       </nav>
 
+      {/* Shared with me (app 2.4.0): joined shares, never workspaces of this store. */}
+      <SharedWithMeSection />
+      <ShareHostIndicator />
       <RemoteIndicator />
       <UsageBars />
 

@@ -9,7 +9,10 @@
 // data plane (ordering, chunking, backpressure), pause, expiry, revoke, live
 // perm changes, the owner and guest leases, the ctl allowlist, read-only
 // chat/git/notes, the status relay, the firewall rule names and the
-// RemoteManager additions. A fake PtyManager, in-memory transports and a fake
+// RemoteManager additions. Stage S5 (workspace extras): a live perm drop ends
+// the chats and every extra, pause stops them, a refused or malformed relay
+// adds nothing to the scope, and an acked pane no snapshot lists leaves it
+// after its grace. A fake PtyManager, in-memory transports and a fake
 // clock. esbuild + vm like test-remote.cjs; nothing listens.
 const { build, buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -1303,6 +1306,107 @@ async function testControl() {
   check(f.last('ctlAck').error === 'denied' && !w3.relayed.length, 'full on one console: no ctl')
 }
 
+// --- 14b. S5 host restrictions: perm drops, pause, failed relays, stale extras ---
+async function testControlLimits() {
+  // A live downgrade from full ends the chats and every extra at once.
+  const w = hostWorld()
+  const { g: grant } = await w.grant({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full' })
+  const g = w.join(grant); w.approve()
+  const moreCalls = []
+  w.chat.more = (owner, paneId, before) => moreCalls.push({ paneId, before })
+  g.send({ t: 'chatSub', paneId: 'p2' })
+  g.send({ t: 'chatMore', paneId: 'p2', before: 'abc' })
+  g.send({ t: 'chatMore', paneId: 'p1', before: '10' })
+  g.send({ t: 'chatMore', paneId: 'p2', before: '12' })
+  check(moreCalls.length === 1 && moreCalls[0].before === 12 && moreCalls[0].paneId === 'p2', 'chatMore needs a chat read and a numeric cursor')
+  const hubSend = w.chat.subs[0].send
+  const sid = w.host.hostState().grants[0].sessions[0].id
+  g.clear()
+  check(w.host.sessionPerm(sid, 'type').ok, 'session perm change accepted')
+  const st = g.last('state').state
+  check(g.last('permChanged').perm === 'type' && !st.caps.createPane && !st.caps.closePane && !st.caps.chat && !st.caps.notes && !st.caps.git && st.presets === undefined, 'full -> type: the new state has no caps and no presets')
+  check(w.chat.unsubs.includes('p2') && !w.host.subscribedPaneIds().has('p2'), 'full -> type: the chat read ends at the hub (and stops keeping the pane awake)')
+  hubSend({ type: 'chatAppend', paneId: 'p2', items: [{ id: '2', role: 'assistant', ts: null, blocks: [{ t: 'text', text: 'leak' }] }] })
+  check(!g.of('chatAppend').length, 'a late hub frame never reaches the downgraded guest')
+  g.send({ t: 'chatMore', paneId: 'p2', before: '5' })
+  g.send({ t: 'ctl', id: 'd1', op: 'createPane', presetId: 'pre1' })
+  g.send({ t: 'ctl', id: 'd2', op: 'closePane', paneId: 'p1' })
+  g.send({ t: 'gitReq', id: 'dg', op: 'status' })
+  g.send({ t: 'notesReq', id: 'dn', op: 'list' })
+  await tick()
+  check(moreCalls.length === 1 && g.of('ctlAck').every(a => !a.ok && a.error === 'denied') && g.of('ctlAck').length === 2 && w.relayed.length === 0, 'after the downgrade: no chatMore, no createPane, no closePane')
+  check(g.last('gitRes').data.error === 'not_found' && g.last('notesRes').error === 'not_found' && w.gitCalls.length === 0 && w.notesCalls.length === 0, 'after the downgrade: no git nor notes')
+  w.host.notesChanged({ workspaceId: 'w1', noteId: 'n' })
+  check(!g.of('notesChanged').length, 'after the downgrade: no notesChanged')
+  // The grant perm moving down (Settings) does the same for every session of it.
+  g.send({ t: 'chatSub', paneId: 'p2' })
+  check(g.last('err').code === 'unauthorized', 'type: chatSub refused')
+  w.host.sessionPerm(sid, 'full')
+  g.send({ t: 'chatSub', paneId: 'p2' })
+  const unsubs0 = w.chat.unsubs.length
+  check(w.host.update({ grantId: grant.id, perm: 'view' }).ok && w.chat.unsubs.length === unsubs0 + 1 && g.last('permChanged').perm === 'view', 'grant full -> view ends the chats of its sessions')
+
+  // Paused: the extras stop with the terminal.
+  const p = hostWorld()
+  const { g: pg } = await p.grant({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full' })
+  const pgst = p.join(pg); p.approve()
+  pgst.send({ t: 'chatSub', paneId: 'p2' })
+  const pSend = p.chat.subs[0].send
+  check(p.host.update({ grantId: pg.id, paused: true }).ok && pgst.last('paused').on === true, 'the grant pauses')
+  pgst.clear()
+  pSend({ type: 'chatAppend', paneId: 'p2', items: [{ id: '3', role: 'assistant', ts: null, blocks: [{ t: 'text', text: 'held' }] }] })
+  pgst.send({ t: 'ctl', id: 'p1', op: 'createPane', presetId: 'pre1' })
+  pgst.send({ t: 'gitReq', id: 'pg', op: 'status' })
+  pgst.send({ t: 'notesReq', id: 'pn', op: 'list' })
+  pgst.send({ t: 'chatSub', paneId: 'p1' })
+  await tick()
+  check(!pgst.of('chatAppend').length && pgst.last('ctlAck').error === 'denied' && pgst.last('gitRes').data.error === 'not_found' && pgst.last('notesRes').error === 'not_found' && pgst.last('err').code === 'paused', 'paused: no chat frames, ctl, git, notes nor a new chat')
+  check(!p.relayed.length && !p.gitCalls.length && !p.notesCalls.length, 'paused: nothing reached the renderer executor, git or notes')
+  p.host.notesChanged({ workspaceId: 'w1' })
+  check(!pgst.of('notesChanged').length, 'paused: no notesChanged')
+
+  // A relay the renderer refused: ack failed, nothing enters the scope.
+  const r = hostWorld({ relay: () => ({ id: 'x', ok: false, error: 'not_found' }) })
+  const { g: rg } = await r.grant({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full' })
+  const rs = r.join(rg); r.approve()
+  rs.send({ t: 'ctl', id: 'f1', op: 'createPane', presetId: 'pre1' })
+  await tick()
+  check(rs.last('ctlAck').ok === false && rs.last('ctlAck').error === 'failed' && rs.last('ctlAck').paneId === undefined, 'a refused relay acks failed without a pane')
+  // A relay that answers a malformed pane id adds nothing either.
+  const bad = hostWorld({ relay: () => ({ id: 'x', ok: true, paneId: 'bad\u0000id' }) })
+  const { g: bg } = await bad.grant({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full' })
+  const bs = bad.join(bg); bad.approve()
+  bs.send({ t: 'ctl', id: 'b1', op: 'createPane' })
+  await tick()
+  check(bs.last('ctlAck').ok === true && bs.last('ctlAck').paneId === undefined && bad.host.allowedFor(bg.id).size === 2, 'a malformed pane id from the executor never enters the scope')
+
+  // An acked pane no snapshot lists leaves the scope after its grace.
+  const e = hostWorld()
+  const { g: eg } = await e.grant({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full' })
+  const es = e.join(eg); e.approve()
+  es.send({ t: 'ctl', id: 'e1', op: 'createPane', presetId: 'pre1' })
+  await tick()
+  check(es.last('ctlAck').paneId === 'p-new' && e.host.allowedFor(eg.id).has('p-new'), 'the acked pane is in scope')
+  es.send({ t: 'ctl', id: 'e2', op: 'closePane', paneId: 'p-new' })
+  await tick()
+  check(es.last('ctlAck').error === 'out_of_scope' && e.relayed.length === 1, 'closePane of a pane no snapshot listed yet is refused (the executor could not find it)')
+  e.clock.advance(S.SHARE_EXTRA_PANE_MS + 1)
+  e.host.maintenance()
+  es.clear()
+  es.send({ t: 'sub', paneId: 'p-new' })
+  check(!e.host.allowedFor(eg.id).has('p-new') && es.last('err')?.code === 'out_of_scope', 'past the grace an unlisted pane is out of scope again')
+  // Listed by a snapshot in time: it stays for good.
+  es.send({ t: 'ctl', id: 'e3', op: 'createPane', presetId: 'pre1' })
+  await tick()
+  const snap = e.snap()
+  snap.workspaces[0].panes.push(pane('p-new', 'claude'))
+  snap.workspaces[0].layoutOrder.push('p-new')
+  e.setSnap(snap)
+  e.clock.advance(S.SHARE_EXTRA_PANE_MS + 1)
+  e.host.maintenance()
+  check(e.host.allowedFor(eg.id).has('p-new') && es.last('state').state.panes.some(x => x.id === 'p-new'), 'a pane the snapshot lists stays in scope and in the state')
+}
+
 // --- 15. Firewall names, guest names, RemoteManager additions ----------------
 async function testHostMisc() {
   const share = S.buildFixScript({ exe: 'C:\\a.exe', port: 4527, programScope: true, tailnet: true, domain: false, rules: S.FW_RULES_SHARE })
@@ -1367,9 +1471,10 @@ async function main() {
   await testLifecycle()
   await testLeases()
   await testControl()
+  await testControlLimits()
   await testHostMisc()
   fs.rmSync(tmp, { recursive: true, force: true })
-  console.log(`PASS: ${checks} share checks (S0 invite, gate, paste, handshake, schema, identity, forced-fast; S1 grants, admission, join, scope, stream, lifecycle, leases, control)`)
+  console.log(`PASS: ${checks} share checks (S0 invite, gate, paste, handshake, schema, identity, forced-fast; S1 grants, admission, join, scope, stream, lifecycle, leases, control; S5 limits)`)
 }
 
 main().catch(error => { console.error(error); fs.rmSync(tmp, { recursive: true, force: true }); process.exit(1) })

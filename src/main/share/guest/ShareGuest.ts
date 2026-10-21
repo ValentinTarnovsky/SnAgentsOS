@@ -14,7 +14,7 @@
  *   they live in LinkStore and in this process only.
  */
 import { CH } from '@shared/ipc-channels'
-import { SHARE_LIMITS } from '@shared/share-protocol'
+import { SHARE_LIMITS, type ShareState } from '@shared/share-protocol'
 import {
   SHARE_LINK_ID_RE,
   type ShareChatEvt,
@@ -128,6 +128,11 @@ export class ShareGuest {
   }
 
   links(): ShareLinksRes {
+    const states: Record<string, ShareState> = {}
+    for (const [id, c] of this.conns) {
+      const st = c.latestState()
+      if (st && this.deps.store.get(id)) states[id] = st
+    }
     return {
       persisted: this.deps.store.persisted,
       guestFingerprint: this.deps.guestFingerprint(),
@@ -135,6 +140,7 @@ export class ShareGuest {
         .list()
         .map((l) => this.view(l.id))
         .filter((v): v is ShareLinkView => v !== null),
+      states,
     }
   }
 
