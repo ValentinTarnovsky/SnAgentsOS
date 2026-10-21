@@ -1,5 +1,5 @@
 import { execFile } from 'child_process'
-import { join } from 'path'
+import { win32 } from 'path'
 
 /**
  * The Microsoft VC++ 2015-2022 runtime check (app 2.5.0). whisper-server.exe
@@ -66,7 +66,7 @@ export function isVcRuntimeExit(code: number | null | undefined, servedBefore: b
 
 /** reg.exe by absolute path, so one earlier in PATH is never picked up. */
 export function regExePath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe')
+  return win32.join(env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe')
 }
 
 export type RegQuery = (key: string) => Promise<string | null>

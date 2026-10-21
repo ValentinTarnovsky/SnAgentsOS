@@ -1,7 +1,7 @@
 import { execFile } from 'child_process'
 import { randomBytes } from 'crypto'
 import { connect, createServer } from 'net'
-import { join, win32 } from 'path'
+import { win32 } from 'path'
 import type { Readable } from 'stream'
 import { ClientError, getHealth, multipartBody, postInference, type InferenceParams } from './serverClient'
 import { parseVerbose, type VerboseSegment } from './verbose'
@@ -489,7 +489,7 @@ export function parseListenerPids(text: string, port: number): number[] {
 
 /** The real portOwners: `%SystemRoot%\System32\NETSTAT.EXE -ano` (no admin needed), by absolute path. Null when it fails. */
 export function listenerPids(port: number, env: NodeJS.ProcessEnv = process.env): Promise<number[] | null> {
-  const exe = join(env.SystemRoot || 'C:\\Windows', 'System32', 'NETSTAT.EXE')
+  const exe = win32.join(env.SystemRoot || 'C:\\Windows', 'System32', 'NETSTAT.EXE')
   return new Promise((resolve) => {
     try {
       execFile(exe, ['-ano'], { windowsHide: true, timeout: 10_000, encoding: 'latin1', maxBuffer: 16 * 1024 * 1024 }, (err, out) => {
@@ -549,7 +549,7 @@ export function isOurServerExe(exe: string | null, dir: string): boolean {
  * (another profile's server, or a reused pid, is left alone). Never throws.
  */
 export async function killOrphan(dir: string, deps: OrphanDeps): Promise<number> {
-  const file = join(dir, 'server.json')
+  const file = win32.join(dir, 'server.json')
   let killed = 0
   try {
     for (const pid of orphanPids(deps.readText(file))) {
@@ -573,7 +573,7 @@ export async function killOrphan(dir: string, deps: OrphanDeps): Promise<number>
 /** The real processPath: Win32_Process.ExecutablePath through powershell.exe by absolute path. */
 export function processExePath(pid: number, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve(null)
-  const ps = join(env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const ps = win32.join(env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   const cmd = `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').ExecutablePath`
   return new Promise((resolve) => {
     try {
