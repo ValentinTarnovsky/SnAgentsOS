@@ -2,6 +2,7 @@ import { join } from 'path'
 import { BrowserWindow } from 'electron'
 import { BRAND } from '@shared/brand'
 import { openExternalSafe } from './openExternal'
+import { isPortable, portableExeFile } from './paths'
 
 export function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -25,6 +26,23 @@ export function createMainWindow(): BrowserWindow {
   })
 
   win.once('ready-to-show', () => win.show())
+
+  // Portable (app 2.4.0): the process runs from a %TEMP% extraction, so a
+  // taskbar pin would point there and break on the next launch. These details
+  // make the pin (and its relaunch) target the stable portable .exe.
+  const portableExe = isPortable() ? portableExeFile() : null
+  if (process.platform === 'win32' && portableExe) {
+    try {
+      win.setAppDetails({
+        appId: BRAND.appId,
+        appIconPath: portableExe,
+        relaunchCommand: `"${portableExe}"`,
+        relaunchDisplayName: BRAND.productName,
+      })
+    } catch (err) {
+      console.warn('[window] setAppDetails failed:', err)
+    }
+  }
 
   // The app ships no native menu (see Menu.setApplicationMenu(null) in main),
   // which also drops the default DevTools accelerators. Re-add a DevTools

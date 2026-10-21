@@ -880,7 +880,7 @@ function fakeUsage(over = {}) {
       updatedAt: 1760000000000,
       services: 'operational',
       error: `boom ${FAKE_TOKEN}`,
-      activeAccount: { id: 'acc_aaaaaaaaaaaa', role: 'primary', label: 'Trabajo', other: { id: 'acc_bbbbbbbbbbbb', role: 'secondary', label: 'yo@mail.com' } },
+      activeAccount: { id: 'acc_aaaaaaaaaaaa', rank: 0, role: 'primary', label: 'Trabajo', other: { id: 'acc_bbbbbbbbbbbb', rank: 1, role: 'secondary', label: 'yo@mail.com' }, others: [{ id: 'acc_bbbbbbbbbbbb', rank: 1, role: 'secondary', label: 'yo@mail.com', ready: true }] },
       rows: [
         { id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 42.4, resetsAt: '2026-10-20T15:00:00.000Z', status: 'ok', planType: 'max', extra: FAKE_TOKEN },
         { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 80, resetsAt: null, status: 'ok', stale: true },
@@ -898,7 +898,7 @@ function fakeUsage(over = {}) {
 /** An AccountService fake: ClaudeAccountsState with emails and a stray token the adapter must drop. */
 function fakeAccountSource() {
   const win = (percent, source = 'live') => ({ percent, resetsAt: '2026-10-21T10:00:00.000Z', at: 1, source })
-  const view = (id, role, label, active, extra = {}) => ({ id, role, label, email: `${role}@mail.com`, organizationName: 'Org', subscriptionType: 'max', capturedAt: 1, active, tokenState: 'ok', needsRecapture: false, identityConfirmed: true, usage: { fiveHour: win(active ? 30 : 5, active ? 'live' : 'parked'), sevenDay: win(50, active ? 'live' : 'parked') }, accessToken: FAKE_TOKEN, ...extra })
+  const view = (id, role, label, active, extra = {}) => ({ id, rank: role === 'primary' ? 0 : 1, role, label, email: `${role}@mail.com`, organizationName: 'Org', subscriptionType: 'max', capturedAt: 1, active, tokenState: 'ok', needsRecapture: false, identityConfirmed: true, usage: { fiveHour: win(active ? 30 : 5, active ? 'live' : 'parked'), sevenDay: win(50, active ? 'live' : 'parked') }, accessToken: FAKE_TOKEN, ...extra })
   const src = {
     calls: [],
     next: { ok: true },
@@ -951,7 +951,7 @@ async function usageAccountChecks() {
     const r0 = all.data.rows[0]
     check(JSON.stringify(Object.keys(r0).sort()) === JSON.stringify(['id', 'kind', 'label', 'percent', 'planType', 'provider', 'resetsAt', 'status']) && r0.percent === 42.4 && r0.planType === 'max', 'usage: each row carries only the picked fields')
     check(all.data.rows[1].stale === true && all.data.rows[2].percent === null && all.data.rows[2].resetsAt === null && all.data.services === 'operational' && all.data.updatedAt === 1760000000000 && !('error' in all.data), 'usage: stale, null percent and reset, services; the snapshot error never goes out')
-    check(all.data.account.id === 'acc_aaaaaaaaaaaa' && all.data.account.slot === 'primary' && all.data.account.label === 'Trabajo' && !('other' in all.data.account), 'usage: the active Claude account by id, slot and label')
+    check(all.data.account.id === 'acc_aaaaaaaaaaaa' && all.data.account.rank === 1 && all.data.account.slot === 'primary' && all.data.account.label === 'Trabajo' && !('other' in all.data.account) && !('others' in all.data.account), 'usage: the active Claude account by id, #rank (1-based), slot and label')
     clean(all.data, 'usage')
     const cx = await call(h, 'usage', { provider: 'codex' }, caller1)
     check(cx.ok && cx.data.rows.length === 1 && cx.data.rows[0].provider === 'codex' && !('account' in cx.data), 'usage --provider codex: Codex rows, no Claude account')
@@ -973,7 +973,8 @@ async function usageAccountChecks() {
     const view = ctlAccountsView(src)
     const st = await view.status()
     check(st.supported && st.live === 'known' && st.active.id === 'acc_aaaaaaaaaaaa' && st.accounts.length === 2 && st.auto.enabled === true && st.auto.switchAtPercent === 95 && st.auto.paused === null && st.lastSwitch.reason === 'manual', 'adapter: status with the live login, accounts, last switch and the automatic switch')
-    check(JSON.stringify(Object.keys(st.accounts[0]).sort()) === JSON.stringify(['active', 'fiveHour', 'id', 'label', 'plan', 'provider', 'ready', 'sevenDay', 'slot']) && st.accounts[1].fiveHour.source === 'parked' && st.accounts[0].plan === 'max', 'adapter: each account carries only the picked fields')
+    check(JSON.stringify(Object.keys(st.accounts[0]).sort()) === JSON.stringify(['active', 'fiveHour', 'id', 'label', 'plan', 'provider', 'rank', 'ready', 'sevenDay', 'slot']) && st.accounts[1].fiveHour.source === 'parked' && st.accounts[0].plan === 'max', 'adapter: each account carries only the picked fields')
+    check(st.accounts[0].rank === 1 && st.accounts[1].rank === 2 && ctlAccount({ ...src.state.accounts[0], rank: 4, role: 'secondary' }).rank === 5 && ctlAccount({ ...src.state.accounts[1], rank: undefined }).rank === 2, 'adapter: rank is 1-based (a view without one falls back to its role)')
     clean(st, 'adapter status')
     check(ctlAccount({ ...src.state.accounts[0], label: 'yo@mail.com', needsRecapture: true }).label === '' && ctlAccount({ ...src.state.accounts[0], needsRecapture: true }).ready === false, 'adapter: a label with an @ is ""; needsRecapture is ready: false')
     const sw = await view.switchTo('acc_bbbbbbbbbbbb', 'cli')
@@ -1026,6 +1027,21 @@ async function usageAccountChecks() {
     check(src.calls.length === 1 && src.calls[0].id === 'acc_aaaaaaaaaaaa', 'the saved active account while an unknown login is live: not a no-op, the switch runs (main decides)')
     src.state.supported = false
     check((await call(h, 'account.use', { account: 'secondary' }, caller1)).error.code === 'disabled', 'no saved logins on this machine: disabled')
+  }
+  {
+    // app 2.4.0: N accounts, `account use <n>` by the 1-based rank.
+    const src = fakeAccountSource()
+    const third = { ...src.state.accounts[1], id: 'acc_cccccccccccc', rank: 2, label: '2', active: false }
+    src.state.accounts.push(third)
+    const h = makeHandlers(fakeWorld(), undefined, { services: () => ({ accounts: ctlAccountsView(src) }) })
+    const ls = await call(h, 'account.ls', {}, caller1)
+    check(ls.data.accounts.map((a) => `${a.rank}:${a.slot}`).join() === '1:primary,2:secondary,3:secondary', 'account ls: #1..#3, slot derived from the rank')
+    const three = await call(h, 'account.use', { account: '3' }, caller1)
+    check(three.ok && three.data.changed === true && src.calls.at(-1).id === 'acc_cccccccccccc' && three.data.active.rank === 3, 'account use 3 switches to #3')
+    const two = await call(h, 'account.use', { account: '#2' }, caller1)
+    check(two.ok && src.calls.at(-1).id === 'acc_bbbbbbbbbbbb', 'account use #2: the rank wins over a label "2" of another account')
+    check((await call(h, 'account.use', { account: 'secondary' }, caller1)).data.changed === false && src.calls.length === 2, 'secondary still names #2 (the live one now: no-op)')
+    check((await call(h, 'account.use', { account: '9' }, caller1)).error.code === 'not_found', 'a rank nobody has: not_found')
   }
   {
     // The live login changed and is not identified yet (liveUnverified).
@@ -1310,6 +1326,7 @@ async function cliEntryChecks() {
   const now = Date.UTC(2026, 9, 20, 12, 0)
   check(C.resetIn('2026-10-20T14:10:00.000Z', now) === '2h 10m' && C.resetIn('2026-10-23T16:00:00.000Z', now) === '3d 4h' && C.resetIn('2026-10-20T12:05:00.000Z', now) === '5m' && C.resetIn('2026-10-20T13:00:00.000Z', now) === '1h' && C.resetIn('2026-10-20T11:00:00.000Z', now) === 'now' && C.resetIn(null, now) === '' && C.resetIn('nope', now) === '', 'resetIn: 2h 10m, 3d 4h, 5m, 1h, now and unknown')
   const soon = new Date(Date.now() + (2 * 60 + 10) * 60_000 - 1000).toISOString()
+  check(C.formatHuman('usage', { updatedAt: 1, services: null, account: { id: 'acc_a', rank: 3, slot: 'secondary', label: 'Casa' }, rows: [] }).endsWith('claude account: Casa (#3)'), 'usage human output names the account by label and #rank')
   const uh = C.formatHuman('usage', { updatedAt: 1, services: null, account: { id: 'acc_a', slot: 'primary', label: '' }, rows: [
     { id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 42.4, resetsAt: soon, status: 'ok', planType: 'max' },
     { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 80, resetsAt: null, status: 'ok', stale: true },
@@ -1317,19 +1334,19 @@ async function cliEntryChecks() {
   ] })
   check(uh === 'claude Session         42%   resets in 2h 10m  [max]\nclaude Weekly          80%    (stale)\ncodex  Session         -     error\nclaude account: primary', 'usage human output', uh)
   check(C.formatHuman('usage', { rows: [], updatedAt: 0, services: null }) === 'no usage rows (turn them on in Settings > AI Usage)', 'usage human output without rows')
-  const acc = (over) => ({ id: 'acc_a', provider: 'claude', slot: 'primary', label: 'Trabajo', plan: 'max', active: true, ready: true, fiveHour: { percent: 30, resetsAt: null, source: 'live' }, sevenDay: { percent: 50, resetsAt: null, source: 'live' }, ...over })
-  const al = C.formatHuman('account.ls', { accounts: [acc(), acc({ id: 'acc_b', slot: 'secondary', label: '', plan: null, active: false, ready: false, fiveHour: { percent: 5, resetsAt: soon, source: 'parked' }, sevenDay: { percent: null, resetsAt: null, source: 'none' } })] })
-  check(al === '* primary    Trabajo           max     5h 30%  7d 50%\n  secondary  -                         5h 5% (resets in 2h 10m)  7d -  (capture it again on the desktop)', 'account ls human output', al)
+  const acc = (over) => ({ id: 'acc_a', provider: 'claude', rank: 1, slot: 'primary', label: 'Trabajo', plan: 'max', active: true, ready: true, fiveHour: { percent: 30, resetsAt: null, source: 'live' }, sevenDay: { percent: 50, resetsAt: null, source: 'live' }, ...over })
+  const al = C.formatHuman('account.ls', { accounts: [acc(), acc({ id: 'acc_b', rank: 2, slot: 'secondary', label: '', plan: null, active: false, ready: false, fiveHour: { percent: 5, resetsAt: soon, source: 'parked' }, sevenDay: { percent: null, resetsAt: null, source: 'none' } })] })
+  check(al === '* #1  Trabajo           max     5h 30%  7d 50%\n  #2  -                         5h 5% (resets in 2h 10m)  7d -  (capture it again on the desktop)', 'account ls human output (a #n column)', al)
   check(C.formatHuman('account.ls', { accounts: [] }).startsWith('no saved Claude accounts'), 'account ls without accounts')
-  const ast = C.formatHuman('account.status', { supported: true, live: 'known', active: acc(), accounts: [acc(), acc({ id: 'acc_b', slot: 'secondary', label: 'Personal', active: false })], lastSwitch: { at: Date.UTC(2026, 9, 1, 9, 30), from: 'acc_b', to: 'acc_a', reason: 'cli' }, auto: { enabled: true, switchAtPercent: 99, paused: 'conflict' } })
-  check(/^active: Trabajo \(primary\)\nlast switch: Personal to Trabajo \(cli, 2026-10-01 \d\d:\d\d\)\nautomatic switch: on at 99% \(paused: conflict\)$/.test(ast), 'account status human output', ast)
+  const ast = C.formatHuman('account.status', { supported: true, live: 'known', active: acc(), accounts: [acc(), acc({ id: 'acc_b', rank: 2, slot: 'secondary', label: 'Personal', active: false })], lastSwitch: { at: Date.UTC(2026, 9, 1, 9, 30), from: 'acc_b', to: 'acc_a', reason: 'cli' }, auto: { enabled: true, switchAtPercent: 99, paused: 'conflict' } })
+  check(/^active: Trabajo \(#1\)\nlast switch: Personal to Trabajo \(cli, 2026-10-01 \d\d:\d\d\)\nautomatic switch: on at 99% \(paused: conflict\)$/.test(ast), 'account status human output', ast)
   check(C.formatHuman('account.status', { supported: true, live: 'unknown', active: null, accounts: [acc()], lastSwitch: null, auto: { enabled: false, switchAtPercent: 99, paused: null } }) === 'active: a Claude login that is not saved here\nautomatic switch: off' && C.formatHuman('account.status', { supported: false, accounts: [] }).includes('not supported'), 'account status with an unknown live login, and unsupported')
-  check(C.formatHuman('account.use', { active: acc({ slot: 'secondary', label: 'Personal' }), changed: true }) === 'switched to Personal (secondary)' && C.formatHuman('account.use', { active: acc({ label: '' }), changed: false }) === 'already on primary', 'account use human output (the slot in parentheses only after a label)')
+  check(C.formatHuman('account.use', { active: acc({ rank: 2, slot: 'secondary', label: 'Personal' }), changed: true }) === 'switched to Personal (#2)' && C.formatHuman('account.use', { active: acc({ label: '' }), changed: false }) === 'already on #1', 'account use human output (#n in parentheses only after a label)')
   const longRow = C.formatHuman('account.ls', { accounts: [acc({ label: 'MyVeryLongWorkAccount', plan: 'enterprise' })] })
-  check(longRow === '* primary    MyVeryLongWorkAccount enterprise 5h 30%  7d 50%', 'account ls: a long label or plan still leaves a space before the next column', longRow)
+  check(longRow === '* #1  MyVeryLongWorkAccount enterprise 5h 30%  7d 50%', 'account ls: a long label or plan still leaves a space before the next column', longRow)
   const unvSt = C.formatHuman('account.status', { supported: true, live: 'known', unverified: true, active: acc(), accounts: [acc()], lastSwitch: null, auto: { enabled: false, switchAtPercent: 99, paused: null } })
-  check(unvSt === 'active: Trabajo (primary)\nthe live Claude login changed and is not identified yet: switches wait until a Claude console used it\nautomatic switch: off', 'account status human output while the live login is unverified', unvSt)
-  check(C.USAGE.includes('snaos usage [--provider claude|codex]') && C.USAGE.includes('account use <primary|secondary|id|label>'), 'USAGE lists usage and account')
+  check(unvSt === 'active: Trabajo (#1)\nthe live Claude login changed and is not identified yet: switches wait until a Claude console used it\nautomatic switch: off', 'account status human output while the live login is unverified', unvSt)
+  check(C.USAGE.includes('snaos usage [--provider claude|codex]') && C.USAGE.includes('account use <n|id|label>'), 'USAGE lists usage and account')
   check(guide2.includes('## Usage and Claude accounts') && guide2.includes('snaos usage') && /only when the user asks/.test(guide2) && /Never `account use` unless the user asked/.test(guide2), 'guide: usage and accounts section, account use only on request')
 }
 
@@ -1464,16 +1481,16 @@ async function serviceChecks() {
     const src = fakeAccountSource()
     service.attach({ usage: fakeUsage(), accounts: ctlAccountsView(src) })
     const us = await run(['usage'])
-    check(us.code === 0 && /^claude Session +42% +resets in /.test(us.out) && us.out.includes('codex  Session') && !us.out.includes('gpt-x') && us.out.endsWith('claude account: Trabajo (primary)'), 'snaos usage, end to end', us.out)
+    check(us.code === 0 && /^claude Session +42% +resets in /.test(us.out) && us.out.includes('codex  Session') && !us.out.includes('gpt-x') && us.out.endsWith('claude account: Trabajo (#1)'), 'snaos usage, end to end', us.out)
     const usj = await run(['usage', '--provider', 'claude', '--json'])
     check(usj.code === 0 && JSON.parse(usj.out).data.rows.length === 2 && !usj.out.includes('sk-ant') && !usj.out.includes('@'), 'snaos usage --provider claude --json: no token, no email')
     const as = await run(['account'])
-    check(as.code === 0 && as.out.startsWith('active: Trabajo (primary)') && as.out.includes('automatic switch: on at 95%'), 'snaos account (status), end to end', as.out)
+    check(as.code === 0 && as.out.startsWith('active: Trabajo (#1)') && as.out.includes('automatic switch: on at 95%'), 'snaos account (status), end to end', as.out)
     const al = await run(['account', 'ls', '--json'])
     check(al.code === 0 && JSON.parse(al.out).data.accounts.length === 2 && !al.out.includes('@') && !al.out.includes('sk-ant'), 'snaos account ls --json: no email, no token')
     const used = await run(['account', 'use', 'secondary'])
-    check(used.code === 0 && used.out === 'switched to Personal (secondary)' && src.calls.length === 1 && src.calls[0].reason === 'cli', "snaos account use secondary switches with reason 'cli'", used.out)
-    check((await run(['account', 'use', 'Personal'])).out === 'already on Personal (secondary)' && src.calls.length === 1, 'using the live account again changes nothing')
+    check(used.code === 0 && used.out === 'switched to Personal (#2)' && src.calls.length === 1 && src.calls[0].reason === 'cli', "snaos account use secondary switches with reason 'cli'", used.out)
+    check((await run(['account', 'use', 'Personal'])).out === 'already on Personal (#2)' && src.calls.length === 1, 'using the live account again changes nothing')
     src.next = { ok: false, error: 'locked' }
     const lockedRun = await run(['account', 'use', 'primary'])
     check(lockedRun.code === 7 && /capture it again/.test(lockedRun.err), 'a locked login exits 7 with the hint')

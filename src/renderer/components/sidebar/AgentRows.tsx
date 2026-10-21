@@ -3,7 +3,7 @@ import type { AgentPreset } from '@shared/types'
 import { AGENT_ROWS_MAX, pickAgentRows } from '@shared/agents'
 import { displayStatus } from '@shared/status'
 import { useLang, useT } from '@/i18n'
-import { agentPhrase, agentTitle, type AgentEntry } from '@/lib/agentNav'
+import { agentIconName, agentPhrase, agentTitle, type AgentEntry } from '@/lib/agentNav'
 import { revealPane } from '@/lib/revealPane'
 import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
@@ -82,7 +82,8 @@ export function AgentRows({
         const statusLine = statusLines[e.id]
         const detailed = e.status?.detail?.text && !phrase.includes(e.status.detail.text) ? `${phrase}\n${e.status.detail.text}` : phrase
         const full = statusLine ? `${statusLine}\n${detailed}` : detailed
-        const Icon = iconFor(e.pane.icon)
+        // v2.4: a shell console running claude / codex shows that agent's icon.
+        const Icon = iconFor(agentIconName(e.pane, e.status))
         // The console's own repo when it is not the workspace's (a folder of many repos).
         const ownGit = gitOn ? paneOwnRepo(gitSummaries[paneGitKey(e.id)], wsGit) : null
         return (

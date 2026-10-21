@@ -24,6 +24,7 @@ export type CategoryId =
   | 'claudeaccounts'
   | 'usage'
   | 'remote'
+  | 'share'
   | 'git'
   | 'updates'
   | 'about'
@@ -45,6 +46,7 @@ export const CATEGORY_ORDER: CategoryId[] = [
   'claudeaccounts',
   'usage',
   'remote',
+  'share',
   'git',
   'updates',
   'about',
@@ -66,6 +68,7 @@ export const CATEGORY_LABEL: Record<CategoryId, MessageKey> = {
   claudeaccounts: 'settings.cat.claudeaccounts',
   usage: 'settings.cat.usage',
   remote: 'settings.cat.remote',
+  share: 'settings.cat.share',
   git: 'settings.cat.git',
   updates: 'settings.cat.updates',
   about: 'settings.cat.about',
@@ -121,6 +124,10 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('terminal.persistScrollback', 'settings.persistScrollback', 'settings.persistScrollbackHint', { groupKey: 'settings.persistGroup', keywords: ['history', 'historial', 'restart', 'reinicio', 'save', 'guardar', 'scrollback', 'persist'] }),
   e('terminal.persistLines', 'settings.persistLines', undefined, { groupKey: 'settings.persistGroup', keywords: ['history', 'historial', 'lines', 'lineas', 'scrollback'] }),
   e('terminal.snapshotMode', 'settings.snapshotMode', 'settings.snapshotModeHint', { groupKey: 'settings.terminalAdvanced', keywords: ['snapshot', 'headless', 'replay', 'reattach', 'recarga', 'reload', 'avanzado', 'advanced'] }),
+  // Desktop dictation (app 2.4.0).
+  e('terminal.dictationEngine', 'settings.dictation.engine', 'settings.dictation.engineHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'voice', 'voz', 'microphone', 'microfono', 'speech', 'offline', 'online', 'sapi'] }),
+  e('terminal.dictationLanguage', 'settings.dictation.language', 'settings.dictation.languageHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'voice', 'voz', 'language', 'idioma'] }),
+  e('terminal.dictationHeaderButton', 'settings.dictation.headerButton', 'settings.dictation.headerButtonHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'microphone', 'microfono', 'mic', 'header', 'encabezado'], toggle: { path: 'dictation.headerButton' } }),
 
   // Agents
   e('agents.resume', 'settings.agents.resume', 'settings.agents.resumeHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'session', 'sesion', 'chat', 'restart', 'reinicio'] }),
@@ -132,6 +139,8 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('agents.rows', 'settings.agents.rows', 'settings.agents.rowsHint', { groupKey: 'settings.agents.behavior', keywords: ['rows', 'filas', 'sidebar', 'barra lateral'], toggle: { path: 'agents.sidebarAgentRows' } }),
   e('agents.sort', 'settings.agents.sort', 'settings.agents.sortHint', { groupKey: 'settings.agents.behavior', keywords: ['sort', 'orden', 'smart', 'inteligente', 'sidebar', 'barra lateral', 'workspace'] }),
   e('agents.topicAsTitle', 'settings.agents.topicAsTitle', 'settings.agents.topicAsTitleHint', { groupKey: 'settings.agents.behavior', keywords: ['topic', 'tema', 'title', 'titulo'], toggle: { path: 'agents.topicAsTitle' } }),
+  e('agents.syncAgentRename', 'settings.agents.syncAgentRename', 'settings.agents.syncAgentRenameHint', { groupKey: 'settings.agents.behavior', keywords: ['rename', 'renombrar', '/rename', 'name', 'nombre', 'title', 'titulo', 'console', 'consola'], toggle: { path: 'agents.syncAgentRename' } }),
+  e('agents.shellAgentDetect', 'settings.agents.shellAgentDetect', 'settings.agents.shellAgentDetectHint', { groupKey: 'settings.agents.behavior', keywords: ['powershell', 'shell', 'claude', 'codex', 'detect', 'detectar', 'agent', 'agente', 'typed', 'tipeado'], toggle: { path: 'agents.shellAgentDetect' } }),
   e('agents.ctrlDigit', 'settings.agents.ctrlDigit', 'settings.agents.ctrlDigitHint', { groupKey: 'settings.agents.behavior', keywords: ['ctrl', 'focus', 'foco', 'shortcut', 'atajo'], toggle: { path: 'agents.ctrlDigitFocus' } }),
   e('agents.hibernate', 'settings.agents.hibernate', 'settings.agents.hibernateHint', { groupKey: 'settings.agents.behavior', keywords: ['hibernate', 'hibernar', 'sleep', 'dormir', 'memory', 'memoria', 'ram', 'idle', 'inactivo'] }),
   e('agents.hibernateMinutes', 'settings.agents.hibernateMinutes', 'settings.agents.hibernateMinutesHint', { groupKey: 'settings.agents.behavior', keywords: ['hibernate', 'hibernar', 'sleep', 'dormir', 'minutes', 'minutos', 'idle', 'inactivo'] }),
@@ -195,10 +204,10 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('aiusage.custom', 'aiusage.customTitle', 'aiusage.customHint', { keywords: ['custom', 'personalizado', 'model', 'modelo', 'budget', 'presupuesto'] }),
 
   // Claude accounts (app 2.3.0). No inline switch for the automatic toggle: the terms note sits next to the live row.
-  e('claudeaccounts.accounts', 'claudeaccounts.title', 'claudeaccounts.hint', { summary: true, keywords: ['account', 'accounts', 'cuenta', 'cuentas', 'login', 'claude', 'switch', 'cambiar', 'subscription', 'suscripcion', 'primary', 'principal', 'secondary', 'secundaria'] }),
+  e('claudeaccounts.accounts', 'claudeaccounts.title', 'claudeaccounts.hint', { summary: true, keywords: ['account', 'accounts', 'cuenta', 'cuentas', 'login', 'claude', 'switch', 'cambiar', 'subscription', 'suscripcion', 'primary', 'principal', 'secondary', 'secundaria', 'priority', 'prioridad', 'order', 'orden'] }),
   e('claudeaccounts.auto', 'claudeaccounts.auto', 'claudeaccounts.autoHint', { keywords: ['account', 'cuenta', 'automatic', 'automatico', 'switch', 'cambiar', 'limit', 'limite', 'claude'] }),
   e('claudeaccounts.switchAt', 'claudeaccounts.switchAt', 'claudeaccounts.switchAtHint', { keywords: ['account', 'cuenta', 'threshold', 'umbral', 'percent', 'porcentaje', 'limit', 'limite'] }),
-  e('claudeaccounts.return', 'claudeaccounts.return', 'claudeaccounts.returnHint', { keywords: ['account', 'cuenta', 'primary', 'principal', 'return', 'volver', 'reset'] }),
+  e('claudeaccounts.return', 'claudeaccounts.return', 'claudeaccounts.returnHint', { keywords: ['account', 'cuenta', 'primary', 'principal', 'priority', 'prioridad', 'return', 'volver', 'reset'] }),
   e('claudeaccounts.defer', 'claudeaccounts.defer', 'claudeaccounts.deferHint', { keywords: ['account', 'cuenta', 'working', 'trabajando', 'wait', 'esperar'] }),
   e('claudeaccounts.pollParked', 'claudeaccounts.pollParked', 'claudeaccounts.pollParkedHint', { keywords: ['account', 'cuenta', 'usage', 'uso', 'parked'] }),
   e('claudeaccounts.alertOnSwitch', 'claudeaccounts.alertOnSwitch', 'claudeaccounts.alertOnSwitchHint', { keywords: ['account', 'cuenta', 'alert', 'alerta', 'aviso'] }),
@@ -211,6 +220,14 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('remote.secure', 'remote.secure', 'remote.secureHint', { keywords: ['https', 'secure', 'seguro', 'tailscale', 'serve', 'push', 'pwa', 'certificate', 'certificado'] }),
   e('remote.phoneFit', 'remote.phoneFit', 'remote.phoneFitHint', { keywords: ['phone', 'celular', 'fit', 'ajustar', 'size', 'tamano', 'columns', 'columnas', 'mobile'], toggle: { path: 'remote.phoneFit' } }),
   e('remote.devices', 'settings.search.remote', 'settings.search.remoteHint', { summary: true, keywords: ['qr', 'pair', 'vincular', 'device', 'dispositivo', 'port', 'puerto', 'tailscale', 'lan', 'keys', 'botones'] }),
+
+  // Sharing (app 2.4.0, item 8): the grants and guests block is live data, summary only. Pause all is main state, not a setting.
+  e('share.enable', 'shareHost.settings.enable', 'shareHost.settings.enableHint', { keywords: ['share', 'compartir', 'guest', 'invitado', 'host', 'anfitrion', 'tunnel', 'tunel', 'pc'], toggle: { path: 'share.enabled' } }),
+  e('share.pauseAll', 'shareHost.settings.pauseAll', 'shareHost.settings.pauseAllHint', { keywords: ['share', 'compartir', 'pause', 'pausar', 'guest', 'invitado'] }),
+  e('share.port', 'shareHost.settings.port', 'shareHost.settings.portHint', { keywords: ['share', 'compartir', 'port', 'puerto', 'firewall', 'tailscale', 'lan'] }),
+  e('share.guestName', 'shareHost.settings.guestName', 'shareHost.settings.guestNameHint', { keywords: ['share', 'compartir', 'name', 'nombre', 'guest', 'invitado'] }),
+  e('share.defaultPerm', 'shareHost.settings.defaultPerm', 'shareHost.settings.defaultPermHint', { keywords: ['share', 'compartir', 'permission', 'permiso', 'view', 'ver', 'type', 'escribir', 'full', 'total'] }),
+  e('share.grants', 'settings.search.share', 'settings.search.shareHint', { summary: true, keywords: ['share', 'compartir', 'invite', 'invitacion', 'password', 'contrasena', 'revoke', 'revocar', 'guest', 'invitado', 'disconnect', 'desconectar', 'expiry', 'vencimiento'] }),
 
   // Git
   e('git.chip', 'settings.git.chip', 'settings.git.chipHint', { keywords: ['git', 'branch', 'rama', 'repo', 'chip', 'diff', 'commit', 'cambios', 'changes'], toggle: { path: 'gitChip' } }),

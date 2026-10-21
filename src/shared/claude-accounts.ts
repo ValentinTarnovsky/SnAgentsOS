@@ -3,10 +3,27 @@
  * shared by main, the renderer and the phone. Nothing here ever carries a
  * token or the raw credentials file; the phone only gets `UsageActiveAccount`
  * (no email). No Node or DOM imports.
+ *
+ * App 2.4.0: up to MAX_CLAUDE_ACCOUNTS accounts in priority order (`rank`,
+ * 0 = highest). `role` is derived from the rank only for older callers
+ * (rank 0 is 'primary', every other one 'secondary').
  */
 import type { ClaudeAccountsSettings } from './types'
 
 export type ClaudeAccountRole = 'primary' | 'secondary'
+
+/** Most saved Claude accounts (app 2.4.0). */
+export const MAX_CLAUDE_ACCOUNTS = 8
+
+/** The compat role of a rank: 0 is the primary, every other one a secondary. */
+export function roleOfRank(rank: number): ClaudeAccountRole {
+  return rank === 0 ? 'primary' : 'secondary'
+}
+
+/** The rank a legacy role names: 'primary' is 0, 'secondary' is 1. */
+export function rankOfRole(role: ClaudeAccountRole): number {
+  return role === 'primary' ? 0 : 1
+}
 
 /**
  * Why the live login changed. `manual` / `phone` come from the desktop UI and
@@ -38,8 +55,11 @@ export interface ClaudeAccountWindowView {
 
 export interface ClaudeAccountView {
   id: string
+  /** Priority, 0-based (0 = highest). The list comes sorted by it. */
+  rank: number
+  /** Derived from `rank` (compat). */
   role: ClaudeAccountRole
-  /** User label ('' = show the role name). */
+  /** User label ('' = show "Account N"). */
   label: string
   /** Desktop only (accounts:getState); never sent to the phone. */
   email: string | null
@@ -77,6 +97,12 @@ export interface ClaudeAccountsState {
    */
   liveUnverified?: boolean
   autoPaused: ClaudeAutoPause | null
+  /**
+   * app 2.4.0: the account the user picked last (a manual, phone or CLI
+   * switch, a capture, an outside /login). The automatic return never climbs
+   * above it. Absent or null = the first account.
+   */
+  anchorId?: string | null
   lastSwitch: { at: number; from: string | null; to: string; reason: ClaudeSwitchReason } | null
   pending: { to: string; reason: 'auto_exhausted' | 'auto_return'; since: number } | null
   blocked: 'allExhausted' | null
@@ -92,7 +118,10 @@ export type AccountsOpError =
   | 'locked'
   | 'identity_failed'
   | 'duplicate'
+  /** 2.3.0 only (two fixed slots); kept for older callers. */
   | 'role_taken'
+  /** app 2.4.0: MAX_CLAUDE_ACCOUNTS are saved already. */
+  | 'limit_reached'
   | 'busy'
   | 'io'
   | 'unsupported'
@@ -116,26 +145,66 @@ export interface ClaudeAccountsEvent {
   at: number
 }
 
-/** IPC payloads (accounts:*), validated with zod in main. */
+/**
+ * IPC payloads (accounts:*), validated with zod in main.
+ * Capture (app 2.4.0): appended as the last account, or in place of
+ * `replaceId` (same rank). The same identity again re-captures in place. The
+ * 2.3.0 shape `{ role, replace: true }` replaces the account at that role's
+ * rank.
+ */
 export interface AccountsCaptureReq {
-  role: ClaudeAccountRole
   label?: string
+  replaceId?: string
+  /**
+   * Re-capture only: the live login must be this saved account (else
+   * `duplicate` when it is another saved one, `unknown_live_account` when it
+   * is not saved). Never appends or replaces.
+   */
+  recaptureId?: string
+  /** @deprecated 2.3.0 slots. */
+  role?: ClaudeAccountRole
+  /** @deprecated 2.3.0 slots, with `role`. */
   replace?: boolean
 }
 export interface AccountsSwitchReq {
-  /** 'primary' | 'secondary' | an account id. */
+  /** An account id, or 'primary' | 'secondary' (rank 0 / 1). */
   target: string
   reason: RendererSwitchReason
+}
+/** app 2.4.0: the new priority order, every saved id exactly once. */
+export interface AccountsReorderReq {
+  ids: string[]
+}
+
+/** A saved account the phone may switch to (no email). */
+export interface UsageOtherAccount {
+  id: string
+  /** 0-based priority. */
+  rank: number
+  /** Derived from the rank (compat). */
+  role: ClaudeAccountRole
+  /** '' = show "Account N". Never carries an `@`. */
+  label: string
+  /** False when the saved login must be captured again. */
+  ready: boolean
 }
 
 /** The active account in the usage snapshot. No email: it also travels to the phone. */
 export interface UsageActiveAccount {
   id: string
+  /** app 2.4.0: 0-based priority (absent from a 2.3.0 desktop). */
+  rank?: number
   role: ClaudeAccountRole
-  /** '' = show the role name. Never carries an `@`. */
+  /** '' = show the role name (2.3.0) or "Account N". Never carries an `@`. */
   label: string
-  /** The other saved account, when there is one (the phone's "Use <other>"). */
-  other?: { id: string; role: ClaudeAccountRole; label: string }
+  /**
+   * The first other account by rank (the 2.3.0 phone's "Use <other>", sent
+   * by role): rank 0, or rank 1 when the active one is rank 0, so its derived
+   * role always names it.
+   */
+  other?: { id: string; rank?: number; role: ClaudeAccountRole; label: string }
+  /** app 2.4.0: every other saved account by rank (the phone's picker, sent by id). */
+  others?: UsageOtherAccount[]
 }
 
 export const DEFAULT_CLAUDE_ACCOUNTS_SETTINGS: ClaudeAccountsSettings = {

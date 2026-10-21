@@ -43,7 +43,7 @@ import type {
   RemoteUiState,
   SecureModeStatus,
 } from '@shared/ipc-contract'
-import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemoteHistorySession, RemoteNote, RemoteNotesReply, RemoteNotesRequest, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
+import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemoteHistorySession, RemoteNote, RemoteNotesReply, RemoteNotesRequest, RemotePaneMenu, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
 import { WS_NOTE_PHONE_MAX, type WsNoteDoc, type WsNotesChangedEvt } from '@shared/ws-notes'
 import type { WsNoteStore } from '../notes/WsNoteStore'
 import type { AgentProvider, ClaudePaneState, ConfigFile, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
@@ -60,6 +60,8 @@ import { ATTACHMENT_CLEANUP_INTERVAL_MS, UploadService } from './UploadService'
 import { noticePage, type ChatHooks } from '../chat/ChatHub'
 import { SecureMode, type SecureResult } from './SecureMode'
 import { PushService, buildPushMessage } from './PushService'
+import { PromptMenuWatcher, validMenu } from './PromptMenuWatcher'
+import { parseMenu } from '@shared/promptMenu'
 import type { StatusNotice } from '../status/events'
 
 const DEFAULT_PORT = 4517
@@ -77,11 +79,12 @@ const IMMEDIATE_STATES = new Set<ClaudePaneState | null>(['action', 'done', 'err
  * CONTRATOS fields of RemotePaneStatus: sessionId, cwd and every desktop-only
  * enrichment (detail, topic, firstPrompt, cacheSince) never leave main.
  */
-export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | null | undefined): RemotePaneStatus | null {
+export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | null | undefined, menu?: RemotePaneMenu | null): RemotePaneStatus | null {
   if (!evt || evt.state == null) return null
   const out: RemotePaneStatus = { state: evt.state, stateSince: evt.stateSince ?? evt.updatedAt ?? 0 }
   if (evt.precise === false) out.precise = false
   if (evt.provider) out.provider = evt.provider
+  if (evt.hosted) out.hosted = true
   if (evt.reason) out.reason = evt.reason
   if (evt.pendingCount) out.pendingCount = evt.pendingCount
   if (evt.lastMessage) out.lastMessage = evt.lastMessage
@@ -94,6 +97,8 @@ export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | n
   if (evt.model) out.model = evt.model
   if (evt.effort) out.effort = evt.effort
   if (evt.ultracode !== undefined) out.ultracode = evt.ultracode
+  // app 2.4.0: Claude's menu (PromptMenuWatcher), only while its request is still pending.
+  if (menu && evt.pending?.some((p) => p.id === menu.for)) out.menu = { for: menu.for, options: menu.options.map((o) => ({ n: o.n, label: o.label })) }
   return out
 }
 
@@ -153,6 +158,10 @@ export class RemoteManager {
   private uiScheduled = false
   /** Tracks the current setBackgroundThrottling state to avoid redundant calls. */
   private throttlingDisabled = false
+  /** app 2.4.0: other owners that keep the renderer unthrottled (the Share guests), by key. */
+  private readonly throttleHolds = new Set<string>()
+  /** app 2.4.0: observers of every renderer snapshot (ShareHost), phone server or not. */
+  private readonly snapshotListeners = new Set<(snap: RemoteStateSnapshot) => void>()
   /** Phone presence observer (AwakeService: an agent in `action` + a phone keeps the PC awake). */
   private phoneListener: ((connected: boolean) => void) | null = null
   private phoneNotified = false
@@ -169,6 +178,8 @@ export class RemoteManager {
   private refitPending = false
   /** Phone-fit owners, grace and auto restore (E3 M11). */
   readonly fit: FitController
+  /** app 2.4.0: Claude's menu read off the headless mirror for the phone's Chat view. */
+  readonly menus: PromptMenuWatcher
   /** Phone image uploads (E3-FR-08..10): `POST /api/upload` and the attachments cleanup. */
   private readonly uploads = new UploadService({
     dir: () => join(dataDir(), 'attachments'),
@@ -236,6 +247,16 @@ export class RemoteManager {
       onFitted: (paneId) => {
         const size = this.ptyManager.sizeOf(paneId)
         if (size) this.sessions?.broadcastFitState(paneId, 'phone', size.cols, size.rows)
+      },
+    })
+    this.menus = new PromptMenuWatcher({
+      screenRows: (paneId) => this.ptyManager.screenRows?.(paneId) ?? null,
+      isWatched: (paneId) => this.sessions?.isPaneWatched(paneId) ?? false,
+      // The full event, so the re-broadcast is the same status plus the menu
+      // (pushPaneStatus's coalesce and dedupe apply).
+      onChange: (paneId) => {
+        const evt = this.paneStatusOf(paneId)
+        if (evt) this.pushPaneStatus(evt)
       },
     })
     this.pairing = new PairingService({
@@ -469,7 +490,12 @@ export class RemoteManager {
       getPushKey: () => (this.httpsWanted ? this.push.publicKey() : null),
       getSecureUrl: () => this.secureUrl(),
       onPaneSeen: (paneId) => this.paneSeenListener?.(paneId),
+      // app 2.4.0: a phone opened the pane (Terminal or Chat): read its menu now.
+      onPaneWatched: (paneId) => this.menus.watch(paneId),
+      answerMenu: (action) => this.answerMenu(action),
     })
+    // The menu reader only schedules a timer per chunk; the sessions sink goes last.
+    this.ptyManager.addSink(this.menus)
     this.ptyManager.addSink(this.sessions)
     // A pty spawning/exiting flips a pane's `running`; re-broadcast so phones
     // update their dots even without a renderer-driven snapshot push.
@@ -508,8 +534,10 @@ export class RemoteManager {
 
   private teardownServer(): void {
     this.resetPaneStatus()
+    this.menus.reset()
     if (this.sessions) {
       this.ptyManager.setRunningChangeListener(null)
+      this.ptyManager.removeSink(this.menus.id)
       this.ptyManager.removeSink(this.sessions.id)
       this.sessions.dispose()
       this.sessions = null
@@ -518,7 +546,7 @@ export class RemoteManager {
       this.server.close()
       this.server = null
     }
-    this.applyThrottling(false)
+    this.applyThrottling(this.throttleHolds.size > 0)
     this.notifyPhones()
   }
 
@@ -553,6 +581,51 @@ export class RemoteManager {
       this.fit.refitAll()
     }
     this.broadcastSnapshot()
+    if (this.snapshotListeners.size > 0) {
+      const snap = this.currentSnapshot()
+      for (const cb of this.snapshotListeners) {
+        try {
+          cb(snap)
+        } catch {
+          /* an observer never breaks the phones' relay */
+        }
+      }
+    }
+  }
+
+  /**
+   * app 2.4.0 (Share): the last renderer snapshot with main's running and
+   * status overlaid, or null before the renderer's first push. Works with
+   * the phone server off.
+   */
+  snapshot(): RemoteStateSnapshot | null {
+    return this.rawSnapshot ? this.currentSnapshot() : null
+  }
+
+  /** app 2.4.0 (Share): called after every renderer snapshot push (overlaid). Returns unsubscribe. */
+  onSnapshot(cb: (snap: RemoteStateSnapshot) => void): () => void {
+    this.snapshotListeners.add(cb)
+    return () => this.snapshotListeners.delete(cb)
+  }
+
+  /**
+   * app 2.4.0 (Share): relay one control action to the renderer executor and
+   * await its result (10 s bound), as a phone ctl does. `label` names who
+   * asked in the renderer's toasts. The caller validated the action.
+   */
+  relayAction(action: RemoteCtlAction, label?: string): Promise<RemoteCommandResult> {
+    return this.relayCommand(action, label)
+  }
+
+  /**
+   * app 2.4.0 (Share): another owner wants the renderer unthrottled (guests
+   * connected) or lets go. Throttling is off while a phone is connected or
+   * any hold is set.
+   */
+  setThrottleHold(key: string, on: boolean): void {
+    if (on) this.throttleHolds.add(key)
+    else this.throttleHolds.delete(key)
+    this.applyThrottling(this.phoneConnected || this.throttleHolds.size > 0)
   }
 
   /** The window's main frame navigated (reload, crash recovery). */
@@ -599,7 +672,9 @@ export class RemoteManager {
     const exited = this.ptyManager.exitedPaneCodes()
     const statuses = new Map<string, RemotePaneStatus>()
     for (const evt of this.getPaneStatuses()) {
-      const status = toRemoteStatus(evt)
+      // app 2.4.0: the menu rides every state frame too, else the phone's
+      // statusMapOf would drop the Chat card on the next pushState.
+      const status = toRemoteStatus(evt, this.menus.menuFor(evt.paneId, evt.pending))
       if (status) statuses.set(evt.paneId, status)
     }
     const host = this.getHostName()
@@ -633,9 +708,12 @@ export class RemoteManager {
    * clearing null go out at once.
    */
   pushPaneStatus(evt: PaneStatusEvt): void {
+    // app 2.4.0: the watcher follows every request, phones or not, so a phone
+    // that connects while a plan waits still gets its menu.
+    this.menus.onStatus(evt)
     if (!this.sessions) return
     const paneId = evt.paneId
-    const status = toRemoteStatus(evt)
+    const status = toRemoteStatus(evt, this.menus.menuFor(paneId, evt.pending))
     if (IMMEDIATE_STATES.has(status?.state ?? null)) {
       this.cancelHeldStatus(paneId)
       this.sendPaneStatus(paneId, status)
@@ -677,6 +755,34 @@ export class RemoteManager {
     this.statusTimers.clear()
     this.statusHeld.clear()
     this.statusSent.clear()
+  }
+
+  /** One pane's live status (what StatusManager.stateOf gives, through the snapshot getter), or null. */
+  private paneStatusOf(paneId: string): PaneStatusEvt | null {
+    return this.getPaneStatuses().find((evt) => evt.paneId === paneId) ?? null
+  }
+
+  /**
+   * app 2.4.0 ctl answerMenu (SessionManager checked the session first): the
+   * screen is read again here, at answer time, and only the digit is written
+   * (never Enter) when the request is still pending and option `n` of the
+   * validated menu still reads `label`.
+   */
+  answerMenu(action: Extract<RemoteCtlAction, { kind: 'answerMenu' }>): RemoteCommandResult {
+    const evt = this.paneStatusOf(action.paneId)
+    const pending = evt?.pending?.find((p) => p.id === action.pendingId)
+    if (!evt || evt.state !== 'action' || !pending) return { id: '', ok: false, error: 'stale' }
+    if (pending.kind !== 'plan' && pending.kind !== 'permission') return { id: '', ok: false, error: 'no_menu' }
+    const ptyId = this.ptyManager.ptyIdForPane(action.paneId)
+    const rows = ptyId ? (this.ptyManager.screenRows?.(action.paneId) ?? null) : null
+    if (!ptyId || !rows) return { id: '', ok: false, error: 'no_menu' }
+    const menu = validMenu(rows, pending.kind)
+    // A menu of another layout replaced it (menu_changed); no menu at all is no_menu.
+    if (!menu) return { id: '', ok: false, error: parseMenu(rows) ? 'menu_changed' : 'no_menu' }
+    const option = menu.find((o) => o.n === action.n)
+    if (!option || option.label !== action.label) return { id: '', ok: false, error: 'menu_changed' }
+    this.ptyManager.write(ptyId, String(option.n), 'user')
+    return { id: '', ok: true }
   }
 
   // --- Control-plane relay --------------------------------------------------
@@ -901,7 +1007,7 @@ export class RemoteManager {
   }
 
   private onConnectionsChanged(): void {
-    this.applyThrottling((this.sessions?.connectedCount ?? 0) > 0)
+    this.applyThrottling((this.sessions?.connectedCount ?? 0) > 0 || this.throttleHolds.size > 0)
     this.scheduleUi()
     this.notifyPhones()
   }

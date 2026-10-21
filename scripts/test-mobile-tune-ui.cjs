@@ -1,11 +1,12 @@
 // Model, effort and Ultracode from the phone (app 2.3.0, ctl agentTune): the
 // real MainScreen with the AgentTuneSheet in an isolated, hidden browser at
 // phone width. The WS client's sendCtl and sendInput are stubbed; no socket
-// opens. Checks the header chip and the kebab row (only for Claude / Codex
-// consoles of a desktop >= 2.3.0), the Claude controls vs the Codex picker,
-// "Apply with Enter" off (Composer inserts at the caret, Direct types without
-// Enter) and on (enter:true, `busy` offers Insert), the in-flight lock, the
-// error toast, es / en and no horizontal overflow at 360 px.
+// opens. Checks the kebab row (only for Claude / Codex consoles of a desktop
+// >= 2.3.0; app 2.4.0: the first extra row, with what the console runs as its
+// truncated hint, and no header chip any more), the Claude controls vs the
+// Codex picker, "Apply with Enter" off (Composer inserts at the caret, Direct
+// types without Enter) and on (enter:true, `busy` offers Insert), the
+// in-flight lock, the error toast, es / en and no horizontal overflow at 360 px.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -33,7 +34,7 @@ window.result = (async () => {
   language:'en', themeTokens:{}, fontFamily:'mono', fontSize:13, activeWorkspaceId:'w1', keyButtons:[], quickCommands:[],
   workspaces:[
    { id:'w1', name:'Front', layoutOrder:['c1','x1','s1'], panes:[
-     { id:'c1', title:'Claude', type:'claude', color:'', icon:'', running:true },
+     { id:'c1', title:'Claude refactoring the session store and its tests', type:'claude', color:'', icon:'', running:true },
      { id:'x1', title:'Codex', type:'codex', color:'', icon:'', running:true },
      { id:'s1', title:'Shell', type:'shell', color:'', icon:'', running:true },
    ] },
@@ -48,24 +49,47 @@ window.result = (async () => {
  const toast = () => [...document.querySelectorAll('[data-toast]')].map(d => d.textContent)[0] ?? '';
  const openKebab = async () => { $('[data-terminal-kebab]').click(); await frames() };
  const closeSheets = async () => { document.querySelectorAll('[aria-label="Close"],[aria-label="Cerrar"]').forEach(b => b.click()); await wait(400) };
+ const kebabIds = () => [...document.querySelectorAll('[data-pane-actions] [data-action]')].map(b => b.dataset.action);
+ const openTune = async () => { await openKebab(); $('[data-action="tune"]').click(); await frames(); await wait(50) };
+ const noOverflow = label => { const wide=[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,5).map(e=>e.tagName+'.'+String(e.className).slice(0,80)); check(document.documentElement.scrollWidth<=innerWidth,label+' '+JSON.stringify(wide)) };
+ const titleWidth = () => $('[data-pane-title]').getBoundingClientRect().width;
 
  // 1. An older desktop: no chip and no kebab row (it would strike the unknown ctl).
  check(!$('[data-tune-chip]'),'no chip for a desktop older than 2.3.0');
+ const titleBefore = titleWidth();
  await openKebab();
  check(!!$('[data-action="history"]') && !$('[data-action="tune"]'),'no kebab row for an older desktop');
+ check(kebabIds().indexOf('quick')===kebabIds().indexOf('history')-1,'Quick Commands still leads the extras without the tune row');
  await closeSheets();
 
- // 2. A 2.3.0 desktop: the chip shows what the console runs.
+ // 2. A 2.3.0 desktop: no header chip (app 2.4.0); the kebab's first extra row shows what the console runs.
  flushSync(() => store.getState().update({ appVersion:'2.3.0' })); await frames();
- const chip = $('[data-tune-chip]');
- check(chip && chip.dataset.tuneChip==='claude' && chip.textContent==='claude-opus-4-5 \\u00b7 high \\u00b7 UC','the chip reads model, effort and UC: '+(chip&&chip.textContent));
- check(chip.getBoundingClientRect().width<=97,'the chip stays narrow (truncated)');
- { check(document.documentElement.scrollWidth<=innerWidth,'no horizontal overflow at phone width with the chip') }
+ check(!$('[data-tune-chip]'),'no header chip for a tunable console');
+ check(titleWidth()>=titleBefore-1,'a long title keeps all its room (no chip crowds it): '+titleWidth()+' vs '+titleBefore);
+ noOverflow('no horizontal overflow in the header at phone width');
+ await openKebab();
+ { const ids=kebabIds(); check(ids.indexOf('tune')>=0 && ids.indexOf('tune')===ids.indexOf('quick')-1 && ids.indexOf('quick')===ids.indexOf('history')-1,'"Model and effort" is the first extra row, before Quick Commands: '+ids.join()) }
+ const row = $('[data-action="tune"]'); const hint = row.querySelector('[data-action-hint]');
+ check(row.textContent.startsWith('Model and effort'),'the row is labelled Model and effort');
+ check(hint && hint.textContent==='claude-opus-4-5 \\u00b7 high \\u00b7 UC','the hint reads model, effort and UC: '+(hint&&hint.textContent));
+ check(hint.getBoundingClientRect().width<=row.getBoundingClientRect().width*0.45+1,'the hint stays within 45% of the row');
+ check(row.getBoundingClientRect().height>=48,'the row is a full touch target');
+ noOverflow('no horizontal overflow with the kebab open');
+ await closeSheets();
+ // A long summary truncates in the row instead of pushing the label out.
+ flushSync(() => store.getState().update({ paneStatus:{ ...store.getState().paneStatus, c1:{ ...claude, model:'claude-opus-4-5-20251101-extended-context-preview' } } })); await frames();
+ await openKebab();
+ { const r=$('[data-action="tune"]'), h=r.querySelector('[data-action-hint]'), label=r.querySelector('span:nth-child(2)');
+   check(h.scrollWidth>h.clientWidth && h.getBoundingClientRect().width<=r.getBoundingClientRect().width*0.45+1,'a long hint is truncated within 45% of the row');
+   check(label.getBoundingClientRect().width>=60 && h.getBoundingClientRect().right<=r.getBoundingClientRect().right+1,'the label keeps its room and the hint stays in the row'); }
+ noOverflow('no horizontal overflow with a long hint');
+ await closeSheets();
+ flushSync(() => store.getState().update({ paneStatus:{ ...store.getState().paneStatus, c1:claude } })); await frames();
 
- // 3. The sheet (from the chip): Claude controls with the current values.
- chip.click(); await frames();
+ // 3. The sheet (from the kebab row): Claude controls with the current values.
+ await openTune();
  const sheet = $('[data-tune-sheet]');
- check(sheet && sheet.dataset.tuneSheet==='claude' && document.body.textContent.includes('Model and effort'),'the chip opens the Claude sheet');
+ check(sheet && sheet.dataset.tuneSheet==='claude' && document.body.textContent.includes('Model and effort'),'the kebab row opens the Claude sheet');
  check(document.querySelectorAll('[data-tune-model]').length===8 && document.querySelectorAll('[data-tune-effort]').length===6,'8 model chips, 5 effort stops plus Auto');
  check($('[data-tune-effort="high"]').getAttribute('aria-checked')==='true' && $('[data-tune-effort="low"]').getAttribute('aria-checked')==='false','the current effort is checked');
  check($('[data-tune-ultracode]').getAttribute('aria-checked')==='true','Ultracode shows on');
@@ -83,9 +107,8 @@ window.result = (async () => {
 
  // 5. Composer mode (from the kebab row): inserted at the caret, nothing over the socket.
  flushSync(() => store.getState().setInputMode('c1','composer')); await frames();
- await openKebab();
- check(!!$('[data-action="tune"]'),'the kebab lists "Model and effort"');
- $('[data-action="tune"]').click(); await frames(); await wait(50);
+ await openTune();
+ check(!!$('[data-tune-sheet]'),'the kebab row opens the sheet in Composer mode too');
  $('[data-tune-model="sonnet"]').click(); await frames(); await wait(400);
  const ta = document.querySelector('textarea[data-kb-input="composer"]');
  check(ctls.length===1 && ta && ta.value.includes('/model sonnet'),'Composer mode inserts /model sonnet in the composer: '+(ta&&ta.value));
@@ -93,7 +116,7 @@ window.result = (async () => {
 
  // 6. Enter on (Direct): enter:true; busy offers Insert, which types it without Enter.
  flushSync(() => { store.getState().setInputMode('c1','direct'); }); await frames();
- $('[data-tune-chip]').click(); await frames();
+ await openTune();
  $('[data-tune-enter]').click(); await frames();
  check($('[data-tune-enter]').getAttribute('aria-checked')==='true' && localStorage.getItem('snagentsos.tune.enter')==='1','the switch turns on and is saved per phone');
  $('[data-tune-ultracode]').click(); await frames();
@@ -104,23 +127,24 @@ window.result = (async () => {
  check(JSON.stringify(ctls[2])===JSON.stringify({ kind:'agentTune', workspaceId:'w1', paneId:'c1', set:{ kind:'ultracode', on:false }, enter:false }),'Insert sends the same command without Enter');
  answer({ ok:true }); await frames(); await wait(400);
  check(!$('[data-tune-sheet]') && toast()==='Typed /effort ultracode off: press Enter to apply it','Insert closes with the typed toast');
- $('[data-tune-chip]').click(); await frames();
+ await openTune();
  check($('[data-tune-enter]').getAttribute('aria-checked')==='true','the switch is remembered');
  $('[data-tune-effort="auto"]').click(); await frames();
  check(ctls[3].set.value==='auto' && ctls[3].enter===true,'Auto with Enter');
  answer({ ok:true }); await frames(); await wait(400);
  check(toast()==='Applied /effort auto','an applied tune says so');
- $('[data-tune-chip]').click(); await frames();
+ await openTune();
  $('[data-tune-effort="low"]').click(); await frames();
  answer({ ok:false, error:'not_running' }); await frames();
  check(toast()==='This console is not running' && !!$('[data-tune-sheet]') && !$('[data-tune-effort="low"]').disabled,'an error toasts and keeps the sheet usable');
  await closeSheets();
 
- // 7. Codex: only the picker; the chip says "Model" while nothing is known.
+ // 7. Codex: only the picker; the row has no hint while nothing is known.
  flushSync(() => store.getState().update({ activePaneId:'x1', subscribedPaneId:'x1' })); await frames();
- const cx = $('[data-tune-chip]');
- check(cx && cx.dataset.tuneChip==='codex' && cx.textContent==='Model','the Codex chip says Model while unknown');
- cx.click(); await frames();
+ check(!$('[data-tune-chip]'),'no header chip for Codex either');
+ await openKebab();
+ { const cx=$('[data-action="tune"]'); const ids=kebabIds(); check(cx && !cx.querySelector('[data-action-hint]') && ids.indexOf('tune')===ids.indexOf('quick')-1,'the Codex row leads the extras with no hint while unknown: '+ids.join()) }
+ $('[data-action="tune"]').click(); await frames(); await wait(50);
  check($('[data-tune-sheet]').dataset.tuneSheet==='codex' && !$('[data-tune-model]') && !$('[data-tune-effort]') && !$('[data-tune-ultracode]') && !!$('[data-tune-picker]'),'Codex shows only the picker');
  check($('[data-tune-now]').textContent==='Now: Unknown','Codex values are read-only (unknown here)');
  $('[data-tune-picker]').click(); await frames();
@@ -128,19 +152,23 @@ window.result = (async () => {
  answer({ ok:true }); await frames(); await wait(400);
  check(toast()==='Applied /model','the picker toast');
 
- // 8. A shell: no chip, no row.
+ // 8. A shell: no chip, no row (Quick Commands leads the extras again).
  flushSync(() => store.getState().update({ activePaneId:'s1', subscribedPaneId:'s1' })); await frames();
  check(!$('[data-tune-chip]'),'no chip on a shell');
  await openKebab();
- check(!$('[data-action="tune"]'),'no kebab row on a shell');
+ check(!$('[data-action="tune"]') && kebabIds().indexOf('quick')===kebabIds().indexOf('history')-1,'no kebab row on a shell');
  await closeSheets();
 
  // 9. Spanish.
  setLang('es'); flushSync(() => store.getState().update({ activePaneId:'c1', subscribedPaneId:'c1', snapshot:{ ...snapshot, language:'es' } })); await frames();
- $('[data-tune-chip]').click(); await frames();
+ check(!$('[data-tune-chip]'),'no header chip in Spanish either');
+ await openKebab();
+ { const r=$('[data-action="tune"]'); check(r && r.textContent==='Modelo y esfuerzo'+'claude-opus-4-5 \\u00b7 high \\u00b7 UC','es row label and hint: '+(r&&r.textContent)) }
+ noOverflow('no horizontal overflow with the kebab open in Spanish');
+ $('[data-action="tune"]').click(); await frames(); await wait(50);
  check(document.body.textContent.includes('Modelo y esfuerzo') && $('[data-tune-model-note]').textContent==='El modelo también se guarda como default para sesiones nuevas.','es copy');
  check($('[data-tune-enter]').textContent.includes('Aplicar con Enter') && $('[data-tune-ultracode]').textContent.includes('solo en esta sesión'),'es switches');
- { const wide=[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,5).map(e=>e.tagName+'.'+String(e.className).slice(0,80)); check(document.documentElement.scrollWidth<=innerWidth,'no horizontal overflow with the sheet open '+JSON.stringify(wide)) }
+ noOverflow('no horizontal overflow with the sheet open');
 
  reactRoot.unmount(); return checks;
 })();

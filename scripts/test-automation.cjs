@@ -55,7 +55,7 @@ function v11(extra = {}) {
 const qc = (i, extra = {}) => ({ id: `qc-${i}`, name: `Cmd ${i}`, text: `echo ${i}`, action: 'send', enter: false, ...extra })
 
 function schemaChecks() {
-  check(CONFIG_VERSION === 16, 'CONFIG_VERSION is 16')
+  check(CONFIG_VERSION === 17, 'CONFIG_VERSION is 17')
 
   // E8-FR-01: 3 snippets -> 3 global send commands, same order and ids, no Enter.
   const snippets = [{ id: 'snip-a', name: 'Continua', text: 'continua' }, { id: 'snip-b', name: 'Compact', text: '/compact' }, { id: 'snip-c', name: 'Tests', text: 'corre los tests\ny arregla' }]
@@ -303,7 +303,7 @@ function v13Real(extra = {}) {
 }
 
 async function schema14Checks() {
-  check(CONFIG_VERSION === 16, 'CONFIG_VERSION is 16 (R31-00, app 2.3.0)')
+  check(CONFIG_VERSION === 17, 'CONFIG_VERSION is 17 (app 2.4.0)')
   const raw = v13Real()
   const a = parseConfig(clone(raw))
   check(a && a.version === CONFIG_VERSION, 'a real v13 config parses and is stamped with the current version')
@@ -328,6 +328,36 @@ async function schema14Checks() {
   const ca = up16.settings.claudeAccounts
   check(up16.version === CONFIG_VERSION && survives(v15, up16), 'v15 -> v16 keeps every value')
   check(ca.autoSwitch === false && ca.switchAtPercent === 99 && ca.returnToPrimary === true && ca.returnBelowPercent === 90 && ca.returnMarginMinutes === 5 && ca.minDwellMinutes === 10 && ca.deferWhileWorking === true && ca.deferMaxMinutes === 3 && ca.pollParked === true && ca.alertOnSwitch === true, 'v16: claudeAccounts gains its defaults, automatic switching off')
+  // Schema 17 (app 2.4.0): defaults plus the one migrate() logic, Codex on once.
+  const v16 = clone(a); v16.version = 16; v16.settings.notifications = { ...v16.settings.notifications, codexEnabled: false }
+  delete v16.settings.agents.syncAgentRename; delete v16.settings.agents.shellAgentDetect; delete v16.settings.dictation; delete v16.settings.share
+  const up17 = parseConfig(clone(v16))
+  check(up17.version === 17 && up17.settings.notifications.codexEnabled === true, 'v16 -> v17 turns the Codex integration on')
+  const v16Rest = clone(v16); delete v16Rest.settings.notifications.codexEnabled
+  check(survives(v16Rest, up17), 'v16 -> v17 keeps every other value')
+  check(up17.settings.agents.syncAgentRename === true && up17.settings.agents.shellAgentDetect === true, 'v17: agents gain syncAgentRename and shellAgentDetect on')
+  check(JSON.stringify(up17.settings.dictation) === '{"engine":"auto","language":"auto","headerButton":true}', 'v17: dictation defaults to auto engine, auto language, header button on')
+  check(JSON.stringify(up17.settings.share) === '{"enabled":false,"port":4527,"guestName":"","defaultPerm":"view"}', 'v17: share defaults to off, port 4527, no guest name, view')
+  const off17 = clone(up17); off17.settings.notifications.codexEnabled = false
+  const again = parseConfig(clone(off17))
+  check(again.settings.notifications.codexEnabled === false && parseConfig(clone(again)).settings.notifications.codexEnabled === false, 'the flip happens once: a later false on v17 survives every parse')
+  check(JSON.stringify(parseConfig(clone(up17))) === JSON.stringify(up17), 'v17 parse is idempotent')
+  const fromV10b = parseConfig({ version: 10, workspaces: [], presets: [], settings: { ...clone(baseSettings), notifications: { codexEnabled: false } } })
+  check(fromV10b.settings.notifications.codexEnabled === true, 'an older config with Codex off also flips on once')
+  const junk17 = clone(up17)
+  Object.assign(junk17.settings.agents, { syncAgentRename: 'yes', shellAgentDetect: 0 })
+  junk17.settings.notifications.codexEnabled = 'on'
+  junk17.settings.dictation = { engine: 'cloud', language: 'es-AR; rm -rf', headerButton: 'no' }
+  junk17.settings.share = { enabled: 'yes', port: 80, guestName: 'x'.repeat(49), defaultPerm: 'admin' }
+  const j = parseConfig(junk17)
+  check(j && j.settings.notifications.codexEnabled === true && j.settings.agents.syncAgentRename === true && j.settings.agents.shellAgentDetect === true, 'junk v17 booleans fall back to their defaults')
+  check(JSON.stringify(j.settings.dictation) === JSON.stringify(up17.settings.dictation) && JSON.stringify(j.settings.share) === JSON.stringify(up17.settings.share), 'junk dictation and share fields fall back field by field')
+  check(parseConfig({ ...clone(up17), settings: { ...clone(up17.settings), dictation: 'x', share: 7 } }).settings.share.port === 4527, 'a non-object dictation or share falls back to the defaults')
+  const kept17 = clone(up17)
+  kept17.settings.dictation = { engine: 'offline', language: 'es-AR', headerButton: false }
+  kept17.settings.share = { enabled: true, port: 4600, guestName: 'Laptop', defaultPerm: 'full' }
+  const k = parseConfig(kept17)
+  check(JSON.stringify(k.settings.dictation) === JSON.stringify(kept17.settings.dictation) && JSON.stringify(k.settings.share) === JSON.stringify(kept17.settings.share), 'valid dictation and share values are kept')
 
   // Values kept, junk values fall back without rejecting the config.
   const set = (v) => { const c = v13Real(); c.settings.terminalShellIntegration = v; return parseConfig(c) }

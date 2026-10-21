@@ -13,10 +13,19 @@ import { BRAND } from '@shared/brand'
  * start (from PSConsoleHostReadLine, so only with PSReadLine), D;<code>
  * command end, written before the next A. Before each A, an OSC 7 with the
  * current folder (file system locations only) feeds the console's git chip.
+ *
+ * v2.4: a C whose first token is `claude` or `codex` (a literal alias to one
+ * counts) carries `;agent=<name>`, and A, D and that C carry `;k=<nonce>`:
+ * the per-pty secret main passed in SHELL_MARK_ENV, which the bootstrap
+ * keeps and removes from the environment so no child (or ssh) inherits it.
+ * Only the enum leaves the shell, never the command line.
  */
 
 /** Environment variable a console with the integration gets (and the script sets). */
 export const SHELL_INTEGRATION_ENV = `${BRAND.envPrefix}SHELL_INTEGRATION`
+
+/** v2.4: the per-pty nonce of the marks (hex), read once and removed by the bootstrap. */
+export const SHELL_MARK_ENV = `${BRAND.envPrefix}SHELL_MARK`
 
 /** Start of the prompt mark: the ready-marker PtyManager waits for (E6-FR-30). */
 export const OSC133_PROMPT_START = '\x1b]133;A'
@@ -39,7 +48,10 @@ const SCRIPT = [
   `  $env:${SHELL_INTEGRATION_ENV} = '1'`,
   '  $__snaosPrompt = $function:prompt',
   "  if ($null -eq $__snaosPrompt) { $__snaosPrompt = { 'PS ' + $ExecutionContext.SessionState.Path.CurrentLocation + ('>' * ($NestedPromptLevel + 1)) + ' ' } }",
-  '  $Global:__SnaosOsc133 = @{ LecAtC = $null; Ran = $false; First = $true; Prompt = $__snaosPrompt; ReadLine = $null }',
+  "  $Global:__SnaosOsc133 = @{ LecAtC = $null; Ran = $false; First = $true; Prompt = $__snaosPrompt; ReadLine = $null; Mark = '' }",
+  // v2.4: the marks' nonce lives in the state only; no child process inherits it.
+  `  if ($env:${SHELL_MARK_ENV} -match '^[0-9a-f]{16,64}$') { $Global:__SnaosOsc133.Mark = ';k=' + $env:${SHELL_MARK_ENV} }`,
+  `  Remove-Item -LiteralPath 'Env:${SHELL_MARK_ENV}' -ErrorAction Ignore`,
   // -EncodedCommand runs in the global scope: drop the temporaries so they never show up in the session.
   "  Remove-Variable -Name '__snaosEnc', '__snaosPrompt' -ErrorAction Ignore",
   '  $Global:__SnaosOsc133.Hook = {',
@@ -52,10 +64,30 @@ const SCRIPT = [
   '      if ($null -ne $line -and ([string]$line).Trim().Length -gt 0) {',
   '        $s.LecAtC = $Global:LASTEXITCODE',
   '        $s.Ran = $true',
-  "        [Console]::Write([string][char]27 + ']133;C' + [string][char]7)",
+  "        [Console]::Write([string][char]27 + ']133;C' + (& $s.Agent ([string]$line)) + [string][char]7)",
   '      }',
   '      $line',
   '    }',
+  '  }',
+  // v2.4: ';agent=claude|codex' plus the nonce when the first token, or a
+  // literal alias of it (never a wildcard, never Get-Command), names one; else ''.
+  '  $Global:__SnaosOsc133.Agent = {',
+  '    param($l)',
+  "    $r = ''",
+  '    try {',
+  '      $s = $Global:__SnaosOsc133',
+  '      if ($s.Mark) {',
+  "        $t = (($l.TrimStart() -split '\\s+', 2)[0]).Trim([char]34, [char]39)",
+  '        $n = [IO.Path]::GetFileNameWithoutExtension($t)',
+  "        if ($t.Length -gt 0 -and $n -notmatch '^(claude|codex)$') {",
+  "          $n = ''",
+  "          $a = Get-Item -LiteralPath ('Alias:' + $t) -ErrorAction Ignore",
+  '          if ($null -ne $a) { $n = [IO.Path]::GetFileNameWithoutExtension([string]$a.Definition) }',
+  '        }',
+  "        if ($n -match '^(claude|codex)$') { $r = ';agent=' + $n.ToLowerInvariant() + $s.Mark }",
+  '      }',
+  '    } catch {}',
+  '    $r',
   '  }',
   '  & $Global:__SnaosOsc133.Hook',
   '  function Global:prompt {',
@@ -67,7 +99,7 @@ const SCRIPT = [
   '    if ($s.Ran -or ($null -eq $s.ReadLine -and -not $s.First)) {',
   '      $code = 0',
   '      if (-not $ok) { if ($lec -and $lec -ne $s.LecAtC) { $code = $lec } else { $code = 1 } }',
-  "      [Console]::Write($e + ']133;D;' + $code + $b)",
+  "      [Console]::Write($e + ']133;D;' + $code + $s.Mark + $b)",
   '    }',
   '    $s.LecAtC = $lec',
   '    $s.Ran = $false',
@@ -78,14 +110,15 @@ const SCRIPT = [
   "      $u = (($loc.ProviderPath -replace '\\\\', '/') -replace '%', '%25') -replace ' ', '%20'",
   "      [Console]::Write($e + ']7;file://localhost/' + $u + $b)",
   '    }',
-  "    [Console]::Write($e + ']133;A' + $b)",
+  "    [Console]::Write($e + ']133;A' + $s.Mark + $b)",
   '    $Global:LASTEXITCODE = $lec',
   "    if (-not $ok) { Write-Error 'failure' -ErrorAction Ignore }",
   '    $p = & $s.Prompt',
   '    $Global:LASTEXITCODE = $lec',
   "    return ([string]$p) + $e + ']133;B' + $b",
   '  }',
-  '}',
+  // Under ConstrainedLanguage the marks stay inert, and the nonce still leaves the environment.
+  `} else { Remove-Item -LiteralPath 'Env:${SHELL_MARK_ENV}' -ErrorAction Ignore }`,
 ].join('\n')
 
 /** The bootstrap source (tests decode the encoded argument back to this). */

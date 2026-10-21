@@ -11,16 +11,24 @@
  * the user sees what "always" covers. The menu is read again at tap time and
  * a change cancels the tap. Without a validated menu the card keeps the hint
  * that "always allow" stays in the terminal.
+ *
+ * app 2.4.0, Chat view: "Always allow" comes from main's read of the screen
+ * (RemotePaneStatus.menu) and goes out as ctl answerMenu, checked against
+ * the screen again in main; Allow and Deny stay plain `input` keys. The card
+ * is at most 45% of the visible height there and scrolls inside.
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
 import { ChevronDown, ShieldQuestion } from 'lucide-react'
 import type { PromptCardModel } from '../../lib/promptRules'
 import { alwaysOption, sameOption, type MenuOption } from '../../lib/promptMenu'
-import { answerCard } from '../../lib/answerLive'
-import { store } from '../../lib/store'
+import { answerCard, answerMenu } from '../../lib/answerLive'
+import { selectInChat, store, useRemoteStore } from '../../lib/store'
 import { t } from '../../lib/i18n'
-import { currentMenu } from './usePromptMenu'
+import { readCurrentMenu } from './usePromptMenu'
+
+/** app 2.4.0: an answer card in the Chat view takes at most 45% of the visible height. */
+export const CHAT_CARD_MAX_HEIGHT = 'calc(var(--vvh, 100dvh) * 0.45)'
 
 type PermissionModel = Extract<PromptCardModel, { kind: 'permission' }>
 
@@ -86,22 +94,27 @@ export function PermissionCard({
   always: MenuOption | null
   onFold: () => void
 }): ReactNode {
+  const inChat = useRemoteStore(selectInChat)
   const summary = card.generic ? '' : card.pending.summary
   const onAlways = (): void => {
-    const fresh = alwaysOption(currentMenu(paneId))
-    if (!always || !fresh || !sameOption([fresh], always)) {
+    const read = readCurrentMenu(paneId, card.pending.id)
+    const fresh = alwaysOption(read?.menu ?? null)
+    if (!read || !always || !fresh || !sameOption([fresh], always)) {
       menuChanged()
       return
     }
-    answerCard(paneId, card.pending.id, { kind: 'always' })
+    if (read.source === 'status') answerMenu(paneId, card.pending.id, { n: fresh.n, label: fresh.label })
+    else answerCard(paneId, card.pending.id, { kind: 'always' })
   }
   return (
     <div
       data-prompt-card="permission"
       data-pending={card.pending.id}
+      data-chat-card={inChat || undefined}
       role="group"
       aria-label={permissionTitle(card)}
-      className="shrink-0 border-t border-state-action/40 bg-bg-secondary px-3 pb-2 pt-2.5"
+      className={clsx('shrink-0 border-t border-state-action/40 bg-bg-secondary px-3 pb-2 pt-2.5', inChat && 'overflow-y-auto overscroll-contain')}
+      style={inChat ? { maxHeight: CHAT_CARD_MAX_HEIGHT } : undefined}
     >
       <CardHeader icon={<ShieldQuestion size={16} className="mt-0.5 shrink-0 text-state-action" />} title={permissionTitle(card)} onFold={onFold} />
       {summary && <RequestSummary text={summary} />}

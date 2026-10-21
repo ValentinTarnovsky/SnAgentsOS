@@ -7,13 +7,18 @@
  * never the email) and offers "Use <other>" (ctl claudeAccountUse) when a
  * second account is saved, only with a desktop >= 2.3.0 (an older one strikes
  * the unknown ctl kind).
+ *
+ * App 2.4.0: a desktop >= 2.4.0 lists every other account (`others`, by
+ * priority). One other keeps the single "Use <name>" button; more open a
+ * picker sheet. Both send `claudeAccountUse { id }`; an older desktop gets
+ * `{ role }` as before.
  */
 import { useRef, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { ArrowLeftRight, Loader2 } from 'lucide-react'
-import type { RemoteUsageRow, RemoteUsageSnapshot } from '@shared/remote-protocol'
-import type { ClaudeAccountRole } from '@shared/claude-accounts'
-import { appVersionAtLeast } from '@shared/agentTune'
+import { ArrowLeftRight, Check, Loader2 } from 'lucide-react'
+import type { RemoteCtlAction, RemoteUsageRow, RemoteUsageSnapshot } from '@shared/remote-protocol'
+import type { ClaudeAccountRole, UsageOtherAccount } from '@shared/claude-accounts'
+import { APP_2_4_0, appVersionAtLeast } from '@shared/agentTune'
 import { visibleUsageRows } from '@shared/usageRows'
 import { Sheet } from './Sheet'
 import { store, useRemoteStore } from '../lib/store'
@@ -115,9 +120,14 @@ const ROLE_LABEL: Record<ClaudeAccountRole, MobileMessageKey> = {
   secondary: 'usage.roleSecondary',
 }
 
-/** An account's label, or its role name when it has none (the snapshot never carries an email). */
-export function accountLabel(a: { label: string; role: ClaudeAccountRole }): string {
-  return a.label.trim() || t(ROLE_LABEL[a.role])
+/**
+ * An account's label, else "Account N" by its rank (a 2.4.0 desktop), else
+ * its role name (2.3.0). The snapshot never carries an email.
+ */
+export function accountLabel(a: { label: string; role: ClaudeAccountRole; rank?: number }): string {
+  const label = a.label.trim()
+  if (label) return label
+  return typeof a.rank === 'number' ? t('usage.accountN', { n: a.rank + 1 }) : t(ROLE_LABEL[a.role])
 }
 
 const ACCOUNT_ERRORS: Record<string, MobileMessageKey> = {
@@ -127,35 +137,123 @@ const ACCOUNT_ERRORS: Record<string, MobileMessageKey> = {
   identity_failed: 'usage.accountUnknown',
 }
 
-/** The Claude group's account line and its "Use <other>" button. */
-function AccountLine({ account }: { account: NonNullable<RemoteUsageSnapshot['activeAccount']> }): ReactNode {
-  const appVersion = useRemoteStore((s) => s.appVersion)
-  const [busy, setBusy] = useState(false)
-  const inFlight = useRef(false)
-  const other = account.other
-  const canSwitch = !!other && appVersionAtLeast(appVersion)
-  const use = async (): Promise<void> => {
-    if (!other || inFlight.current) return
-    inFlight.current = true
-    setBusy(true)
-    const res = await client.sendCtl({ kind: 'claudeAccountUse', role: other.role })
-    inFlight.current = false
-    setBusy(false)
-    store.getState().setToast(res.ok ? t('usage.accountSwitched', { name: accountLabel(other) }) : t(ACCOUNT_ERRORS[res.error ?? ''] ?? 'usage.accountFailed'))
-  }
+type ActiveAccount = NonNullable<RemoteUsageSnapshot['activeAccount']>
+type AccountTarget = { id: string; role: ClaudeAccountRole; rank?: number; label: string }
+
+/**
+ * The ctl for a switch: by id to a desktop >= 2.4.0, by role to a 2.3.0 one
+ * (only its `other`, whose role names it).
+ */
+export function accountUseAction(target: AccountTarget, appVersion: string | undefined): Extract<RemoteCtlAction, { kind: 'claudeAccountUse' }> {
+  return appVersionAtLeast(appVersion, APP_2_4_0) ? { kind: 'claudeAccountUse', id: target.id } : { kind: 'claudeAccountUse', role: target.role }
+}
+
+/** The accounts the phone can offer: every other one (2.4.0), else the single `other` (2.3.0). */
+export function accountChoices(account: ActiveAccount, appVersion: string | undefined): UsageOtherAccount[] {
+  if (appVersionAtLeast(appVersion, APP_2_4_0) && account.others?.length) return account.others
+  const o = account.other
+  if (!o) return []
+  // A 2.3.0 snapshot has no rank: an unlabeled account keeps its role name, not "Account N".
+  const label = o.label.trim() || (typeof o.rank === 'number' ? '' : t(ROLE_LABEL[o.role]))
+  return [{ id: o.id, rank: o.rank ?? (o.role === 'primary' ? 0 : 1), role: o.role, label, ready: true }]
+}
+
+/**
+ * The picker of a desktop with more than two accounts: every account by
+ * priority (the active one marked). A sibling of the usage sheet, never its
+ * child: that panel scrolls and animates, which would clip a fixed child.
+ */
+function AccountPickerSheet({ open, onClose, account, choices, busyId, onPick }: {
+  open: boolean
+  onClose: () => void
+  account: ActiveAccount
+  choices: UsageOtherAccount[]
+  busyId: string | null
+  onPick: (a: UsageOtherAccount) => void
+}): ReactNode {
+  const rows = [{ id: account.id, rank: account.rank ?? 0, role: account.role, label: account.label, ready: true, active: true }, ...choices.map((c) => ({ ...c, active: false }))].sort(
+    (a, b) => a.rank - b.rank,
+  )
   return (
-    <div data-usage-account={account.role} className="mb-1.5 flex items-center justify-between gap-2 px-1">
+    <Sheet open={open} onClose={onClose} title={t('usage.pickAccount')}>
+      <p className="mb-3 px-1 text-xs text-text-secondary">{t('usage.pickAccountHint')}</p>
+      <div data-usage-account-picker className="flex flex-col gap-1.5">
+        {rows.map((r) => (
+          <button
+            key={r.id}
+            type="button"
+            data-usage-pick-account={r.id}
+            data-usage-pick-rank={r.rank}
+            disabled={r.active || !r.ready || busyId !== null}
+            onClick={() => onPick(r)}
+            className="flex min-h-11 items-center gap-2.5 rounded-btn border border-border bg-bg-secondary px-3 py-2 text-left text-sm text-text-primary disabled:opacity-60"
+          >
+            <span className="shrink-0 text-xs font-semibold tabular-nums text-text-secondary">#{r.rank + 1}</span>
+            <span className="min-w-0 flex-1 truncate">{accountLabel(r)}</span>
+            {r.active ? (
+              <span className="flex shrink-0 items-center gap-1 text-xs text-accent-violet">
+                <Check size={13} />
+                {t('usage.accountInUse')}
+              </span>
+            ) : !r.ready ? (
+              <span className="shrink-0 text-xs text-text-secondary">{t('usage.accountNotReady')}</span>
+            ) : busyId === r.id ? (
+              <Loader2 size={13} className="shrink-0 animate-spin" />
+            ) : null}
+          </button>
+        ))}
+      </div>
+    </Sheet>
+  )
+}
+
+/** One account switch at a time (ctl claudeAccountUse), with its toast. Resolves true on success. */
+function useAccountSwitch(appVersion: string | undefined): { busyId: string | null; use: (target: UsageOtherAccount) => Promise<boolean> } {
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const inFlight = useRef(false)
+  const use = async (target: UsageOtherAccount): Promise<boolean> => {
+    if (inFlight.current || !target.ready) return false
+    inFlight.current = true
+    setBusyId(target.id)
+    const res = await client.sendCtl(accountUseAction(target, appVersion))
+    inFlight.current = false
+    setBusyId(null)
+    store.getState().setToast(res.ok ? t('usage.accountSwitched', { name: accountLabel(target) }) : t(ACCOUNT_ERRORS[res.error ?? ''] ?? 'usage.accountFailed'))
+    return res.ok
+  }
+  return { busyId, use }
+}
+
+/** The Claude group's account line: "Use <other>" with one other account, "Change account" (the picker) with more. */
+function AccountLine({ account, choices, busyId, onUse, onPick }: {
+  account: ActiveAccount
+  choices: UsageOtherAccount[]
+  busyId: string | null
+  onUse: (a: UsageOtherAccount) => void
+  onPick: () => void
+}): ReactNode {
+  const single = choices.length === 1 ? choices[0] : null
+  const btnCls = 'flex h-9 shrink-0 items-center gap-1.5 rounded-btn border border-border bg-bg-secondary px-3 text-xs font-medium text-text-primary disabled:opacity-60'
+  return (
+    <div data-usage-account={account.role} data-usage-account-id={account.id} className="mb-1.5 flex items-center justify-between gap-2 px-1">
       <span className="min-w-0 truncate text-xs text-text-secondary">{t('usage.account', { name: accountLabel(account) })}</span>
-      {canSwitch && other && (
+      {single && (
         <button
           type="button"
-          data-usage-use-account={other.role}
-          disabled={busy}
-          onClick={() => void use()}
-          className="flex h-9 shrink-0 items-center gap-1.5 rounded-btn border border-border bg-bg-secondary px-3 text-xs font-medium text-text-primary disabled:opacity-60"
+          data-usage-use-account={single.role}
+          data-usage-use-account-id={single.id}
+          disabled={busyId !== null || !single.ready}
+          onClick={() => onUse(single)}
+          className={btnCls}
         >
-          {busy ? <Loader2 size={13} className="animate-spin" /> : <ArrowLeftRight size={13} />}
-          {t('usage.useAccount', { name: accountLabel(other) })}
+          {busyId ? <Loader2 size={13} className="animate-spin" /> : <ArrowLeftRight size={13} />}
+          {t('usage.useAccount', { name: accountLabel(single) })}
+        </button>
+      )}
+      {choices.length > 1 && (
+        <button type="button" data-usage-change-account disabled={busyId !== null} onClick={onPick} className={btnCls}>
+          {busyId ? <Loader2 size={13} className="animate-spin" /> : <ArrowLeftRight size={13} />}
+          {t('usage.changeAccount')}
         </button>
       )}
     </div>
@@ -166,32 +264,55 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
   // A window the plan does not have (nodata beside an answered sibling) is not shown.
   const rows = visibleUsageRows(useRemoteStore((s) => s.snapshot?.usage?.rows) ?? [])
   const account = useRemoteStore((s) => s.snapshot?.usage?.activeAccount)
+  const appVersion = useRemoteStore((s) => s.appVersion)
+  const { busyId, use } = useAccountSwitch(appVersion)
+  const [picking, setPicking] = useState(false)
+  // An older desktop strikes the unknown ctl kind: no switch at all before 2.3.0.
+  const choices = account && appVersionAtLeast(appVersion) ? accountChoices(account, appVersion) : []
 
   return (
-    <Sheet open={open} onClose={onClose} title={t('usage.title')}>
-      {rows.length === 0 ? (
-        <p className="py-6 text-center text-sm text-text-secondary">{t('usage.none')}</p>
-      ) : (
-        <div className="flex flex-col gap-4">
-          {PROVIDER_ORDER.map((provider) => {
-            const group = rows.filter((r) => r.provider === provider)
-            if (group.length === 0) return null
-            return (
-              <div key={provider}>
-                <div className="mb-1.5 px-1 text-xs font-semibold uppercase tracking-wide text-text-secondary">
-                  {t(PROVIDER_LABEL[provider])}
+    <>
+      <Sheet open={open} onClose={onClose} title={t('usage.title')}>
+        {rows.length === 0 ? (
+          <p className="py-6 text-center text-sm text-text-secondary">{t('usage.none')}</p>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {PROVIDER_ORDER.map((provider) => {
+              const group = rows.filter((r) => r.provider === provider)
+              if (group.length === 0) return null
+              return (
+                <div key={provider}>
+                  <div className="mb-1.5 px-1 text-xs font-semibold uppercase tracking-wide text-text-secondary">
+                    {t(PROVIDER_LABEL[provider])}
+                  </div>
+                  {provider === 'claude' && account && (
+                    <AccountLine account={account} choices={choices} busyId={busyId} onUse={(a) => void use(a)} onPick={() => setPicking(true)} />
+                  )}
+                  <div className="flex flex-col gap-1.5">
+                    {group.map((row) => (
+                      <UsageRowView key={row.id} row={row} />
+                    ))}
+                  </div>
                 </div>
-                {provider === 'claude' && account && <AccountLine account={account} />}
-                <div className="flex flex-col gap-1.5">
-                  {group.map((row) => (
-                    <UsageRowView key={row.id} row={row} />
-                  ))}
-                </div>
-              </div>
-            )
-          })}
-        </div>
+              )
+            })}
+          </div>
+        )}
+      </Sheet>
+      {account && choices.length > 1 && (
+        <AccountPickerSheet
+          open={open && picking}
+          onClose={() => setPicking(false)}
+          account={account}
+          choices={choices}
+          busyId={busyId}
+          onPick={(a) => {
+            void use(a).then((ok) => {
+              if (ok) setPicking(false)
+            })
+          }}
+        />
       )}
-    </Sheet>
+    </>
   )
 }

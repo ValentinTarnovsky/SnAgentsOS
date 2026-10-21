@@ -43,8 +43,15 @@ const UNKNOWN: FirewallStatus = {
  * hint). Fix asks for UAC; a cancelled prompt shows "Cancelled". Renders
  * nothing off Windows.
  */
-export function FirewallStatusRow({ className }: { className?: string }) {
+/** The two calls the row needs: the phone server's (default) or the Share listener's (snApi.share.host). */
+export interface FirewallRowApi {
+  firewallCheck(force?: boolean): Promise<FirewallStatus>
+  firewallFix(): Promise<FirewallFixRes>
+}
+
+export function FirewallStatusRow({ className, api }: { className?: string; api?: FirewallRowApi }) {
   const t = useT()
+  const fw: FirewallRowApi = api ?? window.snApi.remote
   const [status, setStatus] = useState<FirewallStatus | null>(null)
   const [busy, setBusy] = useState<'check' | 'fix' | null>('check')
   const [note, setNote] = useState<MessageKey | null>(null)
@@ -53,7 +60,7 @@ export function FirewallStatusRow({ className }: { className?: string }) {
     setBusy('check')
     setNote(null)
     let alive = true
-    window.snApi.remote
+    fw
       .firewallCheck(force)
       .then((s) => {
         if (alive) setStatus(s)
@@ -68,14 +75,15 @@ export function FirewallStatusRow({ className }: { className?: string }) {
     return () => {
       alive = false
     }
-  }, [])
+    // `fw` follows `api` (or the stable snApi.remote).
+  }, [api])
 
   useEffect(() => check(false), [check])
 
   const fix = (): void => {
     setBusy('fix')
     setNote(null)
-    window.snApi.remote
+    fw
       .firewallFix()
       .then((res: FirewallFixRes) => {
         if (res.status) setStatus(res.status)

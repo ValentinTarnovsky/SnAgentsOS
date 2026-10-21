@@ -23,6 +23,19 @@ function commandLine(command: unknown): string {
   return ''
 }
 
+/**
+ * v2.4: a thread name from `thread/name/set` params (`name`), the
+ * `thread/name/updated` notification (`threadName`) or a Thread (`name`),
+ * one line, <= 60. Both keys are read wherever it appears: the field names
+ * come from `codex app-server generate-ts` of 0.163, not from a capture of
+ * the TUI's own traffic. Undefined for no name.
+ */
+function threadName(source: any): string | undefined {
+  const raw = typeof source?.name === 'string' ? source.name : typeof source?.threadName === 'string' ? source.threadName : ''
+  const name = clip(sanitize(raw, true), LIMITS.title)
+  return name ? name : undefined
+}
+
 /** Text parts of a userMessage item (images, mentions and skills carry no prompt text). */
 function userText(content: unknown): string {
   if (!Array.isArray(content)) return ''
@@ -69,10 +82,24 @@ export class CodexProtocol {
   private requests = new Set<string>()
   private asyncQuestions = new Set<string>()
   private submissions = new Map<string | number, string[]>()
-  constructor(private paneId: string, private ptyId: string, private emit: (evt: AgentEvent) => void) {}
+  /** v2.4: `thread/name/set` requests of the root thread waiting for their answer: id -> name. */
+  private renames = new Map<string | number, string>()
+  /**
+   * `onRename` (v2.4 `/rename`): the root thread's name. `explicit` when the
+   * server accepted a `thread/name/set` (the user renamed it now); otherwise
+   * the name a started or resumed thread already had (undefined: none). It
+   * never touches the state machine.
+   */
+  constructor(private paneId: string, private ptyId: string, private emit: (evt: AgentEvent) => void, private onRename: (sessionId: string, title: string | undefined, explicit: boolean) => void = () => {}) {}
   client(raw: string): void {
     this.read(raw, m => {
       if (m.id !== undefined && ['thread/start', 'thread/resume', 'thread/fork'].includes(m.method ?? '')) this.starts.add(m.id)
+      // v2.4: ThreadSetNameParams { threadId, name } (app-server generate-ts, Codex 0.163).
+      // `threadName` is also read in case a later CLI renames the field.
+      if (m.id !== undefined && m.method === 'thread/name/set' && this.root && m.params?.threadId === this.root) {
+        const name = threadName(m.params)
+        if (name !== undefined) { this.renames.set(m.id, name); if (this.renames.size > 16) this.renames.delete(this.renames.keys().next().value!) }
+      }
       // Async question answers are submitted as normal user input by current TUIs.
       // Only acknowledge after the server accepts the input, never on a failed send.
       if (m.id !== undefined && ['turn/start', 'turn/steer'].includes(m.method ?? '') && m.params?.threadId === this.root && m.params?.input?.length) {
@@ -90,10 +117,18 @@ export class CodexProtocol {
         this.reply = ''
         this.requests.clear()
         this.asyncQuestions.clear()
+        this.renames.clear()
         // A resumed thread names its first user message (`preview`): the row title until a prompt arrives.
         const preview = typeof m.result.thread.preview === 'string' ? clip(m.result.thread.preview, LIMITS.text) : ''
         this.send('start', undefined, undefined, preview.trim() ? { firstPrompt: preview } : undefined)
+        // v2.4: Thread.name (string | null) is the name it already had.
+        this.onRename(this.root, threadName(m.result.thread), false)
         this.status(m.result.thread.status)
+      }
+      if (response && this.renames.has(m.id!)) {
+        const name = this.renames.get(m.id!)!
+        this.renames.delete(m.id!)
+        if (!m.error && this.root) this.onRename(this.root, name, true)
       }
       if (response && this.submissions.has(m.id!)) {
         const ids = this.submissions.get(m.id!)!
@@ -140,6 +175,13 @@ export class CodexProtocol {
           break
         }
         case 'thread/status/changed': this.status(p.status); break
+        // v2.4: ThreadNameUpdatedNotification { threadId, threadName? }. Only a
+        // fallback for a recorded set whose answer has not come (never alone).
+        case 'thread/name/updated': {
+          const name = threadName(p)
+          if (name !== undefined && this.renames.size) { this.renames.clear(); this.onRename(this.root, name, true) }
+          break
+        }
         case 'error': if (p.willRetry === false) this.send('error'); break
         case 'thread/closed': this.send('unknown'); break
         case 'item/completed':

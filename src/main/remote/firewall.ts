@@ -165,14 +165,42 @@ export interface FixScriptInput {
   tailnet: boolean
   /** A LAN endpoint is on a domain network: the LAN rule covers Domain too. */
   domain: boolean
+  /** Rule names and display labels; absent = the phone server's (FW_RULES_REMOTE). */
+  rules?: FirewallRuleNames
+}
+
+/**
+ * The stable -Name of our two Allow rules and the label their DisplayName
+ * starts with ("<label> (TCP <port>)"). The phone server and the Share
+ * listener (app 2.4.0) each own a pair, so neither fix touches the other's.
+ */
+export interface FirewallRuleNames {
+  lan: string
+  tailnet: string
+  lanLabel: string
+  tailnetLabel: string
+}
+
+export const FW_RULES_REMOTE: FirewallRuleNames = {
+  lan: FW_RULE_LAN,
+  tailnet: FW_RULE_TAILNET,
+  lanLabel: `${BRAND.productName} Remote`,
+  tailnetLabel: `${BRAND.productName} Remote Tailscale`,
+}
+
+export const FW_RULES_SHARE: FirewallRuleNames = {
+  lan: `${BRAND.productName}.Share.TCP`,
+  tailnet: `${BRAND.productName}.Share.Tailnet`,
+  lanLabel: `${BRAND.productName} Share`,
+  tailnetLabel: `${BRAND.productName} Share Tailscale`,
 }
 
 /** The elevated fix script: remove the current exe's Blocks, recreate our Allow rule(s). */
-export function buildFixScript({ exe, port, programScope, tailnet, domain }: FixScriptInput): string {
+export function buildFixScript({ exe, port, programScope, tailnet, domain, rules = FW_RULES_REMOTE }: FixScriptInput): string {
   const p = validPort(port)
   const program = programScope ? ` -Program ${psQuote(exe)}` : ''
-  const lanName = psQuote(FW_RULE_LAN)
-  const tailName = psQuote(FW_RULE_TAILNET)
+  const lanName = psQuote(rules.lan)
+  const tailName = psQuote(rules.tailnet)
   // Blocks on the current exe are removed on the profiles our rules open:
   // Private (plus Domain on a domain network), and Public too when the
   // Tailscale rule is created, since the tailnet adapter usually sits on a
@@ -204,12 +232,12 @@ export function buildFixScript({ exe, port, programScope, tailnet, domain }: Fix
     '    }',
     '  }',
     `  Get-NetFirewallRule -Name ${lanName} -ErrorAction SilentlyContinue | Remove-NetFirewallRule`,
-    `  New-NetFirewallRule -Name ${lanName} -DisplayName ${psQuote(`${BRAND.productName} Remote (TCP ${p})`)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${p} -Profile ${domain ? 'Private,Domain' : 'Private'} -RemoteAddress LocalSubnet${program} -EdgeTraversalPolicy Block | Out-Null`,
+    `  New-NetFirewallRule -Name ${lanName} -DisplayName ${psQuote(`${rules.lanLabel} (TCP ${p})`)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${p} -Profile ${domain ? 'Private,Domain' : 'Private'} -RemoteAddress LocalSubnet${program} -EdgeTraversalPolicy Block | Out-Null`,
     `  Get-NetFirewallRule -Name ${tailName} -ErrorAction SilentlyContinue | Remove-NetFirewallRule`,
   ]
   if (tailnet) {
     lines.push(
-      `  New-NetFirewallRule -Name ${tailName} -DisplayName ${psQuote(`${BRAND.productName} Remote Tailscale (TCP ${p})`)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${p} -Profile Any -RemoteAddress ${TAILNET_CIDR}${program} -EdgeTraversalPolicy Block | Out-Null`,
+      `  New-NetFirewallRule -Name ${tailName} -DisplayName ${psQuote(`${rules.tailnetLabel} (TCP ${p})`)} -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${p} -Profile Any -RemoteAddress ${TAILNET_CIDR}${program} -EdgeTraversalPolicy Block | Out-Null`,
     )
   }
   lines.push('  exit 0', '} catch {', `  exit ${FIX_FAILED}`, '}')
@@ -499,6 +527,8 @@ export interface FirewallDeps {
   /** Run powershell.exe with these args. */
   run: (args: string[], timeoutMs: number) => Promise<RunResult>
   now: () => number
+  /** Our rules' names and labels; absent = the phone server's (app 2.4.0: the Share listener has its own). */
+  rules?: FirewallRuleNames
 }
 
 function baseStatus(state: 'unknown' | 'unsupported', port: number, programScope: boolean, now: number, detail?: string): FirewallStatus {
@@ -588,6 +618,7 @@ export class FirewallService {
       programScope: this.deps.programScope(),
       tailnet: endpoints.some((e) => e.kind === 'tailscale'),
       domain: lanDomain,
+      rules: this.deps.rules,
     })
     let res: RunResult
     try {

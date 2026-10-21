@@ -62,7 +62,11 @@ export function ActionList({ title, subtitle, message, leading, items }: ActionL
             <span className={clsx('min-w-0 flex-1 truncate text-sm font-medium', item.destructive ? 'text-red-400' : 'text-text-primary')}>
               {item.label}
             </span>
-            {item.hint && <span className="shrink-0 text-xs text-text-secondary">{item.hint}</span>}
+            {item.hint && (
+              <span data-action-hint className="min-w-0 max-w-[45%] truncate text-xs text-text-secondary">
+                {item.hint}
+              </span>
+            )}
           </button>
         ))}
       </div>

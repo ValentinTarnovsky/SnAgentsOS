@@ -5,6 +5,7 @@ import { visiblePaneIds } from '@shared/status'
 import { revealPane } from './revealPane'
 import { dismissAgentCardsInView, onAgentStatus } from './agentNotice'
 import { AGENT_END_OTHER_CAP_MS, hasPromptMarks, whenPromptReturns } from './shellReady'
+import { applyAgentRename } from './agentRename'
 
 /**
  * Wires the Claude status feature on the renderer side. Mounted once inside
@@ -69,6 +70,9 @@ export function useStatusEvents(): void {
       for (const cancel of waits.values()) cancel()
     }
   }, [])
+
+  // v2.4: the agent's `/rename` renames its console (agents.syncAgentRename).
+  useEffect(() => window.snApi.status.onAgentRename((evt) => { applyAgentRename(evt) }), [])
 
   // A status notification was clicked: reveal that console (E5-FR-04).
   useEffect(() => {

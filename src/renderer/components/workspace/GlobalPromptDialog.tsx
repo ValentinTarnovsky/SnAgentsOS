@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { Flag, GitBranch, Loader2, Megaphone, Minus, Plus } from 'lucide-react'
 import type { Workspace } from '@shared/types'
@@ -26,6 +26,7 @@ import { useT } from '@/i18n'
 import { KeyHint } from '@/components/ui/KeyHint'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ariaKeyshortcuts } from '@/lib/keymap'
+import { FieldDictationStatus, FieldMicButton } from '@/components/terminal/DictationControls'
 
 const SEND_KEYS = ['Ctrl', 'Enter']
 const AGENT_LABEL: Record<RaceAgent, string> = { claude: 'Claude', codex: 'Codex' }
@@ -66,6 +67,27 @@ function PromptDialog({ workspace }: { workspace: Workspace }) {
 
   const [mode, setMode] = useState<Mode>('prompt')
   const [prompt, setPrompt] = useState('')
+  // Dictation (app 2.4.0) inserts at the caret: the latest text and caret, ahead of React's render.
+  const textRef = useRef<HTMLTextAreaElement>(null)
+  const latest = useRef({ text: '', caret: 0 })
+  const [caretSync, setCaretSync] = useState(0)
+  const trackCaret = (): void => {
+    const el = textRef.current
+    if (el) latest.current = { text: el.value, caret: el.selectionEnd ?? el.value.length }
+  }
+  const insertDictated = (chunk: string): void => {
+    const { text, caret } = latest.current
+    const at = Math.min(caret, text.length)
+    const next = text.slice(0, at) + chunk + text.slice(at)
+    latest.current = { text: next, caret: at + chunk.length }
+    setPrompt(next)
+    setCaretSync((n) => n + 1)
+  }
+  useEffect(() => {
+    const el = textRef.current
+    if (!el || caretSync === 0) return
+    el.setSelectionRange(latest.current.caret, latest.current.caret)
+  }, [caretSync])
   const active = workspace.panes.filter((p) => !minimizedIds.includes(p.id))
   const [off, setOff] = useState<ReadonlySet<string>>(new Set())
   const [enter, setEnter] = useState(false)
@@ -198,15 +220,26 @@ function PromptDialog({ workspace }: { workspace: Workspace }) {
             </div>
           </div>
 
-          <textarea
-            autoFocus
-            rows={5}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder={mode === 'prompt' ? t('globalPrompt.placeholder') : t('race.placeholder')}
-            className="w-full resize-none rounded-btn border border-border bg-bg-primary px-3 py-2 text-sm text-text-primary outline-none focus:border-accent-violet/60"
-            data-global-prompt-text
-          />
+          <div className="relative">
+            <textarea
+              ref={textRef}
+              autoFocus
+              rows={5}
+              value={prompt}
+              onChange={(e) => {
+                setPrompt(e.target.value)
+                latest.current = { text: e.target.value, caret: e.target.selectionEnd ?? e.target.value.length }
+              }}
+              onSelect={trackCaret}
+              placeholder={mode === 'prompt' ? t('globalPrompt.placeholder') : t('race.placeholder')}
+              className="w-full resize-none rounded-btn border border-border bg-bg-primary px-3 py-2 pr-9 text-sm text-text-primary outline-none focus:border-accent-violet/60"
+              data-global-prompt-text
+            />
+            <div className="absolute right-1.5 top-1.5">
+              <FieldMicButton owner="globalPrompt" insert={insertDictated} before={() => latest.current.text.slice(0, latest.current.caret)} />
+            </div>
+          </div>
+          <FieldDictationStatus owner="globalPrompt" />
 
           {mode === 'prompt' ? (
             <>

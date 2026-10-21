@@ -47,7 +47,7 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
   \`ws fav <ws> [--off]\`, \`ws close <ws> --yes\`: workspaces. \`ws new\` takes the current folder
   without \`--path\` and keeps the desktop on its workspace without \`--focus\`.
 - \`snaos usage [--provider claude|codex]\`: the Claude and Codex usage bars (percent and reset).
-- \`snaos account [status]\`, \`account ls\`, \`account use <primary|secondary|id|label>\`: the saved
+- \`snaos account [status]\`, \`account ls\`, \`account use <n|id|label>\`: the saved
   Claude accounts (see below).
 - Add \`--json\` to any command for one line of JSON: \`{"ok":true,"data":...}\` or
   \`{"ok":false,"error":{"code","message"}}\`.
@@ -104,8 +104,10 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
 - \`snaos usage\` shows what the usage bars show (5 h and weekly windows, \`resets in ...\`). It reads
   the app's cache: no need to call it in a loop. It answers \`disabled\` when the bars are off.
 - \`snaos account\` shows the live Claude account, the last switch and whether the automatic
-  switch is on; \`account ls\` lists the saved ones (\`*\` marks the live one).
-- Run \`snaos account use <primary|secondary|id|label>\` only when the user asks for it. It
+  switch is on; \`account ls\` lists the saved ones in priority order (\`#1\` first, \`*\` marks the
+  live one).
+- Run \`snaos account use <n|id|label>\` only when the user asks for it (\`n\` is the number
+  \`account ls\` shows; \`primary\` and \`secondary\` still name #1 and #2). It
   changes the login of every Claude console at once (running ones too, no restart) and allows 3
   switches a minute. Accounts are saved and removed by the user in Settings, never by the CLI.
 

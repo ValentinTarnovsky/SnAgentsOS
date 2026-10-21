@@ -20,20 +20,23 @@ import {ReleaseNotesModal} from './src/renderer/components/updates/ReleaseNotesM
 import {I18nProvider} from './src/renderer/i18n';
 import {useAppStore} from './src/renderer/lib/store';
 import {useUpdaterStore} from './src/renderer/lib/updater';
+import {notifyUpdateNotApplied} from './src/renderer/lib/updateNotApplied';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 const noop=()=>()=>{};
 const fallback=(base)=>new Proxy(base,{get:(t,k)=>k in t?t[k]:(typeof k==='string'?fallback(noop):undefined)});
-const calls={install:0,external:[],metrics:0};
+const calls={install:0,check:0,external:[],metrics:0};
 window.snApi=fallback({platform:'win32',
  window:fallback({isMaximized:async()=>false,onMaximizeChange:()=>()=>{}}),
  system:fallback({getMetrics:async()=>{calls.metrics++;return {memMB:1,cpuPercent:0,consoles:7}},openExternal:async u=>{calls.external.push(u)}}),
- updates:fallback({downloadAndInstall:()=>{calls.install++;return new Promise(()=>{})}}),
+ updates:fallback({downloadAndInstall:()=>{calls.install++;return new Promise(()=>{})},check:async()=>{calls.check++;return useUpdaterStore.getState().info}}),
 });
 const notes='## Novedades\\n\\n- **Tarjeta** de actualizacion en la pila\\n- Chip en el titlebar con el porcentaje\\n- Re-chequeo cada 6 h\\n- Cuarta linea que no entra en el extracto';
 const missed=['2.3.0','2.2.0','2.1.0'].map(v=>({version:v,notes:'### '+v+'\\n- Cambio de la '+v,url:'https://github.com/x/releases/tag/v'+v,publishedAt:null}));
 const offer={available:true,currentVersion:'2.0.0',latestVersion:'2.3.0',notes,releaseUrl:'https://github.com/x/releases/tag/v2.3.0',installable:true,installKind:'win-portable',newerCount:3,missed};
 const panes=Array.from({length:7},(_,i)=>({id:'p'+i,type:'shell',title:'Consola '+i,icon:'terminal'}));
 useAppStore.setState({hydrated:true,activeWorkspaceId:'w1',workspaces:[{id:'w1',name:'Proyecto',cwd:'',panes}],paneStatus:{p0:{state:'working',precise:true,provider:'claude',pendingCount:0},p1:{state:'action',precise:true,provider:'codex',pendingCount:1},p2:{state:'done',precise:true,provider:'claude',pendingCount:0}}});
+// Toasts raised outside React (not-applied) translate with the store language, like the app.
+useAppStore.setState(s=>({settings:{...s.settings,language:'es'}}));
 applyTheme('midnight');
 createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div style={{height:'100vh'}} className="flex flex-col bg-bg-primary text-text-primary"><TitleBar/><main className="p-6">Consola de prueba</main></div><NotificationStack/><UpdateCardHost/><ReleaseNotesModal/></I18nProvider>);
 const q=s=>document.querySelector(s);
@@ -49,6 +52,10 @@ window.smoke={
  card:()=>{const c=q('[data-update-card]');if(!c)return null;const r=c.closest('[data-toast-id]').getBoundingClientRect();return {phase:c.dataset.updatePhase,newer:q('[data-update-newer]')?.textContent??null,excerpt:q('[data-update-excerpt]')?.textContent??null,impact:q('[data-update-impact]')?.textContent??null,primary:q('[data-update-primary]')?.dataset.updatePrimary??null,label:q('[data-update-primary]')?.textContent??null,progress:q('[data-update-progress]')?.textContent??null,closeDisabled:q('[data-update-close]')?.disabled??null,text:c.textContent,box:{l:r.left,t:r.top,r:r.right,b:r.bottom}}},
  chip:()=>{const c=q('[data-update-chip]');if(!c)return null;const r=c.getBoundingClientRect();const brand=[...document.querySelectorAll('span')].find(s=>s.textContent==='SnAgentsOS').getBoundingClientRect();return {phase:c.dataset.updateChip,text:c.textContent,w:r.width,afterBrand:r.left>=brand.right,noDrag:getComputedStyle(c).webkitAppRegion||c.className.includes('app-no-drag'),cls:c.className}},
  click:s=>{const el=q(s);if(!el)throw new Error('missing '+s);el.click()},
+ notApplied:()=>notifyUpdateNotApplied({from:'2.4.0',to:'2.5.0'}),
+ warning:()=>q('[data-toast-kind="warning"]')?.textContent??null,
+ warningAction:t=>{const el=[...document.querySelectorAll('[data-toast-kind="warning"] button')].find(b=>b.textContent.trim()===t);if(!el)throw new Error('missing toast button '+t);el.click()},
+ userInitiated:()=>useUpdaterStore.getState().userInitiated,
  clickText:t=>{const el=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===t);if(!el)throw new Error('missing button '+t);el.click()},
  notes:()=>[...document.querySelectorAll('[data-release-version]')].map(e=>e.dataset.releaseVersion),
  overflow:()=>document.documentElement.scrollWidth>innerWidth,
@@ -161,8 +168,16 @@ app.whenReady().then(async()=>{
  chip=await until('smoke.chip()');
  ok(chip&&chip.text==='40%'&&(await js('smoke.card()'))===null,'reloading at 40% brings the chip back '+JSON.stringify(chip));
 
+ // app 2.4.0: a silent update that did not land shows one warning toast
+ // with [Reintentar], which reopens the card and checks again.
+ await js('smoke.notApplied()');await settle();
+ const warn=await until('smoke.warning()');
+ ok(warn&&warn.includes('No se pudo terminar la actualización a 2.5.0')&&warn.includes('Windows puede haber rechazado el permiso')&&warn.includes('Reintentar'),'not-applied toast '+warn);
+ await js("smoke.warningAction('Reintentar')");await settle();
+ ok((await js('smoke.calls.check'))===1&&(await js('smoke.userInitiated()'))===true,'retry reopens the card and re-checks');
+
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' update card UI checks (offer +3, impact, double confirm, chip 42%/installing/failed, notes, dismiss, 125/150%, light, reload at 40%); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' update card UI checks (offer +3, impact, double confirm, chip 42%/installing/failed, notes, dismiss, 125/150%, light, reload at 40%, not-applied toast); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

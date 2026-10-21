@@ -67,7 +67,8 @@ function PaneChip({
       style={{ WebkitTouchCallout: 'none' }}
     >
       <StatusIndicator status={status} size={10} />
-      <PaneIcon type={pane.type} size={13} />
+      {/* v2.4: a console running an agent (a shell with claude / codex typed in) shows that agent's icon. */}
+      <PaneIcon type={status?.provider ?? pane.type} size={13} />
       <span className="truncate whitespace-nowrap">{tabTitle(pane.title)}</span>
       <CacheChip paneId={pane.id} active={active} />
     </button>

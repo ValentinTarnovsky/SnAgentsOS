@@ -51,6 +51,12 @@ export interface HookEvent {
   model?: string
   /** v2.3: json.effort.level of any hook, only an allowlisted level. */
   effort?: string
+  /**
+   * v2.4 (`/rename`): json.session_title (SessionStart, UserPromptSubmit), one
+   * line, <= 60. Claude fills it with the name the user gave the session
+   * (its `currentSessionTitle`), never with the AI title.
+   */
+  sessionTitle?: string
 }
 
 /**
@@ -230,6 +236,9 @@ export function parseHookPayload(consoleId: string, ptyId: string, name: string,
   if (isSafeCwd(json.cwd)) evt.cwd = json.cwd
   if (sessionId && isSafeTranscriptPath(json.transcript_path, sessionId, claudeDir)) evt.transcriptPath = json.transcript_path
   if (name === 'UserPromptSubmit') evt.prompt = cleanString(json.prompt, LIMITS.text)
+  // v2.4: the session's name, wherever Claude sends it.
+  const sessionTitle = cleanString(json.session_title, LIMITS.title, true)
+  if (sessionTitle) evt.sessionTitle = sessionTitle
   if (name === 'Stop') {
     evt.lastAssistantMessage = cleanString(json.last_assistant_message, LIMITS.text)
     evt.background = backgroundTasks(json.background_tasks)

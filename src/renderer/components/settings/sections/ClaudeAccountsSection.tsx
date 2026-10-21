@@ -1,16 +1,16 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { AlertTriangle, Info, Lock } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronUp, Info, Lock } from 'lucide-react'
 import {
   ACCOUNT_LABEL_MAX,
+  MAX_CLAUDE_ACCOUNTS,
   normalizeAccountsSettings,
-  type ClaudeAccountRole,
   type ClaudeAccountView,
   type ClaudeAccountWindowView,
   type ClaudeAccountsState,
 } from '@shared/claude-accounts'
 import type { ClaudeAccountsSettings } from '@shared/types'
 import { useAppStore } from '@/lib/store'
-import { accountName, refreshAccountsState, roleName, runAccountsOp, switchAccount, useAccountsStore } from '@/lib/accountsStore'
+import { accountName, moveAccount, refreshAccountsState, runAccountsOp, switchAccount, useAccountsStore } from '@/lib/accountsStore'
 import { useT, type MessageKey, type TFn } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { UsageMeter, type UsageMeterProps } from '@/components/ui/UsageMeter'
@@ -18,7 +18,11 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { fmtClock, fmtReset } from '@/components/sidebar/UsageBars'
 import { inputCls, labelCls, SettingRow, ToggleRow } from '../ui'
 
-const ROLES: ClaudeAccountRole[] = ['primary', 'secondary']
+/**
+ * Settings > Claude accounts (app 2.3.0; app 2.4.0: up to MAX_CLAUDE_ACCOUNTS
+ * in priority order). The list order is the priority (#1 first); Up / Down
+ * send the whole new order (accounts:reorder) and main checks it.
+ */
 
 const PAUSE_KEY: Record<NonNullable<ClaudeAccountsState['autoPaused']>, MessageKey> = {
   unknownAccount: 'claudeaccounts.paused.unknownAccount',
@@ -92,6 +96,7 @@ function NumberField({ label, value, min, max, onCommit, disabled }: { label: st
   )
 }
 
+/** The editable label; its placeholder is the "Account N" an unlabeled account shows. */
 function LabelField({ account, disabled }: { account: ClaudeAccountView; disabled: boolean }) {
   const t = useT()
   const [draft, setDraft] = useState(account.label)
@@ -105,7 +110,7 @@ function LabelField({ account, disabled }: { account: ClaudeAccountView; disable
       data-account-label
       className={cn(inputCls, 'h-8 flex-1 text-[13px]')}
       maxLength={ACCOUNT_LABEL_MAX}
-      placeholder={t('claudeaccounts.labelPlaceholder')}
+      placeholder={accountName({ label: '', rank: account.rank }, t)}
       aria-label={t('claudeaccounts.labelPlaceholder')}
       value={draft}
       disabled={disabled}
@@ -118,33 +123,26 @@ function LabelField({ account, disabled }: { account: ClaudeAccountView; disable
   )
 }
 
-function SlotCard({ role, state, busy, onRemove }: { role: ClaudeAccountRole; state: ClaudeAccountsState; busy: boolean; onRemove: (a: ClaudeAccountView) => void }) {
+/** One saved account: #n, label, plan, identity, meters and its actions. */
+function AccountRow({ acc, count, state, busy, onRemove }: { acc: ClaudeAccountView; count: number; state: ClaudeAccountsState; busy: boolean; onRemove: (a: ClaudeAccountView) => void }) {
   const t = useT()
-  const acc = state.accounts.find((a) => a.role === role) ?? null
-  const capture = (): void => void runAccountsOp(() => window.snApi.accounts.capture({ role }))
-
-  if (!acc) {
-    return (
-      <div data-account-slot={role} data-account-empty className="space-y-2.5 rounded-card border border-dashed border-border bg-bg-secondary/50 p-3.5">
-        <div className="text-[11px] font-semibold uppercase tracking-wide text-text-secondary">{roleName(role, t)}</div>
-        <p className="text-sm text-text-primary">{t('claudeaccounts.empty')}</p>
-        <p className="text-xs text-text-secondary">{t('claudeaccounts.emptySteps')}</p>
-        <button type="button" data-account-capture className={btnCls} disabled={busy} onClick={capture}>
-          {state.liveIdentity === 'unknown' && state.liveEmail ? t('claudeaccounts.captureAs', { email: state.liveEmail }) : t('claudeaccounts.capture')}
-        </button>
-      </div>
-    )
-  }
-
   const name = accountName(acc, t)
+  const n = acc.rank + 1
   return (
-    <div
-      data-account-slot={role}
+    <li
       data-account-id={acc.id}
-      className={cn('space-y-3 rounded-card border bg-bg-secondary p-3.5', acc.active ? 'border-accent-violet/50' : 'border-border')}
+      data-account-rank={acc.rank}
+      className={cn('list-none space-y-3 rounded-card border bg-bg-secondary p-3.5', acc.active ? 'border-accent-violet/50' : 'border-border')}
     >
       <div className="flex items-center gap-2">
-        <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-text-secondary">{roleName(role, t)}</span>
+        <span
+          data-account-rankbadge
+          title={t('claudeaccounts.rank', { n })}
+          aria-label={t('claudeaccounts.rank', { n })}
+          className="shrink-0 rounded bg-card px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-text-secondary"
+        >
+          #{n}
+        </span>
         <LabelField account={acc} disabled={busy} />
         {acc.subscriptionType && (
           <span data-account-plan className="shrink-0 rounded bg-card px-1.5 py-0.5 text-[10px] font-medium uppercase text-text-secondary">
@@ -178,47 +176,68 @@ function SlotCard({ role, state, busy, onRemove }: { role: ClaudeAccountRole; st
           data-account-use
           className={btnCls}
           disabled={busy || acc.active || acc.needsRecapture || state.liveIdentity === 'unknown'}
-          onClick={() => void switchAccount(role)}
+          onClick={() => void switchAccount(acc.id)}
         >
           {t('claudeaccounts.use')}
         </button>
-        <button type="button" data-account-recapture className={btnCls} disabled={busy} title={t('claudeaccounts.recaptureHint')} onClick={capture}>
+        <button
+          type="button"
+          data-account-recapture
+          className={btnCls}
+          disabled={busy}
+          title={t('claudeaccounts.recaptureHint')}
+          onClick={() => void runAccountsOp(() => window.snApi.accounts.capture({ recaptureId: acc.id }))}
+        >
           {t('claudeaccounts.recapture')}
         </button>
-        {role === 'secondary' && (
-          <button type="button" data-account-primary className={btnCls} disabled={busy} onClick={() => void runAccountsOp(() => window.snApi.accounts.setPrimary(acc.id))}>
-            {t('claudeaccounts.makePrimary')}
-          </button>
-        )}
+        <button
+          type="button"
+          data-account-up
+          className={btnCls}
+          disabled={busy || acc.rank === 0}
+          title={t('claudeaccounts.up')}
+          aria-label={t('claudeaccounts.up')}
+          onClick={() => void moveAccount(acc.id, -1)}
+        >
+          <ChevronUp size={14} />
+        </button>
+        <button
+          type="button"
+          data-account-down
+          className={btnCls}
+          disabled={busy || acc.rank >= count - 1}
+          title={t('claudeaccounts.down')}
+          aria-label={t('claudeaccounts.down')}
+          onClick={() => void moveAccount(acc.id, 1)}
+        >
+          <ChevronDown size={14} />
+        </button>
         <button type="button" data-account-remove className={cn(btnCls, 'hover:border-red-400/50 hover:text-red-400')} disabled={busy} onClick={() => onRemove(acc)}>
           {t('claudeaccounts.remove')}
         </button>
       </div>
-    </div>
+    </li>
   )
 }
 
-/** The unsaved live login: save it in an empty slot or replace a saved one. */
-function UnknownLoginBanner({ state, busy, onReplace }: { state: ClaudeAccountsState; busy: boolean; onReplace: (role: ClaudeAccountRole) => void }) {
+/** The unsaved live login: save it as a new account or in place of a saved one. */
+function UnknownLoginBanner({ state, busy, onReplace }: { state: ClaudeAccountsState; busy: boolean; onReplace: (a: ClaudeAccountView) => void }) {
   const t = useT()
+  const full = state.accounts.length >= MAX_CLAUDE_ACCOUNTS
   return (
     <Banner tone="warn" attr={{ 'data-accounts-unknown': '' }}>
       <p className="font-medium">{t('claudeaccounts.unknown.title')}</p>
       {state.liveEmail && <p>{t('claudeaccounts.unknown.email', { email: state.liveEmail })}</p>}
       <p className="text-text-secondary">{t('claudeaccounts.unknown.hint')}</p>
       <div className="flex flex-wrap gap-2">
-        {ROLES.map((role) => {
-          const taken = state.accounts.some((a) => a.role === role)
-          return taken ? (
-            <button key={role} type="button" data-accounts-replace={role} className={btnCls} disabled={busy} onClick={() => onReplace(role)}>
-              {t('claudeaccounts.replace', { role: roleName(role, t) })}
-            </button>
-          ) : (
-            <button key={role} type="button" data-accounts-save-as={role} className={btnCls} disabled={busy} onClick={() => void runAccountsOp(() => window.snApi.accounts.capture({ role }))}>
-              {t('claudeaccounts.saveAs', { role: roleName(role, t) })}
-            </button>
-          )
-        })}
+        <button type="button" data-accounts-save-new className={btnCls} disabled={busy || full} onClick={() => void runAccountsOp(() => window.snApi.accounts.capture({}))}>
+          {t('claudeaccounts.saveAsNew')}
+        </button>
+        {state.accounts.map((a) => (
+          <button key={a.id} type="button" data-accounts-replace={a.id} className={btnCls} disabled={busy} onClick={() => onReplace(a)}>
+            {t('claudeaccounts.replace', { name: accountName(a, t) })}
+          </button>
+        ))}
       </div>
     </Banner>
   )
@@ -233,7 +252,7 @@ export function ClaudeAccountsSection() {
   const workspaces = useAppStore((s) => s.workspaces)
   const updateSettings = useAppStore((s) => s.updateSettings)
   const [removing, setRemoving] = useState<ClaudeAccountView | null>(null)
-  const [replacing, setReplacing] = useState<ClaudeAccountRole | null>(null)
+  const [replacing, setReplacing] = useState<ClaudeAccountView | null>(null)
 
   // A live section: pull main's state when it opens (the stream keeps it fresh).
   useEffect(() => refreshAccountsState(), [])
@@ -254,7 +273,10 @@ export function ClaudeAccountsSection() {
 
   const supported = !!state?.supported
   const autoAvailable = supported && usageEnabled && (state?.accounts.length ?? 0) >= 2
-  const replaceAcc = replacing ? state?.accounts.find((a) => a.role === replacing) : undefined
+  const count = state?.accounts.length ?? 0
+  const full = count >= MAX_CLAUDE_ACCOUNTS
+  // The automatic return stops at the anchor: worth a note once it is not #1.
+  const anchor = state?.anchorId ? state.accounts.find((a) => a.id === state.anchorId) : undefined
 
   return (
     <div className="space-y-6">
@@ -303,10 +325,41 @@ export function ClaudeAccountsSection() {
               <p>{t('claudeaccounts.restartNeeded', { panes: state.restartNeeded.map(paneTitle).join(', ') })}</p>
             </Banner>
           )}
-          <div className="space-y-3">
-            {ROLES.map((role) => (
-              <SlotCard key={role} role={role} state={state} busy={busy} onRemove={setRemoving} />
-            ))}
+          {count === 0 ? (
+            <div data-accounts-empty className="space-y-2.5 rounded-card border border-dashed border-border bg-bg-secondary/50 p-3.5">
+              <p className="text-sm text-text-primary">{t('claudeaccounts.empty')}</p>
+              <p className="text-xs text-text-secondary">{t('claudeaccounts.emptySteps')}</p>
+            </div>
+          ) : (
+            <>
+              {count >= 2 && <p className="text-xs text-text-secondary">{t('claudeaccounts.orderHint')}</p>}
+              <ol data-accounts-list className="space-y-3">
+                {state.accounts.map((acc) => (
+                  <AccountRow key={acc.id} acc={acc} count={count} state={state} busy={busy} onRemove={setRemoving} />
+                ))}
+              </ol>
+            </>
+          )}
+          {anchor && anchor.rank > 0 && cfg.autoSwitch && cfg.returnToPrimary && (
+            <p data-accounts-anchor className="text-xs text-text-secondary">
+              {t('claudeaccounts.anchor', { n: anchor.rank + 1, name: accountName(anchor, t) })}
+            </p>
+          )}
+          <div className="space-y-1.5">
+            <button
+              type="button"
+              data-accounts-capture-new
+              className={btnCls}
+              disabled={busy || full || state.liveIdentity === 'known'}
+              onClick={() => void runAccountsOp(() => window.snApi.accounts.capture({}))}
+            >
+              {state.liveIdentity === 'unknown' && state.liveEmail ? t('claudeaccounts.captureNewAs', { email: state.liveEmail }) : t('claudeaccounts.captureNew')}
+            </button>
+            {full && (
+              <p data-accounts-limit className="text-xs text-text-secondary">
+                {t('claudeaccounts.limit', { max: MAX_CLAUDE_ACCOUNTS })}
+              </p>
+            )}
           </div>
         </>
       )}
@@ -391,15 +444,15 @@ export function ClaudeAccountsSection() {
       />
       <ConfirmDialog
         open={replacing !== null}
-        title={t('claudeaccounts.replaceTitle', { name: replaceAcc ? accountName(replaceAcc, t) : '' })}
-        message={t('claudeaccounts.replaceMessage', { name: replaceAcc ? accountName(replaceAcc, t) : '' })}
-        confirmLabel={t('claudeaccounts.replace', { role: replacing ? roleName(replacing, t) : '' })}
+        title={t('claudeaccounts.replaceTitle', { name: replacing ? accountName(replacing, t) : '' })}
+        message={t('claudeaccounts.replaceMessage', { name: replacing ? accountName(replacing, t) : '' })}
+        confirmLabel={t('claudeaccounts.replace', { name: replacing ? accountName(replacing, t) : '' })}
         cancelLabel={t('common.cancel')}
         danger
         onConfirm={() => {
-          const role = replacing
+          const acc = replacing
           setReplacing(null)
-          if (role) void runAccountsOp(() => window.snApi.accounts.capture({ role, replace: true }))
+          if (acc) void runAccountsOp(() => window.snApi.accounts.capture({ replaceId: acc.id }))
         }}
         onCancel={() => setReplacing(null)}
       />

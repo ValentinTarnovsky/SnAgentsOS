@@ -7,6 +7,7 @@ import { cn } from '@/lib/cn'
 import type { ScrollbackStats } from '@shared/ipc-contract'
 import type { TerminalSnapshotMode } from '@shared/types'
 import { PERSIST_LINES_MAX, PERSIST_LINES_MIN } from '@shared/terminalEngine'
+import { DictationSettingsBlock } from './DictationSettingsBlock'
 
 /** Megabytes with one decimal, never "0.0" for a non-empty folder. */
 function formatMb(bytes: number): string {
@@ -227,6 +228,8 @@ export function TerminalSection() {
           </button>
         </div>
       </section>
+
+      <DictationSettingsBlock />
 
       <section className="space-y-3 border-t border-border pt-5" aria-labelledby="terminal-advanced">
         <h4 id="terminal-advanced" className="text-xs font-semibold uppercase tracking-wide text-text-secondary">

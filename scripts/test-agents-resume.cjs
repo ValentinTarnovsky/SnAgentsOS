@@ -154,6 +154,41 @@ function storeHarness(opts = {}) {
   return { store, changed, ready, timers, flushTimers, evt, config, tick: (ms) => { clock += ms }, now: () => clock, read: () => JSON.parse(fs.readFileSync(opts.file, 'utf8')) }
 }
 
+// v2.4 `/rename`: each session's last name, kept on disk (optional field, file
+// version 1), never in the view, so a restart or a resume never re-applies it.
+function testAgentTitle() {
+  const trees = fakeTrees()
+  const file = path.join(tmp, 'data-title', 'agent-sessions.json')
+  let h = storeHarness({ trees, file })
+  h.store.load()
+  h.store.noteAgentTitle('p1', 'claude', UUID, 'Antes del registro')
+  check(h.store.agentTitleFor('p1', 'claude', UUID) === 'Antes del registro', 'a name heard before the record exists waits in memory (and seeds)')
+  h.evt('p1', 'idle', { kind: 'start', cwd: trees.repo })
+  h.flushTimers()
+  check(h.read().sessions.p1.agentTitle === 'Antes del registro', 'the stashed name lands on the record made for that session')
+  h.store.noteAgentTitle('p1', 'claude', UUID, 'Foo')
+  h.flushTimers()
+  check(h.read().version === 1 && h.read().sessions.p1.agentTitle === 'Foo' && h.store.agentTitleFor('p1', 'claude', UUID) === 'Foo', 'noteAgentTitle persists the name (file version stays 1)')
+  check(!('agentTitle' in h.store.list().find(v => v.paneId === 'p1')), 'the view never carries agentTitle')
+  check(h.store.agentTitleFor('p1', 'claude', UUID2) === undefined && h.store.agentTitleFor('p1', 'codex', UUID) === undefined && h.store.agentTitleFor('p2', 'claude', UUID) === undefined, 'the seed is per pane, provider and session')
+  h.store.noteAgentTitle('p1', 'claude', 'bad id', 'X')
+  check(h.store.agentTitleFor('p1', 'claude', 'bad id') === undefined, 'an invalid session id is never recorded')
+  h.store.snapshotExitOnce('quit')
+  // Next run: the name comes back from disk.
+  h = storeHarness({ trees, file })
+  h.store.load()
+  check(h.store.agentTitleFor('p1', 'claude', UUID) === 'Foo', 'after a restart the seed is read from disk')
+  h.evt('p1', 'idle', { kind: 'start', sessionId: UUID2 })
+  check(h.store.agentTitleFor('p1', 'claude', UUID2) === undefined, 'a new session of the pane starts with no name')
+  // A tampered or oversized value is dropped, the record survives.
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+  raw.sessions.p1.agentTitle = 'z'.repeat(500)
+  fs.writeFileSync(file, JSON.stringify(raw))
+  h = storeHarness({ trees, file })
+  h.store.load()
+  check(raw.sessions.p1.sessionId === UUID && h.store.list().some(v => v.paneId === 'p1') && h.store.agentTitleFor('p1', 'claude', UUID) === undefined, 'an oversized agentTitle on disk is dropped without losing the record')
+}
+
 function testStore() {
   const trees = fakeTrees()
   const file = path.join(tmp, 'data1', 'agent-sessions.json')
@@ -428,6 +463,7 @@ function testI18n() {
     testDecide()
     testTranscripts()
     testStore()
+    testAgentTitle()
     testIpc()
     testCtlSchema()
     await testRenderer()

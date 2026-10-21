@@ -271,3 +271,42 @@ export async function readLastAssistantMessage(path: string, sessionId: string, 
     } finally { await handle.close() }
   } catch { return undefined }
 }
+
+/**
+ * v2.4 (`/rename`): the newest name the user gave the session, read from the
+ * last 64 KB of its transcript (already validated by isSafeTranscriptPath,
+ * judged again here). Claude appends `{"type":"custom-title","customTitle"}`
+ * at once on `/rename` and again every turn. `ai-title` and `agent-name`
+ * records are never a name. One line, clipped to 60; undefined when there is
+ * none or on any error (never logged with content).
+ */
+export async function readLastCustomTitle(path: string, sessionId: string, claudeDir = claudeConfigDir()): Promise<string | undefined> {
+  try {
+    const real = await realpathAsync(path)
+    if (!isSafeTranscriptPath(real, sessionId, claudeDir)) return undefined
+    const handle = await open(real, 'r')
+    try {
+      const { size } = await handle.stat()
+      const start = Math.max(0, size - TAIL_BYTES)
+      const length = size - start
+      if (length <= 0) return undefined
+      const buffer = Buffer.alloc(length)
+      await handle.read(buffer, 0, length, start)
+      const lines = buffer.toString('utf8').split('\n')
+      if (start > 0) lines.shift() // partial first line
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i]
+        // Cheap filter first: only a custom-title record is ever parsed.
+        if (!line.includes('"custom-title"')) continue
+        let entry: unknown
+        try { entry = JSON.parse(line.trim()) } catch { continue }
+        if (!entry || typeof entry !== 'object') continue
+        const e = entry as Record<string, unknown>
+        if (e.type !== 'custom-title') continue
+        if (typeof e.sessionId === 'string' && e.sessionId !== sessionId) continue
+        return cleanString(e.customTitle, LIMITS.title, true)
+      }
+      return undefined
+    } finally { await handle.close() }
+  } catch { return undefined }
+}

@@ -134,7 +134,7 @@ const DEFAULT_SETTINGS: Settings = {
     hooksEnabled: false,
     hookPort: 43917,
     hookToken: '',
-    codexEnabled: false,
+    codexEnabled: true,
     discord: { enabled: false, webhookUrl: '', userId: '', notifyAction: true, notifyDone: true },
     inAppWhenFocused: true,
     ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', token: '', notifyAction: true, notifyDone: false },
@@ -151,6 +151,8 @@ const DEFAULT_SETTINGS: Settings = {
     resumeNudgeText: '',
     sidebarSort: 'manual',
     cacheTimer: { enabled: false, ttlMinutes: 5 },
+    syncAgentRename: true,
+    shellAgentDetect: true,
   },
   automation: {
     defaultAgentPresetId: '',
@@ -161,6 +163,8 @@ const DEFAULT_SETTINGS: Settings = {
     scheduleMaxWaitMin: 30,
     scheduleNotify: false,
   },
+  dictation: { engine: 'auto', language: 'auto', headerButton: true },
+  share: { enabled: false, port: 4527, guestName: '', defaultPerm: 'view' },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */

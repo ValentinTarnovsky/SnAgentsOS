@@ -203,7 +203,8 @@ export function NotificationsSection() {
       </div>
       <div className="space-y-3 border-t border-border pt-5">
         <ToggleRow checked={n.codexEnabled} onChange={v => patch({ codexEnabled: v })} searchId="notifications.codex" title={t('notif.codex.title')} description={t('notif.codex.desc')} />
-        <p className="text-xs text-text-secondary">{!n.codexEnabled ? t('notif.health.disabled') : health?.codex.connected ? t('notif.codex.connected', { count: health.codex.connected }) : t('notif.health.waiting')}</p>
+        {/* v2.4: on by default; no codex.exe yet is a neutral line, not an error. */}
+        <p data-codex-health className="text-xs text-text-secondary">{!n.codexEnabled ? t('notif.health.disabled') : health?.codex.missing ? t('notif.codex.missing') : health?.codex.connected ? t('notif.codex.connected', { count: health.codex.connected }) : t('notif.health.waiting')}</p>
         {n.codexEnabled && health?.codex.error && <p className="text-xs text-red-400">{health.codex.error}</p>}
       </div>
       <div className="space-y-3 border-t border-border pt-5">

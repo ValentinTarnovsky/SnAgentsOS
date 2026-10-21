@@ -390,7 +390,7 @@ export async function buildCall(args: ParsedArgs, io: ClientIo): Promise<RpcCall
           if (pos.length) throw new UsageError('account ls takes no argument')
           return { method: 'account.ls', params: prov }
         case 'use':
-          if (!pos[0]) throw new UsageError('account use needs an account: primary, secondary, an id or a label')
+          if (!pos[0]) throw new UsageError('account use needs an account: its number (account ls), an id or a label')
           return { method: 'account.use', params: { account: pos.join(' '), ...prov } }
         default:
           if (pos.length) throw new UsageError('account status takes no argument')
@@ -567,9 +567,12 @@ export function resetIn(iso: string | null | undefined, now: number = Date.now()
 }
 
 const pct = (p: number | null | undefined): string => (typeof p === 'number' ? `${Math.round(p)}%` : '-')
-const accountName = (a: { label?: string; slot?: string; id?: string } | null | undefined): string => (a ? a.label || a.slot || a.id || '?' : 'none')
-/** The account name, plus ` (slot)` only when a label names it (the slot alone is not repeated). */
-const accountNameSlot = (a: { label?: string; slot?: string; id?: string } | null | undefined): string => `${accountName(a)}${a?.label && a.slot ? ` (${a.slot})` : ''}`
+type NamedAccount = { label?: string; rank?: number; slot?: string; id?: string }
+/** #n of an account (app 2.4.0), else its 2.3.0 slot. */
+const rankText = (a: NamedAccount | null | undefined): string => (a && typeof a.rank === 'number' ? `#${a.rank}` : (a?.slot ?? ''))
+const accountName = (a: NamedAccount | null | undefined): string => (a ? a.label || rankText(a) || a.id || '?' : 'none')
+/** The account name, plus ` (#n)` only when a label names it (#n alone is not repeated). */
+const accountNameSlot = (a: NamedAccount | null | undefined): string => `${accountName(a)}${a?.label && rankText(a) ? ` (${rankText(a)})` : ''}`
 /** A column that always leaves one space after the value, however long it is. */
 const col = (s: string, n: number): string => pad(s, n - 1) + ' '
 
@@ -586,7 +589,7 @@ function usageHuman(d: CtlUsageResult, now: number): string {
 
 function accountRow(a: CtlAccountInfo, now: number): string {
   const win = (label: string, w: CtlAccountInfo['fiveHour']): string => `${label} ${pct(w.percent)}${w.source === 'parked' && w.resetsAt ? ` (resets in ${resetIn(w.resetsAt, now) || 'now'})` : ''}`
-  return `${a.active ? '* ' : '  '}${col(a.slot, 11)}${col(a.label || '-', 18)}${col(a.plan ?? '', 8)}${win('5h', a.fiveHour)}  ${win('7d', a.sevenDay)}${a.ready ? '' : '  (capture it again on the desktop)'}`.trimEnd()
+  return `${a.active ? '* ' : '  '}${col(rankText(a), 4)}${col(a.label || '-', 18)}${col(a.plan ?? '', 8)}${win('5h', a.fiveHour)}  ${win('7d', a.sevenDay)}${a.ready ? '' : '  (capture it again on the desktop)'}`.trimEnd()
 }
 
 /** `snaos account status`: the live login, the last switch and the automatic switch. */
@@ -711,7 +714,7 @@ export const USAGE = `snaos: drive ${PRODUCT} consoles from any terminal.
   snaos ws new [<name>] [--path <dir>] [--focus] [--composer]
   snaos ws rename <ws> <name> | ws fav <ws> [--off] | ws close <ws> --yes
   snaos usage [--provider claude|codex]
-  snaos account [status] | account ls | account use <primary|secondary|id|label>
+  snaos account [status] | account ls | account use <n|id|label>
   snaos help [--agent]
 
 Every command accepts --json. A console is self, an index (2), <ws>:<index>, an id or a title.

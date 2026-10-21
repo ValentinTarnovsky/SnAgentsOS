@@ -28,7 +28,8 @@ function powershellExe(): string {
   return join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 }
 
-function runPowerShell(args: string[], timeoutMs: number): Promise<RunResult> {
+/** Also the Share listener's firewall row (registerShareHostIpc). */
+export function runPowerShell(args: string[], timeoutMs: number): Promise<RunResult> {
   return new Promise((resolve) => {
     execFile(
       powershellExe(),

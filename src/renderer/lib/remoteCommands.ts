@@ -215,10 +215,18 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
       return runAgentTune(action)
 
     // app 2.3.0: Claude account from the phone; main re-validates (accounts:switch, reason phone).
-    case 'claudeAccountUse':
+    // app 2.4.0: by id or by role, exactly one (the WS schema cannot say so).
+    case 'claudeAccountUse': {
+      const target = accountUseTarget(action)
+      if (!target) return { ok: false, error: 'bad_target' }
       return window.snApi.accounts
-        .switchTo(action.role, 'phone')
+        .switchTo(target, 'phone')
         .then((r): CmdResult => (r.ok ? { ok: true } : { ok: false, error: r.error ?? 'error' }))
+    }
+
+    // app 2.4.0: handled in main (SessionManager.handleCtl re-reads the menu off the mirror); never relayed.
+    case 'answerMenu':
+      return { ok: false, error: 'unknown_action' }
 
     default:
       return { ok: false, error: 'unknown_action' }
@@ -307,12 +315,22 @@ export function remoteNoticeText(
   return name ? translate(lang, 'toast.remote.fromDevice', { device: name, what }) : translate(lang, 'toast.remote.fromPhone', { what })
 }
 
+/** The switch target of a claudeAccountUse: its id or its role, null unless exactly one is set. */
+function accountUseTarget(action: Extract<RemoteCtlAction, { kind: 'claudeAccountUse' }>): string | null {
+  const hasId = typeof action.id === 'string' && action.id !== ''
+  const hasRole = action.role === 'primary' || action.role === 'secondary'
+  if (hasId === hasRole) return null
+  return hasId ? (action.id as string) : (action.role as string)
+}
+
 /** Title of the pane an action targets, read before it runs (closePane removes it); the account name for claudeAccountUse. */
 function targetTitle(action: RemoteCtlAction): string | undefined {
   if (action.kind === 'claudeAccountUse') {
     const lang = useAppStore.getState().settings.language
-    const acc = useAccountsStore.getState().state?.accounts.find((a) => a.role === action.role)
-    return accountName(acc ?? { label: '', role: action.role }, (key, vars) => translate(lang, key, vars))
+    const accounts = useAccountsStore.getState().state?.accounts ?? []
+    const rank = action.id ? accounts.findIndex((a) => a.id === action.id) : action.role === 'secondary' ? 1 : 0
+    const acc = rank >= 0 ? accounts[rank] : undefined
+    return accountName(acc ?? { label: '', rank: Math.max(0, rank) }, (key, vars) => translate(lang, key, vars))
   }
   if (action.kind !== 'restartPane' && action.kind !== 'closePane') return undefined
   const ws = useAppStore.getState().workspaces.find((w) => w.id === action.workspaceId)

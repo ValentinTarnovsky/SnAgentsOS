@@ -2,9 +2,11 @@ import { useEffect } from 'react'
 import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { initUpdaterEvents, startUpdateScheduler } from '@/lib/updater'
+import { checkUpdateNotApplied } from '@/lib/updateNotApplied'
 import { initUsageEvents, syncUsageConfig } from '@/lib/usageStore'
 import { initAccountsEvents, syncAccountsConfig } from '@/lib/accountsStore'
 import { initRemoteEvents, syncRemoteConfig } from '@/lib/remoteStore'
+import { initShareHostEvents, syncShareHostConfig } from '@/lib/shareHostStore'
 import { initRemoteCommands } from '@/lib/remoteCommands'
 import { initPromptResults } from '@/lib/promptDelivery'
 import { initLegacyEvents } from '@/lib/legacyStore'
@@ -13,6 +15,7 @@ import { startRemoteSnapshotSync } from '@/lib/remoteSnapshot'
 import { startGitSync } from '@/lib/gitSync'
 import { startReviewNotesSync } from '@/lib/reviewNotesStore'
 import { startWsNotesSync } from '@/lib/wsNotesSync'
+import { initShareGuest } from '@/lib/shareGuestStore'
 import { engineFromSettings } from '@shared/terminalEngine'
 import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { initHibernation } from '@/lib/hibernation'
@@ -35,6 +38,8 @@ import { RebrandNotice } from '@/components/rebrand/RebrandNotice'
 import { LegacyBanner } from '@/components/rebrand/LegacyBanner'
 import { RemoteQrModal } from '@/components/remote/RemoteQrModal'
 import { RemotePairingPrompt } from '@/components/remote/RemotePairingPrompt'
+import { ShareDialog } from '@/components/share/ShareDialog'
+import { ShareJoinPrompt } from '@/components/share/ShareJoinPrompt'
 import { NewWorkspaceWizard } from '@/components/wizard/NewWorkspaceWizard'
 import { WorkspaceComposer } from '@/components/wizard/WorkspaceComposer'
 import { TrustDialog } from '@/components/ui/TrustDialog'
@@ -48,6 +53,9 @@ import { QuickCommandPopover } from '@/components/workspace/QuickCommandPopover'
 import { NotificationStack } from '@/components/ui/NotificationStack'
 import { ResumeDialog } from '@/components/agents/ResumeDialog'
 import { AgentsBoard } from '@/components/agents/AgentsBoard'
+import { SharedWorkspaceHost } from '@/components/share/SharedWorkspaceHost'
+import { JoinShareDialog } from '@/components/share/JoinShareDialog'
+import { ConfirmLinkDialog } from '@/components/share/ConfirmLinkDialog'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -61,6 +69,8 @@ export function App() {
   const usage = useAppStore((s) => s.settings.usage)
   const claudeAccounts = useAppStore((s) => s.settings.claudeAccounts)
   const remote = useAppStore((s) => s.settings.remote)
+  const shareEnabled = useAppStore((s) => s.settings.share.enabled)
+  const sharePort = useAppStore((s) => s.settings.share.port)
   const awakeMode = useAppStore((s) => s.settings.awakeMode)
   const agents = useAppStore((s) => s.settings.agents)
   const snapshotMode = useAppStore((s) => s.settings.terminalSnapshotMode)
@@ -122,8 +132,13 @@ export function App() {
   // Keep the remote server-status stream + control-command handler wired.
   useEffect(() => initRemoteEvents(), [])
   useEffect(() => initRemoteCommands(), [])
+  // Share host (app 2.4.0, item 8): main's grants, guests and join requests for the whole app lifetime.
+  useEffect(() => initShareHostEvents(), [])
   // Initial prompt outcomes (E8-FR-02b): toasts for the unconfirmed or undelivered ones.
   useEffect(() => initPromptResults(), [])
+
+  // Shared with me (app 2.4.0, item 8): main's guest links, their streams and the overlay guard.
+  useEffect(() => initShareGuest(), [])
 
   // 1.x migration state: welcome notice, banners and the backup line (E0-FR-10, 28, 35).
   useEffect(() => initLegacyEvents(), [])
@@ -142,6 +157,11 @@ export function App() {
   useEffect(() => {
     if (hydrated) syncRemoteConfig(remote)
   }, [hydrated, remote])
+
+  // Push the Share switch and port to main (it starts or stops the share listener).
+  useEffect(() => {
+    if (hydrated) syncShareHostConfig({ enabled: shareEnabled, port: sharePort })
+  }, [hydrated, shareEnabled, sharePort])
 
   // snaos CLI switch (E8-FR-22): main starts or stops the control server.
   useEffect(() => {
@@ -208,6 +228,11 @@ export function App() {
     return startUpdateScheduler(() => useAppStore.getState().settings.autoCheckUpdates)
   }, [hydrated])
 
+  // A silent update that did not land (app 2.4.0): one toast with [Retry].
+  useEffect(() => {
+    if (hydrated) void checkUpdateNotApplied()
+  }, [hydrated])
+
   if (!hydrated) {
     return <div className="h-full w-full bg-bg-primary" />
   }
@@ -263,6 +288,8 @@ function AppBody() {
             </Button>
           </div>
         )}
+        {/* Shared with me (app 2.4.0): a joined share over the local grid, even with no local workspace. */}
+        <SharedWorkspaceHost />
         {/* Agents board (E5-FR-27): over the workspace area; the terminals stay mounted below. */}
         <AgentsBoard />
       </main>
@@ -272,6 +299,8 @@ function AppBody() {
       <RebrandNotice />
       <RemoteQrModal />
       <RemotePairingPrompt />
+      <ShareDialog />
+      <ShareJoinPrompt />
       <WorkspaceComposer />
       <NewWorkspaceWizard />
       <ExportRepoConfigDialog />
@@ -284,6 +313,9 @@ function AppBody() {
       {/* Worktree per console (E7-FR-27/30/31/36): launch and close dialogs. */}
       <WorktreeLaunchDialog />
       <WorktreeCloseDialog />
+      {/* Shared with me (app 2.4.0): join an invite, confirm a link from a shared console. */}
+      <JoinShareDialog />
+      <ConfirmLinkDialog />
     </div>
   )
 }

@@ -7,8 +7,8 @@
  */
 import { client } from './client'
 import { store } from './store'
-import { createAnswerer, usePromptUi, type AnswerPayload, type AnswerResult } from './answer'
-import { t } from './i18n'
+import { createAnswerer, createMenuAnswerer, usePromptUi, type AnswerPayload, type AnswerResult } from './answer'
+import { t, type MobileMessageKey } from './i18n'
 
 export const answerer = createAnswerer({
   isOpen: () => client.isOpen(),
@@ -20,8 +20,51 @@ export const answerer = createAnswerer({
   clearTimeout: (id) => clearTimeout(id),
 })
 
+/** app 2.4.0: the toast of a refused answerMenu ack (no raw code ever shows). */
+export function menuErrorKey(error: string): MobileMessageKey {
+  switch (error) {
+    case 'menu_changed':
+      return 'prompt.menuChanged'
+    case 'stale':
+      return 'prompt.alreadyAnswered'
+    case 'no_menu':
+      return 'prompt.noMenu'
+    case 'rate':
+      return 'prompt.menuError.rate'
+    case 'denied':
+      return 'prompt.menuError.denied'
+    case 'timeout':
+    case 'offline':
+    case 'desktop_unavailable':
+      return 'prompt.menuError.noReply'
+    default:
+      return 'prompt.menuError.generic'
+  }
+}
+
+/** app 2.4.0: Chat view menu answers (ctl answerMenu, checked again in main). */
+export const menuAnswerer = createMenuAnswerer({
+  isOpen: () => client.isOpen(),
+  sendCtl: (action) => client.sendCtl(action),
+  status: (paneId) => store.getState().paneStatus[paneId],
+  setState: (paneId, state) => usePromptUi.getState().setAnswer(paneId, state),
+  onError: (_paneId, pendingId, error) => {
+    store.getState().setToast(t(menuErrorKey(error)))
+    // The request is gone: its card folds (the next paneStatus drops it anyway).
+    if (error === 'stale') usePromptUi.getState().setFolded(pendingId, true)
+  },
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+})
+
+/** Pick option `n` of main's menu read for a request (Chat view, desktop >= 2.4.0). */
+export function answerMenu(paneId: string, pendingId: string, option: { n: number; label: string }): AnswerResult {
+  if (answerer.busy(paneId)) return 'busy'
+  return menuAnswerer.answer(paneId, pendingId, option)
+}
+
 /** Answer a card of `paneId` (E2-FR-21). */
 export function answerCard(paneId: string, pendingId: string, payload: AnswerPayload): AnswerResult {
+  if (menuAnswerer.busy(paneId)) return 'busy'
   return answerer.answerCard(paneId, pendingId, payload)
 }
 

@@ -11,14 +11,17 @@
  *    with a validated menu). A folded card is a one-line strip (E2-FR-22)
  *    and every new card starts unfolded;
  *  - else, with the pane in 'action', the generic strip (E2-FR-25), also for
- *    a plan whose menu the phone does not recognise.
+ *    a plan whose menu the phone does not recognise. app 2.4.0: in the Chat
+ *    view that is the PendingKeyRow (1 / 2 / 3 / Esc and [Terminal]), since
+ *    there is no terminal to open the keyboard on. In Chat the Plan card and
+ *    "Always allow" take their menu from main's read (RemotePaneStatus.menu).
  *
  * The card goes away with the paneStatus that drops its request from
  * pending[], which the answer itself triggers in main (E2-FR-48).
  */
 import type { ReactNode } from 'react'
 import { AlertTriangle, Check, Loader2, X } from 'lucide-react'
-import { useRemoteStore } from '../../lib/store'
+import { selectInChat, useRemoteStore } from '../../lib/store'
 import { cardFor, needsGenericStrip, type PromptCardModel } from '../../lib/promptRules'
 import { alwaysOption, planOptions } from '../../lib/promptMenu'
 import { usePromptUi, type AnswerState } from '../../lib/answer'
@@ -29,6 +32,7 @@ import { openTerminalKeyboard, PromptStrip } from './PromptStrip'
 import { PermissionCard } from './PermissionCard'
 import { AnswerInTerminal, AskHeader, AskWizard, askTitle } from './AskWizard'
 import { PlanCard } from './PlanCard'
+import { PendingKeyRow } from './PendingKeyRow'
 import { usePromptMenu } from './usePromptMenu'
 
 /**
@@ -107,6 +111,7 @@ export function PromptCard(): ReactNode {
   const folded = usePromptUi((s) => s.folded)
   const wizardSeq = usePromptUi((s) => s.wizardSeq)
   const setFolded = usePromptUi((s) => s.setFolded)
+  const inChat = useRemoteStore(selectInChat)
   const card = paneId ? cardFor(status, enabled) : undefined
   // Claude's menu matters for a permission ("Always allow") and a plan.
   const menu = usePromptMenu(paneId, card && card.kind !== 'question' ? card.pending.id : null)
@@ -120,6 +125,8 @@ export function PromptCard(): ReactNode {
     if (card.kind === 'permission') return <PermissionCard key={id} paneId={paneId} card={card} always={alwaysOption(menu)} onFold={fold} />
     if (card.kind === 'plan') return <PlanCard key={id} paneId={paneId} card={card} options={plan!} onFold={fold} />
     if (!card.questions) {
+      // The Chat view has no terminal to answer in: the key row and its [Terminal] button.
+      if (inChat && status) return <PendingKeyRow paneId={paneId} agent={agentName(status)} />
       return (
         <div data-prompt-card="terminal" data-pending={id} className="shrink-0 border-t border-state-action/40 bg-bg-secondary px-3 pb-2 pt-2.5">
           <AskHeader count={card.pending.questions?.length || 1} onFold={fold} />
@@ -130,6 +137,7 @@ export function PromptCard(): ReactNode {
     return <AskWizard key={`${id}:${wizardSeq[id] ?? 0}`} paneId={paneId} pending={card.pending} questions={card.questions} onFold={fold} />
   }
   if (status && needsGenericStrip(status, card, !!plan)) {
+    if (inChat) return <PendingKeyRow paneId={paneId} agent={agentName(status)} />
     return <PromptStrip variant="waiting" text={t('prompt.waiting', { agent: agentName(status) })} onTap={openTerminalKeyboard} />
   }
   return null

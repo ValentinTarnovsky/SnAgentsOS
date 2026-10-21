@@ -23,25 +23,10 @@
  */
 import type { RemotePaneStatus, RemotePending } from '@shared/remote-protocol'
 import { askQuestionsValid, type AskQuestion } from '@shared/askAnswerKeys'
+import { selectCardRequest } from '@shared/promptTarget'
 
-/** Tools whose permission prompt is a plain "1. Yes / Esc No" menu. */
-export const SIMPLE_PERMISSION_TOOLS: readonly string[] = [
-  'Bash',
-  'PowerShell',
-  'Edit',
-  'MultiEdit',
-  'Write',
-  'NotebookEdit',
-  'Read',
-  'Glob',
-  'Grep',
-  'WebFetch',
-  'WebSearch',
-]
-
-export function isSimplePermissionTool(toolName: string | undefined): boolean {
-  return !!toolName && (SIMPLE_PERMISSION_TOOLS.includes(toolName) || toolName.startsWith('mcp__'))
-}
+// The request rules live in src/shared/promptTarget.ts (main's PromptMenuWatcher uses them too).
+export { SIMPLE_PERMISSION_TOOLS, isSimplePermissionTool } from '@shared/promptTarget'
 
 export type PromptCardModel =
   | { kind: 'permission'; pending: RemotePending; generic: boolean }
@@ -53,21 +38,12 @@ export type PromptCardModel =
 /** The card for this pane status, or undefined (E2-FR-17, 18). */
 export function cardFor(status: RemotePaneStatus | undefined, enabled: boolean): PromptCardModel | undefined {
   if (!enabled || !status || status.provider !== 'claude' || !status.pending?.length) return undefined
-  const blocking = status.pending.some((p) => p.kind === 'plan' || p.kind === 'question' || p.kind === 'elicitation')
-  for (const pending of status.pending) {
-    if (pending.kind === 'permission') {
-      if (pending.toolName) {
-        if (isSimplePermissionTool(pending.toolName)) return { kind: 'permission', pending, generic: false }
-      } else if (!blocking) {
-        return { kind: 'permission', pending, generic: true }
-      }
-    } else if (pending.kind === 'question') {
-      return { kind: 'question', pending, questions: askQuestionsValid(pending.questions) ? pending.questions : null }
-    } else if (pending.kind === 'plan') {
-      return { kind: 'plan', pending }
-    }
-  }
-  return undefined
+  const pick = selectCardRequest(status.pending)
+  if (!pick) return undefined
+  const pending = pick.pending
+  if (pending.kind === 'permission') return { kind: 'permission', pending, generic: pick.generic }
+  if (pending.kind === 'question') return { kind: 'question', pending, questions: askQuestionsValid(pending.questions) ? pending.questions : null }
+  return { kind: 'plan', pending }
 }
 
 /**

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
-import { Activity, Bell, Bot, Database, DownloadCloud, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, Users, Workflow, Zap, type LucideIcon } from 'lucide-react'
+import { Activity, Bell, Bot, Database, DownloadCloud, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Share2, Smartphone, TerminalSquare, Users, Workflow, Zap, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -34,6 +34,7 @@ import { UsageSection } from './sections/UsageSection'
 import { AiUsageSection } from './sections/AiUsageSection'
 import { ClaudeAccountsSection } from './sections/ClaudeAccountsSection'
 import { RemoteSection } from './sections/RemoteSection'
+import { SharingSection } from './sections/SharingSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
 import { GitSection } from './sections/GitSection'
@@ -54,6 +55,7 @@ const ICONS: Record<CategoryId, LucideIcon> = {
   claudeaccounts: Users,
   usage: Activity,
   remote: Smartphone,
+  share: Share2,
   git: GitBranch,
   updates: DownloadCloud,
   about: Info,
@@ -75,6 +77,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   claudeaccounts: ClaudeAccountsSection,
   usage: UsageSection,
   remote: RemoteSection,
+  share: SharingSection,
   git: GitSection,
   updates: UpdatesSection,
   about: AboutSection,
