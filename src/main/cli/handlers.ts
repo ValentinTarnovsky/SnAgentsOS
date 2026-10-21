@@ -1230,9 +1230,10 @@ export class CtlHandlers {
   }
 
   /**
-   * `account use <slot|id|label>`: the slot (primary / secondary) first, then
-   * the exact id, then the label (case-insensitive; two equal labels are
-   * `ambiguous`). Already the live login (known and verified): ok with
+   * `account use <n|slot|id|label>`: the slot (primary / secondary: #1 / #2)
+   * first, then a number as the 1-based rank (app 2.4.0), then the exact id,
+   * then the label (case-insensitive; two equal labels are `ambiguous`).
+   * Already the live login (known and verified): ok with
    * `changed: false`, nothing written and no budget spent. Otherwise
    * CTL_ACCOUNT_USE_PER_MIN for every caller together, and
    * AccountService.switchTo with reason 'cli'. `changed` comes from the last
@@ -1246,14 +1247,15 @@ export class CtlHandlers {
     const bad = this.accountProvider(params)
     if (bad) return bad
     const ref = (str(params.account) ?? '').trim()
-    if (!ref) return err('bad_request', 'account use needs an account: primary, secondary, an id or a label')
+    if (!ref) return err('bad_request', 'account use needs an account: its number (snaos account ls), an id or a label')
     const st = await svc.status()
     if (!st.supported) return err('disabled', 'saved Claude logins are not supported on this machine')
     const key = ref.toLowerCase()
-    let hits = st.accounts.filter((a) => a.slot === key)
+    let hits = key === 'primary' ? st.accounts.filter((a) => a.rank === 1) : key === 'secondary' ? st.accounts.filter((a) => a.rank === 2) : []
+    if (!hits.length && /^#?\d{1,2}$/.test(ref)) hits = st.accounts.filter((a) => a.rank === Number(ref.replace('#', '')))
     if (!hits.length) hits = st.accounts.filter((a) => a.id === ref)
     if (!hits.length) hits = st.accounts.filter((a) => a.label !== '' && a.label.toLowerCase() === key)
-    if (hits.length > 1) return err('ambiguous', `more than one account is called "${ref}": use primary, secondary or an id (${hits.map((a) => a.id).join(', ')})`)
+    if (hits.length > 1) return err('ambiguous', `more than one account is called "${ref}": use its number or an id (${hits.map((a) => `#${a.rank} ${a.id}`).join(', ')})`)
     const target = hits[0]
     if (!target) return err('not_found', `no saved Claude account "${ref}" (snaos account ls)`)
     if (target.active && st.live === 'known' && !st.unverified) return ok({ active: target, changed: false })
@@ -1300,7 +1302,9 @@ export function ctlUsage(snap: UsageSnapshot, provider?: 'claude' | 'codex'): Ct
     rows,
     updatedAt: typeof snap.updatedAt === 'number' ? snap.updatedAt : 0,
     services: snap.services ?? null,
-    ...(a && provider !== 'codex' ? { account: { id: a.id, slot: a.role, label: a.label.includes('@') ? '' : a.label } } : {}),
+    ...(a && provider !== 'codex'
+      ? { account: { id: a.id, ...(typeof a.rank === 'number' ? { rank: a.rank + 1 } : {}), slot: a.role, label: a.label.includes('@') ? '' : a.label } }
+      : {}),
   }
 }
 

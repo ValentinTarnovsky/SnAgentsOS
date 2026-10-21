@@ -82,6 +82,7 @@ export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | n
   const out: RemotePaneStatus = { state: evt.state, stateSince: evt.stateSince ?? evt.updatedAt ?? 0 }
   if (evt.precise === false) out.precise = false
   if (evt.provider) out.provider = evt.provider
+  if (evt.hosted) out.hosted = true
   if (evt.reason) out.reason = evt.reason
   if (evt.pendingCount) out.pendingCount = evt.pendingCount
   if (evt.lastMessage) out.lastMessage = evt.lastMessage

@@ -17,7 +17,7 @@ import {useAppStore} from './src/renderer/lib/store';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 import {Tooltip} from './src/renderer/components/ui/Tooltip';
 import {useUsageStore} from './src/renderer/lib/usageStore';
-window.snApi={status:{hooksStatus:async()=>({installed:false,settingsPath:'test/settings.json'}),health:async()=>({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}}),testDiscord:async()=>({ok:true})}};
+window.snApi={status:{hooksStatus:async()=>({installed:false,settingsPath:'test/settings.json'}),health:async()=>({claude:{installed:false},codex:{enabled:true,available:false,connected:0,missing:true},discord:{lastSuccessAt:null,error:null,queued:0}}),testDiscord:async()=>({ok:true})}};
 const states=['working','action','done','error','unknown','idle'];
 useAppStore.setState({hydrated:true,activeWorkspaceId:'ws-1',workspaces:states.map((state,i)=>({id:'ws-'+i,name:i===1?'Proyecto con nombre muy largo para probar truncado y acciones':'Workspace '+i,cwd:'',panes:[{id:'pane-'+i,type:'shell',title:'Console '+i,icon:'terminal'}]})),paneStatus:Object.fromEntries(states.map((state,i)=>['pane-'+i,{state,precise:true,provider:i%2?'claude':'codex',pendingCount:state==='action'?2:0}])),paneAttention:{'pane-1':true}});
 applyTheme('midnight');
@@ -72,6 +72,9 @@ app.whenReady().then(async()=>{
  await w.webContents.executeJavaScript("document.getElementById('edge-tooltip').dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))");await new Promise(r=>setTimeout(r,500));
  const tipFits=await w.webContents.executeJavaScript("(()=>{const r=document.querySelector('[role=tooltip]')?.getBoundingClientRect();return r&&r.width>=200&&r.left>=7&&r.top>=7&&r.right<=innerWidth-7&&r.bottom<=innerHeight-7})()");await shot('tooltip-edge');if(!tipFits)throw new Error('Tooltip outside viewport '+await w.webContents.executeJavaScript("JSON.stringify({focused:document.activeElement.id,rect:document.querySelector('[role=tooltip]')?.getBoundingClientRect(),viewport:[innerWidth,innerHeight]})"));await w.webContents.executeJavaScript("document.getElementById('edge-tooltip').dispatchEvent(new MouseEvent('mouseout',{bubbles:true}))");
  await w.webContents.executeJavaScript('smoke.open()');await new Promise(r=>setTimeout(r,300));await shot('notifications');
+ // v2.4: Codex on by default; no codex.exe is a neutral line, never a red error.
+ const codexLine=await w.webContents.executeJavaScript("(()=>{const p=document.querySelector('[data-codex-health]');return p?{text:p.textContent,red:!!p.parentElement.querySelector('.text-red-400')}:null})()");
+ if(!codexLine||!codexLine.text.startsWith('No se encontró la CLI de Codex')||codexLine.red)throw new Error('Codex missing line '+JSON.stringify(codexLine));
  for(const scale of [1,1.25,1.5]){w.setSize(860,560);w.webContents.setZoomFactor(scale);await new Promise(r=>setTimeout(r,200));const overflow=await w.webContents.executeJavaScript('document.documentElement.scrollWidth>innerWidth');if(overflow)throw new Error('Viewport overflow at '+scale);if(scale===1.5)await shot('notifications-150')}
  w.webContents.setZoomFactor(1);w.setSize(1280,820);await w.webContents.executeJavaScript("smoke.theme('light');document.getElementById('discord-webhook').scrollIntoView({block:'center'})");await new Promise(r=>setTimeout(r,300));await shot('discord-light');
  if(failures.length)throw new Error(failures.join('\\n'));console.log('PASS: six sidebar lights and agent rows expanded/collapsed, folded usage list, centered rail phone, rail dots beside the icon, dot tooltip under 300 ms, settings at 100/125/150%, light/dark; screenshots '+__dirname);w.destroy();app.quit();

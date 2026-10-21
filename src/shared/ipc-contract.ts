@@ -43,6 +43,8 @@ import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDel
 import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResult, WsNoteWriteReq, WsNotesChangedEvt, WsNotesListRes } from './ws-notes'
 import type { FileCreateReq, FileReadRes, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesRootRes } from './files'
 import type { CliCtlAction, CliUiState, SkillOp, SkillStatus, SkillTarget } from './ctl-protocol'
+import type { DictationError } from './dictation'
+import type { DictationEngine } from './types'
 
 export type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -60,6 +62,35 @@ export interface PowerState {
   workingCount?: number
   /** Epoch ms when the grace ends and the block is released (grace only). */
   releaseAt?: number
+}
+
+/** `dictation:start` (app 2.4.0): main validates both against the schema 17 rules. */
+export interface DictationStartReq {
+  engine?: DictationEngine
+  /** A BCP 47 tag (DICTATION_LANG_RE); 'auto' is resolved by the renderer. */
+  lang?: string
+}
+
+export interface DictationStartRes {
+  ok: boolean
+  sessionId?: string
+  error?: DictationError
+}
+
+/**
+ * Main -> renderer `dictation:event`, one per helper line. `ready` names the
+ * engine that runs (with `fallback` when auto fell back to offline), `hyp`
+ * is the phrase so far, `final` a finished phrase, `error` a code and `end`
+ * the session is over (always last).
+ */
+export interface DictationEvt {
+  sessionId: string
+  t: 'ready' | 'hyp' | 'final' | 'error' | 'end'
+  text?: string
+  code?: DictationError
+  engine?: 'online' | 'offline'
+  lang?: string
+  fallback?: DictationError
 }
 
 export interface AppInfo {
@@ -175,7 +206,9 @@ export interface LegacyDataInfo {
 
 /**
  * How a downloaded update will be applied, derived from the OS + install type.
- *  - win-installer  : run the NSIS setup (upgrades + relaunches)
+ *  - win-installer  : run the NSIS setup silently (`/S --updated --force-run`:
+ *                     keeps the shortcuts and the taskbar pin, relaunches); the
+ *                     app quits first. If it cannot start, the wizard opens.
  *  - win-portable   : swap the portable exe in place, then relaunch
  *  - mac-dmg        : open the dmg (manual drag; unsigned can't auto-install)
  *  - linux-appimage : swap the AppImage in place, then relaunch
@@ -256,6 +289,17 @@ export interface UpdateState {
   progress: UpdateProgress | null
   installError: string | null
   info: UpdateInfo | null
+}
+
+/**
+ * A silent update that did not land (app 2.4.0): the marker main wrote before
+ * the setup is still there on the next start, under an hour old, and the
+ * running version is below `to` (a declined Windows permission prompt, or a
+ * setup that aborted). Read once with `update:notApplied`.
+ */
+export interface UpdateNotApplied {
+  from: string
+  to: string
 }
 
 /** Live resource usage of the app (its own Electron processes). */
@@ -837,6 +881,8 @@ export interface SnApi {
     getState(): Promise<UpdateState>
     /** Subscribe to main's update state on every phase change; returns an unsubscribe function. */
     onState(cb: (s: UpdateState) => void): () => void
+    /** One-shot: the update the last silent install failed to apply, then null (app 2.4.0). */
+    takeNotApplied(): Promise<UpdateNotApplied | null>
   }
   /** Live usage / quota bars (Claude OAuth + Codex rollout + custom models). */
   usage: {
@@ -858,12 +904,14 @@ export interface SnApi {
     getState(): Promise<ClaudeAccountsState>
     /** Save the live login (CLAUDE_CONFIG_DIR or ~/.claude) into a slot. */
     capture(req: AccountsCaptureReq): Promise<AccountsOpRes>
-    /** 'primary' | 'secondary' | an account id. */
+    /** An account id, or 'primary' | 'secondary' (rank 0 / 1). */
     switchTo(target: string, reason: RendererSwitchReason): Promise<AccountsOpRes>
     remove(id: string): Promise<AccountsOpRes>
     rename(id: string, label: string): Promise<AccountsOpRes>
-    /** Make this account the primary (the roles swap). */
+    /** Make this account the first (a move to rank 0). */
     setPrimary(id: string): Promise<AccountsOpRes>
+    /** app 2.4.0: the new priority order, every saved id exactly once (main checks it). */
+    reorder(ids: string[]): Promise<AccountsOpRes>
     /** Clear a pause of automatic switching. */
     resumeAuto(): Promise<AccountsOpRes>
     /** Push the policy settings (settings.claudeAccounts). */
@@ -952,6 +1000,16 @@ export interface SnApi {
     getState(): Promise<PowerState>
     /** Every state change, including a mode picked from the tray. Returns unsubscribe. */
     onState(cb: (s: PowerState) => void): () => void
+  }
+  /** Desktop dictation (app 2.4.0): main runs the Windows recognizer; one session at a time. */
+  dictation: {
+    /** Stops any other session first; `unsupported` off Windows. */
+    start(req: DictationStartReq): Promise<DictationStartRes>
+    /** Ends the session, keeping its last phrase (killed after 3 s). */
+    stop(sessionId: string): Promise<void>
+    onEvent(cb: (e: DictationEvt) => void): () => void
+    /** Opens Windows' speech or microphone privacy page (fixed URIs). */
+    openSettings(page: 'speech' | 'microphone'): Promise<boolean>
   }
   /** Agent behavior settings and durable sessions (E5 G2). */
   agents: {

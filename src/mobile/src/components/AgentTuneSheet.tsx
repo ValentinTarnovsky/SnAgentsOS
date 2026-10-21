@@ -1,8 +1,9 @@
 /**
  * Model, effort and Ultracode of the console open on the phone (app 2.3.0,
- * ctl `agentTune`). Opened from a chip in the terminal header ("opus · high ·
- * UC") or the kebab's "Model and effort" row, only for a Claude or Codex
- * console of a desktop >= 2.3.0 (an older one strikes the unknown ctl).
+ * ctl `agentTune`). Opened from the terminal kebab's "Model and effort" row
+ * (first of the extra rows, hint "opus · high · UC"; app 2.4.0 dropped the
+ * header chip, which crowded the title), only for a Claude or Codex console
+ * of a desktop >= 2.3.0 (an older one strikes the unknown ctl).
  *
  * Claude: model chips (the line under them says `/model` also saves the
  * default for new sessions), a 5-stop effort control low..max plus Auto, and
@@ -18,14 +19,14 @@
  */
 import { useRef, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Loader2, SlidersHorizontal } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import { CLAUDE_EFFORTS, CLAUDE_MODELS, tuneCommand, type TuneSet } from '@shared/agentTune'
 import { Sheet } from './Sheet'
 import { selectInputMode, store, useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { getComposerHandle } from '../lib/terminalBus'
 import { paneById, workspaceOfPane } from '../lib/workspace'
-import { loadTuneEnter, saveTuneEnter, tuneChipText, tuneProvider, tuneSupported } from '../lib/tune'
+import { loadTuneEnter, saveTuneEnter, tuneProvider, tuneSupported } from '../lib/tune'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
 const ERRORS: Record<string, MobileMessageKey> = {
@@ -46,26 +47,6 @@ export function useTuneTarget(paneId: string | null): { workspaceId: string; pan
   const workspaceId = workspaceOfPane(snapshot, paneId)
   const provider = tuneProvider(pane?.type, status)
   return pane && workspaceId && provider ? { workspaceId, paneId, provider } : null
-}
-
-/** Header chip of a tunable console: what it runs, or "Model" while unknown. */
-export function AgentTuneChip({ paneId, onOpen }: { paneId: string; onOpen: () => void }): ReactNode {
-  const target = useTuneTarget(paneId)
-  const status = useRemoteStore((s) => s.paneStatus[paneId])
-  if (!target) return null
-  const text = tuneChipText(status)
-  return (
-    <button
-      type="button"
-      data-tune-chip={target.provider}
-      onClick={onOpen}
-      aria-label={t('tune.chipLabel', { value: text ?? t('tune.unknown') })}
-      className="-my-1 flex h-7 max-w-[96px] shrink-0 items-center gap-1 rounded border border-border px-1.5 text-[10px] leading-4 text-text-secondary active:bg-card"
-    >
-      <SlidersHorizontal size={11} className="shrink-0" />
-      <span className="min-w-0 truncate">{text ?? t('tune.chip')}</span>
-    </button>
-  )
 }
 
 function Switch({ on, label, hint, onToggle, disabled, ...data }: { on: boolean; label: string; hint: string; onToggle: () => void; disabled?: boolean; [k: `data-${string}`]: string | boolean }): ReactNode {

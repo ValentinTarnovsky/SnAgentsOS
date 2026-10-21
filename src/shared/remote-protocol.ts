@@ -60,6 +60,8 @@ export interface RemotePaneStatus {
   /** false = inferred from the OSC title (SSH or no hooks); absent = true. */
   precise?: boolean
   provider?: AgentProvider
+  /** v2.4: a shell console running a hand-typed `claude` / `codex` (PaneStatusEvt.hosted). Absent = no. */
+  hosted?: true
   reason?: AttentionReason
   pendingCount?: number
   /** Desktop clock (epoch ms) of the last state transition. */
@@ -192,7 +194,10 @@ export interface RemoteUsageSnapshot {
   updatedAt: number
   /** Anthropic service health, when the status dot is enabled. */
   services?: 'operational' | 'degraded' | 'down' | null
-  /** app 2.3.0: the active Claude account (label and role, never the email); absent = no saved accounts or an older desktop. */
+  /**
+   * app 2.3.0: the active Claude account (label and role, never the email); absent = no saved accounts or an older desktop.
+   * app 2.4.0: plus its rank and `others` (every other saved account by priority, for the picker).
+   */
   activeAccount?: UsageActiveAccount
 }
 
@@ -374,8 +379,11 @@ export type RemoteCtlAction =
    * Errors: not_found, locked, unknown_live_account, identity_failed, busy,
    * unsupported, encryption_unavailable, io, rate.
    * The phone sends it only to a desktop >= 2.3.0.
+   * app 2.4.0: by `id` (an account of `usage.activeAccount.others`), only
+   * to a desktop >= 2.4.0; `role` stays accepted (rank 0 / 1). Exactly one
+   * of the two (the executor answers `bad_target` otherwise).
    */
-  | { kind: 'claudeAccountUse'; role: ClaudeAccountRole }
+  | { kind: 'claudeAccountUse'; role?: ClaudeAccountRole; id?: string }
 
 // --- Git API for the phone's Changes screen (E7-FR-22..26) ---
 

@@ -13,8 +13,9 @@ import {
   type UpdateProgress,
 } from '@shared/ipc-contract'
 import { BRAND } from '@shared/brand'
-import { isPortable, portableExeFile } from './paths'
+import { dataDir, isPortable, portableExeFile } from './paths'
 import { updateState } from './updateState'
+import { clearUpdateMarker, isNewer, writeUpdateMarker } from './updateMarker'
 
 /** Releases fetched per check; a full page of newer ones reads as "30 or more". */
 export const RELEASE_PAGE = 30
@@ -89,24 +90,8 @@ export interface Match {
 
 /** Remembered between a check and the install so the renderer needn't pass it back. */
 let lastMatch: Match | null = null
-
-/** "v1.2.3" / "1.2.3-beta+5" -> [1, 2, 3] (prerelease/build metadata dropped). */
-function parseVersion(v: string): number[] {
-  const core = v.replace(/^v/i, '').split('-')[0].split('+')[0]
-  return core.split('.').map((n) => parseInt(n, 10) || 0)
-}
-
-/** True when `latest` is a strictly higher version than `current`. */
-function isNewer(latest: string, current: string): boolean {
-  const a = parseVersion(latest)
-  const b = parseVersion(current)
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const x = a[i] ?? 0
-    const y = b[i] ?? 0
-    if (x !== y) return x > y
-  }
-  return false
-}
+/** Version of `lastMatch`'s release, for the unfinished-update marker. */
+let lastVersion: string | null = null
 
 /** Locate the "<name>.sha256" sidecar asset URL for integrity verification. */
 function sidecarFor(assets: GhAsset[], name: string): string | null {
@@ -440,18 +425,42 @@ function writeScript(name: string, body: string): string {
 }
 
 /**
+ * Arguments of the silent NSIS update (app 2.4.0). `/S` skips the wizard,
+ * `--updated` makes the old uninstaller keep the shortcuts and the
+ * AppUserModelID (without it the taskbar pin is removed, because
+ * allowToChangeInstallationDirectory turns keep-shortcuts off) and
+ * `--force-run` relaunches the app when the silent setup finishes.
+ */
+export const SILENT_SETUP_ARGS: readonly string[] = ['/S', '--updated', '--force-run']
+
+/**
  * Apply a downloaded update. Returns true when the app will relaunch itself (the
  * caller should quit), false when we merely opened the file or couldn't start
- * the helper (leaving the app running so the user can retry).
+ * the helper (leaving the app running so the user can retry). `version` is the
+ * release being installed, for the unfinished-update marker.
  */
-async function applyInstall(kind: InstallKind, file: string): Promise<boolean> {
+async function applyInstall(kind: InstallKind, file: string, version: string | null): Promise<boolean> {
   switch (kind) {
     case 'win-installer': {
-      // NSIS setup closes the running instance, upgrades and relaunches on its
-      // own, so we DON'T quit here (cancelling the wizard must not strand the user).
-      if (!spawnDetached(file, [], { windowsHide: false })) {
-        await shell.openPath(file)
+      // Silent upgrade: the setup closes, upgrades and relaunches the app, so we
+      // quit first (the caller's quitForUpdate). A per-machine install makes
+      // Windows ask for permission; if that is declined, the marker written
+      // here turns into the update:notApplied toast on the next start.
+      const dir = dataDir()
+      let marked = false
+      if (version) {
+        try {
+          await writeUpdateMarker(dir, { from: app.getVersion(), to: version, at: Date.now() })
+          marked = true
+        } catch (err) {
+          console.warn('[updater] could not write the update marker:', err)
+        }
       }
+      if (spawnDetached(file, [...SILENT_SETUP_ARGS], { windowsHide: false })) return true
+      // The setup could not start silently: open it (the wizard runs, and as
+      // in 2.3.0 it may unpin the app), and keep the app running.
+      if (marked) clearUpdateMarker(dir)
+      await shell.openPath(file)
       return false
     }
     case 'win-portable': {
@@ -675,6 +684,7 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
   const { info, match } = await queryReleases()
   if (!updateState.busy) {
     lastMatch = match
+    lastVersion = match ? info.latestVersion : null
     updateState.checked(info)
   }
   return info
@@ -690,11 +700,15 @@ export async function downloadAndInstall(
   opts?: { beforeApply?: (kind: InstallKind) => void },
 ): Promise<{ relaunching: boolean }> {
   let match = lastMatch
+  let version = lastVersion
   if (!match) {
     // Called with the install already 'downloading': query directly, the
     // state-recording check would ignore the result.
-    match = (await queryReleases()).match
+    const fresh = await queryReleases()
+    match = fresh.match
+    version = match ? fresh.info.latestVersion : null
     lastMatch = match
+    lastVersion = version
   }
   if (!match) throw new Error('No installable update is available for this build.')
 
@@ -745,6 +759,6 @@ export async function downloadAndInstall(
   } catch (err) {
     console.warn('[updater] beforeApply failed:', err)
   }
-  const relaunching = await applyInstall(kind, dest)
+  const relaunching = await applyInstall(kind, dest, version)
   return { relaunching }
 }

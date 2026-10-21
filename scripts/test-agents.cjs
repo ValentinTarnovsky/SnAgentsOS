@@ -362,6 +362,17 @@ function testNavigation() {
     paneAttention: { b: true },
     sessions: { x: view('x', { topic: 'Fix login' }), y: view('y', { endedAt: 9 }), s: view('s') },
   }
+  // v2.4: a shell console running a hand-typed agent (status.provider, hosted) gets a row with that agent's icon.
+  {
+    const sh = { id: 'h', type: 'shell', title: 'PowerShell', color: '#888', icon: 'terminal' }
+    const hostedWs = { id: 'wh', name: 'H', cwd: '', panes: [sh] }
+    const rows = nav.allAgents({ ...input, workspaces: [hostedWs], mountedWorkspaces: { wh: 'full' }, sessions: {}, paneStatus: { h: { state: 'working', precise: false, provider: 'codex', hosted: true, stateSince: 5 } } })
+    check(rows.length === 1 && rows[0].id === 'h' && rows[0].status.provider === 'codex', 'v2.4: a hosted shell pane has an agent row')
+    check(nav.runningAgentOf(sh, rows[0].status) === 'codex' && nav.agentIconName(sh, rows[0].status) === 'openai' && nav.agentIconName(sh, { provider: 'claude' }) === 'claude', 'its icon is the running agent\'s (openai for Codex, claude for Claude)')
+    check(nav.agentIconName(sh, undefined) === 'terminal' && nav.runningAgentOf(sh, null) === undefined, 'without a status provider the shell keeps its own icon')
+    check(nav.agentIconName(pane('k', { icon: 'rocket' }), { provider: 'codex' }) === 'rocket' && nav.runningAgentOf(pane('k'), { provider: 'claude' }) === undefined, 'an agent console keeps its chosen icon and gets no badge')
+    check(nav.agentTitle(sh, [preset], { topic: 'Fix login' }, true) === 'PowerShell', 'the shell console keeps its title')
+  }
   const all = nav.allAgents(input)
   check(all.map(e => e.id).join() === 'c,a,b,m,x', 'allAgents: live panes in layout order plus resumable records of unmounted workspaces (not ended, not SSH)')
   check(all.find(e => e.id === 'x').notStarted && all.find(e => e.id === 'x').rank === 4, 'a record that resumes on open is "not started", rank 4')

@@ -38,6 +38,7 @@ import type {
   UpdateInfo,
   UpdateProgress,
   UpdateState,
+  UpdateNotApplied,
   UsageSnapshot,
 } from '@shared/ipc-contract'
 import type {
@@ -66,6 +67,7 @@ import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRe
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 import type { CliUiState, SkillOp, SkillStatus, SkillTarget } from '@shared/ctl-protocol'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from '@shared/repo-config'
+import type { DictationEvt, DictationStartReq, DictationStartRes } from '@shared/ipc-contract'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -168,6 +170,7 @@ const api: SnApi = {
     onProgress: (cb: (p: UpdateProgress) => void) => sub<UpdateProgress>(CH.UPDATE_PROGRESS, cb),
     getState: () => ipcRenderer.invoke(CH.UPDATE_GET_STATE) as Promise<UpdateState>,
     onState: (cb: (s: UpdateState) => void) => sub<UpdateState>(CH.UPDATE_STATE, cb),
+    takeNotApplied: () => ipcRenderer.invoke(CH.UPDATE_NOT_APPLIED) as Promise<UpdateNotApplied | null>,
   },
   usage: {
     get: () => ipcRenderer.invoke(CH.USAGE_GET) as Promise<UsageSnapshot>,
@@ -183,6 +186,7 @@ const api: SnApi = {
     remove: (id: string) => ipcRenderer.invoke(CH.ACCOUNTS_REMOVE, { id }) as Promise<AccountsOpRes>,
     rename: (id: string, label: string) => ipcRenderer.invoke(CH.ACCOUNTS_RENAME, { id, label }) as Promise<AccountsOpRes>,
     setPrimary: (id: string) => ipcRenderer.invoke(CH.ACCOUNTS_SET_PRIMARY, { id }) as Promise<AccountsOpRes>,
+    reorder: (ids: string[]) => ipcRenderer.invoke(CH.ACCOUNTS_REORDER, { ids }) as Promise<AccountsOpRes>,
     resumeAuto: () => ipcRenderer.invoke(CH.ACCOUNTS_RESUME_AUTO) as Promise<AccountsOpRes>,
     setConfig: (cfg: ClaudeAccountsSettings) => ipcRenderer.send(CH.ACCOUNTS_SET_CONFIG, cfg),
     onChanged: (cb: (s: ClaudeAccountsState) => void) => sub<ClaudeAccountsState>(CH.ACCOUNTS_CHANGED, cb),
@@ -233,6 +237,12 @@ const api: SnApi = {
     setConfig: (mode: AwakeMode) => ipcRenderer.send(CH.POWER_SET_CONFIG, mode),
     getState: () => ipcRenderer.invoke(CH.POWER_GET_STATE) as Promise<PowerState>,
     onState: (cb: (s: PowerState) => void) => sub<PowerState>(CH.POWER_STATE, cb),
+  },
+  dictation: {
+    start: (req: DictationStartReq) => ipcRenderer.invoke(CH.DICTATION_START, req) as Promise<DictationStartRes>,
+    stop: (sessionId: string) => ipcRenderer.invoke(CH.DICTATION_STOP, sessionId) as Promise<void>,
+    onEvent: (cb: (e: DictationEvt) => void) => sub<DictationEvt>(CH.DICTATION_EVENT, cb),
+    openSettings: (page: 'speech' | 'microphone') => ipcRenderer.invoke(CH.DICTATION_OPEN_SETTINGS, page) as Promise<boolean>,
   },
   agents: {
     setConfig: (cfg: AgentSettings) => ipcRenderer.send(CH.AGENTS_SET_CONFIG, cfg),

@@ -54,6 +54,8 @@ interface PaneTrack {
   topic?: string
   /** v2.2.1: a title-only Codex track's text after the spinner (its idle title). */
   titleText?: string
+  /** v2.4: when the armed clear `timer` fires (armClear keeps the sooner one). */
+  clearAt?: number
   firstPrompt?: string
   cwd?: string
   transcriptPath?: string
@@ -136,6 +138,53 @@ function sameTitle(a: string, b: string): boolean {
   return a === b || (!!a && !!b && (a.startsWith(`${b} `) || b.startsWith(`${a} `)))
 }
 
+/** Separators Codex (or a status line) puts between the idle text and extra words. */
+const TITLE_PARTS_RE = / (?:\||·|-|:) /
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * v2.4: Codex back at its prompt. The idle title is the working title's text
+ * without the spinner, give or take a leading activity glyph, extra parts
+ * after ` | `, ` · `, ` - ` or ` : `, or extra words around it (whole words).
+ */
+export function codexIdleMatch(title: string, titleText: string): boolean {
+  const raw = sanitize(title, true)
+  if (sameTitle(raw, titleText)) return true
+  if (!titleText) return false
+  const clean = raw.replace(/^[^\p{L}\p{N}]+/u, '').trim()
+  if (sameTitle(clean, titleText)) return true
+  if (clean.split(TITLE_PARTS_RE).some(part => part.trim() === titleText)) return true
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escapeRe(titleText)}(?:$|[^\\p{L}\\p{N}_])`, 'u').test(clean)
+}
+
+/** v2.4: the shell's own title (PowerShell, pwsh, cmd, their exe path, or the pane's last title before the agent ran). */
+export function looksLikeShellTitle(title: string, shellTitle?: string): boolean {
+  const t = title.trim()
+  if (!t) return false
+  if (shellTitle && t === shellTitle) return true
+  return /^(?:(?:Administrator|Administrador): )?(?:Windows PowerShell|PowerShell|pwsh|cmd(?:\.exe)?)\b/i.test(t) || /(?:^|[\\/])(?:powershell|pwsh|cmd)(?:\.exe)?$/i.test(t)
+}
+
+/** v2.4: an OSC 133 A / C / D mark with its `;field` list (B carries nothing main needs). */
+const SHELL_MARK_RE = /\x1b\]133;([ACD])((?:;[^\x07\x1b]*)?)(?:\x07|\x1b\\)/g
+/** A 133 mark cut at the end of a chunk; the next chunk completes it. */
+const SHELL_MARK_TAIL_RE = /^\x1b(?:\](?:1(?:3(?:3(?:;[^\x07\x1b]*)?)?)?)?)?$/
+/** Longest cut mark kept between chunks (`C;agent=codex;k=` plus a 32-char nonce fits well under it). */
+const SHELL_MARK_TAIL_MAX = 128
+/** An `agent=` mark counts only this soon after a user Enter on the pty. */
+export const SHELL_AGENT_ENTER_MS = 2000
+/** A title-only Codex track under an unknown title, on a pty with no shell marks, is cleared after this long. */
+export const CODEX_STALE_TITLE_MS = 10_000
+
+/** The cut mark at the end of `text` (from its last ESC), or ''. Scans only the last SHELL_MARK_TAIL_MAX chars. */
+function shellMarkTail(text: string): string {
+  let esc = text.indexOf('\x1b', Math.max(0, text.length - SHELL_MARK_TAIL_MAX))
+  if (esc < 0) return ''
+  for (let next = esc; next >= 0; next = text.indexOf('\x1b', next + 1)) esc = next
+  const cut = text.slice(esc)
+  return SHELL_MARK_TAIL_RE.test(cut) ? cut : ''
+}
+
 /** Requests survive title changes, renderer reloads and concurrent background work. */
 export class StatusManager implements PtySink {
   readonly id = 'status'
@@ -171,6 +220,22 @@ export class StatusManager implements PtySink {
   private readonly flashing = new Set<string>()
   /** v2.3: a paired phone is looking at the pane right now (SessionManager.isPaneSeen). */
   private remoteSeen: (paneId: string) => boolean = () => false
+  // v2.4: `claude` / `codex` typed in an integrated PowerShell (OSC 133 C;agent=).
+  /** The pty's mark nonce (PtyManager.shellMarkOf), read on spawn; no entry = not integrated. */
+  private shellMark: (ptyId: string) => string | undefined = () => undefined
+  private readonly shellKeys = new Map<string, string>()
+  /** agents.shellAgentDetect, pushed by main (never read from disk on the data path). */
+  private shellAgentDetect = true
+  /** The agent the pane's shell runs right now; it wins over the config in providerOf. */
+  private readonly runtimeAgents = new Map<string, AgentProvider>()
+  /** A mark cut at the end of the pane's last chunk. */
+  private readonly markTails = new Map<string, string>()
+  /** When the user last sent an Enter to the pane's live pty. */
+  private readonly enterAt = new Map<string, number>()
+  /** The pane's title while it had no track (looksLikeShellTitle). */
+  private readonly shellTitles = new Map<string, string>()
+  /** Sessions a shell's agent ran, cleared at its D/A: a late end or hook never brings the row back. */
+  private readonly hostedRetired = new Map<string, Set<string>>()
   lastClaudeEventAt: number | null = null
   desktopError: 'blocked' | 'failed' | 'unavailable' | null = null
   constructor(
@@ -179,8 +244,32 @@ export class StatusManager implements PtySink {
     private readonly onNotice: (notice: StatusNotice) => void = () => {},
     private readonly readTranscript: (path: string, sessionId: string) => Promise<string | undefined> = (path, sessionId) => readLastAssistantMessage(path, sessionId),
   ) {}
-  onSpawn(ptyId: string, paneId: string): void { this.clearPane(paneId); this.candidates.delete(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.paneProviders.delete(paneId); this.providerMisses.delete(paneId); this.ptys.set(paneId, ptyId); this.spawnTimes.set(paneId, Date.now()) }
-  onData(): void {}
+  onSpawn(ptyId: string, paneId: string): void {
+    this.clearPane(paneId); this.candidates.delete(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.paneProviders.delete(paneId); this.providerMisses.delete(paneId); this.ptys.set(paneId, ptyId); this.spawnTimes.set(paneId, Date.now())
+    this.resetShell(paneId)
+    const key = this.shellMark(ptyId)
+    if (key) this.shellKeys.set(paneId, key)
+  }
+  /**
+   * v2.4: the OSC 133 marks of an integrated PowerShell. Runs on every flush,
+   * so the cheap checks go first: an integrated pty, the cached setting, then
+   * a plain `includes` (or a mark cut at the previous chunk's end).
+   */
+  onData(ptyId: string, paneId: string, data: string): void {
+    const key = this.shellKeys.get(paneId)
+    if (!key || (!this.shellAgentDetect && !this.runtimeAgents.has(paneId)) || this.ptys.get(paneId) !== ptyId) return
+    const tail = this.markTails.get(paneId)
+    if (!tail && !data.includes('\x1b]133;')) {
+      const cut = shellMarkTail(data)
+      if (cut) this.markTails.set(paneId, cut)
+      return
+    }
+    const text = tail ? tail + data : data
+    this.markTails.delete(paneId)
+    for (const m of text.matchAll(SHELL_MARK_RE)) this.onShellMark(paneId, key, m[1], m[2])
+    const cut = shellMarkTail(text)
+    if (cut) this.markTails.set(paneId, cut)
+  }
   /** Every exit (natural or not) releases the pane's tracking. */
   onExit(ptyId: string, paneId: string, _exitCode?: number, _info?: PtyExitInfo): void {
     if (this.ptys.get(paneId) !== ptyId) return
@@ -188,9 +277,77 @@ export class StatusManager implements PtySink {
     this.spawnTimes.delete(paneId)
     this.candidates.delete(paneId)
     this.paneProviders.delete(paneId); this.providerMisses.delete(paneId)
+    this.resetShell(paneId)
     this.clearPane(paneId)
   }
   setConfig(cfg: NotificationSettings): void { this.cfg = cfg }
+  /** v2.4: main's wiring to PtyManager.shellMarkOf (the nonce of an integrated pty). */
+  setShellMarks(fn: (ptyId: string) => string | undefined): void { this.shellMark = fn }
+  /** v2.4: the agents settings main acts on, pushed at boot and on every config save. */
+  setAgentSettings(agents: { shellAgentDetect?: boolean } | null | undefined): void {
+    this.shellAgentDetect = agents?.shellAgentDetect !== false
+  }
+
+  private resetShell(paneId: string): void {
+    this.shellKeys.delete(paneId); this.runtimeAgents.delete(paneId); this.markTails.delete(paneId)
+    this.enterAt.delete(paneId); this.shellTitles.delete(paneId); this.hostedRetired.delete(paneId)
+  }
+
+  /**
+   * v2.4: one mark of the pane's shell. Only a mark carrying the pty's nonce
+   * counts (a program's output, a `cat` of a file or an ssh host cannot know
+   * it). A C with `agent=` right after a user Enter starts a runtime agent;
+   * a D or an A is the shell's prompt back, so no agent owns the console.
+   */
+  private onShellMark(paneId: string, key: string, kind: string, params: string): void {
+    const fields = params.split(';')
+    if (!fields.includes(`k=${key}`)) return
+    if (kind === 'C') {
+      const agent = fields.find(f => f.startsWith('agent='))?.slice(6)
+      if ((agent !== 'claude' && agent !== 'codex') || !this.shellAgentDetect) return
+      if (Date.now() - (this.enterAt.get(paneId) ?? -Infinity) > SHELL_AGENT_ENTER_MS) return
+      this.startRuntimeAgent(paneId, agent)
+      return
+    }
+    this.endRuntimeAgent(paneId)
+  }
+
+  /** The row appears at once, idle; the title rules, hooks or the Codex bridge take it from there. */
+  private startRuntimeAgent(paneId: string, provider: AgentProvider): void {
+    this.runtimeAgents.set(paneId, provider)
+    const current = this.panes.get(paneId)
+    if (current?.precise && !current.ended) { this.publish(paneId, current); return }
+    const track = current && !current.precise ? current : this.createTrack(provider, '')
+    if (current?.precise) {
+      // The previous agent's session ended: this is a new agent of the console.
+      current.retired.add(`${current.provider}:${current.sessionId}`)
+      this.stopTimers(current)
+      track.retired = current.retired
+    }
+    this.cancelTimer(track)
+    track.provider = provider
+    this.panes.set(paneId, track)
+    this.publish(paneId, track)
+  }
+
+  /**
+   * The shell's prompt is back. A shell console drops its row whatever the
+   * precision (the agent's process is gone; its end chip went out on its own)
+   * and remembers the session, so a late SessionEnd or launcher end cannot
+   * bring it back. An agent console only drops an approximate (title) track.
+   */
+  private endRuntimeAgent(paneId: string): void {
+    const hosted = this.runtimeAgents.delete(paneId) && this.configProviderOf(paneId) === null
+    const track = this.panes.get(paneId)
+    if (!track || (!hosted && track.precise)) return
+    if (hosted) {
+      const gone = this.hostedRetired.get(paneId) ?? new Set<string>()
+      for (const key of [...track.retired, `${track.provider}:${track.sessionId}`]) gone.add(key)
+      while (gone.size > 64) gone.delete(gone.values().next().value!)
+      this.hostedRetired.set(paneId, gone)
+    }
+    this.clearPane(paneId)
+  }
   /** The panes the desktop shows; with the window focused they are acknowledged too (v2.3). */
   setViewed(paneIds: string[]): void {
     this.viewed = new Set(paneIds)
@@ -316,11 +473,14 @@ export class StatusManager implements PtySink {
       return
     }
     const working = cp >= 0x2800 && cp <= 0x28ff, stopped = cp === 0x2733
+    // v2.4: what the shell shows while no agent runs (looksLikeShellTitle).
+    if (!current && !working && !stopped && t) this.shellTitles.set(paneId, t)
     // v2.2.1: a Codex console's title has its own shape (no Claude glyph or names).
     if (this.providerOf(paneId) === 'codex') { this.codexTitle(paneId, current, t, working); return }
     const present =/^(claude|Claude Code|claude daemon)$/.test(t) || t.startsWith('claude · ')
     if (!working && !stopped && !present) {
-      if (current && !current.timer) current.timer = setTimeout(() => this.clearPane(paneId), 3000)
+      // v2.4: with a runtime agent, the shell's D/A mark ends the row, never a title.
+      if (current && !current.timer && !this.runtimeAgents.has(paneId)) current.timer = setTimeout(() => this.clearPane(paneId), 3000)
       return
     }
     const track = current ?? this.createTrack('claude', '')
@@ -344,18 +504,26 @@ export class StatusManager implements PtySink {
    * v2.2.1: the title-only fallback of a Codex console (no bridge: the
    * integration is off or the command passes `--no-daemon`). A spinner is a
    * working turn and the text after it is kept; that same text with no spinner
-   * is Codex back at its prompt (done, the track stays); any other title is
-   * the shell after codex quit, cleared after 3 s like Claude's.
+   * is Codex back at its prompt (done, the track stays, codexIdleMatch).
+   * v2.4: only the shell's own title (looksLikeShellTitle) clears it, after
+   * 3 s like Claude's, and never while the shell's marks say an agent runs;
+   * any other title keeps the row (working becomes done). On a pty with no
+   * shell marks an unknown title that stays CODEX_STALE_TITLE_MS clears it
+   * too, or a custom prompt title would keep the row forever.
    */
   private codexTitle(paneId: string, current: PaneTrack | undefined, title: string, working: boolean): void {
     if (!working) {
       if (!current) return
-      if (current.titleText !== undefined && sameTitle(sanitize(title, true), current.titleText)) {
-        this.cancelTimer(current)
-        if (current.activity !== 'done') current.activity = current.activity === 'working' ? 'done' : 'idle'
-        current.pending.clear()
-        this.publish(paneId, current)
-      } else if (!current.timer) current.timer = setTimeout(() => this.clearPane(paneId), 3000)
+      const idle = current.titleText !== undefined && codexIdleMatch(title, current.titleText)
+      if (!idle && looksLikeShellTitle(title, this.shellTitles.get(paneId))) {
+        if (!this.runtimeAgents.has(paneId)) this.armClear(paneId, current, 3000)
+        return
+      }
+      this.cancelTimer(current)
+      if (current.activity !== 'done') current.activity = current.activity === 'working' ? 'done' : 'idle'
+      current.pending.clear()
+      this.publish(paneId, current)
+      if (!idle && !this.shellKeys.has(paneId)) this.armClear(paneId, current, CODEX_STALE_TITLE_MS)
       return
     }
     // A track made by the Claude rules before the config named the preset is relabelled.
@@ -513,6 +681,8 @@ export class StatusManager implements PtySink {
   onAgentEvent(evt: AgentEvent): void {
     if (this.ptys.get(evt.paneId) !== evt.ptyId) return
     let track = this.panes.get(evt.paneId)
+    // v2.4: the shell's prompt already ended this agent (D/A); only a new start counts.
+    if (!track && evt.kind !== 'start' && this.hostedRetired.get(evt.paneId)?.has(`${evt.provider}:${evt.sessionId}`)) return
     if (track?.retired.has(`${evt.provider}:${evt.sessionId}`)) {
       if (evt.kind === 'start' && (evt.provider === 'codex' || (track.ended && track.sessionId === evt.sessionId))) track.retired.delete(`${evt.provider}:${evt.sessionId}`)
       else return
@@ -629,6 +799,8 @@ export class StatusManager implements PtySink {
    */
   onUserInput(ptyId: string, paneId: string, data: string, origin: PtyInputOrigin = 'user'): void {
     if (this.ptys.get(paneId) !== ptyId) return
+    // v2.4: an `agent=` mark needs a user Enter just before it (never an automation's).
+    if (origin === 'user' && this.shellKeys.has(paneId) && data.includes('\r')) this.enterAt.set(paneId, Date.now())
     const track = this.panes.get(paneId)
     if (!track) return
     // v2.3: real input from any device also acknowledges the console (its
@@ -687,6 +859,14 @@ export class StatusManager implements PtySink {
     return { provider, sessionId, retired: new Set(), precise: false, activity: 'idle', pending: new Map(), seen: new Set(), turnId: '', turn: 0, timer: null, updatedAt: now, ended: false, lastState: 'idle', stateSince: now, emittedAt: 0, detailTimer: null, subSessions: new Map(), waitTimer: null, lastHookAt: 0, interruptTimer: null, stateSeq: 0, ackedSeq: 0 }
   }
   private cancelTimer(track: PaneTrack): void { if (track.timer) clearTimeout(track.timer); track.timer = null }
+  /** v2.4: clears the pane in `ms`, unless a clear already armed fires sooner. */
+  private armClear(paneId: string, track: PaneTrack, ms: number): void {
+    const at = Date.now() + ms
+    if (track.timer && (track.clearAt ?? Infinity) <= at) return
+    this.cancelTimer(track)
+    track.clearAt = at
+    track.timer = setTimeout(() => this.clearPane(paneId), ms)
+  }
   private cancelDetail(track: PaneTrack): void { if (track.detailTimer) clearTimeout(track.detailTimer); track.detailTimer = null; track.deferredCause = undefined }
   /** Every timer of a track that is going away. */
   private stopTimers(track: PaneTrack): void {
@@ -777,6 +957,8 @@ export class StatusManager implements PtySink {
       pendingCount: track.pending.size, updatedAt: track.updatedAt, stateSince: track.stateSince,
       attention: this.attentionOf(track, state),
     }
+    // v2.4: a shell console running a hand-typed agent (the saved type stays shell).
+    if (this.runtimeAgents.has(paneId) && this.configProviderOf(paneId) === null) evt.hosted = true
     if (track.topic) evt.topic = track.topic
     if (track.firstPrompt) evt.firstPrompt = track.firstPrompt
     if (track.provider === 'claude' && track.cacheSince) evt.cacheSince = track.cacheSince
@@ -814,8 +996,12 @@ export class StatusManager implements PtySink {
     this.sshMisses.set(paneId, Date.now())
     return false
   }
-  /** effectiveProvider of the pane and its preset (same reading as resolveLaunch), or null. Cached per spawn; misses retried after 5 s. */
+  /** v2.4: the agent the pane's shell runs right now (shell marks), else the config's. */
   private providerOf(paneId: string): AgentProvider | null {
+    return this.runtimeAgents.get(paneId) ?? this.configProviderOf(paneId)
+  }
+  /** effectiveProvider of the pane and its preset (same reading as resolveLaunch), or null. Cached per spawn; misses retried after 5 s. */
+  private configProviderOf(paneId: string): AgentProvider | null {
     const cached = this.paneProviders.get(paneId)
     if (cached !== undefined) return cached
     if (Date.now() - (this.providerMisses.get(paneId) ?? -Infinity) < 5000) return null
@@ -863,7 +1049,7 @@ export class StatusManager implements PtySink {
     if (!evt.attention) this.releaseAttention(paneId)
     // Only-detail changes are coalesced to one emission per 500 ms per pane
     // (E5-FR-02); state, pending, session and notifications go out at once.
-    const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.precise, evt.sessionId, evt.cwd, evt.waiting, evt.attention, evt.model, evt.effort, evt.ultracode])
+    const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.hosted, evt.precise, evt.sessionId, evt.cwd, evt.waiting, evt.attention, evt.model, evt.effort, evt.ultracode])
     const immediate = transition || !!key || evt.notify || (!!cause && IMMEDIATE_KINDS.has(cause.kind)) || signature !== track.emitted
     if (immediate || now - track.emittedAt >= DETAIL_THROTTLE_MS) {
       this.cancelDetail(track)

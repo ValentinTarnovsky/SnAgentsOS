@@ -11,6 +11,9 @@ import type { AgentEvent } from './events'
 import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import { samePath, statusBinDirs } from '../pty/shellResolver'
 
+/** v2.4: how often environment() may look for codex.exe again while the bridge is down. */
+export const CODEX_RESCAN_MS = 60_000
+
 interface Binding { paneId: string; ptyId: string; cwd: string; env?: NodeJS.ProcessEnv; sessionId?: string; finished?: boolean; socket?: WebSocket; child?: ChildProcessWithoutNullStreams }
 
 /** Private loopback bridge. Each PTY gets a random bearer token and a single TUI connection. */
@@ -24,19 +27,26 @@ export class CodexBridge implements PtySink {
   private error: string | undefined
   private enabled = false
   private startPromise: Promise<void> | null = null
+  /** v2.4: no codex.exe on PATH at the last scan; a neutral state (on by default, Codex not installed). */
+  private missing = false
+  /** When the last start scanned for the executable (the lazy rescan's clock). */
+  private lastScan = 0
   constructor(private directory: () => string, private runtimePath: string, private emit: (evt: AgentEvent) => void) {}
-  get health() { return { enabled: this.enabled, available: !!this.executable, connected: [...this.bindings.values()].filter(b => b.socket?.readyState === WebSocket.OPEN).length, error: this.error } }
+  get health() { return { enabled: this.enabled, available: !!this.executable, connected: [...this.bindings.values()].filter(b => b.socket?.readyState === WebSocket.OPEN).length, error: this.error, ...(this.enabled && this.missing ? { missing: true } : {}) } }
   async configure(enabled: boolean): Promise<void> {
     this.enabled = enabled
     if (!enabled) return // Existing sessions keep their transport until they exit.
-    if (this.server) return
+    // A start in flight first: its server exists before it listens.
     if (this.startPromise) return this.startPromise
+    if (this.server) return
     this.startPromise = this.start().catch(() => { this.error = 'Could not prepare the Codex launcher'; this.server?.close(); this.server = null }).finally(() => { this.startPromise = null })
     return this.startPromise
   }
   private async start(): Promise<void> {
+    this.lastScan = Date.now()
     this.executable = this.findExecutable()
-    if (!this.executable) { this.error = 'Codex executable not found in PATH'; return }
+    this.missing = !this.executable
+    if (!this.executable) { this.error = undefined; return }
     const server = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 32 * 1024 * 1024,
       verifyClient: ({ req }: { req: IncomingMessage }) => !req.headers.origin && typeof req.headers.authorization === 'string' && /^(Bearer|Launch) /.test(req.headers.authorization) && this.bindings.has(req.headers.authorization.slice(7)),
     })
@@ -84,7 +94,11 @@ export class CodexBridge implements PtySink {
     this.error = undefined
   }
   environment(ptyId: string, paneId: string, cwd: string): Record<string, string> {
-    if (!this.enabled || !this.server || !this.executable) return {}
+    // v2.4: enabled with no bridge (Codex installed later, or a failed start):
+    // scan again at most once a minute; the next console spawned gets it
+    // (this one never: the server starts listening asynchronously).
+    if (this.enabled && !this.server && !this.startPromise && Date.now() - this.lastScan >= CODEX_RESCAN_MS) { void this.configure(true); return {} }
+    if (!this.enabled || !this.server || !this.executable || !this.port) return {}
     const route = randomBytes(24).toString('hex')
     this.bindings.set(route, { ptyId, paneId, cwd })
     return { [AGENT_ENV.codexUrl]: `ws://127.0.0.1:${this.port}`, [AGENT_ENV.codexToken]: route, [AGENT_ENV.realCodex]: this.executable, [AGENT_ENV.codexShim]: this.directory() }

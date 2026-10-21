@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { ArrowLeftRight, ChevronDown, ChevronUp, RefreshCw, Settings as SettingsIcon } from 'lucide-react'
 import type { UsageRow } from '@shared/ipc-contract'
-import type { ClaudeAccountRole, ClaudeAccountsState } from '@shared/claude-accounts'
+import type { ClaudeAccountsState } from '@shared/claude-accounts'
 import { visibleUsageRows } from '@shared/usageRows'
 import { useAppStore } from '@/lib/store'
 import { useUsageStore } from '@/lib/usageStore'
@@ -138,15 +138,15 @@ export interface AccountChipView {
   label: string
   /** Tooltip and menu name. */
   title: string
-  /** "Use <other>" rows. */
-  items: Array<{ role: ClaudeAccountRole; label: string; disabled: boolean; hint?: string }>
+  /** "Use <other>" rows, one per other saved account, by priority. */
+  items: Array<{ id: string; rank: number; label: string; disabled: boolean; hint?: string }>
   manage: string
 }
 
 /**
  * The Claude account chip of the usage panel (app 2.3.0): shown once an
- * account is saved, with a quick switch to the other one and a way to
- * Settings. Pure, for the tests.
+ * account is saved, with a quick switch to every other one (app 2.4.0: all
+ * of them, by priority) and a way to Settings. Pure, for the tests.
  */
 export function accountChipView(state: ClaudeAccountsState | null, t: TFn): AccountChipView | null {
   if (!state || !state.supported || state.accounts.length === 0) return null
@@ -156,7 +156,8 @@ export function accountChipView(state: ClaudeAccountsState | null, t: TFn): Acco
   const items = state.accounts
     .filter((a) => a.id !== active?.id)
     .map((a) => ({
-      role: a.role,
+      id: a.id,
+      rank: a.rank,
       label: t('claudeaccounts.chip.use', { name: accountName(a, t) }),
       disabled: a.needsRecapture || unknownLive,
       hint: a.needsRecapture ? t('claudeaccounts.err.locked') : unknownLive ? t('claudeaccounts.err.unknownLive') : undefined,
@@ -164,7 +165,7 @@ export function accountChipView(state: ClaudeAccountsState | null, t: TFn): Acco
   return { label, title: t('claudeaccounts.chip.title', { name: label }), items, manage: t('claudeaccounts.chip.manage') }
 }
 
-/** The chip itself: a click opens "Use <other>" and "Manage accounts". */
+/** The chip itself: a click opens one "Use <name>" per other account and "Manage accounts". */
 export function AccountChip() {
   const t = useT()
   const state = useAccountsStore((s) => s.state)
@@ -202,7 +203,7 @@ export function AccountChip() {
               icon: ArrowLeftRight,
               disabled: i.disabled || busy,
               hint: i.hint,
-              onClick: () => void switchAccount(i.role),
+              onClick: () => void switchAccount(i.id),
             })),
             { label: view.manage, icon: SettingsIcon, separated: view.items.length > 0, onClick: () => openSettings('claudeaccounts') },
           ]}

@@ -12,6 +12,7 @@ import { toast } from './toast'
 import { translate } from '@/i18n'
 import { toggleChangesPanel } from './changesPanel'
 import { toggleSidePanel } from './sidePanels'
+import { runDictateShortcut } from './dictation'
 import { panelKeyOf } from './changes'
 import { waitsOnUser } from '@shared/status'
 import {
@@ -178,6 +179,9 @@ function runAction(id: ActionId): void {
       break
     case 'toggleNotes':
       toggleSidePanel('notes')
+      break
+    case 'dictate':
+      runDictateShortcut()
       break
     case 'agentsBoard': {
       // E5-FR-27: never over a modal; the board closes itself on Esc or a pick.

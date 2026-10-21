@@ -8,6 +8,7 @@ import { z } from 'zod'
 import type { RemoteClientMsg } from './remote-protocol'
 import { WS_NOTE_ID_RE, WS_NOTE_PHONE_MAX } from './ws-notes'
 import { isClaudeModel } from './agentTune'
+import { ACCOUNT_ID_RE } from './claude-accounts'
 
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/)
 const id = z.string().min(1).max(128)
@@ -112,7 +113,9 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     enter: z.boolean(),
   }),
   // app 2.3.0: Claude account switch from the phone (main re-validates the role).
-  z.object({ kind: z.literal('claudeAccountUse'), role: z.enum(['primary', 'secondary']) }),
+  // app 2.4.0: or by id. A discriminatedUnion member takes no .refine, so
+  // "exactly one of role and id" is checked by the executor (bad_target).
+  z.object({ kind: z.literal('claudeAccountUse'), role: z.enum(['primary', 'secondary']).optional(), id: z.string().regex(ACCOUNT_ID_RE).optional() }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [

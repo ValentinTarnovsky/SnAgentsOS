@@ -97,6 +97,7 @@ export const CH = {
   UPDATE_PROGRESS: 'update:progress', // main -> renderer ({ percent, transferred, total })
   UPDATE_GET_STATE: 'update:getState', // invoke -> UpdateState (main owns the phase, E4-FR-37)
   UPDATE_STATE: 'update:state', // main -> renderer (UpdateState on every phase change)
+  UPDATE_NOT_APPLIED: 'update:notApplied', // invoke -> UpdateNotApplied | null (one-shot, app 2.4.0)
 
   // Live usage / quota bars (Claude OAuth + Codex rollout + custom models)
   USAGE_GET: 'usage:get', // invoke -> UsageSnapshot (cached, kicks a refresh)
@@ -106,11 +107,12 @@ export const CH = {
 
   // Claude multi-account (app 2.3.0): main owns accounts and logins; no token ever crosses
   ACCOUNTS_GET_STATE: 'accounts:getState', // invoke -> ClaudeAccountsState
-  ACCOUNTS_CAPTURE: 'accounts:capture', // invoke (AccountsCaptureReq) -> AccountsOpRes
-  ACCOUNTS_SWITCH: 'accounts:switch', // invoke ({ target, reason: 'manual'|'phone' }) -> AccountsOpRes
+  ACCOUNTS_CAPTURE: 'accounts:capture', // invoke (AccountsCaptureReq { label?, replaceId? }) -> AccountsOpRes
+  ACCOUNTS_SWITCH: 'accounts:switch', // invoke ({ target: id | 'primary' | 'secondary', reason: 'manual'|'phone' }) -> AccountsOpRes
   ACCOUNTS_REMOVE: 'accounts:remove', // invoke ({ id }) -> AccountsOpRes
   ACCOUNTS_RENAME: 'accounts:rename', // invoke ({ id, label <= 40 }) -> AccountsOpRes
-  ACCOUNTS_SET_PRIMARY: 'accounts:setPrimary', // invoke ({ id }) -> AccountsOpRes
+  ACCOUNTS_SET_PRIMARY: 'accounts:setPrimary', // invoke ({ id }) -> AccountsOpRes (2.4.0: move to rank 0)
+  ACCOUNTS_REORDER: 'accounts:reorder', // invoke ({ ids }, every saved id once) -> AccountsOpRes (app 2.4.0)
   ACCOUNTS_RESUME_AUTO: 'accounts:resumeAuto', // invoke -> AccountsOpRes
   ACCOUNTS_SET_CONFIG: 'accounts:setConfig', // send (ClaudeAccountsSettings, normalized in main)
   ACCOUNTS_CHANGED: 'accounts:changed', // main -> renderer (ClaudeAccountsState)
@@ -154,6 +156,12 @@ export const CH = {
   POWER_SET_CONFIG: 'power:setConfig', // send (AwakeMode); main answers with power:state
   POWER_STATE: 'power:state', // main -> renderer (PowerState, on every change)
   POWER_GET_STATE: 'power:getState', // invoke -> PowerState
+
+  // Desktop dictation (app 2.4.0): main runs the PowerShell recognizer helper.
+  DICTATION_START: 'dictation:start', // invoke (DictationStartReq) -> DictationStartRes
+  DICTATION_STOP: 'dictation:stop', // invoke (sessionId) -> void ('stop' to the helper, kill after 3 s)
+  DICTATION_EVENT: 'dictation:event', // main -> renderer (DictationEvt)
+  DICTATION_OPEN_SETTINGS: 'dictation:openSettings', // invoke ('speech' | 'microphone') -> boolean (fixed ms-settings URIs)
 
   // Agent behavior settings (settings.agents). awakeDisplay rides here.
   AGENTS_SET_CONFIG: 'agents:setConfig', // send (AgentSettings)

@@ -121,6 +121,10 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('terminal.persistScrollback', 'settings.persistScrollback', 'settings.persistScrollbackHint', { groupKey: 'settings.persistGroup', keywords: ['history', 'historial', 'restart', 'reinicio', 'save', 'guardar', 'scrollback', 'persist'] }),
   e('terminal.persistLines', 'settings.persistLines', undefined, { groupKey: 'settings.persistGroup', keywords: ['history', 'historial', 'lines', 'lineas', 'scrollback'] }),
   e('terminal.snapshotMode', 'settings.snapshotMode', 'settings.snapshotModeHint', { groupKey: 'settings.terminalAdvanced', keywords: ['snapshot', 'headless', 'replay', 'reattach', 'recarga', 'reload', 'avanzado', 'advanced'] }),
+  // Desktop dictation (app 2.4.0).
+  e('terminal.dictationEngine', 'settings.dictation.engine', 'settings.dictation.engineHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'voice', 'voz', 'microphone', 'microfono', 'speech', 'offline', 'online', 'sapi'] }),
+  e('terminal.dictationLanguage', 'settings.dictation.language', 'settings.dictation.languageHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'voice', 'voz', 'language', 'idioma'] }),
+  e('terminal.dictationHeaderButton', 'settings.dictation.headerButton', 'settings.dictation.headerButtonHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'microphone', 'microfono', 'mic', 'header', 'encabezado'], toggle: { path: 'dictation.headerButton' } }),
 
   // Agents
   e('agents.resume', 'settings.agents.resume', 'settings.agents.resumeHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'session', 'sesion', 'chat', 'restart', 'reinicio'] }),
@@ -195,10 +199,10 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('aiusage.custom', 'aiusage.customTitle', 'aiusage.customHint', { keywords: ['custom', 'personalizado', 'model', 'modelo', 'budget', 'presupuesto'] }),
 
   // Claude accounts (app 2.3.0). No inline switch for the automatic toggle: the terms note sits next to the live row.
-  e('claudeaccounts.accounts', 'claudeaccounts.title', 'claudeaccounts.hint', { summary: true, keywords: ['account', 'accounts', 'cuenta', 'cuentas', 'login', 'claude', 'switch', 'cambiar', 'subscription', 'suscripcion', 'primary', 'principal', 'secondary', 'secundaria'] }),
+  e('claudeaccounts.accounts', 'claudeaccounts.title', 'claudeaccounts.hint', { summary: true, keywords: ['account', 'accounts', 'cuenta', 'cuentas', 'login', 'claude', 'switch', 'cambiar', 'subscription', 'suscripcion', 'primary', 'principal', 'secondary', 'secundaria', 'priority', 'prioridad', 'order', 'orden'] }),
   e('claudeaccounts.auto', 'claudeaccounts.auto', 'claudeaccounts.autoHint', { keywords: ['account', 'cuenta', 'automatic', 'automatico', 'switch', 'cambiar', 'limit', 'limite', 'claude'] }),
   e('claudeaccounts.switchAt', 'claudeaccounts.switchAt', 'claudeaccounts.switchAtHint', { keywords: ['account', 'cuenta', 'threshold', 'umbral', 'percent', 'porcentaje', 'limit', 'limite'] }),
-  e('claudeaccounts.return', 'claudeaccounts.return', 'claudeaccounts.returnHint', { keywords: ['account', 'cuenta', 'primary', 'principal', 'return', 'volver', 'reset'] }),
+  e('claudeaccounts.return', 'claudeaccounts.return', 'claudeaccounts.returnHint', { keywords: ['account', 'cuenta', 'primary', 'principal', 'priority', 'prioridad', 'return', 'volver', 'reset'] }),
   e('claudeaccounts.defer', 'claudeaccounts.defer', 'claudeaccounts.deferHint', { keywords: ['account', 'cuenta', 'working', 'trabajando', 'wait', 'esperar'] }),
   e('claudeaccounts.pollParked', 'claudeaccounts.pollParked', 'claudeaccounts.pollParkedHint', { keywords: ['account', 'cuenta', 'usage', 'uso', 'parked'] }),
   e('claudeaccounts.alertOnSwitch', 'claudeaccounts.alertOnSwitch', 'claudeaccounts.alertOnSwitchHint', { keywords: ['account', 'cuenta', 'alert', 'alerta', 'aviso'] }),

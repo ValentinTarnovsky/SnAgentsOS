@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { initUpdaterEvents, startUpdateScheduler } from '@/lib/updater'
+import { checkUpdateNotApplied } from '@/lib/updateNotApplied'
 import { initUsageEvents, syncUsageConfig } from '@/lib/usageStore'
 import { initAccountsEvents, syncAccountsConfig } from '@/lib/accountsStore'
 import { initRemoteEvents, syncRemoteConfig } from '@/lib/remoteStore'
@@ -206,6 +207,11 @@ export function App() {
   useEffect(() => {
     if (!hydrated) return
     return startUpdateScheduler(() => useAppStore.getState().settings.autoCheckUpdates)
+  }, [hydrated])
+
+  // A silent update that did not land (app 2.4.0): one toast with [Retry].
+  useEffect(() => {
+    if (hydrated) void checkUpdateNotApplied()
   }, [hydrated])
 
   if (!hydrated) {

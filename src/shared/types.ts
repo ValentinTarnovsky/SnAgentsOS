@@ -10,7 +10,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 16
+export const CONFIG_VERSION = 17
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -515,6 +515,12 @@ export interface PaneStatusEvt extends PaneStatusDetails {
    */
   delivery?: 'native' | 'inApp' | 'none'
   provider?: AgentProvider
+  /**
+   * v2.4: a shell console (no agent in its config) running `claude` / `codex`
+   * typed by hand (OSC 133 `agent=` of the integrated PowerShell). `provider`
+   * names that agent; the saved pane type never changes. Absent = no.
+   */
+  hosted?: true
   reason?: AttentionReason
   pendingCount?: number
   updatedAt?: number
@@ -585,7 +591,8 @@ export interface NtfySettings {
 export interface StatusHealth {
   desktop: { error: 'blocked' | 'failed' | 'unavailable' | null }
   claude: StatusHooksStatusRes
-  codex: { enabled: boolean; available: boolean; connected: number; error?: string }
+  /** v2.4: `missing` = enabled but no codex.exe on PATH yet (a neutral state, not an error; rescanned lazily). */
+  codex: { enabled: boolean; available: boolean; connected: number; error?: string; missing?: boolean }
   discord: { lastSuccessAt: number | null; error: string | null; queued: number }
   /** ntfy channel (E2-FR-40), same shape as discord. */
   ntfy?: { lastSuccessAt: number | null; error: string | null; queued: number }
@@ -612,7 +619,10 @@ export interface NotificationSettings {
   hookPort: number
   /** Random token in the hook URL path; generated on first install. */
   hookToken: string
-  /** Private per-console Codex transport for new local terminals. */
+  /**
+   * Private per-console Codex transport for new local terminals. Default on
+   * since schema 17 (app 2.4.0); migrate() turns it on once for older configs.
+   */
   codexEnabled: boolean
   discord: DiscordSettings
   /**
@@ -657,6 +667,10 @@ export interface AgentSettings {
   sidebarSort: 'manual' | 'smart'
   /** Claude prompt cache countdown chip (E5-FR-28, schema 13). */
   cacheTimer: CacheTimerSettings
+  /** An agent `/rename` also renames its console (schema 17). */
+  syncAgentRename: boolean
+  /** A `claude`/`codex` typed in a shell console is tracked as an agent (OSC 133 `agent=`, schema 17). */
+  shellAgentDetect: boolean
 }
 
 /** Claude prompt cache timer (E5-FR-28, schema 13). */
@@ -682,6 +696,35 @@ export interface AutomationSettings {
   scheduleMaxWaitMin: number
   /** Desktop notification per schedule run (schema 13). */
   scheduleNotify: boolean
+}
+
+/** Desktop dictation engine: 'auto' = online Windows recognizer, offline SAPI fallback (schema 17). */
+export type DictationEngine = 'auto' | 'online' | 'offline'
+
+/** Desktop microphone dictation (schema 17). */
+export interface DictationSettings {
+  engine: DictationEngine
+  /** 'auto' (app language, else the system speech language) or a BCP 47 tag. */
+  language: string
+  /** Microphone button in the workspace header. */
+  headerButton: boolean
+}
+
+/** What a desktop share guest may do: watch, type without Enter, or full control (schema 17). */
+export type SharePerm = 'view' | 'type' | 'full'
+
+/**
+ * Desktop-to-desktop sharing (schema 17). Off until the Share dialog turns it
+ * on; grants, links and the host identity live in dataDir(), never here.
+ */
+export interface ShareSettings {
+  enabled: boolean
+  /** Share listener port (1024..65535), separate from the phone server. */
+  port: number
+  /** Name shown to hosts when joining; '' = the device name. */
+  guestName: string
+  /** Preselected permission in the Share dialog. */
+  defaultPerm: SharePerm
 }
 
 /** Headless snapshot engine (E6-FR-01, schema 12). 'off' also disables scrollback persistence. */
@@ -774,6 +817,10 @@ export interface Settings {
   agents: AgentSettings
   /** Workspace composer defaults (schema 12), CLI and schedule options (schema 13). */
   automation: AutomationSettings
+  /** Desktop microphone dictation (schema 17). */
+  dictation: DictationSettings
+  /** Desktop-to-desktop console and workspace sharing (schema 17). */
+  share: ShareSettings
 }
 
 export interface ConfigFile {

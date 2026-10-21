@@ -23,6 +23,7 @@ export { createAnswerer, answerGroups, usePromptUi, ASK_CONFIRM_MS, SENT_VISIBLE
 export { ANSWER_STEP_MS, MAX_ANSWER_GROUPS, KEY_NEXT } from './src/shared/askAnswerKeys'
 export { loadPromptCards, savePromptCards, PROMPT_CARDS_KEY, loadPrefs } from './src/mobile/src/lib/prefs'
 export { parseMenu, classify, alwaysOption, planOptions, screenRows, readMenu, sameOption, cleanRow, MENU_TAIL_MAX } from './src/mobile/src/lib/promptMenu'
+export * as SharedMenu from './src/shared/promptMenu'
 ` },
   bundle: true, platform: 'node', format: 'cjs', write: false,
   define: { 'process.env.NODE_ENV': '"production"' },
@@ -254,6 +255,9 @@ function rig() {
   const rows = P.screenRows(term)
   check(rows.length === 4 && rows[0] === ' Do you want to proceed?' && rows[2] === "   2. Yes, and don't ask again for npm test commands", 'screenRows reads baseY..baseY+rows and joins soft wraps')
   check(P.alwaysOption(P.readMenu(term))?.n === 2 && P.readMenu(null) === null && P.readMenu({}) === null, 'readMenu binds the parser to a terminal and survives a torn down one')
+  // App 2.4.0: the rules live in src/shared/promptMenu (main reads the headless mirror with them); the phone re-exports.
+  check(P.parseMenu === P.SharedMenu.parseMenu && P.alwaysOption === P.SharedMenu.alwaysOption && P.planOptions === P.SharedMenu.planOptions && P.sameOption === P.SharedMenu.sameOption && P.classify === P.SharedMenu.classify, 'the phone re-exports the shared menu rules')
+  check(JSON.stringify(P.SharedMenu.screenRowsOf(term)) === JSON.stringify(rows), 'screenRowsOf reads a structural terminal (xterm or headless) the same way')
   // The answers: "2" and the plan digit, one group, no Enter.
   const planReq = { id: 'pl', kind: 'plan', toolName: 'ExitPlanMode', summary: 'Plan' }
   check(P.answerGroups(perm('a', 'Bash'), { kind: 'always' }).map(g => g.raw).join('|') === '2', '"Always allow" is the single group "2"')

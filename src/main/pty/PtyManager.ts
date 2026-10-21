@@ -29,7 +29,7 @@ import { sanitizeQueries } from './ansiSanitize'
 import { HeadlessMirror } from './HeadlessMirror'
 import { MAX_FILE_BYTES, capBytes, countLines, scrollOff, trimPersistAnsi, type PersistSnapshot } from './ScrollbackStore'
 import { DEFAULT_ENGINE, REPLAY_LINES, mirrorScrollback, normalizeEngine } from '@shared/terminalEngine'
-import { OSC133_PROMPT_START, SHELL_INTEGRATION_ENV, buildIntegrationArgs, shouldIntegrate, stripOsc133 } from './powershellIntegration'
+import { OSC133_PROMPT_START, SHELL_INTEGRATION_ENV, SHELL_MARK_ENV, buildIntegrationArgs, shouldIntegrate, stripOsc133 } from './powershellIntegration'
 
 interface Entry {
   pty: IPty
@@ -108,6 +108,8 @@ interface Entry {
   promptTimer: ReturnType<typeof setTimeout> | null
   /** Launched with the PowerShell integration (E6-FR-25). */
   integrated: boolean
+  /** v2.4: nonce of this pty's OSC 133 marks (SHELL_MARK_ENV); '' without the integration. */
+  mark: string
   /** Types the initial command on the first prompt mark (E6-FR-30); null when not waiting. */
   readyWait: (() => void) | null
   /** Last bytes of the previous chunk, so a mark split across chunks is still seen. */
@@ -452,6 +454,10 @@ export class PtyManager {
     // PowerShell integration (E6-FR-25): only a bare PowerShell on Windows.
     const integrated = shouldIntegrate({ shell, args: req.args, platform: this.platform, enabled: this.engine.shellIntegration === true })
     if (integrated) env[SHELL_INTEGRATION_ENV] = '1'
+    // v2.4: a fresh nonce per pty authenticates its marks (a preset env never supplies one).
+    const mark = integrated ? randomUUID().replace(/-/g, '') : ''
+    delete env[SHELL_MARK_ENV]
+    if (mark) env[SHELL_MARK_ENV] = mark
     let proc: IPty
     try { proc = spawn(shell, integrated ? buildIntegrationArgs() : (req.args ?? []), {
       name: 'xterm-256color',
@@ -503,6 +509,7 @@ export class PtyManager {
       prompt,
       promptTimer: null,
       integrated,
+      mark,
       readyWait: null,
       readyTail: '',
     }
@@ -1108,6 +1115,11 @@ export class PtyManager {
   getSpawnCwd(paneId: string): string | undefined {
     const ptyId = this.byPane.get(paneId)
     return ptyId ? this.entries.get(ptyId)?.spawnCwd : undefined
+  }
+
+  /** v2.4: the OSC 133 nonce of an integrated pty (StatusManager checks `k=` against it), else undefined. */
+  shellMarkOf(ptyId: string): string | undefined {
+    return this.entries.get(ptyId)?.mark || undefined
   }
 
   /** Epoch ms of the last input written to the pane (desktop or phone), or undefined. */

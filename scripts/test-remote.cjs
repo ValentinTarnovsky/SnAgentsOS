@@ -176,6 +176,8 @@ function testToRemoteStatus(api) {
   // v2.3 attention: true and false are copied (false explicitly), absent stays absent.
   check(api.toRemoteStatus(evt('p1', 'done', { attention: true })).attention === true && api.toRemoteStatus(evt('p1', 'action', { attention: false })).attention === false, 'toRemoteStatus copies attention true and false')
   check(!('attention' in api.toRemoteStatus(evt('p1', 'done'))), 'toRemoteStatus omits attention when the desktop sends none')
+  // v2.4: a shell console running a hand-typed agent.
+  check(api.toRemoteStatus(evt('p1', 'idle', { provider: 'codex', hosted: true })).hosted === true && !('hosted' in api.toRemoteStatus(evt('p1', 'idle'))), 'toRemoteStatus copies hosted, absent stays absent')
   // v2.3 agentTune read-back: model, effort and ultracode (false too) are copied; absent stays absent.
   const tuned = api.toRemoteStatus(evt('p1', 'idle', { model: 'claude-opus-4-5', effort: 'high', ultracode: false }))
   check(tuned.model === 'claude-opus-4-5' && tuned.effort === 'high' && tuned.ultracode === false, 'toRemoteStatus copies model, effort and ultracode')
@@ -1002,7 +1004,10 @@ async function testAutomationRelay() {
   check(!('text' in tune({ kind: 'picker', text: '/exit' }).action.set), 'a stray text in the set is stripped')
   // app 2.3.0 claudeAccountUse: a role only, behind the bucket.
   check(!!frame({ kind: 'claudeAccountUse', role: 'secondary' }) && !!frame({ kind: 'claudeAccountUse', role: 'primary' }), 'the ctl schema accepts claudeAccountUse with a role')
-  check(!frame({ kind: 'claudeAccountUse', role: 'x' }) && !frame({ kind: 'claudeAccountUse' }) && !frame({ kind: 'claudeAccountUse', role: 'acc_0123456789ab' }), 'claudeAccountUse refuses any other role (no ids from the phone)')
+  check(!frame({ kind: 'claudeAccountUse', role: 'x' }) && !frame({ kind: 'claudeAccountUse', role: 'acc_0123456789ab' }), 'claudeAccountUse refuses any other role (an id never goes in role)')
+  // app 2.4.0: or an id, validated by ACCOUNT_ID_RE. "Exactly one" is the executor's check (a union member takes no refine).
+  check(!!frame({ kind: 'claudeAccountUse', id: 'acc_0123456789ab' }) && !frame({ kind: 'claudeAccountUse', id: '../../x' }) && !frame({ kind: 'claudeAccountUse', id: 'acc_0123' }), 'claudeAccountUse { id } takes a well-formed account id only')
+  check(!!frame({ kind: 'claudeAccountUse' }) && !!frame({ kind: 'claudeAccountUse', role: 'primary', id: 'acc_0123456789ab' }), 'neither or both pass the schema and are refused by the executor (bad_target)')
 
   // Main relays both to the renderer as they are and keeps the new snapshot fields.
   const w = world()

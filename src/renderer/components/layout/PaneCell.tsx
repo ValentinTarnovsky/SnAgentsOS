@@ -10,6 +10,7 @@ import {
   GripVertical,
   History,
   Maximize2,
+  Mic,
   Minimize2,
   Minus,
   Paintbrush,
@@ -37,12 +38,15 @@ import { INTERNAL_PATH_MIME, parseInternalPath } from '@/lib/dragNonce'
 import { isPathDrag, nextDragDepth, type DragHoverEvent } from '@/lib/dropHover'
 import { PANE_DRAG_MIME, setPaneDragId } from '@/lib/paneDrag'
 import { iconFor } from '@/lib/icons'
+import { agentIconName, runningAgentOf } from '@/lib/agentNav'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { PaneStatusDot } from '@/components/ui/StatusDot'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/ContextMenu'
 import { ScheduleDialog } from '@/components/layout/ScheduleDialog'
 import { scheduleNextLabel } from '@/lib/scheduleFormat'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
+import { PaneMicButton } from '@/components/terminal/DictationControls'
+import { toggleDictationPane, useDictationStore } from '@/lib/dictation'
 import { PaneErrorBoundary } from '@/components/common/ErrorBoundary'
 import { ResumeChip } from '@/components/agents/ResumeChip'
 import { SleepingOverlay } from '@/components/agents/SleepingOverlay'
@@ -98,7 +102,11 @@ export function PaneCell({
 }: PaneCellProps) {
   const t = useT()
   const lang = useLang()
-  const Icon = iconFor(pane.icon)
+  // v2.4: a shell console running claude / codex shows that agent's icon and
+  // a small badge; its title and saved type stay as they are.
+  const statusProvider = useAppStore((s) => s.paneStatus[pane.id]?.provider)
+  const runningAgent = runningAgentOf(pane, { provider: statusProvider })
+  const Icon = iconFor(agentIconName(pane, { provider: statusProvider }))
   const connections = useAppStore((s) => s.connections)
   // A console moved here from another workspace keeps launching as at home
   // (folder, connection profile): the move only changes where it is shown.
@@ -192,6 +200,8 @@ export function PaneCell({
   const hasSchedule = pane.schedule != null
   const isScheduled = hasSchedule && pane.schedule!.enabled !== false
   const scheduleTip = pane.schedule ? scheduleNextLabel(pane.schedule, t, lang) : t('pane.schedule')
+  // Desktop dictation (app 2.4.0): the menu entry is there even with the header mic hidden.
+  const dictating = useDictationStore((s) => s.phase !== 'idle' && s.scope === `pane:${pane.id}`)
 
   const startRename = (): void => {
     setNameVal(pane.title)
@@ -279,6 +289,18 @@ export function PaneCell({
       icon: Clock,
       onClick: () => setScheduling(true),
     },
+    ...(window.snApi.platform === 'win32'
+      ? [
+          {
+            label: dictating ? t('dictation.stop') : t('dictation.start'),
+            icon: Mic,
+            onClick: () => {
+              toggleDictationPane(pane.id)
+              requestAnimationFrame(() => focusPane(pane.id))
+            },
+          },
+        ]
+      : []),
     ...(offer.show
       ? [
           {
@@ -393,6 +415,15 @@ export function PaneCell({
         ) : (
           // The topic gives way first: it shrinks to nothing before the title truncates.
           <span className="flex min-w-0 flex-1 items-baseline overflow-hidden text-xs" title={topic ? `${pane.title} · ${topic}` : undefined}>
+            {runningAgent && (
+              <span
+                data-pane-running-agent={runningAgent}
+                title={t('pane.runningAgent.tip')}
+                className="mr-1.5 shrink-0 rounded border border-border px-1 text-[10px] leading-4 text-text-secondary"
+              >
+                {t(runningAgent === 'codex' ? 'pane.runningAgent.codex' : 'pane.runningAgent.claude')}
+              </span>
+            )}
             <span className="min-w-0 truncate font-medium text-text-secondary">{pane.title}</span>
             <PaneStatusLine paneId={pane.id} />
             {topic && (
@@ -426,6 +457,7 @@ export function PaneCell({
             {t('pane.exited')}
           </span>
         )}
+        <PaneMicButton paneId={pane.id} />
         <Tooltip label={scheduleTip}>
           <button
             draggable={false}

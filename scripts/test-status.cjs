@@ -353,7 +353,7 @@ async function main() {
     const notifier = new DiscordNotifier(async () => { attempts++; return new Response('{}', { status: attempts < 3 ? 503 : 200 }) }, async () => {})
     check((await notifier.test(discord)).ok && attempts === 3, 'transient HTTP failures retry with bound')
   }
-  check(settings.discord.enabled === false && settings.codexEnabled === false, 'old config has safe integration defaults')
+  check(settings.discord.enabled === false && settings.codexEnabled === true, 'old config has safe integration defaults (Discord off) and Codex on since schema 17')
   check(notificationSettingsSchema.parse({ discord: { enabled: true } }).discord.notifyAction, 'partial Discord settings migrate field defaults')
 
   for (const [args, remote] of [[[], true], [['resume'], true], [['resume', '--no-daemon'], false], [['-c', 'x=1', 'exec', 'task'], false], [['--model', 'exec', 'task'], true], [['--remote=ws://localhost:1'], false], [['--version'], false]]) {
@@ -390,6 +390,29 @@ async function main() {
     })
     check(accepted, 'authenticated launch context accepted without starting a model')
   } finally { bridge.dispose() }
+  // v2.4: on by default, so no codex.exe is a neutral state, rescanned lazily.
+  {
+    const missing = new CodexBridge(() => path.join(temporary, 'launcher-missing'), 'test-runtime.js', () => {})
+    let scans = 0
+    missing.findExecutable = () => { scans++; return '' }
+    try {
+      await missing.configure(true)
+      const hl = missing.health
+      check(hl.enabled && !hl.available && hl.missing === true && hl.error === undefined, 'v2.4: enabled without codex.exe is "missing", not an error')
+      check(Object.keys(missing.environment('p1', 'pane', temporary)).length === 0 && scans === 1, 'no Codex env and no rescan within the minute')
+      await missing.configure(false)
+      missing.lastScan -= 60_000
+      missing.environment('p1', 'pane', temporary)
+      check(missing.health.missing === undefined && scans === 1, 'disabled: never "missing", never rescanned')
+      await missing.configure(true)
+      missing.lastScan -= 60_000
+      missing.findExecutable = () => { scans++; return process.execPath }
+      check(Object.keys(missing.environment('p2', 'pane', temporary)).length === 0, 'the console that triggers the rescan still spawns without the shim')
+      await missing.configure(true)
+      const env = missing.environment('p3', 'pane', temporary)
+      check(scans === 3 && missing.health.available && missing.health.missing === undefined && missing.health.error === undefined && !!env[AGENT_ENV.codexToken], 'a Codex installed later is found on the rescan; the next console gets the bridge')
+    } finally { missing.dispose() }
+  }
   const { HookServer, backgroundTasks, nestedFromHeaders, parseHookPayload } = load('src/main/status/HookServer.ts')
   // v2.2: Stop background_tasks and the sub-session marks.
   const bg = backgroundTasks([
@@ -604,12 +627,12 @@ async function schemaV11Checks() {
     connections: [{ id: 'c1', name: 'SSH', steps: [{ send: 'ssh host', waitFor: 'password:', secret: false }] }],
     keyButtons: [{ id: 'k1', label: 'Esc', seq: '\u001b' }],
   }
-  check(CONFIG_VERSION === 16, 'CONFIG_VERSION is 16 (R31-00, app 2.3.0)')
+  check(CONFIG_VERSION === 17, 'CONFIG_VERSION is 17 (app 2.4.0)')
   const c = parseConfig(JSON.parse(JSON.stringify(v10)))
   check(c && c.version === CONFIG_VERSION, 'a v10 config parses and is stamped with the current version')
   const st = c.settings
   check(st.awakeMode === 'auto' && st.terminalUnicode11 === true && st.terminalAgentEndChip === true && st.notifications.inAppWhenFocused === true, 'v10 gains awakeMode, terminalUnicode11, terminalAgentEndChip and inAppWhenFocused defaults')
-  check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual', cacheTimer: { enabled: false, ttlMinutes: 5 } }), 'v10 gains the settings.agents defaults (v11, v12 and v13 keys)')
+  check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual', cacheTimer: { enabled: false, ttlMinutes: 5 }, syncAgentRename: true, shellAgentDetect: true }), 'v10 gains the settings.agents defaults (v11, v12, v13 and v17 keys)')
   check(c.workspaces.every(w => w.agentsCollapsed === undefined && w.panes.every(p => p.lastSession === undefined)), 'agentsCollapsed and lastSession stay absent')
   const same = (a, b) => { if (a === b) return true; if (typeof a !== 'object' || typeof b !== 'object' || !a || !b) return false; return Object.keys(a).every(k => k === 'version' || k === 'snippets' || same(a[k], b[k])) }
   check(same(v10, c), 'every v10 value survives the parse unchanged')
@@ -946,30 +969,105 @@ async function enrichmentChecks() {
     check(h.last().topic === 'Refactor auth', 'a generic title never overwrites a valid topic')
   }
   // v2.2.1: the title-only fallback of a Codex console (no bridge) keeps its row.
+  // v2.4: only the shell's own title clears it; other titles keep it (a pty
+  // with no shell marks clears after CODEX_STALE_TITLE_MS), and the marks of
+  // an integrated PowerShell run claude / codex typed by hand.
+  const codexCfg = (type = 'codex', presetId) => ({ workspaces: [{ id: 'w', name: 'W', panes: [{ id: 'pane', type, title: 'Codex', ...(presetId ? { presetId } : {}) }] }], presets: [{ id: 'p-cdx', name: 'cdx', type: 'codex', command: 'cdx' }] })
+  /** rich() whose timers fire at their deadline (advance) and whose pty may carry a shell-mark nonce. */
+  function timed({ config = null, key } = {}) {
+    const events = [], sessionEnds = [], timers = new Map()
+    let seq = 0, clock = 1000
+    class FakeDate extends Date { static now() { return clock } }
+    const mod = load('src/main/status/StatusManager.ts', {
+      require: id => id === 'electron' ? { Notification: { isSupported: () => false } } : require(id),
+      setTimeout: (fn, ms = 0) => { timers.set(++seq, { fn, at: clock + (ms || 0) }); return seq }, clearTimeout: id => timers.delete(id), Date: FakeDate,
+    })
+    const manager = new mod.StatusManager(() => ({ isDestroyed: () => false, isFocused: () => false, webContents: { send: (ch, e) => (ch === 'status:sessionEnd' ? sessionEnds : events).push(e) }, flashFrame() {} }), () => config, () => {})
+    manager.setConfig(settings)
+    if (key) manager.setShellMarks(ptyId => (ptyId === 'pty' ? key : undefined))
+    manager.onSpawn('pty', 'pane')
+    const advance = ms => {
+      const end = clock + ms
+      for (;;) {
+        let next = null
+        for (const [id, t] of timers) if (t.at <= end && (!next || t.at < next[1].at)) next = [id, t]
+        if (!next) break
+        timers.delete(next[0]); clock = next[1].at; next[1].fn()
+      }
+      clock = end
+    }
+    const hook = (name, rest = {}) => manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty', sessionId: SID, name, ...rest })
+    return {
+      mod, manager, events, sessionEnds, advance, hook,
+      title: t => manager.reportTitle('pane', t),
+      data: text => manager.onData('pty', 'pane', text),
+      enter: (text = 'codex\r', origin = 'user') => manager.onUserInput('pty', 'pane', text, origin),
+      last: () => events.at(-1), rows: () => manager.snapshot().length, row: () => manager.snapshot()[0],
+    }
+  }
   {
-    const codexCfg = (type = 'codex', presetId) => ({ workspaces: [{ id: 'w', name: 'W', panes: [{ id: 'pane', type, title: 'Codex', ...(presetId ? { presetId } : {}) }] }], presets: [{ id: 'p-cdx', name: 'cdx', type: 'codex', command: 'cdx' }] })
-    const h = rich({ config: codexCfg() })
-    h.manager.reportTitle('pane', '⠋ SnAgentsOS')
+    const h = timed({ config: codexCfg() })
+    h.title('⠋ SnAgentsOS')
     check(h.last().state === 'working' && h.last().provider === 'codex' && h.last().precise === false && h.last().topic === 'SnAgentsOS', 'a Codex spinner title is a working codex track, not a claude one')
-    h.tick(1000); h.manager.reportTitle('pane', 'SnAgentsOS'); h.flush()
-    check(h.last().state === 'done' && h.last().provider === 'codex' && h.manager.snapshot().length === 1, 'the spinner text back without the spinner is done and the track stays')
+    h.advance(1000); h.title('SnAgentsOS')
+    check(h.last().state === 'done' && h.last().provider === 'codex' && h.rows() === 1, 'the spinner text back without the spinner is done and the track stays')
     check(h.last().cacheSince === undefined, 'a Codex track never carries the Claude cache countdown')
-    h.manager.reportTitle('pane', '✳ SnAgentsOS')
-    check(h.events.every(e => e.state !== 'action') && h.manager.snapshot().length === 1, 'the Claude stopped glyph means nothing on a Codex console')
-    h.manager.reportTitle('pane', '⠙ SnAgentsOS')
+    h.advance(60_000)
+    check(h.rows() === 1, 'an idle title keeps the row for good')
+    h.title('✳ SnAgentsOS')
+    check(h.events.every(e => e.state !== 'action') && h.rows() === 1, 'the Claude stopped glyph means nothing on a Codex console')
+    h.title('⠙ SnAgentsOS')
     check(h.last().state === 'working', 'the next spinner opens a new turn')
-    h.manager.reportTitle('pane', 'SnAgentsOS · Ready'); h.flush()
+    h.title('SnAgentsOS · Ready')
     check(h.last().state === 'done', 'extra status words after the idle title still read as done')
-    h.manager.reportTitle('pane', 'Windows PowerShell'); h.flush()
-    check(h.last().state === null && h.manager.snapshot().length === 0, 'any other title (the shell after codex quit) clears the track after 3 s')
-    h.manager.reportTitle('pane', 'SnAgentsOS'); h.flush()
-    check(h.manager.snapshot().length === 0, 'an idle title with no track creates nothing')
-    h.manager.reportTitle('pane', '⠋ SnAgentsOS')
+    for (const idle of ['• SnAgentsOS', 'SnAgentsOS | Fix login', 'SnAgentsOS - main', 'repo: SnAgentsOS']) {
+      h.title('⠋ SnAgentsOS'); h.title(idle); h.advance(30_000)
+      check(h.row()?.state === 'done' && h.rows() === 1, `v2.4: "${idle}" is Codex idle: done, and the row stays`)
+    }
+    h.title('⠋ SnAgentsOS'); h.title('Windows PowerShell'); h.advance(2999)
+    check(h.rows() === 1, 'the shell title waits 3 s before clearing')
+    h.advance(1)
+    check(h.last().state === null && h.rows() === 0, 'the shell title (codex quit) clears the track after 3 s')
+    h.title('SnAgentsOS')
+    check(h.rows() === 0, 'an idle title with no track creates nothing')
+    h.title('⠋ SnAgentsOS')
     h.manager.onAgentEvent({ paneId: 'pane', ptyId: 'pty', provider: 'codex', sessionId: '019a0000-1111-2222-3333-444455556666', kind: 'start' })
     check(h.last().precise === true && h.last().provider === 'codex', 'a precise Codex event takes over the title-only track')
-    h.manager.reportTitle('pane', 'Windows PowerShell'); h.manager.reportTitle('pane', '⠋ other'); h.flush()
-    check(h.last().precise === true && h.last().state === 'idle' && h.manager.snapshot().length === 1, 'titles never move a precise Codex track')
-
+    h.title('Windows PowerShell'); h.title('⠋ other'); h.advance(60_000)
+    check(h.last().precise === true && h.last().state === 'idle' && h.rows() === 1, 'titles never move a precise Codex track')
+  }
+  {
+    // A custom prompt title (no mark can end the row): kept as done, cleared after 10 s.
+    const h = timed({ config: codexCfg() })
+    h.title('⠋ SnAgentsOS'); h.title('dev@box ~/repo')
+    check(h.last().state === 'done' && h.rows() === 1, 'v2.4: an unknown title keeps the row (working becomes done)')
+    h.advance(h.mod.CODEX_STALE_TITLE_MS - 1)
+    check(h.rows() === 1, 'a pty with no shell marks keeps it while the unknown title is younger than 10 s')
+    h.advance(1)
+    check(h.rows() === 0, 'and clears it once that title stayed 10 s (no D mark will ever come)')
+    h.title('⠋ SnAgentsOS'); h.title('dev@box ~/repo'); h.advance(5000); h.title('SnAgentsOS'); h.advance(60_000)
+    check(h.rows() === 1 && h.row().state === 'done', 'the idle title back calls the 10 s clear off')
+    h.title('⠋ SnAgentsOS'); h.title('dev@box ~/repo'); h.title('Windows PowerShell'); h.advance(3000)
+    check(h.rows() === 0, 'a shell title after an unknown one still clears at 3 s (the sooner clear wins)')
+    // The pane's own shell title from before the agent ran also counts as the shell.
+    h.title('C:\\Users\\me\\repo'); h.title('⠋ SnAgentsOS'); h.title('C:\\Users\\me\\repo'); h.advance(3000)
+    check(h.rows() === 0, 'the title the pane had with no track reads as the shell')
+    check(h.mod.looksLikeShellTitle('C:\\WINDOWS\\system32\\cmd.exe') && h.mod.looksLikeShellTitle('Administrator: Windows PowerShell') && h.mod.looksLikeShellTitle('pwsh') && h.mod.looksLikeShellTitle('C:\\Program Files\\PowerShell\\7\\pwsh.exe') && !h.mod.looksLikeShellTitle('SnAgentsOS') && !h.mod.looksLikeShellTitle(''), 'looksLikeShellTitle: PowerShell, pwsh, cmd and their exe paths')
+    check(h.mod.codexIdleMatch('• SnPlugins', 'SnPlugins') && h.mod.codexIdleMatch('SnPlugins | Fix login', 'SnPlugins') && h.mod.codexIdleMatch('SnPlugins - main', 'SnPlugins') && !h.mod.codexIdleMatch('SnPluginsX', 'SnPlugins') && !h.mod.codexIdleMatch('Windows PowerShell', 'SnPlugins') && !h.mod.codexIdleMatch('x', ''), 'codexIdleMatch: leading glyph, separators and whole words only')
+  }
+  {
+    // Integrated pty (agent console launched with the initial command): an unknown
+    // title keeps the row, the authenticated D of the prompt back clears it.
+    const KEY = '0123456789abcdef0123456789abcdef'
+    const h = timed({ config: codexCfg(), key: KEY })
+    h.title('⠋ SnAgentsOS'); h.title(''); h.advance(60_000)
+    check(h.rows() === 1 && h.row().state === 'done', 'v2.4: an empty title keeps the row on an integrated pty (no 10 s clear)')
+    h.data('\x1b]133;D;0\x07\x1b]133;A\x07')
+    check(h.rows() === 1, 'a D / A without the nonce changes nothing')
+    h.data(`\x1b]133;D;0;k=${KEY}\x07`)
+    check(h.rows() === 0, 'the authenticated D clears an approximate track (the agent left the console)')
+  }
+  {
     const preset = rich({ config: codexCfg('custom', 'p-cdx') })
     preset.manager.reportTitle('pane', '⠋ repo')
     check(preset.last().provider === 'codex', 'the provider comes from the preset (effectiveProvider)')
@@ -978,7 +1076,104 @@ async function enrichmentChecks() {
     check(claude.events.some(e => e.provider === 'claude') && claude.last().state === null, 'a Claude console keeps the Claude title rules')
     const shell = rich({ config: codexCfg('shell') })
     shell.manager.reportTitle('pane', '⠋ repo')
-    check(shell.last().provider === 'claude', 'a pane with no agent keeps today\'s fallback')
+    check(shell.last().provider === 'claude' && shell.last().hosted === undefined, 'a shell pane with no shell marks keeps today\'s fallback')
+  }
+  // v2.4: claude / codex typed in an integrated PowerShell (OSC 133 C;agent=;k=).
+  {
+    const KEY = 'fedcba9876543210fedcba9876543210'
+    const C = (agent, k = KEY) => `\x1b]133;C${agent ? ';agent=' + agent : ''}${k ? ';k=' + k : ''}\x07`
+    const D = (code = 0, k = KEY) => `\x1b]133;D;${code}${k ? ';k=' + k : ''}\x07`
+    const A = (k = KEY) => `\x1b]133;A${k ? ';k=' + k : ''}\x07`
+    {
+      const h = timed({ config: codexCfg('shell'), key: KEY })
+      h.enter(); h.data('codex\r\n' + C('codex'))
+      check(h.last().state === 'idle' && h.last().provider === 'codex' && h.last().hosted === true && h.last().precise === false && h.rows() === 1, 'C;agent=codex right after an Enter: an idle hosted codex row at once')
+      h.title('⠋ repo')
+      check(h.last().state === 'working' && h.last().provider === 'codex' && h.last().hosted === true, 'a spinner then is working codex (the runtime agent wins over the shell config)')
+      h.title('repo')
+      check(h.last().state === 'done', 'its idle title is done')
+      h.title('Windows PowerShell'); h.title('dev@box'); h.advance(60_000)
+      check(h.rows() === 1, 'with a runtime agent no title ends the row')
+      h.data('\r\n' + D(0) + '\x1b]7;file://localhost/C:/r\x07' + A() + 'PS C:\\r> \x1b]133;B\x07')
+      check(h.last().state === null && h.rows() === 0, 'the authenticated D (prompt back) clears the row')
+      h.title('⠋ repo')
+      check(h.last().provider === 'claude' && h.last().hosted === undefined, 'after it the pane is a plain shell again')
+    }
+    {
+      const h = timed({ config: codexCfg('shell'), key: KEY })
+      h.enter(); h.data(C('codex', ''))
+      check(h.rows() === 0, 'a mark without the nonce (program output, a cat, an ssh host) creates nothing')
+      h.enter(); h.data(C('codex', '00000000000000000000000000000000'))
+      check(h.rows() === 0, 'a mark with another nonce creates nothing')
+      h.data(`\x1b]133;C;agent=codex;k=${KEY}x\x07`)
+      check(h.rows() === 0, 'a nonce with extra characters is not the nonce')
+      h.enter(); h.advance(2001); h.data(C('codex'))
+      check(h.rows() === 0, 'no user Enter in the last 2 s: ignored')
+      h.enter('codex\r', 'auto'); h.data(C('codex'))
+      check(h.rows() === 0, 'an automation\'s Enter does not count')
+      h.enter(); h.data(C('npx'))
+      check(h.rows() === 0, 'agent= only takes claude or codex')
+      h.enter(); h.data(C(''))
+      check(h.rows() === 0, 'a C with no agent is a plain command')
+      h.enter(); h.data('out\x1b]13'); h.data(`3;C;agent=claude;k=${KEY.slice(0, 7)}`); h.data(`${KEY.slice(7)}\x07`)
+      check(h.rows() === 1 && h.last().provider === 'claude' && h.last().hosted === true, 'a mark split across three chunks still registers')
+      h.data(A())
+      check(h.rows() === 0, 'an A (the prompt, Ctrl+C) ends the runtime agent too')
+    }
+    {
+      const h = timed({ config: codexCfg('shell') })
+      h.enter(); h.data(C('codex'))
+      check(h.rows() === 0, 'a pty without the integration ignores the marks')
+      const off = timed({ config: codexCfg('shell'), key: KEY })
+      off.manager.setAgentSettings({ shellAgentDetect: false })
+      off.enter(); off.data(C('codex'))
+      check(off.rows() === 0, 'agents.shellAgentDetect false: ignored')
+      off.manager.setAgentSettings({}); off.enter(); off.data(C('codex'))
+      check(off.rows() === 1, 'a missing value is the default (on)')
+      off.manager.setAgentSettings({ shellAgentDetect: false }); off.data(D(0))
+      check(off.rows() === 0, 'turned off while an agent runs, its D still ends it')
+      off.manager.setAgentSettings({ shellAgentDetect: true }); off.enter(); off.data(C('codex'))
+      off.manager.onSpawn('pty', 'pane'); off.data(C('codex'))
+      check(off.rows() === 0, 'a respawn drops the runtime agent and the last Enter')
+    }
+    {
+      // Claude typed by hand: its hooks make the track precise; the D ends it, a late hook never brings it back.
+      const h = timed({ config: codexCfg('shell'), key: KEY })
+      h.enter('claude\r'); h.data(C('claude'))
+      h.hook('SessionStart'); h.hook('UserPromptSubmit', { prompt: 'hola' })
+      check(h.last().precise === true && h.last().provider === 'claude' && h.last().state === 'working' && h.last().hosted === true, 'a Claude hook stays precise on a hosted shell row')
+      h.title('Windows PowerShell'); h.advance(5000)
+      check(h.rows() === 1, 'titles never end it')
+      h.data(D(0))
+      check(h.rows() === 0, 'the D clears it on a shell pane, precise or not')
+      h.hook('SessionEnd', { endReason: 'prompt_input_exit' }); h.hook('Stop')
+      check(h.rows() === 0, 'a late SessionEnd or Stop of that session does not bring the row back')
+      h.enter('claude\r'); h.data(C('claude')); h.hook('SessionStart', { sessionId: '0123abcd-0000-4000-8000-0000000000bb' })
+      check(h.rows() === 1 && h.last().precise === true, 'a new claude typed later is tracked again')
+    }
+    {
+      const h = timed({ config: codexCfg('shell'), key: KEY })
+      const CID = '019a0000-1111-2222-3333-444455556666'
+      h.enter(); h.data(C('codex'))
+      h.manager.onAgentEvent({ paneId: 'pane', ptyId: 'pty', provider: 'codex', sessionId: CID, kind: 'start' })
+      check(h.last().precise === true && h.last().hosted === true, 'the Codex bridge takes over the hosted row')
+      h.data(D(0))
+      h.manager.onAgentEvent({ paneId: 'pane', ptyId: 'pty', provider: 'codex', sessionId: CID, kind: 'end' })
+      check(h.rows() === 0, 'a launcher end that arrives after the D does not resurrect the row')
+    }
+    {
+      // An agent console: the D only drops an approximate track; a precise one keeps today's ended / chip rules.
+      const h = timed({ config: codexCfg('claude'), key: KEY })
+      h.enter('claude\r'); h.data(C('claude')); h.hook('SessionStart')
+      check(h.last().hosted === undefined && h.last().precise === true, 'an agent console is never hosted')
+      h.data(D(0))
+      check(h.rows() === 1 && h.last().precise === true, 'the D keeps a precise track on an agent console')
+      const t = timed({ config: codexCfg('codex'), key: KEY })
+      t.enter(); t.data(C('claude')); t.title('⠂ Working')
+      check(t.last().provider === 'claude', 'the runtime agent wins over the config provider (providerOf)')
+      t.data(D(0))
+      check(t.rows() === 0, 'and its D drops the approximate track')
+    }
   }
   // Session id rules (E4-FR-09 d).
   {

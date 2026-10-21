@@ -23,7 +23,8 @@ export const notificationSettingsSchema = z.object({
   sound: z.boolean().default(true), soundId: z.enum(['chime', 'ping', 'pop']).default('chime'), volume: z.number().min(0).max(100).default(70),
   flashTaskbar: z.boolean().default(true), hooksEnabled: z.boolean().default(false),
   hookPort: z.number().int().min(1024).max(65535).default(43917), hookToken: z.string().regex(/^(?:[a-f0-9]{32,64})?$/).default(''),
-  codexEnabled: z.boolean().default(false), discord: discordSettingsSchema.default({}),
+  // Schema 17: on by default (migrate() flips it once for older configs).
+  codexEnabled: z.boolean().catch(true).default(true), discord: discordSettingsSchema.default({}),
   inAppWhenFocused: z.boolean().default(true), // schema 11
   // Schema 12. A non-object value falls back to the defaults instead of
   // rejecting the whole config (the field-level catches only cover fields).
@@ -51,6 +52,9 @@ export const agentSettingsSchema = z.object({
   sidebarSort: z.enum(['manual', 'smart']).catch('manual').default('manual'),
   // Schema 13 (E5-FR-28).
   cacheTimer: cacheTimerSettingsSchema.default({}).catch(() => cacheTimerSettingsSchema.parse({})),
+  // Schema 17 (app 2.4.0).
+  syncAgentRename: z.boolean().catch(true).default(true),
+  shellAgentDetect: z.boolean().catch(true).default(true),
 })
 
 // Schema 12 (E8-FR-08/09).
@@ -64,6 +68,28 @@ export const automationSettingsSchema = z.object({
   scheduleGraceMin: z.number().int().min(0).max(1440).catch(120).default(120),
   scheduleMaxWaitMin: z.number().int().min(1).max(240).catch(30).default(30),
   scheduleNotify: z.boolean().catch(false).default(false),
+})
+
+// Schema 17 (app 2.4.0): desktop dictation. The language is 'auto' or a BCP 47
+// tag; it reaches the helper through a validated env value, never interpolated.
+export const dictationSettingsSchema = z.object({
+  engine: z.enum(['auto', 'online', 'offline']).catch('auto').default('auto'),
+  language: z
+    .string()
+    .max(35)
+    .regex(/^(?:auto|[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3})$/)
+    .catch('auto')
+    .default('auto'),
+  headerButton: z.boolean().catch(true).default(true),
+})
+
+// Schema 17 (app 2.4.0): desktop-to-desktop sharing. Off until the Share dialog
+// turns it on; grants, links and the identity live in dataDir(), never here.
+export const shareSettingsSchema = z.object({
+  enabled: z.boolean().catch(false).default(false),
+  port: z.number().int().min(1024).max(65535).catch(4527).default(4527),
+  guestName: z.string().max(48).catch('').default(''),
+  defaultPerm: z.enum(['view', 'type', 'full']).catch('view').default('view'),
 })
 
 // Schema 13 (E3-FR-42). Only `tailscaleServe` exists (manualCert retired, E3-FR-51).
@@ -373,6 +399,9 @@ const settingsSchema = z.object({
   agents: agentSettingsSchema.default({}),
   // Schema 12: workspace composer defaults; schema 13: CLI and schedule options.
   automation: automationSettingsSchema.default({}).catch(() => automationSettingsSchema.parse({})),
+  // Schema 17: desktop dictation and desktop-to-desktop sharing.
+  dictation: dictationSettingsSchema.default({}).catch(() => dictationSettingsSchema.parse({})),
+  share: shareSettingsSchema.default({}).catch(() => shareSettingsSchema.parse({})),
 })
 
 const keyButtonSchema = z.object({
@@ -423,9 +452,18 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * v14 -> v15 is defaults only (no logic): settings.usage.collapsed (default false).
  * v15 -> v16 is defaults only (no logic): settings.claudeAccounts.* (app 2.3.0,
  * automatic switching off by default).
+ * v16 -> v17 (app 2.4.0) is defaults plus the codexEnabled flip: agents
+ * syncAgentRename / shellAgentDetect, settings.dictation.*, settings.share.*,
+ * and notifications.codexEnabled turns on once for configs older than 17.
+ * Idempotent: the result is stamped 17, so a later `false` survives.
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)
   if (m.dropped > 0) console.warn(`[config] dropped ${m.dropped} invalid quick command(s)`)
-  return { ...m.config, version: CONFIG_VERSION }
+  let out = m.config
+  // configSchema.version is the raw file version, so the flip runs only once.
+  if (config.version < 17) {
+    out = { ...out, settings: { ...out.settings, notifications: { ...out.settings.notifications, codexEnabled: true } } }
+  }
+  return { ...out, version: CONFIG_VERSION }
 }

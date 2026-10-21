@@ -153,6 +153,12 @@ export function inputEffect(data: string, isReport: (data: string) => boolean, p
 export const TUNE_MIN_APP_VERSION = '2.3.0'
 
 /**
+ * First desktop with the 2.4.0 phone features (`answerMenu`, `claudeAccountUse {id}`,
+ * the N-account picker); the phone gates them with `appVersionAtLeast(v, APP_2_4_0)`.
+ */
+export const APP_2_4_0 = '2.4.0'
+
+/**
  * `appVersion` (authOk) is at least `min`. 'dev' counts as new; an empty or
  * unparsable version as old. Pre-release tags are ignored.
  */

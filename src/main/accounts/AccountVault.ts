@@ -1,8 +1,9 @@
-import { promises as fsp, readFileSync, renameSync } from 'fs'
+import { promises as fsp, readFileSync, renameSync, statSync } from 'fs'
 import { join } from 'path'
 import { writeAtomic } from '../fsAtomic'
 import {
   ACCOUNT_ID_RE,
+  MAX_CLAUDE_ACCOUNTS,
   cleanAccountLabel,
   type ClaudeAccountRole,
   type ClaudeAutoPause,
@@ -11,13 +12,21 @@ import {
 import type { VaultCrypto } from './safeCrypto'
 
 /**
- * Saved Claude logins under `dataDir()/claude-accounts/` (app 2.3.0):
- *  - `accounts.json`: metadata only, never a token (UTF-8 without BOM, atomic);
- *  - `<id>.bin`: the captured `.credentials.json`, encrypted with safeStorage;
+ * Saved Claude logins under `dataDir()/claude-accounts/`:
+ *  - `accounts.v2.json` (app 2.4.0): metadata only, never a token (UTF-8
+ *    without BOM, atomic). The array order is the priority (index = rank),
+ *    each account keeps its own `exhaustedUntil`, and `anchorId` is the
+ *    account the user picked last;
+ *  - `accounts.json` (app 2.3.0, two roles): read only to migrate and never
+ *    written, renamed or deleted again, so a downgrade to 2.3.0 finds it as
+ *    it was;
+ *  - `<id>.bin`: the captured `.credentials.json`, encrypted with safeStorage
+ *    (shared by both formats, untouched by the migration);
  *  - `prev.bin`: the live blob replaced by the last switch, encrypted (the
  *    only backup: nothing in plain text next to Claude's file).
- * A corrupt `accounts.json` is set aside as `accounts.json.corrupt-<ts>` and
- * the vault starts empty. Ids are checked with ACCOUNT_ID_RE before any path.
+ * A corrupt `accounts.v2.json` is set aside as `accounts.v2.json.corrupt-<ts>`
+ * and the vault migrates from v1 again (or starts empty). Ids are checked
+ * with ACCOUNT_ID_RE before any path.
  */
 
 export interface WindowSample {
@@ -26,9 +35,14 @@ export interface WindowSample {
   at: number | null
 }
 
+/** One account of `accounts.json` (v1, app 2.3.0). */
+export interface VaultAccountMetaV1 extends Omit<VaultAccountMeta, 'exhaustedUntil'> {
+  role: ClaudeAccountRole
+}
+
+/** One account of `accounts.v2.json`; its index in the array is its rank. */
 export interface VaultAccountMeta {
   id: string
-  role: ClaudeAccountRole
   label: string
   email: string | null
   accountUuid: string
@@ -41,16 +55,36 @@ export interface VaultAccountMeta {
   identityConfirmed: boolean
   /** The saved login cannot be used (decrypt failed, or its refresh emptied the file). */
   needsRecapture: boolean
+  /**
+   * Reset of the window that made the policy leave this account (epoch ms):
+   * it is no target and no return candidate before it plus the margin.
+   */
+  exhaustedUntil: number | null
   lastUsage?: { fiveHour: WindowSample; sevenDay: WindowSample }
 }
 
-export interface VaultMeta {
+type LastSwitch = { at: number; from: string | null; to: string; reason: ClaudeSwitchReason }
+
+/** `accounts.json` (app 2.3.0): one account per role, one global exhaustedUntil. */
+export interface VaultMetaV1 {
   version: 1
   activeId: string | null
-  lastSwitch: { at: number; from: string | null; to: string; reason: ClaudeSwitchReason } | null
+  lastSwitch: LastSwitch | null
   autoPaused: ClaudeAutoPause | null
   /** Reset of the window that made the policy leave the primary (epoch ms). */
   exhaustedUntil: number | null
+  verify: VaultVerify | null
+  accounts: VaultAccountMetaV1[]
+}
+
+/** `accounts.v2.json` (app 2.4.0). */
+export interface VaultMeta {
+  version: 2
+  activeId: string | null
+  /** The account the user picked last; the automatic return never climbs above it (null = the first). */
+  anchorId: string | null
+  lastSwitch: LastSwitch | null
+  autoPaused: ClaudeAutoPause | null
   /**
    * Our last switch, until the target proved it can refresh: an emptied file
    * then rolls back to `from`. Persisted so a restart inside the window keeps
@@ -75,12 +109,15 @@ export interface Snapshot {
   capturedAt: number
 }
 
-export const emptyMeta = (): VaultMeta => ({ version: 1, activeId: null, lastSwitch: null, autoPaused: null, exhaustedUntil: null, verify: null, accounts: [] })
+export const emptyMeta = (): VaultMeta => ({ version: 2, activeId: null, anchorId: null, lastSwitch: null, autoPaused: null, verify: null, accounts: [] })
 
 const REASONS: ReadonlySet<string> = new Set(['manual', 'phone', 'cli', 'auto_exhausted', 'auto_return', 'external', 'rollback'])
 const PAUSES: ReadonlySet<string> = new Set(['unknownAccount', 'noLogin', 'conflict', 'locked', 'refreshFailed'])
+/** The switches that were the user's own pick (they anchor the automatic return). */
+export const ANCHOR_REASONS: ReadonlySet<string> = new Set(['manual', 'phone', 'cli', 'external'])
 const s = (v: unknown, max = 200): string | null => (typeof v === 'string' && v.length > 0 && v.length <= max ? v : null)
 const n = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+const identityOf = (a: { accountUuid: string; organizationUuid: string | null }): string => `${a.accountUuid}:${a.organizationUuid ?? ''}`
 
 function sample(v: unknown): WindowSample {
   const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
@@ -88,17 +125,16 @@ function sample(v: unknown): WindowSample {
   return { percent: p === null ? null : Math.max(0, Math.min(100, p)), resetsAt: s(o.resetsAt, 64), at: n(o.at) }
 }
 
-function account(v: unknown): VaultAccountMeta | null {
+/** The fields both formats share; null when the id or the identity is missing. */
+function accountBase(v: unknown): Omit<VaultAccountMeta, 'exhaustedUntil'> | null {
   if (!v || typeof v !== 'object') return null
   const o = v as Record<string, unknown>
   const id = s(o.id, 32)
   const accountUuid = s(o.accountUuid, 100)
   if (!id || !ACCOUNT_ID_RE.test(id) || !accountUuid) return null
-  if (o.role !== 'primary' && o.role !== 'secondary') return null
   const lu = o.lastUsage && typeof o.lastUsage === 'object' ? (o.lastUsage as Record<string, unknown>) : null
   return {
     id,
-    role: o.role,
     label: cleanAccountLabel(o.label),
     email: s(o.email),
     accountUuid,
@@ -114,22 +150,19 @@ function account(v: unknown): VaultAccountMeta | null {
   }
 }
 
-/** Defensive parse of accounts.json; null when it is not a vault file. */
-export function parseMeta(raw: string): VaultMeta | null {
+function parseObject(raw: string, version: number): Record<string, unknown> | null {
   let v: unknown
   try {
     v = JSON.parse(raw)
   } catch {
     return null
   }
-  if (!v || typeof v !== 'object' || (v as { version?: unknown }).version !== 1) return null
-  const o = v as Record<string, unknown>
-  const accounts: VaultAccountMeta[] = []
-  for (const a of Array.isArray(o.accounts) ? o.accounts : []) {
-    const acc = account(a)
-    // One account per role, ids unique.
-    if (acc && !accounts.some((x) => x.id === acc.id || x.role === acc.role)) accounts.push(acc)
-  }
+  if (!v || typeof v !== 'object' || (v as { version?: unknown }).version !== version) return null
+  return v as Record<string, unknown>
+}
+
+/** lastSwitch, autoPaused, activeId and verify, the same in both formats. */
+function commonFields(o: Record<string, unknown>, ids: ReadonlySet<string>): Pick<VaultMeta, 'activeId' | 'lastSwitch' | 'autoPaused' | 'verify'> {
   const ls = o.lastSwitch && typeof o.lastSwitch === 'object' ? (o.lastSwitch as Record<string, unknown>) : null
   const lastSwitch =
     ls && n(ls.at) !== null && s(ls.to, 32) && typeof ls.reason === 'string' && REASONS.has(ls.reason)
@@ -144,24 +177,83 @@ export function parseMeta(raw: string): VaultMeta | null {
       ? { to: vTo, from: vFrom, at: n(vf.at) as number, targetExpiresAt: n(vf.targetExpiresAt) }
       : null
   return {
-    version: 1,
-    activeId: activeId && accounts.some((a) => a.id === activeId) ? activeId : null,
+    activeId: activeId && ids.has(activeId) ? activeId : null,
     lastSwitch,
     autoPaused: typeof o.autoPaused === 'string' && PAUSES.has(o.autoPaused) ? (o.autoPaused as ClaudeAutoPause) : null,
-    exhaustedUntil: n(o.exhaustedUntil),
-    verify: verify && accounts.some((a) => a.id === verify.to) ? verify : null,
-    accounts,
+    verify: verify && ids.has(verify.to) ? verify : null,
   }
 }
 
+/** Defensive parse of accounts.json (v1, app 2.3.0); null when it is not a v1 vault file. */
+export function parseMetaV1(raw: string): VaultMetaV1 | null {
+  const o = parseObject(raw, 1)
+  if (!o) return null
+  const accounts: VaultAccountMetaV1[] = []
+  for (const a of Array.isArray(o.accounts) ? o.accounts : []) {
+    const base = accountBase(a)
+    const role = (a as { role?: unknown } | null)?.role
+    if (!base || (role !== 'primary' && role !== 'secondary')) continue
+    // One account per role, ids unique.
+    if (!accounts.some((x) => x.id === base.id || x.role === role)) accounts.push({ ...base, role })
+  }
+  return { version: 1, ...commonFields(o, new Set(accounts.map((a) => a.id))), exhaustedUntil: n(o.exhaustedUntil), accounts }
+}
+
+/** The 2.3.0 name of the v1 parser. */
+export const parseMeta = parseMetaV1
+
+/** Defensive parse of accounts.v2.json; null when it is not a v2 vault file. Ids and identities unique, at most MAX_CLAUDE_ACCOUNTS. */
+export function parseMetaV2(raw: string): VaultMeta | null {
+  const o = parseObject(raw, 2)
+  if (!o) return null
+  const accounts: VaultAccountMeta[] = []
+  for (const a of Array.isArray(o.accounts) ? o.accounts : []) {
+    if (accounts.length >= MAX_CLAUDE_ACCOUNTS) break
+    const base = accountBase(a)
+    if (!base || accounts.some((x) => x.id === base.id || identityOf(x) === identityOf(base))) continue
+    accounts.push({ ...base, exhaustedUntil: n((a as { exhaustedUntil?: unknown }).exhaustedUntil) })
+  }
+  const ids = new Set(accounts.map((a) => a.id))
+  const anchorId = s(o.anchorId, 32)
+  const c = commonFields(o, ids)
+  return { version: 2, activeId: c.activeId, anchorId: anchorId && ids.has(anchorId) ? anchorId : null, lastSwitch: c.lastSwitch, autoPaused: c.autoPaused, verify: c.verify, accounts }
+}
+
+/**
+ * v1 to v2: the primary first, then the secondary. The global exhaustedUntil
+ * goes to the account an automatic switch left (`lastSwitch.from` when its
+ * reason was auto_exhausted), else to the primary. The anchor is the target
+ * of the last switch the user made (manual, phone, cli, external), else the
+ * primary.
+ */
+export function migrateV1(v1: VaultMetaV1): VaultMeta {
+  const ordered = [...v1.accounts].sort((a, b) => (a.role === b.role ? 0 : a.role === 'primary' ? -1 : 1))
+  const primary = ordered.find((a) => a.role === 'primary') ?? null
+  const ls = v1.lastSwitch
+  const has = (id: string | null | undefined): id is string => !!id && ordered.some((a) => a.id === id)
+  const exhaustedId = ls?.reason === 'auto_exhausted' && has(ls.from) ? ls.from : (primary?.id ?? null)
+  const accounts: VaultAccountMeta[] = ordered.map(({ role: _role, ...a }) => ({ ...a, exhaustedUntil: a.id === exhaustedId ? v1.exhaustedUntil : null }))
+  const anchorId = ls && ANCHOR_REASONS.has(ls.reason) && has(ls.to) ? ls.to : (primary?.id ?? null)
+  return { version: 2, activeId: v1.activeId, anchorId, lastSwitch: v1.lastSwitch, autoPaused: v1.autoPaused, verify: v1.verify, accounts }
+}
+
 export class AccountVault {
+  /** The last load() built the list from accounts.json (v1): the service saves it as v2 once. */
+  migratedFromV1 = false
+
   constructor(
     readonly dir: string,
     private readonly crypto: VaultCrypto,
     private readonly now: () => number = Date.now,
   ) {}
 
+  /** v2, the only metadata file written. */
   private get metaPath(): string {
+    return join(this.dir, 'accounts.v2.json')
+  }
+
+  /** v1 (app 2.3.0), read only. */
+  private get v1Path(): string {
     return join(this.dir, 'accounts.json')
   }
 
@@ -170,22 +262,63 @@ export class AccountVault {
     return join(this.dir, `${id}.bin`)
   }
 
-  /** Synchronous at startup. Missing file = empty vault; a corrupt one is set aside. */
-  load(): VaultMeta {
-    let raw: string
+  private readV1(): VaultMetaV1 | null {
     try {
-      raw = readFileSync(this.metaPath, 'utf8')
+      return parseMetaV1(readFileSync(this.v1Path, 'utf8'))
     } catch {
-      return emptyMeta()
+      return null
     }
-    const meta = parseMeta(raw)
-    if (meta) return meta
+  }
+
+  /** accounts.json changed after accounts.v2.json: a 2.3.0 ran in between (a downgrade). */
+  private v1Newer(): boolean {
     try {
-      renameSync(this.metaPath, `${this.metaPath}.corrupt-${this.now()}`)
+      return statSync(this.v1Path).mtimeMs > statSync(this.metaPath).mtimeMs
+    } catch {
+      return false
+    }
+  }
+
+  private setAside(suffix: 'bak' | 'corrupt'): void {
+    try {
+      renameSync(this.metaPath, `${this.metaPath}.${suffix}-${this.now()}`)
     } catch {
       /* left in place; the next save replaces it */
     }
-    return emptyMeta()
+  }
+
+  /**
+   * Synchronous at startup.
+   *  1. accounts.v2.json parses: used, unless accounts.json is newer (a 2.3.0
+   *     ran after it): then v2 is kept as `.bak-<ts>` and v1 migrated again.
+   *  2. accounts.v2.json corrupt: set aside as `.corrupt-<ts>`, then 3.
+   *  3. Only accounts.json: migrated. Neither (or a corrupt v1): empty.
+   * accounts.json itself is never written, renamed or removed.
+   */
+  load(): VaultMeta {
+    this.migratedFromV1 = false
+    let raw: string | null
+    try {
+      raw = readFileSync(this.metaPath, 'utf8')
+    } catch {
+      raw = null
+    }
+    if (raw !== null) {
+      const meta = parseMetaV2(raw)
+      if (meta) {
+        if (!this.v1Newer()) return meta
+        const v1 = this.readV1()
+        if (!v1) return meta
+        this.setAside('bak')
+        this.migratedFromV1 = true
+        return migrateV1(v1)
+      }
+      this.setAside('corrupt')
+    }
+    const v1 = this.readV1()
+    if (!v1) return emptyMeta()
+    this.migratedFromV1 = true
+    return migrateV1(v1)
   }
 
   async saveMeta(m: VaultMeta): Promise<void> {

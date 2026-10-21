@@ -1218,6 +1218,15 @@ async function shellIntegrationChecks() {
     check(/\$ok = \$\?\n/.test(script) && script.indexOf('$ok = $?') < script.indexOf('$lec = $Global:LASTEXITCODE'), '$? is captured as the first statement of the prompt')
     check(!/[\u2013\u2014]/.test(script) && !script.includes('`') && Buffer.from(args[2], 'base64').length < 16000, 'the payload is plain ASCII PowerShell well under the command line limit')
     check(PI.buildIntegrationArgs() !== args && PI.buildIntegrationArgs().join() === args.join(), 'each call gets its own copy of the same args')
+    // v2.4: claude / codex typed by hand (agent=) and the per-pty nonce (k=).
+    check(PI.SHELL_MARK_ENV === 'SNAOS_SHELL_MARK' && script.includes("$env:SNAOS_SHELL_MARK -match '^[0-9a-f]{16,64}$'") && script.includes("$Global:__SnaosOsc133.Mark = ';k=' + $env:SNAOS_SHELL_MARK"), 'v2.4: the bootstrap keeps a well-formed nonce from SNAOS_SHELL_MARK')
+    const removes = script.split("Remove-Item -LiteralPath 'Env:SNAOS_SHELL_MARK' -ErrorAction Ignore").length - 1
+    check(removes === 2 && script.indexOf("Remove-Item -LiteralPath 'Env:SNAOS_SHELL_MARK'") > script.indexOf('.Mark = '), 'the nonce leaves the environment right after it is read, and under ConstrainedLanguage too (no child or ssh inherits it)')
+    check(script.trimEnd().endsWith("} else { Remove-Item -LiteralPath 'Env:SNAOS_SHELL_MARK' -ErrorAction Ignore }"), 'the only statement outside the FullLanguage guard is that removal')
+    check(script.includes("$a = Get-Item -LiteralPath ('Alias:' + $t) -ErrorAction Ignore") && !/Get-Alias|Get-Command/.test(script), 'an alias resolves by its literal name (never a wildcard, never Get-Command)')
+    check(script.includes("$n -notmatch '^(claude|codex)$'") && script.includes("$r = ';agent=' + $n.ToLowerInvariant() + $s.Mark") && !/agent=' \+ \$(l|line|t)\b/.test(script), 'only the enum leaves the shell, never the command line')
+    check(/\$Global:__SnaosOsc133\.Agent = \{\n    param\(\$l\)\n    \$r = ''\n    try \{/.test(script) && script.includes('    } catch {}\n    $r\n  }'), 'the Agent block runs inside try/catch and returns \'\' on any failure')
+    check(script.includes("']133;C' + (& $s.Agent ([string]$line)) + [string][char]7") && script.includes("']133;D;' + $code + $s.Mark + $b") && script.includes("']133;A' + $s.Mark + $b"), 'C carries the agent block, D and A the nonce')
   }
   // FR-25: only a bare PowerShell on Windows with the setting on.
   {
@@ -1273,11 +1282,17 @@ async function shellIntegrationChecks() {
   const typed = proc => proc.writes.join('')
   {
     const { pm, h } = winManager({ snapshotMode: 'off', shellIntegration: true })
-    pm.spawn({ paneId: 'i1', cols: 80, rows: 24 })
+    const i1 = pm.spawn({ paneId: 'i1', cols: 80, rows: 24 })
     check(h.spawnCalls[0].shell === 'powershell.exe' && h.spawnCalls[0].args.join() === PI.buildIntegrationArgs().join(), 'a bare default PowerShell spawns with the integration args')
     check(h.spawnCalls[0].opts.env.SNAOS_SHELL_INTEGRATION === '1', 'and SNAOS_SHELL_INTEGRATION=1 in its env')
-    pm.spawn({ paneId: 'i2', args: ['-NoLogo'], cols: 80, rows: 24 })
+    const mark0 = h.spawnCalls[0].opts.env.SNAOS_SHELL_MARK
+    check(/^[0-9a-f]{32}$/.test(mark0) && pm.shellMarkOf(i1.ptyId) === mark0, 'v2.4: an integrated spawn gets a 32-hex nonce in SNAOS_SHELL_MARK, which shellMarkOf returns')
+    const i2 = pm.spawn({ paneId: 'i2', args: ['-NoLogo'], env: { SNAOS_SHELL_MARK: 'feedfeedfeedfeedfeedfeedfeedfeed' }, cols: 80, rows: 24 })
     check(h.spawnCalls[1].args.join() === '-NoLogo' && !('SNAOS_SHELL_INTEGRATION' in h.spawnCalls[1].opts.env), 'a spawn with args keeps them, without the flag')
+    check(!('SNAOS_SHELL_MARK' in h.spawnCalls[1].opts.env) && pm.shellMarkOf(i2.ptyId) === undefined, 'no integration: no nonce, not even one a preset env supplies')
+    pm.spawn({ paneId: 'i1b', cols: 80, rows: 24 })
+    check(/^[0-9a-f]{32}$/.test(h.spawnCalls[2].opts.env.SNAOS_SHELL_MARK) && h.spawnCalls[2].opts.env.SNAOS_SHELL_MARK !== mark0, 'every pty gets its own nonce')
+    h.spawnCalls.splice(2, 1)
     pm.setEngine({ snapshotMode: 'off', shellIntegration: false })
     pm.spawn({ paneId: 'i3', cols: 80, rows: 24 })
     check(h.spawnCalls[2].args.length === 0 && !('SNAOS_SHELL_INTEGRATION' in h.spawnCalls[2].opts.env), 'with the setting off PowerShell launches without extra args')

@@ -70,11 +70,16 @@ import { diagnosticsSecrets } from './diagnostics/buildDiagnostics'
 import { RendererRecovery } from './crash/rendererRecovery'
 import { copyMainDiagnostics, registerCrashIpc, type CrashIpcDeps } from './ipc/registerCrashIpc'
 import { updateState } from './updateState'
+import { takeUpdateMarker } from './updateMarker'
 import { makeOpenRequest, OpenRequestQueue, parseOpenArg, validateOpenPath } from './openRequest'
 import { refreshExplorerMenuOnStartup } from './shellIntegration'
 import { CliService } from './cli/CliService'
 import { removeFromUserPath } from './cli/userPath'
 import { registerCliIpc } from './ipc/registerCliIpc'
+import { registerDictationIpc } from './ipc/registerDictationIpc'
+import type { DictationService } from './dictation/DictationService'
+import { installPermissionHandlers } from './permissions'
+import { pathToFileURL } from 'url'
 
 // Remember main's warn/error lines for "Copy diagnostics" (E4-FR-24).
 installLogRing()
@@ -135,6 +140,8 @@ ptyManager.addSink(statusManager)
 statusManager.addListener((evt) => remoteManager.pushPaneStatus(evt))
 // v2.3 attention: a phone looking at a pane acknowledges it, both ways.
 statusManager.setRemoteSeen((paneId) => remoteManager.isPaneSeen(paneId))
+// v2.4: the nonce of each integrated pty's OSC 133 marks (claude / codex typed in a shell).
+statusManager.setShellMarks((ptyId) => ptyManager.shellMarkOf(ptyId))
 remoteManager.setPaneSeenListener((paneId) => statusManager.ackPane(paneId))
 ptyManager.addSink(codexBridge)
 // snaos CLI (E8-FR-12..22): control server, console tokens, runtime.json and shim under dataDir().
@@ -165,6 +172,8 @@ let scrollbackCheckpoint: ScrollbackCheckpoint | null = null
 let accountService: AccountService | null = null
 // Review notes (E7-FR-18): created in bootstrap; flushed on the exits that skip before-quit.
 let reviewNotes: ReviewNoteStore | null = null
+// Desktop dictation (app 2.4.0): created in bootstrap; its helper dies on quit.
+let dictationService: DictationService | null = null
 // Crash resilience (E4-FR-21..25). The breaker dialog's [Close] quits without
 // the tray-hide or "active consoles" guards (the button already names N).
 let crashQuit = false
@@ -355,7 +364,11 @@ function registerAppIpc(): void {
 
 function registerConfigIpc(): void {
   ipcMain.handle(CH.CONFIG_LOAD, (): ConfigFile | null => configStore.load({ upgrade: true }))
-  ipcMain.on(CH.CONFIG_SAVE, (_e, config: ConfigFile) => configStore.save(config))
+  ipcMain.on(CH.CONFIG_SAVE, (_e, config: ConfigFile) => {
+    configStore.save(config)
+    // v2.4: StatusManager caches the agents settings it reads on the pty data path.
+    statusManager.setAgentSettings(config?.settings?.agents)
+  })
 
   ipcMain.handle(CH.CONFIG_EXPORT, async (_e, config: ConfigFile): Promise<boolean> => {
     const opts = {
@@ -510,6 +523,12 @@ async function bootstrap(): Promise<void> {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   remoteManager.loadDevices()
   registerCsp()
+  // v2.4: web permissions only for the app's own page, and never `media` (dictation runs in main).
+  installPermissionHandlers(
+    session.defaultSession,
+    process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href,
+  )
+  dictationService = registerDictationIpc()
   registerAppIpc()
   registerConfigIpc()
   registerDialogIpc()
@@ -560,6 +579,9 @@ async function bootstrap(): Promise<void> {
       reviewNotes?.flush()
       scrollbackCheckpoint?.persistAllSync()
     },
+    // A silent update that did not land (declined permission prompt): read
+    // and deleted once here, shown by the renderer as a toast with [Retry].
+    notApplied: takeUpdateMarker(dataDir(), app.getVersion()),
   })
   // Claude multi-account (app 2.3.0): saved logins under dataDir()/claude-accounts/,
   // encrypted with safeStorage (needs app ready). Main is the only writer of the
@@ -742,7 +764,9 @@ async function bootstrap(): Promise<void> {
     }
   })
   const startupCfg = configStore.load()
-  await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? false)
+  // v2.4: on by default (schema 17), a first run without a config included.
+  await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? true)
+  statusManager.setAgentSettings(startupCfg?.settings.agents)
   // snaos CLI: shim, skill refresh and PATH first; switched on before the first console spawns.
   registerCliIpc(cliService)
   cliService.init()
@@ -806,6 +830,7 @@ app.on('before-quit', () => {
   afterPtysKilled()
   scrollbackCheckpoint?.stop()
   awakeService?.dispose()
+  dictationService?.dispose()
   accountService?.dispose()
   statusManager.dispose()
   codexBridge.dispose()

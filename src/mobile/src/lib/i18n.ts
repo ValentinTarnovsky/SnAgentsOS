@@ -361,8 +361,6 @@ const en = {
   'quick.err.generic': 'Could not run the Quick Command',
   // Model, effort and Ultracode (app 2.3.0, ctl agentTune)
   'tune.title': 'Model and effort',
-  'tune.chip': 'Model',
-  'tune.chipLabel': 'Model and effort: {value}',
   'tune.now': 'Now: {value}',
   'tune.unknown': 'Unknown',
   'tune.model': 'Model',
@@ -466,6 +464,13 @@ const en = {
   'usage.accountUnknown': 'Claude on the PC is signed in with an unsaved account. Save it on the PC first.',
   'usage.rolePrimary': 'Primary',
   'usage.roleSecondary': 'Secondary',
+  // app 2.4.0: N accounts in priority order, picked by id (desktop >= 2.4.0)
+  'usage.accountN': 'Account {n}',
+  'usage.changeAccount': 'Change account',
+  'usage.pickAccount': 'Claude account',
+  'usage.pickAccountHint': 'Every Claude console on the PC switches to the account you pick.',
+  'usage.accountInUse': 'In use',
+  'usage.accountNotReady': 'Capture it again on the PC',
   // Agent status (E1-FR-04..07, 40)
   'status.working': 'Working',
   'status.action': 'Waiting for you',
@@ -1109,8 +1114,6 @@ const es: Record<Key, string> = {
   'quick.err.generic': 'No se pudo ejecutar el Quick Command',
   // Modelo, esfuerzo y Ultracode (app 2.3.0, ctl agentTune)
   'tune.title': 'Modelo y esfuerzo',
-  'tune.chip': 'Modelo',
-  'tune.chipLabel': 'Modelo y esfuerzo: {value}',
   'tune.now': 'Ahora: {value}',
   'tune.unknown': 'Desconocido',
   'tune.model': 'Modelo',
@@ -1208,6 +1211,13 @@ const es: Record<Key, string> = {
   'usage.accountUnknown': 'Claude en la PC tiene una sesion con una cuenta sin guardar. Guardala primero en la PC.',
   'usage.rolePrimary': 'Principal',
   'usage.roleSecondary': 'Secundaria',
+  // app 2.4.0: N cuentas por prioridad, elegidas por id (escritorio >= 2.4.0)
+  'usage.accountN': 'Cuenta {n}',
+  'usage.changeAccount': 'Cambiar cuenta',
+  'usage.pickAccount': 'Cuenta de Claude',
+  'usage.pickAccountHint': 'Todas las consolas de Claude de la PC pasan a la cuenta que elijas.',
+  'usage.accountInUse': 'En uso',
+  'usage.accountNotReady': 'Capturala de nuevo en la PC',
   'status.working': 'Trabajando',
   'status.action': 'Te espera',
   'status.done': 'Listo',

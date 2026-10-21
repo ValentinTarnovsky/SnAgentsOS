@@ -5,7 +5,7 @@
  * in by the caller and never touches the stores or the DOM, so the rules are
  * unit tested.
  */
-import type { AgentPreset, Language, Pane, PaneStatus, ResumeOnStartup, Workspace } from '@shared/types'
+import type { AgentPreset, AgentProvider, Language, Pane, PaneStatus, ResumeOnStartup, Workspace } from '@shared/types'
 import {
   agentRank,
   compareAgents,
@@ -190,6 +190,21 @@ export function agentTitle(pane: Pane, presets: readonly AgentPreset[], info: { 
   const preset = pane.presetId ? presets.find((p) => p.id === pane.presetId) : undefined
   if (!preset || pane.title !== preset.name) return pane.title
   return info?.topic || info?.firstPrompt || pane.title
+}
+
+/**
+ * v2.4: the agent a shell console runs right now (`claude` / `codex` typed
+ * by hand, or its title), read from the live status; the saved type stays
+ * shell. Agent and custom consoles keep their own icon and title.
+ */
+export function runningAgentOf(pane: Pick<Pane, 'type'>, status: { provider?: AgentProvider } | null | undefined): AgentProvider | undefined {
+  return pane.type === 'shell' && status?.provider ? status.provider : undefined
+}
+
+/** Icon name of a console's header and agent row: its running agent's for a shell, else its own. */
+export function agentIconName(pane: Pick<Pane, 'type' | 'icon'>, status: { provider?: AgentProvider } | null | undefined): string | undefined {
+  const agent = runningAgentOf(pane, status)
+  return agent ? (agent === 'codex' ? 'openai' : 'claude') : pane.icon
 }
 
 /** First line of a text, trimmed. */
