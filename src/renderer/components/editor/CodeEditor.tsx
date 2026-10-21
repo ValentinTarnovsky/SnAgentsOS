@@ -1,10 +1,11 @@
 /**
  * The code editor of the Files and Notes drawers (v2.2, E9): CodeMirror 6
- * with the usual VS Code keys (Ctrl+S save, Ctrl+F find and replace, Ctrl+D
+ * with the usual VS Code keys (Ctrl+S save, Ctrl+F find, Ctrl+H replace, Ctrl+D
  * next match, Alt+Up/Down move line, Ctrl+/ comment, multi-cursor with
  * Alt+click), the app's theme and font, and the file's grammar loaded on
  * demand. The text is the caller's: `onChange` reports every edit and a new
  * `docKey` (another file, a reload) replaces the document and its history.
+ * Find and replace is the app's widget (`cmFind.tsx`, v2.3).
  */
 import { useEffect, useRef } from 'react'
 import { Compartment, EditorState, type Extension } from '@codemirror/state'
@@ -21,12 +22,13 @@ import {
   rectangularSelection,
 } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search'
+import { highlightSelectionMatches, searchKeymap } from '@codemirror/search'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { bracketMatching, foldGutter, foldKeymap, indentOnInput } from '@codemirror/language'
 import type { ThemeTokens } from '@shared/types'
 import { editorTheme } from './editorTheme'
 import { loadLanguage } from './languages'
+import { useCmFind } from './cmFind'
 
 export interface CodeEditorProps {
   /** Identity of the document: a change replaces the text, the selection and the undo history. */
@@ -57,6 +59,7 @@ export function CodeEditor(props: CodeEditorProps) {
   const latest = useRef(props)
   latest.current = props
   const compartments = useRef({ lang: new Compartment(), theme: new Compartment(), wrap: new Compartment(), readOnly: new Compartment() })
+  const find = useCmFind()
 
   // One view per document key: a new key builds a fresh state (no undo across files).
   useEffect(() => {
@@ -77,11 +80,12 @@ export function CodeEditor(props: CodeEditorProps) {
       crosshairCursor(),
       highlightActiveLine(),
       highlightSelectionMatches(),
-      search({ top: true }),
+      find.extension(),
       keymap.of([
         { key: 'Mod-s', preventDefault: true, run: () => (latest.current.onSave?.(), true) },
         ...closeBracketsKeymap,
         ...defaultKeymap,
+        ...find.keys(),
         ...searchKeymap,
         ...historyKeymap,
         ...foldKeymap,
@@ -132,5 +136,10 @@ export function CodeEditor(props: CodeEditorProps) {
     view.current?.dispatch({ effects: compartments.current.readOnly.reconfigure(EditorState.readOnly.of(!!props.readOnly)) })
   }, [props.readOnly])
 
-  return <div ref={host} data-code-editor className="h-full min-h-0 overflow-hidden" />
+  return (
+    <>
+      <div ref={host} data-code-editor className="h-full min-h-0 overflow-hidden" />
+      {find.portal}
+    </>
+  )
 }

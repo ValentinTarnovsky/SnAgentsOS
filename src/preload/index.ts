@@ -19,6 +19,7 @@ import type {
   PtySpawnReq,
   PtySpawnRes,
   PtySubmitReq,
+  StatusTuneHintReq,
   PtySubmitRes,
   PtyWriteReq,
   RecoveryInfo,
@@ -43,6 +44,7 @@ import type {
   AgentSessionEndEvt,
   AgentSettings,
   AwakeMode,
+  ClaudeAccountsSettings,
   ConfigFile,
   Language,
   NotificationSettings,
@@ -52,6 +54,7 @@ import type {
   UsageSettings,
 } from '@shared/types'
 import type { RemoteStateSnapshot } from '@shared/remote-protocol'
+import type { AccountsCaptureReq, AccountsOpRes, ClaudeAccountsEvent, ClaudeAccountsState, RendererSwitchReason } from '@shared/claude-accounts'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from '@shared/agents'
 import type { AgentsHibernateEvt, HibernationConfig } from '@shared/hibernation'
 import type { SessionSummary, SessionsListReq } from '@shared/session-history'
@@ -172,10 +175,24 @@ const api: SnApi = {
     setConfig: (cfg: UsageSettings) => ipcRenderer.send(CH.USAGE_SET_CONFIG, cfg),
     onUpdate: (cb: (s: UsageSnapshot) => void) => sub<UsageSnapshot>(CH.USAGE_UPDATE, cb),
   },
+  accounts: {
+    getState: () => ipcRenderer.invoke(CH.ACCOUNTS_GET_STATE) as Promise<ClaudeAccountsState>,
+    capture: (req: AccountsCaptureReq) => ipcRenderer.invoke(CH.ACCOUNTS_CAPTURE, req) as Promise<AccountsOpRes>,
+    switchTo: (target: string, reason: RendererSwitchReason) =>
+      ipcRenderer.invoke(CH.ACCOUNTS_SWITCH, { target, reason }) as Promise<AccountsOpRes>,
+    remove: (id: string) => ipcRenderer.invoke(CH.ACCOUNTS_REMOVE, { id }) as Promise<AccountsOpRes>,
+    rename: (id: string, label: string) => ipcRenderer.invoke(CH.ACCOUNTS_RENAME, { id, label }) as Promise<AccountsOpRes>,
+    setPrimary: (id: string) => ipcRenderer.invoke(CH.ACCOUNTS_SET_PRIMARY, { id }) as Promise<AccountsOpRes>,
+    resumeAuto: () => ipcRenderer.invoke(CH.ACCOUNTS_RESUME_AUTO) as Promise<AccountsOpRes>,
+    setConfig: (cfg: ClaudeAccountsSettings) => ipcRenderer.send(CH.ACCOUNTS_SET_CONFIG, cfg),
+    onChanged: (cb: (s: ClaudeAccountsState) => void) => sub<ClaudeAccountsState>(CH.ACCOUNTS_CHANGED, cb),
+    onEvent: (cb: (e: ClaudeAccountsEvent) => void) => sub<ClaudeAccountsEvent>(CH.ACCOUNTS_EVENT, cb),
+  },
   status: {
     reportTitle: (paneId: string, title: string) =>
       ipcRenderer.send(CH.STATUS_TITLE, { paneId, title }),
     setViewed: (paneIds: string[]) => ipcRenderer.send(CH.STATUS_VIEWED, paneIds),
+    tuneHint: (req: StatusTuneHintReq) => ipcRenderer.send(CH.STATUS_TUNE_HINT, req),
     setConfig: (cfg: NotificationSettings) => ipcRenderer.send(CH.STATUS_SET_CONFIG, cfg),
     onState: (cb: (e: PaneStatusEvt) => void) => sub<PaneStatusEvt>(CH.STATUS_STATE, cb),
     snapshot: () => ipcRenderer.invoke(CH.STATUS_SNAPSHOT),

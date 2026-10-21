@@ -229,6 +229,12 @@ async function main() {
     check(out.includes('10.1.x.x') && out.includes('172.20.x.x') && out.includes('100.100.x.x') && out.includes('8.8.8.8') && out.includes('172.32.0.1') && out.includes('999.1.1.1'), 'only RFC1918 and 100.64/10 are masked')
     check(redact('/home/ana/x and /HOME/ANA/y', { home: '/home/ana' }) === '~/x and /HOME/ANA/y', 'a POSIX home is case-sensitive')
     check(redact('plain') === 'plain' && maskIpv4('192.168.0.1') === '192.168.x.x' && maskIpv4('1.2.3.4') === '1.2.3.4', 'no options leaves plain text alone')
+    // app 2.3.0: Claude OAuth tokens (fake ones) and account emails never survive a copied log line.
+    const fakeAccess = 'sk-' + 'ant-oat01-' + 'Fake_Token-For-Tests-Only'.repeat(3)
+    const fakeRefresh = 'sk-' + 'ant-ort01-' + 'AnotherFake_value-0123456789'
+    const log = redact(`[accounts] switch to ana.perez+work@example.co.uk failed: ${fakeAccess} / ${fakeRefresh} ssh dev@192.168.1.9`)
+    check(!log.includes('sk-ant-') && !log.includes('Fake_Token') && log.split('<redacted>').length === 3, 'Claude OAuth tokens are redacted')
+    check(!log.includes('@example') && log.includes('<email>') && log.includes('ssh dev@192.168.x.x'), 'emails become <email>; user@ip stays (masked ip)')
   }
 
   // --- logRing ------------------------------------------------------------------

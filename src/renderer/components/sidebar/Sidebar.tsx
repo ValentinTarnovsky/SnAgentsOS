@@ -29,7 +29,7 @@ import { iconFor } from '@/lib/icons'
 import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 import { cn } from '@/lib/cn'
 import { StatusDot } from '@/components/ui/StatusDot'
-import { aggregateStatus } from '@shared/status'
+import { aggregateStatus, displayStatus, needsUser } from '@shared/status'
 import type { PaneStatus, Workspace } from '@shared/types'
 import { useAgentStore } from '@/lib/agentStore'
 import { navInputFrom, workspaceAgents } from '@/lib/agentNav'
@@ -57,6 +57,7 @@ function AttentionBadge({ count, className }: { count: number; className?: strin
   if (count <= 0) return null
   return (
     <span
+      data-attention-badge={count}
       className={cn(
         'flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-[#EF4444] px-1 text-[11px] font-semibold leading-none text-white',
         className,
@@ -95,14 +96,14 @@ function WorkspaceTip({ ws, paneStatus, showName, extra = [], meta = [] }: { ws:
   const t = useT()
   const lang = useLang()
   const [now] = useState(() => Date.now())
-  const withStatus = ws.panes.filter((p) => paneStatus[p.id])
+  // v2.3: counted as the dot shows them (an answered action reads working).
+  const withStatus = ws.panes.flatMap((p) => (paneStatus[p.id] ? [{ p, st: displayStatus(paneStatus[p.id]) }] : []))
   const counts = new Map<PaneStatus['state'], number>()
-  for (const p of withStatus) counts.set(paneStatus[p.id].state, (counts.get(paneStatus[p.id].state) ?? 0) + 1)
+  for (const { st } of withStatus) counts.set(st.state, (counts.get(st.state) ?? 0) + 1)
   const summary = SUMMARY_ORDER.filter((st) => counts.get(st))
     .map((st) => t(SUMMARY_KEY[st], { count: counts.get(st) ?? 0 }))
     .join(', ')
-  const lines = withStatus.slice(0, TIP_MAX_LINES).map((p) => {
-    const st = paneStatus[p.id]
+  const lines = withStatus.slice(0, TIP_MAX_LINES).map(({ p, st }) => {
     return [p.title, t(STATUS_LABEL_KEY[st.state]), st.stateSince ? formatSince(st.stateSince, now, lang) : '']
       .filter(Boolean)
       .join(' - ')
@@ -401,10 +402,11 @@ export function Sidebar() {
           const WsIcon = iconFor(w.panes[0]?.icon)
           const renaming = renamingId === w.id
           // One per console that needs the user, however many requests it holds.
-          const attentionCount = w.panes.filter((p) => (paneStatus[p.id]?.pendingCount ?? 0) > 0 || paneAttention[p.id]).length
-          const status = aggregateStatus(w.panes.map(p => paneStatus[p.id]))
+          // v2.3: main's attention when it sends one (an answered request no longer counts).
+          const attentionCount = w.panes.filter((p) => needsUser(paneStatus[p.id]) || paneAttention[p.id]).length
+          const status = aggregateStatus(w.panes.map(p => displayStatus(paneStatus[p.id])))
           const exited = exitedLines(w.panes, paneExit, t)
-          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${paneStatus[p.id].state}`)}`).concat(exited).join(', ')
+          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${displayStatus(paneStatus[p.id]).state}`)}`).concat(exited).join(', ')
           // Gray dot when no agent state is shown and every console has exited (E6-FR-38).
           const exitedDot = !status && allExited(w.panes, paneExit)
           const exitedLabel = exited.join('\n')

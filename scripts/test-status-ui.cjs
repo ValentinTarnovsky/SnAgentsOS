@@ -46,6 +46,14 @@ app.whenReady().then(async()=>{
  const dotTip=await w.webContents.executeJavaScript("document.querySelector('[role=tooltip]')?.textContent||''");
  if(!dotTip.includes('Console 0 - Trabajando'))throw new Error('Status dot tooltip within 300 ms '+JSON.stringify(dotTip));
  await w.webContents.executeJavaScript("document.querySelector('aside [data-status-dot]').dispatchEvent(new MouseEvent('mouseout',{bubbles:true}))");await new Promise(r=>setTimeout(r,250));
+ // v2.3 attention: the red badge reads main's attention; the legacy fixture (no field) keeps pendingCount / paneAttention.
+ const badges=()=>w.webContents.executeJavaScript("[...document.querySelectorAll('aside nav [data-attention-badge]')].map(b=>{let e=b;while(e&&!/Workspace \\\\d|Proyecto/.test(e.textContent||''))e=e.parentElement;const m=/Workspace (\\\\d)|Proyecto/.exec(e?e.textContent:'');return (m?(m[1]||'1'):'?')+':'+b.textContent}).join()");
+ let b0=await badges();if(b0!=='1:1')throw new Error('Legacy badge: the action workspace only '+JSON.stringify(b0));
+ await w.webContents.executeJavaScript("smoke.set(s=>({paneAttention:{},paneStatus:{...s.paneStatus,'pane-1':{...s.paneStatus['pane-1'],attention:false},'pane-2':{...s.paneStatus['pane-2'],attention:true},'pane-3':{...s.paneStatus['pane-3'],attention:false}}}))");await new Promise(r=>setTimeout(r,250));
+ b0=await badges();if(b0!=='2:1')throw new Error('Attention badge: an answered action (pendingCount 2, attention false) does not count, an unseen done does '+JSON.stringify(b0));
+ const answered=await w.webContents.executeJavaScript("({row:document.querySelector('[data-agent-row=pane-1]')?.dataset.agentState,dot:document.querySelectorAll('aside [data-status-dot]')[1]?.dataset.statusDot})");
+ if(answered.row!=='working'||answered.dot!=='working')throw new Error('An answered action shows as working in the row and the dot '+JSON.stringify(answered));
+ await shot('sidebar-attention');
  // Folded Usage (v2.2.1): one compact line per metric (icon, label, bar, percent), no rings; high values in the bar's red.
  await w.webContents.executeJavaScript('smoke.usage()');await new Promise(r=>setTimeout(r,300));await shot('usage-folded');
  const folded=await w.webContents.executeJavaScript('smoke.folded()');

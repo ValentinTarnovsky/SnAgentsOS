@@ -212,7 +212,7 @@ async function testPushService(api) {
   for (let i = 0; i < 6; i++) push.add('dev-3', subBody(`https://fcm.googleapis.com/fcm/send/many${i}`))
   check(push.list().filter(s => s.deviceId === 'dev-3').length === api.PUSH_SUBS_PER_DEVICE, 'per-device cap keeps the newest subscriptions')
 
-  const msg = { title: 'Claude needs permission', body: 'api - Web', tag: 'p1', url: './#ws=w&pane=p1', urgent: true }
+  const msg = { title: 'Claude needs permission', body: 'api - Web', tag: 'p1', url: './#ws=w&pane=p1', urgent: true, state: 'action' }
   const paired = new Set(['dev-1', 'dev-2', 'dev-3'])
   const visible = new Set(['dev-3'])
   const nctx = { enabled: true, isDeviceVisible: id => visible.has(id), isPaired: id => paired.has(id) }
@@ -220,7 +220,7 @@ async function testPushService(api) {
   let n = await push.notify(msg, nctx)
   check(n === 2 && sent.length === 2 && !sent.some(s => s.sub.endpoint.includes('many')), 'notify: a device with a visible session is skipped')
   check(sent.every(s => s.opts.TTL === 300 && s.opts.urgency === 'high' && s.opts.vapidDetails.publicKey === 'PUB1' && /^https:\/\//.test(s.opts.vapidDetails.subject)), 'TTL 300, urgency high for action, VAPID details from the file')
-  check(sent.every(s => JSON.stringify(Object.keys(s.payload).sort()) === '["body","tag","title","url"]'), 'the payload is only title, body, tag and url')
+  check(sent.every(s => JSON.stringify(Object.keys(s.payload).sort()) === '["body","state","tag","title","url"]' && s.payload.state === 'action'), 'the payload is only title, body, tag, url and (v2.3) state')
   sent.length = 0
   await push.notify({ ...msg, urgent: false }, { ...nctx, isPaired: id => id === 'dev-1' })
   check(sent.length === 1 && sent[0].opts.urgency === 'normal', 'an unpaired device gets nothing; done/error go with normal urgency')
@@ -250,6 +250,7 @@ async function testPushService(api) {
   check(b({ paneId: 'p&1', provider: 'codex', state: 'action', reason: 'question' }, config('en')).title === 'Codex has a question', 'English title per reason')
   const unknown = b({ paneId: 'zz', provider: 'claude', state: 'done' }, config('en'))
   check(unknown.body === 'SnAgentsOS' && unknown.url === './' && !unknown.urgent, 'an unknown pane: product name, app root, normal urgency')
+  check(a1.state === 'action' && unknown.state === 'done' && b({ paneId: 'p&1', provider: 'codex', state: 'error' }, config('en')).state === 'error', 'v2.3: the push message carries the announced state')
 }
 
 // --- RemoteServer (real, loopback) ---------------------------------------------------
@@ -485,6 +486,7 @@ export { wantsWakeLock, WAKE_LOCK_KEY } from './src/mobile/src/lib/wakeLock'
 export { openHashOf } from './src/mobile/src/lib/serviceWorker'
 export { wsUrlFor } from './src/mobile/src/lib/wsUrl'
 export { fillServiceWorker, precacheList } from './src/mobile/swBuild'
+export { isStaleTrayNote, createTrayReconciler, defaultTrayRegistration, TRAY_RECONCILE_MS } from './src/mobile/src/lib/trayReconcile'
 ` },
     bundle: true, platform: 'node', format: 'cjs', write: false,
     define: { __APP_VERSION__: '"2.0.0"', 'process.env.NODE_ENV': '"production"' },
@@ -556,7 +558,49 @@ async function testPhoneLogic(api) {
   let threw = false
   try { api.fillServiceWorker('nothing', '1', []) } catch { threw = true }
   check(threw, 'a template without markers fails the build')
+  await testTrayReconcile(api)
   return filled
+}
+
+/** v2.3: tray notes follow the desktop's attention (no silent push). */
+async function testTrayReconcile(api) {
+  const snap = { workspaces: [{ id: 'w', name: 'W', layoutOrder: ['p1', 'p2', 'p3'], panes: ['p1', 'p2', 'p3'].map(id => ({ id, title: id, type: 'claude', color: '', icon: '', running: true })) }] }
+  const st = (state, rest = {}) => ({ state, stateSince: 1, ...rest })
+  const stale = api.isStaleTrayNote
+  check(stale('p1', { state: 'action' }, snap, { p1: st('action', { attention: false }) }), 'stale: the desktop says attention false')
+  check(stale('p1', { state: 'action' }, snap, { p1: st('working') }), 'stale: the announced state is not the current one')
+  check(stale('p1', { state: 'done' }, snap, {}), 'stale: a known console without a status')
+  check(!stale('zz', { state: 'action' }, snap, {}), 'kept: a pane absent from the snapshot (empty before the first push)')
+  check(!stale('p1', { url: './' }, snap, { p1: st('working') }), 'kept: a legacy note without state, whose console has a status and no attention false')
+  check(stale('p1', { url: './' }, snap, { p1: st('done', { attention: false }) }), 'stale: a legacy note once attention is false')
+  check(!stale('p1', { state: 'action' }, snap, { p1: st('action') }) && !stale('p1', { state: 'action' }, snap, { p1: st('action', { attention: true }) }), 'kept: still waiting (attention true or an older desktop)')
+  check(!stale('p1', { state: 'bogus' }, snap, { p1: st('working') }) && !stale('', null, snap, {}), 'an invalid state or an empty tag decides nothing')
+  // The reconciler: closes only stale notes, after a 150 ms debounce.
+  const closed = []
+  const note = (tag, data) => ({ tag, data, close: () => closed.push(tag) })
+  let statuses = { p1: st('action', { attention: false }), p2: st('action', { attention: true }), p3: st('done') }
+  const notes = [note('p1', { state: 'action' }), note('p2', { state: 'action' }), note('p3', { state: 'action' }), note('zz', { state: 'done' })]
+  const timers = []
+  const r = api.createTrayReconciler({
+    registration: async () => ({ getNotifications: async () => notes }),
+    snapshot: () => snap, statuses: () => statuses,
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length }, clearTimeout: id => { timers[id - 1].fn = null },
+  })
+  check(await r.run() === 2 && closed.join() === 'p1,p3', 'run closes the answered and the changed notes, keeps the waiting one and the unknown pane')
+  closed.length = 0
+  r.schedule(); r.schedule()
+  check(timers.length === 2 && timers[0].fn === null && timers[1].ms === api.TRAY_RECONCILE_MS && api.TRAY_RECONCILE_MS === 150, 'schedule debounces at 150 ms')
+  statuses = { ...statuses, p2: st('action', { attention: false }) }
+  timers[1].fn()
+  await new Promise(resolve => setImmediate(resolve))
+  check(closed.includes('p2'), 'the debounced run reads the newest statuses')
+  const none = api.createTrayReconciler({ registration: async () => ({}), snapshot: () => snap, statuses: () => statuses })
+  check(await none.run() === 0, 'a registration without getNotifications closes nothing')
+  const noReg = api.createTrayReconciler({ registration: async () => undefined, snapshot: () => snap, statuses: () => statuses })
+  const throws = api.createTrayReconciler({ registration: async () => { throw new Error('x') }, snapshot: () => snap, statuses: () => statuses })
+  const noSnap = api.createTrayReconciler({ registration: async () => ({ getNotifications: async () => notes }), snapshot: () => null, statuses: () => statuses })
+  check(await noReg.run() === 0 && await throws.run() === 0 && await noSnap.run() === 0, 'no registration, a throwing one or no live snapshot: nothing closes')
+  check(await api.defaultTrayRegistration() === undefined, 'outside a secure context with a service worker there is no registration (never waits on ready)')
 }
 
 // --- The service worker in a fake scope ---------------------------------------------
@@ -626,6 +670,12 @@ async function testServiceWorker(source) {
   check(fetched.length === 1, 'hashed assets: cache first after the first fetch (fonts on use)')
   await fire('push', { data: { json: () => ({ title: 'Claude needs permission', body: 'api - Web', tag: 'p1', url: './#ws=w&pane=p1' }) } })
   check(notifications.length === 1 && notifications[0].title === 'Claude needs permission' && notifications[0].opts.tag === 'p1' && notifications[0].opts.body === 'api - Web' && notifications[0].opts.data.url === './#ws=w&pane=p1', 'push: shows the title, body and tag = pane')
+  check(!('state' in notifications[0].opts.data), 'a push without state stores none')
+  await fire('push', { data: { json: () => ({ title: 'Claude finished', body: 'api - Web', tag: 'p1', url: './#ws=w&pane=p1', state: 'done' }) } })
+  check(notifications.at(-1).opts.data.state === 'done' && notifications.at(-1).opts.data.url === './#ws=w&pane=p1', 'v2.3: push keeps the announced state in data')
+  await fire('push', { data: { json: () => ({ title: 'x', tag: 'p1', state: 'bogus' }) } })
+  check(!('state' in notifications.at(-1).opts.data), 'an invalid state is dropped')
+  notifications.splice(1)
   await fire('push', { data: { json: () => { throw new Error('bad') } } })
   check(notifications.length === 2 && notifications[1].title === 'SnAgentsOS', 'a malformed push still shows a notification (userVisibleOnly)')
   let closed = 0

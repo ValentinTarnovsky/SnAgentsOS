@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Check, Hourglass, Moon } from 'lucide-react'
 import type { ClaudePaneState, PaneStatus } from '@shared/types'
+import { displayStatus } from '@shared/status'
 import { useAppStore } from '@/lib/store'
 import { useLang, useT, type MessageKey } from '@/i18n'
 import { statusTipLines, STATUS_LABEL_KEY } from '@/lib/formatSince'
@@ -71,6 +72,8 @@ export function StatusDot({
 }) {
   const t = useT()
   const lang = useLang()
+  // v2.3: an action main marked as answered shows as working (idle when title-only).
+  status = displayStatus(status)
   if (!status) return null
   const aria = label ?? statusTipLines(status, t, lang, Date.now()).join(', ')
   const dot = (

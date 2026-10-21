@@ -36,7 +36,7 @@ export function skillStub(appVersion: string): string {
   return [
     '---',
     `name: ${BRAND.skillDir}`,
-    `description: Drive ${BRAND.productName} consoles with the ${BRAND.cliBin} CLI. Use when the user asks to open another console or agent, hand work to Codex or Claude in another console, read or wait for another console, or be notified when something finishes ("otra consola", "pasale esto a codex", "abri un agente nuevo", "avisame cuando termine").`,
+    `description: Drive ${BRAND.productName} consoles with the ${BRAND.cliBin} CLI. Use when the user asks to open another console or agent, hand work to Codex or Claude in another console, see what another console is doing or read its chat, read or wait for another console, manage the workspace notes, consoles or workspaces, check the Claude or Codex usage, switch the Claude account, or be notified when something finishes ("otra consola", "pasale esto a codex", "abri un agente nuevo", "avisame cuando termine", "mira que esta haciendo la consola", "lee la consola de codex", "fijate en la otra consola", "anota esto en las notas del workspace", "reinicia esa consola", "cuanto uso me queda", "cambia de cuenta de claude").`,
     '---',
     `<!-- managed-by: ${BRAND.packageName} v${appVersion} -->`,
     `# ${BRAND.productName} CLI`,

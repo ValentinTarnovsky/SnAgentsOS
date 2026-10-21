@@ -32,7 +32,7 @@ window.snApi={platform:'win32',
  pty:{reattach:async(id)=>{calls.reattach.push(id);calls.seq.push('reattach');return reattachRes},
   killPanes:async(ids)=>{calls.killPanes.push(ids);calls.seq.push('killPanes');return ids.length},
   spawn:async(req)=>{calls.spawn.push(req);return{ptyId:'pty-'+calls.spawn.length,shellKind:'powershell'}},
-  write:(r)=>{calls.writes.push(r)},resize:(r)=>{calls.resize.push(r)},kill:async(id)=>{calls.kills.push(id)},setActive(){},flow(){},
+  write:(r)=>{calls.writes.push(r)},submit:async(r)=>{calls.writes.push({ptyId:r.ptyId,data:r.text,origin:r.origin});return{ok:true}},resize:(r)=>{calls.resize.push(r)},kill:async(id)=>{calls.kills.push(id)},setActive(){},flow(){},
   onData:(cb)=>{listeners.data.add(cb);return()=>listeners.data.delete(cb)},
   onExit:(cb)=>{listeners.exit.add(cb);return()=>listeners.exit.delete(cb)},
   restart:async(req)=>{calls.restart.push(req);if(restartMode==='fail')throw new Error("Error invoking remote method 'pty:restart': Error: File not found: nope.exe");return{ptyId:'pty-r'+calls.restart.length,tail:'--- reiniciado ---'+String.fromCharCode(13,10),shellKind:'powershell'}}},
@@ -165,7 +165,7 @@ app.whenReady().then(async()=>{
  await shot('chip-ready');
  await js("smoke.click('[data-cell=chip] [data-agent-end=resume]')");await wait(100);
  v=await js("({w:smoke.calls.writes.at(-1),chip:smoke.chip('chip')})");
- if(v.w.ptyId!=='pty-d'||v.w.data!=="Set-Location -LiteralPath 'C:/repo'; claude --model opus --resume "+UUID+await js('smoke.CR')||v.chip)fail('Resume types cd + resume + Enter and hides the chip',v);n++;
+ if(v.w.ptyId!=='pty-d'||v.w.data!=="Set-Location -LiteralPath 'C:/repo'; claude --model opus --resume "+UUID+await js('smoke.CR')||v.w.origin!=='auto'||v.chip)fail('Resume types cd + resume + Enter and hides the chip',v);n++;
  await js("smoke.end('pd','"+UUID+"')");await wait(900);
  await js("smoke.click('[data-cell=chip] [data-agent-end=new]')");await wait(100);
  v=await js("smoke.calls.writes.at(-1)");

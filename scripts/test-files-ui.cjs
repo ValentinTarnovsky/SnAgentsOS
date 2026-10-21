@@ -21,8 +21,9 @@ import {I18nProvider} from './src/renderer/i18n';
 import {useAppStore} from './src/renderer/lib/store';
 import {useGlobalKeys} from './src/renderer/lib/useGlobalKeys';
 import {applyTheme} from './src/renderer/themes/applyTheme';
-import {useSidePanels} from './src/renderer/lib/sidePanels';
+import {useSidePanels, openNoteInPanel} from './src/renderer/lib/sidePanels';
 import {openChangesPanel} from './src/renderer/lib/changesPanel';
+import {useToastStore} from './src/renderer/lib/toast';
 
 const ROOT = 'C:\\fixture\\repo';
 const calls = { writes: [], watch: [], creates: [], noteWrites: [], noteCreates: [], clip: [] };
@@ -57,7 +58,7 @@ window.snApi = fallback({
   files: {
     root: async () => ({ ok: true, root: ROOT, name: 'repo' }),
     list: async ({ rel }) => ({ ok: true, entries: kids(rel), truncated: false }),
-    read: async ({ rel }) => { const f = files[rel]; return f ? { ok: true, kind: 'text', text: f.text, eol: f.eol, bom: f.bom, rev: f.rev, size: f.text.length, readOnly: false } : { ok: false, error: 'not_found' } },
+    read: async ({ rel }) => { const f = files[rel]; return f ? { ok: true, kind: 'text', text: f.text, eol: f.eol, bom: f.bom, rev: f.rev, size: f.text.length, readOnly: !!f.readOnly } : { ok: false, error: 'not_found' } },
     write: async (req) => {
       calls.writes.push(req);
       const f = files[req.rel];
@@ -75,7 +76,7 @@ window.snApi = fallback({
     list: async () => ({ ok: true, notes: Object.values(notes).map(({ text, path, ...m }) => m).sort((a, b) => b.updatedAt - a.updatedAt) }),
     read: async ({ noteId }) => (notes[noteId] ? { ok: true, note: { ...notes[noteId] } } : { ok: false, error: 'not_found' }),
     write: async (req) => {
-      calls.noteWrites.push(req);
+      calls.noteWrites.push({ ...req, at: performance.now() });
       const n = notes[req.noteId];
       if (!n) return { ok: false, error: 'not_found' };
       if (req.baseRev !== undefined && req.baseRev !== n.rev) return { ok: false, error: 'conflict', current: { ...n } };
@@ -107,6 +108,8 @@ createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><App 
 const q = (s) => document.querySelector(s);
 const qa = (s) => [...document.querySelectorAll(s)];
 window.addEventListener('error',(e)=>{window.__err=String(e.message)});
+// When the last primary press landed and how many note writes had happened by then.
+window.addEventListener('pointerdown',()=>{window.__downAt=performance.now();window.__writesAtDown=calls.noteWrites.length},true);
 window.smoke = {
   calls, files, notes,
   ready: () => subs.length >= 1,
@@ -122,7 +125,35 @@ window.smoke = {
   status: () => q('[data-files-status]')?.textContent ?? '',
   external: () => q('[data-file-external]')?.dataset.fileExternal ?? null,
   emitFiles: (dirs) => filesChanged && filesChanged({ workspaceId: 'w1', dirs }),
-  search: () => !!q('.cm-search'),
+  search: () => !!q('[data-find-widget]'),
+  // The find widget (v2.3): its counter, whether its field has the focus, its replace row.
+  findCount: () => q('[data-find-count]')?.textContent ?? null,
+  findFocused: () => document.activeElement === q('[data-find-input]'),
+  replaceRow: () => !!q('[data-find-replace-row]'),
+  replaceFocused: () => document.activeElement === q('[data-find-replace-input]'),
+  replaceToggle: () => !!q('[data-find-action="toggleReplace"]'),
+  toggleOn: (k) => q('[data-find-toggle="' + k + '"]')?.dataset.on === 'true',
+  findInvalid: () => q('[data-find-input]')?.getAttribute('aria-invalid') === 'true',
+  editorFocused: () => !!document.activeElement?.classList.contains('cm-content'),
+  closeTab: (rel) => q('[data-file-tab="' + rel + '"] button').click(),
+  // Collapse folders (v2.3) and the tree filter.
+  collapse: () => q('[data-files-collapse]').click(),
+  collapseDisabled: () => q('[data-files-collapse]').disabled,
+  filter: (text) => { const el = q('[data-files-filter]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, text); el.dispatchEvent(new Event('input', { bubbles: true })) },
+  filterValue: () => q('[data-files-filter]').value,
+  // Outside click (v2.3): a point on the console beside the drawer, the resize edge, the pin, the header toggle.
+  consolePoint: () => { const d = q('[data-drawer]').getBoundingClientRect(); const x = q('.xterm-screen').getBoundingClientRect(); return { x: Math.round(Math.min(x.left + 60, d.left - 60)), y: Math.round(x.top + 40) } },
+  resizePoint: () => { const r = q('[data-drawer-resize]').getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } },
+  filesButtonPoint: () => { const r = q('[data-files-button]').getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } },
+  // A point on the title of the console's header, which takes no focus itself.
+  paneTitlePoint: () => { const s = qa('main span.font-medium').find((e) => e.textContent === 'Consola').getBoundingClientRect(); return { x: Math.round(s.left + 6), y: Math.round(s.top + s.height / 2) } },
+  // Lets presses fall through a maximized drawer to the console under it (the drawer's own filter is off).
+  passThrough: (on) => { q('[data-drawer]').style.pointerEvents = on ? 'none' : '' },
+  xtermAt: (x, y) => !!document.elementFromPoint(x, y)?.closest('.xterm'),
+  pin: () => q('[data-drawer-pin]').click(),
+  pinned: () => q('[data-drawer-pin]')?.dataset.drawerPin ?? null,
+  pinStored: (id) => localStorage.getItem('snagentsos.drawer.' + id + '.pinned'),
+  xtermFocused: () => !!document.activeElement?.closest?.('.xterm'),
   notesNew: () => (q('[data-notes-first]') || q('[data-notes-new]')).click(),
   noteRows: () => qa('[data-note-row]').map((r) => r.textContent),
   preview: () => q('[data-note-preview]')?.textContent ?? '',
@@ -141,6 +172,15 @@ window.smoke = {
   menuOnTop: () => { const m = q('[data-new-console-menu]'); if (!m) return false; const r = m.getBoundingClientRect(); return m.contains(document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height - 4, 20))) },
   drawerPoint: () => { const r = q('[data-drawer]').getBoundingClientRect(); return { x: Math.round(r.left + 40), y: Math.round(r.bottom - 40) } },
   palette: () => useAppStore.getState().setPaletteOpen(true),
+  // snaos notes open (v2.3): a note straight into the store (the CLI writes through main), then the request.
+  addNote: (id, title) => { const text = '# ' + title + ' texto'; notes[id] = { id, title, updatedAt: Date.now(), size: text.length, rev: 'n' + ++revN, text, path: 'C:/data/notes/w1/' + id + '.md' } },
+  noteIdOf: (title) => Object.values(notes).find((n) => n.title === title)?.id ?? null,
+  openNote: (id) => openNoteInPanel('w1', id),
+  noteTitle: () => q('[data-note-title]')?.textContent ?? null,
+  noteRequest: () => useSidePanels.getState().noteRequest,
+  // Someone else changed the note on disk (no event yet).
+  bumpRev: (id) => { notes[id].rev = 'n' + ++revN },
+  toasts: () => useToastStore.getState().items.map((t) => t.title),
 };
 `
 
@@ -172,9 +212,26 @@ app.whenReady().then(async()=>{
  await until('smoke.rows().length===3','the first level of the tree');
  eq(await js('smoke.rows()'),['src','README.md','win.txt'],'folders first');
  eq(await js('smoke.calls.watch'),['w1'],'the drawer watches the workspace folder');
+ // Collapse folders (v2.3): disabled while there is nothing to collapse.
+ ok(await js('smoke.collapseDisabled()'),'collapse is disabled on a fresh tree');
  await js("smoke.clickRow('src')");
  await until("smoke.rows().includes('src/app.ts')",'a click expands a folder');
  eq(await js('smoke.rows()'),['src','src/app.ts','src/util.ts','README.md','win.txt'],'children under their folder');
+ ok(!(await js('smoke.collapseDisabled()')),'an open folder enables collapse');
+ await js('smoke.collapse()');
+ await until('smoke.rows().length===3','collapse goes back to the first level');
+ eq(await js('smoke.rows()'),['src','README.md','win.txt'],'collapsed: the first level only');
+ ok(await js('smoke.collapseDisabled()'),'and collapse is disabled again');
+ ok(await js("document.activeElement===document.querySelector('[data-files-tree]')"),'the disabled button hands the keyboard to the tree');
+ // With text in the filter every loaded match shows open: collapse also clears the filter.
+ await js("smoke.filter('app')");
+ await until("smoke.rows().includes('src/app.ts')&&!smoke.rows().includes('README.md')",'the filter shows the loaded match under its folder');
+ ok(!(await js('smoke.collapseDisabled()')),'a filter enables collapse');
+ await js('smoke.collapse()');
+ await until("smoke.filterValue()===''&&smoke.rows().length===3",'collapse with a filter clears it and shows the first level');
+ eq(await js('smoke.rows()'),['src','README.md','win.txt'],'filter cleared, folders closed');
+ await js("smoke.clickRow('src')");
+ await until("smoke.rows().includes('src/app.ts')",'src open for the next steps');
 
  // Open, type, save.
  await js("smoke.clickRow('src/app.ts')");
@@ -192,13 +249,84 @@ app.whenReady().then(async()=>{
  await until("smoke.tabs()[0][1]==='false'",'saved: the dot goes away');
  ok((await js('smoke.drawer()'))==='files','Ctrl+S did not leave the drawer');
 
- // Global keys stay out of the editor: Ctrl+F opens its search.
+ // Global keys stay out of the editor: Ctrl+F opens the find widget (v2.3) with the focus in its field.
+ eq(await js('smoke.editorText()'),'const a = 1\n// hola','the text to search');
  await js('smoke.focusEditor()');
  await press('F',['control']);
- await until('smoke.search()','Ctrl+F opens the editor search panel');
+ await until('smoke.search()&&smoke.findFocused()','Ctrl+F opens the find widget with the focus in the query');
+ ok(!(await js("!!document.querySelector('.cm-search')")),'not the stock CodeMirror panel');
+ eq(await js('smoke.findCount()'),'','nothing typed: no counter');
+ await type('o');
+ await until("smoke.findCount()==='1 de 2'",'typing jumps to the first match: 1 of N');
+ await press('Return');
+ await until("smoke.findCount()==='2 de 2'",'Enter: next match');
+ await press('Return');
+ await until("smoke.findCount()==='1 de 2'",'Enter wraps around');
+ await press('Return',['shift']);
+ await until("smoke.findCount()==='2 de 2'",'Shift+Enter: previous match');
+ await press('F3');
+ await until("smoke.findCount()==='1 de 2'",'F3: next match');
+ await press('F3',['shift']);
+ await until("smoke.findCount()==='2 de 2'",'Shift+F3: previous match');
+ ok(await js('smoke.findFocused()'),'the keys keep the focus in the query');
+ await press('A',['control']);await type('Hola');
+ await until("smoke.findCount()==='1 de 1'",'a case-insensitive match');
+ await press('C',['alt']);
+ await until("smoke.findCount()==='Sin resultados'",'Alt+C (match case) changes the count');
+ ok(await js("smoke.toggleOn('case')")&&await js('smoke.findInvalid()'),'the toggle shows on and the field marks no results');
+ await press('C',['alt']);
+ await until("smoke.findCount()==='1 de 1'&&!smoke.toggleOn('case')",'Alt+C again: back to case-insensitive');
+ ok(!(await js('smoke.replaceRow()')),'replace starts hidden');
+ await press('H',['control']);
+ await until('smoke.replaceRow()&&smoke.replaceFocused()','Ctrl+H shows the replace row with the focus in it');
+ await type('Chau');
+ // Readable at 100 / 125 / 150%: inside the editor, and the first line is not under it (room on top).
+ for(const z of [1,1.25,1.5]){
+  w.webContents.setZoomFactor(z);await frame();await wait(150);
+  ok(await js("(()=>{const r=document.querySelector('[data-find-widget]').getBoundingClientRect(),ed=[...document.querySelectorAll('[data-code-editor]')].find((e)=>e.offsetParent!==null),c=ed.getBoundingClientRect(),l=ed.querySelector('.cm-line').getBoundingClientRect();return r.right<=c.right+1&&r.left>=c.left-1&&r.height>60&&l.top>=r.bottom})()"),'the widget fits the editor and leaves the first line visible at zoom '+z);
+  await shot('find-widget-zoom-'+String(z).replace('.','_'));
+ }
+ w.webContents.setZoomFactor(1);await frame();await wait(100);
+ ok(await js('smoke.replaceFocused()'),'the replace field kept the focus');
+ await press('Return');
+ await until("smoke.editorText()==='const a = 1\\n// Chau'",'Enter in replace replaces the match');
+ await until("smoke.tabs()[0][1]==='true'",'replacing marks the tab unsaved');
+ await press('F',['control']);
+ await until('smoke.findFocused()&&!smoke.replaceRow()','Ctrl+F from the replace field goes back to the query alone (replace hides)');
+ await type('Chau');
+ await until("smoke.findCount()==='1 de 1'",'the replaced text is found');
+ await press('H',['control']);
+ await until('smoke.replaceRow()&&smoke.replaceFocused()','Ctrl+H from the query shows replace again with the focus in it');
+ await js("document.querySelector('[data-find-input]').focus()");
+ await press('H',['control']);
+ await until('smoke.replaceRow()&&smoke.replaceFocused()','Ctrl+H with replace open moves the focus to it (never hides it)');
+ await press('A',['control']);await type('hola');
+ await press('Return',['control','alt']);
+ await until("smoke.editorText()==='const a = 1\\n// hola'",'Ctrl+Alt+Enter replaces all');
+ await until("smoke.findCount()==='Sin resultados'&&smoke.tabs()[0][1]==='false'",'nothing left to find; the text is back to the saved one');
  await press('Escape');
- await until('!smoke.search()','Esc closes the search first');
+ await until('!smoke.search()','Esc closes the widget first');
  ok((await js('smoke.drawer()'))==='files','and keeps the drawer open');
+ ok(await js('smoke.editorFocused()'),'the focus goes back to the text');
+ // A read-only file finds but never replaces.
+ await js("smoke.files['ro.txt']={text:'solo lectura\\n',eol:'lf',bom:false,rev:'r1',readOnly:true};smoke.emitFiles([''])");
+ await until("smoke.rows().includes('ro.txt')",'a read-only file in the tree');
+ await js("smoke.clickRow('ro.txt')");
+ await until("smoke.editorText()==='solo lectura'",'the read-only file opens');
+ await js('smoke.focusEditor()');
+ await press('F',['control']);
+ await until('smoke.search()&&smoke.findFocused()','Ctrl+F finds in a read-only file');
+ ok(!(await js('smoke.replaceToggle()')),'no replace chevron when read-only');
+ await press('H',['control']);
+ ok(!(await js('smoke.replaceRow()')),'Ctrl+H shows no replace row when read-only');
+ await type('lect');
+ await until("smoke.findCount()==='1 de 1'",'and it counts');
+ await press('Escape');
+ await until('!smoke.search()','Esc closes it');
+ await js("smoke.closeTab('ro.txt')");
+ await until('smoke.tabs().length===1','the read-only tab closes');
+ await js("delete smoke.files['ro.txt'];smoke.emitFiles([''])");
+ await until("!smoke.rows().includes('ro.txt')",'and leaves the tree');
 
  // CRLF + BOM keep their shape.
  await js("smoke.clickRow('win.txt')");
@@ -250,6 +378,29 @@ app.whenReady().then(async()=>{
  const nw=await js('smoke.calls.noteWrites.at(-1)');
  ok(nw.text.includes('# Plan del login')&&nw.text.includes('- revisar tokens')&&typeof nw.baseRev==='string','the autosave carries the text and the loaded rev');
  await shot('notes-drawer');
+ // The same find widget in a note.
+ await js('smoke.focusEditor()');
+ await press('F',['control']);
+ await until('smoke.search()&&smoke.findFocused()','Ctrl+F opens the find widget in a note');
+ await type('login');
+ await until("smoke.findCount()==='1 de 1'",'a note counts its matches');
+ await js('smoke.focusEditor()');
+ await press('H',['control']);
+ await until('smoke.replaceRow()&&smoke.replaceFocused()','Ctrl+H from the note text (find open) shows replace with the focus in it');
+ await shot('notes-find');
+ await press('Escape');
+ await until('!smoke.search()','Esc closes the note find');
+ ok(await js('smoke.editorFocused()'),'the note text has the focus back');
+ await press('H',['control']);
+ await until('smoke.search()&&smoke.replaceRow()&&smoke.replaceFocused()','Ctrl+H from the note text (find closed) opens it with replace focused');
+ await press('Escape');
+ await until('!smoke.search()','Esc closes it again');
+ await press('F',['control']);
+ await until('smoke.search()&&smoke.findFocused()','Ctrl+F after Ctrl+H, Esc');
+ ok(!(await js('smoke.replaceRow()')),'opens find alone: closing forgot the replace row');
+ await press('Escape');
+ await until('!smoke.search()','Esc closes the find alone');
+ ok((await js('smoke.drawer()'))==='notes'&&await js('smoke.editorFocused()'),'the Notes drawer stays and the note has the focus');
 
  // Changes takes over; Esc closes a drawer; the palette lists both.
  await js('smoke.openChanges()');
@@ -278,21 +429,127 @@ app.whenReady().then(async()=>{
   ok((await js('smoke.drawer()'))==='files','and the drawer stays open'+(max?' (maximized)':''));
  }
  await js('smoke.maximize(false)');await frame();
+
+ // A click on the console beside the drawer closes it (v2.3), and the console keeps the keyboard.
+ let pt=await js('smoke.drawerPoint()');
+ await click(pt.x,pt.y);
+ ok((await js('smoke.drawer()'))==='files','a click inside the drawer keeps it');
+ pt=await js('smoke.resizePoint()');
+ w.webContents.sendInputEvent({type:'mouseDown',x:pt.x,y:pt.y,button:'left',clickCount:1});
+ w.webContents.sendInputEvent({type:'mouseMove',x:pt.x-40,y:pt.y,button:'left'});
+ w.webContents.sendInputEvent({type:'mouseUp',x:pt.x-40,y:pt.y,button:'left',clickCount:1});
+ await frame();await wait(60);
+ ok((await js('smoke.drawer()'))==='files','dragging the resize edge keeps it');
+ await js("smoke.context('README.md')");
+ await until('smoke.menu().length>5','the tree menu is open');
+ pt=await js('smoke.consolePoint()');
+ await click(pt.x,pt.y);
+ await until('smoke.menu().length===0','a click on the console with the menu open closes the menu');
+ ok((await js('smoke.drawer()'))==='files','and only the menu');
+ await js('smoke.maximize(true)');await frame();
+ await js('smoke.passThrough(true)');
+ ok(await js('smoke.xtermAt('+pt.x+','+pt.y+')'),'with the maximized drawer let through, the press lands on the console');
+ await click(pt.x,pt.y);
+ ok((await js('smoke.drawer()'))==='files','maximized: a press on the grid keeps it');
+ await js('smoke.passThrough(false)');
+ await js('smoke.maximize(false)');await frame();
+ // Pinned: a click outside keeps it, and the pin survives a reopen.
+ eq(await js('smoke.pinned()'),'off','unpinned by default');
+ await js('smoke.pin()');
+ await until("smoke.pinned()==='on'",'the pin turns on');
+ eq(await js("smoke.pinStored('files')"),'1','the pin is kept per drawer');
+ await click(pt.x,pt.y);
+ ok((await js('smoke.drawer()'))==='files','pinned: a click on the console keeps it');
+ await press('E',['control','shift']);
+ await until('smoke.drawer()===null','Ctrl+Shift+E closes it');
+ await press('E',['control','shift']);
+ await until("smoke.drawer()==='files'&&smoke.pinned()==='on'",'reopened, still pinned');
+ await js('smoke.pin()');
+ await until("smoke.pinned()==='off'",'unpinned');
+ eq(await js("smoke.pinStored('files')"),null,'unpinning forgets it');
+ // A dirty tab survives an outside close.
+ await until('smoke.focusEditor()','the editor of the open tab');
+ await press('End',['control']);await type('!');
+ await until("smoke.tabs().some(t=>t[1]==='true')",'a tab with edits');
+ pt=await js('smoke.consolePoint()');
+ await click(pt.x,pt.y);
+ await until('smoke.drawer()===null','a click on the console closes the drawer');
+ await wait(100);
+ ok(await js('smoke.xtermFocused()'),'and the clicked console has the keyboard');
+ await press('E',['control','shift']);
+ await until("smoke.drawer()==='files'&&smoke.tabs().some(t=>t[1]==='true')",'the edited tab survived');
+ ok(!(await js('smoke.xtermFocused()')),'the reopened drawer has the keyboard');
+ pt=await js('smoke.paneTitlePoint()');
+ await click(pt.x,pt.y);
+ await until('smoke.drawer()===null','a click on the pane title closes the drawer');
+ await until('smoke.xtermFocused()','and the last console gets the keyboard back (the title takes no focus)');
+ await press('E',['control','shift']);
+ await until("smoke.drawer()==='files'",'Files again for the header toggle');
+ // The header toggle still toggles once (the header is outside the grid).
+ pt=await js('smoke.filesButtonPoint()');
+ await click(pt.x,pt.y);await wait(100);
+ eq(await js('smoke.drawer()'),null,'the Files button closes it once, no reopen');
+ // A note typed and clicked away before its 600 ms autosave is saved anyway.
+ await press('M',['control','shift']);
+ await until("smoke.drawer()==='notes'",'Notes again');
+ await until('smoke.focusEditor()','the note has the editor');
+ await press('End',['control']);await type(' afuer');
+ await until("smoke.calls.noteWrites.at(-1)?.text.includes(' afuer')",'the autosave of the first keys');
+ const writesBefore=await js('smoke.calls.noteWrites.length');
+ pt=await js('smoke.consolePoint()');
+ // The last key and the press back to back, well inside the 600 ms debounce.
+ w.webContents.sendInputEvent({type:'char',keyCode:'a'});
+ await wait(80);
+ w.webContents.sendInputEvent({type:'mouseDown',x:pt.x,y:pt.y,button:'left',clickCount:1});
+ w.webContents.sendInputEvent({type:'mouseUp',x:pt.x,y:pt.y,button:'left',clickCount:1});
+ await until('smoke.drawer()===null','a click on the console closes Notes');
+ await until("smoke.calls.noteWrites.length>"+writesBefore+"&&smoke.calls.noteWrites.at(-1).text.includes(' afuera')",'the pending note text is saved on close');
+ eq(await js('window.__writesAtDown'),writesBefore,'no autosave had run when the press landed');
+ const lag=await js('smoke.calls.noteWrites.at(-1).at-window.__downAt');
+ ok(lag>=0&&lag<300,'the close itself wrote it, not the debounce ('+Math.round(lag)+' ms after the press)');
+ await press('E',['control','shift']);
+ await until("smoke.drawer()==='files'",'Files for the Esc check');
  await js("document.querySelector('[data-drawer]').focus()");
  await press('Escape');
  await until('smoke.drawer()===null','Esc closes the drawer');
+ // snaos notes open (v2.3): the request opens the drawer on that note, also when it is already open.
+ await js("smoke.addNote('n-cli','Desde la CLI')");
+ await js("smoke.openNote('n-cli')");
+ await until("smoke.drawer()==='notes'&&smoke.noteTitle()==='Desde la CLI'",'notes open: the drawer opens on the asked note, not the last one');
+ eq(await js('smoke.noteRequest()'),null,'the first load took the request');
+ const planId=await js("smoke.noteIdOf('Plan del login')");
+ await js('smoke.openNote('+JSON.stringify(planId)+')');
+ await until("smoke.noteTitle()==='Plan del login'",'a later request switches the open drawer to that note');
+ await js("smoke.addNote('n-nueva','Recien creada')");
+ await js("smoke.openNote('n-nueva')");
+ await until("smoke.noteTitle()==='Recien creada'&&smoke.noteRows().some(r=>r.includes('Recien creada'))",'a note the drawer had not listed yet: the list refreshes and it opens');
+ eq(await js('smoke.noteRequest()'),null,'every request is consumed');
+ // Two requests in a row: the latest one is the note that stays open.
+ await js('smoke.openNote('+JSON.stringify(planId)+');smoke.openNote("n-cli")');
+ await until("smoke.noteRequest()===null&&smoke.noteTitle()==='Desde la CLI'",'two quick requests: the last one wins');
+ await wait(200);
+ eq(await js('smoke.noteTitle()'),'Desde la CLI','an older request still in flight never replaces the latest');
+ // A request never switches away from edits that did not save (here a conflict).
+ await js("smoke.bumpRev('n-cli')");
+ await js('smoke.focusEditor()');await press('End',['control']);await type(' local');
+ await js('smoke.openNote('+JSON.stringify(planId)+')');
+ await until('smoke.noteRequest()===null','the request is consumed');
+ await until("smoke.toasts().some(t=>t.includes('cambios sin guardar'))",'a toast says why the note did not switch');
+ ok((await js('smoke.noteTitle()'))==='Desde la CLI'&&(await js('smoke.editorText()')).endsWith(' local'),'the conflicting note stays open with the unsaved text',await js('smoke.editorText()'));
+ await press('M',['control','shift']);
+ await until('smoke.drawer()===null','Ctrl+Shift+M closes Notes');
  await js('smoke.palette()');await wait(200);
  const body=await js('document.body.textContent');
  ok(body.includes('Abrir los archivos del workspace')&&body.includes('Abrir las notas del workspace'),'the palette has both drawers');
  await press('Escape');
 
  if(failures.length)throw new Error(failures.join('\n'));
- console.log('PASS: '+n+' files and notes drawer UI checks (Ctrl+Shift+E/M, tree, open, type, Ctrl+S with rev, Ctrl+F search, CRLF + BOM, agent changes clean and dirty, context menu, autosaved note + preview, one drawer at a time, Esc, palette, no shell shift on open, New console menu over the drawer); screenshots '+__dirname);
+ console.log('PASS: '+n+' files and notes drawer UI checks (Ctrl+Shift+E/M, tree, open, type, Ctrl+S with rev, collapse folders, find widget with counter / options / replace / read-only / zoom, CRLF + BOM, agent changes clean and dirty, context menu, autosaved note + preview, snaos notes open (latest wins, never over unsaved edits), one drawer at a time, Esc, palette, no shell shift on open, New console menu over the drawer, close on outside click with pin); screenshots '+__dirname);
  w.destroy();app.quit();
 }).catch((e)=>{console.error(e);app.exit(1)});
 `
 fs.writeFileSync(path.join(dir, 'main.cjs'), main)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-const res = spawnSync(require('electron'), [path.join(dir, 'main.cjs')], { env, windowsHide: true, encoding: 'utf8', timeout: 120000 })
+const res = spawnSync(require('electron'), [path.join(dir, 'main.cjs')], { env, windowsHide: true, encoding: 'utf8', timeout: 240000 })
 process.stdout.write(res.stdout ?? ''); if (res.status !== 0) process.stderr.write(res.stderr ?? '')
 process.exitCode = res.status ?? 1

@@ -1,43 +1,67 @@
+import { stat } from 'fs/promises'
 import { posix, win32 } from 'path'
 import { BRAND } from '@shared/brand'
 import {
+  CTL_ACCOUNT_USE_PER_MIN,
+  CTL_CHAT_BLOCK_MAX,
+  CTL_CHAT_MAX_PAGES,
+  CTL_CHAT_TURNS_DEFAULT,
+  CTL_CHAT_TURNS_MAX,
   CTL_MAX_PROMPT,
   CTL_MAX_SEND,
   CTL_MAX_WAITERS,
+  CTL_MUTATE_PER_MIN,
+  CTL_NOTES_WRITE_PER_MIN,
   CTL_NOTIFY_BODY_MAX,
   CTL_NOTIFY_PER_MIN,
   CTL_NOTIFY_TITLE_MAX,
+  CTL_PEEK_LINES_DEFAULT,
   CTL_PROTOCOL_VERSION,
   CTL_READ_DEFAULT,
   CTL_READ_MAX,
+  CTL_READS_PER_MIN,
   CTL_STATUS_MAX,
+  CTL_TITLE_MAX,
   CTL_WAIT_DEFAULT_S,
   CTL_WAIT_MAX_S,
   CTL_WAIT_QUIET_MS,
+  CTL_WS_NAME_MAX,
+  CTL_WS_NEW_PER_MIN,
+  type CtlAccountStatus,
+  type CtlChatResult,
   type CtlConsoleInfo,
   type CtlErrorCode,
   type CtlListData,
   type CtlListPane,
   type CtlListWorkspace,
   type CtlMethod,
+  type CtlPeekResult,
   type CtlRendererData,
   type CtlResponse,
   type CtlSpawnResult,
+  type CtlUsageResult,
+  type CtlUsageRow,
   type CtlWaitResult,
   type CtlWorkspaceInfo,
 } from '@shared/ctl-protocol'
-import { resolveConsoleRef, resolveWorkspaceRef, workspaceOfPane, type RefError } from '@shared/ctlRefs'
+import { resolveConsoleRef, resolveNoteRef, resolveWorkspaceRef, workspaceOfPane, type RefError } from '@shared/ctlRefs'
 import { stripAnsi, tailLines } from '@shared/ansi'
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
-import type { ClaudePaneState, ConfigFile, PaneStatusEvt, PaneType } from '@shared/types'
-import type { PtySubmitRes } from '@shared/ipc-contract'
+import { WS_NOTE_MAX_BYTES, WS_NOTE_TITLE_MAX, type WsNoteCreateReq, type WsNoteDoc, type WsNoteError, type WsNoteMeta, type WsNoteReadReq, type WsNoteResult, type WsNoteWriteReq, type WsNotesListRes } from '@shared/ws-notes'
+import { chatMessageOffset, type ChatBlock, type ChatMessage, type ChatUnavailableReason } from '@shared/chat-types'
+import type { AgentProvider, ClaudePaneState, ConfigFile, PaneStatusEvt, PaneType } from '@shared/types'
+import type { PtySubmitRes, UsageSnapshot } from '@shared/ipc-contract'
+import type { AccountsOpError } from '@shared/claude-accounts'
+import { readPage } from '../chat/TranscriptWatcher'
+import { decoderFor } from '../chat/ChatHub'
+import type { LocateResult } from '../chat/TranscriptLocator'
 import type { BusResult, RendererBus } from './rendererBus'
 import type { CtlCaller } from './CtlTokens'
 
 /** The PtyManager surface the CLI uses. */
 export interface CtlPtyView {
   ptyIdForPane(paneId: string): string | null
-  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean): Promise<PtySubmitRes>
+  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean, origin?: 'user' | 'auto'): Promise<PtySubmitRes>
   lastSubmitAt(paneId: string): number | undefined
   lastOutputAt(paneId: string): number | undefined
   /** The live pty's raw ring (no side effects), or null. */
@@ -69,6 +93,58 @@ export interface CtlTiming {
 
 export const DEFAULT_TIMING: CtlTiming = { settleMs: 1500, recentWorkingMs: 3000, noTurnMs: 10_000, tickMs: 250 }
 
+/** The WsNoteStore surface the CLI uses (the same instance as the renderer IPC and the phones, so every write emits). */
+export interface CtlNotesView {
+  list(workspaceId: string): Promise<WsNotesListRes>
+  read(req: WsNoteReadReq): Promise<WsNoteResult<{ note: WsNoteDoc }>>
+  write(req: WsNoteWriteReq): Promise<WsNoteResult<{ note: WsNoteMeta }>>
+  create(req: WsNoteCreateReq): Promise<WsNoteResult<{ note: WsNoteMeta }>>
+  delete(req: WsNoteReadReq): Promise<WsNoteResult<Record<never, never>>>
+}
+
+/**
+ * Transcript lookup for `chat` / `peek`: TranscriptLocator.locate only. The
+ * CLI reads the file one-shot (readPage) and is never a ChatHub reader: no
+ * watcher, no LRU slot, so a phone's Chat is never evicted (FR-35 holds).
+ */
+export interface CtlChatView {
+  locate(paneId: string): Promise<LocateResult>
+}
+
+/** The usage poller as the CLI reads it (registerUsageIpc's handle fits as is). */
+export interface CtlUsageView {
+  /** The current snapshot; fetches once when nothing was fetched yet (like `usage:get`). */
+  load(): Promise<UsageSnapshot>
+  enabled(): boolean
+}
+
+/** Outcome of a switch: never the account state, a token or an email. */
+export interface CtlAccountSwitchRes {
+  ok: boolean
+  error?: AccountsOpError
+}
+
+/**
+ * Claude accounts as the CLI sees them: an adapter over AccountService
+ * (accountsView.ts) that picks every field, so no token, credentials blob or
+ * email ever reaches a console.
+ */
+export interface CtlAccountsView {
+  status(): Promise<CtlAccountStatus>
+  switchTo(id: string, reason: 'cli'): Promise<CtlAccountSwitchRes>
+}
+
+/**
+ * Main services the CLI reaches once bootstrap built them (CliService.attach).
+ * Each is optional: a missing one answers `disabled`.
+ */
+export interface CtlServices {
+  notes?: CtlNotesView
+  chat?: CtlChatView
+  usage?: CtlUsageView
+  accounts?: CtlAccountsView
+}
+
 export interface CtlHandlerDeps {
   bus: RendererBus
   pty: CtlPtyView
@@ -80,6 +156,39 @@ export interface CtlHandlerDeps {
   timing?: Partial<CtlTiming>
   /** OS whose path rules `open --path` follows (default process.platform; tests pin one). */
   platform?: NodeJS.Platform
+  /** Late-bound services (notes, transcripts). */
+  services?: () => CtlServices
+  /** `ws new`: the folder exists (a stat, nothing is opened or read). */
+  isDir?: (path: string) => Promise<boolean>
+}
+
+const REASON_TEXT: Record<ChatUnavailableReason, string> = {
+  noTranscript: 'no transcript found',
+  ambiguous: 'more than one transcript could be this console',
+  notLocal: 'the agent runs on another machine',
+}
+
+const defaultIsDir = (p: string): Promise<boolean> => stat(p).then((s) => s.isDirectory(), () => false)
+
+/** A text clipped at `max` characters without splitting a surrogate pair. */
+function clip(text: string, max: number): string {
+  let out = text.slice(0, max)
+  const last = out.charCodeAt(out.length - 1)
+  if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1)
+  return out
+}
+
+/** One transcript message as `chat` shows it, or null when nothing is left. */
+function chatView(m: ChatMessage, opts: { tools: boolean; thinking: boolean }): ChatMessage | null {
+  const blocks: ChatBlock[] = []
+  for (const b of m.blocks) {
+    if (b.t === 'notice') continue
+    if (b.t === 'thinking' && !opts.thinking) continue
+    if (b.t === 'toolResult' && !opts.tools) continue
+    if (b.t === 'text' && b.text.length > CTL_CHAT_BLOCK_MAX) blocks.push({ ...b, text: clip(b.text, CTL_CHAT_BLOCK_MAX), truncated: true })
+    else blocks.push(b)
+  }
+  return blocks.length ? { ...m, blocks } : null
 }
 
 const FREE_STATES = new Set<ClaudePaneState>(['idle', 'done', 'action', 'error'])
@@ -153,7 +262,10 @@ export class CtlHandlers {
   private readonly now: () => number
   private readonly timing: CtlTiming
   private readonly waiters = new Set<Waiter>()
-  private readonly notifyLog = new Map<string, number[]>()
+  /** Rate windows, `<bucket>:<caller key>` -> call times of the last minute. */
+  private readonly rateLog = new Map<string, number[]>()
+  /** One promise chain per `<workspace>/<note>`: appends never interleave. */
+  private readonly noteChains = new Map<string, Promise<unknown>>()
   private readonly lastTransitionAt = new Map<string, number>()
   private readonly lastWorkingAt = new Map<string, number>()
   private readonly lastState = new Map<string, ClaudePaneState | null>()
@@ -191,6 +303,46 @@ export class CtlHandlers {
         return this.notify(params, caller)
       case 'note':
         return this.note(params, caller)
+      case 'chat':
+        return this.chat(params, caller)
+      case 'peek':
+        return this.peek(params, caller)
+      case 'kill':
+        return this.kill(params, caller)
+      case 'restart':
+        return this.restart(params, caller)
+      case 'rename':
+        return this.rename(params, caller)
+      case 'ws.new':
+        return this.wsNew(params, caller)
+      case 'ws.rename':
+        return this.wsRename(params, caller)
+      case 'ws.close':
+        return this.wsClose(params, caller)
+      case 'ws.fav':
+        return this.wsFav(params, caller)
+      case 'notes.ls':
+        return this.notesLs(params, caller)
+      case 'notes.get':
+        return this.notesGet(params, caller)
+      case 'notes.new':
+        return this.notesNew(params, caller)
+      case 'notes.set':
+        return this.notesSet(params, caller)
+      case 'notes.append':
+        return this.notesAppend(params, caller)
+      case 'notes.rm':
+        return this.notesRm(params, caller)
+      case 'notes.open':
+        return this.notesOpen(params, caller)
+      case 'usage':
+        return this.usage(params)
+      case 'account.ls':
+        return this.accountLs(params)
+      case 'account.status':
+        return this.accountStatus()
+      case 'account.use':
+        return this.accountUse(params)
       default:
         return err('bad_request', 'unknown method')
     }
@@ -246,6 +398,31 @@ export class CtlHandlers {
     return err(res.error, res.message && res.message !== res.error ? res.message : res.error.replace(/_/g, ' '))
   }
 
+  /**
+   * One call in `bucket` for the caller (its pane, or 'master'), false when
+   * it already made `max` in the last minute. Generalizes notify's budget.
+   */
+  private take(bucket: string, caller: CtlCaller | null, max: number): boolean {
+    const key = `${bucket}:${caller?.paneId ?? 'master'}`
+    const now = this.now()
+    const log = (this.rateLog.get(key) ?? []).filter((at) => now - at < RATE_WINDOW_MS)
+    if (log.length >= max) {
+      this.rateLog.set(key, log)
+      return false
+    }
+    log.push(now)
+    this.rateLog.set(key, log)
+    return true
+  }
+
+  private services(): CtlServices {
+    return this.deps.services?.() ?? {}
+  }
+
+  private platform(): NodeJS.Platform {
+    return this.deps.platform ?? process.platform
+  }
+
   private protectSsh(): boolean {
     return this.deps.config()?.settings?.automation?.cliProtectSsh !== false
   }
@@ -296,6 +473,7 @@ export class CtlHandlers {
       name: w.name,
       cwd: w.cwd,
       active: w.id === list.activeWorkspaceId,
+      ...(w.favorite ? { favorite: true as const } : {}),
       ...(w.note ? { note: w.note } : {}),
       ...(w.taskState ? { taskState: w.taskState } : {}),
       consoles: w.panes.map((p, i): CtlConsoleInfo => {
@@ -417,7 +595,8 @@ export class CtlHandlers {
     if (this.sshProtected(t.workspace, t.pane)) return err('ssh_protected', 'this console has a Connection Profile (cliProtectSsh)')
     const ptyId = this.deps.pty.ptyIdForPane(t.pane.id)
     if (!ptyId) return err('not_running', 'the console is not running')
-    const res = await this.deps.pty.submitToPane(ptyId, t.pane.id, text, enter)
+    // v2.3: an agent's send answers the prompt (cards go away) but never marks the user's result as seen.
+    const res = await this.deps.pty.submitToPane(ptyId, t.pane.id, text, enter, 'auto')
     if (!res.ok) return res.error === 'multiline_unsafe' ? err('multiline_unsafe', 'multi-line text: this console does not accept a safe paste') : err('not_running', 'the console is not running')
     return ok({ paneId: t.pane.id, enter })
   }
@@ -562,15 +741,7 @@ export class CtlHandlers {
     const body = oneLine(str(params.text) ?? '', CTL_NOTIFY_BODY_MAX)
     if (!body) return err('bad_request', 'notify needs a text')
     const title = oneLine(str(params.title) ?? '', CTL_NOTIFY_TITLE_MAX) || BRAND.productName
-    const key = caller?.paneId ?? 'master'
-    const now = this.now()
-    const log = (this.notifyLog.get(key) ?? []).filter((at) => now - at < RATE_WINDOW_MS)
-    if (log.length >= CTL_NOTIFY_PER_MIN) {
-      this.notifyLog.set(key, log)
-      return err('rate_limited', `at most ${CTL_NOTIFY_PER_MIN} notifications per minute`)
-    }
-    log.push(now)
-    this.notifyLog.set(key, log)
+    if (!this.take('notify', caller, CTL_NOTIFY_PER_MIN)) return err('rate_limited', `at most ${CTL_NOTIFY_PER_MIN} notifications per minute`)
     const local = bool(params.local)
     this.deps.notify({ paneId: caller?.paneId ?? null, title, body, local })
     if (caller) void this.deps.bus.request({ kind: 'attention', paneId: caller.paneId })
@@ -599,5 +770,564 @@ export class CtlHandlers {
     const res = await this.deps.bus.request(op)
     if (!res.ok) return this.busErr(res)
     return ok({ workspaceId: sc.id, note: clear ? null : (op.note ?? undefined), taskState: clear ? null : (isTaskState(rawState) ? rawState : undefined) })
+  }
+
+  // --- app 2.3.0: observe other consoles ------------------------------------
+  // `chat` and `peek` only look: they never acknowledge attention (no ackPane,
+  // no setRemoteSeen, no paneAttention), so an agent watching a console never
+  // "reads" a result for the user.
+
+  /** The last screen lines of a running console: the xterm buffer, else main's ring; [] when neither answers. */
+  private async screen(paneId: string, lines: number): Promise<string[]> {
+    const res = await this.deps.bus.request({ kind: 'read', paneId, lines })
+    if (res.ok) {
+      const data = res.data as CtlRendererData['read'] | undefined
+      return Array.isArray(data?.lines) ? data!.lines.slice(-lines) : []
+    }
+    const ring = this.deps.pty.tail(paneId)
+    return ring === null ? [] : tailLines(stripAnsi(ring), lines)
+  }
+
+  private async chat(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    let turns = CTL_CHAT_TURNS_DEFAULT
+    if (params.turns !== undefined) {
+      const n = Number(params.turns)
+      if (!Number.isInteger(n) || n < 1) return err('bad_request', '--turns must be a positive integer')
+      turns = Math.min(n, CTL_CHAT_TURNS_MAX)
+    }
+    let before: number | null = null
+    if (params.before !== undefined) {
+      const raw = params.before
+      const n = typeof raw === 'string' ? (/^\d{1,16}$/.test(raw) ? Number(raw) : NaN) : typeof raw === 'number' ? raw : NaN
+      if (!Number.isSafeInteger(n) || n < 0) return err('bad_request', '--before must be a cursor printed by an earlier snaos chat')
+      before = n
+    }
+    const opts = { tools: bool(params.tools), thinking: bool(params.thinking) }
+    const svc = this.services().chat
+    if (!svc) return err('disabled', 'reading transcripts is not available yet')
+    const list = await this.list()
+    if ('ok' in list) return list
+    const t = this.target(list, params, caller)
+    if (!t.ok) return t
+    if (this.sshProtected(t.workspace, t.pane)) return err('ssh_protected', 'this console has a Connection Profile (cliProtectSsh)')
+    if (!this.take('read', caller, CTL_READS_PER_MIN)) return err('rate_limited', `at most ${CTL_READS_PER_MIN} chat or peek calls per minute`)
+    const paneId = t.pane.id
+    let loc: LocateResult
+    try {
+      loc = await svc.locate(paneId)
+    } catch {
+      return err('internal', 'could not locate the transcript')
+    }
+    const noChat = (reason: ChatUnavailableReason): Fail => {
+      const hint = this.deps.pty.ptyIdForPane(paneId) ? `snaos read ${paneId} shows its screen` : `snaos peek ${paneId} shows its state`
+      // A transcript reason, never the CLI's own `ambiguous` (exit 4).
+      return err('not_found', `no chat for this console (${REASON_TEXT[reason]}); ${hint}`, { reason })
+    }
+    if (!loc.ok) {
+      if (loc.pending) return ok({ paneId, items: [], turns: 0, nextCursor: null, pending: true } satisfies CtlChatResult)
+      return noChat(loc.reason)
+    }
+    const decode = decoderFor(loc.provider)
+    const collected: ChatMessage[] = []
+    let cursor: number | null = before
+    let lastCursor: string | null = null
+    let users = 0
+    for (let page = 0; page < CTL_CHAT_MAX_PAGES; page++) {
+      let res: Awaited<ReturnType<typeof readPage>>
+      try {
+        res = await readPage(loc.path, decode, { before: cursor, paneId })
+      } catch {
+        if (page === 0) return noChat('noTranscript')
+        break
+      }
+      const kept = res.items.flatMap((m) => chatView(m, opts) ?? [])
+      collected.unshift(...kept)
+      users += kept.filter((m) => m.role === 'user').length
+      lastCursor = res.cursor
+      if (res.cursor === null || users >= turns) break
+      cursor = Number(res.cursor)
+    }
+    // A turn starts at a user message: keep the last `turns` of them and what follows.
+    let start = 0
+    if (users >= turns) {
+      let seen = 0
+      for (let i = collected.length - 1; i >= 0; i--) {
+        if (collected[i].role === 'user' && ++seen === turns) {
+          start = i
+          break
+        }
+      }
+    }
+    // One transcript line can hold a tool result and the user's prompt (`<off>.0`, `<off>.1`): the page
+    // starts at the whole line, since `--before <off>` skips every part of it.
+    const lineOffset = start > 0 ? chatMessageOffset(collected[start].id) : null
+    if (lineOffset !== null) while (start > 0 && chatMessageOffset(collected[start - 1].id) === lineOffset) start--
+    const items = collected.slice(start)
+    const startOffset = start > 0 ? chatMessageOffset(items[0].id) : null
+    const nextCursor = startOffset !== null ? String(startOffset) : lastCursor
+    const out: CtlChatResult = { paneId, provider: loc.provider, items, turns: items.filter((m) => m.role === 'user').length, nextCursor }
+    return ok(out)
+  }
+
+  /** Last assistant reply of a transcript (one page), for a status without `lastMessage`. */
+  private async lastReply(paneId: string): Promise<string | undefined> {
+    const svc = this.services().chat
+    if (!svc) return undefined
+    try {
+      const loc = await svc.locate(paneId)
+      if (!loc.ok) return undefined
+      const page = await readPage(loc.path, decoderFor(loc.provider), { before: null, paneId })
+      for (let i = page.items.length - 1; i >= 0; i--) {
+        const m = page.items[i]
+        if (m.role !== 'assistant') continue
+        const text = m.blocks.flatMap((b) => (b.t === 'text' ? [b.text] : [])).join(' ')
+        const line = oneLine(text, 280)
+        if (line) return line
+      }
+    } catch {
+      /* no transcript: the field stays out */
+    }
+    return undefined
+  }
+
+  private async peek(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    let lines = CTL_PEEK_LINES_DEFAULT
+    if (params.lines !== undefined) {
+      const n = Number(params.lines)
+      if (!Number.isInteger(n) || n < 1) return err('bad_request', '--lines must be a positive integer')
+      lines = Math.min(n, CTL_READ_MAX)
+    }
+    const list = await this.list()
+    if ('ok' in list) return list
+    const t = this.target(list, params, caller)
+    if (!t.ok) return t
+    if (this.sshProtected(t.workspace, t.pane)) return err('ssh_protected', 'this console has a Connection Profile (cliProtectSsh)')
+    if (!this.take('read', caller, CTL_READS_PER_MIN)) return err('rate_limited', `at most ${CTL_READS_PER_MIN} chat or peek calls per minute`)
+    const pane = t.pane
+    const st = this.deps.status.stateOf(pane.id)
+    const running = this.deps.pty.ptyIdForPane(pane.id) !== null
+    const provider: AgentProvider | undefined = st?.provider ?? (pane.type === 'claude' || pane.type === 'codex' ? pane.type : undefined)
+    const lastMessage = st?.lastMessage || (provider ? await this.lastReply(pane.id) : undefined)
+    const statusLine = list.statusLines[pane.id]
+    const out: CtlPeekResult = {
+      paneId: pane.id,
+      title: pane.title,
+      type: pane.type,
+      ...(provider ? { provider } : {}),
+      running,
+      state: st?.state ?? null,
+      precise: st?.precise ?? false,
+      ...(st?.attention !== undefined ? { attention: st.attention } : {}),
+      ...(st?.reason ? { reason: st.reason } : {}),
+      ...(st?.pendingCount !== undefined ? { pendingCount: st.pendingCount } : {}),
+      ...(st?.pending?.length ? { pending: st.pending.map((p) => ({ kind: p.kind, ...(p.toolName ? { toolName: p.toolName } : {}), summary: p.summary })) } : {}),
+      ...(st?.stateSince !== undefined ? { stateSince: st.stateSince } : {}),
+      ...(st?.activity ? { activity: st.activity } : {}),
+      ...(lastMessage ? { lastMessage } : {}),
+      ...(st?.waiting ? { waiting: st.waiting } : {}),
+      ...(statusLine ? { statusLine } : {}),
+      ...(st?.model ? { model: st.model } : {}),
+      ...(st?.effort ? { effort: st.effort } : {}),
+      ...(st?.ultracode !== undefined ? { ultracode: st.ultracode } : {}),
+      lines: running ? await this.screen(pane.id, lines) : [],
+    }
+    return ok(out)
+  }
+
+  // --- app 2.3.0: consoles ---------------------------------------------------
+
+  private async kill(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const list = await this.list()
+    if ('ok' in list) return list
+    const t = this.target(list, params, caller)
+    if (!t.ok) return t
+    if (caller && t.pane.id === caller.paneId) return err('bad_request', 'a console cannot kill itself')
+    if (this.sshProtected(t.workspace, t.pane)) return err('ssh_protected', 'this console has a Connection Profile (cliProtectSsh)')
+    if (!this.take('mutate', caller, CTL_MUTATE_PER_MIN)) return err('rate_limited', `at most ${CTL_MUTATE_PER_MIN} console or workspace changes per minute`)
+    const close = bool(params.close)
+    const killed = this.deps.pty.ptyIdForPane(t.pane.id) !== null
+    const res = await this.deps.bus.request({ kind: 'kill', workspaceId: t.workspace.id, paneId: t.pane.id, close, running: killed })
+    if (!res.ok) return this.busErr(res)
+    return ok({ paneId: t.pane.id, killed, closed: close })
+  }
+
+  private async restart(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const resume = params.resume === true ? true : params.resume === false ? false : undefined
+    const list = await this.list()
+    if ('ok' in list) return list
+    const t = this.target(list, params, caller)
+    if (!t.ok) return t
+    if (caller && t.pane.id === caller.paneId) return err('bad_request', 'a console cannot restart itself')
+    if (this.sshProtected(t.workspace, t.pane)) return err('ssh_protected', 'this console has a Connection Profile (cliProtectSsh)')
+    if (resume !== undefined && t.pane.type !== 'claude' && t.pane.type !== 'codex') return err('bad_request', '--resume and --fresh apply to Claude and Codex consoles')
+    if (!this.take('mutate', caller, CTL_MUTATE_PER_MIN)) return err('rate_limited', `at most ${CTL_MUTATE_PER_MIN} console or workspace changes per minute`)
+    const res = await this.deps.bus.request({ kind: 'restart', workspaceId: t.workspace.id, paneId: t.pane.id, ...(resume !== undefined ? { resume } : {}) })
+    if (!res.ok) return this.busErr(res)
+    return ok({ paneId: t.pane.id, mode: resume === true ? 'resume' : resume === false ? 'fresh' : 'default' })
+  }
+
+  private async rename(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const title = oneLine(str(params.title) ?? '', CTL_TITLE_MAX)
+    if (!title) return err('bad_request', 'rename needs a title')
+    const list = await this.list()
+    if ('ok' in list) return list
+    const t = this.target(list, params, caller)
+    if (!t.ok) return t
+    if (!this.take('mutate', caller, CTL_MUTATE_PER_MIN)) return err('rate_limited', `at most ${CTL_MUTATE_PER_MIN} console or workspace changes per minute`)
+    const res = await this.deps.bus.request({ kind: 'renamePane', workspaceId: t.workspace.id, paneId: t.pane.id, title })
+    if (!res.ok) return this.busErr(res)
+    return ok({ paneId: t.pane.id, title })
+  }
+
+  // --- app 2.3.0: workspaces -------------------------------------------------
+
+  private async workspaceParam(list: CtlListData, params: Record<string, unknown>, verb: string): Promise<{ ws: CtlListWorkspace; index: number } | Fail> {
+    const ref = str(params.workspace)
+    if (ref === undefined) return err('bad_request', `ws ${verb} needs a workspace`)
+    const r = resolveWorkspaceRef(list, ref)
+    return r.ok ? { ws: r.workspace, index: r.index } : refErr(r)
+  }
+
+  private async wsNew(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const raw = str(params.path)?.trim()
+    if (!raw || raw.includes('\0') || raw.length > 4096) return err('bad_request', 'ws new needs a folder (--path)')
+    const p = pathFor(this.platform())
+    // The client made it absolute against its own cwd; main never guesses one.
+    if (!p.isAbsolute(raw)) return err('bad_request', 'the folder must be an absolute path')
+    const cwd = p.resolve(raw)
+    if (!(await (this.deps.isDir ?? defaultIsDir)(cwd))) return err('not_found', `no such folder: ${cwd}`)
+    const name = oneLine(str(params.name) ?? '', CTL_WS_NAME_MAX) || oneLine(p.basename(cwd), CTL_WS_NAME_MAX) || cwd
+    // One budget for both paths: the composer also brings the window forward.
+    if (!this.take('wsNew', caller, CTL_WS_NEW_PER_MIN)) return err('rate_limited', `at most ${CTL_WS_NEW_PER_MIN} new workspaces per minute`)
+    if (bool(params.composer)) {
+      const res = await this.deps.bus.request({ kind: 'composer', cwd, name })
+      return res.ok ? ok({ composer: true, name, cwd }) : this.busErr(res)
+    }
+    const res = await this.deps.bus.request({ kind: 'createWorkspace', name, cwd, focus: bool(params.focus) })
+    if (!res.ok) return this.busErr(res)
+    const data = res.data as CtlRendererData['createWorkspace'] | undefined
+    if (!data?.workspaceId) return err('internal', 'the desktop did not create the workspace')
+    return ok({ workspaceId: data.workspaceId, index: data.index, name, cwd })
+  }
+
+  private async wsRename(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const name = oneLine(str(params.name) ?? '', CTL_WS_NAME_MAX)
+    if (!name) return err('bad_request', 'ws rename needs a name')
+    const list = await this.list()
+    if ('ok' in list) return list
+    const w = await this.workspaceParam(list, params, 'rename')
+    if ('ok' in w) return w
+    if (!this.take('mutate', caller, CTL_MUTATE_PER_MIN)) return err('rate_limited', `at most ${CTL_MUTATE_PER_MIN} console or workspace changes per minute`)
+    const res = await this.deps.bus.request({ kind: 'renameWorkspace', workspaceId: w.ws.id, name })
+    return res.ok ? ok({ workspaceId: w.ws.id, name }) : this.busErr(res)
+  }
+
+  private async wsClose(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    // The desktop always confirms this: it ends every console of the workspace.
+    if (params.yes !== true) return err('bad_request', 'closing a workspace ends its consoles; add --yes')
+    const list = await this.list()
+    if ('ok' in list) return list
+    const w = await this.workspaceParam(list, params, 'close')
+    if ('ok' in w) return w
+    if (caller && workspaceOfPane(list, caller.paneId)?.workspace.id === w.ws.id) return err('bad_request', 'a console cannot close its own workspace')
+    // A console visiting from another workspace goes back home instead of ending (store.deleteWorkspace).
+    const live = w.ws.panes.filter((p) => !p.homeWorkspaceId && this.deps.pty.ptyIdForPane(p.id) !== null)
+    if (live.some((p) => this.sshProtected(w.ws, p))) return err('ssh_protected', 'a console of this workspace has a Connection Profile (cliProtectSsh)')
+    if (!this.take('mutate', caller, CTL_MUTATE_PER_MIN)) return err('rate_limited', `at most ${CTL_MUTATE_PER_MIN} console or workspace changes per minute`)
+    const res = await this.deps.bus.request({ kind: 'deleteWorkspace', workspaceId: w.ws.id })
+    return res.ok ? ok({ workspaceId: w.ws.id, name: w.ws.name, consolesEnded: live.length }) : this.busErr(res)
+  }
+
+  private async wsFav(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const favorite = params.favorite !== false
+    const list = await this.list()
+    if ('ok' in list) return list
+    const w = await this.workspaceParam(list, params, 'fav')
+    if ('ok' in w) return w
+    if (!this.take('mutate', caller, CTL_MUTATE_PER_MIN)) return err('rate_limited', `at most ${CTL_MUTATE_PER_MIN} console or workspace changes per minute`)
+    const res = await this.deps.bus.request({ kind: 'setFavorite', workspaceId: w.ws.id, favorite })
+    return res.ok ? ok({ workspaceId: w.ws.id, name: w.ws.name, favorite }) : this.busErr(res)
+  }
+
+  // --- app 2.3.0: Markdown notes of a workspace ------------------------------
+  // Through the same WsNoteStore as the desktop and the phones, so every write
+  // is atomic and emits (the open editor reloads or shows its conflict banner).
+
+  private noteErr(e: WsNoteError, current?: WsNoteDoc): Fail {
+    switch (e) {
+      case 'not_found':
+        return err('not_found', 'note not found')
+      case 'invalid':
+        return err('bad_request', 'invalid note request')
+      case 'too_large':
+        return err('bad_request', 'the note is larger than 1 MB')
+      case 'conflict':
+        // Never the text: only what a retry needs.
+        return err('conflict', 'the note changed since --rev; read it again and retry', current ? { current: { rev: current.rev, updatedAt: current.updatedAt, size: current.size } } : undefined)
+      case 'rate':
+        return err('rate_limited', 'too many note requests')
+      default:
+        return err('internal', 'the note could not be saved')
+    }
+  }
+
+  /** The notes service and the workspace: --workspace, else the caller's, else the active one. */
+  private async noteScope(params: Record<string, unknown>, caller: CtlCaller | null): Promise<{ notes: CtlNotesView; wsId: string } | Fail> {
+    const notes = this.services().notes
+    if (!notes) return err('disabled', 'notes are not available yet')
+    const list = await this.list()
+    if ('ok' in list) return list
+    const sc = this.scope(list, params, caller)
+    if ('ok' in sc) return sc
+    if (!sc.id) return err('bad_request', 'no workspace (use --workspace)')
+    return { notes, wsId: sc.id }
+  }
+
+  private async noteTarget(params: Record<string, unknown>, caller: CtlCaller | null): Promise<{ notes: CtlNotesView; wsId: string; note: WsNoteMeta } | Fail> {
+    const ref = str(params.note)
+    if (ref === undefined) return err('bad_request', 'missing note (an id or its exact title)')
+    const sc = await this.noteScope(params, caller)
+    if ('ok' in sc) return sc
+    const res = await sc.notes.list(sc.wsId)
+    if (!res.ok) return err('internal', 'could not list the notes')
+    const r = resolveNoteRef(res.notes, ref)
+    return r.ok ? { ...sc, note: r.note } : refErr(r)
+  }
+
+  /** Runs `fn` after every earlier call on the same note. */
+  private serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.noteChains.get(key) ?? Promise.resolve()
+    const run = prev.then(fn, fn)
+    const tail = run.catch(() => undefined)
+    this.noteChains.set(key, tail)
+    void tail.then(() => {
+      if (this.noteChains.get(key) === tail) this.noteChains.delete(key)
+    })
+    return run
+  }
+
+  private async notesLs(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const sc = await this.noteScope(params, caller)
+    if ('ok' in sc) return sc
+    const res = await sc.notes.list(sc.wsId)
+    return res.ok ? ok({ workspaceId: sc.wsId, notes: res.notes }) : err('internal', 'could not list the notes')
+  }
+
+  private async notesGet(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const t = await this.noteTarget(params, caller)
+    if ('ok' in t) return t
+    const res = await t.notes.read({ workspaceId: t.wsId, noteId: t.note.id })
+    return res.ok ? ok({ workspaceId: t.wsId, note: res.note }) : this.noteErr(res.error)
+  }
+
+  private async notesNew(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const title = oneLine(str(params.title) ?? '', WS_NOTE_TITLE_MAX)
+    const text = str(params.text) ?? ''
+    const body = title ? `# ${title}\n\n${text}` : text
+    if (Buffer.byteLength(body, 'utf8') > WS_NOTE_MAX_BYTES) return err('bad_request', 'the note is larger than 1 MB')
+    const sc = await this.noteScope(params, caller)
+    if ('ok' in sc) return sc
+    if (!this.take('notesWrite', caller, CTL_NOTES_WRITE_PER_MIN)) return err('rate_limited', `at most ${CTL_NOTES_WRITE_PER_MIN} note writes per minute`)
+    const res = await sc.notes.create({ workspaceId: sc.wsId, text: body })
+    if (!res.ok) return this.noteErr(res.error)
+    let opened = false
+    if (bool(params.open)) opened = (await this.deps.bus.request({ kind: 'openNote', workspaceId: sc.wsId, noteId: res.note.id })).ok
+    return ok({ workspaceId: sc.wsId, note: res.note, ...(opened ? { opened: true } : {}) })
+  }
+
+  private async notesSet(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const text = str(params.text)
+    if (text === undefined) return err('bad_request', 'notes set needs a text (argument, - for stdin or --file)')
+    const rev = params.rev
+    if (rev !== undefined && (typeof rev !== 'string' || !rev.trim())) return err('bad_request', 'invalid --rev')
+    if (Buffer.byteLength(text, 'utf8') > WS_NOTE_MAX_BYTES) return err('bad_request', 'the note is larger than 1 MB')
+    const t = await this.noteTarget(params, caller)
+    if ('ok' in t) return t
+    if (!this.take('notesWrite', caller, CTL_NOTES_WRITE_PER_MIN)) return err('rate_limited', `at most ${CTL_NOTES_WRITE_PER_MIN} note writes per minute`)
+    const res = await t.notes.write({ workspaceId: t.wsId, noteId: t.note.id, text, ...(typeof rev === 'string' ? { baseRev: rev.trim() } : {}) })
+    return res.ok ? ok({ workspaceId: t.wsId, note: res.note }) : this.noteErr(res.error, res.current)
+  }
+
+  private async notesAppend(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const add = str(params.text)
+    if (!add) return err('bad_request', 'notes append needs a text (argument, - for stdin or --file)')
+    if (Buffer.byteLength(add, 'utf8') > WS_NOTE_MAX_BYTES) return err('bad_request', 'the note is larger than 1 MB')
+    const t = await this.noteTarget(params, caller)
+    if ('ok' in t) return t
+    if (!this.take('notesWrite', caller, CTL_NOTES_WRITE_PER_MIN)) return err('rate_limited', `at most ${CTL_NOTES_WRITE_PER_MIN} note writes per minute`)
+    const req = { workspaceId: t.wsId, noteId: t.note.id }
+    return this.serial(`${t.wsId}/${t.note.id}`, async (): Promise<Out> => {
+      // Read, add, write with the rev read: a desktop or phone edit in between is a conflict, retried once.
+      for (let attempt = 0; ; attempt++) {
+        const cur = await t.notes.read(req)
+        if (!cur.ok) return this.noteErr(cur.error)
+        const sep = cur.note.text && !cur.note.text.endsWith('\n') ? '\n' : ''
+        const next = cur.note.text + sep + add
+        if (Buffer.byteLength(next, 'utf8') > WS_NOTE_MAX_BYTES) return err('bad_request', 'the note would be larger than 1 MB')
+        const res = await t.notes.write({ ...req, text: next, baseRev: cur.note.rev })
+        if (res.ok) return ok({ workspaceId: t.wsId, note: res.note })
+        if (res.error !== 'conflict' || attempt >= 1) return this.noteErr(res.error, res.current)
+      }
+    })
+  }
+
+  private async notesRm(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const t = await this.noteTarget(params, caller)
+    if ('ok' in t) return t
+    if (!this.take('notesWrite', caller, CTL_NOTES_WRITE_PER_MIN)) return err('rate_limited', `at most ${CTL_NOTES_WRITE_PER_MIN} note writes per minute`)
+    const res = await t.notes.delete({ workspaceId: t.wsId, noteId: t.note.id })
+    return res.ok ? ok({ workspaceId: t.wsId, noteId: t.note.id, trashed: true }) : this.noteErr(res.error)
+  }
+
+  private async notesOpen(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const t = await this.noteTarget(params, caller)
+    if ('ok' in t) return t
+    const res = await this.deps.bus.request({ kind: 'openNote', workspaceId: t.wsId, noteId: t.note.id })
+    return res.ok ? ok({ workspaceId: t.wsId, noteId: t.note.id }) : this.busErr(res)
+  }
+
+  // --- usage and Claude accounts (app 2.3.0, 4b) ----------------------------------
+
+  /** `usage`: the Claude and Codex rows of main's usage poller (its cache, fetched once if empty). */
+  private async usage(params: Record<string, unknown>): Promise<Out> {
+    const svc = this.services().usage
+    if (!svc) return err('disabled', 'usage is not available yet')
+    const provider = params.provider
+    if (provider !== undefined && provider !== 'claude' && provider !== 'codex') return err('bad_request', 'provider must be claude or codex')
+    if (!svc.enabled()) return err('disabled', 'the usage bars are off (Settings > AI Usage)')
+    let snap: UsageSnapshot
+    try {
+      snap = await svc.load()
+    } catch {
+      return err('internal', 'usage could not be read')
+    }
+    return ok(ctlUsage(snap, provider))
+  }
+
+  private accountsSvc(): CtlAccountsView | Fail {
+    return this.services().accounts ?? err('disabled', 'Claude accounts are not available yet')
+  }
+
+  /** Only Claude logins are saved and switched; `--provider claude` is accepted for symmetry with `usage`. */
+  private accountProvider(params: Record<string, unknown>): Fail | null {
+    const p = params.provider
+    if (p === undefined || p === 'claude') return null
+    return err('bad_request', p === 'codex' ? 'only Claude accounts can be saved and switched' : 'provider must be claude')
+  }
+
+  private async accountLs(params: Record<string, unknown>): Promise<Out> {
+    const svc = this.accountsSvc()
+    if ('ok' in svc) return svc
+    const bad = this.accountProvider(params)
+    if (bad) return bad
+    return ok({ accounts: (await svc.status()).accounts })
+  }
+
+  private async accountStatus(): Promise<Out> {
+    const svc = this.accountsSvc()
+    if ('ok' in svc) return svc
+    return ok(await svc.status())
+  }
+
+  /**
+   * `account use <slot|id|label>`: the slot (primary / secondary) first, then
+   * the exact id, then the label (case-insensitive; two equal labels are
+   * `ambiguous`). Already the live login (known and verified): ok with
+   * `changed: false`, nothing written and no budget spent. Otherwise
+   * CTL_ACCOUNT_USE_PER_MIN for every caller together, and
+   * AccountService.switchTo with reason 'cli'. `changed` comes from the last
+   * switch moving to the target with reason 'cli': switchTo also answers ok
+   * without writing when its own reconcile finds the target already live. A
+   * live login still unverified after that no-op is `busy` (identity_failed).
+   */
+  private async accountUse(params: Record<string, unknown>): Promise<Out> {
+    const svc = this.accountsSvc()
+    if ('ok' in svc) return svc
+    const bad = this.accountProvider(params)
+    if (bad) return bad
+    const ref = (str(params.account) ?? '').trim()
+    if (!ref) return err('bad_request', 'account use needs an account: primary, secondary, an id or a label')
+    const st = await svc.status()
+    if (!st.supported) return err('disabled', 'saved Claude logins are not supported on this machine')
+    const key = ref.toLowerCase()
+    let hits = st.accounts.filter((a) => a.slot === key)
+    if (!hits.length) hits = st.accounts.filter((a) => a.id === ref)
+    if (!hits.length) hits = st.accounts.filter((a) => a.label !== '' && a.label.toLowerCase() === key)
+    if (hits.length > 1) return err('ambiguous', `more than one account is called "${ref}": use primary, secondary or an id (${hits.map((a) => a.id).join(', ')})`)
+    const target = hits[0]
+    if (!target) return err('not_found', `no saved Claude account "${ref}" (snaos account ls)`)
+    if (target.active && st.live === 'known' && !st.unverified) return ok({ active: target, changed: false })
+    if (!target.ready) return err('disabled', 'the saved login of that account cannot be used: capture it again on the desktop (Settings > Claude accounts)')
+    // One budget for every caller (null key): the Claude login is global.
+    if (!this.take('accountUse', null, CTL_ACCOUNT_USE_PER_MIN)) return err('rate_limited', `at most ${CTL_ACCOUNT_USE_PER_MIN} account switches per minute`)
+    let res: CtlAccountSwitchRes
+    try {
+      res = await svc.switchTo(target.id, 'cli')
+    } catch {
+      return err('internal', 'the account switch failed')
+    }
+    if (!res.ok) return switchErr(res.error)
+    const now = await svc.status()
+    const ls = now.lastSwitch
+    const changed = switchKey(ls) !== switchKey(st.lastSwitch) && ls?.to === target.id && ls.reason === 'cli'
+    if (!changed && now.unverified) return switchErr('identity_failed')
+    const after = now.accounts.find((a) => a.id === target.id) ?? { ...target, active: true }
+    return ok({ active: after, changed })
+  }
+}
+
+/** The CLI view of a usage snapshot: Claude and Codex windows, each field picked by name. */
+export function ctlUsage(snap: UsageSnapshot, provider?: 'claude' | 'codex'): CtlUsageResult {
+  const rows: CtlUsageRow[] = []
+  for (const r of snap.rows ?? []) {
+    if (r.provider !== 'claude' && r.provider !== 'codex') continue
+    if (r.kind !== '5h' && r.kind !== '7d') continue
+    if (provider && r.provider !== provider) continue
+    rows.push({
+      id: String(r.id),
+      provider: r.provider,
+      kind: r.kind,
+      label: String(r.label),
+      percent: typeof r.percent === 'number' && Number.isFinite(r.percent) ? r.percent : null,
+      resetsAt: typeof r.resetsAt === 'string' ? r.resetsAt : null,
+      ...(typeof r.planType === 'string' && r.planType ? { planType: r.planType } : {}),
+      status: r.status,
+      ...(r.stale ? { stale: true as const } : {}),
+    })
+  }
+  const a = snap.activeAccount
+  return {
+    rows,
+    updatedAt: typeof snap.updatedAt === 'number' ? snap.updatedAt : 0,
+    services: snap.services ?? null,
+    ...(a && provider !== 'codex' ? { account: { id: a.id, slot: a.role, label: a.label.includes('@') ? '' : a.label } } : {}),
+  }
+}
+
+/** One last switch as a comparable key ('' when there is none). */
+function switchKey(ls: CtlAccountStatus['lastSwitch']): string {
+  return ls ? `${ls.at}|${ls.from ?? ''}|${ls.to}|${ls.reason}` : ''
+}
+
+/** AccountService errors as CLI errors (exit 3, 7 or 1). */
+function switchErr(e: AccountsOpError | undefined): Fail {
+  switch (e) {
+    case 'not_found':
+      return err('not_found', 'that account is no longer saved')
+    case 'locked':
+      return err('disabled', 'the saved login of that account cannot be used: capture it again on the desktop (Settings > Claude accounts)')
+    case 'busy':
+      return err('busy', 'another account change is running, try again in a moment')
+    case 'identity_failed':
+      return err('busy', 'the live Claude login changed and is not identified yet: try again after a Claude console used it')
+    case 'unknown_live_account':
+      return err('disabled', 'the live Claude login is not a saved account: save or replace it on the desktop first (Settings > Claude accounts)')
+    case 'unsupported':
+    case 'encryption_unavailable':
+      return err('disabled', 'saved Claude logins are not supported on this machine')
+    case 'bad_request':
+      return err('bad_request', 'invalid account')
+    default:
+      return err('internal', 'the account switch failed')
   }
 }

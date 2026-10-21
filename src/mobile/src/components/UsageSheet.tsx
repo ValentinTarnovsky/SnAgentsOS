@@ -2,13 +2,22 @@
  * Bottom-sheet showing the desktop's live usage bars (Claude session/weekly,
  * Codex, custom token counters), mirrored into the state snapshot. Read-only;
  * it refreshes live as new snapshots arrive while the sheet is open.
+ *
+ * App 2.3.0: the Claude group names the active account (its label or role,
+ * never the email) and offers "Use <other>" (ctl claudeAccountUse) when a
+ * second account is saved, only with a desktop >= 2.3.0 (an older one strikes
+ * the unknown ctl kind).
  */
-import { type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import type { RemoteUsageRow } from '@shared/remote-protocol'
+import { ArrowLeftRight, Loader2 } from 'lucide-react'
+import type { RemoteUsageRow, RemoteUsageSnapshot } from '@shared/remote-protocol'
+import type { ClaudeAccountRole } from '@shared/claude-accounts'
+import { appVersionAtLeast } from '@shared/agentTune'
 import { visibleUsageRows } from '@shared/usageRows'
 import { Sheet } from './Sheet'
-import { useRemoteStore } from '../lib/store'
+import { store, useRemoteStore } from '../lib/store'
+import { client } from '../lib/client'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
 export const PROVIDER_ORDER = ['claude', 'codex', 'custom'] as const
@@ -101,9 +110,62 @@ function UsageRowView({ row }: { row: RemoteUsageRow }): ReactNode {
   )
 }
 
+const ROLE_LABEL: Record<ClaudeAccountRole, MobileMessageKey> = {
+  primary: 'usage.rolePrimary',
+  secondary: 'usage.roleSecondary',
+}
+
+/** An account's label, or its role name when it has none (the snapshot never carries an email). */
+export function accountLabel(a: { label: string; role: ClaudeAccountRole }): string {
+  return a.label.trim() || t(ROLE_LABEL[a.role])
+}
+
+const ACCOUNT_ERRORS: Record<string, MobileMessageKey> = {
+  rate: 'usage.accountRate',
+  locked: 'usage.accountLocked',
+  unknown_live_account: 'usage.accountUnknown',
+  identity_failed: 'usage.accountUnknown',
+}
+
+/** The Claude group's account line and its "Use <other>" button. */
+function AccountLine({ account }: { account: NonNullable<RemoteUsageSnapshot['activeAccount']> }): ReactNode {
+  const appVersion = useRemoteStore((s) => s.appVersion)
+  const [busy, setBusy] = useState(false)
+  const inFlight = useRef(false)
+  const other = account.other
+  const canSwitch = !!other && appVersionAtLeast(appVersion)
+  const use = async (): Promise<void> => {
+    if (!other || inFlight.current) return
+    inFlight.current = true
+    setBusy(true)
+    const res = await client.sendCtl({ kind: 'claudeAccountUse', role: other.role })
+    inFlight.current = false
+    setBusy(false)
+    store.getState().setToast(res.ok ? t('usage.accountSwitched', { name: accountLabel(other) }) : t(ACCOUNT_ERRORS[res.error ?? ''] ?? 'usage.accountFailed'))
+  }
+  return (
+    <div data-usage-account={account.role} className="mb-1.5 flex items-center justify-between gap-2 px-1">
+      <span className="min-w-0 truncate text-xs text-text-secondary">{t('usage.account', { name: accountLabel(account) })}</span>
+      {canSwitch && other && (
+        <button
+          type="button"
+          data-usage-use-account={other.role}
+          disabled={busy}
+          onClick={() => void use()}
+          className="flex h-9 shrink-0 items-center gap-1.5 rounded-btn border border-border bg-bg-secondary px-3 text-xs font-medium text-text-primary disabled:opacity-60"
+        >
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <ArrowLeftRight size={13} />}
+          {t('usage.useAccount', { name: accountLabel(other) })}
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => void }): ReactNode {
   // A window the plan does not have (nodata beside an answered sibling) is not shown.
   const rows = visibleUsageRows(useRemoteStore((s) => s.snapshot?.usage?.rows) ?? [])
+  const account = useRemoteStore((s) => s.snapshot?.usage?.activeAccount)
 
   return (
     <Sheet open={open} onClose={onClose} title={t('usage.title')}>
@@ -119,6 +181,7 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
                 <div className="mb-1.5 px-1 text-xs font-semibold uppercase tracking-wide text-text-secondary">
                   {t(PROVIDER_LABEL[provider])}
                 </div>
+                {provider === 'claude' && account && <AccountLine account={account} />}
                 <div className="flex flex-col gap-1.5">
                   {group.map((row) => (
                     <UsageRowView key={row.id} row={row} />

@@ -8,8 +8,9 @@ import type { UsageRow } from '@shared/ipc-contract'
 /** Confirmed OAuth usage endpoint used by Claude Code (utilization 0..100 + reset). */
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 
-interface OauthCred {
-  claudeAiOauth?: { accessToken?: string; expiresAt?: number; subscriptionType?: string }
+/** The part of `.credentials.json` main reads (the token never leaves main). */
+export interface OauthCred {
+  claudeAiOauth?: { accessToken?: string; refreshToken?: string; expiresAt?: number; subscriptionType?: string; rateLimitTier?: string }
 }
 interface UsageWindow {
   utilization?: number | null
@@ -42,6 +43,8 @@ export interface ClaudeFetchDeps {
   version?: () => Promise<string>
   now?: () => number
   sleep?: (ms: number) => Promise<void>
+  /** Where the credentials come from (default: the live file, re-read on every call); the parked account passes its own. */
+  readCred?: () => Promise<OauthCred | null>
 }
 
 interface WantedWindow {
@@ -57,6 +60,16 @@ async function readCred(): Promise<OauthCred | null> {
     return JSON.parse(await readFile(join(claudeConfigDir(), '.credentials.json'), 'utf8')) as OauthCred
   } catch {
     return null
+  }
+}
+
+/** Headers Claude Code sends to the OAuth endpoints (usage, profile). */
+export function claudeOauthHeaders(token: string, version: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${token}`,
+    'anthropic-beta': 'oauth-2025-04-20',
+    'User-Agent': `claude-code/${version}`,
+    Accept: 'application/json',
   }
 }
 
@@ -133,8 +146,9 @@ export async function fetchClaudeUsage(
   const get = deps.get ?? ((url, headers) => getJson<UsageResponse>(url, headers))
   const now = deps.now ?? Date.now
   const sleep = deps.sleep ?? defaultSleep
+  const read = deps.readCred ?? readCred
 
-  let cred = await readCred()
+  let cred = await read()
   // The plan label lives in the local credentials file, not the usage response,
   // so every row (incl. error/expired) can carry it: the MAX badge stays put.
   let planType = cred?.claudeAiOauth?.subscriptionType ?? null
@@ -156,7 +170,7 @@ export async function fetchClaudeUsage(
   let token = cred?.claudeAiOauth?.accessToken
   if (!token) return { rows: all('nodata') }
   if (isExpired(cred, now())) {
-    cred = await readCred()
+    cred = await read()
     token = cred?.claudeAiOauth?.accessToken
     planType = cred?.claudeAiOauth?.subscriptionType ?? planType
     if (!token || isExpired(cred, now())) return { rows: all('expired') }
@@ -164,16 +178,11 @@ export async function fetchClaudeUsage(
 
   try {
     const version = await (deps.version ?? claudeCliVersion)()
-    const headersFor = (t: string): Record<string, string> => ({
-      Authorization: `Bearer ${t}`,
-      'anthropic-beta': 'oauth-2025-04-20',
-      'User-Agent': `claude-code/${version}`,
-      Accept: 'application/json',
-    })
+    const headersFor = (t: string): Record<string, string> => claudeOauthHeaders(t, version)
     let res = await getUsageWithRetry(get, sleep, headersFor(token))
     if (res.status === 401 || res.status === 403) {
       // Claude Code may have rotated the token while the request was in flight.
-      const again = await readCred()
+      const again = await read()
       const next = again?.claudeAiOauth?.accessToken
       if (next && next !== token && !isExpired(again, now())) {
         token = next

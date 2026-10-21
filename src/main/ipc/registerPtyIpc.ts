@@ -33,7 +33,10 @@ export function registerPtyIpc(manager: PtyManager, restartLabel: () => string =
   )
 
   // High-frequency, fire-and-forget channels use send (not invoke).
-  ipcMain.on(CH.PTY_WRITE, (_e, req: PtyWriteReq) => manager.write(req.ptyId, req.data))
+  // v2.3: only an explicit 'auto' skips the attention ack; the keyboard is 'user'.
+  ipcMain.on(CH.PTY_WRITE, (_e, req: PtyWriteReq) =>
+    manager.write(req.ptyId, req.data, req.origin === 'auto' ? 'auto' : 'user'),
+  )
   ipcMain.on(CH.PTY_RESIZE, (_e, req: PtyResizeReq) =>
     manager.resize(req.ptyId, req.cols, req.rows),
   )
@@ -52,7 +55,10 @@ export function registerPtyIpc(manager: PtyManager, restartLabel: () => string =
     if (typeof r.text !== 'string' || r.text.length > SUBMIT_TEXT_MAX || (!ptyId && !paneId)) {
       return Promise.resolve({ ok: false, error: 'not_running' })
     }
-    return manager.submitToPane(ptyId, paneId, r.text, r.enter === true)
+    // v2.3: only an explicit 'auto' skips the attention ack; anything else is the user.
+    // `readyFor` (agentTune) gates the Enter on a ready agent with no draft.
+    const readyFor = r.readyFor === 'claude' || r.readyFor === 'codex' ? r.readyFor : undefined
+    return manager.submitToPane(ptyId, paneId, r.text, r.enter === true, r.origin === 'auto' ? 'auto' : 'user', readyFor)
   })
 
   // Explicit lifecycle (E4-FR-36): an unmount never kills, these do, by paneId.

@@ -3,8 +3,10 @@ import { isAbsolute } from 'path'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
 import { effectiveProvider } from '@shared/agents'
+import { REPORTS_ONLY_RE } from '@shared/inputReports'
+import type { TuneHint } from '@shared/agentTune'
 import { AGENT_END_REASONS, type AgentDetail, type AgentProvider, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneStatusEvt, type RemotePending } from '@shared/types'
-import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
+import type { PtyExitInfo, PtyInputOrigin, PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
 import { revealWindow } from '../window/revealWindow'
 import type { BackgroundTasks, HookEvent } from './HookServer'
@@ -72,6 +74,15 @@ interface PaneTrack {
   /** Last hook of the main session (the Esc interrupt watch). */
   lastHookAt: number
   interruptTimer: NodeJS.Timeout | null
+  // v2.3 attention: every effective transition bumps stateSeq; an ack copies
+  // it to ackedSeq. A counter, not a clock: two transitions in the same ms differ.
+  stateSeq: number
+  ackedSeq: number
+  // v2.3 agentTune read-back: SessionStart model / hook effort, or the last
+  // tune applied with Enter (setTuneHint). Reset on `start`.
+  model?: string
+  effort?: string
+  ultracode?: boolean
 }
 
 /** A hook of the live pty with its session: what onHookEvent passes on. */
@@ -111,15 +122,6 @@ export const SUB_SESSION_GRACE_MS = 15 * 1000
 export const BACKGROUND_WAIT_TTL_MS = 2 * 60 * 60 * 1000
 /** Stopped title glyph with no hook for this long after an Esc: the turn is over. */
 export const INTERRUPT_SETTLE_MS = 2000
-/**
- * Input that is only terminal reports, never an answer (E2-FR-48): focus in /
- * out, SGR and X10 mouse, plus the replies a terminal sends on its own to the
- * app's queries (cursor position, device attributes, status, mode reports,
- * kitty keyboard flags, OSC color answers, DECRQSS), which a phone xterm emits while it
- * parses a replay.
- */
-// eslint-disable-next-line no-control-regex
-const REPORTS_ONLY_RE = /^(?:\x1b\[[IO]|\x1b\[<\d+;\d+;\d+[Mm]|\x1b\[M[\s\S]{3}|\x1b\[\??\d+;\d+(?:;\d+)?R|\x1b\[[?>=][\d;]*c|\x1b\[\??\d+n|\x1b\[\??[\d;]+\$y|\x1b\[\?\d+u|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[01]\$r[^\x1b]*\x1b\\)+$/
 
 /** Topic after the spinner / stopped glyph of Claude's OSC title, or undefined for generic titles. */
 function titleTopic(title: string): string | undefined {
@@ -159,6 +161,16 @@ export class StatusManager implements PtySink {
    * is a sub-session (a driver's `claude -p`) or a new agent of the console.
    */
   private readonly candidates = new Map<string, LiveHook>()
+  /**
+   * v2.3: the native toast of each pane's last status notice (only
+   * showNotification; `snaos notify` and the test toast never enter) and the
+   * panes that flashed the taskbar. Both are released when the pane's
+   * attention goes false.
+   */
+  private readonly natives = new Map<string, Notification>()
+  private readonly flashing = new Set<string>()
+  /** v2.3: a paired phone is looking at the pane right now (SessionManager.isPaneSeen). */
+  private remoteSeen: (paneId: string) => boolean = () => false
   lastClaudeEventAt: number | null = null
   desktopError: 'blocked' | 'failed' | 'unavailable' | null = null
   constructor(
@@ -179,8 +191,52 @@ export class StatusManager implements PtySink {
     this.clearPane(paneId)
   }
   setConfig(cfg: NotificationSettings): void { this.cfg = cfg }
-  setViewed(paneIds: string[]): void { this.viewed = new Set(paneIds) }
+  /** The panes the desktop shows; with the window focused they are acknowledged too (v2.3). */
+  setViewed(paneIds: string[]): void {
+    this.viewed = new Set(paneIds)
+    if (!this.isFocused()) return
+    for (const id of this.viewed) this.ackPane(id)
+  }
+  /** v2.3: who tells whether a phone is looking at a pane (main wiring). */
+  setRemoteSeen(fn: (paneId: string) => boolean): void { this.remoteSeen = fn }
+  /**
+   * v2.3: a device saw the pane (a focused desktop view, a phone with it
+   * open): its done / error stops asking for attention. An open request is
+   * not answered by looking at it, so an `action` keeps its attention.
+   * Publishes only when attention really went true -> false.
+   */
+  ackPane(paneId: string): void {
+    const track = this.panes.get(paneId)
+    if (!track || track.ackedSeq === track.stateSeq) return
+    const before = this.attentionOf(track)
+    track.ackedSeq = track.stateSeq
+    if (before && !this.attentionOf(track)) this.publish(paneId, track)
+  }
+  /**
+   * v2.3 (agentTune): the renderer applied a tune with Enter and ok; until a
+   * hook says otherwise (or a new session starts) the console shows it. Only
+   * a precise track takes it (the Enter gate needs one). Values come already
+   * validated (registerStatusIpc).
+   */
+  setTuneHint(paneId: string, hint: TuneHint): void {
+    const track = this.panes.get(paneId)
+    if (!track || !track.precise) return
+    const before = [track.model, track.effort, track.ultracode].join()
+    if (hint.model) track.model = hint.model
+    if (hint.effort) track.effort = hint.effort
+    if (hint.ultracode !== undefined) track.ultracode = hint.ultracode
+    if ([track.model, track.effort, track.ultracode].join() !== before) this.publish(paneId, track)
+  }
+  /** v2.3: the window got the focus: the taskbar stops flashing and the panes in view are seen. */
+  onWindowFocus(): void {
+    this.flashing.clear()
+    for (const id of [...this.viewed]) this.ackPane(id)
+  }
   snapshot(): PaneStatusEvt[] { return [...this.panes].map(([id, track]) => this.event(id, track, false)) }
+  /** v2.3 (agentTune gate): the console's agent session ended (`/exit`), so its pty is back at the shell. */
+  isEnded(paneId: string): boolean {
+    return this.panes.get(paneId)?.ended === true
+  }
   /** Current status of one console, or null when it has none. */
   stateOf(paneId: string): PaneStatusEvt | null {
     const track = this.panes.get(paneId)
@@ -389,12 +445,14 @@ export class StatusManager implements PtySink {
       paneId: evt.consoleId, ptyId: evt.ptyId, provider: 'claude' as const,
       sessionId: evt.agentId ? this.panes.get(evt.consoleId)?.sessionId ?? evt.sessionId : evt.sessionId,
       cwd: evt.cwd, transcriptPath: evt.agentId ? undefined : evt.transcriptPath, subagent: evt.agentId ? true : undefined,
+      // v2.3: a subagent's model and effort are not the console's.
+      ...(evt.agentId ? {} : { model: evt.model, effort: evt.effort }),
     }
     const requestId = evt.toolUseId ?? evt.elicitationId
     const tool = { toolName: evt.toolName, tool: evt.toolSummary, summary: evt.requestSummary ?? evt.toolSummary }
     let event: AgentEvent | undefined
     switch (evt.name) {
-      case 'SessionStart': event = { ...base, kind: 'start' }; break
+      case 'SessionStart': event = { ...base, kind: 'start', source: evt.source }; break
       case 'SessionEnd': event = { ...base, kind: 'end', endReason: evt.endReason }; break
       case 'UserPromptSubmit':
         event = { ...base, kind: 'working', turnId: `prompt:${++this.promptSequence}`, prompt: evt.prompt, detail: evt.prompt ? { kind: 'prompt', text: firstLine(evt.prompt, LIMITS.detail) } : undefined }
@@ -482,6 +540,11 @@ export class StatusManager implements PtySink {
     if (evt.kind === 'start') {
       // A new session starts clean (E5-FR-02: firstPrompt resets on start).
       track.firstPrompt = undefined; track.detail = undefined; track.tool = undefined; track.reply = undefined; track.replyTurn = undefined
+      // v2.3: so is its tune read-back, but only for a new process (a startup,
+      // or a resume after the session ended): a compact, clear or resume
+      // inside the same Claude keeps it (Ultracode is never re-reported) and
+      // SessionStart's own model and effort overwrite it through enrich().
+      if (!evt.source || evt.source === 'startup' || track.ended) { track.model = undefined; track.effort = undefined; track.ultracode = undefined }
     }
     this.enrich(track, evt)
     let notice: StatusNotice['state'] | undefined, key: string | undefined
@@ -564,10 +627,15 @@ export class StatusManager implements PtySink {
    * to answer. `state`, `reason` and `pendingCount` stay: the request lives
    * until its normal hook (PostToolUse). Terminal reports never count.
    */
-  onUserInput(ptyId: string, paneId: string, data: string): void {
+  onUserInput(ptyId: string, paneId: string, data: string, origin: PtyInputOrigin = 'user'): void {
     if (this.ptys.get(paneId) !== ptyId) return
     const track = this.panes.get(paneId)
-    if (!track || track.pending.size === 0 || REPORTS_ONLY_RE.test(data)) return
+    if (!track) return
+    // v2.3: real input from any device also acknowledges the console (its
+    // done / error was seen); an automation's write ('auto') only invalidates.
+    const acks = origin === 'user' && track.ackedSeq !== track.stateSeq
+    if ((track.pending.size === 0 && !acks) || REPORTS_ONLY_RE.test(data)) return
+    const before = this.attentionOf(track)
     const now = Date.now()
     let changed = false
     for (const entry of track.pending.values()) {
@@ -575,7 +643,8 @@ export class StatusManager implements PtySink {
       entry.invalidated = true
       changed = true
     }
-    if (changed) this.publish(paneId, track)
+    if (acks) track.ackedSeq = track.stateSeq
+    if (changed || before !== this.attentionOf(track)) this.publish(paneId, track)
   }
 
   dispose(): void { for (const id of [...this.panes.keys()]) this.clearPane(id); this.ptys.clear() }
@@ -594,6 +663,8 @@ export class StatusManager implements PtySink {
     }
     if (evt.firstPrompt && !track.firstPrompt) track.firstPrompt = firstLine(evt.firstPrompt, LIMITS.title) || undefined
     if (evt.reply) { track.reply = evt.reply; track.replyTurn = track.turnId }
+    if (!evt.subagent && evt.model) track.model = evt.model
+    if (!evt.subagent && evt.effort) track.effort = evt.effort
   }
 
   /**
@@ -613,7 +684,7 @@ export class StatusManager implements PtySink {
 
   private createTrack(provider: AgentProvider, sessionId: string): PaneTrack {
     const now = Date.now()
-    return { provider, sessionId, retired: new Set(), precise: false, activity: 'idle', pending: new Map(), seen: new Set(), turnId: '', turn: 0, timer: null, updatedAt: now, ended: false, lastState: 'idle', stateSince: now, emittedAt: 0, detailTimer: null, subSessions: new Map(), waitTimer: null, lastHookAt: 0, interruptTimer: null }
+    return { provider, sessionId, retired: new Set(), precise: false, activity: 'idle', pending: new Map(), seen: new Set(), turnId: '', turn: 0, timer: null, updatedAt: now, ended: false, lastState: 'idle', stateSince: now, emittedAt: 0, detailTimer: null, subSessions: new Map(), waitTimer: null, lastHookAt: 0, interruptTimer: null, stateSeq: 0, ackedSeq: 0 }
   }
   private cancelTimer(track: PaneTrack): void { if (track.timer) clearTimeout(track.timer); track.timer = null }
   private cancelDetail(track: PaneTrack): void { if (track.detailTimer) clearTimeout(track.detailTimer); track.detailTimer = null; track.deferredCause = undefined }
@@ -628,6 +699,7 @@ export class StatusManager implements PtySink {
     const track = this.panes.get(paneId)
     if (!track) return
     this.stopTimers(track); this.panes.delete(paneId)
+    this.releaseAttention(paneId)
     this.emit({ paneId, state: null, precise: false, notify: false })
   }
   /**
@@ -664,12 +736,46 @@ export class StatusManager implements PtySink {
     // v2.2: a turn waiting on work it started reads as working.
     return this.waitingOf(track) ? 'working' : track.activity
   }
+  /**
+   * v2.3: the console needs the user. `action` while some request was not
+   * answered (invalidated by input), `done` / `error` until a device
+   * acknowledged that transition; never for the other states.
+   */
+  private attentionOf(track: PaneTrack, state = this.stateOfTrack(track)): boolean {
+    if (state === 'action') {
+      for (const entry of track.pending.values()) if (!entry.invalidated) return true
+      return false
+    }
+    return (state === 'done' || state === 'error') && track.ackedSeq !== track.stateSeq
+  }
+  private isFocused(): boolean {
+    const win = this.getWindow()
+    return !!win && !win.isDestroyed() && win.isFocused()
+  }
+  /** A device looks at the pane now: a focused desktop view or a phone. */
+  private seenNow(paneId: string): boolean {
+    if (this.viewed.has(paneId) && this.isFocused()) return true
+    try { return this.remoteSeen(paneId) } catch { return false }
+  }
+  /** v2.3: the pane no longer asks for attention: its native toast closes, the flash stops with the last one. */
+  private releaseAttention(paneId: string): void {
+    const native = this.natives.get(paneId)
+    if (native) {
+      this.natives.delete(paneId)
+      try { native.close() } catch { /* already gone */ }
+    }
+    if (this.flashing.delete(paneId) && this.flashing.size === 0) {
+      const win = this.getWindow()
+      if (win && !win.isDestroyed()) win.flashFrame(false)
+    }
+  }
   private event(paneId: string, track: PaneTrack, notify: boolean): PaneStatusEvt {
     const state = this.stateOfTrack(track)
     const evt: PaneStatusEvt = {
       paneId, provider: track.provider, precise: track.precise, notify, state,
       reason: track.activity === 'error' ? 'failure' : track.pending.values().next().value?.reason,
       pendingCount: track.pending.size, updatedAt: track.updatedAt, stateSince: track.stateSince,
+      attention: this.attentionOf(track, state),
     }
     if (track.topic) evt.topic = track.topic
     if (track.firstPrompt) evt.firstPrompt = track.firstPrompt
@@ -686,6 +792,9 @@ export class StatusManager implements PtySink {
     if (pending.length) evt.pending = pending
     if (track.detail) evt.detail = track.detail
     if (track.cwd) evt.cwd = track.cwd
+    if (track.model) evt.model = track.model
+    if (track.effort) evt.effort = track.effort
+    if (track.ultracode !== undefined) evt.ultracode = track.ultracode
     const waiting = this.waitingOf(track)
     if (waiting) evt.waiting = waiting
     else if (state === 'done' && track.background?.other) evt.backgroundOther = track.background.other
@@ -733,7 +842,10 @@ export class StatusManager implements PtySink {
       if (effective === 'working') track.cacheSince = undefined
       else if (track.lastState === 'working' && (effective === 'done' || effective === 'idle')) track.cacheSince = now
       track.lastState = effective; track.stateSince = now
+      track.stateSeq++
     }
+    // v2.3: a done / error that lands while a device looks at the pane is already seen.
+    if ((effective === 'done' || effective === 'error') && track.ackedSeq !== track.stateSeq && this.seenNow(paneId)) track.ackedSeq = track.stateSeq
     const fresh = !!key && !track.seen.has(key)
     if (key) { track.seen.add(key); if (track.seen.size > 512) track.seen.delete(track.seen.values().next().value!) }
     const evt = this.event(paneId, track, false), cfg = this.cfg
@@ -741,15 +853,17 @@ export class StatusManager implements PtySink {
       this.onNotice({ paneId, provider: track.provider, state, reason: evt.reason })
       const focused = this.getWindow()?.isFocused() ?? false
       const inView = this.viewed.has(paneId) && focused
-      evt.notify = !!cfg?.enabled && (state === 'done' ? cfg.notifyDone : cfg.notifyAction) && !inView
+      // v2.3: nothing to announce for a notice already seen (on a phone).
+      evt.notify = !!cfg?.enabled && (state === 'done' ? cfg.notifyDone : cfg.notifyAction) && !inView && evt.attention !== false
       // E4-FR-07: with the window focused, the renderer shows an in-app card
       // instead of the OS notification (and never flashes the taskbar).
       evt.delivery = !evt.notify ? 'none' : focused && cfg?.inAppWhenFocused !== false ? 'inApp' : 'native'
       if (evt.delivery === 'native') this.showNotification(paneId, track, state)
     }
+    if (!evt.attention) this.releaseAttention(paneId)
     // Only-detail changes are coalesced to one emission per 500 ms per pane
     // (E5-FR-02); state, pending, session and notifications go out at once.
-    const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.precise, evt.sessionId, evt.cwd, evt.waiting])
+    const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.precise, evt.sessionId, evt.cwd, evt.waiting, evt.attention, evt.model, evt.effort, evt.ultracode])
     const immediate = transition || !!key || evt.notify || (!!cause && IMMEDIATE_KINDS.has(cause.kind)) || signature !== track.emitted
     if (immediate || now - track.emittedAt >= DETAIL_THROTTLE_MS) {
       this.cancelDetail(track)
@@ -775,10 +889,21 @@ export class StatusManager implements PtySink {
       if (found) { pane = `${ws.name} / ${found.title}`; break }
     }
     const key = state === 'done' ? 'status.notif.done' : state === 'error' ? 'status.notif.error' : track.precise ? 'status.notif.action' : 'status.notif.generic'
-    this.showNative(mainT(cfg, key, { pane, provider: track.provider === 'codex' ? 'Codex' : 'Claude' }), paneId)
-    if (this.cfg?.flashTaskbar && win && !win.isFocused()) win.flashFrame(true)
+    const native = this.showNative(mainT(cfg, key, { pane, provider: track.provider === 'codex' ? 'Codex' : 'Claude' }), paneId)
+    if (native) {
+      // v2.3: kept until the pane's attention goes false. Not dropped on
+      // 'close': on Windows a toast that timed out into the Action Center
+      // fires it too, and only this reference can remove it from there.
+      const prev = this.natives.get(paneId)
+      this.natives.set(paneId, native)
+      const forget = (): void => { if (this.natives.get(paneId) === native) this.natives.delete(paneId) }
+      native.on('click', forget)
+      native.on('failed', forget)
+      if (prev) try { prev.close() } catch { /* already gone */ }
+    }
+    if (this.cfg?.flashTaskbar && win && !win.isFocused()) { win.flashFrame(true); this.flashing.add(paneId) }
   }
-  private showNative(body: string, paneId?: string, title: string = BRAND.productName): void {
+  private showNative(body: string, paneId?: string, title: string = BRAND.productName): Notification | null {
     this.desktopError = null
     if (Notification.isSupported()) {
       const notification = new Notification({ title, body, silent: true })
@@ -792,7 +917,10 @@ export class StatusManager implements PtySink {
         console.warn('[status] Desktop notification could not be displayed')
       })
       notification.show()
-    } else this.desktopError = 'unavailable'
+      return notification
+    }
+    this.desktopError = 'unavailable'
+    return null
   }
   private emit(evt: PaneStatusEvt, cause?: AgentEvent): void {
     const win = this.getWindow()

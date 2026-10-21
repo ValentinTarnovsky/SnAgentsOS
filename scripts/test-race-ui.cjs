@@ -95,7 +95,7 @@ app.whenReady().then(async()=>{
  ok(JSON.stringify(await js('smoke.pasted.a1'))==='["linea uno\\nlinea dos"]','the agent got the text as one paste');
  ok(JSON.stringify(await js('smoke.pasted.sh'))==='["linea uno linea dos"]','the plain console got one line');
  ok(JSON.stringify(await js('smoke.pasted.min'))==='[]','a minimized console got nothing');
- ok(JSON.stringify(await js('smoke.calls.writes'))==='[{"ptyId":"pty-a1","data":"\\r"}]','Enter only to the agent '+JSON.stringify(await js('smoke.calls.writes')));
+ ok(JSON.stringify(await js('smoke.calls.writes'))==='[{"ptyId":"pty-a1","data":"\\r","origin":"auto"}]','Enter only to the agent '+JSON.stringify(await js('smoke.calls.writes')));
  ok(!(await js("!!document.querySelector('[data-global-prompt]')")),'Ctrl+Enter sends and closes');
 
  // FR-34: race mode with 10 consoles: only a new workspace fits the defaults.

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
-import { Activity, Bell, Bot, Database, DownloadCloud, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, Workflow, Zap, type LucideIcon } from 'lucide-react'
+import { Activity, Bell, Bot, Database, DownloadCloud, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Smartphone, TerminalSquare, Users, Workflow, Zap, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -32,6 +32,7 @@ import { KeymapSection } from './sections/KeymapSection'
 import { DataSection } from './sections/DataSection'
 import { UsageSection } from './sections/UsageSection'
 import { AiUsageSection } from './sections/AiUsageSection'
+import { ClaudeAccountsSection } from './sections/ClaudeAccountsSection'
 import { RemoteSection } from './sections/RemoteSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
@@ -50,6 +51,7 @@ const ICONS: Record<CategoryId, LucideIcon> = {
   appearance: Palette,
   language: Languages,
   aiusage: Gauge,
+  claudeaccounts: Users,
   usage: Activity,
   remote: Smartphone,
   git: GitBranch,
@@ -70,6 +72,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   keys: KeymapSection,
   data: DataSection,
   aiusage: AiUsageSection,
+  claudeaccounts: ClaudeAccountsSection,
   usage: UsageSection,
   remote: RemoteSection,
   git: GitSection,

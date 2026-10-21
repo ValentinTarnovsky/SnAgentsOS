@@ -5,9 +5,14 @@
  * ESC[200~ / ESC[201~ markers when the inner app enabled bracketed-paste mode
  * (2004). Follows the pattern of `focus.ts`; useXterm registers on mount.
  */
+/** v2.3: `auto` marks text nobody typed (it reaches main as `origin: 'auto'`). */
+export interface PasteOpts {
+  auto?: boolean
+}
+
 export interface Paster {
   /** Paste text through xterm (never appends Enter). */
-  paste: (text: string) => void
+  paste: (text: string, opts?: PasteOpts) => void
   /** Whether the inner app currently has bracketed-paste mode on. */
   bracketed: () => boolean
 }
@@ -28,10 +33,11 @@ export function unregisterPaster(paneId: string, paster?: Paster): void {
 }
 
 /** Paste into a pane's terminal. False when no xterm is mounted for it. */
-export function pasteToPane(paneId: string, text: string): boolean {
+export function pasteToPane(paneId: string, text: string, opts?: PasteOpts): boolean {
   const paster = pasters.get(paneId)
   if (!paster || !text) return false
-  paster.paste(text)
+  if (opts?.auto) paster.paste(text, opts)
+  else paster.paste(text)
   return true
 }
 

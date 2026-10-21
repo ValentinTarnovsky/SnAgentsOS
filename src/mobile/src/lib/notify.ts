@@ -14,6 +14,7 @@
  * client.ts binds the singleton to the store.
  */
 import { BRAND } from '@shared/brand'
+import { waitsOnUser } from '@shared/status'
 import type { RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
 import { t } from './i18n'
 import { reasonText } from './statusText'
@@ -72,6 +73,8 @@ export function createPaneNotifier(deps: PaneNotifierDeps): PaneNotifier {
       if (last.get(paneId) === key) return null
       last.set(paneId, key)
       if (last.size > 500) last.delete(last.keys().next().value as string)
+      // v2.3: already seen or answered on some device: nothing to announce.
+      if (next.attention === false) return null
       if (!deps.isVisible()) return null
       const screen = deps.screen()
       const onTerminal = screen === 'terminal'
@@ -93,11 +96,11 @@ export function createPaneNotifier(deps: PaneNotifierDeps): PaneNotifier {
   }
 }
 
-/** Consoles in action across the snapshot (the document title badge). */
+/** Consoles waiting on the user across the snapshot (the document title badge); v2.3: an answered action does not count. */
 export function actionTotal(snap: RemoteStateSnapshot | null, statuses: Record<string, RemotePaneStatus>): number {
   if (!snap) return 0
   let n = 0
-  for (const ws of snap.workspaces) for (const p of ws.panes) if (statuses[p.id]?.state === 'action') n++
+  for (const ws of snap.workspaces) for (const p of ws.panes) if (waitsOnUser(statuses[p.id])) n++
   return n
 }
 
