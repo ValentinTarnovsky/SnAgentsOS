@@ -3,7 +3,8 @@
 // settings URIs and the renderer store (menu guard, never an Enter), all in
 // node with esbuild + vm. On Windows it also runs the real helper once per
 // engine (no speech needed: it must start, stop and end cleanly); set
-// SNAOS_TEST_NO_PS=1 to skip that part.
+// SNAOS_TEST_NO_PS=1 to skip that part. CI runners have no recognizer or
+// microphone, so it is skipped there too (CI=true).
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -367,14 +368,17 @@ async function main() {
   }
 
   // --- Real helper on this machine (Windows only) ---------------------------------
-  if (process.platform === 'win32' && process.env.SNAOS_TEST_NO_PS !== '1') {
+  if (process.platform === 'win32' && process.env.SNAOS_TEST_NO_PS !== '1' && !process.env.CI) {
     const H = load('src/main/dictation/helperScript.ts')
     const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
     const run = (engine, lang) => new Promise((resolve) => {
       const lines = []
+      let err = ''
       const c = spawn(exe, H.buildDictationArgs(), { env: S.helperEnv(process.env, engine, lang), windowsHide: true, stdio: 'pipe' })
       let buf = ''
       c.stdout.setEncoding('utf8')
+      c.stderr.setEncoding('utf8')
+      c.stderr.on('data', (d) => { err += d })
       c.stdout.on('data', (d) => {
         buf += d
         let i
@@ -386,12 +390,12 @@ async function main() {
       const t0 = Date.now()
       const stopper = setTimeout(() => c.stdin.write('stop\n'), 2500)
       const killer = setTimeout(() => c.kill(), 30000)
-      c.on('exit', (code) => { clearTimeout(stopper); clearTimeout(killer); resolve({ code, lines: lines.filter(Boolean), ms: Date.now() - t0 }) })
+      c.on('exit', (code) => { clearTimeout(stopper); clearTimeout(killer); resolve({ code, lines: lines.filter(Boolean), err: err.slice(0, 2000), ms: Date.now() - t0 }) })
     })
     for (const [engine, lang] of [['offline', 'zz-QQ'], ['auto', 'es-AR']]) {
       const r = await run(engine, lang)
       const parsed = r.lines.map(S.parseHelperLine)
-      check(r.code === 0 && parsed.length >= 1 && parsed.every(Boolean), `real helper (${engine}): exit 0, every line valid: ${JSON.stringify(r.lines)}`)
+      check(r.code === 0 && parsed.length >= 1 && parsed.every(Boolean), `real helper (${engine}): exit 0, every line valid: ${JSON.stringify(r.lines)} stderr: ${r.err}`)
       check(parsed.at(-1).t === 'end' && parsed.filter((p) => p.t === 'end').length === 1, `real helper (${engine}): end once, last`)
       const first = parsed[0]
       check(first.t === 'ready' || first.t === 'error', `real helper (${engine}): starts with ready or an error code (${first.t}${first.code ? ' ' + first.code : ''}${first.fallback ? ' fallback ' + first.fallback : ''})`)
