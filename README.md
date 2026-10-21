@@ -19,7 +19,7 @@ Open *sets* of multiple terminals and AI CLI sessions (Claude Code, Codex, custo
 
 ---
 
-> **Status:** `v2.4.0`, stable. Upgrading from a 1.x version? Your data moves over by itself, see [Upgrading from 1.x](#upgrading-from-1x). Built in public as a VibeCoding showcase, open source under MIT.
+> **Status:** `v2.5.0`, stable. Upgrading from a 1.x version? Your data moves over by itself, see [Upgrading from 1.x](#upgrading-from-1x). Built in public as a VibeCoding showcase, open source under MIT.
 
 ## What it is
 
@@ -38,7 +38,7 @@ A collapsible sidebar lists **workspaces** (not chats). Opening a workspace show
 - ⚡ **Quick Commands**: saved prompts and actions, global or per workspace, from a `Ctrl+Shift+Q` popover, the palette or the phone.
 - 🛠️ **Automation**: the `snaos` CLI inside every console (`ls`, `spawn`, `send`, `read`, `peek`, `chat`, `wait`, `status`, `notify`, `note`, `notes`, `focus`, `rename`, `restart`, `kill`, `ws`, `usage`, `account`) so agents can drive the app, watch what another console is doing, keep the workspace notes, read the usage bars and switch the saved Claude account when you ask, a `.snagentsos.json` per repo (consoles, grid, setup, Quick Commands, trusted by hash), and recurring per-console schedules that wait for the agent to be free.
 - 🤝 **Share between PCs**: share a console or a whole workspace with another SnAgentsOS over Tailscale or your LAN, end-to-end encrypted, as View only, Type only (type without send) or Full control, with a password or an approval prompt for each guest.
-- 🎙️ **Dictation (Windows)**: dictate into any console from a mic button, the console menu or `Ctrl+Shift+H`, typed on one line and never with Enter, using Windows online speech recognition with an offline fallback.
+- 🎙️ **Dictation (Windows)**: dictate into any console from a mic button, the console menu or `Ctrl+Shift+H`, typed on one line and never with Enter, using a local Whisper model (large-v3-turbo on an NVIDIA GPU, small on the CPU) downloaded once from Settings. Audio never leaves the PC.
 - 👥 **Claude accounts**: save up to 8 Claude logins in priority order and switch between them by hand, from the phone, with `snaos account use` or automatically when one runs out.
 - 📱 **Phone control**: pair a phone over LAN or Tailscale and get a Home with every workspace, a docked composer, tap-to-answer permission, question and plan cards (also from the Chat view), a Chat view of agent consoles, phone-fit sizing, a Changes screen, session history with resume, image upload and Web Push to the locked phone (secure mode via `tailscale serve`) or ntfy.
 - ⌨️ **Remappable keyboard shortcuts** and an optional global hotkey to summon the window from anywhere.

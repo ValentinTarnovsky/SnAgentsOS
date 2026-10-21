@@ -465,7 +465,7 @@ export class SessionManager implements PtySink {
       case 'unsub':
         return this.handleUnsub(session, msg.paneId)
       case 'input':
-        return this.handleInput(msg.paneId, msg.data)
+        return this.handleInput(msg.paneId, msg.data, msg.submit === true)
       case 'ctl':
         return void this.handleCtl(session, msg.id, msg.action)
       case 'visibility':
@@ -744,9 +744,12 @@ export class SessionManager implements PtySink {
     this.deps.chat?.more(session, paneId, offset, this.chatSender(session))
   }
 
-  private handleInput(paneId: string, data: string): void {
+  /** `submit` (app 2.5.0): a lone Enter after a paste, timed by main from the pty's last write. */
+  private handleInput(paneId: string, data: string, submit = false): void {
     const ptyId = this.deps.ptyManager.ptyIdForPane(paneId)
-    if (ptyId) this.deps.ptyManager.write(ptyId, data)
+    if (!ptyId) return
+    if (submit && data === '\r') this.deps.ptyManager.submitEnter(ptyId)
+    else this.deps.ptyManager.write(ptyId, data)
   }
 
   private takeAccountUse(deviceId: string, now: number = Date.now()): boolean {

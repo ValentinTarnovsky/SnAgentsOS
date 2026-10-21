@@ -21,7 +21,7 @@ import {I18nProvider} from './src/renderer/i18n';
 import {useAppStore} from './src/renderer/lib/store';
 import {useGlobalKeys} from './src/renderer/lib/useGlobalKeys';
 import {applyTheme} from './src/renderer/themes/applyTheme';
-import {useSidePanels, openNoteInPanel} from './src/renderer/lib/sidePanels';
+import {useSidePanels, openNoteInPanel, openSidePanel, closeSidePanel, setSidePanelMaximized} from './src/renderer/lib/sidePanels';
 import {openChangesPanel} from './src/renderer/lib/changesPanel';
 import {useToastStore} from './src/renderer/lib/toast';
 
@@ -152,7 +152,7 @@ window.smoke = {
   xtermAt: (x, y) => !!document.elementFromPoint(x, y)?.closest('.xterm'),
   pin: () => q('[data-drawer-pin]').click(),
   pinned: () => q('[data-drawer-pin]')?.dataset.drawerPin ?? null,
-  pinStored: (id) => localStorage.getItem('snagentsos.drawer.' + id + '.pinned'),
+  pinStored: (id, scope = 'w1') => localStorage.getItem('snagentsos.drawer.' + id + '.pinned.' + scope),
   xtermFocused: () => !!document.activeElement?.closest?.('.xterm'),
   notesNew: () => (q('[data-notes-first]') || q('[data-notes-new]')).click(),
   noteRows: () => qa('[data-note-row]').map((r) => r.textContent),
@@ -160,12 +160,17 @@ window.smoke = {
   previewHeading: () => q('[data-note-preview] [role=heading]')?.textContent ?? '',
   saved: () => q('[data-note-saved]')?.textContent ?? '',
   openChanges: () => openChangesPanel(),
-  side: () => useSidePanels.getState().open,
+  side: () => useSidePanels.getState().open.w1 ?? null,
+  // Every workspace's drawer (app 2.5.0), and a switch of the active one under the same grid.
+  sides: () => useSidePanels.getState().open,
+  activate: (id) => useAppStore.setState({ activeWorkspaceId: id }),
+  openSide: (kind) => openSidePanel(kind),
+  closeSide: () => closeSidePanel({ refocus: false }),
   overflow: () => document.documentElement.scrollWidth > innerWidth,
   shellScroll: () => Math.max(q('[data-shell]').scrollLeft, q('[data-shell]').scrollTop, document.scrollingElement.scrollLeft, document.body.scrollLeft),
   // Samples the shell's scroll every frame for ms, across a drawer's 150 ms slide-in.
   sampleShift: (ms) => { window.__maxShift = 0; const end = performance.now() + ms; const tick = () => { window.__maxShift = Math.max(window.__maxShift, smoke.shellScroll()); if (performance.now() < end) requestAnimationFrame(tick); else window.__sampled = true }; window.__sampled = false; tick() },
-  maximize: (v) => useSidePanels.setState({ maximized: v }),
+  maximize: (v) => setSidePanelMaximized('w1', v),
   newConsole: () => q('[data-new-console-button]').click(),
   menuOpen: () => !!q('[data-new-console-menu]'),
   // Is the menu what paints at a point inside it? The drawer sits right under it.
@@ -457,16 +462,25 @@ app.whenReady().then(async()=>{
  eq(await js('smoke.pinned()'),'off','unpinned by default');
  await js('smoke.pin()');
  await until("smoke.pinned()==='on'",'the pin turns on');
- eq(await js("smoke.pinStored('files')"),'1','the pin is kept per drawer');
+ eq(await js("smoke.pinStored('files')"),'1','the pin is kept per drawer and workspace');
  await click(pt.x,pt.y);
  ok((await js('smoke.drawer()'))==='files','pinned: a click on the console keeps it');
  await press('E',['control','shift']);
  await until('smoke.drawer()===null','Ctrl+Shift+E closes it');
  await press('E',['control','shift']);
  await until("smoke.drawer()==='files'&&smoke.pinned()==='on'",'reopened, still pinned');
+ // Each workspace keeps its own drawer and pin (app 2.5.0): another one opening or closing its drawer leaves this one.
+ await js("smoke.activate('w2')");
+ await js("smoke.openSide('notes')");
+ eq(await js('smoke.sides()'),{w1:'files',w2:'notes'},'Notes on another workspace keeps the pinned Files of this one');
+ eq(await js("smoke.pinStored('files','w2')"),null,'and the other workspace does not share the pin');
+ await js('smoke.closeSide()');
+ eq(await js('smoke.sides()'),{w1:'files'},'closing the drawer there leaves this one');
+ await js("smoke.activate('w1')");
+ await until("smoke.drawer()==='files'&&smoke.pinned()==='on'",'back here: the same drawer, still pinned');
  await js('smoke.pin()');
  await until("smoke.pinned()==='off'",'unpinned');
- eq(await js("smoke.pinStored('files')"),null,'unpinning forgets it');
+ eq(await js("smoke.pinStored('files')"),'0','unpinning is kept for this workspace');
  // A dirty tab survives an outside close.
  await until('smoke.focusEditor()','the editor of the open tab');
  await press('End',['control']);await type('!');
@@ -544,7 +558,7 @@ app.whenReady().then(async()=>{
  await press('Escape');
 
  if(failures.length)throw new Error(failures.join('\n'));
- console.log('PASS: '+n+' files and notes drawer UI checks (Ctrl+Shift+E/M, tree, open, type, Ctrl+S with rev, collapse folders, find widget with counter / options / replace / read-only / zoom, CRLF + BOM, agent changes clean and dirty, context menu, autosaved note + preview, snaos notes open (latest wins, never over unsaved edits), one drawer at a time, Esc, palette, no shell shift on open, New console menu over the drawer, close on outside click with pin); screenshots '+__dirname);
+ console.log('PASS: '+n+' files and notes drawer UI checks (Ctrl+Shift+E/M, tree, open, type, Ctrl+S with rev, collapse folders, find widget with counter / options / replace / read-only / zoom, CRLF + BOM, agent changes clean and dirty, context menu, autosaved note + preview, snaos notes open (latest wins, never over unsaved edits), one drawer at a time and one per workspace, Esc, palette, no shell shift on open, New console menu over the drawer, close on outside click with pin); screenshots '+__dirname);
  w.destroy();app.quit();
 }).catch((e)=>{console.error(e);app.exit(1)});
 `

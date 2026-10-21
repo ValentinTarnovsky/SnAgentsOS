@@ -104,6 +104,7 @@ function world(opts = {}) {
     getReplay: paneId => ({ ptyId: 'pty-' + paneId, replay: 'R:' + paneId, cols: 80, rows: 24 }),
     ptyIdForPane: paneId => 'pty-' + paneId,
     write: (_id, data) => writes.push(data),
+    submitEnter: (id) => writes.push('submit:' + id),
   }
   // A fake renderer: commands relayed by main land here (E2 executor tests).
   const commands = []
@@ -348,6 +349,12 @@ async function testDataPlane() {
   check(ws.closed === null, 'two strikes keep the socket open')
   ws.msg({ type: 'input', paneId: 'p1', data: 'x'.repeat(8193) })
   check(ws.closed === 1008, 'the third oversized input is the third strike and closes the socket')
+  const { ws: ws2 } = await pair(w)
+  ws2.msg({ type: 'input', paneId: 'p1', data: '\r', submit: true })
+  check(w.writes.at(-1) === 'submit:pty-p1', 'a submit Enter goes to submitEnter, timed by main (app 2.5.0)')
+  ws2.msg({ type: 'input', paneId: 'p1', data: 'ab\r', submit: true })
+  ws2.msg({ type: 'input', paneId: 'p1', data: '\r' })
+  check(w.writes.slice(-2).join('|') === 'ab\r|\r', 'submit on other data, or a plain Enter, is a plain write')
 }
 
 /** E2 Home (R22-14): hostName on every frame, promptFallback in the ack, the new ctl schemas. */
@@ -831,13 +838,14 @@ async function testSafePaste() {
   check(sp.buildPasteFrames('\x1b\x00\x07', true).length === 0, 'nothing left after sanitizing yields no frame')
 
   const run = async (text, opts, { live = () => true, open = true, onSleep } = {}) => {
-    const sent = [], sleeps = []
-    const io = { sendInput: d => { if (!open) return false; sent.push(d); return true }, sleep: async ms => { sleeps.push(ms); onSleep?.() } }
+    const sent = [], sleeps = [], submits = []
+    const io = { sendInput: (d, o) => { if (!open) return false; sent.push(d); if (o?.submit) submits.push(d); return true }, sleep: async ms => { sleeps.push(ms); onSleep?.() } }
     const ok = await sp.safePaste(text, { signal: new AbortController().signal, live, ...opts }, io)
-    return { ok, sent, sleeps }
+    return { ok, sent, sleeps, submits }
   }
   let r = await run('hola\nchau', { bracketed: true, enter: true })
   check(r.ok && r.sent.length === 2 && r.sent[0] === START + 'hola\rchau' + END && r.sent[1] === '\r' && r.sleeps[0] === 50, 'enter:true sends \\r after the closing marker, 50ms later')
+  check(r.submits.length === 1 && r.submits[0] === '\r', 'the Enter frame is marked submit (app 2.5.0: main times it from the pty)')
   r = await run('hola', { bracketed: true, enter: false })
   check(r.ok && r.sent.length === 1, 'enter:false sends no Enter')
   let alive = true

@@ -36,6 +36,18 @@ export interface ShareInputCtx {
   precise?: boolean
   /** Last character written to the pane by anyone ('' = nothing yet), for the SSH `~` rule. */
   lastByte: string
+  /**
+   * app 2.5.0: whether the pane's screen shows a numbered menu (parseMenu),
+   * read only while the agent state is not precise (an agent over SSH has no
+   * hooks): true blocks like `action`, false lets `type` through, absent
+   * (the screen could not be read) fails closed.
+   */
+  screenMenu?: boolean
+}
+
+/** The agent's state cannot be trusted (no status, `unknown`, or a title guess): the screen decides. */
+export function shareStateImprecise(ctx: Pick<ShareInputCtx, 'agent' | 'state' | 'precise'>): boolean {
+  return ctx.agent && (!ctx.state || ctx.state === 'unknown' || ctx.precise === false)
 }
 
 export type ShareGateVerdict =
@@ -144,9 +156,11 @@ export class ShareInputGate {
     if (perm === 'view') return deny('view_only')
     if (perm === 'full') return OK
     if (ESC_ONLY_RE.test(data)) return OK
-    if (ctx.agent) {
-      if (ctx.state === 'action') return deny('awaiting_host')
-      if (!ctx.state || ctx.state === 'unknown' || ctx.precise === false) return deny('not_precise')
+    if (ctx.agent && ctx.state === 'action') return deny('awaiting_host')
+    if (shareStateImprecise(ctx)) {
+      // A numbered menu on screen would take a typed digit as its answer.
+      if (ctx.screenMenu === true) return deny('awaiting_host')
+      if (ctx.screenMenu !== false) return deny('not_precise')
     }
     if (SEND_RE.test(data)) return deny('no_send')
     if (INTERRUPT_RE.test(data)) return deny('interrupt')
@@ -154,7 +168,7 @@ export class ShareInputGate {
     // with no timeout: on a non-agent pane the next write joins the pane's last
     // byte, whoever wrote it. Agent TUIs time Esc out, so there the 1 s window holds.
     const joined = this.escPending || (!ctx.agent && ctx.lastByte === '\x1b')
-    const bad = scanTyped(joined ? '\x1b' + data : data, !ctx.agent || ctx.state === 'idle')
+    const bad = scanTyped(joined ? '\x1b' + data : data, !ctx.agent || (ctx.state === 'idle' && ctx.precise !== false))
     if (bad) return deny(bad)
     if (!joined && data[0] === '~' && (ctx.lastByte === '' || ctx.lastByte === '\r' || ctx.lastByte === '\n')) {
       return deny('ssh_escape')

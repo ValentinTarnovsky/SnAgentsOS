@@ -163,7 +163,7 @@ const DEFAULT_SETTINGS: Settings = {
     scheduleMaxWaitMin: 30,
     scheduleNotify: false,
   },
-  dictation: { engine: 'auto', language: 'auto', headerButton: true },
+  dictation: { device: 'auto', language: 'auto', headerButton: true, interim: true, vocabulary: '' },
   share: { enabled: false, port: 4527, guestName: '', defaultPerm: 'view' },
 }
 

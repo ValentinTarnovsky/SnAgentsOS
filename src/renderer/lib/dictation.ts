@@ -1,7 +1,24 @@
 /**
- * Desktop dictation (app 2.4.0): the renderer side of `dictation:*`. Main
- * runs the Windows recognizer; this store only turns its finished phrases
- * into text the user could have typed.
+ * Desktop dictation (app 2.5.0): the renderer side of `dictation:*`. Main
+ * runs the local Whisper engine; this store captures the microphone
+ * (dictationCapture, 16 kHz mono s16 chunks over `dictation:audio`) and
+ * turns the finished phrases into text the user could have typed.
+ *
+ *  - Capture starts together with `dictation:start`. Chunks captured before
+ *    the reply names the session wait (at most EARLY_CHUNKS_MAX, the oldest
+ *    go first) and are sent in order once it does. The capture stops on
+ *    `end`, Stop, a replacing start, a refused start and a capture error
+ *    (which shows its code and stops the session).
+ *  - `slow`: the engine takes long. Before `ready`, after STARTING_SLOW_MS;
+ *    after a GPU `ready`, when speech was sent and no answer (final or hyp)
+ *    has come back REPLY_SLOW_MS after the last voiced chunk (the first CUDA
+ *    JIT runs on the first request, after `ready`). Main sends a `final` with
+ *    empty text when a phrase leaves nothing (VAD, the hallucination filter),
+ *    so a warm engine that hears only noise never reads as slow. The first
+ *    answer clears it for the session; a CPU engine is never `slow` after
+ *    `ready` (its model loads before it).
+ *  - `timeout` is a notice, not an end: the next answer or `ready` clears it,
+ *    and so does `end` (TRANSIENT_ERRORS).
  *
  *  - A console target types each phrase with xterm's paste path (origin
  *    'user'), on one line, sanitized: never a CR or LF, so never an Enter. It
@@ -15,9 +32,9 @@
  *    console's pty changing or its terminal unmounting, and `end` from main.
  */
 import { create } from 'zustand'
-import type { DictationEvt } from '@shared/ipc-contract'
+import type { DictationEvt, DictationStartReq } from '@shared/ipc-contract'
 import { isDictationError, type DictationError } from '@shared/dictation'
-import { nextFinal, spaced, voiceLang } from '@shared/voiceText'
+import { spaced, voiceLang } from '@shared/voiceText'
 import { sanitizePasteText } from '@shared/sanitize-paste'
 import { parseMenu } from '@shared/promptMenu'
 import { waitsOnUser } from '@shared/status'
@@ -29,6 +46,16 @@ import { getPtyId, onPtyRegistryChange } from './ptyRegistry'
 import { readTerm } from './termReaders'
 import { focusPane, getFocusedPane } from './focus'
 import { toast } from './toast'
+import { captureErrorCode, startCapture, type Capture, type CaptureError } from './dictationCapture'
+
+/** `slow` while the start has no `ready` this long. */
+export const STARTING_SLOW_MS = 4000
+/** `slow` when no phrase came back this long after the last voiced chunk (first reply of the session only). */
+export const REPLY_SLOW_MS = 4000
+/** Chunks kept before the session id arrives: 10 s of 100 ms chunks. */
+export const EARLY_CHUNKS_MAX = 100
+/** RMS (s16) of a chunk that counts as speech for `slow`: about -34 dBFS. */
+export const VOICED_RMS = 650
 
 export type DictationTarget =
   | { kind: 'pane'; paneId: string }
@@ -44,7 +71,7 @@ export type DictationTarget =
 
 export type DictationPhase = 'idle' | 'starting' | 'listening' | 'stopping'
 
-interface DictationState {
+export interface DictationState {
   phase: DictationPhase
   target: DictationTarget | null
   /** 'pane:<id>' or 'field:<owner>': where the overlay shows, kept after the end for `error` and `held`. */
@@ -52,12 +79,15 @@ interface DictationState {
   sessionId: string | null
   /** The phrase being heard. */
   interim: string
-  engine: 'online' | 'offline' | null
-  /** Why auto runs offline (privacy: "Online speech recognition" is off). */
+  /** The device the engine runs on, from `ready`. */
+  engine: 'gpu' | 'cpu' | null
+  /** Why it runs on CPU although the GPU was wanted ('gpu_failed'). */
   fallback: DictationError | null
   error: DictationError | null
   /** Text the menu guard held back (console target), typed only with Insert. */
   held: string
+  /** The engine is slow to answer (cold start or first CUDA JIT): the overlay says so. */
+  slow: boolean
 }
 
 export const useDictationStore = create<DictationState>(() => ({
@@ -70,21 +100,110 @@ export const useDictationStore = create<DictationState>(() => ({
   fallback: null,
   error: null,
   held: '',
+  slow: false,
 }))
 
 export function scopeOf(target: DictationTarget): string {
   return target.kind === 'pane' ? `pane:${target.paneId}` : `field:${target.owner}`
 }
 
-// Per session, never rendered: what nextFinal already committed, the text
-// produced so far (spacing and case of the next phrase) and the console's pty.
-let committed = ''
+// Per session, never rendered: the text produced so far (spacing and case of
+// the next phrase) and the console's pty.
 let sessionText = ''
 let targetPty: string | undefined
 let startSeq = 0
 /** Events that arrived before the start reply named the session. */
 let early: DictationEvt[] = []
 let subscribed = false
+
+// The microphone of the current session. Every capture callback carries the
+// captureSeq it was started with; stopCapture bumps it, so a late chunk,
+// error or resolved start of an older capture is dropped (and stopped).
+let capture: Capture | null = null
+let captureSeq = 0
+/** Chunks captured before the start reply named the session. */
+let pendingChunks: ArrayBuffer[] = []
+let slowTimer: ReturnType<typeof setTimeout> | null = null
+/** `ready` arrived for this session. */
+let readySeen = false
+/** A final or hyp arrived for this session: the engine answers, `slow` is over. */
+let replied = false
+/** Speech was sent and nothing came back yet. */
+let voicedUnanswered = false
+
+function stopCapture(): void {
+  captureSeq++
+  const c = capture
+  capture = null
+  pendingChunks = []
+  c?.stop()
+}
+
+function clearSlowTimer(): void {
+  if (slowTimer !== null) clearTimeout(slowTimer)
+  slowTimer = null
+}
+
+function armSlow(ms: number, token: number, cond: () => boolean): void {
+  clearSlowTimer()
+  slowTimer = setTimeout(() => {
+    slowTimer = null
+    if (token !== startSeq || useDictationStore.getState().phase === 'idle' || !cond()) return
+    useDictationStore.setState({ slow: true })
+  }, ms)
+}
+
+function armReplySlow(): void {
+  armSlow(REPLY_SLOW_MS, startSeq, () => !replied)
+}
+
+function chunkRms(pcm: ArrayBuffer): number {
+  const v = new Int16Array(pcm, 0, pcm.byteLength >> 1)
+  if (v.length === 0) return 0
+  let sum = 0
+  for (let i = 0; i < v.length; i++) sum += v[i] * v[i]
+  return Math.sqrt(sum / v.length)
+}
+
+function onChunk(seq: number, pcm: ArrayBuffer): void {
+  if (seq !== captureSeq) return
+  const s = useDictationStore.getState()
+  if (s.phase === 'idle' || s.phase === 'stopping') return
+  if (!replied && chunkRms(pcm) >= VOICED_RMS) {
+    voicedUnanswered = true
+    // Only the GPU pays a load on its first request (the CUDA JIT); a CPU engine is loaded at `ready`.
+    if (readySeen && s.engine === 'gpu') armReplySlow()
+  }
+  if (s.sessionId) {
+    api()?.audio(s.sessionId, pcm)
+    return
+  }
+  pendingChunks.push(pcm)
+  if (pendingChunks.length > EARLY_CHUNKS_MAX) pendingChunks.shift()
+}
+
+function onCaptureError(seq: number, code: CaptureError): void {
+  if (seq !== captureSeq) return
+  stopCapture()
+  if (useDictationStore.getState().phase === 'idle') return
+  useDictationStore.setState({ error: code })
+  stopDictation()
+}
+
+function beginCapture(): void {
+  stopCapture()
+  const seq = captureSeq
+  startCapture(
+    (pcm) => onChunk(seq, pcm),
+    (code) => onCaptureError(seq, code),
+  ).then(
+    (c) => {
+      if (seq !== captureSeq) c.stop()
+      else capture = c
+    },
+    (e: unknown) => onCaptureError(seq, captureErrorCode(e)),
+  )
+}
 
 function api() {
   return typeof window !== 'undefined' ? window.snApi?.dictation : undefined
@@ -134,41 +253,55 @@ export async function startDictation(target: DictationTarget): Promise<void> {
     if (!targetPty) return
   }
   // A running session is replaced: main ends it before starting this one.
-  committed = ''
   sessionText = ''
   early = []
+  readySeen = false
+  replied = false
+  voicedUnanswered = false
   const token = ++startSeq
-  useDictationStore.setState({ phase: 'starting', target, scope, sessionId: null, interim: '', engine: null, fallback: null, error: null, held: '' })
-  const engine = useAppStore.getState().settings.dictation?.engine ?? 'auto'
+  useDictationStore.setState({ phase: 'starting', target, scope, sessionId: null, interim: '', engine: null, fallback: null, error: null, held: '', slow: false })
+  armSlow(STARTING_SLOW_MS, token, () => !readySeen)
+  // The microphone opens while main starts the session; its chunks wait for the id.
+  beginCapture()
+  const req: DictationStartReq = { lang: resolveLang() }
+  if (target.kind === 'pane') req.paneId = target.paneId
   let res: { ok: boolean; sessionId?: string; error?: DictationError }
   try {
-    res = await a.start({ engine, lang: resolveLang() })
+    res = await a.start(req)
   } catch {
     res = { ok: false, error: 'spawn' }
   }
   if (token !== startSeq) {
-    // Stopped or replaced while starting.
+    // Stopped or replaced while starting (whoever did it stopped the capture).
     if (res.ok && res.sessionId) void a.stop(res.sessionId).catch(() => undefined)
     return
   }
   if (!res.ok || !res.sessionId) {
-    useDictationStore.setState({ phase: 'idle', target: null, sessionId: null, error: isDictationError(res.error) ? res.error : 'spawn' })
+    stopCapture()
+    clearSlowTimer()
+    useDictationStore.setState({ phase: 'idle', target: null, sessionId: null, slow: false, error: isDictationError(res.error) ? res.error : 'spawn' })
     return
   }
-  useDictationStore.setState({ sessionId: res.sessionId })
-  const queued = early.filter((e) => e.sessionId === res.sessionId)
+  const sessionId = res.sessionId
+  useDictationStore.setState({ sessionId })
+  const chunks = pendingChunks
+  pendingChunks = []
+  for (const c of chunks) a.audio(sessionId, c)
+  const queued = early.filter((e) => e.sessionId === sessionId)
   early = []
   for (const e of queued) onEvent(e)
 }
 
-/** Ends the session; the last phrase still arrives before `end`. */
+/** Ends the session; the last phrase still arrives before `end`. The microphone closes now. */
 export function stopDictation(): void {
   const s = useDictationStore.getState()
   if (s.phase === 'idle') return
+  stopCapture()
   if (!s.sessionId) {
     // The start reply has not come yet: it stops the session it gets.
     startSeq++
-    useDictationStore.setState({ phase: 'idle', target: null, sessionId: null, interim: '' })
+    clearSlowTimer()
+    useDictationStore.setState({ phase: 'idle', target: null, sessionId: null, interim: '', slow: false })
     return
   }
   if (s.phase === 'stopping') return
@@ -209,7 +342,7 @@ export function insertHeld(): void {
 export function dismissDictation(): void {
   const s = useDictationStore.getState()
   if (s.phase !== 'idle') return
-  useDictationStore.setState({ scope: null, error: null, held: '', fallback: null, engine: null })
+  useDictationStore.setState({ scope: null, error: null, held: '', fallback: null, engine: null, slow: false })
 }
 
 /** A console's terminal unmounted: its session stops and its notices go. */
@@ -217,7 +350,8 @@ export function releaseDictationScope(scope: string): void {
   const s = useDictationStore.getState()
   if (s.scope !== scope) return
   if (s.phase !== 'idle') stopDictation()
-  useDictationStore.setState({ scope: null, target: null, error: null, held: '', fallback: null, engine: null, interim: '' })
+  clearSlowTimer()
+  useDictationStore.setState({ scope: null, target: null, error: null, held: '', fallback: null, engine: null, interim: '', slow: false })
 }
 
 let fieldToggler: (() => void) | null = null
@@ -252,20 +386,25 @@ export function runDictateShortcut(): void {
   toggleDictationPane(paneId)
 }
 
+/**
+ * One Whisper `final` is one new phrase, never the session so far (app 2.5.0):
+ * it is typed whole, also when it repeats or extends the phrase before it
+ * ("sí" twice, "git status" then "git status otra vez"). The phone's
+ * `nextFinal` dedupe is for Android's cumulative results and does not apply.
+ */
 function deliver(text: string): void {
   const s = useDictationStore.getState()
   const target = s.target
   if (!target) return
-  const next = nextFinal(committed, text)
-  committed = next.committed
-  if (!next.fresh) return
+  const fresh = text.replace(/\s+/g, ' ').trim()
+  if (!fresh) return
   if (target.kind === 'field') {
-    const chunk = sanitizePasteText(spaced(target.before(), next.fresh))
+    const chunk = sanitizePasteText(spaced(target.before(), fresh))
     if (chunk) target.insert(chunk)
     return
   }
   // oneLine trims, so it runs on the phrase and spaced adds the joining space after it.
-  const chunk = spaced(sessionText, oneLine(sanitizePasteText(next.fresh)))
+  const chunk = spaced(sessionText, oneLine(sanitizePasteText(fresh)))
   if (!chunk) return
   sessionText += chunk
   // Once something is held, the rest waits too, so the order never changes.
@@ -284,32 +423,69 @@ function onEvent(e: DictationEvt): void {
     return
   }
   switch (e.t) {
-    case 'ready':
-      useDictationStore.setState({ phase: s.phase === 'stopping' ? 'stopping' : 'listening', engine: e.engine ?? null, fallback: isDictationError(e.fallback) ? e.fallback : null })
+    case 'ready': {
+      readySeen = true
+      clearSlowTimer()
+      const engine = e.engine === 'gpu' || e.engine === 'cpu' ? e.engine : null
+      useDictationStore.setState({ phase: s.phase === 'stopping' ? 'stopping' : 'listening', engine, fallback: isDictationError(e.fallback) ? e.fallback : null, slow: false, ...noticeGone(s) })
+      // Speech already sent while the engine started: its first reply may hit the cold JIT (GPU only).
+      if (voicedUnanswered && !replied && engine === 'gpu') armReplySlow()
       break
+    }
     case 'hyp':
-      useDictationStore.setState({ interim: typeof e.text === 'string' ? e.text : '' })
+      answered()
+      // An empty hyp (VAD heard nothing yet) keeps the phrase shown so far.
+      if (typeof e.text === 'string' && e.text) useDictationStore.setState({ interim: e.text, ...noticeGone(s) })
       break
     case 'final':
-      useDictationStore.setState({ interim: '' })
-      if (typeof e.text === 'string') deliver(e.text)
+      // Main also sends an empty final (the phrase left no text): nothing to type, but the engine answered.
+      answered()
+      useDictationStore.setState({ interim: '', ...noticeGone(s) })
+      if (typeof e.text === 'string' && e.text) deliver(e.text)
       break
     case 'error':
       useDictationStore.setState({ error: isDictationError(e.code) ? e.code : 'internal' })
       break
     case 'end':
-      useDictationStore.setState({ phase: 'idle', target: null, sessionId: null, interim: '' })
+      stopCapture()
+      clearSlowTimer()
+      // A transient notice does not outlive the session (a fatal error, sent right before `end`, stays).
+      useDictationStore.setState({ phase: 'idle', target: null, sessionId: null, interim: '', slow: false, ...noticeGone(useDictationStore.getState()) })
       break
   }
 }
 
+/**
+ * Errors that do not end the session (`timeout`: one phrase was dropped and
+ * the engine was restarted) are a notice: the next phrase, hyp or `ready`
+ * clears it, and so does `end`.
+ */
+export const TRANSIENT_ERRORS: ReadonlySet<DictationError> = new Set<DictationError>(['timeout'])
+
+function noticeGone(s: DictationState): { error?: null } {
+  return s.error && TRANSIENT_ERRORS.has(s.error) ? { error: null } : {}
+}
+
+/** The engine answered with a phrase: no more `slow` this session. */
+function answered(): void {
+  if (replied) return
+  replied = true
+  voicedUnanswered = false
+  clearSlowTimer()
+  if (useDictationStore.getState().slow) useDictationStore.setState({ slow: false })
+}
+
 /** Tests: drop the module state between cases. */
 export function __resetDictationForTests(): void {
-  committed = ''
   sessionText = ''
   targetPty = undefined
   early = []
   startSeq++
+  stopCapture()
+  clearSlowTimer()
+  readySeen = false
+  replied = false
+  voicedUnanswered = false
   fieldToggler = null
-  useDictationStore.setState({ phase: 'idle', target: null, scope: null, sessionId: null, interim: '', engine: null, fallback: null, error: null, held: '' })
+  useDictationStore.setState({ phase: 'idle', target: null, scope: null, sessionId: null, interim: '', engine: null, fallback: null, error: null, held: '', slow: false })
 }

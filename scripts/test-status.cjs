@@ -628,7 +628,7 @@ async function schemaV11Checks() {
     connections: [{ id: 'c1', name: 'SSH', steps: [{ send: 'ssh host', waitFor: 'password:', secret: false }] }],
     keyButtons: [{ id: 'k1', label: 'Esc', seq: '\u001b' }],
   }
-  check(CONFIG_VERSION === 17, 'CONFIG_VERSION is 17 (app 2.4.0)')
+  check(CONFIG_VERSION === 18, 'CONFIG_VERSION is 18 (app 2.5.0)')
   const c = parseConfig(JSON.parse(JSON.stringify(v10)))
   check(c && c.version === CONFIG_VERSION, 'a v10 config parses and is stamped with the current version')
   const st = c.settings
@@ -653,7 +653,7 @@ async function schemaV11Checks() {
   check(d.workspaces[0].agentsCollapsed === true && d.workspaces[1].agentsCollapsed === undefined, 'agentsCollapsed kept, malformed value dropped')
   check(d.workspaces[0].panes[0].lastSession.sessionId.startsWith('0123abcd') && d.workspaces[0].panes[1].lastSession === undefined, 'valid lastSession kept, malformed one dropped instead of failing the whole config')
   check(d.workspaces[1].panes[0].lastSession === undefined, 'a lastSession id with shell syntax (imported config) is dropped')
-  check(parseConfig({ ...v10, version: 17 }).version === CONFIG_VERSION, 'parse stamps the current version')
+  check(parseConfig({ ...v10, version: CONFIG_VERSION }).version === CONFIG_VERSION, 'parse stamps the current version')
 
   // ConfigStore: only the renderer load (upgrade) stamps an older file, once.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-config-test-'))
@@ -669,7 +669,7 @@ async function schemaV11Checks() {
     const once = fs.readFileSync(file, 'utf8'); fs.writeFileSync(file + '.bak', 'marker')
     store.load({ upgrade: true })
     check(fs.readFileSync(file + '.bak', 'utf8') === 'marker' && fs.readFileSync(file, 'utf8') === once, 'an already current file is not rewritten')
-    const newer = JSON.stringify({ ...v10, version: 17 }); fs.writeFileSync(file, newer)
+    const newer = JSON.stringify({ ...v10, version: CONFIG_VERSION + 1 }); fs.writeFileSync(file, newer)
     store.load({ upgrade: true })
     check(fs.readFileSync(file, 'utf8') === newer, 'a newer file (downgrade) is never rewritten')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }

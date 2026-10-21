@@ -92,6 +92,8 @@ interface Entry {
   lastOutputAt: number
   /** Epoch ms of the last submit with Enter (E8-FR-02). */
   lastSubmitAt: number
+  /** Epoch ms of the last bytes handed to the pty (fast path or a drained chunk): a submit's Enter is timed from it. */
+  lastWriteAt: number
   /**
    * v2.3 (agentTune): input that did not end in Enter / Ctrl+C reached the
    * pty since the last one, so the agent's input box may hold a draft. Keys
@@ -136,6 +138,8 @@ const MAX_CHUNK = 256 * 1024
  */
 const WRITE_CHUNK = 4 * 1024
 const WRITE_PACE_MS = 4
+/** Longest a submit's Enter waits for the pty to go quiet while other input keeps landing (app 2.5.0). */
+const SUBMIT_QUIET_MAX_MS = 1500
 /** Replay ring-buffer size per pty. */
 const HISTORY_CAP = 256 * 1024
 /**
@@ -509,6 +513,7 @@ export class PtyManager {
       drained: [],
       lastOutputAt: 0,
       lastSubmitAt: 0,
+      lastWriteAt: 0,
       draft: false,
       inputTail: '',
       prompt,
@@ -737,6 +742,7 @@ export class PtyManager {
     // Fast path: a small write with nothing queued goes straight to the pty so
     // interactive typing keeps zero added latency.
     if (entry.writeQueue.length === 0 && data.length <= WRITE_CHUNK) {
+      entry.lastWriteAt = Date.now()
       try {
         entry.pty.write(data)
       } catch {
@@ -786,6 +792,7 @@ export class PtyManager {
       if (end > 1 && end < e.writeQueue.length && lead >= 0xd800 && lead <= 0xdbff) end--
       const chunk = e.writeQueue.slice(0, end)
       e.writeQueue = e.writeQueue.slice(end)
+      e.lastWriteAt = Date.now()
       try {
         e.pty.write(chunk)
       } catch {
@@ -835,23 +842,67 @@ export class PtyManager {
     if (enter && readyFor && (entry.draft || !tuneReady(this.agentState(entry.paneId), readyFor))) return Promise.resolve({ ok: false, error: 'busy' })
     const prepared = prepareSubmit(text, entry.modes.bracketedPaste, forcePaste)
     if (!prepared.ok) return Promise.resolve(prepared)
-    if (prepared.data) this.write(ptyId, prepared.data, origin)
-    if (!enter) return Promise.resolve({ ok: true })
+    // Trailing line breaks are typed Enters: they wait like the submit's own
+    // Enter (app 2.5.0), glued to the text Codex on Windows takes them as a
+    // newline inside the paste.
+    const tail = /\r*$/.exec(prepared.data)?.[0] ?? ''
+    const body = prepared.data.slice(0, prepared.data.length - tail.length)
+    if (body) this.write(ptyId, body, origin)
+    else if (tail) this.write(ptyId, tail, origin)
+    const tailDone = body && tail ? this.enterWhenQuiet(ptyId, entry, tail, origin) : Promise.resolve(true)
+    return tailDone.then(async (alive) => {
+      if (!alive) return { ok: false, error: 'not_running' }
+      if (!enter) return { ok: true }
+      if (!(await this.enterWhenQuiet(ptyId, entry, '\r', origin))) return { ok: false, error: 'not_running' }
+      entry.lastSubmitAt = Date.now()
+      return { ok: true }
+    })
+  }
+
+  /**
+   * A phone's Enter after its paste (`input` with `submit`, app 2.5.0): the
+   * phone sends it 50 ms behind the text and the network can bring the two
+   * frames closer still, so main times it like a submit's Enter.
+   */
+  submitEnter(ptyId: string, origin: PtyInputOrigin = 'user'): void {
+    const entry = this.entries.get(ptyId)
+    if (!entry || entry.cancelled) return
+    void this.enterWhenQuiet(ptyId, entry, '\r', origin).then((sent) => {
+      if (sent) entry.lastSubmitAt = Date.now()
+    })
+  }
+
+  /**
+   * Writes a submit's Enter (`seq`) once the write queue drained and the pty
+   * got no bytes for SUBMIT_DELAY_MS, counted from its last write rather than
+   * from the call: Codex on Windows reads a paste as fast keys and takes an
+   * Enter within about 60 ms of them as a newline inside the paste. Input
+   * that keeps landing pushes it back, at most SUBMIT_QUIET_MAX_MS. False
+   * (nothing written) when the pty went away.
+   */
+  private enterWhenQuiet(ptyId: string, entry: Entry, seq: string, origin: PtyInputOrigin): Promise<boolean> {
     return new Promise((resolve) => {
       this.whenDrained(entry, (alive) => {
         if (!alive) {
-          resolve({ ok: false, error: 'not_running' })
+          resolve(false)
           return
         }
-        setTimeout(() => {
+        const start = Date.now()
+        const tick = (): void => {
           if (this.entries.get(ptyId) !== entry || entry.cancelled) {
-            resolve({ ok: false, error: 'not_running' })
+            resolve(false)
             return
           }
-          this.write(ptyId, '\r', origin)
-          entry.lastSubmitAt = Date.now()
-          resolve({ ok: true })
-        }, SUBMIT_DELAY_MS)
+          const now = Date.now()
+          const wait = Math.min(entry.lastWriteAt + SUBMIT_DELAY_MS - now, start + SUBMIT_QUIET_MAX_MS - now)
+          if (wait > 0) {
+            setTimeout(tick, wait)
+            return
+          }
+          this.write(ptyId, seq, origin)
+          resolve(true)
+        }
+        tick()
       })
     })
   }

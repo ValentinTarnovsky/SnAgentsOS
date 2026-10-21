@@ -92,7 +92,7 @@ function run(code, storage) {
       isOpen: () => io.open,
       currentPaneId: () => io.pane,
       bracketed: () => bracketed,
-      sendInput: data => { if (!io.open) return false; log.push(['input', data, io.latch]); return true },
+      sendInput: (data, o) => { if (!io.open) return false; log.push(['input', data, io.latch, !!o?.submit]); return true },
       releaseLatch: () => { io.latch = false },
       sleeps: [],
       onSleep: null,
@@ -112,6 +112,7 @@ function run(code, storage) {
     check(log[0][1] === '\x1b[200~line 1\rline 2\rline 3\x1b[201~', 'the paste goes through safePaste: one bracketed frame, \\r line breaks (E3-FR-05)')
     check(log[0][2] === false, 'the latch is released before the paste')
     check(log[1][0] === 'input' && log[1][1] === '\r', 'Enter goes as its own \\r frame')
+    check(log[1][3] === true && log[0][3] === false, 'only the Enter frame is marked submit')
     check(io.sleeps[0] === 50, 'Enter waits ENTER_DELAY_MS')
   }
   {
@@ -136,6 +137,7 @@ function run(code, storage) {
     const ok = await cs.sendComposer(' /model ', { enter: true, paneId: 'p1', signal: new AbortController().signal, slash: true, onProgress: (d, t) => progress.push(d + '/' + t) }, io)
     check(ok && log.every(e => e[0] === 'input'), 'slash commands are typed, not pasted')
     check(log.map(e => e[1]).join('') === '/model\r' && log.length === 7, 'one character per frame, then \\r')
+    check(log.at(-1)[3] === true && log.slice(0, -1).every(e => !e[3]), 'the slash Enter is marked submit, the keys are not')
     check(io.sleeps.every(ms => ms === 16) && io.sleeps.length === 6, 'a key every SLASH_KEY_MS')
     check(progress.join(',') === '1/6,2/6,3/6,4/6,5/6,6/6', 'progress counts every typed key')
   }
