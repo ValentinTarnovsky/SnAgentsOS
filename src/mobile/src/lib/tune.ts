@@ -2,7 +2,7 @@
  * Phone side of the model / effort / Ultracode sheet (app 2.3.0, ctl
  * `agentTune`). The "Apply with Enter" switch is a per-phone preference
  * ('snagentsos.tune.enter', '1' when on; absent = off, the default), so the
- * desktop config is untouched. The sheet and its header chip only show to a
+ * desktop config is untouched. The sheet and its kebab row only show to a
  * desktop >= 2.3.0: an older one rejects the unknown ctl kind as a malformed
  * frame (a strike), never with an ack.
  */
@@ -33,8 +33,8 @@ export function tuneProvider(type: PaneType | undefined, status: RemotePaneStatu
   return type === 'claude' || type === 'codex' ? type : null
 }
 
-/** The header chip's text ("opus · high · UC"), or null when nothing is known yet. */
-export function tuneChipText(status: RemotePaneStatus | null | undefined): string | null {
+/** The kebab row's hint ("opus · high · UC", app 2.4.0), or null when nothing is known yet. */
+export function tuneSummary(status: RemotePaneStatus | null | undefined): string | null {
   const parts = [status?.model, status?.effort, status?.ultracode ? 'UC' : undefined].filter((p): p is string => !!p)
   return parts.length ? parts.join(' · ') : null
 }

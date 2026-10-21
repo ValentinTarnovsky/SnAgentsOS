@@ -6,8 +6,9 @@
  * (the viewed pane's own workspace, E2-FR-47; after it the console's `snaos
  * status` line, else the workspace note: E8-FR-19/11, v3.1), the phone mode chip (E3-FR-13),
  * the "N waiting" pill and a kebab with the console's actions plus Quick Commands (E2-FR-08/16/51).
- * App 2.3.0: next to the cache chip, the model / effort chip of a Claude or
- * Codex console (AgentTuneSheet, also a kebab row), only with a desktop >= 2.3.0.
+ * The kebab's first extra row is "Model and effort" of a Claude or Codex
+ * console (AgentTuneSheet, hint "opus · high · UC"), only with a desktop
+ * >= 2.3.0; app 2.4.0 moved it there from a header chip that crowded the title.
  * Below: pane tabs of that workspace (E1-FR-32), the terminal (flex-1,
  * min-h-0), the answer card or the "waiting" strip (E2-FR-17..25), the
  * composer or "Direct input" strip (E1-FR-22..31, 38) and the KeyBar. The status banner and the toasts overlay the terminal.
@@ -23,7 +24,7 @@ import { KeyBar } from './KeyBar'
 import { PaneTabs } from './PaneTabs'
 import { PaneActionList } from './PaneActionList'
 import { QuickCommandsSheet } from './QuickCommandsSheet'
-import { AgentTuneChip, AgentTuneSheet, useTuneTarget } from './AgentTuneSheet'
+import { AgentTuneSheet, useTuneTarget } from './AgentTuneSheet'
 import { Composer, toggleInputMode } from './Composer'
 import { pasteKey } from './pasteKey'
 import { DirectInputStrip } from './DirectInputStrip'
@@ -34,6 +35,7 @@ import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { openDiagnostics } from '../lib/connLog'
 import { openHistory } from '../lib/history'
 import { openChanges } from '../lib/changes'
+import { tuneSummary } from '../lib/tune'
 import { StatusIndicator } from './StatusIndicator'
 import { CacheChip } from './CacheChip'
 import { WaitingPill } from './WaitingPill'
@@ -121,7 +123,6 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
             <span data-pane-title className="truncate text-sm font-semibold leading-tight text-text-primary">{paneTitle}</span>
             <StatusIndicator status={activeStatus} />
             {activePaneId && <CacheChip paneId={activePaneId} />}
-            {activePaneId && <AgentTuneChip paneId={activePaneId} onOpen={() => setTuneOpen(true)} />}
           </div>
           {workspaceName && (
             <div className="flex min-w-0 text-[11px] leading-tight text-text-secondary">
@@ -206,6 +207,22 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
         target={kebab}
         onClose={() => setKebab(null)}
         extraItems={[
+          ...(tuneTarget && kebab?.paneId === tuneTarget.paneId
+            ? [
+                {
+                  // App 2.3.0: model, effort and Ultracode of this console. App 2.4.0: the
+                  // first extra row, its hint is what the console runs (the old header chip).
+                  id: 'tune',
+                  icon: <SlidersHorizontal size={16} />,
+                  label: t('tune.title'),
+                  hint: tuneSummary(activeStatus) ?? undefined,
+                  onSelect: () => {
+                    setKebab(null)
+                    setTuneOpen(true)
+                  },
+                },
+              ]
+            : []),
           {
             id: 'quick',
             icon: <Zap size={16} />,
@@ -215,20 +232,6 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
               setQuickOpen(true)
             },
           },
-          ...(tuneTarget && kebab?.paneId === tuneTarget.paneId
-            ? [
-                {
-                  // App 2.3.0: model, effort and Ultracode of this console.
-                  id: 'tune',
-                  icon: <SlidersHorizontal size={16} />,
-                  label: t('tune.title'),
-                  onSelect: () => {
-                    setKebab(null)
-                    setTuneOpen(true)
-                  },
-                },
-              ]
-            : []),
           {
             // E3-FR-36: the session history of the viewed console's workspace.
             id: 'history',

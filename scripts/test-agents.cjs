@@ -362,6 +362,17 @@ function testNavigation() {
     paneAttention: { b: true },
     sessions: { x: view('x', { topic: 'Fix login' }), y: view('y', { endedAt: 9 }), s: view('s') },
   }
+  // v2.4: a shell console running a hand-typed agent (status.provider, hosted) gets a row with that agent's icon.
+  {
+    const sh = { id: 'h', type: 'shell', title: 'PowerShell', color: '#888', icon: 'terminal' }
+    const hostedWs = { id: 'wh', name: 'H', cwd: '', panes: [sh] }
+    const rows = nav.allAgents({ ...input, workspaces: [hostedWs], mountedWorkspaces: { wh: 'full' }, sessions: {}, paneStatus: { h: { state: 'working', precise: false, provider: 'codex', hosted: true, stateSince: 5 } } })
+    check(rows.length === 1 && rows[0].id === 'h' && rows[0].status.provider === 'codex', 'v2.4: a hosted shell pane has an agent row')
+    check(nav.runningAgentOf(sh, rows[0].status) === 'codex' && nav.agentIconName(sh, rows[0].status) === 'openai' && nav.agentIconName(sh, { provider: 'claude' }) === 'claude', 'its icon is the running agent\'s (openai for Codex, claude for Claude)')
+    check(nav.agentIconName(sh, undefined) === 'terminal' && nav.runningAgentOf(sh, null) === undefined, 'without a status provider the shell keeps its own icon')
+    check(nav.agentIconName(pane('k', { icon: 'rocket' }), { provider: 'codex' }) === 'rocket' && nav.runningAgentOf(pane('k'), { provider: 'claude' }) === undefined, 'an agent console keeps its chosen icon and gets no badge')
+    check(nav.agentTitle(sh, [preset], { topic: 'Fix login' }, true) === 'PowerShell', 'the shell console keeps its title')
+  }
   const all = nav.allAgents(input)
   check(all.map(e => e.id).join() === 'c,a,b,m,x', 'allAgents: live panes in layout order plus resumable records of unmounted workspaces (not ended, not SSH)')
   check(all.find(e => e.id === 'x').notStarted && all.find(e => e.id === 'x').rank === 4, 'a record that resumes on open is "not started", rank 4')
@@ -403,6 +414,11 @@ function testNavigation() {
   check(nav.agentTitle(pane('t'), [preset], { firstPrompt: 'refactor the store' }, true) === 'refactor the store', 'agentTitle: without topic the first prompt is the title')
   check(nav.agentTitle(pane('t', { title: 'Backend' }), [preset], { topic: 'Fix' }, true) === 'Backend', 'agentTitle: a renamed console keeps its name')
   check(nav.agentTitle(pane('t'), [preset], { topic: 'Fix' }, false) === 'Claude Code', 'agentTitle: topicAsTitle off keeps the console title')
+  // v2.4 `/rename`: isDefaultTitle (a pane without a preset is not "renamed" for lacking one).
+  check(nav.isDefaultTitle(pane('t'), [preset]) && !nav.isDefaultTitle(pane('t', { title: 'Backend' }), [preset]), 'isDefaultTitle: the preset name is default, a hand name is not')
+  check(nav.isDefaultTitle({ type: 'claude', title: 'Claude' }, []) && nav.isDefaultTitle({ type: 'codex', title: 'Codex' }, []) && nav.isDefaultTitle({ type: 'shell', title: 'PowerShell' }, []) && nav.isDefaultTitle({ type: 'claude', title: 'PowerShell' }, []), 'isDefaultTitle: without a preset, the default names of the type count')
+  check(nav.isDefaultTitle({ type: 'claude', presetId: 'gone', title: 'Claude Code' }, [preset]) && nav.isDefaultTitle({ type: 'shell', title: 'Shell' }, []) && nav.isDefaultTitle({ type: 'shell', title: '  ' }, []), 'isDefaultTitle: a missing preset, the wizard Shell and an empty title count as default')
+  check(!nav.isDefaultTitle({ type: 'shell', title: 'Foo' }, []) && !nav.isDefaultTitle({ type: 'codex', title: 'Claude Code' }, []) && !nav.isDefaultTitle({ type: 'claude', presetId: preset.id, title: 'claude code' }, [preset]), 'isDefaultTitle: another name, another type default or a different case is a rename')
 
   const T = tr(es)
   const entry = (status, extra = {}) => ({ id: 'e', rank: 1, unread: false, stateSince: now - 2 * 60_000, notStarted: false, ws: ws1, pane: pane('e'), status, ...extra })
@@ -470,6 +486,44 @@ function fakeTimers() {
     clock = end
   }
   return { setTimer, clearTimer, advance, pending: () => timers.size }
+}
+
+// v2.4 `/rename`: the renderer handler of status:agentRename (applyAgentRename).
+function testAgentRename() {
+  const r = loadRenderer(`export { applyAgentRename } from './agentRename'; export { useAppStore } from './store'; export { useToastStore } from './toast'; export { registerPty, unregisterPty } from './ptyRegistry'`, {
+    window: { snApi: { config: { save() {} } } }, document: { hasFocus: () => false },
+  })
+  const S = r.useAppStore
+  const preset = { id: 'preset-claude', name: 'Claude Code', type: 'claude', command: 'claude', args: [], color: '#000', icon: 'claude' }
+  S.getState().hydrate({
+    version: 17, presets: [preset],
+    settings: { ...S.getState().settings, language: 'es' },
+    activeWorkspaceId: 'w1',
+    workspaces: [{ id: 'w1', name: 'Uno', cwd: 'C:\\repo', panes: [
+      { id: 'pa', type: 'claude', presetId: 'preset-claude', title: 'Claude Code', color: '', icon: '' },
+      { id: 'pb', type: 'claude', presetId: 'preset-claude', title: 'Backend', color: '', icon: '' },
+      { id: 'pc', type: 'codex', title: 'Codex', color: '', icon: '' },
+      { id: 'ps', type: 'shell', title: 'PowerShell', color: '', icon: '' },
+    ], layout: { grid: 4, order: ['pa', 'pb', 'pc', 'ps'] } }],
+  })
+  const title = id => S.getState().workspaces[0].panes.find(p => p.id === id).title
+  const evt = (paneId, extra = {}) => ({ paneId, ptyId: 'pty-' + paneId, provider: 'claude', sessionId: '0b7c2f4e-1a2b-4c3d-8e9f-0123456789ab', title: 'Foo', initial: false, ...extra })
+  const toasts = () => r.useToastStore.getState().items
+  r.registerPty('pa', 'pty-pa')
+  check(r.applyAgentRename(evt('pa')) === 'renamed' && title('pa') === 'Foo', 'a /rename renames the console')
+  check(toasts().length === 1 && toasts()[0].title === 'Consola renombrada a Foo' && toasts()[0].kind === 'info', 'and shows the agents.renamed toast in the UI language')
+  check(r.applyAgentRename(evt('pa', { title: 'Foo' })) === 'same' && toasts().length === 1, 'the same name again changes nothing and shows no toast')
+  check(r.applyAgentRename(evt('pa', { ptyId: 'pty-old', title: 'Viejo' })) === 'stale_pty' && title('pa') === 'Foo', 'a rename of another (dead) pty is ignored')
+  check(r.applyAgentRename(evt('gone')) === 'no_pane', 'a closed console is ignored')
+  // Hand-renamed console: an initial (resumed) name never overwrites it; a rename seen happening does.
+  check(r.applyAgentRename(evt('pb', { initial: true, title: 'Resumida' })) === 'kept_manual' && title('pb') === 'Backend', 'initial never overwrites a console renamed by hand')
+  check(r.applyAgentRename(evt('pb', { title: 'Baz' })) === 'renamed' && title('pb') === 'Baz', 'a new /rename wins over a manual name (latest explicit action)')
+  // No preset: the type's default name still counts as default (not "renamed").
+  check(r.applyAgentRename(evt('pc', { provider: 'codex', initial: true, title: 'Login fix' })) === 'renamed' && title('pc') === 'Login fix', 'initial applies on a console without a preset that kept its default name')
+  check(r.applyAgentRename(evt('ps', { initial: true, title: 'Desde la shell' })) === 'renamed' && title('ps') === 'Desde la shell', 'a shell console running a typed agent takes the name too (unmounted pane: no binding to compare)')
+  check(r.applyAgentRename(evt('pa', { title: '   ' })) === 'invalid' && title('pa') === 'Foo', 'a blank name is ignored')
+  S.getState().updateSettings({ agents: { ...S.getState().settings.agents, syncAgentRename: false } })
+  check(r.applyAgentRename(evt('pa', { title: 'Apagado' })) === 'off' && title('pa') === 'Foo', 'agents.syncAgentRename off: the console keeps its name')
 }
 
 // E5-FR-12: dialog model (candidates, groups, phrases) and its countdown.
@@ -782,5 +836,6 @@ function testV22I18n() {
   await testResumeModalFlow()
   testStartupPending()
   testV22I18n()
+  testAgentRename()
   console.log(`PASS: ${checks} agents checks (AwakeService modes, grace, 2 h lease, action + phone, resume, IPC, tray, renderer sync, agent navigation, resume dialog, countdown, nudge, Smart order)`)
 })().catch((err) => { console.error(err); process.exit(1) })

@@ -1,10 +1,18 @@
-import type { ClaudeAccountRole, ClaudeSwitchReason } from '@shared/claude-accounts'
+import type { ClaudeSwitchReason } from '@shared/claude-accounts'
 import type { ClaudeAccountsSettings } from '@shared/types'
 
 /**
  * Automatic Claude account switching (app 2.3.0, item 9). Pure: no clock, no
  * I/O, so a table of cases drives it. AccountService feeds it the active
- * account's fresh usage and the parked account's last reading.
+ * account's fresh usage and the parked accounts' last readings.
+ *
+ * App 2.4.0: N accounts in priority order (`rank`, 0 = highest).
+ *  - Exhausted: the first account by rank that is usable, past its own
+ *    `exhaustedUntil` plus the margin, and has room.
+ *  - Return: only after an automatic move, to the highest priority account
+ *    between the anchor (the user's last pick) and the active one whose
+ *    window reset and reads below returnBelowPercent. Step by step: C to B
+ *    when B resets, B to A when A does. It never climbs above the anchor.
  */
 
 export interface PolicyWindow {
@@ -17,15 +25,18 @@ export interface PolicyWindow {
 
 export interface PolicyAccount {
   id: string
-  role: ClaudeAccountRole
+  /** Priority, 0 = highest. */
+  rank: number
+  /** Reset of the window that made the policy leave this account (epoch ms), or null. */
+  exhaustedUntil: number | null
   fiveHour: PolicyWindow
   sevenDay: PolicyWindow
   /** The reading is recent enough to act on (main decides per account). */
   fresh: boolean
   /**
    * No fresh reading can come (the parked access token expired, the parked
-   * poll stopped or is off): the return to the primary then goes by the
-   * estimate of effectivePercent. Absent = false.
+   * poll stopped or is off): the return to it then goes by the estimate of
+   * effectivePercent. Absent = false.
    */
   stale?: boolean
   /** The saved login can be switched to (false: needs a capture). */
@@ -35,7 +46,6 @@ export interface PolicyAccount {
 export interface PolicyMemory {
   lastSwitchAt: number | null
   lastSwitchReason: ClaudeSwitchReason | null
-  exhaustedUntil: number | null
   deferSince: number | null
   allExhaustedLatched: boolean
 }
@@ -44,6 +54,8 @@ export interface PolicyInput {
   now: number
   cfg: ClaudeAccountsSettings
   activeId: string | null
+  /** The user's last pick; the return never climbs above it (null or unknown = rank 0). */
+  anchorId?: string | null
   accounts: PolicyAccount[]
   paused: boolean
   /** Claude consoles in `working`. */
@@ -60,7 +72,6 @@ export type PolicyDecision =
 export const emptyPolicyMemory = (): PolicyMemory => ({
   lastSwitchAt: null,
   lastSwitchReason: null,
-  exhaustedUntil: null,
   deferSince: null,
   allExhaustedLatched: false,
 })
@@ -100,8 +111,10 @@ export function decide(input: PolicyInput): { decision: PolicyDecision; mem: Pol
 
   if (!cfg.autoSwitch) return stay('off')
   if (input.paused) return stay('paused')
-  const active = input.accounts.find((a) => a.id === input.activeId)
-  if (input.accounts.length < 2 || !active) return stay('single')
+  // By rank, whatever order the caller used.
+  const accounts = [...input.accounts].sort((a, b) => a.rank - b.rank)
+  const active = accounts.find((a) => a.id === input.activeId)
+  if (accounts.length < 2 || !active) return stay('single')
   if (mem.lastSwitchAt !== null && now - mem.lastSwitchAt < cfg.minDwellMinutes * MIN) return stay('dwell')
   if (!active.fresh || (active.fiveHour.percent === null && active.sevenDay.percent === null)) return stay('noData')
 
@@ -114,6 +127,9 @@ export function decide(input: PolicyInput): { decision: PolicyDecision; mem: Pol
         ? '7d'
         : null
 
+  /** Past the reset of the window that made the policy leave it, plus the margin. */
+  const rested = (a: PolicyAccount): boolean => now >= (a.exhaustedUntil ?? 0) + margin
+
   if (exhaustedWin) {
     // Unknown windows count as available; an old value is an upper bound.
     const available = (a: PolicyAccount): boolean =>
@@ -121,7 +137,9 @@ export function decide(input: PolicyInput): { decision: PolicyDecision; mem: Pol
         const p = effectivePercent(w, now, margin, a.fresh)
         return p === null || p < at
       })
-    const target = input.accounts.find((a) => a.id !== active.id && a.usable && available(a))
+    // The first by rank: an account left at its limit stays out until its
+    // own reset (no ping-pong on an old low reading).
+    const target = accounts.find((a) => a.id !== active.id && a.usable && rested(a) && available(a))
     if (!target) {
       const notify = !mem.allExhaustedLatched
       mem.allExhaustedLatched = true
@@ -141,21 +159,25 @@ export function decide(input: PolicyInput): { decision: PolicyDecision; mem: Pol
   }
   mem.allExhaustedLatched = false
 
-  // Back to the primary only after an automatic move away from it (a manual
-  // pick of the secondary is never undone), its reset plus the margin, and a
-  // fresh reading below returnBelowPercent on both windows. When no fresh
-  // reading can come (stale: the parked token expired long before a 7d
-  // reset), the estimate decides: a window whose reset + margin passed counts
-  // as 0, the other keeps its last value; the live reading after the switch,
-  // plus the dwell, corrects a wrong guess.
-  if (active.role === 'secondary' && mem.lastSwitchReason === 'auto_exhausted' && cfg.returnToPrimary) {
-    const primary = input.accounts.find((a) => a.role === 'primary' && a.usable)
-    if (primary && (primary.fresh || primary.stale === true) && now >= (mem.exhaustedUntil ?? 0) + margin) {
-      const five = effectivePercent(primary.fiveHour, now, margin, primary.fresh)
-      const seven = effectivePercent(primary.sevenDay, now, margin, primary.fresh)
-      if (five !== null && seven !== null && five < cfg.returnBelowPercent && seven < cfg.returnBelowPercent) {
-        return maybeDefer({ kind: 'switch', to: primary.id, reason: 'auto_return' })
-      }
+  // Back up only after an automatic move (a manual pick is never undone), to
+  // the highest priority account between the anchor and the active one that
+  // is past its reset plus the margin, with a reading below
+  // returnBelowPercent on both windows. When no fresh reading can come
+  // (stale: the parked token expired long before a 7d reset), the estimate
+  // decides: a window whose reset + margin passed counts as 0, the other
+  // keeps its last value; the live reading after the switch, plus the dwell,
+  // corrects a wrong guess.
+  const auto = mem.lastSwitchReason === 'auto_exhausted' || mem.lastSwitchReason === 'auto_return'
+  if (auto && cfg.returnToPrimary) {
+    const anchorRank = accounts.find((a) => a.id === input.anchorId)?.rank ?? 0
+    if (anchorRank < active.rank) {
+      const back = accounts.find((a) => {
+        if (a.rank < anchorRank || a.rank >= active.rank || !a.usable || !(a.fresh || a.stale === true) || !rested(a)) return false
+        const five = effectivePercent(a.fiveHour, now, margin, a.fresh)
+        const seven = effectivePercent(a.sevenDay, now, margin, a.fresh)
+        return five !== null && seven !== null && five < cfg.returnBelowPercent && seven < cfg.returnBelowPercent
+      })
+      if (back) return maybeDefer({ kind: 'switch', to: back.id, reason: 'auto_return' })
     }
   }
   return stay('ok')

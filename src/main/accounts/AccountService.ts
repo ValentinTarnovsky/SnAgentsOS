@@ -1,10 +1,13 @@
 import { createHash, randomBytes } from 'crypto'
 import { watch as fsWatch, type FSWatcher } from 'fs'
 import {
+  MAX_CLAUDE_ACCOUNTS,
   normalizeAccountsSettings,
+  rankOfRole,
+  roleOfRank,
+  type AccountsCaptureReq,
   type AccountsOpError,
   type AccountsOpRes,
-  type ClaudeAccountRole,
   type ClaudeAccountView,
   type ClaudeAccountWindowView,
   type ClaudeAccountsEvent,
@@ -12,6 +15,7 @@ import {
   type ClaudeAutoPause,
   type ClaudeSwitchReason,
   type UsageActiveAccount,
+  type UsageOtherAccount,
   cleanAccountLabel,
 } from '@shared/claude-accounts'
 import type { UsageRow } from '@shared/ipc-contract'
@@ -21,7 +25,7 @@ import { claudeConfigDir } from '../status/statusDetails'
 import { fetchClaudeUsage, type OauthCred } from '../usage/claude'
 import * as claudeFiles from './claudeFiles'
 import { fetchClaudeProfile, type ClaudeProfile } from './profile'
-import { emptyMeta, type AccountVault, type VaultAccountMeta, type VaultMeta, type WindowSample } from './AccountVault'
+import { ANCHOR_REASONS, emptyMeta, type AccountVault, type VaultAccountMeta, type VaultMeta, type WindowSample } from './AccountVault'
 import type { VaultCrypto } from './safeCrypto'
 import { decide, emptyPolicyMemory, type PolicyAccount, type PolicyMemory, type PolicyWindow } from './switchPolicy'
 
@@ -44,6 +48,14 @@ import { decide, emptyPolicyMemory, type PolicyAccount, type PolicyMemory, type 
  *
  * Logs carry codes only (`parse`, `EPERM`, `http_401`), never `err.message`,
  * file contents, tokens or emails. Nothing returned here carries a token.
+ *
+ * App 2.4.0: up to MAX_CLAUDE_ACCOUNTS accounts, in the vault's order (the
+ * priority; `rank` is the index). A capture appends (or replaces one in
+ * place), `move` / `reorder` change the order, each account keeps its own
+ * `exhaustedUntil`, and a switch the user made (manual, phone, cli, an outside
+ * /login, a capture) sets the anchor the automatic return stops at. Parked
+ * accounts are polled one per tick in turn, each with its own access token
+ * while it is valid, and never refreshed: after that the policy estimates.
  */
 export const CLAUDE_LIVE_SWITCH = true
 
@@ -127,6 +139,15 @@ export interface UsageControl {
   republish(): void
 }
 
+interface SwitchDetail {
+  window?: '5h' | '7d'
+  percent?: number
+  exhaustedUntil?: number | null
+  /** An automatic decision: the active account and lastSwitch.at it was computed from. */
+  expectFrom?: string | null
+  expectSwitchAt?: number | null
+}
+
 interface UsageSampleSet {
   fiveHour: WindowSample
   sevenDay: WindowSample
@@ -152,7 +173,7 @@ const parseIso = (iso: string | null | undefined): number | null => {
 const noSample = (): WindowSample => ({ percent: null, resetsAt: null, at: null })
 const errCode = (err: unknown): string => (err instanceof Error && /^[A-Za-z0-9_]{2,24}$/.test(err.message) ? err.message : claudeFiles.errCode(err))
 
-/** Title and body of a notice, by labels or role names (never an email). */
+/** Title and body of a notice, by labels or "Account N" (never an email). */
 export function accountsNoticeText(cfg: ConfigFile | null, e: ClaudeAccountsEvent, nameOf: (id: string | undefined) => string): { title: string; body: string } {
   const windowName = e.window ? mainT(cfg, e.window === '5h' ? 'accounts.window.5h' : 'accounts.window.7d') : ''
   switch (e.kind) {
@@ -201,8 +222,12 @@ export class AccountService implements AccountServiceApi {
   private readonly usage = new Map<string, UsageSampleSet>()
   private readonly tokenStates = new Map<string, ClaudeAccountView['tokenState']>()
   private readonly parked = new Map<string, { nextAt: number; stopped: boolean }>()
+  /** Round robin over the parked accounts: the id polled last. */
+  private parkedLast: string | null = null
   private parkedBusy = false
   private evaluating = false
+  /** The queued automatic switch was dropped as stale (staleAuto). */
+  private staleSkipped = false
   private chain: Promise<unknown> = Promise.resolve()
   private persistChain: Promise<void> = Promise.resolve()
   private lastUsagePersist = 0
@@ -237,6 +262,9 @@ export class AccountService implements AccountServiceApi {
     if (platform === 'darwin') this.unsupportedReason = 'keychain'
     else if (!this.deps.crypto.available()) this.unsupportedReason = 'encryption_unavailable'
     this.meta = this.deps.vault.load()
+    // Built from the 2.3.0 accounts.json: written once as accounts.v2.json
+    // (accounts.json itself is never written again).
+    if (this.deps.vault.migratedFromV1) await this.persist()
     for (const a of this.meta.accounts) {
       if (a.lastUsage) this.usage.set(a.id, { fiveHour: a.lastUsage.fiveHour, sevenDay: a.lastUsage.sevenDay, ok: true, source: 'parked' })
     }
@@ -348,10 +376,15 @@ export class AccountService implements AccountServiceApi {
     return { percent: w.percent, resetsAt: w.resetsAt, at: w.at, source: live ? 'live' : 'parked' }
   }
 
-  private view(a: VaultAccountMeta): ClaudeAccountView {
+  private rankOf(a: VaultAccountMeta): number {
+    return this.meta.accounts.indexOf(a)
+  }
+
+  private view(a: VaultAccountMeta, rank: number): ClaudeAccountView {
     return {
       id: a.id,
-      role: a.role,
+      rank,
+      role: roleOfRank(rank),
       label: a.label,
       email: a.email,
       organizationName: a.organizationName,
@@ -365,8 +398,9 @@ export class AccountService implements AccountServiceApi {
     }
   }
 
+  /** By priority (the vault's order). */
   list(): ClaudeAccountView[] {
-    return [...this.meta.accounts].sort((a, b) => (a.role === b.role ? 0 : a.role === 'primary' ? -1 : 1)).map((a) => this.view(a))
+    return this.meta.accounts.map((a, i) => this.view(a, i))
   }
 
   status(): ClaudeAccountsState {
@@ -380,6 +414,7 @@ export class AccountService implements AccountServiceApi {
       ...(this.liveIdentity === 'unknown' ? { liveEmail: this.liveEmail } : {}),
       ...(this.liveUnverified ? { liveUnverified: true } : {}),
       autoPaused: this.meta.autoPaused,
+      anchorId: this.meta.anchorId,
       lastSwitch: this.meta.lastSwitch,
       pending: this.pending,
       blocked: this.blocked,
@@ -404,25 +439,36 @@ export class AccountService implements AccountServiceApi {
     if (this.liveUnverified) return null
     const active = this.meta.accounts.find((a) => a.id === this.meta.activeId)
     if (!active) return null
-    const other = this.meta.accounts.find((a) => a.id !== active.id)
+    const rank = this.rankOf(active)
+    const others: UsageOtherAccount[] = this.meta.accounts
+      .map((a, i) => ({ id: a.id, rank: i, role: roleOfRank(i), label: this.phoneLabel(a), ready: !a.needsRecapture }))
+      .filter((a) => a.id !== active.id)
+      .slice(0, MAX_CLAUDE_ACCOUNTS)
+    // The 2.3.0 phone switches by role: `other` is the first other account
+    // by rank (rank 0, or 1 when the active one is 0), so its role names it.
+    const other = others[0]
     return {
       id: active.id,
-      role: active.role,
+      rank,
+      role: roleOfRank(rank),
       label: this.phoneLabel(active),
-      ...(other ? { other: { id: other.id, role: other.role, label: this.phoneLabel(other) } } : {}),
+      ...(other ? { other: { id: other.id, rank: other.rank, role: other.role, label: other.label } } : {}),
+      ...(others.length ? { others } : {}),
     }
   }
 
+  /** The label, else "Account N" (1-based rank); never an email. */
   private nameOf(id: string | undefined): string {
-    const a = this.meta.accounts.find((x) => x.id === id)
-    if (!a) return mainT(this.deps.config?.() ?? null, 'accounts.role.secondary')
-    return this.phoneLabel(a) || mainT(this.deps.config?.() ?? null, a.role === 'primary' ? 'accounts.role.primary' : 'accounts.role.secondary')
+    const cfg = this.deps.config?.() ?? null
+    const i = this.meta.accounts.findIndex((x) => x.id === id)
+    if (i < 0) return mainT(cfg, 'accounts.unknownName')
+    return this.phoneLabel(this.meta.accounts[i]) || mainT(cfg, 'accounts.accountN', { n: i + 1 })
   }
 
   private emitState(force = false): void {
-    // The phone names its "Use <other>" target by role: a changed badge
-    // (roles swapped, a capture, a removal) is pushed at once, not on the
-    // next usage tick.
+    // The 2.3.0 phone names its "Use <other>" target by role (a rank): a
+    // changed badge (a reorder, a capture, a removal) is pushed at once, not
+    // on the next usage tick.
     const badge = JSON.stringify(this.badge())
     if (badge !== this.lastBadge) {
       this.lastBadge = badge
@@ -483,8 +529,9 @@ export class AccountService implements AccountServiceApi {
     return this.meta.accounts.find((a) => this.fp.get(a.id)?.rt === rtHash)
   }
 
+  /** An id, or a 2.3.0 role: 'primary' is rank 0, 'secondary' rank 1. */
   private resolve(idOrRole: string): VaultAccountMeta | undefined {
-    if (idOrRole === 'primary' || idOrRole === 'secondary') return this.meta.accounts.find((a) => a.role === idOrRole)
+    if (idOrRole === 'primary' || idOrRole === 'secondary') return this.meta.accounts[rankOfRole(idOrRole)]
     return this.meta.accounts.find((a) => a.id === idOrRole)
   }
 
@@ -701,6 +748,8 @@ export class AccountService implements AccountServiceApi {
   private external(acc: VaultAccountMeta): void {
     const from = this.meta.activeId
     this.meta.activeId = acc.id
+    // The user's own /login: the automatic return stops there.
+    this.meta.anchorId = acc.id
     this.meta.lastSwitch = { at: this.now(), from, to: acc.id, reason: 'external' }
     this.meta.verify = null
     this.fire({ kind: 'switched', auto: false, from: from ?? undefined, to: acc.id, reason: 'external', at: this.now() }, false)
@@ -785,16 +834,23 @@ export class AccountService implements AccountServiceApi {
 
   // --- capture -----------------------------------------------------------------
 
-  capture(role: ClaudeAccountRole, opts: { label?: string; replace?: boolean } = {}): Promise<AccountsOpRes> {
+  /**
+   * Save the live login: the same identity again re-captures it in place;
+   * with `replaceId` it takes that account's place (same rank, the old login
+   * deleted); else it is appended as the last account (`limit_reached` at
+   * MAX_CLAUDE_ACCOUNTS). The 2.3.0 `{ role, replace: true }` replaces the
+   * account at that role's rank.
+   */
+  capture(opts: AccountsCaptureReq = {}): Promise<AccountsOpRes> {
     return this.run(async () => {
       if (this.disposed) return this.res(false, 'busy')
-      const r = await this.captureInner(role, opts)
+      const r = await this.captureInner(opts)
       this.emitState(true)
       return r
     }, () => this.res(false, 'busy'))
   }
 
-  private async captureInner(role: ClaudeAccountRole, opts: { label?: string; replace?: boolean }): Promise<AccountsOpRes> {
+  private async captureInner(opts: AccountsCaptureReq): Promise<AccountsOpRes> {
     if (this.unsupportedReason === 'keychain') return this.res(false, 'unsupported')
     if (this.unsupportedReason || !this.deps.crypto.available()) return this.res(false, 'encryption_unavailable')
     const live = await this.files.readCredentials()
@@ -815,13 +871,25 @@ export class AccountService implements AccountServiceApi {
     if (!ident) return this.res(false, 'identity_failed')
     const key = identityKey(ident.accountUuid, ident.organizationUuid)
     const existing = this.meta.accounts.find((a) => identityKey(a.accountUuid, a.organizationUuid) === key)
-    if (existing && existing.role !== role) return this.res(false, 'duplicate')
-    // The live grant already belongs to another slot: never two copies of one grant.
+    // The 2.3.0 slots: `{ role, replace }` names the account at that rank.
+    const replaceId = opts.replaceId ?? (opts.role && opts.replace ? this.meta.accounts[rankOfRole(opts.role)]?.id : undefined)
+    const holder = replaceId ? this.meta.accounts.find((a) => a.id === replaceId) : undefined
+    if (replaceId && !holder) return this.res(false, 'not_found')
+    if (opts.recaptureId) {
+      const want = this.meta.accounts.find((a) => a.id === opts.recaptureId)
+      if (!want) return this.res(false, 'not_found')
+      if (existing !== want) return this.res(false, existing ? 'duplicate' : 'unknown_live_account')
+    }
+    // This login is saved as another account already: re-capture that one, never a second copy.
+    if (existing && holder && existing !== holder) return this.res(false, 'duplicate')
+    // The live grant already belongs to another account: never two copies of one grant.
     const fpOwner = this.byRt(tok.refresh ? sha(tok.refresh) : '')
     if (fpOwner && fpOwner.id !== existing?.id) return this.res(false, 'duplicate')
-    const holder = this.meta.accounts.find((a) => a.role === role)
+    if (!existing && !holder && this.meta.accounts.length >= MAX_CLAUDE_ACCOUNTS) return this.res(false, 'limit_reached')
+    /** Where a new account goes: the replaced one's rank, else last. */
+    let at = this.meta.accounts.length
     if (holder && holder !== existing) {
-      if (!opts.replace) return this.res(false, 'role_taken')
+      at = this.rankOf(holder)
       await this.deps.vault.remove(holder.id).catch(() => undefined)
       // prev.bin may hold the replaced account's working login.
       await this.deps.vault.removePrevious().catch(() => undefined)
@@ -840,7 +908,6 @@ export class AccountService implements AccountServiceApi {
     const sub = live.cred.claudeAiOauth?.subscriptionType
     const acc: VaultAccountMeta = {
       id,
-      role,
       label,
       email: ident.email,
       accountUuid: ident.accountUuid,
@@ -852,16 +919,21 @@ export class AccountService implements AccountServiceApi {
       updatedAt: now,
       identityConfirmed: ident.confirmed,
       needsRecapture: false,
+      exhaustedUntil: existing?.exhaustedUntil ?? null,
       ...(existing?.lastUsage ? { lastUsage: existing.lastUsage } : {}),
     }
     if (existing) Object.assign(existing, acc)
-    else this.meta.accounts.push(acc)
+    else this.meta.accounts.splice(Math.min(at, this.meta.accounts.length), 0, acc)
     this.setFingerprint(id, stored)
     this.tokenStates.set(id, 'ok')
     this.parked.delete(id)
     const prevActive = this.meta.activeId
     this.meta.activeId = id
-    if (prevActive !== id) this.meta.verify = null
+    if (prevActive !== id) {
+      this.meta.verify = null
+      // The user signed in to it and saved it: the automatic return stops there.
+      this.meta.anchorId = id
+    }
     this.lastSeenHash = sha(live.raw)
     this.setLiveKnown()
     this.clearLockIfFixed()
@@ -880,6 +952,8 @@ export class AccountService implements AccountServiceApi {
     this.tokenStates.delete(id)
     this.parked.delete(id)
     if (this.meta.activeId === id) this.meta.activeId = null
+    if (this.meta.anchorId === id) this.meta.anchorId = null
+    if (this.parkedLast === id) this.parkedLast = null
     if (this.meta.verify?.to === id || this.meta.verify?.from === id) this.meta.verify = null
   }
 
@@ -889,7 +963,7 @@ export class AccountService implements AccountServiceApi {
     return this.switchWith(idOrRole, reason, {})
   }
 
-  private switchWith(idOrRole: string, reason: ClaudeSwitchReason, detail: { window?: '5h' | '7d'; percent?: number; exhaustedUntil?: number | null }): Promise<AccountsOpRes> {
+  private switchWith(idOrRole: string, reason: ClaudeSwitchReason, detail: SwitchDetail): Promise<AccountsOpRes> {
     return this.run(async () => {
       if (this.disposed) return this.res(false, 'busy')
       const r = await this.switchInner(idOrRole, reason, detail)
@@ -926,13 +1000,27 @@ export class AccountService implements AccountServiceApi {
     return null
   }
 
-  private async switchInner(idOrRole: string, reason: ClaudeSwitchReason, detail: { window?: '5h' | '7d'; percent?: number; exhaustedUntil?: number | null }): Promise<AccountsOpRes> {
+  /**
+   * An automatic decision computed from a state that is gone (a manual, phone
+   * or CLI switch, or an external /login, landed while it waited in the
+   * queue): it must not run, or it would leave the wrong account.
+   */
+  private staleAuto(reason: ClaudeSwitchReason, detail: SwitchDetail): boolean {
+    if (reason !== 'auto_exhausted' && reason !== 'auto_return') return false
+    if (detail.expectFrom === undefined) return false
+    if (this.meta.activeId === detail.expectFrom && (this.meta.lastSwitch?.at ?? null) === (detail.expectSwitchAt ?? null)) return false
+    this.staleSkipped = true
+    return true
+  }
+
+  private async switchInner(idOrRole: string, reason: ClaudeSwitchReason, detail: SwitchDetail): Promise<AccountsOpRes> {
     if (this.unsupportedReason === 'keychain') return this.res(false, 'unsupported')
     if (this.unsupportedReason) return this.res(false, 'encryption_unavailable')
     const target = this.resolve(idOrRole)
     if (!target) return this.res(false, 'not_found')
     if (target.needsRecapture) return this.res(false, 'locked')
     await this.reconcileInner(true)
+    if (this.staleAuto(reason, detail)) return this.res(false, 'busy')
     if (this.isLive(target)) return this.res(true)
     let blocked = this.liveBlock()
     if (blocked) return this.res(false, blocked)
@@ -943,6 +1031,7 @@ export class AccountService implements AccountServiceApi {
     // The second classification may have found an unknown or unverified login.
     blocked = this.liveBlock()
     if (blocked) return this.res(false, blocked)
+    if (this.staleAuto(reason, detail)) return this.res(false, 'busy')
     if (this.isLive(target)) return this.res(true)
     const leaving = this.meta.accounts.find((a) => a.id === this.meta.activeId)
     if (live.kind === 'ok' && leaving) {
@@ -979,7 +1068,10 @@ export class AccountService implements AccountServiceApi {
     this.lastSeenHash = sha(merged)
     this.meta.activeId = target.id
     this.meta.lastSwitch = { at: now, from, to: target.id, reason }
-    if (reason === 'auto_exhausted') this.meta.exhaustedUntil = detail.exhaustedUntil ?? null
+    // The account left at its limit stays out until its own reset.
+    if (reason === 'auto_exhausted' && leaving) leaving.exhaustedUntil = detail.exhaustedUntil ?? null
+    // The user's own pick: the automatic return never climbs above it.
+    if (ANCHOR_REASONS.has(reason)) this.meta.anchorId = target.id
     this.meta.verify = { to: target.id, from, at: now, targetExpiresAt: tokenOf(claudeFiles.parseCredentials(snap.credentialsRaw)).expiresAt }
     this.setLiveKnown()
     this.pending = null
@@ -1018,7 +1110,7 @@ export class AccountService implements AccountServiceApi {
       if (this.meta.accounts.length === 0) {
         this.meta.autoPaused = null
         this.meta.lastSwitch = null
-        this.meta.exhaustedUntil = null
+        this.meta.anchorId = null
         this.meta.verify = null
       }
       // The live login is now an unsaved one: the next look classifies it.
@@ -1041,20 +1133,49 @@ export class AccountService implements AccountServiceApi {
     }, () => this.res(false, 'busy'))
   }
 
-  /** Make this account the primary; the other one becomes the secondary. */
+  /** Make this account the first (the 2.3.0 "Set as primary"): a move to rank 0. */
   setPrimary(id: string): Promise<AccountsOpRes> {
+    return this.move(id, 0)
+  }
+
+  /** Move one account to `to` (0-based, clamped); the others keep their relative order. */
+  move(id: string, to: number): Promise<AccountsOpRes> {
     return this.run(async () => {
-      const acc = this.meta.accounts.find((a) => a.id === id)
-      if (!acc) return this.res(false, 'not_found')
-      if (acc.role !== 'primary') {
-        for (const a of this.meta.accounts) a.role = a.id === id ? 'primary' : 'secondary'
-        // The return-to-primary memory was about the other account.
-        this.meta.exhaustedUntil = null
-        await this.persist()
-      }
-      this.emitState(true)
-      return this.res(true)
+      const i = this.meta.accounts.findIndex((a) => a.id === id)
+      if (i < 0) return this.res(false, 'not_found')
+      if (!Number.isInteger(to)) return this.res(false, 'bad_request')
+      const j = Math.max(0, Math.min(this.meta.accounts.length - 1, to))
+      if (i === j) return this.applyOrder(null)
+      const next = [...this.meta.accounts]
+      const [acc] = next.splice(i, 1)
+      next.splice(j, 0, acc)
+      return this.applyOrder(next)
     }, () => this.res(false, 'busy'))
+  }
+
+  /** The whole priority order at once: every saved id exactly once (else bad_request). */
+  reorder(ids: string[]): Promise<AccountsOpRes> {
+    return this.run(async () => {
+      const cur = this.meta.accounts
+      const unique = new Set(ids)
+      if (!Array.isArray(ids) || ids.length !== cur.length || unique.size !== ids.length || !cur.every((a) => unique.has(a.id))) {
+        return this.res(false, 'bad_request')
+      }
+      const next = ids.map((id) => cur.find((a) => a.id === id) as VaultAccountMeta)
+      return this.applyOrder(next.every((a, i) => a === cur[i]) ? null : next)
+    }, () => this.res(false, 'busy'))
+  }
+
+  /** Inside run(): store a new order (null: unchanged), then publish (the badge's ranks and `other` change). */
+  private async applyOrder(next: VaultAccountMeta[] | null): Promise<AccountsOpRes> {
+    if (next) {
+      this.meta.accounts = next
+      await this.persist()
+      // A pending switch or a block was decided on the old order.
+      this.evaluate()
+    }
+    this.emitState(true)
+    return this.res(true)
   }
 
   /** Clear a pause; `unknownAccount` / `noLogin` come back at once if the live login still is one. */
@@ -1115,14 +1236,21 @@ export class AccountService implements AccountServiceApi {
     }
   }
 
-  /** Usage of the parked account with its own unexpired access token (never refreshed by us). */
+  /**
+   * Usage of a parked account with its own unexpired access token (never
+   * refreshed by us). At most one fetch per tick, the accounts in turn (round
+   * robin after the one polled last), each at most every parkedIntervalMs.
+   */
   async pollParked(): Promise<void> {
     if (!this.cfg.pollParked || this.parkedBusy || this.unsupportedReason || !this.ready) return
     if (this.deps.usageEnabled && !this.deps.usageEnabled()) return
     this.parkedBusy = true
     try {
       const now = this.now()
-      for (const acc of this.meta.accounts) {
+      const list = this.meta.accounts
+      const after = list.findIndex((a) => a.id === this.parkedLast)
+      const turn = [...list.slice(after + 1), ...list.slice(0, after + 1)]
+      for (const acc of turn) {
         if (acc.id === this.meta.activeId || acc.needsRecapture) continue
         const st = this.parked.get(acc.id) ?? { nextAt: 0, stopped: false }
         this.parked.set(acc.id, st)
@@ -1136,6 +1264,8 @@ export class AccountService implements AccountServiceApi {
           st.stopped = true
           continue
         }
+        // One fetch this tick, whatever it answers: the next tick asks the next account.
+        this.parkedLast = acc.id
         const res = await (this.deps.fetchUsage ?? fetchClaudeUsage)(
           { claude5h: true, claude7d: true, claudeOpus7d: false, claudeSonnet7d: false },
           { readCred: async () => cred },
@@ -1143,11 +1273,11 @@ export class AccountService implements AccountServiceApi {
         if (res.rows.length > 0 && res.rows.every((r) => r.status === 'expired')) {
           st.stopped = true
           this.tokenStates.set(acc.id, 'expired')
-          continue
+          break
         }
         if (res.rateLimited || res.rows.every((r) => r.status === 'error')) {
           st.nextAt = now + 2 * this.parkedIntervalMs()
-          continue
+          break
         }
         const row = (rid: string): WindowSample => {
           const r = res.rows.find((x) => x.id === rid && x.status === 'ok')
@@ -1155,6 +1285,7 @@ export class AccountService implements AccountServiceApi {
         }
         this.usage.set(acc.id, { fiveHour: row('claude.5h'), sevenDay: row('claude.7d'), ok: true, source: 'parked' })
         st.nextAt = now + this.parkedIntervalMs()
+        break
       }
     } catch {
       /* next tick */
@@ -1173,26 +1304,35 @@ export class AccountService implements AccountServiceApi {
     const now = this.now()
     const activeFresh = 2 * this.intervalMs() + 30_000
     const parkedFresh = 2 * this.parkedIntervalMs() + 30_000
-    const accounts: PolicyAccount[] = this.meta.accounts.map((a) => {
+    const accounts: PolicyAccount[] = this.meta.accounts.map((a, rank) => {
       const u = this.usage.get(a.id)
       const isActive = a.id === this.meta.activeId
       const at = u ? Math.max(u.fiveHour.at ?? 0, u.sevenDay.at ?? 0) : 0
       const fresh = !!u && u.ok && at > 0 && now - at <= (isActive ? activeFresh : parkedFresh) && (isActive ? u.source === 'live' : true)
       // No fresh parked reading can come: its access token expired (or the poll stopped or is off).
       const stale = !isActive && !fresh && (!this.cfg.pollParked || this.parked.get(a.id)?.stopped === true || this.tokenStates.get(a.id) === 'expired')
-      return { id: a.id, role: a.role, fiveHour: this.policyWindow(u?.fiveHour), sevenDay: this.policyWindow(u?.sevenDay), fresh, stale, usable: !a.needsRecapture }
+      return {
+        id: a.id,
+        rank,
+        exhaustedUntil: a.exhaustedUntil,
+        fiveHour: this.policyWindow(u?.fiveHour),
+        sevenDay: this.policyWindow(u?.sevenDay),
+        fresh,
+        stale,
+        usable: !a.needsRecapture,
+      }
     })
     const working = this.deps.statuses().filter((e) => (e.provider ?? 'claude') === 'claude' && e.state === 'working').length
     const mem: PolicyMemory = {
       ...this.policyMem,
       lastSwitchAt: this.meta.lastSwitch?.at ?? null,
       lastSwitchReason: this.meta.lastSwitch?.reason ?? null,
-      exhaustedUntil: this.meta.exhaustedUntil,
     }
     const out = decide({
       now,
       cfg: this.cfg,
       activeId: this.meta.activeId,
+      anchorId: this.meta.anchorId,
       accounts,
       paused: this.meta.autoPaused !== null || this.liveIdentity !== 'known' || this.liveUnverified,
       workingClaude: working,
@@ -1207,8 +1347,17 @@ export class AccountService implements AccountServiceApi {
       this.pending = null
       this.blocked = null
       this.evaluating = true
-      void this.switchWith(d.to, d.reason, { window: d.window, percent: d.percent, exhaustedUntil: d.exhaustedUntil }).finally(() => {
+      this.staleSkipped = false
+      // Pinned to the state it was decided on: switchInner drops it if that changed.
+      const detail: SwitchDetail = { window: d.window, percent: d.percent, exhaustedUntil: d.exhaustedUntil, expectFrom: this.meta.activeId, expectSwitchAt: this.meta.lastSwitch?.at ?? null }
+      void this.switchWith(d.to, d.reason, detail).finally(() => {
         this.evaluating = false
+        // A stale decision was dropped: decide again on the state that replaced it
+        // (a new lastSwitch puts the policy in its dwell, so this never loops).
+        if (this.staleSkipped) {
+          this.staleSkipped = false
+          this.evaluate()
+        }
       })
       return
     }

@@ -1,6 +1,6 @@
 import { ipcMain, type WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
-import type { InstallKind, UpdateInfo, UpdateProgress, UpdateState } from '@shared/ipc-contract'
+import type { InstallKind, UpdateInfo, UpdateNotApplied, UpdateProgress, UpdateState } from '@shared/ipc-contract'
 import { checkForUpdate, downloadAndInstall } from '../updater'
 import { isUpdateBusy, updateState as sharedState, type UpdateStateStore } from '../updateState'
 
@@ -16,6 +16,11 @@ interface UpdateIpcHooks {
    * AppImage quit through before-quit, which saves on its own.
    */
   persistBeforeInstall?: () => void
+  /**
+   * The silent update that did not land, read from the marker at start (app
+   * 2.4.0). `update:notApplied` hands it out once, then answers null.
+   */
+  notApplied?: UpdateNotApplied | null
   /** Test seams: the check/install implementations and the state store. */
   check?: () => Promise<UpdateInfo>
   install?: (onProgress: (p: UpdateProgress) => void, opts?: { beforeApply?: (kind: InstallKind) => void }) => Promise<{ relaunching: boolean }>
@@ -29,10 +34,12 @@ interface UpdateIpcHooks {
  *  - `update:install`  -> downloads + verifies the matching asset, streams
  *                         progress on `update:progress`, then runs it. When the
  *                         build relaunches itself (Windows portable / Linux
- *                         AppImage) it calls `quitForUpdate`; the NSIS installer
- *                         and mac/.deb just open and leave the app running. A
- *                         second call while one runs joins it (same promise).
+ *                         AppImage, the silent NSIS setup) it calls
+ *                         `quitForUpdate`; mac/.deb, and the NSIS wizard when the
+ *                         silent setup cannot start, open and leave the app
+ *                         running. A second call while one runs joins it.
  *  - `update:state`    -> pushed on every phase change.
+ *  - `update:notApplied` -> UpdateNotApplied | null, one-shot (app 2.4.0).
  */
 export function registerUpdateIpc(hooks: UpdateIpcHooks): void {
   const { getSender, quitForUpdate, setInstalling } = hooks
@@ -58,6 +65,13 @@ export function registerUpdateIpc(hooks: UpdateIpcHooks): void {
   ipcMain.handle(CH.UPDATE_CHECK, (): Promise<UpdateInfo> => check())
 
   ipcMain.handle(CH.UPDATE_GET_STATE, (): UpdateState => state.get())
+
+  let notApplied = hooks.notApplied ?? null
+  ipcMain.handle(CH.UPDATE_NOT_APPLIED, (): UpdateNotApplied | null => {
+    const out = notApplied
+    notApplied = null
+    return out
+  })
 
   ipcMain.handle(CH.UPDATE_INSTALL, (): Promise<{ relaunching: boolean }> => {
     if (inflight) return inflight

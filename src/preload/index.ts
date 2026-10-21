@@ -38,6 +38,7 @@ import type {
   UpdateInfo,
   UpdateProgress,
   UpdateState,
+  UpdateNotApplied,
   UsageSnapshot,
 } from '@shared/ipc-contract'
 import type {
@@ -66,12 +67,88 @@ import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRe
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 import type { CliUiState, SkillOp, SkillStatus, SkillTarget } from '@shared/ctl-protocol'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from '@shared/repo-config'
+import type { DictationEvt, DictationStartReq, DictationStartRes } from '@shared/ipc-contract'
+import type { ShareGuestApi } from '@shared/ipc-contract'
+import type {
+  ShareCreateReq,
+  ShareCreateRes,
+  ShareHostApi,
+  ShareHostConfig,
+  ShareHostPaneGuests,
+  ShareHostState,
+  ShareInviteRes,
+  ShareOpRes,
+  ShareResolveReq,
+  ShareUpdateReq,
+} from '@shared/ipc-contract'
+import type { SharePerm } from '@shared/types'
+import type {
+  ShareChatEvt,
+  ShareChatReq,
+  ShareFlowReq,
+  ShareGuestCtlReq,
+  ShareGuestCtlRes,
+  ShareGuestGitReq,
+  ShareGuestGitRes,
+  ShareGuestInputReq,
+  ShareGuestNotesReq,
+  ShareGuestNotesRes,
+  ShareJoinRes,
+  ShareLinkEvt,
+  ShareLinksRes,
+  SharePasswordReq,
+  SharePasswordRes,
+  SharePreviewRes,
+  ShareStreamEvt,
+} from '@shared/share-guest'
 
 /** Subscribe to a main->renderer channel, returning an unsubscribe fn. */
 function sub<T>(channel: string, cb: (payload: T) => void): () => void {
   const listener = (_e: IpcRendererEvent, payload: T) => cb(payload)
   ipcRenderer.on(channel, listener)
   return () => ipcRenderer.removeListener(channel, listener)
+}
+
+/** snApi.share.host (app 2.4.0, item 8): this PC's shares; ids only, main resolves every scope. */
+const shareHostApi: ShareHostApi = {
+  state: () => ipcRenderer.invoke(CH.SHARE_HOST_STATE) as Promise<ShareHostState>,
+  onEvent: (cb: (s: ShareHostState) => void) => sub<ShareHostState>(CH.SHARE_HOST_EVENT, cb),
+  create: (req: ShareCreateReq) => ipcRenderer.invoke(CH.SHARE_CREATE, req) as Promise<ShareCreateRes>,
+  invite: (grantId: string) => ipcRenderer.invoke(CH.SHARE_INVITE, grantId) as Promise<ShareInviteRes>,
+  rotate: (grantId: string) => ipcRenderer.invoke(CH.SHARE_ROTATE, grantId) as Promise<ShareInviteRes>,
+  update: (req: ShareUpdateReq) => ipcRenderer.invoke(CH.SHARE_UPDATE, req) as Promise<ShareOpRes>,
+  setPassword: (grantId: string, password: string | null) => ipcRenderer.invoke(CH.SHARE_SET_PASSWORD, { grantId, password }) as Promise<ShareOpRes>,
+  revoke: (grantId: string) => ipcRenderer.invoke(CH.SHARE_REVOKE, grantId) as Promise<ShareOpRes>,
+  kick: (sessionId: string) => ipcRenderer.invoke(CH.SHARE_KICK, sessionId) as Promise<ShareOpRes>,
+  sessionPerm: (sessionId: string, perm: SharePerm) => ipcRenderer.invoke(CH.SHARE_SESSION_PERM, { sessionId, perm }) as Promise<ShareOpRes>,
+  pauseAll: (on: boolean) => ipcRenderer.invoke(CH.SHARE_PAUSE_ALL, on === true) as Promise<ShareOpRes>,
+  resolve: (req: ShareResolveReq) => ipcRenderer.send(CH.SHARE_RESOLVE, req),
+  onPanes: (cb: (panes: ShareHostPaneGuests[]) => void) => sub<ShareHostPaneGuests[]>(CH.SHARE_PANES, cb),
+  setConfig: (cfg: ShareHostConfig) => ipcRenderer.send(CH.SHARE_SET_CONFIG, cfg),
+  firewallCheck: (force?: boolean) => ipcRenderer.invoke(CH.SHARE_FIREWALL_CHECK, force === true) as Promise<FirewallStatus>,
+  firewallFix: () => ipcRenderer.invoke(CH.SHARE_FIREWALL_FIX) as Promise<FirewallFixRes>,
+}
+
+/** snApi.share.guest (app 2.4.0, item 8): the shares this PC joined; main validates every argument. */
+const shareGuestApi: ShareGuestApi = {
+  preview: (invite: string) => ipcRenderer.invoke(CH.SHARE_PREVIEW, invite) as Promise<SharePreviewRes>,
+  join: (invite: string) => ipcRenderer.invoke(CH.SHARE_JOIN, invite) as Promise<ShareJoinRes>,
+  links: () => ipcRenderer.invoke(CH.SHARE_LINKS) as Promise<ShareLinksRes>,
+  connect: (linkId: string) => ipcRenderer.invoke(CH.SHARE_CONNECT, linkId) as Promise<boolean>,
+  disconnect: (linkId: string) => ipcRenderer.invoke(CH.SHARE_DISCONNECT, linkId) as Promise<boolean>,
+  forget: (linkId: string) => ipcRenderer.invoke(CH.SHARE_FORGET, linkId) as Promise<boolean>,
+  password: (req: SharePasswordReq) => ipcRenderer.invoke(CH.SHARE_PASSWORD, req) as Promise<SharePasswordRes>,
+  ctl: (req: ShareGuestCtlReq) => ipcRenderer.invoke(CH.SHARE_CTL, req) as Promise<ShareGuestCtlRes>,
+  git: (req: ShareGuestGitReq) => ipcRenderer.invoke(CH.SHARE_GIT, req) as Promise<ShareGuestGitRes>,
+  notes: (req: ShareGuestNotesReq) => ipcRenderer.invoke(CH.SHARE_NOTES, req) as Promise<ShareGuestNotesRes>,
+  sub: (linkId: string, paneId: string) => ipcRenderer.send(CH.SHARE_SUB, { linkId, paneId }),
+  unsub: (linkId: string, paneId: string) => ipcRenderer.send(CH.SHARE_UNSUB, { linkId, paneId }),
+  input: (req: ShareGuestInputReq) => ipcRenderer.send(CH.SHARE_INPUT, req),
+  flow: (req: ShareFlowReq) => ipcRenderer.send(CH.SHARE_FLOW, req),
+  chat: (req: ShareChatReq) => ipcRenderer.send(CH.SHARE_CHAT, req),
+  onLinkEvent: (cb: (e: ShareLinkEvt) => void) => sub<ShareLinkEvt>(CH.SHARE_LINK_EVENT, cb),
+  onStream: (cb: (e: ShareStreamEvt) => void) => sub<ShareStreamEvt>(CH.SHARE_STREAM, cb),
+  onChatEvent: (cb: (e: ShareChatEvt) => void) => sub<ShareChatEvt>(CH.SHARE_CHAT_EVENT, cb),
 }
 
 const api: SnApi = {
@@ -168,6 +245,7 @@ const api: SnApi = {
     onProgress: (cb: (p: UpdateProgress) => void) => sub<UpdateProgress>(CH.UPDATE_PROGRESS, cb),
     getState: () => ipcRenderer.invoke(CH.UPDATE_GET_STATE) as Promise<UpdateState>,
     onState: (cb: (s: UpdateState) => void) => sub<UpdateState>(CH.UPDATE_STATE, cb),
+    takeNotApplied: () => ipcRenderer.invoke(CH.UPDATE_NOT_APPLIED) as Promise<UpdateNotApplied | null>,
   },
   usage: {
     get: () => ipcRenderer.invoke(CH.USAGE_GET) as Promise<UsageSnapshot>,
@@ -183,6 +261,7 @@ const api: SnApi = {
     remove: (id: string) => ipcRenderer.invoke(CH.ACCOUNTS_REMOVE, { id }) as Promise<AccountsOpRes>,
     rename: (id: string, label: string) => ipcRenderer.invoke(CH.ACCOUNTS_RENAME, { id, label }) as Promise<AccountsOpRes>,
     setPrimary: (id: string) => ipcRenderer.invoke(CH.ACCOUNTS_SET_PRIMARY, { id }) as Promise<AccountsOpRes>,
+    reorder: (ids: string[]) => ipcRenderer.invoke(CH.ACCOUNTS_REORDER, { ids }) as Promise<AccountsOpRes>,
     resumeAuto: () => ipcRenderer.invoke(CH.ACCOUNTS_RESUME_AUTO) as Promise<AccountsOpRes>,
     setConfig: (cfg: ClaudeAccountsSettings) => ipcRenderer.send(CH.ACCOUNTS_SET_CONFIG, cfg),
     onChanged: (cb: (s: ClaudeAccountsState) => void) => sub<ClaudeAccountsState>(CH.ACCOUNTS_CHANGED, cb),
@@ -202,6 +281,7 @@ const api: SnApi = {
     testNtfy: () => ipcRenderer.invoke(CH.STATUS_NTFY_TEST) as Promise<{ ok: boolean; error?: string }>,
     onReveal: (cb: (paneId: string) => void) => sub<string>(CH.STATUS_REVEAL, cb),
     onSessionEnd: (cb: (e: AgentSessionEndEvt) => void) => sub<AgentSessionEndEvt>(CH.STATUS_SESSION_END, cb),
+    onAgentRename: (cb: (e: import('@shared/types').AgentRenameEvt) => void) => sub<import('@shared/types').AgentRenameEvt>(CH.STATUS_AGENT_RENAME, cb),
     hooksInstall: (cfg: NotificationSettings) =>
       ipcRenderer.invoke(CH.STATUS_HOOKS_INSTALL, cfg) as Promise<StatusHooksStatusRes>,
     hooksUninstall: () =>
@@ -233,6 +313,12 @@ const api: SnApi = {
     setConfig: (mode: AwakeMode) => ipcRenderer.send(CH.POWER_SET_CONFIG, mode),
     getState: () => ipcRenderer.invoke(CH.POWER_GET_STATE) as Promise<PowerState>,
     onState: (cb: (s: PowerState) => void) => sub<PowerState>(CH.POWER_STATE, cb),
+  },
+  dictation: {
+    start: (req: DictationStartReq) => ipcRenderer.invoke(CH.DICTATION_START, req) as Promise<DictationStartRes>,
+    stop: (sessionId: string) => ipcRenderer.invoke(CH.DICTATION_STOP, sessionId) as Promise<void>,
+    onEvent: (cb: (e: DictationEvt) => void) => sub<DictationEvt>(CH.DICTATION_EVENT, cb),
+    openSettings: (page: 'speech' | 'microphone') => ipcRenderer.invoke(CH.DICTATION_OPEN_SETTINGS, page) as Promise<boolean>,
   },
   agents: {
     setConfig: (cfg: AgentSettings) => ipcRenderer.send(CH.AGENTS_SET_CONFIG, cfg),
@@ -303,6 +389,11 @@ const api: SnApi = {
     worktreeInspect: (req: { path: string; base?: string }) => ipcRenderer.invoke(CH.GIT_WORKTREE_INSPECT, req) as Promise<WorktreeInspectRes>,
     worktreeList: () => ipcRenderer.invoke(CH.GIT_WORKTREE_LIST) as Promise<WorktreeListRes>,
     worktreeReveal: (path: string) => ipcRenderer.invoke(CH.GIT_WORKTREE_REVEAL, { path }) as Promise<boolean>,
+  },
+  // Desktop-to-desktop Share (app 2.4.0, item 8): `host` (ShareHostApi) sits next to `guest`.
+  share: {
+    host: shareHostApi,
+    guest: shareGuestApi,
   },
 }
 

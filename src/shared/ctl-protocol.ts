@@ -300,6 +300,7 @@ export interface CtlUsageRow {
   stale?: true
 }
 
+/** 2.3.0 slots; app 2.4.0: derived from the rank (#1 is 'primary', every other one 'secondary'). */
 export type CtlAccountSlot = 'primary' | 'secondary'
 
 export interface CtlUsageResult {
@@ -307,8 +308,8 @@ export interface CtlUsageResult {
   /** Epoch ms of the snapshot (0: nothing fetched yet). */
   updatedAt: number
   services: 'operational' | 'degraded' | 'down' | null
-  /** The active Claude account, when accounts are saved. */
-  account?: { id: string; slot: CtlAccountSlot; label: string }
+  /** The active Claude account, when accounts are saved. `rank`: 1-based priority (app 2.4.0). */
+  account?: { id: string; rank?: number; slot: CtlAccountSlot; label: string }
 }
 
 export interface CtlAccountWindow {
@@ -322,8 +323,11 @@ export interface CtlAccountWindow {
 export interface CtlAccountInfo {
   id: string
   provider: 'claude'
+  /** app 2.4.0: 1-based priority (#1 first); `account use <n>` takes it. */
+  rank: number
+  /** Derived from the rank, kept for one release (compat). */
   slot: CtlAccountSlot
-  /** The user's label ('' = show the slot). A label with an `@` comes as ''. */
+  /** The user's label ('' = show #rank). A label with an `@` comes as ''. */
   label: string
   /** Subscription type (pro, max...), when known. */
   plan: string | null

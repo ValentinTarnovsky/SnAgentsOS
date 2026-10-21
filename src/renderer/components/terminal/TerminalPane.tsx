@@ -13,6 +13,8 @@ import { useXterm, type XtermExitState } from './useXterm'
 import { ExitCard } from './ExitCard'
 import { AgentEndChip } from './AgentEndChip'
 import { MobileDriverBanner } from './MobileDriverBanner'
+import { ShareHostBanner } from '@/components/share/ShareHostBanner'
+import { DictationOverlay } from './DictationControls'
 import { useFitStore } from '@/lib/fitStore'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
@@ -126,6 +128,7 @@ export function TerminalPane({
       className="relative h-full w-full overflow-hidden bg-bg-primary p-2"
     >
       <div className="flex h-full w-full flex-col">
+        <ShareHostBanner paneId={paneId} />
         <MobileDriverBanner paneId={paneId} onDone={ctl.focus} />
         <div ref={termRef} data-phone-fit={phoneFit ? '' : undefined} className="min-h-0 w-full flex-1" />
       </div>
@@ -144,6 +147,9 @@ export function TerminalPane({
       ) : (
         !exit && <AgentEndChip paneId={paneId} initialCommand={initialCommand} shellKind={ctl.shellKind} onDone={ctl.focus} />
       )}
+
+      {/* Desktop dictation (app 2.4.0): what is heard, Stop, and text held back while an agent menu is open. */}
+      <DictationOverlay paneId={paneId} onDone={ctl.focus} />
 
       {findOpen && (
         <div className="absolute right-3 top-3 z-10 flex items-center gap-1 rounded-btn border border-border bg-card/95 px-2 py-1 shadow-lg backdrop-blur">

@@ -31,6 +31,8 @@ export type ActionId =
   // Files and Notes drawers (v2.2, E9).
   | 'toggleFiles'
   | 'toggleNotes'
+  // Desktop dictation (app 2.4.0): toggles on the focused console (or the open global prompt).
+  | 'dictate'
 
 export interface KeyAction {
   id: ActionId
@@ -67,6 +69,8 @@ export const KEY_ACTIONS: KeyAction[] = [
   // VS Code's explorer key; M for Markdown notes.
   { id: 'toggleFiles', labelKey: 'keys.toggleFiles', defaultAccel: 'Ctrl+Shift+E' },
   { id: 'toggleNotes', labelKey: 'keys.toggleNotes', defaultAccel: 'Ctrl+Shift+M' },
+  // H for "hablar"; Win+H is the system's own dictation.
+  { id: 'dictate', labelKey: 'keys.dictate', defaultAccel: 'Ctrl+Shift+H' },
 ]
 
 /** Actions that stay out of text fields so the field keeps the key (E5-FR-18). */

@@ -230,6 +230,20 @@ function BehaviorBlock() {
         description={t('settings.agents.topicAsTitleHint')}
       />
       <ToggleRow
+        checked={agents.syncAgentRename !== false}
+        onChange={(v) => updateSettings({ agents: { ...agents, syncAgentRename: v } })}
+        searchId="agents.syncAgentRename"
+        title={t('settings.agents.syncAgentRename')}
+        description={t('settings.agents.syncAgentRenameHint')}
+      />
+      <ToggleRow
+        checked={agents.shellAgentDetect !== false}
+        onChange={(v) => updateSettings({ agents: { ...agents, shellAgentDetect: v } })}
+        searchId="agents.shellAgentDetect"
+        title={t('settings.agents.shellAgentDetect')}
+        description={t('settings.agents.shellAgentDetectHint')}
+      />
+      <ToggleRow
         checked={agents.ctrlDigitFocus}
         onChange={(v) => updateSettings({ agents: { ...agents, ctrlDigitFocus: v } })}
         searchId="agents.ctrlDigit"

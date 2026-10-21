@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AccountsOpError, ClaudeAccountRole, ClaudeAccountsEvent, ClaudeAccountsState } from '@shared/claude-accounts'
+import { rankOfRole, type AccountsOpError, type ClaudeAccountRole, type ClaudeAccountsEvent, type ClaudeAccountsState } from '@shared/claude-accounts'
 import type { ClaudeAccountsSettings } from '@shared/types'
 import { translate, type MessageKey, type TFn } from '@/i18n'
 import { useAppStore } from './store'
@@ -18,19 +18,11 @@ interface AccountsStoreState {
 
 export const useAccountsStore = create<AccountsStoreState>(() => ({ state: null, busy: false }))
 
-const ROLE_KEY: Record<ClaudeAccountRole, MessageKey> = {
-  primary: 'claudeaccounts.role.primary',
-  secondary: 'claudeaccounts.role.secondary',
-}
-
-/** The account's label, or its role name when it has none. */
-export function accountName(a: { label: string; role: ClaudeAccountRole } | null | undefined, t: TFn): string {
+/** The account's label, or "Account N" (1-based rank; a bare 2.3.0 role names rank 0 / 1). */
+export function accountName(a: { label: string; rank?: number; role?: ClaudeAccountRole } | null | undefined, t: TFn): string {
   if (!a) return ''
-  return a.label.trim() || t(ROLE_KEY[a.role])
-}
-
-export function roleName(role: ClaudeAccountRole, t: TFn): string {
-  return t(ROLE_KEY[role])
+  const rank = typeof a.rank === 'number' ? a.rank : a.role ? rankOfRole(a.role) : 0
+  return a.label.trim() || t('claudeaccounts.accountN', { n: rank + 1 })
 }
 
 const ERROR_KEY: Record<AccountsOpError, MessageKey> = {
@@ -41,7 +33,8 @@ const ERROR_KEY: Record<AccountsOpError, MessageKey> = {
   locked: 'claudeaccounts.err.locked',
   identity_failed: 'claudeaccounts.err.identity',
   duplicate: 'claudeaccounts.err.duplicate',
-  role_taken: 'claudeaccounts.err.roleTaken',
+  role_taken: 'claudeaccounts.err.limit',
+  limit_reached: 'claudeaccounts.err.limit',
   busy: 'claudeaccounts.err.busy',
   io: 'claudeaccounts.err.io',
   unsupported: 'claudeaccounts.err.unsupported',
@@ -75,9 +68,28 @@ export async function runAccountsOp(op: () => Promise<{ ok: boolean; error?: str
   }
 }
 
-/** Switch the live Claude login to a slot (the desktop UI's `manual` reason). */
-export function switchAccount(role: ClaudeAccountRole): Promise<boolean> {
-  return runAccountsOp(() => window.snApi.accounts.switchTo(role, 'manual'))
+/** Switch the live Claude login to a saved account by id (the desktop UI's `manual` reason). */
+export function switchAccount(id: string): Promise<boolean> {
+  return runAccountsOp(() => window.snApi.accounts.switchTo(id, 'manual'))
+}
+
+/** The ids in the new order after moving `id` by `delta` places (null: it cannot move). */
+export function movedOrder(ids: string[], id: string, delta: number): string[] | null {
+  const i = ids.indexOf(id)
+  const j = i + delta
+  if (i < 0 || j < 0 || j >= ids.length || delta === 0) return null
+  const next = [...ids]
+  next.splice(i, 1)
+  next.splice(j, 0, id)
+  return next
+}
+
+/** Move a saved account up (-1) or down (+1) in the priority order (accounts:reorder). */
+export function moveAccount(id: string, delta: number): Promise<boolean> {
+  const ids = useAccountsStore.getState().state?.accounts.map((a) => a.id) ?? []
+  const next = movedOrder(ids, id, delta)
+  if (!next) return Promise.resolve(false)
+  return runAccountsOp(() => window.snApi.accounts.reorder(next))
 }
 
 /** Pull main's state once (a section mount, the chip). */

@@ -204,6 +204,85 @@ export function createAnswerer(deps: AnswerDeps): Answerer {
   }
 }
 
+// --- app 2.4.0: a menu option from the Chat view (ctl answerMenu) ---
+
+/** The answerMenu ctl the phone sends (RemoteCtlAction answerMenu). */
+export interface AnswerMenuAction {
+  kind: 'answerMenu'
+  paneId: string
+  pendingId: string
+  n: number
+  label: string
+}
+
+export interface MenuAnswerDeps {
+  isOpen(): boolean
+  /** Send the ctl and resolve with its ack (CtlResult). */
+  sendCtl(action: AnswerMenuAction): Promise<{ ok: boolean; error?: string }>
+  status(paneId: string): RemotePaneStatus | undefined
+  setState(paneId: string, state: AnswerState | null): void
+  /** The ack refused it: `error` is stale, no_menu, menu_changed, rate, denied, timeout... */
+  onError(paneId: string, pendingId: string, error: string): void
+  setTimeout(fn: () => void, ms: number): Timer
+}
+
+export interface MenuAnswerer {
+  /**
+   * Pick option `n` of the menu main read for the request. Synchronous
+   * 'started' (the free text row then brings the keyboard up in the same
+   * tap); the outcome lands through setState / onError once the ack comes.
+   */
+  answer(paneId: string, pendingId: string, option: { n: number; label: string }): AnswerResult
+  busy(paneId: string): boolean
+}
+
+/**
+ * The Chat view's menu answer (app 2.4.0): one ctl answerMenu instead of an
+ * `input` digit, because the phone cannot see the screen there. Main re-reads
+ * the menu and writes only the digit (never Enter) when the label still
+ * matches. "Sending answer..." until the ack, then "Sent" like a permission.
+ */
+export function createMenuAnswerer(deps: MenuAnswerDeps): MenuAnswerer {
+  const inFlight = new Set<string>()
+  return {
+    answer(paneId, pendingId, option) {
+      if (inFlight.has(paneId)) return 'busy'
+      const pending = deps.status(paneId)?.pending?.find((p) => p.id === pendingId)
+      if (!pending) {
+        deps.onError(paneId, pendingId, 'stale')
+        return 'stale'
+      }
+      if (pending.kind !== 'plan' && pending.kind !== 'permission') return 'invalid'
+      if (!Number.isInteger(option.n) || option.n < 1 || option.n > 9 || !option.label) return 'invalid'
+      const state: AnswerState = { pendingId, kind: pending.kind, phase: 'sending', groups: 1 }
+      if (!deps.isOpen()) {
+        deps.setState(paneId, { ...state, phase: 'disconnected' })
+        return 'offline'
+      }
+      inFlight.add(paneId)
+      deps.setState(paneId, state)
+      const label = option.label.slice(0, 160)
+      void deps
+        .sendCtl({ kind: 'answerMenu', paneId, pendingId, n: option.n, label })
+        .catch(() => ({ ok: false, error: 'offline' }))
+        .then((res) => {
+          inFlight.delete(paneId)
+          if (!res.ok) {
+            deps.setState(paneId, null)
+            deps.onError(paneId, pendingId, res.error ?? 'error')
+            return
+          }
+          deps.setState(paneId, { ...state, phase: 'sent' })
+          deps.setTimeout(() => deps.setState(paneId, null), SENT_VISIBLE_MS)
+        })
+      return 'started'
+    },
+    busy(paneId) {
+      return inFlight.has(paneId)
+    },
+  }
+}
+
 // --- UI state (answer outcomes, folded cards, wizard resets) ---
 
 export interface PromptUiState {

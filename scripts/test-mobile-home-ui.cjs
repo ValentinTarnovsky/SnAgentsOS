@@ -128,7 +128,40 @@ window.runMain = async () => {
  check(ctls.at(-1).kind === 'claudeAccountUse' && ctls.at(-1).role === 'secondary' && Object.keys(ctls.at(-1)).length === 2, 'Use <other> sends claudeAccountUse { role }');
  check($$('[data-toast]').some(t => t.textContent === 'Claude now uses Secondary'), 'and confirms with a toast');
  check(!$('[data-sheet][data-open=true]').textContent.includes('@'), 'no email in the usage sheet');
- flushSync(() => store.getState().update({ appVersion: '2.0.0' }));
+ // App 2.4.0: one other account keeps the single button, now by id.
+ const others2 = [{ id: 'acc_bbbbbbbbbbbb', rank: 1, role: 'secondary', label: '', ready: true }]
+ const withAccount = acc => ({ ...snapshot, usage: { ...snapshot.usage, activeAccount: acc } })
+ flushSync(() => store.getState().update({ appVersion: '2.4.0', snapshot: withAccount({ id: 'acc_aaaaaaaaaaaa', rank: 0, role: 'primary', label: 'Work', other: { id: 'acc_bbbbbbbbbbbb', rank: 1, role: 'secondary', label: '' }, others: others2 }) }));
+ await frames();
+ const useById = $('[data-usage-use-account-id=acc_bbbbbbbbbbbb]');
+ check(useById && useById.textContent === 'Use Account 2' && !$('[data-usage-change-account]'), 'a 2.4.0 desktop with one other account: the single Use button, named Account N');
+ click(useById);
+ await wait(200);
+ check(ctls.at(-1).kind === 'claudeAccountUse' && ctls.at(-1).id === 'acc_bbbbbbbbbbbb' && !('role' in ctls.at(-1)), 'to a 2.4.0 desktop Use sends claudeAccountUse { id }');
+ // More accounts: "Change account" opens the picker sheet by priority.
+ const others3 = [
+  { id: 'acc_aaaaaaaaaaaa', rank: 0, role: 'primary', label: 'Work', ready: true },
+  { id: 'acc_bbbbbbbbbbbb', rank: 1, role: 'secondary', label: '', ready: false },
+  { id: 'acc_dddddddddddd', rank: 3, role: 'secondary', label: 'Spare', ready: true },
+ ]
+ flushSync(() => store.getState().update({ snapshot: withAccount({ id: 'acc_cccccccccccc', rank: 2, role: 'secondary', label: 'Home', other: { id: 'acc_aaaaaaaaaaaa', rank: 0, role: 'primary', label: 'Work' }, others: others3 }) }));
+ await frames();
+ check($('[data-usage-account-id=acc_cccccccccccc]').textContent.startsWith('Account: Home') && !$('[data-usage-use-account]') && $('[data-usage-change-account]'), 'more than one other account: a Change account button instead of Use');
+ click($('[data-usage-change-account]'));
+ await wait(300);
+ check($$('[data-sheet][data-open=true]').length === 2 && $$('[data-usage-pick-account]').map(b => b.dataset.usagePickRank).join() === '0,1,2,3', 'the picker sheet opens over the usage sheet, every account by priority');
+ check($('[data-usage-pick-account=acc_cccccccccccc]').disabled && $('[data-usage-pick-account=acc_bbbbbbbbbbbb]').disabled && $('[data-usage-pick-account=acc_bbbbbbbbbbbb]').textContent.includes('Capture it again on the PC'), 'the active account and one that needs a capture cannot be picked');
+ check($('[data-usage-pick-account=acc_bbbbbbbbbbbb]').textContent.includes('#2') && $('[data-usage-pick-account=acc_bbbbbbbbbbbb]').textContent.includes('Account 2'), 'rows carry #n and the label or Account N');
+ click($('[data-usage-pick-account=acc_dddddddddddd]'));
+ await wait(300);
+ check(ctls.at(-1).kind === 'claudeAccountUse' && ctls.at(-1).id === 'acc_dddddddddddd' && Object.keys(ctls.at(-1)).length === 2, 'picking Spare sends claudeAccountUse { id }');
+ check($$('[data-toast]').some(t => t.textContent === 'Claude now uses Spare') && $$('[data-sheet][data-open=true]').length === 1, 'a successful pick confirms and closes the picker');
+ check(!$('[data-sheet][data-open=true]').textContent.includes('@'), 'still no email');
+ // A 2.3.0 desktop never gets the picker nor { id }, even with others in the snapshot.
+ flushSync(() => store.getState().update({ appVersion: '2.3.0' }));
+ await frames();
+ check(!$('[data-usage-change-account]') && $('[data-usage-use-account=primary]'), 'a 2.3.0 desktop: only Use <other> by role');
+ flushSync(() => store.getState().update({ appVersion: '2.0.0', snapshot }));
  history.back(); await wait(400);
 
  // --- phone-only navigation (E2-FR-06/16/47) ---

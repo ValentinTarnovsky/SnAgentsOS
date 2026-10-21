@@ -128,6 +128,23 @@ export function ChatView({ paneId }: { paneId: string }): ReactNode {
     if (el) prev.current.height = el.scrollHeight
   }, [working])
 
+  // app 2.4.0: an answer card or the key row docking below (or the keyboard)
+  // shrinks the log: a reader at the end stays at the end, so the card never
+  // covers the last messages.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    let height = el.clientHeight
+    const ro = new ResizeObserver(() => {
+      const next = el.clientHeight
+      if (next < height && atEnd.current) el.scrollTop = el.scrollHeight
+      height = next
+      prev.current.height = el.scrollHeight
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   // Leaving a selected message: back to long-press mode.
   useEffect(() => {
     if (!selectable) return

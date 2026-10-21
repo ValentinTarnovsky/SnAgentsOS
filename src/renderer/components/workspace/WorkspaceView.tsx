@@ -1,5 +1,5 @@
 import { Suspense, lazy, useState } from 'react'
-import { ChevronDown, FolderTree, GitBranch, Megaphone, NotebookPen, Plus } from 'lucide-react'
+import { ChevronDown, FolderTree, GitBranch, Megaphone, NotebookPen, Plus, Share2 } from 'lucide-react'
 import type { AgentPreset, Workspace } from '@shared/types'
 import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
@@ -18,6 +18,7 @@ import { useWorktreeStore } from '@/lib/worktreeStore'
 import { templateFromPreset, worktreeOffer } from '@/lib/worktrees'
 import { cn } from '@/lib/cn'
 import { toggleSidePanel, useSidePanels } from '@/lib/sidePanels'
+import { openShareDialog, useShareHostStore, workspaceShared } from '@/lib/shareHostStore'
 
 // The Notes and Files drawers (v2.2, E9) carry the code editor: loaded on first open.
 const NotesPanel = lazy(() => import('@/components/notes/NotesPanel'))
@@ -54,6 +55,7 @@ export function WorkspaceView({
   const wsGitError = useGitStore((s) => s.errors[workspaceGitKey(workspace.id)])
   const openWorktreeLaunch = useWorktreeStore((s) => s.openLaunch)
   const offer = worktreeOffer(workspace, null, presets, connections, { summary: wsGitSummary, error: wsGitError })
+  const shared = useShareHostStore((s) => workspaceShared(s.state, workspace.id))
 
   const launch = (preset: AgentPreset): void => {
     addPane(workspace.id, {
@@ -75,6 +77,20 @@ export function WorkspaceView({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
+          {/* Share (app 2.4.0, item 8): the whole workspace; lit while a workspace share exists. */}
+          <Tooltip label={t('shareHost.header.share')} side="bottom">
+            <button
+              onClick={() => openShareDialog({ kind: 'workspace', workspaceId: workspace.id })}
+              aria-label={t('shareHost.header.share')}
+              data-share-workspace-button={shared ? 'shared' : ''}
+              className={cn(
+                'flex h-[30px] w-[30px] items-center justify-center rounded-btn border transition-colors',
+                shared ? 'border-accent-violet/60 bg-accent-violet/15 text-text-primary' : 'border-border bg-card text-text-secondary hover:border-accent-violet/40 hover:text-text-primary',
+              )}
+            >
+              <Share2 size={15} />
+            </button>
+          </Tooltip>
           <Tooltip label={<ActionTooltipLabel label={t('files.title')} action="toggleFiles" />} side="bottom">
             <button
               onClick={() => toggleSidePanel('files')}

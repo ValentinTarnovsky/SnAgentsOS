@@ -94,6 +94,25 @@ async function main() {
     })
     createMainWindow()
     check(windowOptions?.title === BRAND.productName, 'window title')
+    // App 2.4.0: a portable pins the stable exe, not the %TEMP% extraction.
+    {
+      let details = null
+      class PortableWindow extends BrowserWindow { setAppDetails(d) { details = d } }
+      const exe = 'C:\\Apps\\SnAgentsOS-portable.exe'
+      const portable = load('src/main/window.ts', {
+        require: id => id === 'electron' ? { BrowserWindow: PortableWindow, shell: { openExternal: noop } } : require(id),
+        process: { ...process, platform: 'win32', env: { ...env, PORTABLE_EXECUTABLE_DIR: 'C:\\Apps',PORTABLE_EXECUTABLE_FILE: exe } }, __dirname: path.join(root, 'out/main'),
+      })
+      portable.createMainWindow()
+      check(details && details.appId === BRAND.appId && details.relaunchCommand === `"${exe}"` && details.appIconPath === exe && details.relaunchDisplayName === BRAND.productName, `portable setAppDetails targets the stable exe: ${JSON.stringify(details)}`)
+      details = null
+      const installed = load('src/main/window.ts', {
+        require: id => id === 'electron' ? { BrowserWindow: PortableWindow, shell: { openExternal: noop } } : require(id),
+        process: { ...process, platform: 'win32', env }, __dirname: path.join(root, 'out/main'),
+      })
+      installed.createMainWindow()
+      check(details === null, 'an installed build keeps the shortcut details')
+    }
 
     let tooltip = null, template = null
     class Tray { constructor() {} setToolTip(text) { tooltip = text } on() {} setContextMenu() {} destroy() {} }
@@ -884,7 +903,7 @@ async function updaterChecks(BRAND, en, es) {
   // routes(url) may answer a net request with { redirect } or { status, body };
   // anything it leaves undefined falls through to the release JSON, the sidecar
   // or a 404. downloadRedirects maps a download URL to the CDN hop GitHub sends.
-  function loadUpdater({ platform, arch = 'x64', env = {}, rel = release(full), sidecar = () => `${payloadSha}  file\n`, routes = () => undefined, downloadRedirects = {}, appVersion = '1.99.0', sharedDir }) {
+  function loadUpdater({ platform, arch = 'x64', env = {}, rel = release(full), sidecar = () => `${payloadSha}  file\n`, routes = () => undefined, downloadRedirects = {}, appVersion = '1.99.0', sharedDir, spawnFails = false }) {
     const log = { requests: [], followed: [], aborted: 0, downloads: [], spawns: [], opened: [], errors: [] }
     const respond = (req, status, body) => setImmediate(() => {
       const res = new EventEmitter(); res.statusCode = status
@@ -935,7 +954,8 @@ async function updaterChecks(BRAND, en, es) {
       net,
       shell: { openPath: async f => { log.opened.push(f); return '' }, showItemInFolder: () => {} },
     }
-    const childProcess = { spawn: (command, args, options) => { log.spawns.push({ command, args, options }); return { pid: 4242, on() {}, unref() {} } } }
+    // spawnFails: the OS refused to start the helper (no pid, spawnDetached returns false).
+    const childProcess = { spawn: (command, args, options) => { log.spawns.push({ command, args, options }); return { pid: spawnFails ? undefined : 4242, on() {}, unref() {} } } }
     const stubs = { electron, https, child_process: childProcess, os: { ...os, tmpdir: () => tmp } }
     const mod = load('src/main/updater.ts', {
       require: id => stubs[id] ?? require(id),
@@ -1001,6 +1021,40 @@ async function updaterChecks(BRAND, en, es) {
       check(path.basename(path.dirname(spawn.options.env.SRC)).startsWith('snagentsos-update-'), 'download under snagentsos-update-')
       check(fs.readFileSync(spawn.options.env.SRC).equals(payload), 'downloaded bytes are the verified asset')
       check(!tmpEntries().some(e => /snmulticc/i.test(e)), 'no legacy temp prefix created')
+    }
+
+    // App 2.4.0: the installed build runs the setup silently with --updated (the
+    // old uninstaller keeps the shortcuts, so the taskbar pin survives) and
+    // --force-run (relaunch), and quits for it. The unfinished-update marker
+    // goes to dataDir() (the stubbed userData) before the setup starts.
+    {
+      const marker = path.join(tmp, 'update-pending.json')
+      fs.rmSync(marker, { force: true })
+      const { mod, log } = loadUpdater({ platform: 'win32' })
+      const info = await mod.checkForUpdate()
+      check(info.installKind === 'win-installer' && info.latestVersion === version, 'installed build sees the setup')
+      const before = Date.now()
+      const result = await mod.downloadAndInstall(() => {})
+      const [spawn] = log.spawns
+      check(result.relaunching === true, 'silent setup: relaunching, the IPC quits the app for it')
+      check(log.spawns.length === 1 && path.basename(spawn.command) === 'SnAgentsOS-2.0.0-setup.exe' && log.opened.length === 0, 'setup spawned once, never opened')
+      assert.deepStrictEqual([...spawn.args], ['/S', '--updated', '--force-run']); checks++
+      assert.deepStrictEqual([...mod.SILENT_SETUP_ARGS], ['/S', '--updated', '--force-run']); checks++
+      check(spawn.options.windowsHide === false && spawn.options.detached === true && spawn.options.stdio === 'ignore', 'setup detached and not hidden (Windows may ask for permission)')
+      check(fs.readFileSync(spawn.command).equals(payload), 'silent setup runs the verified bytes')
+      const written = JSON.parse(fs.readFileSync(marker, 'utf8'))
+      check(written.from === '1.99.0' && written.to === version && written.at >= before && written.at <= Date.now(), `marker under dataDir(): ${JSON.stringify(written)}`)
+      check(!fs.readFileSync(marker).subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])), 'marker is UTF-8 without BOM')
+      check(!tmpEntries().some(e => e.startsWith('update-pending.json.') && e.endsWith('.tmp')), 'atomic write leaves no temp file')
+      fs.rmSync(marker, { force: true })
+
+      // The setup cannot start: the wizard opens (it may unpin, as in 2.3.0),
+      // the app keeps running and no marker stays behind.
+      const failed = loadUpdater({ platform: 'win32', spawnFails: true })
+      await failed.mod.checkForUpdate()
+      const fallback = await failed.mod.downloadAndInstall(() => {})
+      check(fallback.relaunching === false && failed.log.spawns.length === 1 && failed.log.opened.length === 1 && failed.log.opened[0] === failed.log.spawns[0].command, 'spawn failure falls back to opening the setup, no relaunch')
+      check(!fs.existsSync(marker), 'spawn failure removes the marker')
     }
 
     // E0-FR-25: no sidecar, no install, on every installable kind. The release
@@ -1097,7 +1151,9 @@ async function updaterChecks(BRAND, en, es) {
         check(log.followed.includes(cdn(setup + '.sha256')), '1.14.x follows the sidecar to the asset CDN')
         check(log.downloads.map(d => d.url).join() === [base + setup, cdn(setup)].join(), '1.14.x follows the download to the asset CDN')
         const [spawn] = log.spawns
-        check(result.relaunching === false && log.spawns.length === 1 && path.basename(spawn.command) === setup, '1.14.x runs the verified SnAgentsOS setup')
+        // The setup now runs silently (app 2.4.0); a real 1.14.x opened the wizard.
+        check(result.relaunching === true && log.spawns.length === 1 && path.basename(spawn.command) === setup && spawn.args.join(' ') === '/S --updated --force-run', '1.14.x runs the verified SnAgentsOS setup')
+        fs.rmSync(path.join(tmp, 'update-pending.json'), { force: true })
         check(fs.readFileSync(spawn.command).equals(payload), '1.14.x setup bytes match the sidecar')
       } finally {
         fs.rmSync(legacyShared, { recursive: true, force: true })

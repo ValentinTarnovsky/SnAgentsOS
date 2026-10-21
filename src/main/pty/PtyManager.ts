@@ -29,7 +29,7 @@ import { sanitizeQueries } from './ansiSanitize'
 import { HeadlessMirror } from './HeadlessMirror'
 import { MAX_FILE_BYTES, capBytes, countLines, scrollOff, trimPersistAnsi, type PersistSnapshot } from './ScrollbackStore'
 import { DEFAULT_ENGINE, REPLAY_LINES, mirrorScrollback, normalizeEngine } from '@shared/terminalEngine'
-import { OSC133_PROMPT_START, SHELL_INTEGRATION_ENV, buildIntegrationArgs, shouldIntegrate, stripOsc133 } from './powershellIntegration'
+import { OSC133_PROMPT_START, SHELL_INTEGRATION_ENV, SHELL_MARK_ENV, buildIntegrationArgs, shouldIntegrate, stripOsc133 } from './powershellIntegration'
 
 interface Entry {
   pty: IPty
@@ -108,6 +108,8 @@ interface Entry {
   promptTimer: ReturnType<typeof setTimeout> | null
   /** Launched with the PowerShell integration (E6-FR-25). */
   integrated: boolean
+  /** v2.4: nonce of this pty's OSC 133 marks (SHELL_MARK_ENV); '' without the integration. */
+  mark: string
   /** Types the initial command on the first prompt mark (E6-FR-30); null when not waiting. */
   readyWait: (() => void) | null
   /** Last bytes of the previous chunk, so a mark split across chunks is still seen. */
@@ -305,6 +307,9 @@ export interface PtySink {
 /** v2.3: who wrote to a pty: the user (keyboard, phone input, answer cards) or an automation. */
 export type PtyInputOrigin = 'user' | 'auto'
 
+/** Who asked a pane to stay at the fast cadence (setForcedFast): the phone sessions or the share guests. */
+export type ForcedFastOwner = 'remote' | 'share'
+
 /**
  * Owns every node-pty instance. The renderer never touches native modules;
  * it drives ptys exclusively through this manager via IPC.
@@ -319,8 +324,10 @@ export class PtyManager {
   private seq = 0
   /** Extra output listeners (remote-control sessions) fed alongside the renderer. */
   private readonly sinks = new Map<string, PtySink>()
-  /** Panes that flush at the fast cadence even while hidden (remote viewers). */
+  /** Panes that flush at the fast cadence even while hidden (remote viewers): the union of every owner's set. */
   private readonly forcedFast = new Set<string>()
+  /** v2.4: each owner's forced-fast panes (the phone sessions and the share guests), so one never clobbers the other. */
+  private readonly forcedFastBy = new Map<ForcedFastOwner, Set<string>>()
   /** Ptys paused via renderer backpressure; auto-resumed if the renderer dies. */
   private readonly pausedByRenderer = new Set<string>()
   /** Fired after byPane changes (spawn/dispose) so remote can refresh `running`. */
@@ -452,6 +459,10 @@ export class PtyManager {
     // PowerShell integration (E6-FR-25): only a bare PowerShell on Windows.
     const integrated = shouldIntegrate({ shell, args: req.args, platform: this.platform, enabled: this.engine.shellIntegration === true })
     if (integrated) env[SHELL_INTEGRATION_ENV] = '1'
+    // v2.4: a fresh nonce per pty authenticates its marks (a preset env never supplies one).
+    const mark = integrated ? randomUUID().replace(/-/g, '') : ''
+    delete env[SHELL_MARK_ENV]
+    if (mark) env[SHELL_MARK_ENV] = mark
     let proc: IPty
     try { proc = spawn(shell, integrated ? buildIntegrationArgs() : (req.args ?? []), {
       name: 'xterm-256color',
@@ -503,6 +514,7 @@ export class PtyManager {
       prompt,
       promptTimer: null,
       integrated,
+      mark,
       readyWait: null,
       readyTail: '',
     }
@@ -1089,12 +1101,18 @@ export class PtyManager {
   }
 
   /**
-   * Replace the set of panes remote viewers are watching. Those panes flush at
-   * the fast cadence even when their desktop pane is hidden; panes that just
-   * became fast flush immediately (mirror of the reveal flush in setActive).
+   * Replace the set of panes one kind of remote viewer is watching ('remote'
+   * = the phone sessions, the default; 'share' = desktop share guests). The
+   * union of every owner's set flushes at the fast cadence even when the
+   * desktop pane is hidden; panes that just became fast flush immediately
+   * (mirror of the reveal flush in setActive).
    */
-  setForcedFast(paneIds: Iterable<string>): void {
-    const next = new Set(paneIds)
+  setForcedFast(paneIds: Iterable<string>, owner: ForcedFastOwner = 'remote'): void {
+    const mine = new Set(paneIds)
+    if (mine.size > 0) this.forcedFastBy.set(owner, mine)
+    else this.forcedFastBy.delete(owner)
+    const next = new Set<string>()
+    for (const set of this.forcedFastBy.values()) for (const paneId of set) next.add(paneId)
     const newlyFast = [...next].filter((paneId) => !this.forcedFast.has(paneId))
     this.forcedFast.clear()
     for (const paneId of next) this.forcedFast.add(paneId)
@@ -1108,6 +1126,11 @@ export class PtyManager {
   getSpawnCwd(paneId: string): string | undefined {
     const ptyId = this.byPane.get(paneId)
     return ptyId ? this.entries.get(ptyId)?.spawnCwd : undefined
+  }
+
+  /** v2.4: the OSC 133 nonce of an integrated pty (StatusManager checks `k=` against it), else undefined. */
+  shellMarkOf(ptyId: string): string | undefined {
+    return this.entries.get(ptyId)?.mark || undefined
   }
 
   /** Epoch ms of the last input written to the pane (desktop or phone), or undefined. */
@@ -1171,6 +1194,29 @@ export class PtyManager {
     this.flush(ptyId)
     const replay = this.snapshotReplay(ptyId, entry)
     return { ptyId, replay, cols: entry.pty.cols, rows: entry.pty.rows }
+  }
+
+  /**
+   * v2.4: the screen rows of a pane's live pty, read off its headless mirror
+   * (created on demand, seeded from the ring like a first replay). Pending
+   * output is flushed first, so the rows are what a phone would see now.
+   * null without a live pty, with snapshotMode 'off' or after a mirror
+   * failure: the phone's Chat view then offers no menu buttons.
+   */
+  screenRows(paneId: string): string[] | null {
+    const ptyId = this.byPane.get(paneId)
+    const entry = ptyId ? this.entries.get(ptyId) : undefined
+    if (!ptyId || !entry) return null
+    const mirror = this.ensureMirror(ptyId, entry)
+    if (!mirror) return null
+    this.flush(ptyId)
+    if (!entry.mirror) return null
+    try {
+      return entry.mirror.screenRows()
+    } catch (error) {
+      this.dropMirror(entry, error)
+      return null
+    }
   }
 
   // --- Headless mirror (E6-FR-01..07, FR-35) ---------------------------------

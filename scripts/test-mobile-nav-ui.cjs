@@ -78,6 +78,16 @@ window.runMain = async () => {
  const tabs = $$('[data-tab]');
  check(tabs.map(t => t.dataset.tab).join() === 'a2,a1,a3,a4', 'tabs follow layoutOrder of the viewed workspace (got ' + tabs.map(t => t.dataset.tab).join() + ')');
  check(tabs.map(t => t.querySelector('[data-pane-icon]').dataset.paneIcon).join() === 'codex,claude,shell,custom', 'each tab carries its type icon (custom = Bot)');
+ {
+  // v2.4: a shell console running a hand-typed codex shows the agent's icon (status.provider wins).
+  const before = store.getState().paneStatus;
+  store.getState().update({ paneStatus: { ...before, a3: { state: 'idle', provider: 'codex', hosted: true, stateSince: Date.now() } } });
+  await frames();
+  check($('[data-tab=a3] [data-pane-icon]').dataset.paneIcon === 'codex', 'v2.4: a shell tab whose status names codex carries the codex icon');
+  store.getState().update({ paneStatus: before });
+  await frames();
+  check($('[data-tab=a3] [data-pane-icon]').dataset.paneIcon === 'shell', 'and the shell icon again once the agent is gone');
+ }
  const a3 = $('[data-tab=a3]');
  check([...a3.textContent].length === 18 && a3.textContent.endsWith('\\u2026'), 'a long title is cut to 18 characters (got ' + a3.textContent + ')');
  check(getComputedStyle(a3).opacity === '0.5', 'a pane without a pty is dimmed to 50%');

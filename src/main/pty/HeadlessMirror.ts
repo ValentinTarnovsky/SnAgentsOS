@@ -2,6 +2,7 @@
 import { Terminal } from '@xterm/headless'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
+import { screenRowsOf } from '@shared/promptMenu'
 import { ModeTracker } from './ModeTracker'
 
 /**
@@ -166,6 +167,15 @@ export class HeadlessMirror {
       altScreen: this.term.buffer.active.type === 'alternate',
       lines: Math.min(normal.length, opts.scrollback + this.term.rows),
     }
+  }
+
+  /**
+   * v2.4: the pty screen rows (baseY .. baseY + rows, soft wraps joined), the
+   * same read the phone does on its live xterm. Main parses Claude's answer
+   * menu off it for the Chat view's cards (PromptMenuWatcher, answerMenu).
+   */
+  screenRows(): string[] {
+    return screenRowsOf(this.term)
   }
 
   dispose(): void {

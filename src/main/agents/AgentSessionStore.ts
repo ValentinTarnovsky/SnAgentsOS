@@ -39,7 +39,18 @@ const LAST_PROMPT_MAX = 120
 type Availability = Pick<AgentSessionView, 'available' | 'unavailableReason'>
 
 /** One pane's record as stored on disk (the view minus computed fields, plus the transcript). */
-export type AgentRecord = Omit<AgentSessionView, 'paneId' | 'available' | 'unavailableReason'> & { transcriptPath?: string }
+export type AgentRecord = Omit<AgentSessionView, 'paneId' | 'available' | 'unavailableReason'> & {
+  transcriptPath?: string
+  /** v2.4 `/rename`: the session's last name main saw (main only, never in the view). */
+  agentTitle?: string
+}
+
+/** v2.4: a session name heard before its record existed (the record is made on the next status). */
+interface StashedTitle {
+  provider: AgentProvider
+  sessionId: string
+  title: string
+}
 
 const stateSchema = z.enum(['idle', 'working', 'done', 'action', 'error', 'unknown'])
 const reasonSchema = z.enum(['permission', 'question', 'plan', 'elicitation', 'failure'])
@@ -62,6 +73,8 @@ const recordSchema = z.object({
     .optional()
     .catch(undefined),
   transcriptPath: z.string().max(4096).optional(),
+  // v2.4: optional, file version unchanged (an older build drops it on its next write).
+  agentTitle: z.string().max(60).optional().catch(undefined),
 })
 const fileSchema = z.object({
   version: z.literal(1),
@@ -103,6 +116,8 @@ export class AgentSessionStore {
   private readonly consumed = new Set<string>()
   /** paneId -> session just forgotten: its late events must not bring it back before a start. */
   private readonly forgotten = new Map<string, string>()
+  /** v2.4: paneId -> a session name heard before that session's record existed. */
+  private readonly stashedTitles = new Map<string, StashedTitle>()
   private startupInfo: AgentsStartup = { trigger: null, interrupted: [] }
   private cleanExit = false
   private lastExit: { trigger: ExitTrigger; at: number } | undefined
@@ -219,6 +234,9 @@ export class AgentSessionStore {
     if (!rec || rec.sessionId !== sessionId || rec.provider !== provider) {
       if (this.isSshPane(paneId)) return
       rec = { provider, sessionId, spawnCwd: this.deps.spawnCwd(paneId) ?? cause?.cwd ?? '', activity: evt.state, updatedAt: now }
+      const stashed = this.stashedTitles.get(paneId)
+      if (stashed && stashed.provider === provider && stashed.sessionId === sessionId) rec.agentTitle = stashed.title
+      this.stashedTitles.delete(paneId)
       this.records.set(paneId, rec)
       this.started.add(paneId)
       recheck = true
@@ -261,6 +279,34 @@ export class AgentSessionStore {
     }
     this.scheduleSave()
     this.emitIfChanged(paneId, previousSession)
+  }
+
+  /**
+   * v2.4 `/rename` (StatusManager.onAgentRename): the session's last name,
+   * recorded whether or not agents.syncAgentRename is on, so turning it on
+   * later never re-applies an old name. A name heard before the session's
+   * record exists waits in memory for it.
+   */
+  noteAgentTitle(paneId: string, provider: AgentProvider, sessionId: string, title: string): void {
+    if (!this.loaded || this.frozen || !isSafeSessionId(sessionId) || typeof title !== 'string') return
+    const clean = title.slice(0, 60)
+    if (!clean) return
+    const rec = this.records.get(paneId)
+    if (rec && rec.provider === provider && rec.sessionId === sessionId) {
+      if (rec.agentTitle === clean) return
+      rec.agentTitle = clean
+      this.scheduleSave()
+      return
+    }
+    this.stashedTitles.set(paneId, { provider, sessionId, title: clean })
+  }
+
+  /** v2.4: the name a pane's session already had (StatusManager's seed), or undefined. */
+  agentTitleFor(paneId: string, provider: AgentProvider, sessionId: string): string | undefined {
+    const rec = this.records.get(paneId)
+    if (rec && rec.provider === provider && rec.sessionId === sessionId) return rec.agentTitle
+    const stashed = this.stashedTitles.get(paneId)
+    return stashed && stashed.provider === provider && stashed.sessionId === sessionId ? stashed.title : undefined
   }
 
   /** "Start fresh" / "Restart with a new chat": the pane forgets its session. */
@@ -388,7 +434,7 @@ export class AgentSessionStore {
   private view(paneId: string): AgentSessionView | null {
     const rec = this.records.get(paneId)
     if (!rec) return null
-    const { transcriptPath: _hidden, ...rest } = rec
+    const { transcriptPath: _hidden, agentTitle: _title, ...rest } = rec
     const v: AgentSessionView = { paneId, ...rest, ...this.availabilityOf(paneId, rec) }
     for (const key of Object.keys(v) as Array<keyof AgentSessionView>) if (v[key] === undefined) delete v[key]
     return v

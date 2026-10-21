@@ -76,6 +76,7 @@ async function main() {
   // 5. Version gate of the phone.
   check(T.appVersionAtLeast('2.3.0') && T.appVersionAtLeast('2.3.1') && T.appVersionAtLeast('2.10.0') && T.appVersionAtLeast('3.0.0') && T.appVersionAtLeast('2.3.0-beta.1') && T.appVersionAtLeast('dev'), '2.3.0, later and dev desktops support agentTune')
   check(!T.appVersionAtLeast('2.2.1') && !T.appVersionAtLeast('1.9.9') && !T.appVersionAtLeast('') && !T.appVersionAtLeast(undefined) && !T.appVersionAtLeast('test'), 'older, empty or unparsable versions do not')
+  check(T.APP_2_4_0 === '2.4.0' && T.appVersionAtLeast('2.4.0', T.APP_2_4_0) && T.appVersionAtLeast('2.10.0', T.APP_2_4_0) && T.appVersionAtLeast('dev', T.APP_2_4_0) && !T.appVersionAtLeast('2.3.0', T.APP_2_4_0) && !T.appVersionAtLeast(undefined, T.APP_2_4_0), 'APP_2_4_0 gates the 2.4.0 phone features')
 
   // 6. PtyManager: the gated submit (readyFor) and the draft tracking.
   {

@@ -14,6 +14,7 @@ import type {
   PaneStatusEvt,
   RemoteSettings,
   SetupStep,
+  SharePerm,
   StatusHooksStatusRes,
   TerminalSnapshotMode,
   UsageSettings,
@@ -43,6 +44,8 @@ import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDel
 import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResult, WsNoteWriteReq, WsNotesChangedEvt, WsNotesListRes } from './ws-notes'
 import type { FileCreateReq, FileReadRes, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesRootRes } from './files'
 import type { CliCtlAction, CliUiState, SkillOp, SkillStatus, SkillTarget } from './ctl-protocol'
+import type { DictationError } from './dictation'
+import type { DictationEngine } from './types'
 
 export type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -60,6 +63,35 @@ export interface PowerState {
   workingCount?: number
   /** Epoch ms when the grace ends and the block is released (grace only). */
   releaseAt?: number
+}
+
+/** `dictation:start` (app 2.4.0): main validates both against the schema 17 rules. */
+export interface DictationStartReq {
+  engine?: DictationEngine
+  /** A BCP 47 tag (DICTATION_LANG_RE); 'auto' is resolved by the renderer. */
+  lang?: string
+}
+
+export interface DictationStartRes {
+  ok: boolean
+  sessionId?: string
+  error?: DictationError
+}
+
+/**
+ * Main -> renderer `dictation:event`, one per helper line. `ready` names the
+ * engine that runs (with `fallback` when auto fell back to offline), `hyp`
+ * is the phrase so far, `final` a finished phrase, `error` a code and `end`
+ * the session is over (always last).
+ */
+export interface DictationEvt {
+  sessionId: string
+  t: 'ready' | 'hyp' | 'final' | 'error' | 'end'
+  text?: string
+  code?: DictationError
+  engine?: 'online' | 'offline'
+  lang?: string
+  fallback?: DictationError
 }
 
 export interface AppInfo {
@@ -175,7 +207,9 @@ export interface LegacyDataInfo {
 
 /**
  * How a downloaded update will be applied, derived from the OS + install type.
- *  - win-installer  : run the NSIS setup (upgrades + relaunches)
+ *  - win-installer  : run the NSIS setup silently (`/S --updated --force-run`:
+ *                     keeps the shortcuts and the taskbar pin, relaunches); the
+ *                     app quits first. If it cannot start, the wizard opens.
  *  - win-portable   : swap the portable exe in place, then relaunch
  *  - mac-dmg        : open the dmg (manual drag; unsigned can't auto-install)
  *  - linux-appimage : swap the AppImage in place, then relaunch
@@ -256,6 +290,17 @@ export interface UpdateState {
   progress: UpdateProgress | null
   installError: string | null
   info: UpdateInfo | null
+}
+
+/**
+ * A silent update that did not land (app 2.4.0): the marker main wrote before
+ * the setup is still there on the next start, under an hour old, and the
+ * running version is below `to` (a declined Windows permission prompt, or a
+ * setup that aborted). Read once with `update:notApplied`.
+ */
+export interface UpdateNotApplied {
+  from: string
+  to: string
 }
 
 /** Live resource usage of the app (its own Electron processes). */
@@ -677,6 +722,161 @@ export interface RemoteCommandResult {
   data?: unknown
 }
 
+// --- Share, host side (app 2.4.0, item 8; src/main/share/ShareHost.ts) ---
+
+/** What a share grant covers: one console (wherever it moves) or every console of a workspace. */
+export type ShareHostScope = { kind: 'pane'; paneId: string; workspaceId: string } | { kind: 'workspace'; workspaceId: string }
+
+/** Expiry choices of the Share dialog ('never' = until revoked). */
+export type ShareExpiryChoice = 'never' | '1h' | '8h' | '24h'
+
+export type ShareHostError =
+  | 'not_found'
+  | 'invalid'
+  | 'limit'
+  /** No DPAPI: nothing is persisted and a password cannot be set. */
+  | 'encryption_unavailable'
+  /** No Tailscale or LAN address to put in the invite. */
+  | 'no_endpoint'
+  /** The console or workspace is not in the desktop state (or no state yet). */
+  | 'scope_gone'
+
+export type ShareOpRes = { ok: true } | { ok: false; error: ShareHostError }
+
+/** One connected guest as the host's Settings list it (never its key, only the fingerprint). */
+export interface ShareHostSessionView {
+  id: string
+  grantId: string
+  name: string
+  ip: string
+  /** `AB12-CD34-EF56-7890` of the guest's static key. */
+  fingerprint: string
+  perm: SharePerm
+  since: number
+  /** Consoles the guest has open right now. */
+  watching: number
+  /** The guest holds an input lease on some console now. */
+  typing: boolean
+}
+
+export interface ShareHostGrantView {
+  id: string
+  label: string
+  scope: ShareHostScope
+  perm: SharePerm
+  hasPassword: boolean
+  createdAt: number
+  expiresAt?: number
+  paused: boolean
+  expired: boolean
+  /** The console was closed: sessions ended, the grant comes back if it is reopened within the grace. */
+  suspended: boolean
+  knownGuests: number
+  sessions: ShareHostSessionView[]
+}
+
+/** A guest waiting for Allow / Deny (ShareJoinPrompt). */
+export interface ShareHostApproval {
+  requestId: string
+  grantId: string
+  grantLabel: string
+  scopeKind: 'pane' | 'workspace'
+  guestName: string
+  ip: string
+  fingerprint: string
+  /** The guest key joined this grant before. */
+  known: boolean
+  /** A wrong password was tried on this request. */
+  passwordFailed: boolean
+  /** The grant's perm: the prompt's default. */
+  perm: SharePerm
+  expiresAt: number
+}
+
+export interface ShareHostEndpointView {
+  a: string
+  p: number
+  t: 'ts' | 'lan' | 'loop'
+}
+
+export interface ShareHostState {
+  enabled: boolean
+  port: number
+  listening: 'off' | 'starting' | 'running' | 'error'
+  /** EADDRINUSE / EACCES text while `listening` is 'error'. */
+  error?: string
+  pausedAll: boolean
+  /** DPAPI available: grants persist and a password can be set. */
+  encryption: boolean
+  /** Fingerprint of the host key the invites pin (absent until the first grant). */
+  fingerprint?: string
+  endpoints: ShareHostEndpointView[]
+  grants: ShareHostGrantView[]
+  approvals: ShareHostApproval[]
+}
+
+/** share:panes: the guests of each shared console (ShareHostBanner). */
+export interface ShareHostPaneGuests {
+  paneId: string
+  guests: Array<{ sessionId: string; name: string; perm: SharePerm }>
+  /** Name of the guest typing in it right now. */
+  typing?: string
+}
+
+export interface ShareCreateReq {
+  scope: { kind: 'pane'; paneId: string } | { kind: 'workspace'; workspaceId: string }
+  perm: SharePerm
+  label?: string
+  expiry?: ShareExpiryChoice
+  /** 8..128; crosses IPC once and is never persisted (only its scrypt key, DPAPI-sealed). */
+  password?: string
+}
+
+export type ShareCreateRes = { ok: true; grant: ShareHostGrantView; invite: string } | { ok: false; error: ShareHostError }
+export type ShareInviteRes = { ok: true; invite: string } | { ok: false; error: ShareHostError }
+
+export interface ShareUpdateReq {
+  grantId: string
+  perm?: SharePerm
+  label?: string
+  expiry?: ShareExpiryChoice
+  paused?: boolean
+}
+
+export interface ShareResolveReq {
+  requestId: string
+  allow: boolean
+  /** The prompt's perm dropdown; absent = the grant's perm. */
+  perm?: SharePerm
+}
+
+/** settings.share as main applies it (share:setConfig). */
+export interface ShareHostConfig {
+  enabled: boolean
+  port: number
+}
+
+/** window.snApi.share.host */
+export interface ShareHostApi {
+  state(): Promise<ShareHostState>
+  onEvent(cb: (s: ShareHostState) => void): () => void
+  create(req: ShareCreateReq): Promise<ShareCreateRes>
+  invite(grantId: string): Promise<ShareInviteRes>
+  rotate(grantId: string): Promise<ShareInviteRes>
+  update(req: ShareUpdateReq): Promise<ShareOpRes>
+  /** null clears it. */
+  setPassword(grantId: string, password: string | null): Promise<ShareOpRes>
+  revoke(grantId: string): Promise<ShareOpRes>
+  kick(sessionId: string): Promise<ShareOpRes>
+  sessionPerm(sessionId: string, perm: SharePerm): Promise<ShareOpRes>
+  pauseAll(on: boolean): Promise<ShareOpRes>
+  resolve(req: ShareResolveReq): void
+  onPanes(cb: (panes: ShareHostPaneGuests[]) => void): () => void
+  setConfig(cfg: ShareHostConfig): void
+  firewallCheck(force?: boolean): Promise<FirewallStatus>
+  firewallFix(): Promise<FirewallFixRes>
+}
+
 /** The object exposed on window.snApi via contextBridge. */
 export interface SnApi {
   platform: string
@@ -837,6 +1037,8 @@ export interface SnApi {
     getState(): Promise<UpdateState>
     /** Subscribe to main's update state on every phase change; returns an unsubscribe function. */
     onState(cb: (s: UpdateState) => void): () => void
+    /** One-shot: the update the last silent install failed to apply, then null (app 2.4.0). */
+    takeNotApplied(): Promise<UpdateNotApplied | null>
   }
   /** Live usage / quota bars (Claude OAuth + Codex rollout + custom models). */
   usage: {
@@ -858,12 +1060,14 @@ export interface SnApi {
     getState(): Promise<ClaudeAccountsState>
     /** Save the live login (CLAUDE_CONFIG_DIR or ~/.claude) into a slot. */
     capture(req: AccountsCaptureReq): Promise<AccountsOpRes>
-    /** 'primary' | 'secondary' | an account id. */
+    /** An account id, or 'primary' | 'secondary' (rank 0 / 1). */
     switchTo(target: string, reason: RendererSwitchReason): Promise<AccountsOpRes>
     remove(id: string): Promise<AccountsOpRes>
     rename(id: string, label: string): Promise<AccountsOpRes>
-    /** Make this account the primary (the roles swap). */
+    /** Make this account the first (a move to rank 0). */
     setPrimary(id: string): Promise<AccountsOpRes>
+    /** app 2.4.0: the new priority order, every saved id exactly once (main checks it). */
+    reorder(ids: string[]): Promise<AccountsOpRes>
     /** Clear a pause of automatic switching. */
     resumeAuto(): Promise<AccountsOpRes>
     /** Push the policy settings (settings.claudeAccounts). */
@@ -897,6 +1101,8 @@ export interface SnApi {
     onReveal(cb: (paneId: string) => void): () => void
     /** Claude's main session ended on its own (E6-FR-21). Returns an unsubscribe function. */
     onSessionEnd(cb: (e: AgentSessionEndEvt) => void): () => void
+    /** v2.4: the console's agent named its session (`/rename`). Returns an unsubscribe function. */
+    onAgentRename(cb: (e: import('./types').AgentRenameEvt) => void): () => void
     /** Write our hook block into ~/.claude/settings.json. */
     hooksInstall(cfg: NotificationSettings): Promise<StatusHooksStatusRes>
     /** Remove every hook handler of ours from ~/.claude/settings.json. */
@@ -952,6 +1158,16 @@ export interface SnApi {
     getState(): Promise<PowerState>
     /** Every state change, including a mode picked from the tray. Returns unsubscribe. */
     onState(cb: (s: PowerState) => void): () => void
+  }
+  /** Desktop dictation (app 2.4.0): main runs the Windows recognizer; one session at a time. */
+  dictation: {
+    /** Stops any other session first; `unsupported` off Windows. */
+    start(req: DictationStartReq): Promise<DictationStartRes>
+    /** Ends the session, keeping its last phrase (killed after 3 s). */
+    stop(sessionId: string): Promise<void>
+    onEvent(cb: (e: DictationEvt) => void): () => void
+    /** Opens Windows' speech or microphone privacy page (fixed URIs). */
+    openSettings(page: 'speech' | 'microphone'): Promise<boolean>
   }
   /** Agent behavior settings and durable sessions (E5 G2). */
   agents: {
@@ -1068,4 +1284,43 @@ export interface SnApi {
     /** Open a managed worktree folder in the file manager. */
     worktreeReveal(path: string): Promise<boolean>
   }
+  /** Desktop-to-desktop Share (app 2.4.0, item 8): `host` shares this PC's consoles. */
+  share: ShareApi
+}
+
+/** window.snApi.share (the guest half lives next to `host`). */
+export interface ShareApi {
+  host: ShareHostApi
+  guest: ShareGuestApi
+}
+
+/**
+ * window.snApi.share.guest (app 2.4.0, item 8): the shares this PC joined.
+ * Shapes in src/shared/share-guest.ts; main never hands the renderer a key,
+ * a ticket or a proof, and validates every id and length it gets.
+ */
+export interface ShareGuestApi {
+  /** Strict parse of a pasted invite, nothing saved. */
+  preview(invite: string): Promise<import('./share-guest').SharePreviewRes>
+  /** Saves the link (or refreshes the one of the same share) and connects. */
+  join(invite: string): Promise<import('./share-guest').ShareJoinRes>
+  links(): Promise<import('./share-guest').ShareLinksRes>
+  connect(linkId: string): Promise<boolean>
+  /** bye + close; no reconnect until connect. */
+  disconnect(linkId: string): Promise<boolean>
+  /** Disconnects and deletes the link and its remembered password key. */
+  forget(linkId: string): Promise<boolean>
+  password(req: import('./share-guest').SharePasswordReq): Promise<import('./share-guest').SharePasswordRes>
+  ctl(req: import('./share-guest').ShareGuestCtlReq): Promise<import('./share-guest').ShareGuestCtlRes>
+  git(req: import('./share-guest').ShareGuestGitReq): Promise<import('./share-guest').ShareGuestGitRes>
+  notes(req: import('./share-guest').ShareGuestNotesReq): Promise<import('./share-guest').ShareGuestNotesRes>
+  /** Mount / unmount of a shared pane (a mounted pane is resubscribed after a reconnect). */
+  sub(linkId: string, paneId: string): void
+  unsub(linkId: string, paneId: string): void
+  input(req: import('./share-guest').ShareGuestInputReq): void
+  flow(req: import('./share-guest').ShareFlowReq): void
+  chat(req: import('./share-guest').ShareChatReq): void
+  onLinkEvent(cb: (e: import('./share-guest').ShareLinkEvt) => void): () => void
+  onStream(cb: (e: import('./share-guest').ShareStreamEvt) => void): () => void
+  onChatEvent(cb: (e: import('./share-guest').ShareChatEvt) => void): () => void
 }

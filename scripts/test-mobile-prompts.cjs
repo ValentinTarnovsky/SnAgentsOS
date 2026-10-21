@@ -6,7 +6,10 @@
 // on a dropped socket, "Sent" and "Not confirmed"). Also the promptCards
 // preference (default on), and Claude's menu read off the screen (R31-03,
 // E2-FR-53, 54): "Always allow" = "2" and the Plan card only with a layout
-// the phone validates, the fallback for any other. No socket, no DOM.
+// the phone validates, the fallback for any other. App 2.4.0: the Chat
+// view's menu from main (RemotePaneStatus.menu) and its precedence, the
+// "Yes, and use auto mode" label, the answerMenu ctl sender and the es/en
+// texts of its ack errors. No socket, no DOM.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -19,10 +22,12 @@ const code = buildSync({
   stdin: {
     resolveDir: root, loader: 'ts', contents: `
 export { cardFor, needsGenericStrip, isSimplePermissionTool, SIMPLE_PERMISSION_TOOLS } from './src/mobile/src/lib/promptRules'
-export { createAnswerer, answerGroups, usePromptUi, ASK_CONFIRM_MS, SENT_VISIBLE_MS } from './src/mobile/src/lib/answer'
+export { createAnswerer, createMenuAnswerer, answerGroups, usePromptUi, ASK_CONFIRM_MS, SENT_VISIBLE_MS } from './src/mobile/src/lib/answer'
 export { ANSWER_STEP_MS, MAX_ANSWER_GROUPS, KEY_NEXT } from './src/shared/askAnswerKeys'
 export { loadPromptCards, savePromptCards, PROMPT_CARDS_KEY, loadPrefs } from './src/mobile/src/lib/prefs'
-export { parseMenu, classify, alwaysOption, planOptions, screenRows, readMenu, sameOption, cleanRow, MENU_TAIL_MAX } from './src/mobile/src/lib/promptMenu'
+export { parseMenu, classify, alwaysOption, planOptions, screenRows, readMenu, sameOption, cleanRow, MENU_TAIL_MAX, statusMenu, chooseMenu } from './src/mobile/src/lib/promptMenu'
+export { t, setLang } from './src/mobile/src/lib/i18n'
+export * as SharedMenu from './src/shared/promptMenu'
 ` },
   bundle: true, platform: 'node', format: 'cjs', write: false,
   define: { 'process.env.NODE_ENV': '"production"' },
@@ -254,6 +259,9 @@ function rig() {
   const rows = P.screenRows(term)
   check(rows.length === 4 && rows[0] === ' Do you want to proceed?' && rows[2] === "   2. Yes, and don't ask again for npm test commands", 'screenRows reads baseY..baseY+rows and joins soft wraps')
   check(P.alwaysOption(P.readMenu(term))?.n === 2 && P.readMenu(null) === null && P.readMenu({}) === null, 'readMenu binds the parser to a terminal and survives a torn down one')
+  // App 2.4.0: the rules live in src/shared/promptMenu (main reads the headless mirror with them); the phone re-exports.
+  check(P.parseMenu === P.SharedMenu.parseMenu && P.alwaysOption === P.SharedMenu.alwaysOption && P.planOptions === P.SharedMenu.planOptions && P.sameOption === P.SharedMenu.sameOption && P.classify === P.SharedMenu.classify, 'the phone re-exports the shared menu rules')
+  check(JSON.stringify(P.SharedMenu.screenRowsOf(term)) === JSON.stringify(rows), 'screenRowsOf reads a structural terminal (xterm or headless) the same way')
   // The answers: "2" and the plan digit, one group, no Enter.
   const planReq = { id: 'pl', kind: 'plan', toolName: 'ExitPlanMode', summary: 'Plan' }
   check(P.answerGroups(perm('a', 'Bash'), { kind: 'always' }).map(g => g.raw).join('|') === '2', '"Always allow" is the single group "2"')
@@ -295,4 +303,97 @@ function rig() {
   check(!local.has(P.PROMPT_CARDS_KEY) && P.loadPromptCards() === true, 'on removes the key')
 }
 
-console.log(`PASS: ${checks} mobile answer card checks (cardFor, answer sequence, folding, promptCards, Claude menus)`)
+// --- app 2.4.0: the Chat view's menu (RemotePaneStatus.menu) and answerMenu ---
+async function chatMenuChecks() {
+  const M = require('./fixtures/claude-menus.cjs')
+  const planReq = { id: 'tp1', kind: 'plan', toolName: 'ExitPlanMode', summary: 'Plan' }
+  const menu = { for: 'tp1', options: [{ n: 1, label: 'Yes, and use auto mode' }, { n: 2, label: 'Yes, and manually approve edits' }, { n: 3, label: 'No, keep planning' }] }
+  const st = status([planReq], { reason: 'plan', menu })
+  const local = P.parseMenu(M.plan)
+  // currentMenu precedence (chooseMenu): Terminal = local first, Chat = main's read for this request only.
+  check(P.statusMenu(st, 'tp1')?.length === 3 && P.statusMenu(st, 'other') === null, "main's menu is only for its own request (a mismatched for gives no card)")
+  check(P.statusMenu(status([perm('a', 'Bash')], { menu }), 'tp1') === null, 'a menu whose request left pending[] is ignored')
+  check(P.statusMenu(status([planReq]), 'tp1') === null && P.statusMenu(undefined, 'tp1') === null && P.statusMenu(st, null) === null, 'no menu field, no status or no request: no menu')
+  check(P.statusMenu(status([planReq], { menu: { for: 'tp1', options: [{ n: 1, label: 'Yes' }] } }), 'tp1') === null, 'a one option menu is no menu')
+  check(P.chooseMenu(local, false, st, 'tp1')?.source === 'local' && P.chooseMenu(local, false, st, 'tp1').menu === local, 'Terminal: the live xterm read comes first')
+  check(P.chooseMenu(null, false, st, 'tp1')?.source === 'status', "Terminal without a local read: main's read")
+  check(P.chooseMenu(local, true, st, 'tp1')?.source === 'status' && P.chooseMenu(local, true, st, 'tp1').menu[0].label === 'Yes, and use auto mode', "Chat: main's read, never the paused xterm")
+  check(P.chooseMenu(local, true, status([planReq], { reason: 'plan' }), 'tp1') === null, 'Chat without a menu from main: no menu (the key row shows)')
+  check(P.chooseMenu(null, true, st, 'tp1', false) === null, 'a desktop older than 2.4.0 never feeds the Chat card')
+  const plan = P.planOptions(P.statusMenu(st, 'tp1'))
+  check(plan?.length === 3 && plan[0].cls === 'approve', '"Yes, and use auto mode" is an approval of a valid plan menu')
+  const src = require('node:fs').readFileSync(path.join(root, 'src/mobile/src/components/prompts/PlanCard.tsx'), 'utf8')
+  check(/'yes, and use auto mode': 'prompt.planAutoMode'/.test(src), 'PlanCard translates "Yes, and use auto mode"')
+  P.setLang('en')
+  check(P.t('prompt.planAutoMode') === 'Yes, and use auto mode' && P.t('prompt.waitingChat', { agent: 'Codex' }) === 'Codex is waiting for your answer' && P.t('prompt.keyRow.terminal') === 'Terminal', 'the new labels in English')
+  const codes = ['prompt.noMenu', 'prompt.menuError.rate', 'prompt.menuError.denied', 'prompt.menuError.noReply', 'prompt.menuError.generic', 'prompt.keyRow.option', 'prompt.keyRow.esc', 'prompt.keyRow.offline']
+  const en = codes.map(k => P.t(k))
+  P.setLang('es')
+  check(P.t('prompt.planAutoMode') === 'Sí, y usar el modo automático' && P.t('prompt.waitingChat', { agent: 'Claude' }) === 'Claude espera tu respuesta', 'the new labels in Spanish')
+  check(codes.every((k, i) => P.t(k) !== k && en[i] !== k && P.t(k) !== en[i]), 'every answerMenu error and key row text has its own es and en string (no raw code on screen)')
+  P.setLang('en')
+
+  // createMenuAnswerer: one ctl, "Sending" until the ack, then "Sent"; errors go to onError.
+  const menuRig = () => {
+    let clock = 0, seq = 0, open = true
+    const timers = new Map(), ctls = [], states = [], errors = []
+    let reply = { ok: true }
+    const statuses = {}
+    const m = P.createMenuAnswerer({
+      isOpen: () => open,
+      sendCtl: action => { ctls.push(action); return typeof reply === 'function' ? reply(action) : Promise.resolve(reply) },
+      status: paneId => statuses[paneId],
+      setState: (paneId, state) => states.push({ paneId, state }),
+      onError: (paneId, pendingId, error) => errors.push({ paneId, pendingId, error }),
+      setTimeout: (fn, ms) => { const id = ++seq; timers.set(id, { at: clock + ms, fn }); return id },
+    })
+    const advance = ms => {
+      const end = clock + ms
+      for (const [id, t] of [...timers].sort((a, b) => a[1].at - b[1].at)) if (t.at <= end) { timers.delete(id); clock = t.at; t.fn() }
+      clock = end
+    }
+    return { m, ctls, states, errors, statuses, advance, setReply: v => { reply = v }, setOpen: v => { open = v }, last: () => states.at(-1)?.state }
+  }
+  const tick = () => new Promise(res => setImmediate(res))
+  const r = menuRig()
+  r.statuses.p = st
+  check(r.m.answer('p', 'tp1', { n: 1, label: 'Yes, and use auto mode' }) === 'started', 'a Chat plan tap starts at once (the free text row then focuses the composer in the same tap)')
+  check(r.ctls.length === 1 && r.ctls[0].kind === 'answerMenu' && r.ctls[0].n === 1 && r.ctls[0].label === 'Yes, and use auto mode' && r.ctls[0].pendingId === 'tp1' && r.ctls[0].paneId === 'p', 'one answerMenu ctl with the digit and the label')
+  check(r.last().phase === 'sending' && r.last().kind === 'plan' && r.m.busy('p'), '"Sending answer..." while the ack is out')
+  check(r.m.answer('p', 'tp1', { n: 2, label: 'x' }) === 'busy' && r.ctls.length === 1, 'a second tap during the ack is ignored')
+  await tick()
+  check(r.last().phase === 'sent' && !r.m.busy('p'), '"Sent" once main acked ok')
+  r.advance(P.SENT_VISIBLE_MS)
+  check(r.last() === null, '"Sent" clears like a permission answer')
+  r.setReply({ ok: false, error: 'menu_changed' })
+  r.m.answer('p', 'tp1', { n: 2, label: 'Yes, and manually approve edits' })
+  await tick()
+  check(r.errors.at(-1)?.error === 'menu_changed' && r.last() === null, 'menu_changed reaches onError (the toast) and clears the state')
+  r.setReply({ ok: false, error: 'stale' })
+  r.m.answer('p', 'tp1', { n: 1, label: 'Yes, and use auto mode' })
+  await tick()
+  check(r.errors.at(-1)?.error === 'stale' && r.errors.at(-1).pendingId === 'tp1', 'stale reaches onError with the request id (the card folds)')
+  r.setReply(() => Promise.reject(new Error('gone')))
+  r.m.answer('p', 'tp1', { n: 1, label: 'Yes, and use auto mode' })
+  await tick()
+  await tick()
+  check(r.errors.at(-1)?.error === 'offline' && !r.m.busy('p'), 'a failed send is offline and releases the lock')
+  r.setReply({ ok: true })
+  const before = r.ctls.length
+  check(r.m.answer('p', 'gone', { n: 1, label: 'x' }) === 'stale' && r.errors.at(-1).error === 'stale' && r.ctls.length === before, 'a request no longer in pending[] never sends (already answered)')
+  r.statuses.q = status([ask('q1', [single()])])
+  check(r.m.answer('q', 'q1', { n: 1, label: 'Opcion 1' }) === 'invalid' && r.ctls.length === before, 'a question is never answered through answerMenu (the wizard keeps raw keys)')
+  check(r.m.answer('p', 'tp1', { n: 0, label: 'x' }) === 'invalid' && r.m.answer('p', 'tp1', { n: 10, label: 'x' }) === 'invalid' && r.m.answer('p', 'tp1', { n: 1, label: '' }) === 'invalid', 'digits 1..9 and a label only')
+  r.setOpen(false)
+  check(r.m.answer('p', 'tp1', { n: 1, label: 'Yes, and use auto mode' }) === 'offline' && r.last().phase === 'disconnected' && r.ctls.length === before, 'offline: "The connection dropped" and nothing sent')
+  r.setOpen(true)
+  r.statuses.pp = status([perm('tb1', 'Bash')], { menu: { for: 'tb1', options: [{ n: 1, label: 'Yes' }, { n: 2, label: "Yes, and don't ask again" }, { n: 3, label: 'No' }] } })
+  const always = P.alwaysOption(P.statusMenu(r.statuses.pp, 'tb1'))
+  check(always?.n === 2 && r.m.answer('pp', 'tb1', always) === 'started' && r.ctls.at(-1).n === 2 && r.last().kind === 'permission', '"Always allow" in Chat is answerMenu n=2 from the menu main read')
+  await tick()
+  check(r.ctls.every(c => c.kind === 'answerMenu' && Object.keys(c).sort().join() === 'kind,label,n,paneId,pendingId'), 'the phone never sends text through answerMenu, only n and label')
+}
+
+chatMenuChecks().then(() => {
+  console.log(`PASS: ${checks} mobile answer card checks (cardFor, answer sequence, folding, promptCards, Claude menus, Chat menu and answerMenu)`)
+}).catch(error => { console.error(error); process.exit(1) })

@@ -16,17 +16,23 @@
  *  - Known labels are translated; an approval the phone does not know keeps
  *    Claude's text. The menu is read again at tap time and a change cancels
  *    the tap.
+ *  - app 2.4.0, Chat view: the options come from main's read of the screen
+ *    (RemotePaneStatus.menu) and a tap sends ctl answerMenu, which main
+ *    checks against the screen again before it writes the digit. There the
+ *    free text row focuses the composer. In Chat the card is at most 45% of
+ *    the visible height and scrolls inside.
  */
 import type { ReactNode } from 'react'
 import { clsx } from 'clsx'
 import { ClipboardList } from 'lucide-react'
 import type { PromptCardModel } from '../../lib/promptRules'
 import { planOptions, sameOption, type PlanOption } from '../../lib/promptMenu'
-import { answerCard } from '../../lib/answerLive'
+import { answerCard, answerMenu } from '../../lib/answerLive'
 import { t, type MobileMessageKey } from '../../lib/i18n'
-import { CardHeader, RequestSummary, menuChanged } from './PermissionCard'
+import { selectInChat, useRemoteStore } from '../../lib/store'
+import { CHAT_CARD_MAX_HEIGHT, CardHeader, RequestSummary, menuChanged } from './PermissionCard'
 import { openTerminalKeyboard } from './PromptStrip'
-import { currentMenu } from './usePromptMenu'
+import { readCurrentMenu } from './usePromptMenu'
 
 type PlanModel = Extract<PromptCardModel, { kind: 'plan' }>
 
@@ -40,6 +46,8 @@ const KNOWN_LABELS: Record<string, MobileMessageKey> = {
   'yes, and bypass permissions': 'prompt.planBypass',
   'yes, bypass permissions': 'prompt.planBypass',
   'no, keep planning': 'prompt.planKeep',
+  'yes, and use auto mode': 'prompt.planAutoMode',
+  'yes, use auto mode': 'prompt.planAutoMode',
 }
 
 export function planLabel(option: PlanOption): string {
@@ -60,13 +68,19 @@ export function PlanCard({
   options: PlanOption[]
   onFold: () => void
 }): ReactNode {
+  const inChat = useRemoteStore(selectInChat)
   const firstApprove = options.find((o) => o.cls === 'approve')?.n
   const pick = (option: PlanOption): void => {
-    if (!sameOption(planOptions(currentMenu(paneId)), option)) {
+    const read = readCurrentMenu(paneId, card.pending.id)
+    if (!read || !sameOption(planOptions(read.menu), option)) {
       menuChanged()
       return
     }
-    const sent = answerCard(paneId, card.pending.id, { kind: 'menu', option: option.n })
+    // Main's read (Chat): main checks the screen again and writes the digit.
+    const sent =
+      read.source === 'status'
+        ? answerMenu(paneId, card.pending.id, { n: option.n, label: option.label })
+        : answerCard(paneId, card.pending.id, { kind: 'menu', option: option.n })
     // Same tap (the gesture iOS needs for the keyboard), only once the digit went out.
     if (option.cls === 'feedback' && sent === 'started') openTerminalKeyboard()
   }
@@ -74,9 +88,11 @@ export function PlanCard({
     <div
       data-prompt-card="plan"
       data-pending={card.pending.id}
+      data-chat-card={inChat || undefined}
       role="group"
       aria-label={t('prompt.planTitle')}
-      className="shrink-0 border-t border-state-action/40 bg-bg-secondary px-3 pb-2 pt-2.5"
+      className={clsx('shrink-0 border-t border-state-action/40 bg-bg-secondary px-3 pb-2 pt-2.5', inChat && 'overflow-y-auto overscroll-contain')}
+      style={inChat ? { maxHeight: CHAT_CARD_MAX_HEIGHT } : undefined}
     >
       <CardHeader icon={<ClipboardList size={16} className="mt-0.5 shrink-0 text-state-action" />} title={t('prompt.planTitle')} onFold={onFold} />
       {card.pending.summary && <RequestSummary text={card.pending.summary} />}

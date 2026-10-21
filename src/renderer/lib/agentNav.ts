@@ -5,7 +5,7 @@
  * in by the caller and never touches the stores or the DOM, so the rules are
  * unit tested.
  */
-import type { AgentPreset, Language, Pane, PaneStatus, ResumeOnStartup, Workspace } from '@shared/types'
+import type { AgentPreset, AgentProvider, Language, Pane, PaneStatus, ResumeOnStartup, Workspace } from '@shared/types'
 import {
   agentRank,
   compareAgents,
@@ -181,6 +181,32 @@ export function advanceWaiting(
 }
 
 /**
+ * v2.4: the names a console of each type gets when nobody named it: the pane
+ * factory's 'PowerShell', the wizard's 'Shell' and the built-in presets'
+ * names. Compared exactly (they are not localized).
+ */
+const DEFAULT_TITLES: Record<Pane['type'], readonly string[]> = {
+  shell: ['PowerShell', 'Shell', 'Windows PowerShell', 'pwsh', 'cmd'],
+  claude: ['Claude', 'Claude Code', 'PowerShell', 'Shell'],
+  codex: ['Codex', 'PowerShell', 'Shell'],
+  custom: ['PowerShell', 'Shell'],
+}
+
+/**
+ * v2.4 (`/rename`): the console still has the name it was created with, so
+ * an agent's name may take its place. With a preset that is the preset's
+ * name; with or without one, also a default name of the pane's type. A pane
+ * without a preset is not "renamed" just for lacking one.
+ */
+export function isDefaultTitle(pane: Pick<Pane, 'type' | 'title' | 'presetId'>, presets: readonly AgentPreset[]): boolean {
+  const title = pane.title.trim()
+  if (!title) return true
+  const preset = pane.presetId ? presets.find((p) => p.id === pane.presetId) : undefined
+  if (preset && title === preset.name.trim()) return true
+  return (DEFAULT_TITLES[pane.type] ?? DEFAULT_TITLES.shell).includes(title)
+}
+
+/**
  * Title of an agent row (E5-FR-19): with topicAsTitle on and the console not
  * renamed (its title is still its preset's name), the agent's topic or first
  * prompt; otherwise the console's own title.
@@ -190,6 +216,21 @@ export function agentTitle(pane: Pane, presets: readonly AgentPreset[], info: { 
   const preset = pane.presetId ? presets.find((p) => p.id === pane.presetId) : undefined
   if (!preset || pane.title !== preset.name) return pane.title
   return info?.topic || info?.firstPrompt || pane.title
+}
+
+/**
+ * v2.4: the agent a shell console runs right now (`claude` / `codex` typed
+ * by hand, or its title), read from the live status; the saved type stays
+ * shell. Agent and custom consoles keep their own icon and title.
+ */
+export function runningAgentOf(pane: Pick<Pane, 'type'>, status: { provider?: AgentProvider } | null | undefined): AgentProvider | undefined {
+  return pane.type === 'shell' && status?.provider ? status.provider : undefined
+}
+
+/** Icon name of a console's header and agent row: its running agent's for a shell, else its own. */
+export function agentIconName(pane: Pick<Pane, 'type' | 'icon'>, status: { provider?: AgentProvider } | null | undefined): string | undefined {
+  const agent = runningAgentOf(pane, status)
+  return agent ? (agent === 'codex' ? 'openai' : 'claude') : pane.icon
 }
 
 /** First line of a text, trimmed. */

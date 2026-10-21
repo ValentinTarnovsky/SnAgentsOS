@@ -2,8 +2,9 @@
  * `snaos account` over AccountService (app 2.3.0, 4b). Every field is picked
  * by name from the service's views, so the CLI never gets a token, a raw
  * credentials blob or an email (the desktop's Settings is the only place an
- * email shows); a label holding an `@` comes as '' (the slot is shown), the
- * same rule as the phone. Switches always carry reason 'cli'. Types only from
+ * email shows); a label holding an `@` comes as '' (#rank is shown), the
+ * same rule as the phone. app 2.4.0: `rank` is 1-based (#1 first) and
+ * `slot` is derived from it for one more release. Switches always carry reason 'cli'. Types only from
  * the service: tests load this file without Electron.
  */
 import type { AccountsOpRes, ClaudeAccountView, ClaudeAccountWindowView, ClaudeAccountsState } from '@shared/claude-accounts'
@@ -30,6 +31,7 @@ export function ctlAccount(v: ClaudeAccountView): CtlAccountInfo {
   return {
     id: v.id,
     provider: 'claude',
+    rank: (typeof v.rank === 'number' && Number.isInteger(v.rank) && v.rank >= 0 ? v.rank : v.role === 'primary' ? 0 : 1) + 1,
     slot: v.role,
     label: typeof v.label === 'string' && !v.label.includes('@') ? v.label : '',
     plan: typeof v.subscriptionType === 'string' && v.subscriptionType ? v.subscriptionType : null,
