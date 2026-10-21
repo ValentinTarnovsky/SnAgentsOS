@@ -253,6 +253,6 @@ async function typeIntoPane(paneId: string, ref: string): Promise<boolean> {
   return safePaste(
     ref,
     { bracketed: pasteBracketed(termMode, s.paneStatus[paneId]), enter: false, signal: new AbortController().signal },
-    { sendInput: (data) => client.sendInputTo(paneId, data), sleep: abortableSleep },
+    { sendInput: (data, opts) => client.sendInputTo(paneId, data, opts), sleep: abortableSleep },
   )
 }

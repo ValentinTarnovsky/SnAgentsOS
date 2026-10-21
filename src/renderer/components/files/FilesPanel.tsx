@@ -37,7 +37,7 @@ import {
 import type { Workspace } from '@shared/types'
 import { baseName, extOf, isSafeName, joinRel, parentRel, type FilesError } from '@shared/files'
 import { useT, type MessageKey } from '@/i18n'
-import { useSidePanels, closeSidePanel } from '@/lib/sidePanels'
+import { useSidePanels, closeSidePanel, setSidePanelMaximized } from '@/lib/sidePanels'
 import {
   absPath,
   applyFilesChanged,
@@ -137,7 +137,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
   const t = useT()
   const look = useEditorLook()
   const wsId = workspace.id
-  const maximized = useSidePanels((s) => s.maximized)
+  const maximized = useSidePanels((s) => !!s.maximized[workspace.id])
   const ws = useFilesStore((s) => wsFiles(s, wsId))
   const [root, setRoot] = useState<{ root: string; name: string } | null>(null)
   const [rootError, setRootError] = useState<FilesError | null>(null)
@@ -336,12 +336,13 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
   return (
     <RightDrawer
       id="files"
+      pinScope={wsId}
       title={root ? `${t('files.title')} - ${root.name}` : t('files.title')}
       icon={<FolderTree size={15} className="shrink-0 text-accent-violet" />}
       actions={headerActions}
       defaultWidth="clamp(640px, 62%, 1400px)"
       maximized={maximized}
-      onMaximize={(on) => useSidePanels.setState({ maximized: on })}
+      onMaximize={(on) => setSidePanelMaximized(wsId, on)}
       onClose={closeSidePanel}
     >
       <div data-files-panel={wsId} className="flex min-h-0 min-w-0 flex-1">

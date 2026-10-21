@@ -87,7 +87,7 @@ import { registerShareHostIpc } from './ipc/registerShareHostIpc'
 import { listEndpoints } from './remote/network'
 import { phoneNote } from './remote/RemoteManager'
 import type { RemoteGitReply, RemoteGitRequest } from '@shared/remote-protocol'
-import type { DictationService } from './dictation/DictationService'
+import { hasNvidiaGpu, type DictationService } from './dictation/DictationService'
 import { installPermissionHandlers } from './permissions'
 import { pathToFileURL } from 'url'
 
@@ -186,8 +186,10 @@ let scrollbackCheckpoint: ScrollbackCheckpoint | null = null
 let accountService: AccountService | null = null
 // Review notes (E7-FR-18): created in bootstrap; flushed on the exits that skip before-quit.
 let reviewNotes: ReviewNoteStore | null = null
-// Desktop dictation (app 2.4.0): created in bootstrap; its helper dies on quit.
+// Desktop dictation (app 2.5.0): created in bootstrap; its whisper-server dies on quit.
 let dictationService: DictationService | null = null
+// An NVIDIA GPU (app.getGPUInfo, read once at bootstrap): picks the GPU pack for device 'auto'.
+let nvidiaGpu = false
 // Share (app 2.4.0, item 8): ONE identity store for both roles (share-identity.json holds host and guest keys;
 // two instances would overwrite each other's entry). Created lazily after app ready (DPAPI).
 let shareIdentityStore: ShareIdentityStore | null = null
@@ -393,6 +395,9 @@ function registerConfigIpc(): void {
     configStore.save(config)
     // v2.4: StatusManager caches the agents settings it reads on the pty data path.
     statusManager.setAgentSettings(config?.settings?.agents)
+    // v2.5: dictation reads its settings and the workspaces from this cache, never from disk
+    // (the renderer saves through a debounce, so a disk read could be stale).
+    dictationService?.setConfig(config)
   })
 
   ipcMain.handle(CH.CONFIG_EXPORT, async (_e, config: ConfigFile): Promise<boolean> => {
@@ -548,12 +553,20 @@ async function bootstrap(): Promise<void> {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
   remoteManager.loadDevices()
   registerCsp()
-  // v2.4: web permissions only for the app's own page, and never `media` (dictation runs in main).
+  // app 2.5.0: web permissions only for the app's own page; `media` only there and only audio
+  // (dictation captures the microphone in the renderer and streams PCM to main).
   installPermissionHandlers(
     session.defaultSession,
     process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href,
   )
-  dictationService = registerDictationIpc()
+  dictationService = registerDictationIpc({ nvidia: () => nvidiaGpu })
+  dictationService.setConfig(configStore.load())
+  void app.getGPUInfo('basic').then(
+    (info) => {
+      nvidiaGpu = hasNvidiaGpu(info)
+    },
+    () => undefined,
+  )
   registerAppIpc()
   registerConfigIpc()
   registerDialogIpc()

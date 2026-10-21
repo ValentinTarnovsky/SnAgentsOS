@@ -138,7 +138,7 @@ export const remoteClientMsgSchema = z.discriminatedUnion('type', [
   z.object({ v: z.number(), type: z.literal('auth'), deviceId: id, hmac: hex32 }),
   z.object({ v: z.number(), type: z.literal('sub'), paneId: id }),
   z.object({ v: z.number(), type: z.literal('unsub'), paneId: id }),
-  z.object({ v: z.number(), type: z.literal('input'), paneId: id, data: z.string().max(8192) }),
+  z.object({ v: z.number(), type: z.literal('input'), paneId: id, data: z.string().max(8192), submit: z.boolean().optional() }),
   z.object({ v: z.number(), type: z.literal('ctl'), id, action: ctlActionSchema }),
   z.object({ v: z.number(), type: z.literal('ping'), t: z.number() }),
   z.object({ v: z.number(), type: z.literal('visibility'), visible: z.boolean() }),

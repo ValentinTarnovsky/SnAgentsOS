@@ -66,9 +66,9 @@ function cancelAllPresses(): void {
  * key does nothing). Also honours a boolean result from client.sendInput, the
  * socket-OPEN signal of E1-FR-14, when the client provides one.
  */
-function sendSeq(seq: string): boolean {
+function sendSeq(seq: string, opts?: { submit?: boolean }): boolean {
   if (store.getState().banner) return false
-  const sent: unknown = client.sendInput(seq)
+  const sent: unknown = client.sendInput(seq, opts)
   return sent !== false
 }
 
@@ -207,6 +207,7 @@ export function KeyBar({
     }
     const seq = resolveSeq(def, getActiveTerm())
     if (seq == null || !sendSeq(seq)) return false
+    if (def.submit) sendSeq('\r', { submit: true })
     if (def.chip && store.getState().ctrlLatch) setCtrlLatch(false)
     return true
   }

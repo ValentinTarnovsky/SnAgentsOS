@@ -261,7 +261,7 @@ app.whenReady().then(async()=>{
  await js("smoke.setView('board')");
  const rv2=await js('smoke.calls.reveal');
  eq((await js("smoke.op({kind:'openNote',workspaceId:'ws-fav',noteId:'n-0123abcd'})")).ok,true,'openNote');
- eq([(await js('smoke.st()')).active,await js('smoke.side()'),(await js('smoke.agent()')).view,(await js('smoke.calls.reveal'))>rv2],['ws-fav',{open:{kind:'notes',workspaceId:'ws-fav'},req:{workspaceId:'ws-fav',noteId:'n-0123abcd'}},'grid',true],'openNote activates the workspace, leaves the board and asks the Notes drawer for that note');
+ eq([(await js('smoke.st()')).active,await js('smoke.side()'),(await js('smoke.agent()')).view,(await js('smoke.calls.reveal'))>rv2],['ws-fav',{open:{'ws-fav':'notes'},req:{workspaceId:'ws-fav',noteId:'n-0123abcd'}},'grid',true],'openNote activates the workspace, leaves the board and asks the Notes drawer for that note');
  eq((await js("smoke.op({kind:'openNote',workspaceId:'ws-fav',noteId:'../x'})")).error,'bad_request','an invalid note id is bad_request');
  eq((await js("smoke.op({kind:'openNote',workspaceId:'nope',noteId:'n-1'})")).error,'not_found','an unknown workspace is not_found');
 

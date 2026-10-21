@@ -45,8 +45,8 @@ export function WorkspaceView({
   const ownsPanel = useAppStore((s) => panelTarget != null && workspaceOfKey(s.workspaces, panelTarget) === workspace.id)
   const changesKey = isActive && ownsPanel ? panelTarget : null
   // Notes / Files (v2.2): over this grid while this workspace is active and owns the drawer.
-  const side = useSidePanels((s) => s.open)
-  const sideKind = isActive && side?.workspaceId === workspace.id ? side.kind : null
+  const side = useSidePanels((s) => s.open[workspace.id] ?? null)
+  const sideKind = isActive ? side : null
   const filesKeys = useActionKeys('toggleFiles')
   const notesKeys = useActionKeys('toggleNotes')
   // E7-FR-27a: each preset can also start in an isolated worktree of workspace.cwd.

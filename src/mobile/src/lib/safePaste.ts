@@ -14,8 +14,11 @@
  *  4. The result goes in frames of PASTE_FRAME_MAX or less that never split a
  *     surrogate pair or the opening and closing sequences.
  *  5. With `enter`, a `\r` frame follows the closing sequence after
- *     PASTE_ENTER_DELAY_MS (the composer's E1-FR-24 gap, so the agent never
- *     takes the Enter as part of the paste).
+ *     PASTE_ENTER_DELAY_MS (the composer's E1-FR-24 gap), marked `submit`
+ *     (app 2.5.0): the PC writes it SUBMIT_DELAY_MS after the pty's last
+ *     write, because Codex on Windows reads a paste as fast keys and takes
+ *     an Enter within about 60 ms of them as a newline inside the paste,
+ *     and the network can bring the two frames closer than this gap.
  *
  * Free of React, the DOM and the socket: callers pass a SafePasteIo, so the
  * rules run under Node in the tests.
@@ -93,8 +96,8 @@ export function buildPasteFrames(text: string, bracketed: boolean | undefined, m
 
 /** What safePaste needs from the WS client. */
 export interface SafePasteIo {
-  /** One raw `input` frame to the pane; false when the socket is not open. */
-  sendInput(data: string): boolean
+  /** One raw `input` frame to the pane; false when the socket is not open. `submit` marks the Enter. */
+  sendInput(data: string, opts?: { submit?: boolean }): boolean
   /** Resolves after ms, or settles early when signal aborts. */
   sleep(ms: number, signal: AbortSignal): Promise<void>
 }
@@ -129,6 +132,6 @@ export async function safePaste(text: string, opts: SafePasteOpts, io: SafePaste
   } catch {
     /* aborted: live() below says so */
   }
-  if (live()) io.sendInput('\r')
+  if (live()) io.sendInput('\r', { submit: true })
   return true
 }

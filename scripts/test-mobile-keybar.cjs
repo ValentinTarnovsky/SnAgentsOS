@@ -232,6 +232,9 @@ check(viewport.kbFieldOf(new FakeElement('button')) === null && viewport.kbField
   const text = (t, enter) => ({ id: 'cust:t', label: 'T', mode: 'text', text: t, enter })
   check(keys.customKeySeq(text('git status', true)) === 'git status\r' && keys.customKeySeq(text('ls', false)) === 'ls' && keys.customKeySeq(text('', false)) === null, 'Text keys send the literal plus an optional Enter')
   check(keys.customKeySeq(text('', true)) === '\r', 'an empty Text key with Enter still sends Enter')
+  const tk = keys.customKeyDef(text('git status', true))
+  check(keys.resolveSeq(tk, null) === 'git status' && tk.submit === true, 'a Text key with Enter sends its text, then a submit Enter frame (app 2.5.0)')
+  check(!keys.customKeyDef(text('ls', false)).submit && keys.resolveSeq(keys.customKeyDef(text('', true)), null) === '\r' && !keys.customKeyDef(text('', true)).submit, 'without Enter, or with no text, no submit frame')
   // Validation.
   const ok = keys.parseCustomKey(ctrlRight)
   check(ok && ok.ctrl === true && ok.shift === false && keys.parseCustomKey({ ...ctrlRight, label: '  ab  ' }).label === 'ab', 'a valid key parses (label trimmed)')

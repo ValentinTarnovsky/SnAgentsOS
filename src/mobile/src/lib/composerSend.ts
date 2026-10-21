@@ -107,8 +107,8 @@ export interface ComposerIo {
    * pasteBracketed: a claude/codex status, else the xterm's last mode).
    */
   bracketed(): boolean | undefined
-  /** Raw input frames (client.sendInput, which chunks). */
-  sendInput(data: string): boolean
+  /** Raw input frames (client.sendInput, which chunks); `submit` marks the Enter. */
+  sendInput(data: string, opts?: { submit?: boolean }): boolean
   /** Turn the Ctrl latch off before a paste (it only acts on 1-char data). */
   releaseLatch(): void
   /** Resolves after ms, or rejects/settles early when signal aborts. */
@@ -164,7 +164,7 @@ export async function typeSlash(
     await pause(io, SLASH_KEY_MS, signal)
   }
   if (!live(io, paneId, signal)) return false
-  return io.sendInput('\r')
+  return io.sendInput('\r', { submit: true })
 }
 
 /**

@@ -71,9 +71,11 @@ export const automationSettingsSchema = z.object({
 })
 
 // Schema 17 (app 2.4.0): desktop dictation. The language is 'auto' or a BCP 47
-// tag; it reaches the helper through a validated env value, never interpolated.
+// tag. Schema 18 (app 2.5.0): the local Whisper engine replaces the Windows
+// ones; `engine` is gone (zod strips it) and device / interim / vocabulary are
+// new, each falling back to its default on its own.
 export const dictationSettingsSchema = z.object({
-  engine: z.enum(['auto', 'online', 'offline']).catch('auto').default('auto'),
+  device: z.enum(['auto', 'gpu', 'cpu']).catch('auto').default('auto'),
   language: z
     .string()
     .max(35)
@@ -81,6 +83,8 @@ export const dictationSettingsSchema = z.object({
     .catch('auto')
     .default('auto'),
   headerButton: z.boolean().catch(true).default(true),
+  interim: z.boolean().catch(true).default(true),
+  vocabulary: z.string().max(400).catch('').default(''),
 })
 
 // Schema 17 (app 2.4.0): desktop-to-desktop sharing. Off until the Share dialog
@@ -456,6 +460,9 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * syncAgentRename / shellAgentDetect, settings.dictation.*, settings.share.*,
  * and notifications.codexEnabled turns on once for configs older than 17.
  * Idempotent: the result is stamped 17, so a later `false` survives.
+ * v17 -> v18 (app 2.5.0) is defaults only (no logic):
+ * settings.dictation.{device, interim, vocabulary}; settings.dictation.engine
+ * is dropped (zod strips it; the Windows engines are gone).
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)

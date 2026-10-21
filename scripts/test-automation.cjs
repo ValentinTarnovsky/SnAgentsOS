@@ -36,6 +36,7 @@ function loadRenderer(contents, overrides = {}) {
 const clone = (v) => JSON.parse(JSON.stringify(v))
 
 const { parseConfig, CONFIG_VERSION } = load('src/main/store/schema.ts')
+const DICTATION_V18_DEFAULTS = '{"device":"auto","language":"auto","headerButton":true,"interim":true,"vocabulary":""}'
 const QC = load('src/shared/quickCommands.ts')
 
 const baseSettings = { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false }
@@ -55,7 +56,7 @@ function v11(extra = {}) {
 const qc = (i, extra = {}) => ({ id: `qc-${i}`, name: `Cmd ${i}`, text: `echo ${i}`, action: 'send', enter: false, ...extra })
 
 function schemaChecks() {
-  check(CONFIG_VERSION === 17, 'CONFIG_VERSION is 17')
+  check(CONFIG_VERSION === 18, 'CONFIG_VERSION is 18')
 
   // E8-FR-01: 3 snippets -> 3 global send commands, same order and ids, no Enter.
   const snippets = [{ id: 'snip-a', name: 'Continua', text: 'continua' }, { id: 'snip-b', name: 'Compact', text: '/compact' }, { id: 'snip-c', name: 'Tests', text: 'corre los tests\ny arregla' }]
@@ -303,7 +304,7 @@ function v13Real(extra = {}) {
 }
 
 async function schema14Checks() {
-  check(CONFIG_VERSION === 17, 'CONFIG_VERSION is 17 (app 2.4.0)')
+  check(CONFIG_VERSION === 18, 'CONFIG_VERSION is 18 (app 2.5.0)')
   const raw = v13Real()
   const a = parseConfig(clone(raw))
   check(a && a.version === CONFIG_VERSION, 'a real v13 config parses and is stamped with the current version')
@@ -332,11 +333,11 @@ async function schema14Checks() {
   const v16 = clone(a); v16.version = 16; v16.settings.notifications = { ...v16.settings.notifications, codexEnabled: false }
   delete v16.settings.agents.syncAgentRename; delete v16.settings.agents.shellAgentDetect; delete v16.settings.dictation; delete v16.settings.share
   const up17 = parseConfig(clone(v16))
-  check(up17.version === 17 && up17.settings.notifications.codexEnabled === true, 'v16 -> v17 turns the Codex integration on')
+  check(up17.version === CONFIG_VERSION && up17.settings.notifications.codexEnabled === true, 'v16 -> v17 turns the Codex integration on')
   const v16Rest = clone(v16); delete v16Rest.settings.notifications.codexEnabled
   check(survives(v16Rest, up17), 'v16 -> v17 keeps every other value')
   check(up17.settings.agents.syncAgentRename === true && up17.settings.agents.shellAgentDetect === true, 'v17: agents gain syncAgentRename and shellAgentDetect on')
-  check(JSON.stringify(up17.settings.dictation) === '{"engine":"auto","language":"auto","headerButton":true}', 'v17: dictation defaults to auto engine, auto language, header button on')
+  check(JSON.stringify(up17.settings.dictation) === DICTATION_V18_DEFAULTS, 'v17: dictation gains its defaults (the v18 shape)')
   check(JSON.stringify(up17.settings.share) === '{"enabled":false,"port":4527,"guestName":"","defaultPerm":"view"}', 'v17: share defaults to off, port 4527, no guest name, view')
   const off17 = clone(up17); off17.settings.notifications.codexEnabled = false
   const again = parseConfig(clone(off17))
@@ -347,17 +348,47 @@ async function schema14Checks() {
   const junk17 = clone(up17)
   Object.assign(junk17.settings.agents, { syncAgentRename: 'yes', shellAgentDetect: 0 })
   junk17.settings.notifications.codexEnabled = 'on'
-  junk17.settings.dictation = { engine: 'cloud', language: 'es-AR; rm -rf', headerButton: 'no' }
+  junk17.settings.dictation = { device: 'cloud', language: 'es-AR; rm -rf', headerButton: 'no', interim: 'yes', vocabulary: 7 }
   junk17.settings.share = { enabled: 'yes', port: 80, guestName: 'x'.repeat(49), defaultPerm: 'admin' }
   const j = parseConfig(junk17)
   check(j && j.settings.notifications.codexEnabled === true && j.settings.agents.syncAgentRename === true && j.settings.agents.shellAgentDetect === true, 'junk v17 booleans fall back to their defaults')
   check(JSON.stringify(j.settings.dictation) === JSON.stringify(up17.settings.dictation) && JSON.stringify(j.settings.share) === JSON.stringify(up17.settings.share), 'junk dictation and share fields fall back field by field')
   check(parseConfig({ ...clone(up17), settings: { ...clone(up17.settings), dictation: 'x', share: 7 } }).settings.share.port === 4527, 'a non-object dictation or share falls back to the defaults')
   const kept17 = clone(up17)
-  kept17.settings.dictation = { engine: 'offline', language: 'es-AR', headerButton: false }
+  kept17.settings.dictation = { device: 'cpu', language: 'es-AR', headerButton: false, interim: false, vocabulary: 'Vite, zustand' }
   kept17.settings.share = { enabled: true, port: 4600, guestName: 'Laptop', defaultPerm: 'full' }
   const k = parseConfig(kept17)
   check(JSON.stringify(k.settings.dictation) === JSON.stringify(kept17.settings.dictation) && JSON.stringify(k.settings.share) === JSON.stringify(kept17.settings.share), 'valid dictation and share values are kept')
+
+  // Schema 18 (app 2.5.0): local Whisper dictation, defaults only, the Windows `engine` key dropped.
+  const v17 = clone(up17); v17.version = 17
+  v17.settings.dictation = { engine: 'offline', language: 'es-AR', headerButton: false }
+  const up18 = parseConfig(clone(v17))
+  check(up18.version === 18, 'v17 -> v18 is stamped 18')
+  check(!('engine' in up18.settings.dictation), 'v18: the v17 dictation.engine key is stripped')
+  check(JSON.stringify(up18.settings.dictation) === '{"device":"auto","language":"es-AR","headerButton":false,"interim":true,"vocabulary":""}', 'v18: the v17 language and header button are kept, device / interim / vocabulary gain their defaults')
+  const v17Rest = clone(v17); delete v17Rest.settings.dictation
+  check(survives(v17Rest, up18), 'v17 -> v18 keeps every other value')
+  const bare18 = clone(up18); delete bare18.settings.dictation
+  check(JSON.stringify(parseConfig(bare18).settings.dictation) === DICTATION_V18_DEFAULTS, 'v18 dictation defaults: auto device, auto language, header button on, interim on, no vocabulary')
+  for (const [field, bad] of [['device', 'cloud'], ['device', 'GPU'], ['device', 1], ['interim', 'on'], ['interim', null], ['vocabulary', 42], ['vocabulary', ['a']]]) {
+    const c = clone(up18); c.settings.dictation[field] = bad
+    const d = parseConfig(c).settings.dictation
+    const expect = { ...clone(up18.settings.dictation), [field]: JSON.parse(DICTATION_V18_DEFAULTS)[field] }
+    check(JSON.stringify(d) === JSON.stringify(expect), `a junk dictation.${field} ${JSON.stringify(bad)} falls back to its default, the other fields kept`)
+  }
+  for (const device of ['auto', 'gpu', 'cpu']) {
+    const c = clone(up18); c.settings.dictation.device = device
+    check(parseConfig(c).settings.dictation.device === device, `dictation.device '${device}' is kept`)
+  }
+  const long = clone(up18); long.settings.dictation.vocabulary = 'x'.repeat(401); long.settings.dictation.interim = false
+  const ld = parseConfig(long).settings.dictation
+  check(ld.vocabulary === '' && ld.interim === false && ld.language === 'es-AR', 'a 401-char vocabulary resets to empty, the rest kept')
+  const max = clone(up18); max.settings.dictation.vocabulary = 'y'.repeat(400)
+  check(parseConfig(max).settings.dictation.vocabulary.length === 400, 'a 400-char vocabulary is kept')
+  check(JSON.stringify(parseConfig(clone(up18))) === JSON.stringify(up18), 'v18 parse is idempotent')
+  const fromV10c = parseConfig({ version: 10, workspaces: [], presets: [], settings: clone(baseSettings) })
+  check(fromV10c.version === 18 && JSON.stringify(fromV10c.settings.dictation) === DICTATION_V18_DEFAULTS, 'a v10 config walks up to 18 and gets the v18 dictation defaults')
 
   // Values kept, junk values fall back without rejecting the config.
   const set = (v) => { const c = v13Real(); c.settings.terminalShellIntegration = v; return parseConfig(c) }
@@ -698,6 +729,56 @@ async function submitChecks() {
     proc.exit(0)
     await clock.advance(500)
     check(JSON.stringify(await dying) === JSON.stringify({ ok: false, error: 'not_running' }), 'a pty that dies before its Enter answers not_running')
+  }
+  // app 2.5.0: Codex on Windows takes an Enter within ~60 ms of a paste as a newline inside it.
+  {
+    const { pm, procs, clock } = ptyHarness()
+    const { ptyId } = pm.spawn({ paneId: 'tail', shell: PWSH, cols: 80, rows: 24 })
+    const proc = procs[0]
+    const t0 = clock.now()
+    const pending = pm.submit(ptyId, 'ls\n', false)
+    check(proc.text() === 'ls', 'a trailing line break is not glued to the text')
+    await clock.advance(150)
+    check((await pending).ok && proc.writes.at(-1).d === '\r' && proc.writes.at(-1).at - t0 === 150, 'it is typed 150 ms after the text, like an Enter')
+    const both = pm.submit(ptyId, 'go\n', true)
+    await clock.advance(300)
+    check((await both).ok && proc.writes.slice(-3).map((w) => w.d).join('|') === 'go|\r|\r' && proc.writes.at(-1).at - proc.writes.at(-2).at === 150, 'a trailing break and the submit Enter each wait 150 ms')
+    pm.killAll()
+  }
+  {
+    const { pm, procs, clock } = ptyHarness()
+    const { ptyId } = pm.spawn({ paneId: 'ph', shell: PWSH, cols: 80, rows: 24 })
+    const proc = procs[0]
+    const t0 = clock.now()
+    pm.write(ptyId, '\x1b[200~hola codex\x1b[201~')
+    await clock.advance(50)
+    pm.submitEnter(ptyId)
+    await clock.advance(99)
+    check(!proc.text().includes('\r'), "a phone's submit Enter 50 ms behind its paste waits")
+    await clock.advance(1)
+    check(proc.writes.at(-1).d === '\r' && proc.writes.at(-1).at - t0 === 150 && pm.lastSubmitAt('ph') === clock.now(), 'and lands 150 ms after the paste, not 150 ms after the Enter frame')
+    const t1 = clock.now()
+    pm.write(ptyId, 'abc')
+    pm.submitEnter(ptyId)
+    await clock.advance(100)
+    pm.write(ptyId, 'd')
+    await clock.advance(100)
+    check(proc.writes.at(-1).d === 'd', 'input landing meanwhile pushes the Enter back')
+    await clock.advance(50)
+    check(proc.writes.at(-1).d === '\r' && proc.writes.at(-1).at - t1 === 250, '150 ms after the last input')
+    const t2 = clock.now()
+    pm.submitEnter(ptyId)
+    for (let i = 0; i < 20; i++) {
+      pm.write(ptyId, 'k')
+      await clock.advance(100)
+    }
+    const cr = proc.writes.filter((w) => w.d === '\r').at(-1)
+    check(cr.at - t2 === 1500, `steady input holds it at most 1500 ms (${cr.at - t2})`)
+    const before = proc.writes.length
+    pm.submitEnter(ptyId)
+    proc.exit(0)
+    await clock.advance(500)
+    check(proc.writes.length === before, 'a pty that exits drops the pending Enter')
   }
 }
 
@@ -1065,10 +1146,22 @@ async function composerChecks() {
   } finally { fs.rmSync(tmp, { recursive: true, force: true }) }
 }
 
+// app 2.5.0: formatBytes (shared/dictation.ts) for the Whisper pack sizes.
+function formatBytesChecks() {
+  const { formatBytes } = load('src/shared/dictation.ts')
+  check(formatBytes(0, 'en') === '0 B' && formatBytes(-5, 'es') === '0 B' && formatBytes(NaN, 'en') === '0 B' && formatBytes(Infinity, 'en') === '0 B', 'formatBytes: zero, negative and non-finite are 0 B')
+  check(formatBytes(999, 'en') === '999 B' && formatBytes(1000, 'en') === '1 KB' && formatBytes(1500, 'es') === '1,5 KB', 'formatBytes: bytes, then decimal KB with a comma in Spanish')
+  check(formatBytes(885098, 'en') === '885 KB' && formatBytes(8928640, 'en') === '8.9 MB' && formatBytes(8928640, 'es') === '8,9 MB', 'formatBytes: one decimal below 10, none above')
+  check(formatBytes(199899225, 'es') === '200 MB' && formatBytes(1759000704, 'en') === '1.8 GB' && formatBytes(1759000704, 'es') === '1,8 GB', 'formatBytes: the cpu and gpu pack totals')
+  check(formatBytes(999_600_000, 'en') === '1 GB' && formatBytes(9_960_000_000, 'en') === '10 GB' && formatBytes(3_100_000_000, 'en') === '3.1 GB', 'formatBytes: rounding up to the next unit or past 10')
+  check(formatBytes(5e15, 'en') === '5000 TB', 'formatBytes: TB is the largest unit')
+}
+
 async function main() {
   schemaChecks()
   await schema13Checks()
   await schema14Checks()
+  formatBytesChecks()
   v31ContractChecks()
   helperChecks()
   storeChecks()
@@ -1080,7 +1173,7 @@ async function main() {
   await composerChecks()
   await require('./test-automation-repo.cjs').run({ check, load, loadRenderer }) // R30-12 .snagentsos.json
   fs.rmSync(shellDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} automation checks (schema 12, 13 and 14, v3.1 schedule ctl, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state, .snagentsos.json)`)
+  console.log(`PASS: ${checks} automation checks (schema 12, 13, 14 and 18, formatBytes, v3.1 schedule ctl, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state, .snagentsos.json)`)
 }
 main().catch((err) => {
   fs.rmSync(shellDir, { recursive: true, force: true })

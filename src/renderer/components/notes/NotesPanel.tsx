@@ -14,7 +14,7 @@ import type { Workspace } from '@shared/types'
 import type { WsNoteDoc, WsNoteMeta } from '@shared/ws-notes'
 import { formatAgeShort } from '@shared/agents'
 import { useLang, useT } from '@/i18n'
-import { useSidePanels, closeSidePanel, clearNoteRequest, type NoteRequest } from '@/lib/sidePanels'
+import { useSidePanels, closeSidePanel, clearNoteRequest, setSidePanelMaximized, type NoteRequest } from '@/lib/sidePanels'
 import { insertPathToConsole } from '@/lib/insertPath'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/cn'
@@ -61,7 +61,7 @@ export default function NotesPanel({ workspace }: { workspace: Workspace }) {
   const t = useT()
   const lang = useLang()
   const look = useEditorLook()
-  const maximized = useSidePanels((s) => s.maximized)
+  const maximized = useSidePanels((s) => !!s.maximized[workspace.id])
   const wsId = workspace.id
   const [notes, setNotes] = useState<WsNoteMeta[]>([])
   const [filter, setFilter] = useState('')
@@ -317,11 +317,12 @@ export default function NotesPanel({ workspace }: { workspace: Workspace }) {
   return (
     <RightDrawer
       id="notes"
+      pinScope={wsId}
       title={t('wsnotes.title')}
       icon={<NotebookPen size={15} className="shrink-0 text-accent-violet" />}
       defaultWidth="clamp(540px, 46%, 980px)"
       maximized={maximized}
-      onMaximize={(on) => useSidePanels.setState({ maximized: on })}
+      onMaximize={(on) => setSidePanelMaximized(wsId, on)}
       onClose={closeSidePanel}
     >
       <div data-notes-panel={wsId} className="flex min-h-0 min-w-0 flex-1">

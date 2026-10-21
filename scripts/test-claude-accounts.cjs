@@ -126,7 +126,7 @@ const noSecrets = text => !/(?:at|rt)-[A-J]\d/.test(text) && !text.includes('acc
 
 async function schemaChecks() {
   const { parseConfig, CONFIG_VERSION, normalizeAccountsSettings, DEFAULT_CLAUDE_ACCOUNTS_SETTINGS } = M
-  check(CONFIG_VERSION === 17, 'CONFIG_VERSION is 17')
+  check(CONFIG_VERSION === 18, 'CONFIG_VERSION is 18')
   const v15 = { version: 15, workspaces: [], presets: [], settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 14, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false, usage: { enabled: true, collapsed: true } } }
   const up = parseConfig(JSON.parse(JSON.stringify(v15)))
   check(up.version === CONFIG_VERSION && JSON.stringify(up.settings.claudeAccounts) === JSON.stringify(DEFAULT_CLAUDE_ACCOUNTS_SETTINGS), 'a v15 config gains the claudeAccounts defaults')
@@ -1171,7 +1171,7 @@ async function main() {
   } finally {
     for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true })
   }
-  console.log(`PASS: ${checks} Claude account checks (schema 17, policy with N accounts, vault v2 and the v1 migration, vault, capture, switch, reconcile, rollback, locked, usage seams, IPC and WS validation, renderer chip / toasts es+en)`)
+  console.log(`PASS: ${checks} Claude account checks (schema 18, policy with N accounts, vault v2 and the v1 migration, vault, capture, switch, reconcile, rollback, locked, usage seams, IPC and WS validation, renderer chip / toasts es+en)`)
 }
 
 main().catch(err => { console.error('FAIL:', err && err.message ? err.message : err); process.exit(1) })

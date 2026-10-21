@@ -62,7 +62,7 @@ const io: ComposerIo = {
   isOpen: () => client.isOpen(),
   currentPaneId: () => store.getState().subscribedPaneId,
   bracketed: viewedBracketed,
-  sendInput: (data) => client.sendInput(data),
+  sendInput: (data, opts) => client.sendInput(data, opts),
   releaseLatch: () => {
     if (store.getState().ctrlLatch) store.getState().setCtrlLatch(false)
   },

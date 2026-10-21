@@ -124,9 +124,12 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('terminal.persistScrollback', 'settings.persistScrollback', 'settings.persistScrollbackHint', { groupKey: 'settings.persistGroup', keywords: ['history', 'historial', 'restart', 'reinicio', 'save', 'guardar', 'scrollback', 'persist'] }),
   e('terminal.persistLines', 'settings.persistLines', undefined, { groupKey: 'settings.persistGroup', keywords: ['history', 'historial', 'lines', 'lineas', 'scrollback'] }),
   e('terminal.snapshotMode', 'settings.snapshotMode', 'settings.snapshotModeHint', { groupKey: 'settings.terminalAdvanced', keywords: ['snapshot', 'headless', 'replay', 'reattach', 'recarga', 'reload', 'avanzado', 'advanced'] }),
-  // Desktop dictation (app 2.4.0).
-  e('terminal.dictationEngine', 'settings.dictation.engine', 'settings.dictation.engineHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'voice', 'voz', 'microphone', 'microfono', 'speech', 'offline', 'online', 'sapi'] }),
+  // Desktop dictation (app 2.5.0: local Whisper).
+  e('terminal.dictationDevice', 'settings.dictation.device', 'settings.dictation.deviceHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'voice', 'voz', 'speech', 'whisper', 'gpu', 'cpu', 'cuda', 'nvidia', 'device', 'dispositivo'] }),
+  e('terminal.dictationModels', 'settings.dictation.packs', 'settings.dictation.packsHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'whisper', 'modelo', 'model', 'pack', 'descargar', 'download', 'gpu', 'cuda', 'visual c++', 'vc++', 'borrar', 'delete', 'privacy', 'privacidad'] }),
   e('terminal.dictationLanguage', 'settings.dictation.language', 'settings.dictation.languageHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'voice', 'voz', 'language', 'idioma'] }),
+  e('terminal.dictationInterim', 'settings.dictation.interim', 'settings.dictation.interimHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'whisper', 'preview', 'vista previa', 'interim', 'gpu'], toggle: { path: 'dictation.interim' } }),
+  e('terminal.dictationVocabulary', 'settings.dictation.vocabulary', 'settings.dictation.vocabularyHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'whisper', 'vocabulary', 'vocabulario', 'words', 'palabras', 'prompt', 'terms', 'terminos'] }),
   e('terminal.dictationHeaderButton', 'settings.dictation.headerButton', 'settings.dictation.headerButtonHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'microphone', 'microfono', 'mic', 'header', 'encabezado'], toggle: { path: 'dictation.headerButton' } }),
 
   // Agents

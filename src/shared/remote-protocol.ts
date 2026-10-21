@@ -501,7 +501,13 @@ export type RemoteClientMsg =
   | { v: number; type: 'auth'; deviceId: string; hmac: string }
   | { v: number; type: 'sub'; paneId: string }
   | { v: number; type: 'unsub'; paneId: string }
-  | { v: number; type: 'input'; paneId: string; data: string }
+  /**
+   * app 2.5.0: `submit` marks a lone `\r` that submits text this client just
+   * pasted: main writes it SUBMIT_DELAY_MS after the pty's last write, so an
+   * agent that debounces a paste (Codex on Windows) takes it as Enter, not as
+   * a newline inside the paste. Ignored on any other data.
+   */
+  | { v: number; type: 'input'; paneId: string; data: string; submit?: boolean }
   | { v: number; type: 'ctl'; id: string; action: RemoteCtlAction }
   | { v: number; type: 'ping'; t: number }
   /** The page became visible/hidden, and once after authOk (E2-FR-52: ntfy quiet while watched). */

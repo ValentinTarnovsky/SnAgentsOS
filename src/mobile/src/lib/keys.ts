@@ -40,6 +40,8 @@ export interface KeyDef {
   icon?: KeyIcon
   /** Bytes for the pty; a function reads terminal modes (DECCKM arrows). */
   seq?: string | ((term: KeyTerm | null) => string)
+  /** After `seq`, an Enter frame marked `submit` (a custom text key with Enter, app 2.5.0). */
+  submit?: boolean
   /** Auto-repeat while held (arrows, Bksp, Del). */
   repeat?: boolean
   /** The Ctrl latch toggle. */
@@ -315,6 +317,9 @@ export function deskKeyDef(b: KeyButton): KeyDef {
 }
 
 export function customKeyDef(key: CustomKey): KeyDef {
+  // A text key with Enter sends the text, then its Enter as a submit frame
+  // (app 2.5.0): in one frame Codex on Windows takes the Enter as a newline.
+  if (key.mode === 'text' && key.enter && key.text) return { id: key.id, label: key.label, seq: key.text, submit: true }
   return {
     id: key.id,
     label: key.label,

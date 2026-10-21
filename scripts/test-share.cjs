@@ -165,6 +165,11 @@ function testGate() {
     ['\x1b', 'type', ACTION, 'ok'], ['\x1b\x1b', 'type', ACTION, 'ok'],
     ['1', 'type', TITLE, 'not_precise'], ['\x1b', 'type', TITLE, 'ok'], ['a', 'type', NONE, 'not_precise'], ['\x1b', 'type', NONE, 'ok'], ['a', 'type', UNKNOWN, 'not_precise'],
     ['1', 'type', IDLE, 'ok'], ['fix the bug', 'type', WORK, 'ok'],
+    // app 2.5.0: with no precise state (an agent over SSH) the screen decides
+    ['fix the bug', 'type', { ...TITLE, screenMenu: false }, 'ok'], ['a', 'type', { ...NONE, screenMenu: false }, 'ok'], ['a', 'type', { ...UNKNOWN, screenMenu: false }, 'ok'],
+    ['1', 'type', { ...TITLE, screenMenu: true }, 'awaiting_host'], ['\x1b', 'type', { ...NONE, screenMenu: true }, 'ok'],
+    ['go\r', 'type', { ...NONE, screenMenu: false }, 'no_send'], ['\x03', 'type', { ...NONE, screenMenu: false }, 'interrupt'], ['\t', 'type', { ...TITLE, screenMenu: false }, 'agent_busy'],
+    ['a', 'type', { ...IDLE, screenMenu: true }, 'ok'],
     // the SSH escape
     ['~.', 'type', { agent: false, lastByte: '\r' }, 'ssh_escape'], ['~', 'type', { agent: false, lastByte: '\n' }, 'ssh_escape'],
     ['~', 'type', { agent: false, lastByte: '' }, 'ssh_escape'], ['~', 'type', { agent: false, lastByte: 'a' }, 'ok'], ['a~', 'type', { agent: false, lastByte: '\r' }, 'ok'],
@@ -1283,6 +1288,21 @@ async function testLeases() {
   check(w.pty.writes.at(-1).data === '\x1b' && w.pty.writes.at(-1).paneId === 'p2', 'but Esc still passes')
   const ps = a.of('paneStatus').pop()
   check(ps && ps.status.state === 'action' && !('pending' in ps.status) && !('attention' in ps.status), 'pane status reaches the guest without pending nor attention')
+  // app 2.5.0: an agent over SSH (title-only status, no hooks) is judged by its screen.
+  w.host.onPaneStatus({ paneId: 'p2', state: 'idle', precise: false, provider: 'codex', stateSince: 10 })
+  w.clock.advance(2001)
+  a.send({ t: 'input', paneId: 'p2', data: 'x', seq: 17 })
+  check(a.last('inputDenied')?.reason === 'not_precise', 'no screen to read: fails closed')
+  let screen = ['> revisa el diff', '']
+  w.pty.screenRows = () => screen
+  w.clock.advance(2001)
+  a.send({ t: 'input', paneId: 'p2', data: 'ssh ok', seq: 18 })
+  check(w.pty.writes.at(-1).data === 'ssh ok', 'no menu on screen: the guest types')
+  screen = ['Allow this command?', '> 1. Yes', '  2. No, tell Codex what to do differently']
+  w.clock.advance(2001)
+  a.send({ t: 'input', paneId: 'p2', data: '1', seq: 19 })
+  check(a.last('inputDenied')?.reason === 'awaiting_host' && w.pty.writes.at(-1).data === 'ssh ok', 'a numbered menu on screen: a digit is refused')
+  delete w.pty.screenRows
   check(!b.bad.length && !a.bad.length, 'every frame passes the guest schema')
 
   // A paste as one unit; an admitted open paste is closed by the host.

@@ -32,7 +32,7 @@ export function pasteKey(): void {
           signal: new AbortController().signal,
           live: () => store.getState().subscribedPaneId === paneId && client.isOpen(),
         },
-        { sendInput: (data) => client.sendInputTo(paneId, data), sleep: abortableSleep },
+        { sendInput: (data, opts) => client.sendInputTo(paneId, data, opts), sleep: abortableSleep },
       )
     },
     openComposer: openComposerForPaste,

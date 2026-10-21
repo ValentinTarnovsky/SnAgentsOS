@@ -10,7 +10,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 17
+export const CONFIG_VERSION = 18
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -716,16 +716,24 @@ export interface AutomationSettings {
   scheduleNotify: boolean
 }
 
-/** Desktop dictation engine: 'auto' = online Windows recognizer, offline SAPI fallback (schema 17). */
-export type DictationEngine = 'auto' | 'online' | 'offline'
+/**
+ * Where the local Whisper engine runs (schema 18, app 2.5.0): 'auto' = the GPU
+ * pack on an NVIDIA GPU when installed, else the CPU pack.
+ */
+export type DictationDevice = 'auto' | 'gpu' | 'cpu'
 
-/** Desktop microphone dictation (schema 17). */
+/** Desktop microphone dictation (schema 17; schema 18 swaps the Windows engine for local Whisper). */
 export interface DictationSettings {
-  engine: DictationEngine
-  /** 'auto' (app language, else the system speech language) or a BCP 47 tag. */
+  /** Engine device (schema 18). */
+  device: DictationDevice
+  /** 'auto' (the app language) or a BCP 47 tag. */
   language: string
   /** Microphone button in the workspace header. */
   headerButton: boolean
+  /** Show the phrase being heard while it is still open (GPU only, schema 18). */
+  interim: boolean
+  /** Extra words that bias recognition (names, jargon), at most 400 chars (schema 18). */
+  vocabulary: string
 }
 
 /** What a desktop share guest may do: watch, type without Enter, or full control (schema 17). */

@@ -508,13 +508,13 @@ class RemoteClient {
    * keep the text instead of losing it. Data longer than INPUT_CHUNK goes as
    * several `input` frames, in order, never splitting a surrogate pair, so a
    * long paste or snippet stays under the schema's 8192 limit (E1-FR-24).
+   * `submit` (app 2.5.0) marks an Enter that submits pasted text: the PC
+   * times it from the pty's last write (see the `input` message).
    */
-  sendInput(data: string): boolean {
+  sendInput(data: string, opts?: { submit?: boolean }): boolean {
     const paneId = store.getState().subscribedPaneId
     if (!paneId || !this.isOpen()) return false
-    for (const chunk of chunkInput(data)) {
-      if (!this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data: chunk })) return false
-    }
+    if (!this.sendFrames(paneId, data, opts)) return false
     for (const cb of this.inputListeners) cb(paneId)
     return true
   }
@@ -524,12 +524,18 @@ class RemoteClient {
    * in the terminal (E2-FR-21, 23). Same gate and chunking as sendInput; the
    * server takes `input` for any pane of the snapshot, subscribed or not.
    */
-  sendInputTo(paneId: string, data: string): boolean {
+  sendInputTo(paneId: string, data: string, opts?: { submit?: boolean }): boolean {
     if (!paneId || !this.isOpen()) return false
-    for (const chunk of chunkInput(data)) {
-      if (!this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data: chunk })) return false
-    }
+    if (!this.sendFrames(paneId, data, opts)) return false
     for (const cb of this.inputListeners) cb(paneId)
+    return true
+  }
+
+  private sendFrames(paneId: string, data: string, opts?: { submit?: boolean }): boolean {
+    const submit = opts?.submit === true && data === '\r'
+    for (const chunk of chunkInput(data)) {
+      if (!this.send({ v: PROTOCOL_VERSION, type: 'input', paneId, data: chunk, ...(submit ? { submit } : {}) })) return false
+    }
     return true
   }
 
