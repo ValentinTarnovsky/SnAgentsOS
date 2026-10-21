@@ -144,7 +144,10 @@ export class WsNoteStore {
     if (Buffer.byteLength(text, 'utf8') > WS_NOTE_MAX_BYTES) return { ok: false, error: 'too_large' }
     try {
       if (baseRev !== undefined) {
-        const current = await this.doc(workspaceId, noteId).catch(() => null)
+        // undefined = there but unreadable (too large, io): the write goes on as before.
+        const current = await this.doc(workspaceId, noteId).catch(() => undefined)
+        // A guarded write updates that version: a note deleted meanwhile is not brought back.
+        if (current === null) return { ok: false, error: 'not_found' }
         if (current && current.rev !== baseRev) return { ok: false, error: 'conflict', current }
       }
       await fsp.mkdir(this.dir(workspaceId), { recursive: true })

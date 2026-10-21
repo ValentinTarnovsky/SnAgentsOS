@@ -3,6 +3,7 @@ import { Plus } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { initUpdaterEvents, startUpdateScheduler } from '@/lib/updater'
 import { initUsageEvents, syncUsageConfig } from '@/lib/usageStore'
+import { initAccountsEvents, syncAccountsConfig } from '@/lib/accountsStore'
 import { initRemoteEvents, syncRemoteConfig } from '@/lib/remoteStore'
 import { initRemoteCommands } from '@/lib/remoteCommands'
 import { initPromptResults } from '@/lib/promptDelivery'
@@ -58,6 +59,7 @@ export function App() {
   const customColors = useAppStore((s) => s.settings.customColors)
   const language = useAppStore((s) => s.settings.language)
   const usage = useAppStore((s) => s.settings.usage)
+  const claudeAccounts = useAppStore((s) => s.settings.claudeAccounts)
   const remote = useAppStore((s) => s.settings.remote)
   const awakeMode = useAppStore((s) => s.settings.awakeMode)
   const agents = useAppStore((s) => s.settings.agents)
@@ -114,6 +116,9 @@ export function App() {
   // Keep the usage-snapshot stream wired for the whole app lifetime.
   useEffect(() => initUsageEvents(), [])
 
+  // Claude accounts (app 2.3.0): main's state and event streams for the whole app lifetime.
+  useEffect(() => initAccountsEvents(), [])
+
   // Keep the remote server-status stream + control-command handler wired.
   useEffect(() => initRemoteEvents(), [])
   useEffect(() => initRemoteCommands(), [])
@@ -127,6 +132,11 @@ export function App() {
   useEffect(() => {
     if (hydrated) syncUsageConfig(usage)
   }, [hydrated, usage])
+
+  // Push the account switching policy to main whenever it changes.
+  useEffect(() => {
+    if (hydrated) syncAccountsConfig(claudeAccounts)
+  }, [hydrated, claudeAccounts])
 
   // Push remote settings to main (starts/stops/restarts the server) on change.
   useEffect(() => {

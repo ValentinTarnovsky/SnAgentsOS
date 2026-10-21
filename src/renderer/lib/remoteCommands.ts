@@ -9,8 +9,7 @@ import { revealPane } from './revealPane'
 import { getPtyId, killPanePtys } from './ptyRegistry'
 import { fitBaselineOf, useFitStore } from './fitStore'
 import { broadcastToWorkspace } from './broadcastPrompt'
-import { restartFresh, restartFromButton, restartResume } from './agentLaunch'
-import { wakePane } from './hibernation'
+import { restartPaneWith } from './paneRestart'
 import { runRemoteQuickCommand } from './quickCommands'
 import { runOpenPath, runOpenUrl } from './remoteOpen'
 import { runCreatePaneResume } from './remoteResume'
@@ -18,7 +17,9 @@ import { platformDefaultShell, runAgentEnd } from './agentEndRun'
 import { sendReviewNotes } from './sendReviewNotes'
 import { runCtlOp } from './ctlCommands'
 import { runScheduleNow, setScheduleEnabled } from './usePaneScheduler'
+import { runAgentTune } from './agentTune'
 import { toast } from './toast'
+import { accountName, useAccountsStore } from './accountsStore'
 import { translate } from '@/i18n'
 import type { Language } from '@shared/types'
 
@@ -130,15 +131,8 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
       if (!ws || !ws.panes.some((p) => p.id === action.paneId)) {
         return { ok: false, error: 'not_found' }
       }
-      // E5-FR-11: true resumes (falls back to a new chat with the chip when the
-      // record is gone), false forgets the session, absent = the header button.
-      // A sleeping console wakes through the overlay's path (E5-FR-26), so a
-      // scheduled prompt waits for the resumed agent; a phone `sub` never gets here.
-      if (action.resume === true) {
-        if (!wakePane(action.paneId)) restartResume(action.paneId)
-      }
-      else if (action.resume === false) restartFresh(action.paneId)
-      else restartFromButton(action.paneId)
+      // E5-FR-11 through the helper `snaos restart` shares (a phone `sub` never gets here).
+      restartPaneWith(action.paneId, action.resume)
       return { ok: true }
     }
 
@@ -215,6 +209,16 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
     case 'scheduleRun':
     case 'scheduleToggle':
       return runScheduleCtl(action)
+
+    // app 2.3.0: model, effort and Ultracode from the phone (Enter only with its opt-in).
+    case 'agentTune':
+      return runAgentTune(action)
+
+    // app 2.3.0: Claude account from the phone; main re-validates (accounts:switch, reason phone).
+    case 'claudeAccountUse':
+      return window.snApi.accounts
+        .switchTo(action.role, 'phone')
+        .then((r): CmdResult => (r.ok ? { ok: true } : { ok: false, error: r.error ?? 'error' }))
 
     default:
       return { ok: false, error: 'unknown_action' }
@@ -295,13 +299,21 @@ export function remoteNoticeText(
     what = translate(lang, 'toast.remote.restarted', { pane: paneTitle ?? '' })
   } else if (action.kind === 'closePane') {
     what = translate(lang, 'toast.remote.closed', { pane: paneTitle ?? '' })
+  } else if (action.kind === 'claudeAccountUse') {
+    // app 2.3.0: paneTitle carries the account's name (targetTitle).
+    what = translate(lang, 'toast.remote.claudeAccount', { account: paneTitle ?? '' })
   } else return null
   const name = deviceName?.trim()
   return name ? translate(lang, 'toast.remote.fromDevice', { device: name, what }) : translate(lang, 'toast.remote.fromPhone', { what })
 }
 
-/** Title of the pane an action targets, read before it runs (closePane removes it). */
+/** Title of the pane an action targets, read before it runs (closePane removes it); the account name for claudeAccountUse. */
 function targetTitle(action: RemoteCtlAction): string | undefined {
+  if (action.kind === 'claudeAccountUse') {
+    const lang = useAppStore.getState().settings.language
+    const acc = useAccountsStore.getState().state?.accounts.find((a) => a.role === action.role)
+    return accountName(acc ?? { label: '', role: action.role }, (key, vars) => translate(lang, key, vars))
+  }
   if (action.kind !== 'restartPane' && action.kind !== 'closePane') return undefined
   const ws = useAppStore.getState().workspaces.find((w) => w.id === action.workspaceId)
   return ws?.panes.find((p) => p.id === action.paneId)?.title

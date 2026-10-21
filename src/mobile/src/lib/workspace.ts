@@ -6,6 +6,7 @@
  * PC" chip and the last default of the new-console picker.
  */
 import type { RemotePaneInfo, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
+import { waitsOnUser } from '@shared/status'
 
 export function workspaceOfPane(snap: RemoteStateSnapshot, paneId: string): string | null {
   const ws = snap.workspaces.find((w) => w.panes.some((p) => p.id === paneId))
@@ -81,7 +82,7 @@ export function waitingPanes(
   const out: PaneRef[] = []
   for (const ws of snap.workspaces) {
     for (const pane of orderedPanes(ws)) {
-      if (pane.id !== activePaneId && statuses[pane.id]?.state === 'action') out.push({ workspaceId: ws.id, paneId: pane.id })
+      if (pane.id !== activePaneId && waitsOnUser(statuses[pane.id])) out.push({ workspaceId: ws.id, paneId: pane.id })
     }
   }
   return out
@@ -101,7 +102,7 @@ export function nextWaitingPane(
   const start = activePaneId ? all.findIndex((r) => r.paneId === activePaneId) : -1
   for (let i = 1; i <= all.length; i++) {
     const ref = all[(start + i + all.length) % all.length]
-    if (ref.paneId !== activePaneId && statuses[ref.paneId]?.state === 'action') return ref
+    if (ref.paneId !== activePaneId && waitsOnUser(statuses[ref.paneId])) return ref
   }
   return null
 }
@@ -136,20 +137,24 @@ export function tabPanes(snap: RemoteStateSnapshot, activePaneId: string | null)
  * Unread (E2-FR-05): the console sits in action, done or error since a moment
  * this phone has not seen it (lastViewedAt holds the stateSince of the state
  * last seen, so both sides of the comparison use the desktop clock).
+ * v2.3: never with the desktop's attention false (seen or answered on any device).
  */
 export function isUnread(status: RemotePaneStatus | undefined, lastViewedAt: number | undefined): boolean {
-  if (!status) return false
+  if (!status || status.attention === false) return false
   if (status.state !== 'action' && status.state !== 'done' && status.state !== 'error') return false
   return status.stateSince > (lastViewedAt ?? 0)
 }
 
-/** action > error > unread done > working > the rest (E2-FR-04). */
+/**
+ * action > error > unread done > working > the rest (E2-FR-04). v2.3: an
+ * answered action ranks as working and an acknowledged error as the rest.
+ */
 export function rowRank(status: RemotePaneStatus | undefined, unread: boolean): number {
   switch (status?.state) {
     case 'action':
-      return 0
+      return status.attention === false ? 3 : 0
     case 'error':
-      return 1
+      return status.attention === false ? 4 : 1
     case 'done':
       return unread ? 2 : 4
     case 'working':
@@ -178,5 +183,5 @@ export function homeRows(
 
 /** Consoles of a workspace in action: the red badge of its header (E2-FR-04). */
 export function actionCount(ws: RemoteStateSnapshot['workspaces'][number], statuses: Record<string, RemotePaneStatus>): number {
-  return ws.panes.reduce((n, p) => (statuses[p.id]?.state === 'action' ? n + 1 : n), 0)
+  return ws.panes.reduce((n, p) => (waitsOnUser(statuses[p.id]) ? n + 1 : n), 0)
 }

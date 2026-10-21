@@ -94,6 +94,11 @@ export interface PushMessage {
   url: string
   /** action: `urgency: high`. */
   urgent: boolean
+  /**
+   * v2.3: the state the push announces. The phone closes a tray note whose
+   * console is no longer in it (or no longer needs the user), with no silent push.
+   */
+  state?: 'action' | 'done' | 'error'
 }
 
 /**
@@ -115,7 +120,7 @@ export function buildPushMessage(notice: StatusNotice, config: ConfigFile | null
     url = `./#ws=${encodeURIComponent(ws.id)}&pane=${encodeURIComponent(pane.id)}`
     break
   }
-  return { title, body: body.slice(0, 200), tag: notice.paneId, url, urgent: notice.state === 'action' }
+  return { title, body: body.slice(0, 200), tag: notice.paneId, url, urgent: notice.state === 'action', state: notice.state }
 }
 
 export interface PushSendOpts {
@@ -327,7 +332,7 @@ export class PushService {
     const data = this.load()
     const vapid = data.vapid
     if (!vapid || data.subscriptions.length === 0) return 0
-    const payload = JSON.stringify({ title: msg.title, body: msg.body, tag: msg.tag, url: msg.url })
+    const payload = JSON.stringify({ title: msg.title, body: msg.body, tag: msg.tag, url: msg.url, ...(msg.state ? { state: msg.state } : {}) })
     const opts: PushSendOpts = {
       TTL: PUSH_TTL_S,
       urgency: msg.urgent ? 'high' : 'normal',

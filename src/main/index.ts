@@ -22,6 +22,11 @@ import { registerWindowIpc, wireWindowMaximizeEvents } from './ipc/registerWindo
 import { registerSystemIpc } from './ipc/registerSystemIpc'
 import { registerUpdateIpc } from './ipc/registerUpdateIpc'
 import { registerUsageIpc } from './ipc/registerUsageIpc'
+import { registerAccountsIpc } from './ipc/registerAccountsIpc'
+import { AccountService } from './accounts/AccountService'
+import { ctlAccountsView } from './cli/accountsView'
+import { AccountVault } from './accounts/AccountVault'
+import { electronCrypto } from './accounts/safeCrypto'
 import { registerGitIpc } from './ipc/registerGitIpc'
 import { registerReviewNotesIpc } from './ipc/registerReviewNotesIpc'
 import { registerWsNotesIpc } from './ipc/registerWsNotesIpc'
@@ -92,7 +97,7 @@ const ptyManager: PtyManager = new PtyManager(
   // Closure: statusManager is constructed below; the prompt gate polls it (E8-FR-02b).
   (paneId) => {
     const s = statusManager.stateOf(paneId)
-    return s && s.state ? { state: s.state, precise: s.precise } : null
+    return s && s.state ? { state: s.state, precise: s.precise, provider: s.provider, pendingCount: s.pendingCount, ended: statusManager.isEnded(paneId) } : null
   },
 )
 const configStore = new ConfigStore()
@@ -128,6 +133,9 @@ const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime
 ptyManager.addSink(statusManager)
 // Agent status reaches phones straight from main (E1-FR-03), not via the renderer.
 statusManager.addListener((evt) => remoteManager.pushPaneStatus(evt))
+// v2.3 attention: a phone looking at a pane acknowledges it, both ways.
+statusManager.setRemoteSeen((paneId) => remoteManager.isPaneSeen(paneId))
+remoteManager.setPaneSeenListener((paneId) => statusManager.ackPane(paneId))
 ptyManager.addSink(codexBridge)
 // snaos CLI (E8-FR-12..22): control server, console tokens, runtime.json and shim under dataDir().
 const cliService: CliService = new CliService({
@@ -153,6 +161,8 @@ let agentSessions: AgentSessionStore | null = null
 let hibernation: HibernationCoordinator | null = null
 // Saved scrollback (E6-FR-08..13, 36): created in bootstrap, under dataDir().
 let scrollbackCheckpoint: ScrollbackCheckpoint | null = null
+// Claude multi-account (app 2.3.0): created in bootstrap (safeStorage needs app ready).
+let accountService: AccountService | null = null
 // Review notes (E7-FR-18): created in bootstrap; flushed on the exits that skip before-quit.
 let reviewNotes: ReviewNoteStore | null = null
 // Crash resilience (E4-FR-21..25). The breaker dialog's [Close] quits without
@@ -406,7 +416,7 @@ function openMainWindow(): void {
   wireWindowMaximizeEvents(win)
 
   // Stop the taskbar flash (status notifications) once the user comes back.
-  win.on('focus', () => win.flashFrame(false))
+  win.on('focus', () => { win.flashFrame(false); statusManager.onWindowFocus() })
 
   // A renderer reload or crash leaves any ptys it had paused (backpressure)
   // stuck paused, which would starve connected phones. Resume them so the
@@ -551,12 +561,53 @@ async function bootstrap(): Promise<void> {
       scrollbackCheckpoint?.persistAllSync()
     },
   })
-  registerUsageIpc({
+  // Claude multi-account (app 2.3.0): saved logins under dataDir()/claude-accounts/,
+  // encrypted with safeStorage (needs app ready). Main is the only writer of the
+  // live .credentials.json; nothing that leaves main carries a token.
+  const vaultCrypto = electronCrypto()
+  const accounts = new AccountService({
+    vault: new AccountVault(join(dataDir(), 'claude-accounts'), vaultCrypto),
+    crypto: vaultCrypto,
+    statuses: () => statusManager.snapshot(),
+    emit: (s) => {
+      const wc = mainWindow?.webContents
+      if (wc && !wc.isDestroyed()) wc.send(CH.ACCOUNTS_CHANGED, s)
+    },
+    event: (e) => {
+      const wc = mainWindow?.webContents
+      if (wc && !wc.isDestroyed()) wc.send(CH.ACCOUNTS_EVENT, e)
+    },
+    alert: ({ title, body }) => {
+      statusManager.notifyCustom(null, title, body)
+      noticeRouter?.routeCustom({ kind: 'custom', paneId: null, title, body })
+    },
+    // Language of the notices only (read when one fires, which is rare).
+    config: () => configStore.load(),
+    // The usage poller's normalized interval: no config read per policy run.
+    usageIntervalMs: () => usageHandle.intervalMs(),
+    usageEnabled: () => usageHandle.enabled(),
+  })
+  accountService = accounts
+  // One usage handle { get, load, enabled, refreshClaudeNow, republish, intervalMs }: AccountService and snaos usage (4b).
+  const usageHandle = registerUsageIpc({
     getSender: () => mainWindow?.webContents ?? null,
     getInitialConfig: () => configStore.load()?.settings?.usage ?? null,
     // A finished Codex turn refreshes the Codex usage bar.
     onStatus: (cb) => statusManager.addListener(cb),
+    accounts: {
+      windowsNeeded: () => accounts.windowsNeeded(),
+      badge: () => accounts.badge(),
+      onActiveResult: (rows, at) => accounts.onActiveUsage(rows, at),
+      reconcile: () => void accounts.reconcile(),
+    },
   })
+  accounts.setUsageControl({ refreshActive: () => usageHandle.refreshClaudeNow(), republish: () => usageHandle.republish() })
+  registerAccountsIpc(accounts)
+  // snaos usage / account (app 2.3.0, 4b): the same usage handle, and an adapter
+  // over AccountService that picks every field (no token, blob or email) and
+  // switches with reason 'cli'. Before cliService.setEnabled below.
+  cliService.attach({ usage: usageHandle, accounts: ctlAccountsView(accounts) })
+  void accounts.init(configStore.load()?.settings?.claudeAccounts ?? null).catch(() => undefined)
   // Git chip (E7-FR-05..10); settings.gitChip is a schema 12 key, absent = on.
   registerGitIpc({
     getSender: () => mainWindow?.webContents ?? null,
@@ -653,6 +704,10 @@ async function bootstrap(): Promise<void> {
   const chatHub: ChatHub = new ChatHub({ locate: (paneId) => chatLocator.locate(paneId) })
   statusManager.onTranscriptChange((paneId) => chatHub.transcriptChanged(paneId))
   remoteManager.setChat(chatHub)
+  // snaos notes / chat / peek (app 2.3.0): the same notes store as the drawer and
+  // the phones; transcripts through the locator only, read one-shot (never a
+  // ChatHub reader, so no watcher opens: FR-35 holds). Before setEnabled below.
+  cliService.attach({ notes: wsNotes, chat: { locate: (paneId) => chatLocator.locate(paneId) } })
   const bootCfg = configStore.load()
   awakeService = registerPowerIpc({
     getSender: () => mainWindow?.webContents ?? null,
@@ -751,6 +806,7 @@ app.on('before-quit', () => {
   afterPtysKilled()
   scrollbackCheckpoint?.stop()
   awakeService?.dispose()
+  accountService?.dispose()
   statusManager.dispose()
   codexBridge.dispose()
   discordNotifier.dispose()

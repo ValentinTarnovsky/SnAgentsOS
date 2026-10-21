@@ -10,6 +10,7 @@
  */
 import type { ClaudePaneState } from '@shared/types'
 import type { RemotePaneStatus } from '@shared/remote-protocol'
+import { displayStatus } from '@shared/status'
 import { t, type MobileMessageKey } from './i18n'
 
 const STATE_KEY: Record<ClaudePaneState, MobileMessageKey> = {
@@ -119,7 +120,8 @@ export interface RowLineInput {
 }
 
 /** True while a row's second line shows a relative time (drives the 30s ticker). */
-export function rowShowsTime(status: RemotePaneStatus | undefined): boolean {
+export function rowShowsTime(raw: RemotePaneStatus | undefined): boolean {
+  const status = displayStatus(raw)
   if (!status) return false
   if (status.state === 'action') return false
   return status.state === 'working' || status.state === 'done' || status.state === 'error'
@@ -132,7 +134,8 @@ export function rowShowsTime(status: RemotePaneStatus | undefined): boolean {
  * when its workspace is not mounted on the desktop.
  */
 export function rowLine(input: RowLineInput, now: number): string {
-  const { status } = input
+  // An answered action (attention false) reads working, or idle when title-only.
+  const status = displayStatus(input.status)
   if (status) {
     const reason = status.reason
     if (status.state === 'action') {

@@ -73,8 +73,9 @@ export function cardFor(status: RemotePaneStatus | undefined, enabled: boolean):
 /**
  * E2-FR-25: the pane waits on the user but there is no card to show. A plan
  * card whose menu did not validate on screen (`menuOk` false) counts as no
- * card, so the strip is the fallback when Claude changes its layout.
+ * card, so the strip is the fallback when Claude changes its layout. v2.3:
+ * never once the desktop says the request was answered (attention false).
  */
 export function needsGenericStrip(status: RemotePaneStatus | undefined, card: PromptCardModel | undefined, menuOk = true): boolean {
-  return !!status && status.state === 'action' && (!card || (card.kind === 'plan' && !menuOk))
+  return !!status && status.state === 'action' && status.attention !== false && (!card || (card.kind === 'plan' && !menuOk))
 }

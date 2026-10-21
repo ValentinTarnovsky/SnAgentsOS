@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AgentPreset } from '@shared/types'
 import { AGENT_ROWS_MAX, pickAgentRows } from '@shared/agents'
+import { displayStatus } from '@shared/status'
 import { useLang, useT } from '@/i18n'
 import { agentPhrase, agentTitle, type AgentEntry } from '@/lib/agentNav'
 import { revealPane } from '@/lib/revealPane'
@@ -33,7 +34,9 @@ export function useNow(ms: number): number {
 export function glyphOf(e: AgentEntry): GlyphKind {
   if (e.sleeping) return 'sleeping'
   if (e.notStarted || !e.status) return 'notStarted'
-  return e.status.waiting && e.status.state === 'working' ? 'waiting' : e.status.state
+  // v2.3: an action main marked as answered shows what the agent does now.
+  const s = displayStatus(e.status)
+  return s.waiting && s.state === 'working' ? 'waiting' : s.state
 }
 
 /**

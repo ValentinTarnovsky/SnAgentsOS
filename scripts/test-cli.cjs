@@ -6,8 +6,11 @@
 // (Discord, ntfy, router, native), CtlServer over a real temp pipe (401, 403,
 // 413, caller from the token), every handler (ls, open, spawn, send, read,
 // wait incl. noTurnObserved / timeout / cancel / 32 waiters, status, notify
-// rate, note), cliEntry (parser, stdin, --file, --json, exit codes, dead pid)
-// and CliService end to end. Same esbuild + vm harness as test-status.cjs.
+// rate, note; app 2.3.0: chat and peek over the chat fixtures, kill, restart,
+// rename, ws, notes; 4b: usage, account ls|status|use over the AccountService
+// adapter, never a token or an email), cliEntry (parser, subcommands, stdin, --file, --json,
+// exit codes incl. 8, dead pid) and CliService end to end (a real WsNoteStore
+// and the fixture transcripts through the pipe). Same esbuild + vm harness as test-status.cjs.
 // Never touches the real HKCU, ~/.claude or the app's data folder.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -73,6 +76,23 @@ function refChecks() {
   check(!c(null, '2').ok && c(null, '2').code === 'bad_request', 'an index without any workspace is bad_request')
   check(!c('w-api', '7').ok && c('w-api', '7').code === 'not_found' && !c(null, 'api:9').ok && c(null, 'api:9').code === 'not_found', 'out of range indexes are not_found')
   check(R.workspaceOfPane(list, 'p-a3').workspace.id === 'w-api' && R.workspaceOfPane(list, 'x') === null, 'workspaceOfPane')
+  // app 2.3.0: Markdown notes by id or exact title, never an index.
+  const notes = [
+    { id: 'n-aaaa', title: 'Plan', updatedAt: 3, size: 10, rev: 'r1' },
+    { id: 'n-bbbb', title: 'Ideas', updatedAt: 2, size: 5, rev: 'r1' },
+    { id: 'n-cccc', title: 'ideas', updatedAt: 1, size: 5, rev: 'r1' },
+    { id: 'n-dddd', title: '', updatedAt: 0, size: 0, rev: 'r1' },
+  ]
+  const n = (ref) => R.resolveNoteRef(notes, ref)
+  check(n('n-bbbb').ok && n('n-bbbb').note.title === 'Ideas', 'a note by id')
+  check(n('  PLAN ').ok && n('  PLAN ').note.id === 'n-aaaa', 'a note by exact title, case-insensitive, trimmed')
+  check(!n('ideas').ok && n('ideas').code === 'ambiguous' && /n-bbbb/.test(n('ideas').message) && /n-cccc/.test(n('ideas').message), 'a repeated title is ambiguous and lists the ids')
+  check(n('').code === 'bad_request' && n('Plan B').code === 'not_found' && n('1').code === 'not_found', 'empty is bad_request; unknown (and an index) is not_found')
+  // The stored title drops Markdown marks (noteTitle): `fix_login` is listed as `fixlogin`.
+  const W = load('src/shared/ws-notes.ts')
+  const marked = [{ id: 'n-eeee', title: W.noteTitle('# fix_login `api`'), updatedAt: 0, size: 0, rev: 'r1' }]
+  const m = (ref) => R.resolveNoteRef(marked, ref)
+  check(marked[0].title === 'fixlogin api' && m('fix_login `api`').ok && m('# FIX_login `api`').ok && m('fixlogin api').ok && m('fix_login').code === 'not_found', 'a title with Markdown marks resolves as written (cleaned like the stored title)')
 }
 
 function ansiChecks() {
@@ -252,6 +272,7 @@ function skillChecks() {
   const nameLine = fm[1], descLine = fm[2]
   check(fm[0] === '---' && fm[3] === '---' && /^name: [a-z0-9-]{1,64}$/.test(nameLine) && descLine.startsWith('description: ') && descLine.length - 'description: '.length <= 1024, 'the front matter is name + one-line description within the Codex limits')
   check(!/: |\s#/.test(descLine.slice('description: '.length)) && !/^description: ["'|>\[{&*!%@`]/.test(descLine), 'the description parses as a plain YAML scalar (no ": ", no " #", no leading indicator)')
+  check(['mira que esta haciendo la consola', 'anota esto en las notas del workspace', 'cuanto uso me queda', 'cambia de cuenta de claude'].every((t) => descLine.includes(`"${t}"`)) && /usage/.test(descLine) && /Claude account/.test(descLine), 'the description triggers on observing consoles, notes, usage and the Claude account')
   check(K.skillStatus('claude', '2.1.0', env).state === 'outdated' && K.skillStatus('codex', '2.1.0', env).state === 'outdated', 'another app version reads as outdated, per agent')
   const ref = K.refreshSkillOnStartup('2.1.0', env)
   check(ref[0].target === 'claude' && ref[0].state === 'installed' && ref[1].target === 'codex' && ref[1].state === 'installed', 'the startup refresh rewrites both agents')
@@ -385,6 +406,7 @@ function fakeWorld() {
       if (op.kind === 'list') return { ok: true, data: JSON.parse(JSON.stringify(list)) }
       if (op.kind === 'spawn') return { ok: true, data: { paneId: 'p-new', index: 4, promptDelivery: op.prompt ? 'argv' : 'none' } }
       if (op.kind === 'read') return bus.readResult
+      if (op.kind === 'createWorkspace') return { ok: true, data: { workspaceId: 'w-new', index: 3 } }
       return { ok: true }
     },
   }
@@ -396,7 +418,7 @@ function fakeWorld() {
     lastOutput: {},
     ring: { p2: '\x1b[32mPS C:\\>\x1b[0m dir\r\nfile.txt\r\nspin |\r\x1b[Kspin /\r\x1b[Kdone\r\n' },
     ptyIdForPane: (id) => (running.has(id) ? `pty-${id}` : null),
-    async submitToPane(ptyId, paneId, text, enter) { pty.submits.push({ ptyId, paneId, text, enter }); return pty.submitResult },
+    async submitToPane(ptyId, paneId, text, enter, origin) { pty.submits.push({ ptyId, paneId, text, enter, origin }); return pty.submitResult },
     lastSubmitAt: (id) => pty.lastSubmit[id],
     lastOutputAt: (id) => pty.lastOutput[id],
     tail: (id) => (running.has(id) ? pty.ring[id] ?? '' : null),
@@ -449,6 +471,11 @@ async function serverChecks() {
     check((await rpcRaw(endpoint, { token: master, body: { v: 1, method: 'rm -rf', params: {} } })).json.error.code === 'bad_request', 'an unknown method: bad_request')
     check((await rpcRaw(endpoint, { token: master, body: { v: 2, method: 'ping', params: {} } })).json.error.code === 'bad_request', 'another protocol version: bad_request')
     check((await rpcRaw(endpoint, { token: master, urlPath: '/other' })).status === 404, 'another path: 404')
+    const fresh = ['chat', 'peek', 'kill', 'restart', 'rename', 'ws.new', 'ws.rename', 'ws.close', 'ws.fav', 'notes.ls', 'notes.get', 'notes.new', 'notes.set', 'notes.append', 'notes.rm', 'notes.open', 'usage', 'account.ls', 'account.status', 'account.use']
+    const passed = []
+    for (const method of fresh) if ((await rpcRaw(endpoint, { token: master, body: { v: 1, method, params: {} } })).json.ok) passed.push(method)
+    check(passed.length === fresh.length && fresh.every((m) => seen.some((s) => s.method === m)), 'every app 2.3.0 method (4b usage and account.* included) passes the server validation', passed)
+    check((await rpcRaw(endpoint, { token: master, body: { v: 1, method: 'account.rm', params: {} } })).json.error.code === 'bad_request', 'an account method the protocol does not have (account.rm): bad_request')
   } finally {
     await server.stop()
   }
@@ -527,6 +554,7 @@ async function handlerChecks() {
     const h = makeHandlers(w)
     const r = await call(h, 'send', { console: '2', text: 'ls\n', enter: true }, caller1)
     check(r.ok && w.pty.submits[0].paneId === 'p2' && w.pty.submits[0].text === 'ls' && w.pty.submits[0].enter === true, 'send 2 --enter submits to console 2 of the caller workspace (trailing break dropped)')
+    check(w.pty.submits[0].origin === 'auto', 'v2.3: snaos send writes with origin auto (it never acknowledges attention)')
     await call(h, 'send', { console: 'api:3', text: 'hola' }, null)
     check(w.pty.submits[1].paneId === 'p3' && w.pty.submits[1].enter === false, 'without --enter the text is typed, never submitted')
     check((await call(h, 'send', { console: 'srv:1', text: 'x' })).error.code === 'ssh_protected', 'a console with a profile: ssh_protected')
@@ -595,6 +623,443 @@ async function handlerChecks() {
     check(first.title === 'SnAgentsOS' && first.body === 'n0' && first.local === false && first.paneId === 'p1', 'default title is the product name; remote unless --local')
     check(w.ops.some((o) => o.kind === 'attention' && o.paneId === 'p1'), 'notify marks the calling console with attention')
     check((await call(h, 'notify', { text: '   ' }, { ...caller1, paneId: 'p3' })).error.code === 'bad_request', 'an empty notify is bad_request')
+  }
+}
+
+// --- H/I (app 2.3.0). chat, peek, console and workspace control, notes ----------------
+
+const FIX = path.join(root, 'scripts', 'fixtures', 'chat')
+const claudeRec = (role, uuid, text) => JSON.stringify({ isSidechain: false, type: role, uuid, timestamp: '2026-10-01T10:00:00.000Z', message: role === 'user' ? { role: 'user', content: text } : { id: `m-${uuid}`, role: 'assistant', content: [{ type: 'text', text }] } })
+
+/** An in-memory WsNoteStore: revs r1, r2..., `conflict` on a stale baseRev, writes yield so races show. */
+function fakeNotes() {
+  const docs = new Map()
+  let rev = 0, ids = 0, clock = 1000
+  const meta = (id, d) => ({ id, title: (d.text.split('\n').find((l) => l.trim()) ?? '').replace(/^#+\s*/, '').trim(), updatedAt: d.updatedAt, size: Buffer.byteLength(d.text), rev: d.rev })
+  const put = (k, text) => docs.set(k, { text, rev: `r${++rev}`, updatedAt: ++clock })
+  const api = {
+    calls: [],
+    interfere: null,
+    seed(ws, id, text) { put(`${ws}/${id}`, text) },
+    text(ws, id) { return docs.get(`${ws}/${id}`)?.text },
+    async list(ws) { api.calls.push('list'); return { ok: true, notes: [...docs].filter(([k]) => k.startsWith(`${ws}/`)).map(([k, d]) => meta(k.slice(ws.length + 1), d)).sort((a, b) => b.updatedAt - a.updatedAt) } },
+    async read({ workspaceId, noteId }) { const d = docs.get(`${workspaceId}/${noteId}`); return d ? { ok: true, note: { ...meta(noteId, d), text: d.text, path: `C:\\data\\notes\\${workspaceId}\\${noteId}.md` } } : { ok: false, error: 'not_found' } },
+    async write({ workspaceId, noteId, text, baseRev }) {
+      api.calls.push('write')
+      const k = `${workspaceId}/${noteId}`
+      if (!docs.has(k)) return { ok: false, error: 'not_found' }
+      if (api.interfere) { const f = api.interfere; api.interfere = null; f() }
+      const cur = docs.get(k)
+      if (baseRev !== undefined && cur.rev !== baseRev) return { ok: false, error: 'conflict', current: { ...meta(noteId, cur), text: cur.text } }
+      await sleep(3)
+      put(k, text)
+      return { ok: true, note: meta(noteId, docs.get(k)) }
+    },
+    async create({ workspaceId, text }) { api.calls.push('create'); const id = `n-${String(++ids).padStart(4, '0')}`; put(`${workspaceId}/${id}`, text ?? ''); return { ok: true, note: meta(id, docs.get(`${workspaceId}/${id}`)) } },
+    async delete({ workspaceId, noteId }) { api.calls.push('delete'); return docs.delete(`${workspaceId}/${noteId}`) ? { ok: true } : { ok: false, error: 'not_found' } },
+  }
+  return api
+}
+
+async function moreHandlerChecks() {
+  // chat: stateless transcript reads through a fake locate + the fixtures.
+  {
+    const w = fakeWorld()
+    const locs = {
+      p1: { ok: true, path: path.join(FIX, 'claude-session.jsonl'), provider: 'claude' },
+      p3: { ok: true, path: path.join(FIX, 'codex-rollout.jsonl'), provider: 'codex' },
+    }
+    const located = []
+    const svc = { chat: { locate: async (id) => { located.push(id); return locs[id] ?? { ok: false, reason: 'noTranscript' } } } }
+    const h = makeHandlers(w, undefined, { services: () => svc })
+    const all = await call(h, 'chat', { console: '1' }, caller1)
+    check(all.ok && all.data.provider === 'claude' && all.data.turns === 3 && all.data.items[0].id === '56' && all.data.items[0].role === 'user' && all.data.nextCursor === null, 'chat: the last 3 turns of a Claude console (the whole fixture), oldest first, no older cursor')
+    check(all.data.items.every((m) => m.blocks.every((b) => b.t !== 'thinking' && b.t !== 'toolResult')) && all.data.items.some((m) => m.blocks.some((b) => b.t === 'toolUse' && b.summary === 'npm test')), 'chat: tool calls stay, tool output and thinking only with their flags')
+    check(!all.data.items.some((m) => m.role === 'tool'), 'chat: a tool row left without blocks is dropped')
+    const one = await call(h, 'chat', { console: '1', turns: 1 }, caller1)
+    check(JSON.stringify(one.data.items.map((m) => m.id)) === '["7724","8197"]' && one.data.turns === 1 && one.data.nextCursor === '7724', 'chat --turns 1: the last user message and its reply, with the cursor of what is older')
+    const older = await call(h, 'chat', { console: '1', turns: 1, before: one.data.nextCursor }, caller1)
+    check(older.ok && older.data.items[0].id === '7018' && older.data.items[0].role === 'user' && older.data.nextCursor === '7018', 'chat --before <cursor> pages back one turn at a time')
+    const full = await call(h, 'chat', { console: '1', tools: true, thinking: true }, caller1)
+    check(full.data.items.some((m) => m.blocks.some((b) => b.t === 'thinking')) && full.data.items.some((m) => m.role === 'tool' && m.blocks.some((b) => b.t === 'toolResult')), '--tools and --thinking add tool output and reasoning')
+    const cx = await call(h, 'chat', { console: '3', turns: 5 }, caller1)
+    check(cx.ok && cx.data.provider === 'codex' && cx.data.turns === 1 && cx.data.items[0].role === 'user' && cx.data.items.some((m) => m.blocks.some((b) => b.t === 'text' && b.text === 'Fixed the failing test.')), 'chat of a Codex console decodes its rollout')
+    check(located.every((id) => id === 'p1' || id === 'p3'), 'chat locates only the asked console')
+    // A text over 4 KB is clipped with truncated; pages across a scan-capped empty page.
+    const dir = tmp('chat-fx')
+    const big = path.join(dir, 'big.jsonl')
+    fs.writeFileSync(big, [claudeRec('user', 'a', 'pregunta vieja'), claudeRec('assistant', 'b', 'x'.repeat(5000)), ''].join('\n'))
+    const junk = ('not json ' + 'z'.repeat(1015) + '\n').repeat(9 * 1024)
+    fs.appendFileSync(big, junk)
+    fs.appendFileSync(big, [claudeRec('user', 'c', 'pregunta nueva'), claudeRec('assistant', 'd', 'respuesta'), ''].join('\n'))
+    locs.p1 = { ok: true, path: big, provider: 'claude' }
+    const two = await call(h, 'chat', { console: '1', turns: 2 }, caller1)
+    const longText = two.data.items.find((m) => m.role === 'assistant')?.blocks[0]
+    check(two.ok && two.data.turns === 2 && two.data.items[0].blocks[0].text === 'pregunta vieja' && two.data.nextCursor === null, 'chat keeps reading past a page that scanned 8 MB without a message (empty page with a cursor)')
+    check(longText.text.length === 4096 && longText.truncated === true, 'a text block over 4 KB is clipped to 4096 with truncated')
+    const newest = await call(h, 'chat', { console: '1', turns: 1 }, caller1)
+    check(newest.data.items.length === 2 && newest.data.items[0].blocks[0].text === 'pregunta nueva' && newest.data.nextCursor !== null, 'one turn needs one page; the cursor points past the junk')
+    // One line with a tool result and the user's prompt (`<off>.0`, `<off>.1`): the page starts at the whole line.
+    const shared = path.join(dir, 'shared.jsonl')
+    const toolAndText = JSON.stringify({ isSidechain: false, type: 'user', uuid: 'c', timestamp: '2026-10-01T10:00:00.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'salida del tool' }, { type: 'text', text: 'segunda pregunta' }] } })
+    fs.writeFileSync(shared, [claudeRec('user', 'a', 'primera'), claudeRec('assistant', 'b', 'ok'), toolAndText, claudeRec('assistant', 'd', 'respuesta'), ''].join('\n'))
+    locs.p1 = { ok: true, path: shared, provider: 'claude' }
+    const last = await call(h, 'chat', { console: '1', tools: true, turns: 1 }, caller1)
+    const prev = await call(h, 'chat', { console: '1', tools: true, turns: 1, before: last.data.nextCursor }, caller1)
+    const results = [...last.data.items, ...prev.data.items].filter((m) => m.blocks.some((b) => b.t === 'toolResult'))
+    check(last.ok && prev.ok && last.data.turns === 1 && /\.0$/.test(last.data.items[0].id) && last.data.items[1].role === 'user' && results.length === 1 && prev.data.items[0].blocks[0].text === 'primera' && prev.data.nextCursor === null, 'chat --tools paging: a tool result sharing a line with the prompt shows exactly once')
+    // At most CTL_CHAT_MAX_PAGES (8) pages of 50 per call, even without a turn found.
+    const long = path.join(dir, 'long.jsonl')
+    fs.writeFileSync(long, [claudeRec('user', 'u0', 'arranque'), ...Array.from({ length: 450 }, (_, i) => claudeRec('assistant', `r${i}`, `paso ${i}`)), ''].join('\n'))
+    locs.p1 = { ok: true, path: long, provider: 'claude' }
+    const capped = await call(h, 'chat', { console: '1', turns: 2 }, caller1)
+    check(capped.ok && capped.data.items.length === 400 && capped.data.turns === 0 && capped.data.nextCursor !== null, 'chat reads at most 8 pages of 50 messages per call, with a cursor to go on')
+    // No transcript.
+    locs.p1 = { ok: false, reason: 'noTranscript', pending: true }
+    const pend = await call(h, 'chat', { console: '1' }, caller1)
+    check(pend.ok && pend.data.pending === true && pend.data.items.length === 0 && pend.data.nextCursor === null, 'a transcript still coming is ok with items [] and pending')
+    locs.p1 = { ok: false, reason: 'ambiguous' }
+    const amb = await call(h, 'chat', { console: '1' }, caller1)
+    check(!amb.ok && amb.error.code === 'not_found' && amb.data.reason === 'ambiguous' && /snaos read p1/.test(amb.error.message), 'a transcript reason is not_found with data.reason (never exit 4), suggesting read on a running console')
+    w.running.delete('p2')
+    const stopped = await call(h, 'chat', { console: '2' }, caller1)
+    check(stopped.error.code === 'not_found' && stopped.data.reason === 'noTranscript' && /snaos peek p2/.test(stopped.error.message), 'without a pty it suggests peek instead')
+    locs.p1 = { ok: true, path: path.join(dir, 'gone.jsonl'), provider: 'claude' }
+    check((await call(h, 'chat', { console: '1' }, caller1)).data.reason === 'noTranscript', 'a located file that vanished is noTranscript')
+    check((await call(h, 'chat', { console: 'srv:1' }, caller1)).error.code === 'ssh_protected', 'chat of a profile console: ssh_protected')
+    check((await call(h, 'chat', { console: '1', before: 'abc' }, caller1)).error.code === 'bad_request' && (await call(h, 'chat', { console: '1', before: -1 }, caller1)).error.code === 'bad_request' && (await call(h, 'chat', { console: '1', turns: 0 }, caller1)).error.code === 'bad_request', '--before must be a non-negative integer cursor; --turns positive')
+    check((await call(makeHandlers(w), 'chat', { console: '1' }, caller1)).error.code === 'disabled', 'no chat service attached: disabled')
+    check(!w.ops.some((o) => o.kind === 'attention'), 'chat never touches the attention marks')
+  }
+  // peek
+  {
+    const w = fakeWorld()
+    const svc = { chat: { locate: async (id) => (id === 'p3' ? { ok: true, path: path.join(FIX, 'codex-rollout.jsonl'), provider: 'codex' } : { ok: false, reason: 'noTranscript' }) } }
+    const h = makeHandlers(w, undefined, { services: () => svc })
+    w.states.p1 = { paneId: 'p1', provider: 'claude', state: 'action', precise: true, notify: false, attention: true, reason: 'permission', pendingCount: 1, pending: [{ id: 'tu1', kind: 'permission', toolName: 'Bash', summary: 'rm -rf build', questions: [] }], stateSince: 1000, activity: 'Bash: rm -rf build', lastMessage: 'listo para borrar', model: 'opus', effort: 'high', ultracode: true, sessionId: 'secret-session' }
+    const pk = await call(h, 'peek', { console: '1' }, null)
+    const d = pk.data
+    check(pk.ok && d.paneId === 'p1' && d.state === 'action' && d.attention === true && d.reason === 'permission' && d.pendingCount === 1 && d.provider === 'claude', 'peek: state, attention, reason and pending count from stateOf')
+    check(JSON.stringify(d.pending) === '[{"kind":"permission","toolName":"Bash","summary":"rm -rf build"}]' && !('sessionId' in d), 'peek: pending summarized (no ids or options), nothing desktop-only leaks')
+    check(d.model === 'opus' && d.effort === 'high' && d.ultracode === true && d.lastMessage === 'listo para borrar' && d.statusLine === 'corriendo tests' && d.stateSince === 1000, 'peek: model, effort and Ultracode read-back, last reply and status line')
+    check(JSON.stringify(d.lines) === '["uno","dos","tres"]' && w.ops.at(-1).kind === 'read' && w.ops.at(-1).lines === 30, 'peek: the last 30 screen lines by default')
+    check(!w.ops.some((o) => o.kind === 'attention') && w.states.p1.attention === true, 'peek never clears attention (no ack, no attention op)')
+    await call(h, 'peek', { console: '1', lines: 5000 }, null)
+    check(w.ops.at(-1).lines === 2000, 'peek --lines is capped like read')
+    w.running.delete('p3')
+    const cx = await call(h, 'peek', { console: 'api:3' }, null)
+    check(cx.ok && cx.data.running === false && cx.data.lines.length === 0 && cx.data.state === null && cx.data.provider === 'codex' && cx.data.lastMessage === 'Fixed the failing test.', 'peek without a pty: running false, lines [], last reply from the transcript when the status has none')
+    check((await call(h, 'peek', { console: 'srv:1' }, null)).error.code === 'ssh_protected', 'peek of a profile console: ssh_protected')
+    const shell = await call(makeHandlers(w), 'peek', { console: '2' }, caller1)
+    check(shell.ok && shell.data.type === 'shell' && !('provider' in shell.data) && shell.data.state === null, 'peek of a shell without a chat service still answers')
+    check((await call(h, 'peek', { console: '1', lines: 0 }, null)).error.code === 'bad_request', 'peek --lines 0 is bad_request')
+    // The read bucket: 120 a minute per caller.
+    const hb = makeHandlers(fakeWorld())
+    let okCount = 0
+    for (let i = 0; i < 120; i++) if ((await call(hb, 'peek', { console: '2' }, caller1)).ok) okCount++
+    check(okCount === 120 && (await call(hb, 'peek', { console: '2' }, caller1)).error.code === 'rate_limited', 'the 121st chat or peek in a minute: rate_limited')
+    check((await call(hb, 'peek', { console: '2' }, null)).ok, 'the read budget is per caller')
+  }
+  // kill, restart, rename
+  {
+    const w = fakeWorld()
+    const h = makeHandlers(w)
+    const k = await call(h, 'kill', { console: '2' }, caller1)
+    check(k.ok && k.data.killed === true && k.data.closed === false && w.ops.at(-1).kind === 'kill' && w.ops.at(-1).paneId === 'p2' && w.ops.at(-1).close === false && w.ops.at(-1).workspaceId === 'w1' && w.ops.at(-1).running === true, 'kill 2: the renderer op kill (explicit killPanePtys there), running per main')
+    w.running.delete('p3')
+    const k2 = await call(h, 'kill', { console: '3', close: true }, caller1)
+    check(k2.ok && k2.data.killed === false && k2.data.closed === true && w.ops.at(-1).close === true && w.ops.at(-1).running === false, 'kill of a stopped console is ok with killed false (the op says running false); --close closes it')
+    check((await call(h, 'kill', { console: 'self' }, caller1)).error.code === 'bad_request' && (await call(h, 'kill', { console: '1' }, caller1)).error.code === 'bad_request', 'a console cannot kill itself')
+    check((await call(h, 'kill', { console: 'srv:1' }, caller1)).error.code === 'ssh_protected' && (await call(h, 'kill', { console: 'srv:2' }, caller1)).ok, "kill honors cliProtectSsh (a local pane with setupId '' is fine)")
+    const r1 = await call(h, 'restart', { console: '3', resume: true }, caller1)
+    check(r1.ok && r1.data.mode === 'resume' && w.ops.at(-1).kind === 'restart' && w.ops.at(-1).resume === true, 'restart --resume')
+    check((await call(h, 'restart', { console: '3', resume: false }, caller1)).data.mode === 'fresh' && w.ops.at(-1).resume === false, 'restart --fresh')
+    check((await call(h, 'restart', { console: '2' }, caller1)).data.mode === 'default' && !('resume' in w.ops.at(-1)), 'restart without a flag: the header button')
+    check((await call(h, 'restart', { console: '2', resume: true }, caller1)).error.code === 'bad_request', '--resume on a shell is bad_request')
+    check((await call(h, 'restart', { console: 'self' }, caller1)).error.code === 'bad_request' && (await call(h, 'restart', { console: 'srv:1' }, caller1)).error.code === 'ssh_protected', 'restart: self guard and SSH guard')
+    const rn = await call(h, 'rename', { console: '2', title: '  Logs\nde ' + 'x'.repeat(80) }, caller1)
+    check(rn.ok && w.ops.at(-1).kind === 'renamePane' && w.ops.at(-1).title.length === 60 && w.ops.at(-1).title.startsWith('Logs de x'), 'rename flattens the title and clips it at 60')
+    check((await call(h, 'rename', { console: '2', title: '  ' }, caller1)).error.code === 'bad_request', 'an empty title is bad_request')
+    const hm = makeHandlers(fakeWorld())
+    let n = 0
+    for (let i = 0; i < 30; i++) if ((await call(hm, 'rename', { console: '2', title: `t${i}` }, caller1)).ok) n++
+    check(n === 30 && (await call(hm, 'rename', { console: '2', title: 'otra' }, caller1)).error.code === 'rate_limited', 'the 31st console change in a minute: rate_limited')
+  }
+  // workspaces
+  {
+    const w = fakeWorld()
+    w.list.workspaces[1].favorite = true
+    const dirs = []
+    const h = makeHandlers(w, undefined, { platform: 'win32', isDir: async (p) => { dirs.push(p); return p.toLowerCase().includes('repos') } })
+    check((await call(h, 'ws.new', { path: 'relative\\dir' }, caller1)).error.code === 'bad_request' && dirs.length === 0, 'ws new with a relative path is bad_request (main never guesses a cwd)')
+    const gone = await call(h, 'ws.new', { path: 'C:\\nope\\x' }, caller1)
+    check(gone.error.code === 'not_found' && /C:\\nope\\x/.test(gone.error.message) && dirs.at(-1) === 'C:\\nope\\x', 'a missing folder is not_found (checked with a stat)')
+    const made = await call(h, 'ws.new', { path: 'C:\\repos\\web\\' }, caller1)
+    check(made.ok && made.data.workspaceId === 'w-new' && made.data.index === 3 && made.data.name === 'web' && w.ops.at(-1).kind === 'createWorkspace' && w.ops.at(-1).cwd === 'C:\\repos\\web' && w.ops.at(-1).focus === false, 'ws new: name from the folder, without focus by default')
+    await call(h, 'ws.new', { path: 'C:\\repos\\web', name: 'Front\nend', focus: true }, caller1)
+    check(w.ops.at(-1).name === 'Front end' && w.ops.at(-1).focus === true, 'ws new: a given name (one line) and --focus')
+    const comp = await call(h, 'ws.new', { path: 'C:\\repos\\web', composer: true }, caller1)
+    check(comp.ok && comp.data.composer === true && w.ops.at(-1).kind === 'composer' && w.ops.at(-1).name === 'web', 'ws new --composer opens the card with the folder and name')
+    let wn = 0
+    for (let i = 0; i < 5; i++) if ((await call(h, 'ws.new', { path: 'C:\\repos\\web' }, null)).ok) wn++
+    check(wn === 5 && (await call(h, 'ws.new', { path: 'C:\\repos\\web' }, null)).error.code === 'rate_limited', 'the 6th ws new in a minute: rate_limited')
+    // --composer shares the bucket (it also brings the window forward).
+    const hc = makeHandlers(fakeWorld(), undefined, { platform: 'win32', isDir: async () => true })
+    let cn = 0
+    for (let i = 0; i < 5; i++) if ((await call(hc, 'ws.new', { path: 'C:\\repos\\web', composer: true }, caller1)).ok) cn++
+    check(cn === 5 && (await call(hc, 'ws.new', { path: 'C:\\repos\\web', composer: true }, caller1)).error.code === 'rate_limited' && (await call(hc, 'ws.new', { path: 'C:\\repos\\web' }, caller1)).error.code === 'rate_limited', 'ws new --composer counts against the ws new budget: the 6th is rate_limited, plain ones too')
+    check((await call(h, 'ws.close', { workspace: 'srv' }, caller1)).error.code === 'bad_request', 'ws close without --yes is bad_request in main too')
+    check((await call(h, 'ws.close', { workspace: 'api', yes: true }, caller1)).error.code === 'bad_request', 'a console cannot close its own workspace')
+    check((await call(h, 'ws.close', { workspace: 'srv', yes: true }, caller1)).error.code === 'ssh_protected', 'a workspace with a live profile console: ssh_protected')
+    w.running.delete('p4')
+    // A console visiting from api goes back home: not counted, and its (inherited) profile does not block.
+    w.list.workspaces[1].panes.push({ id: 'pv', title: 'Visita', type: 'shell', homeWorkspaceId: 'w1' })
+    w.running.add('pv')
+    const closed = await call(h, 'ws.close', { workspace: 'srv', yes: true }, caller1)
+    check(closed.ok && closed.data.consolesEnded === 1 && closed.data.name === 'srv' && w.ops.at(-1).kind === 'deleteWorkspace' && w.ops.at(-1).workspaceId === 'w2', 'ws close --yes: deleteWorkspace, counting the running consoles of its own (a visiting one goes home)')
+    check((await call(h, 'ws.close', { workspace: 'nope', yes: true }, null)).error.code === 'not_found', 'ws close of an unknown workspace: not_found')
+    await call(h, 'ws.fav', { workspace: 'api', favorite: false }, caller1)
+    check(w.ops.at(-1).kind === 'setFavorite' && w.ops.at(-1).favorite === false && w.ops.at(-1).workspaceId === 'w1', 'ws fav --off')
+    await call(h, 'ws.rename', { workspace: '2', name: '  Servidor\n' }, caller1)
+    check(w.ops.at(-1).kind === 'renameWorkspace' && w.ops.at(-1).name === 'Servidor' && (await call(h, 'ws.rename', { workspace: '2', name: ' ' }, caller1)).error.code === 'bad_request', 'ws rename: one line, empty is bad_request')
+    const ls = await call(h, 'ls', {}, caller1)
+    check(ls.data.workspaces[1].favorite === true && !('favorite' in ls.data.workspaces[0]), 'ls carries favorite')
+  }
+  // notes
+  {
+    const w = fakeWorld()
+    const notes = fakeNotes()
+    notes.seed('w1', 'n-plan', '# Plan\n\nhola')
+    notes.seed('w2', 'n-other', 'otra')
+    const h = makeHandlers(w, undefined, { services: () => ({ notes }) })
+    const ls = await call(h, 'notes.ls', {}, caller1)
+    check(ls.ok && ls.data.workspaceId === 'w1' && ls.data.notes.length === 1 && ls.data.notes[0].title === 'Plan', "notes ls uses the caller's workspace")
+    check((await call(h, 'notes.ls', { workspace: 'srv' }, caller1)).data.notes[0].id === 'n-other', 'notes ls --workspace')
+    const got = await call(h, 'notes.get', { note: 'plan' }, caller1)
+    check(got.ok && got.data.note.text === '# Plan\n\nhola' && /n-plan\.md$/.test(got.data.note.path) && typeof got.data.note.rev === 'string', 'notes get by title gives text, rev and path')
+    const made = await call(h, 'notes.new', { title: 'Ideas\nnuevas', text: 'uno', open: true }, caller1)
+    check(made.ok && notes.text('w1', made.data.note.id) === '# Ideas nuevas\n\nuno' && made.data.opened === true && w.ops.at(-1).kind === 'openNote' && w.ops.at(-1).noteId === made.data.note.id, 'notes new --title writes "# T\\n\\nbody"; --open shows it')
+    const stale = await call(h, 'notes.set', { note: 'n-plan', text: 'pisado', rev: 'r-old' }, caller1)
+    check(!stale.ok && stale.error.code === 'conflict' && stale.data.current.rev && !('text' in stale.data.current) && notes.text('w1', 'n-plan') === '# Plan\n\nhola', 'notes set with a stale --rev: conflict with data.current.rev and never the text')
+    const fresh = await call(h, 'notes.set', { note: 'n-plan', text: '# Plan\n\nhola', rev: got.data.note.rev }, caller1)
+    check(fresh.ok && fresh.data.note.rev !== got.data.note.rev, 'notes set with the current --rev writes')
+    await call(h, 'notes.append', { note: 'Plan', text: 'mas' }, caller1)
+    check(notes.text('w1', 'n-plan') === '# Plan\n\nhola\nmas', 'append adds a line break before the text when the note lacks one')
+    await Promise.all([call(h, 'notes.append', { note: 'n-plan', text: 'A\n' }, caller1), call(h, 'notes.append', { note: 'n-plan', text: 'B\n' }, caller1)])
+    const both = notes.text('w1', 'n-plan')
+    check(both.includes('A\n') && both.includes('B\n') && both.startsWith('# Plan\n\nhola\nmas\n'), 'two concurrent appends both land (serialized per note)')
+    notes.interfere = () => notes.seed('w1', 'n-plan', notes.text('w1', 'n-plan') + 'desde el desktop\n')
+    const retried = await call(h, 'notes.append', { note: 'n-plan', text: 'final' }, caller1)
+    check(retried.ok && notes.text('w1', 'n-plan').endsWith('desde el desktop\nfinal'), 'an edit between the read and the write is a conflict, retried once from a fresh read')
+    check((await call(h, 'notes.append', { note: 'n-plan', text: 'x'.repeat(1024 * 1024) }, caller1)).error.code === 'bad_request', 'append past 1 MB is bad_request')
+    check((await call(h, 'notes.set', { note: 'n-plan' }, caller1)).error.code === 'bad_request' && (await call(h, 'notes.get', { note: 'nope' }, caller1)).error.code === 'not_found', 'set without a text; an unknown note')
+    const op = await call(h, 'notes.open', { note: 'n-plan' }, caller1)
+    check(op.ok && w.ops.at(-1).kind === 'openNote' && w.ops.at(-1).workspaceId === 'w1' && w.ops.at(-1).noteId === 'n-plan', 'notes open sends openNote')
+    const rm = await call(h, 'notes.rm', { note: 'n-plan' }, caller1)
+    check(rm.ok && rm.data.trashed === true && notes.calls.includes('delete') && notes.text('w1', 'n-plan') === undefined, 'notes rm goes through delete (the trash)')
+    check((await call(makeHandlers(w), 'notes.ls', {}, caller1)).error.code === 'disabled', 'no notes service: disabled')
+    w.list.activeWorkspaceId = null
+    check((await call(h, 'notes.ls', {}, null)).error.code === 'bad_request', 'no workspace at all: bad_request')
+    const hn = makeHandlers(fakeWorld(), undefined, { services: () => ({ notes: fakeNotes() }) })
+    let made60 = 0
+    for (let i = 0; i < 60; i++) if ((await call(hn, 'notes.new', { text: `n${i}` }, caller1)).ok) made60++
+    check(made60 === 60 && (await call(hn, 'notes.new', { text: 'una mas' }, caller1)).error.code === 'rate_limited', 'the 61st note write in a minute: rate_limited')
+  }
+}
+
+// --- H/I (app 2.3.0, 4b). usage and Claude accounts -----------------------------------
+
+const FAKE_TOKEN = 'sk-ant-oat01-' + 'Q'.repeat(40)
+
+/** A usage poller handle: Claude, Codex and a custom row with token counts. */
+function fakeUsage(over = {}) {
+  const u = {
+    on: true,
+    loads: 0,
+    snap: {
+      updatedAt: 1760000000000,
+      services: 'operational',
+      error: `boom ${FAKE_TOKEN}`,
+      activeAccount: { id: 'acc_aaaaaaaaaaaa', role: 'primary', label: 'Trabajo', other: { id: 'acc_bbbbbbbbbbbb', role: 'secondary', label: 'yo@mail.com' } },
+      rows: [
+        { id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 42.4, resetsAt: '2026-10-20T15:00:00.000Z', status: 'ok', planType: 'max', extra: FAKE_TOKEN },
+        { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 80, resetsAt: null, status: 'ok', stale: true },
+        { id: 'codex.5h', provider: 'codex', kind: '5h', label: 'Session', percent: null, status: 'error' },
+        { id: 'custom.r1', provider: 'custom', kind: 'custom', label: 'gpt-x', percent: 10, used: 1234, limit: 99999, status: 'ok' },
+      ],
+    },
+    enabled: () => u.on,
+    load: async () => { u.loads++; return JSON.parse(JSON.stringify(u.snap)) },
+    ...over,
+  }
+  return u
+}
+
+/** An AccountService fake: ClaudeAccountsState with emails and a stray token the adapter must drop. */
+function fakeAccountSource() {
+  const win = (percent, source = 'live') => ({ percent, resetsAt: '2026-10-21T10:00:00.000Z', at: 1, source })
+  const view = (id, role, label, active, extra = {}) => ({ id, role, label, email: `${role}@mail.com`, organizationName: 'Org', subscriptionType: 'max', capturedAt: 1, active, tokenState: 'ok', needsRecapture: false, identityConfirmed: true, usage: { fiveHour: win(active ? 30 : 5, active ? 'live' : 'parked'), sevenDay: win(50, active ? 'live' : 'parked') }, accessToken: FAKE_TOKEN, ...extra })
+  const src = {
+    calls: [],
+    next: { ok: true },
+    state: {
+      supported: true,
+      liveSwitch: true,
+      accounts: [view('acc_aaaaaaaaaaaa', 'primary', 'Trabajo', true), view('acc_bbbbbbbbbbbb', 'secondary', 'Personal', false)],
+      activeId: 'acc_aaaaaaaaaaaa',
+      liveIdentity: 'known',
+      liveEmail: 'otro@mail.com',
+      autoPaused: null,
+      lastSwitch: { at: Date.UTC(2026, 9, 20, 9, 30), from: 'acc_bbbbbbbbbbbb', to: 'acc_aaaaaaaaaaaa', reason: 'manual' },
+      pending: null,
+      blocked: null,
+      restartNeeded: [],
+      credentialsRaw: `{"claudeAiOauth":{"accessToken":"${FAKE_TOKEN}"}}`,
+    },
+    status: () => JSON.parse(JSON.stringify(src.state)),
+    settings: () => ({ autoSwitch: true, switchAtPercent: 95, returnToPrimary: true, returnBelowPercent: 90, returnMarginMinutes: 5, minDwellMinutes: 10, deferWhileWorking: true, deferMaxMinutes: 3, pollParked: true, alertOnSwitch: true }),
+    async switchTo(id, reason) {
+      src.calls.push({ id, reason })
+      const r = typeof src.next === 'function' ? src.next(id) : src.next
+      // Like switchInner (isLive ignores liveUnverified): ok without writing (no new lastSwitch) when the target is already live, or on a `noop` answer.
+      const live = src.state.activeId === id && src.state.liveIdentity === 'known'
+      if (r.ok && !r.noop && !live) {
+        src.state.lastSwitch = { at: src.state.lastSwitch.at + 1000, from: src.state.activeId, to: id, reason }
+        src.state.activeId = id
+        src.state.liveIdentity = 'known'
+        for (const a of src.state.accounts) a.active = a.id === id
+      }
+      const { noop, ...out } = r
+      return { ...out, state: { ...src.status(), secret: FAKE_TOKEN } }
+    },
+  }
+  return src
+}
+
+async function usageAccountChecks() {
+  const { ctlAccountsView, ctlAccount } = load('src/main/cli/accountsView.ts')
+  const clean = (v, label) => {
+    const json = JSON.stringify(v)
+    check(!json.includes('sk-ant') && !json.includes('@') && !json.includes('accessToken') && !json.includes('credentials') && !json.includes('"used"') && !json.includes('"limit"'), `${label}: no token, credentials, email or token counts`)
+  }
+  // usage
+  {
+    const usage = fakeUsage()
+    const h = makeHandlers(fakeWorld(), undefined, { services: () => ({ usage }) })
+    const all = await call(h, 'usage', {}, caller1)
+    check(all.ok && all.data.rows.length === 3 && all.data.rows.map((r) => r.id).join() === 'claude.5h,claude.7d,codex.5h' && usage.loads === 1, 'usage: Claude and Codex rows only (the custom row is dropped), read through load()')
+    const r0 = all.data.rows[0]
+    check(JSON.stringify(Object.keys(r0).sort()) === JSON.stringify(['id', 'kind', 'label', 'percent', 'planType', 'provider', 'resetsAt', 'status']) && r0.percent === 42.4 && r0.planType === 'max', 'usage: each row carries only the picked fields')
+    check(all.data.rows[1].stale === true && all.data.rows[2].percent === null && all.data.rows[2].resetsAt === null && all.data.services === 'operational' && all.data.updatedAt === 1760000000000 && !('error' in all.data), 'usage: stale, null percent and reset, services; the snapshot error never goes out')
+    check(all.data.account.id === 'acc_aaaaaaaaaaaa' && all.data.account.slot === 'primary' && all.data.account.label === 'Trabajo' && !('other' in all.data.account), 'usage: the active Claude account by id, slot and label')
+    clean(all.data, 'usage')
+    const cx = await call(h, 'usage', { provider: 'codex' }, caller1)
+    check(cx.ok && cx.data.rows.length === 1 && cx.data.rows[0].provider === 'codex' && !('account' in cx.data), 'usage --provider codex: Codex rows, no Claude account')
+    check((await call(h, 'usage', { provider: 'claude' }, caller1)).data.rows.every((r) => r.provider === 'claude'), 'usage --provider claude')
+    check((await call(h, 'usage', { provider: 'custom' }, caller1)).error.code === 'bad_request', 'usage --provider custom: bad_request')
+    usage.snap.activeAccount.label = 'yo@mail.com'
+    check((await call(h, 'usage', {}, caller1)).data.account.label === '', 'usage: a label holding an @ goes out as ""')
+    usage.on = false
+    const off = await call(h, 'usage', {}, caller1)
+    check(!off.ok && off.error.code === 'disabled' && /Settings > AI Usage/.test(off.error.message), 'usage with the bars off: disabled, pointing at Settings')
+    check((await call(makeHandlers(fakeWorld()), 'usage', {}, caller1)).error.code === 'disabled', 'no usage service attached: disabled')
+    const broken = makeHandlers(fakeWorld(), undefined, { services: () => ({ usage: fakeUsage({ load: async () => { throw new Error(FAKE_TOKEN) } }) }) })
+    const failed = await call(broken, 'usage', {}, caller1)
+    check(failed.error.code === 'internal' && !JSON.stringify(failed).includes('sk-ant'), 'usage: a failing load is internal and never echoes the error text')
+  }
+  // The adapter over AccountService
+  {
+    const src = fakeAccountSource()
+    const view = ctlAccountsView(src)
+    const st = await view.status()
+    check(st.supported && st.live === 'known' && st.active.id === 'acc_aaaaaaaaaaaa' && st.accounts.length === 2 && st.auto.enabled === true && st.auto.switchAtPercent === 95 && st.auto.paused === null && st.lastSwitch.reason === 'manual', 'adapter: status with the live login, accounts, last switch and the automatic switch')
+    check(JSON.stringify(Object.keys(st.accounts[0]).sort()) === JSON.stringify(['active', 'fiveHour', 'id', 'label', 'plan', 'provider', 'ready', 'sevenDay', 'slot']) && st.accounts[1].fiveHour.source === 'parked' && st.accounts[0].plan === 'max', 'adapter: each account carries only the picked fields')
+    clean(st, 'adapter status')
+    check(ctlAccount({ ...src.state.accounts[0], label: 'yo@mail.com', needsRecapture: true }).label === '' && ctlAccount({ ...src.state.accounts[0], needsRecapture: true }).ready === false, 'adapter: a label with an @ is ""; needsRecapture is ready: false')
+    const sw = await view.switchTo('acc_bbbbbbbbbbbb', 'cli')
+    check(sw.ok === true && JSON.stringify(sw) === '{"ok":true}' && src.calls.at(-1).reason === 'cli', 'adapter: a switch answers only { ok }, never the account state')
+    src.next = { ok: false, error: 'locked' }
+    check(JSON.stringify(await view.switchTo('acc_aaaaaaaaaaaa', 'cli')) === '{"ok":false,"error":"locked"}', 'adapter: a failed switch answers only { ok, error }')
+    check(!('unverified' in st), 'adapter: no unverified field while the live login is identified')
+    src.state.liveUnverified = true
+    check((await view.status()).unverified === true, 'adapter: liveUnverified goes out as unverified: true')
+  }
+  // account.ls / status / use through the handlers
+  {
+    const src = fakeAccountSource()
+    const accounts = ctlAccountsView(src)
+    const w = fakeWorld()
+    const h = makeHandlers(w, undefined, { services: () => ({ accounts }) })
+    const ls = await call(h, 'account.ls', {}, caller1)
+    check(ls.ok && ls.data.accounts.length === 2 && ls.data.accounts[0].slot === 'primary' && ls.data.accounts[0].active, 'account ls lists the saved Claude accounts')
+    clean(ls.data, 'account ls')
+    check((await call(h, 'account.ls', { provider: 'claude' }, caller1)).ok && (await call(h, 'account.ls', { provider: 'codex' }, caller1)).error.code === 'bad_request', 'account ls --provider claude; codex has no saved accounts (bad_request)')
+    const st = await call(h, 'account.status', {}, caller1)
+    check(st.ok && st.data.active.label === 'Trabajo' && st.data.auto.enabled === true, 'account status')
+    clean(st.data, 'account status')
+    const same = await call(h, 'account.use', { account: 'primary' }, caller1)
+    check(same.ok && same.data.changed === false && same.data.active.id === 'acc_aaaaaaaaaaaa' && src.calls.length === 0, 'account use of the live account: changed false, AccountService never called')
+    const toSec = await call(h, 'account.use', { account: 'Secondary' }, caller1)
+    check(toSec.ok && toSec.data.changed === true && toSec.data.active.slot === 'secondary' && toSec.data.active.active === true && src.calls.at(-1).id === 'acc_bbbbbbbbbbbb' && src.calls.at(-1).reason === 'cli', "account use secondary (any case): switchTo(id, 'cli'), changed true")
+    clean(toSec.data, 'account use')
+    const byId = await call(h, 'account.use', { account: 'acc_aaaaaaaaaaaa' }, { paneId: 'p3', ptyId: 'pty-p3', workspaceId: 'w1' })
+    check(byId.ok && byId.data.changed === true && src.calls.at(-1).id === 'acc_aaaaaaaaaaaa', 'account use by id')
+    const byLabel = await call(h, 'account.use', { account: 'personal' }, null)
+    check(byLabel.ok && src.calls.at(-1).id === 'acc_bbbbbbbbbbbb', 'account use by label (case-insensitive), from the master token')
+    const limited = await call(h, 'account.use', { account: 'primary' }, { paneId: 'p2', ptyId: 'pty-p2', workspaceId: 'w1' })
+    check(!limited.ok && limited.error.code === 'rate_limited' && src.calls.length === 3, 'the 4th switch in a minute is rate_limited, whatever console asks (one global budget)')
+    check((await call(h, 'account.use', { account: 'secondary' }, caller1)).data.changed === false, 'a no-op use still answers while the budget is spent')
+    check((await call(h, 'account.use', { account: 'nadie' }, caller1)).error.code === 'not_found' && (await call(h, 'account.use', { account: '  ' }, caller1)).error.code === 'bad_request' && (await call(h, 'account.use', { account: 'primary', provider: 'codex' }, caller1)).error.code === 'bad_request', 'account use: unknown, empty and --provider codex')
+  }
+  {
+    const src = fakeAccountSource()
+    src.state.accounts[1].label = 'Trabajo'
+    const h = makeHandlers(fakeWorld(), undefined, { services: () => ({ accounts: ctlAccountsView(src) }) })
+    const amb = await call(h, 'account.use', { account: 'trabajo' }, caller1)
+    check(!amb.ok && amb.error.code === 'ambiguous' && amb.error.message.includes('acc_bbbbbbbbbbbb') && src.calls.length === 0, 'two accounts with the same label: ambiguous, with the ids')
+    src.state.accounts[1].needsRecapture = true
+    const locked = await call(h, 'account.use', { account: 'secondary' }, caller1)
+    check(!locked.ok && locked.error.code === 'disabled' && /capture it again/.test(locked.error.message) && src.calls.length === 0, 'a login to capture again: disabled before any switch')
+    src.state.accounts[1].needsRecapture = false
+    src.state.liveIdentity = 'unknown'
+    await call(h, 'account.use', { account: 'primary' }, caller1)
+    check(src.calls.length === 1 && src.calls[0].id === 'acc_aaaaaaaaaaaa', 'the saved active account while an unknown login is live: not a no-op, the switch runs (main decides)')
+    src.state.supported = false
+    check((await call(h, 'account.use', { account: 'secondary' }, caller1)).error.code === 'disabled', 'no saved logins on this machine: disabled')
+  }
+  {
+    // The live login changed and is not identified yet (liveUnverified).
+    const src = fakeAccountSource()
+    src.state.liveUnverified = true
+    const h = makeHandlers(fakeWorld(), undefined, { services: () => ({ accounts: ctlAccountsView(src) }) })
+    const st = await call(h, 'account.status', {}, caller1)
+    check(st.ok && st.data.unverified === true && st.data.live === 'known', 'account status carries unverified: true')
+    const unv = await call(h, 'account.use', { account: 'primary' }, caller1)
+    check(!unv.ok && unv.error.code === 'busy' && /not identified yet/.test(unv.error.message) && src.calls.length === 1, 'account use of the shown active account while unverified: not a no-op; still unverified after the switch: busy')
+    src.state.liveUnverified = false
+    src.next = { ok: true, noop: true }
+    const stale = await call(h, 'account.use', { account: 'secondary' }, caller1)
+    check(stale.ok && stale.data.changed === false && src.calls.length === 2, 'switchTo ok without a new last switch (the target was already live): changed false')
+    src.next = { ok: true }
+    const real = await call(h, 'account.use', { account: 'secondary' }, caller1)
+    check(real.ok && real.data.changed === true && src.state.lastSwitch.reason === 'cli', 'a switch that moved the last switch: changed true')
+  }
+  {
+    // Error mapping (each from a fresh handler, so the budget never interferes).
+    const mapped = {}
+    for (const e of ['not_found', 'locked', 'busy', 'identity_failed', 'unknown_live_account', 'unsupported', 'encryption_unavailable', 'io']) {
+      const src = fakeAccountSource()
+      src.next = { ok: false, error: e }
+      const h = makeHandlers(fakeWorld(), undefined, { services: () => ({ accounts: ctlAccountsView(src) }) })
+      mapped[e] = (await call(h, 'account.use', { account: 'secondary' }, caller1)).error.code
+    }
+    check(JSON.stringify(mapped) === JSON.stringify({ not_found: 'not_found', locked: 'disabled', busy: 'busy', identity_failed: 'busy', unknown_live_account: 'disabled', unsupported: 'disabled', encryption_unavailable: 'disabled', io: 'internal' }), 'AccountService errors map to not_found / disabled / busy / internal', mapped)
+    const src = fakeAccountSource()
+    src.switchTo = async () => { throw new Error(FAKE_TOKEN) }
+    const h = makeHandlers(fakeWorld(), undefined, { services: () => ({ accounts: ctlAccountsView(src) }) })
+    const thrown = await call(h, 'account.use', { account: 'secondary' }, caller1)
+    check(thrown.error.code === 'internal' && !JSON.stringify(thrown).includes('sk-ant'), 'a throwing switch is internal and never echoes the error text')
+    check((await call(makeHandlers(fakeWorld()), 'account.status', {}, caller1)).error.code === 'disabled', 'no accounts service attached: disabled')
   }
 }
 
@@ -746,7 +1211,7 @@ async function cliEntryChecks() {
   const okRes = { ok: true, data: { workspaces: [] } }
   check((await C.run(['ls', '--json'], deps({ send: async () => okRes }))) === 0 && out.length === 1 && out[0] === JSON.stringify(okRes) && !out[0].includes('\n'), '--json success: exactly one line of JSON')
   const exitOf = async (code) => C.run(['send', '2', 'x'], deps({ send: async () => ({ ok: false, error: { code, message: code } }) }))
-  const codes = { bad_request: 2, not_found: 3, not_running: 3, exited: 3, ambiguous: 4, desktop_unavailable: 5, unauthorized: 6, ssh_protected: 7, multiline_unsafe: 7, rate_limited: 7, disabled: 7, forbidden: 7, timeout: 124, internal: 1 }
+  const codes = { bad_request: 2, not_found: 3, not_running: 3, exited: 3, ambiguous: 4, desktop_unavailable: 5, unauthorized: 6, ssh_protected: 7, multiline_unsafe: 7, rate_limited: 7, disabled: 7, forbidden: 7, timeout: 124, internal: 1, conflict: 8 }
   for (const [code, exit] of Object.entries(codes)) check((await exitOf(code)) === exit, `error ${code} exits ${exit}`)
   check((await C.run(['ping'], deps({ connect: () => { throw new C.AppUnavailable('SnAgentsOS is not running') } }))) === 5 && /not running/.test(err.at(-1)), 'no app: exit 5 with "SnAgentsOS is not running"')
   out.length = 0
@@ -775,6 +1240,97 @@ async function cliEntryChecks() {
   check(C.defaultRuntimePath({ XDG_CONFIG_HOME: '/x/cfg' }, 'linux') === '/x/cfg/snagentsos/runtime.json' && C.defaultRuntimePath({}, 'darwin', () => '/Users/u') === '/Users/u/Library/Application Support/snagentsos/runtime.json', 'default runtime path on Linux and macOS, POSIX separators on any host')
   check(/spawned console 4/.test(C.formatHuman('spawn', { paneId: 'p', index: 4, promptDelivery: 'gate' })) && C.formatHuman('wait', { state: 'idle', precise: true, noTurnObserved: true }) === 'idle (no turn observed)', 'human output')
   check(C.formatHuman('send', { paneId: 'p', enter: true }) === 'sent with Enter' && C.formatHuman('send', { paneId: 'p', enter: false }) === 'typed, not submitted (add --enter to submit)', 'human output of send says when the text was not submitted')
+
+  // --- app 2.3.0: chat, peek, notes, consoles and workspaces -----------------------
+  check(p(['notes']).command === 'notes' && p(['notes']).sub === 'ls' && p(['notes', 'get', 'Plan']).sub === 'get' && p(['notes', 'get', 'Plan']).positionals[0] === 'Plan', 'notes alone is notes ls; the subcommand is parsed off the positionals')
+  check(p(['workspace', 'fav', 'api', '--off']).command === 'ws' && p(['workspace', 'fav', 'api', '--off']).flags.off === true, 'workspace is an alias of ws')
+  check(/ws needs one of: new, rename, close, fav/.test(usage(['ws'])) && /unknown notes command "edit"/.test(usage(['notes', 'edit'])), 'ws alone and an unknown subcommand are usage errors')
+  check(/--rev does not apply to notes new/.test(usage(['notes', 'new', 'x', '--rev', 'r1'])) && /--tools does not apply to peek/.test(usage(['peek', '2', '--tools'])), 'flags are checked per subcommand and command')
+  check(p(['ws', 'close', 'api', '-y']).flags.yes === true, '-y is --yes')
+  const ch = await b(['chat', 'api:2', '--turns', '2', '--before', '7724', '--tools', '--thinking', '-w', 'api'])
+  check(ch.method === 'chat' && ch.params.console === 'api:2' && ch.params.turns === 2 && ch.params.before === '7724' && ch.params.tools === true && ch.params.thinking === true && ch.params.workspace === 'api', 'chat params')
+  const bad = async (argv, i) => { try { await b(argv, i); return null } catch (e) { return e.message } }
+  check(/--turns must be a positive integer/.test(await bad(['chat', '2', '--turns', '0'])) && /--before must be a cursor/.test(await bad(['chat', '2', '--before', 'x1'])), 'chat validates --turns and --before in the client')
+  check((await b(['peek', '3', '-n', '10'])).params.lines === 10 && (await b(['peek', '3'])).method === 'peek', 'peek params')
+  const focus = await b(['focus', '2', '-w', 'api'])
+  check(focus.method === 'open' && focus.params.console === '2' && focus.params.workspace === 'api', 'focus 2 builds open { console }')
+  check((await b(['kill', '3', '--close'])).params.close === true && (await b(['restart', '3', '--resume'])).params.resume === true && (await b(['restart', '3', '--fresh'])).params.resume === false && !('resume' in (await b(['restart', '3'])).params), 'kill and restart params')
+  check(/either --resume or --fresh/.test(await bad(['restart', '3', '--resume', '--fresh'])), 'restart --resume --fresh is a usage error')
+  check((await b(['rename', '2', 'Logs', 'del', 'build'])).params.title === 'Logs del build' && /rename needs/.test(await bad(['rename', '2'])), 'rename joins the title words')
+  const wsNew = await b(['ws', 'new', 'Mi', 'repo'])
+  check(wsNew.method === 'ws.new' && wsNew.params.name === 'Mi repo' && wsNew.params.path === path.resolve(tmpRoot), 'ws new defaults --path to the client cwd, made absolute')
+  check((await b(['ws', 'new', '--path', 'sub', '--composer'])).params.path === path.resolve(tmpRoot, 'sub') && (await b(['ws', 'fav', 'api', '--off'])).params.favorite === false && (await b(['ws', 'rename', 'api', 'API', 'v2'])).params.name === 'API v2', 'ws new --path, fav --off, rename')
+  const nset = await b(['notes', 'set', 'n-1', '-'], io({}, '\uFEFFnuevo texto\n'))
+  check(nset.method === 'notes.set' && nset.params.note === 'n-1' && nset.params.text === 'nuevo texto\n', 'notes set <note> - reads stdin with the BOM stripped (the line break stays: notes are files)')
+  check((await b(['notes', 'append', 'Plan', '--file', 'x.md'], io({ 'x.md': 'de un archivo' }))).params.text === 'de un archivo', 'notes append --file is read by the client')
+  const nnew = await b(['notes', 'new', 'hola', 'mundo', '--title', 'Plan', '--open', '-w', 'api'])
+  check(nnew.method === 'notes.new' && nnew.params.text === 'hola mundo' && nnew.params.title === 'Plan' && nnew.params.open === true && nnew.params.workspace === 'api', 'notes new params')
+  check((await b(['notes', 'set', 'n-1', 'x', '--rev', '12-3'])).params.rev === '12-3' && /notes append needs a text/.test(await bad(['notes', 'append', 'n-1'])), 'notes set --rev; append without a body is a usage error')
+  check(/use either a text or --file/.test(await bad(['notes', 'set', 'n-1', 'x', '--file', 'x.md'], io({ 'x.md': 'y' }))), 'a text and --file together are a usage error')
+  {
+    const out2 = [], err2 = []
+    let sent2 = 0
+    const d2 = { io: io({}, 'x'.repeat(1024 * 1024 + 1)), env: {}, out: (s) => out2.push(s), err: (s) => err2.push(s), connect: () => ({ endpoint: 'x', token: 't', console: true }), send: async () => { sent2++; return { ok: true, data: {} } } }
+    check((await C.run(['notes', 'set', 'n-1', '-'], d2)) === 2 && sent2 === 0 && /larger than 1 MB/.test(err2.at(-1)), 'a note over 1 MB: exit 2 in the client, nothing sent')
+    const quotes = { ...d2, io: io({}, '"'.repeat(600 * 1024)) }
+    check((await C.run(['notes', 'append', 'n-1', '-'], quotes)) === 2 && sent2 === 0 && /after JSON escaping/.test(err2.at(-1)), 'a body over 1 MB once JSON-escaped: exit 2 in the client')
+    check((await C.run(['ws', 'close', 'api'], d2)) === 2 && sent2 === 0 && /add --yes/.test(err2.at(-1)), 'ws close without --yes: exit 2, nothing sent')
+    check((await C.run(['notes', 'set', 'n-1', 'x'], { ...d2, send: async () => ({ ok: false, error: { code: 'conflict', message: 'the note changed' } }) })) === 8, 'conflict exits 8')
+  }
+  // Human output
+  const cat = C.formatHuman('chat', { paneId: 'p1', turns: 1, nextCursor: '7724', items: [
+    { id: '1', role: 'user', ts: null, blocks: [{ t: 'text', text: 'arregla el login' }] },
+    { id: '2', role: 'assistant', ts: null, blocks: [{ t: 'thinking', text: 'veo' }, { t: 'text', text: 'Listo', truncated: true }, { t: 'toolUse', id: 'u', name: 'Bash', summary: 'npm test' }] },
+    { id: '3', role: 'tool', ts: null, blocks: [{ t: 'toolResult', toolUseId: 'u', isError: true, text: '1 failing' }] },
+  ] })
+  check(cat === '--- user\narregla el login\n--- assistant\n(thinking) veo\nListo [truncated]\n-> Bash: npm test\n<- error: 1 failing\nolder: snaos chat p1 --before 7724', 'chat human output: headers, tool calls, results and the older line', cat)
+  check(C.formatHuman('chat', { paneId: 'p1', items: [], pending: true, nextCursor: null }) === 'no messages yet', 'chat of a transcript still coming: no messages yet')
+  const pk = C.formatHuman('peek', { paneId: 'p1', title: 'Claude', type: 'claude', provider: 'claude', running: true, state: 'action', precise: true, attention: true, reason: 'permission', pending: [{ kind: 'permission', toolName: 'Bash', summary: 'rm -rf build' }], model: 'opus', effort: 'high', ultracode: false, lastMessage: 'listo', lines: ['$ npm test'] })
+  check(pk.startsWith('Claude (p1)  claude  action (permission)  running\nattention: needs the user\npending: permission Bash: rm -rf build\nmodel opus, effort high, ultracode off\nlast: listo\n--- screen (last 1 lines)\n$ npm test'), 'peek human output', pk)
+  check(C.formatHuman('kill', { paneId: 'p2', killed: true, closed: false }) === 'stopped console p2' && C.formatHuman('kill', { paneId: 'p2', killed: false, closed: true }) === 'console p2 was not running, closed (reopen it from the desktop)', 'kill human output')
+  check(C.formatHuman('ws.close', { name: 'srv', consolesEnded: 2 }) === 'closed workspace "srv" (2 consoles ended; its notes move to the trash)' && C.formatHuman('ws.new', { workspaceId: 'w9', index: 3, name: 'web' }) === 'created workspace 3 "web" (w9)', 'ws human output')
+  const nls = C.formatHuman('notes.ls', { notes: [{ id: 'n-1', title: 'Plan', updatedAt: Date.UTC(2026, 9, 1, 12), size: 12, rev: 'r' }, { id: 'n-2', title: '', updatedAt: Date.UTC(2026, 9, 1, 12), size: 0, rev: 'r' }] })
+  check(/^n-1 +2026-10-01 \d\d:\d\d +12 B +Plan\nn-2 .*\(untitled\)$/.test(nls) && C.formatHuman('notes.ls', { notes: [] }) === 'no notes', 'notes ls human output', nls)
+  check(C.formatHuman('notes.get', { note: { text: '# Plan\n\nhola' } }) === '# Plan\n\nhola' && C.formatHuman('ls', { workspaces: [{ index: 1, name: 'api', cwd: 'C:/api', active: false, favorite: true, consoles: [] }] }).includes('api [fav]'), 'notes get prints the raw text; ls marks favorites')
+  out.length = 0
+  await C.run(['help', '--agent'], deps())
+  const guide2 = out.join('\n')
+  check(guide2.includes('## Observing other consoles') && guide2.includes('snaos peek <console>') && guide2.includes('snaos chat <console>') && guide2.includes('## Notes') && guide2.includes('snaos notes append'), 'guide: observing other consoles and Notes sections')
+  check(guide2.includes('--yes') && guide2.includes('8 conflict') && /Never `kill`, `restart` or `ws close`/.test(guide2), 'guide: destructive command rules and exit 8')
+  check(!/[\u2013\u2014]/.test(guide2) && !/[\u2013\u2014]/.test(C.USAGE), 'guide and usage carry no en or em dash')
+
+  // --- app 2.3.0 (4b): usage and account ----------------------------------------
+  check(p(['account']).command === 'account' && p(['account']).sub === 'status' && p(['account', 'ls']).sub === 'ls' && p(['account', 'use', 'secondary']).positionals[0] === 'secondary', 'account alone is account status; ls and use parse')
+  check(/unknown account command "rm"/.test(usage(['account', 'rm', 'x'])) && /--provider does not apply to account status/.test(usage(['account', 'status', '--provider', 'claude'])) && /--lines does not apply to usage/.test(usage(['usage', '-n', '3'])), 'account rm is unknown; flags are checked per subcommand')
+  check((await b(['usage'])).method === 'usage' && JSON.stringify((await b(['usage'])).params) === '{}' && (await b(['usage', '--provider', 'codex'])).params.provider === 'codex', 'usage params')
+  check(/--provider must be claude or codex/.test(await bad(['usage', '--provider', 'custom'])) && /usage takes no argument/.test(await bad(['usage', 'claude'])), 'usage validates --provider and takes no argument')
+  check((await b(['account'])).method === 'account.status' && (await b(['account', 'ls', '--provider', 'claude'])).method === 'account.ls' && /--provider must be claude/.test(await bad(['account', 'ls', '--provider', 'codex'])), 'account status and ls; only --provider claude')
+  const use = await b(['account', 'use', 'Mi', 'cuenta'])
+  check(use.method === 'account.use' && use.params.account === 'Mi cuenta' && /account use needs an account/.test(await bad(['account', 'use'])), 'account use joins a label of several words; no account is a usage error')
+  const now = Date.UTC(2026, 9, 20, 12, 0)
+  check(C.resetIn('2026-10-20T14:10:00.000Z', now) === '2h 10m' && C.resetIn('2026-10-23T16:00:00.000Z', now) === '3d 4h' && C.resetIn('2026-10-20T12:05:00.000Z', now) === '5m' && C.resetIn('2026-10-20T13:00:00.000Z', now) === '1h' && C.resetIn('2026-10-20T11:00:00.000Z', now) === 'now' && C.resetIn(null, now) === '' && C.resetIn('nope', now) === '', 'resetIn: 2h 10m, 3d 4h, 5m, 1h, now and unknown')
+  const soon = new Date(Date.now() + (2 * 60 + 10) * 60_000 - 1000).toISOString()
+  const uh = C.formatHuman('usage', { updatedAt: 1, services: null, account: { id: 'acc_a', slot: 'primary', label: '' }, rows: [
+    { id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 42.4, resetsAt: soon, status: 'ok', planType: 'max' },
+    { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 80, resetsAt: null, status: 'ok', stale: true },
+    { id: 'codex.5h', provider: 'codex', kind: '5h', label: 'Session', percent: null, resetsAt: null, status: 'error' },
+  ] })
+  check(uh === 'claude Session         42%   resets in 2h 10m  [max]\nclaude Weekly          80%    (stale)\ncodex  Session         -     error\nclaude account: primary', 'usage human output', uh)
+  check(C.formatHuman('usage', { rows: [], updatedAt: 0, services: null }) === 'no usage rows (turn them on in Settings > AI Usage)', 'usage human output without rows')
+  const acc = (over) => ({ id: 'acc_a', provider: 'claude', slot: 'primary', label: 'Trabajo', plan: 'max', active: true, ready: true, fiveHour: { percent: 30, resetsAt: null, source: 'live' }, sevenDay: { percent: 50, resetsAt: null, source: 'live' }, ...over })
+  const al = C.formatHuman('account.ls', { accounts: [acc(), acc({ id: 'acc_b', slot: 'secondary', label: '', plan: null, active: false, ready: false, fiveHour: { percent: 5, resetsAt: soon, source: 'parked' }, sevenDay: { percent: null, resetsAt: null, source: 'none' } })] })
+  check(al === '* primary    Trabajo           max     5h 30%  7d 50%\n  secondary  -                         5h 5% (resets in 2h 10m)  7d -  (capture it again on the desktop)', 'account ls human output', al)
+  check(C.formatHuman('account.ls', { accounts: [] }).startsWith('no saved Claude accounts'), 'account ls without accounts')
+  const ast = C.formatHuman('account.status', { supported: true, live: 'known', active: acc(), accounts: [acc(), acc({ id: 'acc_b', slot: 'secondary', label: 'Personal', active: false })], lastSwitch: { at: Date.UTC(2026, 9, 1, 9, 30), from: 'acc_b', to: 'acc_a', reason: 'cli' }, auto: { enabled: true, switchAtPercent: 99, paused: 'conflict' } })
+  check(/^active: Trabajo \(primary\)\nlast switch: Personal to Trabajo \(cli, 2026-10-01 \d\d:\d\d\)\nautomatic switch: on at 99% \(paused: conflict\)$/.test(ast), 'account status human output', ast)
+  check(C.formatHuman('account.status', { supported: true, live: 'unknown', active: null, accounts: [acc()], lastSwitch: null, auto: { enabled: false, switchAtPercent: 99, paused: null } }) === 'active: a Claude login that is not saved here\nautomatic switch: off' && C.formatHuman('account.status', { supported: false, accounts: [] }).includes('not supported'), 'account status with an unknown live login, and unsupported')
+  check(C.formatHuman('account.use', { active: acc({ slot: 'secondary', label: 'Personal' }), changed: true }) === 'switched to Personal (secondary)' && C.formatHuman('account.use', { active: acc({ label: '' }), changed: false }) === 'already on primary', 'account use human output (the slot in parentheses only after a label)')
+  const longRow = C.formatHuman('account.ls', { accounts: [acc({ label: 'MyVeryLongWorkAccount', plan: 'enterprise' })] })
+  check(longRow === '* primary    MyVeryLongWorkAccount enterprise 5h 30%  7d 50%', 'account ls: a long label or plan still leaves a space before the next column', longRow)
+  const unvSt = C.formatHuman('account.status', { supported: true, live: 'known', unverified: true, active: acc(), accounts: [acc()], lastSwitch: null, auto: { enabled: false, switchAtPercent: 99, paused: null } })
+  check(unvSt === 'active: Trabajo (primary)\nthe live Claude login changed and is not identified yet: switches wait until a Claude console used it\nautomatic switch: off', 'account status human output while the live login is unverified', unvSt)
+  check(C.USAGE.includes('snaos usage [--provider claude|codex]') && C.USAGE.includes('account use <primary|secondary|id|label>'), 'USAGE lists usage and account')
+  check(guide2.includes('## Usage and Claude accounts') && guide2.includes('snaos usage') && /only when the user asks/.test(guide2) && /Never `account use` unless the user asked/.test(guide2), 'guide: usage and accounts section, account use only on request')
 }
 
 // --- K. CliService end to end ------------------------------------------------------
@@ -850,6 +1406,78 @@ async function serviceChecks() {
     const out = [], err = []
     const code = await C.run(['notify', 'build', 'listo', '--title', 'CI'], deps(env1, out, err))
     check(code === 0 && routed.length === 1 && routed[0].kind === 'custom' && routed[0].body === 'build listo' && routed[0].paneId === 'p1', 'notify reaches the router as a custom notice from the caller')
+  }
+  // app 2.3.0 end to end: services attached late (like bootstrap), a real WsNoteStore and the chat fixtures.
+  {
+    const run = async (argv, env = env1) => { const out = [], err = []; const code = await C.run(argv, deps(env, out, err)); return { code, out: out.join('\n'), err: err.join('\n') } }
+    check((await run(['notes', '--json'])).code === 7, 'before attach the notes answer disabled (exit 7)')
+    const { WsNoteStore } = load('src/main/notes/WsNoteStore.ts')
+    const notesRoot = tmp('cli-notes')
+    const emitted = []
+    const store = new WsNoteStore({ root: () => notesRoot, emit: (e) => emitted.push(e) })
+    service.attach({
+      notes: store,
+      chat: { locate: async (id) => (id === 'p1' ? { ok: true, path: path.join(FIX, 'claude-session.jsonl'), provider: 'claude' } : id === 'p3' ? { ok: true, path: path.join(FIX, 'codex-rollout.jsonl'), provider: 'codex' } : { ok: false, reason: 'noTranscript' }) },
+    })
+    const made = await run(['notes', 'new', 'hola', '--title', 'Plan', '--json'])
+    const id = JSON.parse(made.out).data.note.id
+    const file = path.join(notesRoot, 'w1', `${id}.md`)
+    check(made.code === 0 && fs.readFileSync(file, 'utf8') === '# Plan\n\nhola' && emitted.length === 1 && emitted[0].noteId === id, 'snaos notes new writes <root>/w1/<id>.md through the store and emits once')
+    check((await run(['notes', 'append', id, 'mas'])).code === 0 && fs.readFileSync(file, 'utf8').endsWith('hola\nmas'), 'snaos notes append, end to end')
+    const got = await run(['notes', 'get', 'Plan'])
+    check(got.code === 0 && got.out === '# Plan\n\nhola\nmas', 'snaos notes get <title> prints the raw text')
+    const rev = JSON.parse((await run(['notes', 'get', id, '--json'])).out).data.note.rev
+    const stale = await run(['notes', 'set', id, 'pisado', '--rev', 'r-old'])
+    check(stale.code === 8 && /changed since --rev/.test(stale.err) && fs.readFileSync(file, 'utf8').endsWith('mas'), 'a stale --rev exits 8 and leaves the file alone')
+    check((await run(['notes', 'set', id, 'nuevo', '--rev', rev])).code === 0 && fs.readFileSync(file, 'utf8') === 'nuevo', 'the current --rev writes')
+    const lsOut = await run(['notes'])
+    check(lsOut.code === 0 && lsOut.out.startsWith(id) && lsOut.out.includes('nuevo'), 'snaos notes lists them (human)')
+    check((await run(['notes', 'rm', id])).code === 0 && !fs.existsSync(file) && fs.readdirSync(path.join(notesRoot, '.trash', 'w1')).some((f) => f.startsWith(id)), 'snaos notes rm moves the file under .trash/w1')
+    const guarded = await store.write({ workspaceId: 'w1', noteId: id, text: 'revivida', baseRev: rev })
+    check(!guarded.ok && guarded.error === 'not_found' && !fs.existsSync(file), 'a --rev guarded write on a deleted note is not_found and never brings it back')
+    check((await run(['notes', 'set', id, 'otra', '--rev', rev])).code === 3 && !fs.existsSync(file), 'snaos notes set --rev on a trashed note exits 3')
+    check((await store.write({ workspaceId: 'w1', noteId: id, text: 'nueva' })).ok && fs.readFileSync(file, 'utf8') === 'nueva' && fs.rmSync(file) === undefined, 'an unguarded write still creates it (Keep mine)')
+    const under = await run(['notes', 'new', 'cuerpo', '--title', 'fix_login', '--json'])
+    const underId = JSON.parse(under.out).data.note.id
+    const underGet = await run(['notes', 'get', 'fix_login', '--json'])
+    check(under.code === 0 && underGet.code === 0 && JSON.parse(underGet.out).data.note.id === underId && (await run(['notes', 'rm', 'fix_login'])).code === 0, 'a note titled fix_login (listed as fixlogin) is found by the title it was created with')
+    // chat and peek through the whole chain with the fixture transcripts.
+    const chat = await run(['chat', '1', '--turns', '1'])
+    check(chat.code === 0 && chat.out.startsWith('--- user') && chat.out.includes('Look at this') && chat.out.endsWith('older: snaos chat p1 --before 7724'), 'snaos chat 1 --turns 1 prints the last turn and the older line', chat.out)
+    const older = await run(['chat', 'p1', '--turns', '1', '--before', '7724', '--json'])
+    check(older.code === 0 && JSON.parse(older.out).data.items[0].blocks[0].text === '/model opus', 'snaos chat --before pages back, end to end')
+    const cx = await run(['chat', 'api:3', '--tools'])
+    check(cx.code === 0 && cx.out.includes('-> ') && cx.out.includes('<- result') && cx.out.includes('Fixed the failing test.'), 'snaos chat of the Codex console with --tools', cx.out)
+    world.states.p3 = { paneId: 'p3', provider: 'codex', state: 'done', precise: true, notify: false, attention: true, stateSince: Date.now() - 5000 }
+    const pk = await run(['peek', '3', '--json'])
+    const pd = JSON.parse(pk.out).data
+    check(pk.code === 0 && pd.state === 'done' && pd.attention === true && pd.lastMessage === 'Fixed the failing test.' && Array.isArray(pd.lines), 'snaos peek 3 from console 1: state, attention and the last reply from the transcript')
+    check(world.states.p3.attention === true && !world.ops.some((o) => o.kind === 'attention' && o.paneId === 'p3'), 'peeking never acknowledges for the user')
+    const nochat = await run(['chat', '2'])
+    check(nochat.code === 3 && /no chat for this console/.test(nochat.err), 'a console without a transcript exits 3')
+    check((await run(['kill', 'srv:1'])).code === 7, 'snaos kill srv:1 (SSH protected) exits 7')
+    check((await run(['ws', 'close', 'api', '--yes'])).code === 2, 'snaos ws close of its own workspace exits 2')
+    check((await run(['kill', 'self'])).code === 2, 'snaos kill self exits 2')
+    // 4b: usage and accounts attached late, like bootstrap (the adapter over an AccountService fake).
+    check((await run(['usage'])).code === 7 && (await run(['account'])).code === 7, 'before attach usage and account answer disabled (exit 7)')
+    const { ctlAccountsView } = load('src/main/cli/accountsView.ts')
+    const src = fakeAccountSource()
+    service.attach({ usage: fakeUsage(), accounts: ctlAccountsView(src) })
+    const us = await run(['usage'])
+    check(us.code === 0 && /^claude Session +42% +resets in /.test(us.out) && us.out.includes('codex  Session') && !us.out.includes('gpt-x') && us.out.endsWith('claude account: Trabajo (primary)'), 'snaos usage, end to end', us.out)
+    const usj = await run(['usage', '--provider', 'claude', '--json'])
+    check(usj.code === 0 && JSON.parse(usj.out).data.rows.length === 2 && !usj.out.includes('sk-ant') && !usj.out.includes('@'), 'snaos usage --provider claude --json: no token, no email')
+    const as = await run(['account'])
+    check(as.code === 0 && as.out.startsWith('active: Trabajo (primary)') && as.out.includes('automatic switch: on at 95%'), 'snaos account (status), end to end', as.out)
+    const al = await run(['account', 'ls', '--json'])
+    check(al.code === 0 && JSON.parse(al.out).data.accounts.length === 2 && !al.out.includes('@') && !al.out.includes('sk-ant'), 'snaos account ls --json: no email, no token')
+    const used = await run(['account', 'use', 'secondary'])
+    check(used.code === 0 && used.out === 'switched to Personal (secondary)' && src.calls.length === 1 && src.calls[0].reason === 'cli', "snaos account use secondary switches with reason 'cli'", used.out)
+    check((await run(['account', 'use', 'Personal'])).out === 'already on Personal (secondary)' && src.calls.length === 1, 'using the live account again changes nothing')
+    src.next = { ok: false, error: 'locked' }
+    const lockedRun = await run(['account', 'use', 'primary'])
+    check(lockedRun.code === 7 && /capture it again/.test(lockedRun.err), 'a locked login exits 7 with the hint')
+    check((await run(['account', 'use', 'nadie'])).code === 3, 'an unknown account exits 3')
   }
   // Ctrl+C during wait: the client goes away, the server frees the waiter.
   {
@@ -1022,6 +1650,8 @@ async function main() {
     await noticeChecks()
     await serverChecks()
     await handlerChecks()
+    await moreHandlerChecks()
+    await usageAccountChecks()
     await waitChecks()
     await cliEntryChecks()
     await serviceChecks()
@@ -1031,7 +1661,7 @@ async function main() {
     fs.rmSync(tmpRoot, { recursive: true, force: true })
     if (sockRoot) fs.rmSync(sockRoot, { recursive: true, force: true })
   }
-  console.log(`PASS: ${checks} cli checks (refs, ANSI, tokens, env, runtime.json, shim static and executed, user PATH, skill, custom notify, CtlServer, handlers, wait, cliEntry, CliService end to end, pty tail)`)
+  console.log(`PASS: ${checks} cli checks (refs, ANSI, tokens, env, runtime.json, shim static and executed, user PATH, skill, custom notify, CtlServer, handlers, chat, peek, kill, restart, rename, ws, notes, usage, account, wait, cliEntry, CliService end to end, pty tail)`)
 }
 main().catch((err) => {
   console.error(err)

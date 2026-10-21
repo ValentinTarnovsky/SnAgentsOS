@@ -20,6 +20,7 @@ import type {
   WorkspaceTaskState,
 } from '@shared/types'
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
+import { DEFAULT_CLAUDE_ACCOUNTS_SETTINGS } from '@shared/claude-accounts'
 import { gridForCount, orderPanes } from '@/components/layout/gridTemplates'
 import {
   QUICK_COMMANDS_MAX,
@@ -30,6 +31,7 @@ import {
 import { killPanePtys } from '@/lib/ptyRegistry'
 import { trashSavedScrollback } from '@/lib/scrollback'
 import { restartInPlace } from '@/lib/restartRegistry'
+import { clearStopped } from '@/lib/stoppedPanes'
 import { visiblePaneIds } from '@shared/status'
 import { useAgentStore } from '@/lib/agentStore'
 import { orderIndexOf, transferPane, type PaneHome, type PaneHomes } from '@/lib/paneHome'
@@ -114,6 +116,7 @@ const DEFAULT_SETTINGS: Settings = {
     custom: [],
     collapsed: false,
   },
+  claudeAccounts: { ...DEFAULT_CLAUDE_ACCOUNTS_SETTINGS },
   remote: {
     enabled: false,
     port: 4517,
@@ -967,6 +970,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   removePane: (workspaceId, paneId) => {
+    // A console closed and reopened (same id) starts again: no `snaos kill` stop left behind.
+    clearStopped(paneId)
     set((s) => {
       const maximized = { ...s.maximized }
       if (maximized[workspaceId] === paneId) maximized[workspaceId] = null
@@ -1128,6 +1133,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   restartPaneClean: (paneId) => {
     // Any restart wakes a sleeping console (E5-FR-26): the overlay gives way to a new terminal.
     useAgentStore.getState().setSleeping(paneId, null)
+    // And ends a `snaos kill` stop: the remount spawns again.
+    clearStopped(paneId)
     // Unmounting never kills (E4-FR-36), so kill first, by paneId in main: IPC
     // from one renderer is handled in order and the kill is synchronous, so the
     // new mount's reattach finds nothing and spawns a fresh shell.
@@ -1383,7 +1390,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         state: evt.state, precise: evt.precise, provider: evt.provider, reason: evt.reason, pendingCount: evt.pendingCount, updatedAt: evt.updatedAt,
         stateSince: evt.stateSince, lastMessage: evt.lastMessage, activity: evt.activity, pending: evt.pending, sessionId: evt.sessionId, cwd: evt.cwd,
         detail: evt.detail, topic: evt.topic, firstPrompt: evt.firstPrompt, cacheSince: evt.cacheSince,
-        waiting: evt.waiting, backgroundOther: evt.backgroundOther,
+        waiting: evt.waiting, backgroundOther: evt.backgroundOther, attention: evt.attention,
+        model: evt.model, effort: evt.effort, ultracode: evt.ultracode,
       }
       // A new session (or Claude working again) hides the "Claude exited" chip (E6-FR-22).
       let agentEnded = s.agentEnded
@@ -1396,7 +1404,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // (schema 11, a seed for main's agent-sessions.json). Only a change of
       // session, provider or cwd writes, so plain status traffic never persists.
       const workspaces = withLastSession(s.workspaces, evt)
-      if (evt.state === 'done' || evt.state === 'action' || evt.state === 'error') {
+      // v2.3: with main's `attention` the marks read it directly; the local flag
+      // below is the legacy rule (a desktop without the field) and the CLI op.
+      if (evt.attention === undefined && (evt.state === 'done' || evt.state === 'action' || evt.state === 'error')) {
         // Only flag attention when the console is not being looked at right now:
         // other workspace, minimized in the active one, or the window unfocused.
         const wsId = s.workspaces.find((w) => w.panes.some((p) => p.id === evt.paneId))?.id
@@ -1405,8 +1415,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (!inView && !(evt.paneId in paneAttention)) {
           paneAttention = { ...paneAttention, [evt.paneId]: true }
         }
-      } else if ((evt.state === 'working' || evt.state === 'idle') && evt.paneId in paneAttention) {
-        // Back to work: the pending "look at me" flag is stale.
+      } else if (evt.paneId in paneAttention && (evt.state === 'working' || evt.state === 'idle' || (evt.attention === false && s.paneStatus[evt.paneId]?.attention === true))) {
+        // Back to work, or main's attention went true -> false (seen on any
+        // device): the pending "look at me" flag is stale.
         paneAttention = { ...paneAttention }
         delete paneAttention[evt.paneId]
       }

@@ -8,7 +8,7 @@ import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import type { CustomNotice } from '../status/events'
 import { CtlServer, ctlEndpoint } from './CtlServer'
 import { CtlTokens, newToken } from './CtlTokens'
-import { CtlHandlers, type CtlHandlerDeps, type CtlPtyView, type CtlStatusView } from './handlers'
+import { CtlHandlers, type CtlHandlerDeps, type CtlPtyView, type CtlServices, type CtlStatusView } from './handlers'
 import { IpcRendererBus } from './rendererBus'
 import { removeRuntimeFileIfOwned, writeRuntimeFile } from './runtimeFile'
 import { writeShim } from './shim'
@@ -35,7 +35,7 @@ export interface CliServiceDeps {
   skillEnv?: NodeJS.ProcessEnv
   platform?: NodeJS.Platform
   /** Test seam for the handlers' clock and timings. */
-  handlerOverrides?: Partial<Pick<CtlHandlerDeps, 'now' | 'timing'>>
+  handlerOverrides?: Partial<Pick<CtlHandlerDeps, 'now' | 'timing' | 'isDir'>>
 }
 
 /**
@@ -57,6 +57,8 @@ export class CliService {
   private error: string | undefined
   private shimFile = ''
   private transition: Promise<void> = Promise.resolve()
+  /** Built later in bootstrap (notes store, transcript locator); a missing one answers `disabled`. */
+  private readonly services: CtlServices = {}
 
   constructor(private readonly deps: CliServiceDeps) {
     this.master = newToken()
@@ -70,12 +72,18 @@ export class CliService {
       config: deps.config,
       appVersion: deps.appVersion,
       platform: deps.platform ?? process.platform,
+      services: () => this.services,
       notify: (n) => {
         deps.status.notifyCustom(n.paneId, n.title, n.body)
         if (!n.local) deps.routeCustom({ kind: 'custom', paneId: n.paneId, title: n.title, body: n.body })
       },
       ...deps.handlerOverrides,
     })
+  }
+
+  /** Wires main services the CLI reaches (app 2.3.0: notes, chat, usage, accounts). */
+  attach(services: Partial<CtlServices>): void {
+    Object.assign(this.services, services)
   }
 
   binDir(): string {

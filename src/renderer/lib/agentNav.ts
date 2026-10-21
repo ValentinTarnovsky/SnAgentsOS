@@ -15,6 +15,7 @@ import {
   type AgentSessionView,
   type RankedPane,
 } from '@shared/agents'
+import { displayStatus } from '@shared/status'
 import type { TFn } from '@/i18n'
 import { isPaneMounted, type MountedWorkspaces } from './mounting'
 import { waitingPhrase } from './formatSince'
@@ -100,8 +101,9 @@ export function workspaceAgents(ws: Workspace, input: NavInput): AgentEntry[] {
         status,
         session,
         notStarted: false,
-        rank: agentRank(status.state),
-        unread: !!input.paneAttention[pane.id],
+        rank: agentRank(status.state, status.attention),
+        // v2.3: main's attention (a done or error nobody saw), or the CLI's local mark.
+        unread: status.attention === true || !!input.paneAttention[pane.id],
         stateSince: status.stateSince ?? status.updatedAt ?? 0,
       })
     } else if (!isPaneMounted(input.mountedWorkspaces, ws.id, pane.id) && willResumeOnOpen(ws, pane, input.presets, session, input.policy)) {
@@ -203,7 +205,8 @@ function firstLine(text: string | undefined): string {
 export function agentPhrase(e: AgentEntry, t: TFn, lang: Language, now: number, withAge = true): string {
   if (e.sleeping) return withAge && e.stateSince ? `${t('agents.row.sleeping')} · ${formatAgeShort(now - e.stateSince, lang)}` : t('agents.row.sleeping')
   if (e.notStarted || !e.status) return t('agents.row.notStarted')
-  const s = e.status
+  // v2.3: an answered request reads like the glyph (working, or idle title-only).
+  const s = displayStatus(e.status)
   const age = formatAgeShort(now - e.stateSince, lang)
   const tail = (text: string): string => (withAge && e.stateSince ? `${text} · ${age}` : text)
   const detail = firstLine(s.detail?.text)

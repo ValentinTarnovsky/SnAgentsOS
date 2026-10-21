@@ -7,6 +7,7 @@
 import { z } from 'zod'
 import type { RemoteClientMsg } from './remote-protocol'
 import { WS_NOTE_ID_RE, WS_NOTE_PHONE_MAX } from './ws-notes'
+import { isClaudeModel } from './agentTune'
 
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/)
 const id = z.string().min(1).max(128)
@@ -96,6 +97,22 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   // text: a stray field is stripped, never sent.
   z.object({ kind: z.literal('scheduleRun'), workspaceId: id, paneId: id }),
   z.object({ kind: z.literal('scheduleToggle'), workspaceId: id, paneId: id, enabled: z.boolean() }),
+  // app 2.3.0: only allowlisted values (the phone never builds another one);
+  // the provider and the Enter gate are the executor's and main's to judge.
+  z.object({
+    kind: z.literal('agentTune'),
+    workspaceId: id,
+    paneId: id,
+    set: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('model'), value: z.string().max(64).refine(isClaudeModel, 'model') }),
+      z.object({ kind: z.literal('effort'), value: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'auto']) }),
+      z.object({ kind: z.literal('ultracode'), on: z.boolean() }),
+      z.object({ kind: z.literal('picker') }),
+    ]),
+    enter: z.boolean(),
+  }),
+  // app 2.3.0: Claude account switch from the phone (main re-validates the role).
+  z.object({ kind: z.literal('claudeAccountUse'), role: z.enum(['primary', 'secondary']) }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [

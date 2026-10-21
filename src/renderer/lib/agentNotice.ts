@@ -23,7 +23,8 @@ const CARD_KEYS: Partial<Record<ClaudePaneState, MessageKey>> = {
 export function onAgentStatus(evt: PaneStatusEvt): void {
   const key = agentToastKey(evt.paneId)
   const current = shown.get(evt.paneId)
-  if (current !== undefined && evt.state !== current) {
+  // v2.3: the card also goes once main says the console no longer needs the user.
+  if (current !== undefined && (evt.state !== current || evt.attention === false)) {
     shown.delete(evt.paneId)
     toast.dismissByKey(key)
   }

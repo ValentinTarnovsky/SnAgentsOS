@@ -57,9 +57,10 @@ import {
 } from './auth'
 import { hexEqual, hexToBytes, hmacSha256Hex } from './sha256'
 import { selectPaneMode, selectPaneView, store, type UpdateInfo } from './store'
+import { createTrayReconciler } from './trayReconcile'
 import { chatNoticeOf } from '@shared/chat-types'
 import { chatStore, type ChatLoad } from './chatStore'
-import type { PaneView } from './chatView'
+import { chatToastKey, type PaneView } from './chatView'
 import { applyRemoteTheme } from './theme'
 import { setLang, t } from './i18n'
 import { delayFor } from './reconnectSchedule'
@@ -185,6 +186,15 @@ const paneNotifier = createPaneNotifier({
   },
 })
 
+/** v2.3: tray notes of consoles that no longer need the user close on their own. */
+const trayReconciler = createTrayReconciler({
+  snapshot: () => {
+    const s = store.getState()
+    return s.phase === 'live' ? s.snapshot : null
+  },
+  statuses: () => store.getState().paneStatus,
+})
+
 /** "(N) SnAgentsOS Remote" with N consoles in action (E2-FR-43). */
 function syncTitle(): void {
   const s = store.getState()
@@ -278,6 +288,13 @@ class RemoteClient {
   /** E3 M12: what the chat request pending per pane asked for (first page or earlier). */
   private readonly chatPending = new Map<string, { kind: ChatLoad; token: number }>()
   private chatToken = 0
+  /**
+   * v2.3.0: pane id -> chatToastKey of its status at its last "Chat not
+   * available" toast, for this page session only. The toast shows once per
+   * console until that key changes; the fallback to Terminal still runs on
+   * every notice.
+   */
+  private readonly chatToasted = new Map<string, string>()
 
   /** Boot the client from stored auth or a pairing code. Idempotent. */
   start(): void {
@@ -292,7 +309,11 @@ class RemoteClient {
     if (!pageVisible()) this.hiddenAt = this.lastHiddenAt = perfNow()
     store.getState().update({ online: browserOnline() })
     store.subscribe((s, prev) => {
-      if (s.paneStatus !== prev.paneStatus || s.snapshot !== prev.snapshot || s.phase !== prev.phase) syncTitle()
+      if (s.paneStatus !== prev.paneStatus || s.snapshot !== prev.snapshot || s.phase !== prev.phase) {
+        syncTitle()
+        // authOk, state and paneStatus all land here (v2.3).
+        if (s.phase === 'live') trayReconciler.schedule()
+      }
     })
     // E2-FR-42: a deep link waits for the first goLive (a #pair= hash wins and is left alone).
     const link = takePendingDeepLink()
@@ -671,7 +692,8 @@ class RemoteClient {
    * chatPage (FR-26/30/33): an answer to "Load earlier" goes in front; any
    * other page (the first one, a reset) replaces the list. A lone notice
    * means no chat: back to Terminal for this open only (chatRefused, never
-   * saved), with the toast that names the fix for the console's agent.
+   * saved), with the toast that names the fix for the console's agent: once
+   * per console and status key (v2.3.0), so reopening does not repeat it.
    */
   private handleChatPage(msg: Extract<RemoteServerMsg, { type: 'chatPage' }>): void {
     const pending = this.chatPending.get(msg.paneId)
@@ -685,12 +707,24 @@ class RemoteClient {
       chatStore.getState().clear(msg.paneId)
       s.setChatRefused(msg.paneId, true)
       this.syncView()
-      s.setToast(notice === 'notLocal' ? t('chat.unavailable') : `${t('chat.unavailable')}. ${t(this.chatFixKey(msg.paneId))}`)
+      const key = chatToastKey(store.getState().paneStatus[msg.paneId])
+      if (this.chatToasted.get(msg.paneId) !== key) {
+        this.chatToasted.set(msg.paneId, key)
+        s.setToast(notice === 'notLocal' ? t('chat.unavailable') : `${t('chat.unavailable')}. ${t(this.chatFixKey(msg.paneId))}`)
+      }
       return
     }
     const page = { items, cursor: typeof msg.cursor === 'string' ? msg.cursor : null, done: msg.done === true }
     if (pending?.kind === 'more') chatStore.getState().prepend(msg.paneId, page)
     else chatStore.getState().replace(msg.paneId, page)
+  }
+
+  /** A console whose status key changed since its chat toast may show it again (A to B and back to A included). */
+  private forgetChangedChatToasts(): void {
+    const status = store.getState().paneStatus
+    for (const [paneId, key] of this.chatToasted) {
+      if (chatToastKey(status[paneId]) !== key) this.chatToasted.delete(paneId)
+    }
   }
 
   /** What turns the chat on for this console: the Codex integration, else the status hooks (Claude). */
@@ -949,6 +983,9 @@ class RemoteClient {
     log('info', pageVisible() ? 'visible' : 'hidden')
     this.sendVisibility()
     if (pageVisible()) {
+      // v2.3: no tray reconcile here: the statuses may predate the hide (an
+      // iOS socket can look OPEN while dead). The resync, authOk and
+      // paneStatus frames that follow schedule it through the store.
       this.onRevive('visible')
       return
     }
@@ -1564,6 +1601,7 @@ class RemoteClient {
     setLang(state.language)
     const xtermTheme = applyRemoteTheme(state.themeTokens)
     store.getState().update({ snapshot: state, paneStatus: statusMapOf(state), xtermTheme, terminalUnicode: unicodeOf(state) })
+    this.forgetChangedChatToasts()
     // E2-FR-47: the viewed pane vanished (closed on the desktop): back to Home
     // with a toast. No other pane is picked, least of all from another workspace.
     // A console just created gets AWAIT_NEW_PANE_MS to appear before that.
@@ -1596,11 +1634,14 @@ class RemoteClient {
     if (status) next[paneId] = status
     else delete next[paneId]
     s.update({ paneStatus: next })
+    this.forgetChangedChatToasts()
     // The hooks took over from the title (precise after precise:false): the
     // exact transcript is known now, so a chat refused on this open is tried again.
     if (prev?.precise === false && status && status.precise !== false) s.setChatRefused(paneId, false)
     // A console that becomes (or stops being) an agent switches view (FR-24).
     if (paneId === s.subscribedPaneId) this.syncView()
+    // v2.3: a toast of this console goes once it changes state or no longer needs the user.
+    if (prev && (!status || status.state !== prev.state || (status.attention === false && prev.attention !== false))) s.dismissPaneToasts(paneId)
     // An orphan upsert (status ahead of the state that adds the pane) never alerts.
     if (s.snapshot && paneById(s.snapshot, paneId)) paneNotifier.onPaneStatus(paneId, prev, status)
   }

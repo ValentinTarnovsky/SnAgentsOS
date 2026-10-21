@@ -11,6 +11,7 @@ import type { ReactNode } from 'react'
 import { clsx } from 'clsx'
 import type { ClaudePaneState } from '@shared/types'
 import type { RemotePaneStatus } from '@shared/remote-protocol'
+import { displayStatus } from '@shared/status'
 import { statusAriaLabel } from '../lib/statusText'
 
 const DOT_CLASS: Record<Exclude<ClaudePaneState, 'working'>, string> = {
@@ -21,7 +22,9 @@ const DOT_CLASS: Record<Exclude<ClaudePaneState, 'working'>, string> = {
   unknown: 'bg-transparent ring-1 ring-text-secondary',
 }
 
-export function StatusIndicator({ status, size = 12 }: { status?: RemotePaneStatus; size?: number }): ReactNode {
+export function StatusIndicator({ status: raw, size = 12 }: { status?: RemotePaneStatus; size?: number }): ReactNode {
+  // An action already answered (attention false) reads as the desktop glyph does.
+  const status = displayStatus(raw)
   if (!status) return null
   const dot = Math.max(6, Math.round(size * 0.67))
   return (

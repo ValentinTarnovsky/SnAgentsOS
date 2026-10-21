@@ -279,6 +279,23 @@ const usageSettingsSchema = z
   })
   .default({})
 
+// Schema 16 (app 2.3.0): Claude multi-account policy, every field with its own
+// default so a junk value only resets that field. The saved accounts live in
+// dataDir()/claude-accounts/, never here.
+const pct = (min: number, max: number, d: number) => z.number().int().min(min).max(max).catch(d).default(d)
+const claudeAccountsSettingsSchema = z.object({
+  autoSwitch: z.boolean().catch(false).default(false),
+  switchAtPercent: pct(50, 100, 99),
+  returnToPrimary: z.boolean().catch(true).default(true),
+  returnBelowPercent: pct(0, 99, 90),
+  returnMarginMinutes: pct(0, 120, 5),
+  minDwellMinutes: pct(0, 240, 10),
+  deferWhileWorking: z.boolean().catch(true).default(true),
+  deferMaxMinutes: pct(0, 60, 3),
+  pollParked: z.boolean().catch(true).default(true),
+  alertOnSwitch: z.boolean().catch(true).default(true),
+})
+
 const settingsSchema = z.object({
   defaultShell: z.object({
     win32: z.string().optional(),
@@ -339,6 +356,7 @@ const settingsSchema = z.object({
   keymap: z.record(z.string()).default({}),
   sidebarCollapsed: z.boolean(),
   usage: usageSettingsSchema,
+  claudeAccounts: claudeAccountsSettingsSchema.default({}).catch(() => claudeAccountsSettingsSchema.parse({})),
   // Field-level defaults migrate configs that predate the remote feature.
   remote: z
     .object({
@@ -403,6 +421,8 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * v13 -> v14 is defaults only as well (no logic, R31-00): the single new key
  * is settings.terminalShellIntegration (default true).
  * v14 -> v15 is defaults only (no logic): settings.usage.collapsed (default false).
+ * v15 -> v16 is defaults only (no logic): settings.claudeAccounts.* (app 2.3.0,
+ * automatic switching off by default).
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)
