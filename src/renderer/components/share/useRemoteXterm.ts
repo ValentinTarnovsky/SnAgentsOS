@@ -4,7 +4,8 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { REPORTS_ONLY_RE } from '@shared/inputReports'
-import { ShareInputGate, type ShareInputCtx } from '@shared/shareInput'
+import { ShareInputGate, shareStateImprecise, type ShareInputCtx } from '@shared/shareInput'
+import { parseMenu, screenRowsOf } from '@shared/promptMenu'
 import type { ShareHostPlatform, SharePerm } from '@shared/share-protocol'
 import { useAppStore } from '@/lib/store'
 import { buildXtermTheme } from '@/themes'
@@ -210,7 +211,10 @@ export function useRemoteXterm(containerRef: RefObject<HTMLDivElement | null>, o
     const send = (data: string): void => {
       const o = optsRef.current
       if (o.perm === 'view') return
-      const verdict = gate.check(data, o.perm, { ...o.ctx(), lastByte })
+      const ctx = o.ctx()
+      // app 2.5.0: an agent with no precise state is judged by the screen, like the host does.
+      const screenMenu = o.perm === 'type' && shareStateImprecise(ctx) ? parseMenu(screenRowsOf(term)) != null : undefined
+      const verdict = gate.check(data, o.perm, { ...ctx, lastByte, ...(screenMenu === undefined ? {} : { screenMenu }) })
       if (!verdict.ok) {
         if (!verdict.drop) o.onRefused(verdict.reason)
         return

@@ -56,6 +56,8 @@ import type {
 } from '@shared/ipc-contract'
 import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemotePaneInfo, RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
 import type { PaneStatusEvt, SharePerm } from '@shared/types'
+import { parseMenu } from '@shared/promptMenu'
+import { shareStateImprecise } from '@shared/shareInput'
 import type { WsNotesChangedEvt } from '@shared/ws-notes'
 import type { ChatFrame, ChatHooks } from '../chat/ChatHub'
 import type { PtyInputOrigin } from '../pty/PtyManager'
@@ -93,6 +95,8 @@ const oneLine = (v: unknown, max: number): string => (typeof v === 'string' ? sh
 export interface ShareHostPty extends FanoutPty {
   ptyIdForPane(paneId: string): string | null
   write(ptyId: string, data: string, origin: PtyInputOrigin): void
+  /** The pane's screen rows (PtyManager.screenRows), for an agent with no precise state; null when unreadable. */
+  screenRows?(paneId: string): string[] | null
 }
 
 export interface ShareHostDeps {
@@ -580,11 +584,15 @@ export class ShareHost {
     return this.statusLive ? this.statusMap.get(paneId) : pane?.status
   }
 
-  private ctxFor(paneId: string): { agent: boolean; state?: StatusLike['state']; precise?: boolean } {
+  private ctxFor(paneId: string): { agent: boolean; state?: StatusLike['state']; precise?: boolean; screenMenu?: boolean } {
     const pane = this.findPane(paneId)?.pane
     const st = this.statusOf(pane, paneId)
     const agent = pane?.type === 'claude' || pane?.type === 'codex' || !!st?.hosted || st?.provider === 'claude' || st?.provider === 'codex'
-    return { agent, state: st?.state ?? null, ...(st?.precise === false ? { precise: false } : {}) }
+    const ctx = { agent, state: st?.state ?? null, ...(st?.precise === false ? { precise: false } : {}) }
+    // app 2.5.0: an agent with no precise state (over SSH, no hooks) is judged by its screen.
+    if (!shareStateImprecise(ctx)) return ctx
+    const rows = this.deps.pty.screenRows?.(paneId) ?? null
+    return rows ? { ...ctx, screenMenu: parseMenu(rows) != null } : ctx
   }
 
   // --- Sessions -------------------------------------------------------------------

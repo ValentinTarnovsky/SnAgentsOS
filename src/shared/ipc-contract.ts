@@ -44,8 +44,7 @@ import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDel
 import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResult, WsNoteWriteReq, WsNotesChangedEvt, WsNotesListRes } from './ws-notes'
 import type { FileCreateReq, FileReadRes, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesRootRes } from './files'
 import type { CliCtlAction, CliUiState, SkillOp, SkillStatus, SkillTarget } from './ctl-protocol'
-import type { DictationError } from './dictation'
-import type { DictationEngine } from './types'
+import type { DictationError, WhisperInstallError, WhisperInstallProgress, WhisperPackId, WhisperStatus } from './dictation'
 
 export type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -65,11 +64,15 @@ export interface PowerState {
   releaseAt?: number
 }
 
-/** `dictation:start` (app 2.4.0): main validates both against the schema 17 rules. */
+/**
+ * `dictation:start` (app 2.5.0): main validates both and reads the device,
+ * interim and vocabulary from its own settings cache.
+ */
 export interface DictationStartReq {
-  engine?: DictationEngine
   /** A BCP 47 tag (DICTATION_LANG_RE); 'auto' is resolved by the renderer. */
   lang?: string
+  /** The console being dictated into: its workspace and folder names bias the prompt (validated in main). */
+  paneId?: string
 }
 
 export interface DictationStartRes {
@@ -79,19 +82,19 @@ export interface DictationStartRes {
 }
 
 /**
- * Main -> renderer `dictation:event`, one per helper line. `ready` names the
- * engine that runs (with `fallback` when auto fell back to offline), `hyp`
- * is the phrase so far, `final` a finished phrase, `error` a code and `end`
- * the session is over (always last).
+ * Main -> renderer `dictation:event`. `ready` names the device that runs
+ * (with `fallback: 'gpu_failed'` when the GPU failed and the session runs on
+ * CPU), `hyp` is the open phrase so far (GPU only), `final` a finished
+ * phrase, `error` a code and `end` the session is over (always last, once).
  */
 export interface DictationEvt {
   sessionId: string
   t: 'ready' | 'hyp' | 'final' | 'error' | 'end'
   text?: string
   code?: DictationError
-  engine?: 'online' | 'offline'
+  engine?: 'gpu' | 'cpu'
   lang?: string
-  fallback?: DictationError
+  fallback?: 'gpu_failed'
 }
 
 export interface AppInfo {
@@ -1159,15 +1162,31 @@ export interface SnApi {
     /** Every state change, including a mode picked from the tray. Returns unsubscribe. */
     onState(cb: (s: PowerState) => void): () => void
   }
-  /** Desktop dictation (app 2.4.0): main runs the Windows recognizer; one session at a time. */
+  /**
+   * Desktop dictation (app 2.5.0): main runs a local Whisper server; the
+   * renderer captures the microphone. One session at a time. Desktop IPC
+   * only, never on the phone protocol.
+   */
   dictation: {
-    /** Stops any other session first; `unsupported` off Windows. */
+    /** Stops any other session first; `unsupported` off Windows x64. */
     start(req: DictationStartReq): Promise<DictationStartRes>
-    /** Ends the session, keeping its last phrase (killed after 3 s). */
+    /** Ends the session, keeping its last phrase (the queue drains before `end`). */
     stop(sessionId: string): Promise<void>
+    /** One 16 kHz mono s16 chunk (at most DICTATION_CHUNK_MAX_BYTES), fire and forget. */
+    audio(sessionId: string, pcm: ArrayBuffer): void
     onEvent(cb: (e: DictationEvt) => void): () => void
-    /** Opens Windows' speech or microphone privacy page (fixed URIs). */
-    openSettings(page: 'speech' | 'microphone'): Promise<boolean>
+    /** Opens Windows' microphone privacy page or the fixed VC++ runtime download URL. */
+    openSettings(page: 'microphone' | 'vcredist'): Promise<boolean>
+    /** Packs, install state and the engine that is up. */
+    models(): Promise<WhisperStatus>
+    /** Downloads and installs a pack (one install at a time). */
+    install(pack: WhisperPackId): Promise<{ ok: boolean; error?: WhisperInstallError }>
+    /** Aborts the running install; the partial download is kept for a resume. */
+    cancelInstall(pack: WhisperPackId): Promise<void>
+    /** Deletes a pack's files that no other installed pack needs. */
+    remove(pack: WhisperPackId): Promise<{ ok: boolean; error?: WhisperInstallError }>
+    /** Install progress (every window, throttled). Returns unsubscribe. */
+    onInstallProgress(cb: (p: WhisperInstallProgress) => void): () => void
   }
   /** Agent behavior settings and durable sessions (E5 G2). */
   agents: {

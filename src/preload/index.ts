@@ -68,6 +68,7 @@ import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 import type { CliUiState, SkillOp, SkillStatus, SkillTarget } from '@shared/ctl-protocol'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from '@shared/repo-config'
 import type { DictationEvt, DictationStartReq, DictationStartRes } from '@shared/ipc-contract'
+import type { WhisperInstallError, WhisperInstallProgress, WhisperPackId, WhisperStatus } from '@shared/dictation'
 import type { ShareGuestApi } from '@shared/ipc-contract'
 import type {
   ShareCreateReq,
@@ -318,7 +319,13 @@ const api: SnApi = {
     start: (req: DictationStartReq) => ipcRenderer.invoke(CH.DICTATION_START, req) as Promise<DictationStartRes>,
     stop: (sessionId: string) => ipcRenderer.invoke(CH.DICTATION_STOP, sessionId) as Promise<void>,
     onEvent: (cb: (e: DictationEvt) => void) => sub<DictationEvt>(CH.DICTATION_EVENT, cb),
-    openSettings: (page: 'speech' | 'microphone') => ipcRenderer.invoke(CH.DICTATION_OPEN_SETTINGS, page) as Promise<boolean>,
+    audio: (sessionId: string, pcm: ArrayBuffer) => ipcRenderer.send(CH.DICTATION_AUDIO, sessionId, pcm),
+    openSettings: (page: 'microphone' | 'vcredist') => ipcRenderer.invoke(CH.DICTATION_OPEN_SETTINGS, page) as Promise<boolean>,
+    models: () => ipcRenderer.invoke(CH.DICTATION_MODELS) as Promise<WhisperStatus>,
+    install: (pack: WhisperPackId) => ipcRenderer.invoke(CH.DICTATION_INSTALL, pack) as Promise<{ ok: boolean; error?: WhisperInstallError }>,
+    cancelInstall: (pack: WhisperPackId) => ipcRenderer.invoke(CH.DICTATION_CANCEL_INSTALL, pack) as Promise<void>,
+    remove: (pack: WhisperPackId) => ipcRenderer.invoke(CH.DICTATION_REMOVE, pack) as Promise<{ ok: boolean; error?: WhisperInstallError }>,
+    onInstallProgress: (cb: (p: WhisperInstallProgress) => void) => sub<WhisperInstallProgress>(CH.DICTATION_INSTALL_PROGRESS, cb),
   },
   agents: {
     setConfig: (cfg: AgentSettings) => ipcRenderer.send(CH.AGENTS_SET_CONFIG, cfg),

@@ -22,7 +22,7 @@ window.result = (async () => {
  let checks=0; const check=(ok,label)=>{if(!ok)throw new Error(label);checks++};
  const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
  const wait = ms => new Promise(r => setTimeout(r, ms));
- const sent=[]; client.sendInput = data => { sent.push(data); return true };
+ const sent=[], submits=[]; client.sendInput = (data, o) => { sent.push(data); if (o&&o.submit) submits.push(data); return true };
  store.getState().update({ phase:'live', banner:null, activePaneId:'p1', subscribedPaneId:'p1',
    snapshot:{ keyButtons:[{id:'u1',label:'F5',seq:'\\x1b[15~'}] } });
  const helper=document.createElement('textarea'); helper.className='xterm-helper-textarea'; document.body.appendChild(helper);
@@ -174,7 +174,7 @@ window.result = (async () => {
  saveBtn().click(); await wait(400);
  check(rowIds().at(-1)===custId&&barLabels().at(-1)==='gst','an edit keeps the key in place');
  sent.length=0; tap(key('gst'));
- check(sent[0]==='git status\\r','the Text key sends its literal and Enter');
+ check(sent[0]==='git status'&&sent[1]==='\\r'&&submits.length===1&&submits[0]==='\\r','the Text key sends its literal, then its Enter as a submit frame (app 2.5.0)');
  row(custId).querySelector('[data-key-up]').click(); await settle();
  check(rowIds().at(-2)===custId,'custom keys reorder like any other');
 

@@ -158,11 +158,18 @@ export const CH = {
   POWER_STATE: 'power:state', // main -> renderer (PowerState, on every change)
   POWER_GET_STATE: 'power:getState', // invoke -> PowerState
 
-  // Desktop dictation (app 2.4.0): main runs the PowerShell recognizer helper.
+  // Desktop dictation (app 2.5.0): main runs a local Whisper server, the renderer captures the mic.
+  // Desktop IPC only: none of these is ever exposed on the phone protocol.
   DICTATION_START: 'dictation:start', // invoke (DictationStartReq) -> DictationStartRes
-  DICTATION_STOP: 'dictation:stop', // invoke (sessionId) -> void ('stop' to the helper, kill after 3 s)
+  DICTATION_STOP: 'dictation:stop', // invoke (sessionId) -> void (flush, drain the queue, then end)
   DICTATION_EVENT: 'dictation:event', // main -> renderer (DictationEvt)
-  DICTATION_OPEN_SETTINGS: 'dictation:openSettings', // invoke ('speech' | 'microphone') -> boolean (fixed ms-settings URIs)
+  DICTATION_OPEN_SETTINGS: 'dictation:openSettings', // invoke ('microphone' | 'vcredist') -> boolean (fixed URIs)
+  DICTATION_AUDIO: 'dictation:audio', // send (sessionId, ArrayBuffer), renderer -> main, fire and forget
+  DICTATION_MODELS: 'dictation:models', // invoke -> WhisperStatus
+  DICTATION_INSTALL: 'dictation:install', // invoke (WhisperPackId) -> { ok, error? }
+  DICTATION_CANCEL_INSTALL: 'dictation:cancelInstall', // invoke (WhisperPackId) -> void
+  DICTATION_REMOVE: 'dictation:remove', // invoke (WhisperPackId) -> { ok, error? }
+  DICTATION_INSTALL_PROGRESS: 'dictation:installProgress', // main -> renderer (WhisperInstallProgress), every window, throttled 4/s
 
   // Agent behavior settings (settings.agents). awakeDisplay rides here.
   AGENTS_SET_CONFIG: 'agents:setConfig', // send (AgentSettings)

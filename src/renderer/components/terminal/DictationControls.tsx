@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
-import { Mic, MicOff, Settings2, Square, X } from 'lucide-react'
+import { Download, Mic, MicOff, Settings2, Square, X } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
-import { dictationSettingsPage } from '@shared/dictation'
+import { dictationAction, type DictationError } from '@shared/dictation'
 import { useAppStore } from '@/lib/store'
 import {
   dismissDictation,
@@ -18,7 +18,7 @@ import { Tooltip } from '@/components/ui/Tooltip'
 import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 
-/** The mic shows on Windows only: the recognizer is Windows' own. */
+/** The mic shows on Windows only: the local Whisper engine is a Windows x64 build (main answers `unsupported` elsewhere). */
 function dictationAvailable(): boolean {
   return typeof window !== 'undefined' && window.snApi?.platform === 'win32'
 }
@@ -35,6 +35,7 @@ function useScope(scope: string) {
         fallback: mine ? s.fallback : null,
         error: mine ? s.error : null,
         held: mine ? s.held : '',
+        slow: mine ? s.slow : false,
       }
     }),
   )
@@ -43,19 +44,59 @@ function useScope(scope: string) {
 const pillBtn =
   'flex shrink-0 items-center gap-1 rounded-full border border-border px-2 py-px text-[11px] leading-4 text-text-primary transition-colors hover:bg-bg-secondary'
 
-/** "Open speech settings" / "Open microphone settings" for an error or the offline fallback. */
-function SettingsButton({ page }: { page: 'speech' | 'microphone' }) {
+const ERR_KEY: Record<DictationError, MessageKey> = {
+  model_missing: 'dictation.err.model_missing',
+  vcredist: 'dictation.err.vcredist',
+  gpu_failed: 'dictation.err.gpu_failed',
+  mic_denied: 'dictation.err.mic_denied',
+  no_mic: 'dictation.err.no_mic',
+  audio: 'dictation.err.audio',
+  timeout: 'dictation.err.timeout',
+  internal: 'dictation.err.internal',
+  spawn: 'dictation.err.spawn',
+  exit: 'dictation.err.exit',
+  unsupported: 'dictation.err.unsupported',
+}
+
+/** The text of a dictation error code. */
+function errorKey(code: DictationError): MessageKey {
+  return ERR_KEY[code] ?? 'dictation.err.internal'
+}
+
+/** The line shown while the session runs on CPU because the GPU failed. */
+function fallbackKey(code: DictationError | null): MessageKey | null {
+  return code === 'gpu_failed' ? 'dictation.fallback.gpu_failed' : null
+}
+
+/**
+ * The way out of an error (dictationAction): Windows' microphone privacy page,
+ * the VC++ runtime download, or Settings > Terminal > Dictado at the packs row.
+ */
+function ErrorActionButton({ code }: { code: DictationError | null }) {
   const t = useT()
+  const action = dictationAction(code)
+  if (!action) return null
+  const label: MessageKey =
+    action === 'microphone'
+      ? 'dictation.openMic'
+      : action === 'vcredist'
+        ? 'dictation.openVcredist'
+        : code === 'model_missing'
+          ? 'dictation.openModels'
+          : 'dictation.openDictationSettings'
   return (
     <button
       type="button"
-      data-dictation-open-settings={page}
+      data-dictation-action={action}
       onPointerDown={(e) => e.preventDefault()}
-      onClick={() => void window.snApi.dictation?.openSettings(page).catch(() => false)}
+      onClick={() => {
+        if (action === 'models') useAppStore.getState().openSettings('terminal#dictationModels')
+        else void window.snApi.dictation?.openSettings(action).catch(() => false)
+      }}
       className={pillBtn}
     >
-      <Settings2 size={11} className="shrink-0" />
-      {t(page === 'speech' ? 'dictation.openSpeech' : 'dictation.openMic')}
+      {action === 'vcredist' || code === 'model_missing' ? <Download size={11} className="shrink-0" /> : <Settings2 size={11} className="shrink-0" />}
+      {t(label)}
     </button>
   )
 }
@@ -94,8 +135,9 @@ export function PaneMicButton({ paneId }: { paneId: string }) {
 
 /**
  * Listening overlay of a console (bottom of the terminal): what is being
- * heard, the engine, Stop, the offline fallback notice, an error with its
- * Windows settings page, and the text the menu guard held back with Insert.
+ * heard, the device (GPU / CPU), Stop, the slow-model notice, the GPU
+ * fallback notice, an error with its way out (microphone page, VC++ runtime,
+ * the packs in Settings), and the text the menu guard held back with Insert.
  * Unmounting the terminal stops the session.
  */
 export function DictationOverlay({ paneId, onDone }: { paneId: string; onDone?: () => void }) {
@@ -104,8 +146,7 @@ export function DictationOverlay({ paneId, onDone }: { paneId: string; onDone?: 
   const st = useScope(scope)
   useEffect(() => () => releaseDictationScope(scope), [scope])
   if (!st.on && !st.error && !st.held) return null
-  const errorPage = dictationSettingsPage(st.error)
-  const fallbackPage = dictationSettingsPage(st.fallback)
+  const fallback = fallbackKey(st.fallback)
   const status: MessageKey = st.phase === 'starting' ? 'dictation.starting' : st.phase === 'stopping' ? 'dictation.stopping' : 'dictation.listening'
   return (
     <div
@@ -131,11 +172,11 @@ export function DictationOverlay({ paneId, onDone }: { paneId: string; onDone?: 
           <MicOff size={14} className="shrink-0 text-text-secondary" />
         )}
         <span data-dictation-interim className={cn('min-w-0 flex-1 truncate', st.interim ? 'text-text-primary' : 'text-text-secondary')}>
-          {st.on ? st.interim || t(status) : st.error ? t(`dictation.err.${st.error}` as MessageKey) : t('dictation.held')}
+          {st.on ? st.interim || t(status) : st.error ? t(errorKey(st.error)) : t('dictation.held')}
         </span>
         {st.on && st.engine && (
           <span data-dictation-engine={st.engine} className="shrink-0 rounded border border-border px-1 text-[10px] leading-4 text-text-secondary">
-            {t(st.engine === 'online' ? 'dictation.engine.online' : 'dictation.engine.offline')}
+            {t(st.engine === 'gpu' ? 'dictation.engine.gpu' : 'dictation.engine.cpu')}
           </span>
         )}
         {st.on ? (
@@ -168,20 +209,25 @@ export function DictationOverlay({ paneId, onDone }: { paneId: string; onDone?: 
           </button>
         )}
       </div>
-      {st.on && st.fallback && (
-        <div data-dictation-fallback={st.fallback} className="flex items-center gap-2 text-text-secondary">
-          <span className="min-w-0 flex-1">{t('dictation.fallback')}</span>
-          {fallbackPage && <SettingsButton page={fallbackPage} />}
-        </div>
-      )}
-      {st.on && st.error && (
-        <p data-dictation-error={st.error} className="text-red-400">
-          {t(`dictation.err.${st.error}` as MessageKey)}
+      {st.on && st.slow && (
+        <p data-dictation-slow className="text-text-secondary">
+          {t('dictation.startingSlow')}
         </p>
       )}
-      {!st.on && st.error && errorPage && (
+      {st.on && fallback && (
+        <p data-dictation-fallback={st.fallback ?? ''} className="text-text-secondary">
+          {t(fallback)}
+        </p>
+      )}
+      {st.on && st.error && (
+        <div data-dictation-error={st.error} className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 text-red-400">{t(errorKey(st.error))}</span>
+          <ErrorActionButton code={st.error} />
+        </div>
+      )}
+      {!st.on && st.error && dictationAction(st.error) && (
         <div data-dictation-error={st.error} className="flex justify-end">
-          <SettingsButton page={errorPage} />
+          <ErrorActionButton code={st.error} />
         </div>
       )}
       {st.held && (
@@ -280,21 +326,26 @@ export function FieldMicButton({ owner, insert, before }: FieldDictationProps) {
   )
 }
 
-/** One line under the field: what is being heard, the fallback notice or an error with its settings page. */
+/** One line under the field: what is being heard, the slow or fallback notice, or an error with its way out. */
 export function FieldDictationStatus({ owner }: { owner: string }) {
   const t = useT()
   const st = useScope(`field:${owner}`)
   if (!st.on && !st.error) return null
-  const page = dictationSettingsPage(st.error) ?? (st.on ? dictationSettingsPage(st.fallback) : null)
+  const fallback = fallbackKey(st.fallback)
   return (
     <div data-field-dictation={owner} className="flex items-center gap-2 text-xs text-text-secondary">
       {st.on ? <Mic size={12} className="shrink-0 text-red-400" /> : <MicOff size={12} className="shrink-0" />}
       <span data-dictation-interim className={cn('min-w-0 flex-1 truncate', st.error && !st.on && 'text-red-400')}>
         {st.error
-          ? t(`dictation.err.${st.error}` as MessageKey)
-          : st.interim || (st.fallback ? t('dictation.fallback') : t(st.phase === 'starting' ? 'dictation.starting' : 'dictation.listening'))}
+          ? t(errorKey(st.error))
+          : st.interim ||
+            (st.slow
+              ? t('dictation.startingSlow')
+              : fallback
+                ? t(fallback)
+                : t(st.phase === 'starting' ? 'dictation.starting' : st.phase === 'stopping' ? 'dictation.stopping' : 'dictation.listening'))}
       </span>
-      {page && <SettingsButton page={page} />}
+      {st.error && <ErrorActionButton code={st.error} />}
     </div>
   )
 }

@@ -18,7 +18,7 @@ export function openChangesPanel(targetKey?: string, opts: { base?: string } = {
   if (!ws) return
   const key = targetKey ?? panelTargets(ws)[0]?.key ?? workspaceGitKey(ws.id)
   // One drawer at a time (v2.2): Changes replaces Notes or Files.
-  dropSidePanel()
+  dropSidePanel(ws.id)
   refreshGit([key])
   useGitStore.getState().openChanges(key, key.startsWith('pane:') ? opts.base : undefined)
 }

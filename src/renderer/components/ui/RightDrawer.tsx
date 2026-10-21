@@ -5,7 +5,9 @@
  * resize (kept per drawer in localStorage `snagentsos.drawer.<id>.width`),
  * it can cover the whole grid, and Esc closes it unless a field inside used
  * the key (the editor's search, a rename). A click on a console beside it
- * closes it (v2.3) unless it is pinned (`snagentsos.drawer.<id>.pinned`).
+ * closes it (v2.3) unless it is pinned (`snagentsos.drawer.<id>.pinned`, or
+ * `snagentsos.drawer.<id>.pinned.<scope>` with a `pinScope`: each workspace
+ * keeps its own pin since app 2.5.0, the unscoped key is its old default).
  */
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
@@ -41,18 +43,26 @@ function saveWidth(id: string, width: number): void {
   }
 }
 
-function savedPinned(id: string): boolean {
+function pinKey(id: string, scope?: string): string {
+  return scope ? `snagentsos.drawer.${id}.pinned.${scope}` : `snagentsos.drawer.${id}.pinned`
+}
+
+function savedPinned(id: string, scope?: string): boolean {
   try {
-    return storage()?.getItem(`snagentsos.drawer.${id}.pinned`) === '1'
+    const own = storage()?.getItem(pinKey(id, scope))
+    if (own != null || !scope) return own === '1'
+    return storage()?.getItem(pinKey(id)) === '1'
   } catch {
     return false
   }
 }
 
-function savePinned(id: string, pinned: boolean): void {
+function savePinned(id: string, pinned: boolean, scope?: string): void {
   try {
-    if (pinned) storage()?.setItem(`snagentsos.drawer.${id}.pinned`, '1')
-    else storage()?.removeItem(`snagentsos.drawer.${id}.pinned`)
+    // A scoped unpin is stored as '0' so the unscoped default does not pin it again.
+    if (pinned) storage()?.setItem(pinKey(id, scope), '1')
+    else if (scope) storage()?.setItem(pinKey(id, scope), '0')
+    else storage()?.removeItem(pinKey(id))
   } catch {
     /* blocked storage: the pin lasts this session */
   }
@@ -91,6 +101,7 @@ function useCloseOnOutsidePointer(rootRef: RefObject<HTMLDivElement | null>, ena
 
 export function RightDrawer({
   id,
+  pinScope,
   title,
   icon,
   actions,
@@ -101,6 +112,8 @@ export function RightDrawer({
   children,
 }: {
   id: string
+  /** The pin is kept per scope (the workspace id), not shared by every drawer with this id. */
+  pinScope?: string
   title: ReactNode
   icon?: ReactNode
   /** Buttons of the header, before maximize and close. */
@@ -117,7 +130,7 @@ export function RightDrawer({
   const reduced = useReducedMotion()
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [width, setWidth] = useState<number | null>(() => savedWidth(id))
-  const [pinned, setPinned] = useState(() => savedPinned(id))
+  const [pinned, setPinned] = useState(() => savedPinned(id, pinScope))
   const drag = useRef<{ startX: number; startW: number; max: number } | null>(null)
 
   useCloseOnOutsidePointer(rootRef, !pinned && !maximized, onClose)
@@ -202,7 +215,7 @@ export function RightDrawer({
             aria-pressed={pinned}
             onClick={() => {
               setPinned(!pinned)
-              savePinned(id, !pinned)
+              savePinned(id, !pinned, pinScope)
             }}
             className={cn(btn, pinned && 'bg-accent-violet/20 text-text-primary')}
             data-drawer-pin={pinned ? 'on' : 'off'}
