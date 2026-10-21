@@ -224,6 +224,10 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
         .then((r): CmdResult => (r.ok ? { ok: true } : { ok: false, error: r.error ?? 'error' }))
     }
 
+    // app 2.4.0: handled in main (SessionManager.handleCtl re-reads the menu off the mirror); never relayed.
+    case 'answerMenu':
+      return { ok: false, error: 'unknown_action' }
+
     default:
       return { ok: false, error: 'unknown_action' }
   }

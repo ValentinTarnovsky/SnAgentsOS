@@ -708,6 +708,7 @@ function testRateUnits(api) {
   check(['scheduleRun', 'scheduleToggle'].every(kind => limited({ type: 'ctl', action: { kind, workspaceId: 'w1', paneId: 'p1' } })), 'the v3.1 schedule ctl kinds are limited (R31-00)')
   check(limited({ type: 'ctl', action: { kind: 'agentTune', workspaceId: 'w1', paneId: 'p1', set: { kind: 'picker' }, enter: false } }), 'agentTune (app 2.3.0) is limited')
   check(limited({ type: 'ctl', action: { kind: 'claudeAccountUse', role: 'secondary' } }) && api.RATE_LIMITED_CTL_KINDS.has('claudeAccountUse'), 'claudeAccountUse (app 2.3.0) is limited')
+  check(limited({ type: 'ctl', action: { kind: 'answerMenu', paneId: 'p1', pendingId: 't1', n: 1, label: 'Yes' } }) && api.RATE_LIMITED_CTL_KINDS.has('answerMenu'), 'answerMenu (app 2.4.0) is limited: each one reads the mirror and writes to the pty')
   check(!limited({ type: 'ctl', action: { kind: 'runQuickCommand' } }), 'runQuickCommand (v2.2) stays outside the bucket')
   check(limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1', resume: { provider: 'claude', sessionId: 'x' } } }), 'createPane with resume is limited')
   check(!limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1' } }), 'a plain createPane is not')
@@ -1008,6 +1009,24 @@ async function testAutomationRelay() {
   // app 2.4.0: or an id, validated by ACCOUNT_ID_RE. "Exactly one" is the executor's check (a union member takes no refine).
   check(!!frame({ kind: 'claudeAccountUse', id: 'acc_0123456789ab' }) && !frame({ kind: 'claudeAccountUse', id: '../../x' }) && !frame({ kind: 'claudeAccountUse', id: 'acc_0123' }), 'claudeAccountUse { id } takes a well-formed account id only')
   check(!!frame({ kind: 'claudeAccountUse' }) && !!frame({ kind: 'claudeAccountUse', role: 'primary', id: 'acc_0123456789ab' }), 'neither or both pass the schema and are refused by the executor (bad_target)')
+  // app 2.4.0 answerMenu: a digit 1..9, a bounded label and pending id, no free text to write.
+  const answer = { kind: 'answerMenu', paneId: 'c1', pendingId: 'toolu_01', n: 3, label: 'No, keep planning' }
+  check(!!frame(answer) && !!frame({ ...answer, n: 1 }) && !!frame({ ...answer, n: 9 }), 'the ctl schema accepts answerMenu with a digit 1..9')
+  check(!frame({ ...answer, n: 0 }) && !frame({ ...answer, n: 10 }) && !frame({ ...answer, n: 2.5 }) && !frame({ ...answer, n: '3' }), 'answerMenu refuses any other n')
+  check(!frame({ ...answer, label: '' }) && !frame({ ...answer, label: 'y'.repeat(161) }) && !frame({ ...answer, pendingId: 'x'.repeat(201) }) && !frame({ ...answer, paneId: '' }), 'answerMenu bounds label, pendingId and paneId')
+  check(!('text' in frame({ ...answer, text: '\r' }).action), 'a stray text in answerMenu is stripped')
+
+  // The answerMenu ctl is main's: a phone frame never reaches the renderer.
+  {
+    const wm = world()
+    wm.manager.pushState(snapshot)
+    const { ws: wsm } = await pair(wm)
+    const relayed = wm.commands.length
+    wsm.msg({ type: 'ctl', id: 'am1', action: answer })
+    await new Promise(resolve => setImmediate(resolve))
+    const amAck = wsm.of('ctlAck').find(a => a.id === 'am1')
+    check(wm.commands.length === relayed && amAck && !amAck.ok && amAck.error === 'stale' && wm.writes.length === 0, 'answerMenu for an unknown request acks stale in main, writes nothing and is never relayed')
+  }
 
   // Main relays both to the renderer as they are and keeps the new snapshot fields.
   const w = world()

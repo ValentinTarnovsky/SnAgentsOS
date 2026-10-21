@@ -60,6 +60,11 @@ const MESSAGES = {
     'webpush.elicitation': '{agent} needs an answer',
     'webpush.done': '{agent} finished',
     'webpush.failure': '{agent} failed',
+    // Share host (app 2.4.0, item 8): the guest's name as the host sees it.
+    'share.guestFallback': 'Guest',
+    'share.guestLabel': '{name} (guest)',
+    'share.joinTitle': 'Share request',
+    'share.joinBody': '{name} ({ip}) wants to join "{scope}"',
     // Claude multi-account notices (app 2.3.0; N accounts in 2.4.0): labels or "Account N" only, never an email.
     'accounts.accountN': 'Account {n}',
     'accounts.unknownName': 'another account',
@@ -135,6 +140,10 @@ const MESSAGES = {
     'webpush.elicitation': '{agent} necesita una respuesta',
     'webpush.done': '{agent} terminó',
     'webpush.failure': '{agent} falló',
+    'share.guestFallback': 'Invitado',
+    'share.guestLabel': '{name} (invitado)',
+    'share.joinTitle': 'Pedido para compartir',
+    'share.joinBody': '{name} ({ip}) quiere unirse a "{scope}"',
     'accounts.accountN': 'Cuenta {n}',
     'accounts.unknownName': 'otra cuenta',
     'accounts.window.5h': 'de 5 horas',

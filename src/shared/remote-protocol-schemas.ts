@@ -116,6 +116,15 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   // app 2.4.0: or by id. A discriminatedUnion member takes no .refine, so
   // "exactly one of role and id" is checked by the executor (bad_target).
   z.object({ kind: z.literal('claudeAccountUse'), role: z.enum(['primary', 'secondary']).optional(), id: z.string().regex(ACCOUNT_ID_RE).optional() }),
+  // app 2.4.0: an option of Claude's menu from the Chat view. Main re-reads
+  // the screen and compares the label before it writes the digit (no Enter).
+  z.object({
+    kind: z.literal('answerMenu'),
+    paneId: id,
+    pendingId: z.string().min(1).max(200),
+    n: z.number().int().min(1).max(9),
+    label: z.string().min(1).max(160),
+  }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [

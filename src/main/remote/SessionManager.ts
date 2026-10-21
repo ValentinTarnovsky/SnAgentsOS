@@ -97,7 +97,7 @@ export const MAX_CHAT_SUBS = 8
  * schedule ctl join it (R31-00): a run sends a stored prompt to an agent and
  * every toggle rewrites config.json and re-pushes the snapshot to all devices.
  */
-export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set(['fitPane', 'releaseFit', 'sendReviewNotes', 'scheduleRun', 'scheduleToggle', 'agentTune', 'claudeAccountUse'])
+export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set(['fitPane', 'releaseFit', 'sendReviewNotes', 'scheduleRun', 'scheduleToggle', 'agentTune', 'claudeAccountUse', 'answerMenu'])
 /**
  * app 2.3.0: each `claudeAccountUse` rewrites Claude's credentials file, so on
  * top of the bucket a device gets at most 3 per minute (the same as
@@ -298,6 +298,16 @@ export interface SessionManagerDeps {
    * or came back to it (`visibility: true`): main acknowledges its attention.
    */
   onPaneSeen?: (paneId: string) => void
+  /**
+   * app 2.4.0: an authenticated session started watching the pane (`sub` or
+   * `chatSub`): the PromptMenuWatcher reads its menu now.
+   */
+  onPaneWatched?: (paneId: string) => void
+  /**
+   * app 2.4.0: ctl answerMenu, handled in main (RemoteManager.answerMenu re-reads
+   * the screen and writes only the digit). Absent = ack unknown_action.
+   */
+  answerMenu?: (action: Extract<RemoteCtlAction, { kind: 'answerMenu' }>) => RemoteCommandResult
 }
 
 /**
@@ -665,6 +675,13 @@ export class SessionManager implements PtySink {
     this.recomputeForcedFast()
     this.deps.fit?.joined(session, paneId, false)
     this.noteSeen(session, paneId)
+    this.noteWatched(session, paneId)
+  }
+
+  /** app 2.4.0: an authenticated session watches the pane now (PromptMenuWatcher). */
+  private noteWatched(session: Session, paneId: string): void {
+    if (!session.authed || !this.deps.onPaneWatched) return
+    try { this.deps.onPaneWatched(paneId) } catch { /* a reader never breaks the socket */ }
   }
 
   /** v2.3: the phone looks at the pane now (authenticated, page visible). */
@@ -707,6 +724,7 @@ export class SessionManager implements PtySink {
     if (this.deps.chat) this.deps.chat.sub(session, paneId, this.chatSender(session))
     else noChat()
     this.noteSeen(session, paneId)
+    this.noteWatched(session, paneId)
   }
 
   private handleChatUnsub(session: Session, paneId: string): void {
@@ -758,6 +776,17 @@ export class SessionManager implements PtySink {
       }
     } else if (action.kind === 'claudeAccountUse' && !this.takeAccountUse(session.deviceId ?? '')) {
       result = { id, ok: false, error: 'rate' }
+    } else if (action.kind === 'answerMenu') {
+      // app 2.4.0: main answers it (the renderer never sees it), for a session allowed to drive the pane.
+      if (!this.canControl(session, action.paneId)) result = { id, ok: false, error: 'denied' }
+      else if (!this.deps.answerMenu) result = { id, ok: false, error: 'unknown_action' }
+      else {
+        try {
+          result = this.deps.answerMenu(action)
+        } catch {
+          result = { id, ok: false, error: 'no_menu' }
+        }
+      }
     } else {
       result = await this.deps.executeCommand(action, deviceName || undefined)
     }
@@ -939,6 +968,28 @@ export class SessionManager implements PtySink {
     let n = 0
     for (const session of this.sessions) if (session.authed) n += 1
     return n
+  }
+
+  /**
+   * app 2.4.0: some authenticated session has the pane open, as Terminal
+   * (`subs`) or as Chat (`chatSubs`), visible or not. The PromptMenuWatcher
+   * reads Claude's menu only for these panes.
+   */
+  isPaneWatched(paneId: string): boolean {
+    for (const session of this.sessions) {
+      if (session.authed && (session.subs.has(paneId) || session.chatSubs.has(paneId))) return true
+    }
+    return false
+  }
+
+  /**
+   * app 2.4.0 seam: the session may answer the pane's agent (answerMenu).
+   * Every paired device is an owner today, so it is true for any
+   * authenticated session; a shared-console guest (2.4.0 tunnel) plugs its
+   * permission in here.
+   */
+  canControl(session: Session, _paneId: string): boolean {
+    return session.authed
   }
 
   /**

@@ -307,6 +307,9 @@ export interface PtySink {
 /** v2.3: who wrote to a pty: the user (keyboard, phone input, answer cards) or an automation. */
 export type PtyInputOrigin = 'user' | 'auto'
 
+/** Who asked a pane to stay at the fast cadence (setForcedFast): the phone sessions or the share guests. */
+export type ForcedFastOwner = 'remote' | 'share'
+
 /**
  * Owns every node-pty instance. The renderer never touches native modules;
  * it drives ptys exclusively through this manager via IPC.
@@ -321,8 +324,10 @@ export class PtyManager {
   private seq = 0
   /** Extra output listeners (remote-control sessions) fed alongside the renderer. */
   private readonly sinks = new Map<string, PtySink>()
-  /** Panes that flush at the fast cadence even while hidden (remote viewers). */
+  /** Panes that flush at the fast cadence even while hidden (remote viewers): the union of every owner's set. */
   private readonly forcedFast = new Set<string>()
+  /** v2.4: each owner's forced-fast panes (the phone sessions and the share guests), so one never clobbers the other. */
+  private readonly forcedFastBy = new Map<ForcedFastOwner, Set<string>>()
   /** Ptys paused via renderer backpressure; auto-resumed if the renderer dies. */
   private readonly pausedByRenderer = new Set<string>()
   /** Fired after byPane changes (spawn/dispose) so remote can refresh `running`. */
@@ -1096,12 +1101,18 @@ export class PtyManager {
   }
 
   /**
-   * Replace the set of panes remote viewers are watching. Those panes flush at
-   * the fast cadence even when their desktop pane is hidden; panes that just
-   * became fast flush immediately (mirror of the reveal flush in setActive).
+   * Replace the set of panes one kind of remote viewer is watching ('remote'
+   * = the phone sessions, the default; 'share' = desktop share guests). The
+   * union of every owner's set flushes at the fast cadence even when the
+   * desktop pane is hidden; panes that just became fast flush immediately
+   * (mirror of the reveal flush in setActive).
    */
-  setForcedFast(paneIds: Iterable<string>): void {
-    const next = new Set(paneIds)
+  setForcedFast(paneIds: Iterable<string>, owner: ForcedFastOwner = 'remote'): void {
+    const mine = new Set(paneIds)
+    if (mine.size > 0) this.forcedFastBy.set(owner, mine)
+    else this.forcedFastBy.delete(owner)
+    const next = new Set<string>()
+    for (const set of this.forcedFastBy.values()) for (const paneId of set) next.add(paneId)
     const newlyFast = [...next].filter((paneId) => !this.forcedFast.has(paneId))
     this.forcedFast.clear()
     for (const paneId of next) this.forcedFast.add(paneId)
@@ -1183,6 +1194,29 @@ export class PtyManager {
     this.flush(ptyId)
     const replay = this.snapshotReplay(ptyId, entry)
     return { ptyId, replay, cols: entry.pty.cols, rows: entry.pty.rows }
+  }
+
+  /**
+   * v2.4: the screen rows of a pane's live pty, read off its headless mirror
+   * (created on demand, seeded from the ring like a first replay). Pending
+   * output is flushed first, so the rows are what a phone would see now.
+   * null without a live pty, with snapshotMode 'off' or after a mirror
+   * failure: the phone's Chat view then offers no menu buttons.
+   */
+  screenRows(paneId: string): string[] | null {
+    const ptyId = this.byPane.get(paneId)
+    const entry = ptyId ? this.entries.get(ptyId) : undefined
+    if (!ptyId || !entry) return null
+    const mirror = this.ensureMirror(ptyId, entry)
+    if (!mirror) return null
+    this.flush(ptyId)
+    if (!entry.mirror) return null
+    try {
+      return entry.mirror.screenRows()
+    } catch (error) {
+      this.dropMirror(entry, error)
+      return null
+    }
   }
 
   // --- Headless mirror (E6-FR-01..07, FR-35) ---------------------------------

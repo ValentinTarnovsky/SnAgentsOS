@@ -26,6 +26,7 @@
  * xterm.
  */
 import type { Terminal } from '@xterm/xterm'
+import type { RemotePaneStatus } from '@shared/remote-protocol'
 import { parseMenu, screenRowsOf, type MenuOption } from '@shared/promptMenu'
 
 export {
@@ -61,4 +62,37 @@ export function readMenu(term: Terminal | null): MenuOption[] | null {
   } catch {
     return null
   }
+}
+
+/** Where a card's menu came from: the live xterm, or main's read (RemotePaneStatus.menu). */
+export type MenuSource = 'local' | 'status'
+
+export interface SourcedMenu {
+  menu: MenuOption[]
+  source: MenuSource
+}
+
+/**
+ * app 2.4.0: the menu main read off the headless mirror for `pendingId`
+ * (RemotePaneStatus.menu), or null when it is for another request, the
+ * request is gone, or the desktop sent none.
+ */
+export function statusMenu(status: RemotePaneStatus | undefined, pendingId: string | null): MenuOption[] | null {
+  const menu = status?.menu
+  if (!menu || !pendingId || menu.for !== pendingId) return null
+  if (!status.pending?.some((p) => p.id === pendingId)) return null
+  const options = menu.options.filter((o) => Number.isInteger(o.n) && o.n >= 1 && o.n <= 9 && typeof o.label === 'string')
+  return options.length >= 2 ? options.map((o) => ({ n: o.n, label: o.label })) : null
+}
+
+/**
+ * app 2.4.0 precedence of a card's menu: in Terminal the live xterm read
+ * comes first; in Chat (its stream is paused, the screen may be stale), or
+ * when the local read finds nothing, main's read for this request.
+ * `statusOk` is false for a desktop older than 2.4.0.
+ */
+export function chooseMenu(local: MenuOption[] | null, inChat: boolean, status: RemotePaneStatus | undefined, pendingId: string | null, statusOk = true): SourcedMenu | null {
+  if (!inChat && local) return { menu: local, source: 'local' }
+  const remote = statusOk ? statusMenu(status, pendingId) : null
+  return remote ? { menu: remote, source: 'status' } : null
 }

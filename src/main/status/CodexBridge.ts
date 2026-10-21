@@ -31,7 +31,8 @@ export class CodexBridge implements PtySink {
   private missing = false
   /** When the last start scanned for the executable (the lazy rescan's clock). */
   private lastScan = 0
-  constructor(private directory: () => string, private runtimePath: string, private emit: (evt: AgentEvent) => void) {}
+  /** `onRename` (v2.4): the root thread's name, as CodexProtocol reports it (StatusManager.reportAgentTitle). */
+  constructor(private directory: () => string, private runtimePath: string, private emit: (evt: AgentEvent) => void, private onRename: (paneId: string, ptyId: string, sessionId: string, title: string | undefined, explicit: boolean) => void = () => {}) {}
   get health() { return { enabled: this.enabled, available: !!this.executable, connected: [...this.bindings.values()].filter(b => b.socket?.readyState === WebSocket.OPEN).length, error: this.error, ...(this.enabled && this.missing ? { missing: true } : {}) } }
   async configure(enabled: boolean): Promise<void> {
     this.enabled = enabled
@@ -123,6 +124,8 @@ export class CodexBridge implements PtySink {
       binding.sessionId = evt.sessionId
       // The launcher reported its real directory; the store and the renderer use it as cwd.
       if (!binding.finished) this.emit({ ...evt, cwd: binding.cwd })
+    }, (sessionId, title, explicit) => {
+      if (!binding.finished) this.onRename(binding.paneId, binding.ptyId, sessionId, title, explicit)
     })
     // An isolated stdio server gives this TUI exclusive, observable ownership.
     // The shared daemon control socket uses a different framing protocol.

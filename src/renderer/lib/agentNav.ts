@@ -181,6 +181,32 @@ export function advanceWaiting(
 }
 
 /**
+ * v2.4: the names a console of each type gets when nobody named it: the pane
+ * factory's 'PowerShell', the wizard's 'Shell' and the built-in presets'
+ * names. Compared exactly (they are not localized).
+ */
+const DEFAULT_TITLES: Record<Pane['type'], readonly string[]> = {
+  shell: ['PowerShell', 'Shell', 'Windows PowerShell', 'pwsh', 'cmd'],
+  claude: ['Claude', 'Claude Code', 'PowerShell', 'Shell'],
+  codex: ['Codex', 'PowerShell', 'Shell'],
+  custom: ['PowerShell', 'Shell'],
+}
+
+/**
+ * v2.4 (`/rename`): the console still has the name it was created with, so
+ * an agent's name may take its place. With a preset that is the preset's
+ * name; with or without one, also a default name of the pane's type. A pane
+ * without a preset is not "renamed" just for lacking one.
+ */
+export function isDefaultTitle(pane: Pick<Pane, 'type' | 'title' | 'presetId'>, presets: readonly AgentPreset[]): boolean {
+  const title = pane.title.trim()
+  if (!title) return true
+  const preset = pane.presetId ? presets.find((p) => p.id === pane.presetId) : undefined
+  if (preset && title === preset.name.trim()) return true
+  return (DEFAULT_TITLES[pane.type] ?? DEFAULT_TITLES.shell).includes(title)
+}
+
+/**
  * Title of an agent row (E5-FR-19): with topicAsTitle on and the console not
  * renamed (its title is still its preset's name), the agent's topic or first
  * prompt; otherwise the console's own title.

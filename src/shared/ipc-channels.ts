@@ -131,6 +131,7 @@ export const CH = {
   STATUS_NTFY_TEST: 'status:ntfyTest', // invoke -> { ok, error? } (saved ntfy config, E2-FR-40)
   STATUS_REVEAL: 'status:reveal', // main -> renderer (paneId; notification clicked)
   STATUS_SESSION_END: 'status:sessionEnd', // main -> renderer (AgentSessionEndEvt; E6-FR-21)
+  STATUS_AGENT_RENAME: 'status:agentRename', // main -> renderer (AgentRenameEvt; v2.4 /rename)
   STATUS_HOOKS_INSTALL: 'status:hooksInstall', // invoke -> StatusHooksStatusRes
   STATUS_HOOKS_UNINSTALL: 'status:hooksUninstall', // invoke -> StatusHooksStatusRes
   STATUS_HOOKS_STATUS: 'status:hooksStatus', // invoke -> StatusHooksStatusRes
@@ -245,6 +246,44 @@ export const CH = {
   FILES_OPEN: 'files:open', // invoke ({ workspaceId, rel }) -> FilesOpRes (inert formats open with their app, the rest is revealed)
   FILES_WATCH: 'files:watch', // send (workspaceId | null): the one folder watched
   FILES_CHANGED: 'files:changed', // main -> renderer (FilesChangedEvt)
+
+  // Share, host side (app 2.4.0, item 8): ids only from the renderer; main resolves every scope against its own state.
+  SHARE_HOST_STATE: 'share:hostState', // invoke -> ShareHostState
+  SHARE_HOST_EVENT: 'share:hostEvent', // main -> renderer (ShareHostState)
+  SHARE_CREATE: 'share:create', // invoke (ShareCreateReq) -> ShareCreateRes
+  SHARE_INVITE: 'share:invite', // invoke (grantId) -> ShareInviteRes
+  SHARE_ROTATE: 'share:rotate', // invoke (grantId) -> ShareInviteRes (new invite key; live sessions stay)
+  SHARE_UPDATE: 'share:update', // invoke (ShareUpdateReq) -> ShareOpRes
+  SHARE_SET_PASSWORD: 'share:setPassword', // invoke ({ grantId, password: string | null }) -> ShareOpRes
+  SHARE_REVOKE: 'share:revoke', // invoke (grantId) -> ShareOpRes
+  SHARE_KICK: 'share:kick', // invoke (sessionId) -> ShareOpRes
+  SHARE_SESSION_PERM: 'share:sessionPerm', // invoke ({ sessionId, perm }) -> ShareOpRes
+  SHARE_PAUSE_ALL: 'share:pauseAll', // invoke (on: boolean) -> ShareOpRes
+  SHARE_RESOLVE: 'share:resolve', // send (ShareResolveReq)
+  SHARE_PANES: 'share:panes', // main -> renderer (ShareHostPaneGuests[])
+  SHARE_SET_CONFIG: 'share:setConfig', // send (ShareHostConfig)
+  SHARE_FIREWALL_CHECK: 'share:firewallCheck', // invoke (force?: boolean) -> FirewallStatus (share port, Share rules)
+  SHARE_FIREWALL_FIX: 'share:firewallFix', // invoke -> FirewallFixRes
+
+  // Share, guest side (app 2.4.0, item 8; src/main/share/guest/): link ids only; main owns sockets, keys and tickets.
+  SHARE_PREVIEW: 'share:preview', // invoke (invite: string) -> SharePreviewRes (strict parse, nothing saved)
+  SHARE_JOIN: 'share:join', // invoke (invite: string) -> ShareJoinRes (saves or refreshes the link and connects)
+  SHARE_LINKS: 'share:links', // invoke -> ShareLinksRes
+  SHARE_CONNECT: 'share:connect', // invoke (linkId) -> boolean
+  SHARE_DISCONNECT: 'share:disconnect', // invoke (linkId) -> boolean (bye, no reconnect)
+  SHARE_FORGET: 'share:forget', // invoke (linkId) -> boolean (disconnects and deletes the link)
+  SHARE_PASSWORD: 'share:password', // invoke (SharePasswordReq) -> SharePasswordRes (only the scrypt key is ever kept)
+  SHARE_CTL: 'share:ctl', // invoke (ShareGuestCtlReq) -> ShareGuestCtlRes
+  SHARE_GIT: 'share:git', // invoke (ShareGuestGitReq) -> ShareGuestGitRes
+  SHARE_NOTES: 'share:notes', // invoke (ShareGuestNotesReq) -> ShareGuestNotesRes
+  SHARE_SUB: 'share:sub', // send ({ linkId, paneId }): the renderer mounted that pane
+  SHARE_UNSUB: 'share:unsub', // send ({ linkId, paneId })
+  SHARE_INPUT: 'share:input', // send (ShareGuestInputReq): gated whole in main, then chunked
+  SHARE_FLOW: 'share:flow', // send (ShareFlowReq): renderer backpressure; resume sends a resync
+  SHARE_CHAT: 'share:chat', // send (ShareChatReq)
+  SHARE_LINK_EVENT: 'share:linkEvent', // main -> renderer (ShareLinkEvt)
+  SHARE_STREAM: 'share:stream', // main -> renderer (ShareStreamEvt, batched every 16 ms)
+  SHARE_CHAT_EVENT: 'share:chatEvent', // main -> renderer (ShareChatEvt)
 } as const
 
 export type ChannelName = (typeof CH)[keyof typeof CH]

@@ -5,13 +5,13 @@ import { BRAND } from '@shared/brand'
 import { effectiveProvider } from '@shared/agents'
 import { REPORTS_ONLY_RE } from '@shared/inputReports'
 import type { TuneHint } from '@shared/agentTune'
-import { AGENT_END_REASONS, type AgentDetail, type AgentProvider, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneStatusEvt, type RemotePending } from '@shared/types'
+import { AGENT_END_REASONS, type AgentDetail, type AgentProvider, type AgentRenameEvt, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneStatusEvt, type RemotePending } from '@shared/types'
 import type { PtyExitInfo, PtyInputOrigin, PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
 import { revealWindow } from '../window/revealWindow'
 import type { BackgroundTasks, HookEvent } from './HookServer'
 import type { AgentEvent, StatusNotice } from './events'
-import { LIMITS, clip, firstLine, readLastAssistantMessage, sanitize } from './statusDetails'
+import { LIMITS, clip, firstLine, readLastAssistantMessage, readLastCustomTitle, sanitize } from './statusDetails'
 
 interface PendingEntry {
   reason: AttentionReason
@@ -85,6 +85,13 @@ interface PaneTrack {
   model?: string
   effort?: string
   ultracode?: boolean
+  // v2.4 `/rename`: the session's name as last seen (dedup), the session it
+  // belongs to, and whether main already looked at it once (a name found on
+  // the first look is `initial`). The read of the transcript is debounced.
+  agentTitle?: string
+  titleSession?: string
+  titleLooked?: boolean
+  titleTimer?: NodeJS.Timeout | null
 }
 
 /** A hook of the live pty with its session: what onHookEvent passes on. */
@@ -124,6 +131,12 @@ export const SUB_SESSION_GRACE_MS = 15 * 1000
 export const BACKGROUND_WAIT_TTL_MS = 2 * 60 * 60 * 1000
 /** Stopped title glyph with no hook for this long after an Esc: the turn is over. */
 export const INTERRUPT_SETTLE_MS = 2000
+/** v2.4: a `/rename` trigger (topic change, prompt, done) reads the transcript this long after the last one. */
+export const AGENT_TITLE_DEBOUNCE_MS = 300
+/** v2.4: a prompt that is Claude's `/rename` command never becomes the first prompt. */
+const RENAME_PROMPT_RE = /^\/rename(?:\s|$)/i
+/** v2.4: who keeps the last name of each session across restarts (AgentSessionStore). */
+export type AgentTitleSeed = (paneId: string, provider: AgentProvider, sessionId: string) => string | undefined
 
 /** Topic after the spinner / stopped glyph of Claude's OSC title, or undefined for generic titles. */
 function titleTopic(title: string): string | undefined {
@@ -236,6 +249,9 @@ export class StatusManager implements PtySink {
   private readonly shellTitles = new Map<string, string>()
   /** Sessions a shell's agent ran, cleared at its D/A: a late end or hook never brings the row back. */
   private readonly hostedRetired = new Map<string, Set<string>>()
+  // v2.4 `/rename`: the persisted last name of a session, and who hears a rename.
+  private titleSeed: AgentTitleSeed = () => undefined
+  private readonly renameListeners = new Set<(evt: AgentRenameEvt) => void>()
   lastClaudeEventAt: number | null = null
   desktopError: 'blocked' | 'failed' | 'unavailable' | null = null
   constructor(
@@ -243,6 +259,7 @@ export class StatusManager implements PtySink {
     private readonly getConfig: () => ConfigFile | null,
     private readonly onNotice: (notice: StatusNotice) => void = () => {},
     private readonly readTranscript: (path: string, sessionId: string) => Promise<string | undefined> = (path, sessionId) => readLastAssistantMessage(path, sessionId),
+    private readonly readTitle: (path: string, sessionId: string) => Promise<string | undefined> = (path, sessionId) => readLastCustomTitle(path, sessionId),
   ) {}
   onSpawn(ptyId: string, paneId: string): void {
     this.clearPane(paneId); this.candidates.delete(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.paneProviders.delete(paneId); this.providerMisses.delete(paneId); this.ptys.set(paneId, ptyId); this.spawnTimes.set(paneId, Date.now())
@@ -286,6 +303,28 @@ export class StatusManager implements PtySink {
   /** v2.4: the agents settings main acts on, pushed at boot and on every config save. */
   setAgentSettings(agents: { shellAgentDetect?: boolean } | null | undefined): void {
     this.shellAgentDetect = agents?.shellAgentDetect !== false
+  }
+  /** v2.4 `/rename`: main's wiring to AgentSessionStore.agentTitleFor (the name a session already had). */
+  setAgentTitleSeed(fn: AgentTitleSeed): void { this.titleSeed = fn }
+  /**
+   * v2.4: every AgentRenameEvt main sends the renderer, whatever the
+   * setting (the session store keeps the name so it is never re-applied).
+   */
+  onAgentRename(cb: (evt: AgentRenameEvt) => void): () => void {
+    this.renameListeners.add(cb)
+    return () => { this.renameListeners.delete(cb) }
+  }
+  /**
+   * v2.4: a name Codex gave its thread (CodexProtocol through the bridge).
+   * `explicit`: a `thread/name/set` the server accepted (the user's
+   * `/rename`); otherwise the name a started or resumed thread already had.
+   * Only the console's live precise Codex track of that thread takes it.
+   */
+  reportAgentTitle(paneId: string, ptyId: string, provider: AgentProvider, sessionId: string, title: string | undefined, explicit: boolean): void {
+    if (this.ptys.get(paneId) !== ptyId) return
+    const track = this.panes.get(paneId)
+    if (!track?.precise || track.provider !== provider || track.sessionId !== sessionId || track.ended) return
+    this.applyAgentTitle(paneId, track, title ? clip(sanitize(title, true), LIMITS.title) : undefined, explicit)
   }
 
   private resetShell(paneId: string): void {
@@ -468,7 +507,11 @@ export class StatusManager implements PtySink {
     // generic title never overwrites a valid one.
     const topic = titleTopic(t)
     if (current?.precise) {
-      if (topic && topic !== current.topic) { current.topic = topic; this.publish(paneId, current) }
+      if (topic && topic !== current.topic) {
+        current.topic = topic; this.publish(paneId, current)
+        // v2.4: `/rename` changes Claude's title at once; its record says the name.
+        this.scheduleTitleRead(paneId, current)
+      }
       this.watchInterrupt(paneId, current, cp)
       return
     }
@@ -653,7 +696,69 @@ export class StatusManager implements PtySink {
       }
     }
     if (event) { this.lastClaudeEventAt = Date.now(); this.onAgentEvent(event) }
+    if (event && !evt.agentId) this.titleFromHook(evt)
     if (evt.name === 'SessionEnd') this.emitSessionEnd(evt)
+  }
+
+  /**
+   * v2.4 `/rename`: a hook of the console's main session (sub-sessions and
+   * subagents never get here) names the session or asks for a look.
+   * `session_title` is the name itself; without it a prompt re-reads the
+   * transcript, and a fresh `startup` has no name yet (the first look is
+   * done, so the next name is a rename seen happening).
+   */
+  private titleFromHook(evt: LiveHook): void {
+    const paneId = evt.consoleId
+    const track = this.panes.get(paneId)
+    if (!track?.precise || track.provider !== 'claude' || track.sessionId !== evt.sessionId || track.ended) return
+    if (evt.sessionTitle) { this.applyAgentTitle(paneId, track, evt.sessionTitle, false); return }
+    if (evt.name === 'SessionStart') {
+      if (track.titleLooked) return
+      if (evt.source && evt.source !== 'startup' && track.transcriptPath) this.scheduleTitleRead(paneId, track)
+      else track.titleLooked = true
+      return
+    }
+    if (evt.name === 'UserPromptSubmit') this.scheduleTitleRead(paneId, track)
+  }
+
+  /** v2.4: reads the session's name from its transcript, AGENT_TITLE_DEBOUNCE_MS after the last trigger. */
+  private scheduleTitleRead(paneId: string, track: PaneTrack): void {
+    if (!track.precise || track.provider !== 'claude' || !track.transcriptPath || track.ended) return
+    if (track.titleTimer) clearTimeout(track.titleTimer)
+    track.titleTimer = setTimeout(() => {
+      track.titleTimer = null
+      const session = track.sessionId, path = track.transcriptPath
+      if (this.panes.get(paneId) !== track || !path) return
+      void this.readTitle(path, session).then((title) => {
+        // Stale: another session, the track went away, or the session ended.
+        if (this.panes.get(paneId) !== track || track.sessionId !== session || !track.precise || track.ended) return
+        this.applyAgentTitle(paneId, track, title, false)
+      }, () => {})
+    }, AGENT_TITLE_DEBOUNCE_MS)
+  }
+
+  /**
+   * v2.4: the one place a session name lands. Undefined only records that
+   * main looked. The same name twice (Claude re-appends it every turn, a
+   * restart seeds it back) never goes out again.
+   */
+  private applyAgentTitle(paneId: string, track: PaneTrack, title: string | undefined, explicit: boolean): void {
+    const initial = !explicit && !track.titleLooked
+    track.titleLooked = true
+    if (!title || title === track.agentTitle) return
+    track.agentTitle = title
+    const ptyId = this.ptys.get(paneId)
+    // Never a Codex `launch:` placeholder or an approximate track.
+    if (!ptyId || !SESSION_ID_RE.test(track.sessionId)) return
+    this.sendAgentRename({ paneId, ptyId, provider: track.provider, sessionId: track.sessionId, title, initial })
+  }
+
+  private sendAgentRename(evt: AgentRenameEvt): void {
+    const win = this.getWindow()
+    if (win && !win.isDestroyed()) win.webContents.send(CH.STATUS_AGENT_RENAME, evt)
+    for (const cb of this.renameListeners) {
+      try { cb(evt) } catch { console.warn('[status] a rename listener failed') }
+    }
   }
 
   /** A request of this tool (AskUserQuestion, ExitPlanMode) is already pending on the pane. */
@@ -702,6 +807,17 @@ export class StatusManager implements PtySink {
     this.panes.set(evt.paneId, track)
     this.cancelTimer(track)
     track.lastHookAt = Date.now()
+    // v2.4 `/rename`: a session seen for the first time starts from the name it
+    // already had (kept across restarts), so a resume never renames again.
+    const titleSession = `${evt.provider}:${evt.sessionId}`
+    if (track.titleSession !== titleSession) {
+      track.titleSession = titleSession
+      let seed: string | undefined
+      try { seed = SESSION_ID_RE.test(evt.sessionId) ? this.titleSeed(evt.paneId, evt.provider, evt.sessionId) : undefined } catch { seed = undefined }
+      track.agentTitle = seed
+      track.titleLooked = seed !== undefined
+      if (track.titleTimer) { clearTimeout(track.titleTimer); track.titleTimer = null }
+    }
     // A turn the agent starts on its own (a background task came back) has no
     // UserPromptSubmit: its first event after a settled Stop opens a new turn,
     // so its own Stop notifies again.
@@ -759,6 +875,8 @@ export class StatusManager implements PtySink {
         if (evt.provider === 'claude') {
           const target = track
           if (!evt.reply && !evt.subagent && target.transcriptPath) this.replyFromTranscript(evt.paneId, target)
+          // v2.4: a turn that ended may have renamed the session (`/rename` inside it).
+          if (!evt.subagent) this.scheduleTitleRead(evt.paneId, target)
           target.timer = setTimeout(() => {
             target.timer = null
             target.activity = 'done'
@@ -831,7 +949,8 @@ export class StatusManager implements PtySink {
     if (own && evt.tool) track.tool = evt.tool
     if (evt.prompt) {
       track.tool = undefined
-      if (!track.firstPrompt) track.firstPrompt = firstLine(evt.prompt, LIMITS.title) || undefined
+      // v2.4: a `/rename X` names the session; it is not what the session is about.
+      if (!track.firstPrompt && !RENAME_PROMPT_RE.test(evt.prompt.trim())) track.firstPrompt = firstLine(evt.prompt, LIMITS.title) || undefined
     }
     if (evt.firstPrompt && !track.firstPrompt) track.firstPrompt = firstLine(evt.firstPrompt, LIMITS.title) || undefined
     if (evt.reply) { track.reply = evt.reply; track.replyTurn = track.turnId }
@@ -874,6 +993,7 @@ export class StatusManager implements PtySink {
     if (track.waitTimer) clearTimeout(track.waitTimer)
     if (track.interruptTimer) clearTimeout(track.interruptTimer)
     track.waitTimer = null; track.interruptTimer = null
+    if (track.titleTimer) { clearTimeout(track.titleTimer); track.titleTimer = null }
   }
   private clearPane(paneId: string): void {
     const track = this.panes.get(paneId)

@@ -8,15 +8,18 @@ import type { ReactNode } from 'react'
 import { clsx } from 'clsx'
 import { ChevronUp, Keyboard } from 'lucide-react'
 import { getActiveTerm, getComposerHandle } from '../../lib/terminalBus'
-import { selectInputMode, store } from '../../lib/store'
+import { selectInChat, selectInputMode, store } from '../../lib/store'
 
 /**
  * Bring the soft keyboard up where typing goes now: the composer in Composer
  * mode, else xterm's helper textarea (same refocus dance as DirectInputStrip).
- * Called inside the tap, the user gesture iOS needs.
+ * Called inside the tap, the user gesture iOS needs. app 2.4.0: in the Chat
+ * view the composer is the only input (the xterm is hidden), so it always
+ * gets the focus there.
  */
 export function openTerminalKeyboard(): void {
-  if (selectInputMode(store.getState()) === 'composer') {
+  const st = store.getState()
+  if (selectInChat(st) || selectInputMode(st) === 'composer') {
     getComposerHandle()?.focus()
     return
   }

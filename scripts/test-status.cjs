@@ -497,6 +497,7 @@ async function main() {
   promptCardChecks()
   await attentionChecks()
   tuneReadbackChecks()
+  await agentRenameChecks()
   console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, ntfy channel, away gate, lastHost, store, enrichment, Codex App Server detail, path open, firewall, connection log, answer card, attention and tune read-back checks`)
 }
 
@@ -1904,6 +1905,183 @@ async function attentionChecks() {
 
 // v2.3 agentTune read-back in main: hooks (SessionStart model, effort.level),
 // the optimistic hint of a tune applied with Enter, the reset on start.
+// v2.4 item 5: `/rename` renames the console. A real transcript under a fake
+// CLAUDE_CONFIG_DIR, StatusManager's triggers (prompt, topic, done,
+// session_title), dedup, seed, sub-session and subagent filters, and Codex
+// `thread/name/set` through CodexProtocol (scripts/fixtures/codex-rename.cjs).
+async function agentRenameChecks() {
+  const SID = '0123abcd-0000-4000-8000-00000000aaaa'
+  const SID2 = '0123abcd-0000-4000-8000-00000000bbbb'
+  const SID3 = '0123abcd-0000-4000-8000-00000000cccc'
+  const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-rename-test-'))
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: claudeDir }
+  const fakeProcess = { ...process, env }
+  const realWait = ms => new Promise(r => setTimeout(r, ms))
+  try {
+    const projects = path.join(claudeDir, 'projects', 'C--repo')
+    fs.mkdirSync(projects, { recursive: true })
+    const transcript = path.join(projects, SID + '.jsonl')
+    const transcript3 = path.join(projects, SID3 + '.jsonl')
+    const rec = (type, extra) => JSON.stringify({ type, sessionId: SID, ...extra }) + '\n'
+    fs.writeFileSync(transcript, rec('user', { message: { role: 'user', content: 'hola' } }))
+
+    // Pure reader.
+    const d = load('src/main/status/statusDetails.ts', { process: fakeProcess })
+    check(await d.readLastCustomTitle(transcript, SID, claudeDir) === undefined, 'readLastCustomTitle: no custom-title record, no name')
+    fs.appendFileSync(transcript, rec('ai-title', { aiTitle: 'Titulo automatico' }))
+    check(await d.readLastCustomTitle(transcript, SID, claudeDir) === undefined, 'readLastCustomTitle: an ai-title is never a name')
+    fs.appendFileSync(transcript, rec('custom-title', { customTitle: 'Primero' }) + rec('custom-title', { customTitle: '  Login\u001b[31m fix\n' + 'x'.repeat(100) }) + JSON.stringify({ type: 'custom-title', sessionId: 'other-session', customTitle: 'Ajeno' }) + '\n' + rec('agent-name', { name: 'otro' }) + '{broken custom-title\n')
+    const got = await d.readLastCustomTitle(transcript, SID, claudeDir)
+    check(got.startsWith('Login fix x') && got.length <= 60 && !/[\u0000-\u001f]/.test(got), 'readLastCustomTitle: newest record of the session, one line, clipped to 60, other sessions and broken lines skipped')
+    check(await d.readLastCustomTitle(path.join(os.tmpdir(), SID + '.jsonl'), SID, claudeDir) === undefined && await d.readLastCustomTitle(transcript, 'wrong-session', claudeDir) === undefined, 'readLastCustomTitle: a path outside projects or of another session is never opened')
+    const old = path.join(projects, SID2 + '.jsonl')
+    fs.writeFileSync(old, JSON.stringify({ type: 'custom-title', sessionId: SID2, customTitle: 'Viejo' }) + '\n' + 'y'.repeat(70 * 1024) + '\n')
+    check(await d.readLastCustomTitle(old, SID2, claudeDir) === undefined, 'readLastCustomTitle: nothing older than the 64 KB tail is read')
+    fs.writeFileSync(old, '')
+
+    // HookServer: session_title, cleaned.
+    const { parseHookPayload } = load('src/main/status/HookServer.ts', { process: fakeProcess })
+    const parsed = parseHookPayload('pane', 'pty', 'UserPromptSubmit', { session_id: SID, prompt: 'x', session_title: '  Mi\u001b[31m nombre \n de sesion ' + 'z'.repeat(80), transcript_path: transcript }, claudeDir)
+    check(parsed.sessionTitle.startsWith('Mi nombre de sesion') && parsed.sessionTitle.length <= 60 && parsed.transcriptPath === transcript, 'HookServer: session_title is one line, <= 60')
+    check(parseHookPayload('pane', 'pty', 'SessionStart', { session_id: SID, session_title: 'Resumida' }, claudeDir).sessionTitle === 'Resumida' && parseHookPayload('pane', 'pty', 'Stop', { session_id: SID, session_title: 5 }, claudeDir).sessionTitle === undefined, 'HookServer: SessionStart carries it too; a non-string is dropped')
+
+    // StatusManager with fake timers and the real transcript reader.
+    function harnessRename({ seed } = {}) {
+      const timers = new Map(), renames = [], heard = []
+      let seq = 0
+      const { StatusManager, AGENT_TITLE_DEBOUNCE_MS } = load('src/main/status/StatusManager.ts', {
+        require: id => id === 'electron' ? { Notification: { isSupported: () => false } } : require(id),
+        setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
+        process: fakeProcess,
+      })
+      const manager = new StatusManager(() => ({ isDestroyed: () => false, isFocused: () => false, webContents: { send: (ch, e) => { if (ch === 'status:agentRename') renames.push(e) } }, flashFrame() {} }), () => null, () => {}, async () => undefined)
+      manager.setConfig(settings); manager.onSpawn('pty', 'pane')
+      if (seed) manager.setAgentTitleSeed(seed)
+      manager.onAgentRename(e => heard.push(e))
+      const hook = (name, rest = {}) => manager.onHookEvent({ consoleId: 'pane', ptyId: 'pty', sessionId: SID, transcriptPath: transcript, name, ...rest })
+      // Fires due timers (the 300 ms debounce, Stop's 700 ms; a few rounds, since a sub-session wait re-arms), then lets the file read finish.
+      const settle = async () => { for (let i = 0; i < 3; i++) { for (let n = 0; n < 5 && timers.size; n++) { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) } await realWait(40) } }
+      return { manager, hook, renames, heard, settle, timers, AGENT_TITLE_DEBOUNCE_MS }
+    }
+    fs.writeFileSync(transcript, rec('user', { message: { content: 'hola' } }))
+    {
+      const h = harnessRename()
+      check(h.AGENT_TITLE_DEBOUNCE_MS === 300, 'the transcript read waits 300 ms after the last trigger')
+      h.hook('SessionStart', { source: 'startup' })
+      h.hook('UserPromptSubmit', { prompt: 'arregla el login' }); await h.settle()
+      check(h.renames.length === 0, 'a prompt with no custom-title record renames nothing')
+      fs.appendFileSync(transcript, rec('ai-title', { aiTitle: 'Arreglar login' }))
+      h.hook('Stop', { lastAssistantMessage: 'ok' }); await h.settle()
+      check(h.renames.length === 0, 'an ai-title alone never renames')
+      // `/rename Foo`: the record lands at once and Claude's title changes.
+      h.hook('UserPromptSubmit', { prompt: '/rename Foo' })
+      fs.appendFileSync(transcript, rec('custom-title', { customTitle: 'Foo' }))
+      h.manager.reportTitle('pane', '✳ Foo'); await h.settle()
+      check(h.renames.length === 1 && h.renames[0].title === 'Foo' && h.renames[0].initial === false && h.renames[0].paneId === 'pane' && h.renames[0].ptyId === 'pty' && h.renames[0].provider === 'claude' && h.renames[0].sessionId === SID, 'a /rename on a fresh session emits once, not initial, with pane, pty, provider and session')
+      check(h.heard.length === 1 && h.heard[0].title === 'Foo', 'main listeners (the session store) hear the same rename')
+      check(h.manager.stateOf('pane').firstPrompt === 'arregla el login', 'the /rename prompt never becomes the first prompt')
+      for (let i = 0; i < 195; i++) fs.appendFileSync(transcript, rec('custom-title', { customTitle: 'Foo' }))
+      for (let i = 0; i < 3; i++) { h.hook('UserPromptSubmit', { prompt: 'sigue ' + i }); h.manager.reportTitle('pane', '⠂ Tema ' + i); h.hook('Stop', { lastAssistantMessage: 'r' }) }
+      await h.settle()
+      check(h.renames.length === 1, '195 re-appends of the same name across turns emit nothing more')
+      h.hook('UserPromptSubmit', { prompt: 'x', sessionTitle: 'Bar' })
+      check(h.renames.length === 2 && h.renames[1].title === 'Bar' && h.renames[1].initial === false, 'session_title on a prompt renames at once (no file read)')
+      h.hook('UserPromptSubmit', { prompt: 'y', sessionTitle: 'Bar' })
+      check(h.renames.length === 2, 'the same session_title again is deduplicated')
+      // Sub-session (a driver's claude -p) and a subagent never rename the console.
+      h.hook('SessionStart', { sessionId: SID2, source: 'startup', nested: true, sessionTitle: 'Hijo' })
+      h.hook('UserPromptSubmit', { sessionId: SID2, nested: true, prompt: 'p', sessionTitle: 'Hijo' })
+      h.hook('PermissionRequest', { agentId: 'sub', toolUseId: 't1', sessionTitle: 'Subagente' })
+      await h.settle()
+      check(h.renames.length === 2, 'a sub-session or a subagent never renames the console')
+      // A new session of the console starts over: the same name emits again.
+      h.hook('SessionEnd', { endReason: 'clear' })
+      h.hook('SessionStart', { sessionId: SID3, source: 'clear', transcriptPath: transcript3 })
+      h.hook('UserPromptSubmit', { sessionId: SID3, transcriptPath: transcript3, prompt: 'z', sessionTitle: 'Bar' })
+      check(h.renames.length === 3 && h.renames[2].sessionId === SID3 && h.renames[2].title === 'Bar', 'a new session resets the dedup')
+      // A pty that is not the live one never renames.
+      h.manager.onHookEvent({ consoleId: 'pane', ptyId: 'old-pty', sessionId: SID3, name: 'UserPromptSubmit', sessionTitle: 'Viejo' })
+      check(h.renames.length === 3, 'a hook of a dead pty is ignored')
+      h.manager.dispose()
+    }
+    {
+      // Seed (AgentSessionStore): a restart or resume never re-applies the name it already had.
+      const asked = []
+      const h = harnessRename({ seed: (paneId, provider, sessionId) => { asked.push([paneId, provider, sessionId]); return sessionId === SID ? 'Foo' : undefined } })
+      h.hook('SessionStart', { source: 'resume', sessionTitle: 'Foo' })
+      h.hook('UserPromptSubmit', { prompt: 'x' }); await h.settle()
+      check(asked.length === 1 && asked[0].join() === `pane,claude,${SID}` && h.renames.length === 0, 'a seeded session with the same name emits nothing (resume, transcript re-read)')
+      h.hook('UserPromptSubmit', { prompt: 'y', sessionTitle: 'Nuevo' })
+      check(h.renames.length === 1 && h.renames[0].initial === false, 'a different name after the seed is a rename seen happening')
+      h.manager.dispose()
+    }
+    {
+      // No seed: a resumed session that already had a name is `initial`.
+      const h = harnessRename()
+      h.hook('SessionStart', { source: 'resume', sessionTitle: 'Antiguo' })
+      check(h.renames.length === 1 && h.renames[0].initial === true && h.renames[0].title === 'Antiguo', 'the name of a resumed session is initial (it never overwrites a hand rename)')
+      h.hook('UserPromptSubmit', { prompt: 'x', sessionTitle: 'Otro' })
+      check(h.renames.length === 2 && h.renames[1].initial === false, 'the next name is not initial')
+      h.manager.dispose()
+      // A resume without session_title (an older Claude) looks at the transcript once.
+      const h2 = harnessRename()
+      h2.hook('SessionStart', { source: 'resume' }); await h2.settle()
+      check(h2.renames.length === 1 && h2.renames[0].initial === true && h2.renames[0].title === 'Foo', 'a resume without session_title reads the transcript as its first look')
+      h2.manager.dispose()
+    }
+    {
+      // An approximate (title-only) track never reads or renames.
+      const h = harnessRename()
+      h.manager.reportTitle('pane', '⠂ Foo'); h.manager.reportTitle('pane', '✳ Otra cosa'); await h.settle()
+      check(h.renames.length === 0, 'a title-only track never renames')
+      h.manager.dispose()
+    }
+
+    // Codex: thread/name/set through CodexProtocol (fixture of the 0.163 schema).
+    const fx = require('./fixtures/codex-rename.cjs')
+    const { CodexProtocol } = load('src/main/status/CodexProtocol.ts')
+    {
+      const names = [], events = []
+      const proto = new CodexProtocol('pane', 'pty', e => events.push(e), (sid, title, explicit) => names.push([sid, title, explicit]))
+      const play = steps => steps.forEach(([side, m]) => proto[side](JSON.stringify(m)))
+      play(fx.resume)
+      check(events[0].kind === 'start' && names.length === 1 && names[0].join() === `${fx.thread},Login fix,false`, 'a resumed thread reports the name it had (not explicit), after its start')
+      const before = events.length
+      play(fx.rename(5, 'Nuevo nombre'))
+      check(names.length === 2 && names[1].join() === `${fx.thread},Nuevo nombre,true` && events.length === before, 'thread/name/set plus its answer reports one explicit name and no state change')
+      play(fx.renameFailed(6, 'Rechazado'))
+      check(names.length === 2, 'a rejected thread/name/set reports nothing')
+      proto.client(JSON.stringify({ id: 7, method: 'thread/name/set', params: { threadId: 'child-thread', name: 'Hijo' } }))
+      proto.server(JSON.stringify({ id: 7, result: {} }))
+      proto.server(JSON.stringify({ method: 'thread/name/updated', params: { threadId: fx.thread, threadName: 'Sin pedido' } }))
+      check(names.length === 2, 'a child thread rename, or a name update with no recorded set, reports nothing')
+      proto.client(JSON.stringify({ id: 8, method: 'thread/name/set', params: { threadId: fx.thread, threadName: 'Por las dudas' } }))
+      proto.server(JSON.stringify({ id: 8, result: {} }))
+      check(names.length === 3 && names[2][1] === 'Por las dudas', 'the set is read with `threadName` too (unverified field name)')
+      const fresh = []
+      const proto2 = new CodexProtocol('pane', 'pty', () => {}, (sid, title, explicit) => fresh.push([sid, title, explicit]))
+      fx.start.forEach(([side, m]) => proto2[side](JSON.stringify(m)))
+      check(fresh.length === 1 && fresh[0][1] === undefined && fresh[0][2] === false, 'a new thread with no name reports the first look')
+    }
+    {
+      // Through StatusManager (the bridge's onRename -> reportAgentTitle).
+      const h = harnessRename()
+      const proto = new CodexProtocol('pane', 'pty', e => h.manager.onAgentEvent(e), (sid, title, explicit) => h.manager.reportAgentTitle('pane', 'pty', 'codex', sid, title, explicit))
+      const play = steps => steps.forEach(([side, m]) => proto[side](JSON.stringify(m)))
+      play(fx.resume)
+      check(h.renames.length === 1 && h.renames[0].provider === 'codex' && h.renames[0].initial === true && h.renames[0].title === 'Login fix', 'Codex: the resumed thread name is initial')
+      play(fx.rename(9, 'Codex renombrado'))
+      check(h.renames.length === 2 && h.renames[1].initial === false && h.renames[1].title === 'Codex renombrado', 'Codex: an accepted /rename is explicit')
+      play(fx.rename(10, 'Codex renombrado'))
+      check(h.renames.length === 2, 'Codex: the same name again is deduplicated')
+      h.manager.reportAgentTitle('pane', 'other-pty', 'codex', fx.thread, 'Fantasma', true)
+      h.manager.reportAgentTitle('pane', 'pty', 'codex', 'otro-thread-0000', 'Fantasma', true)
+      check(h.renames.length === 2, 'Codex: another pty or thread is ignored')
+      h.manager.dispose()
+    }
+  } finally { fs.rmSync(claudeDir, { recursive: true, force: true }) }
+}
+
 function tuneReadbackChecks() {
   const h = harness()
   h.hook('SessionStart', { source: 'startup', model: 'claude-opus-4-5', effort: 'high' })

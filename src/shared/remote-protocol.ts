@@ -84,6 +84,22 @@ export interface RemotePaneStatus {
   effort?: string
   /** v2.3: Ultracode as the last tune applied with Enter left it (no hook reports it). */
   ultracode?: boolean
+  /**
+   * app 2.4.0: Claude's answer menu as main reads it off the headless mirror
+   * (PromptMenuWatcher), for the phone's Chat view, whose terminal stream is
+   * paused. Only for a precise Claude console with a pending plan or
+   * permission that some phone watches, and only once the menu validates for
+   * that kind (planOptions / alwaysOption). `for` is the pending id it
+   * belongs to; at most 9 options, labels cleaned and <= 160. Absent = no
+   * validated menu (or an older desktop).
+   */
+  menu?: RemotePaneMenu
+}
+
+/** app 2.4.0: RemotePaneStatus.menu. */
+export interface RemotePaneMenu {
+  for: string
+  options: Array<{ n: number; label: string }>
 }
 
 export interface RemotePaneInfo {
@@ -384,6 +400,17 @@ export type RemoteCtlAction =
    * of the two (the executor answers `bad_target` otherwise).
    */
   | { kind: 'claudeAccountUse'; role?: ClaudeAccountRole; id?: string }
+  /**
+   * app 2.4.0: pick option `n` of Claude's answer menu from the phone's Chat
+   * view (a Plan card option, "Always allow"). Handled in main
+   * (SessionManager.handleCtl): it re-reads the screen off the headless
+   * mirror and writes only the digit, never Enter, when `pendingId` is still
+   * pending and option `n` still reads `label`. Acks: stale (the request is
+   * gone), no_menu (no menu can be read: no live pty, snapshotMode 'off', or
+   * none drawn), menu_changed (option n is missing or reads otherwise),
+   * denied, rate. The phone sends it only to a desktop >= 2.4.0.
+   */
+  | { kind: 'answerMenu'; paneId: string; pendingId: string; n: number; label: string }
 
 // --- Git API for the phone's Changes screen (E7-FR-22..26) ---
 

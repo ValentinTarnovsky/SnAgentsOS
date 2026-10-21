@@ -2,7 +2,7 @@
 import './devUserData'
 import { readFileSync, writeFileSync } from 'fs'
 import { stat } from 'fs/promises'
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, powerMonitor, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, powerMonitor, session } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
 import type { AppInfo, AppMetrics, OpenRequest } from '@shared/ipc-contract'
@@ -60,7 +60,7 @@ import { NtfyNotifier } from './status/NtfyNotifier'
 import { createNoticeRouter, type NoticeRouter } from './status/noticeRouter'
 import { isDesktopAway } from './status/desktopAway'
 import { join } from 'path'
-import { homedir } from 'os'
+import { homedir, hostname } from 'os'
 import { ensureTray, destroyTray, hasTray } from './tray'
 import { mainT, shortDateTime, shortTime } from './i18n'
 import { runLegacyMigrationAtBoot, scheduleLegacyCleanup } from './migration/runLegacyMigration'
@@ -77,6 +77,16 @@ import { CliService } from './cli/CliService'
 import { removeFromUserPath } from './cli/userPath'
 import { registerCliIpc } from './ipc/registerCliIpc'
 import { registerDictationIpc } from './ipc/registerDictationIpc'
+import { registerShareGuestIpc } from './ipc/registerShareGuestIpc'
+import { createShareIdentityStore, type ShareIdentityStore } from './share/identity'
+import type { ShareGuest } from './share/guest/ShareGuest'
+import { ShareHost } from './share/ShareHost'
+import { GrantStore, shareGrantsPath } from './share/GrantStore'
+import { ShareServer } from './share/ShareServer'
+import { registerShareHostIpc } from './ipc/registerShareHostIpc'
+import { listEndpoints } from './remote/network'
+import { phoneNote } from './remote/RemoteManager'
+import type { RemoteGitReply, RemoteGitRequest } from '@shared/remote-protocol'
 import type { DictationService } from './dictation/DictationService'
 import { installPermissionHandlers } from './permissions'
 import { pathToFileURL } from 'url'
@@ -134,10 +144,14 @@ noticeRouter = createNoticeRouter({
   // Web Push to the PWA (E3-FR-44): devices with a visible session are skipped.
   push: (notice, config) => void remoteManager.notifyPush(notice, config),
 })
-const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event))
+const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event),
+  // v2.4 `/rename`: the thread's name goes through the same dedup as Claude's.
+  (paneId, ptyId, sessionId, title, explicit) => statusManager.reportAgentTitle(paneId, ptyId, 'codex', sessionId, title, explicit))
 ptyManager.addSink(statusManager)
 // Agent status reaches phones straight from main (E1-FR-03), not via the renderer.
 statusManager.addListener((evt) => remoteManager.pushPaneStatus(evt))
+// app 2.4.0 Share: the guests' pane statuses too (ShareHost exists once bootstrap ran).
+statusManager.addListener((evt) => shareHost?.onPaneStatus(evt))
 // v2.3 attention: a phone looking at a pane acknowledges it, both ways.
 statusManager.setRemoteSeen((paneId) => remoteManager.isPaneSeen(paneId))
 // v2.4: the nonce of each integrated pty's OSC 133 marks (claude / codex typed in a shell).
@@ -174,6 +188,17 @@ let accountService: AccountService | null = null
 let reviewNotes: ReviewNoteStore | null = null
 // Desktop dictation (app 2.4.0): created in bootstrap; its helper dies on quit.
 let dictationService: DictationService | null = null
+// Share (app 2.4.0, item 8): ONE identity store for both roles (share-identity.json holds host and guest keys;
+// two instances would overwrite each other's entry). Created lazily after app ready (DPAPI).
+let shareIdentityStore: ShareIdentityStore | null = null
+function shareIdentities(): ShareIdentityStore {
+  if (!shareIdentityStore) shareIdentityStore = createShareIdentityStore()
+  return shareIdentityStore
+}
+// Guest half: the shares this PC joined (src/main/share/guest/); links never reach config.json.
+let shareGuest: ShareGuest | null = null
+// Host half: this PC's shared consoles (src/main/share/ShareHost.ts); created in bootstrap.
+let shareHost: ShareHost | null = null
 // Crash resilience (E4-FR-21..25). The breaker dialog's [Close] quits without
 // the tray-hide or "active consoles" guards (the button already names N).
 let crashQuit = false
@@ -630,17 +655,29 @@ async function bootstrap(): Promise<void> {
   // switches with reason 'cli'. Before cliService.setEnabled below.
   cliService.attach({ usage: usageHandle, accounts: ctlAccountsView(accounts) })
   void accounts.init(configStore.load()?.settings?.claudeAccounts ?? null).catch(() => undefined)
+  // The phone's (and the Share guests') git handler, captured when registerGitIpc hands it over.
+  let remoteGitHandler: ((req: RemoteGitRequest) => Promise<RemoteGitReply>) | null = null
   // Git chip (E7-FR-05..10); settings.gitChip is a schema 12 key, absent = on.
   registerGitIpc({
     getSender: () => mainWindow?.webContents ?? null,
     initialGitChip: (configStore.load()?.settings as { gitChip?: unknown } | undefined)?.gitChip !== false,
     // The phone's gitReq (E7-FR-22..26) reads through the same GitService.
-    setRemoteGit: (handler) => remoteManager.setGitHandler(handler),
+    setRemoteGit: (handler) => {
+      // app 2.4.0: the same GitRemote handler answers the Share guests (read-only, scoped workspace).
+      remoteGitHandler = handler
+      remoteManager.setGitHandler(handler)
+    },
   })
   // Review notes of the Changes panel (E7-FR-17..20): dataDir()/review-notes.json.
   reviewNotes = registerReviewNotesIpc({ getSender: () => mainWindow?.webContents ?? null })
   // Workspace notes (v2.2, E9): dataDir()/notes/<workspace>/<note>.md, also read and written by the phones.
-  const wsNotes = registerWsNotesIpc({ getSender: () => mainWindow?.webContents ?? null, onChanged: (evt) => remoteManager.notesChanged(evt) })
+  const wsNotes = registerWsNotesIpc({
+    getSender: () => mainWindow?.webContents ?? null,
+    onChanged: (evt) => {
+      remoteManager.notesChanged(evt)
+      shareHost?.notesChanged(evt)
+    },
+  })
   remoteManager.setNotes(wsNotes)
   // Files drawer (v2.2, E9): the workspace folder from the config, every target contained.
   registerFilesIpc({ getSender: () => mainWindow?.webContents ?? null, config: () => configStore.load() })
@@ -652,6 +689,17 @@ async function bootstrap(): Promise<void> {
   // Per-repo .snagentsos.json (E8-FR-23..27): trusted-repos.json under dataDir().
   registerRepoConfigIpc()
   registerRemoteIpc(remoteManager)
+  shareGuest = registerShareGuestIpc({
+    identities: shareIdentities(),
+    guestName: () => configStore.load()?.settings?.share?.guestName ?? '',
+    app: app.getVersion(),
+    send: (channel, payload) => {
+      const wc = mainWindow?.webContents
+      if (wc && !wc.isDestroyed()) wc.send(channel, payload)
+    },
+  })
+  // Links with a remembered password reconnect on their own; the rest wait for the user.
+  shareGuest.autoConnect()
   registerLegacyIpc({
     getSender: () => mainWindow?.webContents ?? null,
     remoteEnabled: () => configStore.load()?.settings?.remote?.enabled === true,
@@ -687,13 +735,21 @@ async function bootstrap(): Promise<void> {
   sessions.load()
   agentSessions = sessions
   statusManager.addListener((evt, cause) => sessions.onStatus(evt, cause))
+  // v2.4 `/rename`: the store keeps each session's last name (setting on or off), so a restart or a resume never re-applies it.
+  statusManager.setAgentTitleSeed((paneId, provider, sessionId) => sessions.agentTitleFor(paneId, provider, sessionId))
+  statusManager.onAgentRename((evt) => sessions.noteAgentTitle(evt.paneId, evt.provider, evt.sessionId, evt.title))
   // Hibernation (E5-FR-25, D3): explicit kill after the record is marked, so
   // the end that follows never closes the chat. Off (no interval) by default.
   hibernation = new HibernationCoordinator({
     statuses: () => statusManager.snapshot(),
     lastInputAt: (paneId) => ptyManager.lastInputAt(paneId),
     hasPty: (paneId) => ptyManager.ptyIdForPane(paneId) !== null,
-    subscribedPaneIds: () => remoteManager.subscribedPaneIds(),
+    // Panes a phone or a Share guest watches never sleep.
+    subscribedPaneIds: () => {
+      const ids = remoteManager.subscribedPaneIds()
+      for (const id of shareHost?.subscribedPaneIds() ?? []) ids.add(id)
+      return ids
+    },
     isAvailable: (paneId) => sessions.isAvailable(paneId),
     getConfig: () => configStore.load(),
     hibernate: (evt) => {
@@ -742,8 +798,61 @@ async function bootstrap(): Promise<void> {
   const awake = awakeService
   statusManager.addListener((evt) => awake.onPaneStatus(evt))
   awake.seed(statusManager.snapshot())
-  remoteManager.setPhoneListener((connected) => awake.setPhoneConnected(connected))
-  awake.setPhoneConnected(remoteManager.phoneConnected)
+  // One presence rule: a phone OR a Share guest counts (the phone listener only fires on phone flips).
+  const updatePresence = (): void => awake.setPhoneConnected(remoteManager.phoneConnected || (shareHost?.guestCount ?? 0) > 0)
+  remoteManager.setPhoneListener(() => updatePresence())
+  // Share host (app 2.4.0, item 8): grants under dataDir(), the identity store shared with the guest half.
+  const shareGrants = new GrantStore(shareGrantsPath(), electronCrypto())
+  shareGrants.load()
+  const host = new ShareHost({
+    pty: ptyManager,
+    remote: remoteManager,
+    grants: shareGrants,
+    hostKey: () => shareIdentities().get('host'),
+    listen: (port, onTransport) => new ShareServer(port, onTransport),
+    endpoints: (port) => listEndpoints(port),
+    appVersion: app.getVersion(),
+    platform: process.platform === 'darwin' || process.platform === 'linux' ? process.platform : 'win32',
+    hostLabel: () => {
+      try {
+        return hostname()
+      } catch {
+        return ''
+      }
+    },
+    statuses: () => statusManager.snapshot(),
+    chat: () => chatHub,
+    git: () => remoteGitHandler,
+    notes: () => async (req) => {
+      if (req.op === 'list') {
+        const res = await wsNotes.list(req.workspaceId)
+        return res.ok ? { ok: true, notes: res.notes } : { ok: false, error: 'invalid' }
+      }
+      const res = await wsNotes.read({ workspaceId: req.workspaceId, noteId: req.noteId ?? '' })
+      return res.ok ? { ok: true, note: phoneNote(res.note) } : { ok: false, error: res.error }
+    },
+    guestLabel: (name) => mainT(configStore.load(), 'share.guestLabel', { name }),
+    guestFallback: () => mainT(configStore.load(), 'share.guestFallback'),
+    onHostEvent: (state) => sendToRenderer(CH.SHARE_HOST_EVENT, state),
+    onPanes: (panes) => sendToRenderer(CH.SHARE_PANES, panes),
+    onGuestsChanged: (count) => {
+      updatePresence()
+      // Relayed ctl (createPane/closePane) must run while the window sits in the tray.
+      remoteManager.setThrottleHold('share', count > 0)
+    },
+    onApproval: (a) => {
+      if (mainWindow?.isFocused() || !Notification.isSupported()) return
+      const cfg = configStore.load()
+      const n = new Notification({ title: mainT(cfg, 'share.joinTitle'), body: mainT(cfg, 'share.joinBody', { name: a.guestName, ip: a.ip, scope: a.grantLabel }) })
+      n.on('click', () => showWindow())
+      n.show()
+    },
+  })
+  shareHost = host
+  ptyManager.addSink(host.sink)
+  remoteManager.onSnapshot((snap) => host.onSnapshot(snap))
+  registerShareHostIpc(host)
+  updatePresence()
   ipcMain.handle(CH.SYSTEM_SET_HOTKEY, (_e, p: { enabled: boolean; accelerator: string }) =>
     applyGlobalHotkey(p.enabled, p.accelerator),
   )
@@ -786,6 +895,8 @@ async function bootstrap(): Promise<void> {
   remoteManager.applyConfig(
     startupCfg?.settings?.remote ?? { enabled: false, port: 4517, phoneFit: true, https: { enabled: false, mode: 'tailscaleServe' } },
   )
+  // Share listener: only while settings.share.enabled and a live grant exist.
+  shareHost?.applyConfig(startupCfg?.settings?.share ?? null)
   statusIpc?.applyStartup(startupCfg?.settings?.notifications)
 
   app.on('activate', () => {
@@ -823,6 +934,8 @@ app.on('before-quit', () => {
   // Shut the remote server first (best-effort, non-blocking) so phones get a
   // shutdown frame before the ptys they mirror are torn down.
   remoteManager.shutdown('quit')
+  // Share guests get ended{host_quit} before their ptys go.
+  shareHost?.shutdown()
   // runtime.json goes (only when it is ours) and the control server closes.
   cliService.shutdown()
   persistScrollbackOnExit()
@@ -831,6 +944,7 @@ app.on('before-quit', () => {
   scrollbackCheckpoint?.stop()
   awakeService?.dispose()
   dictationService?.dispose()
+  shareGuest?.dispose()
   accountService?.dispose()
   statusManager.dispose()
   codexBridge.dispose()
@@ -848,6 +962,7 @@ app.on('window-all-closed', () => {
   // On darwin the app stays alive with no window; still stop the server so it
   // isn't left listening without any UI to approve pairings.
   remoteManager.shutdown('quit')
+  shareHost?.shutdown()
   persistScrollbackOnExit()
   ptyManager.killAll()
   afterPtysKilled()

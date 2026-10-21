@@ -15,6 +15,12 @@
 // fallback is not sticky (the next open, a precise status), and a choice equal
 // to the default is not saved. v2.3.0: the notice toast shows once per
 // console and page session, until its provider or precise flag changes.
+// v2.4.0: answer cards in Chat: the Plan card from status.menu ("Yes, and use
+// auto mode"), a tap as ctl answerMenu with no input frame, the menu_changed
+// and no_menu toasts, the free text row focusing the composer, Always allow
+// by answerMenu and Allow as "1", the ask wizard, the key row (1 / Esc, never
+// Enter) for an elicitation and a Codex request, [Terminal], the log pinned
+// to the end under a card, and Spanish.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -323,6 +329,106 @@ window.result = (async () => {
  check(localStorage.getItem('snagentsos.remote.paneView.x1') === null && !('x1' in store.getState().paneViews) && store.getState().chatPaneId === 'x1','tapping Chat again removes the key (it equals the default)');
  store.getState().setChatDefault(false);
  check(localStorage.getItem('snagentsos.remote.chatDefault') === 'false' && viewKeys().length === 0,'turning the default off clears the choices too');
+
+ // app 2.4.0: answer cards in Chat. The menu comes from main (status.menu) and
+ // a tap sends ctl answerMenu (never an input digit, never Enter).
+ {
+  setLang('en');
+  store.getState().setChatDefault(false);
+  const ctls = []; let ctlReply = { ok:true };
+  client.sendCtl = async action => { ctls.push(action); return ctlReply };
+  store.getState().update({ appVersion:'2.4.0', promptCards:true, paneStatus:{ c1:{ state:'idle', provider:'claude', stateSince:20 } } });
+  client.viewPane('c1'); await frames();
+  store.getState().setPaneView('c1','chat'); client.syncView(); await frames();
+  feed({ paneId:'c1', items:many, cursor:null, done:true }); await frames(); await wait(50);
+  check(store.getState().chatPaneId === 'c1' && !!q('[data-chat-view="c1"]'),'2.4.0: c1 is in Chat');
+  const chatScroll = q('[data-chat-scroll]');
+  chatScroll.scrollTop = chatScroll.scrollHeight; chatScroll.dispatchEvent(new Event('scroll')); await frames();
+  const atEnd = () => chatScroll.scrollTop + chatScroll.clientHeight >= chatScroll.scrollHeight - 2;
+  check(atEnd(),'the log starts at the end');
+  const planReq = { id:'tp1', kind:'plan', toolName:'ExitPlanMode', summary:'Add the parser, then wire it' };
+  const planMenu = { for:'tp1', options:[{ n:1, label:'Yes, and use auto mode' }, { n:2, label:'Yes, and manually approve edits' }, { n:3, label:'No, keep planning' }] };
+  const planStatus = (menu, extra) => ({ state:'action', provider:'claude', reason:'plan', pendingCount:1, stateSince:21, pending:[planReq], ...(menu ? { menu } : {}), ...(extra || {}) });
+  // Without a menu from main: the key row, not "open terminal".
+  client.handlePaneStatus('c1', planStatus(null)); await frames();
+  check(!q('[data-prompt-card="plan"]') && !!q('[data-pending-key-row="c1"]') && !q('[data-prompt-strip="waiting"]'),'a plan without a menu from main shows the key row in Chat');
+  // The menu arrives: the Plan card, translated, and the log stays at the end.
+  client.handlePaneStatus('c1', planStatus(planMenu)); await frames(); await wait(50);
+  const planCard = q('[data-prompt-card="plan"]');
+  check(!!planCard && planCard.dataset.chatCard === 'true' && qa('[data-plan-option]').length === 3,'the Plan card shows in Chat from status.menu');
+  check(qa('[data-plan-option]')[0].textContent === 'Yes, and use auto mode' && qa('[data-plan-option]')[2].textContent === 'No, keep planning','"Yes, and use auto mode" has its label');
+  check(planCard.getBoundingClientRect().height <= innerHeight * 0.45 + 1,'the card takes at most 45% of the screen');
+  check(atEnd(),'the log stays pinned to the end when the card docks below it');
+  // A menu for another request is no card.
+  client.handlePaneStatus('c1', planStatus({ ...planMenu, for:'other' })); await frames();
+  check(!q('[data-prompt-card="plan"]') && !!q('[data-pending-key-row="c1"]'),'a menu whose for is another request gives no card');
+  client.handlePaneStatus('c1', planStatus(planMenu)); await frames();
+  // A tap: one answerMenu ctl, no input frame.
+  sent.length = 0;
+  qa('[data-plan-option]')[0].click(); await frames();
+  check(ctls.length === 1 && ctls[0].kind === 'answerMenu' && ctls[0].paneId === 'c1' && ctls[0].pendingId === 'tp1' && ctls[0].n === 1 && ctls[0].label === 'Yes, and use auto mode','a Plan tap in Chat sends answerMenu with the digit and the label: ' + JSON.stringify(ctls));
+  check(ofType('input').length === 0,'and no input frame (main writes the digit)');
+  await wait(1600);
+  // menu_changed: the toast, nothing else.
+  ctlReply = { ok:false, error:'menu_changed' };
+  qa('[data-plan-option]')[1].click(); await frames(); await frames();
+  check(store.getState().toasts.some(x => x.text === 'The menu changed, check the terminal'),'menu_changed shows "The menu changed" toast');
+  ctlReply = { ok:false, error:'no_menu' };
+  qa('[data-plan-option]')[1].click(); await frames(); await frames();
+  check(store.getState().toasts.some(x => x.text === "Could not read Claude's menu, use the keys or the terminal"),'no_menu has its own text (never the raw code)');
+  ctlReply = { ok:true };
+  // The free text row: its digit through answerMenu, then the composer gets the focus.
+  const fbMenu = { for:'tp1', options:[{ n:1, label:'Yes, auto-accept edits' }, { n:2, label:'Yes, manually approve edits' }, { n:3, label:'Type here to tell Claude what to change' }] };
+  client.handlePaneStatus('c1', planStatus(fbMenu, { stateSince:22 })); await frames();
+  const fb = q('[data-plan-feedback]');
+  check(!!fb,'the free text row shows');
+  fb.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true})); fb.click(); await frames();
+  check(ctls.at(-1).n === 3 && document.activeElement === q('[data-kb-input="composer"]'),'the free text row sends its digit and focuses the composer in Chat');
+  q('[data-kb-input="composer"]').blur();
+  await wait(1600);
+  // Permission: Allow stays an input "1"; Always allow goes through answerMenu.
+  const permReq = { id:'tb1', kind:'permission', toolName:'Bash', summary:'npm test' };
+  const permMenu = { for:'tb1', options:[{ n:1, label:'Yes' }, { n:2, label:"Yes, and don't ask again for npm test commands" }, { n:3, label:'No, and tell Claude what to do differently' }] };
+  client.handlePaneStatus('c1', { state:'action', provider:'claude', reason:'permission', pendingCount:1, stateSince:23, pending:[permReq], menu:permMenu }); await frames();
+  check(!!q('[data-prompt-card="permission"][data-chat-card]') && !!q('[data-prompt-always]') && q('[data-prompt-always-scope]').textContent.includes("don't ask again"),'Always allow shows in Chat with the scope Claude wrote');
+  sent.length = 0; const before = ctls.length;
+  q('[data-prompt-always]').click(); await frames();
+  check(ctls.length === before + 1 && ctls.at(-1).n === 2 && ctls.at(-1).pendingId === 'tb1' && ofType('input').length === 0,'Always allow in Chat sends answerMenu n=2');
+  await wait(1600);
+  client.handlePaneStatus('c1', { state:'action', provider:'claude', reason:'permission', pendingCount:1, stateSince:24, pending:[{ ...permReq, id:'tb2' }], menu:{ ...permMenu, for:'tb2' } }); await frames();
+  sent.length = 0;
+  q('[data-prompt-allow]').click(); await frames();
+  check(ofType('input').map(m => m.data).join('|') === '1','Allow stays the input "1", no Enter');
+  // "Sending" for one step, then "Sent" for a moment before the next card shows.
+  await wait(2700);
+  // The ask wizard works in Chat as in Terminal.
+  client.handlePaneStatus('c1', { state:'action', provider:'claude', reason:'question', pendingCount:1, stateSince:25, pending:[{ id:'q1', kind:'question', summary:'Which?', questions:[{ question:'Which one?', header:'Pick', multiSelect:false, options:[{ label:'Alpha' }, { label:'Beta' }] }] }] }); await frames();
+  check(!!q('[data-prompt-card="question"]') && qa('[data-ask-option]').length >= 2,'the ask wizard shows in Chat');
+  // Elicitation: the key row; its keys are plain input, never Enter.
+  client.handlePaneStatus('c1', { state:'action', provider:'claude', reason:'elicitation', pendingCount:1, stateSince:26, pending:[{ id:'e1', kind:'elicitation', summary:'Server asks' }] }); await frames();
+  const row = q('[data-pending-key-row="c1"]');
+  check(!!row && q('[data-pending-key-text]').textContent === 'Claude is waiting for your answer','an elicitation shows the key row with its text');
+  check(qa('[data-pending-key]').every(b => b.getBoundingClientRect().height >= 44) && q('[data-pending-terminal]').getBoundingClientRect().height >= 44,'every key is 44px tall');
+  sent.length = 0;
+  q('[data-pending-key="1"]').click(); q('[data-pending-key="esc"]').click(); await frames();
+  check(ofType('input').map(m => m.data).join('|') === '1|\\x1b' && ofType('input').every(m => m.paneId === 'c1' && !m.data.includes('\\r')),'the key row sends "1" and Esc as input, never Enter: ' + JSON.stringify(ofType('input')));
+  // A Codex request gets the key row too.
+  client.handlePaneStatus('c1', { state:'action', provider:'codex', reason:'permission', pendingCount:1, stateSince:27, pending:[{ id:'cx1', kind:'permission', toolName:'exec', summary:'npm test' }] }); await frames();
+  check(!!q('[data-pending-key-row="c1"]') && q('[data-pending-key-text]').textContent === 'Codex is waiting for your answer','a Codex request shows the key row');
+  { const wide=[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1 && !e.closest('[data-scrollable]')).slice(0,5).map(e=>e.tagName+'.'+String(e.className).slice(0,60)); check(document.documentElement.scrollWidth<=innerWidth && wide.length===0,'the key row fits at 390px '+JSON.stringify(wide)) }
+  // [Terminal] goes back to the terminal: chatUnsub then sub.
+  sent.length = 0;
+  q('[data-pending-terminal]').click(); await frames();
+  check(store.getState().chatPaneId === null && sent.map(m => m.type + ':' + m.paneId).join(',') === 'chatUnsub:c1,sub:c1','[Terminal] switches the console to Terminal: ' + JSON.stringify(sent.map(m => m.type)));
+  check(!q('[data-pending-key-row]') && !!q('[data-prompt-strip="waiting"]'),'in Terminal the generic strip is back');
+  // Spanish.
+  setLang('es');
+  store.getState().setPaneView('c1','chat'); client.syncView(); await frames();
+  client.handlePaneStatus('c1', { state:'action', provider:'claude', reason:'elicitation', pendingCount:1, stateSince:28, pending:[{ id:'e2', kind:'elicitation', summary:'x' }] }); await frames();
+  check(q('[data-pending-key-text]')?.textContent === 'Claude espera tu respuesta' && q('[data-pending-terminal]').textContent === 'Terminal','es: the key row');
+  setLang('en');
+  client.handlePaneStatus('c1', { state:'idle', provider:'claude', stateSince:29 }); await frames();
+ }
 
  reactRoot.unmount(); return checks;
 })();

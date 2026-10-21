@@ -555,6 +555,24 @@ export interface AgentSessionEndEvt {
   at: number
 }
 
+/**
+ * Main -> renderer (v2.4, one-shot): the agent of the live pty named its
+ * session (Claude `/rename`, a `custom-title` record or `session_title`;
+ * Codex `thread/name/set`). Only the console's main session, deduplicated
+ * per session in main. `initial`: the name was already there the first time
+ * main looked at the session (a resume), not a rename seen happening; the
+ * renderer never lets it overwrite a console renamed by hand. `title` is one
+ * line, <= 60.
+ */
+export interface AgentRenameEvt {
+  paneId: string
+  ptyId: string
+  provider: AgentProvider
+  sessionId: string
+  title: string
+  initial: boolean
+}
+
 /** Result of installing/uninstalling/inspecting the Claude Code hooks block. */
 export interface StatusHooksStatusRes {
   installed: boolean

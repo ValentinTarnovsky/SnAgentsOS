@@ -105,8 +105,9 @@ export interface PairingDeps {
  * cap at 48. Removed: C0 controls + DEL, and bidi marks (LRM/RLM/ALM, the
  * embedding/override/PDF set, and the isolates) which can visually reorder the
  * name shown to the approving user. Unicode letters and emoji are kept.
+ * `fallback` replaces an empty result (app 2.4.0: Share passes its localized "Guest").
  */
-function sanitizeDeviceName(name: string): string {
+export function sanitizeDeviceName(name: string, fallback = 'Phone'): string {
   let out = ''
   for (const ch of name) {
     const c = ch.codePointAt(0) ?? 0
@@ -116,7 +117,7 @@ function sanitizeDeviceName(name: string): string {
     if (c >= 0x2066 && c <= 0x2069) continue
     out += ch
   }
-  return out.trim().slice(0, 48) || 'Phone'
+  return out.trim().slice(0, 48) || fallback
 }
 
 /** Constant-time string compare via SHA-256 (equal-length digests). */
