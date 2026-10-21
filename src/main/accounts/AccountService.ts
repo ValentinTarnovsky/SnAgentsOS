@@ -139,6 +139,15 @@ export interface UsageControl {
   republish(): void
 }
 
+interface SwitchDetail {
+  window?: '5h' | '7d'
+  percent?: number
+  exhaustedUntil?: number | null
+  /** An automatic decision: the active account and lastSwitch.at it was computed from. */
+  expectFrom?: string | null
+  expectSwitchAt?: number | null
+}
+
 interface UsageSampleSet {
   fiveHour: WindowSample
   sevenDay: WindowSample
@@ -217,6 +226,8 @@ export class AccountService implements AccountServiceApi {
   private parkedLast: string | null = null
   private parkedBusy = false
   private evaluating = false
+  /** The queued automatic switch was dropped as stale (staleAuto). */
+  private staleSkipped = false
   private chain: Promise<unknown> = Promise.resolve()
   private persistChain: Promise<void> = Promise.resolve()
   private lastUsagePersist = 0
@@ -952,7 +963,7 @@ export class AccountService implements AccountServiceApi {
     return this.switchWith(idOrRole, reason, {})
   }
 
-  private switchWith(idOrRole: string, reason: ClaudeSwitchReason, detail: { window?: '5h' | '7d'; percent?: number; exhaustedUntil?: number | null }): Promise<AccountsOpRes> {
+  private switchWith(idOrRole: string, reason: ClaudeSwitchReason, detail: SwitchDetail): Promise<AccountsOpRes> {
     return this.run(async () => {
       if (this.disposed) return this.res(false, 'busy')
       const r = await this.switchInner(idOrRole, reason, detail)
@@ -989,13 +1000,27 @@ export class AccountService implements AccountServiceApi {
     return null
   }
 
-  private async switchInner(idOrRole: string, reason: ClaudeSwitchReason, detail: { window?: '5h' | '7d'; percent?: number; exhaustedUntil?: number | null }): Promise<AccountsOpRes> {
+  /**
+   * An automatic decision computed from a state that is gone (a manual, phone
+   * or CLI switch, or an external /login, landed while it waited in the
+   * queue): it must not run, or it would leave the wrong account.
+   */
+  private staleAuto(reason: ClaudeSwitchReason, detail: SwitchDetail): boolean {
+    if (reason !== 'auto_exhausted' && reason !== 'auto_return') return false
+    if (detail.expectFrom === undefined) return false
+    if (this.meta.activeId === detail.expectFrom && (this.meta.lastSwitch?.at ?? null) === (detail.expectSwitchAt ?? null)) return false
+    this.staleSkipped = true
+    return true
+  }
+
+  private async switchInner(idOrRole: string, reason: ClaudeSwitchReason, detail: SwitchDetail): Promise<AccountsOpRes> {
     if (this.unsupportedReason === 'keychain') return this.res(false, 'unsupported')
     if (this.unsupportedReason) return this.res(false, 'encryption_unavailable')
     const target = this.resolve(idOrRole)
     if (!target) return this.res(false, 'not_found')
     if (target.needsRecapture) return this.res(false, 'locked')
     await this.reconcileInner(true)
+    if (this.staleAuto(reason, detail)) return this.res(false, 'busy')
     if (this.isLive(target)) return this.res(true)
     let blocked = this.liveBlock()
     if (blocked) return this.res(false, blocked)
@@ -1006,6 +1031,7 @@ export class AccountService implements AccountServiceApi {
     // The second classification may have found an unknown or unverified login.
     blocked = this.liveBlock()
     if (blocked) return this.res(false, blocked)
+    if (this.staleAuto(reason, detail)) return this.res(false, 'busy')
     if (this.isLive(target)) return this.res(true)
     const leaving = this.meta.accounts.find((a) => a.id === this.meta.activeId)
     if (live.kind === 'ok' && leaving) {
@@ -1321,8 +1347,17 @@ export class AccountService implements AccountServiceApi {
       this.pending = null
       this.blocked = null
       this.evaluating = true
-      void this.switchWith(d.to, d.reason, { window: d.window, percent: d.percent, exhaustedUntil: d.exhaustedUntil }).finally(() => {
+      this.staleSkipped = false
+      // Pinned to the state it was decided on: switchInner drops it if that changed.
+      const detail: SwitchDetail = { window: d.window, percent: d.percent, exhaustedUntil: d.exhaustedUntil, expectFrom: this.meta.activeId, expectSwitchAt: this.meta.lastSwitch?.at ?? null }
+      void this.switchWith(d.to, d.reason, detail).finally(() => {
         this.evaluating = false
+        // A stale decision was dropped: decide again on the state that replaced it
+        // (a new lastSwitch puts the policy in its dwell, so this never loops).
+        if (this.staleSkipped) {
+          this.staleSkipped = false
+          this.evaluate()
+        }
       })
       return
     }

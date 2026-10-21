@@ -11,7 +11,12 @@
  *    output to the sinks, and that tail is already in the replay);
  *  - out coalesced 16 ms per session; a socket over 512KB buffered drops
  *    the pane (congested) until it drains under 64KB and gets a replay; past
- *    4MB buffered or 30 s congested the session is terminated.
+ *    4MB buffered or 30 s congested the session is terminated;
+ *  - a guest-asked replay (sub, resync) of one pane runs at most once per
+ *    FANOUT_REPLAY_COOLDOWN_MS and never onto a socket past 512KB buffered:
+ *    inside the cooldown, or congested, the pane is marked congested and gets
+ *    one replay later (cooldown end or the drain), so a guest cannot make
+ *    main serialize the scrollback in a loop. The cooldown survives unsub.
  * Unlike the phone, every `replay` and `out` is split into frames of at most
  * 16K UTF-16 units (never a split surrogate pair), and a paused session
  * (grant paused or "pause all") gets nothing until it resumes with a replay.
@@ -29,6 +34,8 @@ export const FANOUT_BACKPRESSURE_DROP = 512 * 1024
 export const FANOUT_BACKPRESSURE_RECOVER = 64 * 1024
 export const FANOUT_BACKPRESSURE_KILL = 4 * 1024 * 1024
 export const FANOUT_CONGESTION_KILL_MS = 30 * 1000
+/** Minimum gap between two guest-asked replays of one pane for one session. */
+export const FANOUT_REPLAY_COOLDOWN_MS = 500
 
 export const SHARE_SINK_ID = 'share-sessions'
 
@@ -61,6 +68,10 @@ interface FanoutState {
   outTimer: ShareTimer | null
   congested: Set<string>
   congestedSince: Map<string, number>
+  /** Last replay sent per pane (kept across unsub, so unsub + sub cannot reset it). */
+  lastReplayAt: Map<string, number>
+  /** One-shot: the replays a cooldown deferred. */
+  replayTimer: ShareTimer | null
 }
 
 /** Cut text into parts of at most `max` UTF-16 units, never between a surrogate pair. */
@@ -99,7 +110,10 @@ export class PaneFanout<S extends object> implements PtySink {
     const st = this.stateOf(session)
     if (st.subs.has(paneId)) return
     // One synchronous block (see the header): replay first, then the sub.
-    const replay = this.deps.streaming(session) ? this.deps.pty.getReplay(paneId) : null
+    // A replay the cooldown or the backpressure defers leaves the pane congested.
+    const allowed = this.deps.streaming(session) && this.replayAllowed(session, st, paneId)
+    if (this.state.get(session) !== st) return // killed (past 4MB buffered)
+    const replay = allowed ? this.deps.pty.getReplay(paneId) : null
     st.subs.add(paneId)
     let set = this.paneSubs.get(paneId)
     if (!set) {
@@ -107,7 +121,7 @@ export class PaneFanout<S extends object> implements PtySink {
       this.paneSubs.set(paneId, set)
     }
     set.add(session)
-    if (this.deps.streaming(session)) this.sendReplay(session, paneId, replay)
+    if (allowed) this.sendReplay(session, paneId, replay)
     this.recomputeForcedFast()
   }
 
@@ -127,16 +141,28 @@ export class PaneFanout<S extends object> implements PtySink {
   resync(session: S, paneId: string): void {
     const st = this.state.get(session)
     if (!st || !st.subs.has(paneId) || !this.deps.streaming(session)) return
+    if (!this.replayAllowed(session, st, paneId)) return
     const replay = this.deps.pty.getReplay(paneId)
     this.discardPane(st, paneId)
     this.sendReplay(session, paneId, replay)
   }
 
-  /** Resume after a pause: a fresh replay of every pane the session watches. */
+  /**
+   * Resume after a pause (the host's decision, so no cooldown): a fresh replay
+   * of every pane the session watches, deferred to the drain past 512KB buffered.
+   */
   resyncAll(session: S): void {
     const st = this.state.get(session)
-    if (!st) return
-    for (const paneId of [...st.subs]) this.resync(session, paneId)
+    if (!st || !this.deps.streaming(session)) return
+    for (const paneId of [...st.subs]) {
+      if (this.deps.bufferedAmount(session) > FANOUT_BACKPRESSURE_DROP) {
+        this.markCongested(st, paneId)
+        continue
+      }
+      const replay = this.deps.pty.getReplay(paneId)
+      this.discardPane(st, paneId)
+      if (!this.sendReplay(session, paneId, replay)) return
+    }
   }
 
   /** Pause: drop what is buffered for the session (the resume replay carries it). */
@@ -153,6 +179,8 @@ export class PaneFanout<S extends object> implements PtySink {
     if (!st) return
     this.state.delete(session)
     if (st.outTimer !== null) this.clock.clearTimeout(st.outTimer)
+    if (st.replayTimer !== null) this.clock.clearTimeout(st.replayTimer)
+    st.replayTimer = null
     for (const paneId of st.subs) {
       const set = this.paneSubs.get(paneId)
       if (!set) continue
@@ -258,14 +286,7 @@ export class PaneFanout<S extends object> implements PtySink {
         }
       }
       if (killed) continue
-      // Recovery: getReplay, THEN discard, THEN send (header).
-      if (st.congested.size > 0 && buffered < FANOUT_BACKPRESSURE_RECOVER) {
-        for (const paneId of [...st.congested]) {
-          const replay = this.deps.pty.getReplay(paneId)
-          this.discardPane(st, paneId)
-          this.sendReplay(session, paneId, replay)
-        }
-      }
+      this.recover(session, st, false)
     }
   }
 
@@ -274,7 +295,7 @@ export class PaneFanout<S extends object> implements PtySink {
   private stateOf(session: S): FanoutState {
     let st = this.state.get(session)
     if (!st) {
-      st = { subs: new Set(), outBuf: new Map(), outTimer: null, congested: new Set(), congestedSince: new Map() }
+      st = { subs: new Set(), outBuf: new Map(), outTimer: null, congested: new Set(), congestedSince: new Map(), lastReplayAt: new Map(), replayTimer: null }
       this.state.set(session, st)
     }
     return st
@@ -292,7 +313,7 @@ export class PaneFanout<S extends object> implements PtySink {
     if (!st) return
     st.outTimer = null
     for (const [paneId, data] of st.outBuf) {
-      if (!st.congested.has(paneId)) this.sendOut(session, st, paneId, data)
+      if (!st.congested.has(paneId) && !this.sendOut(session, st, paneId, data)) break
     }
     st.outBuf.clear()
   }
@@ -304,25 +325,94 @@ export class PaneFanout<S extends object> implements PtySink {
     if (!st.congested.has(paneId)) this.sendOut(session, st, paneId, data)
   }
 
+  private markCongested(st: FanoutState, paneId: string): void {
+    st.congested.add(paneId)
+    if (!st.congestedSince.has(paneId)) st.congestedSince.set(paneId, this.clock.now())
+  }
+
+  /**
+   * A guest-asked replay of the pane may run now: not inside the pane's
+   * cooldown and not onto a socket past 512KB buffered. Otherwise the pane is
+   * marked congested (no out until its replay) and the replay is deferred.
+   * Past 4MB buffered the session is killed (false).
+   */
+  private replayAllowed(session: S, st: FanoutState, paneId: string): boolean {
+    if (!this.alive(session)) return false
+    const last = st.lastReplayAt.get(paneId)
+    const wait = last === undefined ? 0 : last + FANOUT_REPLAY_COOLDOWN_MS - this.clock.now()
+    if (wait <= 0 && this.deps.bufferedAmount(session) <= FANOUT_BACKPRESSURE_DROP) return true
+    this.markCongested(st, paneId)
+    if (wait > 0) this.armReplayTimer(session, st, wait)
+    return false
+  }
+
+  private armReplayTimer(session: S, st: FanoutState, wait: number): void {
+    if (st.replayTimer !== null) return
+    st.replayTimer = this.clock.setTimeout(() => {
+      st.replayTimer = null
+      if (this.state.get(session) === st) this.recover(session, st, true)
+    }, Math.max(1, wait))
+  }
+
+  /**
+   * Recovery: each congested pane gets a replay once the socket is under
+   * 64KB (getReplay, THEN discard, THEN send; header). `cooled` = the cooldown
+   * timer runs it, so a pane still inside its cooldown waits for the next one.
+   */
+  private recover(session: S, st: FanoutState, cooled: boolean): void {
+    if (st.congested.size === 0 || !this.deps.streaming(session)) return
+    if (this.deps.bufferedAmount(session) >= FANOUT_BACKPRESSURE_RECOVER) return
+    const now = this.clock.now()
+    for (const paneId of [...st.congested]) {
+      if (cooled) {
+        const last = st.lastReplayAt.get(paneId)
+        const wait = last === undefined ? 0 : last + FANOUT_REPLAY_COOLDOWN_MS - now
+        if (wait > 0) {
+          this.armReplayTimer(session, st, wait)
+          continue
+        }
+      }
+      if (!st.subs.has(paneId)) {
+        this.discardPane(st, paneId)
+        continue
+      }
+      const replay = this.deps.pty.getReplay(paneId)
+      this.discardPane(st, paneId)
+      if (!this.sendReplay(session, paneId, replay)) return
+    }
+  }
+
+  /** Past 4MB buffered the session is killed at once (false). */
+  private alive(session: S): boolean {
+    if (this.deps.bufferedAmount(session) <= FANOUT_BACKPRESSURE_KILL) return true
+    this.deps.terminate(session)
+    return false
+  }
+
   private discardPane(st: FanoutState, paneId: string): void {
     st.outBuf.delete(paneId)
     st.congested.delete(paneId)
     st.congestedSince.delete(paneId)
   }
 
-  private sendOut(session: S, st: FanoutState, paneId: string, data: string): void {
-    if (!data || !this.deps.streaming(session)) return
+  /** False when the session was killed (past 4MB buffered). */
+  private sendOut(session: S, st: FanoutState, paneId: string, data: string): boolean {
+    if (!data || !this.deps.streaming(session)) return true
     for (const part of splitShareText(data, SHARE_LIMITS.outChunkMax)) {
+      if (!this.alive(session)) return false
       if (this.deps.bufferedAmount(session) > FANOUT_BACKPRESSURE_DROP) {
-        st.congested.add(paneId)
-        if (!st.congestedSince.has(paneId)) st.congestedSince.set(paneId, this.clock.now())
-        return
+        this.markCongested(st, paneId)
+        return true
       }
       this.deps.send(session, { t: 'out', paneId, data: part })
     }
+    return true
   }
 
-  private sendReplay(session: S, paneId: string, replay: { replay: string; cols: number; rows: number } | null): void {
+  /** False when the session was killed (past 4MB buffered) before or while sending. */
+  private sendReplay(session: S, paneId: string, replay: { replay: string; cols: number; rows: number } | null): boolean {
+    if (!this.alive(session)) return false
+    this.state.get(session)?.lastReplayAt.set(paneId, this.clock.now())
     let running = true
     let data = ''
     let cols = 80
@@ -344,7 +434,9 @@ export class PaneFanout<S extends object> implements PtySink {
       }
     }
     const parts = splitShareText(data, SHARE_LIMITS.replayChunkMax)
-    parts.forEach((part, i) => {
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0 && !this.alive(session)) return false
+      const part = parts[i]
       this.deps.send(session, {
         t: 'replay',
         paneId,
@@ -356,7 +448,8 @@ export class PaneFanout<S extends object> implements PtySink {
         first: i === 0,
         last: i === parts.length - 1,
       })
-    })
+    }
+    return true
   }
 
   private recomputeForcedFast(): void {

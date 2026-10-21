@@ -152,7 +152,10 @@ export function accountUseAction(target: AccountTarget, appVersion: string | und
 export function accountChoices(account: ActiveAccount, appVersion: string | undefined): UsageOtherAccount[] {
   if (appVersionAtLeast(appVersion, APP_2_4_0) && account.others?.length) return account.others
   const o = account.other
-  return o ? [{ id: o.id, rank: o.rank ?? (o.role === 'primary' ? 0 : 1), role: o.role, label: o.label, ready: true }] : []
+  if (!o) return []
+  // A 2.3.0 snapshot has no rank: an unlabeled account keeps its role name, not "Account N".
+  const label = o.label.trim() || (typeof o.rank === 'number' ? '' : t(ROLE_LABEL[o.role]))
+  return [{ id: o.id, rank: o.rank ?? (o.role === 'primary' ? 0 : 1), role: o.role, label, ready: true }]
 }
 
 /**

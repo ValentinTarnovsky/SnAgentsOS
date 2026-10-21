@@ -54,6 +54,8 @@ window.result = (async () => {
  let checks=0; const check=(ok,label)=>{if(!ok)throw new Error(label);checks++};
  const frames = () => new Promise(r => setTimeout(r, 30));
  const wait = ms => new Promise(r => setTimeout(r, ms));
+ // Hidden windows paint slowly: layout-driven work (ResizeObserver) gets a task-based wait.
+ const until = async (fn, ms = 3000) => { const end = Date.now() + ms; while (!fn() && Date.now() < end) await wait(30); return fn() };
  const sent=[];
  client.send = msg => { sent.push(msg); return true };
  client.isOpen = () => true;
@@ -358,7 +360,7 @@ window.result = (async () => {
   check(!!planCard && planCard.dataset.chatCard === 'true' && qa('[data-plan-option]').length === 3,'the Plan card shows in Chat from status.menu');
   check(qa('[data-plan-option]')[0].textContent === 'Yes, and use auto mode' && qa('[data-plan-option]')[2].textContent === 'No, keep planning','"Yes, and use auto mode" has its label');
   check(planCard.getBoundingClientRect().height <= innerHeight * 0.45 + 1,'the card takes at most 45% of the screen');
-  check(atEnd(),'the log stays pinned to the end when the card docks below it');
+  check(await until(atEnd),'the log stays pinned to the end when the card docks below it');
   // A menu for another request is no card.
   client.handlePaneStatus('c1', planStatus({ ...planMenu, for:'other' })); await frames();
   check(!q('[data-prompt-card="plan"]') && !!q('[data-pending-key-row="c1"]'),'a menu whose for is another request gives no card');

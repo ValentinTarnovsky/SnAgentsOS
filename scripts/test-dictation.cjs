@@ -327,7 +327,13 @@ async function main() {
     check(state().sessionId === 's2' && D.isDictating('pane:p1'), 'the dictate shortcut starts on the focused console')
     R.registerPty('p1', 'pty-2')
     check(calls.stop.join() === 's1,s2' && state().phase === 'stopping', 'a new pty for the console stops the session, even before ready (its text was for the old one)')
+    pasted.length = 0
+    emit({ sessionId: 's2', t: 'final', text: 'frase final' })
+    check(pasted.length === 0 && state().held === 'frase final', 'the last phrase drained after a pty change is held, never typed into the new pty: ' + JSON.stringify(state().held))
     emit({ sessionId: 's2', t: 'end' })
+    D.insertHeld()
+    check(JSON.stringify(pasted.map((p) => p.text)) === JSON.stringify(['frase final']) && state().held === '', 'Insert (the user asking) still types it')
+    D.dismissDictation()
 
     // Error from start, error then end from the helper.
     snApi.dictation.start = async () => ({ ok: false, error: 'unsupported' })

@@ -317,6 +317,11 @@ export class HostSessions {
     }
   }
 
+  /** Every ticket of the grant gets `fn(its perm)` (a grant perm change). */
+  remapTicketPerms(grantId: string, fn: (perm: SharePerm) => SharePerm): void {
+    for (const [key, t] of this.tickets) if (key.startsWith(`${grantId}|`)) t.perm = fn(t.perm)
+  }
+
   ticketPerm(grantId: string, guestKey: string): SharePerm | null {
     return this.tickets.get(pairKey(grantId, guestKey))?.perm ?? null
   }
@@ -463,7 +468,7 @@ export class HostSessions {
     // Reconnect ticket: bound to this guest key and this grant, at the perm it holds.
     if (msg.ticket) {
       const t = this.tickets.get(pairKey(grant.id, session.guestKey))
-      if (t && sameToken(t.token, msg.ticket) && (t.live > 0 || this.clock.now() < t.expiresAt)) return this.admit(session, grant, t.perm)
+      if (t && sameToken(t.token, msg.ticket) && (t.live > 0 || this.clock.now() < t.expiresAt)) return this.admit(session, grant, t.perm, false)
     }
     if (msg.pw && grant.password) {
       if (verifyShareProof(grant.password.key, 'pw', channel.h, msg.pw)) return this.admit(session, grant, grant.perm)
@@ -543,7 +548,12 @@ export class HostSessions {
     this.deps.onApprovalsChanged()
   }
 
-  private admit(session: HostSession, grant: ShareGrant, perm: SharePerm): void {
+  /**
+   * `freshAuth` = a password or the host's approval admitted it, which clears
+   * the address's failure history. A ticket reconnect never does, or a guest
+   * holding any ticket could reset the password lockout between guesses.
+   */
+  private admit(session: HostSession, grant: ShareGrant, perm: SharePerm, freshAuth = true): void {
     if (!this.roomFor(grant.id, session)) {
       this.removeApproval(session)
       this.send(session, { t: 'denied', reason: 'limit' })
@@ -552,7 +562,7 @@ export class HostSessions {
     const hadApproval = this.removeApproval(session)
     this.clearTimer(session)
     this.uncountUnauthed(session)
-    this.failures.clear(session.ip)
+    if (freshAuth) this.failures.clear(session.ip)
     session.phase = 'admitted'
     session.grantId = grant.id
     session.perm = perm

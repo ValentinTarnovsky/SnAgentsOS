@@ -7,8 +7,9 @@
  *
  *  - A pane is a target only while its status is a precise Claude track in
  *    `action` with a pending plan or permission (pending[] already leaves out
- *    the requests that input invalidated, E2-FR-48). The plan wins over a
- *    permission, like the phone's cardFor.
+ *    the requests that input invalidated, E2-FR-48), and only for the same
+ *    request the phone's cardFor picks (shared selectCardRequest): a question
+ *    first means no target, and a permission for a tool with no card is skipped.
  *  - It is read only while some authenticated phone watches the pane (`sub`
  *    or `chatSub`): when the request arrives, when a phone starts watching,
  *    and on pty output, at most once per MENU_READ_THROTTLE_MS. Every read
@@ -23,6 +24,7 @@
  * Pure of Electron: the screen, the watch check and the timers are injected.
  */
 import { alwaysOption, parseMenu, planOptions, type MenuOption } from '@shared/promptMenu'
+import { selectCardRequest } from '@shared/promptTarget'
 import type { RemotePaneMenu, RemotePending } from '@shared/remote-protocol'
 import type { PaneStatusEvt } from '@shared/types'
 import type { PtySink } from '../pty/PtyManager'
@@ -57,11 +59,10 @@ export interface PromptMenuWatcherDeps {
 /** The request of a status event whose menu main reads, or null. */
 export function menuTarget(evt: Pick<PaneStatusEvt, 'state' | 'precise' | 'provider' | 'pending'> | null | undefined): MenuTarget | null {
   if (!evt || evt.state !== 'action' || evt.precise !== true || (evt.provider ?? 'claude') !== 'claude') return null
-  const pending = evt.pending ?? []
-  const plan = pending.find((p) => p.kind === 'plan')
-  if (plan) return { pendingId: plan.id, kind: 'plan' }
-  const permission = pending.find((p) => p.kind === 'permission')
-  return permission ? { pendingId: permission.id, kind: 'permission' } : null
+  const pick = selectCardRequest(evt.pending)?.pending
+  // A question card needs no menu.
+  if (!pick || (pick.kind !== 'plan' && pick.kind !== 'permission')) return null
+  return { pendingId: pick.id, kind: pick.kind }
 }
 
 /** The menu on these rows when it validates for `kind`, bounded for the wire; else null. */

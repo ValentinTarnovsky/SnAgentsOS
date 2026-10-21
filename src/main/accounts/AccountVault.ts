@@ -1,4 +1,4 @@
-import { promises as fsp, readFileSync, renameSync, statSync } from 'fs'
+import { copyFileSync, existsSync, promises as fsp, readFileSync, renameSync, statSync } from 'fs'
 import { join } from 'path'
 import { writeAtomic } from '../fsAtomic'
 import {
@@ -24,6 +24,10 @@ import type { VaultCrypto } from './safeCrypto'
  *    (shared by both formats, untouched by the migration);
  *  - `prev.bin`: the live blob replaced by the last switch, encrypted (the
  *    only backup: nothing in plain text next to Claude's file).
+ * Each save records the size and mtime of `accounts.json` (`v1Seen`): only a
+ * different one (a 2.3.0 ran in between) merges v1 into v2 again, so a clock
+ * skew never re-migrates and nothing 2.4.0 keeps alone (accounts #3 to #8,
+ * the order, the anchor) is lost to a downgrade.
  * A corrupt `accounts.v2.json` is set aside as `accounts.v2.json.corrupt-<ts>`
  * and the vault migrates from v1 again (or starts empty). Ids are checked
  * with ACCOUNT_ID_RE before any path.
@@ -93,6 +97,13 @@ export interface VaultMeta {
    */
   verify: VaultVerify | null
   accounts: VaultAccountMeta[]
+  /** Size and mtime of accounts.json at the last save (null = there was none; absent = a file from before it was recorded). */
+  v1Seen?: V1Fingerprint | null
+}
+
+export interface V1Fingerprint {
+  mtimeMs: number
+  size: number
 }
 
 export interface VaultVerify {
@@ -216,7 +227,14 @@ export function parseMetaV2(raw: string): VaultMeta | null {
   const ids = new Set(accounts.map((a) => a.id))
   const anchorId = s(o.anchorId, 32)
   const c = commonFields(o, ids)
-  return { version: 2, activeId: c.activeId, anchorId: anchorId && ids.has(anchorId) ? anchorId : null, lastSwitch: c.lastSwitch, autoPaused: c.autoPaused, verify: c.verify, accounts }
+  const meta: VaultMeta = { version: 2, activeId: c.activeId, anchorId: anchorId && ids.has(anchorId) ? anchorId : null, lastSwitch: c.lastSwitch, autoPaused: c.autoPaused, verify: c.verify, accounts }
+  if ('v1Seen' in o) {
+    const f = o.v1Seen && typeof o.v1Seen === 'object' ? (o.v1Seen as Record<string, unknown>) : null
+    const mtimeMs = n(f?.mtimeMs)
+    const size = n(f?.size)
+    meta.v1Seen = mtimeMs !== null && size !== null ? { mtimeMs, size } : null
+  }
+  return meta
 }
 
 /**
@@ -235,6 +253,60 @@ export function migrateV1(v1: VaultMetaV1): VaultMeta {
   const accounts: VaultAccountMeta[] = ordered.map(({ role: _role, ...a }) => ({ ...a, exhaustedUntil: a.id === exhaustedId ? v1.exhaustedUntil : null }))
   const anchorId = ls && ANCHOR_REASONS.has(ls.reason) && has(ls.to) ? ls.to : (primary?.id ?? null)
   return { version: 2, activeId: v1.activeId, anchorId, lastSwitch: v1.lastSwitch, autoPaused: v1.autoPaused, verify: v1.verify, accounts }
+}
+
+/** The fields accounts.json (2.3.0) owns for an account both formats know. */
+const V1_OWNED = ['email', 'accountUuid', 'organizationUuid', 'organizationName', 'subscriptionType', 'rateLimitTier', 'capturedAt', 'identityConfirmed', 'needsRecapture', 'updatedAt'] as const
+
+/**
+ * accounts.json changed under a v2 vault (a 2.3.0 ran in between): v1 merged
+ * into v2, never replacing it.
+ *  - v2's accounts in v2 order; for those v1 knows (by id, else by identity)
+ *    v1's identity fields, needsRecapture, lastUsage and updatedAt, and its
+ *    label only when v1 edited the account later;
+ *  - the v1 accounts v2 lacks appended, up to MAX_CLAUDE_ACCOUNTS;
+ *  - a v2-only account stays while its `<id>.bin` exists (`hasBin`), so one
+ *    2.3.0 removed is dropped;
+ *  - exhaustedUntil: the later of v2's and the one 2.3.0 left; the anchor
+ *    from v2 (else v1's); activeId, lastSwitch, autoPaused and verify from v1
+ *    when its active account is in the list, else v2's.
+ */
+export function mergeV1(v2: VaultMeta, v1: VaultMetaV1, hasBin: (id: string) => boolean): VaultMeta {
+  const m1 = migrateV1(v1)
+  const matched = new Set<string>()
+  const accounts: VaultAccountMeta[] = []
+  for (const a of v2.accounts) {
+    const b = m1.accounts.find((x) => x.id === a.id) ?? m1.accounts.find((x) => !matched.has(x.id) && identityOf(x) === identityOf(a))
+    if (!b) {
+      if (hasBin(a.id)) accounts.push({ ...a })
+      continue
+    }
+    matched.add(b.id)
+    const next: VaultAccountMeta = { ...a }
+    for (const k of V1_OWNED) (next as unknown as Record<string, unknown>)[k] = b[k]
+    if (b.lastUsage) next.lastUsage = b.lastUsage
+    if (b.updatedAt > a.updatedAt) next.label = b.label
+    next.exhaustedUntil = a.exhaustedUntil === null ? b.exhaustedUntil : b.exhaustedUntil === null ? a.exhaustedUntil : Math.max(a.exhaustedUntil, b.exhaustedUntil)
+    accounts.push(next)
+  }
+  for (const b of m1.accounts) {
+    if (matched.has(b.id) || accounts.length >= MAX_CLAUDE_ACCOUNTS) continue
+    if (accounts.some((x) => x.id === b.id || identityOf(x) === identityOf(b))) continue
+    accounts.push({ ...b })
+  }
+  const ids = new Set(accounts.map((a) => a.id))
+  const has = (id: string | null | undefined): id is string => !!id && ids.has(id)
+  const fromV1 = has(v1.activeId)
+  const src = fromV1 ? m1 : v2
+  return {
+    version: 2,
+    activeId: fromV1 ? v1.activeId : has(v2.activeId) ? v2.activeId : null,
+    anchorId: has(v2.anchorId) ? v2.anchorId : has(m1.anchorId) ? m1.anchorId : null,
+    lastSwitch: src.lastSwitch && has(src.lastSwitch.to) ? src.lastSwitch : null,
+    autoPaused: src.autoPaused,
+    verify: src.verify && has(src.verify.to) ? src.verify : null,
+    accounts,
+  }
 }
 
 export class AccountVault {
@@ -270,18 +342,39 @@ export class AccountVault {
     }
   }
 
-  /** accounts.json changed after accounts.v2.json: a 2.3.0 ran in between (a downgrade). */
-  private v1Newer(): boolean {
+  private v1Stat(): V1Fingerprint | null {
     try {
-      return statSync(this.v1Path).mtimeMs > statSync(this.metaPath).mtimeMs
+      const st = statSync(this.v1Path)
+      return { mtimeMs: st.mtimeMs, size: st.size }
     } catch {
-      return false
+      return null
     }
   }
 
+  /**
+   * accounts.json is not the one the last save saw: a 2.3.0 ran in between.
+   * A v2 file from before the fingerprint falls back to the mtime comparison
+   * (once: the next save records it).
+   */
+  private v1Changed(meta: VaultMeta): boolean {
+    const cur = this.v1Stat()
+    if (!cur) return false
+    if (meta.v1Seen === undefined) {
+      try {
+        return cur.mtimeMs > statSync(this.metaPath).mtimeMs
+      } catch {
+        return false
+      }
+    }
+    return meta.v1Seen === null || meta.v1Seen.mtimeMs !== cur.mtimeMs || meta.v1Seen.size !== cur.size
+  }
+
+  /** `corrupt` moves v2 aside; `bak` keeps a copy (the merge is saved over v2 right after). */
   private setAside(suffix: 'bak' | 'corrupt'): void {
+    const to = `${this.metaPath}.${suffix}-${this.now()}`
     try {
-      renameSync(this.metaPath, `${this.metaPath}.${suffix}-${this.now()}`)
+      if (suffix === 'bak') copyFileSync(this.metaPath, to)
+      else renameSync(this.metaPath, to)
     } catch {
       /* left in place; the next save replaces it */
     }
@@ -289,8 +382,9 @@ export class AccountVault {
 
   /**
    * Synchronous at startup.
-   *  1. accounts.v2.json parses: used, unless accounts.json is newer (a 2.3.0
-   *     ran after it): then v2 is kept as `.bak-<ts>` and v1 migrated again.
+   *  1. accounts.v2.json parses: used, unless accounts.json is not the one
+   *     its last save saw (a 2.3.0 ran after it): then v2 is copied to
+   *     `.bak-<ts>` and v1 merged into it (mergeV1).
    *  2. accounts.v2.json corrupt: set aside as `.corrupt-<ts>`, then 3.
    *  3. Only accounts.json: migrated. Neither (or a corrupt v1): empty.
    * accounts.json itself is never written, renamed or removed.
@@ -306,12 +400,18 @@ export class AccountVault {
     if (raw !== null) {
       const meta = parseMetaV2(raw)
       if (meta) {
-        if (!this.v1Newer()) return meta
+        if (!this.v1Changed(meta)) return meta
         const v1 = this.readV1()
         if (!v1) return meta
         this.setAside('bak')
         this.migratedFromV1 = true
-        return migrateV1(v1)
+        return mergeV1(meta, v1, (id) => {
+          try {
+            return existsSync(this.binPath(id))
+          } catch {
+            return false
+          }
+        })
       }
       this.setAside('corrupt')
     }
@@ -321,8 +421,10 @@ export class AccountVault {
     return migrateV1(v1)
   }
 
+  /** Records the accounts.json it saw (`v1Seen`) in the file and on `m`. */
   async saveMeta(m: VaultMeta): Promise<void> {
     await fsp.mkdir(this.dir, { recursive: true })
+    m.v1Seen = this.v1Stat()
     await writeAtomic(this.metaPath, JSON.stringify(m, null, 2), { mode: 0o600 })
   }
 

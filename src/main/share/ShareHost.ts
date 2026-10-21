@@ -981,6 +981,7 @@ export class ShareHost {
     const g = this.deps.grants.get(req.grantId)
     if (!g) return { ok: false, error: 'not_found' }
     const permChanged = req.perm !== undefined && req.perm !== g.perm
+    const oldPerm = g.perm
     this.deps.grants.update(g.id, {
       ...(req.perm ? { perm: req.perm } : {}),
       ...(req.label !== undefined ? { label: req.label } : {}),
@@ -988,11 +989,17 @@ export class ShareHost {
       ...(req.paused !== undefined ? { paused: req.paused } : {}),
     })
     if (permChanged) {
-      // The grant perm applies to every live session of it, and to their tickets.
-      this.sessions.setTicketPerm(g.id, null, g.perm)
+      // The grant perm applies to every live session of it, and to their
+      // tickets. One below the old grant perm was lowered on purpose (the join
+      // prompt or sessionPerm): a grant change may lower it, never raise it.
+      const newPerm = g.perm
+      const next = (p: SharePerm): SharePerm => (PERM_RANK[p] < PERM_RANK[oldPerm] ? ShareHost.minPerm(p, newPerm) : newPerm)
+      this.sessions.remapTicketPerms(g.id, next)
       for (const s of this.sessions.admitted()) {
-        if (s.grantId !== g.id || s.perm === g.perm) continue
-        s.perm = g.perm
+        if (s.grantId !== g.id) continue
+        const p = next(s.perm)
+        if (p === s.perm) continue
+        s.perm = p
         this.sessions.send(s, { t: 'permChanged', perm: s.perm })
         this.enforceCaps(s)
       }

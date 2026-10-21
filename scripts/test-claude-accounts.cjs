@@ -291,14 +291,41 @@ async function vaultV2Checks() {
     const again = new M.AccountVault(dir, fakeCrypto(), () => now)
     const m2 = again.load()
     check(!again.migratedFromV1 && JSON.stringify(m2) === JSON.stringify(m), 'the next start reads accounts.v2.json as written')
-    // A 2.3.0 ran after it (a downgrade touched accounts.json): migrated again, v2 kept as a .bak.
+    check(m2.v1Seen && m2.v1Seen.size === fs.statSync(path.join(dir, 'accounts.json')).size, 'the save records the accounts.json it saw (v1Seen)')
+    // A 2.3.0 ran after it (a downgrade rewrote accounts.json): merged into v2, a copy of v2 kept as a .bak.
     const later = new Date(Date.now() + 60_000)
-    fs.writeFileSync(path.join(dir, 'accounts.json'), v1({ lastSwitch: { at: 9, from: P2, to: P1, reason: 'manual' }, activeId: P1, exhaustedUntil: 777 }))
+    fs.writeFileSync(path.join(dir, 'accounts.json'), v1({ lastSwitch: { at: 9, from: P2, to: P1, reason: 'manual' }, activeId: P1, exhaustedUntil: 99999 }))
     fs.utimesSync(path.join(dir, 'accounts.json'), later, later)
     const down = new M.AccountVault(dir, fakeCrypto(), () => now)
     const m3 = down.load()
-    check(down.migratedFromV1 && m3.activeId === P1 && m3.anchorId === P1 && fs.readdirSync(dir).some(f => f.startsWith('accounts.v2.json.bak-')), 'a newer accounts.json is migrated again and v2 set aside as .bak')
-    check(m3.accounts[0].exhaustedUntil === 777, 'without an automatic switch the global exhaustedUntil goes to the primary')
+    check(down.migratedFromV1 && m3.activeId === P1 && m3.anchorId === P1 && fs.readdirSync(dir).some(f => f.startsWith('accounts.v2.json.bak-')) && fs.existsSync(path.join(dir, 'accounts.v2.json')), 'a changed accounts.json is merged again; v2 is copied to a .bak, never moved')
+    check(m3.accounts[0].exhaustedUntil === 99999 && m3.lastSwitch.reason === 'manual', 'the later exhaustedUntil 2.3.0 left and its last switch are taken')
+    // The merge is saved once; a future mtime on accounts.json never re-merges after that.
+    await down.saveMeta(m3)
+    const steady = new M.AccountVault(dir, fakeCrypto(), () => now)
+    steady.load()
+    check(!steady.migratedFromV1, 'an accounts.json with a future mtime the last save already saw is not merged again')
+  }
+  {
+    // A downgrade with 5 accounts: 2.3.0 knows 2 of them; nothing 2.4.0 keeps alone is lost.
+    const dir = tmp('v1downgrade5')
+    const ids = [1, 2, 3, 4, 5].map(i => 'acc_00000000000' + i)
+    const crypto = fakeCrypto()
+    const vault = new M.AccountVault(dir, crypto, () => now)
+    for (const id of ids.slice(0, 4)) await vault.putSnapshot(id, { v: 1, credentialsRaw: cred(id, 1), capturedAt: now })
+    // acc_5 has no .bin (2.3.0 never had it and it was removed by hand): it is dropped.
+    const v2acc = (id, i, extra = {}) => ({ ...acc1(id, undefined, 'u' + i), label: 'L' + i, updatedAt: 10, exhaustedUntil: i === 3 ? 4444 : null, ...extra })
+    const v2meta = { version: 2, activeId: ids[2], anchorId: ids[3], lastSwitch: { at: 8, from: ids[0], to: ids[2], reason: 'manual' }, autoPaused: null, verify: null,
+      accounts: [v2acc(ids[3], 3), v2acc(ids[2], 2), v2acc(ids[0], 0), v2acc(ids[1], 1), v2acc(ids[4], 4)] }
+    fs.writeFileSync(path.join(dir, 'accounts.json'), JSON.stringify({ version: 1, activeId: ids[0], lastSwitch: null, autoPaused: null, exhaustedUntil: null, verify: null, accounts: [acc1(ids[0], 'primary', 'u0', { label: 'Old', updatedAt: 5 }), acc1(ids[1], 'secondary', 'u1', { label: 'Renamed in 2.3.0', updatedAt: 20, needsRecapture: true })] }))
+    await vault.saveMeta(v2meta)
+    // 2.3.0 runs: unknownAccount (the live login is #3) and rewrites accounts.json.
+    fs.writeFileSync(path.join(dir, 'accounts.json'), JSON.stringify({ version: 1, activeId: null, lastSwitch: null, autoPaused: 'unknownAccount', exhaustedUntil: null, verify: null, accounts: [acc1(ids[0], 'primary', 'u0', { label: 'Old', updatedAt: 5 }), acc1(ids[1], 'secondary', 'u1', { label: 'Renamed in 2.3.0', updatedAt: 20, needsRecapture: true })] }) + ' ')
+    const up = new M.AccountVault(dir, crypto, () => now)
+    const m = up.load()
+    check(up.migratedFromV1 && m.accounts.map(a => a.id).join() === [ids[3], ids[2], ids[0], ids[1]].join(), 'downgrade merge: the 2.4.0 order and accounts #3+ stay; a v2-only account without its .bin is dropped')
+    check(m.anchorId === ids[3] && m.activeId === ids[2] && m.lastSwitch.to === ids[2] && m.autoPaused === null && m.accounts[0].exhaustedUntil === 4444, 'downgrade merge: anchor, active account, last switch and exhaustedUntil from v2 (2.3.0 had no active account)')
+    check(m.accounts[2].label === 'L0' && m.accounts[3].label === 'Renamed in 2.3.0' && m.accounts[3].needsRecapture === true && m.accounts[3].updatedAt === 20, 'downgrade merge: a label 2.3.0 edited later wins, an older one does not; v1 owns needsRecapture')
   }
   {
     // A manual / phone / cli / external last switch anchors its target.
@@ -866,6 +893,29 @@ async function nAccountServiceChecks() {
     await sleep(20)
     check(w.svc.status().activeId === A && w.svc.status().lastSwitch.reason === 'auto_return' && w.read() === cred('A', 1), 'then A resets: B goes back to A')
     check(w.svc.status().anchorId === A, 'automatic moves never touch the anchor')
+  }
+  {
+    // An automatic switch decided while a manual one is in flight is dropped once that lands.
+    const pct = { A: 20, B: 3, C: 5 }
+    const fetchUsage = async (_f, deps) => {
+      const c = await deps.readCred()
+      const p = pct[c.claudeAiOauth.accessToken.slice(3, 4)]
+      return { rows: [{ id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: p, resetsAt: new Date(now + 3 * H).toISOString(), status: 'ok' }, { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: p, resetsAt: new Date(now + 48 * H).toISOString(), status: 'ok' }] }
+    }
+    const w = await nAccounts(3, { cfg: { autoSwitch: true }, fetchUsage })
+    const [A, B, C] = w.ids
+    await w.svc.switchTo(A, 'manual')
+    now += 11 * MIN
+    await w.svc.pollParked(); await w.svc.pollParked()
+    const resetA = now + 120 * MIN
+    const manual = w.svc.switchTo(C, 'manual')
+    w.svc.onActiveUsage([{ id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 99, resetsAt: new Date(resetA).toISOString(), status: 'ok' }, { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 10, resetsAt: new Date(now + 48 * H).toISOString(), status: 'ok' }], now)
+    const mr = await manual
+    await sleep(50)
+    const st = w.svc.status()
+    const metaC = vaultMeta(w).accounts.find(a => a.id === C)
+    check(mr.ok && st.activeId === C && st.lastSwitch.reason === 'manual' && w.read() === cred('C', 1), 'a queued automatic switch from A never undoes the manual pick of C that landed first')
+    check(metaC.exhaustedUntil === null && !w.events.some(e => e.kind === 'switched' && e.auto), 'and C is never marked exhausted with A\'s reset')
   }
   {
     // A manual pick of B anchors: the return from C stops at B even with A fine.

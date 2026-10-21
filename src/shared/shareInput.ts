@@ -7,7 +7,9 @@
  *  - a lone Esc opens a 1 s window (SHARE_ESC_WINDOW_MS) in which the next
  *    write is gated joined to that Esc, so `\x1b` + `[13u` (CSI-u Enter),
  *    `\x1b` + `[Z` (Shift+Tab), `\x1b` + `OM` (keypad Enter) or `\x1b` + `b`
- *    (Meta+b) sent as two frames fail exactly like the joined sequence;
+ *    (Meta+b) sent as two frames fail exactly like the joined sequence. On a
+ *    non-agent pane (a shell, whose line editor keeps Esc as a Meta prefix with
+ *    no timeout) the next write also joins whenever the pane's last byte is Esc;
  *  - it follows the bracketed paste markers it admitted, so the host can
  *    close a paste a guest left open (`cutPaste`).
  *
@@ -148,7 +150,10 @@ export class ShareInputGate {
     }
     if (SEND_RE.test(data)) return deny('no_send')
     if (INTERRUPT_RE.test(data)) return deny('interrupt')
-    const joined = this.escPending
+    // Shells (readline emacs mode, zsh ZLE) keep a bare Esc as a Meta prefix
+    // with no timeout: on a non-agent pane the next write joins the pane's last
+    // byte, whoever wrote it. Agent TUIs time Esc out, so there the 1 s window holds.
+    const joined = this.escPending || (!ctx.agent && ctx.lastByte === '\x1b')
     const bad = scanTyped(joined ? '\x1b' + data : data, !ctx.agent || ctx.state === 'idle')
     if (bad) return deny(bad)
     if (!joined && data[0] === '~' && (ctx.lastByte === '' || ctx.lastByte === '\r' || ctx.lastByte === '\n')) {

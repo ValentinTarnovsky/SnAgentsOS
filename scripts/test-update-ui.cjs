@@ -35,6 +35,8 @@ const missed=['2.3.0','2.2.0','2.1.0'].map(v=>({version:v,notes:'### '+v+'\\n- C
 const offer={available:true,currentVersion:'2.0.0',latestVersion:'2.3.0',notes,releaseUrl:'https://github.com/x/releases/tag/v2.3.0',installable:true,installKind:'win-portable',newerCount:3,missed};
 const panes=Array.from({length:7},(_,i)=>({id:'p'+i,type:'shell',title:'Consola '+i,icon:'terminal'}));
 useAppStore.setState({hydrated:true,activeWorkspaceId:'w1',workspaces:[{id:'w1',name:'Proyecto',cwd:'',panes}],paneStatus:{p0:{state:'working',precise:true,provider:'claude',pendingCount:0},p1:{state:'action',precise:true,provider:'codex',pendingCount:1},p2:{state:'done',precise:true,provider:'claude',pendingCount:0}}});
+// Toasts raised outside React (not-applied) translate with the store language, like the app.
+useAppStore.setState(s=>({settings:{...s.settings,language:'es'}}));
 applyTheme('midnight');
 createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div style={{height:'100vh'}} className="flex flex-col bg-bg-primary text-text-primary"><TitleBar/><main className="p-6">Consola de prueba</main></div><NotificationStack/><UpdateCardHost/><ReleaseNotesModal/></I18nProvider>);
 const q=s=>document.querySelector(s);

@@ -149,7 +149,16 @@ function testWatcher() {
   check(W.MENU_READ_THROTTLE_MS === 250, 'the menu is re-read at most every 250 ms')
   check(W.menuTarget(evt('p', 'action', { pending: [planReq] }))?.kind === 'plan', 'a precise Claude plan is a target')
   check(W.menuTarget(evt('p', 'action', { pending: [permReq] }))?.pendingId === 'tb1', 'a precise Claude permission is a target')
-  check(W.menuTarget(evt('p', 'action', { pending: [permReq, planReq] }))?.kind === 'plan', 'the plan wins over a permission (like the phone card)')
+  // The same request the phone's cardFor picks (shared selectCardRequest), in pending[] order.
+  const readReq = { id: 'tr1', kind: 'permission', toolName: 'Read', summary: 'Read a.ts' }
+  const taskReq = { id: 'tt1', kind: 'permission', toolName: 'Task', summary: 'Task' }
+  const t1 = W.menuTarget(evt('p', 'action', { pending: [readReq, planReq] }))
+  check(t1?.kind === 'permission' && t1.pendingId === 'tr1', '[permission Read, plan]: the Read permission (the card the phone shows), not the plan')
+  const t2 = W.menuTarget(evt('p', 'action', { pending: [taskReq, readReq] }))
+  check(t2?.kind === 'permission' && t2.pendingId === 'tr1', '[permission of a tool with no card, permission Read]: the Read one')
+  check(W.menuTarget(evt('p', 'action', { pending: [taskReq, planReq] }))?.pendingId === 'tp1', 'a permission with no card is skipped for the plan after it')
+  check(W.menuTarget(evt('p', 'action', { pending: [{ id: 'g', kind: 'permission', summary: '' }, planReq] }))?.pendingId === 'tp1', 'a permission without toolName next to a plan: the plan (no generic Allow on a plan menu)')
+  check(W.menuTarget(evt('p', 'action', { pending: [{ id: 'q', kind: 'question', summary: '' }, planReq] })) === null, 'a question first: its card needs no menu')
   check(W.menuTarget(evt('p', 'action', { precise: false, pending: [planReq] })) === null, 'a title-only (approximate) track is no target')
   check(W.menuTarget(evt('p', 'action', { provider: 'codex', pending: [permReq] })) === null, 'a Codex request is no target (the key row covers it)')
   check(W.menuTarget(evt('p', 'action', { pending: [{ id: 'q', kind: 'question', summary: '' }, { id: 'e', kind: 'elicitation', summary: '' }] })) === null, 'questions and elicitations are no target')

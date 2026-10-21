@@ -138,8 +138,9 @@ app.whenReady().then(async()=>{
  const w=new BrowserWindow({width:1280,height:820,show:false,webPreferences:{sandbox:true,backgroundThrottling:false}});
  let failures=[];w.webContents.on('console-message',(_e,level,message)=>{if(level>=3)failures.push(message)});
  await w.loadFile(path.join(__dirname,'index.html'));
- const js=c=>w.webContents.executeJavaScript(c);
- const frame=()=>js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
+ const js=c=>w.webContents.executeJavaScript(c).catch(e=>{throw new Error(e.message+' | in: '+c.slice(0,240))});
+ // Hidden windows paint at about 1 fps: settle on tasks (React commits in tasks), not on a rAF chain.
+ const frame=()=>js('new Promise(r=>setTimeout(r,50))');
  const settle=async(ms=120)=>{await frame();await wait(ms)};
  const shot=async name=>{await settle(150);fs.writeFileSync(path.join(__dirname,name+'.png'),(await w.webContents.capturePage()).toPNG())};
  const LINK='AbCdEfGhIjKlMnOpQrStUv';
@@ -314,7 +315,7 @@ app.whenReady().then(async()=>{
  await js("smoke.stateFull([smoke.sp('sp1'),smoke.sp('sp2',{type:'claude',title:'Agent',icon:'bot'}),smoke.sp('sp9',{type:'claude',title:'Claude 2',icon:'bot'})])");await settle();
  v=await js("({n:smoke.count('[data-shared-pane=sp9]'),title:smoke.text('[data-shared-pane=sp9]'),pending:(smoke.extras().pendingPanes[smoke.LINK]||[]).length})");
  ok(v.n===1&&v.title.includes('Claude 2')&&v.pending===0,'once the state lists it, the pending cell gives way to the host one',v);
- await js("smoke.fakes.ctl=()=>({ok:false,error:'rate'})");
+ await js("smoke.fakes.ctl=()=>({ok:false,error:'rate'});0");
  await js("smoke.click('[data-shared-extra=newConsole]')");await settle();await js("smoke.click('[data-shared-preset=pre2]')");await settle(250);
  v=await js("smoke.toasts().map(t=>({k:t.kind,title:t.title,body:t.body}))");
  ok(v.some(t=>t.k==='error'&&t.title.includes('No se creó')&&t.body.includes('Demasiados')),'a refused createPane says why in a toast',v);
@@ -381,7 +382,7 @@ app.whenReady().then(async()=>{
  await shot('share-s5-notes');
 
  // Changes: status sections, a file's diff in pages, read only.
- await js("smoke.calls.git.length=0;smoke.fakes.git=r=>r.op==='status'?{ok:true,reply:{ok:true,data:{summary:{branch:'feat/x',ahead:0,behind:0,added:5,removed:2,files:2,approx:false,conflicts:0,op:null},files:[{path:'src/a.ts',area:'unstaged',status:'M',added:3,removed:1,binary:false},{path:'new.md',area:'untracked',status:'?',added:2,removed:0,binary:false}],total:2,truncated:false},page:0,done:true}}:{ok:true,reply:{ok:true,data:{path:r.path,area:'unstaged',diffRev:'r1',binary:false,hunks:[{header:'@@ -1,2 +1,3 @@',oldStart:1,newStart:1,lines:r.page?[{kind:'add',newNo:3,text:'page two'}]:[{kind:'ctx',oldNo:1,newNo:1,text:'one'},{kind:'add',newNo:2,text:'two'}],...(r.page?{continued:true}:{})}]},page:r.page||0,done:!!r.page}}}");
+ await js("smoke.calls.git.length=0;smoke.fakes.git=r=>r.op==='status'?{ok:true,reply:{ok:true,data:{summary:{branch:'feat/x',ahead:0,behind:0,added:5,removed:2,files:2,approx:false,conflicts:0,op:null},files:[{path:'src/a.ts',area:'unstaged',status:'M',added:3,removed:1,binary:false},{path:'new.md',area:'untracked',status:'?',added:2,removed:0,binary:false}],total:2,truncated:false},page:0,done:true}}:{ok:true,reply:{ok:true,data:{path:r.path,area:'unstaged',diffRev:'r1',binary:false,hunks:[{header:'@@ -1,2 +1,3 @@',oldStart:1,newStart:1,lines:r.page?[{kind:'add',newNo:3,text:'page two'}]:[{kind:'ctx',oldNo:1,newNo:1,text:'one'},{kind:'add',newNo:2,text:'two'}],...(r.page?{continued:true}:{})}]},page:r.page||0,done:!!r.page}};0");
  await js("smoke.click('[data-shared-extra=changes]')");await settle(300);
  v=await js("({drawer:smoke.has('[data-drawer=share-changes]'),notes:smoke.has('[data-drawer=share-notes]'),call:smoke.calls.git[0],sum:smoke.text('[data-shared-changes-summary]'),secs:[...document.querySelectorAll('[data-shared-changes-section]')].map(e=>e.dataset.sharedChangesSection)})");
  ok(v.drawer&&!v.notes&&v.call.op==='status'&&v.call.page===0&&v.call.linkId===LINK&&v.sum.includes('feat/x')&&JSON.stringify(v.secs)==='[\"unstaged\",\"untracked\"]','Changes replaces Notes (one drawer) and shows the host status in sections',v);

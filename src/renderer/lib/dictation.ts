@@ -269,7 +269,9 @@ function deliver(text: string): void {
   if (!chunk) return
   sessionText += chunk
   // Once something is held, the rest waits too, so the order never changes.
-  if (s.held || menuPending(target.paneId) || !pasteToPane(target.paneId, chunk)) {
+  // A pty that changed since the start (restart, respawn) never gets this
+  // session's text unasked: it is held for Insert.
+  if (s.held || getPtyId(target.paneId) !== targetPty || menuPending(target.paneId) || !pasteToPane(target.paneId, chunk)) {
     useDictationStore.setState({ held: s.held + chunk })
   }
 }

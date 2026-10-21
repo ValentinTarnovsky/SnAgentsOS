@@ -196,7 +196,21 @@ function testGate() {
     now = 6000
     check(!g.check('[13u', 'type', SHELL).ok, 'the window holds for the full second')
     now = 6001
-    check(g.check('[13u', 'type', SHELL).ok, 'after 1 s the text stands alone (escape timeouts have passed)')
+    check(g.check('[13u', 'type', IDLE).ok, 'after 1 s the text stands alone on an agent pane (escape timeouts have passed)')
+  }
+  {
+    // Shell line editors keep a bare Esc as a Meta prefix with no timeout.
+    const ESC_SHELL = { agent: false, lastByte: '\x1b' }
+    const g = gateAt(); now = 8000; g.commit('\x1b')
+    now = 13000
+    for (const tail of ['a', '#', '[13u']) {
+      const v = g.check(tail, 'type', ESC_SHELL)
+      check(!v.ok && v.reason === 'blocked_key', `shell: Esc then ${JSON.stringify(tail)} 5 s later is still joined (Meta prefix)`)
+    }
+    check(g.check('[A', 'type', ESC_SHELL).ok, 'shell: Esc then [A 5 s later joins into an allowed arrow')
+    check(g.check('a', 'type', { agent: true, state: 'idle', precise: true, lastByte: '\x1b' }).ok, 'agent: Esc then a letter 5 s later stands alone')
+    const v2 = gateAt().check('a', 'type', ESC_SHELL)
+    check(!v2.ok && v2.reason === 'blocked_key', 'shell: after the owner pressed Esc a fresh gate joins the letter to it')
   }
   {
     const g = gateAt(); g.commit('abc\x1b')
@@ -932,6 +946,24 @@ async function testJoin() {
   check(bad.last('welcome')?.perm === 'type' && w4.host.hostState().approvals.length === 0, 'the password sent while pending admits and dismisses the prompt')
   check(w4.host.hostState().grants[0].hasPassword && !(await w4.host.setPassword(g4.id, 'short')).ok, 'hasPassword shows; a short password is refused')
   check((await w4.host.setPassword(g4.id, null)).ok && !w4.grants.get(g4.id).password, 'the password can be cleared')
+
+  // A ticket reconnect never resets the password lockout of its address.
+  const w5 = hostWorld()
+  const { g: g5 } = await w5.grant({ scope: { kind: 'pane', paneId: 'p1' }, perm: 'full', password: 'correct horse battery' })
+  const holder = S.generateShareKeyPair()
+  const seat = w5.join(g5, { ip: '192.168.1.70', key: holder })
+  w5.approve('view')
+  const seatTicket = seat.last('welcome')?.ticket
+  const guessKey = await S.derivePasswordKey('a wrong guess', g5.password.salt)
+  for (let i = 0; i < 4; i++) {
+    const guess = w5.join(g5, { ip: '192.168.1.70', pwKey: guessKey })
+    check(guess.last('pending')?.passwordFailed === true, `wrong password guess ${i + 1}: back to the prompt`)
+    guess.send({ t: 'bye' })
+  }
+  const back = w5.join(g5, { ip: '192.168.1.70', key: holder, ticket: seatTicket })
+  check(back.last('welcome')?.perm === 'view', 'the ticket holder reconnects from the same address')
+  const fifth = w5.join(g5, { ip: '192.168.1.70', pwKey: guessKey })
+  check(fifth.last('denied')?.reason === 'locked' && fifth.code === 4429, 'the fifth wrong password still locks the address: the ticket reconnect did not clear the failures')
 }
 
 // --- 11. Scope, state, data plane ---------------------------------------------
@@ -963,6 +995,7 @@ async function testScopeAndStream() {
   check(outs.length === 3 && outs.every(o => o.data.length <= 16384) && outs[0].data.length === 16383 && outs.map(o => o.data).join('') === 'x'.repeat(16383) + '\ud83d\ude00' + 'y'.repeat(20000), 'out is split into <= 16K frames without splitting a surrogate pair')
   g.clear()
   w.pty.panes.get('p1').replay = 'z'.repeat(40000)
+  w.clock.advance(500)
   g.send({ t: 'resync', paneId: 'p1' })
   const parts = g.of('replay')
   check(parts.length === 3 && parts[0].first && !parts[0].last && parts[2].last && !parts[2].first && parts.map(x => x.data).join('').length === 40000, 'replay is split into parts with first and last')
@@ -1062,6 +1095,54 @@ async function testScopeAndStream() {
   sessions.a.buf = 300 * 1024
   fclock.advance(30_001); fan.maintenance()
   check(killed.includes(sessions.a) && fpty.fast.share.length === 0, 'congested for 30 s kills the session; nobody left watching')
+
+  // Guest-asked replays: a per-pane cooldown, no replay onto a congested socket, the kill at once.
+  {
+    const rsent = []
+    const rkilled = []
+    let replays = 0
+    const rpty = fakePty(); rpty.add('p1', { replay: 'R;' })
+    const counted = { ...rpty, getReplay: id => { replays++; return rpty.getReplay(id) } }
+    const rclock = fakeClock()
+    const rfan = new S.PaneFanout({ pty: counted, clock: rclock, send: (s, msg) => rsent.push({ s, msg }), bufferedAmount: s => s.buf, terminate: s => { rkilled.push(s); rfan.removeSession(s) }, streaming: () => true })
+    rpty.sinks.push(rfan)
+    const v = { buf: 0 }
+    const reps = () => rsent.filter(x => x.s === v && x.msg.t === 'replay').length
+    rfan.sub(v, 'p1')
+    check(reps() === 1 && replays === 1, 'cooldown: the first sub gets its replay')
+    for (let i = 0; i < 50; i++) rfan.resync(v, 'p1')
+    for (let i = 0; i < 20; i++) { rfan.unsub(v, 'p1'); rfan.sub(v, 'p1') }
+    check(reps() === 1 && replays === 1 && rfan.isSubscribed(v, 'p1'), 'cooldown: a resync flood and an unsub/sub loop inside 500 ms run no getReplay (the sub still stands)')
+    rpty.emit('p1', 'held'); rclock.advance(16)
+    check(!rsent.some(x => x.s === v && x.msg.t === 'out'), 'cooldown: the deferred pane is congested, no out before its replay')
+    rclock.advance(500)
+    const last = rsent.filter(x => x.s === v && x.msg.t === 'replay').pop()
+    check(reps() === 2 && replays === 2 && last.msg.data === 'R;held', 'cooldown: one deferred replay when it ends, with what was held')
+    rpty.emit('p1', '+'); rclock.advance(16)
+    check(rsent.filter(x => x.s === v && x.msg.t === 'out').pop()?.msg.data === '+', 'cooldown: out flows again after the deferred replay')
+    rclock.advance(500)
+    v.buf = 600 * 1024
+    rfan.resync(v, 'p1')
+    check(reps() === 2 && replays === 2, 'no replay onto a socket past 512KB buffered')
+    v.buf = 10
+    rfan.maintenance()
+    check(reps() === 3 && replays === 3, 'the congested pane gets its replay once the socket drains')
+    rclock.advance(500)
+    v.buf = 5 * 1024 * 1024
+    rfan.unsub(v, 'p1'); rclock.advance(500)
+    const wv = { buf: 5 * 1024 * 1024 }
+    rfan.sub(wv, 'p1')
+    check(rkilled.includes(wv) && !rsent.some(x => x.s === wv && x.msg.t === 'replay') && !rfan.sessionsFor('p1').has(wv), 'past 4MB buffered a sub kills the session at once, nothing sent, no sub left')
+    const kv = { buf: 0 }
+    rfan.sub(kv, 'p1'); kv.buf = 5 * 1024 * 1024
+    rpty.respawn('p1')
+    check(rkilled.includes(kv) && rsent.filter(x => x.s === kv && x.msg.t === 'replay').length === 1, 'past 4MB buffered a host replay (new pty) kills the session before sending')
+    v.buf = 0
+    rfan.dropPending(v); rfan.sub(v, 'p1')
+    const n = reps()
+    rfan.resyncAll(v)
+    check(reps() === n + 1, 'resume after a pause (resyncAll) is the host call: no cooldown')
+  }
 }
 
 // --- 12. Pause, expiry, revoke, perm change -------------------------------------
@@ -1128,6 +1209,21 @@ async function testLifecycle() {
   check(w3.listeners.at(-1).port === 4600, 'a port change restarts the listener there')
   const nep = hostWorld({ noEndpoints: true })
   check((await nep.host.create({ scope: { kind: 'pane', paneId: 'p1' }, perm: 'view' })).error === 'no_endpoint' && nep.grants.list().length === 0, 'no address to invite to: no grant')
+
+  // A grant perm change never raises a guest the host lowered on purpose.
+  const w5 = hostWorld()
+  const { g: g5 } = await w5.grant({ scope: { kind: 'pane', paneId: 'p1' }, perm: 'full' })
+  const lowKey = S.generateShareKeyPair()
+  const low = w5.join(g5, { ip: '192.168.1.80', key: lowKey }); w5.approve('view')
+  const peer = w5.join(g5, { ip: '192.168.1.81' }); w5.approve()
+  check(low.last('welcome')?.perm === 'view' && peer.last('welcome')?.perm === 'full', 'one guest approved at view, one at the grant perm')
+  const lowTicket = low.last('welcome').ticket
+  check(w5.host.update({ grantId: g5.id, perm: 'type' }).ok && !low.last('permChanged') && peer.last('permChanged')?.perm === 'type', 'grant full -> type: the guest at view stays view (no permChanged), the guest at the grant perm follows')
+  check(w5.host.update({ grantId: g5.id, perm: 'full' }).ok && !low.last('permChanged') && peer.last('permChanged')?.perm === 'full', 'grant type -> full: still not raised; the other guest follows again')
+  low.send({ t: 'bye' })
+  const lowBack = w5.join(g5, { ip: '192.168.1.80', key: lowKey, ticket: lowTicket })
+  check(lowBack.last('welcome')?.perm === 'view', 'the reconnect ticket keeps the lowered perm too')
+  check(w5.host.update({ grantId: g5.id, perm: 'view' }).ok && peer.last('permChanged')?.perm === 'view' && !lowBack.last('permChanged'), 'grant -> view lowers the guest at the grant perm; the one already at view gets nothing')
 }
 
 // --- 13. Leases and the gate ---------------------------------------------------

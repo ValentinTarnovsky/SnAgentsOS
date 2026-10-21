@@ -789,7 +789,11 @@ export class StatusManager implements PtySink {
     // v2.4: the shell's prompt already ended this agent (D/A); only a new start counts.
     if (!track && evt.kind !== 'start' && this.hostedRetired.get(evt.paneId)?.has(`${evt.provider}:${evt.sessionId}`)) return
     if (track?.retired.has(`${evt.provider}:${evt.sessionId}`)) {
-      if (evt.kind === 'start' && (evt.provider === 'codex' || (track.ended && track.sessionId === evt.sessionId))) track.retired.delete(`${evt.provider}:${evt.sessionId}`)
+      // A start while the track is the approximate placeholder of a runtime
+      // agent of that provider is a new process the user just typed (`claude -c`,
+      // `claude --resume S` after /exit): it may take a retired session back.
+      const placeholder = !track.precise && this.runtimeAgents.get(evt.paneId) === evt.provider
+      if (evt.kind === 'start' && (evt.provider === 'codex' || placeholder || (track.ended && track.sessionId === evt.sessionId))) track.retired.delete(`${evt.provider}:${evt.sessionId}`)
       else return
     }
     if (track?.precise && (track.sessionId !== evt.sessionId || track.provider !== evt.provider)) {

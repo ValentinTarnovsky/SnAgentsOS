@@ -1175,6 +1175,22 @@ async function enrichmentChecks() {
       t.data(D(0))
       check(t.rows() === 0, 'and its D drops the approximate track')
     }
+    {
+      // An agent console after /exit: `claude -c` typed by hand resumes the same session, hooks and all.
+      const h = timed({ config: codexCfg('claude'), key: KEY })
+      h.hook('SessionStart', { source: 'startup' }); h.hook('UserPromptSubmit', { prompt: 'hola' }); h.hook('Stop')
+      h.hook('SessionEnd', { endReason: 'prompt_input_exit' })
+      h.data(D(0))
+      check(h.rows() === 1 && h.last().precise === true, 'resume by hand: the ended precise track stays after the D')
+      h.enter('claude -c\r'); h.data(C('claude'))
+      h.hook('SessionStart', { source: 'resume' })
+      const r = h.last()
+      check(r.precise === true && r.sessionId === SID && r.state === 'idle', 'resume by hand: the resumed session\'s SessionStart makes the track precise again')
+      h.hook('UserPromptSubmit', { prompt: 'sigue' })
+      check(h.last().state === 'working' && h.last().precise === true, 'resume by hand: UserPromptSubmit of the resumed session is accepted')
+      h.hook('PermissionRequest', { toolUseId: 'r1', toolName: 'Bash', toolSummary: 'Bash: ls' })
+      check(h.last().state === 'action' && h.last().pendingCount === 1, 'resume by hand: PermissionRequest is accepted, one pending request')
+    }
   }
   // Session id rules (E4-FR-09 d).
   {
