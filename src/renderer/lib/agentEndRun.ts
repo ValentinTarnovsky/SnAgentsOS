@@ -104,7 +104,8 @@ export function runAgentEnd(paneId: string, mode: AgentEndMode, workspaceId?: st
   state.clearAgentEnded(paneId)
   if (!ptyId) return { ok: false, error: 'not_running' }
   // A bare CR is exactly what Enter sends (CRLF makes PowerShell print ">>").
-  const write = (): void => window.snApi.pty.write({ ptyId, data: text + '\r' })
+  // v2.3: origin 'auto', a chip tap is no acknowledgement of the console's attention.
+  const write = (): void => { void window.snApi.pty.submit({ ptyId, text: text + '\r', enter: false, origin: 'auto' }) }
   whenShellReady(paneId, found.evt.at, write)
   return { ok: true }
 }

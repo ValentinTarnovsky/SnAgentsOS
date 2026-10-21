@@ -2,7 +2,9 @@
  * The renderer side of the snaos CLI bus (E8 Group C): main resolves every
  * address and checks every rule, then asks the owner of the model for what
  * only it can do (list, open, spawn, read the xterm buffer, status line,
- * note, attention). Ops arrive on the remote control relay as `{ kind: 'cli',
+ * note, attention; in app 2.3.0 also kill, restart, rename, workspaces and
+ * the Notes drawer, each with an info toast when it changes the desktop under
+ * the user). Ops arrive on the remote control relay as `{ kind: 'cli',
  * op }` (CONTRATOS: the CLI reuses remote:controlCmd) and never come from a
  * phone: the phone schema has no `cli` action.
  */
@@ -19,6 +21,13 @@ import { resolveLaunch } from './launch'
 import { platformDefaultShell } from './agentEndRun'
 import { readTerm } from './termReaders'
 import { useStatusLines } from './statusLineStore'
+import { killPanePtys } from './ptyRegistry'
+import { restartPaneWith } from './paneRestart'
+import { markStopped } from './stoppedPanes'
+import { openNoteInPanel } from './sidePanels'
+import { toast } from './toast'
+import { isNoteId } from '@shared/ws-notes'
+import { translate } from '@/i18n'
 
 export interface CtlOpResult {
   ok: boolean
@@ -43,9 +52,20 @@ export function listData(state: AppState): CtlListData {
       name: w.name,
       cwd: w.cwd,
       ...(w.setupId ? { setupId: w.setupId } : {}),
+      ...(w.favorite ? { favorite: true as const } : {}),
       ...(w.note ? { note: w.note } : {}),
       ...(w.taskState ? { taskState: w.taskState } : {}),
-      panes: gridPanes(w).map((p) => ({ id: p.id, title: p.title, type: p.type, ...(p.presetId ? { presetId: p.presetId } : {}), ...(p.setupId !== undefined ? { setupId: p.setupId } : {}) })),
+      panes: gridPanes(w).map((p) => {
+        const home = state.paneHome[p.id]?.workspaceId
+        return {
+          id: p.id,
+          title: p.title,
+          type: p.type,
+          ...(p.presetId ? { presetId: p.presetId } : {}),
+          ...(p.setupId !== undefined ? { setupId: p.setupId } : {}),
+          ...(home && home !== w.id ? { homeWorkspaceId: home } : {}),
+        }
+      }),
     })),
     activeWorkspaceId: state.activeWorkspaceId,
     presets: state.presets.map((p) => ({ id: p.id, name: p.name, type: p.type })),
@@ -98,7 +118,7 @@ export function runCtlOp(op: CtlRendererOp): CtlOpResult {
     }
 
     case 'composer':
-      s.setWizardOpen(true, { cwd: op.cwd })
+      s.setWizardOpen(true, { cwd: op.cwd, ...(op.name ? { name: op.name } : {}) })
       window.snApi.window.reveal()
       return { ok: true }
 
@@ -153,7 +173,92 @@ export function runCtlOp(op: CtlRendererOp): CtlOpResult {
       return { ok: true }
     }
 
+    // --- app 2.3.0 -----------------------------------------------------------
+
+    case 'kill': {
+      const pane = paneIn(s, op.workspaceId, op.paneId)
+      if (!pane) return { ok: false, error: 'not_found' }
+      // Explicit kill (E4-FR-36), the same path as the phone's closePane.
+      killPanePtys([op.paneId])
+      // Closed like the desktop does it: reopenable, a worktree keeps its folder.
+      if (op.close) s.closePane(op.workspaceId, op.paneId)
+      // Kept stopped: a later mount shows the exit card instead of spawning again.
+      else markStopped(op.paneId)
+      if (op.close) cliToast('toast.cli.closed', { pane: pane.title })
+      // Main owns the ptys (this registry is empty after a reload): nothing ran, nothing was stopped.
+      else if (op.running !== false) cliToast('toast.cli.killed', { pane: pane.title })
+      return { ok: true }
+    }
+
+    case 'restart': {
+      const pane = paneIn(s, op.workspaceId, op.paneId)
+      if (!pane) return { ok: false, error: 'not_found' }
+      restartPaneWith(op.paneId, op.resume)
+      cliToast('toast.cli.restarted', { pane: pane.title })
+      return { ok: true }
+    }
+
+    case 'renamePane': {
+      if (!paneIn(s, op.workspaceId, op.paneId)) return { ok: false, error: 'not_found' }
+      s.renamePane(op.workspaceId, op.paneId, op.title)
+      return { ok: true }
+    }
+
+    case 'createWorkspace': {
+      const prevActive = s.activeWorkspaceId
+      const prevPrevious = s.previousWorkspaceId
+      // Activates and mounts the new workspace with one shell.
+      const id = s.createWorkspace(op.name, op.cwd)
+      if (op.focus) window.snApi.window.reveal()
+      // Without --focus the desktop keeps its workspace (E8-FR-30); the new shell still starts.
+      else if (prevActive && prevActive !== id) useAppStore.setState({ activeWorkspaceId: prevActive, previousWorkspaceId: prevPrevious })
+      const index = liveSidebarOrder(useAppStore.getState(), useAgentStore.getState()).findIndex((w) => w.id === id) + 1
+      return { ok: true, data: { workspaceId: id, index } satisfies CtlRendererData['createWorkspace'] }
+    }
+
+    case 'renameWorkspace': {
+      if (!s.workspaces.some((w) => w.id === op.workspaceId)) return { ok: false, error: 'not_found' }
+      s.renameWorkspace(op.workspaceId, op.name)
+      return { ok: true }
+    }
+
+    case 'deleteWorkspace': {
+      const ws = s.workspaces.find((w) => w.id === op.workspaceId)
+      if (!ws) return { ok: false, error: 'not_found' }
+      // Kills every console of it (killPanePtys inside), like the Sidebar's confirmed delete.
+      s.deleteWorkspace(ws.id)
+      cliToast('toast.cli.wsClosed', { name: ws.name })
+      return { ok: true }
+    }
+
+    case 'setFavorite': {
+      const ws = s.workspaces.find((w) => w.id === op.workspaceId)
+      if (!ws) return { ok: false, error: 'not_found' }
+      if (!!ws.favorite !== op.favorite) s.toggleFavorite(ws.id)
+      return { ok: true }
+    }
+
+    case 'openNote': {
+      if (!isNoteId(op.noteId)) return { ok: false, error: 'bad_request' }
+      if (!s.workspaces.some((w) => w.id === op.workspaceId)) return { ok: false, error: 'not_found' }
+      window.snApi.window.reveal()
+      // The board would cover the drawer.
+      useAgentStore.getState().setView('grid')
+      s.ensureMounted(op.workspaceId)
+      if (s.activeWorkspaceId !== op.workspaceId) s.setActive(op.workspaceId)
+      openNoteInPanel(op.workspaceId, op.noteId)
+      return { ok: true }
+    }
+
     default:
       return { ok: false, error: 'bad_request' }
   }
+}
+
+const paneIn = (state: AppState, workspaceId: string, paneId: string): Pane | undefined =>
+  state.workspaces.find((w) => w.id === workspaceId)?.panes.find((p) => p.id === paneId)
+
+/** Info toast of a CLI action that changed the desktop (es/en, like the phone's). */
+function cliToast(key: 'toast.cli.killed' | 'toast.cli.closed' | 'toast.cli.restarted' | 'toast.cli.wsClosed', vars: Record<string, string>): void {
+  toast.info(translate(useAppStore.getState().settings.language, key, vars))
 }

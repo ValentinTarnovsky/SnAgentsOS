@@ -97,7 +97,14 @@ export const MAX_CHAT_SUBS = 8
  * schedule ctl join it (R31-00): a run sends a stored prompt to an agent and
  * every toggle rewrites config.json and re-pushes the snapshot to all devices.
  */
-export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set(['fitPane', 'releaseFit', 'sendReviewNotes', 'scheduleRun', 'scheduleToggle'])
+export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set(['fitPane', 'releaseFit', 'sendReviewNotes', 'scheduleRun', 'scheduleToggle', 'agentTune', 'claudeAccountUse'])
+/**
+ * app 2.3.0: each `claudeAccountUse` rewrites Claude's credentials file, so on
+ * top of the bucket a device gets at most 3 per minute (the same as
+ * `snaos account use`); past that the ack is `rate`, without a strike.
+ */
+export const ACCOUNT_USE_MAX = 3
+export const ACCOUNT_USE_WINDOW_MS = 60_000
 
 /** A parsed phone frame the bucket applies to (E3-FR-03). */
 export function isRateLimitedMsg(msg: { type: string; action?: unknown }): boolean {
@@ -286,6 +293,11 @@ export interface SessionManagerDeps {
    * answers the noTranscript notice, so the phone falls back to Terminal.
    */
   chat?: ChatHooks
+  /**
+   * v2.3: a phone with its page visible opened the pane (`sub` / `chatSub`)
+   * or came back to it (`visibility: true`): main acknowledges its attention.
+   */
+  onPaneSeen?: (paneId: string) => void
 }
 
 /**
@@ -315,6 +327,8 @@ export class SessionManager implements PtySink {
   private readonly unauthedByIp = new Map<string, number>()
   /** E3-FR-01: tokenKey(httpToken) -> the session that holds it. */
   private readonly httpTokens = new Map<string, Session>()
+  /** claudeAccountUse times per device (ACCOUNT_USE_MAX per ACCOUNT_USE_WINDOW_MS). */
+  private readonly accountUses = new Map<string, number[]>()
   private readonly maintenanceTimer: ReturnType<typeof setInterval>
 
   constructor(private readonly deps: SessionManagerDeps) {
@@ -446,6 +460,7 @@ export class SessionManager implements PtySink {
         return void this.handleCtl(session, msg.id, msg.action)
       case 'visibility':
         session.visible = msg.visible
+        if (msg.visible) for (const paneId of new Set([...session.subs, ...session.chatSubs])) this.noteSeen(session, paneId)
         return
       case 'historyReq':
         return void this.handleHistory(session, msg.id, msg.query, msg.workspaceId)
@@ -649,6 +664,13 @@ export class SessionManager implements PtySink {
     this.sendReplay(session, paneId, replay)
     this.recomputeForcedFast()
     this.deps.fit?.joined(session, paneId, false)
+    this.noteSeen(session, paneId)
+  }
+
+  /** v2.3: the phone looks at the pane now (authenticated, page visible). */
+  private noteSeen(session: Session, paneId: string): void {
+    if (!session.authed || !session.visible || !this.deps.onPaneSeen) return
+    try { this.deps.onPaneSeen(paneId) } catch { /* the ack never breaks the socket */ }
   }
 
   private handleUnsub(session: Session, paneId: string): void {
@@ -684,6 +706,7 @@ export class SessionManager implements PtySink {
     this.deps.fit?.joined(session, paneId, true)
     if (this.deps.chat) this.deps.chat.sub(session, paneId, this.chatSender(session))
     else noChat()
+    this.noteSeen(session, paneId)
   }
 
   private handleChatUnsub(session: Session, paneId: string): void {
@@ -708,6 +731,17 @@ export class SessionManager implements PtySink {
     if (ptyId) this.deps.ptyManager.write(ptyId, data)
   }
 
+  private takeAccountUse(deviceId: string, now: number = Date.now()): boolean {
+    const times = (this.accountUses.get(deviceId) ?? []).filter((t) => now - t < ACCOUNT_USE_WINDOW_MS)
+    if (times.length >= ACCOUNT_USE_MAX) {
+      this.accountUses.set(deviceId, times)
+      return false
+    }
+    times.push(now)
+    this.accountUses.set(deviceId, times)
+    return true
+  }
+
   private async handleCtl(session: Session, id: string, action: RemoteCtlAction): Promise<void> {
     // The device name is looked up from the authenticated session, never taken
     // from the client payload (E4-FR-08).
@@ -722,6 +756,8 @@ export class SessionManager implements PtySink {
         const size = this.deps.ptyManager.sizeOf(action.paneId)
         if (size) this.send(session, { type: 'fitState', paneId: action.paneId, owner: 'desktop', cols: size.cols, rows: size.rows })
       }
+    } else if (action.kind === 'claudeAccountUse' && !this.takeAccountUse(session.deviceId ?? '')) {
+      result = { id, ok: false, error: 'rate' }
     } else {
       result = await this.deps.executeCommand(action, deviceName || undefined)
     }
@@ -912,6 +948,19 @@ export class SessionManager implements PtySink {
   isPaneViewed(paneId: string, now: number = Date.now()): boolean {
     for (const session of this.paneSubs.get(paneId) ?? []) {
       if (session.authed && session.visible && now - session.lastSeen <= VIEWED_FRESH_MS) return true
+    }
+    return false
+  }
+
+  /**
+   * v2.3: isPaneViewed plus the Chat view (`chatSubs`): a phone looks at the
+   * pane right now, so its done / error lands already acknowledged.
+   * isPaneViewed itself is unchanged (the ntfy contract).
+   */
+  isPaneSeen(paneId: string, now: number = Date.now()): boolean {
+    if (this.isPaneViewed(paneId, now)) return true
+    for (const session of this.sessions) {
+      if (session.authed && session.visible && session.chatSubs.has(paneId) && now - session.lastSeen <= VIEWED_FRESH_MS) return true
     }
     return false
   }

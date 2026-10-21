@@ -70,6 +70,8 @@ const status = (pending, extra = {}) => ({ state: 'action', provider: 'claude', 
   check(P.cardFor(status([]), true) === undefined && P.cardFor(undefined, true) === undefined, 'no pending, no card')
   check(P.needsGenericStrip(status([perm('a', 'Task')]), undefined) && !P.needsGenericStrip(status([perm('a', 'Bash')]), P.cardFor(status([perm('a', 'Bash')]), true)), 'the generic strip shows only in action without a card')
   check(!P.needsGenericStrip({ state: 'working', stateSince: 1 }, undefined), 'no strip outside action')
+  // v2.3 attention: an action the desktop says was answered needs no strip; absent keeps the rule.
+  check(!P.needsGenericStrip({ state: 'action', stateSince: 1, attention: false }, undefined) && P.needsGenericStrip({ state: 'action', stateSince: 1 }, undefined) && P.needsGenericStrip({ state: 'action', stateSince: 1, attention: true }, undefined), 'no generic strip with attention false; undefined or true shows it')
   check(P.answerGroups(perm('a', 'Bash'), { kind: 'allow' })[0].raw === '1' && P.answerGroups(perm('a', 'Bash'), { kind: 'deny' })[0].raw === '\x1b' && P.answerGroups(perm('a', 'Bash'), { kind: 'allow' }).length === 1, 'Allow is "1" and Deny is Esc, one group, no Enter')
   check(P.answerGroups(ask('q', [single()]), { kind: 'allow' }).length === 0 && P.answerGroups(perm('a', 'Bash'), { kind: 'ask', selections: [] }).length === 0, 'mismatched answers build nothing')
 }

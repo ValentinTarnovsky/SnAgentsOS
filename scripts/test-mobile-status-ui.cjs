@@ -42,6 +42,11 @@ window.result = (async () => {
  check(/rgba\\(107, 114, 128, 0\\.4|oklab|color-mix/.test(bg('idle')) || bg('idle').includes('0.4'), 'idle = grey at 40% (got ' + bg('idle') + ')');
  check(getComputedStyle(inner('unknown')).backgroundColor === 'rgba(0, 0, 0, 0)' && getComputedStyle(inner('unknown')).boxShadow !== 'none', 'unknown = hollow ring');
  check(host.querySelector('[data-state=working]').getBoundingClientRect().width === 12, 'indicator is 12px');
+ // v2.3: an answered action (attention false) draws like the desktop: working, or idle when title-only.
+ flushSync(() => root.render(<div><StatusIndicator status={{ state: 'action', stateSince: 0, attention: false }} /><StatusIndicator status={{ state: 'action', stateSince: 0, attention: false, precise: false }} /></div>));
+ await frames();
+ check([...host.querySelectorAll('[role=img]')].map(g => g.getAttribute('data-state')).join() === 'working,idle', 'answered action: data-state working, idle when title-only');
+ check(host.querySelector('[data-state=working]').getAttribute('aria-label') === 'Claude: working', 'and its label says working');
 
  const now = Date.now();
  const snapshot = {
@@ -88,6 +93,18 @@ window.result = (async () => {
  flushSync(() => store.getState().update({ paneStatus: {} }));
  await frames();
  check(!host.querySelector('[data-waiting]'), 'with nothing waiting the pill disappears');
+
+ // v2.3 attention: a request answered on the desktop (attention false) clears the pill, the header badge and the unread row.
+ const badge = ws => host.querySelector('[data-workspace=' + ws + '] [data-ws-badge]');
+ flushSync(() => store.getState().update({ paneStatus: { ...paneStatus, a1: { ...paneStatus.a1, attention: true }, b1: { ...paneStatus.b1, attention: false }, a2: { ...paneStatus.a2, attention: true } } }));
+ await frames();
+ check(host.querySelector('[data-waiting]').textContent === '1 waiting' && badge('w1') && badge('w1').textContent === '1' && !badge('w2'), 'an answered action leaves the pill and its workspace badge (got ' + (host.querySelector('[data-waiting]') || {}).textContent + ')');
+ check(row('a2').hasAttribute('data-unread') && row('b1').querySelector('[data-status-line]').textContent.startsWith('Working') && row('b1').querySelector('[data-state]').getAttribute('data-state') === 'working', 'an unseen done is unread; the answered row reads working, line and glyph, as on the desktop (got ' + row('b1').querySelector('[data-status-line]').textContent + ')');
+ flushSync(() => store.getState().update({ paneStatus: { ...paneStatus, a1: { ...paneStatus.a1, attention: false }, b1: { ...paneStatus.b1, attention: false }, a2: { ...paneStatus.a2, attention: false } } }));
+ await frames();
+ check(!host.querySelector('[data-waiting]') && !badge('w1') && !badge('w2'), 'with the only waiting console answered the pill and the red badge go');
+ check(!row('a2').hasAttribute('data-unread'), 'a done seen on the desktop is not unread on the phone');
+ check(noOverflow(), 'Home still fits 360px');
 
  setLang('es');
  flushSync(() => store.getState().update({ activePaneId: 'a1', paneStatus }));

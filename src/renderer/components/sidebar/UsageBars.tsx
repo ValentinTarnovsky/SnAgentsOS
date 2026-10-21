@@ -1,14 +1,17 @@
-import type { ReactNode } from 'react'
-import { ChevronDown, ChevronUp, RefreshCw } from 'lucide-react'
+import { useState, type ReactNode } from 'react'
+import { ArrowLeftRight, ChevronDown, ChevronUp, RefreshCw, Settings as SettingsIcon } from 'lucide-react'
 import type { UsageRow } from '@shared/ipc-contract'
+import type { ClaudeAccountRole, ClaudeAccountsState } from '@shared/claude-accounts'
 import { visibleUsageRows } from '@shared/usageRows'
 import { useAppStore } from '@/lib/store'
 import { useUsageStore } from '@/lib/usageStore'
+import { accountName, switchAccount, useAccountsStore } from '@/lib/accountsStore'
 import { useT, type MessageKey, type TFn } from '@/i18n'
 import { iconFor, type IconComponent } from '@/lib/icons'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { UsageMeter } from '@/components/ui/UsageMeter'
 import { UsageRing } from '@/components/ui/UsageRing'
+import { ContextMenu } from '@/components/ui/ContextMenu'
 import { cn } from '@/lib/cn'
 
 const ClaudeIcon = iconFor('claude')
@@ -22,7 +25,7 @@ function fmtTokens(n: number): string {
   return String(n)
 }
 
-function fmtReset(iso: string): string {
+export function fmtReset(iso: string): string {
   const d = new Date(iso)
   const t = d.getTime()
   if (!Number.isFinite(t)) return ''
@@ -32,7 +35,7 @@ function fmtReset(iso: string): string {
     : d.toLocaleDateString([], { day: 'numeric', month: 'short' })
 }
 
-function fmtClock(ms: number): string {
+export function fmtClock(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
@@ -98,12 +101,15 @@ function Group({
   icon: Icon,
   title,
   badge,
+  extra,
   status,
   children,
 }: {
   icon?: IconComponent
   title: string
   badge?: string
+  /** Inline control after the badge (the Claude account chip). */
+  extra?: ReactNode
   status?: Services | null
   children: ReactNode
 }) {
@@ -119,10 +125,90 @@ function Group({
             {badge}
           </span>
         )}
+        {extra}
         {status && <StatusDot status={status} />}
       </div>
       <div className="space-y-1.5 pl-0.5">{children}</div>
     </div>
+  )
+}
+
+export interface AccountChipView {
+  /** The active account's name, or "Unsaved login". */
+  label: string
+  /** Tooltip and menu name. */
+  title: string
+  /** "Use <other>" rows. */
+  items: Array<{ role: ClaudeAccountRole; label: string; disabled: boolean; hint?: string }>
+  manage: string
+}
+
+/**
+ * The Claude account chip of the usage panel (app 2.3.0): shown once an
+ * account is saved, with a quick switch to the other one and a way to
+ * Settings. Pure, for the tests.
+ */
+export function accountChipView(state: ClaudeAccountsState | null, t: TFn): AccountChipView | null {
+  if (!state || !state.supported || state.accounts.length === 0) return null
+  const active = state.accounts.find((a) => a.id === state.activeId) ?? null
+  const label = active ? accountName(active, t) : t('claudeaccounts.chip.other')
+  const unknownLive = state.liveIdentity === 'unknown'
+  const items = state.accounts
+    .filter((a) => a.id !== active?.id)
+    .map((a) => ({
+      role: a.role,
+      label: t('claudeaccounts.chip.use', { name: accountName(a, t) }),
+      disabled: a.needsRecapture || unknownLive,
+      hint: a.needsRecapture ? t('claudeaccounts.err.locked') : unknownLive ? t('claudeaccounts.err.unknownLive') : undefined,
+    }))
+  return { label, title: t('claudeaccounts.chip.title', { name: label }), items, manage: t('claudeaccounts.chip.manage') }
+}
+
+/** The chip itself: a click opens "Use <other>" and "Manage accounts". */
+export function AccountChip() {
+  const t = useT()
+  const state = useAccountsStore((s) => s.state)
+  const busy = useAccountsStore((s) => s.busy)
+  const openSettings = useAppStore((s) => s.openSettings)
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  const view = accountChipView(state, t)
+  if (!view) return null
+  return (
+    <>
+      <button
+        type="button"
+        data-usage-account
+        aria-haspopup="menu"
+        aria-label={view.title}
+        title={view.title}
+        onClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect()
+          setMenu({ x: r.left, y: r.bottom + 4 })
+        }}
+        className="flex min-w-0 max-w-[8rem] items-center gap-0.5 rounded border border-border px-1 py-px text-[9px] text-text-secondary transition-colors hover:border-accent-violet/40 hover:text-text-primary"
+      >
+        <span className="truncate">{view.label}</span>
+        <ChevronDown size={9} className="shrink-0" />
+      </button>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          label={view.title}
+          onClose={() => setMenu(null)}
+          items={[
+            ...view.items.map((i) => ({
+              label: i.label,
+              icon: ArrowLeftRight,
+              disabled: i.disabled || busy,
+              hint: i.hint,
+              onClick: () => void switchAccount(i.role),
+            })),
+            { label: view.manage, icon: SettingsIcon, separated: view.items.length > 0, onClick: () => openSettings('claudeaccounts') },
+          ]}
+        />
+      )}
+    </>
   )
 }
 
@@ -158,6 +244,7 @@ export function UsageBars() {
   const snapshot = useUsageStore((s) => s.snapshot)
   const refreshing = useUsageStore((s) => s.refreshing)
   const refresh = useUsageStore((s) => s.refresh)
+  const accountsState = useAccountsStore((s) => s.state)
 
   if (!usage.enabled) return null
 
@@ -169,6 +256,7 @@ export function UsageBars() {
   const codexPlan = codex.find((r) => r.planType)?.planType ?? undefined
   const claudePlan = claude.find((r) => r.planType)?.planType ?? undefined
   const services = usage.showStatus ? (snapshot?.services ?? null) : null
+  const chip = accountChipView(accountsState, t)
 
   if (collapsed) {
     const groups: Array<{ Icon?: IconComponent; list: UsageRow[] }> = [
@@ -181,7 +269,17 @@ export function UsageBars() {
       <div className="shrink-0 space-y-2 border-t border-border px-2 py-2.5" data-usage-rail>
         {groups.map((g, gi) => (
           <div key={gi} className="flex flex-col items-center gap-1">
-            {g.Icon && <g.Icon size={12} className="text-text-secondary" />}
+            {g.Icon &&
+              (g.Icon === ClaudeIcon && chip ? (
+                // Rail: the Claude mark names the active account in its tooltip.
+                <Tooltip label={`${t('aiusage.claude')} · ${chip.label}`} side="right">
+                  <span data-usage-account-rail className="flex">
+                    <g.Icon size={12} className="text-text-secondary" />
+                  </span>
+                </Tooltip>
+              ) : (
+                <g.Icon size={12} className="text-text-secondary" />
+              ))}
             {g.list.map((r) => (
               <RingCell key={r.id} row={r} t={t} size={30} side="right" />
             ))}
@@ -196,6 +294,8 @@ export function UsageBars() {
       <span className="mr-auto text-[10px] font-semibold uppercase tracking-wider text-text-secondary/60">
         {t('aiusage.title')}
       </span>
+      {/* Folded: the account chip rides in the header (the Claude group header is gone). */}
+      {folded && <AccountChip />}
       <button
         onClick={() => void refresh()}
         title={t('aiusage.refresh')}
@@ -253,7 +353,7 @@ export function UsageBars() {
       ) : (
         <div className="space-y-2.5">
           {claude.length > 0 && (
-            <Group icon={ClaudeIcon} title={t('aiusage.claude')} badge={claudePlan} status={services}>
+            <Group icon={ClaudeIcon} title={t('aiusage.claude')} badge={claudePlan} extra={<AccountChip />} status={services}>
               {claude.map((r) => (
                 <UsageMeter key={r.id} {...viewRow(r, t)} />
               ))}

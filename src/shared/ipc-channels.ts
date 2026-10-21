@@ -104,9 +104,22 @@ export const CH = {
   USAGE_SET_CONFIG: 'usage:setConfig', // send (renderer pushes the usage settings to main)
   USAGE_UPDATE: 'usage:update', // main -> renderer (UsageSnapshot, pushed on the poll interval)
 
+  // Claude multi-account (app 2.3.0): main owns accounts and logins; no token ever crosses
+  ACCOUNTS_GET_STATE: 'accounts:getState', // invoke -> ClaudeAccountsState
+  ACCOUNTS_CAPTURE: 'accounts:capture', // invoke (AccountsCaptureReq) -> AccountsOpRes
+  ACCOUNTS_SWITCH: 'accounts:switch', // invoke ({ target, reason: 'manual'|'phone' }) -> AccountsOpRes
+  ACCOUNTS_REMOVE: 'accounts:remove', // invoke ({ id }) -> AccountsOpRes
+  ACCOUNTS_RENAME: 'accounts:rename', // invoke ({ id, label <= 40 }) -> AccountsOpRes
+  ACCOUNTS_SET_PRIMARY: 'accounts:setPrimary', // invoke ({ id }) -> AccountsOpRes
+  ACCOUNTS_RESUME_AUTO: 'accounts:resumeAuto', // invoke -> AccountsOpRes
+  ACCOUNTS_SET_CONFIG: 'accounts:setConfig', // send (ClaudeAccountsSettings, normalized in main)
+  ACCOUNTS_CHANGED: 'accounts:changed', // main -> renderer (ClaudeAccountsState)
+  ACCOUNTS_EVENT: 'accounts:event', // main -> renderer (ClaudeAccountsEvent)
+
   // Claude status (per-console state dots, badges, notifications)
   STATUS_TITLE: 'status:title', // send (renderer reports an xterm OSC title change: { paneId, title })
-  STATUS_VIEWED: 'status:viewed', // send (paneIds currently in view: active workspace minus minimized)
+  STATUS_VIEWED: 'status:viewed', // send (paneIds currently in view: active workspace minus minimized); with the window focused it also acknowledges done/error (v2.3)
+  STATUS_TUNE_HINT: 'status:tuneHint', // send (v2.3 agentTune applied with Enter: StatusTuneHintReq, validated in main)
   STATUS_SET_CONFIG: 'status:setConfig', // send (renderer pushes NotificationSettings to main)
   STATUS_STATE: 'status:state', // main -> renderer (PaneStatusEvt)
   STATUS_SNAPSHOT: 'status:snapshot',

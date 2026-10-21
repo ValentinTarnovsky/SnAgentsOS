@@ -13,7 +13,8 @@
 // console with no status is eligible by type and opens in Chat with "Open
 // agent consoles in Chat", its notice toast names the Codex integration, the
 // fallback is not sticky (the next open, a precise status), and a choice equal
-// to the default is not saved.
+// to the default is not saved. v2.3.0: the notice toast shows once per
+// console and page session, until its provider or precise flag changes.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -262,13 +263,54 @@ window.result = (async () => {
  sent.length = 0;
  client.viewPane('x1'); await frames();
  check(sent.some(m => m.type === 'chatSub' && m.paneId === 'x1') && store.getState().chatPaneId === 'x1','opening the Codex console again tries Chat again (the notice only lasted for that open)');
+ // v2.3.0: the toast shows once per console and page session; the fallback still runs each time.
+ const codexNotice = () => feed({ paneId:'x1', items:[{ id:'notice', role:'system', ts:null, blocks:[{ t:'notice', code:'noTranscript' }] }], cursor:null, done:true });
+ const toastMark = () => store.getState().toasts.reduce((m, x) => Math.max(m, x.id), 0);
+ const chatToastsSince = id => store.getState().toasts.filter(x => x.id > id && /^Chat (not available|no disponible)/.test(x.text)).length;
+ const reopenX1 = async () => { client.viewPane('c1'); await frames(); sent.length = 0; client.viewPane('x1'); await frames(); };
+ let mark = toastMark(); sent.length = 0;
+ codexNotice(); await frames();
+ check(chatToastsSince(mark) === 0 && store.getState().chatPaneId === null && sent.map(m => m.type + ':' + m.paneId).join(',') === 'chatUnsub:x1,sub:x1','a second notice with the same status gives no toast but still goes back to Terminal');
+ mark = toastMark(); await reopenX1();
+ check(sent.some(m => m.type === 'chatSub' && m.paneId === 'x1') && store.getState().chatPaneId === 'x1' && chatToastsSince(mark) === 0,'reopening sends chatSub without a toast');
+ codexNotice(); await frames();
+ check(chatToastsSince(mark) === 0 && store.getState().chatPaneId === null,'and its notice gives no toast either');
+ // A status that names the agent is a new key: one toast. Turns after it (working -> done -> working) are not.
+ client.handlePaneStatus('x1', { state:'working', provider:'codex', stateSince:7 }); await frames();
+ mark = toastMark(); await reopenX1(); codexNotice(); await frames();
+ check(chatToastsSince(mark) === 1,'a status that appears is a new key: one toast');
+ client.handlePaneStatus('x1', { state:'done', provider:'codex', stateSince:7 }); await frames();
+ client.handlePaneStatus('x1', { state:'working', provider:'codex', stateSince:7 }); await frames();
+ mark = toastMark(); await reopenX1();
+ check(store.getState().chatPaneId === 'x1' && chatToastsSince(mark) === 0,'a working -> done -> working cycle and a reopen give no toast');
+ codexNotice(); await frames();
+ check(chatToastsSince(mark) === 0 && store.getState().chatPaneId === null,'nor does the notice after that cycle');
+ await reopenX1();
+ mark = toastMark();
  // Spanish toast, after a title-only status (precise:false).
  client.handlePaneStatus('x1', { state:'working', provider:'codex', precise:false, stateSince:7 }); await frames();
  setLang('es');
  feed({ paneId:'x1', items:[{ id:'notice', role:'system', ts:null, blocks:[{ t:'notice', code:'ambiguous' }] }], cursor:null, done:true }); await frames();
  const esToast = store.getState().toasts.at(-1)?.text;
  check(esToast === 'Chat no disponible para esta consola. Activa la integracion de Codex en los ajustes de la PC para habilitarlo','es: the Codex toast: ' + esToast);
+ check(chatToastsSince(mark) === 1,'the title-only status (precise:false) is a new key: exactly one more toast');
  setLang('en');
+ // A to B and back to A, with no notice in between: the change forgot the toast, so it shows again. Once through paneStatus, once through the state snapshot.
+ const titleStatus = { state:'working', provider:'codex', precise:false, stateSince:7 };
+ client.handlePaneStatus('x1', null); await frames();
+ client.handlePaneStatus('x1', titleStatus); await frames();
+ mark = toastMark(); await reopenX1();
+ check(store.getState().chatPaneId === 'x1','back on the title-only status, reopening tries Chat');
+ codexNotice(); await frames();
+ check(chatToastsSince(mark) === 1 && store.getState().chatPaneId === null,'a status that goes away and comes back (paneStatus) shows the toast once more');
+ const stateWith = x1 => ({ ...snapshot, workspaces: snapshot.workspaces.map(ws => ({ ...ws, panes: ws.panes.map(p => { const st = p.id === 'x1' ? x1 : store.getState().paneStatus[p.id]; return st ? { ...p, status: st } : p }) })) });
+ client.handleState(stateWith(null)); await frames();
+ check(!store.getState().paneStatus.x1,'a state snapshot without its status clears it');
+ client.handleState(stateWith(titleStatus)); await frames();
+ mark = toastMark(); await reopenX1(); codexNotice(); await frames();
+ check(chatToastsSince(mark) === 1 && store.getState().paneStatus.x1?.precise === false,'the same round trip through state snapshots shows the toast once more');
+ mark = toastMark(); await reopenX1(); codexNotice(); await frames();
+ check(chatToastsSince(mark) === 0 && store.getState().chatPaneId === null,'and the next notice with that status gives none');
  // The status turning precise (the integration or hooks took over) retries Chat live.
  sent.length = 0;
  client.handlePaneStatus('x1', { state:'idle', provider:'codex', stateSince:8 }); await frames();

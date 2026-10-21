@@ -37,7 +37,8 @@ function getNudger(): Nudger {
     write: (paneId, data) => {
       const ptyId = getPtyId(paneId)
       if (!ptyId) return false
-      window.snApi.pty.write({ ptyId, data })
+      // v2.3: nobody typed it, so it never acknowledges the console's attention.
+      void window.snApi.pty.submit({ ptyId, paneId, text: data, enter: false, origin: 'auto' })
       return true
     },
     isAction: (paneId) => useAppStore.getState().paneStatus[paneId]?.state === 'action',

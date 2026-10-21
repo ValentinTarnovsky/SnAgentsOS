@@ -19,6 +19,7 @@ import { registerPaster, unregisterPaster, type Paster } from '@/lib/pasteRegist
 import { registerRedrawer, unregisterRedrawer } from '@/lib/redrawRegistry'
 import { readBufferLines, registerTermReader, unregisterTermReader, type TermReader } from '@/lib/termReaders'
 import { registerRestarter, unregisterRestarter } from '@/lib/restartRegistry'
+import { clearStopped, isStopped } from '@/lib/stoppedPanes'
 import { prepareAgentLaunch } from '@/lib/agentLaunch'
 import { rememberPrompt } from '@/lib/promptDelivery'
 import type { ResolvedLaunch } from '@/lib/launch'
@@ -647,8 +648,18 @@ export function useXterm(
     controllerRef.current.focus = () => term.focus()
     registerFocuser(opts.paneId, () => term.focus())
     // Paste path for drops and review notes: same xterm paste a Ctrl+V uses.
+    // v2.3: an automated paste (global prompt, race) flags the onData it
+    // triggers synchronously, so main never reads it as the user answering.
+    let autoInput = false
     const paster: Paster = {
-      paste: (text) => term.paste(text),
+      paste: (text, o) => {
+        autoInput = o?.auto === true
+        try {
+          term.paste(text)
+        } finally {
+          autoInput = false
+        }
+      },
       bracketed: () => term.modes.bracketedPasteMode,
     }
     registerPaster(opts.paneId, paster)
@@ -881,6 +892,8 @@ export function useXterm(
     const restart = async (): Promise<void> => {
       if (disposed || restartingRef.current) return
       restartingRef.current = true
+      // An explicit restart ends a `snaos kill` stop.
+      clearStopped(opts.paneId)
       await launched
       const prev = exitRef.current
       // The old pty's exit is no longer this pane's; its last output still
@@ -980,6 +993,12 @@ export function useXterm(
           bind(existing.ptyId)
           return undefined
         }
+        // Stopped by `snaos kill`: stays stopped, with the card's Restart, until a restart clears it.
+        if (isStopped(opts.paneId)) {
+          term.write(`\x1b[2m[process stopped]\x1b[0m\r\n`)
+          emitExit({ code: -1, cardVisible: true })
+          return undefined
+        }
         // A real spawn (not a reattach): an agent console may resume its
         // last chat instead (E5-FR-08); this decides the command and cwd.
         const base: ResolvedLaunch = { cwd: opts.cwd ?? '', initialCommand: opts.initialCommand, setup: opts.setup, launchKind: opts.launchKind }
@@ -1049,6 +1068,11 @@ export function useXterm(
 
     const input = term.onData((data) => {
       const id = ptyIdRef.current
+      if (autoInput) {
+        // An automated paste invalidates answer cards but acknowledges nothing.
+        if (id) window.snApi.pty.write({ ptyId: id, data, origin: 'auto' })
+        return
+      }
       if (id) window.snApi.pty.write({ ptyId: id, data })
       // Typing into a console acknowledges its attention badge (early-returns
       // inside the action when there is nothing to clear, so this stays cheap).

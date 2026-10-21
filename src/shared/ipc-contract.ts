@@ -3,9 +3,11 @@
  * exposed on `window.snApi`. The SnApi interface grows phase by phase.
  */
 import type {
+  AgentProvider,
   AgentSessionEndEvt,
   AgentSettings,
   AwakeMode,
+  ClaudeAccountsSettings,
   ConfigFile,
   Language,
   NotificationSettings,
@@ -17,6 +19,14 @@ import type {
   UsageSettings,
 } from './types'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from './agents'
+import type {
+  AccountsCaptureReq,
+  AccountsOpRes,
+  ClaudeAccountsEvent,
+  ClaudeAccountsState,
+  RendererSwitchReason,
+  UsageActiveAccount,
+} from './claude-accounts'
 import type { AgentsHibernateEvt, HibernationConfig } from './hibernation'
 import type { SessionSummary, SessionsListReq } from './session-history'
 import type {
@@ -316,6 +326,8 @@ export interface UsageSnapshot {
   /** Anthropic service health, when the status dot is enabled. */
   services?: 'operational' | 'degraded' | 'down' | null
   error?: string | null
+  /** The active Claude account (app 2.3.0), when accounts are saved. No email: passed through to the phone. */
+  activeAccount?: UsageActiveAccount
 }
 
 // --- PTY payloads (wired from F1) ---
@@ -381,6 +393,19 @@ export interface PtySubmitReq {
   paneId?: string
   text: string
   enter: boolean
+  /**
+   * v2.3: 'auto' for text nobody typed (a scheduled prompt, the resume nudge,
+   * an agent-end chip): it invalidates answer cards but
+   * never acknowledges attention. Validated in main; anything else = 'user'.
+   */
+  origin?: 'auto'
+  /**
+   * v2.3 (agentTune): with `enter`, main sends only when the pane's agent is
+   * this provider, precise and at rest (tuneReady) with nothing unsent in its
+   * input box; else `{ ok: false, error: 'busy' }` and nothing is written.
+   * Validated in main; any other value is ignored.
+   */
+  readyFor?: AgentProvider
 }
 export type PtySubmitRes = { ok: true } | { ok: false; error: SubmitError }
 /** Outcome of a spawn's initial prompt (main -> renderer). */
@@ -401,6 +426,12 @@ export interface PtySpawnRes {
 export interface PtyWriteReq {
   ptyId: string
   data: string
+  /**
+   * v2.3: 'auto' for a write nobody typed (a global prompt's paste and its
+   * Enter, a race task): it invalidates answer cards but never acknowledges
+   * attention. Validated in main; anything else (the keyboard) = 'user'.
+   */
+  origin?: 'auto'
 }
 export interface PtyResizeReq {
   ptyId: string
@@ -460,6 +491,18 @@ export interface PtyRestartRes {
 export interface StatusTitleReq {
   paneId: string
   title: string
+}
+
+/**
+ * `status:tuneHint` (v2.3, agentTune): what an applied tune left on the
+ * console. `model` passes isClaudeModel, `effort` isTuneEffort; main drops
+ * the request when a field fails or none is set.
+ */
+export interface StatusTuneHintReq {
+  paneId: string
+  model?: string
+  effort?: string
+  ultracode?: boolean
 }
 
 // --- Remote control (embedded LAN/Tailscale server for phone clients) ---
@@ -806,12 +849,40 @@ export interface SnApi {
     /** Subscribe to pushed snapshots; returns an unsubscribe function. */
     onUpdate(cb: (s: UsageSnapshot) => void): () => void
   }
+  /**
+   * Claude multi-account (app 2.3.0). Main owns the accounts and the encrypted
+   * logins; nothing here carries a token. The renderer may only claim the
+   * `manual` and `phone` reasons.
+   */
+  accounts: {
+    getState(): Promise<ClaudeAccountsState>
+    /** Save the live login (CLAUDE_CONFIG_DIR or ~/.claude) into a slot. */
+    capture(req: AccountsCaptureReq): Promise<AccountsOpRes>
+    /** 'primary' | 'secondary' | an account id. */
+    switchTo(target: string, reason: RendererSwitchReason): Promise<AccountsOpRes>
+    remove(id: string): Promise<AccountsOpRes>
+    rename(id: string, label: string): Promise<AccountsOpRes>
+    /** Make this account the primary (the roles swap). */
+    setPrimary(id: string): Promise<AccountsOpRes>
+    /** Clear a pause of automatic switching. */
+    resumeAuto(): Promise<AccountsOpRes>
+    /** Push the policy settings (settings.claudeAccounts). */
+    setConfig(cfg: ClaudeAccountsSettings): void
+    onChanged(cb: (s: ClaudeAccountsState) => void): () => void
+    onEvent(cb: (e: ClaudeAccountsEvent) => void): () => void
+  }
   /** Claude status: per-console state dots, badges, notifications. */
   status: {
     /** Relay an xterm OSC title change (the structured Claude state channel). */
     reportTitle(paneId: string, title: string): void
     /** Panes currently in view (active workspace minus minimized); drives notify rules. */
     setViewed(paneIds: string[]): void
+    /**
+     * v2.3 (agentTune): a tune applied with Enter and ok; main shows it on
+     * the pane's status (and on the phone) until a hook or a new session
+     * says otherwise. Validated in main.
+     */
+    tuneHint(req: StatusTuneHintReq): void
     /** Push NotificationSettings so main keeps notify rules + HookServer in sync. */
     setConfig(cfg: NotificationSettings): void
     /** Per-console state updates. Returns an unsubscribe function. */

@@ -10,7 +10,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 15
+export const CONFIG_VERSION = 16
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -348,6 +348,36 @@ export interface UsageSettings {
 }
 
 /**
+ * Claude multi-account switching (schema 16, app 2.3.0). Only the policy
+ * lives in config.json: the saved accounts and their encrypted logins are
+ * main-owned under dataDir()/claude-accounts/. Automatic switching is off by
+ * default; `normalizeAccountsSettings` (src/shared/claude-accounts.ts) clamps
+ * every field and keeps `returnBelowPercent < switchAtPercent`.
+ */
+export interface ClaudeAccountsSettings {
+  /** Switch to the other account when the active one reaches `switchAtPercent`. */
+  autoSwitch: boolean
+  /** 5h or 7d usage that counts as exhausted (50..100). */
+  switchAtPercent: number
+  /** After an automatic switch, go back to the primary once its limit reset. */
+  returnToPrimary: boolean
+  /** The primary must read below this (0..99) to go back to it. */
+  returnBelowPercent: number
+  /** Minutes after the primary's reset before going back (0..120). */
+  returnMarginMinutes: number
+  /** Minimum minutes between two switches (0..240). */
+  minDwellMinutes: number
+  /** Wait while a Claude console is working, up to `deferMaxMinutes`. */
+  deferWhileWorking: boolean
+  /** 0..60 */
+  deferMaxMinutes: number
+  /** Read the usage of the parked account with its own unexpired token. */
+  pollParked: boolean
+  /** Desktop and remote notice on an automatic switch. */
+  alertOnSwitch: boolean
+}
+
+/**
  * Persisted settings for the embedded remote-control server (phone access).
  * Only the on/off switch and port live here; the paired-device registry is a
  * separate main-owned file (remote-devices.json) so device secrets never
@@ -436,6 +466,15 @@ export interface PaneStatusDetails {
   waiting?: AgentWaiting
   /** v2.2: background tasks that do not hold the console (a dev server), next to `done`. */
   backgroundOther?: number
+  /**
+   * v2.3 (agentTune read-back, main): Claude's model from SessionStart or the
+   * last tune applied with Enter (<= 64, one line), its effort level from the
+   * hooks' `effort.level` or that tune (<= 16), and Ultracode as that tune
+   * left it. Reset on a new session (`start`). Absent = unknown.
+   */
+  model?: string
+  effort?: string
+  ultracode?: boolean
 }
 
 /**
@@ -457,6 +496,8 @@ export interface PaneStatus extends PaneStatusDetails {
   reason?: AttentionReason
   pendingCount?: number
   updatedAt?: number
+  /** v2.3: derived by main, see PaneStatusEvt.attention. Absent = legacy rules. */
+  attention?: boolean
 }
 
 /** Main -> renderer status update for one console. */
@@ -477,6 +518,14 @@ export interface PaneStatusEvt extends PaneStatusDetails {
   reason?: AttentionReason
   pendingCount?: number
   updatedAt?: number
+  /**
+   * v2.3, derived by main: the console needs the user now (`action` while some
+   * request is not answered yet, `done` / `error` until a device acknowledged
+   * it). Every badge, flash, card and tray item reads it; `state`,
+   * `pendingCount` and `pending[]` keep their own meaning. Absent = a desktop
+   * without the field (legacy rules).
+   */
+  attention?: boolean
 }
 
 /**
@@ -715,6 +764,8 @@ export interface Settings {
   sidebarCollapsed: boolean
   /** Live usage / quota bars (Claude + Codex + custom models). */
   usage: UsageSettings
+  /** Claude multi-account switching policy (schema 16). */
+  claudeAccounts: ClaudeAccountsSettings
   /** Remote control from a phone browser (embedded LAN/Tailscale server). */
   remote: RemoteSettings
   /** Desktop notifications, sounds and Claude status integration. */

@@ -405,6 +405,14 @@ async function main() {
   check(backgroundTasks([]) === undefined && backgroundTasks(null) === undefined && backgroundTasks([{ type: 'shell', status: 'killed' }]) === undefined, 'nothing running is no background')
   check(parseHookPayload('pane', 'pty', 'Stop', { session_id: 's', background_tasks: [{ type: 'subagent', status: 'running' }] }).background.waits === 1, 'Stop carries its background tasks')
   check(parseHookPayload('pane', 'pty', 'SessionStart', { session_id: 's', source: 'startup' }).source === 'startup', 'SessionStart carries its source')
+  // v2.3 agentTune read-back: SessionStart model, any hook's effort.level (allowlisted).
+  {
+    const start = parseHookPayload('pane', 'pty', 'SessionStart', { session_id: 's', model: 'claude-opus-4-5-20251101', effort: { level: 'high' } })
+    check(start.model === 'claude-opus-4-5-20251101' && start.effort === 'high', 'SessionStart carries the model and the effort level')
+    check(parseHookPayload('pane', 'pty', 'Stop', { session_id: 's', model: 'opus', effort: { level: 'max' } }).model === undefined && parseHookPayload('pane', 'pty', 'Stop', { session_id: 's', effort: { level: 'max' } }).effort === 'max', 'only SessionStart names the model; every hook carries the effort')
+    check(parseHookPayload('pane', 'pty', 'SessionStart', { session_id: 's', model: 'a'.repeat(200) }).model.length <= 64 && parseHookPayload('pane', 'pty', 'SessionStart', { session_id: 's', model: 'x\u001b[31m y' }).model === undefined && parseHookPayload('pane', 'pty', 'SessionStart', { session_id: 's', model: 7 }).model === undefined, 'the model is capped at 64, one word, a string')
+    check([{ level: 'ultra' }, { level: 3 }, 'high', null, { level: 'HIGH' }].every(effort => parseHookPayload('pane', 'pty', 'UserPromptSubmit', { session_id: 's', effort }).effort === undefined), 'an effort off the allowlist is dropped')
+  }
   check(nestedFromHeaders('1', '') && nestedFromHeaders(undefined, 'codex:pane-1') && !nestedFromHeaders('', '') && !nestedFromHeaders('0', 'codex:bad id') && !nestedFromHeaders(undefined, undefined), 'sub-session marks: child 1 or a valid parent')
   const server = new HookServer(), received = []
   server.onEvent(e => received.push(e))
@@ -464,7 +472,9 @@ async function main() {
   await firewallChecks()
   connLogRedactChecks()
   promptCardChecks()
-  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, ntfy channel, away gate, lastHost, store, enrichment, Codex App Server detail, path open, firewall, connection log and answer card checks`)
+  await attentionChecks()
+  tuneReadbackChecks()
+  console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, ntfy channel, away gate, lastHost, store, enrichment, Codex App Server detail, path open, firewall, connection log, answer card, attention and tune read-back checks`)
 }
 
 // R22-16 (E2-FR-28..30): shell:openPath containment in main with real files and
@@ -594,9 +604,9 @@ async function schemaV11Checks() {
     connections: [{ id: 'c1', name: 'SSH', steps: [{ send: 'ssh host', waitFor: 'password:', secret: false }] }],
     keyButtons: [{ id: 'k1', label: 'Esc', seq: '\u001b' }],
   }
-  check(CONFIG_VERSION === 15, 'CONFIG_VERSION is 15 (R31-00)')
+  check(CONFIG_VERSION === 16, 'CONFIG_VERSION is 16 (R31-00, app 2.3.0)')
   const c = parseConfig(JSON.parse(JSON.stringify(v10)))
-  check(c && c.version === 15, 'a v10 config parses and is stamped 15')
+  check(c && c.version === CONFIG_VERSION, 'a v10 config parses and is stamped with the current version')
   const st = c.settings
   check(st.awakeMode === 'auto' && st.terminalUnicode11 === true && st.terminalAgentEndChip === true && st.notifications.inAppWhenFocused === true, 'v10 gains awakeMode, terminalUnicode11, terminalAgentEndChip and inAppWhenFocused defaults')
   check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual', cacheTimer: { enabled: false, ttlMinutes: 5 } }), 'v10 gains the settings.agents defaults (v11, v12 and v13 keys)')
@@ -619,7 +629,7 @@ async function schemaV11Checks() {
   check(d.workspaces[0].agentsCollapsed === true && d.workspaces[1].agentsCollapsed === undefined, 'agentsCollapsed kept, malformed value dropped')
   check(d.workspaces[0].panes[0].lastSession.sessionId.startsWith('0123abcd') && d.workspaces[0].panes[1].lastSession === undefined, 'valid lastSession kept, malformed one dropped instead of failing the whole config')
   check(d.workspaces[1].panes[0].lastSession === undefined, 'a lastSession id with shell syntax (imported config) is dropped')
-  check(parseConfig({ ...v10, version: 16 }).version === 15, 'parse stamps the current version')
+  check(parseConfig({ ...v10, version: 17 }).version === CONFIG_VERSION, 'parse stamps the current version')
 
   // ConfigStore: only the renderer load (upgrade) stamps an older file, once.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-config-test-'))
@@ -629,13 +639,13 @@ async function schemaV11Checks() {
     const file = path.join(dir, 'config.json'), raw = JSON.stringify(v10)
     fs.writeFileSync(file, raw)
     const store = new ConfigStore()
-    check(store.load().version === 15 && fs.readFileSync(file, 'utf8') === raw, 'a plain load stays read-only (legacy verification safe)')
-    check(store.load({ upgrade: true }).version === 15 && JSON.parse(fs.readFileSync(file, 'utf8')).version === 15, 'the renderer load leaves config.json on v15')
+    check(store.load().version === CONFIG_VERSION && fs.readFileSync(file, 'utf8') === raw, 'a plain load stays read-only (legacy verification safe)')
+    check(store.load({ upgrade: true }).version === CONFIG_VERSION && JSON.parse(fs.readFileSync(file, 'utf8')).version === CONFIG_VERSION, 'the renderer load leaves config.json on the current version')
     check(fs.readFileSync(file + '.bak', 'utf8') === raw && fs.readdirSync(path.join(dir, 'backups')).length === 1, 'the pre-upgrade v10 file is kept as .bak and in backups/')
     const once = fs.readFileSync(file, 'utf8'); fs.writeFileSync(file + '.bak', 'marker')
     store.load({ upgrade: true })
     check(fs.readFileSync(file + '.bak', 'utf8') === 'marker' && fs.readFileSync(file, 'utf8') === once, 'an already current file is not rewritten')
-    const newer = JSON.stringify({ ...v10, version: 16 }); fs.writeFileSync(file, newer)
+    const newer = JSON.stringify({ ...v10, version: 17 }); fs.writeFileSync(file, newer)
     store.load({ upgrade: true })
     check(fs.readFileSync(file, 'utf8') === newer, 'a newer file (downgrade) is never rewritten')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
@@ -677,7 +687,7 @@ async function schemaV11Checks() {
   S.getState().setActive('w1')
   check(S.getState().mountedWorkspaces.w1 === 'full', 'activating a partially mounted workspace mounts it full')
   flush()
-  check(saves.length === 1 && saves[0].version === 15 && saves[0].activeWorkspaceId === 'w1', 'a persisted slice change writes once, stamped 15')
+  check(saves.length === 1 && saves[0].version === CONFIG_VERSION && saves[0].activeWorkspaceId === 'w1', 'a persisted slice change writes once, stamped with the current version')
   S.getState().renamePane('w1', 'p1', 'Renombrada'); S.getState().updateSettings({ awakeMode: 'always' }); flush()
   check(saves.length === 2 && saves[1].workspaces[0].panes[0].title === 'Renombrada' && saves[1].settings.awakeMode === 'always', 'debounced writes carry the latest state')
   check(!('mountedWorkspaces' in saves[1]) && !('paneStatus' in saves[1]) && saves[1].settings.agents.ctrlDigitFocus === true, 'transient slices never reach config.json, v11 settings do')
@@ -1462,6 +1472,303 @@ main().catch(error => { console.error(error); process.exitCode = 1 })
 // R22-15 (E2-FR-20, 21, 48): input invalidation of answer cards in
 // StatusManager (reports never count, a letter does, state untouched),
 // PtyManager.write notifying it, and buildAskAnswerKeys / sanitizeAskFreeText.
+/**
+ * v2.3 attention (plan item 2): main derives `attention` per pane; input of
+ * any device, a focused desktop view and a phone looking at the pane
+ * acknowledge it; the native toast and the taskbar flash follow it.
+ */
+async function attentionChecks() {
+  const SID = '0123abcd-0000-4000-8000-0000000000aa'
+  function rig() {
+    const events = [], natives = [], flashes = [], timers = new Map()
+    let focused = false, clock = 5000, seq = 0
+    class FakeDate extends Date { static now() { return clock } }
+    class NativeNotification extends require('events').EventEmitter {
+      static isSupported() { return true }
+      constructor(opts) { super(); this.opts = opts; this.shown = 0; this.closed = 0; natives.push(this) }
+      show() { this.shown++ }
+      close() { this.closed++; this.emit('close') }
+    }
+    const { StatusManager } = load('src/main/status/StatusManager.ts', {
+      require: id => id === 'electron' ? { Notification: NativeNotification } : require(id),
+      setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id), Date: FakeDate,
+    })
+    const win = { isDestroyed: () => false, isFocused: () => focused, webContents: { send: (ch, e) => { if (ch === 'status:state') events.push(e) } }, flashFrame: v => flashes.push(v) }
+    const manager = new StatusManager(() => win, () => null)
+    manager.setConfig(settings)
+    manager.onSpawn('pty', 'pane'); manager.onSpawn('pty2', 'pane2')
+    const hook = (name, rest = {}, pane = 'pane') => manager.onHookEvent({ consoleId: pane, ptyId: pane === 'pane' ? 'pty' : 'pty2', sessionId: pane === 'pane' ? SID : SID.replace('aa', 'bb'), name, ...rest })
+    const flush = () => { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) }
+    const of = pane => events.filter(e => e.paneId === pane)
+    const last = (pane = 'pane') => of(pane).at(-1)
+    // A finished turn: UserPromptSubmit, Stop and its 700 ms settle.
+    const done = (pane = 'pane') => { hook('UserPromptSubmit', { prompt: 'x' }, pane); clock += 1; hook('Stop', { lastAssistantMessage: 'ok' }, pane); flush() }
+    return { manager, hook, flush, done, events, natives, flashes, of, last, focus: v => { focused = v }, tick: ms => { clock += ms } }
+  }
+  // 1. Answered from any device (the phone's input reaches the same write path).
+  {
+    const h = rig()
+    h.hook('UserPromptSubmit', { prompt: 'x' }); h.tick(5)
+    h.hook('PermissionRequest', { toolUseId: 'p1', toolName: 'Bash', toolSummary: 'Bash: ls' })
+    check(h.last().attention === true && h.natives.length === 1 && h.natives[0].shown === 1 && h.flashes.join() === 'true', 'an unfocused permission asks for attention: native toast and taskbar flash')
+    const n = h.events.length
+    h.tick(5); h.manager.onUserInput('pty', 'pane', '1')
+    check(h.events.length === n + 1 && h.last().attention === false && h.last().state === 'action' && h.last().pendingCount === 1, 'the answer emits one event with attention false; state and pendingCount stay')
+    check(h.natives[0].closed === 1 && h.flashes.join() === 'true,false', 'the native toast closes and the taskbar flash stops')
+    h.tick(5); h.manager.onUserInput('pty', 'pane', '\r')
+    check(h.events.length === n + 1 && h.natives[0].closed === 1, 'more input emits nothing and closes nothing again')
+    h.hook('PostToolUse', { toolUseId: 'p1' })
+    check(h.last().state === 'working' && h.last().attention === false, 'PostToolUse goes back to working without attention')
+  }
+  // 2. Two panes flashing: the flash stops with the last one.
+  {
+    const h = rig()
+    for (const p of ['pane', 'pane2']) { h.hook('UserPromptSubmit', { prompt: 'x' }, p); h.tick(5); h.hook('PermissionRequest', { toolUseId: 'r-' + p }, p) }
+    check(h.flashes.join() === 'true,true' && h.natives.length === 2, 'two panes flash and show a toast each')
+    h.tick(5); h.manager.onUserInput('pty', 'pane', 'y')
+    check(h.flashes.join() === 'true,true' && h.natives[0].closed === 1 && h.natives[1].closed === 0, 'releasing one pane closes its toast but keeps the flash')
+    h.manager.onUserInput('pty2', 'pane2', 'y')
+    check(h.flashes.join() === 'true,true,false' && h.natives[1].closed === 1, 'releasing the second stops the flash')
+  }
+  // 3. A done out of view stays until acknowledged; acks are idempotent.
+  {
+    const h = rig()
+    h.done()
+    check(h.last().state === 'done' && h.last().attention === true && h.natives.length === 1, 'a done out of view asks for attention')
+    const n = h.events.length
+    h.manager.ackPane('pane')
+    check(h.events.length === n + 1 && h.last().attention === false && h.last().state === 'done' && h.natives[0].closed === 1, 'ackPane emits one event with attention false and closes the toast')
+    h.manager.ackPane('pane'); h.manager.onUserInput('pty', 'pane', 'a'); h.manager.onUserInput('pty', 'pane', 'b')
+    check(h.events.length === n + 1, 'a second ack and later keystrokes emit nothing')
+  }
+  // 4. A done that lands in view with the window focused is already seen.
+  {
+    const h = rig()
+    h.focus(true); h.manager.setViewed(['pane'])
+    h.done()
+    const d = h.of('pane').find(e => e.state === 'done')
+    check(d.attention === false && d.notify === false && d.delivery === 'none' && h.natives.length === 0, 'done viewed + focused: attention false from the first emission, no notification')
+  }
+  // 5. Viewed but unfocused: the focus acknowledges only the panes in view.
+  {
+    const h = rig()
+    h.manager.setViewed(['pane'])
+    h.done(); h.done('pane2')
+    check(h.last().attention === true && h.last('pane2').attention === true, 'viewed while unfocused still asks for attention')
+    h.manager.setViewed(['pane'])
+    check(h.last().attention === true, 'setViewed with the window unfocused does not acknowledge')
+    h.focus(true); h.manager.onWindowFocus()
+    check(h.last().attention === false && h.last('pane2').attention === true, 'onWindowFocus acknowledges the viewed pane only, never every pane')
+    h.manager.setViewed(['pane', 'pane2'])
+    check(h.last('pane2').attention === false, 'setViewed with the window focused acknowledges the newly viewed pane')
+  }
+  // 6. A phone looking at the pane.
+  {
+    const h = rig()
+    let seen = true
+    h.manager.setRemoteSeen(id => seen && id === 'pane')
+    h.done()
+    const d = h.of('pane').find(e => e.state === 'done')
+    check(d.attention === false && d.notify === false && d.delivery === 'none' && h.natives.length === 0, 'a done while a phone watches: attention false, delivery none, no native toast')
+    seen = false
+    h.done('pane2')
+    check(h.last('pane2').attention === true && h.natives.length === 1, 'a pane no phone watches still notifies')
+    h.manager.setRemoteSeen(() => { throw new Error('boom') })
+    h.done()
+    check(h.last().attention === true, 'a throwing remote check counts as not seen')
+  }
+  // 7. Terminal reports and automations never acknowledge; 'auto' still invalidates.
+  {
+    const h = rig()
+    h.done()
+    const n = h.events.length
+    for (const report of ['\x1b[I', '\x1b[<0;10;5M', '\x1b[12;40R']) h.manager.onUserInput('pty', 'pane', report)
+    check(h.events.length === n && h.last().attention === true, 'focus, mouse and cursor reports do not acknowledge a done')
+    h.manager.onUserInput('pty', 'pane', 'scheduled prompt', 'auto'); h.manager.onUserInput('pty', 'pane', '\r', 'auto')
+    check(h.events.length === n && h.last().attention === true, 'a scheduled submit (origin auto) does not clear a done')
+    h.manager.onUserInput('pty', 'pane', 'a')
+    check(h.last().attention === false, 'a real keystroke does')
+    h.hook('UserPromptSubmit', { prompt: 'y' }); h.tick(5)
+    h.hook('PermissionRequest', { toolUseId: 'q1' })
+    h.tick(5); h.manager.onUserInput('pty', 'pane', 'snaos send text', 'auto')
+    check(h.last().pending === undefined && h.last().attention === false, 'origin auto still invalidates the answer card (the request was answered)')
+  }
+  // 8. A frozen clock: the sequence, not the timestamp, decides.
+  {
+    const h = rig()
+    h.done(); h.manager.ackPane('pane')
+    check(h.last().attention === false, 'acknowledged done')
+    h.hook('UserPromptSubmit', { prompt: 'again' }); h.hook('Stop', { lastAssistantMessage: 'ok' }); h.flush()
+    check(h.last().state === 'done' && h.last().attention === true, 'done -> working -> done in the same ms asks for attention again')
+  }
+  // 9. clearPane (exit) releases the toast and the flash.
+  {
+    const h = rig()
+    h.done()
+    check(h.natives[0].shown === 1 && h.flashes.join() === 'true', 'toast and flash of an unseen done')
+    h.manager.onExit('pty', 'pane')
+    check(h.natives[0].closed === 1 && h.flashes.join() === 'true,false' && h.last().state === null, 'onExit closes the toast and stops the flash')
+  }
+  // 10. Title-only track: the stopped glyph asks; input answers.
+  {
+    const h = rig()
+    h.manager.reportTitle('pane2', '\u2802 Working'); h.manager.reportTitle('pane2', '\u2733 Topic')
+    check(h.last('pane2').state === 'action' && h.last('pane2').precise === false && h.last('pane2').attention === true, 'a title-only stop asks for attention')
+    h.tick(5); h.manager.onUserInput('pty2', 'pane2', 'x')
+    check(h.last('pane2').attention === false && h.last('pane2').state === 'action', 'input acknowledges a title-only stop')
+  }
+  // 11. snapshot() and stateOf() carry attention.
+  {
+    const h = rig()
+    h.done()
+    check(h.manager.stateOf('pane').attention === true && h.manager.snapshot().find(e => e.paneId === 'pane').attention === true, 'snapshot and stateOf carry attention')
+    h.manager.ackPane('pane')
+    check(h.manager.stateOf('pane').attention === false, 'and its acknowledgement')
+  }
+  // 12. Status toasts only: snaos notify and the test toast stay out of the map.
+  {
+    const h = rig()
+    h.manager.notifyCustom('pane', 'Build', 'ok'); h.manager.testDesktop()
+    h.done(); h.manager.ackPane('pane')
+    check(h.natives.length === 3 && h.natives[0].closed === 0 && h.natives[1].closed === 0 && h.natives[2].closed === 1, 'only the status toast closes with attention; snaos notify and the test toast stay')
+    h.done(); h.done()
+    check(h.natives.length === 5 && h.natives[3].closed === 1 && h.natives[4].closed === 0, 'the working transition of the next turn closes the older done toast')
+    h.natives[4].emit('close')
+    h.manager.ackPane('pane')
+    check(h.natives[4].closed === 1, 'a toast that fired close (timed out into the Action Center) is still closed on release')
+  }
+  // 12b. A real replacement: a second request while attention stays true.
+  {
+    const h = rig()
+    h.hook('UserPromptSubmit', { prompt: 'x' }); h.tick(5)
+    h.hook('PermissionRequest', { toolUseId: 'r1', toolName: 'Bash', toolSummary: 'Bash: ls' }); h.tick(5)
+    h.hook('PermissionRequest', { toolUseId: 'r2', toolName: 'Bash', toolSummary: 'Bash: pwd' })
+    check(h.last().attention === true && h.natives.length === 2 && h.natives[0].closed === 1 && h.natives[1].closed === 0, 'a newer status toast of the pane replaces the older one (got ' + h.natives.map(n => n.closed).join() + ')')
+    h.tick(5); h.manager.onUserInput('pty', 'pane', '1')
+    check(h.natives[1].closed === 1 && h.natives[0].closed === 1, 'the answer closes the replacement, the old one is not closed twice')
+  }
+  // 13. PtyManager: origin reaches the sink, both writes of a submit.
+  {
+    const impl = (_shell, _args, opts) => ({ cols: opts.cols, rows: opts.rows, onData() {}, onExit() {}, write() {}, resize() {}, pause() {}, resume() {}, kill() {} })
+    const code = buildSync({ entryPoints: [path.join(root, 'src/main/pty/PtyManager.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'node-pty', '@xterm/headless', '@xterm/addon-serialize', '@xterm/addon-unicode11'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+    const mod = { exports: {} }
+    vm.runInNewContext(code, { module: mod, exports: mod.exports, Buffer, process, setTimeout, clearTimeout, setInterval, clearInterval, console: { ...console, warn() {} },
+      require: id => id === 'node-pty' ? { spawn: impl } : id === 'electron' ? { app: { getPath: () => os.tmpdir() } } : require(id) })
+    const pm = new mod.exports.PtyManager(() => ({ isDestroyed: () => false, send() {} }))
+    const seen = []
+    pm.addSink({ id: 'status', onSpawn() {}, onData() {}, onExit() {}, onUserInput: (_p, _pane, data, origin) => seen.push([data, origin]) })
+    pm.spawn({ paneId: 'p', cols: 80, rows: 24 })
+    const ptyId = pm.ptyIdForPane('p')
+    const res = await pm.submit(ptyId, 'hola', true, false, 'auto')
+    check(res.ok && seen.length === 2 && seen[0][0] === 'hola' && seen[1][0] === '\r' && seen.every(x => x[1] === 'auto'), 'submit(..., auto) passes auto to the text and to its Enter')
+    await pm.submitToPane('', 'p', 'x', false, 'auto')
+    await pm.submitToPane('', 'p', 'y', false)
+    check(seen[2][1] === 'auto' && seen[3][1] === 'user', 'submitToPane forwards the origin, user by default')
+    pm.killAll()
+  }
+  // 14. Shared helpers.
+  {
+    const S = load('src/shared/status.ts')
+    check(S.waitsOnUser({ state: 'action' }) && S.waitsOnUser({ state: 'action', attention: true }) && !S.waitsOnUser({ state: 'action', attention: false }) && !S.waitsOnUser({ state: 'done', attention: true }) && !S.waitsOnUser(undefined), 'waitsOnUser: action unless main says answered')
+    check(S.needsUser({ attention: true }) && !S.needsUser({ attention: false, pendingCount: 2 }) && S.needsUser({ pendingCount: 1 }) && !S.needsUser({ pendingCount: 0 }) && !S.needsUser(undefined), 'needsUser: attention wins, pendingCount without it')
+    const legacy = { state: 'action', precise: true }
+    check(S.displayStatus(legacy) === legacy && S.displayStatus({ state: 'action', precise: true, attention: false }).state === 'working' && S.displayStatus({ state: 'action', precise: false, attention: false }).state === 'idle' && S.displayStatus({ state: 'done', attention: false }).state === 'done', 'displayStatus: an answered action shows working (idle title-only), the rest untouched')
+  }
+  // 15. Renderer store: main's attention replaces the local flag; legacy keeps it.
+  {
+    const rr = loadRenderer(`export { useAppStore } from './store'`, { window: { snApi: { pty: { killPanes: async () => 0 } } }, document: { hasFocus: () => false } })
+    const S = rr.useAppStore
+    const evt = (paneId, state, attention) => S.getState().setPaneStatus({ paneId, state, precise: true, notify: false, ...(attention === undefined ? {} : { attention }) })
+    evt('a', 'done', true)
+    check(S.getState().paneStatus.a.attention === true && !('a' in S.getState().paneAttention), 'with attention the store copies it and sets no local flag')
+    S.setState(st => ({ paneAttention: { ...st.paneAttention, a: true } }))
+    evt('a', 'done', true)
+    check('a' in S.getState().paneAttention, 'a CLI mark survives while attention stays true')
+    evt('a', 'done', false)
+    check(!('a' in S.getState().paneAttention) && S.getState().paneStatus.a.attention === false, 'a true -> false flip clears the CLI mark')
+    evt('b', 'done')
+    check(S.getState().paneAttention.b === true && S.getState().paneStatus.b.attention === undefined, 'an event without attention keeps the legacy local flag')
+    evt('b', 'working')
+    check(!('b' in S.getState().paneAttention), 'and working still clears it')
+  }
+  // 16. Main and renderer wiring that no unit drives (source scan).
+  {
+    const read = rel => fs.readFileSync(path.join(root, rel), 'utf8')
+    const idx = read('src/main/index.ts')
+    check(/statusManager\.setRemoteSeen\(\s*\(?\w+\)?\s*=>\s*remoteManager\.isPaneSeen\(/.test(idx), 'index.ts: StatusManager asks the RemoteManager whether a phone sees the pane')
+    check(/remoteManager\.setPaneSeenListener\(\s*\(?\w+\)?\s*=>\s*statusManager\.ackPane\(/.test(idx), 'index.ts: a phone seeing a pane acknowledges it')
+    check(/win\.on\('focus',[^\n]*statusManager\.onWindowFocus\(\)/.test(idx), 'index.ts: the window focus acknowledges the viewed panes')
+    const ipc = read('src/main/ipc/registerPtyIpc.ts')
+    check(/CH\.PTY_WRITE[\s\S]{0,200}req\.origin === 'auto' \? 'auto' : 'user'/.test(ipc), 'registerPtyIpc: pty:write forwards only an explicit auto origin')
+    const xt = read('src/renderer/components/terminal/useXterm.ts')
+    check(/if \(autoInput\) \{[\s\S]{0,200}origin: 'auto'[\s\S]{0,40}return/.test(xt), 'useXterm: an automated paste reaches main as origin auto and clears no local mark')
+    const bp = read('src/renderer/lib/broadcastPrompt.ts')
+    check(bp.includes('pasteToPane(paneId, payload, { auto: true })') && /data: '\\r', origin: 'auto'/.test(bp), 'broadcastPrompt: the paste and its Enter are automated writes')
+  }
+}
+
+// v2.3 agentTune read-back in main: hooks (SessionStart model, effort.level),
+// the optimistic hint of a tune applied with Enter, the reset on start.
+function tuneReadbackChecks() {
+  const h = harness()
+  h.hook('SessionStart', { source: 'startup', model: 'claude-opus-4-5', effort: 'high' })
+  check(h.last().model === 'claude-opus-4-5' && h.last().effort === 'high' && !('ultracode' in h.last()), 'SessionStart sets the model and the effort')
+  h.hook('UserPromptSubmit', { prompt: 'x' })
+  check(h.last().model === 'claude-opus-4-5' && h.last().effort === 'high', 'a hook without them keeps the last values')
+  h.hook('PreToolUse', { toolName: 'Bash', agentId: 'sub-1', effort: 'low' })
+  check(h.manager.stateOf('pane').effort === 'high', "a subagent's effort is not the console's")
+  h.hook('Stop', { effort: 'max' }); h.flush()
+  check(h.manager.stateOf('pane').effort === 'max', 'a later hook updates the effort')
+  const before = h.events.length
+  h.manager.setTuneHint('pane', { model: 'sonnet', ultracode: true })
+  check(h.events.length === before + 1 && h.last().model === 'sonnet' && h.last().ultracode === true && h.last().effort === 'max', 'a tune hint publishes at once and keeps the rest')
+  h.manager.setTuneHint('pane', { model: 'sonnet' })
+  check(h.events.length === before + 1, 'the same hint again publishes nothing')
+  h.manager.setTuneHint('pane', { effort: 'auto', ultracode: false })
+  check(h.last().effort === 'auto' && h.last().ultracode === false, '/effort auto turns Ultracode off in the read-back')
+  h.manager.setTuneHint('other', { model: 'opus' })
+  check(h.events.length === before + 2, 'a hint for a pane without a track is ignored')
+  h.manager.setTuneHint('pane', { ultracode: true })
+  h.hook('SessionStart', { source: 'compact', model: 'claude-sonnet-4-5' })
+  let kept = h.manager.stateOf('pane')
+  check(kept.ultracode === true && kept.effort === 'auto' && kept.model === 'claude-sonnet-4-5', 'a compact in the same Claude keeps the read-back (Ultracode is never re-reported) and takes its model')
+  h.hook('SessionStart', { source: 'clear' })
+  kept = h.manager.stateOf('pane')
+  check(kept.ultracode === true && kept.model === 'claude-sonnet-4-5', 'so does a clear')
+  check(!h.manager.isEnded('pane'), 'a live session has not ended')
+  h.hook('SessionEnd', { endReason: 'prompt_input_exit' })
+  check(h.manager.isEnded('pane'), 'SessionEnd ends it (the Enter gate refuses a bare shell)')
+  h.hook('SessionStart', { source: 'resume' })
+  let fresh = h.manager.stateOf('pane')
+  check(!h.manager.isEnded('pane') && !('model' in fresh) && !('effort' in fresh) && !('ultracode' in fresh), 'a resume after the end is a new process: no read-back')
+  h.manager.setTuneHint('pane', { model: 'opus', ultracode: true })
+  h.hook('SessionStart', { source: 'startup' })
+  fresh = h.manager.stateOf('pane')
+  check(!('model' in fresh) && !('ultracode' in fresh), 'a startup starts with no read-back')
+  // status:tuneHint wiring: registerStatusIpc validates and forwards to setTuneHint.
+  {
+    const handlers = {}
+    const { registerStatusIpc } = load('src/main/ipc/registerStatusIpc.ts', {
+      require: id => id === 'electron' ? { ipcMain: { on: (ch, fn) => { handlers[ch] = fn }, handle() {} }, app: { getPath: () => os.tmpdir(), isPackaged: false, getAppPath: () => root } } : require(id),
+    })
+    registerStatusIpc(h.manager, { onEvent() {} }, {}, {}, {})
+    const send = handlers['status:tuneHint']
+    check(typeof send === 'function', 'registerStatusIpc listens on status:tuneHint')
+    send({}, { paneId: 'pane', effort: 'max' })
+    check(h.manager.stateOf('pane').effort === 'max', 'status:tuneHint reaches the read-back')
+    const n = h.events.length
+    send({}, { paneId: 'pane', model: 'gpt' }); send({}, { paneId: 'pane', effort: 'max', ultracode: 'yes' }); send({}, null)
+    check(h.events.length === n && h.manager.stateOf('pane').model === undefined && h.manager.stateOf('pane').effort === 'max', 'an invalid status:tuneHint changes nothing')
+    const pre = fs.readFileSync(path.join(root, 'src/preload/index.ts'), 'utf8')
+    check(/tuneHint: \(req: StatusTuneHintReq\) => ipcRenderer\.send\(CH\.STATUS_TUNE_HINT, req\)/.test(pre), 'preload: status.tuneHint sends on status:tuneHint')
+  }
+  // Title-only tracks take no hint (the Enter gate needs a precise agent).
+  const t = harness()
+  t.manager.reportTitle('pane', '\u2733 Claude Code')
+  t.manager.setTuneHint('pane', { model: 'opus' })
+  check(!t.manager.stateOf('pane')?.model, 'a title-only track ignores a tune hint')
+}
+
 function promptCardChecks() {
   const SID = '0123abcd-0000-4000-8000-000000000000'
   function track(start = 1000) {
@@ -1567,12 +1874,13 @@ function promptCardChecks() {
     const pm = new PtyManager(() => ({ isDestroyed: () => false, send() {} }))
     const seen = []
     pm.addSink({ id: 'plain', onSpawn() {}, onData() {}, onExit() {} })
-    pm.addSink({ id: 'status', onSpawn() {}, onData() {}, onExit() {}, onUserInput: (ptyId, paneId, data) => { seen.push([ptyId, paneId, data]); order.push('sink') } })
+    pm.addSink({ id: 'status', onSpawn() {}, onData() {}, onExit() {}, onUserInput: (ptyId, paneId, data, origin) => { seen.push([ptyId, paneId, data, origin]); order.push('sink') } })
     pm.addSink({ id: 'broken', onSpawn() {}, onData() {}, onExit() {}, onUserInput: () => { throw new Error('boom') } })
     pm.spawn({ paneId: 'p', cols: 80, rows: 24 })
     const ptyId = pm.ptyIdForPane('p')
     pm.write(ptyId, 'a')
     check(seen.length === 1 && seen[0][0] === ptyId && seen[0][1] === 'p' && seen[0][2] === 'a', 'write tells onUserInput the pty, the pane and the data')
+    check(seen[0][3] === 'user', 'v2.3: a plain write is user input (origin user)')
     check(order.join() === 'sink,pty' && writes.includes('a'), 'the sink hears the input before it reaches the pty, and a throwing sink never blocks it')
     pm.write(ptyId, ''); pm.write('missing', 'x')
     check(seen.length === 1, 'empty writes and unknown ptys notify nothing')

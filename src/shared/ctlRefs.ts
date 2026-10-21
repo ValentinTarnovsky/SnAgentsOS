@@ -6,13 +6,15 @@
  * Workspace: id, exact name (case-insensitive) or 1-based sidebar index.
  * Console: `self`, 1-based grid index in the scope workspace, `<ws>:<index>`,
  * pane id, or exact title (case-insensitive; the scope workspace first, then
- * every workspace).
+ * every workspace). Note: id or exact title (case-insensitive).
  */
 import type { CtlErrorCode, CtlListData, CtlListPane, CtlListWorkspace } from './ctl-protocol'
+import { noteTitle, type WsNoteMeta } from './ws-notes'
 
 export type RefError = { ok: false; code: Extract<CtlErrorCode, 'bad_request' | 'not_found' | 'ambiguous'>; message: string }
 export type WorkspaceRef = { ok: true; workspace: CtlListWorkspace; index: number } | RefError
 export type ConsoleRef = { ok: true; workspace: CtlListWorkspace; pane: CtlListPane; index: number } | RefError
+export type NoteRef = { ok: true; note: WsNoteMeta } | RefError
 
 const DIGITS = /^\d+$/
 
@@ -35,6 +37,29 @@ export function resolveWorkspaceRef(list: Pick<CtlListData, 'workspaces'>, ref: 
     if (n >= 1 && n <= all.length) return { ok: true, workspace: all[n - 1], index: n }
   }
   return fail('not_found', `workspace "${raw}" not found`)
+}
+
+/**
+ * A Markdown note of a workspace (app 2.3.0): its id, or its exact title
+ * (case-insensitive; a repeated title is `ambiguous`). No index: the list is
+ * newest first and reorders on every write, so an index could hit another
+ * note (dangerous for `notes rm`).
+ */
+export function resolveNoteRef(notes: readonly WsNoteMeta[], ref: string): NoteRef {
+  const raw = ref.trim()
+  if (!raw) return fail('bad_request', 'empty note reference')
+  const byId = notes.find((n) => n.id === raw)
+  if (byId) return { ok: true, note: byId }
+  const lower = raw.toLowerCase()
+  // The stored title drops Markdown marks (`fix_login` is listed as `fixlogin`): the ref is cleaned the same way.
+  const clean = noteTitle(raw).toLowerCase()
+  const titled = notes.filter((n) => {
+    const title = n.title.trim().toLowerCase()
+    return title === lower || (clean !== '' && title === clean)
+  })
+  if (titled.length > 1) return fail('ambiguous', `note "${raw}" is ambiguous: ${titled.map((n) => n.id).join(', ')}`)
+  if (titled.length === 1) return { ok: true, note: titled[0] }
+  return fail('not_found', `note "${raw}" not found`)
 }
 
 /** Workspace holding a pane, with its sidebar index, or null. */

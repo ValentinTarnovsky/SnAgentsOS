@@ -12,7 +12,9 @@
  *    straight to the desktop.
  *  - `push` shows the desktop's notification (title, "<console> - <workspace>",
  *    tag = pane, so they never pile up); `notificationclick` focuses the app
- *    and opens that console through its deep link (E3-FR-45).
+ *    and opens that console through its deep link (E3-FR-45). v2.3: the
+ *    announced `state` rides in `data`, so the page can close a stale note
+ *    (trayReconcile.ts); no silent push ever closes one.
  *
  * vite.config.ts fills VERSION and PRECACHE at build time (swBuild.ts).
  */
@@ -118,6 +120,7 @@ self.addEventListener('push', (event) => {
     badge: 'icons/icon-192.png',
     data: { url: typeof data.url === 'string' ? data.url : './' },
   }
+  if (data.state === 'action' || data.state === 'done' || data.state === 'error') options.data.state = data.state
   event.waitUntil(self.registration.showNotification(title, options))
 })
 

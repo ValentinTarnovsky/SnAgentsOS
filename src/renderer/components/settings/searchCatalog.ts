@@ -21,6 +21,7 @@ export type CategoryId =
   | 'keys'
   | 'data'
   | 'aiusage'
+  | 'claudeaccounts'
   | 'usage'
   | 'remote'
   | 'git'
@@ -41,6 +42,7 @@ export const CATEGORY_ORDER: CategoryId[] = [
   'appearance',
   'language',
   'aiusage',
+  'claudeaccounts',
   'usage',
   'remote',
   'git',
@@ -61,6 +63,7 @@ export const CATEGORY_LABEL: Record<CategoryId, MessageKey> = {
   keys: 'settings.cat.keys',
   data: 'settings.cat.data',
   aiusage: 'settings.cat.aiusage',
+  claudeaccounts: 'settings.cat.claudeaccounts',
   usage: 'settings.cat.usage',
   remote: 'settings.cat.remote',
   git: 'settings.cat.git',
@@ -190,6 +193,15 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('aiusage.showStatus', 'aiusage.showStatus', 'aiusage.showStatusHint', { keywords: ['status', 'estado', 'anthropic'], toggle: { path: 'usage.showStatus', disabledUnless: ['usage.enabled'] } }),
   e('aiusage.refreshOnFocus', 'aiusage.refreshOnFocus', 'aiusage.refreshOnFocusHint', { keywords: ['refresh', 'actualizar', 'interval', 'intervalo'], toggle: { path: 'usage.refreshOnFocus', disabledUnless: ['usage.enabled'] } }),
   e('aiusage.custom', 'aiusage.customTitle', 'aiusage.customHint', { keywords: ['custom', 'personalizado', 'model', 'modelo', 'budget', 'presupuesto'] }),
+
+  // Claude accounts (app 2.3.0). No inline switch for the automatic toggle: the terms note sits next to the live row.
+  e('claudeaccounts.accounts', 'claudeaccounts.title', 'claudeaccounts.hint', { summary: true, keywords: ['account', 'accounts', 'cuenta', 'cuentas', 'login', 'claude', 'switch', 'cambiar', 'subscription', 'suscripcion', 'primary', 'principal', 'secondary', 'secundaria'] }),
+  e('claudeaccounts.auto', 'claudeaccounts.auto', 'claudeaccounts.autoHint', { keywords: ['account', 'cuenta', 'automatic', 'automatico', 'switch', 'cambiar', 'limit', 'limite', 'claude'] }),
+  e('claudeaccounts.switchAt', 'claudeaccounts.switchAt', 'claudeaccounts.switchAtHint', { keywords: ['account', 'cuenta', 'threshold', 'umbral', 'percent', 'porcentaje', 'limit', 'limite'] }),
+  e('claudeaccounts.return', 'claudeaccounts.return', 'claudeaccounts.returnHint', { keywords: ['account', 'cuenta', 'primary', 'principal', 'return', 'volver', 'reset'] }),
+  e('claudeaccounts.defer', 'claudeaccounts.defer', 'claudeaccounts.deferHint', { keywords: ['account', 'cuenta', 'working', 'trabajando', 'wait', 'esperar'] }),
+  e('claudeaccounts.pollParked', 'claudeaccounts.pollParked', 'claudeaccounts.pollParkedHint', { keywords: ['account', 'cuenta', 'usage', 'uso', 'parked'] }),
+  e('claudeaccounts.alertOnSwitch', 'claudeaccounts.alertOnSwitch', 'claudeaccounts.alertOnSwitchHint', { keywords: ['account', 'cuenta', 'alert', 'alerta', 'aviso'] }),
 
   // Performance (live metrics: summary only)
   e('usage.metrics', 'settings.search.usage', 'settings.search.usageHint', { summary: true, keywords: ['performance', 'rendimiento', 'ram', 'cpu', 'memory', 'memoria', 'processes', 'procesos'] }),

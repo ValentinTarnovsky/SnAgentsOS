@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { timingSafeEqual } from 'crypto'
 import type { RemotePending } from '@shared/types'
+import { isTuneEffort } from '@shared/agentTune'
 import { LIMITS, claudeConfigDir, cleanString, extractQuestions, isSafeCwd, isSafeTranscriptPath, summarizeRequest, summarizeTool } from './statusDetails'
 
 /** One Claude Code hook event, already attributed to a console. */
@@ -46,6 +47,10 @@ export interface HookEvent {
   source?: string
   /** Stop json.background_tasks still running, by what the stop means for the console. */
   background?: BackgroundTasks
+  /** v2.3: SessionStart json.model, <= 64, one line. */
+  model?: string
+  /** v2.3: json.effort.level of any hook, only an allowlisted level. */
+  effort?: string
 }
 
 /**
@@ -230,7 +235,15 @@ export function parseHookPayload(consoleId: string, ptyId: string, name: string,
     evt.background = backgroundTasks(json.background_tasks)
   }
   if (name === 'SessionEnd') evt.endReason = cleanString(json.reason, 64, true)
-  if (name === 'SessionStart') evt.source = cleanString(json.source, 32, true)
+  if (name === 'SessionStart') {
+    evt.source = cleanString(json.source, 32, true)
+    // v2.3 (agentTune read-back): only SessionStart names the model.
+    const model = cleanString(json.model, 64, true)
+    if (model && !/\s/.test(model)) evt.model = model
+  }
+  // v2.3: every hook of a model with effort carries `effort: { level }`.
+  const effort = json.effort && typeof json.effort === 'object' ? (json.effort as Record<string, unknown>).level : undefined
+  if (isTuneEffort(effort)) evt.effort = effort
   if ((name === 'PreToolUse' || name === 'PermissionRequest') && toolName) {
     evt.toolSummary = summarizeTool(toolName, json.tool_input) || undefined
     evt.requestSummary = summarizeRequest(toolName, json.tool_input) || undefined

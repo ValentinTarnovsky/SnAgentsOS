@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent a
 import {
   ChevronDown,
   ChevronRight,
+  ChevronsDownUp,
   Copy,
   ExternalLink,
   Eye,
@@ -26,7 +27,6 @@ import {
   FolderOpen,
   FolderPlus,
   FolderTree,
-  ListCollapse,
   PencilLine,
   RefreshCw,
   Search,
@@ -149,6 +149,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
   const [closing, setClosing] = useState<string | null>(null)
   const [cursor, setCursor] = useState({ line: 1, col: 1 })
   const [preview, setPreview] = useState(false)
+  const treeRef = useRef<HTMLDivElement | null>(null)
   const platform = window.snApi.platform
 
   // The folder, its first level, the stash of a previous run, and the watch while the drawer shows.
@@ -268,7 +269,20 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
     }
   }
 
-  const iconBtn = 'flex h-7 w-7 shrink-0 items-center justify-center rounded-btn text-text-secondary transition-colors hover:bg-card hover:text-text-primary'
+  // Back to the first level: also clears the filter, which shows every loaded match open.
+  // The button turns disabled under the focus, so the tree takes the keyboard (Esc, arrows).
+  const collapse = (): void => {
+    collapseAll(wsId)
+    setFilter('')
+    if (selected?.includes('/')) setSelected(null)
+    if (treeRef.current) {
+      treeRef.current.scrollTop = 0
+      treeRef.current.focus({ preventScroll: true })
+    }
+  }
+  const collapsed = ws.expanded.length <= 1 && !filter.trim()
+
+  const iconBtn = 'flex h-7 w-7 shrink-0 items-center justify-center rounded-btn text-text-secondary transition-colors hover:bg-card hover:text-text-primary disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-secondary'
   const headerActions = (
     <>
       <Tooltip label={t('files.newFile')} side="bottom">
@@ -287,8 +301,8 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
         </button>
       </Tooltip>
       <Tooltip label={t('files.collapse')} side="bottom">
-        <button type="button" aria-label={t('files.collapse')} onClick={() => collapseAll(wsId)} className={iconBtn}>
-          <ListCollapse size={14} />
+        <button type="button" aria-label={t('files.collapse')} onClick={collapse} disabled={collapsed} className={iconBtn} data-files-collapse>
+          <ChevronsDownUp size={14} />
         </button>
       </Tooltip>
       <span className="mx-1 h-4 w-px bg-border" />
@@ -345,7 +359,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
               />
             </div>
           </div>
-          <div role="tree" aria-label={t('files.title')} tabIndex={0} className="min-h-0 flex-1 overflow-auto pb-2 outline-none" data-files-tree>
+          <div ref={treeRef} role="tree" aria-label={t('files.title')} tabIndex={0} className="min-h-0 flex-1 overflow-auto pb-2 outline-none" data-files-tree>
             {rootError ? (
               <p className="px-3 py-4 text-center text-[11px] text-text-secondary" data-files-root-error={rootError}>
                 {t(rootError === 'no_root' ? 'files.noFolder' : ERROR_KEY[rootError])}

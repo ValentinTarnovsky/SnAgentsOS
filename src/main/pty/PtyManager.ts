@@ -5,7 +5,9 @@ import { delimiter, dirname } from 'path'
 import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { HeadlessMetrics, PtyDataEvt, PtyExitEvt, PtyPromptResultEvt, PtyReattachRes, PtyRestartReq, PtyRestartRes, PtySpawnReq, PtySpawnRes, PtySubmitRes, ShellKind, TerminalEngineSettings } from '@shared/ipc-contract'
-import type { ClaudePaneState, SetupStep } from '@shared/types'
+import type { AgentProvider, ClaudePaneState, SetupStep } from '@shared/types'
+import { inputEffect, tuneReady } from '@shared/agentTune'
+import { REPORTS_ONLY_RE } from '@shared/inputReports'
 import { AGENT_ENV, CLI_ENV } from '@shared/brand'
 import { appendPromptRef } from '@shared/agent-argv'
 import {
@@ -90,6 +92,16 @@ interface Entry {
   lastOutputAt: number
   /** Epoch ms of the last submit with Enter (E8-FR-02). */
   lastSubmitAt: number
+  /**
+   * v2.3 (agentTune): input that did not end in Enter / Ctrl+C reached the
+   * pty since the last one, so the agent's input box may hold a draft. Keys
+   * answering an open request (state `action`, Enter included) and terminal
+   * reports neither set nor clear it. A tune with Enter refuses (`busy`)
+   * while it is set.
+   */
+  draft: boolean
+  /** Last character of the previous non-report write: a `\` typed before its Enter (inputEffect). */
+  inputTail: string
   /** Initial prompt still to deliver (E8-FR-02b), consumed once. */
   prompt: { req: InitialPromptReq; mode: 'argv' | 'gate' } | null
   /** Gate poll timer. */
@@ -103,7 +115,7 @@ interface Entry {
 }
 
 /** Agent readiness as StatusManager derives it (E8-FR-02b gate). */
-export type AgentStateFn = (paneId: string) => { state: ClaudePaneState; precise: boolean } | null
+export type AgentStateFn = (paneId: string) => { state: ClaudePaneState; precise: boolean; provider?: AgentProvider; pendingCount?: number; ended?: boolean } | null
 
 /** Main-side listener of initial prompt outcomes (the renderer gets pty:promptResult). */
 export type PromptResultListener = (evt: PtyPromptResultEvt) => void
@@ -282,9 +294,16 @@ export interface PtySink {
    * Optional (E2-FR-48): user input is about to reach the pty through
    * write() (desktop keyboard, phone `input`, a phone answer card, a global
    * prompt). Setup sequences write to the pty directly and never land here.
+   * v2.3: `origin` is 'auto' for writes nobody typed (the initial-prompt gate,
+   * `snaos send`, a scheduled prompt, the resume nudge, an agent-end chip, a
+   * global prompt or race paste and its Enter): they still invalidate answer
+   * cards but never acknowledge attention.
    */
-  onUserInput?(ptyId: string, paneId: string, data: string): void
+  onUserInput?(ptyId: string, paneId: string, data: string, origin: PtyInputOrigin): void
 }
+
+/** v2.3: who wrote to a pty: the user (keyboard, phone input, answer cards) or an automation. */
+export type PtyInputOrigin = 'user' | 'auto'
 
 /**
  * Owns every node-pty instance. The renderer never touches native modules;
@@ -479,6 +498,8 @@ export class PtyManager {
       drained: [],
       lastOutputAt: 0,
       lastSubmitAt: 0,
+      draft: false,
+      inputTail: '',
       prompt,
       promptTimer: null,
       integrated,
@@ -687,15 +708,16 @@ export class PtyManager {
     return entry.modes.rehydrate(!ALT_ENTER_RE.test(body)) + body
   }
 
-  write(ptyId: string, data: string): void {
+  write(ptyId: string, data: string, origin: PtyInputOrigin = 'user'): void {
     const entry = this.entries.get(ptyId)
     if (!entry || !data) return
     this.lastInput.set(entry.paneId, Date.now())
+    this.trackDraft(entry, data)
     // E2-FR-48: input invalidates the agent's outstanding answer cards before it lands.
     for (const sink of this.sinks.values()) {
       if (!sink.onUserInput) continue
       try {
-        sink.onUserInput(ptyId, entry.paneId, data)
+        sink.onUserInput(ptyId, entry.paneId, data, origin)
       } catch {
         /* a sink must never block typing */
       }
@@ -715,6 +737,22 @@ export class PtyManager {
     // already queued.
     entry.writeQueue += data
     this.drainWrites(ptyId)
+  }
+
+  /**
+   * v2.3: keeps `entry.draft` (see Entry). Any origin counts: an automation
+   * that inserts without Enter (a global prompt) leaves a draft too. Input
+   * while a request is open (state `action`) goes to its dialog, not to the
+   * box: it changes nothing, so an Enter that answers a permission keeps a
+   * follow-up typed before it. The state is read only when the flag would flip.
+   */
+  private trackDraft(entry: Entry, data: string): void {
+    const effect = inputEffect(data, (d) => REPORTS_ONLY_RE.test(d), entry.inputTail)
+    if (effect === 'report') return
+    entry.inputTail = data.slice(-1)
+    const draft = effect === 'typed'
+    if (draft === entry.draft || this.agentState(entry.paneId)?.state === 'action') return
+    entry.draft = draft
   }
 
   /** Drain an entry's writeQueue to its pty, one capped chunk per pace tick. */
@@ -775,13 +813,17 @@ export class PtyManager {
    * nothing, when it did not). With `enter`, the `\r` goes SUBMIT_DELAY_MS
    * after the write queue drained, not after queueing, so a 64 KB text paced
    * in 4 KB chunks still gets its Enter after its last byte.
+   * `readyFor` (v2.3, agentTune): with `enter`, the pane's agent must be that
+   * provider, precise and at rest (tuneReady) with no draft in its input
+   * box, else `busy` and nothing is written.
    */
-  submit(ptyId: string, text: string, enter: boolean, forcePaste = false): Promise<PtySubmitRes> {
+  submit(ptyId: string, text: string, enter: boolean, forcePaste = false, origin: PtyInputOrigin = 'user', readyFor?: AgentProvider): Promise<PtySubmitRes> {
     const entry = this.entries.get(ptyId)
     if (!entry || entry.cancelled) return Promise.resolve({ ok: false, error: 'not_running' })
+    if (enter && readyFor && (entry.draft || !tuneReady(this.agentState(entry.paneId), readyFor))) return Promise.resolve({ ok: false, error: 'busy' })
     const prepared = prepareSubmit(text, entry.modes.bracketedPaste, forcePaste)
     if (!prepared.ok) return Promise.resolve(prepared)
-    if (prepared.data) this.write(ptyId, prepared.data)
+    if (prepared.data) this.write(ptyId, prepared.data, origin)
     if (!enter) return Promise.resolve({ ok: true })
     return new Promise((resolve) => {
       this.whenDrained(entry, (alive) => {
@@ -794,7 +836,7 @@ export class PtyManager {
             resolve({ ok: false, error: 'not_running' })
             return
           }
-          this.write(ptyId, '\r')
+          this.write(ptyId, '\r', origin)
           entry.lastSubmitAt = Date.now()
           resolve({ ok: true })
         }, SUBMIT_DELAY_MS)
@@ -803,9 +845,9 @@ export class PtyManager {
   }
 
   /** submit() into the pane's live pty, when `ptyId` is unknown or stale. */
-  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean): Promise<PtySubmitRes> {
+  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean, origin: PtyInputOrigin = 'user', readyFor?: AgentProvider): Promise<PtySubmitRes> {
     const id = ptyId && this.entries.has(ptyId) ? ptyId : paneId ? this.byPane.get(paneId) : undefined
-    return id ? this.submit(id, text, enter) : Promise.resolve({ ok: false, error: 'not_running' })
+    return id ? this.submit(id, text, enter, false, origin, readyFor) : Promise.resolve({ ok: false, error: 'not_running' })
   }
 
   /** Whether the pane's live pty has bracketed paste on, or null without one. */
@@ -881,7 +923,7 @@ export class PtyManager {
       // Enter: a title-only `idle` could be a trust dialog or a login screen.
       if (state?.precise && (state.state === 'idle' || state.state === 'done')) {
         entry.prompt = null
-        void this.submit(ptyId, prompt.req.text, prompt.req.enter).then((res) =>
+        void this.submit(ptyId, prompt.req.text, prompt.req.enter, false, 'auto').then((res) =>
           this.emitPrompt(entry.paneId, res.ok ? 'sent_gate' : res.error === 'not_running' ? 'dropped_exit' : 'not_delivered'),
         )
         return
@@ -893,7 +935,7 @@ export class PtyManager {
           return
         }
         // Inserted as a paste, never submitted: the user reviews and presses Enter.
-        void this.submit(ptyId, prompt.req.text, false, true).then((res) =>
+        void this.submit(ptyId, prompt.req.text, false, true, 'auto').then((res) =>
           this.emitPrompt(entry.paneId, res.ok ? 'inserted_unconfirmed' : res.error === 'not_running' ? 'dropped_exit' : 'not_delivered'),
         )
         return

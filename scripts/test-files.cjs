@@ -141,7 +141,41 @@ async function main() {
   check(watchClosed === 1, 'null stops it')
 
   fs.rmSync(tmp, { recursive: true, force: true })
-  console.log(`PASS: ${checks} files drawer checks (safe relative paths, root from the config, list order and .git, junction escape, CRLF and BOM, binary, 2 MB and 5 MB, images, rev conflicts, create, rename, trash, reveal, inert open, watch)`)
+
+  // The editor's find widget (v2.3): keys, counter, capped count, and its es/en strings.
+  const find = load('src/renderer/components/ui/findLogic.ts')
+  const k = (key, mods = {}, code) => ({ key, code, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, ...mods })
+  check(find.findKeyAction(k('Enter'), 'find') === 'next' && find.findKeyAction(k('Enter', { shiftKey: true }), 'find') === 'prev', 'Enter / Shift+Enter in the query: next / previous')
+  check(find.findKeyAction(k('F3'), 'other') === 'next' && find.findKeyAction(k('F3', { shiftKey: true }), 'replace') === 'prev', 'F3 / Shift+F3 anywhere in the widget')
+  check(find.findKeyAction(k('Escape'), 'find') === 'close' && find.findKeyAction(k('Escape'), 'other') === 'close' && find.findKeyAction(k('Escape', { ctrlKey: true }), 'find') === null, 'Esc closes (plain Esc only)')
+  check(find.findKeyAction(k('c', { altKey: true }, 'KeyC'), 'find') === 'toggleCase' && find.findKeyAction(k('w', { altKey: true }, 'KeyW'), 'replace') === 'toggleWord' && find.findKeyAction(k('®', { altKey: true }, 'KeyR'), 'find') === 'toggleRegex', 'Alt+C / Alt+W / Alt+R toggle the options (by code when Alt composes)')
+  check(find.findKeyAction(k('c', { altKey: true, ctrlKey: true }, 'KeyC'), 'find') === null && find.findKeyAction(k('c'), 'find') === null, 'Ctrl+Alt+C and a plain c are not toggles')
+  check(find.findKeyAction(k('h', { ctrlKey: true }, 'KeyH'), 'find') === 'openReplace' && find.findKeyAction(k('h', { ctrlKey: true }, 'KeyH'), 'replace') === 'openReplace' && find.findKeyAction(k('f', { ctrlKey: true }, 'KeyF'), 'replace') === 'focusFind', 'Ctrl+H opens replace (also from its field), Ctrl+F goes back to the query')
+  check(find.findKeyAction(k('Enter'), 'replace') === 'replace' && find.findKeyAction(k('Enter', { ctrlKey: true, altKey: true }), 'replace') === 'replaceAll' && find.findKeyAction(k('Enter', { ctrlKey: true, altKey: true }), 'find') === 'replaceAll', 'Enter in replace: one; Ctrl+Alt+Enter: all')
+  check(find.findKeyAction(k('Enter'), 'other') === null && find.findKeyAction(k('Enter', { ctrlKey: true }), 'find') === null && find.findKeyAction(k('a'), 'find') === null, 'Enter on a button stays the button, other keys are not the widget')
+  const tr = (key, vars) => key + (vars ? ':' + vars.index + '/' + vars.total : '')
+  check(find.resultLabel('', null, false, tr) === '' && find.resultLabel('x', null, false, tr) === 'find.none' && find.resultLabel('x', { index: -1, total: 0, capped: false }, false, tr) === 'find.none', 'nothing to find: no label; no matches: No results')
+  check(find.resultLabel('x', { index: 2, total: 12, capped: false }, false, tr) === 'find.count:3/12' && find.resultLabel('x', { index: 0, total: 1, capped: false }, false, tr) === 'find.count:1/1', '3 of 12, 1 of 1 (1-based)')
+  check(find.resultLabel('x', { index: -1, total: 4, capped: false }, false, tr) === 'find.count:?/4' && find.resultLabel('x', { index: 0, total: 9999, capped: true }, false, tr) === 'find.countCapped:1/9999', 'off a match: ? of 4; over the cap: 9999+')
+  check(find.resultLabel('(', { index: 0, total: 3, capped: false }, true, tr) === 'find.invalidRegex', 'an invalid regex says so')
+  const cursor = (n) => { let i = 0; return { next: () => (i < n ? { done: false, value: { from: i * 10, to: i++ * 10 + 3 } } : { done: true, value: undefined }) } }
+  let cm = find.countMatches(cursor(12), { from: 20, to: 23 })
+  check(cm.index === 2 && cm.total === 12 && !cm.capped, 'the selection on the third of 12 matches')
+  cm = find.countMatches(cursor(12), { from: 20, to: 22 })
+  check(cm.index === -1 && cm.total === 12, 'a selection that is not a whole match: no current index')
+  cm = find.countMatches(cursor(20000), { from: 0, to: 3 })
+  check(cm.total === find.FIND_COUNT_CAP && cm.capped && cm.index === 0 && find.FIND_COUNT_CAP === 9999, 'counting stops at 9999 and says capped')
+  cm = find.countMatches(cursor(9999), { from: 99980, to: 99983 })
+  check(cm.total === 9999 && !cm.capped && cm.index === 9998, 'exactly 9999 matches is not capped')
+  const { en } = load('src/renderer/i18n/en.ts')
+  const { es } = load('src/renderer/i18n/es.ts')
+  const findKeys = Object.keys(en).filter((key) => key.startsWith('find.'))
+  check(findKeys.length >= 14 && findKeys.every((key) => typeof es[key] === 'string' && es[key].trim() && en[key].trim()), 'every find.* string exists in es and en ' + findKeys.length)
+  check(Object.keys(es).filter((key) => key.startsWith('find.')).length === findKeys.length, 'es has no extra find.* key')
+  for (const key of ['find.count', 'find.countCapped']) check(en[key].includes('{index}') && en[key].includes('{total}') && es[key].includes('{index}') && es[key].includes('{total}'), key + ' carries {index} and {total} in both')
+  check(['drawer.pin', 'drawer.unpin', 'files.collapse'].every((key) => es[key] && en[key]) && en['files.collapse'] === 'Collapse folders' && es['files.collapse'] === 'Contraer carpetas', 'drawer pin and collapse strings in es and en')
+
+  console.log(`PASS: ${checks} files drawer checks (safe relative paths, root from the config, list order and .git, junction escape, CRLF and BOM, binary, 2 MB and 5 MB, images, rev conflicts, create, rename, trash, reveal, inert open, watch, find widget keys / counter / cap / es-en strings)`)
 }
 
 main().catch((e) => { console.error(e); process.exit(1) })

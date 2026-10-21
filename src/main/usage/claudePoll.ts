@@ -32,6 +32,19 @@ export class ClaudePoll {
   private errorStreak = 0
   private expiredRetried = false
 
+  /**
+   * Forget everything: the held rows, the back-off and the expired retry.
+   * After a Claude account switch the rows of account A must never show as
+   * account B's (app 2.3.0).
+   */
+  reset(): void {
+    this.rows = []
+    this.backoffMs = 0
+    this.blockedUntil = 0
+    this.errorStreak = 0
+    this.expiredRetried = false
+  }
+
   /** False while a back-off is running (the endpoint asked us to slow down). */
   canFetch(nowMs: number): boolean {
     return nowMs >= this.blockedUntil

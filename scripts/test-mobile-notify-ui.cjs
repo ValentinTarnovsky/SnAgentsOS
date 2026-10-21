@@ -93,6 +93,19 @@ window.runMain = async () => {
  check(store.getState().activePaneId === 'b2' && layer.querySelector('[data-pane-title]').textContent === 'Codex', '[Go] opens the console of the toast');
  check(!store.getState().toasts.some(x => x.paneId === 'b2'), 'and dismisses its toast');
 
+ // v2.3: a shown toast goes once the desktop says its console no longer needs the user (answered on the PC).
+ status('b3', 'working'); status('b3', 'action', { reason: 'question', attention: true });
+ await frames();
+ check(store.getState().toasts.some(x => x.paneId === 'b3' && x.kind === 'action') && layer.querySelector('[data-toast-go=b3]'), 'a console waiting (attention true) toasts');
+ client.handlePaneStatus('b3', { state: 'action', stateSince: since, provider: 'claude', reason: 'question', attention: false });
+ await frames();
+ check(!store.getState().toasts.some(x => x.paneId === 'b3') && !layer.querySelector('[data-toast-go=b3]'), 'the attention flip removes that toast from the stack');
+ check(store.getState().toasts.some(x => x.paneId === 'a2'), 'the toasts of other consoles stay');
+ const quiet = store.getState().toasts.length;
+ status('b1', 'working'); status('b1', 'done', { attention: false });
+ await frames();
+ check(store.getState().toasts.length === quiet - 1 && !store.getState().toasts.some(x => x.paneId === 'b1'), 'a done already seen on the PC never toasts (and the state change dropped the older one)');
+
  // A plain notice leaves before a state toast.
  store.getState().setToast(null);
  status('b3', 'working'); status('b3', 'action');

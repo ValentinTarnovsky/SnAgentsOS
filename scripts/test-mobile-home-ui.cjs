@@ -57,7 +57,7 @@ const snapshot = {
  usage: { updatedAt: now, rows: [
   { id: 'c5', provider: 'claude', kind: '5h', label: '5h', percent: 42, status: 'ok' },
   { id: 'c7', provider: 'claude', kind: '7d', label: '7d', percent: 91, status: 'ok' },
- ] },
+ ], activeAccount: { id: 'acc_aaaaaaaaaaaa', role: 'primary', label: 'Work', other: { id: 'acc_bbbbbbbbbbbb', role: 'secondary', label: '' } } },
  workspaces: [
   { id: 'w1', name: 'Front', layoutOrder: ['a1', 'a2', 'a3', 'a4'], git: { branch: 'main', ahead: 2, behind: 0, added: 142, removed: 37, files: 5 }, panes: [
    pane('a1', 'Idle shell', 'shell', true),
@@ -117,6 +117,18 @@ window.runMain = async () => {
  click($('[data-home-usage] button'));
  await wait(300);
  check(document.body.textContent.includes('Usage') && $$('[data-sheet][data-open=true]').length === 1, 'a tap on the usage card opens the full UsageSheet');
+ // App 2.3.0: the Claude account (label or role, never an email) and "Use <other>" only for a desktop >= 2.3.0.
+ check($('[data-usage-account=primary]') && $('[data-usage-account=primary]').textContent.startsWith('Account: Work') && !$('[data-usage-use-account]'), 'the sheet names the Claude account; an older desktop gets no switch button');
+ flushSync(() => store.getState().update({ appVersion: '2.3.0' }));
+ await frames();
+ const useBtn = $('[data-usage-use-account=secondary]');
+ check(useBtn && useBtn.textContent === 'Use Secondary', 'with a 2.3.0 desktop the sheet offers Use <other>, the role name when unlabeled');
+ click(useBtn);
+ await wait(200);
+ check(ctls.at(-1).kind === 'claudeAccountUse' && ctls.at(-1).role === 'secondary' && Object.keys(ctls.at(-1)).length === 2, 'Use <other> sends claudeAccountUse { role }');
+ check($$('[data-toast]').some(t => t.textContent === 'Claude now uses Secondary'), 'and confirms with a toast');
+ check(!$('[data-sheet][data-open=true]').textContent.includes('@'), 'no email in the usage sheet');
+ flushSync(() => store.getState().update({ appVersion: '2.0.0' }));
  history.back(); await wait(400);
 
  // --- phone-only navigation (E2-FR-06/16/47) ---

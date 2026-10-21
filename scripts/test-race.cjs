@@ -58,11 +58,12 @@ const S = R.useAppStore
 
 // Fake terminals: each pane records what xterm got pasted; `bracketed` per pane.
 const pasted = {}
+const pasteOpts = []
 const bracket = {}
 function mount(paneId, { bracketed = true } = {}) {
   pasted[paneId] = []
   bracket[paneId] = bracketed
-  R.registerPaster(paneId, { paste: (t) => pasted[paneId].push(t), bracketed: () => bracket[paneId] })
+  R.registerPaster(paneId, { paste: (t, o) => { pasted[paneId].push(t); pasteOpts.push(o) }, bracketed: () => bracket[paneId] })
   R.registerPty(paneId, `pty-${paneId}`)
 }
 
@@ -100,6 +101,7 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   await sleep(260)
   same(calls.writes.map((w) => w.ptyId).sort(), ['pty-a1', 'pty-a2'], 'Enter after submitDelayFor goes to the agents only')
   check(calls.writes.every((w) => w.data === '\r'), 'the Enter is a lone CR')
+  check(calls.writes.every((w) => w.origin === 'auto') && pasteOpts.length > 0 && pasteOpts.every((o) => o && o.auto === true), 'v2.3: the paste and its Enter are automated (origin auto), so no attention mark clears')
   calls.writes.length = 0
   n = R.broadcastToWorkspace(ws(), 'hola')
   await sleep(260)

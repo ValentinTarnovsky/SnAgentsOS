@@ -66,6 +66,6 @@ export function statusTipLines(status: PaneStatus, t: TFn, lang: Language, now: 
   if (status.waiting && status.state === 'working') lines.push(waitingPhrase(status.waiting, t))
   if (status.stateSince) lines.push(formatSince(status.stateSince, now, lang))
   if (!status.precise) lines.push(`(${t('status.approximate')})`)
-  if ((status.pendingCount ?? 0) > 1) lines.push(t('status.pendingMany', { count: status.pendingCount ?? 0 }))
+  if (status.state !== 'working' && status.state !== 'idle' && (status.pendingCount ?? 0) > 1) lines.push(t('status.pendingMany', { count: status.pendingCount ?? 0 }))
   return lines
 }

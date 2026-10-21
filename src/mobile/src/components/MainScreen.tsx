@@ -6,6 +6,8 @@
  * (the viewed pane's own workspace, E2-FR-47; after it the console's `snaos
  * status` line, else the workspace note: E8-FR-19/11, v3.1), the phone mode chip (E3-FR-13),
  * the "N waiting" pill and a kebab with the console's actions plus Quick Commands (E2-FR-08/16/51).
+ * App 2.3.0: next to the cache chip, the model / effort chip of a Claude or
+ * Codex console (AgentTuneSheet, also a kebab row), only with a desktop >= 2.3.0.
  * Below: pane tabs of that workspace (E1-FR-32), the terminal (flex-1,
  * min-h-0), the answer card or the "waiting" strip (E2-FR-17..25), the
  * composer or "Direct input" strip (E1-FR-22..31, 38) and the KeyBar. The status banner and the toasts overlay the terminal.
@@ -15,12 +17,13 @@
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { ChevronLeft, GitCompare, History, MoreVertical, Zap } from 'lucide-react'
+import { ChevronLeft, GitCompare, History, MoreVertical, SlidersHorizontal, Zap } from 'lucide-react'
 import { RemoteTerminal } from './RemoteTerminal'
 import { KeyBar } from './KeyBar'
 import { PaneTabs } from './PaneTabs'
 import { PaneActionList } from './PaneActionList'
 import { QuickCommandsSheet } from './QuickCommandsSheet'
+import { AgentTuneChip, AgentTuneSheet, useTuneTarget } from './AgentTuneSheet'
 import { Composer, toggleInputMode } from './Composer'
 import { pasteKey } from './pasteKey'
 import { DirectInputStrip } from './DirectInputStrip'
@@ -72,6 +75,8 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
   const [quickOpen, setQuickOpen] = useState(false)
   const [paneActions, setPaneActions] = useState<PaneRef | null>(null)
   const [kebab, setKebab] = useState<PaneRef | null>(null)
+  const [tuneOpen, setTuneOpen] = useState(false)
+  const tuneTarget = useTuneTarget(activePaneId)
 
   // A Paste one-shot belongs to the pane it was opened on: leaving it ends it.
   useEffect(() => {
@@ -116,6 +121,7 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
             <span data-pane-title className="truncate text-sm font-semibold leading-tight text-text-primary">{paneTitle}</span>
             <StatusIndicator status={activeStatus} />
             {activePaneId && <CacheChip paneId={activePaneId} />}
+            {activePaneId && <AgentTuneChip paneId={activePaneId} onOpen={() => setTuneOpen(true)} />}
           </div>
           {workspaceName && (
             <div className="flex min-w-0 text-[11px] leading-tight text-text-secondary">
@@ -194,6 +200,7 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
       </div>
 
       <QuickCommandsSheet open={quickOpen} onClose={() => setQuickOpen(false)} />
+      <AgentTuneSheet paneId={activePaneId} open={tuneOpen} onClose={() => setTuneOpen(false)} />
       <PaneActionList target={paneActions} onClose={() => setPaneActions(null)} />
       <PaneActionList
         target={kebab}
@@ -208,6 +215,20 @@ export function MainScreen({ onBack }: { onBack?: () => void } = {}): ReactNode 
               setQuickOpen(true)
             },
           },
+          ...(tuneTarget && kebab?.paneId === tuneTarget.paneId
+            ? [
+                {
+                  // App 2.3.0: model, effort and Ultracode of this console.
+                  id: 'tune',
+                  icon: <SlidersHorizontal size={16} />,
+                  label: t('tune.title'),
+                  onSelect: () => {
+                    setKebab(null)
+                    setTuneOpen(true)
+                  },
+                },
+              ]
+            : []),
           {
             // E3-FR-36: the session history of the viewed console's workspace.
             id: 'history',

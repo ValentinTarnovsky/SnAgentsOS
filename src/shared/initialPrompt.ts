@@ -125,7 +125,8 @@ export function chooseDelivery(c: InitialPromptCheck & { launchKind: LaunchKind 
   return initialPromptFallback(c) ? 'gate' : 'argv'
 }
 
-export type SubmitError = 'multiline_unsafe' | 'not_running'
+/** `busy` (v2.3): a gated submit (`readyFor`) found the agent busy or a draft in its input box. */
+export type SubmitError = 'multiline_unsafe' | 'not_running' | 'busy'
 
 /**
  * What a submit writes (E8-FR-02a): line breaks normalized to `\r` (like

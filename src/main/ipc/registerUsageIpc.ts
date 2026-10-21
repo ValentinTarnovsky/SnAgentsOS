@@ -2,11 +2,24 @@ import { ipcMain, type WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { UsageRow, UsageSnapshot } from '@shared/ipc-contract'
 import type { PaneStatusEvt, UsageSettings } from '@shared/types'
-import { fetchClaudeUsage } from '../usage/claude'
+import type { UsageActiveAccount } from '@shared/claude-accounts'
+import { fetchClaudeUsage, type ClaudeRowFlags } from '../usage/claude'
 import { ClaudePoll } from '../usage/claudePoll'
 import { CodexUsage } from '../usage/codexUsage'
 import { computeCustomRows } from '../usage/custom'
 import { fetchServiceStatus, type ServiceStatus } from '../usage/status'
+
+/** Claude multi-account hooks (app 2.3.0); AccountService behind them. */
+export interface UsageAccountsHooks {
+  /** The switch policy needs 5h and 7d even when the user hides them. */
+  windowsNeeded(): boolean
+  /** The active account for the snapshot (no email, it reaches the phone). */
+  badge(): UsageActiveAccount | null
+  /** The full Claude fetch result of the active account, before hidden rows are dropped. */
+  onActiveResult(rows: UsageRow[], at: number): void
+  /** Cheap check of the live login on every Claude tick. */
+  reconcile(): void
+}
 
 interface UsageIpcHooks {
   getSender: () => WebContents | null
@@ -14,6 +27,41 @@ interface UsageIpcHooks {
   getInitialConfig: () => UsageSettings | null
   /** Agent status stream (StatusManager.addListener): a finished Codex turn triggers a Codex refresh. */
   onStatus?: (cb: (evt: PaneStatusEvt) => void) => () => void
+  accounts?: UsageAccountsHooks
+  /** Test seam over the Claude fetch (defaults to fetchClaudeUsage). */
+  fetchClaude?: typeof fetchClaudeUsage
+}
+
+/** What other main services read from the usage poller (AccountService, the CLI). */
+export interface UsageHandle {
+  /** The current snapshot (what the renderer has). */
+  get(): UsageSnapshot
+  /** The snapshot `usage:get` answers: fetched once when nothing was fetched yet (`snaos usage`). */
+  load(): Promise<UsageSnapshot>
+  /** The usage feature is on (only then does anything poll). */
+  enabled(): boolean
+  /** Drop the held Claude rows and fetch again now (after an account switch), then push. */
+  refreshClaudeNow(): Promise<void>
+  /** Push the current snapshot again (the Claude account badge changed). */
+  republish(): void
+  /** The normalized Claude poll interval (ms), without a config read. */
+  intervalMs(): number
+}
+
+/** Flags of the Claude fetch: the shown rows, plus 5h and 7d when the policy needs them. */
+export function claudeFetchFlags(rows: UsageSettings['rows'], needed: boolean): ClaudeRowFlags {
+  const base: ClaudeRowFlags = {
+    claude5h: rows.claude5h,
+    claude7d: rows.claude7d,
+    claudeOpus7d: rows.claudeOpus7d,
+    claudeSonnet7d: rows.claudeSonnet7d,
+  }
+  return needed ? { ...base, claude5h: true, claude7d: true } : base
+}
+
+/** The fetched Claude rows minus the ones the user hid (fetched only for the policy). */
+export function displayRows(rows: UsageRow[], shown: UsageSettings['rows']): UsageRow[] {
+  return rows.filter((r) => !((r.id === 'claude.5h' && !shown.claude5h) || (r.id === 'claude.7d' && !shown.claude7d)))
 }
 
 const DEFAULTS: UsageSettings = {
@@ -63,7 +111,7 @@ function normalize(c: UsageSettings | null): UsageSettings {
  * `usage:update`. Tokens/cookies never leave the main process; only computed
  * percentages and labels are sent.
  */
-export function registerUsageIpc(hooks: UsageIpcHooks): void {
+export function registerUsageIpc(hooks: UsageIpcHooks): UsageHandle {
   const { getSender, getInitialConfig } = hooks
   let cfg = normalize(getInitialConfig())
 
@@ -76,16 +124,23 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
 
   let claudeTimer: NodeJS.Timeout | null = null
   let codexTimer: NodeJS.Timeout | null = null
-  let claudeBusy = false
+  let claudeInFlight: Promise<void> | null = null
+  // Bumped by refreshClaudeNow (account switch): a fetch that started before
+  // it belongs to the previous account and is dropped.
+  let claudeGen = 0
   let codexInFlight: Promise<void> | null = null
   let configDebounce: NodeJS.Timeout | null = null
   let codexTurnDebounce: NodeJS.Timeout | null = null
 
-  const snapshot = (): UsageSnapshot => ({
-    rows: [...claudePoll.rows, ...codexRows, ...customRows],
-    updatedAt: lastUpdated || Date.now(),
-    services: cfg.showStatus ? services : null,
-  })
+  const snapshot = (): UsageSnapshot => {
+    const activeAccount = hooks.accounts?.badge() ?? null
+    return {
+      rows: [...claudePoll.rows, ...codexRows, ...customRows],
+      updatedAt: lastUpdated || Date.now(),
+      services: cfg.showStatus ? services : null,
+      ...(activeAccount ? { activeAccount } : {}),
+    }
+  }
 
   const emit = (): void => {
     const wc = getSender()
@@ -110,31 +165,40 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
    * rows the cache does not hold. Timer, focus and Refresh ticks never call
    * the endpoint while it asked us to back off (the cache stays, flagged stale).
    */
-  async function refreshClaude(bypassBackoff = false): Promise<void> {
-    if (claudeBusy) return
-    claudeBusy = true
-    let next = cfg.claudeIntervalMs
-    try {
-      const t = Date.now()
-      if (bypassBackoff || claudePoll.canFetch(t)) {
-        const res = await fetchClaudeUsage(cfg.rows)
-        // A lone transient failure (timeout/5xx/429) used to flip the bars to
-        // "Error" for one cycle. ClaudePoll holds the last-good rows (flagged
-        // stale) through a short grace window so only a sustained outage
-        // surfaces. Expired/nodata aren't all-error, so those still show at once.
-        next = claudePoll.apply(res, cfg.claudeIntervalMs, Date.now())
-      } else {
-        next = claudePoll.skipDelay(cfg.claudeIntervalMs, t)
+  function refreshClaude(bypassBackoff = false): Promise<void> {
+    if (claudeInFlight) return claudeInFlight
+    const run = (async (): Promise<void> => {
+      let next = cfg.claudeIntervalMs
+      const gen = claudeGen
+      try {
+        hooks.accounts?.reconcile()
+        const t = Date.now()
+        if (bypassBackoff || claudePoll.canFetch(t)) {
+          const res = await (hooks.fetchClaude ?? fetchClaudeUsage)(claudeFetchFlags(cfg.rows, hooks.accounts?.windowsNeeded() === true))
+          if (gen === claudeGen) {
+            hooks.accounts?.onActiveResult(res.rows, Date.now())
+            // A lone transient failure (timeout/5xx/429) used to flip the bars to
+            // "Error" for one cycle. ClaudePoll holds the last-good rows (flagged
+            // stale) through a short grace window so only a sustained outage
+            // surfaces. Expired/nodata aren't all-error, so those still show at once.
+            next = claudePoll.apply({ ...res, rows: displayRows(res.rows, cfg.rows) }, cfg.claudeIntervalMs, Date.now())
+          }
+        } else {
+          next = claudePoll.skipDelay(cfg.claudeIntervalMs, t)
+        }
+        customRows = computeCustomRows(cfg.custom)
+        services = cfg.showStatus ? await fetchServiceStatus() : null
+        lastUpdated = Date.now()
+      } catch (err) {
+        console.error('[usage] claude refresh failed:', err instanceof Error ? err.name : 'error')
+      } finally {
+        armClaude(next)
       }
-      customRows = computeCustomRows(cfg.custom)
-      services = cfg.showStatus ? await fetchServiceStatus() : null
-      lastUpdated = Date.now()
-    } catch (err) {
-      console.error('[usage] claude refresh failed:', err)
-    } finally {
-      claudeBusy = false
-      armClaude(next)
-    }
+    })()
+    claudeInFlight = run.finally(() => {
+      claudeInFlight = null
+    })
+    return claudeInFlight
   }
 
   /** Concurrent callers share the in-flight read; a forced one runs once more right after it. */
@@ -187,10 +251,12 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
   }
   schedule()
 
-  ipcMain.handle(CH.USAGE_GET, async (): Promise<UsageSnapshot> => {
+  const load = async (): Promise<UsageSnapshot> => {
     if (lastUpdated === 0 && cfg.enabled) await refreshAll()
     return snapshot()
-  })
+  }
+
+  ipcMain.handle(CH.USAGE_GET, load)
 
   ipcMain.handle(CH.USAGE_REFRESH, async (): Promise<UsageSnapshot> => {
     await refreshAll(true)
@@ -217,4 +283,20 @@ export function registerUsageIpc(hooks: UsageIpcHooks): void {
       void refreshAll(false, true).then(emit)
     }, 400)
   })
+
+  return {
+    get: snapshot,
+    load,
+    enabled: () => cfg.enabled,
+    republish: emit,
+    intervalMs: () => cfg.claudeIntervalMs,
+    async refreshClaudeNow(): Promise<void> {
+      claudeGen += 1
+      claudePoll.reset()
+      emit()
+      if (claudeInFlight) await claudeInFlight
+      if (cfg.enabled) await refreshClaude(true)
+      emit()
+    },
+  }
 }

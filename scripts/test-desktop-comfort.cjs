@@ -143,6 +143,12 @@ async function main() {
     check(items().some(t => t.dedupeKey === 'agent:b2'), 'a same-state update keeps the card')
     r.onAgentStatus({ paneId: 'b2', state: 'working', precise: true, notify: false, provider: 'codex' })
     check(!items().some(t => t.dedupeKey === 'agent:b2'), 'answering in the console (state leaves action) closes the card')
+    // v2.3: an answer from any device flips attention to false while the state stays action.
+    r.onAgentStatus({ paneId: 'b2', state: 'action', precise: true, notify: true, delivery: 'inApp', provider: 'codex', attention: true })
+    r.onAgentStatus({ paneId: 'b2', state: 'action', precise: true, notify: false, provider: 'codex', attention: true })
+    check(items().some(t => t.dedupeKey === 'agent:b2'), 'attention true keeps the card')
+    r.onAgentStatus({ paneId: 'b2', state: 'action', precise: true, notify: false, provider: 'codex', attention: false })
+    check(!items().some(t => t.dedupeKey === 'agent:b2'), 'the same state with attention false (answered on the phone) closes the card')
     r.onAgentStatus({ paneId: 'b2', state: 'action', precise: false, notify: true, delivery: 'inApp', provider: 'claude' })
     check(items().find(t => t.dedupeKey === 'agent:b2').title === 'Claude se detuvo en Beta / Web, revisá la consola', 'an approximate (title-only) stop gets the generic copy, like the native notification')
     r.onAgentStatus({ paneId: 'b2', state: 'working', precise: false, notify: false, provider: 'claude' })
@@ -253,7 +259,13 @@ async function main() {
       require: id => id === 'electron' ? { ipcMain: { handle: (ch, fn) => { handlers[ch] = fn }, on: (ch, fn) => { handlers[ch] = fn } } } : require(id),
     })
     const calls = []
-    registerPtyIpc({ killPanes: ids => { calls.push(['kill', ids]); return ids.length }, reconcile: ids => { calls.push(['rec', ids]); return 0 } })
+    const submits = []
+    registerPtyIpc({ killPanes: ids => { calls.push(['kill', ids]); return ids.length }, reconcile: ids => { calls.push(['rec', ids]); return 0 }, submitToPane: (...args) => { submits.push(args); return Promise.resolve({ ok: true }) } })
+    // v2.3: pty:submit takes origin 'auto' only; anything else is the user.
+    handlers['pty:submit'](null, { ptyId: 'p', text: 'x', enter: false, origin: 'auto' })
+    handlers['pty:submit'](null, { ptyId: 'p', text: 'x', enter: false, origin: 'robot' })
+    handlers['pty:submit'](null, { ptyId: 'p', text: 'x', enter: true })
+    check(submits.map(a => a[4]).join() === 'auto,user,user' && submits[2][3] === true, 'pty:submit validates origin in main (auto or user) and keeps enter')
     check(handlers['pty:killPanes'](null, ['x', 7, 'y']) === 2 && calls[0][1].join() === 'x,y', 'pty:killPanes keeps only string ids')
     check(handlers['pty:reconcile'](null, 'nope') === 0 && calls.length === 1, 'pty:reconcile ignores a non-array payload instead of killing everything')
     handlers['pty:reconcile'](null, ['x'])

@@ -173,6 +173,70 @@ function testToRemoteStatus(api) {
   check(out.state === 'action' && out.precise === false && out.reason === 'permission' && out.pendingCount === 1 && out.lastMessage === 'hi' && out.activity === 'Bash' && out.pending.length === 1 && out.stateSince === 1000, 'toRemoteStatus copies the contract fields')
   check(!('precise' in api.toRemoteStatus(evt('p1', 'idle'))), 'precise is omitted when true (absent = true)')
   check(api.toRemoteStatus(evt('p1', null)) === null, 'a cleared status maps to null')
+  // v2.3 attention: true and false are copied (false explicitly), absent stays absent.
+  check(api.toRemoteStatus(evt('p1', 'done', { attention: true })).attention === true && api.toRemoteStatus(evt('p1', 'action', { attention: false })).attention === false, 'toRemoteStatus copies attention true and false')
+  check(!('attention' in api.toRemoteStatus(evt('p1', 'done'))), 'toRemoteStatus omits attention when the desktop sends none')
+  // v2.3 agentTune read-back: model, effort and ultracode (false too) are copied; absent stays absent.
+  const tuned = api.toRemoteStatus(evt('p1', 'idle', { model: 'claude-opus-4-5', effort: 'high', ultracode: false }))
+  check(tuned.model === 'claude-opus-4-5' && tuned.effort === 'high' && tuned.ultracode === false, 'toRemoteStatus copies model, effort and ultracode')
+  check(['model', 'effort', 'ultracode'].every(k => !(k in api.toRemoteStatus(evt('p1', 'idle')))), 'toRemoteStatus omits the tune fields when unknown')
+}
+
+/** v2.3 attention: a flip goes out, and a phone looking at a pane acknowledges it. */
+async function testAttention() {
+  const w = world()
+  w.manager.pushState(snapshot)
+  const seen = []
+  w.manager.setPaneSeenListener(id => seen.push(id))
+  const { ws } = await pair(w)
+  const frames = () => ws.of('paneStatus').filter(f => f.paneId === 'p1')
+  w.manager.pushPaneStatus(evt('p1', 'action', { reason: 'permission', pendingCount: 1, attention: true }))
+  w.manager.pushPaneStatus(evt('p1', 'action', { reason: 'permission', pendingCount: 1, attention: false }))
+  check(frames().length === 2 && frames()[1].status.attention === false && frames()[1].status.state === 'action', 'an attention flip with the same state sends a new frame at once')
+  w.manager.pushPaneStatus(evt('p1', 'done', { attention: true }))
+  w.manager.pushPaneStatus(evt('p1', 'done', { attention: false }))
+  check(frames().length === 4 && frames()[3].status.attention === false, 'a done acknowledged elsewhere reaches the phone too')
+
+  // onPaneSeen: only an authenticated session with its page visible.
+  ws.msg({ type: 'sub', paneId: 'p1' })
+  check(seen.length === 0, 'a sub with the page hidden (no visibility yet) is not seen')
+  ws.msg({ type: 'chatSub', paneId: 'p2' })
+  check(seen.length === 0, 'neither a chatSub while hidden')
+  ws.msg({ type: 'visibility', visible: true })
+  check(seen.slice().sort().join() === 'p1,p2', 'visibility true acknowledges every pane the session holds, subs and chatSubs')
+  ws.msg({ type: 'visibility', visible: false })
+  check(seen.length === 2, 'visibility false acknowledges nothing')
+  ws.msg({ type: 'visibility', visible: true })
+  check(seen.length === 4, 'coming back on screen acknowledges again')
+  ws.msg({ type: 'unsub', paneId: 'p1' })
+  ws.msg({ type: 'sub', paneId: 'p1' })
+  check(seen.at(-1) === 'p1' && seen.length === 5, 'a sub with the page visible acknowledges the pane')
+  ws.msg({ type: 'chatUnsub', paneId: 'p2' })
+  ws.msg({ type: 'chatSub', paneId: 'p2' })
+  check(seen.at(-1) === 'p2' && seen.length === 6, 'a chatSub with the page visible acknowledges the pane')
+  const stranger = w.socket()
+  stranger.msg({ type: 'hello', clientNonce: 'dd'.repeat(32) })
+  stranger.msg({ type: 'visibility', visible: true })
+  stranger.msg({ type: 'sub', paneId: 'p1' })
+  check(seen.length === 6, 'before auth nothing is acknowledged')
+
+  // isPaneSeen counts the Chat view; isPaneViewed stays as the ntfy contract.
+  ws.msg({ type: 'unsub', paneId: 'p1' })
+  check(w.manager.isPaneSeen('p2') && !w.manager.isPaneViewed('p2'), 'a visible chatSub is seen but not "viewed" (ntfy unchanged)')
+  check(!w.manager.isPaneSeen('p1'), 'a pane the phone left is not seen')
+  w.advance(31000)
+  check(!w.manager.isPaneSeen('p2'), 'silent for more than 30s: no longer seen')
+  ws.msg({ type: 'ping', t: 1 })
+  check(w.manager.isPaneSeen('p2'), 'a ping refreshes it')
+  ws.msg({ type: 'visibility', visible: false })
+  check(!w.manager.isPaneSeen('p2'), 'a hidden page sees nothing')
+  // A throwing listener never breaks the socket.
+  w.manager.setPaneSeenListener(() => { throw new Error('boom') })
+  ws.msg({ type: 'visibility', visible: true })
+  ws.msg({ type: 'ping', t: 2 })
+  check(ws.of('pong').some(p => p.t === 2) && ws.closed === null, 'a throwing seen listener never breaks the session')
+  w.manager.applyConfig({ enabled: false, port: 4600 })
+  check(!w.manager.isPaneSeen('p2'), 'server off: nothing is seen')
 }
 
 async function testOverlay() {
@@ -440,7 +504,8 @@ async function testAgentResume() {
   const snApi = {
     platform: 'win32',
     config: { save() {} },
-    pty: { killPanes: async () => 0, submit: async () => ({ ok: true }), write: (req) => ptyWrites.push(req) },
+    // v2.3: the agent-end command goes through pty.submit with origin 'auto' (no attention ack).
+    pty: { killPanes: async () => 0, submit: async (req) => { if (req.origin === 'auto') ptyWrites.push({ ptyId: req.ptyId, data: req.text, enter: req.enter }); return { ok: true } }, write: (req) => ptyWrites.push(req) },
     window: { reveal() {} },
     system: { openExternal() {} },
     remote: { onCommand: (cb) => { snApi._cmd = cb; return () => {} }, commandResult: (res) => results.push(res), pushState: (st) => states.push(st) },
@@ -492,6 +557,7 @@ async function testAgentResume() {
   const desk = r.agentEndCommands({ evt: { sessionId: UUID, cwd: 'C:\\repo' }, shellKind: 'powershell', preset: claude, initialCommand: 'claude --model opus' })
   res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'resume' })
   check(res.ok && ptyWrites.length === 1 && ptyWrites[0].ptyId === 'pty-1' && ptyWrites[0].data === resumeText && ptyWrites[0].data === desk.resume + '\r', 'Resume types the desktop chip\'s cd prefix + --resume command with a bare CR')
+  check(ptyWrites[0].enter === false, 'v2.3: the command goes as origin auto with no extra Enter (its own bare CR)')
   check(S.getState().agentEnded.p1 === undefined, 'the first action clears the offer')
   res = ctl({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'new' })
   check(!res.ok && res.error === 'stale' && ptyWrites.length === 1, 'a second action acks stale and types nothing')
@@ -638,6 +704,8 @@ function testRateUnits(api) {
   check(['chatSub', 'chatUnsub', 'chatMore', 'historyReq', 'gitReq'].every(type => limited({ type })), 'the v3.0 message types are limited')
   check(['fitPane', 'releaseFit', 'sendReviewNotes'].every(kind => limited({ type: 'ctl', action: { kind } })), 'the v3.0 ctl kinds are limited')
   check(['scheduleRun', 'scheduleToggle'].every(kind => limited({ type: 'ctl', action: { kind, workspaceId: 'w1', paneId: 'p1' } })), 'the v3.1 schedule ctl kinds are limited (R31-00)')
+  check(limited({ type: 'ctl', action: { kind: 'agentTune', workspaceId: 'w1', paneId: 'p1', set: { kind: 'picker' }, enter: false } }), 'agentTune (app 2.3.0) is limited')
+  check(limited({ type: 'ctl', action: { kind: 'claudeAccountUse', role: 'secondary' } }) && api.RATE_LIMITED_CTL_KINDS.has('claudeAccountUse'), 'claudeAccountUse (app 2.3.0) is limited')
   check(!limited({ type: 'ctl', action: { kind: 'runQuickCommand' } }), 'runQuickCommand (v2.2) stays outside the bucket')
   check(limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1', resume: { provider: 'claude', sessionId: 'x' } } }), 'createPane with resume is limited')
   check(!limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1' } }), 'a plain createPane is not')
@@ -926,6 +994,15 @@ async function testAutomationRelay() {
   check(!frame({ kind: 'scheduleRun', workspaceId: 'w1' }) && !frame({ kind: 'scheduleRun', paneId: 'c1' }) && !frame({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'x'.repeat(129) }), 'scheduleRun needs workspaceId and paneId within 128')
   check(!frame({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1' }) && !frame({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: 'true' }), 'scheduleToggle needs a boolean enabled')
   check(!('prompt' in frame({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1', prompt: 'rm -rf /' }).action), 'a phone can never send the text of a run')
+  // app 2.3.0 agentTune: only allowlisted values, a boolean enter.
+  const tune = (set, enter = false) => frame({ kind: 'agentTune', workspaceId: 'w1', paneId: 'c1', set, enter })
+  check([{ kind: 'model', value: 'opus' }, { kind: 'model', value: 'sonnet[1m]' }, { kind: 'model', value: 'claude-opus-4-5-20251101' }, { kind: 'effort', value: 'max' }, { kind: 'effort', value: 'auto' }, { kind: 'ultracode', on: true }, { kind: 'picker' }].every(set => !!tune(set)), 'the ctl schema accepts every allowlisted agentTune set')
+  check([{ kind: 'model', value: 'opus; rm -rf /' }, { kind: 'model', value: 'claude-x y' }, { kind: 'model', value: 'claude-x\n/exit' }, { kind: 'model', value: 'gpt-5' }, { kind: 'effort', value: 'ultra' }, { kind: 'ultracode', on: 'on' }, { kind: 'text', value: '/exit' }].every(set => !tune(set)), 'free text, unknown efforts and other sets are refused')
+  check(!frame({ kind: 'agentTune', workspaceId: 'w1', paneId: 'c1', set: { kind: 'picker' } }) && !tune({ kind: 'picker' }, 'yes'), 'agentTune needs a boolean enter')
+  check(!('text' in tune({ kind: 'picker', text: '/exit' }).action.set), 'a stray text in the set is stripped')
+  // app 2.3.0 claudeAccountUse: a role only, behind the bucket.
+  check(!!frame({ kind: 'claudeAccountUse', role: 'secondary' }) && !!frame({ kind: 'claudeAccountUse', role: 'primary' }), 'the ctl schema accepts claudeAccountUse with a role')
+  check(!frame({ kind: 'claudeAccountUse', role: 'x' }) && !frame({ kind: 'claudeAccountUse' }) && !frame({ kind: 'claudeAccountUse', role: 'acc_0123456789ab' }), 'claudeAccountUse refuses any other role (no ids from the phone)')
 
   // Main relays both to the renderer as they are and keeps the new snapshot fields.
   const w = world()
@@ -949,6 +1026,19 @@ async function testAutomationRelay() {
   const count = w.commands.length
   ws.msg({ type: 'ctl', id: 'a2', action: { kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: 1 } })
   check(w.commands.length === count && !ws.of('ctlAck').some(a => a.id === 'a2'), 'a malformed scheduleToggle never reaches the renderer')
+
+  // app 2.3.0: claudeAccountUse reaches the executor at most 3 times a minute per device.
+  const before = w.commands.length
+  for (let i = 0; i < 4; i++) ws.msg({ type: 'ctl', id: `acc${i}`, action: { kind: 'claudeAccountUse', role: i % 2 ? 'primary' : 'secondary' } })
+  await new Promise(resolve => setImmediate(resolve))
+  const relayedUses = w.commands.slice(before).filter(c => c.action.kind === 'claudeAccountUse')
+  const rateAck = ws.of('ctlAck').find(a => a.id === 'acc3')
+  check(relayedUses.length === 3 && relayedUses[0].action.role === 'secondary', 'three claudeAccountUse in a minute reach the renderer')
+  check(rateAck && !rateAck.ok && rateAck.error === 'rate' && !ws.closed, 'the fourth is acked rate without reaching it (no strike)')
+  w.advance(60_001)
+  ws.msg({ type: 'ctl', id: 'acc4', action: { kind: 'claudeAccountUse', role: 'secondary' } })
+  await new Promise(resolve => setImmediate(resolve))
+  check(w.commands.filter(c => c.action.kind === 'claudeAccountUse').length === 4, 'a minute later the device may switch again')
 }
 
 async function main() {
@@ -960,6 +1050,7 @@ async function main() {
   await testDataPlane()
   await testHome()
   await testNotify()
+  await testAttention()
   await testAgentResume()
   await testHttpToken()
   testRateUnits(w.api)

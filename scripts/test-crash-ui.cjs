@@ -1,7 +1,8 @@
 // Error boundaries (E4-FR-19, 20) with the production TilingGrid, PaneCell,
 // xterm and TitleBar in an isolated hidden Electron window. The pty is a fake:
 // no shell, no user config. Checks that no boundary kills a pty (FR-36), that
-// [Reload console] reattaches with the replay, and the fallbacks' controls.
+// [Reload console] reattaches with the replay, the fallbacks' controls and that a
+// console stopped by snaos kill remounts with its exit card (app 2.3.0).
 // Requires npm run build (for the CSS).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -21,7 +22,8 @@ import {I18nProvider} from './src/renderer/i18n';
 import {useAppStore} from './src/renderer/lib/store';
 import {initPtyLifecycle} from './src/renderer/lib/ptyLifecycle';
 import {setDevThrow} from './src/renderer/lib/devHooks';
-import {getPtyId} from './src/renderer/lib/ptyRegistry';
+import {getPtyId, killPanePtys} from './src/renderer/lib/ptyRegistry';
+import {markStopped, isStopped} from './src/renderer/lib/stoppedPanes';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 const calls={kill:[],killPanes:[],reattach:[],spawn:[],reload:0,reports:[],clip:[],win:[]};
 const alive=new Set(), subs=[];
@@ -48,7 +50,10 @@ createRoot(document.getElementById('root'),{onCaughtError:(e,info)=>{if(!isSnBou
   <AppErrorBoundary><div id="body" className="min-h-0 flex-1"><Grid/></div></AppErrorBoundary>
  </div><NotificationStack/></I18nProvider>);
 const text=sel=>document.querySelector(sel)?.textContent||'';
-window.smoke={calls,setDevThrow,getPtyId,
+window.smoke={calls,setDevThrow,getPtyId,isStopped,
+ stop:id=>{markStopped(id);killPanePtys([id])},
+ remount:id=>useAppStore.setState(s=>({paneEpoch:{...s.paneEpoch,[id]:(s.paneEpoch[id]??0)+1}})),
+ restartClean:id=>useAppStore.getState().restartPaneClean(id),
  ready:()=>calls.spawn.length>=2&&document.querySelectorAll('.xterm').length>=2,
  emit:(ptyId,data)=>subs.forEach(cb=>cb({ptyId,data})),
  has:sel=>!!document.querySelector(sel),text,
@@ -119,6 +124,16 @@ app.whenReady().then(async()=>{
  ok(JSON.stringify(await js('smoke.calls.killPanes.at(-1)'))==='["p2"]','closing from the fallback X kills that pty (pty lifecycle)');
  ok(!(await js("smoke.has('[data-pane-cell-fallback]')")),'the closed pane leaves the grid');
 
+ // app 2.3.0: a console stopped by snaos kill (no --close) stays stopped across a remount.
+ const sp0=await js('smoke.calls.spawn.length');
+ await js("smoke.stop('p1')");await settle();
+ await js("smoke.remount('p1')");await settle();
+ for(let i=0;i<20&&!(await js("smoke.has('[data-exit-card]')"));i++)await wait(100);
+ ok((await js("smoke.has('[data-exit-card]')")) && (await js('smoke.calls.spawn.length'))===sp0 && (await js("smoke.calls.reattach.at(-1)"))==='p1','a stopped console remounts with its exit card and spawns nothing');
+ await js("smoke.restartClean('p1')");await settle();
+ for(let i=0;i<30&&(await js('smoke.calls.spawn.length'))===sp0;i++)await wait(100);
+ ok((await js('smoke.calls.spawn.length'))===sp0+1 && !(await js("smoke.isStopped('p1')")) && !(await js("smoke.has('[data-exit-card]')")),'an explicit restart clears the stop and spawns again');
+
  // FR-20: title bar and app body fallbacks.
  await js("smoke.setDevThrow('titlebar')");await settle();
  ok(await js("smoke.has('[data-titlebar-fallback].app-drag')"),'title bar fallback is a drag strip');
@@ -136,7 +151,7 @@ app.whenReady().then(async()=>{
  ok(!(await js('smoke.overflow()')),'no horizontal overflow');
  await shot('app-fallback');
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' crash UI checks (pane and cell fallbacks keep ptys, reload reattaches with replay, restart threshold, title bar and app fallbacks); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' crash UI checks (pane and cell fallbacks keep ptys, reload reattaches with replay, restart threshold, snaos kill stop across a remount, title bar and app fallbacks); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

@@ -209,6 +209,7 @@ async function tickerChecks() {
   setSched('p1', { ...schedOf('p1'), dueAt: now - 500 })
   r.schedulerTick(now)
   check(submits.length === 1 && submits[0].ptyId === 'pty-p1' && submits[0].paneId === 'p1' && submits[0].text === 'npm test' && submits[0].enter === true, 'due: the prompt goes through pty.submit with Enter')
+  check(submits[0].origin === 'auto', 'v2.3: a scheduled prompt goes as origin auto (it never acknowledges a done)')
   r.schedulerTick(now)
   check(submits.length === 1, 'a run in flight is never sent twice')
   await flush()

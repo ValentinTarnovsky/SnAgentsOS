@@ -88,6 +88,12 @@ export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | n
   if (evt.activity) out.activity = evt.activity
   if (evt.pending?.length) out.pending = evt.pending
   if (evt.waiting) out.waiting = evt.waiting
+  // v2.3: false goes out explicitly (it clears the phone's marks); absent = an older desktop.
+  if (evt.attention !== undefined) out.attention = evt.attention
+  // v2.3 (agentTune read-back): already bounded by main.
+  if (evt.model) out.model = evt.model
+  if (evt.effort) out.effort = evt.effort
+  if (evt.ultracode !== undefined) out.ultracode = evt.ultracode
   return out
 }
 
@@ -150,6 +156,8 @@ export class RemoteManager {
   /** Phone presence observer (AwakeService: an agent in `action` + a phone keeps the PC awake). */
   private phoneListener: ((connected: boolean) => void) | null = null
   private phoneNotified = false
+  /** v2.3: a phone looked at a pane (StatusManager.ackPane). */
+  private paneSeenListener: ((paneId: string) => void) | null = null
   /** paneStatus dedupe: the serialized status each pane last went out with. */
   private readonly statusSent = new Map<string, string>()
   /** paneStatus coalesce: latest status held per pane until its timer fires. */
@@ -460,6 +468,7 @@ export class RemoteManager {
       // E3-FR-44/46: the VAPID key only while https is on.
       getPushKey: () => (this.httpsWanted ? this.push.publicKey() : null),
       getSecureUrl: () => this.secureUrl(),
+      onPaneSeen: (paneId) => this.paneSeenListener?.(paneId),
     })
     this.ptyManager.addSink(this.sessions)
     // A pty spawning/exiting flips a pane's `running`; re-broadcast so phones
@@ -787,6 +796,16 @@ export class RemoteManager {
   /** A phone is watching this pane right now (subscribed, page visible, fresh); ntfy skips it. */
   isPaneViewed(paneId: string): boolean {
     return this.sessions?.isPaneViewed(paneId) ?? false
+  }
+
+  /** v2.3: a phone looks at this pane right now, Terminal or Chat (attention acks). */
+  isPaneSeen(paneId: string): boolean {
+    return this.sessions?.isPaneSeen(paneId) ?? false
+  }
+
+  /** v2.3: called when a phone with its page visible opens a pane or comes back to it. */
+  setPaneSeenListener(cb: ((paneId: string) => void) | null): void {
+    this.paneSeenListener = cb
   }
 
   // --- Git API for the phone (E7-FR-22..26) ------------------------------------

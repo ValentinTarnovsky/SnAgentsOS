@@ -7,6 +7,7 @@
  * - each `extraSecrets` value of 4+ characters -> `<redacted>`
  * - Discord webhook URLs -> `<discord-webhook>`
  * - hex runs of 32+ characters (tokens, hashes) -> `<redacted>`
+ * - Claude OAuth tokens (`sk-ant-oat01-...`) -> `<redacted>`, emails -> `<email>`
  * - `#pair=...` fragments -> `#pair=<redacted>`
  * - the `home` folder -> `~` (case-insensitive for a Windows path)
  * - private IPv4 (RFC 1918 and 100.64/10) -> `a.b.x.x` (unless `keepIps`)
@@ -53,6 +54,9 @@ export function redact(text: string, opts: RedactOptions = {}): string {
   for (const s of secrets) out = out.split(s).join('<redacted>')
   out = out.replace(/discord(?:app)?\.com\/api\/webhooks\/\d+\/[\w-]+/gi, '<discord-webhook>')
   out = out.replace(/\b[0-9a-f]{32,}\b/gi, '<redacted>')
+  // Claude OAuth tokens (sk-ant-oat01-..., sk-ant-ort01-..., app 2.3.0) and emails.
+  out = out.replace(/sk-ant-[a-z]{2,4}\d{2}-[A-Za-z0-9_-]{20,}/g, '<redacted>')
+  out = out.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, '<email>')
   out = out.replace(/#pair=[^\s]+/g, '#pair=<redacted>')
   if (opts.home) {
     const windows = /^[A-Za-z]:[\\/]/.test(opts.home) || opts.home.startsWith('\\\\')

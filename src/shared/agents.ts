@@ -108,8 +108,12 @@ export function decideLaunch(i: LaunchInput): LaunchDecision {
 /**
  * Urgency rank shared by the palette, sidebar rows and the board (E5-FR-15):
  * 1 action/error, 2 done (unread first via `unread`), 3 working, 4 the rest.
+ * v2.3: with main's `attention` false an answered action ranks as working
+ * and an acknowledged error as done; absent = the state alone.
  */
-export function agentRank(state: ClaudePaneState | null | undefined): 1 | 2 | 3 | 4 {
+export function agentRank(state: ClaudePaneState | null | undefined, attention?: boolean): 1 | 2 | 3 | 4 {
+  if (attention === false && state === 'action') return 3
+  if (attention === false && state === 'error') return 2
   if (state === 'action' || state === 'error') return 1
   if (state === 'done') return 2
   if (state === 'working') return 3

@@ -5,8 +5,8 @@
  * Pure types only - no zod, no Node, no DOM - because this file is bundled
  * into three targets: main, renderer and the mobile web client. Runtime
  * validation schemas live in remote-protocol-schemas.ts (main-only). It may
- * import only types.ts, git-types.ts and chat-types.ts, all import-free of
- * Node and DOM.
+ * import only types.ts, git-types.ts, chat-types.ts, ws-notes.ts and
+ * agentTune.ts, all import-free of Node and DOM.
  */
 import type {
   AgentProvider,
@@ -27,6 +27,8 @@ import type {
 import type { GitArea, GitDiffHunk, GitFileEntry, RemoteGitChip } from './git-types'
 import type { ChatMessage } from './chat-types'
 import type { WsNoteError, WsNoteMeta } from './ws-notes'
+import type { TuneSet } from './agentTune'
+import type { ClaudeAccountRole, UsageActiveAccount } from './claude-accounts'
 
 export type { RemotePending, RemoteGitChip }
 
@@ -69,6 +71,17 @@ export interface RemotePaneStatus {
   pending?: RemotePending[]
   /** v2.2: the agent waits on work it started; the state reads `working` meanwhile. */
   waiting?: AgentWaiting
+  /** v2.3: main's derived attention (PaneStatusEvt.attention), false sent explicitly. Absent = older desktop. */
+  attention?: boolean
+  /**
+   * v2.3 (agentTune): Claude's model (SessionStart, or the last tune applied
+   * with Enter), <= 64, one line. Absent = unknown.
+   */
+  model?: string
+  /** v2.3: Claude's effort level (every hook's effort.level, or the last tune), <= 16. */
+  effort?: string
+  /** v2.3: Ultracode as the last tune applied with Enter left it (no hook reports it). */
+  ultracode?: boolean
 }
 
 export interface RemotePaneInfo {
@@ -179,6 +192,8 @@ export interface RemoteUsageSnapshot {
   updatedAt: number
   /** Anthropic service health, when the status dot is enabled. */
   services?: 'operational' | 'degraded' | 'down' | null
+  /** app 2.3.0: the active Claude account (label and role, never the email); absent = no saved accounts or an older desktop. */
+  activeAccount?: UsageActiveAccount
 }
 
 /** An agent preset as the phone's console picker shows it (E2-FR-10/12). */
@@ -342,6 +357,25 @@ export type RemoteCtlAction =
    * rate.
    */
   | { kind: 'scheduleToggle'; workspaceId: string; paneId: string; enabled: boolean }
+  // --- app 2.3.0: model, effort and Ultracode from the phone ---
+  /**
+   * One allowlisted slash command (tuneCommand) into the agent console:
+   * Claude takes model / effort / ultracode, Codex only `picker` (`/model`).
+   * `enter` only with the phone's "Apply with Enter" switch: then the agent
+   * must be precise and at rest (tuneReady) with nothing unsent in its input
+   * box (checked in main), else ack `busy` and nothing is written. Errors:
+   * not_found, not_agent, unsupported, busy, not_running, rate. The phone
+   * sends it only to a desktop >= 2.3.0 (an older one strikes the kind).
+   */
+  | { kind: 'agentTune'; workspaceId: string; paneId: string; set: TuneSet; enter: boolean }
+  /**
+   * app 2.3.0: switch the Claude login to the saved account of that role
+   * (reason `phone`). Rate limited, plus 3 per minute per device in main.
+   * Errors: not_found, locked, unknown_live_account, identity_failed, busy,
+   * unsupported, encryption_unavailable, io, rate.
+   * The phone sends it only to a desktop >= 2.3.0.
+   */
+  | { kind: 'claudeAccountUse'; role: ClaudeAccountRole }
 
 // --- Git API for the phone's Changes screen (E7-FR-22..26) ---
 

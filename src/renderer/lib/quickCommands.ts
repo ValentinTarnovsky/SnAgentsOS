@@ -82,7 +82,8 @@ export async function runQuickCommand(cmd: QuickCommand): Promise<QuickRunResult
     if (!res.ok) {
       if (res.error === 'multiline_unsafe') toast.warning(tr('quick.toast.multiline'), { dedupeKey: 'quick' })
       else toast.error(tr('quick.toast.noConsole'), { dedupeKey: 'quick' })
-      return { ok: false, error: res.error }
+      // An ungated submit never answers `busy` (v2.3, only `readyFor` does).
+      return { ok: false, error: res.error === 'multiline_unsafe' ? 'multiline_unsafe' : 'not_running' }
     }
     // E4-FR-06: the toast names the command and the console it went to.
     const pane = s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.panes.find((p) => p.id === paneId)

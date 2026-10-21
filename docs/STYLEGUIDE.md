@@ -24,6 +24,7 @@ Reglas de UI y de copy para el desktop (`src/renderer`) y el cliente mobile (`sr
 | Panel sobre el grid de consolas (Notas, Archivos) | `ui/RightDrawer.tsx` (uno a la vez, junto con Cambios; `lib/sidePanels.ts`) | Modal, un panel fijo que achica el grid |
 | Mostrar Markdown en el desktop | `ui/MarkdownDoc.tsx` (tokens de `marked`, nunca HTML inyectado) | `dangerouslySetInnerHTML` |
 | Editar texto o codigo en el desktop | `editor/CodeEditor.tsx` (CodeMirror 6 con el tema de la app) | `<textarea>` para codigo |
+| Buscar y reemplazar dentro de un panel (editor de Notas y Archivos) | `ui/FindWidget.tsx` (flota arriba a la derecha, contador "3 de 12", Aa / palabra / regex; en CodeMirror via `editor/cmFind.tsx`) | El panel de busqueda de CodeMirror, una barra armada a mano |
 | Dictar en un campo del celu | `MicButton.tsx` + `VoiceInterim` (inserta en el cursor, nunca Enter) | Reconocimiento propio por campo |
 
 Si un primitivo se esta estilando para parecer otro, frenar: el manejo de foco es distinto y confunde al siguiente.

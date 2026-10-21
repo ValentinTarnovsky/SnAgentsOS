@@ -4,11 +4,12 @@
  * over the consoles (which stay mounted underneath), its left edge drags to
  * resize (kept per drawer in localStorage `snagentsos.drawer.<id>.width`),
  * it can cover the whole grid, and Esc closes it unless a field inside used
- * the key (the editor's search, a rename).
+ * the key (the editor's search, a rename). A click on a console beside it
+ * closes it (v2.3) unless it is pinned (`snagentsos.drawer.<id>.pinned`).
  */
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
-import { Maximize2, Minimize2, X } from 'lucide-react'
+import { Maximize2, Minimize2, Pin, PinOff, X } from 'lucide-react'
 import { useT } from '@/i18n'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { cn } from '@/lib/cn'
@@ -40,6 +41,54 @@ function saveWidth(id: string, width: number): void {
   }
 }
 
+function savedPinned(id: string): boolean {
+  try {
+    return storage()?.getItem(`snagentsos.drawer.${id}.pinned`) === '1'
+  } catch {
+    return false
+  }
+}
+
+function savePinned(id: string, pinned: boolean): void {
+  try {
+    if (pinned) storage()?.setItem(`snagentsos.drawer.${id}.pinned`, '1')
+    else storage()?.removeItem(`snagentsos.drawer.${id}.pinned`)
+  } catch {
+    /* blocked storage: the pin lasts this session */
+  }
+}
+
+/**
+ * Closes the drawer on a primary press on the grid beside it (a console, a pane
+ * header). A native capture listener on the grid wrapper: React would also bubble
+ * the presses of portaled menus and dialogs opened from the drawer, and anything
+ * outside the grid (sidebar, header toggles, titlebar, backdrops) never closes it.
+ * What has focus inside is blurred first, so a pending rename or new file commits.
+ * A press on something that takes the focus (a console, a field, a button) keeps
+ * it; one on a pane title or a gap gives the keyboard back to the last console.
+ */
+const TAKES_FOCUS = '.xterm, input, textarea, select, button, a[href], [contenteditable], [tabindex]'
+
+function useCloseOnOutsidePointer(rootRef: RefObject<HTMLDivElement | null>, enabled: boolean, onClose: (opts: { refocus: boolean }) => void): void {
+  const latest = useRef(onClose)
+  latest.current = onClose
+  useEffect(() => {
+    const scope = rootRef.current?.parentElement
+    if (!enabled || !scope) return
+    const onDown = (e: globalThis.PointerEvent): void => {
+      if (!e.isTrusted || e.button !== 0) return
+      const target = e.target as Element | null
+      if (!target || target.closest?.('[data-drawer]')) return
+      const root = rootRef.current
+      const active = document.activeElement
+      if (root && active instanceof HTMLElement && root.contains(active)) active.blur()
+      latest.current({ refocus: !target.closest(TAKES_FOCUS) })
+    }
+    scope.addEventListener('pointerdown', onDown, true)
+    return () => scope.removeEventListener('pointerdown', onDown, true)
+  }, [rootRef, enabled])
+}
+
 export function RightDrawer({
   id,
   title,
@@ -60,14 +109,18 @@ export function RightDrawer({
   defaultWidth: string
   maximized: boolean
   onMaximize: (on: boolean) => void
-  onClose: () => void
+  /** `refocus: false` when a click outside closed it on something that takes the focus itself. */
+  onClose: (opts?: { refocus?: boolean }) => void
   children: ReactNode
 }) {
   const t = useT()
   const reduced = useReducedMotion()
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [width, setWidth] = useState<number | null>(() => savedWidth(id))
+  const [pinned, setPinned] = useState(() => savedPinned(id))
   const drag = useRef<{ startX: number; startW: number; max: number } | null>(null)
+
+  useCloseOnOutsidePointer(rootRef, !pinned && !maximized, onClose)
 
   // The drawer takes the keyboard when it opens (unless something inside already has it).
   useEffect(() => {
@@ -142,13 +195,28 @@ export function RightDrawer({
         {icon}
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-text-primary">{title}</span>
         {actions}
+        <Tooltip label={pinned ? t('drawer.unpin') : t('drawer.pin')} side="bottom">
+          <button
+            type="button"
+            aria-label={pinned ? t('drawer.unpin') : t('drawer.pin')}
+            aria-pressed={pinned}
+            onClick={() => {
+              setPinned(!pinned)
+              savePinned(id, !pinned)
+            }}
+            className={cn(btn, pinned && 'bg-accent-violet/20 text-text-primary')}
+            data-drawer-pin={pinned ? 'on' : 'off'}
+          >
+            {pinned ? <PinOff size={14} /> : <Pin size={14} />}
+          </button>
+        </Tooltip>
         <Tooltip label={maximized ? t('drawer.restore') : t('drawer.maximize')} side="bottom">
           <button type="button" aria-label={maximized ? t('drawer.restore') : t('drawer.maximize')} onClick={() => onMaximize(!maximized)} className={btn} data-drawer-maximize>
             {maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
         </Tooltip>
         <Tooltip label={t('drawer.close')} side="bottom">
-          <button type="button" aria-label={t('drawer.close')} onClick={onClose} className={cn(btn)} data-drawer-close>
+          <button type="button" aria-label={t('drawer.close')} onClick={() => onClose()} className={cn(btn)} data-drawer-close>
             <X size={15} />
           </button>
         </Tooltip>

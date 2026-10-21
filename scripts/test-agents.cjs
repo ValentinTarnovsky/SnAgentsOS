@@ -373,6 +373,14 @@ function testNavigation() {
   check(nav.paletteWaiting(many, null).length === 6, 'paletteWaiting: at most 6 rows')
   check(nav.waitingIds(all).join() === 'm,a,b', 'waitingIds: action/error longest waiting first, then unread done')
   check(nav.waitingIds(nav.allAgents({ ...input, paneAttention: {} })).join() === 'm,a', 'waitingIds: a seen done is not waiting')
+  // v2.3 attention: main's derived flag ranks and marks unread.
+  const A = load('src/shared/agents.ts')
+  check(A.agentRank('action') === 1 && A.agentRank('action', true) === 1 && A.agentRank('action', false) === 3 && A.agentRank('error', false) === 2 && A.agentRank('error') === 1 && A.agentRank('done', false) === 2 && A.agentRank('working', false) === 3 && A.agentRank('idle') === 4, 'agentRank(state, attention): an answered action ranks as working, an acked error as done, absent = the state alone')
+  const att = { ...input, paneAttention: {}, paneStatus: { ...input.paneStatus, a: { state: 'action', precise: true, stateSince: 300, attention: false }, b: { state: 'done', precise: true, stateSince: 100, attention: true }, m: { state: 'error', precise: true, stateSince: 50, attention: false } } }
+  const attAll = nav.allAgents(att)
+  check(nav.waitingIds(attAll).join() === 'b', 'waitingIds: an answered action and an acknowledged error are not waiting; an unseen done (attention true) is')
+  check(attAll.find(e => e.id === 'b').unread && !attAll.find(e => e.id === 'm').unread, 'unread comes from attention')
+  check(nav.allAgents({ ...att, paneAttention: { m: true } }).find(e => e.id === 'm').unread, 'the CLI mark (paneAttention) still reads unread')
 
   // Next waiting: three in action, three presses walk them, the fourth wraps.
   const ids = ['p1', 'p2', 'p3']
@@ -402,6 +410,7 @@ function testNavigation() {
   check(nav.agentPhrase(entry({ state: 'working', precise: true }), T, 'es', now) === 'Trabajando · 2m', 'agentPhrase working without detail')
   check(nav.agentPhrase(entry({ state: 'action', precise: true, reason: 'question', detail: { kind: 'question', text: 'Sigo?' } }), T, 'es', now) === 'Pregunta: Sigo?', 'agentPhrase action question')
   check(nav.agentPhrase(entry({ state: 'action', precise: true, reason: 'permission', detail: { kind: 'permission', text: 'Bash: npm test' } }), T, 'es', now) === 'Permiso: Bash: npm test', 'agentPhrase action permission')
+  check(nav.agentPhrase(entry({ state: 'action', precise: true, reason: 'permission', attention: false }), T, 'es', now) === 'Trabajando · 2m', 'v2.3: an answered action reads like the glyph (working)')
   check(nav.agentPhrase(entry({ state: 'action', precise: true, reason: 'plan' }), T, 'es', now) === 'Plan listo para revisar' && nav.agentPhrase(entry({ state: 'action', precise: false }), T, 'es', now) === 'Requiere tu intervención', 'agentPhrase action plan and generic')
   check(nav.agentPhrase(entry({ state: 'done', precise: true, lastMessage: 'Listo el fix\nmas texto' }), T, 'es', now) === 'Listo: Listo el fix · hace 2m', 'agentPhrase done: first line of the reply and "hace 2m"')
   check(nav.agentPhrase(entry({ state: 'error', precise: true }), T, 'es', now) === 'Detenido por un error' && nav.agentPhrase(entry({ state: 'unknown', precise: true }), T, 'es', now) === 'Sin conexión con el agente', 'agentPhrase error and unknown have no age')
@@ -631,7 +640,8 @@ async function testResumeModalFlow() {
         startupPending: async (ids) => ids.filter(id => !consumed.has(id)),
         forget: (id) => sent.forget.push(id), onChanged: () => () => {}, onReady: (cb) => { onReady = cb; return () => {} },
       },
-      pty: { kill: async () => {}, killPanes: async () => 0, write: (req) => sent.writes.push(req) },
+      // v2.3: the nudge goes through pty.submit with origin 'auto' (never an attention ack).
+      pty: { kill: async () => {}, killPanes: async () => 0, write: (req) => sent.writes.push(req), submit: async (req) => { sent.writes.push({ ptyId: req.ptyId, data: req.text, origin: req.origin, enter: req.enter }); return { ok: true } } },
       config: { save() {} },
     }
     const r = loadRenderer(`export * as launch from './agentLaunch'; export { useAppStore } from './store'; export { useAgentStore } from './agentStore'; export { registerPty } from './ptyRegistry'; export { resolveLaunch } from './launch'`, {
@@ -677,6 +687,7 @@ async function testResumeModalFlow() {
   check(h.sent.writes.length === 1 && h.sent.writes[0].ptyId === 'pty-a' && h.sent.writes[0].data === 'Continue where you left off.', 'the resumed working chat gets the nudge on its first idle (default text in the UI language)')
   h.t.advance(150)
   check(h.sent.writes.length === 2 && h.sent.writes[1].data === '\r', 'and the Enter 150 ms later')
+  check(h.sent.writes.every(w => w.origin === 'auto' && w.enter === false), 'v2.3: both nudge writes go as origin auto, never with an implicit Enter')
 
   // A renderer reload after the decision: nothing pending, no dialog.
   const again = build(consumed)

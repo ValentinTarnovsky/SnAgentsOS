@@ -39,18 +39,19 @@ function bytesOf(text: string): number {
  * Paste one prompt into a console through xterm (`term.paste`, never a raw
  * pty write) and, when asked and the console is an agent, press Enter after
  * `submitDelayFor(bytes)` on the same pty only. False when the console has no
- * live pty or mounted terminal.
+ * live pty or mounted terminal. v2.3: both writes go as `origin: 'auto'`, so a
+ * prompt inserted without Enter never clears the consoles' attention marks.
  */
 export function deliverPrompt(paneId: string, text: string, opts: { agent: boolean; enter: boolean }): boolean {
   const ptyId = getPtyId(paneId)
   if (!ptyId) return false
   const clean = promptText(text)
   const payload = opts.agent ? clean : oneLine(clean)
-  if (!payload || !pasteToPane(paneId, payload)) return false
+  if (!payload || !pasteToPane(paneId, payload, { auto: true })) return false
   if (opts.enter && opts.agent) {
     setTimeout(() => {
       // A console restarted in between never gets a stray Enter.
-      if (getPtyId(paneId) === ptyId) window.snApi.pty.write({ ptyId, data: '\r' })
+      if (getPtyId(paneId) === ptyId) window.snApi.pty.write({ ptyId, data: '\r', origin: 'auto' })
     }, submitDelayFor(bytesOf(payload)))
   }
   return true

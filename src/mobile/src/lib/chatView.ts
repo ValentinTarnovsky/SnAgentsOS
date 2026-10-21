@@ -40,6 +40,15 @@ export function resolvePaneView(saved: PaneView | undefined, chatDefault: boolea
   return saved ?? (chatDefault ? 'chat' : 'terminal')
 }
 
+/**
+ * What the "Chat not available" toast remembers per console (v2.3.0): the
+ * provider and whether the status is precise, or 'none' without a status.
+ * Never `state`: it changes on every turn and would bring the toast back.
+ */
+export function chatToastKey(status: RemotePaneStatus | null | undefined): string {
+  return status ? `${status.provider ?? ''}|${status.precise === false ? 'title' : 'precise'}` : 'none'
+}
+
 export function loadPaneViews(): Record<string, PaneView> {
   const out: Record<string, PaneView> = {}
   for (const key of storageKeys(PANE_VIEW_PREFIX)) {

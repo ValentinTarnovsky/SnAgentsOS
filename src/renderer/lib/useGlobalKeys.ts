@@ -13,6 +13,7 @@ import { translate } from '@/i18n'
 import { toggleChangesPanel } from './changesPanel'
 import { toggleSidePanel } from './sidePanels'
 import { panelKeyOf } from './changes'
+import { waitsOnUser } from '@shared/status'
 import {
   advanceWaiting,
   allAgents,
@@ -46,8 +47,9 @@ export function goToNextWaiting(now = Date.now()): string | null {
   // or done (revealing a done one clears its unread flag, not its state).
   const exists = (id: string): boolean => {
     const s = useAppStore.getState()
-    const state = s.paneStatus[id]?.state
-    return (state === 'action' || state === 'error' || state === 'done') && s.workspaces.some((w) => w.panes.some((p) => p.id === id))
+    const st = s.paneStatus[id], state = st?.state
+    // v2.3: an action already answered (main's attention false) is nobody waiting.
+    return (waitsOnUser(st) || state === 'error' || state === 'done') && s.workspaces.some((w) => w.panes.some((p) => p.id === id))
   }
   const step = advanceWaiting(waitingCursor, () => waitingIds(allAgents(navInputFrom(app, useAgentStore.getState()))), exists, now)
   waitingCursor = step.cursor

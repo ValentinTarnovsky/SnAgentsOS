@@ -254,6 +254,8 @@ export interface RemoteState {
   /** Push a toast with a kind and an optional console for [Go] (E2-FR-43). */
   pushToast: (toast: Omit<MobileToast, 'id'>) => void
   dismissToast: (id: number) => void
+  /** v2.3: drop the state toasts of one console (it changed state or no longer needs the user). */
+  dismissPaneToasts: (paneId: string) => void
   setScreen: (screen: LiveScreen) => void
   /**
    * The terminal showed (or stopped showing) paneId: it becomes lastPane and
@@ -372,6 +374,12 @@ export const useRemoteStore = create<RemoteState>((set) => ({
   dismissToast: (id) =>
     set((s) => {
       const toasts = s.toasts.filter((x) => x.id !== id)
+      if (toasts.length === s.toasts.length) return s
+      return { toasts, toast: toasts.at(-1)?.text ?? null }
+    }),
+  dismissPaneToasts: (paneId) =>
+    set((s) => {
+      const toasts = s.toasts.filter((x) => x.paneId !== paneId || !x.kind || x.kind === 'info')
       if (toasts.length === s.toasts.length) return s
       return { toasts, toast: toasts.at(-1)?.text ?? null }
     }),

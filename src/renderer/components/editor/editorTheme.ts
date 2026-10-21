@@ -29,23 +29,12 @@ export function editorTheme(tokens: ThemeTokens, light: boolean, fontFamily: str
       '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: 'color-mix(in srgb, var(--color-state-action) 55%, transparent)' },
       '.cm-foldPlaceholder': { backgroundColor: 'var(--color-card)', border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)' },
       '.cm-panels': { backgroundColor: 'var(--color-bg-secondary)', color: 'var(--color-text-primary)' },
-      '.cm-panels.cm-panels-top': { borderBottom: '1px solid var(--color-border)' },
+      // The find widget (cmFind.tsx) floats over the text: the top panel takes no room.
+      '.cm-panels.cm-panels-top': { backgroundColor: 'transparent', border: 'none', height: '0', overflow: 'visible' },
       '.cm-panels.cm-panels-bottom': { borderTop: '1px solid var(--color-border)' },
-      '.cm-search': { fontFamily: 'var(--font-sans)', fontSize: '12px' },
-      '.cm-textfield': {
-        backgroundColor: 'var(--color-bg-primary)',
-        color: 'var(--color-text-primary)',
-        border: '1px solid var(--color-border)',
-        borderRadius: '6px',
-        padding: '2px 6px',
-      },
-      '.cm-button': {
-        backgroundImage: 'none',
-        backgroundColor: 'var(--color-card)',
-        color: 'var(--color-text-primary)',
-        border: '1px solid var(--color-border)',
-        borderRadius: '6px',
-      },
+      // CodeMirror's own dialogs (Go to line, Ctrl+Alt+G) still open at the bottom.
+      '.cm-panels-bottom .cm-textfield': { backgroundColor: 'var(--color-bg-primary)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)', borderRadius: '6px' },
+      '.cm-panels-bottom .cm-button': { backgroundImage: 'none', backgroundColor: 'var(--color-card)', color: 'var(--color-text-primary)', border: '1px solid var(--color-border)', borderRadius: '6px' },
       '.cm-tooltip': { backgroundColor: 'var(--color-card)', border: '1px solid var(--color-border)', color: 'var(--color-text-primary)' },
     },
     { dark: !light },

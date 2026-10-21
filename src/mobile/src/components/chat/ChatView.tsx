@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Copy, Loader2, TextSelect } from 'lucide-react'
+import { displayStatus } from '@shared/status'
 import { client } from '../../lib/client'
 import { selectPaneChat, useChatStore } from '../../lib/chatStore'
 import { buildRows, messageText, type ChatRow } from '../../lib/chatModel'
@@ -120,7 +121,7 @@ export function ChatView({ paneId }: { paneId: string }): ReactNode {
   }, [chat.list.items, chat.version])
 
   // The working row appearing at the end keeps a reader at the end there.
-  const working = status?.state === 'working'
+  const working = displayStatus(status)?.state === 'working'
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (el && atEnd.current) el.scrollTop = el.scrollHeight

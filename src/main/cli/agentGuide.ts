@@ -31,8 +31,24 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
   idle, done, asking or failed (shells: no output for --quiet-ms).
 - \`snaos status ["<text>" | --clear]\`: shows or sets your console's status line (max 120).
 - \`snaos notify "<text>" [--title <t>] [--local]\`: desktop notification (and Discord/ntfy unless --local).
-- \`snaos note "<text>" [--task-state todo|doing|review|done] | --clear\`: workspace note.
+- \`snaos note "<text>" [--task-state todo|doing|review|done] | --clear\`: the one-line workspace
+  note of the sidebar (not the Markdown notes below).
+- \`snaos peek <console> [--lines N]\`: one look at a console: agent state, whether it needs the
+  user, pending requests, activity, last reply, model and effort when known, and its last N
+  screen lines (default 30).
+- \`snaos chat <console> [--turns N] [--before <cursor>] [--tools] [--thinking]\`: the conversation
+  of a Claude or Codex console from its transcript (default the last 3 turns, max 20).
+- \`snaos notes [ls]\`, \`notes get|new|set|append|rm|open\`: the workspace's Markdown notes (below).
 - \`snaos open <ws> [--console <c>]\` or \`snaos open --path <dir>\`: shows it on the desktop.
+  \`snaos focus <console>\` is the same as \`open --console\`.
+- \`snaos rename <console> <title>\`, \`snaos restart <console> [--resume | --fresh]\`,
+  \`snaos kill <console> [--close]\`: console control (see the rules below).
+- \`snaos ws new [<name>] [--path <dir>] [--focus] [--composer]\`, \`ws rename <ws> <name>\`,
+  \`ws fav <ws> [--off]\`, \`ws close <ws> --yes\`: workspaces. \`ws new\` takes the current folder
+  without \`--path\` and keeps the desktop on its workspace without \`--focus\`.
+- \`snaos usage [--provider claude|codex]\`: the Claude and Codex usage bars (percent and reset).
+- \`snaos account [status]\`, \`account ls\`, \`account use <primary|secondary|id|label>\`: the saved
+  Claude accounts (see below).
 - Add \`--json\` to any command for one line of JSON: \`{"ok":true,"data":...}\` or
   \`{"ok":false,"error":{"code","message"}}\`.
 
@@ -50,6 +66,48 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
   timeout, or run the wait in the background if your tool can.
 - \`send --enter\` followed by \`wait --idle\` returns only after the new turn started and ended;
   \`noTurnObserved: true\` means nothing happened in 10 s (check the console with \`read\`).
+- Never \`kill\`, \`restart\` or \`ws close\` a console or workspace unless the user asked for it.
+  None of them works on your own console or workspace, consoles with a Connection Profile
+  answer \`ssh_protected\`, and \`ws close\` always needs \`--yes\` (it ends every console there).
+- \`restart --resume\` keeps the agent's chat, \`--fresh\` starts a new one; without either it
+  does what the console's restart button does. \`kill\` leaves the console stopped until someone
+  restarts it; \`kill --close\` also removes it from the grid (the user can reopen it).
+- Never \`account use\` unless the user asked to change the Claude account.
+
+## Observing other consoles
+
+- \`snaos peek <console>\` first: it is cheap, shows whether the agent is working, done or waiting
+  on the user, what it asks, and its screen. Looking never clears the user's marks.
+- \`snaos chat <console>\` to know what the agent did or answered: prompts, replies and tool calls
+  (\`-> Bash: <command>\`); add \`--tools\` for tool output and \`--thinking\` for reasoning. Older
+  turns: run the \`older: snaos chat <c> --before <cursor>\` line it prints. "no messages yet" means
+  the transcript does not exist yet; a not found error says whether to use \`read\` or \`peek\`.
+- \`snaos read <console>\` for the raw screen of any console (shells too).
+- To follow another agent's work: \`snaos wait <console> --idle --timeout 110\`, then \`snaos peek\`
+  or \`snaos chat <console> --turns 1\` to read the result.
+
+## Notes
+
+- Workspace notes are real \`.md\` files the user sees in the Notes drawer. A note is its id
+  (\`n-...\`) or its exact title (case-insensitive); there are no indexes.
+- \`snaos notes\` lists them, \`notes get <note>\` prints one (\`--json\` adds \`rev\` and the file
+  \`path\`), \`notes new "<text>" [--title <t>] [--open]\`, \`notes set <note> <text>\` overwrites,
+  \`notes append <note> <text>\` adds at the end, \`notes rm <note>\` moves it to the trash (30
+  days), \`notes open <note>\` shows it on the desktop.
+- Always edit through \`snaos notes set\` or \`snaos notes append\`, never the file: the open
+  editor and the phones only update through the CLI. Long text goes through \`-\` (stdin) or \`--file <path>\`.
+- For a safe edit read \`rev\` from \`notes get --json\` and pass \`notes set <note> - --rev <rev>\`;
+  exit 8 (\`conflict\`) means someone else changed it: read it again and retry.
+
+## Usage and Claude accounts
+
+- \`snaos usage\` shows what the usage bars show (5 h and weekly windows, \`resets in ...\`). It reads
+  the app's cache: no need to call it in a loop. It answers \`disabled\` when the bars are off.
+- \`snaos account\` shows the live Claude account, the last switch and whether the automatic
+  switch is on; \`account ls\` lists the saved ones (\`*\` marks the live one).
+- Run \`snaos account use <primary|secondary|id|label>\` only when the user asks for it. It
+  changes the login of every Claude console at once (running ones too, no restart) and allows 3
+  switches a minute. Accounts are saved and removed by the user in Settings, never by the CLI.
 
 ## Talking to another agent
 
@@ -88,6 +146,7 @@ SnAgentsOS shows your console as done when your turn ends. If you are not done y
 ## Exit codes
 
 0 ok, 1 internal error, 2 bad usage, 3 not found or not running, 4 ambiguous, 5 app not
-available, 6 unauthorized (restart the console), 7 forbidden or disabled, 124 timeout.
+available, 6 unauthorized (restart the console), 7 forbidden or disabled, 8 conflict (the note
+changed since --rev), 124 timeout.
 `
 }

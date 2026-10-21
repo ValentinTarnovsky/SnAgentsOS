@@ -36,6 +36,12 @@ export interface AgentEvent {
   subagent?: boolean
   /** Stop: background work the turn left running (v2.2). */
   background?: BackgroundTasks
+  /** v2.3 (agentTune read-back): the model SessionStart named, <= 64. */
+  model?: string
+  /** v2.3: the effort level a hook reported (allowlisted). */
+  effort?: string
+  /** v2.3: SessionStart `source` ('startup' | 'resume' | 'clear' | 'compact' | 'fork'), <= 32. */
+  source?: string
 }
 export interface StatusNotice {
   paneId: string

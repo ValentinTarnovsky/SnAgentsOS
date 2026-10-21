@@ -485,6 +485,12 @@ function testPaneNotifier(p) {
   check(n.onPaneStatus('k', cs('action'), null) === null && n.onPaneStatus('k', undefined, cs('working')) === null, 'clears and working never alert')
   check(p.remoteTitle(0) === 'SnAgentsOS Remote' && p.remoteTitle(3) === '(3) SnAgentsOS Remote', 'document title: "(N) SnAgentsOS Remote", bare at 0')
   check(p.actionTotal(multi(), { a1: st('action'), b1: st('action'), b3: st('working'), ghost: st('action') }) === 2 && p.actionTotal(null, {}) === 0, 'actionTotal counts consoles in action in the snapshot only')
+  // v2.3 attention: an answered action (attention false) is no longer waiting on anybody.
+  check(p.actionTotal(multi(), { a1: st('action', { attention: false }), b1: st('action', { attention: true }) }) === 1, 'actionTotal skips an action the desktop says was answered')
+  check(p.remoteTitle(p.actionTotal(multi(), { b1: st('action', { attention: false }) })) === 'SnAgentsOS Remote', 'so the title drops the "(1)"')
+  const before = shown.length
+  check(n.onPaneStatus('z', cs('working'), cs('action', { stateSince: 30, attention: false })) === null && n.onPaneStatus('y', cs('working'), cs('done', { stateSince: 31, attention: false })) === null && shown.length === before, 'a status already seen elsewhere (attention false) never toasts nor vibrates')
+  check(n.onPaneStatus('x', cs('working'), cs('action', { stateSince: 32, attention: true })) === 'toast', 'attention true alerts as before')
 
   // Deep links (E2-FR-42).
   check(JSON.stringify(p.parseDeepLink('#ws=w1&pane=p1')) === '{"ws":"w1","pane":"p1"}', 'parseDeepLink reads #ws=&pane=')
@@ -570,6 +576,27 @@ async function testClientNotify() {
   s.recv({ type: 'paneStatus', paneId: 'b1', status: st('action', { stateSince: 54 }) })
   check(p.vibrations.length === before + 1, 'Vibrate off: no vibration')
   check(JSON.parse(p.local.get('snagentsos.prefs')).vibrate === false, 'the choice persists in snagentsos.prefs')
+
+  // v2.3: a console's toast goes once it changes state or the desktop says it no longer needs the user.
+  {
+    const q = page()
+    q.client.start()
+    const t = q.last(); t.open()
+    t.recv({ type: 'authOk', deviceId: 'dev1', state: multi(), hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+    q.setHash('#ws=w1&pane=a1')
+    t.recv({ type: 'paneStatus', paneId: 'b3', status: st('action', { reason: 'question', stateSince: 60, provider: 'codex', attention: true }) })
+    t.recv({ type: 'paneStatus', paneId: 'a2', status: st('error', { stateSince: 61, attention: true }) })
+    check(q.state().toasts.map(x => x.paneId).join() === 'b3,a2', 'two consoles toast')
+    check(q.document.title === '(2) SnAgentsOS Remote', 'the title counts b1 and b3')
+    t.recv({ type: 'paneStatus', paneId: 'b3', status: st('action', { reason: 'question', stateSince: 60, provider: 'codex', attention: false }) })
+    check(q.state().toasts.map(x => x.paneId).join() === 'a2', 'an attention flip drops that console\'s toast only')
+    check(q.document.title === '(1) SnAgentsOS Remote', 'and the "(N)" follows')
+    t.recv({ type: 'paneStatus', paneId: 'a2', status: st('working', { stateSince: 62, attention: false }) })
+    check(q.state().toasts.length === 0, 'a state change drops the toast of that console')
+    q.state().setToast('Sent')
+    t.recv({ type: 'paneStatus', paneId: 'b1', status: st('working', { stateSince: 63 }) })
+    check(q.state().toasts.length === 1 && q.state().toasts[0].text === 'Sent', 'a plain notice toast stays')
+  }
 }
 
 function testWorkspaceSelectors(p) {
@@ -591,6 +618,11 @@ function testWorkspaceSelectors(p) {
   check(p.nextWaitingPane(snap, statuses, 'b1').paneId === 'a2', 'the cycle wraps to the first workspace')
   check(p.nextWaitingPane(snap, statuses, 'b3').paneId === 'a2', 'from a non-waiting pane the next one in order')
   check(p.nextWaitingPane(snap, { a1: st('action') }, 'a1') === null, 'nothing else waiting = null')
+  // v2.3: an answered action (attention false) is not waiting; undefined keeps the old rule.
+  const answered = { ...statuses, a2: st('action', { attention: false }), b1: st('action', { attention: true }) }
+  check(p.waitingPanes(snap, answered, null).map(r => r.paneId).join() === 'a1,b1', 'waitingPanes skips an answered action')
+  check(p.nextWaitingPane(snap, answered, 'b1').paneId === 'a1', 'nextWaitingPane skips it too')
+  check(p.nextWaitingPane(snap, { a1: st('action', { attention: false }) }, null) === null, 'only answered actions = nobody waiting')
 }
 
 async function testClientStatus() {
@@ -887,6 +919,10 @@ function testHomeLogic(p) {
   check(order({}, {}) === 'a,b,c,d,e,f', 'without statuses the order is layoutOrder (stable)')
   check(p.isUnread(st('done', { stateSince: 50 }), undefined) && !p.isUnread(st('done', { stateSince: 50 }), 50) && !p.isUnread(st('working', { stateSince: 50 }), 0) && !p.isUnread(undefined, 0), 'unread = action/done/error newer than the last view')
   check(p.actionCount(ws, { ...statuses, a: st('action') }) === 2, 'actionCount counts the consoles in action (the red badge)')
+  // v2.3 attention.
+  check(p.actionCount(ws, { ...statuses, a: st('action', { attention: false }) }) === 1, 'actionCount skips an answered action')
+  check(!p.isUnread(st('done', { stateSince: 50, attention: false }), undefined) && !p.isUnread(st('error', { stateSince: 50, attention: false }), 0) && p.isUnread(st('done', { stateSince: 50, attention: true }), undefined), 'unread is false once the desktop says seen (attention false)')
+  check(order({ ...statuses, f: st('action', { attention: false }), d: st('error', { attention: false }) }, lastViewed) === 'c,b,f,a,d,e', 'rows: an answered action ranks as working, an acknowledged error as the rest (got ' + order({ ...statuses, f: st('action', { attention: false }), d: st('error', { attention: false }) }, lastViewed) + ')')
 
   const line = (status, rest = {}) => p.rowLine({ status, running: true, mounted: true, ...rest }, now)
   check(line(st('action', { reason: 'permission' })) === 'Waiting for permission' && line(st('action', { reason: 'question' })) === 'Question pending', 'permission / question')
@@ -896,6 +932,9 @@ function testHomeLogic(p) {
   check(line(undefined) === 'Idle' && line(undefined, { running: false }) === 'Stopped' && line(undefined, { running: false, mounted: false }) === 'Not started', 'no status: Idle (running), Stopped, Not started (workspace not mounted)')
   check(line(undefined, { running: false, exitCode: 3 }) === 'Exited (code 3)', 'a shell that ended on its own says so')
   check(p.rowShowsTime(st('error')) && p.rowShowsTime(st('working')) && !p.rowShowsTime(st('action')) && !p.rowShowsTime(undefined), 'working, done and error drive the 30s ticker')
+  // v2.3: an answered action reads as the desktop glyph does (displayStatus).
+  check(line(st('action', { reason: 'permission', attention: false, stateSince: now })) === 'Working' && p.rowShowsTime(st('action', { attention: false })), 'an answered action (attention false) reads Working and drives the ticker')
+  check(line(st('action', { reason: 'permission', attention: false, precise: false })) === 'Idle' && line(st('action', { reason: 'permission', attention: true })) === 'Waiting for permission', 'title-only answered action reads Idle; attention true keeps the reason')
   p.setLang('es')
   check(line(st('action', { reason: 'question' })) === 'Pregunta pendiente' && line(undefined, { running: false, mounted: false }) === 'Sin iniciar' && line(st('unknown')) === 'Se perdio la conexion con el agente', 'Spanish row lines')
   p.setLang('en')

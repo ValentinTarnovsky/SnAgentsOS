@@ -2,6 +2,7 @@ import { ipcMain } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { StatusTitleReq } from '@shared/ipc-contract'
 import type { NotificationSettings, StatusHealth, StatusHooksStatusRes } from '@shared/types'
+import { parseTuneHint } from '@shared/agentTune'
 import type { StatusManager } from '../status/StatusManager'
 import type { HookServer } from '../status/HookServer'
 import { hooksStatus, hooksUpToDate, installHooks, uninstallHooks } from '../status/HookInstaller'
@@ -77,6 +78,11 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
 
   ipcMain.on(CH.STATUS_VIEWED, (_e, paneIds: string[]) => {
     if (Array.isArray(paneIds)) statusManager.setViewed(paneIds.filter((p) => typeof p === 'string'))
+  })
+
+  ipcMain.on(CH.STATUS_TUNE_HINT, (_e, req: unknown) => {
+    const hint = parseTuneHint(req)
+    if (hint) statusManager.setTuneHint(hint.paneId, hint.hint)
   })
 
   ipcMain.on(CH.STATUS_SET_CONFIG, (_e, cfg: NotificationSettings) => {

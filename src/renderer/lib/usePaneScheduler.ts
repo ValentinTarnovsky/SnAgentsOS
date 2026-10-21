@@ -138,7 +138,7 @@ function finishRun(paneId: string, trigger: Trigger, scheduledFor: number, statu
 function submitRun(paneId: string, ptyId: string, text: string, trigger: Trigger, scheduledFor: number, now: number): void {
   patchRuntime('inflight', paneId, { trigger, scheduledFor, via: 'submit', startedAt: now })
   void window.snApi.pty
-    .submit({ ptyId, paneId, text, enter: true })
+    .submit({ ptyId, paneId, text, enter: true, origin: 'auto' })
     .then(
       (res) => {
         if (res.ok) finishRun(paneId, trigger, scheduledFor, 'sent', undefined, Date.now())

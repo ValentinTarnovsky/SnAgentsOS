@@ -22,8 +22,21 @@ import {I18nProvider} from './src/renderer/i18n';
 import {useAppStore} from './src/renderer/lib/store';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 import {dispatchOpenRequest} from './src/renderer/lib/openRequest';
+import {useAccountsStore} from './src/renderer/lib/accountsStore';
+import {useUsageStore} from './src/renderer/lib/usageStore';
 const explorerArgs=[];const calls={};const spy=(name,ret)=>(...a)=>{calls[name]=(calls[name]||0)+1;return ret}
 const noop=()=>()=>{};
+// app 2.3.0: Claude accounts. Fake emails only; no token ever reaches the renderer.
+const accountCalls=[];
+const accView=(id,role,label,email,extra={})=>({id,role,label,email,organizationName:null,subscriptionType:'max',capturedAt:Date.now(),active:false,tokenState:'ok',needsRecapture:false,identityConfirmed:true,usage:{fiveHour:{percent:40,resetsAt:null,at:Date.now(),source:'live'},sevenDay:{percent:12,resetsAt:null,at:Date.now()-60000,source:'parked'}},...extra});
+const accBase={supported:true,liveSwitch:true,liveIdentity:'known',autoPaused:null,lastSwitch:null,pending:null,blocked:null,restartNeeded:[]};
+const ACC_STATES={
+ two:{...accBase,activeId:'acc_aaaaaaaaaaaa',accounts:[accView('acc_aaaaaaaaaaaa','primary','Trabajo','work@example.test',{active:true}),accView('acc_bbbbbbbbbbbb','secondary','','home@example.test')]},
+ one:{...accBase,activeId:'acc_aaaaaaaaaaaa',accounts:[accView('acc_aaaaaaaaaaaa','primary','Trabajo','work@example.test',{active:true})]},
+ banners:{...accBase,activeId:null,liveIdentity:'unknown',liveEmail:'other@example.test',autoPaused:'refreshFailed',lastSwitch:{at:Date.now(),from:'acc_bbbbbbbbbbbb',to:'acc_aaaaaaaaaaaa',reason:'rollback'},accounts:[accView('acc_aaaaaaaaaaaa','primary','Trabajo','work@example.test'),accView('acc_bbbbbbbbbbbb','secondary','','home@example.test',{needsRecapture:true,tokenState:'invalid'})]},
+};
+let accountsState=ACC_STATES.two;
+const accRes=()=>Promise.resolve({ok:true,state:accountsState});
 const fallback=(base)=>new Proxy(base,{get:(t,k)=>k in t?t[k]:(typeof k==='string'?fallback(noop):undefined)});
 window.snApi=fallback({platform:'win32',
  updates:fallback({check:spy('updates.check',Promise.resolve({available:false,currentVersion:'2.0.0'})),onProgress:noop}),
@@ -33,7 +46,9 @@ window.snApi=fallback({platform:'win32',
  status:fallback({health:spy('status.health',Promise.resolve({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}})),hooksStatus:spy('status.hooksStatus',Promise.resolve({installed:false,settingsPath:'x'})),testNtfy:spy('status.testNtfy',Promise.resolve({ok:true}))}),
  app:fallback({info:async()=>({version:'2.0.0',portable:false,platform:'win32'})}),
  remote:fallback({onStatus:noop,onDevices:noop,getStatus:async()=>({state:'stopped',connectedCount:0}),listDevices:async()=>[]}),
- pty:fallback({write(){}}),config:fallback({save(){}})});
+ pty:fallback({write(){}}),config:fallback({save(){}}),
+ accounts:fallback({getState:()=>{calls['accounts.getState']=(calls['accounts.getState']||0)+1;return Promise.resolve(accountsState)},onChanged:noop,onEvent:noop,setConfig(){},
+  switchTo:(target,reason)=>{accountCalls.push(['switch',target,reason]);return accRes()},resumeAuto:()=>{accountCalls.push(['resume']);return accRes()},capture:(req)=>{accountCalls.push(['capture',req]);return accRes()}})});
 const created=[];
 useAppStore.setState({hydrated:true,activeWorkspaceId:'ws-0',workspaces:[{id:'ws-0',name:'Workspace 0',cwd:'C:/w',panes:[{id:'p0',type:'shell',title:'Console',icon:'terminal'}]}],connections:[{id:'c1',name:'Dedi',setup:[]}],createWorkspaceFull:(d)=>{created.push(d)}});
 useAppStore.getState().updateSettings({language:'es'});
@@ -52,7 +67,9 @@ const termKeys=[];document.addEventListener('keydown',e=>{if(e.target&&e.target.
 // checks read this log instead of racing the 1200 ms timer.
 const flashLog=[];new MutationObserver(ms=>ms.forEach(m=>flashLog.push({id:m.target.id,on:m.target.hasAttribute('data-setting-flash'),t:performance.now()}))).observe(document.body,{attributes:true,subtree:true,attributeFilter:['data-setting-flash']});
 const setInput=(el,v)=>{const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}))};
-window.smoke={calls,created,termKeys,explorerArgs,theme:applyTheme,
+window.smoke={calls,created,termKeys,explorerArgs,accountCalls,theme:applyTheme,
+ accounts:k=>{accountsState=ACC_STATES[k];useAccountsStore.setState({state:accountsState})},
+ usageOn:on=>{const st=useAppStore.getState();st.updateSettings({usage:{...st.settings.usage,enabled:on,collapsed:false}});useUsageStore.setState({snapshot:on?{updatedAt:Date.now(),rows:[{id:'claude.5h',provider:'claude',kind:'5h',label:'5h',percent:40,status:'ok'}]}:null})},
  open:(p,id)=>dispatchOpenRequest({id,path:p,source:'second-instance'}),
  explorerMenu:()=>useAppStore.getState().settings.explorerMenu,
  activeWs:()=>useAppStore.getState().activeWorkspaceId,
@@ -108,7 +125,7 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
  for(const q of ['actualizar','rendimiento','notificaciones','inicio','modelos','discord']){await js('smoke.search('+JSON.stringify(q)+')');await frame()}
  await wait(300);
  const during=await calls();
- for(const k of ['updates.check','system.getMetrics','status.health','status.hooksStatus','system.getLoginItem'])eq(during[k]||0,before[k]||0,'searching never mounts a live section: '+k);
+ for(const k of ['updates.check','system.getMetrics','status.health','status.hooksStatus','system.getLoginItem','accounts.getState'])eq(during[k]||0,before[k]||0,'searching never mounts a live section: '+k);
  await js("smoke.search('paleta')");await frame();
  ok(await js("!!document.querySelector('[data-search-result=\\"keys.palette\\"]')"),'"paleta" finds the Keys row');
  await js("smoke.search('despierta')");await frame();
@@ -253,6 +270,44 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
  await js("smoke.openSettings();smoke.set({activeWorkspaceId:null})");await frame();
  await js("smoke.open('c:/W/','open-3')");await frame();
  eq([await js('smoke.activeWs()'),(await js('smoke.state()')).open,(await js('smoke.state()')).wizard],['ws-0',false,false],'a folder that is a workspace (other case, trailing slash) activates it');
+
+ // --- app 2.3.0: Claude accounts (slots, terms note, switch, banners, search, chip) ---
+ await js("smoke.usageOn(true);smoke.accounts('two');smoke.openSettings('claudeaccounts')");await frame();await frame();
+ eq(await js("[...document.querySelectorAll('[data-account-slot]')].map(e=>e.dataset.accountSlot)"),['primary','secondary'],'the section renders both slots');
+ ok(await js("!!document.querySelector('[data-account-slot=primary] [data-account-active]')&&!document.querySelector('[data-account-slot=secondary] [data-account-active]')"),'the Active pill is on the active account');
+ eq(await js("[document.querySelector('[data-account-slot=primary] [data-account-email]')?.textContent,document.querySelector('[data-account-slot=secondary] [data-account-label]')?.placeholder]"),['work@example.test','Nombre (opcional)'],'the desktop shows the email and an editable label');
+ ok(await js("(document.querySelector('[data-accounts-tos]')?.textContent||'').includes('t\\u00e9rminos de servicio de Anthropic')"),'the neutral terms note is visible');
+ ok(await js("!document.querySelector('#setting-claudeaccounts-auto [role=switch]').disabled&&!document.querySelector('[data-accounts-auto-unavailable]')"),'automatic switching can be turned on with two accounts and usage on');
+ await js("[...document.querySelectorAll('[data-account-slot=secondary] button')].find(b=>b.textContent==='Usar esta cuenta').click()");await frame();await frame();
+ eq(await js('smoke.accountCalls'),[['switch','secondary','manual']],'Usar esta cuenta calls switchTo(secondary, manual)');
+ ok(await js("document.querySelector('[data-account-slot=primary] [data-account-use]').disabled"),'the active account cannot be picked again');
+ await shot('accounts-two');
+ await js("smoke.accounts('one')");await frame();
+ ok(await js("document.querySelector('#setting-claudeaccounts-auto [role=switch]').disabled&&!!document.querySelector('[data-accounts-auto-unavailable]')"),'one account: the automatic toggle is disabled and says why');
+ ok(await js("!!document.querySelector('[data-account-slot=secondary][data-account-empty] [data-account-capture]')"),'an empty slot explains and offers Capture');
+ await js("smoke.accounts('two');smoke.usageOn(false)");await frame();
+ ok(await js("document.querySelector('#setting-claudeaccounts-auto [role=switch]').disabled&&!!document.querySelector('[data-accounts-tos]')"),'usage off: the toggle is disabled and the terms note stays');
+ await js("smoke.usageOn(true);smoke.accounts('banners')");await frame();
+ ok(await js("(document.querySelector('[data-accounts-unknown]')?.textContent||'').includes('other@example.test')&&!!document.querySelector('[data-accounts-replace=primary]')&&!!document.querySelector('[data-accounts-replace=secondary]')"),'unknown login banner with Replace for each saved slot');
+ ok(await js("!!document.querySelector('[data-accounts-paused=refreshFailed]')&&!!document.querySelector('[data-accounts-rollback]')&&!!document.querySelector('[data-account-needs-recapture]')"),'paused, rollback and needs-capture banners');
+ ok(await js("[...document.querySelectorAll('[data-account-use]')].every(b=>b.disabled)"),'no switch while the live login is unsaved or a slot needs a capture');
+ await js("document.querySelector('[data-accounts-resume]').click()");await frame();await frame();
+ eq(await js('smoke.accountCalls.at(-1)'),['resume'],'Resume calls resumeAuto');
+ await shot('accounts-banners');
+ await js("smoke.accounts('two')");await frame();
+ await js("smoke.search('cuenta')");await frame();
+ ok(await js("!!document.querySelector('[data-search-result=\\"claudeaccounts.accounts\\"]')"),'search "cuenta" lists the accounts block');
+ await js("smoke.set({settingsOpen:false})");await frame();
+ // The sidebar chip: active label, quick switch, Manage accounts.
+ eq(await js("document.querySelector('[data-usage-account]')?.textContent"),'Trabajo','the usage panel shows the account chip');
+ await js("document.querySelector('[data-usage-account]').click()");await frame();
+ eq(await js("[...document.querySelectorAll('[role=menu] [role=menuitem]')].map(b=>b.textContent)"),['Usar Secundaria','Administrar cuentas'],'the chip menu offers Use <other> and Manage accounts');
+ await js("[...document.querySelectorAll('[role=menu] [role=menuitem]')][0].click()");await frame();await frame();
+ eq(await js('smoke.accountCalls.at(-1)'),['switch','secondary','manual'],'Use <other> switches with reason manual');
+ await js("document.querySelector('[data-usage-account]').click()");await frame();
+ await js("[...document.querySelectorAll('[role=menu] [role=menuitem]')][1].click()");await frame();await frame();
+ ok((await js('smoke.state()')).open&&await js("!!document.querySelector('[data-account-slot]')"),'Manage accounts opens the section');
+ await js("smoke.set({settingsOpen:false});smoke.usageOn(false)");await frame();
 
  // Light theme and zoom: the results list fits.
  await js("smoke.theme('light');smoke.openSettings()");await frame();await js("smoke.search('notif')");

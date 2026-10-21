@@ -5,7 +5,8 @@
  * carrying the version they loaded: when the file changed elsewhere (the
  * phone, another editor) with edits pending here, a banner offers Reload or
  * Keep mine (overwrite). "Insert path" types the note's path into the console
- * so an agent can read it.
+ * so an agent can read it. `snaos notes open` (app 2.3.0) asks for a note
+ * through `useSidePanels.noteRequest`.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Columns2, Eye, FileInput, FilePlus2, FolderOpen, NotebookPen, PencilLine, Search, Trash2 } from 'lucide-react'
@@ -13,7 +14,7 @@ import type { Workspace } from '@shared/types'
 import type { WsNoteDoc, WsNoteMeta } from '@shared/ws-notes'
 import { formatAgeShort } from '@shared/agents'
 import { useLang, useT } from '@/i18n'
-import { useSidePanels, closeSidePanel } from '@/lib/sidePanels'
+import { useSidePanels, closeSidePanel, clearNoteRequest, type NoteRequest } from '@/lib/sidePanels'
 import { insertPathToConsole } from '@/lib/insertPath'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/cn'
@@ -78,6 +79,11 @@ export default function NotesPanel({ workspace }: { workspace: Workspace }) {
   const dirty = useRef(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const seq = useRef(0)
+  /** The first load finished: later note requests are taken by their own effect. */
+  const ready = useRef(false)
+  /** Bumped by every switch (a pick or a `snaos notes open`): an older switch still in flight drops its result. */
+  const nav = useRef(0)
+  const noteRequest = useSidePanels((s) => s.noteRequest)
 
   const refresh = useCallback(async (): Promise<WsNoteMeta[]> => {
     const res = await window.snApi.wsNotes.list(wsId).catch(() => null)
@@ -87,8 +93,9 @@ export default function NotesPanel({ workspace }: { workspace: Workspace }) {
   }, [wsId])
 
   const load = useCallback(
-    async (noteId: string): Promise<void> => {
+    async (noteId: string, stale?: () => boolean): Promise<void> => {
       const res = await window.snApi.wsNotes.read({ workspaceId: wsId, noteId }).catch(() => null)
+      if (stale?.()) return
       if (!res?.ok) {
         if (res && res.error === 'too_large') toast.error(t('wsnotes.tooLarge'))
         return
@@ -131,23 +138,67 @@ export default function NotesPanel({ workspace }: { workspace: Workspace }) {
     [wsId, t],
   )
 
-  // First load: the list, then the last note opened here (or the newest).
+  /**
+   * A `snaos notes open` for this workspace: refresh (the note may be brand new), then show it. It never
+   * switches away from edits that did not save (a conflict or a write error): the user resolves those first.
+   * Only the latest switch applies.
+   */
+  const takeRequest = useCallback(
+    async (req: NoteRequest): Promise<void> => {
+      const mine = ++nav.current
+      const stale = (): boolean => nav.current !== mine
+      clearNoteRequest(req.seq)
+      const list = await refresh()
+      if (stale() || !list.some((n) => n.id === req.noteId) || openRef.current?.id === req.noteId) return
+      await save()
+      if (stale()) return
+      if (dirty.current) {
+        toast.info(t('wsnotes.openBlocked'), { dedupeKey: 'ws-notes-open-blocked' })
+        return
+      }
+      await load(req.noteId, stale)
+    },
+    [refresh, save, load, t],
+  )
+
+  // First load: the list, then the note a `snaos notes open` asked for, else the last one opened here (or the newest).
   useEffect(() => {
     let alive = true
-    void refresh().then((list) => {
-      if (!alive || !list.length) return
-      let last: string | null = null
-      try {
-        last = storage()?.getItem(lastKey(wsId)) ?? null
-      } catch {
-        last = null
+    ready.current = false
+    void refresh().then(async (list) => {
+      if (!alive) return
+      const req = useSidePanels.getState().noteRequest
+      let target: string | null = null
+      if (req && req.workspaceId === wsId) {
+        clearNoteRequest(req.seq)
+        if (list.some((n) => n.id === req.noteId)) target = req.noteId
       }
-      void load(list.some((n) => n.id === last) ? last! : list[0].id)
+      if (!target && list.length) {
+        let last: string | null = null
+        try {
+          last = storage()?.getItem(lastKey(wsId)) ?? null
+        } catch {
+          last = null
+        }
+        target = list.some((n) => n.id === last) ? last! : list[0].id
+      }
+      if (target) await load(target)
+      if (!alive) return
+      ready.current = true
+      // One that came in while the first note loaded.
+      const late = useSidePanels.getState().noteRequest
+      if (late && late.workspaceId === wsId) void takeRequest(late)
     })
     return () => {
       alive = false
     }
-  }, [wsId, refresh, load])
+  }, [wsId, refresh, load, takeRequest])
+
+  // Later asks while the drawer is open (the first load takes the one that opened it).
+  useEffect(() => {
+    if (!noteRequest || noteRequest.workspaceId !== wsId || !ready.current) return
+    void takeRequest(noteRequest)
+  }, [noteRequest, wsId, takeRequest])
 
   // Leaving the drawer (or the app) writes what is pending.
   useEffect(() => {
@@ -193,8 +244,11 @@ export default function NotesPanel({ workspace }: { workspace: Workspace }) {
 
   const pick = async (noteId: string): Promise<void> => {
     if (open?.id === noteId) return
+    const mine = ++nav.current
+    const stale = (): boolean => nav.current !== mine
     await save()
-    await load(noteId)
+    if (stale()) return
+    await load(noteId, stale)
   }
 
   const create = async (): Promise<void> => {

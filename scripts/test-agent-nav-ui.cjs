@@ -153,6 +153,21 @@ app.whenReady().then(async()=>{
  ok(toasts.includes('Ningún agente te espera')&&await js("!!document.querySelector('[aria-live]')"),'nobody waiting: toast in an aria-live stack',toasts);
  await js("smoke.set({paneStatus:"+JSON.stringify(Object.fromEntries(Object.entries(idle).map(([k,v])=>[k,{...v,state:'working'}])))+"})");
 
+ // v2.3 attention: an action answered on any device (attention false) reads working and next waiting skips it.
+ await wait(5100);
+ await js("smoke.set({paneStatus:{...smoke.app().paneStatus,a2:{...smoke.app().paneStatus.a2,state:'action',attention:false},c1:{...smoke.app().paneStatus.c1,state:'action',attention:true}},paneAttention:{}})");await frames();
+ ok(await js("document.querySelector('[data-agent-row=a2]')?.dataset.agentState")==='working','an answered action (attention false) shows the working glyph',await js('smoke.rows()'));
+ ok(await js("document.querySelector('[data-agent-row=c1]')?.dataset.agentState")==='action','an action still waiting (attention true) keeps its glyph');
+ await js("document.querySelector('aside [data-status-dot]').dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))");await wait(260);
+ const answeredTip=await js("document.querySelector('[role=tooltip] [data-workspace-tip]')?.textContent");
+ ok(answeredTip&&!answeredTip.includes('esperando')&&answeredTip.includes('Consola a2 - Trabajando'),'the workspace tooltip counts and labels the answered action as working, like its dot',answeredTip);
+ await js("document.querySelector('aside [data-status-dot]').dispatchEvent(new MouseEvent('mouseout',{bubbles:true}))");await wait(200);
+ const walk2=[];
+ for(let i=0;i<2;i++){await js("smoke.key(null,'J',{ctrlKey:true,shiftKey:true})");await wait(30);walk2.push(await js('smoke.focused()'))}
+ ok(walk2.join()==='c1,c1','next waiting skips the answered action',walk2);
+ await wait(5100);
+ await js("smoke.set({paneStatus:{...smoke.app().paneStatus,a2:{...smoke.app().paneStatus.a2,state:'working',attention:false},c1:{...smoke.app().paneStatus.c1,state:'working',attention:false}}})");
+
  // Ctrl+1..9 (E5-FR-18) and its exclusions.
  await js("smoke.set({activeWorkspaceId:'wa'})");await frames();
  let prevented=await js("smoke.key(null,'3',{ctrlKey:true})");await frames();
