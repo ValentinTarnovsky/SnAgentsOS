@@ -54,6 +54,21 @@ export { CH } from './src/shared/ipc-channels'
 const tmpDirs = []
 function tmp(name) { const d = fs.mkdtempSync(path.join(os.tmpdir(), `snagentsos-accounts-${name}-`)); tmpDirs.push(d); return d }
 const sleep = ms => new Promise(r => setTimeout(r, ms))
+// Waits for what a usage reading set off: the policy's switch in flight
+// (`evaluating`, cleared once switchWith settled, which may decide again) and
+// the serialized mutations (`chain`). A fixed sleep lost the race on a loaded
+// runner (app 2.5.0 release build).
+async function settle(svc) {
+  for (let i = 0; i < 500; i++) {
+    await svc.chain
+    await sleep(1)
+    if (!svc.evaluating) {
+      await svc.chain
+      return
+    }
+  }
+  throw new Error('settle: the account service never went idle')
+}
 const T0 = 1_800_000_000_000
 let now = T0
 const H = 3600_000, MIN = 60_000
@@ -723,7 +738,7 @@ async function hardeningChecks() {
     check(w.svc.badge() === null, 'no account badge over the unverified login\'s usage rows')
     const usageBefore = JSON.stringify(st.accounts.find(a => a.id === w.idB).usage)
     w.svc.onActiveUsage([{ id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 100, resetsAt: null, status: 'ok' }, { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 1, resetsAt: null, status: 'ok' }], now)
-    await sleep(20)
+    await settle(w.svc)
     check(JSON.stringify(w.svc.status().accounts.find(a => a.id === w.idB).usage) === usageBefore, 'its readings are not stored as the active account\'s')
     check(w.svc.status().activeId === w.idB && !w.events.some(e => e.kind === 'switched' && e.auto), 'no automatic switch while the live login is unverified')
   }
@@ -771,7 +786,7 @@ async function policyServiceChecks() {
   check(b.usage.fiveHour.percent === 3 && b.usage.fiveHour.source === 'parked', 'the parked account is polled with its own token')
   const reset = new Date(now + 40 * MIN).toISOString()
   w.svc.onActiveUsage([{ id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 99, resetsAt: reset, status: 'ok' }, { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 50, resetsAt: reset, status: 'ok' }], now)
-  await sleep(20)
+  await settle(w.svc)
   const st = w.svc.status()
   check(st.activeId === w.idB && st.lastSwitch.reason === 'auto_exhausted' && w.read() === cred('B', 1), 'the active account at 99% switches to the other one by itself')
   const al = w.alerts.at(-1)
@@ -783,13 +798,13 @@ async function policyServiceChecks() {
   check(es.title === 'Cambió la cuenta de Claude' && es.body.includes('Personal') && es.body.includes('límite semanal') && !es.body.includes('de semanal'), 'the notices have Spanish text')
   // Dwell: right after the switch nothing moves even at 100%.
   w.svc.onActiveUsage([{ id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 100, resetsAt: reset, status: 'ok' }, { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 1, resetsAt: reset, status: 'ok' }], now)
-  await sleep(20)
+  await settle(w.svc)
   check(w.svc.status().activeId === w.idB, 'minDwell holds the new account')
   // Defer while a Claude console works.
   now += 11 * MIN
   w.statuses = [{ paneId: 'p1', provider: 'claude', state: 'working' }]
   w.svc.onActiveUsage([{ id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 100, resetsAt: reset, status: 'ok' }, { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 1, resetsAt: reset, status: 'ok' }], now)
-  await sleep(20)
+  await settle(w.svc)
   const pend = w.svc.status()
   check(pend.activeId === w.idB && (pend.blocked === 'allExhausted' || pend.pending?.to === w.idA), 'a Claude console working defers (or both are at the limit)')
 }
@@ -872,25 +887,25 @@ async function nAccountServiceChecks() {
     now += 11 * MIN
     const resetA = now + 120 * MIN
     w.svc.onActiveUsage(rows(99, resetA), now)
-    await sleep(20)
+    await settle(w.svc)
     check(w.svc.status().activeId === B && w.read() === cred('B', 1) && vaultMeta(w).accounts[0].exhaustedUntil === Date.parse(new Date(resetA).toISOString()), 'A at 99%: to B, and A keeps its own exhaustedUntil')
     now += 11 * MIN
     const resetB = now + 40 * MIN
     w.svc.onActiveUsage(rows(99, resetB), now)
-    await sleep(20)
+    await settle(w.svc)
     check(w.svc.status().activeId === C && w.read() === cred('C', 1) && vaultMeta(w).accounts[1].exhaustedUntil !== null, 'B at 99% with A before its reset: to C')
     check(w.events.filter(e => e.kind === 'switched' && e.auto).map(e => e.to).join() === [B, C].join(), 'two automatic switches, in priority order')
     // B resets (A not yet): back to B, not A.
     now += 50 * MIN
     await w.svc.pollParked(); await w.svc.pollParked()
     w.svc.onActiveUsage(rows(40, now + 3 * H), now)
-    await sleep(20)
+    await settle(w.svc)
     check(w.svc.status().activeId === B && w.svc.status().lastSwitch.reason === 'auto_return', 'B reset first: C goes back to B')
     // Then A resets: B goes back to A.
     now += 75 * MIN
     await w.svc.pollParked(); await w.svc.pollParked()
     w.svc.onActiveUsage(rows(40, now + 3 * H), now)
-    await sleep(20)
+    await settle(w.svc)
     check(w.svc.status().activeId === A && w.svc.status().lastSwitch.reason === 'auto_return' && w.read() === cred('A', 1), 'then A resets: B goes back to A')
     check(w.svc.status().anchorId === A, 'automatic moves never touch the anchor')
   }
@@ -911,7 +926,7 @@ async function nAccountServiceChecks() {
     const manual = w.svc.switchTo(C, 'manual')
     w.svc.onActiveUsage([{ id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 99, resetsAt: new Date(resetA).toISOString(), status: 'ok' }, { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 10, resetsAt: new Date(now + 48 * H).toISOString(), status: 'ok' }], now)
     const mr = await manual
-    await sleep(50)
+    await settle(w.svc)
     const st = w.svc.status()
     const metaC = vaultMeta(w).accounts.find(a => a.id === C)
     check(mr.ok && st.activeId === C && st.lastSwitch.reason === 'manual' && w.read() === cred('C', 1), 'a queued automatic switch from A never undoes the manual pick of C that landed first')
@@ -928,7 +943,7 @@ async function nAccountServiceChecks() {
     now += 11 * MIN
     await w.svc.pollParked(); await w.svc.pollParked()
     w.svc.onActiveUsage([{ id: 'claude.5h', provider: 'claude', kind: '5h', label: 'Session', percent: 40, resetsAt: null, status: 'ok' }, { id: 'claude.7d', provider: 'claude', kind: '7d', label: 'Weekly', percent: 40, resetsAt: null, status: 'ok' }], now)
-    await sleep(20)
+    await settle(w.svc)
     check(w.svc.status().activeId === B && w.svc.status().activeId !== A && w.svc.status().lastSwitch.reason === 'auto_return', 'the return stops at the anchor B, never above it to A')
   }
 }
