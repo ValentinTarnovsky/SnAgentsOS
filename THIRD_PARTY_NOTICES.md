@@ -7,6 +7,7 @@ example:
 
 ```
 // Adaptado de stablyai/orca (MIT) - src/main/agent-awake-service.ts
+// Adaptado de paperclipai/paperclip (MIT) - packages/adapters/claude-local/src/server/parse.ts
 ```
 
 Ideas, patterns and constants taken without copying code carry no header. The
@@ -17,12 +18,44 @@ npm dependencies keep their own license files inside `node_modules`.
 - Source: https://github.com/stablyai/orca
 - License: MIT
 - Used in: `docs/STYLEGUIDE.md` (sections 2, 5 and 6 adapt its `docs/STYLEGUIDE.md`)
-  and every file with the header above.
+  and every file with the `stablyai/orca` header above.
 
 ```
 MIT License
 
 Copyright (c) 2026 Lovecast Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## paperclipai/paperclip
+
+- Source: https://github.com/paperclipai/paperclip
+- License: MIT
+- Used in: the Teams run parsers (app 2.7.0), `src/main/teams/parsers/claudeStream.ts`
+  and `src/main/teams/parsers/codexExec.ts`, and every file with the
+  `paperclipai/paperclip` header above.
+
+```
+MIT License
+
+Copyright (c) 2025 Paperclip AI
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -1624,6 +1624,14 @@ export const es: Record<keyof typeof en, string> = {
   'settings.cli.skill.remove': 'Quitar',
   'settings.cli.skill.repair': 'Reparar',
 
+  // Labs (app 2.7.0): opt-in experimental modules, Settings > Labs
+  'settings.cat.labs': 'Labs',
+  'labs.intro': 'Módulos experimentales. Cada uno queda apagado hasta que lo actives acá, y puede cambiar en una versión futura.',
+  'labs.consoleChat': 'Chat de consola',
+  'labs.consoleChatHint': 'Suma un selector Terminal | Chat al encabezado de las consolas de agentes, para leer la conversación como mensajes. La terminal sigue corriendo detrás.',
+  'labs.teams': 'Equipos',
+  'labs.teamsHint': 'Agentes con roles que trabajan sobre un repo sin terminal, con un tablero de tareas y tus aprobaciones. Suma la sección Equipos a la barra lateral.',
+
   // Share, host side (app 2.4.0, item 8, S4): dialog, join prompt, banner, Settings > Sharing
   'settings.cat.share': 'Compartir',
   'settings.search.share': 'Compartidos e invitados',

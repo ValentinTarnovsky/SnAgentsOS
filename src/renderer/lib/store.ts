@@ -21,6 +21,7 @@ import type {
 } from '@shared/types'
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { DEFAULT_CLAUDE_ACCOUNTS_SETTINGS } from '@shared/claude-accounts'
+import { DEFAULT_LABS } from '@shared/labs'
 import { gridForCount, orderPanes } from '@/components/layout/gridTemplates'
 import {
   QUICK_COMMANDS_MAX,
@@ -165,6 +166,7 @@ const DEFAULT_SETTINGS: Settings = {
   },
   dictation: { device: 'auto', language: 'auto', headerButton: true, interim: true, vocabulary: '' },
   share: { enabled: false, port: 4527, guestName: '', defaultPerm: 'view' },
+  labs: { ...DEFAULT_LABS },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */

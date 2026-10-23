@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { delimiter, join, resolve } from 'path'
+import { basename, delimiter, dirname, join, resolve } from 'path'
 import { BRAND, LEGACY_BRAND } from '@shared/brand'
 
 /**
@@ -26,6 +26,9 @@ export function statusBinDir(): string {
   return join(app.getPath('userData'), 'status-bin')
 }
 
+/** The userData folder name of a dev instance (devUserData.ts). */
+const DEV_DATA_DIR_RE = new RegExp(`^${BRAND.devUserDataDir}(?:-[0-9a-f]{8})?$`, 'i')
+
 /**
  * Every launcher directory a parent process may have left in an inherited
  * PATH: the current one, the 1.x one (its userData, also for the 1.x
@@ -33,11 +36,22 @@ export function statusBinDir(): string {
  * userData is overridden (dev build, --user-data-dir) and the app was started
  * from a console of the installed app. A pty or the Codex lookup must never
  * pick any of them up (E0-FR-05): on POSIX the shim taken for the real CLI
- * would recurse into itself.
+ * would recurse into itself. Plus the launcher of any dev instance found on
+ * the inherited PATH (plan A1.3: <appData>/snagentsos-dev or
+ * snagentsos-dev-<sha8> of a worktree), so a console of one dev instance that
+ * starts another, or the installed app, does not hand the first one's shim on.
  */
 export function statusBinDirs(): string[] {
   const appData = app.getPath('appData')
-  return [statusBinDir(), join(appData, LEGACY_BRAND.packageName, 'status-bin'), join(appData, BRAND.packageName, 'status-bin')]
+  const dirs = [statusBinDir(), join(appData, LEGACY_BRAND.packageName, 'status-bin'), join(appData, BRAND.packageName, 'status-bin')]
+  const pathKey = Object.keys(process.env).find(k => k.toUpperCase() === 'PATH')
+  for (const entry of (pathKey ? process.env[pathKey] ?? '' : '').split(delimiter)) {
+    if (!entry.trim()) continue
+    const dir = resolve(entry.trim().replace(/^"|"$/g, ''))
+    if (basename(dir).toLowerCase() !== 'status-bin' || !DEV_DATA_DIR_RE.test(basename(dirname(dir)))) continue
+    if (samePath(dirname(dirname(dir)), appData) && !dirs.some(d => samePath(d, dir))) dirs.push(dir)
+  }
+  return dirs
 }
 
 /** Normalized form for comparing PATH entries (Windows paths ignore case). */

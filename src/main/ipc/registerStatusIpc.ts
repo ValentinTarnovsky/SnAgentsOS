@@ -10,6 +10,10 @@ import { notificationSettingsSchema, discordSettingsSchema, ntfySettingsSchema }
 import type { CodexBridge } from '../status/CodexBridge'
 import type { DiscordNotifier } from '../status/DiscordNotifier'
 import type { NtfyNotifier } from '../status/NtfyNotifier'
+import { devPort } from '../devPort'
+
+/** Default of settings.notifications.hookPort (schema.ts), the port devPort() moves. */
+const HOOK_DEFAULT_PORT = 43917
 
 export interface StatusIpc {
   /** Apply the persisted config once at boot (starts the HookServer if enabled). */
@@ -50,9 +54,12 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
   }
 
   async function ensureServer(cfg: NotificationSettings): Promise<void> {
-    if (!hookServer.running || started?.port !== cfg.hookPort || started?.token !== cfg.hookToken) {
-      await hookServer.start(cfg.hookPort, cfg.hookToken)
-      started = { port: cfg.hookPort, token: cfg.hookToken }
+    // Plan A1.3: a worktree dev instance moves the default port (devPort.ts);
+    // installHooks and reconcileInstalled follow hookServer.activePort.
+    const port = devPort(cfg.hookPort, HOOK_DEFAULT_PORT)
+    if (!hookServer.running || started?.port !== port || started?.token !== cfg.hookToken) {
+      await hookServer.start(port, cfg.hookToken)
+      started = { port, token: cfg.hookToken }
     }
     reconcileInstalled(cfg.hookToken)
   }

@@ -26,6 +26,7 @@ export type CategoryId =
   | 'remote'
   | 'share'
   | 'git'
+  | 'labs'
   | 'updates'
   | 'about'
 
@@ -48,6 +49,7 @@ export const CATEGORY_ORDER: CategoryId[] = [
   'remote',
   'share',
   'git',
+  'labs',
   'updates',
   'about',
 ]
@@ -70,6 +72,7 @@ export const CATEGORY_LABEL: Record<CategoryId, MessageKey> = {
   remote: 'settings.cat.remote',
   share: 'settings.cat.share',
   git: 'settings.cat.git',
+  labs: 'settings.cat.labs',
   updates: 'settings.cat.updates',
   about: 'settings.cat.about',
 }
@@ -237,6 +240,10 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('git.diag', 'settings.git.diag', 'settings.git.refreshHint', { keywords: ['git', 'path', 'version', 'detect', 'detectar'] }),
   e('git.worktreesRoot', 'settings.git.worktreesRoot', 'settings.git.worktreesRootHint', { keywords: ['worktree', 'worktrees', 'root', 'raiz', 'carpeta', 'folder', 'branch', 'rama'] }),
   e('git.worktrees', 'settings.git.worktrees', 'settings.git.worktreesHint', { keywords: ['worktree', 'worktrees', 'orphan', 'huerfano', 'huerfanos', 'branch', 'rama', 'borrar', 'delete'] }),
+
+  // Labs (app 2.7.0): opt-in experimental modules, off by default (plain booleans, inline switches).
+  e('labs.consoleChat', 'labs.consoleChat', 'labs.consoleChatHint', { keywords: ['labs', 'experimental', 'beta', 'chat', 'console', 'consola', 'messages', 'mensajes', 'conversation', 'conversacion'], toggle: { path: 'labs.consoleChat' } }),
+  e('labs.teams', 'labs.teams', 'labs.teamsHint', { keywords: ['labs', 'experimental', 'beta', 'teams', 'team', 'equipos', 'equipo', 'agents', 'agentes', 'roles', 'board', 'tablero', 'tasks', 'tareas'], toggle: { path: 'labs.teams' } }),
 
   // Updates (the status block checks on mount: summary only)
   e('updates.status', 'settings.search.updates', 'settings.search.updatesHint', { summary: true, keywords: ['update', 'actualizar', 'actualizacion', 'version', 'upgrade', 'release'] }),

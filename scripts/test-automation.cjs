@@ -56,7 +56,7 @@ function v11(extra = {}) {
 const qc = (i, extra = {}) => ({ id: `qc-${i}`, name: `Cmd ${i}`, text: `echo ${i}`, action: 'send', enter: false, ...extra })
 
 function schemaChecks() {
-  check(CONFIG_VERSION === 18, 'CONFIG_VERSION is 18')
+  check(CONFIG_VERSION === 19, 'CONFIG_VERSION is 19')
 
   // E8-FR-01: 3 snippets -> 3 global send commands, same order and ids, no Enter.
   const snippets = [{ id: 'snip-a', name: 'Continua', text: 'continua' }, { id: 'snip-b', name: 'Compact', text: '/compact' }, { id: 'snip-c', name: 'Tests', text: 'corre los tests\ny arregla' }]
@@ -306,7 +306,7 @@ function v13Real(extra = {}) {
 }
 
 async function schema14Checks() {
-  check(CONFIG_VERSION === 18, 'CONFIG_VERSION is 18 (app 2.5.0)')
+  check(CONFIG_VERSION === 19, 'CONFIG_VERSION is 19 (app 2.7.0)')
   const raw = v13Real()
   const a = parseConfig(clone(raw))
   check(a && a.version === CONFIG_VERSION, 'a real v13 config parses and is stamped with the current version')
@@ -366,7 +366,7 @@ async function schema14Checks() {
   const v17 = clone(up17); v17.version = 17
   v17.settings.dictation = { engine: 'offline', language: 'es-AR', headerButton: false }
   const up18 = parseConfig(clone(v17))
-  check(up18.version === 18, 'v17 -> v18 is stamped 18')
+  check(up18.version === 19, 'v17 -> v18 -> v19 is stamped 19')
   check(!('engine' in up18.settings.dictation), 'v18: the v17 dictation.engine key is stripped')
   check(JSON.stringify(up18.settings.dictation) === '{"device":"auto","language":"es-AR","headerButton":false,"interim":true,"vocabulary":""}', 'v18: the v17 language and header button are kept, device / interim / vocabulary gain their defaults')
   const v17Rest = clone(v17); delete v17Rest.settings.dictation
@@ -390,7 +390,7 @@ async function schema14Checks() {
   check(parseConfig(max).settings.dictation.vocabulary.length === 400, 'a 400-char vocabulary is kept')
   check(JSON.stringify(parseConfig(clone(up18))) === JSON.stringify(up18), 'v18 parse is idempotent')
   const fromV10c = parseConfig({ version: 10, workspaces: [], presets: [], settings: clone(baseSettings) })
-  check(fromV10c.version === 18 && JSON.stringify(fromV10c.settings.dictation) === DICTATION_V18_DEFAULTS, 'a v10 config walks up to 18 and gets the v18 dictation defaults')
+  check(fromV10c.version === 19 && JSON.stringify(fromV10c.settings.dictation) === DICTATION_V18_DEFAULTS, 'a v10 config walks up to 19 and gets the v18 dictation defaults')
 
   // Values kept, junk values fall back without rejecting the config.
   const set = (v) => { const c = v13Real(); c.settings.terminalShellIntegration = v; return parseConfig(c) }

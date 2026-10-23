@@ -66,6 +66,8 @@ const MESSAGES = {
     'share.guestLabel': '{name} (guest)',
     'share.joinTitle': 'Share request',
     'share.joinBody': '{name} ({ip}) wants to join "{scope}"',
+    // Labs (app 2.7.0): a request to a module that is switched off.
+    'labs.teamsOff': 'Teams is off. Turn it on in Settings > Labs.',
     // Claude multi-account notices (app 2.3.0; N accounts in 2.4.0): labels or "Account N" only, never an email.
     'accounts.accountN': 'Account {n}',
     'accounts.unknownName': 'another account',
@@ -146,6 +148,7 @@ const MESSAGES = {
     'share.guestLabel': '{name} (invitado)',
     'share.joinTitle': 'Pedido para compartir',
     'share.joinBody': '{name} ({ip}) quiere unirse a "{scope}"',
+    'labs.teamsOff': 'Equipos está apagado. Activalo en Ajustes > Labs.',
     'accounts.accountN': 'Cuenta {n}',
     'accounts.unknownName': 'otra cuenta',
     'accounts.window.5h': 'de 5 horas',

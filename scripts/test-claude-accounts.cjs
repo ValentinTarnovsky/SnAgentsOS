@@ -141,7 +141,7 @@ const noSecrets = text => !/(?:at|rt)-[A-J]\d/.test(text) && !text.includes('acc
 
 async function schemaChecks() {
   const { parseConfig, CONFIG_VERSION, normalizeAccountsSettings, DEFAULT_CLAUDE_ACCOUNTS_SETTINGS } = M
-  check(CONFIG_VERSION === 18, 'CONFIG_VERSION is 18')
+  check(CONFIG_VERSION === 19, 'CONFIG_VERSION is 19')
   const v15 = { version: 15, workspaces: [], presets: [], settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 14, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false, usage: { enabled: true, collapsed: true } } }
   const up = parseConfig(JSON.parse(JSON.stringify(v15)))
   check(up.version === CONFIG_VERSION && JSON.stringify(up.settings.claudeAccounts) === JSON.stringify(DEFAULT_CLAUDE_ACCOUNTS_SETTINGS), 'a v15 config gains the claudeAccounts defaults')

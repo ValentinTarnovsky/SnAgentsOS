@@ -1622,6 +1622,14 @@ export const en = {
   'settings.cli.skill.remove': 'Remove',
   'settings.cli.skill.repair': 'Repair',
 
+  // Labs (app 2.7.0): opt-in experimental modules, Settings > Labs
+  'settings.cat.labs': 'Labs',
+  'labs.intro': 'Experimental modules. Each one stays off until you turn it on here, and it may change in a later version.',
+  'labs.consoleChat': 'Console chat',
+  'labs.consoleChatHint': 'Adds a Terminal | Chat switch to the header of agent consoles, to read the conversation as messages. The terminal keeps running behind it.',
+  'labs.teams': 'Teams',
+  'labs.teamsHint': 'Agents with roles that work on a repo without a terminal, with a task board and your approvals. Adds a Teams section to the sidebar.',
+
   // Share, host side (app 2.4.0, item 8, S4): dialog, join prompt, banner, Settings > Sharing
   'settings.cat.share': 'Sharing',
   'settings.search.share': 'Shares and guests',

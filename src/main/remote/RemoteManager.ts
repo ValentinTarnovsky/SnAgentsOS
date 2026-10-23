@@ -53,6 +53,7 @@ import { DeviceRegistry } from './DeviceRegistry'
 import { FitController } from './FitController'
 import { listEndpoints } from './network'
 import { dataDir } from '../paths'
+import { devPort } from '../devPort'
 import { PairingService, RateLimiter } from './PairingService'
 import { RemoteServer } from './RemoteServer'
 import { SessionManager, type HttpTokenOwner } from './SessionManager'
@@ -151,7 +152,7 @@ export class RemoteManager {
   private sessions: SessionManager | null = null
   private statusState: RemoteServerState = 'stopped'
   private statusError: string | undefined
-  private boundPort = DEFAULT_PORT
+  private boundPort = devPort(DEFAULT_PORT, DEFAULT_PORT)
   /** Latest snapshot pushed by the renderer (running overlaid on read). */
   private rawSnapshot: RemoteStateSnapshot | null = null
   private readonly pendingCommands = new Map<string, PendingCommand>()
@@ -295,7 +296,8 @@ export class RemoteManager {
     // Turning phone-fit off gives every phone-sized pane back at once.
     if (this.phoneFit && !phoneFit) void this.fit.releaseAll()
     this.phoneFit = phoneFit
-    const port = this.clampPort(cfg.port)
+    // Plan A1.3: a worktree dev instance moves the default port (devPort.ts).
+    const port = devPort(this.clampPort(cfg.port), DEFAULT_PORT)
     this.syncSecure(cfg.https?.enabled === true, port, cfg.enabled === true)
     if (!cfg.enabled) {
       this.stopServer('disabled')

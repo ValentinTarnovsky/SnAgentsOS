@@ -13,7 +13,8 @@ Electron 33 + React 19 + xterm.js 5.5 + node-pty. Centro de mando de agentes (Cl
 - `src/shared` no importa nada de Node (`fs`, `path`, `electron`...) ni del DOM: lo consumen main, renderer y mobile.
 - El unmount de un pane nunca mata su pty: los kills son explicitos (`pty.kill`, `killPanePtys`). El cleanup de `useXterm` ya no mata (E4-FR-36): un remount, un error boundary o un reload se reengancha al pty vivo; los kills por cierre son de `ptyLifecycle`.
 - Todo archivo persistente nuevo vive bajo `dataDir()` (`src/main/paths.ts`), nunca bajo `app.getPath('userData')` directo. Logs en `dataDir()/logs/<nombre>.log`. Escritura atomica `tmp` + `rename`, UTF-8 sin BOM.
-- Todo archivo que porte o adapte codigo de stablyai/orca lleva en la primera linea `// Adaptado de stablyai/orca (MIT) - <ruta original>`; la licencia esta en `THIRD_PARTY_NOTICES.md`. No se usa su nombre ni su marca en la UI.
+- El trabajo de fondo descansa en reposo: ningun `setInterval` de sondeo nuevo (los anteriores a 2.7.0 siguen como estan). Lo que vence a una hora en main se agenda en `src/main/DeadlineTimer.ts` (un solo `setTimeout` al deadline mas cercano); sin deadlines no queda ningun timer.
+- Todo archivo que porte o adapte codigo de stablyai/orca o de paperclipai/paperclip lleva en la primera linea `// Adaptado de stablyai/orca (MIT) - <ruta original>` o `// Adaptado de paperclipai/paperclip (MIT) - <ruta original>`; las licencias estan en `THIRD_PARTY_NOTICES.md`. No se usan sus nombres ni sus marcas en la UI.
 - Main es autoritativo (estado de agentes, procesos, archivos). Ningun canal acepta rutas del renderer o del celu sin validarlas en main.
 - Protocolo WS: `PROTOCOL_VERSION` queda en 1 y todo campo nuevo es opcional. Cada ctl nuevo se declara en `RemoteCtlAction`, `ctlActionSchema` y `src/renderer/lib/remoteCommands.ts`. Canales IPC con forma `domain:action` en `src/shared/ipc-channels.ts`.
 - Strings visibles con clave es/en: `src/renderer/i18n`, `src/main/i18n.ts`, `src/mobile/src/lib/i18n.ts`.
@@ -21,7 +22,7 @@ Electron 33 + React 19 + xterm.js 5.5 + node-pty. Centro de mando de agentes (Cl
 
 ## Nombres
 
-Producto SnAgentsOS (`BRAND` en `src/shared/brand.ts`). Prefijos: env `SNAOS_`, CLI `snaos`, archivo por repo `.snagentsos.json`, skill `~/.claude/skills/snagentsos`, localStorage y sessionStorage `snagentsos.`, carpeta portable `snagentsos-data`, userData de dev `snagentsos-dev`.
+Producto SnAgentsOS (`BRAND` en `src/shared/brand.ts`). Prefijos: env `SNAOS_`, CLI `snaos`, archivo por repo `.snagentsos.json`, skill `~/.claude/skills/snagentsos`, localStorage y sessionStorage `snagentsos.`, carpeta portable `snagentsos-data`, userData de dev `snagentsos-dev` (`snagentsos-dev-<sha8>` en un worktree vinculado).
 
 ## Verificacion
 
@@ -33,15 +34,15 @@ npm run test:ui     # Electron offscreen (desktop)
 npm run test:mobile # Electron offscreen (cliente mobile)
 ```
 
-Tests nuevos con el mismo arnes: esbuild + vm como `scripts/test-status.cjs`, Electron offscreen como `scripts/test-status-ui.cjs`; cada suite nueva se suma al script de `package.json` que corresponda.
+Tests nuevos con el mismo arnes: esbuild + vm como `scripts/test-status.cjs`, Electron offscreen como `scripts/test-status-ui.cjs`; cada suite nueva se suma al script de `package.json` que corresponda. Cada capacidad nueva suma su fila en `docs/snagentsos/FEATURES.md` con la suite que la verifica.
 
 ## Probar en runtime
 
-La app es de instancia unica por perfil: una segunda corrida con el mismo userData solo enfoca la primera (y `snagentsos-dev` lo comparten todos los worktrees). Probar siempre con un perfil desechable:
+La app es de instancia unica por perfil: una segunda corrida con el mismo userData solo enfoca la primera. En dev el checkout principal usa `snagentsos-dev` y un worktree vinculado usa `snagentsos-dev-<sha8>` con un offset en los puertos del celu, de los hooks y del Share (`src/main/devUserData.ts`). Probar siempre con un perfil desechable:
 
 ```
 npm run build
 node_modules/electron/dist/electron.exe out/main/index.js --user-data-dir=<temp>
 ```
 
-Sin `ELECTRON_RENDERER_URL`, con `CLAUDE_CONFIG_DIR` y `CODEX_HOME` apuntando a carpetas temporales (los hooks nunca tocan `~/.claude` real) y otro puerto remoto en la config del perfil. Nunca abrir un build empaquetado (`release/**`, setup, portable, `win-unpacked`) en una maquina con datos reales: migra y borra los datos de 1.x.
+Sin `ELECTRON_RENDERER_URL` y con otro puerto remoto en la config del perfil. `CLAUDE_CONFIG_DIR` y `CODEX_HOME` apuntan a carpetas temporales (los hooks nunca tocan `~/.claude` real). Unica excepcion: las pruebas en runtime de Equipos usan los dirs reales con los hooks apagados y el cambio automatico de cuenta apagado, nunca copian `.credentials.json` ni `auth.json` y nunca setean `SNAOS_FORCE_LEGACY_*`. Nunca abrir un build empaquetado (`release/**`, setup, portable, `win-unpacked`) en una maquina con datos reales: migra y borra los datos de 1.x.

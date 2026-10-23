@@ -3,6 +3,7 @@
  * Must stay free of Node/DOM imports so it is safe in the renderer bundle.
  */
 import type { PaneWorktree } from './worktree-types'
+import type { LabsSettings } from './labs'
 
 export type { PaneWorktree }
 
@@ -10,7 +11,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 18
+export const CONFIG_VERSION = 19
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -871,6 +872,8 @@ export interface Settings {
   dictation: DictationSettings
   /** Desktop-to-desktop console and workspace sharing (schema 17). */
   share: ShareSettings
+  /** Opt-in experimental modules, all off by default (schema 19, app 2.7.0). */
+  labs: LabsSettings
 }
 
 export interface ConfigFile {

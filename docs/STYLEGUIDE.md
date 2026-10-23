@@ -99,4 +99,4 @@ Prohibidos U+2014 y U+2013 en cualquier archivo: UI, codigo, comentarios, docs y
 
 ## 12. Atribucion
 
-Las secciones 2, 5 y 6 adaptan texto de `docs/STYLEGUIDE.md` de stablyai/orca (licencia MIT, Copyright (c) 2026 Lovecast Inc.). El texto completo de la licencia esta en `THIRD_PARTY_NOTICES.md`. Todo archivo de codigo que porte o adapte codigo de ese proyecto lleva en su primera linea `// Adaptado de stablyai/orca (MIT) - <ruta original>`.
+Las secciones 2, 5 y 6 adaptan texto de `docs/STYLEGUIDE.md` de stablyai/orca (licencia MIT, Copyright (c) 2026 Lovecast Inc.). Los parsers de corridas de Equipos adaptan codigo de paperclipai/paperclip (licencia MIT, Copyright (c) 2025 Paperclip AI). El texto completo de las dos licencias esta en `THIRD_PARTY_NOTICES.md`. Todo archivo de codigo que porte o adapte codigo de uno de esos proyectos lleva en su primera linea `// Adaptado de stablyai/orca (MIT) - <ruta original>` o `// Adaptado de paperclipai/paperclip (MIT) - <ruta original>`. Ninguno de los dos nombres ni sus marcas aparecen en la UI.

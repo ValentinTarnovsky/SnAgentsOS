@@ -732,6 +732,9 @@ const en = {
   'link.err.generic': "Couldn't open it on the PC",
   'term.newLines': 'New lines',
   'term.newLinesAria': 'Scroll to the latest output',
+  // Labs (app 2.7.0): opt-in modules, switched on in the desktop's Settings > Labs
+  'labs.teams': 'Teams',
+  'labs.teamsOff': 'Teams is off. Turn it on in Settings > Labs on the desktop.',
   // KeyBar layout and custom keys (E2-FR-45, 46)
   'keybar.title': 'Key bar',
   'keybar.entryHint': 'Order, hide and create keys',
@@ -1487,6 +1490,9 @@ const es: Record<Key, string> = {
   'link.err.generic': 'No se pudo abrir en la PC',
   'term.newLines': 'Nuevas líneas',
   'term.newLinesAria': 'Bajar a la última salida',
+  // Labs (app 2.7.0)
+  'labs.teams': 'Equipos',
+  'labs.teamsOff': 'Equipos está apagado. Activalo en Ajustes > Labs de la PC.',
   'keybar.title': 'Barra de teclas',
   'keybar.entryHint': 'Ordená, ocultá y creá teclas',
   'keybar.hint': 'El botón del teclado queda fijo a la derecha de la barra.',

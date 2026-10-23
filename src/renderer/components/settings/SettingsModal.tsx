@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
-import { Activity, Bell, Bot, Database, DownloadCloud, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Share2, Smartphone, TerminalSquare, Users, Workflow, Zap, type LucideIcon } from 'lucide-react'
+import { Activity, Bell, Bot, Database, DownloadCloud, FlaskConical, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Share2, Smartphone, TerminalSquare, Users, Workflow, Zap, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -38,6 +38,7 @@ import { SharingSection } from './sections/SharingSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
 import { GitSection } from './sections/GitSection'
+import { LabsSection } from './sections/LabsSection'
 
 const ICONS: Record<CategoryId, LucideIcon> = {
   terminal: TerminalSquare,
@@ -57,6 +58,7 @@ const ICONS: Record<CategoryId, LucideIcon> = {
   remote: Smartphone,
   share: Share2,
   git: GitBranch,
+  labs: FlaskConical,
   updates: DownloadCloud,
   about: Info,
 }
@@ -79,6 +81,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   remote: RemoteSection,
   share: SharingSection,
   git: GitSection,
+  labs: LabsSection,
   updates: UpdatesSection,
   about: AboutSection,
 }

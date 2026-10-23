@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
 import { migrateQuickCommandsConfig, QUICK_COMMAND_ID_MAX } from '@shared/quickCommands'
+import { LABS_KEYS, type LabsKey } from '@shared/labs'
 
 export { CONFIG_VERSION }
 
@@ -95,6 +96,13 @@ export const shareSettingsSchema = z.object({
   guestName: z.string().max(48).catch('').default(''),
   defaultPerm: z.enum(['view', 'type', 'full']).catch('view').default('view'),
 })
+
+// Schema 19 (app 2.7.0): Labs, one flag per LABS_KEYS entry (@shared/labs).
+// Off by default, and a junk value turns the lab off instead of failing the config.
+const labFlag = () => z.boolean().catch(false).default(false)
+export const labsSettingsSchema = z.object(
+  Object.fromEntries(LABS_KEYS.map((k) => [k, labFlag()])) as Record<LabsKey, ReturnType<typeof labFlag>>,
+)
 
 // Schema 13 (E3-FR-42). Only `tailscaleServe` exists (manualCert retired, E3-FR-51).
 export const remoteHttpsSettingsSchema = z.object({
@@ -407,6 +415,8 @@ const settingsSchema = z.object({
   // Schema 17: desktop dictation and desktop-to-desktop sharing.
   dictation: dictationSettingsSchema.default({}).catch(() => dictationSettingsSchema.parse({})),
   share: shareSettingsSchema.default({}).catch(() => shareSettingsSchema.parse({})),
+  // Schema 19 (app 2.7.0): Labs; a missing or non-object block gives every lab off.
+  labs: labsSettingsSchema.default({}).catch(() => labsSettingsSchema.parse({})),
 })
 
 const keyButtonSchema = z.object({
@@ -464,6 +474,9 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * v17 -> v18 (app 2.5.0) is defaults only (no logic):
  * settings.dictation.{device, interim, vocabulary}; settings.dictation.engine
  * is dropped (zod strips it; the Windows engines are gone).
+ * v18 -> v19 (app 2.7.0): settings.labs.* (defaults only). Later keys of this
+ * same batch (settings.agents.silence.*, workspaces[].panes[].schedules[] with
+ * the cron recurrence) stay on 19.
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)
