@@ -9,10 +9,16 @@
  * reported on read and restored on save. A save may carry the `rev` the
  * editor loaded (mtime and size): when the file changed on disk since (an
  * agent edited it), the answer is `conflict`. Deletes go to the OS trash.
- * One workspace folder is watched at a time (the drawer on screen).
+ * The drawer on screen watches its workspace folder; share guests (app 2.6.0)
+ * hold watches of their own on the folder they read (FILES_WATCH_MAX folders
+ * at most, one watch per folder whoever asks).
+ *
+ * Share guests read through `guestList` / `guestRead` only: never `.git` (in
+ * any case, nor a link into it), never a secret name (isShareSecretName, also
+ * through a link), names a guest's schema accepts, and bounded reads.
  */
 import { promises as fsp, realpathSync, watch as fsWatch } from 'fs'
-import { basename, isAbsolute, join } from 'path'
+import { basename, isAbsolute, join, relative, sep } from 'path'
 import {
   FILE_EDIT_MAX,
   FILE_IMAGE_MAX,
@@ -24,7 +30,10 @@ import {
   fileRev,
   inGitDir,
   isSafeRel,
+  isShareSecretName,
   parentRel,
+  relHasShareSecret,
+  shareFileNameOk,
   type FileCreateReq,
   type FileEntry,
   type FileReadRes,
@@ -50,6 +59,22 @@ const BINARY_SNIFF = 8000
 export const FILES_WATCH_DEBOUNCE_MS = 250
 /** More changed folders than this in one batch: reload everything shown. */
 const FILES_WATCH_MAX_DIRS = 200
+/** Workspace folders watched at once (the drawer's and the share guests'). */
+export const FILES_WATCH_MAX = 4
+
+/** What a share guest reads of a file: text cut at `textMax` bytes (`partial`), an image up to `imageMax`. */
+export type GuestReadRes =
+  | { ok: true; kind: 'text'; text: string; eol: 'lf' | 'crlf'; bom: boolean; rev: string; size: number; partial: boolean }
+  | { ok: true; kind: 'image'; dataUrl: string; size: number; rev: string }
+  | { ok: false; error: FilesError }
+
+interface Watcher {
+  workspaceId: string
+  handle: TreeWatchHandle
+  timer: ReturnType<typeof setTimeout> | null
+  dirs: Set<string>
+  owners: Map<string, (evt: FilesChangedEvt) => void>
+}
 
 export interface FileServiceDeps {
   config: () => ConfigFile | null
@@ -77,7 +102,9 @@ function isId(v: unknown): v is string {
 
 export class FileService {
   private readonly win: boolean
-  private watcher: { workspaceId: string; handle: TreeWatchHandle; timer: ReturnType<typeof setTimeout> | null; dirs: Set<string> } | null = null
+  private readonly watchers = new Map<string, Watcher>()
+  /** The workspace the drawer on screen watches (owner `local`). */
+  private localWatch: string | null = null
 
   constructor(private readonly deps: FileServiceDeps) {
     this.win = (deps.platform ?? process.platform) === 'win32'
@@ -113,7 +140,15 @@ export class FileService {
       return { ok: false, error: 'not_found' }
     }
     if (!isInside(r.root, target, this.win)) return { ok: false, error: 'denied_path' }
+    // A junction or a link that resolves into `.git` (any case) is `.git`.
+    if (this.realRel(r.root, target).some((seg) => seg.toLowerCase() === '.git')) return { ok: false, error: 'invalid' }
     return { ok: true, root: r.root, target }
+  }
+
+  /** The segments of a contained realpath under the root ([] for the root itself). */
+  private realRel(root: string, target: string): string[] {
+    const rel = relative(root, target)
+    return rel ? rel.split(this.win ? /[\\/]/ : sep) : []
   }
 
   /** A path to create: its parent exists inside the root and it does not exist yet. */
@@ -151,7 +186,7 @@ export class FileService {
     const entries: FileEntry[] = []
     let truncated = false
     for (const d of dirents) {
-      if (d.name === '.git') continue
+      if (d.name.toLowerCase() === '.git') continue
       if (entries.length >= FILES_LIST_MAX) {
         truncated = true
         break
@@ -159,7 +194,10 @@ export class FileService {
       const p = join(dir.target, d.name)
       try {
         const link = d.isSymbolicLink()
-        if (link && !isInside(dir.root, realpathSync.native(p), this.win)) continue
+        if (link) {
+          const real = realpathSync.native(p)
+          if (!isInside(dir.root, real, this.win) || this.realRel(dir.root, real).some((seg) => seg.toLowerCase() === '.git')) continue
+        }
         const st = await fsp.stat(p)
         entries.push({ name: d.name, kind: st.isDirectory() ? 'dir' : 'file', size: st.isDirectory() ? 0 : st.size, mtimeMs: Math.floor(st.mtimeMs), ...(link ? { link: true } : {}) })
       } catch {
@@ -194,6 +232,95 @@ export class FileService {
       return { ok: true, kind: 'text', text: crlf ? raw.replace(/\r\n/g, '\n') : raw, eol: crlf ? 'crlf' : 'lf', bom, rev, size: st.size, readOnly: st.size > FILE_EDIT_MAX }
     } catch {
       return { ok: false, error: 'io' }
+    }
+  }
+
+  /** A share guest's view of the target: no secret name on the way there nor at its real place. */
+  private guestExisting(workspaceId: unknown, rel: unknown): Resolved {
+    if (typeof rel !== 'string' || relHasShareSecret(rel)) return { ok: false, error: 'not_found' }
+    const t = this.existing(workspaceId, rel)
+    if (!t.ok) return t
+    if (this.realRel(t.root, t.target).some(isShareSecretName)) return { ok: false, error: 'not_found' }
+    return t
+  }
+
+  /**
+   * A folder as a share guest gets it (app 2.6.0): no secret name, nothing
+   * that resolves to one, only names its schema accepts, at most `max`.
+   */
+  async guestList(workspaceId: string, rel: string, max: number): Promise<FilesListRes> {
+    const dir = this.guestExisting(workspaceId, rel)
+    if (!dir.ok) return dir
+    const res = await this.list({ workspaceId, rel })
+    if (!res.ok) return res
+    const entries: FileEntry[] = []
+    let truncated = res.truncated
+    for (const e of res.entries) {
+      if (!shareFileNameOk(e.name) || isShareSecretName(e.name)) continue
+      if (e.link) {
+        try {
+          const real = realpathSync.native(join(dir.target, e.name))
+          if (this.realRel(dir.root, real).some(isShareSecretName)) continue
+        } catch {
+          continue
+        }
+      }
+      if (entries.length >= max) {
+        truncated = true
+        break
+      }
+      entries.push(e)
+    }
+    return { ok: true, entries, truncated }
+  }
+
+  /**
+   * A file as a share guest reads it (app 2.6.0): text up to `textMax` UTF-8
+   * bytes (the rest cut, `partial`; it is never saved from a share), an image
+   * up to `imageMax` bytes, binary refused. Only the head of a big text file
+   * is read.
+   */
+  async guestRead(workspaceId: string, rel: string, limits: { textMax: number; imageMax: number }): Promise<GuestReadRes> {
+    const file = this.guestExisting(workspaceId, rel)
+    if (!file.ok) return file
+    let fh: Awaited<ReturnType<typeof fsp.open>> | null = null
+    try {
+      const st = await fsp.stat(file.target)
+      if (!st.isFile()) return { ok: false, error: 'invalid' }
+      const rev = fileRev(st.mtimeMs, st.size)
+      const mime = FILE_IMAGE_TYPES[extOf(file.target)]
+      if (mime) {
+        if (st.size > limits.imageMax) return { ok: false, error: 'too_large' }
+        const buf = await fsp.readFile(file.target)
+        if (buf.length > limits.imageMax) return { ok: false, error: 'too_large' }
+        return { ok: true, kind: 'image', dataUrl: `data:${mime};base64,${buf.toString('base64')}`, size: st.size, rev }
+      }
+      fh = await fsp.open(file.target, 'r')
+      // 3 more bytes: a BOM does not count against the text.
+      const want = Math.min(st.size, limits.textMax + 3)
+      const buf = Buffer.alloc(want)
+      let got = 0
+      while (got < want) {
+        const { bytesRead } = await fh.read(buf, got, want - got, got)
+        if (bytesRead === 0) break
+        got += bytesRead
+      }
+      const head = buf.subarray(0, got)
+      if (head.subarray(0, BINARY_SNIFF).includes(0)) return { ok: false, error: 'binary' }
+      const bom = head.length >= 3 && head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf
+      let body = head.subarray(bom ? 3 : 0)
+      const partial = st.size - (bom ? 3 : 0) > limits.textMax
+      if (body.length > limits.textMax) body = body.subarray(0, limits.textMax)
+      let raw = body.toString('utf8')
+      // A cut in the middle of a character or of a CRLF.
+      if (partial) raw = raw.replace(/\uFFFD+$/, '').replace(/\r$/, '')
+      const crlfs = raw.match(/\r\n/g)?.length ?? 0
+      const crlf = crlfs > 0 && crlfs >= (raw.match(/(?<!\r)\n/g)?.length ?? 0)
+      return { ok: true, kind: 'text', text: crlf ? raw.replace(/\r\n/g, '\n') : raw, eol: crlf ? 'crlf' : 'lf', bom, rev, size: st.size, partial }
+    } catch {
+      return { ok: false, error: 'io' }
+    } finally {
+      await fh?.close().catch(() => undefined)
     }
   }
 
@@ -289,44 +416,87 @@ export class FileService {
     }
   }
 
-  /** Watch one workspace folder (null: stop). Changes go out per folder, gathered for 250 ms. */
+  /** The drawer on screen watches one workspace folder (null: stop). Changes go out per folder, gathered for 250 ms. */
   watch(workspaceId: unknown): void {
-    if (workspaceId !== null && this.watcher?.workspaceId === workspaceId) return
+    const id = typeof workspaceId === 'string' ? workspaceId : null
+    if (id !== null && this.localWatch === id && this.watchers.get(id)?.owners.has('local')) return
     this.unwatch()
-    if (workspaceId === null) return
+    if (id === null) return
+    if (this.acquireWatch(id, 'local', (evt) => this.deps.emit(evt))) this.localWatch = id
+  }
+
+  /** The drawer's watch stops (window closing, drawer gone). */
+  unwatch(): void {
+    const id = this.localWatch
+    this.localWatch = null
+    if (id !== null) this.releaseWatch(id, 'local')
+  }
+
+  /**
+   * Another reader of a workspace folder (a share grant whose guests have the
+   * Files drawer open). One watch per folder whoever holds it; false when the
+   * folder has no root or FILES_WATCH_MAX folders are watched already.
+   */
+  acquireWatch(workspaceId: string, owner: string, cb: (evt: FilesChangedEvt) => void): boolean {
+    const cur = this.watchers.get(workspaceId)
+    if (cur) {
+      cur.owners.set(owner, cb)
+      return true
+    }
+    if (this.watchers.size >= FILES_WATCH_MAX) return false
     const r = this.root(workspaceId)
-    if (!r.ok) return
-    const id = workspaceId as string
+    if (!r.ok) return false
     const onEvent = (name: string | null): void => {
-      const w = this.watcher
-      if (!w || w.workspaceId !== id) return
+      const w = this.watchers.get(workspaceId)
+      if (!w) return
       const rel = name == null ? null : name.replace(/\\/g, '/').replace(/^\/+/, '')
       if (rel !== null && inGitDir(rel)) return
       w.dirs.add(rel === null ? '*' : parentRel(rel))
       if (w.timer) return
-      w.timer = setTimeout(() => this.flushWatch(), FILES_WATCH_DEBOUNCE_MS)
+      w.timer = setTimeout(() => this.flushWatch(workspaceId), FILES_WATCH_DEBOUNCE_MS)
     }
-    const handle = (this.deps.watchRoot ?? defaultWatchRoot(this.deps.platform ?? process.platform))(r.root, onEvent, () => this.unwatch())
-    if (handle) this.watcher = { workspaceId: id, handle, timer: null, dirs: new Set() }
+    const handle = (this.deps.watchRoot ?? defaultWatchRoot(this.deps.platform ?? process.platform))(r.root, onEvent, () => this.closeWatch(workspaceId))
+    if (!handle) return false
+    this.watchers.set(workspaceId, { workspaceId, handle, timer: null, dirs: new Set(), owners: new Map([[owner, cb]]) })
+    return true
   }
 
-  private flushWatch(): void {
-    const w = this.watcher
+  releaseWatch(workspaceId: string, owner: string): void {
+    const w = this.watchers.get(workspaceId)
+    if (!w || !w.owners.delete(owner) || w.owners.size > 0) return
+    this.closeWatch(workspaceId)
+  }
+
+  /** Folders watched now (tests). */
+  get watchedCount(): number {
+    return this.watchers.size
+  }
+
+  private closeWatch(workspaceId: string): void {
+    const w = this.watchers.get(workspaceId)
+    if (!w) return
+    this.watchers.delete(workspaceId)
+    if (this.localWatch === workspaceId) this.localWatch = null
+    if (w.timer) clearTimeout(w.timer)
+    w.handle.close()
+  }
+
+  private flushWatch(workspaceId: string): void {
+    const w = this.watchers.get(workspaceId)
     if (!w) return
     w.timer = null
     const dirs = [...w.dirs]
     w.dirs.clear()
     if (!dirs.length) return
     const all = dirs.includes('*') || dirs.length > FILES_WATCH_MAX_DIRS
-    this.deps.emit({ workspaceId: w.workspaceId, dirs: all ? [] : dirs, ...(all ? { all: true } : {}) })
-  }
-
-  unwatch(): void {
-    const w = this.watcher
-    this.watcher = null
-    if (!w) return
-    if (w.timer) clearTimeout(w.timer)
-    w.handle.close()
+    const evt: FilesChangedEvt = { workspaceId, dirs: all ? [] : dirs, ...(all ? { all: true } : {}) }
+    for (const cb of [...w.owners.values()]) {
+      try {
+        cb(evt)
+      } catch {
+        /* one reader failing never stops the others */
+      }
+    }
   }
 }
 

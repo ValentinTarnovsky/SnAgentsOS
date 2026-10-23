@@ -221,7 +221,13 @@ class FakeHost {
         this.send(c, { t: 'gitRes', id: m.id, ok: true, data: { error: 'not_repo' }, page: 0, done: true })
         return
       case 'notesReq':
-        this.send(c, { t: 'notesRes', id: m.id, ok: true, notes: [{ id: 'n1', title: 'Plan', updatedAt: 1, size: 3, rev: 'r1' }] })
+        if (m.op === 'write') this.send(c, { t: 'notesRes', id: m.id, ok: true, note: { id: m.noteId, title: '', updatedAt: 2, size: 4, rev: '2-4' } })
+        else this.send(c, { t: 'notesRes', id: m.id, ok: true, notes: [{ id: 'n1', title: 'Plan', updatedAt: 1, size: 3, rev: 'r1' }] })
+        return
+      case 'filesReq':
+        this.send(c, m.op === 'list'
+          ? { t: 'filesRes', id: m.id, ok: true, entries: [{ name: 'src', kind: 'dir', size: 0, mtimeMs: 1 }, { name: 'README.md', kind: 'file', size: 5, mtimeMs: 1 }], truncated: false }
+          : { t: 'filesRes', id: m.id, ok: true, file: { kind: 'text', text: '# Hola', eol: 'lf', bom: false, rev: '1-6', size: 6 } })
         return
       case 'ping':
         this.send(c, { t: 'pong', ts: m.ts })
@@ -239,7 +245,7 @@ function inviteFor(host, opts = {}) {
   }, { allowLoopback: true })
 }
 
-const FAST = { backoffMs: [80, 160, 320], jitter: 0, attemptMs: 1000, handshakeMs: 1500, pingMs: 20_000, silenceMs: 60_000, ctlMs: 400, gitMs: 400, notesMs: 400 }
+const FAST = { backoffMs: [80, 160, 320], jitter: 0, attemptMs: 1000, handshakeMs: 1500, pingMs: 20_000, silenceMs: 60_000, ctlMs: 400, gitMs: 400, notesMs: 400, filesMs: 400 }
 
 let guestSeq = 0
 function makeGuest(opts = {}) {
@@ -262,6 +268,7 @@ function makeGuest(opts = {}) {
     batchMs: 16,
     connection: {
       tune: { ...FAST, ...opts.tune },
+      ...(opts.protocolMax ? { protocolMax: opts.protocolMax } : {}),
       dial: (ep, ms) => { dials.push(`${ep.a}:${ep.p}`); return S.dialShareWs(ep, ms) },
     },
   })
@@ -580,7 +587,32 @@ async function testRequests() {
   check((await g.guest.git({ linkId: id, op: 'diff', path: '../etc/passwd' })).error === 'invalid' && (await g.guest.git({ linkId: id, op: 'diff', path: 'C:\\x' })).error === 'invalid', 'git paths that escape are refused in main')
   const notes = await g.guest.notes({ linkId: id, op: 'list' })
   check(notes.ok && notes.reply.notes[0].id === 'n1', 'notes list round trip')
-  check((await g.guest.notes({ linkId: id, op: 'read' })).error === 'invalid' && (await g.guest.notes({ linkId: id, op: 'write' })).error === 'invalid', 'notes are read-only and need an id to read')
+  check((await g.guest.notes({ linkId: id, op: 'read' })).error === 'invalid' && (await g.guest.notes({ linkId: id, op: 'write', text: 'x' })).error === 'invalid' && (await g.guest.notes({ linkId: id, op: 'write', noteId: 'n1' })).error === 'invalid', 'notes need an id to read or write, and a write its text')
+  check((await g.guest.notes({ linkId: id, op: 'write', noteId: 'n1', text: 'x' })).error === 'denied' && (await g.guest.files({ linkId: id, op: 'list', rel: '' })).error === 'denied', 'without notesWrite or files (a v1 host sends neither) the guest refuses locally')
+  // A v2 host turns on notes write and files.
+  host.send(c, { t: 'state', state: makeState('full', { caps: { createPane: true, closePane: true, chat: true, notes: true, git: true, notesWrite: true, files: true } }) })
+  await waitFor(() => g.linkEvents().filter(e => e.t === 'state').length === 2, 2000, 'v2 caps state')
+  const wr = await g.guest.notes({ linkId: id, op: 'write', noteId: 'n1', text: 'hola', baseRev: 'r1' })
+  const sentW = c.msgs.find(m => m.t === 'notesReq' && m.op === 'write')
+  check(wr.ok && wr.reply.note.rev === '2-4' && sentW && sentW.text === 'hola' && sentW.baseRev === 'r1' && !('workspaceId' in sentW), 'a note write round trip (never naming a workspace)')
+  const before = c.msgs.length
+  check((await g.guest.notes({ linkId: id, op: 'write', noteId: 'n1', text: 'ñ'.repeat(20001) })).error === 'too_large', 'past 40000 UTF-8 bytes a note write is refused in main')
+  const ctl = String.fromCharCode(1).repeat(40000)
+  check((await g.guest.notes({ linkId: id, op: 'write', noteId: 'n1', text: ctl })).error === 'too_large' && c.msgs.length === before, 'a 40000-byte note that escapes past one guest frame is never sent')
+  check(g.status(id) === 'connected', 'and the link stays up')
+  const fl = await g.guest.files({ linkId: id, op: 'list', rel: '' })
+  check(fl.ok && fl.reply.entries.map(e => e.name).join() === 'src,README.md', 'a files list round trip')
+  const fr = await g.guest.files({ linkId: id, op: 'read', rel: 'README.md' })
+  check(fr.ok && fr.reply.file.text === '# Hola', 'a file read round trip')
+  check((await g.guest.files({ linkId: id, op: 'read', rel: '../x' })).error === 'invalid' && (await g.guest.files({ linkId: id, op: 'read', rel: '.GIT/config' })).error === 'invalid' && (await g.guest.files({ linkId: id, op: 'read', rel: '' })).error === 'invalid' && (await g.guest.files({ linkId: id, op: 'write', rel: 'a' })).error === 'invalid', 'paths out, .git, the root as a file and writes are refused in main')
+  g.guest.filesWatch({ linkId: id, on: true })
+  await waitFor(() => c.msgs.some(m => m.t === 'filesWatch' && m.on === true), 2000, 'filesWatch on')
+  host.send(c, { t: 'filesChanged', dirs: ['src'] })
+  await waitFor(() => g.linkEvents().some(e => e.t === 'filesChanged' && e.dirs[0] === 'src'), 2000, 'filesChanged')
+  check(true, 'filesChanged reaches the renderer while the drawer is open')
+  g.guest.resetRenderer()
+  await waitFor(() => c.msgs.some(m => m.t === 'filesWatch' && m.on === false), 2000, 'filesWatch off on reset')
+  check(true, 'a renderer reload turns the watch off')
   g.guest.chat({ linkId: id, op: 'sub', paneId: 'p2' })
   await waitFor(() => c.msgs.some(m => m.t === 'chatSub' && m.paneId === 'p2'), 2000, 'chatSub')
   host.send(c, { t: 'chatPage', paneId: 'p2', items: [{ id: '1', role: 'user', ts: 1, blocks: [{ t: 'text', text: 'hola' }] }], cursor: null, done: true })
@@ -595,7 +627,7 @@ async function testRequests() {
 
   // Caps off: refused without a round trip.
   host.send(c, { t: 'state', state: makeState('full', { caps: { createPane: false, closePane: false, chat: false, notes: false, git: false } }) })
-  await waitFor(() => g.linkEvents().filter(e => e.t === 'state').length === 2, 2000, 'caps state')
+  await waitFor(() => g.linkEvents().filter(e => e.t === 'state').length === 3, 2000, 'caps state')
   check((await g.guest.ctl({ linkId: id, op: 'createPane' })).error === 'denied' && (await g.guest.git({ linkId: id, op: 'status' })).error === 'denied' && (await g.guest.notes({ linkId: id, op: 'list' })).error === 'denied', 'requests the caps do not grant are refused locally')
   g.guest.disconnect(id)
   check((await g.guest.git({ linkId: id, op: 'status' })).error === 'offline', 'requests on a disconnected link answer offline')
@@ -850,12 +882,12 @@ async function testMismatch() {
   await mitm.stop()
 
   // Version: no overlap -> ended version with the host range.
-  const v = await new FakeHost({ minVersion: 2, maxVersion: 3 }).listen()
+  const v = await new FakeHost({ minVersion: 3, maxVersion: 4 }).listen()
   const g3 = makeGuest()
   const id3 = await joined(v, g3, { expect: 'ended' })
   await sleep(250)
   const view = g3.guest.view(id3)
-  check(view.reason === 'version' && view.version.min === 2 && view.version.max === 3 && view.version.app === '9.9.9' && v.conns.length === 1, 'no common version ends the link with the host range, no reconnect')
+  check(view.reason === 'version' && view.version.min === 3 && view.version.max === 4 && view.version.app === '9.9.9' && v.conns.length === 1, 'no common version ends the link with the host range, no reconnect')
   g3.guest.dispose()
   await v.stop()
 }
@@ -924,6 +956,9 @@ async function loadRealHost() {
 export { ShareServer } from './src/main/share/ShareServer'
 export { ShareHost } from './src/main/share/ShareHost'
 export { GrantStore } from './src/main/share/GrantStore'
+export { FileService } from './src/main/files/FileService'
+export { WsNoteStore } from './src/main/notes/WsNoteStore'
+export { runNotesRequest } from './src/main/remote/RemoteManager'
 `)
   } catch (err) {
     console.log(`  (real host does not bundle yet: ${String(err.message).split('\n')[0]})`)
@@ -940,6 +975,19 @@ export { GrantStore } from './src/main/share/GrantStore'
     await new Promise(r => probe.close(r))
     const approvals = []
     const writes = []
+    // The real backends of index.ts on a temp workspace folder: FileService (guest half) and the notes store.
+    const folder = path.join(dataDir, 'repo')
+    fs.mkdirSync(path.join(folder, '.git'), { recursive: true })
+    fs.mkdirSync(path.join(folder, 'src'), { recursive: true })
+    fs.writeFileSync(path.join(folder, '.git', 'config'), '[remote] url = https://token@example.invalid')
+    fs.writeFileSync(path.join(folder, '.env'), 'TOKEN=secret')
+    fs.writeFileSync(path.join(folder, 'README.md'), '# Proyecto')
+    fs.writeFileSync(path.join(folder, 'src', 'a.ts'), 'const a = 1')
+    fs.writeFileSync(path.join(folder, 'big.log'), 'x'.repeat(300 * 1024))
+    const files = new R.FileService({ config: () => ({ workspaces: [{ id: 'w1', name: 'Proyecto', cwd: folder, panes: [] }] }), emit: () => {}, trash: async () => {}, reveal: () => {}, openPath: async () => '' })
+    let notesHost = null
+    const notesRoot = path.join(dataDir, 'notes')
+    const wsNotes = new R.WsNoteStore({ root: () => notesRoot, emit: evt => notesHost?.notesChanged(evt) })
     const snapshot = {
       workspaces: [{ id: 'w1', name: 'Proyecto', layoutOrder: ['p1'], panes: [{ id: 'p1', title: 'PowerShell', type: 'shell', color: '#888888', icon: 'terminal', running: true }] }],
       activeWorkspaceId: 'w1', themeTokens: {}, language: 'en', fontFamily: 'Consolas', fontSize: 14,
@@ -972,12 +1020,20 @@ export { GrantStore } from './src/main/share/GrantStore'
       guestFallback: () => 'Guest',
       onApproval: a => approvals.push(a),
       allowLoopback: true,
+      notes: () => req => R.runNotesRequest(wsNotes, req),
+      files: () => ({
+        list: (ws, rel, max) => files.guestList(ws, rel, max),
+        read: (ws, rel, limits) => files.guestRead(ws, rel, limits),
+        acquireWatch: (ws, owner, cb) => files.acquireWatch(ws, owner, cb),
+        releaseWatch: (ws, owner) => files.releaseWatch(ws, owner),
+      }),
     })
     const start = async () => {
       host = make()
+      notesHost = host
       host.applyConfig({ enabled: true, port })
       if (!grantId) {
-        const created = await host.create({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full' })
+        const created = await host.create({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full', rights: S.shareDefaultRights('full') })
         if (!created.ok) throw new Error(`real host create: ${created.error}`)
         grantId = created.grant.id
       }
@@ -998,6 +1054,10 @@ export { GrantStore } from './src/main/share/GrantStore'
         return !!a
       },
       pendingApprovals: () => approvals.length,
+      folder,
+      notesRoot,
+      watched: () => files.watchedCount,
+      state: () => host.hostState(),
       stop: async () => { host?.shutdown(); host = null; await sleep(50) },
       start,
     }
@@ -1059,6 +1119,47 @@ async function testRealHost() {
     await sleep(100)
     check(!host.writes.some(w => w.includes('\r')), 'real: typed text reaches the pty, Enter never does in type')
 
+    // app 2.6.0 over real sockets: notes write and files with the Full defaults, apart from the type perm.
+    const st = g.linkEvents().filter(e => e.t === 'state' && e.linkId === id).pop()?.state
+    check(st && st.caps.notesWrite === true && st.caps.files === true, 'real: a v2 guest admitted as type still gets the notes write and files rights')
+    const made = await g.guest.notes({ linkId: id, op: 'create', text: '# Desde el guest' })
+    const nid = made.reply?.note?.id
+    check(made.ok && made.reply.ok && nid && fs.readFileSync(path.join(host.notesRoot, 'w1', nid + '.md'), 'utf8') === '# Desde el guest', 'real: a note the guest creates is a file of the shared workspace on the host')
+    const rd = await g.guest.notes({ linkId: id, op: 'read', noteId: nid })
+    const before = g.linkEvents().length
+    const rw = await g.guest.notes({ linkId: id, op: 'write', noteId: nid, text: 'hola', baseRev: rd.reply.note.rev })
+    check(rw.ok && rw.reply.ok && fs.readFileSync(path.join(host.notesRoot, 'w1', nid + '.md'), 'utf8') === 'hola', 'real: a guest write with the rev it read lands on disk')
+    await waitFor(() => g.linkEvents().slice(before).some(e => e.t === 'notesChanged' && e.noteId === nid && e.rev === rw.reply.note.rev), 3000, 'real notesChanged with rev')
+    check(true, 'real: the change comes back with its rev (the guest skips its own echo)')
+    const stale = await g.guest.notes({ linkId: id, op: 'write', noteId: nid, text: 'pisada', baseRev: rd.reply.note.rev })
+    check(stale.ok && !stale.reply.ok && stale.reply.error === 'conflict' && stale.reply.current.text === 'hola', 'real: an old rev is a conflict with the note as it is now')
+    const rl = await g.guest.files({ linkId: id, op: 'list', rel: '' })
+    const names = rl.reply?.entries?.map(e => e.name) ?? []
+    check(rl.ok && names.includes('README.md') && names.includes('src') && !names.includes('.git') && !names.includes('.env'), 'real: the shared folder lists without .git nor .env')
+    check((await g.guest.files({ linkId: id, op: 'read', rel: '.env' })).reply?.error === 'not_found' && (await g.guest.files({ linkId: id, op: 'read', rel: '.git/config' })).error === 'invalid', 'real: .env is not_found and .git never leaves main')
+    const big = await g.guest.files({ linkId: id, op: 'read', rel: 'big.log' })
+    check(big.ok && big.reply.file.partial === true && big.reply.file.text.length === 256 * 1024, 'real: a long file arrives cut at 256 KB, partial')
+    g.guest.filesWatch({ linkId: id, on: true })
+    await waitFor(() => host.watched() === 1, 3000, 'real watch')
+    const before2 = g.linkEvents().length
+    fs.writeFileSync(path.join(host.folder, 'src', 'b.ts'), 'export {}')
+    await waitFor(() => g.linkEvents().slice(before2).some(e => e.t === 'filesChanged' && (e.all || e.dirs.includes('src'))), 5000, 'real filesChanged')
+    check(true, 'real: a file written on the host reaches the guest as filesChanged while the drawer is open')
+    g.guest.filesWatch({ linkId: id, on: false })
+    await waitFor(() => host.watched() === 0, 3000, 'real unwatch')
+    check(true, 'real: closing the drawer releases the folder watch')
+    // An app 2.5 guest (protocol v1) on the same share: v1 caps only, the link stays healthy.
+    const old = makeGuest({ protocolMax: 1 })
+    const oid = old.guest.join(host.invite()).link.id
+    await waitFor(() => old.status(oid) === 'waiting_approval' && host.pendingApprovals() > 0, 5000, 'real v1 pending')
+    host.approve()
+    await waitFor(() => old.status(oid) === 'connected', 5000, 'real v1 welcome')
+    const ost = old.linkEvents().filter(e => e.t === 'state').pop().state
+    check(!('files' in ost.caps) && !('notesWrite' in ost.caps) && ost.caps.notes, 'real: a v1 guest gets the v1 caps only')
+    check((await old.guest.notes({ linkId: oid, op: 'write', noteId: 'n1', text: 'x' })).error === 'denied' && (await old.guest.notes({ linkId: oid, op: 'list' })).ok, 'real: a v1 guest reads notes, never writes them')
+    check(host.state().grants[0].sessions.filter(x => x.legacy).length === 1, 'real: the host marks it legacy')
+    old.guest.dispose()
+
     // Reconnect after a server restart: tickets are gone, a new approval admits it.
     await host.stop()
     await waitFor(() => g.status(id) === 'reconnecting', 5000, 'real host gone')
@@ -1104,6 +1205,7 @@ async function main() {
 export * from './src/shared/share-protocol'
 export * from './src/shared/share-protocol-schemas'
 export * from './src/shared/shareInput'
+export * from './src/shared/shareRights'
 export * from './src/shared/share-guest'
 export { CH } from './src/shared/ipc-channels'
 export * from './src/main/share/crypto'

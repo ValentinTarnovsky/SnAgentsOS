@@ -14,6 +14,7 @@ import type {
   ShareDeniedReason,
   ShareDenyReason,
   ShareEndReason,
+  ShareFilesReply,
   ShareHostMsg,
   ShareHostPlatform,
   ShareNotesReply,
@@ -154,7 +155,8 @@ export interface ShareGuestGitReq {
   page?: number
 }
 
-export type ShareGuestRequestError = 'offline' | 'timeout' | 'denied' | 'invalid' | 'busy'
+/** `too_large`: the request would not fit one guest frame (never sent, the link stays up). */
+export type ShareGuestRequestError = 'offline' | 'timeout' | 'denied' | 'invalid' | 'busy' | 'too_large'
 
 export interface ShareGuestGitRes {
   ok: boolean
@@ -162,16 +164,41 @@ export interface ShareGuestGitRes {
   error?: ShareGuestRequestError
 }
 
+/** list and read need `caps.notes`; write, create and delete `caps.notesWrite` (v2). */
 export interface ShareGuestNotesReq {
   linkId: string
-  op: 'list' | 'read'
+  op: 'list' | 'read' | 'write' | 'create' | 'delete'
   noteId?: string
+  /** write / create, <= SHARE_LIMITS.noteTextMax UTF-8 bytes. */
+  text?: string
+  /** write: the rev the editor loaded; another one on the host is a conflict. */
+  baseRev?: string
 }
 
 export interface ShareGuestNotesRes {
   ok: boolean
   reply?: ShareNotesReply
   error?: ShareGuestRequestError
+}
+
+/** v2, `caps.files`: a folder or a file of the shared workspace, read-only. */
+export interface ShareGuestFilesReq {
+  linkId: string
+  op: 'list' | 'read'
+  /** `/` separators, '' = the workspace folder. */
+  rel: string
+}
+
+export interface ShareGuestFilesRes {
+  ok: boolean
+  reply?: ShareFilesReply
+  error?: ShareGuestRequestError
+}
+
+/** The Files drawer is on screen (on) or closed (off): the host pushes `filesChanged` meanwhile. */
+export interface ShareFilesWatchReq {
+  linkId: string
+  on: boolean
 }
 
 export interface ShareGuestInputReq {
@@ -222,7 +249,9 @@ export type ShareLinkEvt =
   /** The filtered scope (welcome or a later `state`); statuses then move on the stream. */
   | { t: 'state'; linkId: string; state: ShareState }
   | { t: 'removed'; linkId: string }
-  | { t: 'notesChanged'; linkId: string; noteId?: string }
+  | { t: 'notesChanged'; linkId: string; noteId?: string; rev?: string }
+  /** v2: folders of the shared workspace whose content changed. */
+  | { t: 'filesChanged'; linkId: string; dirs: string[]; all?: true }
   /** The host answered a frame with `err` (rate, out_of_scope...). */
   | { t: 'err'; linkId: string; code: Extract<ShareHostMsg, { t: 'err' }>['code'] }
 

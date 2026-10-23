@@ -265,6 +265,7 @@ export const CH = {
   SHARE_REVOKE: 'share:revoke', // invoke (grantId) -> ShareOpRes
   SHARE_KICK: 'share:kick', // invoke (sessionId) -> ShareOpRes
   SHARE_SESSION_PERM: 'share:sessionPerm', // invoke ({ sessionId, perm }) -> ShareOpRes
+  SHARE_SESSION_RIGHTS: 'share:sessionRights', // invoke ({ sessionId, rights }) -> ShareOpRes (app 2.6.0)
   SHARE_PAUSE_ALL: 'share:pauseAll', // invoke (on: boolean) -> ShareOpRes
   SHARE_RESOLVE: 'share:resolve', // send (ShareResolveReq)
   SHARE_PANES: 'share:panes', // main -> renderer (ShareHostPaneGuests[])
@@ -283,6 +284,8 @@ export const CH = {
   SHARE_CTL: 'share:ctl', // invoke (ShareGuestCtlReq) -> ShareGuestCtlRes
   SHARE_GIT: 'share:git', // invoke (ShareGuestGitReq) -> ShareGuestGitRes
   SHARE_NOTES: 'share:notes', // invoke (ShareGuestNotesReq) -> ShareGuestNotesRes
+  SHARE_FILES: 'share:files', // invoke (ShareGuestFilesReq) -> ShareGuestFilesRes (v2, read-only)
+  SHARE_FILES_WATCH: 'share:filesWatch', // send (ShareFilesWatchReq): the Files drawer is on screen
   SHARE_SUB: 'share:sub', // send ({ linkId, paneId }): the renderer mounted that pane
   SHARE_UNSUB: 'share:unsub', // send ({ linkId, paneId })
   SHARE_INPUT: 'share:input', // send (ShareGuestInputReq): gated whole in main, then chunked

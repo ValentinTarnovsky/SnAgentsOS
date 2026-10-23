@@ -140,6 +140,71 @@ async function main() {
   fsvc.watch(null)
   check(watchClosed === 1, 'null stops it')
 
+  // The .git guard in any case and at any depth (app 2.6.0): the drawer and share guests.
+  check(shared.inGitDir('.GIT/config') && shared.inGitDir('sub/.git/HEAD') && shared.inGitDir('a/.Git') && !shared.inGitDir('.gitignore') && !shared.inGitDir('x.git/y') && !shared.inGitDir('.github/x'), '.git in any case and at any depth, nothing else')
+  fs.mkdirSync(path.join(repo, 'sub', '.git'), { recursive: true })
+  fs.writeFileSync(path.join(repo, 'sub', '.git', 'config'), '[remote] url = https://token@example.invalid')
+  check((await fsvc.read(R('sub/.git/config'))).error === 'invalid' && (await fsvc.read(R('.GIT/HEAD'))).error === 'invalid' && (await fsvc.list(R('sub/.git'))).error === 'invalid', 'a nested .git or another case neither reads nor lists')
+  check(!(await fsvc.list(R('sub'))).entries.some((e) => e.name.toLowerCase() === '.git'), 'a nested .git is not listed')
+  let gitLinked = true
+  try { fs.symlinkSync(path.join(repo, '.git'), path.join(repo, 'gitlink'), 'junction') } catch { gitLinked = false }
+  if (gitLinked) {
+    check(!(await fsvc.list(R(''))).entries.some((e) => e.name === 'gitlink'), 'a junction into .git is not listed')
+    check((await fsvc.read(R('gitlink/HEAD'))).error === 'invalid' && (await fsvc.list(R('gitlink'))).error === 'invalid', 'nor read or listed through')
+  }
+
+  // Share guests (app 2.6.0): no secret names, names a guest accepts, bounded reads.
+  check(shared.isShareSecretName('.env') && shared.isShareSecretName('.ENV.local') && !shared.isShareSecretName('.env.example') && !shared.isShareSecretName('.env.template'), '.env and .env.* are secrets, the example is not')
+  check(['server.PEM', 'a.key', 'cert.p12', 'c.pfx', 'id_rsa', 'id_ed25519.pub', 'ID_ECDSA', '.npmrc', '.netrc', '.pypirc'].every((n) => shared.isShareSecretName(n)) && !['keyboard.ts', 'monkey', 'key.md', 'ids.json', 'README.md'].some((n) => shared.isShareSecretName(n)), 'keys and credential files are secrets, look-alikes are not')
+  check(shared.relHasShareSecret('certs/.env/x') && !shared.relHasShareSecret('') && !shared.relHasShareSecret('src/env.ts'), 'any segment of a path can hide it')
+  check(shared.shareFileNameOk('a.ts') && !shared.shareFileNameOk('.git') && !shared.shareFileNameOk('.GIT') && !shared.shareFileNameOk('a' + String.fromCharCode(0x202e) + 'b') && !shared.shareFileNameOk('a/b') && !shared.shareFileNameOk('x'.repeat(256)), 'a name a guest gets is one safe segment without bidi')
+  fs.writeFileSync(path.join(repo, '.env'), 'TOKEN=1')
+  fs.writeFileSync(path.join(repo, '.env.example'), 'TOKEN=')
+  fs.mkdirSync(path.join(repo, 'certs'))
+  fs.writeFileSync(path.join(repo, 'certs', 'server.pem'), 'KEY')
+  fs.writeFileSync(path.join(repo, 'certs', 'ca.txt'), 'public')
+  const LIM = { textMax: 1024, imageMax: 1024 }
+  const gl = await fsvc.guestList('w1', '', 2000)
+  const gn = gl.entries.map((e) => e.name)
+  check(gl.ok && !gn.includes('.env') && gn.includes('.env.example') && !gn.includes('.git') && gn.includes('README.md') && gn.includes('certs'), 'a guest never lists a secret name')
+  check((await fsvc.guestList('w1', 'certs', 2000)).entries.map((e) => e.name).join() === 'ca.txt', 'nor a key inside a folder')
+  check((await fsvc.guestRead('w1', '.env', LIM)).error === 'not_found' && (await fsvc.guestRead('w1', 'certs/server.pem', LIM)).error === 'not_found' && (await fsvc.guestRead('w1', '.git/HEAD', LIM)).error === 'invalid' && (await fsvc.guestRead('w1', '../outside/secret.txt', LIM)).error === 'invalid', 'nor reads a secret (not_found), .git or a path out')
+  let envLinked = true
+  try { fs.symlinkSync(path.join(repo, 'certs'), path.join(repo, 'pub'), 'junction'); fs.mkdirSync(path.join(repo, 'cfg')); fs.symlinkSync(path.join(repo, 'cfg'), path.join(repo, '.env.d'), 'junction') } catch { envLinked = false }
+  if (envLinked) {
+    check((await fsvc.guestRead('w1', 'pub/server.pem', LIM)).error === 'not_found' && (await fsvc.guestRead('w1', 'pub/ca.txt', LIM)).ok, 'a key read through a junction is still hidden')
+  }
+  const cut3 = await fsvc.guestList('w1', '', 3)
+  check(cut3.entries.length === 3 && cut3.truncated, 'a guest list stops at its max (truncated)')
+  let gr = await fsvc.guestRead('w1', 'README.md', LIM)
+  check(gr.ok && gr.kind === 'text' && gr.text === '# Hola\n' && !gr.partial, 'a small file reads whole')
+  fs.writeFileSync(path.join(repo, 'long.txt'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('ñ'.repeat(10) + '\r\n' + 'x'.repeat(50), 'utf8')]))
+  gr = await fsvc.guestRead('w1', 'long.txt', { textMax: 9, imageMax: 1024 })
+  check(gr.ok && gr.partial && gr.bom && gr.text === 'ññññ' && !gr.text.includes(String.fromCharCode(0xfffd)), 'a long one is cut at textMax bytes on a whole character (BOM aside), partial')
+  gr = await fsvc.guestRead('w1', 'big.log', LIM)
+  check(gr.ok && gr.partial && gr.text.length === 1024, 'past 5 MB a guest still reads the head')
+  check((await fsvc.guestRead('w1', 'logo.png', { textMax: 10, imageMax: 3 })).error === 'too_large' && (await fsvc.guestRead('w1', 'logo.png', LIM)).kind === 'image', 'an image up to imageMax')
+  check((await fsvc.guestRead('w1', 'bin.dat', LIM)).error === 'binary' && (await fsvc.guestRead('w1', 'src', LIM)).error === 'invalid', 'binary and folders do not read')
+
+  // Watches shared by the drawer and share guests: one per folder, at most FILES_WATCH_MAX folders.
+  const ids = ['a', 'b', 'c', 'd', 'e']
+  for (const n of ids) fs.mkdirSync(path.join(tmp, 'ws-' + n))
+  const cfg2 = { workspaces: ids.map((n) => ({ id: 'x' + n, name: n, cwd: path.join(tmp, 'ws-' + n), panes: [] })) }
+  const opened = [], closedRoots = [], emitted = [], timers2 = []
+  const { FileService: FS2, FILES_WATCH_MAX } = load('src/main/files/FileService.ts', { setTimeout: (fn) => { timers2.push(fn); return timers2.length }, clearTimeout: () => {} })
+  const f2 = new FS2({ config: () => cfg2, emit: (e) => emitted.push(e), trash: async () => {}, reveal: () => {}, openPath: async () => '', watchRoot: (r, onEvent) => { opened.push({ r, onEvent }); return { close() { closedRoots.push(r) } } } })
+  f2.watch('xa')
+  const got = []
+  check(f2.acquireWatch('xa', 'share:g1', (e) => got.push(e)) && opened.length === 1, 'a share guest on the drawer folder shares its watch')
+  opened[0].onEvent('src/a.ts'); timers2.shift()()
+  check(emitted.length === 1 && got.length === 1 && got[0].dirs[0] === 'src', 'one change reaches the drawer and the guest')
+  f2.watch(null)
+  check(closedRoots.length === 0, 'the drawer closing keeps the watch a guest holds')
+  f2.releaseWatch('xa', 'share:g1')
+  check(closedRoots.length === 1 && f2.watchedCount === 0, 'the last reader out closes it')
+  check(['xa', 'xb', 'xc', 'xd'].every((id) => f2.acquireWatch(id, 'o', () => {})) && !f2.acquireWatch('xe', 'o', () => {}) && f2.watchedCount === FILES_WATCH_MAX && FILES_WATCH_MAX === 4, 'at most 4 folders watched')
+  check(!f2.acquireWatch('nope', 'o', () => {}), 'no root, no watch')
+
   fs.rmSync(tmp, { recursive: true, force: true })
 
   // The editor's find widget (v2.3): keys, counter, capped count, and its es/en strings.
@@ -175,7 +240,7 @@ async function main() {
   for (const key of ['find.count', 'find.countCapped']) check(en[key].includes('{index}') && en[key].includes('{total}') && es[key].includes('{index}') && es[key].includes('{total}'), key + ' carries {index} and {total} in both')
   check(['drawer.pin', 'drawer.unpin', 'files.collapse'].every((key) => es[key] && en[key]) && en['files.collapse'] === 'Collapse folders' && es['files.collapse'] === 'Contraer carpetas', 'drawer pin and collapse strings in es and en')
 
-  console.log(`PASS: ${checks} files drawer checks (safe relative paths, root from the config, list order and .git, junction escape, CRLF and BOM, binary, 2 MB and 5 MB, images, rev conflicts, create, rename, trash, reveal, inert open, watch, find widget keys / counter / cap / es-en strings)`)
+  console.log(`PASS: ${checks} files drawer checks (safe relative paths, root from the config, list order and .git, junction escape, CRLF and BOM, binary, 2 MB and 5 MB, images, rev conflicts, create, rename, trash, reveal, inert open, watch, .git in any case and through links, share guest reads and secrets, shared watches, find widget keys / counter / cap / es-en strings)`)
 }
 
 main().catch((e) => { console.error(e); process.exit(1) })

@@ -24,29 +24,9 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { MarkdownDoc } from '@/components/ui/MarkdownDoc'
 import { CodeEditor } from '@/components/editor/CodeEditor'
 import { useEditorLook } from '@/components/editor/useEditorLook'
+import { NOTE_SAVE_DEBOUNCE_MS, loadNoteMode as loadMode, noteStorage as storage, saveNoteMode, type NoteMode as Mode } from './noteMode'
 
-/** A note saves this long after the last keystroke. */
-export const NOTE_SAVE_DEBOUNCE_MS = 600
-type Mode = 'edit' | 'split' | 'preview'
-
-function storage(): Storage | null {
-  try {
-    return window.localStorage
-  } catch {
-    return null
-  }
-}
 const lastKey = (wsId: string): string => `snagentsos.notes.${wsId}.last`
-const MODE_KEY = 'snagentsos.notes.mode'
-
-function loadMode(): Mode {
-  try {
-    const v = storage()?.getItem(MODE_KEY)
-    return v === 'edit' || v === 'split' || v === 'preview' ? v : 'split'
-  } catch {
-    return 'split'
-  }
-}
 
 interface Open {
   id: string
@@ -283,11 +263,7 @@ export default function NotesPanel({ workspace }: { workspace: Workspace }) {
 
   const setModeSaved = (next: Mode): void => {
     setMode(next)
-    try {
-      storage()?.setItem(MODE_KEY, next)
-    } catch {
-      /* blocked storage */
-    }
+    saveNoteMode(next)
   }
 
   const shown = useMemo(() => {

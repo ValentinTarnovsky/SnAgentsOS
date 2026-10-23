@@ -15,6 +15,7 @@ import type {
   RemoteSettings,
   SetupStep,
   SharePerm,
+  ShareRights,
   StatusHooksStatusRes,
   TerminalSnapshotMode,
   UsageSettings,
@@ -755,6 +756,10 @@ export interface ShareHostSessionView {
   /** `AB12-CD34-EF56-7890` of the guest's static key. */
   fingerprint: string
   perm: SharePerm
+  /** What this guest may use beyond the terminal (app 2.6.0). */
+  rights: ShareRights
+  /** An app 2.4 / 2.5 guest (share protocol v1): no Files drawer, notes read-only there. */
+  legacy?: true
   since: number
   /** Consoles the guest has open right now. */
   watching: number
@@ -767,6 +772,8 @@ export interface ShareHostGrantView {
   label: string
   scope: ShareHostScope
   perm: SharePerm
+  /** What a guest who joins gets beyond the terminal (app 2.6.0; none on a console share). */
+  rights: ShareRights
   hasPassword: boolean
   createdAt: number
   expiresAt?: number
@@ -793,6 +800,10 @@ export interface ShareHostApproval {
   passwordFailed: boolean
   /** The grant's perm: the prompt's default. */
   perm: SharePerm
+  /** The grant's rights: the prompt's default (app 2.6.0). */
+  rights: ShareRights
+  /** An app 2.4 / 2.5 guest (share protocol v1). */
+  legacy?: true
   expiresAt: number
 }
 
@@ -829,6 +840,8 @@ export interface ShareHostPaneGuests {
 export interface ShareCreateReq {
   scope: { kind: 'pane'; paneId: string } | { kind: 'workspace'; workspaceId: string }
   perm: SharePerm
+  /** Workspace scope only (a console share has none); absent = what the perm gave before rights existed. */
+  rights?: ShareRights
   label?: string
   expiry?: ShareExpiryChoice
   /** 8..128; crosses IPC once and is never persisted (only its scrypt key, DPAPI-sealed). */
@@ -841,6 +854,8 @@ export type ShareInviteRes = { ok: true; invite: string } | { ok: false; error: 
 export interface ShareUpdateReq {
   grantId: string
   perm?: SharePerm
+  /** Applied to its live guests field by field: one lowered on purpose never goes up. */
+  rights?: ShareRights
   label?: string
   expiry?: ShareExpiryChoice
   paused?: boolean
@@ -851,6 +866,8 @@ export interface ShareResolveReq {
   allow: boolean
   /** The prompt's perm dropdown; absent = the grant's perm. */
   perm?: SharePerm
+  /** The prompt's rights; absent = the grant's. */
+  rights?: ShareRights
 }
 
 /** settings.share as main applies it (share:setConfig). */
@@ -872,6 +889,8 @@ export interface ShareHostApi {
   revoke(grantId: string): Promise<ShareOpRes>
   kick(sessionId: string): Promise<ShareOpRes>
   sessionPerm(sessionId: string, perm: SharePerm): Promise<ShareOpRes>
+  /** One guest's rights, exactly (app 2.6.0). */
+  sessionRights(sessionId: string, rights: ShareRights): Promise<ShareOpRes>
   pauseAll(on: boolean): Promise<ShareOpRes>
   resolve(req: ShareResolveReq): void
   onPanes(cb: (panes: ShareHostPaneGuests[]) => void): () => void
@@ -1333,6 +1352,10 @@ export interface ShareGuestApi {
   ctl(req: import('./share-guest').ShareGuestCtlReq): Promise<import('./share-guest').ShareGuestCtlRes>
   git(req: import('./share-guest').ShareGuestGitReq): Promise<import('./share-guest').ShareGuestGitRes>
   notes(req: import('./share-guest').ShareGuestNotesReq): Promise<import('./share-guest').ShareGuestNotesRes>
+  /** v2: the shared workspace's folder, read-only. */
+  files(req: import('./share-guest').ShareGuestFilesReq): Promise<import('./share-guest').ShareGuestFilesRes>
+  /** v2: the Files drawer is on screen (on) or closed (off). */
+  filesWatch(req: import('./share-guest').ShareFilesWatchReq): void
   /** Mount / unmount of a shared pane (a mounted pane is resubscribed after a reconnect). */
   sub(linkId: string, paneId: string): void
   unsub(linkId: string, paneId: string): void

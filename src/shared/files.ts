@@ -143,7 +143,47 @@ export function extOf(name: string): string {
   return i <= 0 ? '' : name.slice(i + 1).toLowerCase()
 }
 
-/** Inside `.git`: listed never, written never. */
+/**
+ * Inside a `.git` folder at any depth (a submodule's too), in any case
+ * (`.GIT` is the same folder on Windows and macOS): listed never, written never.
+ */
 export function inGitDir(rel: string): boolean {
-  return rel === '.git' || rel.startsWith('.git/')
+  return rel.split('/').some((seg) => seg.toLowerCase() === '.git')
+}
+
+// eslint-disable-next-line no-control-regex
+const SHARE_NAME_BAD_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/
+
+/**
+ * A folder entry's name as a share guest may get it (app 2.6.0): one safe
+ * segment of at most 255, no control, bidi or zero-width character, never
+ * `.git`. The host drops an entry that fails it (the guest's schema would
+ * refuse the whole answer and end the link).
+ */
+export function shareFileNameOk(name: unknown): name is string {
+  return isSafeName(name) && !SHARE_NAME_BAD_RE.test(name) && name.toLowerCase() !== '.git'
+}
+
+const SECRET_KEEP = new Set(['.env.example', '.env.sample', '.env.template'])
+const SECRET_NAMES = new Set(['.npmrc', '.netrc', '_netrc', '.pypirc'])
+const SECRET_EXTS = new Set(['pem', 'key', 'p12', 'pfx'])
+const SECRET_KEY_RE = /^id_(rsa|ed25519|ecdsa|dsa)([._-]|$)/
+
+/**
+ * A name a share guest never sees nor reads (app 2.6.0): `.env` and `.env.*`
+ * (not the example, sample or template), keys and certificates (`*.pem`,
+ * `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`...) and credential
+ * files (`.npmrc`, `.netrc`, `.pypirc`). Any case. The local drawer shows them.
+ */
+export function isShareSecretName(name: string): boolean {
+  const n = name.toLowerCase()
+  if (SECRET_KEEP.has(n)) return false
+  if (n === '.env' || n.startsWith('.env.')) return true
+  if (SECRET_NAMES.has(n) || SECRET_KEY_RE.test(n)) return true
+  return SECRET_EXTS.has(extOf(n))
+}
+
+/** Any segment of the path is a secret name (a `.env` folder hides what is in it). */
+export function relHasShareSecret(rel: string): boolean {
+  return rel !== '' && rel.split('/').some(isShareSecretName)
 }

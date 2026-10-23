@@ -82,13 +82,16 @@ import type {
   ShareResolveReq,
   ShareUpdateReq,
 } from '@shared/ipc-contract'
-import type { SharePerm } from '@shared/types'
+import type { SharePerm, ShareRights } from '@shared/types'
 import type {
   ShareChatEvt,
   ShareChatReq,
+  ShareFilesWatchReq,
   ShareFlowReq,
   ShareGuestCtlReq,
   ShareGuestCtlRes,
+  ShareGuestFilesReq,
+  ShareGuestFilesRes,
   ShareGuestGitReq,
   ShareGuestGitRes,
   ShareGuestInputReq,
@@ -122,6 +125,7 @@ const shareHostApi: ShareHostApi = {
   revoke: (grantId: string) => ipcRenderer.invoke(CH.SHARE_REVOKE, grantId) as Promise<ShareOpRes>,
   kick: (sessionId: string) => ipcRenderer.invoke(CH.SHARE_KICK, sessionId) as Promise<ShareOpRes>,
   sessionPerm: (sessionId: string, perm: SharePerm) => ipcRenderer.invoke(CH.SHARE_SESSION_PERM, { sessionId, perm }) as Promise<ShareOpRes>,
+  sessionRights: (sessionId: string, rights: ShareRights) => ipcRenderer.invoke(CH.SHARE_SESSION_RIGHTS, { sessionId, rights }) as Promise<ShareOpRes>,
   pauseAll: (on: boolean) => ipcRenderer.invoke(CH.SHARE_PAUSE_ALL, on === true) as Promise<ShareOpRes>,
   resolve: (req: ShareResolveReq) => ipcRenderer.send(CH.SHARE_RESOLVE, req),
   onPanes: (cb: (panes: ShareHostPaneGuests[]) => void) => sub<ShareHostPaneGuests[]>(CH.SHARE_PANES, cb),
@@ -142,6 +146,8 @@ const shareGuestApi: ShareGuestApi = {
   ctl: (req: ShareGuestCtlReq) => ipcRenderer.invoke(CH.SHARE_CTL, req) as Promise<ShareGuestCtlRes>,
   git: (req: ShareGuestGitReq) => ipcRenderer.invoke(CH.SHARE_GIT, req) as Promise<ShareGuestGitRes>,
   notes: (req: ShareGuestNotesReq) => ipcRenderer.invoke(CH.SHARE_NOTES, req) as Promise<ShareGuestNotesRes>,
+  files: (req: ShareGuestFilesReq) => ipcRenderer.invoke(CH.SHARE_FILES, req) as Promise<ShareGuestFilesRes>,
+  filesWatch: (req: ShareFilesWatchReq) => ipcRenderer.send(CH.SHARE_FILES_WATCH, req),
   sub: (linkId: string, paneId: string) => ipcRenderer.send(CH.SHARE_SUB, { linkId, paneId }),
   unsub: (linkId: string, paneId: string) => ipcRenderer.send(CH.SHARE_UNSUB, { linkId, paneId }),
   input: (req: ShareGuestInputReq) => ipcRenderer.send(CH.SHARE_INPUT, req),

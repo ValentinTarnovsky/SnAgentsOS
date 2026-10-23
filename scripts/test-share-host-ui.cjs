@@ -11,7 +11,11 @@
 // join prompts with fingerprint, known guest, wrong-password note, perm
 // dropdown, Allow/Deny and the countdown, Enter never confirming; the banner
 // with guests, perm and who is typing; every Settings action by id; the
-// indicator; Spanish strings; no horizontal overflow. Requires npm run build (CSS).
+// indicator; Spanish strings; no horizontal overflow. Rights (app 2.6.0): the
+// editor in the dialog (workspace only, a level fills its defaults, create
+// sends rights), in the join prompt (separate from the perm, legacy guests)
+// and in Settings > Sharing (per share and per guest, legacy disables notes
+// write and Files). Requires npm run build (CSS).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -52,6 +56,7 @@ const host = {
   revoke: async (id) => { log('revoke', id); return replies.op },
   kick: async (id) => { log('kick', id); return replies.op },
   sessionPerm: async (id, perm) => { log('sessionPerm', { id, perm }); return replies.op },
+  sessionRights: async (id, rights) => { log('sessionRights', { id, rights }); return replies.op },
   pauseAll: async (on) => { log('pauseAll', on); return replies.op },
   resolve: (req) => log('resolve', req),
   setConfig: (cfg) => log('setConfig', cfg),
@@ -73,8 +78,12 @@ useAppStore.setState({ hydrated: true, activeWorkspaceId: 'ws-1', workspaces: [w
 useAppStore.setState((s) => ({ settings: { ...s.settings, language: 'en', share: { enabled: false, port: 4527, guestName: '', defaultPerm: 'type' } } }));
 applyTheme('midnight');
 
-const session = (over = {}) => ({ id: 'sess-1', grantId: 'g-1', name: 'Ana', ip: '100.64.0.7', fingerprint: 'AB12-CD34-EF56-7890', perm: 'type', since: Date.now() - 120000, watching: 1, typing: true, ...over });
-const grant = (over = {}) => ({ id: 'g-1', label: 'Claude API', scope: { kind: 'pane', paneId: 'pane-1', workspaceId: 'ws-1' }, perm: 'type', hasPassword: false, createdAt: Date.now() - 60000, paused: false, expired: false, suspended: false, knownGuests: 1, sessions: [session()], ...over });
+const NONE = { consoles: false, chat: false, changes: false, notes: 'off', files: 'off' };
+const FULL = { consoles: true, chat: true, changes: true, notes: 'write', files: 'read' };
+const RIGHT_KEYS = ['consoles', 'chat', 'changes', 'notes', 'files'];
+const sameRights = (a, b) => !!a && !!b && RIGHT_KEYS.every((k) => a[k] === b[k]);
+const session = (over = {}) => ({ id: 'sess-1', grantId: 'g-1', name: 'Ana', ip: '100.64.0.7', fingerprint: 'AB12-CD34-EF56-7890', perm: 'type', rights: NONE, since: Date.now() - 120000, watching: 1, typing: true, ...over });
+const grant = (over = {}) => ({ id: 'g-1', label: 'Claude API', scope: { kind: 'pane', paneId: 'pane-1', workspaceId: 'ws-1' }, perm: 'type', rights: NONE, hasPassword: false, createdAt: Date.now() - 60000, paused: false, expired: false, suspended: false, knownGuests: 1, sessions: [session()], ...over });
 const stateOf = (over = {}) => ({ ...EMPTY_SHARE_HOST, enabled: true, port: 4527, listening: 'running', encryption: true, fingerprint: '1111-2222-3333-4444', endpoints: [{ a: '192.168.1.20', p: 4527, t: 'lan' }], grants: [], approvals: [], ...over });
 
 window.result = (async () => {
@@ -135,6 +144,7 @@ window.result = (async () => {
   check($('[data-share-perm=type]').getAttribute('aria-checked') === 'true', 'the perm radio defaults to settings.share.defaultPerm');
   check($('[data-share-expiry]').value === 'never', 'expiry defaults to until revoked');
   check($('[data-share-label]').placeholder === 'Claude API', 'the label placeholder is the console name');
+  check(!$('[data-share-rights-section]') && !$('[data-share-dialog] [data-share-rights]') && !$('[data-share-dialog] [data-share-right]'), 'a console share has no rights section');
   await click('[data-share-perm=view]');
   check($('[data-share-perm=view]').getAttribute('aria-checked') === 'true' && $('[data-share-perm=type]').getAttribute('aria-checked') === 'false', 'picking a perm moves the radio');
   await setValue('[data-share-password]', 'short');
@@ -153,9 +163,11 @@ window.result = (async () => {
   const req = take('create')[0].arg;
   check(req.scope.kind === 'pane' && req.scope.paneId === 'pane-1' && !('workspaceId' in req.scope), 'create names the console by id only');
   check(req.perm === 'view' && req.expiry === '8h' && req.label === 'Ana pairing' && req.password === 'longenough1', 'create carries perm, expiry, trimmed label and password');
+  check(!('rights' in req), 'a console create sends no rights');
   check(mounted.length === 0, 'a console scope does not mount a workspace');
   check(!!$('[data-share-result]') && $('[data-share-invite]').textContent === 'snaos-share:1:NEWINVITE', 'the result shows the invite');
   check($('[data-share-summary]').textContent.includes('View only') && $('[data-share-summary]').textContent.includes('With password'), 'the summary names perm and password');
+  check(!$('[data-share-rights-summary]'), 'a console result has no rights summary');
   check($$('[data-share-endpoint]').length === 1 && $('[data-share-endpoint=lan]').textContent.includes('192.168.1.20:4527'), 'the LAN endpoint is listed');
   check(!!$('[data-share-no-tailscale]'), 'no Tailscale endpoint shows the hint');
   await wait(60);
@@ -190,11 +202,37 @@ window.result = (async () => {
   await wait();
   check(!!$('[data-share-dialog=workspace]') && $('[data-share-dialog]').textContent.includes('Share workspace'), 'the workspace dialog opens');
   check(!!$('[data-share-existing]') && $('[data-share-existing]').textContent.includes('once'), 'an existing workspace share is mentioned');
-  replies.create = { ok: true, grant: grant({ id: 'g-ws2', scope: { kind: 'workspace', workspaceId: 'ws-1' }, sessions: [] }), invite: 'snaos-share:1:WS' };
+  // Rights (app 2.6.0): a workspace share picks what else the guests may use.
+  const dsw = (k) => $('[data-share-dialog] [data-share-right=' + k + '] [role=switch]');
+  const dsel = (k) => $('[data-share-dialog] [data-share-right=' + k + '] select');
+  const dialogRights = () => ({ consoles: dsw('consoles').getAttribute('aria-checked') === 'true', chat: dsw('chat').getAttribute('aria-checked') === 'true', changes: dsw('changes').getAttribute('aria-checked') === 'true', notes: dsel('notes').value, files: dsel('files').value });
+  check(!!$('[data-share-rights-section]') && $$('[data-share-dialog] [data-share-right]').length === 5, 'a workspace share shows the rights editor with its five rows');
+  check($('[data-share-rights-section]').textContent.includes('What else they can use') && !$('[data-share-dialog] [data-share-rights-legacy]'), 'the rights section is titled and has no legacy note');
+  check(sameRights(dialogRights(), NONE), 'the initial perm (Type only) preselects no extras');
+  await click('[data-share-perm=full]');
+  check(sameRights(dialogRights(), FULL), 'picking Full fills its default extras');
+  await click(dsw('chat'));
+  check(sameRights(dialogRights(), { ...FULL, chat: false }), 'one toggle changes one field and leaves the rest');
+  await click('[data-share-perm=full]');
+  check(sameRights(dialogRights(), { ...FULL, chat: false }), 'picking the level already chosen keeps the host adjustments');
+  await setValue('[data-share-dialog] [data-share-right=notes] select', 'read');
+  await setValue('[data-share-dialog] [data-share-right=files] select', 'off');
+  check(sameRights(dialogRights(), { consoles: true, chat: false, changes: true, notes: 'read', files: 'off' }), 'the notes and files selects change their field');
+  await click('[data-share-perm=view]');
+  check(sameRights(dialogRights(), NONE), 'picking View resets the extras to none');
+  await click('[data-share-perm=full]');
+  await click(dsw('chat'));
+  await setValue('[data-share-dialog] [data-share-right=notes] select', 'read');
+  await setValue('[data-share-dialog] [data-share-right=files] select', 'off');
+  check(noOverflow(), 'the dialog with the rights editor fits');
+  const picked = { consoles: true, chat: false, changes: true, notes: 'read', files: 'off' };
+  replies.create = { ok: true, grant: grant({ id: 'g-ws2', scope: { kind: 'workspace', workspaceId: 'ws-1' }, perm: 'full', rights: picked, sessions: [] }), invite: 'snaos-share:1:WS' };
   clear();
   await click('[data-share-create]');
   check(mounted.length === 1 && mounted[0].id === 'ws-1', 'a workspace scope runs ensureMounted(workspaceId)');
   check(take('create')[0].arg.scope.kind === 'workspace' && take('create')[0].arg.scope.workspaceId === 'ws-1', 'create names the workspace by id');
+  check(take('create')[0].arg.perm === 'full' && sameRights(take('create')[0].arg.rights, picked), 'a workspace create sends the perm and the picked rights');
+  check($('[data-share-rights-summary]').textContent.includes('Extras: Consoles, Changes, Notes (read)') && !$('[data-share-rights-summary]').textContent.includes('Chat') && !$('[data-share-rights-summary]').textContent.includes('Files'), 'the result summarizes the extras');
   await click('[data-share-manage]');
   check(!$('[data-share-dialog]') && useAppStore.getState().settingsOpen && useAppStore.getState().settingsCategory === 'share', 'Manage opens Settings > Sharing');
   useAppStore.getState().setSettingsOpen(false);
@@ -207,8 +245,8 @@ window.result = (async () => {
   // --- Join prompts.
   const now = Date.now();
   const approvals = [
-    { requestId: 'r1', grantId: 'g-1', grantLabel: 'Claude API', scopeKind: 'pane', guestName: 'Ana', ip: '100.64.0.7', fingerprint: 'AB12-CD34-EF56-7890', known: true, passwordFailed: true, perm: 'type', expiresAt: now + 45000 },
-    { requestId: 'r2', grantId: 'g-ws', grantLabel: 'Backend', scopeKind: 'workspace', guestName: 'Bob', ip: '192.168.1.44', fingerprint: '9999-8888-7777-6666', known: false, passwordFailed: false, perm: 'view', expiresAt: now + 60000 },
+    { requestId: 'r1', grantId: 'g-1', grantLabel: 'Claude API', scopeKind: 'pane', guestName: 'Ana', ip: '100.64.0.7', fingerprint: 'AB12-CD34-EF56-7890', known: true, passwordFailed: true, perm: 'type', rights: NONE, expiresAt: now + 45000 },
+    { requestId: 'r2', grantId: 'g-ws', grantLabel: 'Backend', scopeKind: 'workspace', guestName: 'Bob', ip: '192.168.1.44', fingerprint: '9999-8888-7777-6666', known: false, passwordFailed: false, perm: 'view', rights: NONE, expiresAt: now + 60000 },
   ];
   await emit(stateOf({ approvals }));
   check($$('[data-share-prompt]').length === 2, 'two requests stack as two cards');
@@ -237,6 +275,38 @@ window.result = (async () => {
   check(useShareHostStore.getState().answered.length === 0, 'answers main dropped are forgotten');
   await emit(stateOf({ approvals: [{ ...approvals[0], requestId: 'r3', expiresAt: Date.now() - 1 }] }));
   check(!$('[data-share-prompts]'), 'an expired request is not shown');
+  await emit(stateOf({ approvals: [] }));
+
+  // --- Join prompt rights (app 2.6.0): a workspace request edits the guest's rights apart from the perm.
+  const wsApproval = (over) => ({ requestId: 'r4', grantId: 'g-ws', grantLabel: 'Backend', scopeKind: 'workspace', guestName: 'Cleo', ip: '192.168.1.50', fingerprint: 'AAAA-BBBB-CCCC-DDDD', known: false, passwordFailed: false, perm: 'full', rights: FULL, expiresAt: Date.now() + 60000, ...over });
+  await emit(stateOf({ approvals: [wsApproval({}), wsApproval({ requestId: 'r5', guestName: 'Dan', legacy: true }), { ...approvals[0], requestId: 'r6', expiresAt: Date.now() + 60000 }] }));
+  const pr = (id, k) => $('[data-share-prompt=' + id + '] [data-share-right=' + k + ']');
+  const prSw = (id, k) => pr(id, k).querySelector('[role=switch]');
+  const prSel = (id, k) => pr(id, k).querySelector('select');
+  const promptRights = (id) => ({ consoles: prSw(id, 'consoles').getAttribute('aria-checked') === 'true', chat: prSw(id, 'chat').getAttribute('aria-checked') === 'true', changes: prSw(id, 'changes').getAttribute('aria-checked') === 'true', notes: prSel(id, 'notes').value, files: prSel(id, 'files').value });
+  check($$('[data-share-prompt]').length === 3, 'three requests stack');
+  check(!$('[data-share-prompt=r6] [data-share-prompt-rights]') && !$('[data-share-prompt=r6] [data-share-right]'), 'a console request has no rights editor');
+  check(!!$('[data-share-prompt=r4] [data-share-prompt-rights]') && $$('[data-share-prompt=r4] [data-share-right]').length === 5, 'a workspace request shows the rights editor');
+  check(sameRights(promptRights('r4'), FULL), 'the editor starts from the approval rights');
+  check(!$('[data-share-prompts]').contains(document.activeElement), 'nothing in the prompt is focused by default');
+  check(!$('[data-share-prompt=r4] [data-share-prompt-legacy]') && !$('[data-share-prompt=r4] [data-share-rights-legacy]'), 'a current guest has no legacy marks');
+  await setValue('[data-share-prompt=r4] [data-share-prompt-perm]', 'view');
+  check(sameRights(promptRights('r4'), FULL), 'changing the perm leaves the rights alone');
+  await click(prSw('r4', 'chat'));
+  await setValue('[data-share-prompt=r4] [data-share-right=notes] select', 'read');
+  check(sameRights(promptRights('r4'), { ...FULL, chat: false, notes: 'read' }) && $('[data-share-prompt=r4] [data-share-prompt-perm]').value === 'view', 'toggles and selects edit the rights without touching the perm');
+  clear();
+  await click('[data-share-prompt=r4] [data-share-prompt-allow]');
+  const rArg = take('resolve')[0].arg;
+  check(rArg.requestId === 'r4' && rArg.allow === true && rArg.perm === 'view' && sameRights(rArg.rights, { ...FULL, chat: false, notes: 'read' }), 'Allow sends the picked perm and rights');
+  check(!!$('[data-share-prompt=r5] [data-share-prompt-legacy]') && !!$('[data-share-prompt=r5] [data-share-rights-legacy]'), 'a legacy guest is marked and explained');
+  check(prSel('r5', 'notes').querySelector('option[value=write]').disabled && prSel('r5', 'notes').value === 'read', 'a legacy guest cannot get notes write');
+  check(prSel('r5', 'files').disabled && prSel('r5', 'files').value === 'off', 'a legacy guest has no Files control');
+  check(!$('[data-share-prompt=r4]') && $$('[data-share-prompt]').length === 2, 'the answered card is gone, the others stay');
+  await click('[data-share-prompt=r5] [data-share-prompt-allow]');
+  check(take('resolve')[1].arg.requestId === 'r5' && take('resolve')[1].arg.perm === 'full' && !!take('resolve')[1].arg.rights, 'Allow for a legacy guest still sends perm and rights');
+  await click('[data-share-prompt=r6] [data-share-prompt-allow]');
+  check(!('rights' in take('resolve')[2].arg) && take('resolve')[2].arg.perm === 'type', 'a console request sends the perm and no rights');
   await emit(stateOf({ approvals: [] }));
 
   // --- Banner over a shared console.
@@ -337,6 +407,53 @@ window.result = (async () => {
   await setValue('[data-share-default-perm]', 'full');
   check(useAppStore.getState().settings.share.defaultPerm === 'full', 'the default perm select');
   check(noOverflow(), 'the section fits 420px');
+
+  // Rights editors (app 2.6.0): per share on a workspace grant, per guest on a connected session.
+  const grantRights = { consoles: true, chat: false, changes: false, notes: 'read', files: 'off' };
+  const sessNew = session({ id: 'sess-new', grantId: 'g-w', name: 'New Pc', rights: { ...NONE, chat: true, notes: 'read' } });
+  const sessOld = session({ id: 'sess-old', grantId: 'g-w', name: 'Old Pc', rights: FULL, legacy: true });
+  await emit(stateOf({ grants: [grant({ id: 'g-1' }), grant({ id: 'g-w', label: 'Backend', scope: { kind: 'workspace', workspaceId: 'ws-1' }, perm: 'type', rights: grantRights, sessions: [sessNew, sessOld] })] }));
+  const gsw = (k) => $('[data-share-grant=g-w] [data-share-grant-rights] [data-share-right=' + k + '] [role=switch]');
+  const gsel = (k) => $('[data-share-grant=g-w] [data-share-grant-rights] [data-share-right=' + k + '] select');
+  const ssw = (id, k) => $('[data-share-session=' + id + '] [data-share-session-rights] [data-share-right=' + k + '] [role=switch]');
+  const ssel = (id, k) => $('[data-share-session=' + id + '] [data-share-session-rights] [data-share-right=' + k + '] select');
+  check(!$('[data-share-grant=g-1] [data-share-grant-rights]') && !$('[data-share-grant=g-1] [data-share-session-rights-toggle]') && !$('[data-share-grant=g-1] [data-share-session-legacy]'), 'a console share has no rights editors, per share or per guest');
+  check($('[data-share-grant=g-w] [data-share-grant-rights-toggle]').textContent.includes('What else they can use') && $('[data-share-grant=g-w] [data-share-grant-rights-toggle]').textContent.includes('Consoles, Notes (read)'), 'a workspace share summarizes its extras while collapsed');
+  check(!gsw('chat'), 'the share editor starts collapsed');
+  clear();
+  await click('[data-share-grant=g-w] [data-share-grant-rights-toggle]');
+  check($$('[data-share-grant=g-w] [data-share-grant-rights] [data-share-right]').length === 5 && gsw('consoles').getAttribute('aria-checked') === 'true' && gsel('notes').value === 'read' && gsel('files').value === 'off', 'the share editor opens bound to grant.rights');
+  check(!$('[data-share-grant=g-w] [data-share-grant-rights] [data-share-rights-legacy]') && !gsel('files').disabled, 'a share editor is never legacy');
+  await click(gsw('chat'));
+  check(take('update').length === 1 && take('update')[0].arg.grantId === 'g-w' && Object.keys(take('update')[0].arg).length === 2 && sameRights(take('update')[0].arg.rights, { ...grantRights, chat: true }), 'a share toggle calls update with the whole rights');
+  await setValue('[data-share-grant=g-w] [data-share-grant-rights] [data-share-right=notes] select', 'write');
+  check(sameRights(take('update')[1].arg.rights, { ...grantRights, notes: 'write' }), 'the share notes select calls update');
+  await setValue('[data-share-grant=g-w] [data-share-grant-rights] [data-share-right=files] select', 'read');
+  check(sameRights(take('update')[2].arg.rights, { ...grantRights, files: 'read' }), 'the share files select calls update');
+  check(!$('[data-share-grant=g-w] [data-share-session=sess-new] [data-share-session-rights]'), 'a guest editor starts collapsed');
+  check(!!$('[data-share-session=sess-old] [data-share-session-legacy]') && !$('[data-share-session=sess-new] [data-share-session-legacy]'), 'only the older guest is marked');
+  await click('[data-share-session=sess-new] [data-share-session-rights-toggle]');
+  check($$('[data-share-session=sess-new] [data-share-right]').length === 5 && ssw('sess-new', 'chat').getAttribute('aria-checked') === 'true' && ssw('sess-new', 'consoles').getAttribute('aria-checked') === 'false' && ssel('sess-new', 'notes').value === 'read', 'the guest editor opens bound to session.rights');
+  check(!ssel('sess-new', 'notes').querySelector('option[value=write]').disabled && !ssel('sess-new', 'files').disabled && !$('[data-share-session=sess-new] [data-share-rights-legacy]'), 'a current guest can get notes write and Files');
+  await click(ssw('sess-new', 'changes'));
+  check(take('sessionRights').length === 1 && take('sessionRights')[0].arg.id === 'sess-new' && sameRights(take('sessionRights')[0].arg.rights, { ...NONE, chat: true, notes: 'read', changes: true }), 'a guest toggle calls sessionRights with that guest rights');
+  await setValue('[data-share-session=sess-new] [data-share-right=files] select', 'read');
+  check(sameRights(take('sessionRights')[1].arg.rights, { ...NONE, chat: true, notes: 'read', files: 'read' }), 'the guest files select calls sessionRights');
+  check(take('update').length === 3, 'a guest edit never updates the share');
+  await click('[data-share-session=sess-old] [data-share-session-rights-toggle]');
+  check(ssel('sess-old', 'notes').querySelector('option[value=write]').disabled && ssel('sess-old', 'notes').value === 'read', 'a legacy guest cannot get notes write');
+  check(ssel('sess-old', 'files').disabled && ssel('sess-old', 'files').value === 'off', 'a legacy guest has Files disabled');
+  check(!!$('[data-share-session=sess-old] [data-share-rights-legacy]'), 'a legacy guest shows why');
+  await click(ssw('sess-old', 'consoles'));
+  check(take('sessionRights')[2].arg.id === 'sess-old' && take('sessionRights')[2].arg.rights.consoles === false, 'a legacy guest still edits the other rights');
+  check(noOverflow(), 'the section fits 420px with the editors open');
+  replies.op = { ok: false, error: 'not_found' };
+  await click(ssw('sess-new', 'chat'));
+  check($('[data-share-grant=g-w] [data-share-grant-error]').textContent.includes('no longer exists'), 'a failed rights edit shows inline on its share');
+  replies.op = { ok: true };
+  await show('settings', 'es');
+  check($('[data-share-grant=g-w] [data-share-grant-rights-toggle]').textContent.includes('Qué más pueden usar') && $('[data-share-session=sess-old]').textContent.includes('Versión vieja') && $('[data-share-session=sess-old] [data-share-rights-legacy]').textContent.includes('versión vieja'), 'the rights editors are translated');
+  await show('settings', 'en');
   await emit(stateOf({ encryption: false, grants: [grant({ sessions: [] })] }));
   check(!!$('[data-share-no-encryption]'), 'DPAPI missing is explained');
   await emit(stateOf({ grants: [] }));

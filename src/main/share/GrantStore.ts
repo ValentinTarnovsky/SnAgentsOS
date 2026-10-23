@@ -4,7 +4,7 @@
  * under which invite key and optional unattended password.
  *
  * File: `dataDir()/share-grants.json`, main-owned, never in config:
- *   { version: 1, grants: [{ id, shareId, label, scope, perm,
+ *   { version: 1, grants: [{ id, shareId, label, scope, perm, rights?,
  *     inviteKey: { enc: 'dpapi', data }, password?: { salt, N, r, p, key: { enc: 'dpapi', data } },
  *     createdAt, expiresAt?, paused?, knownGuests?: [{ key, name, lastAt }] (<= 20) }] }
  * The invite key and the password key are only ever persisted sealed by
@@ -17,13 +17,18 @@
  * never land out of order: a revoke persisted next to a knownGuests update
  * always leaves the revoked grant out. Callers that work asynchronously (the
  * password's scrypt) re-check the grant still exists before committing.
+ *
+ * `rights` (app 2.6.0) is optional in the file and the version stays 1: a
+ * grant written before it, or one whose rights do not parse, loads with what
+ * its perm gave then (shareLegacyRights), and an older build ignores the key.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { randomBytes } from 'crypto'
 import { z } from 'zod'
 import { SHARE_LIMITS, SHARE_SCRYPT, shareText } from '@shared/share-protocol'
-import type { SharePerm } from '@shared/types'
+import { normalizeShareRights, shareLegacyRights } from '@shared/shareRights'
+import type { SharePerm, ShareRights } from '@shared/types'
 import { dataDir } from '../paths'
 import type { VaultCrypto } from '../accounts/safeCrypto'
 import { fromB64u, toB64u } from './crypto'
@@ -47,6 +52,8 @@ export interface ShareGrant {
   label: string
   scope: ShareGrantScope
   perm: SharePerm
+  /** What a guest who joins gets beyond the terminal (none on a pane scope). */
+  rights: ShareRights
   inviteKey: Buffer
   password?: { salt: Buffer; key: Buffer }
   createdAt: number
@@ -59,6 +66,8 @@ export interface NewShareGrant {
   label: string
   scope: ShareGrantScope
   perm: SharePerm
+  /** Absent: what the perm gave before rights existed (shareLegacyRights). */
+  rights?: ShareRights
   expiresAt?: number
 }
 
@@ -68,12 +77,22 @@ const scopeSchema = z.union([
   z.object({ kind: z.literal('pane'), paneId: z.string().min(1).max(128), workspaceId: z.string().min(1).max(128) }),
   z.object({ kind: z.literal('workspace'), workspaceId: z.string().min(1).max(128) }),
 ])
+const rightsSchema = z
+  .object({
+    consoles: z.boolean(),
+    chat: z.boolean(),
+    changes: z.boolean(),
+    notes: z.enum(['off', 'read', 'write']),
+    files: z.enum(['off', 'read']),
+  })
+  .strict()
 const grantSchema = z.object({
   id: z.string().regex(ID_RE),
   shareId: z.string().regex(/^[A-Za-z0-9_-]{22}$/),
   label: z.string().max(SHARE_LIMITS.labelMax),
   scope: scopeSchema,
   perm: z.enum(['view', 'type', 'full']),
+  rights: rightsSchema.optional().catch(undefined),
   inviteKey: sealedSchema,
   password: z
     .object({ salt: z.string().regex(/^[A-Za-z0-9_-]{22}$/), N: z.number(), r: z.number(), p: z.number(), key: sealedSchema })
@@ -150,6 +169,7 @@ export class GrantStore {
         label: shareText(g.data.label, SHARE_LIMITS.labelMax),
         scope: g.data.scope,
         perm: g.data.perm,
+        rights: normalizeShareRights(g.data.scope.kind, g.data.rights ?? shareLegacyRights(g.data.perm, g.data.scope.kind)),
         inviteKey,
         ...(password ? { password } : {}),
         createdAt: g.data.createdAt,
@@ -184,6 +204,7 @@ export class GrantStore {
       label: shareText(input.label, SHARE_LIMITS.labelMax),
       scope: input.scope,
       perm: input.perm,
+      rights: normalizeShareRights(input.scope.kind, input.rights ?? shareLegacyRights(input.perm, input.scope.kind)),
       inviteKey: randomBytes(16),
       createdAt: this.now(),
       ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
@@ -205,10 +226,11 @@ export class GrantStore {
     return g
   }
 
-  update(id: string, patch: { perm?: SharePerm; label?: string; expiresAt?: number | null; paused?: boolean; scope?: ShareGrantScope }): ShareGrant | null {
+  update(id: string, patch: { perm?: SharePerm; rights?: ShareRights; label?: string; expiresAt?: number | null; paused?: boolean; scope?: ShareGrantScope }): ShareGrant | null {
     const g = this.grants.get(id)
     if (!g) return null
     if (patch.perm) g.perm = patch.perm
+    if (patch.rights) g.rights = normalizeShareRights(patch.scope?.kind ?? g.scope.kind, patch.rights)
     if (patch.label !== undefined) g.label = shareText(patch.label, SHARE_LIMITS.labelMax)
     if (patch.expiresAt === null) delete g.expiresAt
     else if (patch.expiresAt !== undefined) g.expiresAt = patch.expiresAt
@@ -293,6 +315,7 @@ export class GrantStore {
       label: g.label,
       scope: g.scope,
       perm: g.perm,
+      rights: g.rights,
       inviteKey: { enc: 'dpapi', data: s.inviteKey },
       ...(g.password && s.password
         ? { password: { salt: toB64u(g.password.salt), N: SHARE_SCRYPT.N, r: SHARE_SCRYPT.r, p: SHARE_SCRYPT.p, key: { enc: 'dpapi', data: s.password } } }
