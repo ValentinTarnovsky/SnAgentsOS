@@ -58,6 +58,10 @@ export function registerShareHostIpc(host: ShareHost): void {
     const r = (req && typeof req === 'object' ? req : {}) as { sessionId?: unknown; perm?: unknown }
     return host.sessionPerm(r.sessionId, r.perm)
   })
+  ipcMain.handle(CH.SHARE_SESSION_RIGHTS, (_e, req: unknown): ShareOpRes => {
+    const r = (req && typeof req === 'object' ? req : {}) as { sessionId?: unknown; rights?: unknown }
+    return host.sessionRights(r.sessionId, r.rights)
+  })
   ipcMain.handle(CH.SHARE_PAUSE_ALL, (_e, on: unknown): ShareOpRes => host.pauseAll(on === true))
   ipcMain.on(CH.SHARE_RESOLVE, (_e, req: ShareResolveReq) => host.resolve(req))
   ipcMain.on(CH.SHARE_SET_CONFIG, (_e, cfg: ShareHostConfig) => {

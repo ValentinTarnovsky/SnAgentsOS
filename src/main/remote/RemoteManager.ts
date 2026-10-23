@@ -941,31 +941,7 @@ export class RemoteManager {
   private async notesRequest(req: RemoteNotesRequest): Promise<RemoteNotesReply> {
     const store = this.notes
     if (!store || !this.currentSnapshot().workspaces.some((w) => w.id === req.workspaceId)) return { ok: false, error: 'not_found' }
-    const { workspaceId, noteId } = req
-    switch (req.op) {
-      case 'list': {
-        const res = await store.list(workspaceId)
-        return res.ok ? { ok: true, notes: res.notes } : { ok: false, error: 'invalid' }
-      }
-      case 'read': {
-        const res = await store.read({ workspaceId, noteId })
-        return res.ok ? { ok: true, note: phoneNote(res.note) } : { ok: false, error: res.error }
-      }
-      case 'write': {
-        if (typeof req.text !== 'string') return { ok: false, error: 'invalid' }
-        const res = await store.write({ workspaceId, noteId, text: req.text, ...(req.baseRev !== undefined ? { baseRev: req.baseRev } : {}) })
-        if (res.ok) return { ok: true, note: res.note }
-        return { ok: false, error: res.error, ...(res.current ? { current: phoneNote(res.current) } : {}) }
-      }
-      case 'create': {
-        const res = await store.create({ workspaceId, text: req.text ?? '' })
-        return res.ok ? { ok: true, note: res.note } : { ok: false, error: res.error }
-      }
-      case 'delete': {
-        const res = await store.delete({ workspaceId, noteId })
-        return res.ok ? { ok: true } : { ok: false, error: res.error }
-      }
-    }
+    return runNotesRequest(store, req)
   }
 
   // --- HTTP auth (E3-FR-01) ---------------------------------------------------
@@ -1062,6 +1038,46 @@ export class RemoteManager {
     if (code === 'EACCES') return `Port ${port} needs elevated privileges. Choose a port above 1024.`
     return err instanceof Error ? err.message : 'Failed to start the remote server.'
   }
+}
+
+export type NotesRequestStore = Pick<WsNoteStore, 'list' | 'read' | 'write' | 'create' | 'delete'>
+
+/**
+ * One notes request of a remote reader (a phone, or a share guest from app
+ * 2.6.0), on a workspace the caller already checked. Never a path back; a
+ * text past WS_NOTE_PHONE_MAX bytes is `too_large`, and so is a write over a
+ * note bigger than that on disk (the reader only saw its start).
+ */
+export async function runNotesRequest(store: NotesRequestStore, req: RemoteNotesRequest): Promise<RemoteNotesReply> {
+  const { workspaceId, noteId } = req
+  if (req.text !== undefined && Buffer.byteLength(req.text, 'utf8') > WS_NOTE_PHONE_MAX) return { ok: false, error: 'too_large' }
+  switch (req.op) {
+    case 'list': {
+      const res = await store.list(workspaceId)
+      return res.ok ? { ok: true, notes: res.notes } : { ok: false, error: 'invalid' }
+    }
+    case 'read': {
+      const res = await store.read({ workspaceId, noteId })
+      return res.ok ? { ok: true, note: phoneNote(res.note) } : { ok: false, error: res.error }
+    }
+    case 'write': {
+      if (typeof req.text !== 'string') return { ok: false, error: 'invalid' }
+      const cur = await store.read({ workspaceId, noteId })
+      if (cur.ok ? Buffer.byteLength(cur.note.text, 'utf8') > WS_NOTE_PHONE_MAX : cur.error === 'too_large') return { ok: false, error: 'too_large' }
+      const res = await store.write({ workspaceId, noteId, text: req.text, ...(req.baseRev !== undefined ? { baseRev: req.baseRev } : {}) })
+      if (res.ok) return { ok: true, note: res.note }
+      return { ok: false, error: res.error, ...(res.current ? { current: phoneNote(res.current) } : {}) }
+    }
+    case 'create': {
+      const res = await store.create({ workspaceId, text: req.text ?? '' })
+      return res.ok ? { ok: true, note: res.note } : { ok: false, error: res.error }
+    }
+    case 'delete': {
+      const res = await store.delete({ workspaceId, noteId })
+      return res.ok ? { ok: true } : { ok: false, error: res.error }
+    }
+  }
+  return { ok: false, error: 'invalid' }
 }
 
 /**

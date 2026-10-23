@@ -17,11 +17,15 @@
  *    accounts, quick commands, schedules, notes text, the git chip nor other
  *    workspaces) and pane statuses travel without `pending`/`attention`;
  *  - a frame naming a pane outside the scope gets `out_of_scope`, no strike;
- *  - `full` on a workspace scope adds the ctl allowlist (createPane from the
- *    snapshot's presets or a plain type, never prompt/resume/cwd, and
- *    closePane in the scope, both relayed to the renderer executor through
- *    RemoteManager.relayAction; a createPane ack adds its pane to the scope
- *    at once) and read-only Chat, Notes (list/read) and Git (status/diff).
+ *  - on a workspace scope, each session's rights (app 2.6.0, set per grant
+ *    and per guest, apart from the terminal perm) add the ctl allowlist
+ *    (consoles: createPane from the snapshot's presets or a plain type, never
+ *    prompt/resume/cwd, and closePane in the scope, both relayed to the
+ *    renderer executor through RemoteManager.relayAction; a createPane ack
+ *    adds its pane to the scope at once), read-only Chat and Git
+ *    (status/diff), Notes (read, or read and write) and the read-only Files
+ *    drawer. A v1 guest (app 2.4 / 2.5) gets the v1 caps only: notes it may
+ *    write show read-only there, files do not exist for it.
  * Revoke order mirrors revokeDevice: out of memory, then the sessions die
  * (`ended{revoked}`, 4403), then the file is written.
  */
@@ -32,7 +36,10 @@ import {
   type ShareCaps,
   type ShareClientMsg,
   type ShareCtlError,
+  type ShareFilesReply,
+  type ShareHostMsg,
   type ShareHostPlatform,
+  type ShareNotesOp,
   type ShareNotesReply,
   type SharePaneInfo,
   type SharePresetInfo,
@@ -56,9 +63,12 @@ import type {
 } from '@shared/ipc-contract'
 import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemotePaneInfo, RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
 import type { PaneStatusEvt, SharePerm } from '@shared/types'
+import { inGitDir, isSafeRel, relHasShareSecret, type FilesChangedEvt, type FilesListRes } from '@shared/files'
 import { parseMenu } from '@shared/promptMenu'
 import { shareStateImprecise } from '@shared/shareInput'
-import type { WsNotesChangedEvt } from '@shared/ws-notes'
+import { SHARE_RIGHTS_NONE, isShareRights, normalizeShareRights, remapShareRights, sameShareRights, shareCapsOf, type ShareBackends } from '@shared/shareRights'
+import type { WsNoteError, WsNotesChangedEvt } from '@shared/ws-notes'
+import type { GuestReadRes } from '../files/FileService'
 import type { ChatFrame, ChatHooks } from '../chat/ChatHub'
 import type { PtyInputOrigin } from '../pty/PtyManager'
 import { GIT_REQ_IN_FLIGHT, GIT_REQ_MAX, GIT_REQ_WINDOW_MS, MAX_CHAT_SUBS, NOTES_REQ_IN_FLIGHT, NOTES_REQ_MAX, NOTES_REQ_WINDOW_MS, gitPathAllowed, recordGitPaths } from '../remote/SessionManager'
@@ -70,6 +80,7 @@ import { encodeShareInvite, inviteEndpoints, shareLoopbackAllowed } from './invi
 import { PaneFanout, type FanoutPty } from './PaneFanout'
 import { StatusCoalescer, toShareStatus, type StatusLike } from './StatusCoalescer'
 import type { ShareListener } from './ShareServer'
+import { fitFilesReply } from './shareFiles'
 import type { ShareTransport } from './transport'
 import { realShareClock, type ShareClock, type ShareTimer } from './clock'
 
@@ -80,6 +91,13 @@ export const SHARE_CTL_MAX = 6
 export const SHARE_CTL_WINDOW_MS = 60_000
 /** A createPane ack's pane counts as in scope this long before a snapshot lists it. */
 export const SHARE_EXTRA_PANE_MS = 10_000
+/** Files drawer requests per session (filesWatch counts too). */
+export const SHARE_FILES_REQ_MAX = 40
+export const SHARE_FILES_REQ_WINDOW_MS = 5_000
+export const SHARE_FILES_REQ_IN_FLIGHT = 2
+/** Note creates and deletes per session, on top of the notes bucket. */
+export const SHARE_NOTES_OP_MAX = 10
+export const SHARE_NOTES_OP_WINDOW_MS = 60_000
 
 const EXPIRY_MS: Record<Exclude<ShareExpiryChoice, 'never'>, number> = { '1h': 3_600_000, '8h': 8 * 3_600_000, '24h': 24 * 3_600_000 }
 const ID_RE = /^[^\u0000-\u001f\u007f-\u009f]{1,128}$/
@@ -89,6 +107,8 @@ const PERM_RANK: Record<SharePerm, number> = { view: 0, type: 1, full: 2 }
 const isId = (v: unknown): v is string => typeof v === 'string' && ID_RE.test(v)
 const isPerm = (v: unknown): v is SharePerm => typeof v === 'string' && (PERMS as readonly string[]).includes(v)
 const isExpiry = (v: unknown): v is ShareExpiryChoice => v === 'never' || v === '1h' || v === '8h' || v === '24h'
+const NO_BACKENDS: ShareBackends = { chat: false, git: false, notes: false, files: false }
+const REV_RE = /^\d{1,20}-\d{1,20}$/
 const oneLine = (v: unknown, max: number): string => (typeof v === 'string' ? shareText(v, max) : '')
 
 /** The PtyManager surface the host uses. */
@@ -97,6 +117,23 @@ export interface ShareHostPty extends FanoutPty {
   write(ptyId: string, data: string, origin: PtyInputOrigin): void
   /** The pane's screen rows (PtyManager.screenRows), for an agent with no precise state; null when unreadable. */
   screenRows?(paneId: string): string[] | null
+}
+
+/** One notes request on the scoped workspace (the caller checked the caps). */
+export interface ShareHostNotesReq {
+  workspaceId: string
+  op: ShareNotesOp
+  noteId?: string
+  text?: string
+  baseRev?: string
+}
+
+/** FileService as a share guest reads it: never `.git` nor a secret name, bounded. */
+export interface ShareHostFiles {
+  list(workspaceId: string, rel: string, max: number): Promise<FilesListRes>
+  read(workspaceId: string, rel: string, limits: { textMax: number; imageMax: number }): Promise<GuestReadRes>
+  acquireWatch(workspaceId: string, owner: string, cb: (evt: FilesChangedEvt) => void): boolean
+  releaseWatch(workspaceId: string, owner: string): void
 }
 
 export interface ShareHostDeps {
@@ -119,7 +156,11 @@ export interface ShareHostDeps {
   statuses?(): PaneStatusEvt[]
   chat?(): ChatHooks | null
   git?(): ((req: RemoteGitRequest) => Promise<RemoteGitReply>) | null
-  notes?(): ((req: { workspaceId: string; op: 'list' | 'read'; noteId?: string }) => Promise<ShareNotesReply>) | null
+  notes?(): ((req: ShareHostNotesReq) => Promise<ShareNotesReply>) | null
+  /** The workspace folder a guest reads (FileService's guest half), app 2.6.0. */
+  files?(): ShareHostFiles | null
+  /** Highest protocol version offered (tests: 1 plays an app 2.5 host). */
+  protocol?: { max: number }
   /** "<name> (guest)" for the renderer's toasts (i18n in main). */
   guestLabel(name: string): string
   /** Localized "Guest". */
@@ -161,6 +202,8 @@ export class ShareHost {
   private panesScheduled = false
   private lastGuestCount = 0
   private readonly allowLoopback: boolean
+  /** grantId -> the workspace folder watched for its guests' Files drawers. */
+  private readonly filesWatches = new Map<string, string>()
 
   constructor(private readonly deps: ShareHostDeps) {
     this.clock = deps.clock ?? realShareClock
@@ -192,6 +235,7 @@ export class ShareHost {
       onApprovalsChanged: () => this.scheduleUi(),
       onApprovalRequest: (a) => deps.onApproval?.(a),
       clock: this.clock,
+      ...(deps.protocol ? { protocolMax: deps.protocol.max } : {}),
     })
     this.fanout = new PaneFanout<HostSession>({
       pty: deps.pty,
@@ -380,14 +424,49 @@ export class ShareHost {
     this.coalescer.push(evt.paneId, toShareStatus(evt))
   }
 
-  /** A note changed: guests reading that workspace's notes reload. */
+  /** A note changed: guests reading that workspace's notes reload (a v2 one skips the echo of its own save by `rev`). */
   notesChanged(evt: WsNotesChangedEvt): void {
     const noteId = evt.noteId && /^[A-Za-z0-9_-]{1,64}$/.test(evt.noteId) ? evt.noteId : undefined
+    const rev = typeof evt.rev === 'string' && REV_RE.test(evt.rev) ? evt.rev : undefined
     for (const s of this.sessions.admitted()) {
       const grant = this.deps.grants.get(s.grantId)
-      if (!grant || grant.scope.workspaceId !== evt.workspaceId || !this.capsFor(s, grant).notes || this.isPaused(s)) continue
-      this.sessions.send(s, { t: 'notesChanged', ...(noteId ? { noteId } : {}) })
+      if (!grant || grant.scope.kind !== 'workspace' || grant.scope.workspaceId !== evt.workspaceId || !this.capsFor(s, grant).notes || this.isPaused(s)) continue
+      this.sessions.send(s, { t: 'notesChanged', ...(noteId ? { noteId } : {}), ...(rev && s.version >= 2 ? { rev } : {}) })
     }
+  }
+
+  /** The watched folder of a grant changed: its guests with the Files drawer open reload those folders. */
+  private filesChanged(grantId: string, evt: FilesChangedEvt): void {
+    let msg: Extract<ShareHostMsg, { t: 'filesChanged' }>
+    if (evt.all) msg = { t: 'filesChanged', dirs: [], all: true }
+    else {
+      // A folder the guest cannot see is not named (a secret one, `.git`).
+      const dirs = evt.dirs.filter((d) => isSafeRel(d) && !inGitDir(d) && !relHasShareSecret(d))
+      if (!dirs.length) return
+      msg = dirs.length > SHARE_LIMITS.filesChangedDirsMax ? { t: 'filesChanged', dirs: [], all: true } : { t: 'filesChanged', dirs }
+    }
+    const grant = this.deps.grants.get(grantId)
+    if (!grant) return
+    for (const s of this.sessions.admitted()) {
+      if (s.grantId !== grantId || !s.filesWatch || s.version < 2 || this.isPaused(s) || !this.capsFor(s, grant).files) continue
+      this.sessions.send(s, msg)
+    }
+  }
+
+  /** Hold the grant's folder watch while some guest of it has the Files drawer open, release it after. */
+  private syncFilesWatch(grantId: string): void {
+    const files = this.deps.files?.()
+    const g = this.deps.grants.get(grantId)
+    const workspaceId = g?.scope.kind === 'workspace' ? g.scope.workspaceId : undefined
+    const want = !!files && !!workspaceId && this.sessions.admitted().some((s) => s.grantId === grantId && s.filesWatch)
+    const owner = `share:${grantId}`
+    const held = this.filesWatches.get(grantId)
+    if (held !== undefined && (!want || held !== workspaceId)) {
+      files?.releaseWatch(held, owner)
+      this.filesWatches.delete(grantId)
+    }
+    if (!want || !files || !workspaceId || this.filesWatches.has(grantId)) return
+    if (files.acquireWatch(workspaceId, owner, (evt) => this.filesChanged(grantId, evt))) this.filesWatches.set(grantId, workspaceId)
   }
 
   // --- Scope ----------------------------------------------------------------------
@@ -503,14 +582,7 @@ export class ShareHost {
   }
 
   private capsFor(s: HostSession, g: ShareGrant): ShareCaps {
-    const full = s.perm === 'full' && g.scope.kind === 'workspace'
-    return {
-      createPane: full,
-      closePane: full,
-      chat: full && !!this.deps.chat?.(),
-      notes: full && !!this.deps.notes?.(),
-      git: full && !!this.deps.git?.(),
-    }
+    return shareCapsOf(s.rights, g.scope.kind, s.version, { chat: !!this.deps.chat?.(), git: !!this.deps.git?.(), notes: !!this.deps.notes?.(), files: !!this.deps.files?.() })
   }
 
   private paneInfo(p: RemotePaneInfo): SharePaneInfo | null {
@@ -532,7 +604,7 @@ export class ShareHost {
 
   buildState(s: HostSession): ShareState {
     const g = this.deps.grants.get(s.grantId)
-    const caps: ShareCaps = g ? this.capsFor(s, g) : { createPane: false, closePane: false, chat: false, notes: false, git: false }
+    const caps: ShareCaps = g ? this.capsFor(s, g) : shareCapsOf(SHARE_RIGHTS_NONE, 'pane', s.version, NO_BACKENDS)
     const allowed = this.allowedFor(s.grantId)
     const ws = g ? (g.scope.kind === 'pane' ? this.findPane(g.scope.paneId)?.ws : this.findWorkspace(g.scope.workspaceId)) : undefined
     const panes: SharePaneInfo[] = []
@@ -608,6 +680,10 @@ export class ShareHost {
     this.arbiter.dropSession(s)
     if (s.chatSubs.size) this.deps.chat?.()?.closed(s)
     s.chatSubs.clear()
+    if (s.filesWatch) {
+      s.filesWatch = false
+      this.syncFilesWatch(s.grantId)
+    }
     if (wasAdmitted) this.guestsChanged()
     this.scheduleUi()
   }
@@ -682,22 +758,35 @@ export class ShareHost {
       case 'notesReq':
         void this.handleNotes(s, msg)
         return
+      case 'filesReq':
+        if (s.version < 2) return this.sessions.send(s, { t: 'err', code: 'unsupported' })
+        void this.handleFiles(s, msg)
+        return
+      case 'filesWatch':
+        if (s.version < 2) return this.sessions.send(s, { t: 'err', code: 'unsupported' })
+        return this.filesWatch(s, msg.on)
       default:
         this.sessions.send(s, { t: 'err', code: 'unsupported' })
     }
   }
 
   /**
-   * A perm change took a cap away (full -> type or view): the chats it read
-   * end now, so no transcript keeps flowing to a session that may not read
-   * it. Ctl, git and notes check the caps on every request.
+   * A rights change took a cap away: the chats it read end now, so no
+   * transcript keeps flowing to a session that may not read it, and its Files
+   * watch goes. Ctl, git, notes and files check the caps on every request.
    */
   private enforceCaps(s: HostSession): void {
     const g = this.deps.grants.get(s.grantId)
-    if (g && this.capsFor(s, g).chat) return
-    for (const paneId of [...s.chatSubs]) {
-      s.chatSubs.delete(paneId)
-      this.deps.chat?.()?.unsub(s, paneId)
+    const caps = g ? this.capsFor(s, g) : null
+    if (!caps?.chat) {
+      for (const paneId of [...s.chatSubs]) {
+        s.chatSubs.delete(paneId)
+        this.deps.chat?.()?.unsub(s, paneId)
+      }
+    }
+    if (!caps?.files && s.filesWatch) {
+      s.filesWatch = false
+      this.syncFilesWatch(s.grantId)
     }
   }
 
@@ -805,23 +894,88 @@ export class ShareHost {
   }
 
   private async handleNotes(s: HostSession, msg: Extract<ShareClientMsg, { t: 'notesReq' }>): Promise<void> {
+    const fail = (error: WsNoteError): void => this.sessions.send(s, { t: 'notesRes', id: msg.id, ok: false, error })
     const g = this.deps.grants.get(s.grantId)
     const notes = this.deps.notes?.()
-    if (!g || !notes || !this.capsFor(s, g).notes || this.isPaused(s)) return this.sessions.send(s, { t: 'notesRes', id: msg.id, ok: false, error: 'not_found' })
+    const caps = g ? this.capsFor(s, g) : null
+    // Write, create and delete need notesWrite, which only a v2 session can hold.
+    const writes = msg.op === 'write' || msg.op === 'create' || msg.op === 'delete'
+    if (!g || !notes || !caps || !(writes ? caps.notesWrite : caps.notes) || this.isPaused(s)) return fail('not_found')
     const now = this.clock.now()
     s.notesTimes = s.notesTimes.filter((t) => now - t < NOTES_REQ_WINDOW_MS)
-    if (s.notesTimes.length >= NOTES_REQ_MAX || s.notesInFlight >= NOTES_REQ_IN_FLIGHT) return this.sessions.send(s, { t: 'notesRes', id: msg.id, ok: false, error: 'rate' })
+    if (s.notesTimes.length >= NOTES_REQ_MAX || s.notesInFlight >= NOTES_REQ_IN_FLIGHT) return fail('rate')
+    if (msg.op === 'create' || msg.op === 'delete') {
+      s.notesOpTimes = s.notesOpTimes.filter((t) => now - t < SHARE_NOTES_OP_WINDOW_MS)
+      if (s.notesOpTimes.length >= SHARE_NOTES_OP_MAX) return fail('rate')
+      s.notesOpTimes.push(now)
+    }
     s.notesTimes.push(now)
+    // Always the scoped workspace: a guest never names one.
+    const req: ShareHostNotesReq = { workspaceId: g.scope.workspaceId, op: msg.op }
+    if ('noteId' in msg && msg.noteId !== undefined) req.noteId = msg.noteId
+    if ('text' in msg && msg.text !== undefined) req.text = msg.text
+    if ('baseRev' in msg && msg.baseRev !== undefined) req.baseRev = msg.baseRev
     let reply: ShareNotesReply
     s.notesInFlight += 1
     try {
-      reply = await notes({ workspaceId: g.scope.workspaceId, op: msg.op, ...(msg.noteId !== undefined ? { noteId: msg.noteId } : {}) })
+      reply = await notes(req)
     } catch {
       reply = { ok: false, error: 'io' }
     } finally {
       s.notesInFlight -= 1
     }
-    if (s.phase === 'admitted') this.sessions.send(s, { t: 'notesRes', id: msg.id, ...reply })
+    if (s.phase !== 'admitted') return
+    // `current` (the conflict copy) is v2.
+    const { current, ...rest } = reply
+    this.sessions.send(s, { t: 'notesRes', id: msg.id, ...rest, ...(current && s.version >= 2 ? { current } : {}) })
+  }
+
+  private takeFilesSlot(s: HostSession): boolean {
+    const now = this.clock.now()
+    s.filesTimes = s.filesTimes.filter((t) => now - t < SHARE_FILES_REQ_WINDOW_MS)
+    if (s.filesTimes.length >= SHARE_FILES_REQ_MAX) return false
+    s.filesTimes.push(now)
+    return true
+  }
+
+  private async handleFiles(s: HostSession, msg: Extract<ShareClientMsg, { t: 'filesReq' }>): Promise<void> {
+    const send = (reply: ShareFilesReply): void => {
+      if (s.phase === 'admitted') this.sessions.send(s, { t: 'filesRes', id: msg.id, ...fitFilesReply(reply) })
+    }
+    const g = this.deps.grants.get(s.grantId)
+    const files = this.deps.files?.()
+    if (!g || !files || g.scope.kind !== 'workspace' || !this.capsFor(s, g).files || this.isPaused(s)) return send({ ok: false, error: 'not_found' })
+    if (s.filesInFlight >= SHARE_FILES_REQ_IN_FLIGHT || !this.takeFilesSlot(s)) return send({ ok: false, error: 'rate' })
+    // Always the scoped workspace: a guest never names one.
+    const workspaceId = g.scope.workspaceId
+    let reply: ShareFilesReply
+    s.filesInFlight += 1
+    try {
+      if (msg.op === 'list') {
+        const res = await files.list(workspaceId, msg.rel, SHARE_LIMITS.filesListMax)
+        reply = res.ok ? { ok: true, entries: res.entries, truncated: res.truncated } : { ok: false, error: res.error }
+      } else {
+        const res = await files.read(workspaceId, msg.rel, { textMax: SHARE_LIMITS.fileTextMax, imageMax: SHARE_LIMITS.fileImageMax })
+        if (!res.ok) reply = { ok: false, error: res.error }
+        else if (res.kind === 'image') reply = { ok: true, file: { kind: 'image', dataUrl: res.dataUrl, size: res.size, rev: res.rev } }
+        else reply = { ok: true, file: { kind: 'text', text: res.text, eol: res.eol, bom: res.bom, rev: res.rev, size: res.size, ...(res.partial ? { partial: true } : {}) } }
+      }
+    } catch {
+      reply = { ok: false, error: 'io' }
+    } finally {
+      s.filesInFlight -= 1
+    }
+    send(reply)
+  }
+
+  /** The guest's Files drawer opened or closed: its grant's folder watch follows. */
+  private filesWatch(s: HostSession, on: boolean): void {
+    if (on === s.filesWatch) return
+    const g = this.deps.grants.get(s.grantId)
+    if (on && (!g || !this.capsFor(s, g).files)) return this.sessions.send(s, { t: 'err', code: 'unauthorized' })
+    if (!this.takeFilesSlot(s)) return this.sessions.send(s, { t: 'err', code: 'rate' })
+    s.filesWatch = on
+    this.syncFilesWatch(s.grantId)
   }
 
   // --- Host API (registerShareHostIpc) ------------------------------------------------
@@ -865,6 +1019,7 @@ export class ShareHost {
       label: this.scopeOf(g).label,
       scope: g.scope,
       perm: g.perm,
+      rights: { ...g.rights },
       hasPassword: !!g.password,
       createdAt: g.createdAt,
       ...(g.expiresAt !== undefined ? { expiresAt: g.expiresAt } : {}),
@@ -879,6 +1034,8 @@ export class ShareHost {
         ip: s.ip,
         fingerprint: s.fingerprint,
         perm: s.perm,
+        rights: { ...s.rights },
+        ...(s.version < 2 ? { legacy: true as const } : {}),
         since: s.since,
         watching: this.fanout.subsOf(s).size,
         typing: [...this.fanout.subsOf(s)].some((p) => this.arbiter.guestHolder(p) === s),
@@ -899,6 +1056,7 @@ export class ShareHost {
 
   async create(req: ShareCreateReq): Promise<ShareCreateRes> {
     if (!req || typeof req !== 'object' || !isPerm(req.perm)) return { ok: false, error: 'invalid' }
+    if (req.rights !== undefined && !isShareRights(req.rights)) return { ok: false, error: 'invalid' }
     const scopeReq = req.scope as { kind?: unknown; paneId?: unknown; workspaceId?: unknown } | undefined
     if (req.expiry !== undefined && !isExpiry(req.expiry)) return { ok: false, error: 'invalid' }
     if (req.password !== undefined && !this.validPassword(req.password)) return { ok: false, error: 'invalid' }
@@ -926,7 +1084,7 @@ export class ShareHost {
     }
     const label = oneLine(req.label, SHARE_LIMITS.labelMax) || shareText(fallbackLabel, SHARE_LIMITS.labelMax)
     const expiresAt = req.expiry && req.expiry !== 'never' ? this.clock.now() + EXPIRY_MS[req.expiry] : undefined
-    const grant = this.deps.grants.create({ label, scope, perm: req.perm, ...(expiresAt !== undefined ? { expiresAt } : {}) })
+    const grant = this.deps.grants.create({ label, scope, perm: req.perm, ...(req.rights ? { rights: req.rights } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}) })
     if (!grant) return { ok: false, error: 'limit' }
     this.allowed.set(grant.id, this.computeAllowed(grant))
     if (req.password) {
@@ -983,6 +1141,7 @@ export class ShareHost {
   update(req: ShareUpdateReq): ShareOpRes {
     if (!req || typeof req !== 'object' || !isId(req.grantId)) return { ok: false, error: 'invalid' }
     if (req.perm !== undefined && !isPerm(req.perm)) return { ok: false, error: 'invalid' }
+    if (req.rights !== undefined && !isShareRights(req.rights)) return { ok: false, error: 'invalid' }
     if (req.expiry !== undefined && !isExpiry(req.expiry)) return { ok: false, error: 'invalid' }
     if (req.paused !== undefined && typeof req.paused !== 'boolean') return { ok: false, error: 'invalid' }
     if (req.label !== undefined && typeof req.label !== 'string') return { ok: false, error: 'invalid' }
@@ -990,8 +1149,10 @@ export class ShareHost {
     if (!g) return { ok: false, error: 'not_found' }
     const permChanged = req.perm !== undefined && req.perm !== g.perm
     const oldPerm = g.perm
+    const oldRights = { ...g.rights }
     this.deps.grants.update(g.id, {
       ...(req.perm ? { perm: req.perm } : {}),
+      ...(req.rights ? { rights: req.rights } : {}),
       ...(req.label !== undefined ? { label: req.label } : {}),
       ...(req.expiry !== undefined ? { expiresAt: req.expiry === 'never' ? null : this.clock.now() + EXPIRY_MS[req.expiry] } : {}),
       ...(req.paused !== undefined ? { paused: req.paused } : {}),
@@ -1009,6 +1170,19 @@ export class ShareHost {
         if (p === s.perm) continue
         s.perm = p
         this.sessions.send(s, { t: 'permChanged', perm: s.perm })
+        this.enforceCaps(s)
+      }
+    }
+    if (!sameShareRights(oldRights, g.rights)) {
+      // The same rule as the perm, field by field (remapShareRights).
+      const newRights = { ...g.rights }
+      const next = (r: typeof newRights): typeof newRights => normalizeShareRights(g.scope.kind, remapShareRights(r, oldRights, newRights))
+      this.sessions.remapTicketRights(g.id, next)
+      for (const s of this.sessions.admitted()) {
+        if (s.grantId !== g.id) continue
+        const r = next(s.rights)
+        if (sameShareRights(r, s.rights)) continue
+        s.rights = r
         this.enforceCaps(s)
       }
     }
@@ -1092,6 +1266,23 @@ export class ShareHost {
     return { ok: true }
   }
 
+  /** One guest's rights, exactly (Settings > Sharing). */
+  sessionRights(sessionId: unknown, rights: unknown): ShareOpRes {
+    if (!isShareRights(rights)) return { ok: false, error: 'invalid' }
+    const s = isId(sessionId) ? this.sessions.byId(sessionId) : undefined
+    const g = s ? this.deps.grants.get(s.grantId) : undefined
+    if (!s || s.phase !== 'admitted' || !g) return { ok: false, error: 'not_found' }
+    const next = normalizeShareRights(g.scope.kind, rights)
+    if (!sameShareRights(next, s.rights)) {
+      s.rights = next
+      this.sessions.setTicketRights(s.grantId, s.guestKey, next)
+      this.enforceCaps(s)
+      this.pushState(s)
+    }
+    this.scheduleUi()
+    return { ok: true }
+  }
+
   pauseAll(on: unknown): ShareOpRes {
     this.pausedAll = on === true
     this.syncPause()
@@ -1102,7 +1293,8 @@ export class ShareHost {
   resolve(req: ShareResolveReq): void {
     if (!req || typeof req !== 'object' || typeof req.requestId !== 'string' || typeof req.allow !== 'boolean') return
     if (req.perm !== undefined && !isPerm(req.perm)) return
-    this.sessions.resolve(req.requestId, req.allow, req.perm)
+    if (req.rights !== undefined && !isShareRights(req.rights)) return
+    this.sessions.resolve(req.requestId, req.allow, req.perm, req.rights)
     this.scheduleUi()
   }
 

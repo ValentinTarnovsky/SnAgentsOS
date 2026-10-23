@@ -1,10 +1,12 @@
 /**
- * The extras of a full-control shared workspace on the guest (app 2.4.0,
- * item 8, stage S5): New console / Close console (relayed ctl), and the
- * read-only Chat, Notes and Changes drawers. Main validates every request
- * (src/main/share/guest) and the host enforces the caps again; this store
- * only keeps what the drawers show. No persistence, and nothing here ever
- * reaches useAppStore.workspaces, the config, the phone snapshot nor the CLI.
+ * The extras of a shared workspace on the guest (app 2.4.0, item 8, stage
+ * S5; per guest rights from app 2.6.0): New console / Close console (relayed
+ * ctl), the read-only Chat and Changes drawers, the Notes drawer (read, or
+ * read and write) and the read-only Files drawer. Each shows with its cap.
+ * Main validates every request (src/main/share/guest) and the host enforces
+ * the caps again; this store only keeps what the drawers show. No
+ * persistence, and nothing here ever reaches useAppStore.workspaces, the
+ * config, the phone snapshot nor the CLI.
  *
  *  - Chat: per shared pane, the phone's list rules (chat/chatModel.ts) with
  *    a first page / "Load earlier" pending state and a 10 s "The host did not
@@ -12,14 +14,18 @@
  *  - New console: the ack's pane id goes into `pendingPanes` so the cell
  *    shows at once, before the host's next state lists it.
  *  - Notes: `notesChanged` bumps a per-link counter the Notes drawer reloads on.
+ *  - Files: the tree lives in filesStore under `share:<linkId>`, read through
+ *    the link; `filesChanged` (while the drawer is open) reloads its folders.
  */
 import { create } from 'zustand'
 import { chatNoticeOf, type ChatMessage, type ChatUnavailableReason } from '@shared/chat-types'
 import type { RemoteGitChanges, RemoteGitDiffPage, RemoteGitReply } from '@shared/remote-protocol'
 import type { GitDiffHunk, GitDiffRes } from '@shared/git-types'
 import type { ShareChatEvt, ShareGuestRequestError, ShareLinkEvt, ShareLinkView } from '@shared/share-guest'
-import type { ShareCaps, SharePaneInfo, SharePresetInfo, ShareState } from '@shared/share-protocol'
+import type { FilesError } from '@shared/files'
+import type { ShareCaps, ShareFilesReply, SharePaneInfo, SharePresetInfo, ShareState } from '@shared/share-protocol'
 import { EMPTY_LIST, appendList, prependList, replaceList, type ChatList } from '@/components/share/chat/chatModel'
+import { applyFilesChanged, dropFiles, type FilesIo, type FilesIoRead } from '@/lib/filesStore'
 
 /** A chat request with no page back in this long shows "The host did not answer [Retry]". */
 export const SHARE_CHAT_WAIT_MS = 10_000
@@ -30,7 +36,7 @@ export const SHARE_STATUS_MAX_PAGES = 4
 /** A file that keeps changing restarts its diff read at most this many times. */
 export const SHARE_DIFF_MAX_RESTARTS = 2
 
-export type SharePanel = { kind: 'chat'; paneId: string } | { kind: 'notes' } | { kind: 'changes' }
+export type SharePanel = { kind: 'chat'; paneId: string } | { kind: 'notes' } | { kind: 'changes' } | { kind: 'files' }
 export type ChatLoad = 'first' | 'more'
 
 export interface SharedPaneChat {
@@ -54,8 +60,8 @@ interface ExtrasState {
   chats: Record<string, SharedPaneChat>
   /** linkId -> panes a createPane ack named that no state listed yet. */
   pendingPanes: Record<string, SharePaneInfo[]>
-  /** linkId -> bumped on every notesChanged. */
-  notesSeq: Record<string, { n: number; noteId?: string }>
+  /** linkId -> bumped on every notesChanged (`rev`: the note's rev after it, v2). */
+  notesSeq: Record<string, { n: number; noteId?: string; rev?: string }>
   /** linkId -> a ctl is waiting on the host. */
   ctlBusy: Record<string, boolean>
 
@@ -89,7 +95,10 @@ export const useShareExtrasStore = create<ExtrasState>((set, get) => ({
 /** The panel kinds a session may open. */
 export function panelAllowed(panel: SharePanel | null | undefined, caps: ShareCaps | undefined): boolean {
   if (!panel || !caps) return false
-  return panel.kind === 'chat' ? caps.chat : panel.kind === 'notes' ? caps.notes : caps.git
+  if (panel.kind === 'chat') return caps.chat
+  if (panel.kind === 'notes') return caps.notes
+  if (panel.kind === 'files') return caps.files === true
+  return caps.git
 }
 
 /** A shared pane with a transcript to read: an agent console or a shell running one. */
@@ -356,6 +365,46 @@ export function gitOutcome<T extends RemoteGitChanges | RemoteGitDiffPage>(res: 
   return { kind: 'data', data: reply.data as T, page: reply.page, done: reply.done }
 }
 
+// --- Files (read-only, through the link) ---------------------------------------------------
+
+/** The filesStore key of a link's tree (a workspace id never has a colon). */
+export function shareFilesKey(linkId: string): string {
+  return `share:${linkId}`
+}
+
+/** A request that did not reach the host, or the host's rate limit, as the drawer's error. */
+function filesRequestError(error: ShareGuestRequestError | undefined): FilesError {
+  if (error === 'denied') return 'not_found'
+  if (error === 'invalid' || error === 'too_large') return error
+  return 'io'
+}
+
+function filesReplyError(reply: ShareFilesReply): FilesError {
+  return !reply.error || reply.error === 'rate' ? 'io' : reply.error
+}
+
+/** The tree's I/O of a link: list and read through main and the host, never a write. */
+export function shareFilesIo(linkId: string): FilesIo {
+  const api = window.snApi.share.guest
+  return {
+    list: async (rel) => {
+      const res = await api.files({ linkId, op: 'list', rel }).catch(() => null)
+      if (!res?.ok || !res.reply) return { ok: false, error: filesRequestError(res?.error ?? 'offline') }
+      const r = res.reply
+      return r.ok ? { ok: true, entries: r.entries ?? [], truncated: r.truncated === true } : { ok: false, error: filesReplyError(r) }
+    },
+    read: async (rel): Promise<FilesIoRead> => {
+      const res = await api.files({ linkId, op: 'read', rel }).catch(() => null)
+      if (!res?.ok || !res.reply) return { ok: false, error: filesRequestError(res?.error ?? 'offline') }
+      const r = res.reply
+      const f = r.file
+      if (!r.ok || !f) return { ok: false, error: filesReplyError(r) }
+      if (f.kind === 'image') return { ok: true, kind: 'image', dataUrl: f.dataUrl, size: f.size, rev: f.rev }
+      return { ok: true, kind: 'text', text: f.text, eol: f.eol, bom: f.bom, rev: f.rev, size: f.size, readOnly: true, ...(f.partial ? { partial: true } : {}) }
+    },
+  }
+}
+
 // --- Main's events ---------------------------------------------------------------------
 
 function onState(linkId: string, state: ShareState): void {
@@ -385,6 +434,7 @@ function forgetLink(linkId: string): void {
     }
     return { chats, panel: without(s.panel), pendingPanes: without(s.pendingPanes), notesSeq: without(s.notesSeq), ctlBusy: without(s.ctlBusy) }
   })
+  dropFiles(shareFilesKey(linkId))
 }
 
 export function applyExtrasLinkEvent(evt: ShareLinkEvt): void {
@@ -393,8 +443,11 @@ export function applyExtrasLinkEvent(evt: ShareLinkEvt): void {
       return onState(evt.linkId, evt.state)
     case 'notesChanged':
       useShareExtrasStore.setState((s) => ({
-        notesSeq: { ...s.notesSeq, [evt.linkId]: { n: (s.notesSeq[evt.linkId]?.n ?? 0) + 1, ...(evt.noteId ? { noteId: evt.noteId } : {}) } },
+        notesSeq: { ...s.notesSeq, [evt.linkId]: { n: (s.notesSeq[evt.linkId]?.n ?? 0) + 1, ...(evt.noteId ? { noteId: evt.noteId } : {}), ...(evt.rev ? { rev: evt.rev } : {}) } },
       }))
+      return
+    case 'filesChanged':
+      void applyFilesChanged({ workspaceId: shareFilesKey(evt.linkId), dirs: evt.dirs, ...(evt.all ? { all: true } : {}) })
       return
     case 'removed':
       return forgetLink(evt.linkId)

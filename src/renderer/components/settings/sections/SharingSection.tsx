@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Copy, KeyRound, Lock, LogOut, Pause, Play, RefreshCw, Trash2, Users } from 'lucide-react'
+import { ChevronRight, Copy, KeyRound, Lock, LogOut, Pause, Play, RefreshCw, Trash2, Users } from 'lucide-react'
 import type { ShareExpiryChoice, ShareHostGrantView, ShareHostSessionView, ShareOpRes, ShareInviteRes } from '@shared/ipc-contract'
-import type { SharePerm } from '@shared/types'
+import type { SharePerm, ShareRights } from '@shared/types'
 import { BRAND } from '@shared/brand'
 import { useAppStore } from '@/lib/store'
 import {
@@ -15,6 +15,7 @@ import {
   listenErrorText,
   passwordProblem,
   shareErrorKey,
+  shareRightsSummary,
   shortFingerprint,
   useShareHostStore,
 } from '@/lib/shareHostStore'
@@ -22,6 +23,7 @@ import { formatSince } from '@/lib/formatSince'
 import { useLang, useT, type MessageKey } from '@/i18n'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { FirewallStatusRow } from '@/components/remote/FirewallStatusRow'
+import { ShareRightsEditor } from '@/components/share/ShareRightsEditor'
 import { SettingRow, ToggleRow, inputCls, labelCls } from '../ui'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/cn'
@@ -222,6 +224,8 @@ function GrantCard({ grant: g, encryption }: { grant: ShareHostGrantView; encryp
   const [pwOpen, setPwOpen] = useState(false)
   const [pw, setPw] = useState('')
   const [confirm, setConfirm] = useState<'revoke' | 'rotate' | null>(null)
+  const [rightsOpen, setRightsOpen] = useState(false)
+  const workspace = g.scope.kind === 'workspace'
   const now = Date.now()
 
   const run = async (op: () => Promise<ShareOpRes>): Promise<boolean> => {
@@ -267,7 +271,7 @@ function GrantCard({ grant: g, encryption }: { grant: ShareHostGrantView; encryp
         <div className="min-w-0 flex-1">
           <span className="block truncate text-sm text-text-primary">{g.label}</span>
           <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-text-secondary">
-            <span>{t(g.scope.kind === 'workspace' ? 'shareHost.scope.workspace' : 'shareHost.scope.pane')}</span>
+            <span>{t(workspace ? 'shareHost.scope.workspace' : 'shareHost.scope.pane')}</span>
             <span>{expiryText}</span>
             {g.hasPassword && (
               <span className="flex items-center gap-1" data-share-grant-pw>
@@ -337,6 +341,25 @@ function GrantCard({ grant: g, encryption }: { grant: ShareHostGrantView; encryp
         </button>
       </div>
 
+      {workspace && (
+        <div data-share-grant-rights className="space-y-1.5">
+          <button
+            type="button"
+            data-share-grant-rights-toggle
+            aria-expanded={rightsOpen}
+            onClick={() => setRightsOpen((v) => !v)}
+            className="flex w-full items-center gap-1.5 text-left text-[11px] text-text-secondary transition-colors hover:text-text-primary"
+          >
+            <ChevronRight size={13} className={cn('shrink-0 transition-transform', rightsOpen && 'rotate-90')} />
+            <span className="shrink-0 font-medium">{t('shareHost.rights.title')}</span>
+            {!rightsOpen && <span className="min-w-0 truncate">{shareRightsSummary(t, g.rights)}</span>}
+          </button>
+          {rightsOpen && (
+            <ShareRightsEditor compact value={g.rights} onChange={(rights) => void run(() => api.update({ grantId: g.id, rights }))} />
+          )}
+        </div>
+      )}
+
       {pwOpen && (
         <div data-share-grant-pw-form className="space-y-1.5">
           {!encryption ? (
@@ -385,7 +408,7 @@ function GrantCard({ grant: g, encryption }: { grant: ShareHostGrantView; encryp
       {g.sessions.length > 0 && (
         <div className="space-y-1.5 border-t border-border pt-2" data-share-sessions>
           {g.sessions.map((s) => (
-            <SessionRow key={s.id} session={s} onError={setError} />
+            <SessionRow key={s.id} session={s} workspace={workspace} onError={setError} />
           ))}
         </div>
       )}
@@ -419,10 +442,20 @@ function GrantCard({ grant: g, encryption }: { grant: ShareHostGrantView; encryp
   )
 }
 
-function SessionRow({ session: s, onError }: { session: ShareHostSessionView; onError: (k: MessageKey | null) => void }) {
+function SessionRow({
+  session: s,
+  workspace,
+  onError,
+}: {
+  session: ShareHostSessionView
+  /** Only a workspace share has rights to edit per guest. */
+  workspace: boolean
+  onError: (k: MessageKey | null) => void
+}) {
   const t = useT()
   const lang = useLang()
   const api = window.snApi.share.host
+  const [rightsOpen, setRightsOpen] = useState(false)
   const op = async (fn: () => Promise<ShareOpRes>): Promise<void> => {
     onError(null)
     try {
@@ -432,47 +465,72 @@ function SessionRow({ session: s, onError }: { session: ShareHostSessionView; on
       onError('shareHost.err.invalid')
     }
   }
+  const setRights = (rights: ShareRights): void => void op(() => api.sessionRights(s.id, rights))
   return (
-    <div data-share-session={s.id} className="flex items-center gap-2">
-      <Users size={13} className="shrink-0 text-text-secondary" />
-      <div className="min-w-0 flex-1">
-        <span className="flex items-center gap-1.5 truncate text-xs text-text-primary">
-          {s.name}
-          {s.typing && (
-            <span data-share-session-typing className="text-[11px] text-text-secondary">
-              {t('shareHost.session.typing')}
-            </span>
-          )}
-        </span>
-        <span className="block truncate text-[11px] text-text-secondary">
-          <span className="font-mono" title={s.fingerprint}>
-            {shortFingerprint(s.fingerprint)}
+    <div data-share-session={s.id} className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Users size={13} className="shrink-0 text-text-secondary" />
+        <div className="min-w-0 flex-1">
+          <span className="flex items-center gap-1.5 truncate text-xs text-text-primary">
+            {s.name}
+            {s.typing && (
+              <span data-share-session-typing className="text-[11px] text-text-secondary">
+                {t('shareHost.session.typing')}
+              </span>
+            )}
+            {workspace && s.legacy && (
+              <span data-share-session-legacy className="rounded bg-card px-1.5 py-0.5 text-[10px] text-text-secondary">
+                {t('shareHost.session.legacy')}
+              </span>
+            )}
           </span>
-          {' · '}
-          <span className="font-mono">{s.ip}</span>
-          {' · '}
-          {formatSince(s.since, Date.now(), lang)}
-          {' · '}
-          {t('shareHost.session.watching', { count: s.watching })}
-        </span>
+          <span className="block truncate text-[11px] text-text-secondary">
+            <span className="font-mono" title={s.fingerprint}>
+              {shortFingerprint(s.fingerprint)}
+            </span>
+            {' · '}
+            <span className="font-mono">{s.ip}</span>
+            {' · '}
+            {formatSince(s.since, Date.now(), lang)}
+            {' · '}
+            {t('shareHost.session.watching', { count: s.watching })}
+          </span>
+          {workspace && (
+            <button
+              type="button"
+              data-share-session-rights-toggle
+              aria-expanded={rightsOpen}
+              onClick={() => setRightsOpen((v) => !v)}
+              className="mt-0.5 flex items-center gap-1 text-[11px] text-text-secondary transition-colors hover:text-text-primary"
+            >
+              <ChevronRight size={13} className={cn('shrink-0 transition-transform', rightsOpen && 'rotate-90')} />
+              {t('shareHost.session.rights')}
+            </button>
+          )}
+        </div>
+        <select
+          aria-label={t('shareHost.session.perm')}
+          data-share-session-perm
+          className={selectCls}
+          value={s.perm}
+          onChange={(e) => void op(() => api.sessionPerm(s.id, e.target.value as SharePerm))}
+        >
+          {SHARE_PERMS.map((p) => (
+            <option key={p} value={p}>
+              {t(PERM_KEY[p])}
+            </option>
+          ))}
+        </select>
+        <button type="button" data-share-session-kick className={cn(smallBtn, 'hover:border-red-500/50 hover:text-red-400')} onClick={() => void op(() => api.kick(s.id))}>
+          <LogOut size={13} />
+          {t('shareHost.session.kick')}
+        </button>
       </div>
-      <select
-        aria-label={t('shareHost.session.perm')}
-        data-share-session-perm
-        className={selectCls}
-        value={s.perm}
-        onChange={(e) => void op(() => api.sessionPerm(s.id, e.target.value as SharePerm))}
-      >
-        {SHARE_PERMS.map((p) => (
-          <option key={p} value={p}>
-            {t(PERM_KEY[p])}
-          </option>
-        ))}
-      </select>
-      <button type="button" data-share-session-kick className={cn(smallBtn, 'hover:border-red-500/50 hover:text-red-400')} onClick={() => void op(() => api.kick(s.id))}>
-        <LogOut size={13} />
-        {t('shareHost.session.kick')}
-      </button>
+      {workspace && rightsOpen && (
+        <div data-share-session-rights className="pl-5">
+          <ShareRightsEditor compact value={s.rights} legacy={s.legacy === true} onChange={setRights} />
+        </div>
+      )}
     </div>
   )
 }

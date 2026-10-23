@@ -6,7 +6,7 @@ import type {
   ShareHostPaneGuests,
   ShareHostState,
 } from '@shared/ipc-contract'
-import type { Language, SharePerm, ShareSettings } from '@shared/types'
+import type { Language, SharePerm, ShareRights, ShareSettings } from '@shared/types'
 import type { MessageKey, TFn } from '@/i18n'
 
 /**
@@ -84,6 +84,17 @@ export function listenErrorText(t: TFn, state: ShareHostState): string | null {
   return state.error
 }
 
+/** The rights a share gives, as one line in the UI language: "Consoles, Chat, Notes (read)". */
+export function shareRightsSummary(t: TFn, r: ShareRights): string {
+  const parts: string[] = []
+  if (r.consoles) parts.push(t('shareHost.rights.consoles'))
+  if (r.chat) parts.push(t('shareHost.rights.chat'))
+  if (r.changes) parts.push(t('shareHost.rights.changes'))
+  if (r.notes !== 'off') parts.push(t(r.notes === 'write' ? 'shareHost.rights.sumNotesWrite' : 'shareHost.rights.sumNotesRead'))
+  if (r.files === 'read') parts.push(t('shareHost.rights.sumFiles'))
+  return parts.length > 0 ? parts.join(', ') : t('shareHost.rights.none')
+}
+
 /** Password rule of main (SHARE_LIMITS.passwordMin/Max): '' means no password. */
 export const SHARE_PASSWORD_MIN = 8
 export const SHARE_PASSWORD_MAX = 128
@@ -140,8 +151,8 @@ interface ShareHostStoreState {
   answered: string[]
   openDialog: (scope: ShareDialogScope) => void
   closeDialog: () => void
-  /** Allow or Deny one join request (perm: the prompt's dropdown). */
-  resolve: (requestId: string, allow: boolean, perm?: SharePerm) => void
+  /** Allow or Deny one join request (perm and rights: the prompt's dropdown and editor; rights only on a workspace share). */
+  resolve: (requestId: string, allow: boolean, perm?: SharePerm, rights?: ShareRights) => void
 }
 
 export const useShareHostStore = create<ShareHostStoreState>((set, get) => ({
@@ -152,9 +163,9 @@ export const useShareHostStore = create<ShareHostStoreState>((set, get) => ({
   answered: [],
   openDialog: (scope) => set({ dialog: scope }),
   closeDialog: () => set({ dialog: null }),
-  resolve: (requestId, allow, perm) => {
+  resolve: (requestId, allow, perm, rights) => {
     if (get().answered.includes(requestId)) return
-    window.snApi.share.host.resolve({ requestId, allow, ...(allow && perm ? { perm } : {}) })
+    window.snApi.share.host.resolve({ requestId, allow, ...(allow && perm ? { perm } : {}), ...(allow && rights ? { rights } : {}) })
     set((s) => ({ answered: [...s.answered, requestId] }))
   },
 }))

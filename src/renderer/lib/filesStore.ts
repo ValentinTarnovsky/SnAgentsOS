@@ -10,9 +10,14 @@
  * a workspace id and a relative path. A save carries the rev it loaded; an
  * agent editing the same file in between makes it a conflict, never a
  * silent overwrite.
+ *
+ * A share guest's read-only Files drawer (app 2.6.0) keeps its tree here too,
+ * under the key `share:<linkId>` (a workspace id never has a colon): its I/O
+ * goes through the link (setFilesIo), it has no write, and it is never
+ * stashed.
  */
 import { create } from 'zustand'
-import { joinRel, parentRel, type FileEntry, type FilesChangedEvt, type FilesError } from '@shared/files'
+import { joinRel, parentRel, type FileEntry, type FileReadRes, type FileWriteReq, type FileWriteRes, type FilesChangedEvt, type FilesError, type FilesListRes } from '@shared/files'
 
 export interface FileTab {
   rel: string
@@ -35,6 +40,8 @@ export interface FileTab {
   external?: 'changed' | 'deleted' | 'conflict'
   /** Restored from the stash of a previous run (unsaved). */
   restored?: boolean
+  /** Only the start of the file came (a share guest's read of a long one). */
+  partial?: boolean
 }
 
 export interface DirState {
@@ -55,6 +62,47 @@ interface FilesState {
 }
 
 export const useFilesStore = create<FilesState>(() => ({ byWs: {} }))
+
+/** A read as a tree's I/O answers it; `partial`: only the start of the file came. */
+export type FilesIoRead = FileReadRes & { partial?: boolean }
+
+/** Where a tree reads (and writes): the workspace's folder through main, or a share link. */
+export interface FilesIo {
+  list(rel: string): Promise<FilesListRes>
+  read(rel: string): Promise<FilesIoRead>
+  /** Absent: a read-only tree. */
+  write?(req: Omit<FileWriteReq, 'workspaceId'>): Promise<FileWriteRes>
+}
+
+const ios = new Map<string, FilesIo>()
+
+function localIo(wsId: string): FilesIo {
+  return {
+    list: (rel) => window.snApi.files.list({ workspaceId: wsId, rel }),
+    read: (rel) => window.snApi.files.read({ workspaceId: wsId, rel }),
+    write: (req) => window.snApi.files.write({ workspaceId: wsId, ...req }),
+  }
+}
+
+function ioOf(key: string): FilesIo {
+  return ios.get(key) ?? localIo(key)
+}
+
+/** A tree apart from the workspaces (a share link): its reads go through `io`. */
+export function setFilesIo(key: string, io: FilesIo): void {
+  ios.set(key, io)
+}
+
+/** Forget a tree and its I/O (a share link removed). */
+export function dropFiles(key: string): void {
+  ios.delete(key)
+  useFilesStore.setState((s) => {
+    if (!(key in s.byWs)) return s
+    const byWs = { ...s.byWs }
+    delete byWs[key]
+    return { byWs }
+  })
+}
 
 const EMPTY: WsFiles = { tabs: [], active: null, expanded: [''], dirs: {} }
 let tabSeq = 0
@@ -81,7 +129,7 @@ export function isDirty(tab: FileTab): boolean {
 // --- Tree ----------------------------------------------------------------------------
 
 export async function loadDir(wsId: string, rel: string): Promise<void> {
-  const res = await window.snApi.files.list({ workspaceId: wsId, rel }).catch(() => null)
+  const res = await ioOf(wsId).list(rel).catch(() => null)
   const dir: DirState = res?.ok ? { entries: res.entries, truncated: res.truncated } : { entries: [], truncated: false, error: res && !res.ok ? res.error : 'io' }
   patch(wsId, (ws) => ({ dirs: { ...ws.dirs, [rel]: dir } }))
 }
@@ -111,13 +159,14 @@ export async function openFile(wsId: string, rel: string): Promise<FilesError | 
     patch(wsId, () => ({ active: rel }))
     return null
   }
-  const res = await window.snApi.files.read({ workspaceId: wsId, rel }).catch(() => null)
+  const io = ioOf(wsId)
+  const res = await io.read(rel).catch(() => null)
   if (!res) return 'io'
   if (!res.ok) return res.error
   const tab: FileTab =
     res.kind === 'image'
       ? { rel, kind: 'image', seq: ++tabSeq, initial: '', text: '', saved: '', rev: res.rev, eol: 'lf', bom: false, readOnly: true, size: res.size, dataUrl: res.dataUrl }
-      : { rel, kind: 'text', seq: ++tabSeq, initial: res.text, text: res.text, saved: res.text, rev: res.rev, eol: res.eol, bom: res.bom, readOnly: res.readOnly, size: res.size }
+      : { rel, kind: 'text', seq: ++tabSeq, initial: res.text, text: res.text, saved: res.text, rev: res.rev, eol: res.eol, bom: res.bom, readOnly: res.readOnly || !io.write, size: res.size, ...(res.partial ? { partial: true } : {}) }
   patch(wsId, (w) => (w.tabs.some((t) => t.rel === rel) ? { active: rel } : { tabs: [...w.tabs, tab], active: rel }))
   return null
 }
@@ -141,23 +190,23 @@ export function setTabText(wsId: string, rel: string, text: string): void {
 
 /** Reads the file again into the tab, dropping its edits. */
 export async function reloadTab(wsId: string, rel: string): Promise<void> {
-  const res = await window.snApi.files.read({ workspaceId: wsId, rel }).catch(() => null)
+  const io = ioOf(wsId)
+  const res = await io.read(rel).catch(() => null)
   if (!res?.ok) {
     if (res && !res.ok && res.error === 'not_found') patchTab(wsId, rel, () => ({ external: 'deleted' }))
     return
   }
   if (res.kind === 'image') patchTab(wsId, rel, () => ({ seq: ++tabSeq, dataUrl: res.dataUrl, rev: res.rev, size: res.size, external: undefined }))
-  else patchTab(wsId, rel, () => ({ seq: ++tabSeq, initial: res.text, text: res.text, saved: res.text, rev: res.rev, eol: res.eol, bom: res.bom, readOnly: res.readOnly, size: res.size, external: undefined, restored: undefined }))
+  else patchTab(wsId, rel, () => ({ seq: ++tabSeq, initial: res.text, text: res.text, saved: res.text, rev: res.rev, eol: res.eol, bom: res.bom, readOnly: res.readOnly || !io.write, size: res.size, partial: res.partial || undefined, external: undefined, restored: undefined }))
 }
 
 /** Writes the tab. `force` overwrites a newer file on disk (Keep mine). */
 export async function saveTab(wsId: string, rel: string, force = false): Promise<FilesError | null> {
   const tab = wsFiles(useFilesStore.getState(), wsId).tabs.find((t) => t.rel === rel)
-  if (!tab || tab.kind !== 'text' || tab.readOnly) return null
+  const io = ioOf(wsId)
+  if (!tab || tab.kind !== 'text' || tab.readOnly || !io.write) return null
   const text = tab.text
-  const res = await window.snApi.files
-    .write({ workspaceId: wsId, rel, text, eol: tab.eol, bom: tab.bom, ...(force || tab.restored ? {} : { baseRev: tab.rev }) })
-    .catch(() => null)
+  const res = await io.write({ rel, text, eol: tab.eol, bom: tab.bom, ...(force || tab.restored ? {} : { baseRev: tab.rev }) }).catch(() => null)
   if (!res) return 'io'
   if (!res.ok) {
     if (res.error === 'conflict') patchTab(wsId, rel, () => ({ external: 'conflict' }))
@@ -183,7 +232,7 @@ export async function applyFilesChanged(evt: FilesChangedEvt): Promise<void> {
   await Promise.all(ws.expanded.filter((d) => touched(d) && ws.dirs[d]).map((d) => loadDir(evt.workspaceId, d)))
   for (const tab of ws.tabs) {
     if (!touched(parentRel(tab.rel))) continue
-    const res = await window.snApi.files.read({ workspaceId: evt.workspaceId, rel: tab.rel }).catch(() => null)
+    const res = await ioOf(evt.workspaceId).read(tab.rel).catch(() => null)
     const cur = wsFiles(useFilesStore.getState(), evt.workspaceId).tabs.find((t) => t.rel === tab.rel)
     if (!cur || !res) continue
     if (!res.ok) {
@@ -222,6 +271,8 @@ export function stashUnsaved(): void {
   const out: Stashed[] = []
   let size = 0
   for (const [wsId, ws] of Object.entries(useFilesStore.getState().byWs)) {
+    // A share link's tree is read-only: nothing of it to bring back.
+    if (wsId.includes(':')) continue
     for (const tab of ws.tabs) {
       if (!isDirty(tab)) continue
       size += tab.text.length * 2

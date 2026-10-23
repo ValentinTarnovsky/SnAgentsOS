@@ -2,17 +2,20 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertTriangle, Users } from 'lucide-react'
 import type { ShareHostApproval } from '@shared/ipc-contract'
-import type { SharePerm } from '@shared/types'
+import type { SharePerm, ShareRights } from '@shared/types'
 import { PERM_KEY, SHARE_PERMS, shortFingerprint, useShareHostStore } from '@/lib/shareHostStore'
 import { useT } from '@/i18n'
 import { Button } from '@/components/ui/Button'
+import { ShareRightsEditor } from './ShareRightsEditor'
 
 /**
  * Allow / Deny for a guest asking to join a share (app 2.4.0, item 8, S4),
  * after the pattern of RemotePairingPrompt. Security prompt: Enter never
  * confirms and nothing is focused by default. Main allows 3 pending requests
  * at a time, so the cards stack; each one counts down its own 60 s and goes
- * away when main drops it (answered, timed out or the guest left).
+ * away when main drops it (answered, timed out or the guest left). A
+ * workspace request also edits the guest's rights (app 2.6.0), apart from the
+ * perm dropdown: changing one never touches the other.
  */
 export function ShareJoinPrompt() {
   const approvals = useShareHostStore((s) => s.state.approvals)
@@ -47,6 +50,8 @@ function JoinCard({ approval: a, now }: { approval: ShareHostApproval; now: numb
   const t = useT()
   const resolve = useShareHostStore((s) => s.resolve)
   const [perm, setPerm] = useState<SharePerm>(a.perm)
+  const [rights, setRights] = useState<ShareRights>(a.rights)
+  const workspace = a.scopeKind === 'workspace'
   const secondsLeft = Math.max(0, Math.ceil((a.expiresAt - now) / 1000))
   return (
     <div
@@ -73,6 +78,11 @@ function JoinCard({ approval: a, now }: { approval: ShareHostApproval; now: numb
           </span>
           <span data-share-prompt-known={a.known ? 'yes' : 'no'}>{t(a.known ? 'shareHost.join.known' : 'shareHost.join.new')}</span>
           <span className="rounded-btn border border-border bg-bg-secondary px-2 py-0.5 font-mono">{a.ip}</span>
+          {workspace && a.legacy && (
+            <span data-share-prompt-legacy className="rounded-btn border border-border bg-bg-secondary px-2 py-0.5">
+              {t('shareHost.session.legacy')}
+            </span>
+          )}
         </div>
         {a.passwordFailed && (
           <p data-share-prompt-pwfail className="flex items-start gap-1.5 text-left text-xs text-amber-300">
@@ -95,6 +105,12 @@ function JoinCard({ approval: a, now }: { approval: ShareHostApproval; now: numb
             ))}
           </select>
         </label>
+        {workspace && (
+          <div data-share-prompt-rights className="w-full space-y-1 text-left">
+            <span className="block text-xs text-text-secondary">{t('shareHost.rights.title')}</span>
+            <ShareRightsEditor compact value={rights} onChange={setRights} legacy={a.legacy === true} />
+          </div>
+        )}
         <span data-share-prompt-left className="text-[11px] text-text-secondary">
           {t('remote.pairing.expiresIn', { seconds: secondsLeft })}
         </span>
@@ -103,7 +119,7 @@ function JoinCard({ approval: a, now }: { approval: ShareHostApproval; now: numb
         <Button variant="ghost" size="sm" data-share-prompt-deny onClick={() => resolve(a.requestId, false)}>
           {t('remote.pairing.deny')}
         </Button>
-        <Button size="sm" data-share-prompt-allow onClick={() => resolve(a.requestId, true, perm)}>
+        <Button size="sm" data-share-prompt-allow onClick={() => resolve(a.requestId, true, perm, workspace ? rights : undefined)}>
           {t('remote.pairing.allow')}
         </Button>
       </div>

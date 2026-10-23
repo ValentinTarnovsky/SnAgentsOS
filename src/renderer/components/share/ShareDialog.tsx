@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, Copy, Loader2, Lock, Share2 } from 'lucide-react'
 import type { ShareCreateReq, ShareExpiryChoice, ShareHostGrantView, ShareHostState } from '@shared/ipc-contract'
-import type { SharePerm } from '@shared/types'
+import type { SharePerm, ShareRights } from '@shared/types'
+import { shareDefaultRights } from '@shared/shareRights'
 import { BRAND } from '@shared/brand'
 import { useAppStore } from '@/lib/store'
 import {
@@ -17,6 +18,7 @@ import {
   listenErrorText,
   passwordProblem,
   shareErrorKey,
+  shareRightsSummary,
   syncShareHostConfig,
   useShareHostStore,
   type ShareDialogScope,
@@ -24,6 +26,7 @@ import {
 import { useT, type MessageKey } from '@/i18n'
 import { Button } from '@/components/ui/Button'
 import { FirewallStatusRow } from '@/components/remote/FirewallStatusRow'
+import { ShareRightsEditor } from './ShareRightsEditor'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/cn'
 
@@ -35,8 +38,10 @@ const fieldCls =
  * global dialog opened from the pane menu, the workspace header or the
  * sidebar menu. Creating a share is the explicit action that turns
  * settings.share.enabled on; a workspace scope mounts the workspace first so
- * its consoles have a pty to share. The result step shows the invite with
- * Copy, the endpoints it carries and the share port's firewall row.
+ * its consoles have a pty to share. A workspace also picks what else guests may
+ * use (app 2.6.0 rights); a level preselects its defaults and the host adjusts
+ * each one. The result step shows the invite with Copy, the endpoints it
+ * carries and the share port's firewall row.
  */
 export function ShareDialog() {
   const scope = useShareHostStore((s) => s.dialog)
@@ -60,6 +65,7 @@ function ShareDialogBody({ scope }: { scope: ShareDialogScope }) {
   })
 
   const [perm, setPerm] = useState<SharePerm>(defaultPerm)
+  const [rights, setRights] = useState<ShareRights>(() => shareDefaultRights(defaultPerm))
   const [password, setPassword] = useState('')
   const [expiry, setExpiry] = useState<ShareExpiryChoice>('never')
   const [label, setLabel] = useState('')
@@ -89,6 +95,13 @@ function ShareDialogBody({ scope }: { scope: ShareDialogScope }) {
   const pwProblem = passwordProblem(password)
   const existing = grantsForScope(host, scope).length
 
+  // Picking another level resets the extras to that level's defaults; picking the current one keeps the host's edits.
+  const pickPerm = (p: SharePerm): void => {
+    if (p === perm) return
+    setPerm(p)
+    setRights(shareDefaultRights(p))
+  }
+
   const create = async (): Promise<void> => {
     if (busy || pwProblem) return
     setBusy(true)
@@ -103,6 +116,7 @@ function ShareDialogBody({ scope }: { scope: ShareDialogScope }) {
     const req: ShareCreateReq = {
       scope: scope.kind === 'pane' ? { kind: 'pane', paneId: scope.paneId } : { kind: 'workspace', workspaceId: scope.workspaceId },
       perm,
+      ...(scope.kind === 'workspace' ? { rights } : {}),
       expiry,
       ...(label.trim() ? { label: label.trim() } : {}),
       ...(password && host.encryption ? { password } : {}),
@@ -155,7 +169,7 @@ function ShareDialogBody({ scope }: { scope: ShareDialogScope }) {
                       role="radio"
                       aria-checked={perm === p}
                       data-share-perm={p}
-                      onClick={() => setPerm(p)}
+                      onClick={() => pickPerm(p)}
                       className={cn(
                         'flex w-full items-start gap-2.5 rounded-btn border px-3 py-2 text-left transition-colors',
                         perm === p ? 'border-accent-violet bg-accent-violet/10' : 'border-border hover:bg-bg-secondary',
@@ -177,6 +191,16 @@ function ShareDialogBody({ scope }: { scope: ShareDialogScope }) {
                   ))}
                 </div>
               </div>
+
+              {scope.kind === 'workspace' && (
+                <div data-share-rights-section className="space-y-2">
+                  <div>
+                    <span className="block text-xs font-medium text-text-secondary">{t('shareHost.rights.title')}</span>
+                    <span className="block text-[11px] text-text-secondary">{t('shareHost.rights.hint')}</span>
+                  </div>
+                  <ShareRightsEditor value={rights} onChange={setRights} />
+                </div>
+              )}
 
               <label className="block space-y-1.5">
                 <span className="flex items-center gap-1.5 text-xs font-medium text-text-secondary">
@@ -303,6 +327,11 @@ function ShareResult({ host, grant, invite }: { host: ShareHostState; grant: Sha
         {' · '}
         {grant.hasPassword ? t('shareHost.result.withPassword') : t('shareHost.result.withApproval')}
       </p>
+      {grant.scope.kind === 'workspace' && (
+        <p data-share-rights-summary className="text-[11px] text-text-secondary">
+          {t('shareHost.rights.summary', { list: shareRightsSummary(t, grant.rights) })}
+        </p>
+      )}
 
       <div className="space-y-1.5">
         <span className="block text-xs font-medium text-text-secondary">{t('shareHost.endpoints')}</span>

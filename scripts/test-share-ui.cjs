@@ -19,8 +19,12 @@
 // through the confirm dialog, no composer, a reconnect reads it again, a
 // notice, unsub on close), Notes (list, read, links confirmed, notesChanged
 // reloads, no editor), Changes (status sections, diff pages joined, no
-// review buttons) and a live downgrade that takes every extra away. No pty,
-// user config or socket is touched. Requires npm run build (for the CSS).
+// review buttons) and a live downgrade that takes every extra away. App
+// 2.6.0 (per guest rights): the read-only Files drawer (tree, a read-only
+// editor, a long file's start, watched while open, filesChanged reloads) and
+// Notes with the write right (editor, autosave with the rev it read, its own
+// echo skipped, conflict and Keep mine). No pty, user config or socket is
+// touched. Requires npm run build (for the CSS).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -45,10 +49,10 @@ import {ConfirmLinkDialog} from './src/renderer/components/share/ConfirmLinkDial
 import {applyTheme} from './src/renderer/themes/applyTheme';
 import {useToastStore} from './src/renderer/lib/toast';
 import {useShareExtrasStore} from './src/renderer/lib/shareGuestExtras';
-const calls={spawn:[],writes:[],resize:[],setActive:[],save:[],clip:[],titles:[],open:[],
+const calls={spawn:[],writes:[],resize:[],setActive:[],save:[],clip:[],titles:[],open:[],files:[],filesWatch:[],
  sub:[],unsub:[],input:[],flow:[],preview:[],join:[],connect:[],disconnect:[],password:[],ctl:[],git:[],notes:[],chat:[]};
 const subs={data:new Set(),link:new Set(),stream:new Set(),chat:new Set()};
-const fakes={ctl:null,git:null,notes:null};
+const fakes={ctl:null,git:null,notes:null,files:null};
 const noop=()=>()=>{};
 const fallback=(base)=>new Proxy(base,{get:(t,k)=>k in t?t[k]:(typeof k==='string'?fallback(noop):undefined)});
 let clipText='';
@@ -71,7 +75,7 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
   links:async()=>({persisted:true,guestFingerprint:null,links:[],states:{}}),
   connect:async id=>{calls.connect.push(id);return true},disconnect:async id=>{calls.disconnect.push(id);return true},forget:async()=>true,
   password:async r=>{calls.password.push(r);return{ok:true}},
-  ctl:async r=>{calls.ctl.push(r);return fakes.ctl?fakes.ctl(r):{ok:false,error:'denied'}},git:async r=>{calls.git.push(r);return fakes.git?fakes.git(r):{ok:false,error:'denied'}},notes:async r=>{calls.notes.push(r);return fakes.notes?fakes.notes(r):{ok:false,error:'denied'}},
+  ctl:async r=>{calls.ctl.push(r);return fakes.ctl?fakes.ctl(r):{ok:false,error:'denied'}},git:async r=>{calls.git.push(r);return fakes.git?fakes.git(r):{ok:false,error:'denied'}},notes:async r=>{calls.notes.push(r);return fakes.notes?fakes.notes(r):{ok:false,error:'denied'}},files:async r=>{calls.files.push(r);return fakes.files?fakes.files(r):{ok:false,error:'denied'}},filesWatch:r=>calls.filesWatch.push(r),
   sub:(l,p)=>calls.sub.push(l+':'+p),unsub:(l,p)=>calls.unsub.push(l+':'+p),input:r=>calls.input.push(r),flow:r=>calls.flow.push(r),chat:r=>calls.chat.push(r),
   onLinkEvent:cb=>{subs.link.add(cb);return()=>subs.link.delete(cb)},onStream:cb=>{subs.stream.add(cb);return()=>subs.stream.delete(cb)},onChatEvent:cb=>{subs.chat.add(cb);return()=>subs.chat.delete(cb)}}},
 });
@@ -394,6 +398,53 @@ app.whenReady().then(async()=>{
  ok(v.call.page===1&&v.lines===3&&v.hunks===1&&!v.more&&v.edit===0,'the next page joins the continued hunk; no review-note buttons (read only)',v);
  await shot('share-s5-changes');
 
+ // app 2.6.0: Files (read only) and Notes editing come with their own caps.
+ const typeText=async t=>{for(const ch of t){w.webContents.sendInputEvent({type:'char',keyCode:ch});await wait(5)}await settle()};
+ await js("smoke.calls.files.length=0;smoke.calls.filesWatch.length=0;smoke.fakes.files=r=>r.op==='list'?(r.rel===''?{ok:true,reply:{ok:true,entries:[{name:'src',kind:'dir',size:0,mtimeMs:1},{name:'README.md',kind:'file',size:6,mtimeMs:1}],truncated:false}}:{ok:true,reply:{ok:true,entries:[{name:'a.ts',kind:'file',size:12,mtimeMs:1}],truncated:false}}):{ok:true,reply:{ok:true,file:{kind:'text',text:r.rel==='README.md'?'# Hola':'const a = 1',eol:'lf',bom:false,rev:'1-6',size:6,...(r.rel==='src/a.ts'?{partial:true}:{})}}};0");
+ await js("smoke.stateFull([smoke.sp('sp2',{type:'claude',title:'Agent',icon:'bot'})],{caps:{createPane:true,closePane:true,chat:true,notes:true,git:true,notesWrite:true,files:true}})");await settle(250);
+ v=await js("({files:smoke.visible('[data-shared-extra=files]'),notes:smoke.visible('[data-shared-extra=notes]')})");
+ ok(v.files&&v.notes,'with the files right the header shows Files',v);
+ await js("smoke.click('[data-shared-extra=files]')");await settle(350);
+ v=await js("({drawer:smoke.has('[data-drawer=share-files]'),changes:smoke.has('[data-drawer=share-changes]'),watch:smoke.calls.filesWatch.at(-1),list:smoke.calls.files[0],rows:[...document.querySelectorAll('[data-drawer=share-files] [data-file-row]')].map(e=>e.dataset.fileRow),edit:smoke.count('[data-drawer=share-files] [data-files-draft], [data-drawer=share-files] [data-files-new-file]'),pressed:[...document.querySelectorAll('[data-shared-extra][aria-pressed=true]')].map(e=>e.dataset.sharedExtra)})");
+ ok(v.drawer&&!v.changes&&v.watch&&v.watch.on===true&&v.watch.linkId===LINK&&v.list.op==='list'&&v.list.rel===''&&JSON.stringify(v.rows)==='["src","README.md"]'&&v.edit===0&&JSON.stringify(v.pressed)==='["files"]','Files opens the host folder as a read-only tree, watched while open',v);
+ await js("smoke.click('[data-drawer=share-files] [data-file-row=src]')");await settle(300);
+ await js("[...document.querySelectorAll('[data-drawer=share-files] [data-file-row]')].find(e=>e.dataset.fileRow==='src/a.ts').click()");await settle(400);
+ v=await js("({call:smoke.calls.files.at(-1),tab:smoke.has('[data-drawer=share-files] [data-file-tab]'),partial:smoke.has('[data-shared-file-partial]'),ro:document.querySelector('[data-drawer=share-files] .cm-content')?.getAttribute('aria-readonly'),status:smoke.text('[data-drawer=share-files] [data-files-status]')})");
+ ok(v.call.op==='read'&&v.call.rel==='src/a.ts'&&v.tab&&v.partial&&v.ro==='true'&&v.status.includes('Solo lectura'),'a file opens in a read-only editor; a long one says only its start came',v);
+ await js("[...document.querySelectorAll('[data-drawer=share-files] [data-file-row]')].find(e=>e.dataset.fileRow==='README.md').click()");await settle(400);
+ v=await js("({preview:smoke.text('[data-drawer=share-files] [data-file-preview]')})");
+ ok(v.preview.includes('Hola'),'a Markdown file shows its preview',v);
+ const nFiles=await js('smoke.calls.files.length');
+ await js("smoke.linkEvt({t:'filesChanged',dirs:['src']})");await settle(350);
+ v=await js("smoke.calls.files.slice("+nFiles+").map(c=>c.op+':'+c.rel)");
+ ok(v.includes('list:src')&&v.includes('read:src/a.ts')&&!v.includes('list:'),'filesChanged reloads that folder and the files open in it',v);
+ await shot('share-26-files');
+ await js("smoke.click('[data-drawer=share-files] [data-drawer-close]')");await settle(250);
+ v=await js("smoke.calls.filesWatch.at(-1)");
+ ok(v&&v.on===false,'closing the drawer stops the watch',v);
+
+ // Notes with the write right: the editor, autosave with the rev it read, a conflict and Keep mine.
+ await js("smoke.calls.notes.length=0;window.__w=0;smoke.fakes.notes=r=>{if(r.op==='list')return{ok:true,reply:{ok:true,notes:[{id:'n1',title:'Plan',updatedAt:Date.now()-60000,size:6,rev:'a'}]}};if(r.op==='read')return{ok:true,reply:{ok:true,note:{id:'n1',title:'Plan',updatedAt:1,size:6,rev:'a',text:'# Plan'}}};if(r.op==='write'){window.__w++;if(window.__w===1)return{ok:true,reply:{ok:true,note:{id:'n1',title:'Plan',updatedAt:2,size:8,rev:'b'}}};if(r.baseRev)return{ok:true,reply:{ok:false,error:'conflict'}};return{ok:true,reply:{ok:true,note:{id:'n1',title:'Plan',updatedAt:3,size:9,rev:'c'}}}}return{ok:true,reply:{ok:true}}};0");
+ await js("smoke.click('[data-shared-extra=notes]')");await settle(250);
+ await js("smoke.click('[data-shared-note=n1]')");await settle(350);
+ v=await js("({editor:smoke.count('[data-drawer=share-notes] .cm-editor'),newBtn:smoke.has('[data-shared-notes-new]'),del:smoke.has('[data-drawer=share-notes] [data-note-delete]'),write:document.querySelector('[data-shared-notes]')?.dataset.sharedNotesWrite})");
+ ok(v.editor===1&&v.newBtn&&v.del&&v.write==='true','with notesWrite the note opens in an editor, with New and Delete',v);
+ await js("document.querySelector('[data-drawer=share-notes] .cm-content').focus()");await settle();
+ await typeText('xy');await settle(900);
+ v=await js("smoke.calls.notes.filter(c=>c.op==='write')");
+ ok(v.length===1&&v[0].noteId==='n1'&&v[0].baseRev==='a'&&v[0].text.includes('xy')&&v[0].text.includes('Plan')&&v[0].linkId===LINK,'typing saves on its own with the rev it read',v);
+ const nNotes2=await js('smoke.calls.notes.length');
+ await js("smoke.linkEvt({t:'notesChanged',noteId:'n1',rev:'b'})");await settle(300);
+ v=await js("smoke.calls.notes.slice("+nNotes2+").map(c=>c.op)");
+ ok(!v.includes('read'),'the echo of its own save does not reload the note',v);
+ await typeText('z');await settle(900);
+ v=await js("({conflict:smoke.has('[data-drawer=share-notes] [data-note-conflict]'),last:smoke.calls.notes.at(-1)})");
+ ok(v.conflict&&v.last.op==='write'&&v.last.baseRev==='b','a note changed on the host meanwhile is a conflict',v);
+ await js("smoke.click('[data-drawer=share-notes] [data-note-keep]')");await settle(400);
+ v=await js("({conflict:smoke.has('[data-drawer=share-notes] [data-note-conflict]'),last:smoke.calls.notes.at(-1),saved:smoke.text('[data-drawer=share-notes] [data-note-saved]')})");
+ ok(!v.conflict&&v.saved==='Guardada'&&v.last.op==='write'&&v.last.baseRev===undefined&&v.last.text.includes('z'),'Keep mine overwrites without the rev and clears the banner',v);
+ await shot('share-26-notes-edit');
+
  // A live downgrade takes every extra away and closes the drawer.
  await js("smoke.link('connected',{perm:'type',scope:{kind:'workspace',label:'Team'},lastConnectedAt:2,host:{label:'Host PC',platform:'win32',app:'2.4.0'}});smoke.stateFull([smoke.sp('sp2',{type:'claude',title:'Agent',icon:'bot'}),smoke.sp('sp9',{type:'claude',title:'Claude 2',icon:'bot'})],{perm:'type',caps:{createPane:false,closePane:false,chat:false,notes:false,git:false},presets:undefined})");await settle(250);
  v=await js("({extras:smoke.count('[data-shared-extra]'),drawer:smoke.has('[data-drawer]'),close:smoke.count('[data-shared-pane-close]'),chat:smoke.count('[data-shared-pane-chat]'),panel:smoke.extras().panel[smoke.LINK]})");
@@ -403,7 +454,7 @@ app.whenReady().then(async()=>{
  await shot('share-final');
  const real=failures.filter(f=>!/Download the React DevTools/.test(f));
  if(real.length)throw new Error(real.join('\\n'));
- console.log('PASS: '+n+' share guest UI checks (join with preview, name and password wait, host-size fit at 6px+ or scroll, no pty resize, view read-only, type refusals with Esc allowed, OSC 52 and titles swallowed, OSC 8 and URL confirm, host-typing strip, backpressure, overlay focus and Ctrl+1, config clean, end reasons, es/en, light/dark; S5 New and Close console, read-only Chat, Notes and Changes, downgrade); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' share guest UI checks (join with preview, name and password wait, host-size fit at 6px+ or scroll, no pty resize, view read-only, type refusals with Esc allowed, OSC 52 and titles swallowed, OSC 8 and URL confirm, host-typing strip, backpressure, overlay focus and Ctrl+1, config clean, end reasons, es/en, light/dark; S5 New and Close console, read-only Chat, Notes and Changes, downgrade; 2.6 read-only Files, Notes editing); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 if (process.env.SHARE_UI_BUNDLE_ONLY) {

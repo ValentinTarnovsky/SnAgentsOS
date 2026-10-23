@@ -32,6 +32,8 @@ import {
   type ShareClientMsg,
   type ShareHostMsg,
   type ShareHostPlatform,
+  type ShareFilesReply,
+  type ShareNotesOp,
   type ShareNotesReply,
   type SharePaneInfo,
   type SharePerm,
@@ -226,6 +228,7 @@ export interface ShareClientTune {
   ctlMs: number
   gitMs: number
   notesMs: number
+  filesMs: number
 }
 
 export const SHARE_CLIENT_TUNE: ShareClientTune = {
@@ -238,6 +241,7 @@ export const SHARE_CLIENT_TUNE: ShareClientTune = {
   ctlMs: 15_000,
   gitMs: 20_000,
   notesMs: 10_000,
+  filesMs: 15_000,
 }
 
 /** The delay before retry number `attempt` (0-based), jittered with `random()` in [0, 1). */
@@ -261,7 +265,9 @@ export interface LinkConnectionEvents {
   onState(state: ShareState): void
   onStream(item: ShareStreamItem): void
   onChat(msg: ShareChatEvt['msg']): void
-  onNotesChanged(noteId?: string): void
+  onNotesChanged(noteId?: string, rev?: string): void
+  /** v2: folders of the shared workspace changed while the Files drawer is open. */
+  onFilesChanged(dirs: string[], all: boolean): void
   onErr(code: Extract<ShareHostMsg, { t: 'err' }>['code']): void
 }
 
@@ -280,6 +286,8 @@ export interface LinkConnectionDeps {
   now?: () => number
   random?: () => number
   tune?: Partial<ShareClientTune>
+  /** Highest protocol version offered (tests: 1 plays an app 2.5 guest). */
+  protocolMax?: number
 }
 
 export interface LinkLive {
@@ -294,11 +302,22 @@ export interface LinkLive {
 }
 
 type Outcome = 'ok' | 'mismatch' | 'version' | 'fail'
-type ReqKind = 'ctl' | 'git' | 'notes'
-type Reply = Extract<ShareHostMsg, { t: 'ctlAck' | 'gitRes' | 'notesRes' }>
+type ReqKind = 'ctl' | 'git' | 'notes' | 'files'
+type Reply = Extract<ShareHostMsg, { t: 'ctlAck' | 'gitRes' | 'notesRes' | 'filesRes' }>
+type SendResult = 'ok' | 'offline' | 'too_large'
+
+/** A notes request of the renderer, already validated by ShareGuest. */
+export interface LinkNotesReq {
+  op: ShareNotesOp
+  noteId?: string
+  text?: string
+  baseRev?: string
+}
 type ReqResult = { ok: true; msg: Reply } | { ok: false; error: ShareGuestRequestError }
 
 const REQUESTS_MAX = 32
+/** Files requests in flight per link (the host allows 2). */
+const FILES_IN_FLIGHT = 2
 const RECONNECT_ON_DENIED = new Set(['busy', 'limit'])
 const RECONNECT_ON_ENDED = new Set(['host_quit', 'sharing_off'])
 const PRE_WELCOME = new Set(['ready', 'pending', 'denied', 'welcome', 'ended', 'pong', 'err'])
@@ -351,6 +370,10 @@ export class LinkConnection {
   private pasteId = 0
   private reqSeq = 0
   private readonly requests = new Map<string, { kind: ReqKind; timer: unknown; resolve: (r: ReqResult) => void }>()
+  /** The renderer's Files drawer is open; `filesWatchSent` is what the host was told on this socket. */
+  private wantFilesWatch = false
+  private filesWatchSent = false
+  private filesInFlight = 0
 
   constructor(private readonly deps: LinkConnectionDeps) {
     this.timers = deps.timers ?? realTimers
@@ -511,15 +534,63 @@ export class LinkConnection {
     return { ok: true, reply: reply as RemoteGitReply }
   }
 
-  async notes(req: { op: 'list' | 'read'; noteId?: string }): Promise<{ ok: boolean; reply?: ShareNotesReply; error?: ShareGuestRequestError }> {
+  async notes(req: LinkNotesReq): Promise<{ ok: boolean; reply?: ShareNotesReply; error?: ShareGuestRequestError }> {
     if (!this.live_()) return { ok: false, error: 'offline' }
-    if (!this.state?.caps.notes) return { ok: false, error: 'denied' }
-    const r = await this.request('notes', { t: 'notesReq', ...req }, this.tune.notesMs)
+    const caps = this.state?.caps
+    // Write, create and delete exist from v2 on, with notesWrite.
+    const writes = req.op === 'write' || req.op === 'create' || req.op === 'delete'
+    if (!(writes ? caps?.notesWrite : caps?.notes)) return { ok: false, error: 'denied' }
+    if (req.text !== undefined && Buffer.byteLength(req.text, 'utf8') > SHARE_LIMITS.noteTextMax) return { ok: false, error: 'too_large' }
+    // One exact shape per op (the host's schema is strict).
+    let msg: Record<string, unknown>
+    if (req.op === 'list') msg = { t: 'notesReq', op: 'list' }
+    else if (req.op === 'create') msg = { t: 'notesReq', op: 'create', ...(req.text !== undefined ? { text: req.text } : {}) }
+    else if (req.noteId === undefined) return { ok: false, error: 'invalid' }
+    else if (req.op === 'write') {
+      if (req.text === undefined) return { ok: false, error: 'invalid' }
+      msg = { t: 'notesReq', op: 'write', noteId: req.noteId, text: req.text, ...(req.baseRev !== undefined ? { baseRev: req.baseRev } : {}) }
+    } else msg = { t: 'notesReq', op: req.op, noteId: req.noteId }
+    const r = await this.request('notes', msg, this.tune.notesMs)
     if (!r.ok) return { ok: false, error: r.error }
     const { t: _t, id: _id, ...reply } = r.msg as Extract<ShareHostMsg, { t: 'notesRes' }>
     void _t
     void _id
     return { ok: true, reply: reply as ShareNotesReply }
+  }
+
+  /** v2: a folder or a file of the shared workspace, read-only. */
+  async files(req: { op: 'list' | 'read'; rel: string }): Promise<{ ok: boolean; reply?: ShareFilesReply; error?: ShareGuestRequestError }> {
+    if (!this.live_()) return { ok: false, error: 'offline' }
+    if (!this.state?.caps.files) return { ok: false, error: 'denied' }
+    if (this.filesInFlight >= FILES_IN_FLIGHT) return { ok: false, error: 'busy' }
+    this.filesInFlight += 1
+    let r: ReqResult
+    try {
+      r = await this.request('files', { t: 'filesReq', op: req.op, rel: req.rel }, this.tune.filesMs)
+    } finally {
+      this.filesInFlight -= 1
+    }
+    if (!r.ok) return { ok: false, error: r.error }
+    const { t: _t, id: _id, ...reply } = r.msg as Extract<ShareHostMsg, { t: 'filesRes' }>
+    void _t
+    void _id
+    return { ok: true, reply: reply as ShareFilesReply }
+  }
+
+  /** v2: the renderer's Files drawer opened or closed; kept across reconnects. */
+  filesWatch(on: boolean): void {
+    this.wantFilesWatch = on
+    this.syncFilesWatch()
+  }
+
+  private syncFilesWatch(): void {
+    // Without the cap the host already dropped the watch: nothing to say.
+    if (!this.live_() || !this.state?.caps.files) {
+      this.filesWatchSent = false
+      return
+    }
+    if (this.wantFilesWatch === this.filesWatchSent) return
+    if (this.send({ t: 'filesWatch', on: this.wantFilesWatch })) this.filesWatchSent = this.wantFilesWatch
   }
 
   /** The unattended password while the host's prompt is up. */
@@ -577,14 +648,24 @@ export class LinkConnection {
   }
 
   private send(msg: ShareClientMsg): boolean {
+    return this.sendFrame(msg) === 'ok'
+  }
+
+  /**
+   * Seal and send one frame. One past SHARE_LIMITS.guestFrameMax UTF-8 bytes
+   * is never sent (the host's socket would close on it): `too_large`.
+   */
+  private sendFrame(msg: ShareClientMsg): SendResult {
     const t = this.transport
     const ch = this.channel
-    if (!t || !ch || t.closed) return false
+    if (!t || !ch || t.closed) return 'offline'
+    const text = JSON.stringify(msg)
+    if (Buffer.byteLength(text, 'utf8') > SHARE_LIMITS.guestFrameMax) return 'too_large'
     try {
-      t.send(ch.seal(msg))
-      return true
+      t.send(ch.seal(text))
+      return 'ok'
     } catch {
-      return false
+      return 'offline'
     }
   }
 
@@ -592,7 +673,8 @@ export class LinkConnection {
     if (this.requests.size >= REQUESTS_MAX) return Promise.resolve({ ok: false, error: 'busy' })
     this.reqSeq = (this.reqSeq + 1) % 1e9
     const id = `${kind[0]}${this.reqSeq}`
-    if (!this.send({ ...msg, id } as ShareClientMsg)) return Promise.resolve({ ok: false, error: 'offline' })
+    const sent = this.sendFrame({ ...msg, id } as ShareClientMsg)
+    if (sent !== 'ok') return Promise.resolve({ ok: false, error: sent })
     return new Promise<ReqResult>((resolve) => {
       const timer = this.timers.setTimeout(() => {
         this.requests.delete(id)
@@ -623,6 +705,7 @@ export class LinkConnection {
     this.channel = null
     this.welcomed = false
     this.paused = false
+    this.filesWatchSent = false
     this.acked.clear()
     this.gates.clear()
     this.lastSent.clear()
@@ -708,7 +791,7 @@ export class LinkConnection {
       let settled = false
       let hs: GuestHandshake
       try {
-        hs = new GuestHandshake({ hostStatic: hostKey, guestStatic: this.deps.guestStatic() })
+        hs = new GuestHandshake({ hostStatic: hostKey, guestStatic: this.deps.guestStatic(), ...(this.deps.protocolMax ? { maxVersion: this.deps.protocolMax } : {}) })
       } catch {
         t.close(1000)
         resolve('mismatch')
@@ -878,12 +961,17 @@ export class LinkConnection {
         return this.settle('git', msg)
       case 'notesRes':
         return this.settle('notes', msg)
+      case 'filesRes':
+        return this.settle('files', msg)
+      case 'filesChanged':
+        if (this.state?.caps.files) this.deps.events.onFilesChanged(msg.dirs, msg.all === true)
+        return
       case 'chatPage':
       case 'chatAppend':
         if (this.known(msg.paneId)) this.deps.events.onChat(msg)
         return
       case 'notesChanged':
-        this.deps.events.onNotesChanged(msg.noteId)
+        this.deps.events.onNotesChanged(msg.noteId, msg.rev)
         return
       case 'paneStatus': {
         const s = this.state
@@ -947,6 +1035,7 @@ export class LinkConnection {
     this.deps.events.onState(msg.state)
     this.setStatus('connected')
     for (const paneId of this.mounted) if (this.known(paneId)) this.send({ t: 'sub', paneId })
+    this.syncFilesWatch()
   }
 
   private onState(state: ShareState): void {
@@ -959,6 +1048,7 @@ export class LinkConnection {
     const ids = new Set(state.panes.map((p) => p.id))
     for (const id of this.acked) if (ids.has(id)) this.acked.delete(id)
     for (const id of [...this.gates.keys()]) if (!ids.has(id) && !this.acked.has(id)) this.gates.delete(id)
+    this.syncFilesWatch()
     this.deps.events.onState(state)
   }
 

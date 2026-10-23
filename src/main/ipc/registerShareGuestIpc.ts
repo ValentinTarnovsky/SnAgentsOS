@@ -50,6 +50,7 @@ export function registerShareGuestIpc(deps: ShareGuestIpcDeps): ShareGuest {
   ipcMain.handle(CH.SHARE_CTL, (_e, req: unknown) => guest.ctl(req))
   ipcMain.handle(CH.SHARE_GIT, (_e, req: unknown) => guest.git(req))
   ipcMain.handle(CH.SHARE_NOTES, (_e, req: unknown) => guest.notes(req))
+  ipcMain.handle(CH.SHARE_FILES, (_e, req: unknown) => guest.files(req))
   // A reload or a crash of the window drops its mounts, so the host stops streaming (and keeping awake) panes nobody shows.
   const wired = new WeakSet<WebContents>()
   const watch = (e: IpcMainEvent): void => {
@@ -70,5 +71,9 @@ export function registerShareGuestIpc(deps: ShareGuestIpcDeps): ShareGuest {
   ipcMain.on(CH.SHARE_INPUT, (_e, req: unknown) => guest.input(req))
   ipcMain.on(CH.SHARE_FLOW, (_e, req: unknown) => guest.flowCtl(req))
   ipcMain.on(CH.SHARE_CHAT, (_e, req: unknown) => guest.chat(req))
+  ipcMain.on(CH.SHARE_FILES_WATCH, (e, req: unknown) => {
+    watch(e)
+    guest.filesWatch(req)
+  })
   return guest
 }

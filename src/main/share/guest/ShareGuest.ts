@@ -14,12 +14,14 @@
  *   they live in LinkStore and in this process only.
  */
 import { CH } from '@shared/ipc-channels'
+import { FILE_REL_MAX, inGitDir, isSafeRel } from '@shared/files'
 import { SHARE_LIMITS, type ShareState } from '@shared/share-protocol'
 import {
   SHARE_LINK_ID_RE,
   type ShareChatEvt,
   type ShareFlowReq,
   type ShareGuestCtlRes,
+  type ShareGuestFilesRes,
   type ShareGuestGitRes,
   type ShareGuestNotesRes,
   type ShareJoinRes,
@@ -59,7 +61,7 @@ export interface ShareGuestDeps {
   now?: () => number
   batchMs?: number
   /** Test seams of every connection (dialer, timers, backoff). */
-  connection?: Partial<Pick<LinkConnectionDeps, 'dial' | 'timers' | 'now' | 'random' | 'tune'>>
+  connection?: Partial<Pick<LinkConnectionDeps, 'dial' | 'timers' | 'now' | 'random' | 'tune' | 'protocolMax'>>
 }
 
 function isLinkId(v: unknown): v is string {
@@ -235,12 +237,40 @@ export class ShareGuest {
 
   async notes(req: unknown): Promise<ShareGuestNotesRes> {
     const o = obj(req)
-    if (!o || !isLinkId(o.linkId) || (o.op !== 'list' && o.op !== 'read')) return { ok: false, error: 'invalid' }
+    const op = o?.op
+    if (!o || !isLinkId(o.linkId) || (op !== 'list' && op !== 'read' && op !== 'write' && op !== 'create' && op !== 'delete')) return { ok: false, error: 'invalid' }
     if (o.noteId !== undefined && (typeof o.noteId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(o.noteId))) return { ok: false, error: 'invalid' }
-    if (o.op === 'read' && o.noteId === undefined) return { ok: false, error: 'invalid' }
+    if ((op === 'read' || op === 'write' || op === 'delete') && o.noteId === undefined) return { ok: false, error: 'invalid' }
+    if (o.text !== undefined && typeof o.text !== 'string') return { ok: false, error: 'invalid' }
+    if (op === 'write' && o.text === undefined) return { ok: false, error: 'invalid' }
+    if (o.baseRev !== undefined && (typeof o.baseRev !== 'string' || o.baseRev.length > 64)) return { ok: false, error: 'invalid' }
+    if (typeof o.text === 'string' && Buffer.byteLength(o.text, 'utf8') > SHARE_LIMITS.noteTextMax) return { ok: false, error: 'too_large' }
     const c = this.conns.get(o.linkId)
     if (!c) return { ok: false, error: 'offline' }
-    return c.notes({ op: o.op, ...(o.noteId !== undefined ? { noteId: o.noteId as string } : {}) })
+    return c.notes({
+      op,
+      ...(o.noteId !== undefined ? { noteId: o.noteId as string } : {}),
+      ...(op === 'write' || op === 'create' ? (o.text !== undefined ? { text: o.text as string } : {}) : {}),
+      ...(op === 'write' && o.baseRev !== undefined ? { baseRev: o.baseRev as string } : {}),
+    })
+  }
+
+  /** v2: a folder or a file of the shared workspace (`rel` with `/`, never into `.git`). */
+  async files(req: unknown): Promise<ShareGuestFilesRes> {
+    const o = obj(req)
+    if (!o || !isLinkId(o.linkId) || (o.op !== 'list' && o.op !== 'read')) return { ok: false, error: 'invalid' }
+    const rel = o.rel
+    if (!isSafeRel(rel) || rel.length > FILE_REL_MAX || inGitDir(rel) || (o.op === 'read' && rel === '')) return { ok: false, error: 'invalid' }
+    const c = this.conns.get(o.linkId)
+    if (!c) return { ok: false, error: 'offline' }
+    return c.files({ op: o.op, rel })
+  }
+
+  /** v2: the renderer's Files drawer of a link opened or closed. */
+  filesWatch(req: unknown): void {
+    const o = obj(req)
+    if (!o || !isLinkId(o.linkId) || typeof o.on !== 'boolean') return
+    this.conns.get(o.linkId)?.filesWatch(o.on)
   }
 
   // --- Terminal plane ---
@@ -297,7 +327,10 @@ export class ShareGuest {
 
   /** The renderer reloaded or died: every mount is gone (links stay connected). */
   resetRenderer(): void {
-    for (const c of this.conns.values()) c.unsubAll()
+    for (const c of this.conns.values()) {
+      c.unsubAll()
+      c.filesWatch(false)
+    }
     this.flow.clear()
     this.queue.clear()
   }
@@ -363,7 +396,8 @@ export class ShareGuest {
         onState: (state) => this.emit({ t: 'state', linkId, state }),
         onStream: (item) => this.pushStream(linkId, item),
         onChat: (msg) => this.emitChat({ linkId, msg }),
-        onNotesChanged: (noteId) => this.emit({ t: 'notesChanged', linkId, ...(noteId ? { noteId } : {}) }),
+        onNotesChanged: (noteId, rev) => this.emit({ t: 'notesChanged', linkId, ...(noteId ? { noteId } : {}), ...(rev ? { rev } : {}) }),
+        onFilesChanged: (dirs, all) => this.emit({ t: 'filesChanged', linkId, dirs: all ? [] : dirs, ...(all ? { all: true as const } : {}) }),
         onErr: (code) => this.emit({ t: 'err', linkId, code }),
       },
     })

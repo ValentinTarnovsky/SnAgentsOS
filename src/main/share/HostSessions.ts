@@ -12,11 +12,11 @@
  *  2. the grant exists and the invite proof (HMAC over the channel) matches,
  *     in constant time -> else a failure, 4401;
  *  3. the grant has not expired (4410) and its scope is there (4411);
- *  4. a reconnect ticket for (grant, guest key) -> admitted at the perm the
- *     ticket holds (the effective perm of the last session: an approval as
- *     view comes back as view);
- *  5. the grant's password proof -> admitted at the grant perm (a wrong one is
- *     a failure and the prompt shows "wrong password tried");
+ *  4. a reconnect ticket for (grant, guest key) -> admitted at the perm and
+ *     rights the ticket holds (those of the last session: an approval as view
+ *     comes back as view);
+ *  5. the grant's password proof -> admitted at the grant perm and rights (a
+ *     wrong one is a failure and the prompt shows "wrong password tried");
  *  6. otherwise an approval request: at most 1 pending per address and 3 per
  *     host, 60 s; Deny and the timeout count as failures, and a Deny starts a
  *     15 s cooldown for that address. While pending the guest may still send
@@ -28,6 +28,9 @@
  * Tickets live in memory only (a host restart clears them): one per (grant,
  * guest key), valid while a session of that pair is open and for 15 min
  * after the last one closes. A kick or a revoke drops it.
+ *
+ * Each session keeps the protocol version its handshake negotiated
+ * (`version`): ShareHost sends v2 fields and messages only to a v2 session.
  */
 import { randomBytes } from 'crypto'
 import {
@@ -44,8 +47,9 @@ import {
   type ShareState,
 } from '@shared/share-protocol'
 import { parseShareClientMsg } from '@shared/share-protocol-schemas'
+import { SHARE_RIGHTS_NONE, normalizeShareRights } from '@shared/shareRights'
 import type { ShareHostApproval } from '@shared/ipc-contract'
-import type { SharePerm } from '@shared/types'
+import type { SharePerm, ShareRights } from '@shared/types'
 import { sanitizeDeviceName } from '../remote/PairingService'
 import { hostHandshake, keyFingerprint, randomB64u, sameToken, toB64u, verifyShareProof, type SecureChannel, type ShareKeyPair } from './crypto'
 import type { ShareGrant } from './GrantStore'
@@ -89,6 +93,10 @@ export interface HostSession {
   guestName: string
   app: string
   perm: SharePerm
+  /** What it may use beyond the terminal (app 2.6.0, shareRights.ts). */
+  rights: ShareRights
+  /** Negotiated SHARE_PROTOCOL_VERSION (1 before the handshake). */
+  version: number
   since: number
   lastSeen: number
   strikes: number
@@ -105,6 +113,12 @@ export interface HostSession {
   gitInFlight: number
   notesTimes: number[]
   notesInFlight: number
+  /** Note creates and deletes (their own, slower bucket). */
+  notesOpTimes: number[]
+  filesTimes: number[]
+  filesInFlight: number
+  /** The guest's Files drawer is open (`filesWatch`). */
+  filesWatch: boolean
   ctlTimes: number[]
 }
 
@@ -165,6 +179,7 @@ interface Approval {
 interface Ticket {
   token: string
   perm: SharePerm
+  rights: ShareRights
   live: number
   expiresAt: number
 }
@@ -188,6 +203,8 @@ export interface HostSessionsDeps {
   /** A new approval request (main shows a Notification when the window has no focus). */
   onApprovalRequest?(approval: ShareHostApproval): void
   clock?: ShareClock
+  /** Highest protocol version offered (tests: 1 plays an app 2.5 host). */
+  protocolMax?: number
 }
 
 const pairKey = (grantId: string, guestKey: string): string => `${grantId}|${guestKey}`
@@ -228,6 +245,8 @@ export class HostSessions {
       guestName: '',
       app: '',
       perm: 'view',
+      rights: { ...SHARE_RIGHTS_NONE },
+      version: 1,
       since: now,
       lastSeen: now,
       strikes: 0,
@@ -243,6 +262,10 @@ export class HostSessions {
       gitInFlight: 0,
       notesTimes: [],
       notesInFlight: 0,
+      notesOpTimes: [],
+      filesTimes: [],
+      filesInFlight: 0,
+      filesWatch: false,
       ctlTimes: [],
     }
     this.sessions.add(session)
@@ -268,12 +291,18 @@ export class HostSessions {
     return undefined
   }
 
-  /** Seal and send one frame to the session (no-op once it closed). */
+  /**
+   * Seal and send one frame to the session (no-op once it closed). A frame
+   * past SHARE_LIMITS.hostFrameMax UTF-8 bytes is dropped before sealing (the
+   * guest would end the link on it, and sealing advances the nonce).
+   */
   send(session: HostSession, msg: ShareHostMsg): void {
     if (session.phase === 'closed' || !session.channel || session.transport.closed) return
+    const text = JSON.stringify(msg)
+    if (Buffer.byteLength(text, 'utf8') > SHARE_LIMITS.hostFrameMax) return
     let frame: Buffer
     try {
-      frame = session.channel.seal(msg)
+      frame = session.channel.seal(text)
     } catch {
       this.close(session, SHARE_CLOSE.BAD_MSG, 'crypto')
       return
@@ -326,6 +355,22 @@ export class HostSessions {
     return this.tickets.get(pairKey(grantId, guestKey))?.perm ?? null
   }
 
+  /** The rights a ticket reconnect gets: follows a live per-session change. */
+  setTicketRights(grantId: string, guestKey: string, rights: ShareRights): void {
+    const t = this.tickets.get(pairKey(grantId, guestKey))
+    if (t) t.rights = { ...rights }
+  }
+
+  /** Every ticket of the grant gets `fn(its rights)` (a grant rights change). */
+  remapTicketRights(grantId: string, fn: (rights: ShareRights) => ShareRights): void {
+    for (const [key, t] of this.tickets) if (key.startsWith(`${grantId}|`)) t.rights = fn(t.rights)
+  }
+
+  ticketRights(grantId: string, guestKey: string): ShareRights | null {
+    const r = this.tickets.get(pairKey(grantId, guestKey))?.rights
+    return r ? { ...r } : null
+  }
+
   // --- Approvals ------------------------------------------------------------------
 
   approvals(): ShareHostApproval[] {
@@ -344,14 +389,16 @@ export class HostSessions {
         known: a.known,
         passwordFailed: a.session.passwordFailed,
         perm: grant.perm,
+        rights: { ...grant.rights },
+        ...(a.session.version < 2 ? { legacy: true as const } : {}),
         expiresAt: a.expiresAt,
       })
     }
     return out
   }
 
-  /** The host's Allow / Deny (and the perm the prompt chose). */
-  resolve(requestId: string, allow: boolean, perm?: SharePerm): boolean {
+  /** The host's Allow / Deny (and the perm and rights the prompt chose). */
+  resolve(requestId: string, allow: boolean, perm?: SharePerm, rights?: ShareRights): boolean {
     const a = this.approvalsById.get(requestId)
     if (!a) return false
     const session = a.session
@@ -364,7 +411,7 @@ export class HostSessions {
       this.close(session, SHARE_CLOSE.DENIED, 'denied')
       return true
     }
-    this.admit(session, grant, perm ?? grant.perm)
+    this.admit(session, grant, perm ?? grant.perm, rights ?? grant.rights)
     return true
   }
 
@@ -430,12 +477,13 @@ export class HostSessions {
   }
 
   private handshake(session: HostSession, raw: string): void {
-    const res = hostHandshake(raw, { hostStatic: this.deps.hostKey(), app: this.deps.appVersion })
+    const res = hostHandshake(raw, { hostStatic: this.deps.hostKey(), app: this.deps.appVersion, ...(this.deps.protocolMax ? { maxVersion: this.deps.protocolMax } : {}) })
     if (!res.ok) {
       if (res.reply) session.transport.send(res.reply)
       return this.close(session, res.close, res.error)
     }
     session.channel = res.channel
+    session.version = res.version
     session.guestKey = toB64u(res.guestStatic)
     session.fingerprint = keyFingerprint(res.guestStatic)
     session.phase = 'hello'
@@ -468,10 +516,10 @@ export class HostSessions {
     // Reconnect ticket: bound to this guest key and this grant, at the perm it holds.
     if (msg.ticket) {
       const t = this.tickets.get(pairKey(grant.id, session.guestKey))
-      if (t && sameToken(t.token, msg.ticket) && (t.live > 0 || this.clock.now() < t.expiresAt)) return this.admit(session, grant, t.perm, false)
+      if (t && sameToken(t.token, msg.ticket) && (t.live > 0 || this.clock.now() < t.expiresAt)) return this.admit(session, grant, t.perm, t.rights, false)
     }
     if (msg.pw && grant.password) {
-      if (verifyShareProof(grant.password.key, 'pw', channel.h, msg.pw)) return this.admit(session, grant, grant.perm)
+      if (verifyShareProof(grant.password.key, 'pw', channel.h, msg.pw)) return this.admit(session, grant, grant.perm, grant.rights)
       this.failures.record(ip)
       session.passwordFailed = true
       if (this.failures.locked(ip)) {
@@ -536,7 +584,7 @@ export class HostSessions {
       this.send(session, { t: 'denied', reason: 'locked' })
       return this.close(session, SHARE_CLOSE.LOCKED, 'locked')
     }
-    if (verifyShareProof(grant.password.key, 'pw', session.channel!.h, proof)) return this.admit(session, grant, grant.perm)
+    if (verifyShareProof(grant.password.key, 'pw', session.channel!.h, proof)) return this.admit(session, grant, grant.perm, grant.rights)
     this.failures.record(session.ip)
     session.passwordFailed = true
     if (this.failures.locked(session.ip)) {
@@ -553,7 +601,7 @@ export class HostSessions {
    * the address's failure history. A ticket reconnect never does, or a guest
    * holding any ticket could reset the password lockout between guesses.
    */
-  private admit(session: HostSession, grant: ShareGrant, perm: SharePerm, freshAuth = true): void {
+  private admit(session: HostSession, grant: ShareGrant, perm: SharePerm, rights: ShareRights, freshAuth = true): void {
     if (!this.roomFor(grant.id, session)) {
       this.removeApproval(session)
       this.send(session, { t: 'denied', reason: 'limit' })
@@ -566,11 +614,12 @@ export class HostSessions {
     session.phase = 'admitted'
     session.grantId = grant.id
     session.perm = perm
+    session.rights = normalizeShareRights(grant.scope.kind, rights)
     session.since = this.clock.now()
     this.deps.grants.noteGuest(grant.id, session.guestKey, session.guestName)
     const key = pairKey(grant.id, session.guestKey)
     const old = this.tickets.get(key)
-    const ticket: Ticket = { token: randomBytes(32).toString('base64url'), perm, live: (old?.live ?? 0) + 1, expiresAt: 0 }
+    const ticket: Ticket = { token: randomBytes(32).toString('base64url'), perm, rights: { ...session.rights }, live: (old?.live ?? 0) + 1, expiresAt: 0 }
     this.tickets.set(key, ticket)
     this.send(session, {
       t: 'welcome',

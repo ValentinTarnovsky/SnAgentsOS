@@ -104,6 +104,22 @@ async function main() {
   pn = ph.phoneNote({ ...doc, text: big })
   check(pn.readOnly === true && Buffer.byteLength(pn.text) <= shared.WS_NOTE_PHONE_MAX && !pn.text.includes('\ufffd') && big.startsWith(pn.text), 'past 40000 UTF-8 bytes it travels cut on a whole character, read-only')
 
+  // runNotesRequest: the one notes path of phones and share guests (app 2.6.0).
+  const rn = (req) => ph.runNotesRequest(store, { workspaceId: 'w9', ...req })
+  const made = await rn({ op: 'create', text: '# Remota\nhola' })
+  check(made.ok && made.note.id && !('path' in made.note), 'a remote create answers the meta, never a path')
+  const rid = made.note.id
+  const read1 = await rn({ op: 'read', noteId: rid })
+  check(read1.ok && read1.note.text === '# Remota\nhola' && !('path' in read1.note), 'a remote read has no path')
+  const wrote = await rn({ op: 'write', noteId: rid, text: 'nueva', baseRev: read1.note.rev })
+  check(wrote.ok && (await store.read({ workspaceId: 'w9', noteId: rid })).note.text === 'nueva', 'a remote write with the rev it read')
+  const stale = await rn({ op: 'write', noteId: rid, text: 'pisada', baseRev: read1.note.rev })
+  check(!stale.ok && stale.error === 'conflict' && stale.current.text === 'nueva' && !('path' in stale.current), 'an old rev is a conflict with the note as it is now, no path')
+  check((await rn({ op: 'write', noteId: rid, text: 'ñ'.repeat(20001) })).error === 'too_large', 'past 40000 UTF-8 bytes a remote write is too_large')
+  await store.write({ workspaceId: 'w9', noteId: rid, text: 'x'.repeat(50000) })
+  check((await rn({ op: 'write', noteId: rid, text: 'corta' })).error === 'too_large' && (await store.read({ workspaceId: 'w9', noteId: rid })).note.text.length === 50000, 'a note bigger than 40000 bytes on disk is never overwritten from a remote (it only saw its start)')
+  check((await rn({ op: 'delete', noteId: rid })).ok && (await rn({ op: 'read', noteId: rid })).error === 'not_found', 'a remote delete')
+
   const { parseRemoteClientMsg } = load('src/shared/remote-protocol-schemas.ts')
   const msg = (o) => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'notesReq', id: 'r1', workspaceId: 'w1', ...o }))
   check(!!msg({ op: 'list' }) && !!msg({ op: 'read', noteId: 'n-1' }) && !!msg({ op: 'write', noteId: 'n-1', text: 'hola', baseRev: '1-3' }), 'notesReq: list, read and write parse')
