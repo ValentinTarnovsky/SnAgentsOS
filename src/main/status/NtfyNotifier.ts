@@ -57,10 +57,16 @@ export function ntfyHeaders(cfg: NtfySettings): Record<string, string> {
   return headers
 }
 
-/** "Claude: Permission requested" + "Front / Builder": reason, workspace and console only. */
+/**
+ * "Claude: Permission requested" + "Front / Builder": reason, workspace and
+ * console only; a done notice adds its digest line (app 2.7.0). A summary
+ * (noticeCoalescer) is titled with its text over its places, urgent when it
+ * stands for an error.
+ */
 export function ntfyNoticeMessage(notice: StatusNotice, config: ConfigFile | null, click?: string): NtfyMessage {
-  const { agent, message, place } = describeNotice(notice, config, BRAND.productName)
-  return { title: `${agent}: ${message}`, message: place, urgent: notice.state !== 'done', ...(click ? { click } : {}) }
+  const { agent, message, place, digest } = describeNotice(notice, config, BRAND.productName)
+  const title = notice.summary ? message : `${agent}: ${message}`
+  return { title, message: digest ? `${place}\n${digest}` : place, urgent: notice.state !== 'done', ...(click ? { click } : {}) }
 }
 
 type Job = { cfg: NtfySettings; msg: NtfyMessage; epoch: number; resolve: () => void; reject: (error: Error) => void }
@@ -92,10 +98,13 @@ export class NtfyNotifier {
     if (this.cfg && JSON.stringify(this.cfg) !== JSON.stringify(cfg)) this.cancel()
     this.cfg = { ...cfg }
   }
-  /** True when this notice would be published (enabled, topic set, its kind wanted). */
+  /**
+   * True when this notice would be published (enabled, topic set, its kind
+   * wanted); a summary only needs the first two, its notices were wanted already.
+   */
   wants(notice: StatusNotice): boolean {
     const cfg = this.cfg
-    return !!cfg?.enabled && NTFY_TOPIC_RE.test(cfg.topic.trim()) && (notice.state === 'done' ? cfg.notifyDone : cfg.notifyAction)
+    return !!cfg?.enabled && NTFY_TOPIC_RE.test(cfg.topic.trim()) && (!!notice.summary || (notice.state === 'done' ? cfg.notifyDone : cfg.notifyAction))
   }
   notify(notice: StatusNotice, config: ConfigFile | null, click?: string): void {
     const cfg = this.cfg

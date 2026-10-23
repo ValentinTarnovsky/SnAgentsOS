@@ -54,6 +54,7 @@ import { WS_NOTE_MAX_BYTES, WS_NOTE_TITLE_MAX, type WsNoteCreateReq, type WsNote
 import { chatMessageOffset, type ChatBlock, type ChatMessage, type ChatUnavailableReason } from '@shared/chat-types'
 import { NEEDS_TEXT_MAX, type AgentProvider, type ClaudePaneState, type ConfigFile, type PaneStatusEvt, type PaneType } from '@shared/types'
 import { digestLine, toolFamilyKey, type ToolFamily } from '@shared/toolActivity'
+import { redactCredentials } from '@shared/redact'
 import type { PtySubmitRes, UsageSnapshot } from '@shared/ipc-contract'
 import type { AccountsOpError } from '@shared/claude-accounts'
 import { readPage } from '../chat/TranscriptWatcher'
@@ -820,9 +821,12 @@ export class CtlHandlers {
   }
 
   private async notify(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
-    const body = oneLine(str(params.text) ?? '', CTL_NOTIFY_BODY_MAX)
+    // App 2.7.0 (A5): credentials never reach a channel nor the echo. Masked on
+    // the whole line, before the clip, so a key cut at the limit keeps no head.
+    const line = (v: unknown, max: number): string => oneLine(redactCredentials(oneLine(str(v) ?? '', Infinity)), max)
+    const body = line(params.text, CTL_NOTIFY_BODY_MAX)
     if (!body) return err('bad_request', 'notify needs a text')
-    const title = oneLine(str(params.title) ?? '', CTL_NOTIFY_TITLE_MAX) || BRAND.productName
+    const title = line(params.title, CTL_NOTIFY_TITLE_MAX) || BRAND.productName
     if (!this.take('notify', caller, CTL_NOTIFY_PER_MIN)) return err('rate_limited', `at most ${CTL_NOTIFY_PER_MIN} notifications per minute`)
     const local = bool(params.local)
     this.deps.notify({ paneId: caller?.paneId ?? null, title, body, local })

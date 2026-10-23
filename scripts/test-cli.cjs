@@ -653,6 +653,17 @@ async function handlerChecks() {
     check(first.title === 'SnAgentsOS' && first.body === 'n0' && first.local === false && first.paneId === 'p1', 'default title is the product name; remote unless --local')
     check(w.ops.some((o) => o.kind === 'attention' && o.paneId === 'p1'), 'notify marks the calling console with attention')
     check((await call(h, 'notify', { text: '   ' }, { ...caller1, paneId: 'p3' })).error.code === 'bad_request', 'an empty notify is bad_request')
+    // App 2.7.0 (A5): credentials are masked in title and body, in the echo and in the notice.
+    const ghp = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'
+    const sk = 'sk-proj-' + 'Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe'
+    const red = await call(h, 'notify', { text: `deploy listo con ${sk}\ny el token ${ghp}`, title: `CI ${ghp} ${sk}` }, { ...caller1, paneId: 'p3' })
+    const sentRed = w.notices.at(-1)
+    check(red.ok && red.data.body === 'deploy listo con [redacted] y el token [redacted]' && red.data.title === 'CI [redacted] [redacted]', 'notify redacts a ghp_ token and an sk- key in title and body (the echo; the 84 character title is masked before its 80 clip)')
+    check(sentRed.body === red.data.body && sentRed.title === red.data.title && !JSON.stringify(sentRed).includes(ghp) && !JSON.stringify(sentRed).includes(sk), 'and the notice it routes carries the redacted text')
+    const edge = await call(h, 'notify', { text: 'x'.repeat(290) + ' ' + ghp }, { ...caller1, paneId: 'p4' })
+    check(edge.ok && edge.data.body.length <= 300 && !edge.data.body.includes('ghp_A1b2'), 'a token cut by the 300 clip leaves no readable head (masked before the clip)')
+    const titleEdge = await call(h, 'notify', { text: 'ok', title: 'x'.repeat(70) + ' ' + ghp }, { ...caller1, paneId: 'p5' })
+    check(titleEdge.ok && titleEdge.data.title.length <= 80 && !titleEdge.data.title.includes('ghp_'), 'a token cut by the 80 title clip leaves no readable head (masked before the clip)')
   }
 }
 

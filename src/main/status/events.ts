@@ -79,6 +79,33 @@ export interface StatusNotice {
   provider: AgentProvider
   state: 'action' | 'done' | 'error'
   reason?: AttentionReason
+  /**
+   * App 2.7.0 (A5): a `done` notice's turn digest line ("Edit 3, Read 2
+   * (src/a.ts)"), built by StatusManager from tool families and file names
+   * only, redacted (redactCredentials) and <= NOTICE_DIGEST_MAX. Never any
+   * text of the agent's reply. Every remote channel appends it to its done
+   * notice through 'status.push.doneDigest'.
+   */
+  digest?: string
+  /**
+   * App 2.7.0 (A5): set only on the one notice a channel sends for the
+   * notices it held in a window (noticeCoalescer). Its paneId is '' and its
+   * state is 'error' when any held one was an error, else 'done'.
+   */
+  summary?: NoticeSummary
+}
+
+/** Longest digest line a notice carries. */
+export const NOTICE_DIGEST_MAX = 160
+
+/** The notices a channel held in one 10 s window (noticeCoalescer), as one summary. */
+export interface NoticeSummary {
+  /** How many notices were held. */
+  count: number
+  /** 'status.push.digest' in the config language ("More notices from SnAgentsOS: 5"), redacted. */
+  text: string
+  /** "workspace / console" of the held notices, comma separated, '' when they do not fit; redacted. */
+  places: string
 }
 
 /**
@@ -116,9 +143,24 @@ export interface NoticeText {
   /** "workspace / console", or the product name when the pane is unknown. */
   place: string
   workspaceId: string | null
+  /** App 2.7.0 (A5): a done notice's 'status.push.doneDigest' line ("Tools: Edit 3, Read 2"); absent otherwise. */
+  digest?: string
 }
 
+/** App 2.7.0 (A5): the 'status.push.doneDigest' line of a done notice that carries a digest, or undefined. */
+export function noticeDigestLine(notice: StatusNotice, config: ConfigFile | null): string | undefined {
+  if (notice.state !== 'done' || notice.summary || typeof notice.digest !== 'string') return undefined
+  const line = notice.digest.trim()
+  return line ? mainT(config, 'status.push.doneDigest', { line }) : undefined
+}
+
+/**
+ * A summary notice (noticeCoalescer) reads as its own text and places;
+ * `agent` is not shown for it and `workspaceId` is null (no console to open).
+ */
 export function describeNotice(notice: StatusNotice, config: ConfigFile | null, fallbackPlace: string): NoticeText {
+  const agent = notice.provider === 'codex' ? 'Codex' : 'Claude'
+  if (notice.summary) return { agent, message: notice.summary.text, place: notice.summary.places || fallbackPlace, workspaceId: null }
   let place = fallbackPlace
   let workspaceId: string | null = null
   for (const ws of config?.workspaces ?? []) {
@@ -128,5 +170,6 @@ export function describeNotice(notice: StatusNotice, config: ConfigFile | null, 
   const reason: AttentionReason = notice.reason ?? (notice.state === 'error' ? 'failure' : 'question')
   // The words live in main/i18n.ts, in the config language (E2 i18n).
   const message = mainT(config, notice.state === 'done' ? 'status.push.done' : `status.push.${reason}`)
-  return { agent: notice.provider === 'codex' ? 'Codex' : 'Claude', message, place, workspaceId }
+  const digest = noticeDigestLine(notice, config)
+  return { agent, message, place, workspaceId, ...(digest ? { digest } : {}) }
 }

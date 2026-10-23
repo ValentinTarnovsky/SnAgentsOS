@@ -54,6 +54,10 @@ const MESSAGES = {
     'status.push.failure': 'Agent stopped with an error',
     'status.push.done': 'Turn complete',
     'status.push.test': 'ntfy notification test',
+    // App 2.7.0 (A5): the one summary of the notices a channel held in 10 s, and a done notice's
+    // tool digest line (families and files, never reply text).
+    'status.push.digest': 'More notices from {app}: {n}',
+    'status.push.doneDigest': 'Tools: {line}',
     // Web Push titles (E3-FR-45): agent and reason only, never reply text.
     'webpush.permission': '{agent} needs permission',
     'webpush.question': '{agent} has a question',
@@ -163,6 +167,8 @@ const MESSAGES = {
     'status.push.failure': 'El agente se detuvo por un error',
     'status.push.done': 'Turno terminado',
     'status.push.test': 'Prueba de notificación de ntfy',
+    'status.push.digest': 'Más avisos de {app}: {n}',
+    'status.push.doneDigest': 'Herramientas: {line}',
     'webpush.permission': '{agent} necesita permiso',
     'webpush.question': '{agent} tiene una pregunta',
     'webpush.plan': '{agent} espera que apruebes un plan',

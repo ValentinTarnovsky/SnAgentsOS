@@ -6,7 +6,8 @@ import { effectiveProvider } from '@shared/agents'
 import { REPORTS_ONLY_RE } from '@shared/inputReports'
 import type { TuneHint } from '@shared/agentTune'
 import { AGENT_END_REASONS, NEEDS_TEXT_MAX, PLAN_TEXT_MAX, type AgentDetail, type AgentProvider, type AgentRenameEvt, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneContext, type PaneNeeds, type PanePlan, type PaneSilence, type PaneStatusEvt, type PaneUsage, type RemotePending } from '@shared/types'
-import { addTool, emptyDigest, familyOf, type ToolFamily, type TurnDigest } from '@shared/toolActivity'
+import { addTool, digestLine, emptyDigest, familyOf, toolFamilyKey, type ToolFamily, type TurnDigest } from '@shared/toolActivity'
+import { redactCredentials } from '@shared/redact'
 import { claudeFailure, type FailureInfo } from '@shared/failure'
 import { normalizeSilence } from '@shared/silence'
 import type { DeadlineTimerDeps } from '../DeadlineTimer'
@@ -14,7 +15,7 @@ import type { PtyExitInfo, PtyInputOrigin, PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
 import { revealWindow } from '../window/revealWindow'
 import type { BackgroundTasks, HookEvent } from './HookServer'
-import type { AgentEvent, StatusNotice } from './events'
+import { NOTICE_DIGEST_MAX, type AgentEvent, type StatusNotice } from './events'
 import { SilenceWatch } from './SilenceWatch'
 import { LIMITS, clip, cleanFailure, firstLine, readLastAssistantMessage, readLastCustomTitle, sanitize } from './statusDetails'
 
@@ -1600,7 +1601,17 @@ export class StatusManager implements PtySink {
       // App 2.7.0 (A3): a muted console reaches no channel (Web Push, Discord,
       // ntfy) either; its key is spent all the same. A transition unmutes it
       // before this point, so the notice that comes with one flows.
-      if (!evt.muted) this.onNotice({ paneId, provider: track.provider, state, reason: evt.reason })
+      if (!evt.muted) {
+        // App 2.7.0 (A5): a done notice carries its turn's digest line (tool families
+        // in the config language and file names, never reply text), redacted, then clipped.
+        const turn = state === 'done' ? track.lastDigest : undefined
+        let digest = ''
+        if (turn && turn.tools > 0) {
+          const config = this.getConfig()
+          digest = clip(redactCredentials(digestLine(turn, family => mainT(config, toolFamilyKey(family)))), NOTICE_DIGEST_MAX)
+        }
+        this.onNotice({ paneId, provider: track.provider, state, reason: evt.reason, ...(digest ? { digest } : {}) })
+      }
       const focused = this.getWindow()?.isFocused() ?? false
       const inView = this.viewed.has(paneId) && focused
       // v2.3: nothing to announce for a notice already seen (on a phone).

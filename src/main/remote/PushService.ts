@@ -25,7 +25,7 @@ import * as webpush from 'web-push'
 import { z } from 'zod'
 import { BRAND } from '@shared/brand'
 import type { AttentionReason, ConfigFile } from '@shared/types'
-import type { StatusNotice } from '../status/events'
+import { noticeDigestLine, type StatusNotice } from '../status/events'
 import { mainT } from '../i18n'
 
 /** Largest accepted subscribe body (E3 M14: 4KB). */
@@ -101,12 +101,26 @@ export interface PushMessage {
   state?: 'action' | 'done' | 'error'
 }
 
+/** Tag of a summary push: a newer summary replaces the older one, and no console's note is touched. */
+export const PUSH_SUMMARY_TAG = 'snaos-summary'
+
+/** Longest push body. */
+const PUSH_BODY_TEXT_MAX = 200
+
 /**
  * The push of a StatusNotice (E3-FR-45): "<Agent> needs permission" style
  * title in the config language, "<console> - <workspace>" body, the pane as
  * tag and the deep link relative to the PWA scope. No agent text ever.
+ * App 2.7.0 (A5): a done body adds its digest line ('status.push.doneDigest',
+ * tool families and files); a summary (noticeCoalescer) is its text over its
+ * places, with PUSH_SUMMARY_TAG, the app root and no state (no console's
+ * note to reconcile).
  */
 export function buildPushMessage(notice: StatusNotice, config: ConfigFile | null): PushMessage {
+  if (notice.summary) {
+    const body = notice.summary.places || BRAND.productName
+    return { title: notice.summary.text, body: body.slice(0, PUSH_BODY_TEXT_MAX), tag: PUSH_SUMMARY_TAG, url: './', urgent: false }
+  }
   const agent = notice.provider === 'codex' ? 'Codex' : 'Claude'
   const reason: AttentionReason | 'done' =
     notice.state === 'done' ? 'done' : notice.state === 'error' ? 'failure' : (notice.reason ?? 'permission')
@@ -120,7 +134,10 @@ export function buildPushMessage(notice: StatusNotice, config: ConfigFile | null
     url = `./#ws=${encodeURIComponent(ws.id)}&pane=${encodeURIComponent(pane.id)}`
     break
   }
-  return { title, body: body.slice(0, 200), tag: notice.paneId, url, urgent: notice.state === 'action', state: notice.state }
+  body = body.slice(0, PUSH_BODY_TEXT_MAX)
+  const digest = noticeDigestLine(notice, config)
+  if (digest) body = `${body}\n${digest}`.slice(0, PUSH_BODY_TEXT_MAX)
+  return { title, body, tag: notice.paneId, url, urgent: notice.state === 'action', state: notice.state }
 }
 
 export interface PushSendOpts {

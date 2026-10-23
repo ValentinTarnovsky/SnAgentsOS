@@ -5,7 +5,9 @@
 //    names `funnel`.
 //  - PushService: endpoint allow-list, keys file, subscribe 404/401/400/413/200,
 //    caps, notify (visible and unpaired devices skipped, TTL/urgency, 404/410
-//    drop, off = nothing sent and subscriptions kept), revoke, payload words.
+//    drop, off = nothing sent and subscriptions kept), revoke, payload words,
+//    the done digest line and the summary push (app 2.7.0, A5), and a Claude
+//    turn end to end through StatusManager and the router (digest, no reply).
 //  - The real RemoteServer on a loopback port: MagicDNS Host only from loopback
 //    while on, https Origin, X-Forwarded-For for the IP, CSP wss:/worker-src,
 //    the push route.
@@ -251,6 +253,63 @@ async function testPushService(api) {
   const unknown = b({ paneId: 'zz', provider: 'claude', state: 'done' }, config('en'))
   check(unknown.body === 'SnAgentsOS' && unknown.url === './' && !unknown.urgent, 'an unknown pane: product name, app root, normal urgency')
   check(a1.state === 'action' && unknown.state === 'done' && b({ paneId: 'p&1', provider: 'codex', state: 'error' }, config('en')).state === 'error', 'v2.3: the push message carries the announced state')
+  // App 2.7.0 (A5): a done push carries its digest line; a summary push stands for the held notices.
+  const dd = b({ paneId: 'p&1', provider: 'claude', state: 'done', digest: 'Edit 3, Read 2 (src/a.ts)' }, config('en'))
+  check(dd.title === 'Claude finished' && dd.body === 'api - Web\nTools: Edit 3, Read 2 (src/a.ts)' && dd.tag === 'p&1', 'a done push: the place, then the digest line (status.push.doneDigest)')
+  check(b({ paneId: 'p&1', provider: 'claude', state: 'done', digest: 'Edición 1' }, config('es')).body === 'api - Web\nHerramientas: Edición 1', 'the digest line in Spanish')
+  check(b({ paneId: 'p&1', provider: 'claude', state: 'error', digest: 'Edit 1' }, config('en')).body === 'api - Web', 'only a done push adds the digest line')
+  check(b({ paneId: 'p&1', provider: 'claude', state: 'done', digest: 'Edit 9 (' + 'x'.repeat(400) + ')' }, config('en')).body.length === 200, 'the body with its digest line stays within 200')
+  const sum = b({ paneId: '', provider: 'claude', state: 'done', summary: { count: 4, text: 'More notices from SnAgentsOS: 4', places: 'Web / api, Web / db' } }, config('en'))
+  check(sum.title === 'More notices from SnAgentsOS: 4' && sum.body === 'Web / api, Web / db' && sum.tag === 'snaos-summary' && sum.url === './' && !sum.urgent && sum.state === undefined, 'a summary push: its text over its places, its own tag, the app root and no state')
+  check(b({ paneId: '', provider: 'claude', state: 'error', summary: { count: 1, text: 't', places: '' } }, config('en')).body === 'SnAgentsOS', 'a summary without places says the product name')
+}
+
+/**
+ * App 2.7.0 (A5) end to end: a Claude turn that edits a file and ends with a
+ * reply reaches Web Push through StatusManager -> createNoticeRouter ->
+ * buildPushMessage with the digest line and without a word of the reply.
+ */
+function testDonePushDigest() {
+  const code = buildSync({
+    stdin: { resolveDir: root, loader: 'ts', contents: `
+export { StatusManager } from './src/main/status/StatusManager'
+export { createNoticeRouter } from './src/main/status/noticeRouter'
+export { buildPushMessage } from './src/main/remote/PushService'
+` },
+    bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws', 'web-push'],
+    alias: { '@shared': path.join(root, 'src/shared') },
+  }).outputFiles[0].text
+  const timers = new Map()
+  let seq = 0
+  const api = run(code, {
+    require: id => id === 'electron' ? { ...electronStub, Notification: { isSupported: () => false } } : require(id),
+    setTimeout: (fn, ms = 0) => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
+  })
+  const flush = () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn() } }
+  const config = { settings: { language: 'en', notifications: { onlyWhenAway: false, notifyDone: true, notifyAction: true } }, workspaces: [{ id: 'w', name: 'Web', panes: [{ id: 'pane', title: 'api' }] }] }
+  const pushed = []
+  const router = api.createNoticeRouter({
+    discord: { notify() {} }, ntfy: { notify() {}, wants: () => false },
+    loadConfig: () => config, isAway: () => undefined, isPaneViewed: () => false, deepLinkBase: () => null,
+    push: (n, c) => pushed.push({ notice: n, msg: api.buildPushMessage(n, c) }),
+  })
+  const win = { isDestroyed: () => false, isFocused: () => false, webContents: { send() {} }, flashFrame() {} }
+  const sm = new api.StatusManager(() => win, () => config, n => router.route(n))
+  sm.onSpawn('pty', 'pane')
+  const SID = '0123abcd-0000-4000-8000-00000000a5a5'
+  const hook = (name, rest = {}) => sm.onHookEvent({ consoleId: 'pane', ptyId: 'pty', sessionId: SID, name, ...rest })
+  const reply = 'REPLY-TEXT: the password is hunter2'
+  hook('UserPromptSubmit', { prompt: 'fix the login' })
+  hook('PreToolUse', { toolName: 'Edit', toolUseId: 'e1', toolSummary: 'Edit a.ts', toolFile: 'src/a.ts' })
+  hook('PostToolUse', { toolUseId: 'e1' })
+  hook('PreToolUse', { toolName: 'Bash', toolUseId: 'b1', toolSummary: 'Bash: npm test' })
+  hook('PostToolUse', { toolUseId: 'b1' })
+  hook('Stop', { lastAssistantMessage: reply })
+  flush()
+  check(pushed.length === 1 && pushed[0].notice.state === 'done', 'the done notice reaches Web Push through the router')
+  check(pushed[0].msg.title === 'Claude finished' && pushed[0].msg.body === 'api - Web\nTools: Edit 1, Run 1 (src/a.ts)', 'a done push carries the digest line of the turn')
+  check(!JSON.stringify(pushed[0]).includes('REPLY-TEXT') && !JSON.stringify(pushed[0]).includes('hunter2'), 'and no text of the reply, in the notice or the push')
+  for (const id of [...timers.keys()]) timers.delete(id)
 }
 
 // --- RemoteServer (real, loopback) ---------------------------------------------------
@@ -724,6 +783,7 @@ export { createNoticeRouter } from './src/main/status/noticeRouter'
   mainCtx = run.lastCtx
   await testSecureMode(api)
   await testPushService(api)
+  testDonePushDigest()
   await testRemoteServer(run(serverCode))
   await testManager(api)
   const phone = testPhone()
