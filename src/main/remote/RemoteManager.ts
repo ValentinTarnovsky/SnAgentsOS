@@ -115,6 +115,8 @@ export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | n
   if (evt.needs) out.needs = { text: evt.needs.text, at: evt.needs.at }
   if (evt.muted !== undefined) out.muted = evt.muted
   if (evt.bare) out.bare = true
+  // app 2.7.0 (A4): the ledger's context, field by field; `usage` stays on the desktop.
+  if (evt.context) out.context = { pct: evt.context.pct, used: evt.context.used, window: evt.context.window, exact: evt.context.exact }
   return out
 }
 

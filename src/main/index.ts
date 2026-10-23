@@ -55,6 +55,7 @@ import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
 import { HookServer } from './status/HookServer'
 import { CodexBridge } from './status/CodexBridge'
+import { ConsoleLedger } from './usage/ConsoleLedger'
 import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
 import { NtfyNotifier } from './status/NtfyNotifier'
@@ -145,12 +146,21 @@ noticeRouter = createNoticeRouter({
   // Web Push to the PWA (E3-FR-44): devices with a visible session are skipped.
   push: (notice, config) => void remoteManager.notifyPush(notice, config),
 })
+// App 2.7.0 (A4): tokens, cost and context per console, recomputed once per turn for Claude (its done) and on
+// every model call for Codex (thread/tokenUsage/updated), always published as status detail (inside its throttle).
+const consoleLedger = new ConsoleLedger({
+  transcript: (paneId) => statusManager.transcriptFor(paneId),
+  model: (paneId) => statusManager.stateOf(paneId)?.model,
+  publish: (paneId, usage, context) => statusManager.setUsage(paneId, usage, context),
+})
 const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event),
   // v2.4 `/rename`: the thread's name goes through the same dedup as Claude's.
   (paneId, ptyId, sessionId, title, explicit) => statusManager.reportAgentTitle(paneId, ptyId, 'codex', sessionId, title, explicit),
-  // App 2.7.0 (A3): every app-server line is a sign of life. onUsage stays unwired until the ledger (A4).
-  { onSignal: (paneId, ptyId) => statusManager.noteSignal(paneId, ptyId) })
+  // App 2.7.0 (A3): every app-server line is a sign of life. A4: the root thread's token usage feeds the ledger.
+  { onSignal: (paneId, ptyId) => statusManager.noteSignal(paneId, ptyId), onUsage: (paneId, ptyId, usage) => consoleLedger.codexUsage(paneId, ptyId, usage) })
 ptyManager.addSink(statusManager)
+// App 2.7.0 (A4): a Claude turn's done recomputes its console's ledger; a cleared status forgets it.
+statusManager.addListener((evt, cause) => void consoleLedger.onStatus(evt, cause))
 // Agent status reaches phones straight from main (E1-FR-03), not via the renderer.
 statusManager.addListener((evt) => remoteManager.pushPaneStatus(evt))
 // app 2.4.0 Share: the guests' pane statuses too (ShareHost exists once bootstrap ran).

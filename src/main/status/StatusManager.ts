@@ -5,7 +5,7 @@ import { BRAND } from '@shared/brand'
 import { effectiveProvider } from '@shared/agents'
 import { REPORTS_ONLY_RE } from '@shared/inputReports'
 import type { TuneHint } from '@shared/agentTune'
-import { AGENT_END_REASONS, NEEDS_TEXT_MAX, PLAN_TEXT_MAX, type AgentDetail, type AgentProvider, type AgentRenameEvt, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneNeeds, type PanePlan, type PaneSilence, type PaneStatusEvt, type RemotePending } from '@shared/types'
+import { AGENT_END_REASONS, NEEDS_TEXT_MAX, PLAN_TEXT_MAX, type AgentDetail, type AgentProvider, type AgentRenameEvt, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneContext, type PaneNeeds, type PanePlan, type PaneSilence, type PaneStatusEvt, type PaneUsage, type RemotePending } from '@shared/types'
 import { addTool, emptyDigest, familyOf, type ToolFamily, type TurnDigest } from '@shared/toolActivity'
 import { claudeFailure, type FailureInfo } from '@shared/failure'
 import { normalizeSilence } from '@shared/silence'
@@ -92,6 +92,13 @@ interface PaneTrack {
   turnOver?: boolean
   /** App 2.7.0 (A3): full ExitPlanMode plans by request id, the newest PLANS_MAX. */
   plans: Map<string, PanePlan>
+  /**
+   * App 2.7.0 (A4): the ConsoleLedger's estimate (setUsage). `usage` is the
+   * console's, so a new session of the pane keeps it until the next one;
+   * `context` belongs to the session.
+   */
+  usage?: PaneUsage
+  context?: PaneContext
   detail?: AgentDetail
   topic?: string
   /** v2.2.1: a title-only Codex track's text after the spinner (its idle title). */
@@ -625,6 +632,24 @@ export class StatusManager implements PtySink {
     if (hint.ultracode !== undefined) track.ultracode = hint.ultracode
     if ([track.model, track.effort, track.ultracode].join() !== before) this.publish(paneId, track)
   }
+  /**
+   * App 2.7.0 (A4): the console's usage and context from the ConsoleLedger,
+   * once per turn for Claude (its done) and on every model call for Codex
+   * (thread/tokenUsage/updated). Only a precise track
+   * takes them; null clears one. Published once as detail: neither enters
+   * the immediate signature, so it goes out within the 500 ms detail
+   * throttle. The same values again publish nothing.
+   */
+  setUsage(paneId: string, usage: PaneUsage | null, context: PaneContext | null): void {
+    const track = this.panes.get(paneId)
+    if (!track?.precise) return
+    const nextUsage = usage ? { ...usage } : undefined
+    const nextContext = context ? { ...context } : undefined
+    if (JSON.stringify([track.usage, track.context]) === JSON.stringify([nextUsage, nextContext])) return
+    track.usage = nextUsage
+    track.context = nextContext
+    this.publish(paneId, track)
+  }
   /** v2.3: the window got the focus: the taskbar stops flashing and the panes in view are seen. */
   onWindowFocus(): void {
     this.flashing.clear()
@@ -1026,8 +1051,12 @@ export class StatusManager implements PtySink {
       retired.add(`${track.provider}:${track.sessionId}`)
       if (retired.size > 64) retired.delete(retired.values().next().value!)
       this.stopTimers(track)
+      // App 2.7.0 (A4): the ledger's usage is the console's (its next update
+      // adds this session) while the agent stays the same; the context is not.
+      const usage = track.provider === evt.provider ? track.usage : undefined
       track = this.createTrack(evt.provider, evt.sessionId)
       track.retired = retired
+      if (usage) track.usage = usage
     }
     if (!track) track = this.createTrack(evt.provider, evt.sessionId)
     if (!track.precise) { this.cancelTimer(track); track.pending.clear(); track.sessionId = evt.sessionId; track.provider = evt.provider }
@@ -1482,6 +1511,9 @@ export class StatusManager implements PtySink {
     if (digest && digest.tools > 0) evt.digest = { ...digest, families: { ...digest.families }, files: [...digest.files] }
     const signalAt = this.signals.get(paneId)
     if (signalAt !== undefined) evt.signalAt = signalAt
+    // App 2.7.0 (A4): the ledger's estimate (`usage` stays on the desktop, `context` reaches the phone).
+    if (track.usage) evt.usage = { ...track.usage }
+    if (track.context) evt.context = { ...track.context }
     const pending: RemotePending[] = []
     for (const [id, entry] of track.pending) {
       if (entry.reason === 'failure' || entry.invalidated) continue
@@ -1583,7 +1615,7 @@ export class StatusManager implements PtySink {
     // (E5-FR-02); state, pending, session and notifications go out at once.
     // App 2.7.0 (A3): so do a failure, needs, the mute and a silence level;
     // toolFamily and digest are detail-only, and signalAt never counts (it
-    // moves with every signal).
+    // moves with every signal). A4: usage and context are detail-only too.
     const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.hosted, evt.precise, evt.sessionId, evt.cwd, evt.waiting, evt.attention, evt.model, evt.effort, evt.ultracode, evt.failure?.kind, evt.needs?.text, evt.muted, evt.silence?.level])
     const immediate = transition || !!key || evt.notify || (!!cause && IMMEDIATE_KINDS.has(cause.kind)) || signature !== track.emitted
     if (immediate || now - track.emittedAt >= DETAIL_THROTTLE_MS) {

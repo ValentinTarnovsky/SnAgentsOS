@@ -16,6 +16,7 @@ import type {
   ClaudePaneState,
   KeyButton,
   Language,
+  PaneContext,
   PaneNeeds,
   PanePlan,
   PaneSilence,
@@ -117,6 +118,14 @@ export interface RemotePaneStatus {
    * a real status (or an older desktop).
    */
   bare?: true
+  /**
+   * App 2.7.0 (A4): how full the agent's context is (ConsoleLedger), always
+   * an estimate; `exact` for Codex, approximate for Claude. Refreshed once per
+   * turn for Claude (its done) and on every model call for Codex
+   * (thread/tokenUsage/updated), always inside the detail throttle. The token
+   * and cost `usage` stays on the desktop. Absent = unknown.
+   */
+  context?: PaneContext
 }
 
 /** app 2.4.0: RemotePaneStatus.menu. */

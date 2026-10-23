@@ -64,14 +64,18 @@ function tsOf(timestamp: unknown): number {
 }
 
 // --- per-file cache ---------------------------------------------------------
+//
+// App 2.7.0 (A4): the reader below is exported for the console ledger
+// (ConsoleLedger.ts), which keeps its own cache Map and budget: it never
+// shares claudeCache / codexCache, whose file sets and lifetimes differ.
 
-interface FoundFile {
+export interface FoundFile {
   path: string
   mtimeMs: number
   size: number
 }
 
-interface Cached<T> {
+export interface Cached<T> {
   mtimeMs: number
   /** File size the last read reached; the entry is current when it equals the listed size (same mtime). */
   seen: number
@@ -85,7 +89,7 @@ interface Cached<T> {
 }
 
 /** The bytes read by one refresh, shared by every row and both sources. */
-interface ScanBudget {
+export interface ScanBudget {
   files: number
   bytes: number
   capped: boolean
@@ -95,7 +99,7 @@ const isCurrent = (e: Cached<unknown> | undefined, f: FoundFile): boolean =>
   !!e && e.seen === f.size && e.mtimeMs === f.mtimeMs
 
 /** The bytes of `path` in [from, to), or null when they cannot be read in full. */
-async function readAt(path: string, from: number, to: number): Promise<Buffer | null> {
+export async function readAt(path: string, from: number, to: number): Promise<Buffer | null> {
   if (to <= from) return NO_MARK
   let fh: Awaited<ReturnType<typeof fsp.open>> | undefined
   try {
@@ -142,7 +146,7 @@ function parsesAsJson(text: string): boolean {
  * written). Returns false when the budget stopped the scan; a file that
  * vanishes or locks mid-read keeps what it consumed and stays not current.
  */
-async function refreshFile<T>(
+export async function refreshFile<T>(
   cache: Map<string, Cached<T>>,
   f: FoundFile,
   budget: ScanBudget,
@@ -279,8 +283,8 @@ function newestFirst(found: FoundFile[], limits: ScanLimits): Listing {
 // Codex has no equivalent: its subagent threads are ordinary rollouts in the
 // dated tree.
 
-const SUBAGENT_FILE = /^agent-.*\.jsonl$/
-const SUBAGENT_MAX_DEPTH = 3
+export const SUBAGENT_FILE = /^agent-.*\.jsonl$/
+export const SUBAGENT_MAX_DEPTH = 3
 
 async function collectSubagents(dir: string, startMs: number, out: FoundFile[], depth: number): Promise<void> {
   for (const e of await dirEntries(dir)) {

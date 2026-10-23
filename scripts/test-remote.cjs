@@ -212,6 +212,10 @@ function testToRemoteStatus(api) {
   check(Object.keys(bare.failure).join() === 'kind', 'a failure without until or code carries only its kind')
   check(api.toRemoteStatus(evt('p1', 'idle', { muted: false })).muted === false, 'muted false is copied as well')
   check(A3_FIELDS.every(k => !(k in api.toRemoteStatus(evt('p1', 'working')))), 'absent A3 fields stay absent')
+  // app 2.7.0 (A4): the ledger's context reaches the phone field by field; the token and cost usage never does, and a Share guest gets neither.
+  const ledger = { usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4, costUSD: 0.01, estimated: true }, context: { pct: 0.5, used: 100000, window: 200000, exact: false, extra: 1 } }
+  const a4 = api.toRemoteStatus(evt('p1', 'done', ledger))
+  check(a4.context.pct === 0.5 && a4.context.used === 100000 && a4.context.window === 200000 && a4.context.exact === false && !('extra' in a4.context) && a4.context !== ledger.context && !('usage' in a4) && !('context' in api.toRemoteStatus(evt('p1', 'done'))) && ['usage', 'context'].every(k => !(k in api.toShareStatus(evt('p1', 'done', ledger)))), 'toRemoteStatus copies context field by field and never usage; toShareStatus copies neither')
   // Share guests never get them: toShareStatus is its own whitelist.
   const share = api.toShareStatus(src)
   check(share && share.state === 'error' && [...A3_FIELDS, 'digest', 'signalAt'].every(k => !(k in share)), 'toShareStatus never copies the A3 fields')

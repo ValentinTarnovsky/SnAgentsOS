@@ -444,7 +444,8 @@ export interface AgentDetail {
 /**
  * Status enrichment shared by PaneStatus and PaneStatusEvt (E4-FR-09,
  * E5-FR-02). The first four also reach the phone (RemotePaneStatus); the
- * rest are desktop only and never leave main -> renderer.
+ * rest are desktop only and never leave main -> renderer, except the 2.7.0
+ * fields marked "Reaches the phone".
  */
 export interface PaneStatusDetails {
   /** Epoch ms of the last change of the effective state (not of updatedAt). */
@@ -508,6 +509,58 @@ export interface PaneStatusDetails {
    * Desktop only (the phone gets the status without it). Absent = a real status.
    */
   bare?: true
+  /**
+   * App 2.7.0 (A4): tokens and cost the console's agent spent (ConsoleLedger),
+   * refreshed once per turn for Claude (its done) and on every model call for
+   * Codex (thread/tokenUsage/updated), always inside the detail throttle.
+   * Always an estimate ("estimado"). Desktop only.
+   */
+  usage?: PaneUsage
+  /**
+   * App 2.7.0 (A4): how full the agent's context window is, refreshed like
+   * `usage` (once per turn for Claude, on every model call for Codex, inside
+   * the detail throttle). Reaches the phone.
+   */
+  context?: PaneContext
+}
+
+/**
+ * App 2.7.0 (A4): what a console spent, from the ConsoleLedger in main. Every
+ * surface shows it as "estimado": the tokens come from the agent's own
+ * records and the cost from the agent (Claude's `cost-state`) or the dated
+ * rate card (`src/shared/rateCard.ts`, Codex), never from a bill. The four
+ * counts do not overlap: `inputTokens` is the input that was not read from a
+ * cache. Claude: every assistant message of the console's sessions (main and
+ * subagent transcripts) once per message id. Codex: each thread's cumulative
+ * total minus its total before the first call the console saw.
+ */
+export interface PaneUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  /** USD of the part with a known price (a lower bound with `unknownCost`); absent when no part has one. */
+  costUSD?: number
+  /** Some of the usage has no known price (a model off the rate card, a session without `cost-state`, Claude's `hasUnknownModelCost`). */
+  unknownCost?: boolean
+  /** The model of the latest call, when known. */
+  model?: string
+  estimated: true
+}
+
+/**
+ * App 2.7.0 (A4): share of the context window the latest call used. `exact`:
+ * Codex reports the call and its window (`thread/tokenUsage/updated`); Claude's
+ * is approximate (its last main-thread usage over an assumed window).
+ */
+export interface PaneContext {
+  /** 0..1. */
+  pct: number
+  /** Tokens the latest call held. */
+  used: number
+  /** The window, in tokens. */
+  window: number
+  exact: boolean
 }
 
 /** App 2.7.0 (A3): silence levels of a working agent, `quiet` after quietMin, `stalled` after stalledMin. */
