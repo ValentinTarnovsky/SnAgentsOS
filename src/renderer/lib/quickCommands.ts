@@ -10,9 +10,10 @@ import { translate, type MessageKey } from '@/i18n'
 import { useAppStore, type AppState } from './store'
 import { focusPane, focusPaneWhenReady, getFocusedPane } from './focus'
 import { getPtyId } from './ptyRegistry'
+import { awaitsUser } from './broadcastPrompt'
 import { toast } from './toast'
 
-export type QuickRunError = 'no_console' | 'no_workspace' | 'no_preset' | 'multiline_unsafe' | 'not_running' | 'not_found' | 'bad_request'
+export type QuickRunError = 'no_console' | 'no_workspace' | 'no_preset' | 'multiline_unsafe' | 'not_running' | 'not_found' | 'bad_request' | 'awaiting_user' | 'enter_held'
 export type QuickRunResult = { ok: true; paneId?: string } | { ok: false; error: QuickRunError }
 
 function tr(key: MessageKey, params?: Record<string, string | number>): string {
@@ -77,16 +78,32 @@ export async function runQuickCommand(cmd: QuickCommand): Promise<QuickRunResult
       toast.error(tr('quick.toast.noConsole'), { dedupeKey: 'quick' })
       return { ok: false, error: 'no_console' }
     }
+    const pane = s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.panes.find((p) => p.id === paneId)
+    // A console waiting on the user (permission, question or plan menu): the
+    // text or its Enter would answer it, so nothing is written.
+    if (awaitsUser(paneId)) {
+      toast.warning(tr('quick.toast.awaitingUser', { pane: pane?.title ?? '' }), { dedupeKey: 'quick' })
+      return { ok: false, error: 'awaiting_user' }
+    }
     setTimeout(() => focusPane(paneId), 0)
-    const res = await window.snApi.pty.submit({ ptyId, paneId, text: cmd.text, enter: cmd.enter })
+    // userGate: main checks main's own status again, and right before the
+    // deferred Enter, so a menu that opens in between never gets it.
+    const res = await window.snApi.pty.submit({ ptyId, paneId, text: cmd.text, enter: cmd.enter, userGate: true })
     if (!res.ok) {
+      if (res.error === 'awaiting_user') {
+        toast.warning(tr('quick.toast.awaitingUser', { pane: pane?.title ?? '' }), { dedupeKey: 'quick' })
+        return { ok: false, error: 'awaiting_user' }
+      }
+      if (res.error === 'enter_held') {
+        toast.warning(tr('quick.toast.enterHeld', { pane: pane?.title ?? '' }), { dedupeKey: 'quick' })
+        return { ok: false, error: 'enter_held' }
+      }
       if (res.error === 'multiline_unsafe') toast.warning(tr('quick.toast.multiline'), { dedupeKey: 'quick' })
       else toast.error(tr('quick.toast.noConsole'), { dedupeKey: 'quick' })
       // An ungated submit never answers `busy` (v2.3, only `readyFor` does).
       return { ok: false, error: res.error === 'multiline_unsafe' ? 'multiline_unsafe' : 'not_running' }
     }
     // E4-FR-06: the toast names the command and the console it went to.
-    const pane = s.workspaces.find((w) => w.id === s.activeWorkspaceId)?.panes.find((p) => p.id === paneId)
     toast.success(tr('quick.toast.sent', { label: cmd.name, pane: pane?.title ?? '' }), { dedupeKey: 'quick' })
     return { ok: true, paneId }
   }
@@ -124,9 +141,12 @@ export async function runRemoteQuickCommand(
   if (cmd.action === 'send') {
     if (!action.paneId) return { ok: false, error: 'bad_request' }
     if (!ws.panes.some((p) => p.id === action.paneId)) return { ok: false, error: 'not_found' }
+    // Same rule as the desktop: never typed over a menu waiting on the user.
+    if (awaitsUser(action.paneId)) return { ok: false, error: 'awaiting_user' }
     // The registry can miss a live pty after a reload (pane not remounted
     // yet): main resolves the pane's pty then.
-    const res = await window.snApi.pty.submit({ ptyId: getPtyId(action.paneId) ?? '', paneId: action.paneId, text: cmd.text, enter: cmd.enter })
+    // `awaiting_user` or `enter_held` (text typed, Enter dropped) from main's own check.
+    const res = await window.snApi.pty.submit({ ptyId: getPtyId(action.paneId) ?? '', paneId: action.paneId, text: cmd.text, enter: cmd.enter, userGate: true })
     return res.ok ? { ok: true, paneId: action.paneId } : { ok: false, error: res.error }
   }
   const created = createAgentPane(cmd, ws.id)

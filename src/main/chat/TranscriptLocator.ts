@@ -31,6 +31,7 @@ import { open, readdir, realpath, stat } from 'fs/promises'
 import { basename, dirname, isAbsolute, join, relative, sep } from 'path'
 import type { ChatUnavailableReason } from '@shared/chat-types'
 import type { AgentProvider, ConfigFile, Pane, Workspace } from '@shared/types'
+import { findPaneInConfig, presetOfPane } from '@shared/paneConfig'
 import { claudeSlug } from '../agents/transcripts'
 import { numericDirsDesc } from '../agents/codexPaths'
 import { HISTORY_EDGE_BYTES } from '../history/SessionHistory'
@@ -147,11 +148,7 @@ export async function awaitable(root: string, p: string, platform: NodeJS.Platfo
 }
 
 function findPane(cfg: ConfigFile | null, paneId: string): { pane: Pane; ws: Workspace } | null {
-  for (const ws of cfg?.workspaces ?? []) {
-    const pane = ws.panes.find((p) => p.id === paneId)
-    if (pane) return { pane, ws }
-  }
-  return null
+  return findPaneInConfig(cfg, paneId)
 }
 
 const WSL_RE = /^\s*"?(?:[^"\s]*[\\/])?wsl(?:\.exe)?"?(?:\s|$)/i
@@ -159,7 +156,7 @@ const WSL_RE = /^\s*"?(?:[^"\s]*[\\/])?wsl(?:\.exe)?"?(?:\s|$)/i
 /** Behind a Connection Profile (pane.setupId ?? workspace.setupId, like launch.ts) or WSL. */
 export function isNotLocal(cfg: ConfigFile | null, pane: Pane, ws: Workspace, platform: NodeJS.Platform = process.platform): boolean {
   if (pane.setupId ?? ws.setupId) return true
-  const preset = pane.presetId ? cfg?.presets?.find((p) => p.id === pane.presetId) : undefined
+  const preset = presetOfPane(cfg, pane)
   const command = pane.command ?? preset?.command ?? ''
   if (WSL_RE.test(command)) return true
   const shell = cfg?.settings?.defaultShell?.[platform as 'win32' | 'darwin' | 'linux'] ?? ''
@@ -168,13 +165,13 @@ export function isNotLocal(cfg: ConfigFile | null, pane: Pane, ws: Workspace, pl
 
 /** The pane's provider from its config (status unknown). */
 function configProvider(cfg: ConfigFile | null, pane: Pane): AgentProvider | null {
-  const preset = pane.presetId ? cfg?.presets?.find((p) => p.id === pane.presetId) : undefined
+  const preset = presetOfPane(cfg, pane)
   const type = preset?.type ?? pane.type
   return type === 'claude' || type === 'codex' ? type : null
 }
 
 function launchCwd(cfg: ConfigFile | null, pane: Pane, ws: Workspace): string {
-  const preset = pane.presetId ? cfg?.presets?.find((p) => p.id === pane.presetId) : undefined
+  const preset = presetOfPane(cfg, pane)
   return pane.cwd ?? preset?.defaultCwd ?? ws.cwd ?? ''
 }
 

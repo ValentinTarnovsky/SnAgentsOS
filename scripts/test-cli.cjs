@@ -418,7 +418,7 @@ function fakeWorld() {
     lastOutput: {},
     ring: { p2: '\x1b[32mPS C:\\>\x1b[0m dir\r\nfile.txt\r\nspin |\r\x1b[Kspin /\r\x1b[Kdone\r\n' },
     ptyIdForPane: (id) => (running.has(id) ? `pty-${id}` : null),
-    async submitToPane(ptyId, paneId, text, enter, origin) { pty.submits.push({ ptyId, paneId, text, enter, origin }); return pty.submitResult },
+    async submitToPane(ptyId, paneId, text, enter, origin, readyFor, userGate) { pty.submits.push({ ptyId, paneId, text, enter, origin, readyFor, userGate }); return pty.submitResult },
     lastSubmitAt: (id) => pty.lastSubmit[id],
     lastOutputAt: (id) => pty.lastOutput[id],
     tail: (id) => (running.has(id) ? pty.ring[id] ?? '' : null),
@@ -567,6 +567,29 @@ async function handlerChecks() {
     w.pty.submitResult = { ok: true }
     check((await call(h, 'send', { console: 'self', text: 'eco' }, caller1)).ok && w.pty.submits.at(-1).paneId === 'p1', 'sending to the calling console is allowed')
     check((await call(h, 'send', { console: 'claude', text: 'x' }, null)).ok, 'a title resolves')
+    // A console waiting on its user (main's precise status): nothing is typed, with or without --enter.
+    const n = w.pty.submits.length
+    w.states.p3 = { paneId: 'p3', state: 'action', precise: true, provider: 'claude', pendingCount: 1 }
+    for (const params of [{ text: '1', enter: true }, { text: '1' }, { text: '', enter: true }]) {
+      const res = await call(h, 'send', { console: '3', ...params }, caller1)
+      check(!res.ok && res.error.code === 'awaiting_user' && w.pty.submits.length === n, `send ${JSON.stringify(params)} to a permission menu: awaiting_user, nothing written`)
+    }
+    w.states.p3 = { paneId: 'p3', state: 'working', precise: true, provider: 'claude', pendingCount: 1 }
+    check((await call(h, 'send', { console: '3', text: 'y', enter: true }, caller1)).error?.code === 'awaiting_user' && w.pty.submits.length === n, 'an open request (pendingCount) while working: awaiting_user')
+    w.states.p3 = { paneId: 'p3', state: 'action', precise: false, provider: 'claude', pendingCount: 1 }
+    check((await call(h, 'send', { console: '3', text: 'sigue', enter: true }, caller1)).ok && w.pty.submits.length === n + 1, 'a title-only action (SSH, WSL, cmd end of turn) still gets the text')
+    w.states.p3 = { paneId: 'p3', state: 'idle', precise: true, provider: 'claude', pendingCount: 0 }
+    check((await call(h, 'send', { console: '3', text: 'x', enter: true }, caller1)).ok, 'a precise idle agent gets it')
+    check(w.pty.submits.at(-1).userGate === true && w.pty.submits.at(-1).readyFor === undefined, 'send opts into main\'s userGate (re-checked right before the deferred Enter)')
+    // The menu opened while main typed the text: main dropped the Enter.
+    w.pty.submitResult = { ok: false, error: 'enter_held' }
+    let held = await call(h, 'send', { console: '3', text: 'x', enter: true }, caller1)
+    check(!held.ok && held.error.code === 'awaiting_user' && /typed, not submitted/.test(held.error.message), 'a dropped Enter (enter_held): awaiting_user (exit 9), the text stays typed')
+    w.pty.submitResult = { ok: false, error: 'awaiting_user' }
+    held = await call(h, 'send', { console: '3', text: 'x', enter: true }, caller1)
+    check(!held.ok && held.error.code === 'awaiting_user' && /nothing was typed/.test(held.error.message), "main's own refusal (awaiting_user) maps to awaiting_user")
+    w.pty.submitResult = { ok: true }
+    delete w.states.p3
   }
   // read
   {
@@ -1227,7 +1250,7 @@ async function cliEntryChecks() {
   const okRes = { ok: true, data: { workspaces: [] } }
   check((await C.run(['ls', '--json'], deps({ send: async () => okRes }))) === 0 && out.length === 1 && out[0] === JSON.stringify(okRes) && !out[0].includes('\n'), '--json success: exactly one line of JSON')
   const exitOf = async (code) => C.run(['send', '2', 'x'], deps({ send: async () => ({ ok: false, error: { code, message: code } }) }))
-  const codes = { bad_request: 2, not_found: 3, not_running: 3, exited: 3, ambiguous: 4, desktop_unavailable: 5, unauthorized: 6, ssh_protected: 7, multiline_unsafe: 7, rate_limited: 7, disabled: 7, forbidden: 7, timeout: 124, internal: 1, conflict: 8 }
+  const codes = { bad_request: 2, not_found: 3, not_running: 3, exited: 3, ambiguous: 4, desktop_unavailable: 5, unauthorized: 6, ssh_protected: 7, multiline_unsafe: 7, rate_limited: 7, disabled: 7, forbidden: 7, timeout: 124, internal: 1, conflict: 8, awaiting_user: 9 }
   for (const [code, exit] of Object.entries(codes)) check((await exitOf(code)) === exit, `error ${code} exits ${exit}`)
   check((await C.run(['ping'], deps({ connect: () => { throw new C.AppUnavailable('SnAgentsOS is not running') } }))) === 5 && /not running/.test(err.at(-1)), 'no app: exit 5 with "SnAgentsOS is not running"')
   out.length = 0
@@ -1237,6 +1260,7 @@ async function cliEntryChecks() {
   check(/without `--enter` the text waits there, unsent/i.test(guide), 'guide: text without --enter stays unsent')
   check(guide.includes('## Talking to another agent') && guide.includes('snaos send <console> - --enter') && guide.includes('snaos send <console> --file <path> --enter'), 'guide: follow-ups and replies go through send with --enter')
   check(guide.includes('$SNAOS_CONSOLE_ID') && guide.includes('snaos send <your id> - --enter'), 'guide: ask for a reply with your own console id and --enter')
+  check(guide.includes('exits 9 (`awaiting_user`)') && guide.includes('9 awaiting the user'), "guide: send never answers another agent's menu (exit 9 awaiting_user)")
   check(guide.includes('prompt: gate') && guide.includes('empty `snaos send <console> --enter`') && /never type the text again/i.test(guide), 'guide: a gated prompt left unsent is submitted with an empty send --enter')
   const emptyEnter = await b(['send', '3', '--enter'])
   check(emptyEnter.method === 'send' && emptyEnter.params.text === '' && emptyEnter.params.enter === true, 'an empty send --enter (the guide\'s gate recovery) parses')
@@ -1412,6 +1436,11 @@ async function serviceChecks() {
     world.states.p3 = { paneId: 'p3', state: 'idle', precise: true, stateSince: Date.now() - 1000 }
     const code = await C.run(['send', '3', 'hola', '--enter'], deps(env1, out, err))
     check(code === 0 && world.pty.submits.at(-1).paneId === 'p3', 'send through the whole chain (client, pipe, server, bus, pty)')
+    const n = world.pty.submits.length
+    world.states.p3 = { paneId: 'p3', state: 'action', precise: true, provider: 'claude', pendingCount: 1 }
+    const refused = await C.run(['send', '3', '1', '--enter'], deps(env1, out, err))
+    check(refused === 9 && world.pty.submits.length === n && /waits on the user/.test(err.at(-1)), 'send to a permission menu exits 9 through the whole chain and types nothing')
+    world.states.p3 = { paneId: 'p3', state: 'idle', precise: true, stateSince: Date.now() - 1000 }
   }
   {
     const out = [], err = []

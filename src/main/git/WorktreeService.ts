@@ -11,7 +11,11 @@
  *    the junctions are unlinked as links (any failure aborts before anything
  *    else), the folder goes through safeRemoveTree (never follows a link, the
  *    contract's primitive for this) with 5 retries of 400 ms, then
- *    `worktree prune` and `branch -D`.
+ *    `worktree prune` and a compare-and-delete of the branch
+ *    (`update-ref -d refs/heads/<b> <tip>`). Once the pty is gone the state is
+ *    read again against the inspect the caller sent (`expectTip`,
+ *    `expectDirty`): an agent may have committed or written between the
+ *    dialog opening and the click, and that is 'changed', never a silent loss.
  *  - inspect / list: read only.
  * Pattern after Orca's worktree-add.ts (--no-track -b, long path flag only on
  * add) and its junction-first docs; rewritten, no code copied.
@@ -25,6 +29,7 @@ import {
   isValidSlug,
   type WorktreeAddReq,
   type WorktreeAddRes,
+  type WorktreeInProgress,
   type WorktreeInspectRes,
   type WorktreeListEntry,
   type WorktreeListRes,
@@ -48,6 +53,18 @@ export const ENV_COPY_MAX_BYTES = 50 * 1024 * 1024
 export const ENV_FILES = ['.env', '.env.local'] as const
 export const REMOVE_RETRIES = 5
 export const REMOVE_RETRY_MS = 400
+/** A full commit sha (SHA-1 or SHA-256): what inspect reports as `tip` and remove accepts as `expectTip`. */
+const FULL_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i
+/** `git rev-parse --git-path` names whose presence means an operation was left half-done, in report order. */
+export const IN_PROGRESS_PATHS: ReadonlyArray<readonly [string, WorktreeInProgress]> = [
+  ['rebase-merge', 'rebase'],
+  ['rebase-apply', 'rebase'],
+  ['MERGE_HEAD', 'merge'],
+  ['CHERRY_PICK_HEAD', 'cherry-pick'],
+  ['REVERT_HEAD', 'revert'],
+  ['BISECT_LOG', 'bisect'],
+]
+const STATUS_ARGS = ['status', '--porcelain=v2', '-z', '--untracked-files=normal']
 
 export type WorktreeFs = Pick<typeof nodeFsp, 'lstat' | 'stat' | 'mkdir' | 'copyFile' | 'symlink' | 'unlink' | 'rmdir' | 'readdir' | 'readFile'>
 
@@ -151,6 +168,15 @@ export function repoRootFromGitFile(content: string, worktreePath: string, platf
 export class WorktreeService {
   private readonly fsx: WorktreeFs
   private chain: Promise<unknown> = Promise.resolve()
+  /**
+   * pathKey of the worktrees whose folder delete started and stopped half-way
+   * ('busy'): their Retry is judged by recheck's `partial` rule. Memory only:
+   * after a restart (or from another process) the folder left behind is judged
+   * by the plain check, and one git no longer reads as its own checkout (its
+   * `.git` went first) is deleted only with the user's `ackIncomplete` (inspect
+   * reports it `noCheckout`, the dialog asks for the checkbox), else 'changed'.
+   */
+  private readonly partial = new Set<string>()
 
   constructor(private readonly deps: WorktreeServiceDeps) {
     this.fsx = deps.fs ?? nodeFsp
@@ -387,27 +413,54 @@ export class WorktreeService {
     const empty: WorktreeInspectRes = { exists: false, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false }
     if (typeof req.path !== 'string' || !isAbsolute(req.path)) return empty
     const path = this.canon(req.path)
+    let present: boolean
     try {
-      if (!(await this.fsx.stat(path)).isDirectory()) return empty
-      await this.fsx.lstat(join(path, '.git'))
+      present = (await this.fsx.stat(path)).isDirectory()
     } catch {
-      return empty
+      present = false
     }
     const entry = this.deps.manifest.find(path)
+    const recorded = entry && WORKTREE_BRANCH_RE.test(entry.branch) ? entry : null
+    const base = entry?.baseSha || (typeof req.base === 'string' && SHA_RE.test(req.base) ? req.base : '')
+    if (!present) {
+      // Gone by hand (FR-36): its branch can still be deleted, and that delete
+      // compares against this tip. The commits it would drop are read in the
+      // repo, so the dialog asks for the checkbox as for a live folder.
+      const tip = recorded ? await this.branchTip(recorded.repoRoot, recorded.branch) : ''
+      return recorded && tip ? { ...empty, ...(await this.branchLoss(recorded.repoRoot, tip, base)), tip } : empty
+    }
+    if (!(await this.isOwnCheckout(path))) {
+      // On disk but no longer this worktree for git: its `.git` went (a delete
+      // that stopped half-way, by hand). Never "gone": what is left (and what
+      // was written since) cannot be counted, so it is unknown work, the
+      // dialog asks for the checkbox and the delete needs `ackIncomplete`.
+      // The branch side is read in the repo, as for a gone folder.
+      const tip = recorded ? await this.branchTip(recorded.repoRoot, recorded.branch) : ''
+      const loss = recorded && tip ? await this.branchLoss(recorded.repoRoot, tip, base) : null
+      return {
+        exists: true,
+        dirtyFiles: 0,
+        commitsAhead: loss?.commitsAhead ?? 0,
+        mergedIntoHead: loss?.mergedIntoHead ?? false,
+        incomplete: true,
+        noCheckout: true,
+        ...(tip ? { tip } : {}),
+      }
+    }
     // A step git could not answer must never read as "nothing to lose": the
     // close dialog then asks for the checkbox anyway (FR-30).
     let incomplete = false
     let dirtyFiles = 0
+    // Kept apart from `incomplete` (which a missing base also sets): a real
+    // count is sent back as expectDirty even when another step failed.
+    let dirtyRead = true
     try {
-      const st = parseStatusV2(await this.git(['status', '--porcelain=v2', '-z', '--untracked-files=normal'], path))
-      // Our own node_modules junction is not the user's work.
-      const linked = new Set((entry?.linkedPaths ?? []).map((p) => basename(p)))
-      dirtyFiles = new Set(st.entries.map((e) => e.path.replace(/\/$/, '')).filter((p) => !linked.has(p))).size
+      dirtyFiles = await this.dirtyCount(path, entry)
     } catch {
       dirtyFiles = 0
       incomplete = true
+      dirtyRead = false
     }
-    const base = entry?.baseSha || (typeof req.base === 'string' && SHA_RE.test(req.base) ? req.base : '')
     let commitsAhead = 0
     if (base) {
       try {
@@ -424,7 +477,211 @@ export class WorktreeService {
     }
     // Without a base the commits over it are unknown, unless the branch is merged.
     if (!base && !mergedIntoHead) incomplete = true
-    return { exists: true, dirtyFiles, commitsAhead, mergedIntoHead, ...(incomplete ? { incomplete: true } : {}) }
+    // The tip a delete compares against: the recorded branch, else whatever the folder has checked out.
+    let tip = recorded ? await this.branchTip(recorded.repoRoot, recorded.branch) : ''
+    if (!recorded) {
+      try {
+        tip = (await this.git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], path)).trim()
+      } catch {
+        tip = ''
+      }
+    }
+    let headBranch: string | undefined
+    try {
+      const sym = (await this.git(['rev-parse', '--symbolic-full-name', 'HEAD'], path)).trim()
+      headBranch = sym.startsWith('refs/heads/') ? sym.slice('refs/heads/'.length) : ''
+    } catch {
+      incomplete = true
+    }
+    let inProgress: WorktreeInProgress | null = null
+    try {
+      inProgress = await this.inProgressOf(path)
+    } catch {
+      incomplete = true
+    }
+    return {
+      exists: true,
+      dirtyFiles,
+      commitsAhead,
+      mergedIntoHead,
+      ...(incomplete ? { incomplete: true } : {}),
+      ...(incomplete && dirtyRead ? { dirtyRead: true } : {}),
+      ...(FULL_SHA_RE.test(tip) ? { tip } : {}),
+      ...(headBranch !== undefined ? { headBranch } : {}),
+      ...(inProgress ? { inProgress } : {}),
+    }
+  }
+
+  /**
+   * Uncommitted files of a worktree; our own node_modules junction is not the
+   * user's work. Throws when git cannot read it. `skipDeleted` leaves out the
+   * paths whose only change is a deletion in the folder (unstaged 'D'): what
+   * a half-done delete of our own leaves behind, never new work.
+   */
+  private async dirtyCount(path: string, entry: ManifestEntry | null, skipDeleted = false): Promise<number> {
+    const st = parseStatusV2(await this.git(STATUS_ARGS, path))
+    const linked = new Set((entry?.linkedPaths ?? []).map((p) => basename(p)))
+    const kept = skipDeleted ? st.entries.filter((e) => !(e.area === 'unstaged' && e.status === 'D')) : st.entries
+    return new Set(kept.map((e) => e.path.replace(/\/$/, '')).filter((p) => !linked.has(p))).size
+  }
+
+  /**
+   * The operation left half-done in a worktree, or null. `--git-path` names
+   * the per-worktree admin file (relative to the folder for a main checkout,
+   * absolute for a linked one); its existence is the signal. Throws when git
+   * cannot answer.
+   */
+  private async inProgressOf(path: string): Promise<WorktreeInProgress | null> {
+    const out = await this.git(['rev-parse', ...IN_PROGRESS_PATHS.flatMap(([name]) => ['--git-path', name])], path)
+    const lines = out.split(/\r?\n/).filter((l) => l.trim() !== '')
+    if (lines.length !== IN_PROGRESS_PATHS.length) throw new Error('git_path')
+    for (let i = 0; i < lines.length; i++) {
+      if (await this.exists(resolve(path, lines[i].trim()))) return IN_PROGRESS_PATHS[i][1]
+    }
+    return null
+  }
+
+  /** Full sha of refs/heads/<branch> in the repo, '' when it does not resolve. */
+  private async branchTip(repoRoot: string, branch: string): Promise<string> {
+    try {
+      const sha = (await this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], repoRoot)).trim()
+      return FULL_SHA_RE.test(sha) ? sha.toLowerCase() : ''
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * The inspect fields of a branch whose folder is gone, read in the repo:
+   * commits from `base` to `tip` and whether `tip` is in the repo HEAD.
+   * Without a base (or when git cannot count) and not merged it is incomplete.
+   */
+  private async branchLoss(repoRoot: string, tip: string, base: string): Promise<Pick<WorktreeInspectRes, 'commitsAhead' | 'mergedIntoHead' | 'incomplete'>> {
+    const mergedIntoHead = await this.gitOk(['merge-base', '--is-ancestor', tip, 'HEAD'], repoRoot)
+    let commitsAhead = 0
+    let incomplete = !base && !mergedIntoHead
+    if (base) {
+      try {
+        commitsAhead = Number((await this.git(['rev-list', '--count', `${base}..${tip}`], repoRoot)).trim()) || 0
+      } catch {
+        incomplete = !mergedIntoHead
+      }
+    }
+    return { commitsAhead, mergedIntoHead, ...(incomplete ? { incomplete: true } : {}) }
+  }
+
+  /** Deleting the branch at `tip` drops commits: not in the repo HEAD and over the recorded base (unknown counts as lost). */
+  private async losesCommits(entry: ManifestEntry, tip: string): Promise<boolean> {
+    if (await this.gitOk(['merge-base', '--is-ancestor', tip, 'HEAD'], entry.repoRoot)) return false
+    if (!entry.baseSha) return true
+    try {
+      return Number((await this.git(['rev-list', '--count', `${entry.baseSha}..${tip}`], entry.repoRoot)).trim()) !== 0
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * The state the delete may remove, read once the pane's shell is gone (an
+   * agent may commit or write between the inspect the user saw and the
+   * click). Returns the tip the branch delete compares against, or why it is
+   * 'changed':
+   *  - `expectTip` (with deleteBranch): the branch must still point there, else 'tip'.
+   *  - `expectDirty`: more uncommitted files is 'dirty', an unreadable count 'unreadable'.
+   *  - an operation started since is 'in_progress'.
+   *  - neither expectation (a caller that never inspected: an older renderer,
+   *    a future CLI or phone path): main confirms nothing on the user's behalf,
+   *    so the delete goes on only when it loses no work, as the dialog would
+   *    without its checkbox: no uncommitted file, no unreadable state and,
+   *    with the branch, no commit outside the base and the repo HEAD; else
+   *    'unconfirmed'. With `expectTip` alone (the dialog after an inspect git
+   *    could not fully read, whose checkbox the user ticked) the files are not
+   *    counted again; without `expectTip` the commits get the same check.
+   *  - a retry after our own delete stopped half-way ('busy', see `partial`):
+   *    the folder is no longer a checkout to judge. Every tracked file that
+   *    delete already removed reads as a deletion, and the `.git` file may be
+   *    gone too (it sorts early), so a plain re-count would answer 'dirty' or
+   *    'unreadable' on every Retry. The tip is still compared (read in the
+   *    repo, not in the folder). While the folder is still its own checkout
+   *    the files are counted without the deletions (new or modified files
+   *    still are 'dirty': a delete only removes); once git no longer resolves
+   *    the folder to itself nothing there can be read as this worktree (git
+   *    would answer for no repo or for a parent one), so files and operations
+   *    are not re-checked: the user confirmed this delete and main passed this
+   *    same check before removing anything. Ignoring deletions is never
+   *    applied outside that retry, where an agent's own deletions count.
+   *  - a folder git no longer reads as its own checkout without that record (a
+   *    restart after 'busy', a `.git` removed by hand): nothing there can be
+   *    counted, and whatever is left (or written since) would go unseen, so it
+   *    is 'unreadable' unless the user ticked "may lose work" on an inspect
+   *    that said so (`ackIncomplete`); then files and operations are not
+   *    re-checked (there is nothing git can read) and the tip still is.
+   */
+  private async recheck(entry: ManifestEntry, path: string, onDisk: boolean, req: { expectTip: string | null; expectDirty: number | null; deleteBranch: boolean; ackIncomplete: boolean }, partial = false): Promise<{ tip: string } | { changed: string }> {
+    const legacy = req.expectTip === null && req.expectDirty === null
+    const own = onDisk && (await this.isOwnCheckout(path))
+    if (onDisk && !own && !partial && !req.ackIncomplete) return { changed: 'unreadable' }
+    // Only a folder git reads as this worktree is re-counted (a parent repo would answer for another one).
+    if (own) {
+      let op: WorktreeInProgress | null = null
+      let opKnown = true
+      try {
+        op = await this.inProgressOf(path)
+      } catch {
+        opKnown = false
+      }
+      if (op) return { changed: 'in_progress' }
+      if (!opKnown && legacy) return { changed: 'unreadable' }
+      if (req.expectDirty !== null || legacy) {
+        let dirty: number
+        try {
+          dirty = await this.dirtyCount(path, entry, partial)
+        } catch {
+          return { changed: 'unreadable' }
+        }
+        if (dirty > (req.expectDirty ?? 0)) return { changed: req.expectDirty !== null ? 'dirty' : 'unconfirmed' }
+      }
+    }
+    if (!req.deleteBranch) return { tip: '' }
+    const tip = await this.branchTip(entry.repoRoot, entry.branch)
+    // No branch left: nothing to lose and nothing to delete.
+    if (!tip) return { tip: '' }
+    if (req.expectTip !== null) return tip === req.expectTip ? { tip } : { changed: 'tip' }
+    return (await this.losesCommits(entry, tip)) ? { changed: 'unconfirmed' } : { tip }
+  }
+
+  /** git resolves `path` to itself (its own `.git` is still there), not to no repo or a parent one. */
+  private async isOwnCheckout(path: string): Promise<boolean> {
+    try {
+      const top = (await this.git(['rev-parse', '--show-toplevel'], path)).trim()
+      return top !== '' && samePath(this.canon(top), path)
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The app's own branch, compare-and-delete: only while no worktree has it
+   * checked out (update-ref, unlike `branch -D`, would not refuse) and only
+   * while it still points at `tip`, so a commit landing after the recheck
+   * keeps the branch.
+   */
+  private async deleteBranchAt(entry: ManifestEntry, tip: string): Promise<WorktreeRemoveRes> {
+    let list: Array<{ path: string; branch: string | null; prunable: boolean }>
+    try {
+      list = await this.listed(entry.repoRoot)
+    } catch (e) {
+      return { ok: false, error: 'git_error', detail: gitErrorCode(e) }
+    }
+    if (list.some((w) => w.branch === `refs/heads/${entry.branch}`)) return { ok: false, error: 'git_error', detail: 'checked_out' }
+    try {
+      await this.git(['update-ref', '-d', `refs/heads/${entry.branch}`, tip], entry.repoRoot)
+    } catch (e) {
+      const now = await this.branchTip(entry.repoRoot, entry.branch)
+      if (now && now !== tip) return { ok: false, error: 'changed', detail: 'tip_after_delete' }
+      return { ok: false, error: 'git_error', detail: (e as Error).message }
+    }
+    return { ok: true }
   }
 
   private async listed(repoRoot: string): Promise<Array<{ path: string; branch: string | null; prunable: boolean }>> {
@@ -446,6 +703,11 @@ export class WorktreeService {
     if (!root) return notManaged('root')
     if (!WORKTREE_BRANCH_RE.test(entry.branch)) return notManaged('branch')
     const deleteBranch = req.deleteBranch === true
+    // What the caller's inspect showed (optional, validated like any payload).
+    if (req.expectTip !== undefined && (typeof req.expectTip !== 'string' || !FULL_SHA_RE.test(req.expectTip))) return { ok: false, error: 'git_error', detail: 'bad_expect' }
+    if (req.expectDirty !== undefined && (typeof req.expectDirty !== 'number' || !Number.isInteger(req.expectDirty) || req.expectDirty < 0)) return { ok: false, error: 'git_error', detail: 'bad_expect' }
+    if (req.ackIncomplete !== undefined && typeof req.ackIncomplete !== 'boolean') return { ok: false, error: 'git_error', detail: 'bad_expect' }
+    const expect = { expectTip: req.expectTip?.toLowerCase() ?? null, expectDirty: req.expectDirty ?? null, deleteBranch, ackIncomplete: req.ackIncomplete === true }
 
     let list: Array<{ path: string; branch: string | null; prunable: boolean }>
     try {
@@ -455,12 +717,21 @@ export class WorktreeService {
     }
     const row = list.find((w) => samePath(this.canon(w.path), path))
     const onDisk = await this.exists(path)
+    const key = pathKey(path)
+    // Without a folder there is nothing half-deleted left to judge.
+    if (!onDisk) this.partial.delete(key)
     if (!row) {
       // Gone by hand and already pruned: nothing on disk to delete, only the
       // record and (asked for) the app's own branch, if no worktree has it out.
       if (onDisk) return notManaged('not_listed')
-      if (deleteBranch && !list.some((w) => w.branch === `refs/heads/${entry.branch}`)) {
-        await this.git(['branch', '-D', entry.branch], entry.repoRoot).catch(() => undefined)
+      if (deleteBranch) {
+        const state = await this.recheck(entry, path, false, expect)
+        if ('changed' in state) return { ok: false, error: 'changed', detail: state.changed }
+        if (state.tip) {
+          const del = await this.deleteBranchAt(entry, state.tip)
+          // A branch checked out elsewhere stays, as before; a moved one is the caller's to see.
+          if (!del.ok && del.error === 'changed') return del
+        }
       }
       this.deps.manifest.remove(path)
       return { ok: true }
@@ -482,6 +753,10 @@ export class WorktreeService {
       await this.deps.killPane(req.paneId).catch(() => undefined)
     }
 
+    // Read again now that nothing writes there any more: the inspect behind the click may be stale.
+    const state = await this.recheck(entry, path, onDisk, expect, this.partial.has(key))
+    if ('changed' in state) return { ok: false, error: 'changed', detail: state.changed }
+
     for (const link of entry.linkedPaths) {
       try {
         await this.unlinkLink(link)
@@ -492,17 +767,20 @@ export class WorktreeService {
 
     if (onDisk) {
       const res = await this.removeTree(path, root)
-      if (typeof res === 'object' && 'deferred' in res) return { ok: false, error: 'busy', detail: res.deferred }
+      if (typeof res === 'object' && 'deferred' in res) {
+        // safeRemoveTree goes on past a locked entry: what it could delete is gone.
+        this.partial.add(key)
+        return { ok: false, error: 'busy', detail: res.deferred }
+      }
       if (typeof res === 'object' && 'skipped' in res) return notManaged(res.skipped)
+      this.partial.delete(key)
     }
     // The folder is gone: prune drops git's record of it.
     await this.git(['worktree', 'prune'], entry.repoRoot).catch(() => undefined)
-    if (deleteBranch) {
-      try {
-        await this.git(['branch', '-D', entry.branch], entry.repoRoot)
-      } catch (e) {
-        return { ok: false, error: 'git_error', detail: (e as Error).message }
-      }
+    if (deleteBranch && state.tip) {
+      // On failure the entry stays: a retry takes the "gone" path above.
+      const del = await this.deleteBranchAt(entry, state.tip)
+      if (!del.ok) return del
     }
     this.deps.manifest.remove(path)
     return { ok: true }
@@ -600,9 +878,7 @@ export class WorktreeService {
 
   private async isDirty(e: ManifestEntry): Promise<boolean | null> {
     try {
-      const st = parseStatusV2(await this.git(['status', '--porcelain=v2', '-z', '--untracked-files=normal'], e.path))
-      const linked = new Set(e.linkedPaths.map((p) => basename(p)))
-      return st.entries.some((x) => !linked.has(x.path.replace(/\/$/, '')))
+      return (await this.dirtyCount(e.path, e)) > 0
     } catch {
       return null
     }

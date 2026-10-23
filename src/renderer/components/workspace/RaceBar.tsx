@@ -13,6 +13,7 @@ import {
   checkoutCommand,
   discardContestant,
   discardOthers,
+  keepBlock,
   keepLoss,
   liveContestants,
   planKeep,
@@ -193,7 +194,8 @@ function KeepDialog({ workspaceId, keep, onClose }: { workspaceId: string; keep:
   }, [busy, onClose])
 
   const loss = rows ? keepLoss(rows) : { needsAck: false, files: 0, commits: 0 }
-  const canDelete = !!rows && rows.length > 0 && !busy && (!loss.needsAck || ack)
+  // Blocked contestants stay (discardOthers skips them); with only those there is nothing to delete.
+  const canDelete = !!rows && rows.some((r) => !keepBlock(r)) && !busy && (!loss.needsAck || ack)
   const confirm = async (): Promise<void> => {
     if (!canDelete || !rows) return
     setBusy(true)
@@ -224,11 +226,22 @@ function KeepDialog({ workspaceId, keep, onClose }: { workspaceId: string; keep:
                 {rows.map((r) => {
                   const commits = r.info.mergedIntoHead ? 0 : r.info.commitsAhead
                   const dirty = r.info.dirtyFiles > 0 || commits > 0 || r.info.incomplete
+                  const block = keepBlock(r)
                   return (
-                    <li key={r.paneId} className="flex min-w-0 items-center gap-2">
+                    <li key={r.paneId} className="flex min-w-0 items-center gap-2" {...(block ? { 'data-race-keep-blocked': block } : {})}>
                       <span className="min-w-0 flex-1 truncate font-mono text-text-primary">{r.branch}</span>
-                      <span className={cn('shrink-0', dirty ? 'text-state-action' : 'text-text-secondary')}>
-                        {!r.info.exists ? t('worktree.close.gone') : dirty ? t('race.keep.dirty', { files: r.info.dirtyFiles, commits }) : t('race.keep.clean')}
+                      <span className={cn('shrink-0', block ? 'text-state-error' : dirty ? 'text-state-action' : 'text-text-secondary')}>
+                        {block === 'inProgress'
+                          ? t('race.keep.inProgress', { op: r.info.inProgress ?? '' })
+                          : block
+                            ? t('race.keep.branchMismatch')
+                            : !r.info.exists
+                              ? commits > 0
+                                ? `${t('worktree.close.gone')}, ${t('race.keep.dirty', { files: 0, commits })}`
+                                : t('worktree.close.gone')
+                              : dirty
+                                ? t('race.keep.dirty', { files: r.info.dirtyFiles, commits })
+                                : t('race.keep.clean')}
                       </span>
                     </li>
                   )

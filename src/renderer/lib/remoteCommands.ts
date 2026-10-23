@@ -139,8 +139,9 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
     case 'globalPrompt': {
       const ws = store.workspaces.find((w) => w.id === action.workspaceId)
       if (!ws) return { ok: false, error: 'not_found' }
-      const count = broadcastToWorkspace(ws, action.text)
-      return { ok: true, info: count }
+      // `info` stays the count that received it; consoles waiting on the user are skipped.
+      const { sent } = broadcastToWorkspace(ws, action.text)
+      return { ok: true, info: sent }
     }
 
     case 'setTheme': {

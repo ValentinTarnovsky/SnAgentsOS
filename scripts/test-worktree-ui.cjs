@@ -1,7 +1,9 @@
 // Worktree UI (E7-FR-27, 29, 30, 31, 36) in an isolated hidden Electron
 // window: the launch dialog (default slug, read-only base, invalid slug,
 // node_modules warning, Enter creates, typed error), the close dialog (Keep
-// focused, the checkbox gate, Delete, busy with Retry / Open folder), the pane
+// focused, the checkbox gate, Delete, busy with Retry / Open folder, a
+// half-done operation or another branch blocking Delete, 'changed' reading
+// the worktree again), the pane
 // branch chip, the missing card and Settings > Git (root + orphans). A fake
 // window.snApi stands in for main. Needs `npm run build` first (CSS). No user
 // config, real repo or git process is touched.
@@ -29,7 +31,7 @@ import {applyTheme} from './src/renderer/themes/applyTheme';
 const calls={add:[],remove:[],reveal:[],refresh:[]};
 const sha='f6c3fc4f451077c2689a52f81295236419257c5d';
 const wt={repoRoot:'C:\\\\repo',path:'C:\\\\data\\\\worktrees\\\\repo-abc123\\\\claude-1',branch:'sn/claude-1',base:sha};
-const fake={addRes:null,removeRes:{ok:true},inspect:{exists:true,dirtyFiles:2,commitsAhead:1,mergedIntoHead:false},list:[
+const fake={addRes:null,removeRes:{ok:true},afterRemove:null,inspect:{exists:true,dirtyFiles:2,commitsAhead:1,mergedIntoHead:false,tip:sha,headBranch:'sn/claude-1'},list:[
  {path:wt.path,branch:wt.branch,repoName:'repo',dirty:false,managed:true,exists:true,repoRoot:'C:\\\\repo',base:sha},
  {path:'C:\\\\data\\\\worktrees\\\\repo-abc123\\\\old-1',branch:'sn/old-1',repoName:'repo',dirty:true,managed:true,exists:true,repoRoot:'C:\\\\repo',base:sha},
  {path:'C:\\\\data\\\\worktrees\\\\repo-abc123\\\\foreign',branch:'feat',repoName:'repo',dirty:null,managed:false,exists:true}]};
@@ -37,7 +39,7 @@ window.snApi={platform:'win32',dialog:{openDirectory:async()=>'D:\\\\wt'},git:{
  info:async()=>({available:true,version:'2.45.1',path:'C:\\\\Git\\\\git.exe'}),refresh:(r)=>calls.refresh.push(r),setWatch(){},setConfig(){},setPanel(){},onUpdate:()=>()=>{},
  worktreeProbe:async()=>({ok:true,repoName:'repo',head:sha,headShort:sha.slice(0,7)}),
  worktreeAdd:async(r)=>{calls.add.push(r);return fake.addRes??{ok:true,worktree:{repoRoot:'C:\\\\repo',path:'C:\\\\data\\\\worktrees\\\\repo-abc123\\\\'+r.slug,branch:'sn/'+r.slug,base:sha}}},
- worktreeRemove:async(r)=>{calls.remove.push(r);return fake.removeRes},
+ worktreeRemove:async(r)=>{calls.remove.push(r);if(fake.afterRemove){fake.inspect=fake.afterRemove;fake.afterRemove=null}return fake.removeRes},
  worktreeInspect:async()=>fake.inspect,worktreeList:async()=>({entries:fake.list}),worktreeReveal:async(p)=>{calls.reveal.push(p);return true}},
  pty:{killPanes:async()=>0},status:{hooksStatus:async()=>({installed:false,settingsPath:'x'}),health:async()=>({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}})}};
 const preset={id:'preset-claude',name:'Claude Code',type:'claude',command:'claude',args:[],color:'#d97757',icon:'claude'};
@@ -50,7 +52,7 @@ function Header(){const ws=useAppStore(s=>s.workspaces[0]);const pane=ws.panes.f
  <header data-header className="flex h-8 w-[420px] items-center gap-1.5 overflow-hidden border border-border bg-card/50 px-2"><span className="min-w-0 flex-1 truncate text-xs">{pane?.title}</span>{pane&&<PaneWorktreeChip pane={pane}/>}</header>
  <div data-missing-host className="h-48 w-[420px] border border-border">{pane&&pane.worktree&&<WorktreeMissingCard workspace={ws} pane={pane} presets={[preset]}/>}</div></div>}
 createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div style={{height:'100vh'}} className="bg-bg-primary text-text-primary"><Header/><SettingsModal/><WorktreeLaunchDialog/><WorktreeCloseDialog/></div></I18nProvider>);
-window.smoke={app:useAppStore,git:useGitStore,wt:useWorktreeStore,calls,fake,wtObj:wt,
+window.smoke={app:useAppStore,git:useGitStore,wt:useWorktreeStore,calls,fake,wtObj:wt,sha,
  openLaunch:()=>useWorktreeStore.getState().openLaunch({workspaceId:'w1',repoCwd:'C:\\\\repo',template:templateFromPreset(preset)}),
  close:(id)=>requestClosePane('w1',id),settings:()=>useAppStore.getState().openSettings('git')};
 `, resolveDir: root, loader: 'tsx' }, bundle: true, platform: 'browser', format: 'iife', outfile: path.join(dir, 'renderer.js'), alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
@@ -124,10 +126,52 @@ app.whenReady().then(async()=>{
  ok((await js("smoke.calls.reveal.at(-1)"))==='C:\\\\data\\\\worktrees\\\\repo-abc123\\\\claude-1','Open folder reveals the worktree');
  await js("smoke.fake.removeRes={ok:true}");
  await js("[...document.querySelectorAll('[data-worktree-close-error] button')][0].click()");await wait(200);
- ok((await js("JSON.stringify(smoke.calls.remove.at(-1))"))==='{"path":"C:\\\\\\\\data\\\\\\\\worktrees\\\\\\\\repo-abc123\\\\\\\\claude-1","paneId":"pw","deleteBranch":true}','Retry deletes with path, pane and branch');
+ ok((await js("(()=>{const r=smoke.calls.remove.at(-1);return r.path===smoke.wtObj.path&&r.paneId==='pw'&&r.deleteBranch===true&&r.expectTip===smoke.sha&&r.expectDirty===2&&Object.keys(r).length===5})()")),'Retry deletes with path, pane, branch and the inspect it was confirmed on '+(await js("JSON.stringify(smoke.calls.remove.at(-1))")));
  ok(!(await js("smoke.app.getState().workspaces[0].panes.some(p=>p.id==='pw')"))&&!(await js("!!document.querySelector('[data-worktree-close]')")),'after ok the console leaves the store and the dialog closes');
  await js("smoke.close('p1')");await wait(100);
  ok(!(await js("!!document.querySelector('[data-worktree-close]')"))&&!(await js("smoke.app.getState().workspaces[0].panes.some(p=>p.id==='p1')")),'a plain console closes without the dialog');
+
+ // FR-30 delete race: blocked states from the start, and 'changed' reads the worktree again.
+ const addPz="smoke.app.setState(s=>({workspaces:s.workspaces.map(w=>({...w,panes:[...w.panes,{id:'pz',type:'claude',presetId:'preset-claude',title:'Claude Code · claude-1',color:'#d97757',icon:'claude',cwd:smoke.wtObj.path,worktree:smoke.wtObj}]}))}))";
+ await js(addPz);await wait(100);
+ await js("smoke.fake.inspect={exists:true,dirtyFiles:1,commitsAhead:0,mergedIntoHead:true,tip:smoke.sha,headBranch:'sn/claude-1',inProgress:'merge'}");
+ await js("smoke.close('pz')");await wait(250);
+ const bl=await js("({kind:document.querySelector('[data-worktree-close-blocked]')?.getAttribute('data-worktree-close-blocked'),text:document.querySelector('[data-worktree-close-blocked]')?.textContent||'',del:document.querySelector('[data-worktree-delete]').disabled,ack:!!document.querySelector('[data-worktree-ack]')})");
+ ok(bl.kind==='inProgress'&&bl.text.includes('merge')&&bl.text.includes('a medias')&&bl.del&&!bl.ack,'a half-done merge blocks Delete from the start '+JSON.stringify(bl));
+ await shot('close-blocked');
+ await js("smoke.wt.getState().closeClose()");await wait(100);
+ await js("smoke.fake.inspect={exists:true,dirtyFiles:0,commitsAhead:0,mergedIntoHead:true,tip:smoke.sha,headBranch:'main'}");
+ await js("smoke.close('pz')");await wait(250);
+ const bm=await js("({kind:document.querySelector('[data-worktree-close-blocked]')?.getAttribute('data-worktree-close-blocked'),text:document.querySelector('[data-worktree-close-blocked]')?.textContent||'',del:document.querySelector('[data-worktree-delete]').disabled})");
+ ok(bm.kind==='branchMismatch'&&bm.text.includes('main')&&bm.del,'another branch checked out blocks Delete '+JSON.stringify(bm));
+ await js("smoke.wt.getState().closeClose()");await wait(100);
+ const sha2='0123456789abcdef0123456789abcdef01234567';
+ await js("smoke.fake.inspect={exists:true,dirtyFiles:0,commitsAhead:0,mergedIntoHead:true,tip:smoke.sha,headBranch:'sn/claude-1'}");
+ await js("smoke.fake.removeRes={ok:false,error:'changed',detail:'tip'}");
+ await js("smoke.fake.afterRemove={exists:true,dirtyFiles:0,commitsAhead:1,mergedIntoHead:false,tip:'"+sha2+"',headBranch:'sn/claude-1'}");
+ await js("smoke.close('pz')");await wait(250);
+ ok(!(await js("document.querySelector('[data-worktree-delete]').disabled"))&&!(await js("!!document.querySelector('[data-worktree-ack]')")),'a clean worktree deletes without the checkbox');
+ const before=await js("smoke.calls.remove.length");
+ await js("document.querySelector('[data-worktree-delete]').click()");await wait(300);
+ ok((await js("(()=>{const r=smoke.calls.remove.at(-1);return r.paneId==='pz'&&r.expectTip===smoke.sha&&r.expectDirty===0})()"))&&(await js("smoke.calls.remove.length"))===before+1,'Delete sends the tip and dirty count the dialog showed');
+ const ch=await js("({note:document.querySelector('[data-worktree-close-changed]')?.textContent||'',info:document.querySelector('[data-worktree-close-info]')?.textContent||'',del:document.querySelector('[data-worktree-delete]').disabled,ack:!!document.querySelector('[data-worktree-ack]'),err:!!document.querySelector('[data-worktree-close-error]'),pane:smoke.app.getState().workspaces[0].panes.some(p=>p.id==='pz')})");
+ ok(ch.note.includes('El worktree cambió')&&ch.info.includes('1 commits que no están en la base')&&ch.del&&ch.ack&&!ch.err&&ch.pane,'changed: a note, the fresh state, the checkbox is back and the console stays '+JSON.stringify(ch));
+ await shot('close-changed');
+ await js("smoke.fake.removeRes={ok:true}");
+ await js("document.querySelector('[data-worktree-ack]').click()");await wait(80);
+ await js("document.querySelector('[data-worktree-delete]').click()");await wait(250);
+ ok((await js("smoke.calls.remove.at(-1).expectTip"))===sha2&&!(await js("smoke.app.getState().workspaces[0].panes.some(p=>p.id==='pz')"))&&!(await js("!!document.querySelector('[data-worktree-close]')")),'confirmed again, it deletes against the new tip and closes');
+ // A folder gone (by hand, or by a delete whose branch moved): its branch still has commits to lose.
+ await js(addPz);await wait(100);
+ await js("smoke.fake.inspect={exists:false,dirtyFiles:0,commitsAhead:2,mergedIntoHead:false,tip:'"+sha2+"'}");
+ await js("smoke.close('pz')");await wait(250);
+ const gn=await js("({info:document.querySelector('[data-worktree-close-info]')?.textContent||'',lost:!!document.querySelector('[data-worktree-close-lost]'),del:document.querySelector('[data-worktree-delete]').disabled,ack:document.querySelector('[data-worktree-ack]')?.parentElement.textContent||''})");
+ ok(gn.info.includes('ya no existe')&&gn.info.includes('2 commits que no están en la base')&&gn.lost&&gn.del&&gn.ack==='Entiendo que pierdo 0 archivos y 2 commits','a gone folder whose branch has commits shows them and needs the checkbox '+JSON.stringify(gn));
+ await js("smoke.fake.removeRes={ok:true}");
+ await js("document.querySelector('[data-worktree-ack]').click()");await wait(80);
+ await js("document.querySelector('[data-worktree-delete]').click()");await wait(250);
+ ok((await js("smoke.calls.remove.at(-1).expectTip"))===sha2&&!(await js("smoke.app.getState().workspaces[0].panes.some(p=>p.id==='pz')")),'confirmed, it deletes against the tip it showed');
+ await js("smoke.fake.inspect={exists:true,dirtyFiles:2,commitsAhead:1,mergedIntoHead:false,tip:smoke.sha,headBranch:'sn/claude-1'}");
 
  // FR-36: missing card.
  await js("smoke.app.setState(s=>({workspaces:s.workspaces.map(w=>({...w,panes:[...w.panes,{id:'pw',type:'claude',presetId:'preset-claude',title:'Claude Code · claude-1',color:'#d97757',icon:'claude',cwd:smoke.wtObj.path,worktree:smoke.wtObj}]}))}))");await wait(150);
@@ -159,7 +203,7 @@ app.whenReady().then(async()=>{
  ok((await js("!!document.querySelector('[data-worktree-close]')&&!document.querySelector('[data-worktree-keep]')&&document.querySelector('#worktree-close-title').textContent==='Borrar worktree'")),'Delete of an orphan uses the same check, without Keep');
  await js("smoke.fake.removeRes={ok:true}");
  await js("document.querySelector('[data-worktree-ack]').click()");await js("document.querySelector('[data-worktree-delete]').click()");await wait(200);
- ok((await js("JSON.stringify(smoke.calls.remove.at(-1))"))==='{"path":"C:\\\\\\\\data\\\\\\\\worktrees\\\\\\\\repo-abc123\\\\\\\\old-1","deleteBranch":true}','orphan delete sends no pane');
+ ok((await js("JSON.stringify(smoke.calls.remove.at(-1))"))==='{"path":"C:\\\\\\\\data\\\\\\\\worktrees\\\\\\\\repo-abc123\\\\\\\\old-1","deleteBranch":true,"ackIncomplete":true}','orphan delete sends no pane, and the ticked "may lose work" of an incomplete inspect as ackIncomplete');
  for(const scale of [1.25,1.5]){w.setSize(860,560);w.webContents.setZoomFactor(scale);await wait(200);ok(!(await js('document.documentElement.scrollWidth>innerWidth')),'Settings > Git without overflow at '+scale)}
  w.webContents.setZoomFactor(1);w.setSize(1100,760);
  await js("smoke.app.getState().setSettingsOpen(false)");await wait(150);

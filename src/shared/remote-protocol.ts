@@ -201,6 +201,8 @@ export interface RemoteUsageRow {
   status: 'ok' | 'expired' | 'error' | 'nodata' | 'loading'
   /** True when the desktop is holding the last good value through a failed poll. */
   stale?: boolean
+  /** Custom rows whose transcript scan has not caught up yet (the phone does not show it). */
+  partial?: boolean
 }
 
 /** Snapshot of the desktop's live usage bars, mirrored to the phone. */

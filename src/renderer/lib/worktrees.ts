@@ -6,7 +6,7 @@
  */
 import type { AgentPreset, ConnectionProfile, Pane, PaneWorktree, Workspace } from '@shared/types'
 import type { GitError, GitSummary } from '@shared/git-types'
-import { CWD_MISSING, isValidSlug, type WorktreeListEntry } from '@shared/worktree-types'
+import { CWD_MISSING, isValidSlug, type WorktreeInspectRes, type WorktreeListEntry, type WorktreeRemoveReq } from '@shared/worktree-types'
 import { resolveLaunch } from './launch'
 import { useAppStore } from './store'
 import { useWorktreeStore, type PaneTemplate, type WorktreeLaunchRequest } from './worktreeStore'
@@ -158,6 +158,48 @@ export function noteSpawnFailure(paneId: string, message: string | undefined): v
 /** The checkbox of the close dialog is required when deleting loses work. */
 export function deleteNeedsAck(info: { dirtyFiles: number; commitsAhead: number; mergedIntoHead: boolean; incomplete?: boolean }): boolean {
   return info.incomplete === true || info.dirtyFiles > 0 || (info.commitsAhead > 0 && !info.mergedIntoHead)
+}
+
+export type WorktreeDeleteBlock = 'inProgress' | 'branchMismatch'
+
+/**
+ * Why Delete is not offered at all: a rebase, merge, cherry-pick, revert or
+ * bisect left half-done, or the folder has another branch (or a detached HEAD)
+ * checked out instead of the recorded `branch`. Main refuses both too.
+ */
+export function deleteBlock(info: Pick<WorktreeInspectRes, 'exists' | 'inProgress' | 'headBranch'>, branch: string): WorktreeDeleteBlock | null {
+  if (!info.exists) return null
+  if (info.inProgress) return 'inProgress'
+  if (info.headBranch !== undefined && info.headBranch !== branch) return 'branchMismatch'
+  return null
+}
+
+/**
+ * What a delete sends back to main from the inspect the user saw, so main can
+ * refuse ('changed') when the worktree moved on since: the tip always when
+ * known, the dirty count whenever git status answered. `incomplete` alone is
+ * not enough to drop it (a missing base or a failed rev-list leave the count
+ * real, and files written after the inspect must still be 'changed'); only an
+ * unread status (`incomplete` without `dirtyRead`, or the dialog's own
+ * fallback) skips it, so a status that keeps failing never loops on
+ * 'changed': the re-inspect reads it as unknown and the "may lose work"
+ * checkbox confirms it instead.
+ */
+export function removeExpectations(info: WorktreeInspectRes): Pick<WorktreeRemoveReq, 'expectTip' | 'expectDirty'> {
+  const dirtyKnown = !info.incomplete || info.dirtyRead === true
+  return {
+    ...(info.tip ? { expectTip: info.tip } : {}),
+    ...(info.exists && dirtyKnown ? { expectDirty: info.dirtyFiles } : {}),
+  }
+}
+
+/**
+ * The user's "may lose work" on an `incomplete` inspect, sent only when the
+ * checkbox was ticked: main needs it to delete a folder git no longer reads
+ * as its own checkout (`noCheckout`), never infers it.
+ */
+export function ackFields(info: WorktreeInspectRes, acked: boolean): Pick<WorktreeRemoveReq, 'ackIncomplete'> {
+  return info.incomplete && acked ? { ackIncomplete: true } : {}
 }
 
 /** Commits deleting the branch would lose (merged ones survive in the repo HEAD). */

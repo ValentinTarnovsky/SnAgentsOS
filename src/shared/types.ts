@@ -72,7 +72,11 @@ export interface ScheduleRun {
   scheduledFor: number
   trigger: 'scheduled' | 'manual'
   status: ScheduleRunStatus
-  reason?: 'agent_not_running' | 'multiline_unsafe' | 'not_delivered'
+  /**
+   * `enter_held` (post 2.6.0, `userGate`): the agent started waiting on the
+   * user after the text was typed, so the Enter was dropped (text left typed).
+   */
+  reason?: 'agent_not_running' | 'multiline_unsafe' | 'not_delivered' | 'enter_held'
 }
 
 /**

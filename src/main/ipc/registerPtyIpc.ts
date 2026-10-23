@@ -58,7 +58,8 @@ export function registerPtyIpc(manager: PtyManager, restartLabel: () => string =
     // v2.3: only an explicit 'auto' skips the attention ack; anything else is the user.
     // `readyFor` (agentTune) gates the Enter on a ready agent with no draft.
     const readyFor = r.readyFor === 'claude' || r.readyFor === 'codex' ? r.readyFor : undefined
-    return manager.submitToPane(ptyId, paneId, r.text, r.enter === true, r.origin === 'auto' ? 'auto' : 'user', readyFor)
+    // `userGate` (typingBlocked): never type over, nor press Enter into, a menu waiting on the user.
+    return manager.submitToPane(ptyId, paneId, r.text, r.enter === true, r.origin === 'auto' ? 'auto' : 'user', readyFor, r.userGate === true)
   })
 
   // Explicit lifecycle (E4-FR-36): an unmount never kills, these do, by paneId.

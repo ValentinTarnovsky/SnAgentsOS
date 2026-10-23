@@ -25,7 +25,7 @@ import { useAppStore } from './store'
 import { isBracketedPaste } from './pasteRegistry'
 import { deliverPrompt } from './broadcastPrompt'
 import { toast } from './toast'
-import { deleteNeedsAck, MAX_PANES, paneFromWorktree, requestClosePane, templateFromPreset } from './worktrees'
+import { ackFields, deleteBlock, deleteNeedsAck, MAX_PANES, paneFromWorktree, removeExpectations, requestClosePane, templateFromPreset, type WorktreeDeleteBlock } from './worktrees'
 
 /** Contestants per race (E7-FR-34). */
 export const RACE_MAX = 4
@@ -226,7 +226,8 @@ export async function startRace(req: StartRaceReq, timing: RaceTiming = {}): Pro
 
   const created: PaneWorktree[] = []
   const rollback = async (): Promise<void> => {
-    for (const wt of created.reverse()) await git.worktreeRemove({ path: wt.path, deleteBranch: true }).catch(() => undefined)
+    // Fresh worktrees, but main still compares against what is there (a copied .env that is not ignored counts as a file).
+    for (const wt of created.reverse()) await git.worktreeRemove({ path: wt.path, deleteBranch: true, ...removeExpectations(await inspect(wt)) }).catch(() => undefined)
   }
   for (let i = 0; i < slots.length; i++) {
     let res = null as Awaited<ReturnType<typeof git.worktreeAdd>> | null
@@ -337,30 +338,42 @@ export async function discardContestant(workspaceId: string, paneId: string): Pr
   const wt = paneOf(workspaceId, paneId)?.worktree
   if (!wt) return 'error'
   const info = await inspect(wt)
-  if (!info.exists || deleteNeedsAck(info)) {
+  if (!info.exists || deleteNeedsAck(info) || deleteBlock(info, wt.branch)) {
     requestClosePane(workspaceId, paneId)
     return 'dialog'
   }
-  return (await removeContestant(workspaceId, paneId, wt)) ? 'removed' : 'error'
+  const res = await removeContestant(workspaceId, paneId, wt, info, { quietChanged: true })
+  if (res === 'changed') {
+    // It moved on after the inspect (a late commit or file): the dialog reads it again.
+    requestClosePane(workspaceId, paneId)
+    return 'dialog'
+  }
+  return res === 'removed' ? 'removed' : 'error'
 }
 
-async function removeContestant(workspaceId: string, paneId: string, wt: PaneWorktree): Promise<boolean> {
+/** Deletes one contestant against the inspect `info` it was judged on (main answers 'changed' if it moved on since). */
+async function removeContestant(workspaceId: string, paneId: string, wt: PaneWorktree, info: WorktreeInspectRes, o: { quietChanged?: boolean; acked?: boolean } = {}): Promise<'removed' | 'changed' | 'error'> {
   let ok = false
   let detail = ''
+  let changed = false
   try {
-    const res = await window.snApi.git.worktreeRemove({ path: wt.path, paneId, deleteBranch: true })
+    const res = await window.snApi.git.worktreeRemove({ path: wt.path, paneId, deleteBranch: true, ...removeExpectations(info), ...ackFields(info, o.acked === true) })
     ok = res.ok
-    if (!res.ok) detail = res.detail ?? res.error
+    if (!res.ok) {
+      changed = res.error === 'changed'
+      detail = changed ? translate(lang(), 'worktree.rmErr.changed') : (res.detail ?? res.error)
+    }
   } catch (e) {
     detail = String((e as Error)?.message ?? e)
   }
+  if (changed && o.quietChanged) return 'changed'
   if (!ok) {
     toast.error(translate(lang(), 'race.toast.discardFailed', { branch: wt.branch, detail }), { dedupeKey: `race-discard:${paneId}` })
-    return false
+    return changed ? 'changed' : 'error'
   }
   // Deleted for good: not on the reopen stack.
   useAppStore.getState().removePane(workspaceId, paneId)
-  return true
+  return 'removed'
 }
 
 /** What "Keep this one" shows for each of the other contestants before deleting them. */
@@ -383,13 +396,26 @@ export async function planKeep(workspaceId: string, keepPaneId: string): Promise
   return rows
 }
 
-/** Whether "Keep this one" needs the checkbox (some other contestant would lose work), and how much. */
+/**
+ * Why "Keep this one" leaves a contestant in place (FR-30): a half-done git
+ * operation or another branch checked out in its folder, as the close dialog
+ * blocks Delete. Main would refuse it anyway.
+ */
+export function keepBlock(row: KeepPlanRow): WorktreeDeleteBlock | null {
+  return deleteBlock(row.info, row.branch)
+}
+
+/**
+ * Whether "Keep this one" needs the checkbox (some other contestant would
+ * lose work), and how much. A gone folder still counts the commits its branch
+ * delete drops; a blocked contestant is not deleted, so it counts nothing.
+ */
 export function keepLoss(rows: readonly KeepPlanRow[]): { needsAck: boolean; files: number; commits: number } {
   let files = 0
   let commits = 0
   let needsAck = false
   for (const r of rows) {
-    if (!r.info.exists) continue
+    if (keepBlock(r)) continue
     if (deleteNeedsAck(r.info)) needsAck = true
     files += r.info.dirtyFiles
     commits += r.info.mergedIntoHead ? 0 : r.info.commitsAhead
@@ -397,12 +423,19 @@ export function keepLoss(rows: readonly KeepPlanRow[]): { needsAck: boolean; fil
   return { needsAck, files, commits }
 }
 
-/** Deletes the other contestants (worktree and branch); the kept one is untouched. Returns how many went. */
+/**
+ * Deletes the other contestants (worktree and branch) against the inspect the
+ * user confirmed; the kept one is untouched. One that moved on since stays
+ * (main answers 'changed', a toast says so), and so does a blocked one
+ * (keepBlock), never sent to main. Returns how many went.
+ */
 export async function discardOthers(workspaceId: string, rows: readonly KeepPlanRow[]): Promise<number> {
   let n = 0
   for (const r of rows) {
+    if (keepBlock(r)) continue
     const wt = paneOf(workspaceId, r.paneId)?.worktree
-    if (wt && (await removeContestant(workspaceId, r.paneId, wt))) n++
+    // Only called once the keep dialog was confirmed, with its checkbox whenever keepLoss asked for it.
+    if (wt && (await removeContestant(workspaceId, r.paneId, wt, r.info, { acked: true })) === 'removed') n++
   }
   return n
 }

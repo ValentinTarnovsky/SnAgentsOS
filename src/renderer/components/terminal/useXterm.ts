@@ -45,6 +45,10 @@ const plain = (s: string): string => s.replace(/[\x00-\x1f\x7f-\x9f]/g, '')
 const spawnError = (err: unknown): string =>
   plain(String(err instanceof Error ? err.message : err).replace(/^Error invoking remote method '[^']*': (?:Error: )?/, ''))
 
+/** The pane's preset id in the store (a spawn hint; main owns the preset env). */
+const presetIdOf = (paneId: string): string | undefined =>
+  useAppStore.getState().workspaces.flatMap((w) => w.panes).find((p) => p.id === paneId)?.presetId
+
 /** Keys that alone are not typing: they never take a phone-sized pane back (E3-FR-19). */
 const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'OS'])
 
@@ -736,6 +740,7 @@ export function useXterm(
           setup: launch.setup,
           cols: born?.cols ?? term.cols,
           rows: born?.rows ?? term.rows,
+          presetId: presetIdOf(o.paneId),
           // After a failed respawn, retry with the OS default shell.
           fallbackDefaultShell: prev?.error ? true : undefined,
         })
@@ -850,6 +855,8 @@ export function useXterm(
               restoreScrollback: !launch.resumed,
               // The CLI's console token carries the workspace (SNAOS_WORKSPACE_ID).
               workspaceId: useAppStore.getState().workspaces.find((w) => w.panes.some((p) => p.id === opts.paneId))?.id,
+              // Only a hint for a pane not saved yet: main resolves the preset env itself.
+              presetId: presetIdOf(opts.paneId),
             })
           })
           .then((spawned) => {

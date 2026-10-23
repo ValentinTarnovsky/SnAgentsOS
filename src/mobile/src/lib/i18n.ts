@@ -369,6 +369,8 @@ const en = {
   'quick.err.notFound': 'That Quick Command no longer exists',
   'quick.err.notRunning': 'This console is not running',
   'quick.err.multiline': 'Multi-line text: this console does not accept a safe paste',
+  'quick.err.awaitingUser': 'Skipped: this console is waiting on you',
+  'quick.err.enterHeld': 'Typed, not sent: this console started waiting on you',
   'quick.err.noPreset': "This Quick Command's preset no longer exists",
   'quick.err.generic': 'Could not run the Quick Command',
   // Model, effort and Ultracode (app 2.3.0, ctl agentTune)
@@ -1134,6 +1136,8 @@ const es: Record<Key, string> = {
   'quick.err.notFound': 'Ese Quick Command ya no existe',
   'quick.err.notRunning': 'Esta consola no está corriendo',
   'quick.err.multiline': 'Texto multilínea: esta consola no acepta pegado seguro',
+  'quick.err.awaitingUser': 'Salteada: esta consola te espera',
+  'quick.err.enterHeld': 'Escrita sin enviar: esta consola empezó a esperarte',
   'quick.err.noPreset': 'El preset de este Quick Command ya no existe',
   'quick.err.generic': 'No se pudo ejecutar el Quick Command',
   // Modelo, esfuerzo y Ultracode (app 2.3.0, ctl agentTune)

@@ -146,6 +146,41 @@ async function main() {
     pm.write(ptyId, 'draft')
     res = await pm.submitToPane('', 'p', 'echo', true)
     check(res.ok, 'an ungated submit ignores the draft (Quick Commands, schedules)')
+
+    // 6b. userGate (typingBlocked on main's status): `snaos send` and Quick Commands.
+    pm.write(ptyId, '\x03')
+    for (const [label, s] of [['a precise action', { state: 'action', precise: true, provider: 'claude' }], ['an open request', { state: 'working', precise: true, provider: 'claude', pendingCount: 1 }]]) {
+      st = s; writes.length = 0
+      res = await pm.submitToPane('', 'p', 'yes', true, 'auto', undefined, true)
+      check(!res.ok && res.error === 'awaiting_user' && writes.length === 0, `userGate: ${label} gets nothing, not even the text`)
+    }
+    st = { state: 'action', precise: false, provider: 'claude', pendingCount: 1 }; writes.length = 0
+    res = await pm.submitToPane('', 'p', 'ok', true, 'auto', undefined, true)
+    check(res.ok && writes.join('|') === 'ok|\r', 'userGate: a title-only action (end of turn) never blocks')
+    // The menu opens while the text waits for its deferred Enter.
+    st = { state: 'working', precise: true, provider: 'claude' }; writes.length = 0
+    const submittedAt = pm.lastSubmitAt('p')
+    let pending = pm.submitToPane('', 'p', 'run the tests', true, 'auto', undefined, true)
+    st = { state: 'action', precise: true, provider: 'claude', pendingCount: 1 }
+    res = await pending
+    check(!res.ok && res.error === 'enter_held' && writes.join('|') === 'run the tests', 'userGate: a menu that opens before the Enter keeps the text typed and drops the Enter')
+    check(pm.lastSubmitAt('p') === submittedAt, 'a dropped Enter is no submit (lastSubmitAt unchanged)')
+    pm.write(ptyId, '\x03')
+    st = { state: 'working', precise: true, provider: 'claude' }; writes.length = 0
+    pending = pm.submitToPane('', 'p', 'second\n', false, 'auto', undefined, true)
+    st = { state: 'working', precise: true, provider: 'claude', pendingCount: 1 }
+    res = await pending
+    check(!res.ok && res.error === 'enter_held' && writes.join('|') === 'second', 'userGate: a trailing line break (a typed Enter) is dropped the same way')
+    pm.write(ptyId, '\x03')
+    st = { state: 'working', precise: true, provider: 'claude' }; writes.length = 0
+    res = await pm.submitToPane('', 'p', 'go on', true, 'auto', undefined, true)
+    check(res.ok && writes.join('|') === 'go on|\r', 'userGate: a console still working at the Enter gets it')
+    // Ungated callers (scheduler, composer, initial prompt) keep their Enter.
+    writes.length = 0
+    pending = pm.submitToPane('', 'p', 'tick', true, 'auto')
+    st = { state: 'action', precise: true, provider: 'claude', pendingCount: 1 }
+    res = await pending
+    check(res.ok && writes.join('|') === 'tick|\r', 'without userGate the deferred Enter is unchanged (the scheduler has its own blocker)')
     pm.killAll()
   }
 

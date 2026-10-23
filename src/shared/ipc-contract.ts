@@ -365,6 +365,8 @@ export interface UsageRow {
   status: 'ok' | 'expired' | 'error' | 'nodata' | 'loading'
   /** True when main is holding the last good value through a failed poll (grace window). */
   stale?: boolean
+  /** Custom rows: the transcript scan has not caught up with the whole window yet (the count may be low). */
+  partial?: boolean
 }
 
 /** A full snapshot of every enabled usage row, pushed to the renderer. */
@@ -393,6 +395,12 @@ export interface PtySpawnReq {
   args?: string[] | string
   cwd?: string
   env?: Record<string, string>
+  /**
+   * The pane's preset id, only a hint: main reads the preset env from its own
+   * config by `paneId` and uses this id (which must name a saved preset) only
+   * while the pane is not saved yet. The renderer never sends the env itself.
+   */
+  presetId?: string
   /**
    * A command line typed into the shell after spawn (e.g. "claude").
    * Running inside the shell makes PATH/PATHEXT resolution work on Windows
@@ -455,6 +463,13 @@ export interface PtySubmitReq {
    * Validated in main; any other value is ignored.
    */
   readyFor?: AgentProvider
+  /**
+   * Post 2.6.0 (`typingBlocked`): true = main refuses with `awaiting_user`
+   * (nothing written) when the agent waits on the user, and drops the
+   * deferred Enter with `enter_held` (the text stays typed) when it starts
+   * waiting before that Enter. Quick Commands set it; only `true` counts.
+   */
+  userGate?: boolean
 }
 export type PtySubmitRes = { ok: true } | { ok: false; error: SubmitError }
 /** Outcome of a spawn's initial prompt (main -> renderer). */

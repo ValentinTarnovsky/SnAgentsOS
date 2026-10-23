@@ -143,7 +143,7 @@ app.whenReady().then(async()=>{
  // Run now from the table on a live shell console sends right away.
  await js("smoke.registerPty('pa','pty-pa')");
  await click('[data-automation-run=pa]');await wait(200);
- eq(await js('window.__submits.map(s=>[s.ptyId,s.text,s.enter])'),[['pty-pa','revisa los PR abiertos',true]],'"Probar ahora" from the table submits the saved prompt with Enter');
+ eq(await js('window.__submits.map(s=>[s.ptyId,s.text,s.enter,s.userGate])'),[['pty-pa','revisa los PR abiertos',true,true]],'"Probar ahora" from the table submits the saved prompt with Enter, gated on main (userGate)');
  r=await rows();
  ok(/^Enviado/.test(r[0].last)&&await js("smoke.sched('pa').history.length===1&&smoke.sched('pa').history[0].trigger==='manual'"),'the table shows the run result',r[0]);
  await click('[data-automation-edit=pp]');

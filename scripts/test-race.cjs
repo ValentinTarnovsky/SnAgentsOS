@@ -92,7 +92,7 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   const ws = () => S.getState().workspaces.find((w) => w.id === 'w1')
   const text = 'fix the bug\nthen run the tests'
   let n = R.broadcastToWorkspace(ws(), text, { paneIds: ['a1', 'a2', 'sh', 'min'], enter: true })
-  check(n === 3, `three chosen active consoles received it (got ${n})`)
+  check(n.sent === 3 && n.skipped === 0, `three chosen active consoles received it (got ${JSON.stringify(n)})`)
   check(pasted.off.length === 0, 'an unchecked destination receives nothing')
   check(pasted.min.length === 0, 'a minimized console receives nothing')
   same(pasted.a1, [text], 'an agent gets the multi-line text as one paste')
@@ -105,13 +105,32 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   calls.writes.length = 0
   n = R.broadcastToWorkspace(ws(), 'hola')
   await sleep(260)
-  check(n === 4 && calls.writes.length === 0, 'defaults (the phone): every active console, never Enter')
+  check(n.sent === 4 && calls.writes.length === 0, 'defaults (the phone): every active console, never Enter')
   // A restart between the paste and the Enter: the new pty never gets it.
   R.broadcastToWorkspace(ws(), 'again', { paneIds: ['a1'], enter: true })
   R.registerPty('a1', 'pty-a1-restarted')
   await sleep(260)
   check(calls.writes.length === 0, 'a console restarted in between gets no stray Enter')
   R.registerPty('a1', 'pty-a1')
+
+  // A console waiting on the user (precise action or an open request) is skipped whole.
+  for (const id of ['a1', 'a2', 'sh', 'off']) pasted[id].length = 0
+  const setStatus = (patch) => S.setState((s) => ({ paneStatus: { ...s.paneStatus, ...patch } }))
+  setStatus({ a1: { state: 'action', precise: true, provider: 'claude', pendingCount: 1 }, a2: { state: 'working', precise: true, provider: 'codex', pendingCount: 1 }, off: { state: 'action', precise: false, provider: 'claude', pendingCount: 1 } })
+  n = R.broadcastToWorkspace(ws(), '1', { paneIds: ['a1', 'a2', 'sh', 'off'], enter: true })
+  await sleep(260)
+  same(n, { sent: 2, skipped: 2 }, 'two consoles waiting on the user are skipped, the shell and the title-only action get it')
+  check(pasted.a1.length === 0 && pasted.a2.length === 0, 'nothing is pasted into a permission or plan menu')
+  same(calls.writes.map((w) => w.ptyId), ['pty-off'], 'the only Enter goes to the title-only console (an end of turn), never to a waiting one')
+  check(!R.deliverPrompt('a1', 'y', { agent: true, enter: true }) && pasted.a1.length === 0, 'deliverPrompt itself refuses a console waiting on the user')
+  calls.writes.length = 0
+  // A request that shows up between the paste and its Enter: the Enter is dropped.
+  setStatus({ a1: { state: 'idle', precise: true, provider: 'claude' } })
+  check(R.deliverPrompt('a1', 'go on', { agent: true, enter: true }) && pasted.a1.length === 1, 'a free agent gets the paste')
+  setStatus({ a1: { state: 'action', precise: true, provider: 'claude', pendingCount: 1 } })
+  await sleep(260)
+  check(calls.writes.length === 0, 'a console that started waiting on the user before the Enter never gets it')
+  setStatus({ a1: { state: 'idle', precise: true, provider: 'claude' }, a2: { state: 'idle', precise: false, provider: 'codex' }, off: undefined })
 
   // ---- race checks (E7-FR-34) ----
   check(R.raceCountsOk({ claude: 2, codex: 2 }) && !R.raceCountsOk({ claude: 3, codex: 2 }) && !R.raceCountsOk({ claude: 0, codex: 0 }) && !R.raceCountsOk({ claude: -1, codex: 2 }) && !R.raceCountsOk({ claude: 1.5, codex: 0 }), 'counts: 1..4 in all, whole and not negative')
@@ -189,9 +208,10 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   // ---- the bar's actions (E7-FR-35) ----
   same(R.liveContestants(R.useRaceStore.getState().races.w1, ws()).length, 3, 'three rows on the bar')
   const dirtyPath = racers[1].worktree.path
-  fake.inspect = (r) => (r.path === dirtyPath ? { exists: true, dirtyFiles: 2, commitsAhead: 1, mergedIntoHead: false } : { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false })
+  fake.inspect = (r) => (r.path === dirtyPath ? { exists: true, dirtyFiles: 2, commitsAhead: 1, mergedIntoHead: false } : { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false, tip: sha })
   check((await R.discardContestant('w1', c1)) === 'removed', 'a clean contestant is discarded without a dialog')
   check(calls.remove.at(-1).path === racers[0].worktree.path && calls.remove.at(-1).paneId === c1 && calls.remove.at(-1).deleteBranch === true, 'main deletes its worktree and branch (and kills its pty)')
+  check(calls.remove.at(-1).expectTip === sha && calls.remove.at(-1).expectDirty === 0, 'against the inspect it was judged clean on (main answers changed if it moved on)')
   check(!ws().panes.some((p) => p.id === c1), 'its console leaves the workspace')
   check((await R.discardContestant('w1', c2)) === 'dialog' && R.useWorktreeStore.getState().close?.paneId === c2, 'a dirty contestant opens the FR-30 dialog instead')
   R.useWorktreeStore.getState().closeClose()
@@ -200,6 +220,14 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   same(plan.map((r) => r.paneId), [c2], 'keep this one: the others are planned')
   same(R.keepLoss(plan), { needsAck: true, files: 2, commits: 1 }, 'a dirty other needs the checkbox, with the totals')
   same(R.keepLoss([{ paneId: 'x', branch: 'sn/x', info: { exists: true, dirtyFiles: 0, commitsAhead: 2, mergedIntoHead: true } }]), { needsAck: false, files: 0, commits: 0 }, 'merged commits are not lost')
+  same(R.keepLoss([{ paneId: 'x', branch: 'sn/x', info: { exists: false, dirtyFiles: 0, commitsAhead: 2, mergedIntoHead: false, tip: sha } }]), { needsAck: true, files: 0, commits: 2 }, 'a gone folder still loses the commits of its branch: checkbox')
+  same(R.keepLoss([{ paneId: 'x', branch: 'sn/x', info: { exists: false, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false, incomplete: true } }]).needsAck, true, 'a gone folder whose commits git could not count needs it too')
+  const opRow = { paneId: c2, branch: racers[1].worktree.branch, info: { exists: true, dirtyFiles: 3, commitsAhead: 1, mergedIntoHead: false, tip: sha, headBranch: racers[1].worktree.branch, inProgress: 'merge' } }
+  const otherRow = { paneId: c2, branch: racers[1].worktree.branch, info: { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: true, tip: sha, headBranch: 'main' } }
+  check(R.keepBlock(opRow) === 'inProgress' && R.keepBlock(otherRow) === 'branchMismatch' && R.keepBlock(plan[0]) === null, 'keepBlock: a half-done operation, another branch checked out')
+  same(R.keepLoss([opRow, otherRow]), { needsAck: false, files: 0, commits: 0 }, 'blocked contestants stay, so they count no loss')
+  const rmBefore = calls.remove.length
+  check((await R.discardOthers('w1', [opRow, otherRow])) === 0 && calls.remove.length === rmBefore && ws().panes.some((p) => p.id === c2), 'discardOthers never sends a blocked contestant to main')
   fake.removeRes = { ok: false, error: 'busy', detail: 'EBUSY' }
   check((await R.discardOthers('w1', plan)) === 0 && ws().panes.some((p) => p.id === c2), 'a failed delete keeps the console')
   fake.removeRes = { ok: true }

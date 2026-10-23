@@ -11,6 +11,7 @@
  * fall-back hour runs once (the first one).
  */
 import type { ClaudePaneState, PaneSchedule, ScheduleRecurrence, ScheduleRun } from './types'
+import { typingBlocked } from './agentTune'
 
 /** Runs kept per schedule; the 21st drops the oldest (E8-FR-31). */
 export const SCHEDULE_HISTORY_MAX = 20
@@ -107,6 +108,8 @@ export type ScheduleDecision = 'idle' | 'wait' | 'fire' | 'missed' | 'skip_busy'
 export interface ScheduleAgentSignal {
   state: ClaudePaneState
   precise: boolean
+  /** Open requests (hooks): one still waiting on the user blocks like a precise `action`. */
+  pendingCount?: number
 }
 
 export interface DecideInput {
@@ -134,13 +137,14 @@ export interface DecideInput {
  * is free only in a shell/custom pane; in an agent pane the agent may have
  * exited and the text would run in the shell, so it waits. With `waitIdle`
  * off a working agent is typed over, but a precise `action` still blocks:
- * the text plus Enter would answer a real permission or question.
+ * the text plus Enter would answer a real permission or question. An open
+ * request (precise `pendingCount` > 0) blocks the same way (`typingBlocked`).
  */
 function blocker(input: DecideInput): 'busy' | 'no_agent' | null {
   if (!input.live) return 'no_agent'
   const st = input.status
   if (!st || st.state === 'unknown') return input.agent ? 'no_agent' : null
-  if (st.state === 'action' && st.precise) return 'busy'
+  if (typingBlocked(st)) return 'busy'
   if (st.state === 'working' && waitsForIdle(input.schedule)) return 'busy'
   return null
 }

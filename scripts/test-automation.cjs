@@ -230,6 +230,8 @@ async function schema13Checks() {
   check(jf.prompt === 'segui' && jf.waitIdle === undefined && jf.enabled === undefined && jf.waitingSince === undefined && jf.history === undefined, 'junk waitIdle, enabled, waitingSince and history are dropped field by field')
   const hist = withSchedule({ ...base, history: [run(1), 'basura', run(2, { status: 'exploded' }), run(3, { reason: 'weird' }), { at: 4 }] }).workspaces[0].panes[0].schedule.history
   check(hist.length === 2 && hist[0].at === 1 && hist[1].at === 3 && hist[1].reason === undefined, 'history parses item by item; an unknown reason is dropped, the run kept')
+  const held = withSchedule({ ...base, history: [run(1, { status: 'failed', reason: 'enter_held' })] }).workspaces[0].panes[0].schedule.history
+  check(held.length === 1 && held[0].status === 'failed' && held[0].reason === 'enter_held', 'post 2.6.0: the enter_held reason (userGate dropped the Enter) is kept without a config bump')
   const many = withSchedule({ ...base, history: Array.from({ length: 25 }, (_, i) => run(100 + i)) }).workspaces[0].panes[0].schedule.history
   check(many.length === 20 && many[0].at === 105 && many[19].at === 124, '25 runs keep the 20 most recent, oldest first')
   const desc = withSchedule({ ...base, history: Array.from({ length: 25 }, (_, i) => run(200 - i)) }).workspaces[0].panes[0].schedule.history
@@ -956,6 +958,28 @@ async function quickRunChecks() {
   res = await r.runQuickCommand(qcOf('g'))
   check(!res.ok && toasts().at(-1).title === 'Texto multilínea: esta consola no acepta pegado seguro', 'multiline_unsafe shows its toast')
   submitResult = { ok: true }
+  // A console waiting on the user (precise action or open request): skipped, nothing written.
+  const setStatus = (id, st) => S.setState((s) => ({ paneStatus: { ...s.paneStatus, [id]: st } }))
+  let nSub = submits.length
+  setStatus('p1', { state: 'action', precise: true, provider: 'claude', pendingCount: 1 })
+  res = await r.runQuickCommand(qcOf('g'))
+  check(!res.ok && res.error === 'awaiting_user' && submits.length === nSub && toasts().at(-1).title === 'Salteada: Shell te espera' && toasts().at(-1).kind === 'warning', 'send to a console waiting on the user writes nothing and says "skipped: waiting on you"')
+  setStatus('p1', { state: 'working', precise: true, provider: 'claude', pendingCount: 1 })
+  res = await r.runQuickCommand(qcOf('g'))
+  check(!res.ok && res.error === 'awaiting_user' && submits.length === nSub, 'an open request blocks it too')
+  setStatus('p1', { state: 'action', precise: false, provider: 'claude', pendingCount: 1 })
+  res = await r.runQuickCommand(qcOf('g'))
+  check(res.ok && submits.length === nSub + 1 && submits.at(-1).ptyId === 'pty-p1', 'a title-only action (end of turn) still gets it')
+  setStatus('p1', undefined)
+  // Main re-checks its own status (userGate), right before the deferred Enter too.
+  check(submits.at(-1).userGate === true, 'a desktop send asks main for the userGate')
+  submitResult = { ok: false, error: 'enter_held' }
+  res = await r.runQuickCommand(qcOf('g'))
+  check(!res.ok && res.error === 'enter_held' && toasts().at(-1).title === 'Escrita sin enviar: Shell empezó a esperarte' && toasts().at(-1).kind === 'warning', 'a menu that opened before the Enter: main dropped it, the toast says typed, not sent')
+  submitResult = { ok: false, error: 'awaiting_user' }
+  res = await r.runQuickCommand(qcOf('g'))
+  check(!res.ok && res.error === 'awaiting_user' && toasts().at(-1).title === 'Salteada: Shell te espera', "main's own refusal shows the skipped toast")
+  submitResult = { ok: true }
 
   // Desktop agent.
   res = await r.runQuickCommand(qcOf('agent'))
@@ -996,6 +1020,15 @@ async function quickRunChecks() {
   check(ack.ok && submits.at(-1).ptyId === 'pty-q1' && submits.at(-1).paneId === 'q1' && submits.at(-1).text === 'npm test' && submits.at(-1).enter === true, "send writes to the phone's console with the desktop's text, even with the desktop focused elsewhere")
   ack = await ctl({ kind: 'runQuickCommand', workspaceId: 'w2', paneId: 'q1', id: 'qc-g' })
   check(ack.ok && submits.at(-1).ptyId === 'pty-q1', 'a global command runs in any workspace')
+  nSub = submits.length
+  setStatus('q1', { state: 'action', precise: true, provider: 'codex', pendingCount: 1 })
+  ack = await ctl({ kind: 'runQuickCommand', workspaceId: 'w2', paneId: 'q1', id: 'qc-w2only' })
+  check(!ack.ok && ack.error === 'awaiting_user' && submits.length === nSub, "the phone's send to a console waiting on the user answers awaiting_user and writes nothing")
+  setStatus('q1', undefined)
+  submitResult = { ok: false, error: 'enter_held' }
+  ack = await ctl({ kind: 'runQuickCommand', workspaceId: 'w2', paneId: 'q1', id: 'qc-w2only' })
+  check(!ack.ok && ack.error === 'enter_held' && submits.at(-1).userGate === true, "the phone's send asks main for the userGate and acks a dropped Enter as enter_held")
+  submitResult = { ok: true }
   submitResult = { ok: false, error: 'not_running' }
   ack = await ctl({ kind: 'runQuickCommand', workspaceId: 'w2', paneId: 'q1', id: 'qc-g' })
   check(!ack.ok && ack.error === 'not_running', 'a console without a live pty answers not_running')

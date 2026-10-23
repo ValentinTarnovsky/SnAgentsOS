@@ -96,6 +96,7 @@ export const RUN_REASON_KEY: Record<NonNullable<ScheduleRun['reason']>, MessageK
   agent_not_running: 'schedule.reason.agent_not_running',
   multiline_unsafe: 'schedule.reason.multiline_unsafe',
   not_delivered: 'schedule.reason.not_delivered',
+  enter_held: 'schedule.reason.enter_held',
 }
 
 /** Desktop notification per run, opt-in (`scheduleNotify`, E8-FR-31). */
@@ -134,15 +135,23 @@ function finishRun(paneId: string, trigger: Trigger, scheduledFor: number, statu
 /**
  * Send through the shared delivery path (E8-FR-02a): the Enter goes 150 ms
  * after the text drained; multi-line text without bracketed paste is refused.
+ * `userGate`: `decide` only saw the renderer's status, so main checks
+ * `typingBlocked` again on its own status. A console that already waits on
+ * the user gets nothing (`awaiting_user`, logged as `skipped_busy`); one that
+ * starts waiting between the text and the deferred Enter keeps the text typed
+ * and never gets the Enter (`enter_held`, logged as `failed` / `enter_held`).
  */
 function submitRun(paneId: string, ptyId: string, text: string, trigger: Trigger, scheduledFor: number, now: number): void {
   patchRuntime('inflight', paneId, { trigger, scheduledFor, via: 'submit', startedAt: now })
   void window.snApi.pty
-    .submit({ ptyId, paneId, text, enter: true, origin: 'auto' })
+    .submit({ ptyId, paneId, text, enter: true, origin: 'auto', userGate: true })
     .then(
       (res) => {
-        if (res.ok) finishRun(paneId, trigger, scheduledFor, 'sent', undefined, Date.now())
-        else finishRun(paneId, trigger, scheduledFor, 'failed', res.error === 'multiline_unsafe' ? 'multiline_unsafe' : 'not_delivered', Date.now())
+        const at = Date.now()
+        if (res.ok) finishRun(paneId, trigger, scheduledFor, 'sent', undefined, at)
+        else if (res.error === 'awaiting_user') finishRun(paneId, trigger, scheduledFor, 'skipped_busy', undefined, at)
+        else if (res.error === 'enter_held') finishRun(paneId, trigger, scheduledFor, 'failed', 'enter_held', at)
+        else finishRun(paneId, trigger, scheduledFor, 'failed', res.error === 'multiline_unsafe' ? 'multiline_unsafe' : 'not_delivered', at)
       },
       () => finishRun(paneId, trigger, scheduledFor, 'failed', 'not_delivered', Date.now()),
     )

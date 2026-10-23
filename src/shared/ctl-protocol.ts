@@ -159,6 +159,8 @@ export type CtlErrorCode =
   | 'internal'
   /** app 2.3.0: the note changed since `--rev` (reread and retry). */
   | 'conflict'
+  /** `send` to a console whose agent waits on the user (precise permission, question or plan, or an open request): nothing was typed. */
+  | 'awaiting_user'
 
 export interface CtlError {
   code: CtlErrorCode
@@ -171,7 +173,7 @@ export type CtlResponse<T = unknown> = { ok: true; data: T } | { ok: false; erro
 /**
  * Process exit code per error (E8-FR-14): 0 ok, 1 internal, 2 usage, 3 not
  * found, 4 ambiguous, 5 app unavailable, 6 unauthorized, 7 forbidden or
- * disabled, 8 conflict (app 2.3.0), 124 timeout.
+ * disabled, 8 conflict (app 2.3.0), 9 awaiting the user, 124 timeout.
  */
 export const CTL_EXIT: Record<CtlErrorCode, number> = {
   bad_request: 2,
@@ -190,6 +192,7 @@ export const CTL_EXIT: Record<CtlErrorCode, number> = {
   desktop_unavailable: 5,
   internal: 1,
   conflict: 8,
+  awaiting_user: 9,
 }
 
 export interface CtlConsoleInfo {

@@ -179,7 +179,8 @@ export function PaneCell({
     }
     window.snApi.git
       .worktreeInspect({ path: wt.path, base: wt.base })
-      .then((r) => done(r.exists))
+      // A folder left without its `.git` (noCheckout) is no worktree to start a console in.
+      .then((r) => done(r.exists && !r.noCheckout))
       .catch(() => done(true))
     return () => {
       live = false

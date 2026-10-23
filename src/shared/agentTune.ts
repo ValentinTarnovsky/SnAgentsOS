@@ -129,6 +129,20 @@ export function tuneReady(status: TuneGateStatus | null | undefined, provider: A
 }
 
 /**
+ * Nothing may be typed into the console now: its agent waits on the user with
+ * a precise signal (hooks or the Codex bridge), either a precise `action` (a
+ * permission, question or plan menu) or an open request (`pendingCount` > 0).
+ * A digit or an Enter would answer it. A title-only status (SSH, WSL, cmd) never
+ * blocks, even with its `pendingCount` of 1: an `action` read from the title is
+ * just an end of turn. The global prompt, Quick Commands, `snaos send` and the
+ * scheduler all skip such a console.
+ */
+export function typingBlocked(status: Pick<TuneGateStatus, 'state' | 'precise' | 'pendingCount'> | null | undefined): boolean {
+  if (!status || status.precise !== true) return false
+  return status.state === 'action' || (status.pendingCount ?? 0) > 0
+}
+
+/**
  * How a write to an agent's pty changes its input box, for the unsent-input
  * check of a tune with Enter: `report` = terminal replies (never typed) and
  * a lone Esc (an interrupt: it neither types nor clears), `cleared` = it ends

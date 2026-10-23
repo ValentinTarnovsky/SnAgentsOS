@@ -74,6 +74,16 @@ function nextDueChecks() {
   check(hm(fb) === '0 09:00' && fb - local(2026, 10, 31, 9, 0) === 25 * HOUR, 'daily 09:00 across fall back stays at 09:00 local (a 25 h day)')
 }
 
+function typingBlockedChecks() {
+  // The shared "never type over a menu" rule (global prompt, Quick Commands, snaos send, scheduler).
+  const T = load('src/shared/agentTune.ts')
+  check(T.typingBlocked({ state: 'action', precise: true }), 'a precise action (permission, question, plan) blocks typing')
+  check(T.typingBlocked({ state: 'working', precise: true, pendingCount: 1 }) && T.typingBlocked({ state: 'idle', precise: true, pendingCount: 3 }), 'a precise open request blocks in any state')
+  check(!T.typingBlocked({ state: 'action', precise: false }) && !T.typingBlocked({ state: 'action', precise: false, pendingCount: 1 }), 'a title-only action (SSH, WSL, cmd end of turn, pendingCount 1) never blocks')
+  for (const state of ['idle', 'done', 'working', 'error', 'unknown']) check(!T.typingBlocked({ state, precise: true, pendingCount: 0 }), `precise ${state} without a request does not block`)
+  check(!T.typingBlocked(null) && !T.typingBlocked(undefined) && !T.typingBlocked({ state: null, precise: true }) && !T.typingBlocked({ state: 'action' }), 'no status, a cleared state or an unknown precision does not block')
+}
+
 function decideChecks() {
   const now = local(2026, 10, 16, 9, 0, 5)
   const sched = (extra = {}) => ({ time: '09:00', prompt: 'segui', dueAt: local(2026, 10, 16, 9, 0), ...extra })
@@ -91,6 +101,9 @@ function decideChecks() {
   check(S.decide({ ...base, schedule: sched({ waitIdle: false }), status: null }) === 'wait', 'waitIdle off still never types into the shell of an agent pane')
   check(S.decide({ ...base, schedule: sched({ waitIdle: false }), status: { state: 'action', precise: true } }) === 'wait', 'waitIdle off never answers a real permission or question (precise action)')
   check(S.decide({ ...base, trigger: 'manual', schedule: sched({ waitIdle: false }), status: { state: 'action', precise: true } }) === 'wait', 'run now with waitIdle off never answers a precise action either')
+  // An open request (precise pendingCount > 0) blocks like a precise action, whatever the state.
+  check(d({ status: { state: 'idle', precise: true, pendingCount: 1 } }) === 'wait' && S.decide({ ...base, schedule: sched({ waitIdle: false }), status: { state: 'working', precise: true, pendingCount: 2 } }) === 'wait', 'a precise open request waits, waitIdle on or off')
+  check(d({ status: { state: 'action', precise: false, pendingCount: 1 } }) === 'fire' && d({ status: { state: 'idle', precise: true, pendingCount: 0 } }) === 'fire', "a title-only end of turn (its pendingCount 1) still fires; pendingCount 0 changes nothing")
   check(d({ now: local(2026, 10, 16, 8, 59), status: { state: 'idle', precise: true } }) === 'idle', 'not due: idle')
   check(S.decide({ ...base, schedule: sched({ enabled: false }), status: { state: 'idle', precise: true } }) === 'idle', 'enabled:false does nothing')
   // Grace (E8-FR-30).
@@ -210,6 +223,7 @@ async function tickerChecks() {
   r.schedulerTick(now)
   check(submits.length === 1 && submits[0].ptyId === 'pty-p1' && submits[0].paneId === 'p1' && submits[0].text === 'npm test' && submits[0].enter === true, 'due: the prompt goes through pty.submit with Enter')
   check(submits[0].origin === 'auto', 'v2.3: a scheduled prompt goes as origin auto (it never acknowledges a done)')
+  check(submits[0].userGate === true, 'post 2.6.0: a scheduled prompt asks main to re-check typingBlocked (userGate) before the text and before the deferred Enter')
   r.schedulerTick(now)
   check(submits.length === 1, 'a run in flight is never sent twice')
   await flush()
@@ -328,6 +342,28 @@ async function tickerChecks() {
   r.schedulerTick(Date.now())
   await flush()
   check(lastRun('p1').status === 'failed' && lastRun('p1').reason === 'multiline_unsafe', 'multi-line text to a console without bracketed paste: failed multiline_unsafe')
+
+  // userGate outcomes: main saw a menu the renderer's status had not caught up with yet.
+  submits.length = 0
+  submitResult = { ok: false, error: 'awaiting_user' }
+  setSched('p1', { time: '09:00', prompt: 'segui', dueAt: Date.now() - 1000, recurrence: { kind: 'daily' } })
+  r.schedulerTick(Date.now())
+  await flush()
+  check(submits.length === 1 && submits[0].userGate === true, 'fixture: the run went to main with userGate')
+  check(lastRun('p1').status === 'skipped_busy' && !('reason' in lastRun('p1')) && schedOf('p1').dueAt > Date.now() && !r.useScheduleRuntime.getState().inflight.p1, 'awaiting_user (nothing typed): skipped_busy, the daily schedule moves on and the run ends')
+  submitResult = { ok: false, error: 'enter_held' }
+  setSched('p1', { ...schedOf('p1'), dueAt: Date.now() - 1000 })
+  r.schedulerTick(Date.now())
+  await flush()
+  check(lastRun('p1').status === 'failed' && lastRun('p1').reason === 'enter_held', 'enter_held (text typed, Enter dropped): failed with reason enter_held')
+  check(r.translate('es', 'schedule.reason.enter_held').includes('sin enviar') && r.translate('en', 'schedule.reason.enter_held').includes('not sent'), 'the enter_held reason has es and en labels')
+  // "Run now" (desktop dialog and the phone's scheduleRun ctl) goes through the same gated submit.
+  submits.length = 0
+  submitResult = { ok: false, error: 'awaiting_user' }
+  r.runScheduleNow('p1', 'ahora')
+  await flush()
+  check(submits.length === 1 && submits[0].text === 'ahora' && submits[0].userGate === true && submits[0].enter === true, 'run now submits with userGate too')
+  check(lastRun('p1').trigger === 'manual' && lastRun('p1').status === 'skipped_busy' && !r.isManualRunPending(r.useScheduleRuntime.getState(), 'p1'), 'a run now refused by main is logged skipped_busy and no longer pending')
   submitResult = { ok: true }
 
   // Partial mount (E8-FR-30): an unvisited 4-console workspace starts only the due console.
@@ -402,6 +438,7 @@ async function tickerChecks() {
 
 async function main() {
   nextDueChecks()
+  typingBlockedChecks()
   decideChecks()
   historyChecks()
   await tickerChecks()

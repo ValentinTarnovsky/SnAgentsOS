@@ -1359,6 +1359,48 @@ async function shellIntegrationChecks() {
     check(typed(h.procs[0]) === 'ssh host\rsecret\r', 'the next step matches as usual')
     pm.killAll()
   }
+  // A secret step blanked by an export stops the setup: no bare Enter in the
+  // password prompt, no later step nor agent command typed there.
+  {
+    current = fakeHarness()
+    const sent = []
+    const pm = new winMod.PtyManager(() => ({ isDestroyed: () => false, send: (ch, p) => sent.push({ ch, p }) }))
+    pm.setEngine({ snapshotMode: 'off', shellIntegration: false })
+    const h = current
+    const prompts = []
+    pm.addPromptListener(evt => prompts.push(evt))
+    pm.setSetupNoticeSource(step => `paso ${step} sin secreto\x07`)
+    const warns = []
+    const oldWarn = ptyConsole.warn
+    ptyConsole.warn = (...a) => warns.push(a.join(' '))
+    const steps = [
+      { send: 'ssh me@host', delayMs: 10 },
+      { send: '', waitFor: 'password:', timeoutMs: 10000, delayMs: 10, secret: true },
+      { send: 'cd /srv', waitFor: '$ ', timeoutMs: 10000, delayMs: 10 },
+    ]
+    pm.spawn({ paneId: 's1', cols: 80, rows: 24, setup: steps, initialCommand: 'claude', initialPrompt: { text: 'hola', enter: true } })
+    await clock.advance(400)
+    check(typed(h.procs[0]).startsWith('ssh me@host\r'), 'the steps before the blank secret run')
+    h.procs[0].emit('me@host password: ')
+    await clock.advance(1000)
+    h.procs[0].emit('\r\n$ ')
+    await clock.advance(15000)
+    check(!/\r\r|ssh me@host\r(\r|cd|claude)/.test(typed(h.procs[0])) && !typed(h.procs[0]).includes('cd /srv') && !typed(h.procs[0]).includes('claude'), 'no Enter for the blank secret, no later step and no agent command')
+    const out = sent.filter(s => s.ch === 'pty:data').map(s => s.p.data).join('')
+    check(out.includes('paso 2 sin secreto') && !out.includes('\x07---'), 'the pane shows the localized notice for step 2, control characters stripped')
+    check(warns.some(w => w.includes('stopped at step 2')) && !warns.some(w => w.includes('hola')), 'main logs the stop (step only, no text)')
+    check(prompts.length === 1 && prompts[0].paneId === 's1' && prompts[0].result === 'not_delivered', 'the initial prompt is reported as not delivered, never sent or gated')
+    ptyConsole.warn = oldWarn
+    pm.killAll()
+  }
+  {
+    // A secret step WITH text and a plain empty step (a bare Enter) still run.
+    const { pm, h } = winManager({ snapshotMode: 'off', shellIntegration: false })
+    pm.spawn({ paneId: 's2', cols: 80, rows: 24, setup: [{ send: '', delayMs: 10 }, { send: 'pw', delayMs: 10, secret: true }], initialCommand: 'claude' })
+    await clock.advance(2000)
+    check(typed(h.procs[0]) === '\rpw\rclaude\r', 'a non secret empty step and a filled secret step are typed as before')
+    pm.killAll()
+  }
 
   // Schema 14 key (R31-00 owns the bump): tolerant of junk, default on.
   {

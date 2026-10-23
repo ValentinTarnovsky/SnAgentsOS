@@ -14,6 +14,7 @@ import { ScrollbackStore, buildSeed } from './pty/ScrollbackStore'
 import { ScrollbackCheckpoint } from './pty/ScrollbackCheckpoint'
 import { createShutdownPersist, wirePowerShutdown, wireSessionEnd } from './pty/shutdownPersist'
 import { engineFromSettings } from '@shared/terminalEngine'
+import { resolvePresetEnv } from '@shared/presetEnv'
 import { ConfigStore } from './store/ConfigStore'
 import { parseConfig } from './store/schema'
 import { sanitizeExport } from './store/exportConfig'
@@ -574,6 +575,11 @@ async function bootstrap(): Promise<void> {
   // Headless mirror policy from the saved config before any pty spawns (E6-FR-01);
   // the renderer pushes every later change on pty:setEngine.
   ptyManager.setEngine(engineFromSettings(configStore.load()?.settings))
+  // A preset's env (AgentPreset.env) from main's own config at every spawn and
+  // restart: desktop, phone, CLI, resume and wake all land in PtyManager.
+  ptyManager.setPresetEnvSource((paneId, presetHint) => resolvePresetEnv(configStore.load(), paneId, presetHint))
+  // A Connection that stops at a secret step without text (an imported export) says so in the pane.
+  ptyManager.setSetupNoticeSource((step) => mainT(configStore.load(), 'pty.setupSecretMissing', { n: step }))
   // Saved scrollback (E6-FR-08..13): the first spawn of each pane restores
   // its file (sanitized, with the dated separator), a checkpoint saves every
   // 60 s and the exit paths below save synchronously.

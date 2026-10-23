@@ -87,7 +87,7 @@ export function viewRow(row: UsageRow, t: TFn): RowView {
     percent: row.percent,
     valueText,
     subText: when ? t('aiusage.resets', { when }) : undefined,
-    title: row.stale ? t('aiusage.stale') : undefined,
+    title: row.stale ? t('aiusage.stale') : row.partial ? t('aiusage.partial') : undefined,
     muted: false,
   }
 }

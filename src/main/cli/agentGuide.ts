@@ -66,6 +66,10 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
   timeout, or run the wait in the background if your tool can.
 - \`send --enter\` followed by \`wait --idle\` returns only after the new turn started and ended;
   \`noTurnObserved: true\` means nothing happened in 10 s (check the console with \`read\`).
+- \`send\` (with or without \`--enter\`) to a console waiting on its user (a permission, question or
+  plan menu) types nothing and exits 9 (\`awaiting_user\`). If the menu opens after the text was
+  typed, \`--enter\` drops the Enter (the text stays unsent) and also exits 9. Never try to answer
+  another agent's menu: tell the user, or \`wait\` and send later.
 - Never \`kill\`, \`restart\` or \`ws close\` a console or workspace unless the user asked for it.
   None of them works on your own console or workspace, consoles with a Connection Profile
   answer \`ssh_protected\`, and \`ws close\` always needs \`--yes\` (it ends every console there).
@@ -149,6 +153,6 @@ SnAgentsOS shows your console as done when your turn ends. If you are not done y
 
 0 ok, 1 internal error, 2 bad usage, 3 not found or not running, 4 ambiguous, 5 app not
 available, 6 unauthorized (restart the console), 7 forbidden or disabled, 8 conflict (the note
-changed since --rev), 124 timeout.
+changed since --rev), 9 awaiting the user (a permission, question or plan menu), 124 timeout.
 `
 }

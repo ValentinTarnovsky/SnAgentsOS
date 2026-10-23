@@ -1,6 +1,6 @@
 // Agent race UI (E7-FR-33..35) in an isolated hidden Electron window: the
 // global prompt's destination chips and "Send with Enter" (paste path, plain
-// console on one line), race mode (counters capped at 4, "this workspace"
+// console on one line, a console waiting on the user skipped), race mode (counters capped at 4, "this workspace"
 // only when it fits, base from the probe, Ctrl+Enter starts), the race bar
 // (state glyph, diffstat against base, View changes in "against base" mode,
 // Copy git checkout, Discard, Keep this one with its checkbox, close) and the
@@ -27,6 +27,7 @@ import {useRaceStore} from './src/renderer/lib/race';
 import {useWorktreeStore} from './src/renderer/lib/worktreeStore';
 import {registerPaster} from './src/renderer/lib/pasteRegistry';
 import {registerPty} from './src/renderer/lib/ptyRegistry';
+import {useToastStore} from './src/renderer/lib/toast';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 const sha='f6c3fc4f451077c2689a52f81295236419257c5d';
 const calls={add:[],remove:[],writes:[],clip:[],status:[],stat:[]};
@@ -59,7 +60,7 @@ applyTheme('midnight');
 function Bar(){const ws=useAppStore(s=>s.workspaces.find(w=>w.id===s.activeWorkspaceId));return ws?<div data-bar-host className="w-full"><RaceBar workspace={ws}/></div>:null}
 function Panel(){const p=useGitStore(s=>s.panel);const ws=useAppStore(s=>s.workspaces.find(w=>w.id===s.activeWorkspaceId));return p&&ws?<div className="relative h-[420px]"><ChangesPanel workspace={ws} targetKey={p.targetKey} base={p.base}/></div>:null}
 createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div style={{height:'100vh'}} className="flex flex-col bg-bg-primary text-text-primary"><Bar/><Panel/><GlobalPromptDialog/><WorktreeCloseDialog/></div></I18nProvider>);
-window.smoke={app:useAppStore,git:useGitStore,race:useRaceStore,wt:useWorktreeStore,calls,pasted,fake,mount,sha,
+window.smoke={app:useAppStore,git:useGitStore,race:useRaceStore,wt:useWorktreeStore,toasts:useToastStore,calls,pasted,fake,mount,sha,
  key:(k,o)=>document.querySelector('[data-global-prompt-text]').dispatchEvent(new KeyboardEvent('keydown',Object.assign({key:k,bubbles:true},o||{})))};
 `, resolveDir: root, loader: 'tsx' }, bundle: true, platform: 'browser', format: 'iife', outfile: path.join(dir, 'renderer.js'), alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
 fs.writeFileSync(path.join(dir, 'index.html'), `<html><head><meta charset="utf-8"><link rel="stylesheet" href="${pathToFileURL(path.join(assets, css))}"></head><body><div id="root"></div><script src="renderer.js"></script></body></html>`)
@@ -97,6 +98,16 @@ app.whenReady().then(async()=>{
  ok(JSON.stringify(await js('smoke.pasted.min'))==='[]','a minimized console got nothing');
  ok(JSON.stringify(await js('smoke.calls.writes'))==='[{"ptyId":"pty-a1","data":"\\r","origin":"auto"}]','Enter only to the agent '+JSON.stringify(await js('smoke.calls.writes')));
  ok(!(await js("!!document.querySelector('[data-global-prompt]')")),'Ctrl+Enter sends and closes');
+ // A console waiting on the user (precise permission menu): skipped whole, the toast says so.
+ await js("smoke.app.setState(s=>({paneStatus:{...s.paneStatus,a1:{state:'action',precise:true,provider:'claude',pendingCount:1}}}));smoke.calls.writes.length=0;smoke.pasted.a1.length=0;smoke.pasted.sh.length=0");
+ await js("smoke.app.setState({globalPromptOpen:true})");await wait(250);
+ await setText('1');await click('[data-global-prompt-enter]');await wait(60);
+ await js("smoke.key('Enter',{ctrlKey:true})");await wait(400);
+ ok(JSON.stringify(await js('smoke.pasted.a1'))==='[]'&&JSON.stringify(await js('smoke.calls.writes'))==='[]','nothing pasted and no Enter into a permission menu');
+ ok(JSON.stringify(await js('smoke.pasted.sh'))==='["1"]','the plain console still got it');
+ const skipToast=await js("(()=>{const t=smoke.toasts.getState().items.filter(i=>i.dedupeKey==='globalPrompt').at(-1);return t?[t.kind,t.title,t.body||'']:null})()");
+ ok(JSON.stringify(skipToast)===JSON.stringify(['warning','Prompt enviado a 1 consola (Enter solo a los agentes)','1 consola salteada: te espera']),'the toast reports the skipped console '+JSON.stringify(skipToast));
+ await js("smoke.app.setState(s=>({paneStatus:{...s.paneStatus,a1:{state:'idle',precise:true,provider:'claude'}}}));smoke.calls.writes.length=0");
 
  // FR-34: race mode with 10 consoles: only a new workspace fits the defaults.
  await js("smoke.app.setState(s=>({workspaces:s.workspaces.map(w=>({...w,panes:[...w.panes,...Array.from({length:7},(_,i)=>({id:'f'+i,type:'shell',title:'F'+i,color:'#888',icon:'terminal'}))]}))}))");
@@ -151,6 +162,14 @@ app.whenReady().then(async()=>{
  await click('[data-worktree-keep]');await wait(150);
  ok((await js("smoke.wt.getState().close"))===null,'Keep in that dialog closes the console only');
  await js("smoke.app.getState().reopenClosedPane()");await wait(150);
+ // Keep this one: an other with a half-done merge is shown as staying, never deleted.
+ await js("void (smoke.fake.prevInspect=smoke.fake.inspect,smoke.fake.inspect=(r)=>({exists:true,dirtyFiles:2,commitsAhead:0,mergedIntoHead:false,inProgress:'merge'}))");
+ await click('[data-race-row="'+ids[2]+'"] [data-race-keep]');await wait(300);
+ const kb=await js("({rows:[...document.querySelectorAll('[data-race-keep-rows] li')].map(e=>e.getAttribute('data-race-keep-blocked')),text:document.querySelector('[data-race-keep-rows]')?.textContent||'',ack:!!document.querySelector('[data-race-keep-ack]'),dis:document.querySelector('[data-race-keep-confirm]').disabled})");
+ ok(kb.rows.length>0&&kb.rows.every(b=>b==='inProgress')&&kb.text.includes('git merge a medias')&&!kb.ack&&kb.dis,'a contestant with a half-done merge stays, nothing to delete '+JSON.stringify(kb));
+ await js("document.querySelector('[data-race-keep-dialog] [data-race-keep-confirm]').previousElementSibling.click()");await wait(150);
+ ok(!(await js("!!document.querySelector('[data-race-keep-dialog]')"))&&(await js("smoke.calls.remove.length"))===1,'cancelled, nothing was asked of main');
+ await js("void (smoke.fake.inspect=smoke.fake.prevInspect)");
  // Keep this one: the dirty other needs the checkbox.
  await click('[data-race-row="'+ids[2]+'"] [data-race-keep]');await wait(300);
  ok((await q('[data-race-keep-rows]')).includes('2 archivos, 0 commits'),'the others with what they lose');

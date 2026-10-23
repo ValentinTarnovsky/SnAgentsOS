@@ -130,7 +130,8 @@ export const scheduleRunSchema = z.object({
   scheduledFor: z.number(),
   trigger: z.enum(['scheduled', 'manual']),
   status: z.enum(['sent', 'sent_unconfirmed', 'skipped_busy', 'missed', 'failed']),
-  reason: z.enum(['agent_not_running', 'multiline_unsafe', 'not_delivered']).optional().catch(undefined),
+  // `enter_held` post 2.6.0: an older build drops the unknown reason (catch) and keeps the run.
+  reason: z.enum(['agent_not_running', 'multiline_unsafe', 'not_delivered', 'enter_held']).optional().catch(undefined),
 })
 
 type ScheduleRunParsed = z.infer<typeof scheduleRunSchema>

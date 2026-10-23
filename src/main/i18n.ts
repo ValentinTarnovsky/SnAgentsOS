@@ -29,6 +29,7 @@ const MESSAGES = {
     'legacy.failed.quit': 'Quit',
     'pty.restarted': 'restarted {time}',
     'pty.historyRestored': 'restarted - history from {date}',
+    'pty.setupSecretMissing': 'Connection stopped at step {n}: its secret is empty (an exported config never carries it). Type it now or fill it in Settings > Connections.',
     // Crash resilience dialogs (E4-FR-21, 25).
     'crash.breaker.message': '{app} could not recover the window.',
     'crash.breaker.detailNone': 'No consoles are running.',
@@ -112,6 +113,7 @@ const MESSAGES = {
     'legacy.failed.quit': 'Salir',
     'pty.restarted': 'reiniciado {time}',
     'pty.historyRestored': 'reiniciado - historial del {date}',
+    'pty.setupSecretMissing': 'Conexión detenida en el paso {n}: su secreto está vacío (una configuración exportada nunca lo lleva). Escribilo ahora o completalo en Ajustes > Conexiones.',
     'crash.breaker.message': '{app} no pudo recuperar la ventana.',
     'crash.breaker.detailNone': 'No hay consolas en ejecución.',
     'crash.breaker.detailOne': 'Tu consola sigue corriendo en segundo plano.',

@@ -46,6 +46,7 @@ import {
 } from '@shared/ctl-protocol'
 import { resolveConsoleRef, resolveNoteRef, resolveWorkspaceRef, workspaceOfPane, type RefError } from '@shared/ctlRefs'
 import { stripAnsi, tailLines } from '@shared/ansi'
+import { typingBlocked } from '@shared/agentTune'
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { WS_NOTE_MAX_BYTES, WS_NOTE_TITLE_MAX, type WsNoteCreateReq, type WsNoteDoc, type WsNoteError, type WsNoteMeta, type WsNoteReadReq, type WsNoteResult, type WsNoteWriteReq, type WsNotesListRes } from '@shared/ws-notes'
 import { chatMessageOffset, type ChatBlock, type ChatMessage, type ChatUnavailableReason } from '@shared/chat-types'
@@ -61,7 +62,7 @@ import type { CtlCaller } from './CtlTokens'
 /** The PtyManager surface the CLI uses. */
 export interface CtlPtyView {
   ptyIdForPane(paneId: string): string | null
-  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean, origin?: 'user' | 'auto'): Promise<PtySubmitRes>
+  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean, origin?: 'user' | 'auto', readyFor?: AgentProvider, userGate?: boolean): Promise<PtySubmitRes>
   lastSubmitAt(paneId: string): number | undefined
   lastOutputAt(paneId: string): number | undefined
   /** The live pty's raw ring (no side effects), or null. */
@@ -595,9 +596,21 @@ export class CtlHandlers {
     if (this.sshProtected(t.workspace, t.pane)) return err('ssh_protected', 'this console has a Connection Profile (cliProtectSsh)')
     const ptyId = this.deps.pty.ptyIdForPane(t.pane.id)
     if (!ptyId) return err('not_running', 'the console is not running')
+    // A menu waiting on the user (main's own status): a digit or an Enter
+    // would answer it, so one agent could approve another's permission.
+    if (typingBlocked(this.deps.status.stateOf(t.pane.id))) {
+      return err('awaiting_user', 'the console waits on the user (a permission, question or plan): nothing was typed')
+    }
     // v2.3: an agent's send answers the prompt (cards go away) but never marks the user's result as seen.
-    const res = await this.deps.pty.submitToPane(ptyId, t.pane.id, text, enter, 'auto')
-    if (!res.ok) return res.error === 'multiline_unsafe' ? err('multiline_unsafe', 'multi-line text: this console does not accept a safe paste') : err('not_running', 'the console is not running')
+    // userGate: main checks again right before the deferred Enter, so a menu
+    // that opens while the text is typed never gets it.
+    const res = await this.deps.pty.submitToPane(ptyId, t.pane.id, text, enter, 'auto', undefined, true)
+    if (!res.ok) {
+      if (res.error === 'multiline_unsafe') return err('multiline_unsafe', 'multi-line text: this console does not accept a safe paste')
+      if (res.error === 'awaiting_user') return err('awaiting_user', 'the console waits on the user (a permission, question or plan): nothing was typed')
+      if (res.error === 'enter_held') return err('awaiting_user', 'the console started waiting on the user (a permission, question or plan) before the Enter: the text was typed, not submitted')
+      return err('not_running', 'the console is not running')
+    }
     return ok({ paneId: t.pane.id, enter })
   }
 
