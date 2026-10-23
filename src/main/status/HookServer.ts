@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import { timingSafeEqual } from 'crypto'
-import type { RemotePending } from '@shared/types'
+import { PLAN_TEXT_MAX, type RemotePending } from '@shared/types'
 import { isTuneEffort } from '@shared/agentTune'
-import { LIMITS, claudeConfigDir, cleanString, extractQuestions, isSafeCwd, isSafeTranscriptPath, summarizeRequest, summarizeTool } from './statusDetails'
+import { fileOfToolInput } from '@shared/toolActivity'
+import { LIMITS, claudeConfigDir, clip, cleanString, extractQuestions, isSafeCwd, isSafeTranscriptPath, sanitize, summarizeRequest, summarizeTool } from './statusDetails'
 
 /** One Claude Code hook event, already attributed to a console. */
 export interface HookEvent {
@@ -26,8 +27,25 @@ export interface HookEvent {
   transcriptPath?: string
   /** UserPromptSubmit json.prompt, <= 2000. */
   prompt?: string
-  /** Stop json.last_assistant_message, <= 2000. */
+  /** Stop and StopFailure json.last_assistant_message, <= 2000. */
   lastAssistantMessage?: string
+  /** App 2.7.0 (A3): StopFailure json.error (rate_limit, overloaded...), one line, <= 32. */
+  failureCode?: string
+  /** App 2.7.0 (A3): StopFailure json.error_details, one line, <= 300. */
+  errorDetails?: string
+  /**
+   * App 2.7.0 (A3): PreToolUse / PermissionRequest of ExitPlanMode, the whole
+   * tool_input.plan with its line breaks, <= PLAN_TEXT_MAX UTF-16 units.
+   */
+  planText?: string
+  /** The plan was longer than PLAN_TEXT_MAX and planText is its cut start. */
+  planTruncated?: boolean
+  /**
+   * App 2.7.0 (A3): PreToolUse / PermissionRequest, the file the tool works
+   * on (fileOfToolInput: read, edit and notebook tools), its last two path
+   * segments, <= 120. Feeds the turn digest.
+   */
+  toolFile?: string
   /** SessionEnd json.reason ('clear' | 'logout' | 'prompt_input_exit' | 'other' | ...). */
   endReason?: string
   /** summarizeTool(tool_name, tool_input), <= 160. */
@@ -243,6 +261,13 @@ export function parseHookPayload(consoleId: string, ptyId: string, name: string,
     evt.lastAssistantMessage = cleanString(json.last_assistant_message, LIMITS.text)
     evt.background = backgroundTasks(json.background_tasks)
   }
+  // App 2.7.0 (A3, E10 SPIKE S6): `error` (one of 13 codes), `error_details?`
+  // and `last_assistant_message?` (where Claude prints a limit's reset time).
+  if (name === 'StopFailure') {
+    evt.failureCode = cleanString(json.error, 32, true)
+    evt.lastAssistantMessage = cleanString(json.last_assistant_message, LIMITS.text)
+    evt.errorDetails = cleanString(json.error_details, 300, true)
+  }
   if (name === 'SessionEnd') evt.endReason = cleanString(json.reason, 64, true)
   if (name === 'SessionStart') {
     evt.source = cleanString(json.source, 32, true)
@@ -256,10 +281,31 @@ export function parseHookPayload(consoleId: string, ptyId: string, name: string,
   if ((name === 'PreToolUse' || name === 'PermissionRequest') && toolName) {
     evt.toolSummary = summarizeTool(toolName, json.tool_input) || undefined
     evt.requestSummary = summarizeRequest(toolName, json.tool_input) || undefined
+    evt.toolFile = fileOfToolInput(toolName, json.tool_input)
     if (toolName === 'AskUserQuestion') {
       evt.questions = extractQuestions(json.tool_input)
       evt.question = evt.questions?.[0]?.question
     }
+    if (toolName === 'ExitPlanMode') {
+      const plan = planText(json.tool_input)
+      if (plan) {
+        evt.planText = plan.text
+        if (plan.truncated) evt.planTruncated = true
+      }
+    }
   }
   return evt
+}
+
+/**
+ * App 2.7.0 (A3): the whole ExitPlanMode plan for "Leer plan completo",
+ * sanitized with its line breaks kept (3+ blank lines collapse to one) and
+ * cut to PLAN_TEXT_MAX UTF-16 units. Undefined without a plan string.
+ */
+function planText(toolInput: unknown): { text: string; truncated: boolean } | undefined {
+  const raw = toolInput && typeof toolInput === 'object' ? (toolInput as Record<string, unknown>).plan : undefined
+  if (typeof raw !== 'string') return undefined
+  const clean = sanitize(raw)
+  if (!clean) return undefined
+  return { text: clip(clean, PLAN_TEXT_MAX), truncated: clean.length > PLAN_TEXT_MAX }
 }

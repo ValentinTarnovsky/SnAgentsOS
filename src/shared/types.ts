@@ -4,6 +4,8 @@
  */
 import type { PaneWorktree } from './worktree-types'
 import type { LabsSettings } from './labs'
+import type { ToolFamily, TurnDigest } from './toolActivity'
+import type { FailureInfo } from './failure'
 
 export type { PaneWorktree }
 
@@ -480,6 +482,62 @@ export interface PaneStatusDetails {
   model?: string
   effort?: string
   ultracode?: boolean
+  /**
+   * App 2.7.0 (A3): family of the newest tool still open (`activity` is its
+   * summary). Absent while no tool runs. Reaches the phone.
+   */
+  toolFamily?: ToolFamily
+  /** App 2.7.0 (A3): why the last turn failed; cleared by the next `working`. Reaches the phone. */
+  failure?: FailureInfo
+  /** App 2.7.0 (A3): a working agent with no signal for a while (SilenceWatch). Reaches the phone. */
+  silence?: PaneSilence
+  /** App 2.7.0 (A3): open `snaos needs` request; raises attention, never `pending`. Reaches the phone. */
+  needs?: PaneNeeds
+  /** App 2.7.0 (A3): silenced by the user until the effective state changes. Reaches the phone. */
+  muted?: boolean
+  /** App 2.7.0 (A3): tools of the current turn, frozen as the last turn's on done. Desktop only. */
+  digest?: TurnDigest
+  /**
+   * App 2.7.0 (A3): epoch ms of the last sign of life (hook, Codex app-server
+   * line). Desktop only and never part of the publish signature.
+   */
+  signalAt?: number
+  /**
+   * App 2.7.0 (A3): minimal status that only carries `needs` for a pane
+   * without an agent track; consumers treat its state as no agent state.
+   * Desktop only (the phone gets the status without it). Absent = a real status.
+   */
+  bare?: true
+}
+
+/** App 2.7.0 (A3): silence levels of a working agent, `quiet` after quietMin, `stalled` after stalledMin. */
+export type SilenceLevel = 'quiet' | 'stalled'
+
+/** App 2.7.0 (A3): `since` is the signalAt the silence counts from. */
+export interface PaneSilence {
+  level: SilenceLevel
+  since: number
+}
+
+/** Longest `snaos needs` text kept (one line). */
+export const NEEDS_TEXT_MAX = 200
+
+/** App 2.7.0 (A3): what the agent asked for with `snaos needs`, and when. */
+export interface PaneNeeds {
+  text: string
+  at: number
+}
+
+/** Longest ExitPlanMode plan kept for "Leer plan completo", in UTF-16 units. */
+export const PLAN_TEXT_MAX = 32 * 1024
+
+/** App 2.7.0 (A3): the full plan of an ExitPlanMode request (`status:plan`, `planReq`). */
+export interface PanePlan {
+  requestId: string
+  text: string
+  at: number
+  /** The plan was longer than PLAN_TEXT_MAX and was cut. */
+  truncated: boolean
 }
 
 /**
@@ -694,6 +752,19 @@ export interface AgentSettings {
   syncAgentRename: boolean
   /** A `claude`/`codex` typed in a shell console is tracked as an agent (OSC 133 `agent=`, schema 17). */
   shellAgentDetect: boolean
+  /** Silence watch of working agents (schema 19, app 2.7.0). */
+  silence: SilenceSettings
+}
+
+/**
+ * Silence watch (schema 19, app 2.7.0): a working agent without a signal for
+ * quietMin minutes reads `quiet`, for stalledMin `stalled`. It never kills or
+ * writes; quietMin < stalledMin.
+ */
+export interface SilenceSettings {
+  enabled: boolean
+  quietMin: number
+  stalledMin: number
 }
 
 /** Claude prompt cache timer (E5-FR-28, schema 13). */

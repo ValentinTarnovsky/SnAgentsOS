@@ -125,6 +125,11 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     n: z.number().int().min(1).max(9),
     label: z.string().min(1).max(160),
   }),
+  // app 2.7.0 (A3): status marks, handled in main (StatusManager). Only the
+  // pane id travels; main says whether the mark applies (ack not_found).
+  z.object({ kind: z.literal('markRead'), paneId: id }),
+  z.object({ kind: z.literal('mutePane'), paneId: id, muted: z.boolean() }),
+  z.object({ kind: z.literal('silenceAck'), paneId: id }),
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [
@@ -166,6 +171,9 @@ export const remoteClientMsgSchema = z.discriminatedUnion('type', [
     text: z.string().max(WS_NOTE_PHONE_MAX).optional(),
     baseRev: z.string().max(64).optional(),
   }),
+  // app 2.7.0 (A3): the full ExitPlanMode plan; behind the bucket by name and
+  // a per-session window (SessionManager). `requestId` as answerMenu's pendingId.
+  z.object({ v: z.number(), type: z.literal('planReq'), id: gitReqId, paneId: id, requestId: z.string().min(1).max(200).optional() }),
   // E3 M12 Chat view (R30-05); behind the per-session bucket by name. Main
   // clamps `before` to [0, size] and aligns it to the next line start.
   z.object({ v: z.number(), type: z.literal('chatSub'), paneId: id }),

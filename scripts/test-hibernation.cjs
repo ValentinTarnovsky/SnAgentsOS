@@ -64,6 +64,7 @@ function testPlanner() {
     noPty: cand('x', { live: false }),
     recent: cand('x', { stateSince: now - 4 * MIN }),
     noSince: cand('x', { stateSince: undefined }),
+    needs: cand('x', { needs: true }),
   }
   for (const [name, c] of Object.entries(excluded)) check(!H.isEligible(c, 5, now), `excluded: ${name}`)
   check(H.isEligible(cand('x', { state: 'idle', provider: 'codex' }), 5, now), 'Codex idle is eligible too')
@@ -191,6 +192,54 @@ function testCoordinator() {
   check(!store.isAvailable('b'), 'a frozen store (exiting) never offers a console to hibernation')
 }
 
+/**
+ * App 2.7.0 (A3): a console with an open `snaos needs` never sleeps, muted or
+ * not. The minimal idle status StatusManager publishes for a live pane with
+ * no track (an idle Claude console with an old stateSince) carries it, and
+ * once cleared that status is gone, so it never makes the pane a candidate.
+ */
+function testNeeds() {
+  let clock = 1_000 * MIN
+  class FakeDate extends Date { static now() { return clock } }
+  const { StatusManager } = load('src/main/status/StatusManager.ts', {
+    require: (id) => (id === 'electron' ? { Notification: { isSupported: () => false } } : require(id)),
+    Date: FakeDate, setTimeout: () => 0, clearTimeout: () => {},
+  })
+  const cfg = { workspaces: [{ id: 'w', name: 'W', panes: [{ id: 'bare', type: 'claude', title: 'B' }, { id: 'done', type: 'codex', title: 'D' }] }] }
+  const status = new StatusManager(() => null, () => cfg, () => {})
+  status.onSpawn('pty-b', 'bare'); status.onSpawn('pty-d', 'done')
+  const codex = (kind) => status.onAgentEvent({ paneId: 'done', ptyId: 'pty-d', provider: 'codex', sessionId: UUID, kind })
+  codex('start'); codex('working'); codex('done')
+  check(status.setNeeds('bare', 'Revisá el diff') && status.setNeeds('done', 'Aprobá el deploy') && status.setMuted('done', true), 'needs on a pane with no track and on a done Codex console (muted)')
+  const bare = status.stateOf('bare')
+  check(bare.state === 'idle' && bare.provider === 'claude' && bare.stateSince === clock && bare.needs.text === 'Revisá el diff', 'the bare needs status is an idle Claude console')
+  check(status.stateOf('done').muted === true && status.stateOf('done').needs.text === 'Aprobá el deploy', 'muted keeps needs on the status')
+  const slept = []
+  const coord = new H.HibernationCoordinator({
+    statuses: () => status.snapshot(),
+    lastInputAt: () => undefined,
+    hasPty: () => true,
+    subscribedPaneIds: () => new Set(),
+    isAvailable: () => true,
+    getConfig: () => cfg,
+    hibernate: (evt) => slept.push(evt.paneId),
+    now: () => clock,
+    setInterval: () => 1,
+    clearInterval: () => {},
+  })
+  coord.setConfig({ idleMinutes: 5, keep: [] })
+  clock += 30 * MIN
+  const asCandidate = (s) => ({ paneId: s.paneId, provider: s.provider, state: s.state, stateSince: s.stateSince, live: true, visible: false, subscribed: false, schedulePending: false })
+  check(H.isEligible(asCandidate(status.stateOf('bare')), 5, clock) && H.isEligible(asCandidate(status.stateOf('done')), 5, clock), 'without its needs both statuses would pass every other rule')
+  coord.tick(); clock += MIN; coord.tick(); clock += MIN; coord.tick()
+  check(slept.length === 0, 'with needs open neither sleeps (the bare status and the muted done console)')
+  status.setNeeds('bare', null); status.setNeeds('done', null)
+  check(status.stateOf('bare') === null && !status.snapshot().some((s) => s.paneId === 'bare'), 'clearing the bare needs drops its status: no candidate at all')
+  coord.tick(); clock += MIN; coord.tick()
+  check(slept.join() === 'done', 'answered: the done console sleeps two ticks later, the pane with no track never')
+  status.dispose()
+}
+
 function testBoardAndNav() {
   const code = buildSync({ stdin: { contents: `
 export * from './agentsBoard'
@@ -298,8 +347,9 @@ function testKeymapAndI18n() {
 testPlanner()
 testShared()
 testCoordinator()
+testNeeds()
 testBoardAndNav()
 testMobileTrack()
 testKeymapAndI18n()
 fs.rmSync(tmp, { recursive: true, force: true })
-console.log(`PASS: ${checks} hibernation checks (planner 2 ticks, lastInputAt, exclusions, 3 per tick, schedules, coordinator interval and explicit kill on a real session store, cache helpers, board columns and keys, sleeping entries, phone cache tracking with clock skew, keymap, i18n)`)
+console.log(`PASS: ${checks} hibernation checks (planner 2 ticks, lastInputAt, exclusions, 3 per tick, schedules, coordinator interval and explicit kill on a real session store, needs never sleeps, cache helpers, board columns and keys, sleeping entries, phone cache tracking with clock skew, keymap, i18n)`)

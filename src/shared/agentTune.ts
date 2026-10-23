@@ -173,6 +173,12 @@ export const TUNE_MIN_APP_VERSION = '2.3.0'
 export const APP_2_4_0 = '2.4.0'
 
 /**
+ * First desktop with the 2.7.0 phone features (`markRead`, `mutePane`, `silenceAck`,
+ * `planReq`, the team frames); the phone gates them with `appVersionAtLeast(v, APP_2_7_0)`.
+ */
+export const APP_2_7_0 = '2.7.0'
+
+/**
  * `appVersion` (authOk) is at least `min`. 'dev' counts as new; an empty or
  * unparsable version as old. Pre-release tags are ignored.
  */

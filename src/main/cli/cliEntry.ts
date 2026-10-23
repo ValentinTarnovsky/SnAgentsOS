@@ -25,6 +25,7 @@ import {
   type CtlMethod,
   type CtlPeekResult,
   type CtlResponse,
+  type CtlStatusSignals,
   type CtlUsageResult,
   type CtlWorkspaceInfo,
   type SnaosRuntimeFile,
@@ -43,7 +44,7 @@ const VALUE_FLAGS = new Set(['workspace', 'console', 'path', 'prompt', 'prompt-f
 const BOOL_FLAGS = new Set(['json', 'focus', 'no-profile', 'enter', 'clear', 'local', 'idle', 'agent', 'help', 'tools', 'thinking', 'yes', 'resume', 'fresh', 'close', 'off', 'composer', 'open'])
 const ALIASES: Record<string, string> = { w: 'workspace', c: 'console', n: 'lines', h: 'help', t: 'title', y: 'yes' }
 
-const COMMANDS = ['ping', 'ls', 'open', 'spawn', 'send', 'read', 'wait', 'status', 'notify', 'note', 'chat', 'peek', 'kill', 'restart', 'rename', 'focus', 'ws', 'notes', 'usage', 'account', 'help'] as const
+const COMMANDS = ['ping', 'ls', 'open', 'spawn', 'send', 'read', 'wait', 'status', 'notify', 'note', 'chat', 'peek', 'kill', 'restart', 'rename', 'focus', 'ws', 'notes', 'usage', 'account', 'needs', 'help'] as const
 type Command = (typeof COMMANDS)[number]
 const COMMAND_ALIASES: Record<string, Command> = { workspace: 'ws' }
 
@@ -78,6 +79,7 @@ const ALLOWED: Record<Command, string[]> = {
   notes: [],
   usage: ['provider'],
   account: [],
+  needs: ['workspace', 'console', 'clear'],
   help: ['agent'],
 }
 
@@ -175,7 +177,7 @@ function readUserFile(io: ClientIo, path: string, label: string): string {
   }
 }
 
-/** The text of `send`, `notify`, `status`, `note`: the remaining positionals, joined. */
+/** The text of `send`, `notify`, `status`, `note`, `needs`: the remaining positionals, joined. */
 const restText = (p: string[]): string | undefined => (p.length ? p.join(' ') : undefined)
 
 /** A note body: `--file`, a lone `-` (stdin), else the words joined. Read here, never by main. */
@@ -397,6 +399,13 @@ export async function buildCall(args: ParsedArgs, io: ClientIo): Promise<RpcCall
           return { method: 'account.status', params: {} }
       }
     }
+    case 'needs': {
+      const text = restText(pos)
+      if (text !== undefined && on('clear')) throw new UsageError('use either a text or --clear')
+      if (text === undefined && !on('clear')) throw new UsageError('needs takes a text or --clear')
+      if (text !== undefined && !text.trim()) throw new UsageError('empty needs text (use --clear)')
+      return { method: 'needs', params: { ...(text !== undefined ? { text } : {}), ...(on('clear') ? { clear: true } : {}), ...(flag('console') !== undefined ? { console: flag('console') } : {}), ...ws } }
+    }
   }
 }
 
@@ -504,10 +513,23 @@ export function rpc(conn: Connection, call: RpcCall, timeoutMs: number | null): 
 
 const pad = (s: string, n: number): string => (s.length >= n ? s : s + ' '.repeat(n - s.length))
 
+/**
+ * App 2.7.0 (A3): main's signals in a few words, the free text last:
+ * `failed: limit until 15:30`, `quiet 12m`, `needs: <text>`.
+ */
+function signalParts(s: CtlStatusSignals, now: number = Date.now()): string[] {
+  const out: string[] = []
+  if (s.failure) out.push(`failed: ${s.failure.kind}${typeof s.failure.until === 'number' ? ` until ${clock(s.failure.until, now)}` : ''}`)
+  if (s.silence) out.push(`${s.silence.level} ${elapsed(s.silence.since, now)}`)
+  if (s.needs) out.push(`needs: ${s.needs.text}`)
+  return out
+}
+
 function consoleRow(c: CtlConsoleInfo): string {
   const state = c.agentState ? `${c.agentState}${c.precise ? '' : '?'}${c.reason ? ` (${c.reason})` : ''}` : c.running ? 'running' : 'stopped'
   const tags = [c.self ? 'self' : '', c.sshProtected ? 'ssh' : ''].filter(Boolean).join(',')
-  return `   ${pad(String(c.index), 3)}${pad(c.title, 22)} ${pad(c.presetName ?? c.type, 14)} ${pad(state, 22)}${tags ? `[${tags}] ` : ''}${c.statusLine ?? ''}`.trimEnd()
+  const tail = [c.statusLine ?? '', ...signalParts(c)].filter(Boolean).join('  ')
+  return `   ${pad(String(c.index), 3)}${pad(c.title, 22)} ${pad(c.presetName ?? c.type, 14)} ${pad(state, 22)}${tags ? `[${tags}] ` : ''}${tail}`.trimEnd()
 }
 
 const two = (n: number): string => String(n).padStart(2, '0')
@@ -541,8 +563,10 @@ function peekHuman(d: CtlPeekResult): string {
   const state = d.state ? `${d.state}${d.precise ? '' : '?'}${d.reason ? ` (${d.reason})` : ''}` : 'no agent state'
   const out = [`${d.title} (${d.paneId})  ${d.provider ?? d.type}  ${state}${d.stateSince ? ` since ${clock(d.stateSince)}` : ''}  ${d.running ? 'running' : 'stopped'}`]
   if (d.attention !== undefined) out.push(`attention: ${d.attention ? 'needs the user' : 'no'}`)
+  out.push(...signalParts(d))
   for (const p of d.pending ?? []) out.push(`pending: ${p.kind}${p.toolName ? ` ${p.toolName}` : ''}: ${p.summary}`)
   if (d.activity) out.push(`activity: ${d.activity}`)
+  if (d.digest) out.push(`turn: ${d.digest.line || `${d.digest.tools} tools`}`)
   if (d.waiting) out.push(`waiting: ${d.waiting.kind} (${d.waiting.count})`)
   if (d.statusLine) out.push(`status: ${d.statusLine}`)
   const tune = [d.model ? `model ${d.model}` : '', d.effort ? `effort ${d.effort}` : '', d.ultracode !== undefined ? `ultracode ${d.ultracode ? 'on' : 'off'}` : ''].filter(Boolean)
@@ -558,6 +582,16 @@ export function resetIn(iso: string | null | undefined, now: number = Date.now()
   if (!Number.isFinite(at)) return ''
   const mins = Math.ceil((at - now) / 60_000)
   if (mins <= 0) return 'now'
+  return span(mins)
+}
+
+/** Time since an epoch ms in whole minutes, at least 1: `12m`, `1h 5m`, `2d 3h`. */
+export function elapsed(ms: number, now: number = Date.now()): string {
+  return span(Math.max(1, Math.floor((now - ms) / 60_000)))
+}
+
+/** Minutes as `3d 4h`, `2h 10m` or `5m`. */
+function span(mins: number): string {
   const d = Math.floor(mins / 1440)
   const h = Math.floor((mins % 1440) / 60)
   const m = mins % 60
@@ -629,7 +663,7 @@ export function formatHuman(method: CtlMethod, data: unknown): string {
     case 'wait':
       return `${String(d.state ?? 'no agent state')}${d.precise === false && d.state ? ' (approximate)' : ''}${d.noTurnObserved ? ' (no turn observed)' : ''}`
     case 'status':
-      if ('state' in d) return `${String(d.state ?? 'no agent state')}${d.statusLine ? `: ${String(d.statusLine)}` : ''}`
+      if ('state' in d) return [`${String(d.state ?? 'no agent state')}${d.statusLine ? `: ${String(d.statusLine)}` : ''}`, ...signalParts(d as CtlStatusSignals)].join('  ')
       return d.statusLine ? `status: ${String(d.statusLine)}` : 'status cleared'
     case 'notify':
       return 'notified'
@@ -686,6 +720,8 @@ export function formatHuman(method: CtlMethod, data: unknown): string {
       const r = d as unknown as CtlAccountUseResult
       return `${r.changed ? 'switched to' : 'already on'} ${accountNameSlot(r.active)}`
     }
+    case 'needs':
+      return typeof d.needs === 'string' ? `needs: ${d.needs}` : 'needs cleared'
   }
 }
 
@@ -701,6 +737,7 @@ export const USAGE = `snaos: drive ${PRODUCT} consoles from any terminal.
   snaos chat <console> [--turns N] [--before <cursor>] [--tools] [--thinking]
   snaos wait <console> --idle [--timeout <s>] [--quiet-ms <ms>]
   snaos status ["<text>" | --clear] [--console <c>]
+  snaos needs "<action>" | --clear [--console <c>]
   snaos notify "<text>" [--title <t>] [--local]
   snaos note "<text>" [--task-state todo|doing|review|done] | --clear
   snaos notes [ls] | get <note> | rm <note> | open <note>        [--workspace <ws>]

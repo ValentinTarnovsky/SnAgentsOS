@@ -7,8 +7,9 @@
  * Kept free of runtime imports besides types: the CLI entry (cliEntry.ts,
  * Node core only) bundles it next to main.
  */
-import type { AgentProvider, AgentWaiting, AttentionReason, ClaudePaneState, PaneType, RemotePending, WorkspaceTaskState } from './types'
+import type { AgentProvider, AgentWaiting, AttentionReason, ClaudePaneState, PaneType, RemotePending, SilenceLevel, WorkspaceTaskState } from './types'
 import type { ChatMessage } from './chat-types'
+import type { FailureKind } from './failure'
 
 export const CTL_PROTOCOL_VERSION = 1
 export const CTL_RPC_PATH = '/v1/rpc'
@@ -100,6 +101,8 @@ export type CtlMethod =
   | 'account.ls'
   | 'account.status'
   | 'account.use'
+  // app 2.7.0 (A3): ask the user to do or decide something, without blocking the console.
+  | 'needs'
 
 export const CTL_METHODS: readonly CtlMethod[] = [
   'ping',
@@ -132,6 +135,7 @@ export const CTL_METHODS: readonly CtlMethod[] = [
   'account.ls',
   'account.status',
   'account.use',
+  'needs',
 ]
 
 export interface CtlRequest {
@@ -195,7 +199,23 @@ export const CTL_EXIT: Record<CtlErrorCode, number> = {
   awaiting_user: 9,
 }
 
-export interface CtlConsoleInfo {
+/**
+ * App 2.7.0 (A3): main's status signals of a console, picked field by field
+ * from its PaneStatusEvt (`ls`, `peek`, the read-only `status`). Each one is
+ * absent when main has nothing to say.
+ */
+export interface CtlStatusSignals {
+  /** Tools of the current turn (the last one once done): the count and an English line ("Edit 3, Read 2 (src/a.ts)"). */
+  digest?: { tools: number; line: string }
+  /** Why the last turn failed; `until`: epoch ms of a limit reset, when the provider said it. */
+  failure?: { kind: FailureKind; until?: number }
+  /** A working agent with no sign of life since `since` (epoch ms). */
+  silence?: { level: SilenceLevel; since: number }
+  /** The open `snaos needs` request and when it was raised (epoch ms). */
+  needs?: { text: string; at: number }
+}
+
+export interface CtlConsoleInfo extends CtlStatusSignals {
   index: number
   id: string
   title: string
@@ -244,7 +264,7 @@ export interface CtlPeekPending {
 }
 
 /** `peek` (app 2.3.0): one look at a console without reading for the user. */
-export interface CtlPeekResult {
+export interface CtlPeekResult extends CtlStatusSignals {
   paneId: string
   title: string
   type: PaneType
@@ -274,6 +294,12 @@ export interface CtlWaitResult {
   precise: boolean
   waitedMs: number
   noTurnObserved?: boolean
+}
+
+/** `needs` (app 2.7.0, A3): the console flagged, and its request (null: cleared). */
+export interface CtlNeedsResult {
+  paneId: string
+  needs: string | null
 }
 
 export interface CtlSpawnResult {

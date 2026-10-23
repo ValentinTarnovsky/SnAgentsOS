@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
 import { migrateQuickCommandsConfig, QUICK_COMMAND_ID_MAX } from '@shared/quickCommands'
 import { LABS_KEYS, type LabsKey } from '@shared/labs'
+import { DEFAULT_SILENCE, normalizeSilence, SILENCE_QUIET_MIN, SILENCE_STALLED_MIN } from '@shared/silence'
 
 export { CONFIG_VERSION }
 
@@ -39,6 +40,16 @@ export const cacheTimerSettingsSchema = z.object({
   ttlMinutes: z.union([z.literal(5), z.literal(60)]).catch(5).default(5),
 })
 
+// Schema 19 (app 2.7.0, A3): silence watch. Field defaults, then the shared
+// normalizer keeps stalledMin above quietMin.
+export const silenceSettingsSchema = z
+  .object({
+    enabled: z.boolean().catch(DEFAULT_SILENCE.enabled).default(DEFAULT_SILENCE.enabled),
+    quietMin: z.number().int().min(SILENCE_QUIET_MIN.min).max(SILENCE_QUIET_MIN.max).catch(DEFAULT_SILENCE.quietMin).default(DEFAULT_SILENCE.quietMin),
+    stalledMin: z.number().int().min(SILENCE_STALLED_MIN.min).max(SILENCE_STALLED_MIN.max).catch(DEFAULT_SILENCE.stalledMin).default(DEFAULT_SILENCE.stalledMin),
+  })
+  .transform(normalizeSilence)
+
 // Schema 11. Field-level defaults are the whole migration (migrate() only re-stamps).
 export const agentSettingsSchema = z.object({
   resumeOnStartup: z.enum(['ask', 'auto', 'off']).catch('ask').default('ask'),
@@ -56,6 +67,8 @@ export const agentSettingsSchema = z.object({
   // Schema 17 (app 2.4.0).
   syncAgentRename: z.boolean().catch(true).default(true),
   shellAgentDetect: z.boolean().catch(true).default(true),
+  // Schema 19 (app 2.7.0, A3).
+  silence: silenceSettingsSchema.default({}).catch(() => silenceSettingsSchema.parse({})),
 })
 
 // Schema 12 (E8-FR-08/09).

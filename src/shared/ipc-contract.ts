@@ -11,6 +11,7 @@ import type {
   ConfigFile,
   Language,
   NotificationSettings,
+  PanePlan,
   PaneStatusEvt,
   RemoteSettings,
   SetupStep,
@@ -567,6 +568,18 @@ export interface StatusTuneHintReq {
   model?: string
   effort?: string
   ultracode?: boolean
+}
+
+/** `status:mute` (app 2.7.0, A3): silence the pane until its effective state changes, or lift it. */
+export interface StatusMuteReq {
+  paneId: string
+  muted: boolean
+}
+
+/** `status:plan` (app 2.7.0, A3): the full ExitPlanMode plan; without `requestId`, the newest one. */
+export interface StatusPlanReq {
+  paneId: string
+  requestId?: string
 }
 
 // --- Remote control (embedded LAN/Tailscale server for phone clients) ---
@@ -1145,6 +1158,14 @@ export interface SnApi {
     /** Remove every hook handler of ours from ~/.claude/settings.json. */
     hooksUninstall(): Promise<StatusHooksStatusRes>
     hooksStatus(): Promise<StatusHooksStatusRes>
+    /** App 2.7.0 (A3): mark a done / error console read; false when it is neither (or unknown). */
+    markRead(paneId: string): Promise<boolean>
+    /** App 2.7.0 (A3): mute until the effective state changes (`muted: false` lifts it); false for an unknown console. */
+    mute(paneId: string, muted: boolean): Promise<boolean>
+    /** App 2.7.0 (A3): ignore this turn's silence (quiet / stalled), shown or not yet; false for an unknown or title-only console. */
+    silenceAck(paneId: string): Promise<boolean>
+    /** App 2.7.0 (A3): the full ExitPlanMode plan (newest without `requestId`), or null. */
+    plan(paneId: string, requestId?: string): Promise<PanePlan | null>
   }
   /** Remote control from a phone browser (embedded LAN/Tailscale server). */
   remote: {

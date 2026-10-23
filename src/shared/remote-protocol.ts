@@ -5,8 +5,9 @@
  * Pure types only - no zod, no Node, no DOM - because this file is bundled
  * into three targets: main, renderer and the mobile web client. Runtime
  * validation schemas live in remote-protocol-schemas.ts (main-only). It may
- * import only types.ts, git-types.ts, chat-types.ts, ws-notes.ts and
- * agentTune.ts, all import-free of Node and DOM.
+ * import only types.ts, git-types.ts, chat-types.ts, ws-notes.ts,
+ * agentTune.ts, claude-accounts.ts, toolActivity.ts and failure.ts, all
+ * import-free of Node and DOM.
  */
 import type {
   AgentProvider,
@@ -15,6 +16,9 @@ import type {
   ClaudePaneState,
   KeyButton,
   Language,
+  PaneNeeds,
+  PanePlan,
+  PaneSilence,
   PaneType,
   QuickCommand,
   RemotePending,
@@ -29,6 +33,8 @@ import type { ChatMessage } from './chat-types'
 import type { WsNoteError, WsNoteMeta } from './ws-notes'
 import type { TuneSet } from './agentTune'
 import type { ClaudeAccountRole, UsageActiveAccount } from './claude-accounts'
+import type { ToolFamily } from './toolActivity'
+import type { FailureInfo } from './failure'
 
 export type { RemotePending, RemoteGitChip }
 
@@ -94,6 +100,23 @@ export interface RemotePaneStatus {
    * validated menu (or an older desktop).
    */
   menu?: RemotePaneMenu
+  // --- app 2.7.0 (A3); absent = none, or an older desktop ---
+  /** Family of the newest tool still open (`activity` is its summary). */
+  toolFamily?: ToolFamily
+  /** Why the last turn failed (`until` only for a limit with a known reset); cleared by the next `working`. */
+  failure?: FailureInfo
+  /** A working agent with no signal since `since`: `quiet` after quietMin, `stalled` after stalledMin. */
+  silence?: PaneSilence
+  /** Open `snaos needs` request (text <= NEEDS_TEXT_MAX, one line): attention without `pending`. */
+  needs?: PaneNeeds
+  /** Muted by the user until the effective state changes. Main publishes only `true`; absent = not muted (or an older desktop). */
+  muted?: boolean
+  /**
+   * App 2.7.0 (A3): minimal status of a console with no agent track that only
+   * carries `needs`; the phone shows the request and no agent state. Absent =
+   * a real status (or an older desktop).
+   */
+  bare?: true
 }
 
 /** app 2.4.0: RemotePaneStatus.menu. */
@@ -413,6 +436,27 @@ export type RemoteCtlAction =
    * denied, rate. The phone sends it only to a desktop >= 2.4.0.
    */
   | { kind: 'answerMenu'; paneId: string; pendingId: string; n: number; label: string }
+  // --- app 2.7.0 (A3): status marks, handled in main ---
+  /**
+   * Mark a done / error console read from the phone (the desktop's "Marcar
+   * leido"). Handled in main (SessionManager.handleCtl -> StatusManager);
+   * never relayed. Acks: not_found (unknown console, or neither done nor
+   * error), denied, rate. The phone sends it only to a desktop >= 2.7.0.
+   */
+  | { kind: 'markRead'; paneId: string }
+  /**
+   * Mute the console until its effective state changes (`muted: false` lifts
+   * it). Handled in main; never relayed. Acks: not_found (unknown console),
+   * denied, rate. The phone sends it only to a desktop >= 2.7.0.
+   */
+  | { kind: 'mutePane'; paneId: string; muted: boolean }
+  /**
+   * Ignore the silence (quiet / stalled) of the rest of this turn, shown or
+   * not yet; the next turn is watched again. Handled in main; never relayed.
+   * Acks: not_found (unknown or title-only console), denied, rate. The phone
+   * sends it only to a desktop >= 2.7.0.
+   */
+  | { kind: 'silenceAck'; paneId: string }
 
 // --- Git API for the phone's Changes screen (E7-FR-22..26) ---
 
@@ -495,6 +539,32 @@ export interface RemoteNotesReply {
   current?: RemoteNote
 }
 
+// --- Full ExitPlanMode plan for the phone (app 2.7.0, A3) ---
+
+/** The request half of `planReq`: a console's plan by request id, or its newest one. */
+export interface RemotePlanRequest {
+  paneId: string
+  requestId?: string
+}
+
+/**
+ * Why a `planRes` carries no plan. `not_found`: unknown console or no plan
+ * for it; `rate`: over PLAN_REQ_MAX per window or PLAN_REQ_IN_FLIGHT waiting.
+ * `unsupported` never travels: the phone answers it to itself for a desktop
+ * older than 2.7.0, which would strike an unknown frame.
+ */
+export type RemotePlanError = 'not_found' | 'rate' | 'unsupported'
+
+/**
+ * The answer half of `planRes`, < 40KB once framed: main cuts `plan.text`
+ * further when its JSON would not fit (then `truncated: true`).
+ */
+export interface RemotePlanReply {
+  ok: boolean
+  plan?: PanePlan
+  error?: RemotePlanError
+}
+
 // --- Client -> server messages ---
 
 export type RemoteClientMsg =
@@ -520,6 +590,8 @@ export type RemoteClientMsg =
   | ({ v: number; type: 'gitReq'; id: string } & RemoteGitRequest)
   /** v2.2 (E9): the workspace's .md notes; answered by `notesRes` with the same id. */
   | ({ v: number; type: 'notesReq'; id: string } & RemoteNotesRequest)
+  /** app 2.7.0 (A3): the full plan of an ExitPlanMode request; answered by `planRes` with the same id. */
+  | ({ v: number; type: 'planReq'; id: string } & RemotePlanRequest)
   // --- E3 M12 Chat view (R30-05) ---
   /** E3-FR-25: read the pane as a chat; answered by a first `chatPage`. */
   | { v: number; type: 'chatSub'; paneId: string }
@@ -627,6 +699,8 @@ export type RemoteServerMsg =
   | ({ v: number; type: 'notesRes'; id: string } & RemoteNotesReply)
   /** v2.2 (E9): a note of the workspace changed on the PC or on another phone. */
   | { v: number; type: 'notesChanged'; workspaceId: string; noteId?: string }
+  /** app 2.7.0 (A3): the answer to one `planReq`, < 40KB. */
+  | ({ v: number; type: 'planRes'; id: string } & RemotePlanReply)
   /**
    * E3-FR-26/30/33: a page of the pane's chat, oldest first, <= 48KB. One that
    * arrives without a chatMore pending is a first page and replaces the list

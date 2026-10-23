@@ -147,7 +147,9 @@ noticeRouter = createNoticeRouter({
 })
 const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event),
   // v2.4 `/rename`: the thread's name goes through the same dedup as Claude's.
-  (paneId, ptyId, sessionId, title, explicit) => statusManager.reportAgentTitle(paneId, ptyId, 'codex', sessionId, title, explicit))
+  (paneId, ptyId, sessionId, title, explicit) => statusManager.reportAgentTitle(paneId, ptyId, 'codex', sessionId, title, explicit),
+  // App 2.7.0 (A3): every app-server line is a sign of life. onUsage stays unwired until the ledger (A4).
+  { onSignal: (paneId, ptyId) => statusManager.noteSignal(paneId, ptyId) })
 ptyManager.addSink(statusManager)
 // Agent status reaches phones straight from main (E1-FR-03), not via the renderer.
 statusManager.addListener((evt) => remoteManager.pushPaneStatus(evt))
@@ -158,6 +160,8 @@ statusManager.setRemoteSeen((paneId) => remoteManager.isPaneSeen(paneId))
 // v2.4: the nonce of each integrated pty's OSC 133 marks (claude / codex typed in a shell).
 statusManager.setShellMarks((ptyId) => ptyManager.shellMarkOf(ptyId))
 remoteManager.setPaneSeenListener((paneId) => statusManager.ackPane(paneId))
+// App 2.7.0 (A3): the phone's markRead / mutePane / silenceAck ctls and planReq.
+remoteManager.setStatusControl(statusManager)
 ptyManager.addSink(codexBridge)
 // snaos CLI (E8-FR-12..22): control server, console tokens, runtime.json and shim under dataDir().
 const cliService: CliService = new CliService({

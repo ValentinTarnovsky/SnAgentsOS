@@ -229,6 +229,12 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
     case 'answerMenu':
       return { ok: false, error: 'unknown_action' }
 
+    // app 2.7.0: handled in main (SessionManager.handleCtl -> StatusManager); never relayed.
+    case 'markRead':
+    case 'mutePane':
+    case 'silenceAck':
+      return { ok: false, error: 'unknown_action' }
+
     default:
       return { ok: false, error: 'unknown_action' }
   }

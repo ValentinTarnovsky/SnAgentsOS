@@ -1,4 +1,5 @@
 import type { AgentDetail, AgentProvider, AttentionReason, ConfigFile, RemotePending } from '@shared/types'
+import type { FailureInfo } from '@shared/failure'
 import { mainT } from '../i18n'
 import type { BackgroundTasks } from './HookServer'
 export interface AgentEvent {
@@ -8,8 +9,33 @@ export interface AgentEvent {
   sessionId: string
   kind: 'start' | 'working' | 'request' | 'resolved' | 'done' | 'error' | 'idle' | 'end' | 'unknown'
   turnId?: string
+  /**
+   * `request` / `resolved`: the request's id. A `resolved` also closes the
+   * open tool with this id (Claude PostToolUse tool_use_id, Codex item id).
+   */
   requestId?: string
   reason?: AttentionReason
+  /**
+   * App 2.7.0 (A3): the tool call a `working` event opens (Claude PreToolUse
+   * tool_use_id, Codex item id); its `resolved` closes it through requestId.
+   * The PreToolUse of a prompt tool (ExitPlanMode, AskUserQuestion) carries
+   * it on its `request` too, so the turn digest counts it once.
+   */
+  toolUseId?: string
+  /**
+   * App 2.7.0 (A3): why an `error` turn failed (claudeFailure, codexFailure),
+   * bounded by the producer (code <= 32).
+   */
+  failure?: FailureInfo
+  /** App 2.7.0 (A3): an ExitPlanMode request's whole plan, <= PLAN_TEXT_MAX, line breaks kept. Main only. */
+  planText?: string
+  /** The plan was longer than PLAN_TEXT_MAX and was cut. */
+  planTruncated?: boolean
+  /**
+   * App 2.7.0 (A3): the file a tool call works on (fileOfToolInput, <= 120),
+   * for the turn digest. Main only.
+   */
+  toolFile?: string
   // Enrichment (E4-FR-09, E5-FR-01). All optional and already bounded by the
   // producer; prompts and replies live in memory only and are never logged.
   /** Absolute existing directory the agent reported. */
@@ -28,6 +54,11 @@ export interface AgentEvent {
   detail?: AgentDetail
   /** Current tool summary (activity), <= 160. */
   tool?: string
+  /**
+   * The tool's name: Claude's tool_name, or the Codex item type
+   * (commandExecution, fileChange, mcpToolCall, webSearch). familyOf reads
+   * it for the published toolFamily and the turn digest.
+   */
   toolName?: string
   /** Pending card summary, <= 200. */
   summary?: string

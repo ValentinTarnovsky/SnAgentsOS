@@ -21,7 +21,9 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
 
 ## Commands
 
-- \`snaos ls [--workspace <ws>]\`: workspaces and consoles with agent state.
+- \`snaos ls [--workspace <ws>]\`: workspaces and consoles with agent state. A console row also
+  shows why its last turn failed (\`failed: limit until 15:30\`), a working agent silent for a while
+  (\`quiet 12m\`, \`stalled 25m\`) and an open request for the user (\`needs: <text>\`).
 - \`snaos spawn <claude|codex|shell|preset> [--prompt <text> | --prompt-file <path> | --prompt -] [--workspace <ws>] [--title <t>] [--focus] [--no-profile]\`:
   opens a console and returns its index and id right away, without waiting for the agent.
 - \`snaos send <console> <text|-> [--file <path>] [--enter]\`: types text into the console's input;
@@ -30,12 +32,14 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
 - \`snaos wait <console> --idle [--timeout <s>] [--quiet-ms <ms>]\`: blocks until the agent is
   idle, done, asking or failed (shells: no output for --quiet-ms).
 - \`snaos status ["<text>" | --clear]\`: shows or sets your console's status line (max 120).
+- \`snaos needs "<action>" | --clear\`: flags your console because the user has to do or decide
+  something (see "Asking the user for something").
 - \`snaos notify "<text>" [--title <t>] [--local]\`: desktop notification (and Discord/ntfy unless --local).
 - \`snaos note "<text>" [--task-state todo|doing|review|done] | --clear\`: the one-line workspace
   note of the sidebar (not the Markdown notes below).
 - \`snaos peek <console> [--lines N]\`: one look at a console: agent state, whether it needs the
-  user, pending requests, activity, last reply, model and effort when known, and its last N
-  screen lines (default 30).
+  user, pending requests, activity, the tools of its current or last turn, last reply, model and
+  effort when known, and its last N screen lines (default 30).
 - \`snaos chat <console> [--turns N] [--before <cursor>] [--tools] [--thinking]\`: the conversation
   of a Claude or Codex console from its transcript (default the last 3 turns, max 20).
 - \`snaos notes [ls]\`, \`notes get|new|set|append|rm|open\`: the workspace's Markdown notes (below).
@@ -89,6 +93,10 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
 - \`snaos read <console>\` for the raw screen of any console (shells too).
 - To follow another agent's work: \`snaos wait <console> --idle --timeout 110\`, then \`snaos peek\`
   or \`snaos chat <console> --turns 1\` to read the result.
+- \`quiet <time>\` or \`stalled <time>\` in \`ls\` and \`peek\` means a working agent gave no sign of life
+  for that long (a long command, or a stuck tool). Look with \`peek\` or \`read\`; never \`kill\` or
+  \`restart\` it for that unless the user asks. \`failed: limit until <time>\` means its usage limit
+  ran out until then: tell the user instead of sending it more work.
 
 ## Notes
 
@@ -130,6 +138,20 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
 - \`spawn\` prints \`prompt: argv\`, \`gate\` or \`none\`. If it printed \`prompt: gate\` and \`snaos read\` shows
   the text sitting unsent in the new console, submit it with an empty \`snaos send <console> --enter\`.
   Never type the text again.
+
+## Asking the user for something
+
+- \`snaos needs "<action>"\` (one line, max 200 characters) when the user has to do or decide
+  something you cannot do yourself: approve a deploy, log in, pick between two designs, check
+  something by hand. Your console turns amber and goes first in the attention lists (desktop and
+  phone), but its input stays free and nothing blocks you: keep working, or end your turn.
+- It is a flag, not a question menu: write the action itself ("approve the staging migration"),
+  and put the details in your reply or in \`snaos status\`. Running it again replaces the text.
+- Run \`snaos needs --clear\` once it is resolved. The next prompt your console gets, and your
+  session starting or ending, also clear it.
+- It only flags your own console: a console that names another one with \`--console\` gets
+  \`forbidden\` (from an external terminal \`--console\` is required). It shares the budget of 30 a
+  minute with \`kill\`, \`restart\`, \`rename\` and \`ws rename|close|fav\`.
 
 ## Waiting on other consoles, drivers and background work
 

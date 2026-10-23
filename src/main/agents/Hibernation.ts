@@ -7,9 +7,10 @@
  * - planHibernation(): the pure planner. A console is eligible when it runs
  *   Claude or Codex, sits in idle/done for at least N minutes, got no input
  *   (desktop or phone) for N minutes, is not visible, has no phone
- *   subscribed, has no schedule coming up, and its session record is
- *   available. It must look exactly the same on two consecutive ticks (same
- *   state, stateSince and lastInputAt), and at most 3 go per tick.
+ *   subscribed, has no schedule coming up, has no open `snaos needs` (App
+ *   2.7.0) and its session record is available. It must look exactly the
+ *   same on two consecutive ticks (same state, stateSince and lastInputAt),
+ *   and at most 3 go per tick.
  * - HibernationCoordinator: the 60 s tick over main's live sources. The
  *   interval exists only while hibernation is on. Putting a console to sleep
  *   is explicit (D3): the registry marks hibernatedAt first, so the end that
@@ -41,6 +42,12 @@ export interface HibernationCandidate {
   subscribed: boolean
   /** Its schedule runs soon or is waiting for the agent. */
   schedulePending: boolean
+  /**
+   * App 2.7.0 (A3): its agent asked the user something (`snaos needs`), muted
+   * or not. That includes the minimal idle status of a pane with no track,
+   * which exists only while the request is open.
+   */
+  needs?: boolean
 }
 
 export interface PlanInput {
@@ -69,7 +76,7 @@ export function hibernationSignature(c: Pick<HibernationCandidate, 'state' | 'st
 /** Every rule except the two-tick confirmation and the cap (exported for tests). */
 export function isEligible(c: HibernationCandidate, idleMinutes: number, now: number): boolean {
   const idleMs = idleMinutes * MIN_MS
-  if (idleMs <= 0 || !c.live) return false
+  if (idleMs <= 0 || !c.live || c.needs) return false
   if (c.provider !== 'claude' && c.provider !== 'codex') return false
   if (c.state !== 'idle' && c.state !== 'done') return false
   if (typeof c.stateSince !== 'number' || now - c.stateSince < idleMs) return false
@@ -200,6 +207,7 @@ export class HibernationCoordinator {
         visible: this.keep.has(s.paneId),
         subscribed: subscribed.has(s.paneId),
         schedulePending: false,
+        needs: !!s.needs,
       }
       if (!isEligible(c, this.idleMinutes, now)) continue
       schedules ??= schedulesOf(this.deps.getConfig())

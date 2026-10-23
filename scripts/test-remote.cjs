@@ -51,8 +51,9 @@ let code = ''
 let codeV3 = ''
 const entry = `
 export { RemoteManager, toRemoteStatus, PANE_STATUS_COALESCE_MS } from './src/main/remote/RemoteManager'
-export { isRateLimitedMsg, RATE_LIMITED_MSG_TYPES, RATE_LIMITED_CTL_KINDS } from './src/main/remote/SessionManager'
+export { isRateLimitedMsg, RATE_LIMITED_MSG_TYPES, RATE_LIMITED_CTL_KINDS, fitPlanRes, PLAN_REQ_MAX, PLAN_REQ_WINDOW_MS, PLAN_REQ_IN_FLIGHT, PLAN_RES_MAX_BYTES } from './src/main/remote/SessionManager'
 export { TokenBucket, REMOTE_RATE_PER_SEC, REMOTE_RATE_BURST } from './src/main/remote/TokenBucket'
+export { toShareStatus } from './src/main/share/StatusCoalescer'
 `
 const bundleWith = plugins => build({
   stdin: { resolveDir: root, loader: 'ts', contents: entry },
@@ -159,7 +160,18 @@ const snapshot = {
   ],
   activeWorkspaceId: 'w1', themeTokens: {}, language: 'en', fontFamily: '', fontSize: 14,
 }
-const DESKTOP_ONLY = ['sessionId', 'cwd', 'detail', 'topic', 'firstPrompt', 'cacheSince', 'notify', 'delivery', 'paneId', 'updatedAt']
+const DESKTOP_ONLY = ['sessionId', 'cwd', 'detail', 'topic', 'firstPrompt', 'cacheSince', 'notify', 'delivery', 'paneId', 'updatedAt', 'digest', 'signalAt']
+/** app 2.7.0 (A3): the five status fields that reach the phone. */
+const A3_FIELDS = ['toolFamily', 'failure', 'silence', 'needs', 'muted']
+const a3Status = () => ({
+  toolFamily: 'edit',
+  failure: { kind: 'limit', until: 1700000600000, code: 'rate_limit', text: 'You have hit your limit' },
+  silence: { level: 'quiet', since: 1700000000000, extra: 1 },
+  needs: { text: 'Aprobá el deploy', at: 1700000100000, by: 'x' },
+  muted: true,
+})
+const a3DesktopOnly = () => ({ digest: { tools: 3, families: { edit: 2, read: 1 }, files: ['src/a.ts'], lastFamily: 'edit' }, signalAt: 1700000200000 })
+const tick = () => new Promise(resolve => setImmediate(resolve))
 const evt = (paneId, state, rest = {}) => ({ paneId, state, precise: true, notify: false, provider: 'claude', pendingCount: 0, stateSince: 1000, updatedAt: 1234, ...rest })
 
 function testToRemoteStatus(api) {
@@ -168,12 +180,16 @@ function testToRemoteStatus(api) {
     pending: [{ id: 't1', kind: 'permission', summary: 'npm test' }],
     sessionId: '11111111-2222-3333-4444-555555555555', cwd: 'C:\\repo', detail: { kind: 'tool', text: 'x' },
     topic: 'tp', firstPrompt: 'fp', cacheSince: 5, notify: true, delivery: 'native',
+    ...a3DesktopOnly(),
   })
   const out = api.toRemoteStatus(rich)
   check(DESKTOP_ONLY.every(k => !(k in out)), 'toRemoteStatus never copies sessionId, cwd or desktop-only fields')
   check(out.state === 'action' && out.precise === false && out.reason === 'permission' && out.pendingCount === 1 && out.lastMessage === 'hi' && out.activity === 'Bash' && out.pending.length === 1 && out.stateSince === 1000, 'toRemoteStatus copies the contract fields')
   check(!('precise' in api.toRemoteStatus(evt('p1', 'idle'))), 'precise is omitted when true (absent = true)')
   check(api.toRemoteStatus(evt('p1', null)) === null, 'a cleared status maps to null')
+  const bareOut = api.toRemoteStatus(evt('p9', 'idle', { precise: false, bare: true, needs: { text: 'Aprobar', at: 5 }, attention: true }))
+  check(bareOut.bare === true && bareOut.needs.text === 'Aprobar' && bareOut.attention === true, 'a bare status keeps needs and attention and carries the bare mark')
+  check(!('bare' in api.toRemoteStatus(evt('p1', 'idle'))), 'a real status has no bare mark')
   // v2.3 attention: true and false are copied (false explicitly), absent stays absent.
   check(api.toRemoteStatus(evt('p1', 'done', { attention: true })).attention === true && api.toRemoteStatus(evt('p1', 'action', { attention: false })).attention === false, 'toRemoteStatus copies attention true and false')
   check(!('attention' in api.toRemoteStatus(evt('p1', 'done'))), 'toRemoteStatus omits attention when the desktop sends none')
@@ -183,6 +199,22 @@ function testToRemoteStatus(api) {
   const tuned = api.toRemoteStatus(evt('p1', 'idle', { model: 'claude-opus-4-5', effort: 'high', ultracode: false }))
   check(tuned.model === 'claude-opus-4-5' && tuned.effort === 'high' && tuned.ultracode === false, 'toRemoteStatus copies model, effort and ultracode')
   check(['model', 'effort', 'ultracode'].every(k => !(k in api.toRemoteStatus(evt('p1', 'idle')))), 'toRemoteStatus omits the tune fields when unknown')
+
+  // app 2.7.0 (A3): toolFamily, failure, silence, needs and muted reach the phone, field by field.
+  const src = evt('p1', 'error', { ...a3Status(), ...a3DesktopOnly() })
+  const a3 = api.toRemoteStatus(src)
+  check(a3.toolFamily === 'edit' && a3.failure.kind === 'limit' && a3.failure.until === 1700000600000 && a3.failure.code === 'rate_limit', 'toRemoteStatus copies toolFamily and failure (kind, until, code)')
+  check(a3.silence.level === 'quiet' && a3.silence.since === 1700000000000 && a3.needs.text === 'Aprobá el deploy' && a3.needs.at === 1700000100000 && a3.muted === true, 'toRemoteStatus copies silence, needs and muted')
+  check(!('text' in a3.failure) && !('extra' in a3.silence) && !('by' in a3.needs), 'field by field: a stray key of failure, silence or needs never travels')
+  check(a3.failure !== src.failure && a3.silence !== src.silence && a3.needs !== src.needs, 'and the phone status shares no object with the desktop event')
+  check(!('digest' in a3) && !('signalAt' in a3), 'digest and signalAt stay on the desktop')
+  const bare = api.toRemoteStatus(evt('p1', 'error', { failure: { kind: 'overloaded' } }))
+  check(Object.keys(bare.failure).join() === 'kind', 'a failure without until or code carries only its kind')
+  check(api.toRemoteStatus(evt('p1', 'idle', { muted: false })).muted === false, 'muted false is copied as well')
+  check(A3_FIELDS.every(k => !(k in api.toRemoteStatus(evt('p1', 'working')))), 'absent A3 fields stay absent')
+  // Share guests never get them: toShareStatus is its own whitelist.
+  const share = api.toShareStatus(src)
+  check(share && share.state === 'error' && [...A3_FIELDS, 'digest', 'signalAt'].every(k => !(k in share)), 'toShareStatus never copies the A3 fields')
 }
 
 /** v2.3 attention: a flip goes out, and a phone looking at a pane acknowledges it. */
@@ -716,6 +748,8 @@ function testRateUnits(api) {
   check(limited({ type: 'ctl', action: { kind: 'agentTune', workspaceId: 'w1', paneId: 'p1', set: { kind: 'picker' }, enter: false } }), 'agentTune (app 2.3.0) is limited')
   check(limited({ type: 'ctl', action: { kind: 'claudeAccountUse', role: 'secondary' } }) && api.RATE_LIMITED_CTL_KINDS.has('claudeAccountUse'), 'claudeAccountUse (app 2.3.0) is limited')
   check(limited({ type: 'ctl', action: { kind: 'answerMenu', paneId: 'p1', pendingId: 't1', n: 1, label: 'Yes' } }) && api.RATE_LIMITED_CTL_KINDS.has('answerMenu'), 'answerMenu (app 2.4.0) is limited: each one reads the mirror and writes to the pty')
+  check(['markRead', 'mutePane', 'silenceAck'].every(kind => limited({ type: 'ctl', action: { kind, paneId: 'p1', muted: true } }) && api.RATE_LIMITED_CTL_KINDS.has(kind)), 'markRead, mutePane and silenceAck (app 2.7.0) are limited')
+  check(limited({ type: 'planReq', id: 'q1', paneId: 'p1' }) && api.RATE_LIMITED_MSG_TYPES.has('planReq'), 'planReq (app 2.7.0) is limited')
   check(!limited({ type: 'ctl', action: { kind: 'runQuickCommand' } }), 'runQuickCommand (v2.2) stays outside the bucket')
   check(limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1', resume: { provider: 'claude', sessionId: 'x' } } }), 'createPane with resume is limited')
   check(!limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1' } }), 'a plain createPane is not')
@@ -1073,6 +1107,215 @@ async function testAutomationRelay() {
   check(w.commands.filter(c => c.action.kind === 'claudeAccountUse').length === 4, 'a minute later the device may switch again')
 }
 
+/** The real main-side schema (zod), bundled once. */
+let schemasApi = null
+function loadSchemas() {
+  if (schemasApi) return schemasApi
+  const mod = { exports: {} }
+  const src = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/shared/remote-protocol-schemas.ts')], bundle: true, platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
+  vm.runInNewContext(src, { module: mod, exports: mod.exports, require, URL })
+  schemasApi = mod.exports
+  return schemasApi
+}
+
+/** A fake StatusManager behind RemoteManager.setStatusControl; `answers` drives each method's boolean. */
+function fakeStatusControl(plans = {}) {
+  const calls = []
+  const answers = { markRead: true, setMuted: true, ackSilence: true }
+  const ctl = {
+    markRead: (paneId) => { calls.push(['markRead', paneId]); return answers.markRead },
+    setMuted: (paneId, muted) => { calls.push(['setMuted', paneId, muted]); return answers.setMuted },
+    ackSilence: (paneId) => { calls.push(['ackSilence', paneId]); return answers.ackSilence },
+    planOf: (paneId, requestId) => {
+      calls.push(['planOf', paneId, requestId])
+      const plan = plans[paneId]
+      return plan && (requestId === undefined || requestId === plan.requestId) ? plan : null
+    },
+  }
+  return { ctl, calls, answers, plans }
+}
+
+/** app 2.7.0 (A3): markRead, mutePane and silenceAck, handled in main like answerMenu. */
+async function testStatusCtls() {
+  const { parseRemoteClientMsg } = loadSchemas()
+  const frame = action => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'ctl', id: 'x', action }))
+  check(!!frame({ kind: 'markRead', paneId: 'c1' }) && !!frame({ kind: 'mutePane', paneId: 'c1', muted: true }) && !!frame({ kind: 'mutePane', paneId: 'c1', muted: false }) && !!frame({ kind: 'silenceAck', paneId: 'c1' }), 'the ctl schema accepts markRead, mutePane and silenceAck')
+  check(!frame({ kind: 'markRead' }) && !frame({ kind: 'markRead', paneId: '' }) && !frame({ kind: 'silenceAck', paneId: 'x'.repeat(129) }) && !frame({ kind: 'silenceAck', paneId: 7 }), 'each needs a paneId of 1..128')
+  check(!frame({ kind: 'mutePane', paneId: 'c1' }) && !frame({ kind: 'mutePane', paneId: 'c1', muted: 'true' }) && !frame({ kind: 'mutePane', paneId: 'c1', muted: 1 }), 'mutePane needs a boolean muted')
+  check(!frame({ kind: 'markAllRead', paneId: 'c1' }) && !frame({ kind: 'MarkRead', paneId: 'c1' }) && !frame({ paneId: 'c1' }) && !frame('markRead') && !frame(null) && !frame([]), 'ctlActionSchema refuses unknown kinds and junk actions')
+  check(!('text' in frame({ kind: 'markRead', paneId: 'c1', text: '\r' }).action) && !('workspaceId' in frame({ kind: 'silenceAck', paneId: 'c1', workspaceId: 'w1' }).action), 'a stray field in a status ctl is stripped')
+
+  // Earlier suites paired up to the 10-device cap in the shared registry file.
+  fs.rmSync(path.join(dataDir, 'remote-devices.json'), { force: true })
+  const w = world()
+  w.manager.pushState(snapshot)
+  const { ws } = await pair(w)
+  const ack = async (id, action) => { ws.msg({ type: 'ctl', id, action }); await tick(); return ws.of('ctlAck').find(a => a.id === id) }
+  const relayed = w.commands.length
+  const none = await ack('s0', { kind: 'markRead', paneId: 'p1' })
+  check(none && !none.ok && none.error === 'unknown_action' && w.commands.length === relayed, 'without StatusManager wired a status ctl acks unknown_action in main')
+
+  const fake = fakeStatusControl()
+  w.manager.setStatusControl(fake.ctl)
+  const acks = [
+    await ack('s1', { kind: 'markRead', paneId: 'p1' }),
+    await ack('s2', { kind: 'mutePane', paneId: 'p2', muted: true }),
+    await ack('s3', { kind: 'mutePane', paneId: 'p2', muted: false }),
+    await ack('s4', { kind: 'silenceAck', paneId: 'p1' }),
+  ]
+  check(acks.every(a => a && a.ok === true && a.error === undefined), 'markRead, mutePane and silenceAck ack ok')
+  check(JSON.stringify(fake.calls) === JSON.stringify([['markRead', 'p1'], ['setMuted', 'p2', true], ['setMuted', 'p2', false], ['ackSilence', 'p1']]), 'each one calls its StatusManager method with the pane (and muted)')
+  check(w.commands.length === relayed && w.writes.length === 0, 'none of them reaches the renderer relay or writes to a pty')
+
+  fake.answers.markRead = fake.answers.setMuted = fake.answers.ackSilence = false
+  const refused = [
+    await ack('s5', { kind: 'markRead', paneId: 'p1' }),
+    await ack('s6', { kind: 'mutePane', paneId: 'p9', muted: true }),
+    await ack('s7', { kind: 'silenceAck', paneId: 'p1' }),
+  ]
+  check(refused.every(a => a && a.ok === false && a.error === 'not_found'), 'a mark that does not apply (method false) acks not_found')
+  w.manager.setStatusControl({ ...fake.ctl, markRead: () => { throw new Error('boom') } })
+  const thrown = await ack('s8', { kind: 'markRead', paneId: 'p1' })
+  check(thrown && thrown.error === 'not_found' && ws.closed === null, 'a throwing StatusManager acks not_found and keeps the socket')
+  const bad = ws.inbox.length
+  ws.msg({ type: 'ctl', id: 's9', action: { kind: 'mutePane', paneId: 'p1', muted: 'yes' } })
+  check(!ws.of('ctlAck').some(a => a.id === 's9') && ws.inbox.slice(bad).some(m => m.type === 'err' && m.code === 'bad_msg') && w.commands.length === relayed, 'a malformed mutePane is bad_msg, never reaches main or the renderer')
+
+  // The per-session bucket: a burst of 41, the 41st acks rate before StatusManager.
+  const w2 = world()
+  w2.manager.pushState(snapshot)
+  const burst = fakeStatusControl()
+  w2.manager.setStatusControl(burst.ctl)
+  const p2 = await pair(w2)
+  for (let i = 0; i < 41; i++) p2.ws.msg({ type: 'ctl', id: 'b' + i, action: { kind: i % 3 === 0 ? 'markRead' : i % 3 === 1 ? 'silenceAck' : 'mutePane', paneId: 'p1', muted: true } })
+  await tick()
+  const last = p2.ws.of('ctlAck').find(a => a.id === 'b40')
+  check(burst.calls.length === 40 && last && !last.ok && last.error === 'rate' && p2.ws.closed === null, 'status ctls share the bucket: past it they ack rate, without a strike, and never reach StatusManager')
+}
+
+/** app 2.7.0 (A3): planReq / planRes. */
+async function testPlanReq() {
+  const { parseRemoteClientMsg } = loadSchemas()
+  const req = m => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'planReq', ...m }))
+  check(!!req({ id: 'abc123', paneId: 'p1' }) && !!req({ id: 'a_b-9', paneId: 'p1', requestId: 'toolu_01' }), 'the schema accepts planReq with and without requestId')
+  check(!req({ id: 'a b', paneId: 'p1' }) && !req({ id: 'x'.repeat(65), paneId: 'p1' }) && !req({ paneId: 'p1' }) && !req({ id: 'a1' }) && !req({ id: 'a1', paneId: '' }), 'planReq needs a gitReqId id and a paneId')
+  check(!req({ id: 'a1', paneId: 'p1', requestId: '' }) && !req({ id: 'a1', paneId: 'p1', requestId: 'r'.repeat(201) }) && !req({ id: 'a1', paneId: 'p1', requestId: 5 }), 'requestId is a string of 1..200')
+  check(!('text' in req({ id: 'a1', paneId: 'p1', text: 'x' })), 'a stray field in planReq is stripped')
+
+  fs.rmSync(path.join(dataDir, 'remote-devices.json'), { force: true })
+  const w = world()
+  w.manager.pushState(snapshot)
+  const { ws } = await pair(w)
+  const ask = async (id, rest) => { ws.msg({ type: 'planReq', id, ...rest }); await tick(); return ws.of('planRes').find(r => r.id === id) }
+  const r0 = await ask('q0', { paneId: 'p1' })
+  check(r0 && r0.ok === false && r0.error === 'not_found', 'without StatusManager wired planReq answers not_found')
+
+  const text = '# Plan\n\n1. Leer `src/a.ts`\n2. Editar "b"\n'
+  const fake = fakeStatusControl({ p1: { requestId: 'toolu_01', text, at: 1700000000500, truncated: false, secret: 'nope' } })
+  w.manager.setStatusControl(fake.ctl)
+  const relayed = w.commands.length
+  const r1 = await ask('q1', { paneId: 'p1' })
+  check(r1 && r1.ok === true && r1.error === undefined && r1.plan.text === text && r1.plan.requestId === 'toolu_01' && r1.plan.at === 1700000000500 && r1.plan.truncated === false, 'planReq answers planRes with the pane plan')
+  check(Object.keys(r1.plan).sort().join() === 'at,requestId,text,truncated', 'the plan travels field by field')
+  check(fake.calls.at(-1)[0] === 'planOf' && fake.calls.at(-1)[1] === 'p1' && fake.calls.at(-1)[2] === undefined, 'without requestId planOf is asked for the newest plan')
+  const r2 = await ask('q2', { paneId: 'p1', requestId: 'toolu_01' })
+  check(r2 && r2.ok && fake.calls.at(-1)[2] === 'toolu_01', 'requestId reaches planOf')
+  const r3 = await ask('q3', { paneId: 'p9' })
+  check(r3 && r3.ok === false && r3.error === 'not_found' && !('plan' in r3), 'an unknown pane answers not_found')
+  const r4 = await ask('q4', { paneId: 'p1', requestId: 'toolu_99' })
+  check(r4 && r4.ok === false && r4.error === 'not_found', 'an unknown request id answers not_found')
+  check(w.commands.length === relayed, 'planReq never reaches the renderer')
+
+  // Oversized: PLAN_TEXT_MAX of text whose JSON is far bigger is cut under 40KB.
+  const api = w.api
+  check(api.PLAN_RES_MAX_BYTES === 40 * 1024, 'the planRes budget is 40KB')
+  const high = s => { const c = s.length ? s.charCodeAt(s.length - 1) : 0; return c >= 0xd800 && c <= 0xdbff }
+  const cases = [['\n', 32768], ['\u0001', 32768], ['"', 32768], ['ñ', 32768], ['\u{1F600}', 16384], ['ab\u{1F600}', 8192]]
+  for (const [unit, n] of cases) {
+    const big = unit.repeat(n)
+    const f = api.fitPlanRes('id1', { ok: true, plan: { requestId: 'toolu_01', text: big, at: 1, truncated: false } })
+    const bytes = Buffer.byteLength(JSON.stringify(f))
+    const longer = { ...f, plan: { ...f.plan, text: big.slice(0, f.plan.text.length + (big.codePointAt(f.plan.text.length) > 0xffff ? 2 : 1)) } }
+    check(bytes <= 40 * 1024 && f.ok === true && f.plan.truncated === true && f.plan.text.length > 0 && big.startsWith(f.plan.text) && !high(f.plan.text), `a plan of ${JSON.stringify(unit)} x ${n} is cut under 40KB on a whole code point, truncated true`)
+    check(Buffer.byteLength(JSON.stringify(longer)) > 40 * 1024, `and the cut keeps the longest prefix that fits (${JSON.stringify(unit)})`)
+  }
+  const small = api.fitPlanRes('id2', { ok: true, plan: { requestId: 'r', text: 'ok', at: 2, truncated: false } })
+  check(small.plan.text === 'ok' && small.plan.truncated === false && small.v === 1 && small.type === 'planRes' && small.id === 'id2', 'a plan that fits is sent whole, truncated false')
+  check(api.fitPlanRes('id3', { ok: true, plan: { requestId: 'r', text: 'ok', at: 2, truncated: true } }).plan.truncated === true, 'a plan StatusManager already cut keeps truncated true')
+  check(!('plan' in api.fitPlanRes('id4', { ok: false, error: 'rate' })), 'an error frame carries no plan')
+
+  fake.plans.p2 = { requestId: 'toolu_02', text: '\u0001\n'.repeat(16384), at: 3, truncated: false }
+  ws.msg({ type: 'planReq', id: 'q5', paneId: 'p2' })
+  await tick()
+  const r5 = ws.of('planRes').find(r => r.id === 'q5')
+  check(r5 && r5.ok && r5.plan.truncated === true && Buffer.byteLength(JSON.stringify(r5)) <= 40 * 1024, 'through the socket an oversized plan arrives cut under 40KB, truncated true')
+
+  // Per-session window: PLAN_REQ_MAX per PLAN_REQ_WINDOW_MS, then rate (no strike).
+  check(api.PLAN_REQ_MAX === 10 && api.PLAN_REQ_WINDOW_MS === 5000 && api.PLAN_REQ_IN_FLIGHT === 2, 'planReq limits: 10 per 5 s, 2 in flight')
+  w.advance(5001)
+  const mark = ws.of('planRes').length
+  // One at a time (each answered before the next), so only the window counts.
+  for (let i = 0; i < 11; i++) {
+    ws.msg({ type: 'planReq', id: 'w' + i, paneId: 'p1' })
+    await tick()
+  }
+  const windowed = ws.of('planRes').slice(mark)
+  const eleventh = windowed.find(r => r.id === 'w10')
+  check(windowed.length === 11 && windowed.filter(r => r.ok).length === 10 && eleventh && eleventh.ok === false && eleventh.error === 'rate' && ws.closed === null, 'the 11th planReq in 5 s answers rate and keeps the socket')
+  w.advance(5001)
+  const again = await ask('w11', { paneId: 'p1' })
+  check(again && again.ok, 'once the window passes planReq answers again')
+
+  // In flight: a third request while two wait answers rate at once.
+  w.advance(5001)
+  const waiting = []
+  w.manager.planRequest = () => new Promise(resolve => waiting.push(resolve))
+  ws.msg({ type: 'planReq', id: 'f1', paneId: 'p1' })
+  ws.msg({ type: 'planReq', id: 'f2', paneId: 'p1' })
+  ws.msg({ type: 'planReq', id: 'f3', paneId: 'p1' })
+  await tick()
+  const f3 = ws.of('planRes').find(r => r.id === 'f3')
+  check(waiting.length === 2 && f3 && f3.error === 'rate' && !ws.of('planRes').some(r => r.id === 'f1' || r.id === 'f2'), 'with 2 planReq in flight the third answers rate')
+  for (const resolve of waiting) resolve({ ok: false, error: 'not_found' })
+  await tick()
+  check(['f1', 'f2'].every(id => ws.of('planRes').some(r => r.id === id && r.error === 'not_found')), 'the two waiting ones answer when main does')
+}
+
+/** app 2.7.0 (A3): status:markRead, status:mute, status:silenceAck and status:plan validate every renderer value in main. */
+function testStatusIpc() {
+  const handlers = {}
+  const electron = { ipcMain: { on() {}, handle: (ch, fn) => { handlers[ch] = fn } }, app: { getPath: () => os.tmpdir(), isPackaged: false, getAppPath: () => root } }
+  const src = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/main/ipc/registerStatusIpc.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+  const mod = { exports: {} }
+  vm.runInNewContext(src, { module: mod, exports: mod.exports, require: id => id === 'electron' ? electron : require(id), console, process, Buffer, URL, fetch, Response, AbortController, setTimeout, clearTimeout })
+  const plan = { requestId: 'toolu_01', text: '# Plan', at: 1, truncated: false }
+  const calls = []
+  const answers = { markRead: true, setMuted: true, ackSilence: true }
+  const manager = {
+    onHookEvent() {},
+    markRead: (p) => { calls.push(['markRead', p]); return answers.markRead },
+    setMuted: (p, m) => { calls.push(['setMuted', p, m]); return answers.setMuted },
+    ackSilence: (p) => { calls.push(['ackSilence', p]); return answers.ackSilence },
+    planOf: (p, r) => { calls.push(['planOf', p, r]); return plan },
+  }
+  mod.exports.registerStatusIpc(manager, { onEvent() {} }, {}, {}, {})
+  const [markRead, mute, silenceAck, planOf] = ['status:markRead', 'status:mute', 'status:silenceAck', 'status:plan'].map(ch => handlers[ch])
+  check([markRead, mute, silenceAck, planOf].every(fn => typeof fn === 'function'), 'registerStatusIpc handles status:markRead, status:mute, status:silenceAck and status:plan')
+
+  const max = 'p'.repeat(64)
+  check(markRead({}, 'p1') === true && silenceAck({}, max) === true && mute({}, { paneId: 'p1', muted: true }) === true && mute({}, { paneId: 'p1', muted: false }) === true, 'a valid paneId (<= 64) reaches StatusManager')
+  check(planOf({}, { paneId: 'p1' }) === plan && planOf({}, { paneId: 'p1', requestId: 'toolu_01' }) === plan, 'status:plan answers the plan, with and without requestId')
+  check(JSON.stringify(calls) === JSON.stringify([['markRead', 'p1'], ['ackSilence', max], ['setMuted', 'p1', true], ['setMuted', 'p1', false], ['planOf', 'p1', null], ['planOf', 'p1', 'toolu_01']]), 'each handler calls its StatusManager method with the validated values')
+  calls.length = 0
+  const junk = ['', 'p'.repeat(65), 7, null, undefined, ['p1'], { paneId: 'p1' }]
+  check(junk.every(v => markRead({}, v) === false && silenceAck({}, v) === false), 'status:markRead and status:silenceAck answer false to a bad paneId')
+  check([...junk.map(paneId => ({ paneId, muted: true })), { paneId: 'p1' }, { paneId: 'p1', muted: 'true' }, { paneId: 'p1', muted: 1 }, 'p1', null, [{ paneId: 'p1', muted: true }]].every(v => mute({}, v) === false), 'status:mute answers false to a bad paneId or a muted that is not boolean')
+  check([...junk.map(paneId => ({ paneId })), { paneId: 'p1', requestId: '' }, { paneId: 'p1', requestId: 'r'.repeat(201) }, { paneId: 'p1', requestId: 5 }, { paneId: 'p1', requestId: null }, 'p1', null].every(v => planOf({}, v) === null), 'status:plan answers null to a bad paneId or requestId')
+  check(calls.length === 0, 'no bad payload reaches StatusManager')
+  answers.markRead = answers.setMuted = answers.ackSilence = false
+  check(markRead({}, 'p1') === false && mute({}, { paneId: 'p1', muted: true }) === false && silenceAck({}, 'p1') === false, 'a false from StatusManager comes back as false')
+}
+
 async function main() {
   await bundle()
   const w = world()
@@ -1092,8 +1335,11 @@ async function main() {
   await testSafePaste()
   await testAutomationSurface()
   await testAutomationRelay()
+  await testStatusCtls()
+  await testPlanReq()
+  testStatusIpc()
   fs.rmSync(dataDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} remote overlay, paneStatus, lastHost, visibility, agentResume, httpToken, rate limit, pending, safePaste and phone automation checks`)
+  console.log(`PASS: ${checks} remote overlay, paneStatus, lastHost, visibility, agentResume, httpToken, rate limit, pending, safePaste, phone automation, status ctl, planReq and status IPC checks`)
 }
 
 main().catch(error => { console.error(error); fs.rmSync(dataDir, { recursive: true, force: true }); process.exit(1) })

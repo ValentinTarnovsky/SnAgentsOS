@@ -135,6 +135,11 @@ export const CH = {
   STATUS_HOOKS_INSTALL: 'status:hooksInstall', // invoke -> StatusHooksStatusRes
   STATUS_HOOKS_UNINSTALL: 'status:hooksUninstall', // invoke -> StatusHooksStatusRes
   STATUS_HOOKS_STATUS: 'status:hooksStatus', // invoke -> StatusHooksStatusRes
+  // App 2.7.0 (A3): read, mute and silence marks, and the full plan; main validates every paneId.
+  STATUS_MARK_READ: 'status:markRead', // invoke (paneId) -> boolean (done / error only)
+  STATUS_MUTE: 'status:mute', // invoke (StatusMuteReq) -> boolean
+  STATUS_SILENCE_ACK: 'status:silenceAck', // invoke (paneId) -> boolean
+  STATUS_PLAN: 'status:plan', // invoke (StatusPlanReq) -> PanePlan | null
 
   // Remote control (embedded LAN/Tailscale server for phone clients)
   REMOTE_SET_CONFIG: 'remote:setConfig', // send (renderer pushes RemoteSettings; main starts/stops/restarts)

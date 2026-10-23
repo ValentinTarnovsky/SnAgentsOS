@@ -19,6 +19,8 @@ import type {
   PtySpawnReq,
   PtySpawnRes,
   PtySubmitReq,
+  StatusMuteReq,
+  StatusPlanReq,
   StatusTuneHintReq,
   PtySubmitRes,
   PtyWriteReq,
@@ -49,6 +51,7 @@ import type {
   ConfigFile,
   Language,
   NotificationSettings,
+  PanePlan,
   PaneStatusEvt,
   RemoteSettings,
   StatusHooksStatusRes,
@@ -294,6 +297,12 @@ const api: SnApi = {
     hooksUninstall: () =>
       ipcRenderer.invoke(CH.STATUS_HOOKS_UNINSTALL) as Promise<StatusHooksStatusRes>,
     hooksStatus: () => ipcRenderer.invoke(CH.STATUS_HOOKS_STATUS) as Promise<StatusHooksStatusRes>,
+    markRead: (paneId: string) => ipcRenderer.invoke(CH.STATUS_MARK_READ, paneId) as Promise<boolean>,
+    mute: (paneId: string, muted: boolean) =>
+      ipcRenderer.invoke(CH.STATUS_MUTE, { paneId, muted: muted === true } satisfies StatusMuteReq) as Promise<boolean>,
+    silenceAck: (paneId: string) => ipcRenderer.invoke(CH.STATUS_SILENCE_ACK, paneId) as Promise<boolean>,
+    plan: (paneId: string, requestId?: string) =>
+      ipcRenderer.invoke(CH.STATUS_PLAN, (requestId === undefined ? { paneId } : { paneId, requestId }) satisfies StatusPlanReq) as Promise<PanePlan | null>,
   },
   remote: {
     setConfig: (cfg: RemoteSettings) => ipcRenderer.send(CH.REMOTE_SET_CONFIG, cfg),

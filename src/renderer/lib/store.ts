@@ -22,6 +22,7 @@ import type {
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { DEFAULT_CLAUDE_ACCOUNTS_SETTINGS } from '@shared/claude-accounts'
 import { DEFAULT_LABS } from '@shared/labs'
+import { DEFAULT_SILENCE } from '@shared/silence'
 import { gridForCount, orderPanes } from '@/components/layout/gridTemplates'
 import {
   QUICK_COMMANDS_MAX,
@@ -154,6 +155,7 @@ const DEFAULT_SETTINGS: Settings = {
     cacheTimer: { enabled: false, ttlMinutes: 5 },
     syncAgentRename: true,
     shellAgentDetect: true,
+    silence: { ...DEFAULT_SILENCE },
   },
   automation: {
     defaultAgentPresetId: '',
@@ -1398,6 +1400,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         detail: evt.detail, topic: evt.topic, firstPrompt: evt.firstPrompt, cacheSince: evt.cacheSince,
         waiting: evt.waiting, backgroundOther: evt.backgroundOther, attention: evt.attention,
         model: evt.model, effort: evt.effort, ultracode: evt.ultracode,
+        // App 2.7.0 (A3) signals.
+        toolFamily: evt.toolFamily, failure: evt.failure, silence: evt.silence, needs: evt.needs,
+        muted: evt.muted, digest: evt.digest, signalAt: evt.signalAt, bare: evt.bare,
       }
       // A new session (or Claude working again) hides the "Claude exited" chip (E6-FR-22).
       let agentEnded = s.agentEnded

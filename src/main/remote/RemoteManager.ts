@@ -43,10 +43,10 @@ import type {
   RemoteUiState,
   SecureModeStatus,
 } from '@shared/ipc-contract'
-import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemoteHistorySession, RemoteNote, RemoteNotesReply, RemoteNotesRequest, RemotePaneMenu, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
+import type { RemoteCtlAction, RemoteGitReply, RemoteGitRequest, RemoteHistorySession, RemoteNote, RemoteNotesReply, RemoteNotesRequest, RemotePaneMenu, RemotePaneStatus, RemotePlanReply, RemotePlanRequest, RemoteStateSnapshot } from '@shared/remote-protocol'
 import { WS_NOTE_PHONE_MAX, type WsNoteDoc, type WsNotesChangedEvt } from '@shared/ws-notes'
 import type { WsNoteStore } from '../notes/WsNoteStore'
-import type { AgentProvider, ClaudePaneState, ConfigFile, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
+import type { AgentProvider, ClaudePaneState, ConfigFile, PanePlan, PaneStatusEvt, RemoteSettings, ThemeTokens } from '@shared/types'
 import { isHistorySessionId } from '@shared/session-history'
 import type { PtyManager } from '../pty/PtyManager'
 import { DeviceRegistry } from './DeviceRegistry'
@@ -56,7 +56,7 @@ import { dataDir } from '../paths'
 import { devPort } from '../devPort'
 import { PairingService, RateLimiter } from './PairingService'
 import { RemoteServer } from './RemoteServer'
-import { SessionManager, type HttpTokenOwner } from './SessionManager'
+import { SessionManager, type HttpTokenOwner, type RemoteStatusCtl } from './SessionManager'
 import { ATTACHMENT_CLEANUP_INTERVAL_MS, UploadService } from './UploadService'
 import { noticePage, type ChatHooks } from '../chat/ChatHub'
 import { SecureMode, type SecureResult } from './SecureMode'
@@ -78,7 +78,10 @@ const IMMEDIATE_STATES = new Set<ClaudePaneState | null>(['action', 'done', 'err
 /**
  * The phone's view of a desktop status event (E1-FR-03). Copies only the
  * CONTRATOS fields of RemotePaneStatus: sessionId, cwd and every desktop-only
- * enrichment (detail, topic, firstPrompt, cacheSince) never leave main.
+ * enrichment (detail, topic, firstPrompt, cacheSince, digest, signalAt) never
+ * leave main. App 2.7.0 (A3): a `bare` status (needs only, no agent track)
+ * goes out for its needs and attention, without the marker: on a pane that
+ * runs no agent it is the only status with no `provider`.
  */
 export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | null | undefined, menu?: RemotePaneMenu | null): RemotePaneStatus | null {
   if (!evt || evt.state == null) return null
@@ -100,6 +103,18 @@ export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | n
   if (evt.ultracode !== undefined) out.ultracode = evt.ultracode
   // app 2.4.0: Claude's menu (PromptMenuWatcher), only while its request is still pending.
   if (menu && evt.pending?.some((p) => p.id === menu.for)) out.menu = { for: menu.for, options: menu.options.map((o) => ({ n: o.n, label: o.label })) }
+  // app 2.7.0 (A3): already bounded by StatusManager, copied field by field;
+  // digest and signalAt stay on the desktop.
+  if (evt.toolFamily) out.toolFamily = evt.toolFamily
+  if (evt.failure) {
+    out.failure = { kind: evt.failure.kind }
+    if (evt.failure.until !== undefined) out.failure.until = evt.failure.until
+    if (evt.failure.code !== undefined) out.failure.code = evt.failure.code
+  }
+  if (evt.silence) out.silence = { level: evt.silence.level, since: evt.silence.since }
+  if (evt.needs) out.needs = { text: evt.needs.text, at: evt.needs.at }
+  if (evt.muted !== undefined) out.muted = evt.muted
+  if (evt.bare) out.bare = true
   return out
 }
 
@@ -139,6 +154,17 @@ export interface RemoteHistoryProvider {
   has(provider: AgentProvider, sessionId: string): Promise<boolean>
 }
 
+/**
+ * app 2.7.0 (A3): the StatusManager marks behind the phone's markRead /
+ * mutePane / silenceAck ctls and planReq (index.ts wires StatusManager).
+ */
+export interface RemoteStatusControl {
+  markRead(paneId: string): boolean
+  setMuted(paneId: string, muted: boolean): boolean
+  ackSilence(paneId: string): boolean
+  planOf(paneId: string, requestId?: string): PanePlan | null
+}
+
 interface PendingCommand {
   resolve: (res: RemoteCommandResult) => void
   timer: ReturnType<typeof setTimeout>
@@ -168,6 +194,8 @@ export class RemoteManager {
   private phoneNotified = false
   /** v2.3: a phone looked at a pane (StatusManager.ackPane). */
   private paneSeenListener: ((paneId: string) => void) | null = null
+  /** app 2.7.0 (A3): StatusManager's marks and plans (set by index.ts; read lazily by the session deps). */
+  private statusControl: RemoteStatusControl | null = null
   /** paneStatus dedupe: the serialized status each pane last went out with. */
   private readonly statusSent = new Map<string, string>()
   /** paneStatus coalesce: latest status held per pane until its timer fires. */
@@ -495,6 +523,9 @@ export class RemoteManager {
       // app 2.4.0: a phone opened the pane (Terminal or Chat): read its menu now.
       onPaneWatched: (paneId) => this.menus.watch(paneId),
       answerMenu: (action) => this.answerMenu(action),
+      // app 2.7.0 (A3): status marks and the full plan, answered by StatusManager.
+      statusCtl: (action) => this.statusCtl(action),
+      plan: (req) => this.planRequest(req),
     })
     // The menu reader only schedules a timer per chunk; the sessions sink goes last.
     this.ptyManager.addSink(this.menus)
@@ -785,6 +816,33 @@ export class RemoteManager {
     if (!option || option.label !== action.label) return { id: '', ok: false, error: 'menu_changed' }
     this.ptyManager.write(ptyId, String(option.n), 'user')
     return { id: '', ok: true }
+  }
+
+  /** app 2.7.0 (A3): wire StatusManager's marks and plans (index.ts, right after both exist). */
+  setStatusControl(ctl: RemoteStatusControl | null): void {
+    this.statusControl = ctl
+  }
+
+  /**
+   * app 2.7.0 (A3) ctls markRead / mutePane / silenceAck (SessionManager
+   * checked the session first): StatusManager applies the mark and republishes
+   * the pane; a mark that does not apply acks not_found. Nothing is written.
+   */
+  statusCtl(action: RemoteStatusCtl): RemoteCommandResult {
+    const ctl = this.statusControl
+    if (!ctl) return { id: '', ok: false, error: 'unknown_action' }
+    const applied =
+      action.kind === 'markRead' ? ctl.markRead(action.paneId)
+      : action.kind === 'mutePane' ? ctl.setMuted(action.paneId, action.muted)
+      : ctl.ackSilence(action.paneId)
+    return applied === true ? { id: '', ok: true } : { id: '', ok: false, error: 'not_found' }
+  }
+
+  /** app 2.7.0 (A3) planReq: the plan StatusManager keeps for the pane, copied field by field. */
+  private async planRequest(req: RemotePlanRequest): Promise<RemotePlanReply> {
+    const plan = this.statusControl?.planOf(req.paneId, req.requestId) ?? null
+    if (!plan) return { ok: false, error: 'not_found' }
+    return { ok: true, plan: { requestId: plan.requestId, text: plan.text, at: plan.at, truncated: plan.truncated === true } }
   }
 
   // --- Control-plane relay --------------------------------------------------

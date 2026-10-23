@@ -196,6 +196,33 @@ function testDisplayResumeAndEvents() {
   }
 }
 
+// App 2.7.0 (A3): a pane's age counts from max(updatedAt, signalAt).
+function testSignalAge() {
+  const signal = (h, paneId, updatedAt, signalAt) => h.svc.onPaneStatus({ paneId, state: 'working', precise: true, notify: false, updatedAt, signalAt })
+  {
+    const h = harness()
+    signal(h, 'a', h.now() - AWAKE_STALE_MS - 1, h.now() - 1000)
+    check(h.svc.getState().blocking && h.svc.getState().workingCount === 1, 'an old update with a fresh signalAt keeps the PC awake')
+    h.advance(AWAKE_STALE_MS - 1000 - 10)
+    check(h.svc.getState().workingCount === 1, 'the 2 h lease counts from the signal')
+    h.advance(20)
+    check(h.svc.getState().workingCount === 0 && h.svc.getState().releaseAt !== undefined, 'and ends 2 h after it')
+  }
+  {
+    const h = harness()
+    signal(h, 'a', h.now(), h.now() - 3 * HOUR)
+    check(h.svc.getState().workingCount === 1, 'an older signalAt never shortens a fresh update')
+    signal(h, 'b', h.now() - AWAKE_STALE_MS - 1, h.now() - AWAKE_STALE_MS - 1)
+    check(h.svc.getState().workingCount === 1, 'both old: stale')
+    for (const junk of ['soon', NaN, Infinity, null]) {
+      signal(h, 'c', h.now() - AWAKE_STALE_MS - 1, junk)
+    }
+    check(h.svc.getState().workingCount === 1, 'a junk signalAt is ignored (the old update decides)')
+    signal(h, 'd', undefined, h.now())
+    check(h.svc.getState().workingCount === 2, 'a signalAt alone counts')
+  }
+}
+
 function testIpc() {
   const handlers = new Map(), listeners = new Map(), sent = []
   const started = new Set(); let id = 0
@@ -824,6 +851,7 @@ function testV22I18n() {
   testModes()
   testStaleAndPhone()
   testDisplayResumeAndEvents()
+  testSignalAge()
   testIpc()
   testTray()
   testRemotePhones()

@@ -5,13 +5,18 @@ import { BRAND } from '@shared/brand'
 import { effectiveProvider } from '@shared/agents'
 import { REPORTS_ONLY_RE } from '@shared/inputReports'
 import type { TuneHint } from '@shared/agentTune'
-import { AGENT_END_REASONS, type AgentDetail, type AgentProvider, type AgentRenameEvt, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneStatusEvt, type RemotePending } from '@shared/types'
+import { AGENT_END_REASONS, NEEDS_TEXT_MAX, PLAN_TEXT_MAX, type AgentDetail, type AgentProvider, type AgentRenameEvt, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneNeeds, type PanePlan, type PaneSilence, type PaneStatusEvt, type RemotePending } from '@shared/types'
+import { addTool, emptyDigest, familyOf, type ToolFamily, type TurnDigest } from '@shared/toolActivity'
+import { claudeFailure, type FailureInfo } from '@shared/failure'
+import { normalizeSilence } from '@shared/silence'
+import type { DeadlineTimerDeps } from '../DeadlineTimer'
 import type { PtyExitInfo, PtyInputOrigin, PtySink } from '../pty/PtyManager'
 import { mainT } from '../i18n'
 import { revealWindow } from '../window/revealWindow'
 import type { BackgroundTasks, HookEvent } from './HookServer'
 import type { AgentEvent, StatusNotice } from './events'
-import { LIMITS, clip, firstLine, readLastAssistantMessage, readLastCustomTitle, sanitize } from './statusDetails'
+import { SilenceWatch } from './SilenceWatch'
+import { LIMITS, clip, cleanFailure, firstLine, readLastAssistantMessage, readLastCustomTitle, sanitize } from './statusDetails'
 
 interface PendingEntry {
   reason: AttentionReason
@@ -25,6 +30,15 @@ interface PendingEntry {
    */
   requestAt: number
   invalidated?: boolean
+}
+
+/** App 2.7.0 (A3): a tool call that started and did not finish yet. */
+interface OpenTool {
+  /** summarizeTool / codexItemTool line, <= 160 (published as `activity`). */
+  summary: string
+  family: ToolFamily
+  /** When it opened. */
+  at: number
 }
 
 interface PaneTrack {
@@ -48,8 +62,36 @@ interface PaneTrack {
   /** Last assistant reply (<= 2000) and the turn it belongs to. */
   reply?: string
   replyTurn?: string
-  /** Current tool summary (public `activity`). */
-  tool?: string
+  /**
+   * App 2.7.0 (A3): tool calls open right now, by tool use id (Claude
+   * PreToolUse, a permission prompt with its id, a Codex item), oldest first.
+   * The newest is the current tool (public `activity` and `toolFamily`); none
+   * open shows none, so a finished tool is never shown as current. Cleared on
+   * start, prompt, idle, done, error, end and the Esc interrupt.
+   */
+  openTools: Map<string, OpenTool>
+  /** App 2.7.0 (A3): tools of the turn running now; reset when a turn starts. */
+  turnDigest: TurnDigest
+  /** The digest frozen when the last turn was done (published after done). */
+  lastDigest?: TurnDigest
+  /** App 2.7.0 (A3): why the last turn failed; cleared by the next working or a new session (not a compact). */
+  failure?: FailureInfo
+  /** App 2.7.0 (A3): `snaos needs`. Raises attention, never enters `pending`. */
+  needs?: PaneNeeds
+  /** App 2.7.0 (A3): muted while mutedSeq === stateSeq (any effective transition unmutes); -1 = not muted. */
+  mutedSeq: number
+  /** App 2.7.0 (A3): SilenceWatch's level for this turn (precise and working only). */
+  silence?: PaneSilence
+  /** App 2.7.0 (A3): ackSilence: no silence for the rest of this turn. */
+  silenceAcked: boolean
+  /**
+   * App 2.7.0 (A3): a compact (or a resume of the same session) landed on a
+   * done turn: the start left `activity` idle, but the turn is over, so the
+   * next event the agent opens on its own starts a new turn, as after done.
+   */
+  turnOver?: boolean
+  /** App 2.7.0 (A3): full ExitPlanMode plans by request id, the newest PLANS_MAX. */
+  plans: Map<string, PanePlan>
   detail?: AgentDetail
   topic?: string
   /** v2.2.1: a title-only Codex track's text after the spinner (its idle title). */
@@ -135,6 +177,24 @@ export const INTERRUPT_SETTLE_MS = 2000
 export const AGENT_TITLE_DEBOUNCE_MS = 300
 /** v2.4: a prompt that is Claude's `/rename` command never becomes the first prompt. */
 const RENAME_PROMPT_RE = /^\/rename(?:\s|$)/i
+/**
+ * App 2.7.0 (A3): noteSignal never publishes per call (a streaming agent
+ * signals per line), but a precise pane that stays `working` with signals
+ * coming republishes a detail-only refresh at most this often after its
+ * last publish, so AwakeService (age = max(updatedAt, signalAt), lease
+ * AWAKE_STALE_MS = 2 h) sees a fresh signalAt.
+ */
+export const SIGNAL_REFRESH_MS = 10 * 60 * 1000
+/** App 2.7.0 (A3): ExitPlanMode plans kept per pane (planOf). */
+export const PLANS_MAX = 8
+/** Open tools kept per pane: a PostToolUse that never came cannot grow the map. */
+const OPEN_TOOLS_MAX = 32
+/** A tool event with no id (an older producer): one slot, replaced by the next. */
+const ANON_TOOL = ''
+/** Optional seams of the constructor (tests): the SilenceWatch clock and timers. */
+export interface StatusManagerOptions {
+  silence?: DeadlineTimerDeps
+}
 /** v2.4: who keeps the last name of each session across restarts (AgentSessionStore). */
 export type AgentTitleSeed = (paneId: string, provider: AgentProvider, sessionId: string) => string | undefined
 
@@ -252,6 +312,16 @@ export class StatusManager implements PtySink {
   // v2.4 `/rename`: the persisted last name of a session, and who hears a rename.
   private titleSeed: AgentTitleSeed = () => undefined
   private readonly renameListeners = new Set<(evt: AgentRenameEvt) => void>()
+  /**
+   * App 2.7.0 (A3): each live pane's last sign of life (noteSignal: any hook
+   * of its pty, sub-sessions included, or a Codex app-server line). A side
+   * map, so a pane with no track keeps it too. Dropped with the pty.
+   */
+  private readonly signals = new Map<string, number>()
+  /** App 2.7.0 (A3): `snaos needs` of a live pane that has no track (published as a minimal idle status). */
+  private readonly bareNeeds = new Map<string, PaneNeeds>()
+  /** App 2.7.0 (A3): quiet / stalled of working panes; off until setAgentSettings pushes the settings. */
+  private readonly silenceWatch: SilenceWatch
   lastClaudeEventAt: number | null = null
   desktopError: 'blocked' | 'failed' | 'unavailable' | null = null
   constructor(
@@ -260,9 +330,16 @@ export class StatusManager implements PtySink {
     private readonly onNotice: (notice: StatusNotice) => void = () => {},
     private readonly readTranscript: (path: string, sessionId: string) => Promise<string | undefined> = (path, sessionId) => readLastAssistantMessage(path, sessionId),
     private readonly readTitle: (path: string, sessionId: string) => Promise<string | undefined> = (path, sessionId) => readLastCustomTitle(path, sessionId),
-  ) {}
+    opts: StatusManagerOptions = {},
+  ) {
+    this.silenceWatch = new SilenceWatch({
+      signalAt: (paneId) => this.signals.get(paneId),
+      onSilence: (paneId, silence) => this.onSilence(paneId, silence),
+    }, opts.silence)
+  }
   onSpawn(ptyId: string, paneId: string): void {
     this.clearPane(paneId); this.candidates.delete(paneId); this.sshPanes.delete(paneId); this.sshMisses.delete(paneId); this.paneProviders.delete(paneId); this.providerMisses.delete(paneId); this.ptys.set(paneId, ptyId); this.spawnTimes.set(paneId, Date.now())
+    this.signals.delete(paneId)
     this.resetShell(paneId)
     const key = this.shellMark(ptyId)
     if (key) this.shellKeys.set(paneId, key)
@@ -292,6 +369,7 @@ export class StatusManager implements PtySink {
     if (this.ptys.get(paneId) !== ptyId) return
     this.ptys.delete(paneId)
     this.spawnTimes.delete(paneId)
+    this.signals.delete(paneId)
     this.candidates.delete(paneId)
     this.paneProviders.delete(paneId); this.providerMisses.delete(paneId)
     this.resetShell(paneId)
@@ -300,9 +378,23 @@ export class StatusManager implements PtySink {
   setConfig(cfg: NotificationSettings): void { this.cfg = cfg }
   /** v2.4: main's wiring to PtyManager.shellMarkOf (the nonce of an integrated pty). */
   setShellMarks(fn: (ptyId: string) => string | undefined): void { this.shellMark = fn }
-  /** v2.4: the agents settings main acts on, pushed at boot and on every config save. */
-  setAgentSettings(agents: { shellAgentDetect?: boolean } | null | undefined): void {
+  /**
+   * v2.4: the agents settings main acts on, pushed at boot and on every config
+   * save (a raw `config:save` blob: every field is normalized here). App 2.7.0:
+   * `silence` configures the SilenceWatch, which arms nothing before the first
+   * call; a change re-judges every silence on show at once.
+   */
+  setAgentSettings(agents: { shellAgentDetect?: boolean; silence?: unknown } | null | undefined): void {
     this.shellAgentDetect = agents?.shellAgentDetect !== false
+    if (!this.silenceWatch.configure(normalizeSilence(agents?.silence))) return
+    const now = Date.now()
+    for (const [paneId, track] of this.panes) {
+      if (!track.silence) continue
+      const level = this.silenceWatch.levelFor(now - track.silence.since)
+      if (level === track.silence.level) continue
+      track.silence = level ? { level, since: track.silence.since } : undefined
+      this.publish(paneId, track)
+    }
   }
   /** v2.4 `/rename`: main's wiring to AgentSessionStore.agentTitleFor (the name a session already had). */
   setAgentTitleSeed(fn: AgentTitleSeed): void { this.titleSeed = fn }
@@ -409,6 +501,116 @@ export class StatusManager implements PtySink {
     if (before && !this.attentionOf(track)) this.publish(paneId, track)
   }
   /**
+   * App 2.7.0 (A3, `status:markRead`, ctl `markRead`): the user marks a done
+   * or error console read. Acknowledges it like ackPane (attention false,
+   * unless `needs` still asks); false for any other state or no track.
+   */
+  markRead(paneId: string): boolean {
+    const track = this.panes.get(paneId)
+    if (!track) return false
+    const state = this.stateOfTrack(track)
+    if (state !== 'done' && state !== 'error') return false
+    this.ackPane(paneId)
+    return true
+  }
+  /**
+   * App 2.7.0 (A3, `status:mute`, ctl `mutePane`): silenced until the
+   * effective state changes (mutedSeq === stateSeq). A muted console asks for
+   * no attention at all, `needs` included, sends no notice to any channel
+   * (a fresh request key included) and publishes `muted: true`; the next
+   * transition unmutes it on its own. False without a track.
+   */
+  setMuted(paneId: string, muted: boolean): boolean {
+    const track = this.panes.get(paneId)
+    if (!track) return false
+    const next = muted === true ? track.stateSeq : -1
+    if ((track.mutedSeq === track.stateSeq) === (next === track.stateSeq)) return true
+    track.mutedSeq = next
+    this.publish(paneId, track)
+    return true
+  }
+  /**
+   * App 2.7.0 (A3, `status:silenceAck`, ctl `silenceAck`, "Ignorar este
+   * turno"): the silence watch ignores the rest of the current turn. The
+   * silence on show clears now; the next turn (a prompt, a new session, a
+   * turn the agent opens itself; never a compact) is watched again. False
+   * without a precise track.
+   */
+  ackSilence(paneId: string): boolean {
+    const track = this.panes.get(paneId)
+    if (!track?.precise) return false
+    track.silenceAcked = true
+    this.silenceWatch.unwatch(paneId)
+    if (track.silence) {
+      track.silence = undefined
+      this.publish(paneId, track)
+    }
+    return true
+  }
+  /**
+   * App 2.7.0 (A3, `status:plan`, `planReq`): the full plan of an
+   * ExitPlanMode request of the pane (its `pending[].id`), or the latest one
+   * without an id. A copy; null when there is none.
+   */
+  planOf(paneId: string, requestId?: string): PanePlan | null {
+    const plans = this.panes.get(paneId)?.plans
+    if (!plans?.size) return null
+    let plan: PanePlan | undefined
+    if (requestId === undefined) for (const p of plans.values()) plan = p
+    else plan = plans.get(requestId)
+    return plan ? { ...plan } : null
+  }
+  /**
+   * App 2.7.0 (A3, `snaos needs "<action>" | --clear`): what the console's
+   * agent asks of the user. The text is trimmed to one line of at most
+   * NEEDS_TEXT_MAX; null or blank clears it. It raises `attention` and never
+   * enters `pending` (state, pendingCount, typing and the prompt gate stay as
+   * they are). A UserPromptSubmit, a new session (never a compact) and an end
+   * clear it too. A live pane with no track still shows it, as a minimal idle
+   * status marked `bare`. False when the pane has no live pty. The same text
+   * again keeps its first `at`.
+   */
+  setNeeds(paneId: string, text: string | null): boolean {
+    if (!this.ptys.has(paneId)) return false
+    const clean = typeof text === 'string' ? clip(sanitize(text, true), NEEDS_TEXT_MAX) : ''
+    const track = this.panes.get(paneId)
+    const prev = track ? track.needs : this.bareNeeds.get(paneId)
+    if ((prev?.text ?? '') === clean) return true
+    const needs: PaneNeeds | undefined = clean ? { text: clean, at: Date.now() } : undefined
+    if (track) {
+      track.needs = needs
+      this.bareNeeds.delete(paneId)
+      this.publish(paneId, track)
+      return true
+    }
+    if (needs) {
+      this.bareNeeds.set(paneId, needs)
+      this.emit(this.bareEvent(paneId, needs))
+    } else {
+      this.bareNeeds.delete(paneId)
+      this.releaseAttention(paneId)
+      this.emit({ paneId, state: null, precise: false, notify: false })
+    }
+    return true
+  }
+  /**
+   * App 2.7.0 (A3): a sign of life of the pane's agent: every hook of its
+   * live pty (onHookEvent, before routeSubSession, so a driver's sub-session
+   * counts), every accepted agent event and every Codex app-server line
+   * (CodexBridge). With `ptyId` it must be the pane's live pty. O(1) and no
+   * publish per call: it only clears a silence on show (one publish), or
+   * refreshes a working pane at most every SIGNAL_REFRESH_MS for AwakeService.
+   */
+  noteSignal(paneId: string, ptyId?: string): void {
+    const live = this.ptys.get(paneId)
+    if (live === undefined || (ptyId !== undefined && ptyId !== live)) return
+    const now = Date.now()
+    this.signals.set(paneId, now)
+    const track = this.panes.get(paneId)
+    if (!track?.precise) return
+    if (track.silence || (now - track.updatedAt >= SIGNAL_REFRESH_MS && this.stateOfTrack(track) === 'working')) this.publish(paneId, track)
+  }
+  /**
    * v2.3 (agentTune): the renderer applied a tune with Enter and ok; until a
    * hook says otherwise (or a new session starts) the console shows it. Only
    * a precise track takes it (the Enter gate needs one). Values come already
@@ -428,7 +630,11 @@ export class StatusManager implements PtySink {
     this.flashing.clear()
     for (const id of [...this.viewed]) this.ackPane(id)
   }
-  snapshot(): PaneStatusEvt[] { return [...this.panes].map(([id, track]) => this.event(id, track, false)) }
+  snapshot(): PaneStatusEvt[] {
+    const out = [...this.panes].map(([id, track]) => this.event(id, track, false))
+    for (const [id, needs] of this.bareNeeds) if (!this.panes.has(id)) out.push(this.bareEvent(id, needs))
+    return out
+  }
   /** v2.3 (agentTune gate): the console's agent session ended (`/exit`), so its pty is back at the shell. */
   isEnded(paneId: string): boolean {
     return this.panes.get(paneId)?.ended === true
@@ -436,7 +642,9 @@ export class StatusManager implements PtySink {
   /** Current status of one console, or null when it has none. */
   stateOf(paneId: string): PaneStatusEvt | null {
     const track = this.panes.get(paneId)
-    return track ? this.event(paneId, track, false) : null
+    if (track) return this.event(paneId, track, false)
+    const needs = this.bareNeeds.get(paneId)
+    return needs ? this.bareEvent(paneId, needs) : null
   }
   /** Observer seam (E1-FR-01) for the remote overlay, the session store and the awake service. */
   addListener(cb: StatusListener): () => void {
@@ -600,13 +808,16 @@ export class StatusManager implements PtySink {
       track.interruptTimer = null
       if (this.panes.get(paneId) !== track || track.timer || track.activity !== 'working' || track.pending.size || track.lastHookAt !== since) return
       track.activity = 'idle'
-      track.tool = undefined
+      track.openTools.clear()
       this.publish(paneId, track)
     }, INTERRUPT_SETTLE_MS)
   }
 
   onHookEvent(evt: HookEvent): void {
     if (!evt.ptyId || !evt.sessionId || this.ptys.get(evt.consoleId) !== evt.ptyId) return
+    // App 2.7.0 (A3): any hook of the live pty is a sign of life, a driver's
+    // sub-session included (routeSubSession may consume it with no track).
+    this.noteSignal(evt.consoleId, evt.ptyId)
     const live = evt as LiveHook
     if (this.routeSubSession(live)) return
     this.acceptHook(live)
@@ -660,7 +871,9 @@ export class StatusManager implements PtySink {
       ...(evt.agentId ? {} : { model: evt.model, effort: evt.effort }),
     }
     const requestId = evt.toolUseId ?? evt.elicitationId
-    const tool = { toolName: evt.toolName, tool: evt.toolSummary, summary: evt.requestSummary ?? evt.toolSummary }
+    const tool = { toolName: evt.toolName, tool: evt.toolSummary, summary: evt.requestSummary ?? evt.toolSummary, toolFile: evt.toolFile }
+    // App 2.7.0 (A3): the whole plan of an ExitPlanMode request ("Leer plan completo").
+    const plan = evt.planText ? { planText: evt.planText, ...(evt.planTruncated ? { planTruncated: true } : {}) } : {}
     let event: AgentEvent | undefined
     switch (evt.name) {
       case 'SessionStart': event = { ...base, kind: 'start', source: evt.source }; break
@@ -671,19 +884,25 @@ export class StatusManager implements PtySink {
       case 'Stop':
         event = { ...base, kind: 'done', reply: evt.lastAssistantMessage, detail: { kind: 'reply', text: firstLine(evt.lastAssistantMessage, LIMITS.detail) }, background: evt.background }
         break
-      case 'StopFailure': event = { ...base, kind: 'error', reason: 'failure' }; break
+      case 'StopFailure': {
+        // App 2.7.0 (A3, S6): the code, refined by the text Claude printed (a
+        // limit's "resets 3pm" lives in last_assistant_message or error_details).
+        const text = [evt.lastAssistantMessage, evt.errorDetails].filter(Boolean).join('\n')
+        event = { ...base, kind: 'error', reason: 'failure', failure: claudeFailure(evt.failureCode, text, Date.now()) }
+        break
+      }
       case 'PermissionRequest':
         // AskUserQuestion and ExitPlanMode also go through a permission prompt
         // (with no tool_use_id): their PreToolUse already registered the request.
         if (!requestId && PROMPT_TOOLS.has(evt.toolName ?? '') && this.hasPendingTool(evt.consoleId, evt.toolName!)) break
-        event = { ...base, ...tool, kind: 'request', requestId, reason: 'permission', detail: { kind: 'permission', text: evt.toolSummary ?? '' } }
+        event = { ...base, ...tool, ...plan, kind: 'request', requestId, reason: 'permission', detail: { kind: 'permission', text: evt.toolSummary ?? '' } }
         break
       case 'Elicitation': event = { ...base, kind: 'request', requestId, reason: 'elicitation' }; break
       case 'ElicitationResult': event = { ...base, kind: 'resolved', requestId, reason: 'elicitation' }; break
       case 'PreToolUse':
-        if (evt.toolName === 'ExitPlanMode') event = { ...base, toolName: evt.toolName, summary: evt.requestSummary, kind: 'request', requestId, reason: 'plan', detail: { kind: 'plan', text: '' } }
-        else if (evt.toolName === 'AskUserQuestion') event = { ...base, toolName: evt.toolName, summary: evt.question ?? '', questions: evt.questions, kind: 'request', requestId, reason: 'question', detail: { kind: 'question', text: evt.question ?? '' } }
-        else event = { ...base, ...tool, kind: 'working', detail: evt.toolSummary ? { kind: 'tool', text: evt.toolSummary } : undefined }
+        if (evt.toolName === 'ExitPlanMode') event = { ...base, ...plan, toolName: evt.toolName, toolUseId: evt.toolUseId, summary: evt.requestSummary, kind: 'request', requestId, reason: 'plan', detail: { kind: 'plan', text: '' } }
+        else if (evt.toolName === 'AskUserQuestion') event = { ...base, toolName: evt.toolName, toolUseId: evt.toolUseId, summary: evt.question ?? '', questions: evt.questions, kind: 'request', requestId, reason: 'question', detail: { kind: 'question', text: evt.question ?? '' } }
+        else event = { ...base, ...tool, toolUseId: evt.toolUseId, kind: 'working', detail: evt.toolSummary ? { kind: 'tool', text: evt.toolSummary } : undefined }
         break
       case 'PostToolUse':
       case 'PostToolUseFailure': event = { ...base, kind: 'resolved', requestId }; break
@@ -785,7 +1004,12 @@ export class StatusManager implements PtySink {
 
   onAgentEvent(evt: AgentEvent): void {
     if (this.ptys.get(evt.paneId) !== evt.ptyId) return
+    // App 2.7.0 (A3): an event of the live pty is a sign of life too (a hook
+    // already counted; this covers a Codex event whatever the bridge sends).
+    this.noteSignal(evt.paneId, evt.ptyId)
     let track = this.panes.get(evt.paneId)
+    // App 2.7.0 (A3): a start of the session the precise track already follows (a compact, or a resume of that session).
+    const sameSession = track?.precise === true && track.sessionId === evt.sessionId && track.provider === evt.provider
     // v2.4: the shell's prompt already ended this agent (D/A); only a new start counts.
     if (!track && evt.kind !== 'start' && this.hostedRetired.get(evt.paneId)?.has(`${evt.provider}:${evt.sessionId}`)) return
     if (track?.retired.has(`${evt.provider}:${evt.sessionId}`)) {
@@ -825,11 +1049,33 @@ export class StatusManager implements PtySink {
     // A turn the agent starts on its own (a background task came back) has no
     // UserPromptSubmit: its first event after a settled Stop opens a new turn,
     // so its own Stop notifies again.
-    if (!evt.turnId && track.activity === 'done' && (evt.kind === 'working' || evt.kind === 'request')) track.turnId = `wake:${++this.promptSequence}`
+    const turnBefore = track.turnId
+    // App 2.7.0 (A3): so does one after a compact of a done turn (turnOver).
+    const settled = track.activity === 'done' || track.turnOver === true
+    if (evt.kind !== 'start') track.turnOver = undefined
+    if (!evt.turnId && settled && (evt.kind === 'working' || evt.kind === 'request')) track.turnId = `wake:${++this.promptSequence}`
     if (evt.turnId) track.turnId = evt.turnId
+    // App 2.7.0 (A3): the user's prompt (UserPromptSubmit, even one with no
+    // text, or a Codex userMessage) ends what the last turn left open.
+    const prompted = !!evt.prompt || (evt.provider === 'claude' && evt.kind === 'working' && !!evt.turnId?.startsWith('prompt:'))
+    // A Codex steer (a userMessage mid-turn) resets openTools and the digest too: accepted for 2.7.0.
+    if (prompted) { track.openTools.clear(); this.clearNeeds(evt.paneId, track) }
+    // App 2.7.0 (A3): only a new session or conversation renews the turn's
+    // signals: a startup, a /clear, a start with no source (Codex), a start
+    // of another session (resuming one) or after the session ended (the tune
+    // read-back's reading below, plus /clear). A compact is the same session,
+    // often mid-turn: needs, both digests, the silence ack and the failure stay.
+    const renewed = evt.kind === 'start' && (!evt.source || evt.source === 'startup' || evt.source === 'clear' || track.ended || !sameSession)
+    // A turn starts (a session, a prompt, a wake-up, a new Codex turn): a new
+    // digest, and the silence watch counts again after an ackSilence.
+    if (renewed || prompted || track.turnId !== turnBefore) { track.turnDigest = emptyDigest(); track.silenceAcked = false }
     if (evt.kind === 'start') {
+      // App 2.7.0 (A3): a compact keeps a done turn over (the switch below sets activity idle).
+      track.turnOver = !renewed && (track.activity === 'done' || track.turnOver === true)
       // A new session starts clean (E5-FR-02: firstPrompt resets on start).
-      track.firstPrompt = undefined; track.detail = undefined; track.tool = undefined; track.reply = undefined; track.replyTurn = undefined
+      track.firstPrompt = undefined; track.detail = undefined; track.reply = undefined; track.replyTurn = undefined
+      track.openTools.clear()
+      if (renewed) { track.lastDigest = undefined; track.failure = undefined; this.clearNeeds(evt.paneId, track) }
       // v2.3: so is its tune read-back, but only for a new process (a startup,
       // or a resume after the session ended): a compact, clear or resume
       // inside the same Claude keeps it (Ultracode is never re-reported) and
@@ -843,8 +1089,18 @@ export class StatusManager implements PtySink {
         track.ended = false; track.activity = 'idle'; track.pending.clear(); track.seen.clear()
         track.turnId = evt.turnId ?? ''
         break
-      case 'working': track.activity = 'working'; break
-      case 'idle': track.activity = 'idle'; break
+      case 'working':
+        track.activity = 'working'; track.failure = undefined
+        // App 2.7.0 (A3): a tool call opens (Claude PreToolUse, a Codex tool item).
+        if (evt.tool && !evt.subagent) {
+          const id = evt.toolUseId || ANON_TOOL
+          if (id === ANON_TOOL || !track.openTools.has(id)) this.countTool(track, evt)
+          this.openTool(track, id, evt)
+        }
+        break
+      // App 2.7.0 (A3): an interrupted turn (Codex turn/completed interrupted)
+      // leaves nothing open either, like done, error and end.
+      case 'idle': track.activity = 'idle'; track.openTools.clear(); break
       case 'request': {
         const id = evt.requestId ?? `fallback:${evt.reason ?? 'question'}`
         key = evt.requestId ? `request:${id}` : `request:${track.turnId}:${id}`
@@ -860,6 +1116,12 @@ export class StatusManager implements PtySink {
         // one already answered keeps its mark, so no card comes back for it.
         track.pending.set(id, { reason: evt.reason ?? 'question', toolName, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions, requestAt: fallback?.requestAt ?? Date.now(), ...(fallback?.invalidated ? { invalidated: true } : {}) })
         if (!promoted) notice = 'action'
+        // App 2.7.0 (A3): a permission prompt with its id is that tool, open;
+        // the PreToolUse of a prompt tool (plan, question) is one more tool of
+        // the turn; an ExitPlanMode keeps its whole plan for planOf().
+        if (evt.tool && evt.requestId) this.openTool(track, evt.requestId, evt)
+        if (evt.toolUseId && !evt.subagent) this.countTool(track, evt)
+        if (evt.planText) this.keepPlan(track, id, evt)
         break
       }
       case 'resolved':
@@ -867,12 +1129,16 @@ export class StatusManager implements PtySink {
           track.pending.delete(evt.requestId)
           // A stable request ID remains deduplicated after resolution.
         }
+        // App 2.7.0 (A3): the tool with that id finished (PostToolUse, a
+        // completed Codex item). A Claude PostToolUse no open id matches ends
+        // the one tool an older producer opened without an id.
+        if (!(evt.requestId && track.openTools.delete(evt.requestId)) && evt.provider === 'claude' && !evt.subagent) track.openTools.delete(ANON_TOOL)
         if (evt.reason) track.pending.delete(`fallback:${evt.reason}`)
         if (evt.provider === 'claude') {
           track.pending.delete('fallback:permission')
           track.seen.delete(`request:${track.turnId}:fallback:permission`)
           if (evt.reason) track.seen.delete(`request:${track.turnId}:fallback:${evt.reason}`)
-          track.activity = 'working'
+          track.activity = 'working'; track.failure = undefined
         }
         break
       case 'done':
@@ -885,7 +1151,10 @@ export class StatusManager implements PtySink {
             target.timer = null
             target.activity = 'done'
             target.pending.clear()
-            target.tool = undefined
+            // App 2.7.0 (A3): the turn is over: nothing stays open and its
+            // digest freezes here (a hook inside the 700 ms cancels this done).
+            target.openTools.clear()
+            target.lastDigest = target.turnDigest
             target.background = evt.background ? { ...evt.background, at: Date.now() } : undefined
             // v2.2: a turn that left work coming back to it is not done: no notice.
             const waiting = !!this.waitingOf(target)
@@ -895,13 +1164,22 @@ export class StatusManager implements PtySink {
           return
         }
         track.activity = 'done'; key = `done:${track.turnId}`; notice = 'done'
+        track.openTools.clear(); track.lastDigest = track.turnDigest
         break
-      case 'error': track.activity = 'error'; key = `error:${track.turnId}`; notice = 'error'; break
+      case 'error': {
+        track.activity = 'error'; key = `error:${track.turnId}`; notice = 'error'
+        track.openTools.clear()
+        // App 2.7.0 (A3): a later error of the same turn with no info (a failed
+        // Codex turn/completed after its `error`) keeps the first one's.
+        const failure = cleanFailure(evt.failure)
+        if (failure) track.failure = failure
+        break
+      }
       case 'unknown': track.activity = 'unknown'; break
       case 'end':
         track.retired.add(`${evt.provider}:${evt.sessionId}`)
         track.pending.clear(); track.activity = 'idle'; track.ended = true
-        track.detail = undefined; track.tool = undefined
+        track.detail = undefined; track.openTools.clear(); this.clearNeeds(evt.paneId, track)
         // v2.2: Codex quit (its launcher ended with code 0): the same
         // "exited [Resume] [New]" offer Claude's SessionEnd raises.
         if (evt.provider === 'codex' && SESSION_ID_RE.test(evt.sessionId)) {
@@ -941,18 +1219,21 @@ export class StatusManager implements PtySink {
     if (changed || before !== this.attentionOf(track)) this.publish(paneId, track)
   }
 
-  dispose(): void { for (const id of [...this.panes.keys()]) this.clearPane(id); this.ptys.clear() }
+  dispose(): void {
+    for (const id of new Set([...this.panes.keys(), ...this.bareNeeds.keys()])) this.clearPane(id)
+    this.ptys.clear(); this.signals.clear()
+    this.silenceWatch.dispose()
+  }
 
   /** Copies the bounded enrichment of an accepted event onto its track. */
   private enrich(track: PaneTrack, evt: AgentEvent): void {
     if (evt.cwd && isAbsolute(evt.cwd)) track.cwd = evt.cwd
     if (evt.transcriptPath) track.transcriptPath = evt.transcriptPath
-    // Subagents only touch the main detail through questions and permissions.
+    // Subagents only touch the main detail through questions and permissions
+    // (open tools: the `working` and `request` cases of onAgentEvent).
     const own = !evt.subagent || evt.kind === 'request'
     if (own && evt.detail) track.detail = { kind: evt.detail.kind, text: clip(sanitize(evt.detail.text, true), LIMITS.detail) }
-    if (own && evt.tool) track.tool = evt.tool
     if (evt.prompt) {
-      track.tool = undefined
       // v2.4: a `/rename X` names the session; it is not what the session is about.
       if (!track.firstPrompt && !RENAME_PROMPT_RE.test(evt.prompt.trim())) track.firstPrompt = firstLine(evt.prompt, LIMITS.title) || undefined
     }
@@ -977,9 +1258,96 @@ export class StatusManager implements PtySink {
     }, () => {})
   }
 
+  /**
+   * App 2.7.0 (A3): a tool call opens (or a permission prompt names it again)
+   * as the newest one: the current tool and its family. A key already open
+   * keeps its start time.
+   */
+  private openTool(track: PaneTrack, id: string, evt: AgentEvent): void {
+    const summary = clip(sanitize(evt.tool ?? '', true), LIMITS.detail)
+    if (!summary) return
+    const at = track.openTools.get(id)?.at ?? Date.now()
+    track.openTools.delete(id)
+    track.openTools.set(id, { summary, family: familyOf(evt.toolName, evt.provider), at })
+    while (track.openTools.size > OPEN_TOOLS_MAX) track.openTools.delete(track.openTools.keys().next().value!)
+  }
+  /** The newest open tool, or undefined when none runs. */
+  private currentTool(track: PaneTrack): OpenTool | undefined {
+    let newest: OpenTool | undefined
+    for (const tool of track.openTools.values()) newest = tool
+    return newest
+  }
+  /** App 2.7.0 (A3): one more tool call of the turn, by family, with its file. */
+  private countTool(track: PaneTrack, evt: AgentEvent): void {
+    const file = typeof evt.toolFile === 'string' ? clip(sanitize(evt.toolFile, true), 120) : undefined
+    track.turnDigest = addTool(track.turnDigest, evt.toolName ?? '', { provider: evt.provider, file })
+  }
+  /** App 2.7.0 (A3): an ExitPlanMode request's whole plan under its pending id; the newest PLANS_MAX stay. */
+  private keepPlan(track: PaneTrack, requestId: string, evt: AgentEvent): void {
+    const clean = typeof evt.planText === 'string' ? sanitize(evt.planText) : ''
+    const text = clip(clean, PLAN_TEXT_MAX)
+    if (!text) return
+    track.plans.delete(requestId)
+    track.plans.set(requestId, { requestId, text, at: Date.now(), truncated: evt.planTruncated === true || clean.length > PLAN_TEXT_MAX })
+    while (track.plans.size > PLANS_MAX) track.plans.delete(track.plans.keys().next().value!)
+  }
+  /** App 2.7.0 (A3): `needs` ends (a prompt, a new session, an end): on the track and any bare one of the pane. */
+  private clearNeeds(paneId: string, track: PaneTrack): void {
+    track.needs = undefined
+    this.bareNeeds.delete(paneId)
+  }
+  /**
+   * App 2.7.0 (A3): `snaos needs` of a live pane with no track: the minimal
+   * status that carries it (idle, approximate, attention), so every surface
+   * counts the console. Published by setNeeds, snapshot() and stateOf().
+   * `bare` tells main's consumers (the CLI, Share) and the renderer that its
+   * state is no agent state; a track's own event never carries it.
+   */
+  private bareEvent(paneId: string, needs: PaneNeeds): PaneStatusEvt {
+    const provider = this.providerOf(paneId)
+    return {
+      paneId, state: 'idle', precise: false, notify: false, pendingCount: 0,
+      updatedAt: needs.at, stateSince: needs.at, attention: true, needs: { ...needs }, bare: true,
+      ...(provider ? { provider } : {}),
+    }
+  }
+  /**
+   * App 2.7.0 (A3): the watch's deadline found no signal for a while. Only a
+   * precise track still in its working turn, not acknowledged, shows it.
+   */
+  private onSilence(paneId: string, silence: PaneSilence): void {
+    const track = this.panes.get(paneId)
+    if (!track?.precise || track.activity !== 'working' || track.silenceAcked) { this.silenceWatch.unwatch(paneId); return }
+    if (track.silence?.level === silence.level && track.silence.since === silence.since) return
+    track.silence = { level: silence.level, since: silence.since }
+    this.publish(paneId, track)
+  }
+  /**
+   * App 2.7.0 (A3), from publish(): the silence watch follows a precise track
+   * while the agent itself works (`working` activity and effective state: not
+   * a pending request, not a finished turn waiting on background work) and
+   * its turn was not acknowledged. Leaving that clears the silence and its
+   * deadlines; a signal newer than the silence on show clears it and counts
+   * again from that signal.
+   */
+  private syncSilence(paneId: string, track: PaneTrack, effective: ClaudePaneState): void {
+    const watched = track.precise && track.activity === 'working' && effective === 'working' && !track.silenceAcked && this.panes.get(paneId) === track
+    if (!watched) {
+      track.silence = undefined
+      if (this.panes.get(paneId) === track) this.silenceWatch.unwatch(paneId)
+      return
+    }
+    if (track.silence && (this.signals.get(paneId) ?? -Infinity) > track.silence.since) {
+      track.silence = undefined
+      this.silenceWatch.rearm(paneId)
+      return
+    }
+    this.silenceWatch.watch(paneId)
+  }
+
   private createTrack(provider: AgentProvider, sessionId: string): PaneTrack {
     const now = Date.now()
-    return { provider, sessionId, retired: new Set(), precise: false, activity: 'idle', pending: new Map(), seen: new Set(), turnId: '', turn: 0, timer: null, updatedAt: now, ended: false, lastState: 'idle', stateSince: now, emittedAt: 0, detailTimer: null, subSessions: new Map(), waitTimer: null, lastHookAt: 0, interruptTimer: null, stateSeq: 0, ackedSeq: 0 }
+    return { provider, sessionId, retired: new Set(), precise: false, activity: 'idle', pending: new Map(), seen: new Set(), turnId: '', turn: 0, timer: null, updatedAt: now, ended: false, lastState: 'idle', stateSince: now, emittedAt: 0, detailTimer: null, subSessions: new Map(), waitTimer: null, lastHookAt: 0, interruptTimer: null, stateSeq: 0, ackedSeq: 0, openTools: new Map(), turnDigest: emptyDigest(), mutedSeq: -1, silenceAcked: false, plans: new Map() }
   }
   private cancelTimer(track: PaneTrack): void { if (track.timer) clearTimeout(track.timer); track.timer = null }
   /** v2.4: clears the pane in `ms`, unless a clear already armed fires sooner. */
@@ -991,7 +1359,11 @@ export class StatusManager implements PtySink {
     track.timer = setTimeout(() => this.clearPane(paneId), ms)
   }
   private cancelDetail(track: PaneTrack): void { if (track.detailTimer) clearTimeout(track.detailTimer); track.detailTimer = null; track.deferredCause = undefined }
-  /** Every timer of a track that is going away. */
+  /**
+   * Every timer of a track that is going away. App 2.7.0: the silence
+   * deadlines are per pane in the SilenceWatch; clearPane drops them, and a
+   * replacing track re-syncs them on its first publish.
+   */
   private stopTimers(track: PaneTrack): void {
     this.cancelTimer(track); this.cancelDetail(track)
     if (track.waitTimer) clearTimeout(track.waitTimer)
@@ -999,10 +1371,13 @@ export class StatusManager implements PtySink {
     track.waitTimer = null; track.interruptTimer = null
     if (track.titleTimer) { clearTimeout(track.titleTimer); track.titleTimer = null }
   }
+  /** The pane's track goes away (and with it its needs, plans and silence); so does a bare needs. */
   private clearPane(paneId: string): void {
+    const bare = this.bareNeeds.delete(paneId)
+    this.silenceWatch.unwatch(paneId)
     const track = this.panes.get(paneId)
-    if (!track) return
-    this.stopTimers(track); this.panes.delete(paneId)
+    if (!track && !bare) return
+    if (track) { this.stopTimers(track); this.panes.delete(paneId) }
     this.releaseAttention(paneId)
     this.emit({ paneId, state: null, precise: false, notify: false })
   }
@@ -1044,8 +1419,13 @@ export class StatusManager implements PtySink {
    * v2.3: the console needs the user. `action` while some request was not
    * answered (invalidated by input), `done` / `error` until a device
    * acknowledged that transition; never for the other states.
+   * App 2.7.0 (A3): `needs` asks whatever the state (working included). A
+   * muted console (mutedSeq === stateSeq) asks for nothing, `needs` included,
+   * until its effective state changes: the same rule as needsYou().
    */
   private attentionOf(track: PaneTrack, state = this.stateOfTrack(track)): boolean {
+    if (track.mutedSeq === track.stateSeq) return false
+    if (track.needs) return true
     if (state === 'action') {
       for (const entry of track.pending.values()) if (!entry.invalidated) return true
       return false
@@ -1086,17 +1466,34 @@ export class StatusManager implements PtySink {
     if (track.topic) evt.topic = track.topic
     if (track.firstPrompt) evt.firstPrompt = track.firstPrompt
     if (track.provider === 'claude' && track.cacheSince) evt.cacheSince = track.cacheSince
+    // App 2.7.0 (A3): `snaos needs` and the mute reach any track, approximate included.
+    if (track.needs) evt.needs = { ...track.needs }
+    if (track.mutedSeq === track.stateSeq) evt.muted = true
     // A title-only (approximate) track carries no reply, tool or pending detail (E4-FR-09).
     if (!track.precise) return evt
     if (track.reply) evt.lastMessage = clip(sanitize(track.reply, true), LIMITS.lastMessage)
-    if (track.tool && (state === 'working' || state === 'action')) evt.activity = clip(track.tool, LIMITS.activity)
+    // App 2.7.0 (A3): the newest tool still open is the current one; none open, none shown.
+    const tool = state === 'working' || state === 'action' ? this.currentTool(track) : undefined
+    if (tool) { evt.activity = clip(tool.summary, LIMITS.activity); evt.toolFamily = tool.family }
+    if (track.failure) evt.failure = { ...track.failure }
+    if (track.silence) evt.silence = { ...track.silence }
+    // The turn's digest while it runs, the frozen one once it is done (desktop only).
+    const digest = track.activity === 'done' ? track.lastDigest : track.turnDigest
+    if (digest && digest.tools > 0) evt.digest = { ...digest, families: { ...digest.families }, files: [...digest.files] }
+    const signalAt = this.signals.get(paneId)
+    if (signalAt !== undefined) evt.signalAt = signalAt
     const pending: RemotePending[] = []
     for (const [id, entry] of track.pending) {
       if (entry.reason === 'failure' || entry.invalidated) continue
       pending.push({ id, kind: entry.reason, ...(entry.toolName ? { toolName: entry.toolName } : {}), summary: entry.summary, ...(entry.questions ? { questions: entry.questions } : {}) })
     }
     if (pending.length) evt.pending = pending
-    if (track.detail) evt.detail = track.detail
+    // App 2.7.0 (A3): a tool detail (or a permission one once answered)
+    // follows the current tool like `activity`, since the desktop row reads
+    // it: a finished tool is not shown there either.
+    const toolDetail = track.detail?.kind === 'tool' || (track.detail?.kind === 'permission' && state !== 'action')
+    if (toolDetail) { if (tool) evt.detail = { kind: 'tool', text: tool.summary } }
+    else if (track.detail) evt.detail = track.detail
     if (track.cwd) evt.cwd = track.cwd
     if (track.model) evt.model = track.model
     if (track.effort) evt.effort = track.effort
@@ -1144,8 +1541,15 @@ export class StatusManager implements PtySink {
   private publish(paneId: string, track: PaneTrack, key?: string, state?: StatusNotice['state'], cause?: AgentEvent): void {
     const now = Date.now()
     track.updatedAt = now
+    // App 2.7.0 (A3): a `snaos needs` set while the pane had no track moves onto its new track.
+    const bare = this.bareNeeds.get(paneId)
+    if (bare && this.panes.get(paneId) === track) {
+      this.bareNeeds.delete(paneId)
+      if (!track.needs) track.needs = bare
+    }
     // stateSince moves only when the effective state changes (E4-FR-09 c);
     // cacheSince marks Claude's working -> done/idle transition (E5-FR-28).
+    // App 2.7.0: stateSeq also ends a mute (mutedSeq), so a transition unmutes.
     const effective = this.stateOfTrack(track)
     const transition = effective !== track.lastState
     if (transition) {
@@ -1154,13 +1558,17 @@ export class StatusManager implements PtySink {
       track.lastState = effective; track.stateSince = now
       track.stateSeq++
     }
+    this.syncSilence(paneId, track, effective)
     // v2.3: a done / error that lands while a device looks at the pane is already seen.
     if ((effective === 'done' || effective === 'error') && track.ackedSeq !== track.stateSeq && this.seenNow(paneId)) track.ackedSeq = track.stateSeq
     const fresh = !!key && !track.seen.has(key)
     if (key) { track.seen.add(key); if (track.seen.size > 512) track.seen.delete(track.seen.values().next().value!) }
     const evt = this.event(paneId, track, false), cfg = this.cfg
     if (fresh && state) {
-      this.onNotice({ paneId, provider: track.provider, state, reason: evt.reason })
+      // App 2.7.0 (A3): a muted console reaches no channel (Web Push, Discord,
+      // ntfy) either; its key is spent all the same. A transition unmutes it
+      // before this point, so the notice that comes with one flows.
+      if (!evt.muted) this.onNotice({ paneId, provider: track.provider, state, reason: evt.reason })
       const focused = this.getWindow()?.isFocused() ?? false
       const inView = this.viewed.has(paneId) && focused
       // v2.3: nothing to announce for a notice already seen (on a phone).
@@ -1173,7 +1581,10 @@ export class StatusManager implements PtySink {
     if (!evt.attention) this.releaseAttention(paneId)
     // Only-detail changes are coalesced to one emission per 500 ms per pane
     // (E5-FR-02); state, pending, session and notifications go out at once.
-    const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.hosted, evt.precise, evt.sessionId, evt.cwd, evt.waiting, evt.attention, evt.model, evt.effort, evt.ultracode])
+    // App 2.7.0 (A3): so do a failure, needs, the mute and a silence level;
+    // toolFamily and digest are detail-only, and signalAt never counts (it
+    // moves with every signal).
+    const signature = JSON.stringify([evt.state, evt.reason, evt.pendingCount, evt.pending?.map(p => p.id), evt.provider, evt.hosted, evt.precise, evt.sessionId, evt.cwd, evt.waiting, evt.attention, evt.model, evt.effort, evt.ultracode, evt.failure?.kind, evt.needs?.text, evt.muted, evt.silence?.level])
     const immediate = transition || !!key || evt.notify || (!!cause && IMMEDIATE_KINDS.has(cause.kind)) || signature !== track.emitted
     if (immediate || now - track.emittedAt >= DETAIL_THROTTLE_MS) {
       this.cancelDetail(track)

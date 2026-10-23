@@ -43,9 +43,11 @@ import {
   type RemoteNotesRequest,
   type RemoteHistorySession,
   type RemotePaneStatus,
+  type RemotePlanReply,
   type RemoteServerMsg,
   type RemoteStateSnapshot,
 } from '@shared/remote-protocol'
+import { APP_2_7_0, appVersionAtLeast } from '@shared/agentTune'
 import { BRAND } from '@shared/brand'
 import {
   clearAuth,
@@ -973,6 +975,19 @@ class RemoteClient {
     return this.request<RemoteNotesReply>((id) => ({ v: PROTOCOL_VERSION, type: 'notesReq', id, ...req }))
   }
 
+  /**
+   * app 2.7.0 (A3): the full ExitPlanMode plan of a console, by request id
+   * or its newest one (pending by id, 10s); the answer is the planRes
+   * without its envelope. A desktop older than 2.7.0 would strike the
+   * unknown frame, so it gets nothing sent and `unsupported` back.
+   */
+  requestPlan(paneId: string, requestId?: string): Promise<PendingOutcome<RemotePlanReply>> {
+    if (!appVersionAtLeast(store.getState().appVersion, APP_2_7_0)) {
+      return Promise.resolve({ ok: true, value: { ok: false, error: 'unsupported' } })
+    }
+    return this.request<RemotePlanReply>((id) => ({ v: PROTOCOL_VERSION, type: 'planReq', id, paneId, ...(requestId !== undefined ? { requestId } : {}) }))
+  }
+
   /** The answer to an id-keyed request arrived; false when nothing waits (late). */
   settleRequest(id: string, value: unknown): boolean {
     return this.pendingById.resolve(id, value)
@@ -1362,6 +1377,11 @@ class RemoteClient {
       case 'notesChanged':
         noteChanged(msg.workspaceId, msg.noteId)
         break
+      case 'planRes': {
+        const { v: _v, type: _type, id, ...reply } = msg
+        this.pendingById.resolve(id, reply satisfies RemotePlanReply)
+        break
+      }
       case 'revoked':
         log('warn', 'revoked')
         this.forgetComposerState()
