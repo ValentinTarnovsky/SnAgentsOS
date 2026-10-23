@@ -40,6 +40,7 @@ async function bundleShare() {
 export * from './src/shared/share-protocol'
 export * from './src/shared/share-protocol-schemas'
 export * from './src/shared/shareInput'
+export * from './src/shared/shareRights'
 export * from './src/main/share/crypto'
 export * from './src/main/share/identity'
 export * from './src/main/share/invite'
@@ -50,6 +51,7 @@ export * from './src/main/share/PaneFanout'
 export * from './src/main/share/InputArbiter'
 export * from './src/main/share/StatusCoalescer'
 export * from './src/main/share/ShareHost'
+export * from './src/main/share/shareFiles'
 export { checkShareUpgrade } from './src/main/share/ShareServer'
 export { buildFixScript, FW_RULES_SHARE, FW_RULES_REMOTE } from './src/main/remote/firewall'
 export { sanitizeDeviceName } from './src/main/remote/PairingService'
@@ -67,6 +69,14 @@ function loadShare(env = {}) {
 }
 
 let S = null
+/** The app 2.5 share schemas (protocol v1), frozen in scripts/fixtures/share-v1: what a v1 guest accepts. */
+let V1 = null
+function loadV1() {
+  const code = buildSync({ entryPoints: [path.join(root, 'scripts/fixtures/share-v1/share-protocol-schemas.ts')], bundle: true, platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
+  const mod = { exports: {} }
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console })
+  return mod.exports
+}
 
 // --- 1. Invite ---------------------------------------------------------------
 function testInvite() {
@@ -301,7 +311,7 @@ async function testHandshake() {
   const hs1 = g.hello()
   check(!hs1.includes(S.toB64u(guestStatic.pub)), 'hs1 never shows the guest static key in clear')
   const h = S.hostHandshake(hs1, { hostStatic, app: '2.4.0' })
-  check(h.ok && h.version === 1 && h.guestStatic.equals(guestStatic.pub), 'the host opens hs1 and learns the guest static key')
+  check(h.ok && h.version === 2 && h.guestStatic.equals(guestStatic.pub), 'the host opens hs1 and learns the guest static key')
   const gr = g.receive(h.reply)
   check(gr.ok, 'the guest derives the channel from hs2')
   const gc = gr.channel, hc = h.channel
@@ -378,17 +388,26 @@ async function testHandshake() {
   }
   // Version mismatch both ways.
   {
-    const g7 = new S.GuestHandshake({ hostStatic: hostStatic.pub, guestStatic, minVersion: 2, maxVersion: 3 })
+    const g7 = new S.GuestHandshake({ hostStatic: hostStatic.pub, guestStatic, minVersion: 3, maxVersion: 4 })
     const h7 = S.hostHandshake(g7.hello(), { hostStatic, app: '2.4.0' })
     check(!h7.ok && h7.error === 'version' && h7.close === 4426, 'no common version: hsErr and close 4426')
     const r7 = g7.receive(h7.reply)
-    check(!r7.ok && r7.error === 'version' && r7.min === 1 && r7.max === 1 && r7.app === '2.4.0', 'the guest reads the host range from hsErr')
+    check(!r7.ok && r7.error === 'version' && r7.min === 1 && r7.max === 2 && r7.app === '2.4.0', 'the guest reads the host range from hsErr')
     const g8 = new S.GuestHandshake({ hostStatic: hostStatic.pub, guestStatic, minVersion: 1, maxVersion: 5 })
     const h8 = S.hostHandshake(g8.hello(), { hostStatic })
-    check(h8.ok && h8.version === 1, 'a newer guest falls back to the highest common version')
+    check(h8.ok && h8.version === 2, 'a newer guest falls back to the highest common version')
+    // app 2.6.0 (v2) against app 2.4 / 2.5 (v1), both ways: they agree on 1.
+    const g8b = new S.GuestHandshake({ hostStatic: hostStatic.pub, guestStatic, maxVersion: 1 })
+    const h8b = S.hostHandshake(g8b.hello(), { hostStatic })
+    const r8b = h8b.ok ? g8b.receive(h8b.reply) : null
+    check(h8b.ok && h8b.version === 1 && r8b && r8b.ok && r8b.channel.version === 1, 'a v1 guest and a v2 host speak 1')
+    const g8c = new S.GuestHandshake({ hostStatic: hostStatic.pub, guestStatic })
+    const h8c = S.hostHandshake(g8c.hello(), { hostStatic, maxVersion: 1 })
+    const r8c = h8c.ok ? g8c.receive(h8c.reply) : null
+    check(h8c.ok && h8c.version === 1 && r8c && r8c.ok && r8c.channel.version === 1, 'a v2 guest and a v1 host speak 1')
     const g9 = new S.GuestHandshake({ hostStatic: hostStatic.pub, guestStatic })
     g9.hello()
-    check(g9.receive(JSON.stringify({ t: 'hs2', sv: 2, e: S.toB64u(S.generateShareKeyPair().pub) })).error === 'version', 'an hs2 outside the guest range is a version error')
+    check(g9.receive(JSON.stringify({ t: 'hs2', sv: 3, e: S.toB64u(S.generateShareKeyPair().pub) })).error === 'version', 'an hs2 outside the guest range is a version error')
   }
   // Malformed handshake frames.
   {
@@ -465,7 +484,15 @@ function testSchemas() {
   check(C({ t: 'ctl', id: 'r1', op: 'createPane', presetId: 'pre-1' }).ok && C({ t: 'ctl', id: 'r1', op: 'closePane', paneId: 'p-1' }).ok, 'ctl createPane and closePane parse')
   check(!C({ t: 'ctl', id: 'r1', op: 'closePane' }).ok && !C({ t: 'ctl', id: 'r1', op: 'createPane', prompt: 'rm -rf' }).ok && !C({ t: 'ctl', id: 'r1', op: 'createPane', cwd: 'C:/' }).ok, 'ctl never takes prompt or cwd, closePane needs its pane')
   check(!C({ t: 'ctl', id: 'r1', op: 'restartPane', paneId: 'p' }).ok, 'other ctl ops do not exist')
-  check(C({ t: 'notesReq', id: 'n1', op: 'read', noteId: 'abc' }).ok && !C({ t: 'notesReq', id: 'n1', op: 'write', noteId: 'abc' }).ok, 'notes are read-only')
+  // Notes: one exact shape per op (write, create and delete are v2, gated by caps.notesWrite on the host).
+  check(C({ t: 'notesReq', id: 'n1', op: 'read', noteId: 'abc' }).ok && !C({ t: 'notesReq', id: 'n1', op: 'read' }).ok && C({ t: 'notesReq', id: 'n1', op: 'list' }).ok, 'notes read needs its id, list does not')
+  check(C({ t: 'notesReq', id: 'n1', op: 'write', noteId: 'abc', text: 'x', baseRev: '1-2' }).ok && !C({ t: 'notesReq', id: 'n1', op: 'write', noteId: 'abc' }).ok && !C({ t: 'notesReq', id: 'n1', op: 'write', text: 'x' }).ok, 'a note write needs its id and its text')
+  check(!C({ t: 'notesReq', id: 'n1', op: 'write', noteId: 'abc', text: 'x'.repeat(40001) }).ok && !C({ t: 'notesReq', id: 'n1', op: 'write', noteId: '../x', text: 'x' }).ok && !C({ t: 'notesReq', id: 'n1', op: 'write', noteId: 'abc', text: 'x', workspaceId: 'w2' }).ok, 'a note write is bounded, its id is a plain name and it never names a workspace')
+  check(C({ t: 'notesReq', id: 'n1', op: 'create' }).ok && C({ t: 'notesReq', id: 'n1', op: 'delete', noteId: 'abc' }).ok && !C({ t: 'notesReq', id: 'n1', op: 'delete' }).ok && !C({ t: 'notesReq', id: 'n1', op: 'purge', noteId: 'abc' }).ok, 'create and delete parse; other note ops do not exist')
+  // Files: read-only, relative, never `.git` (any case, any depth).
+  check(C({ t: 'filesReq', id: 'f1', op: 'list', rel: '' }).ok && C({ t: 'filesReq', id: 'f1', op: 'read', rel: 'src/a.ts' }).ok && C({ t: 'filesWatch', on: true }).ok, 'files list, read and watch parse')
+  check(!C({ t: 'filesReq', id: 'f1', op: 'write', rel: 'a' }).ok && !C({ t: 'filesReq', id: 'f1', op: 'list', rel: '../x' }).ok && !C({ t: 'filesReq', id: 'f1', op: 'read', rel: 'C:/x' }).ok && !C({ t: 'filesReq', id: 'f1', op: 'read', rel: '/etc/passwd' }).ok && !C({ t: 'filesReq', id: 'f1', op: 'read', rel: 'a\\b' }).ok, 'files never write and never leave the folder')
+  check(!C({ t: 'filesReq', id: 'f1', op: 'read', rel: '.git/config' }).ok && !C({ t: 'filesReq', id: 'f1', op: 'read', rel: '.GIT/config' }).ok && !C({ t: 'filesReq', id: 'f1', op: 'list', rel: 'sub/.Git' }).ok, '.git is out in any case and at any depth')
   check(!C({ t: 'gitReq', id: 'g1', op: 'diff', path: '../secret' }).ok && C({ t: 'gitReq', id: 'g1', op: 'diff', path: 'src/a.ts' }).ok, 'git paths stay relative')
   const unk = C({ t: 'futureThing', x: 1 })
   check(!unk.ok && unk.unknown, 'a well-formed unknown type is reported as unknown (err unsupported, no strike)')
@@ -488,6 +515,17 @@ function testSchemas() {
   check(H({ t: 'chatPage', paneId: 'p-1', items: [{ id: '123', role: 'assistant', ts: null, blocks: [{ t: 'text', text: 'hi' }] }], cursor: null, done: true }).ok, 'chat pages parse')
   check(!H({ t: 'chatPage', paneId: 'p-1', items: [{ id: '123', role: 'assistant', ts: null, blocks: [{ t: 'html', text: '<b>' }] }], cursor: null, done: true }).ok, 'unknown chat blocks are refused')
   check(H({ t: 'notesRes', id: 'n1', ok: true, notes: [{ id: 'a', title: 'T', updatedAt: 1, size: 2, rev: 'r' }] }).ok, 'notes answers parse')
+  check(H({ t: 'notesRes', id: 'n1', ok: false, error: 'conflict', current: { id: 'a', title: 'T', updatedAt: 1, size: 2, rev: 'r', text: 'x' } }).ok && H({ t: 'notesChanged', noteId: 'a', rev: '1-2' }).ok, 'v2: the conflict copy and the rev of a change parse')
+  check(H({ t: 'state', state: { ...state, caps: { ...state.caps, notesWrite: true, files: true } } }).ok && !H({ t: 'state', state: { ...state, caps: { ...state.caps, filesWrite: true } } }).ok, 'v2 caps parse; an unknown cap does not')
+  const entry = { name: 'a.ts', kind: 'file', size: 2, mtimeMs: 1 }
+  check(H({ t: 'filesRes', id: 'f1', ok: true, entries: [entry, { ...entry, name: 'src', kind: 'dir', link: true }], truncated: false }).ok, 'a folder answer parses')
+  const bidi = 'evil' + String.fromCharCode(0x202e) + 'txt.exe'
+  check(!H({ t: 'filesRes', id: 'f1', ok: true, entries: [{ ...entry, name: bidi }] }).ok && !H({ t: 'filesRes', id: 'f1', ok: true, entries: [{ ...entry, name: '../x' }] }).ok && !H({ t: 'filesRes', id: 'f1', ok: true, entries: [{ ...entry, name: '.git' }] }).ok, 'entry names are one safe segment without bidi, never .git')
+  check(!H({ t: 'filesRes', id: 'f1', ok: true, entries: Array.from({ length: 2001 }, (_, i) => ({ ...entry, name: 'f' + i })) }).ok, 'at most 2000 entries')
+  const text = { kind: 'text', text: 'hi', eol: 'lf', bom: false, rev: '1-2', size: 2 }
+  check(H({ t: 'filesRes', id: 'f1', ok: true, file: { ...text, partial: true } }).ok && !H({ t: 'filesRes', id: 'f1', ok: true, file: { ...text, text: 'x'.repeat(256 * 1024 + 1) } }).ok, 'a text file is at most 256 KB')
+  check(H({ t: 'filesRes', id: 'f1', ok: true, file: { kind: 'image', dataUrl: 'data:image/png;base64,AAAA', size: 3, rev: 'r' } }).ok && !H({ t: 'filesRes', id: 'f1', ok: true, file: { kind: 'image', dataUrl: 'data:image/svg+xml;base64,AAAA', size: 3, rev: 'r' } }).ok && !H({ t: 'filesRes', id: 'f1', ok: true, file: { kind: 'image', dataUrl: 'javascript:alert(1)', size: 3, rev: 'r' } }).ok, 'images are base64 data URLs of raster types, never SVG')
+  check(H({ t: 'filesChanged', dirs: ['', 'src'] }).ok && H({ t: 'filesChanged', dirs: [], all: true }).ok && !H({ t: 'filesChanged', dirs: ['../x'] }).ok && !H({ t: 'filesChanged', dirs: Array.from({ length: 201 }, (_, i) => 'd' + i) }).ok, 'filesChanged names safe folders, at most 200')
   check(H({ t: 'gitRes', id: 'g1', ok: false, data: { error: 'not_repo' }, page: 0, done: true }).ok, 'git answers parse')
   const hu = H({ t: 'somethingNew' })
   check(!hu.ok && hu.unknown, 'the guest sees unknown host types as unknown (ignored)')
@@ -671,6 +709,15 @@ function hostWorld(opts = {}) {
   const chat = { subs: [], unsubs: [], closed: [], sub(owner, paneId, send) { chat.subs.push({ owner, paneId, send }); send({ type: 'chatPage', paneId, items: [{ id: '1', role: 'assistant', ts: null, blocks: [{ t: 'text', text: 'hi' }] }], cursor: null, done: true }) }, unsub(owner, paneId) { chat.unsubs.push(paneId) }, more() {}, closed(owner) { chat.closed.push(owner) } }
   const gitCalls = [], notesCalls = []
   const statuses = [{ paneId: 'p2', state: 'idle', precise: true, provider: 'claude', stateSince: 5, updatedAt: 5 }]
+  // The guest half of FileService (app 2.6.0): calls and watches recorded.
+  const filesCalls = [], watches = []
+  const io = { read: () => ({ ok: true, kind: 'text', text: 'hi', eol: 'lf', bom: false, rev: '1-2', size: 2, partial: false }) }
+  const files = {
+    list: async (ws, rel, max) => { filesCalls.push({ op: 'list', ws, rel, max }); return { ok: true, entries: [{ name: 'a.ts', kind: 'file', size: 2, mtimeMs: 1 }], truncated: false } },
+    read: async (ws, rel, limits) => { filesCalls.push({ op: 'read', ws, rel, limits }); return io.read(rel) },
+    acquireWatch: (ws, owner, cb) => { watches.push({ ws, owner, cb, on: true }); return true },
+    releaseWatch: (ws, owner) => { const x = watches.find(y => y.ws === ws && y.owner === owner && y.on); if (x) x.on = false },
+  }
   const host = new S.ShareHost({
     pty, remote, grants,
     hostKey: () => hostKey,
@@ -680,7 +727,9 @@ function hostWorld(opts = {}) {
     statuses: () => statuses,
     chat: () => chat,
     git: () => async req => { gitCalls.push(req); return req.op === 'status' ? { ok: true, data: { summary: { branch: 'main', ahead: 0, behind: 0, added: 1, removed: 0, files: 1, approx: false, conflicts: 0, op: null }, files: [{ path: 'src/a.ts', area: 'unstaged', status: 'M', added: 1, removed: 0, binary: false }], total: 1, truncated: false }, page: 0, done: true } : { ok: true, data: { path: req.path, area: 'unstaged', diffRev: 'r', binary: false, hunks: [] }, page: 0, done: true } },
-    notes: () => async req => { notesCalls.push(req); return req.op === 'list' ? { ok: true, notes: [] } : { ok: false, error: 'not_found' } },
+    notes: () => async req => { notesCalls.push(req); if (opts.notesReply) return opts.notesReply(req); return req.op === 'list' ? { ok: true, notes: [] } : { ok: false, error: 'not_found' } },
+    files: () => files,
+    ...(opts.protocol ? { protocol: opts.protocol } : {}),
     guestLabel: name => `${name} (guest)`,
     guestFallback: () => 'Guest',
     onHostEvent: s => events.host.push(s),
@@ -696,17 +745,19 @@ function hostWorld(opts = {}) {
     const w = { buf: 0, get remoteIp() { return t.remoteIp }, get closed() { return t.closed }, send: f => t.send(f), close: (c, r) => t.close(c, r), bufferedAmount: () => w.buf, onMessage: cb => t.onMessage(cb), onClose: cb => t.onClose(cb) }
     return w
   }
-  function connect(ip = '192.168.1.20', key = S.generateShareKeyPair(), pinned = hostKey.pub) {
+  function connect(ip = '192.168.1.20', key = S.generateShareKeyPair(), pinned = hostKey.pub, maxVersion = undefined) {
     const pair = S.createMemoryTransportPair(ip, '192.168.1.2')
     const hostEnd = wrapT(pair.host)
-    const g = { msgs: [], code: null, ready: false, channel: null, bad: [], key, hostEnd }
-    const hs = new S.GuestHandshake({ hostStatic: pinned, guestStatic: key })
+    // bad1: frames an app 2.5 guest (the frozen v1 schemas) would refuse.
+    const g = { msgs: [], code: null, ready: false, channel: null, bad: [], bad1: [], key, hostEnd }
+    const hs = new S.GuestHandshake({ hostStatic: pinned, guestStatic: key, ...(maxVersion ? { maxVersion } : {}) })
     pair.guest.onMessage(frame => {
       if (!g.channel) { const r = hs.receive(frame); if (r.ok) g.channel = r.channel; else g.hsErr = r; return }
       if (!g.ready) { g.ready = S.GuestHandshake.confirmReady(g.channel, frame); return }
       const text = g.channel.open(frame)
       if (text === null) { g.bad.push('crypto'); return }
       if (!S.parseShareHostMsg(text).ok) g.bad.push(text)
+      if (maxVersion === 1 && !V1.parseShareHostMsg(text).ok) g.bad1.push(text)
       g.msgs.push(JSON.parse(text))
     })
     pair.guest.onClose(code => { if (g.code === null) g.code = code })
@@ -720,14 +771,14 @@ function hostWorld(opts = {}) {
     return g
   }
   function join(grant, o = {}) {
-    const g = connect(o.ip, o.key)
+    const g = connect(o.ip, o.key, undefined, o.maxVersion)
     if (!g.channel) return g
     g.send({ t: 'hello', sid: grant.shareId, guestName: o.name ?? 'Ana', app: '2.4.0', proof: o.proof ?? S.shareProof(grant.inviteKey, 'join', g.channel.h), ...(o.ticket ? { ticket: o.ticket } : {}), ...(o.pwKey ? { pw: S.shareProof(o.pwKey, 'pw', g.channel.h) } : {}) })
     return g
   }
-  function approve(perm, allow = true) {
+  function approve(perm, allow = true, rights = undefined) {
     const a = host.hostState().approvals[0]
-    host.resolve({ requestId: a.requestId, allow, ...(perm ? { perm } : {}) })
+    host.resolve({ requestId: a.requestId, allow, ...(perm ? { perm } : {}), ...(rights ? { rights } : {}) })
     return a
   }
   async function grant(req) {
@@ -736,7 +787,7 @@ function hostWorld(opts = {}) {
     return { view: r.grant, invite: r.invite, g: grants.get(r.grant.id) }
   }
   return {
-    clock, pty, host, grants, file, vaultState, hostKey, listeners, events, relayed, chat, gitCalls, notesCalls, statuses, connect, join, approve, grant,
+    clock, pty, host, grants, file, vaultState, hostKey, listeners, events, relayed, chat, gitCalls, notesCalls, filesCalls, watches, io, statuses, connect, join, approve, grant,
     setSnap(next) { snap = next; if (next) host.onSnapshot(next) },
     snap: () => snap,
   }
@@ -1422,9 +1473,10 @@ async function testControl() {
   check(f.last('ctlAck').error === 'denied' && !w3.relayed.length, 'full on one console: no ctl')
 }
 
-// --- 14b. S5 host restrictions: perm drops, pause, failed relays, stale extras ---
+// --- 14b. S5 host restrictions: rights drops, pause, failed relays, stale extras ---
 async function testControlLimits() {
-  // A live downgrade from full ends the chats and every extra at once.
+  // A live rights downgrade ends the chats and every extra at once (app 2.6.0:
+  // the terminal perm no longer carries them).
   const w = hostWorld()
   const { g: grant } = await w.grant({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full' })
   const g = w.join(grant); w.approve()
@@ -1439,9 +1491,11 @@ async function testControlLimits() {
   const sid = w.host.hostState().grants[0].sessions[0].id
   g.clear()
   check(w.host.sessionPerm(sid, 'type').ok, 'session perm change accepted')
+  check(g.last('permChanged').perm === 'type' && !w.chat.unsubs.length && (g.last('state')?.state.caps.chat ?? true), 'full -> type alone keeps the extras (rights are apart from the terminal perm)')
+  check(w.host.sessionRights(sid, { ...S.SHARE_RIGHTS_NONE }).ok, 'session rights change accepted')
   const st = g.last('state').state
-  check(g.last('permChanged').perm === 'type' && !st.caps.createPane && !st.caps.closePane && !st.caps.chat && !st.caps.notes && !st.caps.git && st.presets === undefined, 'full -> type: the new state has no caps and no presets')
-  check(w.chat.unsubs.includes('p2') && !w.host.subscribedPaneIds().has('p2'), 'full -> type: the chat read ends at the hub (and stops keeping the pane awake)')
+  check(!st.caps.createPane && !st.caps.closePane && !st.caps.chat && !st.caps.notes && !st.caps.git && !st.caps.notesWrite && !st.caps.files && st.presets === undefined, 'rights to none: the new state has no caps and no presets')
+  check(w.chat.unsubs.includes('p2') && !w.host.subscribedPaneIds().has('p2'), 'rights to none: the chat read ends at the hub (and stops keeping the pane awake)')
   hubSend({ type: 'chatAppend', paneId: 'p2', items: [{ id: '2', role: 'assistant', ts: null, blocks: [{ t: 'text', text: 'leak' }] }] })
   check(!g.of('chatAppend').length, 'a late hub frame never reaches the downgraded guest')
   g.send({ t: 'chatMore', paneId: 'p2', before: '5' })
@@ -1454,13 +1508,13 @@ async function testControlLimits() {
   check(g.last('gitRes').data.error === 'not_found' && g.last('notesRes').error === 'not_found' && w.gitCalls.length === 0 && w.notesCalls.length === 0, 'after the downgrade: no git nor notes')
   w.host.notesChanged({ workspaceId: 'w1', noteId: 'n' })
   check(!g.of('notesChanged').length, 'after the downgrade: no notesChanged')
-  // The grant perm moving down (Settings) does the same for every session of it.
+  // The grant rights moving down (Settings) do the same for every session of it.
   g.send({ t: 'chatSub', paneId: 'p2' })
-  check(g.last('err').code === 'unauthorized', 'type: chatSub refused')
-  w.host.sessionPerm(sid, 'full')
+  check(g.last('err').code === 'unauthorized', 'no chat right: chatSub refused')
+  w.host.sessionRights(sid, S.shareLegacyRights('full', 'workspace'))
   g.send({ t: 'chatSub', paneId: 'p2' })
   const unsubs0 = w.chat.unsubs.length
-  check(w.host.update({ grantId: grant.id, perm: 'view' }).ok && w.chat.unsubs.length === unsubs0 + 1 && g.last('permChanged').perm === 'view', 'grant full -> view ends the chats of its sessions')
+  check(w.host.update({ grantId: grant.id, perm: 'view', rights: { ...S.SHARE_RIGHTS_NONE } }).ok && w.chat.unsubs.length === unsubs0 + 1 && g.last('permChanged').perm === 'view', 'grant rights to none ends the chats of its sessions')
 
   // Paused: the extras stop with the terminal.
   const p = hostWorld()
@@ -1570,9 +1624,194 @@ async function testHostMisc() {
   rm.shutdown('quit')
 }
 
+// --- 16. app 2.6.0: rights apart from the perm, notes write, Files, v1 guests ---------
+function testRights() {
+  const NONE = S.SHARE_RIGHTS_NONE
+  const FULL = S.shareDefaultRights('full')
+  check(FULL.consoles && FULL.chat && FULL.changes && FULL.notes === 'write' && FULL.files === 'read' && S.shareDefaultRights('type').notes === 'off' && S.shareDefaultRights('view').files === 'off', 'Full preselects every right (notes write, files read); View and Type none')
+  const legacy = S.shareLegacyRights('full', 'workspace')
+  check(legacy.notes === 'read' && legacy.files === 'off' && legacy.chat && legacy.consoles && !S.shareLegacyRights('full', 'pane').chat && S.shareLegacyRights('type', 'workspace').notes === 'off', 'a grant from before rights keeps what its perm gave (Full: notes read, no files)')
+  check(S.isShareRights(FULL) && !S.isShareRights({ ...FULL, extra: 1 }) && !S.isShareRights({ ...FULL, files: 'write' }) && !S.isShareRights({ ...FULL, notes: 'admin' }) && !S.isShareRights(null) && !S.isShareRights({ consoles: true }), 'rights are exactly five known fields (files has no write)')
+  const all = { chat: true, git: true, notes: true, files: true }
+  const v2 = S.shareCapsOf(FULL, 'workspace', 2, all)
+  const v1 = S.shareCapsOf(FULL, 'workspace', 1, all)
+  check(v2.notes && v2.notesWrite && v2.files && v2.createPane && v2.closePane && v2.chat && v2.git, 'v2: notes write and files are caps')
+  check(JSON.stringify(Object.keys(v1)) === JSON.stringify(['createPane', 'closePane', 'chat', 'notes', 'git']) && v1.notes, 'v1: only the five v1 caps (notes it may write show read-only)')
+  const pane = S.shareCapsOf(FULL, 'pane', 2, all)
+  check(!pane.createPane && !pane.chat && !pane.notes && !pane.notesWrite && !pane.files && !pane.git, 'a console share has no rights whatever the grant says')
+  check(!S.shareCapsOf(FULL, 'workspace', 2, { ...all, files: false }).files && !S.shareCapsOf(FULL, 'workspace', 2, { ...all, notes: false }).notesWrite, 'a missing backend turns its cap off')
+  const some = S.shareCapsOf({ ...NONE, chat: true, notes: 'read' }, 'workspace', 2, all)
+  check(some.chat && some.notes && !some.notesWrite && !some.createPane && !some.files, 'each right on its own: chat and notes read without consoles or files')
+  // Remap after a grant change: field by field, a session lowered on purpose never goes up.
+  const r1 = S.remapShareRights(FULL, FULL, { ...FULL, chat: false })
+  check(!r1.chat && r1.notes === 'write' && r1.files === 'read', 'a session at the grant value follows the grant')
+  check(S.remapShareRights({ ...FULL, notes: 'read' }, FULL, { ...FULL, notes: 'off' }).notes === 'off', 'a lowered field may go lower')
+  check(S.remapShareRights({ ...FULL, notes: 'off' }, { ...FULL, notes: 'read' }, { ...FULL, notes: 'write' }).notes === 'off', 'a lowered field never goes up with the grant')
+  check(S.remapShareRights({ ...NONE, chat: true }, NONE, { ...NONE, notes: 'read' }).chat === true, 'a field the grant did not change stays (a raise at the prompt is kept)')
+  check(S.remapShareRights({ ...NONE, notes: 'write' }, NONE, { ...NONE, notes: 'read' }).notes === 'read', 'a raised field takes the new grant value when the grant changes it')
+  // A Files answer always fits one host frame.
+  const cc = String.fromCharCode(1)
+  const fat = { ok: true, file: { kind: 'text', text: cc.repeat(200000) + 'ab', eol: 'lf', bom: false, rev: '1-2', size: 200002 } }
+  const fit = S.fitFilesReply(fat)
+  check(Buffer.byteLength(JSON.stringify(fit)) <= S.SHARE_FILES_REPLY_BUDGET && fit.file.partial === true && fit.file.text.length < 200000 && fit.file.text.length > 100000, 'a text that escapes past one frame is cut and partial')
+  const small = { ok: true, file: { kind: 'text', text: 'abc', eol: 'lf', bom: false, rev: 'r', size: 3 } }
+  check(S.fitFilesReply(small) === small, 'one that fits is left alone')
+  const astral = String.fromCodePoint(0x1f600).repeat(10)
+  const base = Buffer.byteLength(JSON.stringify({ ok: true, file: { kind: 'text', text: '', eol: 'lf', bom: false, rev: 'r', size: 40, partial: true } }))
+  const cut = S.fitFilesReply({ ok: true, file: { kind: 'text', text: astral, eol: 'lf', bom: false, rev: 'r', size: 40 } }, base + 13)
+  check(cut.file.partial && cut.file.text === astral.slice(0, 6), 'never cut inside a surrogate pair')
+  const many = { ok: true, entries: Array.from({ length: 2000 }, (_, i) => ({ name: 'n'.repeat(200) + i, kind: 'file', size: 1, mtimeMs: 1 })), truncated: false }
+  const fl = S.fitFilesReply(many, 100000)
+  check(fl.truncated && fl.entries.length > 0 && fl.entries.length < 2000 && Buffer.byteLength(JSON.stringify(fl)) <= 100000, 'a list past the frame is cut and truncated')
+  check(S.fitFilesReply({ ok: true, file: { kind: 'image', dataUrl: 'data:image/png;base64,' + 'A'.repeat(2000), size: 1500, rev: 'r' } }, 1000).error === 'too_large', 'an image that does not fit is too_large')
+}
+
+async function testGrantRights() {
+  const clock = fakeClock()
+  const file = path.join(tmp, 'grants-rights.json')
+  const vault = fakeVault()
+  const a = new S.GrantStore(file, vault, clock.now)
+  a.load()
+  const g1 = a.create({ label: 'W', scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full' })
+  const g2 = a.create({ label: 'W2', scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'view', rights: { ...S.SHARE_RIGHTS_NONE, notes: 'write', files: 'read' } })
+  const g3 = a.create({ label: 'P', scope: { kind: 'pane', paneId: 'p1', workspaceId: 'w1' }, perm: 'full', rights: S.shareDefaultRights('full') })
+  check(g1.rights.notes === 'read' && g1.rights.files === 'off' && g2.rights.notes === 'write' && g2.rights.files === 'read' && g2.perm === 'view' && !g3.rights.chat && g3.rights.notes === 'off', 'no rights given: the legacy ones; a view grant may still write notes; a console grant has none')
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8'))
+  check(doc.version === 1 && doc.grants.find(x => x.id === g2.id).rights.files === 'read', 'rights persist and the file stays version 1')
+  // A file from before rights, and one with rights that do not parse: legacy rights, the grant kept.
+  delete doc.grants.find(x => x.id === g1.id).rights
+  doc.grants.find(x => x.id === g2.id).rights = { consoles: 'yes' }
+  fs.writeFileSync(file, JSON.stringify(doc))
+  const b = new S.GrantStore(file, vault, clock.now)
+  b.load()
+  check(b.get(g1.id).rights.notes === 'read' && b.get(g1.id).rights.chat === true && b.get(g1.id).rights.files === 'off', 'a grant from before rights loads with what Full gave then')
+  check(b.get(g2.id) && JSON.stringify(b.get(g2.id).rights) === JSON.stringify(S.SHARE_RIGHTS_NONE), 'malformed rights fall back to the legacy ones and the grant stays')
+  b.update(g1.id, { rights: { ...S.shareDefaultRights('full'), chat: false } })
+  const c = new S.GrantStore(file, vault, clock.now)
+  c.load()
+  check(c.get(g1.id).rights.chat === false && c.get(g1.id).rights.notes === 'write', 'a rights update persists')
+}
+
+async function testShareV2() {
+  const w = hostWorld({
+    notesReply: req => {
+      if (req.op === 'list') return { ok: true, notes: [] }
+      if (req.noteId === 'conflict') return { ok: false, error: 'conflict', current: { id: 'conflict', title: 'T', updatedAt: 1, size: 6, rev: '9-6', text: 'theirs' } }
+      return req.op === 'create' ? { ok: true, note: { id: 'n-1', title: '', updatedAt: 1, size: 0, rev: '1-0' } } : { ok: true }
+    },
+  })
+  const { g: grant } = await w.grant({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full', rights: S.shareDefaultRights('full') })
+  const g = w.join(grant); w.approve()
+  const caps = g.last('welcome').state.caps
+  check(caps.notes && caps.notesWrite && caps.files && caps.chat && caps.createPane && caps.git && !g.bad.length, 'a v2 guest with the Full defaults: notes write and files')
+  const gv = w.host.hostState().grants[0]
+  check(gv.rights.files === 'read' && gv.sessions[0].rights.notes === 'write' && !gv.sessions[0].legacy, 'the host views carry the grant and the session rights')
+  // Notes write, create, delete: the scoped workspace, the exact fields.
+  g.send({ t: 'notesReq', id: 'nw', op: 'write', noteId: 'a', text: 'hola', baseRev: '1-2' })
+  await tick()
+  check(JSON.stringify(w.notesCalls.at(-1)) === JSON.stringify({ workspaceId: 'w1', op: 'write', noteId: 'a', text: 'hola', baseRev: '1-2' }) && g.last('notesRes').ok, 'a guest write reaches the notes of the scoped workspace')
+  g.send({ t: 'notesReq', id: 'nc', op: 'write', noteId: 'conflict', text: 'x' })
+  await tick()
+  const cr = g.last('notesRes')
+  check(!cr.ok && cr.error === 'conflict' && cr.current.text === 'theirs' && !g.bad.length, 'a conflict comes back with the note as it is now (v2)')
+  for (let i = 0; i < 11; i++) {
+    g.send({ t: 'notesReq', id: 'cd' + i, op: i % 2 ? 'delete' : 'create', ...(i % 2 ? { noteId: 'a' } : {}) })
+    await tick()
+  }
+  check(g.of('notesRes').filter(x => x.error === 'rate').length === 1 && w.notesCalls.filter(x => x.op === 'create' || x.op === 'delete').length === 10, 'at most 10 note creates and deletes a minute')
+  w.clock.advance(60_001)
+  g.clear()
+  w.host.notesChanged({ workspaceId: 'w1', noteId: 'a', rev: '5-6' })
+  check(g.last('notesChanged').rev === '5-6' && g.last('notesChanged').noteId === 'a', 'notesChanged carries the rev to a v2 guest')
+  // Files: list and read on the scoped workspace with the share limits.
+  g.send({ t: 'filesReq', id: 'f1', op: 'list', rel: '' })
+  await tick()
+  check(JSON.stringify(w.filesCalls[0]) === JSON.stringify({ op: 'list', ws: 'w1', rel: '', max: 2000 }) && g.last('filesRes').entries[0].name === 'a.ts', 'files list on the scoped workspace, at most 2000')
+  g.send({ t: 'filesReq', id: 'f2', op: 'read', rel: 'src/a.ts' })
+  await tick()
+  const fr = g.last('filesRes')
+  check(fr.ok && fr.file.kind === 'text' && fr.file.text === 'hi' && !('partial' in fr.file) && w.filesCalls[1].limits.textMax === 256 * 1024 && w.filesCalls[1].limits.imageMax === 512 * 1024, 'files read with the share limits')
+  w.io.read = () => ({ ok: true, kind: 'text', text: String.fromCharCode(1).repeat(200000), eol: 'lf', bom: false, rev: '1-2', size: 200000, partial: false })
+  g.send({ t: 'filesReq', id: 'f3', op: 'read', rel: 'big.txt' })
+  await tick()
+  check(g.last('filesRes').file.partial === true && !g.bad.length && !g.closed(), 'a text that would not fit one frame arrives cut and partial (the link stays up)')
+  w.io.read = () => ({ ok: false, error: 'not_found' })
+  g.send({ t: 'filesReq', id: 'f4', op: 'read', rel: '.env' })
+  await tick()
+  check(g.last('filesRes').error === 'not_found', 'what FileService hides answers not_found')
+  // The Files drawer's watch: one per grant, shared by its guests.
+  g.send({ t: 'filesWatch', on: true })
+  check(w.watches.length === 1 && w.watches[0].ws === 'w1' && w.watches[0].owner === 'share:' + grant.id && w.watches[0].on, 'the Files drawer holds one watch of the shared folder')
+  const g2 = w.join(grant, { ip: '192.168.1.21' }); w.approve()
+  g2.send({ t: 'filesWatch', on: true })
+  check(w.watches.length === 1, 'a second guest of the grant shares it')
+  g.clear(); g2.clear()
+  w.watches[0].cb({ workspaceId: 'w1', dirs: ['src', '.env', '.git/refs', 'cfg/.ENV.local', 'keys/id_rsa'] })
+  check(JSON.stringify(g.last('filesChanged')) === JSON.stringify({ t: 'filesChanged', dirs: ['src'] }) && g2.last('filesChanged').dirs.length === 1, 'changes go out without secret or .git folders')
+  w.watches[0].cb({ workspaceId: 'w1', dirs: ['.env'] })
+  check(g.of('filesChanged').length === 1, 'a change only in hidden folders says nothing')
+  w.watches[0].cb({ workspaceId: 'w1', dirs: [], all: true })
+  check(g.last('filesChanged').all === true && !g.bad.length, 'a burst goes out as all')
+  g2.send({ t: 'filesWatch', on: false })
+  check(w.watches[0].on, 'the watch stays while a guest still shows the drawer')
+  // A rights drop for one guest: its files and note writes stop, its watch goes.
+  const sid = w.host.hostState().grants[0].sessions[0].id
+  check(w.host.sessionRights(sid, { ...S.shareDefaultRights('full'), files: 'off', notes: 'read' }).ok && !w.watches[0].on, 'a guest losing files releases the watch')
+  const st2 = g.last('state').state
+  check(!st2.caps.files && !st2.caps.notesWrite && st2.caps.notes && st2.caps.chat, 'its state drops files and notes write at once')
+  check(!w.host.sessionRights(sid, { consoles: true }).ok && !w.host.sessionRights('nope', S.SHARE_RIGHTS_NONE).ok, 'malformed rights or an unknown session are refused')
+  g.send({ t: 'filesReq', id: 'f9', op: 'list', rel: '' })
+  g.send({ t: 'notesReq', id: 'n9', op: 'write', noteId: 'a', text: 'x' })
+  await tick()
+  check(g.last('filesRes').error === 'not_found' && g.last('notesRes').error === 'not_found', 'files reads and note writes are refused after it')
+  g.send({ t: 'filesWatch', on: true })
+  check(g.last('err').code === 'unauthorized' && w.watches.filter(x => x.on).length === 0, 'without the Files right the watch is refused')
+  // The grant's rights change: the guest at the grant value follows, the lowered one never goes up.
+  w.host.update({ grantId: grant.id, rights: { ...S.shareDefaultRights('full'), notes: 'read' } })
+  const sv = w.host.hostState().grants[0].sessions
+  check(sv[0].rights.notes === 'read' && sv[0].rights.files === 'off' && sv[1].rights.notes === 'read' && sv[1].rights.files === 'read', 'a grant rights change remaps its live guests field by field')
+  // Paused: no files.
+  w.host.update({ grantId: grant.id, paused: true })
+  g2.send({ t: 'filesReq', id: 'p1', op: 'list', rel: '' })
+  await tick()
+  check(g2.last('filesRes').error === 'not_found', 'a paused share answers no files')
+  w.host.update({ grantId: grant.id, paused: false })
+
+  // A v1 guest (app 2.5): only the v1 caps and v1 frames, v2 requests answered without a strike.
+  const v = w.join(grant, { ip: '192.168.1.30', maxVersion: 1 }); w.approve()
+  const vcaps = v.last('welcome').state.caps
+  check(vcaps && !('files' in vcaps) && !('notesWrite' in vcaps) && vcaps.notes && !v.bad1.length, 'a v1 guest gets the v1 caps only, and every frame parses with the app 2.5 schemas')
+  v.send({ t: 'filesReq', id: 'vf', op: 'list', rel: '' })
+  v.send({ t: 'filesWatch', on: true })
+  v.send({ t: 'notesReq', id: 'vn', op: 'write', noteId: 'a', text: 'x' })
+  v.send({ t: 'notesReq', id: 'vc', op: 'write', noteId: 'conflict', text: 'x' })
+  await tick()
+  check(v.of('err').filter(x => x.code === 'unsupported').length === 2 && v.last('notesRes').error === 'not_found' && !v.closed(), 'a v1 session asking v2 things gets unsupported or not_found, no strike')
+  w.host.notesChanged({ workspaceId: 'w1', noteId: 'a', rev: '7-8' })
+  check(!('rev' in v.last('notesChanged')) && !v.bad1.length, 'v1: notesChanged without the rev')
+  const lv = w.host.hostState().grants[0].sessions.find(x => x.legacy)
+  check(lv && lv.legacy === true && w.host.hostState().grants[0].sessions.filter(x => x.legacy).length === 1, 'the host marks the v1 guest as legacy')
+  // A v1 host (app 2.5) and a v2 guest: the v2 guest gets v1 frames.
+  const old = hostWorld({ protocol: { max: 1 } })
+  const { g: og } = await old.grant({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'full', rights: S.shareDefaultRights('full') })
+  const o = old.join(og); old.approve()
+  const ocaps = o.last('welcome').state.caps
+  check(ocaps && !('files' in ocaps) && ocaps.notes && !o.bad.length, 'a host playing v1 sends a v2 guest the v1 caps')
+  // The approval prompt's rights for this guest.
+  const w3 = hostWorld()
+  const { g: g3 } = await w3.grant({ scope: { kind: 'workspace', workspaceId: 'w1' }, perm: 'view', rights: S.SHARE_RIGHTS_NONE })
+  const pr = w3.join(g3)
+  const ap = w3.host.hostState().approvals[0]
+  check(JSON.stringify(ap.rights) === JSON.stringify(S.SHARE_RIGHTS_NONE) && !ap.legacy, 'the prompt shows the grant rights')
+  w3.approve(undefined, true, { ...S.SHARE_RIGHTS_NONE, notes: 'write' })
+  const pcaps = pr.last('welcome').state.caps
+  check(pcaps.notes && pcaps.notesWrite && !pcaps.files && !pcaps.createPane && pr.last('welcome').perm === 'view', 'the prompt can give one guest notes write on a view share')
+}
+
 async function main() {
   await bundleShare()
   S = loadShare()
+  V1 = loadV1()
   testInvite()
   testGate()
   testPaste()
@@ -1589,8 +1828,11 @@ async function main() {
   await testControl()
   await testControlLimits()
   await testHostMisc()
+  testRights()
+  await testGrantRights()
+  await testShareV2()
   fs.rmSync(tmp, { recursive: true, force: true })
-  console.log(`PASS: ${checks} share checks (S0 invite, gate, paste, handshake, schema, identity, forced-fast; S1 grants, admission, join, scope, stream, lifecycle, leases, control; S5 limits)`)
+  console.log(`PASS: ${checks} share checks (S0 invite, gate, paste, handshake, schema, identity, forced-fast; S1 grants, admission, join, scope, stream, lifecycle, leases, control; S5 limits; 2.6 rights, notes write, files, v1 guests)`)
 }
 
 main().catch(error => { console.error(error); fs.rmSync(tmp, { recursive: true, force: true }); process.exit(1) })

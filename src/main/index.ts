@@ -85,7 +85,7 @@ import { GrantStore, shareGrantsPath } from './share/GrantStore'
 import { ShareServer } from './share/ShareServer'
 import { registerShareHostIpc } from './ipc/registerShareHostIpc'
 import { listEndpoints } from './remote/network'
-import { phoneNote } from './remote/RemoteManager'
+import { runNotesRequest } from './remote/RemoteManager'
 import type { RemoteGitReply, RemoteGitRequest } from '@shared/remote-protocol'
 import { hasNvidiaGpu, type DictationService } from './dictation/DictationService'
 import { installPermissionHandlers } from './permissions'
@@ -693,7 +693,8 @@ async function bootstrap(): Promise<void> {
   })
   remoteManager.setNotes(wsNotes)
   // Files drawer (v2.2, E9): the workspace folder from the config, every target contained.
-  registerFilesIpc({ getSender: () => mainWindow?.webContents ?? null, config: () => configStore.load() })
+  // Share guests read it too (app 2.6.0, read-only, through the guest half).
+  const fileService = registerFilesIpc({ getSender: () => mainWindow?.webContents ?? null, config: () => configStore.load() })
   // Worktree per console (E7-FR-27..32, 36): worktrees.json under dataDir().
   registerWorktreeIpc({
     loadConfig: () => configStore.load(),
@@ -836,14 +837,14 @@ async function bootstrap(): Promise<void> {
     statuses: () => statusManager.snapshot(),
     chat: () => chatHub,
     git: () => remoteGitHandler,
-    notes: () => async (req) => {
-      if (req.op === 'list') {
-        const res = await wsNotes.list(req.workspaceId)
-        return res.ok ? { ok: true, notes: res.notes } : { ok: false, error: 'invalid' }
-      }
-      const res = await wsNotes.read({ workspaceId: req.workspaceId, noteId: req.noteId ?? '' })
-      return res.ok ? { ok: true, note: phoneNote(res.note) } : { ok: false, error: res.error }
-    },
+    // The same notes path as the phones (the host checked the guest's caps and forced its workspace).
+    notes: () => (req) => runNotesRequest(wsNotes, req),
+    files: () => ({
+      list: (workspaceId, rel, max) => fileService.guestList(workspaceId, rel, max),
+      read: (workspaceId, rel, limits) => fileService.guestRead(workspaceId, rel, limits),
+      acquireWatch: (workspaceId, owner, cb) => fileService.acquireWatch(workspaceId, owner, cb),
+      releaseWatch: (workspaceId, owner) => fileService.releaseWatch(workspaceId, owner),
+    }),
     guestLabel: (name) => mainT(configStore.load(), 'share.guestLabel', { name }),
     guestFallback: () => mainT(configStore.load(), 'share.guestFallback'),
     onHostEvent: (state) => sendToRenderer(CH.SHARE_HOST_EVENT, state),

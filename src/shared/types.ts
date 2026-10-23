@@ -739,6 +739,26 @@ export interface DictationSettings {
 /** What a desktop share guest may do: watch, type without Enter, or full control (schema 17). */
 export type SharePerm = 'view' | 'type' | 'full'
 
+/** A share guest's workspace notes: none, read, or read and write (app 2.6.0). */
+export type ShareNotesRight = 'off' | 'read' | 'write'
+/** A share guest's workspace files: none or read-only (app 2.6.0). */
+export type ShareFilesRight = 'off' | 'read'
+
+/**
+ * What a share guest may use beyond the terminal (app 2.6.0), set apart from
+ * the terminal perm: per grant (the default of whoever joins) and per session.
+ * Only a workspace scope has any (src/shared/shareRights.ts).
+ */
+export interface ShareRights {
+  /** New console / Close console. */
+  consoles: boolean
+  chat: boolean
+  /** The Changes drawer (git status and diff). */
+  changes: boolean
+  notes: ShareNotesRight
+  files: ShareFilesRight
+}
+
 /**
  * Desktop-to-desktop sharing (schema 17). Off until the Share dialog turns it
  * on; grants, links and the host identity live in dataDir(), never here.

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, FileDiff, Loader2, MessageSquare, Plus, RefreshCw, StickyNote } from 'lucide-react'
+import { ChevronDown, ChevronsDownUp, FileDiff, FolderTree, Loader2, MessageSquare, Plus, RefreshCw, StickyNote } from 'lucide-react'
 import type { ShareLinkView } from '@shared/share-guest'
 import type { SharePaneInfo, SharePresetInfo, ShareState } from '@shared/share-protocol'
 import { useT, type MessageKey } from '@/i18n'
@@ -7,12 +7,14 @@ import { cn } from '@/lib/cn'
 import { iconFor } from '@/lib/icons'
 import { toast } from '@/lib/toast'
 import { paneStatusOf, useShareGuestStore } from '@/lib/shareGuestStore'
-import { chatCapable, createSharedPane, panelAllowed, useShareExtrasStore } from '@/lib/shareGuestExtras'
+import { chatCapable, createSharedPane, panelAllowed, shareFilesKey, useShareExtrasStore } from '@/lib/shareGuestExtras'
+import { collapseAll, reloadTree } from '@/lib/filesStore'
 import { RightDrawer } from '@/components/ui/RightDrawer'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { SharedChatView } from './chat/ChatView'
 import { SharedNotesView } from './SharedNotesView'
 import { SharedChangesView } from './SharedChangesView'
+import { SharedFilesView } from './SharedFilesView'
 
 /** i18n of a refused or failed ctl (createPane / closePane). */
 export const CTL_ERR_KEY: Record<string, MessageKey> = {
@@ -39,11 +41,12 @@ export function firstChatPane(panes: SharePaneInfo[], statuses: Parameters<typeo
 }
 
 /**
- * The header extras of a full-control shared workspace (app 2.4.0, item 8,
- * S5), each shown only with its cap: New console (the host's presets only;
- * the ack's pane shows at once), and the read-only Chat, Notes and Changes
- * drawers. Everything is relayed through main, which checks it again, and
- * the host enforces the caps once more.
+ * The header extras of a shared workspace (app 2.4.0, item 8, S5; per guest
+ * rights from app 2.6.0), each shown only with its cap: New console (the
+ * host's presets only; the ack's pane shows at once), the read-only Chat,
+ * Changes and Files drawers and the Notes drawer (editable with notesWrite).
+ * Everything is relayed through main, which checks it again, and the host
+ * enforces the caps once more.
  */
 export function SharedExtrasBar({ link, state, panes }: { link: ShareLinkView; state: ShareState; panes: SharePaneInfo[] }) {
   const t = useT()
@@ -98,6 +101,19 @@ export function SharedExtrasBar({ link, state, panes }: { link: ShareLinkView; s
         >
           <StickyNote size={15} />
           {t('shareGuest.view.notes')}
+        </button>
+      )}
+      {caps.files && (
+        <button
+          type="button"
+          data-shared-extra="files"
+          aria-pressed={panel?.kind === 'files'}
+          disabled={!live && panel?.kind !== 'files'}
+          onClick={() => togglePanel(linkId, { kind: 'files' })}
+          className={cn(headerBtn, panel?.kind === 'files' && pressedBtn)}
+        >
+          <FolderTree size={15} />
+          {t('shareGuest.view.files')}
         </button>
       )}
       {caps.git && (
@@ -217,18 +233,50 @@ export function SharedDrawer({ link, state, panes, hostLabel }: { link: ShareLin
     )
   }
 
+  if (panel.kind === 'files') {
+    const key = shareFilesKey(linkId)
+    const iconBtn = 'flex h-7 w-7 shrink-0 items-center justify-center rounded-btn text-text-secondary transition-colors hover:bg-card hover:text-text-primary'
+    return (
+      <RightDrawer
+        id="share-files"
+        title={state.title ? `${t('shareGuest.files.title')} - ${state.title}` : t('shareGuest.files.title')}
+        icon={<FolderTree size={15} className="shrink-0 text-text-secondary" />}
+        defaultWidth="clamp(640px, 62%, 1400px)"
+        maximized={maximized}
+        onMaximize={setPanelMax}
+        onClose={close}
+        actions={
+          <>
+            <Tooltip label={t('files.refresh')} side="bottom">
+              <button type="button" aria-label={t('files.refresh')} data-shared-files-refresh onClick={() => void reloadTree(key)} className={iconBtn}>
+                <RefreshCw size={13} />
+              </button>
+            </Tooltip>
+            <Tooltip label={t('files.collapse')} side="bottom">
+              <button type="button" aria-label={t('files.collapse')} data-shared-files-collapse onClick={() => collapseAll(key)} className={iconBtn}>
+                <ChevronsDownUp size={14} />
+              </button>
+            </Tooltip>
+          </>
+        }
+      >
+        <SharedFilesView link={link} hostLabel={hostLabel} />
+      </RightDrawer>
+    )
+  }
+
   if (panel.kind === 'notes') {
     return (
       <RightDrawer
         id="share-notes"
-        title={t('shareGuest.notes.title')}
+        title={state.caps.notesWrite ? t('shareGuest.notes.titleEdit') : t('shareGuest.notes.title')}
         icon={<StickyNote size={15} className="shrink-0 text-text-secondary" />}
-        defaultWidth="clamp(520px, 46%, 980px)"
+        defaultWidth={state.caps.notesWrite ? 'clamp(620px, 52%, 1100px)' : 'clamp(520px, 46%, 980px)'}
         maximized={maximized}
         onMaximize={setPanelMax}
         onClose={close}
       >
-        <SharedNotesView link={link} hostLabel={hostLabel} />
+        <SharedNotesView link={link} hostLabel={hostLabel} canWrite={state.caps.notesWrite === true} />
       </RightDrawer>
     )
   }

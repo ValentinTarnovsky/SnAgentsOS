@@ -15,12 +15,18 @@
  */
 import type { AgentProvider, ClaudePaneState, PaneType, SharePerm } from './types'
 import type { ChatMessage } from './chat-types'
+import type { FileEntry, FilesError } from './files'
 import type { RemoteGitReply, RemoteNote } from './remote-protocol'
 import type { WsNoteError, WsNoteMeta } from './ws-notes'
 
 export type { SharePerm }
 
-export const SHARE_PROTOCOL_VERSION = 1
+/**
+ * 2 (app 2.6.0): notes write/create/delete, the read-only Files drawer and
+ * the caps `notesWrite` and `files`. Every v2 field and message goes only to a
+ * session that negotiated 2: a v1 guest's schemas are strict.
+ */
+export const SHARE_PROTOCOL_VERSION = 2
 /** Oldest peer version this build still speaks. */
 export const SHARE_MIN_VERSION = 1
 
@@ -90,6 +96,17 @@ export const SHARE_LIMITS = {
   appMax: 32,
   passwordMin: 8,
   passwordMax: 128,
+  /** v2: a note a guest writes or creates, in UTF-8 bytes (WS_NOTE_PHONE_MAX: it travels in one guest frame). */
+  noteTextMax: 40_000,
+  /** v2: entries of one folder sent to a guest (the rest is `truncated`). */
+  filesListMax: 2000,
+  /** v2: a text file a guest reads, in UTF-8 bytes; the rest is cut (`partial`). */
+  fileTextMax: 256 * 1024,
+  /** v2: an image a guest previews, raw bytes, and its data URL length. */
+  fileImageMax: 512 * 1024,
+  fileDataUrlMax: 700_000,
+  /** v2: folders named in one `filesChanged` (more: `all`). */
+  filesChangedDirsMax: 200,
 } as const
 
 /** A lone Esc keeps this window open: the next guest write is gated joined to it (shareInput.ts). */
@@ -194,13 +211,21 @@ export interface SharePresetInfo {
   color: string
 }
 
-/** What the session may do beyond the terminal (only `full` on a workspace scope gets any). */
+/**
+ * What the session may do beyond the terminal, from its rights (shareRights.ts;
+ * only a workspace scope has any). `notesWrite` and `files` exist from v2 on
+ * and only reach a v2 session.
+ */
 export interface ShareCaps {
   createPane: boolean
   closePane: boolean
   chat: boolean
   notes: boolean
   git: boolean
+  /** v2: write, create and delete notes (implies `notes`). */
+  notesWrite?: boolean
+  /** v2: the read-only Files drawer. */
+  files?: boolean
 }
 
 /** The filtered view of the shared scope: never usage, accounts, quick commands nor other workspaces. */
@@ -273,8 +298,11 @@ export type ShareClientMsg =
   | { t: 'chatUnsub'; paneId: string }
   | { t: 'chatMore'; paneId: string; before: string }
   | { t: 'gitReq'; id: string; op: 'status' | 'diff'; path?: string; staged?: boolean; page?: number }
-  /** Read-only: list and read; write, create and delete do not exist here. */
-  | { t: 'notesReq'; id: string; op: 'list' | 'read'; noteId?: string }
+  | ShareNotesReq
+  /** v2: the scoped workspace's folder, read-only (`rel` with `/`, '' = its root). */
+  | { t: 'filesReq'; id: string; op: 'list' | 'read'; rel: string }
+  /** v2: `filesChanged` pushes on or off (the Files drawer on the guest's screen). */
+  | { t: 'filesWatch'; on: boolean }
   | { t: 'ping'; ts: number }
   | { t: 'bye' }
 
@@ -292,12 +320,43 @@ export interface ShareWelcome {
   limits: { inputMax: number }
 }
 
-/** The notes answer without the write half (no conflict copy). */
+/**
+ * Notes of the scoped workspace. v1 has list and read; write, create and
+ * delete are v2 and need `caps.notesWrite`. `text` <= SHARE_LIMITS.noteTextMax
+ * UTF-8 bytes.
+ */
+export type ShareNotesReq =
+  | { t: 'notesReq'; id: string; op: 'list'; noteId?: string }
+  | { t: 'notesReq'; id: string; op: 'read'; noteId: string }
+  | { t: 'notesReq'; id: string; op: 'write'; noteId: string; text: string; baseRev?: string }
+  | { t: 'notesReq'; id: string; op: 'create'; text?: string }
+  | { t: 'notesReq'; id: string; op: 'delete'; noteId: string }
+
+export type ShareNotesOp = ShareNotesReq['op']
+
+/** The notes answer; `current` (the note as it is now, after a conflict) is v2. */
 export interface ShareNotesReply {
   ok: boolean
   error?: WsNoteError
   notes?: WsNoteMeta[]
   note?: RemoteNote
+  current?: RemoteNote
+}
+
+/** v2: a file as a guest reads it: text always read-only (cut past fileTextMax: `partial`), or an image preview. */
+export type ShareFile =
+  | { kind: 'text'; text: string; eol: 'lf' | 'crlf'; bom: boolean; rev: string; size: number; partial?: boolean }
+  | { kind: 'image'; dataUrl: string; size: number; rev: string }
+
+export type ShareFilesError = FilesError | 'rate'
+
+/** v2: the answer to a `filesReq`. */
+export interface ShareFilesReply {
+  ok: boolean
+  error?: ShareFilesError
+  entries?: FileEntry[]
+  truncated?: boolean
+  file?: ShareFile
 }
 
 export type ShareHostMsg =
@@ -321,7 +380,12 @@ export type ShareHostMsg =
   | { t: 'chatAppend'; paneId: string; items: ChatMessage[] }
   | ({ t: 'gitRes'; id: string } & RemoteGitReply)
   | ({ t: 'notesRes'; id: string } & ShareNotesReply)
-  | { t: 'notesChanged'; noteId?: string }
+  /** `rev` (v2): the note's rev after the change, so a guest skips the echo of its own save. */
+  | { t: 'notesChanged'; noteId?: string; rev?: string }
+  /** v2 */
+  | ({ t: 'filesRes'; id: string } & ShareFilesReply)
+  /** v2: folders of the scoped workspace whose content changed ('' = its root); `all` = too many to name. */
+  | { t: 'filesChanged'; dirs: string[]; all?: true }
   | { t: 'ended'; reason: ShareEndReason }
   | { t: 'pong'; ts: number }
   | { t: 'err'; code: ShareErrCode }

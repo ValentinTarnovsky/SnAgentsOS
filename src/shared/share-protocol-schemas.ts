@@ -11,6 +11,7 @@
  * strike, the guest ignores it. Anything else that fails is malformed.
  */
 import { z } from 'zod'
+import { FILE_REL_MAX, inGitDir, isSafeRel, shareFileNameOk } from './files'
 import {
   SHARE_LIMITS,
   type ShareClientMsg,
@@ -50,6 +51,13 @@ const platform = z.enum(['win32', 'darwin', 'linux'])
 const color = z.string().max(32).refine((s) => !CONTROL_RE.test(s), 'color')
 const icon = z.string().max(64).refine((s) => !CONTROL_RE.test(s), 'icon')
 const noteId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/)
+/** v2: a path inside the scoped workspace's folder ('' = its root), never into `.git`. */
+const fileRel = z
+  .string()
+  .max(FILE_REL_MAX)
+  .refine((rel) => isSafeRel(rel) && !inGitDir(rel), 'file path')
+const noteRev = z.string().max(64)
+const noteText = z.string().max(SHARE_LIMITS.noteTextMax)
 const gitPath = z
   .string()
   .min(1)
@@ -107,7 +115,8 @@ const clientCore = z.discriminatedUnion('t', [
       page: z.number().int().min(0).max(999).optional(),
     })
     .strict(),
-  z.object({ t: z.literal('notesReq'), id: reqId, op: z.enum(['list', 'read']), noteId: noteId.optional() }).strict(),
+  z.object({ t: z.literal('filesReq'), id: reqId, op: z.enum(['list', 'read']), rel: fileRel }).strict(),
+  z.object({ t: z.literal('filesWatch'), on: z.boolean() }).strict(),
   z.object({ t: z.literal('ping'), ts: z.number().finite() }).strict(),
   z.object({ t: z.literal('bye') }).strict(),
 ])
@@ -125,7 +134,15 @@ const ctlSchema = z.union([
     .strict(),
   z.object({ t: z.literal('ctl'), id: reqId, op: z.literal('closePane'), paneId: id }).strict(),
 ])
-const clientSchema = z.union([clientCore, ctlSchema])
+/** notesReq has one shape per op (list and read are v1; write, create and delete v2). */
+const notesReqSchema = z.union([
+  z.object({ t: z.literal('notesReq'), id: reqId, op: z.literal('list'), noteId: noteId.optional() }).strict(),
+  z.object({ t: z.literal('notesReq'), id: reqId, op: z.literal('read'), noteId }).strict(),
+  z.object({ t: z.literal('notesReq'), id: reqId, op: z.literal('write'), noteId, text: noteText, baseRev: noteRev.optional() }).strict(),
+  z.object({ t: z.literal('notesReq'), id: reqId, op: z.literal('create'), text: noteText.optional() }).strict(),
+  z.object({ t: z.literal('notesReq'), id: reqId, op: z.literal('delete'), noteId }).strict(),
+])
+const clientSchema = z.union([clientCore, ctlSchema, notesReqSchema])
 
 // --- Host -> guest ---
 
@@ -155,7 +172,17 @@ const paneInfo = z
   })
   .strict()
 
-const caps = z.object({ createPane: z.boolean(), closePane: z.boolean(), chat: z.boolean(), notes: z.boolean(), git: z.boolean() }).strict()
+const caps = z
+  .object({
+    createPane: z.boolean(),
+    closePane: z.boolean(),
+    chat: z.boolean(),
+    notes: z.boolean(),
+    git: z.boolean(),
+    notesWrite: z.boolean().optional(),
+    files: z.boolean().optional(),
+  })
+  .strict()
 
 const shareState = z
   .object({
@@ -295,9 +322,44 @@ const gitError = z
   .strict()
 
 const noteMeta = z
-  .object({ id: noteId, title: text(80), updatedAt: epoch, size: z.number().int().min(0), rev: z.string().max(64) })
+  .object({ id: noteId, title: text(80), updatedAt: epoch, size: z.number().int().min(0), rev: noteRev })
   .strict()
 const note = noteMeta.extend({ text: z.string().max(40_000).optional(), readOnly: z.boolean().optional() }).strict()
+
+const fileEntry = z
+  .object({
+    name: z.string().refine((n) => shareFileNameOk(n), 'file name'),
+    kind: z.enum(['file', 'dir']),
+    size: z.number().int().min(0),
+    mtimeMs: z.number().int().min(-8.64e15).max(8.64e15),
+    link: z.boolean().optional(),
+  })
+  .strict()
+const shareFile = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('text'),
+      text: z.string().max(SHARE_LIMITS.fileTextMax),
+      eol: z.enum(['lf', 'crlf']),
+      bom: z.boolean(),
+      rev: noteRev,
+      size: z.number().int().min(0),
+      partial: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('image'),
+      // Never SVG: it can carry scripts.
+      dataUrl: z
+        .string()
+        .max(SHARE_LIMITS.fileDataUrlMax)
+        .regex(/^data:image\/(png|jpeg|gif|webp|bmp|x-icon);base64,[A-Za-z0-9+/]*={0,2}$/),
+      size: z.number().int().min(0),
+      rev: noteRev,
+    })
+    .strict(),
+])
 
 const hostSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('ready') }).strict(),
@@ -391,9 +453,22 @@ const hostSchema = z.discriminatedUnion('t', [
       error: z.enum(['not_found', 'invalid', 'too_large', 'conflict', 'io', 'rate']).optional(),
       notes: z.array(noteMeta).max(500).optional(),
       note: note.optional(),
+      current: note.optional(),
     })
     .strict(),
-  z.object({ t: z.literal('notesChanged'), noteId: noteId.optional() }).strict(),
+  z.object({ t: z.literal('notesChanged'), noteId: noteId.optional(), rev: noteRev.optional() }).strict(),
+  z
+    .object({
+      t: z.literal('filesRes'),
+      id: reqId,
+      ok: z.boolean(),
+      error: z.enum(['no_root', 'not_found', 'denied_path', 'invalid', 'binary', 'too_large', 'conflict', 'exists', 'io', 'rate']).optional(),
+      entries: z.array(fileEntry).max(SHARE_LIMITS.filesListMax).optional(),
+      truncated: z.boolean().optional(),
+      file: shareFile.optional(),
+    })
+    .strict(),
+  z.object({ t: z.literal('filesChanged'), dirs: z.array(fileRel).max(SHARE_LIMITS.filesChangedDirsMax), all: z.literal(true).optional() }).strict(),
   z.object({ t: z.literal('ended'), reason: z.enum(['revoked', 'kicked', 'expired', 'scope_gone', 'host_quit', 'sharing_off']) }).strict(),
   z.object({ t: z.literal('pong'), ts: z.number().finite() }).strict(),
   z.object({ t: z.literal('err'), code: z.enum(['bad_msg', 'out_of_scope', 'unsupported', 'rate', 'paused', 'unauthorized']) }).strict(),
@@ -417,10 +492,14 @@ function parseWith<T>(schema: z.ZodTypeAny, known: ReadonlySet<string>, raw: unk
   return result.success ? { ok: true, msg: result.data as T } : { ok: false, unknown: false }
 }
 
-const CLIENT_TYPES = new Set(['hello', 'password', 'sub', 'unsub', 'resync', 'input', 'ctl', 'chatSub', 'chatUnsub', 'chatMore', 'gitReq', 'notesReq', 'ping', 'bye'])
+const CLIENT_TYPES = new Set([
+  'hello', 'password', 'sub', 'unsub', 'resync', 'input', 'ctl', 'chatSub', 'chatUnsub', 'chatMore', 'gitReq', 'notesReq',
+  'filesReq', 'filesWatch', 'ping', 'bye',
+])
 const HOST_TYPES = new Set([
   'ready', 'pending', 'denied', 'welcome', 'state', 'replay', 'out', 'exit', 'fit', 'paneStatus', 'inputLock', 'inputDenied',
-  'permChanged', 'paused', 'ctlAck', 'chatPage', 'chatAppend', 'gitRes', 'notesRes', 'notesChanged', 'ended', 'pong', 'err',
+  'permChanged', 'paused', 'ctlAck', 'chatPage', 'chatAppend', 'gitRes', 'notesRes', 'notesChanged', 'filesRes', 'filesChanged',
+  'ended', 'pong', 'err',
 ])
 const HANDSHAKE_TYPES = new Set(['hs1', 'hs2', 'hsErr'])
 
