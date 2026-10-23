@@ -11,6 +11,10 @@
  * - `#pair=...` fragments -> `#pair=<redacted>`
  * - the `home` folder -> `~` (case-insensitive for a Windows path)
  * - private IPv4 (RFC 1918 and 100.64/10) -> `a.b.x.x` (unless `keepIps`)
+ *
+ * redactCredentials (app 2.7.0) is narrower and meant for notices (`snaos
+ * notify`, Equipos): it masks only credential shapes and leaves hashes, ids,
+ * paths, IPs, emails and plain URLs readable. See its own comment.
  */
 export interface RedactOptions {
   home?: string
@@ -66,4 +70,115 @@ export function redact(text: string, opts: RedactOptions = {}): string {
   }
   if (!opts.keepIps) out = out.replace(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g, (whole) => maskIpv4(whole))
   return out
+}
+
+// --- redactCredentials (app 2.7.0) ---
+
+const CREDENTIAL_MASK = '[redacted]'
+
+const PEM_BEGIN = '-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----'
+const PEM_END = '-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----'
+
+/**
+ * scheme://user:password@host keeps scheme, user and host. The password runs
+ * to the last `@` before a `/`, `?`, `#` or whitespace, so a URL without
+ * credentials (`https://host:8080/a?mail=x@y.z`) never matches.
+ */
+const CONN_RE = /([A-Za-z][A-Za-z0-9+.-]{0,30}:\/\/)([^\s:\/@?#]{0,256}):([^\s\/?#]{1,256})@(?=[^\s@\/?#])/g
+
+/** `Bearer <token>`: the token needs a digit, so prose ("Bearer authentication") stays. */
+const BEARER_RE = /\b(bearer)([ \t]+)([A-Za-z0-9._~+\/=-]{8,})/gi
+
+/**
+ * Token shapes, each after the start or a character that cannot belong to a
+ * token (group 1, kept). The edge is matched, not looked behind: lookbehind
+ * does not parse on Safari < 16.4 and this module ships to the phone.
+ */
+const TOKEN_RE = new RegExp(
+  '(^|[^A-Za-z0-9_-])(' +
+    [
+      'sk-[A-Za-z0-9_-]{20,}', // OpenAI, Anthropic (sk-ant-...) and other sk- keys; see isSkKey
+      'gh[pousr]_[A-Za-z0-9]{20,}', // GitHub tokens
+      'github_pat_[A-Za-z0-9_]{20,}', // GitHub fine-grained tokens
+      'xox[abposr]-\\d[A-Za-z0-9-]{9,}', // Slack
+      '(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])', // AWS access key ids
+      'AIza[A-Za-z0-9_-]{30,}', // Google API keys
+      'npm_[A-Za-z0-9]{30,}', // npm
+      'eyJ[A-Za-z0-9_-]{6,}\\.eyJ[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]*', // JWT (an unsigned one ends in a dot)
+    ].join('|') +
+    ')',
+  'g',
+)
+
+const HAS_DIGIT = /\d/
+const HAS_LETTER = /[A-Za-z]/
+
+/**
+ * An sk- run is a key when it has a digit and, between its dashes, a random
+ * part of 16 or more characters or two key-like parts (a digit plus a letter,
+ * or 8+ characters: `sk-lf-<uuid>`). A kebab name (a path segment, a branch,
+ * `sk-feature-login-fix-2024`, `sk-utils-v2`) has words and at most one such
+ * part.
+ */
+function isSkKey(token: string): boolean {
+  if (!HAS_DIGIT.test(token)) return false
+  let keyLike = 0
+  for (const part of token.split('-')) {
+    if (part.length >= 16) return true
+    if (HAS_DIGIT.test(part) && (part.length >= 8 || HAS_LETTER.test(part)) && ++keyLike >= 2) return true
+  }
+  return false
+}
+
+/** PEM private key blocks; one cut short (no END line, a clipped notice) is masked to the end. */
+function maskPem(text: string): string {
+  if (!text.includes('PRIVATE KEY')) return text
+  const begin = new RegExp(PEM_BEGIN, 'g')
+  const end = new RegExp(PEM_END, 'g')
+  let out = ''
+  let from = 0
+  for (let m = begin.exec(text); m; m = begin.exec(text)) {
+    out += text.slice(from, m.index) + CREDENTIAL_MASK
+    end.lastIndex = m.index + m[0].length
+    const close = end.exec(text)
+    if (!close) return out
+    from = close.index + close[0].length
+    begin.lastIndex = from
+  }
+  return out + text.slice(from)
+}
+
+/** How many dots end the token (a sentence's full stop is not part of it). */
+function trailingDots(token: string): number {
+  let n = 0
+  while (n < token.length && token[token.length - 1 - n] === '.') n++
+  return n
+}
+
+/**
+ * Credentials in free text -> `[redacted]` (app 2.7.0: `snaos notify` and
+ * every Equipos notice, plan A5): PEM private keys, connection string
+ * passwords, `Bearer <token>`, JWTs and the prefixed key shapes in TOKEN_RE.
+ * Unlike redact() it keeps hashes (a 40-hex git SHA), UUIDs, paths, IPs,
+ * emails and URLs without credentials. Every pattern starts on a fixed prefix
+ * with bounded or non-overlapping runs, so it is linear on any input (a 1 MB
+ * notice included). Idempotent; never throws (a failure gives '').
+ */
+export function redactCredentials(text: string): string {
+  try {
+    let out = typeof text === 'string' ? text : String(text ?? '')
+    out = maskPem(out)
+    if (out.includes('://')) out = out.replace(CONN_RE, (_m, scheme: string, user: string) => `${scheme}${user}:${CREDENTIAL_MASK}@`)
+    out = out.replace(BEARER_RE, (whole: string, word: string, gap: string, token: string) => {
+      if (!HAS_DIGIT.test(token)) return whole
+      const dots = trailingDots(token)
+      return word + gap + CREDENTIAL_MASK + token.slice(token.length - dots)
+    })
+    out = out.replace(TOKEN_RE, (whole: string, edge: string, token: string) =>
+      token.startsWith('sk-') && !isSkKey(token) ? whole : edge + CREDENTIAL_MASK,
+    )
+    return out
+  } catch {
+    return ''
+  }
 }

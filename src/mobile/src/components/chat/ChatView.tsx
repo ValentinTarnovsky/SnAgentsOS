@@ -29,7 +29,7 @@ import { Sheet } from '../Sheet'
 import { ActionList } from '../ActionList'
 import { NoReply } from '../NoReply'
 import { MessageRow } from './MessageRow'
-import { ToolRunRow } from './ToolRunRow'
+import { ToolPhaseRow, ToolRunRow } from './ToolRunRow'
 import { FloatingControls } from './FloatingControls'
 
 /** Within this many px of the end, the view follows new messages. */
@@ -218,6 +218,8 @@ export function ChatView({ paneId }: { paneId: string }): ReactNode {
             <div key={row.id} className="min-w-0" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 64px' }}>
               {row.kind === 'tools' ? (
                 <ToolRunRow calls={row.calls} expandAll={expandAll} />
+              ) : row.kind === 'phase' ? (
+                <ToolPhaseRow row={row} expandAll={expandAll} />
               ) : (
                 <MessageRow
                   id={row.id}

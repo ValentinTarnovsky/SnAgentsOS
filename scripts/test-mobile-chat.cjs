@@ -20,7 +20,8 @@
 // and no_menu toasts, the free text row focusing the composer, Always allow
 // by answerMenu and Allow as "1", the ask wizard, the key row (1 / Esc, never
 // Enter) for an elicitation and a Codex request, [Terminal], the log pinned
-// to the end under a card, and Spanish.
+// to the end under a card, and Spanish. v2.7.0: a Grep then a Glob fold into
+// one "Search 2" phase row that expands to its tool rows ("Búsqueda 2" in es).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -193,6 +194,17 @@ window.result = (async () => {
  console.log('500 messages rendered in ' + ms.toFixed(0) + ' ms');
  check(qa('[data-chat-row]').length === 500,'500 messages render');
 
+ // app 2.7.0: tool rows of one family fold into a phase ("Search 2"), expandable to its rows.
+ const phaseItems = [{ id:'10', role:'user', ts:null, blocks:[{ t:'text', text:'find the todos' }] }, { id:'20', role:'assistant', ts:null, blocks:[{ t:'toolUse', id:'toolu_g1', name:'Grep', summary:'TODO' }] }, { id:'30', role:'tool', ts:null, blocks:[{ t:'toolResult', toolUseId:'toolu_g1', isError:false, text:'a.ts:1' }] }, { id:'40', role:'assistant', ts:null, blocks:[{ t:'toolUse', id:'toolu_g2', name:'Glob', summary:'**/*.ts' }] }, { id:'50', role:'tool', ts:null, blocks:[{ t:'toolResult', toolUseId:'toolu_g2', isError:false, text:'a.ts' }] }, { id:'60', role:'assistant', ts:null, blocks:[{ t:'text', text:'Two of them.' }] }];
+ feed({ paneId:'c1', items:phaseItems, cursor:null, done:true }); await frames();
+ const phase = q('[data-tool-phase="search"]');
+ check(!!phase && phase.querySelector('[data-phase-label]').textContent === 'Search 2' && phase.dataset.status === 'done' && !phase.querySelector('[data-tool-run]'),'a Grep then a Glob fold into one "Search 2" phase row');
+ phase.querySelector('button').click(); await frames();
+ const phaseRuns = [...phase.querySelectorAll('[data-tool-run] [data-tool-label]')].map(e => e.textContent);
+ check(phaseRuns.join('|') === 'Grep TODO|Glob **/*.ts' && phase.querySelector('button').getAttribute('aria-expanded') === 'true','the phase expands to its tool rows: ' + JSON.stringify(phaseRuns));
+ phase.querySelector('button').click(); await frames();
+ check(!phase.querySelector('[data-tool-run]'),'and folds again');
+
  // Notice: back to Terminal with the toast (FR-33).
  sent.length = 0;
  feed({ paneId:'c1', items:[{ id:'notice', role:'system', ts:null, blocks:[{ t:'notice', code:'ambiguous' }] }], cursor:null, done:true }); await frames();
@@ -208,6 +220,8 @@ window.result = (async () => {
  feed({ paneId:'c1', items, cursor:null, done:true }); await frames(); await wait(50);
  const esLabels = qa('[data-tool-label]').map(e => e.textContent);
  check(esLabels.includes('Read 3 archivos') && q('[data-chat-thinking]').textContent.includes('Pensando') && q('[data-chat-more]').textContent === 'Ver mas','es: "Read 3 archivos", "Pensando", "Ver mas"');
+ feed({ paneId:'c1', items:phaseItems, cursor:null, done:true }); await frames();
+ check(q('[data-tool-phase="search"] [data-phase-label]')?.textContent === 'Búsqueda 2','es: the phase says "Búsqueda 2"');
  store.getState().update({ paneStatus:{ c1:{ state:'working', provider:'claude', stateSince:4 } } }); await frames();
  check(q('[data-chat-working]')?.textContent === 'Claude esta trabajando...','es: "Claude esta trabajando..."');
  { const wide=[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1 && !e.closest('[data-scrollable]')).slice(0,5).map(e=>e.tagName+'.'+String(e.className).slice(0,60)); check(document.documentElement.scrollWidth<=innerWidth && wide.length===0,'no horizontal overflow in Spanish '+JSON.stringify(wide)) }

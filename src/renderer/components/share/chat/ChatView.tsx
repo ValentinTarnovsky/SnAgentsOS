@@ -21,7 +21,7 @@ import { useShareGuestStore } from '@/lib/shareGuestStore'
 import { EMPTY_CHAT, chatFirst, chatForget, chatMore, chatUnsub, extrasKey, liveKeyOf, useShareExtrasStore } from '@/lib/shareGuestExtras'
 import { buildRows, messageText } from './chatModel'
 import { MessageRow } from './MessageRow'
-import { ToolRunRow } from './ToolRunRow'
+import { ToolPhaseRow, ToolRunRow } from './ToolRunRow'
 
 const FOLLOW_PX = 40
 const JUMP_PX = 200
@@ -196,7 +196,13 @@ export function SharedChatView({ link, pane, status, hostLabel }: { link: ShareL
         <div className="flex min-w-0 flex-col gap-3">
           {rows.map((row) => (
             <div key={row.id} className="min-w-0" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 64px' }}>
-              {row.kind === 'tools' ? <ToolRunRow calls={row.calls} expandAll={expandAll} /> : <MessageRow id={row.id} role={row.role} blocks={row.blocks} onLink={onLink} />}
+              {row.kind === 'tools' ? (
+                <ToolRunRow calls={row.calls} expandAll={expandAll} />
+              ) : row.kind === 'phase' ? (
+                <ToolPhaseRow row={row} expandAll={expandAll} />
+              ) : (
+                <MessageRow id={row.id} role={row.role} blocks={row.blocks} onLink={onLink} />
+              )}
             </div>
           ))}
         </div>

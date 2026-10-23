@@ -7,8 +7,9 @@
  */
 import { useEffect, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { ChevronRight, Wrench } from 'lucide-react'
-import { runLabel, runStatus, type ToolCall } from '../../lib/chatModel'
+import { ChevronRight, Layers, Wrench } from 'lucide-react'
+import { toolFamilyKey } from '@shared/toolActivity'
+import { phaseCalls, runLabel, runStatus, type ChatPhaseRow, type ToolCall } from '../../lib/chatModel'
 import { t, type MobileMessageKey } from '../../lib/i18n'
 import { DiffBlock } from './DiffBlock'
 
@@ -76,6 +77,46 @@ export function ToolRunRow({ calls, expandAll }: { calls: ToolCall[]; expandAll:
         <div data-tool-detail className="mt-1.5 flex min-w-0 flex-col gap-2 pl-1">
           {calls.map((c) => (
             <CallDetail key={c.id} call={c} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * app 2.7.0: tool rows of one family folded into a phase ("Search 3 (a.ts)",
+ * src/shared/chatRows.ts). Minimal for now: the family label, the count and
+ * the files; a tap shows its tool rows, each expandable as usual.
+ */
+export function ToolPhaseRow({ row, expandAll }: { row: ChatPhaseRow; expandAll: { open: boolean; v: number } }): ReactNode {
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    if (expandAll.v > 0) setOpen(expandAll.open)
+  }, [expandAll])
+  const status = runStatus(phaseCalls(row))
+  const files = row.files.length ? ` (${row.files.join(', ')})` : ''
+  return (
+    <div data-tool-phase={row.family} data-status={status} className="min-w-0">
+      <div className="px-3">
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+          className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-btn border border-border px-2.5 py-1.5 text-left text-xs text-text-secondary active:bg-card"
+        >
+          <Layers size={14} className="shrink-0" aria-hidden />
+          <span data-phase-label className="min-w-0 flex-1 truncate font-mono">
+            {`${t(toolFamilyKey(row.family))} ${row.count}${files}`}
+          </span>
+          {status === 'pending' && <span data-phase-pending className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent-violet motion-reduce:animate-none" />}
+          <ChevronRight size={14} className={clsx('shrink-0 transition-transform motion-reduce:transition-none', open && 'rotate-90')} aria-hidden />
+        </button>
+      </div>
+      {open && (
+        <div data-phase-items className="mt-1.5 flex min-w-0 flex-col gap-1.5 pl-3">
+          {row.items.map((r) => (
+            <ToolRunRow key={r.id} calls={r.calls} expandAll={expandAll} />
           ))}
         </div>
       )}
