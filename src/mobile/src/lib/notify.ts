@@ -14,10 +14,11 @@
  * client.ts binds the singleton to the store.
  */
 import { BRAND } from '@shared/brand'
-import { waitsOnUser } from '@shared/status'
+import { needsYouCount } from '@shared/attention'
 import type { RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
 import { t } from './i18n'
 import { reasonText } from './statusText'
+import { attentionItems } from './workspace'
 import type { LiveScreen, MobileToast } from './store'
 import type { PagePrefs } from './prefs'
 
@@ -96,15 +97,18 @@ export function createPaneNotifier(deps: PaneNotifierDeps): PaneNotifier {
   }
 }
 
-/** Consoles waiting on the user across the snapshot (the document title badge); v2.3: an answered action does not count. */
+/**
+ * Consoles that need the user across the snapshot (the document title
+ * badge). App 2.7.0: the shared rule (src/shared/attention.ts), the count of
+ * the desktop's badges: an open request, a done or error nobody saw, a
+ * `snaos needs`, muted ones out.
+ */
 export function actionTotal(snap: RemoteStateSnapshot | null, statuses: Record<string, RemotePaneStatus>): number {
   if (!snap) return 0
-  let n = 0
-  for (const ws of snap.workspaces) for (const p of ws.panes) if (waitsOnUser(statuses[p.id])) n++
-  return n
+  return needsYouCount(attentionItems(snap.workspaces, statuses))
 }
 
-/** "(N) SnAgentsOS Remote" with N consoles in action, the bare title at 0. */
+/** "(N) SnAgentsOS Remote" with N consoles that need the user, the bare title at 0. */
 export function remoteTitle(actionCount: number): string {
   return actionCount > 0 ? `(${actionCount}) ${BRAND.mobileTitle}` : BRAND.mobileTitle
 }

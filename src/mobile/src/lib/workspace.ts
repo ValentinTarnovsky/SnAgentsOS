@@ -5,8 +5,8 @@
  * a console never moves the desktop. activeWorkspaceId only feeds the "On the
  * PC" chip and the last default of the new-console picker.
  */
-import type { RemotePaneInfo, RemotePaneStatus, RemoteStateSnapshot } from '@shared/remote-protocol'
-import { waitsOnUser } from '@shared/status'
+import type { RemotePaneInfo, RemotePaneStatus, RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
+import { needsYou, needsYouCount, needsYouRows, type AttentionItem, type NeedsYouRow } from '@shared/attention'
 
 export function workspaceOfPane(snap: RemoteStateSnapshot, paneId: string): string | null {
   const ws = snap.workspaces.find((w) => w.panes.some((p) => p.id === paneId))
@@ -70,39 +70,63 @@ export function orderedPanes(ws: RemoteStateSnapshot['workspaces'][number]): Rem
   return out
 }
 
+// --- "Needs you" (app 2.7.0, A8): the desktop's rule, src/shared/attention.ts ---
+
+/** One console of the snapshot as the shared "needs you" rule reads it, with what a row renders. */
+export interface PhoneAttentionItem extends AttentionItem {
+  pane: RemotePaneInfo
+  workspaceName: string
+  status?: RemotePaneStatus
+}
+
 /**
- * Every pane waiting on the user (state 'action'), in workspace order and then
- * layoutOrder, excluding the one being viewed (E1-FR-06).
+ * Every console of these workspaces, in Home order (workspace, then
+ * layoutOrder), with its live status. The phone has neither the desktop's
+ * local mark (`marked`) nor its sleep list (`dormant`): a sleeping console
+ * carries no status, so it never counts either way.
+ */
+export function attentionItems(workspaces: readonly RemoteWorkspaceInfo[], statuses: Record<string, RemotePaneStatus>): PhoneAttentionItem[] {
+  const out: PhoneAttentionItem[] = []
+  for (const ws of workspaces) {
+    for (const pane of orderedPanes(ws)) out.push({ paneId: pane.id, workspaceId: ws.id, workspaceName: ws.name, pane, status: statuses[pane.id] })
+  }
+  return out
+}
+
+/** The consoles that need the user across every workspace, most urgent first (Home's "Waiting for you"). */
+export function needsYouPanes(snap: RemoteStateSnapshot, statuses: Record<string, RemotePaneStatus>): NeedsYouRow<PhoneAttentionItem>[] {
+  return needsYouRows(attentionItems(snap.workspaces, statuses))
+}
+
+/**
+ * Every pane that needs the user (the shared rule: an open request, a done
+ * or error nobody saw, a `snaos needs`; muted ones out), in workspace order
+ * and then layoutOrder, excluding the one being viewed (E1-FR-06).
  */
 export function waitingPanes(
   snap: RemoteStateSnapshot,
   statuses: Record<string, RemotePaneStatus>,
   activePaneId: string | null,
 ): PaneRef[] {
-  const out: PaneRef[] = []
-  for (const ws of snap.workspaces) {
-    for (const pane of orderedPanes(ws)) {
-      if (pane.id !== activePaneId && waitsOnUser(statuses[pane.id])) out.push({ workspaceId: ws.id, paneId: pane.id })
-    }
-  }
-  return out
+  return attentionItems(snap.workspaces, statuses)
+    .filter((item) => item.paneId !== activePaneId && needsYou(item))
+    .map((item) => ({ workspaceId: item.workspaceId, paneId: item.paneId }))
 }
 
 /**
- * The next waiting pane after the viewed one, cycling through the global
- * order (workspace, then layoutOrder) and wrapping around.
+ * The next pane that needs the user after the viewed one, cycling through
+ * the global order (workspace, then layoutOrder) and wrapping around.
  */
 export function nextWaitingPane(
   snap: RemoteStateSnapshot,
   statuses: Record<string, RemotePaneStatus>,
   activePaneId: string | null,
 ): PaneRef | null {
-  const all: PaneRef[] = []
-  for (const ws of snap.workspaces) for (const pane of orderedPanes(ws)) all.push({ workspaceId: ws.id, paneId: pane.id })
+  const all = attentionItems(snap.workspaces, statuses)
   const start = activePaneId ? all.findIndex((r) => r.paneId === activePaneId) : -1
   for (let i = 1; i <= all.length; i++) {
-    const ref = all[(start + i + all.length) % all.length]
-    if (ref.paneId !== activePaneId && waitsOnUser(statuses[ref.paneId])) return ref
+    const item = all[(start + i + all.length) % all.length]
+    if (item.paneId !== activePaneId && needsYou(item)) return { workspaceId: item.workspaceId, paneId: item.paneId }
   }
   return null
 }
@@ -148,8 +172,11 @@ export function isUnread(status: RemotePaneStatus | undefined, lastViewedAt: num
 /**
  * action > error > unread done > working > the rest (E2-FR-04). v2.3: an
  * answered action ranks as working and an acknowledged error as the rest.
+ * App 2.7.0: a `snaos needs` not muted ranks as an open request, whatever
+ * the state (the shared rule's rank 1), a bare status (no agent) included.
  */
 export function rowRank(status: RemotePaneStatus | undefined, unread: boolean): number {
+  if (status?.needs && status.muted !== true) return 0
   switch (status?.state) {
     case 'action':
       return status.attention === false ? 3 : 0
@@ -181,7 +208,26 @@ export function homeRows(
     .map((x) => x.pane)
 }
 
-/** Consoles of a workspace in action: the red badge of its header (E2-FR-04). */
-export function actionCount(ws: RemoteStateSnapshot['workspaces'][number], statuses: Record<string, RemotePaneStatus>): number {
-  return ws.panes.reduce((n, p) => (waitsOnUser(statuses[p.id]) ? n + 1 : n), 0)
+/**
+ * Consoles of a workspace that need the user: the red badge of its header
+ * (E2-FR-04; app 2.7.0: the shared rule, the desktop sidebar badge's count).
+ */
+export function actionCount(ws: RemoteWorkspaceInfo, statuses: Record<string, RemotePaneStatus>): number {
+  return needsYouCount(attentionItems([ws], statuses))
+}
+
+/**
+ * Workspace menu "Mark all read" (app 2.7.0): its done and error consoles
+ * not seen yet (`attention` not false), muted ones included (main publishes
+ * a muted console with `attention: false`, so it may be unread under the
+ * mute). Main's markRead does nothing for one already seen.
+ */
+export function markReadTargets(ws: RemoteWorkspaceInfo, statuses: Record<string, RemotePaneStatus>): string[] {
+  return orderedPanes(ws)
+    .filter((p) => {
+      const st = statuses[p.id]
+      if (!st || st.bare || (st.state !== 'done' && st.state !== 'error')) return false
+      return st.attention !== false || st.muted === true
+    })
+    .map((p) => p.id)
 }

@@ -1,6 +1,7 @@
 /**
- * "N waiting" pill in the header (E1-FR-06). N counts the panes in 'action'
- * across every workspace, without the one being viewed; it hides at 0. A tap
+ * "N waiting" pill in the header (E1-FR-06). N counts the panes that need the
+ * user across every workspace (app 2.7.0: the desktop's rule,
+ * src/shared/attention.ts), without the one being viewed; it hides at 0. A tap
  * opens the next waiting pane (workspace order, then layoutOrder, cycling from
  * the current one) through client.requestOpen, so opening it never moves the
  * desktop (E2-FR-06). The wrapper stays mounted as a polite live region so

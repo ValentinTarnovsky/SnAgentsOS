@@ -162,6 +162,11 @@ function paneExists(snap: RemoteStateSnapshot, paneId: string): boolean {
   return snap.workspaces.some((w) => w.panes.some((p) => p.id === paneId))
 }
 
+/** app 2.7.0: the PC paused this chat (ChatHub's LRU); only the user's Resume subscribes it again. */
+function chatPaused(paneId: string): boolean {
+  return chatStore.getState().chats[paneId]?.paused === true
+}
+
 /** E2-FR-43: toast with [Go] and vibration when another console needs the user. */
 const paneNotifier = createPaneNotifier({
   isVisible: pageVisible,
@@ -556,7 +561,8 @@ class RemoteClient {
   /**
    * Switch the viewed pane within the current workspace (unsub old, sub new).
    * `reconnect` (goLive re-subscribing the console still on screen) keeps the
-   * open's in-memory flags: a socket drop is not opening the console again.
+   * open's in-memory flags: a socket drop is not opening the console again,
+   * so a chat the PC paused stays in Chat under its bar with no chatSub.
    */
   viewPane(paneId: string, opts: { reconnect?: boolean } = {}): void {
     const s = store.getState()
@@ -574,8 +580,15 @@ class RemoteClient {
     // E3-FR-24/25: an agent console saved as Chat opens as Chat (chatSub, no sub).
     const chat = selectPaneView(store.getState(), paneId) === 'chat'
     s.update({ activePaneId: paneId, subscribedPaneId: paneId, chatPaneId: chat ? paneId : null })
-    if (chat) this.requestChatFirst(paneId)
-    else this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
+    if (!chat) this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
+    else if (!opts.reconnect || !chatPaused(paneId)) this.requestChatFirst(paneId)
+    else {
+      // A Resume or "Load earlier" the old socket never answered (goLive
+      // dropped it) is not asked again: "The PC did not answer [Retry]", as
+      // after its 10s, so the user's next tap works.
+      const lost = chatStore.getState().chats[paneId]?.loading
+      if (lost) chatStore.getState().fail(paneId, lost)
+    }
   }
 
   /** Stop watching a pane the way it is watched (chatUnsub in Chat, unsub in Terminal). */
@@ -702,6 +715,8 @@ class RemoteClient {
    * means no chat: back to Terminal for this open only (chatRefused, never
    * saved), with the toast that names the fix for the console's agent: once
    * per console and status key (v2.3.0), so reopening does not repeat it.
+   * app 2.7.0 (A7): a first page marked `notice: 'paused'` was read while the
+   * PC closed its watcher for another chat: it shows, under the paused bar.
    */
   private handleChatPage(msg: Extract<RemoteServerMsg, { type: 'chatPage' }>): void {
     const pending = this.chatPending.get(msg.paneId)
@@ -724,7 +739,7 @@ class RemoteClient {
     }
     const page = { items, cursor: typeof msg.cursor === 'string' ? msg.cursor : null, done: msg.done === true }
     if (pending?.kind === 'more') chatStore.getState().prepend(msg.paneId, page)
-    else chatStore.getState().replace(msg.paneId, page)
+    else chatStore.getState().replace(msg.paneId, page, msg.notice === 'paused')
   }
 
   /** A console whose status key changed since its chat toast may show it again (A to B and back to A included). */
@@ -742,9 +757,17 @@ class RemoteClient {
     return provider === 'codex' ? 'chat.enableCodex' : 'chat.installHooks'
   }
 
+  /**
+   * New messages of the chat on screen. app 2.7.0 (A7): an empty one with
+   * `notice: 'paused'` = the PC closed this chat's watcher for another one
+   * (ChatHub's LRU): the list stays, marked paused, until the user's Resume
+   * subscribes again (requestChatFirst); nothing reopens on its own, neither
+   * the resync of a revive nor the viewPane of a reconnect.
+   */
   private handleChatAppend(msg: Extract<RemoteServerMsg, { type: 'chatAppend' }>): void {
     if (store.getState().chatPaneId !== msg.paneId || !Array.isArray(msg.items)) return
-    chatStore.getState().append(msg.paneId, msg.items)
+    if (msg.notice === 'paused') chatStore.getState().pause(msg.paneId)
+    if (msg.items.length > 0) chatStore.getState().append(msg.paneId, msg.items)
   }
 
   /**
@@ -755,8 +778,12 @@ class RemoteClient {
   resyncPane(): void {
     const paneId = store.getState().subscribedPaneId
     if (!paneId || !this.isOpen()) return
-    // In Chat a repeated chatSub is the fresh first page (no stream to resync).
-    if (store.getState().chatPaneId === paneId) return this.requestChatFirst(paneId)
+    // In Chat a repeated chatSub is the fresh first page (no stream to resync);
+    // a chat the PC paused waits for the user's Resume instead (app 2.7.0).
+    if (store.getState().chatPaneId === paneId) {
+      if (!chatPaused(paneId)) this.requestChatFirst(paneId)
+      return
+    }
     this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
     this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
   }
@@ -1513,7 +1540,8 @@ class RemoteClient {
       pairExpiresAt: null,
       // Force viewPane below to (re)issue a sub even on reconnect to the same pane.
       subscribedPaneId: null,
-      // A new socket holds no chatSub yet; viewPane sends it again for a Chat pane.
+      // A new socket holds no chatSub yet; viewPane sends it again for a Chat
+      // pane (not for a chat the PC paused: that one waits for Resume).
       chatPaneId: null,
       activePaneId: keep ?? null,
       ...(lostViewed ? { screen: 'home' as const } : {}),

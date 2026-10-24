@@ -224,7 +224,8 @@ function phoneParity() {
   const answered = { ...waiting, a2: st('action', { attention: false }), b1: st('action', { attention: true }) }
   check(A.needsYouCount(all(answered)) === phone.waitingPanes(snap, answered, null).length, 'an answered action is out on both')
   const unseen = { ...answered, b3: st('done', { attention: true, stateSince: 2 }), b2: st('error', { attention: false }) }
-  check(A.needsYouCount(all(unseen)) === phone.waitingPanes(snap, unseen, null).length + 1, 'intended: the phone now also counts an unseen done (the desktop badge did)')
+  // A8: the phone's selectors moved to the shared rule, so an unseen done counts on both.
+  check(A.needsYouCount(all(unseen)) === phone.waitingPanes(snap, unseen, null).length && phone.waitingPanes(snap, unseen, null).some((r) => r.paneId === 'b3'), 'the phone counts an unseen done too (the desktop badge did)')
 }
 
 ranking()

@@ -80,8 +80,8 @@ const IMMEDIATE_STATES = new Set<ClaudePaneState | null>(['action', 'done', 'err
  * CONTRATOS fields of RemotePaneStatus: sessionId, cwd and every desktop-only
  * enrichment (detail, topic, firstPrompt, cacheSince, digest, signalAt) never
  * leave main. App 2.7.0 (A3): a `bare` status (needs only, no agent track)
- * goes out for its needs and attention, without the marker: on a pane that
- * runs no agent it is the only status with no `provider`.
+ * goes out for its needs and attention with `bare: true`, so the phone shows
+ * the request and no agent state.
  */
 export function toRemoteStatus(evt: Omit<PaneStatusEvt, 'paneId' | 'notify'> | null | undefined, menu?: RemotePaneMenu | null): RemotePaneStatus | null {
   if (!evt || evt.state == null) return null

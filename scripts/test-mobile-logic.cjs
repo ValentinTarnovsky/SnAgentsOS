@@ -15,6 +15,11 @@
 // Section M5 (E1-FR-32..36, 39; E5-FR-11): backStack with a fake history,
 // createLongPress under fake timers, the sheet drag math, tab order and
 // titles, and which per-pane actions show for a resumable pane.
+// Section M10 (app 2.7.0, A8): the phone counts "needs you" with the
+// desktop's rule (src/shared/attention.ts) in the title, the workspace badge,
+// the waiting pill and Home's "Waiting for you"; Mark all read targets; the
+// row signals (doing now, failure, silence, needs, context, bare); the status
+// marks of the pane actions, gated to a 2.7.0 desktop; the plan sheet outcomes.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -31,11 +36,14 @@ export { client, RELOAD_FOR_KEY, IDLE_PROBE_MS, PONG_TIMEOUT, CONNECT_TIMEOUT_MS
 export { store } from './src/mobile/src/lib/store'
 export { classifyConnection, endpointHint, formatAgo } from './src/mobile/src/lib/connectionHealth'
 export { delayFor, RECONNECT_DELAYS } from './src/mobile/src/lib/reconnectSchedule'
-export { relativeAge, statusLine, statusAriaLabel, showsTime, rowLine, rowShowsTime } from './src/mobile/src/lib/statusText'
+export { relativeAge, statusLine, statusAriaLabel, showsTime, rowLine, rowShowsTime, doingNow, failureText, silenceText, needsText, contextShort, contextLabel, agentStatusOf } from './src/mobile/src/lib/statusText'
 export { createPaneNotifier, remoteTitle, actionTotal } from './src/mobile/src/lib/notify'
 export { parseDeepLink } from './src/mobile/src/lib/deepLink'
 export { loadPagePrefs, savePagePrefs } from './src/mobile/src/lib/prefs'
-export { viewedWorkspaceId, paneOpenable, isWorkspaceMounted, homeRows, isUnread, actionCount, waitingPanes, nextWaitingPane, statusMapOf } from './src/mobile/src/lib/workspace'
+export { viewedWorkspaceId, paneOpenable, isWorkspaceMounted, homeRows, isUnread, actionCount, waitingPanes, nextWaitingPane, statusMapOf, attentionItems, needsYouPanes, markReadTargets } from './src/mobile/src/lib/workspace'
+export { needsYouRows, needsYouCount } from './src/shared/attention'
+export { planLoadOf } from './src/mobile/src/lib/plan'
+export { statusMarkIds, statusMarkAction, statusMarksSupported } from './src/mobile/src/lib/paneActions'
 export { withViewed, LAST_VIEWED_MAX } from './src/mobile/src/lib/prefs'
 export { setLang } from './src/mobile/src/lib/i18n'
 export { createBackStack } from './src/mobile/src/lib/backStack'
@@ -587,10 +595,11 @@ async function testClientNotify() {
     t.recv({ type: 'paneStatus', paneId: 'b3', status: st('action', { reason: 'question', stateSince: 60, provider: 'codex', attention: true }) })
     t.recv({ type: 'paneStatus', paneId: 'a2', status: st('error', { stateSince: 61, attention: true }) })
     check(q.state().toasts.map(x => x.paneId).join() === 'b3,a2', 'two consoles toast')
-    check(q.document.title === '(2) SnAgentsOS Remote', 'the title counts b1 and b3')
+    // app 2.7.0: the desktop's rule, so an error nobody saw (attention true) counts too.
+    check(q.document.title === '(3) SnAgentsOS Remote', 'the title counts b1, b3 and the unseen error of a2')
     t.recv({ type: 'paneStatus', paneId: 'b3', status: st('action', { reason: 'question', stateSince: 60, provider: 'codex', attention: false }) })
     check(q.state().toasts.map(x => x.paneId).join() === 'a2', 'an attention flip drops that console\'s toast only')
-    check(q.document.title === '(1) SnAgentsOS Remote', 'and the "(N)" follows')
+    check(q.document.title === '(2) SnAgentsOS Remote', 'and the "(N)" follows')
     t.recv({ type: 'paneStatus', paneId: 'a2', status: st('working', { stateSince: 62, attention: false }) })
     check(q.state().toasts.length === 0, 'a state change drops the toast of that console')
     q.state().setToast('Sent')
@@ -1063,6 +1072,107 @@ async function testHomeClient() {
   }
 }
 
+// --- M10: app 2.7.0 (A8) "needs you", row signals, status marks, full plan ---
+
+function attentionFixture() {
+  const now = 10 * 24 * 60 * MIN
+  const pane = (id, type = 'claude') => ({ id, title: id.toUpperCase(), type, running: true })
+  const snap = {
+    language: 'en', themeTokens: {}, fontFamily: 'mono', fontSize: 13, keyButtons: [], activeWorkspaceId: 'w1',
+    workspaces: [
+      { id: 'w1', name: 'Front', layoutOrder: ['a1', 'a2', 'a3', 'a4', 'a5', 'a6'], panes: ['a6', 'a5', 'a4', 'a3', 'a2', 'a1'].map(id => pane(id)) },
+      { id: 'w2', name: 'Back', layoutOrder: ['b1', 'b2', 'b3', 'b4'], panes: [pane('b1', 'shell'), pane('b2'), pane('b3'), pane('b4', 'codex')] },
+    ],
+  }
+  const statuses = {
+    // An open request with no `attention` (an older main): the legacy rule.
+    a1: st('action', { reason: 'permission', stateSince: now - 5 * MIN }),
+    a2: st('done', { stateSince: now - 3 * MIN, attention: true }),
+    a3: st('working', { stateSince: now - 12 * MIN, toolFamily: 'edit', activity: 'Edit src/a.ts', silence: { level: 'quiet', since: now - 12 * MIN }, context: { pct: 0.42, used: 84000, window: 200000, exact: false } }),
+    a4: st('error', { stateSince: now - 2 * MIN, attention: true, failure: { kind: 'limit', until: now + 2 * 60 * MIN, code: 'rate_limit' } }),
+    // A working agent that asked with `snaos needs`: rank 1, aged from the ask.
+    a5: st('working', { stateSince: now - MIN, needs: { text: 'Approve the deploy', at: now - 7 * MIN } }),
+    // Muted: out, its needs included.
+    a6: st('action', { reason: 'question', stateSince: now - 9 * MIN, attention: false, muted: true, needs: { text: 'Muted ask', at: now - 9 * MIN } }),
+    // A bare status: a `snaos needs` on a shell with no agent.
+    b1: { state: 'idle', precise: false, pendingCount: 0, stateSince: now - 4 * MIN, attention: true, needs: { text: 'Check the PR', at: now - 4 * MIN }, bare: true },
+    b2: st('done', { stateSince: now - MIN, attention: false }),
+    b3: st('done', { stateSince: now - 6 * MIN, attention: false, muted: true }),
+    b4: st('working', { stateSince: now - MIN, provider: 'codex', context: { pct: 0.9, used: 9, window: 10, exact: true } }),
+    ghost: st('action'),
+  }
+  return { now, snap, statuses }
+}
+
+function testAttention(p) {
+  p.setLang('en')
+  const { now, snap, statuses } = attentionFixture()
+  const items = p.attentionItems(snap.workspaces, statuses)
+  check(items.map(i => i.paneId).join() === 'a1,a2,a3,a4,a5,a6,b1,b2,b3,b4' && items[6].workspaceName === 'Back' && items[0].pane.title === 'A1', 'attentionItems: every console in workspace then layout order, with its pane and workspace name')
+  const shared = p.needsYouRows(items).map(r => r.id).join()
+  const rows = p.needsYouPanes(snap, statuses)
+  check(rows.map(r => r.id).join() === shared && shared === 'a5,a1,b1,a4,a2', 'Waiting for you uses the shared order: needs and requests longest waiting first, then the unseen done (got ' + rows.map(r => r.id).join() + ')')
+  check(p.actionTotal(snap, statuses) === p.needsYouCount(items) && p.actionTotal(snap, statuses) === 5, 'the title counts what needsYouCount counts (5): no muted, no seen done, no working, no console outside the snapshot')
+  check(p.actionCount(snap.workspaces[0], statuses) === 4 && p.actionCount(snap.workspaces[1], statuses) === 1, 'the workspace badges (4 + 1) add up to the same 5')
+  check(p.remoteTitle(p.actionTotal(snap, statuses)) === '(5) SnAgentsOS Remote', 'so the document title reads (5)')
+  check(p.waitingPanes(snap, statuses, null).map(r => r.paneId).join() === 'a1,a2,a4,a5,b1' && p.waitingPanes(snap, statuses, 'a4').map(r => r.paneId).join() === 'a1,a2,a5,b1', 'the waiting pill counts the same set, in workspace order, without the viewed console')
+  check(p.nextWaitingPane(snap, statuses, 'a4').paneId === 'a5' && p.nextWaitingPane(snap, statuses, 'b1').paneId === 'a1' && p.nextWaitingPane(snap, statuses, 'a6').paneId === 'b1', 'next waiting walks that set (a needs and a bare needs included), wrapping around')
+  check(p.markReadTargets(snap.workspaces[0], statuses).join() === 'a2,a4' && p.markReadTargets(snap.workspaces[1], statuses).join() === 'b3', 'Mark all read: unseen done and error consoles, a muted one included, never a seen or a bare one')
+  const order = ws => p.homeRows(ws, statuses, {}).map(x => x.id).join()
+  check(order(snap.workspaces[0]) === 'a1,a5,a4,a2,a3,a6' && order(snap.workspaces[1]) === 'b1,b4,b2,b3', 'Home rows: a snaos needs not muted ranks with the open requests (got ' + order(snap.workspaces[0]) + ' / ' + order(snap.workspaces[1]) + ')')
+
+  // The row signals (the desktop's words).
+  const line = (status, rest = {}) => p.rowLine({ status, running: true, mounted: true, ...rest }, now)
+  check(line(statuses.a3) === 'Editing src/a.ts · 12m' && p.doingNow(statuses.a3) === 'Editing src/a.ts', 'doing now: the open tool\'s verb and object, with the age on the row')
+  check(p.doingNow(st('working', { toolFamily: 'run', activity: 'Bash: npm test' })) === 'Running npm test' && p.doingNow(st('working', { provider: 'codex', toolFamily: 'run', activity: 'npm test' })) === 'Running npm test', 'a Claude tool name goes, a Codex command line stays')
+  check(p.doingNow(st('working', { activity: 'npm test' })) === null && p.doingNow(st('working', { toolFamily: 'edit' })) === null && p.doingNow(st('done', { toolFamily: 'edit', activity: 'Edit a.ts' })) === null && p.doingNow(st('working', { toolFamily: 'agent', activity: 'Task: x', waiting: { kind: 'background', count: 1 } })) === null, 'no toolFamily (a desktop before 2.7.0), no open tool, a finished turn or a background wait = nothing')
+  check(line(st('working', { stateSince: now - 6 * MIN, provider: 'claude', activity: 'Edit a.ts' })) === 'Working 6m', 'a 2.6.0 desktop keeps activity on the last tool after it ended: its row keeps "Working 6m"')
+  check(line(st('working', { stateSince: now - 5000, toolFamily: 'read', activity: 'Read a.ts' })) === 'Reading a.ts', 'a fresh turn has no age')
+  check(p.failureText(statuses.a4.failure, now).startsWith('Usage limit until ') && p.failureText({ kind: 'limit', until: now - MIN }, now) === 'Usage limit' && p.failureText({ kind: 'nope' }, now) === 'Turn failed', 'failure: the label, "until <time>" only while the reset is ahead, junk = Turn failed')
+  check(p.silenceText(statuses.a3.silence, now) === 'No signal for 12 min' && p.silenceText({ level: 'stalled', since: now - 25 * MIN - 30000 }, now) === 'Maybe stuck: 25 min without signal', 'silence: quiet and stalled with whole minutes')
+  check(p.needsText(statuses.a5.needs) === 'Needs you: Approve the deploy', 'needs: "Needs you: <text>"')
+  check(p.contextShort(statuses.a3.context) === '42% est.' && p.contextLabel(statuses.a3.context) === 'Context 42% full (estimated)' && p.contextShort(statuses.b4.context) === '90%' && p.contextLabel(statuses.b4.context) === 'Context 90% full', 'context: "est." unless the agent reported it exactly')
+  check(p.agentStatusOf(statuses.b1) === undefined && p.agentStatusOf(statuses.a1) === statuses.a1 && line(statuses.b1) === 'Idle' && !p.rowShowsTime(statuses.b1), 'a bare status is no agent status: no state line of its own, no ticker')
+  check(p.rowShowsTime(st('idle', { failure: { kind: 'limit', until: now + MIN } })) && p.rowShowsTime(st('action', { silence: { level: 'quiet', since: now } })), 'a failure reset or a silence drives the 30s ticker too')
+  p.setLang('es')
+  check(line(statuses.a3) === 'Editando src/a.ts · 12m' && p.failureText(statuses.a4.failure, now).startsWith('Límite de uso hasta ') && p.silenceText(statuses.a3.silence, now) === 'Sin señales hace 12 min' && p.needsText(statuses.a5.needs) === 'Te necesita: Approve the deploy', 'Spanish signals: "Editando", "Límite de uso hasta", "Sin señales hace", "Te necesita"')
+  check(p.contextShort(statuses.a3.context) === '42% estimado' && p.contextLabel(statuses.a3.context) === 'Contexto al 42% (estimado)', 'Spanish context: "42% estimado"')
+  p.setLang('en')
+
+  // The status marks of the pane actions (handled in main, a 2.7.0 desktop only).
+  check(!p.statusMarksSupported('2.6.0') && !p.statusMarksSupported('') && p.statusMarksSupported('2.7.0') && p.statusMarksSupported('dev'), 'the marks need a 2.7.0 desktop (dev counts as new)')
+  const ids = (status, marks = true, pane = {}) => p.paneActionIds(pane, { status, marks }).join()
+  check(ids(statuses.a2, false) === 'rename,restart,reveal,copyTitle,close', 'an older desktop keeps the plain list')
+  check(ids(statuses.a2) === 'markRead,mute,rename,restart,reveal,copyTitle,close' && ids(statuses.a4) === 'markRead,mute,rename,restart,reveal,copyTitle,close', 'a done or error console offers Mark as read and Mute first')
+  check(ids(statuses.a3) === 'mute,silenceAck,rename,restart,reveal,copyTitle,close' && ids(statuses.a6) === 'unmute,rename,restart,reveal,copyTitle,close', 'a silent one adds Ignore this turn; a muted one offers Unmute')
+  check(ids(statuses.b1) === 'rename,restart,reveal,copyTitle,close' && ids(undefined) === 'rename,restart,reveal,copyTitle,close' && p.statusMarkIds(statuses.b1).length === 0, 'a bare status or none gets no marks')
+  check(p.paneActionIds({ resumable: true }, { status: statuses.a2, marks: true, rename: false }).join() === 'markRead,mute,restart,restartResume,restartFresh,reveal,copyTitle,close', 'with the resume rows and without Rename')
+  check(JSON.stringify(p.statusMarkAction('p', 'markRead')) === '{"kind":"markRead","paneId":"p"}' && JSON.stringify(p.statusMarkAction('p', 'mute')) === '{"kind":"mutePane","paneId":"p","muted":true}' && JSON.stringify(p.statusMarkAction('p', 'unmute')) === '{"kind":"mutePane","paneId":"p","muted":false}' && JSON.stringify(p.statusMarkAction('p', 'silenceAck')) === '{"kind":"silenceAck","paneId":"p"}', 'each mark sends its ctl: markRead, mutePane true / false, silenceAck')
+
+  // The plan sheet's outcomes.
+  const plan = { requestId: 'r1', text: '# Plan', at: 1, truncated: false }
+  check(p.planLoadOf({ ok: true, value: { ok: true, plan } }).status === 'ok' && p.planLoadOf({ ok: true, value: { ok: true, plan } }).plan === plan, 'a plan reads ok')
+  check(['timeout', 'rate', 'offline'].every(error => p.planLoadOf({ ok: false, error }).status === 'noReply') && p.planLoadOf({ ok: true, value: { ok: false, error: 'rate' } }).status === 'noReply', 'no answer, offline or the PC\'s rate limit = "The PC did not answer [Retry]"')
+  check(p.planLoadOf({ ok: true, value: { ok: false, error: 'not_found' } }).status === 'gone' && p.planLoadOf({ ok: true, value: { ok: false, error: 'unsupported' } }).status === 'gone' && p.planLoadOf({ ok: true, value: { ok: true, plan: { ...plan, text: ' ' } } }).status === 'gone', 'not kept any more, an older desktop or an empty plan = no longer available')
+}
+
+/** client.requestPlan: nothing goes to an older desktop; planRes answers by id. */
+async function testPlanRequest() {
+  const p = page()
+  p.client.start()
+  const s = p.last(); s.open()
+  s.recv({ type: 'authOk', deviceId: 'dev1', state: multi(), hostPlatform: 'win32', appVersion: BUNDLE_VERSION })
+  const old = await p.client.requestPlan('b1', 'tp1')
+  check(old.ok && old.value.ok === false && old.value.error === 'unsupported' && s.count('planReq') === 0, 'a desktop older than 2.7.0 gets no planReq (it would strike it): unsupported')
+  p.state().update({ appVersion: '2.7.0' })
+  const wait = p.client.requestPlan('b1', 'tp1')
+  const req = s.sent.find(m => m.type === 'planReq')
+  check(req && req.paneId === 'b1' && req.requestId === 'tp1' && /^[0-9a-f]{16}$/.test(req.id), 'a 2.7.0 desktop gets planReq with the pane and the request id')
+  s.recv({ type: 'planRes', id: req.id, ok: true, plan: { requestId: 'tp1', text: '# Plan\n\n1. Parse', at: 5, truncated: true } })
+  const got = await wait
+  check(got.ok && got.value.ok && got.value.plan.truncated === true && p.planLoadOf(got).status === 'ok', 'its planRes resolves the request (truncated kept)')
+}
+
 async function main() {
   const p = page({ paired: false })
   testPure(p)
@@ -1075,6 +1185,8 @@ async function main() {
   testTabsAndActions(p)
   await testClientStatus()
   testHomeLogic(p)
+  testAttention(p)
+  await testPlanRequest()
   await testHomeClient()
   await testClientNotify()
   testGeneration()
