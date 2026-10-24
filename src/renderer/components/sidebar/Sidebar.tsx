@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FocusEvent } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
+  CheckCheck,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -33,10 +34,11 @@ import { iconFor } from '@/lib/icons'
 import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
 import { cn } from '@/lib/cn'
 import { StatusDot } from '@/components/ui/StatusDot'
-import { aggregateStatus, displayStatus, needsUser } from '@shared/status'
+import { aggregateStatus, displayStatus } from '@shared/status'
 import type { PaneStatus, Workspace } from '@shared/types'
 import { useAgentStore } from '@/lib/agentStore'
-import { navInputFrom, workspaceAgents } from '@/lib/agentNav'
+import { hasUnread, markReadTargets, navInputFrom, workspaceAgents, workspaceNeedsCount } from '@/lib/agentNav'
+import { agentStatusOf } from '@/lib/statusSignals'
 import { formatSince, STATUS_LABEL_KEY } from '@/lib/formatSince'
 import { dropWorkspace, freezeSidebarOrder, releaseSidebarOrder, sidebarOrder, useSidebarFreeze } from '@/lib/sidebarOrder'
 import { useLang, type MessageKey } from '@/i18n'
@@ -54,6 +56,20 @@ interface MenuState {
   x: number
   y: number
   wsId: string
+}
+
+/**
+ * Workspace menu "Mark all read" (app 2.7.0): main acknowledges every done
+ * and error console of it, muted ones included (status:markRead; main
+ * ignores any other state and one already seen), and the local marks of its
+ * consoles are cleared.
+ */
+function markWorkspaceRead(wsId: string): void {
+  const s = useAppStore.getState()
+  const ws = s.workspaces.find((w) => w.id === wsId)
+  if (!ws) return
+  for (const id of markReadTargets(ws, s.paneStatus)) void window.snApi.status.markRead(id).catch(() => {})
+  for (const p of ws.panes) s.clearPaneAttention(p.id)
 }
 
 /** Discord-style unread pill: how many consoles in this workspace await the user. */
@@ -100,8 +116,11 @@ function WorkspaceTip({ ws, paneStatus, showName, extra = [], meta = [] }: { ws:
   const t = useT()
   const lang = useLang()
   const [now] = useState(() => Date.now())
-  // v2.3: counted as the dot shows them (an answered action reads working).
-  const withStatus = ws.panes.flatMap((p) => (paneStatus[p.id] ? [{ p, st: displayStatus(paneStatus[p.id]) }] : []))
+  // v2.3: counted as the dot shows them (an answered action reads working; app 2.7.0: a `bare` status is no agent state).
+  const withStatus = ws.panes.flatMap((p) => {
+    const st = agentStatusOf(paneStatus[p.id])
+    return st ? [{ p, st: displayStatus(st) }] : []
+  })
   const counts = new Map<PaneStatus['state'], number>()
   for (const { st } of withStatus) counts.set(st.state, (counts.get(st.state) ?? 0) + 1)
   const summary = SUMMARY_ORDER.filter((st) => counts.get(st))
@@ -276,6 +295,7 @@ export function Sidebar() {
 
   const menuItems = (wsId: string): ContextMenuItem[] => {
     const ws = workspaces.find((w) => w.id === wsId)
+    const unread = !!ws && hasUnread(ws, paneStatus, paneAttention)
     return [
       {
         label: ws?.favorite ? t('ctx.unfavorite') : t('ctx.favorite'),
@@ -286,6 +306,14 @@ export function Sidebar() {
       { label: t('note.menu'), icon: StickyNote, onClick: () => setNotePopover(menu ? { ...menu, wsId } : { x: 80, y: 80, wsId }) },
       // Share (app 2.4.0, item 8): the Share dialog on the whole workspace.
       { label: t('shareHost.menu.shareWorkspace'), icon: Share2, onClick: () => openShareDialog({ kind: 'workspace', workspaceId: wsId }) },
+      // App 2.7.0: acknowledge every finished console at once (disabled with nothing unread).
+      {
+        label: t('workspace.menu.markAllRead'),
+        icon: CheckCheck,
+        disabled: !unread,
+        hint: unread ? undefined : t('workspace.menu.nothingUnread'),
+        onClick: () => markWorkspaceRead(wsId),
+      },
       // Per-repo .snagentsos.json (E8-FR-26/27): reload only for a workspace made or exported with one.
       ...(ws?.cwd
         ? [
@@ -408,11 +436,13 @@ export function Sidebar() {
           const WsIcon = iconFor(w.panes[0]?.icon)
           const renaming = renamingId === w.id
           // One per console that needs the user, however many requests it holds.
-          // v2.3: main's attention when it sends one (an answered request no longer counts).
-          const attentionCount = w.panes.filter((p) => needsUser(paneStatus[p.id]) || paneAttention[p.id]).length
-          const status = aggregateStatus(w.panes.map(p => displayStatus(paneStatus[p.id])))
+          // App 2.7.0: the shared rule (src/shared/attention.ts), the same set the
+          // palette's "Waiting for you", next waiting and the phone count.
+          const attentionCount = workspaceNeedsCount(w, navInput)
+          // App 2.7.0: a `bare` status (only a `snaos needs`, no agent) is no agent state for the dots.
+          const status = aggregateStatus(w.panes.map(p => displayStatus(agentStatusOf(paneStatus[p.id]))))
           const exited = exitedLines(w.panes, paneExit, t)
-          const statusLabel = w.panes.filter(p => paneStatus[p.id]).map(p => `${p.title}: ${t(`status.${displayStatus(paneStatus[p.id]).state}`)}`).concat(exited).join(', ')
+          const statusLabel = w.panes.filter(p => agentStatusOf(paneStatus[p.id])).map(p => `${p.title}: ${t(`status.${displayStatus(paneStatus[p.id]).state}`)}`).concat(exited).join(', ')
           // Gray dot when no agent state is shown and every console has exited (E6-FR-38).
           const exitedDot = !status && allExited(w.panes, paneExit)
           const exitedLabel = exited.join('\n')

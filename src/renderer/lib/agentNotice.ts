@@ -1,8 +1,9 @@
 import type { ClaudePaneState, PaneStatusEvt } from '@shared/types'
 import { translate, type MessageKey } from '@/i18n'
 import { useAppStore } from './store'
-import { toast } from './toast'
+import { toast, type ToastAction } from './toast'
 import { agentToastKey, revealPane } from './revealPane'
+import { openPlan, planRequestOf } from './planModal'
 
 /** paneId -> state its open in-app agent card describes. */
 const shown = new Map<string, ClaudePaneState>()
@@ -43,9 +44,13 @@ export function onAgentStatus(evt: PaneStatusEvt): void {
   const provider = evt.provider === 'codex' ? 'Codex' : 'Claude'
   const title = translate(lang, textKey, { provider, place: `${ws.name} / ${pane.title}` })
   const paneId = evt.paneId
+  const actions: ToastAction[] = [{ label: translate(lang, 'toast.agent.go'), run: () => void revealPane(paneId) }]
+  // App 2.7.0 (A6): a plan waiting for review can be read from the card.
+  const planReq = evt.precise ? planRequestOf(evt) : null
+  if (planReq) actions.push({ label: translate(lang, 'plan.read'), run: () => openPlan(paneId, planReq) })
   const opts = {
     dedupeKey: key,
-    actions: [{ label: translate(lang, 'toast.agent.go'), run: () => void revealPane(paneId) }],
+    actions,
     link: {
       label: translate(lang, 'toast.agent.settings'),
       run: () => useAppStore.getState().openSettings('notifications#inAppWhenFocused'),

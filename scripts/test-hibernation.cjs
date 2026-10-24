@@ -267,7 +267,7 @@ export * from './agentNav'
   check(z && z.sleeping === true && z.rank === 4 && z.stateSince === now - 120 * MIN, 'a sleeping console is an entry of rank 4 with its sleep time')
   const t = (key, vars) => key + (vars ? JSON.stringify(vars) : '')
   check(B.agentPhrase(z, t, 'es', now) === 'agents.row.sleeping · 2h' && B.agentPhrase(z, t, 'es', now, false) === 'agents.row.sleeping', 'its row phrase: "Durmiendo · 2h" (no age when asked)')
-  check(B.waitingIds(entries).every((id) => id !== 'z'), 'a sleeping console never counts as waiting')
+  check(B.waitingIds({ ...input, paneAttention: { ...input.paneAttention, z: true } }).every((id) => id !== 'z'), 'a sleeping console never counts as waiting (not even with a local mark)')
   const cols = B.boardColumns(entries)
   check(cols.waiting.map((e) => e.id).join() === 'a,e' || cols.waiting.map((e) => e.id).join() === 'e,a', 'waiting on you: action and error')
   check(cols.waiting.map((e) => e.id).join() === 'a,e', 'waiting column: longest waiting first')

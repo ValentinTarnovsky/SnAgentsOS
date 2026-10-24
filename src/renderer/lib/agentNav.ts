@@ -8,7 +8,6 @@
 import type { AgentPreset, AgentProvider, Language, Pane, PaneStatus, ResumeOnStartup, Workspace } from '@shared/types'
 import {
   agentRank,
-  compareAgents,
   decideLaunch,
   effectiveProvider,
   formatAgeShort,
@@ -16,6 +15,7 @@ import {
   type RankedPane,
 } from '@shared/agents'
 import { displayStatus } from '@shared/status'
+import { needsYou, needsYouCount, needsYouRows, type AttentionItem, type NeedsYouOptions } from '@shared/attention'
 import type { TFn } from '@/i18n'
 import { isPaneMounted, type MountedWorkspaces } from './mounting'
 import { waitingPhrase } from './formatSince'
@@ -84,6 +84,9 @@ export function willResumeOnOpen(ws: Workspace, pane: Pane, presets: readonly Ag
  * Every agent console of one workspace, in layout order: panes with a live
  * status, plus (in a workspace or partial mount where the pane has not
  * spawned) records that resume when it opens, ranked 4 as "not started".
+ * App 2.7.0: a console that needs the user takes the shared rule's rank and
+ * age (src/shared/attention.ts), so a `snaos needs` not muted is rank 1, aged
+ * from the ask, on the board, the sidebar rows and the smart order too.
  */
 export function workspaceAgents(ws: Workspace, input: NavInput): AgentEntry[] {
   const out: AgentEntry[] = []
@@ -94,6 +97,7 @@ export function workspaceAgents(ws: Workspace, input: NavInput): AgentEntry[] {
     if (sleep) {
       out.push({ id: pane.id, ws, pane, session, notStarted: false, sleeping: true, rank: 4, unread: false, stateSince: sleep.at })
     } else if (status) {
+      const needing = needsYouRows([attentionPane(ws, pane, input)])[0]
       out.push({
         id: pane.id,
         ws,
@@ -101,10 +105,10 @@ export function workspaceAgents(ws: Workspace, input: NavInput): AgentEntry[] {
         status,
         session,
         notStarted: false,
-        rank: agentRank(status.state, status.attention),
+        rank: needing?.rank ?? agentRank(status.state, status.attention),
         // v2.3: main's attention (a done or error nobody saw), or the CLI's local mark.
         unread: status.attention === true || !!input.paneAttention[pane.id],
-        stateSince: status.stateSince ?? status.updatedAt ?? 0,
+        stateSince: needing?.stateSince ?? status.stateSince ?? status.updatedAt ?? 0,
       })
     } else if (!isPaneMounted(input.mountedWorkspaces, ws.id, pane.id) && willResumeOnOpen(ws, pane, input.presets, session, input.policy)) {
       out.push({ id: pane.id, ws, pane, session, notStarted: true, rank: 4, unread: false, stateSince: session?.updatedAt ?? 0 })
@@ -118,30 +122,126 @@ export function allAgents(input: NavInput): AgentEntry[] {
   return input.workspaces.flatMap((ws) => workspaceAgents(ws, input))
 }
 
+/**
+ * App 2.7.0: one pane as the shared "needs you" rule reads it
+ * (src/shared/attention.ts), with the workspace and pane the rows render.
+ */
+export interface AttentionPane extends AttentionItem {
+  ws: Workspace
+  pane: Pane
+  status?: PaneStatus
+}
+
+function attentionPane(ws: Workspace, pane: Pane, input: NavInput): AttentionPane {
+  const status = input.paneStatus[pane.id]
+  return {
+    paneId: pane.id,
+    workspaceId: ws.id,
+    ws,
+    pane,
+    status,
+    marked: !!input.paneAttention[pane.id],
+    // Asleep, or not started: no live status and not spawned (workspaceAgents' "not started").
+    dormant: !!input.sleeping?.[pane.id] || (!status && !isPaneMounted(input.mountedWorkspaces, ws.id, pane.id)),
+  }
+}
+
+/**
+ * Every pane of these workspaces (default: all), in workspace and layout
+ * order, plain shells included: what the sidebar badge, the palette's
+ * "Waiting for you" and next waiting hand to the shared rule, so the three
+ * always agree.
+ */
+export function attentionPanes(input: NavInput, workspaces: readonly Workspace[] = input.workspaces): AttentionPane[] {
+  return workspaces.flatMap((ws) => orderedPanes(ws).map((pane) => attentionPane(ws, pane, input)))
+}
+
+/** The sidebar badge of one workspace: how many of its consoles need the user. */
+export function workspaceNeedsCount(ws: Workspace, input: NavInput): number {
+  return needsYouCount(attentionPanes(input, [ws]))
+}
+
+/**
+ * The consoles that need the user, most urgent first, as rows render them:
+ * rank, unread and age come from the shared rule (`needs` lifts a console to
+ * rank 1, aged from when the agent asked).
+ */
+export function needsYouEntries(input: NavInput, opts: NeedsYouOptions = {}): AgentEntry[] {
+  return needsYouRows(attentionPanes(input), opts).map(({ id, rank, unread, stateSince, item }) => ({
+    id,
+    rank,
+    unread,
+    stateSince,
+    ws: item.ws,
+    pane: item.pane,
+    status: item.status,
+    session: input.sessions[id],
+    notStarted: false,
+  }))
+}
+
 /** Rows of the palette's "Waiting for you" section (E5-FR-15). */
 export const PALETTE_WAITING_MAX = 6
 
 /**
- * Ids for "Waiting for you": up to 6 agent consoles of every workspace by
- * urgency, without the console the user is looking at.
+ * Ids for "Waiting for you" (app 2.7.0: the shared rule): the consoles that
+ * need the user in next waiting's order, up to 6, without the console the
+ * user is looking at.
  */
-export function paletteWaiting(entries: readonly AgentEntry[], excludeId: string | null, max = PALETTE_WAITING_MAX): string[] {
-  return entries
-    .filter((e) => e.id !== excludeId)
-    .sort(compareAgents)
+export function paletteWaiting(input: NavInput, excludeId: string | null, max = PALETTE_WAITING_MAX): string[] {
+  return needsYouRows(attentionPanes(input), { exclude: excludeId })
     .slice(0, max)
-    .map((e) => e.id)
+    .map((r) => r.id)
 }
 
 /**
- * Consoles "next waiting" walks (E5-FR-17): action/error, then unread done,
- * the ones waiting longest first.
+ * Consoles "next waiting" walks (E5-FR-17; app 2.7.0: the shared rule): the
+ * ones that need the user, most urgent first, the set the badge counts.
  */
-export function waitingIds(entries: readonly AgentEntry[]): string[] {
-  return entries
-    .filter((e) => !e.notStarted && (e.rank === 1 || (e.rank === 2 && e.unread)))
-    .sort(compareAgents)
-    .map((e) => e.id)
+export function waitingIds(input: NavInput): string[] {
+  return needsYouRows(attentionPanes(input)).map((r) => r.id)
+}
+
+/**
+ * Whether a console on the list a next waiting walk froze still counts: it
+ * still needs the user, or it was only seen (revealing a done or error, or a
+ * console that sent a notice, clears its unread flag, not why it was listed).
+ * A closed, sleeping or muted console, or a request answered meanwhile, drops
+ * out.
+ */
+export function stillWaiting(input: NavInput, id: string): boolean {
+  const ws = input.workspaces.find((w) => w.panes.some((p) => p.id === id))
+  const pane = ws?.panes.find((p) => p.id === id)
+  if (!ws || !pane) return false
+  const item = attentionPane(ws, pane, input)
+  if (needsYou(item)) return true
+  if (item.dormant || item.status?.muted === true) return false
+  const state = item.status?.state
+  return !item.status || state === 'done' || state === 'error'
+}
+
+/**
+ * Workspace menu "Mark all read" (app 2.7.0): every done and error console of
+ * the workspace, muted ones included (main publishes a muted console with
+ * `attention: false`, so its read state does not show); main's status:markRead
+ * acknowledges each one and does nothing for one already seen.
+ */
+export function markReadTargets(ws: Workspace, paneStatus: Record<string, PaneStatus>): string[] {
+  return ws.panes
+    .filter((p) => {
+      const st = paneStatus[p.id]
+      return !!st && (st.state === 'done' || st.state === 'error')
+    })
+    .map((p) => p.id)
+}
+
+/**
+ * Whether "Mark all read" has anything to do: a local mark, or a target not
+ * seen yet (`attention` not false) or muted (it may be unread under the mute).
+ */
+export function hasUnread(ws: Workspace, paneStatus: Record<string, PaneStatus>, paneAttention: Record<string, true>): boolean {
+  if (ws.panes.some((p) => !!paneAttention[p.id])) return true
+  return markReadTargets(ws, paneStatus).some((id) => paneStatus[id].attention !== false || paneStatus[id].muted === true)
 }
 
 /** Presses of "next waiting" this close together walk one frozen list. */
@@ -234,7 +334,7 @@ export function agentIconName(pane: Pick<Pane, 'type' | 'icon'>, status: { provi
 }
 
 /** First line of a text, trimmed. */
-function firstLine(text: string | undefined): string {
+export function firstLine(text: string | undefined): string {
   return (text ?? '').split(/\r?\n/, 1)[0].trim()
 }
 
@@ -274,6 +374,11 @@ export function agentPhrase(e: AgentEntry, t: TFn, lang: Language, now: number, 
     default:
       return t('agents.row.unknown')
   }
+}
+
+/** A console on a "Waiting for you" row without an agent state to show: a marked shell or a bare needs status. */
+export function isNoticeOnly(e: AgentEntry): boolean {
+  return !e.sleeping && !e.notStarted && (!e.status || e.status.bare === true)
 }
 
 /**

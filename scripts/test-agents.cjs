@@ -405,20 +405,86 @@ function testNavigation() {
   check(all.find(e => e.id === 'x').notStarted && all.find(e => e.id === 'x').rank === 4, 'a record that resumes on open is "not started", rank 4')
   check(nav.allAgents({ ...input, policy: 'off' }).every(e => e.id !== 'x'), 'with resumeOnStartup off nothing resumes on open, so no "not started" row')
   check(nav.allAgents({ ...input, mountedWorkspaces: { w1: 'full', w2: ['y'] } }).some(e => e.id === 'x'), 'a partial mount still lists its unspawned records')
-  check(nav.paletteWaiting(all, null).join() === 'm,a,b,c,x', 'paletteWaiting: urgency order across workspaces')
-  check(nav.paletteWaiting(all, 'm').join() === 'a,b,c,x', 'paletteWaiting: the console being looked at is left out')
-  const many = Array.from({ length: 9 }, (_, i) => ({ id: 'q' + i, rank: 3, stateSince: i, unread: false }))
-  check(nav.paletteWaiting(many, null).length === 6, 'paletteWaiting: at most 6 rows')
-  check(nav.waitingIds(all).join() === 'm,a,b', 'waitingIds: action/error longest waiting first, then unread done')
-  check(nav.waitingIds(nav.allAgents({ ...input, paneAttention: {} })).join() === 'm,a', 'waitingIds: a seen done is not waiting')
+  // App 2.7.0 (A6): the palette and next waiting read the shared rule (src/shared/attention.ts).
+  check(nav.paletteWaiting(input, null).join() === 'm,a,b', 'paletteWaiting: only who needs you, in urgency order across workspaces (working c and not started x are out)')
+  check(nav.paletteWaiting(input, 'm').join() === 'a,b', 'paletteWaiting: the console being looked at is left out')
+  const manyWs = { id: 'wm', name: 'M', cwd: '', panes: Array.from({ length: 9 }, (_, i) => pane('q' + i)) }
+  const many = { ...input, workspaces: [manyWs], mountedWorkspaces: { wm: 'full' }, paneAttention: {}, paneStatus: Object.fromEntries(manyWs.panes.map((p, i) => [p.id, { state: 'action', precise: true, stateSince: i }])) }
+  check(nav.paletteWaiting(many, null).length === 6 && nav.waitingIds(many).length === 9, 'paletteWaiting: at most 6 rows (next waiting walks all 9)')
+  check(nav.waitingIds(input).join() === 'm,a,b', 'waitingIds: action/error longest waiting first, then unread done')
+  check(nav.waitingIds({ ...input, paneAttention: {} }).join() === 'm,a', 'waitingIds: a seen done is not waiting')
   // v2.3 attention: main's derived flag ranks and marks unread.
   const A = load('src/shared/agents.ts')
   check(A.agentRank('action') === 1 && A.agentRank('action', true) === 1 && A.agentRank('action', false) === 3 && A.agentRank('error', false) === 2 && A.agentRank('error') === 1 && A.agentRank('done', false) === 2 && A.agentRank('working', false) === 3 && A.agentRank('idle') === 4, 'agentRank(state, attention): an answered action ranks as working, an acked error as done, absent = the state alone')
   const att = { ...input, paneAttention: {}, paneStatus: { ...input.paneStatus, a: { state: 'action', precise: true, stateSince: 300, attention: false }, b: { state: 'done', precise: true, stateSince: 100, attention: true }, m: { state: 'error', precise: true, stateSince: 50, attention: false } } }
   const attAll = nav.allAgents(att)
-  check(nav.waitingIds(attAll).join() === 'b', 'waitingIds: an answered action and an acknowledged error are not waiting; an unseen done (attention true) is')
+  check(nav.waitingIds(att).join() === 'b', 'waitingIds: an answered action and an acknowledged error are not waiting; an unseen done (attention true) is')
+  check(nav.waitingIds({ ...att, paneAttention: { m: true } }).join() === 'm,b', 'waitingIds: the local mark brings an acknowledged error back, oldest unread first')
   check(attAll.find(e => e.id === 'b').unread && !attAll.find(e => e.id === 'm').unread, 'unread comes from attention')
   check(nav.allAgents({ ...att, paneAttention: { m: true } }).find(e => e.id === 'm').unread, 'the CLI mark (paneAttention) still reads unread')
+
+  // App 2.7.0 (A6): badge, palette and next waiting on one mixed fixture: the same set and order.
+  {
+    const sh = (id) => ({ id, type: 'shell', title: 'Shell ' + id, color: '#888', icon: 'terminal' })
+    const wsA = { id: 'wA', name: 'A', cwd: '', panes: [pane('p1'), pane('p2'), pane('p3'), sh('p4'), pane('p5')] }
+    const wsB = { id: 'wB', name: 'B', cwd: '', panes: [pane('q1'), pane('q2'), pane('q3')] }
+    const wsC = { id: 'wC', name: 'C', cwd: '', panes: [pane('r1')] }
+    const mixed = {
+      workspaces: [wsA, wsB, wsC], presets: [preset], policy: 'ask', sessions: {},
+      mountedWorkspaces: { wA: 'full', wB: ['q2', 'q3'], wC: 'full' },
+      paneStatus: {
+        p1: { state: 'working', precise: true, stateSince: 900, attention: false, needs: { text: 'Aprobá el deploy\nsegunda línea', at: 100 } },
+        p2: { state: 'action', precise: true, stateSince: 500, attention: true },
+        // Muted: main publishes it with attention false (its read state does not show).
+        p3: { state: 'error', precise: true, stateSince: 50, attention: false, muted: true },
+        p5: { state: 'done', precise: true, stateSince: 200, attention: true },
+        q2: { state: 'action', precise: true, stateSince: 300, attention: true },
+        q3: { state: 'done', precise: true, stateSince: 10, attention: true },
+        r1: { state: 'working', precise: true, stateSince: 10, attention: false },
+      },
+      // p4: a plain shell that sent `snaos notify`; q1: marked but never started; q3: marked but asleep.
+      paneAttention: { p4: true, q1: true, q3: true },
+      sleeping: { q3: { at: 5 } },
+    }
+    const order = nav.waitingIds(mixed).join()
+    check(order === 'p1,q2,p2,p5,p4', 'mixed: needs on a working pane first (aged from the ask), then open requests oldest first, the unseen done, the marked shell; muted, not started and asleep are out (got ' + order + ')')
+    check(nav.paletteWaiting(mixed, null).join() === order && nav.needsYouEntries(mixed).map(e => e.id).join() === order, 'mixed: the palette lists the same consoles in the same order as next waiting')
+    const badges = mixed.workspaces.map(w => w.id + ':' + nav.workspaceNeedsCount(w, mixed)).join()
+    check(badges === 'wA:4,wB:1,wC:0', 'mixed: the sidebar badges count the same set per workspace (' + badges + ')')
+    check(mixed.workspaces.every(w => nav.workspaceNeedsCount(w, mixed) === nav.waitingIds(mixed).filter(id => w.panes.some(p => p.id === id)).length), 'mixed: every badge is the number of its consoles on the walk')
+    const A2 = load('src/shared/attention.ts')
+    check(A2.needsYouRows(nav.attentionPanes(mixed)).map(r => r.id).join() === order && A2.needsYouCount(nav.attentionPanes(mixed)) === 5, 'mixed: the shared needsYouRows / needsYouCount over attentionPanes agree')
+    const ap = Object.fromEntries(nav.attentionPanes(mixed).map(p => [p.paneId, p]))
+    check(ap.q1.dormant && ap.q3.dormant && !ap.p4.dormant && ap.p4.marked && !ap.q2.dormant && nav.attentionPanes(mixed).length === 9, 'attentionPanes: every pane, shells included; not started (no status, not mounted) and asleep are dormant')
+    const e1 = nav.needsYouEntries(mixed)[0]
+    check(e1.id === 'p1' && e1.rank === 1 && e1.stateSince === 100 && e1.status.state === 'working' && !e1.notStarted, 'needsYouEntries: the needs row is rank 1 aged from needs.at, with its live status')
+    check(nav.paletteWaiting(mixed, 'p1').join() === 'q2,p2,p5,p4', 'mixed: the looked at console is out of the palette only')
+    const Tm = tr(es)
+    const byId = Object.fromEntries(nav.needsYouEntries(mixed).map(e => [e.id, e]))
+    const sig = load('src/renderer/lib/statusSignals.ts')
+    check(sig.needsYouPhrase(byId.p1, Tm, 'es', 1000) === 'Te necesita: Aprobá el deploy' && sig.needsYouPhrase(byId.p4, Tm, 'es', 1000) === 'Te mandó un aviso' && sig.needsYouPhrase(byId.p5, Tm, 'es', 1000) === 'Listo', 'needsYouPhrase: the first line of the ask, a notice for a shell, else the agent phrase without age')
+    const tooling = { ...byId.p2, status: { state: 'working', precise: true, stateSince: 500, attention: true, activity: 'Edit a.ts', toolFamily: 'edit', detail: { kind: 'tool', text: 'Edit a.ts' } } }
+    check(sig.needsYouPhrase(tooling, Tm, 'es', 1000) === 'Editando a.ts' && sig.needsYouPhrase(tooling, Tm, 'es', 1000) === sig.rowPhrase(tooling, Tm, 'es', 1000, false), 'needsYouPhrase: with a tool open, what it is doing now, the phrase of its sidebar row and board card')
+    check(nav.isNoticeOnly(byId.p4) && !nav.isNoticeOnly(byId.p1) && nav.isNoticeOnly({ ...byId.p1, status: { state: 'idle', precise: true, bare: true } }), 'isNoticeOnly: a marked shell and a bare needs status have no agent state to show')
+    // The board's "Waiting on you" and the agent ranks follow the same rule: a needs not muted is rank 1, aged from the ask.
+    const board = load('src/renderer/lib/agentsBoard.ts')
+    const ranked = Object.fromEntries(nav.allAgents(mixed).map(e => [e.id, e]))
+    check(ranked.p1.rank === 1 && ranked.p1.stateSince === 100 && ranked.p3.rank === 2 && ranked.p5.rank === 2, 'allAgents: the needs on a working pane is rank 1 aged from the ask; the muted error and the done stay rank 2')
+    const cols = board.boardColumns(nav.allAgents(mixed))
+    check(cols.waiting.map(e => e.id).join() === 'p1,q2,p2' && cols.working.map(e => e.id).join() === 'r1', 'board: the needs card waits on you first (oldest ask), then the open requests; it leaves the working column')
+    const mutedNeeds = { ...mixed, paneStatus: { ...mixed.paneStatus, p1: { ...mixed.paneStatus.p1, muted: true } } }
+    const mutedCols = board.boardColumns(nav.allAgents(mutedNeeds))
+    check(mutedCols.waiting.map(e => e.id).join() === 'q2,p2' && mutedCols.working.map(e => e.id).join() === 'p1,r1', 'board: a muted needs stays in its own column, by its state age')
+    // The frozen walk: who still counts after being revealed.
+    const seen = { ...mixed, paneAttention: {}, paneStatus: { ...mixed.paneStatus, p5: { ...mixed.paneStatus.p5, attention: false }, p2: { ...mixed.paneStatus.p2, attention: false } } }
+    check(nav.stillWaiting(seen, 'p5') && nav.stillWaiting(seen, 'p4') && nav.stillWaiting(seen, 'p1') && nav.stillWaiting(seen, 'q2'), 'stillWaiting: a seen done and a seen shell stay on the frozen walk, open asks too')
+    check(!nav.stillWaiting(seen, 'p2') && !nav.stillWaiting(seen, 'p3') && !nav.stillWaiting(seen, 'q3') && !nav.stillWaiting(seen, 'r1') && !nav.stillWaiting(seen, 'gone'), 'stillWaiting: an answered action, a muted, an asleep, a working and a closed console drop out')
+    // Workspace menu "Marcar todo leído".
+    check(nav.markReadTargets(wsA, mixed.paneStatus).join() === 'p3,p5' && nav.markReadTargets(wsA, seen.paneStatus).join() === 'p3,p5', 'markReadTargets: every done and error console, muted (attention false) and seen ones included (main ignores the rest), never working, action or a shell')
+    const allSeen = { ...seen.paneStatus, p3: { ...seen.paneStatus.p3, muted: undefined } }
+    check(nav.hasUnread(wsA, mixed.paneStatus, {}) && nav.hasUnread(wsA, seen.paneStatus, {}) && !nav.hasUnread(wsA, allSeen, {}), 'hasUnread: an unseen or a muted done/error enables "Marcar todo leído"; seen ones alone do not')
+    check(!nav.hasUnread(wsC, mixed.paneStatus, {}) && nav.hasUnread(wsC, mixed.paneStatus, { r1: true }), 'hasUnread: a local mark enables it too')
+  }
 
   // Next waiting: three in action, three presses walk them, the fourth wraps.
   const ids = ['p1', 'p2', 'p3']
@@ -686,6 +752,10 @@ function testSmartOrder() {
   const smart = sidebarOrder(workspaces, { sort: 'smart', nav })
   check(ids(smart) === 'E,D,F,B,A,C', 'smart: favorites stay on top; inside each group the most demanding agent wins (action waiting longest first), agentless workspaces last')
   check(ids(sidebarOrder(workspaces, { sort: 'smart', nav: { ...nav, paneStatus: { ...paneStatus, f1: { state: 'action', precise: true, stateSince: 400 } } } })) === 'E,D,B,F,A,C', 'equal urgency keeps the manual order')
+  // App 2.7.0 (A6): a `snaos needs` ranks first like in "needs you" (src/shared/attention.ts), aged from the ask; muted, it does not.
+  const asked = { ...paneStatus, a1: { ...paneStatus.a1, attention: true, needs: { text: 'Elegí la base', at: 5 } } }
+  check(ids(sidebarOrder(workspaces, { sort: 'smart', nav: { ...nav, paneStatus: asked } })) === 'E,D,A,F,B,C', 'smart: an idle console with needs leads its group (asked before the open requests)')
+  check(ids(sidebarOrder(workspaces, { sort: 'smart', nav: { ...nav, paneStatus: { ...asked, a1: { ...asked.a1, attention: false, muted: true } } } })) === 'E,D,F,B,A,C', 'smart: a muted needs keeps the console where its state puts it')
   const frozen = ['D', 'E', 'A', 'B', 'C']
   check(ids(sidebarOrder(workspaces, { sort: 'smart', nav, frozen })) === 'D,E,A,B,C,F', 'frozen: the order shown at freeze time holds, a new workspace goes last')
   check(ids(sidebarOrder(workspaces.map(w => w.id === 'C' ? { ...w, favorite: true } : w), { sort: 'smart', nav, frozen })) === 'D,E,C,A,B,F', 'frozen: a favorite toggle still regroups (favorites stay on top)')

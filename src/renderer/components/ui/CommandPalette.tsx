@@ -15,7 +15,9 @@ import { formatAccel, resolveKeymap, type ActionId } from '@/lib/keymap'
 import { getFocusedPane } from '@/lib/focus'
 import { revealPane } from '@/lib/revealPane'
 import { goToNextWaiting } from '@/lib/useGlobalKeys'
-import { agentPhrase, agentTitle, allAgents, navInputFrom, paletteWaiting, type AgentEntry } from '@/lib/agentNav'
+import { agentTitle, allAgents, isNoticeOnly, navInputFrom, needsYouEntries, paletteWaiting, type AgentEntry } from '@/lib/agentNav'
+import { needsYouPhrase } from '@/lib/statusSignals'
+import { rankList, rankMatch } from '@shared/fuzzyRank'
 import { StatusGlyph } from '@/components/ui/StatusDot'
 import { glyphOf, useNow } from '@/components/sidebar/AgentRows'
 import { orderQuickCommands } from '@shared/quickCommands'
@@ -35,9 +37,9 @@ interface Command {
   /** Bound keymap action: its accelerator shows on the row (E5-FR-18). */
   action?: ActionId
   /**
-   * Longer free text (an agent's topic and first prompt) the query must
-   * contain as a substring: a fuzzy subsequence over a 200 char prompt would
-   * match nearly any query.
+   * Longer free text (an agent's topic and first prompt, one per line) the
+   * query must find as substrings: a fuzzy subsequence over a 200 char prompt
+   * would match nearly any query.
    */
   search?: string
   /** Console rows (E5-FR-16) show its live glyph. */
@@ -45,14 +47,14 @@ interface Command {
   run: () => void
 }
 
-/** Case-insensitive subsequence match (fuzzy). */
-function matches(needle: string, hay: string): boolean {
-  if (!needle) return true
-  let i = 0
-  for (let j = 0; j < hay.length && i < needle.length; j++) {
-    if (hay[j] === needle[i]) i++
-  }
-  return i === needle.length
+/**
+ * The texts a command is ranked by (app 2.7.0, rankList): its label, plus the
+ * lines of its `search` text where every term of the query is a substring
+ * (score 2 or more, never the subsequence fallback).
+ */
+function rankTexts(c: Command, query: string): string[] {
+  if (!c.search) return [c.label]
+  return [c.label, ...c.search.split('\n').filter((line) => rankMatch(query, line) >= 2)]
 }
 
 /**
@@ -67,9 +69,12 @@ function lookedAtPane(): string | null {
   return visiblePaneIds(ws, s.minimized[ws.id] ?? [], s.maximized[ws.id]).includes(focused) ? focused : null
 }
 
-/** "Waiting for you" ids, frozen when the palette opens (E5-FR-15). */
+/**
+ * "Waiting for you" ids, frozen when the palette opens (E5-FR-15): the
+ * consoles that need the user, the badge's set in next waiting's order.
+ */
 function computeWaiting(): string[] {
-  return paletteWaiting(allAgents(navInputFrom(useAppStore.getState(), useAgentStore.getState())), lookedAtPane())
+  return paletteWaiting(navInputFrom(useAppStore.getState(), useAgentStore.getState()), lookedAtPane())
 }
 
 /** Ctrl/Cmd+K fuzzy launcher for switching workspaces and running actions. */
@@ -111,13 +116,15 @@ export function CommandPalette() {
 
   const keymap = useMemo(() => resolveKeymap(keymapOverrides), [keymapOverrides])
   const topicAsTitle = agentSettings?.topicAsTitle !== false
-  const entries = useMemo(() => {
-    if (!open) return new Map<string, AgentEntry>()
+  // Every agent console (console rows' glyphs), and the ones that need the user
+  // with the shared rule's rank and age (the waiting rows).
+  const { entries, needing } = useMemo(() => {
+    if (!open) return { entries: new Map<string, AgentEntry>(), needing: new Map<string, AgentEntry>() }
     const input = navInputFrom({ workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, settings: { agents: agentSettings } }, { sessions, sleeping })
-    return new Map(allAgents(input).map((e) => [e.id, e]))
+    return { entries: new Map(allAgents(input).map((e) => [e.id, e])), needing: new Map(needsYouEntries(input).map((e) => [e.id, e])) }
   }, [open, workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, agentSettings, sessions, sleeping])
   // Closed consoles (or ones whose agent went away) drop out of the frozen list.
-  const waiting = query.trim() ? [] : frozen.map((id) => entries.get(id)).filter((e): e is AgentEntry => !!e)
+  const waiting = query.trim() ? [] : frozen.map((id) => needing.get(id) ?? entries.get(id)).filter((e): e is AgentEntry => !!e)
 
   const commands = useMemo<Command[]>(() => {
     const cmds: Command[] = [
@@ -216,10 +223,11 @@ export function CommandPalette() {
     return out
   }, [query, workspaces, paneStatus, sessions, t])
 
+  // App 2.7.0: best match first (exact, prefix, substring, then subsequence for
+  // terms of 4+ letters; case and accents ignored), ties in list order.
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return commands
-    return [...consoleCommands, ...commands].filter((c) => matches(q, c.label.toLowerCase()) || !!c.search?.toLowerCase().includes(q))
+    if (!query.trim()) return commands
+    return rankList([...consoleCommands, ...commands], query, (c) => rankTexts(c, query))
   }, [commands, consoleCommands, query])
 
   useEffect(() => {
@@ -305,7 +313,14 @@ export function CommandPalette() {
                     )}
                   >
                     <span className="flex w-full min-w-0 items-center gap-2">
-                      <StatusGlyph kind={glyphOf(e)} unread={e.unread} size={14} />
+                      {/* A marked shell or a bare needs status has no agent state: a plain bell. */}
+                      {isNoticeOnly(e) ? (
+                        <span role="img" aria-label={t('attention.notice')} data-attention-notice className="inline-flex shrink-0 items-center justify-center text-text-secondary" style={{ width: 14, height: 14 }}>
+                          <BellRing size={12} />
+                        </span>
+                      ) : (
+                        <StatusGlyph kind={glyphOf(e)} unread={e.unread} size={14} />
+                      )}
                       <Icon size={14} className="shrink-0" style={{ color: e.pane.color }} />
                       <span className={cn('min-w-0 max-w-[60%] shrink-0 truncate text-text-primary', e.unread && 'font-semibold')}>{title}</span>
                       <span className="min-w-0 flex-1 truncate text-xs text-text-secondary/70">· {e.ws.name}</span>
@@ -314,7 +329,7 @@ export function CommandPalette() {
                       </span>
                       <kbd className="shrink-0 rounded border border-border px-1 font-mono text-[10px] text-text-secondary">Ctrl+{i + 1}</kbd>
                     </span>
-                    <span className="block truncate pl-[44px] text-xs text-text-secondary">{agentPhrase(e, t, lang, now, false)}</span>
+                    <span className="block truncate pl-[44px] text-xs text-text-secondary">{needsYouPhrase(e, t, lang, now)}</span>
                   </button>
                 )
               })}
@@ -327,7 +342,9 @@ export function CommandPalette() {
           {filtered.map((c, j) => {
             const i = j + waiting.length
             const Icon = c.icon
+            // A bare status (a `snaos needs` with no agent) has no agent state: no glyph.
             const entry = c.paneId ? entries.get(c.paneId) : undefined
+            const glyph = entry && entry.status?.bare !== true ? entry : undefined
             return (
               <button
                 key={c.id}
@@ -339,7 +356,7 @@ export function CommandPalette() {
                   i === idx ? 'bg-bg-secondary' : 'hover:bg-bg-secondary/50',
                 )}
               >
-                {entry && <StatusGlyph kind={glyphOf(entry)} unread={entry.unread} size={13} />}
+                {glyph && <StatusGlyph kind={glyphOf(glyph)} unread={glyph.unread} size={13} />}
                 {Icon && <Icon size={15} className="shrink-0 text-text-secondary" />}
                 <span className="min-w-0 flex-1 truncate text-text-primary">{c.label}</span>
                 {c.action && (

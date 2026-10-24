@@ -56,6 +56,7 @@ import { AgentsBoard } from '@/components/agents/AgentsBoard'
 import { SharedWorkspaceHost } from '@/components/share/SharedWorkspaceHost'
 import { JoinShareDialog } from '@/components/share/JoinShareDialog'
 import { ConfirmLinkDialog } from '@/components/share/ConfirmLinkDialog'
+import { PlanModal } from '@/components/status/PlanModal'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -316,6 +317,8 @@ function AppBody() {
       {/* Shared with me (app 2.4.0): join an invite, confirm a link from a shared console. */}
       <JoinShareDialog />
       <ConfirmLinkDialog />
+      {/* "Leer plan completo" (app 2.7.0, A6): an agent's ExitPlanMode plan, read-only. */}
+      <PlanModal />
     </div>
   )
 }

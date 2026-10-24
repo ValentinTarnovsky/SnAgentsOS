@@ -16,15 +16,15 @@ import { runDictateShortcut } from './dictation'
 import { panelKeyOf } from './changes'
 import { sharedOverlayActive } from './shareGuestStore'
 import { focusWorkspaceConsole } from './focusWorkspace'
-import { waitsOnUser } from '@shared/status'
 import {
   advanceWaiting,
-  allAgents,
   navigablePanes,
   navInputFrom,
   stepPane,
+  stillWaiting,
   visibleConsoles,
   waitingIds,
+  type NavInput,
   type WaitingCursor,
 } from './agentNav'
 
@@ -40,21 +40,18 @@ function displayOrder() {
 let waitingCursor: WaitingCursor | null = null
 
 /**
- * Reveal the next console waiting on the user: action/error first, then
- * unread done, longest waiting first; presses within 5 s keep walking the same
- * list. With nobody waiting, a toast (announced by the stack's aria-live).
+ * Reveal the next console that needs the user, in the order the palette's
+ * "Waiting for you" shows (the shared rule, src/shared/attention.ts: needs and
+ * open requests first, then unread done, longest waiting first); presses
+ * within 5 s keep walking the same list. With nobody waiting, a toast
+ * (announced by the stack's aria-live).
  */
 export function goToNextWaiting(now = Date.now()): string | null {
   const app = useAppStore.getState()
-  // A frozen entry still counts while its console exists and is still waiting
-  // or done (revealing a done one clears its unread flag, not its state).
-  const exists = (id: string): boolean => {
-    const s = useAppStore.getState()
-    const st = s.paneStatus[id], state = st?.state
-    // v2.3: an action already answered (main's attention false) is nobody waiting.
-    return (waitsOnUser(st) || state === 'error' || state === 'done') && s.workspaces.some((w) => w.panes.some((p) => p.id === id))
-  }
-  const step = advanceWaiting(waitingCursor, () => waitingIds(allAgents(navInputFrom(app, useAgentStore.getState()))), exists, now)
+  const input = (): NavInput => navInputFrom(useAppStore.getState(), useAgentStore.getState())
+  // A frozen entry still counts while it needs the user or was only seen
+  // (revealing a done one clears its unread flag, not its state).
+  const step = advanceWaiting(waitingCursor, () => waitingIds(input()), (id) => stillWaiting(input(), id), now)
   waitingCursor = step.cursor
   if (!step.target) {
     toast.info(translate(app.settings.language, 'agents.nobodyWaiting'), { dedupeKey: 'next-waiting' })

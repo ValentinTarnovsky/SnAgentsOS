@@ -5,6 +5,7 @@ import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
 import { TilingGrid } from '@/components/layout/TilingGrid'
 import { WorkspaceGitLabel } from '@/components/git/WorkspaceGitLabel'
+import { WorkspaceUsage } from '@/components/status/WorkspaceUsage'
 import { ChangesPanel } from '@/components/changes/ChangesPanel'
 import { RaceBar } from './RaceBar'
 import { useGitStore } from '@/lib/gitStore'
@@ -74,6 +75,8 @@ export function WorkspaceView({
         <div className="flex min-w-0 items-baseline gap-2">
           <span className="shrink-0 text-sm font-medium text-text-primary">{workspace.name}</span>
           <WorkspaceGitLabel workspace={workspace} />
+          {/* App 2.7.0 (A6): what its consoles spent, summed in the renderer, as an estimate. */}
+          <WorkspaceUsage workspace={workspace} />
         </div>
 
         <div className="flex shrink-0 items-center gap-2">

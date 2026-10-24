@@ -90,7 +90,14 @@ function excluded() {
 
 /** The sidebar badge today (Sidebar.tsx): needsUser(status) || paneAttention. */
 const badgeRule = (status, marked) => S.needsUser(status) || !!marked
-/** next waiting today (agentNav.waitingIds) on one AgentEntry-like pane. */
+/**
+ * next waiting before A6 (agentNav.waitingIds over AgentEntry[]), and the
+ * palette's "Waiting for you" before A6 (the top 6 of every agent console).
+ * A6 switched both to needsYouRows; desktopParity pins that too.
+ */
+const oldWaiting = (entries) => entries.filter((e) => !e.notStarted && (e.rank === 1 || (e.rank === 2 && e.unread))).sort(G.compareAgents).map((e) => e.id)
+const oldPalette = (entries, exclude) => entries.filter((e) => e.id !== exclude).sort(G.compareAgents).slice(0, 6).map((e) => e.id)
+/** next waiting before A6 on one AgentEntry-like pane. */
 const nextRule = (status, marked) => {
   const rank = G.agentRank(status?.state, status?.attention)
   const unread = status?.attention === true || !!marked
@@ -148,19 +155,24 @@ function desktopParity() {
   /** What the badge reads: every pane of every workspace. */
   const fromPanes = (inp) => inp.workspaces.flatMap((w) => w.panes.map((p) => ({ paneId: p.id, workspaceId: w.id, status: inp.paneStatus[p.id], marked: !!inp.paneAttention[p.id], dormant: !!inp.sleeping?.[p.id] })))
   const badgeOf = (inp, w) => w.panes.filter((p) => S.needsUser(inp.paneStatus[p.id]) || inp.paneAttention[p.id]).length
-  check(nav.waitingIds(nav.allAgents(input)).join() === 'm,a,b', 'fixture: next waiting today walks m,a,b')
+  check(oldWaiting(nav.allAgents(input)).join() === 'm,a,b', 'fixture: next waiting today walks m,a,b')
   check(ids(A.needsYouRows(fromEntries(input))) === 'm,a,b', 'needsYouRows walks the same m,a,b (x, not started, is out)')
   const seen = { ...input, paneAttention: {} }
-  check(ids(A.needsYouRows(fromEntries(seen))) === nav.waitingIds(nav.allAgents(seen)).join(), 'a seen done is out of both (m,a)')
+  check(ids(A.needsYouRows(fromEntries(seen))) === oldWaiting(nav.allAgents(seen)).join(), 'a seen done is out of both (m,a)')
   const att = { ...input, paneAttention: {}, paneStatus: { ...input.paneStatus, a: { state: 'action', precise: true, stateSince: 300, attention: false }, b: { state: 'done', precise: true, stateSince: 100, attention: true }, m: { state: 'error', precise: true, stateSince: 50, attention: false } } }
-  check(ids(A.needsYouRows(fromEntries(att))) === 'b' && nav.waitingIds(nav.allAgents(att)).join() === 'b', 'v2.3 attention: an answered action and an acknowledged error are out, an unseen done is in (b)')
-  check(ids(A.needsYouRows(fromEntries({ ...att, paneAttention: { m: true } }))) === nav.waitingIds(nav.allAgents({ ...att, paneAttention: { m: true } })).join(), 'an acknowledged error with the local mark: same as next waiting (m,b)')
+  check(ids(A.needsYouRows(fromEntries(att))) === 'b' && oldWaiting(nav.allAgents(att)).join() === 'b', 'v2.3 attention: an answered action and an acknowledged error are out, an unseen done is in (b)')
+  check(ids(A.needsYouRows(fromEntries({ ...att, paneAttention: { m: true } }))) === oldWaiting(nav.allAgents({ ...att, paneAttention: { m: true } })).join(), 'an acknowledged error with the local mark: same as next waiting (m,b)')
   for (const inp of [att, { ...att, paneAttention: { b: true, m: true } }]) {
     for (const w of inp.workspaces) check(A.needsYouCount(fromPanes(inp).filter((i) => i.workspaceId === w.id)) === badgeOf(inp, w), `badge of ${w.id} matches with attention (${badgeOf(inp, w)})`)
   }
   // Palette "Waiting for you": the same function with the looked-at console out.
-  check(nav.paletteWaiting(nav.allAgents(input), 'm').join() === 'a,b,c,x', 'fixture: the palette today lists working and not started consoles too')
+  check(oldPalette(nav.allAgents(input), 'm').join() === 'a,b,c,x', 'fixture: the palette today lists working and not started consoles too')
   check(ids(A.needsYouRows(fromEntries(input), { exclude: 'm' })) === 'a,b', 'intended: with needsYouRows it lists only who needs you (a,b)')
+  // A6: the desktop now hands in every pane (agentNav.attentionPanes) for all three surfaces.
+  for (const inp of [input, seen, att, { ...att, paneAttention: { m: true } }]) {
+    const want = ids(A.needsYouRows(fromEntries(inp)))
+    check(nav.waitingIds(inp).join() === want && nav.paletteWaiting(inp, null).join() === want && ids(A.needsYouRows(nav.attentionPanes(inp))) === want, 'A6: next waiting and the palette are needsYouRows over every pane (' + want + ')')
+  }
 
   // test-status-ui.cjs fixture: one shell pane per state, legacy pendingCount, pane-1 marked.
   const states = ['working', 'action', 'done', 'error', 'unknown', 'idle']
@@ -185,7 +197,7 @@ function desktopParity() {
     sleeping: { z: { at: now - 120 * MIN } },
   }
   const hibRows = A.needsYouRows(fromEntries(hib))
-  check(ids(hibRows) === nav.waitingIds(nav.allAgents(hib)).join() && ids(hibRows) === 'a,e,f', 'hibernation fixture: a,e,f like next waiting; the sleeping z is out even with a mark')
+  check(ids(hibRows) === oldWaiting(nav.allAgents(hib)).join() && ids(hibRows) === 'a,e,f', 'hibernation fixture: a,e,f like next waiting; the sleeping z is out even with a mark')
   check(A.needsYouCount(fromPanes(hib)) === 3, 'and the count fed from every pane (z dormant) is the same 3')
 }
 

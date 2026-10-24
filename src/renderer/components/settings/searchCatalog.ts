@@ -152,6 +152,10 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('agents.hibernateMinutes', 'settings.agents.hibernateMinutes', 'settings.agents.hibernateMinutesHint', { groupKey: 'settings.agents.behavior', keywords: ['hibernate', 'hibernar', 'sleep', 'dormir', 'minutes', 'minutos', 'idle', 'inactivo'] }),
   e('agents.cacheTimer', 'settings.agents.cacheTimer', 'settings.agents.cacheTimerHint', { groupKey: 'settings.agents.behavior', keywords: ['cache', 'timer', 'countdown', 'cuenta regresiva', 'claude', 'prompt'], toggle: { path: 'agents.cacheTimer.enabled' } }),
   e('agents.cacheTtl', 'settings.agents.cacheTtl', 'settings.agents.cacheTtlHint', { groupKey: 'settings.agents.behavior', keywords: ['cache', 'ttl', 'minutes', 'minutos', 'claude'] }),
+  // App 2.7.0 (A6): silence watch (E10-FR-18).
+  e('agents.silence', 'settings.agents.silence', 'settings.agents.silenceHint', { groupKey: 'settings.agents.behavior', keywords: ['silence', 'silencio', 'quiet', 'stalled', 'trabado', 'stuck', 'colgado', 'watchdog', 'signal', 'senal', 'chip'], toggle: { path: 'agents.silence.enabled' } }),
+  e('agents.silenceQuiet', 'settings.agents.silenceQuiet', 'settings.agents.silenceQuietHint', { groupKey: 'settings.agents.behavior', keywords: ['silence', 'silencio', 'quiet', 'minutes', 'minutos', 'signal', 'senal'] }),
+  e('agents.silenceStalled', 'settings.agents.silenceStalled', 'settings.agents.silenceStalledHint', { groupKey: 'settings.agents.behavior', keywords: ['silence', 'silencio', 'stalled', 'trabado', 'stuck', 'colgado', 'minutes', 'minutos'] }),
   e('agents.presets', 'settings.search.agentsPresets', 'settings.search.agentsPresetsHint', { summary: true, keywords: ['preset', 'model', 'modelo', 'agent', 'agente', 'claude', 'codex', 'command', 'comando'] }),
 
   // Connections, Quick Commands

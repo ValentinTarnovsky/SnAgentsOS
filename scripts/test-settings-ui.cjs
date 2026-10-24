@@ -82,6 +82,9 @@ window.smoke={calls,created,termKeys,explorerArgs,accountCalls,theme:applyTheme,
  state:()=>{const s=useAppStore.getState();return {open:s.settingsOpen,query:s.settingsQuery,anchor:s.settingsAnchor,wizard:s.wizardOpen,sound:s.settings.notifications.sound}},
  set:p=>useAppStore.setState(p),
  ntfy:()=>useAppStore.getState().settings.notifications.ntfy,
+ silence:()=>useAppStore.getState().settings.agents.silence,
+ // React's onBlur listens to focusout: a hidden window may never hand the input real focus.
+ commit:(sel,how)=>{const el=document.querySelector(sel);if(how==='enter')el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));else el.dispatchEvent(new FocusEvent('focusout',{bubbles:true}))},
  settings:p=>useAppStore.getState().updateSettings(p),
  openSettings:t=>useAppStore.getState().openSettings(t),
  // The 3-step wizard is the composer's Advanced... (E8-FR-08).
@@ -336,6 +339,34 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
  await js("[...document.querySelectorAll('[role=menu] [role=menuitem]')].at(-1).click()");await frame();await frame();
  await js("smoke.accounts('two')");await frame();
  await js("smoke.set({settingsOpen:false});smoke.usageOn(false)");await frame();
+
+ // --- app 2.7.0 (A6): silence watch rows in Settings > Agentes ----------------
+ await js("smoke.clearFlash();smoke.openSettings('agents#silence')");await frame();await frame();
+ ok(await js("smoke.inView('#setting-agents-silence')&&smoke.flashed('setting-agents-silence')"),"openSettings('agents#silence') shows and rings the row");
+ ok(await js("!!document.querySelector('[data-setting-id=\\"agents.silence\\"] [role=switch]')&&!!document.querySelector('[data-setting-id=\\"agents.silenceQuiet\\"] [data-silence-quiet]')&&!!document.querySelector('[data-setting-id=\\"agents.silenceStalled\\"] [data-silence-stalled]')"),'the silence toggle and both minutes fields carry their search ids');
+ eq(await js("[document.querySelector('[data-silence-quiet]').value,document.querySelector('[data-silence-stalled]').value,smoke.silence()]"),['10','20',{enabled:true,quietMin:10,stalledMin:20}],'defaults: on, 10 and 20 minutes');
+ ok(await js("(document.getElementById('setting-agents-silence')?.textContent||'').includes('nunca frena al agente')"),'the copy says the chip never stops the agent');
+ await js("smoke.setInput('[data-silence-quiet]','')");await frame();
+ await js("smoke.commit('[data-silence-quiet]')");await frame();
+ eq([await js("document.querySelector('[data-silence-quiet]').value"),await js('smoke.silence()')],['10',{enabled:true,quietMin:10,stalledMin:20}],'a blank or non-number quietMin is reverted on blur');
+ await js("smoke.setInput('[data-silence-quiet]','500')");await frame();
+ ok(await js("smoke.silence().quietMin===10"),'typing never commits mid-word');
+ await js("smoke.commit('[data-silence-quiet]','enter')");await frame();
+ eq([await js("[document.querySelector('[data-silence-quiet]').value,document.querySelector('[data-silence-stalled]').value]"),await js('smoke.silence()')],[['120','121'],{enabled:true,quietMin:120,stalledMin:121}],'an out-of-range quietMin is clamped to 120 and stalledMin moves above it');
+ await js("smoke.setInput('[data-silence-quiet]','15')");await js("smoke.commit('[data-silence-quiet]','enter')");await frame();
+ await js("smoke.setInput('[data-silence-stalled]','5')");await frame();
+ await js("smoke.commit('[data-silence-stalled]')");await frame();
+ eq([await js("[document.querySelector('[data-silence-quiet]').value,document.querySelector('[data-silence-stalled]').value]"),await js('smoke.silence()')],[['15','16'],{enabled:true,quietMin:15,stalledMin:16}],'a stalledMin at or below quietMin is fixed by normalizeSilence before the save');
+ await shot('agents-silence');
+ await js("document.querySelector('[data-setting-id=\\"agents.silence\\"] [role=switch]').click()");await frame();
+ eq([await js('smoke.silence().enabled'),await js("document.querySelector('[data-setting-id=\\"agents.silence\\"] [role=switch]').getAttribute('aria-checked')"),await js("document.querySelector('[data-silence-quiet]').disabled&&document.querySelector('[data-silence-stalled]').disabled")],[false,'false',true],'the toggle turns the watch off and disables the minutes');
+ await shot('agents-silence-off');
+ await js("smoke.search('trabado')");await frame();
+ ok(await js("!!document.querySelector('[data-search-result=\\"agents.silence\\"]')&&!!document.querySelector('[data-search-result=\\"agents.silenceStalled\\"]')"),'search "trabado" finds the silence rows');
+ await js("smoke.search('silencio')");await frame();
+ await js("document.querySelector('[data-search-result=\\"agents.silence\\"] [role=switch]').click()");await frame();
+ eq([await js('smoke.silence()'),(await js('smoke.state()')).query],[{enabled:true,quietMin:15,stalledMin:16},'silencio'],'the inline switch (agents.silence.enabled) turns it back on without leaving the search');
+ await js("smoke.search('')");await js("smoke.set({settingsOpen:false})");await frame();
 
  // Light theme and zoom: the results list fits.
  await js("smoke.theme('light');smoke.openSettings()");await frame();await js("smoke.search('notif')");

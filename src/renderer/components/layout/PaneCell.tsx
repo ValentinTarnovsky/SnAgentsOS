@@ -1,14 +1,20 @@
 import { useEffect, useState, type DragEvent } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   ArchiveRestore,
   ArchiveX,
   ArrowRightLeft,
+  Bell,
+  BellOff,
+  CheckCheck,
   Clock,
   ClipboardCopy,
   Eraser,
+  FileText,
   GitBranch,
   GripVertical,
   History,
+  Hourglass,
   Maximize2,
   Mic,
   Minimize2,
@@ -52,6 +58,8 @@ import { PaneErrorBoundary } from '@/components/common/ErrorBoundary'
 import { ResumeChip } from '@/components/agents/ResumeChip'
 import { SleepingOverlay } from '@/components/agents/SleepingOverlay'
 import { CacheChip } from '@/components/agents/CacheChip'
+import { PaneSignals } from '@/components/status/PaneSignals'
+import { openPlan, planRequestOf } from '@/lib/planModal'
 import { useAgentStore } from '@/lib/agentStore'
 import { useGitStore } from '@/lib/gitStore'
 import { workspaceGitKey } from '@/lib/gitChip'
@@ -108,7 +116,22 @@ export function PaneCell({
   // a small badge; its title and saved type stay as they are.
   const statusProvider = useAppStore((s) => s.paneStatus[pane.id]?.provider)
   const runningAgent = runningAgentOf(pane, { provider: statusProvider })
+  const runningAgentLabel = runningAgent ? t(runningAgent === 'codex' ? 'pane.runningAgent.codex' : 'pane.runningAgent.claude') : ''
   const Icon = iconFor(agentIconName(pane, { provider: statusProvider }))
+  // App 2.7.0 (A6): what the agent menu items and the plan button read of the
+  // status, as plain values, so the cell (and its terminal) does not render
+  // again on every other status field. A `bare` status only carries a `snaos
+  // needs` of a pane with no agent: its chip shows (PaneSignals), never the
+  // agent menu items (nor a dot: PaneStatusDot skips it). The plan request,
+  // like the in-app card's, never for a title-only (approximate) stop.
+  const agentStatus = useAppStore(
+    useShallow((s) => {
+      const st = s.paneStatus[pane.id]
+      if (!st || st.bare) return null
+      const plan = st.precise ? planRequestOf(st) : null
+      return { state: st.state, muted: st.muted === true, silent: !!st.silence, plan: !!plan, planId: plan?.requestId, planSummary: plan?.summary ?? '' }
+    }),
+  )
   const connections = useAppStore((s) => s.connections)
   // A console moved here from another workspace keeps launching as at home
   // (folder, connection profile): the move only changes where it is shown.
@@ -275,6 +298,20 @@ export function PaneCell({
     requestAnimationFrame(() => focusPane(target))
   }
 
+  // App 2.7.0 (A6): main acknowledges only a done or error console (status:markRead);
+  // the renderer's own mark (paneAttention, snaos notify) goes with it.
+  const readable = agentStatus?.state === 'done' || agentStatus?.state === 'error'
+  const markRead = (): void => {
+    useAppStore.getState().clearPaneAttention(pane.id)
+    void window.snApi.status.markRead(pane.id).catch(() => false)
+  }
+  const muted = agentStatus?.muted === true
+  // "Leer plan completo" from the pane itself (the menu and a header button) while a plan waits for review.
+  const planReq = agentStatus?.plan ? { requestId: agentStatus.planId, summary: agentStatus.planSummary } : null
+  const readPlan = (): void => {
+    if (planReq) openPlan(pane.id, planReq)
+  }
+
   const menuItems: ContextMenuItem[] = [
     { label: t('ctx.rename'), icon: Pencil, onClick: startRename },
     {
@@ -304,6 +341,28 @@ export function PaneCell({
               requestAnimationFrame(() => focusPane(pane.id))
             },
           },
+        ]
+      : []),
+    // App 2.7.0 (A6): read and mute act on main's status of the console's agent.
+    ...(agentStatus
+      ? [
+          ...(planReq ? [{ label: t('plan.read'), icon: FileText, onClick: readPlan }] : []),
+          {
+            label: t('pane.menu.markRead'),
+            icon: CheckCheck,
+            disabled: !readable,
+            hint: readable ? undefined : t('pane.menu.markReadHint'),
+            onClick: markRead,
+          },
+          {
+            label: muted ? t('pane.menu.unmute') : t('pane.menu.mute'),
+            icon: muted ? Bell : BellOff,
+            onClick: () => void window.snApi.status.mute(pane.id, !muted).catch(() => false),
+          },
+          // The header's silence chip can shrink to its icon in a narrow pane: the ack stays here too.
+          ...(agentStatus.silent
+            ? [{ label: t('status.silence.ack'), icon: Hourglass, onClick: () => void window.snApi.status.silenceAck(pane.id).catch(() => false) }]
+            : []),
         ]
       : []),
     ...(offer.show
@@ -418,24 +477,43 @@ export function PaneCell({
             className="min-w-0 flex-1 rounded border border-accent-violet/50 bg-bg-primary px-1.5 py-0.5 text-xs text-text-primary outline-none"
           />
         ) : (
-          // The topic gives way first: it shrinks to nothing before the title truncates.
-          <span className="flex min-w-0 flex-1 items-baseline overflow-hidden text-xs" title={topic ? `${pane.title} · ${topic}` : undefined}>
-            {runningAgent && (
-              <span
-                data-pane-running-agent={runningAgent}
-                title={t('pane.runningAgent.tip')}
-                className="mr-1.5 shrink-0 rounded border border-border px-1 text-[10px] leading-4 text-text-secondary"
-              >
-                {t(runningAgent === 'codex' ? 'pane.runningAgent.codex' : 'pane.runningAgent.claude')}
+          // App 2.7.0 (A6): the title keeps its first 5rem (all of it when shorter, at least
+          // 2.5rem) and the signal chips truncate before it does. The invisible strut in the
+          // same grid cell sets that floor as the cell's flex basis; the box has no intrinsic
+          // width of its own ([contain:inline-size]), so the doing line and the topic never
+          // raise it. The chips shrink with a far larger factor; only a header too narrow for
+          // its buttons takes the title under its floor, so the buttons are never pushed out.
+          <span className="grid min-w-0 flex-auto">
+            {/* The topic gives way first: it shrinks to nothing before the title truncates. */}
+            <span
+              data-pane-title-box
+              className="col-start-1 row-start-1 flex min-w-0 items-baseline overflow-hidden text-xs [contain:inline-size]"
+              title={topic ? `${pane.title} · ${topic}` : undefined}
+            >
+              {runningAgent && (
+                <span
+                  data-pane-running-agent={runningAgent}
+                  title={t('pane.runningAgent.tip')}
+                  className="mr-1.5 shrink-0 rounded border border-border px-1 text-[10px] leading-4 text-text-secondary"
+                >
+                  {runningAgentLabel}
+                </span>
+              )}
+              <span data-pane-title className="min-w-0 truncate font-medium text-text-secondary">
+                {pane.title}
               </span>
-            )}
-            <span className="min-w-0 truncate font-medium text-text-secondary">{pane.title}</span>
-            <PaneStatusLine paneId={pane.id} />
-            {topic && (
-              <span data-pane-topic className="min-w-0 truncate whitespace-pre text-text-secondary/60 [flex-shrink:9999]">
-                {` · ${topic}`}
-              </span>
-            )}
+              <PaneStatusLine paneId={pane.id} />
+              {topic && (
+                <span data-pane-topic className="min-w-0 truncate whitespace-pre text-text-secondary/60 [flex-shrink:9999]">
+                  {` · ${topic}`}
+                </span>
+              )}
+            </span>
+            <span aria-hidden className="invisible col-start-1 row-start-1 flex h-0 min-w-0 overflow-hidden text-xs">
+              {runningAgent && <span className="mr-1.5 shrink-0 border px-1 text-[10px]">{runningAgentLabel}</span>}
+              {/* 1 px of slack: the title's sliver of the chips' shrink (well under 1 px) never ellipsizes a short title. */}
+              <span className="min-w-[2.5rem] max-w-[5rem] whitespace-pre pr-px font-medium">{pane.title}</span>
+            </span>
           </span>
         )}
         {homeWs && (
@@ -452,7 +530,26 @@ export function PaneCell({
             </button>
           </Tooltip>
         )}
-        {wt && <PaneWorktreeChip pane={pane} />}
+        {/* Like the signal chips, the branch gives way before the title does. */}
+        {wt && (
+          <span className="flex min-w-0 [flex-shrink:999]">
+            <PaneWorktreeChip pane={pane} />
+          </span>
+        )}
+        <PaneSignals paneId={pane.id} />
+        {planReq && (
+          <Tooltip label={t('plan.read')}>
+            <button
+              draggable={false}
+              data-pane-plan={pane.id}
+              aria-label={t('plan.read')}
+              onClick={readPlan}
+              className="rounded p-1 text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
+            >
+              <FileText size={13} />
+            </button>
+          </Tooltip>
+        )}
         <CacheChip paneId={pane.id} />
         {exited && (
           <span
