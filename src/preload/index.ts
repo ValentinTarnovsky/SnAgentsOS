@@ -74,6 +74,7 @@ import type { DictationEvt, DictationStartReq, DictationStartRes } from '@shared
 import type { ChatFrameEvt, ChatMoreReq, ChatPageRes, ChatSubReq } from '@shared/ipc-contract'
 import type { WhisperInstallError, WhisperInstallProgress, WhisperPackId, WhisperStatus } from '@shared/dictation'
 import type { ShareGuestApi } from '@shared/ipc-contract'
+import type { IntegrateProgressEvt, TeamChangedEvt, TeamRequest, TeamRunAppendEvt } from '@shared/team-protocol'
 import type {
   ShareCreateReq,
   ShareCreateRes,
@@ -381,6 +382,12 @@ const api: SnApi = {
     open: (req: WsNoteReadReq) => ipcRenderer.invoke(CH.WS_NOTES_OPEN, req) as Promise<boolean>,
     prune: (workspaceIds: string[]) => ipcRenderer.send(CH.WS_NOTES_PRUNE, workspaceIds),
     onChanged: (cb: (e: WsNotesChangedEvt) => void) => sub<WsNotesChangedEvt>(CH.WS_NOTES_CHANGED, cb),
+  },
+  teams: {
+    req: ((r: TeamRequest) => ipcRenderer.invoke(CH.TEAMS_REQ, r)) as SnApi['teams']['req'],
+    onChanged: (cb: (e: TeamChangedEvt) => void) => sub<TeamChangedEvt>(CH.TEAMS_CHANGED, cb),
+    onRunAppend: (cb: (e: TeamRunAppendEvt) => void) => sub<TeamRunAppendEvt>(CH.TEAMS_RUN_APPEND, cb),
+    onIntegrateProgress: (cb: (e: IntegrateProgressEvt) => void) => sub<IntegrateProgressEvt>(CH.TEAMS_INTEGRATE_PROGRESS, cb),
   },
   files: {
     root: (workspaceId: string, paneId?: string) => ipcRenderer.invoke(CH.FILES_ROOT, workspaceId, paneId) as Promise<FilesRootRes>,

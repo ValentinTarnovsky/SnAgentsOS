@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArchiveRestore, BellRing, Bot, FileDiff, FolderTree, GitBranch, LayoutDashboard, Megaphone, MessageSquare, NotebookPen, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
+import { ArchiveRestore, BellRing, Bot, FileDiff, FolderTree, GitBranch, LayoutDashboard, Megaphone, MessageSquare, NotebookPen, Palette, PanelLeft, Plus, Search, Settings, Type, UserPlus, Users } from 'lucide-react'
+import { labOn } from '@shared/labs'
 import { formatAgeShort } from '@shared/agents'
 import { visiblePaneIds } from '@shared/status'
 import { useAppStore } from '@/lib/store'
@@ -29,6 +30,8 @@ import { useWorktreeStore } from '@/lib/worktreeStore'
 import { templateFromPreset, worktreeOffer } from '@/lib/worktrees'
 import { toast } from '@/lib/toast'
 import { focusedChatConsole, togglePaneView } from '@/lib/consoleChatStore'
+import { closeTeams, openTeams, teamsOverlayActive, useTeamsStore } from '@/lib/teamsStore'
+import { openTeamSetup } from '@/lib/teams/setup'
 
 interface Command {
   id: string
@@ -104,6 +107,11 @@ export function CommandPalette() {
   const sessions = useAgentStore((s) => s.sessions)
   const sleeping = useAgentStore((s) => s.sleeping)
   const canReopen = useAgentStore((s) => s.closedStack.length > 0)
+  // Teams (app 2.7.0, E10 B1): its entries with the lab on; under the overlay the
+  // entries that act on the hidden grid are left out, like their shortcuts.
+  const teamsOn = useAppStore((s) => labOn(s.settings, 'teams'))
+  const teamsList = useTeamsStore((s) => s.list)
+  const teamsOpen = useAgentStore((s) => s.view === 'teams')
 
   const [query, setQuery] = useState('')
   const [idx, setIdx] = useState(0)
@@ -115,7 +123,7 @@ export function CommandPalette() {
   if (open !== wasOpen) {
     setWasOpen(open)
     setFrozen(open ? computeWaiting() : [])
-    setChatTarget(open ? focusedChatConsole() : null)
+    setChatTarget(open && !teamsOverlayActive() ? focusedChatConsole() : null)
   }
 
   const keymap = useMemo(() => resolveKeymap(keymapOverrides), [keymapOverrides])
@@ -139,6 +147,14 @@ export function CommandPalette() {
       // E5-FR-27: the agents board over the workspace area.
       { id: 'agents-board', label: t('agents.board.toggle'), hint: t('palette.general'), icon: LayoutDashboard, action: 'agentsBoard', run: () => useAgentStore.getState().setView('board') },
     ]
+    if (teamsOn) {
+      // App 2.7.0 (E10 B1): Teams, a new team and one entry per team (found by its repo too).
+      cmds.push({ id: 'teams', label: t('teams.palette.open'), hint: t('palette.general'), icon: Users, action: 'teams', run: () => openTeams() })
+      cmds.push({ id: 'teams.new', label: t('teams.palette.new'), hint: t('palette.general'), icon: UserPlus, run: () => openTeamSetup() })
+      for (const team of teamsList) {
+        cmds.push({ id: `team:${team.id}`, label: t('teams.palette.team', { name: team.name }), hint: t('teams.palette.hint'), icon: Users, search: team.repoName, run: () => openTeams(team.id) })
+      }
+    }
     if (canReopen) {
       // E5-FR-14: the last closed console, same id and place, resuming its chat.
       cmds.push({ id: 'reopen-closed', label: t('agents.reopenClosed'), hint: t('palette.console'), icon: ArchiveRestore, action: 'reopenClosedPane', run: () => void reopenClosedConsole() })
@@ -148,9 +164,14 @@ export function CommandPalette() {
       cmds.push({ id: 'toggle-console-chat', label: t('keys.toggleConsoleChat'), hint: t('palette.console'), icon: MessageSquare, action: 'toggleConsoleChat', run: () => togglePaneView(chatTarget) })
     }
     for (const w of workspaces) {
-      cmds.push({ id: `ws-${w.id}`, label: w.name, hint: t('palette.workspace'), icon: iconFor(w.panes[0]?.icon), run: () => setActive(w.id) })
+      // Picking a workspace from over Teams lands on its grid, the active one included.
+      const pick = (): void => {
+        closeTeams({ refocus: false })
+        setActive(w.id)
+      }
+      cmds.push({ id: `ws-${w.id}`, label: w.name, hint: t('palette.workspace'), icon: iconFor(w.panes[0]?.icon), run: pick })
     }
-    if (activeId) {
+    if (activeId && !teamsOpen) {
       cmds.push({
         id: 'global-prompt',
         label: t('globalPrompt.title'),
@@ -192,8 +213,8 @@ export function CommandPalette() {
         }
       }
     }
-    // E8-FR-06: globals and the active workspace's own, run like the popover.
-    for (const qc of orderQuickCommands(quickCommands, activeId)) {
+    // E8-FR-06: globals and the active workspace's own, run like the popover (not into a console Teams hides).
+    for (const qc of teamsOpen ? [] : orderQuickCommands(quickCommands, activeId)) {
       cmds.push({
         id: `qc-${qc.id}`,
         label: `${t('palette.run')}: ${qc.name}`,
@@ -206,7 +227,7 @@ export function CommandPalette() {
       cmds.push({ id: `theme-${th.name}`, label: `${t('palette.theme')}: ${th.label}`, hint: t('palette.appearance'), icon: Palette, run: () => updateSettings({ theme: th.name }) })
     }
     return cmds
-  }, [workspaces, presets, connections, quickCommands, activeId, canReopen, chatTarget, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
+  }, [workspaces, presets, connections, quickCommands, activeId, canReopen, chatTarget, teamsOn, teamsList, teamsOpen, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
 
   // E5-FR-16: with a query every console is searchable by title, workspace,
   // its agent's topic and first prompt.

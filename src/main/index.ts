@@ -2,7 +2,7 @@
 import './devUserData'
 import { readFileSync, writeFileSync } from 'fs'
 import { stat } from 'fs/promises'
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, powerMonitor, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, powerMonitor, session, shell } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
 import type { AppInfo, AppMetrics, OpenRequest } from '@shared/ipc-contract'
@@ -93,6 +93,10 @@ import type { RemoteGitReply, RemoteGitRequest } from '@shared/remote-protocol'
 import { hasNvidiaGpu, type DictationService } from './dictation/DictationService'
 import { installPermissionHandlers } from './permissions'
 import { pathToFileURL } from 'url'
+import { gitRunner } from './git/gitExec'
+import { TeamService } from './teams/TeamService'
+import { registerTeamsIpc } from './teams/registerTeamsIpc'
+import { createTeamsLog } from './teams/teamsLog'
 
 // Remember main's warn/error lines for "Copy diagnostics" (E4-FR-24).
 installLogRing()
@@ -200,6 +204,8 @@ let hibernation: HibernationCoordinator | null = null
 let scrollbackCheckpoint: ScrollbackCheckpoint | null = null
 // Claude multi-account (app 2.3.0): created in bootstrap (safeStorage needs app ready).
 let accountService: AccountService | null = null
+// Teams (app 2.7.0, E10 B, labs.teams): created in bootstrap under dataDir(); idle and answering 'disabled' with the lab off.
+let teamService: TeamService | null = null
 // Review notes (E7-FR-18): created in bootstrap; flushed on the exits that skip before-quit.
 let reviewNotes: ReviewNoteStore | null = null
 // Desktop dictation (app 2.5.0): created in bootstrap; its whisper-server dies on quit.
@@ -418,6 +424,8 @@ function registerConfigIpc(): void {
     dictationService?.setConfig(config)
     // App 2.7.0 (A7): labs.consoleChat off drops every desktop chat reader.
     chatIpc?.setConfig(config)
+    // App 2.7.0 (E10 B1): labs.teams on loads the teams, off flushes and idles them.
+    teamService?.setConfig(config)
   })
 
   ipcMain.handle(CH.CONFIG_EXPORT, async (_e, config: ConfigFile): Promise<boolean> => {
@@ -922,6 +930,18 @@ async function bootstrap(): Promise<void> {
       headless: ptyManager.headlessMetrics(),
     }
   })
+  // Teams (app 2.7.0, E10 B1): main owns every team; the invoke is registered even with the lab off.
+  const teams = new TeamService({
+    dataDir,
+    config: () => configStore.load(),
+    git: gitRunner,
+    emit: (evt) => sendToRenderer(CH.TEAMS_CHANGED, evt),
+    // '' when it opened, else Electron's error text: the reveal op answers io with it.
+    openPath: (p) => shell.openPath(p),
+    log: createTeamsLog(dataDir),
+  })
+  teamService = teams
+  registerTeamsIpc(teams)
   const startupCfg = configStore.load()
   // v2.4: on by default (schema 17), a first run without a config included.
   await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? true)
@@ -930,6 +950,7 @@ async function bootstrap(): Promise<void> {
   registerCliIpc(cliService)
   cliService.init()
   void cliService.setEnabled(startupCfg?.settings?.cliEnabled !== false)
+  void teams.start(startupCfg)
   openMainWindow()
   // Explorer menu (E4-FR-34): with the toggle on, rewrite the keys when the exe
   // or the label changed (a moved portable, the language). After the first paint.

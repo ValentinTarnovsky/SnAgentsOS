@@ -1,4 +1,5 @@
 import type { en } from './en'
+import { teamsEs } from './teams'
 
 export const es: Record<keyof typeof en, string> = {
   // Common
@@ -2096,4 +2097,7 @@ export const es: Record<keyof typeof en, string> = {
   'shareGuest.link.msg': 'Viene de una consola que {host} comparte con vos. Revisá la dirección antes de abrirla.',
   'shareGuest.link.open': 'Abrir en el navegador',
   'shareGuest.link.blocked': 'Solo se pueden abrir links http y https.',
+
+  // Teams (app 2.7.0, E10 B; Labs teams): one catalog file per area under i18n/teams.
+  ...teamsEs,
 }

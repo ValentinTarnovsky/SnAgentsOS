@@ -15,6 +15,8 @@ import { toggleSidePanel } from './sidePanels'
 import { runDictateShortcut } from './dictation'
 import { panelKeyOf } from './changes'
 import { sharedOverlayActive } from './shareGuestStore'
+import { closeTeams, openTeams, teamsOverlayActive } from './teamsStore'
+import { labOn } from '@shared/labs'
 import { focusWorkspaceConsole } from './focusWorkspace'
 import { focusedChatConsole, togglePaneView } from './consoleChatStore'
 import { usePlanModal } from './planModal'
@@ -87,8 +89,8 @@ function ctrlDigitBlocked(e: KeyboardEvent): boolean {
 
 /**
  * Keymap actions that target the focused LOCAL console or the active local
- * workspace. While the shared view covers the grid (app 2.4.0) they are
- * swallowed: they would act on a console the user cannot see.
+ * workspace. While the shared view (app 2.4.0) or Teams (app 2.7.0) covers
+ * the grid they are swallowed: they would act on a console the user cannot see.
  */
 const PANE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   'newConsole',
@@ -241,6 +243,11 @@ function runAction(id: ActionId): void {
       else if (!quickBlocked() && !s.quickPopoverOpen) agents.setView('board')
       break
     }
+    case 'teams':
+      // App 2.7.0 (E10 B1): toggles the overlay, never over a modal; the scan below skips the key with the lab off.
+      if (teamsOverlayActive()) closeTeams()
+      else if (!quickBlocked() && !s.quickPopoverOpen) openTeams()
+      break
   }
 }
 
@@ -269,16 +276,19 @@ export function useGlobalKeys(): void {
           e.stopPropagation()
           // Over the shared view (app 2.4.0) the active workspace itself is a way back:
           // the focus request makes the overlay guard leave even when the id does not change.
-          const back = sharedOverlayActive()
+          // Teams (app 2.7.0) closes first, so the jump lands on the grid.
+          const fromTeams = teamsOverlayActive()
+          if (fromTeams) closeTeams({ refocus: false })
+          const back = sharedOverlayActive() || fromTeams
           useAppStore.getState().setActive(target.id)
           if (back) focusWorkspaceConsole(target.id)
         }
         return
       }
 
-      // The shared view (app 2.4.0) covers the local grid: Ctrl+1..9 would
-      // focus a hidden local console, so it is left to the shared terminal.
-      const overlay = sharedOverlayActive()
+      // The shared view (app 2.4.0) or Teams (app 2.7.0) covers the local grid:
+      // Ctrl+1..9 would focus a hidden local console, so it is left alone.
+      const overlay = sharedOverlayActive() || teamsOverlayActive()
       const digit = ctrlDigit(e)
       if (digit !== null && !overlay && !ctrlDigitBlocked(e)) {
         const s = useAppStore.getState()
@@ -306,6 +316,8 @@ export function useGlobalKeys(): void {
           // Lab off or no agent console focused: the user's chord is not eaten (another binding or the console gets it).
           // Over the shared view it is swallowed like every pane action, never left to the shared terminal.
           if (id === 'toggleConsoleChat' && !overlay && !consoleChatKeyTarget()) continue
+          // Labs teams off: Ctrl+Shift+O is not eaten, it reaches the console (CONTRATOS Atajos).
+          if (id === 'teams' && !labOn(useAppStore.getState().settings, 'teams')) continue
           e.preventDefault()
           e.stopPropagation()
           if (overlay && PANE_ACTIONS.has(id)) return

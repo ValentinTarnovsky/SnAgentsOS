@@ -16,6 +16,8 @@ import { startGitSync } from '@/lib/gitSync'
 import { startReviewNotesSync } from '@/lib/reviewNotesStore'
 import { startWsNotesSync } from '@/lib/wsNotesSync'
 import { initShareGuest } from '@/lib/shareGuestStore'
+import { startTeams } from '@/lib/teams/start'
+import { labOn } from '@shared/labs'
 import { engineFromSettings } from '@shared/terminalEngine'
 import { mountInterruptedAgents } from '@/lib/agentLaunch'
 import { initHibernation } from '@/lib/hibernation'
@@ -57,6 +59,9 @@ import { SharedWorkspaceHost } from '@/components/share/SharedWorkspaceHost'
 import { JoinShareDialog } from '@/components/share/JoinShareDialog'
 import { ConfirmLinkDialog } from '@/components/share/ConfirmLinkDialog'
 import { PlanModal } from '@/components/status/PlanModal'
+import { TeamHost } from '@/components/teams/TeamHost'
+import { TeamSetupDialog } from '@/components/teams/TeamSetupDialog'
+import { TeamTrustDialog } from '@/components/teams/TeamTrustDialog'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -79,6 +84,7 @@ export function App() {
   const persistScrollback = useAppStore((s) => s.settings.persistScrollback)
   const persistScrollbackLines = useAppStore((s) => s.settings.persistScrollbackLines)
   const shellIntegration = useAppStore((s) => s.settings.terminalShellIntegration)
+  const teamsOn = useAppStore((s) => labOn(s.settings, 'teams'))
 
   // Load persisted config once, then start the debounced persistence writer.
   // The pty lifecycle (E4-FR-36) starts right after hydrate: removed panes are
@@ -221,6 +227,13 @@ export function App() {
     return startGitSync()
   }, [hydrated])
 
+  // Teams (app 2.7.0, E10 B; Labs teams): main's team streams, the list and the
+  // overlay guard while the lab is on; turning it off closes the overlay.
+  useEffect(() => {
+    if (!hydrated || !teamsOn) return
+    return startTeams()
+  }, [hydrated, teamsOn])
+
   // After config loads, check GitHub for a newer release (if enabled): 2.5 s
   // after hydration, then every 6 h. A find shows the update card in the toast
   // stack, never a modal, so the console keeps the keyboard (E4-FR-12, 18).
@@ -291,6 +304,8 @@ function AppBody() {
         )}
         {/* Shared with me (app 2.4.0): a joined share over the local grid, even with no local workspace. */}
         <SharedWorkspaceHost />
+        {/* Teams (app 2.7.0, Labs teams): over the grid and a shared view; the board replaces it (one agentStore view). */}
+        <TeamHost />
         {/* Agents board (E5-FR-27): over the workspace area; the terminals stay mounted below. */}
         <AgentsBoard />
       </main>
@@ -319,6 +334,9 @@ function AppBody() {
       <ConfirmLinkDialog />
       {/* "Leer plan completo" (app 2.7.0, A6): an agent's ExitPlanMode plan, read-only. */}
       <PlanModal />
+      {/* Teams (app 2.7.0, E10 B1): new team (preview, then write) and trust (the diff). */}
+      <TeamSetupDialog />
+      <TeamTrustDialog />
     </div>
   )
 }

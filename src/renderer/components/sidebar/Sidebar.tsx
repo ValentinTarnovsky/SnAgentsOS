@@ -51,6 +51,8 @@ import { NoteInlineEditor, TASK_LABEL_KEY, TaskStateChip, WorkspaceNotePopover }
 import { openRepoExport, reloadFromRepo } from '@/lib/repoConfigFlow'
 import { PANE_DRAG_MIME, isPaneDrag, paneDragId } from '@/lib/paneDrag'
 import { revealPane } from '@/lib/revealPane'
+import { AttentionBadge, FOCUS_RING } from '@/components/sidebar/AttentionBadge'
+import { TeamsSection } from '@/components/teams/TeamsSection'
 
 interface MenuState {
   x: number
@@ -72,27 +74,8 @@ function markWorkspaceRead(wsId: string): void {
   for (const p of ws.panes) s.clearPaneAttention(p.id)
 }
 
-/** Discord-style unread pill: how many consoles in this workspace await the user. */
-function AttentionBadge({ count, className }: { count: number; className?: string }) {
-  if (count <= 0) return null
-  return (
-    <span
-      data-attention-badge={count}
-      className={cn(
-        'flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-[#EF4444] px-1 text-[11px] font-semibold leading-none text-white',
-        className,
-      )}
-    >
-      {count > 9 ? '9+' : count}
-    </span>
-  )
-}
-
 /** DataTransfer type of a workspace row being dragged to reorder. */
 const WS_DRAG_MIME = 'application/x-snaos-workspace'
-
-/** Keyboard focus ring of the sidebar's buttons, in place of Chromium's white default. */
-const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-violet/60'
 
 /** Most console lines in a workspace's combined tooltip before "+N" (E4-FR-11). */
 const TIP_MAX_LINES = 8
@@ -429,6 +412,9 @@ export function Sidebar() {
           </button>
         </Tooltip>
       </div>
+
+      {/* Teams (app 2.7.0, Labs teams): never workspaces, never in the sidebar order or Alt+digit. */}
+      <TeamsSection />
 
       <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto overflow-x-hidden px-2">
         {sorted.map((w) => {

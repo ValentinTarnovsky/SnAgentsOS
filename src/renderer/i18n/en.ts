@@ -1,3 +1,5 @@
+import { teamsEn } from './teams'
+
 export const en = {
   // Common
   'common.cancel': 'Cancel',
@@ -2096,4 +2098,7 @@ export const en = {
   'shareGuest.link.msg': 'It comes from a console {host} shares with you. Check the address before opening it.',
   'shareGuest.link.open': 'Open in browser',
   'shareGuest.link.blocked': 'Only http and https links can be opened.',
+
+  // Teams (app 2.7.0, E10 B; Labs teams): one catalog file per area under i18n/teams.
+  ...teamsEn,
 } as const

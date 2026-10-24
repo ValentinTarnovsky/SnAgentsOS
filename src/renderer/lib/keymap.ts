@@ -35,6 +35,8 @@ export type ActionId =
   | 'dictate'
   // Terminal | Chat on the focused agent console (app 2.7.0, A7; Labs consoleChat). CONTRATOS "Atajos": no default.
   | 'toggleConsoleChat'
+  // Open or close Teams (app 2.7.0, E10 B1; CONTRATOS "Atajos"): inert with Labs teams off (the key reaches the console).
+  | 'teams'
 
 export interface KeyAction {
   id: ActionId
@@ -69,6 +71,8 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'quickCommands', labelKey: 'keys.quickCommands', defaultAccel: 'Ctrl+Shift+Q' },
   { id: 'toggleChanges', labelKey: 'keys.toggleChanges', defaultAccel: 'Ctrl+Shift+D' },
   { id: 'agentsBoard', labelKey: 'keys.agentsBoard', defaultAccel: 'Ctrl+Shift+A' },
+  // Shift keeps Claude Code's own Ctrl+O; with Labs teams off useGlobalKeys skips it.
+  { id: 'teams', labelKey: 'keys.teams', defaultAccel: 'Ctrl+Shift+O' },
   // Shift+PageUp/PageDown alone keep scrolling the terminal.
   { id: 'promptPrev', labelKey: 'keys.promptPrev', defaultAccel: 'Ctrl+Shift+PageUp' },
   { id: 'promptNext', labelKey: 'keys.promptNext', defaultAccel: 'Ctrl+Shift+PageDown' },

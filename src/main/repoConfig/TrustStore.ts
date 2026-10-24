@@ -69,6 +69,36 @@ export class TrustStore {
   /** Approve `sha256` for `dir`, replacing any previous hash of that repo. */
   set(dir: string, sha256: string): void {
     if (!SHA_RE.test(sha256)) return
+    this.entries = this.withEntry(dir, sha256)
+    this.write()
+  }
+
+  /**
+   * `set` that reports whether the approval reached the disk (app 2.7.0,
+   * Teams): false for a bad hash or a write that did not land, and then the
+   * entry in memory is left as it was, so nothing reads as trusted that a
+   * restart would forget.
+   */
+  setChecked(dir: string, sha256: string): boolean {
+    if (!SHA_RE.test(sha256)) return false
+    const before = this.load()
+    this.entries = this.withEntry(dir, sha256)
+    if (this.write()) return true
+    this.entries = before
+    return false
+  }
+
+  /** Forgets the approval of `dir` (a removed team); same write path as `set`. */
+  delete(dir: string): void {
+    const key = normTrustPath(dir, this.opts.platform)
+    const entries = { ...this.load() }
+    if (!(key in entries)) return
+    delete entries[key]
+    this.entries = entries
+    this.write()
+  }
+
+  private withEntry(dir: string, sha256: string): Record<string, TrustEntry> {
     const entries = { ...this.load() }
     entries[normTrustPath(dir, this.opts.platform)] = { sha256, approvedAt: (this.opts.now ?? Date.now)() }
     const keys = Object.keys(entries)
@@ -76,11 +106,10 @@ export class TrustStore {
       keys.sort((a, b) => entries[a].approvedAt - entries[b].approvedAt)
       for (const k of keys.slice(0, keys.length - TRUST_MAX_ENTRIES)) delete entries[k]
     }
-    this.entries = entries
-    this.write()
+    return entries
   }
 
-  private write(): void {
+  private write(): boolean {
     const file = this.opts.file()
     const body: TrustFile = { version: 1, entries: this.entries ?? {} }
     const tmp = `${file}.${process.pid}.tmp`
@@ -88,9 +117,15 @@ export class TrustStore {
       mkdirSync(dirname(file), { recursive: true })
       writeFileSync(tmp, JSON.stringify(body, null, 2) + '\n', 'utf8')
       renameSync(tmp, file)
+      return true
     } catch (err) {
-      rmSync(tmp, { force: true })
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        /* the folder itself is not writable */
+      }
       console.warn(`[repoConfig] could not save trusted repos: ${String(err)}`)
+      return false
     }
   }
 }

@@ -48,6 +48,7 @@ import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResul
 import type { FileCreateReq, FileReadRes, FileRefResolved, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesPathReq, FilesResolveRefsReq, FilesRootRes } from './files'
 import type { CliCtlAction, CliUiState, SkillOp, SkillStatus, SkillTarget } from './ctl-protocol'
 import type { DictationError, WhisperInstallError, WhisperInstallProgress, WhisperPackId, WhisperStatus } from './dictation'
+import type { IntegrateProgressEvt, TeamChangedEvt, TeamReplyFor, TeamRequest, TeamRunAppendEvt } from './team-protocol'
 
 export type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -1357,6 +1358,17 @@ export interface SnApi {
     /** Moves the notes of workspaces that no longer exist to the trash. */
     prune(workspaceIds: string[]): void
     onChanged(cb: (e: WsNotesChangedEvt) => void): () => void
+  }
+  /**
+   * Teams (app 2.7.0, E10 B, labs.teams): one request union validated in main,
+   * which owns every team state and answers `disabled` with the lab off. Ids
+   * only; the setup paths (`dir`, `repoRoot`) are resolved and checked in main.
+   */
+  teams: {
+    req<R extends TeamRequest>(r: R): Promise<TeamReplyFor<R>>
+    onChanged(cb: (e: TeamChangedEvt) => void): () => void
+    onRunAppend(cb: (e: TeamRunAppendEvt) => void): () => void
+    onIntegrateProgress(cb: (e: IntegrateProgressEvt) => void): () => void
   }
   /**
    * Files drawer (v2.2, E9): a workspace id and a relative path, resolved and

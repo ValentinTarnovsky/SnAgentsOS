@@ -41,7 +41,8 @@ const ROW: Record<Line['k'], string> = {
   ' ': 'text-text-primary',
 }
 
-function PatchBlock({ hunks, filePath }: { hunks: ChatPatchHunk[]; filePath?: string }) {
+/** The numbered diff of one file; also the Teams trust and hire diffs (app 2.7.0, E10 B1). */
+export function PatchBlock({ hunks, filePath }: { hunks: ChatPatchHunk[]; filePath?: string }) {
   return (
     <div data-chat-diff className="min-w-0 max-w-full rounded-btn border border-border bg-bg-primary">
       {filePath && <div className="truncate border-b border-border px-2 py-1 font-mono text-[11px] text-text-secondary">{filePath}</div>}

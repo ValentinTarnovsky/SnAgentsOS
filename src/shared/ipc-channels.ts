@@ -246,6 +246,12 @@ export const CH = {
   WS_NOTES_PRUNE: 'wsNotes:prune', // send (workspaceIds still in the store)
   WS_NOTES_CHANGED: 'wsNotes:changed', // main -> renderer (WsNotesChangedEvt)
 
+  // Teams (app 2.7.0, E10 B, labs.teams): main owns everything; one zod-validated invoke; main answers 'disabled' with the lab off.
+  TEAMS_REQ: 'teams:req', // invoke (TeamRequest) -> TeamReply
+  TEAMS_CHANGED: 'teams:changed', // main -> renderer (TeamChangedEvt)
+  TEAMS_RUN_APPEND: 'teams:runAppend', // main -> renderer (TeamRunAppendEvt), only the watched run, split <= 48 KB with splitAppend
+  TEAMS_INTEGRATE_PROGRESS: 'teams:integrateProgress', // main -> renderer (IntegrateProgressEvt)
+
   // Files drawer (v2.2, E9): a workspace id and a relative path; main resolves the folder and contains every target.
   // app 2.7.0 (A9): every one also takes an optional paneId (the pane's managed worktree is the root).
   FILES_ROOT: 'files:root', // invoke (workspaceId, paneId?) -> FilesRootRes
