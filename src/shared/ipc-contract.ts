@@ -45,7 +45,7 @@ import type { OpenPathReq, OpenPathRes } from './inertOpen'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from './repo-config'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from './review-notes'
 import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResult, WsNoteWriteReq, WsNotesChangedEvt, WsNotesListRes } from './ws-notes'
-import type { FileCreateReq, FileReadRes, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesRootRes } from './files'
+import type { FileCreateReq, FileReadRes, FileRefResolved, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesPathReq, FilesResolveRefsReq, FilesRootRes } from './files'
 import type { CliCtlAction, CliUiState, SkillOp, SkillStatus, SkillTarget } from './ctl-protocol'
 import type { DictationError, WhisperInstallError, WhisperInstallProgress, WhisperPackId, WhisperStatus } from './dictation'
 
@@ -1358,20 +1358,32 @@ export interface SnApi {
     prune(workspaceIds: string[]): void
     onChanged(cb: (e: WsNotesChangedEvt) => void): () => void
   }
-  /** Files drawer (v2.2, E9): a workspace id and a relative path, resolved and contained by main. */
+  /**
+   * Files drawer (v2.2, E9): a workspace id and a relative path, resolved and
+   * contained by main. app 2.7.0 (A9): `paneId` (optional everywhere) roots
+   * the tree at that pane's worktree when main manages it, else at the
+   * workspace folder.
+   */
   files: {
-    root(workspaceId: string): Promise<FilesRootRes>
+    root(workspaceId: string, paneId?: string): Promise<FilesRootRes>
     list(req: FilesListReq): Promise<FilesListRes>
-    read(req: { workspaceId: string; rel: string }): Promise<FileReadRes>
+    read(req: FilesPathReq): Promise<FileReadRes>
     write(req: FileWriteReq): Promise<FileWriteRes>
     create(req: FileCreateReq): Promise<FilesOpRes>
     rename(req: FileRenameReq): Promise<FilesOpRes>
-    trash(req: { workspaceId: string; rel: string }): Promise<FilesOpRes>
-    reveal(req: { workspaceId: string; rel: string }): Promise<FilesOpRes>
-    open(req: { workspaceId: string; rel: string }): Promise<FilesOpRes>
-    /** The one folder watched (null: none). */
-    watch(workspaceId: string | null): void
+    trash(req: FilesPathReq): Promise<FilesOpRes>
+    reveal(req: FilesPathReq): Promise<FilesOpRes>
+    open(req: FilesPathReq): Promise<FilesOpRes>
+    /** The one folder watched (null: none); with `paneId` its events carry it. */
+    watch(workspaceId: string | null, paneId?: string): void
     onChanged(cb: (e: FilesChangedEvt) => void): () => void
+    /**
+     * Ctrl+click on `file:line` (app 2.7.0, A9): up to FILE_REFS_MAX refs of
+     * a pane's terminal, one answer each, in order. Only `exists: true` refs
+     * can be opened (files:read with the same paneId and the `rel` returned).
+     * A malformed request (more refs, a ref too long or not a ref) answers [].
+     */
+    resolveRefs(req: FilesResolveRefsReq): Promise<FileRefResolved[]>
   }
   /**
    * Desktop console chat (app 2.7.0, A7; settings.labs.consoleChat): the

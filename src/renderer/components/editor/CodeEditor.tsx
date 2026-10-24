@@ -33,7 +33,7 @@ import { useCmFind } from './cmFind'
 export interface CodeEditorProps {
   /** Identity of the document: a change replaces the text, the selection and the undo history. */
   docKey: string
-  /** The text loaded for `docKey` (read only when `docKey` changes). */
+  /** The text the view starts from, read only when it mounts or `docKey` changes (pass the current text so a remount keeps the edits). */
   initialText: string
   /** File name, for the grammar ('' = plain text). */
   fileName: string
@@ -51,6 +51,21 @@ export interface CodeEditorProps {
   onCursor?: (line: number, col: number) => void
   /** The live view, for callers that read or replace the text. */
   onView?: (view: EditorView | null) => void
+  /**
+   * Put the cursor at this 1-based line and column and scroll it to the
+   * middle (app 2.7.0, A9: Ctrl+click on `file:line` in a terminal). A new
+   * `seq` asks again. Pass it only while the editor shows: CodeMirror cannot
+   * measure inside `display:none`.
+   */
+  reveal?: { line: number; col: number; seq: number }
+  /** The `reveal` of that `seq` was applied. */
+  onRevealed?: (seq: number) => void
+}
+
+/** The document offset of a 1-based line and column, both clamped into the document. */
+function revealOffset(doc: { lines: number; line(n: number): { from: number; length: number } }, line: number, col: number): number {
+  const ln = doc.line(Math.min(Math.max(1, Math.floor(line) || 1), doc.lines))
+  return ln.from + Math.min(Math.max(0, (Math.floor(col) || 1) - 1), ln.length)
 }
 
 export function CodeEditor(props: CodeEditorProps) {
@@ -135,6 +150,22 @@ export function CodeEditor(props: CodeEditorProps) {
   useEffect(() => {
     view.current?.dispatch({ effects: compartments.current.readOnly.reconfigure(EditorState.readOnly.of(!!props.readOnly)) })
   }, [props.readOnly])
+
+  // After the frame that shows the editor (a tab just activated, the drawer just mounted).
+  const revealSeq = props.reveal?.seq
+  useEffect(() => {
+    const at = latest.current.reveal
+    if (!at) return
+    const raf = requestAnimationFrame(() => {
+      const v = view.current
+      if (!v) return
+      const pos = revealOffset(v.state.doc, at.line, at.col)
+      v.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: 'center' }) })
+      v.focus()
+      latest.current.onRevealed?.(at.seq)
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [revealSeq, props.docKey])
 
   return (
     <>

@@ -4,7 +4,10 @@
 // or symlink out is refused). Text keeps its BOM and CRLF, binaries and big
 // files are refused, images come as data URLs, saves detect a newer file on
 // disk, create / rename / trash / reveal / open behave, and the watch
-// gathers changes per folder. Same esbuild + vm harness as test-status.cjs.
+// gathers changes per folder. A pane's tree (app 2.7.0, A9) is its managed
+// worktree, and files:resolveRefs keeps every terminal ref inside that root
+// (nothing outside it is even realpath'd). Same esbuild + vm harness as
+// test-status.cjs.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -14,6 +17,7 @@ const path = require('node:path')
 const root = path.resolve(__dirname, '..')
 let checks = 0
 function check(condition, label) { assert.ok(condition, label); checks++ }
+function same(actual, expected, label) { assert.deepEqual(JSON.parse(JSON.stringify(actual ?? null)), JSON.parse(JSON.stringify(expected)), label); checks++ }
 function load(file, overrides = {}) {
   const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
   const mod = { exports: {} }
@@ -205,6 +209,154 @@ async function main() {
   check(['xa', 'xb', 'xc', 'xd'].every((id) => f2.acquireWatch(id, 'o', () => {})) && !f2.acquireWatch('xe', 'o', () => {}) && f2.watchedCount === FILES_WATCH_MAX && FILES_WATCH_MAX === 4, 'at most 4 folders watched')
   check(!f2.acquireWatch('nope', 'o', () => {}), 'no root, no watch')
 
+  // A pane's tree and its terminal refs (app 2.7.0, A9): the root is the pane's
+  // worktree only when main manages it; files:resolveRefs reads relative refs
+  // from the shell's spawn cwd and keeps every answer inside that root.
+  {
+    const wt = path.join(tmp, 'wt-1')
+    const unmanaged = path.join(tmp, 'wt-2')
+    const goneWt = path.join(tmp, 'wt-gone')
+    fs.mkdirSync(path.join(wt, 'src', 'deep'), { recursive: true })
+    fs.mkdirSync(path.join(wt, '.git'), { recursive: true })
+    fs.mkdirSync(unmanaged)
+    fs.writeFileSync(path.join(wt, '.git', 'config'), '[core]\n')
+    fs.writeFileSync(path.join(wt, 'README.md'), '# wt\n')
+    fs.writeFileSync(path.join(wt, 'src', 'b.ts'), 'export const b = 1\n')
+    fs.writeFileSync(path.join(wt, 'src', 'deep', 'c.ts'), '')
+    let wtLinks = true
+    try { fs.symlinkSync(outside, path.join(wt, 'esc'), 'junction'); fs.symlinkSync(path.join(wt, '.git'), path.join(wt, 'gl'), 'junction') } catch { wtLinks = false }
+    const wtOf = (p) => ({ repoRoot: repo, path: p, branch: 'sn/x', base: 'a'.repeat(40) })
+    const cfg3 = {
+      workspaces: [
+        { id: 'w5', name: 'Repo', cwd: repo, panes: [
+          { id: 'pw', type: 'claude', title: 'wt', color: '', icon: '', cwd: wt, worktree: wtOf(wt) },
+          { id: 'pp', type: 'shell', title: 'plain', color: '', icon: '' },
+          { id: 'pu', type: 'shell', title: 'unmanaged', color: '', icon: '', worktree: wtOf(unmanaged) },
+          { id: 'pg', type: 'shell', title: 'gone', color: '', icon: '', worktree: wtOf(goneWt) },
+          { id: 'px', type: 'shell', title: 'ssh pane', color: '', icon: '', setupId: 'box' },
+          { id: 'pl', type: 'shell', title: 'local resumed', color: '', icon: '', setupId: '' },
+        ] },
+        { id: 'w6', name: 'SSH', cwd: repo, setupId: 'box', panes: [{ id: 'qs', type: 'shell', title: 's', color: '', icon: '' }] },
+      ],
+    }
+    const managed = new Set([wt, goneWt].map((p) => p.toLowerCase()))
+    const spawn = { pw: path.join(wt, 'src') }
+    // Every realpath FileService asks for: a path out of the root must never reach the disk (or a share).
+    const touched = []
+    const spyFs = { ...fs, realpathSync: Object.assign((...a) => fs.realpathSync(...a), { native: (p, ...r) => { touched.push(String(p)); return fs.realpathSync.native(p, ...r) } }) }
+    const wopened = [], wemitted = [], wtimers = []
+    const { FileService: FS3 } = load('src/main/files/FileService.ts', {
+      require: (id) => (id === 'fs' || id === 'node:fs' ? spyFs : require(id)),
+      setTimeout: (fn) => { wtimers.push(fn); return wtimers.length },
+      clearTimeout: () => {},
+    })
+    const fp = new FS3({
+      config: () => cfg3,
+      emit: (e) => wemitted.push(e),
+      trash: async () => {},
+      reveal: () => {},
+      openPath: async () => '',
+      watchRoot: (r, onEvent) => { const w = { r, onEvent, closed: false }; wopened.push(w); return { close() { w.closed = true } } },
+      isManagedWorktree: (p) => managed.has(path.resolve(p).toLowerCase()),
+      spawnCwd: (id) => spawn[id],
+      homedir: () => wt,
+    })
+    const P = (rel, paneId) => ({ workspaceId: 'w5', paneId, rel })
+
+    // files:* with paneId.
+    let r5 = fp.rootInfo('w5', 'pw')
+    check(r5.ok && r5.root === wt && r5.name === 'wt-1', 'a pane on a managed worktree: its tree is the worktree')
+    check(fp.rootInfo('w5').root === repo && fp.rootInfo('w5', 'pp').root === repo && fp.rootInfo('w5', null).root === repo, 'without a pane, or a pane without a worktree: the workspace folder')
+    check(fp.rootInfo('w5', 'pu').root === repo, 'a pane.worktree main does not manage (renderer data) never becomes a root')
+    check(fp.rootInfo('w5', 'pg').error === 'no_root', 'a managed worktree gone from disk: no root, never the workspace tree in its place')
+    check(fp.rootInfo('w5', 'nope').error === 'not_found' && fp.rootInfo('w6', 'pw').error === 'not_found' && fp.rootInfo('w5', 'w5#pw').error === 'invalid' && fp.rootInfo('w5', 7).error === 'invalid', 'an unknown pane, a pane of another workspace or a bad id')
+    const l5 = await fp.list(P('', 'pw'))
+    check(l5.ok && l5.entries.map((e) => e.name).includes('README.md') && !l5.entries.some((e) => e.name === 'bin.dat' || e.name === '.git'), 'list with paneId lists the worktree (and never its .git)')
+    const rd5 = await fp.read(P('src/b.ts', 'pw'))
+    check(rd5.ok && rd5.text === 'export const b = 1\n' && (await fp.read(P('src/b.ts'))).error === 'not_found', 'read with paneId reads the worktree file; the workspace tree has no such file')
+    check((await fp.write({ ...P('src/b.ts', 'pw'), text: 'export const b = 2\n', eol: 'lf', bom: false, baseRev: rd5.rev })).ok && fs.readFileSync(path.join(wt, 'src', 'b.ts'), 'utf8') === 'export const b = 2\n', 'write with paneId saves in the worktree')
+    check((await fp.create({ ...P('src/n.ts', 'pw'), kind: 'file' })).ok && fs.existsSync(path.join(wt, 'src', 'n.ts')) && !fs.existsSync(path.join(repo, 'src', 'n.ts')), 'create with paneId')
+    check((await fp.rename({ workspaceId: 'w5', paneId: 'pw', from: 'src/n.ts', to: 'src/m.ts' })).ok && fs.existsSync(path.join(wt, 'src', 'm.ts')), 'rename with paneId')
+    check((await fp.read(P('.git/config', 'pw'))).error === 'invalid' && (await fp.read(P('../repo/README.md', 'pw'))).error === 'invalid', 'paneId keeps the same rules: no .git, no way out')
+    if (wtLinks) check((await fp.read(P('esc/secret.txt', 'pw'))).error === 'denied_path', 'nor through a junction')
+
+    // The drawer of a pane watches the worktree; its events carry the pane.
+    fp.watch('w5', 'pw')
+    check(wopened.length === 1 && wopened[0].r === wt, 'files:watch with paneId watches the worktree')
+    wopened[0].onEvent('src/b.ts'); wtimers.shift()()
+    check(wemitted.length === 1 && wemitted[0].workspaceId === 'w5' && wemitted[0].paneId === 'pw' && wemitted[0].dirs.join() === 'src', 'its events carry workspaceId and paneId')
+    fp.watch('w5', 'pw')
+    check(wopened.length === 1, 'the same pane again keeps the watch')
+    fp.watch('w5')
+    check(wopened.length === 2 && wopened[0].closed && wopened[1].r === repo, 'switching to the workspace tree closes the pane watch and opens the workspace one')
+    wopened[1].onEvent('README.md'); wtimers.shift()()
+    check(wemitted.at(-1).paneId === undefined, 'workspace events carry no paneId')
+    fp.watch('w5', 'bad#id')
+    check(wopened[1].closed && wopened.length === 2, 'a bad pane id stops the watch and opens none')
+    fp.watch('w5', 'pw')
+    const pwWatch = wopened.at(-1)
+    check(!fp.acquireWatch('w5#pw', 'share:g', () => {}) && fp.watchedCount === 1, 'a workspace id spelled w#p never joins a pane watch')
+    fp.watch('w5#pw')
+    check(pwWatch.r === wt && pwWatch.closed && wopened.length === 3, 'nor keeps it: the drawer watch stops and opens none')
+    fp.watch(null)
+
+    // files:resolveRefs.
+    touched.length = 0
+    const refs = await fp.resolveRefs({ paneId: 'pw', refs: [
+      'b.ts:12:3',
+      './deep/c.ts',
+      '../README.md:4',
+      path.join(wt, 'src', 'b.ts') + ':7',
+      path.join(repo, 'README.md'),
+      path.join(outside, 'secret.txt'),
+      '../../outside/secret.txt',
+      '../.git/config',
+      path.join(wt, '.git', 'config'),
+      '../src',
+      'nope.ts:4:2',
+      { path: 'b.ts', line: 3 },
+      { path: 'b.ts', col: 9 },
+      '~/README.md',
+      '\\\\example.invalid\\share\\a.ts:3',
+    ] })
+    check(Array.isArray(refs) && refs.length === 15, 'one answer per ref, in order')
+    const b = fs.realpathSync.native(path.join(wt, 'src', 'b.ts'))
+    same(refs[0], { ref: 'b.ts:12:3', exists: true, path: b, rel: 'src/b.ts', line: 12, col: 3 }, 'a relative ref resolves against the spawn cwd, with line and col')
+    check(refs[1].exists && refs[1].rel === 'src/deep/c.ts' && refs[1].line === undefined, 'a ./ ref without position')
+    check(refs[2].exists && refs[2].rel === 'README.md' && refs[2].line === 4, '../ that stays inside the root')
+    check(refs[3].exists && refs[3].rel === 'src/b.ts' && refs[3].line === 7, 'an absolute ref inside the root')
+    check(!refs[4].exists && refs[4].path === undefined && refs[4].rel === undefined, 'the workspace folder is outside a worktree pane root')
+    check(!refs[5].exists && !refs[6].exists, 'outside the root: an absolute path or a .. escape')
+    check(!refs[7].exists && !refs[8].exists, '.git is never a ref target (relative or absolute)')
+    check(!refs[9].exists, 'a folder is not a file ref')
+    same(refs[10], { ref: 'nope.ts:4:2', exists: false, line: 4, col: 2 }, 'a missing file keeps its line and col')
+    check(refs[11].exists && refs[11].ref === 'b.ts:3' && refs[11].line === 3 && refs[12].exists && refs[12].ref === 'b.ts' && refs[12].col === undefined, 'split refs: the text is rebuilt, a col without a line is dropped')
+    check(refs[13].exists && refs[13].rel === 'README.md', '~ is the home folder (still contained)')
+    check(!refs[14].exists, 'a UNC path is outside the root')
+    const outsideKey = outside.toLowerCase()
+    check(touched.some((p) => p === path.join(wt, 'src', 'b.ts')), `the realpath spy sees the lookups (${touched.length})`)
+    check(!touched.some((p) => p.toLowerCase().startsWith(outsideKey) || p.startsWith('\\\\') || p.toLowerCase().startsWith(repo.toLowerCase() + path.sep)), `nothing outside the root reached realpath (${touched.filter((p) => !p.toLowerCase().startsWith(wt.toLowerCase())).join(', ')})`)
+    if (wtLinks) {
+      const lk = await fp.resolveRefs({ paneId: 'pw', refs: ['../esc/secret.txt', '../gl/config'] })
+      check(!lk[0].exists && !lk[1].exists, 'a junction out of the root or into .git: refused by realpath')
+    }
+    if (process.platform === 'win32') check(!(await fp.resolveRefs({ paneId: 'pw', refs: ['b.ts:zone'] }))[0].exists, 'an NTFS stream name is never a ref')
+    delete spawn.pw
+    check((await fp.resolveRefs({ paneId: 'pw', refs: ['src/b.ts'] }))[0].exists && !(await fp.resolveRefs({ paneId: 'pw', refs: ['b.ts'] }))[0].exists, 'no live shell: relative refs start at the root')
+    const pp = await fp.resolveRefs({ paneId: 'pp', refs: ['src/app.ts:1', path.join(wt, 'README.md')] })
+    check(pp[0].exists && pp[0].rel === 'src/app.ts' && pp[0].path === path.join(repo, 'src', 'app.ts') && !pp[1].exists, 'a pane without a worktree: the workspace folder is the root')
+    check(!(await fp.resolveRefs({ paneId: 'pu', refs: [path.join(unmanaged, 'x')] }))[0].exists, 'an unmanaged pane.worktree is not a root')
+    check(!(await fp.resolveRefs({ paneId: 'px', refs: ['src/app.ts'] }))[0].exists && !(await fp.resolveRefs({ paneId: 'qs', refs: ['src/app.ts'] }))[0].exists && !(await fp.resolveRefs({ paneId: 'nope', refs: ['src/app.ts'] }))[0].exists, 'a pane through a connection profile (its own or its workspace\'s) or an unknown pane resolves nothing')
+    check((await fp.resolveRefs({ paneId: 'pl', refs: ['src/app.ts'] }))[0].exists, "setupId '' (a resumed history console) runs local and resolves")
+    // Malformed requests: [].
+    const many = Array.from({ length: 33 }, () => 'src/app.ts')
+    check((await fp.resolveRefs({ paneId: 'pp', refs: many.slice(0, 32) })).length === 32 && (await fp.resolveRefs({ paneId: 'pp', refs: many })).length === 0, '32 refs answer, 33 are refused')
+    for (const bad of [null, 'x', { paneId: 'pp' }, { paneId: 'pp', refs: 'src/app.ts' }, { paneId: 'p#p', refs: ['a'] }, { paneId: 'pp', refs: ['x'.repeat(1025)] }, { paneId: 'pp', refs: [5] }, { paneId: 'pp', refs: [{ path: 'a', line: 0 }] }, { paneId: 'pp', refs: [{ path: 'a', line: 1.5 }] }, { paneId: 'pp', refs: [{ path: 7 }] }]) {
+      check(Array.isArray(await fp.resolveRefs(bad)) && (await fp.resolveRefs(bad)).length === 0, 'malformed resolveRefs ' + JSON.stringify(bad).slice(0, 60))
+    }
+    check((await fp.resolveRefs({ paneId: 'pp', refs: ['x'.repeat(1024)] }))[0].exists === false, 'a ref of exactly 1024 characters is still a ref')
+  }
+
   fs.rmSync(tmp, { recursive: true, force: true })
 
   // The editor's find widget (v2.3): keys, counter, capped count, and its es/en strings.
@@ -240,7 +392,7 @@ async function main() {
   for (const key of ['find.count', 'find.countCapped']) check(en[key].includes('{index}') && en[key].includes('{total}') && es[key].includes('{index}') && es[key].includes('{total}'), key + ' carries {index} and {total} in both')
   check(['drawer.pin', 'drawer.unpin', 'files.collapse'].every((key) => es[key] && en[key]) && en['files.collapse'] === 'Collapse folders' && es['files.collapse'] === 'Contraer carpetas', 'drawer pin and collapse strings in es and en')
 
-  console.log(`PASS: ${checks} files drawer checks (safe relative paths, root from the config, list order and .git, junction escape, CRLF and BOM, binary, 2 MB and 5 MB, images, rev conflicts, create, rename, trash, reveal, inert open, watch, .git in any case and through links, share guest reads and secrets, shared watches, find widget keys / counter / cap / es-en strings)`)
+  console.log(`PASS: ${checks} files drawer checks (safe relative paths, root from the config, list order and .git, junction escape, CRLF and BOM, binary, 2 MB and 5 MB, images, rev conflicts, create, rename, trash, reveal, inert open, watch, .git in any case and through links, share guest reads and secrets, shared watches, pane worktree roots and watches, resolveRefs containment / spawn cwd / line and col / caps, find widget keys / counter / cap / es-en strings)`)
 }
 
 main().catch((e) => { console.error(e); process.exit(1) })

@@ -40,7 +40,7 @@ import { getPtyId } from '@/lib/ptyRegistry'
 import { clearSavedScrollback } from '@/lib/scrollback'
 import { redrawPane } from '@/lib/redrawRegistry'
 import { copyLastOutput, hasLastOutput } from '@/lib/shellMarksRegistry'
-import { focusPane } from '@/lib/focus'
+import { focusPane, setFocusedPane } from '@/lib/focus'
 import { isBracketedPaste, pasteToPane } from '@/lib/pasteRegistry'
 import { isAgentPane } from '@/lib/agentPane'
 import { buildDropPayload, type DropMode } from '@/lib/dropPaths'
@@ -69,7 +69,7 @@ import { useAgentStore } from '@/lib/agentStore'
 import { useGitStore } from '@/lib/gitStore'
 import { workspaceGitKey } from '@/lib/gitChip'
 import { useWorktreeStore } from '@/lib/worktreeStore'
-import { templateFromPane, worktreeOffer } from '@/lib/worktrees'
+import { MAX_PANES, paneInWorktree, templateFromPane, worktreeOffer } from '@/lib/worktrees'
 import { PaneWorktreeChip } from '@/components/git/PaneWorktreeChip'
 import { WorktreeMissingCard } from '@/components/layout/WorktreeMissingCard'
 import { RepoSetupPlaceholder } from '@/components/layout/RepoSetupPlaceholder'
@@ -331,6 +331,14 @@ export function PaneCell({
     if (view !== (chatView ? 'chat' : 'terminal')) showPaneView(pane.id, view)
   }
 
+  const newConsoleHere = (): void => {
+    const partial = paneInWorktree(pane, workspace, presets)
+    const id = partial ? useAppStore.getState().addPane(workspace.id, partial) : ''
+    if (!id) return
+    setFocusedPane(id, workspace.id)
+    requestAnimationFrame(() => focusPane(id))
+  }
+
   const menuItems: ContextMenuItem[] = [
     { label: t('ctx.rename'), icon: Pencil, onClick: startRename },
     {
@@ -392,6 +400,18 @@ export function PaneCell({
             disabled: !!offer.blocked,
             hint: offer.blocked ? t(offer.blocked) : undefined,
             onClick: () => openWorktreeLaunch({ workspaceId: workspace.id, repoCwd: offer.repoCwd, template: templateFromPane(pane, presets) }),
+          },
+        ]
+      : []),
+    // App 2.7.0 (A9): one more console on this pane's worktree (no new branch, nothing asked of main).
+    ...(wt
+      ? [
+          {
+            label: t('worktree.newHere'),
+            icon: SquareTerminal,
+            disabled: workspace.panes.length >= MAX_PANES || wtMissing,
+            hint: workspace.panes.length >= MAX_PANES ? t('worktree.full') : wtMissing ? t('worktree.missing.title') : undefined,
+            onClick: newConsoleHere,
           },
         ]
       : []),

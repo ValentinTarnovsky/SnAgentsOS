@@ -2,7 +2,10 @@
 // on real repositories in os.tmpdir() (create with .env copy and node_modules
 // junction, branch_exists leaves the branch alone, rollback of a failed step,
 // remove that never follows the junction, not_managed guards, unlink failure
-// aborting before anything else, orphans by scan), schema 13 round trip,
+// aborting before anything else, orphans by scan), "main -N" (inspect's
+// behindMain and GitService's mainBehind, counted only when the tip or the
+// main HEAD moved), a remove refused while another pane of the saved config
+// runs in the folder ('shared'), schema 13 round trip,
 // PtyManager's cwd_missing, and the renderer side (offer rules, close routing,
 // the phone's closePane keeping folder and branch). Bundled with esbuild and
 // run in a vm like test-git.cjs; git runs with an isolated config. Nothing
@@ -217,15 +220,15 @@ async function realRepoChecks() {
   check(fs.existsSync(mfFile), 'the manifest is dataDir()/worktrees.json')
 
   // Inspect (FR-30 / 36).
-  same(await s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: true, tip: head, headBranch: 'sn/claude-ab12' }, 'inspect clean: our own junction and the ignored .env are not dirty; the tip and the checked out branch')
+  same(await s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: true, tip: head, headBranch: 'sn/claude-ab12', behindMain: 0 }, 'inspect clean: our own junction and the ignored .env are not dirty; the tip and the checked out branch; main is not ahead')
   write(path.join(wt.path, 'new.txt'), 'n\n')
   write(path.join(wt.path, 'src', 'app.js'), 'console.log(2)\n')
-  same(await s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 2, commitsAhead: 0, mergedIntoHead: true, tip: head, headBranch: 'sn/claude-ab12' }, 'inspect dirty: 2 files')
+  same(await s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 2, commitsAhead: 0, mergedIntoHead: true, tip: head, headBranch: 'sn/claude-ab12', behindMain: 0 }, 'inspect dirty: 2 files')
   git(wt.path, 'add', 'src/app.js'); git(wt.path, 'commit', '-qm', 'work')
   const wtTip = git(wt.path, 'rev-parse', 'HEAD').trim()
-  same(await s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 1, commitsAhead: 1, mergedIntoHead: false, tip: wtTip, headBranch: 'sn/claude-ab12' }, 'inspect: 1 commit over the base, not merged, the tip moved with it')
+  same(await s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 1, commitsAhead: 1, mergedIntoHead: false, tip: wtTip, headBranch: 'sn/claude-ab12', behindMain: 0 }, 'inspect: 1 commit over the base, not merged, the tip moved with it (main still has nothing it lacks)')
   const blind = make({ deps: { runner: { run: (args, o) => (args.includes('status') ? Promise.reject(Object.assign(new Error('fatal: unsafe repository'), { code: 'unsafe_repo' })) : runner.run(args, o)) } } })
-  same(await blind.s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 0, commitsAhead: 1, mergedIntoHead: false, incomplete: true, tip: wtTip, headBranch: 'sn/claude-ab12' }, 'inspect: a git status that fails is incomplete, never a silent clean')
+  same(await blind.s.inspect({ path: wt.path }), { exists: true, dirtyFiles: 0, commitsAhead: 1, mergedIntoHead: false, incomplete: true, tip: wtTip, headBranch: 'sn/claude-ab12', behindMain: 0 }, 'inspect: a git status that fails is incomplete, never a silent clean')
   check(r_deleteNeedsAckProbe({ exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: true, incomplete: true }), 'an incomplete inspect still requires the checkbox')
   // The dirty count goes back to main whenever git status was read, not only on a complete inspect.
   const tipX = 'a'.repeat(40)
@@ -452,7 +455,7 @@ async function realRepoChecks() {
     const nbTip = commitIn(nb.path, 'nb.txt', 'nb\n', 'nb work')
     manifest.put({ ...manifest.find(nb.path), baseSha: '' })
     const i3 = await s.inspect({ path: nb.path })
-    same(i3, { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false, incomplete: true, dirtyRead: true, tip: nbTip, headBranch: 'sn/nobase-1' }, 'without a base the inspect is incomplete, but its status was read')
+    same(i3, { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false, incomplete: true, dirtyRead: true, tip: nbTip, headBranch: 'sn/nobase-1', behindMain: 0 }, 'without a base the inspect is incomplete, but its status was read')
     check(r_deleteNeedsAckProbe(i3), 'the dialog still asks for the checkbox')
     const saw3 = r_removeExpectations(i3)
     same(saw3, { expectTip: nbTip, expectDirty: 0 }, 'and sends the dirty count it read')
@@ -571,13 +574,127 @@ async function realRepoChecks() {
     const viaLink = make({ root: aRoot })
     const ar = await viaLink.s.create({ repoCwd: aRepo, slug: 'alias-1', copyEnv: false, linkNodeModules: true })
     check(ar.ok && canon(ar.worktree.path) === canon(path.join(wtRoot, folder, 'alias-1')) && ar.worktree.path === fs.realpathSync.native(ar.worktree.path), `a repo and a root spelled through a link land in the one <root>/<repo>-<hash6>, spelled as git spells it (${JSON.stringify(ar)})`)
-    same(await viaLink.s.inspect({ path: path.join(aRoot, folder, 'alias-1') }), { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: true, tip: head, headBranch: 'sn/alias-1' }, 'inspect through the link spelling finds the entry (its junction is not dirty)')
+    same(await viaLink.s.inspect({ path: path.join(aRoot, folder, 'alias-1') }), { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: true, tip: head, headBranch: 'sn/alias-1', behindMain: 0 }, 'inspect through the link spelling finds the entry (its junction is not dirty)')
     same(await make({ root: path.join(aRepo, 'inner2') }).s.create({ repoCwd: repo, slug: 'x5', copyEnv: false, linkNodeModules: false }), { ok: false, error: 'root_inside_repo' }, 'a root inside the repo spelled through a link is still refused')
     check(!fs.existsSync(path.join(repo, 'inner2')), 'and writes nothing in the repo')
     const viaRows = (await viaLink.s.list()).entries
     check(viaRows.filter((e) => e.branch === 'sn/alias-1').length === 1 && new Set(viaRows.map((e) => canon(e.path))).size === viaRows.length, 'one row per worktree whatever spelling the roots use')
     check((await viaLink.s.remove({ path: path.join(aRoot, folder, 'alias-1'), deleteBranch: true })).ok && !fs.existsSync(ar.worktree.path) && !gitOkSync(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/sn/alias-1') && !new M.WorktreeManifest(mfFile).find(ar.worktree.path),'remove through the link spelling: git lists it, folder, branch and entry go')
     check(fs.readFileSync(sentinel, 'utf8') === 'keep me\n', 'and its node_modules junction was unlinked, not followed')
+  }
+
+  // A9: another console of the saved config runs in the folder ("New console in this worktree"):
+  // main refuses, before it kills or deletes anything, whatever the spelling of the folder.
+  {
+    const sh = (await s.create({ repoCwd: repo, slug: 'shared-1', copyEnv: false, linkNodeModules: false })).worktree
+    const next = (await s.create({ repoCwd: repo, slug: 'shared-2', copyEnv: false, linkNodeModules: false })).worktree
+    const otherSpelling = alias ? path.join(alias, 'data', 'worktrees', folder, 'shared-1') : process.platform === 'win32' ? `${sh.path.toUpperCase()}\\` : path.join(wtRoot, folder, 'shared-1')
+    let panes = [{ paneId: 'pa', path: sh.path }, { paneId: 'pb', path: otherSpelling }, { paneId: 'pc', path: next.path }, { paneId: 'pd', path: 'shared-1' }]
+    const guarded = make({ manifest, deps: { worktreePanes: () => panes } })
+    const saw = await seen(s, sh.path)
+    same(await guarded.s.remove({ path: sh.path, paneId: 'pa', deleteBranch: true, ...saw }), { ok: false, error: 'shared', users: 1 }, 'another pane on the folder (spelled another way) is shared, with the count; a pane on another worktree or a relative path does not count')
+    check(guarded.kills.length === 0 && fs.existsSync(sh.path) && listed(repo).includes(canon(sh.path)) && branchAt('sn/shared-1') && guarded.manifest.find(sh.path), 'shared: no pty killed, folder, git record, branch and entry kept')
+    same(await guarded.s.remove({ path: sh.path, deleteBranch: true, ...saw }), { ok: false, error: 'shared', users: 2 }, 'without a pane (Settings, a team) every pane on the folder counts')
+    same(await guarded.s.remove({ path: otherSpelling, paneId: 'pb', deleteBranch: true, ...saw }), { ok: false, error: 'shared', users: 1 }, 'asked through the other spelling, the first pane still counts')
+    panes = [{ paneId: 'pa', path: sh.path }, { paneId: 'pc', path: next.path }]
+    const last = await guarded.s.remove({ path: sh.path, paneId: 'pa', deleteBranch: true, ...saw })
+    check(last.ok && guarded.kills.join() === 'pa' && !fs.existsSync(sh.path) && !branchAt('sn/shared-1'), `the last pane on it deletes as before, killing only its own pty (${JSON.stringify(last)})`)
+    panes = []
+    check((await guarded.s.remove({ path: next.path, deleteBranch: true, ...(await seen(s, next.path)) })).ok && !fs.existsSync(next.path), 'a worktree no pane uses is deleted as before')
+    // registerWorktreeIpc's feed: every pane of the saved config with a worktree, any workspace.
+    const ipc = load('src/main/ipc/registerWorktreeIpc.ts', { require: (id) => (id === 'electron' ? { app: { getPath: () => base }, ipcMain: { handle() {} }, shell: {} } : require(id)) })
+    same(ipc.worktreePanesOf({ workspaces: [
+      { id: 'w1', panes: [{ id: 'a', worktree: { path: 'C:\\wt\\x' } }, { id: 'b' }] },
+      { id: 'w2', panes: [{ id: 'c', worktree: { path: 'C:\\wt\\x' } }, { id: 'd', worktree: { path: '' } }] },
+    ] }), [{ paneId: 'a', path: 'C:\\wt\\x' }, { paneId: 'c', path: 'C:\\wt\\x' }], 'worktreePanesOf: the panes of every workspace with a worktree path')
+    same(ipc.worktreePanesOf(null), [], 'no config: no panes')
+  }
+
+  // "main -N" (app 2.7.0, A9): commits on the main checkout after the worktree was made.
+  {
+    const repo3 = path.join(base, 'repo-behind')
+    write(path.join(repo3, 'a.txt'), 'a\n')
+    git(repo3, 'init', '-q', '-b', 'main'); git(repo3, 'add', '-A'); git(repo3, 'commit', '-qm', 'init')
+    const bw = (await s.create({ repoCwd: repo3, slug: 'behind-1', copyEnv: false, linkNodeModules: false })).worktree
+    check((await s.inspect({ path: bw.path })).behindMain === 0, 'a fresh worktree: main has nothing it lacks')
+    commitIn(repo3, 'b.txt', 'b\n', 'main 1')
+    commitIn(repo3, 'c.txt', 'c\n', 'main 2')
+    const i1 = await s.inspect({ path: bw.path })
+    check(i1.behindMain === 2 && i1.commitsAhead === 0 && i1.mergedIntoHead && !i1.incomplete, `two commits on main after the worktree: main -2 (${JSON.stringify(i1)})`)
+    commitIn(bw.path, 'w.txt', 'w\n', 'wt work')
+    const i2 = await s.inspect({ path: bw.path })
+    check(i2.behindMain === 2 && i2.commitsAhead === 1 && !i2.mergedIntoHead, 'its own commit does not change it')
+    const hand = path.join(base, 'hand-wt')
+    git(repo3, 'worktree', 'add', '-q', '-b', 'feat-hand', hand)
+    check((await s.inspect({ path: hand })).behindMain === undefined && (await s.inspect({ path: repo3 })).behindMain === undefined, 'a worktree main does not manage, and the main checkout, have none')
+    const repoKey = canon(repo3)
+    const noCount = make({ deps: { runner: { run: (args, o) => (args[0] === 'rev-list' && canon(o.cwd) === repoKey ? Promise.reject(Object.assign(new Error('fatal: bad revision'), { code: 'git_error' })) : runner.run(args, o)) } } })
+    const i3 = await noCount.s.inspect({ path: bw.path })
+    check(i3.behindMain === undefined && !i3.incomplete && i3.commitsAhead === 1, `git cannot count: absent, and never incomplete (it does not block a delete) (${JSON.stringify(i3)})`)
+    check(canon(s.repoOf(bw.path)) === repoKey && s.repoOf(hand) === null && s.repoOf('relative') === null, 'repoOf: the main checkout of a managed worktree only')
+
+    // GitService: the chip's mainBehind of a pane on that worktree, cached by (tip, main HEAD).
+    const G = load('src/main/git/GitService.ts')
+    let revLists = 0
+    const counting = { run: (args, o) => { if (args[0] === 'rev-list') revLists++; return runner.run(args, o) }, info: (f) => runner.info(f) }
+    let now = 1e6
+    const pending = []
+    const watches = []
+    const updates = []
+    const svc = new G.GitService({
+      runner: counting,
+      emit: (e) => updates.push(e),
+      now: () => now,
+      timers: { setTimeout: (fn, ms) => { const h = { fn, ms }; pending.push(h); return h }, clearTimeout: (h) => { const i = pending.indexOf(h); if (i >= 0) pending.splice(i, 1) } },
+      watch: (dir, recursive, onEvent) => { const w = { dir, recursive, onEvent, closed: false }; watches.push(w); return { close() { w.closed = true } } },
+      managedRepoOf: (d) => s.repoOf(d),
+    })
+    const sum = (k) => svc.get(k)?.summary
+    const again = async (keys) => { now += 5000; svc.refresh(keys, 'manual'); await svc.idle() }
+    svc.setTargets([
+      { key: 'pane:pb', cwd: bw.path, workspaceId: 'w', paneId: 'pb', active: true },
+      { key: 'ws:w', cwd: repo3, workspaceId: 'w', active: true },
+      { key: 'pane:pm', cwd: repo3, workspaceId: 'w', paneId: 'pm', active: true },
+      { key: 'pane:ph', cwd: hand, workspaceId: 'w', paneId: 'ph', active: true },
+    ])
+    await svc.idle()
+    check(sum('pane:pb') && sum('pane:pb').mainBehind === 2, `a pane on a managed worktree: mainBehind 2 (${JSON.stringify(sum('pane:pb'))})`)
+    check(sum('ws:w').mainBehind === undefined && sum('pane:pm').mainBehind === undefined && sum('pane:ph').mainBehind === undefined, 'none for a workspace target, a pane on the main checkout or on a worktree main does not manage')
+    check(revLists === 1, `one count for the one managed worktree (${revLists})`)
+    const sent = updates.length
+    await again(['pane:pb'])
+    check(revLists === 1 && sum('pane:pb').mainBehind === 2 && updates.length === sent, 'nothing moved: no new count (cached by tip and main HEAD), no git:update')
+    commitIn(repo3, 'd.txt', 'd\n', 'main 3')
+    await again(['pane:pb'])
+    check(revLists === 2 && sum('pane:pb').mainBehind === 3, 'main moved: counted again, main -3')
+    commitIn(bw.path, 'w2.txt', 'w2\n', 'wt work 2')
+    await again(['pane:pb'])
+    check(revLists === 3 && sum('pane:pb').mainBehind === 3, 'the tip moved: counted again, same number')
+    await again(['pane:pb'])
+    check(revLists === 3, 'and cached again')
+    const seen = updates.filter((e) => e.key === 'pane:pb').map((e) => e.summary && e.summary.mainBehind)
+    check(seen.join() === '2,3,3', `git:update carries it: 2, then 3, then the new tip (${seen.join()})`)
+    // A checkout in the main checkout moves only the common dir's HEAD: that refreshes the units counting "main -N".
+    // With the main checkout's own unit gone, the one live watch on <repo>/.git is the common one.
+    svc.setTargets([{ key: 'pane:pb', cwd: bw.path, workspaceId: 'w', paneId: 'pb', active: true }])
+    const commonKey = canon(path.join(repo3, '.git'))
+    const tops = watches.filter((w) => !w.recursive && !w.closed && canon(w.dir) === commonKey)
+    check(tops.length === 1, `the common dir of the worktree is watched (${tops.length})`)
+    const top = tops[0]
+    git(repo3, 'checkout', '-q', '--detach', 'HEAD~3')
+    pending.length = 0
+    top.onEvent('HEAD.lock')
+    check(pending.length === 0, 'a lock file is not a HEAD move')
+    top.onEvent('HEAD')
+    const debounce = pending.find((h) => h.ms === G.WATCH_DEBOUNCE_MS)
+    check(!!debounce, 'the main HEAD moving schedules a refresh of the worktree pane')
+    now += 5000
+    pending.splice(pending.indexOf(debounce), 1)
+    debounce.fn()
+    await svc.idle()
+    check(sum('pane:pb').mainBehind === 0 && revLists === 4, `main checked out at the base: main -0, counted once (${sum('pane:pb').mainBehind}, ${revLists})`)
+    git(repo3, 'checkout', '-q', 'main')
+    svc.dispose()
   }
 
   return { repo, fromBase: fromBase.worktree, git }
@@ -747,7 +864,7 @@ async function rendererChecks(real) {
   if (alias) fs.unlinkSync(alias)
   alias = null
   fs.rmSync(base, { recursive: true, force: true })
-  console.log(`PASS: ${checks} worktree checks (helpers, schema 13, manifest, create/inspect/remove/list on real repos, rollback, junction sentinel, not_managed, cwd_missing, renderer offer/close/orphans, phone closePane)`)
+  console.log(`PASS: ${checks} worktree checks (helpers, schema 13, manifest, create/inspect/remove/list on real repos, rollback, junction sentinel, not_managed, shared, cwd_missing, main -N in inspect and the chip cache, renderer offer/close/orphans, phone closePane)`)
 })().catch((e) => {
   console.error(e)
   process.exit(1)

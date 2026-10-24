@@ -65,7 +65,7 @@ import type { SessionSummary, SessionsListReq } from '@shared/session-history'
 import type { GitArea, GitBaseStat, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
 import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResult, WsNoteWriteReq, WsNotesChangedEvt, WsNotesListRes } from '@shared/ws-notes'
-import type { FileCreateReq, FileReadRes, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesRootRes } from '@shared/files'
+import type { FileCreateReq, FileReadRes, FileRefResolved, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesPathReq, FilesResolveRefsReq, FilesRootRes } from '@shared/files'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 import type { CliUiState, SkillOp, SkillStatus, SkillTarget } from '@shared/ctl-protocol'
@@ -383,17 +383,18 @@ const api: SnApi = {
     onChanged: (cb: (e: WsNotesChangedEvt) => void) => sub<WsNotesChangedEvt>(CH.WS_NOTES_CHANGED, cb),
   },
   files: {
-    root: (workspaceId: string) => ipcRenderer.invoke(CH.FILES_ROOT, workspaceId) as Promise<FilesRootRes>,
+    root: (workspaceId: string, paneId?: string) => ipcRenderer.invoke(CH.FILES_ROOT, workspaceId, paneId) as Promise<FilesRootRes>,
     list: (req: FilesListReq) => ipcRenderer.invoke(CH.FILES_LIST, req) as Promise<FilesListRes>,
-    read: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_READ, req) as Promise<FileReadRes>,
+    read: (req: FilesPathReq) => ipcRenderer.invoke(CH.FILES_READ, req) as Promise<FileReadRes>,
     write: (req: FileWriteReq) => ipcRenderer.invoke(CH.FILES_WRITE, req) as Promise<FileWriteRes>,
     create: (req: FileCreateReq) => ipcRenderer.invoke(CH.FILES_CREATE, req) as Promise<FilesOpRes>,
     rename: (req: FileRenameReq) => ipcRenderer.invoke(CH.FILES_RENAME, req) as Promise<FilesOpRes>,
-    trash: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_TRASH, req) as Promise<FilesOpRes>,
-    reveal: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_REVEAL, req) as Promise<FilesOpRes>,
-    open: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_OPEN, req) as Promise<FilesOpRes>,
-    watch: (workspaceId: string | null) => ipcRenderer.send(CH.FILES_WATCH, workspaceId),
+    trash: (req: FilesPathReq) => ipcRenderer.invoke(CH.FILES_TRASH, req) as Promise<FilesOpRes>,
+    reveal: (req: FilesPathReq) => ipcRenderer.invoke(CH.FILES_REVEAL, req) as Promise<FilesOpRes>,
+    open: (req: FilesPathReq) => ipcRenderer.invoke(CH.FILES_OPEN, req) as Promise<FilesOpRes>,
+    watch: (workspaceId: string | null, paneId?: string) => ipcRenderer.send(CH.FILES_WATCH, workspaceId, paneId),
     onChanged: (cb: (e: FilesChangedEvt) => void) => sub<FilesChangedEvt>(CH.FILES_CHANGED, cb),
+    resolveRefs: (req: FilesResolveRefsReq) => ipcRenderer.invoke(CH.FILES_RESOLVE_REFS, req) as Promise<FileRefResolved[]>,
   },
   chat: {
     sub: (req: ChatSubReq) => ipcRenderer.invoke(CH.CHAT_SUB, req) as Promise<ChatPageRes>,

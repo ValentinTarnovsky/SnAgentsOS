@@ -7,7 +7,8 @@
  *    each step succeeded); a pre-existing sn/<slug> branch is detected first
  *    and never touched.
  *  - remove: the path must be a manifest entry under a worktree root, listed by
- *    `git worktree list` on its branch sn/...; the pane's pty is killed first,
+ *    `git worktree list` on its branch sn/..., and no other pane of the saved
+ *    config may run in it ('shared', app 2.7.0); the pane's pty is killed first,
  *    the junctions are unlinked as links (any failure aborts before anything
  *    else), the folder goes through safeRemoveTree (never follows a link, the
  *    contract's primitive for this) with 5 retries of 400 ms, then
@@ -80,6 +81,12 @@ export interface WorktreeServiceDeps {
   guard?: () => Omit<PathGuard, 'allowedRoots'>
   /** Kill the pane's pty and wait for it to exit (at most 3 s). */
   killPane?: (paneId: string) => Promise<void>
+  /**
+   * The panes of the saved config that run in a worktree, with its folder
+   * (app 2.7.0, A9): remove refuses while one other than its own pane is on
+   * the folder, since it only kills that one.
+   */
+  worktreePanes?: () => ReadonlyArray<{ paneId: string; path: string }>
   /** Test seam over safeRemoveTree. */
   removeTree?: (target: string, guard: PathGuard, o: RemoveOptions) => Promise<RemoveResult>
   removeOptions?: RemoveOptions
@@ -499,6 +506,8 @@ export class WorktreeService {
     } catch {
       incomplete = true
     }
+    // "main -N": read like mergedIntoHead, against the main checkout's HEAD. Never blocks a delete.
+    const behindMain = repoRoot && FULL_SHA_RE.test(tip) ? await this.behindHead(repoRoot, tip) : null
     return {
       exists: true,
       dirtyFiles,
@@ -509,6 +518,17 @@ export class WorktreeService {
       ...(FULL_SHA_RE.test(tip) ? { tip } : {}),
       ...(headBranch !== undefined ? { headBranch } : {}),
       ...(inProgress ? { inProgress } : {}),
+      ...(behindMain !== null ? { behindMain } : {}),
+    }
+  }
+
+  /** `rev-list --count <tip>..HEAD` in the repo: commits its HEAD has that `tip` lacks; null when git cannot count. */
+  private async behindHead(repoRoot: string, tip: string): Promise<number | null> {
+    try {
+      const n = Number((await this.git(['rev-list', '--count', `${tip}..HEAD`], repoRoot)).trim())
+      return Number.isInteger(n) && n >= 0 ? n : null
+    } catch {
+      return null
     }
   }
 
@@ -708,6 +728,10 @@ export class WorktreeService {
     if (req.expectDirty !== undefined && (typeof req.expectDirty !== 'number' || !Number.isInteger(req.expectDirty) || req.expectDirty < 0)) return { ok: false, error: 'git_error', detail: 'bad_expect' }
     if (req.ackIncomplete !== undefined && typeof req.ackIncomplete !== 'boolean') return { ok: false, error: 'git_error', detail: 'bad_expect' }
     const expect = { expectTip: req.expectTip?.toLowerCase() ?? null, expectDirty: req.expectDirty ?? null, deleteBranch, ackIncomplete: req.ackIncomplete === true }
+    // Only req.paneId's shell is killed: another console on the folder would keep running in a
+    // tree being deleted (or hold it, a half delete on Windows). Refused before anything is touched.
+    const users = this.usersOf(path, typeof req.paneId === 'string' ? req.paneId : undefined)
+    if (users > 0) return { ok: false, error: 'shared', users }
 
     let list: Array<{ path: string; branch: string | null; prunable: boolean }>
     try {
@@ -786,9 +810,26 @@ export class WorktreeService {
     return { ok: true }
   }
 
+  /** Panes of the saved config other than `exceptPaneId` whose worktree is the folder `path` (canonical), whatever its spelling. */
+  private usersOf(path: string, exceptPaneId: string | undefined): number {
+    let n = 0
+    for (const p of this.deps.worktreePanes?.() ?? []) {
+      if (p.paneId === exceptPaneId || typeof p.path !== 'string' || !isAbsolute(p.path)) continue
+      if (samePath(this.canon(p.path), path)) n++
+    }
+    return n
+  }
+
   /** Revealing a folder is only offered for one the manifest knows. */
   isManaged(path: unknown): path is string {
     return typeof path === 'string' && isAbsolute(path) && this.deps.manifest.find(path) != null
+  }
+
+  /** The main checkout of a worktree the manifest knows (any spelling of its folder), else null. The chip's "main -N" reads its HEAD. */
+  repoOf(path: unknown): string | null {
+    if (typeof path !== 'string' || !isAbsolute(path)) return null
+    const entry = this.deps.manifest.find(path)
+    return entry && WORKTREE_BRANCH_RE.test(entry.branch) && isAbsolute(entry.repoRoot) ? entry.repoRoot : null
   }
 
   /**

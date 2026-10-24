@@ -3,7 +3,8 @@
 // console on one line, a console waiting on the user skipped), race mode (counters capped at 4, "this workspace"
 // only when it fits, base from the probe, Ctrl+Enter starts), the race bar
 // (state glyph, diffstat against base, View changes in "against base" mode,
-// Copy git checkout, Discard, Keep this one with its checkbox, close) and the
+// Copy git checkout, Discard, Keep this one with its checkbox, a contestant
+// whose worktree another console uses kept with its reason, close) and the
 // Changes panel toggle. A fake window.snApi stands in for main. Needs
 // `npm run build` first (CSS). No user config, repo, git or pty is touched.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
@@ -170,6 +171,19 @@ app.whenReady().then(async()=>{
  await js("document.querySelector('[data-race-keep-dialog] [data-race-keep-confirm]').previousElementSibling.click()");await wait(150);
  ok(!(await js("!!document.querySelector('[data-race-keep-dialog]')"))&&(await js("smoke.calls.remove.length"))===1,'cancelled, nothing was asked of main');
  await js("void (smoke.fake.inspect=smoke.fake.prevInspect)");
+ // Keep this one: an other whose worktree another console also runs in (A9, "New console in this worktree") stays.
+ await js("void (smoke.extra=(()=>{const s=smoke.app.getState();const wt=s.workspaces[0].panes.find(p=>p.id==='"+ids[1]+"').worktree;return s.addPane(s.workspaces[0].id,{type:'shell',title:'Extra',cwd:wt.path,worktree:{...wt}})})())");await wait(150);
+ await click('[data-race-row="'+ids[2]+'"] [data-race-keep]');await wait(300);
+ const ks=await js("({rows:[...document.querySelectorAll('[data-race-keep-rows] li')].map(e=>e.getAttribute('data-race-keep-blocked')),text:document.querySelector('[data-race-keep-rows]')?.textContent||'',ack:!!document.querySelector('[data-race-keep-ack]'),dis:document.querySelector('[data-race-keep-confirm]').disabled})");
+ ok(ks.rows.length===1&&ks.rows[0]==='shared'&&ks.text.includes('otra consola usa su worktree: se queda')&&!ks.ack&&ks.dis,'a contestant whose worktree another console uses stays, with the reason '+JSON.stringify(ks));
+ await shot('race-keep-shared');
+ await js("document.querySelector('[data-race-keep-dialog] [data-race-keep-confirm]').previousElementSibling.click()");await wait(150);
+ // Discard on it goes to the close dialog, which explains and offers only Keep.
+ await click('[data-race-row="'+ids[1]+'"] [data-race-discard]');await wait(300);
+ ok((await js("!!document.querySelector('[data-worktree-close-shared]')&&!document.querySelector('[data-worktree-delete]')&&!!document.querySelector('[data-worktree-keep]')")),'Discard on it opens the close dialog without Delete');
+ await js("smoke.wt.getState().closeClose()");await wait(100);
+ ok((await js("smoke.calls.remove.length"))===1,'nothing was asked of main');
+ await js("smoke.app.getState().removePane(smoke.app.getState().workspaces[0].id,smoke.extra)");await wait(150);
  // Keep this one: the dirty other needs the checkbox.
  await click('[data-race-row="'+ids[2]+'"] [data-race-keep]');await wait(300);
  ok((await q('[data-race-keep-rows]')).includes('2 archivos, 0 commits'),'the others with what they lose');
@@ -182,7 +196,7 @@ app.whenReady().then(async()=>{
  ok(!(await js("!!document.querySelector('[data-race-bar]')"))&&(await js("smoke.app.getState().workspaces[0].panes.some(p=>p.id==='"+ids[2]+"')")),'closing the bar keeps the console');
  for(const scale of [1.25,1.5]){w.setSize(760,520);w.webContents.setZoomFactor(scale);await js("smoke.app.setState({globalPromptOpen:true})");await wait(200);ok(!(await js('document.documentElement.scrollWidth>innerWidth')),'dialog without overflow at '+scale);await js("smoke.app.setState({globalPromptOpen:false})")}
  if(failures.length)throw new Error(failures.join('\n'));
- console.log('PASS: '+n+' race UI checks (prompt chips + Enter, race counters/destination/base, bar stat/copy/view/discard/keep/close, panel against base, 125/150%); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' race UI checks (prompt chips + Enter, race counters/destination/base, bar stat/copy/view/discard/keep/shared worktree/close, panel against base, 125/150%); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

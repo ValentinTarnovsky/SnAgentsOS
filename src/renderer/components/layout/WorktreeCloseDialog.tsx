@@ -3,8 +3,9 @@ import { createPortal } from 'react-dom'
 import { FolderOpen, GitBranch, Loader2, RotateCw } from 'lucide-react'
 import type { WorktreeInspectRes, WorktreeRemoveRes } from '@shared/worktree-types'
 import { useAppStore } from '@/lib/store'
+import { snapshotConfig } from '@/lib/persist'
 import { useWorktreeStore, type WorktreeCloseRequest } from '@/lib/worktreeStore'
-import { ackFields, deleteBlock, deleteNeedsAck, lostCommits, removeExpectations } from '@/lib/worktrees'
+import { ackFields, deleteBlock, deleteNeedsAck, lostCommits, removeExpectations, worktreeUsers } from '@/lib/worktrees'
 import { useT, type MessageKey } from '@/i18n'
 
 /** Mounted once (App); shows while a close request is open. */
@@ -17,6 +18,20 @@ export function WorktreeCloseDialog() {
 type RemoveError = Exclude<WorktreeRemoveRes, { ok: true }>
 
 /**
+ * The config to main now instead of 400 ms later (persist.ts): main refuses a
+ * delete as 'shared' from the saved consoles, and config:save is a send that
+ * lands before the remove invoke, so a console closed just before never counts.
+ */
+function saveConfigNow(): void {
+  if (!useAppStore.getState().hydrated) return
+  try {
+    window.snApi.config.save(snapshotConfig())
+  } catch {
+    /* the debounced save still goes */
+  }
+}
+
+/**
  * Closing a console that runs in a worktree (E7-FR-30): the branch, the
  * uncommitted files, the commits not in the base and whether the branch is
  * merged into the workspace HEAD. "Keep worktree" (focused) only closes the
@@ -25,7 +40,9 @@ type RemoveError = Exclude<WorktreeRemoveRes, { ok: true }>
  * operation or another branch checked out blocks Delete; a worktree that
  * moved on after this read ('changed' from main) is read again. The pane leaves the
  * store only after main said ok, or on Keep. Without a pane (an orphan in
- * Settings, FR-31) there is no Keep.
+ * Settings, FR-31) there is no Keep. While another console still runs in
+ * the same folder (app 2.7.0, A9) Delete is not offered: main would only
+ * kill this console's shell and the other one keeps the folder in use.
  */
 function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
   const t = useT()
@@ -39,6 +56,8 @@ function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
   const keepRef = useRef<HTMLButtonElement>(null)
   const liveRef = useRef(true)
   const hasPane = !!(req.paneId && req.workspaceId)
+  // The other consoles (any workspace) whose worktree is this folder.
+  const others = useAppStore((s) => worktreeUsers(s.workspaces, req.path, req.paneId))
 
   const inspect = (): Promise<WorktreeInspectRes> =>
     window.snApi.git
@@ -83,13 +102,15 @@ function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
   // A gone folder too: its branch delete still drops the commits main counted in the repo.
   const needsAck = info ? deleteNeedsAck(info) : false
   const block = info ? deleteBlock(info, req.branch) : null
-  const canDelete = !!info && !busy && !block && (!needsAck || ack)
+  const shared = others > 0
+  const canDelete = !!info && !busy && !block && !shared && (!needsAck || ack)
 
   const remove = async (): Promise<void> => {
     if (!canDelete || !info) return
     setBusy(true)
     setError(null)
     let res: WorktreeRemoveRes
+    saveConfigNow()
     try {
       res = await window.snApi.git.worktreeRemove({ path: req.path, ...(req.paneId ? { paneId: req.paneId } : {}), deleteBranch: true, ...removeExpectations(info), ...ackFields(info, ack) })
     } catch (e) {
@@ -158,6 +179,7 @@ function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
               )}
               <li className={commits > 0 ? 'text-state-action' : undefined}>{t('worktree.close.ahead', { count: info.commitsAhead })}</li>
               <li>{info.mergedIntoHead ? t('worktree.close.merged') : t('worktree.close.notMerged')}</li>
+              {(info.behindMain ?? 0) > 0 && <li data-worktree-close-behind={info.behindMain}>{t('worktree.close.behindMain', { count: info.behindMain ?? 0 })}</li>}
               {info.incomplete && (
                 <li data-worktree-close-incomplete className="text-state-action">
                   {t('worktree.close.incomplete')}
@@ -179,7 +201,12 @@ function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
                   : t('worktree.close.detached')}
             </p>
           )}
-          {needsAck && !block && (
+          {shared && (
+            <p data-worktree-close-shared={others} role="status" className="rounded-btn border border-state-action/40 bg-state-action/10 px-3 py-2 text-xs text-text-primary">
+              {others === 1 ? t('worktree.close.sharedOne') : t('worktree.close.shared', { count: others })}
+            </p>
+          )}
+          {needsAck && !block && !shared && (
             <label className="flex items-start gap-2 rounded-btn border border-state-error/40 bg-state-error/10 px-3 py-2 text-xs text-text-primary">
               <input type="checkbox" data-worktree-ack checked={ack} onChange={(e) => setAck(e.target.checked)} className="mt-0.5 accent-[var(--color-state-error)]" />
               {info?.incomplete ? t('worktree.close.ackUnknown') : t('worktree.close.ack', { files, commits })}
@@ -216,15 +243,17 @@ function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
           >
             {t('common.cancel')}
           </button>
-          <button
-            data-worktree-delete
-            onClick={() => void remove()}
-            disabled={!canDelete}
-            className="flex items-center gap-1.5 rounded-btn border border-red-400/50 bg-red-500/90 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {busy && <Loader2 size={14} className="animate-spin" />}
-            {busy ? t('worktree.close.deleting') : t('worktree.close.delete')}
-          </button>
+          {!shared && (
+            <button
+              data-worktree-delete
+              onClick={() => void remove()}
+              disabled={!canDelete}
+              className="flex items-center gap-1.5 rounded-btn border border-red-400/50 bg-red-500/90 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {busy && <Loader2 size={14} className="animate-spin" />}
+              {busy ? t('worktree.close.deleting') : t('worktree.close.delete')}
+            </button>
+          )}
           {hasPane && (
             <button
               ref={keepRef}

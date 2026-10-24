@@ -231,17 +231,19 @@ function KeepDialog({ workspaceId, keep, onClose }: { workspaceId: string; keep:
                     <li key={r.paneId} className="flex min-w-0 items-center gap-2" {...(block ? { 'data-race-keep-blocked': block } : {})}>
                       <span className="min-w-0 flex-1 truncate font-mono text-text-primary">{r.branch}</span>
                       <span className={cn('shrink-0', block ? 'text-state-error' : dirty ? 'text-state-action' : 'text-text-secondary')}>
-                        {block === 'inProgress'
-                          ? t('race.keep.inProgress', { op: r.info.inProgress ?? '' })
-                          : block
-                            ? t('race.keep.branchMismatch')
-                            : !r.info.exists
-                              ? commits > 0
-                                ? `${t('worktree.close.gone')}, ${t('race.keep.dirty', { files: 0, commits })}`
-                                : t('worktree.close.gone')
-                              : dirty
-                                ? t('race.keep.dirty', { files: r.info.dirtyFiles, commits })
-                                : t('race.keep.clean')}
+                        {block === 'shared'
+                          ? t('race.keep.shared')
+                          : block === 'inProgress'
+                            ? t('race.keep.inProgress', { op: r.info.inProgress ?? '' })
+                            : block
+                              ? t('race.keep.branchMismatch')
+                              : !r.info.exists
+                                ? commits > 0
+                                  ? `${t('worktree.close.gone')}, ${t('race.keep.dirty', { files: 0, commits })}`
+                                  : t('worktree.close.gone')
+                                : dirty
+                                  ? t('race.keep.dirty', { files: r.info.dirtyFiles, commits })
+                                  : t('race.keep.clean')}
                       </span>
                     </li>
                   )

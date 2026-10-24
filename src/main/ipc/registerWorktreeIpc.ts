@@ -22,6 +22,22 @@ export function worktreesRootOf(cfg: ConfigFile | null, fallback: string): strin
   return typeof raw === 'string' && raw.trim() && isAbsolute(raw.trim()) ? raw.trim() : fallback
 }
 
+/**
+ * Every pane of the saved config (any workspace) that runs in a worktree,
+ * with its folder (app 2.7.0, A9): a delete is refused while another one is
+ * on the folder. Renderer data, only ever compared, never acted on.
+ */
+export function worktreePanesOf(cfg: ConfigFile | null): Array<{ paneId: string; path: string }> {
+  const out: Array<{ paneId: string; path: string }> = []
+  for (const ws of cfg?.workspaces ?? []) {
+    for (const p of ws.panes ?? []) {
+      const path = p.worktree?.path
+      if (typeof p.id === 'string' && typeof path === 'string' && path) out.push({ paneId: p.id, path })
+    }
+  }
+  return out
+}
+
 /** What a worktree delete must never touch, on top of "strictly inside the worktree root". */
 function removalGuard(): Omit<PathGuard, 'allowedRoots'> {
   const present = (list: Array<string | null | undefined>): string[] => list.filter((p): p is string => !!p)
@@ -57,6 +73,7 @@ export function registerWorktreeIpc(deps: WorktreeIpcDeps): WorktreeService {
     defaultRoot,
     guard: removalGuard,
     killPane: deps.killPane,
+    worktreePanes: () => worktreePanesOf(deps.loadConfig()),
   })
   ipcMain.handle(CH.GIT_WORKTREE_ADD, (_e, req: unknown) => service.create(req))
   ipcMain.handle(CH.GIT_WORKTREE_REMOVE, (_e, req: unknown) => service.remove(req))

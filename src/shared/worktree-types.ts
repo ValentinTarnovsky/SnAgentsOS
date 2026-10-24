@@ -88,6 +88,12 @@ export interface WorktreeInspectRes {
   headBranch?: string
   /** A rebase, merge, cherry-pick, revert or bisect left half-done in the folder. */
   inProgress?: WorktreeInProgress
+  /**
+   * Commits the repo HEAD (the main checkout's, as for `mergedIntoHead`) has
+   * that `tip` lacks: `rev-list --count <tip>..HEAD` (app 2.7.0, A9, "main -N").
+   * Only for a folder on disk that main manages; absent when unknown.
+   */
+  behindMain?: number
 }
 
 /** `git:worktreeRemove`: the renderer sends the path and the pane, main completes the rest from its manifest. */
@@ -120,10 +126,13 @@ export interface WorktreeRemoveReq {
  * new uncommitted files, an operation started) or, with neither expectation,
  * the delete would lose work nobody confirmed. Nothing was deleted, except
  * when the detail is 'tip_after_delete' (the folder went, the branch stayed).
+ * 'shared' (app 2.7.0, A9): another console of the saved config still runs
+ * in the folder ("New console in this worktree"); nothing was killed or
+ * deleted, `users` says how many.
  */
-export type WorktreeRemoveError = 'not_managed' | 'unlink_failed' | 'busy' | 'git_error' | 'changed'
+export type WorktreeRemoveError = 'not_managed' | 'unlink_failed' | 'busy' | 'git_error' | 'changed' | 'shared'
 
-export type WorktreeRemoveRes = { ok: true } | { ok: false; error: WorktreeRemoveError; detail?: string }
+export type WorktreeRemoveRes = { ok: true } | { ok: false; error: WorktreeRemoveError; detail?: string; users?: number }
 
 /** One row of Settings > Git > Worktrees (FR-31). `repoRoot`/`base` let "Open a console here" rebuild `pane.worktree`. */
 export interface WorktreeListEntry {

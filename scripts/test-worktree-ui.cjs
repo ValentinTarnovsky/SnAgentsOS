@@ -4,9 +4,16 @@
 // focused, the checkbox gate, Delete, busy with Retry / Open folder, a
 // half-done operation or another branch blocking Delete, 'changed' reading
 // the worktree again), the pane
-// branch chip, the missing card and Settings > Git (root + orphans). A fake
-// window.snApi stands in for main. Needs `npm run build` first (CSS). No user
-// config, real repo or git process is touched.
+// branch chip, the missing card and Settings > Git (root + orphans). App
+// 2.7.0 (A9): the chip's and the dialog's "main -N" (the chip's only with the
+// git chip on, like its counts), the dialog without Delete
+// while another console (any spelling of the path) uses the worktree, Delete
+// saving the config at once before asking main, and the
+// pane menu's "New console in this worktree" (same agent and worktree,
+// disabled on a full workspace), from the production WorkspaceView of a
+// workspace that is not active (no console spawns). A fake window.snApi
+// stands in for main. Needs `npm run build` first (CSS). No user config, real
+// repo or git process is touched.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -22,26 +29,31 @@ import {WorktreeLaunchDialog} from './src/renderer/components/workspace/Worktree
 import {WorktreeCloseDialog} from './src/renderer/components/layout/WorktreeCloseDialog';
 import {WorktreeMissingCard} from './src/renderer/components/layout/WorktreeMissingCard';
 import {PaneWorktreeChip} from './src/renderer/components/git/PaneWorktreeChip';
+import {WorkspaceView} from './src/renderer/components/workspace/WorkspaceView';
 import {I18nProvider} from './src/renderer/i18n';
 import {useAppStore} from './src/renderer/lib/store';
 import {useGitStore} from './src/renderer/lib/gitStore';
 import {useWorktreeStore} from './src/renderer/lib/worktreeStore';
 import {requestClosePane, templateFromPreset} from './src/renderer/lib/worktrees';
 import {applyTheme} from './src/renderer/themes/applyTheme';
-const calls={add:[],remove:[],reveal:[],refresh:[]};
+const calls={add:[],remove:[],reveal:[],refresh:[],saves:[]};
 const sha='f6c3fc4f451077c2689a52f81295236419257c5d';
 const wt={repoRoot:'C:\\\\repo',path:'C:\\\\data\\\\worktrees\\\\repo-abc123\\\\claude-1',branch:'sn/claude-1',base:sha};
 const fake={addRes:null,removeRes:{ok:true},afterRemove:null,inspect:{exists:true,dirtyFiles:2,commitsAhead:1,mergedIntoHead:false,tip:sha,headBranch:'sn/claude-1'},list:[
  {path:wt.path,branch:wt.branch,repoName:'repo',dirty:false,managed:true,exists:true,repoRoot:'C:\\\\repo',base:sha},
  {path:'C:\\\\data\\\\worktrees\\\\repo-abc123\\\\old-1',branch:'sn/old-1',repoName:'repo',dirty:true,managed:true,exists:true,repoRoot:'C:\\\\repo',base:sha},
  {path:'C:\\\\data\\\\worktrees\\\\repo-abc123\\\\foreign',branch:'feat',repoName:'repo',dirty:null,managed:false,exists:true}]};
-window.snApi={platform:'win32',dialog:{openDirectory:async()=>'D:\\\\wt'},git:{
+// The pane grid (A9 menu) reads more of the bridge than the dialogs: anything not faked is a no-op.
+const noop=()=>()=>{};
+const fallback=(base)=>new Proxy(base,{get:(t,k)=>k in t?t[k]:(typeof k==='string'?fallback(noop):undefined)});
+// config.save: how many removes main had seen when each save went, and the consoles it carried.
+window.snApi=fallback({platform:'win32',dialog:{openDirectory:async()=>'D:\\\\wt'},config:fallback({save:(c)=>calls.saves.push({removes:calls.remove.length,panes:c.workspaces.flatMap(w=>w.panes.map(p=>p.id))})}),git:fallback({
  info:async()=>({available:true,version:'2.45.1',path:'C:\\\\Git\\\\git.exe'}),refresh:(r)=>calls.refresh.push(r),setWatch(){},setConfig(){},setPanel(){},onUpdate:()=>()=>{},
  worktreeProbe:async()=>({ok:true,repoName:'repo',head:sha,headShort:sha.slice(0,7)}),
  worktreeAdd:async(r)=>{calls.add.push(r);return fake.addRes??{ok:true,worktree:{repoRoot:'C:\\\\repo',path:'C:\\\\data\\\\worktrees\\\\repo-abc123\\\\'+r.slug,branch:'sn/'+r.slug,base:sha}}},
  worktreeRemove:async(r)=>{calls.remove.push(r);if(fake.afterRemove){fake.inspect=fake.afterRemove;fake.afterRemove=null}return fake.removeRes},
- worktreeInspect:async()=>fake.inspect,worktreeList:async()=>({entries:fake.list}),worktreeReveal:async(p)=>{calls.reveal.push(p);return true}},
- pty:{killPanes:async()=>0},status:{hooksStatus:async()=>({installed:false,settingsPath:'x'}),health:async()=>({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}})}};
+ worktreeInspect:async()=>fake.inspect,worktreeList:async()=>({entries:fake.list}),worktreeReveal:async(p)=>{calls.reveal.push(p);return true}}),
+ pty:fallback({killPanes:async()=>0}),status:fallback({hooksStatus:async()=>({installed:false,settingsPath:'x'}),health:async()=>({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}})})});
 const preset={id:'preset-claude',name:'Claude Code',type:'claude',command:'claude',args:[],color:'#d97757',icon:'claude'};
 useAppStore.setState({hydrated:true,activeWorkspaceId:'w1',presets:[preset],workspaces:[{id:'w1',name:'Repo',cwd:'C:\\\\repo',panes:[
  {id:'pw',type:'claude',presetId:'preset-claude',title:'Claude Code · claude-1',color:'#d97757',icon:'claude',cwd:wt.path,worktree:wt},
@@ -51,10 +63,23 @@ applyTheme('midnight');
 function Header(){const ws=useAppStore(s=>s.workspaces[0]);const pane=ws.panes.find(p=>p.id==='pw');return <div className="flex flex-col gap-2 p-3">
  <header data-header className="flex h-8 w-[420px] items-center gap-1.5 overflow-hidden border border-border bg-card/50 px-2"><span className="min-w-0 flex-1 truncate text-xs">{pane?.title}</span>{pane&&<PaneWorktreeChip pane={pane}/>}</header>
  <div data-missing-host className="h-48 w-[420px] border border-border">{pane&&pane.worktree&&<WorktreeMissingCard workspace={ws} pane={pane} presets={[preset]}/>}</div></div>}
-createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div style={{height:'100vh'}} className="bg-bg-primary text-text-primary"><Header/><SettingsModal/><WorktreeLaunchDialog/><WorktreeCloseDialog/></div></I18nProvider>);
-window.smoke={app:useAppStore,git:useGitStore,wt:useWorktreeStore,calls,fake,wtObj:wt,sha,
+// A9: a second workspace, never active, whose grid has the pane menu (no console spawns there).
+const wt2={repoRoot:'C:\\\\repo',path:'C:\\\\data\\\\worktrees\\\\repo-abc123\\\\shared-1',branch:'sn/shared-1',base:sha};
+function W2(){const w=useAppStore(s=>s.workspaces.find(x=>x.id==='w2'));return w?<div data-w2 style={{height:300}} className="flex min-h-0 min-w-0 flex-col"><div className="min-h-0 flex-1"><WorkspaceView workspace={w} isActive={false}/></div></div>:null}
+createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div style={{height:'100vh'}} className="bg-bg-primary text-text-primary"><Header/><W2/><SettingsModal/><WorktreeLaunchDialog/><WorktreeCloseDialog/></div></I18nProvider>);
+window.smoke={app:useAppStore,git:useGitStore,wt:useWorktreeStore,calls,fake,wtObj:wt,wt2,sha,
  openLaunch:()=>useWorktreeStore.getState().openLaunch({workspaceId:'w1',repoCwd:'C:\\\\repo',template:templateFromPreset(preset)}),
- close:(id)=>requestClosePane('w1',id),settings:()=>useAppStore.getState().openSettings('git')};
+ close:(id)=>requestClosePane('w1',id),settings:()=>useAppStore.getState().openSettings('git'),
+ // Two consoles on one worktree, the second with another spelling of its folder.
+ addW2:()=>useAppStore.setState(s=>({workspaces:[...s.workspaces,{id:'w2',name:'Dos',cwd:'C:\\\\repo',setupId:'ssh-1',panes:[
+  {id:'sa',type:'claude',presetId:'preset-claude',title:'Claude Code · shared-1',color:'#d97757',icon:'claude',cwd:wt2.path,worktree:wt2},
+  {id:'sb',type:'shell',title:'Shell',color:'#fff',icon:'terminal',cwd:wt2.path,setupId:'',worktree:{...wt2,path:'c:/DATA/worktrees/repo-abc123/shared-1/'}}]}]})),
+ dropW2:()=>useAppStore.setState(s=>({workspaces:s.workspaces.filter(w=>w.id!=='w2')})),
+ w2:()=>useAppStore.getState().workspaces.find(w=>w.id==='w2'),
+ closeW2:(id)=>requestClosePane('w2',id),
+ menu:async(id)=>{const h=document.querySelector('[data-pane-cell='+id+'] header');const r=h.getBoundingClientRect();h.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:r.left+40,clientY:r.top+10}));await new Promise(r=>setTimeout(r,120));return [...document.querySelectorAll('[role=menu] [role=menuitem]')].map(b=>({t:b.textContent,d:b.getAttribute('aria-disabled')==='true',h:b.getAttribute('title')||''}))},
+ pick:async(label)=>{const b=[...document.querySelectorAll('[role=menu] [role=menuitem]')].find(e=>e.textContent===label);if(!b)return false;b.click();await new Promise(r=>setTimeout(r,120));return true},
+ closeMenu:async()=>{window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}));await new Promise(r=>setTimeout(r,120))}};
 `, resolveDir: root, loader: 'tsx' }, bundle: true, platform: 'browser', format: 'iife', outfile: path.join(dir, 'renderer.js'), alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
 fs.writeFileSync(path.join(dir, 'index.html'), `<html><head><meta charset="utf-8"><link rel="stylesheet" href="${pathToFileURL(path.join(assets, css))}"></head><body><div id="root"></div><script src="renderer.js"></script></body></html>`)
 fs.writeFileSync(path.join(dir, 'main.cjs'), `
@@ -77,6 +102,21 @@ app.whenReady().then(async()=>{
  ok((await js("smoke.git.getState().panel?.targetKey"))==='pane:pw','a chip click opens Changes on the worktree target');
  await js("smoke.git.getState().closeChanges()");
  ok((await js("document.querySelector('[data-header]').scrollWidth<=document.querySelector('[data-header]').clientWidth+1")),'the chip truncates inside the header');
+ // A9: "main -N" from main's live mainBehind, only while it is over 0.
+ ok(!(await js("!!document.querySelector('[data-worktree-main-behind]')")),'no main -N without mainBehind');
+ const setBehind=(v)=>js("smoke.git.setState(s=>({summaries:{...s.summaries,'pane:pw':{...s.summaries['pane:pw'],mainBehind:"+v+"}}}))");
+ await setBehind(3);await wait(100);
+ ok((await js("document.querySelector('[data-worktree-main-behind]')?.textContent"))==='main -3','the chip shows main -3');
+ ok((await js("document.querySelector('[data-header]').scrollWidth<=document.querySelector('[data-header]').clientWidth+1")),'main -N fits in the header (the branch truncates)');
+ await shot('chip-main-behind');
+ // With the git chip off main stops refreshing pane:<id>: a frozen count is never shown, like the counts beside it.
+ const setChip=(on)=>js("smoke.app.setState(s=>({settings:{...s.settings,gitChip:"+on+"}}))");
+ await setChip(false);await wait(100);
+ ok(!(await js("!!document.querySelector('[data-worktree-main-behind]')")),'git chip off: no main -N (it would be a frozen count)');
+ await setChip(true);await wait(100);
+ ok((await js("document.querySelector('[data-worktree-main-behind]')?.textContent"))==='main -3','git chip on again: main -3 is back');
+ await setBehind(0);await wait(100);
+ ok(!(await js("!!document.querySelector('[data-worktree-main-behind]')")),'main -0 shows nothing');
 
  // FR-27: launch dialog.
  await js('smoke.openLaunch()');await wait(250);
@@ -185,6 +225,52 @@ app.whenReady().then(async()=>{
  const det=await js("JSON.stringify(smoke.app.getState().workspaces[0].panes.find(p=>p.id==='pw'))");
  ok(!det.includes('worktree')&&!det.includes('"cwd"'),'Remove from pane drops worktree and cwd '+det);
 
+ // A9: "New console in this worktree" from the pane menu, and the close dialog of a shared worktree.
+ await js("smoke.addW2()");await wait(250);
+ const adds=await js("smoke.calls.add.length");
+ let items=await js("smoke.menu('sa')");
+ const here=items.find(i=>i.t==='Nueva consola en este worktree');
+ ok(here&&!here.d&&items.findIndex(i=>i.t==='Nueva consola en este worktree')===items.findIndex(i=>i.t==='Duplicar en worktree')+1,'the menu offers it right after Duplicate in worktree '+JSON.stringify(items.map(i=>i.t)));
+ ok(await js("smoke.pick('Nueva consola en este worktree')"),'picked');
+ const made=await js("(()=>{const ps=smoke.w2().panes;const p=ps.at(-1);return {n:ps.length,type:p.type,preset:p.presetId,title:p.title,cwd:p.cwd===smoke.wt2.path,setup:p.setupId,wt:JSON.stringify(p.worktree)===JSON.stringify(smoke.wt2),copy:p.worktree!==ps[0].worktree,id:p.id}})()");
+ ok(made.n===3&&made.type==='claude'&&made.preset==='preset-claude'&&made.title==='Claude Code · shared-1'&&made.cwd&&made.wt&&made.copy,'a new console of the same agent on the same worktree and folder '+JSON.stringify(made));
+ ok(made.setup==='','it runs local like the pane, not on the workspace connection profile');
+ ok((await js("smoke.calls.add.length"))===adds,'no worktree is created for it');
+ items=await js("smoke.menu('sb')");
+ ok(items.some(i=>i.t==='Nueva consola en este worktree'),'a shell on a worktree offers it too');
+ await js("smoke.closeMenu()");
+ // Two other consoles use it (one spelled c:/DATA/.../): no Delete, and why.
+ await js("smoke.fake.inspect={exists:true,dirtyFiles:0,commitsAhead:0,mergedIntoHead:true,tip:smoke.sha,headBranch:'sn/shared-1',behindMain:4}");
+ const removes=await js("smoke.calls.remove.length");
+ await js("smoke.closeW2('sa')");await wait(250);
+ const sh=await js("({del:!!document.querySelector('[data-worktree-delete]'),keep:!!document.querySelector('[data-worktree-keep]'),ack:!!document.querySelector('[data-worktree-ack]'),shared:document.querySelector('[data-worktree-close-shared]')?.textContent||'',behind:document.querySelector('[data-worktree-close-behind]')?.textContent||''})");
+ ok(!sh.del&&sh.keep&&!sh.ack&&sh.shared==='2 consolas más usan este worktree: cerralas antes de borrar el worktree. Conservar cierra solo esta','another console on the path hides Delete and says why '+JSON.stringify(sh));
+ ok(sh.behind==='main -4: el HEAD del workspace tiene 4 commits que esta rama no tiene','the dialog shows main -4 too '+sh.behind);
+ await shot('close-shared');
+ await js("document.querySelector('[data-worktree-keep]').click()");await wait(150);
+ ok(!(await js("smoke.w2().panes.some(p=>p.id==='sa')"))&&(await js("smoke.calls.remove.length"))===removes,'Keep only closes this console');
+ const newId=made.id;
+ await js("smoke.closeW2('"+newId+"')");await wait(250);
+ ok((await js("document.querySelector('[data-worktree-close-shared]')?.textContent"))==='Otra consola usa este worktree: cerrala antes de borrar el worktree. Conservar cierra solo esta'&&!(await js("!!document.querySelector('[data-worktree-delete]')")),'one other console: the singular reason, still no Delete');
+ await js("smoke.wt.getState().closeClose()");await wait(100);
+ await js("smoke.app.getState().removePane('w2','sb')");await wait(100);
+ await js("smoke.closeW2('"+newId+"')");await wait(250);
+ ok((await js("!!document.querySelector('[data-worktree-delete]')"))&&!(await js("!!document.querySelector('[data-worktree-close-shared]')")),'the last console on it offers Delete again');
+ // Delete sends the config to main first (its 'shared' check reads the saved consoles, which the
+ // debounced save keeps up to 400 ms behind): the console closed just before is not in it.
+ const saves=await js("smoke.calls.saves.length"),rmBefore=await js("smoke.calls.remove.length");
+ await js("document.querySelector('[data-worktree-delete]').click()");await wait(250);
+ const sv=await js("smoke.calls.saves.slice("+saves+")");
+ ok(sv.length===1&&sv[0].removes===rmBefore&&!sv[0].panes.includes('sb')&&sv[0].panes.includes(newId)&&(await js("smoke.calls.remove.length"))===rmBefore+1,'Delete saves the config at once, before the remove, without the console closed just before '+JSON.stringify(sv));
+ ok(!(await js("smoke.w2().panes.some(p=>p.id==='"+newId+"')"))&&!(await js("!!document.querySelector('[data-worktree-close]')")),'the last console leaves with its worktree');
+ // A full workspace: the entry stays, disabled, with the reason.
+ await js("smoke.app.setState(s=>({workspaces:s.workspaces.map(w=>w.id!=='w2'?w:{...w,panes:[...w.panes,{id:'sc',type:'shell',title:'Shell',color:'#fff',icon:'terminal',cwd:smoke.wt2.path,worktree:smoke.wt2},...Array.from({length:11},(_,i)=>({id:'f'+i,type:'shell',title:'F'+i,color:'#fff',icon:'terminal'}))]})}))");await wait(200);
+ items=await js("smoke.menu('sc')");
+ const full=items.find(i=>i.t==='Nueva consola en este worktree');
+ ok(full&&full.d&&full.h==='El workspace está lleno','disabled on a full workspace, with the reason '+JSON.stringify(full));
+ await js("smoke.closeMenu()");
+ await js("smoke.dropW2()");await wait(150);
+
  // FR-31 / FR-28: Settings > Git.
  await js("smoke.app.getState().addPane('w1',{type:'claude',title:'Uses claude-1',cwd:smoke.wtObj.path,worktree:smoke.wtObj})");
  await js('smoke.settings()');await wait(500);
@@ -210,7 +296,7 @@ app.whenReady().then(async()=>{
  await js('smoke.openLaunch()');await wait(200);
  for(const scale of [1.25,1.5]){w.setSize(700,520);w.webContents.setZoomFactor(scale);await wait(200);ok(!(await js('document.documentElement.scrollWidth>innerWidth')),'launch dialog without overflow at '+scale)}
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' worktree UI checks (chip, launch dialog, close dialog gate/keep/busy/retry, missing card, Settings root + orphans, 125/150%); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' worktree UI checks (chip with main -N, launch dialog, close dialog gate/keep/busy/retry/main -N/shared worktree/config saved before the delete, new console in this worktree, missing card, Settings root + orphans, 125/150%); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

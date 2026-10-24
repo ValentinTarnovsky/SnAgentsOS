@@ -247,17 +247,19 @@ export const CH = {
   WS_NOTES_CHANGED: 'wsNotes:changed', // main -> renderer (WsNotesChangedEvt)
 
   // Files drawer (v2.2, E9): a workspace id and a relative path; main resolves the folder and contains every target.
-  FILES_ROOT: 'files:root', // invoke (workspaceId) -> FilesRootRes
+  // app 2.7.0 (A9): every one also takes an optional paneId (the pane's managed worktree is the root).
+  FILES_ROOT: 'files:root', // invoke (workspaceId, paneId?) -> FilesRootRes
   FILES_LIST: 'files:list', // invoke (FilesListReq) -> FilesListRes
-  FILES_READ: 'files:read', // invoke ({ workspaceId, rel }) -> FileReadRes
+  FILES_READ: 'files:read', // invoke (FilesPathReq) -> FileReadRes
   FILES_WRITE: 'files:write', // invoke (FileWriteReq) -> FileWriteRes
   FILES_CREATE: 'files:create', // invoke (FileCreateReq) -> FilesOpRes
   FILES_RENAME: 'files:rename', // invoke (FileRenameReq) -> FilesOpRes
-  FILES_TRASH: 'files:trash', // invoke ({ workspaceId, rel }) -> FilesOpRes (to the OS trash)
-  FILES_REVEAL: 'files:reveal', // invoke ({ workspaceId, rel }) -> FilesOpRes
-  FILES_OPEN: 'files:open', // invoke ({ workspaceId, rel }) -> FilesOpRes (inert formats open with their app, the rest is revealed)
-  FILES_WATCH: 'files:watch', // send (workspaceId | null): the one folder watched
+  FILES_TRASH: 'files:trash', // invoke (FilesPathReq) -> FilesOpRes (to the OS trash)
+  FILES_REVEAL: 'files:reveal', // invoke (FilesPathReq) -> FilesOpRes
+  FILES_OPEN: 'files:open', // invoke (FilesPathReq) -> FilesOpRes (inert formats open with their app, the rest is revealed)
+  FILES_WATCH: 'files:watch', // send (workspaceId | null, paneId?): the one folder watched
   FILES_CHANGED: 'files:changed', // main -> renderer (FilesChangedEvt)
+  FILES_RESOLVE_REFS: 'files:resolveRefs', // invoke (FilesResolveRefsReq) -> FileRefResolved[] (Ctrl+click on file:line, app 2.7.0, A9)
 
   // Desktop console chat (app 2.7.0, A7; settings.labs.consoleChat): one ChatHub reader per window and pane; main checks the lab and the pane.
   CHAT_SUB: 'chat:sub', // invoke (ChatSubReq) -> ChatPageRes (the first page; a repeat is a fresh first page)

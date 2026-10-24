@@ -219,4 +219,27 @@ export function orphanWorktrees(entries: WorktreeListEntry[], workspaces: Worksp
   return entries.filter((e) => !used.has(worktreePathKey(e.path)))
 }
 
+/**
+ * How many consoles other than `exceptPaneId` (any workspace) run in the
+ * worktree at `path` (app 2.7.0, A9): the close dialog offers no Delete while
+ * one does, since main only kills the closing console's shell.
+ */
+export function worktreeUsers(workspaces: readonly Workspace[], path: string, exceptPaneId?: string): number {
+  const key = worktreePathKey(path)
+  let n = 0
+  for (const w of workspaces) for (const p of w.panes) if (p.id !== exceptPaneId && p.worktree?.path && worktreePathKey(p.worktree.path) === key) n++
+  return n
+}
+
+/**
+ * "New console in this worktree" (app 2.7.0, A9): the same agent, command and
+ * look as `pane` (what Duplicate gives) on the same worktree and folder, local
+ * like the pane even when the workspace has a connection profile.
+ */
+export function paneInWorktree(pane: Pane, ws: Workspace, presets: AgentPreset[]): Partial<Pane> | null {
+  const wt = pane.worktree
+  if (!wt) return null
+  return { ...paneFromWorktree(templateFromPane(pane, presets), wt), cwd: pane.cwd ?? wt.path, ...(ws.setupId ? { setupId: '' } : {}) }
+}
+
 export { isValidSlug }

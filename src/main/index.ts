@@ -695,10 +695,18 @@ async function bootstrap(): Promise<void> {
   void accounts.init(configStore.load()?.settings?.claudeAccounts ?? null).catch(() => undefined)
   // The phone's (and the Share guests') git handler, captured when registerGitIpc hands it over.
   let remoteGitHandler: ((req: RemoteGitRequest) => Promise<RemoteGitReply>) | null = null
+  // Worktree per console (E7-FR-27..32, 36): worktrees.json under dataDir().
+  // Before the chip and the Files drawer: both ask it which folders it manages (app 2.7.0, A9).
+  const worktrees = registerWorktreeIpc({
+    loadConfig: () => configStore.load(),
+    killPane: (paneId) => ptyManager.killPaneAndWait(paneId),
+  })
   // Git chip (E7-FR-05..10); settings.gitChip is a schema 12 key, absent = on.
   registerGitIpc({
     getSender: () => mainWindow?.webContents ?? null,
     initialGitChip: (configStore.load()?.settings as { gitChip?: unknown } | undefined)?.gitChip !== false,
+    // "main -N" of a pane on a managed worktree (app 2.7.0, A9).
+    managedRepoOf: (dir) => worktrees.repoOf(dir),
     // The phone's gitReq (E7-FR-22..26) reads through the same GitService.
     setRemoteGit: (handler) => {
       // app 2.4.0: the same GitRemote handler answers the Share guests (read-only, scoped workspace).
@@ -719,11 +727,12 @@ async function bootstrap(): Promise<void> {
   remoteManager.setNotes(wsNotes)
   // Files drawer (v2.2, E9): the workspace folder from the config, every target contained.
   // Share guests read it too (app 2.6.0, read-only, through the guest half).
-  const fileService = registerFilesIpc({ getSender: () => mainWindow?.webContents ?? null, config: () => configStore.load() })
-  // Worktree per console (E7-FR-27..32, 36): worktrees.json under dataDir().
-  registerWorktreeIpc({
-    loadConfig: () => configStore.load(),
-    killPane: (paneId) => ptyManager.killPaneAndWait(paneId),
+  // app 2.7.0 (A9): a pane's tree is its managed worktree; resolveRefs reads relative refs from its spawn cwd.
+  const fileService = registerFilesIpc({
+    getSender: () => mainWindow?.webContents ?? null,
+    config: () => configStore.load(),
+    isManagedWorktree: (p) => worktrees.isManaged(p),
+    spawnCwd: (paneId) => ptyManager.getSpawnCwd(paneId),
   })
   // Per-repo .snagentsos.json (E8-FR-23..27): trusted-repos.json under dataDir().
   registerRepoConfigIpc()

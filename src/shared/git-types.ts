@@ -73,6 +73,12 @@ export interface GitSummary {
   op: 'merge' | 'rebase' | 'cherry-pick' | null
   /** More than 5000 status entries. */
   truncated: boolean
+  /**
+   * A `pane:` target on a worktree main manages (app 2.7.0, A9, "main -N"):
+   * commits the main checkout's HEAD has that this HEAD lacks. Absent for
+   * any other target, while unborn, or when git could not count.
+   */
+  mainBehind?: number
   /** When the summary last CHANGED (tooltip "Last change"), epoch ms. */
   updatedAt: number
 }

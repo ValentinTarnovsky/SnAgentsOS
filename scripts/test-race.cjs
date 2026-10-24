@@ -5,7 +5,8 @@
 // orchestration over a fake window.snApi (N worktrees from one sha, the task
 // with Enter to each agent once ready, the 20 s fallback, all-or-nothing
 // worktrees, a new workspace) and the bar's actions (discard clean at once,
-// dirty through the FR-30 dialog, keep one). Bundled with esbuild and run in
+// dirty through the FR-30 dialog, keep one, and never a worktree another
+// console also runs in, app 2.7.0). Bundled with esbuild and run in
 // a vm like test-worktrees.cjs; no git, pty or user config is touched.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -209,6 +210,26 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   same(R.liveContestants(R.useRaceStore.getState().races.w1, ws()).length, 3, 'three rows on the bar')
   const dirtyPath = racers[1].worktree.path
   fake.inspect = (r) => (r.path === dirtyPath ? { exists: true, dirtyFiles: 2, commitsAhead: 1, mergedIntoHead: false } : { exists: true, dirtyFiles: 0, commitsAhead: 0, mergedIntoHead: false, tip: sha })
+  // A9: a console opened on a contestant's worktree ("New console in this worktree"): the race never deletes that worktree.
+  const extra = S.getState().addPane('w1', { type: 'shell', title: 'Extra', cwd: racers[0].worktree.path, worktree: { ...racers[0].worktree } })
+  const rmShared = calls.remove.length
+  check((await R.discardContestant('w1', c1)) === 'dialog' && R.useWorktreeStore.getState().close?.paneId === c1, 'a clean contestant whose worktree another console uses goes through the dialog (it explains and only offers Keep)')
+  check(calls.remove.length === rmShared && ws().panes.some((p) => p.id === c1), 'nothing is sent to main and the console stays')
+  R.useWorktreeStore.getState().closeClose()
+  const sharedPlan = await R.planKeep('w1', c3)
+  const sharedRow = sharedPlan.find((r) => r.paneId === c1)
+  check(sharedRow && sharedRow.shared === 1 && R.keepBlock(sharedRow) === 'shared' && !sharedPlan.find((r) => r.paneId === c2).shared, 'keep this one: the shared contestant is blocked, with the count; the others are not')
+  same(R.keepLoss([sharedRow]), { needsAck: false, files: 0, commits: 0 }, 'a shared contestant stays, so it counts no loss')
+  check((await R.discardOthers('w1', [sharedRow])) === 0 && calls.remove.length === rmShared && ws().panes.some((p) => p.id === c1), 'discardOthers never sends a shared contestant to main')
+  const { shared: _planned, ...lateRow } = sharedRow
+  check((await R.discardOthers('w1', [lateRow])) === 0 && calls.remove.length === rmShared && ws().panes.some((p) => p.id === c1), 'a console opened on it after the plan was read: skipped at confirm too')
+  // Main refuses on its own saved config (the renderer no longer has the other console): never a delete.
+  S.getState().removePane('w1', extra)
+  fake.removeRes = { ok: false, error: 'shared', users: 1 }
+  check((await R.discardContestant('w1', c1)) === 'dialog' && R.useWorktreeStore.getState().close?.paneId === c1 && ws().panes.some((p) => p.id === c1), "main's 'shared' sends Discard to the dialog, the console stays")
+  R.useWorktreeStore.getState().closeClose()
+  check((await R.discardOthers('w1', [lateRow])) === 0 && ws().panes.some((p) => p.id === c1), "main's 'shared' on Keep this one: the console stays")
+  fake.removeRes = { ok: true }
   check((await R.discardContestant('w1', c1)) === 'removed', 'a clean contestant is discarded without a dialog')
   check(calls.remove.at(-1).path === racers[0].worktree.path && calls.remove.at(-1).paneId === c1 && calls.remove.at(-1).deleteBranch === true, 'main deletes its worktree and branch (and kills its pty)')
   check(calls.remove.at(-1).expectTip === sha && calls.remove.at(-1).expectDirty === 0, 'against the inspect it was judged clean on (main answers changed if it moved on)')
@@ -284,7 +305,7 @@ const pane = (id, type = 'shell', extra = {}) => ({ id, type, title: id, color: 
   R.useRaceStore.getState().end(nw.workspaceId)
   check(!R.useRaceStore.getState().races[nw.workspaceId], 'closing the bar ends the race')
 
-  console.log(`PASS: ${checks} race checks (global prompt paste/Enter, race rules, orchestration, readiness, late, all-or-nothing, new workspace, discard, keep one, no merge)`)
+  console.log(`PASS: ${checks} race checks (global prompt paste/Enter, race rules, orchestration, readiness, late, all-or-nothing, new workspace, discard, keep one, shared worktree kept, no merge)`)
 })().catch((e) => {
   console.error(e)
   process.exit(1)
