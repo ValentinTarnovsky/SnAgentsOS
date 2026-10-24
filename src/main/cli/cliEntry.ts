@@ -420,6 +420,9 @@ export interface Connection {
 
 export class AppUnavailable extends Error {}
 
+/** App 2.7.0 (Teams, decision 47): a team run without its token; never the runtime.json fallback (exit 6, not 5). */
+export class TeamTokenLost extends Error {}
+
 /**
  * Default dataDir()/runtime.json of an installed build (the shim always passes
  * --runtime), joined with the separators of `platform`, not the host's.
@@ -448,7 +451,9 @@ export function pidAlive(pid: number): boolean {
 /**
  * Endpoint and token, in this order (E8 Group C): SNAOS_CTL_ENDPOINT +
  * SNAOS_CTL_TOKEN (console token), then --runtime, then the default data dir.
- * A runtime.json whose pid is dead means the app is not running.
+ * A runtime.json whose pid is dead means the app is not running. Inside a
+ * team run (SNAOS_TEAM_RUN) only its own token counts: a lost one (an agent
+ * shell that filtered it) is TeamTokenLost, never the master token.
  */
 export function resolveConnection(
   flags: Record<string, string | true>,
@@ -458,6 +463,7 @@ export function resolveConnection(
 ): Connection {
   const endpoint = env[CLI_ENV.ctlEndpoint]
   const token = env[CLI_ENV.ctlToken]
+  if (env[CLI_ENV.teamRun] && !(endpoint && token)) throw new TeamTokenLost('this team run lost its token')
   if (endpoint && token) return { endpoint, token, console: true }
   const path = typeof flags.runtime === 'string' ? flags.runtime : defaultRuntimePath(env)
   let rt: SnaosRuntimeFile
@@ -722,6 +728,23 @@ export function formatHuman(method: CtlMethod, data: unknown): string {
     }
     case 'needs':
       return typeof d.needs === 'string' ? `needs: ${d.needs}` : 'needs cleared'
+    // app 2.7.0 (Teams): no `team` command reaches here before B3 (its parser and output land there); the raw data meanwhile.
+    case 'team.show':
+    case 'team.tasks':
+    case 'team.task.get':
+    case 'team.task.create':
+    case 'team.task.update':
+    case 'team.comment':
+    case 'team.note':
+    case 'team.ask':
+    case 'team.needs':
+    case 'team.plan':
+    case 'team.review':
+    case 'team.verdict':
+    case 'team.done':
+    case 'team.approve':
+    case 'team.hire':
+      return JSON.stringify(data ?? null)
   }
 }
 
@@ -799,6 +822,7 @@ export async function run(argv: readonly string[], deps: RunDeps): Promise<numbe
   try {
     conn = (deps.connect ?? ((f, env) => resolveConnection(f, env)))(args.flags, deps.env)
   } catch (e) {
+    if (e instanceof TeamTokenLost) return fail('unauthorized', e.message, CTL_EXIT.unauthorized)
     return fail('desktop_unavailable', e instanceof Error ? e.message : NOT_RUNNING, CTL_EXIT.desktop_unavailable)
   }
   let res: CtlResponse

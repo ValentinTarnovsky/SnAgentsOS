@@ -15,7 +15,8 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose()
+      // An Esc something inside already used (a ConfirmDialog over Settings, a key being recorded) closes only that.
+      if (e.key === 'Escape' && !e.defaultPrevented) onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

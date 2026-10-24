@@ -71,6 +71,12 @@ export interface TranscriptLocatorDeps {
   runningPanes: () => string[]
   /** Transcript paths other consoles already hold (normalized with pathKey), pane id per path. */
   claims: () => Map<string, string>
+  /**
+   * App 2.7.0 (E10 B2): a session a team owns (TeamService.ownsSession). The
+   * folder match never picks its transcript for a console: Lead and free runs
+   * write into the repo root's slug folder, where a hookless console looks.
+   */
+  teamSession?: (sessionId: string) => boolean
   /** Local date for the Codex day folders; injectable for tests. */
   now?: () => Date
   platform?: NodeJS.Platform
@@ -302,6 +308,9 @@ export class TranscriptLocator {
     } catch {
       return { ok: false, reason: 'noTranscript' }
     }
+    // A team run's transcript (its file name is the session id) is never a console's.
+    const teamSession = this.deps.teamSession
+    if (teamSession) names = names.filter((n) => !teamSession(n.replace(/\.jsonl$/i, '')))
     // No live pty, no session to match: without a spawn time every file of
     // the folder would count, and an old transcript could pass for this one.
     const spawned = this.deps.spawnedAt(paneId)

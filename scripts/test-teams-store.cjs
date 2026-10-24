@@ -741,7 +741,7 @@ async function serviceChecks(tmp) {
   check(emitted.some((e) => e.teamId === teamId && e.scopes.includes('list')), 'setup emits a list change')
 
   // The trust gate: runs pass the gate while trusted (the B2 op answers unsupported).
-  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'unsupported' }, 'trusted: runNow passes the gate (B2 stub)')
+  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'cliOff' } }, 'trusted: runNow passes the trust gate (this suite has no CLI: deferred cliOff)')
   same(await svc.request({ op: 'board', teamId }, 'desktop'), { ok: false, error: 'unsupported' }, 'later ops answer unsupported in B1')
 
   // Editing roles/dev.md asks to trust again and blocks runs (B1 acceptance).
@@ -769,7 +769,7 @@ async function serviceChecks(tmp) {
   const tr = await svc.request({ op: 'trust', teamId, sha256: diff.trust.sha256 }, 'desktop')
   check(tr.ok && tr.team.trust === 'trusted' && svc.team(teamId).trust === 'trusted', 'trust approves the shown sha')
   check(svc.trusted(teamId).files.find((f) => f.rel === 'roles/dev.md').text.includes('Siempre corr'), 'runs read the newly trusted snapshot')
-  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'unsupported' }, 'trusted again: runNow passes the gate')
+  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'cliOff' } }, 'trusted again: runNow passes the trust gate')
 
   // A misnamed file in roles/ never vanishes (decision a): a bad_name warning with its name in the view; the trust
   // state, the sha and the runs are untouched, yet the renderer is told (the problems changed).
@@ -783,7 +783,7 @@ async function serviceChecks(tmp) {
   const gm = await svc.request({ op: 'get', teamId }, 'desktop')
   same(gm.team.defIssues, [{ file: 'roles/Writer.md', line: 0, code: 'bad_name', severity: 'warning' }], 'a misnamed role file: one bad_name warning with its name in the view')
   check(gm.team.trust === 'trusted' && svc.team(teamId).trust === 'trusted' && gm.team.needsCount === 0, 'a warning never changes the trust state nor counts as a need')
-  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'unsupported' }, 'a misnamed role file does not block runs')
+  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'cliOff' } }, 'a misnamed role file does not block runs (past the trust gate)')
   const dw = await svc.request({ op: 'trustDiff', teamId }, 'desktop')
   check(dw.ok && dw.trust.sha256 === dw.trust.approvedSha && same0(dw.trust.issues, [{ file: 'roles/Writer.md', line: 0, code: 'bad_name', severity: 'warning' }]), 'trustDiff lists the warning too (same sha: nothing to trust)')
   // One more misnamed file: another warning, another emit.

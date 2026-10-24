@@ -88,7 +88,7 @@ export const coreOps: Pick<OpTable, 'list' | 'get' | 'setupProbe' | 'setupPrevie
     await svc.refreshTrust(req.teamId)
     const rec = svc.team(req.teamId)
     if (!rec) return fail('not_found')
-    return { ok: true, team: teamView(rec, svc.shownDef(rec), svc.trusted(req.teamId)) }
+    return { ok: true, team: teamView(rec, svc.shownDef(rec), svc.trusted(req.teamId), svc.now()) }
   },
 
   async setupProbe(req, { svc }) {
@@ -207,7 +207,7 @@ export const coreOps: Pick<OpTable, 'list' | 'get' | 'setupProbe' | 'setupPrevie
       const now = svc.team(req.teamId)
       if (!now) return fail('not_found')
       svc.log(`trust ${req.teamId} approved`)
-      return { ok: true, team: teamView(now, svc.shownDef(now), svc.trusted(req.teamId)) }
+      return { ok: true, team: teamView(now, svc.shownDef(now), svc.trusted(req.teamId), svc.now()) }
     })
   },
 
@@ -224,7 +224,7 @@ export const coreOps: Pick<OpTable, 'list' | 'get' | 'setupProbe' | 'setupPrevie
     const rec = svc.team(req.teamId)
     if (!rec) return fail('not_found')
     svc.commit(req.teamId, setTeamFlags(rec.store.rt, req.patch, { now }), ['team', 'list', 'needs'])
-    return { ok: true, team: teamView(rec, svc.shownDef(rec), svc.trusted(req.teamId)) }
+    return { ok: true, team: teamView(rec, svc.shownDef(rec), svc.trusted(req.teamId), svc.now()) }
   },
 
   async reveal(req, { svc }) {

@@ -23,7 +23,19 @@
 // picker; Esc typed where the focus is (after a picker click, a card, Reintentar,
 // the kebab menu, the remove confirm, the focus on body) and the keyboard back on
 // the host; remove; zoom 1 / 1.25 / 1.5 without overflow; es/en; no console
-// error and no en or em dash. No pty, user config or real main is touched.
+// error and no en or em dash. Agents section (B2): the roster from a stubbed
+// `roster` (Lead first and full width, line 2, elapsed, usage "estimado",
+// context, failure and pause chips), Ejecutar ahora opens the drawer composer
+// and sends `runNow` with the request (Enter is a new line, never a pty
+// write or submit), `deferred` shows its reason inline, the drawer renders
+// `runPage` through ChatScroller, a pushed `teams:runAppend` of the watched
+// run appends and one of another run does not, Load earlier, a link behind
+// a confirm, RunLog's cut row (decoded by the real RunLog, English in main)
+// worded in es and en, Frenar confirms and sends `stop`, the agent and team
+// pauses, usage today in the header, the drawer at zoom, and Settings > Labs
+// (the production SettingsModal) asking before turning Teams off with a live
+// run, Esc on that confirm cancelling it while Settings stays open. No pty,
+// user config or real main is touched.
 // Requires npm run build (for the CSS).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -33,6 +45,14 @@ const root = path.resolve(__dirname, '..'), dir = fs.mkdtempSync(path.join(os.tm
 const assets = path.join(root, 'out/renderer/assets')
 const css = fs.existsSync(assets) ? fs.readdirSync(assets).find(f => /^index-.*\.css$/.test(f)) : null
 if (!css) throw new Error('Run npm run build first')
+// The cut text is one string, RUN_LOG_CUT_TEXT of src/shared/teams.ts, that RunLog writes and the run chat
+// matches: a private copy on either side could drift and the row would show main's English.
+const cutCopies = fs.readdirSync(path.join(root, 'src'), { recursive: true }).map(f => String(f).replace(/\\/g, '/')).filter(f => /\.tsx?$/.test(f) && fs.readFileSync(path.join(root, 'src', f), 'utf8').includes('[Run log cut:'))
+if (cutCopies.join() !== 'shared/teams.ts') throw new Error('the run log cut text must live only in src/shared/teams.ts, found in: ' + cutCopies.join(', '))
+// RunLog's cut row exactly as main decodes it (main keeps its text in English); the run chat words it.
+buildSync({ stdin: { contents: "export {runDecoder} from './src/main/teams/RunLog'", resolveDir: root, loader: 'ts' }, bundle: true, platform: 'node', format: 'cjs', outfile: path.join(dir, 'runlog.cjs'), alias: { '@shared': path.join(root, 'src/shared') }, logLevel: 'error' })
+const CUT_ROW = require(path.join(dir, 'runlog.cjs')).runDecoder('claude')({ type: 'snaos.cut', at: 50 }, 50)[0]
+if (!CUT_ROW || CUT_ROW.role !== 'system') throw new Error('RunLog decodes no cut row')
 buildSync({ stdin: { contents: `
 import React from 'react'; import {createRoot} from 'react-dom/client';
 import {I18nProvider} from './src/renderer/i18n';
@@ -53,12 +73,13 @@ import {CommandPalette} from './src/renderer/components/ui/CommandPalette';
 import {TeamSetupDialog} from './src/renderer/components/teams/TeamSetupDialog';
 import {TeamTrustDialog} from './src/renderer/components/teams/TeamTrustDialog';
 import {NotificationStack} from './src/renderer/components/ui/NotificationStack';
+import {SettingsModal} from './src/renderer/components/settings/SettingsModal';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 import {initShareGuest, useShareGuestStore} from './src/renderer/lib/shareGuestStore';
 import {onPaneFocusRequest, setFocusedPane} from './src/renderer/lib/focus';
-const calls={spawn:[],setActive:[],viewed:[],req:[],save:[],focusReq:[]};
+const calls={spawn:[],setActive:[],viewed:[],req:[],save:[],focusReq:[],ptyWrite:[],ptySubmit:[],openExternal:[]};
 onPaneFocusRequest(id=>calls.focusReq.push(id));
-const subs={changed:new Set()};
+const subs={changed:new Set(),append:new Set()};
 const noop=()=>()=>{};
 const fallback=(base)=>new Proxy(base,{get:(t,k)=>k in t?t[k]:(typeof k==='string'?fallback(noop):undefined)});
 const TA='tm-aaaaaaaaaaaa', TB='tm-bbbbbbbbbbbb';
@@ -68,13 +89,41 @@ const ROLES=[
  {id:'dev',name:'Dev',kind:'dev',provider:'claude',model:'sonnet',effort:'medium',permission:'total',count:2},
  {id:'qa',name:'QA',kind:'qa',provider:'claude',model:'sonnet',permission:'readonly',count:1},
  {id:'research',name:'Investigación',kind:'research',provider:'codex',permission:'readonly',count:1}];
-const viewOf=(it)=>({id:it.id,name:it.name,repoRoot:it.repoRoot,repoName:it.repoName,baseBranch:'main',extraRepos:[],goal:'Meta de '+it.name+': que el login ande con OAuth.',trust:it.trust,defIssues:it.issues||[],autoDispatch:false,paused:it.paused,maxConcurrent:2,maxRunMinutes:45,leadApprovesSmallPlans:true,verify:[{repoId:'main',command:'npm test',confirmed:false}],roles:ROLES,rev:it.rev,needsCount:it.needsCount,running:it.running,providerBlockedUntil:it.limit?{claude:Date.now()+3600000}:{}});
-const fake={on:false,reveal:{ok:true},failGet:new Set(),teams:[item(TA,'Alfa',{running:1}),item(TB,'Beta',{trust:'changed',needsCount:1,rev:5,paused:{reason:'user',at:1},limit:true})]};
+const viewOf=(it)=>({id:it.id,name:it.name,repoRoot:it.repoRoot,repoName:it.repoName,baseBranch:'main',extraRepos:[],goal:'Meta de '+it.name+': que el login ande con OAuth.',trust:it.trust,defIssues:it.issues||[],autoDispatch:false,paused:it.paused,maxConcurrent:2,maxRunMinutes:45,leadApprovesSmallPlans:true,verify:[{repoId:'main',command:'npm test',confirmed:false}],roles:ROLES,rev:it.rev,needsCount:it.needsCount,running:it.running,providerBlockedUntil:it.limit?{claude:Date.now()+3600000}:{},...(it.usage?{usageToday:it.usage}:{})});
+// B2: the roster, the runs and their pages main would answer for Alfa.
+const R1='r-111111111111',R2='r-222222222222',R3='r-333333333333';
+const NOW0=Date.now();
+const use=(i,o,c)=>({inputTokens:i,outputTokens:o,cacheReadTokens:0,cacheWriteTokens:0,...(c===undefined?{}:{costUSD:c}),estimated:true});
+const runV=(id,agentId,x)=>({id,agentId,roleId:agentId.replace(/-\\d+$/,''),taskId:null,mode:'free',trigger:'manual',state:'succeeded',outcome:'progress',provider:'claude',model:'sonnet',resumed:false,queuedAt:NOW0-600000,startedAt:NOW0-590000,endedAt:NOW0-300000,...(x||{})});
+const agentV=(id,roleId,roleName,kind,index,x)=>({id,roleId,roleName,kind,index,provider:'claude',model:'sonnet',permission:kind==='dev'?'total':'readonly',status:'idle',paused:false,retired:false,...(x||{})});
+const msg=(id,role,text)=>({id,role,ts:NOW0,blocks:[{t:'text',text}]});
+const RUNS={
+ [R1]:{view:runV(R1,'lead',{mode:'lead',usage:use(40000,2000,0.12)}),items:[msg('10','user','Armá el plan del login'),msg('20','assistant','Listo, ya lo armé.')]},
+ [R2]:{view:runV(R2,'dev',{state:'running',outcome:undefined,endedAt:undefined,taskId:'t-12',startedAt:NOW0-180000,usage:use(820000,30000,0.4),context:{pct:0.42,used:84000,window:200000,exact:false}}),
+  items:[msg('200','user','Arreglá el login'),msg('300','assistant','Mirando la [guía](https://example.com/docs) del proveedor.')],older:[msg('100','user','Contexto previo de la corrida')]},
+ 'r-444444444444':{view:runV('r-444444444444','qa',{mode:'free',state:'failed',outcome:'failed',failure:{kind:'limit',until:NOW0+3600000}}),items:[msg('5','assistant','Llegué al límite de uso.'),${JSON.stringify(CUT_ROW)}]},
+};
+const AGENTS={[TA]:[
+ agentV('lead','lead','Líder','lead',1,{model:'opus',lastRun:RUNS[R1].view}),
+ agentV('dev','dev','Dev','dev',1,{status:'running',taskId:'t-12',run:RUNS[R2].view}),
+ agentV('dev-2','dev','Dev','dev',2),
+ agentV('qa','qa','QA','qa',1,{lastRun:RUNS['r-444444444444'].view}),
+ agentV('research','research','Investigación','research',1,{provider:'codex',model:undefined,paused:true})]};
+const AGENT_RUNS={lead:[R1],dev:[R2],'dev-2':[],qa:['r-444444444444']};
+const fake={on:false,reveal:{ok:true},failGet:new Set(),teams:[item(TA,'Alfa',{running:1,usage:use(1200000,40000,1.75)}),item(TB,'Beta',{trust:'changed',needsCount:1,rev:5,paused:{reason:'user',at:1},limit:true})],
+ runNow:r=>{
+  if(r.agentId==='qa')return{ok:false,error:'deferred',defer:{reason:'globalCap'}};
+  if(r.agentId!=='dev-2')return{ok:false,error:'running'};
+  RUNS[R3]={view:runV(R3,'dev-2',{state:'starting',outcome:undefined,endedAt:undefined,startedAt:Date.now(),queuedAt:Date.now()}),items:[msg('0','user',r.prompt||'')]};
+  AGENT_RUNS['dev-2']=[R3];
+  Object.assign(AGENTS[TA][2],{status:'running',run:RUNS[R3].view});
+  return{ok:true,runId:R3}}};
 const areaEvents=[];
 onTeamChanged(e=>areaEvents.push(e));
 window.snApi=fallback({platform:'win32',filePath:()=>'',
  pty:fallback({reattach:async()=>null,spawn:async r=>{calls.spawn.push(r.paneId);return{ptyId:'pty-'+r.paneId,shellKind:'powershell'}},
-  write(){},resize(){},setActive:ids=>calls.setActive.push(ids),flow(){},kill:async()=>{},killPanes:async()=>0,onData:noop,onExit:noop}),
+  write:(...a)=>{calls.ptyWrite.push(a)},submit:async r=>{calls.ptySubmit.push(r);return{ok:true}},resize(){},setActive:ids=>calls.setActive.push(ids),flow(){},kill:async()=>{},killPanes:async()=>0,onData:noop,onExit:noop}),
+ system:fallback({openExternal:url=>{calls.openExternal.push(url)}}),
  config:fallback({save:cfg=>{calls.save.push(1);return Promise.resolve()}}),
  status:fallback({snapshot:async()=>[],setViewed:ids=>calls.viewed.push(ids),markRead:async()=>true}),
  agents:fallback({list:async()=>[],startup:async()=>({trigger:null,interrupted:[]})}),
@@ -82,13 +131,22 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
  teams:{
   req:async r=>{calls.req.push(r);if(!fake.on)return{ok:false,error:'disabled'};
    switch(r.op){
-    case 'list':return{ok:true,teams:fake.teams.map(({limit,issues,...x})=>x)};
+    case 'list':return{ok:true,teams:fake.teams.map(({limit,issues,usage,...x})=>x)};
     case 'get':{if(fake.failGet.has(r.teamId))return{ok:false,error:'io'};const it=fake.teams.find(x=>x.id===r.teamId);return it?{ok:true,team:viewOf(it)}:{ok:false,error:'not_found'}}
     case 'trustDiff':return{ok:true,trust:{sha256:'ab'.repeat(32),approvedSha:'cd'.repeat(32),diff:{files:[],risks:[],truncated:false},issues:[]}};
     case 'remove':fake.teams=fake.teams.filter(x=>x.id!==r.teamId);return{ok:true};
     case 'reveal':return fake.reveal;
+    case 'roster':{const a=AGENTS[r.teamId];return a?{ok:true,agents:JSON.parse(JSON.stringify(a)),rev:3}:{ok:false,error:'not_found'}}
+    case 'runs':return{ok:true,runs:(AGENT_RUNS[r.agentId]||[]).map(id=>RUNS[id].view),cursor:null};
+    case 'runPage':{const x=RUNS[r.runId];if(!x)return{ok:false,error:'not_found'};const live=['queued','starting','running','stopping'].includes(x.view.state);
+     return r.before?{ok:true,run:x.view,items:x.older||[],cursor:null,done:true,live}:{ok:true,run:x.view,items:x.items,cursor:x.older?x.items[0].id:null,done:!x.older,live}}
+    case 'watchRun':return{ok:true};
+    case 'runNow':return fake.runNow(r);
+    case 'stop':return{ok:true};
+    case 'pauseAgent':{const a=(AGENTS[r.teamId]||[]).find(x=>x.id===r.agentId);if(!a)return{ok:false,error:'not_found'};a.paused=r.on;return{ok:true}}
+    case 'settings':{const it=fake.teams.find(x=>x.id===r.teamId);if(!it)return{ok:false,error:'not_found'};if(r.patch.paused!==undefined)it.paused=r.patch.paused?{reason:'user',at:Date.now()}:null;return{ok:true,team:viewOf(it)}}
     default:return{ok:false,error:'unsupported'}}},
-  onChanged:cb=>{subs.changed.add(cb);return()=>subs.changed.delete(cb)},onRunAppend:noop,onIntegrateProgress:noop},
+  onChanged:cb=>{subs.changed.add(cb);return()=>subs.changed.delete(cb)},onRunAppend:cb=>{subs.append.add(cb);return()=>subs.append.delete(cb)},onIntegrateProgress:noop},
 });
 const local={id:'local1',type:'shell',title:'Local',icon:'terminal',color:'#888'};
 useAppStore.setState(s=>({hydrated:true,activeWorkspaceId:'w1',workspaces:[{id:'w1',name:'Mine',cwd:'C:/repo',panes:[local],layout:{grid:1,order:['local1']}},{id:'w2',name:'Other',cwd:'C:/other',panes:[{...local,id:'local2',title:'Other'}],layout:{grid:1,order:['local2']}}],settings:{...s.settings,language:'es',labs:{...s.settings.labs,teams:false}}}));
@@ -100,10 +158,11 @@ function Keys(){useGlobalKeys();useStatusEvents();return null}
 // App.tsx's wiring: startTeams for as long as the lab is on.
 function TeamsWiring(){const on=useAppStore(s=>labOn(s.settings,'teams'));React.useEffect(()=>{if(!on)return;return startTeams()},[on]);return null}
 function Root(){const [lang,setLang]=React.useState('es');window.smoke.setLang=setLang;
+ // Settings opens on Labs through the production SettingsModal (the Labs off confirm, B2, sits inside its Modal).
  return <I18nProvider lang={lang}><Keys/><TeamsWiring/><div style={{height:'100vh'}} className="flex w-full overflow-hidden bg-bg-primary text-text-primary">
   <Sidebar/>
   <main className="relative min-w-0 flex-1"><WorkspaceHost/><SharedWorkspaceHost/><TeamHost/><AgentsBoard/></main>
-  <CommandPalette/><TeamSetupDialog/><TeamTrustDialog/>
+  <CommandPalette/><TeamSetupDialog/><TeamTrustDialog/><SettingsModal/>
  </div><NotificationStack/></I18nProvider>}
 const seen=[];
 window.addEventListener('keydown',e=>{if(e.key==='O')seen.push({prevented:e.defaultPrevented})});
@@ -111,6 +170,7 @@ const key=(target,o)=>{const ev=new KeyboardEvent('keydown',{bubbles:true,cancel
 window.smoke={calls,fake,TA,TB,areaEvents,seen,item,
  app:()=>useAppStore.getState(),agents:()=>useAgentStore.getState(),teams:()=>useTeamsStore.getState(),
  labs:on=>useAppStore.setState(s=>({settings:{...s.settings,labs:{...s.settings.labs,teams:on}}})),
+ showLabs:on=>on?useAppStore.getState().openSettings('labs'):useAppStore.getState().setSettingsOpen(false),
  collapse:on=>useAppStore.setState({sidebarCollapsed:on}),
  shared:on=>useShareGuestStore.setState(on?{links:{L1:LINK},activeLinkId:'L1'}:{activeLinkId:null,links:{}}),
  sharedActive:()=>useShareGuestStore.getState().activeLinkId,
@@ -118,6 +178,11 @@ window.smoke={calls,fake,TA,TB,areaEvents,seen,item,
  typedIn:(paneId,wsId)=>setFocusedPane(paneId,wsId),
  openTeams,visibleName,
  push:e=>subs.changed.forEach(cb=>cb(e)),
+ pushAppend:e=>subs.append.forEach(cb=>cb(e)),
+ RUNS,AGENTS,R1,R2,R3,
+ reqs:op=>calls.req.filter(r=>r.op===op),
+ // A controlled field typed like a user would (React reads the native value setter).
+ type:(sel,text)=>{const el=document.querySelector(sel);if(!el)throw new Error('missing '+sel);const set=Object.getOwnPropertyDescriptor(el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype,'value').set;set.call(el,text);el.dispatchEvent(new Event('input',{bubbles:true}))},
  gets:id=>calls.req.filter(r=>r.op==='get'&&r.teamId===id).length,
  lists:()=>calls.req.filter(r=>r.op==='list').length,
  has:sel=>!!document.querySelector(sel),count:sel=>document.querySelectorAll(sel).length,
@@ -218,7 +283,7 @@ app.whenReady().then(async()=>{
 
  // Tabs: click, arrows, remembered per team.
  await js("smoke.click('[data-team-tab=agents]')");await settle();
- ok((await js("smoke.attr('[data-team-tab=agents]','aria-selected')"))==='true'&&(await js("smoke.has('[data-team-empty-tab=agents]')")),'Agentes selected shows its line');
+ ok((await js("smoke.attr('[data-team-tab=agents]','aria-selected')"))==='true'&&(await until("smoke.has('[data-agents-roster]')",2000)),'Agentes selected shows the roster (B2)');
  await js("document.querySelector('[data-team-tab=agents]').focus();smoke.keyActive({key:'ArrowRight',code:'ArrowRight',keyCode:39})");await settle();
  v=await js("({sel:smoke.attr('[data-team-tab=needs]','aria-selected'),focus:document.activeElement?.dataset?.teamTab})");
  ok(v.sel==='true'&&v.focus==='needs','ArrowRight moves to Te necesita and focuses it',v);
@@ -404,7 +469,8 @@ app.whenReady().then(async()=>{
  await js("smoke.dropViews();smoke.fake.failGet.add('"+TA+"');smoke.openTeams('"+TA+"')");
  ok(await until("smoke.has('[data-team-load-failed]')",3000),'a get that fails offers Reintentar');
  await js("smoke.fake.failGet.clear();smoke.focusClick('[data-team-load-failed] button')");
- ok(await until("!smoke.has('[data-team-load-failed]')&&smoke.has('[data-team-role]')",3000),'Reintentar loads the team');
+ // Alfa remembers the Agentes tab: the roster (B2) is its body.
+ ok(await until("!smoke.has('[data-team-load-failed]')&&(smoke.has('[data-team-role]')||smoke.has('[data-agents-roster]'))",3000),'Reintentar loads the team');
  ok(await until("smoke.activeIn('[data-team-host]')",2000),'after Reintentar the host has the keyboard');
  // The kebab menu over Teams takes its own Esc; the remove confirm, cancelled or escaped, gives the keyboard back.
  await js("smoke.click('[data-team-menu=\\""+TA+"\\"]')");await settle(150);
@@ -428,6 +494,141 @@ app.whenReady().then(async()=>{
  ok(await focusOn('local1'),'the console has the keyboard after the close');
  await js("smoke.openTeams('"+TA+"')");await settle(250);
  ok((await js("smoke.attr('[data-team-host]','data-team-host')"))===TA,'Teams reopens on Alfa');
+
+ // B2, the Agentes tab: the roster from main, Ejecutar ahora (runNow, never a pty), deferred, the run chat
+ // (ChatScroller over runPage, pushed lines of the watched run only), links, Frenar, pauses, usage today.
+ const R2='r-222222222222',R3='r-333333333333',R4='r-444444444444';
+ await js("smoke.click('[data-team-tab=agents]')");
+ ok(await until("smoke.count('[data-agent-card]')===5",3000),'the roster shows the five agents of Alfa');
+ v=await js("({first:document.querySelector('[data-agents-roster] [data-agent-card]')?.dataset.agentCard,lead:smoke.has('[data-lead-card=lead] [data-agent-card=lead]'),leadW:document.querySelector('[data-lead-card]').getBoundingClientRect().width,rosterW:document.querySelector('[data-agents-roster]').getBoundingClientRect().width,devStatus:smoke.attr('[data-agent-card=dev]','data-agent-status'),devLine:smoke.text('[data-agent-card=dev] [data-agent-line]'),dev2Line:smoke.text('[data-agent-card=dev-2] [data-agent-line]'),name2:smoke.text('[data-agent-card=dev-2] [data-agent-name]'),elapsed:smoke.text('[data-agent-card=dev] [data-run-elapsed]'),usage:smoke.text('[data-agent-card=dev] [data-run-usage]'),ctx:smoke.attr('[data-agent-card=dev] [data-context-chip]','data-context-chip'),fail:smoke.attr('[data-agent-card=qa] [data-failure-chip]','data-failure-chip'),paused:smoke.attr('[data-agent-card=research] [data-agent-pause]','data-agent-pause'),pausedChip:smoke.text('[data-agent-card=research]').includes('En pausa')})");
+ ok(v.first==='lead'&&v.lead&&Math.abs(v.leadW-v.rosterW)<2,'the Lead card goes first, full width',v);
+ ok(v.devStatus==='running'&&v.devLine==='Trabajando en t-12'&&v.dev2Line==='Libre'&&v.name2==='Dev 2','line 2: Trabajando en t-12, Libre; the second Dev is Dev 2',v);
+ ok(/^\\d+ min$/.test(v.elapsed)&&v.usage.includes('tokens')&&v.usage.includes('estimado')&&v.ctx==='42','a live run: elapsed, usage (estimado) and context chips',v);
+ ok(v.fail==='limit'&&v.paused==='on'&&v.pausedChip,'the failure chip of the last run, a paused agent',v);
+ v=await js("({runNow:[...document.querySelectorAll('[data-run-now]')].map(e=>e.dataset.runNow).sort().join(),stop:[...document.querySelectorAll('[data-agent-card] [data-run-stop]')].map(e=>e.dataset.runStop).join(),chat:smoke.count('[data-agent-chat]')})");
+ ok(v.runNow==='dev-2,lead,qa,research'&&v.stop===R2&&v.chat===5,'Ejecutar ahora on idle agents only, Frenar on the live run, a chat on every card',v);
+ await settle(600);await shot('teams-agents');
+
+ // Ejecutar ahora: the drawer opens on the agent, its composer takes the keyboard; Enter is a new line.
+ await js("smoke.click('[data-run-now=dev-2]')");
+ ok(await until("smoke.has('[data-drawer=team-agent] [data-agent-drawer=dev-2]')",2000),'Ejecutar ahora opens the agent drawer');
+ ok(await until("smoke.activeIs('data-run-now-input')",2000),'the composer takes the keyboard');
+ v=await js("({empty:smoke.text('[data-run-empty]'),send:document.querySelector('[data-run-now-send]').disabled,note:smoke.attr('[data-run-now-note]','data-run-now-note'),title:smoke.text('[data-drawer=team-agent]')})");
+ ok(v.empty.includes('Todavía no corrió')&&v.send&&v.note==='hint'&&v.title.includes('Dev 2'),'no run yet: the empty line; Ejecutar ahora is off until there is text',v);
+ const ptyBefore=await js("smoke.calls.ptyWrite.length+smoke.calls.ptySubmit.length");
+ await js("smoke.type('[data-run-now-input]','  Revisá el README\\\\ny los links  ')");await settle();
+ await js("smoke.keyActive({key:'Enter',code:'Enter',keyCode:13})");await settle();
+ ok((await js("smoke.reqs('runNow').length"))===0,'Enter in the composer sends nothing');
+ await js("smoke.click('[data-run-now-send]')");
+ ok(await until("smoke.reqs('runNow').length===1",2000),'the button sends runNow');
+ v=await js("smoke.reqs('runNow')[0]");
+ ok(v.teamId===TA&&v.agentId==='dev-2'&&v.prompt==='Revisá el README\\ny los links'&&!('taskId' in v),'runNow carries the request text (trimmed), no task',v);
+ ok((await js("smoke.calls.ptyWrite.length+smoke.calls.ptySubmit.length"))===ptyBefore,'Ejecutar ahora never writes to a pty');
+ ok(await until("smoke.has('[data-chat-view=\\"team:"+R3+"\\"]')",3000),'the drawer moves to the new run and reads it through the chat scroller');
+ ok(await until("smoke.attr('[data-run-now-note]','data-run-now-note')==='blocked'",2000),'the roster reloads: the new run is live');
+ v=await js("({watch:smoke.reqs('watchRun').at(-1),page:smoke.reqs('runPage').some(r=>r.runId==='"+R3+"'&&!r.before),noteText:smoke.text('[data-run-now-note]'),draft:document.querySelector('[data-run-now-input]').value,send:document.querySelector('[data-run-now-send]').disabled,first:smoke.text('[data-drawer=team-agent] [data-chat-row=user]')})");
+ ok(v.watch&&v.watch.runId===R3&&v.page,'watchRun, then runPage of the new run',v);
+ ok(v.draft===''&&v.send&&v.noteText.includes('Dev 2 está trabajando'),'the box empties; while the run lives the composer says so',v);
+ ok(v.first.includes('Revisá el README'),'the run page shows the request as the first message',v);
+ // A pushed line of the watched run appends; one of another run does not.
+ await js("smoke.pushAppend({teamId:'"+TA+"',runId:'"+R3+"',agentId:'dev-2',items:[{id:'40',role:'assistant',ts:Date.now(),blocks:[{t:'text',text:'Listo el README nuevo'}]}],state:'running'})");
+ ok(await until("smoke.text('[data-drawer=team-agent] [data-chat-scroll]').includes('Listo el README nuevo')",2000),'teams:runAppend of the watched run appends to its chat');
+ v=await js("({state:smoke.attr('[data-run-header]','data-run-state'),working:smoke.text('[data-chat-working]')})");
+ ok(v.state==='running'&&v.working.includes('Dev 2 está trabajando'),'the pushed state reaches the run header and the working row',v);
+ await js("smoke.pushAppend({teamId:'"+TA+"',runId:'"+R2+"',agentId:'dev',items:[{id:'900',role:'assistant',ts:Date.now(),blocks:[{t:'text',text:'Esto es de otra corrida'}]}]})");await settle();
+ ok(!(await js("smoke.text('[data-drawer=team-agent] [data-chat-scroll]').includes('otra corrida')")),'a line of another run does not append here');
+
+ // Deferred: main's reason in words, inline, and the draft stays (Ctrl+Enter sends).
+ await js("smoke.click('[data-run-now=qa]')");
+ ok(await until("smoke.has('[data-agent-drawer=qa]')&&smoke.activeIs('data-run-now-input')",2000),'Ejecutar ahora on QA moves the drawer there');
+ await js("smoke.type('[data-run-now-input]','Probá el login')");await settle();
+ await js("smoke.keyActive({key:'Enter',code:'Enter',keyCode:13,ctrlKey:true})");
+ ok(await until("smoke.attr('[data-run-now-note]','data-run-now-note')==='error'",2000),'a deferred answer shows inline');
+ v=await js("({text:smoke.text('[data-run-now-note]'),req:smoke.reqs('runNow').at(-1),draft:document.querySelector('[data-run-now-input]').value,fail:smoke.attr('[data-run-header] [data-failure-chip]','data-failure-chip'),state:smoke.attr('[data-run-header]','data-run-state')})");
+ ok(v.text==='Ahora no: los equipos ya tienen el máximo de corridas a la vez.'&&v.req.agentId==='qa'&&v.req.prompt==='Probá el login'&&v.draft==='Probá el login','deferred: the reason in words, Ctrl+Enter sent it, the draft stays',v);
+ ok(v.state==='failed'&&v.fail==='limit','with no run picked the drawer shows the last run, its failure in the header',v);
+ // RunLog's cut row comes from main in English: the run chat words it in the UI language.
+ const cutText="smoke.text('[data-drawer=team-agent] [data-chat-system]')";
+ ok(await until(cutText+".includes('El registro de la corrida quedó muy grande')",2000),'es: the run log cut row is worded in Spanish',await js(cutText));
+ ok(!(await js(cutText)).includes('Run log cut'),'es: the English cut text from main does not show');
+ await js("smoke.setLang('en')");
+ ok(await until(cutText+".includes('The run log got too big')",2000),'en: the cut row is worded from the en catalog',await js(cutText));
+ ok(!(await js(cutText)).includes('[Run log cut'),'en: not the raw text main sent');
+ await js("smoke.setLang('es')");
+ ok(await until(cutText+".includes('El registro de la corrida')",2000),'back to es: the cut row follows the language');
+
+ // The live run of Dev: its page, Load earlier, a link behind a confirm.
+ await js("smoke.click('[data-agent-chat=dev]')");
+ ok(await until("smoke.has('[data-chat-view=\\"team:"+R2+"\\"] [data-chat-load-earlier]')",3000),'Ver chat opens the live run of Dev, with Load earlier');
+ v=await js("({rows:smoke.text('[data-drawer=team-agent] [data-chat-scroll]'),working:smoke.text('[data-chat-working]'),state:smoke.attr('[data-run-header]','data-run-state'),mode:smoke.text('[data-run-mode]'),trigger:smoke.text('[data-run-trigger]'),watch:smoke.reqs('watchRun').slice(-2).map(r=>r.runId),picker:smoke.attr('[data-run-picker]','value')??document.querySelector('[data-run-picker]')?.value})");
+ ok(v.rows.includes('Arreglá el login')&&v.working.includes('Dev está trabajando')&&v.state==='running'&&v.mode==='Pedido directo'&&v.trigger.includes('la ejecutaste vos'),'the run page renders through ChatScroller with its header',v);
+ ok(v.watch[0]===null&&v.watch[1]===R2,'leaving the QA run unwatches it, then the Dev run is watched',v);
+ await js("smoke.click('[data-chat-load-earlier]')");
+ ok(await until("document.querySelector('[data-drawer=team-agent] [data-chat-id]')?.dataset.chatId==='100'",2000),'Load earlier puts the older page in front');
+ ok((await js("smoke.reqs('runPage').at(-1).before"))==='200','Load earlier asks for the page before the oldest offset');
+ await js("smoke.click('[data-drawer=team-agent] [data-md-link]')");await settle();
+ v=await js("({dialog:smoke.has('[data-confirm]'),target:document.body.innerText.includes('https://example.com/docs'),opened:smoke.calls.openExternal.length})");
+ ok(v.dialog&&v.target&&v.opened===0,'a link in the run chat asks first and shows its target',v);
+ await js("smoke.click('[data-confirm]')");await settle();
+ ok(JSON.stringify(await js('smoke.calls.openExternal'))==='[\\"https://example.com/docs\\"]','confirmed: it opens in the browser');
+
+ // Frenar asks first; cancelled sends nothing, confirmed sends stop.
+ await js("smoke.click('[data-agent-card=dev] [data-run-stop]')");await settle();
+ ok((await js("smoke.text('body')")).includes('¿Frenar la corrida de Dev?'),'Frenar asks first');
+ await js("smoke.cancelConfirm()");await settle();
+ ok((await js("smoke.reqs('stop').length"))===0,'cancelled: nothing is stopped');
+ await js("smoke.click('[data-agent-card=dev] [data-run-stop]')");await settle();
+ await js("smoke.click('[data-confirm]')");
+ ok(await until("smoke.reqs('stop').length===1",2000),'confirmed: stop goes to main');
+ v=await js("smoke.reqs('stop')[0]");
+ ok(v.teamId===TA&&v.runId===R2,'stop carries the team and the run',v);
+
+ // The agent pause and the team pause; usage today in the header.
+ await js("smoke.click('[data-agent-card=dev-2] [data-agent-pause]')");
+ ok(await until("smoke.reqs('pauseAgent').length===1",2000),'Pausar sends pauseAgent');
+ v=await js("smoke.reqs('pauseAgent')[0]");
+ ok(v.teamId===TA&&v.agentId==='dev-2'&&v.on===true,'pauseAgent on for Dev 2',v);
+ ok(await until("smoke.attr('[data-agent-card=dev-2] [data-agent-pause]','data-agent-pause')==='on'",2000),'the roster reloads: Dev 2 shows paused');
+ v=await js("({usage:smoke.text('[data-team-usage]'),pause:smoke.attr('[data-team-pause]','data-team-pause')})");
+ ok(v.usage.startsWith('Hoy:')&&v.usage.includes('estimado')&&v.pause==='off','header: usage today (estimado) and Pausar equipo',v);
+ await js("smoke.click('[data-team-pause]')");
+ ok(await until("smoke.attr('[data-team-pause]','data-team-pause')==='on'&&smoke.has('[data-team-paused-chip=user]')",2000),'Pausar equipo: the header shows the pause');
+ v=await js("smoke.reqs('settings').at(-1)");
+ ok(v.teamId===TA&&v.patch.paused===true,'settings carries paused true',v);
+ await js("smoke.click('[data-team-pause]')");
+ ok(await until("smoke.attr('[data-team-pause]','data-team-pause')==='off'&&!smoke.has('[data-team-paused-chip]')",2000),'Reanudar equipo lifts it');
+ // A run that starts or ends moves the header (usage today, the Agentes count): main tags that commit 'team' too, as
+ // TeamService.commit sends it, and the core pulls the view once; the roster sync pulls the roster only, once: the
+ // core hands each scope over from its own timer, and the sync folds them (SCOPE_FOLD_MS).
+ const pulls="({gets:smoke.gets(smoke.TA),rosters:smoke.reqs('roster').length})";
+ const p0=await js(pulls);
+ await js("Object.assign(smoke.fake.teams.find(x=>x.id===smoke.TA),{running:2,usage:{inputTokens:2000000,outputTokens:500000,cacheReadTokens:0,cacheWriteTokens:0,costUSD:3.5,estimated:true}});smoke.push({teamId:smoke.TA,rev:3,scopes:['agents','run','list','team'],runId:'"+R2+"'})");
+ ok(await until("smoke.text('[data-team-usage]').includes('3,50')&&smoke.attr('[data-team-tab=agents] [data-team-tab-count]','data-team-tab-count')==='2'",2000),'a run start (run and team) pulls the view again: usage today and the running count follow',await js("({usage:smoke.text('[data-team-usage]'),count:smoke.attr('[data-team-tab=agents] [data-team-tab-count]','data-team-tab-count')})"));
+ await settle(400);
+ const p1=await js(pulls);
+ ok(p1.gets-p0.gets===1&&p1.rosters-p0.rosters===1,'one run event: one get of the view (the core, on team), and one of the roster',{p0,p1});
+ // A run commit that leaves the header alone carries no 'team': the roster only, no get.
+ await js("smoke.push({teamId:smoke.TA,rev:3,scopes:['agents','run','list'],runId:'"+R2+"'})");
+ ok(await until("smoke.reqs('roster').length>"+p1.rosters,2000),'a run event without team pulls the roster');
+ await settle(400);
+ v=await js(pulls);
+ ok(v.gets===p1.gets&&v.rosters-p1.rosters===1,'a run event without team pulls no view, and the roster once',{p1,v});
+ await js("smoke.fake.teams.find(x=>x.id===smoke.TA).running=1;smoke.push({teamId:smoke.TA,rev:3,scopes:['agents','run','list','team'],runId:'"+R2+"'})");
+ ok(await until("smoke.attr('[data-team-tab=agents] [data-team-tab-count]','data-team-tab-count')==='1'",2000),'and back: the running count follows the run end');
+
+ // Zoom with the drawer open: no page overflow, the composer button on screen.
+ for(const z of [1.25,1.5]){
+  // The drawer lays out again after the zoom (its clamp width): wait for it instead of one fixed settle.
+  w.webContents.setZoomFactor(z);await settle(250);
+  const laid=await until("!smoke.overflow()&&smoke.inView('[data-run-now-send]')&&smoke.inView('[data-team-close]')",2000);
+  v=await js("({over:smoke.overflow(),send:smoke.inView('[data-run-now-send]'),close:smoke.inView('[data-team-close]')})");
+  ok(laid&&!v.over&&v.send&&v.close,'zoom '+z+' with the agent drawer: no overflow, composer and close on screen',v);
+ }
+ w.webContents.setZoomFactor(1);await settle(200);
+ await settle(600);await shot('teams-agent-drawer');
+ await js("smoke.click('[data-drawer=team-agent] [data-drawer-close]')");await settle(200);
+ v=await js("({drawer:smoke.has('[data-drawer=team-agent]'),watch:smoke.reqs('watchRun').at(-1)})");
+ ok(!v.drawer&&v.watch.runId===null,'closing the drawer unwatches the run',v);
 
  // English.
  await js("smoke.setLang('en')");await settle(200);
@@ -463,6 +664,32 @@ app.whenReady().then(async()=>{
  ok(!v.host&&!v.section&&v.view==='grid'&&v.disabled,'disabled from main closes Teams and hides the section',v);
  await js('smoke.fake.on=true');
  ok(await until("smoke.has('[data-teams-section] [data-team-row]')",8000),'the section comes back once main answers again');
+
+ // Settings > Labs (B2): turning Teams off while a team run is live asks first (Alfa has one).
+ await js("smoke.showLabs(true)");
+ ok(await until("smoke.has('[data-setting-id=\\"labs.teams\\"] [role=switch]')",2000),'Settings opens on Labs');
+ await js("smoke.click('[data-setting-id=\\"labs.teams\\"] [role=switch]')");await settle();
+ v=await js("({dialog:smoke.has('[data-confirm]'),text:smoke.text('body').includes('Se frena una corrida del equipo'),on:smoke.app().settings.labs.teams})");
+ ok(v.dialog&&v.text&&v.on===true,'Labs: turning Teams off with a live run asks first',v);
+ await js("smoke.cancelConfirm()");await settle();
+ v=await js("({on:smoke.app().settings.labs.teams,section:smoke.has('[data-teams-section]'),settings:smoke.app().settingsOpen})");
+ ok(v.on===true&&v.section&&v.settings,'cancelled: Teams stays on and Settings stays open',v);
+ // Esc on the confirm (its own capture listener uses it) cancels only the confirm: the Modal of Settings stays.
+ await js("smoke.click('[data-setting-id=\\"labs.teams\\"] [role=switch]')");await settle();
+ ok(await js("smoke.has('[data-confirm]')"),'the confirm asks again');
+ const escUsed=await js("smoke.keyActive("+ESC+")");await settle(200);
+ v=await js("({dialog:smoke.has('[data-confirm]'),settings:smoke.app().settingsOpen,on:smoke.app().settings.labs.teams,labs:smoke.has('[data-setting-id=\\"labs.teams\\"]')})");
+ ok(escUsed&&!v.dialog&&v.on===true,'Esc cancels the Labs off confirm: Teams stays on',v);
+ ok(v.settings&&v.labs,'and Settings stays open on Labs (Modal ignores an Esc already used)',v);
+ await js("smoke.click('[data-setting-id=\\"labs.teams\\"] [role=switch]')");await settle();
+ await js("smoke.click('[data-confirm]')");await settle(250);
+ v=await js("({on:smoke.app().settings.labs.teams,section:smoke.has('[data-teams-section]'),settings:smoke.app().settingsOpen})");
+ ok(v.on===false&&!v.section&&v.settings,'confirmed: Teams goes off, Settings still open',v);
+ // With nothing over it, Esc still closes Settings.
+ await js("document.querySelector('[data-settings-search]').focus();smoke.keyActive("+ESC+")");await settle(200);
+ ok(!(await js("smoke.app().settingsOpen")),'a plain Esc closes Settings');
+ await js("smoke.labs(true)");
+ ok(await until("smoke.has('[data-teams-section] [data-team-row]')",4000),'lab on again: rows back');
 
  // Labs off in the renderer with Teams open.
  await js("smoke.openTeams('"+TA+"')");await settle(200);
@@ -502,7 +729,7 @@ app.whenReady().then(async()=>{
  await js("smoke.keyActive({key:'Escape',code:'Escape',keyCode:27})");await settle(200);
 
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy; agents: roster, run now, run chat, stop, pauses, Labs confirm); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; delete env.ELECTRON_RENDERER_URL

@@ -1,7 +1,11 @@
-import { ChevronsUpDown, FolderGit2, GitBranch, Users, X } from 'lucide-react'
-import type { AgentProvider } from '@shared/types'
+import { useState } from 'react'
+import { ChevronsUpDown, FolderGit2, GitBranch, Pause, Play, Users, X } from 'lucide-react'
+import type { AgentProvider, PaneUsage } from '@shared/types'
 import type { TeamListItem, TeamView } from '@shared/team-protocol'
 import { closeTeams, openTeams, useTeamsStore } from '@/lib/teamsStore'
+import { setTeamPaused } from '@/lib/teams/roster'
+import { formatCost, formatTokens, sumUsage, usageLines } from '@/lib/statusSignals'
+import { toast } from '@/lib/toast'
 import { useLang, useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { Tooltip } from '@/components/ui/Tooltip'
@@ -56,12 +60,73 @@ function LimitChips({ blocked }: { blocked: TeamView['providerBlockedUntil'] }) 
   )
 }
 
+/** "Hoy: 1,2 M tokens · 0,40 US$ (estimado)": what the team's runs spent today (B2); nothing until one reports usage. */
+function UsageToday({ usage }: { usage?: PaneUsage }) {
+  const t = useT()
+  const lang = useLang()
+  const total = sumUsage([usage])
+  if (!total || (total.tokens === 0 && !total.costUSD)) return null
+  const tokens = formatTokens(total.tokens, lang)
+  const text =
+    total.costUSD === undefined
+      ? t('teams.agent.usageTodayNoCost', { tokens })
+      : t(total.unknownCost ? 'teams.agent.usageTodayAtLeast' : 'teams.agent.usageToday', { tokens, cost: formatCost(total.costUSD, lang) })
+  return (
+    <Tooltip
+      side="bottom"
+      className="min-w-0 shrink"
+      label={
+        <span className="flex flex-col" data-team-usage-tip>
+          <span>{t('teams.agent.usageTodayTip')}</span>
+          {usageLines(total, t, lang).map((line, i) => (
+            <span key={i} className="font-normal text-text-secondary">
+              {line}
+            </span>
+          ))}
+        </span>
+      }
+    >
+      <span data-team-usage className={cn(CHIP, NEUTRAL, 'min-w-0 shrink tabular-nums')}>
+        <span className="truncate">{text}</span>
+      </span>
+    </Tooltip>
+  )
+}
+
+/** Pausar / Reanudar of the whole team (B2): a paused team starts no new run; resuming lifts any pause. */
+function PauseButton({ teamId, paused }: { teamId: string; paused: boolean }) {
+  const t = useT()
+  const [busy, setBusy] = useState(false)
+  const label = t(paused ? 'teams.agent.teamResume' : 'teams.agent.teamPause')
+  return (
+    <Tooltip label={label} side="bottom">
+      <button
+        type="button"
+        data-team-pause={paused ? 'on' : 'off'}
+        aria-label={label}
+        disabled={busy}
+        onClick={() => {
+          setBusy(true)
+          void setTeamPaused(teamId, !paused).then((fail) => {
+            setBusy(false)
+            if (fail) toast.error(t(paused ? 'teams.agent.teamResumeFailed' : 'teams.agent.teamPauseFailed'))
+          })
+        }}
+        className={cn(HEADER_BTN, 'disabled:opacity-50')}
+      >
+        {paused ? <Play size={15} /> : <Pause size={15} />}
+      </button>
+    </Tooltip>
+  )
+}
+
 /**
  * Header of the Teams overlay (app 2.7.0, E10 B1): the team name, its repo and
- * base branch, the state chips (trust, pause, provider limits) and the close
- * button. The list item is enough to draw it; the view adds the base branch
- * and the limits once it arrives. Later milestones add their buttons in the
- * right group (B2 pause and usage, B3 new task, B4 autonomy).
+ * base branch, the state chips (trust, pause, provider limits), what the runs
+ * spent today and the close button. The list item is enough to draw it; the
+ * view adds the base branch, the limits and the usage once it arrives. Later
+ * milestones add their buttons in the right group (B2 pause, B3 new task, B4
+ * autonomy).
  */
 export function TeamHeader({ team, view }: { team: TeamListItem; view?: TeamView }) {
   const t = useT()
@@ -111,8 +176,10 @@ export function TeamHeader({ team, view }: { team: TeamListItem; view?: TeamView
           </span>
         )}
         {limited && <LimitChips blocked={blocked} />}
+        <UsageToday usage={view?.usageToday} />
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        <PauseButton teamId={team.id} paused={!!paused} />
         <Tooltip label={t('teams.host.close')} side="bottom">
           <button type="button" data-team-close aria-label={t('teams.host.close')} onClick={() => closeTeams()} className={HEADER_BTN}>
             <X size={15} />

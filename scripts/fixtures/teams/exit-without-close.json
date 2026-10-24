@@ -1,0 +1,6 @@
+{
+  "steps": [
+    { "fixture": "claude-simple.jsonl", "rewriteSession": true },
+    { "spawnChild": { "holdStdout": true, "detached": true, "ms": 120000 } }
+  ]
+}

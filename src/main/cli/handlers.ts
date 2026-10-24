@@ -316,6 +316,12 @@ export class CtlHandlers {
   }
 
   readonly handle = async (method: CtlMethod, params: Record<string, unknown>, caller: CtlCaller | null, signal: AbortSignal): Promise<Out> => {
+    // App 2.7.0 (Teams): a team token reaches only its own tools. It has no workspace, and scope() falls back to the
+    // active one, so without this gate a team agent could send to or kill the user's consoles there.
+    if (caller?.team) {
+      if (method !== 'ping' && method !== 'usage' && !method.startsWith('team.')) return err('forbidden', 'a team agent may only use snaos team, ping and usage')
+    } else if (method.startsWith('team.')) return err('forbidden', 'snaos team works only inside a team run')
+    if (method.startsWith('team.')) return err('disabled', 'snaos team is not available in this build')
     switch (method) {
       case 'ping':
         return ok({ pong: true, appVersion: this.deps.appVersion, protocol: CTL_PROTOCOL_VERSION, self: caller?.paneId ?? null })
@@ -414,6 +420,12 @@ export class CtlHandlers {
 
   dispose(): void {
     for (const w of [...this.waiters]) this.finish(w, err('desktop_unavailable', `${BRAND.productName} is shutting down`))
+  }
+
+  /** A caller that is gone for good (a team run's revoked token, `team:<runId>`): its rate windows go too. */
+  forgetCaller(paneId: string): void {
+    const suffix = `:${paneId}`
+    for (const key of [...this.rateLog.keys()]) if (key.endsWith(suffix)) this.rateLog.delete(key)
   }
 
   private dropStatusLine(paneId: string): void {

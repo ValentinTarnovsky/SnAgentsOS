@@ -6,6 +6,7 @@ const MESSAGES = {
   en: {
     'dialog.activeTitle': 'Active consoles',
     'dialog.activeDetail': '{n} running process(es) will be closed.',
+    'teams.close.runs': '{n} team run(s) will be stopped.',
     'dialog.cancel': 'Cancel',
     'dialog.closeAnyway': 'Close anyway',
     'tray.show': 'Show {app}',
@@ -121,6 +122,7 @@ const MESSAGES = {
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
     'dialog.activeDetail': '{n} proceso(s) en ejecución se cerrarán.',
+    'teams.close.runs': 'Se frenan {n} corrida(s) del equipo.',
     'dialog.cancel': 'Cancelar',
     'dialog.closeAnyway': 'Cerrar de todos modos',
     'tray.show': 'Mostrar {app}',

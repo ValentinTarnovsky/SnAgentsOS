@@ -48,9 +48,14 @@ SOFTWARE.
 
 - Source: https://github.com/paperclipai/paperclip
 - License: MIT
-- Used in: the Teams run parsers (app 2.7.0), `src/main/teams/parsers/claudeStream.ts`
-  and `src/main/teams/parsers/codexExec.ts`, and every file with the
-  `paperclipai/paperclip` header above.
+- Used in (app 2.7.0): the failure classifier `src/shared/failure.ts`; the
+  Teams run parsers `src/main/teams/parsers/claudeStream.ts` and
+  `src/main/teams/parsers/codexExec.ts`; the run chat decoders
+  `src/main/chat/decodeCodexExec.ts` and `src/main/teams/RunLog.ts`; the run
+  processes `src/main/teams/RunSupervisor.ts`, `src/main/teams/agentCli.ts`
+  and `src/main/proc/treeKill.ts`; the run argv and prompt
+  `src/shared/teamArgv.ts` and `src/shared/teamPrompt.ts`; and every other
+  file with the `paperclipai/paperclip` header above.
 
 ```
 MIT License

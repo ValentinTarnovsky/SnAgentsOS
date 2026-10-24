@@ -1,5 +1,5 @@
 import { useState, type MouseEvent } from 'react'
-import { Database, FolderOpen, MoreVertical, PanelTop, Pause, Plus, ShieldAlert, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react'
+import { Database, FolderOpen, MoreVertical, PanelTop, Pause, Play, Plus, ShieldAlert, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react'
 import type { TeamListItem } from '@shared/team-protocol'
 import { labOn } from '@shared/labs'
 import { useAppStore } from '@/lib/store'
@@ -7,6 +7,7 @@ import { useAgentStore } from '@/lib/agentStore'
 import { openTeams, removeTeam, useTeamsStore } from '@/lib/teamsStore'
 import { openTeamSetup } from '@/lib/teams/setup'
 import { openTeamTrust } from '@/lib/teams/trust'
+import { setTeamPaused } from '@/lib/teams/roster'
 import { toast } from '@/lib/toast'
 import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -51,13 +52,23 @@ export function TeamsSection() {
     e.stopPropagation()
     setMenu({ x: e.clientX, y: e.clientY, teamId })
   }
-  const menuItems = (teamId: string): ContextMenuItem[] => [
-    { label: t('teams.menu.open'), icon: PanelTop, onClick: () => openTeams(teamId) },
-    { label: t('teams.menu.review'), icon: ShieldCheck, onClick: () => openTeamTrust(teamId) },
-    { label: t('teams.menu.revealDefinition'), icon: FolderOpen, onClick: () => revealTeamFolder(teamId, 'definition', t) },
-    { label: t('teams.menu.revealData'), icon: Database, separated: true, onClick: () => revealTeamFolder(teamId, 'data', t) },
-    { label: t('teams.menu.remove'), icon: Trash2, danger: true, separated: true, onClick: () => setConfirmRemove(teamId) },
-  ]
+  const togglePause = (teamId: string, paused: boolean): void => {
+    void setTeamPaused(teamId, !paused).then((fail) => {
+      if (fail) toast.error(t(paused ? 'teams.agent.teamResumeFailed' : 'teams.agent.teamPauseFailed'))
+    })
+  }
+  const menuItems = (teamId: string): ContextMenuItem[] => {
+    const paused = !!list.find((team) => team.id === teamId)?.paused
+    return [
+      { label: t('teams.menu.open'), icon: PanelTop, onClick: () => openTeams(teamId) },
+      // B2: Pausar / Reanudar the whole team, as the header's button.
+      { label: t(paused ? 'teams.agent.teamResume' : 'teams.agent.teamPause'), icon: paused ? Play : Pause, onClick: () => togglePause(teamId, paused) },
+      { label: t('teams.menu.review'), icon: ShieldCheck, onClick: () => openTeamTrust(teamId) },
+      { label: t('teams.menu.revealDefinition'), icon: FolderOpen, onClick: () => revealTeamFolder(teamId, 'definition', t) },
+      { label: t('teams.menu.revealData'), icon: Database, separated: true, onClick: () => revealTeamFolder(teamId, 'data', t) },
+      { label: t('teams.menu.remove'), icon: Trash2, danger: true, separated: true, onClick: () => setConfirmRemove(teamId) },
+    ]
+  }
 
   const newRow = (
     <button

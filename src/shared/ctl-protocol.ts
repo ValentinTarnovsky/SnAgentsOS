@@ -10,6 +10,7 @@
 import type { AgentProvider, AgentWaiting, AttentionReason, ClaudePaneState, PaneType, RemotePending, SilenceLevel, WorkspaceTaskState } from './types'
 import type { ChatMessage } from './chat-types'
 import type { FailureKind } from './failure'
+import type { TeamCtlMethod } from './teamTools'
 
 export const CTL_PROTOCOL_VERSION = 1
 export const CTL_RPC_PATH = '/v1/rpc'
@@ -103,6 +104,8 @@ export type CtlMethod =
   | 'account.use'
   // app 2.7.0 (A3): ask the user to do or decide something, without blocking the console.
   | 'needs'
+  // app 2.7.0 (Teams, B2): `snaos team`, only for the token of a team run (TEAM_TOOLS of teamTools.ts).
+  | TeamCtlMethod
 
 export const CTL_METHODS: readonly CtlMethod[] = [
   'ping',
@@ -136,6 +139,22 @@ export const CTL_METHODS: readonly CtlMethod[] = [
   'account.status',
   'account.use',
   'needs',
+  // = TEAM_CTL_METHODS (test-cli.cjs asserts it), spelled out so this file keeps type-only imports.
+  'team.show',
+  'team.tasks',
+  'team.task.get',
+  'team.task.create',
+  'team.task.update',
+  'team.comment',
+  'team.note',
+  'team.ask',
+  'team.needs',
+  'team.plan',
+  'team.review',
+  'team.verdict',
+  'team.done',
+  'team.approve',
+  'team.hire',
 ]
 
 export interface CtlRequest {
@@ -165,6 +184,8 @@ export type CtlErrorCode =
   | 'conflict'
   /** `send` to a console whose agent waits on the user (precise permission, question or plan, or an open request): nothing was typed. */
   | 'awaiting_user'
+  /** app 2.7.0 (Teams): `snaos team task update` of fields the user set (they stay theirs). */
+  | 'user_owned'
 
 export interface CtlError {
   code: CtlErrorCode
@@ -177,7 +198,8 @@ export type CtlResponse<T = unknown> = { ok: true; data: T } | { ok: false; erro
 /**
  * Process exit code per error (E8-FR-14): 0 ok, 1 internal, 2 usage, 3 not
  * found, 4 ambiguous, 5 app unavailable, 6 unauthorized, 7 forbidden or
- * disabled, 8 conflict (app 2.3.0), 9 awaiting the user, 124 timeout.
+ * disabled, 8 conflict (app 2.3.0) or user owned (app 2.7.0), 9 awaiting
+ * the user, 124 timeout.
  */
 export const CTL_EXIT: Record<CtlErrorCode, number> = {
   bad_request: 2,
@@ -197,6 +219,7 @@ export const CTL_EXIT: Record<CtlErrorCode, number> = {
   internal: 1,
   conflict: 8,
   awaiting_user: 9,
+  user_owned: 8,
 }
 
 /**

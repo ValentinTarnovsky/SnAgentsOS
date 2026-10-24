@@ -94,6 +94,8 @@ export const TASK_COMMENTS_MAX = 200                 // per target; older DELIVE
 export const TEAM_STATE_MAX_BYTES = 8 * 1024 * 1024
 export const RUNS_META_MAX = 500                     // runs.json ring
 export const RUN_LOG_MAX_BYTES = 20 * 1024 * 1024
+/** The system row of RunLog's `snaos.cut` line, word for word (main sends it in English, the renderer words it; like CHAT_SKIPPED_TEXT). */
+export const RUN_LOG_CUT_TEXT = '[Run log cut: the rest of this run is not kept on disk]'
 export const RUN_RING_MAX = 500                      // ChatMessages kept in memory per live run
 export const TEAM_LOGS_MAX_BYTES = 200 * 1024 * 1024
 export const TEAM_LOG_TTL_MS = 30 * 86_400_000
@@ -263,7 +265,7 @@ export interface AgentSession {
   turns: number                                    // runs that reached `running`
   sysHash: string                                  // sha256 of systemText(); a different one starts a fresh session (decision 33)
   costTotal?: number                               // Claude cumulative total_cost_usd last seen
-  tokensTotal?: TokenTotals                        // Codex cumulative turn.completed.usage last seen
+  tokensTotal?: TokenTotals                        // cumulative tokens last seen (Claude: the result's modelUsage summed; Codex: turn.completed.usage)
   baseStale?: true                                 // set on takeover release: the next delta is approx
   lastRunId?: string
 }

@@ -12,6 +12,8 @@ import { TeamBanner } from './TeamBanner'
 import { TeamTabs, TEAM_TABPANEL_ID, teamTabId } from './TeamTabs'
 import { TeamPicker } from './TeamPicker'
 import { TeamEmptyTab } from './TeamEmptyTab'
+import { AgentsRoster } from './AgentsRoster'
+import { AgentChatDrawer } from './AgentChatDrawer'
 
 /**
  * The Teams overlay (app 2.7.0, E10 B1; Labs teams), over the workspace area
@@ -65,6 +67,7 @@ function HostBody() {
   const ready = useTeamsStore((s) => s.ready)
   const view = useTeamsStore((s) => (s.openTeamId ? s.views[s.openTeamId] : undefined))
   const tab = useTeamsStore((s) => s.tab)
+  const drawer = useTeamsStore((s) => s.drawer)
   const rootRef = useRef<HTMLElement | null>(null)
   // The team whose `get` did not come (the body offers a retry).
   const [failed, setFailed] = useState<string | null>(null)
@@ -137,7 +140,11 @@ function HostBody() {
         <div role="tabpanel" id={TEAM_TABPANEL_ID} aria-labelledby={teamTabId(tab)} data-team-body={tab} className="relative min-h-0 flex-1">
           <div className="h-full overflow-y-auto p-6">
             {view ? (
-              <TeamEmptyTab tab={tab} view={view} />
+              tab === 'agents' ? (
+                <AgentsRoster teamId={team.id} />
+              ) : (
+                <TeamEmptyTab tab={tab} view={view} />
+              )
             ) : failed === team.id ? (
               <div className="flex flex-col items-start gap-3" data-team-load-failed>
                 <p className="text-sm text-text-secondary">{t('teams.host.loadFailed')}</p>
@@ -149,6 +156,8 @@ function HostBody() {
               <p className="text-sm text-text-secondary">{t('teams.host.loading')}</p>
             )}
           </div>
+          {/* B2: an agent's runs and its "Ejecutar ahora" composer, over any tab. */}
+          {view && drawer?.kind === 'agent' && <AgentChatDrawer key={drawer.agentId} teamId={team.id} view={view} drawer={drawer} />}
         </div>
       </>
     )

@@ -11,7 +11,10 @@
 // adapter, never a token or an email; 2.7.0 (A3): needs and main's signals in
 // ls, peek and status), cliEntry (parser, subcommands, stdin, --file, --json,
 // exit codes incl. 8, dead pid) and CliService end to end (a real WsNoteStore
-// and the fixture transcripts through the pipe). Same esbuild + vm harness as test-status.cjs.
+// and the fixture transcripts through the pipe); 2.7.0 (Teams, B2): team
+// tokens, the handler gate over a real CtlServer with raw requests, the Git
+// Bash shim, SNAOS_TEAM_RUN without a token (exit 6, never runtime.json),
+// envForTeam, ready() and onState. Same esbuild + vm harness as test-status.cjs.
 // Never touches the real HKCU, ~/.claude or the app's data folder.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -134,6 +137,19 @@ function tokenChecks() {
   const c = t.issue('pty-2', 'pane-2', 'ws-1')
   check(t.resolve(b) === null && t.resolve(c).paneId === 'pane-2', 're-issuing for the same pty replaces its token')
   check(t.resolve('') === null && t.resolve('x'.repeat(300)) === null && t.resolve(42) === null && t.resolve(master.slice(0, 63)) === null, 'empty, oversized, non-string and truncated tokens are rejected')
+  // app 2.7.0 (Teams): a team run's token under the synthetic key team:<runId>.
+  const team = { runId: 'r-0123456789ab', teamId: 'tm-0123456789ab', agentId: 'dev-2', roleKind: 'dev' }
+  const tt = t.issueTeam('r-0123456789ab', team)
+  const tw = t.resolve(tt)
+  check(/^[0-9a-f]{64}$/.test(tt) && tw.paneId === 'team:r-0123456789ab' && tw.ptyId === 'team:r-0123456789ab' && tw.workspaceId === '' && JSON.stringify(tw.team) === JSON.stringify(team), 'a team token resolves to team:<runId> (pane and pty), no workspace, and its team caller')
+  tw.team.agentId = 'lead'
+  tw.paneId = 'p1'
+  check(t.resolve(tt).team.agentId === 'dev-2' && t.resolve(tt).paneId === 'team:r-0123456789ab', 'resolve hands out a copy all the way down (the team caller too)')
+  check(t.resolve(c).team === undefined, 'a console token has no team caller')
+  const tt2 = t.issueTeam('r-0123456789ab', team)
+  check(t.resolve(tt) === null && t.resolve(tt2).team.runId === 'r-0123456789ab', 'issuing again for the same run replaces its token')
+  t.revokeTeam('r-0123456789ab')
+  check(t.resolve(tt2) === null && t.resolve(c).paneId === 'pane-2', 'revokeTeam rejects the team token and leaves the consoles alone')
 }
 
 function envChecks() {
@@ -146,9 +162,13 @@ function envChecks() {
     process.env.SNAOS_CLI = 'C:/parent/bin/snaos.cmd'
     process.env.ELECTRON_RUN_AS_NODE = '1'
     process.env.KEEP_ME = 'yes'
+    process.env.SNAOS_TEAM_RUN = 'r-parent'
+    process.env.CLAUDE_CODE_SESSION = 'parent-session'
+    process.env.CLAUDE_CODE_PARENT_SESSION = 'grand-session'
     const env = cleanEnv({ SNAOS_CTL_TOKEN: 'mine' }, [])
-    check(env.SNAOS_CTL_TOKEN === 'mine' && !('SNAOS_CTL_ENDPOINT' in env) && !('SNAOS_CLI' in env), 'inherited SNAOS_* are dropped, our own extra wins')
+    check(env.SNAOS_CTL_TOKEN === 'mine' && !('SNAOS_CTL_ENDPOINT' in env) && !('SNAOS_CLI' in env) && !('SNAOS_TEAM_RUN' in env), 'inherited SNAOS_* (SNAOS_TEAM_RUN too) are dropped, our own extra wins')
     check(!Object.keys(env).some((k) => k.toUpperCase() === 'ELECTRON_RUN_AS_NODE') && env.KEEP_ME === 'yes', 'an inherited ELECTRON_RUN_AS_NODE is dropped, unrelated vars kept')
+    check(!Object.keys(env).some((k) => /^CLAUDE_CODE_(PARENT_)?SESSION$/i.test(k)), "Claude Code's CLAUDE_CODE_SESSION and CLAUDE_CODE_PARENT_SESSION are dropped (app 2.7.0)")
   } finally {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]
     Object.assign(process.env, saved)
@@ -186,6 +206,16 @@ function runtimeAndShimChecks() {
   const written = S.writeShim(bin, target, 'win32')
   check(path.basename(written) === 'snaos.cmd' && fs.readFileSync(written, 'utf8') === cmd, 'writeShim writes <bin>/snaos.cmd on Windows')
   check(S.shimFileName('linux') === 'snaos', 'the POSIX shim is <bin>/snaos')
+  // app 2.7.0 (Teams, S9): Git Bash ignores PATHEXT, so Windows also gets an extensionless sh `snaos`.
+  const gb = S.gitBashShim(target)
+  check(fs.existsSync(path.join(bin, 'snaos')) && fs.readFileSync(path.join(bin, 'snaos'), 'utf8') === gb, 'writeShim on Windows also writes the extensionless <bin>/snaos for Git Bash, and still returns the .cmd')
+  check(gb.startsWith('#!/bin/sh\n') && !gb.includes('\r') && !gb.includes('\\'), 'the Git Bash shim: a sh script, LF endings, / paths')
+  check(gb.includes("if [ ! -f 'C:/Apps/100%/SnAgentsOS.exe' ]; then echo 'SnAgentsOS is not running' >&2; exit 5; fi"), 'it checks the exe first and exits 5, like the .cmd')
+  check(gb.includes("ELECTRON_RUN_AS_NODE=1 exec 'C:/Apps/100%/SnAgentsOS.exe' 'C:/Apps/100%/resources/app.asar/out/main/cli.js' --runtime 'C:/Users/x/AppData/Roaming/snagentsos/runtime.json' \"$@\""), 'it runs cli.js with --runtime and forwards the arguments')
+  check(!/[0-9a-f]{64}/.test(gb) && !/TOKEN/i.test(gb), 'the Git Bash shim never contains a token')
+  const posixBin = tmp('bin-posix')
+  S.writeShim(posixBin, target, 'linux')
+  check(fs.readdirSync(posixBin).join() === 'snaos', 'on POSIX only <bin>/snaos is written')
 }
 
 // --- E. User PATH (injected registry) ----------------------------------------
@@ -483,10 +513,77 @@ async function serverChecks() {
     for (const method of fresh) if ((await rpcRaw(endpoint, { token: master, body: { v: 1, method, params: {} } })).json.ok) passed.push(method)
     check(passed.length === fresh.length && fresh.every((m) => seen.some((s) => s.method === m)), 'every app 2.3.0 method (4b usage and account.* included) and 2.7.0 needs pass the server validation', passed)
     check((await rpcRaw(endpoint, { token: master, body: { v: 1, method: 'account.rm', params: {} } })).json.error.code === 'bad_request', 'an account method the protocol does not have (account.rm): bad_request')
+    // app 2.7.0 (Teams, decision 45): the 15 team.* methods reach the handler (its gate decides, see teamGateChecks).
+    const K = load('src/shared/teamTools.ts')
+    const teamPassed = []
+    for (const method of K.TEAM_CTL_METHODS) if ((await rpcRaw(endpoint, { token: master, body: { v: 1, method, params: {} } })).json.ok) teamPassed.push(method)
+    check(K.TEAM_CTL_METHODS.length === 15 && teamPassed.length === 15, 'every team.* method of TEAM_CTL_METHODS passes the server validation', teamPassed)
+    check((await rpcRaw(endpoint, { token: master, body: { v: 1, method: 'team.nope', params: {} } })).json.error.code === 'bad_request', 'a team method the protocol does not have: bad_request')
   } finally {
     await server.stop()
   }
   check(!server.running, 'stop closes the listener')
+}
+
+// app 2.7.0 (Teams, design 5.1): the handler gate, through the real CtlServer with raw requests.
+async function teamGateChecks() {
+  const { CtlServer } = load('src/main/cli/CtlServer.ts')
+  const { CtlTokens, newToken } = load('src/main/cli/CtlTokens.ts')
+  const K = load('src/shared/teamTools.ts')
+  const master = newToken()
+  const tokens = new CtlTokens(master)
+  const consoleToken = tokens.issue('pty-p1', 'p1', 'w1')
+  const runId = 'r-0123456789ab'
+  const teamToken = tokens.issueTeam(runId, { runId, teamId: 'tm-0123456789ab', agentId: 'dev', roleKind: 'dev' })
+  const world = fakeWorld()
+  const h = makeHandlers(world)
+  const endpoint = pipeName()
+  const server = new CtlServer({ kind: win ? 'named-pipe' : 'unix', endpoint }, (t) => tokens.resolve(t), h.handle)
+  await server.start()
+  const rpc = async (token, method, params = {}) => (await rpcRaw(endpoint, { token, body: { v: 1, method, params } })).json
+  try {
+    const submits = world.pty.submits.length
+    const send = await rpc(teamToken, 'send', { console: '2', text: 'git push', enter: true })
+    check(send.ok === false && send.error.code === 'forbidden' && world.pty.submits.length === submits, 'team token -> send: forbidden, nothing typed', send)
+    const kill = await rpc(teamToken, 'kill', { console: '2' })
+    check(kill.error.code === 'forbidden' && !world.ops.some((o) => o.kind === 'kill'), 'team token -> kill: forbidden, nothing killed', kill)
+    const others = ['ls', 'open', 'spawn', 'read', 'wait', 'status', 'notify', 'note', 'chat', 'peek', 'restart', 'rename', 'ws.new', 'ws.close', 'notes.ls', 'notes.set', 'account.ls', 'account.use', 'needs']
+    const codes = []
+    for (const m of others) codes.push((await rpc(teamToken, m, { console: '2', text: 'x', path: 'C:\\x' })).error?.code)
+    check(codes.every((c) => c === 'forbidden'), 'team token -> any console, workspace, notes or account method: forbidden', codes)
+    check(world.ops.length === 0 && world.pty.submits.length === submits, 'a team token never reaches the renderer or a pty')
+    const ping = await rpc(teamToken, 'ping')
+    check(ping.ok && ping.data.self === `team:${runId}`, 'team token -> ping passes (self is team:<runId>)', ping)
+    const usage = await rpc(teamToken, 'usage')
+    check(usage.ok === false && usage.error.code === 'disabled', 'team token -> usage passes the gate (no usage service here: disabled, never forbidden)', usage)
+    const show = await rpc(teamToken, 'team.show')
+    check(show.ok === false && show.error.code === 'disabled' && /not available/.test(show.error.message), 'team token -> team.show: disabled until B3', show)
+    const all = []
+    for (const m of K.TEAM_CTL_METHODS) all.push((await rpc(teamToken, m, {})).error?.code)
+    check(all.every((c) => c === 'disabled'), 'team token -> every team.* method: disabled', all)
+    const fromMaster = await rpc(master, 'team.show')
+    const fromConsole = await rpc(consoleToken, 'team.show')
+    check(fromMaster.error.code === 'forbidden' && fromConsole.error.code === 'forbidden' && /only inside a team run/.test(fromConsole.error.message), 'master token and console token -> team.show: forbidden', { fromMaster, fromConsole })
+    const masterAll = []
+    for (const m of K.TEAM_CTL_METHODS) masterAll.push((await rpc(master, m, {})).error?.code)
+    check(masterAll.every((c) => c === 'forbidden'), 'master token -> every team.* method: forbidden (fail closed)', masterAll)
+    check((await rpc(consoleToken, 'ls')).ok, 'a console token keeps its methods')
+    tokens.revokeTeam(runId)
+    check((await rpcRaw(endpoint, { token: teamToken, body: { v: 1, method: 'ping', params: {} } })).status === 401, 'a revoked team token: 401')
+  } finally {
+    await server.stop()
+  }
+
+  // forgetCaller: the rate windows of a caller that is gone for good (keys are never deleted otherwise).
+  const hr = makeHandlers(fakeWorld())
+  const tc = { paneId: `team:${runId}`, ptyId: `team:${runId}`, workspaceId: '' }
+  let n = 0
+  for (let i = 0; i < 10; i++) if ((await call(hr, 'notify', { text: `n${i}` }, tc)).ok) n++
+  for (let i = 0; i < 10; i++) await call(hr, 'notify', { text: `c${i}` }, caller1)
+  check(n === 10 && (await call(hr, 'notify', { text: 'x' }, tc)).error.code === 'rate_limited', 'the 11th notify of that caller is rate_limited')
+  hr.forgetCaller(`team:${runId}`)
+  check((await call(hr, 'notify', { text: 'again' }, tc)).ok, 'forgetCaller drops its windows: the budget is fresh')
+  check((await call(hr, 'notify', { text: 'x' }, caller1)).error.code === 'rate_limited', "forgetCaller leaves other callers' windows alone")
 }
 
 async function handlerChecks() {
@@ -1377,7 +1474,8 @@ async function cliEntryChecks() {
   const okRes = { ok: true, data: { workspaces: [] } }
   check((await C.run(['ls', '--json'], deps({ send: async () => okRes }))) === 0 && out.length === 1 && out[0] === JSON.stringify(okRes) && !out[0].includes('\n'), '--json success: exactly one line of JSON')
   const exitOf = async (code) => C.run(['send', '2', 'x'], deps({ send: async () => ({ ok: false, error: { code, message: code } }) }))
-  const codes = { bad_request: 2, not_found: 3, not_running: 3, exited: 3, ambiguous: 4, desktop_unavailable: 5, unauthorized: 6, ssh_protected: 7, multiline_unsafe: 7, rate_limited: 7, disabled: 7, forbidden: 7, timeout: 124, internal: 1, conflict: 8, awaiting_user: 9 }
+  const codes = { bad_request: 2, not_found: 3, not_running: 3, exited: 3, ambiguous: 4, desktop_unavailable: 5, unauthorized: 6, ssh_protected: 7, multiline_unsafe: 7, rate_limited: 7, busy: 7, disabled: 7, forbidden: 7, timeout: 124, internal: 1, conflict: 8, awaiting_user: 9, user_owned: 8 }
+  check(JSON.stringify(Object.keys(codes).sort()) === JSON.stringify(Object.keys(load('src/shared/ctl-protocol.ts').CTL_EXIT).sort()), 'the codes map covers every CtlErrorCode (user_owned included)')
   for (const [code, exit] of Object.entries(codes)) check((await exitOf(code)) === exit, `error ${code} exits ${exit}`)
   check((await C.run(['ping'], deps({ connect: () => { throw new C.AppUnavailable('SnAgentsOS is not running') } }))) === 5 && /not running/.test(err.at(-1)), 'no app: exit 5 with "SnAgentsOS is not running"')
   out.length = 0
@@ -1402,6 +1500,23 @@ async function cliEntryChecks() {
   check(dead instanceof C.AppUnavailable && /not running/.test(dead.message), 'a runtime.json with a dead pid: not running')
   const missing = (() => { try { C.resolveConnection({ runtime: 'nope.json' }, {}, () => { throw new Error('ENOENT') }); return null } catch (e) { return e } })()
   check(missing instanceof C.AppUnavailable, 'no runtime.json: not running')
+  // app 2.7.0 (Teams, decision 47): a team run that lost its token never falls back to the master token.
+  {
+    let reads = 0
+    const readRt = () => { reads++; return rt }
+    const lostOf = (env) => { try { C.resolveConnection({ runtime: 'r.json' }, env, readRt, () => true); return null } catch (e) { return e } }
+    const lost = lostOf({ SNAOS_TEAM_RUN: 'r-0123456789ab' })
+    const half = lostOf({ SNAOS_TEAM_RUN: 'r-0123456789ab', SNAOS_CTL_ENDPOINT: '\\\\.\\pipe\\c' })
+    check(lost instanceof C.TeamTokenLost && !(lost instanceof C.AppUnavailable) && half instanceof C.TeamTokenLost && reads === 0, 'SNAOS_TEAM_RUN without its token (or only half of it): TeamTokenLost, runtime.json never read')
+    const teamConn = C.resolveConnection({ runtime: 'r.json' }, { SNAOS_TEAM_RUN: 'r-0123456789ab', SNAOS_CTL_ENDPOINT: '\\\\.\\pipe\\t', SNAOS_CTL_TOKEN: 't'.repeat(64) }, readRt, () => true)
+    check(teamConn.token === 't'.repeat(64) && teamConn.endpoint === '\\\\.\\pipe\\t' && reads === 0, 'a team run with its token connects with it')
+    let sentLost = 0
+    out.length = 0
+    err.length = 0
+    const lostDeps = { io: io(), env: { SNAOS_TEAM_RUN: 'r-0123456789ab' }, out: (s) => out.push(s), err: (s) => err.push(s), send: async () => { sentLost++; return { ok: true, data: {} } }, appVersion: '2.0.0' }
+    check((await C.run(['ping'], lostDeps)) === 6 && sentLost === 0 && /lost its token/.test(err.at(-1)), 'run(): a lost team token exits 6 (unauthorized), not 5, and sends nothing')
+    check((await C.run(['ping', '--json', '--runtime', 'r.json'], lostDeps)) === 6 && JSON.parse(out.at(-1)).error.code === 'unauthorized' && sentLost === 0, 'run() --json: unauthorized, even with --runtime')
+  }
   check(C.pidAlive(process.pid) === true && C.pidAlive(0) === false, 'pidAlive')
   check(C.defaultRuntimePath({ APPDATA: 'C:\\AD' }, 'win32') === 'C:\\AD\\snagentsos\\runtime.json', 'default runtime path on Windows')
   check(C.defaultRuntimePath({ XDG_CONFIG_HOME: '/x/cfg' }, 'linux') === '/x/cfg/snagentsos/runtime.json' && C.defaultRuntimePath({}, 'darwin', () => '/Users/u') === '/Users/u/Library/Application Support/snagentsos/runtime.json', 'default runtime path on Linux and macOS, POSIX separators on any host')
@@ -1711,8 +1826,33 @@ async function serviceChecks() {
     const out = [], err = []
     check((await C.run(['ping'], deps(env2, out, err))) === 6 && /restart the console/.test(err.at(-1)), "a closed console's token gets 401: exit 6, restart the console")
   }
+  // app 2.7.0 (Teams, design 5.1): a team run's env and the gate end to end.
+  const runId = 'r-0123456789ab'
+  {
+    check(service.ready() === true, 'ready(): the switch on, the server listening and the shim on disk')
+    if (win) check(fs.existsSync(path.join(dataDir, 'bin', 'snaos')), 'init also writes the extensionless Git Bash shim next to snaos.cmd')
+    const tenv = service.envForTeam(runId, 'tm-0123456789ab', 'dev-2', 'dev')
+    check(JSON.stringify(Object.keys(tenv).sort()) === JSON.stringify(['SNAOS_CLI', 'SNAOS_CTL_ENDPOINT', 'SNAOS_CTL_TOKEN', 'SNAOS_TEAM_RUN']) && tenv.SNAOS_TEAM_RUN === runId && tenv.SNAOS_CLI === shim && tenv.SNAOS_CTL_ENDPOINT === runtime.transport.endpoint && tenv.SNAOS_CTL_TOKEN !== runtime.token && tenv.SNAOS_CTL_TOKEN !== env1.SNAOS_CTL_TOKEN, 'envForTeam: the endpoint, its own token, the shim and SNAOS_TEAM_RUN; no console, pty or workspace id')
+    const who = service.tokens.resolve(tenv.SNAOS_CTL_TOKEN)
+    check(who.paneId === `team:${runId}` && who.workspaceId === '' && who.team.runId === runId && who.team.teamId === 'tm-0123456789ab' && who.team.agentId === 'dev-2' && who.team.roleKind === 'dev', 'the team token resolves to its run')
+    const run = async (argv, env) => { const out = [], err = []; const code = await C.run(argv, deps(env, out, err)); return { code, out: out.join('\n'), err: err.join('\n') } }
+    const pong = await run(['ping', '--json'], tenv)
+    check(pong.code === 0 && JSON.parse(pong.out).data.self === `team:${runId}`, 'snaos ping from a team run, end to end')
+    const submits = world.pty.submits.length
+    const ls = await run(['ls'], tenv)
+    const sent = await run(['send', '3', 'x', '--enter'], tenv)
+    check(ls.code === 7 && sent.code === 7 && /may only use snaos team/.test(sent.err) && world.pty.submits.length === submits, 'snaos ls and send from a team run exit 7 (forbidden), nothing typed')
+    service.revokeTeam(runId)
+    check(service.tokens.resolve(tenv.SNAOS_CTL_TOKEN) === null && (await run(['ping'], tenv)).code === 6, 'after revokeTeam the run token gets 401: exit 6')
+    const lost = await run(['ping', '--runtime', path.join(dataDir, 'runtime.json')], { SNAOS_TEAM_RUN: runId })
+    check(lost.code === 6 && /lost its token/.test(lost.err), 'a team run without its token exits 6, never through runtime.json')
+  }
   // Off and on again: same endpoint, same tokens.
+  const states = []
+  const offState = service.onState(() => states.push({ running: service.running, ready: service.ready() }))
   await service.setEnabled(false)
+  check(JSON.stringify(states) === JSON.stringify([{ running: false, ready: false }]), 'onState fires once the switch settled off', states)
+  check(Object.keys(service.envForTeam(runId, 'tm-0123456789ab', 'dev', 'dev')).length === 0 && service.ready() === false, 'CLI off: envForTeam gives nothing and ready() is false')
   check(!service.running && !fs.existsSync(path.join(dataDir, 'runtime.json')), 'CLI off: no server and no runtime.json')
   check(Object.keys(service.envFor('pty-p9', 'p9', 'w1')).length === 0, 'CLI off: new consoles get nothing')
   {
@@ -1723,6 +1863,26 @@ async function serviceChecks() {
   {
     const out = [], err = []
     check((await C.run(['ping', '--json'], deps(env1, out, err))) === 0 && service.transport.endpoint === env1.SNAOS_CTL_ENDPOINT, 'on again: same endpoint, the old console token still works')
+  }
+  check(states.length === 2 && states[1].running === true && states[1].ready === true, 'onState fires again once the server is up', states)
+  offState()
+  await service.setEnabled(true)
+  check(states.length === 2, 'an unsubscribed listener is not called again')
+  // A server that fails to start (its endpoint taken) leaves the switch on but ready() false (decision 71).
+  if (win) {
+    const blocked = makeService(tmp('service-blocked')).service
+    blocked.init()
+    const blocker = http.createServer()
+    await new Promise((resolve) => blocker.listen(blocked.transport.endpoint, resolve))
+    let told = 0
+    blocked.onState(() => told++)
+    try {
+      await blocked.setEnabled(true)
+      check(told === 1 && !blocked.running && blocked.ready() === false && Object.keys(blocked.envForTeam(runId, 'tm-0123456789ab', 'dev', 'dev')).length === 0, 'a server that failed to start: onState fires, ready() false, envForTeam gives nothing')
+    } finally {
+      blocked.shutdown()
+      await new Promise((resolve) => blocker.close(resolve))
+    }
   }
   const ui = await service.uiState()
   check(ui.enabled && ui.running && ui.endpoint === service.transport.endpoint && !JSON.stringify(ui).includes(runtime.token) && !JSON.stringify(ui).includes(env1.SNAOS_CTL_TOKEN), 'the Settings state never carries a token')
@@ -1778,6 +1938,23 @@ async function shimRunChecks() {
     check(res.status === 0 && JSON.parse(res.stdout.trim()).data.pong === true, 'the generated shim runs cli.js on the repo Electron (ELECTRON_RUN_AS_NODE) and pings the server')
     const accents = await viaShim(shim, ['send', '2', 'arreglá', 'ñandú', '--json'])
     check(accents.status === 0 && JSON.parse(accents.stdout.trim()).data.echo.text === 'arreglá ñandú', 'accents in arguments survive the shim')
+    // app 2.7.0 (Teams, S9): Git Bash (Claude Code's Bash tool on Windows) ignores PATHEXT and runs the extensionless shim.
+    if (win) {
+      const gitSh = [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs')].filter(Boolean).map((d) => path.join(d, 'Git', 'bin', 'sh.exe')).find((f) => fs.existsSync(f))
+      if (gitSh) {
+        const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH'
+        const bashEnv = { ...env, [pathKey]: `${bin};${env[pathKey] ?? ''}` }
+        const res = await new Promise((resolve) => {
+          const child = spawn(gitSh, ['-c', 'snaos ping --json'], { env: bashEnv, windowsHide: true, timeout: 30000 })
+          let stdout = '', stderr = ''
+          child.stdout.on('data', (c) => { stdout += c })
+          child.stderr.on('data', (c) => { stderr += c })
+          child.on('close', (status) => resolve({ status, stdout, stderr }))
+        })
+        const line = res.stdout.split(/\r?\n/).find((l) => l.startsWith('{'))
+        check(res.status === 0 && !!line && JSON.parse(line).data.pong === true, 'Git Bash finds the extensionless snaos on PATH and runs cli.js through it', res)
+      } else console.log('skip: Git Bash not found, the Git Bash shim run check skipped')
+    }
     if (win) {
       const leak = await runAsync(cmdExe, ['/d', '/s', '/c', `"call "${shim}" ping & set ELECTRON_RUN_AS_NODE"`])
       check(leak.stdout.includes('pong') && !/ELECTRON_RUN_AS_NODE=1/.test(leak.stdout), 'after snaos, ELECTRON_RUN_AS_NODE is not left in the shell (setlocal)')
@@ -1862,6 +2039,7 @@ async function main() {
     skillChecks()
     await noticeChecks()
     await serverChecks()
+    await teamGateChecks()
     await handlerChecks()
     await moreHandlerChecks()
     await usageAccountChecks()
@@ -1875,7 +2053,7 @@ async function main() {
     fs.rmSync(tmpRoot, { recursive: true, force: true })
     if (sockRoot) fs.rmSync(sockRoot, { recursive: true, force: true })
   }
-  console.log(`PASS: ${checks} cli checks (refs, ANSI, tokens, env, runtime.json, shim static and executed, user PATH, skill, custom notify, CtlServer, handlers, chat, peek, kill, restart, rename, ws, notes, usage, account, needs and signals, wait, cliEntry, CliService end to end, pty tail)`)
+  console.log(`PASS: ${checks} cli checks (refs, ANSI, tokens, env, runtime.json, shim static and executed, user PATH, skill, custom notify, CtlServer, team gate, handlers, chat, peek, kill, restart, rename, ws, notes, usage, account, needs and signals, wait, cliEntry, team token lost, CliService end to end, team env, pty tail)`)
 }
 main().catch((err) => {
   console.error(err)

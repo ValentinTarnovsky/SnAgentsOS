@@ -64,14 +64,23 @@ export function samePath(a: string, b: string): boolean {
 }
 
 /**
+ * What Claude Code sets in the processes it starts (its tools, hooks); never inherited by a console or a team run
+ * (the app launched from inside a Claude session would hand that session's socket, token and pid to its agents).
+ * User configuration such as CLAUDE_CONFIG_DIR, CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX or ANTHROPIC_* is
+ * never in here.
+ */
+const AGENT_SESSION_ENV = new Set([
+  'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_ENV_FILE', 'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_PARENT_SESSION',
+  'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_TMPDIR',
+  'CLAUDE_CODE_PLUGIN_DIRS', 'CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS', 'CLAUDE_EFFORT', 'CLAUDE_PID',
+])
+
+/**
  * A clean env map (node-pty requires string values, no undefined). Variables
- * with our env prefix (new or legacy) and ELECTRON_RUN_AS_NODE are dropped
+ * with our env prefix (new or legacy), ELECTRON_RUN_AS_NODE and AGENT_SESSION_ENV are dropped
  * from the inherited env only, so a console of another instance does not leak its identity; `extra` (the
  * preset env and our own status env) is merged afterwards, unfiltered.
  */
-/** What Claude Code sets in the processes it starts (its tools, hooks); never inherited by a console. */
-const AGENT_SESSION_ENV = new Set(['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_ENV_FILE'])
-
 export function cleanEnv(extra?: Record<string, string>, stripDirs: string[] = statusBinDirs()): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {

@@ -24,7 +24,7 @@ import {applyTheme} from './src/renderer/themes/applyTheme';
 import {dispatchOpenRequest} from './src/renderer/lib/openRequest';
 import {useAccountsStore} from './src/renderer/lib/accountsStore';
 import {useUsageStore} from './src/renderer/lib/usageStore';
-const explorerArgs=[];const calls={};const spy=(name,ret)=>(...a)=>{calls[name]=(calls[name]||0)+1;return ret}
+const explorerArgs=[];const hotkeyArgs=[];const calls={};const spy=(name,ret)=>(...a)=>{calls[name]=(calls[name]||0)+1;return ret}
 const noop=()=>()=>{};
 // app 2.3.0: Claude accounts (app 2.4.0: N in priority order). Fake emails only; no token ever reaches the renderer.
 const accountCalls=[];
@@ -44,7 +44,8 @@ window.snApi=fallback({platform:'win32',
  updates:fallback({check:spy('updates.check',Promise.resolve({available:false,currentVersion:'2.0.0'})),onProgress:noop}),
  system:fallback({getMetrics:spy('system.getMetrics',Promise.resolve(null)),getLoginItem:spy('system.getLoginItem',Promise.resolve(false)),openExternal(){},
   getExplorerMenu:spy('system.getExplorerMenu',Promise.resolve({ok:true,registered:true,exe:'D:/Portable/SnAgentsOS-portable.exe',currentExe:'C:/App/SnAgentsOS.exe',mismatch:true})),
-  setExplorerMenu:(req)=>{explorerArgs.push(req);return Promise.resolve({ok:true,registered:!!req.enabled,exe:req.enabled?'C:/App/SnAgentsOS.exe':undefined,currentExe:'C:/App/SnAgentsOS.exe',mismatch:false})}}),
+  setExplorerMenu:(req)=>{explorerArgs.push(req);return Promise.resolve({ok:true,registered:!!req.enabled,exe:req.enabled?'C:/App/SnAgentsOS.exe':undefined,currentExe:'C:/App/SnAgentsOS.exe',mismatch:false})},
+  setGlobalHotkey:(enabled,accel)=>{hotkeyArgs.push([enabled,accel]);return Promise.resolve(true)}}),
  status:fallback({health:spy('status.health',Promise.resolve({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}})),hooksStatus:spy('status.hooksStatus',Promise.resolve({installed:false,settingsPath:'x'})),testNtfy:spy('status.testNtfy',Promise.resolve({ok:true}))}),
  app:fallback({info:async()=>({version:'2.0.0',portable:false,platform:'win32'})}),
  remote:fallback({onStatus:noop,onDevices:noop,getStatus:async()=>({state:'stopped',connectedCount:0}),listDevices:async()=>[]}),
@@ -69,7 +70,8 @@ const termKeys=[];document.addEventListener('keydown',e=>{if(e.target&&e.target.
 // checks read this log instead of racing the 1200 ms timer.
 const flashLog=[];new MutationObserver(ms=>ms.forEach(m=>flashLog.push({id:m.target.id,on:m.target.hasAttribute('data-setting-flash'),t:performance.now()}))).observe(document.body,{attributes:true,subtree:true,attributeFilter:['data-setting-flash']});
 const setInput=(el,v)=>{const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}))};
-window.smoke={calls,created,termKeys,explorerArgs,accountCalls,theme:applyTheme,
+window.smoke={calls,created,termKeys,explorerArgs,hotkeyArgs,accountCalls,theme:applyTheme,
+ hotkey:()=>{const s=useAppStore.getState().settings;return [s.globalHotkeyEnabled,s.globalHotkey]},
  accounts:k=>{accountsState=ACC_STATES[k];useAccountsStore.setState({state:accountsState})},
  autoSwitch:on=>{const st=useAppStore.getState();st.updateSettings({claudeAccounts:{...st.settings.claudeAccounts,autoSwitch:on}})},
  usageOn:on=>{const st=useAppStore.getState();st.updateSettings({usage:{...st.settings.usage,enabled:on,collapsed:false}});useUsageStore.setState({snapshot:on?{updatedAt:Date.now(),rows:[{id:'claude.5h',provider:'claude',kind:'5h',label:'5h',percent:40,status:'ok'}]}:null})},
@@ -265,6 +267,21 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
  await js("document.querySelector('#setting-startup-explorerMenu [role=switch]').click()");await frame();await frame();
  eq([await js('smoke.explorerArgs'),await js('smoke.explorerMenu()')],[[{enabled:true,language:'es'}],true],'the toggle sends enabled + the UI language and persists the setting');
  ok(await js("(document.querySelector('[data-explorer-path]')?.textContent||'').includes('C:/App/SnAgentsOS.exe')&&!document.querySelector('[data-explorer-mismatch]')&&!document.querySelector('[data-explorer-error]')"),'after enabling, the registered path shows and the mismatch is gone');
+
+ // --- the global hotkey: a bare Esc while recording cancels only the recording ----
+ // The recorder prevents every key it takes, so the Modal of Settings leaves that Esc alone.
+ await js("smoke.settings({globalHotkeyEnabled:true,globalHotkey:'Ctrl+Alt+Space'})");await frame();
+ await js("const b=document.querySelector('[data-hotkey-input]');b.focus();b.click()");await frame();
+ eq(await js("document.querySelector('[data-hotkey-input]').dataset.hotkeyInput"),'recording','a click starts recording the global hotkey');
+ await press('Escape');
+ eq([await js("document.querySelector('[data-hotkey-input]').dataset.hotkeyInput"),(await js('smoke.state()')).open,await js('smoke.hotkey()'),await js('smoke.hotkeyArgs')],['idle',true,[true,'Ctrl+Alt+Space'],[]],'a bare Esc while recording cancels it: Settings stays open, the hotkey is unchanged');
+ await js("document.querySelector('[data-hotkey-input]').click()");await frame();
+ await press('K',['control','shift']);
+ eq([await js("document.querySelector('[data-hotkey-input]').dataset.hotkeyInput"),await js('smoke.hotkey()'),await js('smoke.hotkeyArgs')],['idle',[true,'Ctrl+Shift+K'],[[true,'Ctrl+Shift+K']]],'a combo still records and applies the hotkey');
+ eq(await js("document.activeElement.dataset.hotkeyInput"),'idle','the recorder keeps the focus');
+ await press('Escape');
+ ok(!(await js('smoke.state()')).open,'with no recording, the next Esc closes Settings');
+ await js("smoke.settings({globalHotkeyEnabled:false,globalHotkey:'Super+Alt+O'});smoke.openSettings('startup')");await frame();
 
  // --- E4-FR-33: "Open in" over Settings ---------------------------------------
  await js("smoke.open('D:/New/proj','open-1')");await frame();await frame();

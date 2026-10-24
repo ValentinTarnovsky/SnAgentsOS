@@ -6,7 +6,7 @@
  * and never exported, which is why they live here and not in src/shared.
  */
 import type { ConflictReason } from '@shared/team-protocol'
-import type { DeferInfo, StopReason, TaskField, TeamComment, TeamRuntime, TeamTask, TrustedDefinition } from '@shared/teams'
+import type { DeferInfo, Run, StopReason, TaskField, TeamComment, TeamRuntime, TeamTask, TrustedDefinition } from '@shared/teams'
 
 export type FlowError =
   | 'bad_request' | 'forbidden' | 'not_found' | 'conflict' | 'user_owned' | 'cap' | 'busy' | 'cycle'
@@ -26,6 +26,8 @@ export type TeamEffect =
   | { kind: 'startIntegrate'; taskId: string; attempt: number }
   | { kind: 'synthetic'; runId: string; on: boolean }
   | { kind: 'deadline'; key: string; at: number | null }
+  /** B2: a run left `activeRuns` in this terminal form; TeamService puts it in the runs ring (runs.json). */
+  | { kind: 'ended'; run: Run }
 
 export type FlowResult<R = undefined> =
   | { ok: true; rt: TeamRuntime; effects: TeamEffect[]; result: R }

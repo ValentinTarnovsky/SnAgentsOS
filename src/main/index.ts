@@ -280,6 +280,8 @@ function snapshotAgentsOnce(trigger: ExitTrigger): void {
   agentSessions?.snapshotExitOnce(bypassCloseGuards ? 'update' : trigger)
   // No console goes to sleep while the app exits (the next window pushes its view again).
   hibernation?.rendererGone()
+  // Team runs (app 2.7.0, E10 B2): interrupted, process trees killed and stores flushed, before the CLI and the ptys go.
+  teamService?.shutdownSync(bypassCloseGuards ? 'update' : trigger)
 }
 
 /**
@@ -528,7 +530,12 @@ function openMainWindow(): void {
     }
     if (forceClose) return
     const shouldConfirm = cfg?.settings?.confirmCloseRunning !== false
-    if (shouldConfirm && ptyManager.count > 0) {
+    // Team runs (app 2.7.0, E10 B2) stop with the app too: they count for the confirm.
+    const liveRuns = teamService?.liveRunCount() ?? 0
+    if (shouldConfirm && (ptyManager.count > 0 || liveRuns > 0)) {
+      const detail = [ptyManager.count > 0 ? mainT(cfg, 'dialog.activeDetail', { n: ptyManager.count }) : '', liveRuns > 0 ? mainT(cfg, 'teams.close.runs', { n: liveRuns }) : '']
+        .filter(Boolean)
+        .join('\n')
       const choice = dialog.showMessageBoxSync(win, {
         type: 'question',
         buttons: [mainT(cfg, 'dialog.cancel'), mainT(cfg, 'dialog.closeAnyway')],
@@ -537,7 +544,7 @@ function openMainWindow(): void {
         noLink: true,
         title: BRAND.productName,
         message: mainT(cfg, 'dialog.activeTitle'),
-        detail: mainT(cfg, 'dialog.activeDetail', { n: ptyManager.count }),
+        detail,
       })
       if (choice === 0) {
         event.preventDefault()
@@ -643,12 +650,16 @@ async function bootstrap(): Promise<void> {
     quitForUpdate,
     setInstalling: (v) => {
       isInstalling = v
+      // The wizard did not proceed: team runs may start again.
+      if (!v) teamService?.installAborted()
     },
     // The NSIS setup closes the app without a before-quit (E6-FR-10). Leaves
     // the exit flag alone: a cancelled wizard still saves on the next quit.
     persistBeforeInstall: () => {
       reviewNotes?.flush()
       scrollbackCheckpoint?.persistAllSync()
+      // Team runs interrupted and flushed, never frozen (a cancelled wizard keeps the app running).
+      teamService?.prepareInstall()
     },
     // A silent update that did not land (declined permission prompt): read
     // and deleted once here, shown by the renderer as a toast with [Retry].
@@ -661,10 +672,12 @@ async function bootstrap(): Promise<void> {
   const accounts = new AccountService({
     vault: new AccountVault(join(dataDir(), 'claude-accounts'), vaultCrypto),
     crypto: vaultCrypto,
-    statuses: () => statusManager.snapshot(),
+    // Team runs count as working Claude consoles for deferWhileWorking (app 2.7.0, E10 B2).
+    statuses: () => [...statusManager.snapshot(), ...(teamService?.syntheticStatuses() ?? [])],
     emit: (s) => {
       const wc = mainWindow?.webContents
       if (wc && !wc.isDestroyed()) wc.send(CH.ACCOUNTS_CHANGED, s)
+      teamService?.onAccounts()
     },
     event: (e) => {
       const wc = mainWindow?.webContents
@@ -834,6 +847,8 @@ async function bootstrap(): Promise<void> {
     spawnedAt: (paneId) => statusManager.spawnedAt(paneId),
     runningPanes: () => ptyManager.runningPaneIds(),
     claims: () => chatHub.claims(),
+    // Team transcripts in the repo root's slug folder are never a console's (built later: read lazily).
+    teamSession: (id) => teamService?.ownsSession(id) ?? false,
   })
   const chatHub: ChatHub = new ChatHub({ locate: (paneId) => chatLocator.locate(paneId) })
   statusManager.onTranscriptChange((paneId) => chatHub.transcriptChanged(paneId))
@@ -931,6 +946,8 @@ async function bootstrap(): Promise<void> {
     }
   })
   // Teams (app 2.7.0, E10 B1): main owns every team; the invoke is registered even with the lab off.
+  // A pane id only while its pty is alive (a closed console holds no session).
+  const livePane = (paneId: string | null | undefined): string | null => (paneId && ptyManager.ptyIdForPane(paneId) !== null ? paneId : null)
   const teams = new TeamService({
     dataDir,
     config: () => configStore.load(),
@@ -939,8 +956,40 @@ async function bootstrap(): Promise<void> {
     // '' when it opened, else Electron's error text: the reveal op answers io with it.
     openPath: (p) => shell.openPath(p),
     log: createTeamsLog(dataDir),
+    // B2 (runs): the consoles' status, who holds a session, the ptys, the accounts, the CLI and Awake.
+    status: {
+      snapshot: () => statusManager.snapshot(),
+      stateOf: (paneId) => statusManager.stateOf(paneId),
+      paneForSession: (sessionId) => statusManager.paneForSession(sessionId),
+    },
+    sessionHolder: (provider, sessionId) => {
+      const precise = livePane(statusManager.paneForSession(sessionId))
+      if (precise) return precise
+      const rec = agentSessions?.list().find((v) => v.provider === provider && v.sessionId === sessionId && livePane(v.paneId))
+      if (rec) return rec.paneId
+      for (const ws of configStore.load()?.workspaces ?? []) {
+        for (const p of ws.panes) if (p.lastSession?.provider === provider && p.lastSession.sessionId === sessionId && livePane(p.id)) return p.id
+      }
+      return null
+    },
+    pty: {
+      spawnCwd: (id) => ptyManager.getSpawnCwd(id),
+      ptyIdForPane: (id) => ptyManager.ptyIdForPane(id),
+      killPaneAndWait: (id) => ptyManager.killPaneAndWait(id),
+    },
+    accounts: () => accountService?.status() ?? null,
+    cli: {
+      envForTeam: (runId, teamId, agentId, roleKind) => cliService.envForTeam(runId, teamId, agentId, roleKind),
+      revokeTeam: (runId) => cliService.revokeTeam(runId),
+      ready: () => cliService.ready(),
+    },
+    // Synthetic `team:<runId>` statuses reach only AwakeService (and AccountService through statuses), never StatusManager.
+    awake: (evt) => awakeService?.onPaneStatus(evt),
+    sendRun: (evt) => sendToRenderer(CH.TEAMS_RUN_APPEND, evt),
   })
   teamService = teams
+  statusManager.addListener((evt) => teams.onPaneStatus(evt))
+  cliService.onState(() => teams.onCliState())
   registerTeamsIpc(teams)
   const startupCfg = configStore.load()
   // v2.4: on by default (schema 17), a first run without a config included.
@@ -974,9 +1023,12 @@ async function bootstrap(): Promise<void> {
     if (BrowserWindow.getAllWindows().length === 0) {
       // macOS: the window closed but the app lived on; record sessions again.
       agentSessions?.thaw()
+      teamService?.thaw()
       openMainWindow()
     }
   })
+  // A Windows session end the OS cancelled leaves the app alive after the exit hooks: a focus thaws Teams (no-op otherwise).
+  app.on('browser-window-focus', () => teamService?.thaw())
 }
 
 // The uninstaller (build/installer.nsh customUnInit) runs the exe with
@@ -1001,6 +1053,8 @@ if (process.argv.includes('--cleanup-user-path')) {
 
 app.on('before-quit', () => {
   isQuitting = true
+  // Really quitting: a later focus or request never thaws Teams again.
+  teamService?.markQuitting()
   snapshotAgentsOnce('quit')
   // Shut the remote server first (best-effort, non-blocking) so phones get a
   // shutdown frame before the ptys they mirror are torn down.
@@ -1017,6 +1071,8 @@ app.on('before-quit', () => {
   dictationService?.dispose()
   shareGuest?.dispose()
   accountService?.dispose()
+  // The only place the Teams DeadlineTimer is disposed (shutdownSync above only cleared its keys).
+  teamService?.dispose()
   statusManager.dispose()
   codexBridge.dispose()
   discordNotifier.dispose()
@@ -1025,7 +1081,10 @@ app.on('before-quit', () => {
   destroyTray()
 })
 
-app.on('will-quit', () => globalShortcut.unregisterAll())
+app.on('will-quit', () => {
+  teamService?.markQuitting()
+  globalShortcut.unregisterAll()
+})
 
 app.on('window-all-closed', () => {
   // The ptys die below, so the agent snapshot goes first (E5-FR-06).

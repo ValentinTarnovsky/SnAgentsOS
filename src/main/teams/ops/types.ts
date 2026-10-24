@@ -4,6 +4,7 @@
  * adds the internals it needs to TeamInternals; the IPC register, the zod
  * union and the preload never change after B1.
  */
+import type { ChatMessage } from '@shared/chat-types'
 import type { ConfigFile } from '@shared/types'
 import type { TeamFail, TeamOp, TeamReply, TeamRequest, TeamScope, TeamTrustState } from '@shared/team-protocol'
 import type { Actor, DefError, ResolvedRepo, TeamDefinition, TrustedDefinition } from '@shared/teams'
@@ -69,6 +70,12 @@ export interface TeamInternals {
   approveTrust(teamId: string, loaded: LoadedDefinition & { result: { ok: true } }): Promise<TeamFail | null>
   /** The remove op: stops what runs, flushes, trashes the folder, forgets the trust; a folder that does not move keeps all of it (`io`). */
   removeTeam(teamId: string): Promise<TeamFail | null>
+  /** B2: "Ejecutar ahora" through the manual gate and the admission; the prep runs as the `prepare` effect. */
+  runManual(teamId: string, agentId: string, prompt?: string): { runId: string } | TeamFail
+  /** B2: the supervisor's memory of a live run (null fields once it ended). */
+  runLive(runId: string): { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean }
+  /** B2: the one run whose lines the renderer gets as `teams:runAppend` (decision 49); null stops it. */
+  watchRun(teamId: string, runId: string | null): void
 }
 
 export interface OpCtx {

@@ -1,0 +1,6 @@
+{
+  "steps": [
+    { "fixture": "claude-denied.jsonl", "to": 6, "rewriteSession": true },
+    { "emitBig": { "fixture": "claude-denied.jsonl", "type": "result", "path": ["permission_denials", 0, "tool_input", "content"], "bytes": 3145728, "rewriteSession": true } }
+  ]
+}

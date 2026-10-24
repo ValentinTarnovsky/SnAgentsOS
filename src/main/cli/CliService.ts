@@ -4,6 +4,7 @@ import type { WebContents } from 'electron'
 import { CLI_ENV } from '@shared/brand'
 import type { CliUiState, SkillOp, SkillStatus, SkillTarget, SnaosRuntimeFile } from '@shared/ctl-protocol'
 import type { ConfigFile } from '@shared/types'
+import { teamPaneId, type RoleKind } from '@shared/teams'
 import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import type { CustomNotice } from '../status/events'
 import { CtlServer, ctlEndpoint } from './CtlServer'
@@ -59,6 +60,8 @@ export class CliService {
   private transition: Promise<void> = Promise.resolve()
   /** Built later in bootstrap (notes store, transcript locator); a missing one answers `disabled`. */
   private readonly services: CtlServices = {}
+  /** App 2.7.0 (Teams, decision 71): told after every switch settles (server up, down or failed to start). */
+  private readonly stateListeners = new Set<() => void>()
 
   constructor(private readonly deps: CliServiceDeps) {
     this.master = newToken()
@@ -124,8 +127,36 @@ export class CliService {
   /** settings.cliEnabled (cli:setEnabled and the startup value). Serialized: toggles never overlap. */
   setEnabled(on: boolean): Promise<void> {
     this.enabled = on
-    this.transition = this.transition.then(() => (this.enabled ? this.start() : this.stop())).catch(() => undefined)
+    this.transition = this.transition
+      .then(() => (this.enabled ? this.start() : this.stop()))
+      .catch(() => undefined)
+      .then(() => this.notifyState())
     return this.transition
+  }
+
+  /** App 2.7.0 (Teams, decision 71): `fn` runs after every setEnabled settles. Returns the unsubscribe. */
+  onState(fn: () => void): () => void {
+    this.stateListeners.add(fn)
+    return () => this.stateListeners.delete(fn)
+  }
+
+  private notifyState(): void {
+    for (const fn of [...this.stateListeners]) {
+      try {
+        fn()
+      } catch (error) {
+        console.warn('[cli] state listener failed:', error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  /**
+   * App 2.7.0 (Teams, decision 71): team runs can call `snaos team` only now:
+   * the switch on, the server really listening (it can fail to start,
+   * EADDRINUSE, with the switch on) and the shim on disk.
+   */
+  ready(): boolean {
+    return this.enabled && this.running && this.shimExists()
   }
 
   private async start(): Promise<void> {
@@ -185,6 +216,30 @@ export class CliService {
     }
     if (ws) env[CLI_ENV.workspaceId] = ws
     return env
+  }
+
+  /**
+   * App 2.7.0 (Teams, design 5.1): env of a team run, on top of cleanEnv().
+   * A team token (key `team:<runId>`, no workspace), the endpoint, the shim
+   * and SNAOS_TEAM_RUN; never SNAOS_CONSOLE_ID, SNAOS_PTY_ID or
+   * SNAOS_WORKSPACE_ID (its hooks stay silent). Nothing unless ready(),
+   * stricter than envFor. The PATH prepend of the shim folder is the
+   * caller's. Never logged.
+   */
+  envForTeam(runId: string, teamId: string, agentId: string, roleKind: RoleKind): Record<string, string> {
+    if (!this.ready()) return {}
+    return {
+      [CLI_ENV.ctlEndpoint]: this.transport.endpoint,
+      [CLI_ENV.ctlToken]: this.tokens.issueTeam(runId, { runId, teamId, agentId, roleKind }),
+      [CLI_ENV.cli]: this.shimFile,
+      [CLI_ENV.teamRun]: runId,
+    }
+  }
+
+  /** Every team run end (and shutdownSync): its token and its rate windows go. */
+  revokeTeam(runId: string): void {
+    this.tokens.revokeTeam(runId)
+    this.handlers.forgetCaller(teamPaneId(runId))
   }
 
   private workspaceOf(paneId: string): string {

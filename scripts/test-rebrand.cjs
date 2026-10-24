@@ -327,6 +327,18 @@ async function main() {
         check(env.SNAOS_FOO === 'preset' && env[AGENT_ENV.consoleId] === 'pane' && env.KEEP === 'yes', `${key}: extra merged unfiltered, unrelated vars kept`)
         check(env[key] === tools, `${key}: both status-bin entries stripped, the rest kept`)
       }
+      {
+        // App 2.7.0: the app started from inside a Claude Code session hands none of that session to a console or a
+        // team run (its socket, token, pid, tmp dir...), while the user's own Claude and Anthropic configuration stays.
+        const session = ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_ENV_FILE', 'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_PARENT_SESSION',
+          'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_TMPDIR',
+          'CLAUDE_CODE_PLUGIN_DIRS', 'CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS', 'CLAUDE_EFFORT', 'CLAUDE_PID']
+        const config = { CLAUDE_CONFIG_DIR: path.join(tmp, 'claude'), CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', ANTHROPIC_BASE_URL: 'https://proxy.example', ANTHROPIC_MODEL: 'opus', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8000' }
+        const { cleanEnv } = resolver({ ...Object.fromEntries(session.map(k => [k, 'parent-session'])), ...(process.platform === 'win32' ? { claude_pid_x: 'kept', Claude_Pid: '4242' } : {}), ...config, PATH: tools })
+        const env = cleanEnv()
+        check(!Object.keys(env).some(k => session.includes(k.toUpperCase())), `the Claude Code session vars of a parent session are dropped (any case on Windows): ${Object.keys(env).join()}`)
+        check(Object.entries(config).every(([k, v]) => env[k] === v) && (process.platform !== 'win32' || env.claude_pid_x === 'kept'), 'user configuration stays: CLAUDE_CONFIG_DIR, Bedrock, Vertex, ANTHROPIC_*, other CLAUDE_* settings')
+      }
       if (process.platform === 'win32') {
         const lowerVar = LEGACY_BRAND.envPrefix.toLowerCase() + 'pty_id'
         const { cleanEnv } = resolver({ Path: ['"' + legacyBin.toUpperCase() + '\\"', tools, ''].join(';'), [lowerVar]: 'x' })

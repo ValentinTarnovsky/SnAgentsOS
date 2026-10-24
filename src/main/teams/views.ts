@@ -9,22 +9,28 @@ import { TEAM_DIR } from '@shared/teamDefinition'
 import { teamNeedsCount, type TeamNeedsInput } from '@shared/teamNeeds'
 import { diffTeamFiles } from '@shared/teamDiff'
 import type {
+  AgentView,
   ApprovalView,
   CardView,
   QueueItemView,
   RoleSummary,
+  RunView,
   TeamListItem,
   TeamTakeoverRef,
   TeamTrustState,
   TeamView,
 } from '@shared/team-protocol'
+import type { PaneUsage } from '@shared/types'
 import {
   REPO_MAIN,
   TEAM_MAX_CONCURRENT,
   type Actor,
+  type AgentState,
   type DefError,
   type QueueItem,
   type RoleDefinition,
+  type Run,
+  type RunState,
   type TeamApproval,
   type TeamCard,
   type TeamDefinition,
@@ -174,7 +180,7 @@ export function teamListItem(rec: TeamRecord, def: TeamDefinition | null, truste
     paused: rt.paused,
     autoDispatch: rt.autoDispatch,
     agents: rt.agents.filter((a) => !a.retired).length,
-    running: rt.activeRuns.length,
+    running: liveRuns(rt),
     needsCount: teamNeedsCount(needsInputOf(rt, rec.trust, rec.trustSince, trusted)),
     rev: rt.rev,
     repoRoot: rec.entry.repoRoot,
@@ -184,8 +190,8 @@ export function teamListItem(rec: TeamRecord, def: TeamDefinition | null, truste
   return out
 }
 
-/** The team header and the definition summary of the overlay. */
-export function teamView(rec: TeamRecord, def: TeamDefinition | null, trusted: TrustedDefinition | null): TeamView {
+/** The team header and the definition summary of the overlay; `now` is the service clock (usageToday's day). */
+export function teamView(rec: TeamRecord, def: TeamDefinition | null, trusted: TrustedDefinition | null, now: number): TeamView {
   const rt = rec.store.rt
   const confirmed = (repoId: string, command: string): boolean => {
     const c = rt.verifyConfirmed[repoId]
@@ -219,9 +225,127 @@ export function teamView(rec: TeamRecord, def: TeamDefinition | null, trusted: T
     roles: (def?.roles ?? []).map(roleSummary),
     rev: rt.rev,
     needsCount: teamNeedsCount(needsInputOf(rt, rec.trust, rec.trustSince, trusted)),
-    running: rt.activeRuns.length,
+    running: liveRuns(rt),
     providerBlockedUntil: { ...rt.providerBlockedUntil },
   }
+  const usage = usageToday(rec.store.recentRuns(), now)
+  if (usage) out.usageToday = usage
   if (rt.workspaceId) out.workspaceId = rt.workspaceId
+  return out
+}
+
+/**
+ * The TeamView fields a runtime commit can move, as one comparable key (rev
+ * aside): TeamService adds the `team` scope to a commit that changes it, so
+ * the header (running, usage today, provider limits, pause) and the Te
+ * necesita count never go stale. The definition and trust fields move outside
+ * the runtime and emit `team` where they change (defCheck, trust, setup).
+ */
+export function teamHeaderKey(rec: TeamRecord, trusted: TrustedDefinition | null, now: number): string {
+  const rt = rec.store.rt
+  return JSON.stringify([
+    rt.paused ?? null,
+    rt.autoDispatch,
+    liveRuns(rt),
+    teamNeedsCount(needsInputOf(rt, rec.trust, rec.trustSince, trusted)),
+    rt.providerBlockedUntil,
+    usageToday(rec.store.recentRuns(), now) ?? null,
+    rt.workspaceId ?? null,
+    rt.verifyConfirmed,
+  ])
+}
+
+// ---- runs and agents (B2) ----------------------------------------------------------------------
+
+/** States a process belongs to (the synthetic status, the close confirm, the running counts). */
+export const LIVE_RUN_STATES: readonly RunState[] = ['starting', 'running', 'stopping']
+
+/** Runs with a process: queued ones have none yet, so they never count as running. */
+export function liveRuns(rt: Readonly<TeamRuntime>): number {
+  return rt.activeRuns.filter((r) => LIVE_RUN_STATES.includes(r.state)).length
+}
+
+/** The usage fields of a run delta (RunUsage minus its basis), as the views carry it. */
+function paneUsage(u: NonNullable<Run['usage']>): PaneUsage {
+  const out: PaneUsage = { inputTokens: u.inputTokens, outputTokens: u.outputTokens, cacheReadTokens: u.cacheReadTokens, cacheWriteTokens: u.cacheWriteTokens, estimated: true }
+  if (u.costUSD !== undefined) out.costUSD = u.costUSD
+  if (u.unknownCost) out.unknownCost = true
+  if (u.model) out.model = u.model
+  return out
+}
+
+/** Sum of the run deltas that ended today (local day of `now`), estimated; undefined without any. */
+export function usageToday(runs: readonly Run[], now: number): PaneUsage | undefined {
+  const day = new Date(now)
+  day.setHours(0, 0, 0, 0)
+  const from = day.getTime()
+  let out: PaneUsage | undefined
+  for (const r of runs) {
+    if (!r.usage || (r.endedAt ?? 0) < from) continue
+    const u = r.usage
+    if (!out) out = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimated: true }
+    out.inputTokens += u.inputTokens
+    out.outputTokens += u.outputTokens
+    out.cacheReadTokens += u.cacheReadTokens
+    out.cacheWriteTokens += u.cacheWriteTokens
+    if (u.costUSD !== undefined) out.costUSD = (out.costUSD ?? 0) + u.costUSD
+    if (u.unknownCost) out.unknownCost = true
+  }
+  return out
+}
+
+/** A run as the renderer and the phone see it; `lastLineAt` is the live value while the process runs. */
+export function runView(r: Run, live?: { lastLineAt?: number }): RunView {
+  const out: RunView = {
+    id: r.id, agentId: r.agentId, roleId: r.roleId, taskId: r.taskId ?? null, mode: r.mode, trigger: r.trigger.reason,
+    state: r.state, provider: r.provider, resumed: r.resumed, queuedAt: r.queuedAt,
+  }
+  if (r.outcome) out.outcome = r.outcome
+  if (r.model) out.model = r.model
+  if (r.effort) out.effort = r.effort
+  if (r.startedAt !== undefined) out.startedAt = r.startedAt
+  if (r.endedAt !== undefined) out.endedAt = r.endedAt
+  const lastLineAt = live?.lastLineAt ?? r.lastLineAt
+  if (lastLineAt !== undefined) out.lastLineAt = lastLineAt
+  if (r.failure) out.failure = { ...r.failure }
+  if (r.usage) out.usage = paneUsage(r.usage)
+  if (r.context) out.context = { ...r.context }
+  if (r.digest) out.digest = { ...r.digest, families: { ...r.digest.families }, files: [...r.digest.files] }
+  if (r.summary) out.summary = r.summary
+  if (r.concludedBy) out.concludedBy = r.concludedBy.tool
+  return out
+}
+
+/**
+ * One roster card: the agent, its role as the trusted definition names it,
+ * the active run and the newest ended one. `lastLineAt` reads the live value
+ * of the supervisor (never committed on every line, design 3.5).
+ */
+export function agentView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null, a: AgentState, recent: readonly Run[], lastLineAt: (runId: string) => number | undefined): AgentView {
+  const role = def?.roles.find((r) => r.id === a.roleId)
+  const out: AgentView = {
+    id: a.id, roleId: a.roleId, roleName: role?.name ?? a.roleId, kind: a.roleKind, index: agentIndex(a),
+    provider: a.provider, permission: role?.permission ?? 'readonly', status: a.status, paused: a.paused, retired: !!a.retired,
+  }
+  if (role?.model) out.model = role.model
+  if (role?.effort) out.effort = role.effort
+  const active = a.runId ? rt.activeRuns.find((r) => r.id === a.runId) : undefined
+  if (active) {
+    out.run = runView(active, { lastLineAt: lastLineAt(active.id) })
+    if (active.taskId) out.taskId = active.taskId
+  }
+  for (let i = recent.length - 1; i >= 0; i--) {
+    if (recent[i].agentId === a.id) {
+      out.lastRun = runView(recent[i])
+      break
+    }
+  }
+  const ctx = out.run?.context ?? out.lastRun?.context
+  if (ctx) out.context = { ...ctx }
+  const t = a.takeover
+  if (t) {
+    out.takeover = { phase: t.phase, at: t.at }
+    if (t.phase === 'bound' || t.phase === 'releasing') out.takeover.paneId = t.paneId
+  }
   return out
 }
