@@ -33,11 +33,17 @@ export type ActionId =
   | 'toggleNotes'
   // Desktop dictation (app 2.4.0): toggles on the focused console (or the open global prompt).
   | 'dictate'
+  // Terminal | Chat on the focused agent console (app 2.7.0, A7; Labs consoleChat). CONTRATOS "Atajos": no default.
+  | 'toggleConsoleChat'
 
 export interface KeyAction {
   id: ActionId
   labelKey: MessageKey
-  /** Default accelerator; chosen to avoid clobbering common shell control keys. */
+  /**
+   * Default accelerator; chosen to avoid clobbering common shell control keys.
+   * '' = none: the action has no key until the user records one (eventToAccel
+   * never yields '', so it never matches), and it never collides.
+   */
   defaultAccel: string
 }
 
@@ -71,6 +77,8 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'toggleNotes', labelKey: 'keys.toggleNotes', defaultAccel: 'Ctrl+Shift+M' },
   // H for "hablar"; Win+H is the system's own dictation.
   { id: 'dictate', labelKey: 'keys.dictate', defaultAccel: 'Ctrl+Shift+H' },
+  // No default: any chord it took by itself would stop reaching the agent. The user binds one.
+  { id: 'toggleConsoleChat', labelKey: 'keys.toggleConsoleChat', defaultAccel: '' },
 ]
 
 /** Actions that stay out of text fields so the field keeps the key (E5-FR-18). */

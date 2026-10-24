@@ -1421,7 +1421,8 @@ async function shellIntegrationChecks() {
     const { KEY_ACTIONS, resolveKeymap } = load('src/renderer/lib/keymap.ts')
     const km = resolveKeymap(undefined)
     check(km.promptPrev === 'Ctrl+Shift+PageUp' && km.promptNext === 'Ctrl+Shift+PageDown', 'promptPrev/promptNext defaults per D8')
-    const accels = KEY_ACTIONS.map(a => a.defaultAccel)
+    // An action with no default ('') cannot collide: only real chords are compared.
+    const accels = KEY_ACTIONS.map(a => a.defaultAccel).filter(Boolean)
     check(new Set(accels).size === accels.length && km.workspacePrev === 'Ctrl+PageUp' && km.focusPrevPane === 'Ctrl+Alt+Left', 'no default accelerator is shared')
     check(resolveKeymap({ promptPrev: 'Alt+Up' }).promptPrev === 'Alt+Up', 'the prompt jumps can be remapped')
   }

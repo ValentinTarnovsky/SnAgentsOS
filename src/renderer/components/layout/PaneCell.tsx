@@ -16,6 +16,7 @@ import {
   History,
   Hourglass,
   Maximize2,
+  MessageSquare,
   Mic,
   Minimize2,
   Minus,
@@ -25,11 +26,13 @@ import {
   RotateCw,
   Share2,
   SquarePen,
+  SquareTerminal,
   Undo2,
   X,
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import type { AgentPreset, Pane, Workspace } from '@shared/types'
+import { labOn } from '@shared/labs'
 import { useAppStore } from '@/lib/store'
 import { isPaneMounted } from '@/lib/mounting'
 import { resolveLaunch } from '@/lib/launch'
@@ -59,6 +62,8 @@ import { ResumeChip } from '@/components/agents/ResumeChip'
 import { SleepingOverlay } from '@/components/agents/SleepingOverlay'
 import { CacheChip } from '@/components/agents/CacheChip'
 import { PaneSignals } from '@/components/status/PaneSignals'
+import { ConsoleChatView } from '@/components/chat/ConsoleChatView'
+import { chatCapablePane, showPaneView, usePaneView, type PaneView } from '@/lib/consoleChatStore'
 import { openPlan, planRequestOf } from '@/lib/planModal'
 import { useAgentStore } from '@/lib/agentStore'
 import { useGitStore } from '@/lib/gitStore'
@@ -312,6 +317,20 @@ export function PaneCell({
     if (planReq) openPlan(pane.id, planReq)
   }
 
+  // App 2.7.0 (A7, Labs `consoleChat`): Terminal | Chat on an agent console (a
+  // Claude or Codex pane, or a shell whose status names its agent), saved per
+  // pane. The chat covers the terminal, which only hides (display:none, out of
+  // isActive so it refits on the way back): never unmounted, its pty and screen
+  // live on. With the lab off the switch is gone and the terminal shows. The
+  // remappable `toggleConsoleChat` (no default) switches the focused one.
+  const chatCapable = labOn(settings, 'consoleChat') && chatCapablePane(pane, statusProvider)
+  const savedView = usePaneView(pane.id)
+  const chatView = chatCapable && savedView === 'chat'
+  // The keyboard follows the view: the terminal, or the chat's composer.
+  const showView = (view: PaneView): void => {
+    if (view !== (chatView ? 'chat' : 'terminal')) showPaneView(pane.id, view)
+  }
+
   const menuItems: ContextMenuItem[] = [
     { label: t('ctx.rename'), icon: Pencil, onClick: startRename },
     {
@@ -559,6 +578,43 @@ export function PaneCell({
             {t('pane.exited')}
           </span>
         )}
+        {chatCapable && (
+          // A double click here switches twice, it never maximizes the pane.
+          <div
+            role="radiogroup"
+            aria-label={t('consoleChat.viewLabel')}
+            data-pane-view-toggle={chatView ? 'chat' : 'terminal'}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="flex shrink-0 items-center rounded border border-border p-px"
+          >
+            {(
+              [
+                ['terminal', SquareTerminal, t('consoleChat.viewTerminal')],
+                ['chat', MessageSquare, t('consoleChat.viewChat')],
+              ] as const
+            ).map(([view, Glyph, label]) => {
+              const on = (chatView ? 'chat' : 'terminal') === view
+              return (
+                <Tooltip key={view} label={label}>
+                  <button
+                    draggable={false}
+                    role="radio"
+                    aria-checked={on}
+                    aria-label={label}
+                    data-view-option={view}
+                    onClick={() => showView(view)}
+                    className={cn(
+                      'flex h-5 w-6 items-center justify-center rounded-[3px] transition-colors',
+                      on ? 'bg-accent-violet/15 text-text-primary' : 'text-text-secondary hover:text-text-primary',
+                    )}
+                  >
+                    <Glyph size={13} />
+                  </button>
+                </Tooltip>
+              )
+            })}
+          </div>
+        )}
         <PaneMicButton paneId={pane.id} />
         <Tooltip label={scheduleTip}>
           <button
@@ -638,22 +694,28 @@ export function PaneCell({
         ) : sleepInfo ? (
           <SleepingOverlay paneId={pane.id} workspaceId={workspace.id} info={sleepInfo} />
         ) : mounted ? (
-          // A render failure swaps only the terminal for a fallback; the pty
-          // keeps running and [Reload console] reattaches (E4-FR-19).
-          <PaneErrorBoundary paneId={pane.id} epoch={epoch}>
-            <TerminalPane
-              key={epoch}
-              paneId={pane.id}
-              workspaceId={workspace.id}
-              cwd={cwd}
-              shell={shell}
-              initialCommand={initialCommand}
-              launchKind={launchKind}
-              setup={setup}
-              fontSize={pane.fontSize}
-              isActive={cellVisible}
-            />
-          </PaneErrorBoundary>
+          <>
+            {/* Always this wrapper (the chat only hides it), so switching views never remounts the terminal. */}
+            <div data-pane-terminal={pane.id} className={cn('h-full', chatView && 'hidden')}>
+              {/* A render failure swaps only the terminal for a fallback; the pty
+                  keeps running and [Reload console] reattaches (E4-FR-19). */}
+              <PaneErrorBoundary paneId={pane.id} epoch={epoch}>
+                <TerminalPane
+                  key={epoch}
+                  paneId={pane.id}
+                  workspaceId={workspace.id}
+                  cwd={cwd}
+                  shell={shell}
+                  initialCommand={initialCommand}
+                  launchKind={launchKind}
+                  setup={setup}
+                  fontSize={pane.fontSize}
+                  isActive={cellVisible && !chatView}
+                />
+              </PaneErrorBoundary>
+            </div>
+            {chatView && <ConsoleChatView pane={pane} active={cellVisible} onTerminal={() => showView('terminal')} />}
+          </>
         ) : (
           <div
             data-pane-placeholder={pane.id}

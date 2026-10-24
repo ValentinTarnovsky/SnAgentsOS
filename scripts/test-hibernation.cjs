@@ -328,7 +328,8 @@ function testKeymapAndI18n() {
   const km = load('src/renderer/lib/keymap.ts')
   const keymap = km.resolveKeymap({})
   check(keymap.agentsBoard === 'Ctrl+Shift+A', 'agentsBoard defaults to Ctrl+Shift+A (D8 amendment)')
-  const accels = Object.values(keymap)
+  // An action with no default ('') cannot collide: only real chords are compared.
+  const accels = Object.values(keymap).filter(Boolean)
   check(new Set(accels).size === accels.length, 'no default accelerator is shared')
   const { en } = load('src/renderer/i18n/en.ts')
   const { es } = load('src/renderer/i18n/es.ts')

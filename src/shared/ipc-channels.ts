@@ -259,6 +259,12 @@ export const CH = {
   FILES_WATCH: 'files:watch', // send (workspaceId | null): the one folder watched
   FILES_CHANGED: 'files:changed', // main -> renderer (FilesChangedEvt)
 
+  // Desktop console chat (app 2.7.0, A7; settings.labs.consoleChat): one ChatHub reader per window and pane; main checks the lab and the pane.
+  CHAT_SUB: 'chat:sub', // invoke (ChatSubReq) -> ChatPageRes (the first page; a repeat is a fresh first page)
+  CHAT_UNSUB: 'chat:unsub', // send (ChatSubReq)
+  CHAT_MORE: 'chat:more', // invoke (ChatMoreReq) -> ChatPageRes (the page before `before`)
+  CHAT_FRAME: 'chat:frame', // main -> renderer (ChatFrameEvt: appends, and a chatPage that resets the list)
+
   // Share, host side (app 2.4.0, item 8): ids only from the renderer; main resolves every scope against its own state.
   SHARE_HOST_STATE: 'share:hostState', // invoke -> ShareHostState
   SHARE_HOST_EVENT: 'share:hostEvent', // main -> renderer (ShareHostState)

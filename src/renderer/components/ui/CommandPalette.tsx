@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArchiveRestore, BellRing, Bot, FileDiff, FolderTree, GitBranch, LayoutDashboard, Megaphone, NotebookPen, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
+import { ArchiveRestore, BellRing, Bot, FileDiff, FolderTree, GitBranch, LayoutDashboard, Megaphone, MessageSquare, NotebookPen, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
 import { formatAgeShort } from '@shared/agents'
 import { visiblePaneIds } from '@shared/status'
 import { useAppStore } from '@/lib/store'
@@ -28,6 +28,7 @@ import { workspaceGitKey } from '@/lib/gitChip'
 import { useWorktreeStore } from '@/lib/worktreeStore'
 import { templateFromPreset, worktreeOffer } from '@/lib/worktrees'
 import { toast } from '@/lib/toast'
+import { focusedChatConsole, togglePaneView } from '@/lib/consoleChatStore'
 
 interface Command {
   id: string
@@ -109,9 +110,12 @@ export function CommandPalette() {
   // The order is frozen when the palette opens; glyphs keep updating live.
   const [wasOpen, setWasOpen] = useState(false)
   const [frozen, setFrozen] = useState<string[]>([])
+  // App 2.7.0 (A7): the console "Toggle console chat" acts on, taken as the palette opens (it takes the focus).
+  const [chatTarget, setChatTarget] = useState<string | null>(null)
   if (open !== wasOpen) {
     setWasOpen(open)
     setFrozen(open ? computeWaiting() : [])
+    setChatTarget(open ? focusedChatConsole() : null)
   }
 
   const keymap = useMemo(() => resolveKeymap(keymapOverrides), [keymapOverrides])
@@ -138,6 +142,10 @@ export function CommandPalette() {
     if (canReopen) {
       // E5-FR-14: the last closed console, same id and place, resuming its chat.
       cmds.push({ id: 'reopen-closed', label: t('agents.reopenClosed'), hint: t('palette.console'), icon: ArchiveRestore, action: 'reopenClosedPane', run: () => void reopenClosedConsole() })
+    }
+    if (chatTarget) {
+      // Labs consoleChat: Terminal | Chat on the focused agent console, like its remappable shortcut.
+      cmds.push({ id: 'toggle-console-chat', label: t('keys.toggleConsoleChat'), hint: t('palette.console'), icon: MessageSquare, action: 'toggleConsoleChat', run: () => togglePaneView(chatTarget) })
     }
     for (const w of workspaces) {
       cmds.push({ id: `ws-${w.id}`, label: w.name, hint: t('palette.workspace'), icon: iconFor(w.panes[0]?.icon), run: () => setActive(w.id) })
@@ -198,7 +206,7 @@ export function CommandPalette() {
       cmds.push({ id: `theme-${th.name}`, label: `${t('palette.theme')}: ${th.label}`, hint: t('palette.appearance'), icon: Palette, run: () => updateSettings({ theme: th.name }) })
     }
     return cmds
-  }, [workspaces, presets, connections, quickCommands, activeId, canReopen, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
+  }, [workspaces, presets, connections, quickCommands, activeId, canReopen, chatTarget, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
 
   // E5-FR-16: with a query every console is searchable by title, workspace,
   // its agent's topic and first prompt.
@@ -359,9 +367,10 @@ export function CommandPalette() {
                 {glyph && <StatusGlyph kind={glyphOf(glyph)} unread={glyph.unread} size={13} />}
                 {Icon && <Icon size={15} className="shrink-0 text-text-secondary" />}
                 <span className="min-w-0 flex-1 truncate text-text-primary">{c.label}</span>
-                {c.action && (
+                {/* An action with no key bound (toggleConsoleChat by default) shows no chip. */}
+                {c.action && keymap[c.action] ? (
                   <kbd className="shrink-0 rounded border border-border px-1 font-mono text-[10px] text-text-secondary">{formatAccel(keymap[c.action])}</kbd>
-                )}
+                ) : null}
                 {c.hint && <span className="shrink-0 text-[11px] text-text-secondary">{c.hint}</span>}
               </button>
             )

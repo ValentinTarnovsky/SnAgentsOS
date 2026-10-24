@@ -30,7 +30,7 @@ import type {
   WorkspaceTaskState,
 } from './types'
 import type { GitArea, GitDiffHunk, GitFileEntry, RemoteGitChip } from './git-types'
-import type { ChatMessage } from './chat-types'
+import type { ChatFrameNotice, ChatMessage } from './chat-types'
 import type { WsNoteError, WsNoteMeta } from './ws-notes'
 import type { TuneSet } from './agentTune'
 import type { ClaudeAccountRole, UsageActiveAccount } from './claude-accounts'
@@ -715,7 +715,12 @@ export type RemoteServerMsg =
    * arrives without a chatMore pending is a first page and replaces the list
    * (reset after /clear, a resume or a truncated file). `cursor` = byte offset
    * of its first line (null with nothing before); a lone notice block = no chat.
+   * app 2.7.0 (A7): optional `notice` (ChatFrameNotice), see chatAppend.
    */
-  | { v: number; type: 'chatPage'; paneId: string; items: ChatMessage[]; cursor: string | null; done: boolean }
-  /** E3-FR-30: messages written to the transcript since, <= 48KB per frame. */
-  | { v: number; type: 'chatAppend'; paneId: string; items: ChatMessage[] }
+  | { v: number; type: 'chatPage'; paneId: string; items: ChatMessage[]; cursor: string | null; done: boolean; notice?: ChatFrameNotice }
+  /**
+   * E3-FR-30: messages written to the transcript since, <= 48KB per frame.
+   * app 2.7.0 (A7): `notice: 'paused'` on an empty one = the PC closed this
+   * chat's watcher for another one; nothing more comes until a new chatSub.
+   */
+  | { v: number; type: 'chatAppend'; paneId: string; items: ChatMessage[]; notice?: ChatFrameNotice }

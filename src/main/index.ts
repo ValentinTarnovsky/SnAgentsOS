@@ -31,6 +31,7 @@ import { electronCrypto } from './accounts/safeCrypto'
 import { registerGitIpc } from './ipc/registerGitIpc'
 import { registerReviewNotesIpc } from './ipc/registerReviewNotesIpc'
 import { registerWsNotesIpc } from './ipc/registerWsNotesIpc'
+import { registerChatIpc, type ChatIpc } from './ipc/registerChatIpc'
 import { registerFilesIpc } from './ipc/registerFilesIpc'
 import type { ReviewNoteStore } from './git/ReviewNoteStore'
 import { registerWorktreeIpc } from './ipc/registerWorktreeIpc'
@@ -203,6 +204,8 @@ let accountService: AccountService | null = null
 let reviewNotes: ReviewNoteStore | null = null
 // Desktop dictation (app 2.5.0): created in bootstrap; its whisper-server dies on quit.
 let dictationService: DictationService | null = null
+// Desktop console chat (app 2.7.0, A7): created in bootstrap next to ChatHub; CONFIG_SAVE re-reads its lab.
+let chatIpc: ChatIpc | null = null
 // An NVIDIA GPU (app.getGPUInfo, read once at bootstrap): picks the GPU pack for device 'auto'.
 let nvidiaGpu = false
 // Share (app 2.4.0, item 8): ONE identity store for both roles (share-identity.json holds host and guest keys;
@@ -413,6 +416,8 @@ function registerConfigIpc(): void {
     // v2.5: dictation reads its settings and the workspaces from this cache, never from disk
     // (the renderer saves through a debounce, so a disk read could be stale).
     dictationService?.setConfig(config)
+    // App 2.7.0 (A7): labs.consoleChat off drops every desktop chat reader.
+    chatIpc?.setConfig(config)
   })
 
   ipcMain.handle(CH.CONFIG_EXPORT, async (_e, config: ConfigFile): Promise<boolean> => {
@@ -816,6 +821,8 @@ async function bootstrap(): Promise<void> {
   const chatHub: ChatHub = new ChatHub({ locate: (paneId) => chatLocator.locate(paneId) })
   statusManager.onTranscriptChange((paneId) => chatHub.transcriptChanged(paneId))
   remoteManager.setChat(chatHub)
+  // Desktop console chat (app 2.7.0, A7; labs.consoleChat): one ChatHub reader per window.
+  chatIpc = registerChatIpc({ hub: chatHub, config: () => configStore.load(), running: (paneId) => ptyManager.ptyIdForPane(paneId) !== null })
   // snaos notes / chat / peek (app 2.3.0): the same notes store as the drawer and
   // the phones; transcripts through the locator only, read one-shot (never a
   // ChatHub reader, so no watcher opens: FR-35 holds). Before setEnabled below.

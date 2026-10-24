@@ -7,8 +7,14 @@
 // Codex rollout) and ChatHub through RemoteManager + SessionManager with a
 // fake socket, a fake pty table and a fake clock (first page, appends, more,
 // notices, no `out` while in Chat, the owner in Chat without timers, the
-// watcher closing 30s after the last reader, at most 4 watchers). Every file
-// lives in a temp folder; nothing listens and no real ~/.claude is read.
+// watcher closing 30s after the last reader, at most 4 watchers), the LRU
+// pause (app 2.7.0, A7: the `paused` notice to live readers and nothing for a
+// watcher nobody reads, resume, a first page read while its watcher closed),
+// and the desktop chat:* IPC (A7) through its registered handlers with fake
+// webContents (one owner per window, frames only to it, destroy and reload,
+// the lab off and a sub ahead of the save that turns it on, an unsub while it
+// waits, bad pane ids, the cap and the pause with phone and desktop readers). Every
+// file lives in a temp folder; nothing listens and no real ~/.claude is read.
 const { build } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -60,12 +66,35 @@ export { shrinkMessage, splitAppend, jsonBytes } from './src/main/chat/chatFrame
 export { claudeConfigDir } from './src/main/status/statusDetails'
 export { claudeSlug } from './src/main/agents/transcripts'
 export { chatMessageOffset, chatNoticeOf, CHAT_SKIPPED_TEXT } from './src/shared/chat-types'
+export { registerChatIpc, CHAT_IPC_WAIT_MS, CHAT_DESKTOP_MAX_SUBS, CHAT_LAB_GRACE_MS } from './src/main/ipc/registerChatIpc'
+export { CH } from './src/shared/ipc-channels'
 `
 let code = ''
 const FRAME_MAX = 49152
 
+/** An electron stub whose ipcMain keeps the registered handlers. */
+function fakeElectron() {
+  const handlers = new Map()
+  return { handlers, ipcMain: { handle: (ch, fn) => handlers.set(ch, fn), on: (ch, fn) => handlers.set(ch, fn) } }
+}
+
+/** A fake webContents: what it was sent, its listeners, emit() and destroy(). */
+function fakeWc(id) {
+  const listeners = {}
+  const wc = {
+    id, sent: [], destroyed: false,
+    isDestroyed: () => wc.destroyed,
+    send: (ch, payload) => wc.sent.push({ ch, payload: JSON.parse(JSON.stringify(payload)) }),
+    on: (name, fn) => { (listeners[name] = listeners[name] || []).push(fn) },
+    emit: (name, ...args) => { for (const fn of listeners[name] || []) fn(...args) },
+    destroy: () => { wc.destroyed = true; wc.emit('destroyed') },
+    frames: (paneId) => wc.sent.filter(m => m.ch === 'chat:frame' && (paneId === undefined || m.payload.paneId === paneId)).map(m => m.payload.frame),
+  }
+  return wc
+}
+
 /** A fresh context: real timers, or a fake clock with advance(). */
-function load(fake = false) {
+function load(fake = false, electron = fakeElectron()) {
   let clock = 0, seq = 0
   const timers = new Map()
   const add = (fn, ms, every) => { const id = ++seq; timers.set(id, { at: clock + Math.max(0, ms || 0), fn, every }); return { id, unref() {}, ref() {} } }
@@ -85,7 +114,7 @@ function load(fake = false) {
   }
   class FakeDate extends Date { static now() { return 1700000000000 + clock } }
   const ctx = {
-    module: { exports: {} }, require: id => id === 'qrcode' ? { toDataURL: async () => 'data:' } : require(id),
+    module: { exports: {} }, require: id => id === 'qrcode' ? { toDataURL: async () => 'data:' } : id === 'electron' ? electron : require(id),
     console, process, Buffer, URL, queueMicrotask, TextDecoder, TextEncoder,
     setTimeout: fake ? (fn, ms) => add(fn, ms, 0) : setTimeout, clearTimeout: fake ? del : clearTimeout,
     setInterval: fake ? (fn, ms) => add(fn, ms, ms) : setInterval, clearInterval: fake ? del : clearInterval,
@@ -641,9 +670,9 @@ const snapshot = {
   activeWorkspaceId: 'w1', themeTokens: {}, language: 'en', fontFamily: '', fontSize: 14,
 }
 
-function world(locateImpl) {
+function world(locateImpl, electron) {
   for (const f of fs.readdirSync(dataDir)) fs.rmSync(path.join(dataDir, f), { recursive: true, force: true })
-  const { api, advance } = load(true)
+  const { api, advance } = load(true, electron)
   const sizes = new Map([['p1', { cols: 120, rows: 40 }], ['p2', { cols: 100, rows: 30 }]])
   let sink = null
   const pty = {
@@ -823,10 +852,109 @@ async function testWatcherCap() {
     createWatcher: deps => new api.TranscriptWatcher({ ...deps, watchFile: () => ({ close() {} }), pollMs: 60000 }),
   })
   const got = []
-  for (let i = 0; i < 6; i++) { hub.sub({ n: i }, 'x' + i, f => got.push(f)); await until(() => got.length > i) }
-  check(got.filter(f => f.type === 'chatPage').length === 6 && hub.openWatchers === 4, 'six chats keep at most 4 watchers open (LRU)')
+  const pages = () => got.filter(f => f.type === 'chatPage')
+  for (let i = 0; i < 6; i++) { hub.sub({ n: i }, 'x' + i, f => got.push(f)); await until(() => pages().length > i) }
+  check(pages().length === 6 && hub.openWatchers === 4, 'six chats keep at most 4 watchers open (LRU)')
+  // App 2.7.0 (A7): the two chats that lost their watcher while read were told.
+  check(got.filter(f => f.notice === 'paused').map(f => f.paneId).join() === 'x0,x1', 'and the two it closed were told they are paused')
   hub.dispose()
   check(hub.openWatchers === 0, 'dispose closes them all')
+}
+
+// --- LRU pause (app 2.7.0, A7): a watcher closed while someone reads it says so --------------
+
+async function testHubPause() {
+  const files = Array.from({ length: 6 }, (_, i) => { const f = path.join(tmp, `pause${i}.jsonl`); fs.writeFileSync(f, userLine('p' + i) + '\n'); return f })
+  const { api } = load()
+  const located = []
+  const watchers = new Map()
+  const hub = new api.ChatHub({
+    locate: async id => { located.push(id); return { ok: true, path: files[Number(id.slice(1))], provider: 'claude' } },
+    createWatcher: deps => { const w = new api.TranscriptWatcher({ ...deps, watchFile: () => ({ close() {} }), pollMs: 60000 }); watchers.set(deps.paneId, w); return w },
+  })
+  const got = {}
+  const owners = {}
+  const sub = async (name, paneId) => {
+    owners[name] = owners[name] || { name }
+    got[name] = got[name] || []
+    const n = got[name].length
+    hub.sub(owners[name], paneId, f => got[name].push(f))
+    await until(() => got[name].length > n)
+  }
+  const paused = name => (got[name] || []).filter(f => f.notice === 'paused')
+  const allPaused = () => Object.keys(got).reduce((n, k) => n + paused(k).length, 0)
+  for (const [name, id] of [['A', 'x0'], ['B', 'x0'], ['C', 'x1'], ['D', 'x2'], ['E', 'x3']]) await sub(name, id)
+  check(hub.openWatchers === 4 && Object.values(got).every(fs => fs.length === 1 && fs[0].type === 'chatPage' && !('notice' in fs[0])), 'four chats, four watchers, each reader with a plain first page')
+
+  // A watcher nobody reads goes first and nobody hears about it.
+  hub.unsub(owners.E, 'x3')
+  await sub('F', 'x4')
+  check(hub.openWatchers === 4 && allPaused() === 0, 'evicting a watcher with no reader sends nothing to anyone')
+
+  // The least recently used one with readers: each live reader is told, once.
+  await sub('G', 'x5')
+  const pa = paused('A'), pb = paused('B')
+  check(hub.openWatchers === 4 && pa.length === 1 && pb.length === 1 && allPaused() === 2, 'evicting a watcher with live readers sends each of them the paused notice')
+  check(pa[0].type === 'chatAppend' && pa[0].paneId === 'x0' && Array.isArray(pa[0].items) && pa[0].items.length === 0, 'the notice is an empty chatAppend with notice: paused (an older reader appends nothing)')
+
+  // Paused: no appends, no re-locate, older pages from the file it had.
+  const lenA = got.A.length, lenB = got.B.length
+  fs.appendFileSync(files[0], asstLine('while paused') + '\n')
+  await settle()
+  const locatedBefore = located.length
+  hub.transcriptChanged('x0')
+  await settle()
+  check(got.A.length === lenA && got.B.length === lenB && located.length === locatedBefore && hub.openWatchers === 4, 'a paused chat gets nothing more and a transcript change does not reopen it')
+  const older = []
+  hub.more(owners.A, 'x0', Buffer.byteLength(userLine('p0') + '\n'), f => older.push(f))
+  await until(() => older.length > 0)
+  check(older.length === 1 && older[0].type === 'chatPage' && older[0].items.length === 1 && older[0].items[0].blocks[0].text === 'p0' && hub.openWatchers === 4 && allPaused() === 2, 'Load earlier on a paused chat reads the file it had, pausing nobody else')
+
+  // The user resumes it: a fresh first page; the LRU pauses the next one; its other reader comes back too.
+  await sub('A', 'x0')
+  await until(() => got.B.length > lenB)
+  const freshA = got.A.at(-1), freshB = got.B.at(-1)
+  check(freshA.type === 'chatPage' && !freshA.notice && freshA.items.at(-1).blocks[0].text === 'while paused', 'resuming (a new chatSub) answers a fresh first page with what was written meanwhile')
+  check(got.B.length === lenB + 1 && freshB.type === 'chatPage' && !freshB.notice && freshB.items.length === 2, 'the other reader it had paused gets a fresh first page too, at no extra watcher')
+  check(hub.openWatchers === 4 && paused('C').length === 1 && allPaused() === 3, 'the watcher it took pauses the next least recently used chat, which is told')
+  fs.appendFileSync(files[0], asstLine('after resume') + '\n')
+  await watchers.get('x0').check()
+  await settle()
+  check(got.A.at(-1).type === 'chatAppend' && got.B.at(-1).type === 'chatAppend' && got.B.at(-1).items[0].blocks[0].text === 'after resume', 'and both get the appends again')
+  hub.dispose()
+
+  // A first page read while its watcher is closed comes marked paused, not as a live chat.
+  const gates = []
+  const h2 = new api.ChatHub({
+    maxWatchers: 1,
+    locate: async id => ({ ok: true, path: files[Number(id.slice(1))], provider: 'claude' }),
+    createWatcher: deps => {
+      const w = new api.TranscriptWatcher({ ...deps, watchFile: () => ({ close() {} }), pollMs: 60000 })
+      const first = w.firstPage.bind(w)
+      w.firstPage = deliver => new Promise(res => gates.push(() => res(first(deliver))))
+      return w
+    },
+  })
+  const gh = [], gi = []
+  const H = {}, I = {}
+  h2.sub(H, 'x1', f => gh.push(f))
+  await until(() => gates.length === 1)
+  h2.sub(I, 'x2', f => gi.push(f))
+  await until(() => gates.length === 2)
+  check(h2.openWatchers === 1 && gh.length === 0, 'the second chat closes the first watcher while its first page is still being read')
+  gates[0]()
+  await until(() => gh.length > 0)
+  check(gh.length === 1 && gh[0].type === 'chatPage' && gh[0].notice === 'paused' && gh[0].items[0].blocks[0].text === 'p1', 'that page comes marked paused (one frame: page and notice together)')
+  gates[1]()
+  await until(() => gi.length > 0)
+  check(gi.length === 1 && !gi[0].notice, 'the chat that took the watcher gets a plain first page')
+  h2.sub(H, 'x1', f => gh.push(f))
+  await until(() => gates.length === 3)
+  check(gi.length === 2 && gi[1].notice === 'paused' && gi[1].items.length === 0, 'resuming the first pauses the live one, which is told')
+  gates[2]()
+  await until(() => gh.length > 1)
+  check(gh.length === 2 && gh[1].type === 'chatPage' && !gh[1].notice, 'and the resumed one reads live again')
+  h2.dispose()
 }
 
 async function testHubRaces() {
@@ -879,6 +1007,250 @@ async function testChatSubCap() {
   ws.close()
 }
 
+// --- Desktop chat IPC (app 2.7.0, A7): registerChatIpc over a real ChatHub ----------------
+
+/** The chat:* handlers over a real ChatHub, a fake clock and fake webContents. */
+function desk(locateImpl, { lab = true, panes = ['p1', 'p2'] } = {}) {
+  const electron = fakeElectron()
+  const { api, advance } = load(true, electron)
+  const watchers = []
+  const hub = new api.ChatHub({
+    locate: locateImpl,
+    createWatcher: deps => { const w = new api.TranscriptWatcher({ ...deps, watchFile: () => ({ close() {} }), pollMs: 60000 }); watchers.push(w); return w },
+  })
+  const cfg = { workspaces: [{ id: 'w1', panes: panes.map(id => ({ id })) }], settings: { labs: { consoleChat: lab } } }
+  const running = new Set()
+  const ipc = api.registerChatIpc({ hub, config: () => cfg, running: id => running.has(id) })
+  const h = electron.handlers
+  return {
+    api, advance, hub, ipc, running, watchers, handlers: h,
+    sub: (wc, req) => h.get(api.CH.CHAT_SUB)({ sender: wc }, req),
+    more: (wc, req) => h.get(api.CH.CHAT_MORE)({ sender: wc }, req),
+    unsub: (wc, req) => h.get(api.CH.CHAT_UNSUB)({ sender: wc }, req),
+  }
+}
+
+/** Append a line to a watched transcript and let the watcher read it. */
+async function grow(file, watcher, text) {
+  fs.appendFileSync(file, asstLine(text) + '\n')
+  await watcher.check()
+  await settle()
+}
+
+async function testDesktopChatIpc() {
+  const file = path.join(tmp, 'desk.jsonl')
+  fs.copyFileSync(path.join(fixtures, 'claude-session.jsonl'), file)
+  const located = []
+  const d = desk(async paneId => { located.push(paneId); return paneId === 'p1' ? { ok: true, path: file, provider: 'claude' } : { ok: false, reason: 'ambiguous' } })
+  const CH = d.api.CH
+  check(CH.CHAT_SUB === 'chat:sub' && CH.CHAT_UNSUB === 'chat:unsub' && CH.CHAT_MORE === 'chat:more' && CH.CHAT_FRAME === 'chat:frame' && [CH.CHAT_SUB, CH.CHAT_UNSUB, CH.CHAT_MORE].every(ch => d.handlers.has(ch)), 'chat:sub, chat:unsub and chat:more are registered; chat:frame is the push')
+  const a = fakeWc(1), b = fakeWc(2)
+
+  // Bad pane ids never reach ChatHub.
+  const bad = await Promise.all([d.sub(a, { paneId: '' }), d.sub(a, { paneId: 'x'.repeat(65) }), d.sub(a, { paneId: 7 }), d.sub(a, null), d.sub(a, 'p1')])
+  check(bad.every(r => !r.ok && r.error === 'bad_request'), 'an empty, longer than 64 or non-string paneId is bad_request')
+  const unknown = await d.sub(a, { paneId: 'x'.repeat(64) })
+  check(!unknown.ok && unknown.error === 'unknown_pane' && located.length === 0 && d.hub.openWatchers === 0, 'a pane main does not know is unknown_pane, refused before ChatHub')
+
+  // The first page is the answer; appends are frames to that window only.
+  const first = await d.sub(a, { paneId: 'p1' })
+  check(first.ok && first.page.type === 'chatPage' && first.page.paneId === 'p1' && first.page.items.length === 19 && first.page.done && first.page.cursor === null, 'chat:sub answers the same first page the phone gets')
+  check(a.sent.length === 0 && located.join() === 'p1', 'the first page comes as the answer, not as a frame')
+  await grow(file, d.watchers[0], 'desk line')
+  const app = a.frames('p1')
+  check(app.length === 1 && app[0].type === 'chatAppend' && app[0].paneId === 'p1' && app[0].items[0].blocks[0].text === 'desk line', 'a new line reaches the window as a chatAppend frame')
+  check(b.sent.length === 0, 'and only the window that reads it')
+
+  // A second window: its own reader on the same watcher.
+  const notice = await d.sub(b, { paneId: 'p2' })
+  check(notice.ok && d.api.chatNoticeOf(notice.page.items) === 'ambiguous' && b.sent.length === 0, 'a console without a chat answers the notice page')
+  const second = await d.sub(b, { paneId: 'p1' })
+  check(second.ok && second.page.items.length === 20 && d.watchers.length === 1, 'a second window reads the same watcher')
+  await grow(file, d.watchers[0], 'both')
+  check(a.frames('p1').length === 2 && b.frames('p1').length === 1 && b.frames('p2').length === 0 && b.frames().length === 1, 'each window gets the append once, and nothing for a pane it does not read')
+
+  // chat:more.
+  const older = await d.more(a, { paneId: 'p1', before: '300' })
+  check(older.ok && older.page.type === 'chatPage' && older.page.items.length === 1 && older.page.items[0].role === 'user' && older.page.done, 'chat:more answers the page before the cursor')
+  await settle()
+  const [m1, m2] = await Promise.all([d.more(a, { paneId: 'p1', before: '300' }), d.more(a, { paneId: 'p1', before: '300' })])
+  check(m1.ok && !m2.ok && m2.error === 'busy', 'one chat:more at a time per pane: a repeat in flight is busy')
+  await settle()
+  const noSub = await d.more(fakeWc(3), { paneId: 'p1', before: '300' })
+  const badBefore = await Promise.all([d.more(a, { paneId: 'p1', before: 'x' }), d.more(a, { paneId: 'p1', before: 300 }), d.more(a, { paneId: 'p1', before: '1'.repeat(16) }), d.more(a, { paneId: '', before: '1' })])
+  check(!noSub.ok && noSub.error === 'not_subscribed' && badBefore.every(r => !r.ok && r.error === 'bad_request'), 'chat:more needs a chat:sub of that window and a digit cursor')
+  check(a.frames('p1').length === 2, 'chat:more answers never go out as frames')
+
+  // One owner per window: a repeated sub is a fresh first page, one unsub ends it.
+  const again = await d.sub(a, { paneId: 'p1' })
+  check(again.ok && again.page.items.length === 21 && a.frames('p1').length === 2, 'a repeated chat:sub is a fresh first page, answered and not pushed')
+  d.unsub(a, { paneId: 'p1' })
+  d.unsub(a, { paneId: 'p1' })
+  d.unsub(a, { paneId: 99 })
+  await grow(file, d.watchers[0], 'after unsub')
+  check(a.frames('p1').length === 2 && b.frames('p1').length === 2, 'one chat:unsub ends the window\'s chat even after two subs; the other window still reads')
+  check(!(await d.more(a, { paneId: 'p1', before: '300' })).ok, 'and chat:more is not_subscribed again')
+
+  // A destroyed window drops all its readers.
+  b.destroy()
+  await grow(file, d.watchers[0], 'after destroy')
+  check(b.frames('p1').length === 2, 'a destroyed window gets nothing more')
+  d.advance(d.api.CHAT_CLOSE_DELAY_MS + 10)
+  check(d.hub.openWatchers === 0, 'its readers are gone: the watcher closes 30s after')
+  const gone = await d.sub(b, { paneId: 'p1' })
+  check(!gone.ok && gone.error === 'closed' && d.hub.openWatchers === 0, 'a chat:sub from a window already destroyed registers nothing')
+
+  // A reload (main frame, new document) drops them too; an in-page navigation does not.
+  const c = fakeWc(4)
+  check((await d.sub(c, { paneId: 'p1' })).ok && d.hub.openWatchers === 1, 'a new window reads again')
+  c.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true })
+  c.emit('did-start-navigation', { isMainFrame: false, isSameDocument: false })
+  await grow(file, d.watchers.at(-1), 'same document')
+  check(c.frames('p1').length === 1, 'an in-page or subframe navigation keeps the chat')
+  c.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false })
+  await grow(file, d.watchers.at(-1), 'after reload')
+  check(c.frames('p1').length === 1, 'a reload drops every chat of the window')
+  const re = await d.sub(c, { paneId: 'p1' })
+  check(re.ok && re.page.items.at(-1).blocks[0].text === 'after reload', 'the reloaded page subscribes again from a fresh first page')
+  c.emit('render-process-gone', { reason: 'crashed' })
+  await grow(file, d.watchers.at(-1), 'after crash')
+  check(c.frames('p1').length === 1, 'a crashed renderer drops them as well')
+  d.hub.dispose()
+}
+
+async function testDesktopChatGates() {
+  /** A chat:sub while the lab is off: refused once its wait for a CONFIG_SAVE runs out. */
+  const subOff = (dd, wc, req) => { const p = dd.sub(wc, req); dd.advance(dd.api.CHAT_LAB_GRACE_MS); return p }
+
+  // The lab off at boot: everything is disabled and ChatHub is never asked.
+  let asked = 0
+  const off = desk(async () => { asked++; return { ok: false, reason: 'ambiguous' } }, { lab: false })
+  const w0 = fakeWc(1)
+  const moreOff = await off.more(w0, { paneId: 'p1', before: '1' })
+  const refused = await Promise.all([subOff(off, w0, { paneId: 'p1' }), subOff(off, w0, { paneId: '' })])
+  check([moreOff, ...refused].every(r => !r.ok && r.error === 'disabled') && asked === 0, 'with labs.consoleChat off chat:sub and chat:more answer disabled and nothing is located')
+
+  // The renderer shows the chat when its settings turn the lab on and saves them 400 ms later: a chat:sub ahead of that save waits for it.
+  let early = null
+  off.sub(w0, { paneId: 'p1' }).then(r => { early = r })
+  await settle()
+  off.advance(400)
+  await settle()
+  check(early === null && asked === 0, 'a chat:sub while the lab is off waits a short while for the CONFIG_SAVE that turns it on')
+  off.ipc.setConfig({ settings: { labs: { consoleChat: true } } })
+  await settle()
+  check(early && early.ok && off.api.chatNoticeOf(early.page.items) === 'ambiguous' && asked === 1 && w0.sent.length === 0, 'and once that save turns it on, it reads (its first page as the answer)')
+  off.hub.dispose()
+
+  // A view that went away while its chat:sub waited for the lab registers nothing once it turns on.
+  let asked2 = 0
+  const labFile = path.join(tmp, 'desk-lab.jsonl')
+  fs.writeFileSync(labFile, userLine('lab') + '\n')
+  const off2 = desk(async id => { asked2++; return id === 'p1' ? { ok: true, path: labFile, provider: 'claude' } : { ok: false, reason: 'ambiguous' } }, { lab: false })
+  const w9 = fakeWc(9), w8 = fakeWc(8)
+  const answers = {}
+  off2.sub(w9, { paneId: 'p1' }).then(r => { answers.gone = r })
+  off2.sub(w8, { paneId: 'p1' }).then(r => { answers.other = r })
+  off2.sub(w9, { paneId: 'p2' }).then(r => { answers.p2 = r })
+  await settle()
+  off2.unsub(w9, { paneId: 'p1' })
+  off2.ipc.setConfig({ settings: { labs: { consoleChat: true } } })
+  await until(() => answers.gone && answers.other && answers.p2)
+  check(answers.gone && !answers.gone.ok && answers.gone.error === 'closed', 'a chat:unsub while its chat:sub waits for the lab makes it answer closed')
+  check(answers.other?.ok && answers.other.page.items.length === 1 && answers.p2?.ok && asked2 === 2 && off2.hub.openWatchers === 1, 'only that window and pane: the other window and the other pane read')
+  off2.unsub(w8, { paneId: 'p1' })
+  off2.unsub(w9, { paneId: 'p2' })
+  off2.advance(off2.api.CHAT_CLOSE_DELAY_MS + 10)
+  check(off2.hub.openWatchers === 0, 'the window that unsubscribed left no reader behind (the watcher closes 30s after the last one)')
+  off2.hub.dispose()
+
+  // No page in 10s: timeout; the page that comes later is a frame.
+  const file = path.join(tmp, 'desk-gate.jsonl')
+  fs.writeFileSync(file, userLine('late') + '\n')
+  let gate = null
+  const d = desk(() => new Promise(res => { gate = res }))
+  const a = fakeWc(1)
+  const pending = d.sub(a, { paneId: 'p1' })
+  await settle()
+  d.advance(d.api.CHAT_IPC_WAIT_MS)
+  const res = await pending
+  check(!res.ok && res.error === 'timeout', 'a chat:sub without its first page in 10s answers timeout')
+  gate({ ok: true, path: file, provider: 'claude' })
+  await until(() => a.frames('p1').length > 0)
+  check(a.frames('p1').length === 1 && a.frames('p1')[0].type === 'chatPage' && a.frames('p1')[0].items[0].blocks[0].text === 'late', 'the first page that comes later arrives as a chatPage frame')
+
+  // The lab turned off: waiting answers close, readers go, frames stop.
+  const w2 = fakeWc(2)
+  const waiting = d.sub(w2, { paneId: 'p2' })
+  await settle()
+  d.ipc.setConfig({ settings: { labs: { consoleChat: false } } })
+  const closed = await waiting
+  check(!closed.ok && closed.error === 'closed', 'turning the lab off closes a chat:sub still waiting')
+  await grow(file, d.watchers[0], 'lab off')
+  check(a.frames('p1').length === 1, 'no frame goes out once it is off')
+  const now = await Promise.all([subOff(d, a, { paneId: 'p1' }), d.more(a, { paneId: 'p1', before: '10' })])
+  check(now.every(r => !r.ok && r.error === 'disabled'), 'while it is off chat:sub and chat:more answer disabled')
+  d.advance(d.api.CHAT_CLOSE_DELAY_MS + 10)
+  check(d.hub.openWatchers === 0, 'its readers were dropped: the watcher closes')
+  d.hub.deps.locate = async () => ({ ok: true, path: file, provider: 'claude' })
+  d.ipc.setConfig({ settings: { labs: { consoleChat: true } } })
+  const on = await d.sub(a, { paneId: 'p1' })
+  check(on.ok && on.page.items.at(-1).blocks[0].text === 'lab off', 'on again it reads from a fresh first page')
+  d.ipc.setConfig('junk')
+  check((await subOff(d, a, { paneId: 'p1' })).error === 'disabled', 'a junk config reads as the lab off')
+  const notYes = d.sub(a, { paneId: 'p1' })
+  d.ipc.setConfig({ settings: { labs: { consoleChat: 'yes' } } })
+  d.advance(d.api.CHAT_LAB_GRACE_MS)
+  check((await notYes).error === 'disabled', 'only an explicit true turns it on')
+  d.hub.dispose()
+
+  // Per window cap; a live pty that is not in the config yet is a known console.
+  const l = desk(async () => ({ ok: false, reason: 'ambiguous' }), { panes: [] })
+  const max = l.api.CHAT_DESKTOP_MAX_SUBS
+  for (let i = 0; i <= max; i++) l.running.add('r' + i)
+  const w = fakeWc(1)
+  const subs = []
+  for (let i = 0; i <= max; i++) subs.push(await l.sub(w, { paneId: 'r' + i }))
+  check(subs.slice(0, max).every(r => r.ok && l.api.chatNoticeOf(r.page.items) === 'ambiguous'), 'a console with a live pty is known even before the config has it')
+  check(!subs[max].ok && subs[max].error === 'limit', 'past ' + max + ' chats per window a chat:sub is limit')
+  l.unsub(w, { paneId: 'r0' })
+  check((await l.sub(w, { paneId: 'r' + max })).ok && (await l.sub(fakeWc(2), { paneId: 'r0' })).ok, 'after a chat:unsub there is room again, and the cap is per window')
+  l.hub.dispose()
+}
+
+async function testDesktopChatCap() {
+  const files = Array.from({ length: 6 }, (_, i) => { const f = path.join(tmp, `dcap${i}.jsonl`); fs.writeFileSync(f, userLine('d' + i) + '\n'); return f })
+  const electron = fakeElectron()
+  const w = world(async id => ({ ok: true, path: files[Number(id.slice(1))], provider: 'claude' }), electron)
+  const cfg = { workspaces: [{ id: 'w1', panes: files.map((_, i) => ({ id: 'x' + i })) }], settings: { labs: { consoleChat: true } } }
+  w.api.registerChatIpc({ hub: w.hub, config: () => cfg, running: () => false })
+  const sub = (wc, paneId) => electron.handlers.get(w.api.CH.CHAT_SUB)({ sender: wc }, { paneId })
+  const ws = await w.pair()
+  ws.msg({ type: 'chatSub', paneId: 'x0' })
+  ws.msg({ type: 'chatSub', paneId: 'x1' })
+  await until(() => ws.of('chatPage').length >= 2)
+  const a = fakeWc(1), b = fakeWc(2)
+  const pages = []
+  for (const [wc, id] of [[a, 'x2'], [a, 'x3'], [b, 'x4'], [b, 'x5']]) pages.push(await sub(wc, id))
+  check(pages.every(p => p.ok && p.page.items.length === 1 && !p.page.notice) && b.sent.length === 0, 'phone and desktop readers each get their own first page')
+  check(w.hub.openWatchers === 4, 'with phone and desktop readers at most 4 watchers stay open (LRU)')
+  // The desktop took the phone's two watchers: the phone hears it in frames an older phone appends nothing from.
+  const phonePaused = ws.of('chatAppend').filter(f => f.notice === 'paused')
+  check(phonePaused.map(f => f.paneId).join() === 'x0,x1' && phonePaused.every(f => f.v === 1 && Array.isArray(f.items) && f.items.length === 0 && Buffer.byteLength(JSON.stringify(f)) <= FRAME_MAX), 'the phone gets the paused notice of each chat it lost, as an empty chatAppend (v1, optional field)')
+  // A window reads one of them: the LRU pauses a desktop chat (a chat:frame) and the phone's paused reader of it comes back.
+  pages.push(await sub(b, 'x0'))
+  await until(() => ws.of('chatPage').length >= 3)
+  check(pages.at(-1).ok && !pages.at(-1).page.notice && a.frames('x2').length === 1 && a.frames('x2')[0].type === 'chatAppend' && a.frames('x2')[0].notice === 'paused' && a.frames('x2')[0].items.length === 0, 'reading it on the desktop pauses the oldest desktop chat, told as a chat:frame to its window only')
+  check(b.sent.length === 0 && a.frames('x3').length === 0 && w.hub.openWatchers === 4, 'nobody else hears anything and 4 watchers stay open')
+  const phoneX0 = ws.of('chatPage').filter(f => f.paneId === 'x0')
+  check(phoneX0.length === 2 && !phoneX0[1].notice && phoneX0[1].items.length === 1, 'the phone reader the reopened watcher had paused gets a fresh first page (no gap)')
+  ws.close()
+  a.destroy()
+  b.destroy()
+  w.advance(w.api.CHAT_CLOSE_DELAY_MS + 10)
+  check(w.hub.openWatchers === 0, 'every reader gone, every watcher closes')
+}
+
 // --- The phone's saved view (src/mobile/src/lib/chatView.ts) -----------------------------
 // The list and row model (chatModel.ts over src/shared/chatRows.ts) is in test-chat-rows.cjs.
 
@@ -896,6 +1268,18 @@ async function testMobileModel() {
   check(m.chatEligible(null, 'codex') && m.chatEligible({}, 'claude') && m.chatEligible(undefined, 'claude'), 'no provider in the status: a claude or codex pane type is eligible')
   check(!m.chatEligible({}, 'shell') && !m.chatEligible(null, 'custom') && !m.chatEligible(null) && m.chatEligible({ provider: 'codex' }, 'shell'), 'a shell needs its status to name the agent; a status provider wins over the type')
   check(m.resolvePaneView(undefined, true, true, true) === 'terminal' && m.resolvePaneView(undefined, true, true, false) === 'chat' && m.resolvePaneView('chat', true, true, true) === 'terminal', 'a chat refused on this open (FR-33) shows Terminal, even over chatDefault or a saved Chat')
+  // App 2.7.0 (A7): the paused notice is an empty chatAppend; the phone's store (any version) appends nothing from it.
+  const s = await build({
+    stdin: { resolveDir: root, loader: 'ts', contents: `export { useChatStore } from './src/mobile/src/lib/chatStore'` },
+    bundle: true, platform: 'node', format: 'cjs', write: false, alias: { '@shared': path.join(root, 'src/shared') },
+  })
+  const smod = { exports: {} }
+  vm.runInNewContext(s.outputFiles[0].text, { module: smod, exports: smod.exports, console, process })
+  const store = smod.exports.useChatStore
+  store.getState().replace('x', { items: [{ id: '10', role: 'user', ts: null, blocks: [{ t: 'text', text: 'hola' }] }], cursor: null, done: true })
+  const list = store.getState().chats.x.list
+  store.getState().append('x', [])
+  check(store.getState().chats.x.list === list && list.items.length === 1, 'a phone that does not know the notice keeps its list as it was (an empty append is a no-op)')
 }
 
 async function main() {
@@ -919,10 +1303,14 @@ async function main() {
   await testHubPending()
   await testWatcherCap()
   await testHubRaces()
+  await testHubPause()
   await testChatSubCap()
+  await testDesktopChatIpc()
+  await testDesktopChatGates()
+  await testDesktopChatCap()
   await testMobileModel()
   fs.rmSync(tmp, { recursive: true, force: true })
-  console.log(`PASS: ${checks} chat checks (schemas, Claude and Codex decoders, tool summaries, pages under 48KB, 8MB scan cap, 50MB first page, tail, locator, pending transcripts, ChatHub with phone-fit presence)`)
+  console.log(`PASS: ${checks} chat checks (schemas, Claude and Codex decoders, tool summaries, pages under 48KB, 8MB scan cap, 50MB first page, tail, locator, pending transcripts, ChatHub with phone-fit presence, LRU pause notice, desktop chat IPC)`)
 }
 
 main().catch(error => { console.error(error); fs.rmSync(tmp, { recursive: true, force: true }); process.exit(1) })

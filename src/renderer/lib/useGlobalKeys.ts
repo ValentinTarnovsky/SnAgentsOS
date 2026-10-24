@@ -16,6 +16,7 @@ import { runDictateShortcut } from './dictation'
 import { panelKeyOf } from './changes'
 import { sharedOverlayActive } from './shareGuestStore'
 import { focusWorkspaceConsole } from './focusWorkspace'
+import { focusedChatConsole, togglePaneView } from './consoleChatStore'
 import {
   advanceWaiting,
   navigablePanes,
@@ -103,7 +104,20 @@ const PANE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   'toggleFiles',
   'toggleNotes',
   'dictate',
+  'toggleConsoleChat',
 ])
+
+/**
+ * The console `toggleConsoleChat` (app 2.7.0, A7) switches: the focused agent
+ * console on screen with Labs consoleChat on (focusedChatConsole), and nothing
+ * over the grid (a modal, the Quick Commands popover, the agents board). Null
+ * means the action does nothing and the key goes on as if unbound, except
+ * over the shared view, where it is swallowed (PANE_ACTIONS).
+ */
+function consoleChatKeyTarget(): string | null {
+  if (quickBlocked() || useAppStore.getState().quickPopoverOpen || useAgentStore.getState().view === 'board') return null
+  return focusedChatConsole()
+}
 
 function runAction(id: ActionId): void {
   const s = useAppStore.getState()
@@ -204,6 +218,11 @@ function runAction(id: ActionId): void {
     case 'dictate':
       runDictateShortcut()
       break
+    case 'toggleConsoleChat': {
+      const paneId = consoleChatKeyTarget()
+      if (paneId) togglePaneView(paneId)
+      break
+    }
     case 'agentsBoard': {
       // E5-FR-27: never over a modal; the board closes itself on Esc or a pick.
       const agents = useAgentStore.getState()
@@ -273,6 +292,9 @@ export function useGlobalKeys(): void {
         if (keymap[id] === accel) {
           // Ctrl+Shift+U inside a text field stays the field's key.
           if (SKIP_IN_EDITABLE.has(id) && isEditableTarget(e)) return
+          // Lab off or no agent console focused: the user's chord is not eaten (another binding or the console gets it).
+          // Over the shared view it is swallowed like every pane action, never left to the shared terminal.
+          if (id === 'toggleConsoleChat' && !overlay && !consoleChatKeyTarget()) continue
           e.preventDefault()
           e.stopPropagation()
           if (overlay && PANE_ACTIONS.has(id)) return

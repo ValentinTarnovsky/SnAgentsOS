@@ -35,6 +35,7 @@ import type { SessionSummary, SessionsListReq } from './session-history'
 import type {
   RemoteCtlAction,
   RemoteEndpointKind,
+  RemoteServerMsg,
   RemoteStateSnapshot,
 } from './remote-protocol'
 import type { InitialPromptReq, LaunchKind, SubmitError } from './initialPrompt'
@@ -580,6 +581,58 @@ export interface StatusMuteReq {
 export interface StatusPlanReq {
   paneId: string
   requestId?: string
+}
+
+// --- Desktop console chat (app 2.7.0, A7; settings.labs.consoleChat) ---
+
+/**
+ * The frames ChatHub sends a chat reader, exactly as the phone gets them
+ * (RemoteServerMsg without `v`). A page is oldest first; `cursor` is the
+ * `before` of the next "Load earlier" (null with nothing before). A page whose
+ * only item is the notice (chatNoticeOf) means no chat (FR-33); an empty page
+ * with `done` means the transcript is coming (a new console or a /clear).
+ */
+export type ChatPageFrame = Omit<Extract<RemoteServerMsg, { type: 'chatPage' }>, 'v'>
+export type ChatAppendFrame = Omit<Extract<RemoteServerMsg, { type: 'chatAppend' }>, 'v'>
+export type ChatFrame = ChatPageFrame | ChatAppendFrame
+
+/** `chat:sub` / `chat:unsub`: a console of this PC by id (main checks it exists). */
+export interface ChatSubReq {
+  paneId: string
+}
+
+/** `chat:more`: `before` is the `cursor` of the oldest page the window holds (digits). */
+export interface ChatMoreReq {
+  paneId: string
+  before: string
+}
+
+/**
+ * Why `chat:sub` / `chat:more` gave no page. `disabled`: labs.consoleChat is
+ * off in main's config (a `sub` first waits up to 2 s for the CONFIG_SAVE that
+ * turns it on, which the renderer sends 400 ms after the change);
+ * `unknown_pane`: no such console; `limit`: too many chats open in this
+ * window; `not_subscribed` / `busy`: a `more` without a `sub`, or with one
+ * still in flight; `timeout`: no page within 10 s (a first
+ * page that comes later still arrives as a chat:frame); `closed`: unsubscribed
+ * (or the lab went off) before the page came.
+ */
+export type ChatIpcError = 'disabled' | 'bad_request' | 'unknown_pane' | 'limit' | 'not_subscribed' | 'busy' | 'timeout' | 'closed'
+
+export type ChatPageRes = { ok: true; page: ChatPageFrame } | { ok: false; error: ChatIpcError }
+
+/**
+ * `chat:frame` (main -> renderer): a frame for a pane this window reads.
+ * `chatAppend` adds to the end; a `chatPage` here is a new first page that
+ * replaces the list (reset after /clear, a resume or a truncated file; the
+ * transcript that was coming; the notice when it is lost). `notice: 'paused'`
+ * (on an empty chatAppend, or on a first page): main closed this chat's
+ * watcher for another one (CHAT_MAX_WATCHERS) and sends nothing more until a
+ * new `chat:sub`, which is a fresh first page.
+ */
+export interface ChatFrameEvt {
+  paneId: string
+  frame: ChatFrame
 }
 
 // --- Remote control (embedded LAN/Tailscale server for phone clients) ---
@@ -1319,6 +1372,22 @@ export interface SnApi {
     /** The one folder watched (null: none). */
     watch(workspaceId: string | null): void
     onChanged(cb: (e: FilesChangedEvt) => void): () => void
+  }
+  /**
+   * Desktop console chat (app 2.7.0, A7; settings.labs.consoleChat): the
+   * phone's chat of a console, read by this window. Main keeps ONE reader per
+   * window and pane: a repeated `sub` is a fresh first page and a single
+   * `unsub` ends it, so two views of one pane refcount in the renderer. While
+   * the lab is off everything answers `disabled` and no frame is sent.
+   */
+  chat: {
+    /** Starts reading the pane; resolves with its first page. */
+    sub(req: ChatSubReq): Promise<ChatPageRes>
+    unsub(req: ChatSubReq): void
+    /** The page before `before` (one at a time per pane). */
+    more(req: ChatMoreReq): Promise<ChatPageRes>
+    /** Appends and resets of the panes this window reads. Returns an unsubscribe function. */
+    onFrame(cb: (e: ChatFrameEvt) => void): () => void
   }
   /** Git chip (E7-FR-05..10). Main runs git; the renderer owns the targets and settings.gitChip. */
   git: {

@@ -71,6 +71,7 @@ import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 import type { CliUiState, SkillOp, SkillStatus, SkillTarget } from '@shared/ctl-protocol'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from '@shared/repo-config'
 import type { DictationEvt, DictationStartReq, DictationStartRes } from '@shared/ipc-contract'
+import type { ChatFrameEvt, ChatMoreReq, ChatPageRes, ChatSubReq } from '@shared/ipc-contract'
 import type { WhisperInstallError, WhisperInstallProgress, WhisperPackId, WhisperStatus } from '@shared/dictation'
 import type { ShareGuestApi } from '@shared/ipc-contract'
 import type {
@@ -393,6 +394,12 @@ const api: SnApi = {
     open: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_OPEN, req) as Promise<FilesOpRes>,
     watch: (workspaceId: string | null) => ipcRenderer.send(CH.FILES_WATCH, workspaceId),
     onChanged: (cb: (e: FilesChangedEvt) => void) => sub<FilesChangedEvt>(CH.FILES_CHANGED, cb),
+  },
+  chat: {
+    sub: (req: ChatSubReq) => ipcRenderer.invoke(CH.CHAT_SUB, req) as Promise<ChatPageRes>,
+    unsub: (req: ChatSubReq) => ipcRenderer.send(CH.CHAT_UNSUB, req),
+    more: (req: ChatMoreReq) => ipcRenderer.invoke(CH.CHAT_MORE, req) as Promise<ChatPageRes>,
+    onFrame: (cb: (e: ChatFrameEvt) => void) => sub<ChatFrameEvt>(CH.CHAT_FRAME, cb),
   },
   git: {
     setWatch: (targets: GitTarget[]) => ipcRenderer.send(CH.GIT_SET_WATCH, targets),

@@ -534,7 +534,8 @@ function testNavigation() {
   const km = load('src/renderer/lib/keymap.ts')
   const keymap = km.resolveKeymap({})
   check(keymap.nextWaiting === 'Ctrl+Shift+J' && keymap.reopenClosedPane === 'Ctrl+Shift+U' && keymap.focusNextPane === 'Ctrl+Alt+Right' && keymap.focusPrevPane === 'Ctrl+Alt+Left', 'D8 defaults: Ctrl+Shift+J, Ctrl+Shift+U, Ctrl+Alt+Right/Left')
-  const accels = Object.values(keymap)
+  // An action with no default ('') cannot collide: only real chords are compared.
+  const accels = Object.values(keymap).filter(Boolean)
   check(new Set(accels).size === accels.length, 'no default accelerator collides with another')
   check(!accels.some(a => ['Ctrl+J', 'Ctrl+R', 'Ctrl+Shift+Z'].includes(a)), 'forbidden or reserved combos stay free (Ctrl+J, Ctrl+R, redo)')
   // The combos D8 reserved for E6 prompt navigation now belong to it (R31-01).
