@@ -636,10 +636,10 @@ async function schemaV11Checks() {
   check(st.awakeMode === 'auto' && st.terminalUnicode11 === true && st.terminalAgentEndChip === true && st.notifications.inAppWhenFocused === true, 'v10 gains awakeMode, terminalUnicode11, terminalAgentEndChip and inAppWhenFocused defaults')
   check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual', cacheTimer: { enabled: false, ttlMinutes: 5 }, syncAgentRename: true, shellAgentDetect: true, silence: { enabled: true, quietMin: 10, stalledMin: 20 } }), 'v10 gains the settings.agents defaults (v11, v12, v13, v17 and v19 keys)')
   check(c.workspaces.every(w => w.agentsCollapsed === undefined && w.panes.every(p => p.lastSession === undefined)), 'agentsCollapsed and lastSession stay absent')
-  const same = (a, b) => { if (a === b) return true; if (typeof a !== 'object' || typeof b !== 'object' || !a || !b) return false; return Object.keys(a).every(k => k === 'version' || k === 'snippets' || same(a[k], b[k])) }
+  const same = (a, b) => { if (a === b) return true; if (typeof a !== 'object' || typeof b !== 'object' || !a || !b) return false; return Object.keys(a).every(k => k === 'version' || k === 'snippets' || k === 'schedule' || same(a[k], b[k])) }
   check(same(v10, c), 'every v10 value survives the parse unchanged')
   check(c.snippets === undefined && c.quickCommands.length === 1 && c.quickCommands[0].id === 's1' && c.quickCommands[0].action === 'send', 'v10 snippets come back as quick commands (schema 12)')
-  check(st.terminalRenderer === 'webgl' && st.keymap.palette === 'Ctrl+P' && c.workspaces[0].panes[0].schedule.prompt === 'hola', 'opt-in renderer, keymap and schedules are kept')
+  check(st.terminalRenderer === 'webgl' && st.keymap.palette === 'Ctrl+P' && same(v10.workspaces[0].panes[0].schedule, c.workspaces[0].panes[0].schedules[0]) && c.workspaces[0].panes[0].schedules[0].id === 's1' && !('schedule' in c.workspaces[0].panes[0]), 'opt-in renderer, keymap and schedules are kept (schema 19: the schedule as schedules[0], id s1)')
   const v11 = JSON.parse(JSON.stringify(v10)); v11.version = 11
   v11.settings.terminalRenderer = 'dom'; v11.settings.awakeMode = 'sometimes'; v11.settings.terminalUnicode11 = 'yes'
   v11.settings.agents = { resumeOnStartup: 'auto', ctrlDigitFocus: false }
@@ -2317,6 +2317,28 @@ async function attentionChecks() {
     h.done()
     check(h.last().attention === true, 'a throwing remote check counts as not seen')
   }
+  // 6b. App 2.7.0 (A3): an open `needs` keeps attention but never announces a seen notice or holds its toast.
+  {
+    const h = rig()
+    h.manager.setRemoteSeen(id => id === 'pane')
+    h.hook('UserPromptSubmit', { prompt: 'x' }); h.tick(1)
+    h.manager.setNeeds('pane', 'approve the deploy')
+    h.hook('Stop', { lastAssistantMessage: 'ok' }); h.flush()
+    const d = h.of('pane').find(e => e.state === 'done')
+    check(d.attention === true && d.needs?.text === 'approve the deploy' && d.notify === false && d.delivery === 'none' && h.natives.length === 0 && h.flashes.length === 0, 'a done a phone watches with needs open: attention stays (needs), no notify, no toast, no flash')
+    h.manager.setRemoteSeen(() => false)
+    h.hook('UserPromptSubmit', { prompt: 'x' }, 'pane2'); h.tick(1)
+    h.manager.setNeeds('pane2', 'pick the engine')
+    h.hook('Stop', { lastAssistantMessage: 'ok' }, 'pane2'); h.flush()
+    check(h.last('pane2').notify === true && h.natives.length === 1 && h.flashes.join() === 'true', 'an unseen done with needs open still notifies')
+    check(h.manager.markRead('pane2') === true && h.last('pane2').attention === true && h.last('pane2').needs?.text === 'pick the engine', 'markRead keeps the published attention while needs is open')
+    check(h.natives[0].closed === 1 && h.flashes.join() === 'true,false', 'markRead closes the done toast and stops the flash despite needs')
+    h.hook('UserPromptSubmit', { prompt: 'x' }, 'pane2'); h.tick(1); h.manager.setNeeds('pane2', 'again')
+    h.hook('Stop', { lastAssistantMessage: 'ok' }, 'pane2'); h.flush()
+    check(h.natives.length === 2 && h.natives[1].closed === 0, 'the next unseen done shows its toast')
+    h.tick(1); h.manager.onUserInput('pty2', 'pane2', 'b')
+    check(h.natives[1].closed === 1 && h.last('pane2').attention === true && h.last('pane2').needs?.text === 'again', 'a keystroke closes the done toast while needs stays open')
+  }
   // 7. Terminal reports and automations never acknowledge; 'auto' still invalidates.
   {
     const h = rig()
@@ -2975,6 +2997,17 @@ function codexSignalChecks() {
     check(r.usages.length === 3, 'negative, non-numeric, infinite or missing counts and other threads never reach onUsage')
     r.note('thread/tokenUsage/updated', { tokenUsage: { total: breakdown(), last: breakdown(), modelContextWindow: -1 } })
     check(r.usages.length === 4 && r.usages[3].modelContextWindow === null, 'an invalid window is null, the counts still go')
+    // A4: whether a turn of the root thread runs rides each usage (a resume's replay comes with none running).
+    check(r.usages.every(x => x.inTurn === false), 'a usage with no turn running says inTurn false')
+    const tick = turnId => r.note('thread/tokenUsage/updated', { turnId, tokenUsage: { total: breakdown(), last: breakdown(), modelContextWindow: 200000 } })
+    r.note('turn/started', { turn: { id: 'u2' } }); tick('u2')
+    r.note('turn/completed', { turn: { id: 'u2', status: 'completed', items: [] } }); tick('u2')
+    check(r.usages.length === 6 && r.usages[4].inTurn === true && r.usages[5].inTurn === false, 'inside a running turn it says true, after turn/completed false')
+    r.note('turn/started', { turn: { id: 'u3' } })
+    r.send('client', { id: 2, method: 'thread/resume' })
+    r.send('server', { id: 2, result: { thread: { id: THREAD, preview: '', status: { type: 'idle' } } } })
+    tick(undefined)
+    check(r.usages.length === 7 && r.usages[6].inTurn === false, 'a thread/resume ends the running turn: its replayed usage says false')
     r.manager.dispose()
   }
   // CodexBridge: onSignal per stdout line, onUsage passed through, nothing after finished.

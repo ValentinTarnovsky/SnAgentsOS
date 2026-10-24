@@ -31,8 +31,9 @@ import {
   X,
 } from 'lucide-react'
 import { motion } from 'framer-motion'
-import type { AgentPreset, Pane, Workspace } from '@shared/types'
+import type { AgentPreset, Pane, PaneSchedule, Workspace } from '@shared/types'
 import { labOn } from '@shared/labs'
+import { isScheduleEnabled, paneSchedules } from '@shared/schedule'
 import { useAppStore } from '@/lib/store'
 import { isPaneMounted } from '@/lib/mounting'
 import { resolveLaunch } from '@/lib/launch'
@@ -98,6 +99,13 @@ interface PaneCellProps {
   onClose: () => void
   onDragStartCell: () => void
   onDragEndCell: () => void
+}
+
+/** The active schedule that runs first (the header clock's), if any. */
+function nearestActive(schedules: readonly PaneSchedule[]): PaneSchedule | undefined {
+  let best: PaneSchedule | undefined
+  for (const s of schedules) if (isScheduleEnabled(s) && (!best || s.dueAt < best.dueAt)) best = s
+  return best
 }
 
 export function PaneCell({
@@ -227,10 +235,15 @@ export function PaneCell({
   const [nameVal, setNameVal] = useState(pane.title)
   const [scheduling, setScheduling] = useState(false)
   // E8-FR-28: the clock is lit only for an active schedule; a paused one
-  // (or a fired one-shot) is dimmed and its tooltip says "Paused".
-  const hasSchedule = pane.schedule != null
-  const isScheduled = hasSchedule && pane.schedule!.enabled !== false
-  const scheduleTip = pane.schedule ? scheduleNextLabel(pane.schedule, t, lang) : t('pane.schedule')
+  // (or a fired one-shot) is dimmed and its tooltip says "Paused". App 2.7.0:
+  // with several, it shows the nearest next run among the active ones.
+  const schedules = paneSchedules(pane)
+  const hasSchedule = schedules.length > 0
+  const nearestSchedule = nearestActive(schedules)
+  const isScheduled = nearestSchedule !== undefined
+  const clockSchedule = nearestSchedule ?? schedules[0]
+  const scheduleLabel = clockSchedule ? scheduleNextLabel(clockSchedule, t, lang) : t('pane.schedule')
+  const scheduleTip = schedules.length > 1 ? t('schedule.clockMany', { label: scheduleLabel, count: schedules.length }) : scheduleLabel
   // Desktop dictation (app 2.4.0): the menu entry is there even with the header mic hidden.
   const dictating = useDictationStore((s) => s.phase !== 'idle' && s.scope === `pane:${pane.id}`)
 
@@ -352,7 +365,7 @@ export function PaneCell({
       : []),
     ...(homeWs ? [{ label: t('pane.moveBack', { name: homeWs.name }), icon: Undo2, onClick: () => moveTo(homeWs.id) }] : []),
     {
-      label: hasSchedule ? t('schedule.edit') : t('pane.schedule'),
+      label: schedules.length > 1 ? t('schedule.editMany', { count: schedules.length }) : hasSchedule ? t('schedule.edit') : t('pane.schedule'),
       icon: Clock,
       onClick: () => setScheduling(true),
     },
@@ -788,7 +801,7 @@ export function PaneCell({
           workspaceId={workspace.id}
           paneId={pane.id}
           paneTitle={pane.title}
-          schedule={pane.schedule}
+          scheduleId={clockSchedule?.id}
           onClose={() => setScheduling(false)}
         />
       )}

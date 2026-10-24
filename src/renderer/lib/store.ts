@@ -23,6 +23,7 @@ import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { DEFAULT_CLAUDE_ACCOUNTS_SETTINGS } from '@shared/claude-accounts'
 import { DEFAULT_LABS } from '@shared/labs'
 import { DEFAULT_SILENCE } from '@shared/silence'
+import { PANE_SCHEDULES_MAX, SCHEDULE_ID_RE } from '@shared/schedule'
 import { gridForCount, orderPanes } from '@/components/layout/gridTemplates'
 import {
   QUICK_COMMANDS_MAX,
@@ -424,8 +425,20 @@ export interface AppState {
   setAgentEnded: (evt: AgentSessionEndEvt) => void
   /** Hide a console's "Claude exited" chip (typing, exit, an action, [x]). */
   clearAgentEnded: (paneId: string) => void
-  /** Set (or clear, with null) a console's one-shot scheduled prompt. */
-  setPaneSchedule: (workspaceId: string, paneId: string, schedule: PaneSchedule | null) => void
+  /**
+   * Set one of a console's scheduled prompts by id (schema 19): replaces the
+   * schedule with `scheduleId` in place, appends a new id (ignored once the
+   * console holds PANE_SCHEDULES_MAX), and with null deletes it. The stored
+   * entry always carries `id: scheduleId`; deleting the last one drops the
+   * `schedules` field.
+   */
+  setPaneSchedule: (workspaceId: string, paneId: string, scheduleId: string, schedule: PaneSchedule | null) => void
+  /**
+   * Replace a console's whole schedule list (schema 19): kept in order, a
+   * malformed or repeated id and anything past PANE_SCHEDULES_MAX dropped; an
+   * empty list drops the `schedules` field.
+   */
+  setPaneSchedules: (workspaceId: string, paneId: string, schedules: readonly PaneSchedule[]) => void
   /**
    * Move a console onto a worktree (its path becomes the cwd) or, with null,
    * off it: the cwd override goes too, so it runs in its normal folder again
@@ -531,6 +544,14 @@ function withLastSession(workspaces: Workspace[], evt: PaneStatusEvt): Workspace
     return workspaces.map((w) => (w === ws ? { ...w, panes: w.panes.map((p) => (p === pane ? { ...p, lastSession } : p)) } : w))
   }
   return workspaces
+}
+
+/** `pane` holding `schedules` (schema 19): the same pane when the list did not change, no field when empty. */
+function withSchedules(pane: Pane, schedules: PaneSchedule[]): Pane {
+  if (schedules === pane.schedules || (schedules.length === 0 && !pane.schedules)) return pane
+  if (schedules.length > 0) return { ...pane, schedules }
+  const { schedules: _gone, ...rest } = pane
+  return rest
 }
 
 /** Panes and their queued prompts for a draft (composer, wizard, repo file). */
@@ -1182,18 +1203,38 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
-  setPaneSchedule: (workspaceId, paneId, schedule) =>
+  setPaneSchedule: (workspaceId, paneId, scheduleId, schedule) =>
     set((s) => ({
       workspaces: s.workspaces.map((w) =>
         w.id === workspaceId
           ? {
               ...w,
-              panes: w.panes.map((p) =>
-                p.id === paneId ? { ...p, schedule: schedule ?? undefined } : p,
-              ),
+              panes: w.panes.map((p) => {
+                if (p.id !== paneId) return p
+                const list = p.schedules ?? []
+                const at = list.findIndex((x) => x.id === scheduleId)
+                if (!schedule) return at < 0 ? p : withSchedules(p, list.filter((_, i) => i !== at))
+                if (at >= 0) return withSchedules(p, list.map((x, i) => (i === at ? { ...schedule, id: scheduleId } : x)))
+                if (list.length >= PANE_SCHEDULES_MAX || !SCHEDULE_ID_RE.test(scheduleId)) return p
+                return withSchedules(p, [...list, { ...schedule, id: scheduleId }])
+              }),
             }
           : w,
       ),
+    })),
+
+  setPaneSchedules: (workspaceId, paneId, schedules) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => {
+        if (w.id !== workspaceId) return w
+        const next: PaneSchedule[] = []
+        for (const sc of schedules) {
+          if (!SCHEDULE_ID_RE.test(sc.id) || next.some((x) => x.id === sc.id)) continue
+          next.push(sc)
+          if (next.length === PANE_SCHEDULES_MAX) break
+        }
+        return { ...w, panes: w.panes.map((p) => (p.id === paneId ? withSchedules(p, next) : p)) }
+      }),
     })),
 
   setPaneWorktree: (workspaceId, paneId, worktree) =>

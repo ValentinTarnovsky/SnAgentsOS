@@ -8,7 +8,10 @@
 // v13 keeps everything, new defaults, PaneSchedule automation fields,
 // repoConfig, junk tolerance). R30-12: .snagentsos.json (test-automation-repo.cjs).
 // R31-00: schema 14 (v13 -> v14 keeps everything, terminalShellIntegration)
-// and the zod of the v3.1 ctl scheduleRun / scheduleToggle.
+// and the zod of the v3.1 ctl scheduleRun / scheduleToggle. App 2.7.0 (A10):
+// schema 19 pane.schedule -> pane.schedules[] (migrate by presence,
+// idempotent), the cron recurrence (invalid, too frequent or impossible
+// entries dropped), the 8 cap, schedule ids and the ctl's scheduleId.
 // Same esbuild + vm harness as test-status.cjs.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -171,11 +174,20 @@ function v12Real(extra = {}) {
     ...extra,
   }
 }
-// Every input value survives (new keys may appear next to them).
+// Every input value survives (new keys may appear next to them). Schema 19:
+// a pane's single `schedule` lives on as `schedules[0]` with id s1.
 function survives(input, output, at = '') {
   if (input === output) return true
   if (typeof input !== 'object' || input === null || typeof output !== 'object' || output === null) throw new Error(`value changed at ${at || '<root>'}: ${JSON.stringify(input)} -> ${JSON.stringify(output)}`)
-  for (const k of Object.keys(input)) if (k !== 'version') survives(input[k], output[k], `${at}.${k}`)
+  for (const k of Object.keys(input)) {
+    if (k === 'version') continue
+    if (k === 'schedule' && !('schedule' in output) && Array.isArray(output.schedules)) {
+      if (output.schedules[0]?.id !== 's1') throw new Error(`schedule not migrated to s1 at ${at}`)
+      survives(input.schedule, output.schedules[0], `${at}.schedules[0]`)
+      continue
+    }
+    survives(input[k], output[k], `${at}.${k}`)
+  }
   return true
 }
 const run = (at, extra = {}) => ({ at, scheduledFor: at - 5, trigger: 'scheduled', status: 'sent', ...extra })
@@ -190,8 +202,8 @@ async function schema13Checks() {
   check(st.cliEnabled === true && st.worktreesRoot === '' && st.hibernateIdleMinutes === 0, 'cliEnabled on, worktreesRoot empty (= dataDir()/worktrees) and hibernation off')
   check(JSON.stringify(st.agents.cacheTimer) === '{"enabled":false,"ttlMinutes":5}' && st.agents.sidebarSort === 'smart', 'agents gain cacheTimer off/5 min next to the kept v12 values')
   check(JSON.stringify(st.automation) === JSON.stringify({ defaultAgentPresetId: 'preset-claude', composerCreateAnother: true, cliProtectSsh: true, cliUserPath: false, scheduleGraceMin: 120, scheduleMaxWaitMin: 30, scheduleNotify: false }), 'automation gains the cli/schedule defaults (120 grace, 30 max wait)')
-  const sch = a.workspaces[0].panes[0].schedule
-  check(JSON.stringify(sch) === JSON.stringify(raw.workspaces[0].panes[0].schedule), 'an old one-shot schedule parses with no new keys (stays one-shot)')
+  const sch = a.workspaces[0].panes[0].schedules[0]
+  check(JSON.stringify(sch) === JSON.stringify({ id: 's1', ...raw.workspaces[0].panes[0].schedule }), 'an old one-shot schedule parses with no new keys (stays one-shot; schema 19: as schedules[0], id s1)')
   check(a.workspaces[0].repoConfig === undefined && !('repoConfig' in a.workspaces[0]) && a.workspaces[0].panes.every(p => !('worktree' in p)), 'repoConfig and pane.worktree stay absent')
   check(JSON.stringify(parseConfig(clone(a))) === JSON.stringify(a), 'v13 parse is idempotent')
 
@@ -220,21 +232,21 @@ async function schema13Checks() {
   const base = { time: '09:30', prompt: 'segui', dueAt: 1760000000000 }
   const fullSch = { ...base, recurrence: { kind: 'weekly', days: [1, 3, 5] }, waitIdle: false, enabled: false, waitingSince: 1759999990000, history: [run(1), run(2, { status: 'failed', reason: 'agent_not_running' }), run(3, { trigger: 'manual', status: 'skipped_busy' })] }
   const f = withSchedule(clone(fullSch))
-  check(JSON.stringify(f.workspaces[0].panes[0].schedule) === JSON.stringify(fullSch), 'a full v13 schedule (weekly, waitIdle, paused, waitingSince, history) round-trips')
-  for (const kind of ['once', 'daily', 'weekdays', 'hourly']) check(withSchedule({ ...base, recurrence: { kind } }).workspaces[0].panes[0].schedule.recurrence.kind === kind, `recurrence ${kind} is kept`)
+  check(JSON.stringify(f.workspaces[0].panes[0].schedules[0]) === JSON.stringify({ id: 's1', ...fullSch }), 'a full v13 schedule (weekly, waitIdle, paused, waitingSince, history) round-trips')
+  for (const kind of ['once', 'daily', 'weekdays', 'hourly']) check(withSchedule({ ...base, recurrence: { kind } }).workspaces[0].panes[0].schedules[0].recurrence.kind === kind, `recurrence ${kind} is kept`)
   for (const bad of [{ kind: 'weekly', days: [] }, { kind: 'weekly', days: [1, 1] }, { kind: 'weekly', days: [7] }, { kind: 'weekly' }, { kind: 'monthly' }, 'daily']) {
     const p = withSchedule({ ...base, recurrence: bad })
-    check(p && p.workspaces[0].panes[0].schedule.prompt === 'segui' && p.workspaces[0].panes[0].schedule.recurrence === undefined, `a junk recurrence ${JSON.stringify(bad)} is dropped, the schedule stays`)
+    check(p && p.workspaces[0].panes[0].schedules[0].prompt === 'segui' && p.workspaces[0].panes[0].schedules[0].recurrence === undefined, `a junk recurrence ${JSON.stringify(bad)} is dropped, the schedule stays`)
   }
-  const jf = withSchedule({ ...base, waitIdle: 'x', enabled: 0, waitingSince: 'ayer', history: 'nope' }).workspaces[0].panes[0].schedule
+  const jf = withSchedule({ ...base, waitIdle: 'x', enabled: 0, waitingSince: 'ayer', history: 'nope' }).workspaces[0].panes[0].schedules[0]
   check(jf.prompt === 'segui' && jf.waitIdle === undefined && jf.enabled === undefined && jf.waitingSince === undefined && jf.history === undefined, 'junk waitIdle, enabled, waitingSince and history are dropped field by field')
-  const hist = withSchedule({ ...base, history: [run(1), 'basura', run(2, { status: 'exploded' }), run(3, { reason: 'weird' }), { at: 4 }] }).workspaces[0].panes[0].schedule.history
+  const hist = withSchedule({ ...base, history: [run(1), 'basura', run(2, { status: 'exploded' }), run(3, { reason: 'weird' }), { at: 4 }] }).workspaces[0].panes[0].schedules[0].history
   check(hist.length === 2 && hist[0].at === 1 && hist[1].at === 3 && hist[1].reason === undefined, 'history parses item by item; an unknown reason is dropped, the run kept')
-  const held = withSchedule({ ...base, history: [run(1, { status: 'failed', reason: 'enter_held' })] }).workspaces[0].panes[0].schedule.history
+  const held = withSchedule({ ...base, history: [run(1, { status: 'failed', reason: 'enter_held' })] }).workspaces[0].panes[0].schedules[0].history
   check(held.length === 1 && held[0].status === 'failed' && held[0].reason === 'enter_held', 'post 2.6.0: the enter_held reason (userGate dropped the Enter) is kept without a config bump')
-  const many = withSchedule({ ...base, history: Array.from({ length: 25 }, (_, i) => run(100 + i)) }).workspaces[0].panes[0].schedule.history
+  const many = withSchedule({ ...base, history: Array.from({ length: 25 }, (_, i) => run(100 + i)) }).workspaces[0].panes[0].schedules[0].history
   check(many.length === 20 && many[0].at === 105 && many[19].at === 124, '25 runs keep the 20 most recent, oldest first')
-  const desc = withSchedule({ ...base, history: Array.from({ length: 25 }, (_, i) => run(200 - i)) }).workspaces[0].panes[0].schedule.history
+  const desc = withSchedule({ ...base, history: Array.from({ length: 25 }, (_, i) => run(200 - i)) }).workspaces[0].panes[0].schedules[0].history
   check(desc.length === 20 && desc[0].at === 200 && desc[19].at === 181, 'newest-first history also keeps the 20 most recent in its order')
 
   // Workspace repoConfig trace (E8-FR-25).
@@ -278,11 +290,11 @@ async function schema13Checks() {
   check(S.getState().settings.remote.phoneFit === true && S.getState().settings.cliEnabled === true && S.getState().settings.automation.scheduleMaxWaitMin === 30 && S.getState().settings.agents.cacheTimer.ttlMinutes === 5, 'the store defaults carry the v13 keys')
   S.getState().hydrate(rc)
   const stop = r.startPersistence()
-  S.getState().setPaneSchedule('w1', 'p1', clone(fullSch))
+  S.getState().setPaneSchedule('w1', 'p1', 's1', clone(fullSch))
   S.getState().updateSettings({ hibernateIdleMinutes: 45, remote: { ...S.getState().settings.remote, phoneFit: false } })
   flush()
   const back = parseConfig(saves.at(-1))
-  check(back && back.version === CONFIG_VERSION && JSON.stringify(back.workspaces[0].panes[0].schedule) === JSON.stringify(fullSch) && back.workspaces[0].repoConfig.sha256 === sha, 'schedule fields and repoConfig persist through the store and the schema')
+  check(back && back.version === CONFIG_VERSION && JSON.stringify(back.workspaces[0].panes[0].schedules[0]) === JSON.stringify({ id: 's1', ...fullSch }) && back.workspaces[0].repoConfig.sha256 === sha, 'schedule fields and repoConfig persist through the store and the schema')
   check(back.settings.hibernateIdleMinutes === 45 && back.settings.remote.phoneFit === false && back.settings.remote.https.mode === 'tailscaleServe', 'v13 settings persist through the store')
   stop()
 }
@@ -437,6 +449,95 @@ async function schema14Checks() {
   stop()
 }
 
+// ---- App 2.7.0 (A10): schema 19 pane.schedules[] and the cron recurrence ----
+// A v18 config as the 2.6.0 renderer writes it (the v13 fixture stamped 18),
+// one schedule per console: migrate() turns each into schedules[{ id: 's1' }].
+async function schema19ScheduleChecks() {
+  const v18 = v13Real({ version: 18 })
+  v18.workspaces[0].panes[1].schedule = { time: '07:00', prompt: 'git pull', dueAt: 1760000000000 }
+  const a = parseConfig(clone(v18))
+  check(a && a.version === 19 && CONFIG_VERSION === 19, 'a v18 config with console schedules parses as 19 (no further bump)')
+  const [p1, p2] = a.workspaces[0].panes
+  check(JSON.stringify(p1.schedules) === JSON.stringify([{ id: 's1', ...v18.workspaces[0].panes[0].schedule }]) && JSON.stringify(p2.schedules) === JSON.stringify([{ id: 's1', ...v18.workspaces[0].panes[1].schedule }]), "each console's schedule becomes schedules[0] with id s1, every field kept")
+  check(a.workspaces.every((w) => w.panes.every((p) => !('schedule' in p))), 'schedule is never carried forward')
+  check(survives(v18, a), 'every v18 value survives v18 -> v19')
+  const b = parseConfig(clone(a))
+  check(JSON.stringify(b) === JSON.stringify(a), 'idempotent: a second parse changes nothing')
+  check(JSON.stringify(parseConfig(clone(b))) === JSON.stringify(a), 'and a third one neither')
+  // By presence, not by version.
+  const both = clone(a); both.workspaces[0].panes[0].schedule = { time: '01:00', prompt: 'viejo', dueAt: 1 }
+  const bp = parseConfig(both).workspaces[0].panes[0]
+  check(JSON.stringify(bp.schedules) === JSON.stringify(p1.schedules) && !('schedule' in bp), 'schedules already there wins: a stray schedule next to it is dropped')
+  const stale = clone(a); delete stale.workspaces[0].panes[0].schedules; stale.workspaces[0].panes[0].schedule = { time: '01:00', prompt: 'bajada', dueAt: 1 }
+  const sp = parseConfig(stale).workspaces[0].panes[0]
+  check(sp.schedules.length === 1 && sp.schedules[0].id === 's1' && sp.schedules[0].prompt === 'bajada' && !('schedule' in sp), 'a v19 file with only a schedule (written by an older build after a downgrade) migrates too')
+  const badLegacy = clone(v18); badLegacy.workspaces[0].panes[0].schedule = { prompt: 'sin hora' }
+  const bl = parseConfig(badLegacy)
+  check(bl && bl.workspaces[0].panes[0].schedules === undefined && !('schedule' in bl.workspaces[0].panes[0]) && bl.workspaces[0].panes[1].schedules[0].prompt === 'git pull', 'a malformed v18 schedule is dropped instead of failing the whole config')
+
+  // schedules[] item by item.
+  const entry = (id, extra = {}) => ({ id, time: '09:00', prompt: `p-${id}`, dueAt: 1760000000000, ...extra })
+  const withList = (list) => { const c = clone(a); c.workspaces[0].panes[0].schedules = list; return parseConfig(c) }
+  const listOf = (cfg) => cfg.workspaces[0].panes[0].schedules
+  const ids = (cfg) => (listOf(cfg) ?? []).map((s) => s.id).join()
+  const cronOk = withList([entry('s1'), entry('s2', { time: '', recurrence: { kind: 'cron', expr: '0 9 * * 1-5' } }), entry('s3', { recurrence: { kind: 'cron', expr: '*/15 * * * *' } })])
+  check(ids(cronOk) === 's1,s2,s3' && listOf(cronOk)[1].recurrence.kind === 'cron' && listOf(cronOk)[1].recurrence.expr === '0 9 * * 1-5' && listOf(cronOk)[1].time === '', 'valid cron rules are kept (weekdays 09:00, every 15 minutes)')
+  check(JSON.stringify(parseConfig(clone(cronOk))) === JSON.stringify(cronOk), 'a parse with several schedules and cron rules is idempotent')
+  const badCron = [['0 9 * *', 'does not parse'], ['61 * * * *', 'has a value out of range'], ['*/5 * * * *', 'runs every 5 minutes (under 15)'], ['0,10 9 * * *', 'has two runs 10 minutes apart'], ['0 0 31 2 *', 'never runs (Feb 31)'], ['0 0 30 2 *', 'never runs (Feb 30)'], ['0 '.repeat(61), 'is over 120 characters'], [5, 'is not a string'], [undefined, 'has no expression']]
+  for (const [expr, why] of badCron) {
+    const p = withList([entry('s1'), entry('s2', { recurrence: { kind: 'cron', expr } }), entry('s3')])
+    check(p && ids(p) === 's1,s3', `a cron entry that ${why} is dropped whole, not degraded to a one-shot`)
+  }
+  const junkRec = listOf(withList([entry('s1', { recurrence: { kind: 'monthly' } })]))[0]
+  check(junkRec.prompt === 'p-s1' && junkRec.recurrence === undefined, 'another junk recurrence still falls back to a one-shot (the schema 13 rule)')
+  check(ids(withList(Array.from({ length: 9 }, (_, i) => entry(`s${i + 1}`)))) === 's1,s2,s3,s4,s5,s6,s7,s8', 'at most 8 schedules per console: the 9th is dropped')
+  const dup = withList([entry('s1'), entry('s2', { prompt: 'primero' }), entry('s2'), entry('s1')])
+  check(ids(dup) === 's1,s2' && listOf(dup)[1].prompt === 'primero', 'a repeated id is dropped, the first one kept')
+  check(ids(withList([entry('s0x'), entry('S1'), entry('s1000'), entry(''), entry(7), { time: '09:00', prompt: 'sin id', dueAt: 1 }, entry('s999')])) === 's999', 'ids must match s1..s999 (s0x, S1, s1000, empty, a number or missing are dropped)')
+  const mixed = withList(['basura', entry('s1', { time: 5 }), entry('s2'), null, entry('s3', { waitIdle: 'x', history: [run(1), 'x'] })])
+  check(ids(mixed) === 's2,s3' && listOf(mixed)[1].waitIdle === undefined && listOf(mixed)[1].history.length === 1, 'a malformed entry is dropped and the rest kept; optional fields still drop field by field')
+  const dupFirstBad = withList([entry('s1', { recurrence: { kind: 'cron', expr: '* * * * *' } }), entry('s1', { prompt: 'bueno' })])
+  check(ids(dupFirstBad) === 's1' && listOf(dupFirstBad)[0].prompt === 'bueno', 'a dropped entry does not take its id: a later valid one with the same id is kept')
+  const nonArr = withList('s1')
+  check(nonArr && listOf(nonArr) === undefined && nonArr.workspaces[0].panes[1].schedules.length === 1, 'a non-array schedules is dropped without rejecting the config')
+
+  // ConfigStore: the upgrade write stores 19 with schedules, .bak keeps the v18 file.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-schema19-test-'))
+  try {
+    const app = { getPath: () => dir, isPackaged: false }
+    const { ConfigStore } = load('src/main/store/ConfigStore.ts', { require: id => (id === 'electron' ? { app } : require(id)), process: { ...process, env: {}, argv: ['electron'] } })
+    const file = path.join(dir, 'config.json'), text = JSON.stringify(v18)
+    fs.writeFileSync(file, text)
+    new ConfigStore().load({ upgrade: true })
+    const written = JSON.parse(fs.readFileSync(file, 'utf8'))
+    check(written.version === 19 && written.workspaces[0].panes.every((p) => !('schedule' in p) && p.schedules[0].id === 's1') && survives(v18, written), 'the upgrade write stores 19 with schedules[] and no schedule')
+    check(fs.readFileSync(file + '.bak', 'utf8') === text, 'the pre-upgrade v18 file stays in .bak')
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+
+  // Renderer round trip: a second schedule (cron) persists through the store and the schema.
+  const saves = [], timers = new Map()
+  let seq = 0
+  const flush = () => { const fns = [...timers.values()]; timers.clear(); fns.forEach(fn => fn()) }
+  const r = loadRenderer(`export { startPersistence } from './persist'; export { useAppStore } from './store'`, {
+    window: { snApi: { config: { save: cfg => saves.push(clone(cfg)) }, pty: { killPanes: async () => 0 } } },
+    document: { hasFocus: () => false },
+    setTimeout: fn => { timers.set(++seq, fn); return seq }, clearTimeout: id => timers.delete(id),
+  })
+  const S = r.useAppStore
+  S.getState().hydrate(a)
+  const stop = r.startPersistence()
+  S.getState().setPaneSchedule('w1', 'p1', 's2', { time: '', prompt: 'cada 15', dueAt: 1760000000000, recurrence: { kind: 'cron', expr: '*/15 9-18 * * 1-5' } })
+  flush()
+  const back = parseConfig(saves.at(-1))
+  check(back && ids(back) === 's1,s2' && listOf(back)[1].recurrence.expr === '*/15 9-18 * * 1-5' && JSON.stringify(listOf(back)[0]) === JSON.stringify(p1.schedules[0]), 'a second schedule with a cron rule persists through the store and the schema next to s1')
+  S.getState().setPaneSchedule('w1', 'p1', 's1', null)
+  S.getState().setPaneSchedule('w1', 'p1', 's2', null)
+  flush()
+  check(!('schedules' in parseConfig(saves.at(-1)).workspaces[0].panes[0]), 'deleting every schedule saves the console without schedules')
+  stop()
+}
+// ---- end A10 schema -----------------------------------------------------------
+
 /** v3.1 WS amendments (R31-00): the two Automations ctl through the real zod schema. */
 function v31ContractChecks() {
   const { parseRemoteClientMsg } = load('src/shared/remote-protocol-schemas.ts', { URL })
@@ -456,6 +557,14 @@ function v31ContractChecks() {
     check(frame(bad) === null, `scheduleToggle rejects ${JSON.stringify(bad).slice(0, 70)}`)
   }
   check(frame({ kind: 'scheduleEdit', workspaceId: 'w1', paneId: 'p1', prompt: 'x' }) === null, 'there is no ctl to edit a schedule from the phone')
+  // App 2.7.0 (A10): an optional scheduleId picks one of the console's schedules.
+  const runId = frame({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'p1', scheduleId: 's2' })
+  const toggleId = frame({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: false, scheduleId: 's3' })
+  check(runId && runId.action.scheduleId === 's2' && toggleId && toggleId.action.scheduleId === 's3' && toggleId.action.enabled === false, 'app 2.7.0: scheduleRun and scheduleToggle carry an optional scheduleId')
+  check(!('scheduleId' in run.action), 'without it (an older phone) the frame parses as before')
+  for (const bad of ['', 'x'.repeat(129), 7, null]) {
+    check(frame({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'p1', scheduleId: bad }) === null && frame({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: true, scheduleId: bad }) === null, `a scheduleId ${JSON.stringify(bad).slice(0, 20)} is a malformed frame`)
+  }
   check(frame({ kind: 'runQuickCommand', workspaceId: 'w1', id: 'qc-1' }) && frame({ kind: 'agentResume', workspaceId: 'w1', paneId: 'p1', mode: 'new' }), 'the earlier ctl kinds still parse next to the v3.1 ones')
 }
 // ---- end R31-00 -------------------------------------------------------------
@@ -1194,6 +1303,7 @@ async function main() {
   schemaChecks()
   await schema13Checks()
   await schema14Checks()
+  await schema19ScheduleChecks()
   formatBytesChecks()
   v31ContractChecks()
   helperChecks()
@@ -1206,7 +1316,7 @@ async function main() {
   await composerChecks()
   await require('./test-automation-repo.cjs').run({ check, load, loadRenderer }) // R30-12 .snagentsos.json
   fs.rmSync(shellDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} automation checks (schema 12, 13, 14 and 18, formatBytes, v3.1 schedule ctl, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state, .snagentsos.json)`)
+  console.log(`PASS: ${checks} automation checks (schema 12, 13, 14, 18 and 19 schedules, formatBytes, v3.1 schedule ctl, snippets migration, item parsing, 100 cap, merge remap, store actions, prompt rules, submit, gate, stateOf, Quick Commands, composer, note and task state, .snagentsos.json)`)
 }
 main().catch((err) => {
   fs.rmSync(shellDir, { recursive: true, force: true })

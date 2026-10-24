@@ -155,7 +155,8 @@ function render(i: DiagnosticsInput, b: Budget): string {
   L.push('', '### Counts')
   const cfg = i.config
   const panes = cfg ? cfg.workspaces.reduce((n, w) => n + (w.panes?.length ?? 0), 0) : 0
-  const schedules = cfg ? cfg.workspaces.reduce((n, w) => n + (w.panes ?? []).filter((p) => p.schedule != null).length, 0) : 0
+  // Every schedule of every console (schema 19: several per console).
+  const schedules = cfg ? cfg.workspaces.reduce((n, w) => n + (w.panes ?? []).reduce((k, p) => k + (Array.isArray(p.schedules) ? p.schedules.length : 0), 0), 0) : 0
   const r = i.renderer
   L.push(
     `- workspaces ${r?.workspaces ?? cfg?.workspaces.length ?? 0}, panes ${r?.panes ?? panes}, connections ${r?.connections ?? cfg?.connections?.length ?? 0}, ` +

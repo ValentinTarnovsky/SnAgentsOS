@@ -179,7 +179,8 @@ export function rowRank(status: RemotePaneStatus | undefined, unread: boolean): 
   if (status?.needs && status.muted !== true) return 0
   switch (status?.state) {
     case 'action':
-      return status.attention === false ? 3 : 0
+      // A muted request still open ranks like the desktop board: with the idle ones (app 2.7.0).
+      return status.attention === false ? (status.muted === true ? 4 : 3) : 0
     case 'error':
       return status.attention === false ? 4 : 1
     case 'done':

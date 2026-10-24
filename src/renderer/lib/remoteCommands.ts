@@ -2,6 +2,7 @@ import type { RemoteCommand, RemoteCommandFit } from '@shared/ipc-contract'
 import type { RemoteCtlAction } from '@shared/remote-protocol'
 import type { AgentPreset, Workspace } from '@shared/types'
 import { initialPromptFallback } from '@shared/initialPrompt'
+import { paneSchedules } from '@shared/schedule'
 import { shellKind } from '@shared/shellKind'
 import { type AppState, useAppStore } from './store'
 import { resolveLaunch } from './launch'
@@ -249,18 +250,22 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
  * needs a saved prompt (no_schedule as well, CONTRATOS v3.1). A run asked
  * again while one waits is a no-op ok ack (the contract's `info: 'pending'`
  * cannot travel: `ctlAck.info` is a number; the phone reads `runPending`).
+ * App 2.7.0: `scheduleId` picks one of the console's schedules (an unknown
+ * id is no_schedule); without it (an older phone) the first one.
  * Exported for tests.
  */
 export function runScheduleCtl(action: Extract<RemoteCtlAction, { kind: 'scheduleRun' | 'scheduleToggle' }>): CmdResult {
   const ws = useAppStore.getState().workspaces.find((w) => w.id === action.workspaceId)
   const pane = ws?.panes.find((p) => p.id === action.paneId)
   if (!pane) return { ok: false, error: 'not_found' }
-  if (!pane.schedule) return { ok: false, error: 'no_schedule' }
+  const list = paneSchedules(pane)
+  const sched = action.scheduleId === undefined ? list[0] : list.find((s) => s.id === action.scheduleId)
+  if (!sched) return { ok: false, error: 'no_schedule' }
   if (action.kind === 'scheduleToggle') {
-    setScheduleEnabled(pane.id, action.enabled)
+    setScheduleEnabled(pane.id, sched.id, action.enabled)
     return { ok: true }
   }
-  return runScheduleNow(pane.id) ? { ok: true } : { ok: false, error: 'no_schedule' }
+  return runScheduleNow(pane.id, sched.id) ? { ok: true } : { ok: false, error: 'no_schedule' }
 }
 
 /**

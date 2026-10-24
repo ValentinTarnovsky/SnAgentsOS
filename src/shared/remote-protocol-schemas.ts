@@ -95,9 +95,11 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   }),
   // E8-FR-32 (v3.1, R31-00): pane membership and the schedule itself are the
   // executor's to check (ack not_found / no_schedule). scheduleRun carries no
-  // text: a stray field is stripped, never sent.
-  z.object({ kind: z.literal('scheduleRun'), workspaceId: id, paneId: id }),
-  z.object({ kind: z.literal('scheduleToggle'), workspaceId: id, paneId: id, enabled: z.boolean() }),
+  // text: a stray field is stripped, never sent. App 2.7.0: `scheduleId` is
+  // optional (an older phone acts on the first schedule) and, like the pane,
+  // the executor's to look up (an unknown one acks no_schedule).
+  z.object({ kind: z.literal('scheduleRun'), workspaceId: id, paneId: id, scheduleId: id.optional() }),
+  z.object({ kind: z.literal('scheduleToggle'), workspaceId: id, paneId: id, enabled: z.boolean(), scheduleId: id.optional() }),
   // app 2.3.0: only allowlisted values (the phone never builds another one);
   // the provider and the Enter gate are the executor's and main's to judge.
   z.object({

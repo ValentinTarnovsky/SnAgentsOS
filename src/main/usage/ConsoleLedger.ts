@@ -236,6 +236,9 @@ interface CodexLedger {
  * Codex: `total` is cumulative per thread, so a thread's baseline is its
  * total before the first call this console saw (total - last at first sight)
  * and the console's usage is the sum over its threads of total - baseline.
+ * A thread first seen outside a running turn (`inTurn` false: the restored
+ * usage a resume replays) takes its whole total as the baseline, so a resumed
+ * thread adds nothing of what came before; its context still publishes.
  * The cost comes from the rate card (unknown off the card); the context is
  * codexContextPct, exact.
  */
@@ -304,7 +307,9 @@ export class ConsoleLedger {
     }
     const total = codexTokens(usage.total)
     const prev = ledger.threads.get(usage.threadId)
-    const thread: CodexThread = prev ? { base: prev.base, total } : { base: codexMinus(total, codexTokens(usage.last)), total }
+    // At first sight outside a turn (a resume's replay) `last` is an old call: the whole total is the baseline.
+    const base = prev ? prev.base : usage.inTurn ? codexMinus(total, codexTokens(usage.last)) : total
+    const thread: CodexThread = { base, total }
     ledger.threads.delete(usage.threadId)
     ledger.threads.set(usage.threadId, thread)
     while (ledger.threads.size > LEDGER_PARTS_MAX) {

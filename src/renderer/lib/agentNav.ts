@@ -86,7 +86,9 @@ export function willResumeOnOpen(ws: Workspace, pane: Pane, presets: readonly Ag
  * spawned) records that resume when it opens, ranked 4 as "not started".
  * App 2.7.0: a console that needs the user takes the shared rule's rank and
  * age (src/shared/attention.ts), so a `snaos needs` not muted is rank 1, aged
- * from the ask, on the board, the sidebar rows and the smart order too.
+ * from the ask, on the board, the sidebar rows and the smart order too. A
+ * muted `action` whose request is still open (displayStatus keeps it an
+ * `action`) is rank 4: out of "Waiting on you" and "Working".
  */
 export function workspaceAgents(ws: Workspace, input: NavInput): AgentEntry[] {
   const out: AgentEntry[] = []
@@ -105,7 +107,8 @@ export function workspaceAgents(ws: Workspace, input: NavInput): AgentEntry[] {
         status,
         session,
         notStarted: false,
-        rank: needing?.rank ?? agentRank(status.state, status.attention),
+        // A muted request still open (main sends it with attention false) neither waits on you nor works: with the rest.
+        rank: needing?.rank ?? (status.muted === true && displayStatus(status).state === 'action' ? 4 : agentRank(status.state, status.attention)),
         // v2.3: main's attention (a done or error nobody saw), or the CLI's local mark.
         unread: status.attention === true || !!input.paneAttention[pane.id],
         stateSince: needing?.stateSince ?? status.stateSince ?? status.updatedAt ?? 0,

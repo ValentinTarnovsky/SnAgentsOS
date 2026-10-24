@@ -186,17 +186,32 @@ export interface RemoteWorkspaceInfo {
 
 /**
  * E8-FR-32 (v3.1, R31-00): one console schedule as the phone's Automations
- * section shows it. Read-only mirror of `pane.schedule` with the absent
- * fields resolved; it never carries the prompt text (the phone can only
- * toggle it and run it now, never edit it).
+ * section shows it. Read-only mirror of one entry of `pane.schedules` with
+ * the absent fields resolved; it never carries the prompt text (the phone can
+ * only toggle it and run it now, never edit it). App 2.7.0: one info per
+ * schedule, so a console with several sends several.
  */
 export interface RemoteScheduleInfo {
   workspaceId: string
   paneId: string
-  /** "HH:MM" wall-clock time the user picked, on the desktop clock. */
+  /**
+   * App 2.7.0: the schedule's id within the pane (`s1`..`s999`), echoed in
+   * scheduleRun / scheduleToggle. Absent = an older desktop (one per console).
+   */
+  scheduleId?: string
+  /** "HH:MM" wall-clock time the user picked, on the desktop clock (not used by a `cron` rule). */
   time: string
-  /** Repeat rule; an absent `recurrence` travels as `{ kind: 'once' }`. */
+  /**
+   * Repeat rule; an absent `recurrence` travels as `{ kind: 'once' }`. A
+   * `cron` rule travels as is, and also in `cron` below.
+   */
   recurrence: ScheduleRecurrence
+  /**
+   * App 2.7.0: the cron expression of a `cron` rule (the same text as
+   * `recurrence.expr`), absent otherwise. A phone older than 2.7.0 reads
+   * neither and shows the rule as a one-shot.
+   */
+  cron?: string
   /** Epoch ms of the next run (desktop clock). Meaningless while `enabled` is false. */
   dueAt: number
   /** The Active switch (`schedule.enabled`, absent = true). */
@@ -295,7 +310,8 @@ export interface RemoteStateSnapshot {
   mountedWorkspaceIds?: string[]
   /**
    * E8-FR-32 (v3.1, R31-00): every console with a schedule, in sidebar order
-   * (workspaces, then panes). Absent = an older desktop; `[]` = none.
+   * (workspaces, then panes; app 2.7.0: then the pane's schedules in their
+   * stored order). Absent = an older desktop; `[]` = none.
    */
   schedules?: RemoteScheduleInfo[]
 }
@@ -404,14 +420,16 @@ export type RemoteCtlAction =
    * stored prompt). Idempotent while a run waits (ack ok, `info: 'pending'`).
    * Ack errors: not_found (pane outside workspaceId), no_schedule (no
    * schedule or an empty prompt), rate (per-session bucket, E3-FR-03).
+   * App 2.7.0: `scheduleId` names one of the pane's schedules (an unknown id
+   * is no_schedule); absent = the pane's first schedule (an older phone).
    */
-  | { kind: 'scheduleRun'; workspaceId: string; paneId: string }
+  | { kind: 'scheduleRun'; workspaceId: string; paneId: string; scheduleId?: string }
   /**
    * The Active switch: pauses without deleting; turning it on re-arms the
    * next run like the desktop switch. Ack errors: not_found, no_schedule,
-   * rate.
+   * rate. `scheduleId` as in scheduleRun.
    */
-  | { kind: 'scheduleToggle'; workspaceId: string; paneId: string; enabled: boolean }
+  | { kind: 'scheduleToggle'; workspaceId: string; paneId: string; enabled: boolean; scheduleId?: string }
   // --- app 2.3.0: model, effort and Ultracode from the phone ---
   /**
    * One allowlisted slash command (tuneCommand) into the agent console:

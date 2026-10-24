@@ -128,13 +128,14 @@ export interface RowLineInput {
 
 /**
  * True while a row shows a relative time (drives the 30s ticker): the second
- * line's age, a silence's minutes or a failure's reset, which drops off when
- * it passes.
+ * line's age, a silence's minutes or a failure's reset while it is ahead of
+ * `now` (failureText drops it once it passes, and main keeps the failure on
+ * an idle track, so a past reset must not keep the clock running).
  */
-export function rowShowsTime(raw: RemotePaneStatus | undefined): boolean {
+export function rowShowsTime(raw: RemotePaneStatus | undefined, now: number): boolean {
   const status = displayStatus(agentStatusOf(raw))
   if (!status) return false
-  if (status.silence || status.failure?.until) return true
+  if (status.silence || (status.failure?.until && status.failure.until > now)) return true
   if (status.state === 'action') return false
   return status.state === 'working' || status.state === 'done' || status.state === 'error'
 }

@@ -113,12 +113,12 @@ export function schedulePending(schedule: PaneSchedule | undefined, now: number,
   return typeof schedule.dueAt === 'number' && schedule.dueAt - now <= windowMs
 }
 
-/** paneId -> schedule from a persisted config. */
-export function schedulesOf(cfg: ConfigFile | null): Map<string, PaneSchedule> {
-  const out = new Map<string, PaneSchedule>()
+/** paneId -> every schedule of that console (schema 19) from a persisted config. */
+export function schedulesOf(cfg: ConfigFile | null): Map<string, PaneSchedule[]> {
+  const out = new Map<string, PaneSchedule[]>()
   for (const ws of cfg?.workspaces ?? []) {
     if (!Array.isArray(ws.panes)) continue
-    for (const pane of ws.panes) if (pane.schedule) out.set(pane.id, pane.schedule)
+    for (const pane of ws.panes) if (Array.isArray(pane.schedules) && pane.schedules.length > 0) out.set(pane.id, pane.schedules)
   }
   return out
 }
@@ -194,7 +194,7 @@ export class HibernationCoordinator {
     const now = this.now()
     const subscribed = this.deps.subscribedPaneIds()
     const idleMs = this.idleMinutes * MIN_MS
-    let schedules: Map<string, PaneSchedule> | null = null
+    let schedules: Map<string, PaneSchedule[]> | null = null
     const candidates: HibernationCandidate[] = []
     for (const s of this.deps.statuses()) {
       const c: HibernationCandidate = {
@@ -211,7 +211,8 @@ export class HibernationCoordinator {
       }
       if (!isEligible(c, this.idleMinutes, now)) continue
       schedules ??= schedulesOf(this.deps.getConfig())
-      c.schedulePending = schedulePending(schedules.get(s.paneId), now, idleMs)
+      // Any one of the console's schedules keeps it awake.
+      c.schedulePending = (schedules.get(s.paneId) ?? []).some((sc) => schedulePending(sc, now, idleMs))
       candidates.push(c)
     }
     const plan = planHibernation({ candidates, idleMinutes: this.idleMinutes, now, previous: this.previous, isAvailable: this.deps.isAvailable })

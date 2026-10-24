@@ -8,10 +8,28 @@
  * Times are local wall-clock times computed with `Date` and `setHours`, like
  * the one-shot schedule always did: on a DST spring-forward day a time inside
  * the gap moves forward with the clock (02:30 runs at 03:30), and a repeated
- * fall-back hour runs once (the first one).
+ * fall-back hour runs once (the first one). A `cron` rule (app 2.7.0) follows
+ * the same DST rules through `nextCron` (cron.ts).
+ *
+ * App 2.7.0 (schema 19): a console holds up to PANE_SCHEDULES_MAX schedules
+ * (`Pane.schedules`), each with its own id; every rule here works on one.
+ * The time of a next run in a label (`formatRunWhen`) is shared by the
+ * desktop and the phone: a run 6 or more days away carries its date.
  */
-import type { ClaudePaneState, PaneSchedule, ScheduleRecurrence, ScheduleRun } from './types'
+import type { ClaudePaneState, Language, Pane, PaneSchedule, ScheduleRecurrence, ScheduleRun } from './types'
 import { typingBlocked } from './agentTune'
+import { cronMinIntervalOk, nextCron, parseCron } from './cron'
+
+/** Schedules one console may hold (schema 19); the schema drops the rest. */
+export const PANE_SCHEDULES_MAX = 8
+/** A schedule id within its pane, `s1`..`s999`; the migrated single schedule of schema <= 18 is `s1`. */
+export const SCHEDULE_ID_RE = /^s[0-9]{1,3}$/
+/**
+ * `dueAt` of a cron rule with no next run (the latest `Date`), so it never
+ * comes due. The schema and the dialog refuse such a rule (`cronRuleError`);
+ * this only keeps one that slipped through from firing every hour.
+ */
+export const SCHEDULE_NEVER = 8_640_000_000_000_000
 
 /** Runs kept per schedule; the 21st drops the oldest (E8-FR-31). */
 export const SCHEDULE_HISTORY_MAX = 20
@@ -76,12 +94,16 @@ export function nextOccurrence(time: string, from: Date | number = new Date()): 
  * once / daily: the next HH:MM; weekdays: the next HH:MM on Mon..Fri;
  * weekly: the next HH:MM on one of `days`; hourly: the next hh:MM, with the
  * minute taken from `time`. A malformed time falls back to 1 h from `from`.
+ * cron (app 2.7.0): the expression's next run (`nextCron`), whatever `time`
+ * holds; a rule with none gives SCHEDULE_NEVER.
  */
 export function nextDue(schedule: Pick<PaneSchedule, 'time' | 'recurrence'>, from: Date | number = new Date()): number {
   const fromMs = typeof from === 'number' ? from : from.getTime()
+  const rec = recurrenceOf(schedule)
+  // Before parseTime: a cron schedule's `time` is not part of its rule.
+  if (rec.kind === 'cron') return nextCron(rec.expr, fromMs) ?? SCHEDULE_NEVER
   const t = parseTime(schedule.time)
   if (!t) return fromMs + HOUR_MS
-  const rec = recurrenceOf(schedule)
   if (rec.kind === 'hourly') {
     const due = new Date(fromMs)
     due.setMinutes(t.m, 0, 0)
@@ -223,4 +245,102 @@ export function withEnabled(schedule: PaneSchedule, enabled: boolean, now: numbe
 /** Same rule as the schema: 1..7 distinct days in 0..6. */
 export function validWeeklyDays(days: readonly number[]): boolean {
   return days.length >= 1 && days.length <= 7 && new Set(days).size === days.length && days.every((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+}
+
+/**
+ * Why a cron expression cannot be stored, or null when it can (app 2.7.0;
+ * the same test in the schema and the dialog): `invalid` does not parse,
+ * `never` has no run within the 4 years `nextCron` looks ahead of `now`,
+ * `interval` runs less than CRON_MIN_INTERVAL_MIN (15) minutes apart.
+ * `cronMinIntervalOk` is not cheap: call this on an edit or a load, never per tick.
+ */
+export function cronRuleError(expr: string, now: number): 'invalid' | 'never' | 'interval' | null {
+  const spec = parseCron(expr)
+  if (!spec) return 'invalid'
+  if (nextCron(spec, now) === null) return 'never'
+  if (!cronMinIntervalOk(spec)) return 'interval'
+  return null
+}
+
+/** A console's schedules in their stored order (schema 19; absent = none). */
+export function paneSchedules(pane: Pick<Pane, 'schedules'>): PaneSchedule[] {
+  return pane.schedules ?? []
+}
+
+/** The lowest free id (`s1`, `s2`, ...) for a new schedule, or null once the console holds PANE_SCHEDULES_MAX. */
+export function nextScheduleId(schedules: readonly Pick<PaneSchedule, 'id'>[] | undefined): string | null {
+  const list = schedules ?? []
+  if (list.length >= PANE_SCHEDULES_MAX) return null
+  const taken = new Set(list.map((s) => s.id))
+  for (let n = 1; n <= 999; n++) if (!taken.has(`s${n}`)) return `s${n}`
+  return null
+}
+
+/** `paneId#scheduleId`: the key of one schedule in the scheduler runtime and the phone's rows. */
+export function scheduleKey(paneId: string, scheduleId: string): string {
+  return `${paneId}#${scheduleId}`
+}
+
+/**
+ * Calendar days, today included, whose run a "next run" label names by its
+ * weekday alone: today and the next five, six different weekdays that all
+ * read as this week's. A cron rule (app 2.7.0) can run weeks, months or
+ * years ahead, so "dom 09:00" a month away would read as this Sunday.
+ */
+export const RUN_WEEKDAY_DAYS = 6
+
+/** How a run's label names its day: weekday alone, with day and month, or with the year too. */
+export type RunWhenStyle = 'weekday' | 'date' | 'year'
+
+/**
+ * `weekday` within the RUN_WEEKDAY_DAYS calendar days that start on `now`'s,
+ * `date` further away (or before today), `year` in a year other than `now`'s,
+ * even a day or two ahead.
+ */
+export function runWhenStyle(at: number, now: number): RunWhenStyle {
+  const run = new Date(at)
+  const today = new Date(now)
+  if (run.getFullYear() !== today.getFullYear()) return 'year'
+  // Local midnights, rounded: a 23 h or 25 h DST day still counts as one.
+  const days = Math.round((new Date(run.getFullYear(), run.getMonth(), run.getDate()).getTime() - new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()) / (24 * HOUR_MS))
+  return days >= 0 && days < RUN_WEEKDAY_DAYS ? 'weekday' : 'date'
+}
+
+const runFormats = new Map<string, Intl.DateTimeFormat>()
+
+function runFormat(lang: Language, style: RunWhenStyle): Intl.DateTimeFormat {
+  const key = `${lang}:${style}`
+  let f = runFormats.get(key)
+  if (!f) {
+    f = new Intl.DateTimeFormat(
+      lang,
+      style === 'weekday'
+        ? { weekday: 'short' }
+        : { weekday: 'short', day: 'numeric', month: 'short', ...(style === 'year' ? { year: 'numeric' } : {}), hour: '2-digit', minute: '2-digit', hourCycle: 'h23' },
+    )
+    runFormats.set(key, f)
+  }
+  return f
+}
+
+const pad2 = (n: number): string => String(n).padStart(2, '0')
+
+/**
+ * The local time of a run as every "next run" label shows it (the desktop's
+ * header clock, schedule list and Settings table, the phone's cards):
+ * "lun 09:00" / "Mon 09:00" within RUN_WEEKDAY_DAYS days, else with the date,
+ * "dom, 1 nov, 09:00" / "Sun, Nov 1, 09:00", and the year when it is not
+ * `now`'s, "mar, 29 feb 2028, 00:00" / "Tue, Feb 29, 2028, 00:00".
+ */
+export function formatRunWhen(at: number, lang: Language, now: number = Date.now()): string {
+  const style = runWhenStyle(at, now)
+  const d = new Date(at)
+  // Dot-free like the rest of the weekday names ("lun", never "lun.").
+  if (style === 'weekday') return `${runFormat(lang, 'weekday').format(d).replace(/\.$/, '')} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+  return runFormat(lang, style).format(d)
+}
+
+/** A run with its date even when it is only days away (the year when it is not `now`'s): the dialog's next 3 cron runs, listed together. */
+export function formatRunDate(at: number, lang: Language, now: number = Date.now()): string {
+  return runFormat(lang, new Date(at).getFullYear() !== new Date(now).getFullYear() ? 'year' : 'date').format(new Date(at))
 }

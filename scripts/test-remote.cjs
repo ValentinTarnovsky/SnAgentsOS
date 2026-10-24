@@ -945,11 +945,11 @@ async function testAutomationSurface() {
     version: 13,
     workspaces: [
       { id: 'w1', name: 'Api', cwd: 'C:/a', note: '  esperando\nCI  ', taskState: 'review', panes: [
-        { id: 'c1', type: 'claude', title: 'Claude', color: '#fff', icon: 'claude', schedule: sched({ history }) },
+        { id: 'c1', type: 'claude', title: 'Claude', color: '#fff', icon: 'claude', schedules: [{ id: 's1', ...sched({ history }) }, { id: 's2', ...sched({ time: '', prompt: 'segundo prompt', dueAt: DUE + 60000, recurrence: { kind: 'cron', expr: '0 9 * * 1-5' } }) }] },
         { id: 'c2', type: 'shell', title: 'Shell', color: '#fff', icon: 'terminal' },
       ] },
       { id: 'w2', name: 'Web', cwd: 'C:/b', taskState: 'bogus', panes: [
-        { id: 'd1', type: 'shell', title: 'Cron', color: '#fff', icon: 'terminal', schedule: sched({ time: '07:15', recurrence: { kind: 'hourly' }, enabled: false }) },
+        { id: 'd1', type: 'shell', title: 'Cron', color: '#fff', icon: 'terminal', schedules: [{ id: 's1', ...sched({ time: '07:15', recurrence: { kind: 'hourly' }, enabled: false }) }] },
       ] },
     ],
     presets: [], connections: [],
@@ -966,16 +966,18 @@ async function testAutomationSurface() {
   const c1 = ws1.panes.find(p => p.id === 'c1'), c2 = ws1.panes.find(p => p.id === 'c2')
   check(c1.statusLine.startsWith('corriendo') && !/[\u0000-\u001f]/.test(c1.statusLine) && c1.statusLine.length === r.REMOTE_STATUS_LINE_MAX, 'statusLine is one line without control characters, at most 120 (E8-FR-19)')
   check(!('statusLine' in c2), 'a console without a line has no statusLine')
-  check(Array.isArray(snap.schedules) && snap.schedules.map(s => s.paneId).join() === 'c1,d1', 'schedules lists every console automation in sidebar order (E8-FR-32)')
-  const s1 = snap.schedules[0], s2 = snap.schedules[1]
+  check(Array.isArray(snap.schedules) && snap.schedules.map(s => s.paneId).join() === 'c1,c1,d1', 'schedules lists every console automation in sidebar order (E8-FR-32)')
+  check(snap.schedules.map(s => `${s.paneId}#${s.scheduleId}`).join() === 'c1#s1,c1#s2,d1#s1', 'app 2.7.0: one info per schedule, in the console\'s stored order, each with its scheduleId')
+  const s1 = snap.schedules[0], s2 = snap.schedules[2], sc = snap.schedules[1]
+  check(sc.recurrence.kind === 'cron' && sc.recurrence.expr === '0 9 * * 1-5' && sc.cron === '0 9 * * 1-5' && sc.dueAt === DUE + 60000 && !('cron' in s1) && !('cron' in s2), 'a cron rule travels as is and in cron (the same expression); other rules have no cron')
   check(s1.workspaceId === 'w1' && s1.time === '09:00' && s1.recurrence.kind === 'weekdays' && s1.enabled === true && s1.waitIdle === true && s1.dueAt === DUE, 'a row carries time, recurrence, enabled, waitIdle and dueAt')
   check(s1.lastRun.at === 5000 && s1.lastRun.status === 'sent' && s1.lastRun.trigger === 'manual' && Object.keys(s1.lastRun).sort().join() === 'at,status,trigger', 'lastRun is the newest run: time, status and trigger only (no reason)')
   check(!('last' in s1), 'the row uses the contract name lastRun')
-  check(!JSON.stringify(snap.schedules).includes('corre los tests') && !('history' in s1) && !('prompt' in s1), 'neither the prompt nor the history leave the desktop')
+  check(!JSON.stringify(snap.schedules).includes('corre los tests') && !JSON.stringify(snap.schedules).includes('segundo prompt') && !('history' in s1) && !('prompt' in s1), 'neither the prompt nor the history leave the desktop')
   check(s2.workspaceId === 'w2' && s2.enabled === false && s2.recurrence.kind === 'hourly' && !('lastRun' in s2) && !('runPending' in s2), 'a paused schedule that never ran')
-  const legacy = r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedule: { time: '10:00', prompt: 'p', dueAt: 1 } }] }], () => false)
+  const legacy = r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedules: [{ id: 's1', time: '10:00', prompt: 'p', dueAt: 1 }] }] }], () => false)
   check(legacy[0].recurrence.kind === 'once' && legacy[0].enabled === true && legacy[0].waitIdle === true, 'a one-shot schedule without the schema 13 fields reads as once, active and waiting for idle')
-  check(r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedule: { time: '10:00', prompt: 'p', dueAt: 1, waitIdle: false } }] }], () => false)[0].waitIdle === false, 'waitIdle false travels as false')
+  check(r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedules: [{ id: 's1', time: '10:00', prompt: 'p', dueAt: 1, waitIdle: false }] }] }], () => false)[0].waitIdle === false, 'waitIdle false travels as false')
 
   // The transient line lives in its own store: clearing it pushes again.
   const before = states.length
@@ -987,8 +989,9 @@ async function testAutomationSurface() {
   r.initRemoteCommands()
   const ctl = async action => { snApi._cmd({ id: `c${results.length}`, action }); await new Promise(res => setImmediate(res)); return results.at(-1) }
   const pane = id => S.getState().workspaces.flatMap(w => w.panes).find(p => p.id === id)
+  const schedOf = (id, sid = 's1') => pane(id).schedules.find(s => s.id === sid)
   let ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w2', paneId: 'c1', enabled: false })
-  check(!ack.ok && ack.error === 'not_found' && pane('c1').schedule.enabled !== false, 'a pane outside workspaceId is not_found and nothing changes')
+  check(!ack.ok && ack.error === 'not_found' && schedOf('c1').enabled !== false, 'a pane outside workspaceId is not_found and nothing changes')
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w2', paneId: 'c1' })
   check(!ack.ok && ack.error === 'not_found' && submits.length === 0, 'scheduleRun checks membership too')
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'gone', paneId: 'c1' })
@@ -996,22 +999,38 @@ async function testAutomationSurface() {
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c2' })
   check(!ack.ok && ack.error === 'no_schedule', 'a console without a schedule is no_schedule')
   ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: false })
-  check(ack.ok && pane('c1').schedule.enabled === false && pane('c1').schedule.dueAt === DUE, 'scheduleToggle pauses it')
+  check(ack.ok && schedOf('c1').enabled === false && schedOf('c1').dueAt === DUE && schedOf('c1', 's2').enabled === undefined, 'scheduleToggle pauses it (without scheduleId, an older phone: the first schedule only)')
   await wait(150)
   check(states.at(-1).schedules[0].enabled === false, 'the next snapshot shows it paused')
-  S.getState().setPaneSchedule('w2', 'd1', { ...pane('d1').schedule, dueAt: Date.now() - 1000 })
+  S.getState().setPaneSchedule('w2', 'd1', 's1', { ...schedOf('d1'), dueAt: Date.now() - 1000 })
   ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w2', paneId: 'd1', enabled: true })
-  check(ack.ok && pane('d1').schedule.enabled === true && pane('d1').schedule.dueAt > Date.now(), 'resuming re-arms a past time to its next occurrence')
+  check(ack.ok && schedOf('d1').enabled === true && schedOf('d1').dueAt > Date.now(), 'resuming re-arms a past time to its next occurrence')
   await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: true })
-  check(pane('c1').schedule.enabled === true && pane('c1').schedule.dueAt === DUE, 'resuming a future time keeps it')
+  check(schedOf('c1').enabled === true && schedOf('c1').dueAt === DUE, 'resuming a future time keeps it')
+  // App 2.7.0: scheduleId picks one of the console's schedules.
+  ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: false, scheduleId: 's2' })
+  check(ack.ok && schedOf('c1', 's2').enabled === false && schedOf('c1').enabled === true, 'scheduleToggle with scheduleId s2 pauses that schedule only')
+  await wait(150)
+  check(states.at(-1).schedules[1].enabled === false && states.at(-1).schedules[0].enabled === true, 'the next snapshot shows only that row paused')
+  ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: true, scheduleId: 's9' })
+  check(!ack.ok && ack.error === 'no_schedule' && schedOf('c1', 's2').enabled === false, 'an unknown scheduleId is no_schedule and nothing changes')
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1', scheduleId: 's9' })
+  check(!ack.ok && ack.error === 'no_schedule' && submits.length === 0, 'scheduleRun with an unknown scheduleId is no_schedule too')
+  ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: true, scheduleId: 's2' })
+  check(ack.ok && schedOf('c1', 's2').enabled === true && schedOf('c1', 's2').dueAt > Date.now(), 'and switching it back on re-arms it')
 
   // "Run now" (E8-FR-31 path): a working agent waits, a free one gets the prompt; dueAt never moves.
   r.registerPty('c1', 'pty-c1')
   S.setState({ paneStatus: { c1: { state: 'working', precise: true, stateSince: 0 } } })
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' })
-  check(ack.ok && submits.length === 0 && 'c1' in r.useScheduleRuntime.getState().manual, 'scheduleRun on a working agent acks ok and waits like the desktop "Run now"')
+  check(ack.ok && submits.length === 0 && 'c1#s1' in r.useScheduleRuntime.getState().manual, 'scheduleRun on a working agent acks ok and waits like the desktop "Run now" (without scheduleId: the first schedule)')
   await wait(150)
-  check(states.at(-1).schedules[0].runPending === true, 'the snapshot marks the waiting run (runPending)')
+  check(states.at(-1).schedules[0].runPending === true && !('runPending' in states.at(-1).schedules[1]), 'the snapshot marks the waiting run (runPending) on its own row only')
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1', scheduleId: 's2' })
+  check(ack.ok && Object.keys(r.useScheduleRuntime.getState().manual).sort().join() === 'c1#s1,c1#s2', 'a run now of the second schedule waits on its own')
+  await wait(150)
+  check(states.at(-1).schedules[1].runPending === true, 'and marks its own row')
+  r.useScheduleRuntime.setState((s) => { const manual = { ...s.manual }; delete manual['c1#s2']; return { manual } })
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' })
   check(ack.ok && Object.keys(r.useScheduleRuntime.getState().manual).length === 1, 'a second tap does not queue a second run')
   r.useScheduleRuntime.setState({ manual: {}, inflight: {} })
@@ -1020,13 +1039,13 @@ async function testAutomationSurface() {
   S.setState({ paneStatus: { c1: { state: 'idle', precise: true, stateSince: 0 } } })
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' })
   await wait(20)
-  const ran = pane('c1').schedule
+  const ran = schedOf('c1')
   check(ack.ok && submits.length === 1 && submits[0].ptyId === 'pty-c1' && submits[0].text === 'corre los tests' && submits[0].enter === true, 'a free agent gets the saved prompt with Enter')
   check(ran.dueAt === DUE && ran.history.length === 4 && ran.history.some(h => h.trigger === 'manual' && h.status === 'sent' && h.at > 5000), 'the run is logged as manual and the next run does not move')
   await wait(150)
   check(states.at(-1).schedules[0].lastRun.status === 'sent' && states.at(-1).schedules[0].lastRun.at > 5000 && states.at(-1).schedules[0].dueAt === DUE, 'the phone sees the new last run and the same next run')
   stop()
-  S.getState().setPaneSchedule('w2', 'd1', { ...pane('d1').schedule, prompt: '' })
+  S.getState().setPaneSchedule('w2', 'd1', 's1', { ...schedOf('d1'), prompt: '' })
   check(r.runScheduleCtl({ kind: 'scheduleRun', workspaceId: 'w2', paneId: 'd1' }).error === 'no_schedule', 'a schedule with an empty prompt answers no_schedule (CONTRATOS v3.1)')
   check(r.runScheduleCtl({ kind: 'scheduleToggle', workspaceId: 'w2', paneId: 'd1', enabled: false }).ok, 'an empty prompt can still be paused')
 }
@@ -1088,11 +1107,14 @@ async function testAutomationRelay() {
   check(state.schedules.length === 1 && state.schedules[0].runPending === true, 'and passes schedules through')
   ws.msg({ type: 'ctl', id: 'a1', action: { kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: false } })
   const relayed = w.commands.at(-1)
-  check(relayed && relayed.action.kind === 'scheduleToggle' && relayed.action.enabled === false && relayed.action.paneId === 'p1', 'scheduleToggle reaches the renderer executor')
+  check(relayed && relayed.action.kind === 'scheduleToggle' && relayed.action.enabled === false && relayed.action.paneId === 'p1' && !('scheduleId' in relayed.action), 'scheduleToggle reaches the renderer executor')
   w.manager.onControlResult({ id: relayed.id, ok: false, error: 'no_schedule' })
   await new Promise(resolve => setImmediate(resolve))
   const ack = ws.of('ctlAck').find(a => a.id === 'a1')
   check(ack && !ack.ok && ack.error === 'no_schedule', 'the executor error comes back in the ctlAck')
+  ws.msg({ type: 'ctl', id: 'a3', action: { kind: 'scheduleRun', workspaceId: 'w1', paneId: 'p1', scheduleId: 's2' } })
+  const relayedId = w.commands.at(-1)
+  check(relayedId && relayedId.action.kind === 'scheduleRun' && relayedId.action.scheduleId === 's2', 'app 2.7.0: a scheduleId reaches the renderer executor as is')
   const count = w.commands.length
   ws.msg({ type: 'ctl', id: 'a2', action: { kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: 1 } })
   check(w.commands.length === count && !ws.of('ctlAck').some(a => a.id === 'a2'), 'a malformed scheduleToggle never reaches the renderer')

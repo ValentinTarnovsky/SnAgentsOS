@@ -17,6 +17,7 @@ import { panelKeyOf } from './changes'
 import { sharedOverlayActive } from './shareGuestStore'
 import { focusWorkspaceConsole } from './focusWorkspace'
 import { focusedChatConsole, togglePaneView } from './consoleChatStore'
+import { usePlanModal } from './planModal'
 import {
   advanceWaiting,
   navigablePanes,
@@ -108,6 +109,16 @@ const PANE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
 ])
 
 /**
+ * A modal dialog is open beyond the store's flags (quickBlocked): the plan
+ * modal, or any `aria-modal` dialog, one a component holds in its own state
+ * too (ScheduleDialog, WorktreeCloseDialog).
+ */
+function dialogOpen(): boolean {
+  if (usePlanModal.getState().view) return true
+  return typeof document !== 'undefined' && document.querySelector('[aria-modal="true"]') !== null
+}
+
+/**
  * The console `toggleConsoleChat` (app 2.7.0, A7) switches: the focused agent
  * console on screen with Labs consoleChat on (focusedChatConsole), and nothing
  * over the grid (a modal, the Quick Commands popover, the agents board). Null
@@ -115,7 +126,7 @@ const PANE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
  * over the shared view, where it is swallowed (PANE_ACTIONS).
  */
 function consoleChatKeyTarget(): string | null {
-  if (quickBlocked() || useAppStore.getState().quickPopoverOpen || useAgentStore.getState().view === 'board') return null
+  if (quickBlocked() || dialogOpen() || useAppStore.getState().quickPopoverOpen || useAgentStore.getState().view === 'board') return null
   return focusedChatConsole()
 }
 

@@ -475,6 +475,20 @@ function testNavigation() {
     const mutedNeeds = { ...mixed, paneStatus: { ...mixed.paneStatus, p1: { ...mixed.paneStatus.p1, muted: true } } }
     const mutedCols = board.boardColumns(nav.allAgents(mutedNeeds))
     check(mutedCols.waiting.map(e => e.id).join() === 'q2,p2' && mutedCols.working.map(e => e.id).join() === 'p1,r1', 'board: a muted needs stays in its own column, by its state age')
+    // A muted request still open: main publishes it with attention false, which is not an answer. It keeps
+    // the action look (dot, glyph), says nothing is running and leaves both "Waiting on you" and "Working".
+    const St = load('src/shared/status.ts')
+    const blocked = { state: 'action', precise: true, provider: 'claude', reason: 'permission', stateSince: 400, pendingCount: 1, attention: false, muted: true, activity: 'Bash: npm test', toolFamily: 'run', pending: [{ id: 'r1', kind: 'permission', toolName: 'Bash', summary: 'npm test' }] }
+    check(St.displayStatus(blocked).state === 'action' && St.displayStatus({ ...blocked, precise: false, pending: undefined }).state === 'action', 'displayStatus: a muted action with an open request, or a title-only one, keeps its action look')
+    check(St.displayStatus({ ...blocked, pending: undefined }).state === 'working' && St.displayStatus({ ...blocked, muted: undefined, pending: undefined }).state === 'working' && St.displayStatus({ ...blocked, muted: undefined, pending: undefined, precise: false }).state === 'idle', 'displayStatus: a muted action answered meanwhile (no open request) reads as working, like an answered one')
+    check(sig.doingNow(blocked, Tm) === null && sig.doingNow({ ...blocked, pending: undefined }, Tm) === 'Ejecutando npm test', 'doingNow: nothing while the tool waits for approval under the mute, the verb once it was answered')
+    const mutedAsk = { ...mixed, paneStatus: { ...mixed.paneStatus, r1: blocked } }
+    const askCols = board.boardColumns(nav.allAgents(mutedAsk))
+    const askEntry = nav.allAgents(mutedAsk).find(e => e.id === 'r1')
+    check(askEntry.rank === 4 && askCols.idle.some(e => e.id === 'r1') && !askCols.waiting.some(e => e.id === 'r1') && !askCols.working.some(e => e.id === 'r1'), 'board: a muted open request goes with the rest (rank 4), neither in Te esperan nor in Trabajando')
+    check(!sig.rowPhrase(askEntry, Tm, 'es', 1000).includes('Ejecutando') && !nav.waitingIds(mutedAsk).includes('r1'), 'its row does not say the tool runs, and it needs nobody')
+    const answeredAsk = nav.allAgents({ ...mixed, paneStatus: { ...mixed.paneStatus, r1: { ...blocked, pending: undefined } } }).find(e => e.id === 'r1')
+    check(answeredAsk.rank === 3, 'a muted request answered meanwhile ranks as working, like an answered one')
     // The frozen walk: who still counts after being revealed.
     const seen = { ...mixed, paneAttention: {}, paneStatus: { ...mixed.paneStatus, p5: { ...mixed.paneStatus.p5, attention: false }, p2: { ...mixed.paneStatus.p2, attention: false } } }
     check(nav.stillWaiting(seen, 'p5') && nav.stillWaiting(seen, 'p4') && nav.stillWaiting(seen, 'p1') && nav.stillWaiting(seen, 'q2'), 'stillWaiting: a seen done and a seen shell stay on the frozen walk, open asks too')

@@ -120,10 +120,11 @@ export function HomeScreen(): ReactNode {
   const [actions, setActions] = useState<PaneRef | null>(null)
   const [now, setNow] = useState(() => Date.now())
 
-  // One 30s clock for every relative time on Home, only while one shows.
+  // One 30s clock for every relative time on Home, only while one shows
+  // (a failure reset counts until it passes, so the tick that passes it stops the clock).
   const ticking = useMemo(
-    () => !!snapshot && snapshot.workspaces.some((ws) => ws.panes.some((p) => rowShowsTime(paneStatus[p.id]))),
-    [snapshot, paneStatus],
+    () => !!snapshot && snapshot.workspaces.some((ws) => ws.panes.some((p) => rowShowsTime(paneStatus[p.id], now))),
+    [snapshot, paneStatus, now],
   )
   useEffect(() => {
     if (!ticking) return

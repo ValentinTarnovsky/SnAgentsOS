@@ -169,6 +169,10 @@ app.whenReady().then(async()=>{
  items=await js("smoke.menu('pa-edit')");ok(items.some(i=>i.label==='Marcar leído'&&i.disabled)&&items.some(i=>i.label==='Silenciar hasta que cambie'),'a working pane has Marcar leído disabled',items);
  await js("smoke.pick('Marcar leído')");await js("smoke.pick('Silenciar hasta que cambie')");
  c=await js('smoke.calls()');ok(c.markRead.join()==='pa-done'&&q(c.mute)===q([['pa-done',false],['pa-edit',true]]),'the menu calls markRead and mute with the pane id',c);
+ ok(!items.some(i=>i.label==='Ignorar este turno'),'a pane with no silence has no Ignorar este turno item',items);
+ // The silence ack is in the pane menu too (the header chip can shrink to its icon).
+ items=await js("smoke.menu('pa-quiet')");ok(items.some(i=>i.label==='Ignorar este turno'&&!i.disabled),'a silent pane offers Ignorar este turno in its menu',items);
+ await js("smoke.pick('Ignorar este turno')");c=await js('smoke.calls()');ok(c.silenceAck.join()==='pa-quiet,pa-quiet','the menu item calls status.silenceAck with the pane, like the chip button',c);
  items=await js("smoke.menu('pa-bare')");ok(!items.some(i=>i.label==='Marcar leído'||i.label.startsWith('Silenciar')),'a bare status has no agent menu items',items);await js('smoke.closeMenu()');
  ok((await has('[data-pane-cell=pa-done] [data-pane-muted]'))&&!(await has('[data-pane-cell=pa-edit] [data-pane-muted]')),'a muted pane shows the muted mark');
  const bare=await js("(()=>{const c=document.querySelector('[data-pane-cell=pa-bare]'),r=document.querySelector('[data-agent-row=pa-bare]');return{dot:!!c.querySelector('[data-status-dot]'),needs:c.querySelector('[data-needs-chip]')?.textContent,other:c.querySelectorAll('[data-failure-chip],[data-silence-chip],[data-context-chip],[data-pane-doing],[data-pane-muted]').length,row:r?.dataset.agentState,glyph:!!r?.querySelector('[data-glyph]'),rowNeeds:!!r?.querySelector('[data-needs-chip]')}})()");
@@ -208,7 +212,16 @@ app.whenReady().then(async()=>{
  const narrow=(await js('smoke.headers()')).filter(h=>h.id!=='pa-edit');
  ok(narrow.length===6&&narrow.every(h=>h.width<=225&&h.over<=1&&h.close),'a header too narrow for the title floor truncates the title, never pushes its buttons out',narrow);
  await js("document.querySelectorAll('[data-pane-cell]').forEach(c=>{c.style.width=''})");await wait(150);
- if(failures.length)throw new Error(failures.join('\\n'));console.log('PASS: six sidebar lights and agent rows expanded/collapsed, folded usage list, centered rail phone, rail dots beside the icon, dot tooltip under 300 ms, settings at 100/125/150%, light/dark, '+a6+' A6 status surface checks (doing now, chips, short header chips, readable pane titles at 100/125%, buttons kept in a narrow pane, pane menu, bare needs, workspace usage); screenshots '+__dirname);w.destroy();app.quit();
+ // A muted request still open: main sends it with attention false, which is not an answer. It keeps the
+ // action look, never says the tool that waits for approval runs, and leaves Te esperan and Trabajando.
+ await js("smoke.patch('pa-edit',{state:'action',reason:'permission',attention:false,muted:true,pendingCount:1,pending:[{id:'r1',kind:'permission',toolName:'Bash',summary:'npm test'}],activity:'Bash: npm test',toolFamily:'run',detail:{kind:'permission',text:'Bash: npm test'}})");await wait(250);
+ const mutedAsk=await js("(()=>{const c=document.querySelector('[data-pane-cell=pa-edit]'),r=document.querySelector('[data-agent-row=pa-edit]');return{doing:!!c.querySelector('[data-pane-doing]'),dot:c.querySelector('[data-status-dot]')?.dataset.statusDot,muted:!!c.querySelector('[data-pane-muted]'),row:r?.dataset.agentState,phrase:r?.querySelector('[data-agent-phrase]')?.textContent||''}})()");
+ ok(!mutedAsk.doing&&mutedAsk.dot==='action'&&mutedAsk.muted&&mutedAsk.row==='action'&&!mutedAsk.phrase.includes('Ejecutando'),'a muted open request keeps the action dot and row and says nothing runs',mutedAsk);
+ await js('smoke.board(true)');await wait(250);
+ s=await js("(()=>{const e=document.querySelector('[data-board-card=pa-edit]');return e?{col:e.closest('[data-board-column]')?.dataset.boardColumn,state:e.dataset.boardState,detail:e.querySelector('[data-board-detail]')?.textContent||''}:null})()");
+ ok(s&&s.col==='idle'&&s.state==='action'&&!s.detail.includes('Ejecutando'),'its board card goes with the rest (not Te esperan nor Trabajando) with the action glyph',s);
+ await js('smoke.board(false)');await wait(200);
+ if(failures.length)throw new Error(failures.join('\\n'));console.log('PASS: six sidebar lights and agent rows expanded/collapsed, folded usage list, centered rail phone, rail dots beside the icon, dot tooltip under 300 ms, settings at 100/125/150%, light/dark, '+a6+' A6 status surface checks (doing now, chips, short header chips, readable pane titles at 100/125%, buttons kept in a narrow pane, pane menu with the silence ack, bare needs, workspace usage, a muted open request); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

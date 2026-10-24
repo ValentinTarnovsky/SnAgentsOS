@@ -50,6 +50,8 @@ export interface CodexTokenBreakdown {
  * App 2.7.0 (A3; the A4 ledger and context indicator build on it): the root
  * thread's token usage. `total` is cumulative per thread, `last` the latest
  * model call; `modelContextWindow` is null when the CLI does not know it.
+ * `inTurn` is false for a usage sent with no turn of the root thread running
+ * (the restored one a resume replays): `last` is then no new call.
  */
 export interface CodexTokenUsage {
   threadId: string
@@ -57,6 +59,7 @@ export interface CodexTokenUsage {
   total: CodexTokenBreakdown
   last: CodexTokenBreakdown
   modelContextWindow: number | null
+  inTurn: boolean
 }
 
 /** A count from the wire: a finite non-negative number, or undefined. */
@@ -86,15 +89,15 @@ function tokenBreakdown(v: unknown): CodexTokenBreakdown | null {
   return out
 }
 
-/** `thread/tokenUsage/updated` params as a CodexTokenUsage, or null when they are not valid. */
-export function codexTokenUsage(params: any): CodexTokenUsage | null {
+/** `thread/tokenUsage/updated` params as a CodexTokenUsage, or null when they are not valid. `inTurn`: a turn of the thread is running. */
+export function codexTokenUsage(params: any, inTurn: boolean): CodexTokenUsage | null {
   if (typeof params?.threadId !== 'string' || !params.threadId) return null
   const usage = params.tokenUsage
   const total = tokenBreakdown(usage?.total)
   const last = tokenBreakdown(usage?.last)
   if (!total || !last) return null
   const window = tokenCount(usage.modelContextWindow)
-  const out: CodexTokenUsage = { threadId: params.threadId, total, last, modelContextWindow: window ? window : null }
+  const out: CodexTokenUsage = { threadId: params.threadId, total, last, modelContextWindow: window ? window : null, inTurn }
   if (typeof params.turnId === 'string' && params.turnId && params.turnId.length <= ITEM_ID_MAX) out.turnId = params.turnId
   return out
 }
@@ -349,8 +352,9 @@ export class CodexProtocol {
           break
         case 'thread/closed': this.send('unknown'); break
         // App 2.7.0 (A3): ThreadTokenUsageUpdatedNotification, validated, for the ledger (A4).
+        // Outside a running turn (a resume replaying the restored usage) the ledger counts none of it.
         case 'thread/tokenUsage/updated': {
-          const usage = codexTokenUsage(p)
+          const usage = codexTokenUsage(p, this.active)
           if (usage) this.onUsage(usage)
           break
         }

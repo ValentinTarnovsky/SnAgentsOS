@@ -241,7 +241,7 @@ async function flightChecks() {
   await h.done()
   check(h.last().usage.inputTokens === 7, `so the next Claude session starts from zero (got ${h.last().usage.inputTokens})`)
   const cx = { totalTokens: 11, inputTokens: 10, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 1, reasoningOutputTokens: 0 }
-  h.ledger.codexUsage('pane', 'pty-cx', { threadId: 'T1', turnId: 't', total: cx, last: cx, modelContextWindow: 1000 })
+  h.ledger.codexUsage('pane', 'pty-cx', { threadId: 'T1', turnId: 't', total: cx, last: cx, modelContextWindow: 1000, inTurn: true })
   check(h.ledger.codex.has('pane') && !h.ledger.claude.has('pane'), 'a Codex usage takes the console from the Claude ledger')
   h.ledger.onStatus({ paneId: 'pane', state: 'working', precise: true, notify: false, provider: 'claude' })
   check(!h.ledger.codex.has('pane'), 'and a Claude status forgets the Codex one')
@@ -312,8 +312,8 @@ async function contextChecks() {
 function codexChecks() {
   const h = harness({ model: 'gpt-6-luna' })
   const b = (input, cached, output) => ({ totalTokens: input + output, inputTokens: input, cachedInputTokens: cached, cacheWriteInputTokens: 0, outputTokens: output, reasoningOutputTokens: 0 })
-  const usage = (threadId, total, last, window = 258400) => ({ threadId, turnId: 't', total, last, modelContextWindow: window })
-  // A resumed thread (S4 fixture totals 19731 -> 43860 -> 73235): the first sight is total - last.
+  const usage = (threadId, total, last, window = 258400, inTurn = true) => ({ threadId, turnId: 't', total, last, modelContextWindow: window, inTurn })
+  // A resumed thread (S4 fixture totals 19731 -> 43860 -> 73235): the first sight inside a turn is total - last.
   h.ledger.codexUsage('cx', 'pty-1', usage('T1', b(43860, 19584, 10), b(24129, 19584, 5)))
   let out = h.last()
   check(out.paneId === 'cx' && out.usage.inputTokens === 24129 - 19584 && out.usage.cacheReadTokens === 19584 && out.usage.outputTokens === 5, `a resumed thread counts from its baseline (total - last at first sight) (got ${JSON.stringify(out.usage)})`)
@@ -332,6 +332,13 @@ function codexChecks() {
   // A new pty is a new process: it starts over.
   h.ledger.codexUsage('cx', 'pty-2', usage('T3', b(100, 0, 1), b(100, 0, 1)))
   check(h.last().usage.inputTokens === 100 && h.last().usage.outputTokens === 1, 'a new pty of the pane starts its own ledger')
+  // A resume replays the restored usage with no turn running: its whole total is the baseline, only the next real call counts.
+  h.ledger.codexUsage('cx', 'pty-3', usage('T4', b(150000, 140000, 900), b(60000, 58000, 300), 258400, false))
+  check(h.last().usage === null && h.last().context.exact === true && h.last().context.used === 60300, `a resume replay outside a turn counts nothing and still publishes the exact context (got ${JSON.stringify(h.last())})`)
+  h.ledger.codexUsage('cx', 'pty-3', usage('T4', b(211000, 198000, 1250), b(61000, 58000, 350)))
+  check(h.last().usage.inputTokens === 61000 - 58000 && h.last().usage.cacheReadTokens === 58000 && h.last().usage.outputTokens === 350, `the first real call after the replay counts only that call (got ${JSON.stringify(h.last().usage)})`)
+  h.ledger.codexUsage('cx', 'pty-3', usage('T4', b(211000, 198000, 1250), b(61000, 58000, 350), 258400, false))
+  check(h.last().usage.inputTokens === 3000 && h.last().usage.outputTokens === 350, 'a later usage outside a turn of a thread already seen keeps its baseline')
   // Codex never reads a file.
   check(h.reads.length === 0, 'a Codex usage update reads no file')
   // rateCard: an empty card prices nothing; a row prices input (cached apart) and output.

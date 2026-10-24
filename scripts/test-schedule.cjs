@@ -5,6 +5,11 @@
 // afterRun/withEnabled, and the renderer ticker end to end with a fake pty
 // bridge: submit, wait clock, skipped_busy, agent_not_running, missed, the
 // partial mount of an unvisited workspace, "Run now" and the pending timeout.
+// App 2.7.0 (A10): the cron rule in nextDue (DST included), cronRuleError,
+// schedule ids, and several schedules in one console run on their own (one
+// prompt at a time per console, keyed paneId#scheduleId). The next-run label
+// (formatRunWhen, desktop and phone): weekday and time within 6 calendar
+// days, with day and month further away, plus the year in another year.
 // Same esbuild + vm harness as test-status.cjs.
 //
 // The DST cases need a zone with DST: the TZ is fixed before any Date use.
@@ -171,7 +176,45 @@ function historyChecks() {
   for (let i = 0; i < 25; i++) hist = S.pushHistory(hist, run(1000 + i, i % 3 === 0 ? { status: 'failed', reason: 'agent_not_running' } : {}))
   const written = { ...S.afterRun({ ...daily, history: hist }, run(now, { scheduledFor: daily.dueAt }), now) }
   const cfg = parseConfig({ version: 13, workspaces: [{ id: 'w', name: 'W', cwd: '', panes: [{ id: 'p', type: 'claude', title: 'C', color: '#fff', icon: 'claude', schedule: written }] }], presets: [], settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false } })
-  check(isDeep(cfg.workspaces[0].panes[0].schedule, written), 'a schedule written by afterRun round-trips through the v13 schema')
+  check(isDeep(cfg.workspaces[0].panes[0].schedules, [{ id: 's1', ...written }]) && !('schedule' in cfg.workspaces[0].panes[0]), 'a schedule written by afterRun round-trips through the v13 schema (schema 19: as schedules[0], id s1)')
+  const v19 = parseConfig({ ...cfg, workspaces: [{ ...cfg.workspaces[0], panes: [{ ...cfg.workspaces[0].panes[0], schedules: [{ id: 's1', ...written }, { id: 's2', ...written, recurrence: { kind: 'cron', expr: '0 9 * * 1-5' } }] }] }] })
+  check(isDeep(v19.workspaces[0].panes[0].schedules[1], { id: 's2', ...written, recurrence: { kind: 'cron', expr: '0 9 * * 1-5' } }), 'a cron schedule written by afterRun round-trips through the schema 19 schedules')
+}
+
+// App 2.7.0 (A10): the cron rule in nextDue (delegates to nextCron, before
+// parseTime), the storable-cron test shared by the schema and the dialog, and
+// the per-console schedule ids.
+function cronChecks() {
+  const fri10 = local(2026, 10, 16, 10, 0)
+  const cron = (expr, from, time = '09:00') => S.nextDue({ time, recurrence: { kind: 'cron', expr } }, from)
+  check(cron('0 9 * * 1-5', fri10) === local(2026, 10, 19, 9, 0), 'cron "0 9 * * 1-5" on a Friday at 10:00 runs Monday 09:00')
+  check(cron('30 10 * * *', fri10) === local(2026, 10, 16, 10, 30) && cron('0 10 * * *', fri10) === local(2026, 10, 17, 10, 0), 'cron is strictly after from: later today, or tomorrow at the same minute')
+  check(cron('0 9 * * 1-5', fri10, 'x') === local(2026, 10, 19, 9, 0) && cron('0 9 * * 1-5', fri10, '23:59') === local(2026, 10, 19, 9, 0), "a cron schedule's time is not part of its rule (a malformed one does not fall back to +1 h)")
+  check(cron('0 0 31 2 *', fri10) === S.SCHEDULE_NEVER && cron('basura', fri10) === S.SCHEDULE_NEVER, 'a rule with no next run (or that does not parse) never comes due, it never fires every hour')
+  // DST in America/New_York: 2026-03-08 02:00 -> 03:00 and 2026-11-01 02:00 -> 01:00.
+  const gap = cron('30 2 * * *', local(2026, 3, 8, 1, 0))
+  check(hm(gap) === '0 03:30', 'cron: a time inside the spring-forward gap moves forward with the clock (02:30 runs at 03:30), like a daily time')
+  check(hm(cron('30 2 * * *', gap)) === '1 02:30', 'cron: the next day it is 02:30 again')
+  const nine = cron('0 9 * * *', local(2026, 3, 7, 10, 0))
+  check(hm(nine) === '0 09:00' && nine - local(2026, 3, 7, 9, 0) === 23 * HOUR, 'cron 09:00 across spring forward stays at 09:00 local (a 23 h day)')
+  const fb1 = cron('30 1 * * *', local(2026, 11, 1, 0, 0))
+  const fb2 = cron('30 1 * * *', fb1)
+  check(new Date(fb1).getHours() === 1 && fb2 - fb1 > 23 * HOUR && new Date(fb2).getDate() === 2, 'cron: a repeated fall-back hour runs once (the first 01:30), the next run is the next day')
+  check(cron('0 9 * * *', local(2026, 10, 31, 10, 0)) - local(2026, 10, 31, 9, 0) === 25 * HOUR, 'cron 09:00 across fall back stays at 09:00 local (a 25 h day)')
+  // afterRun / withEnabled re-arm a cron schedule through nextDue.
+  const daily = { id: 's2', time: '', prompt: 'p', dueAt: local(2026, 10, 16, 9, 0), recurrence: { kind: 'cron', expr: '0 9 * * 1-5' } }
+  const after = S.afterRun(daily, { at: fri10, scheduledFor: daily.dueAt, trigger: 'scheduled', status: 'sent' }, fri10)
+  check(after.dueAt === local(2026, 10, 19, 9, 0) && after.enabled === undefined && after.id === 's2', 'a cron run moves dueAt to the next run and keeps the schedule active and its id')
+  check(S.withEnabled({ ...daily, enabled: false }, true, fri10).dueAt === local(2026, 10, 19, 9, 0), 'resuming a past cron schedule re-arms it at its next run')
+  // cronRuleError: what the schema stores and the dialog accepts.
+  check(S.cronRuleError('0 9 * * 1-5', fri10) === null && S.cronRuleError('*/15 * * * *', fri10) === null && S.cronRuleError('0 0 29 2 *', fri10) === null, 'storable: weekdays 09:00, every 15 minutes, a leap day')
+  check(S.cronRuleError('0 9 * *', fri10) === 'invalid' && S.cronRuleError('61 9 * * *', fri10) === 'invalid' && S.cronRuleError('', fri10) === 'invalid', 'invalid: a missing field, a value out of range, empty')
+  check(S.cronRuleError('*/5 * * * *', fri10) === 'interval' && S.cronRuleError('0,10 9 * * *', fri10) === 'interval', 'interval: runs less than 15 minutes apart')
+  check(S.cronRuleError('0 0 31 2 *', fri10) === 'never' && S.cronRuleError('0 0 30 2 *', fri10) === 'never', 'never: an impossible date')
+  // Ids within a console.
+  check(S.PANE_SCHEDULES_MAX === 8 && S.SCHEDULE_ID_RE.test('s1') && S.SCHEDULE_ID_RE.test('s999') && !S.SCHEDULE_ID_RE.test('s1000') && !S.SCHEDULE_ID_RE.test('x1') && !S.SCHEDULE_ID_RE.test('s'), 'ids are s1..s999, 8 per console')
+  check(S.nextScheduleId(undefined) === 's1' && S.nextScheduleId([{ id: 's1' }, { id: 's3' }]) === 's2' && S.nextScheduleId(Array.from({ length: 8 }, (_, i) => ({ id: `s${i + 10}` }))) === null, 'the next id is the lowest free one; none once the console holds 8')
+  check(S.scheduleKey('pane-1', 's2') === 'pane-1#s2' && S.paneSchedules({}).length === 0, 'runtime key paneId#scheduleId; a pane without schedules has none')
 }
 
 async function tickerChecks() {
@@ -187,7 +230,7 @@ async function tickerChecks() {
   const r = loadRenderer(`
     export { useAppStore } from './store'
     export { registerPty, unregisterPty } from './ptyRegistry'
-    export { schedulerTick, runScheduleNow, cancelScheduleRun, setScheduleEnabled, handleSchedulePromptResult, useScheduleRuntime, isManualRunPending, isAgentKind, PENDING_DELIVERY_TIMEOUT_MS } from './usePaneScheduler'
+    export { schedulerTick, runScheduleNow, cancelScheduleRun, setScheduleEnabled, handleSchedulePromptResult, useScheduleRuntime, isManualRunPending, isAgentKind, PENDING_DELIVERY_TIMEOUT_MS, SCHEDULE_SETTLE_MS } from './usePaneScheduler'
     export { scheduleNextLabel, recurrenceLabel, formatWhen, weekdayName } from './scheduleFormat'
     export { translate } from '@/i18n'
   `, { window: { snApi }, Notification: FakeNotification, document: { hasFocus: () => true } })
@@ -205,11 +248,11 @@ async function tickerChecks() {
     activeWorkspaceId: 'w1',
   })
   const st = () => A.getState()
-  const schedOf = (id) => st().workspaces.flatMap((w) => w.panes).find((p) => p.id === id).schedule
+  const schedOf = (id, sid = 's1') => (st().workspaces.flatMap((w) => w.panes).find((p) => p.id === id).schedules || []).find((s) => s.id === sid)
   const wsOf = (id) => st().workspaces.find((w) => w.panes.some((p) => p.id === id)).id
-  const setSched = (id, s) => st().setPaneSchedule(wsOf(id), id, s)
+  const setSched = (id, s, sid = 's1') => st().setPaneSchedule(wsOf(id), id, sid, s)
   const status = (id, state, precise = true) => A.setState((s) => ({ paneStatus: { ...s.paneStatus, [id]: state ? { state, precise } : undefined } }))
-  const lastRun = (id) => { const h = schedOf(id).history || []; return h[h.length - 1] }
+  const lastRun = (id, sid = 's1') => { const h = schedOf(id, sid).history || []; return h[h.length - 1] }
   check(r.isAgentKind({ type: 'custom', presetId: 'preset-claude' }, [preset]) && !r.isAgentKind({ type: 'shell' }, [preset]) && r.isAgentKind({ type: 'codex' }, []), 'agent kind by type or preset')
   check(st().mountedWorkspaces.w1 === 'full' && st().mountedWorkspaces.w2 === undefined, 'fixture: only the active workspace is mounted')
 
@@ -262,6 +305,16 @@ async function tickerChecks() {
   r.schedulerTick(now + 30 * MIN)
   check(submits.length === 0 && lastRun('p2').status === 'failed' && lastRun('p2').reason === 'agent_not_running', 'after 30 min without an agent: failed with agent_not_running')
 
+  // App 2.7.0 (A3): a bare status (only a `snaos needs`, no agent track: state idle, approximate) is no agent state.
+  now = Date.now()
+  setSched('p2', { time: '10:00', prompt: 'p', dueAt: now - 1000 })
+  A.setState((s) => ({ paneStatus: { ...s.paneStatus, p2: { state: 'idle', precise: false, bare: true, attention: true, pendingCount: 0, stateSince: now, updatedAt: now, needs: { text: 'review the diff', at: now } } } }))
+  r.schedulerTick(now)
+  check(submits.length === 0 && schedOf('p2').waitingSince === now, 'a bare needs status on an agent pane is no agent state: the run waits, nothing is typed with Enter')
+  r.schedulerTick(now + 30 * MIN)
+  check(submits.length === 0 && lastRun('p2').status === 'failed' && lastRun('p2').reason === 'agent_not_running', 'and fails with agent_not_running after the max wait, like no status at all')
+  status('p2', null)
+
   // Busy past the max wait -> skipped_busy, hourly moves on.
   now = Date.now()
   setSched('p2', { time: '00:05', prompt: 'p', dueAt: now - 1000, recurrence: { kind: 'hourly' } })
@@ -290,30 +343,30 @@ async function tickerChecks() {
 
   // Run now: paused one-shot, edited text, dueAt untouched.
   const pausedDue = schedOf('p1').dueAt
-  check(r.runScheduleNow('p1', '  probar esto  ') === true, 'run now accepts a scheduled pane')
+  check(r.runScheduleNow('p1', 's1', '  probar esto  ') === true, 'run now accepts a scheduled pane')
   check(submits.length === 1 && submits[0].text === 'probar esto', 'run now sends the dialog text right away to a free pane')
   await flush()
   check(lastRun('p1').trigger === 'manual' && lastRun('p1').status === 'sent' && schedOf('p1').dueAt === pausedDue && schedOf('p1').enabled === false, 'run now logs a manual run and never moves dueAt or the switch')
-  check(!r.isManualRunPending(r.useScheduleRuntime.getState(), 'p1'), 'the manual request is done')
+  check(!r.isManualRunPending(r.useScheduleRuntime.getState(), 'p1', 's1'), 'the manual request is done')
   // Run now on a busy agent waits ("Waiting..."), then fires once free.
   submits.length = 0
   setSched('p2', { time: '10:00', prompt: 'guardado', dueAt: Date.now() + 5 * HOUR })
   status('p2', 'working')
-  r.runScheduleNow('p2')
-  check(submits.length === 0 && r.isManualRunPending(r.useScheduleRuntime.getState(), 'p2'), 'run now respects "wait for the agent to be free"')
+  r.runScheduleNow('p2', 's1')
+  check(submits.length === 0 && r.isManualRunPending(r.useScheduleRuntime.getState(), 'p2', 's1'), 'run now respects "wait for the agent to be free"')
   status('p2', 'idle')
   r.schedulerTick(Date.now())
   check(submits.length === 1 && submits[0].text === 'guardado', 'once free it sends the saved prompt')
   await flush()
-  check(lastRun('p2').trigger === 'manual' && schedOf('p2').dueAt > Date.now() + 4 * HOUR && !r.isManualRunPending(r.useScheduleRuntime.getState(), 'p2'), 'and the scheduled run stays where it was')
+  check(lastRun('p2').trigger === 'manual' && schedOf('p2').dueAt > Date.now() + 4 * HOUR && !r.isManualRunPending(r.useScheduleRuntime.getState(), 'p2', 's1'), 'and the scheduled run stays where it was')
   status('p2', 'working')
-  r.runScheduleNow('p2')
-  r.cancelScheduleRun('p2')
+  r.runScheduleNow('p2', 's1')
+  r.cancelScheduleRun('p2', 's1')
   status('p2', 'idle')
   submits.length = 0
   r.schedulerTick(Date.now())
   check(submits.length === 0, 'a cancelled run now sends nothing')
-  check(r.runScheduleNow('q3') === false, 'run now on a pane without a schedule is refused')
+  check(r.runScheduleNow('q3', 's1') === false, 'run now on a pane without a schedule is refused')
 
   // A run now waiting on a busy agent while the scheduled occurrence comes due:
   // the occurrence starts its own wait clock and is served afterwards, not missed.
@@ -322,7 +375,7 @@ async function tickerChecks() {
   st().updateSettings({ automation: { ...st().settings.automation, scheduleGraceMin: 5 } })
   setSched('p2', { time: '10:00', prompt: 'programado', dueAt: now + 60_000, recurrence: { kind: 'daily' } })
   status('p2', 'working')
-  r.runScheduleNow('p2', 'manual')
+  r.runScheduleNow('p2', 's1', 'manual')
   r.schedulerTick(now + 61_000)
   check(schedOf('p2').waitingSince === now + 61_000 && submits.length === 0, 'the due occurrence starts waiting while run now holds the pane')
   status('p2', 'idle')
@@ -350,7 +403,7 @@ async function tickerChecks() {
   r.schedulerTick(Date.now())
   await flush()
   check(submits.length === 1 && submits[0].userGate === true, 'fixture: the run went to main with userGate')
-  check(lastRun('p1').status === 'skipped_busy' && !('reason' in lastRun('p1')) && schedOf('p1').dueAt > Date.now() && !r.useScheduleRuntime.getState().inflight.p1, 'awaiting_user (nothing typed): skipped_busy, the daily schedule moves on and the run ends')
+  check(lastRun('p1').status === 'skipped_busy' && !('reason' in lastRun('p1')) && schedOf('p1').dueAt > Date.now() && !r.useScheduleRuntime.getState().inflight['p1#s1'], 'awaiting_user (nothing typed): skipped_busy, the daily schedule moves on and the run ends')
   submitResult = { ok: false, error: 'enter_held' }
   setSched('p1', { ...schedOf('p1'), dueAt: Date.now() - 1000 })
   r.schedulerTick(Date.now())
@@ -360,10 +413,10 @@ async function tickerChecks() {
   // "Run now" (desktop dialog and the phone's scheduleRun ctl) goes through the same gated submit.
   submits.length = 0
   submitResult = { ok: false, error: 'awaiting_user' }
-  r.runScheduleNow('p1', 'ahora')
+  r.runScheduleNow('p1', 's1', 'ahora')
   await flush()
   check(submits.length === 1 && submits[0].text === 'ahora' && submits[0].userGate === true && submits[0].enter === true, 'run now submits with userGate too')
-  check(lastRun('p1').trigger === 'manual' && lastRun('p1').status === 'skipped_busy' && !r.isManualRunPending(r.useScheduleRuntime.getState(), 'p1'), 'a run now refused by main is logged skipped_busy and no longer pending')
+  check(lastRun('p1').trigger === 'manual' && lastRun('p1').status === 'skipped_busy' && !r.isManualRunPending(r.useScheduleRuntime.getState(), 'p1', 's1'), 'a run now refused by main is logged skipped_busy and no longer pending')
   submitResult = { ok: true }
 
   // Partial mount (E8-FR-30): an unvisited 4-console workspace starts only the due console.
@@ -375,11 +428,11 @@ async function tickerChecks() {
   check(JSON.stringify(st().mountedWorkspaces.w2) === JSON.stringify(['q1']), 'only the due console mounts; the other three keep the placeholder')
   const pend = st().pendingPrompts.q1
   check(pend && pend.text === 'revisa el diff' && pend.enter === true && pend.source === 'schedule', 'the agent console gets the prompt as its initial prompt (argv or the precise-ready gate)')
-  check(submits.length === 0 && r.useScheduleRuntime.getState().inflight.q1.via === 'pending', 'nothing is typed before the agent is ready')
+  check(submits.length === 0 && r.useScheduleRuntime.getState().inflight['q1#s1'].via === 'pending', 'nothing is typed before the agent is ready')
   r.schedulerTick(now + 1000)
   check(st().pendingPrompts.q1 === pend, 'the prompt is handed once')
   r.handleSchedulePromptResult({ paneId: 'q1', result: 'sent_argv' }, now + 5000)
-  check(lastRun('q1').status === 'sent' && schedOf('q1').dueAt > now && !r.useScheduleRuntime.getState().inflight.q1, 'the spawn outcome logs the run as sent')
+  check(lastRun('q1').status === 'sent' && schedOf('q1').dueAt > now && !r.useScheduleRuntime.getState().inflight['q1#s1'], 'the spawn outcome logs the run as sent')
   r.handleSchedulePromptResult({ paneId: 'q1', result: 'not_delivered' }, now + 6000)
   check(schedOf('q1').history.length === 1, 'an outcome for a run that is not pending is ignored')
   // Gate timeout without a precise signal: inserted without Enter.
@@ -395,7 +448,7 @@ async function tickerChecks() {
   st().takePendingPrompt('q1')
   A.setState((s) => ({ mountedWorkspaces: { ...s.mountedWorkspaces, w2: undefined } }))
   r.schedulerTick(now)
-  check(st().pendingPrompts.q1 && r.useScheduleRuntime.getState().inflight.q1, 'handed to a spawn again')
+  check(st().pendingPrompts.q1 && r.useScheduleRuntime.getState().inflight['q1#s1'], 'handed to a spawn again')
   r.schedulerTick(now + r.PENDING_DELIVERY_TIMEOUT_MS + 1)
   check(lastRun('q1').status === 'failed' && lastRun('q1').reason === 'not_delivered' && !st().pendingPrompts.q1, 'no spawn outcome in time: failed not_delivered and the pending prompt is withdrawn')
   // A shell console in the unvisited workspace mounts alone and is written once its pty exists.
@@ -414,9 +467,9 @@ async function tickerChecks() {
   // Active switch: resuming a fired one-shot re-arms it.
   const fired = schedOf('q2')
   check(fired.enabled === false, 'fixture: the one-shot fired')
-  r.setScheduleEnabled('q2', true)
+  r.setScheduleEnabled('q2', 's1', true)
   check(schedOf('q2').enabled === true && schedOf('q2').dueAt > Date.now(), 'switching it back on schedules the next occurrence')
-  r.setScheduleEnabled('q2', false)
+  r.setScheduleEnabled('q2', 's1', false)
   check(schedOf('q2').enabled === false && schedOf('q2').history.length === 1, 'pausing keeps the history')
 
   // Desktop notification per run (opt-in).
@@ -425,15 +478,135 @@ async function tickerChecks() {
   r.schedulerTick(Date.now())
   await flush()
   check(notifications.length === 1 && notifications[0].title === 'Automatización: T-p1' && notifications[0].body === 'Enviado', 'scheduleNotify shows one desktop notification per run')
+  st().updateSettings({ automation: { ...st().settings.automation, scheduleNotify: false } })
 
-  // Labels (header tooltip, table).
+  // App 2.7.0 (A10): several schedules in one console, each run on its own.
+  const listOf = (id) => st().workspaces.flatMap((w) => w.panes).find((p) => p.id === id).schedules
+  const setList = (id, list) => st().setPaneSchedules(wsOf(id), id, list)
+  submits.length = 0
+  now = Date.now()
+  setList('p2', [
+    { id: 's1', time: '09:00', prompt: 'uno', dueAt: now - 1000, recurrence: { kind: 'daily' } },
+    { id: 's2', time: '09:00', prompt: 'dos', dueAt: now - 1000, recurrence: { kind: 'daily' } },
+  ])
+  status('p2', 'idle')
+  r.schedulerTick(now)
+  check(submits.length === 1 && submits[0].text === 'uno' && submits[0].paneId === 'p2', 'two schedules due at once: one prompt at a time per console, in stored order')
+  check(schedOf('p2', 's2').waitingSince === now && r.useScheduleRuntime.getState().inflight['p2#s1'] && !r.useScheduleRuntime.getState().inflight['p2#s2'], 'the other one is held: it starts its own wait clock (runtime keyed paneId#scheduleId)')
+  await flush()
+  check(lastRun('p2', 's1').status === 'sent' && schedOf('p2', 's1').dueAt > now && schedOf('p2', 's1').history.length === 1 && !(schedOf('p2', 's2').history || []).length, 'the run is logged on its own schedule only')
+  r.schedulerTick(now + 1000)
+  check(submits.length === 1, 'the other schedule holds while the agent status catches up with the prompt that just went in (settle)')
+  status('p2', 'working')
+  r.schedulerTick(now + r.SCHEDULE_SETTLE_MS + 1000)
+  check(submits.length === 1 && schedOf('p2', 's2').waitingSince === now, 'then it follows its own rule: the agent is working, it waits (no Enter is ever added)')
+  status('p2', 'idle')
+  r.schedulerTick(now + r.SCHEDULE_SETTLE_MS + 2000)
+  check(submits.length === 2 && submits[1].text === 'dos' && submits[1].enter === true && submits[1].userGate === true, 'once free the second schedule sends its own prompt through the same gated submit')
+  await flush()
+  check(lastRun('p2', 's2').status === 'sent' && !('waitingSince' in schedOf('p2', 's2')) && schedOf('p2', 's1').history.length === 1, 'each schedule keeps its own history and wait clock')
+  // Run now, pause and delete act on one schedule.
+  submits.length = 0
+  setList('p2', listOf('p2').map((s) => ({ ...s, dueAt: Date.now() + 5 * HOUR })))
+  check(r.runScheduleNow('p2', 's2') === true && submits.length === 1 && submits[0].text === 'dos', 'run now of the second schedule sends its saved prompt')
+  check(r.isManualRunPending(r.useScheduleRuntime.getState(), 'p2', 's2') && !r.isManualRunPending(r.useScheduleRuntime.getState(), 'p2', 's1'), 'only that schedule shows its run now as pending')
+  await flush()
+  check(lastRun('p2', 's2').trigger === 'manual' && schedOf('p2', 's1').history.length === 1, 'the manual run is logged on that schedule only')
+  check(r.runScheduleNow('p2', 's9') === false, 'run now of an unknown schedule id is refused')
+  r.setScheduleEnabled('p2', 's1', false)
+  check(schedOf('p2', 's1').enabled === false && schedOf('p2', 's2').enabled === undefined, 'pausing one schedule leaves the other active')
+  setSched('p2', null, 's1')
+  check(listOf('p2').map((s) => s.id).join() === 's2', 'deleting one schedule keeps the rest')
+  setSched('p2', null, 's2')
+  check(!('schedules' in st().workspaces[0].panes.find((p) => p.id === 'p2')), 'deleting the last one drops the schedules field')
+  // The store setters keep the schema's bounds.
+  setList('p2', [...Array.from({ length: 9 }, (_, i) => ({ id: `s${i + 1}`, time: '09:00', prompt: `n${i}`, dueAt: Date.now() + HOUR })), { id: 's1', time: '09:00', prompt: 'dup', dueAt: 1 }])
+  check(listOf('p2').length === 8 && listOf('p2')[0].prompt === 'n0', 'setPaneSchedules keeps 8, the first of a repeated id')
+  setSched('p2', { time: '09:00', prompt: 'nueve', dueAt: 1 }, 's20')
+  check(listOf('p2').length === 8 && !listOf('p2').some((s) => s.id === 's20'), 'a ninth schedule is ignored')
+  setSched('p2', { time: '10:00', prompt: 'editado', dueAt: 1 }, 's3')
+  check(listOf('p2')[2].id === 's3' && listOf('p2')[2].prompt === 'editado', 'editing one keeps its place and its id')
+  setList('p2', [{ id: 'bad', time: '09:00', prompt: 'x', dueAt: 1 }])
+  check(!('schedules' in st().workspaces[0].panes.find((p) => p.id === 'p2')), 'a malformed id is dropped (an empty list drops the field)')
+  // A cron schedule fires through the same ticker and re-arms at its next run.
+  submits.length = 0
+  now = Date.now()
+  setSched('p1', { time: '', prompt: 'cron', dueAt: now - 1000, recurrence: { kind: 'cron', expr: '*/15 * * * *' } }, 's2')
+  setSched('p1', { ...schedOf('p1'), enabled: false })
+  r.schedulerTick(now)
+  check(submits.length === 1 && submits[0].text === 'cron', 'a due cron schedule fires')
+  await flush()
+  const nextCronRun = schedOf('p1', 's2').dueAt
+  check(lastRun('p1', 's2').status === 'sent' && nextCronRun > Date.now() && nextCronRun - Date.now() <= 15 * MIN && new Date(nextCronRun).getMinutes() % 15 === 0, 'and moves to its next run (the next quarter hour)')
+  setSched('p1', null, 's2')
+  // One pending-prompt slot per console: an unmounted agent console with two due schedules hands over one prompt at a time.
+  submits.length = 0
+  now = Date.now()
+  setList('q4', [
+    { id: 's1', time: '09:00', prompt: 'cuatro uno', dueAt: now - 1000 },
+    { id: 's2', time: '09:00', prompt: 'cuatro dos', dueAt: now - 1000 },
+  ])
+  r.schedulerTick(now)
+  check(st().pendingPrompts.q4 && st().pendingPrompts.q4.text === 'cuatro uno' && r.useScheduleRuntime.getState().inflight['q4#s1'].via === 'pending' && schedOf('q4', 's2').waitingSince === now, 'the first schedule takes the pending-prompt slot, the second waits')
+  st().takePendingPrompt('q4')
+  r.handleSchedulePromptResult({ paneId: 'q4', result: 'sent_argv' }, now + 3000)
+  check(lastRun('q4', 's1').status === 'sent' && !(schedOf('q4', 's2').history || []).length, 'the spawn outcome (it names only the console) logs the schedule that handed the prompt over')
+  r.registerPty('q4', 'pty-q4')
+  status('q4', 'idle')
+  r.schedulerTick(now + 3000 + r.SCHEDULE_SETTLE_MS + 1000)
+  check(submits.length === 1 && submits[0].ptyId === 'pty-q4' && submits[0].text === 'cuatro dos', 'then the second one is typed once the agent is up and free')
+  await flush()
+  check(lastRun('q4', 's2').status === 'sent' && schedOf('q4', 's1').enabled === false && schedOf('q4', 's2').enabled === false, 'both one-shots ran once and paused')
+
+  // Labels (header tooltip, table), as of Friday 2026-10-16 10:00.
+  const fri = local(2026, 10, 16, 10, 0)
   const t = (k, v) => r.translate('es', k, v)
-  const label = r.scheduleNextLabel({ time: '09:00', prompt: 'x', dueAt: local(2026, 10, 19, 9, 0), recurrence: { kind: 'weekdays' } }, t, 'es')
+  const label = r.scheduleNextLabel({ time: '09:00', prompt: 'x', dueAt: local(2026, 10, 19, 9, 0), recurrence: { kind: 'weekdays' } }, t, 'es', fri)
   check(label === 'Próxima: lun 09:00 (Lun-Vie)', 'tooltip: "Próxima: lun 09:00 (Lun-Vie)" ' + label)
   check(r.scheduleNextLabel({ time: '09:00', prompt: 'x', dueAt: 1, enabled: false }, t, 'es') === 'Pausada', 'paused tooltip says "Pausada"')
   check(r.recurrenceLabel({ time: '07:15', recurrence: { kind: 'hourly' } }, t, 'es') === 'Cada hora a los :15' && r.recurrenceLabel({ time: '09:00', recurrence: { kind: 'weekly', days: [3, 1] } }, t, 'es') === 'Semanal: lun, mié', 'hourly and weekly labels')
   const te = (k, v) => r.translate('en', k, v)
-  check(r.scheduleNextLabel({ time: '09:00', prompt: 'x', dueAt: local(2026, 10, 19, 9, 0), recurrence: { kind: 'daily' } }, te, 'en') === 'Next: Mon 09:00 (Daily)', 'English label')
+  check(r.scheduleNextLabel({ time: '09:00', prompt: 'x', dueAt: local(2026, 10, 19, 9, 0), recurrence: { kind: 'daily' } }, te, 'en', fri) === 'Next: Mon 09:00 (Daily)', 'English label')
+  check(r.scheduleNextLabel({ time: '', prompt: 'x', dueAt: local(2026, 10, 19, 9, 0), recurrence: { kind: 'cron', expr: ' 0 9  * * 1-5 ' } }, t, 'es', fri) === 'Próxima: lun 09:00 (Cron: 0 9 * * 1-5)' && r.recurrenceLabel({ time: '', recurrence: { kind: 'cron', expr: '*/15 * * * *' } }, te, 'en') === 'Cron: */15 * * * *', 'a cron rule shows its expression (spaces collapsed) in es and en')
+  // A cron run weeks or years away carries its date (it is not this week's Sunday).
+  const monthly = { time: '', prompt: 'x', recurrence: { kind: 'cron', expr: '0 9 1 * *' } }
+  monthly.dueAt = S.nextDue(monthly, fri)
+  check(r.scheduleNextLabel(monthly, t, 'es', fri) === 'Próxima: dom, 1 nov, 09:00 (Cron: 0 9 1 * *)' && r.scheduleNextLabel(monthly, te, 'en', fri) === 'Next: Sun, Nov 1, 09:00 (Cron: 0 9 1 * *)', 'a monthly cron tooltip names its day and month in es and en')
+  const leap = { time: '', prompt: 'x', recurrence: { kind: 'cron', expr: '0 0 29 2 *' } }
+  leap.dueAt = S.nextDue(leap, fri)
+  check(r.scheduleNextLabel(leap, t, 'es', fri) === 'Próxima: mar, 29 feb 2028, 00:00 (Cron: 0 0 29 2 *)' && r.formatWhen(leap.dueAt, 'en', fri) === 'Tue, Feb 29, 2028, 00:00', 'a leap-day cron run two years away also names the year')
+  check(r.scheduleNextLabel({ time: '09:00', prompt: 'x', dueAt: local(2026, 10, 21, 9, 0), recurrence: { kind: 'weekly', days: [3] } }, t, 'es', fri) === 'Próxima: mié 09:00 (Semanal: mié)', 'a weekly run within 6 days stays "mié 09:00"')
+}
+
+function runLabelChecks() {
+  // As of Friday 2026-10-16 10:00 (America/New_York).
+  const fri = local(2026, 10, 16, 10, 0)
+  const at = (expr) => S.nextDue({ time: '', recurrence: { kind: 'cron', expr } }, fri)
+  const monthly = at('0 9 1 * *')
+  check(monthly === local(2026, 11, 1, 9, 0) && S.runWhenStyle(monthly, fri) === 'date', 'fixture: "0 9 1 * *" next runs Sunday 2026-11-01, 16 days away')
+  check(S.formatRunWhen(monthly, 'es', fri) === 'dom, 1 nov, 09:00' && S.formatRunWhen(monthly, 'en', fri) === 'Sun, Nov 1, 09:00', 'a monthly run shows day and month (es and en), not "dom 09:00"')
+  const leap = at('0 0 29 2 *')
+  check(leap === local(2028, 2, 29, 0, 0) && S.runWhenStyle(leap, fri) === 'year', 'fixture: "0 0 29 2 *" next runs 2028-02-29')
+  check(S.formatRunWhen(leap, 'es', fri) === 'mar, 29 feb 2028, 00:00' && S.formatRunWhen(leap, 'en', fri) === 'Tue, Feb 29, 2028, 00:00', 'a leap-day run in another year also shows the year')
+  // Weekly rules: today and the next five days keep the short label, the sixth on gets the date.
+  const weekly = (days, time = '09:00') => S.nextDue({ time, recurrence: { kind: 'weekly', days } }, fri)
+  check(S.formatRunWhen(weekly([3]), 'es', fri) === 'mié 09:00' && S.formatRunWhen(weekly([3]), 'en', fri) === 'Wed 09:00', 'a weekly run 5 days ahead (Wednesday) stays short')
+  check(S.formatRunWhen(weekly([5], '11:00'), 'es', fri) === 'vie 11:00', 'a run later today stays short')
+  check(S.formatRunWhen(weekly([4]), 'es', fri) === 'jue, 22 oct, 09:00', 'a weekly run 6 days ahead (next Thursday) shows the date')
+  check(S.formatRunWhen(weekly([5]), 'es', fri) === 'vie, 23 oct, 09:00' && S.formatRunWhen(weekly([5]), 'en', fri) === 'Fri, Oct 23, 09:00', 'the same weekday a week ahead never reads as today')
+  check(S.formatRunWhen(local(2026, 10, 21, 23, 59), 'es', fri) === 'mié 23:59' && S.formatRunWhen(local(2026, 10, 22, 0, 0), 'es', fri) === 'jue, 22 oct, 00:00', 'the window is by calendar day: Wednesday 23:59 short, Thursday 00:00 dated')
+  check(S.formatRunWhen(local(2026, 10, 15, 9, 0), 'es', fri) === 'jue, 15 oct, 09:00', 'a run before today (an overdue wait) shows the date')
+  // Fall back (2026-11-01): five calendar days across a 25 h day stay short.
+  check(S.formatRunWhen(local(2026, 11, 2, 23, 30), 'es', local(2026, 10, 28, 0, 30)) === 'lun 23:30', 'five calendar days across fall back (6 x 24 h of real time) stay short')
+  // Another year: the year even a day or two ahead.
+  const dec30 = local(2026, 12, 30, 10, 0)
+  check(S.formatRunWhen(local(2026, 12, 31, 9, 0), 'es', dec30) === 'jue 09:00', 'tomorrow in the same year stays short')
+  check(S.formatRunWhen(local(2027, 1, 1, 9, 0), 'es', dec30) === 'vie, 1 ene 2027, 09:00' && S.formatRunWhen(local(2027, 1, 1, 9, 0), 'en', dec30) === 'Fri, Jan 1, 2027, 09:00', 'a run in the next year shows the year')
+  // The dialog's next 3 cron runs always carry the date, the year only when it is another.
+  check(S.formatRunDate(local(2026, 10, 19, 9, 0), 'es', fri) === 'lun, 19 oct, 09:00' && S.formatRunDate(local(2027, 1, 4, 9, 0), 'en', fri) === 'Mon, Jan 4, 2027, 09:00', 'formatRunDate dates even a run 3 days away')
+  // Built from code points so this file carries no literal dash.
+  const dashes = new RegExp('[-' + String.fromCharCode(0x2013, 0x2014) + ']')
+  check(S.RUN_WEEKDAY_DAYS === 6 && !dashes.test(S.formatRunWhen(leap, 'es', fri) + S.formatRunWhen(leap, 'en', fri) + S.formatRunWhen(monthly, 'es', fri)), 'no dashes in the labels')
 }
 
 async function main() {
@@ -441,8 +614,10 @@ async function main() {
   typingBlockedChecks()
   decideChecks()
   historyChecks()
+  cronChecks()
+  runLabelChecks()
   await tickerChecks()
-  console.log(`PASS: ${checks} schedule checks (nextDue with DST, decide table, history cap, afterRun, ticker: submit, wait, skipped_busy, agent_not_running, missed, partial mount, run now)`)
+  console.log(`PASS: ${checks} schedule checks (nextDue with DST and cron, decide table, history cap, afterRun, next-run labels with the date 6 or more days away, ticker: submit, wait, skipped_busy, agent_not_running, missed, partial mount, run now, several schedules per console)`)
 }
 main().catch((err) => {
   console.error(err)

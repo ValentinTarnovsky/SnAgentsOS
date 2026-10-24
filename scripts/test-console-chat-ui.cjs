@@ -16,8 +16,9 @@
 // for a console on its Chat reaches its composer and the draft outlives a switch
 // to the terminal; the remappable toggleConsoleChat (no default: Settings > Keys
 // says "Sin asignar", the palette shows no chip) toggles the focused agent
-// console with a recorded chord and does nothing with the lab off or on a shell,
-// letting the key through, but swallowed while the shared view is on top; the
+// console with a recorded chord and does nothing with the lab off, on a shell or
+// under a modal (the plan modal, a pane's schedule dialog), letting the key
+// through, but swallowed while the shared view is on top; the
 // palette command does the same; ChatHub's paused
 // notice keeps the list under "Este chat se pausó..." and only [Reanudar]
 // subscribes again; a `disabled` refusal sends the config at once and asks once
@@ -48,6 +49,8 @@ import {KeymapSection} from './src/renderer/components/settings/sections/KeymapS
 import {registerPty,unregisterPty} from './src/renderer/lib/ptyRegistry';
 import {useShareGuestStore,sharedOverlayActive} from './src/renderer/lib/shareGuestStore';
 import {applyTheme} from './src/renderer/themes/applyTheme';
+import {PlanModal} from './src/renderer/components/status/PlanModal';
+import {usePlanModal,closePlan} from './src/renderer/lib/planModal';
 const writes=[],subs=[],calls={sub:[],unsub:[],more:[],submit:[],spawn:[],kill:[],open:[],save:[]};
 let frameCb=null;
 const msg=(id,role,blocks)=>({id,role,ts:null,blocks});
@@ -84,7 +87,7 @@ const noopFn=()=>{};
 function Keys(){useGlobalKeys();return null}
 function Grid(){const w=useAppStore(s=>s.workspaces[0]);return <div style={{height:'100vh',display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:6,padding:6}} className="bg-bg-primary text-text-primary">
  {w.panes.map((p,i)=><PaneCell key={p.id} workspace={w} pane={p} presets={[]} workspaceActive maximizedId={null} minimizedIds={[]} index={i} isDragging={false} draggable onToggleMax={noopFn} onToggleMin={noopFn} onClose={noopFn} onDragStartCell={noopFn} onDragEndCell={noopFn}/>)}
- <Keys/><CommandPalette/><div data-test-keymap style={{display:'none'}}><KeymapSection/></div>
+ <Keys/><CommandPalette/><PlanModal/><div data-test-keymap style={{display:'none'}}><KeymapSection/></div>
 </div>}
 let reactRoot=createRoot(document.getElementById('root'));
 const render=()=>reactRoot.render(<I18nProvider lang="es"><Grid/></I18nProvider>);
@@ -137,6 +140,11 @@ window.smoke={calls,writes,fakes,PAGE,msg,
  reg:(id,ptyId)=>{registerPty(id,ptyId);return true},
  unreg:id=>{unregisterPty(id);return true},
  // The shared view of a joined share on top of the grid (no guard runs here: only the keymap reads it).
+ // A6's plan modal (its own store) and a dialog a pane holds in its own state (the pane menu's "Programar prompt").
+ plan:on=>{if(on)usePlanModal.setState({view:{paneId:'pb',place:'Chat / Backend',summary:'Plan',plan:{requestId:'r1',text:'# Plan\\n\\nPaso uno',at:0,truncated:false}}});else closePlan(false);return true},
+ planOpen:()=>!!document.querySelector('[data-plan-modal]'),
+ menuPick:async(id,label)=>{const h=cell(id).querySelector('header');const r=h.getBoundingClientRect();h.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:r.left+40,clientY:r.top+10}));await new Promise(r=>setTimeout(r,120));const b=[...document.querySelectorAll('[role=menu] [role=menuitem]')].find(e=>e.textContent===label);if(b)b.click();await new Promise(r=>setTimeout(r,120));return !!b},
+ escape:()=>{window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));return true},
  overlay:on=>{useShareGuestStore.setState(on?{links:{l1:{id:'l1',hostLabel:'Host',hostFingerprint:'AB12-CD34-EF56-7890',scope:{kind:'workspace',label:'W'},permHint:'view',addedAt:0,persisted:false}},activeLinkId:'l1'}:{links:{},activeLinkId:null});return sharedOverlayActive()},
 };
 const smoke=window.smoke;
@@ -406,6 +414,33 @@ app.whenReady().then(async()=>{
  eq(await js('smoke.synthKey()'),true,'with a shell focused (no target) the chord is swallowed too');
  ok(!(await js('smoke.overlay(false)')),'the shared view goes away');
  eq(await js('smoke.synthKey()'),false,'and with the grid back the chord on a shell is let through again');
+ // A modal on top that the store flags do not cover: the plan modal (A6), then a dialog a pane holds in
+ // its own state (Programar prompt). The chord does nothing, is not consumed and the modal stays.
+ // Plain waits here (a React commit, not a frame), so the block stays short.
+ await js("smoke.focusXterm('pb')");await wait(80);
+ await js('smoke.plan(true)');await wait(250);
+ ok(await js('smoke.planOpen()'),'the plan modal is open over the grid');
+ eq(await js('smoke.synthKey()'),false,'with the plan modal open the chord is not consumed');
+ await chord();await wait(250);
+ ok(!(await js("smoke.chat('pb')"))&&(await js("smoke.termShown('pb')"))&&(await js("smoke.stored('pb')"))===null&&(await js('smoke.planOpen()')),'and switches nothing behind it: the console keeps its terminal and the plan stays open');
+ await js('smoke.plan(false)');await wait(200);
+ ok(!(await js('smoke.planOpen()')),'the plan modal closes');
+ ok(await js("smoke.menuPick('pb','Programar prompt')"),'the pane menu opens Programar prompt');await wait(250);
+ ok(await js("smoke.has('[data-schedule-dialog=pb]')"),'the schedule dialog is open');
+ eq(await js('smoke.synthKey()'),false,'with a dialog held in the pane state open the chord is not consumed either');
+ await wait(200);
+ ok(!(await js("smoke.chat('pb')"))&&(await js("smoke.stored('pb')"))===null&&(await js("smoke.has('[data-schedule-dialog=pb]')")),'and switches nothing: the dialog stays');
+ await js('smoke.escape()');await wait(250);
+ ok(!(await js("smoke.has('[data-schedule-dialog=pb]')")),'Esc closes the schedule dialog');
+ await js("smoke.focusXterm('pb')");await wait(80);
+ eq(await js('smoke.synthKey()'),true,'with nothing on top the chord works again');
+ await wait(250);
+ ok((await js("smoke.chat('pb')"))&&(await js("smoke.stored('pb')"))==='chat','and switches the focused console to its chat');
+ eq(await js('smoke.synthKey()'),true,'pressed again');
+ // One frame: the view switch hands the keyboard over in a requestAnimationFrame.
+ await settle(250);
+ ok((await js("smoke.termShown('pb')"))&&(await js("smoke.stored('pb')"))===null,'back to the terminal');
+ await js("smoke.focusXterm('ps')");await wait(80);
 
  // --- The palette command -------------------------------------------------------------------
  await js('smoke.palette(true)');await settle();
@@ -496,10 +531,11 @@ app.whenReady().then(async()=>{
 
  eq(await js('smoke.overflow()'),'','no horizontal overflow');
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' console chat UI checks (lab gate, agent-only switch, hidden xterm, rows and phases, Load earlier, frames, composer Insert/Send and gate, enter_held, late page, notice, persistence, focus request, draft, unsub, toggleConsoleChat shortcut, shared overlay and palette, paused and Reanudar, disabled re-sub, unknown_pane retry); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' console chat UI checks (lab gate, agent-only switch, hidden xterm, rows and phases, Load earlier, frames, composer Insert/Send and gate, enter_held, late page, notice, persistence, focus request, draft, unsub, toggleConsoleChat shortcut, modals, shared overlay and palette, paused and Reanudar, disabled re-sub, unknown_pane retry); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-const res = spawnSync(require('electron'), [path.join(dir, 'main.cjs')], { env, windowsHide: true, encoding: 'utf8', timeout: 240000 })
+// The run takes about 210 s on a loaded machine (each frame wait in the hidden window costs about 2 s): room to spare.
+const res = spawnSync(require('electron'), [path.join(dir, 'main.cjs')], { env, windowsHide: true, encoding: 'utf8', timeout: 360000 })
 process.stdout.write(res.stdout ?? ''); if (res.status !== 0) process.stderr.write((res.stderr ?? '') + (res.error ? String(res.error) : ''))
 process.exitCode = res.status ?? 1

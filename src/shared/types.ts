@@ -55,7 +55,9 @@ export interface ConnectionProfile {
 /**
  * How a pane schedule repeats (E8-FR-28, schema 13). Absent = `once`.
  * `weekly.days`: 0 = Sunday .. 6 = Saturday, 1..7 distinct entries; `hourly`
- * takes the minute from `PaneSchedule.time`.
+ * takes the minute from `PaneSchedule.time`. `cron` (app 2.7.0, schema 19):
+ * a 5-field expression in local time (`src/shared/cron.ts`), at least 15
+ * minutes between runs and with a next run; `PaneSchedule.time` is not used.
  */
 export type ScheduleRecurrence =
   | { kind: 'once' }
@@ -63,6 +65,7 @@ export type ScheduleRecurrence =
   | { kind: 'weekdays' }
   | { kind: 'weekly'; days: number[] }
   | { kind: 'hourly' }
+  | { kind: 'cron'; expr: string }
 
 /** Outcome of one schedule run (E8-FR-31, schema 13). */
 export type ScheduleRunStatus = 'sent' | 'sent_unconfirmed' | 'skipped_busy' | 'missed' | 'failed'
@@ -88,10 +91,16 @@ export interface ScheduleRun {
  * reached, using the local PC clock. Without `recurrence` it is one-shot and
  * cleared after firing. Schema 13 adds the optional automation fields (they
  * replace the contract's top-level `automations`, R30-01 amendment); an old
- * schedule without them keeps its one-shot behavior.
+ * schedule without them keeps its one-shot behavior. Schema 19 (app 2.7.0):
+ * a console holds several, each with its own `id`, in `Pane.schedules`.
  */
 export interface PaneSchedule {
-  /** "HH:MM" wall-clock time the user picked (for display/editing). */
+  /**
+   * `s1`..`s999` (`SCHEDULE_ID_RE`, src/shared/schedule.ts), unique within
+   * the pane (schema 19). The single schedule of schema <= 18 becomes `s1`.
+   */
+  id: string
+  /** "HH:MM" wall-clock time the user picked (for display/editing; unused by a `cron` rule). */
   time: string
   /** Prompt text sent into the console (Enter appended) when it fires. */
   prompt: string
@@ -125,8 +134,13 @@ export interface Pane {
   icon: string
   /** Per-pane terminal font size override (Ctrl +/-/0, Ctrl+wheel). */
   fontSize?: number
-  /** One-shot prompt scheduled to run in this console at a set time. */
-  schedule?: PaneSchedule
+  /**
+   * Prompts scheduled to run in this console (schema 19, app 2.7.0): at most
+   * `PANE_SCHEDULES_MAX` (8), ids unique, each run on its own. Replaces the
+   * single `schedule` of schema <= 18, which migrate() turns into
+   * `[{ id: 's1', ...schedule }]` and never writes again.
+   */
+  schedules?: PaneSchedule[]
   /**
    * Last agent session seen in this console (schema 11). A mirror written by
    * the renderer; main's agent-sessions.json is the source of truth and only

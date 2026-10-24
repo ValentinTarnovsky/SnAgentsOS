@@ -87,6 +87,10 @@ function testPlanner() {
   check(H.schedulePending({ time: '10:00', prompt: 'x', dueAt: now + 4 * MIN }, now, 5 * MIN) && H.schedulePending({ time: '10:00', prompt: 'x', dueAt: now - MIN }, now, 5 * MIN), 'a schedule due within the idle window (or overdue) keeps it awake')
   check(H.schedulePending({ time: '10:00', prompt: 'x', dueAt: now + 60 * MIN, waitingSince: now - MIN }, now, 5 * MIN), 'a run waiting for the agent keeps it awake')
   check(!H.schedulePending({ time: '10:00', prompt: 'x', dueAt: now + 60 * MIN }, now, 5 * MIN), 'a schedule an hour away does not')
+  // schedulesOf (schema 19): every schedule of every console, from the persisted config.
+  const many = H.schedulesOf({ workspaces: [{ id: 'w', panes: [{ id: 'p', schedules: [{ id: 's1', dueAt: 1 }, { id: 's2', dueAt: 2 }] }, { id: 'q', schedules: [] }, { id: 'r' }, { id: 'old', schedule: { dueAt: 3 } }] }, { id: 'x', panes: 'junk' }] })
+  check(many.size === 1 && many.get('p').map((s) => s.id).join() === 's1,s2', 'schedulesOf lists both schedules of a console; none, an empty list or a stale single schedule (never a parsed shape) count nothing')
+  check(H.schedulesOf(null).size === 0, 'no config, no schedules')
 }
 
 function testShared() {
@@ -117,7 +121,8 @@ function testCoordinator() {
     clearTimer: () => {},
     onChanged: (e) => changed.push(e),
   })
-  let cfg = { workspaces: [{ id: 'w', panes: [{ id: 'a', type: 'codex' }, { id: 'b', type: 'codex' }, { id: 's', type: 'codex', schedule: { time: '10:00', prompt: 'x', dueAt: clock + 2 * MIN } }] }] }
+  // Schema 19: console s holds two schedules; only the second one is close.
+  let cfg = { workspaces: [{ id: 'w', panes: [{ id: 'a', type: 'codex' }, { id: 'b', type: 'codex' }, { id: 's', type: 'codex', schedules: [{ id: 's1', time: '10:00', prompt: 'x', dueAt: clock + 600 * MIN }, { id: 's2', time: '10:00', prompt: 'x', dueAt: clock + 2 * MIN }] }] }] }
   store.load()
   for (const id of ['a', 'b', 's']) {
     store.onStatus({ paneId: id, state: 'idle', precise: true, notify: false, provider: 'codex', sessionId: UUID.replace('0b7c', id === 'a' ? '1b7c' : id === 'b' ? '2b7c' : '3b7c') }, { kind: 'start', provider: 'codex', sessionId: UUID.replace('0b7c', id === 'a' ? '1b7c' : id === 'b' ? '2b7c' : '3b7c'), paneId: id })
@@ -162,7 +167,7 @@ function testCoordinator() {
   check(configReads === reads0 + 1, 'the config (schedules) is read once per tick, only with candidates')
   clock += MIN
   const slept = coord.tick()
-  check(slept.join() === 'a', 'tick 2: the hidden idle console sleeps; the visible one (keep) and the one with a schedule in 2 min do not')
+  check(slept.join() === 'a', 'tick 2: the hidden idle console sleeps; the visible one (keep) and the one with a schedule in 2 min (its second one, app 2.7.0) do not')
   check(seq.map((s) => s[0]).join() === 'mark,send,kill' && seq[1][2] === 5 && seq[1][3] === clock, 'explicit order: hibernatedAt first, then the renderer event { paneId, at, idleMinutes }, then the kill')
   const viewA = store.list().find((v) => v.paneId === 'a')
   check(viewA && viewA.hibernatedAt === clock && viewA.endedAt === undefined, 'the end that follows the kill never marks endedAt: the chat stays resumable')

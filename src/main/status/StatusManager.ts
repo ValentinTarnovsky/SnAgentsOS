@@ -499,14 +499,15 @@ export class StatusManager implements PtySink {
    * v2.3: a device saw the pane (a focused desktop view, a phone with it
    * open): its done / error stops asking for attention. An open request is
    * not answered by looking at it, so an `action` keeps its attention.
-   * Publishes only when attention really went true -> false.
+   * Publishes only when attention really went true -> false (the notice's
+   * own, so an open `needs` still lets its toast close).
    */
   ackPane(paneId: string): void {
     const track = this.panes.get(paneId)
     if (!track || track.ackedSeq === track.stateSeq) return
-    const before = this.attentionOf(track)
+    const before = this.attentionOf(track, undefined, true)
     track.ackedSeq = track.stateSeq
-    if (before && !this.attentionOf(track)) this.publish(paneId, track)
+    if (before && !this.attentionOf(track, undefined, true)) this.publish(paneId, track)
   }
   /**
    * App 2.7.0 (A3, `status:markRead`, ctl `markRead`): the user marks a done
@@ -1237,7 +1238,7 @@ export class StatusManager implements PtySink {
     // done / error was seen); an automation's write ('auto') only invalidates.
     const acks = origin === 'user' && track.ackedSeq !== track.stateSeq
     if ((track.pending.size === 0 && !acks) || REPORTS_ONLY_RE.test(data)) return
-    const before = this.attentionOf(track)
+    const before = this.attentionOf(track, undefined, true)
     const now = Date.now()
     let changed = false
     for (const entry of track.pending.values()) {
@@ -1246,7 +1247,7 @@ export class StatusManager implements PtySink {
       changed = true
     }
     if (acks) track.ackedSeq = track.stateSeq
-    if (changed || before !== this.attentionOf(track)) this.publish(paneId, track)
+    if (changed || before !== this.attentionOf(track, undefined, true)) this.publish(paneId, track)
   }
 
   dispose(): void {
@@ -1452,10 +1453,12 @@ export class StatusManager implements PtySink {
    * App 2.7.0 (A3): `needs` asks whatever the state (working included). A
    * muted console (mutedSeq === stateSeq) asks for nothing, `needs` included,
    * until its effective state changes: the same rule as needsYou().
+   * `ignoreNeeds` reads the state's own attention: whether its notice (toast,
+   * flash) is still unseen, which a `needs` left open must not keep alive.
    */
-  private attentionOf(track: PaneTrack, state = this.stateOfTrack(track)): boolean {
+  private attentionOf(track: PaneTrack, state = this.stateOfTrack(track), ignoreNeeds = false): boolean {
     if (track.mutedSeq === track.stateSeq) return false
-    if (track.needs) return true
+    if (track.needs && !ignoreNeeds) return true
     if (state === 'action') {
       for (const entry of track.pending.values()) if (!entry.invalidated) return true
       return false
@@ -1597,6 +1600,7 @@ export class StatusManager implements PtySink {
     const fresh = !!key && !track.seen.has(key)
     if (key) { track.seen.add(key); if (track.seen.size > 512) track.seen.delete(track.seen.values().next().value!) }
     const evt = this.event(paneId, track, false), cfg = this.cfg
+    const noticeAttention = this.attentionOf(track, effective, true)
     if (fresh && state) {
       // App 2.7.0 (A3): a muted console reaches no channel (Web Push, Discord,
       // ntfy) either; its key is spent all the same. A transition unmutes it
@@ -1615,13 +1619,15 @@ export class StatusManager implements PtySink {
       const focused = this.getWindow()?.isFocused() ?? false
       const inView = this.viewed.has(paneId) && focused
       // v2.3: nothing to announce for a notice already seen (on a phone).
-      evt.notify = !!cfg?.enabled && (state === 'done' ? cfg.notifyDone : cfg.notifyAction) && !inView && evt.attention !== false
+      // App 2.7.0 (A3): the notice's own attention, so an open `needs` does not announce it.
+      evt.notify = !!cfg?.enabled && (state === 'done' ? cfg.notifyDone : cfg.notifyAction) && !inView && noticeAttention
       // E4-FR-07: with the window focused, the renderer shows an in-app card
       // instead of the OS notification (and never flashes the taskbar).
       evt.delivery = !evt.notify ? 'none' : focused && cfg?.inAppWhenFocused !== false ? 'inApp' : 'native'
       if (evt.delivery === 'native') this.showNotification(paneId, track, state)
     }
-    if (!evt.attention) this.releaseAttention(paneId)
+    // The toast and the flash follow the notice, not `needs` (which keeps evt.attention true).
+    if (!noticeAttention) this.releaseAttention(paneId)
     // Only-detail changes are coalesced to one emission per 500 ms per pane
     // (E5-FR-02); state, pending, session and notifications go out at once.
     // App 2.7.0 (A3): so do a failure, needs, the mute and a silence level;
@@ -1655,9 +1661,10 @@ export class StatusManager implements PtySink {
     const key = state === 'done' ? 'status.notif.done' : state === 'error' ? 'status.notif.error' : track.precise ? 'status.notif.action' : 'status.notif.generic'
     const native = this.showNative(mainT(cfg, key, { pane, provider: track.provider === 'codex' ? 'Codex' : 'Claude' }), paneId)
     if (native) {
-      // v2.3: kept until the pane's attention goes false. Not dropped on
-      // 'close': on Windows a toast that timed out into the Action Center
-      // fires it too, and only this reference can remove it from there.
+      // v2.3: kept until the pane's attention (its notice's own, `needs`
+      // aside) goes false. Not dropped on 'close': on Windows a toast that
+      // timed out into the Action Center fires it too, and only this
+      // reference can remove it from there.
       const prev = this.natives.get(paneId)
       this.natives.set(paneId, native)
       const forget = (): void => { if (this.natives.get(paneId) === native) this.natives.delete(paneId) }
