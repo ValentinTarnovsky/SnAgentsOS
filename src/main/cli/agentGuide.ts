@@ -3,8 +3,10 @@
  * other consoles. English on purpose (a stable contract for agents) and
  * versioned with the app, so the skill stub stays a two-line pointer. Only the
  * idea of a handoff guide comes from stablyai/orca's CLI guide; no text is
- * copied. Node core only: cli.js bundles it.
+ * copied. Node core only: cli.js bundles it (teamTools.ts is pure and zod-free).
  */
+import { teamChannelText, teamToolsGuide } from '@shared/teamTools'
+
 export function agentGuide(appVersion: string): string {
   return `# SnAgentsOS CLI guide (snaos ${appVersion})
 
@@ -171,10 +173,31 @@ SnAgentsOS shows your console as done when your turn ends. If you are not done y
 - If a command says SnAgentsOS is not running or unreachable, or your sandbox blocks the
   pipe, report it and ask the user. Do not retry in a loop.
 
+## Teams (snaos team)
+
+\`snaos team\` works only inside a team run (the app sets \`SNAOS_TEAM_RUN\` for it); outside one it
+answers \`forbidden\`. Inside a team run every other command answers \`forbidden\` too, except \`ping\`
+and \`usage\`. Each run's instructions list the tools of its role; those of a dev, for example:
+
+${teamToolsGuide('dev')}
+
+${teamChannelText(false, { win32: false, provider: 'claude' })}
+
+- Claude Code runs \`snaos team\` with its Bash tool (Git Bash on Windows), never with the PowerShell
+  tool nor through \`$env:SNAOS_CLI\`: on Windows those reach \`snaos.cmd\`, whose arguments cmd.exe
+  reads again, so a team run's permissions allow \`Bash(snaos team:*)\` only. A Codex run calls it from
+  its own shell.
+- A tool that ends your run concludes it: the team then refuses your writes (\`conflict\`, exit 8)
+  and you keep only the reads. Budgets per run: 120 reads and 60 writes a minute.
+- \`team task update\` never changes a field the user set: it answers \`user_owned\` (exit 8) with
+  those fields; send the call again without them.
+
 ## Exit codes
 
 0 ok, 1 internal error, 2 bad usage, 3 not found or not running, 4 ambiguous, 5 app not
-available, 6 unauthorized (restart the console), 7 forbidden or disabled, 8 conflict (the note
-changed since --rev), 9 awaiting the user (a permission, question or plan menu), 124 timeout.
+available, 6 unauthorized (restart the console; in a team run: the run is over), 7 forbidden or
+disabled, 8 conflict (the note or the team task changed since --rev, or this team run already
+concluded) or user owned (team task fields the user set), 9 awaiting the user (a permission,
+question or plan menu), 124 timeout.
 `
 }

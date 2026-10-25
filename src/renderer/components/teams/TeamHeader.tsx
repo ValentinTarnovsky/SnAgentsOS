@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { ChevronsUpDown, FolderGit2, GitBranch, Pause, Play, Users, X } from 'lucide-react'
+import { ChevronsUpDown, FolderGit2, GitBranch, Pause, Play, Plus, Users, X } from 'lucide-react'
 import type { AgentProvider, PaneUsage } from '@shared/types'
 import type { TeamListItem, TeamView } from '@shared/team-protocol'
 import { closeTeams, openTeams, useTeamsStore } from '@/lib/teamsStore'
 import { setTeamPaused } from '@/lib/teams/roster'
+import { openNewTask } from '@/lib/teams/board'
 import { formatCost, formatTokens, sumUsage, usageLines } from '@/lib/statusSignals'
 import { toast } from '@/lib/toast'
 import { useLang, useT, type MessageKey } from '@/i18n'
@@ -179,6 +180,16 @@ export function TeamHeader({ team, view }: { team: TeamListItem; view?: TeamView
         <UsageToday usage={view?.usageToday} />
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        {/* B3: a task for the board, from any tab (the dialog opens over the team). */}
+        <button
+          type="button"
+          data-team-new-task
+          onClick={() => openNewTask(team.id)}
+          className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs font-medium text-text-primary transition-colors hover:bg-card focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-violet/60"
+        >
+          <Plus size={13} aria-hidden />
+          {t('teams.task.new')}
+        </button>
         <PauseButton teamId={team.id} paused={!!paused} />
         <Tooltip label={t('teams.host.close')} side="bottom">
           <button type="button" data-team-close aria-label={t('teams.host.close')} onClick={() => closeTeams()} className={HEADER_BTN}>

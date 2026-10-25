@@ -6,15 +6,24 @@
  */
 import { basename } from 'path'
 import { TEAM_DIR } from '@shared/teamDefinition'
-import { teamNeedsCount, type TeamNeedsInput } from '@shared/teamNeeds'
+import { needsOfTask, teamNeedsCount, teamNeedsRows, type TeamNeedRow, type TeamNeedsInput } from '@shared/teamNeeds'
 import { diffTeamFiles } from '@shared/teamDiff'
+import type { BoardSummary } from '@shared/teamPrompt'
+import { TEAM_BOARD_PAGE } from '@shared/team-protocol'
 import type {
   AgentView,
   ApprovalView,
   CardView,
+  CommentView,
+  LeadView,
+  PlanView,
   QueueItemView,
   RoleSummary,
   RunView,
+  TaskBlockedView,
+  TaskDetail,
+  TaskSummary,
+  TeamBoardPage,
   TeamListItem,
   TeamTakeoverRef,
   TeamTrustState,
@@ -22,19 +31,28 @@ import type {
 } from '@shared/team-protocol'
 import type { PaneUsage } from '@shared/types'
 import {
+  BOARD_COLUMNS,
+  columnOf,
+  LEAD_THREAD,
+  PRIORITY_RANK,
   REPO_MAIN,
   TEAM_MAX_CONCURRENT,
+  taskNumOf,
   type Actor,
   type AgentState,
+  type BoardColumn,
   type DefError,
   type QueueItem,
   type RoleDefinition,
   type Run,
   type RunState,
+  type TaskState,
   type TeamApproval,
   type TeamCard,
+  type TeamComment,
   type TeamDefinition,
   type TeamRuntime,
+  type TeamTask,
   type TrustedDefinition,
 } from '@shared/teams'
 import { agentIndex } from './flow/agents'
@@ -155,6 +173,11 @@ export function needsInputOf(rt: Readonly<TeamRuntime>, trust: TeamTrustState, t
   }
   if (trustSince !== undefined) input.trustSince = trustSince
   return input
+}
+
+/** The "Te necesita" rows of a team (the task cards count theirs from here). */
+export function needsRowsOf(rec: TeamRecord, trusted: TrustedDefinition | null): TeamNeedRow[] {
+  return teamNeedsRows(needsInputOf(rec.store.rt, rec.trust, rec.trustSince, trusted))
 }
 
 function takeoversOf(rt: Readonly<TeamRuntime>, def: TeamDefinition | null): TeamTakeoverRef[] {
@@ -348,4 +371,310 @@ export function agentView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null,
     if (t.phase === 'bound' || t.phase === 'releasing') out.takeover.paneId = t.paneId
   }
   return out
+}
+
+// ---- board, tasks, comments and the Lead thread (B3) --------------------------------------------
+
+/** Comments a task view carries per page (the CLI's `team task get` asks 30). */
+export const TASK_COMMENTS_PAGE = 50
+/** Newest done (and cancelled) tasks of the desktop board page; `board {column:'done', cursor}` pages more. */
+export const BOARD_DONE_PAGE = 100
+/** Messages of the Lead thread per page. */
+export const LEAD_PAGE = 50
+/** Runs a task view lists, newest first. */
+export const TASK_RUNS_MAX = 10
+
+/** What the task views read besides the runtime. */
+export interface TaskViewCtx {
+  def: TeamDefinition | null
+  /** teamNeedsRows of the team (needsRowsOf): a card counts its own rows. */
+  needs: readonly TeamNeedRow[]
+  /** Comments of a target already moved to archive/<target>.jsonl. */
+  archived?: (target: string) => number
+}
+
+/** Priority band, then createdAt, then the numeric id: the order of every task list (teamBoard.ts compareTasks). */
+export function compareTaskOrder(a: Pick<TeamTask, 'id' | 'priority' | 'createdAt'>, b: Pick<TeamTask, 'id' | 'priority' | 'createdAt'>): number {
+  return PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || a.createdAt - b.createdAt || (taskNumOf(a.id) ?? 0) - (taskNumOf(b.id) ?? 0)
+}
+
+/** The number of a comment id (`m-12` -> 12), null for anything else. */
+export function commentNumOf(id: string): number | null {
+  const m = /^m-([0-9]{1,7})$/.exec(id)
+  return m ? Number(m[1]) : null
+}
+
+/** Not yet delivered to its recipient (4.5). */
+export function isQueued(c: TeamComment): boolean {
+  return c.forAgent !== undefined && c.deliveredRunId === undefined
+}
+
+export function commentView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null, c: TeamComment): CommentView {
+  const author = actorLabel(c.author)
+  const out: CommentView = {
+    id: c.id,
+    author,
+    authorName: c.author.kind === 'agent' ? agentName(rt, def, c.author.agentId) : author,
+    kind: c.kind,
+    text: c.sys ? '' : c.text,
+    at: c.at,
+    queued: isQueued(c),
+  }
+  // The recipient fixed at write time (4.5), never the task's assignee now: "Queued for X" stays true after a reassignment.
+  if (c.forAgent !== undefined) {
+    out.recipient = c.forAgent
+    out.recipientName = agentName(rt, def, c.forAgent)
+  }
+  if (c.sys) out.sys = c.sys.vars ? { key: c.sys.key, vars: { ...c.sys.vars } } : { key: c.sys.key }
+  return out
+}
+
+/**
+ * The newest `limit` comments of a target before the comment id `before`
+ * (oldest first), and the cursor of the page before it (null at the start of
+ * what the runtime holds; older ones live in the archive).
+ */
+export function commentPage(rt: Readonly<TeamRuntime>, def: TeamDefinition | null, target: string, o: { before?: number; limit?: number } = {}): { comments: CommentView[]; cursor: string | null } {
+  const list = rt.comments[target] ?? []
+  const limit = o.limit ?? TASK_COMMENTS_PAGE
+  let end = list.length
+  if (o.before !== undefined) {
+    const before = o.before
+    end = 0
+    while (end < list.length && (commentNumOf(list[end].id) ?? 0) < before) end++
+  }
+  const start = Math.max(0, end - limit)
+  return { comments: list.slice(start, end).map((c) => commentView(rt, def, c)), cursor: start > 0 ? list[start].id : null }
+}
+
+/**
+ * id -> state of the live tasks, built once per `rt.tasks` array: the runtime is copy on write, so a new board is a
+ * new array. A page of 2000 cards with 1000 blocked{deps} reads it 1000 times, never rebuilds it per card.
+ */
+const liveStates = new WeakMap<readonly TeamTask[], ReadonlyMap<string, TaskState>>()
+
+function stateOfLive(rt: Readonly<TeamRuntime>): ReadonlyMap<string, TaskState> {
+  let m = liveStates.get(rt.tasks)
+  if (!m) {
+    m = new Map(rt.tasks.map((x) => [x.id, x.state]))
+    liveStates.set(rt.tasks, m)
+  }
+  return m
+}
+
+function blockedView(rt: Readonly<TeamRuntime>, t: TeamTask): TaskBlockedView | undefined {
+  if (!t.blocked) return undefined
+  const r = t.blocked.reason
+  const out: TaskBlockedView = { kind: r.kind }
+  if (r.kind === 'card') out.why = r.why
+  if (r.kind === 'user') {
+    if (r.text) out.text = r.text
+    out.by = r.by ?? 'user'
+  }
+  if (r.kind === 'deps') {
+    const states = stateOfLive(rt)
+    out.waitingOn = t.blockedBy.filter((b) => (states.get(b) ?? rt.archivedTasks[b]) !== 'done')
+  }
+  return out
+}
+
+/** One board card (design 2.4): the counts of its comments and needs, its active run. */
+export function taskSummary(rt: Readonly<TeamRuntime>, t: TeamTask, v: TaskViewCtx): TaskSummary {
+  const list = rt.comments[t.id] ?? []
+  const out: TaskSummary = {
+    id: t.id, rev: t.rev, title: t.title, state: t.state, phase: t.phase, column: columnOf(t), priority: t.priority,
+    repoId: t.repoId, isolation: t.isolation, needsPlan: t.needsPlan, blockedBy: [...t.blockedBy],
+    createdBy: actorLabel(t.createdBy), createdAt: t.createdAt, updatedAt: t.updatedAt, stateSince: t.stateSince,
+    userOwned: [...t.userOwned],
+    needs: needsOfTask(v.needs, t.id).length,
+    comments: list.length + (v.archived?.(t.id) ?? 0),
+    queued: list.filter(isQueued).length,
+  }
+  if (t.assignee) out.assignee = t.assignee
+  const blocked = blockedView(rt, t)
+  if (blocked) out.blocked = blocked
+  if (t.parentId) out.parentId = t.parentId
+  if (t.review.round > 0 || t.phase === 'qa') out.review = { round: t.review.round, max: t.review.max }
+  if (t.worktree) out.branch = t.worktree.branch
+  if (t.integrated) out.integrated = true
+  const run = rt.activeRuns.find((r) => r.taskId === t.id)
+  if (run) {
+    out.run = { id: run.id, agentId: run.agentId, mode: run.mode, state: run.state }
+    if (run.startedAt !== undefined) out.run.startedAt = run.startedAt
+  }
+  return out
+}
+
+function planView(t: TeamTask): PlanView | undefined {
+  const p = t.plan
+  if (!p) return undefined
+  const out: PlanView = { rev: p.rev, text: p.text, status: p.status, small: p.small, at: p.at }
+  if (p.decidedBy) out.decidedBy = p.decidedBy.kind === 'agent' ? 'lead' : 'user'
+  return out
+}
+
+/**
+ * The task drawer (and `team task get`): body, plan, the comment page, the
+ * newest runs, its approvals and cards. `recent` is the runs ring; `lastLineAt`
+ * the live value of a running run.
+ */
+export function taskDetail(
+  rt: Readonly<TeamRuntime>,
+  t: TeamTask,
+  v: TaskViewCtx & { trusted: TrustedDefinition | null; recent: readonly Run[]; lastLineAt?: (runId: string) => number | undefined; commentsBefore?: number; commentsLimit?: number },
+): TaskDetail {
+  const { comments: _count, ...summary } = taskSummary(rt, t, v)
+  const page = commentPage(rt, v.def, t.id, { before: v.commentsBefore, limit: v.commentsLimit })
+  const runs: RunView[] = []
+  const seen = new Set<string>()
+  for (const r of [...rt.activeRuns, ...[...v.recent].reverse()]) {
+    if (r.taskId !== t.id || seen.has(r.id)) continue
+    seen.add(r.id)
+    runs.push(runView(r, { lastLineAt: v.lastLineAt?.(r.id) }))
+    if (runs.length >= TASK_RUNS_MAX) break
+  }
+  const reviewInfo: TaskDetail['reviewInfo'] = { round: t.review.round, max: t.review.max }
+  if (t.review.lastVerdict) reviewInfo.lastVerdict = t.review.lastVerdict
+  if (t.review.qaAgentId) reviewInfo.qaAgentId = t.review.qaAgentId
+  const out: TaskDetail = {
+    ...summary,
+    body: t.body,
+    reviewInfo,
+    comments: page.comments,
+    commentsCursor: page.cursor,
+    commentsArchived: v.archived?.(t.id) ?? 0,
+    runs,
+    approvals: rt.approvals.filter((a) => a.taskId === t.id).map((a) => approvalView(rt, a, v.trusted)),
+    cards: rt.cards.filter((c) => c.taskId === t.id).map(cardView),
+  }
+  const plan = planView(t)
+  if (plan) out.plan = plan
+  if (t.worktree) {
+    // B4/B6 inspect the tree on disk (exists, ahead, behind); the runtime only knows it was created.
+    out.worktree = { path: t.worktree.path, branch: t.worktree.branch, base: t.worktree.base, baseBranch: t.worktree.baseBranch, exists: true }
+  }
+  if (t.grants?.length) out.grants = t.grants.map((g) => g.tool)
+  if (t.integrate) out.integrate = { ...t.integrate, ...(t.integrate.files ? { files: [...t.integrate.files] } : {}) }
+  if (t.integrated) out.integratedInfo = { ...t.integrated }
+  return out
+}
+
+/** Done tasks page by recency (newest first), every other column in board order. */
+function pageKey(t: TeamTask, column: BoardColumn | null): number[] {
+  return column === 'done' || column === null ? [-t.stateSince, -(taskNumOf(t.id) ?? 0)] : [PRIORITY_RANK[t.priority], t.createdAt, taskNumOf(t.id) ?? 0]
+}
+
+function cmpKey(a: readonly number[], b: readonly number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
+
+/**
+ * A board cursor names its column, then the key of the last task a page holds: `done.<stateSince>.<n>` or
+ * `<column>.<rank>.<createdAt>.<n>` (`todo.2.1700000000000.5`), so a cursor of one column never pages another.
+ */
+function encodeCursor(t: TeamTask, column: BoardColumn): string {
+  const n = taskNumOf(t.id) ?? 0
+  return column === 'done' ? `done.${t.stateSince}.${n}` : `${column}.${PRIORITY_RANK[t.priority]}.${t.createdAt}.${n}`
+}
+
+/** The key of a cursor of `column`; null when it does not parse or belongs to another column (bad_request). */
+function decodeCursor(cursor: string, column: BoardColumn): number[] | null {
+  const parts = cursor.split('.')
+  if (parts[0] !== column) return null
+  const nums = parts.slice(1).map((p) => (/^[0-9]{1,16}$/.test(p) ? Number(p) : NaN))
+  if (nums.some((n) => !Number.isSafeInteger(n))) return null
+  if (column === 'done') return nums.length === 2 ? [-nums[0], -nums[1]] : null
+  return nums.length === 3 ? nums : null
+}
+
+/**
+ * The board (design 3.9): without a column, every live task that is not done
+ * or cancelled plus the newest BOARD_DONE_PAGE done (the cursor pages the rest
+ * with `column: 'done'`) and the newest BOARD_DONE_PAGE cancelled, in board
+ * order (column, then compareTaskOrder). With a column, one page of it after
+ * `cursor` (done newest first). Counts cover every live task. A cursor that
+ * does not parse, or that another column minted -> null (bad_request).
+ */
+export function boardPage(rt: Readonly<TeamRuntime>, teamId: string, v: TaskViewCtx, q: { column?: BoardColumn; cursor?: string; limit?: number } = {}): TeamBoardPage | null {
+  const counts = Object.fromEntries(BOARD_COLUMNS.map((c) => [c, 0])) as Record<BoardColumn, number>
+  let cancelled = 0
+  for (const t of rt.tasks) {
+    const c = columnOf(t)
+    if (c) counts[c]++
+    else cancelled++
+  }
+  const summary = (t: TeamTask): TaskSummary => taskSummary(rt, t, v)
+  if (!q.column) {
+    if (q.cursor !== undefined) return null
+    const limit = q.limit ?? BOARD_DONE_PAGE
+    const open = rt.tasks.filter((t) => t.state !== 'done' && t.state !== 'cancelled')
+    const done = rt.tasks.filter((t) => t.state === 'done').sort((a, b) => cmpKey(pageKey(a, 'done'), pageKey(b, 'done')))
+    const gone = rt.tasks.filter((t) => t.state === 'cancelled').sort((a, b) => cmpKey(pageKey(a, null), pageKey(b, null)))
+    const doneShown = done.slice(0, limit)
+    const rank = (t: TeamTask): number => {
+      const c = columnOf(t)
+      return c ? BOARD_COLUMNS.indexOf(c) : BOARD_COLUMNS.length
+    }
+    const tasks = [...open, ...doneShown, ...gone.slice(0, BOARD_DONE_PAGE)].sort((a, b) => rank(a) - rank(b) || compareTaskOrder(a, b))
+    const more = done.length > doneShown.length
+    return { teamId, rev: rt.rev, tasks: tasks.map(summary), cursor: more ? encodeCursor(doneShown[doneShown.length - 1], 'done') : null, done: !more, counts, cancelled }
+  }
+  const column = q.column
+  const after = q.cursor !== undefined ? decodeCursor(q.cursor, column) : null
+  if (q.cursor !== undefined && !after) return null
+  const all = rt.tasks.filter((t) => columnOf(t) === column).sort((a, b) => cmpKey(pageKey(a, column), pageKey(b, column)))
+  const rest = after ? all.filter((t) => cmpKey(pageKey(t, column), after) > 0) : all
+  const limit = q.limit ?? (column === 'done' ? BOARD_DONE_PAGE : TEAM_BOARD_PAGE)
+  const page = rest.slice(0, limit)
+  const more = rest.length > page.length
+  return { teamId, rev: rt.rev, tasks: page.map(summary), cursor: more ? encodeCursor(page[page.length - 1], column) : null, done: !more, counts, cancelled }
+}
+
+/** The Lead thread (newest LEAD_PAGE before `before`, oldest first) and the Lead's roster card. */
+export function leadView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null, o: { before?: number; recent: readonly Run[]; lastLineAt: (runId: string) => number | undefined }): LeadView {
+  const page = commentPage(rt, def, LEAD_THREAD, { before: o.before, limit: LEAD_PAGE })
+  const lead = rt.agents.find((a) => a.roleKind === 'lead' && !a.retired) ?? rt.agents.find((a) => a.roleKind === 'lead')
+  return { messages: page.comments, cursor: page.cursor, agent: lead ? agentView(rt, def, lead, o.recent, o.lastLineAt) : null }
+}
+
+/**
+ * The board as the Lead's stdin reads it (design 2.8): the open tasks in
+ * board order (buildRunPrompt cuts the lowest priority first, before any
+ * queued message of the Lead thread), the counts of
+ * every state, the pending approvals, the unassigned todo tasks not triaged
+ * yet and the roster.
+ */
+export function boardSummaryOf(rt: Readonly<TeamRuntime>): BoardSummary {
+  const counts: Record<TaskState, number> = { todo: 0, doing: 0, review: 0, done: 0, blocked: 0, cancelled: 0 }
+  for (const t of rt.tasks) counts[t.state]++
+  const rows = rt.tasks
+    .filter((t) => t.state !== 'done' && t.state !== 'cancelled')
+    .sort(compareTaskOrder)
+    .map((t) => {
+      const row: BoardSummary['rows'][number] = { id: t.id, title: t.title, state: t.state, phase: t.phase, priority: t.priority, blockedBy: [...t.blockedBy] }
+      if (t.assignee) row.assignee = t.assignee
+      return row
+    })
+  const pendingApprovals = rt.approvals
+    .filter((a) => a.state === 'pending')
+    .map((a) => {
+      const p: BoardSummary['pendingApprovals'][number] = { id: a.id, kind: a.kind }
+      if (a.taskId) p.taskId = a.taskId
+      if (a.kind === 'plan') p.small = a.payload.small
+      return p
+    })
+  const untriaged = rt.tasks.filter((t) => t.state === 'todo' && !t.assignee && t.triagedAt === undefined).sort(compareTaskOrder).map((t) => t.id)
+  const agents = rt.agents
+    .filter((a) => !a.retired)
+    .map((a) => {
+      const row: BoardSummary['agents'][number] = { id: a.id, kind: a.roleKind, status: a.status }
+      const run = a.runId ? rt.activeRuns.find((r) => r.id === a.runId) : undefined
+      if (run?.taskId) row.taskId = run.taskId
+      return row
+    })
+  return { rows, counts, pendingApprovals, untriaged, agents }
 }

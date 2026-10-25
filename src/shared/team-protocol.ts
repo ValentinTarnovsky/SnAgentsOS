@@ -44,7 +44,11 @@ export interface TeamView {
   usageToday?: PaneUsage                           // sum of today's run deltas (local day), estimated
   workspaceId?: string
 }
-export interface TaskBlockedView { kind: BlockedReason['kind']; why?: CardReason; text?: string; waitingOn?: string[] }
+export interface TaskBlockedView {
+  kind: BlockedReason['kind']; why?: CardReason; text?: string; waitingOn?: string[]
+  /** kind 'user' only: who parked it, the Lead (`team task update --state blocked`) or the user (a move). */
+  by?: 'lead' | 'user'
+}
 export interface TaskRunRef { id: string; agentId: string; mode: RunMode; state: RunState; startedAt?: number; silence?: PaneSilence }
 export interface TaskSummary {
   id: string; rev: number; title: string; state: TaskState; phase: TaskPhase; column: BoardColumn | null; priority: TaskPriority
@@ -58,7 +62,11 @@ export interface TaskSummary {
   comments: number; queued: number                 // queued = not yet delivered to its recipient
 }
 export interface PlanView { rev: number; text: string; status: TaskPlan['status']; small: boolean; decidedBy?: 'user' | 'lead'; at: number; truncated?: boolean }
-export interface CommentView { id: string; author: 'user' | 'system' | string /* agent id */; authorName: string; kind: CommentKind; text: string; sys?: SysText; at: number; queued: boolean }   // sys set -> render t(`teams.sys.${sys.key}`, sys.vars), never `text`
+export interface CommentView {
+  id: string; author: 'user' | 'system' | string /* agent id */; authorName: string; kind: CommentKind; text: string; sys?: SysText; at: number; queued: boolean
+  /** The agent main fixed as the recipient when the comment was written (4.5); a later reassignment never changes it. Absent: for nobody. */
+  recipient?: string; recipientName?: string
+}   // sys set -> render t(`teams.sys.${sys.key}`, sys.vars), never `text`
 export interface DiffStat { files: number; insertions: number; deletions: number; top: Array<{ path: string; add: number; del: number }> }
 export interface RunView {
   id: string; agentId: string; roleId: string; taskId: string | null; mode: RunMode; trigger: WakeReason

@@ -8,6 +8,7 @@
  * allowedFor decides by role and run mode; the store re-checks the task
  * phase, the run liveness, the caps and what the user owns.
  */
+import type { AgentProvider } from './types'
 import type { Isolation, RoleKind, RunMode, TerminalTool } from './teams'
 import { TEAM_BLOCK_ACTIONS_MAX, TEAM_BLOCK_MAX_BYTES } from './teams'
 
@@ -137,16 +138,26 @@ const BLOCK_PARAMS: ReadonlyArray<readonly [TeamCtlMethod, string]> = [
  * `snaos team <...> --json`" plus, when win32, "for long text write a UTF-8 file outside your cwd (for example under
  * $env:TEMP) with your edit tool and pass --file <path>; never pipe non-ASCII text in Windows PowerShell"; true -> the
  * 5.6 block contract and grammar.
+ *
+ * Claude (the default, also the CLI guide's) calls them with its Bash tool only: its allow lists carry
+ * `Bash(snaos team:*)` and never the PowerShell twin (teamArgv CLAUDE_TEAM_TOOLS, E10 SPIKE), so its Windows advice
+ * offers a Bash heredoc first and names $TEMP. A Codex run that calls the CLI is `danger-full-access` and calls it
+ * from its own shell.
  */
-export function teamChannelText(reportsByBlock: boolean, o: { win32: boolean }): string {
+export function teamChannelText(reportsByBlock: boolean, o: { win32: boolean; provider?: AgentProvider }): string {
   if (!reportsByBlock) {
+    const claude = (o.provider ?? 'claude') === 'claude'
     const lines = [
-      'Call the team tools from your shell as `snaos team <tool> ... --json` (for example `snaos team show --json`). Each call prints one JSON line: `{"ok":true,"data":...}` or `{"ok":false,"error":{"code":...,"message":...}}`.',
+      claude
+        ? 'Call the team tools with your Bash tool as `snaos team <tool> ... --json` (for example `snaos team show --json`), never with the PowerShell tool: this run does not allow `snaos team` there. Each call prints one JSON line: `{"ok":true,"data":...}` or `{"ok":false,"error":{"code":...,"message":...}}`.'
+        : 'Call the team tools from your shell as `snaos team <tool> ... --json` (for example `snaos team show --json`). Each call prints one JSON line: `{"ok":true,"data":...}` or `{"ok":false,"error":{"code":...,"message":...}}`.',
       'Long text goes in a file: `--file <path>` (`--body-file <path>` for a task body), or `-` to read it from stdin.',
     ]
     if (o.win32) {
       lines.push(
-        "On Windows, for long or non-ASCII text write a UTF-8 file outside your cwd (for example under $env:TEMP) with your edit tool and pass --file <path>, or use a Bash heredoc (`snaos team plan --file - <<'EOF'` ... `EOF`); never pipe non-ASCII text in Windows PowerShell (it turns it into ?).",
+        claude
+          ? "On Windows, for long or non-ASCII text use a Bash heredoc (`snaos team plan --file - <<'EOF'` ... `EOF`), or write a UTF-8 file outside your cwd (for example under $TEMP) with your edit tool and pass --file <path>; never pipe non-ASCII text in Windows PowerShell (it turns it into ?)."
+          : "On Windows, for long or non-ASCII text write a UTF-8 file outside your cwd (for example under $env:TEMP) with your edit tool and pass --file <path>, or use a Bash heredoc (`snaos team plan --file - <<'EOF'` ... `EOF`); never pipe non-ASCII text in Windows PowerShell (it turns it into ?).",
       )
     }
     return lines.join('\n')

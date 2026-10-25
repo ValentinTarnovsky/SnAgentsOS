@@ -13,7 +13,13 @@ import type { PermissionProfile, RunMode } from './teams'
 import { CLAUDE_EFFORTS, isClaudeModel } from './agentTune'
 import { CODEX_EFFORTS, CODEX_MODEL_RE, validToolPattern } from './teamDefinition'
 
-export const CLAUDE_TEAM_TOOLS = ['Bash(snaos team:*)', 'PowerShell(snaos team:*)'] as const
+/**
+ * Only the Bash twin (E10 SPIKE, deviation of design decision 2): on Windows PowerShell finds `snaos` as the
+ * `snaos.cmd` shim, which hands `%*` to cmd.exe, so an argument like `x&calc` (no spaces, so PowerShell does not
+ * quote it) would run `calc` outside the profile. Git Bash runs the extensionless sh shim, which passes the
+ * arguments to the CLI with no cmd parsing (S9). No allow list ever carries a PowerShell rule that names the CLI.
+ */
+export const CLAUDE_TEAM_TOOLS = ['Bash(snaos team:*)'] as const
 export const CLAUDE_READONLY_ALLOW = [
   'Read', 'Grep', 'Glob', 'LS', 'WebSearch', 'WebFetch', 'TodoWrite',
   'Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)', 'Bash(git status:*)',
@@ -29,6 +35,10 @@ export const CLAUDE_ISOLATION_FLAGS = ['--setting-sources', 'user', '--strict-mc
 
 /** The git commands no team run may run (CLAUDE_TOTAL_DENY, as command prefixes). */
 const DENIED_COMMANDS = ['git push', 'git merge', 'git worktree', 'git update-ref']
+/** A first word that names the CLI: `snaos`, its Windows shims (`snaos.cmd`), a path to one, or its env var. */
+const CLI_WORD_RE = /^(?:.*[\\/])?snaos(?:\.(?:cmd|bat|exe))?$|snaos_cli/i
+/** The file names of CLI_WORD_RE, for a one-word prefix rule that could still grow into one. */
+const CLI_NAMES = ['snaos', 'snaos.cmd', 'snaos.bat', 'snaos.exe']
 /** Claude and Codex session / thread ids are UUIDs (fixtures of S1 and S4). */
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -121,7 +131,10 @@ function claudeArgv(i: TeamArgvInput): string[] {
     argv.push('--allowedTools', ...dedupe([...CLAUDE_READONLY_ALLOW, ...CLAUDE_TEAM_TOOLS, ...grants]))
     argv.push('--disallowedTools', ...dedupe([...CLAUDE_READONLY_DENY, ...protect]))
   } else {
-    const own = (i.allowedTools ?? []).filter(validToolPattern)
+    // A role's own shell rule for the CLI adds nothing a run needs (CLAUDE_TEAM_TOOLS is there; every other command
+    // but ping and usage answers forbidden to a team run) and could reopen the cmd.exe hole: PowerShell(snaos ...),
+    // or Bash(snaos.cmd ...), since Git Bash also hands a .cmd to cmd.exe. Dropped.
+    const own = (i.allowedTools ?? []).filter((t) => validToolPattern(t) && !namesCli(shellSpec(t) ?? ''))
     argv.push('--permission-mode', 'dontAsk')
     argv.push('--allowedTools', ...dedupe([...own, ...CLAUDE_TEAM_TOOLS, ...grants]))
     argv.push('--disallowedTools', ...dedupe([...CLAUDE_TOTAL_DENY, ...protect]))
@@ -145,7 +158,7 @@ function codexArgv(i: TeamArgvInput, sandbox: 'read-only' | 'danger-full-access'
  *   --append-system-prompt-file <file> --permission-mode <mode> [--allowedTools ...] [--disallowedTools ...]
  *   total:    bypassPermissions, --disallowedTools ...CLAUDE_TOTAL_DENY ...protect rules
  *   readonly: dontAsk, --allowedTools ...CLAUDE_READONLY_ALLOW ...CLAUDE_TEAM_TOOLS ...grants, --disallowedTools ...CLAUDE_READONLY_DENY ...protect rules
- *   custom:   dontAsk, --allowedTools ...allowedTools ...CLAUDE_TEAM_TOOLS ...grants, --disallowedTools ...CLAUDE_TOTAL_DENY ...protect rules
+ *   custom:   dontAsk, --allowedTools ...allowedTools (but a shell rule that names the CLI) ...CLAUDE_TEAM_TOOLS ...grants, --disallowedTools ...CLAUDE_TOTAL_DENY ...protect rules
  *   protect rules: claudePathRule('Read', p) per readDeny, claudePathRule(Edit|Write|MultiEdit, p[, '/**']) per writeDeny.
  * Codex new:    exec --json --skip-git-repo-check -C <cwd> [-m m] [-c model_reasoning_effort="e"] -c approval_policy="never" -s <sb> -
  * Codex resume: exec resume <thread> --json --skip-git-repo-check [-m m] [-c model_reasoning_effort="e"] -c approval_policy="never" -c sandbox_mode="<sb>" -
@@ -179,7 +192,25 @@ function coversDenied(spec: string): boolean {
   return DENIED_COMMANDS.some((d) => (prefix && d.startsWith(body)) || body === d || body.startsWith(`${d} `))
 }
 
-/** TOOL_PATTERN_RE shape, not covered by CLAUDE_TOTAL_DENY (a git push grant is never offered), not `mcp__*` (no MCP loads: --strict-mcp-config), not `Task` / `Agent`. */
+/**
+ * True when a shell pattern could match a call of the CLI: its first word names it (CLI_WORD_RE, after PowerShell's
+ * `&` call or `.` dot-source operator, which run the next word), or a one-word prefix rule whose name (after its
+ * folder) could still grow into one of CLI_NAMES (`sna:*`, `snaos.c:*`, `C:/bin/sn:*`: prefix rules match by text).
+ */
+function namesCli(spec: string): boolean {
+  const prefix = spec.endsWith(':*')
+  const body = (prefix ? spec.slice(0, -2) : spec).replace(/\s+/g, ' ').trim().replace(/^(?:&|\.(?= |$)) ?/, '')
+  const first = body.split(' ')[0] ?? ''
+  if (CLI_WORD_RE.test(first)) return true
+  const name = first.replace(/^.*[\\/]/, '').toLowerCase()
+  return prefix && first === body && CLI_NAMES.some((n) => n.startsWith(name))
+}
+
+/**
+ * TOOL_PATTERN_RE shape, not covered by CLAUDE_TOTAL_DENY (a git push grant is never offered), not `mcp__*` (no MCP loads: --strict-mcp-config), not `Task` / `Agent`.
+ * Never a shell pattern that names the CLI: `Bash(snaos team:*)` is on every allow list already, every other `snaos`
+ * command answers forbidden to a team run, and a PowerShell one would reach cmd.exe through `snaos.cmd` (CLAUDE_TEAM_TOOLS).
+ */
 export function isGrantable(tool: string): boolean {
   if (!validToolPattern(tool)) return false
   const name = tool.replace(/\(.*$/, '')
@@ -187,7 +218,7 @@ export function isGrantable(tool: string): boolean {
   if (name === 'Bash' || name === 'PowerShell') {
     const spec = shellSpec(tool)
     // A bare shell grant is every command, git push included.
-    return spec !== null && !coversDenied(spec)
+    return spec !== null && !coversDenied(spec) && !namesCli(spec)
   }
   return true
 }
@@ -201,7 +232,8 @@ const PLAIN_WORD_RE = /^[A-Za-z0-9_.\/:@%+=,~-]+$/
  * other tools -> [the tool name]; [] when nothing is grantable.
  *
  * `<w1 w2>`: the first two words of the command's first line, stopping at the first word that is not plain (a quote,
- * a pipe, a redirection, a variable).
+ * a pipe, a redirection, a variable). A denied call of the CLI (`snaos team ...` through the PowerShell tool) grants
+ * nothing: the run already has `Bash(snaos team:*)` (isGrantable).
  */
 export function grantPatternOf(d: { tool: string; input?: unknown }): string[] {
   if (typeof d?.tool !== 'string') return []

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArchiveRestore, BellRing, Bot, FileDiff, FolderTree, GitBranch, LayoutDashboard, Megaphone, MessageSquare, NotebookPen, Palette, PanelLeft, Plus, Search, Settings, Type, UserPlus, Users } from 'lucide-react'
+import { ArchiveRestore, BellRing, Bot, FileDiff, FolderTree, GitBranch, LayoutDashboard, ListPlus, Megaphone, MessageSquare, NotebookPen, Palette, PanelLeft, Plus, Search, Settings, Type, UserPlus, Users } from 'lucide-react'
 import { labOn } from '@shared/labs'
 import { formatAgeShort } from '@shared/agents'
 import { visiblePaneIds } from '@shared/status'
@@ -32,6 +32,7 @@ import { toast } from '@/lib/toast'
 import { focusedChatConsole, togglePaneView } from '@/lib/consoleChatStore'
 import { closeTeams, openTeams, teamsOverlayActive, useTeamsStore } from '@/lib/teamsStore'
 import { openTeamSetup } from '@/lib/teams/setup'
+import { openNewTask } from '@/lib/teams/board'
 
 interface Command {
   id: string
@@ -112,6 +113,7 @@ export function CommandPalette() {
   const teamsOn = useAppStore((s) => labOn(s.settings, 'teams'))
   const teamsList = useTeamsStore((s) => s.list)
   const teamsOpen = useAgentStore((s) => s.view === 'teams')
+  const teamOpenId = useTeamsStore((s) => s.openTeamId)
 
   const [query, setQuery] = useState('')
   const [idx, setIdx] = useState(0)
@@ -154,6 +156,9 @@ export function CommandPalette() {
       for (const team of teamsList) {
         cmds.push({ id: `team:${team.id}`, label: t('teams.palette.team', { name: team.name }), hint: t('teams.palette.hint'), icon: Users, search: team.repoName, run: () => openTeams(team.id) })
       }
+      // B3: a task in the team on screen.
+      const shown = teamsOpen && teamOpenId ? teamsList.find((x) => x.id === teamOpenId) : undefined
+      if (shown) cmds.push({ id: 'teams.newTask', label: t('teams.task.paletteNew', { name: shown.name }), hint: t('teams.palette.hint'), icon: ListPlus, run: () => openNewTask(shown.id) })
     }
     if (canReopen) {
       // E5-FR-14: the last closed console, same id and place, resuming its chat.
@@ -227,7 +232,7 @@ export function CommandPalette() {
       cmds.push({ id: `theme-${th.name}`, label: `${t('palette.theme')}: ${th.label}`, hint: t('palette.appearance'), icon: Palette, run: () => updateSettings({ theme: th.name }) })
     }
     return cmds
-  }, [workspaces, presets, connections, quickCommands, activeId, canReopen, chatTarget, teamsOn, teamsList, teamsOpen, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
+  }, [workspaces, presets, connections, quickCommands, activeId, canReopen, chatTarget, teamsOn, teamsList, teamsOpen, teamOpenId, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
 
   // E5-FR-16: with a query every console is searchable by title, workspace,
   // its agent's topic and first prompt.

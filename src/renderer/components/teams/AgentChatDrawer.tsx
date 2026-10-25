@@ -7,9 +7,12 @@ import { MODE_KEY, agentLabel, loadRoster, useRosterStore } from '@/lib/teams/ro
 import { loadRuns, runsKey, useRunChatStore } from '@/lib/teams/runChat'
 import { clockTime } from '@/lib/statusSignals'
 import { RightDrawer } from '@/components/ui/RightDrawer'
+import { Button } from '@/components/ui/Button'
 import { RUN_STATE_KEY, RunHeader } from './RunHeader'
 import { RunChatView } from './RunChatView'
 import { RunNowComposer } from './RunNowComposer'
+import { LeadThreadView } from './LeadThreadView'
+import { segBtn } from './TaskFields'
 
 type AgentDrawer = Extract<NonNullable<TeamDrawer>, { kind: 'agent' }>
 
@@ -46,23 +49,42 @@ function RunPicker({ runs, value, onPick }: { runs: RunView[]; value: string; on
   )
 }
 
+/** The Lead's drawer: Conversación (the thread, B3) or Corrida (its runs, B2), a segmented control. */
+function LeadViewSwitch({ value, onPick }: { value: 'thread' | 'run'; onPick: (v: 'thread' | 'run') => void }) {
+  const t = useT()
+  return (
+    <div className="flex shrink-0 items-center border-b border-border px-3 py-1.5">
+      <div role="radiogroup" aria-label={t('teams.lead.view')} data-lead-view={value} className="flex w-fit gap-1 rounded-btn border border-border bg-bg-primary p-1">
+        {(['thread', 'run'] as const).map((v) => (
+          <button key={v} type="button" role="radio" aria-checked={value === v} data-lead-tab={v} onClick={() => v !== value && onPick(v)} className={segBtn(value === v)}>
+            {t(v === 'thread' ? 'teams.lead.thread' : 'teams.lead.run')}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 /**
  * The drawer of one agent (app 2.7.0, E10 B2), over the team body: a run
  * picker of its runs, the chosen run's header and chat, and the "Ejecutar
  * ahora" composer. With no run picked it follows the agent: its live run,
- * else its last one. Mounted with `key={agentId}`. The Lead conversation
- * (B3) goes next to the run view as a second view of the Lead's drawer.
+ * else its last one. Mounted with `key={agentId}`. The Lead's drawer (B3)
+ * opens on the conversation (LeadThreadView) and switches to its runs.
  */
 export function AgentChatDrawer({ teamId, view, drawer }: { teamId: string; view: TeamView; drawer: AgentDrawer }) {
   const t = useT()
   const agentId = drawer.agentId
   const roster = useRosterStore((s) => s.rosters[teamId])
+  const rosterFailed = useRosterStore((s) => !!s.failed[teamId])
   const agent = roster?.agents.find((a) => a.id === agentId)
   const listed = useRunChatStore((s) => s.runs[runsKey(teamId, agentId)])
   const [maximized, setMaximized] = useState(false)
 
+  // Every open reads the roster again: the drawer also opens from places that never loaded it (the task drawer's
+  // activity, the board's empty state), and the agent's live run picks the run shown.
   useEffect(() => {
-    if (!useRosterStore.getState().rosters[teamId]) void loadRoster(teamId)
+    void loadRoster(teamId)
   }, [teamId])
   // A new live run (this composer's, the dispatcher's) joins the picker.
   const liveId = agent?.run?.id
@@ -76,6 +98,9 @@ export function AgentChatDrawer({ teamId, view, drawer }: { teamId: string; view
   const run = runId ? (chatRun ?? runs.find((r) => r.id === runId)) : undefined
   const name = agent ? agentLabel(agent) : agentId
   const pickable = runId && !runs.some((r) => r.id === runId) && run ? [run, ...runs] : runs
+  // B3: the Lead's drawer opens on the conversation unless a run was asked for.
+  const isLead = agent?.kind === 'lead'
+  const leadView = isLead ? (drawer.view ?? (drawer.runId ? 'run' : 'thread')) : 'run'
 
   return (
     <RightDrawer
@@ -89,12 +114,32 @@ export function AgentChatDrawer({ teamId, view, drawer }: { teamId: string; view
       onClose={() => closeTeamDrawer()}
     >
       <div data-agent-drawer={agentId} className="flex min-w-0 flex-1 flex-col">
-        {roster && !agent ? (
+        {/* Only the roster says whether this is the Lead (thread first) or not: nothing of the run view shows before it. */}
+        {!roster ? (
+          rosterFailed ? (
+            <div className="flex flex-col items-start gap-3 p-4" data-agent-load-failed>
+              <p className="text-sm text-text-secondary">{t('teams.agent.loadFailed')}</p>
+              <Button variant="ghost" size="sm" data-agent-retry onClick={() => void loadRoster(teamId)}>
+                {t('teams.agent.retry')}
+              </Button>
+            </div>
+          ) : (
+            <p data-agent-loading className="p-4 text-sm text-text-secondary">
+              {t('teams.agent.loading')}
+            </p>
+          )
+        ) : !agent ? (
           <p data-agent-gone className="p-4 text-sm text-text-secondary">
             {t('teams.agent.gone')}
           </p>
+        ) : isLead && leadView === 'thread' ? (
+          <>
+            <LeadViewSwitch value="thread" onPick={(v) => openAgentDrawer(agentId, drawer.runId, v)} />
+            <LeadThreadView teamId={teamId} lead={agent} />
+          </>
         ) : (
           <>
+            {isLead && <LeadViewSwitch value="run" onPick={(v) => openAgentDrawer(agentId, drawer.runId, v)} />}
             {runId && pickable.length > 0 && <RunPicker runs={pickable} value={runId} onPick={(id) => openAgentDrawer(agentId, id, drawer.view)} />}
             {runId ? (
               <>
@@ -103,10 +148,10 @@ export function AgentChatDrawer({ teamId, view, drawer }: { teamId: string; view
               </>
             ) : (
               <p data-run-empty className="min-h-0 flex-1 p-4 text-sm text-text-secondary">
-                {roster ? t('teams.run.none') : t('teams.agent.loading')}
+                {t('teams.run.none')}
               </p>
             )}
-            {agent && <RunNowComposer teamId={teamId} agent={agent} trusted={view.trust === 'trusted'} />}
+            <RunNowComposer teamId={teamId} agent={agent} trusted={view.trust === 'trusted'} />
           </>
         )}
       </div>

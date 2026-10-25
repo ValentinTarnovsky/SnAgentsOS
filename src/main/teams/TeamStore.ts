@@ -119,7 +119,7 @@ const agent = z.object({
 }).passthrough()
 const blockedReason = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('deps') }),
-  z.object({ kind: z.literal('user'), text: str.optional() }),
+  z.object({ kind: z.literal('user'), text: str.optional(), by: z.literal('lead').optional() }),
   z.object({ kind: z.literal('stopped'), runId: str }),
   z.object({ kind: z.literal('card'), cardId: str, why: cardReason }),
 ])

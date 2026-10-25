@@ -220,10 +220,11 @@ function argvChecks() {
   const HEAD = ['-p', '--output-format', 'stream-json', '--verbose', ...ISO]
   const TOTAL_DENY = ['Bash(git push:*)', 'Bash(git merge:*)', 'Bash(git worktree:*)', 'Bash(git update-ref:*)', 'PowerShell(git push:*)', 'PowerShell(git merge:*)', 'PowerShell(git worktree:*)', 'PowerShell(git update-ref:*)']
   const RO_ALLOW = ['Read', 'Grep', 'Glob', 'LS', 'WebSearch', 'WebFetch', 'TodoWrite', 'Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)', 'Bash(git status:*)', 'PowerShell(git log:*)', 'PowerShell(git diff:*)', 'PowerShell(git show:*)', 'PowerShell(git status:*)']
-  const TEAM = ['Bash(snaos team:*)', 'PowerShell(snaos team:*)']
+  // E10 SPIKE (deviation of decision 2): only the Bash rule; PowerShell would run snaos.cmd, whose %* cmd.exe re-parses.
+  const TEAM = ['Bash(snaos team:*)']
   same(G.CLAUDE_ISOLATION_FLAGS, ISO, 'CLAUDE_ISOLATION_FLAGS')
   same(G.CLAUDE_TOTAL_DENY, TOTAL_DENY, 'CLAUDE_TOTAL_DENY has the PowerShell twin of every Bash rule (decision 2)')
-  same(G.CLAUDE_TEAM_TOOLS, TEAM, 'CLAUDE_TEAM_TOOLS: Bash and PowerShell')
+  same(G.CLAUDE_TEAM_TOOLS, TEAM, 'CLAUDE_TEAM_TOOLS: the Bash rule only, never PowerShell(snaos team:*)')
 
   const claude = (profile, session, extra = {}) => G.teamArgv({ provider: 'claude', profile, session, systemFile: sys, cwd, protect, ...extra })
   const grants = ['Bash(npm test:*)', 'PowerShell(npm test:*)', 'Bash(git push:*)', 'Task', 'mcp__github__create_issue', 'Bash(npm test:*)']
@@ -241,10 +242,26 @@ function argvChecks() {
     'claude custom resume': [claude('custom', { kind: 'resume', sessionId: SID }, { allowedTools: ['Grep'] }),
       [...HEAD, '--resume', SID, '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', 'Grep', ...TEAM, '--disallowedTools', ...TOTAL_DENY, ...PROTECT]],
   }
+  // A role or a grant that names the CLI through PowerShell never reaches the allow list (snaos.cmd, cmd.exe).
+  const psCli = ['PowerShell(snaos team:*)', 'PowerShell(snaos:*)', 'PowerShell(SNAOS.CMD team:*)', 'PowerShell(& snaos team:*)', 'PowerShell(C:/Users/u/bin/snaos.cmd team:*)', 'PowerShell(sna:*)']
+  // A role's own Bash rule for the CLI goes too: Git Bash hands snaos.cmd to cmd.exe as well, and Bash(snaos team:*) is always there.
+  snaps['claude custom with PowerShell CLI rules'] = [claude('custom', { kind: 'new', sessionId: SID }, { allowedTools: ['Read', ...psCli, 'Bash(snaos:*)', 'Bash(snaos.cmd team:*)', 'Bash(npm test:*)'], grants: ['PowerShell(snaos team:*)', 'PowerShell(npm test:*)'] }),
+    [...HEAD, '--session-id', SID, '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', 'Read', 'Bash(npm test:*)', ...TEAM, 'PowerShell(npm test:*)', '--disallowedTools', ...TOTAL_DENY, ...PROTECT]]
+  snaps['claude readonly with a PowerShell CLI grant'] = [claude('readonly', { kind: 'new', sessionId: SID }, { grants: [...psCli, 'Bash(snaos team:*)'] }),
+    [...HEAD, '--session-id', SID, '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', ...RO_ALLOW, ...TEAM, '--disallowedTools', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', ...PROTECT]]
+  const allowOf = (argv) => (argv.includes('--allowedTools') ? argv.slice(argv.indexOf('--allowedTools') + 1, argv.indexOf('--disallowedTools')) : [])
   for (const [label, [res, expected]] of Object.entries(snaps)) {
     same(res.argv, expected, `argv snapshot: ${label}`)
     check(res.reportsByBlock === false && res.instructionsInStdin === false && res.sandbox === undefined, `${label}: Claude reports through the CLI, instructions by file`)
     check(json(res.argv.slice(4, 7)) === json(ISO) && PROTECT.every((r) => res.argv.includes(r)), `${label}: the isolation flags and every protect rule are on the line`)
+    const allow = allowOf(res.argv)
+    check(!allow.some((a) => /^PowerShell\(.*snaos|^Bash\(.*snaos\.(?:cmd|bat)/i.test(a)) && !res.argv.includes('PowerShell(snaos team:*)'), `${label}: no PowerShell rule for the CLI (nor a Bash one for snaos.cmd) anywhere on the line`, allow)
+    if (!label.startsWith('claude total')) check(allow.includes('Bash(snaos team:*)'), `${label}: the allow list carries Bash(snaos team:*)`)
+  }
+  // A plan run of any role is readonly: the same allow list, Bash only.
+  for (const permission of ['total', 'custom', 'readonly']) {
+    const plan = claude(G.effectiveProfile(permission, 'plan'), { kind: 'new', sessionId: SID })
+    check(allowOf(plan.argv).includes('Bash(snaos team:*)') && !plan.argv.some((a) => /^PowerShell\(snaos/i.test(a)), `a plan run of a ${permission} role: Bash(snaos team:*) only`)
   }
   const noProtect = G.teamArgv({ provider: 'claude', profile: 'total', session: { kind: 'new', sessionId: SID }, cwd })
   check(!noProtect.argv.some((a) => a.includes('//')) && !noProtect.argv.includes('--append-system-prompt-file'), 'without protect nor systemFile: no path rule and no system flag')
@@ -287,6 +304,13 @@ function argvChecks() {
   const refused = ['Bash(git push:*)', 'PowerShell(git push --force:*)', 'Bash(git push)', 'Bash(git:*)', 'Bash(gi:*)', 'Bash(:*)', 'Bash(*)', 'Bash(npm *)', 'Bash', 'PowerShell', 'Bash(git  merge:*)', 'PowerShell(GIT UPDATE-REF:*)', 'Bash(git -C:*)', 'PowerShell(git -c x=y:*)', 'Bash(git --git-dir=x status)', 'mcp__x', 'mcp__github__create_issue', 'Task', 'Agent', 'Task(explore)', 'bad tool', 'Bash(echo "x")', '']
   check(grantable.every(G.isGrantable), 'isGrantable: plain tools and shell prefixes', grantable.filter((t) => !G.isGrantable(t)))
   check(!refused.some(G.isGrantable), 'isGrantable refuses git push / merge / worktree / update-ref, a bare or wildcard shell, mcp__x, Task and Agent', refused.filter(G.isGrantable))
+  const cliRules = [...psCli, 'Bash(snaos team:*)', 'Bash(snaos:*)', 'Bash(snaos ls)', 'PowerShell(& $env:SNAOS_CLI team:*)',
+    'PowerShell(&snaos team:*)', 'PowerShell(. snaos team:*)', 'PowerShell(snaos.c:*)', 'PowerShell(SNAOS.CM:*)', 'PowerShell(C:/Users/u/bin/sn:*)', 'PowerShell(C:/Users/u/bin/:*)', 'PowerShell(.:*)']
+  check(!cliRules.some(G.isGrantable) && G.isGrantable('PowerShell(snap list:*)') && G.isGrantable('Bash(snake:*)') && G.isGrantable('PowerShell(./build.cmd:*)') && G.isGrantable('PowerShell(. ./env.ps1:*)'), 'isGrantable never grants a shell rule that names the CLI (Bash(snaos team:*) is always there; PowerShell would reach snaos.cmd)', cliRules.filter(G.isGrantable))
+  same(G.grantPatternOf({ tool: 'PowerShell', input: { command: 'snaos team comment t-1 x&calc' } }), [], 'a PowerShell denial of snaos team grants nothing (never PowerShell(snaos team:*))')
+  same(G.grantPatternOf({ tool: 'PowerShell', input: { command: 'snaos.cmd team show --json' } }), [], 'nor through the .cmd name')
+  same(G.grantPatternOf({ tool: 'PowerShell', input: { command: '. snaos team comment t-1 x&calc' } }), [], 'nor through the dot-source operator (`. snaos`, both words plain)')
+  same(G.grantPatternOf({ tool: 'PowerShell', input: { command: 'snaos.c' } }), [], 'nor a one-word prefix that grows into snaos.cmd')
   same(G.grantPatternOf({ tool: 'Bash', input: { command: 'npm test -- --watch' } }), ['Bash(npm test:*)', 'PowerShell(npm test:*)'], 'a Bash denial: both twins of its first two words')
   same(G.grantPatternOf({ tool: 'PowerShell', input: { command: 'Get-ChildItem src\nmore' } }), ['Bash(Get-ChildItem src:*)', 'PowerShell(Get-ChildItem src:*)'], 'a PowerShell denial: both twins too (decision 2), first line only')
   same(G.grantPatternOf({ tool: 'Bash', input: { command: 'ls | grep x' } }), ['Bash(ls:*)', 'PowerShell(ls:*)'], 'the words stop at a pipe')
@@ -340,12 +364,18 @@ function toolsChecks() {
   const cli = K.teamChannelText(false, { win32: false })
   const cliWin = K.teamChannelText(false, { win32: true })
   check(cli.includes('snaos team <tool> ... --json') && !cli.includes('$env:TEMP') && !cli.includes('snaos-team'), 'CLI channel: --json calls, no Windows advice off Windows')
-  check(cliWin.startsWith(cli) && cliWin.includes('UTF-8 file outside your cwd (for example under $env:TEMP)') && cliWin.includes('--file <path>') && cliWin.includes('never pipe non-ASCII text in Windows PowerShell'), 'CLI channel on Windows: the UTF-8 file advice (9.1 risk 25)')
+  check(cli === K.teamChannelText(false, { win32: false, provider: 'claude' }), 'the channel defaults to the Claude wording (the CLI guide uses it)')
+  // E10 SPIKE: a Claude run calls snaos team with its Bash tool only (its allow lists carry no PowerShell rule for the CLI).
+  check(cli.includes('with your Bash tool') && cli.includes('never with the PowerShell tool') && !/from your shell/.test(cli), 'Claude CLI channel: the Bash tool, never the PowerShell tool', cli)
+  check(cliWin.startsWith(cli) && cliWin.includes("use a Bash heredoc (`snaos team plan --file - <<'EOF'`") && cliWin.includes('UTF-8 file outside your cwd') && cliWin.includes('--file <path>') && cliWin.includes('never pipe non-ASCII text in Windows PowerShell') && !cliWin.includes('$env:TEMP'), 'Claude CLI channel on Windows: a Bash heredoc first, or a UTF-8 file (9.1 risk 25)', cliWin)
+  const cx = K.teamChannelText(false, { win32: false, provider: 'codex' })
+  const cxWin = K.teamChannelText(false, { win32: true, provider: 'codex' })
+  check(cx.includes('from your shell as `snaos team <tool> ... --json`') && !cx.includes('Bash tool') && cxWin.startsWith(cx) && cxWin.includes('UTF-8 file outside your cwd (for example under $env:TEMP)') && cxWin.includes('never pipe non-ASCII text in Windows PowerShell'), 'a Codex run with the CLI (danger-full-access) calls it from its own shell; the $env:TEMP file advice on Windows', cxWin)
   const block = K.teamChannelText(true, { win32: false })
-  check(block === K.teamChannelText(true, { win32: true }), 'the block contract does not depend on the OS')
+  check(block === K.teamChannelText(true, { win32: true }) && block === K.teamChannelText(true, { win32: true, provider: 'codex' }), 'the block contract does not depend on the OS nor the provider')
   check(['You cannot run `snaos team` in this sandbox', '```snaos-team', 'four backticks', 'team.task.create {title', 'team.verdict', '"$1"', '64 KB', '21 actions', 'only as the last action'].every((s) => block.includes(s)), 'the block contract and its grammar (5.6)', block)
   same(K.parseTeamBlock(block), { v: 1, actions: [{ method: 'team.comment', params: { target: 't-12', text: '...' } }, { method: 'team.plan', params: { text: '...', small: true } }] }, 'the example of the contract parses as a block')
-  check(![cli, cliWin, block].some((s) => DASH_RE.test(s)), 'no en or em dash in the channel texts')
+  check(![cli, cliWin, cx, cxWin, block].some((s) => DASH_RE.test(s)), 'no en or em dash in the channel texts')
 }
 
 function blockChecks() {

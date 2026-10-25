@@ -62,6 +62,7 @@ import { PlanModal } from '@/components/status/PlanModal'
 import { TeamHost } from '@/components/teams/TeamHost'
 import { TeamSetupDialog } from '@/components/teams/TeamSetupDialog'
 import { TeamTrustDialog } from '@/components/teams/TeamTrustDialog'
+import { NewTaskDialog } from '@/components/teams/NewTaskDialog'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -337,6 +338,8 @@ function AppBody() {
       {/* Teams (app 2.7.0, E10 B1): new team (preview, then write) and trust (the diff). */}
       <TeamSetupDialog />
       <TeamTrustDialog />
+      {/* Teams (app 2.7.0, E10 B3): a new task on the board of the team on screen. */}
+      <NewTaskDialog />
     </div>
   )
 }

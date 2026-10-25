@@ -1,23 +1,29 @@
 import { spawn as nodeSpawn } from 'child_process'
 import { createHash, randomBytes, randomUUID } from 'crypto'
-import { promises as fsp, readdirSync, rmSync } from 'fs'
+import { promises as fsp, readdirSync, readFileSync, rmSync } from 'fs'
 import { isAbsolute, join, resolve } from 'path'
 import type { ChatMessage } from '@shared/chat-types'
 import type { ClaudeAccountsState } from '@shared/claude-accounts'
+import type { CtlErrorCode, CtlResponse } from '@shared/ctl-protocol'
 import { normalizeLabs } from '@shared/labs'
 import { effectiveProfile } from '@shared/teamArgv'
 import { definitionIssues, parseFrontmatter, UNC_PATH_RE } from '@shared/teamDefinition'
 import { systemText } from '@shared/teamPrompt'
-import { isPhoneTeamOp, type TeamChangedEvt, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
+import { isPhoneTeamOp, type TaskSummary, type TeamChangedEvt, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
 import {
+  BOARD_COLUMNS,
+  columnOf,
   ORPHAN_START_SLACK_MS,
   REPO_MAIN,
   sessionKeyOf,
   STOP_GRACE_MS,
+  TASK_ID_RE,
   TEAM_LOG_TTL_MS,
   TEAM_LOGS_MAX_BYTES,
+  TEAM_STATE_MAX_BYTES,
   teamPaneId,
   isTeamPaneId,
+  type Actor,
   type AgentState,
   type DefError,
   type ResolvedRepo,
@@ -26,11 +32,15 @@ import {
   type Run,
   type RunMode,
   type RunRequest,
+  type TaskState,
   type TeamDefinition,
+  type TeamTask,
   type TrustedDefinition,
 } from '@shared/teams'
 import type { AgentProvider, ConfigFile, PaneStatusEvt } from '@shared/types'
 import { splitAppend } from '../chat/chatFrames'
+import type { CtlTeamCaller } from '../cli/CtlTokens'
+import type { CtlTeamsView } from '../cli/handlers'
 import { DeadlineTimer, type DeadlineTimerDeps } from '../DeadlineTimer'
 import type { GitRunner } from '../git/gitExec'
 import { isSameOrInside, pathKey } from '../migration/pathUtil'
@@ -41,7 +51,10 @@ import { TrustStore } from '../repoConfig/TrustStore'
 import { resolveAgentCli, type ResolvedCli } from './agentCli'
 import { dismissSystemCards, openSystemCard, reconcileAgents } from './flow/agents'
 import { admitRun, basicPolicy, finishRun, interruptAll, manualGate, markRunning, orphanCards, reapOnLoad, requestStop, runEndFactsOf, terminalOf, type AdmitFacts, type RunEnd } from './flow/runs'
-import type { FlowCtx, FlowResult, TeamEffect } from './flow/types'
+import { archiveSweep, changedScopes, deliverComments } from './flow/tasks'
+import { applyTool } from './flow/tools'
+import type { FlowCtx, FlowResult, TeamEffect, TeamToolCall } from './flow/types'
+import { createTeamCtl, type TeamCtlPort, type TeamLiveRun } from './teamCtl'
 import { createClaudeStreamParser } from './parsers/claudeStream'
 import { RunStarter } from './RunStarter'
 import { RunSupervisor } from './RunSupervisor'
@@ -52,7 +65,19 @@ import { TeamDefinitionLoader, type LoadedDefinition, type LoaderFs, type LoadRe
 import { resolveMainRoot, TeamRegistry, teamIdOf, type RegistryFs, type TeamIndexEntry } from './TeamRegistry'
 import { TeamStore, type SyncFs, type TeamStoreDeps } from './TeamStore'
 import { goalHashOf, TeamTrust } from './TeamTrust'
-import { LIVE_RUN_STATES, teamHeaderKey } from './views'
+import { compareTaskOrder, LIVE_RUN_STATES, needsRowsOf, taskDetail, taskSummary, teamHeaderKey, type TaskViewCtx } from './views'
+
+/** `team.tasks` answers at most this many tasks (design 5.3); `team task get` carries the newest 30 comments. */
+export const CTL_TASKS_MAX = 200
+export const CTL_TASK_COMMENTS = 30
+/** Archive files a comment count is read from (TeamStore.appendArchive writes the same names). */
+const ARCHIVE_TARGET_RE = /^(?:lead|t-[0-9]{1,5})$/
+/** `team tasks --state`: a task state, or `open` (anything not done or cancelled). */
+const CTL_TASK_STATES: readonly string[] = ['todo', 'doing', 'review', 'done', 'blocked', 'cancelled', 'open']
+
+function ctlErr(code: CtlErrorCode, message: string): CtlResponse {
+  return { ok: false, error: { code, message } }
+}
 
 /** fs.watch events of a definition folder are debounced this long (design 3.10 `defwatch:<teamId>`). */
 export const DEFWATCH_MS = 300
@@ -140,6 +165,17 @@ export class TeamService implements TeamInternals {
   readonly git: GitRunner
   /** B9 binds taken-over panes through it; until then a no-op consumer. */
   readonly sink: PtySink = { id: 'teams', onSpawn: () => undefined, onData: () => undefined, onExit: () => undefined }
+  /**
+   * B3: what `snaos team` reaches (CliService.attach({teams})): teamCtl checks
+   * the params and the role, then reads and writes through this port (B7 adds
+   * `note`; without it `team note` answers disabled).
+   */
+  readonly ctlView: CtlTeamsView = createTeamCtl({
+    // Labs off (or frozen, disposed): every team.* answers disabled, like every Teams request.
+    live: (who) => (this.live() ? this.ctlLive(who) : 'disabled'),
+    read: (teamId, method, params, who) => this.ctlRead(teamId, method, params, who),
+    apply: (teamId, call, who) => this.ctlApply(teamId, call, who),
+  })
 
   private readonly clock: () => number
   private readonly repoFs: Pick<LoaderFs, 'lstat' | 'realpath'>
@@ -185,6 +221,8 @@ export class TeamService implements TeamInternals {
   private readonly idleWaiters = new Map<string, Array<() => void>>()
   /** Teams a removeTeam is taking down: their run ends prune no logs (the folder moves to the trash right after). */
   private readonly removing = new Set<string>()
+  /** B3: archived comments per `<teamId>|<target>` (lines of archive/<target>.jsonl), read once and bumped on append. */
+  private readonly archivedCounts = new Map<string, number>()
   private readonly treeKill: NonNullable<TeamServiceDeps['treeKill']>
 
   constructor(private readonly deps: TeamServiceDeps) {
@@ -440,6 +478,13 @@ export class TeamService implements TeamInternals {
     }
     const ctx = this.flowCtx(e.id)
     if (ctx) this.commit(e.id, reconcileAgents(store.rt, ctx), ['agents'])
+    // Decision 27: old done and cancelled tasks move to the archive (at load, and when a create finds the board full).
+    const swept = archiveSweep(store.rt, { now: this.clock() })
+    if (swept.ok && swept.rt !== store.rt) {
+      const n = store.rt.tasks.length - swept.rt.tasks.length
+      this.commit(e.id, swept, changedScopes(store.rt, swept.rt))
+      this.deps.log(`archived ${e.id} tasks=${n}`)
+    }
     return rec
   }
 
@@ -473,6 +518,7 @@ export class TeamService implements TeamInternals {
     this.pendingDetail.clear()
     this.awakeAt.clear()
     this.runWrites.clear()
+    this.archivedCounts.clear()
     // The orphans of decision 64 (and a check not done yet) outlive a Labs toggle or a freeze: their processes
     // still live, their cards stay open in the store, and only pidAlive or killOrphan lets their sessions go.
   }
@@ -906,6 +952,16 @@ export class TeamService implements TeamInternals {
         case 'synthetic':
           this.synthetic(teamId, e.runId, e.on)
           break
+        case 'archiveComments': {
+          this.teams.get(teamId)?.store.appendArchive(e.target, e.comments)
+          const key = `${teamId}|${e.target}`
+          const n = this.archivedCounts.get(key)
+          if (n !== undefined) this.archivedCounts.set(key, n + e.comments.length)
+          break
+        }
+        case 'archiveTasks':
+          this.teams.get(teamId)?.store.appendArchive('tasks', e.tasks)
+          break
         default:
           this.deps.log(`effect ${e.kind} ${teamId} not handled`)
       }
@@ -1070,6 +1126,138 @@ export class TeamService implements TeamInternals {
   /** The B3 CLI counts the team writes of a run (classifyOutcome reads them at close). */
   noteTeamWrite(runId: string): void {
     this.runWrites.set(runId, (this.runWrites.get(runId) ?? 0) + 1)
+  }
+
+  // ---- the `snaos team` port (B3, design 3.9) ---------------------------------------------------
+
+  /** Comments of a target already archived (lines of archive/<target>.jsonl), read once per target. */
+  archivedCount(teamId: string, target: string): number {
+    if (!ARCHIVE_TARGET_RE.test(target) || !this.teams.has(teamId)) return 0
+    const key = `${teamId}|${target}`
+    const hit = this.archivedCounts.get(key)
+    if (hit !== undefined) return hit
+    let n = 0
+    try {
+      const text = readFileSync(join(this.teamDir(teamId), 'archive', `${target}.jsonl`), 'utf8')
+      n = text.split('\n').length - 1
+    } catch {
+      n = 0
+    }
+    this.archivedCounts.set(key, n)
+    return n
+  }
+
+  private taskViewCtx(teamId: string, rec: TeamRecord): TaskViewCtx {
+    return { def: this.shownDef(rec), needs: needsRowsOf(rec, this.trust.trusted(teamId)), archived: (target) => this.archivedCount(teamId, target) }
+  }
+
+  /** The live run behind a team token: its active run (stopping included: a concluded run keeps reading until revoke). */
+  private ctlLive(who: CtlTeamCaller): TeamLiveRun | null {
+    if (!this.live()) return null
+    const rec = this.teams.get(who.teamId)
+    const def = this.trust.trusted(who.teamId)
+    const run = rec?.store.rt.activeRuns.find((r) => r.id === who.runId)
+    if (!rec || !def || !run || run.agentId !== who.agentId) return null
+    const agent = rec.store.rt.agents.find((a) => a.id === run.agentId)
+    if (!agent) return null
+    const task = run.taskId ? rec.store.rt.tasks.find((t) => t.id === run.taskId) : undefined
+    return task ? { teamId: who.teamId, run, agent, task, def } : { teamId: who.teamId, run, agent, def }
+  }
+
+  /**
+   * `team show`, `team tasks` and `team task get` (design 5.3). A task get
+   * delivers to the calling run the queued comments of its agent that the
+   * reply carries, only while the run is neither concluded nor stopping
+   * (4.5: a run in its grace window reads without taking them).
+   */
+  private ctlRead(teamId: string, method: 'team.show' | 'team.tasks' | 'team.task.get', params: Record<string, unknown>, who: CtlTeamCaller): CtlResponse {
+    const l = this.ctlLive(who)
+    const rec = this.teams.get(teamId)
+    if (!l || l.teamId !== teamId || !rec) return ctlErr('forbidden', 'this team run is over')
+    const rt = rec.store.rt
+    const v = this.taskViewCtx(teamId, rec)
+    switch (method) {
+      case 'team.show': {
+        const run: { id: string; mode: RunMode; taskId?: string } = { id: l.run.id, mode: l.run.mode }
+        if (l.run.taskId) run.taskId = l.run.taskId
+        const data: { team: { id: string; name: string; goal: string }; you: { agentId: string; roleId: string; kind: RoleKind }; run: typeof run; task?: TaskSummary } = {
+          team: { id: teamId, name: l.def.def.name, goal: l.def.def.goal },
+          you: { agentId: l.agent.id, roleId: l.agent.roleId, kind: l.agent.roleKind },
+          run,
+        }
+        if (l.task) data.task = taskSummary(rt, l.task, v)
+        return { ok: true, data }
+      }
+      case 'team.tasks': {
+        const state = params.state
+        if (state !== undefined && (typeof state !== 'string' || !CTL_TASK_STATES.includes(state))) return ctlErr('bad_request', 'state: todo, doing, review, done, blocked, cancelled or open')
+        if (params.mine !== undefined && typeof params.mine !== 'boolean') return ctlErr('bad_request', 'mine: a boolean')
+        const keep = (t: TeamTask): boolean => {
+          if (state === 'open' ? t.state === 'done' || t.state === 'cancelled' : state !== undefined && t.state !== (state as TaskState)) return false
+          return !params.mine || t.assignee === who.agentId || (t.phase === 'qa' && t.review.qaAgentId === who.agentId)
+        }
+        const rank = (t: TeamTask): number => {
+          const c = columnOf(t)
+          return c ? BOARD_COLUMNS.indexOf(c) : BOARD_COLUMNS.length
+        }
+        const tasks = rt.tasks.filter(keep).sort((a, b) => rank(a) - rank(b) || compareTaskOrder(a, b)).slice(0, CTL_TASKS_MAX)
+        return { ok: true, data: { tasks: tasks.map((t) => taskSummary(rt, t, v)) } }
+      }
+      case 'team.task.get': {
+        const id = params.task
+        if (typeof id !== 'string' || !TASK_ID_RE.test(id)) return ctlErr('bad_request', 'task: a task id like t-12')
+        let t = rt.tasks.find((x) => x.id === id)
+        if (!t) return ctlErr('not_found', rt.archivedTasks[id] ? `${id} is archived` : `no task ${id}`)
+        const view = (): ReturnType<typeof taskDetail> =>
+          taskDetail(rec.store.rt, t as TeamTask, { ...v, trusted: l.def, recent: rec.store.recentRuns(), lastLineAt: (rid) => this.supervisor.lastLineAt(rid), commentsLimit: CTL_TASK_COMMENTS })
+        const first = view()
+        if (!l.run.concludedBy && l.run.state !== 'stopping') {
+          const ids = first.comments.filter((c) => c.queued).map((c) => c.id)
+          const queuedForMe = (rt.comments[id] ?? []).filter((c) => ids.includes(c.id) && c.forAgent === who.agentId).map((c) => c.id)
+          if (queuedForMe.length > 0) {
+            const res = deliverComments(rec.store.rt, l.run.id, who.agentId, queuedForMe)
+            if (res.ok && res.rt !== rec.store.rt) this.commit(teamId, res, changedScopes(rec.store.rt, res.rt), { taskId: id })
+            t = rec.store.rt.tasks.find((x) => x.id === id) ?? t
+            return { ok: true, data: { task: view() } }
+          }
+        }
+        return { ok: true, data: { task: first } }
+      }
+    }
+  }
+
+  /**
+   * One write of a run (commit inside): the growth cap of the store rules (an
+   * agent's write is refused past TEAM_STATE_MAX_BYTES with `cap` and `full:
+   * 'state'`, its own hint; the user's still pass), applyTool, the commit with
+   * the scopes it moved, and every accepted write counted for the run
+   * (classifyOutcome, decision 68).
+   */
+  private ctlApply(teamId: string, call: TeamToolCall, who: CtlTeamCaller): ReturnType<TeamCtlPort['apply']> {
+    const l = this.ctlLive(who)
+    const rec = this.teams.get(teamId)
+    const ctx = this.flowCtx(teamId)
+    if (!l || l.teamId !== teamId || !rec) return { ok: false, error: 'forbidden' }
+    if (!ctx) return { ok: false, error: 'untrusted' }
+    let incoming = 0
+    try {
+      incoming = Buffer.byteLength(JSON.stringify(call.params ?? {}), 'utf8')
+    } catch {
+      return { ok: false, error: 'bad_request' }
+    }
+    if (rec.store.lastBytes + incoming > TEAM_STATE_MAX_BYTES) return { ok: false, error: 'cap', full: 'state' }
+    const actor: Actor & { kind: 'agent' } = { kind: 'agent', agentId: l.agent.id, runId: l.run.id, roleKind: l.agent.roleKind }
+    const res = applyTool(rec.store.rt, actor, call, ctx)
+    if (!res.ok) return res
+    const p = call.params ?? {}
+    const created = (res.result as { id?: unknown } | undefined)?.id
+    const taskId = [p.task, p.target, created].find((x): x is string => typeof x === 'string' && TASK_ID_RE.test(x))
+    const out = this.commit(teamId, res, changedScopes(rec.store.rt, res.rt), taskId ? { taskId } : undefined)
+    if (out.ok) {
+      this.noteTeamWrite(l.run.id)
+      this.deps.log(`run ${l.run.id} ${call.method}${call.viaBlock ? ' (block)' : ''}`)
+    }
+    return out
   }
 
   private sendRun(evt: TeamRunAppendEvt): void {
@@ -1530,6 +1718,8 @@ export class TeamService implements TeamInternals {
     // Its orphans' cards went with the folder; a team set up again on the repo starts without them.
     this.lingering.delete(teamId)
     this.reapedAtLoad.delete(teamId)
+    // Its archive went to the trash too: a team set up again (same id) counts its own archived comments.
+    for (const k of [...this.archivedCounts.keys()]) if (k.startsWith(`${teamId}|`)) this.archivedCounts.delete(k)
     this.trust.forget(rec.entry.repoRoot, teamId)
     this.loader.forget(rec.entry.repoRoot)
     this.emit(teamId, ['list'])

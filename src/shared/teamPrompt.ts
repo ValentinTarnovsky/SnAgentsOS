@@ -33,7 +33,7 @@ import type {
   TaskState,
   WakeReason,
 } from './teams'
-import { PROMPT_BUDGET_BYTES, SYSTEM_BUDGET_BYTES } from './teams'
+import { PRIORITY_RANK, PROMPT_BUDGET_BYTES, SYSTEM_BUDGET_BYTES } from './teams'
 import { teamChannelText, teamToolsGuide } from './teamTools'
 
 /** Role instructions longer than this are cut with a marker (design 2.8). */
@@ -120,7 +120,7 @@ export interface BuiltPrompt {
   system: string                                   // Claude system file; '' for Codex (it is inside stdin when codexInstructions)
   stdin: string
   bytes: number
-  /** Included comments, plus omitted ones only when the run can read them (`!reportsByBlock`): a block run cannot call `snaos team task get`, so its omitted comments stay queued for a later run. */
+  /** Included comments, plus omitted ones only when the run can read them (`!reportsByBlock` and a task): a block run cannot call `snaos team task get`, and the Lead thread has no read tool, so their omitted comments stay queued for a later run. */
   deliveredCommentIds: string[]
   consumedCardIds: string[]; seenApprovalIds: string[]
   omitted: { comments: number; qaComments: number; handoff: number; boardRows: number; cards: number; bodyCut: boolean }
@@ -252,6 +252,44 @@ function commentBlock(c: PromptComment): string {
   return wrapUserText('comment', { id: c.id, author: c.author, kind: c.kind, at: iso(c.at) }, c.text)
 }
 
+/** A title of the board as quoted data: one line, the wrapper tags escaped like wrapUserText. */
+function quotedTitle(s: string): string {
+  return JSON.stringify(oneLine(s)).replace(WRAP_TAGS_RE, (_m, slash: string, name: string) => `&lt;${slash}${name}`)
+}
+
+const BOARD_STATES: readonly TaskState[] = ['todo', 'doing', 'review', 'blocked', 'done', 'cancelled']
+
+/** One open task of the Lead's board. */
+function boardRowLine(r: BoardSummary['rows'][number]): string {
+  // A blocked task names the phase it resumes to.
+  const where = r.phase === 'none' ? r.state : r.state === 'blocked' ? `blocked (in ${r.phase})` : `${r.state}/${r.phase}`
+  const extra = [r.assignee ? `assignee ${r.assignee}` : 'unassigned', r.blockedBy.length ? `blocked by ${r.blockedBy.join(', ')}` : ''].filter(Boolean).join(', ')
+  return `- ${r.id} [${r.priority}] ${where}, ${extra}: ${quotedTitle(r.title)}`
+}
+
+/**
+ * The Lead's board (B3, design 2.8): the counts, the roster, the pending
+ * approvals, the tasks to triage and the open tasks most urgent first. `rows`
+ * is the part that survived the budget (the lowest priority is cut first, and
+ * before any queued message of the user); `cut` of them were omitted.
+ */
+function boardBlock(b: BoardSummary, rows: BoardSummary['rows'], cut: number, reportsByBlock: boolean): string {
+  const lines = ['# Board']
+  const counts: Partial<Record<TaskState, number>> = b.counts ?? {}
+  lines.push(`Tasks: ${BOARD_STATES.map((s) => `${counts[s] ?? 0} ${s}`).join(', ')}.`)
+  if (b.agents.length) lines.push(`Agents: ${b.agents.map((a) => `${a.id} (${a.kind}) ${a.status}${a.taskId ? ` on ${a.taskId}` : ''}`).join('; ')}.`)
+  if (b.pendingApprovals.length) {
+    lines.push(`Waiting approvals: ${b.pendingApprovals.map((a) => `${a.id} ${a.kind}${a.taskId ? ` of ${a.taskId}` : ''}${a.small ? ' (small)' : ''}`).join('; ')}.`)
+  }
+  if (b.untriaged.length) lines.push(`Unassigned todo tasks to triage: ${b.untriaged.join(', ')}.`)
+  if (rows.length || cut) {
+    lines.push('Open tasks, most urgent first:')
+    for (const r of rows) lines.push(boardRowLine(r))
+    if (cut) lines.push(reportsByBlock ? `${cut} lower-priority open task(s) omitted.` : `${cut} lower-priority open task(s) omitted: list them with \`snaos team tasks --state open\`.`)
+  } else lines.push('There are no open tasks.')
+  return lines.join('\n')
+}
+
 /** Recovery wording of the trigger line (ported from paperclip server-utils.ts:2328-2344). */
 function triggerLine(reason: WakeReason): string {
   switch (reason) {
@@ -331,15 +369,17 @@ function phaseText(p: PhaseInput, rules: PromptInput['rules']): string {
 
 /**
  * Stdin order (plan 3.5): [Codex new thread: <team-instructions> block] 1 team goal, 2 the task, 3 repo/cwd/branch/base/main -N,
- * 4 run contract (HARD_RULES[rules] + teamChannelText(reportsByBlock, {win32})) then the phase instruction, 5 QA comments,
+ * 4 run contract (HARD_RULES[rules] + teamChannelText(reportsByBlock, {win32, provider})) then the phase instruction, 5 QA comments,
  * 5b handoff (decision 66: "You start a new session; earlier context of this task:" newest comments then the last run
  * summary, <= HANDOFF_BUDGET_BYTES), 6 queued comments, 7 resolved blockers, 8 answered cards, 9 trigger line.
  * Resumed: 4..9 only (5b never on a resume). User text is data: every comment, body, answer and request is wrapped as
  * `<comment id="m-3" author="user" at="...">...</comment>` (and `<task-body>`, `<answer>`, `<request>`) with the closing tag
  * escaped; a `sys` comment renders its en text from the key. Truncation until it fits, in this order: oldest handoff
- * comments, oldest queued comments (a line "N older comments omitted: read them with `snaos team task get <id>`", or for
- * a block run "N older comments wait for your next run"), oldest QA comments, board rows (lowest priority first),
- * answered cards beyond the newest 3, then the task body tail. Section 4, section 9 and the instructions block are never cut.
+ * comments, the Lead's board rows (lowest priority first, every one before any queued comment: the user's messages to
+ * the Lead outrank the board), oldest queued comments (a line "N older comments omitted: read them with `snaos team
+ * task get <id>`", or for a block run and the Lead thread "N older comments wait for your next run"), oldest QA
+ * comments, answered cards beyond the newest 3, then the task body tail. Section 4, section 9 and the instructions
+ * block are never cut.
  * Recovery wording of the trigger line ported from paperclip server-utils.ts:2328-2344 (line 1 header, 1.1).
  */
 export function buildRunPrompt(i: PromptInput): BuiltPrompt {
@@ -355,7 +395,12 @@ export function buildRunPrompt(i: PromptInput): BuiltPrompt {
   let body = i.task?.body ?? ''
   let bodyCut = false
   const omitted = { comments: 0, qaComments: 0, handoff: 0, boardRows: 0, cards: 0, bodyCut: false }
-  const target = i.task?.id ?? 'lead'
+  // Omitted queued comments are delivered only to a run that can read them back (`snaos team task get <task>`): a block
+  // run and a run without a task (the Lead thread has no read tool) leave them queued for a later run.
+  const readsBack = !i.reportsByBlock && i.task !== undefined
+  // The Lead's open tasks, most urgent first (stable inside a band): the budget cuts from the end.
+  const board = i.phase.mode === 'lead' ? i.phase.board : null
+  let boardRows = board ? [...board.rows].sort((a, b) => (PRIORITY_RANK[a.priority] ?? 2) - (PRIORITY_RANK[b.priority] ?? 2)) : []
 
   const render = (): string => {
     const sections: string[] = []
@@ -376,7 +421,8 @@ export function buildRunPrompt(i: PromptInput): BuiltPrompt {
       if (w.behindMain !== undefined && w.behindMain > 0) where.push(`Your branch is ${w.behindMain} commit(s) behind its base.`)
       sections.push(where.join('\n'))
     }
-    sections.push(`# Your run\n${HARD_RULES[i.rules]}\n\n${teamChannelText(i.reportsByBlock, { win32: i.win32 })}\n\n${phaseText(i.phase, i.rules)}`)
+    sections.push(`# Your run\n${HARD_RULES[i.rules]}\n\n${teamChannelText(i.reportsByBlock, { win32: i.win32, provider: i.provider })}\n\n${phaseText(i.phase, i.rules)}`)
+    if (board) sections.push(boardBlock(board, boardRows, omitted.boardRows, i.reportsByBlock))
     if (qa.length || omitted.qaComments) {
       const lines = ['# QA review comments']
       if (omitted.qaComments) lines.push(`${omitted.qaComments} older review comment(s) omitted.`)
@@ -392,9 +438,9 @@ export function buildRunPrompt(i: PromptInput): BuiltPrompt {
       const lines = ['# New comments for you']
       if (omitted.comments) {
         lines.push(
-          i.reportsByBlock
-            ? `${omitted.comments} older comment(s) wait for your next run.`
-            : `${omitted.comments} older comment(s) omitted: read them with \`snaos team task get ${target}\`.`,
+          readsBack
+            ? `${omitted.comments} older comment(s) omitted: read them with \`snaos team task get ${i.task?.id}\`.`
+            : `${omitted.comments} older comment(s) wait for your next run.`,
         )
       }
       sections.push([...lines, ...queued.map(commentBlock)].join('\n'))
@@ -408,14 +454,34 @@ export function buildRunPrompt(i: PromptInput): BuiltPrompt {
   }
 
   let stdin = render()
-  // Truncation order of design 2.8; each step drops one item and measures again.
+  // Truncation order of design 2.8 (the Lead's board rows ahead of its queued comments); each step measures again.
   for (let guard = 0; utf8Length(stdin) > budget && guard < 100_000; guard++) {
     if (handoff.length) {
       handoff = handoff.slice(1)
       omitted.handoff++
+    } else if (boardRows.length) {
+      // The board gives way before what the user wrote to the Lead: a Lead run cannot read an omitted message back
+      // (its thread stays queued and the next run would cut it again), while any row it lost is one `team tasks` away.
+      // As many of the lowest rows as the excess measures, in one step: a full board (2000 tasks) re-rendered once
+      // per row would block main for seconds. The omitted line it adds may cost one more row on the next pass.
+      let over = utf8Length(stdin) - budget
+      let keep = boardRows.length
+      do {
+        keep--
+        over -= utf8Length(boardRowLine(boardRows[keep])) + 1
+        omitted.boardRows++
+      } while (over > 0 && keep > 0)
+      boardRows = boardRows.slice(0, keep)
     } else if (queued.length) {
-      queued = queued.slice(1)
-      omitted.comments++
+      // Oldest first, as many as the excess measures (up to 200 queued comments: one render each would block main).
+      let over = utf8Length(stdin) - budget
+      let drop = 0
+      do {
+        over -= utf8Length(commentBlock(queued[drop])) + 1
+        drop++
+      } while (over > 0 && drop < queued.length)
+      queued = queued.slice(drop)
+      omitted.comments += drop
     } else if (qa.length) {
       qa = qa.slice(1)
       omitted.qaComments++
@@ -432,7 +498,7 @@ export function buildRunPrompt(i: PromptInput): BuiltPrompt {
   }
 
   const includedQueued = new Set(queued.map((c) => c.id))
-  const delivered = i.reportsByBlock ? i.queued.filter((c) => includedQueued.has(c.id)).map((c) => c.id) : i.queued.map((c) => c.id)
+  const delivered = readsBack ? i.queued.map((c) => c.id) : i.queued.filter((c) => includedQueued.has(c.id)).map((c) => c.id)
   const seenApprovalIds = i.phase.mode === 'lead' ? i.phase.board.pendingApprovals.map((a) => a.id) : []
   return {
     system: i.provider === 'claude' ? system : '',

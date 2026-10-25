@@ -55,6 +55,8 @@ import { chatMessageOffset, type ChatBlock, type ChatMessage, type ChatUnavailab
 import { NEEDS_TEXT_MAX, type AgentProvider, type ClaudePaneState, type ConfigFile, type PaneStatusEvt, type PaneType } from '@shared/types'
 import { digestLine, toolFamilyKey, type ToolFamily } from '@shared/toolActivity'
 import { redactCredentials } from '@shared/redact'
+import { TEAM_READS_PER_MIN, TEAM_WRITES_PER_MIN } from '@shared/teams'
+import { teamTool, type TeamCtlMethod } from '@shared/teamTools'
 import type { PtySubmitRes, UsageSnapshot } from '@shared/ipc-contract'
 import type { AccountsOpError } from '@shared/claude-accounts'
 import { readPage } from '../chat/TranscriptWatcher'
@@ -62,7 +64,7 @@ import { decoderFor } from '../chat/ChatHub'
 import type { LocateResult } from '../chat/TranscriptLocator'
 import { mainTLang } from '../i18n'
 import type { BusResult, RendererBus } from './rendererBus'
-import type { CtlCaller } from './CtlTokens'
+import type { CtlCaller, CtlTeamCaller } from './CtlTokens'
 
 /** The PtyManager surface the CLI uses. */
 export interface CtlPtyView {
@@ -146,6 +148,15 @@ export interface CtlAccountsView {
 }
 
 /**
+ * App 2.7.0 (Teams, design 3.9): `snaos team` of a team run. TeamService's
+ * ctlView (teams/teamCtl.ts) checks the params, the role and the run, applies
+ * the call to the store and maps its errors; the gate and the budgets stay here.
+ */
+export interface CtlTeamsView {
+  handle(method: TeamCtlMethod, params: Record<string, unknown>, who: CtlTeamCaller): Promise<CtlResponse>
+}
+
+/**
  * Main services the CLI reaches once bootstrap built them (CliService.attach).
  * Each is optional: a missing one answers `disabled`.
  */
@@ -154,6 +165,7 @@ export interface CtlServices {
   chat?: CtlChatView
   usage?: CtlUsageView
   accounts?: CtlAccountsView
+  teams?: CtlTeamsView
 }
 
 export interface CtlHandlerDeps {
@@ -321,7 +333,7 @@ export class CtlHandlers {
     if (caller?.team) {
       if (method !== 'ping' && method !== 'usage' && !method.startsWith('team.')) return err('forbidden', 'a team agent may only use snaos team, ping and usage')
     } else if (method.startsWith('team.')) return err('forbidden', 'snaos team works only inside a team run')
-    if (method.startsWith('team.')) return err('disabled', 'snaos team is not available in this build')
+    if (method.startsWith('team.')) return this.team(method as TeamCtlMethod, params, caller)
     switch (method) {
       case 'ping':
         return ok({ pong: true, appVersion: this.deps.appVersion, protocol: CTL_PROTOCOL_VERSION, self: caller?.paneId ?? null })
@@ -830,6 +842,21 @@ export class CtlHandlers {
     if (!this.deps.status.setNeeds(paneId, text)) return err('not_found', 'that console is not running')
     const out: CtlNeedsResult = { paneId, needs: text }
     return ok(out)
+  }
+
+  /**
+   * App 2.7.0 (Teams, design 5.1): `snaos team` of a team run (the gate in handle() let only a team caller through).
+   * Budgets per run (`team:<runId>`, freed by forgetCaller at revoke): 120 reads and 60 writes a minute.
+   */
+  private async team(method: TeamCtlMethod, params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const teams = this.services().teams
+    if (!teams) return err('disabled', 'snaos team is not available in this build')
+    const spec = teamTool(method)
+    if (!spec || !caller?.team) return err('bad_request', 'unknown method')
+    const write = spec.write
+    if (!this.take(write ? 'teamWrite' : 'teamRead', caller, write ? TEAM_WRITES_PER_MIN : TEAM_READS_PER_MIN))
+      return err('rate_limited', `at most ${TEAM_READS_PER_MIN} team reads and ${TEAM_WRITES_PER_MIN} team writes per minute and run: wait a minute`)
+    return teams.handle(spec.method, params, caller.team)
   }
 
   private async notify(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {

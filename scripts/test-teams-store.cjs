@@ -12,6 +12,15 @@
 // setup preview and write, adopt, the trust gate, a changed definition flipped by
 // the defwatch deadline, a misnamed role file, extra repos through repoOf, Labs
 // off with zero deadline keys, remove, settings, reveal and the IPC register.
+// B3 additions: the task and comment reducers through a strict TeamStore (create
+// with blockers and cycles, a cycle naming its loop, blocked{deps} on create, a cancelled
+// blocker card, userOwned reject whole, a Lead blocker edit that would move a task the user
+// placed refused with user_owned [state], "Lead decides" releasing the assignee, the Lead's
+// block recorded as by lead and kept by state.json, baseRev conflict with current, a move
+// with an active run answers running and with stopRun stops it, comment recipients and the
+// queue, caps and the archive), applyTool (roles, params, liveness), the board page and its
+// cursor (2000 tasks, half blocked{deps}, under 50 ms), the Lead's board summary, and the
+// board ops through TeamService.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -41,6 +50,12 @@ export { PHONE_TEAM_OPS } from './src/shared/team-protocol'
 export { defaultDraft, renderTeamFiles, canonicalDefText, parseDefinition } from './src/shared/teamDefinition'
 export * from './src/main/teams/flow/agents'
 export * from './src/main/teams/flow/invariants'
+export * from './src/main/teams/flow/tasks'
+export { applyTool } from './src/main/teams/flow/tools'
+export { admitRun, markStarting, markRunning, requestStop } from './src/main/teams/flow/runs'
+export { boardPage, taskSummary, taskDetail, boardSummaryOf, leadView, commentPage, commentView, compareTaskOrder, BOARD_DONE_PAGE } from './src/main/teams/views'
+export { finishRun } from './src/main/teams/flow/runs'
+export { createClaudeStreamParser } from './src/main/teams/parsers/claudeStream'
 export { TeamStore, salvageRuntime, TEAM_FLUSH_MS } from './src/main/teams/TeamStore'
 export { TeamRegistry, teamIdOf, resolveMainRoot } from './src/main/teams/TeamRegistry'
 export { TeamDefinitionLoader } from './src/main/teams/TeamDefinitionLoader'
@@ -222,6 +237,361 @@ function flowChecks() {
   check(M.assertInvariants(rt, def1, { prev: rt }).length === 0, 'I15 holds for the same rt')
 }
 function same0(a, b) { return JSON.stringify(a) === JSON.stringify(b) }
+
+// ---- 2b. B3: tasks, comments, tools and the board views ------------------------------------------
+/** An in-memory SyncFs: the strict store below flushes into it on every commit (live() is false). */
+function memFs() {
+  const files = new Map()
+  const nf = () => Object.assign(new Error('missing'), { code: 'ENOENT' })
+  return {
+    files,
+    readFileSync: (p) => { if (!files.has(p)) throw nf(); return files.get(p) },
+    writeFileSync: (p, d) => { files.set(p, String(d)) },
+    renameSync: (a, b) => { if (!files.has(a)) throw nf(); files.set(b, files.get(a)); files.delete(a) },
+    mkdirSync: () => undefined,
+    rmSync: (p) => { files.delete(p) },
+    appendFileSync: (p, d) => { files.set(p, (files.get(p) ?? '') + d) },
+    statSync: (p) => ({ size: (files.get(p) ?? '').length }),
+  }
+}
+
+function boardChecks() {
+  const teamId = 'tm-0123456789ab'
+  const def = defOf([role('lead', 'lead'), role('dev', 'dev', 2), role('qa', 'qa'), role('research', 'research')])
+  const clock = { now: 1_800_000_000_000 }
+  let runSeq = 0
+  const ctx = () => ({ now: clock.now, def, newRunId: () => `r-${String(++runSeq).padStart(12, '0')}`, newSessionId: () => `0000000${runSeq}-0000-4000-8000-000000000000` })
+  const timer = new M.DeadlineTimer(() => undefined, { now: () => clock.now, setTimeout: () => 0, clearTimeout: () => undefined })
+  // A strict store: every commit is deep-frozen and asserts I1..I22 (a broken invariant throws).
+  const mfs = memFs()
+  const storeDeps = { dir: () => `/mem/${teamId}`, emit: () => undefined, timer, live: () => false, now: () => clock.now, fs: mfs, log: () => undefined, strict: true, newGen: () => 'cafebabe' }
+  const { store } = M.TeamStore.load(storeDeps, teamId, def)
+  const commit = (res, label) => { check(res.ok, `${label} (${res.ok ? 'ok' : res.error})`); return store.commit(res, ['board']) }
+  commit(M.reconcileAgents(store.rt, ctx()), 'the roster')
+  const user = { kind: 'user', via: 'desktop' }
+  const lead = { kind: 'agent', agentId: 'lead', runId: 'r-0000000000ff', roleKind: 'lead' }
+  const task = (id) => store.rt.tasks.find((t) => t.id === id)
+  const v = { def: def.def, needs: [] }
+  const tick = () => { clock.now += 1000 }
+
+  // T1: create, defaults, what the user owns.
+  let r = M.createTask(store.rt, user, { title: '  Login con Google  ' }, ctx())
+  commit(r, 'a user create')
+  const t1 = task('t-1')
+  check(t1.title === 'Login con Google' && t1.rev === 1 && t1.state === 'todo' && t1.phase === 'none' && t1.priority === 'normal' && t1.isolation === 'worktree' && t1.needsPlan === true && t1.repoId === 'main' && t1.review.max === 3, 'create: trimmed title, rev 1, todo; defaults normal, worktree, a plan first, main')
+  same(t1.userOwned, ['title'], 'a user create owns the fields it filled')
+  check(r.effects.some((e) => e.kind === 'dispatch'), 'a create pokes the dispatcher')
+  tick()
+  commit(M.createTask(store.rt, user, { title: 'Sync', priority: 'high', assignee: 'dev', needsPlan: false, isolation: 'main', body: 'cuerpo' }, ctx()), 'a user create with fields')
+  same(task('t-2').userOwned, ['title', 'body', 'priority', 'assignee', 'isolation', 'needsPlan'], 'every filled field is the user\'s, in TASK_FIELDS order')
+  same(M.createTask(store.rt, user, { title: '   ' }, ctx()).error, 'bad_request', 'a blank title')
+  same(M.createTask(store.rt, user, { title: 'x', assignee: 'lead' }, ctx()).error, 'bad_request', 'the Lead is never an assignee')
+  same(M.createTask(store.rt, user, { title: 'x', assignee: 'ghost' }, ctx()).error, 'not_found', 'an unknown assignee')
+  same(M.createTask(store.rt, user, { title: 'x', repoId: 'other' }, ctx()).error, 'bad_request', 'a repo the definition does not name')
+  same(M.createTask(store.rt, user, { title: 'x', body: 'a\u0007b' }, ctx()).error, 'bad_request', 'a control character in the body')
+
+  // Blockers: blocked{deps} on create, unknown, self, cycle, a cancelled blocker.
+  tick()
+  r = M.createTask(store.rt, lead, { title: 'Tests del sync', blockedBy: ['t-2', 't-1', 't-2'] }, ctx())
+  commit(r, 'a create with blockers')
+  const t3 = task('t-3')
+  check(t3.state === 'blocked' && t3.phase === 'none' && t3.blocked.reason.kind === 'deps' && t3.blocked.resume.state === 'todo' && t3.blocked.resume.phase === 'none', 'blockers not done: created blocked{deps}, resuming to todo')
+  same(t3.blockedBy, ['t-2', 't-1'], 'a repeated blocker is dropped, the order kept')
+  same(t3.userOwned, [], 'an agent create owns nothing')
+  same(M.taskSummary(store.rt, t3, v).blocked, { kind: 'deps', waitingOn: ['t-2', 't-1'] }, 'the card names what it waits on')
+  same(M.createTask(store.rt, lead, { title: 'x', blockedBy: ['t-99'] }, ctx()).error, 'not_found', 'an unknown blocker')
+  // A cycle names its loop (`current`, the path from the task back to itself): teamCtl prints it for the agent.
+  same(json(M.updateTask(store.rt, user, 't-1', { blockedBy: ['t-3'] }, 1, ctx())), { ok: false, error: 'cycle', current: ['t-1', 't-3', 't-1'] }, 't-1 waiting on t-3, which waits on t-1: cycle, with the loop')
+  same(M.blockersCycle(store.rt.tasks, 't-2', ['t-3']), ['t-2', 't-3', 't-2'], 'blockersCycle follows the live edges and returns the loop')
+  same(M.blockersCycle(store.rt.tasks, 't-3', ['t-1']), null, 'no loop: null')
+  const chain = [{ id: 't-1', blockedBy: [] }, { id: 't-2', blockedBy: ['t-1'] }, { id: 't-3', blockedBy: ['t-2'] }, { id: 't-4', blockedBy: ['t-3', 't-2'] }]
+  same(M.blockersCycle(chain, 't-1', ['t-4']), ['t-1', 't-4', 't-2', 't-1'], 'a longer loop names its middle tasks, a shortest one')
+  same(M.updateTask(store.rt, user, 't-1', { blockedBy: ['t-1'] }, 1, ctx()).error, 'bad_request', 'a task never waits on itself')
+  tick()
+  commit(M.createTask(store.rt, user, { title: 'Descartada' }, ctx()), 'create t-4')
+  commit(M.moveTask(store.rt, user, 't-4', 'cancelled', task('t-4').rev, {}, ctx()), 'cancel t-4')
+  check(task('t-4').state === 'cancelled' && task('t-4').userOwned.includes('state'), 'a user cancel owns the state')
+  same(M.moveTask(store.rt, user, 't-4', 'todo', task('t-4').rev, {}, ctx()).error, 'bad_request', 'a cancelled task stays cancelled')
+  tick()
+  commit(M.createTask(store.rt, lead, { title: 'Depende de la descartada', blockedBy: ['t-4'] }, ctx()), 'a create on a cancelled blocker')
+  const card5 = store.rt.cards.find((c) => c.taskId === 't-5')
+  check(task('t-5').state === 'blocked' && card5 && card5.state === 'open' && card5.from.why === 'depCancelled' && card5.from.actions.includes('dropBlocker') && card5.from.vars.blockers === 't-4', 'a cancelled blocker: blocked with a depCancelled card')
+  commit(M.updateTask(store.rt, user, 't-3', { blockedBy: [] }, task('t-3').rev, ctx()), 'clear the blockers')
+  check(task('t-3').state === 'todo' && !task('t-3').blocked && task('t-3').userOwned.includes('blockedBy'), 'clearing the blockers resumes it to todo and makes blockedBy the user\'s')
+
+  // userOwned: the user's re-prioritization survives the Lead's next update (B3 acceptance).
+  const rev3 = task('t-3').rev
+  commit(M.moveTask(store.rt, user, 't-3', 'todo', rev3, { priority: 'urgent' }, ctx()), 'a band drop')
+  check(task('t-3').priority === 'urgent' && task('t-3').rev === rev3 + 1 && task('t-3').userOwned.includes('priority'), 'a band drop sets the priority (rev + 1) and owns it')
+  const refused = M.updateTask(store.rt, lead, 't-3', { priority: 'low', title: 'Tests del sync (v2)' }, undefined, ctx())
+  same(json(refused), { ok: false, error: 'user_owned', fields: ['priority'] }, 'the Lead touching an owned field is refused whole')
+  check(task('t-3').title === 'Tests del sync' && task('t-3').priority === 'urgent', 'and nothing changed: the user\'s priority holds')
+  commit(M.updateTask(store.rt, lead, 't-3', { title: 'Tests del sync (v2)', priority: 'urgent' }, undefined, ctx()), 'a Lead edit of free fields')
+  check(task('t-3').title === 'Tests del sync (v2)' && task('t-3').userOwned.join() === 'priority,blockedBy', 'a free field and an owned one at its own value pass; nothing becomes the user\'s')
+  commit(M.releaseOwned(store.rt, 't-3', ['priority'], { now: clock.now }), 'release the priority')
+  commit(M.updateTask(store.rt, lead, 't-3', { priority: 'low' }, undefined, ctx()), 'the Lead after the release')
+  check(task('t-3').priority === 'low', 'handed back, the Lead may change it')
+
+  // A side effect counts too: a blocker edit of the Lead never moves a task whose state the user owns (refused whole).
+  tick()
+  commit(M.createTask(store.rt, lead, { title: 'Pantalla de notas', blockedBy: ['t-1'] }, ctx()), 'a Lead task waiting on t-1')
+  const placed = store.rt.tasks.at(-1).id
+  commit(M.moveTask(store.rt, user, placed, 'todo', task(placed).rev, {}, ctx()), 'the user starts it now anyway')
+  check(task(placed).state === 'todo' && task(placed).userOwned.includes('state'), 'pulled out of blocked{deps} by hand: todo, its state the user\'s')
+  const placedBefore = task(placed)
+  same(json(M.updateTask(store.rt, lead, placed, { blockedBy: ['t-1', 't-2'] }, undefined, ctx())), { ok: false, error: 'user_owned', fields: ['state'] }, 'the Lead adding a blocker that would block it again: user_owned [state]')
+  same(json(M.updateTask(store.rt, lead, placed, { blockedBy: ['t-2'], title: 'Pantalla de notas v2' }, undefined, ctx())), { ok: false, error: 'user_owned', fields: ['state'] }, 'refused whole: a free field in the same call does not land either')
+  check(task(placed) === placedBefore && task(placed).state === 'todo', 'and nothing changed: the user\'s todo holds')
+  tick()
+  commit(M.createTask(store.rt, lead, { title: 'Exportar notas' }, ctx()), 'a Lead task')
+  const free = store.rt.tasks.at(-1).id
+  commit(M.updateTask(store.rt, lead, free, { blockedBy: ['t-1'] }, undefined, ctx()), 'the Lead blocks it on t-1')
+  check(task(free).state === 'blocked' && task(free).blocked.reason.kind === 'deps', 'a state nobody owns: the Lead\'s blocker edit still moves it to blocked{deps}')
+
+  // "Lead decides" (assignee null) hands the assignee back to the Lead instead of fixing it to nobody.
+  commit(M.updateTask(store.rt, user, free, { assignee: 'dev' }, task(free).rev, ctx()), 'the user assigns it')
+  check(task(free).assignee === 'dev' && task(free).userOwned.includes('assignee'), 'a user assignee is the user\'s')
+  commit(M.updateTask(store.rt, user, free, { assignee: null, priority: 'high' }, task(free).rev, ctx()), '"Lead decides" with a priority')
+  check(task(free).assignee === undefined && !task(free).userOwned.includes('assignee') && task(free).userOwned.includes('priority'), '"Lead decides" clears the assignee and releases it; the other field it set stays the user\'s')
+  commit(M.updateTask(store.rt, lead, free, { assignee: 'dev-2' }, undefined, ctx()), 'the Lead assigns it next')
+  check(task(free).assignee === 'dev-2', 'so the Lead decides')
+
+  // The Lead's block says so: `by: 'lead'`, never read as the user's own; it survives a reload.
+  tick()
+  commit(M.createTask(store.rt, lead, { title: 'Buscar notas' }, ctx()), 'a Lead task')
+  const parked = store.rt.tasks.at(-1).id
+  commit(M.updateTask(store.rt, lead, parked, { state: 'blocked' }, undefined, ctx()), 'the Lead parks it (--state blocked)')
+  same(task(parked).blocked.reason, { kind: 'user', by: 'lead' }, 'the Lead\'s block records who: by lead')
+  same(M.taskSummary(store.rt, task(parked), v).blocked, { kind: 'user', by: 'lead' }, 'the card reads it was the Lead')
+  check(!task(parked).userOwned.includes('state'), 'and the state stays nobody\'s')
+  const reloaded = M.TeamStore.load(storeDeps, teamId, def).store.rt.tasks.find((t) => t.id === parked)
+  same(reloaded.blocked.reason, { kind: 'user', by: 'lead' }, 'state.json keeps by lead (the schema does not strip it)')
+  commit(M.moveTask(store.rt, user, parked, 'blocked', task(parked).rev, { text: 'Lo veo yo' }, ctx()), 'the user blocks it too')
+  same(M.taskSummary(store.rt, task(parked), v).blocked, { kind: 'user', text: 'Lo veo yo', by: 'user' }, 'a user move over the Lead\'s block makes it the user\'s')
+  check(task(parked).userOwned.includes('state') && task(parked).blocked.reason.by === undefined, 'with the state the user\'s')
+  commit(M.updateTask(store.rt, lead, parked, { blockedBy: ['t-1'] }, undefined, ctx()), 'a Lead blocker edit that moves nothing')
+  check(task(parked).state === 'blocked' && task(parked).blocked.reason.kind === 'user' && task(parked).blockedBy.join() === 't-1', 'a blocker edit that leaves the user\'s state where it is passes')
+
+  // baseRev.
+  const stale = M.updateTask(store.rt, user, 't-1', { title: 'Otro' }, 0, ctx())
+  check(!stale.ok && stale.error === 'conflict' && stale.reason === 'rev' && stale.current.id === 't-1' && stale.current.rev === 1, 'a stale baseRev: conflict {rev} with the current task')
+  same(M.moveTask(store.rt, user, 't-1', 'blocked', 0, {}, ctx()).reason, 'rev', 'moveTask checks the baseRev too')
+  same(M.updateTask(store.rt, lead, 't-1', { body: 'x' }, 7, ctx()).reason, 'rev', 'an agent --rev that does not match')
+
+  // A move with an active run: running without stopRun; stopRun stops it (decision 37).
+  const runReq = (agentId, taskId, mode) => ({ agentId, taskId, sessionKey: taskId ?? (mode === 'lead' ? 'lead' : 'free'), mode, reason: 'assigned', since: clock.now, priority: 'normal', approved: true, bypassCooldown: false })
+  const admit = (agentId, taskId, mode, profile) =>
+    commit(M.admitRun(store.rt, runReq(agentId, taskId, mode), { sessionKey: taskId ?? (mode === 'lead' ? 'lead' : 'free'), resume: null, cwd: 'C:\\repo', profile, sysHash: 'h' }, ctx()), `admit ${agentId}`).result.run.id
+  const start = (runId) => commit(M.markStarting(store.rt, runId, { pid: 4242, delivered: { comments: [], cards: [], approvals: [] } }, ctx()), `start ${runId}`)
+  const finish = (runId) => {
+    const facts = M.createClaudeStreamParser().facts({ code: 0 }, '', {}, clock.now)
+    commit(M.finishRun(store.rt, runId, { at: clock.now, exit: { code: 0, signal: null }, facts, teamWrites: 0 }, {}, { now: clock.now }), `finish ${runId}`)
+  }
+  let rid = admit('dev', 't-2', 'exec', 'total')
+  check(task('t-2').state === 'doing' && task('t-2').phase === 'executing' && task('t-2').frozen === true, 'admitted: doing/executing and frozen')
+  same(M.moveTask(store.rt, user, 't-2', 'todo', task('t-2').rev, {}, ctx()).error, 'running', 'a move with an active run and no stopRun: running')
+  same(M.updateTask(store.rt, user, 't-2', { assignee: 'dev-2' }, task('t-2').rev, ctx()).error, 'running', 'a new assignee under a run: the user stops it first')
+  same(M.updateTask(store.rt, lead, 't-2', { assignee: 'dev-2' }, undefined, ctx()).error, 'busy', 'and the Lead gets busy')
+  same(M.updateTask(store.rt, user, 't-2', { isolation: 'worktree' }, task('t-2').rev, ctx()).error, 'bad_request', 'isolation is fixed once admitted (frozen)')
+  r = M.moveTask(store.rt, user, 't-2', 'todo', task('t-2').rev, { stopRun: true }, ctx())
+  commit(r, 'a move with stopRun (queued run)')
+  const ended = r.effects.find((e) => e.kind === 'ended')
+  check(store.rt.activeRuns.length === 0 && store.rt.agents.find((a) => a.id === 'dev').status === 'idle' && ended && ended.run.state === 'cancelled' && ended.run.stopReason === 'taskMoved', 'a queued run ends at once: cancelled, taskMoved')
+  check(task('t-2').state === 'todo' && task('t-2').phase === 'none' && task('t-2').userOwned.includes('state'), 'the task is in todo and its state the user\'s')
+  rid = admit('dev', 't-2', 'exec', 'total')
+  start(rid)
+  commit(M.markRunning(store.rt, rid, { at: clock.now }, ctx()), 'running')
+  r = M.moveTask(store.rt, user, 't-2', 'blocked', task('t-2').rev, { stopRun: true, text: 'Esper\u00E1 al dise\u00F1o' }, ctx())
+  commit(r, 'a block with stopRun (running run)')
+  check(store.rt.activeRuns[0].state === 'stopping' && store.rt.activeRuns[0].stopReason === 'taskMoved' && r.effects.some((e) => e.kind === 'stopRun' && e.runId === rid), 'a running run turns stopping (taskMoved) and its tree is signalled')
+  same(task('t-2').blocked, { reason: { kind: 'user', text: 'Esper\u00E1 al dise\u00F1o' }, resume: { state: 'doing', phase: 'executing' }, at: clock.now }, 'blocked{user} with the text, resuming to doing/executing')
+  finish(rid)
+  check(store.rt.activeRuns.length === 0 && task('t-2').state === 'blocked', 'the stopped run ends and the task stays blocked')
+  commit(M.resumeTask(store.rt, user, 't-2', ctx()), 'resume t-2')
+  same([task('t-2').state, task('t-2').phase, task('t-2').next?.agentId, task('t-2').next?.mode, task('t-2').next?.reason, task('t-2').next?.bypassCooldown], ['doing', 'executing', 'dev', 'exec', 'retry', true], 'resumeTask: back to doing/executing with a retry level for the assignee')
+  same(M.resumeTask(store.rt, user, 't-2', ctx()).error, 'conflict', 'only a blocked task resumes')
+
+  // Comments: recipient at write time, the queue, delivery (4.5).
+  const devActor = { kind: 'agent', agentId: 'dev', runId: rid, roleKind: 'dev' }
+  r = M.addComment(store.rt, user, 't-2', 'Us\u00E1 la API v2', 'comment', { now: clock.now })
+  commit(r, 'a user comment')
+  const m1 = r.result.comment
+  check(m1.id === 'm-1' && m1.forAgent === 'dev' && m1.deliveredRunId === undefined && r.effects.some((e) => e.kind === 'dispatch'), 'a user comment on an assigned task is queued for its assignee and pokes')
+  check(M.taskSummary(store.rt, task('t-2'), v).queued === 1 && M.taskSummary(store.rt, task('t-2'), v).comments === 1, 'the card counts it, queued')
+  // The view carries the recipient fixed at write time: "Queued for dev" stays true after a reassignment.
+  const cv = M.commentView(store.rt, def.def, m1)
+  check(cv.queued && cv.recipient === 'dev' && cv.recipientName === 'dev' && M.commentView(store.rt, def.def, { ...m1, forAgent: 'dev-2' }).recipientName === 'dev 2', 'CommentView: the recipient and its name (role name, then the index)', cv)
+  const moved = { ...store.rt, tasks: store.rt.tasks.map((t) => (t.id === 't-2' ? { ...t, assignee: 'dev-2' } : t)) }
+  const cvMoved = M.commentView(moved, def.def, m1)
+  check(cvMoved.recipient === 'dev' && cvMoved.recipientName === 'dev' && M.taskDetail(moved, moved.tasks.find((t) => t.id === 't-2'), { ...v, trusted: def, recent: [] }).comments.find((c) => c.id === 'm-1').recipient === 'dev', 'after a reassignment to dev-2 the view still names dev (the task drawer too)', cvMoved)
+  check(!('recipient' in M.commentView(store.rt, def.def, { ...m1, forAgent: undefined })) && !('recipientName' in M.commentView(store.rt, def.def, { ...m1, forAgent: undefined })), 'a comment for nobody has no recipient')
+  r = M.addComment(store.rt, devActor, 't-2', 'Listo el endpoint', 'comment', { now: clock.now })
+  commit(r, 'an own comment')
+  check(r.result.comment.forAgent === undefined && !r.effects.some((e) => e.kind === 'dispatch'), 'an agent comment on its own task wakes nobody')
+  check(M.addComment(store.rt, { kind: 'agent', agentId: 'dev-2', runId: 'r-0000000000aa', roleKind: 'dev' }, 't-2', 'Ojo con el cache', 'comment', { now: clock.now }).result.comment.forAgent === 'dev', 'another agent\'s comment goes to the task\'s recipient')
+  const qaRt = { ...store.rt, tasks: store.rt.tasks.map((t) => (t.id === 't-2' ? { ...t, state: 'review', phase: 'qa', review: { ...t.review, qaAgentId: 'qa' } } : t)) }
+  check(M.recipientOf(qaRt, 't-2', devActor) === 'qa' && M.recipientOf(qaRt, 't-2', { kind: 'agent', agentId: 'qa', runId: 'r-0000000000bb', roleKind: 'qa' }) === undefined, 'phase qa: comments go to its QA agent, never to the author')
+  r = M.addComment(store.rt, user, 'lead', 'Prioriz\u00E1 el login', 'comment', { now: clock.now })
+  commit(r, 'a message to the Lead')
+  check(r.result.comment.forAgent === 'lead', 'a user message in the Lead thread is for the Lead')
+  check(M.addComment(store.rt, lead, 'lead', 'Anotado', 'comment', { now: clock.now }).result.comment.forAgent === undefined && M.addComment(store.rt, devActor, 'lead', 'hola', 'comment', { now: clock.now }).result.comment.forAgent === undefined, 'agent comments in the Lead thread never wake the Lead (risk 10)')
+  check(M.addComment(store.rt, user, 't-4', 'x', 'comment', { now: clock.now }).result.comment.forAgent === undefined, 'a cancelled task: nobody')
+  same(M.addComment(store.rt, user, 't-99', 'x', 'comment', { now: clock.now }).error, 'not_found', 'an unknown target')
+  same(M.addComment(store.rt, user, 't-2', '  \n ', 'comment', { now: clock.now }).error, 'bad_request', 'an empty comment')
+  check(M.addComment(store.rt, user, 't-2', 'a\r\nb', 'comment', { now: clock.now }).result.comment.text === 'a\nb', 'CRLF is stored as LF')
+  commit(M.deliverComments(store.rt, rid, 'dev', ['m-1']), 'deliver')
+  check(store.rt.comments['t-2'][0].deliveredRunId === rid && M.taskSummary(store.rt, task('t-2'), v).queued === 0, 'deliverComments: delivered to that run, no longer queued')
+  check(M.deliverComments(store.rt, rid, 'dev-2', ['m-1']).rt === store.rt, 'another agent never takes it')
+
+  // Caps: comments archive the oldest delivered; tasks archive old done first; the id ceilings.
+  const full = (queued) => ({ ...store.rt, comments: { ...store.rt.comments, 't-1': Array.from({ length: 200 }, (_, i) => ({ id: `m-${100 + i}`, target: 't-1', author: user, kind: 'comment', at: i, text: 'x', ...(queued ? { forAgent: 'dev' } : {}) })) }, nextIds: { ...store.rt.nextIds, comment: 400 } })
+  r = M.addComment(full(false), user, 't-1', 'otro', 'comment', { now: clock.now })
+  const arch = r.effects.find((e) => e.kind === 'archiveComments')
+  check(r.ok && r.rt.comments['t-1'].length === 200 && arch && arch.target === 't-1' && arch.comments.length === 1 && arch.comments[0].id === 'm-100', 'over TASK_COMMENTS_MAX the oldest delivered comment goes to the archive')
+  same(M.addComment(full(true), user, 't-1', 'otro', 'comment', { now: clock.now }).error, 'cap', '200 queued comments: cap')
+  same(M.addComment({ ...store.rt, nextIds: { ...store.rt.nextIds, comment: 10_000_000 } }, user, 't-1', 'x', 'comment', { now: clock.now }).error, 'cap', 'past m-9999999: cap')
+  const old = clock.now - 31 * 86_400_000
+  const many = (state) => Array.from({ length: 2000 }, (_, i) => ({ ...t1, id: `t-${i + 1}`, title: `T${i}`, state, stateSince: old }))
+  const idle = store.rt.agents.map((a) => { const x = { ...a, status: 'idle' }; delete x.runId; return x })
+  let big = { ...store.rt, tasks: many('done'), comments: {}, cards: [], queue: [], activeRuns: [], agents: idle, nextIds: { ...store.rt.nextIds, task: 2001 } }
+  r = M.createTask(big, user, { title: 'Nueva' }, ctx())
+  check(r.ok && r.rt.tasks.length === 1 && r.rt.tasks[0].id === 't-2001' && Object.keys(r.rt.archivedTasks).length === 2000 && r.effects.some((e) => e.kind === 'archiveTasks' && e.tasks.length === 2000), 'a full board archives its old done tasks first (decision 27), then creates')
+  big = { ...big, tasks: many('todo') }
+  same(M.createTask(big, user, { title: 'Nueva' }, ctx()).error, 'cap', 'TEAM_TASKS_MAX live tasks: cap')
+  same(M.createTask({ ...store.rt, nextIds: { ...store.rt.nextIds, task: 100_000 } }, user, { title: 'x' }, ctx()).error, 'cap', 'past t-99999: cap')
+
+  // archiveSweep.
+  const mk = (id, extra = {}) => ({ ...t1, id, title: id, userOwned: [], ...extra })
+  const sweepRt = {
+    ...store.rt,
+    tasks: [mk('t-10', { state: 'done', stateSince: old }), mk('t-11', { blockedBy: ['t-10'] }), mk('t-12', { state: 'cancelled', stateSince: old }), mk('t-13', { state: 'done', stateSince: clock.now })],
+    comments: { 't-12': [{ id: 'm-1', target: 't-12', author: user, kind: 'comment', at: 1, text: 'x' }] },
+    queue: [{ id: 'q-1', agentId: 'dev-2', taskId: 't-12', sessionKey: 't-12', mode: 'exec', reason: 'assigned', createdAt: 1 }],
+    activeRuns: [], agents: idle, nextIds: { ...store.rt.nextIds, task: 14 },
+  }
+  r = M.archiveSweep(sweepRt, { now: clock.now })
+  same(r.rt.tasks.map((t) => t.id), ['t-10', 't-11', 't-13'], 'archiveSweep: an old done or cancelled task goes; one a live blockedBy names, and a recent one, stay')
+  check(r.rt.archivedTasks['t-12'] === 'cancelled' && !r.rt.comments['t-12'] && r.rt.queue.length === 0, 'its id stays known in archivedTasks; its comments and queue items go')
+  check(r.effects.some((e) => e.kind === 'archiveTasks' && e.tasks.length === 1 && e.tasks[0].id === 't-12') && r.effects.some((e) => e.kind === 'archiveComments' && e.target === 't-12'), 'the effects write the task and its comments to the archive')
+  check(M.archiveSweep(r.rt, { now: clock.now }).rt === r.rt, 'nothing more to sweep: the same rt')
+  // A chain in either order: an old task a live one names stays, and so does the old blocker it names in turn.
+  for (const order of [['t-21', 't-22', 't-20'], ['t-20', 't-21', 't-22']]) {
+    const byId = { 't-20': mk('t-20', { state: 'done', stateSince: old }), 't-21': mk('t-21', { state: 'done', stateSince: old, blockedBy: ['t-20'] }), 't-22': mk('t-22', { blockedBy: ['t-21'] }) }
+    const chain = M.archiveSweep({ ...sweepRt, tasks: order.map((id) => byId[id]), comments: {}, queue: [], nextIds: { ...sweepRt.nextIds, task: 23 } }, { now: clock.now })
+    check(chain.rt.tasks.length === 3 && !chain.effects.length, `archiveSweep keeps a kept task's own blockers (order ${order.join(',')})`)
+  }
+  const onArchived = M.createTask(r.rt, user, { title: 'x', blockedBy: ['t-12'] }, ctx())
+  check(onArchived.ok && onArchived.result.task.state === 'blocked' && onArchived.rt.cards.some((c) => c.taskId === onArchived.result.task.id && c.from.why === 'depCancelled'), 'an archived blocker is known: an archived cancelled one blocks with a card')
+
+  // applyTool: roles, params, liveness (5.3).
+  const leadRun = admit('lead', undefined, 'lead', 'readonly')
+  start(leadRun)
+  const leadActor = { kind: 'agent', agentId: 'lead', runId: leadRun, roleKind: 'lead' }
+  const tool = (actor, method, params, extra = {}) => M.applyTool(store.rt, actor, { method, params, ...extra }, ctx())
+  tick()
+  r = tool(leadActor, 'team.task.create', { title: 'API de notas', blockedBy: ['t-1'], priority: 'high', assign: 'dev-2', noPlan: true })
+  commit(r, 'team.task.create')
+  const nid = r.result.id
+  check(/^t-\d+$/.test(nid) && task(nid).state === 'blocked' && task(nid).assignee === 'dev-2' && task(nid).needsPlan === false && task(nid).createdBy.kind === 'agent' && task(nid).createdBy.agentId === 'lead', 'team.task.create: {id}; blocked by t-1, assigned, no plan, created by the Lead')
+  const revN = task(nid).rev
+  r = tool(leadActor, 'team.task.update', { task: nid, title: 'API de notas v2', rev: revN })
+  commit(r, 'team.task.update')
+  same(r.result, { id: nid, rev: task(nid).rev }, 'team.task.update answers the rev the commit gave it')
+  check(task(nid).rev === revN + 1, 'one more than before')
+  same(tool(leadActor, 'team.task.update', { task: nid, title: 'x', rev: revN }).reason, 'rev', 'a stale --rev: conflict {rev}')
+  same(tool(leadActor, 'team.task.update', { task: nid, title: 'API de notas v2' }).result, { id: nid, rev: task(nid).rev }, 'an update that changes nothing keeps the rev')
+  same(json(tool(leadActor, 'team.task.update', { task: 't-1', title: 'Otro' })), { ok: false, error: 'user_owned', fields: ['title'] }, 'a field the user owns: user_owned')
+  same(tool(leadActor, 'team.task.update', { task: 't-1', assign: 'none' }).ok, true, '--assign none unassigns (nothing to unassign here: accepted)')
+  same(json(tool(leadActor, 'team.task.update', { task: placed, blockedBy: ['t-2'] })), { ok: false, error: 'user_owned', fields: ['state'] }, 'team.task.update --blocked-by that would move a task the user placed: user_owned [state]')
+  same(tool(leadActor, 'team.task.create', { title: 'x', blocked_by: ['t-1'] }).error, 'bad_request', 'a param outside 5.3 is a shape error, never dropped silently')
+  same(tool(leadActor, 'team.task.create', { title: 7 }).error, 'bad_request', 'a param of the wrong type')
+  same(tool(leadActor, 'team.plan', { text: 'p' }).error, 'forbidden', 'a tool of another role')
+  same(tool(leadActor, 'team.hire', { text: 'p' }).error, 'unsupported', 'terminal tools wait for B5')
+  same(tool(leadActor, 'team.note', { text: 'p' }).error, 'unsupported', 'note waits for B7')
+  same(tool(leadActor, 'team.show', {}).error, 'bad_request', 'reads never reach applyTool')
+  r = tool(leadActor, 'team.comment', { target: 'lead', text: 'Arm\u00E9 las tareas' })
+  commit(r, 'team.comment')
+  check(/^m-\d+$/.test(r.result.id) && store.rt.comments.lead.at(-1).forAgent === undefined, 'team.comment in the Lead thread: {id}, for nobody')
+  same(tool({ ...leadActor, runId: 'r-0000000000ee' }, 'team.comment', { target: 'lead', text: 'x' }).error, 'forbidden', 'a run that is not active: forbidden')
+  same(tool({ ...leadActor, agentId: 'dev' }, 'team.comment', { target: 'lead', text: 'x' }).error, 'forbidden', 'a run of another agent: forbidden')
+  commit(M.updateTask(store.rt, user, 't-3', { assignee: 'dev-2', isolation: 'main', needsPlan: false }, task('t-3').rev, ctx()), 'give t-3 to dev-2')
+  const devRun = admit('dev-2', 't-3', 'exec', 'total')
+  start(devRun)
+  const dev2 = { kind: 'agent', agentId: 'dev-2', runId: devRun, roleKind: 'dev' }
+  same(tool(dev2, 'team.task.create', { title: 'Sub' }).error, 'forbidden', 'a Dev creates only subtasks of its task')
+  same(tool(dev2, 'team.task.create', { title: 'Sub', parent: 't-1' }).error, 'forbidden', 'and only of the task it runs')
+  r = tool(dev2, 'team.task.create', { title: 'Sub', parent: 't-3' })
+  commit(r, 'a Dev subtask')
+  check(task(r.result.id).parentId === 't-3' && task(r.result.id).createdBy.agentId === 'dev-2', 'a Dev subtask names its parent')
+  same(tool(dev2, 'team.task.update', { task: 't-3', title: 'x' }).error, 'forbidden', 'only the Lead updates tasks')
+  check(tool(dev2, 'team.comment', { target: 't-1', text: '\u00BFqui\u00E9n dise\u00F1a?' }).ok, 'any role comments')
+  const concludedRt = { ...store.rt, activeRuns: store.rt.activeRuns.map((x) => (x.id === leadRun ? { ...x, concludedBy: { tool: 'ask', at: clock.now } } : x)) }
+  same(json(M.applyTool(concludedRt, leadActor, { method: 'team.comment', params: { target: 'lead', text: 'x' } }, ctx())), { ok: false, error: 'conflict', reason: 'concluded' }, 'after a terminal tool: conflict {concluded} (decision 35)')
+  commit(M.requestStop(store.rt, leadRun, 'user', { now: clock.now }), 'stop the Lead run')
+  same(tool(leadActor, 'team.comment', { target: 'lead', text: 'x' }).error, 'stopping', 'a stopping run writes no more')
+  check(tool(leadActor, 'team.comment', { target: 'lead', text: 'x' }, { viaBlock: true }).ok, 'a Codex block applied at close admits a stopping run')
+
+  // The board page and its cursor; the Lead's board summary; the drawer and the Lead thread views.
+  let page = M.boardPage(store.rt, teamId, v)
+  const counts = { todo: 0, doing: 0, review: 0, done: 0, blocked: 0 }
+  let gone = 0
+  for (const t of store.rt.tasks) { const c = M.columnOf(t); if (c) counts[c]++; else gone++ }
+  check(page.teamId === teamId && page.rev === store.rt.rev && page.done && page.cursor === null && page.tasks.length === store.rt.tasks.length, 'the desktop page: every live task, no cursor')
+  same(page.counts, counts, 'counts per column')
+  check(page.cancelled === gone && gone === 1, 'cancelled counted apart')
+  const colIdx = page.tasks.map((t) => (t.column ? M.BOARD_COLUMNS.indexOf(t.column) : 99))
+  check(colIdx.every((c, i) => i === 0 || colIdx[i - 1] <= c), 'board order: by column, cancelled last')
+  const doneRt = { ...store.rt, tasks: Array.from({ length: 250 }, (_, i) => ({ ...t1, id: `t-${i + 1}`, state: 'done', stateSince: 1000 + (i % 50) })), comments: {}, nextIds: { ...store.rt.nextIds, task: 251 } }
+  page = M.boardPage(doneRt, teamId, v)
+  check(page.tasks.length === M.BOARD_DONE_PAGE && !page.done && /^done\./.test(page.cursor), 'the newest 100 done, a cursor of the done column for the rest')
+  const seen = new Set(page.tasks.map((t) => t.id))
+  const newest = Math.min(...page.tasks.map((t) => t.stateSince))
+  let cursor = page.cursor
+  let pages = 0
+  let dup = false
+  let older = true
+  while (cursor && pages < 10) {
+    const p = M.boardPage(doneRt, teamId, v, { column: 'done', cursor, limit: 100 })
+    for (const t of p.tasks) { if (seen.has(t.id)) dup = true; seen.add(t.id); if (t.stateSince > newest) older = false }
+    cursor = p.cursor
+    pages++
+  }
+  check(seen.size === 250 && !dup && older && pages === 2, 'the done column pages the rest newest first, without a repeat or a gap (ties by id)')
+  check(M.boardPage(doneRt, teamId, v, { column: 'done', cursor: 'todo.1.2.3' }) === null && M.boardPage(doneRt, teamId, v, { cursor: 'done.1.2' }) === null && M.boardPage(doneRt, teamId, v, { column: 'todo', cursor: 'todo.x.1.2' }) === null && M.boardPage(doneRt, teamId, v, { column: 'done', cursor: 'done.1.2.3' }) === null, 'a cursor that does not parse for the column: null (bad_request)')
+  const todoRt = { ...doneRt, tasks: doneRt.tasks.slice(0, 5).map((t, i) => ({ ...t, state: 'todo', priority: i % 2 ? 'urgent' : 'low', createdAt: i })) }
+  const p1 = M.boardPage(todoRt, teamId, v, { column: 'todo', limit: 2 })
+  const p2 = M.boardPage(todoRt, teamId, v, { column: 'todo', limit: 10, cursor: p1.cursor })
+  same([...p1.tasks, ...p2.tasks].map((t) => t.id), ['t-2', 't-4', 't-1', 't-3', 't-5'], 'a column page in board order (priority band, then age), continued by its cursor')
+  // A cursor belongs to the column that minted it: a Por hacer cursor never pages Bloqueado (same key shape).
+  check(/^todo\./.test(p1.cursor) && M.boardPage(todoRt, teamId, v, { column: 'blocked', cursor: p1.cursor }) === null && M.boardPage(todoRt, teamId, v, { column: 'doing', cursor: p1.cursor }) === null && M.boardPage(todoRt, teamId, v, { column: 'done', cursor: p1.cursor }) === null, 'a cursor of another column: null (bad_request)', p1.cursor)
+  check(M.boardPage(todoRt, teamId, v, { column: 'blocked', cursor: p1.cursor.replace(/^todo\./, 'blocked.') }) !== null, 'the same key with its own column parses')
+  // A full board, half of it blocked{deps}: one id -> state lookup per board, never one per blocked card (it ran 0.6 s).
+  const half = Array.from({ length: 2000 }, (_, i) => ({ ...t1, id: `t-${i + 1}`, title: `T${i}`, userOwned: [], ...(i % 2 ? { state: 'blocked', blockedBy: [`t-${i}`], blocked: { reason: { kind: 'deps' }, resume: { state: 'todo', phase: 'none' }, at: 1 } } : {}) }))
+  let best = Infinity
+  let halfPage = null
+  for (let k = 0; k < 5; k++) {
+    // A new tasks array each pass, as every commit makes one: the lookup is built inside the timed call.
+    const halfRt = { ...store.rt, tasks: [...half], comments: {}, nextIds: { ...store.rt.nextIds, task: 2001 } }
+    const t0 = Date.now()
+    halfPage = M.boardPage(halfRt, teamId, v)
+    best = Math.min(best, Date.now() - t0)
+  }
+  const waiting = halfPage.tasks.filter((x) => x.blocked?.kind === 'deps')
+  check(halfPage.tasks.length === 2000 && waiting.length === 1000 && waiting.every((x) => x.blocked.waitingOn.length === 1 && x.blocked.waitingOn[0] === `t-${Number(x.id.slice(2)) - 1}`), 'every blocked{deps} card names what it waits on')
+  check(best < 50, `boardPage of 2000 tasks with 1000 blocked{deps} under 50 ms (${best} ms)`)
+  const bs = M.boardSummaryOf(store.rt)
+  check(bs.rows.length > 0 && bs.rows.every((x) => x.state !== 'done' && x.state !== 'cancelled'), 'the Lead board: open tasks only')
+  check(bs.rows.every((x, i, a) => i === 0 || M.PRIORITY_RANK[a[i - 1].priority] <= M.PRIORITY_RANK[x.priority]), 'most urgent first')
+  check(bs.counts.cancelled === 1 && Object.values(bs.counts).reduce((s, n) => s + n, 0) === store.rt.tasks.length, 'counts of every state')
+  check(bs.agents.some((a) => a.id === 'dev-2' && a.status === 'running' && a.taskId === 't-3') && bs.agents.length === store.rt.agents.length, 'the roster with what each one runs')
+  same(bs.untriaged, store.rt.tasks.filter((t) => t.state === 'todo' && !t.assignee).sort(M.compareTaskOrder).map((t) => t.id), 'untriaged: the unassigned todo tasks')
+  const d = M.taskDetail(store.rt, task('t-2'), { ...v, trusted: def, recent: [], commentsLimit: 1 })
+  check(d.comments.length === 1 && d.comments[0].id === 'm-2' && d.commentsCursor === 'm-2' && d.commentsArchived === 0 && d.body === task('t-2').body && d.reviewInfo.max === 3 && d.runs.length === 0, 'taskDetail: the newest comment page and its cursor')
+  const before = M.commentPage(store.rt, def.def, 't-2', { before: 2, limit: 5 })
+  check(before.comments.length === 1 && before.comments[0].id === 'm-1' && before.cursor === null, 'the page before the cursor')
+  const lv = M.leadView(store.rt, def.def, { recent: [], lastLineAt: () => undefined })
+  check(lv.agent && lv.agent.id === 'lead' && lv.messages.length === 2 && lv.messages[0].author === 'user' && lv.messages[0].queued && lv.messages[1].authorName === 'lead', 'leadView: the thread oldest first and the Lead card')
+}
 
 // ---- 3. TeamStore -------------------------------------------------------------------------------
 function storeChecks(tmp) {
@@ -742,7 +1112,8 @@ async function serviceChecks(tmp) {
 
   // The trust gate: runs pass the gate while trusted (the B2 op answers unsupported).
   same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'cliOff' } }, 'trusted: runNow passes the trust gate (this suite has no CLI: deferred cliOff)')
-  same(await svc.request({ op: 'board', teamId }, 'desktop'), { ok: false, error: 'unsupported' }, 'later ops answer unsupported in B1')
+  same(await svc.request({ op: 'needs', teamId }, 'desktop'), { ok: false, error: 'unsupported' }, 'later ops answer unsupported (needs is B5)')
+  await boardServiceChecks(svc, teamId, emitted)
 
   // Editing roles/dev.md asks to trust again and blocks runs (B1 acceptance).
   const devFile = path.join(app, '.snagentsos', 'team', 'roles', 'dev.md')
@@ -1030,6 +1401,9 @@ async function serviceChecks(tmp) {
   renameFails = false
 
   // remove: trash, forget, repo files untouched.
+  fs.mkdirSync(path.join(data, 'teams', teamId, 'archive'), { recursive: true })
+  fs.writeFileSync(path.join(data, 'teams', teamId, 'archive', 't-9.jsonl'), '{"id":"m-1"}\n')
+  check(svc.archivedCount(teamId, 't-9') === 1, 'archivedCount reads the archive lines once')
   const rm = await svc.request({ op: 'remove', teamId }, 'desktop')
   check(rm.ok && !svc.team(teamId) && !svc.registry.get(teamId), 'remove drops the team')
   check(!fs.existsSync(path.join(data, 'teams', teamId)) && fs.readdirSync(path.join(data, 'teams', '.trash')).some((n) => n.startsWith(teamId + '-')), 'the team folder goes to teams/.trash')
@@ -1040,6 +1414,8 @@ async function serviceChecks(tmp) {
   const reprobe = await svc.request({ op: 'setupProbe', dir: app }, 'desktop')
   check(reprobe.ok && !reprobe.probe.registered && reprobe.probe.existing, 'after remove the repo offers adopt')
   same(await svc.request({ op: 'setupWrite', repoRoot: app, draft, previewHash: prev.preview.hash }, 'desktop'), { ok: false, error: 'exists' }, 'setupWrite over an existing folder of an unregistered repo: exists')
+  const readopt = await svc.request({ op: 'adopt', repoRoot: app, sha256: reprobe.probe.existing.sha256 }, 'desktop')
+  check(readopt.ok && readopt.teamId === teamId && svc.archivedCount(teamId, 't-9') === 0, 'set up again (same id): the archive counts of the removed team are gone')
 
   // shutdownSync: flushed, frozen, thaw on a request.
   svc.shutdownSync('quit')
@@ -1051,6 +1427,45 @@ async function serviceChecks(tmp) {
   svc.dispose()
   check(clock.timers.size === 0, 'dispose leaves no platform timer')
   check(!logs.some((l) => /Una app|Siempre/.test(l)), 'the log carries codes and ids, never definition text')
+}
+
+/** B3 ops through TeamService.request (a trusted team, no runs): board, task, edits, moves, comments, the Lead thread. */
+async function boardServiceChecks(svc, teamId, emitted) {
+  const req = (r, origin = 'desktop') => svc.request({ teamId, ...r }, origin)
+  let res = await req({ op: 'createTask', task: { title: 'Pantalla de login', priority: 'high' } })
+  check(res.ok && res.task.id === 't-1' && res.task.column === 'todo' && res.task.priority === 'high' && res.task.userOwned.includes('priority') && res.task.createdBy === 'user', 'createTask op: a TaskSummary in todo, its fields the user\'s')
+  const t1 = res.task
+  res = await req({ op: 'createTask', task: { title: 'Tests', blockedBy: ['t-1'] } })
+  check(res.ok && res.task.column === 'blocked' && res.task.blocked.kind === 'deps' && res.task.blocked.waitingOn[0] === 't-1', 'createTask with a blocker: blocked, waiting on it')
+  same(await req({ op: 'createTask', task: { title: 'x', assignee: 'lead' } }), { ok: false, error: 'bad_request' }, 'the Lead as assignee: bad_request')
+  res = await req({ op: 'updateTask', taskId: 't-1', baseRev: t1.rev, patch: { body: 'Con Google y GitHub' } })
+  check(res.ok && res.task.body === 'Con Google y GitHub' && res.task.rev === t1.rev + 1 && Array.isArray(res.task.comments) && res.task.userOwned.includes('body'), 'updateTask op: the TaskDetail at rev + 1')
+  res = await req({ op: 'updateTask', taskId: 't-1', baseRev: t1.rev, patch: { title: 'Otro' } })
+  check(!res.ok && res.error === 'conflict' && res.reason === 'rev' && res.current.id === 't-1' && res.current.rev === t1.rev + 1 && res.current.body === 'Con Google y GitHub' && svc.team(teamId).store.rt.tasks[0].title === 'Pantalla de login', 'a stale baseRev: conflict with the current TaskDetail, nothing changed')
+  res = await req({ op: 'comment', taskId: 't-1', text: 'Mirá el diseño' })
+  check(res.ok && res.comment.author === 'user' && res.comment.authorName === 'user' && res.comment.queued === false && res.comment.text === 'Mirá el diseño', 'comment op: a CommentView (no assignee: nobody waits for it)')
+  res = await req({ op: 'leadSay', text: 'Arrancá por el login' })
+  check(res.ok && res.comment.queued === true, 'leadSay: queued for the Lead')
+  res = await req({ op: 'lead' })
+  check(res.ok && res.lead.messages.length === 1 && res.lead.agent && res.lead.agent.kind === 'lead' && res.lead.cursor === null, 'lead op: the thread and the Lead card')
+  same(await req({ op: 'lead', before: 'x-1' }), { ok: false, error: 'bad_request' }, 'a Lead cursor that is not a comment id: bad_request')
+  res = await req({ op: 'board' })
+  check(res.ok && res.page.tasks.length === 2 && res.page.counts.todo === 1 && res.page.counts.blocked === 1 && res.page.done && res.page.cursor === null, 'board op: the desktop page')
+  check(res.page.tasks.find((t) => t.id === 't-1').comments === 1, 'a card counts its comments')
+  same(await req({ op: 'board', column: 'done', cursor: 'zzz' }), { ok: false, error: 'bad_request' }, 'a board cursor that does not parse: bad_request')
+  res = await req({ op: 'task', taskId: 't-1' })
+  check(res.ok && res.task.comments.length === 1 && res.task.commentsArchived === 0 && res.task.commentsCursor === null, 'task op: the drawer view')
+  same(await req({ op: 'task', taskId: 't-1', commentsBefore: 'k-1' }), { ok: false, error: 'bad_request' }, 'a comment cursor that is not a comment id: bad_request')
+  same(await req({ op: 'task', taskId: 't-77' }), { ok: false, error: 'not_found' }, 'an unknown task: not_found')
+  const rev2 = (await req({ op: 'task', taskId: 't-2' })).task.rev
+  res = await req({ op: 'moveTask', taskId: 't-2', baseRev: rev2, to: 'cancelled' })
+  check(res.ok && res.task.state === 'cancelled' && res.task.column === null && res.task.userOwned.includes('state'), 'moveTask op: cancelled, its state the user\'s')
+  res = await req({ op: 'releaseOwned', taskId: 't-1', fields: ['priority'] })
+  check(res.ok && !res.task.userOwned.includes('priority') && res.task.userOwned.includes('title'), 'releaseOwned op: only the named fields go back')
+  check((await req({ op: 'board' }, 'phone')).ok && (await req({ op: 'createTask', task: { title: 'Desde el celu' } }, 'phone')).ok, 'board and createTask are phone ops')
+  same(await req({ op: 'moveTask', taskId: 't-1', baseRev: 1, to: 'done' }, 'phone'), { ok: false, error: 'bad_request' }, 'moveTask is desktop only')
+  await settle()
+  check(emitted.some((e) => e.teamId === teamId && e.scopes.includes('board') && e.scopes.includes('task') && e.taskId === 't-1') && emitted.some((e) => e.teamId === teamId && e.scopes.includes('lead')), 'edits emit board and task with the task hint; the Lead thread emits lead')
 }
 
 // ---- 8. IPC register -----------------------------------------------------------------------------
@@ -1075,6 +1490,7 @@ async function main() {
   try {
     schemaChecks()
     flowChecks()
+    boardChecks()
     storeChecks(tmp)
     registryChecks(tmp)
     await loaderChecks(tmp)
@@ -1085,7 +1501,7 @@ async function main() {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 })
   }
-  console.log(`PASS: ${checks} teams store checks (schemas, flow, store, registry, loader, trust, service, ipc)`)
+  console.log(`PASS: ${checks} teams store checks (schemas, flow, board, store, registry, loader, trust, service, ipc)`)
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1 })

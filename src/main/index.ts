@@ -990,6 +990,8 @@ async function bootstrap(): Promise<void> {
   teamService = teams
   statusManager.addListener((evt) => teams.onPaneStatus(evt))
   cliService.onState(() => teams.onCliState())
+  // B3: `snaos team` from a team run's token reaches the store through teamCtl.
+  cliService.attach({ teams: teams.ctlView })
   registerTeamsIpc(teams)
   const startupCfg = configStore.load()
   // v2.4: on by default (schema 17), a first run without a config included.

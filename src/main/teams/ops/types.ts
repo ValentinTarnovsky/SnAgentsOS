@@ -76,6 +76,8 @@ export interface TeamInternals {
   runLive(runId: string): { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean }
   /** B2: the one run whose lines the renderer gets as `teams:runAppend` (decision 49); null stops it. */
   watchRun(teamId: string, runId: string | null): void
+  /** B3: comments of a target (task id or `lead`) already moved to `archive/<target>.jsonl`. */
+  archivedCount(teamId: string, target: string): number
 }
 
 export interface OpCtx {

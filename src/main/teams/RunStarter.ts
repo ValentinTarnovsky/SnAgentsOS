@@ -18,7 +18,7 @@ import { delimiter, dirname, join } from 'path'
 import { CLI_ENV } from '@shared/brand'
 import type { FailureInfo } from '@shared/failure'
 import { teamArgv } from '@shared/teamArgv'
-import { buildRunPrompt, runRulesOf, sysTextEn, systemText, type BoardSummary, type PhaseInput, type PromptComment } from '@shared/teamPrompt'
+import { buildRunPrompt, runRulesOf, sysTextEn, systemText, type PhaseInput, type PromptComment } from '@shared/teamPrompt'
 import type { TeamScope } from '@shared/team-protocol'
 import {
   LEAD_THREAD,
@@ -38,7 +38,7 @@ import type { FlowCtx, FlowResult } from './flow/types'
 import type { RunSupervisor } from './RunSupervisor'
 import type { TeamDefinitionLoader } from './TeamDefinitionLoader'
 import type { TeamTrust } from './TeamTrust'
-import { actorLabel } from './views'
+import { actorLabel, boardSummaryOf } from './views'
 
 /** Newest comments of the target a fresh session gets as its handoff (decision 66; the prompt budget cuts further). */
 const HANDOFF_COMMENTS = 20
@@ -77,10 +77,6 @@ export interface PrepareIo {
   recent(): readonly Run[]
   /** The manual request's text (never persisted; it reaches only the run's stdin). */
   detail?: string
-}
-
-function emptyBoard(): BoardSummary {
-  return { rows: [], counts: { todo: 0, doing: 0, review: 0, done: 0, blocked: 0, cancelled: 0 }, pendingApprovals: [], untriaged: [], agents: [] }
 }
 
 function promptComment(c: TeamComment): PromptComment {
@@ -225,7 +221,7 @@ export class RunStarter {
       }
     }
     const phase: PhaseInput =
-      now.mode === 'free' ? { mode: 'free', request: io.detail } : now.mode === 'lead' ? { mode: 'lead', board: emptyBoard() } : now.mode === 'qa' ? { mode: 'qa', stat: '', round: task?.review.round ?? 0, max: task?.review.max ?? 0 } : { mode: now.mode }
+      now.mode === 'free' ? { mode: 'free', request: io.detail } : now.mode === 'lead' ? { mode: 'lead', board: boardSummaryOf(rt) } : now.mode === 'qa' ? { mode: 'qa', stat: '', round: task?.review.round ?? 0, max: task?.review.max ?? 0 } : { mode: now.mode }
     const built = buildRunPrompt({
       provider: now.provider,
       resumed: now.resumed,

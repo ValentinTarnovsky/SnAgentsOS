@@ -5,6 +5,7 @@ import { useAgentStore } from '@/lib/agentStore'
 import { closeTeams, loadTeamView, teamsOverlayActive, useTeamsStore } from '@/lib/teamsStore'
 import { useTeamSetupStore } from '@/lib/teams/setup'
 import { useTeamTrustStore } from '@/lib/teams/trust'
+import { useBoardStore } from '@/lib/teams/board'
 import { useT } from '@/i18n'
 import { Button } from '@/components/ui/Button'
 import { TeamHeader, TeamPlainHeader } from './TeamHeader'
@@ -14,6 +15,8 @@ import { TeamPicker } from './TeamPicker'
 import { TeamEmptyTab } from './TeamEmptyTab'
 import { AgentsRoster } from './AgentsRoster'
 import { AgentChatDrawer } from './AgentChatDrawer'
+import { TeamBoard } from './TeamBoard'
+import { TaskDrawer } from './TaskDrawer'
 
 /**
  * The Teams overlay (app 2.7.0, E10 B1; Labs teams), over the workspace area
@@ -42,7 +45,7 @@ export function TeamHost() {
 function dialogUp(): boolean {
   const app = useAppStore.getState()
   if (app.paletteOpen || app.settingsOpen || app.wizardOpen || app.globalPromptOpen) return true
-  if (useTeamSetupStore.getState().open || useTeamTrustStore.getState().teamId !== null) return true
+  if (useTeamSetupStore.getState().open || useTeamTrustStore.getState().teamId !== null || useBoardStore.getState().newTask !== null) return true
   return !!document.querySelector('[aria-modal="true"], [role="menu"]')
 }
 
@@ -79,9 +82,10 @@ function HostBody() {
   const dialogOpen = useAppStore((s) => s.paletteOpen || s.settingsOpen || s.wizardOpen || s.globalPromptOpen)
   const setupOpen = useTeamSetupStore((s) => s.open)
   const trustOpen = useTeamTrustStore((s) => s.teamId !== null)
+  const newTaskOpen = useBoardStore((s) => s.newTask !== null)
   const opening = useRef(true)
   useEffect(() => {
-    if (dialogOpen || setupOpen || trustOpen) return
+    if (dialogOpen || setupOpen || trustOpen || newTaskOpen) return
     if (opening.current || focusLost()) rootRef.current?.focus({ preventScroll: true })
     opening.current = false
   })
@@ -138,10 +142,13 @@ function HostBody() {
         <TeamTabs tab={tab} running={view?.running ?? team.running} needs={view?.needsCount ?? team.needsCount} />
         {/* The body is the parent of the team drawers (RightDrawer closes on clicks in its parent). */}
         <div role="tabpanel" id={TEAM_TABPANEL_ID} aria-labelledby={teamTabId(tab)} data-team-body={tab} className="relative min-h-0 flex-1">
-          <div className="h-full overflow-y-auto p-6">
+          {/* The board scrolls inside itself (each column on its own); the other tabs scroll here. */}
+          <div className={view && tab === 'board' ? 'h-full overflow-hidden p-4' : 'h-full overflow-y-auto p-6'}>
             {view ? (
               tab === 'agents' ? (
                 <AgentsRoster teamId={team.id} />
+              ) : tab === 'board' ? (
+                <TeamBoard teamId={team.id} view={view} />
               ) : (
                 <TeamEmptyTab tab={tab} view={view} />
               )
@@ -158,6 +165,8 @@ function HostBody() {
           </div>
           {/* B2: an agent's runs and its "Ejecutar ahora" composer, over any tab. */}
           {view && drawer?.kind === 'agent' && <AgentChatDrawer key={drawer.agentId} teamId={team.id} view={view} drawer={drawer} />}
+          {/* B3: one task, over any tab; a click on another card switches it in place (keepOpenOn). */}
+          {view && drawer?.kind === 'task' && <TaskDrawer teamId={team.id} view={view} taskId={drawer.taskId} />}
         </div>
       </>
     )

@@ -14,7 +14,10 @@
 // and the fixture transcripts through the pipe); 2.7.0 (Teams, B2): team
 // tokens, the handler gate over a real CtlServer with raw requests, the Git
 // Bash shim, SNAOS_TEAM_RUN without a token (exit 6, never runtime.json),
-// envForTeam, ready() and onState. Same esbuild + vm harness as test-status.cjs.
+// envForTeam, ready() and onState; B3: the teams service behind the gate, the
+// 401 of a revoked team token naming the run, the Teams section of the guide,
+// the team block of USAGE and the skill (snaos team itself: test-teams-cli.cjs).
+// Same esbuild + vm harness as test-status.cjs.
 // Never touches the real HKCU, ~/.claude or the app's data folder.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -305,6 +308,7 @@ function skillChecks() {
   check(!/: |\s#/.test(descLine.slice('description: '.length)) && !/^description: ["'|>\[{&*!%@`]/.test(descLine), 'the description parses as a plain YAML scalar (no ": ", no " #", no leading indicator)')
   check(['mira que esta haciendo la consola', 'anota esto en las notas del workspace', 'cuanto uso me queda', 'cambia de cuenta de claude'].every((t) => descLine.includes(`"${t}"`)) && /usage/.test(descLine) && /Claude account/.test(descLine), 'the description triggers on observing consoles, notes, usage and the Claude account')
   check(descLine.includes('"avisame si necesitas algo"') && /has to do or decide something/.test(descLine), 'app 2.7.0: the description also triggers on flagging the user (snaos needs)')
+  check(/team run/.test(descLine) && /snaos team/.test(descLine) && descLine.length - 'description: '.length < 1024, 'app 2.7.0 (B3): the description names snaos team inside a team run and stays under 1024 characters', descLine.length)
   check(K.skillStatus('claude', '2.1.0', env).state === 'outdated' && K.skillStatus('codex', '2.1.0', env).state === 'outdated', 'another app version reads as outdated, per agent')
   const ref = K.refreshSkillOnStartup('2.1.0', env)
   check(ref[0].target === 'claude' && ref[0].state === 'installed' && ref[1].target === 'codex' && ref[1].state === 'installed', 'the startup refresh rewrites both agents')
@@ -557,10 +561,10 @@ async function teamGateChecks() {
     const usage = await rpc(teamToken, 'usage')
     check(usage.ok === false && usage.error.code === 'disabled', 'team token -> usage passes the gate (no usage service here: disabled, never forbidden)', usage)
     const show = await rpc(teamToken, 'team.show')
-    check(show.ok === false && show.error.code === 'disabled' && /not available/.test(show.error.message), 'team token -> team.show: disabled until B3', show)
+    check(show.ok === false && show.error.code === 'disabled' && /not available/.test(show.error.message), 'team token -> team.show with no teams service attached: disabled', show)
     const all = []
     for (const m of K.TEAM_CTL_METHODS) all.push((await rpc(teamToken, m, {})).error?.code)
-    check(all.every((c) => c === 'disabled'), 'team token -> every team.* method: disabled', all)
+    check(all.every((c) => c === 'disabled'), 'team token -> every team.* method without the service: disabled', all)
     const fromMaster = await rpc(master, 'team.show')
     const fromConsole = await rpc(consoleToken, 'team.show')
     check(fromMaster.error.code === 'forbidden' && fromConsole.error.code === 'forbidden' && /only inside a team run/.test(fromConsole.error.message), 'master token and console token -> team.show: forbidden', { fromMaster, fromConsole })
@@ -568,6 +572,14 @@ async function teamGateChecks() {
     for (const m of K.TEAM_CTL_METHODS) masterAll.push((await rpc(master, m, {})).error?.code)
     check(masterAll.every((c) => c === 'forbidden'), 'master token -> every team.* method: forbidden (fail closed)', masterAll)
     check((await rpc(consoleToken, 'ls')).ok, 'a console token keeps its methods')
+    // app 2.7.0 (B3): with the teams service attached, a team caller's team.* reaches it with its run; the others never do.
+    const seen = []
+    const handlerTeams = makeHandlers(world, undefined, { services: () => ({ teams: { handle: async (method, params, who) => { seen.push({ method, params, who }); return { ok: true, data: { method } } } } }) })
+    const viaService = await call(handlerTeams, 'team.show', {}, tokens.resolve(teamToken))
+    check(viaService.ok && seen.length === 1 && seen[0].method === 'team.show' && seen[0].who.runId === runId && seen[0].who.agentId === 'dev', 'team.show of a team caller reaches the teams service with the run of its token', seen)
+    const fromConsoleSvc = await call(handlerTeams, 'team.show', {}, caller1)
+    const fromMasterSvc = await call(handlerTeams, 'team.comment', { target: 't-1', text: 'x' }, null)
+    check(fromConsoleSvc.error.code === 'forbidden' && fromMasterSvc.error.code === 'forbidden' && seen.length === 1, 'with the service attached a console token and the master token still get forbidden, the service never sees them')
     tokens.revokeTeam(runId)
     check((await rpcRaw(endpoint, { token: teamToken, body: { v: 1, method: 'ping', params: {} } })).status === 401, 'a revoked team token: 401')
   } finally {
@@ -1580,6 +1592,17 @@ async function cliEntryChecks() {
   check(guide2.includes('## Observing other consoles') && guide2.includes('snaos peek <console>') && guide2.includes('snaos chat <console>') && guide2.includes('## Notes') && guide2.includes('snaos notes append'), 'guide: observing other consoles and Notes sections')
   check(guide2.includes('--yes') && guide2.includes('8 conflict') && /Never `kill`, `restart` or `ws close`/.test(guide2), 'guide: destructive command rules and exit 8')
   check(!/[\u2013\u2014]/.test(guide2) && !/[\u2013\u2014]/.test(C.USAGE), 'guide and usage carry no en or em dash')
+  // app 2.7.0 (Teams, B3, design 5.7): the Teams section, the exit codes and USAGE.
+  {
+    const K = load('src/shared/teamTools.ts')
+    check(guide2.includes('## Teams (snaos team)') && guide2.includes(K.teamToolsGuide('dev')) && guide2.includes(K.teamChannelText(false, { win32: false })), 'guide: a Teams section with the dev tools and the CLI channel text of a run')
+    check(/only inside a team run/.test(guide2) && /every other command answers `forbidden` too, except `ping`\s+and `usage`/.test(guide2), 'guide: snaos team only inside a team run; other commands forbidden there')
+    check(/8 conflict \([^)]*team task changed since --rev, or this team run already\s+concluded\) or user owned/.test(guide2) && guide2.includes('`user_owned` (exit 8)'), 'guide: exit 8 covers a team conflict, a concluded run and user_owned', guide2.slice(guide2.indexOf('## Exit codes')))
+    check(guide2.indexOf('## Teams (snaos team)') < guide2.indexOf('## Exit codes'), 'guide: the Teams section comes before the exit codes')
+    const teamUsage = C.USAGE.slice(C.USAGE.indexOf('Inside a team run'))
+    check(['team show', 'team task create --title', 'team task update <t-N>', 'team comment <t-N|lead>', 'team plan --file <file>|- [--small]', 'team verdict approve|changes', 'team approve --plan <t-N>', 'hire --file <file>|-', '--blocked-by t-1,t-2', '--options "A|B|C"'].every((t) => teamUsage.includes(t)), 'USAGE has one team block with every subcommand', teamUsage)
+    check(/team needs one of: show, tasks, task, comment, note, ask, needs, plan, review, verdict, done, approve, hire/.test(usage(['team'])), 'snaos team alone is a usage error listing the subcommands')
+  }
 
   // --- app 2.3.0 (4b): usage and account ----------------------------------------
   check(p(['account']).command === 'account' && p(['account']).sub === 'status' && p(['account', 'ls']).sub === 'ls' && p(['account', 'use', 'secondary']).positionals[0] === 'secondary', 'account alone is account status; ls and use parse')
@@ -1843,7 +1866,9 @@ async function serviceChecks() {
     const sent = await run(['send', '3', 'x', '--enter'], tenv)
     check(ls.code === 7 && sent.code === 7 && /may only use snaos team/.test(sent.err) && world.pty.submits.length === submits, 'snaos ls and send from a team run exit 7 (forbidden), nothing typed')
     service.revokeTeam(runId)
-    check(service.tokens.resolve(tenv.SNAOS_CTL_TOKEN) === null && (await run(['ping'], tenv)).code === 6, 'after revokeTeam the run token gets 401: exit 6')
+    const revoked = await run(['ping'], tenv)
+    check(service.tokens.resolve(tenv.SNAOS_CTL_TOKEN) === null && revoked.code === 6, 'after revokeTeam the run token gets 401: exit 6')
+    check(revoked.err.includes(`team run ${runId}`) && /end your turn/.test(revoked.err) && !/this console's token/.test(revoked.err), "the 401 of a revoked team token names the team run (SNAOS_TEAM_RUN), never this console's token", revoked.err)
     const lost = await run(['ping', '--runtime', path.join(dataDir, 'runtime.json')], { SNAOS_TEAM_RUN: runId })
     check(lost.code === 6 && /lost its token/.test(lost.err), 'a team run without its token exits 6, never through runtime.json')
   }

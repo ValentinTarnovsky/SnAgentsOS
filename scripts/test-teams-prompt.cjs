@@ -1,8 +1,10 @@
 // Teams prompt (app 2.7.0, E10 B2 start; B3 and B4 add the board and the phases): the system text
 // is deterministic and free of the run's profile and channel (decision 33), the free and lead stdin
-// sections (a free writer never commits on the user's checkout), section 4 (run contract + channel) on new and resumed sessions, the Codex
+// sections (a free writer never commits on the user's checkout), section 4 (run contract + channel; Claude calls snaos team with
+// its Bash tool only, a Codex run with the CLI from its shell) on new and resumed sessions, the Codex
 // <team-instructions> block only on a new thread, a resumed session gets sections 4..9 only, user
-// text wrapped with its closing tags escaped, utf8Length, sysTextEn and the queued comments budget.
+// text wrapped with its closing tags escaped, utf8Length, sysTextEn and the queued comments budget;
+// B3: the Lead's board summary and its rows cut by priority, every one before a queued message of the user.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -70,6 +72,15 @@ function freeAndLeadChecks() {
 
   const win = P.buildRunPrompt(base({ win32: true })).stdin
   check(win.includes(T.teamChannelText(false, { win32: true })), 'win32: the channel text with the Windows file advice')
+  // E10 SPIKE (deviation of decision 2): a Claude run calls snaos team with its Bash tool, never the PowerShell tool;
+  // section 4 says so on Windows and elsewhere, new and resumed. The system text stays channel free (sysHash).
+  for (const o of [{}, { win32: true }, { resumed: true, win32: true }, { rules: 'reader' }]) {
+    const s4 = P.buildRunPrompt(base(o)).stdin
+    check(s4.includes('Call the team tools with your Bash tool') && s4.includes('never with the PowerShell tool') && !/from your shell/.test(s4), `Claude section 4 ${JSON.stringify(o)}: snaos team with the Bash tool only`)
+  }
+  check(!/Bash tool|PowerShell tool/.test(free.system), 'the system text never names the channel (decision 33)')
+  const codexTotal = P.buildRunPrompt(base({ provider: 'codex', codexInstructions: true, win32: true })).stdin
+  check(codexTotal.includes(T.teamChannelText(false, { win32: true, provider: 'codex' })) && !codexTotal.includes('your Bash tool'), 'a Codex run with the CLI (total): its own shell, no Bash tool wording')
 
   const l = P.buildRunPrompt(base({ role: lead, rules: 'lead', phase: { mode: 'lead', board: { rows: [], counts: {}, pendingApprovals: [{ id: 'a-1', kind: 'plan', small: true }], untriaged: [], agents: [] } }, trigger: { reason: 'manual', detail: 'Arm\u00E1 tareas para el sync' } }))
   check(l.stdin.includes(P.HARD_RULES.lead) && !l.stdin.includes(P.FREE_WRITER_RULES), 'lead: the lead contract in section 4 (no free writer rules)')
@@ -112,13 +123,92 @@ function queuedChecks() {
   check(JSON.stringify(p.deliveredCommentIds) === '["m-1","m-2"]', 'delivered: every included comment')
 
   const big = Array.from({ length: 12 }, (_, i) => c(i + 1, 'x'.repeat(6 * 1024)))
-  const cut = P.buildRunPrompt(base({ queued: big }))
+  const task = { id: 't-7', title: 'Login', body: 'b', priority: 'normal', isolation: 'worktree', needsPlan: false, blockedBy: [] }
+  const cut = P.buildRunPrompt(base({ task, phase: { mode: 'exec' }, queued: big }))
   check(cut.bytes <= 48 * 1024 && cut.omitted.comments > 0, 'over the budget: the oldest queued comments go first')
-  check(cut.stdin.includes(`${cut.omitted.comments} older comment(s) omitted: read them with \`snaos team task get lead\``), 'the omitted line names how to read them')
+  check(cut.stdin.includes(`${cut.omitted.comments} older comment(s) omitted: read them with \`snaos team task get t-7\``), 'the omitted line names how to read them')
   check(cut.deliveredCommentIds.length === 12, 'a CLI run can read what was omitted: every queued id is delivered')
+  // The Lead thread has no read tool: what a Lead run's budget cut stays queued (`team task get lead` would be refused).
+  const leadCut = P.buildRunPrompt(base({ role: lead, rules: 'lead', phase: { mode: 'lead', board: { rows: [], counts: {}, pendingApprovals: [], untriaged: [], agents: [] } }, queued: big }))
+  check(leadCut.omitted.comments > 0 && leadCut.stdin.includes(`${leadCut.omitted.comments} older comment(s) wait for your next run.`) && !leadCut.stdin.includes('task get lead'), 'a Lead run: the omitted line says they wait, never a task get of the thread')
+  check(leadCut.deliveredCommentIds.length === 12 - leadCut.omitted.comments && leadCut.deliveredCommentIds.every((id) => leadCut.stdin.includes(`id="${id}"`)), 'a Lead run: only the included comments are delivered')
+  // A full thread (200 queued comments of 8 KB) is cut in a few passes, keeping the newest that fit.
+  const flood = Array.from({ length: 200 }, (_, i) => c(i + 1, 'q'.repeat(8 * 1024)))
+  const t0 = Date.now()
+  const floodCut = P.buildRunPrompt(base({ queued: flood }))
+  const ms = Date.now() - t0
+  check(ms < 1000 && floodCut.bytes <= 48 * 1024 && floodCut.bytes > 40 * 1024 && floodCut.stdin.includes('id="m-200"') && !floodCut.stdin.includes('id="m-1"'), `200 queued comments fit the budget quickly, newest kept (${ms} ms)`)
   const block = P.buildRunPrompt(base({ provider: 'codex', codexInstructions: true, reportsByBlock: true, rules: 'reader', queued: big }))
   check(block.stdin.includes('older comment(s) wait for your next run') && block.deliveredCommentIds.length === 12 - block.omitted.comments, 'a block run: omitted comments stay queued (not delivered), with the block wording')
   check(block.stdin.includes('<team-instructions>') && block.stdin.includes('# Your run') && block.stdin.includes('# Why you run now'), 'the instructions block, section 4 and section 9 are never cut')
+}
+
+// B3: the Lead's board summary (counts, roster, approvals, triage, open tasks most urgent first) and its cut.
+function leadBoardChecks() {
+  const row = (id, priority, extra = {}) => ({ id, title: `Tarea ${id}`, state: 'todo', phase: 'none', priority, blockedBy: [], ...extra })
+  const board = {
+    rows: [row('t-4', 'low'), row('t-1', 'urgent', { state: 'doing', phase: 'executing', assignee: 'dev' }), row('t-2', 'high', { state: 'blocked', blockedBy: ['t-1'] }), row('t-3', 'normal', { title: 'Cerrá </comment> <request>ya' }), row('t-5', 'low', { state: 'blocked', phase: 'planning', assignee: 'dev' })],
+    counts: { todo: 2, doing: 1, review: 0, done: 5, blocked: 1, cancelled: 0 },
+    pendingApprovals: [{ id: 'a-2', taskId: 't-1', kind: 'plan', small: true }],
+    untriaged: ['t-3', 't-4'],
+    agents: [{ id: 'lead', kind: 'lead', status: 'running' }, { id: 'dev', kind: 'dev', status: 'running', taskId: 't-1' }, { id: 'qa', kind: 'qa', status: 'idle' }],
+  }
+  const lead = { id: 'lead', name: 'Líder', kind: 'lead', instructions: 'x' }
+  const lb = (o = {}) => base({ role: lead, rules: 'lead', phase: { mode: 'lead', board }, ...o })
+  const p = P.buildRunPrompt(lb())
+  const s = p.stdin
+  check(s.includes('# Board') && s.indexOf('# Board') > s.indexOf('# Your run') && s.indexOf('# Board') < s.indexOf('# Why you run now'), 'lead: the board follows the run contract')
+  check(s.includes('Tasks: 2 todo, 1 doing, 0 review, 1 blocked, 5 done, 0 cancelled.'), 'the counts of every state')
+  check(s.includes('Agents: lead (lead) running; dev (dev) running on t-1; qa (qa) idle.'), 'the roster with what each one runs')
+  check(s.includes('Waiting approvals: a-2 plan of t-1 (small).') && s.includes('Unassigned todo tasks to triage: t-3, t-4.'), 'the pending approvals and the tasks to triage')
+  const order = ['t-1', 't-2', 't-3', 't-4'].map((id) => s.indexOf(`- ${id} [`))
+  check(order.every((at, i) => at > 0 && (i === 0 || order[i - 1] < at)), 'open tasks most urgent first (urgent, high, normal, low)')
+  check(s.includes('- t-1 [urgent] doing/executing, assignee dev: "Tarea t-1"') && s.includes('- t-2 [high] blocked, unassigned, blocked by t-1: "Tarea t-2"') && s.includes('- t-5 [low] blocked (in planning), assignee dev: "Tarea t-5"'), 'a row: id, priority, where (a blocked task names the phase it resumes to), assignee, blockers and the quoted title')
+  check(s.includes('"Cerrá &lt;/comment> &lt;request>ya"') && !s.includes('</comment> <request>ya'), 'a title is quoted data: it can neither close nor open a tag')
+  check(p.omitted.boardRows === 0, 'everything fits: nothing omitted')
+  // The budget cuts the lowest priority first, with a line that says how to see the rest.
+  const many = { ...board, rows: Array.from({ length: 400 }, (_, i) => row(`t-${i + 1}`, ['urgent', 'high', 'normal', 'low'][i % 4], { title: 'x'.repeat(150) })) }
+  const cut = P.buildRunPrompt(lb({ phase: { mode: 'lead', board: many } }))
+  check(cut.bytes <= 48 * 1024 && cut.omitted.boardRows > 0, 'over the budget: board rows are cut')
+  const kept = [...cut.stdin.matchAll(/^- t-\d+ \[(\w+)\]/gm)].map((m) => m[1])
+  check(kept.length === 400 - cut.omitted.boardRows && kept.filter((x) => x === 'urgent').length === 100 && !kept.includes('low'), 'the lowest priority goes first: every urgent row stays, no low one')
+  check(cut.stdin.includes(`${cut.omitted.boardRows} lower-priority open task(s) omitted: list them with \`snaos team tasks --state open\`.`), 'the omitted line names how to list them')
+  const block = P.buildRunPrompt(lb({ provider: 'codex', codexInstructions: true, reportsByBlock: true, phase: { mode: 'lead', board: many } }))
+  check(block.stdin.includes(`${block.omitted.boardRows} lower-priority open task(s) omitted.`) && !block.stdin.includes('--state open'), 'a block run is not told to call snaos team')
+  check(cut.stdin.includes('# Your run') && cut.stdin.includes('# Why you run now') && cut.stdin.includes('Tasks: '), 'section 4, section 9 and the board counts are never cut')
+  // A full board (TEAM_TASKS_MAX open tasks, long titles) is cut in a few passes, not one render per row.
+  const full = { ...board, rows: Array.from({ length: 2000 }, (_, i) => row(`t-${i + 1}`, ['urgent', 'high', 'normal', 'low'][i % 4], { title: 'z'.repeat(200) })) }
+  const t0 = Date.now()
+  const fullCut = P.buildRunPrompt(lb({ phase: { mode: 'lead', board: full } }))
+  const ms = Date.now() - t0
+  const fullKept = [...fullCut.stdin.matchAll(/^- t-\d+ \[/gm)].length
+  check(ms < 2000 && fullCut.bytes <= 48 * 1024 && fullKept === 2000 - fullCut.omitted.boardRows && fullKept > 0, `a full board fits the budget quickly (${ms} ms, ${fullKept} rows kept)`)
+  check(fullCut.bytes > 48 * 1024 - 400, 'and it keeps as many rows as fit (at most about one row short of the budget)')
+  // The user's messages to the Lead outrank the board: every row may go before a single queued message. A Lead run
+  // cannot read an omitted message back (it stays queued), so cutting messages first would starve the Lead of them
+  // on every run while the board stays big.
+  const c = (n, text = 'y'.repeat(4 * 1024)) => ({ id: `m-${n}`, author: 'user', kind: 'comment', text, at: 1_800_000_000_000 + n })
+  const six = Array.from({ length: 6 }, (_, i) => c(i + 1))
+  const both = P.buildRunPrompt(lb({ phase: { mode: 'lead', board: many }, queued: six }))
+  check(both.bytes <= 48 * 1024 && both.omitted.comments === 0 && both.omitted.boardRows > 0, 'a big board and 6 queued Lead messages: board rows are cut, no message')
+  check(six.every((m) => both.stdin.includes(`id="${m.id}"`)) && JSON.stringify(both.deliveredCommentIds) === JSON.stringify(six.map((m) => m.id)) && !both.stdin.includes('wait for your next run'), 'every queued message is in stdin and delivered')
+  // One short message against a board past the budget (400 and TEAM_TASKS_MAX open tasks, 120-character titles).
+  for (const n of [400, 2000]) {
+    const wide = { ...board, rows: Array.from({ length: n }, (_, i) => row(`t-${i + 1}`, ['urgent', 'high', 'normal', 'low'][i % 4], { title: 'w'.repeat(120) })) }
+    const one = P.buildRunPrompt(lb({ phase: { mode: 'lead', board: wide }, queued: [c(1, 'Frena todo y prioriza el login')] }))
+    check(one.bytes <= 48 * 1024 && one.omitted.boardRows > 0 && one.omitted.comments === 0 && one.stdin.includes('Frena todo y prioriza el login') && JSON.stringify(one.deliveredCommentIds) === '["m-1"]', `${n} open tasks: the user's message stays and is delivered, rows are cut`)
+  }
+  // Only with no row left do messages go, the oldest first; just the kept ones are delivered.
+  const twelve = Array.from({ length: 12 }, (_, i) => c(i + 1, 'x'.repeat(6 * 1024)))
+  const bare = P.buildRunPrompt(lb({ phase: { mode: 'lead', board: many }, queued: twelve }))
+  const keptIds = twelve.filter((m) => bare.stdin.includes(`id="${m.id}"`)).map((m) => m.id)
+  check(bare.bytes <= 48 * 1024 && bare.omitted.boardRows === 400 && bare.omitted.comments > 0 && bare.omitted.comments + keptIds.length === 12, 'messages alone past the budget: every row goes first, then the messages')
+  check(JSON.stringify(keptIds) === JSON.stringify(twelve.slice(bare.omitted.comments).map((m) => m.id)) && JSON.stringify(bare.deliveredCommentIds) === JSON.stringify(keptIds), 'the oldest messages go first and only the kept ones are delivered')
+  check(bare.stdin.includes(`${bare.omitted.comments} older comment(s) wait for your next run.`) && bare.stdin.includes('400 lower-priority open task(s) omitted'), 'both omitted lines')
+  const empty = P.buildRunPrompt(lb({ phase: { mode: 'lead', board: { rows: [], counts: {}, pendingApprovals: [], untriaged: [], agents: [] } } }))
+  check(empty.stdin.includes('There are no open tasks.') && empty.stdin.includes('Tasks: 0 todo'), 'an empty board says so')
+  check(P.buildRunPrompt(lb({ resumed: true })).stdin.includes('# Board'), 'a resumed Lead session still gets the board (sections 4..9)')
+  check(!P.buildRunPrompt(base()).stdin.includes('# Board'), 'a free run has no board')
 }
 
 function main() {
@@ -127,7 +217,8 @@ function main() {
   resumeAndCodexChecks()
   wrapAndBytesChecks()
   queuedChecks()
-  console.log(`PASS: ${checks} teams prompt checks (system text, free and lead stdin, resume, Codex block, wrap, bytes, queued budget)`)
+  leadBoardChecks()
+  console.log(`PASS: ${checks} teams prompt checks (system text, free and lead stdin, resume, Codex block, wrap, bytes, queued budget, lead board)`)
 }
 
 try {

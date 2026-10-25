@@ -291,7 +291,7 @@ export type CardReason =
   | 'unblockLimit' | 'cwdMissing' | 'sessionConflict' | 'auth' | 'billing' | 'stateReset' | 'spawnFailed' | 'cliOff' | 'orphan'
 export type BlockedReason =
   | { kind: 'deps' }
-  | { kind: 'user'; text?: string }
+  | { kind: 'user'; text?: string; by?: 'lead' }   // by 'lead': the Lead's `team task update --state blocked` (T19); absent: the user's move (T18)
   | { kind: 'stopped'; runId: string }
   | { kind: 'card'; cardId: string; why: CardReason }
 export interface TaskCounters { noProgress: number; continuations: number; retries: number; interrupts: number; unblockWakes: number; unblockWindowStart: number }
