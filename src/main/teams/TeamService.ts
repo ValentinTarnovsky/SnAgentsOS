@@ -13,7 +13,8 @@ import { afterRunPolicy, candidatesOf, claudeAllLimited, planDispatch } from '@s
 import type { TeamNeedRow } from '@shared/teamNeeds'
 import { systemText } from '@shared/teamPrompt'
 import { parseTeamBlock } from '@shared/teamTools'
-import { isPhoneTeamOp, type TaskSummary, type TeamChangedEvt, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
+import { isPhoneTeamOp, type IntegratePreview, type IntegrateProgressEvt, type TaskSummary, type TeamChangedEvt, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
+import { suggestVerify, type VerifySuggestion } from '@shared/verifyDetect'
 import {
   BOARD_COLUMNS,
   columnOf,
@@ -56,8 +57,10 @@ import { mainT, type MainKey } from '../i18n'
 import type { CtlTeamCaller } from '../cli/CtlTokens'
 import type { CtlTeamsView } from '../cli/handlers'
 import { DeadlineTimer, type DeadlineTimerDeps } from '../DeadlineTimer'
-import type { GitRunner } from '../git/gitExec'
+import { gitExitCode, type GitRunner } from '../git/gitExec'
+import { linkNodeModules } from '../git/WorktreeService'
 import { isSameOrInside, pathKey } from '../migration/pathUtil'
+import { safeRemoveTree } from '../migration/safeRemove'
 import { pidAlive, procStartTime as realProcStartTime, signalTree, treeKillSync } from '../proc/treeKill'
 import type { PtySink } from '../pty/PtyManager'
 import { cleanEnv, statusBinDirs } from '../pty/shellResolver'
@@ -69,15 +72,17 @@ import { enqueue, phaseAgentOf, queueDecide, reconcileTasks } from './flow/dispa
 import { admitRun, finishRun, interruptAll, markRunning, orphanCards, reapOnLoad, requestStop, restoreWake, runEndFactsOf, sessionCardVars, terminalOf, withRunDetail, type AdmitFacts, type RunEnd } from './flow/runs'
 import { answerCard, cancelStaleHires, completeApproval, decideApproval, HIRE_STALE } from './flow/approvals'
 import { archiveSweep, changedScopes, deliverComments } from './flow/tasks'
+import { beginIntegrate, endIntegrate, integrateStep, interruptedIntegrates, worktreeRemoved, type IntegrateOutcome } from './flow/integrate'
 import { applyBlock, applyTool } from './flow/tools'
 import type { FlowCtx, FlowResult, TeamEffect, TeamToolCall } from './flow/types'
+import { createVerifyRunner, integrateHolder, Integrator, type IntegrateResult, type VerifyRunner } from './Integrator'
 import type { StreamFacts } from './parsers/types'
 import { createTeamCtl, paramText, type TeamCtlPort, type TeamLiveRun, type TeamReadReply } from './teamCtl'
 import { createClaudeStreamParser } from './parsers/claudeStream'
 import { maskMessages } from './RunLog'
 import { RunStarter } from './RunStarter'
 import { RunSupervisor } from './RunSupervisor'
-import { TaskWorktrees, type TeamWorktreeApi } from './TaskWorktrees'
+import { TaskWorktrees, type TeamWorktreeApi, type WorktreeLive } from './TaskWorktrees'
 import { WriteLocks } from './WriteLocks'
 import { currentBranch } from './ops/core'
 import { teamGitRead, type TeamGitRequest, type TeamGitTarget } from './ops/gitReads'
@@ -186,6 +191,10 @@ export interface TeamServiceDeps {
   // ---- B5 (needs). ----
   /** A new need row the user should hear about (design 3.1 Notices): B5 the desktop toast, B8 also the phone push. */
   notice?: (n: TeamNotice) => void
+
+  // ---- B6 (Integrar). ----
+  /** teams:integrateProgress to the renderer (every step of every integrate; the dialog filters its integrationId). */
+  sendIntegrate?: (evt: IntegrateProgressEvt) => void
 }
 
 /** A deferred run waits on a console (its session or its tree): a console status change pokes the dispatcher. */
@@ -355,6 +364,27 @@ export class TeamService implements TeamInternals {
    */
   private readonly prepBackoff = new Map<string, number>()
 
+  // ---- B6 Integrar ----
+  /** The temp merge, the verify and the land (design 3.7); null without the worktree service (no task has a worktree then). */
+  readonly integrator: Integrator | null
+  /** The verify processes of every integrate (B6 integration: the exit hooks tree-kill them). */
+  private readonly verifyRunner: VerifyRunner
+  /**
+   * `<teamId>|<taskId>` of every integrate in flight in this app, with the attempt it runs, whether it began its land
+   * and its job (prepareInstall waits for the job of one that did). Outlives a teardown: an integrate finishes its
+   * bounded steps across a Labs toggle (design 3.1), and a load leaves these `running` (only one no process runs any
+   * more is `interrupted`).
+   */
+  private readonly integrating = new Map<string, { integrationId: string; attempt: number; land: boolean; job?: Promise<void> }>()
+  /**
+   * The newest record of each team (set at every load and add, kept across a teardown, dropped by a remove): a B6
+   * commit that lands while the team is not loaded writes on it, never on an older store the integrate began on (Labs
+   * off, on and off again meanwhile would put that store's stale runtime over everything written since).
+   */
+  private readonly newestRecs = new Map<string, TeamRecord>()
+  /** Integrates and sweeps in flight (integrateIdle, tests). */
+  private readonly integrateJobs = new Set<Promise<unknown>>()
+
   constructor(private readonly deps: TeamServiceDeps) {
     this.clock = deps.now ?? Date.now
     this.git = deps.git
@@ -378,6 +408,31 @@ export class TeamService implements TeamInternals {
     this.treeKill = deps.treeKill ?? { sync: (pid) => treeKillSync(pid), signal: (pid, sig) => signalTree(pid, sig), alive: (pid) => pidAlive(pid) }
     this.locks = new WriteLocks({ platform: this.platform, humanWriters: () => this.humanWriters() })
     this.taskWorktrees = deps.worktrees ? new TaskWorktrees({ worktrees: deps.worktrees, git: deps.git, now: this.clock }) : null
+    // Requirement of B6: the verify runs with the run env base (cleanEnv: no SNAOS_* token), its tree killed at the
+    // timeout and by the exit hooks (shutdownSync, prepareInstall).
+    this.verifyRunner = createVerifyRunner({
+      env: deps.baseEnv ?? (() => cleanEnv()),
+      treeKill: (pid) => void this.treeKill.sync(pid),
+      spawn: deps.spawn,
+      platform: this.platform,
+      redact: (s) => redactCredentials(this.maskTokens(s)),
+      log: deps.log,
+    })
+    this.integrator = deps.worktrees
+      ? new Integrator({
+          git: deps.git,
+          worktrees: deps.worktrees,
+          locks: this.locks,
+          integrateDir: (id) => join(teamsDir(), id, 'integrate'),
+          verifyLogDir: (id) => join(teamsDir(), id, 'verify'),
+          runVerify: this.verifyRunner,
+          linkNodeModules: (repoRoot, path) => linkNodeModules(repoRoot, path),
+          removeTree: (target, guard, o) => safeRemoveTree(target, guard, o),
+          now: this.clock,
+          progress: (e) => this.sendIntegrate(e),
+          log: deps.log,
+        })
+      : null
     this.dispatcher = new Dispatcher({
       teams: () => [...this.teams.keys()],
       facts: (teamId, pass, manual) => this.dispatchFacts(teamId, pass, manual),
@@ -498,11 +553,14 @@ export class TeamService implements TeamInternals {
    * process tree killed synchronously, the tokens revoked, the system files
    * deleted, every store flushed synchronously, every key cleared, the
    * watchers stopped, frozen. Idempotent; nothing is disposed (3.0 item 6).
+   * B6 integration: every integrate in flight is halted and its verify tree
+   * killed (haltIntegrates); it ends `interrupted` (at the next load at the latest).
    */
   shutdownSync(trigger?: string): void {
     if (this.frozen) return
     const n = this.stopAllRuns('shutdown')
     if (n > 0) this.deps.log(`shutdown ${trigger ?? 'quit'} interrupted runs=${n}`)
+    this.haltIntegrates(trigger ?? 'quit')
     this.frozen = true
     this.teardown()
   }
@@ -510,13 +568,38 @@ export class TeamService implements TeamInternals {
   /**
    * persistBeforeInstall (the NSIS setup closes the app without before-quit):
    * the same interrupt, kill, revoke and flush, but NOT frozen (a cancelled
-   * wizard leaves the app running); every run defers `disabled` meanwhile.
+   * wizard leaves the app running); every run defers `disabled` meanwhile, and
+   * (B6 integration) the integrates in flight are halted with their verify
+   * trees killed, and a new Integrar answers `busy {install}` until installAborted.
+   * Second round: an integrate that already began its land is waited for, to its
+   * end commit (a git killed in the middle of a checkout can leave the user's
+   * half updated; the land is bounded by its own 10 minute timeout), with a
+   * notice that the update waits for it; the others still stop before their
+   * next step. Resolves with how many it waited for.
    */
-  prepareInstall(): void {
+  async prepareInstall(): Promise<number> {
     this.installing = true
-    if (!this.enabled) return
-    this.stopAllRuns('shutdown')
+    // An integrate outlives Labs off (design 3.1): halted even with the service not enabled.
+    this.haltIntegrates('install')
+    // No land starts after the halt: these are every land of this app that may still be running.
+    const landing = [...this.integrating.entries()].filter(([, v]) => v.land && v.job)
+    if (this.enabled) {
+      this.stopAllRuns('shutdown')
+      for (const rec of this.teams.values()) rec.store.flushSync()
+    }
+    if (landing.length === 0) return 0
+    this.deps.log(`install waits for integrate land(s)=${landing.length}`)
+    for (const [key] of landing) {
+      const [teamId, taskId] = key.split('|')
+      const rec = this.teams.get(teamId) ?? this.newestRecs.get(teamId)
+      if (rec && !this.removedRecs.has(rec)) this.notify(teamId, rec, { rowId: `installWait:${taskId}`, taskId, key: 'teams.push.installWait', urgent: false })
+    }
+    await Promise.allSettled(landing.map(([, v]) => v.job))
+    // A loaded store defers the flush of their end commits (one that is not live wrote them at once): flushed here,
+    // before the setup runs.
     for (const rec of this.teams.values()) rec.store.flushSync()
+    this.deps.log(`install: integrate land(s) over`)
+    return landing.length
   }
 
   /** setInstalling(false): the wizard did not proceed. */
@@ -614,6 +697,8 @@ export class TeamService implements TeamInternals {
     }
     this.enabled = true
     for (const rec of loadedTeams) rec.stopWatch = this.loader.watch(rec.entry.id, rec.entry.repoRoot, () => this.onDefEvent(rec.entry.id))
+    // B6 (design 3.7): what a quit mid-integrate left in each team's integrate folder, then its verify log prune.
+    for (const rec of loadedTeams) this.track(this.sweepIntegrate(rec))
     this.deps.log(`enabled teams=${loadedTeams.length}`)
     this.emit('', ['list'])
     // The rows the load itself opened (a reaped run's card, a repair's) against each team's baseline (design 3.1).
@@ -644,6 +729,7 @@ export class TeamService implements TeamInternals {
     this.sweepRunFiles(e.id)
     const rec: TeamRecord = { entry: e, store, loaded, trust: 'missing', repoIssues: [], repos: new Map(), stopWatch: null }
     this.teams.set(e.id, rec)
+    this.newestRecs.set(e.id, rec)
     await this.recompute(rec)
     if (epoch !== this.epoch) return rec
     // B5 notices (design 3.1): the baseline is the persisted `needsSeen`, never empty, so a restart re-notifies
@@ -655,6 +741,13 @@ export class TeamService implements TeamInternals {
       store.setNeedsSeen(needsRowsOf(rec, trusted).filter((r) => !(reset && r.kind === 'card')).map((r) => r.id))
     }
     this.recheckApplying(e.id, rec)
+    // B6 (design 3.7): an integrate the app quit in the middle of is `failed {interrupted}`; one still in flight in this
+    // app (a Labs toggle reloaded the store meanwhile) keeps running and its end commit lands on this store.
+    const stale = interruptedIntegrates(store.rt, (taskId) => this.integrating.has(`${e.id}|${taskId}`), { now: this.clock() })
+    if (stale.ok && stale.result.taskIds.length) {
+      this.commit(e.id, stale, ['task', 'board', 'needs'])
+      this.deps.log(`integrate ${e.id} interrupted ${stale.result.taskIds.join(',')}`)
+    }
     // B5 review, second round: a pending hire on a base that is no longer the trusted hash (a trust whose cancel never
     // reached the disk, a state written before the cancel existed) can never be approved: cancelled stale at load too.
     const trustedNow = this.trust.trusted(e.id)
@@ -1316,6 +1409,11 @@ export class TeamService implements TeamInternals {
     let n = 0
     for (const rec of this.teams.values()) n += rec.store.rt.activeRuns.filter((r) => LIVE_RUN_STATES.includes(r.state)).length
     return n
+  }
+
+  /** Integrates in flight in this app, of every team and also with Labs off (B6 integration: the close confirm counts them too). */
+  integrateCount(): number {
+    return this.integrating.size
   }
 
   /** True for a session id in any AgentState.sessions or active run: TranscriptLocator never picks its transcript for a console. */
@@ -2328,6 +2426,338 @@ export class TeamService implements TeamInternals {
     this.notify(teamId, rec, { rowId: `${ok ? 'integrated' : 'integrateFailed'}:${taskId}`, taskId, key: ok ? 'teams.push.integrated' : 'teams.push.integrateFailed', urgent: false })
   }
 
+  // ---- Integrar (B6) -----------------------------------------------------------------------------
+
+  /** A job of the Integrar side (an integrate, a sweep) kept until it settles: integrateIdle waits on them. */
+  private track(job: Promise<unknown>): void {
+    const p = job.catch((err) => this.deps.log(`integrate job failed ${(err as Error).name}`))
+    this.integrateJobs.add(p)
+    void p.finally(() => this.integrateJobs.delete(p))
+  }
+
+  /** Resolves once no integrate nor sweep of this service is in flight (tests; nothing in the app waits on it). */
+  async integrateIdle(): Promise<void> {
+    while (this.integrateJobs.size > 0) await Promise.allSettled([...this.integrateJobs])
+  }
+
+  /**
+   * The exit hooks (B6 integration): every integrate begun ends `interrupted` before its next step (Integrator.halt:
+   * no temp tree, verify or land starts after this; a step already running, a land too, finishes) and every verify
+   * tree is killed now (treeKill.ts). What the end commit does not reach before the app exits, the load reads as
+   * `interrupted` (interruptedIntegrates).
+   */
+  private haltIntegrates(why: string): void {
+    this.integrator?.halt()
+    const killed = this.verifyRunner.killAll()
+    if (this.integrating.size > 0 || killed > 0) this.deps.log(`integrate halted (${why}) integrates=${this.integrating.size} verifies=${killed}`)
+  }
+
+  /** Integrates in flight of a team. */
+  private integratesOf(teamId: string): number {
+    let n = 0
+    for (const k of this.integrating.keys()) if (k.startsWith(`${teamId}|`)) n++
+    return n
+  }
+
+  private sendIntegrate(e: IntegrateProgressEvt): void {
+    try {
+      this.deps.sendIntegrate?.(e)
+    } catch (err) {
+      this.deps.log(`integrate progress failed ${(err as Error).name}`)
+    }
+  }
+
+  /**
+   * The verify command of a repo (requirement 2 of B6: only the trusted definition names it, `ResolvedRepo.verify`
+   * comes from the trusted snapshot) and whether the user confirmed that exact text (its sha256 in verifyConfirmed).
+   */
+  private verifyOf(rt: Readonly<TeamRuntime>, repo: ResolvedRepo): { command: string; confirmed: boolean } | null {
+    if (!repo.verify) return null
+    const c = rt.verifyConfirmed[repo.repoId]
+    return { command: repo.verify, confirmed: !!c && c.command === repo.verify && c.sha256 === sha256Hex(repo.verify) }
+  }
+
+  /**
+   * B6 integration: the trees of `tasks` read now (TaskWorktrees.live: on disk, ahead and behind, short timeouts,
+   * cached per tip), for the views the task and needs ops build next. A task without a tree or whose repo does not
+   * resolve is skipped; never throws. Second round: never behind a busy git semaphore (a long land, a temp tree being
+   * added): with no slot free right away a read keeps the cached counts, so the drawer never waits for one.
+   */
+  async readWorktreeLive(teamId: string, tasks: readonly TeamTask[]): Promise<void> {
+    const tw = this.taskWorktrees
+    if (!tw) return
+    // One tree at a time: a live read takes a git slot only when one is free right away, so reads run together would
+    // take each other's (three trees and two slots would leave one unread on every needs op, with git idle).
+    for (const t of tasks) {
+      if (!t.worktree) continue
+      const repo = this.repoOf(teamId, t.repoId)
+      if (!('repoRoot' in repo)) continue
+      try {
+        await tw.live(repo.repoRoot, t.worktree)
+      } catch (err) {
+        this.deps.log(`worktree ${teamId} ${t.id} live read failed ${(err as Error).name}`)
+      }
+    }
+  }
+
+  /** B6 integration: a task tree as readWorktreeLive last read it (no git, no disk); null when never read. */
+  worktreeLive(task: TeamTask): WorktreeLive | null {
+    return task.worktree ? (this.taskWorktrees?.cachedLive(task.worktree) ?? null) : null
+  }
+
+  /**
+   * What the repo's root suggests to verify (design 2.11): the names of its root entries and the script names of its
+   * package.json (a regular file of 1 MB at most), nothing else read and nothing run. The Integrar preview (no verify
+   * declared) and, since the B6 integration, the setup probe's chip.
+   */
+  async verifySuggestions(repoRoot: string): Promise<VerifySuggestion[]> {
+    let rootFiles: string[] = []
+    try {
+      rootFiles = (await fsp.readdir(repoRoot)).slice(0, 5000)
+    } catch {
+      return []
+    }
+    let npmScripts: string[] | undefined
+    if (rootFiles.some((n) => n.toLowerCase() === 'package.json')) {
+      try {
+        const file = join(repoRoot, 'package.json')
+        const st = await fsp.lstat(file)
+        if (st.isFile() && st.size <= 1024 * 1024) {
+          const scripts = (JSON.parse(await fsp.readFile(file, 'utf8')) as { scripts?: unknown })?.scripts
+          if (scripts && typeof scripts === 'object' && !Array.isArray(scripts)) npmScripts = Object.keys(scripts).slice(0, 200)
+        }
+      } catch {
+        npmScripts = undefined
+      }
+    }
+    return suggestVerify({ rootFiles, npmScripts, windows: this.platform === 'win32' })
+  }
+
+  /** The resolved repo of a task (decision 62), or why it does not resolve. */
+  private taskRepo(teamId: string, task: TeamTask): ResolvedRepo | TeamFail {
+    const repo = this.repoOf(teamId, task.repoId)
+    return 'repoRoot' in repo ? repo : fail('git_error', { detail: 'repo' })
+  }
+
+  /** The integratePreview op (design 6.1): read only, for a task in review/integrating (an integrate in flight included). */
+  async integratePreview(teamId: string, taskId: string): Promise<{ preview: IntegratePreview } | TeamFail> {
+    const integrator = this.integrator
+    if (!integrator) return fail('unsupported')
+    const rec = this.teams.get(teamId)
+    if (!rec) return fail('not_found')
+    const task = rec.store.rt.tasks.find((t) => t.id === taskId)
+    if (!task) return fail('not_found')
+    if (task.state !== 'review' || task.phase !== 'integrating') return fail('conflict', { reason: 'stale' })
+    const repo = this.taskRepo(teamId, task)
+    if ('ok' in repo) return repo
+    const verify = this.verifyOf(rec.store.rt, repo)
+    const suggestions = verify ? [] : await this.verifySuggestions(repo.repoRoot)
+    const preview = await integrator.preview(teamId, repo, task, verify, suggestions)
+    if (this.teams.get(teamId) !== rec) return fail('not_found')
+    return { preview }
+  }
+
+  /**
+   * The integrate op (design 3.7, 6.1): the definition is checked again first (design 3.9: an edit since the last
+   * check makes it untrusted), then `beginIntegrate` commits the attempt and the Integrator runs in the background;
+   * the reply is its id (its progress arrives as teams:integrateProgress). A verify runs only when the trusted
+   * definition declares one and the user confirmed that exact command; an unconfirmed one is skipped. The end commit
+   * is T13 (done, closeTaskNeeds) or T14 (failed) with a notice; the write locks of `integrate:<teamId>:<taskId>`
+   * are released on every path.
+   */
+  async integrate(teamId: string, taskId: string, expectTip: string, actor: Actor): Promise<{ integrationId: string } | TeamFail> {
+    const integrator = this.integrator
+    if (!integrator) return fail('unsupported')
+    const rec = this.teams.get(teamId)
+    if (!rec) return fail('not_found')
+    if (this.removing.has(teamId)) return fail('busy', { detail: 'remove' })
+    // B6 integration: the installer is about to close the app (prepareInstall halted what was in flight).
+    if (this.installing) return fail('busy', { detail: 'install' })
+    await this.defCheck(teamId)
+    if (this.teams.get(teamId) !== rec || this.removing.has(teamId)) return fail('not_found')
+    if (this.installing) return fail('busy', { detail: 'install' })
+    if (rec.trust !== 'trusted') return fail('untrusted')
+    const task = rec.store.rt.tasks.find((t) => t.id === taskId)
+    if (!task) return fail('not_found')
+    if (this.integrating.has(`${teamId}|${taskId}`)) return fail('busy')
+    const repo = this.taskRepo(teamId, task)
+    if ('ok' in repo) return repo
+    const ctx = this.flowCtx(teamId)
+    if (!ctx) return fail('untrusted')
+    const v = this.verifyOf(rec.store.rt, repo)
+    const verify = v?.confirmed ? { command: v.command, timeoutMs: ctx.def.def.verifyTimeoutMin * 60_000 } : undefined
+    const begun = this.commit(teamId, beginIntegrate(rec.store.rt, taskId, ctx), ['task', 'needs'], { taskId })
+    if (!begun.ok) return flowFail(begun)
+    const attempt = begun.result.attempt
+    const integrationId = `i-${randomBytes(6).toString('hex')}`
+    const entry: { integrationId: string; attempt: number; land: boolean; job?: Promise<void> } = { integrationId, attempt, land: false }
+    this.integrating.set(`${teamId}|${taskId}`, entry)
+    const cur = rec.store.rt.tasks.find((t) => t.id === taskId) ?? task
+    this.deps.log(`integrate ${teamId} ${taskId} start ${integrationId} attempt=${attempt}${verify ? ' verify' : v ? ' verify-unconfirmed' : ''}`)
+    entry.job = this.runIntegrate(teamId, rec, cur, repo, { expectTip, verify, integrationId, attempt, actor })
+    this.track(entry.job)
+    return { integrationId }
+  }
+
+  /**
+   * A commit of an integrate on the team's current store; with none (Labs off, a freeze since the integrate began,
+   * an enable that failed to load the team) on the newest store the team had, written at once (design 3.1: the end
+   * commit of an integrate in flight is written synchronously). B6 review: whatever live() says, since the flush
+   * deadline of the service only reaches a loaded store. Never the store the integrate began on when a later load
+   * replaced it (its runtime is stale). A removed team's store gets nothing.
+   */
+  private integrateCommit<R>(teamId: string, rec: TeamRecord, reduce: (rt: TeamRuntime) => FlowResult<R>, scopes: TeamScope[], taskId: string): FlowResult<R> | null {
+    const cur = this.teams.get(teamId)
+    if (cur) return this.commit(teamId, reduce(cur.store.rt), scopes, { taskId })
+    const last = this.newestRecs.get(teamId) ?? rec
+    if (this.removedRecs.has(rec) || this.removedRecs.has(last)) return null
+    const res = last.store.commit(reduce(last.store.rt), scopes, { taskId })
+    last.store.flushSync()
+    return res
+  }
+
+  private async runIntegrate(
+    teamId: string,
+    rec: TeamRecord,
+    task: TeamTask,
+    repo: ResolvedRepo,
+    o: { expectTip: string; verify?: { command: string; timeoutMs: number }; integrationId: string; attempt: number; actor: Actor },
+  ): Promise<void> {
+    const key = `${teamId}|${task.id}`
+    let res: IntegrateResult
+    try {
+      res = await (this.integrator as Integrator).integrate(teamId, repo, task, {
+        expectTip: o.expectTip,
+        integrationId: o.integrationId,
+        ...(o.verify ? { verify: o.verify } : {}),
+        onStep: (step) => {
+          // Its land began (after the halt check, in the same tick): prepareInstall waits for this integrate's end.
+          const live = this.integrating.get(key)
+          if (step === 'land' && live?.integrationId === o.integrationId) live.land = true
+          void this.integrateCommit(teamId, rec, (rt) => integrateStep(rt, task.id, o.attempt, step, { now: this.clock() }), ['task'], task.id)
+        },
+      })
+    } catch (err) {
+      this.deps.log(`integrate ${teamId} ${task.id} threw ${(err as Error).name}`)
+      res = { ok: false, error: 'git_error', step: 'cleanup' }
+    } finally {
+      // Every exit path frees what the integrate held (the Integrator released them too: compare-and-clear).
+      this.locks.releaseAll(integrateHolder(teamId, task.id))
+    }
+    const outcome: IntegrateOutcome = res.ok
+      ? { ok: true, mergeSha: res.mergeSha, base: res.base, landed: res.landed, ...(res.mergeBase ? { mergeBase: res.mergeBase } : {}) }
+      : {
+          ok: false, error: res.error, step: res.step, ...(res.files ? { files: res.files } : {}), ...(res.tail ? { tail: res.tail } : {}),
+          // B6 review, second round: the drawer, the reopened dialog and a rebaseVerify comment read them from the task.
+          ...(res.verifyNote ? { verifyNote: res.verifyNote } : {}), ...(res.landing ? { landing: res.landing } : {}),
+          ...(res.mergeBase ? { mergeBase: res.mergeBase } : {}),
+        }
+    let ended: FlowResult<{ ok: boolean }> | null
+    try {
+      ended = this.integrateCommit(teamId, rec, (rt) => endIntegrate(rt, task.id, o.attempt, outcome, o.actor, { now: this.clock() }), ['task', 'board', 'needs'], task.id)
+    } finally {
+      // After the end commit (a load meanwhile must not read this attempt as interrupted), and even when it threw:
+      // a key left behind would answer `busy` to every later Integrar of the task.
+      this.integrating.delete(key)
+    }
+    if (!ended || !ended.ok) {
+      this.deps.log(`integrate ${teamId} ${task.id} end not recorded (stale)`)
+      return
+    }
+    this.deps.log(`integrate ${teamId} ${task.id} ${res.ok ? `landed ${res.landed}` : `failed ${res.error} at ${res.step}`}`)
+    this.integrateNotice(teamId, task.id, res.ok)
+  }
+
+  /** The repos a team integrates into: its main root and every resolved extra repo. */
+  private repoRootsOf(rec: TeamRecord): string[] {
+    const out = [rec.entry.repoRoot]
+    for (const r of rec.repos.values()) if ('repoRoot' in r && !out.includes(r.repoRoot)) out.push(r.repoRoot)
+    return out
+  }
+
+  /** At enable: the Integrator's sweep of the team's integrate folder (design 3.7), then its verify log prune. */
+  private async sweepIntegrate(rec: TeamRecord): Promise<void> {
+    if (!this.integrator) return
+    await this.integrator.sweep(rec.entry.id, this.repoRootsOf(rec))
+  }
+
+  /**
+   * The removeWorktree op (design 6.1, plan 3.9 step 6): the worktree and the `sn/` branch of a done or cancelled
+   * task go, through TaskWorktrees.remove with the task's owner, compared against an inspect made right before
+   * (a commit or a write in between is `conflict {stale}`). Nothing is ever dropped here: uncommitted files are
+   * `dirty_worktree {files}`, commits its base branch does not have (a task moved to done by hand, a cancelled one)
+   * `dirty_worktree {commits}`. A run, an integrate, a takeover or any other lock holder on the tree -> `busy`.
+   */
+  async removeTaskWorktree(teamId: string, taskId: string): Promise<TeamFail | null> {
+    const tw = this.taskWorktrees
+    if (!tw) return fail('unsupported')
+    const rec = this.teams.get(teamId)
+    if (!rec) return fail('not_found')
+    const task = rec.store.rt.tasks.find((t) => t.id === taskId)
+    if (!task) return fail('not_found')
+    const wt = task.worktree
+    if (!wt) return fail('missing_worktree')
+    if (task.state !== 'done' && task.state !== 'cancelled') return fail('conflict', { reason: 'stale' })
+    if (task.integrate?.state === 'running' || this.integrating.has(`${teamId}|${taskId}`)) return fail('busy', { detail: 'integrate' })
+    const wtKey = this.locks.key(wt.path)
+    const rt = rec.store.rt
+    if (rt.activeRuns.some((r) => r.taskId === taskId || this.locks.key(r.cwd) === wtKey)) return fail('busy', { detail: 'run' })
+    if (rt.agents.some((a) => a.takeover && 'cwd' in a.takeover && this.locks.key(a.takeover.cwd) === wtKey)) return fail('busy', { detail: 'takeover' })
+    if (this.locks.holderOf(wtKey) !== null || this.lingeringOf(teamId).cwds.has(wtKey)) return fail('busy', { detail: 'lock' })
+    const insp = await tw.inspect(task)
+    const again = this.teams.get(teamId) === rec ? rec.store.rt.tasks.find((t) => t.id === taskId) : undefined
+    if (!again || again.worktree?.path !== wt.path || (again.state !== 'done' && again.state !== 'cancelled')) return fail('conflict', { reason: 'stale' })
+    if (insp.exists && insp.dirtyFiles > 0) return fail('dirty_worktree', { detail: 'files' })
+    const repo = this.taskRepo(teamId, task)
+    if ('ok' in repo) return repo
+    if (await this.branchLoses(repo.repoRoot, wt.branch, wt.baseBranch, insp.tip)) return fail('dirty_worktree', { detail: 'commits' })
+    if (this.teams.get(teamId) !== rec) return fail('not_found')
+    const res = await tw.remove(again, { tip: insp.tip ?? '', dirty: insp.dirtyFiles })
+    if (!res.ok) {
+      this.deps.log(`worktree ${teamId} ${taskId} not removed ${res.error}${'detail' in res && res.detail ? ` ${res.detail}` : ''}`)
+      const detail = 'detail' in res && typeof res.detail === 'string' ? res.detail : undefined
+      switch (res.error) {
+        case 'changed':
+          return fail('conflict', { reason: 'stale', ...(detail ? { detail } : {}) })
+        case 'busy':
+        case 'shared':
+          return fail('busy', { detail: detail ?? res.error })
+        case 'not_managed':
+          return fail('missing_worktree', detail ? { detail } : {})
+        default:
+          return fail('git_error', detail ? { detail } : {})
+      }
+    }
+    const done = this.integrateCommit(teamId, rec, (r) => worktreeRemoved(r, taskId, wt.path, { now: this.clock() }), ['task', 'board'], taskId)
+    this.deps.log(`worktree ${teamId} ${taskId} removed`)
+    return done && !done.ok ? flowFail(done) : null
+  }
+
+  /**
+   * Deleting `branch` would drop commits: it resolves and is not in `base` (merge-base --is-ancestor exit 1), or git
+   * cannot tell (unknown counts as lost). A branch that is gone loses nothing; B6 review: gone is only git's own answer
+   * for a missing ref (rev-parse --verify --quiet exits 1 and prints nothing), never a timeout or another failure, and a
+   * tip the inspect just read (`knownTip`) proves the branch is there.
+   */
+  private async branchLoses(repoRoot: string, branch: string, base: string, knownTip?: string): Promise<boolean> {
+    const run = (args: string[]): Promise<string> => this.git.run(args, { cwd: repoRoot, timeoutMs: 15_000, priority: 'desktop' })
+    if (!knownTip) {
+      try {
+        await run(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`])
+      } catch (e) {
+        const out = (e as { stdout?: unknown } | null)?.stdout
+        return !(gitExitCode(e) === 1 && (typeof out !== 'string' || out.trim() === ''))
+      }
+    }
+    try {
+      await run(['merge-base', '--is-ancestor', `refs/heads/${branch}`, `refs/heads/${base}`])
+      return false
+    } catch {
+      // Exit 1: not in the base; anything else: git cannot tell. Both keep the branch.
+      return true
+    }
+  }
+
   /** One TeamNotice: the trusted team name and the task id only, from the main catalog, redacted. */
   private notify(teamId: string, rec: TeamRecord, o: { rowId: string; taskId?: string; key: MainKey; urgent: boolean }): void {
     if (!this.deps.notice) return
@@ -2539,6 +2969,7 @@ export class TeamService implements TeamInternals {
     const { store } = TeamStore.load(this.storeDeps(teamId), teamId, null)
     const rec: TeamRecord = { entry, store, loaded, trust: 'untrusted', repoIssues: [], repos: new Map(), stopWatch: null }
     this.teams.set(teamId, rec)
+    this.newestRecs.set(teamId, rec)
     rec.stopWatch = this.loader.watch(teamId, repoRoot, () => this.onDefEvent(teamId))
     const approved = this.trust.approve(teamId, repoRoot, loaded, goalHashOf(def.goal))
     if ('error' in approved) {
@@ -2632,8 +3063,10 @@ export class TeamService implements TeamInternals {
   }
 
   private async removeRecord(teamId: string, rec: TeamRecord): Promise<TeamFail | null> {
+    // B6: an integrate in flight finishes first (its land is bounded and aborting it midway is worse): the team stays whole.
+    if (this.integratesOf(teamId) > 0) return fail('busy', { detail: 'integrate' })
     // Every run stops first (`deleted`) and its close is awaited (the supervisor forces it after STOP_GRACE_MS).
-    // Its task worktrees are disowned once the folder moved (below); B6 refuses while an integrate runs.
+    // Its task worktrees are disowned once the folder moved (below).
     for (const run of [...rec.store.rt.activeRuns]) {
       if (run.state !== 'stopping') this.commit(teamId, requestStop(rec.store.rt, run.id, 'deleted', { now: this.clock() }, this.runPolicy), ['agents', 'run'], { runId: run.id })
     }
@@ -2654,6 +3087,7 @@ export class TeamService implements TeamInternals {
     this.timer.clear(`defwatch:${teamId}`)
     this.teams.delete(teamId)
     this.removedRecs.add(rec)
+    if (this.newestRecs.get(teamId) === rec) this.newestRecs.delete(teamId)
     // Decision 63: its task worktrees lose their owner and read as ordinary orphans in Settings > Git (never deleted
     // here). After the trash: a team whose folder did not move keeps owning them. A tree a prep is still creating
     // lands after this; that prep sees the record removed and disowns it (RunStarter step 2).

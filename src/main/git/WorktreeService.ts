@@ -111,6 +111,47 @@ function errCode(e: unknown): string {
   return typeof c === 'string' ? c : 'error'
 }
 
+/** lstat-based: anything there, a dangling link included; any error but ENOENT counts as there too. */
+async function lexists(fsx: Pick<WorktreeFs, 'lstat'>, p: string): Promise<boolean> {
+  try {
+    await fsx.lstat(p)
+    return true
+  } catch (e) {
+    return errCode(e) !== 'ENOENT'
+  }
+}
+
+/**
+ * The node_modules junction of a new tree (app 2.7.0, E10 B6: extracted from createNow, the Integrator's temp tree
+ * links the same way): `<path>/node_modules` -> `<repoRoot>/node_modules` when the repo has that folder and the tree
+ * has nothing of that name. Returns the links it created (what a rollback or a cleanup unlinks), [] when none.
+ */
+export async function linkNodeModules(repoRoot: string, path: string, fsx: Pick<WorktreeFs, 'lstat' | 'stat' | 'symlink'> = nodeFsp): Promise<string[]> {
+  const target = join(repoRoot, 'node_modules')
+  const link = join(path, 'node_modules')
+  let isDir = false
+  try {
+    isDir = (await fsx.stat(target)).isDirectory()
+  } catch {
+    isDir = false
+  }
+  if (!isDir || (await lexists(fsx, link))) return []
+  await fsx.symlink(target, link, 'junction')
+  return [link]
+}
+
+/** A link (junction or symlink) removed as a link: unlink, rmdir for a directory junction. Never recursive. */
+export async function unlinkLink(p: string, fsx: Pick<WorktreeFs, 'unlink' | 'rmdir'> = nodeFsp): Promise<void> {
+  try {
+    await fsx.unlink(p)
+  } catch (e) {
+    const c = errCode(e)
+    if (c === 'ENOENT') return
+    if (c === 'EPERM' || c === 'EISDIR') await fsx.rmdir(p)
+    else throw e
+  }
+}
+
 /** Path functions of a platform; a host path always uses the host's own flavor. */
 function flavor(platform: NodeJS.Platform): typeof posix {
   return platform === 'win32' ? win32 : posix
@@ -219,13 +260,8 @@ export class WorktreeService {
     return canonicalPath(p, this.deps.realpath)
   }
 
-  private async exists(p: string): Promise<boolean> {
-    try {
-      await this.fsx.lstat(p)
-      return true
-    } catch (e) {
-      return errCode(e) !== 'ENOENT'
-    }
+  private exists(p: string): Promise<boolean> {
+    return lexists(this.fsx, p)
   }
 
   /**
@@ -337,20 +373,8 @@ export class WorktreeService {
       createdBranch = true
 
       if (req.copyEnv === true) await this.copyEnv(repoRoot, path)
-      if (req.linkNodeModules === true) {
-        const target = join(repoRoot, 'node_modules')
-        const link = join(path, 'node_modules')
-        let isDir = false
-        try {
-          isDir = (await this.fsx.stat(target)).isDirectory()
-        } catch {
-          isDir = false
-        }
-        if (isDir && !(await this.exists(link))) {
-          await this.fsx.symlink(target, link, 'junction')
-          createdJunctions.push(link)
-        }
-      }
+      // What it linked joins the rollback list as soon as it exists.
+      if (req.linkNodeModules === true) createdJunctions.push(...(await linkNodeModules(repoRoot, path, this.fsx)))
 
       this.deps.manifest.put({
         path,
@@ -404,15 +428,8 @@ export class WorktreeService {
   }
 
   /** A link (junction or symlink) removed as a link: unlink, rmdir for a directory junction. Never recursive. */
-  private async unlinkLink(p: string): Promise<void> {
-    try {
-      await this.fsx.unlink(p)
-    } catch (e) {
-      const c = errCode(e)
-      if (c === 'ENOENT') return
-      if (c === 'EPERM' || c === 'EISDIR') await this.fsx.rmdir(p)
-      else throw e
-    }
+  private unlinkLink(p: string): Promise<void> {
+    return unlinkLink(p, this.fsx)
   }
 
   private removeTree(target: string, root: string): Promise<RemoveResult> {

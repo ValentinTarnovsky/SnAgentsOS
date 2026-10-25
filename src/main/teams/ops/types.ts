@@ -6,10 +6,12 @@
  */
 import type { ChatMessage } from '@shared/chat-types'
 import type { ConfigFile } from '@shared/types'
-import type { TeamFail, TeamOp, TeamReply, TeamRequest, TeamScope, TeamTrustState } from '@shared/team-protocol'
-import type { Actor, CardAnswer, DefError, DeferInfo, ResolvedRepo, TeamDefinition, TrustedDefinition } from '@shared/teams'
+import type { IntegratePreview, TeamFail, TeamOp, TeamReply, TeamRequest, TeamScope, TeamTrustState } from '@shared/team-protocol'
+import type { Actor, CardAnswer, DefError, DeferInfo, ResolvedRepo, TeamDefinition, TeamTask, TrustedDefinition } from '@shared/teams'
+import type { VerifySuggestion } from '@shared/verifyDetect'
 import type { GitRunner } from '../../git/gitExec'
 import type { FlowCtx, FlowResult } from '../flow/types'
+import type { WorktreeLive } from '../TaskWorktrees'
 import type { LoadedDefinition, LoadRes, TeamDefinitionLoader } from '../TeamDefinitionLoader'
 import type { TeamIndexEntry, TeamRegistry } from '../TeamRegistry'
 import type { TeamStore } from '../TeamStore'
@@ -92,6 +94,18 @@ export interface TeamInternals {
   answer(teamId: string, cardId: string, answer: CardAnswer, actor: Actor): Promise<TeamFail | null>
   /** B5: the level of a prep-failure card's run leaves its prep backoff (Reintentar; Retomar of the task the card blocks). */
   liftPrepBackoff(teamId: string, cardId: string): void
+  /** B6: the Integrar preview of a task in review/integrating (read only). */
+  integratePreview(teamId: string, taskId: string): Promise<{ preview: IntegratePreview } | TeamFail>
+  /** B6: starts an Integrar of the tip the preview showed; its progress arrives as teams:integrateProgress. */
+  integrate(teamId: string, taskId: string, expectTip: string, actor: Actor): Promise<{ integrationId: string } | TeamFail>
+  /** B6: the worktree and branch of a done or cancelled task go (nothing uncommitted or unmerged is ever dropped). */
+  removeTaskWorktree(teamId: string, taskId: string): Promise<TeamFail | null>
+  /** B6 integration: what a repo root suggests to verify (design 2.11; root names and package.json script names only). */
+  verifySuggestions(repoRoot: string): Promise<VerifySuggestion[]>
+  /** B6 integration: reads the trees of these tasks now (TaskWorktrees.live, short timeouts, cached per tip). */
+  readWorktreeLive(teamId: string, tasks: readonly TeamTask[]): Promise<void>
+  /** B6 integration: a task tree as main last read it (no git, no disk), null when never read or without a tree. */
+  worktreeLive(task: TeamTask): WorktreeLive | null
 }
 
 export interface OpCtx {

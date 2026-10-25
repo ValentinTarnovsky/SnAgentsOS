@@ -63,6 +63,7 @@ import { TeamHost } from '@/components/teams/TeamHost'
 import { TeamSetupDialog } from '@/components/teams/TeamSetupDialog'
 import { TeamTrustDialog } from '@/components/teams/TeamTrustDialog'
 import { NewTaskDialog } from '@/components/teams/NewTaskDialog'
+import { IntegrateDialog } from '@/components/teams/IntegrateDialog'
 import { Logo } from '@/components/ui/Logo'
 import { Button } from '@/components/ui/Button'
 
@@ -340,6 +341,8 @@ function AppBody() {
       <TeamTrustDialog />
       {/* Teams (app 2.7.0, E10 B3): a new task on the board of the team on screen. */}
       <NewTaskDialog />
+      {/* Teams (app 2.7.0, E10 B6): Integrar, the merge of a task branch into its base. */}
+      <IntegrateDialog />
     </div>
   )
 }

@@ -9,6 +9,7 @@ import { initRunChatSync } from './runChat'
 import { initBoardSync } from './board'
 import { initLeadSync } from './lead'
 import { initNeedsSync } from './needs'
+import { initIntegrateSync } from './integrate'
 
 export function startTeams(): () => void {
   const offs: Array<() => void> = [initTeams()]
@@ -16,6 +17,7 @@ export function startTeams(): () => void {
   offs.push(initRosterSync(), initRunChatSync())
   offs.push(initBoardSync(), initLeadSync())
   offs.push(initNeedsSync())
+  offs.push(initIntegrateSync())
   return () => {
     // Areas first, the core last (its teardown closes the overlay and clears the store).
     for (const off of offs.reverse()) off()

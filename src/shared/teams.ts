@@ -11,6 +11,7 @@
 import type { AgentProvider, PaneContext, PaneUsage } from './types'
 import type { FailureInfo } from './failure'
 import type { TurnDigest } from './toolActivity'
+import type { VerifyNote } from './team-protocol'
 
 // ---- ids ---------------------------------------------------------------------------------------
 export const TEAM_ID_RE = /^tm-[a-f0-9]{12}$/
@@ -372,7 +373,15 @@ export type IntegrateError =
   | 'missing_worktree' | 'dirty_worktree' | 'in_progress' | 'wrong_branch' | 'busy' | 'merge_conflict' | 'no_identity'
   | 'verify_failed' | 'verify_timeout' | 'base_moved' | 'base_dirty' | 'base_busy' | 'base_checked_out_elsewhere'
   | 'git_error' | 'timeout' | 'interrupted'
-export interface IntegrateStatus { state: 'idle' | 'running' | 'failed'; attempt: number; step?: IntegrateStep; error?: IntegrateError; files?: string[]; tail?: string; at: number }
+/**
+ * A failed one (B6 review, second round) also keeps `step` (where it failed), `verifyNote` (what the verify runner
+ * itself had to do on this attempt, also when it failed at a later step) and `landing` (a failure at step land whose
+ * mode was known: ffOnly lands through the user's checkout, updateRef moves only the branch).
+ */
+export interface IntegrateStatus {
+  state: 'idle' | 'running' | 'failed'; attempt: number; step?: IntegrateStep; error?: IntegrateError; files?: string[]; tail?: string
+  verifyNote?: VerifyNote; landing?: 'ffOnly' | 'updateRef'; at: number
+}
 export interface TeamTask {
   id: string; rev: number
   title: string; body: string

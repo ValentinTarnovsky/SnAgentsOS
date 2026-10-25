@@ -6,7 +6,7 @@ const MESSAGES = {
   en: {
     'dialog.activeTitle': 'Active consoles',
     'dialog.activeDetail': '{n} running process(es) will be closed.',
-    'teams.close.runs': '{n} team run(s) will be stopped.',
+    'teams.close.runs': 'Team work in progress will be stopped: {runs} run(s) and {integrates} integration(s).',
     // Teams notices (B5, design 3.1 and 6.3): the trusted team name and the task id only, never agent text.
     'teams.push.title': 'Team {team}',
     'teams.push.trust': 'The team definition changed: review it and trust it again so the team keeps running.',
@@ -23,6 +23,8 @@ const MESSAGES = {
     'teams.push.dispatch': 'A team run waits for your OK.',
     'teams.push.integrated': '{task} was integrated into its base branch.',
     'teams.push.integrateFailed': 'Integrating {task} stopped: open it to see why.',
+    // B6 integration, second round: the update waits for a land that already began (prepareInstall).
+    'teams.push.installWait': '{task} is landing in its base branch: the update installs as soon as it ends.',
     'dialog.cancel': 'Cancel',
     'dialog.closeAnyway': 'Close anyway',
     'tray.show': 'Show {app}',
@@ -138,7 +140,7 @@ const MESSAGES = {
   es: {
     'dialog.activeTitle': 'Hay consolas activas',
     'dialog.activeDetail': '{n} proceso(s) en ejecución se cerrarán.',
-    'teams.close.runs': 'Se frenan {n} corrida(s) del equipo.',
+    'teams.close.runs': 'Se frena el trabajo del equipo en curso: {runs} corrida(s) y {integrates} integración(es).',
     'teams.push.title': 'Equipo {team}',
     'teams.push.trust': 'Cambió la definición del equipo: revisala y volvé a confiar en ella para que el equipo siga corriendo.',
     'teams.push.paused.auth': 'El equipo quedó en pausa: un agente perdió su sesión. Iniciá sesión de nuevo y reanudá el equipo.',
@@ -154,6 +156,7 @@ const MESSAGES = {
     'teams.push.dispatch': 'Una corrida del equipo espera tu OK.',
     'teams.push.integrated': '{task} quedó integrada en su rama base.',
     'teams.push.integrateFailed': 'La integración de {task} frenó: abrila para ver por qué.',
+    'teams.push.installWait': '{task} se está integrando en su rama base: la actualización se instala apenas termine.',
     'dialog.cancel': 'Cancelar',
     'dialog.closeAnyway': 'Cerrar de todos modos',
     'tray.show': 'Mostrar {app}',

@@ -130,12 +130,15 @@ function hireBody(a: Extract<TeamApproval, { kind: 'hire' }>, trusted: TrustedDe
   return { diff, risks }
 }
 
+/** The commits a task's branch has over its base as main last read them (TaskWorktrees.cachedLive); undefined when unknown. */
+export type AheadOf = (taskId: string) => number | undefined
+
 /**
  * One approval (design 2.4). `light`: what the "Te necesita" count reads (teamNeedsRows needs only the id, kind,
  * state, decider, time and task), without the plan text, the hire diff or its risks: the list row, the header and
  * every commit's header key build it, the needs op and the task drawer build the full one.
  */
-export function approvalView(rt: Readonly<TeamRuntime>, a: TeamApproval, trusted: TrustedDefinition | null, o: { light?: boolean } = {}): ApprovalView {
+export function approvalView(rt: Readonly<TeamRuntime>, a: TeamApproval, trusted: TrustedDefinition | null, o: { light?: boolean; ahead?: AheadOf } = {}): ApprovalView {
   const base = { id: a.id, state: a.state, decider: a.decider, requestedBy: actorLabel(a.createdBy), at: a.createdAt }
   let payload: ApprovalView['payload']
   switch (a.kind) {
@@ -168,9 +171,17 @@ export function approvalView(rt: Readonly<TeamRuntime>, a: TeamApproval, trusted
       break
     }
     case 'integrate': {
-      const err = rt.tasks.find((t) => t.id === a.taskId)?.integrate?.error
+      const last = rt.tasks.find((t) => t.id === a.taskId)?.integrate
       payload = { kind: 'integrate', branch: a.payload.branch, base: a.payload.base }
-      if (err) payload.lastError = err
+      // B6 review, second round: where the last attempt failed and how it was landing (the row words a timeout by them).
+      if (last?.error) {
+        payload.lastError = last.error
+        if (last.step) payload.lastStep = last.step
+        if (last.step === 'land' && last.landing) payload.lastLanding = last.landing
+      }
+      // B6 integration: the commits ahead as main last read them (the needs and task ops read them before this view).
+      const ahead = a.taskId ? o.ahead?.(a.taskId) : undefined
+      if (ahead !== undefined) payload.ahead = ahead
       break
     }
   }
@@ -228,11 +239,12 @@ export function waitingOf(plan: DispatchPlan | null): { byAgent: Map<string, Def
 /**
  * "Te necesita" of one team (design 2.4): the trust state, the pause, the pending approvals with their full bodies,
  * the open cards, the queue rows with their defer reason (B4), and the titles of the tasks the rows name. The same
- * rows as the count (needsInputOf): an approval, card or queue item of a task that is over is in neither.
+ * rows as the count (needsInputOf): an approval, card or queue item of a task that is over is in neither. `ahead`:
+ * the integrate rows' commits ahead (B6 integration, the needs op read them first).
  */
-export function needsView(rec: TeamRecord, trusted: TrustedDefinition | null, defer: ReadonlyMap<string, DeferInfo>): TeamNeedsView {
+export function needsView(rec: TeamRecord, trusted: TrustedDefinition | null, defer: ReadonlyMap<string, DeferInfo>, o: { ahead?: AheadOf } = {}): TeamNeedsView {
   const rt = rec.store.rt
-  const input = needsInputOf(rt, rec.trust, rec.trustSince, trusted, { full: true })
+  const input = needsInputOf(rt, rec.trust, rec.trustSince, trusted, { full: true, ...(o.ahead ? { ahead: o.ahead } : {}) })
   const queue = rt.queue.filter((q) => openTask(rt, q.taskId)).map((q) => queueItemView(rt, q, defer.get(`${q.agentId}|${q.sessionKey}`)))
   const tasks: TeamNeedsView['tasks'] = {}
   const ids = new Set<string>()
@@ -270,11 +282,11 @@ export function cardWaits(rt: Readonly<TeamRuntime>, c: TeamCard): boolean {
  * The input of the one "Te necesita" rule (decision 30) for a team: the approvals that wait (light views unless
  * `full`), the open cards and the queue, none of a task that is over.
  */
-export function needsInputOf(rt: Readonly<TeamRuntime>, trust: TeamTrustState, trustSince: number | undefined, trusted: TrustedDefinition | null, o: { full?: boolean } = {}): TeamNeedsInput {
+export function needsInputOf(rt: Readonly<TeamRuntime>, trust: TeamTrustState, trustSince: number | undefined, trusted: TrustedDefinition | null, o: { full?: boolean; ahead?: AheadOf } = {}): TeamNeedsInput {
   const input: TeamNeedsInput = {
     trust,
     paused: rt.paused,
-    approvals: rt.approvals.filter((a) => approvalWaits(rt, a)).map((a) => approvalView(rt, a, trusted, { light: !o.full })),
+    approvals: rt.approvals.filter((a) => approvalWaits(rt, a)).map((a) => approvalView(rt, a, trusted, { light: !o.full, ...(o.ahead ? { ahead: o.ahead } : {}) })),
     cards: rt.cards.filter((c) => cardWaits(rt, c)).map(cardView),
     queue: rt.queue.filter((q) => openTask(rt, q.taskId)).map((q) => queueItemView(rt, q)),
   }
@@ -632,12 +644,16 @@ function planView(t: TeamTask): PlanView | undefined {
 /**
  * The task drawer (and `team task get`): body, plan, the comment page, the
  * newest runs, its approvals and cards. `recent` is the runs ring; `lastLineAt`
- * the live value of a running run.
+ * the live value of a running run; `worktree` the tree as main last read it
+ * (B6 integration: exists, ahead, behind; without one the tree reads as there).
  */
 export function taskDetail(
   rt: Readonly<TeamRuntime>,
   t: TeamTask,
-  v: TaskViewCtx & { trusted: TrustedDefinition | null; recent: readonly Run[]; lastLineAt?: (runId: string) => number | undefined; commentsBefore?: number; commentsLimit?: number },
+  v: TaskViewCtx & {
+    trusted: TrustedDefinition | null; recent: readonly Run[]; lastLineAt?: (runId: string) => number | undefined; commentsBefore?: number; commentsLimit?: number
+    worktree?: { exists: boolean; ahead?: number; behind?: number } | null
+  },
 ): TaskDetail {
   const { comments: _count, ...summary } = taskSummary(rt, t, v)
   const page = commentPage(rt, v.def, t.id, { before: v.commentsBefore, limit: v.commentsLimit })
@@ -652,6 +668,8 @@ export function taskDetail(
   const reviewInfo: TaskDetail['reviewInfo'] = { round: t.review.round, max: t.review.max }
   if (t.review.lastVerdict) reviewInfo.lastVerdict = t.review.lastVerdict
   if (t.review.qaAgentId) reviewInfo.qaAgentId = t.review.qaAgentId
+  const live = t.worktree ? v.worktree : null
+  const ahead: AheadOf = (taskId) => (taskId === t.id ? live?.ahead : undefined)
   const out: TaskDetail = {
     ...summary,
     body: t.body,
@@ -661,14 +679,16 @@ export function taskDetail(
     commentsArchived: v.archived?.(t.id) ?? 0,
     runs,
     // A task that is over shows its decided approvals and answered cards, never one still waiting (B5).
-    approvals: rt.approvals.filter((a) => a.taskId === t.id && (approvalWaits(rt, a) || (a.state !== 'pending' && a.state !== 'applying'))).map((a) => approvalView(rt, a, v.trusted)),
+    approvals: rt.approvals.filter((a) => a.taskId === t.id && (approvalWaits(rt, a) || (a.state !== 'pending' && a.state !== 'applying'))).map((a) => approvalView(rt, a, v.trusted, { ahead })),
     cards: rt.cards.filter((c) => c.taskId === t.id && (cardWaits(rt, c) || c.state !== 'open')).map(cardView),
   }
   const plan = planView(t)
   if (plan) out.plan = plan
   if (t.worktree) {
-    // B4/B6 inspect the tree on disk (exists, ahead, behind); the runtime only knows it was created.
-    out.worktree = { path: t.worktree.path, branch: t.worktree.branch, base: t.worktree.base, baseBranch: t.worktree.baseBranch, exists: true }
+    // The runtime only knows the tree was created: exists, ahead and behind are main's last read of it (the task op).
+    out.worktree = { path: t.worktree.path, branch: t.worktree.branch, base: t.worktree.base, baseBranch: t.worktree.baseBranch, exists: live?.exists ?? true }
+    if (live?.ahead !== undefined) out.worktree.ahead = live.ahead
+    if (live?.behind !== undefined) out.worktree.behind = live.behind
   }
   // What the task's runs get (teamArgv filters task.grants through isGrantable): never a rule an earlier build stored
   // that the policy now refuses (fourth round), so `team task get` names no grant the run does not have.

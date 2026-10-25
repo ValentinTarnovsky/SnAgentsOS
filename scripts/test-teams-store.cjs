@@ -845,6 +845,14 @@ function storeChecks(tmp) {
   const sv = M.salvageRuntime({ teamId: 'tm-0123456789ab', gen: 'cafebabe', rev: 3, tasks: [{ ...task, diffStat }], approvals: [perm], nextIds: { task: 2, comment: 1, approval: 2, card: 1, queue: 1 } }, 'tm-0123456789ab', 'cafebabe')
   same([sv.rt.approvals[0]?.payload.denied, sv.rt.tasks[0]?.diffStat], [['npm test -- --watch'], diffStat], 'denied and diffStat survive a load')
   check(!sv.repaired.some((r) => r.startsWith('tasks') || r.startsWith('approvals')), 'with nothing repaired')
+  // B6 review, second round: a failed integrate keeps its verify note and land mode across a load; a value this build
+  // does not know (a newer build's) drops that field only, never the task.
+  const failedInt = { state: 'failed', attempt: 2, step: 'land', error: 'timeout', verifyNote: 'leftStopped', landing: 'ffOnly', at: 7 }
+  const odd = { ...failedInt, verifyNote: 'fromANewerBuild', landing: 'alreadyMerged' }
+  const si = M.salvageRuntime({ teamId: 'tm-0123456789ab', gen: 'cafebabe', rev: 3, tasks: [{ ...task, integrate: failedInt }, { ...task, id: 't-2', integrate: odd }], nextIds: { task: 3, comment: 1, approval: 1, card: 1, queue: 1 } }, 'tm-0123456789ab', 'cafebabe')
+  same(si.rt.tasks[0]?.integrate, failedInt, 'a failed integrate keeps verifyNote and landing across a load')
+  same(si.rt.tasks[1]?.integrate, { state: 'failed', attempt: 2, step: 'land', error: 'timeout', at: 7 }, 'an unknown verifyNote or landing is dropped, the rest of the integrate kept')
+  check(si.rt.tasks.length === 2 && !si.repaired.some((r) => r.startsWith('tasks')), 'both tasks kept, nothing repaired')
 
   // corrupt state -> moved aside, empty runtime with a stateReset card.
   fs.writeFileSync(path.join(dir, 'state.json'), '{not json')

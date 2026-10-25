@@ -8,14 +8,15 @@
  * Reads for the prompt and the policy: how far the branch is behind its base,
  * how far ahead, the diff stat QA reviews (text for the prompt, numbers for
  * the final OK), and the tree mark a writer run is
- * compared against at its close (decision 68). Every git call has its own
- * timeout; a failure reads as unknown, never as a number.
+ * compared against at its close (decision 68), and (B6) the live state the
+ * drawer and the integrate need row show, cached per tip. Every git call has
+ * its own timeout; a failure reads as unknown, never as a number.
  */
 import { createHash } from 'crypto'
 import { promises as fsp } from 'fs'
 import { DIFF_STAT_TOP_MAX, taskNumOf, taskSlug, teamWorktreeOwner, type ResolvedRepo, type TaskDiffStat, type TaskWorktree, type TeamTask, type TreeMark } from '@shared/teams'
 import type { WorktreeAddError, WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
-import type { GitRunner } from '../git/gitExec'
+import { MAX_GIT_PROCS, type GitRunner } from '../git/gitExec'
 import { parseNumstatZ, sumNumstat } from '../git/porcelain'
 
 /** Per git call (the small queries); `worktree add` keeps the service's own 120 s. */
@@ -24,8 +25,15 @@ export const TASK_GIT_TIMEOUT_MS = 15_000
 export const QA_STAT_MAX_BYTES = 4 * 1024
 /** Slug suffixes tried when the task's slug is taken by a tree this task does not own (`-r2` .. `-r9`). */
 export const SLUG_RETRIES = 9
+/** Per git call of a live read (the drawer's task op, the needs op wait on it). */
+export const LIVE_GIT_TIMEOUT_MS = 3_000
+/** Trees whose last live read is kept (the oldest goes first). */
+export const LIVE_CACHE_MAX = 500
 
 const FULL_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i
+
+/** What the drawer and the integrate need row show of a task tree (B6 integration): a count is absent when unknown. */
+export interface WorktreeLive { exists: boolean; ahead?: number; behind?: number }
 
 /** The console worktree service as a team uses it (WorktreeService, decision 63). */
 export interface TeamWorktreeApi {
@@ -68,6 +76,8 @@ function capLines(s: string, max: number): string {
 
 export class TaskWorktrees {
   private readonly now: () => number
+  /** The last live read per tree path, with the tips its counts were read at (cached per tip). */
+  private readonly liveCache = new Map<string, { branch: string; baseBranch: string; tip: string; baseTip: string; live: WorktreeLive }>()
 
   constructor(private readonly deps: TaskWorktreesDeps) {
     this.now = deps.now ?? Date.now
@@ -150,6 +160,87 @@ export class TaskWorktrees {
     return this.count(`refs/heads/${wt.baseBranch}..refs/heads/${wt.branch}`, wt.path)
   }
 
+  /**
+   * B6 integration: the tree as the drawer and the integrate need row show it, read now with short timeouts: whether
+   * its folder is on disk, the commits its branch has over its base branch (`ahead`) and the base over it (`behind`).
+   * Both tips come from one `for-each-ref` in the repo (the folder may be gone); the counts (`rev-list --left-right
+   * --count`) are read again only when a tip moved since the last read (cached per tip). Never throws: a git call that
+   * fails or times out leaves the counts unknown. Only the async task and needs ops call it, never a board render.
+   * Second round: never a wait behind the git semaphore (a long land holds a slot for minutes): with no slot free
+   * right away the tips are not read and the counts last read stay (only `exists` is new), and a moved tip whose count
+   * finds no slot leaves the counts unknown until the next read.
+   */
+  async live(repoRoot: string, wt: TaskWorktree, timeoutMs = LIVE_GIT_TIMEOUT_MS): Promise<WorktreeLive> {
+    const out: WorktreeLive = { exists: await isDir(wt.path) }
+    const tipRef = `refs/heads/${wt.branch}`
+    const baseRef = `refs/heads/${wt.baseBranch}`
+    const c = this.liveCache.get(wt.path)
+    const prev = c && c.branch === wt.branch && c.baseBranch === wt.baseBranch ? c : undefined
+    // for-each-ref also lists refs below a pattern (`<base>/x`): only the exact names count.
+    const refs = this.gitNow(['for-each-ref', '--format=%(objectname) %(refname)', tipRef, baseRef], repoRoot, timeoutMs)
+    if (!refs) {
+      if (prev?.live.ahead !== undefined) out.ahead = prev.live.ahead
+      if (prev?.live.behind !== undefined) out.behind = prev.live.behind
+      return this.remember(wt, prev?.tip ?? '', prev?.baseTip ?? '', out)
+    }
+    let tip = ''
+    let baseTip = ''
+    try {
+      for (const line of (await refs).split('\n')) {
+        const [sha, name] = [line.slice(0, line.indexOf(' ')).trim(), line.slice(line.indexOf(' ') + 1).trim()]
+        if (!FULL_SHA_RE.test(sha)) continue
+        if (name === tipRef) tip = sha.toLowerCase()
+        else if (name === baseRef) baseTip = sha.toLowerCase()
+      }
+    } catch {
+      tip = ''
+    }
+    if (tip && baseTip) {
+      if (prev && prev.tip === tip && prev.baseTip === baseTip && prev.live.ahead !== undefined) {
+        out.ahead = prev.live.ahead
+        if (prev.live.behind !== undefined) out.behind = prev.live.behind
+      } else {
+        try {
+          const counts = this.gitNow(['rev-list', '--left-right', '--count', `${baseTip}...${tip}`], repoRoot, timeoutMs)
+          const [behind, ahead] = counts ? (await counts).trim().split(/\s+/).map(Number) : []
+          if (Number.isInteger(ahead) && ahead >= 0 && Number.isInteger(behind) && behind >= 0) {
+            out.ahead = ahead
+            out.behind = behind
+          }
+        } catch {
+          /* unknown counts */
+        }
+      }
+    }
+    return this.remember(wt, tip, baseTip, out)
+  }
+
+  /**
+   * A git call of a live read only when the git semaphore has a slot free right now (B6 integration, second round),
+   * else null. Below MAX_GIT_PROCS a desktop call starts at once (gitExec never keeps one waiting while a slot is
+   * free), and the check and that start are one synchronous step.
+   */
+  private gitNow(args: string[], cwd: string, timeoutMs: number): Promise<string> | null {
+    return this.deps.git.running >= MAX_GIT_PROCS ? null : this.git(args, cwd, timeoutMs)
+  }
+
+  /** The live read of `wt` cached with the tips it was read at (the oldest of LIVE_CACHE_MAX goes); a copy back. */
+  private remember(wt: TaskWorktree, tip: string, baseTip: string, live: WorktreeLive): WorktreeLive {
+    this.liveCache.delete(wt.path)
+    this.liveCache.set(wt.path, { branch: wt.branch, baseBranch: wt.baseBranch, tip, baseTip, live: { ...live } })
+    if (this.liveCache.size > LIVE_CACHE_MAX) {
+      const oldest = this.liveCache.keys().next().value
+      if (oldest !== undefined) this.liveCache.delete(oldest)
+    }
+    return live
+  }
+
+  /** The last live read of `wt` (no git, no disk: a sync view may show it), null when there is none for its branches. */
+  cachedLive(wt: TaskWorktree): WorktreeLive | null {
+    const c = this.liveCache.get(wt.path)
+    return c && c.branch === wt.branch && c.baseBranch === wt.baseBranch ? { ...c.live } : null
+  }
+
   private async count(range: string, cwd: string): Promise<number | undefined> {
     try {
       const n = Number((await this.git(['rev-list', '--count', range], cwd)).trim())
@@ -222,6 +313,24 @@ export class TaskWorktrees {
     } catch {
       return null
     }
+  }
+
+  /**
+   * B6, the removeWorktree op (design 3.6): the task's tree and its `sn/` branch through the worktree service, named
+   * by the task's owner (decision 63: no other caller may remove it). `expect` is the inspect main just made: the tip
+   * the branch delete compares against ('' when the branch is gone) and the uncommitted files the recheck allows, so
+   * a commit or a write that lands in between is `changed`, never lost. The caller checked that no run, integrate
+   * nor takeover uses the tree.
+   */
+  remove(task: TeamTask, expect: { tip: string; dirty: number }): Promise<WorktreeRemoveRes> {
+    const wt = task.worktree
+    if (!wt) return Promise.resolve({ ok: false, error: 'not_managed', detail: 'task' })
+    const req: WorktreeRemoveReq = { path: wt.path, deleteBranch: true, expectDirty: Math.max(0, Math.floor(expect.dirty)) }
+    if (FULL_SHA_RE.test(expect.tip)) req.expectTip = expect.tip.toLowerCase()
+    return this.deps.worktrees.remove(req, { owner: wt.owner }).then((res) => {
+      if (res.ok) this.liveCache.delete(wt.path)
+      return res
+    })
   }
 
   /** The `remove` op of a team: every manifest entry of `team:<teamId>:` loses its owner (ordinary orphans from then on). */

@@ -93,7 +93,7 @@
 // resumeTeam, so no card is left saying the team is paused) and of a billing
 // pause with no card (settings); the task
 // drawer's plan section (Ver completo, Pedir cambios, a small plan the Lead
-// decides); Marcar hecha of a branch to integrate; the new-need toast (none on
+// decides); a branch to integrate (B6: Integrar..., see below); the new-need toast (none on
 // Te necesita itself nor for a run to dispatch) and its Abrir, with the keyboard
 // on the row; Retomar of a task left blocked on a card only once that card was
 // dismissed (an open orphan card of the task does not hold it back), the
@@ -101,8 +101,42 @@
 // card of the same reason) and the board card then saying it resumes from the
 // task; a Retomar refused because the task left that block, in its words; Esc in a field that holds a draft (a text answer, the comment box,
 // the new task title) only leaves it, keeping the draft, and the next Esc
-// closes as before; Beta's trust row; en, zoom and no dashes. No pty, user config or
-// real main is touched. Requires npm run build (for the CSS).
+// closes as before; Beta's trust row; en, zoom and no dashes. Integrate section
+// (B6): a branch to integrate has Integrar... (no Marcar hecha) and the reason
+// its last attempt failed; the dialog shows the attempt main kept (a quit
+// mid-integrate), the preview (commits, files and the verify command spelled
+// out, landing, a definition change, the hooks note), Confirmar este comando
+// sends confirmVerify, Integrar sends integrate with the preview's tip, the
+// steps come live from teams:integrateProgress with the verification output
+// escaped and capped, Esc and the backdrop do nothing while it runs, the
+// cleanup ends it; all sixteen errors with their words and actions, a console
+// in the task worktree, a blocked landing (none for a branch already merged),
+// a refused start, a preflight that fails with no cleanup after it, a conflict
+// with its files, askRebase (conflict and verify, one refused), the dialog
+// opened on a run main already has (one whose outcome only main's task says),
+// the success with its merge commit and the worktree deleted after a confirm;
+// the drawer's worktree section; zoom, en and no
+// dashes. B6 integration: the integrate row's ahead chip (payload.ahead, one in
+// the singular), ApprovalBody with no integrate body and no Marcar hecha key
+// left, the drawer's live exists, ahead and behind (a folder that is gone shows
+// no count), the verify install note of the preview (its node_modules are built
+// in the temporary copy) and a dirty base's file list (escaped, the first 20,
+// then how many more of main's count). B6 review: the verify runner's note
+// (main's verifyNote code) in words under the verify step (a failed and a
+// passed verification) and in the error view, es and en; a start refused
+// because an update is being installed or the team is being removed (busy
+// with that detail) in its own words, inline, the preview kept; a timeout of
+// the landing (the event's step, the step main kept in the dialog and the
+// drawer) worded apart from one in the temporary copy, es and en. Second
+// round: base_dirty says to move an ignored file aside (a plain stash leaves
+// it), es and en; the step, the landing and the runner note main stores of a
+// failed attempt (the approval's lastStep and lastLanding) word the Te
+// necesita row, the drawer, the last attempt and the result (one the stream
+// gave without the note or the land mode gets them from the task, and so does
+// an outcome read from the task alone): an ffOnly landing timeout may
+// leave the checkout partly updated, an updateRef one touched no checkout,
+// and "it may have been the landing" only with nothing stored. No pty, user
+// config or real main is touched. Requires npm run build (for the CSS).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -147,6 +181,11 @@ import {CommandPalette} from './src/renderer/components/ui/CommandPalette';
 import {TeamSetupDialog} from './src/renderer/components/teams/TeamSetupDialog';
 import {TeamTrustDialog} from './src/renderer/components/teams/TeamTrustDialog';
 import {NewTaskDialog} from './src/renderer/components/teams/NewTaskDialog';
+import {IntegrateDialog,IntegrateNeedBody} from './src/renderer/components/teams/IntegrateDialog';
+import {IntegrateErrorView} from './src/renderer/components/teams/IntegrateSteps';
+import {ApprovalBody} from './src/renderer/components/teams/ApprovalBody';
+import {needsEn,needsEs} from './src/renderer/i18n/teams/needs';
+import {flushSync} from 'react-dom';
 import {NotificationStack} from './src/renderer/components/ui/NotificationStack';
 import {SettingsModal} from './src/renderer/components/settings/SettingsModal';
 import {applyTheme} from './src/renderer/themes/applyTheme';
@@ -154,7 +193,7 @@ import {initShareGuest, useShareGuestStore} from './src/renderer/lib/shareGuestS
 import {onPaneFocusRequest, setFocusedPane} from './src/renderer/lib/focus';
 const calls={spawn:[],setActive:[],viewed:[],req:[],save:[],focusReq:[],ptyWrite:[],ptySubmit:[],openExternal:[]};
 onPaneFocusRequest(id=>calls.focusReq.push(id));
-const subs={changed:new Set(),append:new Set()};
+const subs={changed:new Set(),append:new Set(),integrate:new Set()};
 const noop=()=>()=>{};
 const fallback=(base)=>new Proxy(base,{get:(t,k)=>k in t?t[k]:(typeof k==='string'?fallback(noop):undefined)});
 const TA='tm-aaaaaaaaaaaa', TB='tm-bbbbbbbbbbbb';
@@ -165,7 +204,7 @@ const ROLES=[
  {id:'qa',name:'QA',kind:'qa',provider:'claude',model:'sonnet',permission:'readonly',count:1},
  {id:'research',name:'Investigación',kind:'research',provider:'codex',permission:'readonly',count:1}];
 // B5: main counts needsCount with the one rule (teamNeedsCount) over the same view Te necesita shows.
-const viewOf=(it)=>({id:it.id,name:it.name,repoRoot:it.repoRoot,repoName:it.repoName,baseBranch:'main',extraRepos:[],goal:'Meta de '+it.name+': que el login ande con OAuth.',trust:it.trust,defIssues:it.issues||[],autoDispatch:!!it.autoDispatch,paused:it.paused,maxConcurrent:2,maxRunMinutes:45,leadApprovesSmallPlans:true,verify:[{repoId:'main',command:'npm test',confirmed:false}],roles:ROLES,rev:it.rev,needsCount:teamNeedsCount(needsOf(it.id)),running:it.running,providerBlockedUntil:it.limit?{claude:Date.now()+3600000}:{},...(it.usage?{usageToday:it.usage}:{})});
+const viewOf=(it)=>({id:it.id,name:it.name,repoRoot:it.repoRoot,repoName:it.repoName,baseBranch:'main',extraRepos:[],goal:'Meta de '+it.name+': que el login ande con OAuth.',trust:it.trust,defIssues:it.issues||[],autoDispatch:!!it.autoDispatch,paused:it.paused,maxConcurrent:2,maxRunMinutes:45,leadApprovesSmallPlans:true,verify:[{repoId:'main',command:'npm test',confirmed:!!fake.verifyConfirmed}],roles:ROLES,rev:it.rev,needsCount:teamNeedsCount(needsOf(it.id)),running:it.running,providerBlockedUntil:it.limit?{claude:Date.now()+3600000}:{},...(it.usage?{usageToday:it.usage}:{})});
 // B2: the roster, the runs and their pages main would answer for Alfa.
 const R1='r-111111111111',R2='r-222222222222',R3='r-333333333333';
 const NOW0=Date.now();
@@ -194,12 +233,13 @@ const ACTIVE_RUN=['queued','starting','running','stopping'];
 const colOf=t=>t.state==='cancelled'?null:['todo','done','blocked'].includes(t.state)?t.state:['qa','userOk','integrating'].includes(t.phase)?'review':'doing';
 // resume and the plan live in main's runtime and the detail only; B5: the summary's review names the QA agent
 // (review.qaAgentId), as main sends it whenever the review shows (a round or the qa phase).
-const sumOf=t=>{const {body,runs,earlier,qaAgentId,resume,plan,...s}=t;return{...s,...(s.review?{review:{...s.review,...(qaAgentId?{qaAgentId}:{})}}:{}),column:colOf(t)}};
+const sumOf=t=>{const {body,runs,earlier,qaAgentId,resume,plan,worktree,integrate,integratedInfo,...s}=t;return{...s,...(s.review?{review:{...s.review,...(qaAgentId?{qaAgentId}:{})}}:{}),column:colOf(t)}};
 const pageOf=id=>{const live=(BOARD[id]||[]).filter(t=>t.state!=='cancelled');const counts={todo:0,doing:0,review:0,done:0,blocked:0};for(const t of live)counts[colOf(t)]++;return{teamId:id,rev:1,tasks:live.map(sumOf),cursor:null,done:true,counts,cancelled:(BOARD[id]||[]).length-live.length}};
 // earlier: the cursor of the comment pages before the newest one (main counts them all in the summary, never the page).
 // B5: the task's plan and its approvals and cards (full views) come with the detail.
 const detailOf=t=>({...sumOf(t),body:t.body||'',reviewInfo:{round:t.review?t.review.round:0,max:3,...(t.qaAgentId?{qaAgentId:t.qaAgentId}:{})},comments:COMMENTS[t.id]||[],commentsCursor:t.earlier||null,commentsArchived:0,runs:t.runs||[],
- approvals:JSON.parse(JSON.stringify((APPROVALS[TA]||[]).filter(a=>a.taskId===t.id))),cards:JSON.parse(JSON.stringify((CARDS[TA]||[]).filter(c=>c.taskId===t.id))),...(t.plan?{plan:{...t.plan}}:{})});
+ approvals:JSON.parse(JSON.stringify((APPROVALS[TA]||[]).filter(a=>a.taskId===t.id))),cards:JSON.parse(JSON.stringify((CARDS[TA]||[]).filter(c=>c.taskId===t.id))),...(t.plan?{plan:{...t.plan}}:{}),
+ ...(t.worktree?{worktree:{...t.worktree}}:{}),...(t.integrate?{integrate:JSON.parse(JSON.stringify(t.integrate))}:{}),...(t.integratedInfo?{integratedInfo:{...t.integratedInfo}}:{})});
 const own=(t,f)=>{if(!t.userOwned.includes(f))t.userOwned=[...t.userOwned,f]};
 const findTask=r=>(BOARD[r.teamId]||[]).find(x=>x.id===r.taskId);
 const cm=(id,author,authorName,text,x)=>({id,author,authorName,kind:'comment',text,at:NOW0-60000+Number(id.slice(2))*1000,queued:false,...(x||{})});
@@ -285,7 +325,7 @@ function fillNeeds(){
  QUEUE[TA]=[qv('q-60','dev-2',{taskId:'t-35',at:now-50000}),qv('q-61','research',{mode:'free',reason:'routine',approved:true,at:now-40000})];
 }
 // B5 part 2: main's commits emit what they change (off before it: the earlier sections push their own events).
-fake.emitOn=false;fake.rev=100;
+fake.emitOn=false;fake.rev=100;fake.igN=0;
 fake.emitNeeds=(teamId,taskId)=>{if(!fake.emitOn)return;queueMicrotask(()=>{const e={teamId,rev:++fake.rev,scopes:['needs','team','list',...(taskId?['board','task']:[])],...(taskId?{taskId}:{})};subs.changed.forEach(cb=>cb(e))})};
 const areaEvents=[];
 onTeamChanged(e=>areaEvents.push(e));
@@ -369,8 +409,20 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
      // resumeTeam, as main's cardAction: an auth or billing pause lifts and every auth or billing card goes with it.
      if(r.answer.action==='resumeTeam'){const it=fake.teams.find(x=>x.id===r.teamId);if(it&&it.paused&&it.paused.reason!=='user')it.paused=null;for(const k of CARDS[r.teamId])if(k.state==='open'&&k.system&&(k.system.why==='auth'||k.system.why==='billing'))k.state='dismissed'}
      fake.emitNeeds(r.teamId,c.taskId);return{ok:true}}
+    // B6, as main answers: the preview of the task branch (fake.igPrev, with the preflight error or the blocked landing
+    // the integrate section sets), Integrar with the preview's tip (its steps come from the section through the stream;
+    // main's T13 / T14 commit is smoke.igEnd), the exact command team.md declares confirmed, a rebase asked of the Dev,
+    // and the worktree of a done task deleted.
+    case 'integratePreview':{const t=findTask(r);if(!t)return{ok:false,error:'not_found'};if(fake.igPreviewFail){const f=fake.igPreviewFail;fake.igPreviewFail=null;return f}return{ok:true,preview:JSON.parse(JSON.stringify(fake.igPrev))}}
+    case 'integrate':{const t=findTask(r);if(!t)return{ok:false,error:'not_found'};if(fake.igStartFail){const f=fake.igStartFail;fake.igStartFail=null;return f}
+     // A step of another integration of this task that reaches the dialog before this reply (fake.igBeforeReply).
+     if(fake.igBeforeReply){const e=fake.igBeforeReply;fake.igBeforeReply=null;subs.integrate.forEach(cb=>cb({teamId:r.teamId,taskId:r.taskId,at:Date.now(),...e}))}
+     t.integrate={state:'running',attempt:((t.integrate&&t.integrate.attempt)||0)+1,at:Date.now()};t.rev++;return{ok:true,integrationId:'i-'+(++fake.igN)}}
+    case 'confirmVerify':{const it=fake.teams.find(x=>x.id===r.teamId);if(!it)return{ok:false,error:'not_found'};if(r.repoId!=='main'||r.command!==fake.igPrev.verify.command)return{ok:false,error:'bad_request'};fake.igPrev.verify.confirmed=true;fake.verifyConfirmed=true;return{ok:true,team:viewOf(it)}}
+    case 'askRebase':{if(fake.igRebaseFail){const f=fake.igRebaseFail;fake.igRebaseFail=null;return f}return findTask(r)?{ok:true}:{ok:false,error:'not_found'}}
+    case 'removeWorktree':{const t=findTask(r);if(!t||!t.worktree)return{ok:false,error:'not_found'};if(t.state!=='done')return{ok:false,error:'conflict',reason:'stale'};delete t.worktree;t.rev++;fake.emitNeeds(r.teamId,t.id);return{ok:true}}
     default:return{ok:false,error:'unsupported'}}},
-  onChanged:cb=>{subs.changed.add(cb);return()=>subs.changed.delete(cb)},onRunAppend:cb=>{subs.append.add(cb);return()=>subs.append.delete(cb)},onIntegrateProgress:noop},
+  onChanged:cb=>{subs.changed.add(cb);return()=>subs.changed.delete(cb)},onRunAppend:cb=>{subs.append.add(cb);return()=>subs.append.delete(cb)},onIntegrateProgress:cb=>{subs.integrate.add(cb);return()=>subs.integrate.delete(cb)}},
 });
 const local={id:'local1',type:'shell',title:'Local',icon:'terminal',color:'#888'};
 useAppStore.setState(s=>({hydrated:true,activeWorkspaceId:'w1',workspaces:[{id:'w1',name:'Mine',cwd:'C:/repo',panes:[local],layout:{grid:1,order:['local1']}},{id:'w2',name:'Other',cwd:'C:/other',panes:[{...local,id:'local2',title:'Other'}],layout:{grid:1,order:['local2']}}],settings:{...s.settings,language:'es',labs:{...s.settings.labs,teams:false}}}));
@@ -386,7 +438,7 @@ function Root(){const [lang,setLang]=React.useState('es');window.smoke.setLang=s
  return <I18nProvider lang={lang}><Keys/><TeamsWiring/><div style={{height:'100vh'}} className="flex w-full overflow-hidden bg-bg-primary text-text-primary">
   <Sidebar/>
   <main className="relative min-w-0 flex-1"><WorkspaceHost/><SharedWorkspaceHost/><TeamHost/><AgentsBoard/></main>
-  <CommandPalette/><TeamSetupDialog/><TeamTrustDialog/><NewTaskDialog/><SettingsModal/>
+  <CommandPalette/><TeamSetupDialog/><TeamTrustDialog/><NewTaskDialog/><IntegrateDialog/><SettingsModal/>
  </div><NotificationStack/></I18nProvider>}
 const seen=[];
 window.addEventListener('keydown',e=>{if(e.key==='O')seen.push({prevented:e.defaultPrevented})});
@@ -454,6 +506,35 @@ window.smoke={calls,fake,TA,TB,areaEvents,seen,item,
  // B5 part 2: the approvals and cards main keeps, the needs view it answers and the one rule over it.
  APPROVALS,CARDS,needsOf,teamNeedsCount,teamNeedsRows,fillNeeds,openTaskDrawer,
  needIds:()=>[...document.querySelectorAll('[data-team-need]')].map(e=>e.dataset.teamNeed).join(),
+ // B6: the steps main streams for t-31; its worktree, its last attempt (a quit mid-integrate) and the preview main
+ // answers; a run main has when the dialog opens; the end of a run as main's T13 / T14 commit it (the task, its
+ // approval and the events); an output of n lines (CRLF, a terminal color and a bidi override on line 150); n files.
+ pushIntegrate:e=>subs.integrate.forEach(cb=>cb({teamId:TA,taskId:'t-31',at:Date.now(),...e})),
+ prepIntegrate:()=>{const H=String.fromCodePoint;const t=BOARD[TA].find(y=>y.id==='t-31');
+  t.worktree={path:'C:/repos/alfa/.worktrees/t-aaaaaa-31',branch:'sn/t-aaaaaa-31',base:'b'.repeat(40),baseBranch:'main',exists:true,ahead:2,behind:1};
+  t.integrate={state:'failed',attempt:1,error:'interrupted',at:Date.now()-60000};t.rev++;APPROVALS[TA].find(y=>y.id==='a-6').payload.lastError='interrupted';
+  fake.igPrev={branch:'sn/t-aaaaaa-31',base:'main',tip:'a'.repeat(40),baseTip:'b'.repeat(40),ahead:2,behind:1,stat:{files:2,insertions:30,deletions:4,top:[{path:'src/csv.ts',add:28,del:4},{path:'src/ex'+H(0x200B)+'port.ts',add:2,del:0}]},
+   alreadyMerged:false,verify:{command:'npm test',confirmed:false},landing:{mode:'ffOnly'},touchesDefinition:true};fake.emitNeeds(TA,'t-31')},
+ igRunning:()=>{const t=BOARD[TA].find(y=>y.id==='t-31');t.integrate={state:'running',attempt:((t.integrate&&t.integrate.attempt)||0)+1,at:Date.now()};t.rev++},
+ igEnd:(ok,x)=>{const t=BOARD[TA].find(y=>y.id==='t-31');const at=Date.now();const n=(t.integrate&&t.integrate.attempt)||1;const a=APPROVALS[TA].find(y=>y.id==='a-6');
+  if(ok){t.state='done';t.phase='none';t.integrated=true;t.integratedInfo={mergeSha:x.mergeSha,base:'main',at,landed:x.landing};t.integrate={state:'idle',attempt:n,at};if(a)a.state='approved'}
+  // A failure keeps where, how a failed landing was landing and the verify runner's note; the approval the step and the
+  // landing (B6 review, second round).
+  else{t.integrate={state:'failed',attempt:n,error:x.error,...(x.step?{step:x.step}:{}),...(x.landing?{landing:x.landing}:{}),...(x.verifyNote?{verifyNote:x.verifyNote}:{}),at};
+   if(a){a.payload.lastError=x.error;if(x.step)a.payload.lastStep=x.step;else delete a.payload.lastStep;if(x.landing)a.payload.lastLanding=x.landing;else delete a.payload.lastLanding}}
+  t.rev++;fake.emitNeeds(TA,'t-31')},
+ igTail:n=>{const E=String.fromCharCode(27),out=[];for(let i=1;i<=n;i++)out.push(i===150?E+'[31mlínea 150 FAIL'+String.fromCodePoint(0x202E)+' x'+E+'[0m':'línea '+i);return out.join(String.fromCharCode(13,10))},
+ igFiles:n=>Array.from({length:n},(_,i)=>i===1?'src/b'+String.fromCodePoint(0x202E)+'.ts':'src/f'+i+'.ts'),
+ // B6 integration: ApprovalBody or IntegrateNeedBody alone over an approval, in a root of its own (NeedRow never
+ // brings ApprovalBody an integrate one: Integrar lands it), and whether B5's Marcar hecha left any catalog key behind.
+ bodyOf:(which,a)=>{const el=document.createElement('div');document.body.appendChild(el);const r=createRoot(el);const B=which==='integrate'?IntegrateNeedBody:ApprovalBody;
+  flushSync(()=>r.render(<I18nProvider lang="es"><B teamId={TA} approval={a}/></I18nProvider>));
+  const out={html:el.innerHTML,mark:!!el.querySelector('[data-need-mark-done]'),ahead:el.querySelector('[data-need-ahead]')?.textContent??null,err:el.querySelector('[data-integrate-last-error]')?.textContent??null};r.unmount();el.remove();return out},
+ markDoneKeys:()=>Object.keys(needsEn).concat(Object.keys(needsEs)).filter(k=>/markDone/.test(k)),
+ // B6 review: IntegrateErrorView alone, in a root of its own: its message and the verify runner's note (main's code).
+ errorViewOf:(props,lang)=>{const el=document.createElement('div');document.body.appendChild(el);const r=createRoot(el);
+  flushSync(()=>r.render(<I18nProvider lang={lang}><IntegrateErrorView base="main" branch="b" step="verify" {...props}/></I18nProvider>));
+  const n=el.querySelector('[data-integrate-verify-note]');const out={msg:el.querySelector('p')?.textContent??null,note:n?n.getAttribute('data-integrate-verify-note'):null,text:n?n.textContent:null,tail:!!el.querySelector('[data-integrate-tail]'),label:el.querySelector('[data-integrate-tail] span')?.textContent??null};r.unmount();el.remove();return out},
  // One number everywhere: the sidebar badge, the tab pill, the need rows on screen and teamNeedsCount of main's view.
  counts:id=>({badge:document.querySelector('[data-team-row=\"'+id+'\"] [data-team-badge]')?.getAttribute('data-team-badge')??'0',tab:document.querySelector('[data-team-tab=needs] [data-team-tab-count]')?.getAttribute('data-team-tab-count')??'0',rows:String(document.querySelectorAll('[data-team-need]').length),rule:String(teamNeedsCount(needsOf(id)))}),
 };
@@ -1469,7 +1550,7 @@ app.whenReady().then(async()=>{
  // groups ("Frena al equipo", "Decisiones", "Por despachar"); Aprobar, Pedir cambios (a note required) and Rechazar
  // send decide with the note; a hire shows its role file with every hidden character spelled out; a permission
  // the exact rule and the denied command, escaped; choice, multi, text, confirm and system cards send answer; a
- // refusal in words; Reanudar; the plan section of the task drawer (a plan the Lead decides too); Marcar hecha;
+ // refusal in words; Reanudar; the plan section of the task drawer (a plan the Lead decides too); Integrar (B6);
  // the new-need toast and its Abrir; a changed definition on Beta; en; zoom.
  await js("smoke.fillNeeds();smoke.fake.emitOn=true;smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['needs','team','list','board']})");
  await js("smoke.click('[data-team-tab=needs]')");
@@ -1646,15 +1727,414 @@ app.whenReady().then(async()=>{
  ok(await until("smoke.reqs('decide').length==="+(dc0+7)+"&&smoke.text('[data-task-drawer=t-32] [data-plan-state]')==='Aprobado'",3000),'Aprobar on it: approved',await js("smoke.text('[data-task-drawer=t-32] [data-plan-state]')"));
  ok(await sameAt(3),'a lead-decided plan never counted: still 3',await js("smoke.counts(smoke.TA)"));
  await js("document.querySelector('[data-drawer] [data-drawer-close]')?.click()");await settle(200);
- // A branch ready to integrate: Marcar hecha asks like the board, then moves the task to Hecho.
- const m0=await js("smoke.reqs('moveTask').length");
- await js("smoke.click('[data-need-mark-done=t-31]')");await settle();
- ok(await js("smoke.has('[data-confirm]')&&smoke.text('body').includes('¿Marcarla hecha sin integrar?')"),'Marcar hecha asks first, as the board does');
+ // B6, the integrate section: a branch ready to integrate offers Integrar... (B5's Marcar hecha is gone), which opens
+ // the dialog: the last attempt main kept (a quit mid-integrate reads interrupted), the preview (its commits, its files
+ // spelled out, the verification team.md declares, how it lands, a change to the definition, the hooks note),
+ // Confirmar este comando, Integrar with the preview's tip, the steps live with the verification output escaped and
+ // capped, Esc and the backdrop doing nothing while it runs, every error with its words and its actions, a console in
+ // the task worktree, a blocked landing, a refusal at the start, a conflict with its files, the dialog opened on a run
+ // main already has, the success with its merge commit and the worktree deleted; the drawer's worktree section; zoom,
+ // en and no dashes. B6 review: the verify runner's own note (main's verifyNote code) worded under the verify step and
+ // in the error view; an update being installed or the team being removed refusing the start in their own words; a
+ // timeout of the landing worded apart from one in the temporary copy; a verification stopped midway shows its output
+ // once, as the verification's; another integration's note never stays past the reply.
+ await js("smoke.prepIntegrate()");
+ ok(await until("smoke.has('[data-team-need=a-6] [data-need-integrate=t-31]')&&smoke.text('[data-team-need=a-6]').includes('El último intento de integrar falló.')",3000),'a branch to integrate: Integrar..., and why its last attempt failed',await js("smoke.text('[data-team-need=a-6]')"));
+ v=await js("({mark:smoke.has('[data-need-mark-done]'),label:smoke.text('[data-need-integrate=t-31]'),why:smoke.text('[data-team-need=a-6] [data-integrate-last-error]')})");
+ ok(!v.mark&&v.label==='Integrar...'&&v.why.includes('La app se cerró mientras se integraba esta tarea'),'Integrar... replaces Marcar hecha; the row says the app closed mid-integrate',v);
+ // B6 integration: the commits main counted for the approval (payload.ahead) as a chip on the row; ApprovalBody has no
+ // integrate body any more (B5's unreachable Marcar hecha is gone, and so is its catalog key).
+ v=await js("({ahead:smoke.attr('[data-team-need=a-6] [data-need-ahead]','data-need-ahead'),text:smoke.text('[data-team-need=a-6] [data-need-ahead]')})");
+ ok(v.ahead==='2'&&v.text==='2 commits adelante','the integrate row: the commits ahead of main as a chip',v);
+ v=await js("(()=>{const a=(x)=>({id:'a-x',taskId:'t-31',state:'pending',decider:'user',requestedBy:'dev',at:1,payload:{kind:'integrate',branch:'b',base:'main',...x}});return{body:smoke.bodyOf('approval',a({ahead:1})),one:smoke.bodyOf('integrate',a({ahead:1})).ahead,none:smoke.bodyOf('integrate',a({})).ahead,zero:smoke.bodyOf('integrate',a({ahead:0})).ahead,keys:smoke.markDoneKeys()}})()");
+ ok(v.body.html===''&&!v.body.mark&&v.keys.length===0,'ApprovalBody renders nothing for an integrate approval (no Marcar hecha), no markDone key left',v);
+ ok(v.one==='1 commit adelante'&&v.none===null&&v.zero===null,'one commit ahead in the singular; no chip when main counted none or could not count',v);
+ const ip0=await js("smoke.reqs('integratePreview').length"),tk0=await js("smoke.reqs('task').length");
+ await js("smoke.click('[data-need-integrate=t-31]')");
+ ok(await until("smoke.has('[data-integrate-dialog=t-31] [data-integrate-preview]')",3000),'Integrar... opens the dialog on its preview');
+ v=await js("({p:smoke.reqs('integratePreview').at(-1),n:smoke.reqs('integratePreview').length,tasks:smoke.reqs('task').length,cancel:smoke.activeIs('data-integrate-cancel'),title:smoke.text('#team-integrate-title')})");
+ ok(v.p.teamId===TA&&v.p.taskId==='t-31'&&v.n===ip0+1&&v.tasks>tk0,'it reads the task and asks main for the preview of t-31',v);
+ ok(v.cancel&&v.title.includes('Integrar t-31')&&v.title.includes('Exportar CSV'),'Cancel holds the focus (Enter never integrates on its own); the title names the task',v);
+ v=await js("({last:smoke.attr('[data-integrate-last]','data-integrate-last'),text:smoke.text('[data-integrate-last]'),retry:smoke.has('[data-integrate-error-at=last] [data-integrate-retry]')})");
+ ok(v.last==='interrupted'&&v.text.includes('El último intento falló')&&v.text.includes('si el merge ya había llegado a main, Integrar solo marca la tarea como hecha')&&v.retry,'the last attempt main kept: the app closed mid-integrate, with Revisar de nuevo',v);
+ v=await js("(()=>{const d='[data-integrate-dialog=t-31] ';return{branch:smoke.text(d+'[data-integrate-branch]'),base:smoke.text(d+'[data-integrate-base]'),ahead:smoke.text(d+'[data-integrate-ahead]'),behind:smoke.text(d+'[data-integrate-behind]'),stat:smoke.text(d+'[data-integrate-stat]'),top:[...document.querySelectorAll(d+'[data-integrate-top]')].map(e=>e.textContent).join('|'),raw:smoke.text('[data-integrate-dialog]').includes(String.fromCodePoint(0x200B))}})()");
+ ok(v.branch==='sn/t-aaaaaa-31'&&v.base==='main'&&v.ahead==='2 commits de la tarea'&&v.behind==='1 commit nuevo en main'&&v.stat==='2 archivos, +30 -4','the summary: the branch into main, its commits, what main has new, the stat',v);
+ ok(v.top==='src/csv.ts+28 -4|src/ex<U+200B>port.ts+2 -0'&&!v.raw,'its files, each path spelled out',v);
+ v=await js("({verify:smoke.attr('[data-integrate-verify]','data-integrate-verify'),cmd:smoke.text('[data-integrate-verify-command]'),vtext:smoke.text('[data-integrate-verify]'),confirm:smoke.text('[data-integrate-confirm-verify]'),land:smoke.attr('[data-integrate-landing]','data-integrate-landing'),ltext:smoke.text('[data-integrate-landing]'),def:smoke.text('[data-integrate-touches-def]'),hooks:smoke.text('[data-integrate-noverify]'),start:!document.querySelector('[data-integrate-start]').disabled,primary:[...document.querySelectorAll('[data-integrate-dialog] button')].filter(b=>b.className.includes('linear-gradient')).length})");
+ ok(v.verify==='unconfirmed'&&v.cmd==='npm test'&&v.vtext.includes('Sin confirmar')&&v.vtext.includes('Solo corre cuando lo confirmás')&&v.confirm==='Confirmar este comando','the verification team.md declares, not confirmed yet, with Confirmar este comando',v);
+ ok(v.land==='ffOnly'&&v.ltext.includes('Cómo llega a main')&&v.ltext.includes('fast-forward'),'how it lands: a fast-forward of your checkout',v);
+ ok(v.def.includes('cambia la definición del equipo')&&v.hooks==='Los hooks de git del repo no corren en este merge; la verificación confirmada es el control.','the definition warning and the hooks note (decision 70)',v);
+ ok(v.start&&v.primary===1,'Integrar is the one primary button',v);
+ ok(!(await js("smoke.has('[data-integrate-verify-installs]')")),'npm test installs nothing: no install note');
+ // Confirmar este comando: the exact command, for the task's repo; the preview comes again and says confirmed.
+ await js("smoke.click('[data-integrate-confirm-verify]')");
+ ok(await until("smoke.attr('[data-integrate-verify]','data-integrate-verify')==='confirmed'",3000),'confirmed: the preview shows it confirmed');
+ v=await js("({c:smoke.reqs('confirmVerify').at(-1),n:smoke.reqs('integratePreview').length,text:smoke.text('[data-integrate-verify]'),btn:smoke.has('[data-integrate-confirm-verify]')})");
+ ok(v.c.teamId===TA&&v.c.repoId==='main'&&v.c.command==='npm test'&&v.n===ip0+2&&v.text.includes('Confirmada')&&v.text.includes('Si falla, no se integra nada')&&!v.btn,'confirmVerify carries the repo and the exact command; the preview again',v);
+ // 1280 px and zoom: the dialog scrolls inside itself, Integrar and the close button stay on screen.
+ for(const z of [1.25,1.5]){
+  w.webContents.setZoomFactor(z);await settle(250);
+  const laid=await until("!smoke.overflow()&&smoke.inView('[data-integrate-start]')&&smoke.inView('[data-integrate-close]')",3000);
+  ok(laid,'zoom '+z+' on the preview: no page overflow, Integrar and the close button on screen',await js("({over:smoke.overflow(),start:smoke.inView('[data-integrate-start]')})"));
+  if(z===1.5){await settle(400);await w.webContents.capturePage();await shot('teams-integrate-zoom150')}
+ }
+ w.webContents.setZoomFactor(1);await settle(200);
+ await js("smoke.setLang('en')");await settle(200);
+ v=await js("({start:smoke.text('[data-integrate-start]'),hooks:smoke.text('[data-integrate-noverify]'),sec:smoke.text('[data-integrate-verify] h3'),land:smoke.text('[data-integrate-landing]'),copy:smoke.copy()})");
+ ok(v.start==='Integrate'&&v.hooks==="The repo's git hooks do not run on this merge; the confirmed verification is the check."&&v.sec==='Verification'&&v.land.includes('fast-forward'),'en: the dialog',{...v,copy:undefined});
+ ok(!/[\\u2013\\u2014]/.test(v.copy),'en: no en or em dash with the dialog open');
+ await js("smoke.setLang('es')");await settle(200);
+ ok(!/[\\u2013\\u2014]/.test(await js("smoke.copy()")),'es: no en or em dash with the dialog open');
+ // Integrar: the preview's tip; the steps come live, the verification's output escaped and capped.
+ const ig0=await js("smoke.reqs('integrate').length");
+ await js("smoke.click('[data-integrate-start]')");
+ ok(await until("smoke.reqs('integrate').length==="+(ig0+1)+"&&smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='running'",3000),'Integrar sends integrate; the dialog runs');
+ v=await js("smoke.reqs('integrate').at(-1)");
+ ok(v.teamId===TA&&v.taskId==='t-31'&&v.expectTip==='a'.repeat(40),'with the tip the preview showed (expectTip)',v);
+ v=await js("({steps:[...document.querySelectorAll('[data-integrate-step]')].map(e=>e.dataset.integrateStep+':'+e.dataset.stepState).join(),note:smoke.text('[data-integrate-running]'),close:document.querySelector('[data-integrate-close]').disabled})");
+ ok(v.steps==='preflight:pending,temp:pending,merge:pending,verify:pending,land:pending,cleanup:pending'&&v.note.includes('No se corta a la mitad')&&v.close,'six steps waiting; it says it does not stop halfway; the close button is off',v);
+ const IID="'i-'+smoke.fake.igN";
+ await js("smoke.pushIntegrate({integrationId:"+IID+",step:'preflight',state:'running'});smoke.pushIntegrate({integrationId:"+IID+",step:'preflight',state:'ok'});smoke.pushIntegrate({integrationId:"+IID+",step:'temp',state:'ok'});smoke.pushIntegrate({integrationId:"+IID+",step:'merge',state:'ok'});smoke.pushIntegrate({integrationId:"+IID+",step:'verify',state:'running',logTail:smoke.igTail(200)})");
+ ok(await until("smoke.attr('[data-integrate-step=verify]','data-step-state')==='running'&&smoke.has('[data-integrate-step=verify] [data-integrate-tail]')",3000),'the steps come live; the verification runs with its output');
+ v=await js("(()=>{const pre=document.querySelector('[data-integrate-step=verify] [data-integrate-tail] pre');const lines=pre.textContent.split('\\\\n');const s=smoke.text('[data-integrate-dialog]');return{states:[...document.querySelectorAll('[data-integrate-step]')].map(e=>e.dataset.stepState).join(),first:lines[0],last:lines.at(-1),count:lines.length,fail:lines.find(l=>l.includes('FAIL')),raw:s.includes(String.fromCodePoint(0x202E))||s.includes(String.fromCharCode(27))||s.includes(String.fromCharCode(13))||s.includes('<U+001B>'),cut:smoke.text('[data-integrate-step=verify] [data-integrate-tail]'),cmd:smoke.text('[data-integrate-step=verify] code')}})()");
+ ok(v.states==='ok,ok,ok,running,pending,pending'&&v.cmd==='npm test','preflight, the copy and the merge done; the confirmed command running',v);
+ ok(v.count===80&&v.first==='línea 121'&&v.last==='línea 200'&&v.cut.includes('Se muestran las últimas 80 líneas.'),'the output capped to its last 80 lines, CRLF folded',v);
+ ok(v.fail==='línea 150 FAIL<U+202E> x'&&!v.raw,'escaped: terminal colors dropped, the bidi override spelled out, nothing raw',v);
+ // While it runs: Esc and the backdrop close nothing (neither the dialog nor Teams).
+ v=await js("({prevented:smoke.keyActive("+ESC+")})");await settle(200);
+ v={...v,...(await js("({dialog:smoke.has('[data-integrate-dialog]'),host:smoke.has('[data-team-host]')})"))};
+ ok(v.prevented&&v.dialog&&v.host,'Esc while it runs: consumed; the dialog and Teams stay',v);
+ await js("document.querySelector('[data-integrate-dialog]').previousElementSibling.click()");await settle(200);
+ ok(await js("smoke.has('[data-integrate-dialog]')"),'a click on the backdrop while it runs: the dialog stays');
+ // The verification fails: the dialog waits for the cleanup (it does not stop halfway), then says what to do.
+ await js("smoke.pushIntegrate({integrationId:"+IID+",step:'verify',state:'failed',error:'verify_failed',logTail:smoke.igTail(200),verifyNote:'leftStopped'})");await settle(200);
+ v=await js("({phase:smoke.attr('[data-integrate-dialog]','data-integrate-phase'),err:smoke.has('[data-integrate-error-at=result][data-integrate-error=verify_failed]'),close:document.querySelector('[data-integrate-close]').disabled})");
+ ok(v.phase==='running'&&v.err&&v.close,'a failed step shows at once; the dialog still waits for the cleanup',v);
+ await js("smoke.pushIntegrate({integrationId:"+IID+",step:'cleanup',state:'running'});smoke.pushIntegrate({integrationId:"+IID+",step:'cleanup',state:'ok'});smoke.igEnd(false,{error:'verify_failed'})");
+ ok(await until("smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='done'",3000),'the cleanup settles: over');
+ v=await js("({text:smoke.text('[data-integrate-error-at=result]'),fix:smoke.text('[data-integrate-error-at=result] [data-integrate-ask-rebase=verify]'),retry:smoke.text('[data-integrate-error-at=result] [data-integrate-retry]'),tails:smoke.count('[data-integrate-dialog] [data-integrate-tail]'),steps:[...document.querySelectorAll('[data-integrate-step]')].map(e=>e.dataset.stepState).join(),close:document.querySelector('[data-integrate-close]').disabled,focus:smoke.activeIs('data-integrate-done-close')})");
+ ok(v.text.includes('La verificación falló sobre el merge, así que nada llegó a main.')&&v.fix==='Pedile al Dev que lo arregle'&&v.retry==='Revisar de nuevo','verify_failed: what happened and what to do',v);
+ ok(v.tails===1&&v.steps==='ok,ok,ok,failed,pending,ok'&&!v.close&&v.focus,'its output shows once (under its step); the close button is back and Cerrar holds the focus',v);
+ // B6 review: what the verify runner itself did (a leftover that still held the output, stopped) comes as a code and
+ // reads in the catalog's words under the verify step, once (the error view below does not repeat it); the output main
+ // sends carries no English line of the runner.
+ v=await js("({note:smoke.text('[data-integrate-step=verify] [data-integrate-verify-note=leftStopped]'),notes:smoke.count('[data-integrate-dialog] [data-integrate-verify-note]'),inResult:smoke.has('[data-integrate-error-at=result] [data-integrate-verify-note]'),raw:smoke.text('[data-integrate-dialog]').includes('leftStopped')})");
+ ok(v.note==='El comando dejó un proceso corriendo que seguía con su salida abierta después de terminar: se lo detuvo.'&&v.notes===1&&!v.inResult&&!v.raw,'the runner note under the verify step, in words, once',v);
+ await js("smoke.setLang('en')");await settle(150);
+ v=await js("smoke.text('[data-integrate-step=verify] [data-integrate-verify-note=leftStopped]')");
+ ok(v==='The command left a process running that still held its output after it ended: it was stopped.','en: the runner note',v);
+ await js("smoke.setLang('es')");await settle(150);
+ // The error view words the note where the steps do not show it: a command that could not start (no output at all), a
+ // tree that never closed its output after the timeout kill; a code it does not know shows nothing (never raw text).
+ v=await js("(()=>{const o={error:'verify_failed',step:'verify'};const k={error:'verify_timeout',step:'verify',tail:'npm test',verifyNote:'timeoutKill'};return{spawn:smoke.errorViewOf({...o,verifyNote:'spawnFailed'},'es'),spawnEn:smoke.errorViewOf({...o,verifyNote:'spawnFailed'},'en'),kill:smoke.errorViewOf(k,'es'),killEn:smoke.errorViewOf(k,'en'),odd:smoke.errorViewOf({...o,tail:'x',verifyNote:'[killed at the timeout]'},'es'),none:smoke.errorViewOf({...o,tail:'x'},'es')}})()");
+ ok(v.spawn.note==='spawnFailed'&&v.spawn.text==='El comando de verificación no pudo arrancar.'&&!v.spawn.tail&&v.spawnEn.text==='The verification command could not start.','the error view: a command that could not start, es and en',v);
+ ok(v.kill.note==='timeoutKill'&&v.kill.tail&&v.kill.text==='Se cortó al vencer el tiempo, pero su salida nunca se cerró: la app dejó de esperarla, y algún proceso suyo puede seguir corriendo.'&&v.killEn.text==='It was stopped at the timeout, but its output never closed: the app stopped waiting for it, and a process of it may still be running.','the error view: the output, then the timeout kill note, es and en',v);
+ ok(v.odd.note===null&&v.none.note===null,'an unknown code or none: no note',v);
+ await w.webContents.capturePage();await shot('teams-integrate-failed');
+ // Pedile al Dev que lo arregle: a refusal first, in words; then askRebase and the dialog closes.
+ await js("smoke.fake.igRebaseFail={ok:false,error:'running'};smoke.click('[data-integrate-ask-rebase=verify]')");
+ ok(await until("smoke.text('[data-integrate-action-error=rebase]')==='Esta tarea ya se está integrando: esperá a que termine.'",2000),'a refused ask: in words, the dialog stays',await js("smoke.text('[data-integrate-dialog]').slice(-200)"));
+ await js("smoke.click('[data-integrate-ask-rebase=verify]')");
+ ok(await until("!smoke.has('[data-integrate-dialog]')&&smoke.toastsOf('success').some(x=>x.includes('Se le pidió al Dev que lo arregle, con la salida de la verificación'))",3000),'Pedile al Dev que lo arregle: the dialog closes and says so',await js("smoke.toastsOf('success')"));
+ v=await js("smoke.reqs('askRebase').at(-1)");
+ ok(v.teamId===TA&&v.taskId==='t-31'&&v.why==='verify','askRebase of t-31, why verify',v);
+ // The drawer's worktree section: its branch and folder, why the last attempt failed, Integrar..., no delete before Hecho.
+ await js("smoke.openTaskDrawer('t-31')");
+ ok(await until("smoke.attr('[data-task-drawer=t-31] [data-task-section=worktree]','data-worktree-status')==='failed'",3000),'the drawer has the worktree section: the last attempt failed');
+ v=await js("({branch:smoke.text('[data-task-drawer=t-31] [data-worktree-branch]'),path:smoke.text('[data-task-drawer=t-31] [data-worktree-path]'),err:smoke.attr('[data-task-drawer=t-31] [data-worktree-error]','data-worktree-error'),text:smoke.text('[data-task-drawer=t-31] [data-worktree-error]'),btn:smoke.text('[data-task-drawer=t-31] [data-task-integrate=t-31]'),rm:smoke.has('[data-task-drawer=t-31] [data-task-remove-worktree]')})");
+ ok(v.branch==='sn/t-aaaaaa-31'&&v.path==='C:/repos/alfa/.worktrees/t-aaaaaa-31'&&v.err==='verify_failed'&&v.text.includes('La verificación falló')&&v.btn==='Integrar...'&&!v.rm,'its branch and folder, why the last attempt failed, Integrar..., and no delete while it is not done',v);
+ // B6 integration: what main measured in the task read (TaskDetail.worktree exists, ahead, behind) shows live; a folder
+ // that is gone says so and shows no count.
+ v=await js("({ahead:smoke.text('[data-task-drawer=t-31] [data-worktree-ahead]'),behind:smoke.text('[data-task-drawer=t-31] [data-worktree-behind]'),gone:smoke.has('[data-task-drawer=t-31] [data-worktree-gone]')})");
+ ok(v.ahead==='2 commits adelante'&&v.behind==='1 commit nuevo en main'&&!v.gone,'the worktree as main measured it: 2 commits ahead, 1 new commit in main',v);
+ await js("(()=>{const t=smoke.BOARD[smoke.TA].find(y=>y.id==='t-31');t.worktree={...t.worktree,exists:false,ahead:5,behind:3};t.rev++;smoke.fake.emitNeeds(smoke.TA,'t-31')})()");
+ ok(await until("smoke.has('[data-task-drawer=t-31] [data-worktree-gone]')",3000),'main says the folder is gone: the drawer follows');
+ v=await js("({gone:smoke.text('[data-task-drawer=t-31] [data-worktree-gone]'),ahead:smoke.has('[data-task-drawer=t-31] [data-worktree-ahead]'),behind:smoke.has('[data-task-drawer=t-31] [data-worktree-behind]'),btn:smoke.has('[data-task-drawer=t-31] [data-task-integrate=t-31]')})");
+ ok(v.gone==='La carpeta ya no está en el disco.'&&!v.ahead&&!v.behind&&v.btn,'gone: in words, no counts, Integrar... still there (its preview says missing_worktree)',v);
+ await js("(()=>{const t=smoke.BOARD[smoke.TA].find(y=>y.id==='t-31');t.worktree={...t.worktree,exists:true,ahead:1,behind:0};t.rev++;smoke.fake.emitNeeds(smoke.TA,'t-31')})()");
+ ok(await until("!smoke.has('[data-task-drawer=t-31] [data-worktree-gone]')&&smoke.text('[data-task-drawer=t-31] [data-worktree-ahead]')==='1 commit adelante'&&!smoke.has('[data-task-drawer=t-31] [data-worktree-behind]')",3000),'back on disk: 1 commit ahead, nothing new in main',await js("smoke.text('[data-task-drawer=t-31] [data-task-section=worktree]')"));
+ await js("smoke.click('[data-task-drawer=t-31] [data-task-integrate=t-31]')");
+ ok(await until("smoke.has('[data-integrate-dialog=t-31] [data-integrate-preview]')&&smoke.attr('[data-integrate-last]','data-integrate-last')==='verify_failed'",3000),'from the drawer: the dialog, with the last attempt main kept');
+ // Every integrate error (main answers a preflight failure in the preview): its words, its actions, Integrar off.
+ const CODES=['missing_worktree','dirty_worktree','in_progress','wrong_branch','busy','merge_conflict','no_identity','verify_failed','verify_timeout','base_moved','base_dirty','base_busy','base_checked_out_elsewhere','git_error','timeout','interrupted'];
+ const ACTS={merge_conflict:'conflict,retry',verify_failed:'verify,retry',verify_timeout:'verify,retry',dirty_worktree:'console,retry',in_progress:'console,retry',wrong_branch:'console,retry'};
+ const texts=new Set();
+ for(const code of CODES){
+  await js("smoke.fake.igPrev.error='"+code+"';smoke.click('[data-integrate-dialog] [data-integrate-retry]')");
+  ok(await until("smoke.has('[data-integrate-error-at=preview][data-integrate-error="+code+"]')",3000),'preflight '+code+': shown',await js("smoke.text('[data-integrate-dialog]').slice(0,300)"));
+  v=await js("(()=>{const e=document.querySelector('[data-integrate-error-at=preview]');return{text:e.querySelector('p').textContent,acts:[...e.querySelectorAll('button')].map(b=>b.hasAttribute('data-integrate-ask-rebase')?b.dataset.integrateAskRebase:b.hasAttribute('data-integrate-console')?'console':b.hasAttribute('data-integrate-retry')?'retry':'?').join(),start:document.querySelector('[data-integrate-start]').disabled}})()");
+  ok(v.text.length>40&&!v.text.includes('teams.')&&!v.text.includes('{')&&v.acts===(ACTS[code]||'retry')&&v.start,code+': its explanation and its actions; Integrar off',v);
+  texts.add(v.text);
+ }
+ ok(texts.size===CODES.length,'sixteen errors, sixteen explanations',texts.size);
+ // Abrir consola en el worktree: a shell console in the task worktree, brought on screen (the dialog and Teams close).
+ await js("smoke.fake.igPrev.error='dirty_worktree';smoke.click('[data-integrate-dialog] [data-integrate-retry]')");
+ ok(await until("smoke.has('[data-integrate-error-at=preview][data-integrate-error=dirty_worktree] [data-integrate-console]')",3000),'dirty_worktree: Abrir consola en el worktree');
+ ok((await js("smoke.text('[data-integrate-error-at=preview] [data-integrate-console]')"))==='Abrir consola en el worktree','its label');
+ const igPanes0=await js("smoke.app().workspaces[0].panes.length");
+ await js("smoke.click('[data-integrate-error-at=preview] [data-integrate-console]')");
+ ok(await until("!smoke.has('[data-integrate-dialog]')&&smoke.agents().view==='grid'",3000),'the dialog and Teams close');
+ v=await js("(()=>{const ws=smoke.app().workspaces[0];const p=ws.panes.at(-1);return{n:ws.panes.length,cwd:p.cwd,title:p.title,type:p.type,active:smoke.app().activeWorkspaceId}})()");
+ ok(v.n===igPanes0+1&&v.cwd==='C:/repos/alfa/.worktrees/t-aaaaaa-31'&&v.title==='Worktree t-31'&&v.type==='shell'&&v.active==='w1','a shell console in the task worktree, in the workspace on screen',v);
+ ok(await until("smoke.calls.spawn.includes(smoke.app().workspaces[0].panes.at(-1).id)",4000),'and it starts');
+ await js("(()=>{const ws=smoke.app().workspaces[0];smoke.app().removePane(ws.id,ws.panes.at(-1).id)})()");await settle(200);
+ await js("smoke.openTeams(smoke.TA,'needs')");
+ ok(await until("smoke.has('[data-team-need=a-6] [data-need-integrate=t-31]')",3000),'back on Te necesita');
+ await js("document.querySelector('[data-drawer] [data-drawer-close]')?.click()");await settle(200);
+ // A landing main cannot do now: why, where, and Integrar off.
+ await js("delete smoke.fake.igPrev.error;smoke.fake.igPrev.landing={blocked:'base_checked_out_elsewhere',path:'C:/repos/alfa-release'};smoke.click('[data-need-integrate=t-31]')");
+ ok(await until("smoke.attr('[data-integrate-landing]','data-integrate-landing')==='blocked'",3000),'a landing main cannot do now');
+ v=await js("({text:smoke.text('[data-integrate-landing]'),err:smoke.has('[data-integrate-error-at=landing][data-integrate-error=base_checked_out_elsewhere]'),start:document.querySelector('[data-integrate-start]').disabled})");
+ ok(v.text.includes('Ahora no puede llegar a main:')&&v.text.includes('está abierta en otro worktree')&&v.text.includes('Dónde: C:/repos/alfa-release')&&v.err&&v.start,'blocked: why, where, and Integrar off',v);
+ await js("smoke.fake.igPrev.landing={mode:'updateRef'};smoke.click('[data-integrate-error-at=landing] [data-integrate-retry]')");
+ ok(await until("smoke.attr('[data-integrate-landing]','data-integrate-landing')==='updateRef'&&!document.querySelector('[data-integrate-start]').disabled",3000),'checked again: main moves the branch directly');
+ ok((await js("smoke.text('[data-integrate-landing]')")).includes('main no está abierta en ningún checkout'),'updateRef in words');
+ // B6 integration: a dirty base names its changed files (main sends at most 50 and how many more it left out): each
+ // one spelled out, the first 20, then the rest counted; Integrar off until Revisar de nuevo.
+ await js("smoke.fake.igPrev.landing={blocked:'base_dirty',files:smoke.igFiles(50),filesMore:70};smoke.click('[data-integrate-dialog] [data-integrate-retry]')");
+ ok(await until("smoke.has('[data-integrate-error-at=landing][data-integrate-error=base_dirty]')",3000),'a dirty base blocks the landing');
+ v=await js("(()=>{const e='[data-integrate-error-at=landing] ';return{files:[...document.querySelectorAll(e+'[data-integrate-file]')].map(x=>x.textContent),more:smoke.text(e+'[data-integrate-files] + span'),raw:smoke.text('[data-integrate-dialog]').includes(String.fromCodePoint(0x202E)),start:document.querySelector('[data-integrate-start]').disabled,retry:smoke.has(e+'[data-integrate-retry]'),text:smoke.text(e+'p')}})()");
+ ok(v.files.length===20&&v.files[0]==='src/f0.ts'&&v.files[1]==='src/b<U+202E>.ts'&&v.more==='100 más'&&!v.raw,'its files: the first 20 spelled out, then the 30 more main sent and the 70 it left out',v);
+ // B6 review, second round: a file the merge would overwrite may be an ignored one (main lists those too), which a
+ // plain stash leaves where it is: the words say to move it aside. es and en.
+ ok(v.start&&v.retry&&v.text==='Tu checkout de main tiene cambios sin commitear, o archivos que el merge pisaría, ignorados incluidos. Commitealos, guardalos con stash (git stash -u para los que no tienen seguimiento), o mové a otro lado un archivo ignorado (un stash deja los ignorados donde están), y revisá de nuevo.','what to do (an ignored file moved aside, a plain stash leaves it), Revisar de nuevo, Integrar off',v);
+ await js("smoke.setLang('en')");await settle(150);
+ v=await js("smoke.text('[data-integrate-error-at=landing] p')");
+ ok(v==='Your checkout of main has changes that are not committed, or files the merge would overwrite, ignored ones included. Commit them, stash them (git stash -u for untracked files), or move an ignored file aside (a stash leaves ignored files where they are), and check again.','en: base_dirty with ignored files',v);
+ await js("smoke.setLang('es')");await settle(150);
+ await js("smoke.fake.igPrev.landing={blocked:'base_dirty',files:['README.md']};smoke.click('[data-integrate-error-at=landing] [data-integrate-retry]')");
+ ok(await until("smoke.count('[data-integrate-error-at=landing] [data-integrate-file]')===1&&!smoke.has('[data-integrate-error-at=landing] [data-integrate-files] + span')",3000),'one file and nothing left out: no count');
+ // A verify that installs dependencies gets no node_modules link in the temporary copy (verifyInstalls): the preview says so.
+ await js("smoke.fake.igPrev.landing={mode:'updateRef'};smoke.fake.igPrev.verify={command:'npm ci && npm test',confirmed:true,installs:true};smoke.click('[data-integrate-error-at=landing] [data-integrate-retry]')");
+ ok(await until("smoke.has('[data-integrate-verify-installs]')&&!document.querySelector('[data-integrate-start]').disabled",3000),'a verify that installs: the note, Integrar on');
+ v=await js("({text:smoke.text('[data-integrate-verify-installs]'),in:!!document.querySelector('[data-integrate-verify=confirmed] [data-integrate-verify-installs]')})");
+ ok(v.in&&v.text==='Este comando instala dependencias: arma su propio node_modules en la copia temporal, y el tuyo no se toca.','its node_modules are built in the temporary copy, yours are not touched',v);
+ await js("smoke.setLang('en')");await settle(200);
+ v=await js("smoke.text('[data-integrate-verify-installs]')");
+ ok(v==='This command installs dependencies: it builds its own node_modules in the temporary copy, and yours are not touched.','en: the install note',v);
+ await js("smoke.setLang('es')");await settle(150);
+ await js("smoke.fake.igPrev.verify={command:'npm test',confirmed:true};smoke.click('[data-integrate-dialog] [data-integrate-retry]')");
+ ok(await until("smoke.attr('[data-integrate-verify]','data-integrate-verify')==='confirmed'&&!smoke.has('[data-integrate-verify-installs]')",3000),'npm test again: no install note');
+ // A branch already in main lands nothing (main marks the task done after the preflight): a landing that would be
+ // blocked neither shows nor turns Integrar off.
+ await js("smoke.fake.igPrev.alreadyMerged=true;smoke.fake.igPrev.landing={blocked:'base_dirty'};smoke.click('[data-integrate-dialog] [data-integrate-retry]')");
+ ok(await until("smoke.has('[data-integrate-already]')&&!smoke.has('[data-integrate-landing]')&&!document.querySelector('[data-integrate-start]').disabled",3000),'already in main: no landing to block, Integrar stays on',await js("({already:smoke.has('[data-integrate-already]'),land:smoke.has('[data-integrate-landing]'),start:!document.querySelector('[data-integrate-start]').disabled})"));
+ await js("smoke.fake.igPrev.alreadyMerged=false;smoke.fake.igPrev.landing={mode:'updateRef'};smoke.click('[data-integrate-dialog] [data-integrate-retry]')");
+ ok(await until("smoke.attr('[data-integrate-landing]','data-integrate-landing')==='updateRef'&&!smoke.has('[data-integrate-already]')&&!document.querySelector('[data-integrate-start]').disabled",3000),'a branch to merge again');
+ // B6 review: an update being installed or the team being removed refuses every start (busy with that detail): inline,
+ // in its own words, the preview stays with Integrar on (never the result's busy, whose Revisar de nuevo never helps).
+ for(const [detail,es,en] of [['install','Se está instalando una actualización de la app, así que ahora no arranca ninguna integración.','An app update is being installed, so no integration starts now.'],['remove','Este equipo se está quitando, así que no arranca ninguna integración.','This team is being removed, so no integration starts.']]){
+  const n0=await js("smoke.reqs('integrate').length");
+  await js("smoke.fake.igStartFail={ok:false,error:'busy',detail:'"+detail+"'};smoke.click('[data-integrate-start]')");
+  ok(await until("smoke.reqs('integrate').length==="+(n0+1)+"&&smoke.text('[data-integrate-action-error=start]').startsWith("+JSON.stringify(es)+")",3000),'busy '+detail+': refused inline, in its own words',await js("smoke.text('[data-integrate-dialog]').slice(-300)"));
+  v=await js("({result:smoke.has('[data-integrate-error-at=result]'),busy:smoke.text('[data-integrate-dialog]').includes('La rama de la tarea cambió'),phase:smoke.attr('[data-integrate-dialog]','data-integrate-phase'),preview:smoke.has('[data-integrate-preview]'),steps:smoke.has('[data-integrate-steps]'),start:!document.querySelector('[data-integrate-start]').disabled})");
+  ok(!v.result&&!v.busy&&v.phase==='preview'&&v.preview&&!v.steps&&v.start,'busy '+detail+': not the branch-moved busy; the preview stays, Integrar on',v);
+  await js("smoke.setLang('en')");await settle(150);
+  v=await js("smoke.text('[data-integrate-action-error=start]')");
+  ok(v.startsWith(en),'en: busy '+detail,v);
+  await js("smoke.setLang('es')");await settle(150);
+ }
+ // Main refuses the start (the branch moved since the preview): busy, as the result, before any step.
+ await js("smoke.fake.igStartFail={ok:false,error:'busy'};smoke.click('[data-integrate-start]')");
+ ok(await until("smoke.has('[data-integrate-error-at=result][data-integrate-error=busy]')",3000),'the branch moved since the preview: busy, as the result');
+ v=await js("({steps:smoke.has('[data-integrate-steps]'),retry:smoke.has('[data-integrate-error-at=result] [data-integrate-retry]'),phase:smoke.attr('[data-integrate-dialog]','data-integrate-phase')})");
+ ok(!v.steps&&v.retry&&v.phase==='done','no step ran; Revisar de nuevo',v);
+ // The preflight fails once it runs (the branch moved after the preview): main sends no cleanup after it (nothing was
+ // created) and its task event may never reach the dialog (Teams closed); the run is over all the same.
+ await js("smoke.click('[data-integrate-error-at=result] [data-integrate-retry]')");
+ ok(await until("!!document.querySelector('[data-integrate-start]')&&!document.querySelector('[data-integrate-start]').disabled",3000),'checked again before the preflight run');
+ await js("smoke.click('[data-integrate-start]')");
+ ok(await until("smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='running'",3000),'running, to fail at the preflight');
+ await js("smoke.pushIntegrate({integrationId:"+IID+",step:'preflight',state:'running'});smoke.pushIntegrate({integrationId:"+IID+",step:'preflight',state:'failed',error:'busy'})");
+ ok(await until("smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='done'&&smoke.has('[data-integrate-error-at=result][data-integrate-error=busy]')",3000),'a failed preflight ends the run with no cleanup and no task event',await js("smoke.attr('[data-integrate-dialog]','data-integrate-phase')"));
+ v=await js("({steps:[...document.querySelectorAll('[data-integrate-step]')].map(e=>e.dataset.stepState).join(),close:document.querySelector('[data-integrate-close]').disabled,retry:smoke.has('[data-integrate-error-at=result] [data-integrate-retry]')})");
+ ok(v.steps==='failed,pending,pending,pending,pending,pending'&&!v.close&&v.retry,'the preflight failed, nothing else ran; the close button is back, with Revisar de nuevo',v);
+ await js("smoke.igEnd(false,{error:'busy'})");await settle(150);
+ // A conflict: the merge step fails with its files; Pedile al Dev que haga rebase.
+ await js("smoke.click('[data-integrate-error-at=result] [data-integrate-retry]')");
+ ok(await until("!!document.querySelector('[data-integrate-start]')&&!document.querySelector('[data-integrate-start]').disabled",3000),'checked again');
+ await js("smoke.click('[data-integrate-start]')");
+ ok(await until("smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='running'",3000),'running again');
+ await js("smoke.pushIntegrate({integrationId:"+IID+",step:'preflight',state:'ok'});smoke.pushIntegrate({integrationId:"+IID+",step:'temp',state:'ok'});smoke.pushIntegrate({integrationId:"+IID+",step:'merge',state:'failed',error:'merge_conflict',files:smoke.igFiles(25)});smoke.pushIntegrate({integrationId:"+IID+",step:'cleanup',state:'ok'});smoke.igEnd(false,{error:'merge_conflict'})");
+ ok(await until("smoke.has('[data-integrate-error-at=result][data-integrate-error=merge_conflict]')&&smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='done'",3000),'a conflict: the merge step failed');
+ v=await js("(()=>{const e='[data-integrate-error-at=result] ';return{files:[...document.querySelectorAll(e+'[data-integrate-file]')].map(x=>x.textContent),more:smoke.text(e+'[data-integrate-files] + span'),text:smoke.text(e+'p'),raw:smoke.text('[data-integrate-dialog]').includes(String.fromCodePoint(0x202E)),rebase:smoke.text(e+'[data-integrate-ask-rebase=conflict]'),merge:smoke.attr('[data-integrate-step=merge]','data-step-state')}})()");
+ ok(v.files.length===20&&v.files[1]==='src/b<U+202E>.ts'&&v.more==='5 más'&&!v.raw&&v.merge==='failed','its files: the first 20 spelled out, then how many more',v);
+ ok(v.text.includes('El merge con main tiene conflictos en estos archivos. Tu checkout quedó como estaba.')&&v.rebase==='Pedile al Dev que haga rebase','what happened and what to do',v);
+ await js("smoke.click('[data-integrate-ask-rebase=conflict]')");
+ ok(await until("!smoke.has('[data-integrate-dialog]')&&smoke.reqs('askRebase').at(-1).why==='conflict'",3000),'Pedile al Dev que haga rebase: askRebase why conflict, the dialog closes');
+ // A task main is integrating right now (the renderer came back mid-run): its steps, never a preview; Esc does nothing.
+ await js("smoke.igRunning()");
+ const ip1=await js("smoke.reqs('integratePreview').length");
+ await js("smoke.click('[data-need-integrate=t-31]')");
+ ok(await until("smoke.has('[data-integrate-running]')",3000),'opened on a run main has: running');
+ v=await js("({note:smoke.text('[data-integrate-running]'),n:smoke.reqs('integratePreview').length,prevented:smoke.keyActive("+ESC+")})");await settle(150);
+ ok(v.note==='Esta tarea se está integrando ahora.'&&v.n===ip1&&v.prevented&&(await js("smoke.has('[data-integrate-dialog]')")),'it says so, asks for no preview, and Esc closes nothing',v);
+ await js("smoke.pushIntegrate({integrationId:'i-77',step:'land',state:'failed',error:'base_moved'});smoke.pushIntegrate({integrationId:'i-77',step:'cleanup',state:'ok'});smoke.igEnd(false,{error:'base_moved'})");
+ ok(await until("smoke.has('[data-integrate-error-at=result][data-integrate-error=base_moved]')&&smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='done'",3000),'its steps come and end: base_moved');
+ ok((await js("smoke.text('[data-integrate-error-at=result]')")).includes('main avanzó mientras se integraba'),'base_moved in words');
+ await js("smoke.keyActive("+ESC+")");await settle(200);
+ ok(!(await js("smoke.has('[data-integrate-dialog]')"))&&(await js("smoke.has('[data-team-host]')")),'over: Esc closes the dialog only, Teams stays');
+ // B6 review: a timeout of the landing (the one step that writes your checkout of main: git cut midway may leave it
+ // partly updated) reads apart, from the failed event's step and from the step main kept (the dialog's last attempt,
+ // the drawer); one in the temporary copy keeps "your checkout stayed as it was". Second round: main names how a failed
+ // landing was landing (the event's and the stored landing) and the approval carries the step and the landing it kept,
+ // so the Te necesita row words it too; only an ffOnly landing says the checkout may be partly updated, an updateRef one
+ // says no checkout was touched, and the "may have been the landing" words are left for a failure stored without them.
+ // The verify runner's note main kept shows in the drawer, in the last attempt and in a result the stream gave without
+ // it (the verification ended before the dialog opened). es and en.
+ await js("smoke.igRunning()");
+ await js("smoke.click('[data-need-integrate=t-31]')");
+ ok(await until("smoke.has('[data-integrate-running]')",3000),'opened on a run main has, to time out at the landing');
+ await js("smoke.pushIntegrate({integrationId:'i-79',step:'land',state:'failed',error:'timeout',landing:'ffOnly'});smoke.pushIntegrate({integrationId:'i-79',step:'cleanup',state:'ok'});smoke.igEnd(false,{error:'timeout',step:'land',landing:'ffOnly',verifyNote:'leftStopped'})");
+ ok(await until("smoke.has('[data-integrate-error-at=result][data-integrate-error=timeout]')&&smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='done'",3000),'the landing timed out');
+ const LAND_ES='Llevar el merge a main tardó demasiado y se cortó, así que tu checkout de main puede haber quedado a medio actualizar. Mirá git status ahí antes de intentarlo de nuevo.';
+ const LAND_EN='Bringing the merge to main took too long and was stopped, so your checkout of main may be partly updated. Check git status there before trying again.';
+ const REF_ES='Mover main al merge tardó demasiado y se cortó. main no está abierta en ningún checkout, así que tu checkout no se tocó. Revisá de nuevo: si main ya apunta al merge, Integrar solo marca la tarea como hecha.';
+ const REF_EN='Moving main to the merge took too long and was stopped. main is not open in any checkout, so your checkout was not touched. Check again: if main already points to the merge, Integrate only marks the task done.';
+ const TEMP_ES='Un paso de git tardó demasiado y se cortó. Tu checkout quedó como estaba: revisá de nuevo.';
+ const TEMP_EN='A git step took too long and was stopped. Your checkout stayed as it was: check again.';
+ const UNKNOWN_ES='Un paso de git tardó demasiado y se cortó. Si era el que llevaba el merge a main, tu checkout de main puede haber quedado a medio actualizar: mirá git status ahí antes de intentarlo de nuevo.';
+ const STOPPED_ES='El comando dejó un proceso corriendo que seguía con su salida abierta después de terminar: se lo detuvo.';
+ const LETGO_ES='El comando dejó un proceso corriendo que seguía con su salida abierta después de terminar: no se lo pudo detener y puede seguir corriendo.';
+ v=await js("({text:smoke.text('[data-integrate-error-at=result] p'),land:smoke.attr('[data-integrate-step=land]','data-step-state')})");
+ ok(v.text===LAND_ES&&v.land==='failed','an ffOnly landing timeout: your checkout may be partly updated, git status there first',v);
+ // The stream never brought the verification's end (the dialog opened after it): its note comes from what main stored.
+ ok(await until("smoke.text('[data-integrate-error-at=result] [data-integrate-verify-note=leftStopped]')==="+JSON.stringify(STOPPED_ES)+"&&smoke.count('[data-integrate-dialog] [data-integrate-verify-note]')===1",3000),'the runner note main stored, in the result the stream gave without it, once',await js("smoke.text('[data-integrate-error-at=result]')"));
+ await js("smoke.setLang('en')");await settle(150);
+ v=await js("smoke.text('[data-integrate-error-at=result] p')");
+ ok(v===LAND_EN,'en: an ffOnly landing timeout',v);
+ await js("smoke.setLang('es')");await settle(150);
+ await js("smoke.keyActive("+ESC+")");await settle(200);
+ ok(await until("smoke.attr('[data-team-need=a-6] [data-integrate-last-error]','data-integrate-last-error')==='timeout'",3000),'Te necesita: the last attempt timed out');
+ v=await js("smoke.text('[data-team-need=a-6] [data-integrate-last-error]')");
+ ok(v.endsWith(LAND_ES),'the row: the step and the landing main kept, an ffOnly landing',v);
+ await js("smoke.setLang('en')");await settle(150);
+ v=await js("smoke.text('[data-team-need=a-6] [data-integrate-last-error]')");
+ ok(v.endsWith(LAND_EN),'en: the row',v);
+ await js("smoke.setLang('es')");await settle(150);
+ // A row (and an error view) with nothing stored about where: it may have been the landing, never "stayed as it was";
+ // a landing without its mode is not known either; a stored step in the temporary copy is.
+ v=await js("(()=>{const a=(x)=>({id:'a-x',taskId:'t-31',state:'pending',decider:'user',requestedBy:'dev',at:1,payload:{kind:'integrate',branch:'b',base:'main',lastError:'timeout',...x}});return{none:smoke.bodyOf('integrate',a({})).err,landOnly:smoke.bodyOf('integrate',a({lastStep:'land'})).err,temp:smoke.bodyOf('integrate',a({lastStep:'temp'})).err,ref:smoke.bodyOf('integrate',a({lastStep:'land',lastLanding:'updateRef'})).err,odd:smoke.bodyOf('integrate',a({lastStep:'nope',lastLanding:'nope'})).err,viewLand:smoke.errorViewOf({error:'timeout',step:'land'},'es').msg,viewNone:smoke.errorViewOf({error:'timeout',step:undefined},'es').msg,viewRef:smoke.errorViewOf({error:'timeout',step:'land',landing:'updateRef'},'es').msg,viewFf:smoke.errorViewOf({error:'timeout',step:'land',landing:'ffOnly'},'es').msg,viewTemp:smoke.errorViewOf({error:'timeout',step:'temp'},'es').msg}})()");
+ ok(v.none.endsWith(UNKNOWN_ES)&&v.landOnly.endsWith(UNKNOWN_ES)&&v.odd.endsWith(UNKNOWN_ES)&&v.temp.endsWith(TEMP_ES)&&v.ref.endsWith(REF_ES),'the row: unknown only when nothing says where or how it landed; the temporary copy; an updateRef landing',v);
+ ok(v.viewLand===UNKNOWN_ES&&v.viewNone===UNKNOWN_ES&&v.viewRef===REF_ES&&v.viewFf===LAND_ES&&v.viewTemp===TEMP_ES,'the error view: the landing decides, a landing step without it is not known',v);
+ await js("smoke.openTaskDrawer('t-31')");
+ ok(await until("smoke.attr('[data-task-drawer=t-31] [data-worktree-error]','data-worktree-error')==='timeout'",3000),'the drawer: the last attempt timed out');
+ ok((await js("smoke.text('[data-task-drawer=t-31] [data-worktree-error]')"))===LAND_ES,'the drawer: the step main kept, the landing',await js("smoke.text('[data-task-drawer=t-31] [data-worktree-error]')"));
+ ok((await js("smoke.text('[data-task-drawer=t-31] [data-integrate-verify-note=leftStopped]')"))===STOPPED_ES,'the drawer: the runner note main kept',await js("smoke.text('[data-task-drawer=t-31] [data-task-section=worktree]')"));
+ await js("smoke.click('[data-task-drawer=t-31] [data-task-integrate=t-31]')");
+ ok(await until("smoke.attr('[data-integrate-last]','data-integrate-last')==='timeout'&&!!document.querySelector('[data-integrate-start]')&&!document.querySelector('[data-integrate-start]').disabled",3000),'the dialog again: the last attempt main kept, then the preview');
+ ok((await js("smoke.text('[data-integrate-error-at=last] p')"))===LAND_ES,'its last attempt: the landing timed out',await js("smoke.text('[data-integrate-error-at=last]')"));
+ ok((await js("smoke.text('[data-integrate-error-at=last] [data-integrate-verify-note=leftStopped]')"))===STOPPED_ES,'its last attempt: the runner note main kept',await js("smoke.text('[data-integrate-error-at=last]')"));
+ // An updateRef landing that timed out: only the branch moves, so no checkout was touched, from the event's landing
+ // and from the one main kept (the last attempt, the drawer, the row).
+ await js("smoke.click('[data-integrate-start]')");
+ ok(await until("smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='running'",3000),'running, to time out at an updateRef landing');
+ await js("['preflight','temp','merge'].forEach(s=>smoke.pushIntegrate({integrationId:"+IID+",step:s,state:'ok'}));smoke.pushIntegrate({integrationId:"+IID+",step:'verify',state:'ok',verifyNote:'leftLetGo'});smoke.pushIntegrate({integrationId:"+IID+",step:'land',state:'failed',error:'timeout',landing:'updateRef'});smoke.pushIntegrate({integrationId:"+IID+",step:'cleanup',state:'ok'});smoke.igEnd(false,{error:'timeout',step:'land',landing:'updateRef',verifyNote:'leftLetGo'})");
+ ok(await until("smoke.has('[data-integrate-error-at=result][data-integrate-error=timeout]')&&smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='done'",3000),'the updateRef landing timed out');
+ v=await js("({text:smoke.text('[data-integrate-error-at=result] p'),notes:smoke.count('[data-integrate-dialog] [data-integrate-verify-note]'),under:smoke.text('[data-integrate-step=verify] [data-integrate-verify-note=leftLetGo]')})");
+ ok(v.text===REF_ES&&v.notes===1&&v.under===LETGO_ES,'an updateRef landing timeout: no checkout was touched; the runner note once, under its step',v);
+ await js("smoke.setLang('en')");await settle(150);
+ v=await js("smoke.text('[data-integrate-error-at=result] p')");
+ ok(v===REF_EN,'en: an updateRef landing timeout',v);
+ await js("smoke.setLang('es')");await settle(150);
+ await js("smoke.keyActive("+ESC+")");await settle(200);
+ ok(await until("smoke.text('[data-task-drawer=t-31] [data-worktree-error]')==="+JSON.stringify(REF_ES),3000),'the drawer: the landing main kept, updateRef',await js("smoke.text('[data-task-drawer=t-31] [data-worktree-error]')"));
+ ok((await js("smoke.text('[data-task-drawer=t-31] [data-integrate-verify-note=leftLetGo]')"))===LETGO_ES,'the drawer: the runner note of that attempt',await js("smoke.text('[data-task-drawer=t-31] [data-task-section=worktree]')"));
+ ok((await js("smoke.text('[data-team-need=a-6] [data-integrate-last-error]')")).endsWith(REF_ES),'the row: an updateRef landing',await js("smoke.text('[data-team-need=a-6] [data-integrate-last-error]')"));
+ await js("smoke.click('[data-task-drawer=t-31] [data-task-integrate=t-31]')");
+ ok(await until("smoke.attr('[data-integrate-last]','data-integrate-last')==='timeout'&&!!document.querySelector('[data-integrate-start]')&&!document.querySelector('[data-integrate-start]').disabled",3000),'the dialog again, on the updateRef attempt');
+ ok((await js("smoke.text('[data-integrate-error-at=last] p')"))===REF_ES,'its last attempt: an updateRef landing',await js("smoke.text('[data-integrate-error-at=last]')"));
+ // One in the temporary copy: the checkout stayed as it was, wherever it shows.
+ await js("smoke.click('[data-integrate-start]')");
+ ok(await until("smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='running'",3000),'running, to time out in the temporary copy');
+ await js("smoke.pushIntegrate({integrationId:"+IID+",step:'preflight',state:'ok'});smoke.pushIntegrate({integrationId:"+IID+",step:'temp',state:'failed',error:'timeout'});smoke.pushIntegrate({integrationId:"+IID+",step:'cleanup',state:'ok'});smoke.igEnd(false,{error:'timeout',step:'temp'})");
+ ok(await until("smoke.has('[data-integrate-error-at=result][data-integrate-error=timeout]')&&smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='done'",3000),'the temporary copy timed out');
+ ok((await js("smoke.text('[data-integrate-error-at=result] p')"))===TEMP_ES,'a timeout in the temporary copy: your checkout stayed as it was',await js("smoke.text('[data-integrate-error-at=result]')"));
+ await js("smoke.setLang('en')");await settle(150);
+ ok((await js("smoke.text('[data-integrate-error-at=result] p')"))===TEMP_EN,'en: a timeout in the temporary copy',await js("smoke.text('[data-integrate-error-at=result]')"));
+ await js("smoke.setLang('es')");await settle(150);
+ await js("smoke.keyActive("+ESC+")");await settle(200);
+ ok(await until("smoke.text('[data-task-drawer=t-31] [data-worktree-error]')==="+JSON.stringify(TEMP_ES),3000),'the drawer: the step main kept, the temporary copy',await js("smoke.text('[data-task-drawer=t-31] [data-worktree-error]')"));
+ await js("document.querySelector('[data-drawer] [data-drawer-close]')?.click()");await settle(200);
+ // A verification the exit hooks stopped midway (interrupted at the verify step): its output shows once, under its step,
+ // and an error view of it (the last attempt main kept) calls it the verification output, never git's.
+ await js("smoke.igRunning()");
+ await js("smoke.click('[data-need-integrate=t-31]')");
+ ok(await until("smoke.has('[data-integrate-running]')",3000),'opened on a run main has, to be stopped at the verification');
+ await js("smoke.pushIntegrate({integrationId:'i-80',step:'verify',state:'running',logTail:'Tests: 3 passed'});smoke.pushIntegrate({integrationId:'i-80',step:'verify',state:'failed',error:'interrupted',logTail:'Tests: 3 passed'});smoke.pushIntegrate({integrationId:'i-80',step:'cleanup',state:'ok'});smoke.igEnd(false,{error:'interrupted',step:'verify'})");
+ ok(await until("smoke.has('[data-integrate-error-at=result][data-integrate-error=interrupted]')&&smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='done'",3000),'stopped at the verification: interrupted');
+ v=await js("({tails:smoke.count('[data-integrate-dialog] [data-integrate-tail]'),under:smoke.has('[data-integrate-step=verify] [data-integrate-tail]'),view:smoke.errorViewOf({error:'interrupted',step:'verify',tail:'Tests: 3 passed'},'es').label,git:smoke.errorViewOf({error:'git_error',step:'merge',tail:'fatal: x'},'es').label})");
+ ok(v.tails===1&&v.under&&v.view==='Salida de la verificación'&&v.git==='Salida de git','its output once, under its step; the error view calls it the verification output (a git step: git output)',v);
+ await js("smoke.keyActive("+ESC+")");await settle(200);
+ ok(!(await js("smoke.has('[data-integrate-dialog]')")),'Esc closes it');
+ // Opened on a run whose failure came before the dialog did: only its cleanup arrives, so the dialog never guesses a
+ // success; the task main commits next says how it ended.
+ await js("smoke.igRunning()");
+ await js("smoke.click('[data-need-integrate=t-31]')");
+ ok(await until("smoke.has('[data-integrate-running]')",3000),'opened on a run main has, once more');
+ await js("smoke.pushIntegrate({integrationId:'i-78',step:'cleanup',state:'running'});smoke.pushIntegrate({integrationId:'i-78',step:'cleanup',state:'ok'})");await settle(200);
+ v=await js("({phase:smoke.attr('[data-integrate-dialog]','data-integrate-phase'),ok:smoke.has('[data-integrate-result=ok]'),err:smoke.has('[data-integrate-error-at=result]'),close:document.querySelector('[data-integrate-close]').disabled})");
+ ok(v.phase==='done'&&!v.ok&&!v.err&&!v.close,'only its cleanup came: over, no outcome guessed, the close button is back',v);
+ await js("smoke.igEnd(false,{error:'verify_failed',step:'verify',verifyNote:'spawnFailed'})");
+ ok(await until("smoke.has('[data-integrate-error-at=result][data-integrate-error=verify_failed]')&&!smoke.has('[data-integrate-result=ok]')",3000),'the task main committed gives the outcome: verify_failed');
+ // B6 review, second round: with the verify runner's note main stored (the command could not start), in words.
+ v=await js("({note:smoke.text('[data-integrate-error-at=result] [data-integrate-verify-note=spawnFailed]'),notes:smoke.count('[data-integrate-dialog] [data-integrate-verify-note]')})");
+ ok(v.note==='El comando de verificación no pudo arrancar.'&&v.notes===1,'the outcome from the task: the runner note main stored, once',v);
+ await js("smoke.keyActive("+ESC+")");await settle(200);
+ ok(!(await js("smoke.has('[data-integrate-dialog]')")),'Esc closes it');
+ // Second round: an outcome read from the task (only its cleanup came) and a failure the stream showed without its land
+ // mode both take the step and the land mode main stored: an updateRef landing touched no checkout, an ffOnly one may
+ // have left it partly updated.
+ await js("smoke.igRunning()");
+ await js("smoke.click('[data-need-integrate=t-31]')");
+ ok(await until("smoke.has('[data-integrate-running]')",3000),'opened on a run main has, whose landing timed out before the dialog did');
+ await js("smoke.pushIntegrate({integrationId:'i-82',step:'cleanup',state:'ok'});smoke.igEnd(false,{error:'timeout',step:'land',landing:'updateRef'})");
+ ok(await until("smoke.text('[data-integrate-error-at=result] p')==="+JSON.stringify(REF_ES),3000),'the outcome from the task: the step and the land mode main stored, an updateRef landing',await js("smoke.text('[data-integrate-error-at=result]')"));
+ await js("smoke.keyActive("+ESC+")");await settle(200);
+ await js("smoke.igRunning()");
+ await js("smoke.click('[data-need-integrate=t-31]')");
+ ok(await until("smoke.has('[data-integrate-running]')",3000),'opened on a run main has, whose landing event comes without its mode');
+ await js("smoke.pushIntegrate({integrationId:'i-83',step:'land',state:'failed',error:'timeout'});smoke.pushIntegrate({integrationId:'i-83',step:'cleanup',state:'ok'});smoke.igEnd(false,{error:'timeout',step:'land',landing:'ffOnly'})");
+ ok(await until("smoke.text('[data-integrate-error-at=result] p')==="+JSON.stringify(LAND_ES),3000),'a failure the stream showed without its land mode: the one main stored, an ffOnly landing',await js("smoke.text('[data-integrate-error-at=result]')"));
+ await js("smoke.keyActive("+ESC+")");await settle(200);
+ ok(!(await js("smoke.has('[data-integrate-dialog]')")),'Esc closes it');
+ // Success: through the landing, the merge commit on main; the task is done and its worktree can go.
+ await js("smoke.click('[data-need-integrate=t-31]')");
+ ok(await until("!!document.querySelector('[data-integrate-start]')&&!document.querySelector('[data-integrate-start]').disabled",3000),'the preview again');
+ // A verify step of another integration that came before the reply (with its runner note): the reply's id is the one
+ // that counts, and nothing of the other one stays, its note neither.
+ await js("smoke.fake.igBeforeReply={integrationId:'i-90',step:'verify',state:'ok',verifyNote:'leftStopped'};smoke.click('[data-integrate-start]')");
+ ok(await until("smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='running'",3000),'running');
+ v=await js("({notes:smoke.count('[data-integrate-dialog] [data-integrate-verify-note]'),steps:[...document.querySelectorAll('[data-integrate-step]')].map(e=>e.dataset.stepState).join()})");
+ ok(v.notes===0&&v.steps==='pending,pending,pending,pending,pending,pending','a step of another integration before the reply: its state and its runner note go',v);
+ await js("['preflight','temp','merge'].forEach(s=>smoke.pushIntegrate({integrationId:"+IID+",step:s,state:'ok'}));smoke.pushIntegrate({integrationId:"+IID+",step:'verify',state:'ok',logTail:'Tests: 12 passed',verifyNote:'leftLetGo'});smoke.pushIntegrate({integrationId:"+IID+",step:'land',state:'ok',mergeSha:'c'.repeat(40),landing:'ffOnly'})");await settle(150);
+ ok((await js("smoke.attr('[data-integrate-dialog]','data-integrate-phase')"))==='running','landed: still running until the cleanup');
+ // B6 review: a verification that passed can carry the runner's note too (a leftover it could not stop): under its step.
+ v=await js("({note:smoke.text('[data-integrate-step=verify] [data-integrate-verify-note=leftLetGo]'),notes:smoke.count('[data-integrate-dialog] [data-integrate-verify-note]')})");
+ ok(v.note==='El comando dejó un proceso corriendo que seguía con su salida abierta después de terminar: no se lo pudo detener y puede seguir corriendo.'&&v.notes===1,'a passed verification with its runner note under the step',v);
+ await js("smoke.pushIntegrate({integrationId:"+IID+",step:'cleanup',state:'ok'});smoke.igEnd(true,{mergeSha:'c'.repeat(40),landing:'ffOnly'})");
+ ok(await until("smoke.has('[data-integrate-result=ok]')&&smoke.attr('[data-integrate-dialog]','data-integrate-phase')==='done'",3000),'integrated');
+ v=await js("({text:smoke.text('[data-integrate-result=ok]'),sha:smoke.attr('[data-integrate-sha]','data-integrate-sha'),steps:[...document.querySelectorAll('[data-integrate-step]')].map(e=>e.dataset.stepState).join(),remove:smoke.text('[data-integrate-remove]'),focus:smoke.activeIs('data-integrate-done-close')})");
+ ok(v.text.includes('Integrada en main')&&v.text.includes('Commit de merge ccccccc.')&&v.text.includes('Tu checkout de main avanzó hasta ahí.')&&v.sha==='c'.repeat(40),'the merge commit on main, landed by a fast-forward',v);
+ ok(v.steps==='ok,ok,ok,ok,ok,ok'&&v.remove==='Borrar el worktree de la tarea'&&v.focus,'every step done; the offer to delete the worktree; Cerrar holds the focus',v);
+ await w.webContents.capturePage();await shot('teams-integrate-done');
+ await js("smoke.click('[data-integrate-remove]')");await settle();
+ ok(await js("smoke.has('[data-confirm]')&&smoke.text('body').includes('¿Borrar el worktree de t-31?')&&smoke.text('body').includes('Lo integrado ya está en main.')"),'deleting it asks first');
+ await js("smoke.keyActive("+ESC+")");await settle(200);
+ ok(!(await js("smoke.has('[data-confirm]')"))&&(await js("smoke.has('[data-integrate-dialog]')")),'Esc cancels the confirm only; the dialog stays');
+ await js("smoke.click('[data-integrate-remove]')");await settle();
  await js("smoke.click('[data-confirm]')");
- ok(await until("smoke.reqs('moveTask').length==="+(m0+1),2000),'confirmed: moveTask');
- v=await js("smoke.reqs('moveTask').at(-1)");
- ok(v.taskId==='t-31'&&v.to==='done'&&typeof v.baseRev==='number','to done with the task rev',v);
- ok(await sameAt(2),'the task is over: its approval goes from every count, 2',await js("smoke.counts(smoke.TA)"));
+ ok(await until("smoke.reqs('removeWorktree').length===1&&smoke.has('[data-integrate-removed]')&&!smoke.has('[data-integrate-remove]')",3000),'confirmed: removeWorktree, and the dialog says it went');
+ v=await js("smoke.reqs('removeWorktree').at(-1)");
+ ok(v.teamId===TA&&v.taskId==='t-31','removeWorktree of t-31',v);
+ await js("smoke.click('[data-integrate-done-close]')");await settle(200);
+ ok(!(await js("smoke.has('[data-integrate-dialog]')")),'Cerrar closes it');
+ ok(await sameAt(2),'the task is integrated: its approval goes from every count, 2',await js("smoke.counts(smoke.TA)"));
+ await js("smoke.openTaskDrawer('t-31')");
+ ok(await until("smoke.attr('[data-task-drawer=t-31] [data-task-section=worktree]','data-worktree-status')==='integrated'",3000),'the drawer: integrated');
+ v=await js("({text:smoke.text('[data-task-drawer=t-31] [data-worktree-integrated]'),branch:smoke.has('[data-task-drawer=t-31] [data-worktree-branch]'),rm:smoke.has('[data-task-drawer=t-31] [data-task-remove-worktree]'),btn:smoke.has('[data-task-drawer=t-31] [data-task-integrate]')})");
+ ok(v.text==='Integrada en main · ccccccc'&&!v.branch&&!v.rm&&!v.btn,'integrated into main with its merge commit; the worktree is gone, nothing more to do',v);
+ await js("document.querySelector('[data-drawer] [data-drawer-close]')?.click()");await settle(200);
  // A task blocked on a card (a prep that failed, T17): no Retomar while that card is up (its own actions resume it);
  // once the user dismissed it, the drawer says so and offers Retomar, which sends resumeTask, and its board card says
  // Retomar is in the task. An orphan card of the same task (decision 64: about a process, it blocks nothing) stays
@@ -1890,7 +2370,7 @@ app.whenReady().then(async()=>{
  await js("smoke.keyActive({key:'Escape',code:'Escape',keyCode:27})");await settle(200);
 
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy; agents: roster, run now, run chat, stop, pauses, Labs confirm; board: columns, drag, bands, stopRun, keyboard, drawer, blocker loop, comments, new task, Lead thread; dispatch: autonomy switch, Por despachar, Despachar todo, kickoff; review: run now by phase, Retomar, consoleBusy; part 2: needs count parity, decide, answer, hire escaping, permission rule, plan section, Marcar hecha, Retomar after a dismissed card (the blocking card by cardId, the board card text, a refused card block), Esc keeps a draft, new-need toast); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy; agents: roster, run now, run chat, stop, pauses, Labs confirm; board: columns, drag, bands, stopRun, keyboard, drawer, blocker loop, comments, new task, Lead thread; dispatch: autonomy switch, Por despachar, Despachar todo, kickoff; review: run now by phase, Retomar, consoleBusy; part 2: needs count parity, decide, answer, hire escaping, permission rule, plan section, Retomar after a dismissed card (the blocking card by cardId, the board card text, a refused card block), Esc keeps a draft, new-need toast; integrate: Integrar... in Te necesita, last attempt, preview, confirm verify, live steps and escaped tail, Esc and backdrop while running, sixteen errors with their actions, worktree console, blocked landing (none when already merged), refused start, a failed preflight ends the run, conflict files, askRebase, reopen while running (the outcome from the task main commits), merge commit, worktree removal, drawer section; B6 integration: ahead chip, no Marcar hecha, live worktree counts, dirty base files, install note; B6 review: verify runner notes in words, busy install and remove at the start, landing timeout apart from a temporary copy one; second round: base_dirty with ignored files, the stored step, landing and runner note in the row, the drawer, the last attempt and the result, an updateRef landing timeout); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; delete env.ELECTRON_RENDERER_URL

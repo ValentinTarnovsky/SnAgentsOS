@@ -92,7 +92,12 @@ export type ApprovalPayloadView =
   | { kind: 'final'; summary: string; stat?: DiffStat }   // stat: the last diff stat a QA run of the task read (B5); absent when none was computed
   | { kind: 'hire'; roleId: string; diff: TeamFileDiff; risks: TeamRiskFlag[] }
   | { kind: 'permission'; roleId: string; tools: string[]; denied?: string[] }   // denied: the shell commands the run was denied (redacted, <= 10 x 300 chars, B5)
-  | { kind: 'integrate'; branch: string; base: string; ahead?: number; lastError?: IntegrateError }
+  /**
+   * ahead: commits of the branch over its base, as main last read them (the needs and task ops); absent when unknown.
+   * With `lastError` (the last attempt failed, B6 review second round): `lastStep` where, `lastLanding` the land mode of
+   * a failure at step land whose mode was known (IntegrateStatus.step and .landing).
+   */
+  | { kind: 'integrate'; branch: string; base: string; ahead?: number; lastError?: IntegrateError; lastStep?: IntegrateStep; lastLanding?: 'ffOnly' | 'updateRef' }
 export interface ApprovalView { id: string; taskId?: string; state: ApprovalState; decider: 'user' | 'lead'; requestedBy: string; at: number; error?: string; payload: ApprovalPayloadView }
 export interface CardView {
   id: string; taskId?: string; agentId?: string; kind: TeamCard['kind']; state: TeamCard['state']; at: number
@@ -105,6 +110,7 @@ export interface QueueItemView { id: string; agentId: string; taskId?: string; r
 export interface TaskDetail extends Omit<TaskSummary, 'comments'> {
   body: string; plan?: PlanView
   reviewInfo: { round: number; max: number; lastVerdict?: 'approve' | 'changes'; qaAgentId?: string }
+  /** `exists`, `ahead` and `behind` as main last read them (the task op reads them again, cached per tip); a count is absent when unknown. */
   worktree?: { path?: string /* desktop only */; branch: string; base: string; baseBranch: string; ahead?: number; behind?: number; exists: boolean }
   comments: CommentView[]; commentsCursor: string | null; commentsArchived: number
   runs: RunView[]                                  // newest 10
@@ -128,7 +134,7 @@ export interface SetupProbe {
   repoRoot: string; repoName: string; branch: string | null; branches: string[]
   registered?: string                              // team id already registered for this repo
   existing?: { sha256: string; files: TeamFilePreview[]; issues: DefError[]; diff: TeamDefinitionDiff }
-  suggestedVerify?: string
+  suggestedVerify?: string                         // the first suggestVerify of the repo root (B6 integration); absent when none
   defaults: TeamSetupDraft
 }
 export interface SetupPreview { files: TeamFilePreview[]; hash: string; issues: DefError[]; warnings: SetupWarning[] }
@@ -139,15 +145,32 @@ export type IntegrateStepState = 'pending' | 'running' | 'ok' | 'failed' | 'skip
 export interface IntegratePreview {
   branch: string; base: string; tip: string; baseTip: string; ahead: number; behind: number; stat: DiffStat
   alreadyMerged: boolean
-  verify: { command: string; confirmed: boolean } | { suggested?: string }
-  landing: { mode: 'ffOnly' | 'updateRef' } | { blocked: IntegrateError; path?: string }
+  /**
+   * `installs` (B6 integration): the command installs dependencies (`verifyInstalls`), so the temp tree gets no
+   * node_modules junction: the install builds its own node_modules there and the repo's is never touched.
+   */
+  verify: { command: string; confirmed: boolean; installs?: true } | { suggested?: string }
+  /**
+   * `files` (base_dirty only): the changed tracked files of the user's checkout or, with none (B6 review), its untracked
+   * and ignored files the merge would replace, at most 50; `filesMore` how many more.
+   */
+  landing: { mode: 'ffOnly' | 'updateRef' } | { blocked: IntegrateError; path?: string; files?: string[]; filesMore?: number }
   touchesDefinition: boolean                       // the merge changes .snagentsos/team/: landing it makes the team untrusted
   error?: IntegrateError                           // preflight failure: Integrar disabled
 }
+/**
+ * What the verify runner itself had to do (B6 review), worded by the renderer under the verify step and in the error
+ * view (the English line stays in the verify log only, never in the tail): `leftStopped` / `leftLetGo` a process the
+ * command left still held its output after it exited and was stopped / let go; `timeoutKill` the tree killed at the
+ * timeout never closed its output and was let go; `spawnFailed` the command could not start.
+ */
+export type VerifyNote = 'leftStopped' | 'leftLetGo' | 'timeoutKill' | 'spawnFailed'
 export interface IntegrateProgressEvt {
   teamId: string; taskId: string; integrationId: string; step: IntegrateStep; state: IntegrateStepState; at: number
   logTail?: string                                 // verify output tail, redacted, <= 8 KB
+  /** `landing`: `land` in `ok` (how it landed) and, since the B6 review second round, in `failed` when the mode was known. */
   files?: string[]; error?: IntegrateError; mergeSha?: string; landing?: 'ffOnly' | 'updateRef' | 'alreadyMerged'
+  verifyNote?: VerifyNote                          // step 'verify', its end (ok or failed); absent when the runner had nothing to say
 }
 /**
  * workspaceId is chosen by main (plan 3.10.2): rt.workspaceId when it still exists in config, else the first config

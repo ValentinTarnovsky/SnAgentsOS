@@ -697,7 +697,7 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
  */
 export async function downloadAndInstall(
   onProgress: (p: UpdateProgress) => void,
-  opts?: { beforeApply?: (kind: InstallKind) => void },
+  opts?: { beforeApply?: (kind: InstallKind) => void | Promise<unknown> },
 ): Promise<{ relaunching: boolean }> {
   let match = lastMatch
   let version = lastVersion
@@ -754,8 +754,9 @@ export async function downloadAndInstall(
 
   // Last chance before the setup runs (E6-FR-10): the NSIS installer closes
   // the app itself, without a before-quit, so the scrollback is saved here.
+  // Awaited (app 2.7.0, E10 B6): a Teams integrate land finishes first.
   try {
-    opts?.beforeApply?.(kind)
+    await opts?.beforeApply?.(kind)
   } catch (err) {
     console.warn('[updater] beforeApply failed:', err)
   }

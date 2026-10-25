@@ -16,11 +16,22 @@ import { fail, type OpTable } from './types'
 
 export const needsOps: Pick<OpTable, 'needs' | 'decide' | 'answer'> = {
   async needs(req, { svc }) {
+    const first = svc.team(req.teamId)
+    if (!first) return fail('not_found')
+    // B6 integration: the trees of the tasks an integrate approval waits on, read first (their rows show the commits
+    // ahead; short timeouts, cached per tip, never behind a busy git semaphore).
+    const ids = new Set(first.store.rt.approvals.filter((a) => a.kind === 'integrate' && (a.state === 'pending' || a.state === 'applying') && a.taskId).map((a) => a.taskId as string))
+    if (ids.size) await svc.readWorktreeLive(req.teamId, first.store.rt.tasks.filter((t) => ids.has(t.id)))
     const rec = svc.team(req.teamId)
     if (!rec) return fail('not_found')
     // The dry run first: dropping a dead orphan may commit (its card), so the view is built after it.
     const waiting = svc.dispatchWaiting(req.teamId).byKey
-    return { ok: true, needs: needsView(rec, svc.trusted(req.teamId), waiting) }
+    const tasks = new Map(rec.store.rt.tasks.map((t) => [t.id, t]))
+    const ahead = (taskId: string): number | undefined => {
+      const t = tasks.get(taskId)
+      return t ? svc.worktreeLive(t)?.ahead : undefined
+    }
+    return { ok: true, needs: needsView(rec, svc.trusted(req.teamId), waiting, { ahead }) }
   },
 
   async decide(req, { svc, origin, actor }) {

@@ -530,10 +530,11 @@ function openMainWindow(): void {
     }
     if (forceClose) return
     const shouldConfirm = cfg?.settings?.confirmCloseRunning !== false
-    // Team runs (app 2.7.0, E10 B2) stop with the app too: they count for the confirm.
+    // Team runs (app 2.7.0, E10 B2) and the integrates in flight (B6: halted, their verify killed) stop with the app too.
     const liveRuns = teamService?.liveRunCount() ?? 0
-    if (shouldConfirm && (ptyManager.count > 0 || liveRuns > 0)) {
-      const detail = [ptyManager.count > 0 ? mainT(cfg, 'dialog.activeDetail', { n: ptyManager.count }) : '', liveRuns > 0 ? mainT(cfg, 'teams.close.runs', { n: liveRuns }) : '']
+    const integrates = teamService?.integrateCount() ?? 0
+    if (shouldConfirm && (ptyManager.count > 0 || liveRuns > 0 || integrates > 0)) {
+      const detail = [ptyManager.count > 0 ? mainT(cfg, 'dialog.activeDetail', { n: ptyManager.count }) : '', liveRuns + integrates > 0 ? mainT(cfg, 'teams.close.runs', { runs: liveRuns, integrates }) : '']
         .filter(Boolean)
         .join('\n')
       const choice = dialog.showMessageBoxSync(win, {
@@ -655,11 +656,17 @@ async function bootstrap(): Promise<void> {
     },
     // The NSIS setup closes the app without a before-quit (E6-FR-10). Leaves
     // the exit flag alone: a cancelled wizard still saves on the next quit.
-    persistBeforeInstall: () => {
+    persistBeforeInstall: async () => {
       reviewNotes?.flush()
       scrollbackCheckpoint?.persistAllSync()
-      // Team runs interrupted and flushed, never frozen (a cancelled wizard keeps the app running).
-      teamService?.prepareInstall()
+      // Team runs interrupted and flushed, never frozen (a cancelled wizard keeps the app running). B6 integration:
+      // the setup waits for an integrate land already running (a git killed mid checkout leaves it half updated),
+      // then what the consoles printed meanwhile is saved again.
+      const waited = (await teamService?.prepareInstall()) ?? 0
+      if (waited > 0) {
+        reviewNotes?.flush()
+        scrollbackCheckpoint?.persistAllSync()
+      }
     },
     // A silent update that did not land (declined permission prompt): read
     // and deleted once here, shown by the renderer as a toast with [Retry].
@@ -989,6 +996,7 @@ async function bootstrap(): Promise<void> {
     // Synthetic `team:<runId>` statuses reach only AwakeService (and AccountService through statuses), never StatusManager.
     awake: (evt) => awakeService?.onPaneStatus(evt),
     sendRun: (evt) => sendToRenderer(CH.TEAMS_RUN_APPEND, evt),
+    sendIntegrate: (evt) => sendToRenderer(CH.TEAMS_INTEGRATE_PROGRESS, evt),
     // B4: task worktrees through the console worktree service, tagged with their team owner (decision 63).
     worktrees,
     // B5: a new "Te necesita" row (an approval, a card, the trust, an auth or billing pause) as a desktop toast; B8 also routes it to the phone.

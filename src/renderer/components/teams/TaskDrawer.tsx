@@ -20,6 +20,7 @@ import { TaskFields, FIELD_CLS, TITLE_BAD_RE } from './TaskFields'
 import { TaskActivity } from './TaskActivity'
 import { BODY_BAD_RE, TaskComments, useLinkConfirm } from './TaskComments'
 import { TaskPlanSection } from './TaskPlanSection'
+import { TaskWorktreeSection } from './TaskWorktreeSection'
 
 const NO_AGENTS: readonly AgentView[] = []
 const SECTION = 'text-[11px] font-semibold uppercase tracking-wide text-text-secondary'
@@ -60,7 +61,8 @@ function Section({ title, children, name }: { title: string; children: ReactNode
  * loads the new version and keeps the change to retry); the review round;
  * the runs of the task; and its comments with the composer. A click on
  * another card switches it (`keepOpenOn`), with its own state per task. B5
- * adds the plan section (TaskPlanSection), B6 the worktree one.
+ * adds the plan section (TaskPlanSection), B6 the worktree one
+ * (TaskWorktreeSection: Integrar... and deleting the worktree of a task that is over).
  */
 export function TaskDrawer({ teamId, view, taskId }: { teamId: string; view: TeamView; taskId: string }) {
   const t = useT()
@@ -417,8 +419,9 @@ function TaskBody({ teamId, view, entry, detail, agents, byId }: { teamId: strin
         <TaskFields detail={detail} view={view} agents={agents} tasks={tasks} pending={pending} busy={saving} onSave={(patch) => void save(patch)} />
       </Section>
 
-      {/* B5: the plan and its decision while it waits; B6 inserts the worktree section (TaskWorktreeSection) after it. */}
+      {/* B5: the plan and its decision while it waits; B6: the task worktree, Integrar... and deleting it once done. */}
       <TaskPlanSection teamId={teamId} detail={detail} />
+      <TaskWorktreeSection teamId={teamId} detail={detail} />
 
       {(detail.reviewInfo.round > 0 || detail.reviewInfo.lastVerdict) && (
         <Section name="review" title={t('teams.task.section.review')}>

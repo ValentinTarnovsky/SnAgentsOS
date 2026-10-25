@@ -597,7 +597,8 @@ async function lifecycleExitChecks() {
   // prepareInstall: interrupted and flushed, not frozen; runs defer disabled until installAborted.
   const i = await w.runNow('dev')
   await w.waitState(i.runId, 'running')
-  w.svc.prepareInstall()
+  // B6 integration, second round: it resolves once no integrate land is left (none here) with how many it waited for.
+  check((await w.svc.prepareInstall()) === 0, 'prepareInstall resolves with no land to wait for')
   check(w.ended(i.runId)?.state === 'interrupted', 'prepareInstall interrupts the live run')
   same(await w.runNow('dev'), { ok: false, error: 'deferred', defer: { reason: 'disabled' } }, 'while installing: deferred disabled')
   check((await w.svc.request({ op: 'list' }, 'desktop')).ok, 'not frozen: reads still answer')

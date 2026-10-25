@@ -1,7 +1,8 @@
 /**
  * The only way main runs git (E7 Design B). The chip and the panel only read;
  * WorktreeService (E7 Design F) runs its few writes (worktree add / prune,
- * branch -D) through the same binary resolution, env and semaphore:
+ * branch -D), and the Teams Integrator (app 2.7.0, E10 B6) its temp merge and
+ * its land, through the same binary resolution, env and semaphore:
  *  - the env drops GIT_DIR and friends, so a polluted app env never points a
  *    query at another repo, and adds GIT_OPTIONAL_LOCKS=0 (status never takes
  *    index.lock while an agent commits), GIT_TERMINAL_PROMPT=0 (no credential
@@ -45,6 +46,13 @@ export class GitExecError extends Error {
     readonly stderr = '',
     /** App 2.7.0 (B5 integration, fifth round): stdout passed maxBuffer (Node's code), even when git also wrote to stderr. */
     readonly maxBuffer = false,
+    /**
+     * App 2.7.0 (E10 B6, decision 70): git's exit code when it ran and exited non-zero, else null (a timeout, a spawn
+     * failure). The Integrator reads it: `merge-base --is-ancestor` exits 1 for "not an ancestor", `update-ref` 128.
+     */
+    readonly exitCode: number | null = null,
+    /** What git printed on stdout before it failed (a merge says CONFLICT there). */
+    readonly stdout = '',
   ) {
     super(message)
     this.name = 'GitExecError'
@@ -57,6 +65,12 @@ const MAX_BUFFER_CODE = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
 /** True when a run's output passed its maxBuffer (by shape, so it survives bundling boundaries). */
 export function gitOverflowed(e: unknown): boolean {
   return (e as { maxBuffer?: unknown } | null)?.maxBuffer === true
+}
+
+/** The exit code of a failed run, null when git did not exit by itself (by shape, like gitErrorCode). */
+export function gitExitCode(e: unknown): number | null {
+  const c = (e as { exitCode?: unknown } | null)?.exitCode
+  return typeof c === 'number' && Number.isInteger(c) ? c : null
 }
 
 type ExecCallback = (err: (Error & { code?: unknown; killed?: boolean; signal?: unknown }) | null, stdout: string, stderr: string) => void
@@ -156,7 +170,7 @@ interface Waiter {
 export interface GitRunner {
   run(args: string[], opts: RunGitOpts): Promise<string>
   info(force?: boolean): Promise<GitInfoRes>
-  /** Processes currently running (tests). */
+  /** Processes currently running (tests, and TaskWorktrees.gitNow: a live read runs only when a slot is free). */
   readonly running: number
 }
 
@@ -233,7 +247,9 @@ export function createGitRunner(deps: GitRunnerDeps = {}): GitRunner {
             // A spawn ENOENT with a git we just found means the cwd is gone, not git.
             const code = err.code === 'ENOENT' && !existsSync(cwd) ? 'not_repo' : classifyGitError(err, errText)
             const overflow = err.code === MAX_BUFFER_CODE || /maxBuffer/i.test(err.message)
-            reject(new GitExecError(code, errText.trim() || err.message, errText, overflow))
+            // execFile names the exit code in `code` (a number) when git ran and exited non-zero; a string is a spawn error.
+            const exitCode = typeof err.code === 'number' && !err.killed ? err.code : null
+            reject(new GitExecError(code, errText.trim() || err.message, errText, overflow, exitCode, String(stdout ?? '')))
           } else resolve({ stdout: String(stdout ?? ''), stderr: errText })
         })
       } catch (e) {

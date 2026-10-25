@@ -4,7 +4,8 @@
  * (`ctx.actor`, desktop or phone): it carries the task `rev` and a stale one
  * answers `conflict {rev}` with the current task, so the drawer can show
  * what changed. Reads never touch the disk but for the archived comment
- * counts. B4 adds `resumeTask`, the drawer's Retomar of a stopped task.
+ * counts and (B6) the `task` op's read of the task tree (never the board).
+ * B4 adds `resumeTask`, the drawer's Retomar of a stopped task.
  */
 import { LEAD_THREAD, type TeamTask } from '@shared/teams'
 import type { TaskDetail } from '@shared/team-protocol'
@@ -17,6 +18,7 @@ function viewCtx(svc: TeamInternals, teamId: string, rec: TeamRecord): TaskViewC
   return { def: svc.shownDef(rec), needs: needsRowsOf(rec, svc.trusted(teamId)), archived: (target) => svc.archivedCount(teamId, target) }
 }
 
+/** The drawer's task: its tree as main last read it (B6 integration: the `task` op reads it first; no git here). */
 function detailOf(svc: TeamInternals, teamId: string, rec: TeamRecord, t: TeamTask, commentsBefore?: number): TaskDetail {
   return taskDetail(rec.store.rt, t, {
     ...viewCtx(svc, teamId, rec),
@@ -24,6 +26,7 @@ function detailOf(svc: TeamInternals, teamId: string, rec: TeamRecord, t: TeamTa
     recent: rec.store.recentRuns(),
     lastLineAt: (id) => svc.runLive(id).lastLineAt,
     commentsBefore,
+    worktree: svc.worktreeLive(t),
   })
 }
 
@@ -59,6 +62,7 @@ export const boardOps: Pick<OpTable, 'board' | 'task' | 'createTask' | 'updateTa
     return page ? { ok: true, page } : fail('bad_request')
   },
 
+  /** B6 integration: a task with a worktree reads it first (exists, ahead, behind; short timeouts, cached per tip, never behind a busy git semaphore). */
   async task(req, { svc }) {
     const rec = svc.team(req.teamId)
     if (!rec) return fail('not_found')
@@ -66,7 +70,12 @@ export const boardOps: Pick<OpTable, 'board' | 'task' | 'createTask' | 'updateTa
     if (!t) return fail('not_found')
     const before = req.commentsBefore === undefined ? undefined : commentNumOf(req.commentsBefore)
     if (before === null) return fail('bad_request')
-    return { ok: true, task: detailOf(svc, req.teamId, rec, t, before) }
+    if (t.worktree) await svc.readWorktreeLive(req.teamId, [t])
+    // The view is built from the state after the read (3.0 item 1).
+    const now = svc.team(req.teamId)
+    const cur = now?.store.rt.tasks.find((x) => x.id === req.taskId)
+    if (!now || !cur) return fail('not_found')
+    return { ok: true, task: detailOf(svc, req.teamId, now, cur, before) }
   },
 
   async createTask(req, { svc, actor }) {

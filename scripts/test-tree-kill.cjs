@@ -1,7 +1,9 @@
 // Team runs, the process side (app 2.7.0, B2): treeKill (a real child with a real grandchild,
 // `ping` (detached, out of the kill-on-close job) or `sleep`, killed with the whole tree, and the
 // control that killing the child alone leaves it alive; a dead pid; the injected taskkill and kill),
-// procStartTime (the test process itself and a child, injected probe outputs), agentCli
+// procStartTime (the test process itself and a child, injected probe outputs), childrenSince (B6
+// integration, second round: the real child's direct children on Windows, never its conhost.exe, injected CIM outputs;
+// B6 review: the upper bound of the window, never a child created after it, and childrenSinceSync), agentCli
 // (resolveAgentCli skip rules, .exe before .cmd, spawnTarget for a .cmd), teamArgv (argv snapshots
 // per provider x profile x new/resume, with the isolation flags and the protect rules on every
 // Claude line, claudePathRule, grants, isGrantable, grantPatternOf: Bash rules only, never a PowerShell one, B5;
@@ -87,6 +89,19 @@ async function treeChecks() {
     check(T.pidAlive(a.child.pid) && T.pidAlive(a.grand), 'a real child with a real grandchild (ping / sleep) is alive')
     const probe = await T.procStartTime(a.child.pid)
     check(probe && probe.image === 'node' && Math.abs(probe.at - a.startedAt) < 10_000, 'procStartTime of the child: node, started when it was spawned', probe)
+    if (win) {
+      // B6 integration, second round: the direct children of a process, created within a window (the real CIM query).
+      const kids = await T.childrenSince(a.child.pid, a.startedAt, Date.now())
+      check(kids.includes(a.grand) && !kids.includes(a.child.pid), 'childrenSince: the real grandchild is a direct child of the child, created since it started', kids)
+      // The hidden console host of the child (a console app spawned with pipes and no window) is never one of them.
+      const hosts = require('node:child_process').execFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `Get-CimInstance Win32_Process -Filter 'ParentProcessId=${a.child.pid}' | Where-Object { $_.Name -eq 'conhost.exe' } | ForEach-Object { $_.ProcessId }`], { encoding: 'utf8', windowsHide: true }).split(/\r?\n/).map(Number).filter((n) => n > 0)
+      check(!kids.some((k) => hosts.includes(k)), 'childrenSince: never the console host (conhost.exe) of the process', { kids, hosts })
+      same(await T.childrenSince(a.child.pid, Date.now() + 60_000, Infinity), [], 'childrenSince: none created since a later time')
+      // B6 review: the upper bound. Nothing the child started was created before the child itself.
+      same(await T.childrenSince(a.child.pid, a.startedAt - 60_000, a.startedAt - 1), [], 'childrenSince: none created up to a time before the child started (the upper bound)')
+      const sync = T.childrenSinceSync(a.child.pid, a.startedAt, Date.now())
+      check(sync.includes(a.grand) && !sync.includes(a.child.pid) && !sync.some((k) => hosts.includes(k)), 'childrenSinceSync: the same real query, run synchronously (the exit hooks)', sync)
+    }
     check(T.treeKillSync(a.child.pid) === true, 'treeKillSync answers true')
     await Promise.race([a.exited, sleep(10_000)])
     check(await gone(T, a.child.pid), 'the child is gone')
@@ -162,6 +177,39 @@ async function treeChecks() {
   const ps = execs.at(-1)
   check(ps.file === 'ps' && json(ps.args) === json(['-o', 'lstart=', '-o', 'comm=', '-p', '77']) && ps.opts.env.LC_ALL === 'C', 'darwin: ps -o lstart= -o comm= -p <pid> with LC_ALL=C', ps)
   check((await T.procStartTime(77, { platform: 'darwin', execFile: fakeExec('Sat Oct 24 10:00:00 2026 /sbin/launchd\n') })) === null, 'darwin: another image is no match')
+
+  // childrenSince (B6 integration, second round): one CIM query of the direct children, kept within a window (B6
+  // review: the upper bound is the moment the dead shell was seen to exit plus the clock slack; a process that reused
+  // its pid, and whatever that one starts, is created after it and never listed).
+  execs.length = 0
+  const since = Date.UTC(2026, 9, 24, 13, 0, 0, 500)
+  const until = Date.UTC(2026, 9, 24, 13, 0, 2, 250)
+  const cim = '5001|2026-10-24T13:00:00.5000000Z\r\n5002|2026-10-24T13:00:00.4990000Z\r\n4242|2026-10-24T13:00:01Z\r\n5003|2026-10-24T13:00:02.25Z\r\n5005|2026-10-24T13:00:02.2510000Z\r\n5001|2026-10-24T13:00:03Z\r\n5006|2026-10-24T13:00:09Z\r\ngarbage\r\n0|2026-10-24T13:00:03Z\r\n5004|yesterday\r\n'
+  const kids = await T.childrenSince(4242, since, until, { platform: 'win32', execFile: fakeExec(cim) })
+  same(kids, [5001, 5003], 'childrenSince: created from the start to the end of the window (both included), never after it (a reused pid: 5005, 5006), never the parent itself, once each, garbled lines skipped')
+  check(/^[A-Za-z]:\\.*\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/i.test(execs[0].file) && json(execs[0].args.slice(0, 3)) === json(['-NoProfile', '-NonInteractive', '-Command']) && execs[0].args[3].includes("Get-CimInstance Win32_Process -Filter 'ParentProcessId=4242'") && execs[0].args[3].includes("$_.Name -ne 'conhost.exe'") && !execs[0].args[3].includes('"') && execs[0].opts.timeout === 5000 && execs[0].opts.windowsHide === true, 'childrenSince: Get-CimInstance Win32_Process by ParentProcessId through powershell.exe, never conhost.exe, hidden, 5 s, no double quote', execs[0])
+  same(await T.childrenSince(4242, since, Infinity, { platform: 'win32', execFile: fakeExec(cim) }), [5001, 5003, 5005, 5006], 'childrenSince: with no upper bound every later one counts (the control of the bound)')
+  same(await T.childrenSince(4242, since, until, { platform: 'win32', execFile: fakeExec('', err('ETIMEDOUT')) }), [], 'childrenSince: a failed probe finds none')
+  check(T.CREATION_CLOCK_SLACK_MS >= 16 && T.CREATION_CLOCK_SLACK_MS <= 50, `the clock slack covers one Windows tick, not more (${T.CREATION_CLOCK_SLACK_MS} ms)`)
+  const before = execs.length
+  same([
+    await T.childrenSince(4242, since, until, { platform: 'linux', execFile: fakeExec('5001|2026-10-24T13:00:01Z') }), await T.childrenSince(0, since, until, { platform: 'win32', execFile: fakeExec('5001|2026-10-24T13:00:01Z') }),
+    await T.childrenSince(4242, NaN, until, { platform: 'win32', execFile: fakeExec('5001|2026-10-24T13:00:01Z') }), await T.childrenSince(4242, since, NaN, { platform: 'win32', execFile: fakeExec('5001|2026-10-24T13:00:01Z') }),
+    await T.childrenSince(4242, until, since, { platform: 'win32', execFile: fakeExec('5001|2026-10-24T13:00:01Z') }),
+  ], [[], [], [], [], []], 'childrenSince: nothing off Windows, for a bad pid, a bad time or an empty window')
+  check(execs.length === before, 'and no probe runs for them')
+  // childrenSinceSync (B6 review: killAll of the exit hooks during the drain): the same query and filter by spawnSync.
+  const syncCalls = []
+  const fakeSync = (status, stdout, error) => (file, args, opts) => { syncCalls.push({ file, args, opts }); return { status, stdout, error } }
+  same(T.childrenSinceSync(4242, since, until, { platform: 'win32', spawnSync: fakeSync(0, cim) }), [5001, 5003], 'childrenSinceSync: the same window and filter')
+  check(/powershell\.exe$/i.test(syncCalls[0].file) && syncCalls[0].args[3] === execs[0].args[3] && syncCalls[0].opts.timeout === 5000 && syncCalls[0].opts.windowsHide === true && syncCalls[0].opts.encoding === 'utf8', 'childrenSinceSync: the same script, hidden, 5 s', syncCalls[0])
+  same([
+    T.childrenSinceSync(4242, since, until, { platform: 'win32', spawnSync: fakeSync(1, cim) }), T.childrenSinceSync(4242, since, until, { platform: 'win32', spawnSync: fakeSync(null, '', err('ETIMEDOUT')) }),
+    T.childrenSinceSync(4242, since, until, { platform: 'win32', spawnSync: () => { throw err('EPERM') } }),
+  ], [[], [], []], 'childrenSinceSync: a probe that fails, times out or throws finds none')
+  const nSync = syncCalls.length
+  same([T.childrenSinceSync(4242, since, until, { platform: 'darwin', spawnSync: fakeSync(0, cim) }), T.childrenSinceSync(4242, until, since, { platform: 'win32', spawnSync: fakeSync(0, cim) })], [[], []], 'childrenSinceSync: nothing off Windows or for an empty window')
+  check(syncCalls.length === nSync, 'and no probe runs for them')
 }
 
 // --- agentCli --------------------------------------------------------------------------------
@@ -610,7 +658,7 @@ async function main() {
   argvChecks()
   toolsChecks()
   blockChecks()
-  console.log(`PASS: ${checks} tree-kill checks (real grandchild tree kill, procStartTime, taskkill and kill fakes, agentCli, spawnTarget, teamArgv snapshots, grants, teamTools, guide, channel text, parseTeamBlock)`)
+  console.log(`PASS: ${checks} tree-kill checks (real grandchild tree kill, procStartTime, childrenSince, taskkill and kill fakes, agentCli, spawnTarget, teamArgv snapshots, grants, teamTools, guide, channel text, parseTeamBlock)`)
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1 })

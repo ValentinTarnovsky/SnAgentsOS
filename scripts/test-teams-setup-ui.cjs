@@ -86,7 +86,8 @@ const req=async(r)=>{calls.push(JSON.parse(JSON.stringify(r)));await new Promise
    if(r.dir==='C:/adopt')return {ok:true,probe:probeOf('C:/adopt',{existing:{sha256:SHA_A,files:asPreview(repoFiles),issues:[],diff:adoptDiff}})};
    if(r.dir==='C:/bad')return {ok:true,probe:probeOf('C:/bad',{existing:{sha256:SHA_E,files:asPreview(repoFiles),issues:[{file:'roles/dev.md',line:4,key:'model',code:'bad_model'}],diff:adoptDiff}})};
    if(r.dir==='C:/warn')return {ok:true,probe:probeOf('C:/warn',{existing:{sha256:SHA_D,files:asPreview(repoFiles),issues:WARNS,diff:adoptDiff}})};
-   if(r.dir==='C:/fresh')return {ok:true,probe:probeOf('C:/fresh',{branch:null,branches:[]})};
+   // A repo whose root suggests no command (main sends no suggestedVerify): no chip.
+   if(r.dir==='C:/fresh')return {ok:true,probe:probeOf('C:/fresh',{branch:null,branches:[],suggestedVerify:undefined})};
    return {ok:true,probe:probeOf(r.dir)};
   case 'setupPreview':{previews++;const files=renderTeamFiles(r.draft);const p=parseDefinition(files);
    return {ok:true,preview:{files:asPreview(files),hash:'h'+previews,issues:p.ok?[]:p.errors,warnings:warningsOf(r.draft)}}}
@@ -223,7 +224,7 @@ app.whenReady().then(async()=>{
  await js("smoke.setVal('[data-setup-field=\\"goal\\"]','x'.repeat(8193))");await frames();
  ok(await js("smoke.exists('[data-setup-goal-error]')")&&await js("smoke.disabled('[data-setup-next]')")===true,'a goal over 8 KB blocks the preview');
  await js("smoke.setVal('[data-setup-field=\\"goal\\"]','Compilación más rápida')");await frames();
- ok(await js("smoke.attr('[data-setup-verify-suggest]','data-setup-verify-suggest')")==='npm test','the verify suggestion chip shows the detected command');
+ ok(await js("smoke.attr('[data-setup-verify-suggest]','data-setup-verify-suggest')")==='npm test'&&(await js("smoke.text('[data-setup-verify-suggest]')"))==='Usar npm test'&&await js("smoke.value('[data-setup-field=\\"verify\\"]')")==='','the verify suggestion chip shows the command main detected (SetupProbe.suggestedVerify), the field stays empty until it is picked');
  await js("smoke.click('[data-setup-verify-suggest]')");await frames();
  ok(await js("smoke.value('[data-setup-field=\\"verify\\"]')")==='npm test'&&!(await js("smoke.exists('[data-setup-verify-suggest]')")),'the chip fills the verify command and hides');
  await js("smoke.click('[data-setup-parallel=\\"3\\"]')");await frames();
@@ -273,6 +274,7 @@ app.whenReady().then(async()=>{
  await js("smoke.setup('C:/fresh')");
  await until("smoke.attr('[data-team-setup]','data-setup-step')==='edit'",'edit step (fresh)');
  ok(await js("document.querySelector('[data-setup-field=\\"baseBranch\\"]').tagName")==='INPUT','with no branches the base branch is a text field');
+ ok(!(await js("smoke.exists('[data-setup-verify-suggest]')")),'no suggestion from main: no verify chip');
  await js("smoke.setVal('[data-setup-field=\\"baseBranch\\"]','bad branch')");await frames();
  ok(await js("smoke.exists('[data-setup-branch-error]')")&&await js("smoke.disabled('[data-setup-next]')")===true,'a base branch git would refuse blocks the preview');
  await js("smoke.setVal('[data-setup-field=\\"baseBranch\\"]','trunk')");await frames();

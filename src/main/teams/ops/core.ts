@@ -99,6 +99,9 @@ export const coreOps: Pick<OpTable, 'list' | 'get' | 'setupProbe' | 'setupPrevie
     const defaults = defaultDraft(lang)
     if (branch) defaults.baseBranch = branch
     const probe: SetupProbe = { repoRoot: root, repoName: basename(root), branch, branches: await localBranches(svc.git, root), defaults }
+    // B6 integration: the setup dialog's chip (the same detection as the Integrar preview; nothing is run).
+    const suggested = (await svc.verifySuggestions(root))[0]
+    if (suggested) probe.suggestedVerify = suggested.command
     const teamId = svc.idOf(root)
     if (svc.registry.get(teamId)) probe.registered = teamId
     const loaded = await svc.loader.load(root)

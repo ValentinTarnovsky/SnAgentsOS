@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { Check, CheckCheck, GitBranch, MessageSquareWarning, X } from 'lucide-react'
+import { Check, MessageSquareWarning, X } from 'lucide-react'
 import { DECIDE_NOTE_MAX } from '@shared/teams'
 import type { ApprovalView, TeamView } from '@shared/team-protocol'
 import type { TeamDefinitionDiff } from '@shared/teamDiff'
@@ -7,12 +7,10 @@ import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { toast } from '@/lib/toast'
 import { busyKey, decide, decideFailText, useNeedsStore } from '@/lib/teams/needs'
-import { loadTask, moveTask, summaryFromDetail, summaryOf } from '@/lib/teams/board'
 import { visibleName } from '@/lib/teams/issues'
 import { ChatMarkdown } from '@/components/chat/Markdown'
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { SMALL_BTN, SMALL_BTN_QUIET, SMALL_BTN_TEXT } from './RunHeader'
-import { CHIP, CHIP_NEUTRAL, taskFailText } from './TaskCard'
+import { CHIP, CHIP_NEUTRAL } from './TaskCard'
 import { BODY_BAD_RE, useLinkConfirm } from './TaskComments'
 import { TeamDiffView } from './TeamDiffView'
 
@@ -214,52 +212,15 @@ function ApprovalError({ error }: { error?: string }) {
 }
 
 /**
- * "Marcar hecha" of a task whose branch waits to be integrated (B5; B6 adds
- * Integrar): the board's move to Hecho, after the board's own confirm (the
- * branch and its worktree stay as they are). A manual done never integrates.
- */
-function MarkDone({ teamId, taskId }: { teamId: string; taskId: string }) {
-  const t = useT()
-  const [ask, setAsk] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const run = async (): Promise<void> => {
-    setBusy(true)
-    const task = summaryOf(teamId, taskId) ?? (await loadTask(teamId, taskId).then((d) => (d ? summaryFromDetail(d, 0) : undefined)))
-    const fail = task ? await moveTask(teamId, task, 'done') : { ok: false as const, error: 'not_found' as const }
-    setBusy(false)
-    if (fail) toast.error(taskFailText(fail, t))
-  }
-  return (
-    <>
-      <button type="button" data-need-mark-done={taskId} disabled={busy} onClick={() => setAsk(true)} className={cn(SMALL_BTN, SMALL_BTN_TEXT)}>
-        <CheckCheck size={13} aria-hidden />
-        {t('teams.approval.markDone')}
-      </button>
-      <ConfirmDialog
-        open={ask}
-        title={t('teams.drop.unintegratedTitle')}
-        message={t('teams.drop.unintegratedMsg')}
-        confirmLabel={t('teams.drop.unintegratedYes')}
-        cancelLabel={t('common.cancel')}
-        onConfirm={() => {
-          setAsk(false)
-          void run()
-        }}
-        onCancel={() => setAsk(false)}
-      />
-    </>
-  )
-}
-
-/**
  * The body of an approval in Te necesita (app 2.7.0, E10 B5), by kind: a plan
  * (its Markdown, Aprobar / Pedir cambios), a final OK (the agent's summary
  * and what changed: the view's `stat`, the diff stat main last computed for
  * the task, absent when none was; Aprobar / Pedir cambios), a hire (the role file as a diff
  * through TeamDiffView, so every hidden character shows as `<U+XXXX>`, and its
- * risks; Aprobar / Rechazar), a permission (the exact rule granted and the
- * commands that were denied, the view's `denied`, all spelled out; Aprobar / Rechazar) and a branch
- * ready to integrate (Marcar hecha). Repo and agent text is never HTML.
+ * risks; Aprobar / Rechazar) and a permission (the exact rule granted and the
+ * commands that were denied, the view's `denied`, all spelled out; Aprobar / Rechazar).
+ * A branch ready to integrate is never decided: NeedRow shows IntegrateNeedBody
+ * for it (B6, Integrar...). Repo and agent text is never HTML.
  */
 export function ApprovalBody({ teamId, approval, view, fromQa }: { teamId: string; approval: ApprovalView; view?: TeamView; fromQa?: boolean }) {
   const t = useT()
@@ -368,25 +329,7 @@ export function ApprovalBody({ teamId, approval, view, fromQa }: { teamId: strin
         </div>
       )
     }
-    case 'integrate':
-      return (
-        <div data-approval-body="integrate" className="flex min-w-0 flex-col gap-2">
-          <p className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-text-primary">
-            <GitBranch size={13} className="shrink-0 text-text-secondary" aria-hidden />
-            <span className="min-w-0 break-words">{t('teams.approval.integrateHint', { branch: visibleName(p.branch), base: visibleName(p.base) })}</span>
-            {p.ahead !== undefined && p.ahead > 0 && <span className={cn(CHIP, CHIP_NEUTRAL, 'tabular-nums')}>{t('teams.approval.ahead', { count: p.ahead })}</span>}
-          </p>
-          {p.lastError && (
-            <p data-approval-error="integrate" className="text-[11px] text-state-action">
-              {t('teams.approval.integrateFailed')}
-            </p>
-          )}
-          {approval.taskId && (
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <MarkDone teamId={teamId} taskId={approval.taskId} />
-            </div>
-          )}
-        </div>
-      )
   }
+  // An integrate approval is landed by Integrar alone (IntegrateNeedBody); NeedRow never brings one here.
+  return null
 }

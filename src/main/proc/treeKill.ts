@@ -96,12 +96,20 @@ function hit(at: number, rawImage: string): { at: number; image: string } | null
   return Number.isFinite(at) && at > 0 && RUN_IMAGES.has(image) ? { at, image } : null
 }
 
+/** A UTC round-trip date (`2026-10-24T13:00:00.1234567Z`, the fraction optional) as epoch ms, NaN when it is not one. */
+function utcRoundTrip(s: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/.exec(s.trim())
+  if (!m) return NaN
+  const ms = m[7] ? Number(m[7].slice(0, 3).padEnd(3, '0')) : 0
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]), ms)
+}
+
 /** `2026-10-24T13:00:00.1234567Z|node` (a UTC round-trip date, then the process name). */
 function parseWindows(out: string): { at: number; image: string } | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z\|(.+)$/.exec(out.trim())
-  if (!m) return null
-  const ms = m[7] ? Number(m[7].slice(0, 3).padEnd(3, '0')) : 0
-  return hit(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]), ms), m[8])
+  const line = out.trim()
+  const bar = line.indexOf('|')
+  if (bar < 0) return null
+  return hit(utcRoundTrip(line.slice(0, bar)), line.slice(bar + 1))
 }
 
 /** `Sat Oct 24 10:00:00 2026     /usr/local/bin/node` (ps lstart in the C locale, local time, then comm). */
@@ -148,4 +156,66 @@ export async function procStartTime(pid: number, deps: TreeKillDeps = {}): Promi
   if (platform === 'linux') return linuxStart(pid, deps)
   const out = await probe(deps, 'ps', ['-o', 'lstart=', '-o', 'comm=', '-p', String(pid)], { ...process.env, LC_ALL: 'C' })
   return out === null ? null : parsePs(out)
+}
+
+/**
+ * What a wall-clock time (Date.now()) and a process creation time Windows recorded may differ by (B6 review): the
+ * kernel stamps a creation from its clock tick (15.6 ms by default). A caller that bounds childrenSince by the
+ * moment it saw a process exit adds this much.
+ */
+export const CREATION_CLOCK_SLACK_MS = 20
+
+const childrenScript = (parentPid: number): string =>
+  `Get-CimInstance Win32_Process -Filter 'ParentProcessId=${parentPid}' | ForEach-Object { if ($_.CreationDate -and $_.Name -ne 'conhost.exe') { '' + $_.ProcessId + '|' + $_.CreationDate.ToUniversalTime().ToString('o') } }`
+
+function childrenWindowOk(parentPid: number, sinceMs: number, untilMs: number, deps: TreeKillDeps): boolean {
+  return validPid(parentPid) && Number.isFinite(sinceMs) && !Number.isNaN(untilMs) && untilMs >= sinceMs && (deps.platform ?? process.platform) === 'win32'
+}
+
+/** `<ProcessId>|<creation round-trip>` lines: the pids created within [sinceMs, untilMs], once each, never the parent. */
+function parseChildren(out: string, parentPid: number, sinceMs: number, untilMs: number): number[] {
+  const pids: number[] = []
+  for (const line of out.split(/\r?\n/)) {
+    const bar = line.indexOf('|')
+    if (bar < 0) continue
+    const pid = Number(line.slice(0, bar).trim())
+    const at = utcRoundTrip(line.slice(bar + 1))
+    if (validPid(pid) && pid !== parentPid && Number.isFinite(at) && at >= sinceMs && at <= untilMs && !pids.includes(pid)) pids.push(pid)
+  }
+  return pids
+}
+
+/**
+ * Windows only (B6 integration, second round; the verify runner after its shell exited): the live processes whose
+ * parent is `parentPid` and that were created from `sinceMs` to `untilMs` (epoch ms, both included), in the order the
+ * probe lists them. Windows never reparents, so the direct children of a process that already exited still name it;
+ * the lower bound keeps out the children of an older process that had the same pid, and the upper bound (B6 review:
+ * the moment the shell was seen to exit plus CREATION_CLOCK_SLACK_MS) those of a newer one: once its handle is closed
+ * the pid may go to another process, and that one and whatever it starts are created after the exit. The console host
+ * Windows starts for a console process (`conhost.exe`) is never listed: the command did not start it, it closes once
+ * its last client is gone, and killing it stops none of them (a deeper process holding the pipes would read as
+ * stopped). One `powershell.exe -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter
+ * 'ParentProcessId=<pid>' | ..."` printing `<ProcessId>|<CreationDate.ToUniversalTime() round-trip>` per line (5 s,
+ * like procStartTime); [] when it fails, times out or runs anywhere else. A child of a child whose own parent already
+ * died is not found (its parent is gone).
+ */
+export async function childrenSince(parentPid: number, sinceMs: number, untilMs: number, deps: TreeKillDeps = {}): Promise<number[]> {
+  if (!childrenWindowOk(parentPid, sinceMs, untilMs, deps)) return []
+  const out = await probe(deps, system32('WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', childrenScript(parentPid)])
+  return out === null ? [] : parseChildren(out, parentPid, sinceMs, untilMs)
+}
+
+/**
+ * childrenSince run synchronously (B6 review: the exit hooks, shutdownSync and prepareInstall, cannot wait for the
+ * probe): the same query by spawnSync with the same 5 s cap; [] when it fails, times out or runs anywhere else.
+ */
+export function childrenSinceSync(parentPid: number, sinceMs: number, untilMs: number, deps: TreeKillDeps = {}): number[] {
+  if (!childrenWindowOk(parentPid, sinceMs, untilMs, deps)) return []
+  try {
+    const res = (deps.spawnSync ?? nodeSpawnSync)(system32('WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', childrenScript(parentPid)], { windowsHide: true, timeout: PROBE_TIMEOUT_MS, encoding: 'utf8' })
+    if (res.status !== 0 || res.error) return []
+    return parseChildren(String(res.stdout ?? ''), parentPid, sinceMs, untilMs)
+  } catch {
+    return []
+  }
 }

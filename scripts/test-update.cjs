@@ -37,8 +37,8 @@ function rel(v, { sidecar = true, setup = true, draft = false, prerelease = fals
   return { tag_name: `v${v}`, body, html_url: `https://github.com/${REPO}/releases/tag/v${v}`, published_at: '2026-10-01T00:00:00Z', draft, prerelease, assets: names.map(n => asset(v, n)) }
 }
 
-/** updater.ts over a fake electron.net: routes(url) -> { status, body } | undefined (404). */
-function loadUpdater({ routes, env = {}, isPackaged = false, version = '2.0.0' }) {
+/** updater.ts over a fake electron.net: routes(url) -> { status, body } | undefined (404); `modules` replaces node modules. */
+function loadUpdater({ routes, env = {}, isPackaged = false, version = '2.0.0', modules = {}, userData = null }) {
   const log = { requests: [], aborted: 0, errors: [] }
   const net = {
     request(opts) {
@@ -58,9 +58,9 @@ function loadUpdater({ routes, env = {}, isPackaged = false, version = '2.0.0' }
       return req
     },
   }
-  const electron = { app: { getVersion: () => version, isPackaged }, net, shell: {} }
+  const electron = { app: { getVersion: () => version, isPackaged, ...(userData ? { getPath: () => userData } : {}) }, net, shell: {} }
   const mod = load('src/main/updater.ts', {
-    require: id => id === 'electron' ? electron : require(id),
+    require: id => id === 'electron' ? electron : modules[id] ?? require(id),
     process: { ...process, platform: 'win32', arch: 'x64', env, argv: [process.execPath] },
     console: { ...console, error: (...a) => log.errors.push(a.join(' ')) },
   })
@@ -143,6 +143,53 @@ async function main() {
     const dots = loadUpdater({ env: { SNAOS_UPDATE_REPO: '../..' }, routes: url => url === listUrl ? { status: 200, body: list } : undefined })
     await dots.mod.checkForUpdate()
     check(dots.log.requests[0] === listUrl, 'a dot-only override segment is ignored')
+  }
+
+  // --- the setup waits for beforeApply (app 2.7.0, E10 B6: a Teams land finishes first) ---
+  {
+    const fs = require('node:fs')
+    const os = require('node:os')
+    const { PassThrough } = require('node:stream')
+    const bytes = Buffer.from('not a real setup, never run')
+    const sha = require('node:crypto').createHash('sha256').update(bytes).digest('hex')
+    const release = rel('2.3.0')
+    for (const a of release.assets) if (a.name.endsWith('-setup.exe')) a.size = bytes.length
+    const listUrl = `${api(REPO)}/releases?per_page=30`
+    const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-test-update-'))
+    const spawned = []
+    // The download (node https) and the setup start (child_process.spawn) are fakes: nothing runs, nothing leaves.
+    const https = { get: (url, opts, cb) => {
+      const req = new EventEmitter()
+      req.setTimeout = () => req
+      req.destroy = () => {}
+      setImmediate(() => { const res = new PassThrough(); res.statusCode = 200; res.headers = {}; cb(res); res.end(bytes) })
+      return req
+    } }
+    const child_process = { ...require('node:child_process'), spawn: (cmd, args) => { spawned.push({ cmd, args }); const c = new EventEmitter(); c.pid = 4242; c.unref = () => {}; return c } }
+    const up = loadUpdater({
+      routes: url => url === listUrl ? { status: 200, body: [release] } : url.endsWith('-setup.exe.sha256') ? { status: 200, body: `${sha}  setup.exe` } : undefined,
+      modules: { https, child_process }, userData,
+    })
+    let open
+    const gate = new Promise(r => { open = r })
+    const kinds = []
+    let settled = false
+    try {
+      const run = up.mod.downloadAndInstall(() => {}, { beforeApply: (kind) => { kinds.push(kind); return gate } }).then((r) => { settled = true; return r })
+      for (let i = 0; i < 200 && kinds.length === 0; i++) await flush()
+      for (let i = 0; i < 20; i++) await flush()
+      check(kinds.join() === 'win-installer' && spawned.length === 0 && !settled, 'the setup never starts while the promise beforeApply returned is pending')
+      open()
+      const res = await run
+      check(res.relaunching === true && spawned.length === 1 && spawned[0].cmd.endsWith('SnAgentsOS-2.3.0-setup.exe'), 'it starts once that promise settled')
+    } finally {
+      // Only the download folder updater.ts made in the temp dir.
+      for (const s of spawned) {
+        const dir = path.dirname(s.cmd)
+        if (path.isAbsolute(dir) && path.dirname(dir) === path.resolve(os.tmpdir()) && path.basename(dir).startsWith('snagentsos-update-')) fs.rmSync(dir, { recursive: true, force: true })
+      }
+      fs.rmSync(userData, { recursive: true, force: true })
+    }
   }
 
   // --- visibility table (E4-FR-13, 16, 18) ----------------------------------

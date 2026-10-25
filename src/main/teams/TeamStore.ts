@@ -143,7 +143,12 @@ const task = z.object({
   integrate: z.object({
     state: z.enum(['idle', 'running', 'failed']), attempt: int,
     step: z.enum(['preflight', 'temp', 'merge', 'verify', 'land', 'cleanup']).optional(),
-    error: str.optional(), files: z.array(str).optional(), tail: str.optional(), at: num,
+    error: str.optional(), files: z.array(str).optional(), tail: str.optional(),
+    // B6 review, second round: the verify runner's note and the land mode of a failed attempt. Only words for the
+    // dialog: a value this build does not know (a newer build's) drops the field, never the task.
+    verifyNote: z.enum(['leftStopped', 'leftLetGo', 'timeoutKill', 'spawnFailed']).optional().catch(undefined),
+    landing: z.enum(['ffOnly', 'updateRef']).optional().catch(undefined),
+    at: num,
   }).passthrough().optional(),
   integrated: z.object({ mergeSha: str, base: str, at: num, landed: z.enum(['ffOnly', 'updateRef', 'alreadyMerged']) }).optional(),
   triagedAt: num.optional(),

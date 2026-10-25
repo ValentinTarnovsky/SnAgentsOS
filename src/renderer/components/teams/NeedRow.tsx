@@ -14,6 +14,7 @@ import { clockTime } from '@/lib/statusSignals'
 import { SMALL_BTN, SMALL_BTN_QUIET, SMALL_BTN_TEXT } from './RunHeader'
 import { revealTeamFolder } from './TeamBanner'
 import { ApprovalBody } from './ApprovalBody'
+import { IntegrateNeedBody } from './IntegrateDialog'
 import { QuestionCard } from './QuestionCard'
 
 const ICON = {
@@ -109,7 +110,8 @@ function PausedBody({ teamId, needs }: { teamId: string; needs: TeamNeedsView })
  * shows exactly what the sidebar badge and the tab pill count
  * (`data-team-need` once per row). The head says what it is, for which task
  * (a click opens its drawer), who asked and since when; the body is the trust
- * state, the pause, the approval (ApprovalBody) or the card (QuestionCard).
+ * state, the pause, the approval (ApprovalBody; B6: a branch to integrate has
+ * Integrar..., IntegrateNeedBody) or the card (QuestionCard).
  */
 export function NeedRow({ teamId, row, needs, view, agents }: { teamId: string; row: TeamNeedRow; needs: TeamNeedsView; view: TeamView; agents: Readonly<Record<string, AgentView>> }) {
   const t = useT()
@@ -165,7 +167,12 @@ export function NeedRow({ teamId, row, needs, view, agents }: { teamId: string; 
       </div>
       {row.kind === 'trust' && <TrustBody teamId={teamId} view={view} needs={needs} />}
       {row.kind === 'paused' && <PausedBody teamId={teamId} needs={needs} />}
-      {approval && <ApprovalBody teamId={teamId} approval={approval} view={view} fromQa={from?.kind === 'qa'} />}
+      {approval &&
+        (approval.payload.kind === 'integrate' ? (
+          <IntegrateNeedBody teamId={teamId} approval={approval} />
+        ) : (
+          <ApprovalBody teamId={teamId} approval={approval} view={view} fromQa={from?.kind === 'qa'} />
+        ))}
       {card && <QuestionCard teamId={teamId} card={card} />}
     </li>
   )
