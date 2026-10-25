@@ -4,7 +4,9 @@
 // with a BOM or without one, U+FFFD refused with the hint) and teamCtl behind the real CtlServer and
 // CtlHandlers with a team caller {paneId: 'team:<runId>', ptyId: same, workspaceId: '', team}: every
 // method's params as the port gets them, the role and mode checks (a dev creates only with --parent =
-// its task), every row of the 5.1 error mapping table with its exit code, the 120 reads and 60 writes a
+// its task; a readonly Dev's exec run reports with done, never review, and a writing Dev's plan run has no
+// done), every row of the 5.1 error mapping table with its exit code (a loop also as data.loop and
+// data.loopMore), the 120 reads and 60 writes a
 // minute and forgetCaller at revoke, a revoked token (401 naming the run, exit 6), conflict concluded
 // after a terminal tool (the port is a fake here: B3 stubs the store's terminal tools), redaction, Teams
 // off answering disabled (never forbidden), each `cap` with its own hint (the board, a comment thread, the
@@ -12,7 +14,8 @@
 // step running the real cli.js (`snaos team show --json`) with the run env.
 // Last, the real TeamService behind teamCtl on a temp repo: a Lead run creates tasks with blockers
 // through snaos team, a user reprioritization survives its next update (user_owned), a loop of
-// blockers answers with every task of it (t-1 -> t-3 -> t-2 -> t-1), `team task get`
+// blockers answers with every task of it (t-1 -> t-3 -> t-2 -> t-1, also as a field, and TeamFail.loop on the
+// user's path), `team task get`
 // delivers only the queued comments its reply carries (newest 30), a write past TEAM_STATE_MAX_BYTES
 // answers "the team state is full", and Labs off answers disabled.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data, never a real agent.
@@ -74,7 +77,7 @@ function fakePort() {
     applyReply: null,
     noteReply: undefined,
     setRun(o = {}) {
-      const run = { id: RUN, agentId: o.agentId ?? o.roleKind ?? 'dev', roleId: o.roleKind ?? 'dev', roleKind: o.roleKind ?? 'dev', mode: o.mode ?? 'exec', state: o.state ?? 'running', ...(o.taskId === null ? {} : { taskId: o.taskId ?? 't-3' }), ...(o.concludedBy ? { concludedBy: o.concludedBy } : {}) }
+      const run = { id: RUN, agentId: o.agentId ?? o.roleKind ?? 'dev', roleId: o.roleKind ?? 'dev', roleKind: o.roleKind ?? 'dev', mode: o.mode ?? 'exec', state: o.state ?? 'running', ...(o.taskId === null ? {} : { taskId: o.taskId ?? 't-3' }), ...(o.concludedBy ? { concludedBy: o.concludedBy } : {}), ...(o.profile ? { profile: o.profile } : {}) }
       port.live = o.none ? null : { teamId: TEAM, run, agent: { id: run.agentId, roleKind: run.roleKind }, ...(run.taskId ? { task: { id: run.taskId, isolation: o.isolation ?? 'worktree' } } : {}), def: { def: {} } }
     },
     view: null,
@@ -381,6 +384,13 @@ async function serverChecks() {
     await roleCase(() => port.setRun({ roleKind: 'dev', mode: 'plan' }), ['team', 'review'], false, /works only in exec runs; this run is in plan mode/)
     await roleCase(() => port.setRun({ roleKind: 'dev', mode: 'plan' }), ['team', 'plan', 'paso 1'], true)
     await roleCase(() => port.setRun({ roleKind: 'dev', mode: 'exec', isolation: 'main' }), ['team', 'done', 'listo'], true)
+    // Decision 24 (B4 integration item 4): a Dev whose role is readonly runs its worktree task in the repo root and
+    // commits nothing, so its exec run reports with done and has nothing to review; a writing Dev's plan run is
+    // readonly only for its phase and still cannot call done.
+    const roDev = () => port.setRun({ roleKind: 'dev', mode: 'exec', isolation: 'worktree', profile: 'readonly' })
+    await roleCase(roDev, ['team', 'done', 'informe'], true)
+    await roleCase(roDev, ['team', 'review'], false, /read-only and commits nothing to review: report the task with snaos team done/)
+    await roleCase(() => port.setRun({ roleKind: 'dev', mode: 'plan', isolation: 'worktree', profile: 'readonly' }), ['team', 'done'], false, /not allowed in this run \(plan mode\)/)
     await roleCase(() => port.setRun({ roleKind: 'custom', mode: 'exec' }), ['team', 'task', 'create', '--title', 'Sub', '--parent', 't-3'], true)
     await roleCase(() => port.setRun({ roleKind: 'custom', mode: 'exec' }), ['team', 'done'], true)
     await roleCase(() => port.setRun({ roleKind: 'research', mode: 'plan' }), ['team', 'done', 'informe'], true)
@@ -461,7 +471,9 @@ async function mappingChecks() {
       // [store error and extras, argv, role, ctl code, exit, message]
       [{ error: 'bad_request', detail: 'assign names the lead' }, ['team', 'task', 'create', '--title', 'x', '--assign', 'lead'], 'lead', 'bad_request', 2, /assign names the lead/],
       [{ error: 'bad_request' }, ['team', 'comment', 't-3', 'x'], 'dev', 'bad_request', 2, /team comment: the team refused these params/],
-      [{ error: 'cycle', current: ['t-5', 't-1', 't-5'] }, ['team', 'task', 'update', 't-5', '--blocked-by', 't-1'], 'lead', 'bad_request', 2, /loop of blockers: t-5 -> t-1 -> t-5/],
+      [{ error: 'cycle', current: { loop: ['t-5', 't-1', 't-5'], more: 0 } }, ['team', 'task', 'update', 't-5', '--blocked-by', 't-1'], 'lead', 'bad_request', 2, /loop of blockers: t-5 -> t-1 -> t-5$/],
+      [{ error: 'cycle', current: { loop: ['t-5', 't-1'], more: 7 } }, ['team', 'task', 'update', 't-5', '--blocked-by', 't-1'], 'lead', 'bad_request', 2, /loop of blockers: t-5 -> t-1 -> \.\.\. \(\+7 more\)$/],
+      [{ error: 'cycle', loop: ['t-6', 't-2', 't-6'] }, ['team', 'task', 'update', 't-6', '--blocked-by', 't-2'], 'lead', 'bad_request', 2, /loop of blockers: t-6 -> t-2 -> t-6$/],
       [{ error: 'cycle' }, ['team', 'task', 'update', 't-5', '--blocked-by', 't-1'], 'lead', 'bad_request', 2, /--blocked-by t-1 makes a loop of blockers/],
       [{ error: 'too_big' }, ['team', 'comment', 't-3', 'x'], 'dev', 'bad_request', 2, /too long/],
       [{ error: 'not_found' }, ['team', 'comment', 't-99', 'x'], 'dev', 'not_found', 3, /^t-99 not found$/],
@@ -499,6 +511,18 @@ async function mappingChecks() {
       check(r.code === exit && r.json?.ok === false && r.json.error.code === code && re.test(r.json.error.message) && r.json.data.error === f.error, `5.1: ${f.error}${f.reason ? ` ${f.reason}` : ''} -> ${code} (exit ${exit})`, r.json)
       check(exit === M.CTL_EXIT[code], `5.1: the exit of ${code} is CTL_EXIT's`)
     }
+    // Item 6 of the B4 integration: the loop also travels as a field (data.loop, at most 20 ids, and data.loopMore).
+    port.setRun({ roleKind: 'lead', mode: 'lead', taskId: null })
+    for (const [current, loop, more] of [[{ loop: ['t-5', 't-1', 't-5'], more: 0 }, ['t-5', 't-1', 't-5'], undefined], [{ loop: ['t-5', 't-1'], more: 7 }, ['t-5', 't-1'], 7]]) {
+      w.fresh()
+      port.applyReply = { ok: false, error: 'cycle', current }
+      const c = await run(['team', 'task', 'update', 't-5', '--blocked-by', 't-1', '--json'])
+      check(JSON.stringify(c.json.data.loop) === JSON.stringify(loop) && c.json.data.loopMore === more && c.json.data.error === 'cycle', `cycle: data.loop ${loop.join(',')} and loopMore ${more}`, c.json)
+    }
+    w.fresh()
+    port.applyReply = { ok: false, error: 'cycle', current: ['t-5', 't-1', 't-5'] }
+    const shapeless = await run(['team', 'task', 'update', 't-5', '--blocked-by', 't-1', '--json'])
+    check(shapeless.json.data.loop === undefined && /--blocked-by t-1 makes a loop of blockers/.test(shapeless.json.error.message), 'a loop in no known shape: the plain cycle words, no loop field', shapeless.json)
     const owned = rows.find((r) => r[0].error === 'user_owned')
     port.setRun({ roleKind: 'lead', mode: 'lead', taskId: null })
     port.applyReply = { ok: false, ...owned[0] }
@@ -747,6 +771,11 @@ async function serviceChecks() {
     check(lead2.cli[2].code === 0 && lead2.cli[2].res.data.id === 't-3', 't-3 created, blocked by t-2', lead2.cli[2])
     const loop = lead2.cli[3]
     check(loop.code === 2 && loop.res.error.code === 'bad_request' && loop.res.data.error === 'cycle' && loop.res.error.message === '--blocked-by makes a loop of blockers: t-1 -> t-3 -> t-2 -> t-1', 'a loop of blockers through TeamService names every task of it (bad_request, exit 2)', loop)
+    check(JSON.stringify(loop.res.data.loop) === '["t-1","t-3","t-2","t-1"]' && loop.res.data.loopMore === undefined, 'and carries it as a field (data.loop, no loopMore for a short loop)', loop)
+    // The user's path (teams:req) answers the same loop as TeamFail.loop.
+    const t1rev = rt().tasks.find((t) => t.id === 't-1').rev
+    const userLoop = await svc.request({ op: 'updateTask', teamId, taskId: 't-1', baseRev: t1rev, patch: { blockedBy: ['t-3'] } }, 'desktop')
+    check(!userLoop.ok && userLoop.error === 'cycle' && JSON.stringify(userLoop.loop) === '["t-1","t-3","t-2","t-1"]' && userLoop.loopMore === undefined, 'the user path: the same loop as TeamFail.loop', userLoop)
     check(JSON.stringify(rt().tasks.find((t) => t.id === 't-1').blockedBy) === '[]', 'and t-1 keeps its blockers')
 
     // team task get delivers only the queued comments its reply carries (newest 30, 4.5).

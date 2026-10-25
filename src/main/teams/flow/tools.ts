@@ -55,7 +55,7 @@ export function applyTool(rt: TeamRuntime, actor: Actor & { kind: 'agent' }, cal
   const run = rt.activeRuns.find((r) => r.id === actor.runId)
   if (!run || run.agentId !== actor.agentId || run.state === 'queued') return fail('forbidden')
   const task: TeamTask | undefined = run.taskId ? rt.tasks.find((t) => t.id === run.taskId) : undefined
-  if (!allowedFor(run.roleKind, spec, { mode: run.mode, isolation: task?.isolation, hasTask: !!task })) return fail('forbidden')
+  if (!allowedFor(run.roleKind, spec, { mode: run.mode, isolation: task?.isolation, hasTask: !!task, profile: run.profile })) return fail('forbidden')
   if (run.concludedBy) return fail('conflict', { reason: 'concluded' })
   if (run.state === 'stopping' && !call.viaBlock) return fail('stopping')
   const who: Actor = { kind: 'agent', agentId: run.agentId, runId: run.id, roleKind: run.roleKind }

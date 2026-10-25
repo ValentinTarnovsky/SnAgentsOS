@@ -986,6 +986,8 @@ async function bootstrap(): Promise<void> {
     // Synthetic `team:<runId>` statuses reach only AwakeService (and AccountService through statuses), never StatusManager.
     awake: (evt) => awakeService?.onPaneStatus(evt),
     sendRun: (evt) => sendToRenderer(CH.TEAMS_RUN_APPEND, evt),
+    // B4: task worktrees through the console worktree service, tagged with their team owner (decision 63).
+    worktrees,
   })
   teamService = teams
   statusManager.addListener((evt) => teams.onPaneStatus(evt))

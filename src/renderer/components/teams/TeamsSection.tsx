@@ -1,5 +1,5 @@
 import { useState, type MouseEvent } from 'react'
-import { Database, FolderOpen, MoreVertical, PanelTop, Pause, Play, Plus, ShieldAlert, ShieldCheck, Trash2, UserPlus, Users } from 'lucide-react'
+import { Database, FolderOpen, MoreVertical, PanelTop, Pause, Play, Plus, ShieldAlert, ShieldCheck, Trash2, UserPlus, Users, Zap, ZapOff } from 'lucide-react'
 import type { TeamListItem } from '@shared/team-protocol'
 import { labOn } from '@shared/labs'
 import { useAppStore } from '@/lib/store'
@@ -17,6 +17,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { StatusGlyph } from '@/components/ui/StatusDot'
 import { AttentionBadge, FOCUS_RING } from '@/components/sidebar/AttentionBadge'
 import { revealTeamFolder } from './TeamBanner'
+import { switchAutoDispatch } from './DispatchToggle'
 
 /** The row glyph of a definition that is not trusted as it is on disk. */
 const TRUST_ROW_KEY: Record<Exclude<TeamListItem['trust'], 'trusted'>, MessageKey> = {
@@ -58,9 +59,13 @@ export function TeamsSection() {
     })
   }
   const menuItems = (teamId: string): ContextMenuItem[] => {
-    const paused = !!list.find((team) => team.id === teamId)?.paused
+    const row = list.find((team) => team.id === teamId)
+    const paused = !!row?.paused
+    const auto = !!row?.autoDispatch
     return [
       { label: t('teams.menu.open'), icon: PanelTop, onClick: () => openTeams(teamId) },
+      // B4: Despacho automático, as the header's switch (the toast says what it means now).
+      { label: t(auto ? 'teams.dispatch.turnOff' : 'teams.dispatch.turnOn'), icon: auto ? ZapOff : Zap, onClick: () => void switchAutoDispatch(teamId, !auto, t) },
       // B2: Pausar / Reanudar the whole team, as the header's button.
       { label: t(paused ? 'teams.agent.teamResume' : 'teams.agent.teamPause'), icon: paused ? Play : Pause, onClick: () => togglePause(teamId, paused) },
       { label: t('teams.menu.review'), icon: ShieldCheck, onClick: () => openTeamTrust(teamId) },

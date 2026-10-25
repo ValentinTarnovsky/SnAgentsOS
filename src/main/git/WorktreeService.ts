@@ -275,11 +275,17 @@ export class WorktreeService {
     }
   }
 
-  create(req: unknown): Promise<WorktreeAddRes> {
-    return this.serial(() => this.createNow(req))
+  /**
+   * `o.owner` (app 2.7.0, decision 63) tags the manifest entry with a team task (`team:<teamId>:<gen>:<taskId>`).
+   * Only main's TaskWorktrees passes it: the IPC handlers call create(req) alone, so the renderer can neither set
+   * nor spoof an owner.
+   */
+  create(req: unknown, o?: { owner?: string }): Promise<WorktreeAddRes> {
+    const owner = typeof o?.owner === 'string' && o.owner ? o.owner : undefined
+    return this.serial(() => this.createNow(req, owner))
   }
 
-  private async createNow(raw: unknown): Promise<WorktreeAddRes> {
+  private async createNow(raw: unknown, owner?: string): Promise<WorktreeAddRes> {
     const req = (raw && typeof raw === 'object' ? raw : {}) as Partial<WorktreeAddReq>
     if (!isValidSlug(req.slug)) return { ok: false, error: 'bad_slug' }
     if (typeof req.repoCwd !== 'string' || !isAbsolute(req.repoCwd)) return { ok: false, error: 'not_repo' }
@@ -355,6 +361,7 @@ export class WorktreeService {
         linkedPaths: createdJunctions,
         root,
         createdAt: (this.deps.now ?? Date.now)(),
+        ...(owner ? { owner } : {}),
       })
       return { ok: true, worktree: { repoRoot, path, branch, base: baseSha } }
     } catch (e) {
@@ -708,17 +715,24 @@ export class WorktreeService {
     return parseWorktreeList(await this.git(['worktree', 'list', '--porcelain'], repoRoot))
   }
 
-  remove(req: unknown): Promise<WorktreeRemoveRes> {
-    return this.serial(() => this.removeNow(req))
+  /**
+   * A team task worktree (an entry with an owner, decision 63) is removed only by a call that names that exact
+   * owner (TaskWorktrees, B6); any other call, the IPC one included (it never passes `o`), answers 'busy' with
+   * detail 'team' and touches nothing.
+   */
+  remove(req: unknown, o?: { owner?: string }): Promise<WorktreeRemoveRes> {
+    const owner = typeof o?.owner === 'string' && o.owner ? o.owner : undefined
+    return this.serial(() => this.removeNow(req, owner))
   }
 
-  private async removeNow(raw: unknown): Promise<WorktreeRemoveRes> {
+  private async removeNow(raw: unknown, owner?: string): Promise<WorktreeRemoveRes> {
     const req = (raw && typeof raw === 'object' ? raw : {}) as Partial<WorktreeRemoveReq>
     const notManaged = (detail: string): Fail<'not_managed'> => ({ ok: false, error: 'not_managed', detail })
     if (typeof req.path !== 'string' || !isAbsolute(req.path)) return notManaged('path')
     const path = this.canon(req.path)
     const entry = this.deps.manifest.find(path)
     if (!entry) return notManaged('manifest')
+    if (entry.owner !== undefined && entry.owner !== owner) return { ok: false, error: 'busy', detail: 'team' }
     const root = this.rootOf(path, this.rootsFor(entry))
     if (!root) return notManaged('root')
     if (!WORKTREE_BRANCH_RE.test(entry.branch)) return notManaged('branch')
@@ -825,6 +839,22 @@ export class WorktreeService {
     return typeof path === 'string' && isAbsolute(path) && this.deps.manifest.find(path) != null
   }
 
+  /** app 2.7.0 (decision 63): the worktree a team task owns, from the manifest (TaskWorktrees adopts it after a crash). */
+  ownedBy(owner: string): { path: string; branch: string; repoRoot: string; baseSha: string; createdAt: number } | null {
+    const e = typeof owner === 'string' ? this.deps.manifest.ownedBy(owner) : null
+    return e && WORKTREE_BRANCH_RE.test(e.branch) ? { path: e.path, branch: e.branch, repoRoot: e.repoRoot, baseSha: e.baseSha, createdAt: e.createdAt } : null
+  }
+
+  /** A team task's stale tree (decision 63): the entry of `path` loses its owner when it is exactly `owner` (no two entries of one owner). */
+  disownAt(path: string, owner: string): boolean {
+    return typeof path === 'string' && isAbsolute(path) && typeof owner === 'string' && owner.startsWith('team:') ? this.deps.manifest.disownAt(path, owner) : false
+  }
+
+  /** A removed team (decision 63): every entry whose owner starts with `prefix` loses it and reads as an ordinary orphan. */
+  disown(prefix: string): number {
+    return typeof prefix === 'string' && prefix.startsWith('team:') ? this.deps.manifest.disown(prefix) : 0
+  }
+
   /** The main checkout of a worktree the manifest knows (any spelling of its folder), else null. The chip's "main -N" reads its HEAD. */
   repoOf(path: unknown): string | null {
     if (typeof path !== 'string' || !isAbsolute(path)) return null
@@ -882,6 +912,7 @@ export class WorktreeService {
         exists,
         repoRoot: e.repoRoot,
         ...(e.baseSha ? { base: e.baseSha } : {}),
+        ...(e.owner ? { teamOwned: true as const } : {}),
       })
     }
     return { entries: [...out.values()] }
@@ -905,15 +936,22 @@ export class WorktreeService {
     } catch {
       baseSha = ''
     }
-    this.deps.manifest.put({
-      path,
-      branch,
-      repoRoot,
-      baseRef: 'HEAD',
-      baseSha: SHA_RE.test(baseSha) ? baseSha : '',
-      linkedPaths: [],
-      root,
-      createdAt: (this.deps.now ?? Date.now)(),
+    // The write goes through the create/remove queue and only while the manifest still lacks the folder: a create
+    // that finished during the scan (a team task's tree with its owner, decision 63) keeps its entry, which put
+    // would replace (owner, junctions and base gone). A create that failed meanwhile rolled its folder back: nothing
+    // is adopted then (the folder is looked at first, so no await sits between find and put).
+    await this.serial(async () => {
+      if (!(await this.exists(path)) || this.deps.manifest.find(path)) return
+      this.deps.manifest.put({
+        path,
+        branch,
+        repoRoot,
+        baseRef: 'HEAD',
+        baseSha: SHA_RE.test(baseSha) ? baseSha : '',
+        linkedPaths: [],
+        root,
+        createdAt: (this.deps.now ?? Date.now)(),
+      })
     })
   }
 

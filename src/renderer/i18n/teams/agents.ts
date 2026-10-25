@@ -99,6 +99,8 @@ export const agentsEn = {
   'teams.run.fail.unsupported': 'This app version cannot do that yet.',
   'teams.run.fail.busy': 'The team is busy: try again in a moment.',
   'teams.run.fail.disabled': 'Teams is off.',
+  'teams.run.fail.conflict': 'That task has no run to start now: it is blocked, closed or waiting for you.',
+  'teams.run.fail.bad_request': '{agent} does not run this task in the phase it is in.',
   'teams.run.fail.other': 'The run could not start.',
 
   // Modes
@@ -145,6 +147,7 @@ export const agentsEn = {
   'teams.defer.sessionBusy': 'its session is open in a console',
   'teams.defer.takenOver': 'the agent is in a console',
   'teams.defer.treeBusy': 'another run is using the same folder',
+  'teams.defer.consoleBusy': 'a console of yours is using that folder',
   'teams.defer.running': 'it is already running',
   'teams.defer.stopping': 'it is still stopping',
 
@@ -254,6 +257,8 @@ export const agentsEs: Record<keyof typeof agentsEn, string> = {
   'teams.run.fail.unsupported': 'Esta versión de la app todavía no hace eso.',
   'teams.run.fail.busy': 'El equipo está ocupado: probá de nuevo en un momento.',
   'teams.run.fail.disabled': 'Equipos está apagado.',
+  'teams.run.fail.conflict': 'Esa tarea no tiene una corrida para arrancar ahora: está bloqueada, cerrada o esperándote.',
+  'teams.run.fail.bad_request': '{agent} no corre esta tarea en la fase en la que está.',
   'teams.run.fail.other': 'No se pudo arrancar la corrida.',
 
   // Modes
@@ -300,6 +305,7 @@ export const agentsEs: Record<keyof typeof agentsEn, string> = {
   'teams.defer.sessionBusy': 'su sesión está abierta en una consola',
   'teams.defer.takenOver': 'el agente está en una consola',
   'teams.defer.treeBusy': 'otra corrida está usando la misma carpeta',
+  'teams.defer.consoleBusy': 'una consola tuya está usando esa carpeta',
   'teams.defer.running': 'ya está corriendo',
   'teams.defer.stopping': 'todavía se está frenando',
 

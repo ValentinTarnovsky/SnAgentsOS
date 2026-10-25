@@ -170,6 +170,7 @@ export const DEFER_KEY: Record<DeferInfo['reason'], MessageKey> = {
   sessionBusy: 'teams.defer.sessionBusy',
   takenOver: 'teams.defer.takenOver',
   treeBusy: 'teams.defer.treeBusy',
+  consoleBusy: 'teams.defer.consoleBusy',
   running: 'teams.defer.running',
   stopping: 'teams.defer.stopping',
 }
@@ -195,6 +196,9 @@ const FAIL_KEY: Partial<Record<TeamError, MessageKey>> = {
   unsupported: 'teams.run.fail.unsupported',
   busy: 'teams.run.fail.busy',
   disabled: 'teams.run.fail.disabled',
+  // A task run (runNow with a taskId, B4): the task has no phase to run now, or another agent runs its phase.
+  conflict: 'teams.run.fail.conflict',
+  bad_request: 'teams.run.fail.bad_request',
 }
 
 /** What a refused "Ejecutar ahora" says: the defer reason, or the failure in the catalog's words (never main's detail). */

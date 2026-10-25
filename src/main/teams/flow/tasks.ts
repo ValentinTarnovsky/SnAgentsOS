@@ -154,9 +154,39 @@ export function blockersCycle(tasks: readonly TeamTask[], taskId: string, blocke
   return null
 }
 
+/** Ids of a loop a refusal names before it says how many more there are (a 2000-task loop never builds a huge message). */
+export const CYCLE_SHOWN_MAX = 20
+
+/**
+ * The loop of a `cycle` refusal as it travels (`current` of the flow failure; TeamFail.loop and loopMore for the
+ * user, the ctl error's data for the agent): its first CYCLE_SHOWN_MAX ids, task ids only, and how many more.
+ */
+export interface CycleLoop { loop: string[]; more: number }
+
+export function cappedLoop(loop: readonly string[]): CycleLoop {
+  if (loop.length <= CYCLE_SHOWN_MAX) return { loop: [...loop], more: 0 }
+  return { loop: loop.slice(0, CYCLE_SHOWN_MAX), more: loop.length - CYCLE_SHOWN_MAX }
+}
+
+/** The CycleLoop a refusal carries (its `current`), or null for anything else. */
+export function cycleLoopOf(current: unknown): CycleLoop | null {
+  if (typeof current !== 'object' || current === null || Array.isArray(current)) return null
+  const c = current as { loop?: unknown; more?: unknown }
+  if (!Array.isArray(c.loop) || c.loop.length === 0 || c.loop.length > CYCLE_SHOWN_MAX || !c.loop.every((x) => typeof x === 'string' && TASK_ID_RE.test(x))) return null
+  const more = typeof c.more === 'number' && Number.isInteger(c.more) && c.more > 0 ? c.more : 0
+  return { loop: [...(c.loop as string[])], more }
+}
+
+/** A loop as one line for the agent (`t-1 -> t-3 -> t-1`, then ` -> ... (+N more)` past the cap); '' without one. */
+export function cycleText(c: CycleLoop | null): string {
+  if (!c || c.loop.length === 0) return ''
+  return c.loop.join(' -> ') + (c.more > 0 ? ` -> ... (+${c.more} more)` : '')
+}
+
 /**
  * A blocker list: ids, no duplicates (first kept), within the cap, no self, each live or archived, acyclic (a loop
- * answers `cycle` with the loop as `current`, so the agent reads which tasks close it).
+ * answers `cycle` with the loop as `current`, a CycleLoop capped by cappedLoop, so the agent and the user read which
+ * tasks close it).
  */
 function checkBlockers(rt: TeamRuntime, selfId: string | null, v: unknown): { ok: true; ids: string[] } | Fail {
   if (!Array.isArray(v)) return fail('bad_request')
@@ -169,7 +199,7 @@ function checkBlockers(rt: TeamRuntime, selfId: string | null, v: unknown): { ok
   if (selfId !== null && ids.includes(selfId)) return fail('bad_request')
   if (ids.some((b) => blockerState(rt, b) === undefined)) return fail('not_found')
   const loop = selfId !== null ? blockersCycle(rt.tasks, selfId, ids) : null
-  if (loop) return fail('cycle', { current: loop })
+  if (loop) return fail('cycle', { current: cappedLoop(loop) })
   return { ok: true, ids }
 }
 
@@ -387,6 +417,8 @@ export function updateTask(
       if (next === undefined) delete t.assignee
       else t.assignee = next
       touched.push('assignee')
+      // A reassignment (the user's or the Lead's) ends the old assignee's wake on the task: the new one starts its own.
+      if (t.next && t.next.agentId === task.assignee) delete t.next
     }
   }
   if (patch.priority !== undefined) {
@@ -461,6 +493,10 @@ export function updateTask(
     t.userOwned = patch.assignee === null ? owned.filter((f) => f !== 'assignee') : owned
   }
   out = { ...out, tasks: replaceTask(out.tasks, t) }
+  // Its "Por despachar" item goes with it (reconcileTasks would drop it at the next pass anyway).
+  if (touched.includes('assignee') && task.assignee && out.queue.some((q) => q.taskId === task.id && q.agentId === task.assignee)) {
+    out = { ...out, queue: out.queue.filter((q) => !(q.taskId === task.id && q.agentId === task.assignee)) }
+  }
   if (touched.includes('blockedBy') && t.state === 'blocked' && t.blocked?.reason.kind === 'deps' && depsOf(out, t.blockedBy) === 'cancelled') out = depCancelledCard(out, t, ctx)
   return { ok: true, rt: out, effects: [{ kind: 'dispatch' }], result: { task: t } }
 }

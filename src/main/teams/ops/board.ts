@@ -4,11 +4,11 @@
  * (`ctx.actor`, desktop or phone): it carries the task `rev` and a stale one
  * answers `conflict {rev}` with the current task, so the drawer can show
  * what changed. Reads never touch the disk but for the archived comment
- * counts.
+ * counts. B4 adds `resumeTask`, the drawer's Retomar of a stopped task.
  */
 import { LEAD_THREAD, type TeamTask } from '@shared/teams'
 import type { TaskDetail } from '@shared/team-protocol'
-import { addComment, changedScopes, createTask, moveTask, releaseOwned, updateTask } from '../flow/tasks'
+import { addComment, changedScopes, createTask, cycleLoopOf, cycleText, moveTask, releaseOwned, resumeTask, updateTask } from '../flow/tasks'
 import type { FlowResult } from '../flow/types'
 import { boardPage, commentNumOf, commentView, leadView, needsRowsOf, taskDetail, taskSummary, type TaskViewCtx } from '../views'
 import { fail, type OpTable, type TeamInternals, type TeamRecord } from './types'
@@ -33,17 +33,25 @@ function commitTask<R>(svc: TeamInternals, teamId: string, rec: TeamRecord, res:
   return svc.commit(teamId, res, changedScopes(rec.store.rt, res.rt), { taskId })
 }
 
-/** A failed task reducer as a reply: a rev conflict carries the current task. */
+/**
+ * A failed task reducer as a reply: a rev conflict carries the current task; a loop of blockers names its tasks as
+ * a field (`loop`, the first CYCLE_SHOWN_MAX ids, and `loopMore` for the rest), so the renderer words it without
+ * reading `detail`, which keeps the same line the CLI prints (`t-1 -> t-3 -> t-1`).
+ */
 function taskFail(svc: TeamInternals, teamId: string, rec: TeamRecord, res: Extract<FlowResult<unknown>, { ok: false }>) {
   if (res.error === 'conflict') {
     const cur = res.current as TeamTask | undefined
     const live = cur ? rec.store.rt.tasks.find((t) => t.id === cur.id) : undefined
     return fail('conflict', live ? { reason: res.reason, current: detailOf(svc, teamId, rec, live) } : { reason: res.reason })
   }
+  if (res.error === 'cycle') {
+    const c = cycleLoopOf(res.current)
+    return fail('cycle', c ? { loop: c.loop, ...(c.more > 0 ? { loopMore: c.more } : {}), detail: cycleText(c) } : {})
+  }
   return fail(res.error, res.fields ? { fields: res.fields } : {})
 }
 
-export const boardOps: Pick<OpTable, 'board' | 'task' | 'createTask' | 'updateTask' | 'moveTask' | 'releaseOwned' | 'comment' | 'lead' | 'leadSay'> = {
+export const boardOps: Pick<OpTable, 'board' | 'task' | 'createTask' | 'updateTask' | 'moveTask' | 'resumeTask' | 'releaseOwned' | 'comment' | 'lead' | 'leadSay'> = {
   async board(req, { svc }) {
     const rec = svc.team(req.teamId)
     if (!rec) return fail('not_found')
@@ -96,6 +104,26 @@ export const boardOps: Pick<OpTable, 'board' | 'task' | 'createTask' | 'updateTa
     const res = commitTask(svc, req.teamId, rec, moveTask(rec.store.rt, actor, req.taskId, req.to, req.baseRev, o, ctx), req.taskId)
     if (!res.ok) return taskFail(svc, req.teamId, rec, res)
     svc.log(`task ${req.teamId} ${req.taskId} moved to ${req.to}${req.stopRun ? ' (run stopped)' : ''}`)
+    const t = rec.store.rt.tasks.find((x) => x.id === req.taskId)
+    return t ? { ok: true, task: taskSummary(rec.store.rt, t, viewCtx(svc, req.teamId, rec)) } : fail('not_found')
+  },
+
+  /**
+   * B4, decision 38: the drawer's Retomar of a task the user stopped. Only blocked {stopped} resumes here (a card's
+   * block resumes by its card action, B5; a deps block by its level): T17 puts it back in the pair it was stopped in
+   * with a retry level for that phase's agent, which then dispatches like any other (Por despachar with autonomy off).
+   */
+  async resumeTask(req, { svc, actor }) {
+    const rec = svc.team(req.teamId)
+    const ctx = svc.flowCtx(req.teamId)
+    if (!rec) return fail('not_found')
+    if (!ctx) return fail('untrusted')
+    const cur = rec.store.rt.tasks.find((x) => x.id === req.taskId)
+    if (!cur) return fail('not_found')
+    if (cur.state !== 'blocked' || cur.blocked?.reason.kind !== 'stopped') return fail('conflict', { reason: 'stale', current: detailOf(svc, req.teamId, rec, cur) })
+    const res = commitTask(svc, req.teamId, rec, resumeTask(rec.store.rt, actor, req.taskId, ctx), req.taskId)
+    if (!res.ok) return taskFail(svc, req.teamId, rec, res)
+    svc.log(`task ${req.teamId} ${req.taskId} resumed`)
     const t = rec.store.rt.tasks.find((x) => x.id === req.taskId)
     return t ? { ok: true, task: taskSummary(rec.store.rt, t, viewCtx(svc, req.teamId, rec)) } : fail('not_found')
   },

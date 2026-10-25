@@ -146,6 +146,11 @@ export interface WorktreeListEntry {
   exists: boolean
   repoRoot?: string
   base?: string
+  /**
+   * app 2.7.0 (E10 B4, decision 63): the worktree of a team task. Settings > Git never offers it as an orphan
+   * and `git:worktreeRemove` answers 'busy' (detail 'team') for it; removing the team makes it an ordinary row.
+   */
+  teamOwned?: true
 }
 
 export interface WorktreeListRes {

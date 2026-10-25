@@ -192,6 +192,8 @@ export type TeamRequest =
   // B4
   | { op: 'dispatch'; teamId: string; queueId: string /* QUEUE_ID_RE or 'all' */; go: boolean }
   | { op: 'kickoff'; teamId: string }
+  /** Decision 38: the drawer's Retomar of a task the user stopped (blocked {stopped}); T17, any other task answers conflict {stale}. */
+  | { op: 'resumeTask'; teamId: string; taskId: string }
   // B5
   | { op: 'needs'; teamId: string }
   | { op: 'decide'; teamId: string; approvalId: string; decision: 'approve' | 'reject'; note?: string }
@@ -227,7 +229,7 @@ export interface TeamReplyMap {
   board: { page: TeamBoardPage }; task: { task: TaskDetail }
   createTask: { task: TaskSummary }; updateTask: { task: TaskDetail }; moveTask: { task: TaskSummary }; releaseOwned: { task: TaskSummary }
   comment: { comment: CommentView }; lead: { lead: LeadView }; leadSay: { comment: CommentView }
-  dispatch: { approved: string[]; dropped: string[] }; kickoff: { runId: string }
+  dispatch: { approved: string[]; dropped: string[] }; kickoff: { runId: string }; resumeTask: { task: TaskSummary }
   needs: { needs: TeamNeedsView }; decide: Empty; answer: Empty
   integratePreview: { preview: IntegratePreview }; integrate: { integrationId: string }; askRebase: Empty
   confirmVerify: { team: TeamView }; removeWorktree: Empty
@@ -249,6 +251,8 @@ export interface TeamFail {
   issues?: DefError[]                              // invalid_definition
   fields?: TaskField[]                             // user_owned
   files?: string[]; detail?: string
+  /** cycle: the task ids that close the loop (the path from the task back to itself), at most 20; loopMore = the ids past them. */
+  loop?: string[]; loopMore?: number
 }
 export type TeamReply<O extends TeamOp = TeamOp> = ({ ok: true } & TeamReplyMap[O]) | TeamFail
 export type TeamReplyFor<R extends { op: TeamOp }> = TeamReply<R['op']>

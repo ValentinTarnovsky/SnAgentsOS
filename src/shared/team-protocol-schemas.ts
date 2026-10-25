@@ -203,6 +203,7 @@ const leadSayReq = op('leadSay', { teamId, text: body(COMMENT_TEXT_MAX).pipe(z.s
 // B4
 const dispatchReq = op('dispatch', { teamId, queueId: z.union([z.string().regex(QUEUE_ID_RE), z.literal('all')]), go: z.boolean() })
 const kickoffReq = op('kickoff', { teamId })
+const resumeTaskReq = op('resumeTask', { teamId, taskId })
 // B5
 const needsReq = op('needs', { teamId })
 const decideReq = op('decide', { teamId, approvalId: z.string().regex(APPROVAL_ID_RE), decision: z.enum(['approve', 'reject']), note: body(DECIDE_NOTE_MAX).optional() })
@@ -230,7 +231,7 @@ export const teamRequestSchema = z.discriminatedUnion('op', [
   listReq, getReq, setupProbeReq, setupPreviewReq, setupWriteReq, adoptReq, trustDiffReq, trustReq, removeReq, settingsReq, revealReq,
   rosterReq, runNowReq, stopReq, pauseAgentReq, runsReq, runPageReq, watchRunReq,
   boardReq, taskReq, createTaskReq, updateTaskReq, moveTaskReq, releaseOwnedReq, commentReq, leadReq, leadSayReq,
-  dispatchReq, kickoffReq,
+  dispatchReq, kickoffReq, resumeTaskReq,
   needsReq, decideReq, answerReq,
   integratePreviewReq, integrateReq, askRebaseReq, confirmVerifyReq, removeWorktreeReq,
   routinesReq, routineRunReq, notesReq, noteReq, runSilenceAckReq,

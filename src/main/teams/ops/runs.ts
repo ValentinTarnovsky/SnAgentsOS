@@ -1,8 +1,9 @@
 /**
- * B2 ops (app 2.7.0, E10 B2): the roster, "Ejecutar ahora" (free mode for
- * the agents, lead mode for the Lead; a task run waits for B4's Dispatcher),
- * stop, the agent pause, the run list and the run chat pages. Paths never
- * leave main: the run log is found from the team and run ids.
+ * B2 ops (app 2.7.0, E10 B2): the roster, "Ejecutar ahora", stop, the agent
+ * pause, the run list and the run chat pages. Paths never leave main: the run
+ * log is found from the team and run ids. B4: "Ejecutar ahora" goes through
+ * Dispatcher.manual (a task run too) and each roster card says why its run
+ * waits (`waiting`, a dispatch dry run).
  */
 import { join } from 'path'
 import { CHAT_FRAME_MAX_BYTES } from '@shared/chat-types'
@@ -28,17 +29,17 @@ export const runOps: Pick<OpTable, 'roster' | 'runNow' | 'stop' | 'pauseAgent' |
   async roster(req, { svc }) {
     const rec = svc.team(req.teamId)
     if (!rec) return fail('not_found')
+    // The dry run first: dropping a dead orphan may commit, so `rt` is read after it.
+    const waiting = svc.dispatchWaiting(req.teamId).byAgent
     const rt = rec.store.rt
     const def = svc.shownDef(rec)
     const recent = rec.store.recentRuns()
-    const agents = rt.agents.map((a) => agentView(rt, def, a, recent, (id) => svc.runLive(id).lastLineAt))
+    const agents = rt.agents.map((a) => agentView(rt, def, a, recent, (id) => svc.runLive(id).lastLineAt, waiting.get(a.id)))
     return { ok: true, agents, rev: rt.rev }
   },
 
   async runNow(req, { svc }) {
-    // B4 routes task runs through the Dispatcher (plan, exec and qa phases).
-    if (req.taskId) return fail('unsupported')
-    const r = svc.runManual(req.teamId, req.agentId, req.prompt)
+    const r = svc.runManual(req.teamId, req.agentId, req.prompt, req.taskId)
     return 'runId' in r ? { ok: true, runId: r.runId } : r
   },
 

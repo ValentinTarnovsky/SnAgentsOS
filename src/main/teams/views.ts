@@ -25,6 +25,7 @@ import type {
   TaskSummary,
   TeamBoardPage,
   TeamListItem,
+  TeamNeedsView,
   TeamTakeoverRef,
   TeamTrustState,
   TeamView,
@@ -42,6 +43,8 @@ import {
   type AgentState,
   type BoardColumn,
   type DefError,
+  type DeferInfo,
+  type DispatchPlan,
   type QueueItem,
   type RoleDefinition,
   type Run,
@@ -155,10 +158,46 @@ export function cardView(c: TeamCard): CardView {
   return out
 }
 
-export function queueItemView(rt: Readonly<TeamRuntime>, q: QueueItem): QueueItemView {
+/** A "Por despachar" row; `defer` is why it would not start now (the dispatcher's dry run, B4), absent when nothing holds it. */
+export function queueItemView(rt: Readonly<TeamRuntime>, q: QueueItem, defer?: DeferInfo): QueueItemView {
   const task = q.taskId ? rt.tasks.find((t) => t.id === q.taskId) : undefined
   const out: QueueItemView = { id: q.id, agentId: q.agentId, reason: q.reason, mode: q.mode, priority: task?.priority ?? 'normal', at: q.createdAt, approved: q.approvedAt !== undefined }
   if (q.taskId) out.taskId = q.taskId
+  if (defer) out.defer = { ...defer }
+  return out
+}
+
+/**
+ * Why each agent's wanted run waits, from a dispatch dry run (AgentView.waiting, QueueItemView.defer): the
+ * deferred request of every agent, keyed by agent id and by `agentId|sessionKey`.
+ */
+export function waitingOf(plan: DispatchPlan | null): { byAgent: Map<string, DeferInfo>; byKey: Map<string, DeferInfo> } {
+  const byAgent = new Map<string, DeferInfo>()
+  const byKey = new Map<string, DeferInfo>()
+  for (const d of plan?.deferred ?? []) {
+    const info: DeferInfo = { reason: d.reason }
+    if (d.until !== undefined) info.until = d.until
+    if (d.request.taskId) info.taskId = d.request.taskId
+    if (!byAgent.has(d.request.agentId)) byAgent.set(d.request.agentId, info)
+    byKey.set(`${d.request.agentId}|${d.request.sessionKey}`, info)
+  }
+  return { byAgent, byKey }
+}
+
+/**
+ * "Te necesita" of one team (B4: the queue rows with their defer reason; the approvals and cards as B1 views them,
+ * B5 completes their bodies), and the titles of the tasks the rows name.
+ */
+export function needsView(rec: TeamRecord, trusted: TrustedDefinition | null, defer: ReadonlyMap<string, DeferInfo>): TeamNeedsView {
+  const rt = rec.store.rt
+  const input = needsInputOf(rt, rec.trust, rec.trustSince, trusted)
+  const queue = rt.queue.map((q) => queueItemView(rt, q, defer.get(`${q.agentId}|${q.sessionKey}`)))
+  const tasks: TeamNeedsView['tasks'] = {}
+  const ids = new Set<string>()
+  for (const x of [...input.approvals, ...input.cards, ...queue]) if (x.taskId) ids.add(x.taskId)
+  for (const t of rt.tasks) if (ids.has(t.id)) tasks[t.id] = { title: t.title, state: t.state, phase: t.phase }
+  const out: TeamNeedsView = { teamId: rec.entry.id, rev: rt.rev, trust: rec.trust, paused: rt.paused, approvals: input.approvals, cards: input.cards, queue, tasks }
+  if (rec.trustSince !== undefined) out.trustSince = rec.trustSince
   return out
 }
 
@@ -342,9 +381,10 @@ export function runView(r: Run, live?: { lastLineAt?: number }): RunView {
 /**
  * One roster card: the agent, its role as the trusted definition names it,
  * the active run and the newest ended one. `lastLineAt` reads the live value
- * of the supervisor (never committed on every line, design 3.5).
+ * of the supervisor (never committed on every line, design 3.5). `waiting`
+ * (B4): why its wanted run waits, from the dispatcher's dry run.
  */
-export function agentView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null, a: AgentState, recent: readonly Run[], lastLineAt: (runId: string) => number | undefined): AgentView {
+export function agentView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null, a: AgentState, recent: readonly Run[], lastLineAt: (runId: string) => number | undefined, waiting?: DeferInfo): AgentView {
   const role = def?.roles.find((r) => r.id === a.roleId)
   const out: AgentView = {
     id: a.id, roleId: a.roleId, roleName: role?.name ?? a.roleId, kind: a.roleKind, index: agentIndex(a),
@@ -365,6 +405,7 @@ export function agentView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null,
   }
   const ctx = out.run?.context ?? out.lastRun?.context
   if (ctx) out.context = { ...ctx }
+  if (waiting && !active) out.waiting = { ...waiting }
   const t = a.takeover
   if (t) {
     out.takeover = { phase: t.phase, at: t.at }

@@ -19,8 +19,12 @@
 // block recorded as by lead and kept by state.json, baseRev conflict with current, a move
 // with an active run answers running and with stopRun stops it, comment recipients and the
 // queue, caps and the archive), applyTool (roles, params, liveness), the board page and its
-// cursor (2000 tasks, half blocked{deps}, under 50 ms), the Lead's board summary, and the
-// board ops through TeamService.
+// cursor (2000 tasks, half blocked{deps}, the tasks read a bounded number of times: work, not wall time),
+// the Lead's board summary, and the board ops through TeamService.
+// B4 additions: R2 of a Lead run triages the tasks its board listed, a reassignment by the user or the Lead
+// clears the old assignee's wake and queue item (and reconcileTasks drops a stale one), a loop of blockers
+// named through teams:req like the CLI names it (TeamFail.loop and loopMore, the CLI's data.loop), capped at its
+// first 20 ids on both paths, and Despachar todo answering only the items it approved now.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -61,6 +65,8 @@ export { TeamRegistry, teamIdOf, resolveMainRoot } from './src/main/teams/TeamRe
 export { TeamDefinitionLoader } from './src/main/teams/TeamDefinitionLoader'
 export { TeamTrust, sha256Hex, goalHashOf } from './src/main/teams/TeamTrust'
 export { TeamService } from './src/main/teams/TeamService'
+export { reconcileTasks, enqueue, queueDecide } from './src/main/teams/flow/dispatch'
+export { createTeamCtl } from './src/main/teams/teamCtl'
 export { TrustStore } from './src/main/repoConfig/TrustStore'
 export { DeadlineTimer } from './src/main/DeadlineTimer'
 export { writeAtomicSync } from './src/main/fsAtomic'
@@ -153,6 +159,9 @@ function schemaChecks() {
   no({ op: 'releaseOwned', teamId, taskId: 't-3', fields: ['owner'] }, 'an unknown task field')
   ok({ op: 'dispatch', teamId, queueId: 'all', go: true }, 'dispatch all')
   no({ op: 'dispatch', teamId, queueId: 'q-x', go: true }, 'a bad queue id')
+  ok({ op: 'resumeTask', teamId, taskId: 't-2' }, 'resumeTask (decision 38)')
+  no({ op: 'resumeTask', teamId, taskId: 'task-2' }, 'resumeTask of a task id off its shape')
+  check(!M.phoneTeamRequestSchema.safeParse({ op: 'resumeTask', teamId, taskId: 't-2' }).success, 'resumeTask stays desktop only')
   ok({ op: 'answer', teamId, cardId: 'k-1', answer: { choices: [0, 5] } }, 'answer choices 0..5')
   no({ op: 'answer', teamId, cardId: 'k-1', answer: { choices: [6] } }, 'answer choice 6')
   no({ op: 'answer', teamId, cardId: 'k-1', answer: { choices: [0, 1, 2, 3, 4, 5, 0] } }, 'answer with 7 choices')
@@ -301,7 +310,7 @@ function boardChecks() {
   same(M.taskSummary(store.rt, t3, v).blocked, { kind: 'deps', waitingOn: ['t-2', 't-1'] }, 'the card names what it waits on')
   same(M.createTask(store.rt, lead, { title: 'x', blockedBy: ['t-99'] }, ctx()).error, 'not_found', 'an unknown blocker')
   // A cycle names its loop (`current`, the path from the task back to itself): teamCtl prints it for the agent.
-  same(json(M.updateTask(store.rt, user, 't-1', { blockedBy: ['t-3'] }, 1, ctx())), { ok: false, error: 'cycle', current: ['t-1', 't-3', 't-1'] }, 't-1 waiting on t-3, which waits on t-1: cycle, with the loop')
+  same(json(M.updateTask(store.rt, user, 't-1', { blockedBy: ['t-3'] }, 1, ctx())), { ok: false, error: 'cycle', current: { loop: ['t-1', 't-3', 't-1'], more: 0 } }, 't-1 waiting on t-3, which waits on t-1: cycle, with the loop')
   same(M.blockersCycle(store.rt.tasks, 't-2', ['t-3']), ['t-2', 't-3', 't-2'], 'blockersCycle follows the live edges and returns the loop')
   same(M.blockersCycle(store.rt.tasks, 't-3', ['t-1']), null, 'no loop: null')
   const chain = [{ id: 't-1', blockedBy: [] }, { id: 't-2', blockedBy: ['t-1'] }, { id: 't-3', blockedBy: ['t-2'] }, { id: 't-4', blockedBy: ['t-3', 't-2'] }]
@@ -567,18 +576,23 @@ function boardChecks() {
   check(M.boardPage(todoRt, teamId, v, { column: 'blocked', cursor: p1.cursor.replace(/^todo\./, 'blocked.') }) !== null, 'the same key with its own column parses')
   // A full board, half of it blocked{deps}: one id -> state lookup per board, never one per blocked card (it ran 0.6 s).
   const half = Array.from({ length: 2000 }, (_, i) => ({ ...t1, id: `t-${i + 1}`, title: `T${i}`, userOwned: [], ...(i % 2 ? { state: 'blocked', blockedBy: [`t-${i}`], blocked: { reason: { kind: 'deps' }, resume: { state: 'todo', phase: 'none' }, at: 1 } } : {}) }))
-  let best = Infinity
-  let halfPage = null
-  for (let k = 0; k < 5; k++) {
-    // A new tasks array each pass, as every commit makes one: the lookup is built inside the timed call.
-    const halfRt = { ...store.rt, tasks: [...half], comments: {}, nextIds: { ...store.rt.nextIds, task: 2001 } }
-    const t0 = Date.now()
-    halfPage = M.boardPage(halfRt, teamId, v)
-    best = Math.min(best, Date.now() - t0)
-  }
+  // Work, not wall time (a loaded machine made a 50 ms bound flaky): every read of an element of `rt.tasks` is counted
+  // through a proxy, a new array as every commit makes one, so the lookup is built inside the counted call. A linear
+  // page reads each task a handful of times; one lookup per blocked card would read about 1000 x 1000 (or 1000 x 2000).
+  let reads = 0
+  const counted = new Proxy([...half], { get: (target, key, recv) => { if (typeof key === 'string' && /^\d+$/.test(key)) reads++; return Reflect.get(target, key, recv) } })
+  const halfRt = { ...store.rt, tasks: counted, comments: {}, nextIds: { ...store.rt.nextIds, task: 2001 } }
+  const t0 = Date.now()
+  const halfPage = M.boardPage(halfRt, teamId, v)
+  const ms = Date.now() - t0
   const waiting = halfPage.tasks.filter((x) => x.blocked?.kind === 'deps')
   check(halfPage.tasks.length === 2000 && waiting.length === 1000 && waiting.every((x) => x.blocked.waitingOn.length === 1 && x.blocked.waitingOn[0] === `t-${Number(x.id.slice(2)) - 1}`), 'every blocked{deps} card names what it waits on')
-  check(best < 50, `boardPage of 2000 tasks with 1000 blocked{deps} under 50 ms (${best} ms)`)
+  check(reads > 0 && reads <= 20 * half.length, `boardPage of 2000 tasks with 1000 blocked{deps} reads the tasks a bounded number of times, never once per card (${reads} reads, ${ms} ms)`)
+  // The counter would see a lookup per card: the same page with a find per blocked card reads far past the bound.
+  let slow = 0
+  const probe = new Proxy([...half], { get: (target, key, recv) => { if (typeof key === 'string' && /^\d+$/.test(key)) slow++; return Reflect.get(target, key, recv) } })
+  for (const t of half) if (t.blocked) probe.find((x) => x.id === t.blockedBy[0])
+  check(slow > 20 * half.length, `a lookup per blocked card is what the bound refuses (${slow} reads)`)
   const bs = M.boardSummaryOf(store.rt)
   check(bs.rows.length > 0 && bs.rows.every((x) => x.state !== 'done' && x.state !== 'cancelled'), 'the Lead board: open tasks only')
   check(bs.rows.every((x, i, a) => i === 0 || M.PRIORITY_RANK[a[i - 1].priority] <= M.PRIORITY_RANK[x.priority]), 'most urgent first')
@@ -591,6 +605,125 @@ function boardChecks() {
   check(before.comments.length === 1 && before.comments[0].id === 'm-1' && before.cursor === null, 'the page before the cursor')
   const lv = M.leadView(store.rt, def.def, { recent: [], lastLineAt: () => undefined })
   check(lv.agent && lv.agent.id === 'lead' && lv.messages.length === 2 && lv.messages[0].author === 'user' && lv.messages[0].queued && lv.messages[1].authorName === 'lead', 'leadView: the thread oldest first and the Lead card')
+}
+
+// ---- 2c. B4: R2 triages the Lead's untriaged tasks, a reassignment ends the old wake, capped loops ----------
+async function b4StoreChecks() {
+  const teamId = 'tm-0123456789ab'
+  const def = defOf([role('lead', 'lead'), role('dev', 'dev', 2), role('qa', 'qa')])
+  const clock = { now: 1_800_000_000_000 }
+  let seq = 0
+  const ctx = () => ({ now: clock.now, def, newRunId: () => `r-${String(++seq).padStart(12, '0')}`, newSessionId: () => `0000000${seq}-0000-4000-8000-000000000000` })
+  const timer = new M.DeadlineTimer(() => undefined, { now: () => clock.now, setTimeout: () => 0, clearTimeout: () => undefined })
+  const storeDeps = { dir: () => `/mem/${teamId}`, emit: () => undefined, timer, live: () => false, now: () => clock.now, fs: memFs(), log: () => undefined, strict: true, newGen: () => 'cafebabe' }
+  const { store } = M.TeamStore.load(storeDeps, teamId, def)
+  const commit = (res, label) => { check(res.ok, `${label} (${res.ok ? 'ok' : res.error})`); return store.commit(res, ['board']) }
+  commit(M.reconcileAgents(store.rt, ctx()), 'the roster')
+  const user = { kind: 'user', via: 'desktop' }
+  const lead = { kind: 'agent', agentId: 'lead', runId: 'r-0000000000ff', roleKind: 'lead' }
+  const task = (id) => store.rt.tasks.find((t) => t.id === id)
+
+  // Item 4: R2 (markStarting) of a Lead run sets triagedAt on every task its board listed as untriaged, only those.
+  commit(M.createTask(store.rt, user, { title: 'Sin asignar' }, ctx()), 'an unassigned user task')
+  commit(M.createTask(store.rt, user, { title: 'Otra sin asignar' }, ctx()), 'another one')
+  same(M.boardSummaryOf(store.rt).untriaged, ['t-1', 't-2'], 'both wait to be triaged')
+  const admitted = M.admitRun(store.rt, { agentId: 'lead', sessionKey: 'lead', mode: 'lead', reason: 'triage', since: clock.now, priority: 'normal', approved: false, bypassCooldown: false }, { sessionKey: 'lead', resume: null, cwd: 'C:\\r', profile: 'readonly', sysHash: 'h' }, ctx())
+  commit(admitted, 'a Lead run admitted')
+  clock.now += 1000
+  commit(M.markStarting(store.rt, admitted.result.run.id, { pid: 42, delivered: { comments: [], cards: [], approvals: [] }, triaged: ['t-1'] }, ctx()), 'R2 of the Lead run')
+  check(task('t-1').triagedAt === clock.now && task('t-2').triagedAt === undefined, 'R2 triages the tasks the Lead was shown, and only those')
+  same(M.boardSummaryOf(store.rt).untriaged, ['t-2'], 'so the triage level no longer names t-1 (the Lead is not woken for it again)')
+
+  // Item 4: a reassignment, by the user or the Lead, ends the old assignee's wake on the task (and its queue item).
+  const withNext = (id, agentId, mode = 'plan') => {
+    const rt = store.rt
+    return { ok: true, rt: { ...rt, tasks: rt.tasks.map((t) => (t.id === id ? { ...t, next: { agentId, mode, reason: 'continuation', since: clock.now } } : t)) }, effects: [], result: undefined }
+  }
+  commit(M.createTask(store.rt, user, { title: 'Login', assignee: 'dev' }, ctx()), 'a task for dev')
+  commit(withNext('t-3', 'dev'), 'dev has a wake on t-3')
+  commit(M.updateTask(store.rt, user, 't-3', { assignee: 'dev-2' }, task('t-3').rev, ctx()), 'the user reassigns it')
+  check(task('t-3').assignee === 'dev-2' && task('t-3').next === undefined, 'a user reassignment clears task.next')
+  commit(withNext('t-3', 'dev-2'), 'dev-2 has a wake on t-3')
+  commit(M.releaseOwned(store.rt, 't-3', ['assignee'], { now: clock.now }), 'the user hands the assignee back')
+  commit(M.updateTask(store.rt, lead, 't-3', { assignee: 'dev' }, undefined, ctx()), 'the Lead reassigns it')
+  check(task('t-3').assignee === 'dev' && task('t-3').next === undefined, 'a Lead reassignment clears it too')
+  commit(withNext('t-3', 'dev'), 'the new assignee gets a wake')
+  commit(M.updateTask(store.rt, user, 't-3', { title: 'Login v2' }, task('t-3').rev, ctx()), 'an edit of another field')
+  check(task('t-3').next?.agentId === 'dev', 'an edit that is no reassignment keeps the wake')
+  commit(withNext('t-3', 'qa'), 'a wake of an agent that does not run this phase')
+  commit(M.reconcileTasks(store.rt, def.def, ctx()), 'a reconcile')
+  check(task('t-3').next === undefined, 'reconcileTasks drops a wake of an agent that is not the one of its phase (a reassignment that bypassed the edit)')
+  commit(M.enqueue(store.rt, [{ agentId: 'dev', taskId: 't-3', sessionKey: 't-3', mode: 'plan', reason: 'assigned', since: clock.now, priority: 'normal', approved: false, bypassCooldown: false }], ctx()), 'its Por despachar item')
+  check(store.rt.queue.some((q) => q.taskId === 't-3' && q.agentId === 'dev'), 'queued for dev')
+  commit(M.updateTask(store.rt, user, 't-3', { assignee: 'dev-2' }, task('t-3').rev, ctx()), 'reassigned again')
+  check(!store.rt.queue.some((q) => q.taskId === 't-3'), 'the old assignee\'s queue item goes with the reassignment')
+
+  // reconcileTasks raises a card once: a dismissed depCancelled card is not raised again by the next pass; an unblock
+  // window that refused a task raises unblockLimit once in that window and names its end as the pass's next deadline.
+  const patchTask = (id, patch) => ({ ok: true, rt: { ...store.rt, tasks: store.rt.tasks.map((t) => (t.id === id ? { ...t, ...patch } : t)) }, effects: [], result: undefined })
+  const dismissAll = (why) => ({ ok: true, rt: { ...store.rt, cards: store.rt.cards.map((c) => (c.from.kind === 'system' && c.from.why === why ? { ...c, state: 'dismissed' } : c)) }, effects: [], result: undefined })
+  const cardsOf = (id, why) => store.rt.cards.filter((c) => c.taskId === id && c.from.kind === 'system' && c.from.why === why)
+  commit(M.createTask(store.rt, user, { title: 'Bloqueante' }, ctx()), 'a blocker')
+  const blocker = store.rt.tasks[store.rt.tasks.length - 1].id
+  commit(M.createTask(store.rt, user, { title: 'Espera', blockedBy: [blocker] }, ctx()), 'a task blocked by it')
+  const waiter = store.rt.tasks[store.rt.tasks.length - 1].id
+  check(task(waiter).state === 'blocked' && task(waiter).blocked.reason.kind === 'deps', 'blocked{deps}')
+  commit(patchTask(blocker, { state: 'cancelled', phase: 'none' }), 'the blocker cancelled')
+  commit(M.reconcileTasks(store.rt, def.def, ctx()), 'a pass')
+  check(cardsOf(waiter, 'depCancelled').length === 1 && cardsOf(waiter, 'depCancelled')[0].state === 'open', 'a cancelled blocker opens its depCancelled card')
+  commit(dismissAll('depCancelled'), 'the user dismisses it')
+  const quiet = M.reconcileTasks(store.rt, def.def, ctx())
+  check(quiet.ok && quiet.rt === store.rt && cardsOf(waiter, 'depCancelled').length === 1, 'the next pass does not raise it again (a dismissed card stays dismissed)')
+  commit(M.createTask(store.rt, user, { title: 'Previa' }, ctx()), 'another blocker')
+  const prior = store.rt.tasks[store.rt.tasks.length - 1].id
+  commit(M.createTask(store.rt, user, { title: 'Limitada', blockedBy: [prior] }, ctx()), 'a task blocked by it')
+  const limited = store.rt.tasks[store.rt.tasks.length - 1].id
+  const start = clock.now - 10 * 60_000
+  commit(patchTask(limited, { counters: { ...task(limited).counters, unblockWakes: 3, unblockWindowStart: start } }), 'three unblock wakes this hour')
+  commit(patchTask(prior, { state: 'done', phase: 'none' }), 'its blocker done')
+  const refusedPass = M.reconcileTasks(store.rt, def.def, ctx())
+  check(refusedPass.ok && refusedPass.result.nextAt === start + 60 * 60_000, `the refused unblock names the end of its window as the next deadline (${refusedPass.ok && refusedPass.result.nextAt})`)
+  commit(refusedPass, 'that pass')
+  check(task(limited).state === 'blocked' && cardsOf(limited, 'unblockLimit').length === 1, 'still blocked, one unblockLimit card')
+  commit(dismissAll('unblockLimit'), 'dismissed')
+  const again = M.reconcileTasks(store.rt, def.def, ctx())
+  check(again.ok && again.rt === store.rt && cardsOf(limited, 'unblockLimit').length === 1, 'not raised again in the same window')
+  clock.now = start + 60 * 60_000
+  commit(M.reconcileTasks(store.rt, def.def, ctx()), 'the pass at the end of the window')
+  check(task(limited).state === 'todo' && task(limited).counters.unblockWakes === 1 && task(limited).counters.unblockWindowStart === clock.now, 'the window over: the task unblocks, a new window')
+
+  // Item 6: a loop of blockers names its tasks, capped at the first CYCLE_SHOWN_MAX ids (a 2000-task loop stays short).
+  const N = 2000
+  const chain = Array.from({ length: N }, (_, i) => ({ id: `t-${i + 1}`, blockedBy: i === 0 ? [] : [`t-${i}`] }))
+  const loop = M.blockersCycle(chain, 't-1', [`t-${N}`])
+  check(loop.length === N + 1 && loop[0] === 't-1' && loop[1] === `t-${N}` && loop[N] === 't-1', 'a 2000-task loop: the path from t-1 back to t-1')
+  const capped = M.cappedLoop(loop)
+  check(capped.loop.length === M.CYCLE_SHOWN_MAX && capped.loop.every((x) => M.TASK_ID_RE.test(x)) && capped.more === N + 1 - M.CYCLE_SHOWN_MAX && M.cycleText(capped).endsWith(` -> ... (+${N + 1 - M.CYCLE_SHOWN_MAX} more)`) && M.cycleText(capped).length < 400, 'capped: the first 20 ids (task ids only), then how many more')
+  same(M.cappedLoop(['t-1', 't-3', 't-1']), { loop: ['t-1', 't-3', 't-1'], more: 0 }, 'a short loop stays whole')
+  check(M.cycleText(null) === '' && M.cycleLoopOf(undefined) === null && M.cycleLoopOf(['t-1', 't-3']) === null && M.cycleLoopOf({ loop: ['t-1', 3] }) === null && M.cycleLoopOf({ loop: ['t-1', '<b>'] }) === null && M.cycleLoopOf({ loop: Array(21).fill('t-1') }) === null, 'cycleLoopOf: only a CycleLoop of task ids within the cap')
+  same(M.cycleLoopOf({ loop: ['t-1', 't-2'], more: -3 }), { loop: ['t-1', 't-2'], more: 0 }, 'a bad count reads as none')
+  const base = store.rt.tasks[0]
+  const big = { ...store.rt, tasks: chain.map((c) => ({ ...base, id: c.id, title: c.id, blockedBy: c.blockedBy, userOwned: [] })), nextIds: { ...store.rt.nextIds, task: N + 1 } }
+  const refused = M.updateTask(big, user, 't-1', { blockedBy: [`t-${N}`] }, base.rev, ctx())
+  check(!refused.ok && refused.error === 'cycle' && refused.current.loop.length === M.CYCLE_SHOWN_MAX && refused.current.more === N + 1 - M.CYCLE_SHOWN_MAX, 'updateTask refuses the 2000-task loop with the capped loop as current')
+  // The CLI path (teamCtl) prints that loop; the message stays short.
+  const ctl = M.createTeamCtl({
+    live: () => ({ teamId, run: { id: 'r-0123456789ab', agentId: 'lead', roleId: 'lead', roleKind: 'lead', mode: 'lead', state: 'running' }, agent: { id: 'lead', roleKind: 'lead' }, def: { def: {} } }),
+    read: () => ({ ok: true, data: {} }),
+    apply: () => refused,
+  })
+  const resp = await ctl.handle('team.task.update', { task: 't-1', blockedBy: [`t-${N}`] }, { runId: 'r-0123456789ab', teamId, agentId: 'lead', roleKind: 'lead' })
+  check(!resp.ok && resp.error.code === 'bad_request' && resp.error.message.startsWith(`--blocked-by makes a loop of blockers: t-1 -> t-${N} -> t-${N - 1}`) && resp.error.message.endsWith(`... (+${N + 1 - M.CYCLE_SHOWN_MAX} more)`) && resp.error.message.length < 500, `the CLI path names the loop, capped (${resp.error && resp.error.message.length} chars)`)
+  check(resp.data.loop.length === M.CYCLE_SHOWN_MAX && resp.data.loop[0] === 't-1' && resp.data.loopMore === N + 1 - M.CYCLE_SHOWN_MAX, 'and as fields: data.loop (20 ids) and data.loopMore')
+
+  // Item 5 of the B4 integration: Despachar todo names in `approved` only what it approved now.
+  const qRt = { ...store.rt, queue: [{ id: 'q-1', agentId: 'dev', sessionKey: 't-3', mode: 'exec', reason: 'assigned', createdAt: 1, approvedAt: 5, approvedBy: user }, { id: 'q-2', agentId: 'dev-2', sessionKey: 'free', mode: 'free', reason: 'interrupted', createdAt: 2 }] }
+  const all = M.queueDecide(qRt, user, 'all', true, ctx())
+  check(all.ok && JSON.stringify(all.result.approved) === '["q-2"]' && all.rt.queue[0].approvedAt === 5 && all.rt.queue[1].approvedAt === clock.now, `'all' approves only the items still waiting and answers only those (${all.ok && JSON.stringify(all.result.approved)})`)
+  const again2 = M.queueDecide(all.rt, user, 'all', true, ctx())
+  check(again2.ok && again2.result.approved.length === 0 && again2.rt === all.rt && again2.effects.some((e) => e.kind === 'dispatch'), "'all' again: nothing newly approved, nothing changed (a pass still runs)")
+  const one = M.queueDecide(all.rt, user, 'q-1', true, ctx())
+  check(one.ok && JSON.stringify(one.result.approved) === '["q-1"]' && one.rt.queue[0].approvedAt === 5, 'one item already dispatched: named, its first approval kept')
 }
 
 // ---- 3. TeamStore -------------------------------------------------------------------------------
@@ -1112,7 +1245,10 @@ async function serviceChecks(tmp) {
 
   // The trust gate: runs pass the gate while trusted (the B2 op answers unsupported).
   same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'cliOff' } }, 'trusted: runNow passes the trust gate (this suite has no CLI: deferred cliOff)')
-  same(await svc.request({ op: 'needs', teamId }, 'desktop'), { ok: false, error: 'unsupported' }, 'later ops answer unsupported (needs is B5)')
+  same(await svc.request({ op: 'decide', teamId, approvalId: 'a-1', decision: 'approve' }, 'desktop'), { ok: false, error: 'unsupported' }, 'later ops answer unsupported (decide is B5)')
+  // B4 answers needs already (the Por despachar section reads its queue rows).
+  const nv = await svc.request({ op: 'needs', teamId }, 'desktop')
+  check(nv.ok && nv.needs.teamId === teamId && Array.isArray(nv.needs.queue) && nv.needs.trust === 'trusted', 'B4: needs answers the TeamNeedsView')
   await boardServiceChecks(svc, teamId, emitted)
 
   // Editing roles/dev.md asks to trust again and blocks runs (B1 acceptance).
@@ -1128,7 +1264,9 @@ async function serviceChecks(tmp) {
   check(svc.team(teamId).trust === 'changed', 'the defwatch deadline flips the cached state to changed')
   same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'untrusted' }, 'changed: runNow deferred untrusted')
   same(await svc.request({ op: 'kickoff', teamId }, 'desktop'), { ok: false, error: 'untrusted' }, 'changed: kickoff untrusted')
-  same(await svc.request({ op: 'dispatch', teamId, queueId: 'all', go: false }, 'desktop'), { ok: false, error: 'unsupported' }, 'dispatch go:false is not gated')
+  same(await svc.request({ op: 'resumeTask', teamId, taskId: 't-1' }, 'desktop'), { ok: false, error: 'untrusted' }, 'changed: resumeTask (it can start a run) untrusted')
+  same(await svc.request({ op: 'dispatch', teamId, queueId: 'all', go: false }, 'desktop'), { ok: true, approved: [], dropped: [] }, 'dispatch go:false is not gated (B4: an empty queue, nothing dropped)')
+  same(await svc.request({ op: 'dispatch', teamId, queueId: 'all', go: true }, 'desktop'), { ok: false, error: 'untrusted' }, 'dispatch go:true is')
   list = await svc.request({ op: 'list' }, 'desktop')
   check(list.teams[0].trust === 'changed' && list.teams[0].needsCount === 1, 'the trust need row counts in the badge')
   check(emitted.some((e) => e.teamId === teamId && e.scopes.includes('team') && e.scopes.includes('needs')), 'the flip emits team and needs')
@@ -1466,6 +1604,18 @@ async function boardServiceChecks(svc, teamId, emitted) {
   same(await req({ op: 'moveTask', taskId: 't-1', baseRev: 1, to: 'done' }, 'phone'), { ok: false, error: 'bad_request' }, 'moveTask is desktop only')
   await settle()
   check(emitted.some((e) => e.teamId === teamId && e.scopes.includes('board') && e.scopes.includes('task') && e.taskId === 't-1') && emitted.some((e) => e.teamId === teamId && e.scopes.includes('lead')), 'edits emit board and task with the task hint; the Lead thread emits lead')
+
+  // B4 item 6: a loop of blockers refused through teams:req (the user path) names it like the CLI does, capped.
+  const a = (await req({ op: 'createTask', task: { title: 'Loop A' } })).task.id
+  const b = (await req({ op: 'createTask', task: { title: 'Loop B', blockedBy: [a] } })).task.id
+  const aRev = (await req({ op: 'task', taskId: a })).task.rev
+  // Integration item 6: the loop is a field (TeamFail.loop, loopMore past 20 ids), so the renderer never reads `detail`.
+  same(await req({ op: 'updateTask', taskId: a, baseRev: aRev, patch: { blockedBy: [b] } }), { ok: false, error: 'cycle', loop: [a, b, a], detail: `${a} -> ${b} -> ${a}` }, 'the user path: cycle with the loop as TeamFail.loop (and the same line in detail)')
+  const ids = [a]
+  for (let i = 0; i < 25; i++) ids.push((await req({ op: 'createTask', task: { title: `Cadena ${i}`, blockedBy: [ids[ids.length - 1]] } })).task.id)
+  const longRefused = await req({ op: 'updateTask', taskId: a, baseRev: (await req({ op: 'task', taskId: a })).task.rev, patch: { blockedBy: [ids[ids.length - 1]] } })
+  check(!longRefused.ok && longRefused.error === 'cycle' && longRefused.detail.split(' -> ').length === 21 && longRefused.detail.startsWith(`${a} -> ${ids[ids.length - 1]}`) && longRefused.detail.endsWith(`... (+${ids.length + 1 - 20} more)`), `the user path caps a long loop too (${longRefused.detail})`)
+  check(longRefused.loop.length === 20 && longRefused.loop[0] === a && longRefused.loop[1] === ids[ids.length - 1] && longRefused.loopMore === ids.length + 1 - 20, `TeamFail.loop: the first 20 ids, loopMore the rest (${longRefused.loopMore})`)
 }
 
 // ---- 8. IPC register -----------------------------------------------------------------------------
@@ -1491,6 +1641,7 @@ async function main() {
     schemaChecks()
     flowChecks()
     boardChecks()
+    await b4StoreChecks()
     storeChecks(tmp)
     registryChecks(tmp)
     await loaderChecks(tmp)
@@ -1501,7 +1652,7 @@ async function main() {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 })
   }
-  console.log(`PASS: ${checks} teams store checks (schemas, flow, board, store, registry, loader, trust, service, ipc)`)
+  console.log(`PASS: ${checks} teams store checks (schemas, flow, board, B4 triage, reassignment and capped loops, store, registry, loader, trust, service, ipc)`)
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1 })

@@ -7,7 +7,7 @@
 import type { ChatMessage } from '@shared/chat-types'
 import type { ConfigFile } from '@shared/types'
 import type { TeamFail, TeamOp, TeamReply, TeamRequest, TeamScope, TeamTrustState } from '@shared/team-protocol'
-import type { Actor, DefError, ResolvedRepo, TeamDefinition, TrustedDefinition } from '@shared/teams'
+import type { Actor, DefError, DeferInfo, ResolvedRepo, TeamDefinition, TrustedDefinition } from '@shared/teams'
 import type { GitRunner } from '../../git/gitExec'
 import type { FlowCtx, FlowResult } from '../flow/types'
 import type { LoadedDefinition, LoadRes, TeamDefinitionLoader } from '../TeamDefinitionLoader'
@@ -70,8 +70,14 @@ export interface TeamInternals {
   approveTrust(teamId: string, loaded: LoadedDefinition & { result: { ok: true } }): Promise<TeamFail | null>
   /** The remove op: stops what runs, flushes, trashes the folder, forgets the trust; a folder that does not move keeps all of it (`io`). */
   removeTeam(teamId: string): Promise<TeamFail | null>
-  /** B2: "Ejecutar ahora" through the manual gate and the admission; the prep runs as the `prepare` effect. */
-  runManual(teamId: string, agentId: string, prompt?: string): { runId: string } | TeamFail
+  /** "Ejecutar ahora" through Dispatcher.manual (B4: a task run too); the prep runs as the `prepare` effect. */
+  runManual(teamId: string, agentId: string, prompt?: string, taskId?: string): { runId: string } | TeamFail
+  /** B4: the kickoff op (decision 43), the Lead now through Dispatcher.manual. */
+  kickoff(teamId: string): { runId: string } | TeamFail
+  /** B4: Despachar / Descartar of "Por despachar" (one item or `all`). */
+  dispatchQueue(teamId: string, queueId: string, go: boolean, actor: Actor): { approved: string[]; dropped: string[] } | TeamFail
+  /** B4: why each agent's (and each queue key's `agentId|sessionKey`) wanted run waits, from a dispatch dry run. */
+  dispatchWaiting(teamId: string): { byAgent: Map<string, DeferInfo>; byKey: Map<string, DeferInfo> }
   /** B2: the supervisor's memory of a live run (null fields once it ended). */
   runLive(runId: string): { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean }
   /** B2: the one run whose lines the renderer gets as `teams:runAppend` (decision 49); null stops it. */

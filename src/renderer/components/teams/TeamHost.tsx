@@ -12,7 +12,7 @@ import { TeamHeader, TeamPlainHeader } from './TeamHeader'
 import { TeamBanner } from './TeamBanner'
 import { TeamTabs, TEAM_TABPANEL_ID, teamTabId } from './TeamTabs'
 import { TeamPicker } from './TeamPicker'
-import { TeamEmptyTab } from './TeamEmptyTab'
+import { NeedsYouTab } from './NeedsYouTab'
 import { AgentsRoster } from './AgentsRoster'
 import { AgentChatDrawer } from './AgentChatDrawer'
 import { TeamBoard } from './TeamBoard'
@@ -150,7 +150,7 @@ function HostBody() {
               ) : tab === 'board' ? (
                 <TeamBoard teamId={team.id} view={view} />
               ) : (
-                <TeamEmptyTab tab={tab} view={view} />
+                <NeedsYouTab teamId={team.id} view={view} />
               )
             ) : failed === team.id ? (
               <div className="flex flex-col items-start gap-3" data-team-load-failed>

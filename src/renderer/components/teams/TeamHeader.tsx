@@ -11,8 +11,13 @@ import { useLang, useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { useNow } from '@/components/sidebar/AgentRows'
+import { DispatchToggle } from './DispatchToggle'
 
 const CHIP = 'inline-flex max-w-[16rem] shrink-0 items-center gap-1 rounded border px-1.5 text-[11px] leading-5'
+// The chips that give way first when the header is tight (zoom, the B4 switch and count on the right): repo, base,
+// usage. Without shrink-0, which wins over `shrink` in the CSS: else the chip keeps its width while its tooltip
+// wrapper shrinks, and it draws over the next chip.
+const CHIP_FLEX = 'inline-flex min-w-0 max-w-[16rem] shrink items-center gap-1 overflow-hidden rounded border px-1.5 text-[11px] leading-5'
 const NEUTRAL = 'border-border text-text-secondary'
 const AMBER = 'border-state-action/60 bg-state-action/15 text-state-action'
 const RED = 'border-state-error/60 bg-state-error/15 text-state-error'
@@ -87,7 +92,7 @@ function UsageToday({ usage }: { usage?: PaneUsage }) {
         </span>
       }
     >
-      <span data-team-usage className={cn(CHIP, NEUTRAL, 'min-w-0 shrink tabular-nums')}>
+      <span data-team-usage className={cn(CHIP_FLEX, NEUTRAL, 'tabular-nums')}>
         <span className="truncate">{text}</span>
       </span>
     </Tooltip>
@@ -153,14 +158,14 @@ export function TeamHeader({ team, view }: { team: TeamListItem; view?: TeamView
       )}
       <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
         <Tooltip label={t('teams.host.repoTip', { path: view?.repoRoot ?? team.repoRoot })} side="bottom" className="min-w-0 shrink">
-          <span data-team-repo className={cn(CHIP, NEUTRAL, 'min-w-0 shrink')}>
+          <span data-team-repo className={cn(CHIP_FLEX, NEUTRAL)}>
             <FolderGit2 size={13} className="shrink-0" />
             <span className="truncate">{view?.repoName ?? team.repoName}</span>
           </span>
         </Tooltip>
         {view?.baseBranch && (
           <Tooltip label={t('teams.host.baseTip')} side="bottom" className="min-w-0 shrink">
-            <span data-team-base className={cn(CHIP, NEUTRAL, 'min-w-0 shrink')}>
+            <span data-team-base className={cn(CHIP_FLEX, NEUTRAL)}>
               <GitBranch size={13} className="shrink-0" />
               <span className="truncate">{view.baseBranch}</span>
             </span>
@@ -180,6 +185,8 @@ export function TeamHeader({ team, view }: { team: TeamListItem; view?: TeamView
         <UsageToday usage={view?.usageToday} />
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        {/* B4: the autonomy switch and, while it is off, how many runs wait in "Por despachar". */}
+        <DispatchToggle teamId={team.id} on={view ? view.autoDispatch : team.autoDispatch} />
         {/* B3: a task for the board, from any tab (the dialog opens over the team). */}
         <button
           type="button"

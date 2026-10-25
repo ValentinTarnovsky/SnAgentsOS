@@ -11,7 +11,9 @@
 // saving the config at once before asking main, and the
 // pane menu's "New console in this worktree" (same agent and worktree,
 // disabled on a full workspace), from the production WorkspaceView of a
-// workspace that is not active (no console spawns). A fake window.snApi
+// workspace that is not active (no console spawns). B4 (decision 63): a team
+// task's worktree refused by main (busy, detail 'team') has its own words, no
+// Retry and Delete off, while a plain busy keeps its own. A fake window.snApi
 // stands in for main. Needs `npm run build` first (CSS). No user config, real
 // repo or git process is touched.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
@@ -211,6 +213,30 @@ app.whenReady().then(async()=>{
  await js("document.querySelector('[data-worktree-ack]').click()");await wait(80);
  await js("document.querySelector('[data-worktree-delete]').click()");await wait(250);
  ok((await js("smoke.calls.remove.at(-1).expectTip"))===sha2&&!(await js("smoke.app.getState().workspaces[0].panes.some(p=>p.id==='pz')")),'confirmed, it deletes against the tip it showed');
+ // B4 (decision 63): a team task's worktree, refused by main as busy with detail 'team', says a team uses it (never
+ // "files in use"), offers no Retry (it can never succeed from here), turns Delete off and keeps the console.
+ await js(addPz);await wait(100);
+ await js("smoke.fake.inspect={exists:true,dirtyFiles:0,commitsAhead:0,mergedIntoHead:true,tip:smoke.sha,headBranch:'sn/claude-1'}");
+ await js("smoke.fake.removeRes={ok:false,error:'busy',detail:'team'}");
+ await js("smoke.close('pz')");await wait(250);
+ const rmTeam=await js("smoke.calls.remove.length");
+ await js("document.querySelector('[data-worktree-delete]').click()");await wait(250);
+ const tm=await js("({kind:document.querySelector('[data-worktree-close-error]')?.getAttribute('data-worktree-close-error'),text:document.querySelector('[data-worktree-close-error] p')?.textContent||'',buttons:[...document.querySelectorAll('[data-worktree-close-error] button')].map(b=>b.textContent),del:document.querySelector('[data-worktree-delete]').disabled,keep:!!document.querySelector('[data-worktree-keep]'),pane:smoke.app.getState().workspaces[0].panes.some(p=>p.id==='pz'),removes:smoke.calls.remove.length})");
+ ok(tm.kind==='team'&&tm.text==='Una tarea de un equipo usa este worktree: quitalo desde el equipo. No se borró nada','a team worktree: its own message, never the files-in-use one '+JSON.stringify(tm));
+ ok(JSON.stringify(tm.buttons)==='["Abrir carpeta"]'&&tm.del&&tm.keep&&tm.pane&&tm.removes===rmTeam+1,'no Retry, Delete off, Keep still there and the console stays '+JSON.stringify(tm));
+ await shot('close-team');
+ await js("smoke.fake.removeRes={ok:false,error:'busy',detail:'EBUSY'}");
+ await js("document.querySelector('[data-worktree-keep]').click()");await wait(150);
+ ok(!(await js("smoke.app.getState().workspaces[0].panes.some(p=>p.id==='pz')"))&&(await js("smoke.calls.remove.length"))===rmTeam+1,'Keep closes the console and deletes nothing more');
+ // A plain busy on the next dialog keeps its words and Retry (the team words come only from detail 'team').
+ await js(addPz);await wait(100);
+ await js("smoke.close('pz')");await wait(250);
+ await js("document.querySelector('[data-worktree-delete]').click()");await wait(250);
+ const pb=await js("({kind:document.querySelector('[data-worktree-close-error]')?.getAttribute('data-worktree-close-error'),text:document.querySelector('[data-worktree-close-error] p')?.textContent||'',buttons:[...document.querySelectorAll('[data-worktree-close-error] button')].length,del:document.querySelector('[data-worktree-delete]').disabled})");
+ ok(pb.kind==='busy'&&pb.text.includes('Hay archivos en uso')&&pb.buttons===2&&!pb.del,'a plain busy still reads files in use, with Retry and Delete '+JSON.stringify(pb));
+ await js("smoke.fake.removeRes={ok:true}");
+ await js("document.querySelector('[data-worktree-delete]').click()");await wait(250);
+ ok(!(await js("smoke.app.getState().workspaces[0].panes.some(p=>p.id==='pz')"))&&!(await js("!!document.querySelector('[data-worktree-close]')")),'and deletes once the files are free');
  await js("smoke.fake.inspect={exists:true,dirtyFiles:2,commitsAhead:1,mergedIntoHead:false,tip:smoke.sha,headBranch:'sn/claude-1'}");
 
  // FR-36: missing card.
@@ -296,7 +322,7 @@ app.whenReady().then(async()=>{
  await js('smoke.openLaunch()');await wait(200);
  for(const scale of [1.25,1.5]){w.setSize(700,520);w.webContents.setZoomFactor(scale);await wait(200);ok(!(await js('document.documentElement.scrollWidth>innerWidth')),'launch dialog without overflow at '+scale)}
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' worktree UI checks (chip with main -N, launch dialog, close dialog gate/keep/busy/retry/main -N/shared worktree/config saved before the delete, new console in this worktree, missing card, Settings root + orphans, 125/150%); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' worktree UI checks (chip with main -N, launch dialog, close dialog gate/keep/busy/retry/team worktree/main -N/shared worktree/config saved before the delete, new console in this worktree, missing card, Settings root + orphans, 125/150%); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

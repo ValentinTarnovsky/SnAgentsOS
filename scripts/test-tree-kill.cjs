@@ -347,7 +347,12 @@ function toolsChecks() {
   check(ok('dev', 'review', 'exec') && ok('custom', 'review', 'exec') && !ok('dev', 'review', 'plan') && !ok('research', 'review', 'exec'), 'review: dev and custom in exec')
   check(ok('qa', 'verdict', 'qa') && !ok('qa', 'verdict', 'exec') && !ok('dev', 'verdict', 'qa'), 'verdict: QA in qa runs')
   check(ok('research', 'done', 'plan') && ok('research', 'done', 'exec') && ok('custom', 'done', 'exec') && !ok('custom', 'done', 'plan'), 'done: research in plan or exec, custom in exec')
-  check(ok('dev', 'done', 'exec', { isolation: 'main' }) && !ok('dev', 'done', 'exec', { isolation: 'worktree' }) && !ok('dev', 'done', 'exec') && !ok('qa', 'done', 'qa') && !ok('lead', 'done', 'lead'), 'done: a Dev only with isolation main')
+  check(ok('dev', 'done', 'exec', { isolation: 'main' }) && !ok('dev', 'done', 'exec', { isolation: 'worktree' }) && !ok('dev', 'done', 'exec') && !ok('qa', 'done', 'qa') && !ok('lead', 'done', 'lead'), 'done: a writing Dev only with isolation main')
+  // Decision 24 (B4 integration item 4): a Dev whose ROLE is readonly runs its worktree task in the repo root and commits
+  // nothing: its exec run ends with done (never review). A writing Dev's plan run is readonly for its phase only.
+  check(ok('dev', 'done', 'exec', { isolation: 'worktree', profile: 'readonly' }) && ok('custom', 'done', 'exec', { isolation: 'worktree', profile: 'readonly' }), 'done: the exec run of a readonly Dev or custom role, worktree task too')
+  check(!ok('dev', 'done', 'plan', { isolation: 'worktree', profile: 'readonly' }) && !ok('dev', 'done', 'exec', { isolation: 'worktree', profile: 'total' }) && !ok('dev', 'done', 'exec', { isolation: 'worktree', profile: 'custom' }), 'done: never a writing Dev\'s plan run (readonly for its phase) nor its exec run in a worktree')
+  check(!ok('dev', 'review', 'exec', { profile: 'readonly' }) && !ok('custom', 'review', 'exec', { profile: 'readonly' }) && ok('dev', 'review', 'exec', { profile: 'total' }) && ok('custom', 'review', 'exec', { profile: 'custom' }), 'review: never a readonly exec run (nothing committed to review)')
   check(ok('lead', 'approve', 'lead') && ok('lead', 'hire', 'lead') && !ok('dev', 'approve', 'exec') && !ok('lead', 'hire', 'free'), 'approve and hire: the Lead in its runs')
 
   const dev = K.teamToolsGuide('dev')

@@ -46,15 +46,33 @@
 // ends the drag (no column stays dimmed), a running task asks and sends
 // `stopRun`; keyboard roving and Shift+F10 "Mover a" / "Prioridad" parity,
 // cancel and "Mostrar canceladas"; the task drawer (field save with the rev,
-// the conflict kept with Reintentar, the title edited and Esc, the card's
+// the conflict kept with Reintentar, the title edited and Esc, a blocker loop
+// refused by main named from TeamFail.loop and loopMore (ids spelled out, never
+// main's detail; B4), the card's
 // comment count kept from main over the drawer's page, a block by the Lead
 // worded as the Lead's, "Que decida el Líder" handing the assignee back, comments with
 // the queued chip (the recipient main fixed, kept over a reassignment) and a
 // `sys` one, activity to the run chat, a trusted click
 // on another card switches it and one beside closes it); Nueva tarea from the
 // header (only touched fields, Ctrl+Enter) and the palette (Esc cancels);
-// 1280 px and zoom without page overflow; en. No pty, user config or real
-// main is touched.
+// 1280 px and zoom without page overflow; en. Dispatch section (B4): the
+// header's Despacho automático switch sends `settings {autoDispatch}` (its
+// toast says what it means; a click on its label flips it too) and, while it
+// is off, "N por despachar" counts the runs waiting for the user's OK and
+// opens Te necesita with the keyboard on "Por despachar"; the rows (need
+// rows only while unapproved, in the teamNeedsRows order) with the agent,
+// mode, priority, task, why and the defer reason in words (with its time,
+// never main's code), the dispatched ones apart; Despachar / Descartar /
+// Despachar todo (it asks first above 5); the sidebar kebab item; en; zoom
+// (the switch label gives way at 1.5); the empty board's kickoff CTA, its
+// toast and a deferred kickoff worded beside it. B4 review: Ejecutar ahora
+// only where runManual runs it (the card menu and the drawer: Por hacer,
+// planning and executing for the assignee, qa for the QA agent the detail
+// names; never blocked nor a phase that waits on the user), conflict and
+// bad_request in their own words; Retomar of a stopped task sends
+// `resumeTask` and a task no longer stopped is said so; consoleBusy (a console
+// of the user) worded apart from treeBusy on the agent card and in Por
+// despachar, es and en. No pty, user config or real main is touched.
 // Requires npm run build (for the CSS).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -110,7 +128,7 @@ const ROLES=[
  {id:'dev',name:'Dev',kind:'dev',provider:'claude',model:'sonnet',effort:'medium',permission:'total',count:2},
  {id:'qa',name:'QA',kind:'qa',provider:'claude',model:'sonnet',permission:'readonly',count:1},
  {id:'research',name:'Investigación',kind:'research',provider:'codex',permission:'readonly',count:1}];
-const viewOf=(it)=>({id:it.id,name:it.name,repoRoot:it.repoRoot,repoName:it.repoName,baseBranch:'main',extraRepos:[],goal:'Meta de '+it.name+': que el login ande con OAuth.',trust:it.trust,defIssues:it.issues||[],autoDispatch:false,paused:it.paused,maxConcurrent:2,maxRunMinutes:45,leadApprovesSmallPlans:true,verify:[{repoId:'main',command:'npm test',confirmed:false}],roles:ROLES,rev:it.rev,needsCount:it.needsCount,running:it.running,providerBlockedUntil:it.limit?{claude:Date.now()+3600000}:{},...(it.usage?{usageToday:it.usage}:{})});
+const viewOf=(it)=>({id:it.id,name:it.name,repoRoot:it.repoRoot,repoName:it.repoName,baseBranch:'main',extraRepos:[],goal:'Meta de '+it.name+': que el login ande con OAuth.',trust:it.trust,defIssues:it.issues||[],autoDispatch:!!it.autoDispatch,paused:it.paused,maxConcurrent:2,maxRunMinutes:45,leadApprovesSmallPlans:true,verify:[{repoId:'main',command:'npm test',confirmed:false}],roles:ROLES,rev:it.rev,needsCount:it.needsCount,running:it.running,providerBlockedUntil:it.limit?{claude:Date.now()+3600000}:{},...(it.usage?{usageToday:it.usage}:{})});
 // B2: the roster, the runs and their pages main would answer for Alfa.
 const R1='r-111111111111',R2='r-222222222222',R3='r-333333333333';
 const NOW0=Date.now();
@@ -137,10 +155,11 @@ const BOARD={[TA]:[],[TB]:[]};
 const COMMENTS={};
 const ACTIVE_RUN=['queued','starting','running','stopping'];
 const colOf=t=>t.state==='cancelled'?null:['todo','done','blocked'].includes(t.state)?t.state:['qa','userOk','integrating'].includes(t.phase)?'review':'doing';
-const sumOf=t=>{const {body,runs,earlier,...s}=t;return{...s,column:colOf(t)}};
+// qaAgentId and resume live in main's runtime and the detail only: a TaskSummary never carries them.
+const sumOf=t=>{const {body,runs,earlier,qaAgentId,resume,...s}=t;return{...s,column:colOf(t)}};
 const pageOf=id=>{const live=(BOARD[id]||[]).filter(t=>t.state!=='cancelled');const counts={todo:0,doing:0,review:0,done:0,blocked:0};for(const t of live)counts[colOf(t)]++;return{teamId:id,rev:1,tasks:live.map(sumOf),cursor:null,done:true,counts,cancelled:(BOARD[id]||[]).length-live.length}};
 // earlier: the cursor of the comment pages before the newest one (main counts them all in the summary, never the page).
-const detailOf=t=>({...sumOf(t),body:t.body||'',reviewInfo:{round:t.review?t.review.round:0,max:3},comments:COMMENTS[t.id]||[],commentsCursor:t.earlier||null,commentsArchived:0,runs:t.runs||[],approvals:[],cards:[]});
+const detailOf=t=>({...sumOf(t),body:t.body||'',reviewInfo:{round:t.review?t.review.round:0,max:3,...(t.qaAgentId?{qaAgentId:t.qaAgentId}:{})},comments:COMMENTS[t.id]||[],commentsCursor:t.earlier||null,commentsArchived:0,runs:t.runs||[],approvals:[],cards:[]});
 const own=(t,f)=>{if(!t.userOwned.includes(f))t.userOwned=[...t.userOwned,f]};
 const findTask=r=>(BOARD[r.teamId]||[]).find(x=>x.id===r.taskId);
 const cm=(id,author,authorName,text,x)=>({id,author,authorName,kind:'comment',text,at:NOW0-60000+Number(id.slice(2))*1000,queued:false,...(x||{})});
@@ -157,14 +176,26 @@ function fillBoard(){
   TK('t-8',{title:'Tests e2e',priority:'high',userOwned:['priority']})];
  COMMENTS['t-1']=[cm('m-10','dev-2','Dev 2','Empiezo por el refresh.'),cm('m-11','system','Sistema','',{kind:'system',sys:{key:'noQaRole'}})];
 }
+// B4: the "Por despachar" queue main would answer in Te necesita (each item with its dry run defer) and the needs view around it.
+const QUEUE={[TA]:[],[TB]:[]};
+const qv=(id,agentId,x)=>({id,agentId,reason:'assigned',mode:'exec',priority:'normal',at:NOW0-100000,approved:false,...(x||{})});
+const needsOf=id=>{const it=fake.teams.find(x=>x.id===id);return{teamId:id,rev:1,trust:it?it.trust:'trusted',paused:it?it.paused:null,approvals:[],cards:[],queue:JSON.parse(JSON.stringify(QUEUE[id]||[])),tasks:Object.fromEntries((BOARD[id]||[]).map(t=>[t.id,{title:t.title,state:t.state,phase:t.phase}]))}};
 const fake={on:false,reveal:{ok:true},failGet:new Set(),conflictNext:false,cid:100,tid:8,teams:[item(TA,'Alfa',{running:1,usage:use(1200000,40000,1.75)}),item(TB,'Beta',{trust:'changed',needsCount:1,rev:5,paused:{reason:'user',at:1},limit:true})],
  runNow:r=>{
+  if(r.taskId)return fake.runTask(r);
   if(r.agentId==='qa')return{ok:false,error:'deferred',defer:{reason:'globalCap'}};
   if(r.agentId!=='dev-2')return{ok:false,error:'running'};
   RUNS[R3]={view:runV(R3,'dev-2',{state:'starting',outcome:undefined,endedAt:undefined,startedAt:Date.now(),queuedAt:Date.now()}),items:[msg('0','user',r.prompt||'')]};
   AGENT_RUNS['dev-2']=[R3];
   Object.assign(AGENTS[TA][2],{status:'running',run:RUNS[R3].view});
-  return{ok:true,runId:R3}}};
+  return{ok:true,runId:R3}},
+ // B4, as runManual answers a run of a task: the agent its phase runs (the assignee in todo, planning and executing,
+ // the QA agent in qa), conflict {stale} for a task blocked, over or waiting on the user, bad_request for another agent.
+ runTask:r=>{const t=(BOARD[r.teamId]||[]).find(x=>x.id===r.taskId);if(!t)return{ok:false,error:'not_found'};
+  const who=['done','cancelled','blocked'].includes(t.state)?undefined:t.state==='todo'||t.phase==='planning'||t.phase==='executing'?t.assignee:t.phase==='qa'?t.qaAgentId:undefined;
+  if(who===undefined)return{ok:false,error:'conflict',reason:'stale'};
+  if(who!==r.agentId)return{ok:false,error:'bad_request'};
+  return{ok:true,runId:'r-666666666666'}}};
 const areaEvents=[];
 onTeamChanged(e=>areaEvents.push(e));
 window.snApi=fallback({platform:'win32',filePath:()=>'',
@@ -191,7 +222,7 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
     case 'runNow':return fake.runNow(r);
     case 'stop':return{ok:true};
     case 'pauseAgent':{const a=(AGENTS[r.teamId]||[]).find(x=>x.id===r.agentId);if(!a)return{ok:false,error:'not_found'};a.paused=r.on;return{ok:true}}
-    case 'settings':{const it=fake.teams.find(x=>x.id===r.teamId);if(!it)return{ok:false,error:'not_found'};if(r.patch.paused!==undefined)it.paused=r.patch.paused?{reason:'user',at:Date.now()}:null;return{ok:true,team:viewOf(it)}}
+    case 'settings':{const it=fake.teams.find(x=>x.id===r.teamId);if(!it)return{ok:false,error:'not_found'};if(r.patch.paused!==undefined)it.paused=r.patch.paused?{reason:'user',at:Date.now()}:null;if(r.patch.autoDispatch!==undefined)it.autoDispatch=r.patch.autoDispatch;return{ok:true,team:viewOf(it)}}
     // B3, as main answers: a user write marks the fields it touched userOwned and bumps the task rev.
     case 'board':return{ok:true,page:pageOf(r.teamId)};
     case 'task':{const t=findTask(r);return t?{ok:true,task:detailOf(t)}:{ok:false,error:'not_found'}}
@@ -200,6 +231,8 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
      if(r.stopRun)delete t.run;t.state=r.to;if(r.to!=='blocked')t.phase='none';if(r.to==='blocked')t.blocked={kind:'user',by:'user'};else delete t.blocked;
      if(r.priority){t.priority=r.priority;own(t,'priority')}own(t,'state');t.rev++;return{ok:true,task:sumOf(t)}}
     case 'updateTask':{const t=findTask(r);if(!t)return{ok:false,error:'not_found'};
+     // A refusal main would answer (a blocker loop: 'cycle' with TeamFail.loop and loopMore), once.
+     if(fake.failNext){const f=fake.failNext;fake.failNext=null;return f}
      if(fake.conflictNext){fake.conflictNext=false;t.rev++;t.title=t.title+' (Líder)';return{ok:false,error:'conflict',reason:'rev',current:detailOf(t)}}
      if(t.rev!==r.baseRev)return{ok:false,error:'conflict',reason:'rev',current:detailOf(t)};
      // "Que decida el Líder" (assignee null) hands the field back to the Lead instead of owning it.
@@ -212,6 +245,20 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
     case 'createTask':{const id='t-'+(++fake.tid);const d=r.task;const t=TK(id,{...d,createdAt:Date.now(),userOwned:Object.keys(d).filter(k=>k!=='title'&&k!=='body')});(BOARD[r.teamId]=BOARD[r.teamId]||[]).push(t);return{ok:true,task:sumOf(t)}}
     case 'lead':return{ok:true,lead:{messages:LEAD[r.teamId]||[],cursor:null,agent:null}};
     case 'leadSay':{const c=cm('m-'+(++fake.cid),'user','Vos',r.text,{at:Date.now(),queued:true});(LEAD[r.teamId]=LEAD[r.teamId]||[]).push(c);return{ok:true,comment:c}}
+    // B4, as main answers: Te necesita (the queue part), Despachar / Descartar (one or all) and the kickoff.
+    case 'needs':return{ok:true,needs:needsOf(r.teamId)};
+    // As queueDecide: 'all' names in approved only the items it newly approved (never the ones approved before); one id
+    // that is gone is not_found.
+    case 'dispatch':{const q=QUEUE[r.teamId]||[];const approved=[],dropped=[];
+     for(const x of [...q]){if(r.queueId!=='all'&&x.id!==r.queueId)continue;
+      if(r.go){if(r.queueId==='all'&&x.approved)continue;x.approved=true;approved.push(x.id)}else{q.splice(q.indexOf(x),1);dropped.push(x.id)}}
+     return r.queueId==='all'||approved.length+dropped.length>0?{ok:true,approved,dropped}:{ok:false,error:'not_found'}}
+    case 'kickoff':return fake.kickoffRes||{ok:true,runId:'r-555555555555'};
+    // Decision 38, as main's T17 answers it: a stopped task goes back to the pair it was stopped in; any other is stale,
+    // with the task as main has it now (current, CONTRATOS).
+    case 'resumeTask':{const t=findTask(r);if(!t)return{ok:false,error:'not_found'};
+     if(t.state!=='blocked'||!t.blocked||t.blocked.kind!=='stopped')return{ok:false,error:'conflict',reason:'stale',current:detailOf(t)};
+     t.state=t.resume.state;t.phase=t.resume.phase;delete t.blocked;t.rev++;return{ok:true,task:sumOf(t)}}
     default:return{ok:false,error:'unsupported'}}},
   onChanged:cb=>{subs.changed.add(cb);return()=>subs.changed.delete(cb)},onRunAppend:cb=>{subs.append.add(cb);return()=>subs.append.delete(cb)},onIntegrateProgress:noop},
 });
@@ -292,6 +339,8 @@ window.smoke={calls,fake,TA,TB,areaEvents,seen,item,
  releaseRoster:()=>{const g=fake.rosterGate;fake.rosterGate=null;if(g)g.release()},
  watchSeen:sels=>{const seen=new Set();const look=()=>{for(const s of sels)if(document.querySelector(s))seen.add(s)};look();const mo=new MutationObserver(look);mo.observe(document.body,{childList:true,subtree:true,attributes:true});window.__watch=()=>{mo.disconnect();look();return [...seen]}},
  watchStop:()=>window.__watch(),
+ // B4: the queue fixtures; the task maker for the review checks (Ejecutar ahora by phase, Retomar).
+ QUEUE,qv,TK,
 };
 createRoot(document.getElementById('root')).render(<Root/>);
 `, resolveDir: root, loader: 'tsx' }, bundle: true, platform: 'browser', format: 'iife', outfile: path.join(dir, 'renderer.js'), alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, loader: { '.ttf': 'empty', '.woff': 'empty', '.woff2': 'empty' }, logLevel: 'error' })
@@ -951,6 +1000,27 @@ app.whenReady().then(async()=>{
  await js("smoke.keyActive({key:'Escape',code:'Escape',keyCode:27})");await settle(200);
  v=await js("({input:smoke.has('[data-task-title-input]'),drawer:smoke.has('[data-drawer=team-task]'),host:smoke.has('[data-team-host]')})");
  ok(!v.input&&v.drawer&&v.host,'Esc in the title cancels the edit only',v);
+ // A blocker that closes a loop: main refuses it as cycle with the loop as a field (TeamFail.loop, loopMore past 20
+ // ids); the drawer names the tasks that close it from that field, ids spelled out, never main's detail.
+ const cycleNote=async(fail,pick)=>{const n0=await js("smoke.reqs('updateTask').length");await js("smoke.fake.failNext="+JSON.stringify(fail));await js("smoke.select('[data-task-fields] [data-blocker-add]','"+pick+"')");
+  ok(await until("smoke.reqs('updateTask').length==="+(n0+1)+"&&smoke.fake.failNext===null",2000),'the blocker goes to main and main refuses it',fail);
+  await settle();
+  ok((await js("smoke.attr('[data-task-save-note]','data-task-save-note')"))==='error','the drawer says why',fail);
+  return js("({patch:smoke.reqs('updateTask').at(-1).patch,note:smoke.text('[data-task-save-note]'),tags:document.querySelectorAll('[data-task-save-note] *:not(span)').length,blockers:[...document.querySelectorAll('[data-task-fields] [data-blocker]')].map(e=>e.dataset.blocker).join()})")};
+ v=await cycleNote({ok:false,error:'cycle',loop:['t-1','t-8','t-2','t-1'],detail:'DETAIL t-1 -> t-8 -> t-2 -> t-1'},'t-8');
+ ok(JSON.stringify(v.patch)==='{"blockedBy":["t-8"]}'&&v.note==='Esas dependencias forman un ciclo: t-1 → t-8 → t-2 → t-1','the refusal names the tasks that close the loop',v);
+ ok(!v.note.includes('DETAIL')&&!v.note.includes('->')&&v.blockers==='','never main\\'s detail; the refused blocker is not kept',v);
+ const loop20=Array.from({length:20},(_,i)=>'t-'+(i+1));
+ v=await cycleNote({ok:false,error:'cycle',loop:loop20,loopMore:7,detail:'DETAIL'},'t-2');
+ ok(v.note==='Esas dependencias forman un ciclo: '+loop20.join(' → ')+' y 7 más','a long loop: its 20 ids, then y 7 más from loopMore',v);
+ v=await cycleNote({ok:false,error:'cycle',loop:['t-1','<b>t-8</b>\\u202E','t-1']},'t-8');
+ ok(v.note==='Esas dependencias forman un ciclo: t-1 → <b>t-8</b><U+202E> → t-1'&&v.tags===0,'ids are text with their hiding characters spelled out, never markup',v);
+ v=await cycleNote({ok:false,error:'cycle',detail:'DETAIL t-1 -> t-8 -> t-1'},'t-8');
+ ok(v.note==='Así los bloqueos se esperan entre sí en un ciclo.','without a loop (an older main) the plain cycle words, still never the detail',v);
+ await js("smoke.setLang('en')");
+ v=await cycleNote({ok:false,error:'cycle',loop:['t-1','t-3','t-1'],loopMore:2},'t-3');
+ ok(v.note==='Those dependencies form a loop: t-1 → t-3 → t-1 and 2 more','en: the loop, then and 2 more',v);
+ await js("smoke.setLang('es')");
  // Comments: Enter is a new line, Comentar sends, the new one is queued for the assignee.
  await js("smoke.type('[data-comment-composer]','Ojo con el refresh token')");await settle();
  await js("document.querySelector('[data-comment-composer]').focus({preventScroll:true});smoke.keyActive({key:'Enter',code:'Enter',keyCode:13})");await settle();
@@ -1026,6 +1096,238 @@ app.whenReady().then(async()=>{
  await js("smoke.keyActive({key:'Escape',code:'Escape',keyCode:27})");await settle(200);
  v=await js("({dialog:smoke.has('[data-new-task]'),host:smoke.has('[data-team-host]'),creates:smoke.reqs('createTask').length})");
  ok(!v.dialog&&v.host&&v.creates===creates,'Esc cancels the dialog only: Teams stays, nothing created',v);
+
+ // B4, dispatch: the autonomy switch (settings), "N por despachar" in the header while it is off, the "Por despachar"
+ // rows of Te necesita with their defer reason in words (never main's code), Despachar / Descartar / Despachar todo
+ // (it asks first above 5), the sidebar kebab item, en, zoom, and the empty board's kickoff CTA.
+ await js("document.querySelector('[data-drawer] [data-drawer-close]')?.click()");await settle(200);
+ let nrev=60;
+ const pushNeeds=()=>js("smoke.push({teamId:smoke.TA,rev:"+(++nrev)+",scopes:['needs']})");
+ const QUEUE4="[smoke.qv('q-1','dev-2',{taskId:'t-2',mode:'plan',priority:'urgent',at:Date.now()-300000,defer:{reason:'autonomyOff'}}),smoke.qv('q-2','dev',{taskId:'t-8',reason:'comment',priority:'high',at:Date.now()-200000,defer:{reason:'teamCap'}}),smoke.qv('q-3','qa',{taskId:'t-4',reason:'review',mode:'qa',at:Date.now()-100000,defer:{reason:'cooldown',until:Date.now()+3600000}}),smoke.qv('q-4','research',{reason:'routine',mode:'free',approved:true,at:Date.now()-50000,defer:{reason:'globalCap'}})]";
+ await js("smoke.QUEUE[smoke.TA]="+QUEUE4);await pushNeeds();
+ ok(await until("smoke.attr('[data-dispatch-pending]','data-dispatch-pending')==='3'",3000),'autonomy off: the header counts the 3 runs that wait for your OK (not the dispatched one)',await js("smoke.text('[data-team-header]')"));
+ v=await js("({auto:smoke.attr('[data-team-autodispatch]','data-team-autodispatch'),sw:smoke.attr('[data-team-autodispatch] [role=switch]','aria-checked'),name:smoke.attr('[data-team-autodispatch] [role=switch]','aria-label'),label:smoke.text('[data-team-autodispatch] label'),pending:smoke.text('[data-dispatch-pending]')})");
+ ok(v.auto==='off'&&v.sw==='false'&&v.name==='Despacho automático'&&v.label==='Despacho automático'&&v.pending==='3 por despachar','the header: Despacho automático off, labelled, and 3 por despachar',v);
+ await js("smoke.click('[data-dispatch-pending]')");
+ ok(await until("smoke.attr('[data-team-tab=needs]','aria-selected')==='true'&&smoke.activeIs('data-dispatch-title')",3000),'3 por despachar opens Te necesita with the keyboard on Por despachar');
+ ok((await js('smoke.shifted()'))===0,'bringing the section up scrolls nothing around Teams',await js('smoke.shifted()'));
+ v=await js("({needs:[...document.querySelectorAll('[data-team-need]')].map(e=>e.dataset.teamNeed+':'+e.dataset.needKind).join(),rows:[...document.querySelectorAll('[data-dispatch-row]')].map(e=>e.dataset.dispatchRow+':'+e.dataset.dispatchApproved).join(),count:smoke.attr('[data-dispatch-count]','data-dispatch-count'),hint:smoke.text('[data-dispatch-hint=off]'),all:smoke.attr('[data-dispatch-all]','data-dispatch-all')})");
+ ok(v.needs==='q-1:dispatch,q-2:dispatch,q-3:dispatch'&&v.rows==='q-1:false,q-2:false,q-3:false,q-4:true'&&v.count==='3','the rows that wait for you in the Te necesita order, then the dispatched one (no need row)',v);
+ ok(v.hint.includes('apagado')&&v.hint.includes('espera acá tu OK')&&v.all==='3','the hint says what autonomy off means; Despachar todo for the 3',v);
+ v=await js("({q1:smoke.text('[data-dispatch-row=q-1]'),q2:smoke.text('[data-dispatch-row=q-2] [data-dispatch-defer]'),q3:smoke.text('[data-dispatch-row=q-3] [data-dispatch-defer]'),q4:smoke.text('[data-dispatch-row=q-4] [data-dispatch-defer]'),go4:smoke.has('[data-dispatch-go=q-4]'),drop4:smoke.has('[data-dispatch-drop=q-4]'),done:smoke.text('[data-dispatch-approved-list] h4'),all:smoke.text('[data-dispatch-queue]')})");
+ ok(v.q1.includes('Dev 2')&&v.q1.includes('Plan')&&v.q1.includes('Urgente')&&v.q1.includes('t-2 Configurar la base')&&v.q1.includes('Por qué: le asignaron una tarea')&&v.q1.includes('en cola desde')&&v.q1.includes('Arranca apenas la despaches.'),'a row: agent, mode, priority, task, why and since; it only waits for you',v.q1);
+ ok(v.q2==='Si la despachás, espera: el equipo ya tiene el máximo de corridas a la vez.','the defer reason in words: the team cap',v.q2);
+ ok(/^Si la despachás, espera: está en una pausa corta antes de reintentar \\(hasta [^)]*\\d{2}[^)]*\\)\\.$/.test(v.q3),'a defer with its time: until when',v.q3);
+ ok(v.q4==='Espera: los equipos ya tienen el máximo de corridas a la vez.'&&!v.go4&&v.drop4&&v.done==='Despachadas, esperando su turno','a dispatched run says what holds it now, with Descartar only',v);
+ ok(!/autonomyOff|teamCap|globalCap|cooldown|assigned|routine/.test(v.all),'no internal code in the queue copy',v.all);
+ // Despachar: the row moves to the dispatched ones and says what holds it now; Descartar drops one.
+ const d0=await js("smoke.reqs('dispatch').length");
+ await js("smoke.click('[data-dispatch-go=q-2]')");
+ ok(await until("smoke.reqs('dispatch').length==="+(d0+1),2000),'Despachar sends dispatch');
+ v=await js("smoke.reqs('dispatch').at(-1)");
+ ok(v.teamId===TA&&v.queueId==='q-2'&&v.go===true,'dispatch carries the queue id and go',v);
+ ok(await until("smoke.attr('[data-dispatch-row=q-2]','data-dispatch-approved')==='true'&&smoke.text('[data-dispatch-row=q-2] [data-dispatch-defer]')==='Espera: el equipo ya tiene el máximo de corridas a la vez.'&&smoke.attr('[data-dispatch-pending]','data-dispatch-pending')==='2'",2000),'dispatched: the row says what holds it now; the header counts 2',await js("smoke.text('[data-dispatch-queue]')"));
+ ok(!(await js("smoke.has('[data-team-need=q-2]')")),'a dispatched run is no longer a need row');
+ await js("smoke.click('[data-dispatch-drop=q-3]')");
+ ok(await until("smoke.reqs('dispatch').length==="+(d0+2)+"&&!smoke.has('[data-dispatch-row=q-3]')",2000),'Descartar sends dispatch and the row goes');
+ v=await js("smoke.reqs('dispatch').at(-1)");
+ ok(v.queueId==='q-3'&&v.go===false,'Descartar is go false',v);
+ ok(await until("smoke.attr('[data-dispatch-pending]','data-dispatch-pending')==='1'&&!smoke.has('[data-dispatch-all]')",2000),'one run left: the header counts 1 and Despachar todo goes');
+ // Despachar todo: above 5 runs it asks first (cancel sends nothing); at 5 or fewer it goes at once.
+ await js("smoke.QUEUE[smoke.TA].push(...[10,11,12,13,14,15].map(n=>smoke.qv('q-'+n,'dev-2',{at:Date.now()-n*1000})))");await pushNeeds();
+ ok(await until("smoke.attr('[data-dispatch-all]','data-dispatch-all')==='7'",3000),'seven runs wait: Despachar todo for 7');
+ await js("smoke.click('[data-dispatch-all]')");await settle();
+ v=await js("({dialog:smoke.has('[data-confirm]'),title:smoke.text('body').includes('¿Despachar las 7 corridas?'),cap:smoke.text('body').includes('hasta 2 a la vez')})");
+ ok(v.dialog&&v.title&&v.cap,'above 5 runs Despachar todo asks first, with the team cap',v);
+ await js("smoke.cancelConfirm()");await settle();
+ ok((await js("smoke.reqs('dispatch').length"))===d0+2,'cancelled: nothing dispatched');
+ await js("smoke.click('[data-dispatch-all]')");await settle();
+ await js("smoke.click('[data-confirm]')");
+ ok(await until("smoke.reqs('dispatch').length==="+(d0+3),2000),'confirmed: Despachar todo goes');
+ v=await js("smoke.reqs('dispatch').at(-1)");
+ ok(v.queueId==='all'&&v.go===true,'Despachar todo is queueId all with go',v);
+ ok(await until("smoke.count('[data-team-need]')===0&&!smoke.has('[data-dispatch-pending]')&&smoke.toastsOf('success').some(x=>x.includes('Corridas despachadas: 7.'))",2000),'all dispatched: no need row, no header count, a toast says how many',await js("smoke.toastsOf('success')"));
+ await js("smoke.QUEUE[smoke.TA].push(smoke.qv('q-20','dev',{}),smoke.qv('q-21','dev-2',{}))");await pushNeeds();
+ ok(await until("smoke.attr('[data-dispatch-all]','data-dispatch-all')==='2'",3000),'two runs wait again');
+ await js("smoke.click('[data-dispatch-all]')");
+ ok(await until("smoke.reqs('dispatch').length==="+(d0+4),2000)&&!(await js("smoke.has('[data-confirm]')")),'at 5 or fewer Despachar todo sends at once, no confirm');
+ // The switch: settings {autoDispatch}; its toast is the hint; while on, no count in the header.
+ await js("smoke.QUEUE[smoke.TA].push(smoke.qv('q-30','qa',{taskId:'t-4',mode:'qa',reason:'review'}))");await pushNeeds();
+ ok(await until("smoke.attr('[data-dispatch-pending]','data-dispatch-pending')==='1'",3000),'one run waits');
+ const s0=await js("smoke.reqs('settings').length");
+ await js("smoke.click('[data-team-autodispatch] [role=switch]')");
+ ok(await until("smoke.reqs('settings').length==="+(s0+1),2000),'the switch sends settings');
+ v=await js("smoke.reqs('settings').at(-1)");
+ ok(v.teamId===TA&&v.patch.autoDispatch===true&&!('paused' in v.patch),'settings carries autoDispatch true only',v);
+ ok(await until("smoke.attr('[data-team-autodispatch]','data-team-autodispatch')==='on'&&!smoke.has('[data-dispatch-pending]')&&smoke.has('[data-dispatch-hint=on]')",2000),'on: the switch shows it, the header count goes, the hint says runs start on their own');
+ ok(await until("smoke.toastsOf('info').some(x=>x.includes('Despacho automático prendido'))",2000),'a toast says what on means',await js("smoke.toastsOf('info')"));
+ await js("smoke.click('[data-team-autodispatch] label span')");
+ ok(await until("smoke.reqs('settings').length==="+(s0+2)+"&&smoke.attr('[data-team-autodispatch]','data-team-autodispatch')==='off'",2000),'a click on the label turns it off again');
+ ok(await until("smoke.toastsOf('info').some(x=>x.includes('cada corrida espera tu OK en Te necesita'))&&smoke.attr('[data-dispatch-pending]','data-dispatch-pending')==='1'",2000),'off: the toast says each run waits for your OK, and the count is back',await js("smoke.toastsOf('info')"));
+ // The sidebar kebab item does the same.
+ ok(await until("smoke.teams().list.find(x=>x.id===smoke.TA).autoDispatch===false",2000),'the list follows the switch');
+ await js("smoke.click('[data-team-menu="+TA+"]')");await settle(150);
+ await js("smoke.clickText('[role=menuitem]','Prender despacho automático')");
+ ok(await until("smoke.reqs('settings').length==="+(s0+3)+"&&smoke.attr('[data-team-autodispatch]','data-team-autodispatch')==='on'",2000),'the kebab item Prender despacho automático turns it on');
+ ok((await js("smoke.reqs('settings').at(-1).patch.autoDispatch"))===true,'the kebab sends the same settings');
+ ok(await until("smoke.teams().list.find(x=>x.id===smoke.TA).autoDispatch===true",2000),'the list follows the kebab');
+ await js("smoke.click('[data-team-menu="+TA+"]')");await settle(150);
+ await js("smoke.clickText('[role=menuitem]','Apagar despacho automático')");
+ ok(await until("smoke.reqs('settings').length==="+(s0+4)+"&&smoke.attr('[data-team-autodispatch]','data-team-autodispatch')==='off'",2000),'on, the kebab offers Apagar despacho automático and it turns it off');
+ // en.
+ await js("smoke.setLang('en')");
+ ok(await until("smoke.text('[data-dispatch-pending]')==='1 to dispatch'",2000),'en: 1 to dispatch',await js("smoke.text('[data-dispatch-pending]')"));
+ v=await js("({q2:smoke.text('[data-dispatch-row=q-2] [data-dispatch-defer]'),q30:smoke.text('[data-dispatch-row=q-30] [data-dispatch-defer]'),title:smoke.text('[data-dispatch-title]'),label:smoke.text('[data-team-autodispatch] label'),go:smoke.text('[data-dispatch-go=q-30]'),drop:smoke.text('[data-dispatch-drop=q-30]')})");
+ ok(v.q2==='Waiting: the team already has its most runs at once.'&&v.q30==='Starts as soon as you dispatch it.'&&v.title==='To dispatch'&&v.label==='Auto dispatch'&&v.go==='Dispatch'&&v.drop==='Discard','en: the queue and the switch',v);
+ await js("smoke.setLang('es')");await settle();
+ // 1280 px and zoom with the count and the queue: nothing overflows; at 1.5 the switch stays, its label gives way.
+ for(const z of [1,1.25,1.5]){
+  w.webContents.setZoomFactor(z);await settle(250);
+  // The label follows a media query: its change event lands after the zoom, so the wait includes it.
+  const laid=await until("!smoke.overflow()&&smoke.inView('[data-team-autodispatch] [role=switch]')&&smoke.inView('[data-dispatch-pending]')&&smoke.inView('[data-team-close]')&&smoke.inView('[data-dispatch-go=q-30]')&&smoke.has('[data-team-autodispatch] label')==="+(z!==1.5),3000);
+  v=await js("({over:smoke.overflow(),sw:smoke.inView('[data-team-autodispatch] [role=switch]'),pending:smoke.inView('[data-dispatch-pending]'),close:smoke.inView('[data-team-close]'),go:smoke.inView('[data-dispatch-go=q-30]'),label:smoke.has('[data-team-autodispatch] label'),wide:matchMedia('(min-width: 1024px)').matches,iw:innerWidth,"+
+   // The header chips give way to the switch and the count: each ends before the next one starts, all before the switch.
+   "chips:(()=>{const r=['[data-team-repo]','[data-team-base]','[data-team-usage]'].map(s=>document.querySelector(s)).filter(Boolean).map(e=>e.getBoundingClientRect());const end=document.querySelector('[data-team-autodispatch]').getBoundingClientRect().left;return r.every((x,i)=>(i===0||r[i-1].right<=x.left+0.5)&&x.right<=end+0.5)})()})");
+  ok(laid&&!v.over&&v.sw&&v.pending&&v.close&&v.go,'zoom '+z+' with the queue: no overflow; the switch, the count, close and Despachar on screen',v);
+  ok(v.chips,'zoom '+z+': the header chips shrink and never draw over each other or the switch',v);
+  ok(z===1.5?!v.label:v.label,'zoom '+z+': the switch label shows only where it fits (a tooltip names the switch alone)',v);
+  if(z===1.5){await settle(400);await shot('teams-dispatch-zoom150')}
+ }
+ w.webContents.setZoomFactor(1);await settle(200);
+ await settle(400);await shot('teams-dispatch');
+ v=await js("smoke.copy()");
+ ok(!/[\\u2013\\u2014]/.test(v),'dispatch: no en or em dash in the copy');
+ // The empty board's kickoff CTA (Beta has no task): kickoff, its toast, and a defer said beside it, in words.
+ await js("smoke.openTeams(smoke.TB,'board')");
+ ok(await until("smoke.has('[data-board-empty] [data-kickoff]')",3000),'an empty board offers the kickoff');
+ v=await js("({text:smoke.text('[data-kickoff]'),hint:smoke.text('[data-board-empty]').includes('El Líder lee la meta del equipo'),pending:smoke.has('[data-dispatch-pending]')})");
+ ok(v.text==='Pedile al Líder que arme las tareas'&&v.hint&&!v.pending,'Pedile al Líder que arme las tareas, with what it does; nothing queued, no count',v);
+ const k0=await js("smoke.reqs('kickoff').length");
+ await js("smoke.click('[data-kickoff]')");
+ ok(await until("smoke.reqs('kickoff').length==="+(k0+1),2000),'the CTA sends kickoff');
+ v=await js("smoke.reqs('kickoff').at(-1)");
+ ok(v.teamId===TB&&Object.keys(v).sort().join()==='op,teamId','kickoff carries the team only',v);
+ ok(await until("smoke.toastsOf('success').some(x=>x.includes('El Líder está armando las tareas.'))",2000),'a toast says the Lead is on it',await js("smoke.toastsOf('success')"));
+ await js("smoke.fake.kickoffRes={ok:false,error:'deferred',defer:{reason:'paused'}};smoke.click('[data-kickoff]')");
+ ok(await until("smoke.text('[data-kickoff-note]')==='Ahora no: el equipo está en pausa.'",2000),'a deferred kickoff says why beside the button, in words',await js("smoke.text('[data-kickoff-note]')"));
+ await js("smoke.fake.kickoffRes=null");
+ // No event reaches Alfa while Beta shows: back on it, the header asks again instead of keeping the count it had.
+ await js("smoke.QUEUE[smoke.TA].push(smoke.qv('q-40','dev',{}))");await pushNeeds();
+ await js("smoke.openTeams(smoke.TA,'board')");
+ ok(await until("smoke.count('[data-board-column]')===5",3000),'back on Alfa\\'s board');
+ ok(await until("smoke.attr('[data-dispatch-pending]','data-dispatch-pending')==='2'",3000),'back on Alfa the header counts what waits now (2), not the 1 it kept',await js("smoke.attr('[data-dispatch-pending]','data-dispatch-pending')"));
+
+ // B4 review: "Ejecutar ahora" only where main's runManual runs it (the agent of the task's phase, the QA agent in qa;
+ // never on a blocked task nor in a phase that waits on the user), in the card menu and the drawer, its refusals in
+ // their own words; Retomar on a task the user stopped (resumeTask); a console of the user holding the folder
+ // (consoleBusy) worded apart from another run (treeBusy), on the agent card and in Por despachar, es and en.
+ const ro0=await js("smoke.reqs('roster').length");
+ await js("(()=>{for(const a of smoke.AGENTS[smoke.TA]){a.status='idle';a.paused=false;delete a.run;delete a.waiting}const T=smoke.TK;smoke.BOARD[smoke.TA].push("+
+  "T('t-20',{title:'Login social',assignee:'dev-2'}),T('t-21',{title:'Pago',state:'doing',phase:'executing',assignee:'dev'}),T('t-22',{title:'Perfil',state:'doing',phase:'planApproval',assignee:'dev'}),"+
+  "T('t-23',{title:'Registro',state:'review',phase:'qa',assignee:'dev',qaAgentId:'qa',review:{round:0,max:3}}),T('t-24',{title:'Menú',state:'review',phase:'userOk',assignee:'dev'}),"+
+  "T('t-25',{title:'Carrito',state:'blocked',phase:'executing',assignee:'dev',blocked:{kind:'stopped'},resume:{state:'doing',phase:'executing'}}),T('t-26',{title:'Ayuda',state:'blocked',assignee:'dev-2',blocked:{kind:'user',by:'user'}}))})()");
+ await js("smoke.push({teamId:smoke.TA,rev:70,scopes:['board','agents']})");
+ ok(await until("smoke.has('[data-task-card=t-20]')&&smoke.has('[data-task-card=t-26]')&&smoke.reqs('roster').length>"+ro0,3000),'the review tasks are on the board and the roster reloads with every agent idle');
+ await settle(200);
+ const menuOf=async id=>{await js("document.querySelector('[data-task-card="+id+"]').focus({preventScroll:true})");await js("smoke.keyActive({key:'F10',code:'F10',keyCode:121,shiftKey:true})");await settle();return js("[...document.querySelectorAll('[role=menu] [role^=menuitem]')].map(e=>e.textContent)")};
+ const menuClose=async()=>{await js("document.querySelector('[role=menu]')?.parentElement.dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))");await settle()};
+ const offers={};
+ for(const id of ['t-20','t-21','t-22','t-23','t-24','t-25','t-26']){offers[id]=(await menuOf(id)).includes('Ejecutar ahora');await menuClose()}
+ ok(offers['t-20']&&offers['t-21']&&!offers['t-22']&&!offers['t-24']&&!offers['t-25']&&!offers['t-26'],'the card menu offers Ejecutar ahora in Por hacer and executing, never in a phase that waits on you nor on a blocked task (a stopped one included)',offers);
+ ok(!offers['t-23'],'in qa the summary does not name the QA agent: the card menu never offers the run of the assignee',offers);
+ const rn0=await js("smoke.reqs('runNow').length");
+ await menuOf('t-21');await js("smoke.clickText('[role=menu] button','Ejecutar ahora')");
+ ok(await until("smoke.reqs('runNow').length==="+(rn0+1),2000),'Ejecutar ahora from the card menu sends runNow');
+ v=await js("smoke.reqs('runNow').at(-1)");
+ ok(v.teamId===TA&&v.agentId==='dev'&&v.taskId==='t-21'&&!('prompt' in v),'runNow carries the task and the agent of its phase',v);
+ ok(await until("smoke.toastsOf('success').some(x=>x.includes('Arrancó la corrida.'))",2000),'its toast says the run started');
+ // A card main moved meanwhile (no event yet): its conflict in its own words, never the generic failure.
+ await js("smoke.BOARD[smoke.TA].find(t=>t.id==='t-20').state='blocked'");
+ await menuOf('t-20');await js("smoke.clickText('[role=menu] button','Ejecutar ahora')");
+ ok(await until("smoke.toasts().some(x=>x.includes('Esa tarea no tiene una corrida para arrancar ahora: está bloqueada, cerrada o esperándote.'))",2000),'the card menu: conflict worded as a task with nothing to run now',await js("smoke.toasts()"));
+ ok(!(await js("smoke.toasts().some(x=>x.includes('No se pudo arrancar la corrida.'))")),'never the generic failure');
+ await js("smoke.BOARD[smoke.TA].find(t=>t.id==='t-20').state='todo'");
+ // The drawer of the qa task knows its QA agent: it offers the run and sends that agent; the card menu follows.
+ await js("smoke.click('[data-task-card=t-23]')");
+ ok(await until("smoke.has('[data-task-drawer=t-23] [data-task-run-now]')",3000),'qa: the drawer, which knows the QA agent, offers Ejecutar ahora');
+ await js("smoke.click('[data-task-drawer=t-23] [data-task-run-now]')");
+ ok(await until("smoke.reqs('runNow').length==="+(rn0+3)+"&&smoke.attr('[data-task-run-note]','data-task-run-note')==='ok'",2000),'the drawer sends runNow and main takes it');
+ v=await js("smoke.reqs('runNow').at(-1)");
+ ok(v.agentId==='qa'&&v.taskId==='t-23','in qa it sends the QA agent, never the assignee',v);
+ v=await menuOf('t-23');
+ ok(v.includes('Ejecutar ahora'),'once the detail named the QA agent the card menu offers it too',v);
+ await js("smoke.clickText('[role=menu] button','Ejecutar ahora')");
+ ok(await until("smoke.reqs('runNow').length==="+(rn0+4),2000)&&(await js("smoke.reqs('runNow').at(-1).agentId"))==='qa','and it sends the QA agent');
+ // The phases that wait on the user and a block that is not a stop: neither Ejecutar ahora nor Retomar in the drawer.
+ for(const id of ['t-22','t-24','t-26']){
+  await js("smoke.click('[data-task-card="+id+"]')");
+  ok(await until("smoke.has('[data-task-drawer="+id+"] [data-task-fields]')",3000),'the drawer of '+id);
+  await settle();
+  v=await js("({run:smoke.has('[data-task-drawer="+id+"] [data-task-run-now]'),resume:smoke.has('[data-task-drawer="+id+"] [data-task-resume]')})");
+  ok(!v.run&&!v.resume,'no Ejecutar ahora and no Retomar on '+id,v);
+ }
+ // Another agent runs that phase in main now: bad_request in its own words, naming the agent.
+ await js("smoke.click('[data-task-card=t-21]')");
+ ok(await until("smoke.has('[data-task-drawer=t-21] [data-task-run-now]')",3000),'executing: the drawer offers Ejecutar ahora to the assignee');
+ await js("smoke.BOARD[smoke.TA].find(t=>t.id==='t-21').assignee='dev-2'");
+ await js("smoke.click('[data-task-drawer=t-21] [data-task-run-now]')");
+ ok(await until("smoke.attr('[data-task-run-note]','data-task-run-note')==='error'",2000),'main refuses it');
+ v=await js("smoke.text('[data-task-run-note]')");
+ ok(v==='Dev no corre esta tarea en la fase en la que está.','bad_request: the agent does not run this phase',v);
+ await js("smoke.BOARD[smoke.TA].find(t=>t.id==='t-21').assignee='dev'");
+ // A task main closed meanwhile: conflict in the drawer, es and en.
+ await js("smoke.click('[data-task-card=t-20]')");
+ ok(await until("smoke.has('[data-task-drawer=t-20] [data-task-run-now]')",3000),'Por hacer: the drawer offers Ejecutar ahora');
+ await js("smoke.BOARD[smoke.TA].find(t=>t.id==='t-20').state='done'");
+ await js("smoke.click('[data-task-drawer=t-20] [data-task-run-now]')");
+ ok(await until("smoke.text('[data-task-run-note]')==='Esa tarea no tiene una corrida para arrancar ahora: está bloqueada, cerrada o esperándote.'",2000),'conflict in the drawer: its own words',await js("smoke.text('[data-task-run-note]')"));
+ await js("smoke.setLang('en')");await settle();
+ await js("smoke.click('[data-task-drawer=t-20] [data-task-run-now]')");
+ ok(await until("smoke.text('[data-task-run-note]')==='That task has no run to start now: it is blocked, closed or waiting for you.'",2000),'en: the conflict',await js("smoke.text('[data-task-run-note]')"));
+ await js("smoke.setLang('es')");
+ await js("smoke.BOARD[smoke.TA].find(t=>t.id==='t-20').state='todo'");
+ // Retomar on a stopped task (decision 38): resumeTask, then the task is back where it was stopped.
+ await js("smoke.click('[data-task-card=t-25]')");
+ ok(await until("smoke.has('[data-task-drawer=t-25] [data-task-resume]')",3000),'a stopped task: Retomar in its drawer');
+ v=await js("({run:smoke.has('[data-task-drawer=t-25] [data-task-run-now]'),blocked:smoke.text('[data-task-drawer-blocked]'),label:smoke.text('[data-task-resume]')})");
+ ok(!v.run&&v.blocked==='Frenada: reanudala cuando quieras'&&v.label==='Retomar','Retomar instead of Ejecutar ahora, under why it waits',v);
+ const rs0=await js("smoke.reqs('resumeTask').length");
+ await js("smoke.click('[data-task-resume]')");
+ ok(await until("smoke.reqs('resumeTask').length==="+(rs0+1),2000),'Retomar sends resumeTask');
+ v=await js("smoke.reqs('resumeTask').at(-1)");
+ ok(v.teamId===TA&&v.taskId==='t-25'&&Object.keys(v).sort().join()==='op,taskId,teamId','resumeTask carries the team and the task only',v);
+ ok(await until("smoke.text('[data-task-run-note]')==='Retomada: la tarea volvió a donde la frenaste.'&&smoke.colIds('doing').split(',').includes('t-25')&&!smoke.has('[data-task-resume]')",3000),'resumed: the note says so, the card is back in En curso and Retomar goes',await js("({note:smoke.text('[data-task-run-note]'),doing:smoke.colIds('doing')})"));
+ ok(await until("smoke.has('[data-task-drawer=t-25] [data-task-run-now]')",2000),'executing again: Ejecutar ahora for its assignee');
+ // A task that is no longer stopped in main: conflict in its own words, and the drawer shows the task main sent back.
+ await js("(()=>{const t=smoke.BOARD[smoke.TA].find(x=>x.id==='t-25');t.state='blocked';t.blocked={kind:'stopped'};t.rev++})();smoke.push({teamId:smoke.TA,rev:71,scopes:['board','task'],taskId:'t-25'})");
+ ok(await until("smoke.has('[data-task-drawer=t-25] [data-task-resume]')",3000),'stopped again: Retomar is back');
+ await js("(()=>{const t=smoke.BOARD[smoke.TA].find(x=>x.id==='t-25');t.state='todo';t.phase='none';delete t.blocked;t.rev++})()");
+ await settle(150);
+ const tq0=await js("smoke.reqs('task').length");
+ await js("smoke.click('[data-task-resume]')");
+ ok(await until("smoke.text('[data-task-run-note]')==='Esta tarea ya no está frenada: el tablero muestra cómo está ahora.'",2000),'a task no longer stopped: the refusal in its own words',await js("smoke.text('[data-task-run-note]')"));
+ ok(await until("!smoke.has('[data-task-resume]')&&smoke.colIds('todo').split(',').includes('t-25')",3000),'the drawer takes the current task: Retomar goes and the card shows where it is now');
+ ok((await js("smoke.reqs('task').length"))===tq0,'from the current the conflict carries, with no second read of the task',await js("smoke.reqs('task').length-"+tq0));
+ await js("document.querySelector('[data-drawer] [data-drawer-close]')?.click()");await settle(200);
+ // consoleBusy: a console of the user holds the folder, worded apart from another run (treeBusy).
+ await js("(()=>{const A=smoke.AGENTS[smoke.TA];A.find(a=>a.id==='qa').waiting={reason:'consoleBusy'};A.find(a=>a.id==='research').waiting={reason:'treeBusy'}})();smoke.push({teamId:smoke.TA,rev:72,scopes:['agents']})");
+ await js("smoke.click('[data-team-tab=agents]')");
+ const lines="({qa:smoke.text('[data-agent-card=qa] [data-agent-line]'),research:smoke.text('[data-agent-card=research] [data-agent-line]')})";
+ ok(await until(lines+".qa==='Esperando: una consola tuya está usando esa carpeta'",3000),'consoleBusy on the agent card: a console of yours uses that folder',await js(lines));
+ ok((await js(lines)).research==='Esperando: otra corrida está usando la misma carpeta','treeBusy keeps another run',await js(lines));
+ await js("smoke.QUEUE[smoke.TA].push(smoke.qv('q-50','dev',{taskId:'t-21',defer:{reason:'consoleBusy'}}),smoke.qv('q-51','dev-2',{taskId:'t-20',defer:{reason:'treeBusy'}}))");await pushNeeds();
+ await js("smoke.click('[data-team-tab=needs]')");
+ const rows="({c:smoke.text('[data-dispatch-row=q-50] [data-dispatch-defer]'),t:smoke.text('[data-dispatch-row=q-51] [data-dispatch-defer]')})";
+ ok(await until(rows+".c==='Si la despachás, espera: una consola tuya está usando esa carpeta.'",3000),'consoleBusy in Por despachar',await js(rows));
+ ok((await js(rows)).t==='Si la despachás, espera: otra corrida está usando la misma carpeta.','treeBusy in Por despachar keeps another run',await js(rows));
+ await js("smoke.setLang('en')");
+ ok(await until(rows+".c==='If you dispatch it, it waits: a console of yours is using that folder.'&&"+rows+".t==='If you dispatch it, it waits: another run is using the same folder.'",2000),'en: Por despachar',await js(rows));
+ await js("smoke.click('[data-team-tab=agents]')");
+ ok(await until(lines+".qa==='Waiting: a console of yours is using that folder'&&"+lines+".research==='Waiting: another run is using the same folder'",3000),'en: the agent cards',await js(lines));
+ await js("smoke.setLang('es')");
+ await js("(()=>{const q=smoke.QUEUE[smoke.TA];for(const id of ['q-50','q-51'])q.splice(q.findIndex(x=>x.id===id),1);for(const a of smoke.AGENTS[smoke.TA])delete a.waiting})();smoke.push({teamId:smoke.TA,rev:73,scopes:['agents']})");await pushNeeds();
+ await js("smoke.click('[data-team-tab=board]')");
+ ok(await until("smoke.count('[data-board-column]')===5&&smoke.attr('[data-dispatch-pending]','data-dispatch-pending')==='2'",3000),'back on the board, the queue as it was');
 
  // 1280 px and zoom: the board scrolls inside itself, never the page; the header stays on screen.
  for(const z of [1,1.25,1.5]){
@@ -1140,7 +1442,7 @@ app.whenReady().then(async()=>{
  await js("smoke.keyActive({key:'Escape',code:'Escape',keyCode:27})");await settle(200);
 
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy; agents: roster, run now, run chat, stop, pauses, Labs confirm; board: columns, drag, bands, stopRun, keyboard, drawer, comments, new task, Lead thread); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy; agents: roster, run now, run chat, stop, pauses, Labs confirm; board: columns, drag, bands, stopRun, keyboard, drawer, blocker loop, comments, new task, Lead thread; dispatch: autonomy switch, Por despachar, Despachar todo, kickoff; review: run now by phase, Retomar, consoleBusy); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; delete env.ELECTRON_RENDERER_URL

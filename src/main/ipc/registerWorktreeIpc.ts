@@ -75,6 +75,8 @@ export function registerWorktreeIpc(deps: WorktreeIpcDeps): WorktreeService {
     killPane: deps.killPane,
     worktreePanes: () => worktreePanesOf(deps.loadConfig()),
   })
+  // Never an owner from here (app 2.7.0, decision 63): the renderer cannot tag a worktree as a team's, and a team
+  // task's worktree answers 'busy' (detail 'team') to this remove; only main's TaskWorktrees passes its owner.
   ipcMain.handle(CH.GIT_WORKTREE_ADD, (_e, req: unknown) => service.create(req))
   ipcMain.handle(CH.GIT_WORKTREE_REMOVE, (_e, req: unknown) => service.remove(req))
   ipcMain.handle(CH.GIT_WORKTREE_PROBE, (_e, p: { repoCwd?: unknown } | null) => service.probe(p?.repoCwd))

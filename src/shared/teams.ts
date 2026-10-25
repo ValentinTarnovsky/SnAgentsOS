@@ -195,10 +195,13 @@ export function columnOf(t: { state: TaskState; phase: TaskPhase }): BoardColumn
   }
 }
 
-/** Why a wanted run does not start now. Never persisted (plan 3.3). */
+/**
+ * Why a wanted run does not start now. Never persisted (plan 3.3). `treeBusy`: another run (or an integrate, or a
+ * lingering orphan) holds the run's folder; `consoleBusy`: only a console of the user working there does (G6).
+ */
 export type DeferReason =
   | 'disabled' | 'untrusted' | 'cliOff' | 'paused' | 'agentPaused' | 'autonomyOff' | 'teamCap' | 'globalCap'
-  | 'quota' | 'cooldown' | 'sessionBusy' | 'takenOver' | 'treeBusy' | 'running' | 'stopping'
+  | 'quota' | 'cooldown' | 'sessionBusy' | 'takenOver' | 'treeBusy' | 'consoleBusy' | 'running' | 'stopping'
 export interface DeferInfo { reason: DeferReason; until?: number; taskId?: string }
 
 /** Who did it. A user edit from the phone is still a user edit. */
@@ -506,7 +509,8 @@ export interface PolicyDecision {
   next?: WakeMark | null                           // undefined leave, null clear (task.next or agent.next)
   counters?: Partial<TaskCounters>
   cooldownUntil?: number
-  block?: { reason: BlockedReason; card: { why: CardReason; actions: CardAction[] } }
+  /** No card: the task blocks with its reason alone (a user's Frenar, decision 38: the drawer resumes it, nothing in Te necesita). */
+  block?: { reason: BlockedReason; card?: { why: CardReason; actions: CardAction[] } }
   providerBlock?: { provider: AgentProvider; until: number }
   pauseTeam?: 'auth' | 'billing'
   freshSession?: boolean                           // drop agent.sessions[sessionKey]

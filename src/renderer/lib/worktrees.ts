@@ -212,11 +212,14 @@ export function worktreePathKey(p: string): string {
   return p.replace(/[\\/]+/g, '/').replace(/\/$/, '').toLowerCase()
 }
 
-/** The worktrees no console references (FR-31): a deleted workspace's ones land here. */
+/**
+ * The worktrees no console references (FR-31): a deleted workspace's ones land here. A team task's worktree is
+ * never one (app 2.7.0, decision 63): its team owns it, and main refuses to delete it from here.
+ */
 export function orphanWorktrees(entries: WorktreeListEntry[], workspaces: Workspace[]): WorktreeListEntry[] {
   const used = new Set<string>()
   for (const w of workspaces) for (const p of w.panes) if (p.worktree?.path) used.add(worktreePathKey(p.worktree.path))
-  return entries.filter((e) => !used.has(worktreePathKey(e.path)))
+  return entries.filter((e) => !e.teamOwned && !used.has(worktreePathKey(e.path)))
 }
 
 /**

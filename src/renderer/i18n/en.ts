@@ -174,6 +174,7 @@ export const en = {
   'worktree.rmErr.git_error': 'git failed: {detail}',
   'worktree.rmErr.changed': 'The worktree changed since it was checked; nothing was deleted',
   'worktree.rmErr.shared': 'Another console still uses this worktree: close it first. Nothing was deleted',
+  'worktree.rmErr.team': 'A team task uses this worktree: remove it from the team instead. Nothing was deleted',
   'worktree.chip.base': 'Base {sha}',
   'worktree.chip.ahead': '{count} commits over the base',
   'worktree.chip.open': 'Click to see the changes',

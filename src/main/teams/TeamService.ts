@@ -6,16 +6,19 @@ import type { ChatMessage } from '@shared/chat-types'
 import type { ClaudeAccountsState } from '@shared/claude-accounts'
 import type { CtlErrorCode, CtlResponse } from '@shared/ctl-protocol'
 import { normalizeLabs } from '@shared/labs'
-import { effectiveProfile } from '@shared/teamArgv'
+import { effectiveProfile, roleWrites } from '@shared/teamArgv'
 import { definitionIssues, parseFrontmatter, UNC_PATH_RE } from '@shared/teamDefinition'
+import { afterRunPolicy, candidatesOf, claudeAllLimited, planDispatch } from '@shared/teamDispatch'
 import { systemText } from '@shared/teamPrompt'
 import { isPhoneTeamOp, type TaskSummary, type TeamChangedEvt, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
 import {
   BOARD_COLUMNS,
   columnOf,
+  LEAD_THREAD,
+  LIMIT_FALLBACK_MS,
   ORPHAN_START_SLACK_MS,
+  RETRY_DELAY_MS,
   REPO_MAIN,
-  sessionKeyOf,
   STOP_GRACE_MS,
   TASK_ID_RE,
   TEAM_LOG_TTL_MS,
@@ -24,18 +27,23 @@ import {
   teamPaneId,
   isTeamPaneId,
   type Actor,
-  type AgentState,
   type DefError,
+  type DeferInfo,
+  type DispatchFacts,
+  type DispatchPlan,
+  type PolicyDecision,
   type ResolvedRepo,
-  type RoleDefinition,
   type RoleKind,
   type Run,
+  type RunEndFacts,
   type RunMode,
   type RunRequest,
   type TaskState,
   type TeamDefinition,
+  type TeamRuntime,
   type TeamTask,
   type TrustedDefinition,
+  type WakeMark,
 } from '@shared/teams'
 import type { AgentProvider, ConfigFile, PaneStatusEvt } from '@shared/types'
 import { splitAppend } from '../chat/chatFrames'
@@ -49,8 +57,10 @@ import type { PtySink } from '../pty/PtyManager'
 import { cleanEnv, statusBinDirs } from '../pty/shellResolver'
 import { TrustStore } from '../repoConfig/TrustStore'
 import { resolveAgentCli, type ResolvedCli } from './agentCli'
+import { Dispatcher, DISPATCH_KEY, type ManualRequest, type StepResult } from './Dispatcher'
 import { dismissSystemCards, openSystemCard, reconcileAgents } from './flow/agents'
-import { admitRun, basicPolicy, finishRun, interruptAll, manualGate, markRunning, orphanCards, reapOnLoad, requestStop, runEndFactsOf, terminalOf, type AdmitFacts, type RunEnd } from './flow/runs'
+import { enqueue, phaseAgentOf, queueDecide, reconcileTasks } from './flow/dispatch'
+import { admitRun, finishRun, interruptAll, markRunning, orphanCards, reapOnLoad, requestStop, restoreWake, runEndFactsOf, sessionCardVars, terminalOf, withRunDetail, type AdmitFacts, type RunEnd } from './flow/runs'
 import { archiveSweep, changedScopes, deliverComments } from './flow/tasks'
 import { applyTool } from './flow/tools'
 import type { FlowCtx, FlowResult, TeamEffect, TeamToolCall } from './flow/types'
@@ -58,6 +68,8 @@ import { createTeamCtl, type TeamCtlPort, type TeamLiveRun } from './teamCtl'
 import { createClaudeStreamParser } from './parsers/claudeStream'
 import { RunStarter } from './RunStarter'
 import { RunSupervisor } from './RunSupervisor'
+import { TaskWorktrees, type TeamWorktreeApi } from './TaskWorktrees'
+import { WriteLocks } from './WriteLocks'
 import { currentBranch } from './ops/core'
 import { OPS } from './ops/index'
 import { fail, type OpHandler, type TeamInternals, type TeamRecord } from './ops/types'
@@ -65,7 +77,7 @@ import { TeamDefinitionLoader, type LoadedDefinition, type LoaderFs, type LoadRe
 import { resolveMainRoot, TeamRegistry, teamIdOf, type RegistryFs, type TeamIndexEntry } from './TeamRegistry'
 import { TeamStore, type SyncFs, type TeamStoreDeps } from './TeamStore'
 import { goalHashOf, TeamTrust } from './TeamTrust'
-import { compareTaskOrder, LIVE_RUN_STATES, needsRowsOf, taskDetail, taskSummary, teamHeaderKey, type TaskViewCtx } from './views'
+import { compareTaskOrder, LIVE_RUN_STATES, needsRowsOf, taskDetail, taskSummary, teamHeaderKey, waitingOf, type TaskViewCtx } from './views'
 
 /** `team.tasks` answers at most this many tasks (design 5.3); `team task get` carries the newest 30 comments. */
 export const CTL_TASKS_MAX = 200
@@ -87,7 +99,7 @@ export const DEFWATCH_MS = 300
  * (design 3.9): what could start a run or touch git. Reads, edits, comments
  * and decisions keep working so the user can see the diff and tidy the board.
  */
-const TRUST_GATED_OPS: ReadonlySet<TeamOp> = new Set<TeamOp>(['runNow', 'kickoff', 'routineRun', 'integrate', 'dispatch'])
+const TRUST_GATED_OPS: ReadonlySet<TeamOp> = new Set<TeamOp>(['runNow', 'kickoff', 'resumeTask', 'routineRun', 'integrate', 'dispatch'])
 
 /** The problems of a load as one comparable key: the load error, or the parser's errors and warnings. */
 function issueKey(loaded: LoadRes): string {
@@ -138,7 +150,16 @@ export interface TeamServiceDeps {
   resolveCli?: (provider: AgentProvider, env: Record<string, string>) => ResolvedCli | null
   baseEnv?: () => Record<string, string>
   treeKill?: { sync: typeof treeKillSync; signal: typeof signalTree; alive: (pid: number) => boolean }
+
+  // ---- B4 (dispatch). ----
+  /** The console worktree service (registerWorktreeIpc's instance): task worktrees, tagged with their owner (decision 63). Without it a worktree task cannot start. */
+  worktrees?: TeamWorktreeApi | null
 }
+
+/** A deferred run waits on a console (its session or its tree): a console status change pokes the dispatcher. */
+const CONSOLE_DEFERS: ReadonlySet<DeferInfo['reason']> = new Set(['sessionBusy', 'treeBusy', 'consoleBusy'])
+/** The run-end close budget of the tree mark (design 3.5 close sequence). */
+const CLOSE_MARK_MS = 5_000
 
 /** = SIGNAL_REFRESH_MS of StatusManager (10 min): the synthetic status of a live run is pushed again at most this often (decision 58). */
 export const SYNTHETIC_REFRESH_MS = 10 * 60 * 1000
@@ -205,8 +226,16 @@ export class TeamService implements TeamInternals {
   private readonly platform: NodeJS.Platform
   /** persistBeforeInstall ran (prepareInstall): every run defers `disabled` until installAborted. */
   private installing = false
-  /** The manual request text of a queued run, until its prep reads it (never persisted). */
-  private readonly pendingDetail = new Map<string, string>()
+  /**
+   * The request text of an active run (the user's prompt of "Ejecutar ahora", a routine's), from its admission to
+   * its end: the prep puts it in the stdin, and the run-end policy copies it into the wake mark of a task-less run
+   * it wakes again (`withRunDetail`, persisted as WakeMark.detail from then on). Memory only.
+   */
+  private readonly runDetail = new Map<string, string>()
+  /** The wake mark an admission consumed (R1), until the prep of its run reads it: a prep failure without a card puts it back (restoreWake). */
+  private readonly consumedMark = new Map<string, WakeMark>()
+  /** afterRunPolicy, with the run's request text carried into a task-less re-wake (every run end of this service). */
+  private readonly runPolicy = (f: RunEndFacts): PolicyDecision => withRunDetail(afterRunPolicy(f), f.run, this.runDetail.get(f.run.id))
   /** The run the renderer watches (teams:runAppend), one at a time (decision 49). */
   private watched: { teamId: string; runId: string } | null = null
   /** Last synthetic push per live run (decision 58). */
@@ -215,15 +244,39 @@ export class TeamService implements TeamInternals {
   private readonly runWrites = new Map<string, number>()
   /** Decision 64: live processes of runs reaped at load, per team. */
   private readonly lingering = new Map<string, Lingering[]>()
-  /** Runs reaped by the last load of each team, waiting for the orphan check. */
+  /** Runs reaped (with a pid) by the last load of each team, waiting for the orphan check; they hold their sessions and trees until it settles. */
   private readonly reapedAtLoad = new Map<string, Run[]>()
   /** removeTeam waiters per team, resolved when its last active run ends (runsEnded). */
   private readonly idleWaiters = new Map<string, Array<() => void>>()
   /** Teams a removeTeam is taking down: their run ends prune no logs (the folder moves to the trash right after). */
   private readonly removing = new Set<string>()
+  /** Records a removeTeam took out (not a teardown): a prep still inside TaskWorktrees.ensure disowns the tree it made. */
+  private readonly removedRecs = new WeakSet<TeamRecord>()
   /** B3: archived comments per `<teamId>|<target>` (lines of archive/<target>.jsonl), read once and bumped on append. */
   private readonly archivedCounts = new Map<string, number>()
   private readonly treeKill: NonNullable<TeamServiceDeps['treeKill']>
+
+  // ---- B4 dispatch ----
+  /** One pass at a time over every team (design 3.6). */
+  readonly dispatcher: Dispatcher
+  /** The write locks of every team's run trees (and B6's integrates). */
+  readonly locks: WriteLocks
+  /** Task worktrees (decision 24, 63); null without the worktree service. */
+  readonly taskWorktrees: TaskWorktrees | null
+  /**
+   * "Descartar" of a level the runtime derives (a todo assignee, queued comments, an unread message): its
+   * `<teamId>|<agentId>|<sessionKey>`, its task and what it looked like, so the next passes leave it out (the
+   * agent's next level is its candidate instead) until it changes. Memory only (a restart offers it once more).
+   */
+  private readonly discarded = new Map<string, { sig: string; taskId?: string }>()
+  /** Teams whose last pass deferred a run on a console's session or tree: a console status change pokes. */
+  private readonly waitsOnConsoles = new Set<string>()
+  /**
+   * `<teamId>|<agentId>|<sessionKey>` -> until when a level does not start again after its prep failed with a card
+   * (no CLI found, a missing cwd, the control server): a level the runtime derives (the goal, queued comments) would
+   * otherwise be admitted again by the very next pass and fail the same way, on every tick. Memory only.
+   */
+  private readonly prepBackoff = new Map<string, number>()
 
   constructor(private readonly deps: TeamServiceDeps) {
     this.clock = deps.now ?? Date.now
@@ -246,6 +299,19 @@ export class TeamService implements TeamInternals {
     const store = deps.trustStore ?? new TrustStore({ file: () => join(deps.dataDir(), 'trusted-teams.json'), now: this.clock, platform: deps.platform })
     this.trust = new TeamTrust(store, (id) => join(teamsDir(), id, 'trusted-def.json'), (id) => this.registry.get(id)?.repoRoot ?? null, this.clock)
     this.treeKill = deps.treeKill ?? { sync: (pid) => treeKillSync(pid), signal: (pid, sig) => signalTree(pid, sig), alive: (pid) => pidAlive(pid) }
+    this.locks = new WriteLocks({ platform: this.platform, humanWriters: () => this.humanWriters() })
+    this.taskWorktrees = deps.worktrees ? new TaskWorktrees({ worktrees: deps.worktrees, git: deps.git, now: this.clock }) : null
+    this.dispatcher = new Dispatcher({
+      teams: () => [...this.teams.keys()],
+      facts: (teamId, pass, manual) => this.dispatchFacts(teamId, pass, manual),
+      step: (teamId, facts) => this.dispatchStep(teamId, facts),
+      plan: (teamId, facts) => this.dryPlan(teamId, facts),
+      unplanned: (teamId, m) => this.unplanned(teamId, m),
+      timer: this.timer,
+      now: this.clock,
+      live: () => this.live() && !this.installing,
+      log: deps.log,
+    })
     this.supervisor = new RunSupervisor({
       spawn: deps.spawn ?? nodeSpawn,
       treeKill: { sync: this.treeKill.sync, signal: this.treeKill.signal },
@@ -279,9 +345,28 @@ export class TeamService implements TeamInternals {
       log: deps.log,
       baseEnv: deps.baseEnv ?? (() => cleanEnv()),
       platform: this.platform,
-      lingering: (teamId) => new Set((this.lingering.get(teamId) ?? []).map((l) => l.sessionId).filter((s): s is string => !!s)),
+      lingering: (teamId) => new Set(this.orphanHolds(teamId).map((l) => l.sessionId).filter((s): s is string => !!s)),
       untrusted: (teamId) => void this.defCheck(teamId),
+      worktrees: this.taskWorktrees,
+      lock: (runId, cwd) => this.locks.acquire(this.locks.key(cwd), runId),
     })
+  }
+
+  /** Spawn cwds of the precise consoles a human is working in (working | action): their trees are busy (G6, Integrar). */
+  private humanWriters(): string[] {
+    const out: string[] = []
+    let snap: PaneStatusEvt[] = []
+    try {
+      snap = this.deps.status?.snapshot() ?? []
+    } catch {
+      snap = []
+    }
+    for (const e of snap) {
+      if (!e || isTeamPaneId(e.paneId) || !e.precise || (e.state !== 'working' && e.state !== 'action')) continue
+      const cwd = this.deps.pty?.spawnCwd(e.paneId)
+      if (cwd) out.push(cwd)
+    }
+    return out
   }
 
   /** Decision 72: what a Claude run may never read or write, built from dataDir() (never the whole folder: worktrees live there). */
@@ -311,10 +396,14 @@ export class TeamService implements TeamInternals {
     await this.beginEnable()
   }
 
-  /** CONFIG_SAVE: labs.teams off -> disable() (decision 57), on -> enable(); anything else is a no-op while not live. */
+  /** CONFIG_SAVE: labs.teams off -> disable() (decision 57), on -> enable(); anything else pokes the dispatcher (a no-op while not live). */
   setConfig(cfg: ConfigFile | null): void {
     const on = normalizeLabs(cfg?.settings?.labs).teams
-    if (on === this.labOn) return
+    if (on === this.labOn) {
+      // A saved config may free a session a run waits on (a console's lastSession, design 3.6 pokes); no-op while not live.
+      this.poke()
+      return
+    }
     this.labOn = on
     if (on) {
       if (!this.frozen) void this.beginEnable()
@@ -361,7 +450,7 @@ export class TeamService implements TeamInternals {
     let n = 0
     for (const [teamId, rec] of this.teams) {
       if (rec.store.rt.activeRuns.length === 0) continue
-      const res = this.commit(teamId, interruptAll(rec.store.rt, cause, basicPolicy, { now: this.clock() }), ['agents', 'run', 'list'])
+      const res = this.commit(teamId, interruptAll(rec.store.rt, cause, this.runPolicy, { now: this.clock() }), ['agents', 'run', 'list'])
       if (res.ok) n += res.result.runIds.length
     }
     this.supervisor.shutdownSync()
@@ -449,6 +538,8 @@ export class TeamService implements TeamInternals {
     // Decision 64: the processes of reaped runs that still live (main crashed, the children did not).
     for (const rec of loadedTeams) {
       // Dropped from reapedAtLoad only by a check that completes (a teardown first leaves it for the next enable).
+      // Until then those runs hold their sessions and trees (orphanHolds), so this pass and any other before the
+      // check settles cannot resume them; the check pokes again when it settles.
       const reaped = this.reapedAtLoad.get(rec.entry.id) ?? []
       if (reaped.length) void this.orphanCheck(rec.entry.id, reaped, epoch)
     }
@@ -504,6 +595,11 @@ export class TeamService implements TeamInternals {
     this.enabling = null
     // Nothing runs past here (a disposed or frozen service kills what is left, and owns no key).
     this.supervisor.shutdownSync()
+    this.dispatcher.stop()
+    this.locks.releaseRuns()
+    this.discarded.clear()
+    this.waitsOnConsoles.clear()
+    this.prepBackoff.clear()
     for (const [id, rec] of this.teams) {
       rec.stopWatch?.()
       rec.stopWatch = null
@@ -515,7 +611,8 @@ export class TeamService implements TeamInternals {
     // A removeTeam waiting for its runs goes on (it then finds its team gone: not_found).
     for (const id of [...this.idleWaiters.keys()]) this.wakeIdle(id)
     this.watched = null
-    this.pendingDetail.clear()
+    this.runDetail.clear()
+    this.consumedMark.clear()
     this.awakeAt.clear()
     this.runWrites.clear()
     this.archivedCounts.clear()
@@ -533,7 +630,7 @@ export class TeamService implements TeamInternals {
       log: this.deps.log,
       fs: this.deps.storeFs,
       strict: this.deps.strict,
-      reap: (rt, recent) => reapOnLoad(rt, recent, basicPolicy, { now: this.clock() }),
+      reap: (rt, recent) => reapOnLoad(rt, recent, this.runPolicy, { now: this.clock() }),
     }
   }
 
@@ -614,8 +711,13 @@ export class TeamService implements TeamInternals {
     if (epoch !== this.epoch || !this.live()) return
     const rec = this.teams.get(teamId)
     if (!rec) return
+    // Settled: until here every reaped run with a live pid held its session and tree (orphanHolds); a pass now sees
+    // only the confirmed orphans, so the check pokes once it settles, whatever it found.
     this.reapedAtLoad.delete(teamId)
-    if (found.length === 0) return
+    if (found.length === 0) {
+      this.poke()
+      return
+    }
     const byRun = new Map(reaped.map((r) => [r.id, r]))
     const res = this.commit(
       teamId,
@@ -630,6 +732,7 @@ export class TeamService implements TeamInternals {
     }
     this.lingering.set(teamId, [...(this.lingering.get(teamId) ?? []).filter((l) => !found.some((x) => x.runId === l.runId)), ...found])
     this.deps.log(`orphans ${teamId} n=${found.length}`)
+    this.poke()
   }
 
   private orphanMatch(info: { at: number; image: string }, startedAt: number): boolean {
@@ -686,11 +789,25 @@ export class TeamService implements TeamInternals {
     return null
   }
 
-  /** Session ids and cwds the lingering orphans of a team hold (G5 / G6). */
+  /**
+   * What the processes of decision 64 hold in a team: the lingering orphans and, until the team's orphan check
+   * settles, every run its load reaped whose pid still lives (the probe takes seconds on Windows, and a pass before
+   * it ends would resume the orphan's session next to it, or write in its tree).
+   */
+  private orphanHolds(teamId: string): Array<{ sessionId?: string; cwd: string }> {
+    const out: Array<{ sessionId?: string; cwd: string }> = [...(this.lingering.get(teamId) ?? [])]
+    for (const r of this.reapedAtLoad.get(teamId) ?? []) {
+      if (typeof r.pid !== 'number' || !this.treeKill.alive(r.pid)) continue
+      out.push(r.sessionId ? { sessionId: r.sessionId, cwd: r.cwd } : { cwd: r.cwd })
+    }
+    return out
+  }
+
+  /** Session ids and cwds the lingering orphans of a team hold (G5 / G6), the runs its orphan check still probes included. */
   lingeringOf(teamId: string): { sessions: Set<string>; cwds: Set<string> } {
     this.dropDeadOrphans(teamId)
-    const list = this.lingering.get(teamId) ?? []
-    return { sessions: new Set(list.map((l) => l.sessionId).filter((s): s is string => !!s)), cwds: new Set(list.map((l) => pathKey(l.cwd))) }
+    const list = this.orphanHolds(teamId)
+    return { sessions: new Set(list.map((l) => l.sessionId).filter((s): s is string => !!s)), cwds: new Set(list.map((l) => this.locks.key(l.cwd))) }
   }
 
   // ---- deadlines -------------------------------------------------------------------------------
@@ -700,6 +817,9 @@ export class TeamService implements TeamInternals {
     const kind = colon < 0 ? key : key.slice(0, colon)
     const rest = colon < 0 ? '' : key.slice(colon + 1)
     switch (kind) {
+      case DISPATCH_KEY:
+        this.dispatcher.onDue()
+        return
       case 'flush':
         this.teams.get(rest)?.store.flushSync()
         return
@@ -716,7 +836,7 @@ export class TeamService implements TeamInternals {
         if (!rec) return
         const reason = m[2] === 'max' ? 'timeout' : 'concluded'
         this.deps.log(`run ${m[1]} stop ${reason}`)
-        this.commit(teamId, requestStop(rec.store.rt, m[1], reason, { now: this.clock() }), ['agents', 'run'], { runId: m[1] })
+        this.commit(teamId, requestStop(rec.store.rt, m[1], reason, { now: this.clock() }, this.runPolicy), ['agents', 'run'], { runId: m[1] })
         return
       }
       default:
@@ -903,6 +1023,17 @@ export class TeamService implements TeamInternals {
   commit<R>(teamId: string, res: FlowResult<R>, scopes: TeamScope[], hint?: { taskId?: string; runId?: string }): FlowResult<R> {
     const rec = this.teams.get(teamId)
     if (!rec) return res
+    // A task run that is admitted, starts or ends moves its card (run glyph, phase): the board and the task drawer refresh.
+    const hintRun = hint?.runId
+    if (res.ok && hintRun && !hint?.taskId) {
+      const run = rec.store.rt.activeRuns.find((r) => r.id === hintRun) ?? res.rt.activeRuns.find((r) => r.id === hintRun)
+      if (run?.taskId) {
+        hint = { ...hint, taskId: run.taskId }
+        scopes = [...new Set<TeamScope>([...scopes, 'board', 'task'])]
+      }
+    } else if (res.ok && hint?.runId && hint.taskId && !scopes.includes('board')) {
+      scopes = [...new Set<TeamScope>([...scopes, 'board', 'task'])]
+    }
     const header = res.ok && !scopes.includes('team') ? teamHeaderKey(rec, this.trust.trusted(teamId), this.clock()) : null
     const out = rec.store.commit(res, scopes, hint)
     if (!out.ok) return out
@@ -940,7 +1071,7 @@ export class TeamService implements TeamInternals {
           }
           break
         case 'releaseLocks':
-          // B4: WriteLocks.releaseAll(runId).
+          this.locks.releaseAll(e.runId)
           break
         case 'deleteSystemFile':
           try {
@@ -972,7 +1103,8 @@ export class TeamService implements TeamInternals {
   private runEnded(teamId: string, run: Run): void {
     const rec = this.teams.get(teamId)
     rec?.store.recordRun(run)
-    this.pendingDetail.delete(run.id)
+    this.runDetail.delete(run.id)
+    this.consumedMark.delete(run.id)
     this.awakeAt.delete(run.id)
     this.runWrites.delete(run.id)
     if (this.watched?.runId === run.id) this.sendRun({ teamId, runId: run.id, agentId: run.agentId, items: [], state: run.state })
@@ -982,10 +1114,10 @@ export class TeamService implements TeamInternals {
     if (this.live() && !this.removing.has(teamId)) void this.pruneRunLogs(teamId)
   }
 
-  /** B4: wakes the Dispatcher; nothing dispatches before it. No-op while not live (3.0 item 6). */
-  private poke(): void {
+  /** Wakes the Dispatcher: one pass on the next tick (timer key `dispatch`). No-op while not live or installing (3.0 item 6). */
+  poke(): void {
     if (!this.live() || this.installing) return
-    /* no dispatcher yet */
+    this.dispatcher.poke()
   }
 
   // ---- runs (B2) -------------------------------------------------------------------------------
@@ -1009,11 +1141,16 @@ export class TeamService implements TeamInternals {
     return createHash('sha256').update(text, 'utf8').digest('hex')
   }
 
-  /** The `prepare` effect: the async prep, CAS on `queued` after every await (RunStarter). */
+  /**
+   * The `prepare` effect: the async prep, CAS on `queued` after every await (RunStarter). A prep failure with a card
+   * backs that agent and key off; one without a card gives back the wake mark the admission consumed, as it was.
+   */
   private prepare(teamId: string, runId: string): void {
     const rec = this.teams.get(teamId)
+    const consumed = this.consumedMark.get(runId)
+    this.consumedMark.delete(runId)
     if (!rec) return
-    const detail = this.pendingDetail.get(runId)
+    const detail = this.runDetail.get(runId)
     const current = (): TeamRecord | undefined => (this.teams.get(teamId) === rec ? rec : undefined)
     this.starter
       .prepare(teamId, runId, {
@@ -1023,9 +1160,21 @@ export class TeamService implements TeamInternals {
         ctx: () => (current() ? this.flowCtx(teamId) : null),
         recent: () => rec.store.recentRuns(),
         detail,
+        removed: () => this.removedRecs.has(rec),
+        failed: (_code, card) => {
+          if (!current()) return
+          const run = rec.store.recentRuns().find((r) => r.id === runId)
+          if (!run) return
+          if (card !== null) {
+            this.prepBackoff.set(`${teamId}|${run.agentId}|${run.sessionKey}`, this.clock() + RETRY_DELAY_MS)
+            return
+          }
+          if (!consumed) return
+          const res = restoreWake(rec.store.rt, run.taskId, consumed, { now: this.clock() })
+          if (res.ok && res.rt !== rec.store.rt) this.commit(teamId, res, changedScopes(rec.store.rt, res.rt), run.taskId ? { taskId: run.taskId } : undefined)
+        },
       })
       .catch((err) => this.deps.log(`run ${runId} prep error ${(err as Error).name}`))
-      .finally(() => this.pendingDetail.delete(runId))
   }
 
   /** The synthetic status of a live run (design 3.5): AwakeService only, never StatusManager. */
@@ -1088,15 +1237,20 @@ export class TeamService implements TeamInternals {
    * not live.
    */
   onPaneStatus(evt: PaneStatusEvt): void {
-    if (!this.live() || !evt || isTeamPaneId(evt.paneId) || evt.state === null || !evt.sessionId) return
+    if (!this.live() || !evt || isTeamPaneId(evt.paneId)) return
+    // A console that stopped working may free a session or a tree a deferred run waits on (G5, G6): one pass.
+    if (this.waitsOnConsoles.size > 0 && evt.state !== 'working' && evt.state !== 'action') this.poke()
+    if (evt.state === null || !evt.sessionId) return
     for (const [teamId, rec] of this.teams) {
       for (const run of rec.store.rt.activeRuns) {
         if (run.sessionId !== evt.sessionId || (run.state !== 'starting' && run.state !== 'running')) continue
         if ((evt.provider ?? 'claude') !== run.provider) continue
         this.deps.log(`run ${run.id} session conflict with a console`)
-        const stopped = this.commit(teamId, requestStop(rec.store.rt, run.id, 'sessionConflict', { now: this.clock() }), ['agents', 'run'], { runId: run.id })
-        if (stopped.ok) {
-          this.commit(teamId, openSystemCard(rec.store.rt, { why: 'sessionConflict', actions: ['dismiss'], taskId: run.taskId, runId: run.id, vars: { what: run.id, agentId: run.agentId } }, { now: this.clock() }), ['needs'])
+        const stopped = this.commit(teamId, requestStop(rec.store.rt, run.id, 'sessionConflict', { now: this.clock() }, this.runPolicy), ['agents', 'run'], { runId: run.id })
+        // One card per session (decision 39, extra requirement 2): a second conflict on the same run or session,
+        // while its card is open, opens none (openSystemCard dedups by reason, task and `what`, the session).
+        if (stopped.ok && !stopped.result.already) {
+          this.commit(teamId, openSystemCard(rec.store.rt, { why: 'sessionConflict', actions: ['dismiss'], taskId: run.taskId, runId: run.id, vars: sessionCardVars(run) }, { now: this.clock() }), ['needs'])
         }
       }
     }
@@ -1118,7 +1272,7 @@ export class TeamService implements TeamInternals {
     for (const [teamId, rec] of this.teams) {
       for (const run of [...rec.store.rt.activeRuns]) {
         if (run.state === 'stopping') continue
-        this.commit(teamId, requestStop(rec.store.rt, run.id, 'cliOff', { now: this.clock() }), ['agents', 'run'], { runId: run.id })
+        this.commit(teamId, requestStop(rec.store.rt, run.id, 'cliOff', { now: this.clock() }, this.runPolicy), ['agents', 'run'], { runId: run.id })
       }
     }
   }
@@ -1310,14 +1464,37 @@ export class TeamService implements TeamInternals {
       this.deps.log(`run ${runId} closed after its end`)
       return
     }
+    // A writer run's tree is marked again (5 s budget): a moved HEAD or status is progress (decision 68). The
+    // finalize after it is a CAS: a run another path ended meanwhile (Labs off, a quit) is left alone.
+    const before = run.treeBefore
+    if (before && this.taskWorktrees) {
+      void this.taskWorktrees
+        .mark(run.cwd, CLOSE_MARK_MS)
+        .catch(() => null)
+        .then((m) => this.finalizeClosed(runId, end, m ? m.head !== before.head || m.status !== before.status : undefined))
+        .catch((err) => this.deps.log(`run ${runId} finalize failed ${(err as Error).name}`))
+      return
+    }
+    this.finalizeClosed(runId, end, end.treeMoved)
+  }
+
+  /** The `finishRun` commit of a closed run (its policy from the terminal copy), with the tree mark's verdict. */
+  private finalizeClosed(runId: string, end: RunEnd & { stderrTail: string; logBytes?: number; logCut?: boolean }, treeMoved: boolean | undefined): void {
+    const teamId = this.teamOfRun(runId)
+    const rec = teamId ? this.teams.get(teamId) : undefined
+    const run = rec?.store.rt.activeRuns.find((r) => r.id === runId)
+    if (!teamId || !rec || !run || run.state === 'queued') {
+      this.deps.log(`run ${runId} closed after its end`)
+      return
+    }
     const full: RunEnd = { at: end.at, exit: end.exit, facts: end.facts, teamWrites: this.runWrites.get(runId) ?? 0 }
     if (end.lastLineAt !== undefined) full.lastLineAt = end.lastLineAt
-    if (end.treeMoved !== undefined) full.treeMoved = end.treeMoved
+    if (treeMoved !== undefined) full.treeMoved = treeMoved
     const now = this.clock()
     const terminal = terminalOf(run, full)
     const acc = this.deps.accounts?.() ?? null
     const switchedAt = acc?.lastSwitch?.at
-    const policy = basicPolicy(runEndFactsOf(rec.store.rt, terminal, now, { claudeCanSwitch: this.claudeCanSwitch(acc), claudeSwitchedAt: switchedAt, unknownSession: end.facts.unknownSession }))
+    const policy = this.runPolicy(runEndFactsOf(rec.store.rt, terminal, now, { claudeCanSwitch: this.claudeCanSwitch(acc), claudeSwitchedAt: switchedAt, unknownSession: end.facts.unknownSession }))
     const res = this.commit(teamId, finishRun(rec.store.rt, runId, full, policy, { now }), ['agents', 'run', 'needs'], { runId })
     if (res.ok && end.logBytes !== undefined) {
       // Log size of the ended run (Run.logBytes, logTruncated) patched into its ring copy.
@@ -1338,7 +1515,7 @@ export class TeamService implements TeamInternals {
     facts.failure = { kind: 'request', code: `spawn_${detail}`.slice(0, 32) }
     const full: RunEnd = { at: now, exit: { code: null, signal: null }, facts, teamWrites: 0 }
     const terminal = terminalOf(run, full)
-    this.commit(teamId, finishRun(rec.store.rt, runId, full, basicPolicy(runEndFactsOf(rec.store.rt, terminal, now)), { now }), ['agents', 'run', 'needs'], { runId })
+    this.commit(teamId, finishRun(rec.store.rt, runId, full, this.runPolicy(runEndFactsOf(rec.store.rt, terminal, now)), { now }), ['agents', 'run', 'needs'], { runId })
   }
 
   /** autoSwitch on and another usable account (afterRunPolicy's claudeCanSwitch). */
@@ -1347,94 +1524,363 @@ export class TeamService implements TeamInternals {
     return acc.accounts.some((a) => a.id !== acc.activeId && (a.usage.fiveHour.percent ?? 0) < 100 && (a.usage.sevenDay.percent ?? 0) < 100)
   }
 
-  /** Every Claude account at its limit: the earliest reset ahead, else null (B4: claudeAllLimited). */
+  // ---- dispatch (B4, design 3.6) ----------------------------------------------------------------
+
+  /** Every Claude account at its limit (claudeAllLimited): its earliest reset, else the fallback; null while one is usable. */
   private claudeBlockedUntil(now: number): number | null {
-    const acc = this.deps.accounts?.() ?? null
-    if (!acc || acc.blocked !== 'allExhausted') return null
-    let until: number | null = null
-    for (const a of acc.accounts) {
-      for (const w of [a.usage.fiveHour, a.usage.sevenDay]) {
-        const t = w.resetsAt ? Date.parse(w.resetsAt) : NaN
-        if (Number.isFinite(t) && t > now && (until === null || t < until)) until = t
-      }
-    }
-    return until
+    const lim = claudeAllLimited(this.deps.accounts?.() ?? null, now)
+    if (!lim.limited) return null
+    return lim.until !== undefined && lim.until > now ? lim.until : now + LIMIT_FALLBACK_MS
   }
 
-  /** The gates' facts for a manual request (B4 builds them for the Dispatcher). */
-  private manualFacts(teamId: string): Parameters<typeof manualGate>[3] {
-    const now = this.clock()
-    const rec = this.teams.get(teamId)
-    let globalActive = 0
-    for (const r of this.teams.values()) globalActive += r.store.rt.activeRuns.length
-    const busySessions = new Set<string>(this.lingeringOf(teamId).sessions)
-    for (const a of rec?.store.rt.agents ?? []) {
-      for (const s of Object.values(a.sessions)) if (this.deps.sessionHolder?.(s.provider, s.sessionId)) busySessions.add(s.sessionId)
-    }
-    return {
-      now,
-      enabled: this.live() && !this.installing,
-      trusted: rec?.trust === 'trusted',
-      cliReady: this.deps.cli?.ready() ?? false,
-      globalActive,
-      claudeBlockedUntil: this.claudeBlockedUntil(now),
-      busySessions,
-      busyCwds: new Set(),
-      writerCwds: new Set(),
-      integrateCwds: new Set(),
-      cwdKeys: {},
-    }
-  }
-
-  /** Where and how a task-less run of `agent` runs: the main repo root, the effective profile, resume or fresh (decision 33). */
-  private admitFacts(teamId: string, agent: AgentState, role: RoleDefinition, mode: RunMode, sessionKey: string): AdmitFacts | null {
-    const main = this.repoOf(teamId, REPO_MAIN)
-    if (!('repoRoot' in main)) return null
-    const sysHash = this.sysHashOf(teamId, role.id) ?? ''
-    const cwd = main.repoRoot
-    const sess = agent.sessions[sessionKey]
-    const resume = sess && sess.turns > 0 && sess.sysHash === sysHash && sess.provider === agent.provider && pathKey(sess.cwd) === pathKey(cwd) ? { sessionId: sess.sessionId } : null
-    const a: AdmitFacts = { sessionKey, resume, cwd, profile: effectiveProfile(role.permission, mode), sysHash }
-    if (role.model) a.model = role.model
-    if (role.effort) a.effort = role.effort
-    return a
+  /** The assignee's role writes (total, custom): a worktree task then gets its tree (decision 24). */
+  private assigneeWrites(rt: Readonly<TeamRuntime>, def: TrustedDefinition, task: TeamTask): boolean {
+    const agent = task.assignee ? rt.agents.find((a) => a.id === task.assignee) : undefined
+    const role = agent ? def.def.roles.find((r) => r.id === agent.roleId) : undefined
+    return !!role && roleWrites(role.permission)
   }
 
   /**
-   * "Ejecutar ahora" (B2): free mode for the agents, lead mode for the Lead.
-   * runNow bypasses only the autonomy gate (decision 44): every other gate
-   * answers `deferred` with its reason. The prompt rides in memory to the prep.
+   * Where a run would work (design 3.6): a task with its worktree -> that tree; a worktree task whose assignee
+   * writes and that has none yet -> pending (the prep creates it; the repo root holds its place until then);
+   * any other task -> the root of its repo (decision 62; an unresolved one fails the prep with cwdMissing);
+   * lead and free -> the main repo root.
    */
-  runManual(teamId: string, agentId: string, prompt?: string): { runId: string } | TeamFail {
+  private runCwdOf(teamId: string, rt: Readonly<TeamRuntime>, def: TrustedDefinition, task: TeamTask | undefined): { cwd: string; pending: boolean } | null {
+    const main = this.repoOf(teamId, REPO_MAIN)
+    if (!('repoRoot' in main)) return null
+    if (!task) return { cwd: main.repoRoot, pending: false }
+    if (task.worktree) return { cwd: task.worktree.path, pending: false }
+    const repo = this.repoOf(teamId, task.repoId)
+    const root = 'repoRoot' in repo ? repo.repoRoot : main.repoRoot
+    return { cwd: root, pending: task.isolation === 'worktree' && this.assigneeWrites(rt, def, task) }
+  }
+
+  /** The DispatchFacts cwd key of a run's tree: its write-lock key, or a key nobody holds for a worktree still to come. */
+  private cwdKeyOf(teamId: string, taskId: string | undefined, where: { cwd: string; pending: boolean }): string {
+    return where.pending ? `pending-worktree:${teamId}:${taskId ?? ''}` : this.locks.key(where.cwd)
+  }
+
+  /**
+   * One team's facts for a pass, from memory only (design 3.6): the cached trust state (decision 69), the CLI,
+   * the counts, the Claude accounts, the write locks, the lingering orphans of decision 64 (their sessions are
+   * busy, their cwds are writers) and, for the candidates only, who holds their sessions and their trees.
+   */
+  private dispatchFacts(teamId: string, pass: { globalActive: number; writers: Set<string> }, manual: readonly ManualRequest[]): DispatchFacts | null {
+    const rec = this.teams.get(teamId)
+    if (!rec) return null
+    const now = this.clock()
+    // The lingering set first: dropping a dead orphan commits (its card), so `rt` is read after it.
+    const lingering = this.lingeringOf(teamId)
+    const rt = rec.store.rt
+    const trusted = this.trust.trusted(teamId)
+    let globalActive = 0
+    for (const r of this.teams.values()) globalActive += r.store.rt.activeRuns.length
+    const busySessions = new Set<string>(lingering.sessions)
+    const writerCwds = new Set<string>([...this.locks.writerKeys(), ...lingering.cwds, ...pass.writers])
+    const cwdKeys: Record<string, string> = {}
+    const trees: string[] = []
+    const facts: DispatchFacts = {
+      now,
+      enabled: this.live() && !this.installing,
+      trusted: rec.trust === 'trusted' && trusted !== null,
+      cliReady: this.deps.cli?.ready() ?? false,
+      globalActive: Math.max(globalActive, pass.globalActive),
+      claudeBlockedUntil: this.claudeBlockedUntil(now),
+      busySessions,
+      busyCwds: new Set(),
+      writerCwds,
+      integrateCwds: this.locks.integrateKeys(),
+      cwdKeys,
+      manual: [...manual],
+    }
+    if (!trusted) return facts
+    let cands: RunRequest[] = []
+    try {
+      cands = candidatesOf(rt, trusted.def, trusted.goalHash, { now, manual: facts.manual }, { skip: this.skipOf(teamId, rt) })
+    } catch (err) {
+      this.deps.log(`dispatch ${teamId} candidates failed ${(err as Error).name}`)
+    }
+    for (const c of cands) {
+      const agent = rt.agents.find((a) => a.id === c.agentId)
+      const s = agent?.sessions[c.sessionKey]
+      if (s && !busySessions.has(s.sessionId) && this.deps.sessionHolder?.(s.provider, s.sessionId)) busySessions.add(s.sessionId)
+      if (cwdKeys[c.sessionKey] !== undefined) continue
+      const task = c.taskId ? rt.tasks.find((t) => t.id === c.taskId) : undefined
+      const where = this.runCwdOf(teamId, rt, trusted, task)
+      if (!where) continue
+      cwdKeys[c.sessionKey] = this.cwdKeyOf(teamId, task?.id, where)
+      if (!where.pending) trees.push(where.cwd)
+    }
+    facts.busyCwds = this.locks.busyKeys(trees)
+    return facts
+  }
+
+  /**
+   * One team's step of a pass (design 3.11 item 2): the reconcileTasks commit, planDispatch, the "Por despachar"
+   * items it asks for (a discarded level that did not change is no candidate: planOf skips it) and the admissions,
+   * each its own commit (its `prepare` effect starts the async prep).
+   */
+  private dispatchStep(teamId: string, given: DispatchFacts): StepResult {
     const rec = this.teams.get(teamId)
     const ctx0 = this.flowCtx(teamId)
-    if (!rec || !ctx0) return fail(rec ? 'untrusted' : 'not_found')
-    // The facts first: lingeringOf may commit (a dead orphan's card dismissed), so `rt` is read after it.
-    const facts = this.manualFacts(teamId)
+    const none: StepResult = { plan: { start: [], enqueue: [], deferred: [], nextAt: null }, started: [] }
+    if (!rec || !ctx0) return none
+    let facts = given
+    let unblockAt: number | null = null
+    if (facts.enabled && facts.trusted) {
+      const r = reconcileTasks(rec.store.rt, ctx0.def.def, ctx0)
+      if (r.ok) {
+        unblockAt = r.result.nextAt
+        if (r.rt !== rec.store.rt) {
+          this.commit(teamId, r, changedScopes(rec.store.rt, r.rt))
+          // A task it unblocked is a new candidate: its session and tree are looked up again (the pass's counts kept).
+          facts = this.dispatchFacts(teamId, { globalActive: given.globalActive, writers: new Set(given.writerCwds) }, given.manual) ?? given
+        }
+      }
+    }
     const rt = rec.store.rt
-    const agent = rt.agents.find((a) => a.id === agentId)
+    const plan = this.planOf(teamId, rt, ctx0.def, facts)
+    // A task an unblock window refused is unblocked by the first pass after the window: its end is a deadline too.
+    if (unblockAt !== null && (plan.nextAt === null || unblockAt < plan.nextAt)) plan.nextAt = unblockAt
+    if (plan.deferred.some((d) => CONSOLE_DEFERS.has(d.reason))) this.waitsOnConsoles.add(teamId)
+    else this.waitsOnConsoles.delete(teamId)
+    if (plan.enqueue.length > 0) {
+      const e = enqueue(rec.store.rt, plan.enqueue, ctx0)
+      if (e.ok && e.rt !== rec.store.rt) this.commit(teamId, e, ['needs', 'agents'])
+    }
+    const started: StepResult['started'] = []
+    for (const req of plan.start) {
+      const runId = this.admit(teamId, req)
+      if (runId) started.push({ request: req, runId })
+    }
+    return { plan, started }
+  }
+
+  /**
+   * planDispatch with the prep-failure backoff applied: a level whose prep just failed with a card waits
+   * RETRY_DELAY_MS (a user's "Ejecutar ahora" bypasses the cooldown and never does). Its agent sits out the plan
+   * (planDispatch reads it as paused), so it never takes a cap slot the next request in line could use, and its
+   * row reads `cooldown` until the backoff ends. A level the user discarded and that did not change is skipped
+   * before each agent's minimum (skipOf), so the agent's next level gets its queue item.
+   */
+  private planOf(teamId: string, rt: Readonly<TeamRuntime>, def: TrustedDefinition, facts: DispatchFacts): DispatchPlan {
+    const held = new Map<string, number>()
+    const skip = this.skipOf(teamId, rt)
+    // Each round holds at least one more agent (a held one is paused, never a start again): at most one per agent.
+    for (;;) {
+      const view: Readonly<TeamRuntime> = held.size === 0 ? rt : { ...rt, agents: rt.agents.map((a) => (held.has(a.id) ? { ...a, paused: true } : a)) }
+      const plan = planDispatch(view, def.def, def.goalHash, facts, { skip })
+      let more = false
+      for (const req of plan.start) {
+        const until = req.bypassCooldown ? undefined : this.backoffOf(teamId, req, facts.now)
+        if (until === undefined) continue
+        held.set(req.agentId, until)
+        more = true
+      }
+      if (more) continue
+      if (held.size === 0) return plan
+      plan.deferred = plan.deferred.map((d) => {
+        const until = held.get(d.request.agentId)
+        return until !== undefined && d.reason === 'agentPaused' ? { request: d.request, reason: 'cooldown', until } : d
+      })
+      for (const until of held.values()) if (plan.nextAt === null || until < plan.nextAt) plan.nextAt = until
+      return plan
+    }
+  }
+
+  /** The end of a level's prep-failure backoff (`<teamId>|<agentId>|<sessionKey>`), or undefined; an expired one is forgotten. */
+  private backoffOf(teamId: string, req: RunRequest, now: number): number | undefined {
+    const key = `${teamId}|${req.agentId}|${req.sessionKey}`
+    const until = this.prepBackoff.get(key)
+    if (until === undefined) return undefined
+    if (until > now) return until
+    this.prepBackoff.delete(key)
+    return undefined
+  }
+
+  /** planDispatch of the current runtime with the prep backoff, no commit (dry runs). */
+  private dryPlan(teamId: string, facts: DispatchFacts): DispatchPlan {
+    const rec = this.teams.get(teamId)
+    const def = this.trust.trusted(teamId)
+    if (!rec || !def) return { start: [], enqueue: [], deferred: [], nextAt: null }
+    return this.planOf(teamId, rec.store.rt, def, facts)
+  }
+
+  /** A manual request no candidate came from: its agent is busy (running, stopping, taken over) or the team cannot run. */
+  private unplanned(teamId: string, m: ManualRequest): DeferInfo {
+    const rec = this.teams.get(teamId)
+    const withTask = (d: DeferInfo): DeferInfo => (m.taskId ? { ...d, taskId: m.taskId } : d)
+    if (!rec || rec.trust !== 'trusted' || !this.trust.trusted(teamId)) return withTask({ reason: 'untrusted' })
+    if (!this.live() || this.installing) return withTask({ reason: 'disabled' })
+    const rt = rec.store.rt
+    const agent = rt.agents.find((a) => a.id === m.agentId)
+    if (agent && (agent.status === 'takenOver' || agent.takeover)) return withTask({ reason: 'takenOver' })
+    const run = agent?.runId ? rt.activeRuns.find((r) => r.id === agent.runId) : m.taskId ? rt.activeRuns.find((r) => r.taskId === m.taskId) : undefined
+    return withTask({ reason: run?.state === 'stopping' ? 'stopping' : 'running' })
+  }
+
+  /**
+   * Admits one request of a pass (R1): where and how it runs, the write lock of its tree for a writer run (a
+   * pending worktree takes it in the prep, once its path exists), the admission commit. The run id, or null when
+   * the state moved under it (the request stays a level; the next pass sees it again).
+   */
+  private admit(teamId: string, req: RunRequest): string | null {
+    const rec = this.teams.get(teamId)
+    const ctx0 = this.flowCtx(teamId)
+    if (!rec || !ctx0) return null
+    const rt = rec.store.rt
+    const agent = rt.agents.find((a) => a.id === req.agentId)
     const role = agent ? ctx0.def.def.roles.find((r) => r.id === agent.roleId) : undefined
-    if (!agent || !role) return fail('not_found')
-    if (agent.retired) return fail('busy')
-    const mode: RunMode = agent.roleKind === 'lead' ? 'lead' : 'free'
-    const sessionKey = sessionKeyOf(mode)
-    const now = this.clock()
-    const req: RunRequest = { agentId, sessionKey, mode, reason: 'manual', since: now, priority: 'high', approved: true, bypassCooldown: true }
-    if (prompt && prompt.trim()) req.detail = prompt
-    const defer = manualGate(rt, ctx0.def.def, req, facts)
-    if (defer) return fail('deferred', { defer })
-    const a = this.admitFacts(teamId, agent, role, mode, sessionKey)
-    if (!a) return fail('deferred', { defer: { reason: 'untrusted' } })
+    const task = req.taskId ? rt.tasks.find((t) => t.id === req.taskId) : undefined
+    if (!agent || !role || (req.taskId && !task)) return null
+    const where = this.runCwdOf(teamId, rt, ctx0.def, task)
+    if (!where) return null
+    const sysHash = this.sysHashOf(teamId, role.id) ?? ''
+    const sess = agent.sessions[req.sessionKey]
+    const resume = !where.pending && sess && sess.turns > 0 && sess.sysHash === sysHash && sess.provider === agent.provider && pathKey(sess.cwd) === pathKey(where.cwd) ? { sessionId: sess.sessionId } : null
+    const a: AdmitFacts = { sessionKey: req.sessionKey, resume, cwd: where.cwd, profile: effectiveProfile(role.permission, req.mode), sysHash }
+    if (role.model) a.model = role.model
+    if (role.effort) a.effort = role.effort
     const runId = ctx0.newRunId()
     const ctx: FlowCtx = { ...ctx0, newRunId: () => runId }
-    if (req.detail) this.pendingDetail.set(runId, req.detail)
-    const res = this.commit(teamId, admitRun(rt, req, a, ctx), ['agents', 'run'], { runId })
-    if (!res.ok) {
-      this.pendingDetail.delete(runId)
-      return fail(res.error === 'running' || res.error === 'stopping' ? 'deferred' : res.error, res.error === 'running' || res.error === 'stopping' ? { defer: { reason: res.error } } : {})
+    const lockKey = a.profile !== 'readonly' && !where.pending ? this.locks.key(where.cwd) : null
+    if (lockKey && !this.locks.acquire(lockKey, runId)) {
+      this.deps.log(`run of ${req.agentId} not admitted: tree held by ${this.locks.holderOf(lockKey) ?? '?'}`)
+      return null
     }
-    this.deps.log(`run ${runId} admitted agent=${agentId} mode=${mode} resume=${a.resume ? 'yes' : 'no'}`)
-    return { runId }
+    if (req.detail) this.runDetail.set(runId, req.detail)
+    // The level R1 consumes (it clears task.next, and the agent's own mark of this mode): a prep failure without a card gives it back.
+    const consumed = task ? task.next : agent.next && agent.next.mode === req.mode ? agent.next : undefined
+    if (consumed && consumed.agentId === agent.id) this.consumedMark.set(runId, { ...consumed })
+    const res = this.commit(teamId, admitRun(rt, req, a, ctx), ['agents', 'run', 'needs'], { runId })
+    if (!res.ok) {
+      if (lockKey) this.locks.release(lockKey, runId)
+      this.runDetail.delete(runId)
+      this.consumedMark.delete(runId)
+      this.deps.log(`run of ${req.agentId} not admitted: ${res.error}`)
+      return null
+    }
+    this.discarded.delete(`${teamId}|${req.agentId}|${req.sessionKey}`)
+    this.deps.log(`run ${runId} admitted agent=${req.agentId} mode=${req.mode} reason=${req.reason}${req.taskId ? ` task=${req.taskId}` : ''} resume=${a.resume ? 'yes' : 'no'}`)
+    return runId
+  }
+
+  /**
+   * What a level the runtime derives looks like (a todo assignee, queued comments, an unread message, the Lead's
+   * goal and triage): a discarded item comes back only once this moves.
+   */
+  private levelSig(rt: Readonly<TeamRuntime>, agentId: string, sessionKey: string, taskId: string | undefined): string {
+    const agent = rt.agents.find((a) => a.id === agentId)
+    if (taskId) {
+      const t = rt.tasks.find((x) => x.id === taskId)
+      const queued = (rt.comments[taskId] ?? []).filter((c) => c.forAgent === agentId && c.deliveredRunId === undefined)
+      return `t|${t?.rev ?? 0}|${t?.state ?? ''}|${t?.phase ?? ''}|${queued.length}|${queued.at(-1)?.id ?? ''}|${t?.next?.since ?? ''}`
+    }
+    if (agent?.roleKind === 'lead') {
+      const msgs = (rt.comments[LEAD_THREAD] ?? []).filter((c) => c.author.kind === 'user' && c.forAgent === agentId && c.deliveredRunId === undefined)
+      const untriaged = rt.tasks.filter((t) => t.state === 'todo' && !t.assignee && t.triagedAt === undefined).length
+      const smallPlans = rt.approvals.filter((x) => x.state === 'pending' && x.decider === 'lead' && !x.leadSeenRunId).length
+      return `l|${rt.goalSeenHash ?? ''}|${msgs.length}|${msgs.at(-1)?.id ?? ''}|${untriaged}|${smallPlans}|${agent.next?.since ?? ''}`
+    }
+    return `f|${sessionKey}|${agent?.next?.since ?? ''}`
+  }
+
+  /**
+   * The `agentId|sessionKey` levels of a team the user discarded and that did not change since (a changed one is
+   * forgotten here): planDispatch leaves them out before each agent's minimum, so the agent's next level is its
+   * candidate. Only while autonomy is off: with it on nothing waits in "Por despachar" and the level runs.
+   */
+  private skipOf(teamId: string, rt: Readonly<TeamRuntime>): Set<string> {
+    const out = new Set<string>()
+    if (rt.autoDispatch || this.discarded.size === 0) return out
+    const prefix = `${teamId}|`
+    for (const [key, d] of [...this.discarded]) {
+      if (!key.startsWith(prefix)) continue
+      const rest = key.slice(prefix.length)
+      const bar = rest.indexOf('|')
+      const agentId = rest.slice(0, bar)
+      const sessionKey = rest.slice(bar + 1)
+      if (d.sig === this.levelSig(rt, agentId, sessionKey, d.taskId)) out.add(rest)
+      else this.discarded.delete(key)
+    }
+    return out
+  }
+
+  /**
+   * "Ejecutar ahora" (decision 44): through Dispatcher.manual, which bypasses only the autonomy gate; every other
+   * gate answers `deferred` with its reason. Without a task: the agent's best level, else a free run (lead mode
+   * for the Lead). With a task: the run its phase wants of that agent (its assignee in todo and doing, its QA in
+   * qa); a task over, blocked or waiting on the user answers `conflict {stale}`, another agent `bad_request`.
+   * The prompt rides in memory to the prep and the run's end; only a task-less re-wake the policy asks for keeps it,
+   * in its persisted wake mark (withRunDetail).
+   */
+  runManual(teamId: string, agentId: string, prompt?: string, taskId?: string): { runId: string } | TeamFail {
+    const rec = this.teams.get(teamId)
+    const def = this.trust.trusted(teamId)
+    if (!rec) return fail('not_found')
+    if (!def) return fail('untrusted')
+    const rt = rec.store.rt
+    const agent = rt.agents.find((a) => a.id === agentId)
+    if (!agent || !def.def.roles.some((r) => r.id === agent.roleId)) return fail('not_found')
+    if (agent.retired) return fail('busy')
+    if (taskId) {
+      const task = rt.tasks.find((t) => t.id === taskId)
+      if (!task) return fail('not_found')
+      const run = rt.activeRuns.find((r) => r.taskId === taskId)
+      if (run && run.agentId !== agentId) return fail('deferred', { defer: { reason: run.state === 'stopping' ? 'stopping' : 'running', taskId } })
+      if (!run) {
+        const who = phaseAgentOf(task)
+        if (task.state === 'done' || task.state === 'cancelled' || task.state === 'blocked' || who === undefined) return fail('conflict', { reason: 'stale' })
+        if (who !== agentId) return fail('bad_request')
+      }
+    }
+    const m: ManualRequest = { agentId, reason: 'manual' }
+    if (taskId) m.taskId = taskId
+    if (prompt && prompt.trim()) m.detail = prompt
+    const r = this.dispatcher.manual(teamId, m)
+    return 'runId' in r ? r : fail('deferred', { defer: r.defer })
+  }
+
+  /** The kickoff op (decision 43): the Lead turns the goal into tasks now, through Dispatcher.manual like runNow. */
+  kickoff(teamId: string): { runId: string } | TeamFail {
+    const rec = this.teams.get(teamId)
+    if (!rec) return fail('not_found')
+    if (!this.trust.trusted(teamId)) return fail('untrusted')
+    const lead = rec.store.rt.agents.find((a) => a.roleKind === 'lead' && !a.retired)
+    if (!lead) return fail('not_found')
+    const r = this.dispatcher.manual(teamId, { agentId: lead.id, reason: 'kickoff' })
+    return 'runId' in r ? r : fail('deferred', { defer: r.defer })
+  }
+
+  /**
+   * Despachar / Descartar of "Por despachar" (one item or `all`): queueDecide commit, then a pass for what was
+   * approved. A discarded level the runtime derives is kept out of the candidates until it changes (memory only),
+   * and the pass right after a Descartar offers the agent's next level in its place.
+   */
+  dispatchQueue(teamId: string, queueId: string, go: boolean, actor: Actor): { approved: string[]; dropped: string[] } | TeamFail {
+    const rec = this.teams.get(teamId)
+    const ctx = this.flowCtx(teamId)
+    if (!rec) return fail('not_found')
+    if (!ctx) return fail('untrusted')
+    const targets = rec.store.rt.queue.filter((q) => queueId === 'all' || q.id === queueId)
+    const res = this.commit(teamId, queueDecide(rec.store.rt, actor, queueId, go, ctx), ['needs', 'agents'])
+    if (!res.ok) return fail(res.error)
+    if (!go) {
+      for (const q of targets) {
+        const d: { sig: string; taskId?: string } = { sig: this.levelSig(rec.store.rt, q.agentId, q.sessionKey, q.taskId) }
+        if (q.taskId) d.taskId = q.taskId
+        this.discarded.set(`${teamId}|${q.agentId}|${q.sessionKey}`, d)
+      }
+      if (targets.length > 0) this.poke()
+    }
+    this.deps.log(`dispatch ${teamId} ${go ? 'approved' : 'dropped'} ${(go ? res.result.approved : res.result.dropped).join(',')}`)
+    return res.result
+  }
+
+  /** Why each agent's and each queue item's run waits now (a dispatch dry run, no commit). */
+  dispatchWaiting(teamId: string): { byAgent: Map<string, DeferInfo>; byKey: Map<string, DeferInfo> } {
+    return waitingOf(this.dispatcher.dryRun(teamId))
   }
 
   runLive(runId: string): { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean } {
@@ -1695,13 +2141,13 @@ export class TeamService implements TeamInternals {
 
   private async removeRecord(teamId: string, rec: TeamRecord): Promise<TeamFail | null> {
     // Every run stops first (`deleted`) and its close is awaited (the supervisor forces it after STOP_GRACE_MS).
-    // B4 disowns the task worktrees; B6 refuses while an integrate runs.
+    // Its task worktrees are disowned once the folder moved (below); B6 refuses while an integrate runs.
     for (const run of [...rec.store.rt.activeRuns]) {
-      if (run.state !== 'stopping') this.commit(teamId, requestStop(rec.store.rt, run.id, 'deleted', { now: this.clock() }), ['agents', 'run'], { runId: run.id })
+      if (run.state !== 'stopping') this.commit(teamId, requestStop(rec.store.rt, run.id, 'deleted', { now: this.clock() }, this.runPolicy), ['agents', 'run'], { runId: run.id })
     }
     await this.runsEnded(teamId, rec, REMOVE_WAIT_MS)
     for (const run of [...rec.store.rt.activeRuns]) this.supervisor.onDeadline(`run:${run.id}:stop`)
-    if (rec.store.rt.activeRuns.length > 0) this.commit(teamId, interruptAll(rec.store.rt, 'shutdown', basicPolicy, { now: this.clock() }), ['agents', 'run'])
+    if (rec.store.rt.activeRuns.length > 0) this.commit(teamId, interruptAll(rec.store.rt, 'shutdown', this.runPolicy, { now: this.clock() }), ['agents', 'run'])
     if (this.teams.get(teamId) !== rec) return fail('not_found')
     // Written now, so the folder that moves holds the last state (dispose only flushes: the store stays usable).
     rec.store.dispose()
@@ -1715,6 +2161,18 @@ export class TeamService implements TeamInternals {
     rec.stopWatch = null
     this.timer.clear(`defwatch:${teamId}`)
     this.teams.delete(teamId)
+    this.removedRecs.add(rec)
+    // Decision 63: its task worktrees lose their owner and read as ordinary orphans in Settings > Git (never deleted
+    // here). After the trash: a team whose folder did not move keeps owning them. A tree a prep is still creating
+    // lands after this; that prep sees the record removed and disowns it (RunStarter step 2).
+    try {
+      const n = this.taskWorktrees?.disown(teamId) ?? 0
+      if (n > 0) this.deps.log(`remove ${teamId} disowned worktrees=${n}`)
+    } catch (err) {
+      this.deps.log(`remove ${teamId} disown failed ${(err as Error).name}`)
+    }
+    for (const k of [...this.discarded.keys()]) if (k.startsWith(`${teamId}|`)) this.discarded.delete(k)
+    this.waitsOnConsoles.delete(teamId)
     // Its orphans' cards went with the folder; a team set up again on the repo starts without them.
     this.lingering.delete(teamId)
     this.reapedAtLoad.delete(teamId)

@@ -175,6 +175,7 @@ export const es: Record<keyof typeof en, string> = {
   'worktree.rmErr.git_error': 'git falló: {detail}',
   'worktree.rmErr.changed': 'El worktree cambió desde que se revisó; no se borró nada',
   'worktree.rmErr.shared': 'Otra consola todavía usa este worktree: cerrala primero. No se borró nada',
+  'worktree.rmErr.team': 'Una tarea de un equipo usa este worktree: quitalo desde el equipo. No se borró nada',
   'worktree.chip.base': 'Base {sha}',
   'worktree.chip.ahead': '{count} commits sobre la base',
   'worktree.chip.open': 'Click para ver los cambios',

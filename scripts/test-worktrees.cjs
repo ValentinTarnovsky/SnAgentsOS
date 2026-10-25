@@ -7,7 +7,10 @@
 // main HEAD moved), a remove refused while another pane of the saved config
 // runs in the folder ('shared'), schema 13 round trip,
 // PtyManager's cwd_missing, and the renderer side (offer rules, close routing,
-// the phone's closePane keeping folder and branch). Bundled with esbuild and
+// the phone's closePane keeping folder and branch), and the team task owner of
+// app 2.7.0 B4 (manifest owner, teamOwned in list, the IPC remove refused, the
+// owner's remove, disown, never an orphan, a create landing while list() adopts
+// its folder keeps its owner). Bundled with esbuild and
 // run in a vm like test-git.cjs; git runs with an isolated config. Nothing
 // outside the temp tree is touched.
 const { buildSync } = require('esbuild')
@@ -697,6 +700,95 @@ async function realRepoChecks() {
     svc.dispose()
   }
 
+  // app 2.7.0 (E10 B4, decision 63): a team task worktree carries its owner; Settings > Git never offers it as an
+  // orphan, the IPC remove (which never passes an owner) is refused, its owner removes it, a removed team disowns it.
+  {
+    const owner = 'team:tm-0123456789ab:cafebabe:t-1'
+    const ow = await s.create({ repoCwd: repo, slug: 'team-own-1', copyEnv: false, linkNodeModules: false }, { owner })
+    check(ow.ok && manifest.find(ow.worktree.path).owner === owner && new M.WorktreeManifest(mfFile).find(ow.worktree.path).owner === owner, 'create with an owner: the manifest entry keeps it, also read back from the file')
+    const plainWt = await s.create({ repoCwd: repo, slug: 'no-owner-1', copyEnv: false, linkNodeModules: false })
+    check(plainWt.ok && manifest.find(plainWt.worktree.path).owner === undefined, 'a console create (the IPC call, create(req) alone) never has one')
+    const lst = await s.list()
+    const ownRow = lst.entries.find((e) => canon(e.path) === canon(ow.worktree.path))
+    check(ownRow && ownRow.teamOwned === true && ownRow.managed && !lst.entries.find((e) => canon(e.path) === canon(plainWt.worktree.path)).teamOwned, 'list(): teamOwned on the owned row only')
+    same(await s.remove({ path: ow.worktree.path, deleteBranch: true }), { ok: false, error: 'busy', detail: 'team' }, 'the IPC remove (no owner) of an owned entry: busy, detail team')
+    same(await s.remove({ path: ow.worktree.path, deleteBranch: true }, { owner: 'team:tm-0123456789ab:deadbeef:t-1' }), { ok: false, error: 'busy', detail: 'team' }, 'another owner (an old gen of the team) cannot remove it either')
+    check(fs.existsSync(ow.worktree.path) && gitOkSync(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/sn/team-own-1'), 'and nothing was touched')
+    check(s.ownedBy(owner) && canon(s.ownedBy(owner).path) === canon(ow.worktree.path) && s.ownedBy('team:tm-0123456789ab:cafebabe:t-2') === null, 'ownedBy finds the entry of exactly that owner')
+    const owner2 = 'team:tm-0123456789ab:cafebabe:t-2'
+    const ow2 = await s.create({ repoCwd: repo, slug: 'team-own-2', copyEnv: false, linkNodeModules: false }, { owner: owner2 })
+    const in2 = await s.inspect({ path: ow2.worktree.path })
+    same(await s.remove({ path: ow2.worktree.path, deleteBranch: true, expectTip: in2.tip, expectDirty: 0 }, { owner: owner2 }), { ok: true }, 'its own owner removes it')
+    check(!fs.existsSync(ow2.worktree.path) && !manifest.find(ow2.worktree.path) && !gitOkSync(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/sn/team-own-2'), 'folder, entry and branch gone')
+    // A junk owner in the file is dropped at load, the entry kept.
+    const raw = JSON.parse(fs.readFileSync(mfFile, 'utf8'))
+    fs.writeFileSync(mfFile, JSON.stringify({ ...raw, entries: raw.entries.map((e) => (canon(e.path) === canon(plainWt.worktree.path) ? { ...e, owner: 'renderer:spoof' } : e)) }))
+    const reread = new M.WorktreeManifest(mfFile)
+    check(reread.find(plainWt.worktree.path) && reread.find(plainWt.worktree.path).owner === undefined && reread.find(ow.worktree.path).owner === owner, 'an owner off the team shape is dropped at load, the entry kept')
+    fs.writeFileSync(mfFile, JSON.stringify(raw))
+    // The team removed: its trees lose the owner and read as ordinary orphans (the user may delete them).
+    const fresh = make({ manifest: new M.WorktreeManifest(mfFile) })
+    check(fresh.s.disown('team:tm-0123456789ab:') === 1 && fresh.manifest.find(ow.worktree.path).owner === undefined && new M.WorktreeManifest(mfFile).find(ow.worktree.path).owner === undefined, 'disown clears the owner of every entry of the team, on disk too')
+    check(!(await fresh.s.list()).entries.find((e) => canon(e.path) === canon(ow.worktree.path)).teamOwned && fresh.s.disown('nope') === 0 && fresh.s.disown('') === 0, 'list() no longer marks it; disown needs a team prefix')
+    const in1 = await fresh.s.inspect({ path: ow.worktree.path })
+    same(await fresh.s.remove({ path: ow.worktree.path, deleteBranch: true, expectTip: in1.tip, expectDirty: 0 }), { ok: true }, 'a disowned tree: the plain remove works again')
+    const inP = await fresh.s.inspect({ path: plainWt.worktree.path })
+    same(await fresh.s.remove({ path: plainWt.worktree.path, deleteBranch: true, expectTip: inP.tip, expectDirty: 0 }), { ok: true }, 'an unowned one as before')
+
+    // list() adopting a folder whose create lands meanwhile (B4 review): the scan saw the folder with no entry, then
+    // the create's put (with its owner) landed while adopt waited on git. Adopt re-checks under the create queue and
+    // keeps that entry: the owner is never erased, the tree never reads as an orphan.
+    const repoR = path.join(base, 'race repo')
+    write(path.join(repoR, 'a.txt'), 'a\n')
+    git(repoR, 'init', '-q', '-b', 'main'); git(repoR, 'add', '-A'); git(repoR, 'commit', '-qm', 'init')
+    const racePath = path.join(wtRoot, W.repoFolderName(repoR), 'team-race-1')
+    git(repoR, 'worktree', 'add', '-q', '-b', 'sn/team-race-1', racePath)
+    const raceOwner = 'team:tm-0123456789ab:cafebabe:t-7'
+    const raceMf = new M.WorktreeManifest(mfFile)
+    const raceRepoKey = canon(repoR)
+    let landed = false
+    const landing = {
+      run: async (args, o) => {
+        const out = await runner.run(args, o)
+        if (args[0] === 'merge-base' && !landed && canon(o.cwd) === raceRepoKey) {
+          landed = true
+          raceMf.put({ path: racePath, branch: 'sn/team-race-1', repoRoot: fs.realpathSync.native(repoR), baseRef: 'HEAD', baseSha: git(repoR, 'rev-parse', 'HEAD').trim(), linkedPaths: [], root: wtRoot, createdAt: 1, owner: raceOwner })
+        }
+        return out
+      },
+      info: (f) => runner.info(f),
+    }
+    const racing = make({ manifest: raceMf, deps: { runner: landing } })
+    const raceRows = (await racing.s.list()).entries
+    check(landed && raceMf.find(racePath)?.owner === raceOwner && new M.WorktreeManifest(mfFile).find(racePath).owner === raceOwner && raceMf.find(racePath).createdAt === 1, 'a create that lands while list() adopts its folder keeps its entry and its owner (on disk too)')
+    check(raceRows.find((e) => canon(e.path) === canon(racePath))?.teamOwned === true, 'and list() reports it team owned, never an orphan')
+    check(racing.s.disown('team:tm-0123456789ab:') === 1, 'cleanup: disowned')
+    const inR = await racing.s.inspect({ path: racePath })
+    same(await racing.s.remove({ path: racePath, deleteBranch: true, expectTip: inR.tip, expectDirty: 0 }), { ok: true }, 'cleanup: removed')
+    // The other end of that wait: a create that failed rolls its folder back while adopt waits in the queue, and
+    // adopt then finds no folder: it writes no entry for a tree that is gone.
+    const gonePath = path.join(wtRoot, W.repoFolderName(repoR), 'team-race-2')
+    git(repoR, 'worktree', 'add', '-q', '-b', 'sn/team-race-2', gonePath)
+    let rolledBack = false
+    const rollback = {
+      run: async (args, o) => {
+        const out = await runner.run(args, o)
+        if (args[0] === 'merge-base' && !rolledBack && canon(o.cwd) === raceRepoKey) {
+          rolledBack = true
+          git(repoR, 'worktree', 'remove', '--force', gonePath)
+        }
+        return out
+      },
+      info: (f) => runner.info(f),
+    }
+    const goneMf = new M.WorktreeManifest(mfFile)
+    const gone = make({ manifest: goneMf, deps: { runner: rollback } })
+    const goneRows = (await gone.s.list()).entries
+    check(rolledBack && !fs.existsSync(gonePath) && goneMf.find(gonePath) === null && new M.WorktreeManifest(mfFile).find(gonePath) === null, 'a folder gone while adopt waited: no entry is written for it')
+    check(!goneRows.some((e) => canon(e.path) === canon(gonePath)), 'and list() does not show it')
+    git(repoR, 'branch', '-D', 'sn/team-race-2')
+  }
+
   return { repo, fromBase: fromBase.worktree, git }
 }
 
@@ -840,6 +932,7 @@ async function rendererChecks(real) {
   check(r.orphanWorktrees([{ ...entries[0], path: wt.path.toUpperCase().replace(/\\/g, '/') + '/' }], st().workspaces).length === 0, 'path spelling (case, slashes) does not matter')
   st().deleteWorkspace('w1')
   check(r.orphanWorktrees(entries, st().workspaces).length === 2 && removes.length === 0, 'deleting the workspace leaves its worktrees as orphans, no delete')
+  check(r.orphanWorktrees([...entries, { path: 'C:\\x\\team-t-1', branch: 'sn/t-0123ab-1', repoName: 'r', dirty: false, managed: true, exists: true, teamOwned: true }], st().workspaces).length === 2, 'a team task worktree is never an orphan (app 2.7.0, decision 63)')
   if (real) check(fs.existsSync(wt.path), 'and the folder is still there')
 
   // Phone closePane keeps folder and branch (FR-32), through the real executor.
@@ -864,7 +957,7 @@ async function rendererChecks(real) {
   if (alias) fs.unlinkSync(alias)
   alias = null
   fs.rmSync(base, { recursive: true, force: true })
-  console.log(`PASS: ${checks} worktree checks (helpers, schema 13, manifest, create/inspect/remove/list on real repos, rollback, junction sentinel, not_managed, shared, cwd_missing, main -N in inspect and the chip cache, renderer offer/close/orphans, phone closePane)`)
+  console.log(`PASS: ${checks} worktree checks (helpers, schema 13, manifest, create/inspect/remove/list on real repos, rollback, junction sentinel, not_managed, shared, cwd_missing, main -N in inspect and the chip cache, renderer offer/close/orphans, phone closePane, team task owner)`)
 })().catch((e) => {
   console.error(e)
   process.exit(1)

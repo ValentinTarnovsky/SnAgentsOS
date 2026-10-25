@@ -15,6 +15,22 @@
 // terminalOf's clean end (!facts.failure), the grandchildren of stop and linger detached on Windows (only taskkill /T
 // reaches them), the Claude Code session vars of a parent session kept out of the run env, and the supervisor never
 // signalling a pid after its exit (drain, stop, kill and stop deadlines, shutdownSync; the group only on POSIX).
+// B4 additions: the task worktree created at the task's first run (the plan run) through the real WorktreeService
+// on a temp manifest, tagged with its owner (teamOwned in list(), the IPC remove refused), the exec resuming the plan
+// session in the same cwd, the write lock held and released by CAS, a console working in the tree holding a writer
+// (treeBusy), a readonly assignee in the repo root with no worktree, a crash between the create and the commit
+// re-adopting the owned tree, the tree mark (treeMoved), an extra-repo task with its worktree in that repo, a removed
+// and re-created team getting -r2 for its t-1, runs in series within the caps with autonomy on (AgentView.waiting),
+// Por despachar with autonomy off (needs rows with their defer reason, Despachar, Descartar of a derived level kept
+// out until it changes, Descartar todo), the kickoff op, R2 triaging the Lead's untriaged tasks, the board scope of a
+// task run's start and end, the backoff of a derived level whose prep failed with a card, and one sessionConflict
+// card per session. B4 integration: Frenar opens no card and leaves the badge as it was, an owned tree whose folder
+// is gone loses its owner once the task has a new one, a task-less re-wake keeps the user's request text across a
+// reload (WakeMark.detail), and a prep failure without a card gives back the wake mark its admission consumed.
+// B4 review: Descartar of a derived level offers the agent's next one at once, a kickoff on a resumed Lead session
+// carries the edited goal, a pass before the orphan check settles never resumes the reaped session (the check pokes
+// when it settles), a tree a prep made after its team was removed loses its owner, Retomar (resumeTask) of a stopped
+// task through teams:req, and a console alone in the tree reads consoleBusy.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data, never a real agent.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -60,6 +76,12 @@ export { CHAT_SKIPPED_TEXT } from './src/shared/chat-types'
 export { pidAlive, signalTree, treeKillSync } from './src/main/proc/treeKill'
 export { RunSupervisor } from './src/main/teams/RunSupervisor'
 export { DeadlineTimer } from './src/main/DeadlineTimer'
+export { afterRunPolicy, classifyOutcome } from './src/shared/teamDispatch'
+export { WorktreeService } from './src/main/git/WorktreeService'
+export { WorktreeManifest } from './src/main/git/WorktreeManifest'
+export { TaskWorktrees } from './src/main/teams/TaskWorktrees'
+export { WriteLocks } from './src/main/teams/WriteLocks'
+export { DISPATCH_KEY } from './src/main/teams/Dispatcher'
 `)
 const WIN = process.platform === 'win32'
 
@@ -95,7 +117,10 @@ function manualClock(start = 1_800_000_000_000) {
 // ---- git ------------------------------------------------------------------------------------------
 const gitCfg = path.join(TMP, 'gitconfig')
 fs.writeFileSync(gitCfg, '[core]\n\tautocrlf = false\n[init]\n\tdefaultBranch = main\n')
-const gitEnvVars = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: gitCfg }
+// The system config an empty file too (B4: real git only in temp repos with an isolated config).
+const gitSysCfg = path.join(TMP, 'gitconfig-system')
+fs.writeFileSync(gitSysCfg, '')
+const gitEnvVars = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: gitCfg, GIT_CONFIG_SYSTEM: gitSysCfg }
 for (const k of Object.keys(gitEnvVars)) if (/^GIT_(DIR|WORK_TREE|INDEX_FILE)$/i.test(k)) delete gitEnvVars[k]
 const git = (cwd, ...args) => cp.execFileSync('git', args, { cwd, env: gitEnvVars, stdio: ['ignore', 'pipe', 'pipe'] }).toString()
 const runner = M.createGitRunner({ env: () => M.gitEnv(gitEnvVars) })
@@ -135,6 +160,14 @@ async function world(name, o = {}) {
   fs.writeFileSync(shim, '')
   w.shim = shim
   w.cfg = { settings: { labs: { teams: true, consoleChat: false }, language: 'es', worktreesRoot: '' }, workspaces: o.workspaces ?? [] }
+  // B4: the console worktree service on a temp manifest and root, as registerWorktreeIpc builds it (git isolated).
+  if (o.worktrees) {
+    w.wtRoot = path.join(data, 'worktrees')
+    w.manifest = new M.WorktreeManifest(path.join(data, 'worktrees.json'))
+    w.wts = new M.WorktreeService({ runner, manifest: w.manifest, root: () => w.wtRoot, defaultRoot: () => w.wtRoot, removeOptions: { delayMs: 0, retries: 1 } })
+  }
+  w.statuses = []
+  w.spawnCwds = new Map()
   w.svc = new M.TeamService({
     dataDir: () => data,
     config: () => w.cfg,
@@ -146,8 +179,10 @@ async function world(name, o = {}) {
     timerDeps: clock.deps,
     loader: new M.TeamDefinitionLoader({ watch: () => ({ on() { return this }, close() {} }) }),
     strict: true,
-    status: { snapshot: () => [], stateOf: () => null, paneForSession: () => null },
+    status: { snapshot: () => w.statuses, stateOf: () => null, paneForSession: () => null },
+    pty: { spawnCwd: (id) => w.spawnCwds.get(id), ptyIdForPane: () => null, killPaneAndWait: async () => undefined },
     sessionHolder: (_p, s) => w.holders.get(s) ?? null,
+    ...(w.wts ? { worktrees: w.wts } : {}),
     accounts: () => w.accounts,
     cli: {
       envForTeam: (runId) => (w.cliReady ? { SNAOS_CTL_ENDPOINT: 'test-pipe', SNAOS_CTL_TOKEN: `tok-${runId}`, SNAOS_CLI: shim, SNAOS_TEAM_RUN: runId } : {}),
@@ -157,7 +192,7 @@ async function world(name, o = {}) {
     awake: (e) => w.awake.push(json(e)),
     sendRun: (e) => w.appended.push(json(e)),
     spawn: (...a) => { w.spawned++; return cp.spawn(...a) },
-    resolveCli: () => ({ file: process.execPath, args: [FAKE, w.scenario], kind: 'exe' }),
+    resolveCli: () => (w.noCli ? null : { file: process.execPath, args: [FAKE, w.scenario], kind: 'exe' }),
     procStartTime: (pid) => w.procStart(pid),
     // The real tree kill, recording every pid it is handed (the supervisor never hands it a reaped pid).
     treeKill: { sync: (pid) => { w.signalled.push(pid); return M.treeKillSync(pid) }, signal: (pid, sig) => { w.signalled.push(pid); return M.signalTree(pid, sig) }, alive: (pid) => (o.alive ? o.alive(pid) : M.pidAlive(pid)) },
@@ -179,6 +214,13 @@ async function world(name, o = {}) {
   w.ended = (id) => w.ring().find((r) => r.id === id)
   w.active = (id) => w.rt().activeRuns.find((r) => r.id === id)
   w.runNow = (agentId, prompt) => w.svc.request({ op: 'runNow', teamId: w.teamId, agentId, ...(prompt ? { prompt } : {}) }, 'desktop')
+  w.runTask = (agentId, taskId, prompt) => w.svc.request({ op: 'runNow', teamId: w.teamId, agentId, taskId, ...(prompt ? { prompt } : {}) }, 'desktop')
+  w.task = (id) => w.rt().tasks.find((t) => t.id === id)
+  w.createTask = async (task) => {
+    const r = await w.svc.request({ op: 'createTask', teamId: w.teamId, task }, 'desktop')
+    assert.ok(r.ok, `createTask: ${JSON.stringify(r)}`)
+    return r.task.id
+  }
   w.use = (file) => {
     if (typeof file === 'object') {
       const p = path.join(dir, `scenario-${Math.random().toString(16).slice(2)}.json`)
@@ -434,7 +476,7 @@ async function stopChecks() {
   await w.svc.request({ op: 'settings', teamId: w.teamId, patch: { paused: true } }, 'desktop')
   same(await w.runNow('dev'), { ok: false, error: 'deferred', defer: { reason: 'paused' } }, 'a paused team: deferred paused')
   await w.svc.request({ op: 'settings', teamId: w.teamId, patch: { paused: false } }, 'desktop')
-  same(await w.svc.request({ op: 'runNow', teamId: w.teamId, agentId: 'dev', taskId: 't-1' }, 'desktop'), { ok: false, error: 'unsupported' }, 'a task run waits for B4')
+  same(await w.svc.request({ op: 'runNow', teamId: w.teamId, agentId: 'dev', taskId: 't-1' }, 'desktop'), { ok: false, error: 'not_found' }, 'B4: a task run of a task that does not exist')
   same(await w.svc.request({ op: 'runNow', teamId: w.teamId, agentId: 'nobody' }, 'desktop'), { ok: false, error: 'not_found' }, 'an unknown agent')
   w.svc.dispose()
 }
@@ -518,10 +560,11 @@ async function lifecycleExitChecks() {
 // ---- 4. reaper and orphans (decision 64) ----------------------------------------------------------
 async function reaperChecks() {
   // First life: two hanging runs, state written; the app "crashes" (the service is dropped, children live on).
+  // The second is QA's (readonly): two writers never share the repo root (G6, decision 36).
   const w1 = await world('reap', { clock: manualClock() })
   w1.use('hang.json')
   const a = await w1.runNow('dev')
-  const b = await w1.runNow('dev-2')
+  const b = await w1.runNow('qa')
   await w1.waitState(a.runId, 'running')
   await w1.waitState(b.runId, 'running')
   w1.svc.team(w1.teamId).store.flushSync()
@@ -541,7 +584,7 @@ async function reaperChecks() {
   check(cards.length === 1 && cards[0].from.vars.runId === a.runId && cards[0].from.vars.pid === runA.pid && JSON.stringify(cards[0].from.actions) === '["killOrphan","dismiss"]', 'one orphan card for the matching start time; the mismatch is ignored')
   same(await w2.runNow('dev'), { ok: false, error: 'deferred', defer: { reason: 'sessionBusy' } }, 'the orphan holds its session (G5): the agent defers sessionBusy')
   w2.use('claude-simple.json')
-  const free = await w2.runNow('dev-2')
+  const free = await w2.runNow('qa')
   check(free.ok, 'the agent of the ignored pid is not held')
   await w2.waitEnded(free.runId)
   // Labs off and on keep the orphan (its process still lives): the session stays held and its card still works.
@@ -659,7 +702,9 @@ async function teamScopeChecks() {
   await settle()
   const v2 = await view()
   check(teamEmits(e0).some((e) => !e.runId && e.scopes.includes('needs')), 'a card that opens (Te necesita count): team with needs')
-  check(teamEmits(e0).some((e) => e.runId === r.runId) && v2.running === 0 && v2.needsCount === 1, 'the run end: team, running back to 0, the need counted')
+  // B4: the Lead's kickoff (a goal it has not seen) waits in "Por despachar" since the first pass (autonomy off): one more row.
+  const waitingRows = w.rt().queue.filter((q) => q.approvedAt === undefined).length
+  check(teamEmits(e0).some((e) => e.runId === r.runId) && v2.running === 0 && waitingRows === 1 && v2.needsCount === 1 + waitingRows, 'the run end: team, running back to 0, the need counted (with the kickoff waiting in Por despachar)')
 
   // usageToday from the service clock, and the end that adds usage carries team.
   w.use('claude-simple.json')
@@ -746,24 +791,24 @@ async function removeChecks() {
   w.svc.dispose()
 }
 
-// ---- 8. pure reducers: policy rows of B2, requestStop on queued, manualGate -------------------------
+// ---- 8. pure reducers: the provider rows of afterRunPolicy (B2 rows kept under B4), terminalOf, requestStop on queued ----
 function reducerChecks() {
   const now = 1_800_000_000_000
   const base = { id: 'r-0123456789ab', agentId: 'dev', roleId: 'dev', roleKind: 'dev', sessionKey: 'free', provider: 'claude', profile: 'total', resumed: false, cwd: 'C:\\r', repoId: 'main', mode: 'free', trigger: { reason: 'manual', by: 'user' }, state: 'failed', reachedRunning: true, resultSeen: true, queuedAt: now - 10_000, startedAt: now - 9_000, endedAt: now }
   const facts = (run, o = {}) => ({ run, agentInterrupts: 0, now, claudeCanSwitch: false, unknownSession: false, ...o })
-  const lim = M.basicPolicy(facts({ ...base, failure: { kind: 'limit', until: now + 3_600_000 } }))
+  const lim = M.afterRunPolicy(facts({ ...base, failure: { kind: 'limit', until: now + 3_600_000 } }))
   check(lim.providerBlock?.provider === 'claude' && lim.providerBlock.until === now + 3_600_000 && lim.next?.reason === 'retry' && lim.next.notBefore === now + 3_600_000, 'limit: the provider blocked until the reset, a retry after it')
-  const sw = M.basicPolicy(facts({ ...base, failure: { kind: 'limit' } }, { claudeCanSwitch: true }))
+  const sw = M.afterRunPolicy(facts({ ...base, failure: { kind: 'limit' } }, { claudeCanSwitch: true }))
   check(sw.providerBlock.until === now + M.LIMIT_FALLBACK_MS, 'limit with another account to switch to: the 15 min fallback')
-  const auth = M.basicPolicy(facts({ ...base, failure: { kind: 'auth' } }))
+  const auth = M.afterRunPolicy(facts({ ...base, failure: { kind: 'auth' } }))
   check(auth.pauseTeam === 'auth' && auth.next?.reason === 'retry', 'auth: the team pauses')
-  const switched = M.basicPolicy(facts({ ...base, failure: { kind: 'auth' } }, { claudeSwitchedAt: now - 5_000 }))
+  const switched = M.afterRunPolicy(facts({ ...base, failure: { kind: 'auth' } }, { claudeSwitchedAt: now - 5_000 }))
   check(!switched.pauseTeam && switched.next?.reason === 'retry', 'auth while the account switched during the run: a retry, not a pause (decision 40)')
-  const before = M.basicPolicy(facts({ ...base, failure: { kind: 'auth' } }, { claudeSwitchedAt: now - 60_000 }))
+  const before = M.afterRunPolicy(facts({ ...base, failure: { kind: 'auth' } }, { claudeSwitchedAt: now - 60_000 }))
   check(before.pauseTeam === 'auth', 'a switch before the run started does not count')
-  check(M.basicPolicy(facts({ ...base, failure: { kind: 'billing' } })).pauseTeam === 'billing', 'billing pauses')
-  check(M.basicPolicy(facts({ ...base, state: 'failed', reachedRunning: false, failure: { kind: 'request', code: 'no_output' } })).undeliver === true, 'a failure before running hands back what it got')
-  check(!M.basicPolicy(facts({ ...base, state: 'cancelled', reachedRunning: false, stopReason: 'user' })).undeliver, 'never on a user stop')
+  check(M.afterRunPolicy(facts({ ...base, failure: { kind: 'billing' } })).pauseTeam === 'billing', 'billing pauses')
+  check(M.afterRunPolicy(facts({ ...base, state: 'failed', reachedRunning: false, failure: { kind: 'request', code: 'no_output' } })).undeliver === true, 'a failure before running hands back what it got')
+  check(!M.afterRunPolicy(facts({ ...base, state: 'cancelled', reachedRunning: false, stopReason: 'user' })).undeliver, 'never on a user stop')
 
   // R9 / 4.1: a stop for `concluded` without a result line ends succeeded(concluded); a stopped run has no outcome.
   const parserFacts = (o = {}) => ({ sawProtocol: true, resultSeen: false, isError: false, maxTurns: false, unknownSession: false, harnessCrash: false, finalText: '', denials: [], digest: { tools: 0, families: {}, files: [] }, toolCalls: 0, teamCalls: 0, fileEdits: 0, ...o })
@@ -787,8 +832,8 @@ function reducerChecks() {
   const plainStop = { ...base, state: 'stopping', resultSeen: false, stopReason: 'user' }
   const stoppedFail = M.terminalOf(plainStop, end({ resultSeen: true, isError: false, failure: { kind: 'overloaded' } }))
   check(stoppedFail.state === 'failed' && stoppedFail.failure?.kind === 'overloaded', 'a stopped run with a result: its state from the parser failure')
-  const stoppedOk = M.terminalOf(plainStop, end({ resultSeen: true, isError: true }))
-  check(stoppedOk.state === 'succeeded' && !stoppedOk.failure && stoppedOk.outcome === 'empty', 'a stopped run with a result and no failure: succeeded')
+  const stoppedOk = M.terminalOf(plainStop, end({ resultSeen: true }))
+  check(stoppedOk.state === 'succeeded' && !stoppedOk.failure && stoppedOk.outcome === 'empty', 'a stopped run with a result and no failure: succeeded (classifyOutcome: empty)')
 
   // R4 / K1: a queued run stopped for a takeover is a plain cancel (no process existed).
   const queuedRun = { ...base, state: 'queued', reachedRunning: false, resultSeen: false, startedAt: undefined, endedAt: undefined }
@@ -874,6 +919,543 @@ function supervisorKillChecks() {
   check(denied.logs.some((l) => l.includes('group SIGKILL (shutdown) failed EPERM')), 'POSIX: another group kill error is logged')
 }
 
+// ---- 10. B4: task worktrees, the exec resume, write locks, the tree mark, extra repos, a re-created team ----
+/** Same folder (realpath, case-folded where the filesystem folds it). */
+function sameDir(a, b) {
+  const k = (p) => { try { p = fs.realpathSync.native(p) } catch { p = path.resolve(p) } return WIN || process.platform === 'darwin' ? p.toLowerCase() : p }
+  return !!a && !!b && k(a) === k(b)
+}
+/** A task patch committed by hand (what B5's terminal tools and approvals will do): the store's CAS and invariants still run. */
+function setTask(w, id, patch, drop = []) {
+  const rt = w.rt()
+  const tasks = rt.tasks.map((t) => {
+    if (t.id !== id) return t
+    const next = { ...t, ...patch }
+    for (const k of drop) delete next[k]
+    return next
+  })
+  const res = w.svc.commit(w.teamId, { ok: true, rt: { ...rt, tasks }, effects: [], result: undefined }, ['board', 'task'], { taskId: id })
+  assert.ok(res.ok, `setTask ${id}`)
+}
+
+async function worktreeChecks() {
+  const w = await world('wt', { worktrees: true })
+  const gen = w.rt().gen
+  // A Dev task in worktree isolation (the defaults): the plan run (readonly) creates the tree (decision 24).
+  const t1 = await w.createTask({ title: 'Login con Google', assignee: 'dev' })
+  check(!w.task(t1).worktree, 'no worktree before the first run')
+  same(await w.runTask('dev-2', t1), { ok: false, error: 'bad_request' }, 'runNow of a task for an agent its phase does not run: bad_request')
+  w.use({ steps: [{ echoArgv: true }, { fixture: 'claude-simple.jsonl', to: 6, rewriteSession: true }, { sleepMs: 400 }, { fixture: 'claude-simple.jsonl', from: 6, rewriteSession: true }] })
+  const p = await w.runTask('dev', t1)
+  check(p.ok, `runNow with a task admits its plan run (${JSON.stringify(p)})`)
+  await w.waitState(p.runId, 'running')
+  const startEmits = w.emitted.filter((e) => e.teamId === w.teamId && e.runId === p.runId && e.taskId === t1 && e.scopes.includes('board') && e.scopes.includes('task'))
+  check(startEmits.length > 0, 'a task run that starts sends the board and task scopes with its task (the board and the drawer refresh)')
+  const e0 = w.emitted.length
+  await w.waitEnded(p.runId)
+  await settle()
+  check(w.emitted.slice(e0).some((e) => e.runId === p.runId && e.taskId === t1 && e.scopes.includes('board')), 'and so does its end')
+  const plan = w.ended(p.runId)
+  const wt = w.task(t1).worktree
+  check(wt && wt.owner === M.teamWorktreeOwner(w.teamId, gen, t1) && wt.slug === M.taskSlug(w.teamId, 1) && wt.branch === `sn/${wt.slug}` && wt.baseBranch === 'main' && /^[0-9a-f]{40}$/.test(wt.base), 'the first run created the task worktree: sn/<slug> from the base, tagged with the task owner')
+  check(w.task(t1).frozen === true && plan.mode === 'plan' && plan.profile === 'readonly' && plan.cwd === wt.path, 'the plan run (readonly) ran in it; the task frozen')
+  const argv = w.logLines(p.runId).find((l) => l && l.type === 'fake.argv')
+  check(argv && sameDir(argv.cwd, wt.path), 'the process cwd is the worktree')
+  check(fs.existsSync(path.join(wt.path, 'README.md')) && git(w.repo, 'worktree', 'list', '--porcelain').includes(`refs/heads/${wt.branch}`), 'a real git worktree of the repo on its branch')
+  const entry = w.manifest.find(wt.path)
+  check(entry && entry.owner === wt.owner && new M.WorktreeManifest(path.join(w.data, 'worktrees.json')).find(wt.path).owner === wt.owner, 'the manifest entry carries the owner, also read back from the file (decision 63)')
+  const listed = await w.wts.list()
+  check(listed.entries.some((e) => sameDir(e.path, wt.path) && e.teamOwned === true && e.managed), 'list(): the entry is teamOwned (Settings > Git never offers it as an orphan)')
+  same(await w.wts.remove({ path: wt.path, deleteBranch: true }), { ok: false, error: 'busy', detail: 'team' }, 'the IPC remove of a team worktree (no owner passed): busy, detail team')
+  check(fs.existsSync(wt.path), 'and the tree is still there')
+  const sess = w.rt().agents.find((a) => a.id === 'dev').sessions[t1]
+  check(sess && sess.cwd === wt.path && sess.sessionId === plan.sessionId && sess.turns === 1, 'the task session lives in the worktree (I20)')
+
+  // The plan approved (B5's T5 by hand): the exec resumes the same session in the same cwd, a writer holding its lock.
+  setTask(w, t1, { state: 'doing', phase: 'executing', plan: { rev: 1, text: 'Paso 1', status: 'approved', small: false, at: w.clock.now } }, ['next', 'cooldownUntil'])
+  w.use({ steps: [{ echoArgv: true }, { fixture: 'claude-simple.jsonl', to: 6, rewriteSession: true }, { writeFile: { path: 'feature.txt', text: 'hola\n' } }, { sleepMs: 1200 }, { fixture: 'claude-simple.jsonl', from: 6, rewriteSession: true }] })
+  const x = await w.runTask('dev', t1)
+  check(x.ok, `the exec run is admitted (${JSON.stringify(x)})`)
+  await w.waitState(x.runId, 'running')
+  const lockKey = w.svc.locks.key(wt.path)
+  const live = w.active(x.runId)
+  check(live.mode === 'exec' && live.profile === 'total' && live.resumed === true && live.sessionId === plan.sessionId && live.cwd === wt.path, 'exec resumes the plan session (same sessionId) in the same cwd (decision 24)')
+  check(w.svc.locks.holderOf(lockKey) === x.runId, 'the writer run holds the write lock of its tree')
+  check(live.treeBefore && /^[0-9a-f]{40}$/.test(live.treeBefore.head), 'its tree marked at the prep (decision 68)')
+  await w.waitEnded(x.runId)
+  const ex = w.ended(x.runId)
+  check(ex.treeMoved === true && ex.outcome === 'progress', 'the tree moved (a new file): treeMoved, outcome progress')
+  check(w.svc.locks.holderOf(lockKey) === null && w.svc.locks.size === 0, 'the lock released at the end')
+  const argv2 = w.logLines(x.runId).find((l) => l && l.type === 'fake.argv')
+  check(argv2.argv.includes('--resume') && argv2.argv.includes(plan.sessionId) && sameDir(argv2.cwd, wt.path), 'argv: --resume <the plan session>, in the worktree')
+
+  // WriteLocks: compare-and-clear, a human console inside a tree, integrates outlive a teardown.
+  const L = new M.WriteLocks({ platform: process.platform, humanWriters: () => [path.join(w.repo, 'src')] })
+  const k = L.key(w.repo)
+  check(L.acquire(k, 'r-aaaaaaaaaaaa') && !L.acquire(k, 'r-bbbbbbbbbbbb') && L.acquire(k, 'r-aaaaaaaaaaaa') && L.holderOf(k) === 'r-aaaaaaaaaaaa', 'acquire: one holder per tree (the same holder again is fine)')
+  L.release(k, 'r-bbbbbbbbbbbb')
+  check(L.holderOf(k) === 'r-aaaaaaaaaaaa', 'a release by another holder clears nothing (CAS)')
+  L.release(k, 'r-aaaaaaaaaaaa')
+  check(L.holderOf(k) === null && L.busyKeys([w.repo]).has(k) && L.busyKeys([path.join(w.repo, 'src', 'deep')]).has(L.key(path.join(w.repo, 'src', 'deep'))) && L.busyKeys([w.dir]).size === 1, 'busyKeys: a human console inside the tree, the tree inside its cwd, either direction')
+  check(L.acquire(L.key(wt.path), 'integrate:t-1') && L.acquire(k, 'r-cccccccccccc') && L.integrateKeys().size === 1, 'integrateKeys: only integrate holders')
+  L.releaseRuns()
+  check(L.holderOf(L.key(wt.path)) === 'integrate:t-1' && L.holderOf(k) === null, 'releaseRuns keeps an integrate in flight')
+
+  // A human console working in the repo root holds a writer free run there (G6); a readonly one goes on.
+  w.statuses = [{ paneId: 'p-human', state: 'working', precise: true, notify: false, provider: 'claude' }]
+  w.spawnCwds.set('p-human', w.repo)
+  same(await w.runNow('dev-2', 'Arreglá el README'), { ok: false, error: 'deferred', defer: { reason: 'consoleBusy' } }, 'a writer run waits while a console works in its tree (consoleBusy: no run holds it)')
+  w.use('claude-simple.json')
+  const ro = await w.runNow('qa', 'Revisá el README')
+  check(ro.ok, 'a readonly free run is not held by it')
+  await w.waitEnded(ro.runId)
+  w.statuses = []
+
+  // A readonly assignee (research) never gets a worktree: its worktree task runs in the repo root (decision 24).
+  const t2 = await w.createTask({ title: 'Investigar el login', assignee: 'research' })
+  w.use('codex-simple.json')
+  const r2 = await w.runTask('research', t2)
+  check(r2.ok, 'the research task run is admitted')
+  await w.waitEnded(r2.runId)
+  check(!w.task(t2).worktree && sameDir(w.ended(r2.runId).cwd, w.repo), 'a readonly assignee runs its worktree task in the repo root, no worktree')
+
+  // A crash between the create and the task.worktree commit: the tree its owner holds is adopted, never a -r2.
+  const t3 = await w.createTask({ title: 'Despues de un crash', assignee: 'dev-2' })
+  const tw = new M.TaskWorktrees({ worktrees: w.wts, git: runner })
+  const made = await tw.ensure({ id: w.teamId, gen }, w.svc.repoOf(w.teamId, 'main'), w.task(t3))
+  check(made.ok && !w.task(t3).worktree && w.manifest.find(made.worktree.path).owner === M.teamWorktreeOwner(w.teamId, gen, t3), 'an owned tree exists that the task does not name yet')
+  w.use('claude-simple.json')
+  const r3 = await w.runTask('dev-2', t3)
+  await w.waitEnded(r3.runId)
+  check(w.task(t3).worktree && w.task(t3).worktree.path === made.worktree.path && w.task(t3).worktree.slug === M.taskSlug(w.teamId, 3) && w.ended(r3.runId).cwd === made.worktree.path, 're-adopted by its exact owner: same path and slug')
+
+  // An owned tree whose folder is gone (B4 integration item 9): the next run makes a new one (-r2) and the stale entry
+  // loses its owner, so one owner never names two entries (ownedBy would keep finding the stale one first).
+  const t4 = await w.createTask({ title: 'Carpeta borrada', assignee: 'dev-2' })
+  const owner4 = M.teamWorktreeOwner(w.teamId, gen, t4)
+  const gone = await tw.ensure({ id: w.teamId, gen }, w.svc.repoOf(w.teamId, 'main'), w.task(t4))
+  check(gone.ok && w.manifest.find(gone.worktree.path).owner === owner4, 'an owned tree the task does not name yet')
+  fs.rmSync(gone.worktree.path, { recursive: true, force: true })
+  w.use('claude-simple.json')
+  const r4 = await w.runTask('dev-2', t4)
+  await w.waitEnded(r4.runId)
+  const nw4 = w.task(t4).worktree
+  const owned4 = w.manifest.list().filter((e) => e.owner === owner4)
+  check(nw4 && !sameDir(nw4.path, gone.worktree.path) && nw4.slug === `${M.taskSlug(w.teamId, M.taskNumOf(t4))}-r2` && owned4.length === 1 && sameDir(owned4[0].path, nw4.path), `a new tree (-r2) is the only entry of its owner (${owned4.length})`)
+  const stale4 = w.manifest.find(gone.worktree.path)
+  check(stale4 && stale4.owner === undefined && new M.WorktreeManifest(path.join(w.data, 'worktrees.json')).find(gone.worktree.path).owner === undefined, 'the stale entry lost its owner (an ordinary orphan now), on disk too')
+  check(w.wts.ownedBy(owner4) && sameDir(w.wts.ownedBy(owner4).path, nw4.path), 'ownedBy names the new tree')
+
+  // A writer free run that changes nothing: its tree did not move.
+  w.use('claude-simple.json')
+  const f = await w.runNow('dev', 'Mirá el repo')
+  await w.waitEnded(f.runId)
+  check(w.ended(f.runId).treeBefore && w.ended(f.runId).treeMoved === false, 'a writer run that changes nothing: treeMoved false')
+
+  // An extra repo (decision 62): a task on it gets its worktree in that repo, and its cwd there.
+  const lib = makeRepo(path.join(w.dir, 'lib'))
+  const teamMd = path.join(w.repo, '.snagentsos', 'team', 'team.md')
+  fs.writeFileSync(teamMd, fs.readFileSync(teamMd, 'utf8').replace(/^(name: .*)$/m, '$1\nrepo.lib.path: ../lib'))
+  const diff = await w.svc.request({ op: 'trustDiff', teamId: w.teamId }, 'desktop')
+  const tr = await w.svc.request({ op: 'trust', teamId: w.teamId, sha256: diff.trust.sha256 }, 'desktop')
+  check(tr.ok && 'repoRoot' in w.svc.repoOf(w.teamId, 'lib'), `the extra repo is trusted and resolves (${JSON.stringify(tr.ok ? 'ok' : tr)})`)
+  const tx = await w.createTask({ title: 'En la lib', assignee: 'dev', repoId: 'lib' })
+  w.use('claude-simple.json')
+  const rx = await w.runTask('dev', tx)
+  await w.waitEnded(rx.runId)
+  const wx = w.task(tx).worktree
+  const exEntry = wx ? w.manifest.find(wx.path) : null
+  check(wx && exEntry && sameDir(exEntry.repoRoot, lib) && sameDir(w.ended(rx.runId).cwd, wx.path) && git(lib, 'worktree', 'list', '--porcelain').includes(`refs/heads/${wx.branch}`) && !git(w.repo, 'worktree', 'list', '--porcelain').includes(`refs/heads/${wx.branch}`), 'an extra-repo task: its worktree in that repo, the run cwd in it, the main repo untouched')
+
+  // The team removed: its worktrees lose their owner (ordinary orphans now), nothing deleted. Set up again (a new
+  // gen): its t-1 gets a new tree with the -r2 suffix and never adopts the old one (decision 63).
+  const oldPath = wt.path
+  const rm = await w.svc.request({ op: 'remove', teamId: w.teamId }, 'desktop')
+  check(rm.ok, 'remove the team')
+  check(w.manifest.list().every((e) => !e.owner) && fs.existsSync(oldPath), 'remove disowned every task worktree of the team and deleted none')
+  const after = await w.wts.list()
+  check(after.entries.some((e) => sameDir(e.path, oldPath) && !e.teamOwned), 'they list as ordinary rows now')
+  const probe = await w.svc.request({ op: 'setupProbe', dir: w.repo }, 'desktop')
+  const ad = await w.svc.request({ op: 'adopt', repoRoot: w.repo, sha256: probe.probe.existing.sha256 }, 'desktop')
+  check(ad.ok && ad.teamId === w.teamId && w.rt().gen !== gen, 'set up again on the same repo: the same team id, a new gen')
+  const n1 = await w.createTask({ title: 'Otra vez t-1', assignee: 'dev' })
+  check(n1 === 't-1', 'its first task is t-1 again')
+  w.use('claude-simple.json')
+  const rn = await w.runTask('dev', n1)
+  await w.waitEnded(rn.runId)
+  const nwt = w.task(n1).worktree
+  check(nwt && nwt.slug === `${M.taskSlug(w.teamId, 1)}-r2` && !sameDir(nwt.path, oldPath) && nwt.owner === M.teamWorktreeOwner(w.teamId, w.rt().gen, 't-1'), 'the re-created team gets -r2 for its t-1, its own owner, never the old tree')
+  w.svc.dispose()
+}
+
+// ---- 11. B4: runs in series within the caps (autonomy on), Por despachar (autonomy off), kickoff, triage ---
+async function seriesChecks() {
+  const w = await world('series', { worktrees: true })
+  check(w.svc.trusted(w.teamId).def.maxConcurrent === 2, 'the template runs two at a time')
+  w.use('hang.json')
+  const ids = []
+  for (const [i, who] of ['dev', 'dev-2', 'research'].entries()) ids.push(await w.createTask({ title: `Urgente ${i}`, assignee: who, priority: 'urgent' }))
+  check(w.rt().activeRuns.length === 0, 'autonomy off: nothing starts by itself')
+  same((await w.svc.request({ op: 'settings', teamId: w.teamId, patch: { autoDispatch: true } }, 'desktop')).ok, true, 'autonomy on')
+  check(w.svc.pendingTimers > 0 && w.clock.timers.size > 0, 'turning it on pokes the dispatcher (the dispatch deadline at now)')
+  w.clock.advance(0)
+  const active = () => w.rt().activeRuns
+  check(active().length === 2 && active().every((r) => r.taskId === ids[0] || r.taskId === ids[1]), 'one pass: two runs start (maxConcurrent 2), the most urgent oldest first')
+  const roster = await w.svc.request({ op: 'roster', teamId: w.teamId }, 'desktop')
+  const waitOf = (id) => roster.agents.find((a) => a.id === id).waiting
+  check(waitOf('research')?.reason === 'teamCap' && waitOf('research').taskId === ids[2] && waitOf('lead')?.reason === 'teamCap' && !waitOf('dev'), 'AgentView.waiting: the third task and the Lead kickoff wait on the team cap; a running agent waits on nothing')
+  await until(() => active().every((r) => r.state === 'running'), 20000, 'both running')
+  const first = active().find((r) => r.taskId === ids[0])
+  const openCards = () => w.rt().cards.filter((c) => c.state === 'open')
+  const badge = async () => (await w.svc.request({ op: 'list' }, 'desktop')).teams.find((x) => x.id === w.teamId).needsCount
+  const badgeBefore = await badge()
+  check(openCards().length === 0, 'no open card before Frenar')
+  same(await w.svc.request({ op: 'stop', teamId: w.teamId, runId: first.id }, 'desktop'), { ok: true }, 'stop the first')
+  await w.waitEnded(first.id)
+  check(w.task(ids[0]).state === 'blocked' && w.task(ids[0]).blocked.reason.kind === 'stopped' && w.task(ids[0]).blocked.reason.runId === first.id, 'Frenar blocks its task (decision 38): autonomy never restarts it')
+  // Decision 38 (B4 integration item 1): blocked {stopped} and the drawer's resume only, no card in Te necesita.
+  check(openCards().length === 0 && !w.rt().cards.some((c) => c.taskId === ids[0]), `Frenar opens no card (${JSON.stringify(openCards().map((c) => c.from))})`)
+  same(await badge(), badgeBefore, 'the Te necesita badge is unchanged by a Frenar')
+  w.clock.advance(0)
+  check(active().length === 2 && active().some((r) => r.taskId === ids[2]) && !active().some((r) => r.taskId === ids[0]), 'its end pokes: the next one starts, still two at a time')
+  for (const r of [...active()]) await w.svc.request({ op: 'stop', teamId: w.teamId, runId: r.id }, 'desktop')
+  for (const r of [...active()]) await w.waitEnded(r.id)
+  w.svc.dispose()
+}
+
+async function queueChecks() {
+  const w = await world('queue')
+  w.use('hang.json')
+  const u1 = await w.createTask({ title: 'Sin asignar' })
+  const t = await w.createTask({ title: 'Docs', assignee: 'research', needsPlan: false, isolation: 'main' })
+  w.clock.advance(0)
+  const q = () => w.rt().queue
+  check(q().some((x) => x.taskId === t && x.agentId === 'research' && x.mode === 'exec' && x.reason === 'assigned') && q().some((x) => x.agentId === 'lead' && x.reason === 'kickoff'), 'autonomy off: the task run and the Lead kickoff wait in Por despachar (decision 18)')
+  check(w.rt().activeRuns.length === 0, 'and nothing started')
+  const n0 = q().length
+  w.clock.advance(0)
+  check(q().length === n0, 'a later pass enqueues nothing twice (one item per agent and session key)')
+  const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  const row = needs.ok && needs.needs.queue.find((x) => x.taskId === t)
+  check(row && row.approved === false && row.defer?.reason === 'autonomyOff' && row.mode === 'exec' && needs.needs.tasks[t].title === 'Docs' && needs.needs.rev === w.rt().rev, 'needs: the queue row with the reason it waits on and its task title')
+
+  // kickoff (decision 43): the Lead now, autonomy off or not; its board lists u1 to triage, so R2 triages it.
+  const k = await w.svc.request({ op: 'kickoff', teamId: w.teamId }, 'desktop')
+  check(k.ok, `kickoff admits the Lead (${JSON.stringify(k)})`)
+  await w.waitState(k.runId, 'running')
+  const lr = w.active(k.runId)
+  check(lr.mode === 'lead' && lr.trigger.reason === 'kickoff' && !q().some((x) => x.agentId === 'lead'), 'a lead run for the kickoff; its queue item went with the admission (R1)')
+  check(w.task(u1).triagedAt === lr.startedAt && w.rt().goalSeenHash === w.svc.trusted(w.teamId).goalHash, 'R2 of the Lead run: the task its board listed to triage is triaged, the goal seen')
+  same(await w.svc.request({ op: 'kickoff', teamId: w.teamId }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'running' } }, 'a second kickoff while the Lead runs: deferred running')
+
+  // Despachar: approved; the next pass starts it (only the autonomy gate is skipped).
+  const tq = q().find((x) => x.taskId === t)
+  const go = await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: tq.id, go: true }, 'desktop')
+  check(go.ok && go.approved.join() === tq.id && go.dropped.length === 0 && q().find((x) => x.id === tq.id).approvedAt === w.clock.now, 'Despachar sets approvedAt and answers it')
+  w.clock.advance(0)
+  const tr = w.rt().activeRuns.find((r) => r.taskId === t)
+  check(tr && !q().some((x) => x.id === tq.id) && tr.mode === 'exec', 'the next pass starts it; the admission removed the item')
+
+  // Descartar a level the runtime derives (a todo assignee): not offered again until the task changes.
+  const t3 = await w.createTask({ title: 'Refactor', assignee: 'dev-2', needsPlan: false, isolation: 'main' })
+  w.clock.advance(0)
+  const it3 = q().find((x) => x.taskId === t3)
+  check(it3 && it3.reason === 'assigned', 'the new task waits in Por despachar')
+  same(await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: it3.id, go: false }, 'desktop'), { ok: true, approved: [], dropped: [it3.id] }, 'Descartar answers what it dropped')
+  w.clock.advance(0)
+  w.svc.poke()
+  w.clock.advance(0)
+  check(!q().some((x) => x.taskId === t3), 'the next passes do not offer it again')
+  await w.svc.request({ op: 'updateTask', teamId: w.teamId, taskId: t3, baseRev: w.task(t3).rev, patch: { priority: 'high' } }, 'desktop')
+  w.clock.advance(0)
+  check(q().some((x) => x.taskId === t3), 'once the task changes it is offered again')
+  same(await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: 'q-9999', go: true }, 'desktop'), { ok: false, error: 'not_found' }, 'an unknown item: not_found')
+  same(await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: 'nope', go: true }, 'desktop'), { ok: false, error: 'bad_request' }, 'a queue id off its shape: bad_request')
+
+  // A triage level discarded: the tasks count as triaged (the Lead is not woken for them again).
+  const u2 = await w.createTask({ title: 'Otra sin asignar' })
+  for (const r of [...w.rt().activeRuns]) await w.svc.request({ op: 'stop', teamId: w.teamId, runId: r.id }, 'desktop')
+  for (const r of [...w.rt().activeRuns]) await w.waitEnded(r.id)
+  w.clock.advance(0)
+  const tri = q().find((x) => x.agentId === 'lead')
+  check(tri && tri.reason === 'triage', 'an untriaged task wakes the Lead (triage)')
+  const all = await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: 'all', go: false }, 'desktop')
+  check(all.ok && all.dropped.includes(tri.id) && q().length === 0 && w.task(u2).triagedAt !== undefined, 'Descartar todo: every item dropped; the discarded triage triages its tasks')
+  w.svc.dispose()
+}
+
+// A derived level whose prep fails with a card (no agent CLI found) waits RETRY_DELAY_MS before it is admitted again:
+// autonomy on would otherwise retry it on every tick.
+async function backoffChecks() {
+  const w = await world('backoff')
+  w.noCli = true
+  await w.svc.request({ op: 'settings', teamId: w.teamId, patch: { autoDispatch: true } }, 'desktop')
+  w.clock.advance(0)
+  const leadRuns = () => w.ring().filter((r) => r.agentId === 'lead')
+  check(w.rt().activeRuns.some((r) => r.agentId === 'lead' && r.trigger.reason === 'kickoff'), 'autonomy on: the Lead kickoff is admitted')
+  await until(() => leadRuns().length === 1, 10000, 'the kickoff prep fails')
+  check(leadRuns()[0].failure?.code === 'spawnFailed' && w.rt().cards.filter((c) => c.state === 'open' && c.from.kind === 'system' && c.from.why === 'spawnFailed').length === 1, 'no CLI: spawnFailed with its card')
+  w.clock.advance(0)
+  w.svc.poke()
+  w.clock.advance(0)
+  check(w.rt().activeRuns.length === 0 && leadRuns().length === 1, 'the next passes do not admit it again at once (the goal is still unseen)')
+  const failedAt = leadRuns()[0].endedAt
+  const roster = await w.svc.request({ op: 'roster', teamId: w.teamId }, 'desktop')
+  const leadWait = roster.ok && roster.agents.find((a) => a.id === 'lead').waiting
+  check(leadWait && leadWait.reason === 'cooldown' && leadWait.until === failedAt + M.RETRY_DELAY_MS, `the roster reads the backoff as cooldown until it ends (${JSON.stringify(leadWait)})`)
+  // A backed-off level never takes a cap slot: two readonly task runs (no shared writer tree) start in one pass with
+  // maxConcurrent 2 while the Lead waits.
+  const ta = await w.createTask({ title: 'Uno', assignee: 'research', needsPlan: false, isolation: 'main' })
+  const tb = await w.createTask({ title: 'Dos', assignee: 'qa', needsPlan: false, isolation: 'main' })
+  w.clock.advance(0)
+  const both = w.rt().activeRuns
+  check(both.length === 2 && both.some((r) => r.taskId === ta) && both.some((r) => r.taskId === tb) && !both.some((r) => r.agentId === 'lead'), `the backed-off Lead sits out the plan: both task runs start (maxConcurrent 2; ${JSON.stringify(both.map((r) => [r.agentId, r.taskId]))})`)
+  await until(() => w.rt().activeRuns.length === 0, 10000, 'both preps fail (no CLI)')
+  const leadCards = () => w.rt().cards.filter((c) => c.state === 'open' && c.from.kind === 'system' && c.from.why === 'spawnFailed' && !c.taskId)
+  w.clock.advance(M.RETRY_DELAY_MS)
+  await until(() => leadRuns().length === 2, 10000, 'the retry after the backoff')
+  check(leadCards().length === 1, 'after RETRY_DELAY_MS one more try; its card is not raised twice')
+  w.noCli = false
+  w.use('claude-simple.json')
+  const manual = await w.runNow('lead', 'Arrancá')
+  check(manual.ok, 'a manual run of the same agent never waits on the backoff')
+  await w.waitEnded(manual.runId)
+  w.svc.dispose()
+}
+
+// ---- 12. B4: one sessionConflict card per session (extra requirement 2) ----------------------------------
+async function conflictChecks() {
+  const w = await world('conflict')
+  w.use('hang.json')
+  const r = await w.runNow('dev')
+  await w.waitState(r.runId, 'running')
+  const sid = w.active(r.runId).sessionId
+  const ev = { paneId: 'pane-x', state: 'working', precise: true, notify: false, provider: 'claude', sessionId: sid }
+  w.svc.onPaneStatus(ev)
+  w.svc.onPaneStatus(ev)
+  await w.waitEnded(r.runId)
+  const open = () => w.rt().cards.filter((c) => c.state === 'open' && c.from.kind === 'system' && c.from.why === 'sessionConflict')
+  check(open().length === 1 && open()[0].from.vars.what === `session:${sid}`, 'two conflicts on one run: one card, keyed by its session')
+  const r2 = await w.runNow('dev')
+  await w.waitState(r2.runId, 'running')
+  check(w.active(r2.runId).sessionId === sid, 'the next run resumes the same session')
+  w.svc.onPaneStatus(ev)
+  await w.waitEnded(r2.runId)
+  check(w.ended(r2.runId).interruptCause === 'sessionConflict' && open().length === 1, 'a second conflict on the same session while its card is open: no other card')
+  w.svc.dispose()
+}
+
+// ---- 13. B4 integration items 2 and 3: a re-woken task-less run keeps its request across a reload; a prep failure
+// without a card gives the wake mark its admission consumed back as it was -------------------------------------
+async function wakeChecks() {
+  // Item 2: a free run with the user's request, interrupted by a quit: the policy's re-wake keeps the text, persisted.
+  const w1 = await world('wake')
+  w1.use('hang.json')
+  const ask = 'Revisá el README y contame qué falta'
+  const r = await w1.runNow('dev', ask)
+  await w1.waitState(r.runId, 'running')
+  const pid = w1.active(r.runId).pid
+  w1.svc.shutdownSync('quit')
+  const st = JSON.parse(fs.readFileSync(path.join(w1.data, 'teams', w1.teamId, 'state.json'), 'utf8'))
+  const mark = st.agents.find((a) => a.id === 'dev').next
+  check(mark && mark.mode === 'free' && mark.reason === 'interrupted' && mark.detail === ask, `the re-wake of the interrupted free run keeps the request text, written to state.json (${JSON.stringify(mark)})`)
+  await until(() => !M.pidAlive(pid), 10000, 'wake: shutdown kill')
+  w1.svc.dispose()
+
+  // The second life on the same data: the mark is back with its text. Before the woken run starts, a console takes its
+  // session during the prep (sessionBusy, no card): the mark the admission consumed comes back as it was (item 3).
+  const w2 = await world('wake', { repo: w1.repo, data: w1.data, clock: manualClock(w1.clock.now + 60_000), noTeam: true, teamId: w1.teamId })
+  w2.teamId = w1.teamId
+  const dev = () => w2.rt().agents.find((a) => a.id === 'dev')
+  const loaded = json(dev().next)
+  check(loaded && loaded.detail === ask && loaded.reason === 'interrupted', 'loaded back: the wake mark with its request text')
+  const sid = dev().sessions.free?.sessionId
+  check(!!sid, 'the free session of the first life')
+  const busy = await w2.runNow('dev')
+  check(busy.ok, `runNow without a prompt runs the agent's level, the re-wake (${JSON.stringify(busy)})`)
+  w2.holders.set(sid, 'pane-console')
+  await w2.waitEnded(busy.runId)
+  check(w2.ended(busy.runId).failure?.code === 'sessionBusy' && w2.rt().cards.every((c) => c.state !== 'open'), 'a console took the session during the prep: sessionBusy, no card')
+  same(dev().next, loaded, 'a manual run without a task built from the agent\'s mark gives that mark back, its request text too')
+  w2.holders.clear()
+  const stdinFile = path.join(w2.dir, 'wake-stdin.txt')
+  w2.use({ saveStdin: stdinFile, steps: [{ fixture: 'claude-simple.jsonl', rewriteSession: true }] })
+  const ok = await w2.runNow('dev')
+  check(ok.ok, 'the session is free again')
+  await w2.waitEnded(ok.runId)
+  check(fs.readFileSync(stdinFile, 'utf8').includes(`<request from="user">\n${ask}\n</request>`) && dev().next === undefined, 'the run after the reload carries the request into its stdin; the mark is consumed')
+
+  // Item 3 on a task: Ejecutar ahora of a task waiting on its L1 mark (a continuation in its cooldown); the prep fails
+  // without a card, and the task gets that very mark back (reason, cooldown), not a bare retry.
+  const t = await w2.createTask({ title: 'Docs', assignee: 'dev', needsPlan: false, isolation: 'main' })
+  w2.use('claude-simple.json')
+  const first = await w2.runTask('dev', t)
+  await w2.waitEnded(first.runId)
+  const l1 = json(w2.task(t).next)
+  check(l1 && l1.reason === 'continuation' && l1.notBefore > w2.clock.now && w2.task(t).phase === 'executing', `a run without progress leaves a continuation in its cooldown (${JSON.stringify(l1)})`)
+  const tsid = dev().sessions[t]?.sessionId
+  const manual = await w2.runTask('dev', t)
+  check(manual.ok, 'Ejecutar ahora bypasses the cooldown')
+  w2.holders.set(tsid, 'pane-console')
+  await w2.waitEnded(manual.runId)
+  check(w2.ended(manual.runId).failure?.code === 'sessionBusy' && w2.rt().cards.every((c) => c.state !== 'open'), 'its prep fails sessionBusy, no card')
+  same(w2.task(t).next, l1, 'the task gets its L1 mark back as it was')
+  check(w2.task(t).state === 'doing' && w2.task(t).phase === 'executing', 'so it does not sit in doing with no level')
+  w2.holders.clear()
+  w2.svc.dispose()
+}
+
+// ---- 14. B4 review fixes ------------------------------------------------------------------------------------------
+// Descartar of a derived level never hides the agent's next one (finding 1): with autonomy off the next task gets its
+// item at once, and the roster names a row Te necesita has.
+async function discardNextChecks() {
+  const w = await world('discard-next')
+  w.use('hang.json')
+  const a = await w.createTask({ title: 'Urgente', assignee: 'dev-2', needsPlan: false, isolation: 'main', priority: 'urgent' })
+  const b = await w.createTask({ title: 'Normal', assignee: 'dev-2', needsPlan: false, isolation: 'main' })
+  w.clock.advance(0)
+  const q = () => w.rt().queue
+  const ia = q().find((x) => x.agentId === 'dev-2')
+  check(ia && ia.taskId === a && !q().some((x) => x.taskId === b), 'autonomy off: one item per agent, its most urgent task')
+  same(await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: ia.id, go: false }, 'desktop'), { ok: true, approved: [], dropped: [ia.id] }, 'Descartar the urgent one')
+  w.clock.advance(0)
+  const ib = q().find((x) => x.agentId === 'dev-2')
+  check(ib && ib.taskId === b && ib.reason === 'assigned', `the pass right after Descartar offers the agent's next task (${JSON.stringify(q().map((x) => [x.agentId, x.taskId ?? null]))})`)
+  const roster = await w.svc.request({ op: 'roster', teamId: w.teamId }, 'desktop')
+  const wait = roster.ok && roster.agents.find((x) => x.id === 'dev-2').waiting
+  check(wait && wait.reason === 'autonomyOff' && wait.taskId === b, `the roster says it waits for that task (${JSON.stringify(wait)})`)
+  const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  check(needs.ok && needs.needs.queue.some((x) => x.id === ib.id && x.defer?.reason === 'autonomyOff'), 'and Te necesita has its row')
+  w.svc.poke()
+  w.clock.advance(0)
+  check(!q().some((x) => x.taskId === a) && q().filter((x) => x.agentId === 'dev-2').length === 1, 'the discarded task stays out while it does not change')
+  w.svc.dispose()
+}
+
+// A kickoff on a resumed Lead session reads the goal it was asked about (finding 2, decision 43).
+async function leadGoalChecks() {
+  const w = await world('lead-goal')
+  w.use('claude-simple.json')
+  const first = await w.runNow('lead')
+  check(first.ok, `a Lead run (${JSON.stringify(first)})`)
+  await w.waitEnded(first.runId)
+  const sess = w.rt().agents.find((x) => x.id === 'lead').sessions.lead
+  check(sess && sess.turns === 1 && w.rt().goalSeenHash === w.svc.trusted(w.teamId).goalHash, 'its session on the lead key; the goal seen')
+  const teamMd = path.join(w.repo, '.snagentsos', 'team', 'team.md')
+  fs.writeFileSync(teamMd, fs.readFileSync(teamMd, 'utf8').replace('Una app de notas', 'Una app de tareas con recordatorios'))
+  const diff = await w.svc.request({ op: 'trustDiff', teamId: w.teamId }, 'desktop')
+  const tr = await w.svc.request({ op: 'trust', teamId: w.teamId, sha256: diff.trust.sha256 }, 'desktop')
+  check(tr.ok && w.svc.trusted(w.teamId).def.goal.includes('tareas con recordatorios') && w.rt().goalSeenHash !== w.svc.trusted(w.teamId).goalHash, 'the goal edited and trusted: the Lead has not seen it')
+  const stdinFile = path.join(w.dir, 'kickoff-stdin.txt')
+  w.use({ saveStdin: stdinFile, steps: [{ fixture: 'claude-resume.jsonl', rewriteSession: true }] })
+  const k = await w.svc.request({ op: 'kickoff', teamId: w.teamId }, 'desktop')
+  check(k.ok, `kickoff (${JSON.stringify(k)})`)
+  await w.waitEnded(k.runId)
+  const run = w.ended(k.runId)
+  check(run.resumed === true && run.sessionId === sess.sessionId, 'the kickoff resumes the Lead session (the goal is not in the system text: same sysHash)')
+  const stdin = fs.readFileSync(stdinFile, 'utf8')
+  check(stdin.includes('Goal (updated') && stdin.includes('Una app de tareas con recordatorios') && stdin.indexOf('tareas con recordatorios') < stdin.indexOf('# Your run'), 'its resumed stdin carries the new goal, marked updated, before section 4')
+  check(w.rt().goalSeenHash === w.svc.trusted(w.teamId).goalHash, 'and only then is the goal seen')
+  w.svc.dispose()
+}
+
+// The orphan check of decision 64 settling after the first pass (finding 7): with autonomy on and a probe that
+// answers late, no pass resumes the reaped run's session before it settles; it pokes when it settles.
+async function orphanWaitChecks() {
+  // First life: the Lead saw the goal (no kickoff later), a Dev's free run hangs; autonomy goes on and the state is
+  // written (no pass runs: the manual clock never moves). Then the app "crashes".
+  const w1 = await world('orphan-wait')
+  w1.use('claude-simple.json')
+  const l = await w1.runNow('lead')
+  await w1.waitEnded(l.runId)
+  w1.use('hang.json')
+  const a = await w1.runNow('dev')
+  await w1.waitState(a.runId, 'running')
+  check((await w1.svc.request({ op: 'settings', teamId: w1.teamId, patch: { autoDispatch: true } }, 'desktop')).ok, 'autonomy on')
+  w1.svc.team(w1.teamId).store.flushSync()
+  const runA = json(w1.active(a.runId))
+  // Second life: the probe waits on a gate (PowerShell takes seconds on Windows); enable's pass runs meanwhile.
+  let release
+  const gate = new Promise((r) => (release = r))
+  let probed = 0
+  const w2 = await world('orphan-wait', { repo: w1.repo, data: w1.data, clock: manualClock(w1.clock.now + 60_000), noTeam: true, teamId: w1.teamId, procStart: async () => { probed++; await gate; return null } })
+  w2.teamId = w1.teamId
+  w2.use('claude-simple.json')
+  const dev = () => w2.rt().agents.find((x) => x.id === 'dev')
+  check(dev().next?.reason === 'interrupted' && dev().next.mode === 'free' && w2.rt().autoDispatch === true && M.pidAlive(runA.pid), 'the reaper queued the re-wake of the interrupted free run; autonomy on; its process lives')
+  w2.clock.advance(0)
+  check(probed === 1 && !w2.rt().activeRuns.some((r) => r.agentId === 'dev'), 'a pass before the check settles: the re-wake of the orphan session is not admitted')
+  const roster = await w2.svc.request({ op: 'roster', teamId: w2.teamId }, 'desktop')
+  check(roster.ok && roster.agents.find((x) => x.id === 'dev').waiting?.reason === 'sessionBusy', 'it waits sessionBusy until then')
+  const due = () => [...w2.clock.timers.values()].some((t) => t.at <= w2.clock.now)
+  check(!due(), 'no pass armed while the check runs')
+  // It settles (the pid is not ours this time): it pokes, and the next pass resumes the session.
+  release()
+  await until(() => !w2.svc.reapedAtLoad.has(w2.teamId), 5000, 'the check settles')
+  check(due(), 'the settled check pokes, also when it found no orphan')
+  w2.clock.advance(0)
+  const re = w2.rt().activeRuns.find((r) => r.agentId === 'dev')
+  check(re && re.resumed === true && re.sessionId === runA.sessionId && re.trigger.reason === 'interrupted', 'then the pass resumes the session')
+  await w2.waitEnded(re.id)
+  hardKill(runA.pid)
+  w2.svc.dispose()
+  w1.svc.dispose()
+}
+
+// A team removed while a run's prep is inside TaskWorktrees.ensure (findings 5 and 6): the create lands after the
+// removal's disown, and the prep disowns the tree it made (an ordinary orphan, decision 63).
+async function removeRaceChecks() {
+  const w = await world('remove-race', { worktrees: true })
+  const t = await w.createTask({ title: 'Repo grande', assignee: 'dev' })
+  const owner = M.teamWorktreeOwner(w.teamId, w.rt().gen, t)
+  let release
+  const gate = new Promise((r) => (release = r))
+  let entered = false
+  const realCreate = w.wts.create.bind(w.wts)
+  w.wts.create = async (req, o) => { entered = true; await gate; return realCreate(req, o) }
+  w.use('claude-simple.json')
+  const r = await w.runTask('dev', t)
+  check(r.ok, `the plan run of a worktree task is admitted (${JSON.stringify(r)})`)
+  await until(() => entered, 10000, 'the prep is inside the worktree create')
+  const rm = await w.svc.request({ op: 'remove', teamId: w.teamId }, 'desktop')
+  check(rm.ok && !w.svc.team(w.teamId), 'the team is removed meanwhile')
+  release()
+  const slug = M.taskSlug(w.teamId, M.taskNumOf(t))
+  await until(() => w.manifest.list().some((e) => e.branch === `sn/${slug}`), 30000, 'the create lands after the removal')
+  await until(() => w.manifest.list().every((e) => !e.owner), 5000, 'the prep disowns the tree it made')
+  const entry = w.manifest.list().find((e) => e.branch === `sn/${slug}`)
+  check(entry && entry.owner === undefined && new M.WorktreeManifest(path.join(w.data, 'worktrees.json')).list().every((e) => e.owner !== owner), 'its entry has no owner, on disk too')
+  const rows = await w.wts.list()
+  check(rows.entries.some((e) => e.branch === `sn/${slug}` && !e.teamOwned), 'Settings > Git lists it as an ordinary orphan the user may delete')
+  check(w.logs.some((x) => x === `run ${r.runId} worktree ${slug} disowned: its team was removed`) && !w.logs.some((x) => x.startsWith(`run ${r.runId} started`)), 'the prep disowned it and started nothing')
+  w.svc.dispose()
+}
+
+// Retomar of a task the user stopped (finding 4, decision 38): `resumeTask` over T17 through teams:req.
+async function resumeChecks() {
+  const w = await world('resume')
+  w.use('hang.json')
+  const t = await w.createTask({ title: 'Frenada', assignee: 'dev', needsPlan: false, isolation: 'main' })
+  const other = await w.createTask({ title: 'Otra', assignee: 'dev-2', needsPlan: false, isolation: 'main' })
+  const r = await w.runTask('dev', t)
+  await w.waitState(r.runId, 'running')
+  same(await w.svc.request({ op: 'stop', teamId: w.teamId, runId: r.runId }, 'desktop'), { ok: true }, 'Frenar')
+  await w.waitEnded(r.runId)
+  check(w.task(t).state === 'blocked' && w.task(t).blocked.reason.kind === 'stopped' && w.task(t).blocked.resume.state === 'doing' && w.task(t).blocked.resume.phase === 'executing', 'blocked {stopped}, to resume in doing/executing')
+  same(await w.svc.request({ op: 'resumeTask', teamId: w.teamId, taskId: 't-404' }, 'desktop'), { ok: false, error: 'not_found' }, 'an unknown task: not_found')
+  const notStopped = await w.svc.request({ op: 'resumeTask', teamId: w.teamId, taskId: other }, 'desktop')
+  check(!notStopped.ok && notStopped.error === 'conflict' && notStopped.reason === 'stale' && notStopped.current?.id === other, 'a task that is not blocked {stopped}: conflict stale, with the current task')
+  const res = await w.svc.request({ op: 'resumeTask', teamId: w.teamId, taskId: t }, 'desktop')
+  check(res.ok && res.task.id === t && res.task.state === 'doing' && res.task.phase === 'executing' && !res.task.blocked, `Retomar: back in the pair it was stopped in (${JSON.stringify(res.ok ? [res.task.state, res.task.phase] : res)})`)
+  const next = w.task(t).next
+  check(!w.task(t).blocked && next && next.agentId === 'dev' && next.mode === 'exec' && next.reason === 'retry' && next.bypassCooldown === true, 'with a retry level for the agent of that phase (T17)')
+  w.clock.advance(0)
+  check(w.rt().queue.some((q) => q.taskId === t && q.agentId === 'dev' && q.reason === 'retry'), 'autonomy off: the resumed task waits in Por despachar')
+  const again = await w.svc.request({ op: 'resumeTask', teamId: w.teamId, taskId: t }, 'desktop')
+  check(!again.ok && again.error === 'conflict' && again.reason === 'stale', 'a second Retomar: conflict stale')
+  w.svc.dispose()
+}
+
 async function main() {
   try {
     reducerChecks()
@@ -885,7 +1467,18 @@ async function main() {
     await logChecks()
     await teamScopeChecks()
     await removeChecks()
-    console.log(`PASS: ${checks} teams runner checks (fake agent lifecycle, watch, stop tree, linger, drain, max, prep CAS, session conflict, CLI off, gates, Labs off/on, shutdownSync, install, thaw, reaper, orphans, big result, RunLog cut, team scope, usage today, runs paging, remove wait, policy rows, no signal after exit)`)
+    await worktreeChecks()
+    await seriesChecks()
+    await queueChecks()
+    await backoffChecks()
+    await conflictChecks()
+    await wakeChecks()
+    await discardNextChecks()
+    await leadGoalChecks()
+    await orphanWaitChecks()
+    await removeRaceChecks()
+    await resumeChecks()
+    console.log(`PASS: ${checks} teams runner checks (fake agent lifecycle, watch, stop tree, linger, drain, max, prep CAS, session conflict, CLI off, gates, Labs off/on, shutdownSync, install, thaw, reaper, orphans, big result, RunLog cut, team scope, usage today, runs paging, remove wait, policy rows, no signal after exit; B4: task worktrees and the exec resume, write locks, tree mark, extra repo, a re-created team, runs in series within the caps, Por despachar, kickoff, triage, prep failure backoff, one sessionConflict card; integration: Frenar opens no card, a stale owned tree disowned, a re-wake keeps its request across a reload, a prep failure gives its wake mark back; review: Descartar offers the next level, a resumed kickoff reads the goal, no resume before the orphan check settles, a tree made after its team's removal disowned, Retomar a stopped task)`)
   } finally {
     // dispose() is idempotent: it kills what a failed section left running (the supervisor's tree kill).
     for (const s of services) { try { s.dispose() } catch { /* already gone */ } }

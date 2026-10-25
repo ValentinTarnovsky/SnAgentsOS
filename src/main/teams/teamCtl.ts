@@ -42,6 +42,7 @@ import { allowedFor, TEAM_TOOLS, teamTool, type TeamCtlMethod, type TeamToolSpec
 import { WS_NOTE_TITLE_MAX } from '@shared/ws-notes'
 import type { CtlTeamCaller } from '../cli/CtlTokens'
 import type { CtlTeamsView } from '../cli/handlers'
+import { cycleLoopOf, cycleText } from './flow/tasks'
 import type { FlowResult, TeamToolCall } from './flow/types'
 
 /** The live run behind a caller (the port's `live`). */
@@ -72,6 +73,9 @@ export interface TeamFailLike {
   current?: unknown
   defer?: { reason: string; until?: number }
   detail?: string
+  /** `cycle` as a TeamFail carries it (a flow failure has it in `current`, a CycleLoop). */
+  loop?: readonly string[]
+  loopMore?: number
   /** `cap` only: 'state' = the write would take state.json past TEAM_STATE_MAX_BYTES (absent: a count cap of the reducer). */
   full?: 'state'
 }
@@ -340,9 +344,14 @@ export function teamCtlError(f: TeamFailLike, hint: { method: TeamCtlMethod; par
       message = detail || `${cmd}: the team refused these params (check the ids and values with snaos team show and snaos team tasks)`
       break
     case 'cycle': {
-      const loop = Array.isArray(f.current) && f.current.every((x) => typeof x === 'string') ? (f.current as string[]).join(' -> ') : ''
+      // The loop travels as a field too (data.loop, data.loopMore), the same shape the user's TeamFail carries.
+      const c = cycleLoopOf(f.current) ?? (f.loop ? cycleLoopOf({ loop: f.loop, more: f.loopMore }) : null)
       const by = Array.isArray(hint.params?.blockedBy) ? (hint.params.blockedBy as string[]).join(',') : ''
-      message = loop ? `--blocked-by makes a loop of blockers: ${loop}` : `--blocked-by ${by} makes a loop of blockers (a task cannot wait on itself through others)`
+      if (c) {
+        extras.loop = c.loop
+        if (c.more > 0) extras.loopMore = c.more
+      }
+      message = c ? `--blocked-by makes a loop of blockers: ${cycleText(c)}` : `--blocked-by ${by} makes a loop of blockers (a task cannot wait on itself through others)`
       break
     }
     case 'too_big':
@@ -422,7 +431,8 @@ function forbiddenWhy(spec: TeamToolSpec, kind: RoleKind, live: TeamLiveRun): st
     if (kind === 'lead') return `the Lead creates tasks in its lead runs only; this run is in ${mode} mode`
     return `a ${kind} creates only subtasks of its own task, in an exec run: --parent ${live.run.taskId ?? '<your task>'}`
   }
-  if (spec.name === 'done' && kind === 'dev' && live.task?.isolation !== 'main') return 'a dev ends a task with isolation worktree with snaos team review, not done'
+  if (spec.name === 'review' && live.run.profile === 'readonly' && mode === 'exec') return 'this run is read-only and commits nothing to review: report the task with snaos team done'
+  if (spec.name === 'done' && kind === 'dev' && live.task?.isolation !== 'main' && mode === 'exec') return 'a dev ends a task with isolation worktree with snaos team review, not done'
   if (spec.modes.length && !spec.modes.includes(mode)) return `${cmd} works only in ${spec.modes.join(' or ')} runs; this run is in ${mode} mode`
   return `${cmd} is not allowed in this run (${mode} mode)`
 }
@@ -459,7 +469,7 @@ export function createTeamCtl(port: TeamCtlPort): CtlTeamsView {
       return fail('forbidden', 'this team run is not active any more: end your turn')
     }
     const kind = live.run.roleKind
-    if (!allowedFor(kind, spec, { mode: live.run.mode, isolation: live.task?.isolation, hasTask: !!live.run.taskId })) return fail('forbidden', forbiddenWhy(spec, kind, live))
+    if (!allowedFor(kind, spec, { mode: live.run.mode, isolation: live.task?.isolation, hasTask: !!live.run.taskId, profile: live.run.profile })) return fail('forbidden', forbiddenWhy(spec, kind, live))
     // A Dev or a custom role splits only the task it runs (5.3); allowedFor knows only that it has one.
     if (spec.name === 'task.create' && kind !== 'lead' && params.parent !== live.run.taskId) return fail('forbidden', forbiddenWhy(spec, kind, live))
     const hint = { method: spec.method, params }

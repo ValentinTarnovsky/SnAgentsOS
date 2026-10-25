@@ -9,7 +9,7 @@
  * phase, the run liveness, the caps and what the user owns.
  */
 import type { AgentProvider } from './types'
-import type { Isolation, RoleKind, RunMode, TerminalTool } from './teams'
+import type { Isolation, PermissionProfile, RoleKind, RunMode, TerminalTool } from './teams'
 import { TEAM_BLOCK_ACTIONS_MAX, TEAM_BLOCK_MAX_BYTES } from './teams'
 
 export type TeamToolName = 'show' | 'tasks' | 'task.get' | 'task.create' | 'task.update' | 'comment' | 'note'
@@ -76,8 +76,12 @@ export function isTeamMethod(m: string): m is TeamCtlMethod {
   return typeof m === 'string' && (TEAM_CTL_METHODS as readonly string[]).includes(m)
 }
 
-/** Role, mode and requirement check (section 5.3); the store re-checks phase and liveness. */
-export function allowedFor(kind: RoleKind, spec: TeamToolSpec, ctx: { mode: RunMode; isolation?: Isolation; hasTask: boolean }): boolean {
+/**
+ * Role, mode and requirement check (section 5.3); the store re-checks phase and liveness. `profile` is the run's
+ * permission profile (Run.profile): in an exec run it is the role's own, while a plan run is readonly whatever the
+ * role (effectiveProfile).
+ */
+export function allowedFor(kind: RoleKind, spec: TeamToolSpec, ctx: { mode: RunMode; isolation?: Isolation; hasTask: boolean; profile?: PermissionProfile }): boolean {
   if (!spec.roles.includes(kind)) return false
   if (spec.modes.length > 0 && !spec.modes.includes(ctx.mode)) return false
   switch (spec.name) {
@@ -85,9 +89,14 @@ export function allowedFor(kind: RoleKind, spec: TeamToolSpec, ctx: { mode: RunM
       // The Lead plans from its own runs; a Dev or a custom role only splits the task it runs (`--parent`, the store checks it is that one).
       return kind === 'lead' ? ctx.mode === 'lead' : ctx.mode === 'exec' && ctx.hasTask
     case 'done':
-      // A Dev closes only a task without a worktree (nothing to integrate); research may close from its plan run too.
-      if (kind === 'dev' && ctx.isolation !== 'main') return false
+      // A Dev closes only a task with nothing to integrate: isolation main, or an exec run of a readonly role (its
+      // worktree task runs in the repo root and commits nothing, decision 24). A writing Dev's plan run is readonly
+      // only for its phase: it never closes the task. Research may close from its plan run too.
+      if (kind === 'dev' && ctx.isolation !== 'main' && !(ctx.mode === 'exec' && ctx.profile === 'readonly')) return false
       return kind === 'research' || ctx.mode === 'exec'
+    case 'review':
+      // A readonly exec run commits nothing, so there is nothing to review: it reports with `team done`.
+      return ctx.profile !== 'readonly'
     default:
       return true
   }
@@ -99,7 +108,8 @@ const MODE_WORD: Readonly<Record<RunMode, string>> = { plan: 'plan', exec: 'exec
 function whenOf(kind: RoleKind, spec: TeamToolSpec): string {
   if (kind === 'lead') return ''
   if (spec.name === 'task.create') return 'exec runs, only a subtask of your task: --parent <your task>'
-  if (spec.name === 'done') return kind === 'research' ? 'plan or exec runs' : kind === 'dev' ? 'exec runs of a task with isolation main' : 'exec runs'
+  if (spec.name === 'done') return kind === 'research' ? 'plan or exec runs' : kind === 'dev' ? 'exec runs of a task with isolation main, or any exec run when your role is read-only' : 'exec runs'
+  if (spec.name === 'review') return 'exec runs, when your role may write'
   return spec.modes.length === 0 ? '' : `${spec.modes.map((m) => MODE_WORD[m]).join(' or ')} runs`
 }
 

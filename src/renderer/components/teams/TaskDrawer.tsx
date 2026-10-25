@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import { ListTodo, MessageSquare, MoreHorizontal, Pencil, Play } from 'lucide-react'
+import { ListTodo, MessageSquare, MoreHorizontal, Pencil, Play, RotateCcw } from 'lucide-react'
 import { TASK_BODY_MAX, TASK_TITLE_MAX, isActiveRun, type TaskField } from '@shared/teams'
 import type { AgentView, TaskDetail, TaskPatch, TeamView } from '@shared/team-protocol'
 import { columnKey, columnOf, phaseKey, phaseWaitsOnUser, priorityKey } from '@shared/teamBoard'
 import { useLang, useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { closeTeamDrawer, openAgentDrawer } from '@/lib/teamsStore'
-import { boardTasks, loadTask, releaseOwned, saveTask, summaryFromDetail, summaryOf, taskKey, useBoardStore, type TaskEntry } from '@/lib/teams/board'
+import { boardTasks, loadTask, releaseOwned, resumeTask, saveTask, summaryFromDetail, summaryOf, taskKey, useBoardStore, type TaskEntry } from '@/lib/teams/board'
 import { agentLabel, loadRoster, runFailText, runNow, useRosterStore } from '@/lib/teams/roster'
 import { toast } from '@/lib/toast'
 import { RightDrawer } from '@/components/ui/RightDrawer'
@@ -15,7 +15,7 @@ import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ChatMarkdown } from '@/components/chat/Markdown'
 import { SMALL_BTN, SMALL_BTN_TEXT } from './RunHeader'
-import { CHIP, CHIP_AMBER, CHIP_NEUTRAL, blockedText, taskFailText, useTaskActions } from './TaskCard'
+import { CHIP, CHIP_AMBER, CHIP_NEUTRAL, blockedText, resumeFailText, taskFailText, taskRunner, useTaskActions } from './TaskCard'
 import { TaskFields, FIELD_CLS, TITLE_BAD_RE } from './TaskFields'
 import { TaskActivity } from './TaskActivity'
 import { BODY_BAD_RE, TaskComments, useLinkConfirm } from './TaskComments'
@@ -51,8 +51,9 @@ function Section({ title, children, name }: { title: string; children: ReactNode
 
 /**
  * The drawer of one task (app 2.7.0, E10 B3), over any tab of the team: its
- * state, phase and why it is blocked; "Ejecutar ahora" for an idle assignee
- * and "Ver chat" of a live run; the title and the description (edited in
+ * state, phase and why it is blocked; "Ejecutar ahora" for the idle agent of
+ * its phase (B4: only where main runs it), Retomar for a task the user
+ * stopped and "Ver chat" of a live run; the title and the description (edited in
  * place); the fields (each saved at once with the task's rev; a `conflict`
  * loads the new version and keeps the change to retry); the review round;
  * the runs of the task; and its comments with the composer. A click on
@@ -210,18 +211,28 @@ function TaskBody({ teamId, view, entry, detail, agents, byId }: { teamId: strin
 
   const col = columnOf(detail)
   const live = detail.run && isActiveRun(detail.run.state) ? detail.run : undefined
-  const assignee = detail.assignee ? byId[detail.assignee] : undefined
-  const canRun = !!assignee && assignee.status === 'idle' && !assignee.retired && !assignee.takeover && !live && detail.state !== 'done' && detail.state !== 'cancelled'
+  // Ejecutar ahora only where main's runManual runs it: the agent of the task's phase (its QA agent in qa), idle.
+  const runner = taskRunner(detail, byId, detail.reviewInfo.qaAgentId)
+  const canRun = !!runner
+  // A task the user stopped (Frenar, decision 38) waits for Retomar: autonomy never restarts it on its own.
+  const canResume = detail.blocked?.kind === 'stopped' && !live
   const blocked = blockedText(detail, t)
   const bodyUnits = editing?.field === 'body' ? editing.text.length : 0
 
   const doRun = async (): Promise<void> => {
-    if (!assignee) return
+    if (!runner) return
     setRunning(true)
     setRunNote(null)
-    const fail = await runNow(teamId, assignee.id, undefined, detail.id)
+    const fail = await runNow(teamId, runner.id, undefined, detail.id)
     setRunning(false)
-    setRunNote(fail ? { text: runFailText(fail, agentLabel(assignee), t, lang, Date.now()), error: true } : { text: t('teams.task.runStarted'), error: false })
+    setRunNote(fail ? { text: runFailText(fail, agentLabel(runner), t, lang, Date.now()), error: true } : { text: t('teams.task.runStarted'), error: false })
+  }
+  const doResume = async (): Promise<void> => {
+    setRunning(true)
+    setRunNote(null)
+    const fail = await resumeTask(teamId, detail.id)
+    setRunning(false)
+    setRunNote(fail ? { text: resumeFailText(fail, t), error: true } : { text: t('teams.task.resumed'), error: false })
   }
 
   return (
@@ -259,8 +270,14 @@ function TaskBody({ teamId, view, entry, detail, agents, byId }: { teamId: strin
             </button>
           </div>
         )}
-        {(canRun || live) && (
+        {(canRun || canResume || live) && (
           <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {canResume && (
+              <button type="button" data-task-resume disabled={running} onClick={() => void doResume()} className={cn(SMALL_BTN, SMALL_BTN_TEXT)}>
+                <RotateCcw size={13} aria-hidden />
+                {t('teams.task.resume')}
+              </button>
+            )}
             {canRun && (
               <button type="button" data-task-run-now disabled={running} onClick={() => void doRun()} className={cn(SMALL_BTN, SMALL_BTN_TEXT)}>
                 <Play size={13} aria-hidden />
@@ -365,7 +382,8 @@ function TaskBody({ teamId, view, entry, detail, agents, byId }: { teamId: strin
 
       {(pending || error) && (
         <div data-task-save-note={pending ? 'conflict' : 'error'} role="status" className="mx-4 mb-1 flex min-w-0 flex-wrap items-center gap-2 rounded-btn border border-state-action/50 bg-state-action/10 px-3 py-2 text-xs text-text-primary">
-          <span className="min-w-0 flex-1">{pending ? t('teams.task.conflict') : error}</span>
+          {/* A refusal can be long (a blocker loop names up to 20 tasks): it wraps inside the drawer. */}
+          <span className="min-w-0 flex-1 break-words">{pending ? t('teams.task.conflict') : error}</span>
           {pending && (
             <>
               <button type="button" data-task-retry disabled={saving} onClick={() => void save(pending).then((ok) => ok && setEditing(null))} className={cn(SMALL_BTN, SMALL_BTN_TEXT, 'h-7')}>

@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
-import { MessageSquare, Plus } from 'lucide-react'
-import { BOARD_COLUMNS, type BoardColumn as Column, type TaskPriority } from '@shared/teams'
+import { ListTodo, MessageSquare, Plus } from 'lucide-react'
+import { BOARD_COLUMNS, isActiveRun, type BoardColumn as Column, type TaskPriority } from '@shared/teams'
 import type { AgentView, TaskSummary, TeamView } from '@shared/team-protocol'
 import { boardColumns, columnOf, filterActive, type BoardFilter } from '@shared/teamBoard'
-import { useT } from '@/i18n'
+import { useLang, useT } from '@/i18n'
 import { DRAG_NONCE } from '@/lib/dragNonce'
 import { openAgentDrawer, openTaskDrawer } from '@/lib/teamsStore'
 import { boardTasks, loadBoard, loadMoreDone, openNewTask, setBoardFilter, useBoardStore, withOptimistic } from '@/lib/teams/board'
-import { loadRoster, useRosterStore } from '@/lib/teams/roster'
+import { agentLabel, loadRoster, runFailText, useRosterStore } from '@/lib/teams/roster'
+import { kickoff } from '@/lib/teams/needs'
+import { toast } from '@/lib/toast'
 import { Button } from '@/components/ui/Button'
 import { ContextMenu } from '@/components/ui/ContextMenu'
 import { BoardColumn } from './BoardColumn'
@@ -48,9 +50,56 @@ function revealIn(scroller: Element | null | undefined, el: HTMLElement, axis: '
   else if (r.right > s.right) scroller.scrollLeft += r.right - s.right + 8
 }
 
-/** The empty board: what to do first, and the definition summary (goal, how it works, roles) under it. */
-function EmptyBoard({ teamId, view, leadId }: { teamId: string; view: TeamView; leadId: string | null }) {
+/**
+ * "Pedile al Líder que arme las tareas" (B4, decision 43): one Lead run now
+ * (reason kickoff) that reads the goal and splits it into the first tasks.
+ * Main applies every gate but the autonomy one; a refusal or a defer says why
+ * beside the button, in words. While the Lead runs, the button waits.
+ */
+function KickoffCta({ teamId, view, lead }: { teamId: string; view: TeamView; lead: AgentView | null }) {
   const t = useT()
+  const lang = useLang()
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+  const role = view.roles.find((r) => r.kind === 'lead')
+  const leadId = lead?.id ?? role?.id ?? null
+  const name = lead ? agentLabel(lead) : (role?.name ?? '')
+  const working = !!lead?.run && isActiveRun(lead.run.state)
+  const go = (): void => {
+    setBusy(true)
+    setNote(null)
+    void kickoff(teamId).then((res) => {
+      setBusy(false)
+      if (!res.ok) {
+        setNote(runFailText(res, name, t, lang, Date.now()))
+        return
+      }
+      const runId = res.runId
+      const id = leadId
+      toast.success(t('teams.kickoff.started'), id ? { actions: [{ label: t('teams.kickoff.watch'), run: () => openAgentDrawer(id, runId, 'run') }] } : undefined)
+      void loadRoster(teamId)
+    })
+  }
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      <Button size="sm" data-kickoff disabled={busy || working} onClick={go}>
+        <ListTodo size={13} aria-hidden />
+        {working ? t('teams.kickoff.busy') : t('teams.kickoff.cta')}
+      </Button>
+      <p className="text-[11px] text-text-secondary">{t('teams.kickoff.hint')}</p>
+      {note && (
+        <p data-kickoff-note role="status" className="text-xs text-state-error">
+          {note}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** The empty board: what to do first, and the definition summary (goal, how it works, roles) under it. */
+function EmptyBoard({ teamId, view, lead }: { teamId: string; view: TeamView; lead: AgentView | null }) {
+  const t = useT()
+  const leadId = lead?.id ?? null
   return (
     <div data-board-empty className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 pb-4">
@@ -59,6 +108,8 @@ function EmptyBoard({ teamId, view, leadId }: { teamId: string; view: TeamView; 
             <p className="text-sm font-medium text-text-primary">{t('teams.board.empty')}</p>
             <p className="mt-1 text-xs text-text-secondary">{t('teams.board.emptyHint')}</p>
           </div>
+          {/* B4: with a goal to read, the Lead can set up the first tasks itself. */}
+          {view.goal.trim() !== '' && <KickoffCta teamId={teamId} view={view} lead={lead} />}
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" data-board-new-task onClick={() => openNewTask(teamId)} className={SMALL}>
               <Plus size={13} aria-hidden />
@@ -256,7 +307,7 @@ export function TeamBoard({ teamId, view }: { teamId: string; view: TeamView }) 
   return (
     <section data-team-board={teamId} aria-label={t('teams.board.label')} className="flex h-full min-h-0 flex-col gap-3">
       {empty ? (
-        <EmptyBoard teamId={teamId} view={view} leadId={lead?.id ?? null} />
+        <EmptyBoard teamId={teamId} view={view} lead={lead} />
       ) : (
         <>
           <BoardFilters teamId={teamId} filter={filter} agents={agents} />

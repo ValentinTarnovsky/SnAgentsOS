@@ -7,8 +7,9 @@ import { useLang, useT, type MessageKey, type TFn } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { toast } from '@/lib/toast'
 import { openTaskDrawer } from '@/lib/teamsStore'
-import { cancelTask, moveTask, releaseOwned } from '@/lib/teams/board'
+import { cancelTask, moveTask, qaAgentOf, releaseOwned, runNowAgentOf } from '@/lib/teams/board'
 import { agentLabel, runFailText, runNow } from '@/lib/teams/roster'
+import { visibleName } from '@/lib/teams/issues'
 import { StatusGlyph } from '@/components/ui/StatusDot'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -42,10 +43,35 @@ const FAIL_KEY: Partial<Record<TeamError, MessageKey>> = {
   untrusted: 'teams.task.fail.untrusted',
 }
 
+/** Ids of a loop a refusal names before "and N more" (main caps TeamFail.loop at the same count). */
+const LOOP_SHOWN_MAX = 20
+
+/**
+ * A blocker loop main refused (`cycle`, app 2.7.0, E10 B4) with the tasks that close it, from TeamFail.loop and
+ * loopMore (never `detail`): "t-3 → t-5 → t-3", each id with its hiding characters spelled out. Null without a loop.
+ */
+function cycleLoopText(f: TeamFail, t: TFn): string | null {
+  const ids = Array.isArray(f.loop) ? f.loop.filter((id): id is string => typeof id === 'string' && id !== '') : []
+  if (ids.length === 0) return null
+  const shown = ids.slice(0, LOOP_SHOWN_MAX)
+  const more = (typeof f.loopMore === 'number' && Number.isSafeInteger(f.loopMore) && f.loopMore > 0 ? f.loopMore : 0) + ids.length - shown.length
+  const loop = shown.map(visibleName).join(' → ')
+  return more > 0 ? t('teams.task.fail.cycleLoopMore', { loop, count: more }) : t('teams.task.fail.cycleLoop', { loop })
+}
+
 /** A refused task write in the catalog's words (never main's detail). */
 export function taskFailText(f: TeamFail, t: TFn): string {
+  const loop = f.error === 'cycle' ? cycleLoopText(f, t) : null
+  if (loop) return loop
   const key = FAIL_KEY[f.error]
   return key ? t(key) : t('teams.task.fail.other')
+}
+
+/** A refused Retomar (`resumeTask`, B4): a task that is no longer stopped says so, the rest as any task write. */
+export function resumeFailText(f: TeamFail, t: TFn): string {
+  if (f.error === 'conflict') return t('teams.task.resumeFail.conflict')
+  const key = FAIL_KEY[f.error]
+  return key ? t(key) : t('teams.task.resumeFail.other')
 }
 
 /** "Dev 2" for an agent of the roster, the id when the roster does not have it (yet). */
@@ -70,6 +96,20 @@ export function blockedText(task: Pick<TaskSummary, 'blocked'>, t: TFn): string 
     default:
       return t('teams.blocked.card')
   }
+}
+
+/**
+ * Who "Ejecutar ahora" runs a task with, in the drawer and the card menu (app
+ * 2.7.0, E10 B4): the agent its phase runs (runNowAgentOf: the assignee, or
+ * the QA agent in qa), while that agent is idle, not retired nor in a console,
+ * and no run of the task is live (a QA run of it counts too). Undefined: the
+ * action is not offered (main's runManual would refuse it).
+ */
+export function taskRunner(task: Pick<TaskSummary, 'state' | 'phase' | 'assignee' | 'run'>, agents: Readonly<Record<string, AgentView>>, qaAgentId?: string): AgentView | undefined {
+  if (task.run && isActiveRun(task.run.state)) return undefined
+  const id = runNowAgentOf(task, qaAgentId)
+  const a = id ? agents[id] : undefined
+  return a && a.status === 'idle' && !a.retired && !a.takeover ? a : undefined
 }
 
 /** The columns a user may move a card to (the rest belong to the flow). */
@@ -145,15 +185,15 @@ export function useTaskActions(teamId: string, agents: Readonly<Record<string, A
       })
     })
     const extra: ContextMenuItem[] = []
-    const assignee = task.assignee ? agents[task.assignee] : undefined
-    // The drawer's rule: an idle assignee and no live run on the task (a QA run of it counts too).
-    if (assignee && assignee.status === 'idle' && !assignee.retired && !assignee.takeover && !live(task) && task.state !== 'done' && task.state !== 'cancelled') {
+    // The drawer's rule (taskRunner); in qa the QA agent is known once the task's detail was loaded.
+    const runner = taskRunner(task, agents, qaAgentOf(teamId, task.id))
+    if (runner) {
       extra.push({
         label: t('teams.task.runNow'),
         icon: Play,
         onClick: () => {
-          void runNow(teamId, assignee.id, undefined, task.id).then((fail) => {
-            if (fail) toast.error(runFailText(fail, agentLabel(assignee), t, lang, Date.now()))
+          void runNow(teamId, runner.id, undefined, task.id).then((fail) => {
+            if (fail) toast.error(runFailText(fail, agentLabel(runner), t, lang, Date.now()))
             else toast.success(t('teams.task.runStarted'))
           })
         },

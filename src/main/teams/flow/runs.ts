@@ -7,22 +7,18 @@
  * for the side effects (revoke the token, release locks, delete the system
  * file, synthetic status off, clear the run deadlines, dispatch).
  *
- * B2 runs are manual ("Ejecutar ahora"): `manualGate` checks the gates of a
- * manual request and `basicPolicy` holds the provider rows of the policy
- * table; B4 replaces both with the Dispatcher and `afterRunPolicy`.
+ * B4: every run comes from a Dispatcher pass (the manual ones too, through
+ * Dispatcher.manual); the outcome is `classifyOutcome` and the run-end policy
+ * `afterRunPolicy` (teamDispatch.ts). A task run that writes in a worktree
+ * gets it during its prep (`setRunWorktree`, decision 24).
  */
 import { redactCredentials } from '@shared/redact'
+import { afterRunPolicy, classifyOutcome } from '@shared/teamDispatch'
 import {
-  GLOBAL_MAX_RUNS,
-  LIMIT_FALLBACK_MS,
-  RETRIES_MAX,
   RUN_SUMMARY_MAX,
-  TEAM_MAX_CONCURRENT,
   type AgentSession,
   type AgentState,
   type CardReason,
-  type DeferInfo,
-  type DispatchFacts,
   type InterruptCause,
   type PermissionProfile,
   type PolicyDecision,
@@ -33,9 +29,10 @@ import {
   type RunState,
   type SessionKey,
   type StopReason,
-  type TeamDefinition,
+  type TaskWorktree,
   type TeamRuntime,
   type TeamTask,
+  type TreeMark,
   type WakeMark,
 } from '@shared/teams'
 import type { FailureInfo } from '@shared/failure'
@@ -110,7 +107,7 @@ export function runEndFactsOf(rt: TeamRuntime, run: Run, now: number, o: { claud
 
 /**
  * Applies a policy decision for a run that just ended (its `next`, counters,
- * cooldown, block card, provider block, team pause, fresh session, undeliver
+ * cooldown, block (and its card, when it names one), provider block, team pause, fresh session, undeliver
  * and the task-less interruption streak). Pure helper of every terminal path.
  */
 function applyPolicy(rt: TeamRuntime, run: Run, p: PolicyDecision, ctx: Pick<FlowCtx, 'now'>): TeamRuntime {
@@ -130,11 +127,20 @@ function applyPolicy(rt: TeamRuntime, run: Run, p: PolicyDecision, ctx: Pick<Flo
     if (p.cooldownUntil !== undefined) t = { ...t, cooldownUntil: p.cooldownUntil }
     if (t !== task) out = { ...out, tasks: replaceTask(out.tasks, { ...t, updatedAt: ctx.now }) }
     if (p.block && t.state !== 'blocked' && t.state !== 'done' && t.state !== 'cancelled') {
-      const card = openSystemCard(out, { why: p.block.card.why, actions: p.block.card.actions, taskId: t.id, runId: run.id }, ctx)
-      if (card.ok) {
-        out = card.rt
-        const cardId = card.result.cardId ?? out.cards.find((c) => c.state === 'open' && c.taskId === t.id && c.from.kind === 'system' && c.from.why === p.block?.card.why)?.id
-        const reason = p.block.reason.kind === 'card' && cardId ? { ...p.block.reason, cardId } : p.block.reason
+      // A block without a card (a user's Frenar, decision 38) blocks with its reason alone: nothing in Te necesita.
+      let reason = p.block.reason
+      let blocks = true
+      const want = p.block.card
+      if (want) {
+        const card = openSystemCard(out, { why: want.why, actions: want.actions, taskId: t.id, runId: run.id }, ctx)
+        blocks = card.ok
+        if (card.ok) {
+          out = card.rt
+          const cardId = card.result.cardId ?? out.cards.find((c) => c.state === 'open' && c.taskId === t.id && c.from.kind === 'system' && c.from.why === want.why)?.id
+          if (reason.kind === 'card' && cardId) reason = { ...reason, cardId }
+        }
+      }
+      if (blocks) {
         const cur = out.tasks.find((x) => x.id === t.id) ?? t
         out = {
           ...out,
@@ -184,6 +190,16 @@ function applyPolicy(rt: TeamRuntime, run: Run, p: PolicyDecision, ctx: Pick<Flo
   }
   if (p.undeliver) out = undeliver(out, run.id)
   return out
+}
+
+/**
+ * The vars of a run's sessionConflict card (TeamService.onPaneStatus, the only place that opens one: the run-end
+ * policy never does, its `sessionConflict` row only leaves the wake mark): `what` is its session (openSystemCard
+ * raises one card per reason, task and `what`), so a second conflict on the same run or session finds the open card
+ * and opens no other (extra requirement 2 of B4).
+ */
+export function sessionCardVars(run: Pick<Run, 'id' | 'agentId' | 'sessionId'>): Record<string, string> {
+  return { what: run.sessionId ? `session:${run.sessionId}` : `run:${run.id}`, runId: run.id, agentId: run.agentId }
 }
 
 /** Comments, cards and approvals a run received go back to queued (a system failure before `running`). */
@@ -300,14 +316,26 @@ export function admitRun(rt: TeamRuntime, req: RunRequest, a: AdmitFacts, ctx: F
 /**
  * R2: the process spawned. `startedAt` and the pid; what the prompt carried
  * is marked delivered to this run (comments for this agent, cards,
- * approvals); a lead run records the goal it saw. Arms `run:<id>:max` and
- * turns the synthetic status on.
+ * approvals); a lead run records the goal it saw and every task its board
+ * listed as untriaged gets `triagedAt` (without it the triage level would
+ * wake the Lead again and again). A writer run keeps the tree mark of its
+ * prep (decision 68). Arms `run:<id>:max` and turns the synthetic status on.
  */
-export function markStarting(rt: TeamRuntime, runId: string, s: { pid: number; delivered: NonNullable<Run['delivered']> }, ctx: FlowCtx): FlowResult {
+export function markStarting(
+  rt: TeamRuntime,
+  runId: string,
+  s: { pid: number; delivered: NonNullable<Run['delivered']>; triaged?: readonly string[]; treeBefore?: TreeMark },
+  ctx: FlowCtx,
+): FlowResult {
   const run = findRun(rt, runId)
   if (!run || run.state !== 'queued') return fail('conflict', { reason: 'stale' })
   const started: Run = { ...run, state: 'starting', startedAt: ctx.now, pid: s.pid, delivered: { comments: [...s.delivered.comments], cards: [...s.delivered.cards], approvals: [...s.delivered.approvals] } }
+  if (s.treeBefore) started.treeBefore = { ...s.treeBefore }
   let out = replaceRun(rt, started)
+  if (run.mode === 'lead' && s.triaged && s.triaged.length) {
+    const ids = new Set(s.triaged)
+    out = { ...out, tasks: out.tasks.map((t) => (ids.has(t.id) && t.triagedAt === undefined ? { ...t, triagedAt: ctx.now } : t)) }
+  }
   if (s.delivered.comments.length) {
     const ids = new Set(s.delivered.comments)
     const comments: TeamRuntime['comments'] = {}
@@ -370,17 +398,62 @@ export function markRunning(rt: TeamRuntime, runId: string, f: { at: number; ses
 /**
  * R3: the async prep could not spawn the run. `failed` with a request
  * failure; `cwdMissing`, `spawnFailed` and `cliOff` open their system card;
- * `untrusted` and `sessionBusy` only fail the run (the level re-requests it,
- * nothing is counted).
+ * `untrusted`, `sessionBusy` and `treeBusy` only fail the run and give its
+ * level back (the admission consumed it): the same wake mark, so the next
+ * pass after the trust or the free session requests it again, nothing counted.
+ * A manual run without a task is the user's click, not a level: it is not
+ * requested again; one on a task gets a `retry` wake (its admission moved the
+ * task into the mode's phase, where no other level would find it). When the
+ * admission consumed a wake mark, TeamService then puts that exact mark back
+ * (restoreWake).
  */
 export function prepFailed(rt: TeamRuntime, runId: string, failure: FailureInfo, card: CardReason | null, ctx: FlowCtx): FlowResult {
   const run = findRun(rt, runId)
   if (!run || run.state !== 'queued') return fail('conflict', { reason: 'stale' })
   const terminal: Run = { ...run, state: 'failed', failure: { ...failure }, outcome: 'failed', endedAt: ctx.now }
-  const ended = endRun(rt, terminal, {}, ctx, true)
+  const policy: PolicyDecision = {}
+  const manual = run.trigger.reason === 'manual'
+  if (card === null && (!manual || run.taskId)) {
+    const mark: WakeMark = { agentId: run.agentId, mode: run.mode, reason: manual ? 'retry' : run.trigger.reason, since: run.queuedAt }
+    if (run.trigger.refs && run.trigger.refs.length) mark.refs = [...run.trigger.refs]
+    policy.next = mark
+  }
+  const ended = endRun(rt, terminal, policy, ctx, true)
   if (!ended.ok || !card) return ended.ok ? { ...ended, result: undefined } : ended
   const opened = openSystemCard(ended.rt, { why: card, actions: run.taskId ? ['retry', 'dismiss'] : ['dismiss'], taskId: run.taskId, runId: run.id }, ctx)
   return { ok: true, rt: opened.ok ? opened.rt : ended.rt, effects: ended.effects, result: undefined }
+}
+
+/**
+ * After a prepFailed that opened no card (untrusted, sessionBusy, treeBusy): the wake mark the admission consumed
+ * (R1 clears task.next, and the agent's own mark of the run's mode) goes back exactly as it was (its reason, refs,
+ * request text and cooldown bypass), in place of the one prepFailed derived from the trigger: a manual run built
+ * from that mark has only `manual` and gets a `retry` on a task and nothing without one. Only into a slot prepFailed
+ * left for this agent and mode, or an empty one, of a task the agent still runs in that phase (a newer level wins).
+ */
+export function restoreWake(rt: TeamRuntime, taskId: string | undefined, mark: WakeMark, ctx: Pick<FlowCtx, 'now'>): FlowResult {
+  const keep: FlowResult = { ok: true, rt, effects: [], result: undefined }
+  const free = (m: WakeMark | undefined): boolean => !m || (m.agentId === mark.agentId && m.mode === mark.mode)
+  const agent = rt.agents.find((a) => a.id === mark.agentId)
+  if (!agent || agent.retired) return keep
+  if (taskId) {
+    const t = rt.tasks.find((x) => x.id === taskId)
+    if (!t || t.state === 'done' || t.state === 'cancelled' || t.state === 'blocked' || !free(t.next)) return keep
+    if (t.phase !== 'none' && MODE_PHASE[mark.mode] !== t.phase) return keep
+    return { ok: true, rt: { ...rt, tasks: replaceTask(rt.tasks, { ...t, next: { ...mark }, updatedAt: ctx.now }) }, effects: [], result: undefined }
+  }
+  if (!free(agent.next)) return keep
+  return { ok: true, rt: { ...rt, agents: replaceAgent(rt.agents, { ...agent, next: { ...mark } }) }, effects: [], result: undefined }
+}
+
+/**
+ * The run-end policy of a run that carried a request text (the user's prompt of "Ejecutar ahora", a routine's): a
+ * task-less run the policy wakes again (interrupted, retry, context) keeps that text in its wake mark, persisted with
+ * the runtime (`WakeMark.detail`), so the run it gets, after a reload too, still carries the request.
+ */
+export function withRunDetail(p: PolicyDecision, run: Pick<Run, 'taskId'>, detail: string | undefined): PolicyDecision {
+  if (run.taskId || !detail || !detail.trim() || !p.next || p.next.detail) return p
+  return { ...p, next: { ...p.next, detail } }
 }
 
 /** The terminal state of a stop that needs no close (queued) or of a forced or closed stopping run without a result. */
@@ -415,7 +488,7 @@ export function requestStop(
   runId: string,
   reason: StopReason,
   ctx: Pick<FlowCtx, 'now'>,
-  policyOf: (f: RunEndFacts) => PolicyDecision = basicPolicy,
+  policyOf: (f: RunEndFacts) => PolicyDecision = afterRunPolicy,
 ): FlowResult<{ already: boolean; immediate: boolean }> {
   const run = findRun(rt, runId)
   if (!run) return fail('not_found')
@@ -440,14 +513,22 @@ function summaryOf(text: string): string | undefined {
   return t.length > RUN_SUMMARY_MAX ? t.slice(0, RUN_SUMMARY_MAX - 1) + '…' : t
 }
 
-/** Outcome without the B4 classifier (same order as classifyOutcome): none for a stopped run, concluded, failed, or progress / empty from the hard evidence. */
-function basicOutcome(state: RunState, run: Run, end: RunEnd): RunOutcome | undefined {
-  if (state === 'cancelled' || state === 'takenOver' || state === 'interrupted') return undefined
-  if (run.concludedBy) return 'concluded'
-  if (state === 'failed') return 'failed'
-  if (state !== 'succeeded') return undefined
-  if (end.facts.maxTurns || end.teamWrites > 0 || end.facts.fileEdits > 0 || end.treeMoved) return 'progress'
-  return 'empty'
+/** classifyOutcome (decision 68) of a terminal copy: the parser facts, the run's team writes and its tree mark. */
+function outcomeOf(state: RunState, run: Run, end: RunEnd): RunOutcome | undefined {
+  const f = end.facts
+  return classifyOutcome({
+    state,
+    isError: f.isError,
+    maxTurns: f.maxTurns,
+    finalText: f.finalText ?? '',
+    digest: f.digest ?? { tools: 0, families: {}, files: [] },
+    teamWrites: end.teamWrites,
+    concluded: !!run.concludedBy,
+    mode: run.mode,
+    roleKind: run.roleKind,
+    fileEdits: f.fileEdits ?? 0,
+    ...(end.treeMoved !== undefined ? { treeMoved: end.treeMoved } : {}),
+  })
 }
 
 /**
@@ -456,6 +537,7 @@ function basicOutcome(state: RunState, run: Run, end: RunEnd): RunOutcome | unde
  * (which computes the same copy again). A clean end is `!facts.failure`, the
  * one field the parsers set exactly when the run failed (max turns is no
  * failure, decision 10); a stopped run without a result ends by its reason.
+ * The outcome is classifyOutcome's.
  */
 export function terminalOf(run: Run, end: RunEnd): Run {
   const facts = end.facts
@@ -499,7 +581,7 @@ export function terminalOf(run: Run, end: RunEnd): Run {
     for (const d of facts.denials) counts.set(d.tool, (counts.get(d.tool) ?? 0) + 1)
     terminal.denials = [...counts].map(([tool, count]) => ({ tool, count }))
   }
-  const outcome = basicOutcome(state, terminal, end)
+  const outcome = outcomeOf(state, terminal, end)
   if (outcome) terminal.outcome = outcome
   else delete terminal.outcome
   return terminal
@@ -532,75 +614,31 @@ export function finishRun(rt: TeamRuntime, runId: string, end: RunEnd, policy: P
   return endRun(out, terminal, policy, ctx, true)
 }
 
-/** The wake mark of the same agent, mode and session for a run's follow-up. */
-function sameAs(run: RunEndFacts['run'], reason: WakeMark['reason'], now: number, notBefore?: number): WakeMark {
-  const m: WakeMark = { agentId: run.agentId, mode: run.mode, reason, since: now }
-  if (notBefore !== undefined) m.notBefore = notBefore
-  return m
-}
-
 /**
- * B2 only (until B4): the provider rows of the policy table (limit and rate
- * limit block the provider; auth and billing pause the team, unless the
- * account switched during the run, decision 40: then it is a retry) plus the
- * delivery rule (a run that never reached `running` hands back what it got).
+ * Prep step 2 (decision 24): the task's worktree, created for this queued run,
+ * is the task's from now on and the run's cwd (CAS: the run is still queued,
+ * the task has no other worktree). A session of the task kept in another cwd
+ * could never resume in the worktree (a Claude session lives in its cwd slug):
+ * it goes, so every task-keyed session runs in the task's cwd (I20).
  */
-export function basicPolicy(f: RunEndFacts): PolicyDecision {
-  const run = f.run
-  const out: PolicyDecision = {}
-  const concluded = !!run.concludedBy
-  if ((run.state === 'failed' || run.state === 'interrupted') && !run.reachedRunning && run.stopReason !== 'user') out.undeliver = true
-  const failure = run.state === 'failed' ? run.failure : undefined
-  if (!failure) return out
-  if (failure.kind === 'limit' || failure.kind === 'rateLimited') {
-    const until = f.claudeCanSwitch && run.provider === 'claude' ? f.now + LIMIT_FALLBACK_MS : failure.until ?? f.now + LIMIT_FALLBACK_MS
-    out.providerBlock = { provider: run.provider, until }
-    if (!concluded) out.next = sameAs(run, 'retry', f.now, until)
-    return out
-  }
-  if (failure.kind === 'auth') {
-    const switched = f.claudeSwitchedAt !== undefined && run.provider === 'claude' && run.startedAt !== undefined && f.claudeSwitchedAt >= run.startedAt && f.claudeSwitchedAt <= (run.endedAt ?? f.now)
-    if (switched) {
-      if (!concluded) out.next = sameAs(run, 'retry', f.now)
-      if (f.task) out.counters = { retries: Math.min(RETRIES_MAX + 1, f.task.counters.retries + 1) }
-      return out
-    }
-  }
-  if (failure.kind === 'auth' || failure.kind === 'billing') {
-    out.pauseTeam = failure.kind
-    if (!concluded) out.next = sameAs(run, 'retry', f.now)
-  }
-  return out
-}
-
-/**
- * B2 only (until B4 replaces it with a Dispatcher pass): G1, G1b, G2, G3, G5
- * for a manual request, in that order. Busy agents answer `running` /
- * `stopping`. Null: the request may be admitted now.
- */
-export function manualGate(rt: TeamRuntime, def: TeamDefinition, req: RunRequest, facts: Omit<DispatchFacts, 'manual'>): DeferInfo | null {
-  const withTask = (d: DeferInfo): DeferInfo => (req.taskId ? { ...d, taskId: req.taskId } : d)
-  if (!facts.enabled) return withTask({ reason: 'disabled' })
-  if (!facts.trusted) return withTask({ reason: 'untrusted' })
-  if (!facts.cliReady) return withTask({ reason: 'cliOff' })
-  if (rt.paused) return withTask({ reason: 'paused' })
-  const agent = rt.agents.find((a) => a.id === req.agentId)
-  if (!agent) return withTask({ reason: 'disabled' })
-  if (agent.status === 'takenOver' || agent.takeover) return withTask({ reason: 'takenOver' })
-  if (agent.runId) {
-    const cur = findRun(rt, agent.runId)
-    return withTask({ reason: cur?.state === 'stopping' ? 'stopping' : 'running' })
-  }
-  if (agent.paused) return withTask({ reason: 'agentPaused' })
-  const cap = Math.min(def.maxConcurrent, TEAM_MAX_CONCURRENT)
-  if (rt.activeRuns.length >= cap) return withTask({ reason: 'teamCap' })
-  if (facts.globalActive >= GLOBAL_MAX_RUNS) return withTask({ reason: 'globalCap' })
-  const blocked = rt.providerBlockedUntil[agent.provider]
-  if (blocked !== undefined && blocked > facts.now) return withTask({ reason: 'quota', until: blocked })
-  if (agent.provider === 'claude' && facts.claudeBlockedUntil !== null && facts.claudeBlockedUntil > facts.now) return withTask({ reason: 'quota', until: facts.claudeBlockedUntil })
-  const sess = agent.sessions[req.sessionKey]
-  if (sess && facts.busySessions.has(sess.sessionId)) return withTask({ reason: 'sessionBusy' })
-  return null
+export function setRunWorktree(rt: TeamRuntime, runId: string, wt: TaskWorktree, ctx: Pick<FlowCtx, 'now'>): FlowResult {
+  const run = findRun(rt, runId)
+  if (!run || run.state !== 'queued' || !run.taskId) return fail('conflict', { reason: 'stale' })
+  const task = rt.tasks.find((t) => t.id === run.taskId)
+  if (!task || (task.worktree && task.worktree.path !== wt.path)) return fail('conflict', { reason: 'stale' })
+  // The admission of a task whose worktree was still to come never resumes (TeamService.admitFacts): a new session here.
+  if (run.resumed) return fail('conflict', { reason: 'stale' })
+  let out: TeamRuntime = replaceRun(rt, { ...run, cwd: wt.path })
+  out = { ...out, tasks: replaceTask(out.tasks, { ...task, worktree: { ...wt }, frozen: true, updatedAt: ctx.now }) }
+  const agents = out.agents.map((a) => {
+    const s = a.sessions[task.id]
+    if (!s || s.cwd === wt.path) return a
+    const sessions = { ...a.sessions }
+    delete sessions[task.id]
+    return { ...a, sessions }
+  })
+  if (agents.some((a, i) => a !== out.agents[i])) out = { ...out, agents }
+  return { ok: true, rt: out, effects: [], result: undefined }
 }
 
 /**

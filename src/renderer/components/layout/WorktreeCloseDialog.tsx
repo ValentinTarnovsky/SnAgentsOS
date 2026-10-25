@@ -18,6 +18,14 @@ export function WorktreeCloseDialog() {
 type RemoveError = Exclude<WorktreeRemoveRes, { ok: true }>
 
 /**
+ * A team task's worktree (app 2.7.0, decision 63): main refuses every remove but its team's as 'busy' with detail
+ * 'team'. Retrying never helps, so it has its own words and no Retry.
+ */
+function teamOwnedError(error: RemoveError | null): boolean {
+  return !!error && error.error === 'busy' && error.detail === 'team'
+}
+
+/**
  * The config to main now instead of 400 ms later (persist.ts): main refuses a
  * delete as 'shared' from the saved consoles, and config:save is a send that
  * lands before the remove invoke, so a console closed just before never counts.
@@ -42,7 +50,9 @@ function saveConfigNow(): void {
  * store only after main said ok, or on Keep. Without a pane (an orphan in
  * Settings, FR-31) there is no Keep. While another console still runs in
  * the same folder (app 2.7.0, A9) Delete is not offered: main would only
- * kill this console's shell and the other one keeps the folder in use.
+ * kill this console's shell and the other one keeps the folder in use. A
+ * team task's worktree (B4, decision 63) refused by main says so and turns
+ * Delete off: the team removes it, never this dialog.
  */
 function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
   const t = useT()
@@ -103,7 +113,8 @@ function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
   const needsAck = info ? deleteNeedsAck(info) : false
   const block = info ? deleteBlock(info, req.branch) : null
   const shared = others > 0
-  const canDelete = !!info && !busy && !block && !shared && (!needsAck || ack)
+  const teamOwned = teamOwnedError(error)
+  const canDelete = !!info && !busy && !block && !shared && !teamOwned && (!needsAck || ack)
 
   const remove = async (): Promise<void> => {
     if (!canDelete || !info) return
@@ -213,16 +224,18 @@ function CloseDialog({ req }: { req: WorktreeCloseRequest }) {
             </label>
           )}
           {error && (
-            <div data-worktree-close-error role="alert" className="space-y-2 rounded-btn border border-state-error/40 bg-state-error/10 px-3 py-2 text-xs text-state-error">
-              <p className="break-words">{t(`worktree.rmErr.${error.error}` as MessageKey, { detail: error.detail ?? '' })}</p>
+            <div data-worktree-close-error={teamOwned ? 'team' : error.error} role="alert" className="space-y-2 rounded-btn border border-state-error/40 bg-state-error/10 px-3 py-2 text-xs text-state-error">
+              <p className="break-words">{teamOwned ? t('worktree.rmErr.team') : t(`worktree.rmErr.${error.error}` as MessageKey, { detail: error.detail ?? '' })}</p>
               <div className="flex gap-2">
-                <button
-                  onClick={() => void remove()}
-                  className="flex items-center gap-1 rounded-btn border border-border bg-card px-2 py-1 text-text-primary transition-colors hover:border-accent-violet/40"
-                >
-                  <RotateCw size={12} />
-                  {t('worktree.close.retry')}
-                </button>
+                {!teamOwned && (
+                  <button
+                    onClick={() => void remove()}
+                    className="flex items-center gap-1 rounded-btn border border-border bg-card px-2 py-1 text-text-primary transition-colors hover:border-accent-violet/40"
+                  >
+                    <RotateCw size={12} />
+                    {t('worktree.close.retry')}
+                  </button>
+                )}
                 <button
                   onClick={() => void window.snApi.git.worktreeReveal(req.path)}
                   className="flex items-center gap-1 rounded-btn border border-border bg-card px-2 py-1 text-text-primary transition-colors hover:border-accent-violet/40"
