@@ -76,6 +76,8 @@ export class CliService {
       appVersion: deps.appVersion,
       platform: deps.platform ?? process.platform,
       services: () => this.services,
+      // B5 integration, fifth round: a team text that holds a live token (the master one too) is refused.
+      secrets: this.tokens,
       notify: (n) => {
         deps.status.notifyCustom(n.paneId, n.title, n.body)
         if (!n.local) deps.routeCustom({ kind: 'custom', paneId: n.paneId, title: n.title, body: n.body })

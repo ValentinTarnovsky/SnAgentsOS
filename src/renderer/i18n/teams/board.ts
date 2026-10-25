@@ -66,6 +66,8 @@ export const boardEn = {
   'teams.blocked.leadText': 'Blocked by the Lead: {text}',
   'teams.blocked.stopped': 'Stopped: resume it when you want',
   'teams.blocked.card': 'Blocked: it needs your answer in Needs you',
+  'teams.blocked.cardDismissed': 'Blocked: you dismissed its notice; resume it when you want',
+  'teams.blocked.cardClosed': 'Blocked: you dismissed its notice; resume it from the task',
 
   // Drops and moves
   'teams.drop.phaseColumn': 'The team moves cards here (plan, execution and QA)',
@@ -130,7 +132,8 @@ export const boardEn = {
   'teams.task.runStarted': 'The run started.',
   'teams.task.resume': 'Resume',
   'teams.task.resumed': 'Resumed: the task is back where you stopped it.',
-  'teams.task.resumeFail.conflict': 'This task is no longer stopped: the board shows how it is now.',
+  'teams.task.resumedCard': 'Resumed: the task is back in its phase for another try.',
+  'teams.task.resumeFail.conflict': 'This task no longer waits to be resumed: the board shows how it is now.',
   'teams.task.resumeFail.other': 'The task could not be resumed.',
   'teams.task.owned': 'Pinned by you: {fields}. The Lead does not change them.',
   'teams.task.ownedRelease': 'Unpin',
@@ -301,6 +304,8 @@ export const boardEs: Record<keyof typeof boardEn, string> = {
   'teams.blocked.leadText': 'Bloqueada por el Líder: {text}',
   'teams.blocked.stopped': 'Frenada: reanudala cuando quieras',
   'teams.blocked.card': 'Bloqueada: necesita tu respuesta en Te necesita',
+  'teams.blocked.cardDismissed': 'Bloqueada: descartaste su aviso; retomala cuando quieras',
+  'teams.blocked.cardClosed': 'Bloqueada: descartaste su aviso; retomala desde la tarea',
 
   // Drops and moves
   'teams.drop.phaseColumn': 'Acá mueve las tarjetas el equipo (plan, ejecución y QA)',
@@ -365,7 +370,8 @@ export const boardEs: Record<keyof typeof boardEn, string> = {
   'teams.task.runStarted': 'Arrancó la corrida.',
   'teams.task.resume': 'Retomar',
   'teams.task.resumed': 'Retomada: la tarea volvió a donde la frenaste.',
-  'teams.task.resumeFail.conflict': 'Esta tarea ya no está frenada: el tablero muestra cómo está ahora.',
+  'teams.task.resumedCard': 'Retomada: la tarea volvió a su fase para intentarlo de nuevo.',
+  'teams.task.resumeFail.conflict': 'Esta tarea ya no espera que la retomes: el tablero muestra cómo está ahora.',
   'teams.task.resumeFail.other': 'No se pudo retomar la tarea.',
   'teams.task.owned': 'Fijado por vos: {fields}. El Líder no los cambia.',
   'teams.task.ownedRelease': 'Soltar',

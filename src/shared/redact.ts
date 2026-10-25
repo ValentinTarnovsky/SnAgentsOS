@@ -13,8 +13,9 @@
  * - private IPv4 (RFC 1918 and 100.64/10) -> `a.b.x.x` (unless `keepIps`)
  *
  * redactCredentials (app 2.7.0) is narrower and meant for notices (`snaos
- * notify`, Equipos): it masks only credential shapes and leaves hashes, ids,
- * paths, IPs, emails and plain URLs readable. See its own comment.
+ * notify`, Equipos): it masks only credential shapes (the snaos token shape
+ * among them) and leaves other hashes, ids, paths, IPs, emails and plain URLs
+ * readable. See its own comment.
  */
 export interface RedactOptions {
   home?: string
@@ -110,6 +111,14 @@ const TOKEN_RE = new RegExp(
   'g',
 )
 
+/**
+ * The snaos tokens (B5 integration, fifth round): the master token of runtime.json and every console or team token
+ * are 64 hex characters (newToken), here alone between characters that are no letter or digit, in any case. A second
+ * net behind main's refusal of a live token in a team text (CtlTokens.holdsToken): a SHA-256 hex digest has the same
+ * shape and is masked too, while a 40-hex git SHA, a UUID or a longer hex run stays.
+ */
+const SNAOS_TOKEN_RE = /(^|[^0-9A-Za-z])[0-9a-fA-F]{64}(?![0-9A-Za-z])/g
+
 const HAS_DIGIT = /\d/
 const HAS_LETTER = /[A-Za-z]/
 
@@ -158,11 +167,12 @@ function trailingDots(token: string): number {
 /**
  * Credentials in free text -> `[redacted]` (app 2.7.0: `snaos notify` and
  * every Equipos notice, plan A5): PEM private keys, connection string
- * passwords, `Bearer <token>`, JWTs and the prefixed key shapes in TOKEN_RE.
+ * passwords, `Bearer <token>`, JWTs, the prefixed key shapes in TOKEN_RE and
+ * (B5 integration, fifth round) the 64 hex snaos token shape (SNAOS_TOKEN_RE).
  * Unlike redact() it keeps hashes (a 40-hex git SHA), UUIDs, paths, IPs,
  * emails and URLs without credentials. Every pattern starts on a fixed prefix
- * with bounded or non-overlapping runs, so it is linear on any input (a 1 MB
- * notice included). Idempotent; never throws (a failure gives '').
+ * or edge with bounded or non-overlapping runs, so it is linear on any input
+ * (a 1 MB notice included). Idempotent; never throws (a failure gives '').
  */
 export function redactCredentials(text: string): string {
   try {
@@ -177,6 +187,7 @@ export function redactCredentials(text: string): string {
     out = out.replace(TOKEN_RE, (whole: string, edge: string, token: string) =>
       token.startsWith('sk-') && !isSkKey(token) ? whole : edge + CREDENTIAL_MASK,
     )
+    out = out.replace(SNAOS_TOKEN_RE, (_whole: string, edge: string) => edge + CREDENTIAL_MASK)
     return out
   } catch {
     return ''

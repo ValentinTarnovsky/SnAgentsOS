@@ -5,6 +5,7 @@ import { useLang, useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { agentLabel, composeTaken, runFailText, runNow, useRosterStore } from '@/lib/teams/roster'
 import { Button } from '@/components/ui/Button'
+import { escKeepsDraft } from './TaskComments'
 
 /** C0 except tab and newline, and DEL: main refuses a request body that has one (team-protocol-schemas BODY_BAD_RE). */
 const BODY_BAD_RE = /[\u0000-\u0008\u000b-\u001f\u007f]/
@@ -25,7 +26,7 @@ function blockedKey(agent: AgentView, trusted: boolean): MessageKey | null {
 /**
  * The composer of "Ejecutar ahora" (app 2.7.0, E10 B2), at the foot of the
  * agent drawer. Enter is a new line; only [Ejecutar ahora] or Ctrl+Enter
- * sends. The text goes to main in `runNow`, which hands it to the new run's
+ * sends; Esc with a draft only leaves the box. The text goes to main in `runNow`, which hands it to the new run's
  * stdin as the user's request: never argv, never a pty, never typed into a
  * console. Main may still refuse it (a gate): the line under the box says
  * why ("Ahora no: el equipo está en pausa"). The draft outlives a close of
@@ -79,6 +80,7 @@ export function RunNowComposer({ teamId, agent, trusted }: { teamId: string; age
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (escKeepsDraft(e, draft)) return
     if (e.key !== 'Enter' || e.nativeEvent.isComposing || e.altKey || e.shiftKey || !(e.ctrlKey || e.metaKey)) return
     e.preventDefault()
     void submit()

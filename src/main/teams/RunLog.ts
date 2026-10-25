@@ -15,8 +15,8 @@
  */
 import { closeSync, mkdirSync, openSync, writeSync } from 'fs'
 import { dirname } from 'path'
-import { CHAT_FRAME_MAX_BYTES, CHAT_SKIPPED_TEXT, CHAT_TEXT_MAX, chatMessageOffset, type ChatMessage } from '@shared/chat-types'
-import { RUN_LOG_CUT_TEXT, RUN_LOG_MAX_BYTES, RUN_RING_MAX, teamPaneId, type RunMode, type WakeReason } from '@shared/teams'
+import { CHAT_FRAME_MAX_BYTES, CHAT_SKIPPED_TEXT, CHAT_TEXT_MAX, chatMessageOffset, type ChatBlock, type ChatMessage } from '@shared/chat-types'
+import { RUN_LOG_CUT_TEXT, RUN_LOG_MAX_BYTES, RUN_RING_MAX, runNoteOf, runNoteText, teamPaneId, type RunMode, type WakeReason } from '@shared/teams'
 import type { AgentProvider } from '@shared/types'
 import { FrameBudget, shrinkMessage } from '../chat/chatFrames'
 import { decodeClaude } from '../chat/decodeClaude'
@@ -49,7 +49,7 @@ function tsOf(v: unknown): number | null {
   return Number.isFinite(t) ? t : null
 }
 
-/** snaos.prompt -> user message; snaos.cut and snaos.stderr -> system rows; else the provider decoder. */
+/** snaos.prompt -> user message; snaos.cut, snaos.stderr and snaos.note -> system rows; else the provider decoder. */
 export function runDecoder(provider: AgentProvider): TranscriptDecoder {
   const inner: TranscriptDecoder = provider === 'codex' ? decodeCodexExec : decodeClaudeStream
   return (record, offset) => {
@@ -63,6 +63,12 @@ export function runDecoder(provider: AgentProvider): TranscriptDecoder {
         const tail = typeof record.tail === 'string' ? record.tail.trim() : ''
         return tail ? [systemRow(offset, `stderr:\n${tail.slice(-CHAT_TEXT_MAX)}`)] : []
       }
+      // B5: a note main appends after the close (where a Codex block stopped): its key and vars (runNoteText), never a
+      // sentence, so the run chat words it in the UI language. A record without a known key shows nothing.
+      if (record.type === 'snaos.note') {
+        const note = runNoteOf(record)
+        return note ? [systemRow(offset, runNoteText(note))] : []
+      }
       return []
     }
     return inner(record, offset)
@@ -73,6 +79,38 @@ export function runDecoder(provider: AgentProvider): TranscriptDecoder {
 function clean(msgs: ChatMessage[]): ChatMessage[] {
   for (const m of msgs) for (const b of m.blocks) if ('truncated' in b && b.truncated === undefined) delete (b as { truncated?: boolean }).truncated
   return msgs
+}
+
+/** One block with `mask` on every text it shows (a tool's name and summary, a result and its patch, an image label). */
+function maskBlock(b: ChatBlock, mask: (text: string) => string): ChatBlock {
+  switch (b.t) {
+    case 'text':
+    case 'thinking':
+      return { ...b, text: mask(b.text) }
+    case 'toolUse':
+      return { ...b, name: mask(b.name), summary: mask(b.summary) }
+    case 'toolResult': {
+      const out = { ...b, text: mask(b.text) }
+      if (b.patch) {
+        out.patch = { ...b.patch, hunks: b.patch.hunks.map((h) => ({ ...h, lines: h.lines.map((l) => mask(l)) })) }
+        if (b.patch.filePath !== undefined) out.patch.filePath = mask(b.patch.filePath)
+      }
+      return out
+    }
+    case 'image':
+      return { ...b, label: mask(b.label) }
+    default:
+      return b
+  }
+}
+
+/**
+ * Chat rows with `mask` on every text (B5 integration, sixth round: TeamService.maskRun hands it redactCredentials and
+ * the live tokens of the app). New objects: the ring's rows stay as they were decoded. It runs before a frame budget
+ * (RunLog.page, splitAppend): a mask can make a text a little longer (`[redacted]` for a one letter password).
+ */
+export function maskMessages(items: readonly ChatMessage[], mask: (text: string) => string): ChatMessage[] {
+  return items.map((m) => ({ ...m, blocks: m.blocks.map((b) => maskBlock(b, mask)) }))
 }
 
 export class RunLog {
@@ -210,7 +248,8 @@ export class RunLog {
    * One page of a run's chat, oldest first. While the run is live its ring
    * serves what it covers (`before` past the ring's oldest message, or the
    * newest page); below that, and for a finished run, `readPage` reads the
-   * file. A `before` past the cut is clamped to the cut.
+   * file. A `before` past the cut is clamped to the cut. `mask` (B5 integration, sixth round: TeamService.maskRun)
+   * runs on each row before the frame budget, so what leaves main never holds a live token of the app.
    */
   static async page(
     file: string,
@@ -220,6 +259,7 @@ export class RunLog {
     maxBytes: number = CHAT_FRAME_MAX_BYTES,
     ring?: readonly ChatMessage[] | null,
     cutAt?: number | null,
+    mask?: (items: readonly ChatMessage[]) => ChatMessage[],
   ): Promise<{ items: ChatMessage[]; cursor: string | null; done: boolean }> {
     const paneId = teamPaneId(runId)
     const offsetOf = (m: ChatMessage): number => chatMessageOffset(m.id) ?? 0
@@ -231,7 +271,7 @@ export class RunLog {
       while (i >= 0 && before !== null && offsetOf(ring[i]) >= before) i--
       let reachedOldest = false
       for (; i >= 0; i--) {
-        const m = shrinkMessage(ring[i], single)
+        const m = shrinkMessage(mask ? mask([ring[i]])[0] : ring[i], single)
         if (!budget.fits([m])) break
         budget.add([m])
         picked.unshift(m)
@@ -246,8 +286,9 @@ export class RunLog {
     }
     let from = before
     if (from !== null && cutAt !== null && cutAt !== undefined && from > cutAt) from = cutAt
+    const decode = runDecoder(provider)
     try {
-      const page = await readPage(file, runDecoder(provider), { before: from, paneId, maxBytes })
+      const page = await readPage(file, mask ? (record, offset) => mask(decode(record, offset)) : decode, { before: from, paneId, maxBytes })
       return { items: clean(page.items), cursor: page.cursor, done: page.done }
     } catch {
       return { items: [], cursor: null, done: true }

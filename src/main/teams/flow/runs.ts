@@ -11,10 +11,19 @@
  * Dispatcher.manual); the outcome is `classifyOutcome` and the run-end policy
  * `afterRunPolicy` (teamDispatch.ts). A task run that writes in a worktree
  * gets it during its prep (`setRunWorktree`, decision 24).
+ *
+ * B5: a run's end also posts the Lead's reply to its thread, hands a small
+ * plan the Lead saw and left to the user (decision 29), and turns its denials
+ * into one permission approval (flow/approvals.ts permissionAsk) or, for a
+ * `snaos team` call through PowerShell, the agent's Bash hint; a Lead session
+ * records the goal hash it read (decision 43); a task run whose prep failed
+ * with a card blocks on it.
  */
 import { redactCredentials } from '@shared/redact'
 import { afterRunPolicy, classifyOutcome } from '@shared/teamDispatch'
 import {
+  LEAD_REPLY_MAX,
+  LEAD_THREAD,
   RUN_SUMMARY_MAX,
   type AgentSession,
   type AgentState,
@@ -29,6 +38,7 @@ import {
   type RunState,
   type SessionKey,
   type StopReason,
+  type TaskDiffStat,
   type TaskWorktree,
   type TeamRuntime,
   type TeamTask,
@@ -38,10 +48,19 @@ import {
 import type { FailureInfo } from '@shared/failure'
 import type { StreamFacts } from '../parsers/types'
 import { openSystemCard } from './agents'
+import { isEscapeDenial, isTeamCallDenial, permissionAsk, type PermissionAskOpts } from './approvals'
+import { appendComment } from './tasks'
 import type { FlowCtx, FlowResult, TeamEffect } from './types'
 
 export interface AdmitFacts { sessionKey: SessionKey; resume: { sessionId: string } | null; cwd: string; profile: PermissionProfile; model?: string; effort?: string; sysHash: string }
 export interface RunEnd { at: number; exit: { code: number | null; signal: string | null }; facts: StreamFacts; teamWrites: number; treeMoved?: boolean; lastLineAt?: number }
+/**
+ * finishRun's clock and (B5 integration, seventh round, security) the live-token mask of what a run's final text
+ * leaves in the team state: its summary and the Lead's reply, and (B5 review) the rules and denied commands of its
+ * permission ask (PermissionAskOpts.mask). TeamService hands it CtlTokens.maskTokens through TeamServiceDeps.cli (a
+ * run reads runtime.json or a console's env as it likes); without it the text stays as is.
+ */
+export interface RunEndCtx extends Pick<FlowCtx, 'now'> { mask?: (text: string) => string }
 
 /** Deadline keys a run end clears (the RunSupervisor clears its own linger, drain, stop and kill keys). */
 const RUN_DEADLINES = ['max', 'conclude'] as const
@@ -252,7 +271,8 @@ function endRun(rt: TeamRuntime, terminal: Run, policy: PolicyDecision, ctx: Pic
 /**
  * R1: a new run, `queued`. The agent must be idle, not paused, not retired
  * and not held by a takeover; a task run also needs the task free of any
- * other active run. The Claude session id is minted here for a fresh
+ * other active run, and an exec run a task that needs no plan or has its plan
+ * approved (T3, `conflict {stale}`). The Claude session id is minted here for a fresh
  * session (Codex learns its thread id from `thread.started`). The agent
  * turns `running`, a task run moves its task to the mode's phase (T2/T3,
  * qa stays) and freezes it (I19), the matching level and queue item go,
@@ -275,6 +295,9 @@ export function admitRun(rt: TeamRuntime, req: RunRequest, a: AdmitFacts, ctx: F
     if (!task) return fail('not_found')
     if (rt.activeRuns.some((r) => r.taskId === req.taskId)) return fail('running')
     if (task.state === 'done' || task.state === 'cancelled' || task.state === 'blocked') return fail('conflict', { reason: 'stale' })
+    // T3, defensive (B5 review, E10-FR-133): no exec run on a task that needs a plan and has none approved, whatever
+    // phase a wake or a level put it in; its next run is a plan run.
+    if (req.mode === 'exec' && task.needsPlan && task.plan?.status !== 'approved') return fail('conflict', { reason: 'stale' })
   }
   const id = ctx.newRunId()
   const sessionId = a.resume ? a.resume.sessionId : agent.provider === 'claude' ? ctx.newSessionId() : undefined
@@ -320,18 +343,36 @@ export function admitRun(rt: TeamRuntime, req: RunRequest, a: AdmitFacts, ctx: F
  * listed as untriaged gets `triagedAt` (without it the triage level would
  * wake the Lead again and again). A writer run keeps the tree mark of its
  * prep (decision 68). Arms `run:<id>:max` and turns the synthetic status on.
+ * B5: a lead run keeps the goal hash its prompt carried (`goalHash`, the
+ * session records it at R5, decision 43), a prompt that carried the Bash or
+ * the escape hint consumes the agent's `bashHint` / `escapeHint`, and a QA
+ * run's diff stat (what its prompt showed) becomes its task's `diffStat`, the
+ * one the final OK shows.
  */
 export function markStarting(
   rt: TeamRuntime,
   runId: string,
-  s: { pid: number; delivered: NonNullable<Run['delivered']>; triaged?: readonly string[]; treeBefore?: TreeMark },
+  s: { pid: number; delivered: NonNullable<Run['delivered']>; triaged?: readonly string[]; treeBefore?: TreeMark; goalHash?: string; bashHint?: boolean; escapeHint?: boolean; diffStat?: TaskDiffStat },
   ctx: FlowCtx,
 ): FlowResult {
   const run = findRun(rt, runId)
   if (!run || run.state !== 'queued') return fail('conflict', { reason: 'stale' })
   const started: Run = { ...run, state: 'starting', startedAt: ctx.now, pid: s.pid, delivered: { comments: [...s.delivered.comments], cards: [...s.delivered.cards], approvals: [...s.delivered.approvals] } }
   if (s.treeBefore) started.treeBefore = { ...s.treeBefore }
+  const goalHash = run.mode === 'lead' ? s.goalHash ?? ctx.def.goalHash : undefined
+  if (goalHash !== undefined) started.goalHash = goalHash
   let out = replaceRun(rt, started)
+  const agent = out.agents.find((a) => a.id === run.agentId)
+  if (agent && ((s.bashHint && agent.bashHint) || (s.escapeHint && agent.escapeHint))) {
+    const a: AgentState = { ...agent }
+    if (s.bashHint) delete a.bashHint
+    if (s.escapeHint) delete a.escapeHint
+    out = { ...out, agents: replaceAgent(out.agents, a) }
+  }
+  if (s.diffStat && run.mode === 'qa' && run.taskId) {
+    const t = out.tasks.find((x) => x.id === run.taskId)
+    if (t) out = { ...out, tasks: replaceTask(out.tasks, { ...t, diffStat: { ...s.diffStat, top: s.diffStat.top.map((f) => ({ ...f })) }, updatedAt: ctx.now }) }
+  }
   if (run.mode === 'lead' && s.triaged && s.triaged.length) {
     const ids = new Set(s.triaged)
     out = { ...out, tasks: out.tasks.map((t) => (ids.has(t.id) && t.triagedAt === undefined ? { ...t, triagedAt: ctx.now } : t)) }
@@ -352,7 +393,7 @@ export function markStarting(
     const ids = new Set(s.delivered.approvals)
     out = { ...out, approvals: out.approvals.map((a) => (ids.has(a.id) && !a.leadSeenRunId ? { ...a, leadSeenRunId: runId } : a)) }
   }
-  if (run.mode === 'lead' && out.goalSeenHash !== ctx.def.goalHash) out = { ...out, goalSeenHash: ctx.def.goalHash }
+  if (goalHash !== undefined && out.goalSeenHash !== goalHash) out = { ...out, goalSeenHash: goalHash }
   const maxAt = ctx.now + Math.max(1, ctx.def.def.maxRunMinutes) * 60_000
   return {
     ok: true,
@@ -368,8 +409,9 @@ export function markStarting(
 /**
  * R5: the first protocol line. `firstLineAt` and `reachedRunning`; the
  * session record of the agent (a Codex thread id learned now, `turns` + 1,
- * the run's cwd and `sysHash`). A run already `stopping` stays stopping but
- * still records that its session now exists on disk.
+ * the run's cwd and `sysHash`, a Lead run's `goalHash`). A run already
+ * `stopping` stays stopping but still records that its session now exists on
+ * disk.
  */
 export function markRunning(rt: TeamRuntime, runId: string, f: { at: number; sessionId?: string; sysHash?: string }, _ctx: FlowCtx): FlowResult {
   const run = findRun(rt, runId)
@@ -386,6 +428,8 @@ export function markRunning(rt: TeamRuntime, runId: string, f: { at: number; ses
         ? { ...cur, turns: cur.turns + 1, lastRunId: run.id }
         : { provider: run.provider, sessionId, cwd: run.cwd, createdAt: f.at, turns: 1, sysHash: f.sysHash ?? cur?.sysHash ?? '', lastRunId: run.id }
     if (f.sysHash) session.sysHash = f.sysHash
+    // B5 (decision 43): the goal this Lead session read is the one its prompt carried, once the turn runs.
+    if (run.goalHash !== undefined) session.goalHash = run.goalHash
     // A session id lives in one agent and one key only (I5).
     const sessions: Record<string, AgentSession> = {}
     for (const [k, s] of Object.entries(agent.sessions)) if (k === run.sessionKey || s.sessionId !== sessionId) sessions[k] = s
@@ -405,9 +449,15 @@ export function markRunning(rt: TeamRuntime, runId: string, f: { at: number; ses
  * requested again; one on a task gets a `retry` wake (its admission moved the
  * task into the mode's phase, where no other level would find it). When the
  * admission consumed a wake mark, TeamService then puts that exact mark back
- * (restoreWake).
+ * (restoreWake). B5: a task run whose prep failed with a card blocks its task
+ * on that card (`blocked {card}`, resume = the pair the admission moved it to):
+ * Reintentar resumes it with a `retry` wake (T17, answerCard), and Descartar
+ * leaves it blocked, so Retomar (resumeTask) resumes it later: it never sits in
+ * doing with nothing to wake it. B5 integration, seventh round: `vars` give the
+ * card its own words (`{what: 'cmdLine'}`: the command line through cmd.exe of
+ * a `.cmd` agent CLI would pass CMD_LINE_MAX, agentCli.ts).
  */
-export function prepFailed(rt: TeamRuntime, runId: string, failure: FailureInfo, card: CardReason | null, ctx: FlowCtx): FlowResult {
+export function prepFailed(rt: TeamRuntime, runId: string, failure: FailureInfo, card: CardReason | null, ctx: FlowCtx, vars?: Record<string, string | number>): FlowResult {
   const run = findRun(rt, runId)
   if (!run || run.state !== 'queued') return fail('conflict', { reason: 'stale' })
   const terminal: Run = { ...run, state: 'failed', failure: { ...failure }, outcome: 'failed', endedAt: ctx.now }
@@ -418,10 +468,21 @@ export function prepFailed(rt: TeamRuntime, runId: string, failure: FailureInfo,
     if (run.trigger.refs && run.trigger.refs.length) mark.refs = [...run.trigger.refs]
     policy.next = mark
   }
+  // applyPolicy opens the card of a task run and blocks the task on it (its id in the reason).
+  if (card !== null && run.taskId) policy.block = { reason: { kind: 'card', cardId: '', why: card }, card: { why: card, actions: ['retry', 'dismiss'] } }
   const ended = endRun(rt, terminal, policy, ctx, true)
   if (!ended.ok || !card) return ended.ok ? { ...ended, result: undefined } : ended
-  const opened = openSystemCard(ended.rt, { why: card, actions: run.taskId ? ['retry', 'dismiss'] : ['dismiss'], taskId: run.taskId, runId: run.id }, ctx)
+  if (run.taskId) return { ...ended, rt: vars ? withBlockCardVars(rt, ended.rt, run.taskId, vars) : ended.rt, result: undefined }
+  const opened = openSystemCard(ended.rt, { why: card, actions: ['dismiss'], runId: run.id, ...(vars ? { vars } : {}) }, ctx)
   return { ok: true, rt: opened.ok ? opened.rt : ended.rt, effects: ended.effects, result: undefined }
+}
+
+/** The card a task now blocks on, when this transition opened it (absent from `before`), gets `vars`. */
+function withBlockCardVars(before: TeamRuntime, after: TeamRuntime, taskId: string, vars: Record<string, string | number>): TeamRuntime {
+  const reason = after.tasks.find((t) => t.id === taskId)?.blocked?.reason
+  const cardId = reason?.kind === 'card' ? reason.cardId : undefined
+  if (!cardId || before.cards.some((c) => c.id === cardId)) return after
+  return { ...after, cards: after.cards.map((c) => (c.id === cardId && c.from.kind === 'system' ? { ...c, from: { ...c.from, vars: { ...vars } } } : c)) }
 }
 
 /**
@@ -506,9 +567,10 @@ export function requestStop(
   return { ok: true, rt: replaceRun(rt, stopping), effects: [{ kind: 'stopRun', runId, reason }], result: { already: false, immediate: false } }
 }
 
-/** A short, redacted summary of a run's final text. */
-function summaryOf(text: string): string | undefined {
-  const t = redactCredentials(text.trim())
+/** A short summary of a run's final text: every live token masked (`mask`), redacted, then cut. */
+function summaryOf(text: string, mask: RunEndCtx['mask']): string | undefined {
+  const trimmed = text.trim()
+  const t = redactCredentials(mask ? mask(trimmed) : trimmed)
   if (!t) return undefined
   return t.length > RUN_SUMMARY_MAX ? t.slice(0, RUN_SUMMARY_MAX - 1) + '…' : t
 }
@@ -537,9 +599,10 @@ function outcomeOf(state: RunState, run: Run, end: RunEnd): RunOutcome | undefin
  * (which computes the same copy again). A clean end is `!facts.failure`, the
  * one field the parsers set exactly when the run failed (max turns is no
  * failure, decision 10); a stopped run without a result ends by its reason.
- * The outcome is classifyOutcome's.
+ * The outcome is classifyOutcome's (on the raw final text); the summary is
+ * masked with `mask` (RunEndCtx).
  */
-export function terminalOf(run: Run, end: RunEnd): Run {
+export function terminalOf(run: Run, end: RunEnd, mask?: RunEndCtx['mask']): Run {
   const facts = end.facts
   let state: RunState
   let failure: FailureInfo | undefined
@@ -574,7 +637,7 @@ export function terminalOf(run: Run, end: RunEnd): Run {
   if (facts.usage) terminal.usage = { ...facts.usage }
   if (facts.context) terminal.context = { ...facts.context }
   if (facts.digest) terminal.digest = { ...facts.digest, families: { ...facts.digest.families }, files: [...facts.digest.files] }
-  const summary = summaryOf(facts.finalText ?? '')
+  const summary = summaryOf(facts.finalText ?? '', mask)
   if (summary) terminal.summary = summary
   if (facts.denials.length) {
     const counts = new Map<string, number>()
@@ -592,12 +655,14 @@ export function terminalOf(run: Run, end: RunEnd): Run {
  * usage, context, digest, summary, the session bases (Claude cumulative cost,
  * Codex cumulative tokens), the agent idle, the policy, and the end effects.
  * A run already finalized by another path, or still queued, is left alone.
+ * The final text reaches the team state masked by `ctx.mask` (the summary,
+ * the Lead's reply).
  */
-export function finishRun(rt: TeamRuntime, runId: string, end: RunEnd, policy: PolicyDecision, ctx: Pick<FlowCtx, 'now'>): FlowResult<{ run: Run }> {
+export function finishRun(rt: TeamRuntime, runId: string, end: RunEnd, policy: PolicyDecision, ctx: RunEndCtx, ask?: RunEndAsk): FlowResult<{ run: Run }> {
   const run = findRun(rt, runId)
   if (!run || run.state === 'queued') return fail('conflict', { reason: 'stale' })
   const facts = end.facts
-  const terminal = terminalOf(run, end)
+  const terminal = terminalOf(run, end, ctx.mask)
 
   // Session bases for the next delta (decision 9).
   let out = rt
@@ -611,7 +676,94 @@ export function finishRun(rt: TeamRuntime, runId: string, end: RunEnd, policy: P
     delete s.baseStale
     out = { ...out, agents: replaceAgent(out.agents, { ...agent, sessions: { ...agent.sessions, [run.sessionKey]: s } }) }
   }
-  return endRun(out, terminal, policy, ctx, true)
+  const ended = endRun(out, terminal, policy, ctx, true)
+  if (!ended.ok) return ended
+  return runEndFollowUps(ended, terminal, facts, ctx, ask)
+}
+
+/** What finishRun needs for the permission approvals of a run's denials (B5): the trusted definition and the protect paths of decision 72. */
+export interface RunEndAsk { ctx: FlowCtx; protect: PermissionAskOpts['protect'] }
+
+/** The opening line of a Codex `snaos-team` fence (5.6): what follows it is main's to apply, not the Lead's words. */
+const TEAM_FENCE_LINE_RE = /^ {0,3}`{3,}[ \t]*snaos-team[ \t]*$/
+
+/**
+ * The Lead's reply as the Lead thread shows it: the final text without a trailing `snaos-team` block (a Codex Lead
+ * reports its actions in one), every live token masked (`mask`, after the block is cut), redacted, within LEAD_REPLY_MAX.
+ */
+function leadReplyText(run: Run, finalText: string, mask: RunEndCtx['mask']): string {
+  let text = finalText
+  if (run.provider === 'codex') {
+    const lines = text.split(/\r\n|\r|\n/)
+    let cut = -1
+    for (let i = 0; i < lines.length; i++) if (TEAM_FENCE_LINE_RE.test(lines[i])) cut = i
+    if (cut >= 0) text = lines.slice(0, cut).join('\n')
+  }
+  const trimmed = text.trim()
+  const t = redactCredentials(mask ? mask(trimmed) : trimmed)
+  return t.length > LEAD_REPLY_MAX ? t.slice(0, LEAD_REPLY_MAX - 1) + '…' : t
+}
+
+/**
+ * B5, after the terminal transition of finishRun (design 4.1 "Lead runs" and "Permission denials"):
+ * - the Lead's reply: a lead run that answered the user (a userMessage or kickoff wake, or one that got a user
+ *   message of the Lead thread in its prompt) and ended well appends its final text (leadReplyText, with the live
+ *   tokens masked by `ctx.mask`) to the Lead thread as an `answer` comment for nobody (it wakes no one);
+ * - lead escalation (decision 29): a small plan this run saw and did not decide waits for the user now, with the
+ *   `leadEscalation` note in the Lead thread;
+ * - denials: a `snaos team` call through the PowerShell tool or `snaos.cmd` (its profile allows the CLI only as
+ *   `Bash(snaos team:*)`) sets the agent's `bashHint`, so its next run gets TEAM_CALL_HINT, instead of an approval; a
+ *   shell or inline-code escape (isEscapeDenial: never grantable) sets its `escapeHint`, so its next run gets
+ *   ESCAPE_HINT (the command needs the user: `snaos team needs`); the rest go to permissionAsk (its rules: no approval
+ *   for what the profile keeps denying, never a PowerShell grant, never mcp / Task / Agent), only with `ask` (the
+ *   trusted definition: an untrusted team asks nothing).
+ */
+function runEndFollowUps(ended: Extract<FlowResult<{ run: Run }>, { ok: true }>, run: Run, facts: StreamFacts, ctx: RunEndCtx, ask: RunEndAsk | undefined): FlowResult<{ run: Run }> {
+  let out = ended.rt
+  const effects = [...ended.effects]
+
+  if (run.mode === 'lead' && run.state === 'succeeded') {
+    const lead = out.comments[LEAD_THREAD] ?? []
+    const delivered = new Set(run.delivered?.comments ?? [])
+    const answered = run.trigger.reason === 'userMessage' || run.trigger.reason === 'kickoff' || lead.some((c) => delivered.has(c.id) && c.author.kind === 'user')
+    const text = answered ? leadReplyText(run, facts.finalText ?? '', ctx.mask) : ''
+    if (text) {
+      const reply = appendComment(out, { author: { kind: 'agent', agentId: run.agentId, runId: run.id, roleKind: run.roleKind }, target: LEAD_THREAD, kind: 'answer', text }, ctx)
+      if (reply.ok) {
+        out = reply.rt
+        effects.push(...reply.effects)
+      }
+    }
+  }
+
+  for (const ap of out.approvals) {
+    if (ap.state !== 'pending' || ap.decider !== 'lead' || ap.leadSeenRunId !== run.id) continue
+    out = { ...out, approvals: out.approvals.map((x) => (x.id === ap.id ? { ...x, decider: 'user' as const } : x)) }
+    const note = appendComment(out, { author: { kind: 'system' }, target: LEAD_THREAD, kind: 'system', text: '', sys: { key: 'leadEscalation', vars: { taskId: ap.taskId ?? '' } } }, ctx)
+    if (note.ok) {
+      out = note.rt
+      effects.push(...note.effects)
+    }
+  }
+
+  const denials = facts.denials ?? []
+  if (denials.some(isTeamCallDenial)) {
+    const agent = out.agents.find((a) => a.id === run.agentId)
+    if (agent && !agent.bashHint) out = { ...out, agents: replaceAgent(out.agents, { ...agent, bashHint: true }) }
+  }
+  if (denials.some(isEscapeDenial)) {
+    const agent = out.agents.find((a) => a.id === run.agentId)
+    if (agent && !agent.escapeHint) out = { ...out, agents: replaceAgent(out.agents, { ...agent, escapeHint: true }) }
+  }
+  if (denials.length > 0 && ask) {
+    // The live-token mask of the run end too (B5 review): a rule or a denied line never enters the state with a token.
+    const asked = permissionAsk(out, run, denials, { ...ask.ctx, now: ctx.now }, { protect: ask.protect, mask: ctx.mask })
+    if (asked.ok) {
+      out = asked.rt
+      effects.push(...asked.effects)
+    }
+  }
+  return out === ended.rt ? ended : { ok: true, rt: out, effects, result: ended.result }
 }
 
 /**

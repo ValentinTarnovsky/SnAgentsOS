@@ -3,7 +3,9 @@
  * pause, the run list and the run chat pages. Paths never leave main: the run
  * log is found from the team and run ids. B4: "Ejecutar ahora" goes through
  * Dispatcher.manual (a task run too) and each roster card says why its run
- * waits (`waiting`, a dispatch dry run).
+ * waits (`waiting`, a dispatch dry run). B5 integration, sixth round: a run
+ * chat page leaves main masked (TeamInternals.maskRun); the log file keeps
+ * the raw lines.
  */
 import { join } from 'path'
 import { CHAT_FRAME_MAX_BYTES } from '@shared/chat-types'
@@ -101,7 +103,8 @@ export const runOps: Pick<OpTable, 'roster' | 'runNow' | 'stop' | 'pauseAgent' |
     const file = join(svc.dataDir(), 'teams', req.teamId, 'runs', `${run.id}.jsonl`)
     const live = svc.runLive(run.id)
     const before = req.before === undefined ? null : Number(req.before)
-    const page = await RunLog.page(file, run.provider, run.id, before, CHAT_FRAME_MAX_BYTES, live.ring, live.cutAt)
+    // B5 integration, sixth round: every row masked before the frame budget (redactCredentials and the live tokens).
+    const page = await RunLog.page(file, run.provider, run.id, before, CHAT_FRAME_MAX_BYTES, live.ring, live.cutAt, (items) => svc.maskRun(items))
     return { ok: true, run: runView(run, live), items: page.items, cursor: page.cursor, done: page.done, live: isActiveRun(run.state) }
   },
 

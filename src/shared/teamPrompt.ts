@@ -48,7 +48,7 @@ const CUT_MARKER = '\n[... cut: the rest is too long for one run]'
  */
 export const BASE_RULES = [
   'You are one agent of a software team coordinated by SnAgentsOS. These rules always apply:',
-  '- Never run `git push`, `git merge`, `git worktree` or `git update-ref`. Integrating work is the user\'s job.',
+  '- Never run `git push`, `git send-pack`, `git http-push`, `git merge`, `git worktree` or `git update-ref`. Integrating work is the user\'s job.',
   '- Never switch to, commit on, merge into, reset or push the base branch or any branch other than your own, and never touch other worktrees. Stay inside your working directory; editing files there is not a branch operation (your run contract says whether you may).',
   '- End every run on a task with exactly one terminal team tool (your run contract names them).',
   '- When something is unclear, ask with `team ask` instead of guessing.',
@@ -71,6 +71,13 @@ export const HARD_RULES: Readonly<Record<'writer' | 'reader' | 'lead', string>> 
     'End your run when the board reflects the goal; use `team ask` or `team needs` to wait on the user.',
   ].join('\n'),
 }
+
+/**
+ * Section 4 of a reader or a Lead run that calls the CLI (B5 integration, fourth round, security): the readonly profile
+ * has no git log, git diff nor git show (teamArgv CLAUDE_READONLY_ALLOW), so main reads them. A block run cannot call
+ * `snaos team` (its sandbox reads the repo itself) and a writer keeps git.
+ */
+export const READ_CHANGES_RULE = 'Read code changes with `snaos team diff` (`--stat` for the files only, `-- <path>` for one file) and the history with `snaos team log`, never with git log, git diff or git show.'
 
 /** writer when the effective profile writes (total, custom), lead for mode lead, else reader. */
 export function runRulesOf(profile: PermissionProfile, mode: RunMode): 'writer' | 'reader' | 'lead' {
@@ -144,6 +151,13 @@ export interface PromptInput {
    * `kickoff`: the user asked for it. The system text never carries the goal (sysHash stays the same).
    */
   leadGoal?: 'changed' | 'kickoff'
+  /**
+   * B5: lines main adds to section 4 after the channel text (never cut, no user text, never a `<request>` block):
+   * TEAM_CALL_HINT of flow/approvals.ts after a denied `snaos team` call through the PowerShell tool
+   * (AgentState.bashHint), ESCAPE_HINT after a denied shell or inline-code escape (AgentState.escapeHint), and the
+   * grantHint of a run the user's permission grant woke (its trigger refs name the approval).
+   */
+  hints?: readonly string[]
   budgetBytes?: number                             // PROMPT_BUDGET_BYTES
 }
 export interface BuiltPrompt {
@@ -452,7 +466,11 @@ function phaseText(p: PhaseInput, i: PromptInput, readsBack: boolean, done: bool
       return lines.join('\n')
     }
     case 'qa': {
-      const diff = i.where.base ? `\`git diff ${oneLine(i.where.base)}...HEAD\`` : '`git diff` against the base branch'
+      // A run that calls the CLI reads them through main (READ_CHANGES_RULE: a readonly QA has no git diff); a block
+      // run's sandbox reads the repo with git itself.
+      const diff = !i.reportsByBlock
+        ? '`snaos team diff`, `--stat` first'
+        : i.where.base ? `\`git diff ${oneLine(i.where.base)}...HEAD\`` : '`git diff` against the base branch'
       // `round` counts the change requests so far (T9): this review is the next one, as the board card shows it.
       const round = Math.min(p.round + 1, Math.max(p.max, 1))
       const lines = [
@@ -468,7 +486,7 @@ function phaseText(p: PhaseInput, i: PromptInput, readsBack: boolean, done: bool
 
 /**
  * Stdin order (plan 3.5): [Codex new thread: <team-instructions> block] 1 team goal, 2 the task, 3 repo/cwd/branch/base/main -N,
- * 4 run contract (HARD_RULES[rules], the tools that end this run from endToolsOf, teamChannelText(reportsByBlock, {win32,
+ * 4 run contract (HARD_RULES[rules], READ_CHANGES_RULE for a reader or Lead run that calls the CLI, the tools that end this run from endToolsOf, teamChannelText(reportsByBlock, {win32,
  * provider})) then the phase instruction, 5 QA comments,
  * 5b handoff (decision 66: "You start a new session; earlier context of this task:" newest comments then the last run
  * summary, <= HANDOFF_BUDGET_BYTES), 6 queued comments, 7 resolved blockers, 8 answered cards, 9 trigger line.
@@ -537,7 +555,8 @@ export function buildRunPrompt(i: PromptInput): BuiltPrompt {
   const boardLine = (n: number): string => boardOmittedLine(n, i.reportsByBlock)
   const endTools = endToolsOf(i)
   const phase = phaseText(i.phase, i, readsBack, endTools.includes('done'))
-  const contract = [HARD_RULES[i.rules], endToolsLine(endTools)].filter(Boolean).join('\n')
+  const readsChanges = i.rules !== 'writer' && !i.reportsByBlock
+  const contract = [HARD_RULES[i.rules], readsChanges ? READ_CHANGES_RULE : '', endToolsLine(endTools)].filter(Boolean).join('\n')
   // A resumed Lead session that must read the goal (decision 43): section 1's heading and goal, never cut.
   const goal = i.team.goal.trim()
   const goalSection = i.resumed && i.leadGoal && i.phase.mode === 'lead' && goal !== ''
@@ -563,7 +582,9 @@ export function buildRunPrompt(i: PromptInput): BuiltPrompt {
       if (w.behindMain !== undefined && w.behindMain > 0) where.push(`Your branch is ${w.behindMain} commit(s) behind its base.`)
       sections.push(where.join('\n'))
     } else if (goalSection) sections.push(goalSection)
-    sections.push(`# Your run\n${contract}\n\n${teamChannelText(i.reportsByBlock, { win32: i.win32, provider: i.provider })}\n\n${phase}`)
+    const hints = (i.hints ?? []).map((h) => h.trim()).filter(Boolean)
+    const channel = [teamChannelText(i.reportsByBlock, { win32: i.win32, provider: i.provider }), ...hints].join('\n')
+    sections.push(`# Your run\n${contract}\n\n${channel}\n\n${phase}`)
     if (board) sections.push(boardBlock(board, boardRows, omitted.boardRows, i.reportsByBlock))
     if (qa.length || omitted.qaComments) {
       const lines = ['# QA review comments']

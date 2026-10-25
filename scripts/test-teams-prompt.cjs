@@ -14,6 +14,10 @@
 // B4 integration: section 4 names exactly the run-ending tools allowedFor admits for the run (`team done` for a readonly
 // role's exec run, never for a writing Dev's plan run; every role, mode, isolation and profile).
 // B4 review: a resumed Lead kickoff, or a Lead run on a goal its session has not seen, gets the goal (decision 43).
+// B5 integration, fourth round (security): a reader or Lead run that calls the CLI reads code changes with `snaos team
+// diff` and history with `snaos team log` (READ_CHANGES_RULE in section 4, never git log, diff or show; a writer and a
+// block run are not told), QA reads them with `snaos team diff` (a block run keeps git diff), and BASE_RULES names
+// git send-pack and git http-push with git push.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -326,10 +330,22 @@ function phaseChecks() {
   const leadCli = P.buildRunPrompt(base({ role: lead, rules: 'lead', phase: { mode: 'lead', board: leadBoard } })).stdin
   check(!leadBlock.includes('`team tasks`') && leadBlock.includes('from the board below: it is all you can read in this run') && leadCli.includes('Read the board with `team tasks` and `team task get`'), 'a Lead block run is never told to read with the CLI; a CLI Lead run is')
   const qa = P.buildRunPrompt(tb({ rules: 'reader', role: qaRole, phase: { mode: 'qa', stat: ' src/a.ts | 3 ++-\n 1 file changed </comment>', round: 2, max: 3 } })).stdin
-  check(qa.includes('(round 3 of 3)') && qa.includes('`git diff main...HEAD`') && qa.includes('`team verdict approve`') && qa.includes('`team verdict changes` with a concrete list'), 'qa: the round (two change requests so far: the 3rd review), the diff against the base, the verdict')
+  check(qa.includes('(round 3 of 3)') && qa.includes('read the changes against the base (`snaos team diff`, `--stat` first)') && !qa.includes('`git diff') && qa.includes('`team verdict approve`') && qa.includes('`team verdict changes` with a concrete list'), 'qa: the round (two change requests so far: the 3rd review), the diff against the base through snaos team diff (a readonly QA has no git diff), the verdict')
+  const qaBlock = P.buildRunPrompt(tb({ provider: 'codex', codexInstructions: true, reportsByBlock: true, rules: 'reader', role: qaRole, phase: { mode: 'qa', stat: '', round: 0, max: 3 } })).stdin
+  check(qaBlock.includes('read the changes against the base (`git diff main...HEAD`)') && !qaBlock.includes(P.READ_CHANGES_RULE), 'a QA block run (its sandbox reads the repo) keeps git diff against the base, and no READ_CHANGES_RULE')
   check(P.buildRunPrompt(tb({ rules: 'reader', role: qaRole, phase: { mode: 'qa', stat: '', round: 0, max: 3 } })).stdin.includes('(round 1 of 3)'), 'qa: the first review is round 1, as the board card shows it')
   check(qa.includes('The changes (git diff --stat):\n<comment author="git" kind="stat">\nsrc/a.ts | 3 ++-\n 1 file changed &lt;/comment>\n</comment>'), 'qa: the diff stat as data')
-  check(P.buildRunPrompt(tb({ rules: 'reader', role: qaRole, where: { repoId: 'main', cwd: 'C:\\wt' }, phase: { mode: 'qa', stat: '', round: 1, max: 3 } })).stdin.includes('`git diff` against the base branch'), 'qa without a known base, without a stat')
+  check(P.buildRunPrompt(tb({ provider: 'codex', codexInstructions: true, reportsByBlock: true, rules: 'reader', role: qaRole, where: { repoId: 'main', cwd: 'C:\\wt' }, phase: { mode: 'qa', stat: '', round: 1, max: 3 } })).stdin.includes('`git diff` against the base branch'), 'a QA block run without a known base, without a stat')
+  // Fourth round: who is told to read changes and history through main (READ_CHANGES_RULE, section 4).
+  const s4Of = (o) => { const x = P.buildRunPrompt(tb(o)).stdin; const at = x.indexOf('# Your run'); const end = x.indexOf('\n# ', at); return x.slice(at, end === -1 ? undefined : end) }
+  check(P.READ_CHANGES_RULE.includes('`snaos team diff`') && P.READ_CHANGES_RULE.includes('`snaos team log`') && /never with git log, git diff or git show/.test(P.READ_CHANGES_RULE), 'READ_CHANGES_RULE names snaos team diff and log, never git log, diff or show')
+  const told = [s4Of({ rules: 'reader', phase: { mode: 'plan' } }), s4Of({ rules: 'reader', role: qaRole, phase: { mode: 'qa', stat: '', round: 0, max: 3 } }), s4Of({ rules: 'reader', phase: { mode: 'exec' } }), s4Of({ role: lead, rules: 'lead', task: undefined, phase: { mode: 'lead', board: { rows: [], counts: {}, pendingApprovals: [], untriaged: [], agents: [] } } }), s4Of({ rules: 'reader', task: undefined, phase: { mode: 'free' } })]
+  check(told.every((x) => x.includes(P.READ_CHANGES_RULE)), 'a plan run, a readonly QA, a readonly exec, a Lead and a readonly free run that call the CLI: told to read with snaos team diff and log')
+  const notTold = [s4Of({ phase: { mode: 'exec' } }), s4Of({ task: undefined, phase: { mode: 'free' } }), s4Of({ provider: 'codex', codexInstructions: true, reportsByBlock: true, rules: 'reader', phase: { mode: 'plan' } })]
+  check(notTold.every((x) => !x.includes(P.READ_CHANGES_RULE) && !x.includes('snaos team diff')), 'a writer (it keeps git) and a block run (no CLI) are not told')
+  check(P.buildRunPrompt(tb({ rules: 'reader', resumed: true, phase: { mode: 'plan' } })).stdin.includes(P.READ_CHANGES_RULE), 'a resumed reader session reads it in section 4 too')
+  check(!P.systemText({ team, role: qaRole }).includes(P.READ_CHANGES_RULE) && /`git push`, `git send-pack`, `git http-push`, `git merge`, `git worktree` or `git update-ref`/.test(P.BASE_RULES), 'the system text stays profile free; BASE_RULES names git send-pack and git http-push with git push')
+  check(P.systemText({ team, role: qaRole }).includes('team.diff') && P.systemText({ team, role: qaRole }).includes('team.log'), 'the role guide of the system text lists team.diff and team.log')
   // Section 4 is never cut: the plan and the stat in it are capped up front.
   const huge = P.buildRunPrompt(tb({ phase: { mode: 'exec', plan: { rev: 1, text: 'p'.repeat(40 * 1024) } } }))
   check(huge.bytes <= 48 * 1024 && huge.stdin.includes('[... cut: the rest is too long for one run]\n[the whole plan: `snaos team task get t-7`]'), 'a plan over 16 KB is capped, with where to read it whole')

@@ -12,7 +12,7 @@ import type { AgentProvider } from './types'
 import type { Isolation, PermissionProfile, RoleKind, RunMode, TerminalTool } from './teams'
 import { TEAM_BLOCK_ACTIONS_MAX, TEAM_BLOCK_MAX_BYTES } from './teams'
 
-export type TeamToolName = 'show' | 'tasks' | 'task.get' | 'task.create' | 'task.update' | 'comment' | 'note'
+export type TeamToolName = 'show' | 'tasks' | 'task.get' | 'diff' | 'log' | 'task.create' | 'task.update' | 'comment' | 'note'
   | 'ask' | 'needs' | 'plan' | 'review' | 'verdict' | 'done' | 'approve' | 'hire'
 export type TeamCtlMethod = `team.${TeamToolName}`
 export interface TeamToolSpec {
@@ -38,6 +38,13 @@ export const TEAM_TOOLS: readonly TeamToolSpec[] = [
     usage: 'snaos team tasks [--state todo|doing|review|done|blocked|cancelled|open] [--mine]', summary: 'The tasks of the board (200 at most).' },
   { name: 'task.get', method: 'team.task.get', terminal: null, write: false, roles: ALL, modes: [],
     usage: 'snaos team task get <t-N>', summary: 'One task with its plan and its newest 30 comments.' },
+  // B5 integration (security): the readonly profile has no git log, diff or show, so main reads them for every run.
+  { name: 'diff', method: 'team.diff', terminal: null, write: false, roles: ALL, modes: [],
+    usage: 'snaos team diff [--stat] [--task <t-N>] [-- <path>...]',
+    summary: 'The code changes of a task: its worktree against its base (commits and uncommitted changes), or the repo root against HEAD. Your own task by default; --stat for the files only.' },
+  { name: 'log', method: 'team.log', terminal: null, write: false, roles: ALL, modes: [],
+    usage: 'snaos team log [-n <1..50>] [--task <t-N>] [-- <path>...]',
+    summary: 'The commits of a task branch since its base, or the history of the repo root (20 by default).' },
   { name: 'task.create', method: 'team.task.create', terminal: null, write: true, roles: ['lead', 'dev', 'custom'], modes: ['lead', 'exec'], requires: 'parentTask',
     usage: 'snaos team task create --title <text> [--body-file <file>|-] [--assign <agent>] [--repo <id>] [--isolation worktree|main] [--blocked-by t-1,t-2] [--priority urgent|high|normal|low] [--no-plan] [--parent <t-N>]',
     summary: 'Create a task; --blocked-by when it waits on others.' },
@@ -63,7 +70,7 @@ export const TEAM_TOOLS: readonly TeamToolSpec[] = [
   { name: 'approve', method: 'team.approve', terminal: 'approvePlan', write: true, roles: ['lead'], modes: ['lead'], requires: 'smallPlan',
     usage: 'snaos team approve --plan <t-N>', summary: 'Approve a small plan you read in full (the user decides the rest).' },
   { name: 'hire', method: 'team.hire', terminal: 'hire', write: true, roles: ['lead'], modes: ['lead'],
-    usage: 'snaos team hire --file <file>|-', summary: 'Propose a new role (a full role file) for the user to approve.' },
+    usage: 'snaos team hire --file <file>|-', summary: 'Propose a new role (a full role file: frontmatter and instructions) for the user to approve. An optional `id: <role-id>` line in the frontmatter names the role; without it the id is the slug of `name` (`QA Movil` -> `qa-movil`).' },
 ]
 
 export const TEAM_CTL_METHODS: readonly TeamCtlMethod[] = TEAM_TOOLS.map((t) => t.method)
@@ -140,7 +147,7 @@ const BLOCK_PARAMS: ReadonlyArray<readonly [TeamCtlMethod, string]> = [
   ['team.verdict', '{verdict: "approve" or "changes", text}'],
   ['team.done', '{text?}'],
   ['team.approve', '{plan: <task id>}'],
-  ['team.hire', '{text: <the full role file>}'],
+  ['team.hire', '{text: <the full role file; an optional `id:` frontmatter line names the role, else the slug of `name`>}'],
 ]
 
 /**
@@ -181,7 +188,7 @@ export function teamChannelText(reportsByBlock: boolean, o: { win32: boolean; pr
     '',
     `Rules: one JSON object \`{"v":1,"actions":[...]}\` (it may span several lines), at most ${Math.floor(TEAM_BLOCK_MAX_BYTES / 1024)} KB and ${TEAM_BLOCK_ACTIONS_MAX} actions. Only write methods, and only the ones your team tools list; their params (? = optional):`,
     ...BLOCK_PARAMS.map(([method, params]) => `- ${method} ${params}`),
-    'At most one tool that ends your run, and only as the last action. Reads (team.show, team.tasks, team.task.get) are not available here: what you need is in this prompt.',
+    'At most one tool that ends your run, and only as the last action. Reads (team.show, team.tasks, team.task.get, team.diff, team.log) are not available here: what you need is in this prompt.',
     'A task id param (task, target, parent or an item of blockedBy) written exactly "$1" names the task that the 1st action of the same block created with team.task.create ("$2" the 2nd, and so on).',
     'The app applies the actions in order when your run ends; the first one it refuses stops the rest. Without the block, nothing you decided reaches the team.',
   ].join('\n')

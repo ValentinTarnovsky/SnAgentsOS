@@ -3,11 +3,15 @@
  * and the phone get, never the raw runtime. B1 builds the list row, the team
  * header and the "Te necesita" input; each later milestone adds its views
  * here (agents B2, board B3, queue B4, needs B5, routines B7, takeover B9).
+ * B5: the full approval bodies (the plan text, the hire diff from the
+ * canonical text and its risk flags), light ones for every count, and no
+ * view shows or counts an approval, card or queue item of a task that is over.
  */
 import { basename } from 'path'
-import { TEAM_DIR } from '@shared/teamDefinition'
+import { isGrantable } from '@shared/teamArgv'
+import { normalizeDefText, parseDefinition, TEAM_DIR } from '@shared/teamDefinition'
 import { needsOfTask, teamNeedsCount, teamNeedsRows, type TeamNeedRow, type TeamNeedsInput } from '@shared/teamNeeds'
-import { diffTeamFiles } from '@shared/teamDiff'
+import { diffTeamFiles, teamRiskFlags, type TeamFileDiff, type TeamRiskFlag } from '@shared/teamDiff'
 import type { BoardSummary } from '@shared/teamPrompt'
 import { TEAM_BOARD_PAGE } from '@shared/team-protocol'
 import type {
@@ -34,6 +38,9 @@ import type { PaneUsage } from '@shared/types'
 import {
   BOARD_COLUMNS,
   columnOf,
+  DENIED_COMMAND_MAX,
+  DENIED_COMMANDS_MAX,
+  DIFF_STAT_TOP_MAX,
   LEAD_THREAD,
   PRIORITY_RANK,
   REPO_MAIN,
@@ -103,29 +110,63 @@ export function defIssuesOf(rec: TeamRecord): DefError[] {
   return loadIssues(rec.loaded, rec.repoIssues)
 }
 
-export function approvalView(rt: Readonly<TeamRuntime>, a: TeamApproval, trusted: TrustedDefinition | null): ApprovalView {
+/**
+ * The hire of a role as the user decides it (B5, design 4.3): the diff of `roles/<id>.md` against the trusted
+ * snapshot, both sides as the canonical definition text main hashes and writes (normalizeDefText: no BOM, LF), never
+ * stripped, so the renderer shows every hidden character (it escapes them); and the risk flags of the definition the
+ * hire would make (teamRiskFlags of the trusted files plus the role), none when that definition does not parse.
+ */
+function hireBody(a: Extract<TeamApproval, { kind: 'hire' }>, trusted: TrustedDefinition | null): { diff: TeamFileDiff; risks: TeamRiskFlag[] } {
+  const rel = `roles/${a.payload.roleId}.md`
+  const text = normalizeDefText(a.payload.text)
+  const files = trusted?.files ?? []
+  const before = files.filter((f) => f.rel === rel).map((f) => ({ rel: f.rel, text: normalizeDefText(f.text) }))
+  const diff = diffTeamFiles(before, [{ rel, text }])[0] ?? { rel, status: 'changed' as const, hunks: [], add: 0, del: 0 }
+  let risks: TeamRiskFlag[] = []
+  if (trusted) {
+    const after = parseDefinition([...files.filter((f) => f.rel !== rel), { rel, text }])
+    if (after.ok) risks = teamRiskFlags(trusted.def, after.def)
+  }
+  return { diff, risks }
+}
+
+/**
+ * One approval (design 2.4). `light`: what the "Te necesita" count reads (teamNeedsRows needs only the id, kind,
+ * state, decider, time and task), without the plan text, the hire diff or its risks: the list row, the header and
+ * every commit's header key build it, the needs op and the task drawer build the full one.
+ */
+export function approvalView(rt: Readonly<TeamRuntime>, a: TeamApproval, trusted: TrustedDefinition | null, o: { light?: boolean } = {}): ApprovalView {
   const base = { id: a.id, state: a.state, decider: a.decider, requestedBy: actorLabel(a.createdBy), at: a.createdAt }
   let payload: ApprovalView['payload']
   switch (a.kind) {
     case 'plan': {
-      const plan = rt.tasks.find((t) => t.id === a.taskId)?.plan
+      const plan = o.light ? undefined : rt.tasks.find((t) => t.id === a.taskId)?.plan
       payload = { kind: 'plan', planRev: a.payload.planRev, small: a.payload.small, text: plan && plan.rev === a.payload.planRev ? plan.text : '' }
       break
     }
-    case 'final':
+    case 'final': {
       payload = { kind: 'final', summary: a.payload.summary }
-      break
-    case 'hire': {
-      // B5 completes the risks; the diff is of the role file against the trusted snapshot.
-      const rel = `roles/${a.payload.roleId}.md`
-      const before = (trusted?.files ?? []).filter((f) => f.rel === rel)
-      const diff = diffTeamFiles(before, [{ rel, text: a.payload.text }])[0] ?? { rel, status: 'changed' as const, hunks: [], add: 0, del: 0 }
-      payload = { kind: 'hire', roleId: a.payload.roleId, diff, risks: [] }
+      // B5: the diff stat the task's last QA run read (RunStarter); absent when none was computed.
+      const stat = rt.tasks.find((t) => t.id === a.taskId)?.diffStat
+      if (stat) payload.stat = { files: stat.files, insertions: stat.insertions, deletions: stat.deletions, top: stat.top.slice(0, DIFF_STAT_TOP_MAX).map((f) => ({ path: f.path, add: f.add, del: f.del })) }
       break
     }
-    case 'permission':
-      payload = { kind: 'permission', roleId: a.payload.roleId, tools: [...a.payload.tools] }
+    case 'hire': {
+      const rel = `roles/${a.payload.roleId}.md`
+      const body = o.light ? { diff: { rel, status: 'changed' as const, hunks: [], add: 0, del: 0 }, risks: [] } : hireBody(a, trusted)
+      payload = { kind: 'hire', roleId: a.payload.roleId, diff: body.diff, risks: body.risks }
       break
+    }
+    case 'permission': {
+      // Only the rules the policy still grants (isGrantable, B5 integration, fourth round): one an earlier build stored
+      // that it now refuses is neither shown nor granted on Approve (decidePermission); with none left the approval
+      // reads as nothing to grant and its Approve answers bad_request (`detail: 'nothingToGrant'`).
+      payload = { kind: 'permission', roleId: a.payload.roleId, tools: a.payload.tools.filter(isGrantable) }
+      // B5: the shell commands the run was denied (redacted when stored; the renderer escapes them).
+      const denied = (a.payload.denied ?? []).slice(0, DENIED_COMMANDS_MAX).map((c) => c.slice(0, DENIED_COMMAND_MAX))
+      if (denied.length) payload.denied = denied
+      break
+    }
     case 'integrate': {
       const err = rt.tasks.find((t) => t.id === a.taskId)?.integrate?.error
       payload = { kind: 'integrate', branch: a.payload.branch, base: a.payload.base }
@@ -185,13 +226,14 @@ export function waitingOf(plan: DispatchPlan | null): { byAgent: Map<string, Def
 }
 
 /**
- * "Te necesita" of one team (B4: the queue rows with their defer reason; the approvals and cards as B1 views them,
- * B5 completes their bodies), and the titles of the tasks the rows name.
+ * "Te necesita" of one team (design 2.4): the trust state, the pause, the pending approvals with their full bodies,
+ * the open cards, the queue rows with their defer reason (B4), and the titles of the tasks the rows name. The same
+ * rows as the count (needsInputOf): an approval, card or queue item of a task that is over is in neither.
  */
 export function needsView(rec: TeamRecord, trusted: TrustedDefinition | null, defer: ReadonlyMap<string, DeferInfo>): TeamNeedsView {
   const rt = rec.store.rt
-  const input = needsInputOf(rt, rec.trust, rec.trustSince, trusted)
-  const queue = rt.queue.map((q) => queueItemView(rt, q, defer.get(`${q.agentId}|${q.sessionKey}`)))
+  const input = needsInputOf(rt, rec.trust, rec.trustSince, trusted, { full: true })
+  const queue = rt.queue.filter((q) => openTask(rt, q.taskId)).map((q) => queueItemView(rt, q, defer.get(`${q.agentId}|${q.sessionKey}`)))
   const tasks: TeamNeedsView['tasks'] = {}
   const ids = new Set<string>()
   for (const x of [...input.approvals, ...input.cards, ...queue]) if (x.taskId) ids.add(x.taskId)
@@ -201,14 +243,40 @@ export function needsView(rec: TeamRecord, trusted: TrustedDefinition | null, de
   return out
 }
 
-/** The input of the one "Te necesita" rule (decision 30) for a team. */
-export function needsInputOf(rt: Readonly<TeamRuntime>, trust: TeamTrustState, trustSince: number | undefined, trusted: TrustedDefinition | null): TeamNeedsInput {
+/**
+ * True unless `taskId` names a task that is over: done or cancelled, or archived (gone from the board). B5-flow's
+ * reducers close the approvals and cards of a task that ends; the views never show or count one either way.
+ */
+export function openTask(rt: Readonly<TeamRuntime>, taskId: string | undefined): boolean {
+  if (taskId === undefined) return true
+  const state = stateOfLive(rt).get(taskId)
+  return state !== undefined && state !== 'done' && state !== 'cancelled'
+}
+
+/** A pending (or applying) approval of a task that is not over: it waits for a decision. */
+export function approvalWaits(rt: Readonly<TeamRuntime>, a: TeamApproval): boolean {
+  return (a.state === 'pending' || a.state === 'applying') && openTask(rt, a.taskId)
+}
+
+/**
+ * An open card of a task that is not over: it waits for an answer. An `orphan` card (decision 64) is about a process,
+ * not its task: it waits until killOrphan or Descartar, whatever the task did since (closeTaskNeeds never closes it).
+ */
+export function cardWaits(rt: Readonly<TeamRuntime>, c: TeamCard): boolean {
+  return c.state === 'open' && (openTask(rt, c.taskId) || (c.from.kind === 'system' && c.from.why === 'orphan'))
+}
+
+/**
+ * The input of the one "Te necesita" rule (decision 30) for a team: the approvals that wait (light views unless
+ * `full`), the open cards and the queue, none of a task that is over.
+ */
+export function needsInputOf(rt: Readonly<TeamRuntime>, trust: TeamTrustState, trustSince: number | undefined, trusted: TrustedDefinition | null, o: { full?: boolean } = {}): TeamNeedsInput {
   const input: TeamNeedsInput = {
     trust,
     paused: rt.paused,
-    approvals: rt.approvals.filter((a) => a.state === 'pending' || a.state === 'applying').map((a) => approvalView(rt, a, trusted)),
-    cards: rt.cards.filter((c) => c.state === 'open').map(cardView),
-    queue: rt.queue.map((q) => queueItemView(rt, q)),
+    approvals: rt.approvals.filter((a) => approvalWaits(rt, a)).map((a) => approvalView(rt, a, trusted, { light: !o.full })),
+    cards: rt.cards.filter((c) => cardWaits(rt, c)).map(cardView),
+    queue: rt.queue.filter((q) => openTask(rt, q.taskId)).map((q) => queueItemView(rt, q)),
   }
   if (trustSince !== undefined) input.trustSince = trustSince
   return input
@@ -507,7 +575,11 @@ function blockedView(rt: Readonly<TeamRuntime>, t: TeamTask): TaskBlockedView | 
   if (!t.blocked) return undefined
   const r = t.blocked.reason
   const out: TaskBlockedView = { kind: r.kind }
-  if (r.kind === 'card') out.why = r.why
+  if (r.kind === 'card') {
+    out.why = r.why
+    // A block whose card id was never filled (applyPolicy found no card) names none: the drawer falls back to `why`.
+    if (r.cardId) out.cardId = r.cardId
+  }
   if (r.kind === 'user') {
     if (r.text) out.text = r.text
     out.by = r.by ?? 'user'
@@ -535,7 +607,10 @@ export function taskSummary(rt: Readonly<TeamRuntime>, t: TeamTask, v: TaskViewC
   const blocked = blockedView(rt, t)
   if (blocked) out.blocked = blocked
   if (t.parentId) out.parentId = t.parentId
-  if (t.review.round > 0 || t.phase === 'qa') out.review = { round: t.review.round, max: t.review.max }
+  if (t.review.round > 0 || t.phase === 'qa') {
+    out.review = { round: t.review.round, max: t.review.max }
+    if (t.review.qaAgentId) out.review.qaAgentId = t.review.qaAgentId
+  }
   if (t.worktree) out.branch = t.worktree.branch
   if (t.integrated) out.integrated = true
   const run = rt.activeRuns.find((r) => r.taskId === t.id)
@@ -585,8 +660,9 @@ export function taskDetail(
     commentsCursor: page.cursor,
     commentsArchived: v.archived?.(t.id) ?? 0,
     runs,
-    approvals: rt.approvals.filter((a) => a.taskId === t.id).map((a) => approvalView(rt, a, v.trusted)),
-    cards: rt.cards.filter((c) => c.taskId === t.id).map(cardView),
+    // A task that is over shows its decided approvals and answered cards, never one still waiting (B5).
+    approvals: rt.approvals.filter((a) => a.taskId === t.id && (approvalWaits(rt, a) || (a.state !== 'pending' && a.state !== 'applying'))).map((a) => approvalView(rt, a, v.trusted)),
+    cards: rt.cards.filter((c) => c.taskId === t.id && (cardWaits(rt, c) || c.state !== 'open')).map(cardView),
   }
   const plan = planView(t)
   if (plan) out.plan = plan
@@ -594,7 +670,10 @@ export function taskDetail(
     // B4/B6 inspect the tree on disk (exists, ahead, behind); the runtime only knows it was created.
     out.worktree = { path: t.worktree.path, branch: t.worktree.branch, base: t.worktree.base, baseBranch: t.worktree.baseBranch, exists: true }
   }
-  if (t.grants?.length) out.grants = t.grants.map((g) => g.tool)
+  // What the task's runs get (teamArgv filters task.grants through isGrantable): never a rule an earlier build stored
+  // that the policy now refuses (fourth round), so `team task get` names no grant the run does not have.
+  const grants = (t.grants ?? []).map((g) => g.tool).filter(isGrantable)
+  if (grants.length) out.grants = grants
   if (t.integrate) out.integrate = { ...t.integrate, ...(t.integrate.files ? { files: [...t.integrate.files] } : {}) }
   if (t.integrated) out.integratedInfo = { ...t.integrated }
   return out
@@ -700,8 +779,9 @@ export function boardSummaryOf(rt: Readonly<TeamRuntime>): BoardSummary {
       if (t.assignee) row.assignee = t.assignee
       return row
     })
+  // Never one of a task that is over (B5: the views hold even when a reducer left one open).
   const pendingApprovals = rt.approvals
-    .filter((a) => a.state === 'pending')
+    .filter((a) => a.state === 'pending' && openTask(rt, a.taskId))
     .map((a) => {
       const p: BoardSummary['pendingApprovals'][number] = { id: a.id, kind: a.kind }
       if (a.taskId) p.taskId = a.taskId

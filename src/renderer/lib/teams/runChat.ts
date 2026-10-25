@@ -17,13 +17,16 @@
  *    run, tells main to stop pushing (`watchRun null`).
  *  - RunLog's cut row comes in English (main keeps the text, like
  *    CHAT_SKIPPED_TEXT: RUN_LOG_CUT_TEXT of src/shared/teams.ts, the one
- *    string both sides use); `wordRunList` words it in the UI language for
- *    the view only, the store keeps what main sent.
+ *    string both sides use), and a main note (B5: where a Codex block
+ *    stopped) as its key and vars (runNoteText, never a sentence);
+ *    `wordRunList` words both in the UI language for the view only, the
+ *    store keeps what main sent.
  */
 import { create } from 'zustand'
 import type { ChatMessage } from '@shared/chat-types'
 import type { RunView, TeamRunAppendEvt } from '@shared/team-protocol'
-import { RUN_LOG_CUT_TEXT } from '@shared/teams'
+import { RUN_LOG_CUT_TEXT, runNoteOfText, type RunNote } from '@shared/teams'
+import type { TFn } from '@/i18n'
 import { EMPTY_LIST, appendList, prependList, replaceList, type ChatList } from '@/components/chat/chatModel'
 import type { ChatScrollerState } from '@/components/chat/ChatScroller'
 import { onRunAppend, onTeamChanged, teamReq, useTeamsStore } from '@/lib/teamsStore'
@@ -38,19 +41,33 @@ export interface RunChat extends ChatScrollerState {
 
 export const EMPTY_RUN_CHAT: Omit<RunChat, 'teamId'> = { list: EMPTY_LIST, loading: null, failed: null, version: 0, live: false }
 
-/** A system row of a run's chat the view words itself (the log cut), else null; the rest go to the chat's systemKey. */
-export function runSystemKey(text: string): 'teams.run.chat.cut' | null {
-  return text === RUN_LOG_CUT_TEXT ? 'teams.run.chat.cut' : null
+/** A main note in the UI language, from its key and vars (a stopped block's vars name the refused action by its method and code). */
+function noteWords(n: RunNote, t: TFn): string {
+  switch (n.key) {
+    case 'blockStopped':
+      return t(n.vars.detail === 'secret' ? 'teams.run.chat.note.blockSecret' : 'teams.run.chat.note.blockStopped', n.vars)
+    case 'blockStateFull':
+      return t('teams.run.chat.note.blockStateFull', n.vars)
+  }
 }
 
-/** The list with each cut row worded as `cut`; the same list when it has none (ChatScroller keeps its rows). */
-export function wordRunList(list: ChatList, cut: string): ChatList {
+/** A system row of a run's chat the view words itself (the log cut, a main note), else null; the rest go to the chat's systemKey. */
+export function runSystemText(text: string, t: TFn): string | null {
+  if (text === RUN_LOG_CUT_TEXT) return t('teams.run.chat.cut')
+  const note = runNoteOfText(text)
+  return note ? noteWords(note, t) : null
+}
+
+/** The list with each cut row and note worded through `t`; the same list when it has none (ChatScroller keeps its rows). */
+export function wordRunList(list: ChatList, t: TFn): ChatList {
   let items: ChatMessage[] | null = null
   for (let i = 0; i < list.items.length; i++) {
     const m = list.items[i]
-    if (m.role !== 'system' || !runSystemKey(m.blocks.map((b) => (b.t === 'text' ? b.text : '')).join('\n'))) continue
+    if (m.role !== 'system') continue
+    const text = runSystemText(m.blocks.map((b) => (b.t === 'text' ? b.text : '')).join('\n'), t)
+    if (text === null) continue
     items ??= list.items.slice()
-    items[i] = { ...m, blocks: [{ t: 'text', text: cut }] }
+    items[i] = { ...m, blocks: [{ t: 'text', text }] }
   }
   return items ? { ...list, items } : list
 }

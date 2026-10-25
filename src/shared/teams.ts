@@ -96,6 +96,55 @@ export const RUNS_META_MAX = 500                     // runs.json ring
 export const RUN_LOG_MAX_BYTES = 20 * 1024 * 1024
 /** The system row of RunLog's `snaos.cut` line, word for word (main sends it in English, the renderer words it; like CHAT_SKIPPED_TEXT). */
 export const RUN_LOG_CUT_TEXT = '[Run log cut: the rest of this run is not kept on disk]'
+/**
+ * B5: a note main appends to a closed run's log (TeamService.runNote), the record `{ type: 'snaos.note', at, key, vars }`,
+ * never a sentence. RunLog decodes it to a system row whose one text is runNoteText (the key and vars as JSON); the run
+ * chat reads them back with runNoteOfText and words them through its own es/en keys.
+ * - `blockStopped`: a Codex `snaos-team` block stopped at a refused action; vars `applied` and `total` (actions),
+ *   `at` (the refused one, 1-based), `method` (its `team.*` method), `error` (the refusal's code) and, when the action
+ *   held a live token of the app, `detail: 'secret'`.
+ * - `blockStateFull`: the block was not applied, the team state would pass TEAM_STATE_MAX_BYTES; vars `mb` (that cap).
+ */
+export type RunNoteKey = 'blockStopped' | 'blockStateFull'
+export const RUN_NOTE_KEYS: readonly RunNoteKey[] = ['blockStopped', 'blockStateFull']
+export interface RunNote { key: RunNoteKey; vars: Record<string, string | number> }
+/** A note's vars: at most this many, each a finite number or a one-line string of at most RUN_NOTE_VAR_MAX characters. */
+const RUN_NOTE_VARS_MAX = 8
+const RUN_NOTE_VAR_MAX = 120
+const RUN_NOTE_VAR_NAME_RE = /^[a-z][A-Za-z0-9]{0,31}$/
+const RUN_NOTE_VAR_BAD_RE = /[\u0000-\u001f\u007f]/
+
+/** The note of a `snaos.note` record (or of anything shaped `{ key, vars }`), checked; null when it is not one. */
+export function runNoteOf(v: unknown): RunNote | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+  const { key, vars } = v as { key?: unknown; vars?: unknown }
+  if (typeof key !== 'string' || !(RUN_NOTE_KEYS as readonly string[]).includes(key)) return null
+  if (!vars || typeof vars !== 'object' || Array.isArray(vars)) return null
+  const entries = Object.entries(vars as Record<string, unknown>)
+  if (entries.length > RUN_NOTE_VARS_MAX) return null
+  const out: Record<string, string | number> = {}
+  for (const [name, value] of entries) {
+    if (!RUN_NOTE_VAR_NAME_RE.test(name)) return null
+    if (typeof value === 'number' ? !Number.isFinite(value) : typeof value !== 'string' || value.length > RUN_NOTE_VAR_MAX || RUN_NOTE_VAR_BAD_RE.test(value)) return null
+    out[name] = value as string | number
+  }
+  return { key: key as RunNoteKey, vars: out }
+}
+
+/** The one text of a note's system row: `{"type":"snaos.note","key":...,"vars":{...}}`. */
+export function runNoteText(n: RunNote): string {
+  return JSON.stringify({ type: 'snaos.note', key: n.key, vars: n.vars })
+}
+
+/** The note a system row's text holds (runNoteText), else null: any other text, a key it does not know, bad vars. */
+export function runNoteOfText(text: unknown): RunNote | null {
+  if (typeof text !== 'string' || !text.startsWith('{"type":"snaos.note"')) return null
+  try {
+    return runNoteOf(JSON.parse(text))
+  } catch {
+    return null
+  }
+}
 export const RUN_RING_MAX = 500                      // ChatMessages kept in memory per live run
 export const TEAM_LOGS_MAX_BYTES = 200 * 1024 * 1024
 export const TEAM_LOG_TTL_MS = 30 * 86_400_000
@@ -118,6 +167,9 @@ export const LEAD_REPLY_MAX = 4 * 1024               // final text of a lead run
 export const RUN_SUMMARY_MAX = 2000
 export const BLOCKED_BY_MAX = 16
 export const GRANTS_MAX = 32
+export const DENIED_COMMAND_MAX = 300                // a permission approval's denied command (B5), redacted then cut
+export const DENIED_COMMANDS_MAX = 10                // denied commands one permission approval keeps
+export const DIFF_STAT_TOP_MAX = 8                   // files a task's diff stat lists (TaskDiffStat.top)
 export const HIRE_TEXT_MAX = 64 * 1024
 export const PROMPT_BUDGET_BYTES = 48 * 1024         // whole stdin (Codex new thread: instructions block included)
 export const HANDOFF_BUDGET_BYTES = 8 * 1024         // fresh-session handoff share of stdin (decision 66)
@@ -271,6 +323,8 @@ export interface AgentSession {
   tokensTotal?: TokenTotals                        // cumulative tokens last seen (Claude: the result's modelUsage summed; Codex: turn.completed.usage)
   baseStale?: true                                 // set on takeover release: the next delta is approx
   lastRunId?: string
+  /** Lead sessions (B5): the goal hash this session last read (decision 43); a resumed Lead run gets the goal again when it differs. */
+  goalHash?: string
 }
 /** A durable level: "this agent should run this mode for this reason" (plan 3.7 candidates). */
 export interface WakeMark { agentId: string; mode: RunMode; reason: WakeReason; since: number; notBefore?: number; refs?: string[]; bypassCooldown?: true; detail?: string }
@@ -288,6 +342,10 @@ export interface AgentState {
   next?: WakeMark                                  // task-less wake (lead, free routines)
   interrupts: number                               // task-less interruption streak
   takeover?: Takeover
+  /** B5: a run of this agent was denied a `snaos team` call through the PowerShell tool; its next run is told to use the Bash tool. */
+  bashHint?: true
+  /** B5: a run of this agent was denied a shell or inline-code command no grant ever allows (teamArgv isShellEscape); its next run is told it needs the user. */
+  escapeHint?: true
 }
 export type CardReason =
   | 'noProgress' | 'qaRounds' | 'qaNoVerdict' | 'interrupted' | 'failure' | 'timeout' | 'stalled' | 'depCancelled'
@@ -307,6 +365,8 @@ export function teamWorktreeOwner(teamId: string, gen: string, taskId: string): 
 
 export interface TaskPlan { rev: number; text: string; status: 'pending' | 'approved' | 'rejected'; small: boolean; at: number; approvalId?: string; decidedBy?: Actor }
 export interface TaskGrant { roleId: string; tool: string; at: number; approvalId: string }
+/** B5: the diff stat a QA run of the task read (RunStarter, `git diff --numstat` of what QA reviews); the final OK shows it. */
+export interface TaskDiffStat { files: number; insertions: number; deletions: number; top: Array<{ path: string; add: number; del: number }>; at: number }
 export type IntegrateStep = 'preflight' | 'temp' | 'merge' | 'verify' | 'land' | 'cleanup'
 export type IntegrateError =
   | 'missing_worktree' | 'dirty_worktree' | 'in_progress' | 'wrong_branch' | 'busy' | 'merge_conflict' | 'no_identity'
@@ -332,6 +392,7 @@ export interface TeamTask {
   next?: WakeMark                                  // one durable slot per task
   blocked?: { reason: BlockedReason; resume: { state: TaskState; phase: TaskPhase }; at: number }
   grants?: TaskGrant[]
+  diffStat?: TaskDiffStat                          // B5: the last QA diff stat (absent until a QA run read one)
   integrate?: IntegrateStatus
   integrated?: { mergeSha: string; base: string; at: number; landed: 'ffOnly' | 'updateRef' | 'alreadyMerged' }
   triagedAt?: number
@@ -369,7 +430,7 @@ export type TeamApproval = ApprovalBase & (
   | { kind: 'plan'; payload: { planRev: number; small: boolean } }
   | { kind: 'final'; payload: { hasWorktree: boolean; summary: string } }
   | { kind: 'hire'; payload: { roleId: string; text: string; sha256: string; baseDefHash: string; replaces: boolean } }
-  | { kind: 'permission'; payload: { roleId: string; runId: string; tools: string[] } }
+  | { kind: 'permission'; payload: { roleId: string; runId: string; tools: string[]; denied?: string[] /* B5: shell commands denied, redacted, DENIED_COMMANDS_MAX x DENIED_COMMAND_MAX */ } }
   | { kind: 'integrate'; payload: { branch: string; base: string } }
 )
 export type CardAction = 'retry' | 'resume' | 'toTodo' | 'cancelTask' | 'stopRun' | 'keepWaiting' | 'dropBlocker' | 'resumeTeam' | 'newSession' | 'killOrphan' | 'dismiss'
@@ -412,6 +473,8 @@ export interface Run {
   denials?: Array<{ tool: string; count: number }>
   logBytes?: number; logTruncated?: true
   silenceAckedAt?: number
+  /** Lead runs (B5): the goal hash the prompt carried (markStarting), recorded on the session once it runs (R5). */
+  goalHash?: string
 }
 export interface TeamPause { reason: 'user' | 'auth' | 'billing'; at: number; cardId?: string; failure?: FailureInfo }
 export interface RoutineState { lastScheduledFor?: number; lastFiredAt?: number; lastRunId?: string; lastTaskId?: string; skippedFor?: number }

@@ -100,7 +100,7 @@ function complete(settings: Record<string, unknown>, port: number, token: string
 /** Reads and parses settings.json. Throws on unparseable JSON (never clobber). */
 function readSettings(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {}
-  const raw = readFileSync(path, 'utf8').replace(/^﻿/, '')
+  const raw = readFileSync(path, 'utf8').replace(/^\uFEFF/, '')
   if (!raw.trim()) return {}
   const parsed: unknown = JSON.parse(raw)
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {

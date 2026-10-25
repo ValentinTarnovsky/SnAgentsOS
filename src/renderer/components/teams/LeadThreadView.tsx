@@ -7,7 +7,7 @@ import { clockTime } from '@/lib/statusSignals'
 import { loadLead, sayToLead, threadMessages, useLeadStore } from '@/lib/teams/lead'
 import { Button } from '@/components/ui/Button'
 import { StatusGlyph } from '@/components/ui/StatusDot'
-import { BODY_BAD_RE, CommentBody, authorText, useLinkConfirm } from './TaskComments'
+import { BODY_BAD_RE, CommentBody, authorText, escKeepsDraft, useLinkConfirm } from './TaskComments'
 import { taskFailText } from './TaskCard'
 
 const SEND_KEYS = ['Ctrl', 'Enter']
@@ -49,7 +49,8 @@ export function LeadMessage({ m, onLink, compact }: { m: CommentView; onLink: (h
  * The conversation with the Lead (app 2.7.0, E10 B3), the first view of the
  * Lead's drawer: the thread main keeps (`lead`), "Ver anteriores" for the
  * pages before, "El Líder está trabajando" while its run is live, and the
- * composer (Enter is a new line, only [Enviar] or Ctrl+Enter sends). A
+ * composer (Enter is a new line, only [Enviar] or Ctrl+Enter sends, Esc with
+ * a draft only leaves the box). A
  * message is a comment main queues for the Lead's next run ("Lo lee en su
  * próxima corrida"): nothing here starts a run or touches a console.
  */
@@ -98,6 +99,7 @@ export function LeadThreadView({ teamId, lead }: { teamId: string; lead: AgentVi
     if ((drafts.get(teamId) ?? '') === sent) setDraft('')
   }
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (escKeepsDraft(e, draft)) return
     if (e.key !== 'Enter' || e.nativeEvent.isComposing || e.altKey || e.shiftKey || !(e.ctrlKey || e.metaKey)) return
     e.preventDefault()
     void send()

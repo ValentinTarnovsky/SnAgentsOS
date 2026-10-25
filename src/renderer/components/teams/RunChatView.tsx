@@ -14,8 +14,8 @@ const LOADING: ChatScrollerState = { ...EMPTY_RUN_CHAT, loading: 'first' }
  * ChatScroller (A7) over the run's RunLog pages, with "Load earlier" and the
  * lines main pushes while the run is watched (lib/teams/runChat.ts). Read
  * only. A link an agent wrote opens in the browser only after a confirm that
- * shows its whole target, and only for http(s). RunLog's cut row shows in the
- * UI language (`wordRunList`).
+ * shows its whole target, and only for http(s). RunLog's cut row and main's
+ * notes (B5: where a Codex block stopped) show in the UI language (`wordRunList`).
  */
 export function RunChatView({ teamId, runId, run, agentName }: { teamId: string; runId: string; run?: RunView; agentName: string }) {
   const t = useT()
@@ -37,10 +37,10 @@ export function RunChatView({ teamId, runId, run, agentName }: { teamId: string;
     () => ({ log: t('teams.run.chat.log'), capped: t('teams.run.chat.capped'), noReply: t('teams.run.chat.noReply'), outputCut: t('teams.run.chat.outputCut') }),
     [t],
   )
-  const cut = t('teams.run.chat.cut')
   const held = chat?.list
-  // Worded once per list or language: a patch of the run alone keeps the rows ChatScroller built.
-  const list = useMemo(() => (held ? wordRunList(held, cut) : null), [held, cut])
+  // Worded once per list or language (`t` is one function per language): a patch of the run alone keeps the rows
+  // ChatScroller built.
+  const list = useMemo(() => (held ? wordRunList(held, t) : null), [held, t])
   const shown = useMemo<ChatScrollerState>(() => {
     if (!chat || !list) return LOADING
     return list === chat.list ? chat : { ...chat, list }

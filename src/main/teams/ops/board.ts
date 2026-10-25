@@ -109,9 +109,11 @@ export const boardOps: Pick<OpTable, 'board' | 'task' | 'createTask' | 'updateTa
   },
 
   /**
-   * B4, decision 38: the drawer's Retomar of a task the user stopped. Only blocked {stopped} resumes here (a card's
-   * block resumes by its card action, B5; a deps block by its level): T17 puts it back in the pair it was stopped in
-   * with a retry level for that phase's agent, which then dispatches like any other (Por despachar with autonomy off).
+   * B4, decision 38: the drawer's Retomar of a task the user stopped, and B5 of a task blocked on a card (a prep
+   * failure the user dismissed; a deps block only by its level): T17 puts it back in the pair it was blocked in with a
+   * retry level for that phase's agent, which then dispatches like any other (Por despachar with autonomy off). The op
+   * also takes a card block whose card is still open and dismisses that card in the same result; the drawer offers
+   * Retomar only once the card is closed (an open card resumes by its own action).
    */
   async resumeTask(req, { svc, actor }) {
     const rec = svc.team(req.teamId)
@@ -120,9 +122,14 @@ export const boardOps: Pick<OpTable, 'board' | 'task' | 'createTask' | 'updateTa
     if (!ctx) return fail('untrusted')
     const cur = rec.store.rt.tasks.find((x) => x.id === req.taskId)
     if (!cur) return fail('not_found')
-    if (cur.state !== 'blocked' || cur.blocked?.reason.kind !== 'stopped') return fail('conflict', { reason: 'stale', current: detailOf(svc, req.teamId, rec, cur) })
+    // B5: a task blocked on a card (a prep failure the user dismissed, design T17) resumes the same way, and like the
+    // card's Reintentar its level leaves the prep backoff (the user asked for it now).
+    const reason = cur.blocked?.reason
+    const kind = reason?.kind
+    if (cur.state !== 'blocked' || (kind !== 'stopped' && kind !== 'card')) return fail('conflict', { reason: 'stale', current: detailOf(svc, req.teamId, rec, cur) })
     const res = commitTask(svc, req.teamId, rec, resumeTask(rec.store.rt, actor, req.taskId, ctx), req.taskId)
     if (!res.ok) return taskFail(svc, req.teamId, rec, res)
+    if (reason?.kind === 'card') svc.liftPrepBackoff(req.teamId, reason.cardId)
     svc.log(`task ${req.teamId} ${req.taskId} resumed`)
     const t = rec.store.rt.tasks.find((x) => x.id === req.taskId)
     return t ? { ok: true, task: taskSummary(rec.store.rt, t, viewCtx(svc, req.teamId, rec)) } : fail('not_found')

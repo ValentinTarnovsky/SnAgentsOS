@@ -25,6 +25,25 @@ export function newToken(): string {
 
 const digest = (token: string): string => createHash('sha256').update(token, 'utf8').digest('hex')
 
+/** The shape newToken gives every token (holdsToken reads a text's hex characters as one run for it). */
+const HEX_TOKEN_RE = /^[0-9a-f]{64}$/
+/** Hex characters in a row that maskTokens takes for a piece of a live token (no accident at 64 bits). */
+const TOKEN_PIECE_MIN = 16
+const HEX_RUN_RE = new RegExp(`[0-9a-f]{${TOKEN_PIECE_MIN},}`, 'gi')
+
+/** True when the lowercase hex run `run` is a piece of `token`: inside it, or TOKEN_PIECE_MIN of it at one edge of the run. */
+function tokenPiece(run: string, token: string): boolean {
+  if (token.includes(run)) return true
+  // An edge piece holds the run's TOKEN_PIECE_MIN characters at that edge: neither inside the token, no piece (a git SHA).
+  const head = token.includes(run.slice(0, TOKEN_PIECE_MIN))
+  const tail = token.includes(run.slice(-TOKEN_PIECE_MIN))
+  if (!head && !tail) return false
+  for (let k = Math.min(run.length, token.length); k >= TOKEN_PIECE_MIN; k--) {
+    if (token.startsWith(run.slice(run.length - k)) || token.endsWith(run.slice(0, k))) return true
+  }
+  return false
+}
+
 function sameToken(a: string, b: string): boolean {
   const x = Buffer.from(a, 'utf8')
   const y = Buffer.from(b, 'utf8')
@@ -81,6 +100,50 @@ export class CtlTokens {
     if (!hit || !sameToken(hit.token, token)) return null
     // A copy all the way down: a handler never mutates the stored caller.
     return { ...hit.caller, ...(hit.caller.team ? { team: { ...hit.caller.team } } : {}) }
+  }
+
+  /**
+   * B5 integration, fifth round (security): true when `text` holds the master token or a live console or team token,
+   * so main refuses a team text that would carry one into the team state (a run could read runtime.json and post it).
+   * Every token is 64 hex characters (newToken): besides the text as is, its hex characters are read as one run, in
+   * any case, so a token in capitals or cut by spaces, line ends or other characters still counts. Never logs nor
+   * returns a token.
+   */
+  holdsToken(text: string): boolean {
+    if (typeof text !== 'string' || text === '') return false
+    const lower = text.toLowerCase()
+    const hex = lower.replace(/[^0-9a-f]+/g, '')
+    const found = (token: string): boolean => {
+      if (!token) return false
+      const t = token.toLowerCase()
+      return lower.includes(t) || (HEX_TOKEN_RE.test(t) && hex.includes(t))
+    }
+    if (found(this.master)) return true
+    for (const { token } of this.byDigest.values()) if (found(token)) return true
+    return false
+  }
+
+  /**
+   * B5 integration, sixth round (security): `text` with every live token (the master and each console or team token)
+   * masked, for what main shows of a team run (its chat rows: a run reads runtime.json or a console's env as it
+   * likes). Each token as is, in any case, becomes `mask`; a text that still holds one after that (holdsToken: cut by
+   * spaces, line ends or other characters) is masked whole. Then every run of TOKEN_PIECE_MIN or more hex characters
+   * that is a piece of a live token becomes `mask` too: the decoders cut a text at its cap (CHAT_TOOL_TEXT_MAX, a tail
+   * at its start) before main masks it, so a token on the cut leaves up to 63 of its characters, which neither the
+   * whole-token pass nor the 64 hex shape of redactCredentials sees. Never logs nor returns a token.
+   */
+  maskTokens(text: string, mask = '[redacted]'): string {
+    if (typeof text !== 'string' || text === '') return text
+    const tokens = [this.master, ...[...this.byDigest.values()].map((v) => v.token)].filter((t) => !!t).map((t) => t.toLowerCase())
+    let out = text
+    let lower = out.toLowerCase()
+    for (const token of tokens) {
+      if (!lower.includes(token)) continue
+      out = out.replace(new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), mask)
+      lower = out.toLowerCase()
+    }
+    if (this.holdsToken(out)) return mask
+    return out.replace(HEX_RUN_RE, (run) => (tokens.some((t) => tokenPiece(run.toLowerCase(), t)) ? mask : run))
   }
 
   /** Live console tokens (diagnostics and tests). */

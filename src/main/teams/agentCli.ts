@@ -80,6 +80,24 @@ export function spawnTarget(cli: ResolvedCli, argv: string[]): { file: string; a
   return { file: win32.join(root, 'System32', 'cmd.exe'), args: ['/d', '/s', '/c', `"${line}"`], verbatim: true }
 }
 
+/**
+ * B5 integration, seventh round: the longest command line a run through cmd.exe may have. cmd.exe cuts its command
+ * line at 8191 characters, and a Claude line carries its whole permission list (the protect rules of every secret of
+ * the data folder, a custom role's tools, the task's grants), so a longer one would run with a cut list: it never spawns.
+ */
+export const CMD_LINE_MAX = 8000
+
+/**
+ * True when the target goes through cmd.exe (a `.cmd` agent CLI) and its full command line (cmd.exe, `/d /s /c` and the
+ * quoted line, as CreateProcess gets it with windowsVerbatimArguments) would pass CMD_LINE_MAX. An `.exe` or POSIX
+ * target has no such limit here (CreateProcess takes 32767 characters).
+ */
+export function cmdLineTooLong(cli: ResolvedCli, argv: string[]): boolean {
+  if (cli.kind !== 'cmd') return false
+  const t = spawnTarget(cli, argv)
+  return [t.file, ...t.args].join(' ').length > CMD_LINE_MAX
+}
+
 export function quoteForCmd(arg: string): string {
   if (!arg.length) return '""'
   const escaped = arg.replace(/"/g, '""')

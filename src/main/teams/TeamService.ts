@@ -1,15 +1,18 @@
 import { spawn as nodeSpawn } from 'child_process'
 import { createHash, randomBytes, randomUUID } from 'crypto'
-import { promises as fsp, readdirSync, readFileSync, rmSync } from 'fs'
+import { appendFileSync, promises as fsp, readdirSync, readFileSync, rmSync } from 'fs'
 import { isAbsolute, join, resolve } from 'path'
 import type { ChatMessage } from '@shared/chat-types'
 import type { ClaudeAccountsState } from '@shared/claude-accounts'
-import type { CtlErrorCode, CtlResponse } from '@shared/ctl-protocol'
+import { CTL_TEAM_LOG_DEFAULT, type CtlErrorCode, type CtlResponse } from '@shared/ctl-protocol'
 import { normalizeLabs } from '@shared/labs'
-import { effectiveProfile, roleWrites } from '@shared/teamArgv'
-import { definitionIssues, parseFrontmatter, UNC_PATH_RE } from '@shared/teamDefinition'
+import { redactCredentials } from '@shared/redact'
+import { DATA_SECRET_PATHS, effectiveProfile, isGrantable, roleWrites } from '@shared/teamArgv'
+import { canonicalDefText, definitionIssues, normalizeDefText, parseDefinition, parseFrontmatter, UNC_PATH_RE } from '@shared/teamDefinition'
 import { afterRunPolicy, candidatesOf, claudeAllLimited, planDispatch } from '@shared/teamDispatch'
+import type { TeamNeedRow } from '@shared/teamNeeds'
 import { systemText } from '@shared/teamPrompt'
+import { parseTeamBlock } from '@shared/teamTools'
 import { isPhoneTeamOp, type TaskSummary, type TeamChangedEvt, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
 import {
   BOARD_COLUMNS,
@@ -27,6 +30,7 @@ import {
   teamPaneId,
   isTeamPaneId,
   type Actor,
+  type CardAnswer,
   type DefError,
   type DeferInfo,
   type DispatchFacts,
@@ -37,6 +41,7 @@ import {
   type Run,
   type RunEndFacts,
   type RunMode,
+  type RunNote,
   type RunRequest,
   type TaskState,
   type TeamDefinition,
@@ -47,6 +52,7 @@ import {
 } from '@shared/teams'
 import type { AgentProvider, ConfigFile, PaneStatusEvt } from '@shared/types'
 import { splitAppend } from '../chat/chatFrames'
+import { mainT, type MainKey } from '../i18n'
 import type { CtlTeamCaller } from '../cli/CtlTokens'
 import type { CtlTeamsView } from '../cli/handlers'
 import { DeadlineTimer, type DeadlineTimerDeps } from '../DeadlineTimer'
@@ -61,22 +67,26 @@ import { Dispatcher, DISPATCH_KEY, type ManualRequest, type StepResult } from '.
 import { dismissSystemCards, openSystemCard, reconcileAgents } from './flow/agents'
 import { enqueue, phaseAgentOf, queueDecide, reconcileTasks } from './flow/dispatch'
 import { admitRun, finishRun, interruptAll, markRunning, orphanCards, reapOnLoad, requestStop, restoreWake, runEndFactsOf, sessionCardVars, terminalOf, withRunDetail, type AdmitFacts, type RunEnd } from './flow/runs'
+import { answerCard, cancelStaleHires, completeApproval, decideApproval, HIRE_STALE } from './flow/approvals'
 import { archiveSweep, changedScopes, deliverComments } from './flow/tasks'
-import { applyTool } from './flow/tools'
+import { applyBlock, applyTool } from './flow/tools'
 import type { FlowCtx, FlowResult, TeamEffect, TeamToolCall } from './flow/types'
-import { createTeamCtl, type TeamCtlPort, type TeamLiveRun } from './teamCtl'
+import type { StreamFacts } from './parsers/types'
+import { createTeamCtl, paramText, type TeamCtlPort, type TeamLiveRun, type TeamReadReply } from './teamCtl'
 import { createClaudeStreamParser } from './parsers/claudeStream'
+import { maskMessages } from './RunLog'
 import { RunStarter } from './RunStarter'
 import { RunSupervisor } from './RunSupervisor'
 import { TaskWorktrees, type TeamWorktreeApi } from './TaskWorktrees'
 import { WriteLocks } from './WriteLocks'
 import { currentBranch } from './ops/core'
+import { teamGitRead, type TeamGitRequest, type TeamGitTarget } from './ops/gitReads'
 import { OPS } from './ops/index'
 import { fail, type OpHandler, type TeamInternals, type TeamRecord } from './ops/types'
 import { TeamDefinitionLoader, type LoadedDefinition, type LoaderFs, type LoadRes } from './TeamDefinitionLoader'
 import { resolveMainRoot, TeamRegistry, teamIdOf, type RegistryFs, type TeamIndexEntry } from './TeamRegistry'
 import { TeamStore, type SyncFs, type TeamStoreDeps } from './TeamStore'
-import { goalHashOf, TeamTrust } from './TeamTrust'
+import { goalHashOf, sha256Hex, TeamTrust } from './TeamTrust'
 import { compareTaskOrder, LIVE_RUN_STATES, needsRowsOf, taskDetail, taskSummary, teamHeaderKey, waitingOf, type TaskViewCtx } from './views'
 
 /** `team.tasks` answers at most this many tasks (design 5.3); `team task get` carries the newest 30 comments. */
@@ -100,6 +110,14 @@ export const DEFWATCH_MS = 300
  * and decisions keep working so the user can see the diff and tidy the board.
  */
 const TRUST_GATED_OPS: ReadonlySet<TeamOp> = new Set<TeamOp>(['runNow', 'kickoff', 'resumeTask', 'routineRun', 'integrate', 'dispatch'])
+
+/**
+ * A desktop notice of a team (design 3.1 Notices, 6.3): one per new "Te necesita" row with `push` (an approval, a
+ * card, the trust state, an auth or billing pause) and per integrate result. `title` and `body` come from the main
+ * catalog (`teams.push.*`) with the trusted team name and the task id only, never agent text, redacted. `tag` is
+ * `team:<teamId>:<rowId>` (B8's push tag); `urgent` for a row that blocks the team (rank 1).
+ */
+export interface TeamNotice { kind: 'team'; teamId: string; taskId?: string; tag: string; title: string; body: string; urgent: boolean; push: boolean }
 
 /** The problems of a load as one comparable key: the load error, or the parser's errors and warnings. */
 function issueKey(loaded: LoadRes): string {
@@ -137,8 +155,18 @@ export interface TeamServiceDeps {
   /** Wired as ptyManager.getSpawnCwd / ptyIdForPane / killPaneAndWait. */
   pty?: { spawnCwd(paneId: string): string | undefined; ptyIdForPane(paneId: string): string | null; killPaneAndWait(paneId: string): Promise<void> }
   accounts?: () => ClaudeAccountsState | null
-  /** ready() = CliService.running && shimExists() (decision 71). */
-  cli?: { envForTeam(runId: string, teamId: string, agentId: string, roleKind: RoleKind): Record<string, string>; revokeTeam(runId: string): void; ready(): boolean }
+  /**
+   * ready() = CliService.running && shimExists() (decision 71). B5 integration, sixth round (security): the live tokens
+   * of the app (CliService.tokens): holdsToken refuses a Codex block action that carries one (applyRunBlock, like
+   * teamCtl does a CLI call), maskTokens masks them in a run's chat rows before they leave main (maskRun).
+   */
+  cli?: {
+    envForTeam(runId: string, teamId: string, agentId: string, roleKind: RoleKind): Record<string, string>
+    revokeTeam(runId: string): void
+    ready(): boolean
+    holdsToken(text: string): boolean
+    maskTokens(text: string): string
+  }
   /** treeKill.ts procStartTime (decision 64); test seam. */
   procStartTime?: (pid: number) => Promise<{ at: number; image: string } | null>
   /** AwakeService.onPaneStatus: the synthetic status of a live run (never StatusManager). */
@@ -154,6 +182,10 @@ export interface TeamServiceDeps {
   // ---- B4 (dispatch). ----
   /** The console worktree service (registerWorktreeIpc's instance): task worktrees, tagged with their owner (decision 63). Without it a worktree task cannot start. */
   worktrees?: TeamWorktreeApi | null
+
+  // ---- B5 (needs). ----
+  /** A new need row the user should hear about (design 3.1 Notices): B5 the desktop toast, B8 also the phone push. */
+  notice?: (n: TeamNotice) => void
 }
 
 /** A deferred run waits on a console (its session or its tree): a console status change pokes the dispatcher. */
@@ -167,6 +199,49 @@ export const SYNTHETIC_REFRESH_MS = 10 * 60 * 1000
 export const REMOVE_WAIT_MS = STOP_GRACE_MS + 2_000
 /** Images a reaped pid must run to count as an orphan of ours (decision 64). */
 const ORPHAN_IMAGES = new Set(['claude', 'codex', 'node', 'cmd'])
+
+/** A refused reducer result as the op's reply (FlowError is a subset of TeamError). */
+function flowFail(res: Extract<FlowResult<unknown>, { ok: false }>): TeamFail {
+  const extra: Omit<TeamFail, 'ok' | 'error'> = {}
+  if (res.reason) extra.reason = res.reason
+  if (res.fields) extra.fields = res.fields
+  if (res.defer) extra.defer = res.defer
+  return fail(res.error, extra)
+}
+
+/** The `teams.push.*` body key of a need row (design 6.3): its kind, the pause reason, the approval kind, a card with or without a task. */
+function noticeKey(row: TeamNeedRow, paused: TeamRuntime['paused']): MainKey {
+  switch (row.kind) {
+    case 'trust':
+      return 'teams.push.trust'
+    case 'paused':
+      return paused?.reason === 'billing' ? 'teams.push.paused.billing' : 'teams.push.paused.auth'
+    case 'approval':
+      switch (row.approvalKind) {
+        case 'plan':
+          return row.taskId ? 'teams.push.approval.plan' : 'teams.push.approval'
+        case 'final':
+          return row.taskId ? 'teams.push.approval.final' : 'teams.push.approval'
+        case 'permission':
+          return row.taskId ? 'teams.push.approval.permission' : 'teams.push.approval'
+        case 'integrate':
+          return row.taskId ? 'teams.push.approval.integrate' : 'teams.push.approval'
+        case 'hire':
+          return 'teams.push.approval.hire'
+        default:
+          return 'teams.push.approval'
+      }
+    case 'card':
+      return row.taskId ? 'teams.push.card' : 'teams.push.cardTeam'
+    case 'dispatch':
+      return 'teams.push.dispatch'
+  }
+}
+
+/** A Codex run whose sandbox is read-only (readonly or custom profile) reports its team actions in a `snaos-team` block (decision 7). */
+function reportsByBlock(run: Pick<Run, 'provider' | 'profile'>): boolean {
+  return run.provider === 'codex' && run.profile !== 'total'
+}
 
 /** A process of a run of an earlier app life that is still alive (decision 64): it holds its session and its cwd. */
 interface Lingering { runId: string; agentId: string; pid: number; startedAt: number; sessionId?: string; cwd: string; cardId?: string }
@@ -194,7 +269,7 @@ export class TeamService implements TeamInternals {
   readonly ctlView: CtlTeamsView = createTeamCtl({
     // Labs off (or frozen, disposed): every team.* answers disabled, like every Teams request.
     live: (who) => (this.live() ? this.ctlLive(who) : 'disabled'),
-    read: (teamId, method, params, who) => this.ctlRead(teamId, method, params, who),
+    read: (teamId, method, params, who) => (method === 'team.diff' || method === 'team.log' ? this.ctlGit(teamId, method, params, who) : this.ctlRead(teamId, method, params, who)),
     apply: (teamId, call, who) => this.ctlApply(teamId, call, who),
   })
 
@@ -254,6 +329,8 @@ export class TeamService implements TeamInternals {
   private readonly removedRecs = new WeakSet<TeamRecord>()
   /** B3: archived comments per `<teamId>|<target>` (lines of archive/<target>.jsonl), read once and bumped on append. */
   private readonly archivedCounts = new Map<string, number>()
+  /** B5 integration, fifth round: runs with a `team diff` or `team log` in flight (one at a time per run, ctlGit). */
+  private readonly gitReading = new Set<string>()
   private readonly treeKill: NonNullable<TeamServiceDeps['treeKill']>
 
   // ---- B4 dispatch ----
@@ -369,11 +446,15 @@ export class TeamService implements TeamInternals {
     return out
   }
 
-  /** Decision 72: what a Claude run may never read or write, built from dataDir() (never the whole folder: worktrees live there). */
+  /**
+   * Decision 72: what a Claude run may never read or write, built from dataDir() (never the whole folder: worktrees
+   * live there). Sixth round of the B5 integration: Read of every secret of the folder (DATA_SECRET_PATHS, the list the
+   * client guard of a team run shares); the write denies stay teams/, trusted-teams.json and runtime.json, since each
+   * path costs six rules on a line cmd.exe caps at 8191 characters when Claude's CLI is a `.cmd`.
+   */
   private protectPaths(): { readDeny: string[]; writeDeny: string[] } {
     const d = this.deps.dataDir()
-    const runtime = join(d, 'runtime.json')
-    return { readDeny: [runtime], writeDeny: [join(d, 'teams'), join(d, 'trusted-teams.json'), runtime] }
+    return { readDeny: DATA_SECRET_PATHS.map((p) => join(d, p)), writeDeny: [join(d, 'teams'), join(d, 'trusted-teams.json'), join(d, 'runtime.json')] }
   }
 
   /** Decision 12: PATH dirs only, never the app's own shims (status-bin, <dataDir>/bin). */
@@ -535,6 +616,8 @@ export class TeamService implements TeamInternals {
     for (const rec of loadedTeams) rec.stopWatch = this.loader.watch(rec.entry.id, rec.entry.repoRoot, () => this.onDefEvent(rec.entry.id))
     this.deps.log(`enabled teams=${loadedTeams.length}`)
     this.emit('', ['list'])
+    // The rows the load itself opened (a reaped run's card, a repair's) against each team's baseline (design 3.1).
+    for (const rec of loadedTeams) this.noticeNeeds(rec.entry.id)
     // Decision 64: the processes of reaped runs that still live (main crashed, the children did not).
     for (const rec of loadedTeams) {
       // Dropped from reapedAtLoad only by a check that completes (a teardown first leaves it for the next enable).
@@ -552,7 +635,7 @@ export class TeamService implements TeamInternals {
     if (epoch !== this.epoch) return null
     this.trust.reload(e.id)
     const trusted = this.trust.trusted(e.id)
-    const { store, reaped } = TeamStore.load(this.storeDeps(e.id), e.id, trusted)
+    const { store, reaped, repaired } = TeamStore.load(this.storeDeps(e.id), e.id, trusted)
     // Reaped runs (R10: interrupted {crash}) join the runs ring; their pids are never signalled here.
     for (const r of reaped) store.recordRun(r)
     if (reaped.length) this.deps.log(`reaped ${e.id} runs=${reaped.length}`)
@@ -563,6 +646,19 @@ export class TeamService implements TeamInternals {
     this.teams.set(e.id, rec)
     await this.recompute(rec)
     if (epoch !== this.epoch) return rec
+    // B5 notices (design 3.1): the baseline is the persisted `needsSeen`, never empty, so a restart re-notifies
+    // nothing still pending (a card the reaper or the repair opened at load is new and notifies once). A team
+    // written before B5 has none: what waits now is its baseline. A state.json the repair reset lost its baseline
+    // with it: its only card is the repair's `stateReset`, which notifies once; the trust and pause rows stay seen.
+    if (store.rt.needsSeen === undefined) {
+      const reset = repaired.includes('state.json')
+      store.setNeedsSeen(needsRowsOf(rec, trusted).filter((r) => !(reset && r.kind === 'card')).map((r) => r.id))
+    }
+    this.recheckApplying(e.id, rec)
+    // B5 review, second round: a pending hire on a base that is no longer the trusted hash (a trust whose cancel never
+    // reached the disk, a state written before the cancel existed) can never be approved: cancelled stale at load too.
+    const trustedNow = this.trust.trusted(e.id)
+    if (trustedNow) this.dropStaleHires(e.id, rec, trustedNow.sha256)
     if (this.trust.snapshotState(e.id) === 'bad') {
       // Decision 34: an edited snapshot or a TrustStore entry that does not match it.
       this.commit(e.id, openSystemCard(store.rt, { why: 'stateReset', actions: ['dismiss'], vars: { what: 'trust' } }, { now: this.clock() }), ['needs', 'list'])
@@ -1093,6 +1189,9 @@ export class TeamService implements TeamInternals {
         case 'archiveTasks':
           this.teams.get(teamId)?.store.appendArchive('tasks', e.tasks)
           break
+        case 'applyHire':
+          this.applyHire(teamId, e.approvalId)
+          break
         default:
           this.deps.log(`effect ${e.kind} ${teamId} not handled`)
       }
@@ -1381,6 +1480,60 @@ export class TeamService implements TeamInternals {
   }
 
   /**
+   * Where `team diff` and `team log` read (B5 integration, fourth round): a task with its worktree -> that tree
+   * against the current tip of its base branch (fifth round: the merge base, like TaskWorktrees.qaStat); any other
+   * task -> the root of its repo against HEAD (an extra repo that does not resolve: null); no task -> the main repo
+   * root. Like runCwdOf, from the team's own state only.
+   */
+  private gitTargetOf(teamId: string, task: TeamTask | undefined): TeamGitTarget | null {
+    const main = this.repoOf(teamId, REPO_MAIN)
+    if (!('repoRoot' in main)) return null
+    if (!task) return { cwd: main.repoRoot, where: 'root' }
+    const wt = task.worktree
+    if (wt) return { cwd: wt.path, where: 'worktree', base: wt.base, baseBranch: wt.baseBranch, branch: wt.branch, task: task.id }
+    const repo = this.repoOf(teamId, task.repoId)
+    return 'repoRoot' in repo ? { cwd: repo.repoRoot, where: 'root', task: task.id } : null
+  }
+
+  /**
+   * `team diff` and `team log` (B5 integration, fourth round, security): the params teamCtl checked, the task of the
+   * caller's own team (`task`, else the run's own; any role reads any task of its team, never another team's: the
+   * token names the team), then ops/gitReads (the paths again, realpath, git with fixed options, the cap). Fifth
+   * round: one read of a run in flight at a time; a second one meanwhile answers busy, so a run never queues reads
+   * ahead of the phone and the other runs in the one git slot a remote caller may hold.
+   */
+  private async ctlGit(teamId: string, method: 'team.diff' | 'team.log', params: Record<string, unknown>, who: CtlTeamCaller): Promise<TeamReadReply> {
+    const l = this.ctlLive(who)
+    const rec = this.teams.get(teamId)
+    if (!l || l.teamId !== teamId || !rec) return ctlErr('forbidden', 'this team run is over')
+    if (this.gitReading.has(who.runId)) return { ok: false, error: 'busy', detail: `another snaos team diff or log of this run is still reading: wait for its answer, then run snaos ${method.replace('.', ' ')} again` }
+    this.gitReading.add(who.runId)
+    try {
+      return await this.ctlGitRead(rec, l, method, params)
+    } finally {
+      this.gitReading.delete(who.runId)
+    }
+  }
+
+  /** ctlGit's read, one per run at a time: the task, the target, the request. */
+  private async ctlGitRead(rec: TeamRecord, l: TeamLiveRun, method: 'team.diff' | 'team.log', params: Record<string, unknown>): Promise<TeamReadReply> {
+    const teamId = l.teamId
+    const rt = rec.store.rt
+    const taskId = typeof params.task === 'string' ? params.task : l.run.taskId
+    let task: TeamTask | undefined
+    if (taskId !== undefined) {
+      if (!TASK_ID_RE.test(taskId)) return ctlErr('bad_request', 'task: a task id like t-12')
+      task = rt.tasks.find((t) => t.id === taskId)
+      if (!task) return ctlErr('not_found', rt.archivedTasks[taskId] ? `${taskId} is archived` : `no task ${taskId}`)
+    }
+    const target = this.gitTargetOf(teamId, task)
+    if (!target) return { ok: false, error: 'io', detail: `the repo of ${task?.id ?? 'the team'} is not available` }
+    const paths = Array.isArray(params.paths) ? (params.paths as string[]) : []
+    const req: TeamGitRequest = method === 'team.diff' ? { method, stat: params.stat === true, paths } : { method, n: typeof params.n === 'number' ? params.n : CTL_TEAM_LOG_DEFAULT, paths }
+    return teamGitRead({ git: this.git, realpath: (p) => this.repoFs.realpath(p) }, target, req)
+  }
+
+  /**
    * One write of a run (commit inside): the growth cap of the store rules (an
    * agent's write is refused past TEAM_STATE_MAX_BYTES with `cap` and `full:
    * 'state'`, its own hint; the user's still pass), applyTool, the commit with
@@ -1435,12 +1588,12 @@ export class TeamService implements TeamInternals {
     this.commit(teamId, markRunning(rec.store.rt, runId, f, ctx), ['agents', 'run'], { runId })
   }
 
-  /** Line events never emit teamChanged (design 3.1); only the watched run gets its items. */
+  /** Line events never emit teamChanged (design 3.1); only the watched run gets its items, masked (maskRun). */
   private onAppend(runId: string, items: ChatMessage[], at: number): void {
     const w = this.watched
     if (!w || w.runId !== runId || !this.deps.sendRun) return
     const run = this.activeRun(w.teamId, runId)
-    for (const chunk of splitAppend(teamPaneId(runId), items)) this.sendRun({ teamId: w.teamId, runId, agentId: run?.agentId ?? '', items: chunk, lastLineAt: at })
+    for (const chunk of splitAppend(teamPaneId(runId), this.maskRun(items))) this.sendRun({ teamId: w.teamId, runId, agentId: run?.agentId ?? '', items: chunk, lastLineAt: at })
   }
 
   /** Every line: the synthetic status is refreshed at most every SYNTHETIC_REFRESH_MS (decision 58, never a timer). */
@@ -1478,29 +1631,118 @@ export class TeamService implements TeamInternals {
     this.finalizeClosed(runId, end, end.treeMoved)
   }
 
-  /** The `finishRun` commit of a closed run (its policy from the terminal copy), with the tree mark's verdict. */
+  /**
+   * The `finishRun` commit of a closed run (its policy from the terminal copy), with the tree mark's verdict. B5: a
+   * Codex run that reports by block applies its block first (R11), so the policy and the outcome see what it did;
+   * finishRun gets the trusted definition for the permission approvals of its denials.
+   */
   private finalizeClosed(runId: string, end: RunEnd & { stderrTail: string; logBytes?: number; logCut?: boolean }, treeMoved: boolean | undefined): void {
     const teamId = this.teamOfRun(runId)
     const rec = teamId ? this.teams.get(teamId) : undefined
-    const run = rec?.store.rt.activeRuns.find((r) => r.id === runId)
-    if (!teamId || !rec || !run || run.state === 'queued') {
+    const run0 = rec?.store.rt.activeRuns.find((r) => r.id === runId)
+    if (!teamId || !rec || !run0 || run0.state === 'queued') {
       this.deps.log(`run ${runId} closed after its end`)
       return
     }
-    const full: RunEnd = { at: end.at, exit: end.exit, facts: end.facts, teamWrites: this.runWrites.get(runId) ?? 0 }
+    const full: RunEnd = { at: end.at, exit: end.exit, facts: end.facts, teamWrites: 0 }
     if (end.lastLineAt !== undefined) full.lastLineAt = end.lastLineAt
     if (treeMoved !== undefined) full.treeMoved = treeMoved
+    // R11: only a run that would end succeeded or failed (never one the user, a takeover or a quit stopped).
+    if (reportsByBlock(run0)) {
+      const would = terminalOf(run0, full).state
+      if (would === 'succeeded' || would === 'failed') this.applyRunBlock(teamId, run0, end)
+    }
+    const run = rec.store.rt.activeRuns.find((r) => r.id === runId) ?? run0
+    full.teamWrites = this.runWrites.get(runId) ?? 0
     const now = this.clock()
     const terminal = terminalOf(run, full)
     const acc = this.deps.accounts?.() ?? null
     const switchedAt = acc?.lastSwitch?.at
     const policy = this.runPolicy(runEndFactsOf(rec.store.rt, terminal, now, { claudeCanSwitch: this.claudeCanSwitch(acc), claudeSwitchedAt: switchedAt, unknownSession: end.facts.unknownSession }))
-    const res = this.commit(teamId, finishRun(rec.store.rt, runId, full, policy, { now }), ['agents', 'run', 'needs'], { runId })
+    const ctx = this.flowCtx(teamId)
+    const fin = finishRun(rec.store.rt, runId, full, policy, { now, mask: this.maskTokens }, ctx ? { ctx, protect: this.protectPaths() } : undefined)
+    // The Lead's reply and a lead escalation write the Lead thread (`lead`), a permission approval the needs.
+    const scopes = [...new Set<TeamScope>(['agents', 'run', 'needs', ...(fin.ok ? changedScopes(rec.store.rt, fin.rt) : [])])]
+    const res = this.commit(teamId, fin, scopes, { runId })
     if (res.ok && end.logBytes !== undefined) {
       // Log size of the ended run (Run.logBytes, logTruncated) patched into its ring copy.
       const ended: Run = { ...res.result.run, logBytes: end.logBytes }
       if (end.logCut) ended.logTruncated = true
       rec.store.recordRun(ended)
+    }
+  }
+
+  /**
+   * R11 (design 3.5 close sequence, 5.6): the LAST complete `snaos-team` block of a Codex run's last message,
+   * applied through applyTool in order (applyBlock: `$<n>` refs, `viaBlock` admits the stopping run) in ONE commit,
+   * every accepted action counted as a team write (classifyOutcome). A refused action or an unresolved ref stops the
+   * list there: teams.log and a note row in the run's chat say where and why. The state cap of ctlApply holds.
+   * B5 integration, sixth round (security): an action whose params hold a live token of the app (deps.cli.holdsToken,
+   * the check teamCtl runs on a CLI call; a read-only sandbox reads runtime.json) is refused like a rejected action,
+   * `bad_request` with detail `secret`: the list stops there and nothing of it lands.
+   */
+  private applyRunBlock(teamId: string, run: Run, end: { facts: StreamFacts; logCut?: boolean }): void {
+    const rec = this.teams.get(teamId)
+    const ctx = this.flowCtx(teamId)
+    if (!rec || !ctx) return
+    const block = parseTeamBlock(end.facts.finalText ?? '')
+    if (!block) {
+      this.deps.log(`run ${run.id} block none`)
+      return
+    }
+    let bytes = 0
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(block.actions), 'utf8')
+    } catch {
+      bytes = Infinity
+    }
+    if (rec.store.lastBytes + bytes > TEAM_STATE_MAX_BYTES) {
+      this.deps.log(`run ${run.id} block refused: state full`)
+      this.runNote(teamId, run.id, end, { key: 'blockStateFull', vars: { mb: Math.floor(TEAM_STATE_MAX_BYTES / (1024 * 1024)) } })
+      return
+    }
+    const actor: Actor & { kind: 'agent' } = { kind: 'agent', agentId: run.agentId, runId: run.id, roleKind: run.roleKind }
+    // The first action that carries a live token, checked on its raw params (before the redaction of blockParams), read
+    // as teamCtl reads a CLI call's params (paramText).
+    const cli = this.deps.cli
+    const secretAt = cli ? block.actions.findIndex((a) => cli.holdsToken(paramText(a.params))) : -1
+    const res = applyBlock(rec.store.rt, actor, secretAt === -1 ? block : { ...block, actions: block.actions.slice(0, secretAt) }, ctx)
+    if (!res.ok) {
+      this.deps.log(`run ${run.id} block failed ${res.error}`)
+      return
+    }
+    const { applied } = res.result
+    // The actions before the secret one all landed: the list stops at it.
+    const secret = res.result.stoppedAt === undefined && secretAt !== -1
+    const stoppedAt = secret ? secretAt : res.result.stoppedAt
+    const why = secret ? 'bad_request: secret' : res.result.error ?? 'refused'
+    if (res.rt !== rec.store.rt) this.commit(teamId, res, changedScopes(rec.store.rt, res.rt), run.taskId ? { taskId: run.taskId } : undefined)
+    for (let i = 0; i < applied; i++) {
+      this.noteTeamWrite(run.id)
+      this.deps.log(`run ${run.id} ${block.actions[i].method} (block)`)
+    }
+    if (stoppedAt === undefined) {
+      this.deps.log(`run ${run.id} block applied=${applied}/${block.actions.length}`)
+      return
+    }
+    const method = block.actions[stoppedAt]?.method ?? '?'
+    this.deps.log(`run ${run.id} block applied=${applied}/${block.actions.length} stopped=${stoppedAt + 1} ${method} ${why}`)
+    const vars: RunNote['vars'] = { applied, total: block.actions.length, at: stoppedAt + 1, method, error: secret ? 'bad_request' : res.result.error ?? 'refused' }
+    if (secret) vars.detail = 'secret'
+    this.runNote(teamId, run.id, end, { key: 'blockStopped', vars })
+  }
+
+  /**
+   * A main note at the end of a closed run's log (`snaos.note`, a system row of its chat): the RunLog is closed by
+   * then, so the line is appended to its file; a log past its cut keeps it out (its tail lives only in the ring). The
+   * record carries the note's key and vars (`{ type, at, key, vars }`, RunNote), never a sentence: the run chat words it.
+   */
+  private runNote(teamId: string, runId: string, end: { logCut?: boolean }, note: RunNote): void {
+    if (end.logCut) return
+    try {
+      appendFileSync(join(this.teamDir(teamId), 'runs', `${runId}.jsonl`), JSON.stringify({ type: 'snaos.note', at: new Date(this.clock()).toISOString(), key: note.key, vars: note.vars }) + '\n', 'utf8')
+    } catch (err) {
+      this.deps.log(`run ${runId} note failed ${(err as NodeJS.ErrnoException).code ?? 'error'}`)
     }
   }
 
@@ -1515,7 +1757,9 @@ export class TeamService implements TeamInternals {
     facts.failure = { kind: 'request', code: `spawn_${detail}`.slice(0, 32) }
     const full: RunEnd = { at: now, exit: { code: null, signal: null }, facts, teamWrites: 0 }
     const terminal = terminalOf(run, full)
-    this.commit(teamId, finishRun(rec.store.rt, runId, full, this.runPolicy(runEndFactsOf(rec.store.rt, terminal, now)), { now }), ['agents', 'run', 'needs'], { runId })
+    const fin = finishRun(rec.store.rt, runId, full, this.runPolicy(runEndFactsOf(rec.store.rt, terminal, now)), { now, mask: this.maskTokens })
+    // A lead escalation of this run's end writes the Lead thread (B5).
+    this.commit(teamId, fin, [...new Set<TeamScope>(['agents', 'run', 'needs', ...(fin.ok ? changedScopes(rec.store.rt, fin.rt) : [])])], { runId })
   }
 
   /** autoSwitch on and another usable account (afterRunPolicy's claudeCanSwitch). */
@@ -1883,6 +2127,230 @@ export class TeamService implements TeamInternals {
     return waitingOf(this.dispatcher.dryRun(teamId))
   }
 
+  // ---- needs: approvals, cards, the hire, notices (B5) -----------------------------------------------
+
+  /**
+   * The decide op (design 4.3, 6.1; the origin checks are the op's, ops/needs.ts). A final approve of a task with a
+   * worktree first reads how far its branch is ahead of its base (T11: nothing to merge goes straight to done); the
+   * reducer CASes the approval's state after that await, so a second decide (the desktop and the phone) answers
+   * `conflict {already_decided}`. A hire approve turns `applying`: its `applyHire` effect writes and trusts the role.
+   */
+  async decide(teamId: string, approvalId: string, decision: 'approve' | 'reject', note: string | undefined, actor: Actor): Promise<TeamFail | null> {
+    const rec = this.teams.get(teamId)
+    if (!rec) return fail('not_found')
+    const ap = rec.store.rt.approvals.find((a) => a.id === approvalId)
+    if (!ap) return fail('not_found')
+    let ahead: number | undefined
+    if (ap.kind === 'final' && decision === 'approve' && ap.state === 'pending') {
+      const task = ap.taskId ? rec.store.rt.tasks.find((t) => t.id === ap.taskId) : undefined
+      if (task?.worktree && this.taskWorktrees) ahead = await this.taskWorktrees.ahead(task)
+      if (this.teams.get(teamId) !== rec) return fail('not_found')
+    }
+    const ctx = this.flowCtx(teamId)
+    if (!ctx) return fail('untrusted')
+    const res = decideApproval(rec.store.rt, actor, approvalId, decision, note, ctx, ahead !== undefined ? { ahead } : undefined)
+    // A permission approval with no rule the policy still grants (an earlier build stored them): its own words.
+    if (!res.ok && res.error === 'bad_request' && ap.kind === 'permission' && decision === 'approve' && !ap.payload.tools.some(isGrantable)) return fail('bad_request', { detail: 'nothingToGrant' })
+    if (!res.ok) return flowFail(res)
+    this.commit(teamId, res, [...new Set<TeamScope>(['needs', ...changedScopes(rec.store.rt, res.rt)])], ap.taskId ? { taskId: ap.taskId } : undefined)
+    this.deps.log(`decide ${teamId} ${approvalId} ${ap.kind} ${decision}`)
+    return null
+  }
+
+  /**
+   * The answer op (design 4.5; the origin checks are the op's). `killOrphan` is this service's (decision 64: the
+   * start time is confirmed again before the tree kill); every other answer and system action goes through answerCard
+   * in one commit (a second answer: `conflict {already_decided}`). A retried level is lifted from its prep backoff
+   * (the user asked for it now).
+   */
+  async answer(teamId: string, cardId: string, answer: CardAnswer, actor: Actor): Promise<TeamFail | null> {
+    const rec = this.teams.get(teamId)
+    if (!rec) return fail('not_found')
+    const card = rec.store.rt.cards.find((c) => c.id === cardId)
+    if (!card) return fail('not_found')
+    if (answer.action === 'killOrphan') {
+      if (card.state !== 'open') return fail('conflict', { reason: 'already_decided' })
+      if (card.from.kind !== 'system' || !card.from.actions.includes('killOrphan')) return fail('bad_request')
+      return this.killOrphan(teamId, cardId)
+    }
+    const ctx = this.flowCtx(teamId)
+    if (!ctx) return fail('untrusted')
+    const res = answerCard(rec.store.rt, actor, cardId, answer, ctx)
+    if (!res.ok) return flowFail(res)
+    this.commit(teamId, res, [...new Set<TeamScope>(['needs', ...changedScopes(rec.store.rt, res.rt)])], card.taskId ? { taskId: card.taskId } : undefined)
+    if (answer.action === 'retry') this.liftPrepBackoff(teamId, cardId)
+    this.deps.log(`answer ${teamId} ${cardId}${answer.action ? ` ${answer.action}` : ''}`)
+    return null
+  }
+
+  /**
+   * The user asked for the run of a prep-failure card now (its Reintentar, or Retomar of the task it blocks after a
+   * Descartar): the level of the card's run leaves its prep backoff (TeamInternals).
+   */
+  liftPrepBackoff(teamId: string, cardId: string): void {
+    const rec = this.teams.get(teamId)
+    const card = rec?.store.rt.cards.find((c) => c.id === cardId)
+    const runId = card && card.from.kind === 'system' ? card.from.runId : undefined
+    const run = runId ? rec?.store.recentRuns().find((r) => r.id === runId) : undefined
+    if (run) this.prepBackoff.delete(`${teamId}|${run.agentId}|${run.sessionKey}`)
+  }
+
+  /** The `applyHire` effect (design 4.3): through the team's serial chain of disk-writing ops (3.0 item 5). */
+  private applyHire(teamId: string, approvalId: string): void {
+    void this.serial(teamId, () => this.applyHireNow(teamId, approvalId)).catch((err) => this.deps.log(`hire ${teamId} ${approvalId} failed ${(err as Error).name}`))
+  }
+
+  /**
+   * An approved hire, `applying` (design 4.3, 3.2 Hire): the definition on disk must still be the trusted one (else
+   * `untrusted`: the user reviews the other edits first), the role text must parse with the trusted files, then
+   * `roles/<id>.md` is written atomically (TeamDefinitionLoader: UTF-8 without BOM, LF, no link followed), the folder
+   * is loaded again and must hash exactly as the trusted files plus the role, and that exact hash is trusted
+   * (approveTrust: the snapshot, the repos, reconcileAgents). completeApproval ends it approved, or pending with the
+   * error. A role already trusted with exactly this text (an apply that landed before a restart) is approved as is;
+   * else a trusted hash that is no longer the hire's base fails it `stale` (cancelled, B5 review, second round);
+   * a folder that already is the trusted files plus exactly this role (an apply cut off between its write and its
+   * trust: back to pending at load, decision 28) is trusted without writing again, so approving it again lands.
+   */
+  private async applyHireNow(teamId: string, approvalId: string): Promise<void> {
+    const rec = this.teams.get(teamId)
+    const ap0 = rec?.store.rt.approvals.find((a) => a.id === approvalId)
+    if (!rec || !ap0 || ap0.kind !== 'hire' || ap0.state !== 'applying') return
+    const ap = ap0
+    const done = (outcome: { ok: true } | { ok: false; error: string }): void => {
+      if (this.teams.get(teamId) !== rec) return
+      this.completeHire(teamId, rec, approvalId, outcome)
+    }
+    const trusted = this.trust.trusted(teamId)
+    if (!trusted) return done({ ok: false, error: 'untrusted' })
+    const rel = `roles/${ap.payload.roleId}.md`
+    const text = normalizeDefText(ap.payload.text)
+    if (trusted.files.some((f) => f.rel === rel && normalizeDefText(f.text) === text)) return done({ ok: true })
+    // The approve CASed the base (decideApproval), but a trust may land while this apply waits on the serial chain (the
+    // user's trust op queued first): the diff the user approved was of the old base, so it is never written over the
+    // new one. completeApproval cancels it stale (B5 review, second round).
+    if (trusted.sha256 !== ap.payload.baseDefHash) return done({ ok: false, error: HIRE_STALE })
+    const files = [...trusted.files.filter((f) => f.rel !== rel), { rel, text }]
+    const want = sha256Hex(canonicalDefText(files))
+    const loaded = await this.loader.load(rec.entry.repoRoot)
+    if (this.teams.get(teamId) !== rec) return
+    const landed = !('error' in loaded) && loaded.result.ok && loaded.sha256 === want
+    if (!landed && ('error' in loaded || loaded.sha256 !== trusted.sha256)) return done({ ok: false, error: 'untrusted' })
+    if (!parseDefinition(files).ok) return done({ ok: false, error: 'invalid_definition' })
+    if (!landed) {
+      const written = await this.loader.write(rec.entry.repoRoot, [{ rel, text }], { overwrite: trusted.files.some((f) => f.rel === rel) })
+      if (this.teams.get(teamId) !== rec) return
+      if (!written.ok) return done({ ok: false, error: written.error })
+    }
+    const after = landed ? loaded : await this.loader.load(rec.entry.repoRoot)
+    if (this.teams.get(teamId) !== rec) return
+    if ('error' in after || !after.result.ok || after.sha256 !== want) return done({ ok: false, error: 'changed' })
+    const failed = await this.approveTrust(teamId, after as LoadedDefinition & { result: { ok: true } })
+    if (failed) return done({ ok: false, error: failed.error })
+    done({ ok: true })
+  }
+
+  /**
+   * Decision 28 at load: a hire found `applying` (a quit in the middle of its apply) is approved when its role file
+   * on disk has exactly its text and the folder is trusted as it is; else it goes back to pending with
+   * `interrupted` (the user may approve it again).
+   */
+  private recheckApplying(teamId: string, rec: TeamRecord): void {
+    const trusted = this.trust.trusted(teamId)
+    for (const ap of rec.store.rt.approvals) {
+      if (ap.kind !== 'hire' || ap.state !== 'applying') continue
+      const rel = `roles/${ap.payload.roleId}.md`
+      const onDisk = 'error' in rec.loaded ? undefined : rec.loaded.files.find((f) => f.rel === rel)
+      const landed = !!trusted && !('error' in rec.loaded) && rec.loaded.sha256 === trusted.sha256 && !!onDisk && normalizeDefText(onDisk.text) === normalizeDefText(ap.payload.text)
+      this.completeHire(teamId, rec, ap.id, landed ? { ok: true } : { ok: false, error: 'interrupted' })
+    }
+  }
+
+  /**
+   * completeApproval of a hire in one commit: approved (the roster follows the newly trusted definition), or back to
+   * pending with its error, or cancelled stale when that pending would sit on an old base. An approve needs the trusted
+   * definition (reconcileAgents reads it): without one it fails.
+   */
+  private completeHire(teamId: string, rec: TeamRecord, approvalId: string, outcome: { ok: true } | { ok: false; error: string }): void {
+    const ctx = this.flowCtx(teamId)
+    const out = outcome.ok && !ctx ? { ok: false as const, error: 'untrusted' } : outcome
+    // Without a trusted definition a failure reads only the clock (no hash to call a base stale against).
+    const before = rec.store.rt
+    const res = completeApproval(before, approvalId, out, ctx ?? ({ now: this.clock() } as FlowCtx))
+    if (res.ok) this.commit(teamId, res, [...new Set<TeamScope>(['needs', 'agents', ...changedScopes(before, res.rt)])])
+    this.deps.log(`hire ${teamId} ${approvalId} ${out.ok ? 'applied' : `not applied ${out.error}`}`)
+    if (res.ok) this.logStaleHires(teamId, before, res.rt)
+  }
+
+  /**
+   * B5 review: every pending hire whose base is no longer `sha256` (the trusted hash) is cancelled stale in one commit
+   * (cancelStaleHires; a trust, the load), and teams.log names each one.
+   */
+  private dropStaleHires(teamId: string, rec: TeamRecord, sha256: string): void {
+    const before = rec.store.rt
+    const stale = cancelStaleHires(before, sha256, { now: this.clock() })
+    if (stale === before) return
+    this.commit(teamId, { ok: true, rt: stale, effects: [], result: undefined }, ['needs'])
+    this.logStaleHires(teamId, before, stale)
+  }
+
+  /** `hire <teamId> <id> cancelled stale` for each hire waiting (pending or applying) before and cancelled stale after. */
+  private logStaleHires(teamId: string, before: TeamRuntime, after: TeamRuntime): void {
+    for (const a of before.approvals) {
+      if (a.kind !== 'hire' || (a.state !== 'pending' && a.state !== 'applying')) continue
+      const now = after.approvals.find((x) => x.id === a.id)
+      if (now?.state === 'cancelled' && now.error === HIRE_STALE) this.deps.log(`hire ${teamId} ${a.id} cancelled stale`)
+    }
+  }
+
+  /**
+   * The notices of a team (design 3.1 Notices), after the changes of a tick: each "Te necesita" row that is new
+   * against the persisted baseline (`needsSeen`) and has `push` gives one TeamNotice; the baseline then becomes the
+   * current rows (TeamStore.setNeedsSeen: written with the state, no rev, no emit). The baseline survives a restart, a
+   * Labs toggle and a thaw, so nothing still pending notifies twice.
+   */
+  private noticeNeeds(teamId: string): void {
+    const rec = this.teams.get(teamId)
+    if (!rec || !this.live()) return
+    const rows = needsRowsOf(rec, this.trust.trusted(teamId))
+    const ids = rows.map((r) => r.id)
+    const seen = new Set(rec.store.rt.needsSeen ?? [])
+    for (const row of rows) {
+      if (!row.push || seen.has(row.id)) continue
+      this.notify(teamId, rec, { rowId: row.id, taskId: row.taskId, key: noticeKey(row, rec.store.rt.paused), urgent: row.rank === 1 })
+    }
+    rec.store.setNeedsSeen(ids)
+  }
+
+  /** The end of an Integrar (design 3.1 Notices, B6 calls it): `integrated` or `integrateFailed` of a task, once per end. */
+  integrateNotice(teamId: string, taskId: string, ok: boolean): void {
+    const rec = this.teams.get(teamId)
+    if (!rec || !this.live()) return
+    this.notify(teamId, rec, { rowId: `${ok ? 'integrated' : 'integrateFailed'}:${taskId}`, taskId, key: ok ? 'teams.push.integrated' : 'teams.push.integrateFailed', urgent: false })
+  }
+
+  /** One TeamNotice: the trusted team name and the task id only, from the main catalog, redacted. */
+  private notify(teamId: string, rec: TeamRecord, o: { rowId: string; taskId?: string; key: MainKey; urgent: boolean }): void {
+    if (!this.deps.notice) return
+    const cfg = this.deps.config()
+    const team = this.trust.trusted(teamId)?.def.name ?? rec.entry.name
+    const n: TeamNotice = {
+      kind: 'team',
+      teamId,
+      tag: `team:${teamId}:${o.rowId}`,
+      title: redactCredentials(mainT(cfg, 'teams.push.title', { team })),
+      body: redactCredentials(mainT(cfg, o.key, { team, task: o.taskId ?? '' })),
+      urgent: o.urgent,
+      push: true,
+    }
+    if (o.taskId) n.taskId = o.taskId
+    try {
+      this.deps.notice(n)
+    } catch (err) {
+      this.deps.log(`notice ${teamId} failed ${(err as Error).name}`)
+    }
+    this.deps.log(`notice ${teamId} ${o.key.slice('teams.push.'.length)} ${o.rowId}`)
+  }
+
   runLive(runId: string): { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean } {
     const out: { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean } = {
       ring: this.supervisor.ring(runId),
@@ -1896,6 +2364,25 @@ export class TeamService implements TeamInternals {
 
   watchRun(teamId: string, runId: string | null): void {
     this.watched = runId ? { teamId, runId } : null
+  }
+
+  /**
+   * B5 integration, sixth round (security): a run's chat rows as they leave main (runPage, teams:runAppend), every
+   * text with redactCredentials and every live token of the app masked (CtlTokens.maskTokens through deps.cli). A run
+   * reads what it can (runtime.json, a console's env); its log file under dataDir() keeps the raw lines.
+   */
+  maskRun(items: readonly ChatMessage[]): ChatMessage[] {
+    return maskMessages(items, (text) => redactCredentials(this.maskTokens(text)))
+  }
+
+  /**
+   * `text` with every live token of the app masked (CtlTokens.maskTokens through deps.cli; as is without it). Seventh
+   * round of the B5 integration: also what a run's final text leaves in the team state (finishRun's RunEndCtx.mask:
+   * Run.summary and the Lead's reply).
+   */
+  private readonly maskTokens = (text: string): string => {
+    const cli = this.deps.cli
+    return cli ? cli.maskTokens(text) : text
   }
 
   /**
@@ -1936,6 +2423,8 @@ export class TeamService implements TeamInternals {
         this.deps.log(`emit failed ${(err as Error).name}`)
       }
     }
+    // B5: every change of a tick, a commit or a trust state, may add a need row (the notices diff, design 3.1).
+    for (const teamId of new Set(list.map((e) => e.teamId))) if (teamId) this.noticeNeeds(teamId)
   }
 
   /**
@@ -2091,6 +2580,9 @@ export class TeamService implements TeamInternals {
       this.registry.put(rec.entry)
     }
     this.commit(teamId, dismissSystemCards(rec.store.rt, 'stateReset', 'trust'), ['needs'])
+    // A pending hire proposed against another trusted hash can never be approved now (conflict stale): it leaves Te
+    // necesita, cancelled with its own error (a hire's apply lands here too, for every other pending hire).
+    this.dropStaleHires(teamId, rec, approved.sha256)
     const ctx = this.flowCtx(teamId)
     if (ctx) this.commit(teamId, reconcileAgents(rec.store.rt, ctx), ['agents'])
     this.emit(teamId, ['team', 'needs', 'agents'])

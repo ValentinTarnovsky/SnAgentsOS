@@ -16,7 +16,8 @@
 // Bash shim, SNAOS_TEAM_RUN without a token (exit 6, never runtime.json),
 // envForTeam, ready() and onState; B3: the teams service behind the gate, the
 // 401 of a revoked team token naming the run, the Teams section of the guide,
-// the team block of USAGE and the skill (snaos team itself: test-teams-cli.cjs).
+// the team block of USAGE and the skill (snaos team itself: test-teams-cli.cjs);
+// B5 integration, fifth round: CliService hands its live tokens to team calls.
 // Same esbuild + vm harness as test-status.cjs.
 // Never touches the real HKCU, ~/.claude or the app's data folder.
 const { buildSync } = require('esbuild')
@@ -517,11 +518,11 @@ async function serverChecks() {
     for (const method of fresh) if ((await rpcRaw(endpoint, { token: master, body: { v: 1, method, params: {} } })).json.ok) passed.push(method)
     check(passed.length === fresh.length && fresh.every((m) => seen.some((s) => s.method === m)), 'every app 2.3.0 method (4b usage and account.* included) and 2.7.0 needs pass the server validation', passed)
     check((await rpcRaw(endpoint, { token: master, body: { v: 1, method: 'account.rm', params: {} } })).json.error.code === 'bad_request', 'an account method the protocol does not have (account.rm): bad_request')
-    // app 2.7.0 (Teams, decision 45): the 15 team.* methods reach the handler (its gate decides, see teamGateChecks).
+    // app 2.7.0 (Teams, decision 45): the 17 team.* methods (team diff and log since the B5 integration) reach the handler (its gate decides, see teamGateChecks).
     const K = load('src/shared/teamTools.ts')
     const teamPassed = []
     for (const method of K.TEAM_CTL_METHODS) if ((await rpcRaw(endpoint, { token: master, body: { v: 1, method, params: {} } })).json.ok) teamPassed.push(method)
-    check(K.TEAM_CTL_METHODS.length === 15 && teamPassed.length === 15, 'every team.* method of TEAM_CTL_METHODS passes the server validation', teamPassed)
+    check(K.TEAM_CTL_METHODS.length === 17 && teamPassed.length === 17 && ['team.diff', 'team.log'].every((m) => teamPassed.includes(m)), 'every team.* method of TEAM_CTL_METHODS passes the server validation', teamPassed)
     check((await rpcRaw(endpoint, { token: master, body: { v: 1, method: 'team.nope', params: {} } })).json.error.code === 'bad_request', 'a team method the protocol does not have: bad_request')
   } finally {
     await server.stop()
@@ -1601,7 +1602,14 @@ async function cliEntryChecks() {
     check(guide2.indexOf('## Teams (snaos team)') < guide2.indexOf('## Exit codes'), 'guide: the Teams section comes before the exit codes')
     const teamUsage = C.USAGE.slice(C.USAGE.indexOf('Inside a team run'))
     check(['team show', 'team task create --title', 'team task update <t-N>', 'team comment <t-N|lead>', 'team plan --file <file>|- [--small]', 'team verdict approve|changes', 'team approve --plan <t-N>', 'hire --file <file>|-', '--blocked-by t-1,t-2', '--options "A|B|C"'].every((t) => teamUsage.includes(t)), 'USAGE has one team block with every subcommand', teamUsage)
-    check(/team needs one of: show, tasks, task, comment, note, ask, needs, plan, review, verdict, done, approve, hire/.test(usage(['team'])), 'snaos team alone is a usage error listing the subcommands')
+    check(/team needs one of: show, tasks, task, diff, log, comment, note, ask, needs, plan, review, verdict, done, approve, hire/.test(usage(['team'])), 'snaos team alone is a usage error listing the subcommands (team diff and log since the B5 integration)')
+    check(teamUsage.includes('snaos team diff [--stat] [--task <t-N>] [-- <path>...] | log [-n <1..50>] [--task <t-N>] [-- <path>...]'), 'USAGE: team diff and team log, paths only after --', teamUsage)
+    // B5 integration item 9: the hire role id (an optional `id:` frontmatter line, else the slug of name).
+    check(/hire: a whole role file; an optional id: line in its frontmatter names the role, else the slug of name/.test(teamUsage), 'USAGE: team hire names the optional id: line and the slug of name', teamUsage)
+    const hireLines = guide2.slice(guide2.indexOf('`team hire --file'), guide2.indexOf('## Exit codes'))
+    check(/optional `id: <role-id>` line in its frontmatter names\s+the role/.test(hireLines) && /the id is the slug of `name`/.test(hireLines) && /one line per problem \(`data.issues` with `--json`\)/.test(hireLines), 'guide: team hire, its optional id: line, the slug of name and the issues of a refused file', hireLines)
+    const lead = K.teamToolsGuide('lead')
+    check(/`id: <role-id>` line in the frontmatter names the role; without it the id is the slug of `name`/.test(lead), 'the Lead tool list says it too (TEAM_TOOLS hire summary)', lead)
   }
 
   // --- app 2.3.0 (4b): usage and account ----------------------------------------
@@ -1757,6 +1765,28 @@ async function serviceChecks() {
     check((await C.run(['needs', '--clear', '--console', '3'], deps(env1, out, err))) === 7 && /its own needs/.test(err.at(-1)) && world.needsCalls.at(-1).id === 'p1', 'snaos needs --console <another> from a console exits 7 (forbidden)')
     const ext = await C.run(['needs', '--clear', '--console', '3', '--json', '--runtime', path.join(dataDir, 'runtime.json')], deps({}, out, err))
     check(ext === 0 && JSON.parse(out.at(-1)).data.needs === null && world.needsCalls.at(-1).id === 'p3' && world.needsCalls.at(-1).text === null, 'an external terminal clears the needs of console 3 with --console')
+  }
+  // B5 integration, fifth round (security): CliService hands its live tokens to every team call (CtlHandlers
+  // `secrets`), end to end through the real server: the master token of runtime.json, the run's own team token and a
+  // console token count; plain text and a revoked token do not. teamCtl refuses on it (test-teams-cli.cjs).
+  {
+    const seen = []
+    service.attach({ teams: { handle: async (method, params, who, secrets) => { seen.push({ method, who, hasSecrets: !!secrets }); return { ok: true, data: { holds: secrets ? secrets.holdsToken(String(params.text ?? '')) : null } } } } })
+    const runId = 'r-0123456789ab'
+    const teamEnv = service.envForTeam(runId, 'tm-0123456789ab', 'dev', 'dev')
+    const say = async (text) => {
+      const out = [], err = []
+      const d = deps(teamEnv, out, err)
+      d.io = { ...d.io, readStdin: async () => text }
+      const code = await C.run(['team', 'comment', 't-3', '-', '--json'], d)
+      return code === 0 ? JSON.parse(out.at(-1)).data.holds : `exit ${code}: ${err.join(' ')}`
+    }
+    const gone = service.envFor('pty-gone', 'p-gone', 'w1').SNAOS_CTL_TOKEN
+    service.tokens.revoke('pty-gone')
+    const got = [await say(`runtime: ${runtime.token}`), await say(`el mio ${teamEnv.SNAOS_CTL_TOKEN}`), await say(`consola ${env1.SNAOS_CTL_TOKEN.toUpperCase()}`), await say('hola sin secretos'), await say(`revocado ${gone}`)]
+    check(JSON.stringify(got) === JSON.stringify([true, true, true, false, false]), 'CliService wires its live tokens into team calls: master, team and console tokens are seen, plain text and a revoked one are not', got)
+    check(seen.length === 5 && seen.every((s) => s.hasSecrets && s.who.runId === runId), 'every team call of the run carries them', seen)
+    service.revokeTeam(runId)
   }
   // app 2.3.0 end to end: services attached late (like bootstrap), a real WsNoteStore and the chat fixtures.
   {

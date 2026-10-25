@@ -7,7 +7,7 @@
 import type { ChatMessage } from '@shared/chat-types'
 import type { ConfigFile } from '@shared/types'
 import type { TeamFail, TeamOp, TeamReply, TeamRequest, TeamScope, TeamTrustState } from '@shared/team-protocol'
-import type { Actor, DefError, DeferInfo, ResolvedRepo, TeamDefinition, TrustedDefinition } from '@shared/teams'
+import type { Actor, CardAnswer, DefError, DeferInfo, ResolvedRepo, TeamDefinition, TrustedDefinition } from '@shared/teams'
 import type { GitRunner } from '../../git/gitExec'
 import type { FlowCtx, FlowResult } from '../flow/types'
 import type { LoadedDefinition, LoadRes, TeamDefinitionLoader } from '../TeamDefinitionLoader'
@@ -82,8 +82,16 @@ export interface TeamInternals {
   runLive(runId: string): { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean }
   /** B2: the one run whose lines the renderer gets as `teams:runAppend` (decision 49); null stops it. */
   watchRun(teamId: string, runId: string | null): void
+  /** B5 integration, sixth round: a run's chat rows as they leave main, credentials and live tokens of the app masked. */
+  maskRun(items: readonly ChatMessage[]): ChatMessage[]
   /** B3: comments of a target (task id or `lead`) already moved to `archive/<target>.jsonl`. */
   archivedCount(teamId: string, target: string): number
+  /** B5: decide an approval (the op checked the origin); null when it landed. */
+  decide(teamId: string, approvalId: string, decision: 'approve' | 'reject', note: string | undefined, actor: Actor): Promise<TeamFail | null>
+  /** B5: answer a card or run its system action (the op checked the origin); null when it landed. */
+  answer(teamId: string, cardId: string, answer: CardAnswer, actor: Actor): Promise<TeamFail | null>
+  /** B5: the level of a prep-failure card's run leaves its prep backoff (Reintentar; Retomar of the task the card blocks). */
+  liftPrepBackoff(teamId: string, cardId: string): void
 }
 
 export interface OpCtx {

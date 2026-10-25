@@ -7,9 +7,11 @@
  * tool, redacts every text before it can reach a notice and maps the store's
  * errors to ctl codes (the 5.1 table, one hint per error in English for the
  * agent). The store re-checks all of it (phase, liveness, caps, what the user
- * owns): this layer answers the agent early and in words.
+ * owns): this layer answers the agent early and in words. B5 integration,
+ * fifth round: a call whose params hold a live token of the app (CtlSecrets)
+ * is refused, `bad_request` with `data.detail` = `secret`.
  */
-import type { CtlErrorCode, CtlResponse } from '@shared/ctl-protocol'
+import { CTL_TEAM_LOG_N_MAX, CTL_TEAM_PATHS_MAX, type CtlErrorCode, type CtlResponse } from '@shared/ctl-protocol'
 import { redactCredentials } from '@shared/redact'
 import type { ConflictReason } from '@shared/team-protocol'
 import {
@@ -41,14 +43,18 @@ import {
 import { allowedFor, TEAM_TOOLS, teamTool, type TeamCtlMethod, type TeamToolSpec } from '@shared/teamTools'
 import { WS_NOTE_TITLE_MAX } from '@shared/ws-notes'
 import type { CtlTeamCaller } from '../cli/CtlTokens'
-import type { CtlTeamsView } from '../cli/handlers'
+import type { CtlSecrets, CtlTeamsView } from '../cli/handlers'
 import { cycleLoopOf, cycleText } from './flow/tasks'
 import type { FlowResult, TeamToolCall } from './flow/types'
+import { repoPathError } from './ops/gitReads'
 
 /** The live run behind a caller (the port's `live`). */
 export interface TeamLiveRun { teamId: string; run: Run; agent: AgentState; task?: TeamTask; def: TrustedDefinition }
 
-export type TeamReadMethod = 'team.show' | 'team.tasks' | 'team.task.get'
+/** B5 integration, fourth round: team.diff and team.log are reads main runs git for (ops/gitReads.ts). */
+export type TeamReadMethod = 'team.show' | 'team.tasks' | 'team.task.get' | 'team.diff' | 'team.log'
+/** A read's answer: a ctl answer, or a store-like failure (`{ ok: false, error: 'io' }`) that teamCtlError words. */
+export type TeamReadReply = CtlResponse | ({ ok: false } & TeamFailLike)
 
 /** What TeamService gives the CLI (design 3.9); TeamService.ctlView = createTeamCtl(port). */
 export interface TeamCtlPort {
@@ -57,8 +63,12 @@ export interface TeamCtlPort {
    * Teams is not served (Labs off, frozen or disposed) -> disabled, before any other check.
    */
   live(who: CtlTeamCaller): TeamLiveRun | 'disabled' | null
-  /** team.show, team.tasks and team.task.get with the params already checked here (task.get marks delivered what its reply includes, 4.5). */
-  read(teamId: string, method: TeamReadMethod, params: Record<string, unknown>, who: CtlTeamCaller): CtlResponse
+  /**
+   * team.show, team.tasks and team.task.get with the params already checked here (task.get marks delivered what its
+   * reply includes, 4.5); team.diff and team.log answer later (git runs in main: the port resolves the tree and the
+   * range, checks the paths again after realpath and caps the text).
+   */
+  read(teamId: string, method: TeamReadMethod, params: Record<string, unknown>, who: CtlTeamCaller): TeamReadReply | Promise<TeamReadReply>
   /** Every other write but note: applyTool and the commit, inside; or the state cap the port checks before them (`full: 'state'`). */
   apply(teamId: string, call: TeamToolCall, who: CtlTeamCaller): FlowResult<unknown> | ({ ok: false } & TeamFailLike)
   /** B7 (team notes). Absent until then: team.note answers disabled. */
@@ -78,10 +88,16 @@ export interface TeamFailLike {
   loopMore?: number
   /** `cap` only: 'state' = the write would take state.json past TEAM_STATE_MAX_BYTES (absent: a count cap of the reducer). */
   full?: 'state'
+  /** A refused hire's definition issues as a TeamFail carries them (a flow failure has them in `current.issues`). */
+  issues?: unknown
 }
 
 /** The Labs gate in the agent's words (main i18n `labs.teamsOff`): the run cannot go on. */
 const TEAMS_OFF = 'Teams is off (Settings > Labs): end your turn'
+/** B5 integration, fifth round: a text holds a live token of the app (the refusal names no token). */
+const SECRET_REFUSED = 'a text holds an access token of the app, which never goes into the team: leave it out (never copy files of the app\'s data folder)'
+/** How deep paramText walks the params (a team call nests one list at most). */
+const PARAM_DEPTH = 8
 
 type Params = Record<string, unknown>
 type Fail = Extract<CtlResponse, { ok: false }>
@@ -143,6 +159,28 @@ function safeName(k: string): string {
 
 function onlyKeys(p: Params, allowed: readonly string[], spec: TeamToolSpec): void {
   for (const k of Object.keys(p)) if (!allowed.includes(k)) throw new ParamError(`${words(spec)} takes no param "${safeName(k)}"`)
+}
+
+/**
+ * B5 integration, fifth round: every text of a call's params as one text (lines joined), for CtlSecrets.holdsToken:
+ * each string value and key, nested lists and objects too (PARAM_DEPTH levels), whatever the method takes. Seventh
+ * round: TeamService.applyRunBlock reads a Codex block action's params with it too (one reader for both checks).
+ */
+export function paramText(p: unknown): string {
+  const out: string[] = []
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === 'string') out.push(v)
+    else if (depth < PARAM_DEPTH && typeof v === 'object' && v !== null) {
+      if (Array.isArray(v)) for (const x of v) walk(x, depth + 1)
+      else
+        for (const [k, x] of Object.entries(v)) {
+          out.push(k)
+          walk(x, depth + 1)
+        }
+    }
+  }
+  walk(p, 0)
+  return out.join('\n')
 }
 
 /** Drops the undefined values (the store reads a missing key as "not given"). */
@@ -222,6 +260,22 @@ function options(p: Params): string[] | undefined {
   })
 }
 
+/**
+ * team.diff and team.log `paths`: CTL_TEAM_PATHS_MAX repo relative texts at most (repoPathError: not absolute, no
+ * drive, no `..`); the port checks them again and keeps them inside the tree after realpath. Never an option of git:
+ * they go after `--` as literal pathspecs.
+ */
+function repoPaths(p: Params): string[] | undefined {
+  const v = p.paths
+  if (v === undefined) return undefined
+  if (!Array.isArray(v) || v.length > CTL_TEAM_PATHS_MAX) throw new ParamError(`paths must be a list of ${CTL_TEAM_PATHS_MAX} repo relative paths at most`)
+  v.forEach((x, i) => {
+    const why = repoPathError(x, i)
+    if (why) throw new ParamError(why)
+  })
+  return [...new Set(v as string[])]
+}
+
 const TASK_ID = 'a task id like t-12'
 const AGENT_ID = 'an agent id of this team (snaos team show)'
 
@@ -237,6 +291,15 @@ function normalize(spec: TeamToolSpec, p: Params): Params {
     case 'team.task.get':
       onlyKeys(p, ['task'], spec)
       return { task: id(p, 'task', TASK_ID_RE, { required: true, what: TASK_ID }) }
+    case 'team.diff':
+      onlyKeys(p, ['stat', 'task', 'paths'], spec)
+      return defined({ stat: flag(p, 'stat'), task: id(p, 'task', TASK_ID_RE, { what: `${TASK_ID} of your team` }), paths: repoPaths(p) })
+    case 'team.log': {
+      onlyKeys(p, ['n', 'task', 'paths'], spec)
+      const n = p.n
+      if (n !== undefined && !(typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= CTL_TEAM_LOG_N_MAX)) throw new ParamError(`n must be a whole number from 1 to ${CTL_TEAM_LOG_N_MAX}`)
+      return defined({ n, task: id(p, 'task', TASK_ID_RE, { what: `${TASK_ID} of your team` }), paths: repoPaths(p) })
+    }
     case 'team.task.create': {
       onlyKeys(p, ['title', 'body', 'assign', 'repo', 'isolation', 'blockedBy', 'priority', 'noPlan', 'parent'], spec)
       return defined({
@@ -325,6 +388,32 @@ function revOf(current: unknown): number | undefined {
   return undefined
 }
 
+/** Definition issues a refused `team hire` carries back (the CLI prints one line each). */
+const HIRE_ISSUES_MAX = 20
+
+/** One definition issue as the agent gets it: the DefError fields, texts as plain one-line strings (the CLI escapes them again). */
+export interface HireIssue { file: string; line: number; key?: string; code: string; detail?: string; severity: string }
+
+/**
+ * The definition issues of a refused hire (`current.issues` of the flow failure, or `issues`), checked field by field
+ * and capped (HIRE_ISSUES_MAX, 200 characters a text): what the agent needs to fix its role file.
+ */
+function hireIssuesOf(f: TeamFailLike): HireIssue[] {
+  const raw: unknown[] = plain(f.current) && Array.isArray(f.current.issues) ? f.current.issues : Array.isArray(f.issues) ? f.issues : []
+  // eslint-disable-next-line no-control-regex
+  const line = (v: unknown): string => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').slice(0, 200) : '')
+  const out: HireIssue[] = []
+  for (const i of raw) {
+    if (out.length >= HIRE_ISSUES_MAX) break
+    if (!plain(i) || typeof i.code !== 'string') continue
+    const issue: HireIssue = { file: line(i.file), line: typeof i.line === 'number' && Number.isSafeInteger(i.line) && i.line >= 0 ? i.line : 0, code: line(i.code), severity: i.severity === 'warning' ? 'warning' : 'error' }
+    if (typeof i.key === 'string' && i.key) issue.key = line(i.key)
+    if (typeof i.detail === 'string' && i.detail) issue.detail = line(i.detail)
+    out.push(issue)
+  }
+  return out
+}
+
 /**
  * Section 5.1: a store or flow failure (FlowResult, TeamFail) as the ctl answer, with a hint for the agent: the
  * offending param, the id, the role or mode, the fields the user owns. `data` carries the store's error word and its
@@ -340,9 +429,18 @@ export function teamCtlError(f: TeamFailLike, hint: { method: TeamCtlMethod; par
   const task = typeof hint.params?.task === 'string' ? hint.params.task : typeof hint.params?.target === 'string' ? hint.params.target : '<t-N>'
   let message: string
   switch (f.error) {
-    case 'bad_request':
-      message = detail || `${cmd}: the team refused these params (check the ids and values with snaos team show and snaos team tasks)`
+    case 'bad_request': {
+      // A refused hire carries the definition issues of its role file back (data.issues; the CLI prints one line each).
+      const issues = hint.method === 'team.hire' ? hireIssuesOf(f) : []
+      if (issues.length) {
+        extras.issues = issues
+        message = `${cmd}: the role file does not fit the team definition (${issues.length} ${issues.length === 1 ? 'issue' : 'issues'}): fix each one and send the whole file again`
+      } else if (hint.method === 'team.hire') message = detail || `${cmd}: the role file was refused (it changes nothing, or it is not a role file with frontmatter and instructions)`
+      // repo, isolation and the plan flag change only while the task is in todo (flow/tasks.ts updateTask).
+      else if (hint.method === 'team.task.update' && ['repo', 'isolation', 'needsPlan'].some((k) => hint.params?.[k] !== undefined)) message = detail || `${cmd}: the team refused these params (--repo, --isolation, --no-plan and --needs-plan change only while the task is in todo; check the ids and values with snaos team show and snaos team tasks)`
+      else message = detail || `${cmd}: the team refused these params (check the ids and values with snaos team show and snaos team tasks)`
       break
+    }
     case 'cycle': {
       // The loop travels as a field too (data.loop, data.loopMore), the same shape the user's TeamFail carries.
       const c = cycleLoopOf(f.current) ?? (f.loop ? cycleLoopOf({ loop: f.loop, more: f.loopMore }) : null)
@@ -356,6 +454,10 @@ export function teamCtlError(f: TeamFailLike, hint: { method: TeamCtlMethod; par
     }
     case 'too_big':
       message = detail || `${cmd}: the text is too long`
+      break
+    case 'io':
+      // team diff and team log: git failed in main (its first stderr line as the detail, printable ASCII).
+      message = hint.method === 'team.diff' || hint.method === 'team.log' ? `${cmd}: git could not read it${detail ? ` (${detail})` : ''}` : 'the team could not apply it'
       break
     case 'not_found':
       message = detail || (ids.length === 1 ? `${ids[0]} not found` : ids.length ? `not found: one of ${ids.join(', ')}` : `${cmd}: not found`)
@@ -448,7 +550,7 @@ export function createTeamCtl(port: TeamCtlPort): CtlTeamsView {
     while (concluded.size > CONCLUDED_MEMORY) concluded.delete(concluded.keys().next().value as string)
   }
 
-  async function handle(method: TeamCtlMethod, raw: Params, who: CtlTeamCaller): Promise<CtlResponse> {
+  async function handle(method: TeamCtlMethod, raw: Params, who: CtlTeamCaller, secrets?: CtlSecrets): Promise<CtlResponse> {
     const spec = teamTool(method)
     if (!spec) return fail('bad_request', 'unknown team method')
     // The Labs gate first, as every Teams request (B1): Teams off answers disabled, never forbidden.
@@ -457,6 +559,9 @@ export function createTeamCtl(port: TeamCtlPort): CtlTeamsView {
       concluded.delete(who.runId)
       return fail('disabled', TEAMS_OFF)
     }
+    // B5 integration, fifth round (security): a live token of the app never goes into the team state, whatever param
+    // carries it (a run could read runtime.json and post it). Checked on the raw params, before redaction would mask it.
+    if (secrets?.holdsToken(paramText(raw))) return fail('bad_request', `${words(spec)}: ${SECRET_REFUSED}`, { error: 'bad_request', detail: 'secret' })
     let params: Params
     try {
       params = normalize(spec, plain(raw) ? raw : {})
@@ -473,7 +578,7 @@ export function createTeamCtl(port: TeamCtlPort): CtlTeamsView {
     // A Dev or a custom role splits only the task it runs (5.3); allowedFor knows only that it has one.
     if (spec.name === 'task.create' && kind !== 'lead' && params.parent !== live.run.taskId) return fail('forbidden', forbiddenWhy(spec, kind, live))
     const hint = { method: spec.method, params }
-    if (!spec.write) return portReply(port.read(live.teamId, spec.method as TeamReadMethod, params, who), hint)
+    if (!spec.write) return portReply(await port.read(live.teamId, spec.method as TeamReadMethod, params, who), hint)
     // Decision 35: a run that concluded keeps reading but writes no more.
     const concludedWith = live.run.concludedBy ? toolWord(live.run.concludedBy.tool) : concluded.get(live.run.id)
     if (concludedWith) return teamCtlError({ error: 'conflict', reason: 'concluded' }, { ...hint, concludedWith })
@@ -489,9 +594,9 @@ export function createTeamCtl(port: TeamCtlPort): CtlTeamsView {
   }
 
   return {
-    async handle(method, params, who) {
+    async handle(method, params, who, secrets) {
       try {
-        return await handle(method, params, who)
+        return await handle(method, params, who, secrets)
       } catch {
         return fail('internal', 'the team could not answer')
       }

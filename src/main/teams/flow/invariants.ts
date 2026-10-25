@@ -95,14 +95,15 @@ export function assertInvariants(rt: TeamRuntime, def: TrustedDefinition | null,
   }
   for (const r of rt.activeRuns) if (!agents.has(r.agentId)) bad('I2', `${r.id} of unknown agent ${r.agentId}`)
 
-  // I3 one active run per task; its mode matches the phase (a stopping run may outlive a user move).
+  // I3 one active run per task; its mode matches the phase (a stopping run may outlive a user move, and a run that
+  // concluded with a terminal tool, B5, already moved its task on while it finishes its turn: decision 35).
   const perTask = new Map<string, number>()
   for (const r of rt.activeRuns) {
     if (!r.taskId) continue
     perTask.set(r.taskId, (perTask.get(r.taskId) ?? 0) + 1)
     const t = tasks.get(r.taskId)
     const want = MODE_PHASE[r.mode]
-    if (t && want && r.state !== 'stopping' && t.phase !== want) bad('I3', `${r.id} mode ${r.mode} on ${t.id} phase ${t.phase}`)
+    if (t && want && r.state !== 'stopping' && !r.concludedBy && t.phase !== want) bad('I3', `${r.id} mode ${r.mode} on ${t.id} phase ${t.phase}`)
   }
   for (const [id, n] of perTask) if (n > 1) bad('I3', `${id} has ${n} active runs`)
 

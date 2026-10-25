@@ -6,7 +6,8 @@
  * says so), repo (with extra repos) and blockers. Main creates it and marks
  * every field the user filled as theirs, so only the fields touched here go
  * in the draft (an untouched default stays the Lead's to change). Esc
- * cancels, Ctrl+Enter creates; the drawer opens on the new task. Mounted
+ * cancels (with a title or description typed, the first Esc in a text field
+ * only leaves it), Ctrl+Enter creates; the drawer opens on the new task. Mounted
  * once in App; nothing while closed.
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
@@ -27,7 +28,7 @@ import { Toggle } from '@/components/settings/ui'
 import { toast } from '@/lib/toast'
 import { FIELD_CLS, TITLE_BAD_RE, assignableAgents, isolationHint, segBtn } from './TaskFields'
 import { taskFailText } from './TaskCard'
-import { BODY_BAD_RE } from './TaskComments'
+import { BODY_BAD_RE, leaveField } from './TaskComments'
 
 const NO_AGENTS: readonly AgentView[] = []
 const CREATE_KEYS = ['Ctrl', 'Enter']
@@ -102,15 +103,20 @@ function DialogBody({ teamId }: { teamId: string }) {
     }
   }
 
-  // Esc closes only this dialog (never the team host or the drawer behind it); Ctrl+Enter creates.
+  // Esc closes only this dialog (never the team host or the drawer behind it); Ctrl+Enter creates. With a title or a
+  // description typed, Esc in a text field only gives the keyboard back to the dialog (the draft stays); the next closes.
   const submitRef = useRef(submit)
   submitRef.current = submit
+  const heldRef = useRef(false)
+  heldRef.current = title.trim() !== '' || body.trim() !== ''
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape' && !e.isComposing) {
         e.preventDefault()
         e.stopPropagation()
-        closeNewTask()
+        const field = e.target
+        if (heldRef.current && (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) && field.closest('[data-new-task]')) leaveField(field)
+        else closeNewTask()
       } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && !e.isComposing) {
         e.preventDefault()
         e.stopPropagation()
@@ -135,7 +141,8 @@ function DialogBody({ teamId }: { teamId: string }) {
         aria-labelledby="team-new-task-title"
         data-new-task={teamId}
         aria-busy={busy || undefined}
-        className="relative z-10 flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]"
+        tabIndex={-1}
+        className="relative z-10 flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)] outline-none"
       >
         <div className="flex items-center gap-3 border-b border-border px-5 py-3">
           <ListPlus size={18} className="shrink-0 text-accent-violet" />

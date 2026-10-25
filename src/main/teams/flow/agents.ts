@@ -77,7 +77,8 @@ export function reconcileAgents(rt: TeamRuntime, ctx: FlowCtx): FlowResult {
 
 /**
  * The B1 `settings` op: autonomy on/off and the user pause. Unpausing lifts any
- * pause (the user always wins; an auth or billing card stays for B5 to close).
+ * pause (the user always wins); lifting an auth or billing pause dismisses its
+ * open auth and billing cards, as the card's own resumeTeam does (B5).
  * Turning autonomy on or lifting a pause pokes the dispatcher.
  */
 export function setTeamFlags(rt: TeamRuntime, f: { autoDispatch?: boolean; paused?: boolean }, ctx: Pick<FlowCtx, 'now'>): FlowResult {
@@ -91,6 +92,7 @@ export function setTeamFlags(rt: TeamRuntime, f: { autoDispatch?: boolean; pause
   if (f.paused === false && rt.paused !== null) {
     out = { ...out, paused: null }
     poke = true
+    if (rt.paused.reason !== 'user') out = dismissPauseCards(out)
   }
   const effects: TeamEffect[] = poke ? [{ kind: 'dispatch' }] : []
   return { ok: true, rt: out, effects, result: undefined }
@@ -122,6 +124,13 @@ export function openSystemCard(
     effects: [],
     result: { cardId: id },
   }
+}
+
+/** A lifted auth or billing pause takes every open auth and billing card with it (the settings op, the card's resumeTeam). */
+export function dismissPauseCards(rt: TeamRuntime): TeamRuntime {
+  const goes = (c: TeamCard): boolean => c.state === 'open' && c.from.kind === 'system' && (c.from.why === 'auth' || c.from.why === 'billing')
+  if (!rt.cards.some(goes)) return rt
+  return { ...rt, cards: rt.cards.map((c) => (goes(c) ? { ...c, state: 'dismissed' as const } : c)) }
 }
 
 /** Dismisses the open system cards of one reason (and `vars.what`), e.g. a trust stateReset once trusted again. */

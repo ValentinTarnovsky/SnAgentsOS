@@ -25,6 +25,8 @@
 // clears the old assignee's wake and queue item (and reconcileTasks drops a stale one), a loop of blockers
 // named through teams:req like the CLI names it (TeamFail.loop and loopMore, the CLI's data.loop), capped at its
 // first 20 ids on both paths, and Despachar todo answering only the items it approved now.
+// B5 review, second round: needsPlan changes only while the task is in todo (bad_request otherwise, like repo and
+// isolation), from the Lead's team.task.update, the user's updateTask reducer and the updateTask op alike.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -512,10 +514,24 @@ function boardChecks() {
   same(json(tool(leadActor, 'team.task.update', { task: 't-1', title: 'Otro' })), { ok: false, error: 'user_owned', fields: ['title'] }, 'a field the user owns: user_owned')
   same(tool(leadActor, 'team.task.update', { task: 't-1', assign: 'none' }).ok, true, '--assign none unassigns (nothing to unassign here: accepted)')
   same(json(tool(leadActor, 'team.task.update', { task: placed, blockedBy: ['t-2'] })), { ok: false, error: 'user_owned', fields: ['state'] }, 'team.task.update --blocked-by that would move a task the user placed: user_owned [state]')
+  // B5 review, second round (a deviation of T20): needsPlan changes only while the task is in todo, from the Lead's
+  // team.task.update and from the user's edit alike, refused like repo and isolation (bad_request, the drawer's words).
+  check(task(free).state === 'blocked' && task(free).needsPlan === true && !task(free).userOwned.includes('needsPlan') && task('t-2').state === 'doing' && task('t-2').needsPlan === false, 'a blocked task whose plan nobody owns, and one in doing')
+  const freeBefore = task(free)
+  same(json(tool(leadActor, 'team.task.update', { task: free, needsPlan: false })), { ok: false, error: 'bad_request' }, 'team.task.update --no-plan on a blocked task: bad_request')
+  same(json(M.updateTask(store.rt, user, free, { needsPlan: false }, task(free).rev, ctx())), { ok: false, error: 'bad_request' }, 'the user\'s edit of it on a blocked task: bad_request too')
+  same(json(M.updateTask(store.rt, user, 't-2', { needsPlan: true }, task('t-2').rev, ctx())), { ok: false, error: 'bad_request' }, 'and on a task in doing (it would strand its exec phase)')
+  same(json(M.updateTask(store.rt, user, free, { needsPlan: false, title: 'Otro' }, task(free).rev, ctx())), { ok: false, error: 'bad_request' }, 'refused whole: a free field in the same edit does not land either')
+  check(tool(leadActor, 'team.task.update', { task: free, needsPlan: true }).ok && task(free) === freeBefore, 'its own value changes nothing, so it passes; nothing changed')
+  r = tool(leadActor, 'team.task.update', { task: placed, needsPlan: false })
+  commit(r, 'the Lead turns the plan off on a todo task')
+  check(task(placed).state === 'todo' && task(placed).needsPlan === false, 'in todo the Lead still sets it')
+  commit(M.updateTask(store.rt, user, placed, { needsPlan: true }, task(placed).rev, ctx()), 'the user turns it back on in todo')
+  check(task(placed).needsPlan === true && task(placed).userOwned.includes('needsPlan'), 'and so does the user (the field becomes the user\'s)')
   same(tool(leadActor, 'team.task.create', { title: 'x', blocked_by: ['t-1'] }).error, 'bad_request', 'a param outside 5.3 is a shape error, never dropped silently')
   same(tool(leadActor, 'team.task.create', { title: 7 }).error, 'bad_request', 'a param of the wrong type')
   same(tool(leadActor, 'team.plan', { text: 'p' }).error, 'forbidden', 'a tool of another role')
-  same(tool(leadActor, 'team.hire', { text: 'p' }).error, 'unsupported', 'terminal tools wait for B5')
+  same(tool(leadActor, 'team.hire', { text: 'p' }).error, 'bad_request', 'a terminal tool (B5) checks its params: a hire text that is not a role file')
   same(tool(leadActor, 'team.note', { text: 'p' }).error, 'unsupported', 'note waits for B7')
   same(tool(leadActor, 'team.show', {}).error, 'bad_request', 'reads never reach applyTool')
   r = tool(leadActor, 'team.comment', { target: 'lead', text: 'Arm\u00E9 las tareas' })
@@ -821,6 +837,14 @@ function storeChecks(tmp) {
   check(store.rt.agents.length === 1 && store.rt.cards.length === 0 && repaired.includes('agents[1]') && repaired.includes('cards[0]') && repaired.includes('nextIds'), 'salvage drops bad elements and falls back per field')
   check(store.rt.nextIds.task === 2, 'a salvaged counter is raised above the kept ids')
   store.dispose()
+
+  // B5 integration item 4: the schema keeps a permission approval's denied commands and a task's QA diff stat (zod
+  // strips an unlisted key of a listed object).
+  const diffStat = { files: 1, insertions: 4, deletions: 2, top: [{ path: 'src/a.ts', add: 4, del: 2 }], at: 5 }
+  const perm = { id: 'a-1', taskId: 't-1', state: 'pending', decider: 'user', createdAt: 1, createdBy: { kind: 'system' }, kind: 'permission', payload: { roleId: 'dev', runId: 'r-0123456789ab', tools: ['Bash(npm test:*)'], denied: ['npm test -- --watch'] } }
+  const sv = M.salvageRuntime({ teamId: 'tm-0123456789ab', gen: 'cafebabe', rev: 3, tasks: [{ ...task, diffStat }], approvals: [perm], nextIds: { task: 2, comment: 1, approval: 2, card: 1, queue: 1 } }, 'tm-0123456789ab', 'cafebabe')
+  same([sv.rt.approvals[0]?.payload.denied, sv.rt.tasks[0]?.diffStat], [['npm test -- --watch'], diffStat], 'denied and diffStat survive a load')
+  check(!sv.repaired.some((r) => r.startsWith('tasks') || r.startsWith('approvals')), 'with nothing repaired')
 
   // corrupt state -> moved aside, empty runtime with a stateReset card.
   fs.writeFileSync(path.join(dir, 'state.json'), '{not json')
@@ -1245,7 +1269,7 @@ async function serviceChecks(tmp) {
 
   // The trust gate: runs pass the gate while trusted (the B2 op answers unsupported).
   same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'cliOff' } }, 'trusted: runNow passes the trust gate (this suite has no CLI: deferred cliOff)')
-  same(await svc.request({ op: 'decide', teamId, approvalId: 'a-1', decision: 'approve' }, 'desktop'), { ok: false, error: 'unsupported' }, 'later ops answer unsupported (decide is B5)')
+  same(await svc.request({ op: 'decide', teamId, approvalId: 'a-1', decision: 'approve' }, 'desktop'), { ok: false, error: 'not_found' }, 'decide (B5) of an approval that does not exist: not_found')
   // B4 answers needs already (the Por despachar section reads its queue rows).
   const nv = await svc.request({ op: 'needs', teamId }, 'desktop')
   check(nv.ok && nv.needs.teamId === teamId && Array.isArray(nv.needs.queue) && nv.needs.trust === 'trusted', 'B4: needs answers the TeamNeedsView')
@@ -1596,6 +1620,13 @@ async function boardServiceChecks(svc, teamId, emitted) {
   same(await req({ op: 'task', taskId: 't-1', commentsBefore: 'k-1' }), { ok: false, error: 'bad_request' }, 'a comment cursor that is not a comment id: bad_request')
   same(await req({ op: 'task', taskId: 't-77' }), { ok: false, error: 'not_found' }, 'an unknown task: not_found')
   const rev2 = (await req({ op: 'task', taskId: 't-2' })).task.rev
+  // B5 review, second round: the user's path (teams:req updateTask) refuses a needsPlan change outside todo like repo
+  // and isolation (bad_request, nothing changed); in todo it lands.
+  same(await req({ op: 'updateTask', taskId: 't-2', baseRev: rev2, patch: { needsPlan: false } }), { ok: false, error: 'bad_request' }, 'updateTask op: needsPlan on a blocked task is bad_request')
+  check(svc.team(teamId).store.rt.tasks.find((t) => t.id === 't-2').needsPlan === true && (await req({ op: 'task', taskId: 't-2' })).task.rev === rev2, 'and nothing changed')
+  const rev1 = (await req({ op: 'task', taskId: 't-1' })).task.rev
+  res = await req({ op: 'updateTask', taskId: 't-1', baseRev: rev1, patch: { needsPlan: false } })
+  check(res.ok && res.task.needsPlan === false && res.task.state === 'todo', 'in todo the same edit lands')
   res = await req({ op: 'moveTask', taskId: 't-2', baseRev: rev2, to: 'cancelled' })
   check(res.ok && res.task.state === 'cancelled' && res.task.column === null && res.task.userOwned.includes('state'), 'moveTask op: cancelled, its state the user\'s')
   res = await req({ op: 'releaseOwned', taskId: 't-1', fields: ['priority'] })
@@ -1652,7 +1683,7 @@ async function main() {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 })
   }
-  console.log(`PASS: ${checks} teams store checks (schemas, flow, board, B4 triage, reassignment and capped loops, store, registry, loader, trust, service, ipc)`)
+  console.log(`PASS: ${checks} teams store checks (schemas, flow, board, B4 triage, reassignment and capped loops, needsPlan only in todo, store, registry, loader, trust, service, ipc)`)
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1 })

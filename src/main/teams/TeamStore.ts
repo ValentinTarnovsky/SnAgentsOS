@@ -139,6 +139,7 @@ const task = z.object({
   next: wakeMark.optional(),
   blocked: z.object({ reason: blockedReason, resume: z.object({ state: taskState, phase: taskPhase }), at: num }).optional(),
   grants: z.array(z.object({ roleId: str, tool: str, at: num, approvalId: str }).passthrough()).optional(),
+  diffStat: z.object({ files: int, insertions: int, deletions: int, top: z.array(z.object({ path: str, add: int, del: int })), at: num }).optional(),
   integrate: z.object({
     state: z.enum(['idle', 'running', 'failed']), attempt: int,
     step: z.enum(['preflight', 'temp', 'merge', 'verify', 'land', 'cleanup']).optional(),
@@ -161,7 +162,7 @@ const approval = z.discriminatedUnion('kind', [
   z.object({ ...approvalBase, kind: z.literal('plan'), payload: z.object({ planRev: int, small: z.boolean() }) }).passthrough(),
   z.object({ ...approvalBase, kind: z.literal('final'), payload: z.object({ hasWorktree: z.boolean(), summary: str }) }).passthrough(),
   z.object({ ...approvalBase, kind: z.literal('hire'), payload: z.object({ roleId: str, text: str, sha256: str, baseDefHash: str, replaces: z.boolean() }) }).passthrough(),
-  z.object({ ...approvalBase, kind: z.literal('permission'), payload: z.object({ roleId: str, runId: str, tools: z.array(str) }) }).passthrough(),
+  z.object({ ...approvalBase, kind: z.literal('permission'), payload: z.object({ roleId: str, runId: str, tools: z.array(str), denied: z.array(str).optional() }) }).passthrough(),
   z.object({ ...approvalBase, kind: z.literal('integrate'), payload: z.object({ branch: str, base: str }) }).passthrough(),
 ])
 const cardAnswer = z.object({

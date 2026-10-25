@@ -143,6 +143,8 @@ export const CTL_METHODS: readonly CtlMethod[] = [
   'team.show',
   'team.tasks',
   'team.task.get',
+  'team.diff',
+  'team.log',
   'team.task.create',
   'team.task.update',
   'team.comment',
@@ -323,6 +325,41 @@ export interface CtlWaitResult {
 export interface CtlNeedsResult {
   paneId: string
   needs: string | null
+}
+
+// --- snaos team diff and log (app 2.7.0, Teams, B5 integration) -------------------
+// Reads main runs for a team run: the readonly profile has no git log, diff or show
+// (their --output writes any file, --no-index and blame --contents read any one).
+
+/** Output caps in UTF-8 bytes: a longer text is cut at a line end, followed by one marker line. */
+export const CTL_TEAM_DIFF_MAX = 256 * 1024
+export const CTL_TEAM_LOG_MAX = 64 * 1024
+/** `team log -n` default and its range (1..50). */
+export const CTL_TEAM_LOG_DEFAULT = 20
+export const CTL_TEAM_LOG_N_MAX = 50
+/** The paths after `--`: this many at most, each this many characters at most (repo relative). */
+export const CTL_TEAM_PATHS_MAX = 32
+export const CTL_TEAM_PATH_MAX = 1024
+
+/** `team.diff` params. `task`: a task of the caller's team (default: the run's own task); `paths`: repo relative, main checks them again. */
+export interface CtlTeamDiffParams { stat?: boolean; task?: string; paths?: string[] }
+/** `team.log` params. `n`: 1..CTL_TEAM_LOG_N_MAX commits (default CTL_TEAM_LOG_DEFAULT). */
+export interface CtlTeamLogParams { n?: number; task?: string; paths?: string[] }
+
+/** `team.diff` and `team.log` data: where main read and what git printed (UTF-8, cut with a marker line past its cap). */
+export interface CtlTeamGitResult {
+  /** The task whose tree was read; absent when the run has no task and named none. */
+  task?: string
+  /** `worktree`: the task's worktree; `root`: the root of the task's repo (or the main repo). */
+  where: 'worktree' | 'root'
+  /**
+   * What was compared: diff of a worktree = the sha of the merge base of its base branch and its branch, against its
+   * working tree (its commits and its uncommitted changes), of the root = `HEAD` against the working tree; log of a
+   * worktree = `refs/heads/<base branch>..refs/heads/<branch>`, of the root = `HEAD`.
+   */
+  range: string
+  text: string
+  cut?: true
 }
 
 export interface CtlSpawnResult {

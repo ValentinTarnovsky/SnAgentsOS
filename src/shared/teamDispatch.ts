@@ -70,6 +70,9 @@ function todoMode(t: Pick<TeamTask, 'needsPlan' | 'plan'>): RunMode {
 /**
  * The run mode the task's (state, phase) lets `agentId` run (4.2), or null: the assignee runs todo (plan or exec),
  * planning (plan) and executing (exec); the task's QA agent runs qa. Every other phase waits on the user or the flow.
+ * T3, defensive (B5 review): an executing task that needs a plan and has none approved (a needsPlan turned on after its
+ * start) runs nothing, since admitRun refuses that exec run; as a candidate it would stand as its agent's minimum and
+ * take a cap slot on every pass, so the agent's other levels would never run.
  */
 function modeFor(t: TeamTask, agentId: string): RunMode | null {
   switch (t.state) {
@@ -77,7 +80,7 @@ function modeFor(t: TeamTask, agentId: string): RunMode | null {
       return t.assignee === agentId ? todoMode(t) : null
     case 'doing':
       if (t.assignee !== agentId) return null
-      return t.phase === 'planning' ? 'plan' : t.phase === 'executing' ? 'exec' : null
+      return t.phase === 'planning' ? 'plan' : t.phase === 'executing' && todoMode(t) === 'exec' ? 'exec' : null
     case 'review':
       return t.phase === 'qa' && t.review.qaAgentId === agentId ? 'qa' : null
     default:

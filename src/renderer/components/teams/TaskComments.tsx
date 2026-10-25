@@ -14,6 +14,32 @@ import { CHIP, CHIP_NEUTRAL, taskFailText } from './TaskCard'
 /** C0 except tab and newline, and DEL: main refuses a comment that has one. */
 export const BODY_BAD_RE = /[\u0000-\u0008\u000b-\u001f\u007f]/
 const SEND_KEYS = ['Ctrl', 'Enter']
+
+/**
+ * Takes the keyboard out of a field and leaves it on the nearest container that
+ * holds one (the drawer, the Te necesita row, the dialog, the overlay), so the
+ * next Esc reaches what it closed before; nowhere when none does.
+ */
+export function leaveField(field: HTMLElement): void {
+  field.parentElement?.closest<HTMLElement>('[tabindex="-1"]')?.focus({ preventScroll: true })
+  if (document.activeElement === field) field.blur()
+}
+
+/**
+ * Esc in a team text field that holds a draft (app 2.7.0, E10 B5: a card's text
+ * answer, the comment, Lead and run-now composers): consumed (prevented and
+ * stopped, as the drawers, the dialogs and the overlay expect) and it only
+ * leaves the field, so the draft stays; the next Esc closes as before. An empty
+ * field lets it through. True when it took the key.
+ */
+export function escKeepsDraft(e: KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>, draft: string): boolean {
+  if (e.key !== 'Escape' || e.nativeEvent.isComposing || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey || !draft.trim()) return false
+  e.preventDefault()
+  e.stopPropagation()
+  leaveField(e.currentTarget)
+  return true
+}
+
 /** Refusals of a comment that say more than "it could not be sent". */
 const COMMENT_FAIL_WORDED: readonly TeamError[] = ['cap', 'not_found', 'too_big', 'disabled']
 
@@ -102,8 +128,9 @@ const drafts = new Map<string, string>()
  * waits for its recipient says "En cola para Dev 2" (the agent main fixed
  * when it was written, `recipient`); a `sys` comment is worded from
  * `teams.sys.<key>` (`data-comment-sys`). The composer at the foot: Enter is
- * a new line, only [Comentar] or Ctrl+Enter sends; main picks the recipient
- * and queues it for their next run (nothing here runs).
+ * a new line, only [Comentar] or Ctrl+Enter sends, Esc with a draft only
+ * leaves the box; main picks the recipient and queues it for their next run
+ * (nothing here runs).
  */
 export function TaskComments({ teamId, taskId, entry }: { teamId: string; taskId: string; entry: TaskEntry }) {
   const t = useT()
@@ -144,6 +171,7 @@ export function TaskComments({ teamId, taskId, entry }: { teamId: string; taskId
     if ((drafts.get(key) ?? '') === sent) setDraft('')
   }
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (escKeepsDraft(e, draft)) return
     if (e.key !== 'Enter' || e.nativeEvent.isComposing || e.altKey || e.shiftKey || !(e.ctrlKey || e.metaKey)) return
     e.preventDefault()
     void send()

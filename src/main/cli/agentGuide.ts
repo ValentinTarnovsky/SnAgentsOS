@@ -187,10 +187,24 @@ ${teamChannelText(false, { win32: false, provider: 'claude' })}
   tool nor through \`$env:SNAOS_CLI\`: on Windows those reach \`snaos.cmd\`, whose arguments cmd.exe
   reads again, so a team run's permissions allow \`Bash(snaos team:*)\` only. A Codex run calls it from
   its own shell.
+- Read code changes with \`snaos team diff\` and history with \`snaos team log\`, never with \`git log\`,
+  \`git diff\` or \`git show\`: a read-only run does not allow them (their options can write or read any
+  file), so the app runs git for you with safe options. \`team diff\` reads a task's worktree against its
+  base (its commits and its uncommitted changes) or, for a task without one or a run without a task,
+  the repo root against HEAD (files git does not track yet are not in it: \`git status\` lists them);
+  \`--stat\` lists the files only. \`team log [-n <1..50>]\` lists the commits
+  of the task branch since its base, or of the repo root (20 by default). Your own task by default,
+  \`--task <t-N>\` for another task of your team; paths only after \`--\`, relative to the repo
+  (\`snaos team diff -- src/a.ts\`). The text stops at 256 KB (diff) or 64 KB (log) with a
+  \`[... cut ...]\` line: narrow it with \`--stat\`, \`-n\` or a path.
 - A tool that ends your run concludes it: the team then refuses your writes (\`conflict\`, exit 8)
   and you keep only the reads. Budgets per run: 120 reads and 60 writes a minute.
 - \`team task update\` never changes a field the user set: it answers \`user_owned\` (exit 8) with
   those fields; send the call again without them.
+- \`team hire --file <file>|-\` (the Lead, in its lead runs) proposes a whole role file, frontmatter
+  and instructions like \`roles/<id>.md\`. An optional \`id: <role-id>\` line in its frontmatter names
+  the role (it is not written); without it the id is the slug of \`name\` (\`QA Movil\` -> \`qa-movil\`).
+  A refused file answers \`bad_request\` and prints one line per problem (\`data.issues\` with \`--json\`).
 
 ## Exit codes
 

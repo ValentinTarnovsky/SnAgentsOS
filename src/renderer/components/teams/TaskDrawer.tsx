@@ -15,10 +15,11 @@ import { Button } from '@/components/ui/Button'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ChatMarkdown } from '@/components/chat/Markdown'
 import { SMALL_BTN, SMALL_BTN_TEXT } from './RunHeader'
-import { CHIP, CHIP_AMBER, CHIP_NEUTRAL, blockedText, resumeFailText, taskFailText, taskRunner, useTaskActions } from './TaskCard'
+import { CHIP, CHIP_AMBER, CHIP_NEUTRAL, blockedText, cardBlockClosed, resumeFailText, taskFailText, taskRunner, useTaskActions } from './TaskCard'
 import { TaskFields, FIELD_CLS, TITLE_BAD_RE } from './TaskFields'
 import { TaskActivity } from './TaskActivity'
 import { BODY_BAD_RE, TaskComments, useLinkConfirm } from './TaskComments'
+import { TaskPlanSection } from './TaskPlanSection'
 
 const NO_AGENTS: readonly AgentView[] = []
 const SECTION = 'text-[11px] font-semibold uppercase tracking-wide text-text-secondary'
@@ -53,12 +54,13 @@ function Section({ title, children, name }: { title: string; children: ReactNode
  * The drawer of one task (app 2.7.0, E10 B3), over any tab of the team: its
  * state, phase and why it is blocked; "Ejecutar ahora" for the idle agent of
  * its phase (B4: only where main runs it), Retomar for a task the user
- * stopped and "Ver chat" of a live run; the title and the description (edited in
+ * stopped or one left blocked on a dismissed card (B5) and "Ver chat" of a
+ * live run; the title and the description (edited in
  * place); the fields (each saved at once with the task's rev; a `conflict`
  * loads the new version and keeps the change to retry); the review round;
  * the runs of the task; and its comments with the composer. A click on
  * another card switches it (`keepOpenOn`), with its own state per task. B5
- * adds the plan section, B6 the worktree one.
+ * adds the plan section (TaskPlanSection), B6 the worktree one.
  */
 export function TaskDrawer({ teamId, view, taskId }: { teamId: string; view: TeamView; taskId: string }) {
   const t = useT()
@@ -214,9 +216,14 @@ function TaskBody({ teamId, view, entry, detail, agents, byId }: { teamId: strin
   // Ejecutar ahora only where main's runManual runs it: the agent of the task's phase (its QA agent in qa), idle.
   const runner = taskRunner(detail, byId, detail.reviewInfo.qaAgentId)
   const canRun = !!runner
-  // A task the user stopped (Frenar, decision 38) waits for Retomar: autonomy never restarts it on its own.
-  const canResume = detail.blocked?.kind === 'stopped' && !live
-  const blocked = blockedText(detail, t)
+  // A task the user stopped (Frenar, decision 38) waits for Retomar: autonomy never restarts it on its own. So does
+  // one still blocked on a card that nobody has open any more (B5: a prep failure card the user dismissed); while
+  // its card is open, the card's own actions resume it (Te necesita). The view names the blocking card
+  // (TaskBlockedView.cardId); another open card of the task (an orphan process, a question) does not block it.
+  const cardGone = cardBlockClosed(detail, detail.cards)
+  const canResume = !live && (detail.blocked?.kind === 'stopped' || cardGone)
+  // Its card was dismissed, so "your answer in Te necesita" would point at nothing.
+  const blocked = cardGone ? t('teams.blocked.cardDismissed') : blockedText(detail, t)
   const bodyUnits = editing?.field === 'body' ? editing.text.length : 0
 
   const doRun = async (): Promise<void> => {
@@ -228,11 +235,12 @@ function TaskBody({ teamId, view, entry, detail, agents, byId }: { teamId: strin
     setRunNote(fail ? { text: runFailText(fail, agentLabel(runner), t, lang, Date.now()), error: true } : { text: t('teams.task.runStarted'), error: false })
   }
   const doResume = async (): Promise<void> => {
+    const done = cardGone ? 'teams.task.resumedCard' : 'teams.task.resumed'
     setRunning(true)
     setRunNote(null)
     const fail = await resumeTask(teamId, detail.id)
     setRunning(false)
-    setRunNote(fail ? { text: resumeFailText(fail, t), error: true } : { text: t('teams.task.resumed'), error: false })
+    setRunNote(fail ? { text: resumeFailText(fail, t), error: true } : { text: t(done), error: false })
   }
 
   return (
@@ -409,7 +417,8 @@ function TaskBody({ teamId, view, entry, detail, agents, byId }: { teamId: strin
         <TaskFields detail={detail} view={view} agents={agents} tasks={tasks} pending={pending} busy={saving} onSave={(patch) => void save(patch)} />
       </Section>
 
-      {/* B5 inserts the plan section here (TaskPlanSection), B6 the worktree section (TaskWorktreeSection). */}
+      {/* B5: the plan and its decision while it waits; B6 inserts the worktree section (TaskWorktreeSection) after it. */}
+      <TaskPlanSection teamId={teamId} detail={detail} />
 
       {(detail.reviewInfo.round > 0 || detail.reviewInfo.lastVerdict) && (
         <Section name="review" title={t('teams.task.section.review')}>

@@ -43,10 +43,20 @@ export class GitExecError extends Error {
     readonly code: GitError,
     message: string,
     readonly stderr = '',
+    /** App 2.7.0 (B5 integration, fifth round): stdout passed maxBuffer (Node's code), even when git also wrote to stderr. */
+    readonly maxBuffer = false,
   ) {
     super(message)
     this.name = 'GitExecError'
   }
+}
+
+/** Node's execFile error past maxBuffer (`ERR_CHILD_PROCESS_STDIO_MAXBUFFER`; an older Node says it in the message only). */
+const MAX_BUFFER_CODE = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+
+/** True when a run's output passed its maxBuffer (by shape, so it survives bundling boundaries). */
+export function gitOverflowed(e: unknown): boolean {
+  return (e as { maxBuffer?: unknown } | null)?.maxBuffer === true
 }
 
 type ExecCallback = (err: (Error & { code?: unknown; killed?: boolean; signal?: unknown }) | null, stdout: string, stderr: string) => void
@@ -222,7 +232,8 @@ export function createGitRunner(deps: GitRunnerDeps = {}): GitRunner {
           if (err) {
             // A spawn ENOENT with a git we just found means the cwd is gone, not git.
             const code = err.code === 'ENOENT' && !existsSync(cwd) ? 'not_repo' : classifyGitError(err, errText)
-            reject(new GitExecError(code, errText.trim() || err.message, errText))
+            const overflow = err.code === MAX_BUFFER_CODE || /maxBuffer/i.test(err.message)
+            reject(new GitExecError(code, errText.trim() || err.message, errText, overflow))
           } else resolve({ stdout: String(stdout ?? ''), stderr: errText })
         })
       } catch (e) {

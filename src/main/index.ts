@@ -982,12 +982,19 @@ async function bootstrap(): Promise<void> {
       envForTeam: (runId, teamId, agentId, roleKind) => cliService.envForTeam(runId, teamId, agentId, roleKind),
       revokeTeam: (runId) => cliService.revokeTeam(runId),
       ready: () => cliService.ready(),
+      // B5 integration, sixth round: the live tokens refuse a Codex block action and are masked in a run's chat rows.
+      holdsToken: (text) => cliService.tokens.holdsToken(text),
+      maskTokens: (text) => cliService.tokens.maskTokens(text),
     },
     // Synthetic `team:<runId>` statuses reach only AwakeService (and AccountService through statuses), never StatusManager.
     awake: (evt) => awakeService?.onPaneStatus(evt),
     sendRun: (evt) => sendToRenderer(CH.TEAMS_RUN_APPEND, evt),
     // B4: task worktrees through the console worktree service, tagged with their team owner (decision 63).
     worktrees,
+    // B5: a new "Te necesita" row (an approval, a card, the trust, an auth or billing pause) as a desktop toast; B8 also routes it to the phone.
+    notice: (n) => {
+      statusManager.notifyCustom(null, n.title, n.body)
+    },
   })
   teamService = teams
   statusManager.addListener((evt) => teams.onPaneStatus(evt))

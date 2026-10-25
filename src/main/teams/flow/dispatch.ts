@@ -6,8 +6,9 @@
  * blockers are all done leaves blocked{deps} (at most UNBLOCK_WAKES_PER_HOUR
  * times an hour, then one card), a cancelled blocker opens its card, levels
  * that no longer fit their task go (a reassigned task's wake, a phase that
- * moved on), queue items whose level is gone are dropped, and a small plan
- * the Lead saw without deciding goes to the user (decision 29). It changes
+ * moved on, an exec of a task that still needs a plan), queue items whose
+ * level is gone are dropped, and a small plan the Lead saw without deciding
+ * goes to the user (decision 29). It changes
  * nothing when nothing is due, so a quiet pass commits nothing.
  *
  * enqueue holds the requests autonomy off keeps for "Por despachar" (one item
@@ -55,19 +56,29 @@ export function phaseAgentOf(t: Pick<TeamTask, 'state' | 'phase' | 'assignee' | 
   return undefined
 }
 
-/** A run mode that may run in the task's current pair (I3; todo admits plan and exec, T2 / T3). */
-export function modeFits(t: Pick<TeamTask, 'state' | 'phase'>, mode: RunMode): boolean {
+/**
+ * A run mode that may run in the task's current pair (I3; todo admits plan and exec, T2 / T3). Executing admits exec
+ * only when the task needs no plan or has it approved, the rule of teamDispatch modeFor (B5 review, second round):
+ * admitRun refuses any other exec run, so its wake mark and its "Por despachar" item are levels that no longer stand.
+ */
+export function modeFits(t: Pick<TeamTask, 'state' | 'phase' | 'needsPlan' | 'plan'>, mode: RunMode): boolean {
   if (t.state === 'todo') return mode === 'plan' || mode === 'exec'
   if (mode === 'plan') return t.phase === 'planning'
-  if (mode === 'exec') return t.phase === 'executing'
+  if (mode === 'exec') return t.phase === 'executing' && todoModeOf(t) === 'exec'
   if (mode === 'qa') return t.phase === 'qa'
   return false
 }
 
-/** True when a task's level for `agentId` still stands: its wake mark, the todo assignee (L2) or comments queued for it (L3). */
+/**
+ * True when a task's level for `agentId` still stands: its wake mark, the todo assignee (L2) or comments queued for it
+ * (L3), in a mode its phase admits (modeFits: an exec of an executing task that still needs a plan does not). A todo
+ * task runs only its todoModeOf (teamDispatch modeFor): a level of the other mode (needsPlan changed in todo since it
+ * was queued) no longer stands either, so its "Por despachar" item never offers a plan run that would start as an exec.
+ */
 function taskLevelFor(rt: TeamRuntime, t: TeamTask, agentId: string, mode: RunMode): boolean {
   if (t.state === 'done' || t.state === 'cancelled' || t.state === 'blocked') return false
   if (phaseAgentOf(t) !== agentId || !modeFits(t, mode)) return false
+  if (t.state === 'todo' && mode !== todoModeOf(t)) return false
   if (t.next && t.next.agentId === agentId) return true
   if (t.state === 'todo' && t.assignee === agentId) return true
   return (rt.comments[t.id] ?? []).some((c) => c.forAgent === agentId && c.deliveredRunId === undefined)

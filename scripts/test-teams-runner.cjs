@@ -31,6 +31,39 @@
 // carries the edited goal, a pass before the orphan check settles never resumes the reaped session (the check pokes
 // when it settles), a tree a prep made after its team was removed loses its owner, Retomar (resumeTask) of a stopped
 // task through teams:req, and a console alone in the tree reads consoleBusy.
+// B5 additions: the Codex block applied at close (codex-readonly-block: a comment then a small plan, in order, the run
+// concluded; a refused action stops the list with a teams.log line and a note row in the run chat), a permission
+// approval from claude-denied (a custom role's Write), one notice, approve grants the rule and the re-run allows it,
+// a second decide already_decided, an approval and a card of a task that is over neither shown nor counted, the hire
+// (team hire from a Lead run, phone decide forbidden, the canonical diff with its hidden characters and risks, the
+// desktop approve writes roles/<id>.md and trusts that exact hash, an applying hire found at load back to pending, one
+// whose file landed but was never trusted approved again with no second write),
+// notices once per new need row and zero after a restart with a pending approval and a changed trust (needsSeen
+// persisted; a state.json the repair reset notifies its stateReset card once), the Lead's reply in its thread, lead escalation with its note, the goal per Lead session (a Descartar of
+// the kickoff item still gives the resumed session the edited goal), the Bash hint after a PowerShell `snaos team`
+// denial (no approval, one run), and a prep failure card (blocked on it, Reintentar, Descartar then Retomar, phone
+// desktop-only actions forbidden).
+// B5 integration: Retomar lifts the prep backoff of a dismissed prep-failure card, `team task get` in the grace of a
+// concluded run leaves a newer user comment queued (ctlRead), an escape denial (bash -c) opens no approval and its next
+// run reads ESCAPE_HINT, a Bash denial's approval carries the denied command, the grant re-run reads its Bash hint as a
+// system hint (never a <request from="user"> block, no WakeMark.detail), and a QA run's prep stores the numstat diff
+// stat on the task for the final OK view. Fourth round: a permission approval whose stored rules the policy now refuses
+// shows no rule and its Approve answers bad_request with detail nothingToGrant (Reject still works). Fifth round: a
+// 64 hex token shape in a Codex block comment (a read-only sandbox reads runtime.json) is masked before it lands.
+// Sixth round (the real CtlTokens in the world): a run whose stream holds the master token and team tokens (its own,
+// another live run's, one cut by a line end, the piece a 4 KB tool result cut leaves) shows none in runPage (from the
+// ring while it lives, from the file after) nor in a pushed append while its log file keeps them,
+// every Claude line denies Read of each DATA_SECRET_PATHS entry, and the codex-readonly-block scenario with a live token
+// in its comment action stops the list there (bad_request: secret; a cut team token in a later action too).
+// Seventh round: a run's summary (the ring, runs.json) and the Lead's reply hold no live token nor a piece of one cut by
+// a space or a line end, and a Claude line through a .cmd agent CLI past CMD_LINE_MAX (a custom role of 32 long tools)
+// never spawns: spawnFailed with its own card words (vars.what cmdLine), while the same role through an .exe runs.
+// B5 review: the Codex block note is a `snaos.note` record of a key and its vars (never an English sentence) that
+// RunLog decodes to a system row of them (runNoteText; the old sentence shape, an unknown key or bad vars decode to
+// nothing); a hire's apply and the user's trust of an edited definition cancel every other pending hire on the old
+// base (error stale, out of Te necesita and the badge) and a decide that raced it answers conflict stale; a denied
+// command whose exact rule holds an sk- key or the master token (whole or split) opens no permission approval and a
+// prefix rule's denied command is masked whole.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data, never a real agent.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -82,6 +115,16 @@ export { WorktreeManifest } from './src/main/git/WorktreeManifest'
 export { TaskWorktrees } from './src/main/teams/TaskWorktrees'
 export { WriteLocks } from './src/main/teams/WriteLocks'
 export { DISPATCH_KEY } from './src/main/teams/Dispatcher'
+export { OPS } from './src/main/teams/ops/index'
+export { TEAM_CALL_HINT, ESCAPE_HINT } from './src/main/teams/flow/approvals'
+export { canonicalDefText, normalizeDefText } from './src/shared/teamDefinition'
+export { teamNeedsCount } from './src/shared/teamNeeds'
+export { mainTLang } from './src/main/i18n'
+export { CtlTokens, newToken } from './src/main/cli/CtlTokens'
+export { claudePathRule, DATA_SECRET_PATHS } from './src/shared/teamArgv'
+export { redactCredentials } from './src/shared/redact'
+export { CMD_LINE_MAX, spawnTarget } from './src/main/teams/agentCli'
+export { needsEn, needsEs } from './src/renderer/i18n/teams/needs'
 `)
 const WIN = process.platform === 'win32'
 
@@ -151,10 +194,12 @@ async function world(name, o = {}) {
   const data = o.data ?? path.join(dir, 'data')
   const clock = o.clock ?? manualClock()
   const w = {
-    dir, repo, data, clock, logs: [], emitted: [], awake: [], appended: [], revoked: [], spawned: 0, signalled: [],
+    dir, repo, data, clock, logs: [], emitted: [], awake: [], appended: [], revoked: [], spawned: 0, signalled: [], notices: [],
     scenario: path.join(FIX, 'claude-simple.json'), cliReady: true, holders: new Map(), accounts: null,
     procStart: o.procStart ?? (async () => null),
   }
+  w.master = M.newToken()
+  w.tokens = new M.CtlTokens(w.master)
   const shim = path.join(dir, 'bin', process.platform === 'win32' ? 'snaos.cmd' : 'snaos')
   fs.mkdirSync(path.dirname(shim), { recursive: true })
   fs.writeFileSync(shim, '')
@@ -184,16 +229,28 @@ async function world(name, o = {}) {
     sessionHolder: (_p, s) => w.holders.get(s) ?? null,
     ...(w.wts ? { worktrees: w.wts } : {}),
     accounts: () => w.accounts,
+    // B5 integration, sixth round: the real CtlTokens (a master token, a team token per run, revoked at its end) behind
+    // the live-token refusal of a Codex block and the masking of a run's chat; onToken lets a check see a run's token.
     cli: {
-      envForTeam: (runId) => (w.cliReady ? { SNAOS_CTL_ENDPOINT: 'test-pipe', SNAOS_CTL_TOKEN: `tok-${runId}`, SNAOS_CLI: shim, SNAOS_TEAM_RUN: runId } : {}),
-      revokeTeam: (runId) => w.revoked.push(runId),
+      envForTeam: (runId, teamId, agentId, roleKind) => {
+        if (!w.cliReady) return {}
+        const token = w.tokens.issueTeam(runId, { runId, teamId, agentId, roleKind })
+        w.onToken?.(runId, token)
+        return { SNAOS_CTL_ENDPOINT: 'test-pipe', SNAOS_CTL_TOKEN: token, SNAOS_CLI: shim, SNAOS_TEAM_RUN: runId }
+      },
+      revokeTeam: (runId) => { w.revoked.push(runId); w.tokens.revokeTeam(runId) },
       ready: () => w.cliReady,
+      holdsToken: (text) => w.tokens.holdsToken(text),
+      maskTokens: (text) => w.tokens.maskTokens(text),
     },
     awake: (e) => w.awake.push(json(e)),
     sendRun: (e) => w.appended.push(json(e)),
     spawn: (...a) => { w.spawned++; return cp.spawn(...a) },
-    resolveCli: () => (w.noCli ? null : { file: process.execPath, args: [FAKE, w.scenario], kind: 'exe' }),
+    // w.cliTarget (seventh round): another agent CLI, a .cmd one, in place of the fake agent's exe.
+    resolveCli: () => (w.noCli ? null : w.cliTarget ?? { file: process.execPath, args: [FAKE, w.scenario], kind: 'exe' }),
     procStartTime: (pid) => w.procStart(pid),
+    // B5: the desktop toast of a new need row.
+    notice: (n) => w.notices.push(json(n)),
     // The real tree kill, recording every pid it is handed (the supervisor never hands it a reaped pid).
     treeKill: { sync: (pid) => { w.signalled.push(pid); return M.treeKillSync(pid) }, signal: (pid, sig) => { w.signalled.push(pid); return M.signalTree(pid, sig) }, alive: (pid) => (o.alive ? o.alive(pid) : M.pidAlive(pid)) },
     platform: process.platform,
@@ -668,6 +725,32 @@ async function logChecks() {
   log.close()
   const finished = await M.RunLog.page(file, 'claude', 'r-0123456789ab', null, 48 * 1024, null, null)
   check(finished.items.some((m) => m.role === 'system' && m.blocks[0].text === M.RUN_LOG_CUT_TEXT) && M.RUN_LOG_CUT_TEXT.includes('Run log cut'), 'an ended run pages from the file and shows the cut row, the shared RUN_LOG_CUT_TEXT word for word (the renderer words it)')
+
+  // B5 review (finding 5): a `snaos.note` record decodes to a system row of its key and vars (runNoteText), never a
+  // sentence, for either provider; the old sentence shape, an unknown key and vars that are not short one-line values
+  // decode to nothing, and runNoteOfText reads back only a note.
+  const at = '2027-01-15T08:00:00.000Z'
+  const stopped = { key: 'blockStopped', vars: { applied: 1, total: 3, at: 2, method: 'team.task.create', error: 'forbidden' } }
+  const full = { key: 'blockStateFull', vars: { mb: 8 } }
+  for (const provider of ['claude', 'codex']) {
+    const dec = M.runDecoder(provider)
+    same(dec({ type: 'snaos.note', at, ...stopped }, 77), [{ id: '77', role: 'system', ts: null, blocks: [{ t: 'text', text: M.runNoteText(stopped) }] }], `${provider}: a blockStopped note record decodes to a system row of its key and vars`)
+    same(dec({ type: 'snaos.note', at, ...full }, 78)[0].blocks[0].text, M.runNoteText(full), `${provider}: a blockStateFull note too`)
+    const bad = [
+      { type: 'snaos.note', at, text: 'snaos-team block: 1 of 3 action(s) applied; action 2 (team.task.create) was refused (forbidden) and stopped the list.' },
+      { type: 'snaos.note', at, key: 'somethingElse', vars: {} },
+      { type: 'snaos.note', at, key: 'blockStopped', vars: { method: 'team.comment\nand more' } },
+      { type: 'snaos.note', at, key: 'blockStopped', vars: { method: 'x'.repeat(121) } },
+      { type: 'snaos.note', at, key: 'blockStopped', vars: { applied: Infinity } },
+      { type: 'snaos.note', at, key: 'blockStopped', vars: { 'bad key': 1 } },
+      { type: 'snaos.note', at, key: 'blockStopped', vars: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`v${i}`, i])) },
+      { type: 'snaos.note', at, key: 'blockStopped', vars: [1] },
+    ]
+    same(bad.map((r) => dec(r, 5)), bad.map(() => []), `${provider}: the old sentence shape, an unknown key and bad vars decode to nothing`)
+  }
+  same([M.runNoteOfText(M.runNoteText(stopped)), M.runNoteOfText(M.runNoteText(full))], [stopped, full], 'runNoteOfText reads back what runNoteText wrote')
+  same([M.runNoteOfText(M.RUN_LOG_CUT_TEXT), M.runNoteOfText('{"type":"snaos.note","key":"blockStopped"'), M.runNoteOfText('hola'), M.runNoteOfText(null), M.runNoteOfText(JSON.stringify({ type: 'other', key: 'blockStopped', vars: {} }))], [null, null, null, null, null], 'runNoteOfText: null for any other text')
+  check(!/applied;|was refused|stopped the list/.test(M.runNoteText(stopped)), 'the row text is no sentence')
 }
 
 // ---- 6. the `team` scope of every commit that moves a TeamView field, usageToday's clock, runs paging --
@@ -1456,6 +1539,887 @@ async function resumeChecks() {
   w.svc.dispose()
 }
 
+// ---- 15. B5: the Codex block at close, permission approvals, the hire, notices, the Lead, hints, cards ----------
+/** The team caller a live run's token resolves to (what `snaos team` reaches teamCtl with). */
+function whoOf(w, runId) {
+  const run = w.active(runId)
+  return { runId, teamId: w.teamId, agentId: run.agentId, roleKind: run.roleKind }
+}
+async function trustAgain(w) {
+  const diff = await w.svc.request({ op: 'trustDiff', teamId: w.teamId }, 'desktop')
+  const tr = await w.svc.request({ op: 'trust', teamId: w.teamId, sha256: diff.trust.sha256 }, 'desktop')
+  assert.ok(tr.ok, `trust: ${JSON.stringify(tr)}`)
+}
+const teamDirOf = (w) => path.join(w.repo, '.snagentsos', 'team')
+/** One Codex exec turn whose last agent message is `text` (a new thread `thread`). */
+const codexTurn = (thread, text) => ({
+  steps: [
+    { emit: { type: 'thread.started', thread_id: thread } },
+    { emit: { type: 'turn.started' } },
+    { emit: { type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text } } },
+    { emit: { type: 'turn.completed', usage: { input_tokens: 900, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 40, reasoning_output_tokens: 0 } } },
+  ],
+})
+const phoneCtx = (w) => ({ origin: 'phone', actor: { kind: 'user', via: 'phone' }, svc: w.svc, now: w.clock.now })
+
+// R11: a Codex readonly run's block applied at close, in order, before the policy; a refused action stops the list.
+async function blockChecks() {
+  const w = await world('b5-block')
+  const t = await w.createTask({ title: 'Investigar el bug', assignee: 'research', isolation: 'main' })
+  check(t === 't-1', 'the first task is t-1 (the scenario block names it)')
+  w.use('codex-readonly-block.json')
+  const r = await w.runTask('research', t)
+  check(r.ok, `the research plan run (${JSON.stringify(r)})`)
+  await w.waitEnded(r.runId)
+  const run = w.ended(r.runId)
+  check(run.provider === 'codex' && run.mode === 'plan' && run.state === 'succeeded' && run.outcome === 'concluded' && run.concludedBy?.tool === 'plan', `the block concluded the run with team plan (${JSON.stringify([run.state, run.outcome, run.concludedBy])})`)
+  const task = w.task(t)
+  check(task.state === 'doing' && task.phase === 'planApproval' && task.plan?.status === 'pending' && task.plan.small === true && task.plan.text.includes('Read the code'), 'T4 through the block: the plan pending approval')
+  const ap = w.rt().approvals.find((a) => a.kind === 'plan' && a.taskId === t)
+  check(ap && ap.state === 'pending' && ap.decider === 'lead', 'a small plan the team lets the Lead approve (decision 29)')
+  const c = (w.rt().comments[t] ?? []).find((x) => x.author.kind === 'agent' && x.author.agentId === 'research')
+  check(c && c.text === 'Plan written', 'the comment action landed first, in order')
+  check(w.logs.includes(`run ${r.runId} block applied=2/2`) && w.logs.includes(`run ${r.runId} team.plan (block)`), 'teams.log: both actions, then the count')
+  check(run.denials === undefined && !w.rt().approvals.some((a) => a.kind === 'permission'), 'a Codex run never asks a permission')
+
+  // A refused action stops the list: the comment lands, a Lead-only create is refused, the plan never comes.
+  const t2 = await w.createTask({ title: 'Otra pista', assignee: 'research', isolation: 'main' })
+  const text = `Listo.\n\n\`\`\`snaos-team\n${JSON.stringify({ v: 1, actions: [
+    { method: 'team.comment', params: { target: t2, text: 'Primero esto' } },
+    { method: 'team.task.create', params: { title: 'No me toca' } },
+    { method: 'team.plan', params: { text: 'Nunca llega' } },
+  ] })}\n\`\`\``
+  w.use(codexTurn('019a0000-0000-7000-8000-0000000b10c9', text))
+  const r2 = await w.runTask('research', t2)
+  await w.waitEnded(r2.runId)
+  const run2 = w.ended(r2.runId)
+  check(run2.outcome !== 'concluded' && !run2.concludedBy && w.task(t2).phase === 'planning' && !w.task(t2).plan, 'the list stopped before the plan: the task stays in planning')
+  check((w.rt().comments[t2] ?? []).some((x) => x.text === 'Primero esto') && !w.rt().tasks.some((x) => x.title === 'No me toca'), 'the action before it landed, the refused one changed nothing')
+  check(w.logs.includes(`run ${r2.runId} block applied=1/3 stopped=2 team.task.create forbidden`), `teams.log names where and why (${w.logs.filter((l) => l.includes(r2.runId) && l.includes('block')).join(' | ')})`)
+  const note = w.logLines(r2.runId).find((l) => l && l.type === 'snaos.note')
+  // B5 review (finding 5): the note is a record of its key and vars, never an English sentence; the run chat words it.
+  check(note && note.key === 'blockStopped' && JSON.stringify(note.vars) === JSON.stringify({ applied: 1, total: 3, at: 2, method: 'team.task.create', error: 'forbidden' }) && !('text' in note) && typeof note.at === 'string', 'the run log keeps a note record of it: key blockStopped and its vars, no sentence', note)
+  const page = await w.svc.request({ op: 'runPage', teamId: w.teamId, runId: r2.runId }, 'desktop')
+  const noteRow = page.ok ? page.items.find((m) => m.role === 'system' && m.blocks.some((b) => b.t === 'text' && M.runNoteOfText(b.text))) : undefined
+  check(noteRow && noteRow.blocks.length === 1 && noteRow.blocks[0].text === M.runNoteText({ key: 'blockStopped', vars: note.vars }) && JSON.stringify(M.runNoteOfText(noteRow.blocks[0].text)) === JSON.stringify({ key: 'blockStopped', vars: note.vars }), 'its chat shows the note as a system row of that key and vars (runNoteText, read back with runNoteOfText)', noteRow)
+
+  // B5 integration, fifth round (the second net): a Codex read-only sandbox reads any file, so its block could carry
+  // the master token of runtime.json; the 64 hex token shape is masked before the comment lands (redactCredentials).
+  const t3 = await w.createTask({ title: 'Tercera pista', assignee: 'research', isolation: 'main' })
+  const leaked = '9f'.repeat(32)
+  const text3 = `Listo.\n\n\`\`\`snaos-team\n${JSON.stringify({ v: 1, actions: [{ method: 'team.comment', params: { target: t3, text: `runtime.json: {"token":"${leaked}"}` } }] })}\n\`\`\``
+  w.use(codexTurn('019a0000-0000-7000-8000-0000000b10ca', text3))
+  const r3 = await w.runTask('research', t3)
+  await w.waitEnded(r3.runId)
+  const c3 = (w.rt().comments[t3] ?? []).find((x) => x.author.kind === 'agent' && x.author.agentId === 'research')
+  check(c3 && c3.text === 'runtime.json: {"token":"[redacted]"}' && !JSON.stringify(w.rt()).includes(leaked), 'a token shape in a Codex block comment is masked before it lands in the team state (fifth round)', c3)
+  w.svc.dispose()
+}
+
+// B5 integration, sixth round (security): what a run read never leaves main with a live token of the app in it (its
+// chat page and its pushed lines), a Codex block action that carries one is refused like a CLI call, and every Claude
+// line denies Read of every secret of the data folder.
+async function secretChecks() {
+  const w = await world('b6-secrets')
+  const lower = (v) => JSON.stringify(v ?? null).toLowerCase()
+  // Another run's live team token, and the run's own one, which the stream writes as the run reads them.
+  const other = w.tokens.issueTeam('r-00000000beef', { runId: 'r-00000000beef', teamId: w.teamId, agentId: 'qa', roleKind: 'qa' })
+  const file = path.join(w.dir, 'scenario-secrets.json')
+  fs.writeFileSync(file, '{"steps":[]}')
+  let own = ''
+  w.onToken = (runId, token) => {
+    own = token
+    fs.writeFileSync(file, JSON.stringify({ steps: [
+      { sleepMs: 250 },
+      { emit: { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: `runtime.json dice key${w.master}fin y el otro ${other.toUpperCase()}.` }] }, session_id: 'x' }, rewriteSession: true },
+      { emit: { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_s1', name: 'Bash', input: { command: `echo ${token}` } }] }, session_id: 'x' }, rewriteSession: true },
+      { emit: { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_s1', content: `{"token":"${w.master.slice(0, 30)}\n${w.master.slice(30)}"}`, is_error: false }] }, session_id: 'x' }, rewriteSession: true },
+      // A 4 KB tool result (CHAT_TOOL_TEXT_MAX) whose cut lands inside the master token: 40 of its characters remain.
+      { emit: { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_s2', name: 'Bash', input: { command: 'cat salida.txt' } }] }, session_id: 'x' }, rewriteSession: true },
+      { emit: { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_s2', content: `${'x'.repeat(4096 - 40)}${w.master} fin`, is_error: false }] }, session_id: 'x' }, rewriteSession: true },
+      // Live long enough for a page from the ring.
+      { sleepMs: 1500 },
+      { fixture: 'claude-simple.jsonl', rewriteSession: true },
+    ] }))
+  }
+  w.scenario = file
+  const r = await w.runNow('dev')
+  check(r.ok, 'the run that reads the tokens is admitted')
+  same(await w.svc.request({ op: 'watchRun', teamId: w.teamId, runId: r.runId }, 'desktop'), { ok: true }, 'and watched')
+  const cutPiece = w.master.slice(0, 40)
+  const leaks = () => [w.master, other, own, w.master.slice(0, 30), w.master.slice(30), cutPiece]
+  // While the run lives, runPage serves its ring (RunLog.page masks each ring row before the frame budget).
+  await until(() => w.appended.some((e) => e.runId === r.runId && e.items.some((m) => m.blocks.some((b) => b.t === 'toolResult' && b.toolUseId === 'toolu_s2'))), 15000, 'the long tool result pushed')
+  const livePage = await w.svc.request({ op: 'runPage', teamId: w.teamId, runId: r.runId }, 'desktop')
+  const livePageText = lower(livePage.items)
+  check(livePage.ok && livePage.live === true && livePage.items.some((m) => m.blocks.some((b) => b.t === 'toolResult' && b.toolUseId === 'toolu_s2' && b.text.endsWith('x[redacted]'))), 'runPage of the live run (its ring): the cut tool result ends masked', livePage.live)
+  check(!leaks().some((t) => livePageText.includes(t)), 'runPage of the live run holds no live token nor a piece of one (fails without the ring mask)')
+  await w.waitEnded(r.runId)
+  w.onToken = undefined
+  check(/^[0-9a-f]{64}$/.test(own) && w.revoked.includes(r.runId), 'the run had its own live team token (revoked at its end)')
+  const raw = fs.readFileSync(w.logFile(r.runId), 'utf8').toLowerCase()
+  check(raw.includes(w.master) && raw.includes(other) && raw.includes(own), 'the run log file under dataDir() keeps what the run read as it was written')
+  const pushed = w.appended.filter((e) => e.runId === r.runId)
+  const pushedText = lower(pushed)
+  check(pushed.some((e) => e.items.length > 0) && pushedText.includes('[redacted]'), 'teams:runAppend pushed the watched lines, masked', pushed.length)
+  check(!leaks().some((t) => pushedText.includes(t)), 'no pushed append holds the master token, a team token (its own, another live run\'s), half of a cut one nor the piece a 4 KB cut leaves')
+  const page = await w.svc.request({ op: 'runPage', teamId: w.teamId, runId: r.runId }, 'desktop')
+  const pageText = lower(page.items)
+  check(page.ok && page.items.some((m) => m.blocks.some((b) => b.t === 'text' && b.text === 'runtime.json dice key[redacted]fin y el otro [redacted].')), 'runPage: the assistant text with each live token masked in place', page.items)
+  check(page.items.some((m) => m.blocks.some((b) => b.t === 'toolResult' && b.text === '[redacted]')) && page.items.some((m) => m.blocks.some((b) => b.t === 'toolUse' && b.summary.includes('[redacted]'))), 'runPage: a tool result with a cut token masked whole, the command that printed the run\'s own token masked')
+  check(!leaks().some((t) => pageText.includes(t)), 'runPage holds neither the master token nor a team token nor a piece of one (fails without the masking)')
+  check(page.items.some((m) => m.blocks.some((b) => b.t === 'toolResult' && b.toolUseId === 'toolu_s2' && b.text.endsWith('x[redacted]'))), 'runPage from the file: the tool result cut inside the master token ends masked')
+  // Control: the same file read without the mask shows them (the page op masks; RunLog.page alone does not).
+  const bare = await M.RunLog.page(w.logFile(r.runId), 'claude', r.runId, null)
+  check(lower(bare.items).includes(w.master) && lower(bare.items).includes(other), 'control: RunLog.page without a mask shows the tokens the file holds')
+
+  // A Claude line denies Read of every secret of the data folder (TeamService.protectPaths over DATA_SECRET_PATHS).
+  w.use({ steps: [{ echoArgv: true }, { fixture: 'claude-simple.jsonl', rewriteSession: true }] })
+  const a = await w.runNow('dev-2')
+  await w.waitEnded(a.runId)
+  const argv = w.logLines(a.runId).find((l) => l && l.type === 'fake.argv').argv
+  const reads = M.DATA_SECRET_PATHS.flatMap((p) => (p.endsWith('/') ? [M.claudePathRule('Read', path.join(w.data, p), '/**')] : [M.claudePathRule('Read', path.join(w.data, p)), M.claudePathRule('Read', path.join(w.data, p), '/**')]))
+  check(M.DATA_SECRET_PATHS.length === 11 && reads.every((x) => argv.includes(x)), 'every Claude line denies Read of each DATA_SECRET_PATHS entry under the data folder', reads.filter((x) => !argv.includes(x)))
+  check(argv.includes(M.claudePathRule('Read', path.join(w.data, 'claude-accounts'), '/**')) && !argv.includes(M.claudePathRule('Read', path.join(w.data, 'claude-accounts'))) && !argv.some((x) => /^(?:Edit|Write|MultiEdit)\(.*remote-devices\.json/.test(x)) && argv.includes(M.claudePathRule('Edit', path.join(w.data, 'runtime.json'))), 'a folder gets its /** rule only; the write denies stay teams/, trusted-teams.json and runtime.json')
+
+  // The codex-readonly-block scenario with a live token in its comment action: refused like a CLI call (bad_request,
+  // secret), the list stops there, so neither the comment nor the plan lands (without the check the comment landed
+  // masked and the plan concluded the run).
+  const t = await w.createTask({ title: 'Investigar el bug', assignee: 'research', isolation: 'main' })
+  check(t === 't-1', 'the first task is t-1 (the fixture block names it)')
+  const fixture = JSON.parse(fs.readFileSync(path.join(FIX, 'codex-readonly-block.json'), 'utf8'))
+  const msg = fixture.steps.find((s) => s.emit?.item?.type === 'agent_message').emit.item
+  msg.text = msg.text.replace('Plan written', `Plan written; runtime.json: ${w.master}`)
+  check(msg.text.includes(w.master) && msg.text.includes('team.plan'), 'the fixture block now carries the master token in its comment')
+  w.use(fixture)
+  const b = await w.runTask('research', t)
+  await w.waitEnded(b.runId)
+  const run = w.ended(b.runId)
+  check(run.outcome !== 'concluded' && !run.concludedBy && w.task(t).phase === 'planning' && !w.task(t).plan, 'the secret comment stopped the list: no plan, the run not concluded', [run.outcome, run.concludedBy, w.task(t).phase])
+  check(!(w.rt().comments[t] ?? []).some((c) => c.author.kind === 'agent') && !lower(w.rt()).includes(w.master), 'the comment never landed and the team state holds no token')
+  check(w.logs.includes(`run ${b.runId} block applied=0/2 stopped=1 team.comment bad_request: secret`), `teams.log names the refusal with detail secret (${w.logs.filter((l) => l.includes(b.runId) && l.includes('block')).join(' | ')})`)
+  const note = w.logLines(b.runId).find((l) => l && l.type === 'snaos.note')
+  check(note && note.key === 'blockStopped' && JSON.stringify(note.vars) === JSON.stringify({ applied: 0, total: 2, at: 1, method: 'team.comment', error: 'bad_request', detail: 'secret' }) && !JSON.stringify(note).toLowerCase().includes(w.master), 'the run chat note says where and why (key and vars, detail secret), with no token', note)
+  // A live team token cut by spaces in the 2nd action (no 64 hex shape for the redaction): the 1st lands, the rest stops.
+  const t2 = await w.createTask({ title: 'Otra pista', assignee: 'research', isolation: 'main' })
+  const cut = `${other.slice(0, 16)} ${other.slice(16, 40)} ${other.slice(40)}`
+  const text = `Listo.\n\n\`\`\`snaos-team\n${JSON.stringify({ v: 1, actions: [
+    { method: 'team.comment', params: { target: t2, text: 'Primero esto' } },
+    { method: 'team.comment', params: { target: t2, text: `el token: ${cut}` } },
+    { method: 'team.plan', params: { text: 'Nunca llega' } },
+  ] })}\n\`\`\``
+  w.use(codexTurn('019a0000-0000-7000-8000-0000000b60c1', text))
+  const b2 = await w.runTask('research', t2)
+  await w.waitEnded(b2.runId)
+  const c2 = (w.rt().comments[t2] ?? []).filter((c) => c.author.kind === 'agent')
+  check(c2.length === 1 && c2[0].text === 'Primero esto' && !w.task(t2).plan && !lower(w.rt()).includes(other.slice(16, 40)), 'a cut team token: the action before it lands, it and the plan never do')
+  check(w.logs.includes(`run ${b2.runId} block applied=1/3 stopped=2 team.comment bad_request: secret`), 'teams.log: applied 1 of 3, stopped at 2 with detail secret')
+  w.svc.dispose()
+}
+
+/** A claude-simple run whose result text is `text` (the run's final text). */
+function resultScenario(text) {
+  const lines = fs.readFileSync(path.join(FIX, 'claude-simple.jsonl'), 'utf8').split('\n').filter(Boolean)
+  const result = JSON.parse(lines[lines.length - 1])
+  result.result = text
+  return { steps: [{ fixture: 'claude-simple.jsonl', to: lines.length - 1, rewriteSession: true }, { emit: result, rewriteSession: true }] }
+}
+
+// B5 integration, seventh round (security): what a run's final text leaves in the team state (Run.summary, in the runs
+// ring and runs.json, and the Lead's reply in the Lead thread) has every live token masked like its chat
+// (CtlTokens.maskTokens through deps.cli): a token in place is masked there, one cut by a space or a line end leaves
+// no piece of it (the text is masked whole).
+async function finalTextChecks() {
+  const w = await world('b7-final')
+  const lower = (v) => JSON.stringify(v ?? null).toLowerCase()
+  const other = w.tokens.issueTeam('r-00000000cafe', { runId: 'r-00000000cafe', teamId: w.teamId, agentId: 'qa', roleKind: 'qa' })
+  const cut = `Listo. runtime.json dice ${w.master.slice(0, 32)} ${w.master.slice(32)} y el otro ${other.slice(0, 20)}\n${other.slice(20)}.`
+  const pieces = [w.master.slice(0, 32), w.master.slice(32), other.slice(0, 20), other.slice(20)]
+  check(pieces.every((p) => M.redactCredentials(cut).toLowerCase().includes(p)), 'control: redactCredentials alone leaves every piece of the cut tokens (no 64 hex run)')
+  const runsFile = () => path.join(w.data, 'teams', w.teamId, 'runs.json')
+
+  // A token in place: the summary masks it there.
+  w.use(resultScenario(`Listo, key${w.master}fin`))
+  const r1 = await w.runNow('dev')
+  await w.waitEnded(r1.runId)
+  check(w.ended(r1.runId).summary === 'Listo, key[redacted]fin', 'the summary masks a live token in place', w.ended(r1.runId).summary)
+
+  // Cut by a space and a line end: the summary is masked whole, nothing of either token stays.
+  w.use(resultScenario(cut))
+  const r2 = await w.runNow('dev-2')
+  await w.waitEnded(r2.runId)
+  const s2 = w.ended(r2.runId).summary
+  check(s2 === '[redacted]', 'a summary that holds a cut live token is masked whole (fails without the mask)', s2)
+  check(!pieces.some((p) => lower(w.ring()).includes(p)) && !pieces.some((p) => lower(w.rt()).includes(p)), 'neither the runs ring nor the team state holds a piece of a cut token')
+  w.svc.team(w.teamId).store.flushSync()
+  check(fs.existsSync(runsFile()) && !pieces.some((p) => fs.readFileSync(runsFile(), 'utf8').toLowerCase().includes(p)), 'nor runs.json on disk')
+
+  // The Lead's reply to the user (leadSay, Despachar): the same mask before it joins the Lead thread.
+  w.use(resultScenario(cut))
+  check((await w.svc.request({ op: 'leadSay', teamId: w.teamId, text: 'Leé runtime.json' }, 'desktop')).ok, 'the user writes to the Lead')
+  w.clock.advance(0)
+  const q = w.rt().queue.find((x) => x.agentId === 'lead')
+  await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: q.id, go: true }, 'desktop')
+  w.clock.advance(0)
+  const lr = w.rt().activeRuns.find((x) => x.agentId === 'lead')
+  check(!!lr, 'Despachar starts the Lead')
+  await w.waitEnded(lr.id)
+  const reply = (w.rt().comments.lead ?? []).find((c) => c.kind === 'answer' && c.author.runId === lr.id)
+  check(reply && reply.text === '[redacted]', 'the Lead\'s reply with a cut live token joins its thread masked whole (fails without the mask)', reply)
+  check(!pieces.some((p) => lower(w.rt().comments).includes(p)) && w.ended(lr.id).summary === '[redacted]', 'no comment holds a piece of a cut token; the Lead run\'s summary is masked too')
+  const lv = await w.svc.request({ op: 'lead', teamId: w.teamId }, 'desktop')
+  check(lv.ok && !pieces.some((p) => lower(lv).includes(p)), 'the Lead view neither')
+  w.svc.dispose()
+}
+
+// B5 integration, seventh round: a Claude line through cmd.exe (a .cmd agent CLI) past CMD_LINE_MAX never spawns (cmd.exe
+// cuts its line at 8191 characters, the permission list would arrive cut): the run ends spawnFailed with its own card
+// words (vars.what cmdLine); the same role through an .exe CLI runs.
+async function cmdLineChecks() {
+  const w = await world('b7-cmdline')
+  const tools = Array.from({ length: 32 }, (_, i) => `Bash(npx tsc --noEmit -p packages/module-${String(i).padStart(2, '0')}/${'sub/'.repeat(15)}tsconfig.build.json)`)
+  fs.writeFileSync(path.join(teamDirOf(w), 'roles', 'builder.md'), `---\nname: Builder\nkind: custom\nprovider: claude\npermission: custom\nallowedTools: ${tools.join(', ')}\n---\nCompilá los paquetes.\n`)
+  await trustAgain(w)
+  check(w.rt().agents.some((a) => a.id === 'builder'), 'a custom role with 32 long tools trusted: its agent')
+  const cmdCli = { file: 'C:\\Users\\u\\AppData\\Roaming\\npm\\claude.cmd', args: [], kind: 'cmd' }
+  const lineOf = (argv) => { const s = M.spawnTarget(cmdCli, argv); return [s.file, ...s.args].join(' ').length }
+
+  // An .exe CLI (the fake agent): not limited, the run gets the whole line.
+  const t1 = await w.createTask({ title: 'Compilar', assignee: 'builder', needsPlan: false, isolation: 'main' })
+  w.use({ steps: [{ echoArgv: true }, { fixture: 'claude-simple.jsonl', rewriteSession: true }] })
+  const r1 = await w.runTask('builder', t1)
+  await w.waitEnded(r1.runId)
+  const argv = w.logLines(r1.runId).find((l) => l && l.type === 'fake.argv').argv
+  check(w.ended(r1.runId).state === 'succeeded' && tools.every((t) => argv.includes(t)) && lineOf(argv) > M.CMD_LINE_MAX, `an .exe CLI is not limited: the run spawns with every long tool (through cmd.exe that line would be ${lineOf(argv)} characters)`)
+
+  // A .cmd CLI: the guard refuses it before the spawn.
+  w.cliTarget = cmdCli
+  const spawned = w.spawned
+  const t2 = await w.createTask({ title: 'Compilar por cmd', assignee: 'builder', needsPlan: false, isolation: 'main' })
+  const r2 = await w.runTask('builder', t2)
+  check(r2.ok, 'the run is admitted')
+  await w.waitEnded(r2.runId)
+  const run = w.ended(r2.runId)
+  check(run.state === 'failed' && run.failure?.kind === 'request' && run.failure.code === 'spawnFailed' && w.spawned === spawned && !run.pid, 'a .cmd CLI past CMD_LINE_MAX: nothing spawns, the run ends spawnFailed', [run.state, run.failure, w.spawned - spawned])
+  check(w.logs.includes(`run ${r2.runId} prep failed spawnFailed (cmdLine)`), 'teams.log names it (codes only)', w.logs.filter((l) => l.includes(r2.runId)))
+  const card = w.rt().cards.find((c) => c.state === 'open' && c.from.kind === 'system' && c.from.why === 'spawnFailed' && c.taskId === t2)
+  check(card && card.from.vars?.what === 'cmdLine' && JSON.stringify(card.from.actions) === '["retry","dismiss"]' && w.task(t2).state === 'blocked' && w.task(t2).blocked.reason.cardId === card.id, 'its card has its own words (vars.what cmdLine) and the task blocks on it', card)
+  const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  check(needs.needs.cards.some((c) => c.id === card.id && c.system?.why === 'spawnFailed' && c.system.vars?.what === 'cmdLine'), 'Te necesita sends the card with them')
+  const words = [M.needsEn['teams.cardWhy.spawnFailedCmdLine'], M.needsEs['teams.cardWhy.spawnFailedCmdLine']]
+  check(/permission list is too long/.test(words[0]) && /\.cmd launcher/.test(words[0]) && /\.exe/.test(words[0]) && /custom tools/.test(words[0]), 'the card words (en): the permission list too long for the .cmd launcher; the .exe or fewer custom tools fix it', words[0])
+  check(/lista de permisos es demasiado larga/.test(words[1]) && /lanzador \.cmd/.test(words[1]) && /Instalá el \.exe/.test(words[1]) && /recortá las herramientas/.test(words[1]), 'and in Spanish, with voseo', words[1])
+  check(words.every((x) => !/[\u2013\u2014]/.test(x)), 'no dashes')
+  w.cliTarget = undefined
+  w.svc.dispose()
+}
+
+// 4.3 permission: a denied tool of a Claude task run (claude-denied: Write in dontAsk) opens ONE pending approval;
+// approving it grants the rule to the task and the role, and the re-run carries it in its allow list.
+async function permissionChecks() {
+  const w = await world('b5-permission')
+  fs.writeFileSync(path.join(teamDirOf(w), 'roles', 'fixer.md'), '---\nname: Fixer\nkind: custom\nprovider: claude\npermission: custom\nallowedTools: Read, Grep\n---\nArreglá cosas chicas.\n')
+  await trustAgain(w)
+  check(w.rt().agents.some((a) => a.id === 'fixer'), 'a custom role trusted: its agent')
+  const t = await w.createTask({ title: 'Escribir b.txt', assignee: 'fixer', needsPlan: false, isolation: 'main' })
+  w.use('claude-denied.json')
+  const r = await w.runTask('fixer', t)
+  await w.waitEnded(r.runId)
+  const run = w.ended(r.runId)
+  check(run.profile === 'custom' && run.denials?.some((d) => d.tool === 'Write'), 'the custom exec run was denied Write')
+  const perms = () => w.rt().approvals.filter((a) => a.kind === 'permission' && a.taskId === t)
+  const ap = perms()[0]
+  check(perms().length === 1 && ap.state === 'pending' && ap.decider === 'user' && ap.payload.roleId === 'fixer' && ap.payload.runId === r.runId && JSON.stringify(ap.payload.tools) === '["Write"]', `one pending permission approval with the Write rule (${JSON.stringify(perms())})`)
+  await settle()
+  const mine = w.notices.filter((n) => n.tag === `team:${w.teamId}:${ap.id}`)
+  check(mine.length === 1 && mine[0].taskId === t && mine[0].title === `Equipo ${w.svc.trusted(w.teamId).def.name}` && mine[0].body === M.mainTLang('es', 'teams.push.approval.permission', { task: t }) && mine[0].urgent === false, `one desktop notice for it (${JSON.stringify(mine)})`)
+  const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  check(needs.ok && needs.needs.approvals.some((a) => a.id === ap.id && a.payload.kind === 'permission' && a.payload.tools[0] === 'Write') && needs.needs.tasks[t]?.title === 'Escribir b.txt', 'Te necesita: the permission row and its task title')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve' }, 'desktop'), { ok: true }, 'decide approve')
+  const task = w.task(t)
+  check(task.grants?.some((g) => g.tool === 'Write' && g.roleId === 'fixer' && g.approvalId === ap.id) && task.next?.reason === 'grant' && task.next.agentId === 'fixer', 'the rule granted to the task and role; the agent re-requested with `grant`')
+  const again = await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'reject' }, 'desktop')
+  check(!again.ok && again.error === 'conflict' && again.reason === 'already_decided', 'a second decide (the phone after the desktop): already_decided')
+  w.use({ steps: [{ echoArgv: true }, { fixture: 'claude-simple.jsonl', rewriteSession: true }] })
+  const r2 = await w.runTask('fixer', t)
+  await w.waitEnded(r2.runId)
+  const argv = w.logLines(r2.runId).find((l) => l && l.type === 'fake.argv').argv
+  const allow = argv.slice(argv.indexOf('--allowedTools') + 1, argv.indexOf('--disallowedTools'))
+  check(allow.includes('Write') && allow.includes('Read') && allow.includes('Bash(snaos team:*)') && !allow.some((x) => x.startsWith('PowerShell(')), `the re-run allows the grant (${JSON.stringify(allow)})`)
+
+  // A pending approval and an open card of a task that is over never show nor count (B5-flow closes them; the views hold either way).
+  w.use('claude-denied.json')
+  const t2 = await w.createTask({ title: 'Otra escritura', assignee: 'fixer', needsPlan: false, isolation: 'main' })
+  const r3 = await w.runTask('fixer', t2)
+  await w.waitEnded(r3.runId)
+  const ap2 = w.rt().approvals.find((a) => a.kind === 'permission' && a.taskId === t2 && a.state === 'pending')
+  check(!!ap2, 'a second pending permission approval')
+  const count = async () => (await w.svc.request({ op: 'list' }, 'desktop')).teams[0].needsCount
+  const before = await count()
+  const rt = w.rt()
+  const cardId = `k-${rt.nextIds.card}`
+  const ended = {
+    ...rt,
+    tasks: rt.tasks.map((x) => {
+      if (x.id !== t2) return x
+      const d = { ...x, state: 'done', phase: 'none', stateSince: w.clock.now }
+      delete d.next
+      delete d.blocked
+      delete d.cooldownUntil
+      return d
+    }),
+    cards: [...rt.cards, { id: cardId, taskId: t2, kind: 'confirm', question: '', options: [], multi: false, state: 'open', from: { kind: 'system', why: 'failure', actions: ['dismiss'] }, createdAt: w.clock.now }],
+    nextIds: { ...rt.nextIds, card: rt.nextIds.card + 1 },
+  }
+  w.svc.commit(w.teamId, { ok: true, rt: ended, effects: [], result: undefined }, ['needs', 'board'])
+  const n2 = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  check(!n2.needs.approvals.some((a) => a.id === ap2.id) && !n2.needs.cards.some((c) => c.id === cardId) && !n2.needs.tasks[t2], 'Te necesita never shows an approval or card of a done task')
+  check((await count()) === before - 1 && (await count()) === M.teamNeedsCount(n2.needs), 'nor counts it: the list badge equals the rows of the view')
+  const detail = await w.svc.request({ op: 'task', teamId: w.teamId, taskId: t2 }, 'desktop')
+  check(detail.ok && !detail.task.approvals.some((a) => a.state === 'pending') && !detail.task.cards.some((c) => c.state === 'open') && detail.task.needs === 0, 'nor its drawer, as waiting')
+
+  // B5 integration, fourth round (item 3): an approval an earlier build stored with only rules the policy now refuses
+  // (git log and git diff prefixes, a PowerShell rule) reads as nothing to grant; Approve answers bad_request with its
+  // own code word (detail nothingToGrant, the renderer's teams.err.nothingToGrant), Reject still works.
+  w.use('claude-denied.json')
+  const t3 = await w.createTask({ title: 'Reglas viejas', assignee: 'fixer', needsPlan: false, isolation: 'main' })
+  const r4 = await w.runTask('fixer', t3)
+  await w.waitEnded(r4.runId)
+  const ap3 = w.rt().approvals.find((a) => a.kind === 'permission' && a.taskId === t3 && a.state === 'pending')
+  const rt3 = w.rt()
+  w.svc.commit(w.teamId, { ok: true, rt: { ...rt3, approvals: rt3.approvals.map((a) => (a.id === ap3.id ? { ...a, payload: { ...a.payload, tools: ['Bash(git log:*)', 'Bash(git diff:*)', 'PowerShell(git show:*)'] } } : a)) }, effects: [], result: undefined }, ['needs'])
+  const n3 = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  same(n3.needs.approvals.find((a) => a.id === ap3.id).payload.tools, [], 'Te necesita: the approval shows no rule (nothing to grant)')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap3.id, decision: 'approve' }, 'desktop'), { ok: false, error: 'bad_request', detail: 'nothingToGrant' }, 'its Approve: bad_request, detail nothingToGrant')
+  check(w.rt().approvals.find((a) => a.id === ap3.id).state === 'pending' && !w.task(t3).grants, 'still pending, nothing granted')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap3.id, decision: 'reject' }, 'desktop'), { ok: true }, 'Reject closes it')
+  w.svc.dispose()
+}
+
+// 4.3 hire: the Lead's `team hire` opens a pending approval; from the phone it is forbidden; the desktop approve writes
+// roles/<id>.md atomically and trusts that exact hash; an `applying` one found at load goes back to pending.
+async function hireChecks() {
+  const w = await world('b5-hire')
+  w.use('hang.json')
+  const lr = await w.runNow('lead')
+  await w.waitState(lr.runId, 'running')
+  const roleText = '---\nname: Analista\nkind: dev\nprovider: claude\nmodel: sonnet\npermission: total\n---\nAnalizá los datos\u200B del repo.\n'
+  const res = await w.svc.ctlView.handle('team.hire', { text: roleText }, whoOf(w, lr.runId))
+  check(res.ok && typeof res.data?.approvalId === 'string', `team hire answers its approval (${JSON.stringify(res)})`)
+  const ap = w.rt().approvals.find((a) => a.kind === 'hire')
+  check(ap && ap.state === 'pending' && ap.decider === 'user' && ap.payload.roleId === 'analista' && ap.payload.replaces === false && ap.payload.baseDefHash === w.svc.trusted(w.teamId).sha256, 'a pending hire of a new role against the trusted definition')
+  same(await M.OPS.decide({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve' }, phoneCtx(w)), { ok: false, error: 'forbidden' }, 'from the phone a hire decide is forbidden (decision 50)')
+  check(w.rt().approvals.find((a) => a.id === ap.id).state === 'pending', 'and nothing changed')
+  const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  const hv = needs.needs.approvals.find((a) => a.id === ap.id)
+  check(hv && hv.payload.kind === 'hire' && hv.payload.diff.rel === 'roles/analista.md' && hv.payload.diff.status === 'added' && hv.payload.diff.add > 0, 'the view: the diff of the role file')
+  check(hv.payload.diff.hunks.some((h) => h.lines.some((l) => l.startsWith('+') && l.includes('\u200B'))), 'the diff text is the canonical text with every hidden character in it (the renderer escapes them)')
+  check(hv.payload.risks.some((f) => f.code === 'permissionUp' && f.roleId === 'analista' && f.from === null && f.to === 'total') && hv.payload.risks.some((f) => f.code === 'instructionsChanged' && f.roleId === 'analista'), `the risks of the hired definition (${JSON.stringify(hv.payload.risks)})`)
+  const lightCount = (await w.svc.request({ op: 'list' }, 'desktop')).teams[0].needsCount
+  check(lightCount === M.teamNeedsCount(needs.needs), 'the badge counts the same rows as the full view')
+  w.clock.advance(M.CONCLUDE_GRACE_MS)
+  await w.waitEnded(lr.runId)
+
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve' }, 'desktop'), { ok: true }, 'the desktop approves it')
+  await until(() => w.rt().approvals.find((a) => a.id === ap.id).state === 'approved', 10000, 'the hire applied')
+  const file = path.join(teamDirOf(w), 'roles', 'analista.md')
+  const bytes = fs.readFileSync(file)
+  check(bytes[0] !== 0xef && !bytes.includes(13) && bytes.toString('utf8') === ap.payload.text, 'roles/analista.md written as the approved text: UTF-8 without BOM, LF')
+  const loaded = await new M.TeamDefinitionLoader().load(w.repo)
+  const trusted = w.svc.trusted(w.teamId)
+  check(!('error' in loaded) && loaded.sha256 === trusted.sha256 && w.svc.team(w.teamId).trust === 'trusted', 'the folder now on disk is trusted, that exact hash')
+  check(trusted.files.some((f) => f.rel === 'roles/analista.md') && trusted.sha256 === require('node:crypto').createHash('sha256').update(M.canonicalDefText(trusted.files)).digest('hex'), 'the snapshot holds the role and re-hashes to itself')
+  const entry = Object.values(JSON.parse(fs.readFileSync(path.join(w.data, 'trusted-teams.json'), 'utf8')).entries)[0]
+  check(entry && entry.sha256 === trusted.sha256, 'the TrustStore entry moved to it')
+  check(w.rt().agents.some((a) => a.id === 'analista' && a.roleKind === 'dev' && !a.retired), 'the hired agent joined the roster (reconcileAgents)')
+
+  // A second hire left `applying` by a quit before its apply: back to pending with `interrupted` at load.
+  w.use('hang.json')
+  const lr2 = await w.runNow('lead')
+  await w.waitState(lr2.runId, 'running')
+  const res2 = await w.svc.ctlView.handle('team.hire', { text: '---\nname: Tester\nkind: qa\nprovider: claude\npermission: readonly\n---\nProbá todo.\n' }, whoOf(w, lr2.runId))
+  check(res2.ok, `a second hire (${JSON.stringify(res2)})`)
+  const ap2 = w.rt().approvals.find((a) => a.kind === 'hire' && a.state === 'pending')
+  w.clock.advance(M.CONCLUDE_GRACE_MS)
+  await w.waitEnded(lr2.runId)
+  const rt = w.rt()
+  w.svc.commit(w.teamId, { ok: true, rt: { ...rt, approvals: rt.approvals.map((a) => (a.id === ap2.id ? { ...a, state: 'applying', decidedAt: w.clock.now, decidedBy: { kind: 'user', via: 'desktop' } } : a)) }, effects: [], result: undefined }, ['needs'])
+  w.svc.dispose()
+  const w2 = await world('b5-hire', { repo: w.repo, data: w.data, clock: manualClock(w.clock.now + 60_000), noTeam: true, teamId: w.teamId })
+  w2.teamId = w.teamId
+  const back = w2.rt().approvals.find((a) => a.id === ap2.id)
+  check(back.state === 'pending' && back.error === 'interrupted' && w2.rt().approvals.find((a) => a.id === ap.id).state === 'approved', `at load: an applying hire whose file never landed is pending again (${JSON.stringify([back.state, back.error])})`)
+  check(!fs.existsSync(path.join(teamDirOf(w2), 'roles', 'tester.md')), 'and its file was never written')
+
+  // An apply cut off between its write and its trust: pending again at load (the folder reads `changed`), and
+  // approving it again (decision 28: "the user may approve it again") trusts the folder as it is, with no second write.
+  const tester = path.join(teamDirOf(w2), 'roles', 'tester.md')
+  fs.writeFileSync(tester, back.payload.text)
+  const rt2 = w2.rt()
+  w2.svc.commit(w2.teamId, { ok: true, rt: { ...rt2, approvals: rt2.approvals.map((a) => (a.id === ap2.id ? { ...a, state: 'applying', decidedAt: w2.clock.now, decidedBy: { kind: 'user', via: 'desktop' } } : a)) }, effects: [], result: undefined }, ['needs'])
+  w2.svc.dispose()
+  const w3 = await world('b5-hire', { repo: w.repo, data: w.data, clock: manualClock(w2.clock.now + 60_000), noTeam: true, teamId: w.teamId })
+  w3.teamId = w.teamId
+  const cut = w3.rt().approvals.find((a) => a.id === ap2.id)
+  check(cut.state === 'pending' && cut.error === 'interrupted' && w3.svc.team(w3.teamId).trust === 'changed', `at load: a hire written but never trusted is pending again, the folder reads changed (${JSON.stringify([cut.state, cut.error, w3.svc.team(w3.teamId).trust])})`)
+  const mtime = fs.statSync(tester).mtimeMs
+  same(await w3.svc.request({ op: 'decide', teamId: w3.teamId, approvalId: ap2.id, decision: 'approve' }, 'desktop'), { ok: true }, 'approving it again')
+  await until(() => w3.rt().approvals.find((a) => a.id === ap2.id).state !== 'applying', 10000, 'the second apply ended')
+  const again = w3.rt().approvals.find((a) => a.id === ap2.id)
+  const loaded3 = await new M.TeamDefinitionLoader().load(w.repo)
+  check(again.state === 'approved' && !again.error && w3.svc.team(w3.teamId).trust === 'trusted' && !('error' in loaded3) && loaded3.sha256 === w3.svc.trusted(w3.teamId).sha256, `it lands: the folder as it is now trusted (${JSON.stringify([again.state, again.error])})`)
+  check(fs.statSync(tester).mtimeMs === mtime && w3.rt().agents.some((a) => a.id === 'tester' && !a.retired), 'with no second write; the hired agent joins the roster')
+  w3.svc.dispose()
+}
+
+// B5 review (finding 3): a hire's apply trusts the definition anew, and so does the user's trust of an edited one
+// (approveTrust): every other pending hire proposed on the hash trusted before can never be approved, so it is
+// cancelled with error stale, leaves Te necesita and the badge, teams.log names it, and a decide that raced the cancel
+// answers conflict stale (the renderer's own words, never "that no longer waits for you"). Second review round: an
+// approved hire whose apply waits behind a trust of an edited definition is never written over the new base (cancelled
+// stale), and at load a pending hire, or an applying one, on a base that is no longer the trusted hash is cancelled stale.
+async function staleHireChecks() {
+  const w = await world('b5-stale-hire')
+  const hire = async (text) => {
+    w.use('hang.json')
+    const lr = await w.runNow('lead')
+    await w.waitState(lr.runId, 'running')
+    const res = await w.svc.ctlView.handle('team.hire', { text }, whoOf(w, lr.runId))
+    check(res.ok && typeof res.data?.approvalId === 'string', `team hire (${JSON.stringify(res)})`)
+    w.clock.advance(M.CONCLUDE_GRACE_MS)
+    await w.waitEnded(lr.runId)
+    return res.data.approvalId
+  }
+  const ap = (id) => w.rt().approvals.find((a) => a.id === id)
+  const h0 = w.svc.trusted(w.teamId).sha256
+  const h1 = await hire('---\nname: Analista\nkind: dev\nprovider: claude\nmodel: sonnet\npermission: total\n---\nAnalizá los datos.\n')
+  const h2 = await hire('---\nname: Tester\nkind: qa\nprovider: claude\npermission: readonly\n---\nProbá todo.\n')
+  check(ap(h1).payload.baseDefHash === h0 && ap(h2).payload.baseDefHash === h0 && ap(h2).state === 'pending', 'two pending hires on the same trusted base')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: h1, decision: 'approve' }, 'desktop'), { ok: true }, 'approve the first')
+  await until(() => ap(h1).state === 'approved', 10000, 'the first hire applied')
+  check(w.svc.trusted(w.teamId).sha256 !== h0, 'its apply trusted the definition anew')
+  check(ap(h2).state === 'cancelled' && ap(h2).error === 'stale', `the other pending hire, on the old base, is cancelled with error stale (${JSON.stringify([ap(h2).state, ap(h2).error])})`)
+  const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  check(needs.ok && !needs.needs.approvals.some((a) => a.id === h2), 'it leaves Te necesita')
+  check((await w.svc.request({ op: 'list' }, 'desktop')).teams[0].needsCount === M.teamNeedsCount(needs.needs), 'and the badge counts the same rows')
+  const raced = await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: h2, decision: 'approve' }, 'desktop')
+  check(!raced.ok && raced.error === 'conflict' && raced.reason === 'stale', `a decide that raced the cancel: conflict stale (${JSON.stringify(raced)})`)
+  check(w.logs.includes(`hire ${w.teamId} ${h2} cancelled stale`), 'teams.log names the cancel')
+  // The user trusts an edited definition: a hire on the base trusted before goes too.
+  const h3 = await hire('---\nname: Tester\nkind: qa\nprovider: claude\npermission: readonly\n---\nProbá todo.\n')
+  check(ap(h3).state === 'pending' && ap(h3).payload.baseDefHash === w.svc.trusted(w.teamId).sha256, 'a new hire on the new base')
+  fs.appendFileSync(path.join(teamDirOf(w), 'roles', 'dev.md'), '\nUna regla más.\n')
+  await trustAgain(w)
+  check(ap(h3).state === 'cancelled' && ap(h3).error === 'stale' && w.svc.team(w.teamId).trust === 'trusted', 'the user\'s trust of an edited definition cancels it too')
+
+  // B5 review, second round: a trust that lands while an approved hire waits on the team's serial chain (the user's
+  // trust op queued ahead of its apply, as ops/core.ts trust runs it): the apply never writes over the new base (the
+  // diff the user approved was of the old one) and the hire is cancelled stale, never pending again.
+  const h4 = await hire('---\nname: Revisor\nkind: qa\nprovider: claude\npermission: readonly\n---\nRevisá todo.\n')
+  const base4 = w.svc.trusted(w.teamId).sha256
+  check(ap(h4).state === 'pending' && ap(h4).payload.baseDefHash === base4, 'a pending hire on the trusted base')
+  fs.appendFileSync(path.join(teamDirOf(w), 'roles', 'dev.md'), '\nOtra regla más.\n')
+  let release
+  const released = new Promise((r) => { release = r })
+  const trusting = w.svc.serial(w.teamId, async () => {
+    await released
+    const loaded = await w.svc.loader.load(w.repo)
+    return w.svc.approveTrust(w.teamId, loaded)
+  })
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: h4, decision: 'approve' }, 'desktop'), { ok: true }, 'approved while the trust waits ahead of its apply')
+  check(ap(h4).state === 'applying', 'applying, its apply queued behind the trust')
+  release()
+  same(await trusting, null, 'the trust of the edited definition lands first')
+  await until(() => ap(h4).state !== 'applying', 10000, 'the apply ended')
+  check(ap(h4).state === 'cancelled' && ap(h4).error === 'stale' && w.svc.trusted(w.teamId).sha256 !== base4, `the apply on the old base fails and the hire is cancelled stale (${JSON.stringify([ap(h4).state, ap(h4).error])})`)
+  check(!fs.existsSync(path.join(teamDirOf(w), 'roles', 'revisor.md')) && !w.rt().agents.some((a) => a.id === 'revisor'), 'its role file was never written and nobody joined the roster')
+  check(w.logs.includes(`hire ${w.teamId} ${h4} not applied stale`) && w.logs.includes(`hire ${w.teamId} ${h4} cancelled stale`), 'teams.log names the failed apply and the cancel')
+  const needs4 = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  check(needs4.ok && !needs4.needs.approvals.some((a) => a.id === h4), 'it leaves Te necesita')
+
+  // At load: a pending hire on a base that is no longer the trusted hash (a trust whose cancel never reached the disk)
+  // is cancelled stale; one on the trusted base stays.
+  const h5 = await hire('---\nname: Revisor\nkind: qa\nprovider: claude\npermission: readonly\n---\nRevisá todo.\n')
+  const h6 = await hire('---\nname: Escritor\nkind: research\nprovider: claude\npermission: readonly\n---\nEscribí la doc.\n')
+  const h7 = await hire('---\nname: Disenador\nkind: research\nprovider: claude\npermission: readonly\n---\nDiseñá.\n')
+  const forge = (wx, id, extra) => {
+    const rtx = wx.rt()
+    wx.svc.commit(wx.teamId, { ok: true, rt: { ...rtx, approvals: rtx.approvals.map((a) => (a.id === id ? { ...a, ...extra(a) } : a)) }, effects: [], result: undefined }, ['needs'])
+  }
+  forge(w, h5, (a) => ({ payload: { ...a.payload, baseDefHash: 'e'.repeat(64) } }))
+  w.svc.dispose()
+  const w2 = await world('b5-stale-hire', { repo: w.repo, data: w.data, clock: manualClock(w.clock.now + 60_000), noTeam: true, teamId: w.teamId })
+  const ap2 = (id) => w2.rt().approvals.find((a) => a.id === id)
+  check(ap2(h5).state === 'cancelled' && ap2(h5).error === 'stale' && w2.logs.includes(`hire ${w2.teamId} ${h5} cancelled stale`), `at load: the pending hire on another base is cancelled stale, teams.log names it (${JSON.stringify([ap2(h5).state, ap2(h5).error])})`)
+  check(ap2(h6).state === 'pending' && ap2(h7).state === 'pending' && ap2(h7).payload.baseDefHash === w2.svc.trusted(w2.teamId).sha256, 'control: the ones on the trusted base stay pending')
+  const needs5 = await w2.svc.request({ op: 'needs', teamId: w2.teamId }, 'desktop')
+  check(needs5.ok && needs5.needs.approvals.some((a) => a.id === h7) && !needs5.needs.approvals.some((a) => a.id === h5), 'Te necesita lists only the live ones')
+  check((await w2.svc.request({ op: 'list' }, 'desktop')).teams[0].needsCount === M.teamNeedsCount(needs5.needs), 'and the badge counts the same rows')
+  // An applying one on an old base whose apply never landed (a quit cut it off): at load it is never pending again.
+  forge(w2, h6, (a) => ({ state: 'applying', decidedAt: w2.clock.now, decidedBy: { kind: 'user', via: 'desktop' }, payload: { ...a.payload, baseDefHash: 'd'.repeat(64) } }))
+  w2.svc.dispose()
+  const w3 = await world('b5-stale-hire', { repo: w.repo, data: w.data, clock: manualClock(w2.clock.now + 60_000), noTeam: true, teamId: w.teamId })
+  const ap3 = (id) => w3.rt().approvals.find((a) => a.id === id)
+  check(ap3(h6).state === 'cancelled' && ap3(h6).error === 'stale' && w3.logs.includes(`hire ${w3.teamId} ${h6} cancelled stale`), `at load: the applying hire on an old base is cancelled stale (${JSON.stringify([ap3(h6).state, ap3(h6).error])})`)
+  check(ap3(h7).state === 'pending' && !fs.existsSync(path.join(teamDirOf(w3), 'roles', 'escritor.md')), 'the other stays pending; its role file was never written')
+  w3.svc.dispose()
+}
+
+// B5 review (findings 2 and 4), through TeamService: a denied plain-word command whose exact rule holds an sk- key or
+// the master token (whole, or split in two words, which only CtlTokens.maskTokens sees) opens no permission approval;
+// a prefix rule whose command holds a split token keeps its rule and shows that command masked whole. finishRun gets
+// the mask from deps.cli (RunEndCtx.mask) and hands it to the ask.
+async function secretAskChecks() {
+  const w = await world('b5-secret-ask')
+  fs.writeFileSync(path.join(teamDirOf(w), 'roles', 'fixer.md'), '---\nname: Fixer\nkind: custom\nprovider: claude\npermission: custom\nallowedTools: Read, Grep\n---\nArreglá cosas chicas.\n')
+  await trustAgain(w)
+  const t = await w.createTask({ title: 'Probar la API', assignee: 'fixer', needsPlan: false, isolation: 'main' })
+  const sk = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789'
+  const half = [w.master.slice(0, 32), w.master.slice(32)]
+  w.use(deniedScenario([`curl -u me:${sk} https://api.example.com/health`, `echo ${w.master}`, `echo ${half[0]} ${half[1]}`]))
+  const r = await w.runTask('fixer', t)
+  await w.waitEnded(r.runId)
+  check(JSON.stringify(w.ended(r.runId).denials) === '[{"tool":"Bash","count":3}]' && !w.rt().approvals.some((a) => a.kind === 'permission'), 'three denied commands with a secret in their exact rule: no permission approval')
+  w.use(deniedScenario([`npm run lint -- ${half[0]} ${half[1]}`, `curl -u me:${sk} https://api.example.com/health`]))
+  const r2 = await w.runTask('fixer', t)
+  await w.waitEnded(r2.runId)
+  const ap = w.rt().approvals.find((a) => a.kind === 'permission' && a.taskId === t && a.state === 'pending')
+  check(ap && JSON.stringify(ap.payload.tools) === '["Bash(npm run:*)"]' && JSON.stringify(ap.payload.denied) === '["[redacted]"]', `the prefix rule stays, its denied command masked whole; the curl rule never joins (${JSON.stringify(ap?.payload)})`)
+  const nv = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  const lower = (v) => JSON.stringify(v ?? null).toLowerCase()
+  const pieces = [w.master, half[0], half[1], sk.toLowerCase()]
+  check(!pieces.some((s) => lower(w.rt()).includes(s) || lower(nv).includes(s)), 'no piece of the token nor the key in the team state or Te necesita')
+  w.svc.dispose()
+}
+
+// Design 3.1 Notices: one per new need row; the baseline `needsSeen` persists, so a restart with a pending approval
+// and a changed trust emits zero notices.
+async function noticeChecks() {
+  const w1 = await world('b5-notice')
+  const t = await w1.createTask({ title: 'Plan grande', assignee: 'dev', isolation: 'main' })
+  w1.use('hang.json')
+  const r = await w1.runTask('dev', t)
+  await w1.waitState(r.runId, 'running')
+  const res = await w1.svc.ctlView.handle('team.plan', { text: '1. Hacer\n2. Probar' }, whoOf(w1, r.runId))
+  check(res.ok, `team plan (${JSON.stringify(res)})`)
+  await settle()
+  const ap = w1.rt().approvals.find((a) => a.kind === 'plan' && a.taskId === t)
+  const forAp = () => w1.notices.filter((n) => n.tag === `team:${w1.teamId}:${ap.id}`)
+  check(ap.decider === 'user' && forAp().length === 1 && forAp()[0].body === M.mainTLang('es', 'teams.push.approval.plan', { task: t }) && forAp()[0].kind === 'team' && forAp()[0].push === true, `one notice for the new plan approval (${JSON.stringify(w1.notices)})`)
+  check(!JSON.stringify(w1.notices).includes('Hacer'), 'a notice never carries agent text')
+  await w1.svc.request({ op: 'comment', teamId: w1.teamId, taskId: t, text: 'Mirá esto' }, 'desktop')
+  await w1.svc.request({ op: 'needs', teamId: w1.teamId }, 'desktop')
+  await settle()
+  check(forAp().length === 1, 'later commits notify nothing again')
+  w1.clock.advance(M.CONCLUDE_GRACE_MS)
+  await w1.waitEnded(r.runId)
+  fs.appendFileSync(path.join(teamDirOf(w1), 'roles', 'dev.md'), '\nUna regla más.\n')
+  await w1.svc.request({ op: 'get', teamId: w1.teamId }, 'desktop')
+  await settle()
+  const forTrust = w1.notices.filter((n) => n.tag === `team:${w1.teamId}:trust`)
+  check(w1.svc.team(w1.teamId).trust === 'changed' && forTrust.length === 1 && forTrust[0].urgent === true && forTrust[0].body === M.mainTLang('es', 'teams.push.trust'), 'a changed definition: one urgent notice (rank 1)')
+  check(['trust', ap.id].every((id) => (w1.rt().needsSeen ?? []).includes(id)), 'the baseline holds both rows')
+  const total = w1.notices.length
+  w1.svc.dispose()
+  const saved = JSON.parse(fs.readFileSync(path.join(w1.data, 'teams', w1.teamId, 'state.json'), 'utf8'))
+  check(['trust', ap.id].every((id) => saved.needsSeen.includes(id)), 'needsSeen persisted in state.json')
+  const w2 = await world('b5-notice', { repo: w1.repo, data: w1.data, clock: manualClock(w1.clock.now + 60_000), noTeam: true, teamId: w1.teamId })
+  w2.teamId = w1.teamId
+  await settle()
+  await w2.svc.request({ op: 'list' }, 'desktop')
+  await settle()
+  check(w2.svc.team(w2.teamId).trust === 'changed' && w2.rt().approvals.some((a) => a.id === ap.id && a.state === 'pending'), 'the second life: the approval still pending, the trust still changed')
+  check(w2.notices.length === 0 && total === 2, `a restart with a pending approval and a changed trust: zero notices (${JSON.stringify(w2.notices)})`)
+  w2.svc.dispose()
+
+  // A state.json the repair resets (it lost its baseline with it): the repair's stateReset card notifies once, the
+  // trust row that was already notified does not.
+  fs.writeFileSync(path.join(w1.data, 'teams', w1.teamId, 'state.json'), '{"v": 1, "not json')
+  const w3 = await world('b5-notice', { repo: w1.repo, data: w1.data, clock: manualClock(w1.clock.now + 120_000), noTeam: true, teamId: w1.teamId })
+  w3.teamId = w1.teamId
+  await settle()
+  const reset = w3.rt().cards.find((c) => c.state === 'open' && c.from.kind === 'system' && c.from.why === 'stateReset')
+  check(!!reset && w3.svc.team(w3.teamId).trust === 'changed', 'the reset state: a stateReset card, the trust still changed')
+  check(w3.notices.length === 1 && w3.notices[0].tag === `team:${w3.teamId}:${reset.id}` && w3.notices[0].body === M.mainTLang('es', 'teams.push.cardTeam'), `one notice, for the repair's card (${JSON.stringify(w3.notices)})`)
+  w3.svc.dispose()
+}
+
+// The Lead (design 4.1): its reply joins the Lead thread; a small plan it saw and left goes to the user (decision 29);
+// the goal a resumed Lead session read is its own, so a Descartar of the kickoff item never hides an edited goal.
+async function leadChecks() {
+  const w = await world('b5-lead')
+  w.use('claude-simple.json')
+  check((await w.svc.request({ op: 'leadSay', teamId: w.teamId, text: 'Hola Líder' }, 'desktop')).ok, 'the user writes to the Lead')
+  w.clock.advance(0)
+  const q = w.rt().queue.find((x) => x.agentId === 'lead')
+  check(!!q, 'autonomy off: the Lead waits in Por despachar')
+  await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: q.id, go: true }, 'desktop')
+  w.clock.advance(0)
+  const lr = w.rt().activeRuns.find((x) => x.agentId === 'lead')
+  check(!!lr, 'Despachar starts it')
+  await w.waitEnded(lr.id)
+  const reply = (w.rt().comments.lead ?? []).find((c) => c.kind === 'answer')
+  check(reply && reply.author.kind === 'agent' && reply.author.agentId === 'lead' && reply.author.runId === lr.id && reply.text === 'OK' && reply.forAgent === undefined, `the Lead's final text joined its thread, for nobody (${JSON.stringify(reply)})`)
+  const lv = await w.svc.request({ op: 'lead', teamId: w.teamId }, 'desktop')
+  check(lv.ok && lv.lead.messages.some((m) => m.kind === 'answer' && m.text === 'OK' && m.author === 'lead'), 'the Lead view shows the reply')
+  w.clock.advance(0)
+  check(!w.rt().queue.some((x) => x.agentId === 'lead') && !w.rt().activeRuns.length, 'the reply wakes nobody')
+  const sess0 = w.rt().agents.find((a) => a.id === 'lead').sessions.lead
+  const h1 = w.svc.trusted(w.teamId).goalHash
+  check(sess0.goalHash === h1 && w.rt().goalSeenHash === h1, 'the Lead session records the goal its prompt carried')
+
+  // Lead escalation: a small plan the Lead's run saw and did not decide waits for the user.
+  const t = await w.createTask({ title: 'Chica', assignee: 'dev', isolation: 'main' })
+  w.use('hang.json')
+  const pr = await w.runTask('dev', t)
+  await w.waitState(pr.runId, 'running')
+  check((await w.svc.ctlView.handle('team.plan', { text: 'Un paso', small: true }, whoOf(w, pr.runId))).ok, 'a small plan')
+  await settle()
+  const ap = w.rt().approvals.find((a) => a.kind === 'plan' && a.taskId === t)
+  check(ap.decider === 'lead' && !w.notices.some((n) => n.tag === `team:${w.teamId}:${ap.id}`), 'the Lead decides it: no need row, no notice')
+  w.clock.advance(M.CONCLUDE_GRACE_MS)
+  await w.waitEnded(pr.runId)
+  w.use('claude-resume.json')
+  const seen = await w.runNow('lead', 'Mirá el tablero')
+  await w.waitEnded(seen.runId)
+  const after = w.rt().approvals.find((a) => a.id === ap.id)
+  check(after.state === 'pending' && after.decider === 'user' && after.leadSeenRunId === seen.runId, 'the run that saw it ended without deciding: the user decides it now')
+  check((w.rt().comments.lead ?? []).some((c) => c.sys?.key === 'leadEscalation' && c.sys.vars?.taskId === t && c.forAgent === undefined), 'with the leadEscalation note in the Lead thread, for nobody')
+  await settle()
+  check(w.notices.filter((n) => n.tag === `team:${w.teamId}:${ap.id}`).length === 1, 'and now it notifies once')
+  check(!(w.rt().comments.lead ?? []).some((c) => c.kind === 'answer' && c.author.runId === seen.runId), 'a manual Lead run that answered no message posts no reply')
+
+  // Decision 43 edge (B4 review): a Descartar of the kickoff item sets the team-wide goalSeenHash, yet the session
+  // never read the edited goal: its next resumed run gets the goal block.
+  const teamMd = path.join(teamDirOf(w), 'team.md')
+  fs.writeFileSync(teamMd, fs.readFileSync(teamMd, 'utf8').replace('Una app de notas', 'Una app de notas con etiquetas'))
+  await trustAgain(w)
+  const h2 = w.svc.trusted(w.teamId).goalHash
+  w.clock.advance(0)
+  const kq = w.rt().queue.find((x) => x.agentId === 'lead' && x.reason === 'kickoff')
+  check(h2 !== h1 && !!kq, 'the edited goal asks for a kickoff (Por despachar)')
+  await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: kq.id, go: false }, 'desktop')
+  const sess1 = w.rt().agents.find((a) => a.id === 'lead').sessions.lead
+  check(w.rt().goalSeenHash === h2 && sess1.goalHash === h1, 'Descartar marks the goal seen for the team, not for the session')
+  const stdinFile = path.join(w.dir, 'lead-goal-stdin.txt')
+  w.use({ saveStdin: stdinFile, steps: [{ fixture: 'claude-resume.jsonl', rewriteSession: true }] })
+  const m = await w.runNow('lead', 'Seguimos')
+  await w.waitEnded(m.runId)
+  const mr = w.ended(m.runId)
+  const stdin = fs.readFileSync(stdinFile, 'utf8')
+  check(mr.resumed === true && mr.sessionId === sess0.sessionId && stdin.includes('Goal (updated') && stdin.includes('con etiquetas') && stdin.indexOf('con etiquetas') < stdin.indexOf('# Your run'), 'the resumed Lead run reads the edited goal, marked updated, before section 4')
+  check(w.rt().agents.find((a) => a.id === 'lead').sessions.lead.goalHash === h2, 'then its session has read it')
+  const stdin2File = path.join(w.dir, 'lead-goal-stdin2.txt')
+  w.use({ saveStdin: stdin2File, steps: [{ fixture: 'claude-resume.jsonl', rewriteSession: true }] })
+  const m2 = await w.runNow('lead', 'Otra')
+  await w.waitEnded(m2.runId)
+  check(!fs.readFileSync(stdin2File, 'utf8').includes('Goal (updated'), 'and the run after it gets no goal block')
+  w.svc.dispose()
+}
+
+// Extra requirement 1: a `snaos team` call through the PowerShell tool is no approval; the agent's next run (only
+// that one) is told to call it with Bash (TEAM_CALL_HINT).
+async function hintChecks() {
+  const w = await world('b5-hint')
+  const lines = fs.readFileSync(path.join(FIX, 'claude-simple.jsonl'), 'utf8').split('\n').filter(Boolean)
+  const result = JSON.parse(lines[lines.length - 1])
+  result.permission_denials = [{ tool_name: 'PowerShell', tool_use_id: 'toolu_ps1', tool_input: { command: 'snaos team show --json' } }]
+  result.result = 'No pude llamar al equipo.'
+  const t = await w.createTask({ title: 'Probar el canal', assignee: 'dev', isolation: 'main' })
+  w.use({ steps: [{ fixture: 'claude-simple.jsonl', to: lines.length - 1, rewriteSession: true }, { emit: result, rewriteSession: true }] })
+  const r = await w.runTask('dev', t)
+  await w.waitEnded(r.runId)
+  check(w.ended(r.runId).denials?.some((d) => d.tool === 'PowerShell') && w.ended(r.runId).profile === 'readonly', 'the plan run (readonly) was denied a PowerShell call')
+  check(!w.rt().approvals.some((a) => a.kind === 'permission'), 'a PowerShell `snaos team` denial opens no approval')
+  check(w.rt().agents.find((a) => a.id === 'dev').bashHint === true, 'the agent keeps the Bash hint for its next run')
+  const s1 = path.join(w.dir, 'hint-stdin1.txt')
+  w.use({ saveStdin: s1, steps: [{ fixture: 'claude-resume.jsonl', rewriteSession: true }] })
+  const r2 = await w.runTask('dev', t)
+  await w.waitEnded(r2.runId)
+  const stdin = fs.readFileSync(s1, 'utf8')
+  check(stdin.includes(M.TEAM_CALL_HINT) && stdin.indexOf(M.TEAM_CALL_HINT) > stdin.indexOf('# Your run'), 'the next run reads TEAM_CALL_HINT in section 4')
+  check(!w.rt().agents.find((a) => a.id === 'dev').bashHint, 'and consumed it')
+  const s2 = path.join(w.dir, 'hint-stdin2.txt')
+  w.use({ saveStdin: s2, steps: [{ fixture: 'claude-resume.jsonl', rewriteSession: true }] })
+  const r3 = await w.runTask('dev', t)
+  await w.waitEnded(r3.runId)
+  check(!fs.readFileSync(s2, 'utf8').includes(M.TEAM_CALL_HINT), 'the run after it has no hint')
+  w.svc.dispose()
+}
+
+// Extra requirement 5 (from B4): a task run whose prep failed with a card blocks on it; Reintentar re-requests the
+// run, Descartar leaves it blocked for Retomar; the phone may not run a desktop-only action.
+async function cardChecks() {
+  const w = await world('b5-cards')
+  const t = await w.createTask({ title: 'Sin CLI', assignee: 'dev', needsPlan: false, isolation: 'main' })
+  w.noCli = true
+  const r = await w.runTask('dev', t)
+  await w.waitEnded(r.runId)
+  const openCard = () => w.rt().cards.find((c) => c.state === 'open' && c.from.kind === 'system' && c.from.why === 'spawnFailed' && c.taskId === t)
+  const card = openCard()
+  check(card && JSON.stringify(card.from.actions) === '["retry","dismiss"]' && card.from.runId === r.runId, 'the prep failure opened its card: Reintentar, Descartar')
+  const blocked = w.task(t).blocked
+  check(w.task(t).state === 'blocked' && blocked?.reason.kind === 'card' && blocked.reason.cardId === card.id && blocked.reason.why === 'spawnFailed' && blocked.resume.state === 'doing' && blocked.resume.phase === 'executing', 'the task blocks on it (it never sits in doing with nothing to wake it)')
+  const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  const list = await w.svc.request({ op: 'list' }, 'desktop')
+  check(needs.needs.cards.some((c) => c.id === card.id && c.system?.why === 'spawnFailed') && list.teams[0].needsCount === M.teamNeedsCount(needs.needs), 'Te necesita shows the card, and the badge counts its rows')
+  same(await M.OPS.answer({ op: 'answer', teamId: w.teamId, cardId: card.id, answer: { action: 'resumeTeam' } }, phoneCtx(w)), { ok: false, error: 'forbidden' }, 'from the phone a desktop-only action is forbidden (decision 50)')
+  same(await M.OPS.answer({ op: 'answer', teamId: w.teamId, cardId: card.id, answer: { action: 'killOrphan' } }, phoneCtx(w)), { ok: false, error: 'forbidden' }, 'killOrphan too')
+  w.noCli = false
+  same(await w.svc.request({ op: 'answer', teamId: w.teamId, cardId: card.id, answer: { action: 'retry' } }, 'desktop'), { ok: true }, 'Reintentar')
+  const next = w.task(t).next
+  check(w.task(t).state === 'doing' && w.task(t).phase === 'executing' && next?.agentId === 'dev' && next.mode === 'exec' && next.reason === 'retry' && next.bypassCooldown === true, 'the run is requested again (T17, retry)')
+  check(w.rt().cards.find((c) => c.id === card.id).state === 'answered', 'the card answered')
+  const twice = await w.svc.request({ op: 'answer', teamId: w.teamId, cardId: card.id, answer: { action: 'dismiss' } }, 'desktop')
+  check(!twice.ok && twice.error === 'conflict' && twice.reason === 'already_decided', 'a second answer: already_decided')
+  w.use('claude-simple.json')
+  w.clock.advance(0)
+  const qi = w.rt().queue.find((x) => x.taskId === t)
+  check(qi && qi.reason === 'retry', 'autonomy off: the retry waits in Por despachar')
+  await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: qi.id, go: true }, 'desktop')
+  w.clock.advance(0)
+  const rr = w.rt().activeRuns.find((x) => x.taskId === t)
+  check(!!rr, 'Despachar starts it')
+  await w.waitEnded(rr.id)
+  check(w.ended(rr.id).state === 'succeeded', 'and it runs')
+  // Descartar: the task stays blocked on the card, Retomar (the resumeTask op, T17) resumes it later.
+  w.noCli = true
+  const r3 = await w.runTask('dev', t)
+  await w.waitEnded(r3.runId)
+  const card2 = openCard()
+  check(card2 && card2.id !== card.id && w.task(t).state === 'blocked', 'a second prep failure blocks it again, on a new card')
+  same(await w.svc.request({ op: 'answer', teamId: w.teamId, cardId: card2.id, answer: { action: 'dismiss' } }, 'desktop'), { ok: true }, 'Descartar')
+  check(w.rt().cards.find((c) => c.id === card2.id).state === 'dismissed' && w.task(t).state === 'blocked' && w.task(t).blocked.reason.cardId === card2.id, 'the card goes, the task stays blocked on it')
+  const after = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  check(!after.needs.cards.some((c) => c.id === card2.id), 'and leaves Te necesita')
+  // Item 6 (B5 integration): Retomar of a task blocked on a dismissed prep-failure card lifts the prep backoff, like Reintentar.
+  const backoffKey = `${w.teamId}|dev|${t}`
+  check(w.svc.prepBackoff.has(backoffKey), 'the prep failure backed its level off (Descartar keeps the backoff)')
+  w.noCli = false
+  const res = await w.svc.request({ op: 'resumeTask', teamId: w.teamId, taskId: t }, 'desktop')
+  check(res.ok && w.task(t).state === 'doing' && w.task(t).phase === 'executing' && w.task(t).next?.reason === 'retry', `Retomar resumes it later (${JSON.stringify(res.ok ? res.task.state : res)})`)
+  check(!w.svc.prepBackoff.has(backoffKey), 'and lifts the prep backoff of its level (the user asked for it now)')
+  w.svc.dispose()
+}
+
+// ---- 16. B5 integration ----------------------------------------------------------------------------------------
+// Item 10: `team task get` from a run that concluded (its grace) never marks a newer user comment delivered
+// (TeamService.ctlRead); a live run's get does.
+async function graceReadChecks() {
+  const w = await world('b5-grace')
+  const t = await w.createTask({ title: 'Leer en la gracia', assignee: 'dev', isolation: 'main' })
+  w.use('hang.json')
+  const r = await w.runTask('dev', t)
+  await w.waitState(r.runId, 'running')
+  const who = whoOf(w, r.runId)
+  const say = async (text) => {
+    check((await w.svc.request({ op: 'comment', teamId: w.teamId, taskId: t, text }, 'desktop')).ok, `the user comments "${text}"`)
+    return (w.rt().comments[t] ?? []).at(-1)
+  }
+  const c1 = await say('Antes del plan')
+  check(c1.forAgent === 'dev' && !c1.deliveredRunId, 'queued for the dev')
+  const get1 = await w.svc.ctlView.handle('team.task.get', { task: t }, who)
+  check(get1.ok && w.rt().comments[t].find((c) => c.id === c1.id).deliveredRunId === r.runId, 'a live run: team task get delivers it')
+  check((await w.svc.ctlView.handle('team.plan', { text: '1. Hacer' }, who)).ok && !!w.active(r.runId).concludedBy && w.active(r.runId).state === 'running', 'team plan concludes the run; it still runs (its grace)')
+  const c2 = await say('Una cosa más')
+  check(c2.forAgent === 'dev' && !c2.deliveredRunId, 'a newer comment, queued for the dev')
+  const get2 = await w.svc.ctlView.handle('team.task.get', { task: t }, who)
+  check(get2.ok && get2.data.task.comments.some((c) => c.id === c2.id && c.queued === true), 'the concluded run still reads it, as queued')
+  check(!w.rt().comments[t].find((c) => c.id === c2.id).deliveredRunId, 'and it stays queued: never delivered to a run that concluded (the next run reads it)')
+  w.clock.advance(M.CONCLUDE_GRACE_MS)
+  await w.waitEnded(r.runId)
+  check(!w.rt().comments[t].find((c) => c.id === c2.id).deliveredRunId, 'still queued after the run ended')
+  w.svc.dispose()
+}
+
+/** A claude-simple run whose result carries these permission denials (claude-denied style). */
+function deniedScenario(denials, text = 'No pude.') {
+  const lines = fs.readFileSync(path.join(FIX, 'claude-simple.jsonl'), 'utf8').split('\n').filter(Boolean)
+  const result = JSON.parse(lines[lines.length - 1])
+  result.permission_denials = denials.map((command, i) => ({ tool_name: 'Bash', tool_use_id: `toolu_b${i}`, tool_input: { command } }))
+  result.result = text
+  return { steps: [{ fixture: 'claude-simple.jsonl', to: lines.length - 1, rewriteSession: true }, { emit: result, rewriteSession: true }] }
+}
+
+// Items 2, 4 and 7: an escape denial opens no approval and its next run hears it needs the user; a Bash denial's
+// approval carries the denied command; the grant's re-run gets its Bash hint as a system hint in section 4, never as
+// the user's request text.
+async function hintsChecks() {
+  const w = await world('b5-hints')
+  fs.writeFileSync(path.join(teamDirOf(w), 'roles', 'fixer.md'), '---\nname: Fixer\nkind: custom\nprovider: claude\npermission: custom\nallowedTools: Read, Grep\n---\nArreglá cosas chicas.\n')
+  await trustAgain(w)
+  const t = await w.createTask({ title: 'Correr los tests', assignee: 'fixer', needsPlan: false, isolation: 'main' })
+  // Item 2: bash -c is never grantable.
+  w.use(deniedScenario(['bash -c "npm test"']))
+  const r = await w.runTask('fixer', t)
+  await w.waitEnded(r.runId)
+  check(w.ended(r.runId).denials?.some((d) => d.tool === 'Bash') && !w.rt().approvals.some((a) => a.kind === 'permission'), 'a `bash -c` denial opens no approval')
+  check(w.rt().agents.find((a) => a.id === 'fixer').escapeHint === true, 'the agent keeps the escape hint for its next run')
+  const s1 = path.join(w.dir, 'esc-stdin.txt')
+  w.use({ saveStdin: s1, steps: [{ fixture: 'claude-resume.jsonl', rewriteSession: true }] })
+  const r2 = await w.runTask('fixer', t)
+  await w.waitEnded(r2.runId)
+  const st1 = fs.readFileSync(s1, 'utf8')
+  check(st1.includes(M.ESCAPE_HINT) && st1.indexOf(M.ESCAPE_HINT) > st1.indexOf('# Your run') && /snaos team needs/.test(M.ESCAPE_HINT), 'its next run reads ESCAPE_HINT in section 4 (the command needs the user: snaos team needs)')
+  check(!w.rt().agents.find((a) => a.id === 'fixer').escapeHint, 'and consumed it')
+  // Items 4 and 7: a Bash denial asks for its rule with the denied command; the grant re-run gets a system hint.
+  w.use(deniedScenario(['npm test -- --watch']))
+  const r3 = await w.runTask('fixer', t)
+  await w.waitEnded(r3.runId)
+  const ap = w.rt().approvals.find((a) => a.kind === 'permission' && a.taskId === t && a.state === 'pending')
+  check(ap && JSON.stringify(ap.payload.tools) === '["Bash(npm test:*)"]' && JSON.stringify(ap.payload.denied) === '["npm test -- --watch"]', 'the approval: the Bash rule and the denied command', ap?.payload)
+  const nv = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  check(JSON.stringify(nv.needs.approvals.find((a) => a.id === ap.id).payload.denied) === '["npm test -- --watch"]', 'Te necesita sends the denied command (ApprovalPayloadView.denied)')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve' }, 'desktop'), { ok: true }, 'approve it')
+  check(w.task(t).next?.reason === 'grant' && w.task(t).next.detail === undefined && JSON.stringify(w.task(t).next.refs) === JSON.stringify([ap.id]), 'the grant wake names the approval, no detail (that is the user request text only)', w.task(t).next)
+  w.clock.advance(0)
+  const qi = w.rt().queue.find((x) => x.taskId === t)
+  check(qi && qi.reason === 'grant', 'autonomy off: the grant re-run waits in Por despachar')
+  const s2 = path.join(w.dir, 'grant-stdin.txt')
+  w.use({ saveStdin: s2, steps: [{ echoArgv: true }, { fixture: 'claude-resume.jsonl', rewriteSession: true }] })
+  await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: qi.id, go: true }, 'desktop')
+  w.clock.advance(0)
+  const gr = w.rt().activeRuns.find((x) => x.taskId === t)
+  check(!!gr && gr.trigger.reason === 'grant', 'Despachar starts it')
+  await w.waitEnded(gr.id)
+  const st2 = fs.readFileSync(s2, 'utf8')
+  const hint = 'The user allowed Bash(npm test:*). Run those commands with your Bash tool'
+  check(st2.includes(hint) && st2.indexOf(hint) > st2.indexOf('# Your run') && !st2.includes('<request from="user">'), 'the grant re-run: the Bash hint in section 4 as main\'s text, no <request from="user"> block', st2.slice(st2.indexOf('# Your run'), st2.indexOf('# Your run') + 1200))
+  const allow = w.logLines(gr.id).find((l) => l && l.type === 'fake.argv').argv
+  check(allow.includes('Bash(npm test:*)') && !allow.some((x) => /^PowerShell\(npm/.test(x)), 'its allow list carries the Bash rule')
+  w.svc.dispose()
+}
+
+// Item 4: a QA run's prep computes the diff stat (numstat of what QA reviews), the task keeps it, the final OK shows it.
+async function qaStatChecks() {
+  const w = await world('b5-qastat', { worktrees: true })
+  const t = await w.createTask({ title: 'Con diff', assignee: 'dev' })
+  w.use('claude-simple.json')
+  const p = await w.runTask('dev', t)
+  await w.waitEnded(p.runId)
+  const wt = w.task(t).worktree
+  check(!!wt, 'the plan run made the task worktree')
+  fs.writeFileSync(path.join(wt.path, 'feature.txt'), 'uno\ndos\ntres\n')
+  fs.writeFileSync(path.join(wt.path, 'README.md'), '# r\notra\n')
+  git(wt.path, 'add', '-A')
+  git(wt.path, 'commit', '-qm', 'feature')
+  setTask(w, t, { state: 'review', phase: 'qa', plan: { rev: 1, text: 'Paso 1', status: 'approved', small: false, at: w.clock.now }, review: { round: 1, max: 3, qaAgentId: 'qa' } }, ['next', 'cooldownUntil'])
+  w.use('hang.json')
+  const q = await w.runTask('qa', t)
+  check(q.ok, `the QA run is admitted (${JSON.stringify(q)})`)
+  await w.waitState(q.runId, 'running')
+  const ds = w.task(t).diffStat
+  check(ds && ds.files === 2 && ds.insertions === 4 && ds.deletions === 0 && ds.top[0].path === 'feature.txt' && ds.top[0].add === 3 && ds.top[1].path === 'README.md' && ds.at === w.clock.now, 'the QA prep stored the diff stat of the branch on the task', ds)
+  const res = await w.svc.ctlView.handle('team.verdict', { verdict: 'approve', text: 'Revisé feature.txt' }, whoOf(w, q.runId))
+  check(res.ok && w.task(t).phase === 'userOk', `QA approves: the final OK (${JSON.stringify(res)})`)
+  const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  const fin = needs.needs.approvals.find((a) => a.payload.kind === 'final' && a.taskId === t)
+  same(fin?.payload.stat, { files: 2, insertions: 4, deletions: 0, top: [{ path: 'feature.txt', add: 3, del: 0 }, { path: 'README.md', add: 1, del: 0 }] }, 'the final OK view carries the stat QA read')
+  w.clock.advance(M.CONCLUDE_GRACE_MS)
+  await w.waitEnded(q.runId)
+  w.svc.dispose()
+}
+
 async function main() {
   try {
     reducerChecks()
@@ -1478,7 +2442,22 @@ async function main() {
     await orphanWaitChecks()
     await removeRaceChecks()
     await resumeChecks()
-    console.log(`PASS: ${checks} teams runner checks (fake agent lifecycle, watch, stop tree, linger, drain, max, prep CAS, session conflict, CLI off, gates, Labs off/on, shutdownSync, install, thaw, reaper, orphans, big result, RunLog cut, team scope, usage today, runs paging, remove wait, policy rows, no signal after exit; B4: task worktrees and the exec resume, write locks, tree mark, extra repo, a re-created team, runs in series within the caps, Por despachar, kickoff, triage, prep failure backoff, one sessionConflict card; integration: Frenar opens no card, a stale owned tree disowned, a re-wake keeps its request across a reload, a prep failure gives its wake mark back; review: Descartar offers the next level, a resumed kickoff reads the goal, no resume before the orphan check settles, a tree made after its team's removal disowned, Retomar a stopped task)`)
+    await blockChecks()
+    await secretChecks()
+    await finalTextChecks()
+    await cmdLineChecks()
+    await permissionChecks()
+    await hireChecks()
+    await staleHireChecks()
+    await secretAskChecks()
+    await noticeChecks()
+    await leadChecks()
+    await hintChecks()
+    await cardChecks()
+    await graceReadChecks()
+    await hintsChecks()
+    await qaStatChecks()
+    console.log(`PASS: ${checks} teams runner checks (fake agent lifecycle, watch, stop tree, linger, drain, max, prep CAS, session conflict, CLI off, gates, Labs off/on, shutdownSync, install, thaw, reaper, orphans, big result, RunLog cut, team scope, usage today, runs paging, remove wait, policy rows, no signal after exit; B4: task worktrees and the exec resume, write locks, tree mark, extra repo, a re-created team, runs in series within the caps, Por despachar, kickoff, triage, prep failure backoff, one sessionConflict card; integration: Frenar opens no card, a stale owned tree disowned, a re-wake keeps its request across a reload, a prep failure gives its wake mark back; review: Descartar offers the next level, a resumed kickoff reads the goal, no resume before the orphan check settles, a tree made after its team's removal disowned, Retomar a stopped task; B5: the Codex block at close, permission approval and grant, views of an ended task, hire apply and re-trust, applying at load, notices once and none after a restart, the Lead reply, lead escalation, the goal per Lead session, the Bash hint, prep failure cards; B5 integration: Retomar lifts the prep backoff, no delivery in the grace, the escape hint, the denied command, the grant system hint, the QA diff stat; fourth round: nothing to grant; fifth round: a token shape in a Codex block masked; sixth round: live tokens masked in runPage and runAppend, a Codex block action with a live token refused, a Read deny per secret of the data folder; seventh round: the summary and the Lead reply masked, the cmd.exe line guard; review: the snaos.note record of key and vars, stale hires cancelled at a re-trust, no permission rule with a secret; second review round: an apply whose base a trust replaced cancelled stale, stale hires cancelled at load)`)
   } finally {
     // dispose() is idempotent: it kills what a failed section left running (the supervisor's tree kill).
     for (const s of services) { try { s.dispose() } catch { /* already gone */ } }

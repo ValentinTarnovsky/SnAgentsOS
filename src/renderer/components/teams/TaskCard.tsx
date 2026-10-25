@@ -1,13 +1,14 @@
 import { memo, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react'
 import { ArrowRightLeft, Ban, GitBranch, MessageSquare, Pin, Play, Unlock } from 'lucide-react'
 import { TASK_PRIORITIES, isActiveRun, type BoardColumn, type TaskPriority } from '@shared/teams'
-import type { AgentView, TaskSummary, TeamFail, TeamError } from '@shared/team-protocol'
+import type { AgentView, CardView, TaskSummary, TeamFail, TeamError } from '@shared/team-protocol'
 import { columnKey, columnOf, dropVerdict, phaseKey, phaseWaitsOnUser, priorityKey, type DropRefusal } from '@shared/teamBoard'
 import { useLang, useT, type MessageKey, type TFn } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { toast } from '@/lib/toast'
-import { openTaskDrawer } from '@/lib/teamsStore'
-import { cancelTask, moveTask, qaAgentOf, releaseOwned, runNowAgentOf } from '@/lib/teams/board'
+import { openTaskDrawer, useTeamsStore } from '@/lib/teamsStore'
+import { cancelTask, moveTask, releaseOwned, runNowAgentOf, useBoardStore } from '@/lib/teams/board'
+import { useNeedsStore } from '@/lib/teams/needs'
 import { agentLabel, runFailText, runNow } from '@/lib/teams/roster'
 import { visibleName } from '@/lib/teams/issues'
 import { StatusGlyph } from '@/components/ui/StatusDot'
@@ -67,7 +68,10 @@ export function taskFailText(f: TeamFail, t: TFn): string {
   return key ? t(key) : t('teams.task.fail.other')
 }
 
-/** A refused Retomar (`resumeTask`, B4): a task that is no longer stopped says so, the rest as any task write. */
+/**
+ * A refused Retomar (`resumeTask`, B4): a task that no longer waits for it (no longer stopped, or B5 no longer
+ * blocked on that card) says so, the rest as any task write.
+ */
 export function resumeFailText(f: TeamFail, t: TFn): string {
   if (f.error === 'conflict') return t('teams.task.resumeFail.conflict')
   const key = FAIL_KEY[f.error]
@@ -96,6 +100,36 @@ export function blockedText(task: Pick<TaskSummary, 'blocked'>, t: TFn): string 
     default:
       return t('teams.blocked.card')
   }
+}
+
+/**
+ * A task blocked on a card that is closed (B5: a prep failure card the user dismissed): it waits for Retomar, its
+ * card answers nothing any more. `cards` are the cards to look in, only open ones count (the drawer's
+ * TaskDetail.cards, the board's Te necesita view). The blocking card is TaskBlockedView.cardId; from a main that
+ * does not name it, the task's open system card of the block's reason. Another open card of the task (an orphan
+ * process, a question) blocks nothing.
+ */
+export function cardBlockClosed(task: Pick<TaskSummary, 'id' | 'blocked'>, cards: readonly CardView[]): boolean {
+  const b = task.blocked
+  if (b?.kind !== 'card') return false
+  const id = b.cardId
+  return !cards.some((c) => c.state === 'open' && (id ? c.id === id : c.taskId === task.id && c.system?.why === b.why))
+}
+
+/**
+ * cardBlockClosed for a board card: from the team's Te necesita view (every open card) once it is at least as new
+ * as the board page, so a card the page already holds never reads closed from an older view; before that, from the
+ * summary's own count (no row of the task waits there).
+ */
+function useCardBlockClosed(task: TaskSummary): boolean {
+  const card = task.blocked?.kind === 'card'
+  const teamId = useTeamsStore((s) => (card ? s.openTeamId : null))
+  const pageRev = useBoardStore((s) => (teamId ? s.pages[teamId]?.rev : undefined))
+  const fromView = useNeedsStore((s) => {
+    const n = teamId ? s.needs[teamId] : undefined
+    return n && pageRev !== undefined && n.rev >= pageRev ? cardBlockClosed(task, n.cards) : null
+  })
+  return card && (fromView ?? task.needs === 0)
 }
 
 /**
@@ -185,8 +219,8 @@ export function useTaskActions(teamId: string, agents: Readonly<Record<string, A
       })
     })
     const extra: ContextMenuItem[] = []
-    // The drawer's rule (taskRunner); in qa the QA agent is known once the task's detail was loaded.
-    const runner = taskRunner(task, agents, qaAgentOf(teamId, task.id))
+    // The drawer's rule (taskRunner); in qa the QA agent the summary names (B5: `review.qaAgentId`), no detail needed.
+    const runner = taskRunner(task, agents, task.review?.qaAgentId)
     if (runner) {
       extra.push({
         label: t('teams.task.runNow'),
@@ -296,7 +330,8 @@ export const TaskCard = memo(function TaskCard({ task, assigneeName, runName, se
   const t = useT()
   const live = task.run && isActiveRun(task.run.state) ? task.run : undefined
   const pinned = task.userOwned.length > 0
-  const blocked = blockedText(task, t)
+  // Its card closed, "your answer in Te necesita" would point at nothing: Retomar is in the task's drawer.
+  const blocked = useCardBlockClosed(task) ? t('teams.blocked.cardClosed') : blockedText(task, t)
   const qa = task.review && (task.phase === 'qa' || task.review.round > 0) ? Math.min(task.review.round + (task.phase === 'qa' ? 1 : 0), task.review.max) : null
   const openMenu = (e: MouseEvent<HTMLElement>): void => {
     e.preventDefault()

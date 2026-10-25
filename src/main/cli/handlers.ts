@@ -151,9 +151,16 @@ export interface CtlAccountsView {
  * App 2.7.0 (Teams, design 3.9): `snaos team` of a team run. TeamService's
  * ctlView (teams/teamCtl.ts) checks the params, the role and the run, applies
  * the call to the store and maps its errors; the gate and the budgets stay here.
+ * B5 integration, fifth round: `secrets` (CtlTokens) lets it refuse a text that
+ * holds a live token of the app, right after the Labs gate.
  */
 export interface CtlTeamsView {
-  handle(method: TeamCtlMethod, params: Record<string, unknown>, who: CtlTeamCaller): Promise<CtlResponse>
+  handle(method: TeamCtlMethod, params: Record<string, unknown>, who: CtlTeamCaller, secrets?: CtlSecrets): Promise<CtlResponse>
+}
+
+/** B5 integration, fifth round: the live tokens of the app as a team call checks its texts against them (CtlTokens). */
+export interface CtlSecrets {
+  holdsToken(text: string): boolean
 }
 
 /**
@@ -181,6 +188,8 @@ export interface CtlHandlerDeps {
   platform?: NodeJS.Platform
   /** Late-bound services (notes, transcripts). */
   services?: () => CtlServices
+  /** B5 integration, fifth round: the live tokens (CliService's CtlTokens); a team text that holds one is refused. */
+  secrets?: CtlSecrets
   /** `ws new`: the folder exists (a stat, nothing is opened or read). */
   isDir?: (path: string) => Promise<boolean>
 }
@@ -846,7 +855,8 @@ export class CtlHandlers {
 
   /**
    * App 2.7.0 (Teams, design 5.1): `snaos team` of a team run (the gate in handle() let only a team caller through).
-   * Budgets per run (`team:<runId>`, freed by forgetCaller at revoke): 120 reads and 60 writes a minute.
+   * Budgets per run (`team:<runId>`, freed by forgetCaller at revoke): 120 reads and 60 writes a minute. The live
+   * tokens go along (B5 integration, fifth round): teamCtl refuses a text that holds one (`detail: 'secret'`).
    */
   private async team(method: TeamCtlMethod, params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
     const teams = this.services().teams
@@ -856,7 +866,7 @@ export class CtlHandlers {
     const write = spec.write
     if (!this.take(write ? 'teamWrite' : 'teamRead', caller, write ? TEAM_WRITES_PER_MIN : TEAM_READS_PER_MIN))
       return err('rate_limited', `at most ${TEAM_READS_PER_MIN} team reads and ${TEAM_WRITES_PER_MIN} team writes per minute and run: wait a minute`)
-    return teams.handle(spec.method, params, caller.team)
+    return teams.handle(spec.method, params, caller.team, this.deps.secrets)
   }
 
   private async notify(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {

@@ -6,15 +6,17 @@
  * offers such a tree as an orphan and only that owner removes it (B6).
  *
  * Reads for the prompt and the policy: how far the branch is behind its base,
- * how far ahead, the diff stat QA reviews, and the tree mark a writer run is
+ * how far ahead, the diff stat QA reviews (text for the prompt, numbers for
+ * the final OK), and the tree mark a writer run is
  * compared against at its close (decision 68). Every git call has its own
  * timeout; a failure reads as unknown, never as a number.
  */
 import { createHash } from 'crypto'
 import { promises as fsp } from 'fs'
-import { taskNumOf, taskSlug, teamWorktreeOwner, type ResolvedRepo, type TaskWorktree, type TeamTask, type TreeMark } from '@shared/teams'
+import { DIFF_STAT_TOP_MAX, taskNumOf, taskSlug, teamWorktreeOwner, type ResolvedRepo, type TaskDiffStat, type TaskWorktree, type TeamTask, type TreeMark } from '@shared/teams'
 import type { WorktreeAddError, WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
 import type { GitRunner } from '../git/gitExec'
+import { parseNumstatZ, sumNumstat } from '../git/porcelain'
 
 /** Per git call (the small queries); `worktree add` keeps the service's own 120 s. */
 export const TASK_GIT_TIMEOUT_MS = 15_000
@@ -174,6 +176,33 @@ export class TaskWorktrees {
       return capLines(out.replace(/\s+$/, ''), QA_STAT_MAX_BYTES)
     } catch {
       return ''
+    }
+  }
+
+  /**
+   * B5: the same range as qaStat in numbers (`diff --numstat -z`): files, insertions, deletions and the
+   * DIFF_STAT_TOP_MAX files with the most lines changed (binaries count 0). The task keeps it as `diffStat`, the one
+   * the final OK shows. null when git cannot say or there is no range (no worktree and no cwd).
+   */
+  async diffStat(task: TeamTask, cwd?: string): Promise<Omit<TaskDiffStat, 'at'> | null> {
+    const wt = task.worktree
+    const flags = ['--no-ext-diff', '--no-textconv', '-z', '--numstat', '-M']
+    try {
+      const out = wt
+        ? await this.git(['diff', ...flags, `refs/heads/${wt.baseBranch}...refs/heads/${wt.branch}`, '--'], wt.path)
+        : cwd
+          ? await this.git(['diff', ...flags, 'HEAD', '--'], cwd)
+          : null
+      if (out === null) return null
+      const rows = parseNumstatZ(out)
+      const top = rows
+        .map((r) => ({ path: r.path.slice(0, 300), add: r.added ?? 0, del: r.removed ?? 0 }))
+        .sort((a, b) => b.add + b.del - (a.add + a.del) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+        .slice(0, DIFF_STAT_TOP_MAX)
+      const sum = sumNumstat(rows)
+      return { files: rows.length, insertions: sum.added, deletions: sum.removed, top }
+    } catch {
+      return null
     }
   }
 

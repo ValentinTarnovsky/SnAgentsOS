@@ -1,5 +1,6 @@
 // redactCredentials (app 2.7.0, A2): src/shared/redact.ts masks credential
-// shapes in free text (notices, plan A5) and nothing else. Every pattern, the
+// shapes in free text (notices, plan A5; since the fifth B5 integration round
+// the 64 hex snaos token shape too) and nothing else. Every pattern, the
 // kept parts of a connection string, idempotence, the negatives (prose, git
 // SHAs, UUIDs, paths, URLs without credentials), junk input and 1 MB inputs
 // (adversarial ones too) under a time budget. redact() keeps its behavior.
@@ -74,6 +75,15 @@ function patterns() {
   masks('amqp://guest:guest@[::1]:5672', `amqp://guest:${M}@[::1]:5672`, 'IPv6 host')
   masks('two: mysql://a:b1@h1/x and ftp://c:d2@h2', `two: mysql://a:${M}@h1/x and ftp://c:${M}@h2`, 'two connection strings in one text')
   masks('postgres://u:' + 'sk-' + tok(30) + '@h/db', `postgres://u:${M}@h/db`, 'a token used as the password')
+
+  // B5 integration, fifth round: the snaos token shape (newToken: 64 hex), the master token of runtime.json and every
+  // console or team token; a second net behind main's refusal of a live token in a team text.
+  const hex64 = rep('0f1e2d3c4b5a6978', 64)
+  masks(`{"version":1,"pid":4242,"token":"${hex64}"}`, `{"version":1,"pid":4242,"token":"${M}"}`, 'the master token inside a pasted runtime.json')
+  masks(`SNAOS_CTL_TOKEN=${hex64}`, `SNAOS_CTL_TOKEN=${M}`, 'a team or console token after =')
+  masks(`Authorization ${hex64.toUpperCase()}\n${hex64}.`, `Authorization ${M}\n${M}.`, 'in capitals, and before a full stop')
+  masks(`token_${hex64} y x-${hex64}`, `token_${M} y x-${M}`, 'after an underscore or a dash')
+  masks(`sha256 ${'ab12'.repeat(16)}`, `sha256 ${M}`, 'a SHA-256 hex digest has the same shape and is masked too')
 }
 
 function negatives() {
@@ -89,6 +99,8 @@ function negatives() {
   for (const p of prose) keeps(p, 'prose stays: ' + p.slice(0, 40))
   keeps('commit a94a8fe5ccb19ba61c4c0873d391e987982fbbd3 (HEAD -> main)', '40-hex git SHA stays')
   keeps('a94a8fe5ccb19ba61c4c0873d391e987982fbbd3a94a8fe5ccb19ba61c4c0873d391e987982fbbd3', '80-hex run stays (redact() is the one for hashes)')
+  keeps(`63 ${rep('0f1e2d3c', 63)} and 65 ${rep('0f1e2d3c', 65)}`, '63 and 65 hex runs are not the 64 hex token shape')
+  keeps(`x${rep('0f1e2d3c', 64)} and ${rep('0f1e2d3c', 64)}g`, 'a 64 hex run glued to a letter or a digit is part of a longer word')
   keeps('session 123e4567-e89b-12d3-a456-426614174000 and pane-4f346061', 'UUIDs and pane ids stay')
   keeps('C:\\Users\\tarno\\Desktop\\SnAgentsOS\\src\\shared\\redact.ts:42:7', 'Windows path with line:col stays')
   keeps('/home/me/.ssh/id_rsa and ~/.claude/settings.json and src/sk-utils/file.ts', 'POSIX paths stay')
@@ -160,6 +172,8 @@ function linear() {
     'pem blocks': rep('-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n', MB),
     'at signs': 'a://u:' + rep('@', MB),
     'dash runs': rep('-', MB),
+    'hex runs': rep('0123456789abcdef', MB),
+    'hex words of 63': rep(' ' + rep('a1', 63), MB),
   }
   for (const [name, input] of Object.entries(inputs)) {
     const t0 = process.hrtime.bigint()

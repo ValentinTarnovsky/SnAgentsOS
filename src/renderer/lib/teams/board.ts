@@ -5,7 +5,8 @@
  * comments) and the user's writes: drag and "Mover a" (`moveTask`, or
  * `updateTask {priority}` for a band inside the same column), field edits
  * (`updateTask` with the task's `rev` as `baseRev`), comments, "Soltar
- * fijado" (`releaseOwned`), Retomar of a stopped task (`resumeTask`, B4)
+ * fijado" (`releaseOwned`), Retomar of a stopped task (`resumeTask`, B4; B5
+ * also a task left blocked on a dismissed card)
  * and new tasks (`createTask`). Main owns every
  * state and marks each field a user write touches `userOwned`; this store
  * only mirrors its answers. A move shows at once (optimistic) and the reply's
@@ -96,8 +97,8 @@ export function summaryOf(teamId: string, taskId: string): TaskSummary | undefin
 /**
  * The agent "Ejecutar ahora" runs a task with: the one main's runManual takes
  * for the task's phase (app 2.7.0, E10 B4). Its assignee in Por hacer, in
- * planning and in executing; its QA agent in qa (`reviewInfo.qaAgentId`, so
- * a card knows it once its detail was loaded). Undefined where main would
+ * planning and in executing; its QA agent in qa (a card passes the summary's
+ * `review.qaAgentId`, B5; the drawer its `reviewInfo`). Undefined where main would
  * answer `conflict`: a task blocked (a stopped one has Retomar in its drawer),
  * done or cancelled, or in a phase that waits on the user or on integrating.
  */
@@ -105,11 +106,6 @@ export function runNowAgentOf(task: Pick<TaskSummary, 'state' | 'phase' | 'assig
   if (task.state === 'done' || task.state === 'cancelled' || task.state === 'blocked') return undefined
   if (task.state === 'todo' || task.phase === 'planning' || task.phase === 'executing') return task.assignee
   return task.phase === 'qa' ? qaAgentId : undefined
-}
-
-/** The QA agent of a task as its loaded detail names it (TaskSummary does not carry it). */
-export function qaAgentOf(teamId: string, taskId: string): string | undefined {
-  return useBoardStore.getState().tasks[taskKey(teamId, taskId)]?.detail?.reviewInfo.qaAgentId
 }
 
 /** Fields of TaskDetail that a TaskSummary does not have. */
@@ -384,9 +380,10 @@ export async function releaseOwned(teamId: string, taskId: string, fields: TaskF
 }
 
 /**
- * Retomar of a task the user stopped (decision 38, `resumeTask`): main puts it
- * back in the pair it was stopped in (T17) with a retry for the agent of that
- * phase; a task that is no longer stopped answers `conflict` and the drawer
+ * Retomar of a task the user stopped (decision 38, `resumeTask`) or one still
+ * blocked on a card nobody has open any more (B5: a dismissed prep failure):
+ * main puts it back in the pair it was blocked in (T17) with a retry for the
+ * agent of that phase; a task that is no longer blocked so answers `conflict` and the drawer
  * reads it again, so it shows how the task is now. Null once main applied it.
  */
 export async function resumeTask(teamId: string, taskId: string): Promise<TeamFail | null> {

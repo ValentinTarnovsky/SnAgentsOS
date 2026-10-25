@@ -5,8 +5,9 @@
  * that landed meanwhile wins and nothing spawns. In order: the definition on
  * disk against the trusted hash (the authoritative trust check, decision 69),
  * the run cwd, the agent CLI, the CLI env with the team token (decision 71),
- * the argv, the Claude system file, the prompt from the CURRENT store, a late
- * session check, then the sync spawn and the `markStarting` commit.
+ * the argv (through cmd.exe within CMD_LINE_MAX), the Claude system file, the
+ * prompt from the CURRENT store, a late session check, then the sync spawn and
+ * the `markStarting` commit.
  *
  * Instructions come only from the trusted snapshot (decision 34); nothing of
  * `team.md` enters the env, and no user text enters the argv (the prompt goes
@@ -29,6 +30,7 @@ import {
   type ResolvedRepo,
   type RoleKind,
   type Run,
+  type TaskDiffStat,
   type TeamCard,
   type TeamComment,
   type TeamRuntime,
@@ -37,8 +39,9 @@ import {
   type TrustedDefinition,
 } from '@shared/teams'
 import type { AgentProvider } from '@shared/types'
-import type { ResolvedCli } from './agentCli'
+import { cmdLineTooLong, type ResolvedCli } from './agentCli'
 import type { SessionBase } from './parsers/types'
+import { ESCAPE_HINT, grantedByRefs, grantHint, TEAM_CALL_HINT } from './flow/approvals'
 import { markStarting, prepFailed, setRunWorktree } from './flow/runs'
 import type { FlowCtx, FlowResult } from './flow/types'
 import type { RunSupervisor } from './RunSupervisor'
@@ -87,7 +90,7 @@ export interface RunStarterDeps {
   /** Step 1 found the disk moved past the trusted hash: the cached trust state flips (decision 69). */
   untrusted: (teamId: string) => void
   /** B4: the task worktrees (null: no worktree service, a worktree task cannot start). */
-  worktrees: Pick<TaskWorktrees, 'ensure' | 'behind' | 'qaStat' | 'mark' | 'disownTree'> | null
+  worktrees: Pick<TaskWorktrees, 'ensure' | 'behind' | 'qaStat' | 'diffStat' | 'mark' | 'disownTree'> | null
   /** B4: a writer run whose cwd was known only now (its new worktree) takes that tree's write lock; false while another holds it. */
   lock: (runId: string, cwd: string) => boolean
 }
@@ -126,12 +129,12 @@ export class RunStarter {
   /** Effect `prepare`: async steps, each followed by a CAS `run.state === 'queued'` through `check()`. */
   async prepare(teamId: string, runId: string, io: PrepareIo): Promise<void> {
     const find = (): Run | undefined => io.rt().activeRuns.find((r) => r.id === runId)
-    const fail = (code: string, card: CardReason | null): void => {
+    const fail = (code: string, card: CardReason | null, vars?: Record<string, string | number>): void => {
       const ctx = io.ctx()
       if (!ctx || !io.check(runId)) return
       const failure: FailureInfo = { kind: 'request', code }
-      this.deps.log(`run ${runId} prep failed ${code}`)
-      const res = io.commit(prepFailed(io.rt(), runId, failure, card, ctx), ['agents', 'run', 'needs'], { runId })
+      this.deps.log(`run ${runId} prep failed ${code}${vars?.what ? ` (${vars.what})` : ''}`)
+      const res = io.commit(prepFailed(io.rt(), runId, failure, card, ctx, vars), ['agents', 'run', 'needs'], { runId })
       if (res.ok) io.failed?.(code, card)
     }
     const run0 = find()
@@ -265,6 +268,12 @@ export class RunStarter {
       fail('spawnFailed', 'spawnFailed')
       return
     }
+    // B5 integration, seventh round: a `.cmd` agent CLI runs through cmd.exe, which cuts its line at 8191 characters
+    // (the permission list would arrive cut): past CMD_LINE_MAX the run never spawns, its card says why and what fixes it.
+    if (cmdLineTooLong(cli, argv.argv)) {
+      fail('spawnFailed', 'spawnFailed', { what: 'cmdLine' })
+      return
+    }
 
     // 6. The Claude system file (deterministic text, deleted at finalize, swept at enable).
     const team = { name: trusted.def.name, goal: trusted.def.goal, rules: trusted.def.rules }
@@ -287,9 +296,15 @@ export class RunStarter {
     const pre = find() ?? run
     const preTask = pre.taskId ? io.rt().tasks.find((t) => t.id === pre.taskId) : undefined
     let qaStat = ''
+    let diffStat: TaskDiffStat | undefined
     let behindMain: number | undefined
     if (preTask && this.deps.worktrees) {
-      if (pre.mode === 'qa') qaStat = await this.deps.worktrees.qaStat(preTask, pre.cwd)
+      if (pre.mode === 'qa') {
+        qaStat = await this.deps.worktrees.qaStat(preTask, pre.cwd)
+        // B5: the same range in numbers, kept on the task at R2 for the final OK.
+        const ds = await this.deps.worktrees.diffStat(preTask, pre.cwd)
+        if (ds) diffStat = { ...ds, at: this.deps.now() }
+      }
       if (preTask.worktree) behindMain = await this.deps.worktrees.behind(preTask)
       if (!io.check(runId)) return
     }
@@ -317,9 +332,22 @@ export class RunStarter {
       where.base = nowTask.worktree.baseBranch
     }
     if (behindMain !== undefined) where.behindMain = behindMain
-    // Decision 43: a Lead run on a goal its session has not seen (markStarting records it as seen), or a kickoff, reads
-    // the goal even on a resumed session (section 1 is skipped there; the system text never carries the goal).
-    const leadGoal: PromptInput['leadGoal'] = now.mode !== 'lead' ? undefined : rt.goalSeenHash !== trusted.goalHash ? 'changed' : now.trigger.reason === 'kickoff' ? 'kickoff' : undefined
+    // Decision 43: a Lead run on a goal its session has not seen, or a kickoff, reads the goal even on a resumed session
+    // (section 1 is skipped there; the system text never carries the goal). B5: what the session read is its own
+    // `goalHash` (R5 records the hash its prompt carried), not the team-wide `goalSeenHash`, which a Descartar of the
+    // kickoff item also sets; a session from before B5 falls back to the team-wide one.
+    const agentNow = rt.agents.find((a) => a.id === now.agentId)
+    const leadSess = agentNow?.sessions[now.sessionKey]
+    const sessGoal = leadSess && leadSess.sessionId === now.sessionId ? leadSess.goalHash ?? rt.goalSeenHash : rt.goalSeenHash
+    const leadGoal: PromptInput['leadGoal'] = now.mode !== 'lead' ? undefined : sessGoal !== trusted.goalHash ? 'changed' : now.trigger.reason === 'kickoff' ? 'kickoff' : undefined
+    // B5, system hints in section 4 (main's text, never WakeMark.detail nor a `<request from="user">` block): an earlier
+    // run of this agent was denied a `snaos team` call through PowerShell (or `snaos.cmd`), so this one is told to use
+    // Bash; or a shell or inline-code escape, so this one is told it needs the user; and a run the user's grant woke
+    // (its wake refs name the approved permission) is told to run those commands with Bash.
+    const bashHint = agentNow?.bashHint === true
+    const escapeHint = agentNow?.escapeHint === true
+    const granted = grantHint(grantedByRefs(rt, now))
+    const hints = [...(bashHint ? [TEAM_CALL_HINT] : []), ...(escapeHint ? [ESCAPE_HINT] : []), ...(granted ? [granted] : [])]
     const built = buildRunPrompt({
       provider: now.provider,
       resumed: now.resumed,
@@ -342,6 +370,7 @@ export class RunStarter {
         .map((c) => ({ id: c.id, question: c.question, answer: answerText(c) })),
       trigger: io.detail && now.mode !== 'free' ? { reason: now.trigger.reason, detail: io.detail } : { reason: now.trigger.reason },
       ...(leadGoal ? { leadGoal } : {}),
+      ...(hints.length ? { hints } : {}),
     })
 
     // 8. Late session check: a console (or a lingering orphan) took the session during the prep.
@@ -377,6 +406,12 @@ export class RunStarter {
     // R2: the tasks the Lead's board listed to triage (the untriaged line is never cut) are triaged by this run.
     if (board && board.untriaged.length) s.triaged = [...board.untriaged]
     if (treeBefore) s.treeBefore = treeBefore
+    // B5: the goal this Lead prompt carried (decision 43), the Bash and escape hints it delivered (consumed now) and
+    // the diff stat a QA prompt showed (the task keeps it for the final OK).
+    if (now.mode === 'lead') s.goalHash = trusted.goalHash
+    if (bashHint) s.bashHint = true
+    if (escapeHint) s.escapeHint = true
+    if (diffStat) s.diffStat = diffStat
     io.commit(markStarting(io.rt(), runId, s, ctx), ['agents', 'run'], { runId })
   }
 

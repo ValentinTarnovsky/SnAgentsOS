@@ -35,6 +35,7 @@ import {
   type TaskField,
   type TaskPriority,
   type TaskState,
+  type TeamCard,
   type TeamComment,
   type TeamRuntime,
   type TeamTask,
@@ -308,6 +309,32 @@ export function createTask(rt: TeamRuntime, actor: Actor, d: TaskDraft & { paren
 /** The run mode of a task phase (I3), for the level a resume sets. */
 const PHASE_MODE: Readonly<Partial<Record<TeamTask['phase'], RunMode>>> = { planning: 'plan', executing: 'exec', qa: 'qa' }
 
+/** An `orphan` system card (decision 64): about a process that outlived main, never closed with its task. */
+export function isOrphanCard(c: TeamCard): boolean {
+  return c.from.kind === 'system' && c.from.why === 'orphan'
+}
+
+/**
+ * B5: a task that ends (done, cancelled, archived) leaves nothing of it open in Te necesita, in the same result: its
+ * pending approvals are cancelled, its open cards dismissed and its "Por despachar" items dropped, whatever its phase
+ * was. `keep`: the approval the caller resolves itself (the final OK of T11). Every path that ends a task calls it: a
+ * user move to done or cancelled (T18), the Lead's cancel (T19), a card's cancelTask, the final OK with nothing to
+ * merge (T11), the archive sweep (decision 27); B6's Integrator end (T13) too. An `applying` approval is a hire (no
+ * task): it ends through completeApproval. An `orphan` card stays open (decision 64: it is about a live process, not
+ * the task; only its killOrphan or Descartar closes it).
+ */
+export function closeTaskNeeds(rt: TeamRuntime, taskId: string, ctx: Pick<FlowCtx, 'now'>, keep?: string): TeamRuntime {
+  let out = rt
+  if (out.approvals.some((a) => a.taskId === taskId && a.state === 'pending' && a.id !== keep)) {
+    out = { ...out, approvals: out.approvals.map((a) => (a.taskId === taskId && a.state === 'pending' && a.id !== keep ? { ...a, state: 'cancelled' as const, decidedAt: ctx.now } : a)) }
+  }
+  if (out.cards.some((c) => c.taskId === taskId && c.state === 'open' && !isOrphanCard(c))) {
+    out = { ...out, cards: out.cards.map((c) => (c.taskId === taskId && c.state === 'open' && !isOrphanCard(c) ? { ...c, state: 'dismissed' as const } : c)) }
+  }
+  if (out.queue.some((q) => q.taskId === taskId)) out = { ...out, queue: out.queue.filter((q) => q.taskId !== taskId) }
+  return out
+}
+
 /**
  * A task leaves for `to` (T18 for the user, T19 for the Lead): its level and
  * queue items go; leaving its phase (todo, done, cancelled) cancels its
@@ -315,7 +342,8 @@ const PHASE_MODE: Readonly<Partial<Record<TeamTask['phase'], RunMode>>> = { plan
  * the counters go); to blocked it keeps its phase to resume to, and a block
  * of the Lead says so (`by: 'lead'`, never read as the user's own). Moot
  * cards are dismissed: the blocking card when it unblocks, every open card
- * when it is done or cancelled. The caller stopped the run first.
+ * but an orphan one (decision 64) when it is done or cancelled. The caller
+ * stopped the run first.
  */
 function moveTo(
   rt: TeamRuntime,
@@ -335,7 +363,10 @@ function moveTo(
     t = { ...t, state: 'blocked', blocked: { reason, resume, at: ctx.now } }
     if (task.state !== 'blocked') t.stateSince = ctx.now
   } else {
-    if (task.phase !== 'none') {
+    // Over (done, cancelled): nothing of it stays open, whatever its phase (closeTaskNeeds). Back to todo: the
+    // approvals of the phase it leaves.
+    if (to === 'done' || to === 'cancelled') out = closeTaskNeeds(out, task.id, ctx)
+    else if (task.phase !== 'none') {
       out = {
         ...out,
         approvals: out.approvals.map((a) => (a.taskId === task.id && a.state === 'pending' ? { ...a, state: 'cancelled' as const, decidedAt: ctx.now } : a)),
@@ -344,6 +375,7 @@ function moveTo(
     if (to === 'todo') {
       delete t.plan
       delete t.cooldownUntil
+      delete t.diffStat
       t.review = { ...t.review, round: 0 }
       delete t.review.lastVerdict
       t.counters = { ...t.counters, noProgress: 0, continuations: 0, retries: 0, interrupts: 0 }
@@ -356,7 +388,8 @@ function moveTo(
   if (dismissAll || (blockingCard && to !== 'blocked')) {
     out = {
       ...out,
-      cards: out.cards.map((c) => (c.state === 'open' && c.taskId === task.id && (dismissAll || c.id === blockingCard) ? { ...c, state: 'dismissed' as const } : c)),
+      // An orphan card is about a process, not the task (decision 64): it stays for its killOrphan.
+      cards: out.cards.map((c) => (c.state === 'open' && c.taskId === task.id && ((dismissAll && !isOrphanCard(c)) || c.id === blockingCard) ? { ...c, state: 'dismissed' as const } : c)),
     }
   }
   if (to !== 'blocked' && out.queue.some((q) => q.taskId === task.id)) out = { ...out, queue: out.queue.filter((q) => q.taskId !== task.id) }
@@ -371,7 +404,8 @@ function moveTo(
  * included: a blockedBy edit that would move a task whose state the user owns
  * answers `user_owned ['state']`. A user edit makes the fields it changed the
  * user's, but for "Lead decides" (assignee null), which hands `assignee` back
- * to the Lead. Isolation and repo only before the first admission (`frozen`);
+ * to the Lead. Isolation and repo only before the first admission (`frozen`),
+ * needsPlan only while the task is in todo (B5 review, second round), else `bad_request`;
  * a new assignee while a run is active: an agent gets `busy`, the user
  * `running` (stop the run first, decision 37). `state` is the Lead's (todo,
  * blocked, cancelled from todo, doing or blocked, no active run; its block is
@@ -455,6 +489,10 @@ export function updateTask(
   if (patch.needsPlan !== undefined) {
     if (typeof patch.needsPlan !== 'boolean') return fail('bad_request')
     if (patch.needsPlan !== task.needsPlan) {
+      // Only in todo (B5 review, second round, a deviation of T20): past it the task's phase already follows the field (a
+      // plan turned on in executing would leave an exec phase no run may take: admitRun refuses it); refused like repo
+      // and isolation.
+      if (task.state !== 'todo') return fail('bad_request')
       t.needsPlan = patch.needsPlan
       touched.push('needsPlan')
     }
@@ -713,12 +751,10 @@ export function archiveSweep(rt: TeamRuntime, ctx: Pick<FlowCtx, 'now'>): FlowRe
   }
   const archivedTasks = { ...rt.archivedTasks }
   for (const t of gone) archivedTasks[t.id] = t.state as 'done' | 'cancelled'
-  return {
-    ok: true,
-    rt: { ...rt, tasks: rt.tasks.filter((t) => !old.has(t.id)), comments, archivedTasks, queue: rt.queue.filter((q) => !q.taskId || !old.has(q.taskId)) },
-    effects,
-    result: undefined,
-  }
+  // An approval or card an archived task left open (one from before B5) closes with it: no view can open it again.
+  let out: TeamRuntime = { ...rt, tasks: rt.tasks.filter((t) => !old.has(t.id)), comments, archivedTasks, queue: rt.queue.filter((q) => !q.taskId || !old.has(q.taskId)) }
+  for (const id of old) out = closeTaskNeeds(out, id, ctx)
+  return { ok: true, rt: out, effects, result: undefined }
 }
 
 /**

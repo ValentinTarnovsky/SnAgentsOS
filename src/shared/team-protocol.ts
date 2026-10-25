@@ -48,6 +48,8 @@ export interface TaskBlockedView {
   kind: BlockedReason['kind']; why?: CardReason; text?: string; waitingOn?: string[]
   /** kind 'user' only: who parked it, the Lead (`team task update --state blocked`) or the user (a move). */
   by?: 'lead' | 'user'
+  /** kind 'card' only (B5): the card that blocks the task, so the drawer names that exact card (open or not) rather than one with the same `why`. */
+  cardId?: string
 }
 export interface TaskRunRef { id: string; agentId: string; mode: RunMode; state: RunState; startedAt?: number; silence?: PaneSilence }
 export interface TaskSummary {
@@ -55,7 +57,8 @@ export interface TaskSummary {
   assignee?: string; repoId: string; isolation: Isolation; needsPlan: boolean
   blockedBy: string[]; blocked?: TaskBlockedView; parentId?: string
   createdBy: 'user' | 'system' | string /* agent id */; createdAt: number; updatedAt: number; stateSince: number
-  userOwned: TaskField[]; review?: { round: number; max: number }
+  /** `qaAgentId` (B5): the QA agent the task's qa phase runs, so a card names it without the drawer's detail. */
+  userOwned: TaskField[]; review?: { round: number; max: number; qaAgentId?: string }
   branch?: string; integrated?: boolean
   run?: TaskRunRef
   needs: number                                    // teamNeedsRows rows with this taskId
@@ -86,9 +89,9 @@ export interface AgentView {
 }
 export type ApprovalPayloadView =
   | { kind: 'plan'; planRev: number; small: boolean; text: string; truncated?: boolean }
-  | { kind: 'final'; summary: string; stat?: DiffStat }
+  | { kind: 'final'; summary: string; stat?: DiffStat }   // stat: the last diff stat a QA run of the task read (B5); absent when none was computed
   | { kind: 'hire'; roleId: string; diff: TeamFileDiff; risks: TeamRiskFlag[] }
-  | { kind: 'permission'; roleId: string; tools: string[] }
+  | { kind: 'permission'; roleId: string; tools: string[]; denied?: string[] }   // denied: the shell commands the run was denied (redacted, <= 10 x 300 chars, B5)
   | { kind: 'integrate'; branch: string; base: string; ahead?: number; lastError?: IntegrateError }
 export interface ApprovalView { id: string; taskId?: string; state: ApprovalState; decider: 'user' | 'lead'; requestedBy: string; at: number; error?: string; payload: ApprovalPayloadView }
 export interface CardView {
@@ -192,7 +195,7 @@ export type TeamRequest =
   // B4
   | { op: 'dispatch'; teamId: string; queueId: string /* QUEUE_ID_RE or 'all' */; go: boolean }
   | { op: 'kickoff'; teamId: string }
-  /** Decision 38: the drawer's Retomar of a task the user stopped (blocked {stopped}); T17, any other task answers conflict {stale}. */
+  /** Decision 38: the drawer's Retomar of a task the user stopped (blocked {stopped}) or blocked on a card (B5: a dismissed prep failure card); T17, any other task answers conflict {stale}. */
   | { op: 'resumeTask'; teamId: string; taskId: string }
   // B5
   | { op: 'needs'; teamId: string }

@@ -5,7 +5,7 @@
  * path that came from the CLI), the HTTP client over the pipe or socket,
  * human or `--json` output and the exit codes. Output is English on purpose.
  */
-import { readFileSync } from 'fs'
+import { readFileSync, realpathSync, statSync } from 'fs'
 import { request } from 'http'
 import { homedir } from 'os'
 import { posix, resolve, win32 } from 'path'
@@ -16,6 +16,9 @@ import {
   CTL_MAX_PROMPT,
   CTL_MAX_SEND,
   CTL_RPC_PATH,
+  CTL_TEAM_LOG_N_MAX,
+  CTL_TEAM_PATH_MAX,
+  CTL_TEAM_PATHS_MAX,
   type CtlAccountInfo,
   type CtlAccountStatus,
   type CtlAccountUseResult,
@@ -48,6 +51,7 @@ import {
   TASK_TITLE_MAX,
   TEAM_PLAN_MAX,
 } from '@shared/teams'
+import { DATA_SECRET_FILES } from '@shared/teamArgv'
 import type { TeamCtlMethod } from '@shared/teamTools'
 import { agentGuide } from './agentGuide'
 
@@ -60,11 +64,11 @@ const NOT_RUNNING = `${PRODUCT} is not running`
 const VALUE_FLAGS = new Set([
   'workspace', 'console', 'path', 'prompt', 'prompt-file', 'title', 'file', 'lines', 'timeout', 'quiet-ms', 'task-state', 'runtime', 'turns', 'before', 'rev', 'provider',
   // app 2.7.0 (Teams): snaos team.
-  'body-file', 'assign', 'repo', 'isolation', 'blocked-by', 'priority', 'parent', 'state', 'options', 'plan',
+  'body-file', 'assign', 'repo', 'isolation', 'blocked-by', 'priority', 'parent', 'state', 'options', 'plan', 'task',
 ])
 const BOOL_FLAGS = new Set([
   'json', 'focus', 'no-profile', 'enter', 'clear', 'local', 'idle', 'agent', 'help', 'tools', 'thinking', 'yes', 'resume', 'fresh', 'close', 'off', 'composer', 'open',
-  'mine', 'no-plan', 'needs-plan', 'small', 'multi', 'confirm',
+  'mine', 'no-plan', 'needs-plan', 'small', 'multi', 'confirm', 'stat',
 ])
 const ALIASES: Record<string, string> = { w: 'workspace', c: 'console', n: 'lines', h: 'help', t: 'title', y: 'yes' }
 
@@ -84,6 +88,9 @@ const SUBS: Partial<Record<Command, Record<string, string[]>>> = {
     show: [],
     tasks: ['state', 'mine'],
     task: ['title', 'body-file', 'assign', 'repo', 'isolation', 'blocked-by', 'priority', 'no-plan', 'needs-plan', 'parent', 'state', 'rev'],
+    // -n is the alias of --lines.
+    diff: ['stat', 'task'],
+    log: ['lines', 'task'],
     comment: ['file'],
     note: ['file', 'title'],
     ask: ['file', 'options', 'multi', 'confirm'],
@@ -132,6 +139,8 @@ export interface ParsedArgs {
   sub?: string
   positionals: string[]
   flags: Record<string, string | true>
+  /** App 2.7.0 (team diff, team log): the index in `positionals` where the words after `--` start; absent without `--`. */
+  dashAt?: number
 }
 
 export class UsageError extends Error {}
@@ -140,9 +149,11 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const positionals: string[] = []
   const flags: Record<string, string | true> = {}
   let command: Command | null = null
+  let dashAt: number | undefined
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--') {
+      dashAt = positionals.length
       positionals.push(...argv.slice(i + 1))
       break
     }
@@ -179,7 +190,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   let sub: string | undefined
   let own = ALLOWED[command]
   if (subs && flags.help !== true) {
-    sub = positionals.shift() ?? DEFAULT_SUB[command]
+    // A subcommand is a word before `--` (after it, every word is data).
+    sub = dashAt !== 0 ? positionals.shift() : undefined
+    if (sub !== undefined && dashAt !== undefined) dashAt--
+    sub ??= DEFAULT_SUB[command]
     const names = Object.keys(subs).join(', ')
     if (sub === undefined) throw new UsageError(`${command} needs one of: ${names}`)
     if (!Object.prototype.hasOwnProperty.call(subs, sub)) throw new UsageError(`unknown ${command} command "${sub}" (one of: ${names})`)
@@ -188,7 +202,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const allowed = new Set([...own, 'json', 'runtime', 'help'])
   const label = sub ? `${command} ${sub}` : command
   for (const name of Object.keys(flags)) if (!allowed.has(name)) throw new UsageError(`--${name} does not apply to ${label}`)
-  return { command, ...(sub ? { sub } : {}), positionals, flags }
+  return { command, ...(sub ? { sub } : {}), positionals, flags, ...(dashAt !== undefined ? { dashAt } : {}) }
 }
 
 /** Reads what the client is responsible for: files and stdin (main never opens CLI paths). */
@@ -199,6 +213,11 @@ export interface ClientIo {
   /** App 2.7.0 (snaos team): the raw bytes, decoded by decodeTeamText. Without them the UTF-8 text is used. */
   readFileBytes?(path: string): Uint8Array
   readStdinBytes?(): Promise<Uint8Array>
+  /**
+   * B5 integration, fifth round: why the client must not read this absolute path, or null. run() sets it inside a team
+   * run (teamReadGuard); every `--file`, `--body-file` and `--prompt-file` asks it before reading.
+   */
+  refuse?(path: string): string | null
 }
 
 function stdinBytes(): Promise<Buffer> {
@@ -218,13 +237,116 @@ export const nodeIo: ClientIo = {
   readStdinBytes: stdinBytes,
 }
 
-const stripBom = (s: string): string => s.replace(/^﻿/, '')
+const stripBom = (s: string): string => s.replace(/^\uFEFF/, '')
 
 function readUserFile(io: ClientIo, path: string, label: string): string {
+  const abs = resolve(io.cwd(), path)
+  const why = io.refuse?.(abs)
+  if (why) throw new UsageError(`cannot read ${label} ${path}: ${why}`)
   try {
-    return stripBom(io.readFile(resolve(io.cwd(), path)))
+    return stripBom(io.readFile(abs))
   } catch {
     throw new UsageError(`cannot read ${label} ${path}`)
+  }
+}
+
+/**
+ * Files a team run never reads, in any folder (B5 integration, fifth round): the master token, the Claude and Codex
+ * logins. Sixth round: every secret file of the data folder (DATA_SECRET_FILES, the list the Read denies of a Claude
+ * run share).
+ */
+const SECRET_FILES: readonly string[] = [...DATA_SECRET_FILES, '.credentials.json', 'auth.json']
+/** The default root of the worktrees inside the data folder (registerWorktreeIpc: dataDir()/worktrees): task trees live there. */
+const WORKTREES_DIR = 'worktrees'
+
+/**
+ * A file's or folder's identity (its volume and file index), the same through every alias of it: a share of the same
+ * disk (`\\localhost\C$\...`, `\\<host>\C$\...`, whose realpath stays that share), a mapped or subst drive, a junction.
+ * Null when unknown: missing, unreadable, or an index of 0 (a file system without file ids gives it to every file).
+ */
+function fileIdentity(path: string): string | null {
+  try {
+    const s = statSync(path, { bigint: true, throwIfNoEntry: false })
+    return s && s.ino !== 0n ? `${s.dev}:${s.ino}` : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * B5 integration, fifth round (security, a second net: main refuses a live token in any team text): inside a team run
+ * (SNAOS_TEAM_RUN) the client reads no file whose realpath is inside the data folder (runtime.json holds the master
+ * token; the folder also keeps the team state, the device secrets and the saved accounts) and no file named like one
+ * of SECRET_FILES anywhere (runtime.json, the other secrets of the data folder, .credentials.json, auth.json; by its
+ * own name or its realpath's). The data folder is every absolute one
+ * the run could mean: the shim's (SNAOS_CLI is <dataDir>/bin/snaos), the --runtime one (the shim passes it; another
+ * --runtime only adds a folder) and the installed build's. Inside it by path or by identity (`identity`, fileIdentity:
+ * a folder above the file is the data folder itself), so a share of the same disk does not get around it. Its
+ * `worktrees` folder is the run's own tree (the default root of the task worktrees) and stays readable, as long as the
+ * realpath stays in it too. Stdin is no path, also when the shell redirects a file into it (`- < file`): main's
+ * live-token refusal and the masking of a run's chat cover the tokens.
+ */
+export function teamReadGuard(
+  flags: Record<string, string | true>,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  realpath: (p: string) => string = realpathSync.native,
+  identity: (p: string) => string | null = fileIdentity,
+): (path: string) => string | null {
+  const p = platform === 'win32' ? win32 : posix
+  const key = (x: string): string => (platform === 'win32' ? p.resolve(x).toLowerCase() : p.resolve(x))
+  const real = (x: string): string => {
+    try {
+      return realpath(x)
+    } catch {
+      return x
+    }
+  }
+  const dirs: string[] = []
+  const add = (dir: string): void => {
+    // A folder of its own only: never a drive or the file system root, never relative to the cwd.
+    if (!p.isAbsolute(dir) || p.dirname(p.resolve(dir)) === p.resolve(dir)) return
+    for (const d of [dir, real(dir)]) if (!dirs.includes(key(d))) dirs.push(key(d))
+  }
+  const cli = env[CLI_ENV.cli]
+  if (cli) add(p.dirname(p.dirname(cli)))
+  if (typeof flags.runtime === 'string') add(p.dirname(flags.runtime))
+  add(p.dirname(defaultRuntimePath(env, platform)))
+  const inside = (file: string, dir: string): boolean => file === dir || file.startsWith(dir.endsWith(p.sep) ? dir : dir + p.sep)
+  const inData = (file: string): boolean => dirs.some((d) => inside(file, d) && !inside(file, p.join(d, WORKTREES_DIR)))
+  // The identities of the data folders and of their worktrees folders, read at the first file only.
+  let ids: { data: Set<string>; trees: Set<string> } | null = null
+  const idsOf = (): { data: Set<string>; trees: Set<string> } => {
+    if (ids) return ids
+    ids = { data: new Set(), trees: new Set() }
+    for (const d of dirs) {
+      const a = identity(d)
+      if (a) ids.data.add(a)
+      const t = identity(p.join(d, WORKTREES_DIR))
+      if (t) ids.trees.add(t)
+    }
+    return ids
+  }
+  /** Walks up from `file`: a folder that is a data folder (by identity) before its worktrees folder means inside. */
+  const inDataById = (file: string): boolean => {
+    const { data, trees } = idsOf()
+    if (data.size === 0) return false
+    let cur = p.resolve(file)
+    for (let i = 0; i < 256; i++) {
+      const id = identity(cur)
+      if (id && trees.has(id)) return false
+      if (id && data.has(id)) return true
+      const up = p.dirname(cur)
+      if (up === cur) return false
+      cur = up
+    }
+    return false
+  }
+  return (path) => {
+    const forms = [path, real(path)]
+    if (forms.some((f) => SECRET_FILES.includes(p.basename(f).toLowerCase()))) return `a team run never reads a ${SECRET_FILES.join(', ')} file (they hold secrets)`
+    if (forms.some((f) => inData(key(f)) || inDataById(f))) return `a team run never reads a file of the ${PRODUCT} data folder (it holds the app's token)`
+    return null
   }
 }
 
@@ -312,6 +434,8 @@ async function readTeamText(io: ClientIo, v: string, flag = 'file'): Promise<str
   if (v === '-') bytes = io.readStdinBytes ? await io.readStdinBytes() : Buffer.from(await io.readStdin(), 'utf8')
   else {
     const path = resolve(io.cwd(), v)
+    const why = io.refuse?.(path)
+    if (why) throw new UsageError(`cannot read --${flag} ${v}: ${why}`)
     try {
       bytes = io.readFileBytes ? io.readFileBytes(path) : Buffer.from(io.readFile(path), 'utf8')
     } catch {
@@ -383,6 +507,23 @@ function checkTeamCall(call: RpcCall): RpcCall {
   if (Buffer.byteLength(JSON.stringify({ v: 1, method: call.method, params: call.params }), 'utf8') > CTL_MAX_BODY)
     throw new UsageError('the text is too large to send in one request (1 MB after JSON escaping)')
   return call
+}
+
+/**
+ * The paths of `team diff` and `team log`: only the words after `--` (no other word), repo relative (not absolute, no
+ * drive, no `..`), CTL_TEAM_PATHS_MAX of CTL_TEAM_PATH_MAX characters at most. Main checks them again and keeps them
+ * inside the tree after realpath; git gets them after its own `--` only, as literal names (`-- --stat` is a file).
+ */
+function teamPaths(args: ParsedArgs, label: string): string[] {
+  const before = args.dashAt ?? args.positionals.length
+  if (before > 0) throw new UsageError(`${label} takes paths only after --: snaos ${label} -- src/a.ts`)
+  const paths = args.positionals.slice(before)
+  if (paths.length > CTL_TEAM_PATHS_MAX) throw new UsageError(`${label} takes ${CTL_TEAM_PATHS_MAX} paths at most`)
+  for (const p of paths) {
+    if (p === '' || p.length > CTL_TEAM_PATH_MAX) throw new UsageError(`${label}: a path is empty or longer than ${CTL_TEAM_PATH_MAX} characters`)
+    if (/^[\\/]/.test(p) || /^[A-Za-z]:/.test(p) || p.split(/[\\/]/).includes('..')) throw new UsageError(`${label}: ${p} is not relative to the repo (no absolute path, drive or ..)`)
+  }
+  return paths
 }
 
 const TEAM_TASK_VERBS = ['get', 'create', 'update'] as const
@@ -506,6 +647,17 @@ async function buildTeamCall(args: ParsedArgs, io: ClientIo): Promise<RpcCall> {
       const plan = idFlag(flag('plan'), 'plan', TASK_ID_RE, TASK_ID_TEXT)
       if (plan === undefined) throw new UsageError('team approve needs --plan <t-N> (the task whose plan you approve)')
       return call('team.approve', { plan })
+    }
+    case 'diff':
+    case 'log': {
+      const label = `team ${args.sub}`
+      const paths = teamPaths(args, label)
+      const task = idFlag(flag('task'), 'task', TASK_ID_RE, TASK_ID_TEXT)
+      const common = { ...(task !== undefined ? { task } : {}), ...(paths.length ? { paths } : {}) }
+      if (args.sub === 'diff') return call('team.diff', { ...(on('stat') ? { stat: true } : {}), ...common })
+      const n = flag('lines')
+      if (n !== undefined && (!/^\d{1,2}$/.test(n) || Number(n) < 1 || Number(n) > CTL_TEAM_LOG_N_MAX)) throw new UsageError(`-n must be a whole number from 1 to ${CTL_TEAM_LOG_N_MAX}`)
+      return call('team.log', { ...(n !== undefined ? { n: Number(n) } : {}), ...common })
     }
     default:
       // hire (parseArgs admits only the subs of SUBS.team)
@@ -1053,6 +1205,8 @@ export function formatHuman(method: CtlMethod, data: unknown): string {
     case 'team.show':
     case 'team.tasks':
     case 'team.task.get':
+    case 'team.diff':
+    case 'team.log':
     case 'team.task.create':
     case 'team.task.update':
     case 'team.comment':
@@ -1105,6 +1259,10 @@ function teamHuman(method: TeamCtlMethod, d: Record<string, unknown>): string {
       }
       return out.join('\n')
     }
+    case 'team.diff':
+    case 'team.log':
+      // What git printed, as is (main cut it past its cap with a marker line); nothing to show reads as such.
+      return typeof d.text === 'string' && d.text !== '' ? d.text : method === 'team.diff' ? 'no changes' : 'no commits'
     case 'team.task.create':
       return `${word(d.id)} created`
     case 'team.task.update':
@@ -1130,6 +1288,50 @@ function teamHuman(method: TeamCtlMethod, d: Record<string, unknown>): string {
     case 'team.hire':
       return `role proposed to the user (${word(d.approvalId)}); ${CONCLUDED}`
   }
+}
+
+/** Lines a refused `team hire` prints under its error, at most (main sends 20 at most too). */
+const HIRE_ISSUE_LINES_MAX = 20
+/** Longest printed issue line. */
+const HIRE_ISSUE_LINE_MAX = 300
+
+/** Invisible or layout code points an issue line never prints raw: C0, DEL, C1, soft hyphen, ALM, MVS, zero-width and bidi marks, separators, word joiners, BOM, annotations, tags. */
+const HIDDEN_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x00, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x61c, 0x61c], [0x180e, 0x180e], [0x200b, 0x200f], [0x2028, 0x202e],
+  [0x2060, 0x206f], [0xfeff, 0xfeff], [0xfff9, 0xfffb], [0xe0000, 0xe007f],
+]
+
+/** A text of an issue as one printable line: each HIDDEN_RANGES code point written as its escape (u{hex}). */
+function issueText(v: unknown): string {
+  if (typeof v !== 'string' && typeof v !== 'number') return ''
+  let out = ''
+  for (const ch of String(v)) {
+    const cp = ch.codePointAt(0) ?? 0
+    out += HIDDEN_RANGES.some(([a, b]) => cp >= a && cp <= b) ? `\\u{${cp.toString(16)}}` : ch
+  }
+  return out
+}
+
+/**
+ * App 2.7.0 (Teams, B5): the definition issues a refused `team hire` carries in `data.issues`, one line each
+ * (`  roles/hire.md:3 count: bad_value (9)`), escaped and capped, so the Lead sees what to fix in its role file.
+ */
+export function hireIssueLines(method: string, data: unknown): string[] {
+  if (method !== 'team.hire' || !data || typeof data !== 'object') return []
+  const issues = (data as { issues?: unknown }).issues
+  if (!Array.isArray(issues)) return []
+  const out: string[] = []
+  for (const i of issues.slice(0, HIRE_ISSUE_LINES_MAX)) {
+    if (!i || typeof i !== 'object') continue
+    const x = i as Record<string, unknown>
+    const where = `${issueText(x.file) || 'role file'}${typeof x.line === 'number' && x.line > 0 ? `:${x.line}` : ''}`
+    const key = issueText(x.key)
+    const detail = issueText(x.detail)
+    const text = `  ${where} ${key ? `${key}: ` : ''}${issueText(x.code)}${detail ? ` (${detail})` : ''}${x.severity === 'warning' ? ' [warning]' : ''}`
+    out.push(text.length > HIRE_ISSUE_LINE_MAX ? `${text.slice(0, HIRE_ISSUE_LINE_MAX - 3)}...` : text)
+  }
+  if (issues.length > HIRE_ISSUE_LINES_MAX) out.push(`  ... ${issues.length - HIRE_ISSUE_LINES_MAX} more`)
+  return out
 }
 
 export const USAGE = `snaos: drive ${PRODUCT} consoles from any terminal.
@@ -1163,6 +1365,7 @@ export const USAGE = `snaos: drive ${PRODUCT} consoles from any terminal.
 
 Inside a team run only (snaos help --agent, section Teams):
   snaos team show | tasks [--state <state>|open] [--mine] | task get <t-N>
+  snaos team diff [--stat] [--task <t-N>] [-- <path>...] | log [-n <1..50>] [--task <t-N>] [-- <path>...]
   snaos team task create --title <t> [--body-file <file>|-] [--assign <agent>] [--repo <id>]
              [--isolation worktree|main] [--blocked-by t-1,t-2] [--priority urgent|high|normal|low]
              [--no-plan] [--parent <t-N>]
@@ -1174,6 +1377,7 @@ Inside a team run only (snaos help --agent, section Teams):
   snaos team plan --file <file>|- [--small] | review | done [<text|-> | --file <file>|-]
   snaos team verdict approve|changes <text|-> | --file <file>|-
   snaos team approve --plan <t-N> | hire --file <file>|-
+             (hire: a whole role file; an optional id: line in its frontmatter names the role, else the slug of name)
 
 Every command accepts --json. A console is self, an index (2), <ws>:<index>, an id or a title.
 A note is its id or its exact title.`
@@ -1205,7 +1409,9 @@ export async function run(argv: readonly string[], deps: RunDeps): Promise<numbe
       deps.out(USAGE)
       return 0
     }
-    call = await buildCall(args, deps.io)
+    // B5 integration, fifth round: a team run reads no file of the data folder and no credentials file (teamReadGuard).
+    const io = deps.env[CLI_ENV.teamRun] ? { ...deps.io, refuse: teamReadGuard(args.flags, deps.env) } : deps.io
+    call = await buildCall(args, io)
   } catch (e) {
     if (e instanceof UsageError) return fail('usage', e.message, 2)
     return fail('internal', e instanceof Error ? e.message : String(e), 1)
@@ -1231,7 +1437,10 @@ export async function run(argv: readonly string[], deps: RunDeps): Promise<numbe
   }
   if (json) deps.out(JSON.stringify(res))
   if (!res.ok) {
-    if (!json) deps.err(`snaos: ${res.error.message}`)
+    if (!json) {
+      deps.err(`snaos: ${res.error.message}`)
+      for (const line of hireIssueLines(call.method, res.data)) deps.err(line)
+    }
     return CTL_EXIT[res.error.code] ?? 1
   }
   if (!json) {
