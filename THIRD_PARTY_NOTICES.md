@@ -54,8 +54,9 @@ SOFTWARE.
   `src/main/chat/decodeCodexExec.ts` and `src/main/teams/RunLog.ts`; the run
   processes `src/main/teams/RunSupervisor.ts`, `src/main/teams/agentCli.ts`
   and `src/main/proc/treeKill.ts`; the run argv and prompt
-  `src/shared/teamArgv.ts` and `src/shared/teamPrompt.ts`; and every other
-  file with the `paperclipai/paperclip` header above.
+  `src/shared/teamArgv.ts` and `src/shared/teamPrompt.ts`; the dispatch
+  planner `src/shared/teamDispatch.ts`; and every other file with the
+  `paperclipai/paperclip` header above.
 
 ```
 MIT License

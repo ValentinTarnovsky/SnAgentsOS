@@ -12,17 +12,18 @@ Electron 33 + React 19 + xterm.js 5.5 + node-pty. Centro de mando de agentes (Cl
 - Cada tanda de claves de config nuevas sube `CONFIG_VERSION` (`src/shared/types.ts`) una sola vez, con default de zod por campo en `src/main/store/schema.ts`. `migrate()` solo agrega logica cuando hay transformacion. Los schemas 11 a 14 viajan juntos en 2.0.0 como migraciones secuenciales.
 - `src/shared` no importa nada de Node (`fs`, `path`, `electron`...) ni del DOM: lo consumen main, renderer y mobile.
 - El unmount de un pane nunca mata su pty: los kills son explicitos (`pty.kill`, `killPanePtys`). El cleanup de `useXterm` ya no mata (E4-FR-36): un remount, un error boundary o un reload se reengancha al pty vivo; los kills por cierre son de `ptyLifecycle`.
-- Todo archivo persistente nuevo vive bajo `dataDir()` (`src/main/paths.ts`), nunca bajo `app.getPath('userData')` directo. Logs en `dataDir()/logs/<nombre>.log`. Escritura atomica `tmp` + `rename`, UTF-8 sin BOM.
+- Todo archivo persistente nuevo vive bajo `dataDir()` (`src/main/paths.ts`), nunca bajo `app.getPath('userData')` directo. Logs en `dataDir()/logs/<nombre>.log`. Escritura atomica `tmp` + `rename`, UTF-8 sin BOM. El estado de Equipos vive en `dataDir()/teams/` y solo lo escribe main; la definicion esta en el repo y las corridas leen solo la copia confiada.
 - El trabajo de fondo descansa en reposo: ningun `setInterval` de sondeo nuevo (los anteriores a 2.7.0 siguen como estan). Lo que vence a una hora en main se agenda en `src/main/DeadlineTimer.ts` (un solo `setTimeout` al deadline mas cercano); sin deadlines no queda ningun timer.
 - Todo archivo que porte o adapte codigo de stablyai/orca o de paperclipai/paperclip lleva en la primera linea `// Adaptado de stablyai/orca (MIT) - <ruta original>` o `// Adaptado de paperclipai/paperclip (MIT) - <ruta original>`; las licencias estan en `THIRD_PARTY_NOTICES.md`. No se usan sus nombres ni sus marcas en la UI.
 - Main es autoritativo (estado de agentes, procesos, archivos). Ningun canal acepta rutas del renderer o del celu sin validarlas en main.
+- Equipos es un Lab (`settings.labs.teams`) que gatea main: apagado no carga ningun equipo, no deja ningun timer y `teams:req` responde `disabled`. Una corrida de equipo nunca recibe `SNAOS_CONSOLE_ID`, `SNAOS_PTY_ID`, `SNAOS_WORKSPACE_ID` ni un token de consola: su token propio (con `SNAOS_TEAM_RUN`) solo llega a `ping`, `usage` y `team.*`. Las escrituras de git de Equipos son solo del Integrator (merge `--no-ff` en un worktree temporal, nunca push) y de los worktrees de tareas.
 - Protocolo WS: `PROTOCOL_VERSION` queda en 1 y todo campo nuevo es opcional. Cada ctl nuevo se declara en `RemoteCtlAction`, `ctlActionSchema` y `src/renderer/lib/remoteCommands.ts`. Canales IPC con forma `domain:action` en `src/shared/ipc-channels.ts`.
 - Strings visibles con clave es/en: `src/renderer/i18n`, `src/main/i18n.ts`, `src/mobile/src/lib/i18n.ts`.
 - Prohibidos el em dash y el en dash en todo el repo, y el nombre de producto anterior fuera de la allowlist de `scripts/check-brand.cjs` (identidad vieja solo en `LEGACY_BRAND` de `src/shared/brand.ts`).
 
 ## Nombres
 
-Producto SnAgentsOS (`BRAND` en `src/shared/brand.ts`). Prefijos: env `SNAOS_`, CLI `snaos`, archivo por repo `.snagentsos.json`, skill `~/.claude/skills/snagentsos`, localStorage y sessionStorage `snagentsos.`, carpeta portable `snagentsos-data`, userData de dev `snagentsos-dev` (`snagentsos-dev-<sha8>` en un worktree vinculado).
+Producto SnAgentsOS (`BRAND` en `src/shared/brand.ts`). Prefijos: env `SNAOS_`, CLI `snaos`, archivo por repo `.snagentsos.json`, definicion de equipo `.snagentsos/team/`, skill `~/.claude/skills/snagentsos`, localStorage y sessionStorage `snagentsos.`, carpeta portable `snagentsos-data`, userData de dev `snagentsos-dev` (`snagentsos-dev-<sha8>` en un worktree vinculado).
 
 ## Verificacion
 

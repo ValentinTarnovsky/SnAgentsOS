@@ -26,6 +26,14 @@ Reglas de UI y de copy para el desktop (`src/renderer`) y el cliente mobile (`sr
 | Editar texto o codigo en el desktop | `editor/CodeEditor.tsx` (CodeMirror 6 con el tema de la app) | `<textarea>` para codigo |
 | Buscar y reemplazar dentro de un panel (editor de Notas y Archivos) | `ui/FindWidget.tsx` (flota arriba a la derecha, contador "3 de 12", Aa / palabra / regex; en CodeMirror via `editor/cmFind.tsx`) | El panel de busqueda de CodeMirror, una barra armada a mano |
 | Dictar en un campo del celu | `MicButton.tsx` + `VoiceInterim` (inserta en el cursor, nunca Enter) | Reconocimiento propio por campo |
+| Mostrar las senales de una consola (pedido de `snaos needs`, falla, silencio, contexto, silenciada) | `status/PaneSignals.tsx`: `StatusSignals` (`compact` en el header del pane, `dense` en una fila del sidebar, `wrap` en una tarjeta) o un chip suelto de `status/` (`NeedsChip`, `FailureChip`, `SilenceChip`, `ContextChip`, cada uno en su archivo) en otra superficie, como la tarjeta de un agente de Equipos | Un chip propio con otro color u otras palabras |
+| Ordenar o contar lo que espera al usuario | `needsYouRows` de `src/shared/attention.ts` (consolas) y `teamNeedsRows` de `src/shared/teamNeeds.ts` (un equipo), los mismos en desktop y celu; cada fila de Te necesita de un equipo con `teams/NeedRow.tsx` | Un filtro o un orden propio por pantalla |
+| Badge de lo que espera (un workspace, un equipo, una pestana) | `sidebar/AttentionBadge.tsx` (pildora roja, "9+" desde 10) | Un numero suelto en el label |
+| Un log de chat que salta al final y sigue lo nuevo (Share, chat de consola, corridas de Equipos) | `chat/ChatScroller.tsx` con las filas de `components/chat/` | Un scroller con auto-scroll propio |
+| Mostrar texto o un diff que viene del repo (definicion de un equipo, un rol a contratar) | `teams/TeamDiffView.tsx` (`TeamDiffView`, `DefIssueList`): cada linea pasa por `visibleLine` y los caracteres ocultos se ven | El texto del repo tal cual |
+| Aprobar, Pedir cambios o Rechazar en un equipo | `DecideControls` de `teams/ApprovalBody.tsx` (Te necesita y el plan del drawer de una tarea) | Botones propios por pantalla |
+| Una consola que tomo un agente de un equipo | `teams/TakeoverChip.tsx` (`TakeoverChip` con Devolver al Equipo en el header; `TakeoverButton` para Tomar el control) | Otro chip en el header |
+| Chips y botones chicos dentro de Equipos | `RUN_CHIP` y `SMALL_BTN` de `teams/RunHeader.tsx` (con `UsageChip` y `ElapsedChip`) | Clases copiadas a mano |
 
 Si un primitivo se esta estilando para parecer otro, frenar: el manejo de foco es distinto y confunde al siguiente.
 
@@ -87,7 +95,7 @@ Tokens de estado (los mismos hex en desktop y mobile, declarados en los dos `@th
 
 ## 9. Color solo para estados
 
-La UI es monocromatica. Ambar, rojo, verde y violeta significan estado, nunca decoracion. El color nunca es la unica senal: va con glifo, texto o `aria-label` ("Claude: esperando tu respuesta"). Hay un unico boton primario por pantalla, en desktop y en mobile; el resto son ghost o secundarios.
+La UI es monocromatica. Ambar, rojo, verde y violeta significan estado, nunca decoracion. El color nunca es la unica senal: va con glifo, texto o `aria-label` ("Claude: esperando tu respuesta"). Hay un unico boton primario por pantalla, en desktop y en mobile; el resto son ghost o secundarios. Los chips de senal siguen la regla: la falla en `state-error` y el pedido de `snaos needs` en `state-action`; el silencio, el contexto, lo gastado y la toma de un equipo van monocromos.
 
 ## 10. i18n obligatoria
 
@@ -99,4 +107,4 @@ Prohibidos U+2014 y U+2013 en cualquier archivo: UI, codigo, comentarios, docs y
 
 ## 12. Atribucion
 
-Las secciones 2, 5 y 6 adaptan texto de `docs/STYLEGUIDE.md` de stablyai/orca (licencia MIT, Copyright (c) 2026 Lovecast Inc.). Los parsers de corridas de Equipos adaptan codigo de paperclipai/paperclip (licencia MIT, Copyright (c) 2025 Paperclip AI). El texto completo de las dos licencias esta en `THIRD_PARTY_NOTICES.md`. Todo archivo de codigo que porte o adapte codigo de uno de esos proyectos lleva en su primera linea `// Adaptado de stablyai/orca (MIT) - <ruta original>` o `// Adaptado de paperclipai/paperclip (MIT) - <ruta original>`. Ninguno de los dos nombres ni sus marcas aparecen en la UI.
+Las secciones 2, 5 y 6 adaptan texto de `docs/STYLEGUIDE.md` de stablyai/orca (licencia MIT, Copyright (c) 2026 Lovecast Inc.). Las corridas de Equipos (parsers, lanzador, supervisor, log, perfiles de permisos, prompt, despacho y tree kill), el decoder del chat de `codex exec` y el clasificador de fallas adaptan codigo de paperclipai/paperclip (licencia MIT, Copyright (c) 2025 Paperclip AI). El texto completo de las dos licencias esta en `THIRD_PARTY_NOTICES.md`. Todo archivo de codigo que porte o adapte codigo de uno de esos proyectos lleva en su primera linea `// Adaptado de stablyai/orca (MIT) - <ruta original>` o `// Adaptado de paperclipai/paperclip (MIT) - <ruta original>`. Ninguno de los dos nombres ni sus marcas aparecen en la UI.
