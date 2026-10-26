@@ -1,0 +1,8 @@
+{
+  "steps": [
+    { "emit": { "type": "thread.started", "thread_id": "019a0000-0000-7000-8000-0000000b10c2" } },
+    { "emit": { "type": "turn.started" } },
+    { "emit": { "type": "item.completed", "item": { "id": "item_0", "type": "agent_message", "text": "Tasks below.\n\n````snaos-team\n{\"v\":1,\"actions\":[{\"method\":\"team.task.create\",\"params\":{\"title\":\"A\",\"body\":\"Do A:\\n```js\\nconsole.log(1)\\n```\"}},{\"method\":\"team.task.create\",\"params\":{\"title\":\"B\",\"blockedBy\":[\"$1\"]}}]}\n````" } } },
+    { "emit": { "type": "turn.completed", "usage": { "input_tokens": 900, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 60, "reasoning_output_tokens": 0 } } }
+  ]
+}

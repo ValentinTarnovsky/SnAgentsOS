@@ -29,8 +29,13 @@ export function needsUser(s: { attention?: boolean; pendingCount?: number } | nu
  * false) reads as `working` while the agent goes on, or `idle` for a
  * title-only track (its request was a turn that ended). The same object
  * otherwise.
+ * App 2.7.0: a mute (`muted`) also makes main publish attention false, so a
+ * muted `action` is answered only when none of its requests is still open
+ * (`pending` lists the unanswered ones of a precise track); one still open,
+ * or a title-only one (it has no `pending`), keeps the request look.
  */
-export function displayStatus<T extends { state: ClaudePaneState | null; attention?: boolean; precise?: boolean } | null | undefined>(s: T): T {
+export function displayStatus<T extends { state: ClaudePaneState | null; attention?: boolean; precise?: boolean; muted?: boolean; pending?: readonly unknown[] } | null | undefined>(s: T): T {
   if (!s || s.state !== 'action' || s.attention !== false) return s
+  if (s.muted === true && (s.precise === false || (s.pending?.length ?? 0) > 0)) return s
   return { ...s, state: s.precise === false ? 'idle' : 'working' }
 }

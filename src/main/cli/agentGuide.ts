@@ -3,8 +3,10 @@
  * other consoles. English on purpose (a stable contract for agents) and
  * versioned with the app, so the skill stub stays a two-line pointer. Only the
  * idea of a handoff guide comes from stablyai/orca's CLI guide; no text is
- * copied. Node core only: cli.js bundles it.
+ * copied. Node core only: cli.js bundles it (teamTools.ts is pure and zod-free).
  */
+import { teamChannelText, teamToolsGuide } from '@shared/teamTools'
+
 export function agentGuide(appVersion: string): string {
   return `# SnAgentsOS CLI guide (snaos ${appVersion})
 
@@ -21,7 +23,9 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
 
 ## Commands
 
-- \`snaos ls [--workspace <ws>]\`: workspaces and consoles with agent state.
+- \`snaos ls [--workspace <ws>]\`: workspaces and consoles with agent state. A console row also
+  shows why its last turn failed (\`failed: limit until 15:30\`), a working agent silent for a while
+  (\`quiet 12m\`, \`stalled 25m\`) and an open request for the user (\`needs: <text>\`).
 - \`snaos spawn <claude|codex|shell|preset> [--prompt <text> | --prompt-file <path> | --prompt -] [--workspace <ws>] [--title <t>] [--focus] [--no-profile]\`:
   opens a console and returns its index and id right away, without waiting for the agent.
 - \`snaos send <console> <text|-> [--file <path>] [--enter]\`: types text into the console's input;
@@ -30,12 +34,14 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
 - \`snaos wait <console> --idle [--timeout <s>] [--quiet-ms <ms>]\`: blocks until the agent is
   idle, done, asking or failed (shells: no output for --quiet-ms).
 - \`snaos status ["<text>" | --clear]\`: shows or sets your console's status line (max 120).
+- \`snaos needs "<action>" | --clear\`: flags your console because the user has to do or decide
+  something (see "Asking the user for something").
 - \`snaos notify "<text>" [--title <t>] [--local]\`: desktop notification (and Discord/ntfy unless --local).
 - \`snaos note "<text>" [--task-state todo|doing|review|done] | --clear\`: the one-line workspace
   note of the sidebar (not the Markdown notes below).
 - \`snaos peek <console> [--lines N]\`: one look at a console: agent state, whether it needs the
-  user, pending requests, activity, last reply, model and effort when known, and its last N
-  screen lines (default 30).
+  user, pending requests, activity, the tools of its current or last turn, last reply, model and
+  effort when known, and its last N screen lines (default 30).
 - \`snaos chat <console> [--turns N] [--before <cursor>] [--tools] [--thinking]\`: the conversation
   of a Claude or Codex console from its transcript (default the last 3 turns, max 20).
 - \`snaos notes [ls]\`, \`notes get|new|set|append|rm|open\`: the workspace's Markdown notes (below).
@@ -66,6 +72,10 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
   timeout, or run the wait in the background if your tool can.
 - \`send --enter\` followed by \`wait --idle\` returns only after the new turn started and ended;
   \`noTurnObserved: true\` means nothing happened in 10 s (check the console with \`read\`).
+- \`send\` (with or without \`--enter\`) to a console waiting on its user (a permission, question or
+  plan menu) types nothing and exits 9 (\`awaiting_user\`). If the menu opens after the text was
+  typed, \`--enter\` drops the Enter (the text stays unsent) and also exits 9. Never try to answer
+  another agent's menu: tell the user, or \`wait\` and send later.
 - Never \`kill\`, \`restart\` or \`ws close\` a console or workspace unless the user asked for it.
   None of them works on your own console or workspace, consoles with a Connection Profile
   answer \`ssh_protected\`, and \`ws close\` always needs \`--yes\` (it ends every console there).
@@ -85,6 +95,10 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
 - \`snaos read <console>\` for the raw screen of any console (shells too).
 - To follow another agent's work: \`snaos wait <console> --idle --timeout 110\`, then \`snaos peek\`
   or \`snaos chat <console> --turns 1\` to read the result.
+- \`quiet <time>\` or \`stalled <time>\` in \`ls\` and \`peek\` means a working agent gave no sign of life
+  for that long (a long command, or a stuck tool). Look with \`peek\` or \`read\`; never \`kill\` or
+  \`restart\` it for that unless the user asks. \`failed: limit until <time>\` means its usage limit
+  ran out until then: tell the user instead of sending it more work.
 
 ## Notes
 
@@ -127,6 +141,20 @@ SnAgentsOS console it already knows which console you are (\`self\`). Use
   the text sitting unsent in the new console, submit it with an empty \`snaos send <console> --enter\`.
   Never type the text again.
 
+## Asking the user for something
+
+- \`snaos needs "<action>"\` (one line, max 200 characters) when the user has to do or decide
+  something you cannot do yourself: approve a deploy, log in, pick between two designs, check
+  something by hand. Your console turns amber and goes first in the attention lists (desktop and
+  phone), but its input stays free and nothing blocks you: keep working, or end your turn.
+- It is a flag, not a question menu: write the action itself ("approve the staging migration"),
+  and put the details in your reply or in \`snaos status\`. Running it again replaces the text.
+- Run \`snaos needs --clear\` once it is resolved. The next prompt your console gets, and your
+  session starting or ending, also clear it.
+- It only flags your own console: a console that names another one with \`--console\` gets
+  \`forbidden\` (from an external terminal \`--console\` is required). It shares the budget of 30 a
+  minute with \`kill\`, \`restart\`, \`rename\` and \`ws rename|close|fav\`.
+
 ## Waiting on other consoles, drivers and background work
 
 SnAgentsOS shows your console as done when your turn ends. If you are not done yet:
@@ -145,10 +173,45 @@ SnAgentsOS shows your console as done when your turn ends. If you are not done y
 - If a command says SnAgentsOS is not running or unreachable, or your sandbox blocks the
   pipe, report it and ask the user. Do not retry in a loop.
 
+## Teams (snaos team)
+
+\`snaos team\` works only inside a team run (the app sets \`SNAOS_TEAM_RUN\` for it); outside one it
+answers \`forbidden\`. Inside a team run every other command answers \`forbidden\` too, except \`ping\`
+and \`usage\`. Each run's instructions list the tools of its role; those of a dev, for example:
+
+${teamToolsGuide('dev')}
+
+${teamChannelText(false, { win32: false, provider: 'claude' })}
+
+- Claude Code runs \`snaos team\` with its Bash tool (Git Bash on Windows), never with the PowerShell
+  tool nor through \`$env:SNAOS_CLI\`: on Windows those reach \`snaos.cmd\`, whose arguments cmd.exe
+  reads again, so a team run's permissions allow \`Bash(snaos team:*)\` only. A Codex run calls it from
+  its own shell.
+- Read code changes with \`snaos team diff\` and history with \`snaos team log\`, never with \`git log\`,
+  \`git diff\` or \`git show\`: a read-only run does not allow them (their options can write or read any
+  file), so the app runs git for you with safe options. \`team diff\` reads a task's worktree against its
+  base (its commits and its uncommitted changes) or, for a task without one or a run without a task,
+  the repo root against HEAD (files git does not track yet are not in it: \`git status\` lists them);
+  \`--stat\` lists the files only. \`team log [-n <1..50>]\` lists the commits
+  of the task branch since its base, or of the repo root (20 by default). Your own task by default,
+  \`--task <t-N>\` for another task of your team; paths only after \`--\`, relative to the repo
+  (\`snaos team diff -- src/a.ts\`). The text stops at 256 KB (diff) or 64 KB (log) with a
+  \`[... cut ...]\` line: narrow it with \`--stat\`, \`-n\` or a path.
+- A tool that ends your run concludes it: the team then refuses your writes (\`conflict\`, exit 8)
+  and you keep only the reads. Budgets per run: 120 reads and 60 writes a minute.
+- \`team task update\` never changes a field the user set: it answers \`user_owned\` (exit 8) with
+  those fields; send the call again without them.
+- \`team hire --file <file>|-\` (the Lead, in its lead runs) proposes a whole role file, frontmatter
+  and instructions like \`roles/<id>.md\`. An optional \`id: <role-id>\` line in its frontmatter names
+  the role (it is not written); without it the id is the slug of \`name\` (\`QA Movil\` -> \`qa-movil\`).
+  A refused file answers \`bad_request\` and prints one line per problem (\`data.issues\` with \`--json\`).
+
 ## Exit codes
 
 0 ok, 1 internal error, 2 bad usage, 3 not found or not running, 4 ambiguous, 5 app not
-available, 6 unauthorized (restart the console), 7 forbidden or disabled, 8 conflict (the note
-changed since --rev), 124 timeout.
+available, 6 unauthorized (restart the console; in a team run: the run is over), 7 forbidden or
+disabled, 8 conflict (the note or the team task changed since --rev, or this team run already
+concluded) or user owned (team task fields the user set), 9 awaiting the user (a permission,
+question or plan menu), 124 timeout.
 `
 }

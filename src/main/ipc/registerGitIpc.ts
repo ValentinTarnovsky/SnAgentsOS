@@ -15,6 +15,8 @@ export interface GitIpcDeps {
   initialGitChip: boolean
   /** E7-FR-22..26: hands the phone's gitReq handler to RemoteManager. */
   setRemoteGit?: (handler: (req: RemoteGitRequest) => Promise<RemoteGitReply>) => void
+  /** WorktreeService.repoOf: the chip's "main -N" of a managed worktree pane (app 2.7.0, A9). */
+  managedRepoOf?: (dir: string) => string | null
 }
 
 /** Debug counters go to the log at most this often, and only when they moved. */
@@ -37,6 +39,7 @@ export function registerGitIpc(deps: GitIpcDeps): GitService {
       const wc = deps.getSender()
       if (wc && !wc.isDestroyed()) wc.send(CH.GIT_UPDATE, evt)
     },
+    managedRepoOf: deps.managedRepoOf,
   })
   service.setEnabled(deps.initialGitChip)
 

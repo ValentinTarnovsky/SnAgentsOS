@@ -21,10 +21,14 @@
  *    checks against the screen again before it writes the digit. There the
  *    free text row focuses the composer. In Chat the card is at most 45% of
  *    the visible height and scrolls inside.
+ *  - app 2.7.0 (A8): while live with a desktop >= 2.7.0, "View full plan"
+ *    takes the place of the pointer to the terminal and opens PlanSheet
+ *    (planReq). It only reads: nothing is answered from there.
  */
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { ClipboardList } from 'lucide-react'
+import { ClipboardList, FileText } from 'lucide-react'
+import { APP_2_7_0, appVersionAtLeast } from '@shared/agentTune'
 import type { PromptCardModel } from '../../lib/promptRules'
 import { planOptions, sameOption, type PlanOption } from '../../lib/promptMenu'
 import { answerCard, answerMenu } from '../../lib/answerLive'
@@ -33,6 +37,7 @@ import { selectInChat, useRemoteStore } from '../../lib/store'
 import { CHAT_CARD_MAX_HEIGHT, CardHeader, RequestSummary, menuChanged } from './PermissionCard'
 import { openTerminalKeyboard } from './PromptStrip'
 import { readCurrentMenu } from './usePromptMenu'
+import { PlanSheet } from './PlanSheet'
 
 type PlanModel = Extract<PromptCardModel, { kind: 'plan' }>
 
@@ -69,6 +74,9 @@ export function PlanCard({
   onFold: () => void
 }): ReactNode {
   const inChat = useRemoteStore(selectInChat)
+  // planReq is a 2.7.0 frame (an older desktop strikes it) and needs the socket.
+  const canRead = useRemoteStore((s) => s.phase === 'live' && s.connected && appVersionAtLeast(s.appVersion, APP_2_7_0))
+  const [planOpen, setPlanOpen] = useState(false)
   const firstApprove = options.find((o) => o.cls === 'approve')?.n
   const pick = (option: PlanOption): void => {
     const read = readCurrentMenu(paneId, card.pending.id)
@@ -96,7 +104,19 @@ export function PlanCard({
     >
       <CardHeader icon={<ClipboardList size={16} className="mt-0.5 shrink-0 text-state-action" />} title={t('prompt.planTitle')} onFold={onFold} />
       {card.pending.summary && <RequestSummary text={card.pending.summary} />}
-      <p className="mt-1.5 text-[11px] leading-tight text-text-secondary">{t('prompt.planHint')}</p>
+      {canRead ? (
+        <button
+          type="button"
+          data-plan-read={card.pending.id}
+          onClick={() => setPlanOpen(true)}
+          className="mt-1.5 flex h-9 max-w-full items-center gap-1.5 rounded-btn border border-border bg-bg-secondary px-3 text-xs font-medium text-text-primary active:bg-card"
+        >
+          <FileText size={14} className="shrink-0 text-text-secondary" />
+          <span className="truncate">{t('plan.read')}</span>
+        </button>
+      ) : (
+        <p className="mt-1.5 text-[11px] leading-tight text-text-secondary">{t('prompt.planHint')}</p>
+      )}
       <div className="mt-2 flex flex-col gap-1.5">
         {options.map((option) =>
           option.cls === 'feedback' ? (
@@ -129,6 +149,7 @@ export function PlanCard({
           ),
         )}
       </div>
+      <PlanSheet paneId={paneId} requestId={card.pending.id} summary={card.pending.summary} open={planOpen} onClose={() => setPlanOpen(false)} />
     </div>
   )
 }

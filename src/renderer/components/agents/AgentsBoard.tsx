@@ -4,7 +4,9 @@ import { formatAgeShort } from '@shared/agents'
 import { formatCountdown } from '@shared/hibernation'
 import { useAppStore } from '@/lib/store'
 import { useAgentStore } from '@/lib/agentStore'
-import { agentPhrase, agentTitle, allAgents, navInputFrom, type AgentEntry } from '@/lib/agentNav'
+import { agentTitle, allAgents, navInputFrom, type AgentEntry } from '@/lib/agentNav'
+import { rowPhrase } from '@/lib/statusSignals'
+import { StatusSignals } from '@/components/status/PaneSignals'
 import { BOARD_COLUMNS, boardColumns, firstCard, moveSelection, navigableColumns, type BoardColumnId } from '@/lib/agentsBoard'
 import { revealPane } from '@/lib/revealPane'
 import { focusPane, getFocusedPane } from '@/lib/focus'
@@ -62,12 +64,16 @@ function BoardCard({ entry, selected, onSelect, setRef }: { entry: AgentEntry; s
   const topicAsTitle = useAppStore((s) => s.settings.agents?.topicAsTitle !== false)
   const Icon = iconFor(entry.pane.icon)
   const title = agentTitle(entry.pane, presets, entry.status ?? entry.session, topicAsTitle)
+  // App 2.7.0 (A6): a `bare` status (a `snaos needs` with no agent) shows its needs chip alone, no glyph.
+  const st = entry.status
+  const bare = st?.bare === true
+  const signals = !!st && (bare || !!st.needs || !!st.failure || !!st.silence || !!st.context || st.muted === true)
   return (
     <button
       ref={setRef}
       type="button"
       data-board-card={entry.id}
-      data-board-state={glyphOf(entry)}
+      data-board-state={bare ? 'bare' : glyphOf(entry)}
       aria-selected={selected}
       tabIndex={selected ? 0 : -1}
       onFocus={onSelect}
@@ -78,16 +84,23 @@ function BoardCard({ entry, selected, onSelect, setRef }: { entry: AgentEntry; s
       )}
     >
       <span className="flex min-w-0 items-center gap-1.5">
-        <StatusGlyph kind={glyphOf(entry)} unread={entry.unread} size={13} />
+        {!bare && <StatusGlyph kind={glyphOf(entry)} unread={entry.unread} size={13} />}
         <Icon size={12} className="shrink-0" style={{ color: entry.pane.color }} />
         <span className={cn('min-w-0 flex-1 truncate text-[13px] leading-5', entry.unread ? 'font-semibold text-text-primary' : 'text-text-primary/90')}>{title}</span>
         <CacheChip paneId={entry.id} />
         {entry.stateSince > 0 && <span className="shrink-0 text-[11px] text-text-secondary">{formatAgeShort(now - entry.stateSince, lang)}</span>}
       </span>
       <span className="truncate text-[11px] text-text-secondary">{entry.ws.name}</span>
-      <span data-board-detail className="line-clamp-2 break-words text-[12px] leading-4 text-text-secondary">
-        {agentPhrase(entry, t, lang, now, false)}
-      </span>
+      {signals && (
+        <span data-board-signals className="flex min-w-0 max-w-full flex-wrap items-center gap-1">
+          <StatusSignals paneId={entry.id} status={entry.status} wrap />
+        </span>
+      )}
+      {!bare && (
+        <span data-board-detail className="line-clamp-2 break-words text-[12px] leading-4 text-text-secondary">
+          {rowPhrase(entry, t, lang, now, false)}
+        </span>
+      )}
     </button>
   )
 }
@@ -121,6 +134,8 @@ function BoardBody() {
   const cards = useRef(new Map<string, HTMLButtonElement>())
   const rootRef = useRef<HTMLDivElement | null>(null)
 
+  // App 2.7.0: the ranks come from the shared rule (agentNav.workspaceAgents), so a
+  // `snaos needs` not muted, on an agent or a bare pane, waits on you, aged from the ask.
   const entries = useMemo(
     () => allAgents(navInputFrom({ workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, settings: { agents: agentSettings } }, { sessions, sleeping })),
     [workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, agentSettings, sessions, sleeping],

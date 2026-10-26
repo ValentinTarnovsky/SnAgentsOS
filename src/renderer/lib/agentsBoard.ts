@@ -11,7 +11,11 @@ export type BoardColumnId = 'waiting' | 'working' | 'done' | 'idle'
 /** Screen order: waiting on you, working, done, idle (collapsed by default). */
 export const BOARD_COLUMNS: readonly BoardColumnId[] = ['waiting', 'working', 'done', 'idle']
 
-/** Rank (agentRank) -> column: 1 action/error, 2 done, 3 working, 4 idle/unknown/sleeping/not started. */
+/**
+ * Rank (agentRank; app 2.7.0: 1 also for a `snaos needs` not muted, see
+ * workspaceAgents) -> column: 1 action/error, 2 done, 3 working, 4
+ * idle/unknown/sleeping/not started.
+ */
 const COLUMN_OF_RANK: Record<1 | 2 | 3 | 4, BoardColumnId> = { 1: 'waiting', 2: 'done', 3: 'working', 4: 'idle' }
 
 /** Entries split into the four columns, each in urgency order (compareAgents). */

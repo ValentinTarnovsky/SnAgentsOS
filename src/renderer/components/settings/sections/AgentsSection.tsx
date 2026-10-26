@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
-import type { AgentPreset, AgentSettings, AwakeMode, ResumeOnStartup } from '@shared/types'
+import type { AgentPreset, AgentSettings, AwakeMode, ResumeOnStartup, SilenceSettings } from '@shared/types'
 import { HIBERNATE_MAX_MINUTES, HIBERNATE_MIN_MINUTES, HIBERNATE_SUGGESTED_MINUTES, normalizeIdleMinutes } from '@shared/hibernation'
+import { normalizeSilence, SILENCE_QUIET_MIN, SILENCE_STALLED_MIN } from '@shared/silence'
 import { useAppStore } from '@/lib/store'
 import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
@@ -89,13 +90,100 @@ function HibernateRows() {
   )
 }
 
+/** Typed minutes for a silence threshold, clamped to `range` (a non-number keeps `fallback`). */
+export function clampSilenceMinutes(value: string, range: { min: number; max: number }, fallback: number): number {
+  const n = Math.round(Number(value))
+  if (!value.trim() || !Number.isFinite(n)) return fallback
+  return Math.min(range.max, Math.max(range.min, n))
+}
+
+/**
+ * Silence watch (app 2.7.0, A6; E10-FR-18): the quiet / stalled chip of a
+ * working agent with no sign of life. The minutes commit on blur or Enter
+ * like hibernation, and go through normalizeSilence (the rule main applies)
+ * so stalledMin always stays above quietMin.
+ */
+function SilenceRows() {
+  const t = useT()
+  const silence = normalizeSilence(useAppStore((s) => s.settings.agents.silence))
+  const updateSettings = useAppStore((s) => s.updateSettings)
+  const [quiet, setQuiet] = useState<string | null>(null)
+  const [stalled, setStalled] = useState<string | null>(null)
+  const save = (patch: Partial<SilenceSettings>): void => {
+    const agents = useAppStore.getState().settings.agents
+    const prev = normalizeSilence(agents.silence)
+    const next = normalizeSilence({ ...prev, ...patch })
+    if (next.enabled !== prev.enabled || next.quietMin !== prev.quietMin || next.stalledMin !== prev.stalledMin) {
+      updateSettings({ agents: { ...agents, silence: next } })
+    }
+  }
+  const commitQuiet = (): void => {
+    if (quiet === null) return
+    save({ quietMin: clampSilenceMinutes(quiet, SILENCE_QUIET_MIN, silence.quietMin) })
+    setQuiet(null)
+  }
+  const commitStalled = (): void => {
+    if (stalled === null) return
+    save({ stalledMin: clampSilenceMinutes(stalled, SILENCE_STALLED_MIN, silence.stalledMin) })
+    setStalled(null)
+  }
+  const off = !silence.enabled
+  return (
+    <>
+      <ToggleRow
+        checked={silence.enabled}
+        onChange={(v) => save({ enabled: v })}
+        searchId="agents.silence"
+        title={t('settings.agents.silence')}
+        description={t('settings.agents.silenceHint')}
+      />
+      <SettingRow searchId="agents.silenceQuiet" title={t('settings.agents.silenceQuiet')} description={t('settings.agents.silenceQuietHint')}>
+        <input
+          type="number"
+          min={SILENCE_QUIET_MIN.min}
+          max={SILENCE_QUIET_MIN.max}
+          step={1}
+          data-silence-quiet
+          disabled={off}
+          aria-label={t('settings.agents.silenceQuiet')}
+          className={cn(inputCls, 'w-28', off && 'pointer-events-none opacity-50')}
+          value={quiet ?? String(silence.quietMin)}
+          onChange={(e) => setQuiet(e.target.value)}
+          onBlur={commitQuiet}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commitQuiet()
+          }}
+        />
+      </SettingRow>
+      <SettingRow searchId="agents.silenceStalled" title={t('settings.agents.silenceStalled')} description={t('settings.agents.silenceStalledHint')}>
+        <input
+          type="number"
+          min={SILENCE_STALLED_MIN.min}
+          max={SILENCE_STALLED_MIN.max}
+          step={1}
+          data-silence-stalled
+          disabled={off}
+          aria-label={t('settings.agents.silenceStalled')}
+          className={cn(inputCls, 'w-28', off && 'pointer-events-none opacity-50')}
+          value={stalled ?? String(silence.stalledMin)}
+          onChange={(e) => setStalled(e.target.value)}
+          onBlur={commitStalled}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commitStalled()
+          }}
+        />
+      </SettingRow>
+    </>
+  )
+}
+
 /**
  * Agent "Behavior" block (E5-FR-29). Each key joins when its FR lands; today:
  * resume on startup (E5-FR-10), the resume dialog countdown (E5-FR-12) and
  * nudge (E5-FR-13), keep the PC awake and its display variant (E5-FR-23/24),
  * sidebar agent rows and topic as title (E5-FR-19), the sidebar order
- * (E5-FR-22), Ctrl+1..9 (E5-FR-18), hibernation (E5-FR-25) and the Claude
- * cache timer (E5-FR-28).
+ * (E5-FR-22), Ctrl+1..9 (E5-FR-18), hibernation (E5-FR-25), the Claude
+ * cache timer (E5-FR-28) and the silence watch (app 2.7.0).
  */
 function BehaviorBlock() {
   const t = useT()
@@ -282,6 +370,7 @@ function BehaviorBlock() {
           ))}
         </div>
       </SettingRow>
+      <SilenceRows />
     </section>
   )
 }

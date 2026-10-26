@@ -1,0 +1,8 @@
+{
+  "steps": [
+    { "emit": { "type": "thread.started", "thread_id": "019a0000-0000-7000-8000-00000000b10c" } },
+    { "emit": { "type": "turn.started" } },
+    { "emit": { "type": "item.completed", "item": { "id": "item_0", "type": "agent_message", "text": "Plan ready.\n\n```snaos-team\n{\"v\":1,\"actions\":[{\"method\":\"team.comment\",\"params\":{\"target\":\"t-1\",\"text\":\"Plan written\"}},{\"method\":\"team.plan\",\"params\":{\"text\":\"1. Read the code\\n2. Change it\",\"small\":true}}]}\n```" } } },
+    { "emit": { "type": "turn.completed", "usage": { "input_tokens": 1200, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 40, "reasoning_output_tokens": 0 } } }
+  ]
+}

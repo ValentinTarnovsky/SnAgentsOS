@@ -3,7 +3,9 @@ import type { AgentPreset } from '@shared/types'
 import { AGENT_ROWS_MAX, pickAgentRows } from '@shared/agents'
 import { displayStatus } from '@shared/status'
 import { useLang, useT } from '@/i18n'
-import { agentIconName, agentPhrase, agentTitle, type AgentEntry } from '@/lib/agentNav'
+import { agentIconName, agentTitle, type AgentEntry } from '@/lib/agentNav'
+import { doingNow, rowPhrase, signalTipLines } from '@/lib/statusSignals'
+import { StatusSignals } from '@/components/status/PaneSignals'
 import { revealPane } from '@/lib/revealPane'
 import { iconFor } from '@/lib/icons'
 import { cn } from '@/lib/cn'
@@ -78,10 +80,16 @@ export function AgentRows({
         const title = agentTitle(e.pane, presets, info, topicAsTitle)
         const deadline = paneCacheDeadline(e.status, cacheTimer)
         const cache = deadline !== null && deadline > Date.now() ? deadline : null
-        const phrase = agentPhrase(e, t, lang, now, cache === null)
+        // App 2.7.0 (A6): what it is doing now while a tool is open; a `bare`
+        // status (a `snaos needs` with no agent) is its needs chip, no glyph.
+        const bare = e.status?.bare === true
+        const phrase = rowPhrase(e, t, lang, now, cache === null)
         const statusLine = statusLines[e.id]
-        const detailed = e.status?.detail?.text && !phrase.includes(e.status.detail.text) ? `${phrase}\n${e.status.detail.text}` : phrase
-        const full = statusLine ? `${statusLine}\n${detailed}` : detailed
+        const detailText = e.status?.detail?.text
+        const doing = doingNow(e.status, t)
+        const showDetail = !!detailText && !bare && !phrase.includes(detailText) && !(doing && e.status?.detail?.kind === 'tool')
+        const detailed = showDetail ? `${phrase}\n${detailText}` : phrase
+        const full = [statusLine, bare ? '' : detailed, ...signalTipLines(e.status, t, lang, now)].filter(Boolean).join('\n')
         // v2.4: a shell console running claude / codex shows that agent's icon.
         const Icon = iconFor(agentIconName(e.pane, e.status))
         // The console's own repo when it is not the workspace's (a folder of many repos).
@@ -111,11 +119,11 @@ export function AgentRows({
             <button
               type="button"
               data-agent-row={e.id}
-              data-agent-state={glyphOf(e)}
+              data-agent-state={bare ? 'bare' : glyphOf(e)}
               onClick={() => revealPane(e.id)}
               className="flex h-9 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left transition-colors hover:bg-card/60 focus-visible:bg-card/60 focus-visible:outline-none"
             >
-              <StatusGlyph kind={glyphOf(e)} unread={e.unread} size={13} noTooltip />
+              {bare ? <span aria-hidden className="w-[13px] shrink-0" /> : <StatusGlyph kind={glyphOf(e)} unread={e.unread} size={13} noTooltip />}
               <span className="min-w-0 flex-1">
                 <span className="flex min-w-0 items-center gap-1">
                   <Icon size={11} className="shrink-0" style={{ color: e.pane.color }} />
@@ -135,7 +143,10 @@ export function AgentRows({
                   )}
                 </span>
                 <span className="flex min-w-0 items-center gap-1">
-                  <span className="block min-w-0 flex-1 truncate text-[11px] leading-4 text-text-secondary" {...(statusLine ? { 'data-agent-status-line': '' } : {})}>{statusLine ?? phrase}</span>
+                  {(!bare || statusLine) && (
+                    <span className="block min-w-0 flex-1 truncate text-[11px] leading-4 text-text-secondary" data-agent-phrase {...(statusLine ? { 'data-agent-status-line': '' } : {})}>{statusLine ?? phrase}</span>
+                  )}
+                  <StatusSignals paneId={e.id} status={e.status} dense noTooltip />
                   {cache !== null && <CountdownChip deadline={cache} />}
                 </span>
               </span>

@@ -55,8 +55,12 @@ export interface SleepInfo {
   idleMinutes: number
 }
 
-/** What the workspace area shows: the grid, or the agents board over it (E5-FR-27). */
-export type AgentsView = 'grid' | 'board'
+/**
+ * What the workspace area shows: the grid, the agents board over it (E5-FR-27)
+ * or the Teams overlay (app 2.7.0, E10 B1; CONTRATOS R30-14). Every
+ * `setView('grid')` exit closes either one.
+ */
+export type AgentsView = 'grid' | 'board' | 'teams'
 
 export interface AgentState {
   /** paneId -> session view from main. */

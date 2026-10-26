@@ -1,5 +1,6 @@
 import type { Pane, Workspace } from '@shared/types'
 import { sanitizeForPaste } from '@shared/review-notes-format'
+import { typingBlocked } from '@shared/agentTune'
 import { useAppStore } from './store'
 import { getPtyId } from './ptyRegistry'
 import { pasteToPane } from './pasteRegistry'
@@ -35,23 +36,30 @@ function bytesOf(text: string): number {
   return new TextEncoder().encode(text).length
 }
 
+/** The console's agent waits on the user (a precise permission, question or plan menu, or an open request). */
+export function awaitsUser(paneId: string): boolean {
+  return typingBlocked(useAppStore.getState().paneStatus[paneId])
+}
+
 /**
  * Paste one prompt into a console through xterm (`term.paste`, never a raw
  * pty write) and, when asked and the console is an agent, press Enter after
  * `submitDelayFor(bytes)` on the same pty only. False when the console has no
- * live pty or mounted terminal. v2.3: both writes go as `origin: 'auto'`, so a
- * prompt inserted without Enter never clears the consoles' attention marks.
+ * live pty or mounted terminal, or its agent waits on the user (`awaitsUser`:
+ * a digit or an Enter would answer the menu). v2.3: both writes go as
+ * `origin: 'auto'`, so a prompt inserted without Enter never clears the
+ * consoles' attention marks.
  */
 export function deliverPrompt(paneId: string, text: string, opts: { agent: boolean; enter: boolean }): boolean {
   const ptyId = getPtyId(paneId)
-  if (!ptyId) return false
+  if (!ptyId || awaitsUser(paneId)) return false
   const clean = promptText(text)
   const payload = opts.agent ? clean : oneLine(clean)
   if (!payload || !pasteToPane(paneId, payload, { auto: true })) return false
   if (opts.enter && opts.agent) {
     setTimeout(() => {
-      // A console restarted in between never gets a stray Enter.
-      if (getPtyId(paneId) === ptyId) window.snApi.pty.write({ ptyId, data: '\r', origin: 'auto' })
+      // A console restarted in between, or that started waiting on the user, never gets a stray Enter.
+      if (getPtyId(paneId) === ptyId && !awaitsUser(paneId)) window.snApi.pty.write({ ptyId, data: '\r', origin: 'auto' })
     }, submitDelayFor(bytesOf(payload)))
   }
   return true
@@ -64,23 +72,36 @@ export interface BroadcastOpts {
   enter?: boolean
 }
 
+export interface BroadcastResult {
+  /** Consoles that received the text. */
+  sent: number
+  /** Live consoles skipped because their agent waits on the user (nothing pasted, no Enter). */
+  skipped: number
+}
+
 /**
  * Insert the same text into the ACTIVE (non-minimized) consoles of a
  * workspace that have a live pty, optionally only the chosen ones (E7-FR-33).
  * Agent consoles get the text as is (plus Enter when asked); plain ones get
- * it on one line, without Enter. The phone's globalPrompt uses it with the
- * defaults: every active console, no Enter. Returns how many received it.
+ * it on one line, without Enter. A console whose agent waits on the user (a
+ * precise permission, question or plan menu, or an open request) is skipped
+ * whole: the text could pick an option. The phone's globalPrompt uses it with
+ * the defaults: every active console, no Enter.
  */
-export function broadcastToWorkspace(workspace: Workspace, text: string, opts: BroadcastOpts = {}): number {
-  if (!text) return 0
+export function broadcastToWorkspace(workspace: Workspace, text: string, opts: BroadcastOpts = {}): BroadcastResult {
+  const out: BroadcastResult = { sent: 0, skipped: 0 }
+  if (!text) return out
   const minimized = useAppStore.getState().minimized[workspace.id] ?? []
   const chosen = opts.paneIds ? new Set(opts.paneIds) : null
-  let sent = 0
   for (const pane of workspace.panes) {
     if (minimized.includes(pane.id)) continue
     if (chosen && !chosen.has(pane.id)) continue
+    if (getPtyId(pane.id) && awaitsUser(pane.id)) {
+      out.skipped++
+      continue
+    }
     const agent = promptTargetOf(pane) === 'agent'
-    if (deliverPrompt(pane.id, text, { agent, enter: opts.enter === true })) sent++
+    if (deliverPrompt(pane.id, text, { agent, enter: opts.enter === true })) out.sent++
   }
-  return sent
+  return out
 }

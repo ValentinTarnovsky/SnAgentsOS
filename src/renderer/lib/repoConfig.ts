@@ -308,11 +308,11 @@ export type TrustItem =
  * "Trojan Source" command reads differently than it runs) and zero-width
  * marks. The trust dialog shows them as `<U+XXXX>` instead.
  */
-const HIDDEN_RE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g
+const HIDDEN_RE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF\u{E0000}-\u{E007F}]/gu
 
 /** `text` with every hiding character spelled out, so the dialog shows what runs. */
 export function visibleText(text: string): string {
-  return text.replace(HIDDEN_RE, (ch) => `<U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}>`)
+  return text.replace(HIDDEN_RE, (ch) => `<U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}>`)
 }
 
 /**

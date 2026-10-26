@@ -1,0 +1,6 @@
+{
+  "steps": [
+    { "fixture": "claude-simple.jsonl", "to": 6, "rewriteSession": true },
+    { "hang": true }
+  ]
+}

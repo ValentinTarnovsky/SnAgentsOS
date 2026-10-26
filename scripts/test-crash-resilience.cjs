@@ -258,7 +258,7 @@ async function main() {
     const webhook = 'https://discord.com/api/webhooks/42/SeCrEt-Hook'
     const config = {
       version: 12,
-      workspaces: [{ id: 'w1', name: 'Client secret project', cwd: 'C:\\Users\\Tarno\\work', panes: [{ id: 'p1', type: 'shell', title: 'prod db', schedule: { time: '10:00', prompt: 'deploy please', dueAt: 1 } }, { id: 'p2', type: 'claude', title: 'b' }] }],
+      workspaces: [{ id: 'w1', name: 'Client secret project', cwd: 'C:\\Users\\Tarno\\work', panes: [{ id: 'p1', type: 'shell', title: 'prod db', schedules: [{ id: 's1', time: '10:00', prompt: 'deploy please', dueAt: 1 }, { id: 's2', time: '11:00', prompt: 'deploy again', dueAt: 2, recurrence: { kind: 'cron', expr: '0 11 * * 1-5' } }] }, { id: 'p2', type: 'claude', title: 'b', schedules: [{ id: 's1', time: '12:00', prompt: 'x', dueAt: 3 }] }] }],
       presets: [{ id: 'x' }],
       settings: {
         language: 'es', theme: 'midnight', terminalRenderer: 'canvas', globalHotkey: 'Super+Alt+O', keymap: { palette: 'Ctrl+K' },
@@ -289,11 +289,11 @@ async function main() {
     check(!text.includes('SeCrEt-Hook') && !text.includes('webhooks/42'), 'the webhook URL never appears')
     check(!/tarno/i.test(text), 'the home path never appears')
     check(!text.includes('tk_secretvalue') && !text.includes('mytopic123'), 'ntfy topic and token never appear')
-    for (const leak of ['Client secret project', 'prod db', 'deploy please', 'ssh admin', 'rm -rf', 'Super+Alt+O', 'Ctrl+K', 'my-private-model', 'ssh prod'])
+    for (const leak of ['Client secret project', 'prod db', 'deploy please', 'deploy again', '0 11 * * 1-5', 'ssh admin', 'rm -rf', 'Super+Alt+O', 'Ctrl+K', 'my-private-model', 'ssh prod'])
       check(!text.includes(leak), `allowlist keeps out "${leak}"`)
     check(text.includes('Version: 2.0.0 (win-installer)') && text.includes('Config version: 12') && text.includes('Uptime: 1h 02m'), 'version, install kind, config version and uptime are listed')
     check(text.includes('closeToTray=on') && text.includes('gitChip=off') && text.includes('remote.enabled=on') && text.includes('terminalRenderer=canvas'), 'feature booleans and enums are listed')
-    check(text.includes('workspaces 1, panes 2, connections 1, quick commands 1') && text.includes('schedules 1'), 'counts are listed')
+    check(text.includes('workspaces 1, panes 2, connections 1, quick commands 1') && text.includes('schedules 3'), 'counts are listed (schema 19: every schedule of every console)')
     check(text.includes('lan 192.168.x.x') && text.includes('tailscale 100.101.x.x') && text.includes('port 4517'), 'remote state with masked IPs')
     check(text.includes('render-process-gone (reason crashed, exit 5') && text.includes('[pane] pane p1'), 'crashes and render errors are listed')
     check(Buffer.byteLength(text) < DIAGNOSTICS_MAX_BYTES, 'the block is under 64KB')

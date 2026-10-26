@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { StatusTitleReq } from '@shared/ipc-contract'
-import type { NotificationSettings, StatusHealth, StatusHooksStatusRes } from '@shared/types'
+import type { NotificationSettings, PanePlan, StatusHealth, StatusHooksStatusRes } from '@shared/types'
 import { parseTuneHint } from '@shared/agentTune'
 import type { StatusManager } from '../status/StatusManager'
 import type { HookServer } from '../status/HookServer'
@@ -10,6 +10,24 @@ import { notificationSettingsSchema, discordSettingsSchema, ntfySettingsSchema }
 import type { CodexBridge } from '../status/CodexBridge'
 import type { DiscordNotifier } from '../status/DiscordNotifier'
 import type { NtfyNotifier } from '../status/NtfyNotifier'
+import { devPort } from '../devPort'
+
+/** Default of settings.notifications.hookPort (schema.ts), the port devPort() moves. */
+const HOOK_DEFAULT_PORT = 43917
+
+/** App 2.7.0 (A3): longest console id and plan request id the renderer may name. */
+const PANE_ID_MAX = 64
+const PLAN_REQUEST_ID_MAX = 200
+
+/** A renderer value as a console id (non-empty, <= PANE_ID_MAX), or null. */
+function paneIdOf(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 && v.length <= PANE_ID_MAX ? v : null
+}
+
+/** A renderer value as a plain object, or null. */
+function objOf(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+}
 
 export interface StatusIpc {
   /** Apply the persisted config once at boot (starts the HookServer if enabled). */
@@ -50,9 +68,12 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
   }
 
   async function ensureServer(cfg: NotificationSettings): Promise<void> {
-    if (!hookServer.running || started?.port !== cfg.hookPort || started?.token !== cfg.hookToken) {
-      await hookServer.start(cfg.hookPort, cfg.hookToken)
-      started = { port: cfg.hookPort, token: cfg.hookToken }
+    // Plan A1.3: a worktree dev instance moves the default port (devPort.ts);
+    // installHooks and reconcileInstalled follow hookServer.activePort.
+    const port = devPort(cfg.hookPort, HOOK_DEFAULT_PORT)
+    if (!hookServer.running || started?.port !== port || started?.token !== cfg.hookToken) {
+      await hookServer.start(port, cfg.hookToken)
+      started = { port, token: cfg.hookToken }
     }
     reconcileInstalled(cfg.hookToken)
   }
@@ -129,6 +150,30 @@ export function registerStatusIpc(statusManager: StatusManager, hookServer: Hook
   // E2-FR-40: the test publishes with the saved config main already holds
   // (the renderer pushes it on every change), never with a renderer payload.
   ipcMain.handle(CH.STATUS_NTFY_TEST, () => ntfy.test())
+
+  // App 2.7.0 (A3): read, mute and silence marks and the full plan. A bad
+  // payload answers false / null, never throws.
+  ipcMain.handle(CH.STATUS_MARK_READ, (_e, raw: unknown): boolean => {
+    const paneId = paneIdOf(raw)
+    return paneId ? statusManager.markRead(paneId) : false
+  })
+  ipcMain.handle(CH.STATUS_MUTE, (_e, raw: unknown): boolean => {
+    const req = objOf(raw)
+    const paneId = paneIdOf(req?.paneId)
+    return paneId && typeof req?.muted === 'boolean' ? statusManager.setMuted(paneId, req.muted) : false
+  })
+  ipcMain.handle(CH.STATUS_SILENCE_ACK, (_e, raw: unknown): boolean => {
+    const paneId = paneIdOf(raw)
+    return paneId ? statusManager.ackSilence(paneId) : false
+  })
+  ipcMain.handle(CH.STATUS_PLAN, (_e, raw: unknown): PanePlan | null => {
+    const req = objOf(raw)
+    const paneId = paneIdOf(req?.paneId)
+    const requestId = req?.requestId
+    if (!paneId) return null
+    if (requestId === undefined) return statusManager.planOf(paneId)
+    return typeof requestId === 'string' && requestId.length > 0 && requestId.length <= PLAN_REQUEST_ID_MAX ? statusManager.planOf(paneId, requestId) : null
+  })
 
   return {
     health,

@@ -21,6 +21,9 @@ import type {
 } from '@shared/types'
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { DEFAULT_CLAUDE_ACCOUNTS_SETTINGS } from '@shared/claude-accounts'
+import { DEFAULT_LABS } from '@shared/labs'
+import { DEFAULT_SILENCE } from '@shared/silence'
+import { PANE_SCHEDULES_MAX, SCHEDULE_ID_RE } from '@shared/schedule'
 import { gridForCount, orderPanes } from '@/components/layout/gridTemplates'
 import {
   QUICK_COMMANDS_MAX,
@@ -153,6 +156,7 @@ const DEFAULT_SETTINGS: Settings = {
     cacheTimer: { enabled: false, ttlMinutes: 5 },
     syncAgentRename: true,
     shellAgentDetect: true,
+    silence: { ...DEFAULT_SILENCE },
   },
   automation: {
     defaultAgentPresetId: '',
@@ -165,6 +169,7 @@ const DEFAULT_SETTINGS: Settings = {
   },
   dictation: { device: 'auto', language: 'auto', headerButton: true, interim: true, vocabulary: '' },
   share: { enabled: false, port: 4527, guestName: '', defaultPerm: 'view' },
+  labs: { ...DEFAULT_LABS },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */
@@ -359,6 +364,13 @@ export interface AppState {
 
   hydrate: (config: ConfigFile | null) => void
   createWorkspace: (name: string, cwd: string) => string
+  /**
+   * App 2.7.0 (E10 B9, "Tomar el control"): a workspace holding exactly this
+   * one console, with no shell console beside it. Unlike createWorkspace it
+   * neither activates nor mounts anything: the caller mounts the console
+   * (ensureMounted with only its id) and brings it on screen (revealPane).
+   */
+  createWorkspaceWith: (name: string, cwd: string, pane: Partial<Pane>) => { workspaceId: string; paneId: string }
   createWorkspaceFull: (draft: WorkspaceDraft) => string
   /**
    * "Reload from .snagentsos.json" (E8-FR-27): replaces the grid, the consoles
@@ -420,8 +432,20 @@ export interface AppState {
   setAgentEnded: (evt: AgentSessionEndEvt) => void
   /** Hide a console's "Claude exited" chip (typing, exit, an action, [x]). */
   clearAgentEnded: (paneId: string) => void
-  /** Set (or clear, with null) a console's one-shot scheduled prompt. */
-  setPaneSchedule: (workspaceId: string, paneId: string, schedule: PaneSchedule | null) => void
+  /**
+   * Set one of a console's scheduled prompts by id (schema 19): replaces the
+   * schedule with `scheduleId` in place, appends a new id (ignored once the
+   * console holds PANE_SCHEDULES_MAX), and with null deletes it. The stored
+   * entry always carries `id: scheduleId`; deleting the last one drops the
+   * `schedules` field.
+   */
+  setPaneSchedule: (workspaceId: string, paneId: string, scheduleId: string, schedule: PaneSchedule | null) => void
+  /**
+   * Replace a console's whole schedule list (schema 19): kept in order, a
+   * malformed or repeated id and anything past PANE_SCHEDULES_MAX dropped; an
+   * empty list drops the `schedules` field.
+   */
+  setPaneSchedules: (workspaceId: string, paneId: string, schedules: readonly PaneSchedule[]) => void
   /**
    * Move a console onto a worktree (its path becomes the cwd) or, with null,
    * off it: the cwd override goes too, so it runs in its normal folder again
@@ -527,6 +551,14 @@ function withLastSession(workspaces: Workspace[], evt: PaneStatusEvt): Workspace
     return workspaces.map((w) => (w === ws ? { ...w, panes: w.panes.map((p) => (p === pane ? { ...p, lastSession } : p)) } : w))
   }
   return workspaces
+}
+
+/** `pane` holding `schedules` (schema 19): the same pane when the list did not change, no field when empty. */
+function withSchedules(pane: Pane, schedules: PaneSchedule[]): Pane {
+  if (schedules === pane.schedules || (schedules.length === 0 && !pane.schedules)) return pane
+  if (schedules.length > 0) return { ...pane, schedules }
+  const { schedules: _gone, ...rest } = pane
+  return rest
 }
 
 /** Panes and their queued prompts for a draft (composer, wizard, repo file). */
@@ -668,6 +700,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       mountedWorkspaces: mountActive(s.mountedWorkspaces, ws.id),
     }))
     return ws.id
+  },
+
+  createWorkspaceWith: (name, cwd, pane) => {
+    const only: Pane = { ...makeShellPane(0), ...pane, id: uid('pane') }
+    const ws: Workspace = {
+      id: uid('ws'),
+      name,
+      cwd,
+      panes: [only],
+      favorite: false,
+      layout: { grid: 1, order: [only.id] },
+    }
+    set((s) => ({ workspaces: [...s.workspaces, ws] }))
+    return { workspaceId: ws.id, paneId: only.id }
   },
 
   createWorkspaceFull: (draft) => {
@@ -1178,18 +1224,38 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
-  setPaneSchedule: (workspaceId, paneId, schedule) =>
+  setPaneSchedule: (workspaceId, paneId, scheduleId, schedule) =>
     set((s) => ({
       workspaces: s.workspaces.map((w) =>
         w.id === workspaceId
           ? {
               ...w,
-              panes: w.panes.map((p) =>
-                p.id === paneId ? { ...p, schedule: schedule ?? undefined } : p,
-              ),
+              panes: w.panes.map((p) => {
+                if (p.id !== paneId) return p
+                const list = p.schedules ?? []
+                const at = list.findIndex((x) => x.id === scheduleId)
+                if (!schedule) return at < 0 ? p : withSchedules(p, list.filter((_, i) => i !== at))
+                if (at >= 0) return withSchedules(p, list.map((x, i) => (i === at ? { ...schedule, id: scheduleId } : x)))
+                if (list.length >= PANE_SCHEDULES_MAX || !SCHEDULE_ID_RE.test(scheduleId)) return p
+                return withSchedules(p, [...list, { ...schedule, id: scheduleId }])
+              }),
             }
           : w,
       ),
+    })),
+
+  setPaneSchedules: (workspaceId, paneId, schedules) =>
+    set((s) => ({
+      workspaces: s.workspaces.map((w) => {
+        if (w.id !== workspaceId) return w
+        const next: PaneSchedule[] = []
+        for (const sc of schedules) {
+          if (!SCHEDULE_ID_RE.test(sc.id) || next.some((x) => x.id === sc.id)) continue
+          next.push(sc)
+          if (next.length === PANE_SCHEDULES_MAX) break
+        }
+        return { ...w, panes: w.panes.map((p) => (p.id === paneId ? withSchedules(p, next) : p)) }
+      }),
     })),
 
   setPaneWorktree: (workspaceId, paneId, worktree) =>
@@ -1396,6 +1462,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         detail: evt.detail, topic: evt.topic, firstPrompt: evt.firstPrompt, cacheSince: evt.cacheSince,
         waiting: evt.waiting, backgroundOther: evt.backgroundOther, attention: evt.attention,
         model: evt.model, effort: evt.effort, ultracode: evt.ultracode,
+        // App 2.7.0 (A3) signals.
+        toolFamily: evt.toolFamily, failure: evt.failure, silence: evt.silence, needs: evt.needs,
+        muted: evt.muted, digest: evt.digest, signalAt: evt.signalAt, bare: evt.bare,
+        // App 2.7.0 (A4) ledger: shown in A6.
+        usage: evt.usage, context: evt.context,
       }
       // A new session (or Claude working again) hides the "Claude exited" chip (E6-FR-22).
       let agentEnded = s.agentEnded

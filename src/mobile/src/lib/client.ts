@@ -43,9 +43,12 @@ import {
   type RemoteNotesRequest,
   type RemoteHistorySession,
   type RemotePaneStatus,
+  type RemotePlanReply,
   type RemoteServerMsg,
   type RemoteStateSnapshot,
 } from '@shared/remote-protocol'
+import { TEAM_REQ_IN_FLIGHT, type PhoneTeamRequest, type TeamCtlAction, type TeamFail, type TeamReplyFor } from '@shared/team-protocol'
+import { APP_2_7_0, appVersionAtLeast } from '@shared/agentTune'
 import { BRAND } from '@shared/brand'
 import {
   clearAuth,
@@ -65,15 +68,19 @@ import { applyRemoteTheme } from './theme'
 import { setLang, t } from './i18n'
 import { delayFor } from './reconnectSchedule'
 import { actionTotal, createPaneNotifier, remoteTitle } from './notify'
-import { takePendingDeepLink } from './deepLink'
+import { isTeamLink, takePendingDeepLink, type TeamDeepLink } from './deepLink'
+import { closeTeamScreens, forgetTeams, loadTeamList, openTeamLink, resyncTeams, teamChanged, teamsDisabled, teamsSupported } from './teamsStore'
 import { paneById, paneOpenable, statusMapOf, workspaceOfPane } from './workspace'
 import { clearMobileStorage } from './mobileStorage'
 import { useNotesStore } from './notesStore'
-import { noteChanged } from './wsNotes'
+import { closeWsNotes, noteChanged, useWsNotes } from './wsNotes'
+import { closeHistory, useHistoryStore } from './history'
+import { closeChanges, useChangesStore } from './changes'
+import { closeAutomations, useAutomationsStore } from './automations'
 import { chunkInput } from './composerSend'
 import { PendingMap, type PendingOutcome } from './pending'
 import { pruneDrafts } from './drafts'
-import { log, useDiagStore } from './connLog'
+import { closeDiagnostics, log, useDiagStore } from './connLog'
 import { FIT_REPLAY_GRACE_MS, decideFitState, loadFitOwned, saveFitOwned } from './phoneFit'
 import { syncPush } from './push'
 import { wsUrlFor } from './wsUrl'
@@ -158,6 +165,33 @@ function unicodeOf(snap: RemoteStateSnapshot): '6' | '11' {
 
 function paneExists(snap: RemoteStateSnapshot, paneId: string): boolean {
   return snap.workspaces.some((w) => w.panes.some((p) => p.id === paneId))
+}
+
+/** app 2.7.0 (E10 B8): a TeamReply that says Labs Teams is off on the PC. */
+function isTeamDisabled(reply: unknown): boolean {
+  const r = reply as Partial<TeamFail> | null
+  return !!r && r.ok === false && r.error === 'disabled'
+}
+
+/**
+ * app 2.7.0 (E10 B8): the terminal slides in under the pushed screens, so a
+ * console push closes every one first (History, Automations, Changes and its
+ * diff, Notes, Diagnostics and the Teams screens; Settings goes as the screen
+ * turns to the terminal) and the console it names is what shows.
+ */
+function closePushedScreens(): void {
+  if (useHistoryStore.getState().workspaceId) closeHistory()
+  if (useAutomationsStore.getState().open) closeAutomations()
+  const changes = useChangesStore.getState()
+  if (changes.workspaceId || changes.diff) closeChanges()
+  if (useWsNotes.getState().workspaceId) closeWsNotes()
+  if (useDiagStore.getState().open) closeDiagnostics()
+  closeTeamScreens()
+}
+
+/** app 2.7.0: the PC paused this chat (ChatHub's LRU); only the user's Resume subscribes it again. */
+function chatPaused(paneId: string): boolean {
+  return chatStore.getState().chats[paneId]?.paused === true
 }
 
 /** E2-FR-43: toast with [Go] and vibration when another console needs the user. */
@@ -268,6 +302,17 @@ class RemoteClient {
    * before lastPane. Filled from the URL hash at start (deepLink.ts); it only picks the view.
    */
   private pendingDeepLink: string | null = null
+  /**
+   * app 2.7.0 (E10 B8): a team a push asked for (`#team=<id>[&task=<id>]`),
+   * applied after the next goLive on a desktop with Teams, where it wins over
+   * lastPane (openTeamLink). The newer of the two pending links wins.
+   */
+  private pendingTeamLink: TeamDeepLink | null = null
+  /** app 2.7.0: team requests out (the PC answers `rate` past TEAM_REQ_IN_FLIGHT) and the ones waiting for a slot. */
+  private teamInFlight = 0
+  private readonly teamWaiting: Array<() => void> = []
+  /** Ids of the team requests out, so goLive can end the ones a dropped socket took with it. */
+  private readonly teamIds = new Set<string>()
   /** A console shown before any state frame listed it (just created), with its deadline. */
   private awaitedPane: { id: string; until: number } | null = null
   // Frames that arrived before the terminal mounted (the authOk -> first React
@@ -317,7 +362,8 @@ class RemoteClient {
     })
     // E2-FR-42: a deep link waits for the first goLive (a #pair= hash wins and is left alone).
     const link = takePendingDeepLink()
-    if (link) this.pendingDeepLink = link.pane
+    if (isTeamLink(link)) this.pendingTeamLink = link
+    else if (link) this.pendingDeepLink = link.pane
 
     const auth = getStoredAuth()
     const code = readPairCode()
@@ -354,6 +400,9 @@ class RemoteClient {
     this.noReconnect = false
     this.reconnectAttempt = 0
     this.clearPairCeiling()
+    // app 2.7.0: the teams on screen belong to the desktop paired before (maybe another one).
+    this.pendingTeamLink = null
+    forgetTeams()
     useDiagStore.getState().update({ pairTimedOut: false })
     store.getState().update({ phase: 'pairForm', banner: null, pairReason: null, pairExpiresAt: null, connAttempt: 0 })
   }
@@ -554,7 +603,8 @@ class RemoteClient {
   /**
    * Switch the viewed pane within the current workspace (unsub old, sub new).
    * `reconnect` (goLive re-subscribing the console still on screen) keeps the
-   * open's in-memory flags: a socket drop is not opening the console again.
+   * open's in-memory flags: a socket drop is not opening the console again,
+   * so a chat the PC paused stays in Chat under its bar with no chatSub.
    */
   viewPane(paneId: string, opts: { reconnect?: boolean } = {}): void {
     const s = store.getState()
@@ -572,8 +622,15 @@ class RemoteClient {
     // E3-FR-24/25: an agent console saved as Chat opens as Chat (chatSub, no sub).
     const chat = selectPaneView(store.getState(), paneId) === 'chat'
     s.update({ activePaneId: paneId, subscribedPaneId: paneId, chatPaneId: chat ? paneId : null })
-    if (chat) this.requestChatFirst(paneId)
-    else this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
+    if (!chat) this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
+    else if (!opts.reconnect || !chatPaused(paneId)) this.requestChatFirst(paneId)
+    else {
+      // A Resume or "Load earlier" the old socket never answered (goLive
+      // dropped it) is not asked again: "The PC did not answer [Retry]", as
+      // after its 10s, so the user's next tap works.
+      const lost = chatStore.getState().chats[paneId]?.loading
+      if (lost) chatStore.getState().fail(paneId, lost)
+    }
   }
 
   /** Stop watching a pane the way it is watched (chatUnsub in Chat, unsub in Terminal). */
@@ -700,6 +757,8 @@ class RemoteClient {
    * means no chat: back to Terminal for this open only (chatRefused, never
    * saved), with the toast that names the fix for the console's agent: once
    * per console and status key (v2.3.0), so reopening does not repeat it.
+   * app 2.7.0 (A7): a first page marked `notice: 'paused'` was read while the
+   * PC closed its watcher for another chat: it shows, under the paused bar.
    */
   private handleChatPage(msg: Extract<RemoteServerMsg, { type: 'chatPage' }>): void {
     const pending = this.chatPending.get(msg.paneId)
@@ -722,7 +781,7 @@ class RemoteClient {
     }
     const page = { items, cursor: typeof msg.cursor === 'string' ? msg.cursor : null, done: msg.done === true }
     if (pending?.kind === 'more') chatStore.getState().prepend(msg.paneId, page)
-    else chatStore.getState().replace(msg.paneId, page)
+    else chatStore.getState().replace(msg.paneId, page, msg.notice === 'paused')
   }
 
   /** A console whose status key changed since its chat toast may show it again (A to B and back to A included). */
@@ -740,9 +799,17 @@ class RemoteClient {
     return provider === 'codex' ? 'chat.enableCodex' : 'chat.installHooks'
   }
 
+  /**
+   * New messages of the chat on screen. app 2.7.0 (A7): an empty one with
+   * `notice: 'paused'` = the PC closed this chat's watcher for another one
+   * (ChatHub's LRU): the list stays, marked paused, until the user's Resume
+   * subscribes again (requestChatFirst); nothing reopens on its own, neither
+   * the resync of a revive nor the viewPane of a reconnect.
+   */
   private handleChatAppend(msg: Extract<RemoteServerMsg, { type: 'chatAppend' }>): void {
     if (store.getState().chatPaneId !== msg.paneId || !Array.isArray(msg.items)) return
-    chatStore.getState().append(msg.paneId, msg.items)
+    if (msg.notice === 'paused') chatStore.getState().pause(msg.paneId)
+    if (msg.items.length > 0) chatStore.getState().append(msg.paneId, msg.items)
   }
 
   /**
@@ -753,8 +820,12 @@ class RemoteClient {
   resyncPane(): void {
     const paneId = store.getState().subscribedPaneId
     if (!paneId || !this.isOpen()) return
-    // In Chat a repeated chatSub is the fresh first page (no stream to resync).
-    if (store.getState().chatPaneId === paneId) return this.requestChatFirst(paneId)
+    // In Chat a repeated chatSub is the fresh first page (no stream to resync);
+    // a chat the PC paused waits for the user's Resume instead (app 2.7.0).
+    if (store.getState().chatPaneId === paneId) {
+      if (!chatPaused(paneId)) this.requestChatFirst(paneId)
+      return
+    }
     this.send({ v: PROTOCOL_VERSION, type: 'unsub', paneId })
     this.send({ v: PROTOCOL_VERSION, type: 'sub', paneId })
   }
@@ -846,12 +917,39 @@ class RemoteClient {
    */
   setPendingDeepLink(paneId: string | null): void {
     const s = store.getState()
+    if (paneId) this.pendingTeamLink = null
     if (paneId && s.phase === 'live' && s.snapshot) {
       this.pendingDeepLink = null
-      this.requestOpen(paneId)
+      this.openFromLink(paneId)
       return
     }
     this.pendingDeepLink = paneId
+  }
+
+  /**
+   * A console link opens over whatever is on screen: the pushed screens close
+   * first (app 2.7.0, E10 B8) unless the console is gone, which only toasts.
+   */
+  private openFromLink(paneId: string): void {
+    const snap = store.getState().snapshot
+    if (snap && paneById(snap, paneId)) closePushedScreens()
+    this.requestOpen(paneId)
+  }
+
+  /**
+   * app 2.7.0 (E10 B8): ask for a team from a push. Applied at once while
+   * live, else after the next goLive (over lastPane); a desktop without
+   * Teams drops it. It only picks the screens (openTeamLink), never an action.
+   */
+  setPendingTeamLink(link: TeamDeepLink | null): void {
+    const s = store.getState()
+    if (link) this.pendingDeepLink = null
+    if (link && s.phase === 'live' && s.snapshot) {
+      this.pendingTeamLink = null
+      if (teamsSupported(s.appVersion)) openTeamLink(link)
+      return
+    }
+    this.pendingTeamLink = link
   }
 
   /**
@@ -973,6 +1071,84 @@ class RemoteClient {
     return this.request<RemoteNotesReply>((id) => ({ v: PROTOCOL_VERSION, type: 'notesReq', id, ...req }))
   }
 
+  /**
+   * app 2.7.0 (A3): the full ExitPlanMode plan of a console, by request id
+   * or its newest one (pending by id, 10s); the answer is the planRes
+   * without its envelope. A desktop older than 2.7.0 would strike the
+   * unknown frame, so it gets nothing sent and `unsupported` back.
+   */
+  requestPlan(paneId: string, requestId?: string): Promise<PendingOutcome<RemotePlanReply>> {
+    if (!appVersionAtLeast(store.getState().appVersion, APP_2_7_0)) {
+      return Promise.resolve({ ok: true, value: { ok: false, error: 'unsupported' } })
+    }
+    return this.request<RemotePlanReply>((id) => ({ v: PROTOCOL_VERSION, type: 'planReq', id, paneId, ...(requestId !== undefined ? { requestId } : {}) }))
+  }
+
+  /**
+   * app 2.7.0 (E10 B8): one Teams request (pending by id, 10s); the answer is
+   * the teamRes `res`, exactly the desktop's TeamReply. At most
+   * TEAM_REQ_IN_FLIGHT go out at once (the PC refuses more with `rate`), the
+   * rest wait for a slot. A desktop older than 2.7.0 would strike the unknown
+   * frame, so it gets nothing sent and `unsupported` back; a `disabled`
+   * answer (Labs off on the PC) empties the Teams store.
+   */
+  requestTeam<R extends PhoneTeamRequest>(req: R): Promise<PendingOutcome<TeamReplyFor<R>>> {
+    const unsupported: PendingOutcome<TeamReplyFor<R>> = { ok: true, value: { ok: false, error: 'unsupported' } satisfies TeamFail }
+    if (!teamsSupported(store.getState().appVersion)) return Promise.resolve(unsupported)
+    return this.teamSlot(async () => {
+      // Re-checked at send time: a request that waited for a slot may find another desktop.
+      if (!teamsSupported(store.getState().appVersion)) return unsupported
+      let sent = ''
+      const out = await this.request<TeamReplyFor<R>>((id) => {
+        sent = id
+        this.teamIds.add(id)
+        return { v: PROTOCOL_VERSION, type: 'teamReq', id, req }
+      })
+      this.teamIds.delete(sent)
+      return out
+    }).then((out) => {
+      if (out.ok && isTeamDisabled(out.value)) teamsDisabled()
+      return out
+    })
+  }
+
+  /**
+   * app 2.7.0 (E10 B8): a Teams decision (teamDecide, teamAnswer,
+   * teamDispatch) through the ctl path, handled in main. Never sent to a
+   * desktop older than 2.7.0 (`unsupported`); `disabled` empties the store.
+   */
+  async sendTeamCtl(action: TeamCtlAction): Promise<CtlResult> {
+    if (!teamsSupported(store.getState().appVersion)) return { ok: false, error: 'unsupported' }
+    const res = await this.sendCtl(action)
+    if (!res.ok && res.error === 'disabled') teamsDisabled()
+    return res
+  }
+
+  /** Run a team request in one of the TEAM_REQ_IN_FLIGHT slots, or once one frees up. */
+  private teamSlot<T>(run: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const start = (): void => {
+        this.teamInFlight++
+        const done = (): void => {
+          this.teamInFlight--
+          this.teamWaiting.shift()?.()
+        }
+        run().then(
+          (value) => {
+            done()
+            resolve(value)
+          },
+          (err: unknown) => {
+            done()
+            reject(err)
+          },
+        )
+      }
+      if (this.teamInFlight < TEAM_REQ_IN_FLIGHT) start()
+      else this.teamWaiting.push(start)
+    })
+  }
+
   /** The answer to an id-keyed request arrived; false when nothing waits (late). */
   settleRequest(id: string, value: unknown): boolean {
     return this.pendingById.resolve(id, value)
@@ -1002,10 +1178,11 @@ class RemoteClient {
     this.clearDeadline()
   }
 
-  /** E2-FR-42: a deep link opened while the page was already loaded. */
+  /** E2-FR-42: a deep link opened while the page was already loaded (a notification tap relays its hash here too). */
   private onHashChange = (): void => {
     const link = takePendingDeepLink()
-    if (link) this.setPendingDeepLink(link.pane)
+    if (isTeamLink(link)) this.setPendingTeamLink(link)
+    else if (link) this.setPendingDeepLink(link.pane)
   }
 
   /** E2-FR-52: tell the desktop whether this page is on screen (ntfy stays quiet then). */
@@ -1362,6 +1539,18 @@ class RemoteClient {
       case 'notesChanged':
         noteChanged(msg.workspaceId, msg.noteId)
         break
+      case 'planRes': {
+        const { v: _v, type: _type, id, ...reply } = msg
+        this.pendingById.resolve(id, reply satisfies RemotePlanReply)
+        break
+      }
+      // app 2.7.0 (E10 B8): the answer of a teamReq (its `res` is the desktop's TeamReply) and a team change.
+      case 'teamRes':
+        this.pendingById.resolve(msg.id, msg.res)
+        break
+      case 'teamChanged':
+        teamChanged(msg)
+        break
       case 'revoked':
         log('warn', 'revoked')
         this.forgetComposerState()
@@ -1467,17 +1656,22 @@ class RemoteClient {
     const cur = prev.activePaneId
     const deepLink = this.pendingDeepLink
     this.pendingDeepLink = null
+    // app 2.7.0 (E10 B8): a team link wins over lastPane too.
+    const teamLink = this.pendingTeamLink
+    this.pendingTeamLink = null
     const lastPane = prev.lastPane
     const keep =
       cur && paneExists(state, cur)
         ? cur
-        : lastPane && !deepLink && paneExists(state, lastPane) && paneOpenable(state, lastPane)
+        : lastPane && !deepLink && !teamLink && paneExists(state, lastPane) && paneOpenable(state, lastPane)
           ? lastPane
           : null
     const lostViewed = !!cur && keep !== cur && prev.screen === 'terminal'
     // A chat request sent on the old socket never gets its answer: drop it, or
     // the chatSub below would be refused as "already waiting" for up to 10s.
     for (const paneId of [...this.chatPending.keys()]) this.cancelChat(paneId)
+    // app 2.7.0: nor does a team request; ending it frees its slot for the ones queued behind it.
+    for (const id of [...this.teamIds]) this.pendingById.fail(id, 'offline')
     store.getState().update({
       phase: 'live',
       banner: null,
@@ -1493,7 +1687,8 @@ class RemoteClient {
       pairExpiresAt: null,
       // Force viewPane below to (re)issue a sub even on reconnect to the same pane.
       subscribedPaneId: null,
-      // A new socket holds no chatSub yet; viewPane sends it again for a Chat pane.
+      // A new socket holds no chatSub yet; viewPane sends it again for a Chat
+      // pane (not for a chat the PC paused: that one waits for Resume).
       chatPaneId: null,
       activePaneId: keep ?? null,
       ...(lostViewed ? { screen: 'home' as const } : {}),
@@ -1506,18 +1701,37 @@ class RemoteClient {
     // A reconnect is not a new open: the PC's reclaim and a refused chat stay.
     if (viewing) this.viewPane(viewing, { reconnect: true })
     if (lostViewed) store.getState().setToast(t('toast.paneClosed'))
-    if (deepLink) this.requestOpen(deepLink)
+    if (deepLink) this.openFromLink(deepLink)
+    this.goLiveTeams(teamLink)
     if (!this.draftsPruned) {
       this.draftsPruned = true
       pruneDrafts(new Set(state.workspaces.flatMap((w) => w.panes.map((p) => p.id))))
     }
   }
 
-  /** Drafts, input modes and review notes never outlive the pairing (E1-FR-28, E3-FR-54). */
+  /**
+   * app 2.7.0 (E10 B8), after goLive: a desktop with Teams loads the list,
+   * the screens left open refetch (changes may have been missed while the
+   * socket was down) and a pending team link opens; an older desktop leaves
+   * the Teams store empty and gets nothing.
+   */
+  private goLiveTeams(teamLink: TeamDeepLink | null): void {
+    if (!teamsSupported(store.getState().appVersion)) {
+      forgetTeams()
+      return
+    }
+    void loadTeamList()
+    resyncTeams()
+    if (teamLink) openTeamLink(teamLink)
+  }
+
+  /** Drafts, input modes, review notes and the Teams screens never outlive the pairing (E1-FR-28, E3-FR-54, E10 B8). */
   private forgetComposerState(): void {
     clearMobileStorage()
     // Else the notes still in memory would be written back on the next edit.
     useNotesStore.getState().forgetAll()
+    this.pendingTeamLink = null
+    forgetTeams()
     store.getState().update({ inputModes: {}, composerOneShot: null, httpToken: null, pushKey: null, secureUrl: null })
   }
 

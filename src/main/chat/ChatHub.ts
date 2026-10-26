@@ -10,22 +10,29 @@
  *    that shrinks or is replaced, or an assignment that changes (/clear, a
  *    resume, the hooks starting to report), sends a new first page, and an
  *    assignment that is lost sends the notice (StatusManager.onTranscriptChange).
- *  - At most 4 watchers stay open (LRU, idle ones go first).
+ *  - At most 4 watchers stay open (LRU, idle ones go first). A chat closed
+ *    while someone reads it is paused, never frozen in silence: its readers
+ *    get the `paused` notice (app 2.7.0, A7) and no appends until they
+ *    subscribe again; its older pages still read from the file it had, and a
+ *    watcher reopened for another reader of it hands them a fresh first page.
+ *    A paused chat is not re-located (only a new chatSub opens it again).
  *  - A transcript that is coming (`pending`: a new console, or a /clear,
  *    before the first message) answers an empty first page instead of the
  *    notice, so the phone stays in Chat, and is located again every second
  *    while someone reads; after 10 minutes the wait ends with the notice.
  *
  * RemoteManager hands it to SessionManager; it never sees sockets, only an
- * owner object (the session) and the function that sends to it.
+ * owner object (the session) and the function that sends to it. A Share
+ * guest session and a desktop window (app 2.7.0, registerChatIpc: one owner
+ * per webContents) read through the same hooks, under the same LRU and cap.
  */
-import type { ChatMessage, ChatUnavailableReason } from '@shared/chat-types'
+import type { ChatFrameNotice, ChatMessage, ChatUnavailableReason } from '@shared/chat-types'
 import type { AgentProvider } from '@shared/types'
 import { decodeClaude } from './decodeClaude'
 import { decodeCodex } from './decodeCodex'
 import { splitAppend } from './chatFrames'
 import { pathKey, type LocateResult } from './TranscriptLocator'
-import { TranscriptWatcher, type ChatPageData, type TranscriptDecoder, type TranscriptWatcherDeps } from './TranscriptWatcher'
+import { TranscriptWatcher, readPage, type ChatPageData, type TranscriptDecoder, type TranscriptWatcherDeps } from './TranscriptWatcher'
 
 /** A watcher with no reader closes after this (FR-35). */
 export const CHAT_CLOSE_DELAY_MS = 30 * 1000
@@ -36,10 +43,10 @@ export const CHAT_PENDING_POLL_MS = 1000
 /** A pending transcript that never appears gives up after this (then the notice). */
 export const CHAT_PENDING_MAX_MS = 10 * 60 * 1000
 
-/** The chat frames a session sends (SessionManager adds `v`). */
+/** The chat frames a session sends (SessionManager adds `v`; `notice` is optional, ChatFrameNotice). */
 export type ChatFrame =
-  | { type: 'chatPage'; paneId: string; items: ChatMessage[]; cursor: string | null; done: boolean }
-  | { type: 'chatAppend'; paneId: string; items: ChatMessage[] }
+  | { type: 'chatPage'; paneId: string; items: ChatMessage[]; cursor: string | null; done: boolean; notice?: ChatFrameNotice }
+  | { type: 'chatAppend'; paneId: string; items: ChatMessage[]; notice?: ChatFrameNotice }
 
 export type ChatSend = (frame: ChatFrame) => void
 
@@ -67,6 +74,10 @@ interface Reader {
   send: ChatSend
   /** Got its first page: appends go to it from here on. */
   live: boolean
+  /** Its watcher was closed for another chat (LRU) and it was told so: nothing goes to it until a first page. */
+  paused: boolean
+  /** The first page asked for it last (a later sub or re-locate supersedes one still in flight). */
+  first: number
 }
 
 interface PaneChat {
@@ -88,6 +99,8 @@ interface PaneChat {
   /** When the transcript started to be pending (null: not pending). */
   pendingSince: number | null
   pollTimer: ReturnType<typeof setTimeout> | null
+  /** Its watcher was closed for another chat while someone read it (until one opens again). */
+  paused: boolean
 }
 
 /** The first page of a chat whose transcript is not written yet. */
@@ -100,11 +113,17 @@ export function noticePage(paneId: string, code: ChatUnavailableReason): Extract
   return { type: 'chatPage', paneId, items: [{ id: 'notice', role: 'system', ts: null, blocks: [{ t: 'notice', code }] }], cursor: null, done: true }
 }
 
+/** A reader's chat was paused (its watcher closed for another chat): an empty chatAppend with the notice. */
+export function pausedFrame(paneId: string): Extract<ChatFrame, { type: 'chatAppend' }> {
+  return { type: 'chatAppend', paneId, items: [], notice: 'paused' }
+}
+
 export function decoderFor(provider: AgentProvider): TranscriptDecoder {
   return provider === 'codex' ? decodeCodex : decodeClaude
 }
 
 let useSeq = 0
+let firstSeq = 0
 
 export class ChatHub implements ChatHooks {
   private readonly panes = new Map<string, PaneChat>()
@@ -117,8 +136,8 @@ export class ChatHub implements ChatHooks {
     const pc = this.paneOf(paneId)
     this.cancelClose(pc)
     pc.usedAt = ++useSeq
-    // A repeated chatSub (a resync) is a fresh first page for that reader.
-    pc.readers.set(owner, { send, live: false })
+    // A repeated chatSub (a resync, a resume after a pause) is a fresh first page for that reader.
+    pc.readers.set(owner, { send, live: false, paused: false, first: 0 })
     void this.deliverFirst(pc, owner)
   }
 
@@ -133,11 +152,29 @@ export class ChatHub implements ChatHooks {
     if (!pc || !pc.readers.has(owner) || pc.moreBusy.has(owner)) return
     pc.usedAt = ++useSeq
     pc.moreBusy.add(owner)
-    void this.answerMore(pc, owner, before, send).finally(() => pc.moreBusy.delete(owner))
+    void this.answerMore(pc, owner, before, send).finally(() => {
+      pc.moreBusy.delete(owner)
+      // A watcher that reopened meanwhile left this paused reader out (its first page would read as this answer).
+      const r = pc.readers.get(owner)
+      if (r?.paused && pc.watcher && !pc.paused) {
+        r.paused = false
+        void this.deliverFirst(pc, owner)
+      }
+    })
   }
 
   /** One chatMore: the page before `before`, or the notice when the chat is gone. */
   private async answerMore(pc: PaneChat, owner: object, before: number, send: ChatSend): Promise<void> {
+    // A paused chat reads its older pages from the file it had: no watcher opens, so no other chat pauses for them.
+    if (pc.paused && !pc.watcher && pc.path && pc.provider) {
+      try {
+        const page = await readPage(pc.path, decoderFor(pc.provider), { before, paneId: pc.paneId })
+        if (pc.readers.has(owner)) send({ type: 'chatPage', paneId: pc.paneId, items: page.items, cursor: page.cursor, done: page.done })
+      } catch {
+        if (pc.readers.has(owner)) send(noticePage(pc.paneId, 'noTranscript'))
+      }
+      return
+    }
     await this.ensure(pc)
     if (!pc.readers.has(owner)) return
     if (!pc.watcher) {
@@ -161,10 +198,14 @@ export class ChatHub implements ChatHooks {
 
   // --- Assignment changes ----------------------------------------------------------
 
-  /** StatusManager.onTranscriptChange: re-locate a pane someone reads. */
+  /**
+   * StatusManager.onTranscriptChange: re-locate a pane someone reads. A
+   * paused one waits for a new chatSub, which locates it afresh (re-locating
+   * would open a watcher and pause another chat without anyone asking).
+   */
   transcriptChanged(paneId: string): void {
     const pc = this.panes.get(paneId)
-    if (!pc || pc.readers.size === 0) return
+    if (!pc || pc.readers.size === 0 || (pc.paused && !pc.locating)) return
     void this.relocate(pc)
   }
 
@@ -202,7 +243,7 @@ export class ChatHub implements ChatHooks {
   private paneOf(paneId: string): PaneChat {
     let pc = this.panes.get(paneId)
     if (!pc) {
-      pc = { paneId, readers: new Map(), path: null, provider: null, unavailable: null, watcher: null, closeTimer: null, gen: 0, locating: null, relocating: null, moreBusy: new Set(), usedAt: 0, pendingSince: null, pollTimer: null }
+      pc = { paneId, readers: new Map(), path: null, provider: null, unavailable: null, watcher: null, closeTimer: null, gen: 0, locating: null, relocating: null, moreBusy: new Set(), usedAt: 0, pendingSince: null, pollTimer: null, paused: false }
       this.panes.set(paneId, pc)
     }
     return pc
@@ -232,6 +273,8 @@ export class ChatHub implements ChatHooks {
       pc.path = null
       pc.provider = null
       pc.unavailable = res.reason
+      // No file to keep paused on: a transcript change may locate it again (and hand a first page to every reader).
+      pc.paused = false
       this.notePending(pc, !!res.pending)
       return
     }
@@ -239,7 +282,16 @@ export class ChatHub implements ChatHooks {
     pc.pendingSince = null
     pc.path = res.path
     pc.provider = res.provider
+    const wasPaused = pc.paused
     this.open(pc)
+    // Reopened for one reader (a resume): the others it had paused get a fresh first page too, at no extra watcher.
+    if (wasPaused) {
+      for (const [owner, r] of pc.readers) {
+        if (!r.paused || pc.moreBusy.has(owner)) continue
+        r.paused = false
+        void this.deliverFirst(pc, owner)
+      }
+    }
   }
 
   /**
@@ -285,10 +337,17 @@ export class ChatHub implements ChatHooks {
     }
     const watcher = this.deps.createWatcher ? this.deps.createWatcher(watcherDeps) : new TranscriptWatcher(watcherDeps)
     pc.watcher = watcher
+    pc.paused = false
     watcher.start()
   }
 
-  /** Keep at most CHAT_MAX_WATCHERS open: idle panes go first, then the least recently used. */
+  /**
+   * Keep at most CHAT_MAX_WATCHERS open: idle panes go first, then the least
+   * recently used. A victim nobody reads is forgotten; one someone reads is
+   * paused: each live reader gets the `paused` notice (an empty chatAppend)
+   * and stops getting appends, and one whose first page is being read gets
+   * that page marked paused (deliverFirst). Nobody is resumed from here.
+   */
   private evictFor(pc: PaneChat): void {
     const max = this.deps.maxWatchers ?? CHAT_MAX_WATCHERS
     const open = [...this.panes.values()].filter((p) => p.watcher && p !== pc)
@@ -300,18 +359,35 @@ export class ChatHub implements ChatHooks {
       if (victim.readers.size === 0) {
         this.cancelClose(victim)
         this.panes.delete(victim.paneId)
+        continue
+      }
+      victim.paused = true
+      for (const r of victim.readers.values()) {
+        r.paused = true
+        if (!r.live) continue
+        r.live = false
+        r.send(pausedFrame(victim.paneId))
       }
     }
   }
 
   private async deliverFirst(pc: PaneChat, owner: object): Promise<void> {
+    const asked = pc.readers.get(owner)
+    if (!asked) return
+    // A later first page for this reader (a repeated sub, a re-locate, a resume) drops this one.
+    const seq = (asked.first = ++firstSeq)
+    const current = (): Reader | null => {
+      const r = pc.readers.get(owner)
+      return r && r.first === seq ? r : null
+    }
     await this.ensure(pc)
     // A re-locate that started meanwhile supersedes the locate above (its
     // result was dropped): answer from what the re-locate decides.
     while (!pc.watcher && pc.relocating) await pc.relocating
-    const reader = pc.readers.get(owner)
+    const reader = current()
     if (!reader) return
     if (!pc.watcher) {
+      reader.paused = false
       if (pc.pendingSince !== null) {
         // The transcript is coming: an empty chat now, the first page when it appears.
         reader.send(emptyPage(pc.paneId))
@@ -322,15 +398,23 @@ export class ChatHub implements ChatHooks {
       reader.send(noticePage(pc.paneId, pc.unavailable ?? 'noTranscript'))
       return
     }
+    const watcher = pc.watcher
     try {
-      await pc.watcher.firstPage((page) => {
-        const r = pc.readers.get(owner)
+      await watcher.firstPage((page) => {
+        const r = current()
         if (!r) return
-        r.send({ type: 'chatPage', paneId: pc.paneId, ...page })
-        r.live = true
+        if (pc.watcher === watcher) {
+          r.paused = false
+          r.send({ type: 'chatPage', paneId: pc.paneId, ...page })
+          r.live = true
+        } else if (r.paused) {
+          // Its watcher closed for another chat while this page was read: the page, marked paused.
+          r.send({ type: 'chatPage', paneId: pc.paneId, ...page, notice: 'paused' })
+        }
+        // Otherwise a re-locate replaced or lost the watcher and already told this reader.
       })
     } catch {
-      const r = pc.readers.get(owner)
+      const r = current()
       if (r) r.send(noticePage(pc.paneId, 'noTranscript'))
     }
   }
@@ -376,7 +460,10 @@ export class ChatHub implements ChatHooks {
       pc.path = null
       pc.provider = null
       pc.unavailable = res.reason
+      // Every reader hears what happened now, a paused one too: nothing is paused any more.
+      pc.paused = false
       for (const r of pc.readers.values()) {
+        r.paused = false
         if (pending) {
           // A new session (/clear, a resume) whose file is not written yet: an empty chat.
           r.send(emptyPage(pc.paneId))

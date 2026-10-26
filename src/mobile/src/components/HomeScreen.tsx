@@ -10,19 +10,28 @@
  * The workspace kebab (E2-FR-09) offers New console here, Prompt to every
  * console (that workspace only), Quick Commands (E2-FR-51), History (E3-FR-36) and Show on the PC
  * (an explicit switchWorkspace, which also brings the window up).
+ *
+ * App 2.7.0 (A8): "Waiting for you" (NeedsYouSection) heads the body, across
+ * every workspace; on a desktop >= 2.7.0 the kebab starts with Mark all read
+ * (markRead for each done or error console of it not seen yet) while there
+ * is one.
+ *
+ * App 2.7.0 (E10 B8): the Teams card follows it, with or without workspaces,
+ * on a desktop >= 2.7.0 that has a team.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
-import { Clock, Gauge, History, Megaphone, MonitorUp, NotebookPen, Plus, Settings as SettingsIcon, Zap } from 'lucide-react'
+import { CheckCheck, Clock, Gauge, History, Megaphone, MonitorUp, NotebookPen, Plus, Settings as SettingsIcon, Zap } from 'lucide-react'
 import { BRAND } from '@shared/brand'
 import { Sheet } from './Sheet'
-import { ActionList } from './ActionList'
+import { ActionList, type ActionItem } from './ActionList'
 import { UsageSheet } from './UsageSheet'
 import { GlobalPromptSheet } from './GlobalPromptSheet'
 import { QuickCommandsSheet } from './QuickCommandsSheet'
 import { PaneActionList } from './PaneActionList'
 import { DOT_COLOR, StatusBanner, useConnectionHealth } from './StatusBanner'
 import { WorkspaceSection } from './home/WorkspaceSection'
+import { NeedsYouSection } from './home/NeedsYouSection'
 import { ResumeCard } from './home/ResumeCard'
 import { SecureCard } from './home/SecureCard'
 import { UsageCards } from './home/UsageCards'
@@ -30,6 +39,7 @@ import { NoWorkspaces } from './home/EmptyStates'
 import { Fab, FAB_CLEARANCE_PX } from './home/Fab'
 import { NewConsoleSheet } from './home/NewConsoleSheet'
 import { ToastStack } from './ToastStack'
+import { TeamsCard } from './teams/TeamsCard'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { openDiagnostics } from '../lib/connLog'
@@ -37,7 +47,8 @@ import { openHistory } from '../lib/history'
 import { openWsNotes } from '../lib/wsNotes'
 import { openAutomations } from '../lib/automations'
 import { rowShowsTime, STATUS_TICK_MS } from '../lib/statusText'
-import { isWorkspaceMounted, type PaneRef } from '../lib/workspace'
+import { statusMarksSupported } from '../lib/paneActions'
+import { isWorkspaceMounted, markReadTargets, needsYouPanes, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
 
 function HomeHeader({ onUsage, onSettings }: { onUsage: () => void; onSettings: () => void }): ReactNode {
@@ -104,6 +115,7 @@ export function HomeScreen(): ReactNode {
   const toggleCollapsed = useRemoteStore((s) => s.toggleCollapsed)
   const setScreen = useRemoteStore((s) => s.setScreen)
   const viewedPaneId = useRemoteStore((s) => s.activePaneId)
+  const marks = useRemoteStore((s) => statusMarksSupported(s.appVersion))
   const [usageOpen, setUsageOpen] = useState(false)
   const [newFor, setNewFor] = useState<{ workspaceId: string | null } | null>(null)
   const [menuFor, setMenuFor] = useState<string | null>(null)
@@ -112,10 +124,11 @@ export function HomeScreen(): ReactNode {
   const [actions, setActions] = useState<PaneRef | null>(null)
   const [now, setNow] = useState(() => Date.now())
 
-  // One 30s clock for every relative time on Home, only while one shows.
+  // One 30s clock for every relative time on Home, only while one shows
+  // (a failure reset counts until it passes, so the tick that passes it stops the clock).
   const ticking = useMemo(
-    () => !!snapshot && snapshot.workspaces.some((ws) => ws.panes.some((p) => rowShowsTime(paneStatus[p.id]))),
-    [snapshot, paneStatus],
+    () => !!snapshot && snapshot.workspaces.some((ws) => ws.panes.some((p) => rowShowsTime(paneStatus[p.id], now))),
+    [snapshot, paneStatus, now],
   )
   useEffect(() => {
     if (!ticking) return
@@ -124,6 +137,9 @@ export function HomeScreen(): ReactNode {
     return () => clearInterval(id)
   }, [ticking])
   useEffect(() => setNow(Date.now()), [paneStatus])
+
+  const needsRows = useMemo(() => (snapshot ? needsYouPanes(snapshot, paneStatus) : []), [snapshot, paneStatus])
+  const hasWorkspaces = !!snapshot && snapshot.workspaces.length > 0
 
   const onOpen = useCallback((paneId: string) => void client.requestOpen(paneId), [])
   const onActions = useCallback((workspaceId: string, paneId: string) => setActions({ workspaceId, paneId }), [])
@@ -136,6 +152,17 @@ export function HomeScreen(): ReactNode {
       if (!res.ok) useRemoteStore.getState().setToast(t('toast.actionFailed'))
     })
   }
+  // App 2.7.0: main acknowledges each one (markRead, handled in main); one toast for any failure.
+  const readTargets = menuWs && marks ? markReadTargets(menuWs, paneStatus) : []
+  const markAllRead = (paneIds: readonly string[]): void => {
+    void Promise.all(paneIds.map((paneId) => client.sendCtl({ kind: 'markRead', paneId }))).then((acks) => {
+      if (acks.some((res) => !res.ok)) useRemoteStore.getState().setToast(t('toast.actionFailed'))
+    })
+  }
+  const markAllItem: ActionItem[] =
+    readTargets.length > 0
+      ? [{ id: 'markAllRead', icon: <CheckCheck size={16} />, label: t('home.markAllRead'), onSelect: () => { const ids = readTargets; setMenuFor(null); markAllRead(ids) } }]
+      : []
 
   return (
     <div data-home className="flex flex-col overflow-hidden bg-bg-primary" style={{ height: 'var(--vvh, 100dvh)' }}>
@@ -150,7 +177,10 @@ export function HomeScreen(): ReactNode {
         >
           {/* E3-FR-43: the desktop's https origin, offered while this page is http. */}
           <SecureCard />
-          {snapshot && snapshot.workspaces.length > 0 ? (
+          {hasWorkspaces && <NeedsYouSection rows={needsRows} now={now} onOpen={onOpen} onActions={onActions} />}
+          {/* App 2.7.0 (E10 B8): the teams of the PC, with or without workspaces. */}
+          <TeamsCard />
+          {hasWorkspaces ? (
             <>
               <ResumeCard now={now} onOpen={onOpen} onActions={onActions} />
               <UsageCards onOpen={() => setUsageOpen(true)} />
@@ -189,6 +219,7 @@ export function HomeScreen(): ReactNode {
         <div data-ws-actions={menuFor ?? ''}>
           <ActionList
             items={[
+              ...markAllItem,
               { id: 'newHere', icon: <Plus size={16} />, label: t('home.newHere'), onSelect: () => { const id = menuFor; setMenuFor(null); if (id) setNewFor({ workspaceId: id }) } },
               { id: 'promptAll', icon: <Megaphone size={16} />, label: t('home.promptAll'), onSelect: () => { setPromptFor(menuFor); setMenuFor(null) } },
               { id: 'quick', icon: <Zap size={16} />, label: t('quick.title'), onSelect: () => { setQuickFor(menuFor); setMenuFor(null) } },

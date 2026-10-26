@@ -44,10 +44,14 @@ function StatusTip({ status }: { status: PaneStatus }) {
 
 /**
  * Live agent state dot for one console. Renders nothing while no agent
- * session is detected in the pane, so plain shells stay untouched.
+ * session is detected in the pane, so plain shells stay untouched; a `bare`
+ * status (app 2.7.0: only a `snaos needs`, no agent) is no agent session.
  */
 export function PaneStatusDot({ paneId, size = 7, noTooltip }: { paneId: string; size?: number; noTooltip?: boolean }) {
-  const status = useAppStore((s) => s.paneStatus[paneId])
+  const status = useAppStore((s) => {
+    const st = s.paneStatus[paneId]
+    return st?.bare ? undefined : st
+  })
   return <StatusDot status={status} size={size} noTooltip={noTooltip} />
 }
 

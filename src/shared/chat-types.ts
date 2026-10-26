@@ -14,6 +14,16 @@ export type ChatRole = 'user' | 'assistant' | 'tool' | 'system'
 /** Why a console has no chat (FR-33). */
 export type ChatUnavailableReason = 'noTranscript' | 'ambiguous' | 'notLocal'
 
+/**
+ * A word about the chat itself, not its transcript (app 2.7.0, A7), in the
+ * optional `notice` of a chat frame. `paused`: its watcher was closed for
+ * another chat (CHAT_MAX_WATCHERS), so nothing more comes until a new chatSub,
+ * which answers a fresh first page. It rides on an empty chatAppend (or on the
+ * first page that was being read then), so a reader that does not know the
+ * field appends nothing.
+ */
+export type ChatFrameNotice = 'paused'
+
 export interface ChatPatchHunk {
   oldStart: number
   oldLines: number

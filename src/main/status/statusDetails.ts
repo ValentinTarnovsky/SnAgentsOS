@@ -3,6 +3,7 @@ import { realpathSync, statSync } from 'fs'
 import { homedir } from 'os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import type { RemotePending } from '@shared/types'
+import { FAILURE_KINDS, type FailureInfo } from '@shared/failure'
 
 /**
  * Pure helpers behind the status enrichment (E4-FR-09, E5-FR-01/02): bounded
@@ -156,6 +157,22 @@ export function summarizeRequest(toolName: string | undefined, toolInput: unknow
     out = extractQuestions(toolInput)?.[0]?.question ?? ''
   }
   return clip(out || summarizeTool(name, toolInput), LIMITS.summary)
+}
+
+/**
+ * App 2.7.0 (A3): a FailureInfo a producer handed in (StopFailure through
+ * claudeFailure, Codex through codexFailure), copied field by field: a known
+ * kind, a finite `until`, a one-line code of at most 32. Undefined otherwise.
+ */
+export function cleanFailure(value: unknown): FailureInfo | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const v = value as Record<string, unknown>
+  if (typeof v.kind !== 'string' || !(FAILURE_KINDS as readonly string[]).includes(v.kind)) return undefined
+  const out: FailureInfo = { kind: v.kind as FailureInfo['kind'] }
+  if (typeof v.until === 'number' && Number.isFinite(v.until)) out.until = v.until
+  const code = typeof v.code === 'string' ? clip(sanitize(v.code, true), 32) : ''
+  if (code) out.code = code
+  return out
 }
 
 /** Structured AskUserQuestion questions in the RemotePending shape, bounded. */

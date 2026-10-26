@@ -15,6 +15,12 @@
  * under the key `share:<linkId>` (a workspace id never has a colon): its I/O
  * goes through the link (setFilesIo), it has no write, and it is never
  * stashed.
+ *
+ * A worktree console has its own tree (app 2.7.0, A9) under `wsId#paneId`
+ * (ids never have a `#`): every call names the pane too, and main roots it at
+ * the pane's worktree. The drawer of a workspace shows one tree at a time
+ * (`shown`), the workspace's own unless a Ctrl+click on a terminal path of a
+ * worktree console switched it.
  */
 import { create } from 'zustand'
 import { joinRel, parentRel, type FileEntry, type FileReadRes, type FileWriteReq, type FileWriteRes, type FilesChangedEvt, type FilesError, type FilesListRes } from '@shared/files'
@@ -26,7 +32,7 @@ export interface FileTab {
   seq: number
   /** The text the editor was loaded with at `seq`. */
   initial: string
-  /** The current text (what the editor shows). */
+  /** The current text (what the editor shows; an editor mounted again starts from it). */
   text: string
   /** The text on disk as last read or written: dirty = text !== saved. */
   saved: string
@@ -42,6 +48,8 @@ export interface FileTab {
   restored?: boolean
   /** Only the start of the file came (a share guest's read of a long one). */
   partial?: boolean
+  /** Put the cursor here once the editor shows (1-based); `seq` grows on every ask. */
+  reveal?: { line: number; col: number; seq: number }
 }
 
 export interface DirState {
@@ -59,9 +67,38 @@ interface WsFiles {
 
 interface FilesState {
   byWs: Record<string, WsFiles>
+  /** Drawer workspace id -> the tree it shows when not its own (a `wsId#paneId` key). */
+  shown: Record<string, string>
 }
 
-export const useFilesStore = create<FilesState>(() => ({ byWs: {} }))
+export const useFilesStore = create<FilesState>(() => ({ byWs: {}, shown: {} }))
+
+/** The key of a worktree console's own tree. */
+export function paneFilesKey(wsId: string, paneId: string): string {
+  return `${wsId}#${paneId}`
+}
+
+/** What a key names to main: the workspace, plus the console of a `wsId#paneId` tree. */
+export function filesIds(key: string): { workspaceId: string; paneId?: string } {
+  const i = key.indexOf('#')
+  return i < 0 ? { workspaceId: key } : { workspaceId: key.slice(0, i), paneId: key.slice(i + 1) }
+}
+
+/** The tree the drawer of workspace `drawerWsId` shows. */
+export function shownFilesKey(state: FilesState, drawerWsId: string): string {
+  return state.shown[drawerWsId] ?? drawerWsId
+}
+
+/** Switch the drawer of `drawerWsId` to the tree `key` (its own workspace id: back to it). */
+export function showFilesTree(drawerWsId: string, key: string): void {
+  useFilesStore.setState((s) => {
+    if (shownFilesKey(s, drawerWsId) === key) return s
+    const shown = { ...s.shown }
+    if (key === drawerWsId) delete shown[drawerWsId]
+    else shown[drawerWsId] = key
+    return { shown }
+  })
+}
 
 /** A read as a tree's I/O answers it; `partial`: only the start of the file came. */
 export type FilesIoRead = FileReadRes & { partial?: boolean }
@@ -76,11 +113,12 @@ export interface FilesIo {
 
 const ios = new Map<string, FilesIo>()
 
-function localIo(wsId: string): FilesIo {
+function localIo(key: string): FilesIo {
+  const ids = filesIds(key)
   return {
-    list: (rel) => window.snApi.files.list({ workspaceId: wsId, rel }),
-    read: (rel) => window.snApi.files.read({ workspaceId: wsId, rel }),
-    write: (req) => window.snApi.files.write({ workspaceId: wsId, ...req }),
+    list: (rel) => window.snApi.files.list({ ...ids, rel }),
+    read: (rel) => window.snApi.files.read({ ...ids, rel }),
+    write: (req) => window.snApi.files.write({ ...ids, ...req }),
   }
 }
 
@@ -153,10 +191,17 @@ export async function reloadTree(wsId: string): Promise<void> {
 
 // --- Tabs ----------------------------------------------------------------------------
 
-export async function openFile(wsId: string, rel: string): Promise<FilesError | null> {
+let revealSeq = 0
+
+/**
+ * Opens (or activates) a tab. `at` (app 2.7.0, A9) also puts the cursor on
+ * that 1-based line and column once the editor shows, open tab or new.
+ */
+export async function openFile(wsId: string, rel: string, at?: { line?: number | null; col?: number | null }): Promise<FilesError | null> {
+  const reveal = at?.line ? { line: at.line, col: at.col || 1, seq: ++revealSeq } : undefined
   const ws = wsFiles(useFilesStore.getState(), wsId)
   if (ws.tabs.some((t) => t.rel === rel)) {
-    patch(wsId, () => ({ active: rel }))
+    patch(wsId, (w) => ({ active: rel, ...(reveal ? { tabs: w.tabs.map((t) => (t.rel === rel && t.kind === 'text' ? { ...t, reveal } : t)) } : {}) }))
     return null
   }
   const io = ioOf(wsId)
@@ -166,9 +211,19 @@ export async function openFile(wsId: string, rel: string): Promise<FilesError | 
   const tab: FileTab =
     res.kind === 'image'
       ? { rel, kind: 'image', seq: ++tabSeq, initial: '', text: '', saved: '', rev: res.rev, eol: 'lf', bom: false, readOnly: true, size: res.size, dataUrl: res.dataUrl }
-      : { rel, kind: 'text', seq: ++tabSeq, initial: res.text, text: res.text, saved: res.text, rev: res.rev, eol: res.eol, bom: res.bom, readOnly: res.readOnly || !io.write, size: res.size, ...(res.partial ? { partial: true } : {}) }
-  patch(wsId, (w) => (w.tabs.some((t) => t.rel === rel) ? { active: rel } : { tabs: [...w.tabs, tab], active: rel }))
+      : { rel, kind: 'text', seq: ++tabSeq, initial: res.text, text: res.text, saved: res.text, rev: res.rev, eol: res.eol, bom: res.bom, readOnly: res.readOnly || !io.write, size: res.size, ...(res.partial ? { partial: true } : {}), ...(reveal ? { reveal } : {}) }
+  patch(wsId, (w) =>
+    w.tabs.some((t) => t.rel === rel)
+      ? { active: rel, ...(reveal ? { tabs: w.tabs.map((t) => (t.rel === rel && t.kind === 'text' ? { ...t, reveal } : t)) } : {}) }
+      : { tabs: [...w.tabs, tab], active: rel },
+  )
   return null
+}
+
+/** The editor applied the tab's reveal `seq` (a newer ask stays). */
+export function clearReveal(wsId: string, rel: string, seq: number): void {
+  const tab = wsFiles(useFilesStore.getState(), wsId).tabs.find((t) => t.rel === rel)
+  if (tab?.reveal?.seq === seq) patchTab(wsId, rel, () => ({ reveal: undefined }))
 }
 
 export function setActiveTab(wsId: string, rel: string): void {
@@ -225,23 +280,29 @@ export function renameTabs(wsId: string, from: string, to: string): void {
 
 // --- Changes on disk -----------------------------------------------------------------------
 
+/** The tree a change event is for: the workspace's, or the pane's its watch named. */
+export function changedKey(evt: FilesChangedEvt): string {
+  return evt.paneId ? paneFilesKey(evt.workspaceId, evt.paneId) : evt.workspaceId
+}
+
 /** A burst of changes in the watched folder: reload the folders shown and check the open tabs there. */
 export async function applyFilesChanged(evt: FilesChangedEvt): Promise<void> {
-  const ws = wsFiles(useFilesStore.getState(), evt.workspaceId)
+  const key = changedKey(evt)
+  const ws = wsFiles(useFilesStore.getState(), key)
   const touched = (rel: string): boolean => evt.all === true || evt.dirs.includes(rel)
-  await Promise.all(ws.expanded.filter((d) => touched(d) && ws.dirs[d]).map((d) => loadDir(evt.workspaceId, d)))
+  await Promise.all(ws.expanded.filter((d) => touched(d) && ws.dirs[d]).map((d) => loadDir(key, d)))
   for (const tab of ws.tabs) {
     if (!touched(parentRel(tab.rel))) continue
-    const res = await ioOf(evt.workspaceId).read(tab.rel).catch(() => null)
-    const cur = wsFiles(useFilesStore.getState(), evt.workspaceId).tabs.find((t) => t.rel === tab.rel)
+    const res = await ioOf(key).read(tab.rel).catch(() => null)
+    const cur = wsFiles(useFilesStore.getState(), key).tabs.find((t) => t.rel === tab.rel)
     if (!cur || !res) continue
     if (!res.ok) {
-      if (res.error === 'not_found') patchTab(evt.workspaceId, tab.rel, () => ({ external: 'deleted' }))
+      if (res.error === 'not_found') patchTab(key, tab.rel, () => ({ external: 'deleted' }))
       continue
     }
     if (res.rev === cur.rev) continue
-    if (isDirty(cur)) patchTab(evt.workspaceId, tab.rel, () => ({ external: 'changed' }))
-    else await reloadTab(evt.workspaceId, tab.rel)
+    if (isDirty(cur)) patchTab(key, tab.rel, () => ({ external: 'changed' }))
+    else await reloadTab(key, tab.rel)
   }
 }
 
@@ -266,19 +327,37 @@ function storage(): Storage | null {
   }
 }
 
-/** Unload: unsaved buffers go to localStorage (newest first until 2 MB). */
+function readStash(): Stashed[] {
+  try {
+    const raw = storage()?.getItem(STASH_KEY)
+    const all: unknown = raw ? JSON.parse(raw) : []
+    return Array.isArray(all) ? (all as Stashed[]) : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Unload: unsaved buffers go to localStorage (newest first until 2 MB). The
+ * stash of a tree not loaded this run (its drawer never opened) is still
+ * there, unrestored: it stays, after this run's buffers.
+ */
 export function stashUnsaved(): void {
-  const out: Stashed[] = []
-  let size = 0
-  for (const [wsId, ws] of Object.entries(useFilesStore.getState().byWs)) {
+  const byWs = useFilesStore.getState().byWs
+  const now: Stashed[] = []
+  for (const [wsId, ws] of Object.entries(byWs)) {
     // A share link's tree is read-only: nothing of it to bring back.
     if (wsId.includes(':')) continue
-    for (const tab of ws.tabs) {
-      if (!isDirty(tab)) continue
-      size += tab.text.length * 2
-      if (size > STASH_MAX) break
-      out.push({ wsId, rel: tab.rel, text: tab.text, eol: tab.eol, bom: tab.bom })
-    }
+    for (const tab of ws.tabs) if (isDirty(tab)) now.push({ wsId, rel: tab.rel, text: tab.text, eol: tab.eol, bom: tab.bom })
+  }
+  const loaded = new Set(Object.keys(byWs))
+  const older = readStash().filter((s) => s && typeof s.wsId === 'string' && !loaded.has(s.wsId) && !s.wsId.includes(':') && typeof s.rel === 'string' && typeof s.text === 'string')
+  const out: Stashed[] = []
+  let size = 0
+  for (const s of [...now, ...older]) {
+    size += s.text.length * 2
+    if (size > STASH_MAX) break
+    out.push(s)
   }
   try {
     if (out.length) storage()?.setItem(STASH_KEY, JSON.stringify(out))
@@ -288,16 +367,15 @@ export function stashUnsaved(): void {
   }
 }
 
-/** Opening a workspace's drawer: its stashed buffers come back as unsaved tabs (once). */
+/**
+ * Opening a tree (the drawer, or a Ctrl+click on a terminal path, app 2.7.0,
+ * A9): its stashed buffers come back as unsaved tabs (once). A tab already
+ * open on that file that still shows what it read from disk takes the stash;
+ * one with edits of this session keeps them (they are newer).
+ */
 export function restoreUnsaved(wsId: string): void {
-  let all: Stashed[] = []
-  try {
-    const raw = storage()?.getItem(STASH_KEY)
-    all = raw ? (JSON.parse(raw) as Stashed[]) : []
-  } catch {
-    all = []
-  }
-  if (!Array.isArray(all) || !all.length) return
+  const all = readStash()
+  if (!all.length) return
   const mine = all.filter((s) => s && s.wsId === wsId && typeof s.rel === 'string' && typeof s.text === 'string')
   if (!mine.length) return
   const rest = all.filter((s) => !mine.includes(s))
@@ -310,8 +388,13 @@ export function restoreUnsaved(wsId: string): void {
   patch(wsId, (ws) => {
     const tabs = [...ws.tabs]
     for (const s of mine) {
-      if (tabs.some((t) => t.rel === s.rel)) continue
-      tabs.push({ rel: s.rel, kind: 'text', seq: ++tabSeq, initial: s.text, text: s.text, saved: '\u0000', rev: '', eol: s.eol === 'crlf' ? 'crlf' : 'lf', bom: !!s.bom, readOnly: false, size: s.text.length, restored: true })
+      const i = tabs.findIndex((t) => t.rel === s.rel)
+      const open = i < 0 ? null : tabs[i]
+      if (open && (open.kind !== 'text' || isDirty(open) || open.text === s.text)) continue
+      const tab: FileTab = { rel: s.rel, kind: 'text', seq: ++tabSeq, initial: s.text, text: s.text, saved: '\u0000', rev: '', eol: s.eol === 'crlf' ? 'crlf' : 'lf', bom: !!s.bom, readOnly: false, size: s.text.length, restored: true }
+      // The open tab's pending cursor (the Ctrl+click that opened it) still applies.
+      if (open) tabs[i] = open.reveal ? { ...tab, reveal: open.reveal } : tab
+      else tabs.push(tab)
     }
     return { tabs, active: ws.active ?? tabs[0]?.rel ?? null }
   })

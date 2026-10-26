@@ -79,19 +79,35 @@ export function providerOfCommand(command: string | undefined): AgentProvider | 
 // Flags whose next token is their value. Anything else is treated as a
 // boolean, so a following token counts as a positional (the prompt) and is
 // dropped on resume: re-sending a prompt is worse than losing an odd flag.
+// Claude's list follows `claude --help` (2.1.x); optional values (`--debug
+// [filter]`, `-w [name]`) stay boolean.
 const VALUE_FLAGS: Record<AgentProvider, Set<string>> = {
   claude: new Set([
-    '--model', '--permission-mode', '--allowedTools', '--allowed-tools', '--disallowedTools',
-    '--disallowed-tools', '--tools', '--add-dir', '--mcp-config', '--append-system-prompt',
-    '--system-prompt', '--output-format', '--input-format', '--settings', '--setting-sources',
-    '--agents', '--agent', '--fallback-model', '--max-turns', '--permission-prompt-tool',
-    '--plugin-dir', '--betas', '--max-budget-usd', '--json-schema', '--debug-file',
+    '--model', '--permission-mode', '--append-system-prompt', '--append-system-prompt-file',
+    '--system-prompt', '--system-prompt-file', '--system-prompt-snapshot', '--output-format',
+    '--input-format', '--settings', '--setting-sources', '--agents', '--agent', '--fallback-model',
+    '--max-turns', '--permission-prompt-tool', '--permission-prompts', '--plugin-dir', '--plugin-url',
+    '--max-budget-usd', '--json-schema', '--debug-file', '--effort', '--autocompact', '-n', '--name',
+    '--environment', '--remote-control-session-name-prefix',
   ]),
   codex: new Set([
     '-m', '--model', '-p', '--profile', '-c', '--config', '-s', '--sandbox', '-a',
     '--ask-for-approval', '-C', '--cd', '-i', '--image', '--local-provider', '--add-dir',
     '--enable', '--disable', '--remote', '--remote-auth-token-env',
   ]),
+}
+/**
+ * Variadic flags (`<dirs...>` in the help): after the first value commander
+ * keeps taking every following token up to the next flag, so they all belong
+ * to the flag (a trailing quoted prompt included) and are kept. The inline
+ * form `--add-dir=a` takes only its own value, as in commander.
+ */
+const VARIADIC_FLAGS: Record<AgentProvider, Set<string>> = {
+  claude: new Set([
+    '--add-dir', '--mcp-config', '--allowedTools', '--allowed-tools', '--disallowedTools',
+    '--disallowed-tools', '--tools', '--betas', '--file',
+  ]),
+  codex: new Set(),
 }
 /** Claude session flags removed before adding our own `--resume <id>`. */
 const CLAUDE_SESSION_FLAGS = new Set(['--resume', '-r', '--continue', '-c', '--session-id', '--fork-session'])
@@ -108,11 +124,12 @@ export function stripForResume(provider: AgentProvider, tokens: string[]): strin
   if (tokens.length === 0) return []
   const out = [tokens[0]]
   const values = VALUE_FLAGS[provider]
+  const variadic = VARIADIC_FLAGS[provider]
+  const isFlagTok = (t: string) => unquote(t).startsWith('-') && unquote(t).length > 1
   for (let i = 1; i < tokens.length; i++) {
     const raw = tokens[i]
     const tok = unquote(raw)
-    const isFlag = tok.startsWith('-') && tok.length > 1
-    if (!isFlag) {
+    if (!isFlagTok(raw)) {
       // Codex `resume <id>`: drop the subcommand and the id after it.
       if (provider === 'codex' && tok === 'resume') {
         const next = tokens[i + 1]
@@ -129,7 +146,9 @@ export function stripForResume(provider: AgentProvider, tokens: string[]): strin
     }
     if (provider === 'codex' && (name === '--last' || name === '--all')) continue
     out.push(raw)
-    if (!inline && values.has(name) && i + 1 < tokens.length) out.push(tokens[++i])
+    if (inline) continue
+    if ((values.has(name) || variadic.has(name)) && i + 1 < tokens.length) out.push(tokens[++i])
+    if (variadic.has(name)) while (i + 1 < tokens.length && !isFlagTok(tokens[i + 1])) out.push(tokens[++i])
   }
   return out
 }

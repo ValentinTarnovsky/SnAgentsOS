@@ -7,11 +7,18 @@
  * Relative time uses the phone's clock against the desktop's stateSince, with
  * no skew correction (no serverTime in the contract, E1 risk 24): an instant
  * in the future clamps to "now".
+ *
+ * App 2.7.0 (A8): the words of a row's status signals, the same as the
+ * desktop's (src/renderer/lib/statusSignals.ts): what the agent is doing now,
+ * why its last turn failed, its silence, what it asked for with `snaos
+ * needs` and how full its context is.
  */
-import type { ClaudePaneState } from '@shared/types'
+import type { ClaudePaneState, PaneContext, PaneNeeds, PaneSilence } from '@shared/types'
 import type { RemotePaneStatus } from '@shared/remote-protocol'
 import { displayStatus } from '@shared/status'
-import { t, type MobileMessageKey } from './i18n'
+import { failureLabelKey, type FailureInfo } from '@shared/failure'
+import { familyOf, toolVerbKey, type ToolFamily } from '@shared/toolActivity'
+import { getLang, t, type MobileMessageKey } from './i18n'
 
 const STATE_KEY: Record<ClaudePaneState, MobileMessageKey> = {
   working: 'status.working',
@@ -119,10 +126,16 @@ export interface RowLineInput {
   mounted: boolean
 }
 
-/** True while a row's second line shows a relative time (drives the 30s ticker). */
-export function rowShowsTime(raw: RemotePaneStatus | undefined): boolean {
-  const status = displayStatus(raw)
+/**
+ * True while a row shows a relative time (drives the 30s ticker): the second
+ * line's age, a silence's minutes or a failure's reset while it is ahead of
+ * `now` (failureText drops it once it passes, and main keeps the failure on
+ * an idle track, so a past reset must not keep the clock running).
+ */
+export function rowShowsTime(raw: RemotePaneStatus | undefined, now: number): boolean {
+  const status = displayStatus(agentStatusOf(raw))
   if (!status) return false
+  if (status.silence || (status.failure?.until && status.failure.until > now)) return true
   if (status.state === 'action') return false
   return status.state === 'working' || status.state === 'done' || status.state === 'error'
 }
@@ -131,11 +144,13 @@ export function rowShowsTime(raw: RemotePaneStatus | undefined): boolean {
  * The Home row's second line: the attention reason, the state with its age
  * ("Working 2m", "Done 3m ago", "Error 1m ago"), "Lost connection to agent",
  * else from the pty: Idle (running), Exited (code), Stopped, or Not started
- * when its workspace is not mounted on the desktop.
+ * when its workspace is not mounted on the desktop. App 2.7.0: while a tool
+ * is open, what the agent is doing with its age ("Editing a.ts · 2m"); a
+ * `bare` status (no agent) reads as no status here (the row shows its needs).
  */
 export function rowLine(input: RowLineInput, now: number): string {
   // An answered action (attention false) reads working, or idle when title-only.
-  const status = displayStatus(input.status)
+  const status = displayStatus(agentStatusOf(input.status))
   if (status) {
     const reason = status.reason
     if (status.state === 'action') {
@@ -146,8 +161,11 @@ export function rowLine(input: RowLineInput, now: number): string {
     const waiting = waitingText(status)
     if (waiting) return waiting
     switch (status.state) {
-      case 'working':
+      case 'working': {
+        const doing = doingNow(status)
+        if (doing) return fresh ? doing : `${doing} · ${age}`
         return fresh ? t('row.working') : t('row.workingFor', { t: age })
+      }
       case 'done':
         return fresh ? t('row.doneNow') : t('row.doneAgo', { t: age })
       case 'error':
@@ -161,4 +179,100 @@ export function rowLine(input: RowLineInput, now: number): string {
   if (input.running) return t('row.idle')
   if (input.exitCode !== undefined) return t('row.exited', { code: input.exitCode })
   return input.mounted ? t('row.stopped') : t('row.notStarted')
+}
+
+// --- Status signals (app 2.7.0, A8) ---
+
+const MIN_MS = 60_000
+
+/** The status as an agent status: a `bare` one (only a `snaos needs` on a console with no agent) is none. */
+export function agentStatusOf(status: RemotePaneStatus | undefined): RemotePaneStatus | undefined {
+  return status && !status.bare ? status : undefined
+}
+
+/**
+ * What the activity summary says beyond the tool's own name, as the desktop
+ * words it: main writes a Claude tool as "Edit a.ts", "Bash: npm test" or
+ * "Task: <description>", so the leading name goes when it is a tool of the
+ * same family (the verb already says it). A Codex command line keeps every word.
+ */
+export function toolObject(activity: string, family: ToolFamily): string {
+  const text = activity.trim()
+  const m = /^(\S+?)(?::\s+|\s+|$)/.exec(text)
+  if (!m || family === 'other') return text
+  const head = m[1]
+  const named = familyOf(head) === family || (family === 'mcp' && head === 'mcp')
+  return named ? text.slice(m[0].length).trim() : text
+}
+
+/**
+ * "Editing a.ts": the verb of the newest open tool plus what it works on,
+ * only while the agent works with a tool open (since 2.7.0 main sends
+ * `activity` with its `toolFamily` while the tool is open, and drops both
+ * once it ends). Null otherwise, also for a finished turn that waits on
+ * background work and for a status without toolFamily: a desktop before
+ * 2.7.0 keeps `activity` on the turn's last tool after it ends, so its row
+ * keeps "Working 6m".
+ */
+export function doingNow(raw: RemotePaneStatus | undefined): string | null {
+  const s = displayStatus(agentStatusOf(raw))
+  const activity = s?.activity?.trim()
+  if (!s || !s.toolFamily || !activity || s.state !== 'working' || s.waiting) return null
+  const verb = t(toolVerbKey(s.toolFamily))
+  const what = toolObject(activity, s.toolFamily)
+  return what ? `${verb} ${what}` : verb
+}
+
+/** "15:30" today, "25 oct, 15:30" another day, in the phone's language and clock. */
+export function clockTime(at: number, now: number): string {
+  const d = new Date(at)
+  const today = new Date(now)
+  const sameDay = d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && d.getDate() === today.getDate()
+  const lang = getLang()
+  try {
+    return sameDay
+      ? d.toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleString(lang, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return d.toTimeString().slice(0, 5)
+  }
+}
+
+/** "Usage limit until 15:30": the failure's label, plus its reset while it is ahead. */
+export function failureText(f: FailureInfo, now: number): string {
+  const label = t(failureLabelKey(f.kind) as MobileMessageKey)
+  return f.until && f.until > now ? `${label} ${t('status.failure.until', { time: clockTime(f.until, now) })}` : label
+}
+
+/** Whole minutes of silence since the last sign of life. */
+export function silenceMinutes(s: PaneSilence, now: number): number {
+  return Math.max(0, Math.floor((now - s.since) / MIN_MS))
+}
+
+/** "No signal for 12 min" (quiet) or "Maybe stuck: 25 min without signal" (stalled). */
+export function silenceText(s: PaneSilence, now: number): string {
+  return t(s.level === 'stalled' ? 'status.silence.stalled' : 'status.silence.quiet', { min: silenceMinutes(s, now) })
+}
+
+/** "Needs you: <text>" (`snaos needs`). */
+export function needsText(needs: PaneNeeds): string {
+  return t('status.needs.label', { text: needs.text })
+}
+
+/** Context fill as a whole percent, 0..100. */
+export function contextPercent(c: PaneContext): number {
+  const pct = Number.isFinite(c.pct) ? c.pct : 0
+  return Math.round(Math.min(1, Math.max(0, pct)) * 100)
+}
+
+/** The short form a row shows: "42%" when the agent reported it (Codex), else "42% est.". */
+export function contextShort(c: PaneContext): string {
+  const pct = contextPercent(c)
+  return c.exact ? `${pct}%` : t('status.context.short', { pct })
+}
+
+/** The accessible name: "Context 42% full", plus "(estimated)" unless exact. */
+export function contextLabel(c: PaneContext): string {
+  const label = t('status.context.label', { pct: contextPercent(c) })
+  return c.exact ? label : `${label} (${t('status.context.estimated')})`
 }

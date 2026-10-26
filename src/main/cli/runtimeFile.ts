@@ -26,7 +26,7 @@ export function writeRuntimeFile(path: string, data: SnaosRuntimeFile): void {
 /** The parsed file, or null when missing or malformed. */
 export function readRuntimeFile(path: string): SnaosRuntimeFile | null {
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8').replace(/^﻿/, '')) as Partial<SnaosRuntimeFile>
+    const raw = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')) as Partial<SnaosRuntimeFile>
     if (
       raw?.version !== 1 ||
       typeof raw.pid !== 'number' ||

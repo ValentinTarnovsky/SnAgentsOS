@@ -1,6 +1,10 @@
 import { z } from 'zod'
-import { CONFIG_VERSION, type ConfigFile } from '@shared/types'
+import { CONFIG_VERSION, type ConfigFile, type Pane, type PaneSchedule } from '@shared/types'
+import { CRON_EXPR_MAX } from '@shared/cron'
+import { cronRuleError, PANE_SCHEDULES_MAX, SCHEDULE_ID_RE } from '@shared/schedule'
 import { migrateQuickCommandsConfig, QUICK_COMMAND_ID_MAX } from '@shared/quickCommands'
+import { LABS_KEYS, type LabsKey } from '@shared/labs'
+import { DEFAULT_SILENCE, normalizeSilence, SILENCE_QUIET_MIN, SILENCE_STALLED_MIN } from '@shared/silence'
 
 export { CONFIG_VERSION }
 
@@ -38,6 +42,16 @@ export const cacheTimerSettingsSchema = z.object({
   ttlMinutes: z.union([z.literal(5), z.literal(60)]).catch(5).default(5),
 })
 
+// Schema 19 (app 2.7.0, A3): silence watch. Field defaults, then the shared
+// normalizer keeps stalledMin above quietMin.
+export const silenceSettingsSchema = z
+  .object({
+    enabled: z.boolean().catch(DEFAULT_SILENCE.enabled).default(DEFAULT_SILENCE.enabled),
+    quietMin: z.number().int().min(SILENCE_QUIET_MIN.min).max(SILENCE_QUIET_MIN.max).catch(DEFAULT_SILENCE.quietMin).default(DEFAULT_SILENCE.quietMin),
+    stalledMin: z.number().int().min(SILENCE_STALLED_MIN.min).max(SILENCE_STALLED_MIN.max).catch(DEFAULT_SILENCE.stalledMin).default(DEFAULT_SILENCE.stalledMin),
+  })
+  .transform(normalizeSilence)
+
 // Schema 11. Field-level defaults are the whole migration (migrate() only re-stamps).
 export const agentSettingsSchema = z.object({
   resumeOnStartup: z.enum(['ask', 'auto', 'off']).catch('ask').default('ask'),
@@ -55,6 +69,8 @@ export const agentSettingsSchema = z.object({
   // Schema 17 (app 2.4.0).
   syncAgentRename: z.boolean().catch(true).default(true),
   shellAgentDetect: z.boolean().catch(true).default(true),
+  // Schema 19 (app 2.7.0, A3).
+  silence: silenceSettingsSchema.default({}).catch(() => silenceSettingsSchema.parse({})),
 })
 
 // Schema 12 (E8-FR-08/09).
@@ -96,6 +112,13 @@ export const shareSettingsSchema = z.object({
   defaultPerm: z.enum(['view', 'type', 'full']).catch('view').default('view'),
 })
 
+// Schema 19 (app 2.7.0): Labs, one flag per LABS_KEYS entry (@shared/labs).
+// Off by default, and a junk value turns the lab off instead of failing the config.
+const labFlag = () => z.boolean().catch(false).default(false)
+export const labsSettingsSchema = z.object(
+  Object.fromEntries(LABS_KEYS.map((k) => [k, labFlag()])) as Record<LabsKey, ReturnType<typeof labFlag>>,
+)
+
 // Schema 13 (E3-FR-42). Only `tailscaleServe` exists (manualCert retired, E3-FR-51).
 export const remoteHttpsSettingsSchema = z.object({
   enabled: z.boolean().catch(false).default(false),
@@ -123,6 +146,13 @@ export const scheduleRecurrenceSchema = z.discriminatedUnion('kind', [
       .refine((d) => new Set(d).size === d.length, 'duplicate day'),
   }),
   z.object({ kind: z.literal('hourly') }),
+  // Schema 19 (app 2.7.0). Refined on the field: a discriminatedUnion member
+  // must stay a plain object. It parses, keeps 15 minutes between runs and
+  // has a next run (an impossible date like "0 0 31 2 *" does not).
+  z.object({
+    kind: z.literal('cron'),
+    expr: z.string().max(CRON_EXPR_MAX).refine((e) => cronRuleError(e, Date.now()) === null, 'bad cron'),
+  }),
 ])
 
 export const scheduleRunSchema = z.object({
@@ -130,7 +160,8 @@ export const scheduleRunSchema = z.object({
   scheduledFor: z.number(),
   trigger: z.enum(['scheduled', 'manual']),
   status: z.enum(['sent', 'sent_unconfirmed', 'skipped_busy', 'missed', 'failed']),
-  reason: z.enum(['agent_not_running', 'multiline_unsafe', 'not_delivered']).optional().catch(undefined),
+  // `enter_held` post 2.6.0: an older build drops the unknown reason (catch) and keeps the run.
+  reason: z.enum(['agent_not_running', 'multiline_unsafe', 'not_delivered', 'enter_held']).optional().catch(undefined),
 })
 
 type ScheduleRunParsed = z.infer<typeof scheduleRunSchema>
@@ -156,7 +187,7 @@ const scheduleHistorySchema = z.array(z.unknown()).transform((items) => {
   return runs.filter((_, i) => keep.has(i))
 })
 
-const paneScheduleSchema = z.object({
+const paneScheduleFields = {
   time: z.string(),
   prompt: z.string(),
   dueAt: z.number(),
@@ -165,6 +196,44 @@ const paneScheduleSchema = z.object({
   enabled: z.boolean().optional().catch(undefined),
   waitingSince: z.number().optional().catch(undefined),
   history: scheduleHistorySchema.optional().catch(undefined),
+}
+
+/** Schema <= 18 `pane.schedule`: migration input only (schema 19 reads `schedules`). */
+const paneScheduleSchema = z.object(paneScheduleFields)
+
+// ---- Schema 19 (app 2.7.0): several schedules per console -------------------
+// The id goes first so a migrated entry ({ id: 's1', ...schedule }) keeps the
+// key order of a parsed one and a second parse is a no-op.
+const paneScheduleEntrySchema = z.object({ id: z.string().regex(SCHEDULE_ID_RE), ...paneScheduleFields })
+
+type PaneScheduleParsed = z.infer<typeof paneScheduleEntrySchema>
+
+/** The input asked for a cron rule (`recurrence.kind === 'cron'`). */
+function cronInput(item: unknown): boolean {
+  if (typeof item !== 'object' || item === null) return false
+  const rec = (item as { recurrence?: unknown }).recurrence
+  return typeof rec === 'object' && rec !== null && (rec as { kind?: unknown }).kind === 'cron'
+}
+
+/**
+ * Item by item: a malformed entry, a repeated id and anything past
+ * PANE_SCHEDULES_MAX (8) are dropped and the rest kept in order. A cron rule
+ * that fails its field (does not parse, runs less than 15 minutes apart, or
+ * never runs) drops its whole entry: the recurrence's catch would otherwise
+ * leave a one-shot that fires once at `dueAt`. Another junk recurrence still
+ * falls back to a one-shot, as in schema 13.
+ */
+const paneSchedulesSchema = z.array(z.unknown()).transform((items) => {
+  const out: PaneScheduleParsed[] = []
+  for (const item of items) {
+    const r = paneScheduleEntrySchema.safeParse(item)
+    if (!r.success) continue
+    if (r.data.recurrence?.kind !== 'cron' && cronInput(item)) continue
+    if (out.some((s) => s.id === r.data.id)) continue
+    out.push(r.data)
+    if (out.length === PANE_SCHEDULES_MAX) break
+  }
+  return out
 })
 
 // Schema 13 (E7-FR-28, Contratos compartidos). Without this field zod's
@@ -209,7 +278,9 @@ const paneSchema = z.object({
   color: z.string(),
   icon: z.string(),
   fontSize: z.number().optional(),
-  schedule: paneScheduleSchema.optional(),
+  // Schema <= 18 input only: migrate() turns it into `schedules` and never
+  // writes it again. A malformed one is dropped instead of failing the config.
+  schedule: paneScheduleSchema.optional().catch(undefined),
   // Schema 11: a mirror of main's agent-sessions.json. A malformed value is
   // dropped instead of failing the whole config (which would fall back to .bak).
   lastSession: z
@@ -224,6 +295,9 @@ const paneSchema = z.object({
     .optional()
     .catch(undefined),
   worktree: paneWorktreeSchema.optional().catch(undefined), // schema 13
+  // Schema 19 (app 2.7.0). Last, where migrate() appends it, so the key order
+  // of a migrated pane matches a parsed one. A non-array value is dropped.
+  schedules: paneSchedulesSchema.optional().catch(undefined),
 })
 
 const setupStepSchema = z.object({
@@ -406,6 +480,8 @@ const settingsSchema = z.object({
   // Schema 17: desktop dictation and desktop-to-desktop sharing.
   dictation: dictationSettingsSchema.default({}).catch(() => dictationSettingsSchema.parse({})),
   share: shareSettingsSchema.default({}).catch(() => shareSettingsSchema.parse({})),
+  // Schema 19 (app 2.7.0): Labs; a missing or non-object block gives every lab off.
+  labs: labsSettingsSchema.default({}).catch(() => labsSettingsSchema.parse({})),
 })
 
 const keyButtonSchema = z.object({
@@ -463,14 +539,48 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * v17 -> v18 (app 2.5.0) is defaults only (no logic):
  * settings.dictation.{device, interim, vocabulary}; settings.dictation.engine
  * is dropped (zod strips it; the Windows engines are gone).
+ * v18 -> v19 (app 2.7.0): settings.labs.* (defaults only). Later keys of this
+ * same batch (settings.agents.silence.*, workspaces[].panes[].schedules[] with
+ * the cron recurrence) stay on 19.
+ * v19 also has the batch's one real transformation: a console's single
+ * `schedule` becomes `schedules: [{ id: 's1', ...schedule }]` (only while
+ * `schedules` is missing, like snippets) and `schedule` is never carried
+ * forward. By presence, not by version, so it also covers a `schedule` an
+ * older build wrote after a downgrade. That only re-imports what the older
+ * build wrote itself: a 2.6.0 or older build strips `schedules` (zod drops the
+ * unknown key) and its next save loses them, so after a downgrade only
+ * config.json.bak and backups/ still hold them. Idempotent: a second parse
+ * changes nothing.
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)
   if (m.dropped > 0) console.warn(`[config] dropped ${m.dropped} invalid quick command(s)`)
-  let out = m.config
+  let out = migrateSchedules(m.config)
   // configSchema.version is the raw file version, so the flip runs only once.
   if (config.version < 17) {
     out = { ...out, settings: { ...out.settings, notifications: { ...out.settings.notifications, codexEnabled: true } } }
   }
   return { ...out, version: CONFIG_VERSION }
+}
+
+/** A pane as parsed, with the schema <= 18 single schedule (no id yet). */
+type LegacySchedulePane = Pane & { schedule?: Omit<PaneSchedule, 'id'> }
+
+/** The v19 step of migrate(): `pane.schedule` -> `pane.schedules`, by presence. */
+function migrateSchedules(config: ConfigFile): ConfigFile {
+  let changed = false
+  const workspaces = config.workspaces.map((ws) => {
+    if (!ws.panes.some((p) => 'schedule' in p)) return ws
+    changed = true
+    return {
+      ...ws,
+      panes: ws.panes.map((p): Pane => {
+        if (!('schedule' in p)) return p
+        const { schedule, ...rest } = p as LegacySchedulePane
+        if (rest.schedules !== undefined || !schedule) return rest
+        return { ...rest, schedules: [{ id: 's1', ...schedule }] }
+      }),
+    }
+  })
+  return changed ? { ...config, workspaces } : config
 }

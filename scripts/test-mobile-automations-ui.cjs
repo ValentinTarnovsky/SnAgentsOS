@@ -7,7 +7,12 @@
 // the Active switch with its optimistic value and snap back, "Run now" sent
 // once and "Waiting..." while the desktop's run waits, the empty state), the
 // Settings entry, the terminal header's `snaos status` line (else the note)
-// and the Spanish labels without horizontal overflow.
+// and the Spanish labels without horizontal overflow. App 2.7.0 (A10): one
+// card per schedule when a console holds several, a cron card shows its
+// expression, Run now and the switch carry the card's scheduleId, a next run
+// 6 or more days away names its date (and its year in another year, es and
+// en), and an older desktop (no scheduleId, the base fixture) keeps the old
+// ctl shape. App 2.7.0 (E10 B8): a toast the screen raises shows on top of it.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -33,6 +38,8 @@ const $$ = sel => [...document.querySelectorAll(sel)];
 const ptr = (el, type) => el.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: 10, clientY: 10, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0 }));
 const click = el => el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
 const tap = el => { ptr(el, 'pointerdown'); ptr(el, 'pointerup'); click(el) };
+// Whether an element is what a tap at its center would hit (a toast box ignores touches, so it takes them for the probe).
+const onTop = el => { const was = el.style.pointerEvents; el.style.pointerEvents = 'auto'; const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); el.style.pointerEvents = was; return r.width > 0 && !!hit && hit.closest('[data-toast]') === el };
 const ctls = [];
 let ackFor = () => ({ ok: true });
 let release = null;
@@ -116,6 +123,8 @@ window.runMain = async () => {
  ackFor = () => ({ ok: false, error: 'not_found' });
  click(sw('d1')); await frames();
  check(sw('d1').getAttribute('aria-checked') === 'false' && store.getState().toasts.some(t => t.text === 'That automation no longer exists on the PC'), 'a failed ack snaps back with a toast');
+ // App 2.7.0 (E10 B8): the toast shows over the Automations screen that raised it, not only on Home under it.
+ check($$('[data-toast]').some(el => el.textContent === 'That automation no longer exists on the PC' && onTop(el)), 'the toast shows on top of the Automations screen');
  ackFor = () => ({ ok: true });
 
  store.getState().update({ toasts: [] });
@@ -145,6 +154,61 @@ window.runMain = async () => {
  click(row('d1').querySelector('[data-auto-run]')); await frames();
  check(store.getState().toasts.some(t => t.text === 'That automation no longer exists or has no prompt to send'), 'a run refused with no_schedule (gone or an empty prompt) has its own toast');
  ackFor = () => ({ ok: true });
+ check(ctls.every(a => !('scheduleId' in a)), 'an older desktop (no scheduleId in its infos) gets the ctls without one');
+
+ // --- app 2.7.0 (A10): several schedules per console, cron rules ---
+ const cronExpr = '*/30 9-17 * * 1-5';
+ const multi = { ...base, schedules: [
+  { ...base.schedules[0], scheduleId: 's1' },
+  { workspaceId: 'w1', paneId: 'c1', scheduleId: 's2', time: '00:00', recurrence: { kind: 'cron', expr: cronExpr }, cron: cronExpr, dueAt: due.getTime(), enabled: true, waitIdle: true },
+  { ...base.schedules[1], scheduleId: 's1' },
+ ] };
+ setSnap(multi); await frames();
+ const card = (p, s) => $('[data-auto-row=' + p + '][data-auto-schedule=' + s + ']');
+ check(rows().map(e => e.dataset.autoRow + ':' + e.dataset.autoSchedule).join() === 'c1:s1,c1:s2,d1:s1', 'one card per schedule: a console with two shows two, in desktop order');
+ check(card('c1', 's1').querySelector('[data-auto-pane]').textContent === 'Claude' && card('c1', 's2').querySelector('[data-auto-pane]').textContent === 'Claude', 'both cards name the same console');
+ check(card('c1', 's2').querySelector('[data-auto-rec]').textContent === 'Cron: ' + cronExpr && card('c1', 's1').querySelector('[data-auto-rec]').textContent === 'Mon-Fri', 'a cron card shows its expression, not "Once"');
+ setSnap({ ...multi, schedules: multi.schedules.map(s => s.scheduleId === 's2' && s.paneId === 'c1' ? { ...s, cron: undefined } : s) }); await frames();
+ check(card('c1', 's2').querySelector('[data-auto-rec]').textContent === 'Cron: ' + cronExpr, 'the cron recurrence alone (no cron field) also shows the expression');
+ setSnap(multi); await frames();
+ const runOf = (p, s) => card(p, s).querySelector('[data-auto-run]');
+ const swOf = (p, s) => card(p, s).querySelector('[data-auto-toggle]');
+ ackFor = () => 'hold';
+ click(runOf('c1', 's2')); click(runOf('c1', 's2')); await frames();
+ check(ctls.filter(a => a.kind === 'scheduleRun' && a.scheduleId === 's2').length === 1 && JSON.stringify(ctls.at(-1)) === JSON.stringify({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1', scheduleId: 's2' }), 'Run now sends scheduleRun with the card\\'s scheduleId, once: ' + JSON.stringify(ctls.at(-1)));
+ check(runOf('c1', 's2').disabled && !runOf('c1', 's1').disabled, 'only that card spins while its ack is out');
+ release({ ok: true }); await frames();
+ ackFor = () => ({ ok: true });
+ click(swOf('c1', 's2')); await frames();
+ check(JSON.stringify(ctls.at(-1)) === JSON.stringify({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', scheduleId: 's2', enabled: false }), 'the switch sends scheduleToggle with the scheduleId: ' + JSON.stringify(ctls.at(-1)));
+ check(swOf('c1', 's2').getAttribute('aria-checked') === 'false' && swOf('c1', 's1').getAttribute('aria-checked') === 'true', 'switching one schedule leaves the other of the same console alone');
+ setSnap({ ...multi, schedules: multi.schedules.map(s => s.scheduleId === 's2' ? { ...s, enabled: false } : s) }); await frames();
+ check(card('c1', 's2').querySelector('[data-auto-next]').textContent === 'Paused' && card('c1', 's1').querySelector('[data-auto-next]').textContent.startsWith('Next: '), 'the desktop confirms only that schedule as Paused');
+ setSnap({ ...multi, schedules: multi.schedules.map(s => s.scheduleId === 's2' ? { ...s, runPending: true } : s) }); await frames();
+ check(runOf('c1', 's2').textContent === 'Waiting...' && runOf('c1', 's1').textContent === 'Run now', '"Waiting..." only on the schedule whose run waits');
+ const longCron = '0,15,30,45 0,2,4,6,8,10,12,14,16,18,20,22 1,5,9,13,17,21,25,29 jan,mar,may,jul,sep,nov mon,tue,wed,thu,fri';
+ setSnap({ ...multi, schedules: multi.schedules.map(s => s.scheduleId === 's2' ? { ...s, recurrence: { kind: 'cron', expr: longCron }, cron: longCron } : s) }); await frames();
+ check(card('c1', 's2').querySelector('[data-auto-rec]').textContent === 'Cron: ' + longCron && noOverflow(), 'a long cron expression wraps inside 360px');
+ // The next run names its date 6 or more days away (a cron rule can be months
+ // ahead) and its year in another year; a run a day away stays "Mon 09:00".
+ const nextOf = (p, s) => card(p, s).querySelector('[data-auto-next]').textContent;
+ // On New Year's Eve "a day away" lands in the next year, which names its date and year.
+ const nearRe = due.getFullYear() === new Date(now).getFullYear() ? /^Next: [A-Z][a-z]{2} \\d\\d:\\d\\d$/ : /^Next: [A-Z][a-z]{2}, [A-Z][a-z]{2,3} \\d{1,2}, \\d{4}, \\d\\d:\\d\\d$/;
+ check(nearRe.test(nextOf('c1', 's1')) && nextOf('c1', 's1').endsWith(hhmm), 'a run a day away keeps weekday and time: ' + nextOf('c1', 's1'));
+ const at9 = days => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(9, 0, 0, 0); return d };
+ const far = at9(40), nextYear = at9(400);
+ const dateOf = txt => { const m = /^(?:Next|Próxima): \\S+, (?:[A-Z][a-z]{2,3} (\\d{1,2})|(\\d{1,2}) [a-z]{3,4})(?: (\\d{4})|, (\\d{4}))?, 09:00$/.exec(txt); return m && { day: Number(m[1] || m[2]), year: m[3] || m[4] ? Number(m[3] || m[4]) : null } };
+ const want = d => JSON.stringify({ day: d.getDate(), year: d.getFullYear() !== new Date(now).getFullYear() ? d.getFullYear() : null });
+ const dated = { ...multi, schedules: multi.schedules.map(s => s.paneId !== 'c1' ? s : { ...s, dueAt: (s.scheduleId === 's2' ? far : nextYear).getTime() }) };
+ setSnap(dated); await frames();
+ check(JSON.stringify(dateOf(nextOf('c1', 's2'))) === want(far), 'a cron run 40 days away names its day and month: ' + nextOf('c1', 's2'));
+ check(JSON.stringify(dateOf(nextOf('c1', 's1'))) === JSON.stringify({ day: nextYear.getDate(), year: nextYear.getFullYear() }), 'a run in another year names the year too: ' + nextOf('c1', 's1'));
+ check(noOverflow(), 'dated cards fit 360px');
+ setLang('es'); setSnap(JSON.parse(JSON.stringify({ ...dated, language: 'es' }))); await frames();
+ check(/^Próxima: (lun|mar|mié|jue|vie|sáb|dom), \\d{1,2} [a-z]{3,4}( \\d{4})?, 09:00$/.test(nextOf('c1', 's2')) && JSON.stringify(dateOf(nextOf('c1', 's2'))) === want(far), 'es: "Próxima: <día>, <d> <mes>, 09:00": ' + nextOf('c1', 's2'));
+ setLang('en');
+ setSnap(paused); await frames();
+ check(rows().map(e => e.dataset.autoRow).join() === 'c1,d1' && !$('[data-auto-schedule]'), 'back on an older desktop: one card per console, no schedule ids');
 
  // Empty state, then back to Home.
  setSnap({ ...base, schedules: [] }); await frames();
@@ -180,10 +244,11 @@ window.runMain = async () => {
  // --- Spanish ---
  // A real state frame is parsed JSON: every workspace is a new object.
  setLang('es'); setSnap(JSON.parse(JSON.stringify({ ...paused, language: 'es' }))); await frames();
- check($('[data-workspace=w1] [data-ws-task]').textContent === 'En revision', 'es task chip');
+ check($('[data-workspace=w1] [data-ws-task]').textContent === 'En revisión', 'es task chip');
  click($('[data-home-automations]')); await wait(380);
  check(screen().textContent.includes('Automatizaciones') && text('c1', '[data-auto-rec]') === 'Lun-Vie' && text('c1', '[data-auto-next]') === 'Pausada' && text('c1', '[data-auto-last]') === 'Enviado hace 3h', 'es rows: Lun-Vie, Pausada, Enviado hace 3h');
  check(row('c1').querySelector('[data-auto-run]').textContent === 'Probar ahora' && sw('c1').textContent.includes('Activa'), 'es actions: Probar ahora, Activa');
+ check(text('d1', '[data-auto-last]') === 'Nunca se ejecutó', 'es: "Nunca se ejecutó", with its tilde');
  { const wide = $$('body *').filter(e => e.getBoundingClientRect().right > innerWidth + 1).slice(0, 5).map(e => e.tagName + '.' + String(e.className).slice(0, 60)); check(noOverflow(), 'es Automations fits 360px ' + JSON.stringify(wide)) }
  history.back(); await wait(400);
 

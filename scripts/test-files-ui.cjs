@@ -2,8 +2,11 @@
 // the production WorkspaceView with one console on a fake pty, useGlobalKeys,
 // the command palette and fake window.snApi.files / wsNotes over an
 // in-memory folder. Real key events (sendInputEvent) open the drawers, type
-// into CodeMirror and save. Needs `npm run build` first (CSS). No user
-// config, real folder, shell or file is touched.
+// into CodeMirror and save. App 2.7.0 (A9 follow-ups): a dirty tab whose
+// editor mounts again (drawer reopened, tree switched and back) shows and
+// keeps its edits, and the unload stash keeps the entries of a tree not
+// loaded this run. Needs `npm run build` first (CSS). No user config, real
+// folder, shell or file is touched.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
@@ -24,6 +27,7 @@ import {applyTheme} from './src/renderer/themes/applyTheme';
 import {useSidePanels, openNoteInPanel, openSidePanel, closeSidePanel, setSidePanelMaximized} from './src/renderer/lib/sidePanels';
 import {openChangesPanel} from './src/renderer/lib/changesPanel';
 import {useToastStore} from './src/renderer/lib/toast';
+import {showFilesTree, stashUnsaved, useFilesStore} from './src/renderer/lib/filesStore';
 
 const ROOT = 'C:\\fixture\\repo';
 const calls = { writes: [], watch: [], creates: [], noteWrites: [], noteCreates: [], clip: [] };
@@ -186,6 +190,18 @@ window.smoke = {
   // Someone else changed the note on disk (no event yet).
   bumpRev: (id) => { notes[id].rev = 'n' + ++revN },
   toasts: () => useToastStore.getState().items.map((t) => t.title),
+  // The active tab's buffer in the store (app 2.7.0, A9 follow-ups), and the tree the drawer shows.
+  buffer: () => { const s = useFilesStore.getState().byWs.w1; const t = s?.tabs.find((x) => x.rel === s.active); return t ? { rel: t.rel, text: t.text, dirty: t.text !== t.saved } : null },
+  treeKey: () => q('[data-files-tree-key]')?.dataset.filesTreeKey ?? null,
+  showTree: (key) => showFilesTree('w1', key),
+  // A worktree console of another workspace (no grid of its own here): its tree is wsId#paneId.
+  addWorktreeConsole: () => useAppStore.setState((s) => ({ workspaces: [...s.workspaces, { id: 'w9', name: 'Worktree', cwd: ROOT, panes: [{ id: 'pwt', type: 'shell', title: 'WT', icon: 'terminal', cwd: 'C:\\fixture\\wt', worktree: { repoRoot: ROOT, path: 'C:\\fixture\\wt', branch: 'sn/wt-1', base: 'a'.repeat(40) } }] }] })),
+  dropWorktreeConsole: () => useAppStore.setState((s) => ({ workspaces: s.workspaces.filter((w) => w.id !== 'w9') })),
+  // The hot-exit stash (localStorage snagentsos.files.unsaved) and the unload that writes it.
+  setStash: (list) => localStorage.setItem('snagentsos.files.unsaved', JSON.stringify(list)),
+  stashed: () => JSON.parse(localStorage.getItem('snagentsos.files.unsaved') || 'null'),
+  clearStash: () => localStorage.removeItem('snagentsos.files.unsaved'),
+  stash: () => stashUnsaved(),
 };
 `
 
@@ -493,6 +509,34 @@ app.whenReady().then(async()=>{
  await press('E',['control','shift']);
  await until("smoke.drawer()==='files'&&smoke.tabs().some(t=>t[1]==='true')",'the edited tab survived');
  ok(!(await js('smoke.xtermFocused()')),'the reopened drawer has the keyboard');
+ // App 2.7.0 (A9 follow-ups): the editor mounted again shows the buffer, not the text it read from disk, and the next key adds to it.
+ const edited=await js('smoke.buffer()');
+ ok(edited&&edited.rel==='src/app.ts'&&edited.dirty&&edited.text.endsWith('!'),'the store kept the edit '+JSON.stringify(edited));
+ await until('smoke.editorText()==='+JSON.stringify(edited.text.trimEnd()),'the reopened drawer shows the edits, not the disk text');
+ await until('smoke.focusEditor()','the editor of the reopened tab');
+ await press('End',['control']);await type('?');
+ await until('smoke.buffer().text==='+JSON.stringify(edited.text+'?'),'the next key adds to the edits, it never starts over from the disk text');
+ ok(await js("smoke.tabs().find(t=>t[0]==='src/app.ts')[1]==='true'"),'and the tab is still unsaved');
+ // The same across a tree switch (FilesTree key={tree}): to a worktree console's tree and Back.
+ await js('smoke.addWorktreeConsole()');
+ await js("smoke.showTree('w9#pwt')");
+ await until("smoke.treeKey()==='w9#pwt'&&smoke.tabs().length===0&&smoke.rows().length===3",'the drawer switches to the worktree console tree (loaded)');
+ await js("document.querySelector('[data-files-back]').click()");
+ await until("smoke.treeKey()==='w1'&&smoke.tabs().length===2",'Back shows the workspace tree with its tabs');
+ await until('smoke.editorText()==='+JSON.stringify((edited.text+'?').trimEnd()),'after the switch the editor still shows the edits');
+ ok(await js("smoke.tabs().find(t=>t[0]==='src/app.ts')[1]==='true'"),'still unsaved after the switch');
+ await until('smoke.focusEditor()','the editor after the switch');
+ await press('End',['control']);await type('#');
+ await until('smoke.buffer().text==='+JSON.stringify(edited.text+'?#'),'and a key there adds to them');
+ await js('smoke.dropWorktreeConsole()');
+ // Hot exit: the unload keeps the stash of a tree not loaded this run (after this run's buffers, within 2 MB);
+ // a tree loaded this run already took its entries, so its own buffers replace them.
+ const buf=await js('smoke.buffer()');
+ await js("smoke.setStash([{wsId:'w5',rel:'old.ts',text:'de otra corrida\\n',eol:'crlf',bom:true},{wsId:'w1',rel:'src/app.ts',text:'vieja\\n',eol:'lf',bom:false},{wsId:'w9#pwt',rel:'wt.ts',text:'vieja\\n',eol:'lf',bom:false},{wsId:'share:l1',rel:'x.ts',text:'invitado\\n',eol:'lf',bom:false},{wsId:'w6',rel:'big.txt',text:'x'.repeat(1100000),eol:'lf',bom:false},{wsId:'w7',rel:'after.ts',text:'despues\\n',eol:'lf',bom:false}])");
+ await js('smoke.stash()');
+ eq(await js('smoke.stashed()'),[{wsId:'w1',rel:'src/app.ts',text:buf.text,eol:'lf',bom:false},{wsId:'w5',rel:'old.ts',text:'de otra corrida\n',eol:'crlf',bom:true}],'the unload stash: this run first, then the unrestored tree; loaded trees, a share link and what passes 2 MB stay out');
+ ok(buf.text.endsWith('!?#'),'with the buffer as edited across the remounts');
+ await js('smoke.clearStash()');
  pt=await js('smoke.paneTitlePoint()');
  await click(pt.x,pt.y);
  await until('smoke.drawer()===null','a click on the pane title closes the drawer');
@@ -558,7 +602,7 @@ app.whenReady().then(async()=>{
  await press('Escape');
 
  if(failures.length)throw new Error(failures.join('\n'));
- console.log('PASS: '+n+' files and notes drawer UI checks (Ctrl+Shift+E/M, tree, open, type, Ctrl+S with rev, collapse folders, find widget with counter / options / replace / read-only / zoom, CRLF + BOM, agent changes clean and dirty, context menu, autosaved note + preview, snaos notes open (latest wins, never over unsaved edits), one drawer at a time and one per workspace, Esc, palette, no shell shift on open, New console menu over the drawer, close on outside click with pin); screenshots '+__dirname);
+ console.log('PASS: '+n+' files and notes drawer UI checks (Ctrl+Shift+E/M, tree, open, type, Ctrl+S with rev, collapse folders, find widget with counter / options / replace / read-only / zoom, CRLF + BOM, agent changes clean and dirty, context menu, autosaved note + preview, snaos notes open (latest wins, never over unsaved edits), one drawer at a time and one per workspace, Esc, palette, no shell shift on open, New console menu over the drawer, close on outside click with pin, edits kept across editor remounts and tree switches, unload stash merge); screenshots '+__dirname);
  w.destroy();app.quit();
 }).catch((e)=>{console.error(e);app.exit(1)});
 `

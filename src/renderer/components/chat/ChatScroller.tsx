@@ -1,0 +1,262 @@
+/**
+ * The scrolling log of a desktop chat (app 2.7.0, A7), taken out of the share
+ * guest's ChatView (app 2.4.0, item 8, S5) so the console chat reads the same
+ * way. It knows no store and no socket: the rows come in as a `ChatList` with
+ * its loading state, "Load earlier" calls `onMore`, a link calls `onLink`.
+ *
+ *  - A first page (`version` changed) jumps to the end; an older page in
+ *    front keeps the reader where they were; new messages at the end follow
+ *    only a reader already at the end, otherwise they count on the "Go to the
+ *    end (N)" pill.
+ *  - "<agent> is working..." under the last row, the last assistant text in a
+ *    polite live region, expand-all for the tool rows.
+ *  - A page that did not come back shows `texts.noReply` with [Retry].
+ *
+ * Its refs assume one pane per mount: give it a `key` per pane.
+ */
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { ArrowDown, ChevronsDownUp, ChevronsUpDown, Loader2 } from 'lucide-react'
+import { useT } from '@/i18n'
+import { Tooltip } from '@/components/ui/Tooltip'
+import { buildRows, messageText, type ChatList } from './chatModel'
+import { MessageRow } from './MessageRow'
+import { ToolPhaseRow, ToolRunRow, type ExpandAll } from './ToolRunRow'
+
+const FOLLOW_PX = 40
+const JUMP_PX = 200
+
+export type ChatLoad = 'first' | 'more'
+
+/** What the log shows of one pane's chat. */
+export interface ChatScrollerState {
+  list: ChatList
+  loading: ChatLoad | null
+  failed: ChatLoad | null
+  /** Bumped by every first page: the view jumps to the end. */
+  version: number
+}
+
+/** The words that depend on where the chat comes from (the host, this PC). */
+export interface ChatScrollerTexts {
+  /** The log's accessible name. */
+  log: string
+  /** Older messages left out at the memory cap. */
+  capped: string
+  /** A page that did not come back in time (shown with [Retry]). */
+  noReply: string
+  /** Where a cut tool output is whole. */
+  outputCut: string
+}
+
+export interface ChatScrollerProps {
+  /** The `data-chat-view` value. */
+  paneId: string
+  chat: ChatScrollerState
+  /** The agent is working: the row under the last message. */
+  working: boolean
+  /** "Claude" or "Codex". */
+  agent: string
+  /** "Load earlier" and its [Retry]. */
+  onMore: () => void
+  /** [Retry] of a first page that did not come. */
+  onRetryFirst: () => void
+  /** An http/https link of a message, with its full target. */
+  onLink: (href: string) => void
+  texts: ChatScrollerTexts
+}
+
+function reducedMotion(): boolean {
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  } catch {
+    return false
+  }
+}
+
+function Skeleton() {
+  return (
+    <div data-chat-skeleton aria-hidden className="flex flex-col gap-3 px-3 py-2">
+      {[70, 90, 55].map((w, i) => (
+        <div key={i} className="h-9 animate-pulse rounded-card bg-card motion-reduce:animate-none" style={{ width: `${w}%`, marginLeft: i === 1 ? 'auto' : undefined }} />
+      ))}
+    </div>
+  )
+}
+
+function NoReply({ text, onRetry }: { text: string; onRetry: () => void }) {
+  const t = useT()
+  return (
+    <div data-chat-noreply className="flex items-center justify-center gap-2 px-4 py-3 text-xs text-text-secondary">
+      {text}
+      <button type="button" data-chat-retry onClick={onRetry} className="rounded-btn border border-border px-2.5 py-1 text-xs text-text-primary transition-colors hover:bg-card">
+        {t('shareGuest.extras.retry')}
+      </button>
+    </div>
+  )
+}
+
+export function ChatScroller({ paneId, chat, working, agent, onMore, onRetryFirst, onLink, texts }: ChatScrollerProps) {
+  const t = useT()
+  const rows = useMemo(() => buildRows(chat.list.items), [chat.list.items])
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const [showJump, setShowJump] = useState(false)
+  const [newCount, setNewCount] = useState(0)
+  const [expandAll, setExpandAll] = useState<ExpandAll>({ open: false, v: 0 })
+  const atEnd = useRef(true)
+
+  const prev = useRef<{ first: string | null; last: string | null; count: number; version: number; height: number }>({ first: null, last: null, count: 0, version: -1, height: 0 })
+
+  const onScroll = useCallback((): void => {
+    const el = scrollRef.current
+    if (!el) return
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+    atEnd.current = dist <= FOLLOW_PX
+    setShowJump(dist > JUMP_PX)
+    if (atEnd.current) setNewCount(0)
+  }, [])
+
+  const jump = useCallback((): void => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight, behavior: reducedMotion() ? 'auto' : 'smooth' })
+    atEnd.current = true
+    setNewCount(0)
+    setShowJump(false)
+  }, [])
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const items = chat.list.items
+    const first = items[0]?.id ?? null
+    const last = items.at(-1)?.id ?? null
+    const p = prev.current
+    if (chat.version !== p.version) {
+      el.scrollTop = el.scrollHeight
+      atEnd.current = true
+      setNewCount(0)
+      setShowJump(false)
+    } else if (first !== p.first && last === p.last && p.count > 0) {
+      el.scrollTop += el.scrollHeight - p.height
+    } else if (last !== p.last && p.last !== null) {
+      const at = items.findIndex((m) => m.id === p.last)
+      const added = at >= 0 ? items.length - 1 - at : 1
+      if (atEnd.current) el.scrollTop = el.scrollHeight
+      else if (added > 0) setNewCount((n) => n + added)
+    }
+    prev.current = { first, last, count: items.length, version: chat.version, height: el.scrollHeight }
+  }, [chat.list.items, chat.version])
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (el && atEnd.current) el.scrollTop = el.scrollHeight
+    if (el) prev.current.height = el.scrollHeight
+  }, [working])
+
+  const lastAssistant = useMemo(() => {
+    for (let i = chat.list.items.length - 1; i >= 0; i--) {
+      const m = chat.list.items[i]
+      if (m.role === 'assistant') {
+        const text = messageText(m.blocks)
+        if (text) return text.slice(0, 500)
+      }
+    }
+    return ''
+  }, [chat.list.items])
+
+  const list = chat.list
+  const firstLoading = chat.loading === 'first' && list.items.length === 0
+
+  return (
+    <div data-chat-view={paneId} className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={scrollRef}
+        data-chat-scroll
+        role="log"
+        aria-label={texts.log}
+        aria-live="off"
+        onScroll={onScroll}
+        className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-14 pt-2"
+      >
+        {chat.failed === 'more' ? (
+          <NoReply text={texts.noReply} onRetry={onMore} />
+        ) : chat.loading === 'more' ? (
+          <Skeleton />
+        ) : list.capped ? (
+          <div data-chat-capped className="px-4 py-2 text-center text-[11px] text-text-secondary">
+            {texts.capped}
+          </div>
+        ) : !list.done && list.items.length > 0 ? (
+          <div className="flex justify-center py-1">
+            <button
+              type="button"
+              data-chat-load-earlier
+              onClick={onMore}
+              className="rounded-btn border border-border px-3 py-1.5 text-xs font-medium text-text-primary transition-colors hover:bg-card"
+            >
+              {t('shareGuest.chat.loadEarlier')}
+            </button>
+          </div>
+        ) : null}
+
+        {firstLoading && <Skeleton />}
+        {chat.failed === 'first' && <NoReply text={texts.noReply} onRetry={onRetryFirst} />}
+        {!firstLoading && !chat.failed && list.items.length === 0 && list.done && (
+          <div data-chat-empty className="px-4 py-8 text-center text-sm text-text-secondary">
+            {t('shareGuest.chat.empty')}
+          </div>
+        )}
+
+        <div className="flex min-w-0 flex-col gap-3">
+          {rows.map((row) => (
+            <div key={row.id} className="min-w-0" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 64px' }}>
+              {row.kind === 'tools' ? (
+                <ToolRunRow calls={row.calls} expandAll={expandAll} outputCut={texts.outputCut} />
+              ) : row.kind === 'phase' ? (
+                <ToolPhaseRow row={row} expandAll={expandAll} outputCut={texts.outputCut} />
+              ) : (
+                <MessageRow id={row.id} role={row.role} blocks={row.blocks} onLink={onLink} />
+              )}
+            </div>
+          ))}
+        </div>
+
+        {working && (
+          <div data-chat-working className="flex items-center gap-2 px-3 pt-3 text-xs text-text-secondary">
+            <Loader2 size={13} className="animate-spin motion-reduce:animate-none" aria-hidden />
+            {t('shareGuest.chat.working', { agent })}
+          </div>
+        )}
+      </div>
+
+      <div className="sr-only" aria-live="polite" data-chat-announce>
+        {lastAssistant}
+      </div>
+
+      <div className="pointer-events-none absolute bottom-3 right-3 z-10 flex items-center gap-2">
+        {showJump && (
+          <button
+            type="button"
+            data-chat-jump
+            onClick={jump}
+            className="pointer-events-auto flex h-8 items-center gap-1.5 rounded-full border border-border bg-bg-secondary px-3 text-xs font-medium text-text-primary shadow-lg transition-colors hover:bg-card"
+          >
+            <ArrowDown size={13} aria-hidden />
+            {newCount > 0 ? t('shareGuest.chat.jumpEndN', { n: newCount }) : t('shareGuest.chat.jumpEnd')}
+          </button>
+        )}
+        <Tooltip label={expandAll.open ? t('shareGuest.chat.collapseAll') : t('shareGuest.chat.expandAll')} side="left">
+          <button
+            type="button"
+            data-chat-toggle-all={expandAll.open ? 'open' : 'closed'}
+            onClick={() => setExpandAll((s) => ({ open: !s.open, v: s.v + 1 }))}
+            aria-label={expandAll.open ? t('shareGuest.chat.collapseAll') : t('shareGuest.chat.expandAll')}
+            className="pointer-events-auto flex h-8 w-8 items-center justify-center rounded-full border border-border bg-bg-secondary text-text-secondary shadow-lg transition-colors hover:bg-card hover:text-text-primary"
+          >
+            {expandAll.open ? <ChevronsDownUp size={15} /> : <ChevronsUpDown size={15} />}
+          </button>
+        </Tooltip>
+      </div>
+    </div>
+  )
+}

@@ -52,14 +52,48 @@ export type WorktreeProbeRes =
   | { ok: true; repoName: string; head: string; headShort: string }
   | { ok: false; error: 'not_repo' | 'unborn' | 'git_error' }
 
+/** A git operation left half-done in a worktree: deleting it would throw that state away. */
+export type WorktreeInProgress = 'rebase' | 'merge' | 'cherry-pick' | 'revert' | 'bisect'
+
 /** `git:worktreeInspect` (amendment): the close dialog (FR-30) and the missing card (FR-36). */
 export interface WorktreeInspectRes {
   exists: boolean
   dirtyFiles: number
+  /** With the folder gone and the branch alive, these two are read in the repo from `tip`. */
   commitsAhead: number
   mergedIntoHead: boolean
   /** Set when git could not read the state (status or rev-list failed, base unknown): treat it as work that may be lost. */
   incomplete?: true
+  /**
+   * Only alongside `incomplete`: git status did answer, so `dirtyFiles` is a
+   * real count (the gap was elsewhere: rev-list, an unknown base...) and the
+   * delete still sends it as `expectDirty`. Absent with `incomplete`: the
+   * count is unknown and is not sent (main then does not re-count files).
+   */
+  dirtyRead?: true
+  /**
+   * Only alongside `exists` and `incomplete`: the folder is on disk but git no
+   * longer reads it as its own checkout (its `.git` went: a delete that stopped
+   * half-way, 'busy', or one by hand). Nothing in it can be counted, so it is
+   * never "gone": the delete asks for the checkbox and sends `ackIncomplete`.
+   * A console does not start there (the missing card shows, as for a gone folder).
+   */
+  noCheckout?: true
+  /**
+   * Full sha the recorded branch points at (the worktree HEAD when main has no
+   * record), also for a folder deleted by hand. Sent back as `expectTip`.
+   */
+  tip?: string
+  /** Branch checked out in the folder ('sn/<slug>'), '' when HEAD is detached. Absent when unknown or the folder is gone. */
+  headBranch?: string
+  /** A rebase, merge, cherry-pick, revert or bisect left half-done in the folder. */
+  inProgress?: WorktreeInProgress
+  /**
+   * Commits the repo HEAD (the main checkout's, as for `mergedIntoHead`) has
+   * that `tip` lacks: `rev-list --count <tip>..HEAD` (app 2.7.0, A9, "main -N").
+   * Only for a folder on disk that main manages; absent when unknown.
+   */
+  behindMain?: number
 }
 
 /** `git:worktreeRemove`: the renderer sends the path and the pane, main completes the rest from its manifest. */
@@ -67,11 +101,38 @@ export interface WorktreeRemoveReq {
   path: string
   paneId?: string
   deleteBranch: boolean
+  /**
+   * `tip` of the inspect the user saw. Main deletes the branch only while it
+   * still points there (compare-and-delete); a moved tip is 'changed'.
+   */
+  expectTip?: string
+  /**
+   * `dirtyFiles` of that inspect, whenever git status was read (also when the
+   * inspect was `incomplete` for another reason, see `dirtyRead`): more
+   * uncommitted files once the pty is gone is 'changed'.
+   */
+  expectDirty?: number
+  /**
+   * The user ticked "may lose work" on an `incomplete` inspect. Main needs it
+   * to delete a folder git no longer reads as its own checkout (`noCheckout`)
+   * that its own half-done delete in this session did not leave: nothing there
+   * can be re-counted, so without it the answer is 'changed'/'unreadable'.
+   */
+  ackIncomplete?: boolean
 }
 
-export type WorktreeRemoveError = 'not_managed' | 'unlink_failed' | 'busy' | 'git_error'
+/**
+ * 'changed': the worktree moved on since the inspect the caller sent (tip,
+ * new uncommitted files, an operation started) or, with neither expectation,
+ * the delete would lose work nobody confirmed. Nothing was deleted, except
+ * when the detail is 'tip_after_delete' (the folder went, the branch stayed).
+ * 'shared' (app 2.7.0, A9): another console of the saved config still runs
+ * in the folder ("New console in this worktree"); nothing was killed or
+ * deleted, `users` says how many.
+ */
+export type WorktreeRemoveError = 'not_managed' | 'unlink_failed' | 'busy' | 'git_error' | 'changed' | 'shared'
 
-export type WorktreeRemoveRes = { ok: true } | { ok: false; error: WorktreeRemoveError; detail?: string }
+export type WorktreeRemoveRes = { ok: true } | { ok: false; error: WorktreeRemoveError; detail?: string; users?: number }
 
 /** One row of Settings > Git > Worktrees (FR-31). `repoRoot`/`base` let "Open a console here" rebuild `pane.worktree`. */
 export interface WorktreeListEntry {
@@ -85,6 +146,11 @@ export interface WorktreeListEntry {
   exists: boolean
   repoRoot?: string
   base?: string
+  /**
+   * app 2.7.0 (E10 B4, decision 63): the worktree of a team task. Settings > Git never offers it as an orphan
+   * and `git:worktreeRemove` answers 'busy' (detail 'team') for it; removing the team makes it an ordinary row.
+   */
+  teamOwned?: true
 }
 
 export interface WorktreeListRes {

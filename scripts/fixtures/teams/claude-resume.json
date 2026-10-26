@@ -1,0 +1,1 @@
+{ "steps": [{ "fixture": "claude-resume.jsonl", "rewriteSession": true }] }

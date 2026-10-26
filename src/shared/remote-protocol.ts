@@ -5,8 +5,9 @@
  * Pure types only - no zod, no Node, no DOM - because this file is bundled
  * into three targets: main, renderer and the mobile web client. Runtime
  * validation schemas live in remote-protocol-schemas.ts (main-only). It may
- * import only types.ts, git-types.ts, chat-types.ts, ws-notes.ts and
- * agentTune.ts, all import-free of Node and DOM.
+ * import only types.ts, git-types.ts, chat-types.ts, ws-notes.ts,
+ * agentTune.ts, claude-accounts.ts, toolActivity.ts, failure.ts and
+ * team-protocol.ts, all import-free of Node and DOM.
  */
 import type {
   AgentProvider,
@@ -15,6 +16,10 @@ import type {
   ClaudePaneState,
   KeyButton,
   Language,
+  PaneContext,
+  PaneNeeds,
+  PanePlan,
+  PaneSilence,
   PaneType,
   QuickCommand,
   RemotePending,
@@ -25,10 +30,13 @@ import type {
   WorkspaceTaskState,
 } from './types'
 import type { GitArea, GitDiffHunk, GitFileEntry, RemoteGitChip } from './git-types'
-import type { ChatMessage } from './chat-types'
+import type { ChatFrameNotice, ChatMessage } from './chat-types'
 import type { WsNoteError, WsNoteMeta } from './ws-notes'
 import type { TuneSet } from './agentTune'
 import type { ClaudeAccountRole, UsageActiveAccount } from './claude-accounts'
+import type { ToolFamily } from './toolActivity'
+import type { FailureInfo } from './failure'
+import type { PhoneTeamRequest, TeamCtlAction, TeamReply, TeamScope } from './team-protocol'
 
 export type { RemotePending, RemoteGitChip }
 
@@ -94,6 +102,31 @@ export interface RemotePaneStatus {
    * validated menu (or an older desktop).
    */
   menu?: RemotePaneMenu
+  // --- app 2.7.0 (A3); absent = none, or an older desktop ---
+  /** Family of the newest tool still open (`activity` is its summary). */
+  toolFamily?: ToolFamily
+  /** Why the last turn failed (`until` only for a limit with a known reset); cleared by the next `working`. */
+  failure?: FailureInfo
+  /** A working agent with no signal since `since`: `quiet` after quietMin, `stalled` after stalledMin. */
+  silence?: PaneSilence
+  /** Open `snaos needs` request (text <= NEEDS_TEXT_MAX, one line): attention without `pending`. */
+  needs?: PaneNeeds
+  /** Muted by the user until the effective state changes. Main publishes only `true`; absent = not muted (or an older desktop). */
+  muted?: boolean
+  /**
+   * App 2.7.0 (A3): minimal status of a console with no agent track that only
+   * carries `needs`; the phone shows the request and no agent state. Absent =
+   * a real status (or an older desktop).
+   */
+  bare?: true
+  /**
+   * App 2.7.0 (A4): how full the agent's context is (ConsoleLedger), always
+   * an estimate; `exact` for Codex, approximate for Claude. Refreshed once per
+   * turn for Claude (its done) and on every model call for Codex
+   * (thread/tokenUsage/updated), always inside the detail throttle. The token
+   * and cost `usage` stays on the desktop. Absent = unknown.
+   */
+  context?: PaneContext
 }
 
 /** app 2.4.0: RemotePaneStatus.menu. */
@@ -154,17 +187,32 @@ export interface RemoteWorkspaceInfo {
 
 /**
  * E8-FR-32 (v3.1, R31-00): one console schedule as the phone's Automations
- * section shows it. Read-only mirror of `pane.schedule` with the absent
- * fields resolved; it never carries the prompt text (the phone can only
- * toggle it and run it now, never edit it).
+ * section shows it. Read-only mirror of one entry of `pane.schedules` with
+ * the absent fields resolved; it never carries the prompt text (the phone can
+ * only toggle it and run it now, never edit it). App 2.7.0: one info per
+ * schedule, so a console with several sends several.
  */
 export interface RemoteScheduleInfo {
   workspaceId: string
   paneId: string
-  /** "HH:MM" wall-clock time the user picked, on the desktop clock. */
+  /**
+   * App 2.7.0: the schedule's id within the pane (`s1`..`s999`), echoed in
+   * scheduleRun / scheduleToggle. Absent = an older desktop (one per console).
+   */
+  scheduleId?: string
+  /** "HH:MM" wall-clock time the user picked, on the desktop clock (not used by a `cron` rule). */
   time: string
-  /** Repeat rule; an absent `recurrence` travels as `{ kind: 'once' }`. */
+  /**
+   * Repeat rule; an absent `recurrence` travels as `{ kind: 'once' }`. A
+   * `cron` rule travels as is, and also in `cron` below.
+   */
   recurrence: ScheduleRecurrence
+  /**
+   * App 2.7.0: the cron expression of a `cron` rule (the same text as
+   * `recurrence.expr`), absent otherwise. A phone older than 2.7.0 reads
+   * neither and shows the rule as a one-shot.
+   */
+  cron?: string
   /** Epoch ms of the next run (desktop clock). Meaningless while `enabled` is false. */
   dueAt: number
   /** The Active switch (`schedule.enabled`, absent = true). */
@@ -201,6 +249,8 @@ export interface RemoteUsageRow {
   status: 'ok' | 'expired' | 'error' | 'nodata' | 'loading'
   /** True when the desktop is holding the last good value through a failed poll. */
   stale?: boolean
+  /** Custom rows whose transcript scan has not caught up yet (the phone does not show it). */
+  partial?: boolean
 }
 
 /** Snapshot of the desktop's live usage bars, mirrored to the phone. */
@@ -261,7 +311,8 @@ export interface RemoteStateSnapshot {
   mountedWorkspaceIds?: string[]
   /**
    * E8-FR-32 (v3.1, R31-00): every console with a schedule, in sidebar order
-   * (workspaces, then panes). Absent = an older desktop; `[]` = none.
+   * (workspaces, then panes; app 2.7.0: then the pane's schedules in their
+   * stored order). Absent = an older desktop; `[]` = none.
    */
   schedules?: RemoteScheduleInfo[]
 }
@@ -370,14 +421,16 @@ export type RemoteCtlAction =
    * stored prompt). Idempotent while a run waits (ack ok, `info: 'pending'`).
    * Ack errors: not_found (pane outside workspaceId), no_schedule (no
    * schedule or an empty prompt), rate (per-session bucket, E3-FR-03).
+   * App 2.7.0: `scheduleId` names one of the pane's schedules (an unknown id
+   * is no_schedule); absent = the pane's first schedule (an older phone).
    */
-  | { kind: 'scheduleRun'; workspaceId: string; paneId: string }
+  | { kind: 'scheduleRun'; workspaceId: string; paneId: string; scheduleId?: string }
   /**
    * The Active switch: pauses without deleting; turning it on re-arms the
    * next run like the desktop switch. Ack errors: not_found, no_schedule,
-   * rate.
+   * rate. `scheduleId` as in scheduleRun.
    */
-  | { kind: 'scheduleToggle'; workspaceId: string; paneId: string; enabled: boolean }
+  | { kind: 'scheduleToggle'; workspaceId: string; paneId: string; enabled: boolean; scheduleId?: string }
   // --- app 2.3.0: model, effort and Ultracode from the phone ---
   /**
    * One allowlisted slash command (tuneCommand) into the agent console:
@@ -411,6 +464,44 @@ export type RemoteCtlAction =
    * denied, rate. The phone sends it only to a desktop >= 2.4.0.
    */
   | { kind: 'answerMenu'; paneId: string; pendingId: string; n: number; label: string }
+  // --- app 2.7.0 (A3): status marks, handled in main ---
+  /**
+   * Mark a done / error console read from the phone (the desktop's "Marcar
+   * leido"). Handled in main (SessionManager.handleCtl -> StatusManager);
+   * never relayed. Acks: not_found (unknown console, or neither done nor
+   * error), denied, rate. The phone sends it only to a desktop >= 2.7.0.
+   */
+  | { kind: 'markRead'; paneId: string }
+  /**
+   * Mute the console until its effective state changes (`muted: false` lifts
+   * it). Handled in main; never relayed. Acks: not_found (unknown console),
+   * denied, rate. The phone sends it only to a desktop >= 2.7.0.
+   */
+  | { kind: 'mutePane'; paneId: string; muted: boolean }
+  /**
+   * Ignore the silence (quiet / stalled) of the rest of this turn, shown or
+   * not yet; the next turn is watched again. Handled in main; never relayed.
+   * Acks: not_found (unknown or title-only console), denied, rate. The phone
+   * sends it only to a desktop >= 2.7.0.
+   */
+  | { kind: 'silenceAck'; paneId: string }
+  // --- app 2.7.0 (E10 B8): Teams decisions from the phone, handled in main ---
+  /**
+   * `teamDecide` (approve or reject an approval), `teamAnswer` (answer a card)
+   * and `teamDispatch` (dispatch or drop a "Por despachar" item, or `all`), the
+   * shapes of team-protocol.ts. Handled in main (SessionManager.handleCtl ->
+   * TeamService with origin `phone`); never relayed. The ack's `error` is the
+   * op's TeamError code; a conflict names its reason after a colon and so does
+   * a detail the phone has words for: not_found (unknown team, approval, card
+   * or item), `conflict:already_decided` (the PC or another phone decided
+   * first), `conflict:stale`, disabled (Labs off), untrusted, bad_request (an
+   * integrate approval: only the PC lands it), `bad_request:nothingToGrant` (a
+   * permission with no rule left to grant), forbidden (a hire approval, or a
+   * PC-only card action: resumeTeam, killOrphan), denied, rate, io, and any
+   * other TeamError of the op as it is. Never any text. The phone sends them
+   * only to a desktop >= 2.7.0.
+   */
+  | TeamCtlAction
 
 // --- Git API for the phone's Changes screen (E7-FR-22..26) ---
 
@@ -493,6 +584,32 @@ export interface RemoteNotesReply {
   current?: RemoteNote
 }
 
+// --- Full ExitPlanMode plan for the phone (app 2.7.0, A3) ---
+
+/** The request half of `planReq`: a console's plan by request id, or its newest one. */
+export interface RemotePlanRequest {
+  paneId: string
+  requestId?: string
+}
+
+/**
+ * Why a `planRes` carries no plan. `not_found`: unknown console or no plan
+ * for it; `rate`: over PLAN_REQ_MAX per window or PLAN_REQ_IN_FLIGHT waiting.
+ * `unsupported` never travels: the phone answers it to itself for a desktop
+ * older than 2.7.0, which would strike an unknown frame.
+ */
+export type RemotePlanError = 'not_found' | 'rate' | 'unsupported'
+
+/**
+ * The answer half of `planRes`, < 40KB once framed: main cuts `plan.text`
+ * further when its JSON would not fit (then `truncated: true`).
+ */
+export interface RemotePlanReply {
+  ok: boolean
+  plan?: PanePlan
+  error?: RemotePlanError
+}
+
 // --- Client -> server messages ---
 
 export type RemoteClientMsg =
@@ -518,6 +635,13 @@ export type RemoteClientMsg =
   | ({ v: number; type: 'gitReq'; id: string } & RemoteGitRequest)
   /** v2.2 (E9): the workspace's .md notes; answered by `notesRes` with the same id. */
   | ({ v: number; type: 'notesReq'; id: string } & RemoteNotesRequest)
+  /** app 2.7.0 (A3): the full plan of an ExitPlanMode request; answered by `planRes` with the same id. */
+  | ({ v: number; type: 'planReq'; id: string } & RemotePlanRequest)
+  /**
+   * app 2.7.0 (E10 B8): one Teams request (a PHONE_TEAM_OPS op), answered by
+   * `teamRes` with the same id. Sent only to a desktop >= 2.7.0.
+   */
+  | { v: number; type: 'teamReq'; id: string; req: PhoneTeamRequest }
   // --- E3 M12 Chat view (R30-05) ---
   /** E3-FR-25: read the pane as a chat; answered by a first `chatPage`. */
   | { v: number; type: 'chatSub'; paneId: string }
@@ -625,12 +749,46 @@ export type RemoteServerMsg =
   | ({ v: number; type: 'notesRes'; id: string } & RemoteNotesReply)
   /** v2.2 (E9): a note of the workspace changed on the PC or on another phone. */
   | { v: number; type: 'notesChanged'; workspaceId: string; noteId?: string }
+  /** app 2.7.0 (A3): the answer to one `planReq`, < 40KB. */
+  | ({ v: number; type: 'planRes'; id: string } & RemotePlanReply)
+  /**
+   * app 2.7.0 (E10 B8): the answer to one `teamReq`, the desktop's TeamReply
+   * of that op as it may leave the PC, <= TEAM_FRAME_MAX_BYTES (48KB) once
+   * framed (main's phoneFit): every text masked like the desktop's run rows
+   * (live tokens, credentials); no desktop path nor desktop-only field (a
+   * `list` item is a PhoneTeamListItem, a task worktree has no `path`, a
+   * conflict no `current`); a task body past TEAM_PHONE_BODY_MAX and a plan
+   * past TEAM_PHONE_PLAN_MAX cut (`truncated`), a hire diff to
+   * TEAM_PHONE_HIRE_LINES lines (`diff.truncated`); task comments, the Lead
+   * thread and a run page keep their newest rows with the cursor at the oldest
+   * one kept (`truncated.comments` counts the comments left for "Ver
+   * anteriores"); a board page of a column holds what fits, its cursor pages
+   * the rest (a page without a column that does not fit comes cut, `cursor`
+   * null and `done` false: the phone pages by column). `too_big`: it still did
+   * not fit (never expected). `rate`: over TEAM_REQ_MAX per TEAM_REQ_WINDOW_MS
+   * or TEAM_REQ_IN_FLIGHT waiting.
+   */
+  | { v: number; type: 'teamRes'; id: string; res: TeamReply }
+  /**
+   * app 2.7.0 (E10 B8): a team changed on the PC (or by another phone). The
+   * first change of a team goes out at once, the ones within 500 ms of it as
+   * one at the end of that window: the newest `rev` (the team runtime rev),
+   * every scope; `taskId` with the `task` scope and `runId` with `run` only
+   * when every merged change named the same one (absent: any task or run of
+   * the team). Only a hint: the phone reloads what it shows through `teamReq`.
+   */
+  | { v: number; type: 'teamChanged'; teamId: string; rev: number; scopes?: TeamScope[]; taskId?: string; runId?: string }
   /**
    * E3-FR-26/30/33: a page of the pane's chat, oldest first, <= 48KB. One that
    * arrives without a chatMore pending is a first page and replaces the list
    * (reset after /clear, a resume or a truncated file). `cursor` = byte offset
    * of its first line (null with nothing before); a lone notice block = no chat.
+   * app 2.7.0 (A7): optional `notice` (ChatFrameNotice), see chatAppend.
    */
-  | { v: number; type: 'chatPage'; paneId: string; items: ChatMessage[]; cursor: string | null; done: boolean }
-  /** E3-FR-30: messages written to the transcript since, <= 48KB per frame. */
-  | { v: number; type: 'chatAppend'; paneId: string; items: ChatMessage[] }
+  | { v: number; type: 'chatPage'; paneId: string; items: ChatMessage[]; cursor: string | null; done: boolean; notice?: ChatFrameNotice }
+  /**
+   * E3-FR-30: messages written to the transcript since, <= 48KB per frame.
+   * app 2.7.0 (A7): `notice: 'paused'` on an empty one = the PC closed this
+   * chat's watcher for another one; nothing more comes until a new chatSub.
+   */
+  | { v: number; type: 'chatAppend'; paneId: string; items: ChatMessage[]; notice?: ChatFrameNotice }

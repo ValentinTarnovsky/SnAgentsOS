@@ -241,7 +241,11 @@ export interface RemoteState {
    * memory only: the next open, the toggle or a precise status try Chat again.
    */
   chatRefused: Record<string, true>
-  /** The pane this phone reads as Chat on the desktop (chatSub sent, xterm stream paused). */
+  /**
+   * The pane this phone reads as Chat on the desktop (xterm stream paused).
+   * Usually a chatSub was sent; a chat the PC paused (app 2.7.0) keeps this
+   * after a reconnect without a new chatSub until the user taps Reanudar.
+   */
   chatPaneId: string | null
 
   /** Merge a partial state (used by the client for machine transitions). */

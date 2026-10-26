@@ -52,7 +52,8 @@ export function ConfirmDialog({
       <div className="relative z-10 w-full max-w-sm overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]">
         <div className="p-5">
           <h2 className="text-sm font-semibold text-text-primary">{title}</h2>
-          <p className="mt-2 text-sm text-text-secondary">{message}</p>
+          {/* break-words: a long word (a link a team agent wrote, a path) wraps instead of being cut by the card. */}
+          <p className="mt-2 break-words text-sm text-text-secondary">{message}</p>
         </div>
         <div className="flex justify-end gap-2 border-t border-border bg-bg-secondary/40 px-5 py-3">
           <button

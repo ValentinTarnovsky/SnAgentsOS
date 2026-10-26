@@ -1,12 +1,14 @@
 /**
  * One workspace on Home (E2-FR-04, 09, 15, 50). The header shows the chevron,
- * the name, how many consoles it has, a red badge with the ones in action
- * (visible while collapsed too), the "On the PC" chip when it is the desktop's
+ * the name, how many consoles it has, a red badge with the ones that need the
+ * user (app 2.7.0: the desktop sidebar badge's rule, src/shared/attention.ts;
+ * visible while collapsed too), the "On the PC" chip when it is the desktop's
  * active workspace, the task state chip (amber while in review) and the
  * workspace note on one truncated line under the name (E8-FR-11, v3.1), the
- * git chip under that (a tap opens Changes, E3-FR-52) and a kebab. A tap on the header collapses or expands it (persisted in snagentsos.home.collapsed;
- * everything starts expanded). Rows follow homeRows: action > error > unread
- * done > working > the rest, layoutOrder inside each rank.
+ * git chip under that (a tap opens Changes, E3-FR-52) and a kebab (its sheet,
+ * with "Mark all read" on a desktop >= 2.7.0, lives in HomeScreen). A tap on the header collapses or expands it (persisted in snagentsos.home.collapsed;
+ * everything starts expanded). Rows follow homeRows: action (or a `snaos
+ * needs`) > error > unread done > working > the rest, layoutOrder inside each rank.
  */
 import { memo, type ReactNode } from 'react'
 import { clsx } from 'clsx'

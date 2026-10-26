@@ -11,7 +11,9 @@ import { navInputFrom, workspaceAgents, type NavInput } from './agentNav'
  *
  * Smart order (E5-FR-22, `settings.agents.sidebarSort: 'smart'`): inside each
  * group, workspaces go by their most demanding agent console (the palette's
- * urgency rank, ties by how long it has been in that state); workspaces
+ * urgency rank, ties by how long it has been in that state; app 2.7.0: a
+ * `snaos needs` not muted ranks first, as workspaceAgents applies the shared
+ * "needs you" rule of src/shared/attention.ts); workspaces
  * without agents keep their manual order after them. While the pointer is
  * over the sidebar or the keyboard focus is inside it, the order is frozen
  * (`frozen`), so a row never jumps away from under the user.

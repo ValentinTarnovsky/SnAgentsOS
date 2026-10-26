@@ -36,7 +36,7 @@ export function skillStub(appVersion: string): string {
   return [
     '---',
     `name: ${BRAND.skillDir}`,
-    `description: Drive ${BRAND.productName} consoles with the ${BRAND.cliBin} CLI. Use when the user asks to open another console or agent, hand work to Codex or Claude in another console, see what another console is doing or read its chat, read or wait for another console, manage the workspace notes, consoles or workspaces, check the Claude or Codex usage, switch the Claude account, or be notified when something finishes ("otra consola", "pasale esto a codex", "abri un agente nuevo", "avisame cuando termine", "mira que esta haciendo la consola", "lee la consola de codex", "fijate en la otra consola", "anota esto en las notas del workspace", "reinicia esa consola", "cuanto uso me queda", "cambia de cuenta de claude").`,
+    `description: Drive ${BRAND.productName} consoles with the ${BRAND.cliBin} CLI. Use when the user asks to open another console or agent, hand work to Codex or Claude in another console, see what another console is doing or read its chat, read or wait for another console, manage the workspace notes, consoles or workspaces, check the Claude or Codex usage, switch the Claude account, or be notified when something finishes ("otra consola", "pasale esto a codex", "abri un agente nuevo", "avisame cuando termine", "mira que esta haciendo la consola", "lee la consola de codex", "fijate en la otra consola", "anota esto en las notas del workspace", "reinicia esa consola", "cuanto uso me queda", "cambia de cuenta de claude"). Also use it to flag that the user has to do or decide something while you keep working ("avisame si necesitas algo"). Inside a team run it covers snaos team too (the board, tasks, comments, the code changes and history of a task, and the Lead).`,
     '---',
     `<!-- managed-by: ${BRAND.packageName} v${appVersion} -->`,
     `# ${BRAND.productName} CLI`,
@@ -120,7 +120,8 @@ export function repairSkill(target: SkillTarget, appVersion: string, env: NodeJS
  * Startup refresh (E8-FR-21): an installed stub of another version is
  * rewritten, for Claude and for Codex alike; nothing is ever installed on its
  * own. One status per target, in SKILL_TARGETS order; a failure on one agent's
- * folder never stops the other.
+ * folder never stops the other. Only a packaged app calls it (CliService.init,
+ * 2.7.0): an unpackaged run would stamp the user's stubs with Electron's version.
  */
 export function refreshSkillOnStartup(appVersion: string, env: NodeJS.ProcessEnv = process.env): SkillStatus[] {
   return SKILL_TARGETS.map((target) => {

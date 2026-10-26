@@ -921,7 +921,51 @@ async function main() {
     assert.deepStrictEqual([...dels.map(i => block[i])], [`DeleteRegKey SHCTX "${rel(keys.folder)}"`, `DeleteRegKey SHCTX "${rel(keys.background)}"`]); checks++
   }
 
-  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices, pty lifecycle, update state, settings search, key chips, wizard keys, open requests, Explorer menu)`)
+  // --- fuzzyRank (app 2.7.0, A2; the palette ranks with it in A6) -------------
+  {
+    const { rankMatch: rm, rankList, foldSearchText } = load('src/shared/fuzzyRank.ts')
+    // Each rank.
+    check(rm('settings', 'Settings') === 4 && rm('Claude Code', 'claude code') === 4, 'exact (any case) scores 4')
+    check(rm('sett', 'Settings') === 3 && rm('code', 'Claude Code') === 3 && rm('uno', 'Consola: Claude · Uno') === 3 && rm('main', 'feat/main') === 3, 'prefix of the text or of a word scores 3')
+    check(rm('ings', 'Settings') === 2 && rm('ude', 'Consola: Claude') === 2 && rm('set', 'Reset view') === 2, 'substring scores 2 (a match inside a word is not a prefix)')
+    check(rm('stgs', 'Settings') === 1 && rm('wkspc', 'Nuevo workspace') === 1, 'subsequence of a 4+ character term scores 1')
+    check(rm('stg', 'Settings') === 0 && rm('nws', 'Nuevo workspace') === 0, 'a subsequence of a term shorter than 4 is rejected')
+    check(rm('xyzw', 'Settings') === 0 && rm('settingsx', 'Settings') === 0 && rm('a', '') === 0, 'no match scores 0')
+    // Accents and case.
+    check(rm('configuracion', 'Configuración') === 4 && rm('CONFIGURACIÓN', 'configuracion') === 4 && rm('nino', 'Niño') === 4, 'accents and case are ignored both ways')
+    check(rm('pájaro', 'El pajaro voló') === 3 && rm('volo', 'El pájaro voló') === 3 && rm('accion', 'Requiere tu intervención o acción') === 3, 'accented words match as words')
+    check(foldSearchText('  Árbol   Ñandú ') === 'arbol nandu', 'folding: lower case, no accents, single spaces, trimmed')
+    // Several terms: all must match, the score is the lowest; the whole query equal to the text is exact.
+    check(rm('claude code', 'Claude Code') === 4 && rm('  claude   code ', 'Claude  Code') === 4, 'a multi-term query equal to the text is exact (spaces collapsed)')
+    check(rm('code claude', 'Claude Code') === 3, 'terms match in any order (both prefixes: 3)')
+    check(rm('cla ode', 'Claude Code') === 2 && rm('clde code', 'Claude Code') === 1, 'the score is the lowest term (prefix + substring = 2, subsequence + prefix = 1)')
+    check(rm('claude zzz', 'Claude Code') === 0 && rm('clde cd', 'Claude Code') === 0, 'one term that does not match gives 0 (a short subsequence included)')
+    // Empty query.
+    check(rm('', 'anything') === 4 && rm('   ', '') === 4 && rm(undefined, 'x') === 4, 'an empty query matches everything with 4')
+
+    // rankList: score desc, then input order; 0 dropped.
+    const labels = ['Reset view', 'Settings', 'Asset folder', 'Open settings', 'Sxexxt', 'Settings']
+    const ranked = rankList(labels.map((label, i) => ({ label, i })), 'set', (x) => x.label)
+    check(ranked.map(x => x.i).join() === '1,3,5,0,2', 'rankList: prefixes (3) first, then substrings (2), each in input order; no match dropped (got ' + ranked.map(x => x.i).join() + ')')
+    const many = Array.from({ length: 50 }, (_, i) => 'item ' + i)
+    check(rankList(many, 'item', (x) => x).join() === many.join(), 'rankList is stable across 50 equal scores')
+    const all = rankList(labels, '  ', (x) => x)
+    check(all.join() === labels.join() && all !== labels, 'an empty query returns every item in order (a copy)')
+    check(rankList([], 'x', (x) => x).length === 0, 'no items, no rows')
+    // Several texts per item: the best one counts; empty texts are skipped.
+    const cmds = [
+      { id: 'a', label: 'Consola: Claude · Uno', search: 'fix login bug' },
+      { id: 'b', label: 'Login', search: undefined },
+      { id: 'c', label: 'Consola: Codex · Dos', search: null },
+      { id: 'd', label: 'Tema: Login azul', search: '' },
+    ]
+    const texts = (c) => [c.label, c.search]
+    check(rankList(cmds, 'login', texts).map(c => c.id).join() === 'b,a,d', 'several texts: the best one counts (exact label 4, then the word prefixes in input order)')
+    check(rankList(cmds, 'fix login', texts).map(c => c.id).join() === 'a', 'every term has to match inside one text')
+    check(rankList(cmds, 'dos', texts).map(c => c.id).join() === 'c', 'null and empty texts are skipped')
+  }
+
+  console.log(`PASS: ${checks} desktop comfort checks (toast stack, revealPane, in-app agent cards, phone notices, pty lifecycle, update state, settings search, key chips, wizard keys, open requests, Explorer menu, fuzzy ranking)`)
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })

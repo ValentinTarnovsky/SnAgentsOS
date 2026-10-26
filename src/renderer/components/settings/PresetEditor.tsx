@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { FolderOpen, Plus } from 'lucide-react'
 import type { AgentPreset, PaneType } from '@shared/types'
+import { parsePresetEnvText, presetEnvToText } from '@shared/presetEnv'
 import { ICON_NAMES, iconFor } from '@/lib/icons'
 import { useT } from '@/i18n'
 import { cn } from '@/lib/cn'
@@ -11,25 +12,6 @@ const TYPES: PaneType[] = ['shell', 'claude', 'codex', 'custom']
 const inputCls =
   'h-9 w-full rounded-btn border border-border bg-bg-secondary px-3 text-sm text-text-primary outline-none transition-colors focus:border-accent-violet focus:ring-2 focus:ring-[rgba(99,102,241,0.25)]'
 const labelCls = 'mb-1 block text-xs font-medium text-text-secondary'
-
-function envToText(env?: Record<string, string>): string {
-  if (!env) return ''
-  return Object.entries(env)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n')
-}
-
-function parseEnv(text: string): Record<string, string> | undefined {
-  const out: Record<string, string> = {}
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    const eq = trimmed.indexOf('=')
-    if (eq <= 0) continue
-    out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim()
-  }
-  return Object.keys(out).length ? out : undefined
-}
 
 export function PresetEditor({
   initial,
@@ -45,7 +27,7 @@ export function PresetEditor({
   const [type, setType] = useState<PaneType>(initial.type)
   const [command, setCommand] = useState(initial.command)
   const [args, setArgs] = useState(initial.args.join(' '))
-  const [envText, setEnvText] = useState(envToText(initial.env))
+  const [envText, setEnvText] = useState(presetEnvToText(initial.env))
   const [defaultCwd, setDefaultCwd] = useState(initial.defaultCwd ?? '')
   const [color, setColor] = useState(initial.color)
   const [icon, setIcon] = useState(initial.icon)
@@ -62,7 +44,7 @@ export function PresetEditor({
       type,
       command: command.trim(),
       args: args.trim() ? args.trim().split(/\s+/) : [],
-      env: parseEnv(envText),
+      env: parsePresetEnvText(envText),
       color,
       icon,
       defaultCwd: defaultCwd.trim() || undefined,

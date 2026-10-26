@@ -57,6 +57,23 @@ export function posixShim(t: ShimTarget): string {
   ].join('\n')
 }
 
+/**
+ * App 2.7.0 (Teams, spike S9): the extensionless `snaos` next to `snaos.cmd`
+ * on Windows, for Git Bash (Claude Code's Bash tool there), which ignores
+ * PATHEXT and so never finds a bare `snaos` as the .cmd. The POSIX shim with
+ * `/` paths (Git Bash reads `C:/...`) and LF endings; cmd and PowerShell keep
+ * resolving `snaos` to the .cmd.
+ */
+export function gitBashShim(t: ShimTarget): string {
+  const slash = (p: string): string => sh(p.replace(/\\/g, '/'))
+  return [
+    '#!/bin/sh',
+    `if [ ! -f ${slash(t.execPath)} ]; then echo '${SHIM_NOT_RUNNING}' >&2; exit ${SHIM_NOT_RUNNING_EXIT}; fi`,
+    `ELECTRON_RUN_AS_NODE=1 exec ${slash(t.execPath)} ${slash(t.cliPath)} --runtime ${slash(t.runtimePath)} "$@"`,
+    '',
+  ].join('\n')
+}
+
 /** File name of the shim on this platform. */
 export function shimFileName(platform: NodeJS.Platform = process.platform): string {
   return platform === 'win32' ? `${BRAND.cliBin}.cmd` : BRAND.cliBin
@@ -65,13 +82,15 @@ export function shimFileName(platform: NodeJS.Platform = process.platform): stri
 /**
  * (Re)writes `<binDir>/snaos.cmd` (Windows) or `<binDir>/snaos` (POSIX, 0700).
  * Rewritten at every start: the portable's execPath changes per run.
- * Returns the shim path.
+ * Returns the shim path (on Windows the .cmd, also with the Git Bash one beside it).
  */
 export function writeShim(binDir: string, target: ShimTarget, platform: NodeJS.Platform = process.platform): string {
   mkdirSync(binDir, { recursive: true })
   const file = join(binDir, shimFileName(platform))
-  if (platform === 'win32') writeFileSync(file, windowsShim(target), 'utf8')
-  else {
+  if (platform === 'win32') {
+    writeFileSync(file, windowsShim(target), 'utf8')
+    writeFileSync(join(binDir, BRAND.cliBin), gitBashShim(target), 'utf8')
+  } else {
     writeFileSync(file, posixShim(target), { encoding: 'utf8', mode: 0o700 })
     try {
       chmodSync(file, 0o700)

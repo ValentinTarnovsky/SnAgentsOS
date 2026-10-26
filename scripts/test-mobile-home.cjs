@@ -2,7 +2,9 @@
 // renderer executor (createPane with a prompt and its promptFallback
 // prediction, the partial mount that never moves the desktop, mountWorkspace,
 // revealPane, openUrl) and the snapshot fields the phone needs (presets,
-// mountedWorkspaceIds). Same esbuild + vm harness as test-automation.cjs, with
+// mountedWorkspaceIds). App 2.7.0 (A8): the phone's markRead, mutePane and
+// silenceAck are main's, so one reaching the renderer acks unknown_action and
+// changes nothing. Same esbuild + vm harness as test-automation.cjs, with
 // a fake window.snApi: no Electron, no network, no personal config.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -124,6 +126,15 @@ async function main() {
   }
   ack = await ctl({ kind: 'openUrl', url: 'mailto:a@b.c' })
   check(ack.ok && calls.open.at(-1) === 'mailto:a@b.c', 'openUrl opens a mailto link')
+
+  // --- app 2.7.0 (A8): the phone's status marks are main's; one relayed by mistake does nothing here ---
+  const desk = () => JSON.stringify({ ws: S.getState().workspaces, status: S.getState().paneStatus, marks: S.getState().paneAttention, active: S.getState().activeWorkspaceId })
+  const deskBefore = desk()
+  for (const action of [{ kind: 'markRead', paneId: 'q1' }, { kind: 'mutePane', paneId: 'q1', muted: true }, { kind: 'silenceAck', paneId: 'q1' }]) {
+    ack = await ctl(action)
+    check(!ack.ok && ack.error === 'unknown_action', `${action.kind} reaching the renderer acks unknown_action (handled in main)`)
+  }
+  check(desk() === deskBefore && calls.reveal === 2 && calls.open.length === 2, 'and changes nothing on the desktop')
 
   // --- snapshot (E2-FR-12) ---
   const stop = r.startRemoteSnapshotSync()

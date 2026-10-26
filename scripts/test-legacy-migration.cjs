@@ -39,6 +39,7 @@ function electronStub(o = {}) {
       getPath: name => paths[name],
       setPath: (name, value) => { calls.push(['setPath', name, value]); paths[name] = value },
       getVersion: () => '2.0.0',
+      getAppPath: () => o.appPath ?? path.join(tmpRoot, 'app'),
     },
   }
 }
@@ -258,12 +259,96 @@ async function pathsChecks() {
 }
 
 async function devUserDataChecks() {
-  const run = o => { const stub = electronStub(o); load('src/main/devUserData.ts', withElectron(stub)); return stub.calls }
+  // Plan A1.3: fake checkouts. The app path is <repo>/out/main under `electron out/main/index.js`.
+  const checkout = (name, { gitFile = false, git = true, pkgName = 'snagentsos' } = {}) => {
+    const dir = freshDir(name)
+    if (pkgName) write(path.join(dir, 'package.json'), JSON.stringify({ name: pkgName, version: '2.7.0' }))
+    if (git && gitFile) write(path.join(dir, '.git'), 'gitdir: C:/repo/.git/worktrees/' + name + '\n')
+    else if (git) fs.mkdirSync(path.join(dir, '.git', 'objects'), { recursive: true })
+    fs.mkdirSync(path.join(dir, 'out', 'main'), { recursive: true })
+    return dir
+  }
+  const mainRepo = checkout('main-checkout'), linked = checkout('linked-worktree', { gitFile: true }), other = checkout('other-worktree', { gitFile: true })
+  const norm = p => { const s = p.replace(/\\/g, '/').replace(/\/+$/, ''); return isWin ? s.toLowerCase() : s }
+  const sha8 = dir => sha(norm(dir)).slice(0, 8)
+  const offsetOf = dir => 11 + (parseInt(sha8(dir), 16) % 89)
+  const run = o => { const stub = electronStub(o); const mod = load('src/main/devUserData.ts', withElectron(stub)); return { calls: stub.calls, mod } }
+  const userDataOf = r => (r.calls.length === 1 && r.calls[0][1] === 'userData' ? r.calls[0][2] : null)
   const appData = path.join(tmpRoot, 'appData')
-  const dev = run({ isPackaged: false, appData })
-  check(dev.length === 1 && dev[0][1] === 'userData' && dev[0][2] === path.join(appData, 'snagentsos-dev'), 'devUserData: dev without --user-data-dir uses <appData>/snagentsos-dev')
-  check(run({ isPackaged: true, appData }).length === 0, 'devUserData: packaged keeps its userData')
-  check(run({ isPackaged: false, appData, switches: ['user-data-dir'] }).length === 0, 'devUserData: --user-data-dir wins in dev')
+
+  const dev = run({ isPackaged: false, appData, appPath: path.join(mainRepo, 'out', 'main') })
+  check(userDataOf(dev) === path.join(appData, 'snagentsos-dev'), 'devUserData: dev without --user-data-dir uses <appData>/snagentsos-dev')
+  check(dev.mod.devPortOffset() === 0, 'devUserData: the main checkout has no port offset')
+  check(userDataOf(run({ isPackaged: false, appData, appPath: mainRepo })) === path.join(appData, 'snagentsos-dev'), 'devUserData: main checkout from the repo root (electron .) keeps snagentsos-dev')
+  check(run({ isPackaged: true, appData, appPath: path.join(linked, 'out', 'main') }).calls.length === 0, 'devUserData: packaged keeps its userData')
+  check(run({ isPackaged: false, appData, switches: ['user-data-dir'] }).calls.length === 0, 'devUserData: --user-data-dir wins in dev')
+  {
+    // The stub of 2.6.0 had no getAppPath; a lookup that throws is no checkout.
+    const stub = electronStub({ isPackaged: false, appData }); delete stub.app.getAppPath
+    load('src/main/devUserData.ts', withElectron(stub))
+    check(userDataOf(stub) === path.join(appData, 'snagentsos-dev'), 'devUserData: no app path means snagentsos-dev')
+  }
+
+  // Linked worktree: <root>/.git is a file.
+  const wt = run({ isPackaged: false, appData, appPath: path.join(linked, 'out', 'main') })
+  check(/^[0-9a-f]{8}$/.test(sha8(linked)) && userDataOf(wt) === path.join(appData, `snagentsos-dev-${sha8(linked)}`), 'devUserData: a linked worktree uses <appData>/snagentsos-dev-<sha8 of its root>')
+  check(userDataOf(run({ isPackaged: false, appData, appPath: linked })) === userDataOf(wt), 'devUserData: same folder from the repo root and from out/main')
+  check(userDataOf(run({ isPackaged: false, appData, appPath: path.join(other, 'out', 'main') })) === path.join(appData, `snagentsos-dev-${sha8(other)}`) && sha8(other) !== sha8(linked), 'devUserData: each worktree gets its own folder')
+  const off = wt.mod.devPortOffset()
+  check(off >= 11 && off <= 99 && off === offsetOf(linked), 'devUserData: worktree port offset is 11 + sha8 mod 89')
+  check(run({ isPackaged: false, appData, appPath: linked }).mod.devPortOffset() === off && wt.mod.devPortOffset() === off, 'devUserData: the offset is stable across runs and calls')
+  const custom = run({ isPackaged: false, appData, appPath: path.join(linked, 'out', 'main'), switches: ['user-data-dir'] })
+  check(custom.calls.length === 0 && custom.mod.devPortOffset() === off, 'devUserData: --user-data-dir keeps the userData but not the port offset (it follows the checkout)')
+  check(run({ isPackaged: true, appData, appPath: linked }).mod.devPortOffset() === 0, 'devUserData: packaged has no port offset')
+
+  // Root lookup: the first folder with .git or the app's package.json, three folders at most.
+  {
+    const { findDevCheckout, checkoutHash, devUserDataDirName } = wt.mod
+    const nested = path.join(linked, 'pkg')
+    write(path.join(nested, 'package.json'), JSON.stringify({ name: 'snagentsos' }))
+    check(findDevCheckout(nested).root === nested && findDevCheckout(nested).worktree === false, 'devUserData: the app package.json stops the walk before a parent .git')
+    const foreign = path.join(linked, 'tool')
+    write(path.join(foreign, 'package.json'), JSON.stringify({ name: 'other' }))
+    check(findDevCheckout(foreign).root === linked && findDevCheckout(foreign).worktree === true, 'devUserData: another package.json does not stop the walk')
+    const zip = checkout('source-zip', { git: false })
+    check(findDevCheckout(path.join(zip, 'out', 'main')).root === zip && devUserDataDirName(findDevCheckout(zip)) === 'snagentsos-dev', 'devUserData: no .git is a main checkout')
+    const loose = checkout('loose', { git: false, pkgName: null })
+    check(findDevCheckout(path.join(loose, 'out', 'main')) === null && findDevCheckout(path.join(linked, 'out', 'main', 'a', 'b')) === null, 'devUserData: nothing within three folders is no checkout')
+    check(checkoutHash('C:\\Repo\\Wt\\', 'win32') === checkoutHash('c:/repo/wt', 'win32') && checkoutHash('/Repo/Wt/', 'linux') !== checkoutHash('/repo/wt', 'linux'), 'devUserData: sha8 normalizes slashes, the trailing slash and (win32) case')
+  }
+
+  // devPort.ts: the offset moves only the default port of each listener.
+  {
+    const P = load('src/main/devPort.ts')
+    check(P.devPort(4517, 4517) === 4517, 'devPort: no offset until devUserData sets one')
+    P.setDevPortOffset(42)
+    check(P.devPort(4517, 4517) === 4559 && P.devPort(4527, 4527) === 4569 && P.devPort(43917, 43917) === 43959, 'devPort: a default port moves by the offset')
+    check(P.devPort(5000, 4517) === 5000 && P.devPort(4559, 4517) === 4559, 'devPort: a port the user picked stays as configured')
+    for (const bad of [0, 1, 10, 100, 12.5, NaN, -20]) { P.setDevPortOffset(bad); check(P.devPort(4517, 4517) === 4517, `devPort: offset ${bad} is ignored`) }
+    check(P.DEV_PORT_OFFSET_MIN === 11 && P.DEV_PORT_OFFSET_MAX === 99, 'devPort: range 11..99 (never 10 nor 1)')
+    // Import-time wiring in one bundle, like out/main/index.js: devUserData sets the offset devPort reads.
+    const bundled = o => {
+      const stub = electronStub(o)
+      const code = buildSync({ stdin: { contents: "import './src/main/devUserData'\nexport { devPort } from './src/main/devPort'", resolveDir: root, loader: 'ts' }, bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+      const mod = { exports: {} }
+      vm.runInNewContext(code, { module: mod, exports: mod.exports, require: id => (id === 'electron' ? stub : require(id)), console, process, Buffer })
+      return mod.exports
+    }
+    const W = bundled({ isPackaged: false, appData, appPath: path.join(linked, 'out', 'main'), switches: ['user-data-dir'] })
+    check(W.devPort(4517, 4517) === 4517 + off && W.devPort(4527, 4527) === 4527 + off && W.devPort(43917, 43917) === 43917 + off && W.devPort(6000, 4517) === 6000, 'devPort: a worktree instance (also under --user-data-dir) moves its default ports at import')
+    check(bundled({ isPackaged: false, appData, appPath: mainRepo }).devPort(4517, 4517) === 4517 && bundled({ isPackaged: true, appData, appPath: linked }).devPort(43917, 43917) === 43917, 'devPort: main checkout and packaged keep the default ports')
+  }
+
+  // Each listener routes its port through devPort() with its own default, inside the service (the renderer re-pushes the unshifted port).
+  {
+    const src = file => fs.readFileSync(path.join(root, file), 'utf8')
+    const schema = src('src/main/store/schema.ts'), remote = src('src/main/remote/RemoteManager.ts'), share = src('src/main/share/ShareHost.ts'), status = src('src/main/ipc/registerStatusIpc.ts')
+    check(/hookPort: z\.number\(\)[^\n]*\.default\(43917\)/.test(schema) && /port: z\.number\(\)[^\n]*\.default\(4527\)/.test(schema) && /port: z\.number\(\)[^\n]*\.default\(4517\)/.test(schema), 'devPort: schema defaults are 4517, 4527 and 43917')
+    check(/^const DEFAULT_PORT = 4517$/m.test(remote) && /applyConfig\(cfg: RemoteSettings\): void \{[^}]*const port = devPort\(this\.clampPort\(cfg\.port\), DEFAULT_PORT\)/.test(remote), 'devPort: RemoteManager.applyConfig moves the default remote port')
+    check(/applyConfig\(cfg: Partial<ShareHostConfig> \| null \| undefined\): void \{[^}]*const port = devPort\(valid, 4527\)\s+this\.config = \{ enabled: cfg\?\.enabled === true, port \}/.test(share), 'devPort: ShareHost.applyConfig moves the default share port')
+    check(/^const HOOK_DEFAULT_PORT = 43917$/m.test(status) && /async function ensureServer\(cfg: NotificationSettings\): Promise<void> \{[^}]*const port = devPort\(cfg\.hookPort, HOOK_DEFAULT_PORT\)[^}]*hookServer\.start\(port, cfg\.hookToken\)/.test(status), 'devPort: ensureServer starts the hook server on the moved default port')
+  }
+
   const index = fs.readFileSync(path.join(root, 'src/main/index.ts'), 'utf8')
   const firstImport = index.split('\n').find(l => l.startsWith('import '))
   check(firstImport === "import './devUserData'", 'devUserData: first import of index.ts')

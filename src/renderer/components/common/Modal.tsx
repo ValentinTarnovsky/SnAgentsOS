@@ -15,7 +15,8 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') onClose()
+      // An Esc something inside already used (a ConfirmDialog over Settings, a key being recorded) closes only that.
+      if (e.key === 'Escape' && !e.defaultPrevented) onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -28,6 +29,8 @@ export function Modal({ open, onClose, title, children, className }: ModalProps)
       {/* A click that starts on a toast never closes the modal (E4-FR-03). */}
       <div className="absolute inset-0 bg-black/60" onClick={(e) => { if (!isFromToast(e)) onClose() }} />
       <div
+        role="dialog"
+        aria-modal="true"
         className={cn(
           'relative z-10 flex max-h-[82vh] w-full max-w-2xl flex-col overflow-hidden rounded-modal border border-border bg-card shadow-[0_20px_48px_-12px_rgba(0,0,0,0.6)]',
           className,

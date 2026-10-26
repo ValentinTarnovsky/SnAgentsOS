@@ -2,6 +2,7 @@ import type { RemoteCommand, RemoteCommandFit } from '@shared/ipc-contract'
 import type { RemoteCtlAction } from '@shared/remote-protocol'
 import type { AgentPreset, Workspace } from '@shared/types'
 import { initialPromptFallback } from '@shared/initialPrompt'
+import { paneSchedules } from '@shared/schedule'
 import { shellKind } from '@shared/shellKind'
 import { type AppState, useAppStore } from './store'
 import { resolveLaunch } from './launch'
@@ -139,8 +140,9 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
     case 'globalPrompt': {
       const ws = store.workspaces.find((w) => w.id === action.workspaceId)
       if (!ws) return { ok: false, error: 'not_found' }
-      const count = broadcastToWorkspace(ws, action.text)
-      return { ok: true, info: count }
+      // `info` stays the count that received it; consoles waiting on the user are skipped.
+      const { sent } = broadcastToWorkspace(ws, action.text)
+      return { ok: true, info: sent }
     }
 
     case 'setTheme': {
@@ -228,6 +230,18 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
     case 'answerMenu':
       return { ok: false, error: 'unknown_action' }
 
+    // app 2.7.0: handled in main (SessionManager.handleCtl -> StatusManager); never relayed.
+    case 'markRead':
+    case 'mutePane':
+    case 'silenceAck':
+      return { ok: false, error: 'unknown_action' }
+
+    // app 2.7.0 (E10 B8): handled in main (SessionManager.handleCtl); never relayed.
+    case 'teamDecide':
+    case 'teamAnswer':
+    case 'teamDispatch':
+      return { ok: false, error: 'unknown_action' }
+
     default:
       return { ok: false, error: 'unknown_action' }
   }
@@ -242,18 +256,22 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
  * needs a saved prompt (no_schedule as well, CONTRATOS v3.1). A run asked
  * again while one waits is a no-op ok ack (the contract's `info: 'pending'`
  * cannot travel: `ctlAck.info` is a number; the phone reads `runPending`).
+ * App 2.7.0: `scheduleId` picks one of the console's schedules (an unknown
+ * id is no_schedule); without it (an older phone) the first one.
  * Exported for tests.
  */
 export function runScheduleCtl(action: Extract<RemoteCtlAction, { kind: 'scheduleRun' | 'scheduleToggle' }>): CmdResult {
   const ws = useAppStore.getState().workspaces.find((w) => w.id === action.workspaceId)
   const pane = ws?.panes.find((p) => p.id === action.paneId)
   if (!pane) return { ok: false, error: 'not_found' }
-  if (!pane.schedule) return { ok: false, error: 'no_schedule' }
+  const list = paneSchedules(pane)
+  const sched = action.scheduleId === undefined ? list[0] : list.find((s) => s.id === action.scheduleId)
+  if (!sched) return { ok: false, error: 'no_schedule' }
   if (action.kind === 'scheduleToggle') {
-    setScheduleEnabled(pane.id, action.enabled)
+    setScheduleEnabled(pane.id, sched.id, action.enabled)
     return { ok: true }
   }
-  return runScheduleNow(pane.id) ? { ok: true } : { ok: false, error: 'no_schedule' }
+  return runScheduleNow(pane.id, sched.id) ? { ok: true } : { ok: false, error: 'no_schedule' }
 }
 
 /**

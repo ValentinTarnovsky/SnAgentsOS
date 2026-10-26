@@ -3,12 +3,12 @@
  * clock, the schedule dialog and Settings > Automation. Pure: no store.
  */
 import type { Language, PaneSchedule, ScheduleRecurrence } from '@shared/types'
-import { isScheduleEnabled, recurrenceOf, WEEK_ORDER } from '@shared/schedule'
+import { formatRunWhen, isScheduleEnabled, recurrenceOf, WEEK_ORDER } from '@shared/schedule'
 import type { MessageKey, TFn } from '@/i18n'
 
 export type RecurrenceKind = ScheduleRecurrence['kind']
 
-/** Chip order of the dialog. */
+/** Chip order of the dialog (a `cron` rule has its own "Advanced (cron)" field, not a chip). */
 export const RECURRENCE_KINDS: readonly RecurrenceKind[] = ['once', 'daily', 'weekdays', 'weekly', 'hourly']
 
 export const RECURRENCE_KEY: Record<RecurrenceKind, MessageKey> = {
@@ -17,6 +17,7 @@ export const RECURRENCE_KEY: Record<RecurrenceKind, MessageKey> = {
   weekdays: 'schedule.rec.weekdays',
   weekly: 'schedule.rec.weekly',
   hourly: 'schedule.rec.hourly',
+  cron: 'schedule.rec.cron',
 }
 
 /** One-letter day toggles, by `Date.getDay()` (0 = Sunday). */
@@ -48,17 +49,19 @@ export function weekdayName(day: number, lang: Language, style: 'short' | 'long'
   return weekdayFormat(lang, style).format(new Date(2024, 0, 7 + day, 12)).replace(/\.$/, '')
 }
 
-const pad = (n: number): string => String(n).padStart(2, '0')
-
-/** "lun 09:00" / "Mon 09:00" for an epoch-ms time (local clock). */
-export function formatWhen(at: number, lang: Language): string {
-  const d = new Date(at)
-  return `${weekdayName(d.getDay(), lang)} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+/**
+ * "lun 09:00" / "Mon 09:00" for an epoch-ms time (local clock) within the
+ * next 6 days, else with its date ("dom, 1 nov, 09:00") and the year when it
+ * is another (`formatRunWhen`, the phone's rule too).
+ */
+export function formatWhen(at: number, lang: Language, now: number = Date.now()): string {
+  return formatRunWhen(at, lang, now)
 }
 
-/** "Lun-Vie", "Semanal: lun, mie", "Cada hora (:15)". */
+/** "Lun-Vie", "Semanal: lun, mie", "Cada hora (:15)", "Cron: 0 9 * * 1-5". */
 export function recurrenceLabel(schedule: Pick<PaneSchedule, 'recurrence' | 'time'>, t: TFn, lang: Language): string {
   const rec = recurrenceOf(schedule)
+  if (rec.kind === 'cron') return t('schedule.rec.cronExpr', { expr: rec.expr.trim().replace(/\s+/g, ' ') })
   if (rec.kind === 'weekly') {
     const days = WEEK_ORDER.filter((d) => rec.days.includes(d)).map((d) => weekdayName(d, lang))
     return t('schedule.rec.weeklyDays', { days: days.join(', ') })
@@ -69,9 +72,10 @@ export function recurrenceLabel(schedule: Pick<PaneSchedule, 'recurrence' | 'tim
 
 /**
  * The header clock tooltip and the table's "next run" (E8-FR-28):
- * "Proxima: lun 09:00 (Lun-Vie)" while active, "Pausada" when paused.
+ * "Proxima: lun 09:00 (Lun-Vie)" while active ("Proxima: dom, 1 nov, 09:00
+ * (Cron: 0 9 1 * *)" for a run 6 or more days away), "Pausada" when paused.
  */
-export function scheduleNextLabel(schedule: PaneSchedule, t: TFn, lang: Language): string {
+export function scheduleNextLabel(schedule: PaneSchedule, t: TFn, lang: Language, now: number = Date.now()): string {
   if (!isScheduleEnabled(schedule)) return t('schedule.paused')
-  return t('schedule.next', { when: formatWhen(schedule.dueAt, lang), rec: recurrenceLabel(schedule, t, lang) })
+  return t('schedule.next', { when: formatWhen(schedule.dueAt, lang, now), rec: recurrenceLabel(schedule, t, lang) })
 }

@@ -24,7 +24,7 @@ import {applyTheme} from './src/renderer/themes/applyTheme';
 import {dispatchOpenRequest} from './src/renderer/lib/openRequest';
 import {useAccountsStore} from './src/renderer/lib/accountsStore';
 import {useUsageStore} from './src/renderer/lib/usageStore';
-const explorerArgs=[];const calls={};const spy=(name,ret)=>(...a)=>{calls[name]=(calls[name]||0)+1;return ret}
+const explorerArgs=[];const hotkeyArgs=[];const calls={};const spy=(name,ret)=>(...a)=>{calls[name]=(calls[name]||0)+1;return ret}
 const noop=()=>()=>{};
 // app 2.3.0: Claude accounts (app 2.4.0: N in priority order). Fake emails only; no token ever reaches the renderer.
 const accountCalls=[];
@@ -44,7 +44,8 @@ window.snApi=fallback({platform:'win32',
  updates:fallback({check:spy('updates.check',Promise.resolve({available:false,currentVersion:'2.0.0'})),onProgress:noop}),
  system:fallback({getMetrics:spy('system.getMetrics',Promise.resolve(null)),getLoginItem:spy('system.getLoginItem',Promise.resolve(false)),openExternal(){},
   getExplorerMenu:spy('system.getExplorerMenu',Promise.resolve({ok:true,registered:true,exe:'D:/Portable/SnAgentsOS-portable.exe',currentExe:'C:/App/SnAgentsOS.exe',mismatch:true})),
-  setExplorerMenu:(req)=>{explorerArgs.push(req);return Promise.resolve({ok:true,registered:!!req.enabled,exe:req.enabled?'C:/App/SnAgentsOS.exe':undefined,currentExe:'C:/App/SnAgentsOS.exe',mismatch:false})}}),
+  setExplorerMenu:(req)=>{explorerArgs.push(req);return Promise.resolve({ok:true,registered:!!req.enabled,exe:req.enabled?'C:/App/SnAgentsOS.exe':undefined,currentExe:'C:/App/SnAgentsOS.exe',mismatch:false})},
+  setGlobalHotkey:(enabled,accel)=>{hotkeyArgs.push([enabled,accel]);return Promise.resolve(true)}}),
  status:fallback({health:spy('status.health',Promise.resolve({claude:{installed:false},codex:{enabled:false,available:true,connected:0},discord:{lastSuccessAt:null,error:null,queued:0}})),hooksStatus:spy('status.hooksStatus',Promise.resolve({installed:false,settingsPath:'x'})),testNtfy:spy('status.testNtfy',Promise.resolve({ok:true}))}),
  app:fallback({info:async()=>({version:'2.0.0',portable:false,platform:'win32'})}),
  remote:fallback({onStatus:noop,onDevices:noop,getStatus:async()=>({state:'stopped',connectedCount:0}),listDevices:async()=>[]}),
@@ -69,7 +70,8 @@ const termKeys=[];document.addEventListener('keydown',e=>{if(e.target&&e.target.
 // checks read this log instead of racing the 1200 ms timer.
 const flashLog=[];new MutationObserver(ms=>ms.forEach(m=>flashLog.push({id:m.target.id,on:m.target.hasAttribute('data-setting-flash'),t:performance.now()}))).observe(document.body,{attributes:true,subtree:true,attributeFilter:['data-setting-flash']});
 const setInput=(el,v)=>{const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}))};
-window.smoke={calls,created,termKeys,explorerArgs,accountCalls,theme:applyTheme,
+window.smoke={calls,created,termKeys,explorerArgs,hotkeyArgs,accountCalls,theme:applyTheme,
+ hotkey:()=>{const s=useAppStore.getState().settings;return [s.globalHotkeyEnabled,s.globalHotkey]},
  accounts:k=>{accountsState=ACC_STATES[k];useAccountsStore.setState({state:accountsState})},
  autoSwitch:on=>{const st=useAppStore.getState();st.updateSettings({claudeAccounts:{...st.settings.claudeAccounts,autoSwitch:on}})},
  usageOn:on=>{const st=useAppStore.getState();st.updateSettings({usage:{...st.settings.usage,enabled:on,collapsed:false}});useUsageStore.setState({snapshot:on?{updatedAt:Date.now(),rows:[{id:'claude.5h',provider:'claude',kind:'5h',label:'5h',percent:40,status:'ok'}]}:null})},
@@ -82,6 +84,9 @@ window.smoke={calls,created,termKeys,explorerArgs,accountCalls,theme:applyTheme,
  state:()=>{const s=useAppStore.getState();return {open:s.settingsOpen,query:s.settingsQuery,anchor:s.settingsAnchor,wizard:s.wizardOpen,sound:s.settings.notifications.sound}},
  set:p=>useAppStore.setState(p),
  ntfy:()=>useAppStore.getState().settings.notifications.ntfy,
+ silence:()=>useAppStore.getState().settings.agents.silence,
+ // React's onBlur listens to focusout: a hidden window may never hand the input real focus.
+ commit:(sel,how)=>{const el=document.querySelector(sel);if(how==='enter')el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));else el.dispatchEvent(new FocusEvent('focusout',{bubbles:true}))},
  settings:p=>useAppStore.getState().updateSettings(p),
  openSettings:t=>useAppStore.getState().openSettings(t),
  // The 3-step wizard is the composer's Advanced... (E8-FR-08).
@@ -263,6 +268,21 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
  eq([await js('smoke.explorerArgs'),await js('smoke.explorerMenu()')],[[{enabled:true,language:'es'}],true],'the toggle sends enabled + the UI language and persists the setting');
  ok(await js("(document.querySelector('[data-explorer-path]')?.textContent||'').includes('C:/App/SnAgentsOS.exe')&&!document.querySelector('[data-explorer-mismatch]')&&!document.querySelector('[data-explorer-error]')"),'after enabling, the registered path shows and the mismatch is gone');
 
+ // --- the global hotkey: a bare Esc while recording cancels only the recording ----
+ // The recorder prevents every key it takes, so the Modal of Settings leaves that Esc alone.
+ await js("smoke.settings({globalHotkeyEnabled:true,globalHotkey:'Ctrl+Alt+Space'})");await frame();
+ await js("const b=document.querySelector('[data-hotkey-input]');b.focus();b.click()");await frame();
+ eq(await js("document.querySelector('[data-hotkey-input]').dataset.hotkeyInput"),'recording','a click starts recording the global hotkey');
+ await press('Escape');
+ eq([await js("document.querySelector('[data-hotkey-input]').dataset.hotkeyInput"),(await js('smoke.state()')).open,await js('smoke.hotkey()'),await js('smoke.hotkeyArgs')],['idle',true,[true,'Ctrl+Alt+Space'],[]],'a bare Esc while recording cancels it: Settings stays open, the hotkey is unchanged');
+ await js("document.querySelector('[data-hotkey-input]').click()");await frame();
+ await press('K',['control','shift']);
+ eq([await js("document.querySelector('[data-hotkey-input]').dataset.hotkeyInput"),await js('smoke.hotkey()'),await js('smoke.hotkeyArgs')],['idle',[true,'Ctrl+Shift+K'],[[true,'Ctrl+Shift+K']]],'a combo still records and applies the hotkey');
+ eq(await js("document.activeElement.dataset.hotkeyInput"),'idle','the recorder keeps the focus');
+ await press('Escape');
+ ok(!(await js('smoke.state()')).open,'with no recording, the next Esc closes Settings');
+ await js("smoke.settings({globalHotkeyEnabled:false,globalHotkey:'Super+Alt+O'});smoke.openSettings('startup')");await frame();
+
  // --- E4-FR-33: "Open in" over Settings ---------------------------------------
  await js("smoke.open('D:/New/proj','open-1')");await frame();await frame();
  eq([(await js('smoke.state()')).open,(await js('smoke.state()')).wizard,await js("document.querySelector('[data-composer-cwd]')?.value"),await js("document.activeElement.hasAttribute('data-composer-primary')")],[false,true,'D:/New/proj',true],'a new folder closes Settings and opens the composer prefilled, focus on Create');
@@ -336,6 +356,34 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
  await js("[...document.querySelectorAll('[role=menu] [role=menuitem]')].at(-1).click()");await frame();await frame();
  await js("smoke.accounts('two')");await frame();
  await js("smoke.set({settingsOpen:false});smoke.usageOn(false)");await frame();
+
+ // --- app 2.7.0 (A6): silence watch rows in Settings > Agentes ----------------
+ await js("smoke.clearFlash();smoke.openSettings('agents#silence')");await frame();await frame();
+ ok(await js("smoke.inView('#setting-agents-silence')&&smoke.flashed('setting-agents-silence')"),"openSettings('agents#silence') shows and rings the row");
+ ok(await js("!!document.querySelector('[data-setting-id=\\"agents.silence\\"] [role=switch]')&&!!document.querySelector('[data-setting-id=\\"agents.silenceQuiet\\"] [data-silence-quiet]')&&!!document.querySelector('[data-setting-id=\\"agents.silenceStalled\\"] [data-silence-stalled]')"),'the silence toggle and both minutes fields carry their search ids');
+ eq(await js("[document.querySelector('[data-silence-quiet]').value,document.querySelector('[data-silence-stalled]').value,smoke.silence()]"),['10','20',{enabled:true,quietMin:10,stalledMin:20}],'defaults: on, 10 and 20 minutes');
+ ok(await js("(document.getElementById('setting-agents-silence')?.textContent||'').includes('nunca frena al agente')"),'the copy says the chip never stops the agent');
+ await js("smoke.setInput('[data-silence-quiet]','')");await frame();
+ await js("smoke.commit('[data-silence-quiet]')");await frame();
+ eq([await js("document.querySelector('[data-silence-quiet]').value"),await js('smoke.silence()')],['10',{enabled:true,quietMin:10,stalledMin:20}],'a blank or non-number quietMin is reverted on blur');
+ await js("smoke.setInput('[data-silence-quiet]','500')");await frame();
+ ok(await js("smoke.silence().quietMin===10"),'typing never commits mid-word');
+ await js("smoke.commit('[data-silence-quiet]','enter')");await frame();
+ eq([await js("[document.querySelector('[data-silence-quiet]').value,document.querySelector('[data-silence-stalled]').value]"),await js('smoke.silence()')],[['120','121'],{enabled:true,quietMin:120,stalledMin:121}],'an out-of-range quietMin is clamped to 120 and stalledMin moves above it');
+ await js("smoke.setInput('[data-silence-quiet]','15')");await js("smoke.commit('[data-silence-quiet]','enter')");await frame();
+ await js("smoke.setInput('[data-silence-stalled]','5')");await frame();
+ await js("smoke.commit('[data-silence-stalled]')");await frame();
+ eq([await js("[document.querySelector('[data-silence-quiet]').value,document.querySelector('[data-silence-stalled]').value]"),await js('smoke.silence()')],[['15','16'],{enabled:true,quietMin:15,stalledMin:16}],'a stalledMin at or below quietMin is fixed by normalizeSilence before the save');
+ await shot('agents-silence');
+ await js("document.querySelector('[data-setting-id=\\"agents.silence\\"] [role=switch]').click()");await frame();
+ eq([await js('smoke.silence().enabled'),await js("document.querySelector('[data-setting-id=\\"agents.silence\\"] [role=switch]').getAttribute('aria-checked')"),await js("document.querySelector('[data-silence-quiet]').disabled&&document.querySelector('[data-silence-stalled]').disabled")],[false,'false',true],'the toggle turns the watch off and disables the minutes');
+ await shot('agents-silence-off');
+ await js("smoke.search('trabado')");await frame();
+ ok(await js("!!document.querySelector('[data-search-result=\\"agents.silence\\"]')&&!!document.querySelector('[data-search-result=\\"agents.silenceStalled\\"]')"),'search "trabado" finds the silence rows');
+ await js("smoke.search('silencio')");await frame();
+ await js("document.querySelector('[data-search-result=\\"agents.silence\\"] [role=switch]').click()");await frame();
+ eq([await js('smoke.silence()'),(await js('smoke.state()')).query],[{enabled:true,quietMin:15,stalledMin:16},'silencio'],'the inline switch (agents.silence.enabled) turns it back on without leaving the search');
+ await js("smoke.search('')");await js("smoke.set({settingsOpen:false})");await frame();
 
  // Light theme and zoom: the results list fits.
  await js("smoke.theme('light');smoke.openSettings()");await frame();await js("smoke.search('notif')");

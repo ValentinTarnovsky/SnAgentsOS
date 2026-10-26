@@ -253,7 +253,7 @@ window.result = (async () => {
  check($('[data-changes-counts]').textContent==='+25 -6 · 5 archivos','es header: 5 archivos');
  answer = req => req.op==='diff' ? reply(FX.diffTooLarge) : statusAnswer(req);
  row('notes/ñandú.md','untracked').click(); await frames(); await wait(400);
- check($('[data-diff-too-large]').textContent==='Diff demasiado grande (18000 lineas). Abrilo en la PC.','es: Diff demasiado grande ... Abrilo en la PC.');
+ check($('[data-diff-too-large]').textContent==='Diff demasiado grande (18000 líneas). Abrilo en la PC.','es: Diff demasiado grande ... Abrilo en la PC.');
  { const wide=[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).slice(0,5).map(e=>e.tagName+'.'+String(e.className).slice(0,80)); check(document.documentElement.scrollWidth<=innerWidth,'no horizontal overflow at phone width '+JSON.stringify(wide)) }
 
  // The workspace disappearing on the desktop closes Changes.

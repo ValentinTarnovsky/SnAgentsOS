@@ -7,8 +7,10 @@
  * Kept free of runtime imports besides types: the CLI entry (cliEntry.ts,
  * Node core only) bundles it next to main.
  */
-import type { AgentProvider, AgentWaiting, AttentionReason, ClaudePaneState, PaneType, RemotePending, WorkspaceTaskState } from './types'
+import type { AgentProvider, AgentWaiting, AttentionReason, ClaudePaneState, PaneType, RemotePending, SilenceLevel, WorkspaceTaskState } from './types'
 import type { ChatMessage } from './chat-types'
+import type { FailureKind } from './failure'
+import type { TeamCtlMethod } from './teamTools'
 
 export const CTL_PROTOCOL_VERSION = 1
 export const CTL_RPC_PATH = '/v1/rpc'
@@ -100,6 +102,10 @@ export type CtlMethod =
   | 'account.ls'
   | 'account.status'
   | 'account.use'
+  // app 2.7.0 (A3): ask the user to do or decide something, without blocking the console.
+  | 'needs'
+  // app 2.7.0 (Teams, B2): `snaos team`, only for the token of a team run (TEAM_TOOLS of teamTools.ts).
+  | TeamCtlMethod
 
 export const CTL_METHODS: readonly CtlMethod[] = [
   'ping',
@@ -132,6 +138,25 @@ export const CTL_METHODS: readonly CtlMethod[] = [
   'account.ls',
   'account.status',
   'account.use',
+  'needs',
+  // = TEAM_CTL_METHODS (test-cli.cjs asserts it), spelled out so this file keeps type-only imports.
+  'team.show',
+  'team.tasks',
+  'team.task.get',
+  'team.diff',
+  'team.log',
+  'team.task.create',
+  'team.task.update',
+  'team.comment',
+  'team.note',
+  'team.ask',
+  'team.needs',
+  'team.plan',
+  'team.review',
+  'team.verdict',
+  'team.done',
+  'team.approve',
+  'team.hire',
 ]
 
 export interface CtlRequest {
@@ -159,6 +184,10 @@ export type CtlErrorCode =
   | 'internal'
   /** app 2.3.0: the note changed since `--rev` (reread and retry). */
   | 'conflict'
+  /** `send` to a console whose agent waits on the user (precise permission, question or plan, or an open request): nothing was typed. */
+  | 'awaiting_user'
+  /** app 2.7.0 (Teams): `snaos team task update` of fields the user set (they stay theirs). */
+  | 'user_owned'
 
 export interface CtlError {
   code: CtlErrorCode
@@ -171,7 +200,8 @@ export type CtlResponse<T = unknown> = { ok: true; data: T } | { ok: false; erro
 /**
  * Process exit code per error (E8-FR-14): 0 ok, 1 internal, 2 usage, 3 not
  * found, 4 ambiguous, 5 app unavailable, 6 unauthorized, 7 forbidden or
- * disabled, 8 conflict (app 2.3.0), 124 timeout.
+ * disabled, 8 conflict (app 2.3.0) or user owned (app 2.7.0), 9 awaiting
+ * the user, 124 timeout.
  */
 export const CTL_EXIT: Record<CtlErrorCode, number> = {
   bad_request: 2,
@@ -190,9 +220,27 @@ export const CTL_EXIT: Record<CtlErrorCode, number> = {
   desktop_unavailable: 5,
   internal: 1,
   conflict: 8,
+  awaiting_user: 9,
+  user_owned: 8,
 }
 
-export interface CtlConsoleInfo {
+/**
+ * App 2.7.0 (A3): main's status signals of a console, picked field by field
+ * from its PaneStatusEvt (`ls`, `peek`, the read-only `status`). Each one is
+ * absent when main has nothing to say.
+ */
+export interface CtlStatusSignals {
+  /** Tools of the current turn (the last one once done): the count and an English line ("Edit 3, Read 2 (src/a.ts)"). */
+  digest?: { tools: number; line: string }
+  /** Why the last turn failed; `until`: epoch ms of a limit reset, when the provider said it. */
+  failure?: { kind: FailureKind; until?: number }
+  /** A working agent with no sign of life since `since` (epoch ms). */
+  silence?: { level: SilenceLevel; since: number }
+  /** The open `snaos needs` request and when it was raised (epoch ms). */
+  needs?: { text: string; at: number }
+}
+
+export interface CtlConsoleInfo extends CtlStatusSignals {
   index: number
   id: string
   title: string
@@ -241,7 +289,7 @@ export interface CtlPeekPending {
 }
 
 /** `peek` (app 2.3.0): one look at a console without reading for the user. */
-export interface CtlPeekResult {
+export interface CtlPeekResult extends CtlStatusSignals {
   paneId: string
   title: string
   type: PaneType
@@ -271,6 +319,47 @@ export interface CtlWaitResult {
   precise: boolean
   waitedMs: number
   noTurnObserved?: boolean
+}
+
+/** `needs` (app 2.7.0, A3): the console flagged, and its request (null: cleared). */
+export interface CtlNeedsResult {
+  paneId: string
+  needs: string | null
+}
+
+// --- snaos team diff and log (app 2.7.0, Teams, B5 integration) -------------------
+// Reads main runs for a team run: the readonly profile has no git log, diff or show
+// (their --output writes any file, --no-index and blame --contents read any one).
+
+/** Output caps in UTF-8 bytes: a longer text is cut at a line end, followed by one marker line. */
+export const CTL_TEAM_DIFF_MAX = 256 * 1024
+export const CTL_TEAM_LOG_MAX = 64 * 1024
+/** `team log -n` default and its range (1..50). */
+export const CTL_TEAM_LOG_DEFAULT = 20
+export const CTL_TEAM_LOG_N_MAX = 50
+/** The paths after `--`: this many at most, each this many characters at most (repo relative). */
+export const CTL_TEAM_PATHS_MAX = 32
+export const CTL_TEAM_PATH_MAX = 1024
+
+/** `team.diff` params. `task`: a task of the caller's team (default: the run's own task); `paths`: repo relative, main checks them again. */
+export interface CtlTeamDiffParams { stat?: boolean; task?: string; paths?: string[] }
+/** `team.log` params. `n`: 1..CTL_TEAM_LOG_N_MAX commits (default CTL_TEAM_LOG_DEFAULT). */
+export interface CtlTeamLogParams { n?: number; task?: string; paths?: string[] }
+
+/** `team.diff` and `team.log` data: where main read and what git printed (UTF-8, cut with a marker line past its cap). */
+export interface CtlTeamGitResult {
+  /** The task whose tree was read; absent when the run has no task and named none. */
+  task?: string
+  /** `worktree`: the task's worktree; `root`: the root of the task's repo (or the main repo). */
+  where: 'worktree' | 'root'
+  /**
+   * What was compared: diff of a worktree = the sha of the merge base of its base branch and its branch, against its
+   * working tree (its commits and its uncommitted changes), of the root = `HEAD` against the working tree; log of a
+   * worktree = `refs/heads/<base branch>..refs/heads/<branch>`, of the root = `HEAD`.
+   */
+  range: string
+  text: string
+  cut?: true
 }
 
 export interface CtlSpawnResult {

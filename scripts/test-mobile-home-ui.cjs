@@ -7,7 +7,9 @@
 // workspace, back returns), the Resume card, the mount confirmation, the FAB
 // picker with promptFallback (draft + composer + toast), per-pane actions on
 // the row's own workspace, the workspace kebab, empty states, inline usage,
-// Settings with the versions, the Welcome steps and Spanish.
+// Settings with the versions, the Welcome steps and Spanish. App 2.7.0: the
+// "Waiting for you" section on top (its 2.7.0 signals and marks are
+// test-mobile-attention-ui.cjs).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -101,6 +103,11 @@ window.runMain = async () => {
  check($('[data-workspace=w1] [data-on-pc]') && !$('[data-workspace=w2] [data-on-pc]'), '"On the PC" only on the desktop active workspace');
  check($('[data-workspace=w1] [data-git-chip]').textContent === 'main +142 -37 \\u00b7 5 \\u21912' && !$('[data-workspace=w2] [data-git-chip]'), 'the git chip shows branch, counts and ahead; no chip and no space without git');
  check($('[data-workspace=w1] [data-ws-badge]').textContent === '1' && $('[data-workspace=w2] [data-ws-badge]').textContent === '1', 'each section badges its consoles in action');
+ // App 2.7.0: "Waiting for you" heads Home across workspaces (an older desktop's statuses: the legacy rule).
+ const needsIds = () => $$('[data-needs-row]').map(e => e.dataset.needsRow).join();
+ const homeList = $('[data-home-list]');
+ check(needsIds() === 'a3,b1' && $('[data-needs-you]').dataset.needsYou === '2' && homeList.firstElementChild === $('[data-needs-you]'), 'Waiting for you lists both open requests first in the list, across workspaces (got ' + needsIds() + ')');
+ check($('[data-needs-row=b1] [data-needs-wsname]').textContent === 'Back' && $('[data-needs-row=b1] [data-needs-line]').textContent === 'Question pending', 'a row names its workspace and why it waits');
 
  // --- collapse (E2-FR-04) ---
  click($('[data-workspace=w2] [data-ws-toggle]'));
@@ -279,7 +286,7 @@ window.runMain = async () => {
  // --- no workspaces (E2-FR-15) ---
  flushSync(() => store.getState().update({ snapshot: { ...snapshot, language: 'es', workspaces: [] } }));
  await frames();
- check($('[data-empty-workspaces]').textContent === 'No hay workspaces. Crea uno en la PC.' && !$('[data-fab]'), 'without workspaces the hero shows and there is no FAB');
+ check($('[data-empty-workspaces]').textContent === 'No hay workspaces. Creá uno en la PC.' && !$('[data-fab]'), 'without workspaces the hero shows and there is no FAB');
  setLang('en');
  r.unmount();
 

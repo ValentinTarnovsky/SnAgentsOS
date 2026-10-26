@@ -9,7 +9,10 @@
  *    messages scroll in on their own;
  *  - "Claude is working..." while the status says working;
  *  - "The PC did not answer [Retry]" when a page never came (E3-FR-04);
- *  - long-press actions per message (Copy, Select text).
+ *  - long-press actions per message (Copy, Select text);
+ *  - app 2.7.0: a chat the PC paused for another one (ChatHub's LRU) keeps
+ *    its list under a bar that says so; only its [Resume], a tap of the
+ *    user, subscribes again (resuming may pause another chat).
  *
  * The list is a `role="log"`; only the newest assistant message is
  * announced (a polite live region), rows use `content-visibility: auto`, and
@@ -17,7 +20,7 @@
  * answer cards stay below, in MainScreen.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Copy, Loader2, TextSelect } from 'lucide-react'
+import { Copy, Loader2, Pause, TextSelect } from 'lucide-react'
 import { displayStatus } from '@shared/status'
 import { client } from '../../lib/client'
 import { selectPaneChat, useChatStore } from '../../lib/chatStore'
@@ -29,7 +32,7 @@ import { Sheet } from '../Sheet'
 import { ActionList } from '../ActionList'
 import { NoReply } from '../NoReply'
 import { MessageRow } from './MessageRow'
-import { ToolRunRow } from './ToolRunRow'
+import { ToolPhaseRow, ToolRunRow } from './ToolRunRow'
 import { FloatingControls } from './FloatingControls'
 
 /** Within this many px of the end, the view follows new messages. */
@@ -174,6 +177,22 @@ export function ChatView({ paneId }: { paneId: string }): ReactNode {
 
   return (
     <div data-chat-view={paneId} className="absolute inset-0 flex flex-col bg-bg-primary">
+      {chat.paused && (
+        <div data-chat-paused role="status" className="flex min-w-0 shrink-0 items-center gap-2 border-b border-border bg-bg-secondary px-3 py-1.5">
+          <Pause size={14} aria-hidden className="shrink-0 text-text-secondary" />
+          <p className="min-w-0 flex-1 text-xs leading-snug text-text-secondary">{t('chat.paused')}</p>
+          <button
+            type="button"
+            data-chat-resume
+            disabled={chat.loading === 'first'}
+            onClick={() => client.requestChatFirst(paneId)}
+            className="flex h-9 shrink-0 items-center gap-1.5 rounded-btn border border-border px-3 text-xs font-medium text-text-primary active:bg-card disabled:opacity-50"
+          >
+            {chat.loading === 'first' && <Loader2 size={14} className="spin" aria-hidden />}
+            {t('chat.resume')}
+          </button>
+        </div>
+      )}
       <div
         ref={scrollRef}
         data-scrollable
@@ -218,6 +237,8 @@ export function ChatView({ paneId }: { paneId: string }): ReactNode {
             <div key={row.id} className="min-w-0" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 64px' }}>
               {row.kind === 'tools' ? (
                 <ToolRunRow calls={row.calls} expandAll={expandAll} />
+              ) : row.kind === 'phase' ? (
+                <ToolPhaseRow row={row} expandAll={expandAll} />
               ) : (
                 <MessageRow
                   id={row.id}

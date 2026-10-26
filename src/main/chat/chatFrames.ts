@@ -20,12 +20,13 @@ export function jsonBytes(value: unknown): number {
 
 /**
  * Bytes of a chat frame with an empty `items`, using the widest cursor and
- * `done` so the figure holds for any page.
+ * `done` so the figure holds for any page, and a page's room for the `paused`
+ * notice (app 2.7.0, A7: a first page read while its watcher was closed).
  */
 export function frameOverhead(type: 'chatPage' | 'chatAppend', paneId: string): number {
   const frame =
     type === 'chatPage'
-      ? { v: PROTOCOL_VERSION, type, paneId, items: [], cursor: '999999999999999', done: false }
+      ? { v: PROTOCOL_VERSION, type, paneId, items: [], cursor: '999999999999999', done: false, notice: 'paused' }
       : { v: PROTOCOL_VERSION, type, paneId, items: [] }
   return jsonBytes(frame)
 }

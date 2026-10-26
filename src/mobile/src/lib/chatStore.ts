@@ -2,7 +2,10 @@
  * Chat messages per console (E3 M12), fed by the WS client (chatPage,
  * chatAppend) and read by ChatView. The list rules live in chatModel.ts;
  * this store adds the loading and "The PC did not answer" state of the first
- * page and of "Load earlier" (E3-FR-04, FR-26).
+ * page and of "Load earlier" (E3-FR-04, FR-26). App 2.7.0 (A8): `paused`,
+ * the PC closed this chat's watcher for another one (ChatHub's LRU, the
+ * `paused` notice): the list stays and nothing more comes until a new
+ * chatSub, whose first page clears it.
  */
 import { create } from 'zustand'
 import type { ChatMessage } from '@shared/chat-types'
@@ -17,9 +20,11 @@ export interface PaneChat {
   failed: ChatLoad | null
   /** Bumped by every first page: the view jumps to the end. */
   version: number
+  /** app 2.7.0: the PC paused this chat (no appends until the user resumes it). */
+  paused: boolean
 }
 
-const EMPTY_PANE: PaneChat = { list: EMPTY_LIST, loading: null, failed: null, version: 0 }
+const EMPTY_PANE: PaneChat = { list: EMPTY_LIST, loading: null, failed: null, version: 0, paused: false }
 
 interface Page {
   items: ChatMessage[]
@@ -31,10 +36,12 @@ export interface ChatState {
   chats: Record<string, PaneChat>
   begin: (paneId: string, kind: ChatLoad) => void
   fail: (paneId: string, kind: ChatLoad) => void
-  /** A first page (or a reset): the list is replaced. */
-  replace: (paneId: string, page: Page) => void
+  /** A first page (or a reset): the list is replaced; `paused` when the PC marked it so. */
+  replace: (paneId: string, page: Page, paused?: boolean) => void
   prepend: (paneId: string, page: Page) => void
   append: (paneId: string, items: ChatMessage[]) => void
+  /** app 2.7.0: the `paused` notice; the list stays as it is. */
+  pause: (paneId: string) => void
   clear: (paneId: string) => void
 }
 
@@ -51,10 +58,10 @@ export const useChatStore = create<ChatState>((set) => ({
       if (cur.loading !== kind) return s
       return { chats: patch(s.chats, paneId, { loading: null, failed: kind }) }
     }),
-  replace: (paneId, page) =>
+  replace: (paneId, page, paused = false) =>
     set((s) => {
       const cur = s.chats[paneId] ?? EMPTY_PANE
-      return { chats: patch(s.chats, paneId, { list: replaceList(page), loading: null, failed: null, version: cur.version + 1 }) }
+      return { chats: patch(s.chats, paneId, { list: replaceList(page), loading: null, failed: null, version: cur.version + 1, paused }) }
     }),
   prepend: (paneId, page) =>
     set((s) => {
@@ -65,6 +72,11 @@ export const useChatStore = create<ChatState>((set) => ({
     set((s) => {
       const cur = s.chats[paneId] ?? EMPTY_PANE
       return { chats: patch(s.chats, paneId, { list: appendList(cur.list, items) }) }
+    }),
+  pause: (paneId) =>
+    set((s) => {
+      if (s.chats[paneId]?.paused) return s
+      return { chats: patch(s.chats, paneId, { paused: true }) }
     }),
   clear: (paneId) =>
     set((s) => {

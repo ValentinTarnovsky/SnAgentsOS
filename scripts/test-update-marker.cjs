@@ -3,7 +3,8 @@
 // dataDir() turns a setup that never completed (a declined permission prompt)
 // into one update:notApplied toast on the next start. Covers the pure reader
 // (numeric version order, age window, malformed files), the read-and-delete at
-// start against a throwaway folder and the one-shot IPC handler.
+// start against a throwaway folder and the one-shot IPC handler. B5 integration (third round): the BOM
+// strippers of runtimeFile, repoConfig and HookInstaller (and this suite) spell U+FEFF as an escape.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -58,7 +59,7 @@ async function main() {
     const bad = [
       '', 'not json', 'null', '[]', '{}', text({ from: '2.4.0', to: '2.4.1' }), text({ ...fresh, at: 'yesterday' }),
       text({ ...fresh, at: -1 }), text({ ...fresh, to: 'latest' }), text({ ...fresh, from: 42 }), text({ ...fresh, to: '9'.repeat(80) + '.0.0' }),
-      text({ ...fresh, to: '2.4.1; rm -rf /' }), '﻿' + text(fresh),
+      text({ ...fresh, to: '2.4.1; rm -rf /' }), '\uFEFF' + text(fresh),
     ]
     for (const b of bad) check(m.readUpdateMarker(b, '2.4.0', now) === null, `malformed marker is silent: ${JSON.stringify(b).slice(0, 60)}`)
     check(m.parseUpdateMarker(text({ ...fresh, extra: 1 }))?.to === '2.4.1', 'unknown fields are ignored')
@@ -110,6 +111,16 @@ async function main() {
     check(handlers.get(CH.UPDATE_NOT_APPLIED)() === null, 'without a marker it answers null')
   }
 
+  // --- BOM strippers: the escape, never the invisible character itself -------
+  {
+    const BOM = String.fromCharCode(0xFEFF)
+    const ESC = String.fromCharCode(92) + 'uFEFF'
+    for (const rel of ['src/main/cli/runtimeFile.ts', 'src/main/repoConfig/repoConfig.ts', 'src/main/status/HookInstaller.ts', 'scripts/test-update-marker.cjs']) {
+      const src = fs.readFileSync(path.join(root, rel), 'utf8')
+      check(!src.includes(BOM) && src.includes(ESC), `${rel}: a BOM is spelled as its escape, no raw U+FEFF in the source`)
+    }
+  }
+
   // --- copy: es/en for every new string, no dashes -------------------------
   {
     const { en } = load('src/renderer/i18n/en.ts')
@@ -122,7 +133,7 @@ async function main() {
     check(/reopen/.test(en['update.installerNote']) && /permission/.test(en['update.installerNote']) && /volver/.test(es['update.installerNote']) && /permiso/.test(es['update.installerNote']), 'installer note: closes, updates, reopens, Windows may ask for permission')
   }
 
-  console.log(`PASS: ${checks} update marker checks (version order, age window, malformed files, take-and-delete, one-shot IPC, copy)`)
+  console.log(`PASS: ${checks} update marker checks (version order, age window, malformed files, take-and-delete, one-shot IPC, BOM escapes, copy)`)
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1 })

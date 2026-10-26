@@ -1,0 +1,6 @@
+{
+  "steps": [
+    { "spawnChild": { "detached": true, "ms": 120000 } },
+    { "exit": 0 }
+  ]
+}

@@ -10,7 +10,7 @@ import { StatusIndicator } from '../StatusIndicator'
 import { useRemoteStore } from '../../lib/store'
 import { PaneIcon } from '../../lib/paneIcon'
 import { useLongPress } from '../../lib/longPress'
-import { rowLine } from '../../lib/statusText'
+import { agentStatusOf, needsText, rowLine } from '../../lib/statusText'
 import { isWorkspaceMounted, workspaceOfPane } from '../../lib/workspace'
 import { t } from '../../lib/i18n'
 
@@ -33,7 +33,10 @@ export function ResumeCard({
     if (ws && pane) onActions(ws.id, pane.id)
   })
   if (!snapshot || !ws || !pane) return null
-  const line = rowLine({ status, running: pane.running, exitCode: pane.exitCode, mounted: isWorkspaceMounted(snapshot, ws.id) }, now)
+  // App 2.7.0: a bare status (a `snaos needs` with no agent) reads as its request.
+  const line = status?.bare && status.needs
+    ? needsText(status.needs)
+    : rowLine({ status, running: pane.running, exitCode: pane.exitCode, mounted: isWorkspaceMounted(snapshot, ws.id) }, now)
   return (
     <section className="mb-4">
       <h2 className="mb-1.5 px-1 text-[11px] font-semibold uppercase tracking-wide text-text-secondary">{t('home.resume')}</h2>
@@ -58,7 +61,7 @@ export function ResumeCard({
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="truncate text-sm font-semibold text-text-primary">{pane.title}</span>
-            <StatusIndicator status={status} size={10} />
+            <StatusIndicator status={agentStatusOf(status)} size={10} />
           </span>
           <span className="truncate text-[11px] text-text-secondary">
             {ws.name} - {line}

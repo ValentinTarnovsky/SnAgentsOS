@@ -137,12 +137,16 @@ function PromptDialog({ workspace }: { workspace: Workspace }) {
   }
   const send = (): void => {
     if (!canSend) return
-    const count = broadcastToWorkspace(workspace, prompt.trim(), { paneIds: chosen.map((p) => p.id), enter })
+    const { sent: count, skipped } = broadcastToWorkspace(workspace, prompt.trim(), { paneIds: chosen.map((p) => p.id), enter })
     setOpen(false)
-    // N is what actually received the text (live, non-minimized ptys).
-    if (count === 0) toast.warning(t('toast.prompt.none'), { dedupeKey: 'globalPrompt' })
-    else if (enter) toast.success(t(count === 1 ? 'toast.prompt.enterOne' : 'toast.prompt.enterMany', { count }), { dedupeKey: 'globalPrompt' })
-    else toast.success(t(count === 1 ? 'toast.prompt.one' : 'toast.prompt.many', { count }), { dedupeKey: 'globalPrompt' })
+    // N is what actually received the text (live, non-minimized ptys); the
+    // consoles waiting on the user (a permission or plan menu) got nothing.
+    const body = skipped > 0 ? t(skipped === 1 ? 'toast.prompt.skippedOne' : 'toast.prompt.skippedMany', { count: skipped }) : undefined
+    const opts = { dedupeKey: 'globalPrompt', ...(body ? { body } : {}) }
+    const done = body ? toast.warning : toast.success
+    if (count === 0) toast.warning(t('toast.prompt.none'), opts)
+    else if (enter) done(t(count === 1 ? 'toast.prompt.enterOne' : 'toast.prompt.enterMany', { count }), opts)
+    else done(t(count === 1 ? 'toast.prompt.one' : 'toast.prompt.many', { count }), opts)
   }
   const race = async (): Promise<void> => {
     if (!canRace) return

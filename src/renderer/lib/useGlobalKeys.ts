@@ -15,16 +15,20 @@ import { toggleSidePanel } from './sidePanels'
 import { runDictateShortcut } from './dictation'
 import { panelKeyOf } from './changes'
 import { sharedOverlayActive } from './shareGuestStore'
+import { closeTeams, openTeams, teamsOverlayActive } from './teamsStore'
+import { labOn } from '@shared/labs'
 import { focusWorkspaceConsole } from './focusWorkspace'
-import { waitsOnUser } from '@shared/status'
+import { focusedChatConsole, togglePaneView } from './consoleChatStore'
+import { usePlanModal } from './planModal'
 import {
   advanceWaiting,
-  allAgents,
   navigablePanes,
   navInputFrom,
   stepPane,
+  stillWaiting,
   visibleConsoles,
   waitingIds,
+  type NavInput,
   type WaitingCursor,
 } from './agentNav'
 
@@ -40,21 +44,18 @@ function displayOrder() {
 let waitingCursor: WaitingCursor | null = null
 
 /**
- * Reveal the next console waiting on the user: action/error first, then
- * unread done, longest waiting first; presses within 5 s keep walking the same
- * list. With nobody waiting, a toast (announced by the stack's aria-live).
+ * Reveal the next console that needs the user, in the order the palette's
+ * "Waiting for you" shows (the shared rule, src/shared/attention.ts: needs and
+ * open requests first, then unread done, longest waiting first); presses
+ * within 5 s keep walking the same list. With nobody waiting, a toast
+ * (announced by the stack's aria-live).
  */
 export function goToNextWaiting(now = Date.now()): string | null {
   const app = useAppStore.getState()
-  // A frozen entry still counts while its console exists and is still waiting
-  // or done (revealing a done one clears its unread flag, not its state).
-  const exists = (id: string): boolean => {
-    const s = useAppStore.getState()
-    const st = s.paneStatus[id], state = st?.state
-    // v2.3: an action already answered (main's attention false) is nobody waiting.
-    return (waitsOnUser(st) || state === 'error' || state === 'done') && s.workspaces.some((w) => w.panes.some((p) => p.id === id))
-  }
-  const step = advanceWaiting(waitingCursor, () => waitingIds(allAgents(navInputFrom(app, useAgentStore.getState()))), exists, now)
+  const input = (): NavInput => navInputFrom(useAppStore.getState(), useAgentStore.getState())
+  // A frozen entry still counts while it needs the user or was only seen
+  // (revealing a done one clears its unread flag, not its state).
+  const step = advanceWaiting(waitingCursor, () => waitingIds(input()), (id) => stillWaiting(input(), id), now)
   waitingCursor = step.cursor
   if (!step.target) {
     toast.info(translate(app.settings.language, 'agents.nobodyWaiting'), { dedupeKey: 'next-waiting' })
@@ -88,8 +89,8 @@ function ctrlDigitBlocked(e: KeyboardEvent): boolean {
 
 /**
  * Keymap actions that target the focused LOCAL console or the active local
- * workspace. While the shared view covers the grid (app 2.4.0) they are
- * swallowed: they would act on a console the user cannot see.
+ * workspace. While the shared view (app 2.4.0) or Teams (app 2.7.0) covers
+ * the grid they are swallowed: they would act on a console the user cannot see.
  */
 const PANE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   'newConsole',
@@ -106,7 +107,30 @@ const PANE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>([
   'toggleFiles',
   'toggleNotes',
   'dictate',
+  'toggleConsoleChat',
 ])
+
+/**
+ * A modal dialog is open beyond the store's flags (quickBlocked): the plan
+ * modal, or any `aria-modal` dialog, one a component holds in its own state
+ * too (ScheduleDialog, WorktreeCloseDialog).
+ */
+function dialogOpen(): boolean {
+  if (usePlanModal.getState().view) return true
+  return typeof document !== 'undefined' && document.querySelector('[aria-modal="true"]') !== null
+}
+
+/**
+ * The console `toggleConsoleChat` (app 2.7.0, A7) switches: the focused agent
+ * console on screen with Labs consoleChat on (focusedChatConsole), and nothing
+ * over the grid (a modal, the Quick Commands popover, the agents board). Null
+ * means the action does nothing and the key goes on as if unbound, except
+ * over the shared view, where it is swallowed (PANE_ACTIONS).
+ */
+function consoleChatKeyTarget(): string | null {
+  if (quickBlocked() || dialogOpen() || useAppStore.getState().quickPopoverOpen || useAgentStore.getState().view === 'board') return null
+  return focusedChatConsole()
+}
 
 function runAction(id: ActionId): void {
   const s = useAppStore.getState()
@@ -207,6 +231,11 @@ function runAction(id: ActionId): void {
     case 'dictate':
       runDictateShortcut()
       break
+    case 'toggleConsoleChat': {
+      const paneId = consoleChatKeyTarget()
+      if (paneId) togglePaneView(paneId)
+      break
+    }
     case 'agentsBoard': {
       // E5-FR-27: never over a modal; the board closes itself on Esc or a pick.
       const agents = useAgentStore.getState()
@@ -214,6 +243,11 @@ function runAction(id: ActionId): void {
       else if (!quickBlocked() && !s.quickPopoverOpen) agents.setView('board')
       break
     }
+    case 'teams':
+      // App 2.7.0 (E10 B1): toggles the overlay, never over a modal; the scan below skips the key with the lab off.
+      if (teamsOverlayActive()) closeTeams()
+      else if (!quickBlocked() && !s.quickPopoverOpen) openTeams()
+      break
   }
 }
 
@@ -242,16 +276,19 @@ export function useGlobalKeys(): void {
           e.stopPropagation()
           // Over the shared view (app 2.4.0) the active workspace itself is a way back:
           // the focus request makes the overlay guard leave even when the id does not change.
-          const back = sharedOverlayActive()
+          // Teams (app 2.7.0) closes first, so the jump lands on the grid.
+          const fromTeams = teamsOverlayActive()
+          if (fromTeams) closeTeams({ refocus: false })
+          const back = sharedOverlayActive() || fromTeams
           useAppStore.getState().setActive(target.id)
           if (back) focusWorkspaceConsole(target.id)
         }
         return
       }
 
-      // The shared view (app 2.4.0) covers the local grid: Ctrl+1..9 would
-      // focus a hidden local console, so it is left to the shared terminal.
-      const overlay = sharedOverlayActive()
+      // The shared view (app 2.4.0) or Teams (app 2.7.0) covers the local grid:
+      // Ctrl+1..9 would focus a hidden local console, so it is left alone.
+      const overlay = sharedOverlayActive() || teamsOverlayActive()
       const digit = ctrlDigit(e)
       if (digit !== null && !overlay && !ctrlDigitBlocked(e)) {
         const s = useAppStore.getState()
@@ -276,6 +313,11 @@ export function useGlobalKeys(): void {
         if (keymap[id] === accel) {
           // Ctrl+Shift+U inside a text field stays the field's key.
           if (SKIP_IN_EDITABLE.has(id) && isEditableTarget(e)) return
+          // Lab off or no agent console focused: the user's chord is not eaten (another binding or the console gets it).
+          // Over the shared view it is swallowed like every pane action, never left to the shared terminal.
+          if (id === 'toggleConsoleChat' && !overlay && !consoleChatKeyTarget()) continue
+          // Labs teams off: Ctrl+Shift+O is not eaten, it reaches the console (CONTRATOS Atajos).
+          if (id === 'teams' && !labOn(useAppStore.getState().settings, 'teams')) continue
           e.preventDefault()
           e.stopPropagation()
           if (overlay && PANE_ACTIONS.has(id)) return

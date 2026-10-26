@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { delimiter, join, resolve } from 'path'
+import { basename, delimiter, dirname, join, resolve } from 'path'
 import { BRAND, LEGACY_BRAND } from '@shared/brand'
 
 /**
@@ -26,6 +26,9 @@ export function statusBinDir(): string {
   return join(app.getPath('userData'), 'status-bin')
 }
 
+/** The userData folder name of a dev instance (devUserData.ts). */
+const DEV_DATA_DIR_RE = new RegExp(`^${BRAND.devUserDataDir}(?:-[0-9a-f]{8})?$`, 'i')
+
 /**
  * Every launcher directory a parent process may have left in an inherited
  * PATH: the current one, the 1.x one (its userData, also for the 1.x
@@ -33,11 +36,22 @@ export function statusBinDir(): string {
  * userData is overridden (dev build, --user-data-dir) and the app was started
  * from a console of the installed app. A pty or the Codex lookup must never
  * pick any of them up (E0-FR-05): on POSIX the shim taken for the real CLI
- * would recurse into itself.
+ * would recurse into itself. Plus the launcher of any dev instance found on
+ * the inherited PATH (plan A1.3: <appData>/snagentsos-dev or
+ * snagentsos-dev-<sha8> of a worktree), so a console of one dev instance that
+ * starts another, or the installed app, does not hand the first one's shim on.
  */
 export function statusBinDirs(): string[] {
   const appData = app.getPath('appData')
-  return [statusBinDir(), join(appData, LEGACY_BRAND.packageName, 'status-bin'), join(appData, BRAND.packageName, 'status-bin')]
+  const dirs = [statusBinDir(), join(appData, LEGACY_BRAND.packageName, 'status-bin'), join(appData, BRAND.packageName, 'status-bin')]
+  const pathKey = Object.keys(process.env).find(k => k.toUpperCase() === 'PATH')
+  for (const entry of (pathKey ? process.env[pathKey] ?? '' : '').split(delimiter)) {
+    if (!entry.trim()) continue
+    const dir = resolve(entry.trim().replace(/^"|"$/g, ''))
+    if (basename(dir).toLowerCase() !== 'status-bin' || !DEV_DATA_DIR_RE.test(basename(dirname(dir)))) continue
+    if (samePath(dirname(dirname(dir)), appData) && !dirs.some(d => samePath(d, dir))) dirs.push(dir)
+  }
+  return dirs
 }
 
 /** Normalized form for comparing PATH entries (Windows paths ignore case). */
@@ -50,14 +64,23 @@ export function samePath(a: string, b: string): boolean {
 }
 
 /**
+ * What Claude Code sets in the processes it starts (its tools, hooks); never inherited by a console or a team run
+ * (the app launched from inside a Claude session would hand that session's socket, token and pid to its agents).
+ * User configuration such as CLAUDE_CONFIG_DIR, CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX or ANTHROPIC_* is
+ * never in here.
+ */
+const AGENT_SESSION_ENV = new Set([
+  'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_ENV_FILE', 'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_PARENT_SESSION',
+  'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_TMPDIR',
+  'CLAUDE_CODE_PLUGIN_DIRS', 'CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS', 'CLAUDE_EFFORT', 'CLAUDE_PID',
+])
+
+/**
  * A clean env map (node-pty requires string values, no undefined). Variables
- * with our env prefix (new or legacy) and ELECTRON_RUN_AS_NODE are dropped
+ * with our env prefix (new or legacy), ELECTRON_RUN_AS_NODE and AGENT_SESSION_ENV are dropped
  * from the inherited env only, so a console of another instance does not leak its identity; `extra` (the
  * preset env and our own status env) is merged afterwards, unfiltered.
  */
-/** What Claude Code sets in the processes it starts (its tools, hooks); never inherited by a console. */
-const AGENT_SESSION_ENV = new Set(['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_ENV_FILE'])
-
 export function cleanEnv(extra?: Record<string, string>, stripDirs: string[] = statusBinDirs()): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {

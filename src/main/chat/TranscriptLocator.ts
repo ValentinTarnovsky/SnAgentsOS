@@ -31,6 +31,7 @@ import { open, readdir, realpath, stat } from 'fs/promises'
 import { basename, dirname, isAbsolute, join, relative, sep } from 'path'
 import type { ChatUnavailableReason } from '@shared/chat-types'
 import type { AgentProvider, ConfigFile, Pane, Workspace } from '@shared/types'
+import { findPaneInConfig, presetOfPane } from '@shared/paneConfig'
 import { claudeSlug } from '../agents/transcripts'
 import { numericDirsDesc } from '../agents/codexPaths'
 import { HISTORY_EDGE_BYTES } from '../history/SessionHistory'
@@ -70,6 +71,12 @@ export interface TranscriptLocatorDeps {
   runningPanes: () => string[]
   /** Transcript paths other consoles already hold (normalized with pathKey), pane id per path. */
   claims: () => Map<string, string>
+  /**
+   * App 2.7.0 (E10 B2): a session a team owns (TeamService.ownsSession). The
+   * folder match never picks its transcript for a console: Lead and free runs
+   * write into the repo root's slug folder, where a hookless console looks.
+   */
+  teamSession?: (sessionId: string) => boolean
   /** Local date for the Codex day folders; injectable for tests. */
   now?: () => Date
   platform?: NodeJS.Platform
@@ -147,11 +154,7 @@ export async function awaitable(root: string, p: string, platform: NodeJS.Platfo
 }
 
 function findPane(cfg: ConfigFile | null, paneId: string): { pane: Pane; ws: Workspace } | null {
-  for (const ws of cfg?.workspaces ?? []) {
-    const pane = ws.panes.find((p) => p.id === paneId)
-    if (pane) return { pane, ws }
-  }
-  return null
+  return findPaneInConfig(cfg, paneId)
 }
 
 const WSL_RE = /^\s*"?(?:[^"\s]*[\\/])?wsl(?:\.exe)?"?(?:\s|$)/i
@@ -159,7 +162,7 @@ const WSL_RE = /^\s*"?(?:[^"\s]*[\\/])?wsl(?:\.exe)?"?(?:\s|$)/i
 /** Behind a Connection Profile (pane.setupId ?? workspace.setupId, like launch.ts) or WSL. */
 export function isNotLocal(cfg: ConfigFile | null, pane: Pane, ws: Workspace, platform: NodeJS.Platform = process.platform): boolean {
   if (pane.setupId ?? ws.setupId) return true
-  const preset = pane.presetId ? cfg?.presets?.find((p) => p.id === pane.presetId) : undefined
+  const preset = presetOfPane(cfg, pane)
   const command = pane.command ?? preset?.command ?? ''
   if (WSL_RE.test(command)) return true
   const shell = cfg?.settings?.defaultShell?.[platform as 'win32' | 'darwin' | 'linux'] ?? ''
@@ -168,13 +171,13 @@ export function isNotLocal(cfg: ConfigFile | null, pane: Pane, ws: Workspace, pl
 
 /** The pane's provider from its config (status unknown). */
 function configProvider(cfg: ConfigFile | null, pane: Pane): AgentProvider | null {
-  const preset = pane.presetId ? cfg?.presets?.find((p) => p.id === pane.presetId) : undefined
+  const preset = presetOfPane(cfg, pane)
   const type = preset?.type ?? pane.type
   return type === 'claude' || type === 'codex' ? type : null
 }
 
 function launchCwd(cfg: ConfigFile | null, pane: Pane, ws: Workspace): string {
-  const preset = pane.presetId ? cfg?.presets?.find((p) => p.id === pane.presetId) : undefined
+  const preset = presetOfPane(cfg, pane)
   return pane.cwd ?? preset?.defaultCwd ?? ws.cwd ?? ''
 }
 
@@ -305,6 +308,9 @@ export class TranscriptLocator {
     } catch {
       return { ok: false, reason: 'noTranscript' }
     }
+    // A team run's transcript (its file name is the session id) is never a console's.
+    const teamSession = this.deps.teamSession
+    if (teamSession) names = names.filter((n) => !teamSession(n.replace(/\.jsonl$/i, '')))
     // No live pty, no session to match: without a spawn time every file of
     // the folder would count, and an old transcript could pass for this one.
     const spawned = this.deps.spawnedAt(paneId)

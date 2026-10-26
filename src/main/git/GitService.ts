@@ -8,6 +8,13 @@
  * a bounded untracked line count. A summary is emitted on `git:update` only
  * when it changed by value.
  *
+ * "main -N" (app 2.7.0, A9): a unit with a `pane:` key on a worktree main
+ * manages (`managedRepoOf`) also reads its main checkout's HEAD
+ * (`rev-parse`) and counts `rev-list --count <tip>..<mainHead>` only when the
+ * tip or that HEAD moved since the last count (cached per unit). A commit on
+ * the main branch moves refs/heads (the common watcher); a checkout in the
+ * main checkout moves the common dir's HEAD, which refreshes only those units.
+ *
  * When a unit refreshes (FR-06):
  *  (a) a watcher on its gitdir (index, HEAD, ORIG_HEAD, MERGE_HEAD,
  *      CHERRY_PICK_HEAD, rebase-*) and two shared per common dir (packed-refs,
@@ -76,6 +83,8 @@ export interface GitServiceDeps {
   mtimeOf?: (p: string) => number | null
   untracked?: UntrackedCounter
   platform?: NodeJS.Platform
+  /** WorktreeService.repoOf: the main checkout of a worktree main manages, else null ("main -N"). */
+  managedRepoOf?: (dir: string) => string | null
 }
 
 interface Resolved {
@@ -113,6 +122,8 @@ interface Unit {
   gitDirWatch: WatchHandle | null
   hotUntil: number
   waiters: Waiter[]
+  /** Last "main -N" count and the (tip, main HEAD) it was counted at; null when the unit has none. */
+  behind: { tip: string; mainHead: string; n: number } | null
 }
 
 interface CommonWatch {
@@ -488,6 +499,7 @@ export class GitService {
       }
       const untrackedPaths = st.entries.filter((e) => e.area === 'untracked').map((e) => e.path)
       const ut = await this.untracked.count(repo.repoRoot, untrackedPaths)
+      const mainBehind = await this.mainBehindOf(u, repo, st.branch.oid)
       const summary: GitSummary = {
         repoRoot: repo.repoRoot,
         branch: st.branch.head,
@@ -507,6 +519,7 @@ export class GitService {
         conflicts: st.conflicts,
         op: this.opOf(repo.gitDir),
         truncated: st.truncated,
+        ...(mainBehind !== undefined ? { mainBehind } : {}),
         updatedAt: 0,
       }
       this.settle(u, summary, undefined, st.entries)
@@ -515,9 +528,39 @@ export class GitService {
       if (code === 'not_repo' && u.resolved) {
         this.untracked.forget(u.resolved.repoRoot)
         u.resolved = null
+        u.behind = null
         this.rebalanceWatchers()
       }
       this.settle(u, null, code, [])
+    }
+  }
+
+  /**
+   * "main -N" of a unit with a `pane:` key on a worktree main manages: the
+   * commits its main checkout's HEAD has that `tip` lacks. The count is
+   * cached by (tip, main HEAD), so a run where neither moved costs one
+   * `rev-parse`. Undefined for any other unit, while unborn, or when git
+   * cannot answer (the chip then shows nothing, never a wrong number).
+   */
+  private async mainBehindOf(u: Unit, repo: Resolved, tip: string | null): Promise<number | undefined> {
+    const lookup = this.deps.managedRepoOf
+    const mainRepo = lookup && tip && [...u.keys].some((k) => k.startsWith('pane:')) ? lookup(repo.repoRoot) : null
+    if (!mainRepo || !tip) {
+      u.behind = null
+      return undefined
+    }
+    try {
+      const mainHead = (await this.deps.runner.run(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { cwd: mainRepo })).trim().toLowerCase()
+      if (!/^[0-9a-f]{40,64}$/.test(mainHead)) throw new GitExecError('git_error', 'no main HEAD')
+      const at = tip.toLowerCase()
+      if (u.behind && u.behind.tip === at && u.behind.mainHead === mainHead) return u.behind.n
+      const n = Number((await this.deps.runner.run(['rev-list', '--count', `${at}..${mainHead}`], { cwd: u.cwd })).trim())
+      if (!Number.isInteger(n) || n < 0) throw new GitExecError('git_error', 'unexpected rev-list output')
+      u.behind = { tip: at, mainHead, n }
+      return n
+    } catch {
+      u.behind = null
+      return undefined
     }
   }
 
@@ -577,7 +620,17 @@ export class GitService {
     for (const [id, dir] of commons) {
       if (this.commons.has(id)) continue
       const handles: WatchHandle[] = []
-      const top = this.watchFn(dir, false, (name) => name && COMMON_NAMES.has(name) && this.onCommonEvent(id), () => undefined)
+      const top = this.watchFn(
+        dir,
+        false,
+        (name) => {
+          if (!name) return
+          if (COMMON_NAMES.has(name)) this.onCommonEvent(id)
+          // The main checkout's HEAD (a checkout there): only "main -N" of its worktrees moves.
+          else if (name === 'HEAD') this.onMainHeadEvent(id)
+        },
+        () => undefined,
+      )
       if (top) handles.push(top)
       const refs = this.watchFn(
         this.P.join(dir, 'refs'),
@@ -612,6 +665,17 @@ export class GitService {
     for (const u of this.units.values()) {
       if (u.gitDirWatch && u.resolved && this.norm(u.resolved.commonDir) === commonId) this.debounceWatch(u)
     }
+  }
+
+  /** The common dir's HEAD moved: refresh the units on it that count "main -N". */
+  private onMainHeadEvent(commonId: string): void {
+    let hit = false
+    for (const u of this.units.values()) {
+      if (!u.behind || !u.gitDirWatch || !u.resolved || this.norm(u.resolved.commonDir) !== commonId) continue
+      hit = true
+      this.debounceWatch(u)
+    }
+    if (hit) this.stats.watchEvents++
   }
 
   private indexChanged(u: Unit): boolean {
@@ -659,6 +723,7 @@ export class GitService {
       gitDirWatch: null,
       hotUntil: 0,
       waiters: [],
+      behind: null,
     }
   }
 

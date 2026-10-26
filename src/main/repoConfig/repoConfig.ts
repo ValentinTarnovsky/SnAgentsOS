@@ -38,7 +38,7 @@ const nodeFs: RepoFs = {
 /** The text that gets hashed and parsed: UTF-8, no BOM, CRLF (and lone CR) as LF. */
 export function normalizeRepoText(buf: Buffer | string): string {
   const text = typeof buf === 'string' ? buf : buf.toString('utf8')
-  return text.replace(/^﻿/, '').replace(/\r\n?/g, '\n')
+  return text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
 }
 
 /** sha256 hex over the normalized text (E8-FR-24): line endings and a BOM never re-ask. */

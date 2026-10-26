@@ -307,12 +307,37 @@ async function main() {
         const dev = load('src/main/pty/shellResolver.ts', { require: id => id === 'electron' ? devElectron : require(id), process: { ...process, env: { PATH: [currentBin, devBin, legacyBin, tools].join(path.delimiter) } } })
         check(dev.statusBinDirs().join() === [devBin, legacyBin, currentBin].join() && dev.cleanEnv().PATH === tools, 'overridden userData: the installed app status-bin is stripped too')
       }
+      {
+        // Plan A1.3: a worktree dev instance (snagentsos-dev-<sha8>) started from a console of the main dev instance or of another worktree.
+        const devDir = name => path.join(appData, name, 'status-bin')
+        const ownBin = devDir(BRAND.devUserDataDir + '-0a1b2c3d'), mainDevBin = devDir(BRAND.devUserDataDir), otherBin = devDir(BRAND.devUserDataDir + '-ffee0011')
+        const kept = [devDir(BRAND.devUserDataDir + '-notahash'), devDir(BRAND.devUserDataDir + '-0a1b2c3d4'), path.join(tmp, 'elsewhere', BRAND.devUserDataDir, 'status-bin'), path.join(appData, BRAND.devUserDataDir, 'bin'), tools]
+        const wtElectron = { app: { getPath: name => ({ appData, userData: path.dirname(ownBin) })[name] } }
+        const inheritedPath = [mainDevBin, ...kept.slice(0, 2), otherBin + path.sep, ownBin, ...kept.slice(2)].join(path.delimiter)
+        const wt = load('src/main/pty/shellResolver.ts', { require: id => id === 'electron' ? wtElectron : require(id), process: { ...process, env: { PATH: inheritedPath } } })
+        check(wt.statusBinDirs().join() === [ownBin, legacyBin, currentBin, mainDevBin, otherBin].join(), 'worktree dev instance: the inherited status-bin of other dev instances joins the strip list once')
+        check(wt.cleanEnv().PATH === kept.join(path.delimiter), 'worktree dev instance: other dev launchers stripped, look-alike folders kept')
+        const installed = load('src/main/pty/shellResolver.ts', { require: withElectron, process: { ...process, env: { PATH: [mainDevBin, tools].join(path.delimiter) } } })
+        check(installed.cleanEnv().PATH === tools, 'installed app started from a dev console: the dev status-bin is stripped')
+      }
       for (const key of ['PATH', 'Path']) {
         const { cleanEnv } = resolver({ ...inherited, [key]: [legacyBin, tools, currentBin].join(path.delimiter) })
         const env = cleanEnv({ SNAOS_FOO: 'preset', [AGENT_ENV.consoleId]: 'pane' })
         check(!(legacyVar in env) && !(AGENT_ENV.ptyId in env), `${key}: inherited legacy and new prefixed vars dropped`)
         check(env.SNAOS_FOO === 'preset' && env[AGENT_ENV.consoleId] === 'pane' && env.KEEP === 'yes', `${key}: extra merged unfiltered, unrelated vars kept`)
         check(env[key] === tools, `${key}: both status-bin entries stripped, the rest kept`)
+      }
+      {
+        // App 2.7.0: the app started from inside a Claude Code session hands none of that session to a console or a
+        // team run (its socket, token, pid, tmp dir...), while the user's own Claude and Anthropic configuration stays.
+        const session = ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_ENV_FILE', 'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_PARENT_SESSION',
+          'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_TMPDIR',
+          'CLAUDE_CODE_PLUGIN_DIRS', 'CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS', 'CLAUDE_EFFORT', 'CLAUDE_PID']
+        const config = { CLAUDE_CONFIG_DIR: path.join(tmp, 'claude'), CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', ANTHROPIC_BASE_URL: 'https://proxy.example', ANTHROPIC_MODEL: 'opus', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8000' }
+        const { cleanEnv } = resolver({ ...Object.fromEntries(session.map(k => [k, 'parent-session'])), ...(process.platform === 'win32' ? { claude_pid_x: 'kept', Claude_Pid: '4242' } : {}), ...config, PATH: tools })
+        const env = cleanEnv()
+        check(!Object.keys(env).some(k => session.includes(k.toUpperCase())), `the Claude Code session vars of a parent session are dropped (any case on Windows): ${Object.keys(env).join()}`)
+        check(Object.entries(config).every(([k, v]) => env[k] === v) && (process.platform !== 'win32' || env.claude_pid_x === 'kept'), 'user configuration stays: CLAUDE_CONFIG_DIR, Bedrock, Vertex, ANTHROPIC_*, other CLAUDE_* settings')
       }
       if (process.platform === 'win32') {
         const lowerVar = LEGACY_BRAND.envPrefix.toLowerCase() + 'pty_id'

@@ -125,8 +125,13 @@ export function chooseDelivery(c: InitialPromptCheck & { launchKind: LaunchKind 
   return initialPromptFallback(c) ? 'gate' : 'argv'
 }
 
-/** `busy` (v2.3): a gated submit (`readyFor`) found the agent busy or a draft in its input box. */
-export type SubmitError = 'multiline_unsafe' | 'not_running' | 'busy'
+/**
+ * `busy` (v2.3): a gated submit (`readyFor`) found the agent busy or a draft in its input box.
+ * With `userGate` (post 2.6.0, `typingBlocked`): `awaiting_user` = the agent waits on the user,
+ * nothing was written; `enter_held` = it started waiting after the text was typed, so the
+ * deferred Enter (and any trailing line break) was dropped and the text stays unsent.
+ */
+export type SubmitError = 'multiline_unsafe' | 'not_running' | 'busy' | 'awaiting_user' | 'enter_held'
 
 /**
  * What a submit writes (E8-FR-02a): line breaks normalized to `\r` (like

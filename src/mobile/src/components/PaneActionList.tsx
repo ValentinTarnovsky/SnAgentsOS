@@ -11,9 +11,15 @@
  * (E5-FR-11) and only show for a `resumable` pane (D10); an error ack (no
  * saved session any more) shows a toast. "Show on the PC" sends revealPane:
  * the desktop restores its window and focuses the console (E2-FR-07).
+ *
+ * App 2.7.0 (A8): on a desktop >= 2.7.0 the status marks come first (Mark as
+ * read for a done or error turn, Mute until it changes or Unmute, Ignore
+ * this turn while silent), sent at once as markRead / mutePane / silenceAck,
+ * which main handles; a failed ack shows a toast. A `bare` status (only a
+ * `snaos needs`, no agent) gets none and no agent glyph.
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Copy, History, MessageSquarePlus, MonitorUp, Pencil, RotateCcw, Trash2 } from 'lucide-react'
+import { Bell, BellOff, CheckCheck, Copy, EyeOff, History, MessageSquarePlus, MonitorUp, Pencil, RotateCcw, Trash2 } from 'lucide-react'
 import type { RemoteCtlAction } from '@shared/remote-protocol'
 import { Sheet } from './Sheet'
 import { ActionList, type ActionItem } from './ActionList'
@@ -23,14 +29,25 @@ import { StatusIndicator } from './StatusIndicator'
 import { store, useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { PaneIcon } from '../lib/paneIcon'
-import { paneActionIds, restartAction, type PaneActionId } from '../lib/paneActions'
+import { paneActionIds, restartAction, statusMarkAction, statusMarksSupported, type PaneActionId, type StatusMarkId } from '../lib/paneActions'
+import { agentStatusOf } from '../lib/statusText'
 import type { PaneRef } from '../lib/workspace'
 import { t, type MobileMessageKey } from '../lib/i18n'
 
 /** Longest last reply the header shows (the desktop already caps it at 280). */
 const MESSAGE_MAX = 280
 
+const MARKS: ReadonlySet<PaneActionId> = new Set<StatusMarkId>(['markRead', 'mute', 'unmute', 'silenceAck'])
+
+function isMark(id: PaneActionId): id is StatusMarkId {
+  return MARKS.has(id)
+}
+
 const LABEL: Record<PaneActionId, MobileMessageKey> = {
+  markRead: 'act.markRead',
+  mute: 'act.mute',
+  unmute: 'act.unmute',
+  silenceAck: 'act.silenceAck',
   rename: 'act.rename',
   restart: 'act.restart',
   restartResume: 'act.restartResume',
@@ -48,6 +65,10 @@ const CONFIRM: Record<'restart' | 'restartResume' | 'restartFresh' | 'close', Mo
 }
 
 const ICON: Record<PaneActionId, ReactNode> = {
+  markRead: <CheckCheck size={16} />,
+  mute: <BellOff size={16} />,
+  unmute: <Bell size={16} />,
+  silenceAck: <EyeOff size={16} />,
   rename: <Pencil size={16} />,
   restart: <RotateCcw size={16} />,
   restartResume: <History size={16} />,
@@ -115,18 +136,24 @@ export function usePaneActionItems(
     const ws = s.snapshot.workspaces.find((w) => w.id === ref.workspaceId)
     return ws?.panes.find((p) => p.id === ref.paneId) ?? null
   })
+  const status = useRemoteStore((s) => (ref ? s.paneStatus[ref.paneId] : undefined))
+  const marks = useRemoteStore((s) => statusMarksSupported(s.appVersion))
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [renaming, setRenaming] = useState<{ ref: PaneRef; title: string } | null>(null)
 
   const items: ActionItem[] =
     ref && pane
-      ? paneActionIds(pane, opts).map((id) => ({
+      ? paneActionIds(pane, { ...opts, status, marks }).map((id) => ({
           id,
           icon: ICON[id],
           label: t(LABEL[id]),
           destructive: id === 'close',
           onSelect: () => {
             onPick()
+            if (isMark(id)) {
+              void sendPaneCtl(statusMarkAction(ref.paneId, id))
+              return
+            }
             if (id === 'rename') {
               setRenaming({ ref, title: pane.title })
               return
@@ -208,7 +235,7 @@ export function PaneActionList({
               pane ? (
                 <>
                   <PaneIcon type={status?.provider ?? pane.type} size={16} />
-                  <StatusIndicator status={status} />
+                  <StatusIndicator status={agentStatusOf(status)} />
                 </>
               ) : undefined
             }

@@ -83,6 +83,7 @@ import type { ShareListener } from './ShareServer'
 import { fitFilesReply } from './shareFiles'
 import type { ShareTransport } from './transport'
 import { realShareClock, type ShareClock, type ShareTimer } from './clock'
+import { devPort } from '../devPort'
 
 export const SHARE_SCOPE_GRACE_MS = 10 * 60_000
 export const SHARE_RUNNING_DEBOUNCE_MS = 50
@@ -292,7 +293,9 @@ export class ShareHost {
   // --- Config and the listener ------------------------------------------------------
 
   applyConfig(cfg: Partial<ShareHostConfig> | null | undefined): void {
-    const port = Number.isInteger(cfg?.port) && cfg!.port! >= 1024 && cfg!.port! <= 65535 ? cfg!.port! : 4527
+    const valid = Number.isInteger(cfg?.port) && cfg!.port! >= 1024 && cfg!.port! <= 65535 ? cfg!.port! : 4527
+    // Plan A1.3: a worktree dev instance moves the default port (devPort.ts).
+    const port = devPort(valid, 4527)
     this.config = { enabled: cfg?.enabled === true, port }
     this.syncListener(true)
     this.scheduleUi()
