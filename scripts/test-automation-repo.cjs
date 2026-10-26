@@ -218,6 +218,8 @@ async function run({ check, load, loadRenderer }) {
     check(L.trustItemsFor({ version: 1, grid: 4, connectionProfile: 'dedi', consoles: [{ title: 'x' }] }, 'dedi', 1)[0].kind === 'profile', 'a file with only a profile shows the profile line first')
     const sneaky = L.trustItemsFor({ version: 1, setup: { command: 'echo ok \u202E;rm -rf x\u202C\u200B' }, consoles: [{ title: 'a\u001b[2Jb', command: 'npm i\nnpm test' }] }, undefined, 2)
     check(sneaky[0].command === 'echo ok <U+202E>;rm -rf x<U+202C><U+200B>' && sneaky[1].title === 'a<U+001B>[2Jb' && sneaky[1].command === 'npm i\nnpm test', 'bidi, zero-width and control characters are spelled out in the trust lines (newlines stay)')
+    const tagged = L.trustItemsFor({ version: 1, setup: { command: 'npm test\u{E0072}\u{E006D}' }, consoles: [{}] }, undefined, 1)
+    check(tagged[0].command === 'npm test<U+E0072><U+E006D>', 'Unicode tag characters (U+E0000 to U+E007F) are spelled out too, as whole code points', tagged[0].command)
     check(L.trustItemsFor({ version: 1, consoles: [{ agent: 'Shell' }, { agent: 'codex' }] }, undefined, 2).map((x) => x.kind).join() === 'agent', 'the shell keyword is no agent line, any case')
     const okRes = (extra) => ({ status: 'ok', config: { version: 1, consoles: [{}] }, sha256: okSha, needsTrust: true, trusted: false, warnings: [], ...extra })
     check(L.trustDialogNeeded(okRes(), undefined).dialog && L.trustDialogNeeded(okRes(), undefined).store, 'executable and untrusted: dialog and store')
