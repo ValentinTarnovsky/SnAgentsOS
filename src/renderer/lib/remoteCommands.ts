@@ -236,6 +236,12 @@ function run(action: RemoteCtlAction, fit?: RemoteCommandFit): CmdResult | Promi
     case 'silenceAck':
       return { ok: false, error: 'unknown_action' }
 
+    // app 2.7.0 (E10 B8): handled in main (SessionManager.handleCtl); never relayed.
+    case 'teamDecide':
+    case 'teamAnswer':
+    case 'teamDispatch':
+      return { ok: false, error: 'unknown_action' }
+
     default:
       return { ok: false, error: 'unknown_action' }
   }

@@ -121,6 +121,16 @@ export interface CustomNotice {
   body: string
 }
 
+/**
+ * A notice of a team (app 2.7.0, E10 B5 and B8, design 3.1 Notices and 6.3): one per new "Te necesita" row with
+ * `push` (an approval, a card, the trust state, an auth or billing pause) and per integrate result. `title` and `body`
+ * come from the main catalog (`teams.push.*`) with the trusted team name and the task id only, never agent text,
+ * redacted. `tag` is `team:<teamId>:<rowId>` (the push tag; a newer push of the same row replaces the older one);
+ * `urgent` for a row that blocks the team (rank 1). `push: false` stays a desktop toast: noticeRouter.routeTeam sends
+ * nothing to the phone, Discord or ntfy for it.
+ */
+export interface TeamNotice { kind: 'team'; teamId: string; taskId?: string; tag: string; title: string; body: string; urgent: boolean; push: boolean }
+
 /** "workspace / console" of a pane and its workspace id, or the fallback. */
 export function describePlace(paneId: string | null, config: ConfigFile | null, fallbackPlace: string): { place: string; workspaceId: string | null } {
   if (paneId) {

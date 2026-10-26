@@ -12,7 +12,7 @@
 // expression, Run now and the switch carry the card's scheduleId, a next run
 // 6 or more days away names its date (and its year in another year, es and
 // en), and an older desktop (no scheduleId, the base fixture) keeps the old
-// ctl shape.
+// ctl shape. App 2.7.0 (E10 B8): a toast the screen raises shows on top of it.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -38,6 +38,8 @@ const $$ = sel => [...document.querySelectorAll(sel)];
 const ptr = (el, type) => el.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, clientX: 10, clientY: 10, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0 }));
 const click = el => el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
 const tap = el => { ptr(el, 'pointerdown'); ptr(el, 'pointerup'); click(el) };
+// Whether an element is what a tap at its center would hit (a toast box ignores touches, so it takes them for the probe).
+const onTop = el => { const was = el.style.pointerEvents; el.style.pointerEvents = 'auto'; const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); el.style.pointerEvents = was; return r.width > 0 && !!hit && hit.closest('[data-toast]') === el };
 const ctls = [];
 let ackFor = () => ({ ok: true });
 let release = null;
@@ -121,6 +123,8 @@ window.runMain = async () => {
  ackFor = () => ({ ok: false, error: 'not_found' });
  click(sw('d1')); await frames();
  check(sw('d1').getAttribute('aria-checked') === 'false' && store.getState().toasts.some(t => t.text === 'That automation no longer exists on the PC'), 'a failed ack snaps back with a toast');
+ // App 2.7.0 (E10 B8): the toast shows over the Automations screen that raised it, not only on Home under it.
+ check($$('[data-toast]').some(el => el.textContent === 'That automation no longer exists on the PC' && onTop(el)), 'the toast shows on top of the Automations screen');
  ackFor = () => ({ ok: true });
 
  store.getState().update({ toasts: [] });
@@ -240,7 +244,7 @@ window.runMain = async () => {
  // --- Spanish ---
  // A real state frame is parsed JSON: every workspace is a new object.
  setLang('es'); setSnap(JSON.parse(JSON.stringify({ ...paused, language: 'es' }))); await frames();
- check($('[data-workspace=w1] [data-ws-task]').textContent === 'En revision', 'es task chip');
+ check($('[data-workspace=w1] [data-ws-task]').textContent === 'En revisión', 'es task chip');
  click($('[data-home-automations]')); await wait(380);
  check(screen().textContent.includes('Automatizaciones') && text('c1', '[data-auto-rec]') === 'Lun-Vie' && text('c1', '[data-auto-next]') === 'Pausada' && text('c1', '[data-auto-last]') === 'Enviado hace 3h', 'es rows: Lun-Vie, Pausada, Enviado hace 3h');
  check(row('c1').querySelector('[data-auto-run]').textContent === 'Probar ahora' && sw('c1').textContent.includes('Activa'), 'es actions: Probar ahora, Activa');

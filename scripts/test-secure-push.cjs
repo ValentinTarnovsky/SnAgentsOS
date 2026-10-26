@@ -15,8 +15,9 @@
 //    secureUrl, tailscaleHttps endpoint first, setSecure, revoke, notifyPush
 //    with isDeviceVisible, deepLinkBase, the notice router gate.
 //  - Phone: pushSupport, base64url keys, postSubscription, the Paste key flow,
-//    wake lock rule, the secure card, SW message filter, SW build fill and the
-//    service worker itself in a fake worker scope.
+//    wake lock rule, the secure card, SW message filter, the page applying a
+//    tap's hash with replaceState and a hashchange (never location.hash, app
+//    2.7.0), SW build fill and the service worker itself in a fake worker scope.
 const { build, buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -54,6 +55,8 @@ function run(code, extra = {}) {
 /** The vm context of the main bundle: its stub RemoteServer leaves __srv there. */
 let mainCtx = null
 const srv = () => mainCtx.__srv
+/** The vm context of the phone bundle: the tap relay check gives it a page (window, history, location). */
+let phoneCtx = null
 
 // --- SecureMode ------------------------------------------------------------------
 
@@ -542,7 +545,7 @@ function testPhone() {
 export { pushSupport, base64UrlToBytes, sameKey, postSubscription, isIosUserAgent, PUSH_SUBSCRIBE_PATH } from './src/mobile/src/lib/push'
 export { pasteFromClipboard } from './src/mobile/src/lib/clipboardPaste'
 export { wantsWakeLock, WAKE_LOCK_KEY } from './src/mobile/src/lib/wakeLock'
-export { openHashOf } from './src/mobile/src/lib/serviceWorker'
+export { openHashOf, registerServiceWorker } from './src/mobile/src/lib/serviceWorker'
 export { wsUrlFor } from './src/mobile/src/lib/wsUrl'
 export { fillServiceWorker, precacheList } from './src/mobile/swBuild'
 export { isStaleTrayNote, createTrayReconciler, defaultTrayRegistration, TRAY_RECONCILE_MS } from './src/mobile/src/lib/trayReconcile'
@@ -554,6 +557,7 @@ export { isStaleTrayNote, createTrayReconciler, defaultTrayRegistration, TRAY_RE
   const storage = new Map()
   const localStorage = { getItem: k => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => storage.set(k, String(v)), removeItem: k => storage.delete(k), key: i => [...storage.keys()][i] ?? null, get length() { return storage.size } }
   const api = run(code, { localStorage, atob: s => Buffer.from(s, 'base64').toString('binary') })
+  phoneCtx = run.lastCtx
   return api
 }
 
@@ -607,6 +611,55 @@ async function testPhoneLogic(api) {
   // SW message filter (FR-45)
   check(api.openHashOf({ type: 'snaos-open', hash: '#ws=w%201&pane=p1' }) === '#ws=w%201&pane=p1', 'a snaos-open message carries the deep link hash')
   check(api.openHashOf({ type: 'snaos-open', hash: 'javascript:alert(1)' }) === null && api.openHashOf({ type: 'x', hash: '#ws=a&pane=b' }) === null && api.openHashOf(null) === null, 'anything else is ignored')
+  // app 2.7.0 (E10 B8): a team push tap relays #team=<id>[&task=<id>] (else it is dropped while the app is open).
+  check(api.openHashOf({ type: 'snaos-open', hash: '#team=tm-0123456789ab' }) === '#team=tm-0123456789ab' && api.openHashOf({ type: 'snaos-open', hash: '#team=tm-0123456789ab&task=t-42' }) === '#team=tm-0123456789ab&task=t-42', 'a team link hash (with or without its task) passes')
+  const badTeam = ['#team=tm-0123', '#team=TM-0123456789AB', '#team=tm-0123456789ab&task=x-1', '#team=tm-0123456789ab&task=t-123456', '#team=tm-0123456789ab&pair=AB12', '#x=1&team=tm-0123456789ab', '#team=tm-0123456789ab#ws=a&pane=b']
+  check(badTeam.every(hash => api.openHashOf({ type: 'snaos-open', hash }) === null), 'a malformed team id or task, extra keys or a pair code are not relayed')
+  // app 2.7.0 (E10 B8): the page side of that tap. The hash goes in with replaceState (the entry and its back stack
+  // state kept) and a hashchange dispatched by hand, never location.hash: a fragment navigation adds a history entry
+  // and fires a popstate that BackStackHost reads as the user's back.
+  const page = new EventTarget()
+  page.isSecureContext = true
+  const container = new EventTarget()
+  container.register = () => Promise.resolve({})
+  const url = { hash: '' }
+  const pageLog = []
+  const pageLocation = {
+    get href() { return `https://${DNS}/${url.hash}` },
+    get hash() { return url.hash },
+    set hash(v) { pageLog.push(['assign', v]); url.hash = v },
+  }
+  const claimState = { snagentsos: 'claim' }
+  const pageHistory = {
+    state: claimState,
+    pushState() { pageLog.push(['push']) },
+    replaceState(s, _t, u) { pageLog.push(['replace', s === claimState, u]); url.hash = String(u).startsWith('#') ? String(u) : '' },
+  }
+  class FakeHashChangeEvent extends Event {
+    constructor(type, init = {}) { super(type); this.oldURL = init.oldURL; this.newURL = init.newURL }
+  }
+  page.addEventListener('hashchange', e => pageLog.push(['hashchange', url.hash, e.oldURL, e.newURL]))
+  const pageGlobals = { window: page, navigator: { serviceWorker: container }, location: pageLocation, history: pageHistory, HashChangeEvent: FakeHashChangeEvent }
+  Object.assign(phoneCtx, pageGlobals)
+  try {
+    api.registerServiceWorker()
+    const tap = hash => container.dispatchEvent(new MessageEvent('message', { data: { type: 'snaos-open', hash } }))
+    tap('#team=tm-0123456789ab&task=t-7')
+    check(JSON.stringify(pageLog) === JSON.stringify([['replace', true, '#team=tm-0123456789ab&task=t-7'], ['hashchange', '#team=tm-0123456789ab&task=t-7', `https://${DNS}/`, `https://${DNS}/#team=tm-0123456789ab&task=t-7`]]), 'a tapped team push: replaceState keeps the entry and its state, then one hashchange; location.hash is never set: ' + JSON.stringify(pageLog))
+    pageLog.length = 0
+    url.hash = ''
+    tap('#ws=w1&pane=p1')
+    check(pageLog.length === 2 && pageLog[0][0] === 'replace' && pageLog[0][1] === true && pageLog[1][0] === 'hashchange' && pageLog[1][1] === '#ws=w1&pane=p1', 'a tapped console push the same way')
+    pageLog.length = 0
+    tap('#x=1')
+    container.dispatchEvent(new MessageEvent('message', { data: { type: 'other', hash: '#ws=a&pane=b' } }))
+    check(pageLog.length === 0, 'a message openHashOf refuses touches nothing')
+    pageHistory.replaceState = () => { throw new Error('SecurityError') }
+    tap('#ws=w1&pane=p1')
+    check(pageLog.length === 0, 'replaceState refused: no navigation and no hashchange (the tap only focused the app)')
+  } finally {
+    for (const k of Object.keys(pageGlobals)) delete phoneCtx[k]
+  }
 
   // SW build (FR-47)
   const list = api.precacheList(['assets/index-abc.js', 'assets/index-abc.css', 'assets/inter-latin-400.woff2', 'manifest.webmanifest', 'icons/icon-192.png', 'index.html'])
@@ -664,7 +717,7 @@ async function testTrayReconcile(api) {
 
 // --- The service worker in a fake scope ---------------------------------------------
 
-async function testServiceWorker(source) {
+async function testServiceWorker(source, phoneApi) {
   const listeners = {}
   const stores = new Map()
   const cacheFor = name => {
@@ -742,6 +795,11 @@ async function testServiceWorker(source) {
   clientsList = [focusClient]
   await fire('notificationclick', { notification: { close: () => closed++, data: { url: './#ws=w&pane=p1' } } })
   check(closed === 1 && posted.length === 1 && posted[0].type === 'snaos-open' && posted[0].hash === '#ws=w&pane=p1' && opened.length === 0, 'tap with the app open: focus it and send the deep link')
+  // app 2.7.0 (E10 B8): a team push (no state) relays its team link, which the page's openHashOf accepts.
+  await fire('push', { data: { json: () => ({ title: 'Web needs you', body: 'Plan to approve', tag: 'team:tm-0123456789ab:a-3', url: './#team=tm-0123456789ab&task=t-7' }) } })
+  check(notifications.at(-1).opts.tag === 'team:tm-0123456789ab:a-3' && !('state' in notifications.at(-1).opts.data), 'a team push shows with its team tag and no state')
+  await fire('notificationclick', { notification: { close: () => closed++, data: notifications.at(-1).opts.data } })
+  check(posted.length === 2 && posted[1].hash === '#team=tm-0123456789ab&task=t-7' && phoneApi.openHashOf(posted[1]) === posted[1].hash, 'a team push tap with the app open relays #team=&task=, and the page takes it')
   clientsList = []
   await fire('notificationclick', { notification: { close() {}, data: { url: 'https://evil.com/#ws=x&pane=y' } } })
   check(opened.length === 1 && opened[0] === 'https://pc.ts.net/', 'tap with no window: opens our own origin only (a foreign URL goes to the root)')
@@ -788,7 +846,7 @@ export { createNoticeRouter } from './src/main/status/noticeRouter'
   await testManager(api)
   const phone = testPhone()
   const filled = await testPhoneLogic(phone)
-  await testServiceWorker(filled)
+  await testServiceWorker(filled, phone)
   console.log(`PASS: ${checks} secure mode, Web Push, service worker, paste key and wake lock checks`)
   fs.rmSync(tmp, { recursive: true, force: true })
 }

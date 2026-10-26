@@ -175,8 +175,8 @@ check(all.every(k => k.icon == null || k.ariaKey), 'every icon key has a localiz
 const i18n = load('src/mobile/src/lib/i18n.ts')
 check(i18n.t('key.ctrlEnter') === 'Newline' && i18n.t('key.ctrlEnterAria') === 'Alt+Enter: newline', 'English Newline label and aria-label')
 i18n.setLang('es')
-check(i18n.t('key.ctrlEnter') === 'Nueva linea' && i18n.t('key.ctrlEnterAria') === 'Alt+Enter: nueva linea', 'Spanish Newline label and aria-label')
-check(i18n.t('key.ctrlComposerHint') === 'Ctrl+letra: usa el modo Directo', 'Spanish composer latch hint')
+check(i18n.t('key.ctrlEnter') === 'Nueva línea' && i18n.t('key.ctrlEnterAria') === 'Alt+Enter: nueva línea', 'Spanish Newline label and aria-label')
+check(i18n.t('key.ctrlComposerHint') === 'Ctrl+letra: usá el modo Directo', 'Spanish composer latch hint')
 const needed = ['key.backspace', 'key.delete', 'key.del', 'key.ctrlC', 'key.ctrlD', 'key.ctrlL', 'key.ctrlR', 'key.ctrlZ', 'key.mode', 'key.left', 'key.up', 'key.down', 'key.right']
 for (const lang of ['en', 'es']) { i18n.setLang(lang); check(needed.every(k => i18n.t(k) && i18n.t(k) !== k), `${lang} has every KeyBar aria string`) }
 

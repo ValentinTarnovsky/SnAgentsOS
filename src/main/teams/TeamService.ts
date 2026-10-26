@@ -14,7 +14,7 @@ import { afterRunPolicy, candidatesOf, claudeAllLimited, planDispatch } from '@s
 import type { TeamNeedRow } from '@shared/teamNeeds'
 import { systemText } from '@shared/teamPrompt'
 import { parseTeamBlock } from '@shared/teamTools'
-import { isPhoneTeamOp, type IntegratePreview, type IntegrateProgressEvt, type RoutineView, type TaskSummary, type TeamChangedEvt, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
+import { isPhoneTeamOp, type IntegratePreview, type IntegrateProgressEvt, type PhoneTeamRequest, type RoutineView, type TaskSummary, type TeamChangedEvt, type TeamCtlAction, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
 import { suggestVerify, type VerifySuggestion } from '@shared/verifyDetect'
 import type { WsNoteMeta } from '@shared/ws-notes'
 import {
@@ -58,6 +58,7 @@ import {
   type WakeMark,
 } from '@shared/teams'
 import type { AgentProvider, ConfigFile, PaneSilence, PaneStatusEvt } from '@shared/types'
+import type { RemoteCommandResult } from '@shared/ipc-contract'
 import { splitAppend } from '../chat/chatFrames'
 import { mainT, type MainKey } from '../i18n'
 import type { CtlTeamCaller } from '../cli/CtlTokens'
@@ -71,7 +72,9 @@ import { WsNoteStore } from '../notes/WsNoteStore'
 import { pidAlive, procStartTime as realProcStartTime, signalTree, treeKillSync } from '../proc/treeKill'
 import type { PtySink } from '../pty/PtyManager'
 import { cleanEnv, statusBinDirs } from '../pty/shellResolver'
+import type { RemoteTeamsView } from '../remote/RemoteManager'
 import { TrustStore } from '../repoConfig/TrustStore'
+import type { TeamNotice } from '../status/events'
 import { SilenceWatch } from '../status/SilenceWatch'
 import { resolveAgentCli, type ResolvedCli } from './agentCli'
 import { Dispatcher, DISPATCH_KEY, type ManualRequest, type StepResult } from './Dispatcher'
@@ -89,6 +92,7 @@ import { createVerifyRunner, integrateHolder, Integrator, type IntegrateResult, 
 import type { StreamFacts } from './parsers/types'
 import { createTeamCtl, paramText, type TeamCtlPort, type TeamLiveRun, type TeamReadReply } from './teamCtl'
 import { createClaudeStreamParser } from './parsers/claudeStream'
+import { phoneTeamReply, teamCtlRequest, teamCtlResult } from './phoneFit'
 import { maskMessages } from './RunLog'
 import { lastDue, ROUTINE_SLOT_RETRY_MS, RoutineTicker, type RoutineFireOutcome } from './RoutineTicker'
 import { RunStarter } from './RunStarter'
@@ -128,12 +132,11 @@ export const DEFWATCH_MS = 300
 const TRUST_GATED_OPS: ReadonlySet<TeamOp> = new Set<TeamOp>(['runNow', 'kickoff', 'resumeTask', 'routineRun', 'integrate', 'dispatch'])
 
 /**
- * A desktop notice of a team (design 3.1 Notices, 6.3): one per new "Te necesita" row with `push` (an approval, a
- * card, the trust state, an auth or billing pause) and per integrate result. `title` and `body` come from the main
- * catalog (`teams.push.*`) with the trusted team name and the task id only, never agent text, redacted. `tag` is
- * `team:<teamId>:<rowId>` (B8's push tag); `urgent` for a row that blocks the team (rank 1).
+ * B8 (design 6.2): the ops of the phone's three ctls (teamDecide, teamAnswer, teamDispatch). They are not phone
+ * requests (PHONE_TEAM_OPS), so only remoteView.ctl lets them past that gate; the origin checks of each op still
+ * apply (ops/needs.ts: a hire decide and a PC-only card action are forbidden from the phone).
  */
-export interface TeamNotice { kind: 'team'; teamId: string; taskId?: string; tag: string; title: string; body: string; urgent: boolean; push: boolean }
+const PHONE_CTL_OPS: ReadonlySet<TeamOp> = new Set<TeamOp>(['decide', 'answer', 'dispatch'])
 
 /** The problems of a load as one comparable key: the load error, or the parser's errors and warnings. */
 function issueKey(loaded: LoadRes): string {
@@ -310,6 +313,16 @@ export class TeamService implements TeamInternals {
     apply: (teamId, call, who) => this.ctlApply(teamId, call, who),
     note: (teamId, text, title, who) => this.ctlNote(teamId, text, title, who),
   })
+  /**
+   * B8 (design 6.2): what the phone reaches (RemoteManager.setTeams). `request`: a PHONE_TEAM_OPS request with origin
+   * phone, its reply masked, without the desktop fields and fitted to one frame (phoneFit). `ctl`: teamDecide,
+   * teamAnswer and teamDispatch as the decide, answer and dispatch ops with origin phone, past the PHONE_TEAM_OPS gate
+   * (PHONE_CTL_OPS) and through each op's origin checks; the ack carries the error code only (teamCtlResult).
+   */
+  readonly remoteView: RemoteTeamsView = {
+    request: (req: PhoneTeamRequest) => phoneTeamReply(req, (r) => this.request(r, 'phone'), this.phoneMask),
+    ctl: async (action: TeamCtlAction): Promise<RemoteCommandResult> => teamCtlResult(await this.serve(teamCtlRequest(action), 'phone', true)),
+  }
 
   private readonly clock: () => number
   private readonly repoFs: Pick<LoaderFs, 'lstat' | 'realpath'>
@@ -651,7 +664,8 @@ export class TeamService implements TeamInternals {
     for (const [key] of landing) {
       const [teamId, taskId] = key.split('|')
       const rec = this.teams.get(teamId) ?? this.newestRecs.get(teamId)
-      if (rec && !this.removedRecs.has(rec)) this.notify(teamId, rec, { rowId: `installWait:${taskId}`, taskId, key: 'teams.push.installWait', urgent: false })
+      // B8: a desktop toast only (the update waits on this PC), never a push to the phone.
+      if (rec && !this.removedRecs.has(rec)) this.notify(teamId, rec, { rowId: `installWait:${taskId}`, taskId, key: 'teams.push.installWait', urgent: false, push: false })
     }
     await Promise.allSettled(landing.map(([, v]) => v.job))
     // A loaded store defers the flush of their end commits (one that is not live wrote them at once): flushed here,
@@ -1202,14 +1216,19 @@ export class TeamService implements TeamInternals {
    * desktop-only op -> bad_request; unknown team -> not_found; the trust gate;
    * then the op. Never throws (io).
    */
-  async request(req: TeamRequest, origin: 'desktop' | 'phone'): Promise<TeamReply> {
+  request(req: TeamRequest, origin: 'desktop' | 'phone'): Promise<TeamReply> {
+    return this.serve(req, origin, false)
+  }
+
+  /** request(); `ctl` (B8) lets one of the phone ctls' ops (PHONE_CTL_OPS) past the PHONE_TEAM_OPS gate, only from remoteView.ctl. */
+  private async serve(req: TeamRequest, origin: 'desktop' | 'phone', ctl: boolean): Promise<TeamReply> {
     try {
       if (this.frozen && !this.quitting) this.thaw()
       const retry = this.labOn && !this.frozen && !this.quitting && !this.disposed
       if (retry && !this.enabled && !this.enabling) void this.beginEnable()
       if (this.enabling) await this.enabling
       if (!this.live()) return fail(retry && this.labOn && !this.frozen ? 'io' : 'disabled')
-      if (origin === 'phone' && !isPhoneTeamOp(req.op)) return fail('bad_request')
+      if (origin === 'phone' && !isPhoneTeamOp(req.op) && !(ctl && PHONE_CTL_OPS.has(req.op))) return fail('bad_request')
       if ('teamId' in req) {
         const rec = this.teams.get(req.teamId)
         if (!rec) return fail('not_found')
@@ -3217,8 +3236,11 @@ export class TeamService implements TeamInternals {
     }
   }
 
-  /** One TeamNotice: the trusted team name and the task id only, from the main catalog, redacted. */
-  private notify(teamId: string, rec: TeamRecord, o: { rowId: string; taskId?: string; key: MainKey; urgent: boolean }): void {
+  /**
+   * One TeamNotice: the trusted team name and the task id only, from the main catalog, redacted. `push` (default true,
+   * B8): false keeps it a desktop toast (noticeRouter.routeTeam sends nothing remote for it).
+   */
+  private notify(teamId: string, rec: TeamRecord, o: { rowId: string; taskId?: string; key: MainKey; urgent: boolean; push?: boolean }): void {
     if (!this.deps.notice) return
     const cfg = this.deps.config()
     const team = this.trust.trusted(teamId)?.def.name ?? rec.entry.name
@@ -3229,7 +3251,7 @@ export class TeamService implements TeamInternals {
       title: redactCredentials(mainT(cfg, 'teams.push.title', { team })),
       body: redactCredentials(mainT(cfg, o.key, { team, task: o.taskId ?? '' })),
       urgent: o.urgent,
-      push: true,
+      push: o.push !== false,
     }
     if (o.taskId) n.taskId = o.taskId
     try {
@@ -3265,6 +3287,9 @@ export class TeamService implements TeamInternals {
   maskRun(items: readonly ChatMessage[]): ChatMessage[] {
     return maskMessages(items, (text) => redactCredentials(this.maskTokens(text)))
   }
+
+  /** B8: one text as it may leave for the phone, the mask of maskRun (phoneFit runs it on every string of a teamRes). */
+  private readonly phoneMask = (text: string): string => redactCredentials(this.maskTokens(text))
 
   /**
    * `text` with every live token of the app masked (CtlTokens.maskTokens through deps.cli; as is without it). Seventh

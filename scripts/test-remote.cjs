@@ -754,6 +754,8 @@ function testRateUnits(api) {
   check(limited({ type: 'ctl', action: { kind: 'answerMenu', paneId: 'p1', pendingId: 't1', n: 1, label: 'Yes' } }) && api.RATE_LIMITED_CTL_KINDS.has('answerMenu'), 'answerMenu (app 2.4.0) is limited: each one reads the mirror and writes to the pty')
   check(['markRead', 'mutePane', 'silenceAck'].every(kind => limited({ type: 'ctl', action: { kind, paneId: 'p1', muted: true } }) && api.RATE_LIMITED_CTL_KINDS.has(kind)), 'markRead, mutePane and silenceAck (app 2.7.0) are limited')
   check(limited({ type: 'planReq', id: 'q1', paneId: 'p1' }) && api.RATE_LIMITED_MSG_TYPES.has('planReq'), 'planReq (app 2.7.0) is limited')
+  check(limited({ type: 'teamReq', id: 'q1', req: { op: 'list' } }) && api.RATE_LIMITED_MSG_TYPES.has('teamReq'), 'teamReq (app 2.7.0, E10 B8) is limited')
+  check(['teamDecide', 'teamAnswer', 'teamDispatch'].every(kind => limited({ type: 'ctl', action: { kind, teamId: 'tm-0123456789ab' } }) && api.RATE_LIMITED_CTL_KINDS.has(kind)), 'teamDecide, teamAnswer and teamDispatch (app 2.7.0, E10 B8) are limited: each one is a TeamService commit')
   check(!limited({ type: 'ctl', action: { kind: 'runQuickCommand' } }), 'runQuickCommand (v2.2) stays outside the bucket')
   check(limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1', resume: { provider: 'claude', sessionId: 'x' } } }), 'createPane with resume is limited')
   check(!limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1' } }), 'a plain createPane is not')
@@ -1307,6 +1309,48 @@ async function testPlanReq() {
   check(['f1', 'f2'].every(id => ws.of('planRes').some(r => r.id === id && r.error === 'not_found')), 'the two waiting ones answer when main does')
 }
 
+/**
+ * app 2.7.0 (E10 B8): teamReq and the three Teams ctls are main's (TeamService through RemoteManager.setTeams), never
+ * relayed to the renderer; without a TeamService wired teamReq answers not_found and a ctl acks unknown_action. The
+ * whole Teams world (fits, rates, origin checks, push) is test-teams-remote.cjs.
+ */
+async function testTeamSurface() {
+  const { parseRemoteClientMsg } = loadSchemas()
+  const TEAM = 'tm-0123456789ab'
+  const req = (r, id = 'tq1') => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'teamReq', id, req: r }))
+  const ctl = action => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'ctl', id: 'c1', action }))
+  check(!!req({ op: 'list' }) && !!req({ op: 'board', teamId: TEAM, column: 'todo' }) && !!req({ op: 'leadSay', teamId: TEAM, text: 'hola' }), 'the schema accepts a teamReq of a phone op')
+  check(!req({ op: 'trust', teamId: TEAM, sha256: 'a'.repeat(64) }) && !req({ op: 'integrate', teamId: TEAM, taskId: 't-1', expectTip: 'a'.repeat(40) }) && !req({ op: 'decide', teamId: TEAM, approvalId: 'a-1', decision: 'approve' }), 'a desktop op (or a decision, which is a ctl) never parses as a teamReq')
+  check(!req({ op: 'list' }, 'a b') && !req({ op: 'board', teamId: 'tm-x' }) && !req(null) && !req({ op: 'list', teamId: TEAM, extra: 1 }).req.extra, 'teamReq needs a gitReqId id and the op\'s ids; a stray field is stripped')
+  check(!!ctl({ kind: 'teamDecide', teamId: TEAM, approvalId: 'a-1', decision: 'reject', note: 'otra vez' }) && !!ctl({ kind: 'teamAnswer', teamId: TEAM, cardId: 'k-2', answer: { choices: [1] } }) && !!ctl({ kind: 'teamDispatch', teamId: TEAM, queueId: 'all', go: true }), 'the ctl schema accepts teamDecide, teamAnswer and teamDispatch')
+  check(!ctl({ kind: 'teamDecide', teamId: TEAM, approvalId: 'k-1', decision: 'approve' }) && !ctl({ kind: 'teamAnswer', teamId: TEAM, cardId: 'k-1', answer: { choices: [9] } }) && !ctl({ kind: 'teamDispatch', teamId: TEAM, queueId: 'q-x', go: true }), 'bad ids and out of range answers never parse')
+
+  fs.rmSync(path.join(dataDir, 'remote-devices.json'), { force: true })
+  const w = world()
+  w.manager.pushState(snapshot)
+  const { ws } = await pair(w)
+  const relayed = w.commands.length
+  ws.msg({ type: 'teamReq', id: 'tq1', req: { op: 'list' } })
+  await tick()
+  const res = ws.of('teamRes').find(r => r.id === 'tq1')
+  check(res && res.res && res.res.ok === false && res.res.error === 'not_found', 'without a TeamService wired teamReq answers not_found')
+  const acks = []
+  for (const [id, action] of [['d1', { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-1', decision: 'approve' }], ['a1', { kind: 'teamAnswer', teamId: TEAM, cardId: 'k-1', answer: { confirm: true } }], ['p1', { kind: 'teamDispatch', teamId: TEAM, queueId: 'q-1', go: false }]]) {
+    ws.msg({ type: 'ctl', id, action })
+    await tick()
+    acks.push(ws.of('ctlAck').find(a => a.id === id))
+  }
+  check(acks.every(a => a && a.ok === false && a.error === 'unknown_action'), 'each Teams ctl acks unknown_action in main without a TeamService')
+  check(w.commands.length === relayed, 'teamReq and the Teams ctls never reach the renderer relay')
+  // A wired view answers them, still in main.
+  const seen = []
+  w.manager.setTeams({ request: async (r) => { seen.push(r.op); return { ok: true, teams: [] } }, ctl: async (a) => { seen.push(a.kind); return { id: '', ok: true } } })
+  ws.msg({ type: 'teamReq', id: 'tq2', req: { op: 'list' } })
+  ws.msg({ type: 'ctl', id: 'd2', action: { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-1', decision: 'approve' } })
+  await tick()
+  check(ws.of('teamRes').find(r => r.id === 'tq2')?.res.ok === true && ws.of('ctlAck').find(a => a.id === 'd2')?.ok === true && seen.join() === 'list,teamDecide' && w.commands.length === relayed, 'with setTeams the view answers both in main, nothing relayed')
+}
+
 /** app 2.7.0 (A3): status:markRead, status:mute, status:silenceAck and status:plan validate every renderer value in main. */
 function testStatusIpc() {
   const handlers = {}
@@ -1363,9 +1407,10 @@ async function main() {
   await testAutomationRelay()
   await testStatusCtls()
   await testPlanReq()
+  await testTeamSurface()
   testStatusIpc()
   fs.rmSync(dataDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} remote overlay, paneStatus, lastHost, visibility, agentResume, httpToken, rate limit, pending, safePaste, phone automation, status ctl, planReq and status IPC checks`)
+  console.log(`PASS: ${checks} remote overlay, paneStatus, lastHost, visibility, agentResume, httpToken, rate limit, pending, safePaste, phone automation, status ctl, planReq, Teams surface and status IPC checks`)
 }
 
 main().catch(error => { console.error(error); fs.rmSync(dataDir, { recursive: true, force: true }); process.exit(1) })

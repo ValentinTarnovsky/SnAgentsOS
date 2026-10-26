@@ -150,6 +150,8 @@ noticeRouter = createNoticeRouter({
   deepLinkBase: () => remoteManager.deepLinkBase(),
   // Web Push to the PWA (E3-FR-44): devices with a visible session are skipped.
   push: (notice, config) => void remoteManager.notifyPush(notice, config),
+  // Teams (app 2.7.0, E10 B8): the push of a new "Te necesita" row or an integrate result, with the #team= deep link.
+  pushTeam: (notice, config) => void remoteManager.notifyTeamPush(notice, config),
 })
 // App 2.7.0 (A4): tokens, cost and context per console, recomputed once per turn for Claude (its done) and on
 // every model call for Codex (thread/tokenUsage/updated), always published as status detail (inside its throttle).
@@ -959,7 +961,11 @@ async function bootstrap(): Promise<void> {
     dataDir,
     config: () => configStore.load(),
     git: gitRunner,
-    emit: (evt) => sendToRenderer(CH.TEAMS_CHANGED, evt),
+    // B8: the phones hear of every change too (RemoteManager throttles it per team); Share never does.
+    emit: (evt) => {
+      sendToRenderer(CH.TEAMS_CHANGED, evt)
+      remoteManager.teamChanged(evt)
+    },
     // '' when it opened, else Electron's error text: the reveal op answers io with it.
     openPath: (p) => shell.openPath(p),
     log: createTeamsLog(dataDir),
@@ -999,12 +1005,16 @@ async function bootstrap(): Promise<void> {
     sendIntegrate: (evt) => sendToRenderer(CH.TEAMS_INTEGRATE_PROGRESS, evt),
     // B4: task worktrees through the console worktree service, tagged with their team owner (decision 63).
     worktrees,
-    // B5: a new "Te necesita" row (an approval, a card, the trust, an auth or billing pause) as a desktop toast; B8 also routes it to the phone.
+    // B5: a new "Te necesita" row (an approval, a card, the trust, an auth or billing pause) as a desktop toast; B8 also
+    // routes it to the phone push, Discord and ntfy (routeTeam: the away gate; nothing remote for a push: false one).
     notice: (n) => {
       statusManager.notifyCustom(null, n.title, n.body)
+      noticeRouter?.routeTeam(n)
     },
   })
   teamService = teams
+  // B8: teamReq and the phone's three Teams ctls reach the service from the phone sessions (origin phone).
+  remoteManager.setTeams(teams.remoteView)
   statusManager.addListener((evt) => teams.onPaneStatus(evt))
   cliService.onState(() => teams.onCliState())
   // B3: `snaos team` from a team run's token reaches the store through teamCtl.

@@ -25,6 +25,13 @@
  * the first QR endpoint and authOk's `secureUrl`. PushService holds the VAPID
  * keys and the subscriptions; it is active with `settings.remote.https.enabled`
  * (FR-46) and pushes each StatusNotice to the devices without a visible session.
+ *
+ * Teams (app 2.7.0, E10 B8): index.ts injects TeamService.remoteView
+ * (setTeams); teamReq and the three Teams ctls reach it from the sessions and
+ * are never relayed to the renderer, every team change goes to the phones as
+ * `teamChanged` (at most one per team per TEAM_CHANGED_THROTTLE_MS, scopes
+ * merged) and each TeamNotice the router lets through is a Web Push with the
+ * `#team=` deep link. Team data never reaches Share.
  */
 import { randomUUID } from 'crypto'
 import { hostname } from 'os'
@@ -60,10 +67,11 @@ import { SessionManager, type HttpTokenOwner, type RemoteStatusCtl } from './Ses
 import { ATTACHMENT_CLEANUP_INTERVAL_MS, UploadService } from './UploadService'
 import { noticePage, type ChatHooks } from '../chat/ChatHub'
 import { SecureMode, type SecureResult } from './SecureMode'
-import { PushService, buildPushMessage } from './PushService'
+import { PushService, buildPushMessage, buildTeamPushMessage } from './PushService'
 import { PromptMenuWatcher, validMenu } from './PromptMenuWatcher'
 import { parseMenu } from '@shared/promptMenu'
-import type { StatusNotice } from '../status/events'
+import type { StatusNotice, TeamNotice } from '../status/events'
+import type { PhoneTeamRequest, TeamChangedEvt, TeamCtlAction, TeamReply, TeamScope } from '@shared/team-protocol'
 
 const DEFAULT_PORT = 4517
 const MIN_PORT = 1024
@@ -167,6 +175,23 @@ export interface RemoteStatusControl {
   planOf(paneId: string, requestId?: string): PanePlan | null
 }
 
+/**
+ * app 2.7.0 (E10 B8): what the phones reach of Teams (TeamService.remoteView, design 6.2). `request`: one
+ * PHONE_TEAM_OPS request with origin phone, its reply masked and fitted to one frame. `ctl`: teamDecide, teamAnswer
+ * and teamDispatch as the decide, answer and dispatch ops with origin phone; acks ok or the TeamError code (a conflict
+ * with its reason, `conflict:already_decided`; a detail the phone words, `bad_request:nothingToGrant`).
+ */
+export interface RemoteTeamsView {
+  request(req: PhoneTeamRequest, device?: string): Promise<TeamReply>
+  ctl(action: TeamCtlAction, device?: string): Promise<RemoteCommandResult>
+}
+
+/** app 2.7.0 (E10 B8): one `teamChanged` per team per this window to the phones; what comes inside it is merged. */
+export const TEAM_CHANGED_THROTTLE_MS = 500
+
+/** A team change held by the throttle: the newest rev, the merged scopes, a hint only while every held one agrees. */
+interface HeldTeamChange { rev: number; scopes: TeamScope[]; taskId?: string; runId?: string; mixedTask: boolean; mixedRun: boolean }
+
 interface PendingCommand {
   resolve: (res: RemoteCommandResult) => void
   timer: ReturnType<typeof setTimeout>
@@ -223,6 +248,12 @@ export class RemoteManager {
   private gitHandler: ((req: RemoteGitRequest) => Promise<RemoteGitReply>) | null = null
   /** v2.2 (E9): the workspace notes the phones read and write (set by index.ts at boot). */
   private notes: Pick<WsNoteStore, 'list' | 'read' | 'write' | 'create' | 'delete'> | null = null
+  /** app 2.7.0 (E10 B8): Teams for the phones (TeamService.remoteView, set by index.ts at boot). */
+  private teams: RemoteTeamsView | null = null
+  /** teamChanged throttle per team: when the last one went out, and what waits for the end of its window. */
+  private readonly teamSent = new Map<string, number>()
+  private readonly teamHeld = new Map<string, HeldTeamChange>()
+  private readonly teamTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** E3 M12: the phones' Chat view (ChatHub, set by index.ts at boot). */
   private chat: ChatHooks | null = null
   private readonly chatRelay: ChatHooks = {
@@ -496,6 +527,24 @@ export class RemoteManager {
       .catch(() => 0)
   }
 
+  /**
+   * app 2.7.0 (E10 B8): a TeamNotice that passed the router's away gate (noticeRouter.routeTeam): the push of its "Te
+   * necesita" row or integrate result to every paired device without a visible session, behind the desktop's
+   * notifyAction (a team that needs the user is action-like). Nothing while https is off (FR-46).
+   */
+  notifyTeamPush(notice: TeamNotice, config: ConfigFile | null): Promise<number> {
+    if (!this.httpsWanted || !notice.push) return Promise.resolve(0)
+    const prefs = config?.settings?.notifications
+    if (prefs && !prefs.notifyAction) return Promise.resolve(0)
+    return this.push
+      .notify(buildTeamPushMessage(notice), {
+        enabled: this.httpsWanted,
+        isDeviceVisible: (deviceId) => this.sessions?.isDeviceVisible(deviceId) ?? false,
+        isPaired: (deviceId) => this.registry.get(deviceId) !== undefined,
+      })
+      .catch(() => 0)
+  }
+
   private startServer(port: number): void {
     this.boundPort = port
     this.sessions = new SessionManager({
@@ -528,6 +577,9 @@ export class RemoteManager {
       // app 2.7.0 (A3): status marks and the full plan, answered by StatusManager.
       statusCtl: (action) => this.statusCtl(action),
       plan: (req) => this.planRequest(req),
+      // app 2.7.0 (E10 B8): Teams requests and decisions, answered by TeamService in main.
+      team: (req, device) => this.teamRequest(req, device),
+      teamCtl: (action, device) => this.teamCtl(action, device),
     })
     // The menu reader only schedules a timer per chunk; the sessions sink goes last.
     this.ptyManager.addSink(this.menus)
@@ -569,6 +621,7 @@ export class RemoteManager {
 
   private teardownServer(): void {
     this.resetPaneStatus()
+    this.resetTeamChanged()
     this.menus.reset()
     if (this.sessions) {
       this.ptyManager.setRunningChangeListener(null)
@@ -997,6 +1050,86 @@ export class RemoteManager {
   /** A note changed on the PC or on a phone: every phone reloads what it shows of that workspace. */
   notesChanged(evt: WsNotesChangedEvt): void {
     this.sessions?.broadcastNotesChanged(evt.workspaceId, evt.noteId)
+  }
+
+  // --- Teams for the phone (app 2.7.0, E10 B8) ------------------------------------
+
+  /** Wire TeamService.remoteView (index.ts, once the service exists). */
+  setTeams(view: RemoteTeamsView | null): void {
+    this.teams = view
+  }
+
+  /**
+   * TeamService emitted a change (TeamServiceDeps.emit): every phone hears of it as `teamChanged`. The first change of
+   * a team goes out at once; the ones that come within TEAM_CHANGED_THROTTLE_MS of it wait for the end of that window
+   * and go out as one, with the newest rev, every scope and the task or run hint only when they all named the same.
+   * No server, no frames and nothing held.
+   */
+  teamChanged(evt: TeamChangedEvt): void {
+    if (!this.sessions) return
+    const teamId = evt.teamId
+    const now = Date.now()
+    const last = this.teamSent.get(teamId)
+    if (!this.teamTimers.has(teamId) && (last === undefined || now - last >= TEAM_CHANGED_THROTTLE_MS || now < last)) {
+      this.teamSent.set(teamId, now)
+      this.sessions.broadcastTeamChanged(evt)
+      return
+    }
+    const held = this.teamHeld.get(teamId)
+    if (!held) {
+      this.teamHeld.set(teamId, { rev: evt.rev, scopes: [...evt.scopes], taskId: evt.taskId, runId: evt.runId, mixedTask: false, mixedRun: false })
+    } else {
+      held.rev = Math.max(held.rev, evt.rev)
+      for (const s of evt.scopes) if (!held.scopes.includes(s)) held.scopes.push(s)
+      if (held.taskId !== evt.taskId) held.mixedTask = true
+      if (held.runId !== evt.runId) held.mixedRun = true
+    }
+    if (this.teamTimers.has(teamId)) return
+    const wait = Math.max(0, (last ?? now) + TEAM_CHANGED_THROTTLE_MS - now)
+    this.teamTimers.set(
+      teamId,
+      setTimeout(() => {
+        this.teamTimers.delete(teamId)
+        const h = this.teamHeld.get(teamId)
+        this.teamHeld.delete(teamId)
+        if (!h || !this.sessions) return
+        this.teamSent.set(teamId, Date.now())
+        const out: TeamChangedEvt = { teamId, rev: h.rev, scopes: h.scopes }
+        if (h.taskId && !h.mixedTask) out.taskId = h.taskId
+        if (h.runId && !h.mixedRun) out.runId = h.runId
+        this.sessions.broadcastTeamChanged(out)
+      }, wait),
+    )
+  }
+
+  /** Server gone: nothing held, the next change of every team goes out at once. */
+  private resetTeamChanged(): void {
+    for (const timer of this.teamTimers.values()) clearTimeout(timer)
+    this.teamTimers.clear()
+    this.teamHeld.clear()
+    this.teamSent.clear()
+  }
+
+  /** One teamReq (SessionManager checked the session and the rate first). No TeamService wired: not_found. */
+  private async teamRequest(req: PhoneTeamRequest, device?: string): Promise<TeamReply> {
+    const view = this.teams
+    if (!view) return { ok: false, error: 'not_found' }
+    try {
+      return await view.request(req, device)
+    } catch {
+      return { ok: false, error: 'io' }
+    }
+  }
+
+  /** ctls teamDecide, teamAnswer and teamDispatch (SessionManager checked the session first). No TeamService wired: unknown_action. */
+  private async teamCtl(action: TeamCtlAction, device?: string): Promise<RemoteCommandResult> {
+    const view = this.teams
+    if (!view) return { id: '', ok: false, error: 'unknown_action' }
+    try {
+      return await view.ctl(action, device)
+    } catch {
+      return { id: '', ok: false, error: 'io' }
+    }
   }
 
   /** One notesReq. The phone is never trusted: only a workspace the desktop has, ids only, never a path back. */

@@ -20,6 +20,14 @@
 // the waiting pill and Home's "Waiting for you"; Mark all read targets; the
 // row signals (doing now, failure, silence, needs, context, bare); the status
 // marks of the pane actions, gated to a 2.7.0 desktop; the plan sheet outcomes.
+// Section M11 (app 2.7.0, E10 B8): the deep link union (#team=<id>[&task=<id>],
+// pair= first, the pane form before it), the Teams store (list, coalesced
+// teamChanged, disabled, navigation, openTeamLink) and the client's team gate
+// (nothing to a desktop before 2.7.0, two requests in flight, a team link
+// after goLive over lastPane, forgotten on revoke and with an older desktop);
+// a console link, live or at goLive, closes the pushed screens (Teams,
+// History, Automations, Changes, Notes, Diagnostics) and a team link leaves
+// them; the Spanish phone strings with their tildes.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -38,14 +46,20 @@ export { classifyConnection, endpointHint, formatAgo } from './src/mobile/src/li
 export { delayFor, RECONNECT_DELAYS } from './src/mobile/src/lib/reconnectSchedule'
 export { relativeAge, statusLine, statusAriaLabel, showsTime, rowLine, rowShowsTime, doingNow, failureText, silenceText, needsText, contextShort, contextLabel, agentStatusOf } from './src/mobile/src/lib/statusText'
 export { createPaneNotifier, remoteTitle, actionTotal } from './src/mobile/src/lib/notify'
-export { parseDeepLink } from './src/mobile/src/lib/deepLink'
+export { parseDeepLink, isTeamLink } from './src/mobile/src/lib/deepLink'
+export { useTeamsUi, teamsSupported, loadTeamList, teamChanged, teamChangeWants, openTeamsList, openTeamBoard, closeTeamBoard, setTeamColumn, openTeamNeeds, closeTeamNeeds, openLeadChat, openTeamTask, closeTeamTask, openTeamLink, forgetTeams, TEAM_CHANGED_MS } from './src/mobile/src/lib/teamsStore'
+export { useHistoryStore, openHistory } from './src/mobile/src/lib/history'
+export { useChangesStore, openChanges, openDiff } from './src/mobile/src/lib/changes'
+export { useWsNotes, openWsNotes } from './src/mobile/src/lib/wsNotes'
+export { useAutomationsStore, openAutomations } from './src/mobile/src/lib/automations'
+export { useDiagStore, openDiagnostics } from './src/mobile/src/lib/connLog'
 export { loadPagePrefs, savePagePrefs } from './src/mobile/src/lib/prefs'
 export { viewedWorkspaceId, paneOpenable, isWorkspaceMounted, homeRows, isUnread, actionCount, waitingPanes, nextWaitingPane, statusMapOf, attentionItems, needsYouPanes, markReadTargets } from './src/mobile/src/lib/workspace'
 export { needsYouRows, needsYouCount } from './src/shared/attention'
 export { planLoadOf } from './src/mobile/src/lib/plan'
 export { statusMarkIds, statusMarkAction, statusMarksSupported } from './src/mobile/src/lib/paneActions'
 export { withViewed, LAST_VIEWED_MAX } from './src/mobile/src/lib/prefs'
-export { setLang } from './src/mobile/src/lib/i18n'
+export { setLang, t } from './src/mobile/src/lib/i18n'
 export { createBackStack } from './src/mobile/src/lib/backStack'
 export { createLongPress, LONG_PRESS_MS, LONG_PRESS_SLOP_PX, LONG_PRESS_VIBRATE_MS } from './src/mobile/src/lib/longPress'
 export * as sheetDrag from './src/mobile/src/lib/sheetDrag'
@@ -945,7 +959,10 @@ function testHomeLogic(p) {
   check(line(st('action', { reason: 'permission', attention: false, stateSince: now })) === 'Working' && p.rowShowsTime(st('action', { attention: false }), now), 'an answered action (attention false) reads Working and drives the ticker')
   check(line(st('action', { reason: 'permission', attention: false, precise: false })) === 'Idle' && line(st('action', { reason: 'permission', attention: true })) === 'Waiting for permission', 'title-only answered action reads Idle; attention true keeps the reason')
   p.setLang('es')
-  check(line(st('action', { reason: 'question' })) === 'Pregunta pendiente' && line(undefined, { running: false, mounted: false }) === 'Sin iniciar' && line(st('unknown')) === 'Se perdio la conexion con el agente', 'Spanish row lines')
+  check(line(st('action', { reason: 'question' })) === 'Pregunta pendiente' && line(undefined, { running: false, mounted: false }) === 'Sin iniciar' && line(st('unknown')) === 'Se perdió la conexión con el agente', 'Spanish row lines')
+  // The Spanish phone strings carry their tildes, with voseo (B8 polish of the Tanda A pending list).
+  check(p.t('pending.noReply') === 'No respondió la PC' && p.t('conn.impostor') === 'Falló la verificación de seguridad' && p.t('history.empty') === 'Todavía no hay sesiones acá', 'Spanish no reply, impostor and empty History with tildes')
+  check(p.t('notes.empty') === 'Todavía no hay notas. Tocá el número de una línea en un diff para escribir una.' && p.t('diag.logEmpty') === 'Todavía no hay nada en el log.', 'Spanish empty notes and log with tildes and voseo')
   p.setLang('en')
 
   let map = {}
@@ -1175,6 +1192,343 @@ async function testPlanRequest() {
   check(got.ok && got.value.ok && got.value.plan.truncated === true && p.planLoadOf(got).status === 'ok', 'its planRes resolves the request (truncated kept)')
 }
 
+// --- M11: app 2.7.0 (E10 B8) Teams on the phone ---
+
+const TM = 'tm-0123456789ab'
+const TM2 = 'tm-ba9876543210'
+const teamItem = (id, rest = {}) => ({ id, name: id === TM ? 'Web' : 'Api', repoName: 'web', trust: 'trusted', paused: null, autoDispatch: true, agents: 3, running: 1, needsCount: 0, rev: 7, ...rest })
+/** Every microtask (the vm shares the host queue) and the promise chains of a teamRes. */
+const settle = () => new Promise(resolve => setImmediate(resolve))
+const teamReqs = s => s.sent.filter(m => m.type === 'teamReq')
+const teamAnswer = (s, m, res) => s.recv({ type: 'teamRes', id: m.id, res })
+/** 'dev' counts as a 2.7.0 desktop and never mismatches this 2.0.0 bundle; '2.0.0' is a desktop before Teams. */
+const teamAuthOk = (s, appVersion) => s.recv({ type: 'authOk', deviceId: 'dev1', state: multi(), hostPlatform: 'win32', appVersion })
+
+function testTeamLinks(p) {
+  check(JSON.stringify(p.parseDeepLink(`#team=${TM}`)) === `{"team":"${TM}"}` && JSON.stringify(p.parseDeepLink(`#team=${TM}&task=t-12`)) === `{"team":"${TM}","task":"t-12"}`, 'parseDeepLink reads #team= and #team=&task=')
+  check(p.isTeamLink(p.parseDeepLink(`#team=${TM}`)) && !p.isTeamLink(p.parseDeepLink('#ws=w&pane=p')) && !p.isTeamLink(null), 'isTeamLink tells a team link from a console link')
+  check(p.parseDeepLink(`#x=1&team=${TM}&task=t-3&y=2`).task === 't-3' && p.parseDeepLink(`team=${TM}`).team === TM, 'other keys may come before and after; the # is optional')
+  check(p.parseDeepLink(`#pair=AB12&team=${TM}`) === null && p.parseDeepLink(`#team=${TM}&pair=AB12`) === null, 'a pair= hash still wins over a team link')
+  const both = p.parseDeepLink(`#ws=w&pane=p&team=${TM}`)
+  check(both && both.pane === 'p' && !p.isTeamLink(both), 'the pane form is tried first')
+  check(p.parseDeepLink(`#ws=%E0&pane=p&team=${TM}`).team === TM, 'a malformed console link falls through to the team form')
+  check(p.parseDeepLink('#team=tm-0123') === null && p.parseDeepLink(`#team=${TM.toUpperCase()}`) === null && p.parseDeepLink(`#team=${TM}0`) === null && p.parseDeepLink('#team=') === null, 'a team id that is not tm-<12 hex> is no link')
+  check(JSON.stringify(p.parseDeepLink(`#team=${TM}&task=x-1`)) === `{"team":"${TM}"}` && JSON.stringify(p.parseDeepLink(`#team=${TM}&task=t-123456`)) === `{"team":"${TM}"}`, 'a malformed task id drops only the task')
+  check(!p.teamsSupported('2.6.0') && !p.teamsSupported('') && !p.teamsSupported(undefined) && p.teamsSupported('2.7.0') && p.teamsSupported('2.8.1') && p.teamsSupported('dev'), 'teamsSupported: a 2.7.0 desktop or newer (dev counts as new)')
+  const c = { rev: 1, seq: 1, scopes: ['task', 'board'], taskId: 't-1' }
+  check(p.teamChangeWants(c, 'task', 't-1') && !p.teamChangeWants(c, 'task', 't-2') && p.teamChangeWants(c, 'board') && !p.teamChangeWants(c, 'needs') && !p.teamChangeWants(c, 'lead') && !p.teamChangeWants(c, 'run') && !p.teamChangeWants(undefined, 'board'), 'teamChangeWants: a task change touches that task and the board only')
+  check(p.teamChangeWants({ rev: 1, seq: 1, scopes: ['task'] }, 'task', 't-9'), 'a task change without an id touches every task')
+  const n = { rev: 1, seq: 1, scopes: ['needs', 'list'] }
+  check(p.teamChangeWants(n, 'needs') && p.teamChangeWants(n, 'task', 't-9') && p.teamChangeWants(n, 'board') && !p.teamChangeWants(n, 'lead'), 'a needs change touches Te necesita, every task (its approvals and cards) and the board (need dots)')
+  const r = { rev: 1, seq: 1, scopes: ['agents', 'run', 'list'] }
+  check(p.teamChangeWants(r, 'lead') && p.teamChangeWants(r, 'run') && !p.teamChangeWants(r, 'board') && !p.teamChangeWants(r, 'task', 't-1') && p.teamChangeWants({ rev: 1, seq: 1, scopes: ['lead'] }, 'lead'), 'a run change touches the Lead chat and run logs; a lead change the Lead chat')
+}
+
+/** The Teams store and the client's team gate through the real client. */
+async function testTeamsClient() {
+  {
+    // A desktop before 2.7.0: nothing team-shaped ever leaves the phone, the store stays empty.
+    const p = page({ hash: `#team=${TM}&task=t-1` })
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, '2.0.0')
+    const u = p.useTeamsUi.getState()
+    check(p.state().phase === 'live' && teamReqs(s).length === 0 && u.list === null && u.listState === 'idle', 'an older desktop: no teamReq at goLive, the store stays empty')
+    check(u.boardFor === null && u.task === null && p.hash === '', 'and a team link opens nothing')
+    const r = await p.client.requestTeam({ op: 'board', teamId: TM })
+    const c = await p.client.sendTeamCtl({ kind: 'teamDecide', teamId: TM, approvalId: 'a-1', decision: 'approve' })
+    await p.loadTeamList()
+    p.teamChanged({ teamId: TM, rev: 3, scopes: ['list', 'board'] }); p.advance(p.TEAM_CHANGED_MS); await settle()
+    check(r.ok && r.value.ok === false && r.value.error === 'unsupported' && !c.ok && c.error === 'unsupported', 'requestTeam and sendTeamCtl answer unsupported to themselves')
+    check(teamReqs(s).length === 0 && !s.sent.some(m => m.type === 'ctl') && p.useTeamsUi.getState().list === null, 'nothing was sent (an unknown frame would be a bad_msg strike) and a change loads nothing')
+  }
+  {
+    const p = page()
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    const [lr] = teamReqs(s)
+    check(lr && lr.req.op === 'list' && /^[0-9a-f]{16}$/.test(lr.id) && p.useTeamsUi.getState().listState === 'loading', 'a 2.7.0 desktop: goLive loads the team list (teamReq {id, req})')
+    teamAnswer(s, lr, { ok: true, teams: [teamItem(TM, { needsCount: 2 }), teamItem(TM2)] })
+    await settle()
+    let u = p.useTeamsUi.getState()
+    check(u.listState === 'ok' && u.list.map(t => t.id).join() === `${TM},${TM2}` && u.list[0].needsCount === 2 && u.listSeq === 1, 'its teamRes fills the list')
+
+    // Two in flight (the PC refuses a third with rate); the third goes once a slot frees.
+    const w1 = p.client.requestTeam({ op: 'board', teamId: TM })
+    const w2 = p.client.requestTeam({ op: 'needs', teamId: TM })
+    const w3 = p.client.requestTeam({ op: 'lead', teamId: TM })
+    check(teamReqs(s).length === 3 && teamReqs(s).map(m => m.req.op).join() === 'list,board,needs', 'two team requests go out at once, the third waits')
+    teamAnswer(s, teamReqs(s)[1], { ok: false, error: 'not_found' })
+    const got1 = await w1
+    await settle()
+    check(got1.ok && got1.value.ok === false && got1.value.error === 'not_found' && teamReqs(s).length === 4 && teamReqs(s)[3].req.op === 'lead', 'the answer is the desktop TeamReply, and it frees the slot for the waiting one')
+    teamAnswer(s, teamReqs(s)[2], { ok: true, needs: { teamId: TM, rev: 7, trust: 'trusted', paused: null, approvals: [], cards: [], queue: [], tasks: {} } })
+    teamAnswer(s, teamReqs(s)[3], { ok: true, lead: { messages: [], cursor: null, agent: null } })
+    check((await w2).value.ok && (await w3).value.lead.cursor === null, 'every answer settles by its id')
+
+    // teamChanged: one burst per team, a team with no screen open reacts only to list, one list reload.
+    p.openTeamBoard(TM)
+    const before = teamReqs(s).length
+    s.recv({ type: 'teamChanged', teamId: TM, rev: 8, scopes: ['board', 'task', 'list'], taskId: 't-1' })
+    s.recv({ type: 'teamChanged', teamId: TM, rev: 9, scopes: ['needs', 'list'] })
+    s.recv({ type: 'teamChanged', teamId: TM2, rev: 4, scopes: ['board', 'list'] })
+    check(!p.useTeamsUi.getState().changed[TM] && teamReqs(s).length === before, 'changes gather for TEAM_CHANGED_MS before anything moves')
+    p.advance(p.TEAM_CHANGED_MS); await settle()
+    let ch = p.useTeamsUi.getState().changed
+    check(ch[TM] && ch[TM].seq === 1 && ch[TM].rev === 9 && [...ch[TM].scopes].sort().join() === 'board,list,needs,task' && ch[TM].taskId === 't-1', 'one change per team per burst: scopes merged, the newest rev, the one task they named')
+    check(!ch[TM2], 'a team with no screen open reacts only to list')
+    const lists = teamReqs(s).slice(before)
+    check(lists.length === 1 && lists[0].req.op === 'list', 'and the list reloads once for both teams (the store refetches nothing else)')
+    s.recv({ type: 'teamChanged', teamId: TM, rev: 10, scopes: ['list'] })
+    p.advance(p.TEAM_CHANGED_MS); await settle()
+    check(teamReqs(s).length === before + 1 && p.useTeamsUi.getState().changed[TM].seq === 1, 'a list change while a load is out waits for it; a list-only change leaves the screens alone')
+    teamAnswer(s, lists[0], { ok: true, teams: [teamItem(TM, { needsCount: 3 }), teamItem(TM2)] })
+    await settle()
+    const again = teamReqs(s).slice(before + 1)
+    check(p.useTeamsUi.getState().list[0].needsCount === 3 && again.length === 1 && again[0].req.op === 'list', 'then exactly one more load runs right after it')
+    teamAnswer(s, again[0], { ok: true, teams: [teamItem(TM, { needsCount: 3 }), teamItem(TM2)] })
+    await settle()
+    s.recv({ type: 'teamChanged', teamId: TM, rev: 11, scopes: ['task'], taskId: 't-1' })
+    s.recv({ type: 'teamChanged', teamId: TM, rev: 11, scopes: ['task'], taskId: 't-2' })
+    p.advance(p.TEAM_CHANGED_MS); await settle()
+    ch = p.useTeamsUi.getState().changed
+    check(ch[TM].seq === 2 && ch[TM].taskId === undefined && ch[TM].scopes.join() === 'task', 'two tasks in one burst: the change names any task')
+    s.recv({ type: 'teamChanged', teamId: TM, rev: 12, scopes: ['bogus'] })
+    s.recv({ type: 'teamChanged', teamId: TM, rev: 12 })
+    p.advance(p.TEAM_CHANGED_MS); await settle()
+    ch = p.useTeamsUi.getState().changed
+    check(ch[TM].seq === 3 && ch[TM].scopes.includes('board') && ch[TM].scopes.includes('lead') && !ch[TM].scopes.includes('bogus') && !ch[TM].scopes.includes('disabled'), 'unknown scopes are dropped; a change without scopes may touch anything')
+    teamAnswer(s, teamReqs(s).at(-1), { ok: true, teams: [teamItem(TM), teamItem(TM2)] })
+    await settle()
+
+    // Navigation: a screen of one team closes the screens of another; the column stays per team.
+    p.setTeamColumn('review'); p.openTeamTask(TM, 't-4'); p.openTeamBoard(TM)
+    u = p.useTeamsUi.getState()
+    check(u.boardFor === TM && u.column === 'review' && u.task && u.task.taskId === 't-4', 'reopening the board of the same team keeps its column and the task over it')
+    p.openTeamsList(); p.openLeadChat(TM2)
+    u = p.useTeamsUi.getState()
+    check(u.listOpen && u.leadFor === TM2 && u.boardFor === null && u.task === null, 'a screen of another team closes the first team\'s screens (the list stays)')
+    p.openTeamBoard(TM2, 'done'); p.closeTeamBoard(); p.openTeamBoard(TM2)
+    check(p.useTeamsUi.getState().column === 'todo' && p.useTeamsUi.getState().leadFor === TM2, 'a closed board opens again on To do')
+
+    // A team gone from the list (removed on the PC): its open screens refetch once and find it gone.
+    const seq = p.useTeamsUi.getState().changed[TM2]?.seq ?? 0
+    s.recv({ type: 'teamChanged', teamId: TM2, rev: 13, scopes: ['list'] })
+    p.advance(p.TEAM_CHANGED_MS); await settle()
+    teamAnswer(s, teamReqs(s).at(-1), { ok: true, teams: [teamItem(TM)] })
+    await settle()
+    check(p.useTeamsUi.getState().changed[TM2].seq === seq + 1 && p.useTeamsUi.getState().changed[TM2].scopes.includes('board'), 'a team on screen gone from the list bumps its screens once')
+    p.loadTeamList(); teamAnswer(s, teamReqs(s).at(-1), { ok: true, teams: [teamItem(TM)] }); await settle()
+    check(p.useTeamsUi.getState().changed[TM2].seq === seq + 1, 'and not again on the next load')
+
+    // Decisions go through the ctl path; a disabled ack empties the store.
+    const dc = p.client.sendTeamCtl({ kind: 'teamDispatch', teamId: TM, queueId: 'all', go: true })
+    const ctl = s.sent.filter(m => m.type === 'ctl').at(-1)
+    check(ctl && ctl.action.kind === 'teamDispatch' && ctl.action.queueId === 'all' && ctl.action.go === true, 'sendTeamCtl sends the ctl to a 2.7.0 desktop')
+    s.recv({ type: 'ctlAck', id: ctl.id, ok: true }); check((await dc).ok, 'and resolves with its ack')
+
+    // Labs off on the PC: disabled empties the store at once; Labs on again comes back as a list change.
+    p.openTeamNeeds(TM2)
+    s.recv({ type: 'teamChanged', teamId: TM2, rev: 14, scopes: ['needs'] })
+    s.recv({ type: 'teamChanged', teamId: '', rev: 0, scopes: ['disabled'] })
+    u = p.useTeamsUi.getState()
+    check(u.list === null && u.listState === 'disabled' && !u.listOpen && u.boardFor === null && u.needsFor === null && u.leadFor === null && Object.keys(u.changed).length === 0, 'Labs off on the PC (disabled) empties the store and closes every screen at once')
+    p.advance(p.TEAM_CHANGED_MS); await settle()
+    check(Object.keys(p.useTeamsUi.getState().changed).length === 0, 'a change gathered before it never lands')
+    const n0 = teamReqs(s).length
+    s.recv({ type: 'teamChanged', teamId: '', rev: 0, scopes: ['list'] })
+    p.advance(p.TEAM_CHANGED_MS); await settle()
+    check(teamReqs(s).length === n0 + 1 && teamReqs(s).at(-1).req.op === 'list' && p.useTeamsUi.getState().listState === 'loading', 'Labs on again (a list change of the whole set) loads the list')
+    teamAnswer(s, teamReqs(s).at(-1), { ok: false, error: 'disabled' }); await settle()
+    check(p.useTeamsUi.getState().listState === 'disabled' && p.useTeamsUi.getState().list === null, 'a disabled answer hides everything too')
+    p.loadTeamList(); teamAnswer(s, teamReqs(s).at(-1), { ok: true, teams: [teamItem(TM)] }); await settle()
+    p.openTeamBoard(TM)
+    const r = p.client.requestTeam({ op: 'board', teamId: TM })
+    teamAnswer(s, teamReqs(s).at(-1), { ok: false, error: 'disabled' })
+    check((await r).value.error === 'disabled' && p.useTeamsUi.getState().boardFor === null && p.useTeamsUi.getState().listState === 'disabled', 'any team request answered disabled empties the store')
+    p.loadTeamList(); teamAnswer(s, teamReqs(s).at(-1), { ok: true, teams: [teamItem(TM)] }); await settle()
+    p.loadTeamList(); teamAnswer(s, teamReqs(s).at(-1), { ok: false, error: 'rate' }); await settle()
+    check(p.useTeamsUi.getState().listState === 'noReply' && p.useTeamsUi.getState().list.length === 1, 'a list the PC did not give keeps the one it had (noReply)')
+
+    // A reconnect: requests the old socket took never get answers and free their slots; the screens left open refetch.
+    p.openTeamTask(TM, 't-4')
+    const seqT = p.useTeamsUi.getState().changed[TM]?.seq ?? 0
+    const lost1 = p.client.requestTeam({ op: 'task', teamId: TM, taskId: 't-4' })
+    const lost2 = p.client.requestTeam({ op: 'needs', teamId: TM })
+    s.drop(1006); p.advance(1000)
+    const s2 = p.last(); s2.open(); teamAuthOk(s2, 'dev')
+    const l1 = await lost1, l2 = await lost2
+    await settle()
+    check(!l1.ok && l1.error === 'offline' && !l2.ok && l2.error === 'offline', 'goLive ends the team requests the dropped socket took (they can never be answered)')
+    check(teamReqs(s2).length === 1 && teamReqs(s2)[0].req.op === 'list', 'so the new list load goes out at once on the new socket')
+    u = p.useTeamsUi.getState()
+    check(u.task && u.task.taskId === 't-4' && u.changed[TM].seq === seqT + 1 && p.teamChangeWants(u.changed[TM], 'task', 't-4') && p.teamChangeWants(u.changed[TM], 'lead'), 'the screens left open stay and refetch everything (changes may have been missed)')
+
+    // Another desktop without Teams after a reconnect: the store empties.
+    s2.drop(1006); p.advance(1000)
+    const s3 = p.last(); s3.open(); teamAuthOk(s3, '2.0.0')
+    u = p.useTeamsUi.getState()
+    check(teamReqs(s3).length === 0 && u.list === null && u.listState === 'idle' && u.task === null, 'a desktop before 2.7.0 after a reconnect: the store empties and nothing is sent')
+  }
+  {
+    // Labs off and on again inside one throttle window reach the phone as one change: the list decides.
+    const p = page()
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    teamAnswer(s, teamReqs(s)[0], { ok: true, teams: [teamItem(TM)] }); await settle()
+    p.openTeamBoard(TM)
+    s.recv({ type: 'teamChanged', teamId: '', rev: 0, scopes: ['disabled', 'list'] })
+    const u = p.useTeamsUi.getState()
+    check(u.list === null && u.listState === 'disabled' && u.boardFor === null, 'disabled merged with list empties the store at once')
+    p.advance(p.TEAM_CHANGED_MS); await settle()
+    check(teamReqs(s).length === 2 && teamReqs(s)[1].req.op === 'list', 'and loads the list again to learn which one holds')
+    teamAnswer(s, teamReqs(s)[1], { ok: true, teams: [teamItem(TM)] }); await settle()
+    check(p.useTeamsUi.getState().listState === 'ok' && p.useTeamsUi.getState().list.length === 1, 'Labs on: the list is back')
+  }
+  {
+    // A revoke forgets everything.
+    const p = page()
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    teamAnswer(s, teamReqs(s)[0], { ok: true, teams: [teamItem(TM)] }); await settle()
+    p.openTeamBoard(TM); p.openTeamNeeds(TM)
+    s.recv({ type: 'revoked' })
+    const u = p.useTeamsUi.getState()
+    check(u.list === null && u.listState === 'idle' && u.boardFor === null && u.needsFor === null, 'a revoke closes every Teams screen and forgets the list')
+  }
+}
+
+/** Team deep links through the real client (E10 B8). */
+async function testTeamDeepLinks() {
+  {
+    // At boot: waits for goLive, wins over lastPane, board then task; the hash is cleared, nothing is acted on.
+    const p = page({ hash: `#team=${TM}&task=t-3` })
+    p.state().update({ lastPane: 'a1' })
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    const u = p.useTeamsUi.getState()
+    check(u.boardFor === TM && u.task && u.task.teamId === TM && u.task.taskId === 't-3' && u.needsFor === null, 'a team link opens its board, then the task over it')
+    check(p.state().activePaneId === null && p.state().screen === 'home' && !s.sent.some(m => m.type === 'sub'), 'it is applied after goLive and wins over lastPane')
+    check(p.hash === '' && !s.sent.some(m => m.type === 'ctl') && teamReqs(s).length === 1 && teamReqs(s)[0].req.op === 'list', 'the hash was cleared and only the list was asked for (a link never acts)')
+  }
+  {
+    // Without a task: the board at once, Te necesita over it once the list says the team needs the user.
+    const p = page({ hash: `#team=${TM}` })
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    check(p.useTeamsUi.getState().boardFor === TM && p.useTeamsUi.getState().needsFor === null, 'without a task the board opens at once')
+    teamAnswer(s, teamReqs(s)[0], { ok: true, teams: [teamItem(TM, { needsCount: 2 }), teamItem(TM2)] }); await settle()
+    check(p.useTeamsUi.getState().needsFor === TM, 'and Te necesita over it when the list says it needs the user')
+    // While live: a hashchange (a notification tap relays its hash) applies at once.
+    p.setHash(`#team=${TM2}`)
+    let u = p.useTeamsUi.getState()
+    check(u.boardFor === TM2 && u.needsFor === null && p.hash === '', 'a team link while live opens at once; a team with nothing pending gets only its board')
+    p.setHash(`#team=${TM}`)
+    u = p.useTeamsUi.getState()
+    check(u.boardFor === TM && u.needsFor === TM && u.task === null, 'one that needs the user gets Te necesita over the board right away')
+    // The other pushed screens stay under a team link (it only picks the Teams screens).
+    const pushedOpen = () => [
+      p.useHistoryStore.getState().workspaceId !== null, p.useChangesStore.getState().workspaceId !== null, p.useChangesStore.getState().diff !== null,
+      p.useWsNotes.getState().workspaceId !== null, p.useAutomationsStore.getState().open, p.useDiagStore.getState().open,
+    ]
+    p.openHistory('w1'); p.openAutomations(); p.openChanges('w1'); p.openDiff({ path: 'a.ts', area: 'unstaged', staged: false }); p.openWsNotes('w1'); p.openDiagnostics()
+    p.setHash(`#team=${TM}&task=t-9`)
+    u = p.useTeamsUi.getState()
+    check(u.task && u.task.taskId === 't-9' && u.needsFor === null, 'with a task: the task over the board')
+    check(pushedOpen().every(Boolean), 'a team link leaves History, Automations, Changes, its diff, Notes and Diagnostics open')
+    // A console link: the terminal slides in under the pushed screens, so every one of them closes first.
+    p.openTeamsList(); p.openLeadChat(TM)
+    p.setHash('#ws=w1&pane=a1')
+    check(p.state().activePaneId === 'a1' && p.state().screen === 'terminal', 'a console link still opens its console')
+    u = p.useTeamsUi.getState()
+    check(!u.listOpen && u.boardFor === null && u.needsFor === null && u.leadFor === null && u.task === null && u.list !== null, 'a console link closes every Teams screen (the list stays)')
+    check(pushedOpen().every(x => !x), 'and History, Automations, Changes, its diff, Notes and Diagnostics, so its terminal is what shows')
+    // A console the PC no longer has only toasts: nothing closes.
+    p.client.leaveTerminal()
+    p.openHistory('w1'); p.openTeamBoard(TM)
+    p.setHash('#ws=w1&pane=ghost')
+    check(p.useHistoryStore.getState().workspaceId === 'w1' && p.useTeamsUi.getState().boardFor === TM && p.state().screen === 'home', 'a link to a console that is gone closes nothing')
+  }
+  {
+    // A tap while the socket is down, with a list load the dropped socket took: the load that
+    // fails 'offline' at goLive neither forgets the link nor flashes noReply; the one after it decides.
+    const p = page()
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    teamAnswer(s, teamReqs(s)[0], { ok: true, teams: [teamItem(TM)] }); await settle()
+    s.recv({ type: 'teamChanged', teamId: TM, rev: 8, scopes: ['list'] })
+    p.advance(p.TEAM_CHANGED_MS); await settle()
+    check(teamReqs(s).length === 2, 'a list reload is out when the socket drops')
+    const seq0 = p.useTeamsUi.getState().listSeq
+    s.drop(1006); p.advance(1000)
+    p.setHash(`#team=${TM}`)
+    check(p.useTeamsUi.getState().boardFor === TM && p.useTeamsUi.getState().needsFor === null && p.hash === '', 'a team link while the socket is down opens the board, Te necesita waits for the list')
+    const s2 = p.last(); s2.open(); teamAuthOk(s2, 'dev')
+    await settle()
+    check(p.useTeamsUi.getState().listState === 'ok' && p.useTeamsUi.getState().listSeq === seq0, 'the lost load settles nothing while another one follows it')
+    check(teamReqs(s2).length === 1 && teamReqs(s2)[0].req.op === 'list', 'and the follow-up load goes out on the new socket')
+    teamAnswer(s2, teamReqs(s2)[0], { ok: true, teams: [teamItem(TM, { needsCount: 1 })] }); await settle()
+    check(p.useTeamsUi.getState().needsFor === TM, 'its answer opens Te necesita over the board')
+  }
+  {
+    // The list may be older than the push: one that says nothing is pending asks the PC again.
+    const p = page()
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    teamAnswer(s, teamReqs(s)[0], { ok: true, teams: [teamItem(TM)] }); await settle()
+    p.setHash(`#team=${TM}`)
+    check(p.useTeamsUi.getState().boardFor === TM && p.useTeamsUi.getState().needsFor === null && teamReqs(s).length === 2 && teamReqs(s)[1].req.op === 'list', 'a list with nothing pending for the team: the board, and a fresh list load')
+    teamAnswer(s, teamReqs(s)[1], { ok: true, teams: [teamItem(TM, { needsCount: 1 })] }); await settle()
+    check(p.useTeamsUi.getState().needsFor === TM, 'the fresh list opens Te necesita over the board')
+    // A socket that slept: the load cannot leave, the link waits for goLive's load.
+    p.closeTeamNeeds(); s.drop(1006); p.advance(1000)
+    p.setHash(`#team=${TM2}`); await settle()
+    check(p.useTeamsUi.getState().boardFor === TM2 && p.useTeamsUi.getState().listState === 'noReply', 'with the socket down the board opens and the load fails at once')
+    const s2 = p.last(); s2.open(); teamAuthOk(s2, 'dev'); await settle()
+    teamAnswer(s2, teamReqs(s2)[0], { ok: true, teams: [teamItem(TM), teamItem(TM2, { needsCount: 2 })] }); await settle()
+    check(p.useTeamsUi.getState().needsFor === TM2 && p.useTeamsUi.getState().boardFor === TM2, 'the list goLive loads still opens Te necesita for the link')
+  }
+  {
+    // The list arrives after the user moved on: Te necesita does not pop up over another screen.
+    const p = page({ hash: `#team=${TM}` })
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    p.openLeadChat(TM)
+    teamAnswer(s, teamReqs(s)[0], { ok: true, teams: [teamItem(TM, { needsCount: 2 })] }); await settle()
+    check(p.useTeamsUi.getState().needsFor === null && p.useTeamsUi.getState().leadFor === TM, 'a list that lands after the user moved on opens nothing')
+  }
+  {
+    // A console link that waits for goLive closes the pushed screens left open too.
+    const p = page({ hash: '#ws=w1&pane=a1' })
+    p.openWsNotes('w1'); p.openTeamBoard(TM); p.openTeamTask(TM, 't-2')
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    check(p.state().activePaneId === 'a1' && p.state().screen === 'terminal', 'the console link opens its console at goLive')
+    check(p.useWsNotes.getState().workspaceId === null && p.useTeamsUi.getState().boardFor === null && p.useTeamsUi.getState().task === null, 'and the pushed screens left open close over it')
+  }
+  {
+    const p = page({ hash: `#ws=w2&pane=b1&team=${TM}` })
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    check(p.state().activePaneId === 'b1' && p.useTeamsUi.getState().boardFor === null, 'a hash with both forms opens the console (the pane form first)')
+  }
+  {
+    const p = page({ paired: false, hash: `#pair=AB12CD34&team=${TM}` })
+    p.client.start()
+    check(p.state().phase === 'pairForm' && p.useTeamsUi.getState().boardFor === null, 'with pair= in the hash pairing wins over a team link')
+  }
+  {
+    // A link that waits through an older desktop is dropped (nothing is sent).
+    const p = page()
+    p.client.setPendingTeamLink({ team: TM, task: 't-1' })
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, '2.0.0')
+    check(p.useTeamsUi.getState().boardFor === null && teamReqs(s).length === 0, 'a pending team link on a desktop before 2.7.0 opens nothing')
+    p.client.setPendingTeamLink({ team: TM })
+    check(p.useTeamsUi.getState().boardFor === null, 'nor while live with it')
+  }
+  {
+    // The newer of the two pending links wins.
+    const p = page()
+    p.client.setPendingTeamLink({ team: TM })
+    p.client.setPendingDeepLink('a1')
+    p.client.start(); const s = p.last(); s.open(); teamAuthOk(s, 'dev')
+    check(p.state().activePaneId === 'a1' && p.useTeamsUi.getState().boardFor === null, 'a console link after a team link replaces it')
+    const q = page()
+    q.client.setPendingDeepLink('a1')
+    q.client.setPendingTeamLink({ team: TM })
+    q.client.start(); const t = q.last(); t.open(); teamAuthOk(t, 'dev')
+    check(q.state().activePaneId === null && q.useTeamsUi.getState().boardFor === TM, 'and a team link after a console link replaces that one')
+  }
+}
+
 async function main() {
   const p = page({ paired: false })
   testPure(p)
@@ -1189,6 +1543,9 @@ async function main() {
   testHomeLogic(p)
   testAttention(p)
   await testPlanRequest()
+  testTeamLinks(p)
+  await testTeamsClient()
+  await testTeamDeepLinks()
   await testHomeClient()
   await testClientNotify()
   testGeneration()

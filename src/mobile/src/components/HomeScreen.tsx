@@ -15,6 +15,9 @@
  * every workspace; on a desktop >= 2.7.0 the kebab starts with Mark all read
  * (markRead for each done or error console of it not seen yet) while there
  * is one.
+ *
+ * App 2.7.0 (E10 B8): the Teams card follows it, with or without workspaces,
+ * on a desktop >= 2.7.0 that has a team.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -36,6 +39,7 @@ import { NoWorkspaces } from './home/EmptyStates'
 import { Fab, FAB_CLEARANCE_PX } from './home/Fab'
 import { NewConsoleSheet } from './home/NewConsoleSheet'
 import { ToastStack } from './ToastStack'
+import { TeamsCard } from './teams/TeamsCard'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { openDiagnostics } from '../lib/connLog'
@@ -135,6 +139,7 @@ export function HomeScreen(): ReactNode {
   useEffect(() => setNow(Date.now()), [paneStatus])
 
   const needsRows = useMemo(() => (snapshot ? needsYouPanes(snapshot, paneStatus) : []), [snapshot, paneStatus])
+  const hasWorkspaces = !!snapshot && snapshot.workspaces.length > 0
 
   const onOpen = useCallback((paneId: string) => void client.requestOpen(paneId), [])
   const onActions = useCallback((workspaceId: string, paneId: string) => setActions({ workspaceId, paneId }), [])
@@ -172,9 +177,11 @@ export function HomeScreen(): ReactNode {
         >
           {/* E3-FR-43: the desktop's https origin, offered while this page is http. */}
           <SecureCard />
-          {snapshot && snapshot.workspaces.length > 0 ? (
+          {hasWorkspaces && <NeedsYouSection rows={needsRows} now={now} onOpen={onOpen} onActions={onActions} />}
+          {/* App 2.7.0 (E10 B8): the teams of the PC, with or without workspaces. */}
+          <TeamsCard />
+          {hasWorkspaces ? (
             <>
-              <NeedsYouSection rows={needsRows} now={now} onOpen={onOpen} onActions={onActions} />
               <ResumeCard now={now} onOpen={onOpen} onActions={onActions} />
               <UsageCards onOpen={() => setUsageOpen(true)} />
               {snapshot.workspaces.map((ws) => (

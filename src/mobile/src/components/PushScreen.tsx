@@ -4,10 +4,13 @@
  * and ignores touches while sliding. With prefers-reduced-motion it appears
  * and disappears at once. Holds a back-stack claim (useBackClaim), so Android
  * back and the header's back arrow both pop it. Stays mounted until its exit
- * animation ends (fallback SLIDE_MS + 50ms).
+ * animation ends (fallback SLIDE_MS + 50ms). The open one on top shows the
+ * in-page notices inside it (app 2.7.0, ToastStack usePushToasts),
+ * `toastBottom` px up.
  */
 import { useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react'
 import { ChevronLeft } from 'lucide-react'
+import { ToastStack, usePushToasts } from './ToastStack'
 import { useBackClaim } from '../lib/useBackClaim'
 import { prefersReducedMotion } from '../lib/sheetDrag'
 import { t } from '../lib/i18n'
@@ -27,6 +30,7 @@ export function PushScreen({
   flush,
   bodyRef,
   onScroll,
+  toastBottom = 12,
 }: {
   open: boolean
   onClose: () => void
@@ -41,11 +45,14 @@ export function PushScreen({
   /** The scrolling body element. */
   bodyRef?: Ref<HTMLDivElement>
   onScroll?: (el: HTMLDivElement) => void
+  /** Room the toasts leave at the bottom (a FAB, a composer). */
+  toastBottom?: number
 }): ReactNode {
   const { requestClose } = useBackClaim(open, onClose)
   const [mounted, setMounted] = useState(open)
   const [stage, setStage] = useState<Stage>('in')
   const ref = useRef<HTMLDivElement | null>(null)
+  const toastsHere = usePushToasts(open, ref)
 
   if (open && !mounted) {
     setMounted(true)
@@ -126,6 +133,7 @@ export function PushScreen({
       >
         {children}
       </div>
+      {toastsHere && <ToastStack bottom={toastBottom} notices shell />}
     </div>
   )
 }

@@ -14,7 +14,9 @@
  *    tag = pane, so they never pile up); `notificationclick` focuses the app
  *    and opens that console through its deep link (E3-FR-45). v2.3: the
  *    announced `state` rides in `data`, so the page can close a stale note
- *    (trayReconcile.ts); no silent push ever closes one.
+ *    (trayReconcile.ts); no silent push ever closes one. app 2.7.0 (E10 B8):
+ *    a team push carries `./#team=<id>[&task=<id>]`, tag `team:<id>:<row>`
+ *    and no state; the same tap relays its hash (serviceWorker.ts openHashOf).
  *
  * vite.config.ts fills VERSION and PRECACHE at build time (swBuild.ts).
  */

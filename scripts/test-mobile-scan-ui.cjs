@@ -143,7 +143,7 @@ window.runMain = async () => {
  paired.length = 0;
  setLang('es');
  await open();
- check($('h1').textContent === 'Escanear el codigo QR' && host.textContent.includes('o escribi el codigo de 8 caracteres'), 'Spanish scanner strings');
+ check($('h1').textContent === 'Escanear el código QR' && host.textContent.includes('o escribí el código de 8 caracteres'), 'Spanish scanner strings');
  const field = $('input[placeholder="ABCD2345"]');
  const go = [...host.querySelectorAll('button')].find(b => b.textContent === 'Ir');
  const setField = v => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, v); field.dispatchEvent(new Event('input', { bubbles: true })) };

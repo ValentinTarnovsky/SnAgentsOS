@@ -286,7 +286,7 @@ window.runMain = async () => {
  // --- no workspaces (E2-FR-15) ---
  flushSync(() => store.getState().update({ snapshot: { ...snapshot, language: 'es', workspaces: [] } }));
  await frames();
- check($('[data-empty-workspaces]').textContent === 'No hay workspaces. Crea uno en la PC.' && !$('[data-fab]'), 'without workspaces the hero shows and there is no FAB');
+ check($('[data-empty-workspaces]').textContent === 'No hay workspaces. Creá uno en la PC.' && !$('[data-fab]'), 'without workspaces the hero shows and there is no FAB');
  setLang('en');
  r.unmount();
 

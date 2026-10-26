@@ -1616,27 +1616,27 @@ export const es: Record<keyof typeof en, string> = {
   'remote.pairing.allow': 'Permitir',
   'remote.pairing.deny': 'Denegar',
 
-  // Atajos custom de la barra de teclas del telefono
-  'remote.keybar.title': 'Botones de la barra de teclas del telefono',
+  // Atajos custom de la barra de teclas del teléfono
+  'remote.keybar.title': 'Botones de la barra de teclas del teléfono',
   'remote.keybar.hint':
-    'Agrega botones custom a la barra de teclas de los telefonos pareados. Cada boton manda una secuencia fija de bytes a la consola - que eso se interprete como "insertar una linea nueva" o algo distinto depende de la app que corre ahi, no de {app}.',
-  'remote.keybar.new': 'Nuevo boton',
+    'Agregá botones custom a la barra de teclas de los teléfonos vinculados. Cada botón manda una secuencia fija de bytes a la consola: que eso se interprete como "insertar una línea nueva" o algo distinto depende de la app que corre ahí, no de {app}.',
+  'remote.keybar.new': 'Nuevo botón',
   'remote.keybar.label': 'Etiqueta',
   'remote.keybar.seq': 'Secuencia',
   'remote.keybar.literal': 'Texto literal',
   'remote.keybar.addText': 'Agregar texto',
   'remote.keybar.enter': 'Enter',
-  'remote.keybar.newline': 'Salto de linea',
+  'remote.keybar.newline': 'Salto de línea',
   'remote.keybar.tab': 'Tab',
   'remote.keybar.esc': 'Esc',
   'remote.keybar.ctrl': 'Ctrl+',
-  'remote.keybar.combo': 'Combinacion de teclas',
+  'remote.keybar.combo': 'Combinación de teclas',
   'remote.keybar.base': 'Tecla',
-  'remote.keybar.char': 'Caracter',
+  'remote.keybar.char': 'Carácter',
   'remote.keybar.addCombo': 'Agregar combo',
   'remote.keybar.clear': 'Limpiar',
   'remote.keybar.preview': 'Vista previa',
-  'remote.keybar.empty': 'Todavia no hay botones custom.',
+  'remote.keybar.empty': 'Todavía no hay botones custom.',
 
   // Settings > Automation: snaos CLI (E8-FR-21/22)
   'settings.cli.enabled': 'CLI snaos en las consolas',

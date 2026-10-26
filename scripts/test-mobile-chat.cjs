@@ -272,14 +272,14 @@ window.result = (async () => {
  q('[data-view-option="chat"]').click(); await frames();
  feed({ paneId:'c1', items, cursor:null, done:true }); await frames(); await wait(50);
  const esLabels = qa('[data-tool-label]').map(e => e.textContent);
- check(esLabels.includes('Read 3 archivos') && q('[data-chat-thinking]').textContent.includes('Pensando') && q('[data-chat-more]').textContent === 'Ver mas','es: "Read 3 archivos", "Pensando", "Ver mas"');
+ check(esLabels.includes('Read 3 archivos') && q('[data-chat-thinking]').textContent.includes('Pensando') && q('[data-chat-more]').textContent === 'Ver más','es: "Read 3 archivos", "Pensando", "Ver más"');
  feed({ paneId:'c1', items:phaseItems, cursor:null, done:true }); await frames();
  check(q('[data-tool-phase="search"] [data-phase-label]')?.textContent === 'Búsqueda 2','es: the phase says "Búsqueda 2"');
  client.handleChatAppend({ v:1, type:'chatAppend', paneId:'c1', items:[], notice:'paused' }); await frames();
  check(q('[data-chat-paused]')?.textContent.includes('Este chat se pausó') && q('[data-chat-resume]').textContent === 'Reanudar','es: "Este chat se pausó" with [Reanudar]');
  feed({ paneId:'c1', items:phaseItems, cursor:null, done:true }); await frames();
  store.getState().update({ paneStatus:{ c1:{ state:'working', provider:'claude', stateSince:4 } } }); await frames();
- check(q('[data-chat-working]')?.textContent === 'Claude esta trabajando...','es: "Claude esta trabajando..."');
+ check(q('[data-chat-working]')?.textContent === 'Claude está trabajando...','es: "Claude está trabajando..."');
  { const wide=[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1 && !e.closest('[data-scrollable]')).slice(0,5).map(e=>e.tagName+'.'+String(e.className).slice(0,60)); check(document.documentElement.scrollWidth<=innerWidth && wide.length===0,'no horizontal overflow in Spanish '+JSON.stringify(wide)) }
 
  // A shell where an agent was started by hand: its status names the agent, so
@@ -370,7 +370,7 @@ window.result = (async () => {
  setLang('es');
  feed({ paneId:'x1', items:[{ id:'notice', role:'system', ts:null, blocks:[{ t:'notice', code:'ambiguous' }] }], cursor:null, done:true }); await frames();
  const esToast = store.getState().toasts.at(-1)?.text;
- check(esToast === 'Chat no disponible para esta consola. Activa la integracion de Codex en los ajustes de la PC para habilitarlo','es: the Codex toast: ' + esToast);
+ check(esToast === 'Chat no disponible para esta consola. Activá la integración de Codex en los ajustes de la PC para habilitarlo','es: the Codex toast: ' + esToast);
  check(chatToastsSince(mark) === 1,'the title-only status (precise:false) is a new key: exactly one more toast');
  setLang('en');
  // A to B and back to A, with no notice in between: the change forgot the toast, so it shows again. Once through paneStatus, once through the state snapshot.

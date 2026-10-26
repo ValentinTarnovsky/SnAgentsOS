@@ -6,8 +6,8 @@
  * into three targets: main, renderer and the mobile web client. Runtime
  * validation schemas live in remote-protocol-schemas.ts (main-only). It may
  * import only types.ts, git-types.ts, chat-types.ts, ws-notes.ts,
- * agentTune.ts, claude-accounts.ts, toolActivity.ts and failure.ts, all
- * import-free of Node and DOM.
+ * agentTune.ts, claude-accounts.ts, toolActivity.ts, failure.ts and
+ * team-protocol.ts, all import-free of Node and DOM.
  */
 import type {
   AgentProvider,
@@ -36,6 +36,7 @@ import type { TuneSet } from './agentTune'
 import type { ClaudeAccountRole, UsageActiveAccount } from './claude-accounts'
 import type { ToolFamily } from './toolActivity'
 import type { FailureInfo } from './failure'
+import type { PhoneTeamRequest, TeamCtlAction, TeamReply, TeamScope } from './team-protocol'
 
 export type { RemotePending, RemoteGitChip }
 
@@ -484,6 +485,23 @@ export type RemoteCtlAction =
    * sends it only to a desktop >= 2.7.0.
    */
   | { kind: 'silenceAck'; paneId: string }
+  // --- app 2.7.0 (E10 B8): Teams decisions from the phone, handled in main ---
+  /**
+   * `teamDecide` (approve or reject an approval), `teamAnswer` (answer a card)
+   * and `teamDispatch` (dispatch or drop a "Por despachar" item, or `all`), the
+   * shapes of team-protocol.ts. Handled in main (SessionManager.handleCtl ->
+   * TeamService with origin `phone`); never relayed. The ack's `error` is the
+   * op's TeamError code; a conflict names its reason after a colon and so does
+   * a detail the phone has words for: not_found (unknown team, approval, card
+   * or item), `conflict:already_decided` (the PC or another phone decided
+   * first), `conflict:stale`, disabled (Labs off), untrusted, bad_request (an
+   * integrate approval: only the PC lands it), `bad_request:nothingToGrant` (a
+   * permission with no rule left to grant), forbidden (a hire approval, or a
+   * PC-only card action: resumeTeam, killOrphan), denied, rate, io, and any
+   * other TeamError of the op as it is. Never any text. The phone sends them
+   * only to a desktop >= 2.7.0.
+   */
+  | TeamCtlAction
 
 // --- Git API for the phone's Changes screen (E7-FR-22..26) ---
 
@@ -619,6 +637,11 @@ export type RemoteClientMsg =
   | ({ v: number; type: 'notesReq'; id: string } & RemoteNotesRequest)
   /** app 2.7.0 (A3): the full plan of an ExitPlanMode request; answered by `planRes` with the same id. */
   | ({ v: number; type: 'planReq'; id: string } & RemotePlanRequest)
+  /**
+   * app 2.7.0 (E10 B8): one Teams request (a PHONE_TEAM_OPS op), answered by
+   * `teamRes` with the same id. Sent only to a desktop >= 2.7.0.
+   */
+  | { v: number; type: 'teamReq'; id: string; req: PhoneTeamRequest }
   // --- E3 M12 Chat view (R30-05) ---
   /** E3-FR-25: read the pane as a chat; answered by a first `chatPage`. */
   | { v: number; type: 'chatSub'; paneId: string }
@@ -728,6 +751,33 @@ export type RemoteServerMsg =
   | { v: number; type: 'notesChanged'; workspaceId: string; noteId?: string }
   /** app 2.7.0 (A3): the answer to one `planReq`, < 40KB. */
   | ({ v: number; type: 'planRes'; id: string } & RemotePlanReply)
+  /**
+   * app 2.7.0 (E10 B8): the answer to one `teamReq`, the desktop's TeamReply
+   * of that op as it may leave the PC, <= TEAM_FRAME_MAX_BYTES (48KB) once
+   * framed (main's phoneFit): every text masked like the desktop's run rows
+   * (live tokens, credentials); no desktop path nor desktop-only field (a
+   * `list` item is a PhoneTeamListItem, a task worktree has no `path`, a
+   * conflict no `current`); a task body past TEAM_PHONE_BODY_MAX and a plan
+   * past TEAM_PHONE_PLAN_MAX cut (`truncated`), a hire diff to
+   * TEAM_PHONE_HIRE_LINES lines (`diff.truncated`); task comments, the Lead
+   * thread and a run page keep their newest rows with the cursor at the oldest
+   * one kept (`truncated.comments` counts the comments left for "Ver
+   * anteriores"); a board page of a column holds what fits, its cursor pages
+   * the rest (a page without a column that does not fit comes cut, `cursor`
+   * null and `done` false: the phone pages by column). `too_big`: it still did
+   * not fit (never expected). `rate`: over TEAM_REQ_MAX per TEAM_REQ_WINDOW_MS
+   * or TEAM_REQ_IN_FLIGHT waiting.
+   */
+  | { v: number; type: 'teamRes'; id: string; res: TeamReply }
+  /**
+   * app 2.7.0 (E10 B8): a team changed on the PC (or by another phone). The
+   * first change of a team goes out at once, the ones within 500 ms of it as
+   * one at the end of that window: the newest `rev` (the team runtime rev),
+   * every scope; `taskId` with the `task` scope and `runId` with `run` only
+   * when every merged change named the same one (absent: any task or run of
+   * the team). Only a hint: the phone reloads what it shows through `teamReq`.
+   */
+  | { v: number; type: 'teamChanged'; teamId: string; rev: number; scopes?: TeamScope[]; taskId?: string; runId?: string }
   /**
    * E3-FR-26/30/33: a page of the pane's chat, oldest first, <= 48KB. One that
    * arrives without a chatMore pending is a first page and replaces the list

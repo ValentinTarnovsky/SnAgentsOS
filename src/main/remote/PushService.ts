@@ -25,7 +25,7 @@ import * as webpush from 'web-push'
 import { z } from 'zod'
 import { BRAND } from '@shared/brand'
 import type { AttentionReason, ConfigFile } from '@shared/types'
-import { noticeDigestLine, type StatusNotice } from '../status/events'
+import { noticeDigestLine, type StatusNotice, type TeamNotice } from '../status/events'
 import { mainT } from '../i18n'
 
 /** Largest accepted subscribe body (E3 M14: 4KB). */
@@ -88,9 +88,12 @@ type PushFile = z.infer<typeof fileSchema>
 export interface PushMessage {
   title: string
   body: string
-  /** paneId: a newer push of the same console replaces the older one (FR-45). */
+  /**
+   * paneId: a newer push of the same console replaces the older one (FR-45). App 2.7.0 (E10 B8): a team push is tagged
+   * `team:<teamId>:<rowId>`, never a pane id, so the phone's tray reconcile leaves it alone.
+   */
   tag: string
-  /** Deep link relative to the PWA scope, `./#ws=<id>&pane=<id>` (E2 deep links). */
+  /** Deep link relative to the PWA scope, `./#ws=<id>&pane=<id>` (E2 deep links); a team push `./#team=<id>[&task=<id>]`. */
   url: string
   /** action: `urgency: high`. */
   urgent: boolean
@@ -138,6 +141,18 @@ export function buildPushMessage(notice: StatusNotice, config: ConfigFile | null
   const digest = noticeDigestLine(notice, config)
   if (digest) body = `${body}\n${digest}`.slice(0, PUSH_BODY_TEXT_MAX)
   return { title, body, tag: notice.paneId, url, urgent: notice.state === 'action', state: notice.state }
+}
+
+/**
+ * App 2.7.0 (E10 B8, design 6.3): the push of a TeamNotice. Its title and body are main's own words (the trusted team
+ * name and the task id only, redacted by TeamService), the body cut like every push; the deep link opens the team's
+ * board on the phone, then the task when there is one (`./#team=<id>[&task=<id>]`); the tag is the notice's
+ * `team:<teamId>:<rowId>`; `urgent` for a row that blocks the team. NO `state`: the tray reconcile reads a state's tag
+ * as a pane id.
+ */
+export function buildTeamPushMessage(n: TeamNotice): PushMessage {
+  const url = `./#team=${encodeURIComponent(n.teamId)}${n.taskId ? `&task=${encodeURIComponent(n.taskId)}` : ''}`
+  return { title: n.title, body: n.body.slice(0, PUSH_BODY_TEXT_MAX), tag: n.tag, url, urgent: n.urgent }
 }
 
 export interface PushSendOpts {

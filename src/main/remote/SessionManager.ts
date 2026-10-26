@@ -19,6 +19,11 @@
  * E3 M12 (R30-05): chatSub / chatUnsub / chatMore go to the ChatHub, and a
  * chatSub counts as presence for phone-fit (FR-21): the owner that switches
  * to Chat (unsub + chatSub) keeps the size without grace or auto restore.
+ *
+ * App 2.7.0 (E10 B8): teamReq (30 per 10 s and 2 in flight per session, then
+ * `rate`) and the three Teams ctls go to TeamService through RemoteManager,
+ * never to the renderer; each teamRes is measured against TEAM_FRAME_MAX_BYTES
+ * once more, and every team change reaches the phones as teamChanged.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto'
 import { WebSocket, type RawData } from 'ws'
@@ -42,6 +47,16 @@ import {
   type RemoteStateSnapshot,
 } from '@shared/remote-protocol'
 import { parseRemoteClientMsg } from '@shared/remote-protocol-schemas'
+import {
+  TEAM_FRAME_MAX_BYTES,
+  TEAM_REQ_IN_FLIGHT,
+  TEAM_REQ_MAX,
+  TEAM_REQ_WINDOW_MS,
+  type PhoneTeamRequest,
+  type TeamChangedEvt,
+  type TeamCtlAction,
+  type TeamReply,
+} from '@shared/team-protocol'
 import type { PtyExitInfo, PtyManager, PtySink } from '../pty/PtyManager'
 import type { DeviceRegistry } from './DeviceRegistry'
 import type { FitHooks, FitOwner } from './FitController'
@@ -88,7 +103,7 @@ const LAST_HOST_MAX = 64
 // schema is limited from its first frame without touching the gate.
 
 /** Phone -> desktop message types behind the per-session token bucket. */
-export const RATE_LIMITED_MSG_TYPES: ReadonlySet<string> = new Set(['chatSub', 'chatUnsub', 'chatMore', 'historyReq', 'gitReq', 'notesReq', 'planReq'])
+export const RATE_LIMITED_MSG_TYPES: ReadonlySet<string> = new Set(['chatSub', 'chatUnsub', 'chatMore', 'historyReq', 'gitReq', 'notesReq', 'planReq', 'teamReq'])
 /**
  * E3 M12: panes one session may read as Chat at once. The phone reads one;
  * the cap keeps a misbehaving device from holding a hub entry per pane id.
@@ -99,10 +114,12 @@ export const MAX_CHAT_SUBS = 8
  * schedule ctl join it (R31-00): a run sends a stored prompt to an agent and
  * every toggle rewrites config.json and re-pushes the snapshot to all devices.
  * app 2.7.0 (A3): the status marks too, each one republishes the pane.
+ * app 2.7.0 (E10 B8): the Teams decisions, each one a TeamService commit.
  */
 export const RATE_LIMITED_CTL_KINDS: ReadonlySet<string> = new Set([
   'fitPane', 'releaseFit', 'sendReviewNotes', 'scheduleRun', 'scheduleToggle', 'agentTune', 'claudeAccountUse', 'answerMenu',
   'markRead', 'mutePane', 'silenceAck',
+  'teamDecide', 'teamAnswer', 'teamDispatch',
 ])
 /**
  * app 2.3.0: each `claudeAccountUse` rewrites Claude's credentials file, so on
@@ -171,6 +188,22 @@ export const PLAN_RES_MAX_BYTES = 40 * 1024
 
 /** The status ctls main applies itself (StatusManager through RemoteManager). */
 export type RemoteStatusCtl = Extract<RemoteCtlAction, { kind: 'markRead' | 'mutePane' | 'silenceAck' }>
+
+// --- app 2.7.0 (E10 B8): teamReq limits and the teamRes budget (team-protocol.ts) ---
+
+/** teamReq answered per session inside TEAM_REQ_WINDOW_MS (30 per 10 s); the next one gets `rate`; TEAM_REQ_IN_FLIGHT (2) may wait. */
+export { TEAM_FRAME_MAX_BYTES, TEAM_REQ_IN_FLIGHT, TEAM_REQ_MAX, TEAM_REQ_WINDOW_MS }
+
+/**
+ * The teamRes frame for `reply`: phoneFit already fits it to TEAM_FRAME_MAX_BYTES with the widest id, so this only
+ * measures the real envelope once more and answers `too_big` for a reply that still would not fit (never expected).
+ * Exported for tests.
+ */
+export function fitTeamRes(id: string, res: TeamReply): Extract<RemoteServerMsg, { type: 'teamRes' }> {
+  const frame: Extract<RemoteServerMsg, { type: 'teamRes' }> = { v: PROTOCOL_VERSION, type: 'teamRes', id, res }
+  if (Buffer.byteLength(JSON.stringify(frame)) <= TEAM_FRAME_MAX_BYTES) return frame
+  return { v: PROTOCOL_VERSION, type: 'teamRes', id, res: { ok: false, error: 'too_big' } }
+}
 
 /**
  * The planRes frame for `reply`, at most PLAN_RES_MAX_BYTES serialized: a
@@ -295,6 +328,9 @@ interface Session {
   /** app 2.7.0 (A3): when the planReq of the last PLAN_REQ_WINDOW_MS were accepted, and how many wait. */
   planTimes: number[]
   planInFlight: number
+  /** app 2.7.0 (E10 B8): when the teamReq of the last TEAM_REQ_WINDOW_MS were accepted, and how many wait. */
+  teamTimes: number[]
+  teamInFlight: number
   /** E3-FR-56: per workspace, the paths the last status answer listed to this session. */
   gitPaths: Map<string, Set<string>>
 }
@@ -376,6 +412,17 @@ export interface SessionManagerDeps {
    * StatusManager.planOf). Absent = every planReq answers not_found.
    */
   plan?: (req: RemotePlanRequest) => Promise<RemotePlanReply>
+  /**
+   * app 2.7.0 (E10 B8): one teamReq (RemoteManager.teamRequest -> TeamService.remoteView.request: origin phone,
+   * masked, fitted). `device` is the name of the authenticated session's device. Absent = every teamReq answers
+   * not_found.
+   */
+  team?: (req: PhoneTeamRequest, device?: string) => Promise<TeamReply>
+  /**
+   * app 2.7.0 (E10 B8): ctls teamDecide, teamAnswer and teamDispatch, handled in main (RemoteManager.teamCtl ->
+   * TeamService.remoteView.ctl). Absent = ack unknown_action.
+   */
+  teamCtl?: (action: TeamCtlAction, device?: string) => Promise<RemoteCommandResult>
 }
 
 /**
@@ -457,6 +504,8 @@ export class SessionManager implements PtySink {
       notesInFlight: 0,
       planTimes: [],
       planInFlight: 0,
+      teamTimes: [],
+      teamInFlight: 0,
       gitPaths: new Map(),
     }
     this.sessions.add(session)
@@ -550,6 +599,8 @@ export class SessionManager implements PtySink {
         return void this.handleNotesReq(session, msg)
       case 'planReq':
         return void this.handlePlanReq(session, msg)
+      case 'teamReq':
+        return void this.handleTeamReq(session, msg)
       case 'chatSub':
         return this.handleChatSub(session, msg.paneId)
       case 'chatUnsub':
@@ -873,6 +924,17 @@ export class SessionManager implements PtySink {
           result = { id, ok: false, error: 'not_found' }
         }
       }
+    } else if (action.kind === 'teamDecide' || action.kind === 'teamAnswer' || action.kind === 'teamDispatch') {
+      // app 2.7.0 (E10 B8): main decides (TeamService with origin phone); the renderer never sees it.
+      if (!this.canControl(session, '')) result = { id, ok: false, error: 'denied' }
+      else if (!this.deps.teamCtl) result = { id, ok: false, error: 'unknown_action' }
+      else {
+        try {
+          result = await this.deps.teamCtl(action, deviceName || undefined)
+        } catch {
+          result = { id, ok: false, error: 'io' }
+        }
+      }
     } else {
       result = await this.deps.executeCommand(action, deviceName || undefined)
     }
@@ -999,10 +1061,57 @@ export class SessionManager implements PtySink {
     this.send(session, frame)
   }
 
+  /**
+   * app 2.7.0 (E10 B8): one Teams request. Over TEAM_REQ_MAX per TEAM_REQ_WINDOW_MS, or with TEAM_REQ_IN_FLIGHT
+   * waiting, the answer is `rate` (no strike); a device revoked meanwhile gets nothing; the frame is measured once more
+   * (fitTeamRes).
+   */
+  private async handleTeamReq(session: Session, msg: RemoteClientMsgOf<'teamReq'>): Promise<void> {
+    const now = Date.now()
+    session.teamTimes = session.teamTimes.filter((t) => now - t < TEAM_REQ_WINDOW_MS)
+    if (session.teamTimes.length >= TEAM_REQ_MAX || session.teamInFlight >= TEAM_REQ_IN_FLIGHT) {
+      return this.send(session, { type: 'teamRes', id: msg.id, res: { ok: false, error: 'rate' } })
+    }
+    session.teamTimes.push(now)
+    // The device name comes from the authenticated session, never from the frame (E4-FR-08).
+    const deviceName = session.deviceId ? this.deps.registry.get(session.deviceId)?.name : undefined
+    let res: TeamReply
+    if (!this.deps.team) res = { ok: false, error: 'not_found' }
+    else {
+      session.teamInFlight += 1
+      try {
+        // msg.req is the schema's own copy (zod strips every field outside the op's object).
+        res = await this.deps.team(msg.req, deviceName || undefined)
+      } catch {
+        res = { ok: false, error: 'io' }
+      } finally {
+        session.teamInFlight -= 1
+      }
+    }
+    if (!session.authed) return
+    const { v: _v, ...frame } = fitTeamRes(msg.id, res)
+    this.send(session, frame)
+  }
+
   /** v2.2 (E9): a note changed (on the PC or another phone): the phones reload what they show. */
   broadcastNotesChanged(workspaceId: string, noteId?: string): void {
     for (const session of this.sessions) {
       if (session.authed) this.send(session, { type: 'notesChanged', workspaceId, ...(noteId ? { noteId } : {}) })
+    }
+  }
+
+  /** app 2.7.0 (E10 B8): a team changed (on the PC or by another phone): the phones reload what they show of it. */
+  broadcastTeamChanged(evt: TeamChangedEvt): void {
+    const frame: ServerMsgNoV = {
+      type: 'teamChanged',
+      teamId: evt.teamId,
+      rev: evt.rev,
+      ...(evt.scopes.length ? { scopes: [...evt.scopes] } : {}),
+      ...(evt.taskId ? { taskId: evt.taskId } : {}),
+      ...(evt.runId ? { runId: evt.runId } : {}),
+    }
+    for (const session of this.sessions) {
+      if (session.authed) this.send(session, frame)
     }
   }
 

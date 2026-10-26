@@ -14,10 +14,17 @@
  * has its noticeCoalescer (10 s window, the first 3 at once, the rest as one
  * summary; an `action` is never held). `snaos notify` (routeCustom) goes
  * through the Discord and ntfy ones too.
+ *
+ * App 2.7.0 (E10 B8): a team notice (routeTeam, a new "Te necesita" row or an
+ * integrate result) passes the same away gate and the same coalescers, where
+ * it is action-like and never held: Web Push through `pushTeam`, Discord and
+ * ntfy as a custom notice of main's own words, ntfy's tap opening the team on
+ * the phone (`#team=<id>[&task=<id>]`). One marked `push: false` (a desktop
+ * toast only) goes nowhere.
  */
 import type { ConfigFile } from '@shared/types'
 import type { DeadlineTimerDeps } from '../DeadlineTimer'
-import type { CustomNotice, StatusNotice } from './events'
+import type { CustomNotice, StatusNotice, TeamNotice } from './events'
 import { describePlace } from './events'
 import type { DiscordNotifier } from './DiscordNotifier'
 import type { NtfyNotifier } from './NtfyNotifier'
@@ -38,6 +45,11 @@ export interface NoticeRouterDeps {
    * away gate; it skips devices with a visible session on its own.
    */
   push?: (notice: StatusNotice, config: ConfigFile | null) => void
+  /**
+   * App 2.7.0 (E10 B8): Web Push of a team notice (RemoteManager.notifyTeamPush): behind the same away gate; it skips
+   * devices with a visible session and checks the desktop's notifyAction on its own.
+   */
+  pushTeam?: (notice: TeamNotice, config: ConfigFile | null) => void
   /** App 2.7.0 (A5): clock and timers of the coalescers (tests); the real ones by default. */
   timers?: DeadlineTimerDeps
 }
@@ -46,12 +58,33 @@ export interface NoticeRouter {
   route: (notice: StatusNotice) => void
   /** `snaos notify` (E8-FR-19): the same away gate; ntfy is not skipped for a watched pane (the caller asked for it). */
   routeCustom: (notice: CustomNotice) => void
+  /**
+   * App 2.7.0 (E10 B8): a team notice with `push`: the away gate of routeCustom, then each channel's coalescer, where
+   * it is never held (action-like): Web Push (pushTeam), Discord and ntfy when they take custom notices.
+   */
+  routeTeam: (notice: TeamNotice) => void
 }
 
 /** 'http://h:p/#ws=<wsId>&pane=<paneId>' (both URI-encoded), or undefined without a base or workspace. */
 export function deepLinkUrl(base: string | null, workspaceId: string | null, paneId: string): string | undefined {
   if (!base || !workspaceId) return undefined
   return `${base.replace(/\/+$/, '')}/#ws=${encodeURIComponent(workspaceId)}&pane=${encodeURIComponent(paneId)}`
+}
+
+/** App 2.7.0 (E10 B8): 'http://h:p/#team=<teamId>[&task=<taskId>]' (URI-encoded), or undefined without a base. */
+export function teamDeepLinkUrl(base: string | null, teamId: string, taskId?: string): string | undefined {
+  if (!base) return undefined
+  return `${base.replace(/\/+$/, '')}/#team=${encodeURIComponent(teamId)}${taskId ? `&task=${encodeURIComponent(taskId)}` : ''}`
+}
+
+/** A team notice rather than an agent notice or a `snaos notify`. */
+export function isTeamNotice(n: StatusNotice | CustomNotice | TeamNotice): n is TeamNotice {
+  return (n as TeamNotice).kind === 'team'
+}
+
+/** A team notice as Discord and ntfy send a `snaos notify`: main's title and body, no console. */
+function customOf(n: TeamNotice): CustomNotice {
+  return { kind: 'custom', paneId: null, title: n.title, body: n.body }
 }
 
 /**
@@ -64,10 +97,17 @@ function wantsPush(notice: StatusNotice, config: ConfigFile | null): boolean {
   return !prefs || !!(notice.state === 'done' ? prefs.notifyDone : prefs.notifyAction)
 }
 
-/** What a coalescer holds: the notice and the config it was routed with. */
+/** What a coalescer holds: the notice and the config it was routed with (a team notice is never held). */
 interface Routed {
-  notice: StatusNotice | CustomNotice
+  notice: StatusNotice | CustomNotice | TeamNotice
   config: ConfigFile | null
+}
+
+/** The held notices a summary stands for (a team notice never waits in a window, so it is never one of them). */
+function heldNotices(held: readonly Routed[]): Array<StatusNotice | CustomNotice> {
+  const out: Array<StatusNotice | CustomNotice> = []
+  for (const r of held) if (!isTeamNotice(r.notice)) out.push(r.notice)
+  return out
 }
 
 export function createNoticeRouter(deps: NoticeRouterDeps): NoticeRouter {
@@ -81,22 +121,28 @@ export function createNoticeRouter(deps: NoticeRouterDeps): NoticeRouter {
   const base = (): string | null => {
     try { return deps.deepLinkBase() } catch { return null }
   }
-  /** One coalescer per channel; its summary passes the away gate again (the user may be back at the PC). */
+  /**
+   * One coalescer per channel; its summary passes the away gate again (the user may be back at the PC). An `action`
+   * and every team notice (B8: a team that needs the user is action-like) are never held.
+   */
   const channel = (deliver: (r: Routed) => void, deliverSummary: (summary: StatusNotice, config: ConfigFile | null) => void) =>
     createNoticeCoalescer<Routed>({
       timers: deps.timers,
-      immediate: ({ notice }) => !isCustomNotice(notice) && notice.state === 'action',
+      immediate: ({ notice }) => isTeamNotice(notice) || (!isCustomNotice(notice) && notice.state === 'action'),
       deliver,
       summarize: (held) => {
         const config = deps.loadConfig()
         if (!gateOpen(config)) return
-        deliverSummary(summaryNotice(held.map((r) => r.notice), config), config)
+        const notices = heldNotices(held)
+        if (notices.length) deliverSummary(summaryNotice(notices, config), config)
       },
     })
   const push = channel(
     ({ notice, config }) => {
-      if (isCustomNotice(notice)) return
-      try { deps.push?.(notice, config) } catch { /* push never blocks the other channels */ }
+      try {
+        if (isTeamNotice(notice)) deps.pushTeam?.(notice, config)
+        else if (!isCustomNotice(notice)) deps.push?.(notice, config)
+      } catch { /* push never blocks the other channels */ }
     },
     (summary, config) => {
       try { deps.push?.(summary, config) } catch { /* idem */ }
@@ -104,13 +150,18 @@ export function createNoticeRouter(deps: NoticeRouterDeps): NoticeRouter {
   )
   const discord = channel(
     ({ notice, config }) => {
-      if (isCustomNotice(notice)) deps.discord.notifyCustom?.(notice, config)
+      if (isTeamNotice(notice)) deps.discord.notifyCustom?.(customOf(notice), config)
+      else if (isCustomNotice(notice)) deps.discord.notifyCustom?.(notice, config)
       else deps.discord.notify(notice, config)
     },
     (summary, config) => deps.discord.notify(summary, config),
   )
   const ntfy = channel(
     ({ notice, config }) => {
+      if (isTeamNotice(notice)) {
+        deps.ntfy.notifyCustom?.(customOf(notice), config, teamDeepLinkUrl(base(), notice.teamId, notice.taskId))
+        return
+      }
       const { workspaceId } = describePlace(notice.paneId, config, '')
       if (isCustomNotice(notice)) deps.ntfy.notifyCustom?.(notice, config, notice.paneId ? deepLinkUrl(base(), workspaceId, notice.paneId) : undefined)
       else deps.ntfy.notify(notice, config, deepLinkUrl(base(), workspaceId, notice.paneId))
@@ -137,6 +188,15 @@ export function createNoticeRouter(deps: NoticeRouterDeps): NoticeRouter {
     routeCustom(notice) {
       const config = deps.loadConfig()
       if (!gateOpen(config)) return
+      if (deps.discord.wantsCustom?.() ?? true) discord.push({ notice, config })
+      if (!deps.ntfy.wantsCustom?.()) return
+      ntfy.push({ notice, config })
+    },
+    routeTeam(notice) {
+      if (!notice.push) return
+      const config = deps.loadConfig()
+      if (!gateOpen(config)) return
+      if (deps.pushTeam) push.push({ notice, config })
       if (deps.discord.wantsCustom?.() ?? true) discord.push({ notice, config })
       if (!deps.ntfy.wantsCustom?.()) return
       ntfy.push({ notice, config })
