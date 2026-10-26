@@ -19,7 +19,9 @@
 // dismissed when its run ends, Seguir esperando and Frenar, the silence settings, and with Labs off zero DeadlineTimer
 // keys and no watched run, then routines firing again after Labs on; a new stalled card raising exactly one desktop
 // notice (the B5 path), also when a settings change moves a quiet run on show to stalled, and that card dismissed with
-// the silence when new minutes no longer reach it; a routine wake that a policy
+// the silence when new minutes no longer reach it; a run inside a long tool that only prints tool_progress heartbeats
+// (claude-heartbeat.jsonl, the shape of the real 2.7.0 walkthrough run) going quiet and stalled with its one card,
+// while one that streams content every 30 s keeps no silence; a routine wake that a policy
 // re-wake of its agent writes over getting its wake-slot retry for the same scheduled time and running once (no retry
 // and no 'retry' log line when its next key comes sooner); a displaced wake never lost at a quit or a crash
 // (displacedFor in state.json, the reaper's case, the catch-up of the next enable running it once within 2 h and
@@ -872,6 +874,69 @@ async function stalledNoticeChecks() {
   w.svc.dispose()
 }
 
+async function heartbeatSilenceChecks() {
+  // The 2.7.0 runtime walkthrough (run r-8ad66ddf8c19, claude-heartbeat.jsonl): Claude prints a tool_progress heartbeat
+  // every 30 s while a tool runs, also inside a command that never ends. A heartbeat carries no new content, so with
+  // quietMin 1 and stalledMin 2 the run goes quiet then stalled from its last real line and opens its one stalled card,
+  // while a run that streams real content every 30 s keeps no silence. The fake agent sends one line every 250 ms of
+  // real time and the run's clock moves 30 s before each one (as in the real run).
+  const w = await world('heartbeat', { agents: { silence: { enabled: true, quietMin: 1, stalledMin: 2 } } })
+  const logLines = (runId) => {
+    try {
+      return fs.readFileSync(path.join(w.teamData(), 'runs', `${runId}.jsonl`), 'utf8').split('\n').filter((l) => l.trim() && !l.startsWith('{"type":"snaos.'))
+    } catch {
+      return []
+    }
+  }
+  const stalledOf = (runId) => w.rt().cards.filter((c) => c.from.kind === 'system' && c.from.why === 'stalled' && c.from.runId === runId)
+  /** Each line of `from..to` of the fixture 30 s of the run's clock after the one before; the silence level after each. */
+  const play = async (runId, from, count) => {
+    const levels = []
+    for (let k = 1; k <= count; k++) {
+      w.clock.advance(30_000)
+      await until(() => logLines(runId).length >= from + k, 10000, `line ${from + k} of ${runId}`)
+      levels.push(w.svc.runLive(runId).silence?.level ?? null)
+    }
+    return levels
+  }
+
+  const HB = 'claude-heartbeat.jsonl'
+  w.use({ steps: [{ fixture: HB, to: 3, rewriteSession: true }, { fixture: HB, from: 3, delayMs: 250, rewriteSession: true }, { hang: true }] })
+  const a = await w.req('runNow', { agentId: 'dev' })
+  check(a.ok, `a run (${JSON.stringify(a)})`)
+  await w.waitState(a.runId, 'running')
+  await until(() => logLines(a.runId).length >= 3, 10000, 'the tool_use and its task_started')
+  const toolLine = w.svc.runLive(a.runId).lastLineAt
+  check(typeof toolLine === 'number' && w.svc.silenceWatchCount === 1, 'watched from running, counting from its last real line (the task_started of its Bash)')
+  const levels = await play(a.runId, 3, 6)
+  check(logLines(a.runId).slice(3).every((l) => l.includes('"type":"tool_progress"') && l.includes('"heartbeat":true')), 'six tool_progress heartbeats read (and logged)')
+  same(levels, [null, 'quiet', 'quiet', 'stalled', 'stalled', 'stalled'], 'heartbeats every 30 s keep no sign of life: quiet at 1 min, stalled at 2 min')
+  check(w.svc.runLive(a.runId).lastLineAt === toolLine, 'the heartbeats never move its last line')
+  same(w.svc.runLive(a.runId).silence, { level: 'stalled', since: toolLine }, 'stalled since the tool started')
+  same((await w.req('roster')).agents.find((x) => x.id === 'dev').run?.silence, { level: 'stalled', since: toolLine }, 'the roster shows it')
+  const card = stalledOf(a.runId)
+  check(card.length === 1 && card[0].state === 'open' && JSON.stringify(card[0].from.actions) === '["stopRun","keepWaiting"]', 'its one stalled card, Frenar and Seguir esperando')
+  w.clock.advance(5 * MIN)
+  await settle()
+  check(stalledOf(a.runId).length === 1, 'still one card')
+  await w.req('stop', { runId: a.runId })
+  await w.waitEnded(a.runId)
+  check(stalledOf(a.runId)[0].state === 'dismissed', 'its card goes with the run')
+
+  // Real content every 30 s (claude-tools.jsonl: tool uses, their results, a rate limit event, the text): no silence.
+  const TOOLS = 'claude-tools.jsonl'
+  w.use({ steps: [{ fixture: TOOLS, to: 1, rewriteSession: true }, { fixture: TOOLS, from: 1, to: 7, delayMs: 250, rewriteSession: true }, { hang: true }] })
+  const b = await w.req('runNow', { agentId: 'dev' })
+  await w.waitState(b.runId, 'running')
+  await until(() => logLines(b.runId).length >= 1, 10000, 'its init line')
+  const streamed = await play(b.runId, 1, 6)
+  same(streamed, [null, null, null, null, null, null], 'a line of content every 30 s keeps no silence')
+  check(w.svc.runLive(b.runId).lastLineAt === w.clock.now && w.svc.runLive(b.runId).silence === undefined && stalledOf(b.runId).length === 0, 'its last line moves with each one, no silence and no card')
+  await w.req('stop', { runId: b.runId })
+  await w.waitEnded(b.runId)
+  w.svc.dispose()
+}
+
 async function displacedWakeChecks() {
   // A routine wake kept in the agent's one slot is never lost to a run-end policy re-wake of that agent: the policy
   // writes its mark, the routine gets its wake-slot retry for the same scheduled time, and its prompt runs once.
@@ -1111,6 +1176,7 @@ async function main() {
     await codexLeadNoteChecks()
     await silenceChecks()
     await stalledNoticeChecks()
+    await heartbeatSilenceChecks()
     await displacedWakeChecks()
     await displacedSoonerChecks()
     await displacedAtQuitChecks()
@@ -1122,7 +1188,7 @@ async function main() {
     await settle()
     try { fs.rmSync(TMP, { recursive: true, force: true }) } catch { /* a child may still hold a file on Windows */ }
   }
-  console.log(`PASS: ${checks} teams routines checks (ticker, catch-up, reducers, routine fires and coalesce, Correr ahora, daily summary, team notes, restart catch-up, run silence, Labs off, stalled card notices, a displaced routine wake, one owed across a quit or a crash, a changed definition)`)
+  console.log(`PASS: ${checks} teams routines checks (ticker, catch-up, reducers, routine fires and coalesce, Correr ahora, daily summary, team notes, restart catch-up, run silence, Labs off, stalled card notices, heartbeats are no sign of life, a displaced routine wake, one owed across a quit or a crash, a changed definition)`)
 }
 
 main().catch((error) => {

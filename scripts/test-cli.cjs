@@ -18,6 +18,8 @@
 // 401 of a revoked team token naming the run, the Teams section of the guide,
 // the team block of USAGE and the skill (snaos team itself: test-teams-cli.cjs);
 // B5 integration, fifth round: CliService hands its live tokens to team calls.
+// 2.7.0 runtime walkthrough: an unpackaged run never refreshes nor installs the skill stubs at init, and the Settings
+// action writes them with package.json's version, never Electron's.
 // Same esbuild + vm harness as test-status.cjs.
 // Never touches the real HKCU, ~/.claude or the app's data folder.
 const { buildSync } = require('esbuild')
@@ -35,8 +37,8 @@ function check(condition, label) { assert.ok(condition, label); checks++ }
 const warnings = []
 const quietConsole = { ...console, warn: (...a) => warnings.push(a.join(' ')) }
 const sandbox = { console: quietConsole, process, Buffer, URL, AbortController, TextEncoder, TextDecoder, structuredClone, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate }
-function load(file, overrides = {}) {
-  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'node-pty', '@xterm/headless', '@xterm/addon-serialize', '@xterm/addon-unicode11'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+function load(file, overrides = {}, build = {}) {
+  const code = buildSync({ entryPoints: [path.join(root, file)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'node-pty', '@xterm/headless', '@xterm/addon-serialize', '@xterm/addon-unicode11'], alias: { '@shared': path.join(root, 'src/shared') }, ...build }).outputFiles[0].text
   const mod = { exports: {} }
   vm.runInNewContext(code, { module: mod, exports: mod.exports, require, ...sandbox, ...overrides })
   return mod.exports
@@ -1712,6 +1714,52 @@ function makeService(dataDir, extra = {}) {
   return { service, world, routed }
 }
 
+// 2.7.0 runtime walkthrough: a dev launch of out/main (whose app.getVersion() is Electron's) rewrote the user's real
+// skill stubs with 'v33.4.11'. An unpackaged run never refreshes nor installs them on its own; the Settings action still
+// installs them, with package.json's version (the build's __SNAOS_APP_VERSION__), never Electron's.
+function skillStartupChecks() {
+  const K = load('src/main/cli/skillInstaller.ts')
+  const pkgVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
+  const define = { define: { __SNAOS_APP_VERSION__: JSON.stringify(pkgVersion) } }
+  const make = (name, electron, o = {}) => {
+    const { CliService } = load('src/main/cli/CliService.ts', { require: (id) => (id === 'electron' ? electron : require(id)) }, define)
+    const dataDir = tmp(`skill-start-${name}`)
+    const env = { CLAUDE_CONFIG_DIR: path.join(dataDir, 'claude'), CODEX_HOME: path.join(dataDir, 'codex') }
+    // Stubs an older release installed: outdated for this build.
+    if (o.preinstall !== false) for (const t of ['claude', 'codex']) K.installSkill(t, '2.6.0', env)
+    const world = fakeWorld()
+    const service = new CliService({
+      dataDir: () => dataDir, appVersion: '33.4.11', execPath: process.execPath, cliPath: path.join(dataDir, 'cli.js'), portable: false,
+      getSender: () => null, pty: world.pty, status: { ...world.status, notifyCustom: () => true }, config: () => null, routeCustom: () => undefined,
+      registry: { read: async () => '', write: async () => { throw new Error('never in tests') }, broadcast: async () => {} },
+      skillEnv: env, ...(o.packaged !== undefined ? { packaged: o.packaged } : {}),
+    })
+    const stub = (t) => {
+      try { return fs.readFileSync(path.join(K.skillDir(t, env), 'SKILL.md'), 'utf8') } catch { return null }
+    }
+    return { service, env, stub }
+  }
+  const old = (s) => ['claude', 'codex'].every((t) => s.stub(t).includes('<!-- managed-by: snagentsos v2.6.0 -->'))
+  for (const [label, electron, o] of [['no electron app', {}, {}], ['app.isPackaged false', { app: { isPackaged: false } }, {}], ['packaged: false over app.isPackaged true', { app: { isPackaged: true } }, { packaged: false }]]) {
+    const s = make(label.replace(/\W+/g, '-'), electron, o)
+    s.service.init()
+    check(old(s) && !s.stub('claude').includes('33.4.11') && !s.stub('codex').includes('33.4.11'), `unpackaged (${label}): init leaves the user's outdated Claude and Codex stubs as they are`)
+    s.service.shutdown()
+  }
+  const none = make('missing', {}, { preinstall: false })
+  none.service.init()
+  check(none.stub('claude') === null && none.stub('codex') === null, 'unpackaged: init installs nothing')
+  const st = none.service.skill('install')
+  const cst = none.service.skill('install', 'codex')
+  check(st.state === 'installed' && st.version === pkgVersion && cst.version === pkgVersion && none.stub('claude').includes(`<!-- managed-by: snagentsos v${pkgVersion} -->`) && !none.stub('codex').includes('33.4.11'), `unpackaged, the Settings action: installed with package.json's version v${pkgVersion}, never Electron's`)
+  check(none.service.skill('status').state === 'installed' && none.service.skill('status', 'codex').version === pkgVersion, 'and Settings reads it as installed')
+  none.service.shutdown()
+  const packaged = make('packaged', { app: { isPackaged: true } })
+  packaged.service.init()
+  check(['claude', 'codex'].every((t) => packaged.stub(t).includes(`<!-- managed-by: snagentsos v${pkgVersion} -->`)), 'packaged (app.isPackaged): init refreshes both outdated stubs to package.json\'s version')
+  packaged.service.shutdown()
+}
+
 async function serviceChecks() {
   const C = load('src/main/cli/cliEntry.ts')
   const dataDir = tmp('service-data')
@@ -2101,6 +2149,7 @@ async function main() {
     await needsChecks()
     await waitChecks()
     await cliEntryChecks()
+    skillStartupChecks()
     await serviceChecks()
     await shimRunChecks()
     ptyChecks()
@@ -2108,7 +2157,7 @@ async function main() {
     fs.rmSync(tmpRoot, { recursive: true, force: true })
     if (sockRoot) fs.rmSync(sockRoot, { recursive: true, force: true })
   }
-  console.log(`PASS: ${checks} cli checks (refs, ANSI, tokens, env, runtime.json, shim static and executed, user PATH, skill, custom notify, CtlServer, team gate, handlers, chat, peek, kill, restart, rename, ws, notes, usage, account, needs and signals, wait, cliEntry, team token lost, CliService end to end, team env, pty tail)`)
+  console.log(`PASS: ${checks} cli checks (refs, ANSI, tokens, env, runtime.json, shim static and executed, user PATH, skill, custom notify, CtlServer, team gate, handlers, chat, peek, kill, restart, rename, ws, notes, usage, account, needs and signals, wait, cliEntry, team token lost, no skill refresh unpackaged, CliService end to end, team env, pty tail)`)
 }
 main().catch((err) => {
   console.error(err)

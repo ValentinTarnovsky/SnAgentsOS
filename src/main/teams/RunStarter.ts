@@ -41,7 +41,7 @@ import {
 import type { AgentProvider } from '@shared/types'
 import { cmdLineTooLong, type ResolvedCli } from './agentCli'
 import type { SessionBase } from './parsers/types'
-import { ESCAPE_HINT, grantedByRefs, grantHint, TEAM_CALL_HINT } from './flow/approvals'
+import { ESCAPE_HINT, grantedByRefs, grantHint, rejectHint, TEAM_CALL_HINT } from './flow/approvals'
 import { markStarting, prepFailed, setRunWorktree } from './flow/runs'
 import type { FlowCtx, FlowResult } from './flow/types'
 import type { RunSupervisor } from './RunSupervisor'
@@ -347,7 +347,9 @@ export class RunStarter {
     const bashHint = agentNow?.bashHint === true
     const escapeHint = agentNow?.escapeHint === true
     const granted = grantHint(grantedByRefs(rt, now))
-    const hints = [...(bashHint ? [TEAM_CALL_HINT] : []), ...(escapeHint ? [ESCAPE_HINT] : []), ...(granted ? [granted] : [])]
+    // 2.7.0 runtime fixes: a run the user's reject of its permission woke (its `answer` refs name it) goes on without it.
+    const refused = rejectHint(rt, now)
+    const hints = [...(bashHint ? [TEAM_CALL_HINT] : []), ...(escapeHint ? [ESCAPE_HINT] : []), ...(granted ? [granted] : []), ...(refused ? [refused] : [])]
     const built = buildRunPrompt({
       provider: now.provider,
       resumed: now.resumed,

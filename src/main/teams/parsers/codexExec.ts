@@ -22,7 +22,7 @@ import { codexFailure, parseResetsAt, type FailureInfo } from '@shared/failure'
 import { codexCost } from '@shared/rateCard'
 import type { RunUsage, TokenTotals } from '@shared/teams'
 import { addTool, emptyDigest, fileOfToolInput, type TurnDigest } from '@shared/toolActivity'
-import { FINAL_TEXT_MAX, isTeamCall, type ParsedLine, type SessionBase, type StreamFacts, type StreamParser } from './types'
+import { FINAL_TEXT_MAX, isBeatLine, isTeamCall, type ParsedLine, type SessionBase, type StreamFacts, type StreamParser } from './types'
 
 type Rec = Record<string, unknown>
 
@@ -221,13 +221,17 @@ export function createCodexExecParser(): StreamParser {
   return {
     line(raw: string, at: number): ParsedLine | null {
       const rec = parse(raw)
-      if (!rec || typeof rec.type !== 'string' || !EXEC_TYPES.has(rec.type)) return null
+      if (!rec || typeof rec.type !== 'string') return null
+      const beat = isBeatLine(rec)
+      // A keepalive or ping style line (exec --json prints none today) is no turn event: alive, no content, no protocol.
+      if (!EXEC_TYPES.has(rec.type)) return beat ? { type: rec.type, beat: true } : null
       if (!sawProtocol) {
         sawProtocol = true
         firstLineAt = at
       }
       const type = rec.type
       const out: ParsedLine = { type }
+      if (beat) out.beat = true
       switch (type) {
         case 'thread.started': {
           const id = str(rec.thread_id).trim()

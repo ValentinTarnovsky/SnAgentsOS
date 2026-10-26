@@ -7,7 +7,7 @@ import type { RunView } from '@shared/team-protocol'
 import { useLang, useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { toast } from '@/lib/toast'
-import { MODE_KEY, TRIGGER_KEY, runUsageText, stopRun } from '@/lib/teams/roster'
+import { MODE_KEY, runUsageText, stopRun, triggerKey } from '@/lib/teams/roster'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { STATUS_TIP_DELAY } from '@/components/ui/StatusDot'
@@ -136,7 +136,7 @@ export function RunHeader({ teamId, run, agentName }: { teamId: string; run: Run
       <UsageChip usage={run.usage} />
       {run.resumed && <span className={cn(RUN_CHIP, RUN_CHIP_NEUTRAL, 'shrink-0')}>{t('teams.run.resumed')}</span>}
       <span data-run-trigger={run.trigger} className="min-w-0 truncate text-[11px] text-text-secondary">
-        {t('teams.run.trigger', { reason: t(TRIGGER_KEY[run.trigger]) })}
+        {t('teams.run.trigger', { reason: t(triggerKey(run)) })}
       </span>
       <div className="ml-auto flex shrink-0 items-center">
         <StopRunButton teamId={teamId} run={run} agentName={agentName} />

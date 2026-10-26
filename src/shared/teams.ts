@@ -544,6 +544,8 @@ export interface RunRequest {
   agentId: string; taskId?: string; sessionKey: SessionKey; mode: RunMode
   reason: WakeReason; refs?: string[]; detail?: string; since: number; priority: TaskPriority
   queueItemId?: string; approved: boolean; bypassCooldown: boolean
+  /** 2.7.0 runtime fixes: a manual entry of `DispatchFacts.manual` (the user's "Ejecutar ahora" or kickoff op); admitRun reads it for `trigger.by`. */
+  manual?: true
 }
 export interface Deferred { request: RunRequest; reason: DeferReason; until?: number }
 export interface DispatchFacts {
@@ -581,6 +583,8 @@ export interface RunEndFacts {
   claudeCanSwitch: boolean                         // autoSwitch on and another usable account
   claudeSwitchedAt?: number                        // last account switch (decision 40)
   unknownSession: boolean                          // parser: "No conversation found" / unknown thread
+  /** 2.7.0 runtime fixes: the run's denials opened, grew or asked again a pending permission approval of its task and role (flow/runs.ts permissionWaitOf). */
+  permissionWait?: boolean
 }
 export interface PolicyDecision {
   next?: WakeMark | null                           // undefined leave, null clear (task.next or agent.next)

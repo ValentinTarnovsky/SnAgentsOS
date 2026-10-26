@@ -7,6 +7,8 @@
 // minimum), nextAt, unblockReady and the 3 per hour throttle, claudeAllLimited, classifyOutcome in order
 // (with the codex-read and claude-tools fixtures through the B2 parsers) and afterRunPolicy row by row.
 // Tanda B close: a skip keyed `agentId|sessionKey|reason` leaves out one Lead level only (the others still enqueue).
+// 2.7.0 runtime fixes: a manual entry carries `manual` (the goal change kickoff level does not), and the
+// `permissionWait` row (a run waiting on its permission approval: only the provider rows and a fresh session).
 // Fixed `now`, no clock reads. Same esbuild + vm harness as test-status.cjs: the bundle runs in an empty
 // context (no require, no process), so the module is pure.
 const { buildSync } = require('esbuild')
@@ -157,6 +159,13 @@ function candidateChecks() {
   check(reqs(rt({ tasks: [task(16, { assignee: 'dev-2' })] }), { manual: [m({ taskId: 't-16' })] }).filter((x) => x.agentId === 'dev').length === 0, 'manual on another agent\'s task: nothing')
   const kick = of(reqs(rt(), { manual: [{ agentId: 'lead', reason: 'kickoff' }] }), 'lead')
   check(kick.reason === 'kickoff' && kick.mode === 'lead' && kick.approved && kick.bypassCooldown, 'kickoff: a lead request, approved')
+  // 2.7.0 runtime fixes: the user's entry is marked (admitRun gives it trigger.by 'user'); the kickoff a goal change
+  // raises (the L4 level of the same reason) and every other level are not.
+  check(kick.manual === true && of(reqs(rt(), { manual: [m()] }), 'dev').manual === true && of(reqs(rt({ tasks: [task(15, { state: 'doing', phase: 'planning', assignee: 'dev' })] }), { manual: [m({ taskId: 't-15' })] }), 'dev').manual === true, 'a manual entry (kickoff, Ejecutar ahora, on a task) carries manual')
+  const auto = of(reqs(rt({ goalSeenHash: 'g-0' })), 'lead')
+  check(auto.reason === 'kickoff' && auto.manual === undefined && !auto.approved, 'the goal change kickoff level carries no manual mark')
+  check(reqs(rt({ tasks: [task(1, { assignee: 'dev' })], comments: { lead: [comment(1, 'lead', { forAgent: 'lead' })] } })).every((x) => x.manual === undefined), 'nor any other level')
+  check(plan(rt({ goalSeenHash: 'g-0' }), { manual: [{ agentId: 'lead', reason: 'kickoff' }] }).start.find((x) => x.agentId === 'lead')?.manual === true, 'planDispatch starts the user\'s kickoff with its mark')
   const mr = of(reqs(busy, { manual: [m()] }), 'dev')
   check(mr && mr.approved, 'manual of a running agent still yields (planDispatch reports running)')
 
@@ -505,6 +514,26 @@ function policyChecks() {
   same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'limit', until: NOW + 30 * MIN } }, { task: { state: 'cancelled', phase: 'none' } }), { providerBlock: { provider: 'claude', until: NOW + 30 * MIN } }, 'task cancelled: the provider block only')
   same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'overloaded' } }, { task: { state: 'blocked', phase: 'executing' } }), {}, 'task blocked meanwhile: no retry')
   same(P({ outcome: 'progress', mode: 'plan' }, { task: { phase: 'planApproval' } }), {}, 'task out of the run\'s phase: no follow-up')
+
+  // Row (2.7.0 runtime fixes, orchestrator decision): the run's denials left its permission approval pending, so the task
+  // waits on the user: no continuation, no retry, no count and no block; the provider rows still hold.
+  const wait = { permissionWait: true }
+  same(P(qa, { task: { ...qaTask, counters: { continuations: 1 } }, ...wait }), {}, 'a QA run without a verdict at its continuation, waiting on a permission: no qaNoVerdict block')
+  same(P(qa, { task: qaTask, ...wait }), {}, 'a first QA run waiting on a permission: no continuation, continuations not counted')
+  same(P({}, wait), {}, 'progress waiting on a permission: no continuation')
+  same(P({}, { task: { counters: { continuations: 1 } }, ...wait }), {}, 'progress at the second time waiting on a permission: no noProgress block')
+  for (const outcome of ['planOnly', 'empty']) same(P({ outcome }, { task: { counters: { noProgress: 2 } }, ...wait }), {}, `${outcome} waiting on a permission: no cooldown, no count`)
+  same(P({ outcome: 'empty' }, { task: { counters: { noProgress: 3 } }, ...wait }), {}, 'the 4th no progress waiting on a permission: no block')
+  same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'request' } }, wait), {}, 'a failure waiting on a permission: no retry (the decision wakes it)')
+  same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'unknown', code: 'timeout' } }, wait), {}, 'a timeout waiting on a permission: no timeout block')
+  same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'limit', until: NOW + 30 * MIN } }, wait), { providerBlock: { provider: 'claude', until: NOW + 30 * MIN } }, 'a limit waiting on a permission: the provider block, no retry wake')
+  same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'billing' } }, wait), { pauseTeam: 'billing' }, 'billing waiting on a permission: the team pauses, no retry wake')
+  same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'context' } }, wait), { freshSession: true }, 'a full context waiting on a permission: the decision wakes a fresh session')
+  same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'request' } }, { unknownSession: true, ...wait }), { freshSession: true }, 'an unknown session waiting on a permission: a fresh session, no context wake')
+  same(P({ outcome: 'concluded', concludedBy: { tool: 'verdict', at: NOW - 1 } }, { task: { counters: { continuations: 1 } }, ...wait }), { counters: { noProgress: 0, continuations: 0, retries: 0, interrupts: 0 } }, 'a concluded run never waits (its counters reset)')
+  check(P({ state: 'cancelled', stopReason: 'user', outcome: undefined }, wait).block?.reason.kind === 'stopped', 'a user stop keeps its own row (blocked {stopped})')
+  same(P({ state: 'interrupted', interruptCause: 'shutdown', stopReason: 'shutdown', outcome: undefined }, wait), { next: mark('interrupted'), counters: { interrupts: 1 } }, 'an interruption keeps its own row')
+  same(P({ agentId: 'dev', taskId: undefined, sessionKey: 'free', mode: 'free', outcome: 'progress' }, { task: null, ...wait }), {}, 'a free run: nothing either way')
 }
 
 /** Pure and total: a deep-frozen runtime and facts go through untouched, and a full board stays one linear pass. */

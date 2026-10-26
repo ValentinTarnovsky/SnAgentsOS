@@ -80,8 +80,8 @@ import { resolveAgentCli, type ResolvedCli } from './agentCli'
 import { Dispatcher, DISPATCH_KEY, type ManualRequest, type StepResult } from './Dispatcher'
 import { dismissSystemCards, openSystemCard, reconcileAgents } from './flow/agents'
 import { enqueue, phaseAgentOf, queueDecide, reconcileTasks } from './flow/dispatch'
-import { admitRun, finishRun, interruptAll, markRunning, orphanCards, reapOnLoad, requestStop, restoreWake, runEndFactsOf, sessionCardVars, terminalOf, withRunDetail, type AdmitFacts, type RunEnd } from './flow/runs'
-import { answerCard, cancelStaleHires, completeApproval, decideApproval, HIRE_STALE } from './flow/approvals'
+import { admitRun, finishRun, interruptAll, markRunning, orphanCards, permissionWaitOf, reapOnLoad, requestStop, restoreWake, runEndFactsOf, sessionCardVars, terminalOf, withRunDetail, type AdmitFacts, type RunEnd } from './flow/runs'
+import { answerCard, cancelStaleHires, completeApproval, decideApproval, HIRE_STALE, PERMISSION_NOT_NEEDED } from './flow/approvals'
 import { archiveSweep, changedScopes, deliverComments } from './flow/tasks'
 import { beginIntegrate, endIntegrate, integrateStep, interruptedIntegrates, worktreeRemoved, type IntegrateOutcome } from './flow/integrate'
 import { patchRoutine, routineOfRefs, routinePending, routineTask, routineWake } from './flow/routines'
@@ -2245,8 +2245,10 @@ export class TeamService implements TeamInternals {
   }
 
   /**
-   * Every line: a silence on show ends (B7, design 3.8: once per recovery), and the synthetic status is refreshed at
-   * most every SYNTHETIC_REFRESH_MS (decision 58, never a timer).
+   * Every line with content (RunSupervisor never signals a beat: a Claude tool_progress heartbeat or a keepalive is no
+   * sign of life, so a run stuck inside a long command still goes quiet and stalled): a silence on show ends (B7,
+   * design 3.8: once per recovery), and the synthetic status is refreshed at most every SYNTHETIC_REFRESH_MS (decision
+   * 58, never a timer; AWAKE_STALE_MS, 2 h, is not under the longest maxRunMinutes, so the beats need not refresh it).
    */
   private onSignal(runId: string, at: number): void {
     if (this.runSilence.has(runId)) this.silenceRecovered(runId)
@@ -2310,12 +2312,23 @@ export class TeamService implements TeamInternals {
     const terminal = terminalOf(run, full)
     const acc = this.deps.accounts?.() ?? null
     const switchedAt = acc?.lastSwitch?.at
-    const policy = this.runPolicy(runEndFactsOf(rec.store.rt, terminal, now, { claudeCanSwitch: this.claudeCanSwitch(acc), claudeSwitchedAt: switchedAt, unknownSession: end.facts.unknownSession }))
     const ctx = this.flowCtx(teamId)
-    const fin = finishRun(rec.store.rt, runId, full, policy, { now, mask: this.maskTokens }, ctx ? { ctx, protect: this.protectPaths() } : undefined)
+    const endCtx = { now, mask: this.maskTokens }
+    const ask = ctx ? { ctx, protect: this.protectPaths() } : undefined
+    // 2.7.0 runtime fixes: a run whose denials leave its permission approval pending waits on the user's decision.
+    const permissionWait = permissionWaitOf(rec.store.rt, terminal, end.facts, endCtx, ask)
+    const policy = this.runPolicy(runEndFactsOf(rec.store.rt, terminal, now, { claudeCanSwitch: this.claudeCanSwitch(acc), claudeSwitchedAt: switchedAt, unknownSession: end.facts.unknownSession, permissionWait }))
+    const fin = finishRun(rec.store.rt, runId, full, policy, endCtx, ask)
     // The Lead's reply and a lead escalation write the Lead thread (`lead`), a permission approval the needs.
     const scopes = [...new Set<TeamScope>(['agents', 'run', 'needs', ...(fin.ok ? changedScopes(rec.store.rt, fin.rt) : [])])]
+    const before = rec.store.rt
     const res = this.commit(teamId, fin, scopes, { runId })
+    if (res.ok) {
+      for (const a of rec.store.rt.approvals) {
+        if (a.kind === 'permission' && a.state === 'cancelled' && a.error === PERMISSION_NOT_NEEDED && before.approvals.some((b) => b.id === a.id && b.state === 'pending')) this.deps.log(`permission ${teamId} ${a.id} cancelled notNeeded`)
+      }
+    }
+    if (res.ok && permissionWait) this.deps.log(`run ${runId} waits on a permission`)
     if (res.ok && end.logBytes !== undefined) {
       // Log size of the ended run (Run.logBytes, logTruncated) patched into its ring copy.
       const ended: Run = { ...res.result.run, logBytes: end.logBytes }

@@ -28,6 +28,12 @@
  * shell or inline-code escape (`bash -c`, `node -e`: its next run gets
  * ESCAPE_HINT), from a Codex run (no allow list) or a total one (nothing to
  * allow).
+ *
+ * 2.7.0 runtime fixes (orchestrator decision): the run that asked leaves its
+ * task waiting on the decision (afterRunPolicy `permissionWait`): approve
+ * wakes the phase agent with `grant`, reject with `answer` (rejectHint), and
+ * a verdict, `done` or `review` of that role makes the approval needless
+ * (cancelNeedlessPermission).
  */
 import { redactCredentials } from '@shared/redact'
 import { CLAUDE_READONLY_ALLOW, CLAUDE_READONLY_DENY, CLAUDE_TEAM_TOOLS, grantPatternOf, isGrantable, isShellEscape } from '@shared/teamArgv'
@@ -57,6 +63,7 @@ import {
   type TeamCard,
   type TeamRuntime,
   type TeamTask,
+  type TerminalTool,
   type TrustedDefinition,
   type WakeMark,
 } from '@shared/teams'
@@ -332,6 +339,32 @@ function decideFinal(rt: TeamRuntime, decided: TeamApproval, task: TeamTask, app
 }
 
 /**
+ * The system hint of a run woken by the user's reject of its permission approval (RunStarter, PromptInput.hints, never
+ * WakeMark.detail nor a `<request from="user">` block; 2.7.0 runtime fixes): the rules of each rejected permission
+ * approval the wake refs name, of the run's task and role, are not allowed, so it goes on without them; a QA run
+ * decides from reading the change. The user's note, when there is one, reaches the run as their comment.
+ */
+export function rejectHint(rt: Pick<TeamRuntime, 'approvals'>, run: Pick<Run, 'taskId' | 'roleId' | 'mode' | 'trigger'>): string | undefined {
+  const refs = run.trigger.refs ?? []
+  if (!run.taskId || refs.length === 0) return undefined
+  let found = false
+  const rules: string[] = []
+  for (const a of rt.approvals) {
+    if (a.kind !== 'permission' || a.state !== 'rejected' || !refs.includes(a.id) || a.taskId !== run.taskId || a.payload.roleId !== run.roleId) continue
+    found = true
+    // What the user saw (approvalView shows only what isGrantable accepts).
+    for (const t of a.payload.tools) if (isGrantable(t) && !rules.includes(t)) rules.push(t)
+  }
+  if (!found) return undefined
+  const what = rules.length ? `The user did not allow ${rules.join(', ')}.` : 'The user did not allow the commands you were denied.'
+  const go =
+    run.mode === 'qa'
+      ? 'Do not run them again: read the change with `snaos team diff` and `snaos team log` and give your verdict from what you read.'
+      : 'Do not run them again: go on with the rest of your work without them.'
+  return `${what} ${go}`
+}
+
+/**
  * 4.3 permission: the rules join `task.grants` of that role (cap GRANTS_MAX; isGrantable again, so never a PowerShell
  * rule nor a prefix off GRANT_PREFIX_ALLOWLIST that an older version stored in the approval; an approve of an approval
  * with no rule left that isGrantable accepts answers `bad_request`, TeamService.decide adds `detail: 'nothingToGrant'`;
@@ -339,15 +372,35 @@ function decideFinal(rt: TeamRuntime, decided: TeamApproval, task: TeamTask, app
  * and the agent of the task's phase, when it is of that role and its run did not end waiting on the user (an open card
  * of that run), is woken with `grant` (cooldown bypassed: the user just allowed what stopped it). The wake names the
  * approval in its refs; the run it gets is told to use Bash by a system hint built from them (grantedByRefs), never
- * by text in the wake mark (`detail` is the user's request text only).
+ * by text in the wake mark (`detail` is the user's request text only). 2.7.0 runtime fixes (orchestrator decision): the
+ * run that asked left its task waiting on this decision (afterRunPolicy `permissionWait`), so a reject wakes that same
+ * agent too, with `answer` and the approval in its refs (rejectHint: go on without those commands; a QA reads the
+ * change), and the user's note, when given, as their comment for it.
  */
-function decidePermission(rt: TeamRuntime, ap: Extract<TeamApproval, { kind: 'permission' }>, decided: TeamApproval, task: TeamTask, approve: boolean, ctx: FlowCtx): FlowResult {
+function decidePermission(rt: TeamRuntime, ap: Extract<TeamApproval, { kind: 'permission' }>, decided: TeamApproval, task: TeamTask, approve: boolean, note: string | undefined, actor: Actor, ctx: FlowCtx): FlowResult {
   let out: TeamRuntime = { ...rt, approvals: replaceApproval(rt.approvals, decided) }
-  if (!approve) return { ok: true, rt: out, effects: [], result: undefined }
+  const roleId = ap.payload.roleId
+  const agentId = phaseAgentOf(task)
+  const agent = agentId ? rt.agents.find((a) => a.id === agentId) : undefined
+  const mode = phaseModeOf(task)
+  const waitsOnUser = rt.cards.some((c) => c.state === 'open' && c.from.kind === 'agent' && c.from.runId === ap.payload.runId)
+  const wake = agent && !agent.retired && agent.roleId === roleId && mode && task.state !== 'blocked' && !waitsOnUser ? { agent, mode } : null
+  if (!approve) {
+    if (!wake) return { ok: true, rt: out, effects: [], result: undefined }
+    const next: WakeMark = { agentId: wake.agent.id, mode: wake.mode, reason: 'answer', since: ctx.now, refs: [ap.id], bypassCooldown: true }
+    out = { ...out, tasks: replaceTask(out.tasks, { ...task, next, updatedAt: ctx.now }) }
+    const effects: TeamEffect[] = [{ kind: 'dispatch' }]
+    if (note) {
+      const c = appendComment(out, { author: actor, target: task.id, kind: 'comment', text: note, forAgent: wake.agent.id }, ctx)
+      if (!c.ok) return c
+      out = c.rt
+      effects.push(...c.effects)
+    }
+    return { ok: true, rt: out, effects, result: undefined }
+  }
   // The view shows only these (approvalView): an approval whose every rule the policy now refuses grants nothing.
   const tools = ap.payload.tools.filter(isGrantable)
   if (tools.length === 0) return fail('bad_request')
-  const roleId = ap.payload.roleId
   const grants: TaskGrant[] = [...(task.grants ?? [])]
   let full = false
   for (const tool of tools) {
@@ -362,12 +415,8 @@ function decidePermission(rt: TeamRuntime, ap: Extract<TeamApproval, { kind: 'pe
   // nobody (the woken run would be denied again and ask again), the approval stays pending.
   if (full && grants.length === (task.grants ?? []).length) return fail('bad_request', { detail: 'grantsFull' })
   let t: TeamTask = { ...task, grants, updatedAt: ctx.now }
-  const agentId = phaseAgentOf(task)
-  const agent = agentId ? rt.agents.find((a) => a.id === agentId) : undefined
-  const mode = phaseModeOf(task)
-  const waitsOnUser = rt.cards.some((c) => c.state === 'open' && c.from.kind === 'agent' && c.from.runId === ap.payload.runId)
-  if (agent && !agent.retired && agent.roleId === roleId && mode && task.state !== 'blocked' && !waitsOnUser) {
-    const next: WakeMark = { agentId: agent.id, mode, reason: 'grant', since: ctx.now, refs: [ap.id], bypassCooldown: true }
+  if (wake) {
+    const next: WakeMark = { agentId: wake.agent.id, mode: wake.mode, reason: 'grant', since: ctx.now, refs: [ap.id], bypassCooldown: true }
     t = { ...t, next }
   }
   out = { ...out, tasks: replaceTask(out.tasks, t) }
@@ -382,7 +431,9 @@ function decidePermission(rt: TeamRuntime, ap: Extract<TeamApproval, { kind: 'pe
  * Dev as a review comment). A plan approve goes to executing with the same session (T5), a reject back to planning
  * (T6); a final approve integrates (T11; `f.ahead` 0 or no worktree: done) or a reject sends it back (T12: to
  * executing, or to planning with a plan wake when the task needs a plan and has none approved); a
- * permission approve grants and re-requests the run; a hire approve turns `applying` with the `applyHire` effect (its
+ * permission approve grants and re-requests the run, a reject wakes the same agent to go on without the command (2.7.0
+ * runtime fixes), and one a terminal tool made needless (`error: PERMISSION_NOT_NEEDED`) answers `conflict {stale}`
+ * like a stale hire; a hire approve turns `applying` with the `applyHire` effect (its
  * definition base must still be the trusted one, else `conflict {stale}`), a reject leaves a `hireRejected` system
  * note in the Lead thread that wakes nobody. A permission decide carries the approval's rev the user saw (`f.rev`,
  * ApprovalView.rev): a missing or different one (a later run merged rules into it) answers `conflict {stale}`.
@@ -402,6 +453,8 @@ export function decideApproval(
   if (ap.kind === 'integrate') return fail('bad_request')
   // A hire cancelled for its stale base (cancelStaleHires) tells a decide that raced the cancel why.
   if (ap.kind === 'hire' && ap.state === 'cancelled' && ap.error === HIRE_STALE) return fail('conflict', { reason: 'stale' })
+  // So does a permission a verdict, done or review of its role made needless (cancelNeedlessPermission).
+  if (ap.kind === 'permission' && ap.state === 'cancelled' && ap.error === PERMISSION_NOT_NEEDED) return fail('conflict', { reason: 'stale' })
   if (ap.state !== 'pending') return fail('conflict', { reason: 'already_decided' })
   if (actor.kind === 'system') return fail('forbidden')
   if (actor.kind === 'user' && actor.via === 'phone' && ap.kind === 'hire') return fail('forbidden')
@@ -431,7 +484,7 @@ export function decideApproval(
     case 'permission':
       // B close: bound to the rules the user saw, never to rules a later run merged in since.
       if (f?.rev !== (ap.rev ?? 1)) return fail('conflict', { reason: 'stale' })
-      return task ? decidePermission(rt, ap, decided, task, approve, ctx) : fail('conflict', { reason: 'stale' })
+      return task ? decidePermission(rt, ap, decided, task, approve, clean, actor, ctx) : fail('conflict', { reason: 'stale' })
     case 'hire': {
       if (approve) {
         // The proposal was checked against this trusted definition; one trusted since (other edits) is a stale diff.
@@ -448,6 +501,26 @@ export function decideApproval(
 
 /** The `error` of a hire cancelled for its stale base (cancelStaleHires): a decide that raced it answers `conflict {stale}`. */
 export const HIRE_STALE = 'stale'
+
+/**
+ * The `error` of a permission approval a terminal tool made needless (cancelNeedlessPermission): a decide that raced it
+ * answers `conflict {stale}`.
+ */
+export const PERMISSION_NOT_NEEDED = 'notNeeded'
+
+/** The terminal tools that move a task past what a permission was asked for (2.7.0 runtime fixes): QA's verdict, a `done`, a `review`. */
+export const PERMISSION_SETTLING_TOOLS: readonly TerminalTool[] = ['verdict', 'done', 'review']
+
+/**
+ * 2.7.0 runtime fixes (orchestrator decision): a run of the task's role that gave a verdict, `done` or `review` moved the
+ * task on as always, so the pending permission approval of that task and role is no longer needed: cancelled with
+ * `error: PERMISSION_NOT_NEEDED` (it leaves Te necesita and its count). The same runtime when there is none.
+ */
+export function cancelNeedlessPermission(rt: TeamRuntime, taskId: string, roleId: string, ctx: Pick<FlowCtx, 'now'>): TeamRuntime {
+  const needless = (a: TeamApproval): boolean => a.kind === 'permission' && a.state === 'pending' && a.taskId === taskId && a.payload.roleId === roleId
+  if (!rt.approvals.some(needless)) return rt
+  return { ...rt, approvals: rt.approvals.map((a) => (needless(a) ? ({ ...a, state: 'cancelled', decidedAt: ctx.now, error: PERMISSION_NOT_NEEDED } as TeamApproval) : a)) }
+}
 
 /**
  * A definition trusted anew (TeamService.approveTrust, the end of a hire's apply), and also the load of a team and a

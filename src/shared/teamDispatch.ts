@@ -181,7 +181,8 @@ function leadLevels(rt: TeamRuntime, def: TeamDefinition, goalHash: string, agen
 /**
  * A manual entry ("Ejecutar ahora", kickoff): the level of the named task, else the agent's best level (no prompt) or a
  * free / lead request. The best level is picked like the agent's candidate, so a level in `skip` (discarded) is not it:
- * the run is the one the roster says the agent waits for. A named task always runs, discarded or not.
+ * the run is the one the roster says the agent waits for. A named task always runs, discarded or not. The request is
+ * approved, bypasses the cooldown and carries `manual` (the user started it).
  */
 function manualCandidate(rt: TeamRuntime, m: DispatchFacts['manual'][number], agent: AgentState, levels: readonly Candidate[], now: number, skip?: ReadonlySet<string>): Candidate | null {
   const lead = agent.roleKind === 'lead'
@@ -207,8 +208,10 @@ function manualCandidate(rt: TeamRuntime, m: DispatchFacts['manual'][number], ag
     const mode: RunMode = lead ? 'lead' : 'free'
     base = { req: request(agent.id, mode, lead ? LEAD_THREAD : 'free', m.reason, now, 'high'), agent }
   }
-  // The user's prompt replaces a level's detail; without one a level keeps its own (a routine wake's prompt).
-  base.req = { ...base.req, approved: true, bypassCooldown: true }
+  // The user's prompt replaces a level's detail; without one a level keeps its own (a routine wake's prompt). `manual`
+  // marks the user's entry (2.7.0 runtime fixes): a kickoff the user asked for reads `trigger.by: 'user'`, the one a
+  // goal change raised (the L4 level of the same reason) 'system'.
+  base.req = { ...base.req, approved: true, bypassCooldown: true, manual: true }
   if (m.detail && m.detail.trim()) base.req.detail = m.detail
   return base
 }
@@ -548,6 +551,10 @@ function blockCard(why: CardReason): NonNullable<PolicyDecision['block']> {
  *   interruption streak is `agentInterrupts` (< INTERRUPTS_MAX re-wakes), reset to 0 by a run that ends otherwise.
  * - Any failed or interrupted run that never reached `running` and that the user did not stop hands back what it was
  *   given (`undeliver`, 4.5).
+ * - 2.7.0 runtime fixes: a task run that ended succeeded or failed without concluding and whose denials left a
+ *   permission approval of its task and role pending (`permissionWait`) waits on the user: only the provider rows (and
+ *   a fresh session for an unknown or full one) apply, never a continuation, a retry, a count or a block (qaNoVerdict,
+ *   noProgress, failure, timeout). A user stop, a cancel, a takeover and an interruption keep their own rows.
  */
 export function afterRunPolicy(f: RunEndFacts): PolicyDecision {
   const run = f.run
@@ -616,6 +623,15 @@ export function afterRunPolicy(f: RunEndFacts): PolicyDecision {
       out.next = sameAs(run, 'interrupted', now)
       out.agentInterrupts = f.agentInterrupts + 1
     }
+    return out
+  }
+
+  // Row (2.7.0 runtime fixes, orchestrator decision): the run's denials left a permission approval of its task and role
+  // pending, so the task waits on the user's decision, which wakes the phase agent (approve: `grant`, reject: `answer`,
+  // flow/approvals.ts): no continuation, no retry, no count and no block. The provider rows above still hold, and a
+  // session that is gone or full still starts fresh for the run the decision wakes.
+  if (f.permissionWait && taskRun && !concluded) {
+    if (f.unknownSession || failure?.kind === 'context') out.freshSession = true
     return out
   }
 

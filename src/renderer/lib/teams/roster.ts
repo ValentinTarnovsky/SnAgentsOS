@@ -12,7 +12,7 @@
 import { create } from 'zustand'
 import type { DeferInfo, RunMode, WakeReason } from '@shared/teams'
 import type { Language, PaneUsage } from '@shared/types'
-import type { AgentView, TeamError, TeamFail, TeamRequest } from '@shared/team-protocol'
+import type { AgentView, RunView, TeamError, TeamFail, TeamRequest } from '@shared/team-protocol'
 import { onTeamChanged, openAgentDrawer, refreshTeamList, teamReq, useTeamsStore } from '@/lib/teamsStore'
 import { clockTime, formatCost, formatTokens, sumUsage } from '@/lib/statusSignals'
 import type { MessageKey, TFn } from '@/i18n'
@@ -154,6 +154,14 @@ export const TRIGGER_KEY: Record<WakeReason, MessageKey> = {
   triage: 'teams.trigger.triage',
   leadApproval: 'teams.trigger.leadApproval',
   manual: 'teams.trigger.manual',
+}
+
+/**
+ * Why a run started, as its catalog key: a kickoff the user asked for (main's `triggerBy: 'user'`, the Dispatcher's
+ * manual kickoff) reads "le pediste que arme las tareas"; the automatic one, on a goal change, keeps "cambió la meta".
+ */
+export function triggerKey(run: Pick<RunView, 'trigger' | 'triggerBy'>): MessageKey {
+  return run.trigger === 'kickoff' && run.triggerBy === 'user' ? 'teams.trigger.kickoffAsked' : TRIGGER_KEY[run.trigger]
 }
 
 export const DEFER_KEY: Record<DeferInfo['reason'], MessageKey> = {

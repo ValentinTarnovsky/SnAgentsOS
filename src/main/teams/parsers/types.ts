@@ -27,7 +27,8 @@ export interface Denial { tool: string; toolUseId?: string; input?: unknown }
 /**
  * What one stdout line says right away, or null when it is not a line of the
  * stream protocol (not JSON, no `type`, or a type the stream never prints,
- * such as a transcript's `cost-state`).
+ * such as a transcript's `cost-state`); a keepalive or ping style line of no
+ * protocol type answers `{type, beat}` only.
  * - `sessionId`: the session the line names (Claude `session_id`, Codex the
  *   `thread_id` of `thread.started`).
  * - `result`: the run's FIRST terminal line (Claude `result`, Codex
@@ -38,11 +39,27 @@ export interface Denial { tool: string; toolUseId?: string; input?: unknown }
  *   flag arms would end a turn that is still going.
  * - `denial`: a Claude `system/permission_denied` line.
  * - `rateLimit`: a refused `rate_limit_event`, read at the line's time.
+ * - `beat`: a line that carries no new content (isBeatLine): the process is
+ *   alive, but it is no sign of life for the run's silence (B7) and moves no
+ *   `lastLineAt`.
  */
-export interface ParsedLine { type: string; sessionId?: string; result?: true; denial?: Denial; rateLimit?: FailureInfo; items?: never }
+export interface ParsedLine { type: string; sessionId?: string; result?: true; denial?: Denial; rateLimit?: FailureInfo; beat?: true; items?: never }
+
+/** Line types that only say the process is alive (Claude `keep_alive`; keepalive or ping style lines of either provider). */
+const BEAT_TYPES: ReadonlySet<string> = new Set(['keep_alive', 'keepalive', 'ping', 'heartbeat'])
+
+/**
+ * A stream line that carries no new content (2.7.0 runtime walkthrough, B7 run silence): a Claude `tool_progress`
+ * heartbeat (`heartbeat: true`, every 30 s while a tool runs, also inside a command that hangs), a `keep_alive`, or a
+ * keepalive or ping style line (`codex exec --json` prints none today: its retry notices are `error` events and show in
+ * the chat). The run's silence counts from the last line that is not one.
+ */
+export function isBeatLine(rec: Readonly<Record<string, unknown>>): boolean {
+  return rec.heartbeat === true || (typeof rec.type === 'string' && BEAT_TYPES.has(rec.type))
+}
 
 export interface StreamFacts {
-  /** line() returned a ParsedLine at least once; firstLineAt is the `at` of the first one. */
+  /** line() returned a ParsedLine of a protocol type at least once (a beat outside them is none); firstLineAt is the `at` of the first one. */
   sawProtocol: boolean; firstLineAt?: number
   /** Claude: the last `session_id` seen; Codex: the `thread.started` of THIS output (none on a failed resume). */
   sessionId?: string

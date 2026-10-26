@@ -22,7 +22,7 @@ import { claudeContextWindow, fitContextWindow } from '@shared/rateCard'
 import type { RunUsage, TokenTotals } from '@shared/teams'
 import { addTool, emptyDigest, fileOfToolInput, type TurnDigest } from '@shared/toolActivity'
 import type { PaneContext } from '@shared/types'
-import { DENIAL_INPUT_MAX, DENIALS_MAX, FINAL_TEXT_MAX, isTeamCall, type Denial, type ParsedLine, type SessionBase, type StreamFacts, type StreamParser } from './types'
+import { DENIAL_INPUT_MAX, DENIALS_MAX, FINAL_TEXT_MAX, isBeatLine, isTeamCall, type Denial, type ParsedLine, type SessionBase, type StreamFacts, type StreamParser } from './types'
 
 type Rec = Record<string, unknown>
 /** failureFromRateLimit reads its fields with typeof checks, so any record may go in. */
@@ -363,12 +363,17 @@ export function createClaudeStreamParser(): StreamParser {
   return {
     line(raw: string, at: number): ParsedLine | null {
       const rec = parse(raw)
-      if (!rec || typeof rec.type !== 'string' || !STREAM_TYPES.has(rec.type)) return null
+      if (!rec || typeof rec.type !== 'string') return null
+      // A tool_progress heartbeat or a keep_alive: no new content (the run's silence goes on).
+      const beat = isBeatLine(rec)
+      // A keepalive or ping style line outside the stream types: alive, no content, no protocol (as in codexExec).
+      if (!STREAM_TYPES.has(rec.type)) return beat ? { type: rec.type, beat: true } : null
       if (!sawProtocol) {
         sawProtocol = true
         firstLineAt = at
       }
       const out: ParsedLine = { type: rec.type }
+      if (beat) out.beat = true
       const sid = str(rec.session_id).trim()
       if (sid) {
         sessionId = sid

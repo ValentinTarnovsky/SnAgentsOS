@@ -18,6 +18,11 @@
  * `snaos team` call through PowerShell, the agent's Bash hint; a Lead session
  * records the goal hash it read (decision 43); a task run whose prep failed
  * with a card blocks on it.
+ *
+ * 2.7.0 runtime fixes: a run whose denials leave its permission approval
+ * pending waits on the user (permissionWaitOf, the policy's `permissionWait`),
+ * a verdict, done or review cancels that approval, and only the user's
+ * manual entry gives a run `trigger.by: 'user'` among the kickoffs.
  */
 import { redactCredentials } from '@shared/redact'
 import { afterRunPolicy, classifyOutcome } from '@shared/teamDispatch'
@@ -48,7 +53,7 @@ import {
 import type { FailureInfo } from '@shared/failure'
 import type { StreamFacts } from '../parsers/types'
 import { openSystemCard } from './agents'
-import { isEscapeDenial, isTeamCallDenial, permissionAsk, type PermissionAskOpts } from './approvals'
+import { cancelNeedlessPermission, isEscapeDenial, isTeamCallDenial, PERMISSION_SETTLING_TOOLS, permissionAsk, type PermissionAskOpts } from './approvals'
 import { appendComment } from './tasks'
 import type { FlowCtx, FlowResult, TeamEffect } from './types'
 
@@ -103,8 +108,8 @@ function endEffects(run: Run, dispatch: boolean): TeamEffect[] {
   return out
 }
 
-/** The RunEndFacts the policy reads, from the terminal run and the runtime it ends in. */
-export function runEndFactsOf(rt: TeamRuntime, run: Run, now: number, o: { claudeCanSwitch?: boolean; claudeSwitchedAt?: number; unknownSession?: boolean } = {}): RunEndFacts {
+/** The RunEndFacts the policy reads, from the terminal run and the runtime it ends in (`permissionWait`: permissionWaitOf). */
+export function runEndFactsOf(rt: TeamRuntime, run: Run, now: number, o: { claudeCanSwitch?: boolean; claudeSwitchedAt?: number; unknownSession?: boolean; permissionWait?: boolean } = {}): RunEndFacts {
   const task = run.taskId ? rt.tasks.find((t) => t.id === run.taskId) : undefined
   const agent = rt.agents.find((a) => a.id === run.agentId)
   const f: RunEndFacts = {
@@ -121,6 +126,7 @@ export function runEndFactsOf(rt: TeamRuntime, run: Run, now: number, o: { claud
   }
   if (task) f.task = { id: task.id, state: task.state, phase: task.phase, counters: task.counters, assignee: task.assignee, review: task.review }
   if (o.claudeSwitchedAt !== undefined) f.claudeSwitchedAt = o.claudeSwitchedAt
+  if (o.permissionWait) f.permissionWait = true
   return f
 }
 
@@ -301,7 +307,9 @@ export function admitRun(rt: TeamRuntime, req: RunRequest, a: AdmitFacts, ctx: F
   }
   const id = ctx.newRunId()
   const sessionId = a.resume ? a.resume.sessionId : agent.provider === 'claude' ? ctx.newSessionId() : undefined
-  const by: Run['trigger']['by'] = req.reason === 'manual' || req.reason === 'kickoff' || req.reason === 'userMessage' ? 'user' : 'system'
+  // 2.7.0 runtime fixes: a kickoff is the user's only when they asked for it (a manual entry, RunRequest.manual); the
+  // one a goal change raised (the Lead's L4 level, the same reason) is the team's.
+  const by: Run['trigger']['by'] = req.manual || req.reason === 'manual' || req.reason === 'userMessage' ? 'user' : 'system'
   const trigger: Run['trigger'] = { reason: req.reason, by }
   if (req.refs && req.refs.length) trigger.refs = [...req.refs]
   const run: Run = {
@@ -684,6 +692,22 @@ export function finishRun(rt: TeamRuntime, runId: string, end: RunEnd, policy: P
 /** What finishRun needs for the permission approvals of a run's denials (B5): the trusted definition and the protect paths of decision 72. */
 export interface RunEndAsk { ctx: FlowCtx; protect: PermissionAskOpts['protect'] }
 
+/**
+ * 2.7.0 runtime fixes (orchestrator decision), the policy fact `permissionWait` of a closing run (TeamService computes
+ * it before the policy, which finishRun applies before its follow-ups ask): true when the run is a task run that did
+ * not conclude and its denials open, grow or ask again the pending permission approval of its task and role (the
+ * approval permissionAsk would answer, read without committing it). Without `ask` (an untrusted team) nothing is
+ * asked, so nothing waits. Only a run that ended succeeded or failed and that the user did not stop waits: a user
+ * stop, a cancel, a takeover and an interruption keep their own policy rows (and teams.log never says it waits).
+ */
+export function permissionWaitOf(rt: TeamRuntime, run: Run, facts: Pick<StreamFacts, 'denials'>, ctx: RunEndCtx, ask: RunEndAsk | undefined): boolean {
+  const denials = facts.denials ?? []
+  if ((run.state !== 'succeeded' && run.state !== 'failed') || run.stopReason === 'user') return false
+  if (!ask || !run.taskId || run.concludedBy || denials.length === 0) return false
+  const asked = permissionAsk(rt, run, denials, { ...ask.ctx, now: ctx.now }, { protect: ask.protect, mask: ctx.mask })
+  return asked.ok && asked.result.approvalId !== null
+}
+
 /** The opening line of a Codex `snaos-team` fence (5.6): what follows it is main's to apply, not the Lead's words. */
 const TEAM_FENCE_LINE_RE = /^ {0,3}`{3,}[ \t]*snaos-team[ \t]*$/
 
@@ -716,7 +740,9 @@ function leadReplyText(run: Run, finalText: string, mask: RunEndCtx['mask']): st
  *   shell or inline-code escape (isEscapeDenial: never grantable) sets its `escapeHint`, so its next run gets
  *   ESCAPE_HINT (the command needs the user: `snaos team needs`); the rest go to permissionAsk (its rules: no approval
  *   for what the profile keeps denying, never a PowerShell grant, never mcp / Task / Agent), only with `ask` (the
- *   trusted definition: an untrusted team asks nothing).
+ *   trusted definition: an untrusted team asks nothing);
+ * - 2.7.0 runtime fixes: a task run that concluded with a verdict, `done` or `review` asks nothing and cancels the
+ *   pending permission approval of its task and role (cancelNeedlessPermission: no longer needed).
  */
 function runEndFollowUps(ended: Extract<FlowResult<{ run: Run }>, { ok: true }>, run: Run, facts: StreamFacts, ctx: RunEndCtx, ask: RunEndAsk | undefined): FlowResult<{ run: Run }> {
   let out = ended.rt
@@ -755,7 +781,11 @@ function runEndFollowUps(ended: Extract<FlowResult<{ run: Run }>, { ok: true }>,
     const agent = out.agents.find((a) => a.id === run.agentId)
     if (agent && !agent.escapeHint) out = { ...out, agents: replaceAgent(out.agents, { ...agent, escapeHint: true }) }
   }
-  if (denials.length > 0 && ask) {
+  if (run.taskId && run.concludedBy && PERMISSION_SETTLING_TOOLS.includes(run.concludedBy.tool)) {
+    // 2.7.0 runtime fixes (orchestrator decision): a verdict, done or review wins: the task moved on, and the pending
+    // permission of its task and role is no longer needed (cancelled with its own reason), nor asked again.
+    out = cancelNeedlessPermission(out, run.taskId, run.roleId, ctx)
+  } else if (denials.length > 0 && ask) {
     // The live-token mask of the run end too (B5 review): a rule or a denied line never enters the state with a token.
     const asked = permissionAsk(out, run, denials, { ...ask.ctx, now: ctx.now }, { protect: ask.protect, mask: ctx.mask })
     if (asked.ok) {

@@ -77,6 +77,8 @@ export interface RunView {
   queuedAt: number; startedAt?: number; endedAt?: number; lastLineAt?: number
   failure?: FailureInfo; silence?: PaneSilence; usage?: PaneUsage; context?: PaneContext; digest?: TurnDigest
   summary?: string; concludedBy?: TerminalTool
+  /** 2.7.0 runtime fixes: who started it (`Run.trigger.by`): 'user' for the user's run, kickoff or message, 'system' for a level of the team (a goal change kickoff). */
+  triggerBy?: 'user' | 'system'
 }
 export interface AgentView {
   id: string; roleId: string; roleName: string; kind: RoleKind; index: number

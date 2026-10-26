@@ -47,7 +47,7 @@ export interface RunHooks {
   firstLine(runId: string, at: number, sessionId?: string): void
   /** RunLog items, for the watched run. */
   append(runId: string, items: ChatMessage[], at: number): void
-  /** Every line; TeamService throttles the synthetic refresh. */
+  /** Every line with content (a beat is none: ParsedLine.beat); TeamService throttles the synthetic refresh. */
   signal(runId: string, at: number): void
   result(runId: string, at: number): void
   closed(runId: string, end: RunEnd & { stderrTail: string; logBytes: number; logCut: boolean }): void
@@ -173,7 +173,10 @@ export class RunSupervisor {
     return { ok: true, pid: child.pid }
   }
 
-  /** The live last-line time of a run (memory; views, the synthetic status and the run SilenceWatch read it; Run.lastLineAt is written only by real commits). */
+  /**
+   * The live time of a run's last line with content, a beat never moves it (memory; views, the synthetic status and the
+   * run SilenceWatch read it; Run.lastLineAt is written only by real commits).
+   */
   lastLineAt(runId: string): number | undefined {
     return this.runs.get(runId)?.lastLineAt
   }
@@ -313,8 +316,11 @@ export class RunSupervisor {
       this.deps.log(`run ${id} parser error ${(err as Error).name}`)
     }
     const items = live.log.append(raw)
-    live.lastLineAt = at
-    if (parsed && parsed.type && !live.sawLine) {
+    // A beat (a Claude tool_progress heartbeat every 30 s inside a long tool, a keepalive) carries no new content: it
+    // is logged, but it is no sign of life for the run's silence (B7), so a run stuck in a command still goes quiet.
+    const beat = parsed?.beat === true
+    if (!beat) live.lastLineAt = at
+    if (parsed && parsed.type && !beat && !live.sawLine) {
       live.sawLine = true
       this.deps.hooks.firstLine(id, at, parsed.sessionId)
     }
@@ -323,7 +329,7 @@ export class RunSupervisor {
       if (!live.done) this.deps.timer.set(this.key(id, 'linger'), at + LINGER_MS)
       this.deps.hooks.result(id, at)
     }
-    this.deps.hooks.signal(id, at)
+    if (!beat) this.deps.hooks.signal(id, at)
     if (items.length) this.deps.hooks.append(id, items, at)
   }
 

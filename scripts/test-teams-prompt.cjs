@@ -18,6 +18,8 @@
 // diff` and history with `snaos team log` (READ_CHANGES_RULE in section 4, never git log, diff or show; a writer and a
 // block run are not told), QA reads them with `snaos team diff` (a block run keeps git diff), and BASE_RULES names
 // git send-pack and git http-push with git push.
+// 2.7.0 runtime walkthrough: BASE_RULES tells every role to use team ask and team needs only when it truly needs the
+// user, and the Lead contract ends a run by stopping (no needless closing card).
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -58,6 +60,12 @@ function systemChecks() {
   check(/never switch to, commit on, merge into, reset or push the base branch or any branch other than your own/i.test(branchLine) && /never touch other worktrees/i.test(branchLine) && /stay inside your working directory/i.test(branchLine), 'BASE_RULES: never switch to, commit on, merge into, reset or push the base or another branch; never other worktrees; stay in the cwd')
   check(!/touch[^\n]*(base branch|other branches)/i.test(P.BASE_RULES) && branchLine.includes('editing files there is not a branch operation'), 'BASE_RULES never forbids touching the base branch as such: editing files in the cwd stays allowed')
   check(!/readonly|read-only|\btotal\b|writer|reader|--json|snaos-team|free run|repo root|\bmain\b/i.test(P.BASE_RULES), 'BASE_RULES is profile, mode and channel free (it feeds sysHash)')
+  // 2.7.0 runtime walkthrough: a haiku Lead ended almost every run with a needless card ("Nada que necesite de vos por
+  // ahora"). Every role is told that ask and needs are only for what truly needs the user.
+  const askLine = P.BASE_RULES.split('\n').find((l) => /`team needs`/.test(l)) ?? ''
+  check(/use `team ask` and `team needs` only when you truly need the user/i.test(askLine) && /never use them to report progress, to say that nothing needs the user, or just to close a run/i.test(askLine), 'BASE_RULES: team ask and team needs only when the agent truly needs the user, never to report progress, to say nothing needs the user or to close a run')
+  for (const kind of ['lead', 'dev', 'qa', 'research', 'custom']) check(P.systemText({ team, role: { id: kind, name: kind, kind, instructions: 'x' } }).includes(askLine), `the ${kind} system text carries that rule`)
+  check(/just stop, a Lead run needs no closing tool/.test(P.HARD_RULES.lead) && /`team ask` or `team needs` only when the team cannot go on without the user's answer or action/.test(P.HARD_RULES.lead) && !/to wait on the user/.test(P.HARD_RULES.lead), 'the Lead contract: a run ends by stopping, ask and needs only when the team cannot go on without the user')
   check(P.systemText({ team, role: lead }) !== a, 'another role, another system text (another sysHash)')
   const long = P.systemText({ team: { ...team, rules: 'r'.repeat(40 * 1024) }, role: { ...dev, instructions: 'i'.repeat(40 * 1024) } })
   check(P.utf8Length(long) <= 24 * 1024 && long.includes(P.BASE_RULES) && long.includes(T.teamToolsGuide('dev')), 'over budget: cut to SYSTEM_BUDGET_BYTES, the base rules and the guide whole')
@@ -98,6 +106,7 @@ function freeAndLeadChecks() {
 
   const l = P.buildRunPrompt(base({ role: lead, rules: 'lead', phase: { mode: 'lead', board: { rows: [], counts: {}, pendingApprovals: [{ id: 'a-1', kind: 'plan', small: true }], untriaged: [], agents: [] } }, trigger: { reason: 'manual', detail: 'Arm\u00E1 tareas para el sync' } }))
   check(l.stdin.includes(P.HARD_RULES.lead) && !l.stdin.includes(P.FREE_WRITER_RULES), 'lead: the lead contract in section 4 (no free writer rules)')
+  check(s.includes('`team ask` and `team needs` still work when you truly need the user') && !s.includes('to wait on the user'), 'free: ask and needs only when the run truly needs the user')
   check(l.stdin.includes('<request from="user">\nArm\u00E1 tareas para el sync\n</request>') && l.stdin.indexOf('<request') > l.stdin.indexOf('# Why you run now'), 'lead: the user request in section 9')
   check(JSON.stringify(l.seenApprovalIds) === '["a-1"]', 'lead: the pending approvals it saw')
 }

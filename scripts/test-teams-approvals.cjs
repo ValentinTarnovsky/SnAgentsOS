@@ -33,6 +33,9 @@
 // Tanda B close: a permission approval's rev (a merge that grows it moves it; a decide without it or with another one
 // answers conflict stale, other kinds ignore it), and GRANTS_MAX per task (an ask offers only what still fits, an
 // approve with nothing that lands answers bad_request grantsFull and wakes nobody).
+// 2.7.0 runtime fixes (orchestrator decision): a run whose denials leave its permission approval pending waits on the
+// user (no continuation, no count, no qaNoVerdict); approve wakes the QA or the Dev of the phase with grant, reject with
+// answer, the reject hint and the note as the user's comment; a verdict, review or done of that role cancels it.
 // Same esbuild + vm harness as test-teams-store.cjs: no Electron, no processes, no user data.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -70,7 +73,7 @@ export * from './src/main/teams/flow/approvals'
 export { applyTool, applyBlock } from './src/main/teams/flow/tools'
 export { createTask, updateTask, moveTask, addComment, deliverComments, archiveSweep, closeTaskNeeds, resumeTask } from './src/main/teams/flow/tasks'
 export { reconcileAgents, openSystemCard, setTeamFlags } from './src/main/teams/flow/agents'
-export { admitRun, markStarting, markRunning, requestStop, finishRun, terminalOf, runEndFactsOf, prepFailed, setRunWorktree } from './src/main/teams/flow/runs'
+export { admitRun, markStarting, markRunning, requestStop, finishRun, terminalOf, runEndFactsOf, prepFailed, setRunWorktree, permissionWaitOf } from './src/main/teams/flow/runs'
 export { reconcileTasks, modeFits, todoModeOf } from './src/main/teams/flow/dispatch'
 export { assertInvariants } from './src/main/teams/flow/invariants'
 export { needsInputOf, approvalView, taskSummary, taskDetail } from './src/main/teams/views'
@@ -197,6 +200,21 @@ function world(o = {}) {
     const terminal = M.terminalOf(run, end)
     const policy = M.afterRunPolicy(M.runEndFactsOf(store.rt, terminal, clock.now))
     return w.commit(M.finishRun(store.rt, runId, end, policy, { now: clock.now }), `finish ${runId}`)
+  }
+  /**
+   * The run end as TeamService.finalizeClosed does it (2.7.0 runtime fixes): permissionWaitOf on the runtime before the
+   * end, the policy with that fact, then finishRun with the trusted definition, so its follow-ups ask or cancel.
+   */
+  w.end = (runId, o2 = {}) => {
+    const run = w.run(runId)
+    const end = { at: clock.now, exit: { code: 0, signal: null }, facts: baseFacts(o2.facts), teamWrites: o2.teamWrites ?? 0 }
+    const terminal = M.terminalOf(run, end)
+    const endCtx = { now: clock.now }
+    const ask = { ctx: ctx(), protect: PROTECT }
+    const wait = M.permissionWaitOf(store.rt, terminal, end.facts, endCtx, ask)
+    const policy = M.afterRunPolicy(M.runEndFactsOf(store.rt, terminal, clock.now, { permissionWait: wait }))
+    w.commit(M.finishRun(store.rt, runId, end, policy, endCtx, ask), `end ${runId}`)
+    return wait
   }
   // B close: a permission decide carries the rev the user saw (ApprovalView.rev), as the desktop and the phone send it;
   // `f` given is used as is (the rev checks pass their own).
@@ -1094,6 +1112,149 @@ function permissionChecks() {
   same(leaks(w.rt()), [], 'and the team state holds no piece of the token')
 }
 
+// ---- 7b. 2.7.0 runtime fixes: the run that asked for a permission waits on the user's decision ------------------
+// Orchestrator decision: a run whose denials leave a permission approval of its task and role pending (opened, grown or
+// asked again) leaves its task waiting on that decision (no continuation, no count, no qaNoVerdict or other block);
+// approve wakes the phase agent with `grant` and the grant hint, reject with `answer`, the reject hint (go on without
+// the command; QA decides by reading the change) and the user's note as their comment; a verdict, done or review of a
+// run of that role wins and cancels the pending approval (error notNeeded; a decide that raced it answers stale).
+function permissionWaitChecks() {
+  const w = world()
+  const reads = { digest: { tools: 2, families: { read: 2 }, files: [] }, toolCalls: 2 }
+  const bash = (command) => [{ tool: 'Bash', input: { command } }]
+  const pendingOf = (taskId, roleId) => w.rt().approvals.filter((a) => a.kind === 'permission' && a.state === 'pending' && a.taskId === taskId && a.payload.roleId === roleId)
+  const levelOf = (taskId) => M.candidatesOf(w.rt(), w.def.def, w.def.goalHash, { now: w.clock.now, manual: [] }).find((r) => r.taskId === taskId)
+  /** A task the Dev sent to review (no summary, so nothing is queued for the QA): its sticky QA, `qa`, runs it next. */
+  const inQa = (title) => {
+    const id = w.create(title, { assignee: 'dev', needsPlan: false })
+    const ex = w.go('dev', id, 'exec')
+    w.commit(w.tool(ex, 'team.review', {}), `review ${title}`)
+    w.finish(ex)
+    return id
+  }
+
+  // QA, approve. A first QA run without a verdict and no denial takes its one continuation (the control); the second is
+  // denied `npm test`: the task waits, where the policy alone would block it with qaNoVerdict.
+  const t1 = inQa('QA aprueba')
+  const q1 = w.go('qa', t1, 'qa', { reason: 'review' })
+  check(w.end(q1, { facts: reads }) === false && w.task(t1).next?.reason === 'continuation' && w.task(t1).counters.continuations === 1, 'control: a QA run without a verdict nor a denial takes its continuation')
+  const q2 = w.go('qa', t1, 'qa', { reason: 'continuation' })
+  check(w.end(q2, { facts: { ...reads, denials: bash('npm test') } }) === true, 'permissionWaitOf: the QA run\'s denial opens a pending permission approval, so the run waits')
+  let t = w.task(t1)
+  const [a1] = pendingOf(t1, 'qa')
+  check(!!a1 && json(a1.payload.tools).join() === 'Bash(npm test:*)' && a1.payload.runId === q2, 'one pending permission approval of the task and the QA role', a1)
+  check(t.state === 'review' && t.phase === 'qa' && !t.next && !t.blocked && t.counters.continuations === 1 && !t.cooldownUntil, 'the task waits on the decision: no continuation, no count, no qaNoVerdict block', t)
+  check(!w.rt().cards.some((c) => c.taskId === t1 && c.state === 'open') && w.needs().some((n) => n.id === a1.id), 'no card: the approval is what Te necesita shows')
+  check(levelOf(t1) === undefined, 'and nothing wakes the QA meanwhile (no level of the task)')
+  w.tick()
+  w.commit(w.decide(user, a1.id, 'approve'), 'approve the QA permission')
+  t = w.task(t1)
+  check(t.next?.agentId === 'qa' && t.next.mode === 'qa' && t.next.reason === 'grant' && t.next.bypassCooldown === true && json(t.next.refs).join() === a1.id, 'approve: the grant wakes the QA of review/qa', t.next)
+  check(levelOf(t1)?.reason === 'grant' && levelOf(t1).sessionKey === t1, 'its level: the grant on the task\'s session (the same session resumes, TeamService.admitFacts)')
+  const q3 = w.admit('qa', t1, 'qa', { reason: 'grant', refs: t.next.refs })
+  const gh = M.grantHint(M.grantedByRefs(w.rt(), w.run(q3)))
+  check(!!gh && gh.includes('Bash(npm test:*)') && M.rejectHint(w.rt(), w.run(q3)) === undefined, 'the woken run reads the grant hint, no reject hint', gh)
+  w.start(q3)
+  w.commit(w.tool(q3, 'team.verdict', { verdict: 'approve', text: 'Tests verdes' }), 'the QA gives its verdict with the grant')
+  w.end(q3)
+  check(w.task(t1).phase === 'userOk' && w.approval(a1.id).state === 'approved', 'the verdict moves it on; the approved permission stays approved')
+
+  // QA, reject with a note: the same QA goes on without the command and decides by reading the change.
+  const t2 = inQa('QA rechazado')
+  const r1 = w.go('qa', t2, 'qa', { reason: 'review' })
+  check(w.end(r1, { facts: { ...reads, denials: bash('npm test') } }) === true, 'a QA run denied npm test waits')
+  const [a2] = pendingOf(t2, 'qa')
+  const before2 = (w.rt().comments[t2] ?? []).length
+  w.tick()
+  w.commit(w.decide(user, a2.id, 'reject', 'No corras los tests: leé el diff'), 'reject with a note')
+  t = w.task(t2)
+  check(w.approval(a2.id).state === 'rejected' && w.approval(a2.id).note === 'No corras los tests: leé el diff' && !t.grants, 'rejected with its note, nothing granted')
+  check(t.next?.agentId === 'qa' && t.next.mode === 'qa' && t.next.reason === 'answer' && t.next.bypassCooldown === true && json(t.next.refs).join() === a2.id, 'reject: the same QA is woken with answer and the approval in its refs', t.next)
+  const note = w.rt().comments[t2].at(-1)
+  check(w.rt().comments[t2].length === before2 + 1 && note.author.kind === 'user' && note.kind === 'comment' && note.text === 'No corras los tests: leé el diff' && note.forAgent === 'qa' && !note.deliveredRunId, 'the note reaches the QA as the user\'s comment, queued for it', note)
+  const r2 = w.admit('qa', t2, 'qa', { reason: 'answer', refs: t.next.refs })
+  const rh = M.rejectHint(w.rt(), w.run(r2))
+  check(!!rh && rh.includes('Bash(npm test:*)') && rh.includes('snaos team diff') && rh.includes('snaos team log') && /verdict/.test(rh) && !/[\u2013\u2014]/.test(rh), 'its reject hint: not allowed, decide by reading the change', rh)
+  check(M.grantHint(M.grantedByRefs(w.rt(), w.run(r2))) === undefined, 'and no grant hint')
+  check(M.rejectHint(w.rt(), { ...w.run(r2), roleId: 'dev' }) === undefined && M.rejectHint(w.rt(), { ...w.run(r2), trigger: { reason: 'answer', refs: [] } }) === undefined, 'another role or no refs: no reject hint')
+  w.start(r2)
+  w.commit(w.tool(r2, 'team.verdict', { verdict: 'changes', text: 'Falta un test, lo vi en el diff' }), 'the QA decides by reading')
+  w.end(r2)
+  check(w.task(t2).phase === 'executing' && w.task(t2).next?.reason === 'changes', 'its verdict moves the task on')
+
+  // A verdict in a run of that role wins: the pending permission is no longer needed.
+  const t3 = inQa('QA con veredicto')
+  const v1 = w.go('qa', t3, 'qa', { reason: 'review' })
+  w.end(v1, { facts: { ...reads, denials: bash('npm test') } })
+  const [a3] = pendingOf(t3, 'qa')
+  check(!!a3, 'a pending permission of the QA')
+  // The user runs the QA by hand; this run is denied again and gives its verdict from reading the change.
+  const v2 = w.go('qa', t3, 'qa', { reason: 'manual' })
+  w.commit(w.tool(v2, 'team.verdict', { verdict: 'approve', text: 'Leí el cambio' }), 'a verdict in the run that was denied again')
+  w.tick()
+  check(w.end(v2, { facts: { ...reads, denials: bash('npm test') } }) === false, 'a run that concluded never waits')
+  const c3 = w.approval(a3.id)
+  check(w.task(t3).phase === 'userOk' && c3.state === 'cancelled' && c3.error === M.PERMISSION_NOT_NEEDED && c3.error === 'notNeeded' && c3.decidedAt === w.clock.now && pendingOf(t3, 'qa').length === 0, 'the verdict wins: the task moves on and the pending permission is cancelled as no longer needed', c3)
+  check(!w.needs().some((n) => n.id === a3.id), 'out of Te necesita')
+  same(json(w.decide(user, a3.id, 'approve', undefined, { rev: 1 })), { ok: false, error: 'conflict', reason: 'stale' }, 'a decide that raced it: conflict stale')
+  const t3b = inQa('QA de una')
+  const v3 = w.go('qa', t3b, 'qa', { reason: 'review' })
+  w.commit(w.tool(v3, 'team.verdict', { verdict: 'approve', text: 'Ok' }), 'a verdict')
+  w.end(v3, { facts: { ...reads, denials: bash('npm test') } })
+  check(!w.rt().approvals.some((a) => a.kind === 'permission' && a.taskId === t3b), 'denied and the verdict in one run with nothing pending: no approval at all')
+
+  // A Dev in executing (a custom role, isolation main): the same wait, approve and reject; review and done win.
+  const t4 = w.create('Dev con permiso', { assignee: 'ops', needsPlan: false, isolation: 'main' })
+  const e1 = w.go('ops', t4, 'exec')
+  check(w.end(e1, { facts: { denials: bash('make all') } }) === true, 'a Dev exec run denied make all waits')
+  t = w.task(t4)
+  const [a4] = pendingOf(t4, 'ops')
+  check(!!a4 && t.state === 'doing' && t.phase === 'executing' && !t.next && !t.blocked && !t.cooldownUntil && t.counters.noProgress === 0 && t.counters.continuations === 0, 'executing waits on the decision: no no-progress count, no cooldown, no continuation', t)
+  check(levelOf(t4) === undefined, 'nothing wakes the Dev meanwhile')
+  w.commit(w.decide(user, a4.id, 'approve'), 'approve the Dev permission')
+  t = w.task(t4)
+  check(t.next?.agentId === 'ops' && t.next.mode === 'exec' && t.next.reason === 'grant' && json(t.next.refs).join() === a4.id && t.grants.some((g) => g.tool === 'Bash(make all:*)' && g.roleId === 'ops'), 'approve: the Dev in executing is woken with grant and the rule')
+  const e2 = w.go('ops', t4, 'exec', { reason: 'grant', refs: t.next.refs })
+  check(w.end(e2, { facts: { denials: bash('make deploy') } }) === true && pendingOf(t4, 'ops').length === 1, 'the granted run is denied another command: a new pending approval, it waits again')
+  const a4b = pendingOf(t4, 'ops')[0]
+  const e3 = w.go('ops', t4, 'exec', { reason: 'manual' })
+  w.commit(w.tool(e3, 'team.review', {}), 'the Dev sends it to review')
+  w.end(e3, { facts: { denials: bash('make deploy') } })
+  check(w.task(t4).phase === 'qa' && w.approval(a4b.id).state === 'cancelled' && w.approval(a4b.id).error === 'notNeeded', 'review wins: the task moves on and the pending permission is cancelled')
+  const t5 = w.create('Dev rechazado', { assignee: 'ops', needsPlan: false, isolation: 'main' })
+  const d1 = w.go('ops', t5, 'exec')
+  w.end(d1, { facts: { denials: bash('make release') } })
+  const [a5] = pendingOf(t5, 'ops')
+  w.commit(w.decide(user, a5.id, 'reject'), 'reject without a note')
+  t = w.task(t5)
+  check(t.next?.reason === 'answer' && t.next.mode === 'exec' && t.next.agentId === 'ops' && json(t.next.refs).join() === a5.id && (w.rt().comments[t5] ?? []).length === 0, 'reject without a note: the Dev is woken with answer, no comment')
+  const d2 = w.admit('ops', t5, 'exec', { reason: 'answer', refs: t.next.refs })
+  const dh = M.rejectHint(w.rt(), w.run(d2))
+  check(!!dh && dh.includes('Bash(make release:*)') && /rest of your work/.test(dh) && !dh.includes('snaos team diff'), 'the Dev reads: go on without it', dh)
+  w.start(d2)
+  check(w.end(d2, { facts: { denials: bash('make release') } }) === true && pendingOf(t5, 'ops').length === 1, 'denied the same command again: a new pending approval (the rejected one is closed), it waits')
+  const a5b = pendingOf(t5, 'ops')[0]
+  const d3 = w.go('ops', t5, 'exec', { reason: 'manual' })
+  w.commit(w.tool(d3, 'team.done', { text: 'Hecho sin release' }), 'done')
+  w.end(d3)
+  check(w.task(t5).phase === 'userOk' && w.approval(a5b.id).state === 'cancelled' && w.approval(a5b.id).error === 'notNeeded', 'done wins: the pending permission is cancelled')
+  // A run that ends waiting on its own card still waits on the card: the grant does not wake it (the answer does).
+  const t6 = w.create('Dev pregunta', { assignee: 'ops', needsPlan: false, isolation: 'main' })
+  const k1 = w.go('ops', t6, 'exec')
+  w.commit(w.tool(k1, 'team.ask', { text: '¿Puedo correr make all?' }), 'it asks')
+  check(w.end(k1, { facts: { denials: bash('make all') } }) === false, 'a run that concluded with ask does not wait on the permission')
+  const [a6] = pendingOf(t6, 'ops')
+  w.commit(w.decide(user, a6.id, 'reject'), 'reject it')
+  check(!w.task(t6).next && w.approval(a6.id).state === 'rejected', 'the reject wakes nobody: the open card will')
+  // A run the user stopped keeps its own row even when it ended with its result: it never waits (nor does teams.log say
+  // so), its task blocks {stopped}, and its denial still opens the approval.
+  const t7 = w.create('Dev frenado', { assignee: 'ops', needsPlan: false, isolation: 'main' })
+  const s1 = w.go('ops', t7, 'exec')
+  w.commit(M.requestStop(w.rt(), s1, 'user', w.ctx()), 'the user stops it')
+  check(w.end(s1, { facts: { denials: bash('make all') } }) === false, 'a run the user stopped does not wait on its permission')
+  check(w.task(t7).blocked?.reason.kind === 'stopped' && pendingOf(t7, 'ops').length === 1, 'its task blocks {stopped} and its denial still opens the approval', w.task(t7))
+}
+
 // ---- 8. hire --------------------------------------------------------------------------------------------
 function hireChecks() {
   const w = world()
@@ -1467,6 +1628,7 @@ replanChecks()
 cardChecks()
 systemCardChecks()
 permissionChecks()
+permissionWaitChecks()
 hireChecks()
 blockChecks()
 endPathsChecks()

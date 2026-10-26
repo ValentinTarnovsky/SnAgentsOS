@@ -288,6 +288,12 @@ function templateChecks() {
     check(same(res.def.routines.map((x) => [x.id, x.cron, x.action, x.role, x.enabled]), [['daily-summary', '0 18 * * 1-5', 'wake', 'lead', true]]), `${lang}: daily summary 0 18 * * 1-5 wakes the lead`)
     check(/snaos team task create/.test(r.lead.instructions) && /--no-plan/.test(r.lead.instructions) && /snaos team note/.test(r.lead.instructions), `${lang}: the lead is told task create, --no-plan and note`)
     check(/snaos team note/.test(res.def.routines[0].prompt), `${lang}: the summary routine uses snaos team note`)
+    // 2.7.0 runtime walkthrough: a readonly QA cannot run a compound command; it reads the change through main and runs
+    // one test command at a time, and a denied one becomes a permission request for the user.
+    const qa = r.qa.instructions
+    check(/`snaos team diff`/.test(qa) && /`snaos team log`/.test(qa), `${lang}: the QA reads the change with snaos team diff and its history with snaos team log`)
+    check((lang === 'es' ? /de a un comando por vez \(por ejemplo `npm test`\)/ : /one command at a time \(for example `npm test`\)/).test(qa) && /`&&`, `;` o `\|`|`&&`, `;` or `\|`/.test(qa), `${lang}: the QA runs the tests one command at a time, never chained`)
+    check((lang === 'es' ? /pedido de permiso para el usuario/ : /permission request for the user/).test(qa), `${lang}: the QA is told a denied command becomes a permission request for the user`)
     check(files.every((f) => !/[\u2013\u2014\r]/.test(f.text) && f.text.endsWith('\n') && !f.text.startsWith('\uFEFF')), `${lang}: LF, no BOM, no dashes`)
     check(same(D.renderTeamFiles(D.defaultDraft(lang)), files) && same(D.defaultTemplate(lang), files), `${lang}: deterministic`)
   }
@@ -295,6 +301,7 @@ function templateChecks() {
   const esLead = es.def.roles.find((r) => r.id === 'lead')
   check(same(es.def.roles.map((r) => r.id), ['dev', 'lead', 'qa', 'research']), 'roles come in rel order')
   check(es.def.name === 'Equipo' && esLead.name === 'Líder' && /Sos el Líder/.test(esLead.instructions) && /preguntá/.test(es.def.rules) && es.def.roles.find((r) => r.id === 'research').name === 'Investigación', 'es: tildes and voseo')
+  check(/Corré las pruebas/.test(es.def.roles.find((r) => r.id === 'qa').instructions) && /Si te niegan un comando/.test(es.def.roles.find((r) => r.id === 'qa').instructions), 'es: the QA in voseo too')
   const en = parse(D.defaultTemplate('en'))
   check(en.def.name === 'Team' && /^You are the team Lead/.test(en.def.roles.find((r) => r.id === 'lead').instructions), 'en: English')
 }

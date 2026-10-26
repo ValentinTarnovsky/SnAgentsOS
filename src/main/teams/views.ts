@@ -495,6 +495,8 @@ export function runView(r: Run, live?: { lastLineAt?: number; silence?: PaneSile
   if (r.digest) out.digest = { ...r.digest, families: { ...r.digest.families }, files: [...r.digest.files] }
   if (r.summary) out.summary = r.summary
   if (r.concludedBy) out.concludedBy = r.concludedBy.tool
+  // 2.7.0 runtime fixes: who started it, so a kickoff the user asked for reads apart from a goal change's.
+  if (r.trigger.by === 'user' || r.trigger.by === 'system') out.triggerBy = r.trigger.by
   return out
 }
 

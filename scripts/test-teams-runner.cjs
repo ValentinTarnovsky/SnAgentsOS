@@ -15,6 +15,8 @@
 // terminalOf's clean end (!facts.failure), the grandchildren of stop and linger detached on Windows (only taskkill /T
 // reaches them), the Claude Code session vars of a parent session kept out of the run env, and the supervisor never
 // signalling a pid after its exit (drain, stop, kill and stop deadlines, shutdownSync; the group only on POSIX).
+// 2.7.0 runtime walkthrough: a beat (the tool_progress heartbeats of claude-heartbeat.jsonl, a keep_alive, a ping
+// style line of either provider) is logged but signals nothing and moves no lastLineAt (nor is a first line).
 // B4 additions: the task worktree created at the task's first run (the plan run) through the real WorktreeService
 // on a temp manifest, tagged with its owner (teamOwned in list(), the IPC remove refused), the exec resuming the plan
 // session in the same cwd, the write lock held and released by CAS, a console working in the tree holding a writer
@@ -69,6 +71,10 @@
 // Descartar of one Lead level (kickoff, triage, a message) leaves its other levels their item; a queue row whose agent
 // runs another run says `running`; a permission decide carries the approval's rev (stale without it, stale after a
 // later run merged a rule into it, which notifies once more).
+// 2.7.0 runtime fixes, second round: a run whose denial leaves its permission approval pending waits on the user (no
+// continuation, count nor cooldown, a teams.log line), Rechazar wakes the same agent on the same session with the reject
+// hint and the note, and a kickoff the user asked for reads trigger.by user (RunView.triggerBy) while the goal change
+// kickoff reads system.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data, never a real agent.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -1049,6 +1055,70 @@ function supervisorKillChecks() {
   check(denied.logs.some((l) => l.includes('group SIGKILL (shutdown) failed EPERM')), 'POSIX: another group kill error is logged')
 }
 
+// ---- 9b. a beat is no sign of life (2.7.0 runtime walkthrough, run r-8ad66ddf8c19) ------------------------
+// Claude prints a tool_progress heartbeat every 30 s while a tool runs, also inside a command that hangs: the line is
+// logged, but it signals nothing and moves no lastLineAt, so the run's silence (B7) counts from its last real line.
+function supervisorBeatChecks() {
+  const { EventEmitter } = require('node:events')
+  const { PassThrough } = require('node:stream')
+  const RID = 'r-0123456789ac'
+  const hb = fs.readFileSync(path.join(FIX, 'claude-heartbeat.jsonl'), 'utf8').split('\n').filter((l) => l.trim())
+  let n = 0
+  const make = (provider) => {
+    const clock = manualClock()
+    const s = { clock, signals: [], first: [], appends: 0, logFile: path.join(TMP, 'sup-beat', `${provider}-${++n}.jsonl`) }
+    const child = Object.assign(new EventEmitter(), { pid: 46000 + n, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() })
+    const timer = new M.DeadlineTimer((key) => s.sup.onDeadline(key), clock.deps)
+    s.sup = new M.RunSupervisor({
+      spawn: () => child,
+      treeKill: { sync: () => true, signal: () => true },
+      groupKill: () => undefined,
+      timer, now: () => clock.now, platform: 'win32', log: () => undefined,
+      hooks: { firstLine: (id, at, sid) => s.first.push({ at, sid }), append: () => { s.appends++ }, signal: (id, at) => s.signals.push(at), result() {}, closed() {}, spawnFailed() {} },
+    })
+    assert.ok(s.sup.start({ runId: RID, teamId: 'tm-0123456789ab', agentId: 'dev', provider, cli: { file: process.execPath, args: [], kind: 'exe' }, argv: [], cwd: TMP, env: {}, stdin: 'hola', logFile: s.logFile, promptMeta: { mode: 'free', trigger: 'manual' }, base: {} }).ok, 'the fake child starts')
+    child.emit('spawn')
+    /** One stdout line after `ms` of the run's clock (the data event the supervisor reads, synchronously). */
+    s.line = (text, ms = 0) => {
+      clock.advance(ms)
+      child.stdout.emit('data', Buffer.from((typeof text === 'string' ? text : JSON.stringify(text)) + '\n'))
+    }
+    return s
+  }
+
+  const c = make('claude')
+  c.line(hb[0])
+  c.line(hb[1], 5000)
+  c.line(hb[2], 1000)
+  const toolAt = c.clock.now
+  check(c.first.length === 1 && c.signals.length === 3 && c.sup.lastLineAt(RID) === toolAt, 'claude: init, the Bash tool_use and its task_started are signs of life')
+  const appends = c.appends
+  for (const beat of hb.slice(3)) c.line(beat, 30_000)
+  c.line({ type: 'keep_alive' }, 30_000)
+  c.line({ type: 'ping' }, 30_000)
+  c.line({ type: 'heartbeat' }, 30_000)
+  check(c.signals.length === 3 && c.sup.lastLineAt(RID) === toolAt, `claude: ${hb.length - 3} tool_progress heartbeats, a keep_alive and ping or heartbeat lines signal nothing and move no lastLineAt`)
+  check(c.appends === appends, 'claude: nor do they add chat rows (the runAppend lastLineAt never moves on a beat)')
+  const logged = fs.readFileSync(c.logFile, 'utf8')
+  check((logged.match(/"heartbeat":true/g) ?? []).length === hb.length - 3, 'the heartbeats are still logged')
+  c.line({ type: 'assistant', message: { id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'sigue' }] }, parent_tool_use_id: null, session_id: 's' }, 1000)
+  check(c.signals.length === 4 && c.sup.lastLineAt(RID) === c.clock.now, 'claude: the next real line signals again')
+  c.sup.shutdownSync()
+
+  const x = make('codex')
+  x.line({ type: 'ping' })
+  check(x.first.length === 0 && x.signals.length === 0 && x.sup.lastLineAt(RID) === undefined, 'codex: a ping style line before the thread is no first line and no sign of life')
+  x.line({ type: 'thread.started', thread_id: '019a0000-0000-7000-8000-0000000000aa' }, 1000)
+  const threadAt = x.clock.now
+  check(x.first.length === 1 && x.first[0].sid === '019a0000-0000-7000-8000-0000000000aa' && x.signals.length === 1, 'codex: thread.started is the first line, with its thread')
+  x.line({ type: 'keepalive' }, 30_000)
+  x.line({ type: 'heartbeat' }, 30_000)
+  check(x.signals.length === 1 && x.sup.lastLineAt(RID) === threadAt, 'codex: keepalive and heartbeat lines signal nothing')
+  x.line({ type: 'item.completed', item: { id: 'i', type: 'agent_message', text: 'OK' } }, 1000)
+  check(x.signals.length === 2 && x.sup.lastLineAt(RID) === x.clock.now, 'codex: an item is a sign of life')
+  x.sup.shutdownSync()
+}
+
 // ---- 10. B4: task worktrees, the exec resume, write locks, the tree mark, extra repos, a re-created team ----
 /** Same folder (realpath, case-folded where the filesystem folds it). */
 function sameDir(a, b) {
@@ -1275,6 +1345,10 @@ async function queueChecks() {
   await w.waitState(k.runId, 'running')
   const lr = w.active(k.runId)
   check(lr.mode === 'lead' && lr.trigger.reason === 'kickoff' && !q().some((x) => x.agentId === 'lead'), 'a lead run for the kickoff; its queue item went with the admission (R1)')
+  // 2.7.0 runtime fixes: the kickoff the user asked for is theirs (Dispatcher.manual marks it), in the run and its view.
+  const kr = await w.svc.request({ op: 'roster', teamId: w.teamId }, 'desktop')
+  const kView = kr.ok && kr.agents.find((a) => a.id === 'lead').run
+  check(lr.trigger.by === 'user' && kView && kView.id === k.runId && kView.trigger === 'kickoff' && kView.triggerBy === 'user', `the user's kickoff: trigger.by user, RunView.triggerBy user (${JSON.stringify([lr.trigger, kView && kView.triggerBy])})`)
   check(w.task(u1).triagedAt === lr.startedAt && w.rt().goalSeenHash === w.svc.trusted(w.teamId).goalHash, 'R2 of the Lead run: the task its board listed to triage is triaged, the goal seen')
   same(await w.svc.request({ op: 'kickoff', teamId: w.teamId }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'running' } }, 'a second kickoff while the Lead runs: deferred running')
 
@@ -1323,7 +1397,12 @@ async function backoffChecks() {
   w.clock.advance(0)
   const leadRuns = () => w.ring().filter((r) => r.agentId === 'lead')
   check(w.rt().activeRuns.some((r) => r.agentId === 'lead' && r.trigger.reason === 'kickoff'), 'autonomy on: the Lead kickoff is admitted')
+  // 2.7.0 runtime fixes: the kickoff a goal the Lead has not seen raised is the team's, not the user's.
+  check(w.rt().activeRuns.find((r) => r.agentId === 'lead' && r.trigger.reason === 'kickoff').trigger.by === 'system', 'the goal change kickoff: trigger.by system')
   await until(() => leadRuns().length === 1, 10000, 'the kickoff prep fails')
+  const autoRuns = await w.svc.request({ op: 'runs', teamId: w.teamId, agentId: 'lead' }, 'desktop')
+  const autoView = autoRuns.ok && autoRuns.runs.find((r) => r.id === leadRuns()[0].id)
+  check(autoView && autoView.trigger === 'kickoff' && autoView.triggerBy === 'system', `and its RunView reads triggerBy system (${JSON.stringify(autoView)})`)
   check(leadRuns()[0].failure?.code === 'spawnFailed' && w.rt().cards.filter((c) => c.state === 'open' && c.from.kind === 'system' && c.from.why === 'spawnFailed').length === 1, 'no CLI: spawnFailed with its card')
   w.clock.advance(0)
   w.svc.poke()
@@ -1971,6 +2050,11 @@ async function permissionChecks() {
   const perms = () => w.rt().approvals.filter((a) => a.kind === 'permission' && a.taskId === t)
   const ap = perms()[0]
   check(perms().length === 1 && ap.state === 'pending' && ap.decider === 'user' && ap.payload.roleId === 'fixer' && ap.payload.runId === r.runId && JSON.stringify(ap.payload.tools) === '["Write"]', `one pending permission approval with the Write rule (${JSON.stringify(perms())})`)
+  // 2.7.0 runtime fixes (orchestrator decision): the close path computes the wait before the policy, so the task waits
+  // on the decision: no continuation, no no-progress count, no cooldown (the policy alone would give the empty run all three).
+  const waiting = w.task(t)
+  check(waiting.state === 'doing' && waiting.phase === 'executing' && !waiting.next && !waiting.cooldownUntil && waiting.counters.noProgress === 0 && waiting.counters.continuations === 0 && !waiting.blocked, `the Dev in executing waits on the decision (${JSON.stringify({ next: waiting.next, counters: waiting.counters, cooldownUntil: waiting.cooldownUntil })})`)
+  check(w.logs.includes(`run ${r.runId} waits on a permission`), 'teams.log says the run waits on a permission')
   await settle()
   const mine = w.notices.filter((n) => n.tag === `team:${w.teamId}:${ap.id}`)
   check(mine.length === 1 && mine[0].taskId === t && mine[0].title === `Equipo ${w.svc.trusted(w.teamId).def.name}` && mine[0].body === M.mainTLang('es', 'teams.push.approval.permission', { task: t }) && mine[0].urgent === false, `one desktop notice for it (${JSON.stringify(mine)})`)
@@ -2540,6 +2624,28 @@ async function hintsChecks() {
   check(st2.includes(hint) && st2.indexOf(hint) > st2.indexOf('# Your run') && !st2.includes('<request from="user">'), 'the grant re-run: the Bash hint in section 4 as main\'s text, no <request from="user"> block', st2.slice(st2.indexOf('# Your run'), st2.indexOf('# Your run') + 1200))
   const allow = w.logLines(gr.id).find((l) => l && l.type === 'fake.argv').argv
   check(allow.includes('Bash(npm test:*)') && !allow.some((x) => /^PowerShell\(npm/.test(x)), 'its allow list carries the Bash rule')
+  // 2.7.0 runtime fixes (orchestrator decision): the denied run waits on the decision; Rechazar wakes the same agent with
+  // `answer`, and its run resumes the same session and reads the reject hint in section 4 (main's text) and the note.
+  w.use(deniedScenario(['make release']))
+  const r4 = await w.runTask('fixer', t)
+  await w.waitEnded(r4.runId)
+  const apr = w.rt().approvals.find((a) => a.kind === 'permission' && a.taskId === t && a.state === 'pending')
+  check(apr && JSON.stringify(apr.payload.tools) === '["Bash(make release:*)"]' && !w.task(t).next, 'a denied make release: its approval, and the task waits on it (no wake of its own)', { payload: apr?.payload, next: w.task(t).next })
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: apr.id, decision: 'reject', note: 'Sin release por ahora', rev: 1 }, 'desktop'), { ok: true }, 'reject it with a note')
+  check(w.task(t).next?.reason === 'answer' && w.task(t).next.agentId === 'fixer' && JSON.stringify(w.task(t).next.refs) === JSON.stringify([apr.id]), 'the reject wakes the same agent with answer, the approval in its refs', w.task(t).next)
+  w.clock.advance(0)
+  const qr = w.rt().queue.find((x) => x.taskId === t)
+  check(qr && qr.reason === 'answer', 'autonomy off: it waits in Por despachar')
+  const s3 = path.join(w.dir, 'reject-stdin.txt')
+  w.use({ saveStdin: s3, steps: [{ fixture: 'claude-resume.jsonl', rewriteSession: true }] })
+  await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: qr.id, go: true }, 'desktop')
+  w.clock.advance(0)
+  const rj = w.rt().activeRuns.find((x) => x.taskId === t)
+  check(!!rj && rj.trigger.reason === 'answer' && rj.resumed === true && rj.sessionId === w.ended(r4.runId).sessionId, 'Despachar starts it on the same session', rj && { trigger: rj.trigger, resumed: rj.resumed, sessionId: rj.sessionId })
+  await w.waitEnded(rj.id)
+  const st3 = fs.readFileSync(s3, 'utf8')
+  const rhint = 'The user did not allow Bash(make release:*).'
+  check(st3.includes(rhint) && st3.indexOf(rhint) > st3.indexOf('# Your run') && st3.includes('Sin release por ahora') && !st3.includes('The user allowed'), 'its prompt: the reject hint in section 4 and the user\'s note', st3.slice(st3.indexOf('# Your run'), st3.indexOf('# Your run') + 1200))
   w.svc.dispose()
 }
 
@@ -2577,6 +2683,7 @@ async function main() {
   try {
     reducerChecks()
     supervisorKillChecks()
+    supervisorBeatChecks()
     await lifecycleChecks()
     await stopChecks()
     await lifecycleExitChecks()
@@ -2613,7 +2720,7 @@ async function main() {
     await graceReadChecks()
     await hintsChecks()
     await qaStatChecks()
-    console.log(`PASS: ${checks} teams runner checks (fake agent lifecycle, watch, stop tree, linger, drain, max, prep CAS, session conflict, CLI off, gates, Labs off/on, shutdownSync, install, thaw, reaper, orphans, big result, RunLog cut, team scope, usage today, runs paging, remove wait, policy rows, no signal after exit; B4: task worktrees and the exec resume, write locks, tree mark, extra repo, a re-created team, runs in series within the caps, Por despachar, kickoff, triage, prep failure backoff, one sessionConflict card; integration: Frenar opens no card, a stale owned tree disowned, a re-wake keeps its request across a reload, a prep failure gives its wake mark back; review: Descartar offers the next level, a resumed kickoff reads the goal, no resume before the orphan check settles, a tree made after its team's removal disowned, Retomar a stopped task; B5: the Codex block at close, permission approval and grant, views of an ended task, hire apply and re-trust, applying at load, notices once and none after a restart, the Lead reply, lead escalation, the goal per Lead session, the Bash hint, prep failure cards; B5 integration: Retomar lifts the prep backoff, no delivery in the grace, the escape hint, the denied command, the grant system hint, the QA diff stat; fourth round: nothing to grant; fifth round: a token shape in a Codex block masked; sixth round: live tokens masked in runPage and runAppend, a Codex block action with a live token refused, a Read deny per secret of the data folder; seventh round: the summary and the Lead reply masked, the cmd.exe line guard; review: the snaos.note record of key and vars, stale hires cancelled at a re-trust, no permission rule with a secret; second review round: an apply whose base a trust replaced cancelled stale, stale hires cancelled at load)`)
+    console.log(`PASS: ${checks} teams runner checks (fake agent lifecycle, watch, stop tree, linger, drain, max, prep CAS, session conflict, CLI off, gates, Labs off/on, shutdownSync, install, thaw, reaper, orphans, big result, RunLog cut, team scope, usage today, runs paging, remove wait, policy rows, no signal after exit, a heartbeat is no sign of life; B4: task worktrees and the exec resume, write locks, tree mark, extra repo, a re-created team, runs in series within the caps, Por despachar, kickoff, triage, prep failure backoff, one sessionConflict card; integration: Frenar opens no card, a stale owned tree disowned, a re-wake keeps its request across a reload, a prep failure gives its wake mark back; review: Descartar offers the next level, a resumed kickoff reads the goal, no resume before the orphan check settles, a tree made after its team's removal disowned, Retomar a stopped task; B5: the Codex block at close, permission approval and grant, views of an ended task, hire apply and re-trust, applying at load, notices once and none after a restart, the Lead reply, lead escalation, the goal per Lead session, the Bash hint, prep failure cards; B5 integration: Retomar lifts the prep backoff, no delivery in the grace, the escape hint, the denied command, the grant system hint, the QA diff stat; fourth round: nothing to grant; fifth round: a token shape in a Codex block masked; sixth round: live tokens masked in runPage and runAppend, a Codex block action with a live token refused, a Read deny per secret of the data folder; seventh round: the summary and the Lead reply masked, the cmd.exe line guard; review: the snaos.note record of key and vars, stale hires cancelled at a re-trust, no permission rule with a secret; second review round: an apply whose base a trust replaced cancelled stale, stale hires cancelled at load; runtime fixes: a run waits on its permission approval, the reject wake and hint, the user's kickoff apart from a goal change)`)
   } finally {
     // dispose() is idempotent: it kills what a failed section left running (the supervisor's tree kill).
     for (const s of services) { try { s.dispose() } catch { /* already gone */ } }

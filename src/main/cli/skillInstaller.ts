@@ -120,7 +120,8 @@ export function repairSkill(target: SkillTarget, appVersion: string, env: NodeJS
  * Startup refresh (E8-FR-21): an installed stub of another version is
  * rewritten, for Claude and for Codex alike; nothing is ever installed on its
  * own. One status per target, in SKILL_TARGETS order; a failure on one agent's
- * folder never stops the other.
+ * folder never stops the other. Only a packaged app calls it (CliService.init,
+ * 2.7.0): an unpackaged run would stamp the user's stubs with Electron's version.
  */
 export function refreshSkillOnStartup(appVersion: string, env: NodeJS.ProcessEnv = process.env): SkillStatus[] {
   return SKILL_TARGETS.map((target) => {

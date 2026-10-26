@@ -6,7 +6,7 @@ import { useLang, useT } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { clockTime } from '@/lib/statusSignals'
 import { openAgentDrawer } from '@/lib/teamsStore'
-import { MODE_KEY, TRIGGER_KEY } from '@/lib/teams/roster'
+import { MODE_KEY, triggerKey } from '@/lib/teams/roster'
 import { FailureChip } from '@/components/status/FailureChip'
 import { RUN_CHIP, RUN_CHIP_NEUTRAL, RUN_STATE_KEY, SMALL_BTN, SMALL_BTN_TEXT, UsageChip } from './RunHeader'
 import { agentNameOf } from './TaskCard'
@@ -40,7 +40,7 @@ export function TaskActivity({ runs, agents }: { runs: readonly RunView[]; agent
                 {t('teams.task.viewRun')}
               </button>
             </div>
-            <p className="mt-1 min-w-0 truncate text-[11px] text-text-secondary">{t('teams.run.trigger', { reason: t(TRIGGER_KEY[r.trigger]) })}</p>
+            <p className="mt-1 min-w-0 truncate text-[11px] text-text-secondary">{t('teams.run.trigger', { reason: t(triggerKey(r)) })}</p>
             {(r.failure || r.usage) && (
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
                 {r.failure && <FailureChip failure={r.failure} className="max-w-full" />}
