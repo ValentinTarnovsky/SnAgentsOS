@@ -5,8 +5,9 @@
  * union and the preload never change after B1.
  */
 import type { ChatMessage } from '@shared/chat-types'
-import type { ConfigFile } from '@shared/types'
-import type { IntegratePreview, TeamFail, TeamOp, TeamReply, TeamRequest, TeamScope, TeamTrustState } from '@shared/team-protocol'
+import type { ConfigFile, PaneSilence } from '@shared/types'
+import type { IntegratePreview, RoutineView, TeamFail, TeamOp, TeamReply, TeamRequest, TeamScope, TeamTrustState } from '@shared/team-protocol'
+import type { WsNoteMeta } from '@shared/ws-notes'
 import type { Actor, CardAnswer, DefError, DeferInfo, ResolvedRepo, TeamDefinition, TeamTask, TrustedDefinition } from '@shared/teams'
 import type { VerifySuggestion } from '@shared/verifyDetect'
 import type { GitRunner } from '../../git/gitExec'
@@ -80,8 +81,8 @@ export interface TeamInternals {
   dispatchQueue(teamId: string, queueId: string, go: boolean, actor: Actor): { approved: string[]; dropped: string[] } | TeamFail
   /** B4: why each agent's (and each queue key's `agentId|sessionKey`) wanted run waits, from a dispatch dry run. */
   dispatchWaiting(teamId: string): { byAgent: Map<string, DeferInfo>; byKey: Map<string, DeferInfo> }
-  /** B2: the supervisor's memory of a live run (null fields once it ended). */
-  runLive(runId: string): { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean }
+  /** B2: the supervisor's memory of a live run (null fields once it ended). B7: its silence while it runs (quiet, stalled). */
+  runLive(runId: string): { lastLineAt?: number; silence?: PaneSilence; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean }
   /** B2: the one run whose lines the renderer gets as `teams:runAppend` (decision 49); null stops it. */
   watchRun(teamId: string, runId: string | null): void
   /** B5 integration, sixth round: a run's chat rows as they leave main, credentials and live tokens of the app masked. */
@@ -106,6 +107,16 @@ export interface TeamInternals {
   readWorktreeLive(teamId: string, tasks: readonly TeamTask[]): Promise<void>
   /** B6 integration: a task tree as main last read it (no git, no disk), null when never read or without a tree. */
   worktreeLive(task: TeamTask): WorktreeLive | null
+  /** B7: the routines of the definition the team runs (the trusted one, else the loaded one), with their next and last runs. */
+  routineViews(teamId: string): RoutineView[]
+  /** B7: "Correr ahora" of a routine: a wake runs now through Dispatcher.manual (`runId`), a task routine creates its task (`taskId`). */
+  runRoutine(teamId: string, routineId: string): { runId?: string; taskId?: string } | TeamFail
+  /** B7: the team notes (the daily summary among them), newest first. */
+  teamNotes(teamId: string): Promise<{ notes: WsNoteMeta[] } | TeamFail>
+  /** B7: one team note. */
+  teamNote(teamId: string, noteId: string): Promise<{ title: string; text: string; updatedAt: number } | TeamFail>
+  /** B7: runSilenceAck: the rest of the run's silence is ignored and its stalled card goes. */
+  ackRunSilence(teamId: string, runId: string): TeamFail | null
 }
 
 export interface OpCtx {

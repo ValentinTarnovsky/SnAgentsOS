@@ -7,26 +7,31 @@ import type { ClaudeAccountsState } from '@shared/claude-accounts'
 import { CTL_TEAM_LOG_DEFAULT, type CtlErrorCode, type CtlResponse } from '@shared/ctl-protocol'
 import { normalizeLabs } from '@shared/labs'
 import { redactCredentials } from '@shared/redact'
+import { normalizeSilence } from '@shared/silence'
 import { DATA_SECRET_PATHS, effectiveProfile, isGrantable, roleWrites } from '@shared/teamArgv'
 import { canonicalDefText, definitionIssues, normalizeDefText, parseDefinition, parseFrontmatter, UNC_PATH_RE } from '@shared/teamDefinition'
 import { afterRunPolicy, candidatesOf, claudeAllLimited, planDispatch } from '@shared/teamDispatch'
 import type { TeamNeedRow } from '@shared/teamNeeds'
 import { systemText } from '@shared/teamPrompt'
 import { parseTeamBlock } from '@shared/teamTools'
-import { isPhoneTeamOp, type IntegratePreview, type IntegrateProgressEvt, type TaskSummary, type TeamChangedEvt, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
+import { isPhoneTeamOp, type IntegratePreview, type IntegrateProgressEvt, type RoutineView, type TaskSummary, type TeamChangedEvt, type TeamFail, type TeamOp, type TeamReply, type TeamRequest, type TeamRunAppendEvt, type TeamScope, type TeamTrustState } from '@shared/team-protocol'
 import { suggestVerify, type VerifySuggestion } from '@shared/verifyDetect'
+import type { WsNoteMeta } from '@shared/ws-notes'
 import {
   BOARD_COLUMNS,
   columnOf,
+  COMMENT_TEXT_MAX,
   LEAD_THREAD,
   LIMIT_FALLBACK_MS,
   ORPHAN_START_SLACK_MS,
   RETRY_DELAY_MS,
   REPO_MAIN,
+  ROUTINE_CATCHUP_MS,
   STOP_GRACE_MS,
   TASK_ID_RE,
   TEAM_LOG_TTL_MS,
   TEAM_LOGS_MAX_BYTES,
+  TEAM_PANE_PREFIX,
   TEAM_STATE_MAX_BYTES,
   teamPaneId,
   isTeamPaneId,
@@ -39,6 +44,7 @@ import {
   type PolicyDecision,
   type ResolvedRepo,
   type RoleKind,
+  type RoutineDef,
   type Run,
   type RunEndFacts,
   type RunMode,
@@ -51,7 +57,7 @@ import {
   type TrustedDefinition,
   type WakeMark,
 } from '@shared/teams'
-import type { AgentProvider, ConfigFile, PaneStatusEvt } from '@shared/types'
+import type { AgentProvider, ConfigFile, PaneSilence, PaneStatusEvt } from '@shared/types'
 import { splitAppend } from '../chat/chatFrames'
 import { mainT, type MainKey } from '../i18n'
 import type { CtlTeamCaller } from '../cli/CtlTokens'
@@ -61,10 +67,12 @@ import { gitExitCode, type GitRunner } from '../git/gitExec'
 import { linkNodeModules } from '../git/WorktreeService'
 import { isSameOrInside, pathKey } from '../migration/pathUtil'
 import { safeRemoveTree } from '../migration/safeRemove'
+import { WsNoteStore } from '../notes/WsNoteStore'
 import { pidAlive, procStartTime as realProcStartTime, signalTree, treeKillSync } from '../proc/treeKill'
 import type { PtySink } from '../pty/PtyManager'
 import { cleanEnv, statusBinDirs } from '../pty/shellResolver'
 import { TrustStore } from '../repoConfig/TrustStore'
+import { SilenceWatch } from '../status/SilenceWatch'
 import { resolveAgentCli, type ResolvedCli } from './agentCli'
 import { Dispatcher, DISPATCH_KEY, type ManualRequest, type StepResult } from './Dispatcher'
 import { dismissSystemCards, openSystemCard, reconcileAgents } from './flow/agents'
@@ -73,13 +81,16 @@ import { admitRun, finishRun, interruptAll, markRunning, orphanCards, reapOnLoad
 import { answerCard, cancelStaleHires, completeApproval, decideApproval, HIRE_STALE } from './flow/approvals'
 import { archiveSweep, changedScopes, deliverComments } from './flow/tasks'
 import { beginIntegrate, endIntegrate, integrateStep, interruptedIntegrates, worktreeRemoved, type IntegrateOutcome } from './flow/integrate'
-import { applyBlock, applyTool } from './flow/tools'
+import { patchRoutine, routineOfRefs, routinePending, routineTask, routineWake } from './flow/routines'
+import { ackRunSilence as ackSilenceFlow, dismissStaleStalledCards, dismissStalledCard, openStalledCard } from './flow/silence'
+import { applyBlock, applyTool, noteOf, teamNoteText } from './flow/tools'
 import type { FlowCtx, FlowResult, TeamEffect, TeamToolCall } from './flow/types'
 import { createVerifyRunner, integrateHolder, Integrator, type IntegrateResult, type VerifyRunner } from './Integrator'
 import type { StreamFacts } from './parsers/types'
 import { createTeamCtl, paramText, type TeamCtlPort, type TeamLiveRun, type TeamReadReply } from './teamCtl'
 import { createClaudeStreamParser } from './parsers/claudeStream'
 import { maskMessages } from './RunLog'
+import { lastDue, ROUTINE_SLOT_RETRY_MS, RoutineTicker, type RoutineFireOutcome } from './RoutineTicker'
 import { RunStarter } from './RunStarter'
 import { RunSupervisor } from './RunSupervisor'
 import { TaskWorktrees, type TeamWorktreeApi, type WorktreeLive } from './TaskWorktrees'
@@ -92,7 +103,7 @@ import { TeamDefinitionLoader, type LoadedDefinition, type LoaderFs, type LoadRe
 import { resolveMainRoot, TeamRegistry, teamIdOf, type RegistryFs, type TeamIndexEntry } from './TeamRegistry'
 import { TeamStore, type SyncFs, type TeamStoreDeps } from './TeamStore'
 import { goalHashOf, sha256Hex, TeamTrust } from './TeamTrust'
-import { compareTaskOrder, LIVE_RUN_STATES, needsRowsOf, taskDetail, taskSummary, teamHeaderKey, waitingOf, type TaskViewCtx } from './views'
+import { compareTaskOrder, LIVE_RUN_STATES, needsRowsOf, routineView, taskDetail, taskSummary, teamHeaderKey, waitingOf, type TaskViewCtx } from './views'
 
 /** `team.tasks` answers at most this many tasks (design 5.3); `team task get` carries the newest 30 comments. */
 export const CTL_TASKS_MAX = 200
@@ -208,6 +219,23 @@ export const SYNTHETIC_REFRESH_MS = 10 * 60 * 1000
 export const REMOVE_WAIT_MS = STOP_GRACE_MS + 2_000
 /** Images a reaped pid must run to count as an orphan of ours (decision 64). */
 const ORPHAN_IMAGES = new Set(['claude', 'codex', 'node', 'cmd'])
+/** B7: team notes one team keeps; `team note` past it answers busy (a Lead writes about one a day). */
+export const TEAM_NOTES_MAX = 500
+
+/** A runtime built in place (B7: a routine's state, a card dismissed) as a reducer result for commit. */
+function committed(rt: TeamRuntime): FlowResult {
+  return { ok: true, rt, effects: [], result: undefined }
+}
+
+/** B7: a routine wake another mark wrote over in its agent's slot (TeamService.displacedWakes); `owed` while the routine is on. */
+interface DisplacedWake { agentId: string; routineId: string; by: WakeMark['reason']; scheduledAt: number; owed: boolean }
+
+/** `rt` with the `displacedFor` of every owed wake, so a quit, Labs off, an install or a crash before its retry lands never loses it. */
+function withDisplaced(rt: TeamRuntime, list: readonly DisplacedWake[]): TeamRuntime {
+  let out = rt
+  for (const d of list) if (d.owed) out = patchRoutine(out, d.routineId, { displacedFor: d.scheduledAt })
+  return out
+}
 
 /** A refused reducer result as the op's reply (FlowError is a subset of TeamError). */
 function flowFail(res: Extract<FlowResult<unknown>, { ok: false }>): TeamFail {
@@ -272,14 +300,15 @@ export class TeamService implements TeamInternals {
   readonly sink: PtySink = { id: 'teams', onSpawn: () => undefined, onData: () => undefined, onExit: () => undefined }
   /**
    * B3: what `snaos team` reaches (CliService.attach({teams})): teamCtl checks
-   * the params and the role, then reads and writes through this port (B7 adds
-   * `note`; without it `team note` answers disabled).
+   * the params and the role, then reads and writes through this port (B7:
+   * `note` writes a team note).
    */
   readonly ctlView: CtlTeamsView = createTeamCtl({
     // Labs off (or frozen, disposed): every team.* answers disabled, like every Teams request.
     live: (who) => (this.live() ? this.ctlLive(who) : 'disabled'),
     read: (teamId, method, params, who) => (method === 'team.diff' || method === 'team.log' ? this.ctlGit(teamId, method, params, who) : this.ctlRead(teamId, method, params, who)),
     apply: (teamId, call, who) => this.ctlApply(teamId, call, who),
+    note: (teamId, text, title, who) => this.ctlNote(teamId, text, title, who),
   })
 
   private readonly clock: () => number
@@ -385,6 +414,25 @@ export class TeamService implements TeamInternals {
   /** Integrates and sweeps in flight (integrateIdle, tests). */
   private readonly integrateJobs = new Set<Promise<unknown>>()
 
+  // ---- B7 routines, team notes, run silence ----
+  /** Routine deadlines on the shared timer (design 3.8, 3.10): armed at enable (with catch-up), after a fire and a trust. */
+  readonly routines: RoutineTicker
+  /**
+   * Team notes (design 3.8): a second WsNoteStore under dataDir()/teams, workspaceId = teamId. Its changes go out as
+   * the `notes` scope only (never remoteManager.notesChanged, Share or the wsNotes IPC), and it is never prune()d:
+   * TeamRegistry owns the purge of the trash under teams/ (9.1 risk 16).
+   */
+  private readonly notes: WsNoteStore
+  /**
+   * Decision 58: the silence of the live runs, a second SilenceWatch (its own DeadlineTimer) whose signal is the
+   * run's last line. Built once here and disposed only by dispose(); Labs off and a freeze unwatch every run.
+   */
+  private readonly silence: SilenceWatch
+  /** Runs the silence watch follows: from `running` to their end, unless the user ignored their silence. */
+  private readonly silenceWatched = new Set<string>()
+  /** The silence on show of a watched run (memory only, design 3.8). */
+  private readonly runSilence = new Map<string, PaneSilence>()
+
   constructor(private readonly deps: TeamServiceDeps) {
     this.clock = deps.now ?? Date.now
     this.git = deps.git
@@ -400,6 +448,12 @@ export class TeamService implements TeamInternals {
     }
     this.timer = new DeadlineTimer<string>((key) => this.onDue(key), timerDeps)
     const teamsDir = (): string => join(deps.dataDir(), 'teams')
+    this.routines = new RoutineTicker({ timer: this.timer, now: this.clock, fire: (teamId, r, at) => this.fireRoutine(teamId, r, at), log: deps.log })
+    this.notes = new WsNoteStore({ root: teamsDir, emit: (e) => this.onNoteWritten(e.workspaceId), now: this.clock })
+    this.silence = new SilenceWatch(
+      { signalAt: (paneId) => this.supervisor.lastLineAt(paneId.slice(TEAM_PANE_PREFIX.length)), onSilence: (paneId, s) => this.onRunSilence(paneId, s) },
+      timerDeps,
+    )
     this.registry = new TeamRegistry({ file: () => join(teamsDir(), 'index.json'), trashDir: () => join(teamsDir(), '.trash'), now: this.clock, log: deps.log, fs: deps.registryFs })
     this.repoFs = deps.repoFs ?? { lstat: (p) => fsp.lstat(p), realpath: (p) => fsp.realpath(p) }
     this.loader = deps.loader ?? new TeamDefinitionLoader()
@@ -528,12 +582,17 @@ export class TeamService implements TeamInternals {
   /** After CLI init: no-op with Labs off; else enable(). */
   async start(cfg: ConfigFile | null): Promise<void> {
     this.labOn = normalizeLabs(cfg?.settings?.labs).teams
+    this.configureSilence(cfg)
     if (!this.labOn || this.frozen) return
     await this.beginEnable()
   }
 
-  /** CONFIG_SAVE: labs.teams off -> disable() (decision 57), on -> enable(); anything else pokes the dispatcher (a no-op while not live). */
+  /**
+   * CONFIG_SAVE: labs.teams off -> disable() (decision 57), on -> enable(); anything else pokes the dispatcher (a no-op
+   * while not live). B7: `settings.agents.silence` configures the run silence watch (it arms nothing while no run is watched).
+   */
   setConfig(cfg: ConfigFile | null): void {
+    this.configureSilence(cfg)
     const on = normalizeLabs(cfg?.settings?.labs).teams
     if (on === this.labOn) {
       // A saved config may free a session a run waits on (a console's lastSession, design 3.6 pokes); no-op while not live.
@@ -633,16 +692,22 @@ export class TeamService implements TeamInternals {
     this.quitting = true
   }
 
-  /** The only place the DeadlineTimer is disposed; a request after it answers `disabled`. */
+  /** The only place the DeadlineTimer and the run SilenceWatch are disposed; a request after it answers `disabled`. */
   dispose(): void {
     this.disposed = true
     this.teardown()
     this.timer.dispose()
+    this.silence.dispose()
   }
 
   /** Pending deadlines (tests: zero with Labs off). */
   get pendingTimers(): number {
     return this.timer.size
+  }
+
+  /** Runs the silence watch follows (tests: none with Labs off). */
+  get silenceWatchCount(): number {
+    return this.silenceWatched.size
   }
 
   private live(): boolean {
@@ -699,6 +764,8 @@ export class TeamService implements TeamInternals {
     for (const rec of loadedTeams) rec.stopWatch = this.loader.watch(rec.entry.id, rec.entry.repoRoot, () => this.onDefEvent(rec.entry.id))
     // B6 (design 3.7): what a quit mid-integrate left in each team's integrate folder, then its verify log prune.
     for (const rec of loadedTeams) this.track(this.sweepIntegrate(rec))
+    // B7 (design 3.8): routines armed again, with what came due while the app or the lab was off (once within 2 h).
+    for (const rec of loadedTeams) this.armRoutines(rec.entry.id, true)
     this.deps.log(`enabled teams=${loadedTeams.length}`)
     this.emit('', ['list'])
     // The rows the load itself opened (a reaped run's card, a repair's) against each team's baseline (design 3.1).
@@ -741,6 +808,9 @@ export class TeamService implements TeamInternals {
       store.setNeedsSeen(needsRowsOf(rec, trusted).filter((r) => !(reset && r.kind === 'card')).map((r) => r.id))
     }
     this.recheckApplying(e.id, rec)
+    // B7: a run's stalled card goes with its run (design 3.8); the reaper ended those runs without the run-end path.
+    const stalled = dismissStaleStalledCards(store.rt)
+    if (stalled !== store.rt) this.commit(e.id, committed(stalled), ['needs'])
     // B6 (design 3.7): an integrate the app quit in the middle of is `failed {interrupted}`; one still in flight in this
     // app (a Labs toggle reloaded the store meanwhile) keeps running and its end commit lands on this store.
     const stale = interruptedIntegrates(store.rt, (taskId) => this.integrating.has(`${e.id}|${taskId}`), { now: this.clock() })
@@ -789,6 +859,10 @@ export class TeamService implements TeamInternals {
     this.discarded.clear()
     this.waitsOnConsoles.clear()
     this.prepBackoff.clear()
+    // B7 (3.0 item 6): no routine key and no watched run is left (the timer and the watch themselves stay).
+    this.routines.disarmAll()
+    for (const runId of [...this.silenceWatched]) this.unwatchSilence(runId)
+    this.runSilence.clear()
     for (const [id, rec] of this.teams) {
       rec.stopWatch?.()
       rec.stopWatch = null
@@ -819,7 +893,13 @@ export class TeamService implements TeamInternals {
       log: this.deps.log,
       fs: this.deps.storeFs,
       strict: this.deps.strict,
-      reap: (rt, recent) => reapOnLoad(rt, recent, this.runPolicy, { now: this.clock() }),
+      reap: (rt, recent) => {
+        const res = reapOnLoad(rt, recent, this.runPolicy, { now: this.clock() })
+        // B7: a routine wake the reaper's re-wake wrote over (a crash) is owed; the catch-up of this enable runs it.
+        const displaced = res.ok ? this.displacedWakes(teamId, rt, res.rt) : []
+        for (const d of displaced) this.deps.log(`routine ${teamId} ${d.routineId} wake displaced on ${d.agentId} by ${d.by} at load: ${d.owed ? 'owed to the catch-up' : 'dropped, the routine is off'}`)
+        return displaced.length && res.ok ? { ...res, rt: withDisplaced(res.rt, displaced) } : res
+      },
     }
   }
 
@@ -1014,6 +1094,9 @@ export class TeamService implements TeamInternals {
         return
       case 'defwatch':
         void this.defCheck(rest)
+        return
+      case 'routine':
+        this.routines.onDue(key)
         return
       case 'run': {
         // linger, drain, stop and kill are the supervisor's; max and conclude stop the run through the store.
@@ -1224,8 +1307,12 @@ export class TeamService implements TeamInternals {
       scopes = [...new Set<TeamScope>([...scopes, 'board', 'task'])]
     }
     const header = res.ok && !scopes.includes('team') ? teamHeaderKey(rec, this.trust.trusted(teamId), this.clock()) : null
-    const out = rec.store.commit(res, scopes, hint)
+    const before = rec.store.rt
+    // B7: a routine wake this result writes over in its agent's slot is owed in the same commit (displacedFor).
+    const displaced = res.ok && res.rt !== before ? this.displacedWakes(teamId, before, res.rt) : []
+    const out = rec.store.commit(displaced.length && res.ok ? { ...res, rt: withDisplaced(res.rt, displaced) } : res, scopes, hint)
     if (!out.ok) return out
+    if (displaced.length) this.retryDisplaced(teamId, displaced)
     // The effects first: a run end joins the runs ring there (usageToday).
     this.runEffects(teamId, out.effects)
     if (header !== null && this.teams.get(teamId) === rec && teamHeaderKey(rec, this.trust.trusted(teamId), this.clock()) !== header) this.emit(teamId, ['team'], hint)
@@ -1285,13 +1372,22 @@ export class TeamService implements TeamInternals {
         case 'applyHire':
           this.applyHire(teamId, e.approvalId)
           break
+        case 'teamNote':
+          // B7: a Codex block's `team.note` (the CLI path writes through ctlNote and answers the id).
+          void this.writeTeamNote(teamId, { text: e.text, ...(e.title ? { title: e.title } : {}) }).then((r) =>
+            this.deps.log(`run ${e.runId} team.note (block) ${'id' in r ? `written ${r.id}` : `failed ${r.error}`}`),
+          )
+          break
         default:
           this.deps.log(`effect ${e.kind} ${teamId} not handled`)
       }
     }
   }
 
-  /** A terminal run: the runs ring, the run memory dropped, the watched renderer told, logs pruned. */
+  /**
+   * A terminal run: the runs ring, the run memory dropped, the watched renderer told, logs pruned. B7: its silence is
+   * no longer watched and its stalled card goes with it (design 3.8).
+   */
   private runEnded(teamId: string, run: Run): void {
     const rec = this.teams.get(teamId)
     rec?.store.recordRun(run)
@@ -1299,6 +1395,11 @@ export class TeamService implements TeamInternals {
     this.consumedMark.delete(run.id)
     this.awakeAt.delete(run.id)
     this.runWrites.delete(run.id)
+    this.unwatchSilence(run.id)
+    if (rec) {
+      const rt = dismissStalledCard(rec.store.rt, run.id)
+      if (rt !== rec.store.rt) this.commit(teamId, committed(rt), ['needs'])
+    }
     if (this.watched?.runId === run.id) this.sendRun({ teamId, runId: run.id, agentId: run.agentId, items: [], state: run.state })
     this.deps.log(`run ${run.id} ended ${run.state}${run.failure ? ` ${run.failure.kind}${run.failure.code ? `:${run.failure.code}` : ''}` : ''}${run.interruptCause ? ` cause=${run.interruptCause}` : ''}`)
     if (rec && rec.store.rt.activeRuns.length === 0) this.wakeIdle(teamId)
@@ -1499,7 +1600,7 @@ export class TeamService implements TeamInternals {
   }
 
   private taskViewCtx(teamId: string, rec: TeamRecord): TaskViewCtx {
-    return { def: this.shownDef(rec), needs: needsRowsOf(rec, this.trust.trusted(teamId)), archived: (target) => this.archivedCount(teamId, target) }
+    return { def: this.shownDef(rec), needs: needsRowsOf(rec, this.trust.trusted(teamId)), archived: (target) => this.archivedCount(teamId, target), silence: (runId) => this.runSilence.get(runId) }
   }
 
   /** The live run behind a team token: its active run (stopping included: a concluded run keeps reading until revoke). */
@@ -1665,6 +1766,64 @@ export class TeamService implements TeamInternals {
     return out
   }
 
+  /**
+   * `team note` (B7, design 3.8 and 5.3): teamCtl checked the role (the Lead, in lead and free runs), the run (live,
+   * not concluded, not stopping), redacted the texts and refused a live token; noteOf checks them once more, then the
+   * note is written as a team note (dataDir()/teams/<teamId>/<noteId>.md, tmp + rename, UTF-8 without BOM), never a
+   * workspace note. A write the run made (classifyOutcome); `{id}` is the note's id.
+   */
+  private async ctlNote(teamId: string, text: string, title: string | undefined, who: CtlTeamCaller): Promise<CtlResponse> {
+    const l = this.ctlLive(who)
+    if (!l || l.teamId !== teamId || !this.teams.has(teamId)) return ctlErr('forbidden', 'this team run is over')
+    const n = noteOf(title === undefined ? { text } : { text, title })
+    if (!n) return ctlErr('bad_request', `team note: the text is required (${COMMENT_TEXT_MAX} characters at most) and the title is one line`)
+    const r = await this.writeTeamNote(teamId, n)
+    if (!('id' in r)) {
+      this.deps.log(`run ${l.run.id} team.note failed ${r.error}`)
+      return r.error === 'busy'
+        ? ctlErr('busy', `the team keeps ${TEAM_NOTES_MAX} notes at most: no more fit`)
+        : r.error === 'too_big'
+          ? ctlErr('bad_request', 'team note: the note is too large')
+          : ctlErr('internal', 'the team note could not be saved')
+    }
+    this.noteTeamWrite(l.run.id)
+    this.deps.log(`run ${l.run.id} team.note ${r.id}`)
+    return { ok: true, data: { id: r.id } }
+  }
+
+  /**
+   * A team note written (the CLI path and a Codex block's effect): the team's cap, then WsNoteStore.create. A team
+   * that is gone or being removed gets none (the write would make its folder again next to the trashed one).
+   */
+  private async writeTeamNote(teamId: string, n: { text: string; title?: string }): Promise<{ id: string } | { error: 'busy' | 'too_big' | 'io' }> {
+    let count = 0
+    try {
+      count = (await fsp.readdir(this.teamDir(teamId))).filter((f) => f.endsWith('.md')).length
+    } catch {
+      count = 0
+    }
+    if (count >= TEAM_NOTES_MAX) return { error: 'busy' }
+    if (!this.teams.has(teamId) || this.removing.has(teamId)) return { error: 'io' }
+    const res = await this.notes.create({ workspaceId: teamId, text: teamNoteText(n) })
+    if (!res.ok) return { error: res.error === 'too_large' ? 'too_big' : 'io' }
+    return { id: res.note.id }
+  }
+
+  /** The team notes store wrote one: the `notes` scope of that team only (design 3.8: never the workspace notes' events). */
+  private onNoteWritten(teamId: string): void {
+    if (this.teams.has(teamId)) this.emit(teamId, ['notes'])
+  }
+
+  teamNotes(teamId: string): Promise<{ notes: WsNoteMeta[] } | TeamFail> {
+    return this.notes.list(teamId).then((r) => (r.ok ? { notes: r.notes } : fail('io')))
+  }
+
+  async teamNote(teamId: string, noteId: string): Promise<{ title: string; text: string; updatedAt: number } | TeamFail> {
+    const r = await this.notes.read({ workspaceId: teamId, noteId })
+    if (r.ok) return { title: r.note.title, text: r.note.text, updatedAt: r.note.updatedAt }
+    return fail(r.error === 'not_found' ? 'not_found' : r.error === 'invalid' ? 'bad_request' : r.error === 'too_large' ? 'too_big' : 'io')
+  }
+
   private sendRun(evt: TeamRunAppendEvt): void {
     try {
       this.deps.sendRun?.(evt)
@@ -1683,7 +1842,9 @@ export class TeamService implements TeamInternals {
     if (sessionId) f.sessionId = sessionId
     const sysHash = this.sysHashOf(teamId, run.roleId)
     if (sysHash) f.sysHash = sysHash
-    this.commit(teamId, markRunning(rec.store.rt, runId, f, ctx), ['agents', 'run'], { runId })
+    const res = this.commit(teamId, markRunning(rec.store.rt, runId, f, ctx), ['agents', 'run'], { runId })
+    // B7 (design 3.8): the silence watch follows the run from `running`, counting from this line.
+    if (res.ok && rec.store.rt.activeRuns.find((r) => r.id === runId)?.state === 'running') this.watchSilence(runId)
   }
 
   /** Line events never emit teamChanged (design 3.1); only the watched run gets its items, masked (maskRun). */
@@ -1694,8 +1855,12 @@ export class TeamService implements TeamInternals {
     for (const chunk of splitAppend(teamPaneId(runId), this.maskRun(items))) this.sendRun({ teamId: w.teamId, runId, agentId: run?.agentId ?? '', items: chunk, lastLineAt: at })
   }
 
-  /** Every line: the synthetic status is refreshed at most every SYNTHETIC_REFRESH_MS (decision 58, never a timer). */
+  /**
+   * Every line: a silence on show ends (B7, design 3.8: once per recovery), and the synthetic status is refreshed at
+   * most every SYNTHETIC_REFRESH_MS (decision 58, never a timer).
+   */
   private onSignal(runId: string, at: number): void {
+    if (this.runSilence.has(runId)) this.silenceRecovered(runId)
     const last = this.awakeAt.get(runId)
     if (last === undefined || at - last < SYNTHETIC_REFRESH_MS) return
     const teamId = this.teamOfRun(runId)
@@ -1814,7 +1979,8 @@ export class TeamService implements TeamInternals {
     const secret = res.result.stoppedAt === undefined && secretAt !== -1
     const stoppedAt = secret ? secretAt : res.result.stoppedAt
     const why = secret ? 'bad_request: secret' : res.result.error ?? 'refused'
-    if (res.rt !== rec.store.rt) this.commit(teamId, res, changedScopes(rec.store.rt, res.rt), run.taskId ? { taskId: run.taskId } : undefined)
+    // B7: a block of team notes only changes no runtime; its `teamNote` effects still run through the commit.
+    if (res.rt !== rec.store.rt || res.effects.length > 0) this.commit(teamId, res, changedScopes(rec.store.rt, res.rt), run.taskId ? { taskId: run.taskId } : undefined)
     for (let i = 0; i < applied; i++) {
       this.noteTeamWrite(run.id)
       this.deps.log(`run ${run.id} ${block.actions[i].method} (block)`)
@@ -2092,10 +2258,27 @@ export class TeamService implements TeamInternals {
       return null
     }
     if (req.detail) this.runDetail.set(runId, req.detail)
+    // B7: the routine whose wake this request runs (its ref: a dispatched wake, or "Ejecutar ahora" without a prompt,
+    // which runs the agent's best level with reason manual); re-wakes never carry the ref.
+    const routineId = !task ? routineOfRefs(req.refs) : null
+    // B7: a routine's wake mark is never swallowed by another run of the same agent and mode (R1 clears the agent's
+    // mark of the mode it admits, and its prompt would be gone): it stays and runs after this one. The run of that
+    // very wake consumes it (kept, its prompt would run twice).
+    const mark = !task && agent.next && agent.next.mode === req.mode && agent.next.reason === 'routine' ? agent.next : undefined
+    const keepRoutine = mark && req.reason !== 'routine' && (routineId === null || routineId !== routineOfRefs(mark.refs)) ? mark : undefined
     // The level R1 consumes (it clears task.next, and the agent's own mark of this mode): a prep failure without a card gives it back.
-    const consumed = task ? task.next : agent.next && agent.next.mode === req.mode ? agent.next : undefined
+    const consumed = task ? task.next : agent.next && agent.next.mode === req.mode && !keepRoutine ? agent.next : undefined
     if (consumed && consumed.agentId === agent.id) this.consumedMark.set(runId, { ...consumed })
-    const res = this.commit(teamId, admitRun(rt, req, a, ctx), ['agents', 'run', 'needs'], { runId })
+    // B7: the run of a routine's wake is its `lastRunId` (the panel's last run, the coalesce rule), in the same commit;
+    // a wake it still owed (displacedFor) is this run.
+    let admitted = admitRun(rt, req, a, ctx)
+    if (admitted.ok && (keepRoutine || routineId)) {
+      let out = admitted.rt
+      if (keepRoutine) out = { ...out, agents: out.agents.map((x) => (x.id === agent.id ? { ...x, next: keepRoutine } : x)) }
+      if (routineId) out = patchRoutine(out, routineId, { lastRunId: runId, displacedFor: undefined })
+      admitted = { ...admitted, rt: out }
+    }
+    const res = this.commit(teamId, admitted, routineId ? ['agents', 'run', 'needs', 'routines'] : ['agents', 'run', 'needs'], { runId })
     if (!res.ok) {
       if (lockKey) this.locks.release(lockKey, runId)
       this.runDetail.delete(runId)
@@ -2424,6 +2607,282 @@ export class TeamService implements TeamInternals {
     const rec = this.teams.get(teamId)
     if (!rec || !this.live()) return
     this.notify(teamId, rec, { rowId: `${ok ? 'integrated' : 'integrateFailed'}:${taskId}`, taskId, key: ok ? 'teams.push.integrated' : 'teams.push.integrateFailed', urgent: false })
+  }
+
+  // ---- routines and run silence (B7, design 3.8) ----------------------------------------------------
+
+  /**
+   * The routine keys of a team from its trusted definition (enable, a trust); `catchUp` (enable only) first runs once
+   * what came due while the app or the lab was off (a displaced wake that never landed among it, `displacedFor`), when
+   * its last due time is within ROUTINE_CATCHUP_MS, and records an older one as skipped (`skippedFor`, logged by the
+   * ticker; an owed wake goes with it). Not live or no trusted definition: no key.
+   */
+  private armRoutines(teamId: string, catchUp: boolean): void {
+    const rec = this.teams.get(teamId)
+    const trusted = this.trust.trusted(teamId)
+    if (!this.live() || !rec || !trusted) {
+      this.routines.disarm(teamId)
+      return
+    }
+    const routines = trusted.def.routines
+    const missed = catchUp ? this.routines.catchUp(teamId, routines, rec.store.rt.routines, trusted.trustedAt) : []
+    this.routines.arm(teamId, routines, rec.store.rt.routines)
+    for (const m of missed) {
+      if (m.skipped) this.commit(teamId, committed(patchRoutine(rec.store.rt, m.routine.id, { skippedFor: m.scheduledAt, displacedFor: undefined })), ['routines'])
+      else this.routines.fire(teamId, m.routine.id, m.scheduledAt)
+    }
+  }
+
+  /**
+   * A routine's due time (the ticker's `fire`, design 3.8). Coalesce: while its previous fire still holds it (an active
+   * run, a wake not dispatched, its task still waiting) it is skipped and logged. Else `lastScheduledFor` is committed
+   * and written FIRST (no double fire after a crash), then the wake (the role agent's wake mark: lead mode for the
+   * Lead, free for the rest, the prompt as its request) or the task, then a pass. A wake whose agents all hold
+   * another wake in their one slot waits ROUTINE_SLOT_RETRY_MS and tries again, until ROUTINE_CATCHUP_MS past the
+   * due time. A deadline the timer reaches more than ROUTINE_CATCHUP_MS late (the machine slept through it, what
+   * schedule.ts calls missed) is judged like the catch-up at enable: its latest due time up to now runs once when it
+   * is within ROUTINE_CATCHUP_MS, else it is skipped and logged (`skippedFor`). Every verdict but a wait lands a wake
+   * the routine still owed (`displacedFor` goes): placed again, covered by the pending fire, or skipped.
+   */
+  private fireRoutine(teamId: string, r: RoutineDef, scheduledAt: number): RoutineFireOutcome {
+    const rec = this.teams.get(teamId)
+    const ctx = this.flowCtx(teamId)
+    if (!this.live() || !rec || !ctx) return undefined
+    const now = ctx.now
+    let at = scheduledAt
+    if (now - at > ROUTINE_CATCHUP_MS) {
+      at = lastDue(r.cron, at, now) ?? at
+      if (now - at > ROUTINE_CATCHUP_MS) {
+        this.deps.log(`routine ${teamId} ${r.id} skipped: due ${new Date(at).toISOString()} missed by ${Math.round((now - at) / 60_000)} min`)
+        this.commit(teamId, committed(patchRoutine(rec.store.rt, r.id, { skippedFor: at, displacedFor: undefined })), ['routines'])
+        return undefined
+      }
+    }
+    const pending = routinePending(rec.store.rt, r)
+    if (pending) {
+      this.deps.log(`routine ${teamId} ${r.id} skipped: its previous fire still has a ${pending}`)
+      this.commit(teamId, committed(patchRoutine(rec.store.rt, r.id, { lastScheduledFor: at, displacedFor: undefined })), ['routines'])
+      return undefined
+    }
+    if (r.action === 'wake') {
+      const probe = routineWake(rec.store.rt, r, ctx)
+      if (!probe.ok) {
+        if (probe.error === 'busy' && now + ROUTINE_SLOT_RETRY_MS - at <= ROUTINE_CATCHUP_MS) {
+          this.deps.log(`routine ${teamId} ${r.id} waits: every agent of ${r.role} holds another wake`)
+          return { retryAt: now + ROUTINE_SLOT_RETRY_MS }
+        }
+        this.deps.log(`routine ${teamId} ${r.id} skipped: ${probe.error === 'busy' ? `every agent of ${r.role} still holds another wake` : `no agent of ${r.role}`}`)
+        this.commit(teamId, committed(patchRoutine(rec.store.rt, r.id, { lastScheduledFor: at, displacedFor: undefined })), ['routines'])
+        return undefined
+      }
+    }
+    this.commit(teamId, committed(patchRoutine(rec.store.rt, r.id, { lastScheduledFor: at, lastFiredAt: now, lastRunId: undefined, lastTaskId: undefined, displacedFor: undefined })), ['routines'])
+    rec.store.flushSync()
+    if (r.action === 'wake') {
+      const res = this.commit(teamId, routineWake(rec.store.rt, r, ctx), ['agents', 'routines'])
+      this.deps.log(`routine ${teamId} ${r.id} fired: ${res.ok ? `wake ${res.result.agentId}` : `wake failed ${res.error}`}`)
+    } else {
+      const before = rec.store.rt
+      const made = routineTask(before, r, ctx)
+      const res = made.ok ? this.commit(teamId, made, [...new Set<TeamScope>([...changedScopes(before, made.rt), 'routines'])], { taskId: made.result.taskId }) : made
+      this.deps.log(`routine ${teamId} ${r.id} fired: ${res.ok ? `task ${res.result.taskId}` : `task failed ${res.error}`}`)
+    }
+    this.poke()
+    return undefined
+  }
+
+  /**
+   * The routine wakes `before` held in an agent's one slot (agent.next) that `after` wrote another mark over: a run-end
+   * policy re-wake of that agent (retry, interrupted, context of a task-less run; also the interrupt of a quit, Labs
+   * off, an install, and the reaper after a crash) or the level a failed prep gives back. Each stands for the routine's
+   * scheduled time (`lastScheduledFor`, else the mark's since) and is owed while the routine is on in the trusted
+   * definition. A mark that just went (its run took it, the user dropped it) is no displacement.
+   */
+  private displacedWakes(teamId: string, before: TeamRuntime, after: TeamRuntime): DisplacedWake[] {
+    if (before.agents === after.agents) return []
+    const out: DisplacedWake[] = []
+    let on: ReadonlySet<string> | undefined
+    for (const a of before.agents) {
+      const mark = a.next
+      const routineId = mark?.reason === 'routine' ? routineOfRefs(mark.refs) : null
+      if (!mark || !routineId) continue
+      const next = after.agents.find((x) => x.id === a.id)?.next
+      if (!next || (next.reason === 'routine' && routineOfRefs(next.refs) === routineId)) continue
+      on ??= new Set((this.trust.trusted(teamId)?.def.routines ?? []).filter((r) => r.enabled).map((r) => r.id))
+      out.push({ agentId: a.id, routineId, by: next.reason, scheduledAt: after.routines[routineId]?.lastScheduledFor ?? mark.since, owed: on.has(routineId) })
+    }
+    return out
+  }
+
+  /**
+   * After the commit that persisted them (withDisplaced): each owed wake gets its wake-slot retry, the same scheduled
+   * time again in ROUTINE_SLOT_RETRY_MS, judged then like any fire (a slot still taken waits again), so its prompt
+   * still runs once. A key of the routine that comes due sooner, or no armed routine, arms none: that fire, or the
+   * catch-up of the next enable, lands it. The log says `retry` only for a retry armed.
+   */
+  private retryDisplaced(teamId: string, list: readonly DisplacedWake[]): void {
+    for (const d of list) {
+      const head = `routine ${teamId} ${d.routineId} wake displaced on ${d.agentId} by ${d.by}`
+      if (!d.owed) {
+        this.deps.log(`${head}: dropped, the routine is off`)
+        continue
+      }
+      const armed = this.routines.retry(teamId, d.routineId, d.scheduledAt, this.clock() + ROUTINE_SLOT_RETRY_MS)
+      this.deps.log(`${head}: ${armed ? 'retry' : this.routines.nextAt(teamId, d.routineId) !== null ? 'owed, its next fire comes sooner' : 'owed to the catch-up'}`)
+    }
+  }
+
+  routineViews(teamId: string): RoutineView[] {
+    const rec = this.teams.get(teamId)
+    if (!rec) return []
+    return (this.shownDef(rec)?.routines ?? []).map((r) => routineView(r, rec.store.rt.routines[r.id], this.routines.nextAt(teamId, r.id)))
+  }
+
+  /**
+   * "Correr ahora" (the routineRun op, trust gated like runNow): the user's go for one routine of the trusted
+   * definition, off in its file or not. Its previous fire still holding it answers `busy` (the coalesce rule). A task
+   * routine creates its task now; a wake runs its agent now through runManual (decision 44: past the autonomy gate
+   * only; any other gate answers `deferred` with its reason), the prompt as its request. The run or the task is the
+   * routine's last one.
+   */
+  runRoutine(teamId: string, routineId: string): { runId?: string; taskId?: string } | TeamFail {
+    const rec = this.teams.get(teamId)
+    const ctx = this.flowCtx(teamId)
+    if (!rec) return fail('not_found')
+    if (!ctx) return fail('untrusted')
+    const r = ctx.def.def.routines.find((x) => x.id === routineId)
+    if (!r) return fail('not_found')
+    const pending = routinePending(rec.store.rt, r)
+    if (pending) return fail('busy', { detail: pending })
+    if (r.action === 'task') {
+      const before = rec.store.rt
+      const made = routineTask(before, r, ctx)
+      if (!made.ok) return flowFail(made)
+      const res = this.commit(teamId, { ...made, rt: patchRoutine(made.rt, r.id, { lastFiredAt: ctx.now, lastRunId: undefined }) }, [...new Set<TeamScope>([...changedScopes(before, made.rt), 'routines'])], { taskId: made.result.taskId })
+      return res.ok ? { taskId: made.result.taskId } : flowFail(res)
+    }
+    const agents = rec.store.rt.agents.filter((a) => a.roleId === r.role && !a.retired)
+    const agent = agents.find((a) => a.status === 'idle' && !a.runId && !a.paused && !a.takeover) ?? agents[0]
+    if (!agent) return fail('not_found')
+    const started = this.runManual(teamId, agent.id, r.prompt)
+    if (!('runId' in started)) return started
+    this.commit(teamId, committed(patchRoutine(rec.store.rt, r.id, { lastFiredAt: this.clock(), lastRunId: started.runId, lastTaskId: undefined })), ['routines'])
+    return { runId: started.runId }
+  }
+
+  /**
+   * runSilenceAck: the user ignores the rest of the run's silence (Run.silenceAckedAt, the watch lets it go) and its
+   * stalled card goes. A run that is over has nothing to ignore (ok); an unknown run is not_found.
+   */
+  ackRunSilence(teamId: string, runId: string): TeamFail | null {
+    const rec = this.teams.get(teamId)
+    if (!rec) return fail('not_found')
+    const active = rec.store.rt.activeRuns.find((r) => r.id === runId)
+    if (!active && !rec.store.recentRuns().some((r) => r.id === runId)) return fail('not_found')
+    if (!active) return null
+    const shown = this.runSilence.has(runId)
+    this.unwatchSilence(runId)
+    const res = ackSilenceFlow(rec.store.rt, runId, { now: this.clock() })
+    const changed = res.ok && res.rt !== rec.store.rt
+    this.commit(teamId, res, ['agents', 'run', 'needs'], { runId })
+    if (!changed && shown) this.emitRun(teamId, active)
+    this.deps.log(`run ${runId} silence ignored by the user`)
+    return null
+  }
+
+  /** The silence watch follows a run that reached `running` (and whose silence the user did not ignore). */
+  private watchSilence(runId: string): void {
+    const teamId = this.teamOfRun(runId)
+    const run = teamId ? this.activeRun(teamId, runId) : undefined
+    if (!run || run.silenceAckedAt !== undefined) return
+    this.silenceWatched.add(runId)
+    this.silence.watch(teamPaneId(runId))
+  }
+
+  private unwatchSilence(runId: string): void {
+    this.silence.unwatch(teamPaneId(runId))
+    this.silenceWatched.delete(runId)
+    this.runSilence.delete(runId)
+  }
+
+  /** The changes of a run's silence: its card (agents, run) and its task's card (board, task). */
+  private emitRun(teamId: string, run: Pick<Run, 'id' | 'taskId'>): void {
+    if (run.taskId) this.emit(teamId, ['agents', 'run', 'board', 'task'], { runId: run.id, taskId: run.taskId })
+    else this.emit(teamId, ['agents', 'run'], { runId: run.id })
+  }
+
+  /**
+   * The run SilenceWatch's host (design 3.8): a run quiet or stalled since its last line. The level lives in memory on
+   * the run (views and roster), goes out as `agents`/`run`, and `stalled` opens the run's one stalled card (Frenar,
+   * Seguir esperando). A run no longer running, or whose silence the user ignored, is let go.
+   */
+  private onRunSilence(paneId: string, s: PaneSilence): void {
+    const runId = paneId.slice(TEAM_PANE_PREFIX.length)
+    const teamId = this.live() ? this.teamOfRun(runId) : null
+    const rec = teamId ? this.teams.get(teamId) : undefined
+    const run = rec?.store.rt.activeRuns.find((r) => r.id === runId)
+    if (!teamId || !rec || !run || run.state !== 'running' || run.silenceAckedAt !== undefined) {
+      this.unwatchSilence(runId)
+      return
+    }
+    const cur = this.runSilence.get(runId)
+    if (cur && cur.level === s.level && cur.since === s.since) return
+    this.runSilence.set(runId, { level: s.level, since: s.since })
+    this.deps.log(`run ${runId} silence ${s.level}`)
+    if (s.level === 'stalled') {
+      const card = openStalledCard(rec.store.rt, run, { now: this.clock() })
+      if (card.ok && card.rt !== rec.store.rt) {
+        this.commit(teamId, card, ['needs', 'agents', 'run'], { runId })
+        return
+      }
+    }
+    this.emitRun(teamId, run)
+  }
+
+  /**
+   * A line of a run whose silence is on show (the host's recovery, SilenceWatch.ts): the silence clears, the watch
+   * counts again from this line (rearm) and the run's open stalled card goes, in one commit: one change out per
+   * recovery (line events never emit otherwise).
+   */
+  private silenceRecovered(runId: string): void {
+    this.runSilence.delete(runId)
+    if (this.silenceWatched.has(runId)) this.silence.rearm(teamPaneId(runId))
+    const teamId = this.teamOfRun(runId)
+    const rec = teamId ? this.teams.get(teamId) : undefined
+    const run = rec?.store.rt.activeRuns.find((r) => r.id === runId)
+    if (!teamId || !rec || !run) return
+    this.deps.log(`run ${runId} silence over`)
+    const rt = dismissStalledCard(rec.store.rt, runId)
+    if (rt !== rec.store.rt) this.commit(teamId, committed(rt), ['needs', 'agents', 'run'], { runId })
+    else this.emitRun(teamId, run)
+  }
+
+  /**
+   * `settings.agents.silence` (the same minutes as the consoles, normalizeSilence). A change re-judges every watched
+   * run at once (the watch); a silence on show the new minutes no longer reach goes with its open stalled card, in one
+   * commit (no line would dismiss that card later: nothing is on show), one they still reach keeps its level, and one
+   * they move to another level takes it through the watch's own host path (onRunSilence): a quiet run the new minutes
+   * call stalled opens its one stalled card (and its notice) here, and the watch's next report of that same level
+   * changes nothing.
+   */
+  private configureSilence(cfg: ConfigFile | null): void {
+    if (!this.silence.configure(normalizeSilence(cfg?.settings?.agents?.silence))) return
+    for (const [runId, s] of [...this.runSilence]) {
+      const level = this.silence.levelFor(this.clock() - s.since)
+      if (level === s.level) continue
+      if (level) {
+        this.onRunSilence(teamPaneId(runId), { level, since: s.since })
+        continue
+      }
+      this.runSilence.delete(runId)
+      const teamId = this.teamOfRun(runId)
+      const rec = teamId ? this.teams.get(teamId) : undefined
+      const run = rec?.store.rt.activeRuns.find((r) => r.id === runId)
+      if (!teamId || !rec || !run) continue
+      const rt = dismissStalledCard(rec.store.rt, runId)
+      if (rt !== rec.store.rt) this.commit(teamId, committed(rt), ['needs', 'agents', 'run'], { runId })
+      else this.emitRun(teamId, run)
+    }
   }
 
   // ---- Integrar (B6) -----------------------------------------------------------------------------
@@ -2781,14 +3240,16 @@ export class TeamService implements TeamInternals {
     this.deps.log(`notice ${teamId} ${o.key.slice('teams.push.'.length)} ${o.rowId}`)
   }
 
-  runLive(runId: string): { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean } {
-    const out: { lastLineAt?: number; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean } = {
+  runLive(runId: string): { lastLineAt?: number; silence?: PaneSilence; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean } {
+    const out: { lastLineAt?: number; silence?: PaneSilence; ring: readonly ChatMessage[] | null; cutAt: number | null; live: boolean } = {
       ring: this.supervisor.ring(runId),
       cutAt: this.supervisor.cutAt(runId),
       live: this.supervisor.isAlive(runId),
     }
     const at = this.supervisor.lastLineAt(runId)
     if (at !== undefined) out.lastLineAt = at
+    const silence = this.runSilence.get(runId)
+    if (silence) out.silence = { ...silence }
     return out
   }
 
@@ -2982,7 +3443,8 @@ export class TeamService implements TeamInternals {
     this.setTrust(rec, 'trusted')
     const ctx = this.flowCtx(teamId)
     if (ctx) this.commit(teamId, reconcileAgents(store.rt, ctx), ['agents'])
-    this.emit(teamId, ['list', 'team', 'needs'])
+    this.armRoutines(teamId, false)
+    this.emit(teamId, ['list', 'team', 'needs', 'routines'])
     return { teamId }
   }
 
@@ -3016,7 +3478,9 @@ export class TeamService implements TeamInternals {
     this.dropStaleHires(teamId, rec, approved.sha256)
     const ctx = this.flowCtx(teamId)
     if (ctx) this.commit(teamId, reconcileAgents(rec.store.rt, ctx), ['agents'])
-    this.emit(teamId, ['team', 'needs', 'agents'])
+    // B7 (design 3.10): the routines of the newly trusted definition (a routine it dropped or turned off arms nothing).
+    this.armRoutines(teamId, false)
+    this.emit(teamId, ['team', 'needs', 'agents', 'routines'])
     this.poke()
     return null
   }
@@ -3085,6 +3549,7 @@ export class TeamService implements TeamInternals {
     rec.stopWatch?.()
     rec.stopWatch = null
     this.timer.clear(`defwatch:${teamId}`)
+    this.routines.disarm(teamId)
     this.teams.delete(teamId)
     this.removedRecs.add(rec)
     if (this.newestRecs.get(teamId) === rec) this.newestRecs.delete(teamId)

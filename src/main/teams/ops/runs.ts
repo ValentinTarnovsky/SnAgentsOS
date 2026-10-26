@@ -36,7 +36,8 @@ export const runOps: Pick<OpTable, 'roster' | 'runNow' | 'stop' | 'pauseAgent' |
     const rt = rec.store.rt
     const def = svc.shownDef(rec)
     const recent = rec.store.recentRuns()
-    const agents = rt.agents.map((a) => agentView(rt, def, a, recent, (id) => svc.runLive(id).lastLineAt, waiting.get(a.id)))
+    // B7: each live run's silence (the roster's SilenceChip) rides with its live last line.
+    const agents = rt.agents.map((a) => agentView(rt, def, a, recent, (id) => svc.runLive(id).lastLineAt, waiting.get(a.id), (id) => svc.runLive(id).silence))
     return { ok: true, agents, rev: rt.rev }
   },
 

@@ -1,15 +1,18 @@
 import { useState, type ReactNode } from 'react'
-import { MessageSquare, Pause, Play } from 'lucide-react'
-import { isActiveRun } from '@shared/teams'
-import type { AgentView } from '@shared/team-protocol'
+import { EyeOff, MessageSquare, Pause, Play } from 'lucide-react'
+import { isActiveRun, teamPaneId } from '@shared/teams'
+import type { AgentView, RunView, TaskRunRef } from '@shared/team-protocol'
 import { useT, type MessageKey, type TFn } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { toast } from '@/lib/toast'
 import { openAgentDrawer } from '@/lib/teamsStore'
 import { agentLabel, deferReason, openRunNow, pauseAgent } from '@/lib/teams/roster'
+import { ackRunSilence, useRunSilence } from '@/lib/teams/routines'
 import { StatusGlyph, type GlyphKind } from '@/components/ui/StatusDot'
+import { Tooltip } from '@/components/ui/Tooltip'
 import { FailureChip } from '@/components/status/FailureChip'
 import { ContextChip } from '@/components/status/ContextChip'
+import { SilenceChip } from '@/components/status/SilenceChip'
 import { KIND_KEY } from './TeamEmptyTab'
 import { ElapsedChip, RUN_CHIP, RUN_CHIP_NEUTRAL, SMALL_BTN, SMALL_BTN_QUIET, SMALL_BTN_TEXT, StopRunButton, UsageChip } from './RunHeader'
 
@@ -46,9 +49,47 @@ export function agentLine(a: AgentView, t: TFn): string {
 }
 
 /**
+ * A live run that has given no sign of life for a while (app 2.7.0, E10 B7:
+ * main's second SilenceWatch over the run's last line): the A6 SilenceChip,
+ * monochrome, "Sin señales hace 12 min" or "Quizás trabado: 25 min sin
+ * señales". With `teamId` it carries "Ignorar el silencio de esta corrida"
+ * (`runSilenceAck`, never the console's status.silenceAck: a run has no
+ * pane), which hides it at once; without it (a board card, whose click opens
+ * the task) the chip only shows. Nothing here stops or writes to the run.
+ */
+export function RunSilenceChip({ run, teamId }: { run: Pick<RunView | TaskRunRef, 'id' | 'silence'>; teamId?: string }) {
+  const t = useT()
+  const silence = useRunSilence(run)
+  if (!silence) return null
+  return (
+    <span data-run-silence={run.id} className="flex min-w-0 max-w-full items-center gap-1">
+      <SilenceChip paneId={teamPaneId(run.id)} silence={silence} />
+      {teamId && (
+        <Tooltip label={t('teams.silence.ack')} className="shrink-0">
+          <button
+            type="button"
+            data-run-silence-ack={run.id}
+            aria-label={t('teams.silence.ack')}
+            onClick={() => {
+              void ackRunSilence(teamId, run.id).then((fail) => {
+                if (fail) toast.error(t('teams.silence.ackFailed'))
+              })
+            }}
+            className="flex rounded text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-violet/60"
+          >
+            <EyeOff size={13} />
+          </button>
+        </Tooltip>
+      )}
+    </span>
+  )
+}
+
+/**
  * One agent of the Agentes tab (app 2.7.0, E10 B2): its name, role, agent and
  * model; what it is on; while a run is live how long it runs, plus the run's
- * failure, context and spend (an estimate); and its actions: the chat drawer,
+ * failure, silence (B7, with its ignore button), context and spend (an
+ * estimate); and its actions: the chat drawer,
  * "Ejecutar ahora" (an idle agent: it opens the drawer's composer, nothing
  * runs before its button), Frenar (a live run, after a confirm) and the
  * agent's pause. `wide` is the Lead's full-width look; `children` goes under
@@ -102,6 +143,7 @@ export function AgentCard({ teamId, agent: a, wide, hint, children }: { teamId: 
       <div data-agent-chips className="flex min-w-0 flex-wrap items-center gap-1.5 empty:hidden">
         {live?.startedAt ? <ElapsedChip since={live.startedAt} tipKey="teams.agent.elapsedTip" /> : null}
         {failure && <FailureChip failure={failure} className="max-w-full" />}
+        {live && <RunSilenceChip run={live} teamId={teamId} />}
         {context && <ContextChip context={context} usage={shown?.usage} />}
         <UsageChip usage={shown?.usage} />
       </div>

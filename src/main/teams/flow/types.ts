@@ -28,6 +28,8 @@ export type TeamEffect =
   | { kind: 'deadline'; key: string; at: number | null }
   /** B2: a run left `activeRuns` in this terminal form; TeamService puts it in the runs ring (runs.json). */
   | { kind: 'ended'; run: Run }
+  /** B7: a `team.note` of a Codex block (the CLI path writes its note through the port): TeamService writes the team note file. */
+  | { kind: 'teamNote'; runId: string; text: string; title?: string }
 
 export type FlowResult<R = undefined> =
   | { ok: true; rt: TeamRuntime; effects: TeamEffect[]; result: R }

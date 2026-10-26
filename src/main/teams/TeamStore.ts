@@ -214,6 +214,7 @@ const pause = z.object({ reason: z.enum(['user', 'auth', 'billing']), at: num, c
 const nextIds = z.object({ task: int.min(1), comment: int.min(1), approval: int.min(1), card: int.min(1), queue: int.min(1) })
 const routineState = z.object({
   lastScheduledFor: num.optional(), lastFiredAt: num.optional(), lastRunId: str.optional(), lastTaskId: str.optional(), skippedFor: num.optional(),
+  displacedFor: num.optional(),
 }).passthrough()
 
 /** `items` element by element: a bad one is dropped and named in `repaired`. */

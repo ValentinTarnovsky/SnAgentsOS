@@ -27,7 +27,8 @@
 // `roster` (Lead first and full width, line 2, elapsed, usage "estimado",
 // context, failure and pause chips), Ejecutar ahora opens the drawer composer
 // and sends `runNow` with the request (Enter is a new line, never a pty
-// write or submit), `deferred` shows its reason inline, the drawer renders
+// write or submit), `deferred` shows its reason inline (a CLI that is off,
+// deferred cliOff, in the words that turn it on), the drawer renders
 // `runPage` through ChatScroller, a pushed `teams:runAppend` of the watched
 // run appends and one of another run does not, Load earlier, a link behind
 // a confirm, RunLog's cut row (decoded by the real RunLog, English in main)
@@ -135,7 +136,18 @@
 // gave without the note or the land mode gets them from the task, and so does
 // an outcome read from the task alone): an ffOnly landing timeout may
 // leave the checkout partly updated, an updateRef one touched no checkout,
-// and "it may have been the landing" only with nothing stored. No pty, user
+// and "it may have been the landing" only with nothing stored. Routines section
+// (B7): the Agentes tab lists the routines read only (what a fire does, the cron,
+// the next run by formatRunWhen with the date when it is weeks away, the last run
+// or the one skipped while the app was closed or the PC asleep, one off, a markup
+// title as text), Correr ahora sends `routineRun` (its toasts open the run and the
+// task, a deferral and a refusal in words, a CLI that is off in the words that turn
+// it on, off while untrusted, no pty write); the team notes newest first with
+// escaped titles, a note's drawer rendering its HTML as text with a link behind a
+// confirm, its first `# <title>` line not repeated under the same title, switched
+// in place, gone, and refetched on a `notes` change; the silence chip of live runs on the task card and the agent
+// cards, Ignorar el silencio sending `runSilenceAck` (never status.silenceAck) and
+// hiding it at once, a refusal bringing it back; zoom; en; no dashes. No pty, user
 // config or real main is touched. Requires npm run build (for the CSS).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -172,6 +184,7 @@ import {useRosterStore} from './src/renderer/lib/teams/roster';
 import {visibleName} from './src/renderer/lib/teams/issues';
 import {labOn} from './src/shared/labs';
 import {teamNeedsCount,teamNeedsRows} from './src/shared/teamNeeds';
+import {formatRunWhen} from './src/shared/schedule';
 import {Sidebar} from './src/renderer/components/sidebar/Sidebar';
 import {WorkspaceHost} from './src/renderer/components/layout/WorkspaceHost';
 import {SharedWorkspaceHost} from './src/renderer/components/share/SharedWorkspaceHost';
@@ -191,7 +204,7 @@ import {SettingsModal} from './src/renderer/components/settings/SettingsModal';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 import {initShareGuest, useShareGuestStore} from './src/renderer/lib/shareGuestStore';
 import {onPaneFocusRequest, setFocusedPane} from './src/renderer/lib/focus';
-const calls={spawn:[],setActive:[],viewed:[],req:[],save:[],focusReq:[],ptyWrite:[],ptySubmit:[],openExternal:[]};
+const calls={spawn:[],setActive:[],viewed:[],req:[],save:[],focusReq:[],ptyWrite:[],ptySubmit:[],openExternal:[],statusAck:[]};
 onPaneFocusRequest(id=>calls.focusReq.push(id));
 const subs={changed:new Set(),append:new Set(),integrate:new Set()};
 const noop=()=>()=>{};
@@ -269,6 +282,8 @@ const needsOf=id=>{const it=fake.teams.find(x=>x.id===id);const keep=x=>taskOpen
  queue:JSON.parse(JSON.stringify(QUEUE[id]||[])),tasks:Object.fromEntries((BOARD[id]||[]).map(t=>[t.id,{title:t.title,state:t.state,phase:t.phase}]))}};
 const fake={on:false,reveal:{ok:true},failGet:new Set(),conflictNext:false,cid:100,tid:8,teams:[item(TA,'Alfa',{running:1,usage:use(1200000,40000,1.75)}),item(TB,'Beta',{trust:'changed',needsCount:1,rev:5,paused:{reason:'user',at:1},limit:true})],
  runNow:r=>{
+  // fake.runNowRes answers once instead (a CLI that is off).
+  if(fake.runNowRes){const f=fake.runNowRes;fake.runNowRes=null;return f}
   if(r.taskId)return fake.runTask(r);
   if(r.agentId==='qa')return{ok:false,error:'deferred',defer:{reason:'globalCap'}};
   if(r.agentId!=='dev-2')return{ok:false,error:'running'};
@@ -324,6 +339,37 @@ function fillNeeds(){
  fake.teams.find(x=>x.id===TA).paused={reason:'auth',at:now-200000,cardId:'k-1'};
  QUEUE[TA]=[qv('q-60','dev-2',{taskId:'t-35',at:now-50000}),qv('q-61','research',{mode:'free',reason:'routine',approved:true,at:now-40000})];
 }
+// B7: the routines main reads from the trusted definition (each with its next and its last run: one main skipped
+// because the app was closed, one off in its file, one whose title is markup), the notes the Lead wrote (one whose
+// title and text carry HTML, a bidi override and a link; one untitled with no text left) and the silence of two live
+// runs as main's run SilenceWatch sets them (Dev stalled on t-50, Dev 2 quiet).
+const ROUTINES={[TA]:[],[TB]:[]},NOTES={[TA]:[],[TB]:[]},NOTE_DOCS={};
+function fillRoutines(){
+ const now=Date.now(),D=86400000,H=String.fromCodePoint,NL=String.fromCharCode(10);
+ ROUTINES[TA]=[
+  {id:'daily-summary',cron:'0 18 * * 1-5',action:'wake',role:'lead',title:'Resumen diario',enabled:true,nextAt:now+2*D+300000,last:{at:now-D,skipped:true}},
+  {id:'deps',cron:'0  9 1 * *',action:'task',role:'dev',title:'Revisar dependencias',enabled:true,nextAt:now+20*D,last:{at:now-3*D,taskId:'t-6'}},
+  {id:'scan',cron:'*/30 * * * *',action:'wake',role:'research',enabled:false,nextAt:null},
+  {id:'qa-check',cron:'15 * * * *',action:'wake',role:'qa',title:'<b>QA</b> rápida',enabled:true,nextAt:now+1800000,last:{at:now-1800000,runId:'r-444444444444'}}];
+ const html='<img src=x onerror="window.__pwned=1">';
+ NOTES[TA]=[
+  {id:'n-1',title:'Resumen del jueves',updatedAt:now-3*D,size:40,rev:'1'},
+  {id:'n-2',title:html+' Resumen'+H(0x202E)+' de hoy',updatedAt:now-60000,size:300,rev:'2'},
+  {id:'n-3',title:'',updatedAt:now-2*D,size:0,rev:'3'}];
+ // n-1 as snaos team note --title writes it: its title as the first heading (the drawer shows it once).
+ NOTE_DOCS['n-1']={title:'Resumen del jueves',text:['# Resumen del jueves','','Sin novedades.',''].join(NL),updatedAt:now-3*D};
+ NOTE_DOCS['n-2']={title:NOTES[TA][1].title,text:['# Resumen de hoy','',html+' **Listo** el login.','','<script>window.__pwned=2</script>','','Mirá [la guía](https://example.com/resumen).'].join(NL),updatedAt:now-60000};
+}
+function silenceOn(){
+ const now=Date.now(),A=AGENTS[TA];
+ RUNS[R3]=RUNS[R3]||{view:runV(R3,'dev-2',{outcome:undefined,endedAt:undefined}),items:[]};
+ const r2=RUNS[R2].view,r3=RUNS[R3].view;
+ Object.assign(r2,{state:'running',silence:{level:'stalled',since:now-25*60000}});
+ Object.assign(r3,{state:'running',startedAt:now-15*60000,silence:{level:'quiet',since:now-12*60000}});
+ Object.assign(A.find(a=>a.id==='dev'),{status:'running',taskId:'t-50',run:r2});
+ Object.assign(A.find(a=>a.id==='dev-2'),{status:'running',run:r3});
+ BOARD[TA].push(TK('t-50',{title:'Migración lenta',state:'doing',phase:'executing',assignee:'dev',run:{id:R2,agentId:'dev',mode:'exec',state:'running',startedAt:now-40*60000,silence:{level:'stalled',since:now-25*60000}}}));
+}
 // B5 part 2: main's commits emit what they change (off before it: the earlier sections push their own events).
 fake.emitOn=false;fake.rev=100;fake.igN=0;
 fake.emitNeeds=(teamId,taskId)=>{if(!fake.emitOn)return;queueMicrotask(()=>{const e={teamId,rev:++fake.rev,scopes:['needs','team','list',...(taskId?['board','task']:[])],...(taskId?{taskId}:{})};subs.changed.forEach(cb=>cb(e))})};
@@ -334,7 +380,7 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
   write:(...a)=>{calls.ptyWrite.push(a)},submit:async r=>{calls.ptySubmit.push(r);return{ok:true}},resize(){},setActive:ids=>calls.setActive.push(ids),flow(){},kill:async()=>{},killPanes:async()=>0,onData:noop,onExit:noop}),
  system:fallback({openExternal:url=>{calls.openExternal.push(url)}}),
  config:fallback({save:cfg=>{calls.save.push(1);return Promise.resolve()}}),
- status:fallback({snapshot:async()=>[],setViewed:ids=>calls.viewed.push(ids),markRead:async()=>true}),
+ status:fallback({snapshot:async()=>[],setViewed:ids=>calls.viewed.push(ids),markRead:async()=>true,silenceAck:async p=>{calls.statusAck.push(p);return true}}),
  agents:fallback({list:async()=>[],startup:async()=>({trigger:null,interrupted:[]})}),
  share:{host:fallback({}),guest:fallback({links:async()=>({persisted:true,guestFingerprint:null,links:[],states:{}})})},
  teams:{
@@ -421,6 +467,20 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
     case 'confirmVerify':{const it=fake.teams.find(x=>x.id===r.teamId);if(!it)return{ok:false,error:'not_found'};if(r.repoId!=='main'||r.command!==fake.igPrev.verify.command)return{ok:false,error:'bad_request'};fake.igPrev.verify.confirmed=true;fake.verifyConfirmed=true;return{ok:true,team:viewOf(it)}}
     case 'askRebase':{if(fake.igRebaseFail){const f=fake.igRebaseFail;fake.igRebaseFail=null;return f}return findTask(r)?{ok:true}:{ok:false,error:'not_found'}}
     case 'removeWorktree':{const t=findTask(r);if(!t||!t.worktree)return{ok:false,error:'not_found'};if(t.state!=='done')return{ok:false,error:'conflict',reason:'stale'};delete t.worktree;t.rev++;fake.emitNeeds(r.teamId,t.id);return{ok:true}}
+    // B7, as main answers: the routines with their next and last run; Correr ahora (a wake runs the first agent of the
+    // routine's role, a task routine creates its task for it; fake.routineRes answers once instead); the team notes and
+    // one note; the silence of a run ignored (main drops it from the run, its agent's view and its task's ref).
+    case 'routines':return ROUTINES[r.teamId]?{ok:true,routines:JSON.parse(JSON.stringify(ROUTINES[r.teamId]))}:{ok:false,error:'not_found'};
+    case 'routineRun':{if(fake.routineRes){const f=fake.routineRes;fake.routineRes=null;return f}
+     const x=(ROUTINES[r.teamId]||[]).find(y=>y.id===r.routineId);if(!x)return{ok:false,error:'not_found'};
+     const a=(AGENTS[r.teamId]||[]).find(y=>y.roleId===x.role);
+     if(x.action==='task'){const tid='t-'+(++fake.tid);(BOARD[r.teamId]=BOARD[r.teamId]||[]).push(TK(tid,{title:x.title||x.id,assignee:a&&a.id,createdBy:'system'}));x.last={at:Date.now(),taskId:tid};return{ok:true,taskId:tid}}
+     const rid='r-777777777777';RUNS[rid]={view:runV(rid,a.id,{mode:a.kind==='lead'?'lead':'free',trigger:'routine',state:'running',outcome:undefined,endedAt:undefined,startedAt:Date.now()}),items:[msg('1','user','Rutina '+x.id)]};
+     AGENT_RUNS[a.id]=[rid,...(AGENT_RUNS[a.id]||[])];Object.assign(a,{status:'running',run:RUNS[rid].view});x.last={at:Date.now(),runId:rid};return{ok:true,runId:rid}}
+    case 'notes':return NOTES[r.teamId]?{ok:true,notes:JSON.parse(JSON.stringify(NOTES[r.teamId]))}:{ok:false,error:'not_found'};
+    case 'note':{const d=NOTES[r.teamId]&&NOTE_DOCS[r.noteId];return d?{ok:true,...d}:{ok:false,error:'not_found'}}
+    case 'runSilenceAck':{if(fake.ackFail){fake.ackFail=false;return{ok:false,error:'io'}}const x=RUNS[r.runId];if(!x)return{ok:false,error:'not_found'};delete x.view.silence;
+     for(const t of BOARD[r.teamId]||[])if(t.run&&t.run.id===r.runId)delete t.run.silence;return{ok:true}}
     default:return{ok:false,error:'unsupported'}}},
   onChanged:cb=>{subs.changed.add(cb);return()=>subs.changed.delete(cb)},onRunAppend:cb=>{subs.append.add(cb);return()=>subs.append.delete(cb)},onIntegrateProgress:cb=>{subs.integrate.add(cb);return()=>subs.integrate.delete(cb)}},
 });
@@ -536,6 +596,8 @@ window.smoke={calls,fake,TA,TB,areaEvents,seen,item,
   flushSync(()=>r.render(<I18nProvider lang={lang}><IntegrateErrorView base="main" branch="b" step="verify" {...props}/></I18nProvider>));
   const n=el.querySelector('[data-integrate-verify-note]');const out={msg:el.querySelector('p')?.textContent??null,note:n?n.getAttribute('data-integrate-verify-note'):null,text:n?n.textContent:null,tail:!!el.querySelector('[data-integrate-tail]'),label:el.querySelector('[data-integrate-tail] span')?.textContent??null};r.unmount();el.remove();return out},
  // One number everywhere: the sidebar badge, the tab pill, the need rows on screen and teamNeedsCount of main's view.
+ // B7: the routines, the notes and the run silence fixtures, the A10 label rule, and the drawer closed by hand.
+ fillRoutines,silenceOn,ROUTINES,NOTES,NOTE_DOCS,formatRunWhen,closeDrawer:()=>useTeamsStore.setState({drawer:null}),
  counts:id=>({badge:document.querySelector('[data-team-row=\"'+id+'\"] [data-team-badge]')?.getAttribute('data-team-badge')??'0',tab:document.querySelector('[data-team-tab=needs] [data-team-tab-count]')?.getAttribute('data-team-tab-count')??'0',rows:String(document.querySelectorAll('[data-team-need]').length),rule:String(teamNeedsCount(needsOf(id)))}),
 };
 createRoot(document.getElementById('root')).render(<Root/>);
@@ -885,6 +947,12 @@ app.whenReady().then(async()=>{
  v=await js("({text:smoke.text('[data-run-now-note]'),req:smoke.reqs('runNow').at(-1),draft:document.querySelector('[data-run-now-input]').value,fail:smoke.attr('[data-run-header] [data-failure-chip]','data-failure-chip'),state:smoke.attr('[data-run-header]','data-run-state')})");
  ok(v.text==='Ahora no: los equipos ya tienen el máximo de corridas a la vez.'&&v.req.agentId==='qa'&&v.req.prompt==='Probá el login'&&v.draft==='Probá el login','deferred: the reason in words, Ctrl+Enter sent it, the draft stays',v);
  ok(v.state==='failed'&&v.fail==='limit','with no run picked the drawer shows the last run, its failure in the header',v);
+ // A CLI that is off: main answers deferred {cliOff} (never cli_off), and the note says how to turn it on, not "Ahora no".
+ const runNowSent=await js("smoke.reqs('runNow').length");
+ await js("smoke.fake.runNowRes={ok:false,error:'deferred',defer:{reason:'cliOff'}};smoke.keyActive({key:'Enter',code:'Enter',keyCode:13,ctrlKey:true})");
+ ok(await until("smoke.text('[data-run-now-note]')==='El CLI snaos está apagado: prendelo en Ajustes para que el equipo pueda correr.'",2000),'a CLI that is off (deferred cliOff) says how to turn it on',await js("({text:smoke.text('[data-run-now-note]'),pending:smoke.fake.runNowRes})"));
+ v=await js("({n:smoke.reqs('runNow').length,req:smoke.reqs('runNow').at(-1),draft:document.querySelector('[data-run-now-input]').value})");
+ ok(v.n===runNowSent+1&&v.req.agentId==='qa'&&v.req.prompt==='Probá el login'&&v.draft==='Probá el login','the request went for QA and the draft stays',v);
  // RunLog's cut row comes from main in English: the run chat words it in the UI language.
  const cutText="smoke.text('[data-drawer=team-agent] [data-chat-system]')";
  ok(await until(cutText+".includes('El registro de la corrida quedó muy grande')",2000),'es: the run log cut row is worded in Spanish',await js(cutText));
@@ -2271,6 +2339,152 @@ app.whenReady().then(async()=>{
  ok(v==='To do|In progress|Review|Done|Blocked','en: the column names',v);
  await js("smoke.setLang('es')");await settle(200);
 
+ // B7, the routines section: the Agentes tab lists the team's routines read only (in the definition's order, what a
+ // fire does with the role's name, the cron with its spaces folded, the next run by formatRunWhen (the A10 rule: the
+ // weekday within six days, the date beyond), the last run or the one main skipped because over 2 h went by with the
+ // app closed, Teams off or the PC asleep, one off in its file, a title that is markup shown as text); Correr ahora sends
+ // routineRun (a wake: its toast watches the run; a task routine: its toast opens the task; a deferral and a refusal in
+ // words under the row, a CLI that is off (deferred cliOff) in the words that turn it on; an untrusted definition turns
+ // it off) and never writes to a pty; a routines change pulls them again. The team notes newest first (titles as text
+ // with hiding characters spelled out, an untitled one, the date of an older one); a note in its drawer (its HTML as
+ // text, nothing injected, a link behind a confirm; a first # <title> line equal to its title not repeated, one that
+ // differs kept), another one switched in place, a gone one, a notes change pulling the list and the open note again. The silence of live runs: on the task card the chip alone, on the
+ // agent cards (stalled and quiet) with Ignorar el silencio, which sends runSilenceAck (never the console's
+ // status.silenceAck) and hides the chip at once; a refusal brings it back. 1280 px and zoom without overflow; en; no
+ // dashes.
+ await js("smoke.closeDrawer();smoke.fillRoutines();smoke.silenceOn();smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['board','agents']})");
+ ok(await until("smoke.has('[data-task-card=t-50] [data-silence-chip=stalled]')",3000),'a stalled run shows its silence chip on its task card');
+ v=await js("({text:smoke.text('[data-task-card=t-50] [data-silence-chip]'),ack:smoke.has('[data-task-card=t-50] [data-run-silence-ack]')})");
+ // The minutes move while the section runs (one timeout to the next whole minute): 25, or 26 past a minute boundary.
+ ok(/^Quizás trabado: 2[56] min sin señales$/.test(v.text)&&!v.ack,'the task card words it as the A6 chip, with no ignore button (its click opens the task)',v);
+ const pw0=await js('smoke.calls.ptyWrite.length+smoke.calls.ptySubmit.length');
+ await js("smoke.click('[data-team-tab=agents]')");
+ ok(await until("smoke.has('[data-routine=daily-summary]')&&smoke.has('[data-team-note=n-2]')&&smoke.has('[data-agent-card=dev] [data-silence-chip]')",3000),'Agentes lists the routines and the team notes under the roster');
+ v=await js("(()=>{const now=Date.now(),R=smoke.ROUTINES[smoke.TA],f=x=>smoke.formatRunWhen(x,'es',now);return{ids:[...document.querySelectorAll('[data-routine]')].map(e=>e.dataset.routine).join(),"+
+  "actions:['daily-summary','deps','scan','qa-check'].map(id=>smoke.text('[data-routine='+id+'] [data-routine-action]')).join('|'),"+
+  "next:smoke.text('[data-routine=daily-summary] [data-routine-next]'),nextWant:'Próxima: '+f(R[0].nextAt),far:smoke.text('[data-routine=deps] [data-routine-next]'),farWant:'Próxima: '+f(R[1].nextAt),"+
+  "cron:smoke.text('[data-routine=deps] [data-routine-cron]'),off:smoke.has('[data-routine=scan] [data-routine-off]'),offNext:smoke.has('[data-routine=scan] [data-routine-next]'),"+
+  "skipped:smoke.text('[data-routine=daily-summary] [data-routine-last=skipped]'),ran:smoke.text('[data-routine=deps] [data-routine-last=ran]'),never:smoke.text('[data-routine=scan] [data-routine-last=never]'),"+
+  "task:smoke.has('[data-routine=deps] [data-routine-task=t-6]'),title:smoke.text('[data-routine=qa-check] [data-routine-title]'),bold:smoke.count('[data-routine=qa-check] b')}})()");
+ ok(v.ids==='daily-summary,deps,scan,qa-check','the routines in the definition order',v);
+ ok(v.actions==='Despierta al Líder|Crea una tarea para Dev|Despierta a Investigación|Despierta a QA','what each fire does, with the role of the definition',v);
+ ok(v.next===v.nextWant&&v.far===v.farWant&&v.far.includes(','),'the next run by formatRunWhen: one weeks away carries its date',v);
+ ok(v.cron==='Cron: 0 9 1 * *'&&v.off&&!v.offNext,'the cron with its spaces folded; a routine off in its file says so and has no next run',v);
+ ok(v.skipped.startsWith('Salteada la de ')&&v.skipped.endsWith('pasaron más de 2 h con la app cerrada, Equipos apagado o la PC suspendida')&&v.ran.startsWith('Última: ')&&v.task&&v.never==='Todavía no corrió','the last run, the one main skipped (the app closed, Teams off or the PC asleep) and one that never ran',v);
+ ok(v.title==='<b>QA</b> rápida'&&v.bold===0,'a routine title that is markup shows as text',v);
+
+ // The silence of the live runs on their agent cards, and Ignorar el silencio (a refusal first).
+ v=await js("({dev:smoke.text('[data-agent-card=dev] [data-silence-chip=stalled]'),dev2:smoke.text('[data-agent-card=dev-2] [data-silence-chip=quiet]'),ack:smoke.attr('[data-agent-card=dev] [data-run-silence-ack]','aria-label')})");
+ ok(/^Quizás trabado: 2[56] min sin señales$/.test(v.dev)&&/^Sin señales hace 1[23] min$/.test(v.dev2)&&v.ack==='Ignorar el silencio de esta corrida','the agent cards show the stalled and the quiet run, each with Ignorar el silencio',v);
+ await js("smoke.fake.ackFail=true;smoke.click('[data-agent-card=dev] [data-run-silence-ack]')");
+ ok(await until("smoke.toasts().some(x=>x.includes('No se pudo ignorar el silencio de la corrida'))&&smoke.has('[data-agent-card=dev] [data-silence-chip=stalled]')",3000),'a refused ignore brings the chip back and says so',await js('smoke.toasts()'));
+ await js("[...document.querySelectorAll('[data-toast-kind=error]')].find(e=>e.textContent.includes('ignorar el silencio'))?.querySelector('button[aria-label]')?.click()");
+ const ro1=await js("smoke.reqs('roster').length");
+ await js("smoke.click('[data-agent-card=dev] [data-run-silence-ack]')");
+ v=await js("({chip:smoke.has('[data-agent-card=dev] [data-silence-chip]'),req:smoke.reqs('runSilenceAck').at(-1),acks:smoke.reqs('runSilenceAck').length,statusAck:smoke.calls.statusAck.length,drawer:smoke.has('[data-drawer]')})");
+ ok(!v.chip&&v.req&&v.req.teamId===TA&&v.req.runId==='r-222222222222'&&v.acks===2&&v.statusAck===0&&!v.drawer,'Ignorar el silencio hides the chip at once and sends runSilenceAck for that run, never status.silenceAck nor a drawer',v);
+ ok(await until("smoke.reqs('roster').length>"+ro1+"&&!smoke.has('[data-agent-card=dev] [data-silence-chip]')&&smoke.has('[data-agent-card=dev-2] [data-silence-chip=quiet]')",3000),'the roster comes again without that silence; Dev 2 keeps its own');
+ await js("smoke.click('[data-team-tab=board]')");
+ ok(await until("smoke.has('[data-task-card=t-50] [data-task-running]')&&!smoke.has('[data-task-card=t-50] [data-silence-chip]')",3000),'the silence ignored: the task card shows no chip either');
+ await js("smoke.click('[data-team-tab=agents]')");
+ ok(await until("smoke.has('[data-routine-run=daily-summary]')",3000),'back on Agentes');
+
+ // Correr ahora: a wake (its toast watches the run), a task routine (its toast opens the task), a deferral, a refusal.
+ await js("smoke.click('[data-routine-run=daily-summary]')");
+ ok(await until("smoke.toastsOf('success').some(x=>x.includes('La rutina Resumen diario está corriendo.'))",3000),'Correr ahora on a wake routine: the toast says it runs',await js("smoke.toastsOf('success')"));
+ v=await js("smoke.reqs('routineRun').at(-1)");
+ ok(v&&v.teamId===TA&&v.routineId==='daily-summary'&&Object.keys(v).length===3,'it sends routineRun with the team and the routine, nothing else',v);
+ await js("[...[...document.querySelectorAll('[data-toast-kind=success]')].find(e=>e.textContent.includes('Resumen diario está corriendo')).querySelectorAll('button')].find(b=>b.textContent==='Ver').click()");
+ ok(await until("smoke.attr('[data-drawer=team-agent] [data-run-header]','data-run-header')==='r-777777777777'",3000),'its Ver opens that run in the Lead drawer');
+ await js("smoke.closeDrawer()");await settle();
+ await js("smoke.click('[data-routine-run=deps]')");
+ ok(await until("smoke.toastsOf('success').some(x=>x.includes('La rutina Revisar dependencias creó t-'))",3000),'Correr ahora on a task routine: the toast names the task it created',await js("smoke.toastsOf('success')"));
+ const rt=await js("smoke.ROUTINES[smoke.TA][1].last.taskId");
+ await js("[...[...document.querySelectorAll('[data-toast-kind=success]')].find(e=>e.textContent.includes('Revisar dependencias creó')).querySelectorAll('button')].find(b=>b.textContent==='Ver tarea').click()");
+ ok(await until("smoke.has('[data-task-drawer="+rt+"]')",3000),'its Ver tarea opens that task',rt);
+ ok(await until("smoke.has('[data-routine=deps] [data-routine-task="+rt+"]')",3000),'the routine row names that task as its last run');
+ await js("smoke.closeDrawer()");await settle();
+ await js("smoke.fake.routineRes={ok:false,error:'deferred',defer:{reason:'paused'}};smoke.click('[data-routine-run=qa-check]')");
+ ok(await until("smoke.text('[data-routine=qa-check] [data-routine-note]')==='Ahora no: el equipo está en pausa.'",3000),'a deferral says why under the row',await js("smoke.text('[data-routine=qa-check] [data-routine-note]')"));
+ // busy: main's coalesce rule (its previous fire still has its run), with a detail that never shows.
+ await js("smoke.fake.routineRes={ok:false,error:'busy',detail:'run r-1 is active'};smoke.click('[data-routine-run=qa-check]')");
+ ok(await until("smoke.text('[data-routine=qa-check] [data-routine-note]')==='Esta rutina ya está en marcha: lo que disparó la vez anterior todavía no terminó.'",3000),'a routine already under way says so, never main\\'s detail');
+ await js("smoke.fake.routineRes={ok:false,error:'running'};smoke.click('[data-routine-run=qa-check]')");
+ ok(await until("smoke.text('[data-routine=qa-check] [data-routine-note]')==='El agente de esta rutina está trabajando: probá cuando termine.'",3000),'its agent busy with another run says so');
+ // A CLI that is off: main answers deferred {cliOff} (never cli_off), and the row says how to turn it on, not "Ahora no".
+ await js("smoke.fake.routineRes={ok:false,error:'deferred',defer:{reason:'cliOff'}};smoke.click('[data-routine-run=qa-check]')");
+ ok(await until("smoke.text('[data-routine=qa-check] [data-routine-note]')==='El CLI snaos está apagado: prendelo en Ajustes para que el equipo pueda correr.'",3000),'a CLI that is off (deferred cliOff) says how to turn it on',await js("smoke.text('[data-routine=qa-check] [data-routine-note]')"));
+ ok((await js('smoke.calls.ptyWrite.length+smoke.calls.ptySubmit.length'))===pw0,'no routine writes to a pty or submits anything');
+ // An untrusted definition: Correr ahora is off and the panel says why; trusted again it is back.
+ await js("smoke.fake.teams[0].trust='changed';smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['team','list']})");
+ ok(await until("smoke.has('[data-routines-untrusted]')&&document.querySelector('[data-routine-run=daily-summary]').disabled",3000),'an untrusted definition: Correr ahora is off and the panel says why');
+ await js("smoke.fake.teams[0].trust='trusted';smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['team','list']})");
+ ok(await until("!smoke.has('[data-routines-untrusted]')&&!document.querySelector('[data-routine-run=daily-summary]').disabled",3000),'trusted again: Correr ahora is back');
+ const rq0=await js("smoke.reqs('routines').length");
+ await js("smoke.ROUTINES[smoke.TA][0].nextAt=Date.now()+8*86400000;smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['routines']})");
+ ok(await until("smoke.reqs('routines').length>"+rq0+"&&smoke.text('[data-routine=daily-summary] [data-routine-next]')==='Próxima: '+smoke.formatRunWhen(smoke.ROUTINES[smoke.TA][0].nextAt,'es',Date.now())",3000),'a routines change pulls them again');
+
+ // The team notes: newest first, titles as text; a note in its drawer; another one in place; a gone one; a notes change.
+ v=await js("({ids:[...document.querySelectorAll('[data-team-note]')].map(e=>e.dataset.teamNote).join(),t2:smoke.text('[data-team-note=n-2] [data-team-note-title]'),t2Want:smoke.visibleName(smoke.NOTES[smoke.TA][1].title),t3:smoke.text('[data-team-note=n-3] [data-team-note-title]'),img:smoke.count('[data-notes-panel] img'),"+
+  "w2:smoke.text('[data-team-note=n-2] [data-team-note-when]'),w2Want:smoke.formatRunWhen(smoke.NOTES[smoke.TA][1].updatedAt,'es',Date.now()),w1:smoke.text('[data-team-note=n-1] [data-team-note-when]'),w1Want:smoke.formatRunWhen(smoke.NOTES[smoke.TA][0].updatedAt,'es',Date.now())})");
+ ok(v.ids==='n-2,n-3,n-1','the team notes newest first',v);
+ ok(v.t2===v.t2Want&&v.t2.startsWith('<img src=x onerror=')&&!v.t2.includes(String.fromCodePoint(0x202E))&&v.img===0&&v.t3==='Nota sin título','a note title is text (its HTML shows, its bidi override spelled out); an untitled one says so',v);
+ ok(v.w2===v.w2Want&&v.w1===v.w1Want&&v.w1.includes(','),'each note says when it was written; an older one carries its date',v);
+ const noteT2=v.t2,oe0=await js('smoke.calls.openExternal.length');
+ await js("smoke.click('[data-team-note=n-2]')");
+ ok(await until("smoke.has('[data-drawer=team-note] [data-note-drawer=n-2] [data-note-text]')",3000),'a note opens in its drawer');
+ v=await js("({req:smoke.reqs('note').at(-1),title:smoke.text('[data-drawer=team-note] [data-note-title]'),text:smoke.text('[data-note-drawer=n-2] [data-note-text]'),heading:smoke.text('[data-note-drawer=n-2] [role=heading]'),img:smoke.count('[data-drawer=team-note] img'),script:smoke.count('[data-drawer=team-note] script'),clean:window.__pwned===undefined,current:smoke.attr('[data-team-note=n-2]','aria-current'),updated:smoke.text('[data-note-updated]')})");
+ ok(v.req&&v.req.teamId===TA&&v.req.noteId==='n-2'&&v.title===noteT2&&v.current==='true'&&v.updated.startsWith('Actualizada: '),'the drawer asks main for that note and shows its title and when it was written',v);
+ ok(v.text.includes('<img src=x onerror="window.__pwned=1">')&&v.text.includes('<script>window.__pwned=2</script>')&&v.text.includes('Listo')&&v.heading==='Resumen de hoy'&&v.img===0&&v.script===0&&v.clean,'the note text renders escaped: its HTML shows as text and nothing runs',v);
+ await js("smoke.click('[data-note-drawer=n-2] [data-md-link]')");await settle();
+ v=await js("({dialog:smoke.has('[data-confirm]'),target:document.body.innerText.includes('https://example.com/resumen'),opened:smoke.calls.openExternal.length})");
+ ok(v.dialog&&v.target&&v.opened===oe0,'a link in a note asks first and shows its target',v);
+ await js("smoke.click('[data-confirm]')");await settle();
+ ok((await js('smoke.calls.openExternal.at(-1)'))==='https://example.com/resumen'&&(await js('smoke.calls.openExternal.length'))===oe0+1,'confirmed: it opens in the browser');
+ await js("smoke.click('[data-team-note=n-1]')");
+ ok(await until("smoke.has('[data-drawer=team-note]')&&smoke.text('[data-note-drawer=n-1] [data-note-text]').includes('Sin novedades')",3000),'another note switches the drawer in place');
+ // Its text starts with # Resumen del jueves, its title: the drawer shows the title once, the body starts below it.
+ v=await js("({title:smoke.text('[data-drawer=team-note] [data-note-title]'),text:smoke.text('[data-note-drawer=n-1] [data-note-text]'),headings:smoke.count('[data-note-drawer=n-1] [role=heading]')})");
+ ok(v.title==='Resumen del jueves'&&v.text.trim()==='Sin novedades.'&&v.headings===0,'a first # line equal to the title is not repeated under it',v);
+ await js("smoke.click('[data-team-note=n-3]')");
+ ok(await until("smoke.text('[data-note-drawer=n-3] [data-note-failed=not_found]').includes('Esta nota ya no está.')",3000),'a note main no longer has says so');
+ await js("smoke.click('[data-team-note=n-2]')");
+ ok(await until("smoke.has('[data-note-drawer=n-2] [data-note-text]')",3000),'back on the note of today');
+ const nl0=await js("smoke.reqs('notes').length"),nd0=await js("smoke.reqs('note').length");
+ await js("(()=>{const now=Date.now();smoke.NOTES[smoke.TA].push({id:'n-4',title:'Resumen del viernes',updatedAt:now,size:20,rev:'4'});smoke.NOTE_DOCS['n-4']={title:'Resumen del viernes',text:'Todo en orden.',updatedAt:now};smoke.NOTE_DOCS['n-2'].text+=String.fromCharCode(10,10)+'Agregado: el pago.'})();smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['notes']})");
+ ok(await until("smoke.reqs('notes').length>"+nl0+"&&smoke.reqs('note').length>"+nd0+"&&[...document.querySelectorAll('[data-team-note]')].map(e=>e.dataset.teamNote).join()==='n-4,n-2,n-3,n-1'&&smoke.text('[data-note-drawer=n-2]').includes('Agregado: el pago.')",3000),'a notes change pulls the list and the note on screen again');
+
+ // 1280 px and zoom: the panels wrap inside the tab, the buttons stay on screen; the note drawer fits at 1.5.
+ await js("smoke.closeDrawer()");await settle();
+ for(const z of [1,1.25,1.5]){
+  w.webContents.setZoomFactor(z);await settle(250);
+  const laid=await until("!smoke.overflow()&&smoke.inView('[data-routine-run=daily-summary]')&&smoke.inView('[data-routine-run=qa-check]')&&smoke.inView('[data-team-note=n-2]')&&smoke.inView('[data-agent-card=dev-2] [data-run-silence-ack]')&&smoke.inView('[data-team-close]')",3000);
+  ok(laid,'zoom '+z+' on Agentes with the routines, the notes and a silence: no overflow, the buttons on screen',await js("({over:smoke.overflow(),run:smoke.inView('[data-routine-run=daily-summary]'),note:smoke.inView('[data-team-note=n-2]'),ack:smoke.inView('[data-agent-card=dev-2] [data-run-silence-ack]')})"));
+  if(z===1){await js("document.querySelector('[data-routines-panel]').scrollIntoView({block:'start'})");await shot('teams-routines');await shot('teams-routines')}
+ }
+ // A hidden window paints when it is captured: the first capture brings the frame up to date, the second keeps it.
+ await js("document.querySelector('[data-routines-panel]').scrollIntoView({block:'start'})");await settle(400);await shot('teams-routines-zoom150');await shot('teams-routines-zoom150');
+ await js("smoke.click('[data-team-note=n-2]')");
+ ok(await until("!smoke.overflow()&&smoke.has('[data-note-drawer=n-2] [data-note-text]')&&smoke.inView('[data-drawer=team-note]')&&smoke.inView('[data-drawer=team-note] [data-drawer-close]')",3000),'zoom 1.5: the note drawer fits too',await js("(()=>{const r=document.querySelector('[data-drawer=team-note]')?.getBoundingClientRect();return r?{l:r.left,r:r.right,w:innerWidth}:null})()"));
+ await settle(1200);await shot('teams-note-zoom150');
+ w.webContents.setZoomFactor(1);await settle(200);
+ // en, and no dashes in either language.
+ await js("smoke.setLang('en')");await settle(200);
+ v=await js("({title:smoke.text('[data-routines-panel] h3'),notes:smoke.text('[data-notes-panel] h3'),action:smoke.text('[data-routine=daily-summary] [data-routine-action]'),task:smoke.text('[data-routine=deps] [data-routine-action]'),run:smoke.text('[data-routine-run=daily-summary]'),"+
+  "next:smoke.text('[data-routine=deps] [data-routine-next]'),nextWant:'Next: '+smoke.formatRunWhen(smoke.ROUTINES[smoke.TA][1].nextAt,'en',Date.now()),quiet:smoke.text('[data-agent-card=dev-2] [data-silence-chip]'),ack:smoke.attr('[data-agent-card=dev-2] [data-run-silence-ack]','aria-label'),updated:smoke.text('[data-note-updated]')})");
+ ok(v.title==='Routines'&&v.notes==='Team notes'&&v.action==='Wakes the Lead'&&v.task==='Creates a task for Dev'&&v.run==='Run now'&&v.next===v.nextWant,'en: the routines panel',v);
+ ok(/^No signal for 1[2-4] min$/.test(v.quiet)&&v.ack==='Ignore the silence of this run'&&v.updated.startsWith('Updated: '),'en: the silence and the note drawer',v);
+ // The daily summary ran since (Correr ahora): a fire main skipped on another routine words it in en.
+ await js("smoke.ROUTINES[smoke.TA][2].last={at:Date.now()-86400000,skipped:true};smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['routines']})");
+ ok(await until("smoke.text('[data-routine=scan] [data-routine-last=skipped]').startsWith('Skipped the one at ')&&smoke.text('[data-routine=scan] [data-routine-last=skipped]').endsWith('more than 2 h went by with the app closed, Teams off or the PC asleep')",3000),'en: a skipped fire names the app closed, Teams off or the PC asleep',await js("smoke.text('[data-routine=scan] [data-routine-last]')"));
+ v=await js("smoke.copy()");
+ ok(!/[\\u2013\\u2014]/.test(v),'routines, en: no en or em dash in the copy');
+ await js("smoke.setLang('es')");await settle(200);
+ v=await js("smoke.copy()");
+ ok(!/[\\u2013\\u2014]/.test(v),'routines, es: no en or em dash in the copy');
+ await js("smoke.closeDrawer();smoke.click('[data-team-tab=board]')");
+ ok(await until("smoke.count('[data-board-column]')===5",3000),'back on the board');
+
  // English.
  await js("smoke.setLang('en')");await settle(200);
  v=await js("({tabs:[...document.querySelectorAll('[data-team-tab]')].map(e=>e.textContent.replace(/\\\\d+/g,'')),section:smoke.text('[data-teams-section]')})");
@@ -2370,7 +2584,7 @@ app.whenReady().then(async()=>{
  await js("smoke.keyActive({key:'Escape',code:'Escape',keyCode:27})");await settle(200);
 
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy; agents: roster, run now, run chat, stop, pauses, Labs confirm; board: columns, drag, bands, stopRun, keyboard, drawer, blocker loop, comments, new task, Lead thread; dispatch: autonomy switch, Por despachar, Despachar todo, kickoff; review: run now by phase, Retomar, consoleBusy; part 2: needs count parity, decide, answer, hire escaping, permission rule, plan section, Retomar after a dismissed card (the blocking card by cardId, the board card text, a refused card block), Esc keeps a draft, new-need toast; integrate: Integrar... in Te necesita, last attempt, preview, confirm verify, live steps and escaped tail, Esc and backdrop while running, sixteen errors with their actions, worktree console, blocked landing (none when already merged), refused start, a failed preflight ends the run, conflict files, askRebase, reopen while running (the outcome from the task main commits), merge commit, worktree removal, drawer section; B6 integration: ahead chip, no Marcar hecha, live worktree counts, dirty base files, install note; B6 review: verify runner notes in words, busy install and remove at the start, landing timeout apart from a temporary copy one; second round: base_dirty with ignored files, the stored step, landing and runner note in the row, the drawer, the last attempt and the result, an updateRef landing timeout); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy; agents: roster, run now, run chat, stop, pauses, Labs confirm; board: columns, drag, bands, stopRun, keyboard, drawer, blocker loop, comments, new task, Lead thread; dispatch: autonomy switch, Por despachar, Despachar todo, kickoff; review: run now by phase, Retomar, consoleBusy; part 2: needs count parity, decide, answer, hire escaping, permission rule, plan section, Retomar after a dismissed card (the blocking card by cardId, the board card text, a refused card block), Esc keeps a draft, new-need toast; integrate: Integrar... in Te necesita, last attempt, preview, confirm verify, live steps and escaped tail, Esc and backdrop while running, sixteen errors with their actions, worktree console, blocked landing (none when already merged), refused start, a failed preflight ends the run, conflict files, askRebase, reopen while running (the outcome from the task main commits), merge commit, worktree removal, drawer section; B6 integration: ahead chip, no Marcar hecha, live worktree counts, dirty base files, install note; B6 review: verify runner notes in words, busy install and remove at the start, landing timeout apart from a temporary copy one; second round: base_dirty with ignored files, the stored step, landing and runner note in the row, the drawer, the last attempt and the result, an updateRef landing timeout; routines: panel, next run label, skipped fires, Correr ahora with a CLI that is off, team notes and their drawer with the title heading once, run silence and its ignore); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; delete env.ELECTRON_RENDERER_URL

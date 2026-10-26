@@ -15,6 +15,7 @@ import { StatusGlyph } from '@/components/ui/StatusDot'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import type { ContextMenuItem } from '@/components/ui/ContextMenu'
+import { RunSilenceChip } from './AgentCard'
 
 /** The MIME of a card drag; the payload is `{nonce, teamId, taskId}` (a drop accepts only this renderer's nonce). */
 export const TASK_DRAG_MIME = 'application/x-snaos-task'
@@ -319,7 +320,8 @@ export interface TaskCardProps {
 
 /**
  * One card of the Tablero (app 2.7.0, E10 B3): id and title; the phase (amber
- * while it waits on the user), the assignee, the live run, the QA round, why
+ * while it waits on the user), the assignee, the live run (B7: and its silence,
+ * the chip alone: its ignore button lives on the agent's card), the QA round, why
  * it is blocked, its branch, comments and queued ones, a dot when it needs
  * the user and the pin when the user owns some of its fields. A click or
  * Enter opens the drawer; it drags natively (TASK_DRAG_MIME + the renderer's
@@ -392,6 +394,7 @@ export const TaskCard = memo(function TaskCard({ task, assigneeName, runName, se
           {assigneeName ?? t('teams.card.unassigned')}
         </span>
         {qa !== null && task.review && <span data-task-qa className={cn(CHIP, CHIP_NEUTRAL, 'tabular-nums')}>{t('teams.card.qaRound', { round: qa, max: task.review.max })}</span>}
+        {live && <RunSilenceChip run={live} />}
       </div>
       {blocked && (
         <p data-task-blocked={task.blocked?.kind} className="min-w-0 truncate text-[11px] text-state-action">

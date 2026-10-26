@@ -3,6 +3,8 @@
  * and the phone get, never the raw runtime. B1 builds the list row, the team
  * header and the "Te necesita" input; each later milestone adds its views
  * here (agents B2, board B3, queue B4, needs B5, routines B7, takeover B9).
+ * B7: the silence of a live run (quiet, stalled) is TeamService memory, read
+ * through a `silence` callback like the live `lastLineAt`.
  * B5: the full approval bodies (the plan text, the hire diff from the
  * canonical text and its risk flags), light ones for every count, and no
  * view shows or counts an approval, card or queue item of a task that is over.
@@ -23,6 +25,7 @@ import type {
   PlanView,
   QueueItemView,
   RoleSummary,
+  RoutineView,
   RunView,
   TaskBlockedView,
   TaskDetail,
@@ -34,7 +37,7 @@ import type {
   TeamTrustState,
   TeamView,
 } from '@shared/team-protocol'
-import type { PaneUsage } from '@shared/types'
+import type { PaneSilence, PaneUsage } from '@shared/types'
 import {
   BOARD_COLUMNS,
   columnOf,
@@ -54,6 +57,8 @@ import {
   type DispatchPlan,
   type QueueItem,
   type RoleDefinition,
+  type RoutineDef,
+  type RoutineState,
   type Run,
   type RunState,
   type TaskState,
@@ -436,8 +441,11 @@ export function usageToday(runs: readonly Run[], now: number): PaneUsage | undef
   return out
 }
 
-/** A run as the renderer and the phone see it; `lastLineAt` is the live value while the process runs. */
-export function runView(r: Run, live?: { lastLineAt?: number }): RunView {
+/**
+ * A run as the renderer and the phone see it; `lastLineAt` is the live value while the process runs, `silence` (B7)
+ * the run's silence while it runs (TeamService memory: quiet or stalled since its last line).
+ */
+export function runView(r: Run, live?: { lastLineAt?: number; silence?: PaneSilence }): RunView {
   const out: RunView = {
     id: r.id, agentId: r.agentId, roleId: r.roleId, taskId: r.taskId ?? null, mode: r.mode, trigger: r.trigger.reason,
     state: r.state, provider: r.provider, resumed: r.resumed, queuedAt: r.queuedAt,
@@ -450,6 +458,7 @@ export function runView(r: Run, live?: { lastLineAt?: number }): RunView {
   const lastLineAt = live?.lastLineAt ?? r.lastLineAt
   if (lastLineAt !== undefined) out.lastLineAt = lastLineAt
   if (r.failure) out.failure = { ...r.failure }
+  if (live?.silence) out.silence = { level: live.silence.level, since: live.silence.since }
   if (r.usage) out.usage = paneUsage(r.usage)
   if (r.context) out.context = { ...r.context }
   if (r.digest) out.digest = { ...r.digest, families: { ...r.digest.families }, files: [...r.digest.files] }
@@ -462,9 +471,18 @@ export function runView(r: Run, live?: { lastLineAt?: number }): RunView {
  * One roster card: the agent, its role as the trusted definition names it,
  * the active run and the newest ended one. `lastLineAt` reads the live value
  * of the supervisor (never committed on every line, design 3.5). `waiting`
- * (B4): why its wanted run waits, from the dispatcher's dry run.
+ * (B4): why its wanted run waits, from the dispatcher's dry run. `silenceOf`
+ * (B7): the active run's silence (the roster's SilenceChip).
  */
-export function agentView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null, a: AgentState, recent: readonly Run[], lastLineAt: (runId: string) => number | undefined, waiting?: DeferInfo): AgentView {
+export function agentView(
+  rt: Readonly<TeamRuntime>,
+  def: TeamDefinition | null,
+  a: AgentState,
+  recent: readonly Run[],
+  lastLineAt: (runId: string) => number | undefined,
+  waiting?: DeferInfo,
+  silenceOf?: (runId: string) => PaneSilence | undefined,
+): AgentView {
   const role = def?.roles.find((r) => r.id === a.roleId)
   const out: AgentView = {
     id: a.id, roleId: a.roleId, roleName: role?.name ?? a.roleId, kind: a.roleKind, index: agentIndex(a),
@@ -474,7 +492,7 @@ export function agentView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null,
   if (role?.effort) out.effort = role.effort
   const active = a.runId ? rt.activeRuns.find((r) => r.id === a.runId) : undefined
   if (active) {
-    out.run = runView(active, { lastLineAt: lastLineAt(active.id) })
+    out.run = runView(active, { lastLineAt: lastLineAt(active.id), silence: silenceOf?.(active.id) })
     if (active.taskId) out.taskId = active.taskId
   }
   for (let i = recent.length - 1; i >= 0; i--) {
@@ -512,6 +530,8 @@ export interface TaskViewCtx {
   needs: readonly TeamNeedRow[]
   /** Comments of a target already moved to archive/<target>.jsonl. */
   archived?: (target: string) => number
+  /** B7: a live run's silence (the task card's SilenceChip and the drawer's runs). */
+  silence?: (runId: string) => PaneSilence | undefined
 }
 
 /** Priority band, then createdAt, then the numeric id: the order of every task list (teamBoard.ts compareTasks). */
@@ -629,6 +649,8 @@ export function taskSummary(rt: Readonly<TeamRuntime>, t: TeamTask, v: TaskViewC
   if (run) {
     out.run = { id: run.id, agentId: run.agentId, mode: run.mode, state: run.state }
     if (run.startedAt !== undefined) out.run.startedAt = run.startedAt
+    const silence = v.silence?.(run.id)
+    if (silence) out.run.silence = { level: silence.level, since: silence.since }
   }
   return out
 }
@@ -662,7 +684,7 @@ export function taskDetail(
   for (const r of [...rt.activeRuns, ...[...v.recent].reverse()]) {
     if (r.taskId !== t.id || seen.has(r.id)) continue
     seen.add(r.id)
-    runs.push(runView(r, { lastLineAt: v.lastLineAt?.(r.id) }))
+    runs.push(runView(r, { lastLineAt: v.lastLineAt?.(r.id), silence: v.silence?.(r.id) }))
     if (runs.length >= TASK_RUNS_MAX) break
   }
   const reviewInfo: TaskDetail['reviewInfo'] = { round: t.review.round, max: t.review.max }
@@ -775,10 +797,35 @@ export function boardPage(rt: Readonly<TeamRuntime>, teamId: string, v: TaskView
 }
 
 /** The Lead thread (newest LEAD_PAGE before `before`, oldest first) and the Lead's roster card. */
-export function leadView(rt: Readonly<TeamRuntime>, def: TeamDefinition | null, o: { before?: number; recent: readonly Run[]; lastLineAt: (runId: string) => number | undefined }): LeadView {
+export function leadView(
+  rt: Readonly<TeamRuntime>,
+  def: TeamDefinition | null,
+  o: { before?: number; recent: readonly Run[]; lastLineAt: (runId: string) => number | undefined; silence?: (runId: string) => PaneSilence | undefined },
+): LeadView {
   const page = commentPage(rt, def, LEAD_THREAD, { before: o.before, limit: LEAD_PAGE })
   const lead = rt.agents.find((a) => a.roleKind === 'lead' && !a.retired) ?? rt.agents.find((a) => a.roleKind === 'lead')
-  return { messages: page.comments, cursor: page.cursor, agent: lead ? agentView(rt, def, lead, o.recent, o.lastLineAt) : null }
+  return { messages: page.comments, cursor: page.cursor, agent: lead ? agentView(rt, def, lead, o.recent, o.lastLineAt, undefined, o.silence) : null }
+}
+
+// ---- routines (B7) --------------------------------------------------------------------------------
+
+/**
+ * One routine of the definition (design 2.4, the read-only panel): `nextAt` is its armed deadline (null while it does
+ * not run on its own: off in its file, the team not trusted, the lab off). `last`: the newest of its last fire (a
+ * scheduled one, a catch-up or "Correr ahora", with the run or the task it made) and a due time it skipped because the
+ * app was closed past ROUTINE_CATCHUP_MS (`skipped`).
+ */
+export function routineView(r: RoutineDef, s: RoutineState | undefined, nextAt: number | null): RoutineView {
+  const out: RoutineView = { id: r.id, cron: r.cron, action: r.action, role: r.role, enabled: r.enabled, nextAt }
+  if (r.title) out.title = r.title
+  const fired = s?.lastFiredAt
+  if (s?.skippedFor !== undefined && (fired === undefined || s.skippedFor > fired)) out.last = { at: s.skippedFor, skipped: true }
+  else if (fired !== undefined) {
+    out.last = { at: fired }
+    if (s?.lastRunId) out.last.runId = s.lastRunId
+    if (s?.lastTaskId && r.action === 'task') out.last.taskId = s.lastTaskId
+  }
+  return out
 }
 
 /**

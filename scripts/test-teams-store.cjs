@@ -532,7 +532,9 @@ function boardChecks() {
   same(tool(leadActor, 'team.task.create', { title: 7 }).error, 'bad_request', 'a param of the wrong type')
   same(tool(leadActor, 'team.plan', { text: 'p' }).error, 'forbidden', 'a tool of another role')
   same(tool(leadActor, 'team.hire', { text: 'p' }).error, 'bad_request', 'a terminal tool (B5) checks its params: a hire text that is not a role file')
-  same(tool(leadActor, 'team.note', { text: 'p' }).error, 'unsupported', 'note waits for B7')
+  // B7: a team note is a file, not runtime state: the store is untouched and the note rides as a teamNote effect.
+  r = tool(leadActor, 'team.note', { text: 'p' })
+  check(r.ok && r.rt === store.rt && JSON.stringify(r.effects) === JSON.stringify([{ kind: 'teamNote', runId: leadRun, text: 'p' }]), 'team.note: the runtime as it is, a teamNote effect (B7)')
   same(tool(leadActor, 'team.show', {}).error, 'bad_request', 'reads never reach applyTool')
   r = tool(leadActor, 'team.comment', { target: 'lead', text: 'Arm\u00E9 las tareas' })
   commit(r, 'team.comment')

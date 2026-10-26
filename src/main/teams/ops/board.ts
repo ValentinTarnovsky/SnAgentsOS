@@ -15,7 +15,8 @@ import { boardPage, commentNumOf, commentView, leadView, needsRowsOf, taskDetail
 import { fail, type OpTable, type TeamInternals, type TeamRecord } from './types'
 
 function viewCtx(svc: TeamInternals, teamId: string, rec: TeamRecord): TaskViewCtx {
-  return { def: svc.shownDef(rec), needs: needsRowsOf(rec, svc.trusted(teamId)), archived: (target) => svc.archivedCount(teamId, target) }
+  // B7: a live run's silence (the task card's SilenceChip) from main's memory, like its last line.
+  return { def: svc.shownDef(rec), needs: needsRowsOf(rec, svc.trusted(teamId)), archived: (target) => svc.archivedCount(teamId, target), silence: (id) => svc.runLive(id).silence }
 }
 
 /** The drawer's task: its tree as main last read it (B6 integration: the `task` op reads it first; no git here). */
@@ -166,7 +167,7 @@ export const boardOps: Pick<OpTable, 'board' | 'task' | 'createTask' | 'updateTa
     if (!rec) return fail('not_found')
     const before = req.before === undefined ? undefined : commentNumOf(req.before)
     if (before === null) return fail('bad_request')
-    const lead = leadView(rec.store.rt, svc.shownDef(rec), { before, recent: rec.store.recentRuns(), lastLineAt: (id) => svc.runLive(id).lastLineAt })
+    const lead = leadView(rec.store.rt, svc.shownDef(rec), { before, recent: rec.store.recentRuns(), lastLineAt: (id) => svc.runLive(id).lastLineAt, silence: (id) => svc.runLive(id).silence })
     return { ok: true, lead }
   },
 

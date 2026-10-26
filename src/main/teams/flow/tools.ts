@@ -6,7 +6,9 @@
  *
  * B3 lands the non-terminal tools (task create and update, comment); B5 the
  * terminal ones (ask, needs, plan, review, verdict, done, approve, hire) and
- * applyBlock; `note` is B7's: until then it answers `unsupported`. Reads
+ * applyBlock; B7 `note`: a team note is a file, not runtime state, so the
+ * block path answers a `teamNote` effect TeamService writes after the commit
+ * (the CLI path writes it through TeamCtlPort.note, checked by noteOf). Reads
  * (show, tasks, task get) never come here: TeamService answers them.
  *
  * A terminal tool moves the task at once (T4, T7..T10, decision 35) and marks
@@ -35,6 +37,7 @@ import {
   type TerminalTool,
 } from '@shared/teams'
 import type { TaskDraft, TaskPatch } from '@shared/team-protocol'
+import { WS_NOTE_TITLE_MAX } from '@shared/ws-notes'
 import { openSystemCard } from './agents'
 import { addApproval, cancelPending, decideApproval, hireOf, qaAgentFor, sha256Utf8 } from './approvals'
 import { addComment, appendComment, createTask, updateTask } from './tasks'
@@ -51,6 +54,7 @@ const PARAMS: Readonly<Partial<Record<TeamToolName, readonly string[]>>> = {
   'task.create': ['title', 'body', 'assign', 'repo', 'isolation', 'blockedBy', 'priority', 'noPlan', 'parent'],
   'task.update': ['task', 'rev', 'title', 'body', 'assign', 'priority', 'blockedBy', 'isolation', 'state', 'needsPlan'],
   comment: ['target', 'text'],
+  note: ['text', 'title'],
   ask: ['text', 'options', 'multi', 'confirm'],
   needs: ['text'],
   plan: ['text', 'small'],
@@ -107,6 +111,27 @@ function optionsOf(v: unknown): string[] | null | undefined {
     out.push(s)
   }
   return out
+}
+
+/**
+ * B7: a `team note`'s params, checked as every agent text is (agentText: redacted, within COMMENT_TEXT_MAX, no control
+ * character) and its title one line of WS_NOTE_TITLE_MAX at most (controls and runs of spaces to one space, redacted).
+ * Null when they are not one. The CLI path (TeamService.ctlNote) and the block path (applyTool) both read it.
+ */
+export function noteOf(p: Record<string, unknown>): { text: string; title?: string } | null {
+  const text = agentText(p.text, COMMENT_TEXT_MAX, true)
+  if (!text) return null
+  if (p.title === undefined || p.title === null) return { text }
+  if (typeof p.title !== 'string') return null
+  // eslint-disable-next-line no-control-regex
+  const title = redactCredentials(p.title.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim())
+  if (title.length > WS_NOTE_TITLE_MAX) return null
+  return title ? { text, title } : { text }
+}
+
+/** The file text of a team note: its title as the first heading (noteTitle reads it back), then the text. */
+export function teamNoteText(n: { text: string; title?: string }): string {
+  return n.title ? `# ${n.title}\n\n${n.text}\n` : `${n.text}\n`
 }
 
 function replaceTask(tasks: readonly TeamTask[], t: TeamTask): TeamTask[] {
@@ -389,8 +414,15 @@ export function applyTool(rt: TeamRuntime, actor: Actor & { kind: 'agent' }, cal
       const res = addComment(rt, who, p.target, p.text, 'comment', ctx)
       return res.ok ? { ...res, result: { id: res.result.comment.id } } : res
     }
+    case 'note': {
+      // B7: the runtime does not change; the note file is the effect (the CLI path never comes here, teamCtl calls the port).
+      const n = noteOf(p)
+      if (!n) return fail('bad_request')
+      const effect: Extract<TeamEffect, { kind: 'teamNote' }> = { kind: 'teamNote', runId: run.id, text: n.text }
+      if (n.title) effect.title = n.title
+      return { ok: true, rt, effects: [effect], result: {} }
+    }
     default:
-      // B7: note.
       return fail('unsupported')
   }
 }

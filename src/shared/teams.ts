@@ -486,7 +486,11 @@ export interface Run {
   goalHash?: string
 }
 export interface TeamPause { reason: 'user' | 'auth' | 'billing'; at: number; cardId?: string; failure?: FailureInfo }
-export interface RoutineState { lastScheduledFor?: number; lastFiredAt?: number; lastRunId?: string; lastTaskId?: string; skippedFor?: number }
+export interface RoutineState {
+  lastScheduledFor?: number; lastFiredAt?: number; lastRunId?: string; lastTaskId?: string; skippedFor?: number
+  /** B7: the scheduled time of a wake a policy re-wake wrote over in its agent's slot, until a fire or its run lands (catch-up runs it once). */
+  displacedFor?: number
+}
 export interface TeamRuntime {
   v: typeof TEAM_STATE_VERSION; teamId: string; rev: number
   gen: string                                      // 8 hex minted by main (randomBytes) for emptyRuntime: a re-created team never adopts the old team's worktrees (decision 63)

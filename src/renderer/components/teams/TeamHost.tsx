@@ -17,6 +17,7 @@ import { AgentsRoster } from './AgentsRoster'
 import { AgentChatDrawer } from './AgentChatDrawer'
 import { TeamBoard } from './TeamBoard'
 import { TaskDrawer } from './TaskDrawer'
+import { TeamNoteDrawer } from './TeamNoteDrawer'
 
 /**
  * The Teams overlay (app 2.7.0, E10 B1; Labs teams), over the workspace area
@@ -167,6 +168,8 @@ function HostBody() {
           {view && drawer?.kind === 'agent' && <AgentChatDrawer key={drawer.agentId} teamId={team.id} view={view} drawer={drawer} />}
           {/* B3: one task, over any tab; a click on another card switches it in place (keepOpenOn). */}
           {view && drawer?.kind === 'task' && <TaskDrawer teamId={team.id} view={view} taskId={drawer.taskId} />}
+          {/* B7: one team note (the Lead's), over any tab; a click on another note of the panel switches it in place. */}
+          {view && drawer?.kind === 'note' && <TeamNoteDrawer teamId={team.id} noteId={drawer.noteId} />}
         </div>
       </>
     )

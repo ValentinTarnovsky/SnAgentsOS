@@ -189,7 +189,6 @@ export function deferText(d: DeferInfo, t: TFn, lang: Language, now: number): st
 
 const FAIL_KEY: Partial<Record<TeamError, MessageKey>> = {
   untrusted: 'teams.run.fail.untrusted',
-  cli_off: 'teams.run.fail.cli_off',
   running: 'teams.run.fail.running',
   stopping: 'teams.run.fail.stopping',
   not_found: 'teams.run.fail.not_found',
@@ -201,8 +200,12 @@ const FAIL_KEY: Partial<Record<TeamError, MessageKey>> = {
   bad_request: 'teams.run.fail.bad_request',
 }
 
-/** What a refused "Ejecutar ahora" says: the defer reason, or the failure in the catalog's words (never main's detail). */
+/**
+ * What a refused "Ejecutar ahora" says: the defer reason, or the failure in the catalog's words (never main's detail).
+ * A CLI that is off comes back as `deferred` {cliOff}: it says how to turn it on, not "Ahora no" (as routineFailText).
+ */
 export function runFailText(f: TeamFail, agent: string, t: TFn, lang: Language, now: number): string {
+  if (f.error === 'deferred' && f.defer?.reason === 'cliOff') return t('teams.run.fail.cli_off')
   if (f.error === 'deferred' && f.defer) return deferText(f.defer, t, lang, now)
   const key = FAIL_KEY[f.error]
   return key ? t(key, { agent }) : t('teams.run.fail.other')

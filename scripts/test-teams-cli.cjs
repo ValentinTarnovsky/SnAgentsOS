@@ -655,7 +655,7 @@ async function serverChecks() {
     await roleCase(lead, ['team', 'plan', 'x'], false, /not a tool of the lead role/)
     await roleCase(() => port.setRun({ roleKind: 'lead', mode: 'free', taskId: null }), ['team', 'task', 'create', '--title', 'x'], false, /the Lead creates tasks in its lead runs only; this run is in free mode/)
 
-    // team note until B7: no port.note -> disabled (exit 7); with one, its answer passes.
+    // team note: a port without note (the optional TeamCtlPort.note) -> disabled (exit 7); with one, its answer passes.
     lead()
     w.fresh()
     const note = await run(['team', 'note', 'resumen', '--json'])
@@ -1480,7 +1480,7 @@ async function main() {
     fs.rmSync(TMP, { recursive: true, force: true })
     if (sockRoot) fs.rmSync(sockRoot, { recursive: true, force: true })
   }
-  console.log(`PASS: ${checks} team cli checks (parser, verbs and flags, --blocked-by and --options, texts: BOM, CRLF, UTF-16, U+FFFD, client caps, params per method, server validation, redaction, roles and modes, dev subtasks, note until B7, terminals until B5, concluded, liveness, the 5.1 table, budgets, forgetCaller, revoked token, gate, the fake agent cli step, the real TeamService: Lead tasks with blockers, user_owned, a named loop of blockers, task get delivery; team diff and team log: worktree, root, --task, stat, log, literal paths, refused paths, caps, no repo config command, another team; fifth round: live tokens refused, the client guard, busy, merge base after a rebase, too_big with stderr; sixth round: every secret file name refused, maskTokens, a missing worktree folder)`)
+  console.log(`PASS: ${checks} team cli checks (parser, verbs and flags, --blocked-by and --options, texts: BOM, CRLF, UTF-16, U+FFFD, client caps, params per method, server validation, redaction, roles and modes, dev subtasks, team note through the port (disabled without one), terminals until B5, concluded, liveness, the 5.1 table, budgets, forgetCaller, revoked token, gate, the fake agent cli step, the real TeamService: Lead tasks with blockers, user_owned, a named loop of blockers, task get delivery; team diff and team log: worktree, root, --task, stat, log, literal paths, refused paths, caps, no repo config command, another team; fifth round: live tokens refused, the client guard, busy, merge base after a rebase, too_big with stderr; sixth round: every secret file name refused, maskTokens, a missing worktree folder)`)
 }
 
 main().catch((e) => {

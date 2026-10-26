@@ -4,12 +4,15 @@ import { loadRoster, useRosterStore } from '@/lib/teams/roster'
 import { Button } from '@/components/ui/Button'
 import { AgentCard } from './AgentCard'
 import { LeadCard } from './LeadCard'
+import { RoutinesPanel } from './RoutinesPanel'
+import { LeadNotesPanel } from './LeadNotesPanel'
 
 /**
  * The Agentes tab of a team (app 2.7.0, E10 B2): the Lead on top, full
  * width, then one card per agent of the trusted definition, in main's
  * order. The roster comes from main (`roster`) when the tab shows and again
- * on every change of the team's agents or runs (lib/teams/roster.ts).
+ * on every change of the team's agents or runs (lib/teams/roster.ts). B7
+ * appends the team's routines and the Lead's notes below.
  */
 export function AgentsRoster({ teamId }: { teamId: string }) {
   const t = useT()
@@ -47,6 +50,8 @@ export function AgentsRoster({ teamId }: { teamId: string }) {
           ))}
         </div>
       )}
+      <RoutinesPanel teamId={teamId} />
+      <LeadNotesPanel teamId={teamId} />
     </section>
   )
 }
