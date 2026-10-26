@@ -1,4 +1,4 @@
-import { promises as fsp } from 'fs'
+import { promises as fsp, renameSync, rmSync, writeFileSync } from 'fs'
 
 /**
  * Atomic write: a temp file next to the target, then a rename over it, so a
@@ -13,6 +13,36 @@ export async function writeAtomic(file: string, data: string | Uint8Array, opts:
     await fsp.rename(tmp, file)
   } catch (err) {
     await fsp.rm(tmp, { force: true }).catch(() => undefined)
+    throw err
+  }
+}
+
+/** Sync file calls writeAtomicSync uses; a test fake replaces them. */
+export interface AtomicSyncFs {
+  writeFileSync(file: string, data: string | Uint8Array, opts?: { mode?: number }): void
+  renameSync(from: string, to: string): void
+  rmSync(file: string, opts: { force: true }): void
+}
+
+const nodeSyncFs: AtomicSyncFs = { writeFileSync, renameSync, rmSync }
+
+/**
+ * `writeAtomic` for exit paths and synchronous stores (app 2.7.0, Teams): the
+ * same temp file plus rename, without an await between them, so it can run in
+ * a quit handler and never interleaves with another write of the same file.
+ * Does not create the parent folder. Throws after removing the temp file.
+ */
+export function writeAtomicSync(file: string, data: string | Uint8Array, opts: { mode?: number } = {}, fs: AtomicSyncFs = nodeSyncFs): void {
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+  try {
+    fs.writeFileSync(tmp, data, opts.mode !== undefined ? { mode: opts.mode } : undefined)
+    fs.renameSync(tmp, file)
+  } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true })
+    } catch {
+      /* already gone */
+    }
     throw err
   }
 }

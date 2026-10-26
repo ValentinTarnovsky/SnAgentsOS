@@ -98,7 +98,8 @@ window.result = (async () => {
  const badge = ws => host.querySelector('[data-workspace=' + ws + '] [data-ws-badge]');
  flushSync(() => store.getState().update({ paneStatus: { ...paneStatus, a1: { ...paneStatus.a1, attention: true }, b1: { ...paneStatus.b1, attention: false }, a2: { ...paneStatus.a2, attention: true } } }));
  await frames();
- check(host.querySelector('[data-waiting]').textContent === '1 waiting' && badge('w1') && badge('w1').textContent === '1' && !badge('w2'), 'an answered action leaves the pill and its workspace badge (got ' + (host.querySelector('[data-waiting]') || {}).textContent + ')');
+ // app 2.7.0: the desktop's rule, so the done nobody saw (attention true) counts with the open request.
+ check(host.querySelector('[data-waiting]').textContent === '2 waiting' && badge('w1') && badge('w1').textContent === '2' && !badge('w2'), 'an answered action leaves the pill and its workspace badge; the unseen done stays in both (got ' + (host.querySelector('[data-waiting]') || {}).textContent + ')');
  check(row('a2').hasAttribute('data-unread') && row('b1').querySelector('[data-status-line]').textContent.startsWith('Working') && row('b1').querySelector('[data-state]').getAttribute('data-state') === 'working', 'an unseen done is unread; the answered row reads working, line and glyph, as on the desktop (got ' + row('b1').querySelector('[data-status-line]').textContent + ')');
  flushSync(() => store.getState().update({ paneStatus: { ...paneStatus, a1: { ...paneStatus.a1, attention: false }, b1: { ...paneStatus.b1, attention: false }, a2: { ...paneStatus.a2, attention: false } } }));
  await frames();

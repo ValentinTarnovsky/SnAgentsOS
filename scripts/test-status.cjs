@@ -497,6 +497,7 @@ async function main() {
   promptCardChecks()
   await attentionChecks()
   tuneReadbackChecks()
+  statusSignalChecks()
   await agentRenameChecks()
   console.log(`PASS: ${checks} status, protocol, visibility, Discord, installer, schema 11/12, ntfy export, ntfy channel, away gate, lastHost, store, enrichment, Codex App Server detail, path open, firewall, connection log, answer card, attention and tune read-back checks`)
 }
@@ -628,17 +629,17 @@ async function schemaV11Checks() {
     connections: [{ id: 'c1', name: 'SSH', steps: [{ send: 'ssh host', waitFor: 'password:', secret: false }] }],
     keyButtons: [{ id: 'k1', label: 'Esc', seq: '\u001b' }],
   }
-  check(CONFIG_VERSION === 18, 'CONFIG_VERSION is 18 (app 2.5.0)')
+  check(CONFIG_VERSION === 19, 'CONFIG_VERSION is 19 (app 2.7.0)')
   const c = parseConfig(JSON.parse(JSON.stringify(v10)))
   check(c && c.version === CONFIG_VERSION, 'a v10 config parses and is stamped with the current version')
   const st = c.settings
   check(st.awakeMode === 'auto' && st.terminalUnicode11 === true && st.terminalAgentEndChip === true && st.notifications.inAppWhenFocused === true, 'v10 gains awakeMode, terminalUnicode11, terminalAgentEndChip and inAppWhenFocused defaults')
-  check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual', cacheTimer: { enabled: false, ttlMinutes: 5 }, syncAgentRename: true, shellAgentDetect: true }), 'v10 gains the settings.agents defaults (v11, v12, v13 and v17 keys)')
+  check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual', cacheTimer: { enabled: false, ttlMinutes: 5 }, syncAgentRename: true, shellAgentDetect: true, silence: { enabled: true, quietMin: 10, stalledMin: 20 } }), 'v10 gains the settings.agents defaults (v11, v12, v13, v17 and v19 keys)')
   check(c.workspaces.every(w => w.agentsCollapsed === undefined && w.panes.every(p => p.lastSession === undefined)), 'agentsCollapsed and lastSession stay absent')
-  const same = (a, b) => { if (a === b) return true; if (typeof a !== 'object' || typeof b !== 'object' || !a || !b) return false; return Object.keys(a).every(k => k === 'version' || k === 'snippets' || same(a[k], b[k])) }
+  const same = (a, b) => { if (a === b) return true; if (typeof a !== 'object' || typeof b !== 'object' || !a || !b) return false; return Object.keys(a).every(k => k === 'version' || k === 'snippets' || k === 'schedule' || same(a[k], b[k])) }
   check(same(v10, c), 'every v10 value survives the parse unchanged')
   check(c.snippets === undefined && c.quickCommands.length === 1 && c.quickCommands[0].id === 's1' && c.quickCommands[0].action === 'send', 'v10 snippets come back as quick commands (schema 12)')
-  check(st.terminalRenderer === 'webgl' && st.keymap.palette === 'Ctrl+P' && c.workspaces[0].panes[0].schedule.prompt === 'hola', 'opt-in renderer, keymap and schedules are kept')
+  check(st.terminalRenderer === 'webgl' && st.keymap.palette === 'Ctrl+P' && same(v10.workspaces[0].panes[0].schedule, c.workspaces[0].panes[0].schedules[0]) && c.workspaces[0].panes[0].schedules[0].id === 's1' && !('schedule' in c.workspaces[0].panes[0]), 'opt-in renderer, keymap and schedules are kept (schema 19: the schedule as schedules[0], id s1)')
   const v11 = JSON.parse(JSON.stringify(v10)); v11.version = 11
   v11.settings.terminalRenderer = 'dom'; v11.settings.awakeMode = 'sometimes'; v11.settings.terminalUnicode11 = 'yes'
   v11.settings.agents = { resumeOnStartup: 'auto', ctrlDigitFocus: false }
@@ -1228,7 +1229,8 @@ async function enrichmentChecks() {
       h2.tick(50); h2.hook('PostToolUse', { toolUseId: `t${i}` })
     }
     h2.flush()
-    check(h2.events.length - start <= 3 && h2.last().activity === 'Read g9.ts' && h2.heard.length === h2.events.length, '10 PreToolUse/PostToolUse pairs in one second stay throttled')
+    // App 2.7.0 (A3): every tool finished, so none is shown as current (it used to keep 'Read g9.ts').
+    check(h2.events.length - start <= 3 && h2.last().activity === undefined && h2.last().toolFamily === undefined && h2.heard.length === h2.events.length, '10 PreToolUse/PostToolUse pairs in one second stay throttled, and the finished tools are not shown')
   }
   // Listener seam (E1-FR-01) and SessionEnd parsing for E6-FR-21.
   {
@@ -1679,6 +1681,532 @@ function connLogRedactChecks() {
   check(redact('dial 192.168.1.20:4517') === 'dial 192.168.1.20:4517', 'connLog.redact keeps the dialed IP')
 }
 
+/**
+ * App 2.7.0 (A3): status signals in main. HookServer's StopFailure and plan
+ * fields, StatusManager's open tools, turn digest, failure, needs, mute,
+ * markRead, plans, noteSignal and the SilenceWatch (fake clock and timers
+ * that fire at their deadline).
+ */
+function statusSignalChecks() {
+  const SID = '0123abcd-0000-4000-8000-0000000000a3'
+  const SID2 = '0123abcd-0000-4000-8000-0000000000b3'
+  const MIN = 60_000
+  const { parseHookPayload } = load('src/main/status/HookServer.ts')
+  const { needsYouRows } = load('src/shared/attention.ts')
+  const { PLAN_TEXT_MAX, NEEDS_TEXT_MAX } = load('src/shared/types.ts')
+  function rig(opts = {}) {
+    const events = [], notices = [], timers = new Map()
+    let seq = 0, clock = opts.start ?? Date.UTC(2026, 9, 23, 12, 0)
+    class FakeDate extends Date { static now() { return clock } }
+    const mod = load('src/main/status/StatusManager.ts', {
+      require: id => id === 'electron' ? { Notification: { isSupported: () => false } } : require(id),
+      setTimeout: (fn, ms = 0) => { timers.set(++seq, { fn, at: clock + (ms || 0) }); return seq }, clearTimeout: id => timers.delete(id), Date: FakeDate,
+    })
+    const win = { isDestroyed: () => false, isFocused: () => false, webContents: { send: (ch, e) => { if (ch === 'status:state') events.push(e) } }, flashFrame() {} }
+    const manager = new mod.StatusManager(() => win, () => null, n => notices.push(n))
+    manager.setConfig(settings)
+    // main pushes the agents settings at boot; `silence: false` leaves the watch never configured.
+    if (opts.silence !== false) manager.setAgentSettings({ silence: opts.silence ?? {} })
+    manager.onSpawn('pty', 'pane'); manager.onSpawn('pty2', 'pane2')
+    /** Moves the clock, firing every timer that comes due at its own time. */
+    const advance = ms => {
+      const end = clock + ms
+      for (;;) {
+        let next = null
+        for (const [id, t] of timers) if (t.at <= end && (!next || t.at < next[1].at)) next = [id, t]
+        if (!next) break
+        timers.delete(next[0]); clock = Math.max(clock, next[1].at); next[1].fn()
+      }
+      clock = end
+    }
+    const hook = (name, rest = {}, pane = 'pane') => manager.onHookEvent({ consoleId: pane, ptyId: pane === 'pane' ? 'pty' : 'pty2', sessionId: pane === 'pane' ? SID : SID2, name, ...rest })
+    const of = pane => events.filter(e => e.paneId === pane)
+    // A Claude done settles 700 ms after Stop.
+    const done = (pane = 'pane') => { hook('Stop', { lastAssistantMessage: 'ok' }, pane); advance(701) }
+    return { mod, manager, hook, done, events, notices, timers, advance, of, last: (pane = 'pane') => of(pane).at(-1), st: (pane = 'pane') => manager.stateOf(pane), now: () => clock }
+  }
+
+  // 1. HookServer: StopFailure, the whole plan and the tool's file.
+  {
+    const limit = 'You\'ve hit your session limit \u00b7 resets 3pm (America/New_York)'
+    const f = parseHookPayload('pane', 'pty', 'StopFailure', { session_id: SID, error: 'rate_limit', last_assistant_message: limit, error_details: '429\nToo many' })
+    check(f.failureCode === 'rate_limit' && f.lastAssistantMessage === limit && f.errorDetails === '429 Too many', 'StopFailure keeps error, last_assistant_message and error_details (one line)')
+    const g = parseHookPayload('pane', 'pty', 'StopFailure', { session_id: SID, error: 'x'.repeat(40) + '\nsecond', error_details: 'd'.repeat(400) })
+    check(g.failureCode.length <= 32 && !g.failureCode.includes('\n') && g.errorDetails.length <= 300 && g.lastAssistantMessage === undefined, 'failureCode <= 32 and errorDetails <= 300, one line each')
+    check(parseHookPayload('pane', 'pty', 'StopFailure', { session_id: SID, error: { code: 1 } }).failureCode === undefined && parseHookPayload('pane', 'pty', 'Stop', { session_id: SID, error: 'rate_limit' }).failureCode === undefined, 'a non-string error, or a Stop, has no failureCode')
+    const plan = '# Plan\r\n\r\n1. Uno\n2. Dos\n\n\n\n3. Tres'
+    const p = parseHookPayload('pane', 'pty', 'PreToolUse', { session_id: SID, tool_name: 'ExitPlanMode', tool_use_id: 'p1', tool_input: { plan } })
+    check(p.planText === '# Plan\n\n1. Uno\n2. Dos\n\n3. Tres' && p.planTruncated === undefined && p.requestSummary === 'Plan', 'ExitPlanMode keeps the whole plan with its line breaks (3+ blank lines collapse)')
+    const long = ('linea\n'.repeat(4000) + 'z'.repeat(20000))
+    const q = parseHookPayload('pane', 'pty', 'PermissionRequest', { session_id: SID, tool_name: 'ExitPlanMode', tool_input: { plan: long } })
+    check(q.planText.length === PLAN_TEXT_MAX && q.planText.endsWith('\u2026') && q.planText.startsWith('linea\nlinea\n') && q.planTruncated === true, 'a plan over PLAN_TEXT_MAX (32768 UTF-16 units) is cut there, with line breaks, and marked truncated')
+    check(parseHookPayload('pane', 'pty', 'PreToolUse', { session_id: SID, tool_name: 'ExitPlanMode', tool_input: { plan: 7 } }).planText === undefined && parseHookPayload('pane', 'pty', 'PreToolUse', { session_id: SID, tool_name: 'Bash', tool_input: { plan: 'x' } }).planText === undefined, 'only an ExitPlanMode string plan is kept')
+    check(parseHookPayload('pane', 'pty', 'PreToolUse', { session_id: SID, tool_name: 'Edit', tool_input: { file_path: 'C:\\repo\\src\\a.ts' } }).toolFile === 'src/a.ts' && parseHookPayload('pane', 'pty', 'PreToolUse', { session_id: SID, tool_name: 'Bash', tool_input: { command: 'cat C:\\x.ts' } }).toolFile === undefined, 'a file tool names its file for the digest; Bash names none')
+  }
+
+  // 2. Open tools: a finished tool is not shown; parallel tools; Task; what clears them.
+  {
+    const h = rig({ silence: false })
+    h.hook('UserPromptSubmit', { prompt: 'arreglá el login' })
+    h.hook('PreToolUse', { toolName: 'Bash', toolUseId: 't1', toolSummary: 'Bash: npm test' })
+    check(h.st().activity === 'Bash: npm test' && h.st().toolFamily === 'run', 'the open tool is the activity, with its family')
+    h.hook('PostToolUse', { toolUseId: 't1' })
+    check(h.st().state === 'working' && h.st().activity === undefined && h.st().toolFamily === undefined, 'a finished tool is not shown (no activity, no toolFamily after PostToolUse)')
+    check(h.st().detail === undefined, 'nor as the tool detail the desktop row reads')
+    h.advance(600)
+    check(h.last().activity === undefined && h.last().toolFamily === undefined, 'and the throttled emission agrees')
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'a', toolSummary: 'Read a.ts' })
+    h.hook('PreToolUse', { toolName: 'Grep', toolUseId: 'b', toolSummary: 'Grep "login"' })
+    check(h.st().activity === 'Grep "login"' && h.st().toolFamily === 'search', 'parallel tools: the newest open one is current')
+    h.hook('PostToolUse', { toolUseId: 'b' })
+    check(h.st().activity === 'Read a.ts' && h.st().toolFamily === 'read', 'closing the newest shows the one still open')
+    check(h.st().detail.kind === 'tool' && h.st().detail.text === 'Read a.ts', 'the tool detail (the desktop row) follows the current tool too')
+    h.hook('PreToolUse', { toolName: 'Edit', toolUseId: 'c', toolSummary: 'Edit b.ts' })
+    h.hook('PostToolUse', { toolUseId: 'a' })
+    check(h.st().activity === 'Edit b.ts' && h.st().toolFamily === 'edit', 'an older tool finishing first leaves the newer one current')
+    h.hook('PostToolUseFailure', { toolUseId: 'c' })
+    check(h.st().activity === undefined, 'a failed tool closes too')
+    h.hook('PreToolUse', { toolName: 'Task', toolUseId: 'task', toolSummary: 'Task: revisar tests' })
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'sub-read', agentId: 'sub', toolSummary: 'Read x.ts' })
+    h.hook('PostToolUse', { toolUseId: 'sub-read', agentId: 'sub' })
+    check(h.st().activity === 'Task: revisar tests' && h.st().toolFamily === 'agent', 'a Task stays open while its subagent works (subagent tools never open or close it)')
+    h.hook('PostToolUse', { toolUseId: 'task' })
+    check(h.st().activity === undefined, 'and closes with its own PostToolUse')
+    h.hook('PreToolUse', { toolName: 'Bash', toolUseId: 'p', toolSummary: 'Bash: rm -rf dist' })
+    h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'p', toolSummary: 'Bash: rm -rf dist' })
+    check(h.st().state === 'action' && h.st().activity === 'Bash: rm -rf dist' && h.st().toolFamily === 'run', 'a tool waiting on its permission is the activity of the action')
+    h.hook('PostToolUse', { toolUseId: 'p' })
+    check(h.st().state === 'working' && h.st().activity === undefined, 'its PostToolUse resolves the request and closes the tool')
+    check(h.st().detail === undefined, 'and the answered permission detail does not keep naming it')
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'q', toolSummary: 'Read q.ts' })
+    h.hook('UserPromptSubmit', { prompt: 'otra cosa' })
+    check(h.st().activity === undefined, 'a prompt ends every tool the last turn left open')
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'r', toolSummary: 'Read r.ts' })
+    h.done()
+    check(h.st().state === 'done', 'done')
+    h.hook('PostToolUse', { toolUseId: 'unrelated' })
+    check(h.st().state === 'working' && h.st().activity === undefined, 'done ends the open tools (a later wake-up does not bring the old one back)')
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 's', toolSummary: 'Read s.ts' }); h.hook('StopFailure', { failureCode: 'overloaded' })
+    h.hook('PostToolUse', { toolUseId: 'late' })
+    check(h.st().activity === undefined, 'a StopFailure ends them too')
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'u', toolSummary: 'Read u.ts' }); h.hook('SessionStart', { source: 'clear' })
+    h.hook('PostToolUse', { toolUseId: 'x' })
+    check(h.st().activity === undefined, 'and so does a start')
+    h.hook('PreToolUse', { toolName: 'Read', toolSummary: 'Read anon.ts' })
+    check(h.st().activity === 'Read anon.ts', 'a tool with no id (an older producer) still shows')
+    h.hook('PostToolUse', { toolUseId: 'whatever' })
+    check(h.st().activity === undefined, 'and a PostToolUse no open id matches ends it')
+    // An idle (an interrupted turn) ends them like done, error and end: the
+    // next working with no tool does not bring the old one back.
+    const claude = (kind, rest = {}) => h.manager.onAgentEvent({ paneId: 'pane', ptyId: 'pty', provider: 'claude', sessionId: SID, kind, ...rest })
+    h.hook('PreToolUse', { toolName: 'Grep', toolUseId: 'i1', toolSummary: 'Grep "idle"' })
+    claude('idle')
+    check(h.st().state === 'idle' && h.st().activity === undefined && h.st().toolFamily === undefined, 'a Claude idle event shows no tool')
+    claude('working')
+    check(h.st().state === 'working' && h.st().activity === undefined && h.st().toolFamily === undefined && h.st().detail === undefined, 'an idle clears the open tools (no activity, no toolFamily on the next working)')
+    h.hook('PreToolUse', { toolName: 'Bash', toolUseId: 'esc', toolSummary: 'Bash: npm test' })
+    h.manager.reportTitle('pane', '✳ Arreglar login')
+    h.advance(h.mod.INTERRUPT_SETTLE_MS)
+    check(h.st().state === 'idle' && h.st().activity === undefined, 'the Esc interrupt (Claude\'s idle with no hook) settles with no tool')
+    claude('working')
+    check(h.st().state === 'working' && h.st().activity === undefined && h.st().toolFamily === undefined, 'and the next working does not show the interrupted tool')
+  }
+
+  // 3. Turn digest: every tool of the turn, frozen on done.
+  {
+    const h = rig({ silence: false })
+    h.hook('UserPromptSubmit', { prompt: 'x' })
+    check(h.st().digest === undefined, 'a turn with no tool has no digest')
+    h.hook('PreToolUse', { toolName: 'Edit', toolUseId: 'e1', toolSummary: 'Edit a.ts', toolFile: 'src/a.ts' })
+    h.hook('PreToolUse', { toolName: 'Edit', toolUseId: 'e1', toolSummary: 'Edit a.ts', toolFile: 'src/a.ts' })
+    h.hook('PostToolUse', { toolUseId: 'e1' })
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'r1', toolSummary: 'Read b.ts', toolFile: 'src/b.ts' })
+    h.hook('PreToolUse', { toolName: 'Bash', toolUseId: 'b1', toolSummary: 'Bash: ls' })
+    h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'b1', toolSummary: 'Bash: ls' })
+    h.hook('PostToolUse', { toolUseId: 'b1' })
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'sub', agentId: 'child', toolSummary: 'Read c.ts', toolFile: 'src/c.ts' })
+    let d = h.st().digest
+    check(d.tools === 3 && d.families.edit === 1 && d.families.read === 1 && d.families.run === 1 && d.files.join() === 'src/a.ts,src/b.ts' && d.lastFamily === 'run', 'the digest counts each tool once by family with its files (a repeated PreToolUse, the permission prompt and subagent tools add nothing)')
+    h.hook('Stop', { lastAssistantMessage: 'casi' }); h.advance(300)
+    h.hook('PreToolUse', { toolName: 'Grep', toolUseId: 'g1', toolSummary: 'Grep "x"' }); h.advance(800)
+    check(h.st().state === 'working' && h.st().digest.tools === 4, 'a hook inside the 700 ms cancels the done and the turn keeps counting')
+    h.hook('PostToolUse', { toolUseId: 'g1' }); h.done()
+    const doneEvt = h.of('pane').find(e => e.state === 'done')
+    check(doneEvt.digest.tools === 4 && doneEvt.digest.families.search === 1 && h.st().digest.tools === 4, 'done publishes the frozen digest of the turn')
+    h.hook('UserPromptSubmit', { prompt: 'y' })
+    check(h.st().digest === undefined, 'the next prompt starts an empty digest')
+    h.hook('PreToolUse', { toolName: 'ExitPlanMode', toolUseId: 'plan-1', planText: 'Plan' })
+    h.hook('PermissionRequest', { toolName: 'ExitPlanMode', planText: 'Plan' })
+    d = h.st().digest
+    check(d.tools === 1 && d.families.plan === 1, 'a plan request counts once as a plan tool')
+    h.hook('PostToolUse', { toolUseId: 'plan-1' }); h.done()
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'w1', toolSummary: 'Read w.ts' })
+    check(h.st().state === 'working' && h.st().digest.tools === 1 && h.st().digest.families.read === 1, 'a turn the agent opens itself (no prompt) starts its own digest')
+    check(JSON.stringify(h.st()).indexOf('"families"') > 0 && h.st().digest.files.length === 0, 'digest is a plain object on the desktop event')
+  }
+
+  // 4. Failure: a limit with its reset time, cleared by the next working or a start.
+  {
+    const h = rig({ silence: false })
+    h.hook('UserPromptSubmit', { prompt: 'x' })
+    const n = h.events.length
+    h.hook('StopFailure', { failureCode: 'rate_limit', lastAssistantMessage: 'You\'ve hit your session limit \u00b7 resets 3pm (America/New_York)' })
+    const e = h.last()
+    const ny = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' })
+    check(h.events.length === n + 1 && e.state === 'error' && e.reason === 'failure' && e.failure.kind === 'limit' && e.failure.code === 'rate_limit', 'a StopFailure by limit publishes failure.kind limit at once')
+    check(typeof e.failure.until === 'number' && e.failure.until > h.now() && e.failure.until - h.now() <= 86_400_000 && ny.format(e.failure.until) === '15:00', 'with until: the next 3pm in America/New_York')
+    h.hook('StopFailure', { failureCode: 'overloaded' })
+    check(h.last().failure.kind === 'overloaded' && !('until' in h.last().failure) && h.events.length === n + 2, 'another failure of the same turn replaces it at once')
+    h.hook('UserPromptSubmit', { prompt: 'de nuevo' })
+    check(h.st().failure === undefined && h.last().failure === undefined && h.st().state === 'working', 'the next working clears the failure')
+    h.hook('StopFailure', { failureCode: 'invalid_request', errorDetails: 'Prompt is too long: 210000 tokens > 200000 maximum' })
+    check(h.st().failure.kind === 'context', 'error_details refine the code (context window)')
+    h.hook('StopFailure', { failureCode: 'authentication_failed' })
+    h.hook('SessionStart', { source: 'clear' })
+    check(h.st().failure === undefined, 'a start clears it too')
+    h.event = (kind, rest = {}) => h.manager.onAgentEvent({ paneId: 'pane', ptyId: 'pty', provider: 'claude', sessionId: SID, kind, ...rest })
+    h.event('error', { failure: { kind: 'bogus' } })
+    check(h.st().state === 'error' && h.st().failure === undefined, 'a failure of an unknown kind is dropped')
+    h.event('error', { failure: { kind: 'limit', until: 'soon', code: 'x\ny'.repeat(30) } })
+    check(h.st().failure.kind === 'limit' && h.st().failure.until === undefined && h.st().failure.code.length <= 32 && !h.st().failure.code.includes('\n'), 'main bounds a producer\'s failure (finite until, one-line code <= 32)')
+  }
+
+  // 5. Silence: 10 minutes without a signal is quiet, 20 stalled; a signal clears it.
+  {
+    const h = rig()
+    const t0 = h.now()
+    h.hook('UserPromptSubmit', { prompt: 'x' })
+    h.advance(10 * MIN - 1)
+    check(h.st().silence === undefined, 'no silence before quietMin')
+    h.advance(1)
+    check(h.st().silence?.level === 'quiet' && h.st().silence.since === t0 && h.last().silence?.level === 'quiet' && h.st().state === 'working', '10 minutes without a signal give quiet, since the last signal')
+    h.advance(10 * MIN)
+    check(h.st().silence?.level === 'stalled' && h.st().silence.since === t0 && h.last().silence?.level === 'stalled', '20 give stalled')
+    const n = h.events.length
+    h.hook('PreToolUse', { toolName: 'Bash', toolUseId: 'b', toolSummary: 'Bash: npm test' })
+    check(h.events.length > n && h.last().silence === undefined && h.st().silence === undefined && h.st().signalAt === h.now(), 'a signal clears it at once')
+    const t1 = h.now()
+    h.advance(10 * MIN)
+    check(h.st().silence?.level === 'quiet' && h.st().silence.since === t1, 'and the watch counts again from that signal')
+    // Lazy: signals never re-arm the timer and never publish one by one.
+    h.hook('PostToolUse', { toolUseId: 'b' })
+    check(h.st().silence === undefined, 'the PostToolUse is a signal too')
+    h.advance(5 * MIN)
+    const timers = h.timers.size, before = h.events.length
+    const t2 = h.now()
+    for (let i = 0; i < 50; i++) h.manager.noteSignal('pane', 'pty')
+    check(h.events.length === before && h.timers.size === timers, '50 signals: no publish and no new timer')
+    h.manager.noteSignal('pane', 'other-pty'); h.manager.noteSignal('ghost')
+    check(h.st().signalAt === t2, 'a signal of another pty or an unknown pane is ignored')
+    h.advance(5 * MIN)
+    check(h.st().silence === undefined, 'the deadline that finds a newer signal re-arms instead of reporting')
+    h.advance(5 * MIN)
+    check(h.st().silence?.level === 'quiet' && h.st().silence.since === t2, 'quiet then comes quietMin after that signal')
+    // Leaving working clears it; an action is not watched.
+    h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'perm', toolSummary: 'Bash: rm' })
+    check(h.st().state === 'action' && h.st().silence === undefined && h.last().silence === undefined, 'a request (action) clears the silence')
+    h.advance(30 * MIN)
+    check(h.st().silence === undefined, 'and an action is never watched')
+    h.hook('PostToolUse', { toolUseId: 'perm' })
+    h.advance(10 * MIN)
+    check(h.st().silence?.level === 'quiet', 'back to working, watched again')
+    h.done()
+    check(h.st().state === 'done' && h.st().silence === undefined, 'done clears it')
+    h.advance(60 * MIN)
+    check(h.st().silence === undefined && h.timers.size === 0, 'a finished turn arms nothing at all')
+    // ackSilence: the rest of the turn is ignored.
+    h.hook('UserPromptSubmit', { prompt: 'y' })
+    h.advance(10 * MIN)
+    check(h.st().silence?.level === 'quiet', 'quiet again')
+    check(h.manager.ackSilence('pane') === true && h.st().silence === undefined && h.last().silence === undefined, 'ackSilence clears it at once')
+    h.advance(60 * MIN)
+    check(h.st().silence === undefined && h.timers.size === 0, 'no silence for the rest of that turn, and no deadline')
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'r', toolSummary: 'Read a.ts' })
+    h.advance(30 * MIN)
+    check(h.st().silence === undefined, 'a tool of the same turn does not bring it back')
+    h.hook('UserPromptSubmit', { prompt: 'z' })
+    h.advance(10 * MIN)
+    check(h.st().silence?.level === 'quiet', 'the next turn is watched again')
+    check(h.manager.ackSilence('nope') === false, 'ackSilence without a track is false')
+    // Settings: off clears and arms nothing; on again re-judges; never configured is off.
+    h.manager.setAgentSettings({ silence: { enabled: false, quietMin: 10, stalledMin: 20 } })
+    check(h.st().silence === undefined && h.last().silence === undefined && h.timers.size === 0, 'turning it off clears the silence and leaves no deadline')
+    h.advance(60 * MIN)
+    check(h.st().silence === undefined, 'off: nothing ever fires')
+    h.manager.setAgentSettings({ silence: { enabled: true, quietMin: 30, stalledMin: 120 } })
+    h.advance(0)
+    check(h.st().silence?.level === 'quiet', 'on again: a pane silent for 70 minutes is judged on the next tick with the new minutes (quiet 30, stalled 120)')
+    h.manager.setAgentSettings({ silence: { enabled: true, quietMin: 100, stalledMin: 120 } })
+    check(h.st().silence === undefined, 'raising quietMin past the silence clears it')
+    h.manager.setAgentSettings({ shellAgentDetect: true, silence: { enabled: true, quietMin: 100, stalledMin: 120 } })
+    check(h.st().silence === undefined, 'the same settings again change nothing')
+    const never = rig({ silence: false })
+    never.hook('UserPromptSubmit', { prompt: 'x' }); never.advance(60 * MIN)
+    check(never.st().silence === undefined && never.timers.size === 0, 'before main pushes the settings the watch arms nothing')
+    // A turn waiting on background work it started is not the agent's silence.
+    const bg = rig()
+    bg.hook('UserPromptSubmit', { prompt: 'x' }); bg.hook('Stop', { background: { waits: 1, other: 0 } }); bg.advance(701)
+    bg.advance(60 * MIN)
+    check(bg.st().state === 'working' && bg.st().waiting?.kind === 'background' && bg.st().silence === undefined, 'waiting on background work is never quiet')
+    // Exit and dispose leave no deadline behind.
+    const ex = rig()
+    ex.hook('UserPromptSubmit', { prompt: 'x' })
+    ex.manager.onExit('pty', 'pane')
+    check(ex.timers.size === 0, 'an exit drops the pane\'s deadline')
+    const dp = rig()
+    dp.hook('UserPromptSubmit', { prompt: 'x' }); dp.hook('UserPromptSubmit', { prompt: 'x' }, 'pane2')
+    dp.manager.dispose()
+    check(dp.timers.size === 0, 'dispose drops every deadline')
+    // The constructor seam: the watch's clock and timers can be injected.
+    const delays = []
+    const { StatusManager } = load('src/main/status/StatusManager.ts', { require: id => id === 'electron' ? { Notification: { isSupported: () => false } } : require(id) })
+    const seam = new StatusManager(() => null, () => null, () => {}, undefined, undefined, { silence: { now: () => Date.now(), setTimeout: (_fn, ms) => { delays.push(ms); return delays.length }, clearTimeout: () => {} } })
+    seam.setAgentSettings({}); seam.onSpawn('pty', 'pane')
+    seam.onHookEvent({ consoleId: 'pane', ptyId: 'pty', sessionId: SID, name: 'UserPromptSubmit', prompt: 'x' })
+    check(delays.length === 1 && delays[0] > 10 * MIN - 5000 && delays[0] <= 10 * MIN, 'the SilenceWatch takes injected timers: one deadline quietMin ahead')
+    seam.dispose()
+  }
+
+  // 6. noteSignal: before routeSubSession, with no track, and the AwakeService refresh.
+  {
+    const h = rig()
+    h.hook('SessionStart', { source: 'startup' }); h.hook('UserPromptSubmit', { prompt: 'corré el driver' })
+    h.hook('PreToolUse', { toolName: 'Bash', toolUseId: 'drv', toolSummary: 'Bash: sn-drive' })
+    h.advance(8 * MIN)
+    h.hook('UserPromptSubmit', { sessionId: 'sub-1', nested: true, prompt: 'sub' })
+    check(h.st().signalAt === h.now() && h.manager.paneForSession('sub-1') === null, 'a sub-session hook (routeSubSession consumes it) still counts as a signal of the console')
+    h.advance(2 * MIN)
+    check(h.st().silence === undefined, 'so 10 minutes after the console\'s own last hook it is not quiet')
+    h.advance(8 * MIN)
+    check(h.st().silence?.level === 'quiet', 'but 10 minutes after the sub-session hook it is')
+    const n = h.events.length
+    h.hook('UserPromptSubmit', { sessionId: 'sub-2', nested: true, prompt: 'otra' }, 'pane2')
+    check(h.st('pane2') === null && h.events.length === n, 'a nested hook of a pane with no track is a signal kept aside (no track, no status)')
+    const a = rig({ silence: false })
+    a.hook('UserPromptSubmit', { prompt: 'x' })
+    const m = a.events.length
+    a.advance(5 * MIN); a.manager.noteSignal('pane', 'pty')
+    a.advance(5 * MIN - 1); a.manager.noteSignal('pane', 'pty')
+    check(a.events.length === m, 'no refresh before SIGNAL_REFRESH_MS since the last publish')
+    a.advance(1); a.manager.noteSignal('pane', 'pty')
+    check(a.mod.SIGNAL_REFRESH_MS === 10 * MIN && a.events.length === m + 1 && a.last().signalAt === a.now() && a.last().updatedAt === a.now() && a.last().state === 'working', 'a working pane whose signals keep coming republishes once after 10 minutes, with a fresh signalAt')
+    a.manager.noteSignal('pane', 'pty')
+    check(a.events.length === m + 1, 'and not again right after')
+    a.done(); const k = a.events.length
+    a.advance(20 * MIN); a.manager.noteSignal('pane', 'pty')
+    check(a.events.length === k, 'a pane that is not working gets no refresh')
+  }
+
+  // 7. needs: attention without pending, first in "Te esperan", cleared by prompt, start, end and --clear.
+  {
+    const h = rig({ silence: false })
+    h.hook('UserPromptSubmit', { prompt: 'x' }, 'pane2'); h.done('pane2')
+    h.advance(5000)
+    h.hook('UserPromptSubmit', { prompt: 'deploy' })
+    check(h.manager.setNeeds('pane', '  Aprobá el deploy\n a prod  ') === true, 'setNeeds on a live pane')
+    const e = h.last()
+    check(e.needs.text === 'Aprobá el deploy a prod' && e.needs.at === h.now() && e.attention === true && e.state === 'working' && e.pendingCount === 0 && e.pending === undefined, 'needs: attention true, one line, never in pending (state and pendingCount stay)')
+    const rows = needsYouRows(h.manager.snapshot().map(s => ({ paneId: s.paneId, workspaceId: 'w', status: s })))
+    check(rows.length === 2 && rows[0].id === 'pane' && rows[0].rank === 1 && rows[1].id === 'pane2', 'needsYouRows puts the console with needs first, above an older unread done')
+    const n = h.events.length
+    check(h.manager.setNeeds('pane', 'Aprobá el deploy a prod') === true && h.events.length === n, 'the same text again publishes nothing and keeps its first time')
+    h.manager.setNeeds('pane', 'x'.repeat(500))
+    check(h.st().needs.text.length === NEEDS_TEXT_MAX && h.st().needs.text.endsWith('\u2026'), 'needs text is clipped to NEEDS_TEXT_MAX')
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'r', toolSummary: 'Read a.ts' })
+    check(h.st().needs !== undefined, 'a tool (a working with no prompt) keeps it')
+    h.manager.ackPane('pane')
+    check(h.st().attention === true, 'looking at the pane does not answer it')
+    check(h.manager.setNeeds('pane', null) === true && h.st().needs === undefined && h.st().attention === false && h.last().needs === undefined, 'setNeeds(null) clears it at once')
+    h.manager.setNeeds('pane', 'a'); h.hook('UserPromptSubmit', { prompt: 'listo' })
+    check(h.st().needs === undefined && h.st().attention === false, 'a UserPromptSubmit clears it')
+    h.manager.setNeeds('pane', 'b'); h.hook('SessionStart', { source: 'clear' })
+    check(h.st().needs === undefined, 'a start clears it')
+    h.manager.setNeeds('pane', 'c'); h.hook('SessionEnd', { endReason: 'other' })
+    check(h.st().needs === undefined, 'an end clears it')
+    h.manager.setNeeds('pane', '   ')
+    check(h.st().needs === undefined, 'a blank text is a clear')
+    check(h.manager.setNeeds('ghost', 'x') === false, 'no live pty: false')
+    // A live pane with no track still shows it, as a minimal idle status.
+    h.manager.onSpawn('pty3', 'pane3')
+    check(h.manager.setNeeds('pane3', 'Revisá el diff') === true, 'setNeeds on a pane with no track')
+    const b = h.last('pane3')
+    check(b.state === 'idle' && b.precise === false && b.attention === true && b.needs.text === 'Revisá el diff' && b.pendingCount === 0 && h.st('pane3').needs.text === 'Revisá el diff', 'it is published as a minimal idle status with attention')
+    check(b.bare === true && h.st('pane3').bare === true && h.manager.snapshot().find(s => s.paneId === 'pane3').bare === true, 'that status is marked bare (published, stateOf and snapshot): no agent state for its consumers')
+    check(!('provider' in b), 'a pane that runs no agent: the bare status names no provider')
+    check(h.manager.snapshot().filter(s => s.paneId !== 'pane3').every(s => !('bare' in s)) && !('bare' in h.st()), 'a track\'s own status is never bare')
+    const { toShareStatus } = load('src/main/share/StatusCoalescer.ts')
+    const { bare: _mark, ...unmarked } = b
+    check(toShareStatus(b) === null && toShareStatus(h.st('pane3')) === null && toShareStatus(unmarked)?.state === 'idle', 'Share: a bare status is no status for a guest (the mark alone decides)')
+    check(h.manager.snapshot().some(s => s.paneId === 'pane3' && s.needs) && needsYouRows([{ paneId: 'pane3', workspaceId: 'w', status: h.st('pane3') }]).length === 1, 'snapshot carries it and needsYouRows counts it')
+    h.manager.setNeeds('pane3', null)
+    check(h.last('pane3').state === null && h.st('pane3') === null, 'clearing it drops that status')
+    h.manager.setNeeds('pane3', 'x')
+    h.manager.onHookEvent({ consoleId: 'pane3', ptyId: 'pty3', sessionId: SID.replace('a3', 'c3'), name: 'PreToolUse', toolName: 'Read', toolUseId: 'r', toolSummary: 'Read a.ts' })
+    check(h.st('pane3').precise === true && h.st('pane3').needs?.text === 'x' && h.st('pane3').attention === true, 'a track that appears takes the needs over')
+    check(!('bare' in h.st('pane3')) && !('bare' in h.last('pane3')) && h.last('pane3').precise === true, 'and drops the bare mark (its own status is a real one)')
+    h.manager.setNeeds('pane3', 'y'); h.manager.onExit('pty3', 'pane3')
+    check(h.st('pane3') === null && h.manager.setNeeds('pane3', 'z') === false, 'an exit drops it')
+  }
+
+  // 7b. A compaction is not a start: the same session (often mid-turn) keeps
+  // needs, both digests, the silence ack and the failure; a startup clears them.
+  {
+    const h = rig()
+    h.hook('UserPromptSubmit', { prompt: 'migrá la base' })
+    h.hook('PreToolUse', { toolName: 'Edit', toolUseId: 'e1', toolSummary: 'Edit a.ts', toolFile: 'src/a.ts' })
+    h.hook('PostToolUse', { toolUseId: 'e1' })
+    h.manager.setNeeds('pane', 'Elegí el motor de la base')
+    check(h.manager.ackSilence('pane') === true, 'the silence of this turn is acknowledged')
+    h.hook('SessionStart', { source: 'compact' })
+    let s = h.st()
+    check(s.needs?.text === 'Elegí el motor de la base' && s.attention === true, 'a compact of the same session keeps needs and its attention')
+    check(s.digest?.tools === 1 && s.digest.families.edit === 1 && s.digest.files.join() === 'src/a.ts', 'and the turn digest')
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'r1', toolSummary: 'Read b.ts', toolFile: 'src/b.ts' })
+    check(h.st().state === 'working' && h.st().digest.tools === 2, 'the turn goes on after it and keeps counting')
+    h.advance(30 * MIN)
+    check(h.st().silence === undefined, 'the silence ack survives the compact (the same turn stays ignored)')
+    h.hook('PostToolUse', { toolUseId: 'r1' }); h.done()
+    check(h.st().state === 'done' && h.st().digest.tools === 2, 'done freezes the digest')
+    h.hook('SessionStart', { source: 'compact' })
+    check(h.st().digest?.tools === 2 && h.st().digest.families.read === 1 && h.st().needs?.text === 'Elegí el motor de la base', 'a compact after done keeps the frozen digest and needs')
+    // The turn stays over: one the agent opens itself next (a background task came back) is a new turn.
+    h.hook('PreToolUse', { toolName: 'Grep', toolUseId: 'w1', toolSummary: 'Grep "motor"' })
+    check(h.st().state === 'working' && h.st().digest?.tools === 1 && h.st().digest.families.search === 1 && h.st().needs?.text === 'Elegí el motor de la base', 'a turn the agent opens itself after that compact starts a new digest (needs stays)')
+    h.advance(10 * MIN)
+    check(h.st().silence?.level === 'quiet', 'and is watched again: the ack of the finished turn is spent')
+    h.hook('PostToolUse', { toolUseId: 'w1' }); h.done()
+    h.hook('UserPromptSubmit', { prompt: 'seguí' })
+    h.hook('StopFailure', { failureCode: 'invalid_request', errorDetails: 'Prompt is too long: 210000 tokens > 200000 maximum' })
+    check(h.st().failure?.kind === 'context', 'a context failure')
+    h.manager.setNeeds('pane', 'Compactá o empezá de nuevo')
+    h.hook('SessionStart', { source: 'compact' })
+    check(h.st().failure?.kind === 'context' && h.st().needs?.text === 'Compactá o empezá de nuevo', 'a compact keeps the failure as it is (the next working clears it)')
+    h.hook('PreToolUse', { toolName: 'Edit', toolUseId: 'e2', toolSummary: 'Edit c.ts', toolFile: 'src/c.ts' })
+    check(h.st().failure === undefined && h.st().digest.tools === 1, 'the next working clears the failure as always')
+    // A startup is a new session: it clears them all.
+    h.hook('StopFailure', { failureCode: 'overloaded' })
+    h.manager.setNeeds('pane', 'Reintentá')
+    check(h.st().failure?.kind === 'overloaded' && h.st().digest.tools === 1 && h.st().needs?.text === 'Reintentá', 'a failure, a digest and needs before the startup')
+    h.hook('SessionStart', { source: 'startup' })
+    s = h.st()
+    check(s.needs === undefined && s.attention === false && s.digest === undefined && s.failure === undefined, 'a startup clears needs, the digest and the failure')
+    h.hook('UserPromptSubmit', { prompt: 'x' })
+    h.hook('PreToolUse', { toolName: 'Grep', toolUseId: 'g1', toolSummary: 'Grep "x"' }); h.hook('PostToolUse', { toolUseId: 'g1' }); h.done()
+    check(h.st().state === 'done' && h.st().digest?.tools === 1, 'a frozen digest')
+    h.hook('SessionStart', { source: 'startup' })
+    check(h.st().digest === undefined, 'a startup clears the frozen digest of the last turn too')
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'r2', toolSummary: 'Read d.ts' })
+    h.manager.ackSilence('pane')
+    h.hook('SessionStart', { source: 'startup' })
+    h.hook('PreToolUse', { toolName: 'Read', toolUseId: 'r3', toolSummary: 'Read e.ts' })
+    h.advance(10 * MIN)
+    check(h.st().silence?.level === 'quiet', 'and the silence ack: the new session is watched again')
+    // A resume of the live session is no new conversation; one of another session is.
+    h.manager.setNeeds('pane', 'otra')
+    h.hook('SessionStart', { source: 'resume' })
+    check(h.st().needs?.text === 'otra', 'a resume of the session already followed keeps needs')
+    const other = SID.replace('a3', 'd3')
+    h.hook('SessionStart', { source: 'resume', sessionId: other })
+    check(h.st().needs === undefined && h.st().sessionId === other, 'a resume of another session clears it')
+  }
+
+  // 8. Muted until the state changes; markRead only for done and error.
+  {
+    const h = rig({ silence: false })
+    h.hook('UserPromptSubmit', { prompt: 'x' }); h.done()
+    check(h.st().attention === true, 'an unseen done asks for attention')
+    const n = h.events.length
+    check(h.manager.setMuted('pane', true) === true && h.events.length === n + 1 && h.last().muted === true && h.last().attention === false && h.last().state === 'done', 'muted: published at once, attention false')
+    check(h.manager.setMuted('pane', true) === true && h.events.length === n + 1, 'muting twice publishes nothing')
+    check(needsYouRows([{ paneId: 'pane', workspaceId: 'w', status: h.st() }]).length === 0, 'a muted console is out of needsYouRows')
+    h.manager.setNeeds('pane', 'algo')
+    check(h.st().attention === false && h.st().needs.text === 'algo', 'muted hides needs too')
+    h.hook('UserPromptSubmit', { prompt: 'y' })
+    check(h.st().muted === undefined && h.last().muted === undefined && h.st().state === 'working', 'the next transition unmutes on its own')
+    h.done()
+    check(h.st().attention === true && h.st().muted === undefined, 'and the next done asks again')
+    h.manager.setMuted('pane', true); h.manager.setMuted('pane', false)
+    check(h.st().muted === undefined && h.st().attention === true, 'setMuted false unmutes at once')
+    check(h.manager.setMuted('nope', true) === false, 'setMuted without a track is false')
+    // markRead.
+    check(h.manager.markRead('pane') === true && h.st().attention === false && h.last().attention === false, 'markRead acknowledges a done')
+    check(h.manager.markRead('pane') === true, 'and is true again on a done already read')
+    h.hook('UserPromptSubmit', { prompt: 'z' })
+    check(h.manager.markRead('pane') === false && h.st().state === 'working', 'markRead of a working console is false')
+    h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'q', toolSummary: 'Bash: ls' })
+    check(h.manager.markRead('pane') === false && h.st().attention === true, 'markRead of an action is false (a request is not answered by reading it)')
+    h.hook('PostToolUse', { toolUseId: 'q' }); h.hook('StopFailure', { failureCode: 'overloaded' })
+    check(h.st().attention === true && h.manager.markRead('pane') === true && h.st().attention === false, 'markRead acknowledges an error')
+    check(h.manager.markRead('nope') === false, 'markRead without a track is false')
+  }
+
+  // 8b. Muted means every channel: a fresh notice key while muted reaches no
+  // onNotice (Web Push, Discord, ntfy); a transition unmutes and notices flow.
+  {
+    const h = rig({ silence: false })
+    h.hook('UserPromptSubmit', { prompt: 'x' })
+    h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'm1', toolSummary: 'Bash: ls' })
+    check(h.notices.length === 1 && h.notices[0].state === 'action', 'a request notifies the channels')
+    h.manager.setMuted('pane', true)
+    h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'm2', toolSummary: 'Bash: rm -rf dist' })
+    check(h.st().state === 'action' && h.st().pendingCount === 2 && h.st().muted === true && h.last().pending.length === 2, 'muted in action: the second request is still listed')
+    check(h.notices.length === 1 && !h.last().notify && h.last().attention === false, 'but its fresh key reaches no channel and no local notify')
+    h.hook('PostToolUse', { toolUseId: 'm1' })
+    check(h.st().muted === true && h.notices.length === 1, 'still action (m2 open): still muted')
+    h.hook('PostToolUse', { toolUseId: 'm2' })
+    check(h.st().state === 'working' && h.st().muted === undefined, 'answering both is a transition: unmuted')
+    h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'm3', toolSummary: 'Bash: ls' })
+    check(h.notices.length === 2 && h.notices[1].state === 'action' && h.notices[1].paneId === 'pane', 'from then on notices flow again')
+    h.hook('PostToolUse', { toolUseId: 'm3' })
+    h.manager.setMuted('pane', true)
+    h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'm4', toolSummary: 'Bash: ls' })
+    check(h.notices.length === 3 && h.st().muted === undefined && h.st().attention === true, 'muted while working: the request that changes the state unmutes and its notice flows')
+  }
+
+  // 9. Plans: the whole text by request id, the last PLANS_MAX, gone with the pane.
+  {
+    const h = rig({ silence: false })
+    h.hook('UserPromptSubmit', { prompt: 'planificá' })
+    const json = { session_id: SID, tool_name: 'ExitPlanMode', tool_use_id: 'p1', tool_input: { plan: '# Plan\n\n1. Uno\n2. Dos' } }
+    h.manager.onHookEvent(parseHookPayload('pane', 'pty', 'PreToolUse', json))
+    const p = h.manager.planOf('pane', 'p1')
+    check(h.st().state === 'action' && h.st().pending[0].id === 'p1' && p.requestId === 'p1' && p.text === '# Plan\n\n1. Uno\n2. Dos' && p.truncated === false && p.at === h.now(), 'the ExitPlanMode request keeps its plan with line breaks, under its pending id')
+    check(h.manager.planOf('pane').requestId === 'p1' && !JSON.stringify(h.st()).includes('Dos'), 'planOf without an id is the latest; the plan never rides the status')
+    p.text = 'changed'
+    check(h.manager.planOf('pane', 'p1').text.startsWith('# Plan'), 'planOf returns a copy')
+    h.hook('PostToolUse', { toolUseId: 'p1' })
+    h.manager.onHookEvent(parseHookPayload('pane', 'pty', 'PreToolUse', { ...json, tool_use_id: 'big', tool_input: { plan: 'p'.repeat(PLAN_TEXT_MAX + 10) } }))
+    const big = h.manager.planOf('pane', 'big')
+    check(big.text.length === PLAN_TEXT_MAX && big.truncated === true && h.manager.planOf('pane').requestId === 'big', 'a plan over the cap is kept capped and marked truncated')
+    h.hook('PostToolUse', { toolUseId: 'big' })
+    h.hook('PreToolUse', { toolName: 'ExitPlanMode', toolUseId: 'raw', planText: 'r'.repeat(PLAN_TEXT_MAX + 5) })
+    const raw = h.manager.planOf('pane', 'raw')
+    check(raw.text.length === PLAN_TEXT_MAX && raw.truncated === true, 'main caps a plan its producer did not cut, and marks it truncated')
+    h.hook('PostToolUse', { toolUseId: 'raw' })
+    for (let i = 0; i < 10; i++) {
+      h.hook('PostToolUse', { toolUseId: i ? `p-${i - 1}` : 'big' })
+      h.hook('PreToolUse', { toolName: 'ExitPlanMode', toolUseId: `p-${i}`, planText: `plan ${i}` })
+    }
+    check(h.mod.PLANS_MAX === 8 && h.manager.planOf('pane', 'p-1') === null && h.manager.planOf('pane', 'p-2').text === 'plan 2' && h.manager.planOf('pane').text === 'plan 9', 'only the last 8 plans are kept')
+    check(h.manager.planOf('pane', 'nope') === null && h.manager.planOf('pane2') === null && h.manager.planOf('ghost') === null, 'an unknown id or a pane with none is null')
+    h.manager.onExit('pty', 'pane')
+    check(h.manager.planOf('pane') === null, 'they go away with the pane')
+  }
+
+  // 10. Renderer store copies the A3 fields.
+  {
+    const rr = loadRenderer(`export { useAppStore } from './store'`, { window: { snApi: { pty: { killPanes: async () => 0 } } }, document: { hasFocus: () => false } })
+    const S = rr.useAppStore
+    const digest = { tools: 2, families: { edit: 2 }, files: ['a.ts'] }
+    S.getState().setPaneStatus({ paneId: 'p', state: 'working', precise: true, notify: false, toolFamily: 'edit', failure: { kind: 'limit', until: 5 }, silence: { level: 'quiet', since: 1 }, needs: { text: 'n', at: 2 }, muted: true, digest, signalAt: 3 })
+    const s = S.getState().paneStatus.p
+    check(s.toolFamily === 'edit' && s.failure.kind === 'limit' && s.silence.level === 'quiet' && s.needs.text === 'n' && s.muted === true && s.digest.tools === 2 && s.signalAt === 3, 'setPaneStatus copies toolFamily, failure, silence, needs, muted, digest and signalAt')
+    check(s.bare === undefined, 'a real status carries no bare mark')
+    S.getState().setPaneStatus({ paneId: 'b', state: 'idle', precise: false, notify: false, pendingCount: 0, attention: true, needs: { text: 'revisá', at: 4 }, bare: true })
+    check(S.getState().paneStatus.b.bare === true && S.getState().paneStatus.b.needs.text === 'revisá', 'and copies the bare mark of a needs-only status (so a surface shows only its needs)')
+  }
+}
+
 main().catch(error => { console.error(error); process.exitCode = 1 })
 
 // R22-15 (E2-FR-20, 21, 48): input invalidation of answer cards in
@@ -1788,6 +2316,28 @@ async function attentionChecks() {
     h.manager.setRemoteSeen(() => { throw new Error('boom') })
     h.done()
     check(h.last().attention === true, 'a throwing remote check counts as not seen')
+  }
+  // 6b. App 2.7.0 (A3): an open `needs` keeps attention but never announces a seen notice or holds its toast.
+  {
+    const h = rig()
+    h.manager.setRemoteSeen(id => id === 'pane')
+    h.hook('UserPromptSubmit', { prompt: 'x' }); h.tick(1)
+    h.manager.setNeeds('pane', 'approve the deploy')
+    h.hook('Stop', { lastAssistantMessage: 'ok' }); h.flush()
+    const d = h.of('pane').find(e => e.state === 'done')
+    check(d.attention === true && d.needs?.text === 'approve the deploy' && d.notify === false && d.delivery === 'none' && h.natives.length === 0 && h.flashes.length === 0, 'a done a phone watches with needs open: attention stays (needs), no notify, no toast, no flash')
+    h.manager.setRemoteSeen(() => false)
+    h.hook('UserPromptSubmit', { prompt: 'x' }, 'pane2'); h.tick(1)
+    h.manager.setNeeds('pane2', 'pick the engine')
+    h.hook('Stop', { lastAssistantMessage: 'ok' }, 'pane2'); h.flush()
+    check(h.last('pane2').notify === true && h.natives.length === 1 && h.flashes.join() === 'true', 'an unseen done with needs open still notifies')
+    check(h.manager.markRead('pane2') === true && h.last('pane2').attention === true && h.last('pane2').needs?.text === 'pick the engine', 'markRead keeps the published attention while needs is open')
+    check(h.natives[0].closed === 1 && h.flashes.join() === 'true,false', 'markRead closes the done toast and stops the flash despite needs')
+    h.hook('UserPromptSubmit', { prompt: 'x' }, 'pane2'); h.tick(1); h.manager.setNeeds('pane2', 'again')
+    h.hook('Stop', { lastAssistantMessage: 'ok' }, 'pane2'); h.flush()
+    check(h.natives.length === 2 && h.natives[1].closed === 0, 'the next unseen done shows its toast')
+    h.tick(1); h.manager.onUserInput('pty2', 'pane2', 'b')
+    check(h.natives[1].closed === 1 && h.last('pane2').attention === true && h.last('pane2').needs?.text === 'again', 'a keystroke closes the done toast while needs stays open')
   }
   // 7. Terminal reports and automations never acknowledge; 'auto' still invalidates.
   {
@@ -2307,3 +2857,208 @@ function promptCardChecks() {
     check(K.selectionAnswered(single(), { options: [0] }) && !K.selectionAnswered(single(), { options: [] }) && K.selectionAnswered(multi(), { options: [], other: 'x' }), 'selectionAnswered follows the same rules')
   }
 }
+
+// App 2.7.0 (A3): Codex signals. CodexProtocol opens and closes tools by item
+// id, turns codexErrorInfo into a failure and hands the root thread's token
+// usage to onUsage (E10 SPIKE S6, S8); CodexBridge reports a sign of life per
+// app-server line. Synchronous and with its own count: it runs at load time,
+// right after main() starts, and prints its own PASS line.
+function codexSignalChecks() {
+  let count = 0
+  const check = (condition, label) => { assert.ok(condition, label); count++ }
+  const { StatusManager } = load('src/main/status/StatusManager.ts', { require: id => id === 'electron' ? { Notification: { isSupported: () => false } } : require(id) })
+  const P = load('src/main/status/CodexProtocol.ts')
+  const THREAD = '019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7d'
+  function rig() {
+    const manager = new StatusManager(() => null, () => null)
+    manager.onSpawn('pty-x', 'pane-x')
+    const raw = [], usages = []
+    const proto = new P.CodexProtocol('pane-x', 'pty-x', e => { raw.push(e); manager.onAgentEvent(e) }, () => {}, u => usages.push(u))
+    const send = (side, m) => proto[side](JSON.stringify(m))
+    const note = (method, params = {}) => send('server', { method, params: { threadId: THREAD, ...params } })
+    send('client', { id: 1, method: 'thread/start' })
+    send('server', { id: 1, result: { thread: { id: THREAD, preview: '', status: { type: 'idle' } } } })
+    return { manager, proto, raw, usages, send, note, st: () => manager.stateOf('pane-x') }
+  }
+  const cmd = (id, command) => ({ type: 'commandExecution', id, command, commandActions: [], cwd: 'C:\\repo', processId: null, source: 'agent', status: 'inProgress', aggregatedOutput: null, exitCode: null, durationMs: null, pluginId: null, scriptPath: null })
+  // Tools open on item/started and close on item/completed.
+  {
+    const r = rig()
+    r.note('turn/started', { turn: { id: 't1', status: 'inProgress' } })
+    r.note('item/started', { turnId: 't1', startedAtMs: 1, item: cmd('c1', 'npm test') })
+    const opened = r.raw.at(-1)
+    check(opened.kind === 'working' && opened.toolUseId === 'c1' && opened.toolName === 'commandExecution' && opened.tool === 'npm test', 'a tool item opens a tool by its item id, named by its type')
+    check(r.st().activity === 'npm test' && r.st().toolFamily === 'run', 'the open command is the activity, family run')
+    r.note('item/completed', { turnId: 't1', completedAtMs: 2, item: { ...cmd('c1', 'npm test'), status: 'completed', exitCode: 0 } })
+    check(r.raw.at(-1).kind === 'resolved' && r.raw.at(-1).requestId === 'c1' && r.raw.at(-1).reason === undefined, 'its item/completed resolves that id')
+    check(r.st().state === 'working' && r.st().activity === undefined && r.st().toolFamily === undefined, 'a tool that finished is no longer shown: no open tool, no activity')
+    const n = r.raw.length
+    r.note('item/completed', { turnId: 't1', item: { ...cmd('c1', 'npm test'), status: 'completed' } })
+    r.note('item/completed', { turnId: 't1', item: { ...cmd('never', 'ls'), status: 'completed' } })
+    check(r.raw.length === n, 'a repeated or unknown completion sends nothing')
+    // Parallel tools: the newest still open is the activity.
+    r.note('item/started', { turnId: 't1', item: cmd('c2', 'git status') })
+    r.note('item/started', { turnId: 't1', item: { type: 'fileChange', id: 'f2', status: 'inProgress', changes: [{ path: 'C:\\repo\\src\\a.ts', kind: { type: 'update' }, diff: '' }] } })
+    check(r.st().activity === 'Edit a.ts' && r.st().toolFamily === 'edit', 'the newest open tool is the activity')
+    check(r.raw.at(-1).toolFile === 'src/a.ts' && r.raw.at(-2).toolFile === undefined, 'a fileChange names its file for the turn digest; a command names none')
+    r.note('item/completed', { turnId: 't1', item: { type: 'fileChange', id: 'f2', status: 'completed', changes: [] } })
+    check(r.st().activity === 'git status' && r.st().toolFamily === 'run', 'closing it shows the one still running')
+    // A tool item outside a running turn opens nothing.
+    r.note('turn/completed', { turn: { id: 't1', status: 'completed', items: [] } })
+    const m = r.raw.length
+    r.note('item/started', { item: cmd('late', 'echo late') })
+    r.note('item/completed', { item: cmd('late', 'echo late') })
+    check(r.raw.length === m, 'a tool item outside a turn opens and resolves nothing')
+    // An interrupted turn closes the tools it left running: a next turn with no
+    // prompt (a compaction) never shows them, and a late completion sends nothing.
+    r.note('turn/started', { turn: { id: 'i1' } })
+    r.note('item/started', { turnId: 'i1', item: cmd('c9', 'sleep 100') })
+    r.note('turn/completed', { turn: { id: 'i1', status: 'interrupted', items: [] } })
+    check(r.raw.at(-2).kind === 'resolved' && r.raw.at(-2).requestId === 'c9' && r.raw.at(-1).kind === 'idle', 'an interrupted turn resolves its open tools before going idle')
+    r.note('turn/started', { turn: { id: 'i2' } })
+    check(r.st().state === 'working' && r.st().activity === undefined && r.st().toolFamily === undefined, 'the next turn shows no tool of the interrupted one')
+    const k = r.raw.length
+    r.note('item/completed', { turnId: 'i1', item: { ...cmd('c9', 'sleep 100'), status: 'failed' } })
+    check(r.raw.length === k, 'a late completion of an interrupted tool sends nothing')
+    r.manager.dispose()
+  }
+  // webSearch and the other tool items: summary and family.
+  {
+    const r = rig()
+    r.note('turn/started', { turn: { id: 'w1' } })
+    const web = { type: 'webSearch', id: 'ws1', query: '', action: { type: 'search', query: 'electron 33 release notes' }, results: null }
+    r.note('item/started', { turnId: 'w1', item: web })
+    check(r.raw.at(-1).tool === 'WebSearch "electron 33 release notes"' && r.raw.at(-1).toolUseId === 'ws1', 'webSearch names its query')
+    check(r.st().toolFamily === 'web' && P.codexItemFamily(web) === 'web', 'webSearch gives toolFamily web')
+    r.note('item/completed', { turnId: 'w1', item: { ...web, query: 'electron 33 release notes' } })
+    check(r.st().toolFamily === undefined && r.st().activity === undefined, 'a completed webSearch closes too')
+    r.manager.dispose()
+    check(P.codexItemTool({ type: 'webSearch', id: 'w', query: '', action: { type: 'open_page', url: 'https://example.com/a?b' } }) === 'WebFetch example.com', 'a page visit names its host')
+    check(P.codexItemTool({ type: 'webSearch', id: 'w', query: '', action: null }) === 'WebSearch', 'a webSearch with nothing yet still names its kind')
+    check(P.codexItemTool({ type: 'imageView', id: 'i', path: 'C:\\repo\\shot.png' }) === 'Read shot.png' && P.codexItemFamily({ type: 'imageView' }) === 'read', 'imageView reads its image')
+    check(P.codexItemTool({ type: 'collabAgentToolCall', id: 'a', tool: 'spawnAgent', prompt: 'revisá los tests\ny más', status: 'inProgress' }) === 'spawnAgent: revisá los tests' && P.codexItemFamily({ type: 'collabAgentToolCall' }) === 'agent', 'a collab agent call names its tool and the prompt\'s first line')
+    check(P.codexItemTool({ type: 'dynamicToolCall', id: 'd', namespace: 'browser', tool: 'click' }) === 'browser.click' && P.codexItemFamily({ type: 'dynamicToolCall' }) === 'other', 'dynamicToolCall names namespace.tool')
+    check(P.codexItemTool({ type: 'commandExecution', id: 'c', command: '', commandActions: [] }) === 'shell' && P.codexItemTool({ type: 'fileChange', id: 'f', changes: [] }) === 'Edit', 'a tool item with no detail still names its kind')
+    check(P.codexItemFamily({ type: 'reasoning' }) === undefined && P.codexItemFamily({ type: 'plan' }) === undefined && P.codexItemTool({ type: 'agentMessage' }) === undefined, 'items that are not tools have no family and no summary')
+  }
+  // Failures: the error notification and a failed turn/completed.
+  {
+    const r = rig()
+    r.note('turn/started', { turn: { id: 'e1' } })
+    const n = r.raw.length
+    r.note('error', { turnId: 'e1', willRetry: true, error: { message: 'stream disconnected', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } }, additionalDetails: null } })
+    check(r.raw.length === n && r.st().state === 'working' && r.st().failure === undefined, 'an error Codex retries does nothing')
+    const now = Date.now()
+    r.note('error', { turnId: 'e1', willRetry: false, error: { message: "You've hit your usage limit. Upgrade to Pro or try again at 3:30 PM.", codexErrorInfo: 'usageLimitExceeded', additionalDetails: null } })
+    const failed = r.raw.at(-1)
+    check(failed.kind === 'error' && failed.failure.kind === 'limit' && failed.failure.code === 'usageLimitExceeded', 'usageLimitExceeded is a limit failure')
+    const until = new Date(failed.failure.until)
+    // At most a day ahead, plus the hour a fall-back night adds.
+    check(failed.failure.until > now && failed.failure.until - now <= 90_000_000 && until.getHours() === 15 && until.getMinutes() === 30, '"try again at 3:30 PM" gives until (the next 15:30 local)')
+    check(r.st().state === 'error' && r.st().failure?.kind === 'limit' && r.st().failure.until === failed.failure.until, 'the pane publishes the failure')
+    r.note('turn/completed', { turn: { id: 'e1', status: 'failed', error: null, items: [] } })
+    check(r.raw.at(-1).kind === 'error' && r.raw.at(-1).failure?.kind === 'limit' && r.raw.at(-1).failure.until === failed.failure.until, 'a failed turn without turn.error keeps the notification\'s failure')
+    r.note('turn/started', { turn: { id: 'e2' } })
+    check(r.st().state === 'working' && r.st().failure === undefined, 'the next working clears the failure')
+    r.note('turn/completed', { turn: { id: 'e2', status: 'failed', error: { message: 'Codex ran out of room in the model\'s context window. Start a new thread or clear earlier history before retrying.', codexErrorInfo: 'contextWindowExceeded', additionalDetails: null }, items: [] } })
+    check(r.raw.at(-1).kind === 'error' && r.raw.at(-1).failure.kind === 'context' && r.raw.at(-1).failure.code === 'contextWindowExceeded' && r.st().failure?.kind === 'context', 'a failed turn/completed with contextWindowExceeded is a context failure')
+    r.note('turn/started', { turn: { id: 'e3' } })
+    r.note('turn/completed', { turn: { id: 'e3', status: 'failed', error: { message: 'Bad gateway', codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } }, additionalDetails: null }, items: [] } })
+    check(r.raw.at(-1).failure.kind === 'unknown' && r.raw.at(-1).failure.code === 'httpConnectionFailed', 'a one-key codexErrorInfo object is read by its key')
+    r.note('turn/started', { turn: { id: 'e4' } })
+    r.note('turn/completed', { turn: { id: 'e4', status: 'failed', error: null, items: [] } })
+    check(r.raw.at(-1).kind === 'error' && r.raw.at(-1).failure === undefined, 'a failure from an earlier turn never rides a later one')
+    r.note('turn/started', { turn: { id: 'e5' } })
+    r.note('turn/completed', { turn: { id: 'e5', status: 'completed', items: [] } })
+    check(r.raw.at(-1).kind === 'done' && r.raw.at(-1).failure === undefined, 'a completed turn carries no failure')
+    r.manager.dispose()
+  }
+  // thread/tokenUsage/updated -> onUsage, validated.
+  {
+    const r = rig()
+    const breakdown = (o = {}) => ({ totalTokens: 30000, inputTokens: 24000, cachedInputTokens: 20000, cacheWriteInputTokens: 0, outputTokens: 6000, reasoningOutputTokens: 2000, ...o })
+    const events = r.raw.length
+    r.note('thread/tokenUsage/updated', { turnId: 'u1', tokenUsage: { total: breakdown({ totalTokens: 90000, inputTokens: 80000 }), last: breakdown(), modelContextWindow: 200000 } })
+    const u = r.usages[0]
+    check(r.usages.length === 1 && u.threadId === THREAD && u.turnId === 'u1' && u.total.inputTokens === 80000 && u.total.totalTokens === 90000 && u.last.cachedInputTokens === 20000 && u.last.reasoningOutputTokens === 2000 && u.modelContextWindow === 200000, 'tokenUsage calls onUsage with the validated numbers')
+    check(r.raw.length === events, 'token usage is never an AgentEvent')
+    check(P.codexContextPct(u) === 0.15, 'context is (last.inputTokens + last.outputTokens) / window: cached tokens are already part of the input')
+    check(P.codexContextPct({ ...u, last: breakdown({ inputTokens: 400000 }) }) === 1 && P.codexContextPct({ ...u, modelContextWindow: null }) === null, 'codexContextPct clamps to 1 and is null without a window')
+    r.note('thread/tokenUsage/updated', { tokenUsage: { total: { totalTokens: 10, inputTokens: 8, outputTokens: 2 }, last: { totalTokens: 10, inputTokens: 8, outputTokens: 2 }, modelContextWindow: null } })
+    const old = r.usages[1]
+    check(r.usages.length === 2 && old.turnId === undefined && !('turnId' in old) && old.last.cachedInputTokens === 0 && old.last.cacheWriteInputTokens === 0 && old.modelContextWindow === null && P.codexContextPct(old) === null, 'cache counts an older CLI leaves out are 0; no window is null; no turnId is left out')
+    r.note('thread/tokenUsage/updated', { tokenUsage: { total: breakdown(), last: breakdown(), modelContextWindow: 0 } })
+    check(r.usages.length === 3 && r.usages[2].modelContextWindow === null, 'a window of 0 is no window')
+    for (const bad of [breakdown({ inputTokens: -1 }), breakdown({ outputTokens: '6000' }), breakdown({ cachedInputTokens: -5 }), { totalTokens: 1, inputTokens: 1 }, null, [1, 2]]) {
+      r.note('thread/tokenUsage/updated', { tokenUsage: { total: breakdown(), last: bad, modelContextWindow: 200000 } })
+    }
+    r.proto.server(`{"method":"thread/tokenUsage/updated","params":{"threadId":"${THREAD}","tokenUsage":{"total":${JSON.stringify(breakdown())},"last":{"totalTokens":1e999,"inputTokens":1,"outputTokens":1},"modelContextWindow":200000}}}`)
+    r.send('server', { method: 'thread/tokenUsage/updated', params: { threadId: 'child-thread', turnId: 'x', tokenUsage: { total: breakdown(), last: breakdown(), modelContextWindow: 200000 } } })
+    check(r.usages.length === 3, 'negative, non-numeric, infinite or missing counts and other threads never reach onUsage')
+    r.note('thread/tokenUsage/updated', { tokenUsage: { total: breakdown(), last: breakdown(), modelContextWindow: -1 } })
+    check(r.usages.length === 4 && r.usages[3].modelContextWindow === null, 'an invalid window is null, the counts still go')
+    // A4: whether a turn of the root thread runs rides each usage (a resume's replay comes with none running).
+    check(r.usages.every(x => x.inTurn === false), 'a usage with no turn running says inTurn false')
+    const tick = turnId => r.note('thread/tokenUsage/updated', { turnId, tokenUsage: { total: breakdown(), last: breakdown(), modelContextWindow: 200000 } })
+    r.note('turn/started', { turn: { id: 'u2' } }); tick('u2')
+    r.note('turn/completed', { turn: { id: 'u2', status: 'completed', items: [] } }); tick('u2')
+    check(r.usages.length === 6 && r.usages[4].inTurn === true && r.usages[5].inTurn === false, 'inside a running turn it says true, after turn/completed false')
+    r.note('turn/started', { turn: { id: 'u3' } })
+    r.send('client', { id: 2, method: 'thread/resume' })
+    r.send('server', { id: 2, result: { thread: { id: THREAD, preview: '', status: { type: 'idle' } } } })
+    tick(undefined)
+    check(r.usages.length === 7 && r.usages[6].inTurn === false, 'a thread/resume ends the running turn: its replayed usage says false')
+    r.manager.dispose()
+  }
+  // CodexBridge: onSignal per stdout line, onUsage passed through, nothing after finished.
+  {
+    let onLine = null
+    const handlers = {}
+    const child = { stdout: {}, stderr: { on() {} }, stdin: { destroyed: false, on() {}, write() {}, end() {} }, on() {}, once() {}, kill() {} }
+    const { CodexBridge } = load('src/main/status/CodexBridge.ts', {
+      require: id => id === 'child_process' ? { spawn: () => child }
+        : id === 'readline' ? { createInterface: () => ({ on: (ev, fn) => { if (ev === 'line') onLine = fn }, close() {} }) }
+        : id === 'ws' ? { WebSocketServer: class {}, WebSocket: { OPEN: 1 } }
+        : require(id),
+    })
+    const signals = [], usages = [], emitted = [], sent = []
+    let throwing = false
+    const bridge = new CodexBridge(() => os.tmpdir(), 'runtime.js', e => emitted.push(e), () => {}, {
+      onSignal: (paneId, ptyId) => { signals.push(`${paneId}/${ptyId}`); if (throwing) throw new Error('boom') },
+      onUsage: (paneId, ptyId, usage) => usages.push([paneId, ptyId, usage]),
+    })
+    const socket = { readyState: 1, send: line => sent.push(line), on: (ev, fn) => { handlers[ev] = fn }, once() {}, close() {}, terminate() {} }
+    const binding = { paneId: 'pane-b', ptyId: 'pty-b', cwd: os.tmpdir() }
+    bridge.connect(binding, socket)
+    check(typeof onLine === 'function' && typeof handlers.message === 'function', 'the bridge reads the app-server stdout line by line')
+    handlers.message(Buffer.from(JSON.stringify({ id: 1, method: 'thread/start' })))
+    onLine(JSON.stringify({ id: 1, result: { thread: { id: THREAD, preview: '', status: { type: 'idle' } } } }))
+    onLine(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: THREAD, turnId: 't', itemId: 'a', delta: 'ho' } }))
+    onLine('not a protocol message')
+    check(signals.length === 3 && signals.every(s => s === 'pane-b/pty-b'), 'every app-server line is a sign of life of its pane and pty, a delta and a non-protocol line included')
+    check(sent.length === 3 && emitted[0]?.kind === 'start' && emitted[0].cwd === binding.cwd, 'every line still reaches the TUI and the protocol')
+    const usageLine = JSON.stringify({ method: 'thread/tokenUsage/updated', params: { threadId: THREAD, turnId: 't', tokenUsage: { total: { totalTokens: 5, inputTokens: 4, outputTokens: 1 }, last: { totalTokens: 5, inputTokens: 4, outputTokens: 1 }, modelContextWindow: 1000 } } })
+    onLine(usageLine)
+    check(usages.length === 1 && usages[0][0] === 'pane-b' && usages[0][1] === 'pty-b' && usages[0][2].last.inputTokens === 4 && signals.length === 4, 'onUsage reaches the bridge observer with its pane and pty')
+    throwing = true
+    onLine(JSON.stringify({ method: 'item/agentMessage/delta', params: { threadId: THREAD, delta: 'la' } }))
+    check(signals.length === 5 && sent.length === 5, 'an observer that throws never cuts the TUI stream')
+    throwing = false
+    binding.finished = true
+    onLine(JSON.stringify({ method: 'turn/started', params: { threadId: THREAD, turn: { id: 't2' } } }))
+    onLine(usageLine)
+    check(signals.length === 5 && usages.length === 1 && emitted.length === 1, 'after the launcher finished: no sign of life, no usage, no event')
+    check(sent.length === 7, 'the TUI still gets its lines')
+    const plain = new CodexBridge(() => os.tmpdir(), 'runtime.js', () => {})
+    const plainSent = []
+    plain.connect({ paneId: 'pane-c', ptyId: 'pty-c', cwd: os.tmpdir() }, { ...socket, send: line => plainSent.push(line) })
+    onLine(usageLine)
+    check(plainSent.length === 1, 'a bridge built with the old four arguments still forwards every line')
+    plain.dispose(); bridge.dispose()
+  }
+  return count
+}
+try {
+  const n = codexSignalChecks()
+  console.log(`PASS: ${n} Codex signal checks (open tools, failures, token usage, sign of life)`)
+} catch (error) { console.error(error); process.exitCode = 1 }

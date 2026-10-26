@@ -6,7 +6,7 @@
  */
 import type { AgentPreset, ConnectionProfile, Pane, PaneWorktree, Workspace } from '@shared/types'
 import type { GitError, GitSummary } from '@shared/git-types'
-import { CWD_MISSING, isValidSlug, type WorktreeListEntry } from '@shared/worktree-types'
+import { CWD_MISSING, isValidSlug, type WorktreeInspectRes, type WorktreeListEntry, type WorktreeRemoveReq } from '@shared/worktree-types'
 import { resolveLaunch } from './launch'
 import { useAppStore } from './store'
 import { useWorktreeStore, type PaneTemplate, type WorktreeLaunchRequest } from './worktreeStore'
@@ -160,6 +160,48 @@ export function deleteNeedsAck(info: { dirtyFiles: number; commitsAhead: number;
   return info.incomplete === true || info.dirtyFiles > 0 || (info.commitsAhead > 0 && !info.mergedIntoHead)
 }
 
+export type WorktreeDeleteBlock = 'inProgress' | 'branchMismatch'
+
+/**
+ * Why Delete is not offered at all: a rebase, merge, cherry-pick, revert or
+ * bisect left half-done, or the folder has another branch (or a detached HEAD)
+ * checked out instead of the recorded `branch`. Main refuses both too.
+ */
+export function deleteBlock(info: Pick<WorktreeInspectRes, 'exists' | 'inProgress' | 'headBranch'>, branch: string): WorktreeDeleteBlock | null {
+  if (!info.exists) return null
+  if (info.inProgress) return 'inProgress'
+  if (info.headBranch !== undefined && info.headBranch !== branch) return 'branchMismatch'
+  return null
+}
+
+/**
+ * What a delete sends back to main from the inspect the user saw, so main can
+ * refuse ('changed') when the worktree moved on since: the tip always when
+ * known, the dirty count whenever git status answered. `incomplete` alone is
+ * not enough to drop it (a missing base or a failed rev-list leave the count
+ * real, and files written after the inspect must still be 'changed'); only an
+ * unread status (`incomplete` without `dirtyRead`, or the dialog's own
+ * fallback) skips it, so a status that keeps failing never loops on
+ * 'changed': the re-inspect reads it as unknown and the "may lose work"
+ * checkbox confirms it instead.
+ */
+export function removeExpectations(info: WorktreeInspectRes): Pick<WorktreeRemoveReq, 'expectTip' | 'expectDirty'> {
+  const dirtyKnown = !info.incomplete || info.dirtyRead === true
+  return {
+    ...(info.tip ? { expectTip: info.tip } : {}),
+    ...(info.exists && dirtyKnown ? { expectDirty: info.dirtyFiles } : {}),
+  }
+}
+
+/**
+ * The user's "may lose work" on an `incomplete` inspect, sent only when the
+ * checkbox was ticked: main needs it to delete a folder git no longer reads
+ * as its own checkout (`noCheckout`), never infers it.
+ */
+export function ackFields(info: WorktreeInspectRes, acked: boolean): Pick<WorktreeRemoveReq, 'ackIncomplete'> {
+  return info.incomplete && acked ? { ackIncomplete: true } : {}
+}
+
 /** Commits deleting the branch would lose (merged ones survive in the repo HEAD). */
 export function lostCommits(info: { commitsAhead: number; mergedIntoHead: boolean }): number {
   return info.mergedIntoHead ? 0 : info.commitsAhead
@@ -170,11 +212,37 @@ export function worktreePathKey(p: string): string {
   return p.replace(/[\\/]+/g, '/').replace(/\/$/, '').toLowerCase()
 }
 
-/** The worktrees no console references (FR-31): a deleted workspace's ones land here. */
+/**
+ * The worktrees no console references (FR-31): a deleted workspace's ones land here. A team task's worktree is
+ * never one (app 2.7.0, decision 63): its team owns it, and main refuses to delete it from here.
+ */
 export function orphanWorktrees(entries: WorktreeListEntry[], workspaces: Workspace[]): WorktreeListEntry[] {
   const used = new Set<string>()
   for (const w of workspaces) for (const p of w.panes) if (p.worktree?.path) used.add(worktreePathKey(p.worktree.path))
-  return entries.filter((e) => !used.has(worktreePathKey(e.path)))
+  return entries.filter((e) => !e.teamOwned && !used.has(worktreePathKey(e.path)))
+}
+
+/**
+ * How many consoles other than `exceptPaneId` (any workspace) run in the
+ * worktree at `path` (app 2.7.0, A9): the close dialog offers no Delete while
+ * one does, since main only kills the closing console's shell.
+ */
+export function worktreeUsers(workspaces: readonly Workspace[], path: string, exceptPaneId?: string): number {
+  const key = worktreePathKey(path)
+  let n = 0
+  for (const w of workspaces) for (const p of w.panes) if (p.id !== exceptPaneId && p.worktree?.path && worktreePathKey(p.worktree.path) === key) n++
+  return n
+}
+
+/**
+ * "New console in this worktree" (app 2.7.0, A9): the same agent, command and
+ * look as `pane` (what Duplicate gives) on the same worktree and folder, local
+ * like the pane even when the workspace has a connection profile.
+ */
+export function paneInWorktree(pane: Pane, ws: Workspace, presets: AgentPreset[]): Partial<Pane> | null {
+  const wt = pane.worktree
+  if (!wt) return null
+  return { ...paneFromWorktree(templateFromPane(pane, presets), wt), cwd: pane.cwd ?? wt.path, ...(ws.setupId ? { setupId: '' } : {}) }
 }
 
 export { isValidSlug }

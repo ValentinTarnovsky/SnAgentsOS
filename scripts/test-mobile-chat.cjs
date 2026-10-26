@@ -20,7 +20,13 @@
 // and no_menu toasts, the free text row focusing the composer, Always allow
 // by answerMenu and Allow as "1", the ask wizard, the key row (1 / Esc, never
 // Enter) for an elicitation and a Codex request, [Terminal], the log pinned
-// to the end under a card, and Spanish.
+// to the end under a card, and Spanish. v2.7.0: a Grep then a Glob fold into
+// one "Search 2" phase row that expands to its tool rows ("Búsqueda 2" in es);
+// the PC's `paused` notice (ChatHub's LRU) keeps the list under a bar whose
+// [Resume] sends chatSub again, and the next first page clears it; neither
+// the revive pong after more than 10s hidden nor a reconnect (authOk) sends
+// chatSub for a paused chat (a Resume lost with the socket leaves "The PC did
+// not answer" and a working [Resume]), while the pong still resyncs one not paused.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -193,6 +199,65 @@ window.result = (async () => {
  console.log('500 messages rendered in ' + ms.toFixed(0) + ' ms');
  check(qa('[data-chat-row]').length === 500,'500 messages render');
 
+ // app 2.7.0: tool rows of one family fold into a phase ("Search 2"), expandable to its rows.
+ const phaseItems = [{ id:'10', role:'user', ts:null, blocks:[{ t:'text', text:'find the todos' }] }, { id:'20', role:'assistant', ts:null, blocks:[{ t:'toolUse', id:'toolu_g1', name:'Grep', summary:'TODO' }] }, { id:'30', role:'tool', ts:null, blocks:[{ t:'toolResult', toolUseId:'toolu_g1', isError:false, text:'a.ts:1' }] }, { id:'40', role:'assistant', ts:null, blocks:[{ t:'toolUse', id:'toolu_g2', name:'Glob', summary:'**/*.ts' }] }, { id:'50', role:'tool', ts:null, blocks:[{ t:'toolResult', toolUseId:'toolu_g2', isError:false, text:'a.ts' }] }, { id:'60', role:'assistant', ts:null, blocks:[{ t:'text', text:'Two of them.' }] }];
+ feed({ paneId:'c1', items:phaseItems, cursor:null, done:true }); await frames();
+ const phase = q('[data-tool-phase="search"]');
+ check(!!phase && phase.querySelector('[data-phase-label]').textContent === 'Search 2' && phase.dataset.status === 'done' && !phase.querySelector('[data-tool-run]'),'a Grep then a Glob fold into one "Search 2" phase row');
+ phase.querySelector('button').click(); await frames();
+ const phaseRuns = [...phase.querySelectorAll('[data-tool-run] [data-tool-label]')].map(e => e.textContent);
+ check(phaseRuns.join('|') === 'Grep TODO|Glob **/*.ts' && phase.querySelector('button').getAttribute('aria-expanded') === 'true','the phase expands to its tool rows: ' + JSON.stringify(phaseRuns));
+ phase.querySelector('button').click(); await frames();
+ check(!phase.querySelector('[data-tool-run]'),'and folds again');
+
+ // app 2.7.0 (A7): the PC paused this chat for another one (ChatHub's LRU): the
+ // list stays under a bar, nothing reopens on its own, only [Resume] subscribes again.
+ const keptIds = qa('[data-chat-id]').length;
+ sent.length = 0;
+ client.handleChatAppend({ v:1, type:'chatAppend', paneId:'c1', items:[], notice:'paused' }); await frames();
+ check(!!q('[data-chat-paused]') && q('[data-chat-paused]').textContent.includes('This chat was paused') && q('[data-chat-resume]')?.textContent === 'Resume' && qa('[data-chat-id]').length === keptIds,'the paused notice keeps the list under "This chat was paused" with [Resume]');
+ check(chatStore.getState().chats.c1.paused === true && sent.length === 0 && store.getState().chatPaneId === 'c1','it sends nothing and stays in Chat');
+ { const wide=[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1 && !e.closest('[data-scrollable]')).slice(0,5).map(e=>e.tagName+'.'+String(e.className).slice(0,60)); check(document.documentElement.scrollWidth<=innerWidth && wide.length===0,'the paused bar fits '+JSON.stringify(wide)) }
+ // Nor does the client ask for it: not the resync of a page back after more
+ // than 10s hidden (on the revive probe's pong), not a reconnect (authOk).
+ // An open authed socket stands in for the real one; send stays captured.
+ const recv = msg => client.onMessage({ data: JSON.stringify({ v:1, ...msg }) });
+ const revive = () => { client.hiddenAt = performance.now() - 15000; client.onRevive('visible') };
+ const types = () => sent.map(m => m.type + (m.paneId ? ':' + m.paneId : '')).join();
+ Object.assign(client, { ws:{ readyState: WebSocket.OPEN, close() {} }, socketAuthed:true, mode:'auth', deviceId:'dev1' });
+ sent.length = 0;
+ revive();
+ check(client.resyncOnPong === true && types() === 'ping','a page back after 15s hidden probes the socket, to resync on the pong: ' + types());
+ recv({ type:'pong', t:Date.now() }); await frames();
+ check(types() === 'ping' && !!q('[data-chat-paused]') && store.getState().chatPaneId === 'c1','the revive pong sends no chatSub for the paused chat and the bar stays: ' + types());
+ const withStatus = { ...snapshot, workspaces: snapshot.workspaces.map(w => ({ ...w, panes: w.panes.map(p => p.id === 'c1' ? { ...p, status:{ state:'idle', provider:'claude', stateSince:3 } } : p) })) };
+ sent.length = 0;
+ recv({ type:'authOk', deviceId:'dev1', state:withStatus, hostPlatform:'win32', appVersion:'test' }); await frames();
+ check(store.getState().phase === 'live' && !sent.some(m => m.type === 'chatSub' || m.type === 'sub') && store.getState().chatPaneId === 'c1' && chatStore.getState().chats.c1.paused === true && !!q('[data-chat-paused]') && qa('[data-chat-id]').length === keptIds,'a reconnect (authOk) keeps the paused chat in Chat under its bar, with no chatSub: ' + types());
+ sent.length = 0;
+ q('[data-chat-resume]').click(); await frames();
+ check(sent.map(m => m.type + ':' + m.paneId).join() === 'chatSub:c1' && q('[data-chat-resume]').disabled,'[Resume] sends chatSub again and waits, disabled, for the page: ' + JSON.stringify(sent));
+ // A Resume lost with the socket (a reconnect within its 10s) is not asked
+ // again on its own, and never leaves [Resume] disabled for good.
+ sent.length = 0;
+ recv({ type:'authOk', deviceId:'dev1', state:withStatus, hostPlatform:'win32', appVersion:'test' }); await frames();
+ check(!sent.some(m => m.type === 'chatSub') && !!q('[data-chat-paused]') && !q('[data-chat-resume]').disabled && !!q('[data-chat-view] [data-no-reply]'),'a Resume the old socket never answered: the reconnect asks nothing, "The PC did not answer" and [Resume] works again: ' + types());
+ sent.length = 0;
+ q('[data-chat-resume]').click(); await frames();
+ check(types() === 'chatSub:c1' && q('[data-chat-resume]').disabled,'and its next tap sends chatSub: ' + types());
+ feed({ paneId:'c1', items:phaseItems, cursor:null, done:true }); await frames();
+ check(!q('[data-chat-paused]') && chatStore.getState().chats.c1.paused === false,'the fresh first page clears the bar');
+ // The same pong does resync a chat that is not paused: the path above ran.
+ sent.length = 0;
+ revive(); recv({ type:'pong', t:Date.now() }); await frames();
+ check(types() === 'ping,chatSub:c1','a chat that is not paused gets a fresh first page on the revive pong: ' + types());
+ client.stopKeepalive(); client.clearIdleWatchdog(); client.clearDeadline();
+ Object.assign(client, { ws:null, socketAuthed:false, mode:'idle', deviceId:null, hiddenAt:null });
+ feed({ paneId:'c1', items:phaseItems, cursor:null, done:true, notice:'paused' }); await frames();
+ check(!!q('[data-chat-paused]') && !!q('[data-tool-phase="search"]'),'a first page read while the PC closed the watcher shows under the bar');
+ feed({ paneId:'c1', items:phaseItems, cursor:null, done:true }); await frames();
+ check(!q('[data-chat-paused]'),'and the next one clears it');
+
  // Notice: back to Terminal with the toast (FR-33).
  sent.length = 0;
  feed({ paneId:'c1', items:[{ id:'notice', role:'system', ts:null, blocks:[{ t:'notice', code:'ambiguous' }] }], cursor:null, done:true }); await frames();
@@ -207,9 +272,14 @@ window.result = (async () => {
  q('[data-view-option="chat"]').click(); await frames();
  feed({ paneId:'c1', items, cursor:null, done:true }); await frames(); await wait(50);
  const esLabels = qa('[data-tool-label]').map(e => e.textContent);
- check(esLabels.includes('Read 3 archivos') && q('[data-chat-thinking]').textContent.includes('Pensando') && q('[data-chat-more]').textContent === 'Ver mas','es: "Read 3 archivos", "Pensando", "Ver mas"');
+ check(esLabels.includes('Read 3 archivos') && q('[data-chat-thinking]').textContent.includes('Pensando') && q('[data-chat-more]').textContent === 'Ver más','es: "Read 3 archivos", "Pensando", "Ver más"');
+ feed({ paneId:'c1', items:phaseItems, cursor:null, done:true }); await frames();
+ check(q('[data-tool-phase="search"] [data-phase-label]')?.textContent === 'Búsqueda 2','es: the phase says "Búsqueda 2"');
+ client.handleChatAppend({ v:1, type:'chatAppend', paneId:'c1', items:[], notice:'paused' }); await frames();
+ check(q('[data-chat-paused]')?.textContent.includes('Este chat se pausó') && q('[data-chat-resume]').textContent === 'Reanudar','es: "Este chat se pausó" with [Reanudar]');
+ feed({ paneId:'c1', items:phaseItems, cursor:null, done:true }); await frames();
  store.getState().update({ paneStatus:{ c1:{ state:'working', provider:'claude', stateSince:4 } } }); await frames();
- check(q('[data-chat-working]')?.textContent === 'Claude esta trabajando...','es: "Claude esta trabajando..."');
+ check(q('[data-chat-working]')?.textContent === 'Claude está trabajando...','es: "Claude está trabajando..."');
  { const wide=[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1 && !e.closest('[data-scrollable]')).slice(0,5).map(e=>e.tagName+'.'+String(e.className).slice(0,60)); check(document.documentElement.scrollWidth<=innerWidth && wide.length===0,'no horizontal overflow in Spanish '+JSON.stringify(wide)) }
 
  // A shell where an agent was started by hand: its status names the agent, so
@@ -300,7 +370,7 @@ window.result = (async () => {
  setLang('es');
  feed({ paneId:'x1', items:[{ id:'notice', role:'system', ts:null, blocks:[{ t:'notice', code:'ambiguous' }] }], cursor:null, done:true }); await frames();
  const esToast = store.getState().toasts.at(-1)?.text;
- check(esToast === 'Chat no disponible para esta consola. Activa la integracion de Codex en los ajustes de la PC para habilitarlo','es: the Codex toast: ' + esToast);
+ check(esToast === 'Chat no disponible para esta consola. Activá la integración de Codex en los ajustes de la PC para habilitarlo','es: the Codex toast: ' + esToast);
  check(chatToastsSince(mark) === 1,'the title-only status (precise:false) is a new key: exactly one more toast');
  setLang('en');
  // A to B and back to A, with no notice in between: the change forgot the toast, so it shows again. Once through paneStatus, once through the state snapshot.

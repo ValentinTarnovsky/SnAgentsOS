@@ -3,6 +3,8 @@
 // hidden Electron window: agent rows per state, "+N more", "Not started",
 // the chevron, the palette's "Waiting for you" with Ctrl+1, next waiting,
 // Ctrl+1..9 and its exclusions, reopen, focus next and the 200 ms tooltips.
+// App 2.7.0 (A6): the badge, the palette and next waiting agree on one mixed
+// fixture (src/shared/attention.ts), "Marcar todo leído" and palette ranking.
 // Consoles are never mounted: fake focusers stand in for terminals, so no pty,
 // user config or real agent is touched.
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
@@ -23,9 +25,10 @@ import {useAppStore} from './src/renderer/lib/store';
 import {useAgentStore} from './src/renderer/lib/agentStore';
 import {useToastStore} from './src/renderer/lib/toast';
 import {useGlobalKeys} from './src/renderer/lib/useGlobalKeys';
-import {registerFocuser, getFocusedPane} from './src/renderer/lib/focus';
+import {registerFocuser, getFocusedPane, setFocusedPane} from './src/renderer/lib/focus';
 import {applyTheme} from './src/renderer/themes/applyTheme';
-window.snApi={platform:'win32',agents:{forget(){},list:async()=>[],startup:async()=>({trigger:null,interrupted:[]}),consumeStartup:async()=>false,onChanged:()=>()=>{},onReady:()=>()=>{}},status:{}};
+window.markReadLog=[];
+window.snApi={platform:'win32',agents:{forget(){},list:async()=>[],startup:async()=>({trigger:null,interrupted:[]}),consumeStartup:async()=>false,onChanged:()=>()=>{},onReady:()=>()=>{}},status:{markRead:async id=>{window.markReadLog.push(id);return true}}};
 const now=Date.now(), M=60000;
 const preset={id:'pc',name:'Claude Code',type:'claude',command:'claude',args:[],color:'#d97757',icon:'claude'};
 const pane=(id,title)=>({id,type:'claude',presetId:'pc',title:title??'Claude Code',color:'#d97757',icon:'claude'});
@@ -48,7 +51,12 @@ applyTheme('midnight');
 function Keys(){useGlobalKeys();return null}
 createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div style={{height:'100vh'}} className="flex bg-bg-primary text-text-primary"><Keys/><Sidebar/><main className="flex-1 p-6"><textarea id="ta" className="h-24 w-64 border border-border bg-card"/></main><CommandPalette/><NotificationStack/></div></I18nProvider>);
 window.smoke={
- theme:applyTheme,set:useAppStore.setState,app:useAppStore.getState,agents:useAgentStore.getState,toasts:()=>useToastStore.getState().items.map(t=>t.title),focused:getFocusedPane,
+ theme:applyTheme,set:useAppStore.setState,app:useAppStore.getState,agents:useAgentStore.getState,setAgents:useAgentStore.setState,toasts:()=>useToastStore.getState().items.map(t=>t.title),focused:getFocusedPane,setFocused:setFocusedPane,
+ badges(){return [...document.querySelectorAll('aside nav [data-sidebar-ws]')].map(el=>el.dataset.sidebarWs+':'+(el.querySelector('[data-attention-badge]')?.dataset.attentionBadge??'0')).join()},
+ palettePanes(){return [...document.querySelectorAll('[data-palette-pane]')].map(b=>b.dataset.palettePane)},
+ query(q){const i=document.querySelector('.relative input');const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(i,q);i.dispatchEvent(new Event('input',{bubbles:true}))},
+ wsMenu(wsId){const row=document.querySelector('[data-sidebar-ws='+wsId+'] button');row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:120,clientY:120}))},
+ menuItem(label){return [...document.querySelectorAll('[role=menu] [role=menuitem]')].find(b=>b.textContent===label)},
  key(sel,key,mods){const el=sel?document.querySelector(sel):document.body;if(el&&el.focus)el.focus();const e=new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...(mods||{})});(el||document.body).dispatchEvent(e);return e.defaultPrevented},
  rows(wsId){const box=[...document.querySelectorAll('[data-agent-rows]')];return [...document.querySelectorAll('[data-agent-row]')].map(b=>({id:b.dataset.agentRow,state:b.dataset.agentState,glyph:b.querySelector('[data-glyph]')?.dataset.glyph,text:b.textContent,bold:!!b.querySelector('.font-semibold')}))},
 };
@@ -116,15 +124,16 @@ app.whenReady().then(async()=>{
  // Palette "Te esperan" (E5-FR-15/16) and Ctrl+1.
  ok(await js("smoke.key(null,'k',{ctrlKey:true})"),'Ctrl+K handled');await frames();
  const pal=await js("[...document.querySelectorAll('[data-palette-pane]')].map(b=>b.dataset.palettePane)");
- ok(pal.join()==='c1,a2,a4,a3,c2,a7','palette lists at most 6 by urgency',pal);
+ // App 2.7.0: only who needs you (the shared rule): the open requests, then the unread done; a legacy error without attention is out.
+ ok(pal.join()==='c1,a2,a3','palette lists the consoles that need you by urgency',pal);
  const hint=await js("document.querySelector('[data-palette-pane] kbd')?.textContent");
  ok(hint==='Ctrl+1','first row hints Ctrl+1',hint);
  const keyHint=await js("document.querySelector('[data-palette-cmd=next-waiting] kbd')?.textContent");
  ok(keyHint==='Ctrl + Shift + J','commands show their bound shortcut',keyHint);
- await js("smoke.set({paneStatus:{...smoke.app().paneStatus,a7:{...smoke.app().paneStatus.a7,state:'action',stateSince:Date.now()-3600000}}})");await frames();
- const frozen=await js("({ids:[...document.querySelectorAll('[data-palette-pane]')].map(b=>b.dataset.palettePane),glyph:document.querySelector('[data-palette-pane=a7] [data-glyph]')?.dataset.glyph})");
- ok(frozen.ids.join()==='c1,a2,a4,a3,c2,a7'&&frozen.glyph==='action','order frozen while open, glyph live',frozen);
- await js("smoke.set({paneStatus:{...smoke.app().paneStatus,a7:{...smoke.app().paneStatus.a7,state:'working',stateSince:Date.now()-30000}}})");await frames();
+ await js("smoke.set({paneStatus:{...smoke.app().paneStatus,a7:{...smoke.app().paneStatus.a7,state:'action',stateSince:Date.now()-3600000},a3:{...smoke.app().paneStatus.a3,state:'error'}}})");await frames();
+ const frozen=await js("({ids:[...document.querySelectorAll('[data-palette-pane]')].map(b=>b.dataset.palettePane),glyph:document.querySelector('[data-palette-pane=a3] [data-glyph]')?.dataset.glyph})");
+ ok(frozen.ids.join()==='c1,a2,a3'&&frozen.glyph==='error','order frozen while open (a new request is not added), glyph live',frozen);
+ await js("smoke.set({paneStatus:{...smoke.app().paneStatus,a7:{...smoke.app().paneStatus.a7,state:'working',stateSince:Date.now()-30000},a3:{...smoke.app().paneStatus.a3,state:'done'}}})");await frames();
  await shot('palette-dark');
  await js("(()=>{const i=document.querySelector('[data-palette-waiting]').closest('.relative').querySelector('input');const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(i,'migrar');i.dispatchEvent(new Event('input',{bubbles:true}))})()");await frames();
  const found=await js("[...document.querySelectorAll('[data-palette-cmd]')].map(b=>b.dataset.paletteCmd)");
@@ -140,13 +149,14 @@ app.whenReady().then(async()=>{
  let s=await js("({open:smoke.app().paletteOpen,active:smoke.app().activeWorkspaceId,log:window.focusLog,att:!!smoke.app().paneAttention.c1,focused:smoke.focused()})");
  ok(!s.open&&s.active==='wc'&&s.log.includes('c1')&&!s.att&&s.focused==='c1','Ctrl+1 in the palette reveals row 1 (workspace, focus, attention cleared)',s);
 
- // Next waiting (E5-FR-17): action/error then unread done, longest first; wraps.
+ // Next waiting (E5-FR-17; app 2.7.0 the shared rule): open requests then unread done, longest first; wraps.
  await js("smoke.set({paneAttention:{a3:true}})");
  const walk=[];
  for(let i=0;i<5;i++){await js("smoke.key(null,'J',{ctrlKey:true,shiftKey:true})");await wait(30);walk.push(await js('smoke.focused()'))}
- ok(walk.join()==='c1,a2,a4,a3,c1','Ctrl+Shift+J walks c1, a2, a4, then the unread done a3, and wraps',walk);
+ ok(walk.join()==='c1,a2,a3,c1,a2','Ctrl+Shift+J walks c1, a2, then the unread done a3 (the legacy error a4 is out), and wraps',walk);
  await wait(5100);
- const idle={};for(const [k,v] of Object.entries(await js('smoke.app().paneStatus')))idle[k]={...v,state:'idle'};
+ // Open requests closed too: a legacy pendingCount (no attention field) still needs you, as the badge always counted it.
+ const idle={};for(const [k,v] of Object.entries(await js('smoke.app().paneStatus')))idle[k]={...v,state:'idle',pendingCount:0};
  await js('smoke.set({paneStatus:'+JSON.stringify(idle)+',paneAttention:{}})');
  await js("smoke.key(null,'J',{ctrlKey:true,shiftKey:true})");await frames();
  const toasts=await js('smoke.toasts()');
@@ -217,6 +227,72 @@ app.whenReady().then(async()=>{
  ok(codexRow.state==='done'&&codexRow.claude,'its done turn keeps the Codex row next to the Claude one',codexRow);
  await js("smoke.set({workspaces:smoke.app().workspaces.filter(w=>w.id!=='wd'),mountedWorkspaces:Object.fromEntries(Object.entries(smoke.app().mountedWorkspaces).filter(([k])=>k!=='wd'))})");await frames();
 
+ // App 2.7.0 (A6): one rule for "te necesita". Mixed fixture: needs on a working a1 (asked 40 min ago),
+ // open requests c1 and a2, an unseen done a3, a muted error a4 (main sends a muted console with attention
+ // false), a plain shell b2 that sent a notice; out: a4 (muted), b1 (marked but never started), a8 (marked
+ // but asleep), a seen done c2.
+ const fix={a1:{state:'working',attention:false,needs:{text:'Aprobá el deploy',at:'40'}},a2:{state:'action',attention:true,since:10},a3:{state:'done',attention:true,since:3},a4:{state:'error',attention:false,muted:true,since:1},a5:{state:'idle',attention:false},a6:{state:'unknown'},a7:{state:'working',attention:false},a8:{state:'idle',attention:false},c1:{state:'action',attention:true,since:30},c2:{state:'done',attention:false,since:5}};
+ await js("(()=>{const now=Date.now(),M=60000,fix="+JSON.stringify(fix)+";const ps={};for(const [id,f] of Object.entries(fix)){const {since,needs,...rest}=f;ps[id]={precise:true,provider:'claude',updatedAt:now,stateSince:now-(since??1)*M,...rest,...(needs?{needs:{text:needs.text,at:now-Number(needs.at)*M}}:{})}}smoke.set({activeWorkspaceId:'wa',paneStatus:ps,paneAttention:{b1:true,b2:true,a8:true},mountedWorkspaces:{wa:'full',wb:['b2'],wc:'full'},minimized:{},maximized:{}});smoke.setAgents({sleeping:{a8:{at:now-90*M}}});smoke.setFocused('a5','wa')})()");await frames();
+ const mixedBadges=await js('smoke.badges()');
+ ok(mixedBadges==='wa:3,wb:1,wc:1','mixed: the sidebar badges count a1, a2, a3 / the marked shell b2 / c1 (muted, asleep, not started and seen are out)',mixedBadges);
+ ok(await js("smoke.key(null,'k',{ctrlKey:true})"),'Ctrl+K handled (mixed)');await frames();
+ const mixedPal=await js('smoke.palettePanes()');
+ ok(mixedPal.join()==='a1,c1,a2,a3,b2','mixed: the palette lists the same consoles, needs first (aged from the ask), then requests oldest first, the unseen done, the shell',mixedPal);
+ const mixedRows=await js("({a1:document.querySelector('[data-palette-pane=a1]')?.textContent,b2:document.querySelector('[data-palette-pane=b2]')?.textContent,b2glyph:!!document.querySelector('[data-palette-pane=b2] [data-attention-notice]')&&!document.querySelector('[data-palette-pane=b2] [data-glyph]'),a1glyph:document.querySelector('[data-palette-pane=a1] [data-glyph]')?.dataset.glyph})");
+ ok(mixedRows.a1.includes('Te necesita: Aprobá el deploy')&&/(39|40)m/.test(mixedRows.a1)&&mixedRows.a1glyph==='working','mixed: the needs row says what the agent asked, aged from the ask, with the live working glyph',mixedRows);
+ ok(mixedRows.b2.includes('Te mandó un aviso')&&mixedRows.b2glyph,'mixed: the shell row reads as a notice with a bell, no agent glyph',mixedRows);
+ await shot('palette-needs-dark');
+ await js("smoke.key('.relative input','Escape')");await frames();
+ ok(!(await js('smoke.app().paletteOpen')),'Escape closes the palette');
+ const mixedWalk=[];
+ for(let i=0;i<6;i++){await js("smoke.key(null,'J',{ctrlKey:true,shiftKey:true})");await wait(30);mixedWalk.push(await js('smoke.focused()'))}
+ ok(mixedWalk.join()==='a1,c1,a2,a3,b2,a1','mixed: Ctrl+Shift+J walks the palette order and wraps',mixedWalk);
+
+ // Workspace menu "Marcar todo leído": markRead for every done and error console (the muted a4 included), local marks cleared.
+ await js("smoke.set({paneAttention:{...smoke.app().paneAttention,a5:true}})");await frames();
+ ok(await js('smoke.badges()')==='wa:4,wb:0,wc:1','a marked idle console counts (wa:4; revealing b2 cleared its mark)',await js('smoke.badges()'));
+ await js("smoke.wsMenu('wa')");await frames();
+ const markItem=await js("(()=>{const b=smoke.menuItem('Marcar todo leído');return b?{disabled:b.getAttribute('aria-disabled')}:null})()");
+ ok(markItem&&markItem.disabled===null,'the workspace menu offers "Marcar todo leído"',markItem);
+ await js("window.markReadLog=[];smoke.menuItem('Marcar todo leído').click()");await frames();
+ const marked=await js("({log:window.markReadLog.join(),att:Object.keys(smoke.app().paneAttention).filter(id=>id.startsWith('a')).join(),menu:!!document.querySelector('[role=menu]'),badges:smoke.badges()})");
+ ok(marked.log==='a3,a4'&&marked.att===''&&!marked.menu,'"Marcar todo leído" calls markRead for the done a3 and the muted error a4 (attention false) only and clears the marks of the workspace',marked);
+ ok(marked.badges==='wa:3,wb:0,wc:1','without the local mark wa counts its own three again (main acknowledges a3 itself)',marked.badges);
+ await js("smoke.set({paneStatus:{...smoke.app().paneStatus,c2:{...smoke.app().paneStatus.c2,attention:false}}})");
+ await js("smoke.wsMenu('wc')");await frames();
+ const wcItem=await js("(()=>{const b=smoke.menuItem('Marcar todo leído');return b?{disabled:b.getAttribute('aria-disabled'),title:b.title}:null})()");
+ ok(wcItem&&wcItem.disabled==='true'&&wcItem.title==='No hay nada sin leer en este workspace','with nothing unread the item is disabled and says why',wcItem);
+ await js("window.markReadLog=[];smoke.menuItem('Marcar todo leído').click()");await frames();
+ ok(await js("window.markReadLog.length===0&&!!document.querySelector('[role=menu]')"),'a disabled item does nothing and keeps the menu open');
+ await js("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))");await frames();
+ ok(!(await js("!!document.querySelector('[role=menu]')")),'Escape closes the workspace menu');
+
+ // A "Te esperan" row with a tool open says what the console is doing now (rowPhrase), like its sidebar row and board card.
+ await js("smoke.set({paneAttention:{...smoke.app().paneAttention,a7:true},paneStatus:{...smoke.app().paneStatus,a7:{...smoke.app().paneStatus.a7,activity:'Edit a.ts',toolFamily:'edit',detail:{kind:'tool',text:'Edit a.ts'}}}})");await frames();
+ ok(await js("smoke.key(null,'k',{ctrlKey:true})"),'Ctrl+K handled (doing now)');await frames();
+ const doingRow=await js("document.querySelector('[data-palette-pane=a7]')?.textContent??''");
+ ok(doingRow.includes('Editando a.ts'),'a waiting row with a tool open reads "Editando a.ts"',doingRow);
+ await js("smoke.key('.relative input','Escape')");await frames();
+ await js("(()=>{const ps={...smoke.app().paneStatus};const {activity,toolFamily,detail,...rest}=ps.a7;ps.a7=rest;const att={...smoke.app().paneAttention};delete att.a7;smoke.set({paneStatus:ps,paneAttention:att})})()");await frames();
+
+ // Palette ranking (app 2.7.0, rankList): exact, then word prefix, substring, subsequence (4+ letters); accents and case ignored; ties keep the list order.
+ await js("smoke.set({workspaces:[...smoke.app().workspaces,{id:'n4',name:'Subnube',cwd:'',panes:[]},{id:'n5',name:'Nuevo bebé',cwd:'',panes:[]},{id:'n3',name:'Mi nube',cwd:'',panes:[]},{id:'n1',name:'Nube',cwd:'',panes:[]},{id:'n2',name:'Nube privada',cwd:'',panes:[]}]})");await frames();
+ ok(await js("smoke.key(null,'k',{ctrlKey:true})"),'Ctrl+K handled (ranking)');await frames();
+ const ranked=async q=>{await js('smoke.query('+JSON.stringify(q)+')');await frames();return js("[...document.querySelectorAll('[data-palette-cmd]')].map(b=>b.dataset.paletteCmd)")};
+ let hits=await ranked('nube');
+ ok(hits[0]==='ws-n1'&&hits.filter(id=>/^ws-n\\d$/.test(id)).join()==='ws-n1,ws-n3,ws-n2,ws-n4,ws-n5','ranked: Nube (exact), Mi nube and Nube privada (word prefix, list order), Subnube (substring), Nuevo bebé (subsequence)',hits);
+ hits=await ranked('NÚBE');
+ ok(hits.filter(id=>/^ws-n\\d$/.test(id)).join()==='ws-n1,ws-n3,ws-n2,ws-n4,ws-n5','ranked: case and accents do not matter',hits);
+ hits=await ranked('nbe');
+ ok(!hits.includes('ws-n5')&&!hits.includes('ws-n1'),'ranked: a 3 letter term never matches as a scattered subsequence',hits);
+ // A bare status (a snaos needs on a shell with no agent) has no agent state: no glyph on its console row.
+ await js("smoke.set({paneStatus:{...smoke.app().paneStatus,b2:{state:'idle',precise:false,pendingCount:0,attention:true,bare:true,updatedAt:Date.now(),stateSince:Date.now(),needs:{text:'Revisá el log',at:Date.now()}}}})");await frames();
+ hits=await ranked('shell');
+ const bareRow=await js("({row:!!document.querySelector('[data-palette-cmd=console-b2]'),glyph:!!document.querySelector('[data-palette-cmd=console-b2] [data-glyph]')})");
+ ok(bareRow.row&&!bareRow.glyph,'ranked: the console row of a bare needs status shows no agent glyph',{hits,bareRow});
+ await js("smoke.key('.relative input','Escape')");await frames();
+ await js("(()=>{const ps={...smoke.app().paneStatus};delete ps.b2;smoke.set({workspaces:smoke.app().workspaces.filter(w=>!/^n\\d$/.test(w.id)),paneAttention:{},paneStatus:ps});smoke.setAgents({sleeping:{}})})()");await frames();
+
  for(const theme of ['midnight','light'])for(const scale of [1,1.25,1.5]){
   await js("smoke.theme('"+theme+"')");w.setSize(900,600);w.webContents.setZoomFactor(scale);await wait(200);
   const fit=await js("[...document.querySelectorAll('[data-agent-row]')].every(b=>{const r=b.getBoundingClientRect(),a=document.querySelector('aside').getBoundingClientRect();return r.right<=a.right+1&&r.left>=a.left-1})&&document.documentElement.scrollWidth<=innerWidth");
@@ -224,7 +300,7 @@ app.whenReady().then(async()=>{
   if(scale===1.5)await shot('rows-'+theme+'-150');
  }
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+checks+' agent navigation UI checks (rows per state, +N, not started, chevron, palette Ctrl+1, next waiting, Ctrl+1..9 rules, reopen, focus next, 200 ms tooltips, dark/light 100-150%); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+checks+' agent navigation UI checks (rows per state, +N, not started, chevron, palette Ctrl+1, next waiting, one needs-you rule for badge, palette and next waiting, mark all read, palette doing now, palette ranking, Ctrl+1..9 rules, reopen, focus next, 200 ms tooltips, dark/light 100-150%); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE

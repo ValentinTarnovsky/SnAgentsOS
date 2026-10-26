@@ -2,7 +2,7 @@
 import './devUserData'
 import { readFileSync, writeFileSync } from 'fs'
 import { stat } from 'fs/promises'
-import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, powerMonitor, session } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, Notification, powerMonitor, session, shell } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import { BRAND } from '@shared/brand'
 import type { AppInfo, AppMetrics, OpenRequest } from '@shared/ipc-contract'
@@ -14,6 +14,7 @@ import { ScrollbackStore, buildSeed } from './pty/ScrollbackStore'
 import { ScrollbackCheckpoint } from './pty/ScrollbackCheckpoint'
 import { createShutdownPersist, wirePowerShutdown, wireSessionEnd } from './pty/shutdownPersist'
 import { engineFromSettings } from '@shared/terminalEngine'
+import { resolvePresetEnv } from '@shared/presetEnv'
 import { ConfigStore } from './store/ConfigStore'
 import { parseConfig } from './store/schema'
 import { sanitizeExport } from './store/exportConfig'
@@ -30,6 +31,7 @@ import { electronCrypto } from './accounts/safeCrypto'
 import { registerGitIpc } from './ipc/registerGitIpc'
 import { registerReviewNotesIpc } from './ipc/registerReviewNotesIpc'
 import { registerWsNotesIpc } from './ipc/registerWsNotesIpc'
+import { registerChatIpc, type ChatIpc } from './ipc/registerChatIpc'
 import { registerFilesIpc } from './ipc/registerFilesIpc'
 import type { ReviewNoteStore } from './git/ReviewNoteStore'
 import { registerWorktreeIpc } from './ipc/registerWorktreeIpc'
@@ -54,6 +56,7 @@ import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
 import { HookServer } from './status/HookServer'
 import { CodexBridge } from './status/CodexBridge'
+import { ConsoleLedger } from './usage/ConsoleLedger'
 import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
 import { NtfyNotifier } from './status/NtfyNotifier'
@@ -90,6 +93,10 @@ import type { RemoteGitReply, RemoteGitRequest } from '@shared/remote-protocol'
 import { hasNvidiaGpu, type DictationService } from './dictation/DictationService'
 import { installPermissionHandlers } from './permissions'
 import { pathToFileURL } from 'url'
+import { gitRunner } from './git/gitExec'
+import { TeamService } from './teams/TeamService'
+import { registerTeamsIpc } from './teams/registerTeamsIpc'
+import { createTeamsLog } from './teams/teamsLog'
 
 // Remember main's warn/error lines for "Copy diagnostics" (E4-FR-24).
 installLogRing()
@@ -143,11 +150,24 @@ noticeRouter = createNoticeRouter({
   deepLinkBase: () => remoteManager.deepLinkBase(),
   // Web Push to the PWA (E3-FR-44): devices with a visible session are skipped.
   push: (notice, config) => void remoteManager.notifyPush(notice, config),
+  // Teams (app 2.7.0, E10 B8): the push of a new "Te necesita" row or an integrate result, with the #team= deep link.
+  pushTeam: (notice, config) => void remoteManager.notifyTeamPush(notice, config),
+})
+// App 2.7.0 (A4): tokens, cost and context per console, recomputed once per turn for Claude (its done) and on
+// every model call for Codex (thread/tokenUsage/updated), always published as status detail (inside its throttle).
+const consoleLedger = new ConsoleLedger({
+  transcript: (paneId) => statusManager.transcriptFor(paneId),
+  model: (paneId) => statusManager.stateOf(paneId)?.model,
+  publish: (paneId, usage, context) => statusManager.setUsage(paneId, usage, context),
 })
 const codexBridge = new CodexBridge(statusBinDir, join(__dirname, 'statusRuntime.js'), event => statusManager.onAgentEvent(event),
   // v2.4 `/rename`: the thread's name goes through the same dedup as Claude's.
-  (paneId, ptyId, sessionId, title, explicit) => statusManager.reportAgentTitle(paneId, ptyId, 'codex', sessionId, title, explicit))
+  (paneId, ptyId, sessionId, title, explicit) => statusManager.reportAgentTitle(paneId, ptyId, 'codex', sessionId, title, explicit),
+  // App 2.7.0 (A3): every app-server line is a sign of life. A4: the root thread's token usage feeds the ledger.
+  { onSignal: (paneId, ptyId) => statusManager.noteSignal(paneId, ptyId), onUsage: (paneId, ptyId, usage) => consoleLedger.codexUsage(paneId, ptyId, usage) })
 ptyManager.addSink(statusManager)
+// App 2.7.0 (A4): a Claude turn's done recomputes its console's ledger; a cleared status forgets it.
+statusManager.addListener((evt, cause) => void consoleLedger.onStatus(evt, cause))
 // Agent status reaches phones straight from main (E1-FR-03), not via the renderer.
 statusManager.addListener((evt) => remoteManager.pushPaneStatus(evt))
 // app 2.4.0 Share: the guests' pane statuses too (ShareHost exists once bootstrap ran).
@@ -157,6 +177,8 @@ statusManager.setRemoteSeen((paneId) => remoteManager.isPaneSeen(paneId))
 // v2.4: the nonce of each integrated pty's OSC 133 marks (claude / codex typed in a shell).
 statusManager.setShellMarks((ptyId) => ptyManager.shellMarkOf(ptyId))
 remoteManager.setPaneSeenListener((paneId) => statusManager.ackPane(paneId))
+// App 2.7.0 (A3): the phone's markRead / mutePane / silenceAck ctls and planReq.
+remoteManager.setStatusControl(statusManager)
 ptyManager.addSink(codexBridge)
 // snaos CLI (E8-FR-12..22): control server, console tokens, runtime.json and shim under dataDir().
 const cliService: CliService = new CliService({
@@ -184,10 +206,14 @@ let hibernation: HibernationCoordinator | null = null
 let scrollbackCheckpoint: ScrollbackCheckpoint | null = null
 // Claude multi-account (app 2.3.0): created in bootstrap (safeStorage needs app ready).
 let accountService: AccountService | null = null
+// Teams (app 2.7.0, E10 B, labs.teams): created in bootstrap under dataDir(); idle and answering 'disabled' with the lab off.
+let teamService: TeamService | null = null
 // Review notes (E7-FR-18): created in bootstrap; flushed on the exits that skip before-quit.
 let reviewNotes: ReviewNoteStore | null = null
 // Desktop dictation (app 2.5.0): created in bootstrap; its whisper-server dies on quit.
 let dictationService: DictationService | null = null
+// Desktop console chat (app 2.7.0, A7): created in bootstrap next to ChatHub; CONFIG_SAVE re-reads its lab.
+let chatIpc: ChatIpc | null = null
 // An NVIDIA GPU (app.getGPUInfo, read once at bootstrap): picks the GPU pack for device 'auto'.
 let nvidiaGpu = false
 // Share (app 2.4.0, item 8): ONE identity store for both roles (share-identity.json holds host and guest keys;
@@ -256,6 +282,8 @@ function snapshotAgentsOnce(trigger: ExitTrigger): void {
   agentSessions?.snapshotExitOnce(bypassCloseGuards ? 'update' : trigger)
   // No console goes to sleep while the app exits (the next window pushes its view again).
   hibernation?.rendererGone()
+  // Team runs (app 2.7.0, E10 B2): interrupted, process trees killed and stores flushed, before the CLI and the ptys go.
+  teamService?.shutdownSync(bypassCloseGuards ? 'update' : trigger)
 }
 
 /**
@@ -398,6 +426,10 @@ function registerConfigIpc(): void {
     // v2.5: dictation reads its settings and the workspaces from this cache, never from disk
     // (the renderer saves through a debounce, so a disk read could be stale).
     dictationService?.setConfig(config)
+    // App 2.7.0 (A7): labs.consoleChat off drops every desktop chat reader.
+    chatIpc?.setConfig(config)
+    // App 2.7.0 (E10 B1): labs.teams on loads the teams, off flushes and idles them.
+    teamService?.setConfig(config)
   })
 
   ipcMain.handle(CH.CONFIG_EXPORT, async (_e, config: ConfigFile): Promise<boolean> => {
@@ -500,7 +532,13 @@ function openMainWindow(): void {
     }
     if (forceClose) return
     const shouldConfirm = cfg?.settings?.confirmCloseRunning !== false
-    if (shouldConfirm && ptyManager.count > 0) {
+    // Team runs (app 2.7.0, E10 B2) and the integrates in flight (B6: halted, their verify killed) stop with the app too.
+    const liveRuns = teamService?.liveRunCount() ?? 0
+    const integrates = teamService?.integrateCount() ?? 0
+    if (shouldConfirm && (ptyManager.count > 0 || liveRuns > 0 || integrates > 0)) {
+      const detail = [ptyManager.count > 0 ? mainT(cfg, 'dialog.activeDetail', { n: ptyManager.count }) : '', liveRuns + integrates > 0 ? mainT(cfg, 'teams.close.runs', { runs: liveRuns, integrates }) : '']
+        .filter(Boolean)
+        .join('\n')
       const choice = dialog.showMessageBoxSync(win, {
         type: 'question',
         buttons: [mainT(cfg, 'dialog.cancel'), mainT(cfg, 'dialog.closeAnyway')],
@@ -509,7 +547,7 @@ function openMainWindow(): void {
         noLink: true,
         title: BRAND.productName,
         message: mainT(cfg, 'dialog.activeTitle'),
-        detail: mainT(cfg, 'dialog.activeDetail', { n: ptyManager.count }),
+        detail,
       })
       if (choice === 0) {
         event.preventDefault()
@@ -574,6 +612,11 @@ async function bootstrap(): Promise<void> {
   // Headless mirror policy from the saved config before any pty spawns (E6-FR-01);
   // the renderer pushes every later change on pty:setEngine.
   ptyManager.setEngine(engineFromSettings(configStore.load()?.settings))
+  // A preset's env (AgentPreset.env) from main's own config at every spawn and
+  // restart: desktop, phone, CLI, resume and wake all land in PtyManager.
+  ptyManager.setPresetEnvSource((paneId, presetHint) => resolvePresetEnv(configStore.load(), paneId, presetHint))
+  // A Connection that stops at a secret step without text (an imported export) says so in the pane.
+  ptyManager.setSetupNoticeSource((step) => mainT(configStore.load(), 'pty.setupSecretMissing', { n: step }))
   // Saved scrollback (E6-FR-08..13): the first spawn of each pane restores
   // its file (sanitized, with the dated separator), a checkpoint saves every
   // 60 s and the exit paths below save synchronously.
@@ -610,12 +653,22 @@ async function bootstrap(): Promise<void> {
     quitForUpdate,
     setInstalling: (v) => {
       isInstalling = v
+      // The wizard did not proceed: team runs may start again.
+      if (!v) teamService?.installAborted()
     },
     // The NSIS setup closes the app without a before-quit (E6-FR-10). Leaves
     // the exit flag alone: a cancelled wizard still saves on the next quit.
-    persistBeforeInstall: () => {
+    persistBeforeInstall: async () => {
       reviewNotes?.flush()
       scrollbackCheckpoint?.persistAllSync()
+      // Team runs interrupted and flushed, never frozen (a cancelled wizard keeps the app running). B6 integration:
+      // the setup waits for an integrate land already running (a git killed mid checkout leaves it half updated),
+      // then what the consoles printed meanwhile is saved again.
+      const waited = (await teamService?.prepareInstall()) ?? 0
+      if (waited > 0) {
+        reviewNotes?.flush()
+        scrollbackCheckpoint?.persistAllSync()
+      }
     },
     // A silent update that did not land (declined permission prompt): read
     // and deleted once here, shown by the renderer as a toast with [Retry].
@@ -628,10 +681,12 @@ async function bootstrap(): Promise<void> {
   const accounts = new AccountService({
     vault: new AccountVault(join(dataDir(), 'claude-accounts'), vaultCrypto),
     crypto: vaultCrypto,
-    statuses: () => statusManager.snapshot(),
+    // Team runs count as working Claude consoles for deferWhileWorking (app 2.7.0, E10 B2).
+    statuses: () => [...statusManager.snapshot(), ...(teamService?.syntheticStatuses() ?? [])],
     emit: (s) => {
       const wc = mainWindow?.webContents
       if (wc && !wc.isDestroyed()) wc.send(CH.ACCOUNTS_CHANGED, s)
+      teamService?.onAccounts()
     },
     event: (e) => {
       const wc = mainWindow?.webContents
@@ -670,10 +725,18 @@ async function bootstrap(): Promise<void> {
   void accounts.init(configStore.load()?.settings?.claudeAccounts ?? null).catch(() => undefined)
   // The phone's (and the Share guests') git handler, captured when registerGitIpc hands it over.
   let remoteGitHandler: ((req: RemoteGitRequest) => Promise<RemoteGitReply>) | null = null
+  // Worktree per console (E7-FR-27..32, 36): worktrees.json under dataDir().
+  // Before the chip and the Files drawer: both ask it which folders it manages (app 2.7.0, A9).
+  const worktrees = registerWorktreeIpc({
+    loadConfig: () => configStore.load(),
+    killPane: (paneId) => ptyManager.killPaneAndWait(paneId),
+  })
   // Git chip (E7-FR-05..10); settings.gitChip is a schema 12 key, absent = on.
   registerGitIpc({
     getSender: () => mainWindow?.webContents ?? null,
     initialGitChip: (configStore.load()?.settings as { gitChip?: unknown } | undefined)?.gitChip !== false,
+    // "main -N" of a pane on a managed worktree (app 2.7.0, A9).
+    managedRepoOf: (dir) => worktrees.repoOf(dir),
     // The phone's gitReq (E7-FR-22..26) reads through the same GitService.
     setRemoteGit: (handler) => {
       // app 2.4.0: the same GitRemote handler answers the Share guests (read-only, scoped workspace).
@@ -694,11 +757,12 @@ async function bootstrap(): Promise<void> {
   remoteManager.setNotes(wsNotes)
   // Files drawer (v2.2, E9): the workspace folder from the config, every target contained.
   // Share guests read it too (app 2.6.0, read-only, through the guest half).
-  const fileService = registerFilesIpc({ getSender: () => mainWindow?.webContents ?? null, config: () => configStore.load() })
-  // Worktree per console (E7-FR-27..32, 36): worktrees.json under dataDir().
-  registerWorktreeIpc({
-    loadConfig: () => configStore.load(),
-    killPane: (paneId) => ptyManager.killPaneAndWait(paneId),
+  // app 2.7.0 (A9): a pane's tree is its managed worktree; resolveRefs reads relative refs from its spawn cwd.
+  const fileService = registerFilesIpc({
+    getSender: () => mainWindow?.webContents ?? null,
+    config: () => configStore.load(),
+    isManagedWorktree: (p) => worktrees.isManaged(p),
+    spawnCwd: (paneId) => ptyManager.getSpawnCwd(paneId),
   })
   // Per-repo .snagentsos.json (E8-FR-23..27): trusted-repos.json under dataDir().
   registerRepoConfigIpc()
@@ -792,10 +856,14 @@ async function bootstrap(): Promise<void> {
     spawnedAt: (paneId) => statusManager.spawnedAt(paneId),
     runningPanes: () => ptyManager.runningPaneIds(),
     claims: () => chatHub.claims(),
+    // Team transcripts in the repo root's slug folder are never a console's (built later: read lazily).
+    teamSession: (id) => teamService?.ownsSession(id) ?? false,
   })
   const chatHub: ChatHub = new ChatHub({ locate: (paneId) => chatLocator.locate(paneId) })
   statusManager.onTranscriptChange((paneId) => chatHub.transcriptChanged(paneId))
   remoteManager.setChat(chatHub)
+  // Desktop console chat (app 2.7.0, A7; labs.consoleChat): one ChatHub reader per window.
+  chatIpc = registerChatIpc({ hub: chatHub, config: () => configStore.load(), running: (paneId) => ptyManager.ptyIdForPane(paneId) !== null })
   // snaos notes / chat / peek (app 2.3.0): the same notes store as the drawer and
   // the phones; transcripts through the locator only, read one-shot (never a
   // ChatHub reader, so no watcher opens: FR-35 holds). Before setEnabled below.
@@ -886,6 +954,74 @@ async function bootstrap(): Promise<void> {
       headless: ptyManager.headlessMetrics(),
     }
   })
+  // Teams (app 2.7.0, E10 B1): main owns every team; the invoke is registered even with the lab off.
+  // A pane id only while its pty is alive (a closed console holds no session).
+  const livePane = (paneId: string | null | undefined): string | null => (paneId && ptyManager.ptyIdForPane(paneId) !== null ? paneId : null)
+  const teams = new TeamService({
+    dataDir,
+    config: () => configStore.load(),
+    git: gitRunner,
+    // B8: the phones hear of every change too (RemoteManager throttles it per team); Share never does.
+    emit: (evt) => {
+      sendToRenderer(CH.TEAMS_CHANGED, evt)
+      remoteManager.teamChanged(evt)
+    },
+    // '' when it opened, else Electron's error text: the reveal op answers io with it.
+    openPath: (p) => shell.openPath(p),
+    log: createTeamsLog(dataDir),
+    // B2 (runs): the consoles' status, who holds a session, the ptys, the accounts, the CLI and Awake.
+    status: {
+      snapshot: () => statusManager.snapshot(),
+      stateOf: (paneId) => statusManager.stateOf(paneId),
+      paneForSession: (sessionId) => statusManager.paneForSession(sessionId),
+    },
+    sessionHolder: (provider, sessionId) => {
+      const precise = livePane(statusManager.paneForSession(sessionId))
+      if (precise) return precise
+      const rec = agentSessions?.list().find((v) => v.provider === provider && v.sessionId === sessionId && livePane(v.paneId))
+      if (rec) return rec.paneId
+      for (const ws of configStore.load()?.workspaces ?? []) {
+        for (const p of ws.panes) if (p.lastSession?.provider === provider && p.lastSession.sessionId === sessionId && livePane(p.id)) return p.id
+      }
+      return null
+    },
+    pty: {
+      spawnCwd: (id) => ptyManager.getSpawnCwd(id),
+      ptyIdForPane: (id) => ptyManager.ptyIdForPane(id),
+      killPaneAndWait: (id) => ptyManager.killPaneAndWait(id),
+    },
+    accounts: () => accountService?.status() ?? null,
+    cli: {
+      envForTeam: (runId, teamId, agentId, roleKind) => cliService.envForTeam(runId, teamId, agentId, roleKind),
+      revokeTeam: (runId) => cliService.revokeTeam(runId),
+      ready: () => cliService.ready(),
+      // B5 integration, sixth round: the live tokens refuse a Codex block action and are masked in a run's chat rows.
+      holdsToken: (text) => cliService.tokens.holdsToken(text),
+      maskTokens: (text) => cliService.tokens.maskTokens(text),
+    },
+    // Synthetic `team:<runId>` statuses reach only AwakeService (and AccountService through statuses), never StatusManager.
+    awake: (evt) => awakeService?.onPaneStatus(evt),
+    sendRun: (evt) => sendToRenderer(CH.TEAMS_RUN_APPEND, evt),
+    sendIntegrate: (evt) => sendToRenderer(CH.TEAMS_INTEGRATE_PROGRESS, evt),
+    // B4: task worktrees through the console worktree service, tagged with their team owner (decision 63).
+    worktrees,
+    // B5: a new "Te necesita" row (an approval, a card, the trust, an auth or billing pause) as a desktop toast; B8 also
+    // routes it to the phone push, Discord and ntfy (routeTeam: the away gate; nothing remote for a push: false one).
+    notice: (n) => {
+      statusManager.notifyCustom(null, n.title, n.body)
+      noticeRouter?.routeTeam(n)
+    },
+  })
+  teamService = teams
+  // B9: the consoles' ptys (a takeover's console spawning, a bound one closed by hand).
+  ptyManager.addSink(teams.sink)
+  // B8: teamReq and the phone's three Teams ctls reach the service from the phone sessions (origin phone).
+  remoteManager.setTeams(teams.remoteView)
+  statusManager.addListener((evt) => teams.onPaneStatus(evt))
+  cliService.onState(() => teams.onCliState())
+  // B3: `snaos team` from a team run's token reaches the store through teamCtl.
+  cliService.attach({ teams: teams.ctlView })
+  registerTeamsIpc(teams)
   const startupCfg = configStore.load()
   // v2.4: on by default (schema 17), a first run without a config included.
   await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? true)
@@ -894,6 +1030,7 @@ async function bootstrap(): Promise<void> {
   registerCliIpc(cliService)
   cliService.init()
   void cliService.setEnabled(startupCfg?.settings?.cliEnabled !== false)
+  void teams.start(startupCfg)
   openMainWindow()
   // Explorer menu (E4-FR-34): with the toggle on, rewrite the keys when the exe
   // or the label changed (a moved portable, the language). After the first paint.
@@ -917,9 +1054,12 @@ async function bootstrap(): Promise<void> {
     if (BrowserWindow.getAllWindows().length === 0) {
       // macOS: the window closed but the app lived on; record sessions again.
       agentSessions?.thaw()
+      teamService?.thaw()
       openMainWindow()
     }
   })
+  // A Windows session end the OS cancelled leaves the app alive after the exit hooks: a focus thaws Teams (no-op otherwise).
+  app.on('browser-window-focus', () => teamService?.thaw())
 }
 
 // The uninstaller (build/installer.nsh customUnInit) runs the exe with
@@ -944,6 +1084,8 @@ if (process.argv.includes('--cleanup-user-path')) {
 
 app.on('before-quit', () => {
   isQuitting = true
+  // Really quitting: a later focus or request never thaws Teams again.
+  teamService?.markQuitting()
   snapshotAgentsOnce('quit')
   // Shut the remote server first (best-effort, non-blocking) so phones get a
   // shutdown frame before the ptys they mirror are torn down.
@@ -960,6 +1102,8 @@ app.on('before-quit', () => {
   dictationService?.dispose()
   shareGuest?.dispose()
   accountService?.dispose()
+  // The only place the Teams DeadlineTimer is disposed (shutdownSync above only cleared its keys).
+  teamService?.dispose()
   statusManager.dispose()
   codexBridge.dispose()
   discordNotifier.dispose()
@@ -968,7 +1112,10 @@ app.on('before-quit', () => {
   destroyTray()
 })
 
-app.on('will-quit', () => globalShortcut.unregisterAll())
+app.on('will-quit', () => {
+  teamService?.markQuitting()
+  globalShortcut.unregisterAll()
+})
 
 app.on('window-all-closed', () => {
   // The ptys die below, so the agent snapshot goes first (E5-FR-06).

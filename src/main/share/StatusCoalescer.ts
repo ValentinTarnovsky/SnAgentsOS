@@ -29,10 +29,13 @@ export interface StatusLike {
   activity?: string
   model?: string
   effort?: string
+  /** App 2.7.0 (A3): PaneStatusEvt's needs-only status of a pane with no agent track. */
+  bare?: boolean
 }
 
+/** App 2.7.0 (A3): a bare status (only a `snaos needs`, no agent) is no status for a guest. */
 export function toShareStatus(evt: StatusLike | null | undefined): ShareAgentStatus | null {
-  if (!evt || evt.state == null) return null
+  if (!evt || evt.state == null || evt.bare) return null
   const out: ShareAgentStatus = { state: evt.state, stateSince: Math.max(0, Math.floor(evt.stateSince ?? evt.updatedAt ?? 0)) }
   if (evt.precise === false) out.precise = false
   if (evt.provider === 'claude' || evt.provider === 'codex') out.provider = evt.provider

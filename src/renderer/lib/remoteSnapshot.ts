@@ -1,7 +1,7 @@
 import type { RemotePaneInfo, RemotePresetInfo, RemoteScheduleInfo, RemoteStateSnapshot, RemoteWorkspaceInfo } from '@shared/remote-protocol'
 import type { GitSummary } from '@shared/git-types'
 import type { Workspace } from '@shared/types'
-import { isScheduleEnabled, recentRuns, recurrenceOf, waitsForIdle } from '@shared/schedule'
+import { isScheduleEnabled, paneSchedules, recentRuns, recurrenceOf, waitsForIdle } from '@shared/schedule'
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { resolveTokens } from '@/themes'
 import { type AppState, useAppStore } from './store'
@@ -52,26 +52,31 @@ function statusLineField(line: string | undefined): Pick<RemotePaneInfo, 'status
 /**
  * E8-FR-32 (v3.1): every console automation in sidebar order, for the phone's
  * Automations section. The prompt and the history stay on the desktop; only
- * the last run travels. Exported for tests.
+ * the last run travels. App 2.7.0: one info per schedule of a console (in its
+ * stored order), with its `scheduleId` and, for a cron rule, `cron`.
+ * Exported for tests.
  */
-export function remoteSchedules(workspaces: readonly Workspace[], pendingRun: (paneId: string) => boolean): RemoteScheduleInfo[] {
+export function remoteSchedules(workspaces: readonly Workspace[], pendingRun: (paneId: string, scheduleId: string) => boolean): RemoteScheduleInfo[] {
   const out: RemoteScheduleInfo[] = []
   for (const ws of workspaces) {
     for (const pane of ws.panes) {
-      const sched = pane.schedule
-      if (!sched) continue
-      const last = recentRuns(sched.history)[0]
-      out.push({
-        workspaceId: ws.id,
-        paneId: pane.id,
-        time: sched.time,
-        recurrence: recurrenceOf(sched),
-        dueAt: sched.dueAt,
-        enabled: isScheduleEnabled(sched),
-        waitIdle: waitsForIdle(sched),
-        ...(last ? { lastRun: { at: last.at, status: last.status, trigger: last.trigger } } : {}),
-        ...(pendingRun(pane.id) ? { runPending: true } : {}),
-      })
+      for (const sched of paneSchedules(pane)) {
+        const last = recentRuns(sched.history)[0]
+        const recurrence = recurrenceOf(sched)
+        out.push({
+          workspaceId: ws.id,
+          paneId: pane.id,
+          scheduleId: sched.id,
+          time: sched.time,
+          recurrence,
+          ...(recurrence.kind === 'cron' ? { cron: recurrence.expr } : {}),
+          dueAt: sched.dueAt,
+          enabled: isScheduleEnabled(sched),
+          waitIdle: waitsForIdle(sched),
+          ...(last ? { lastRun: { at: last.at, status: last.status, trigger: last.trigger } } : {}),
+          ...(pendingRun(pane.id, sched.id) ? { runPending: true } : {}),
+        })
+      }
     }
   }
   return out
@@ -151,7 +156,7 @@ function buildSnapshot(state: AppState): RemoteStateSnapshot {
     // E2-FR-12: the phone's console picker and its "starts N consoles" confirmation.
     presets: remotePresets(state.presets),
     mountedWorkspaceIds: fullyMountedIds(state.mountedWorkspaces, ordered.map((w) => w.id)),
-    schedules: remoteSchedules(ordered, (paneId) => isManualRunPending(runtime, paneId)),
+    schedules: remoteSchedules(ordered, (paneId, scheduleId) => isManualRunPending(runtime, paneId, scheduleId)),
   }
 }
 
@@ -270,7 +275,7 @@ export function startRemoteSnapshotSync(): () => void {
   }
 }
 
-/** Panes whose "Run now" is pending: the only part of the scheduler runtime the phone sees. */
+/** Schedules (`paneId#scheduleId`) whose "Run now" is pending: the only part of the scheduler runtime the phone sees. */
 function runPendingSig(): string {
   const runtime = useScheduleRuntime.getState()
   const ids = new Set([...Object.keys(runtime.manual), ...Object.keys(runtime.inflight).filter((id) => runtime.inflight[id].trigger === 'manual')])

@@ -186,7 +186,7 @@ export function registerUsageIpc(hooks: UsageIpcHooks): UsageHandle {
         } else {
           next = claudePoll.skipDelay(cfg.claudeIntervalMs, t)
         }
-        customRows = computeCustomRows(cfg.custom)
+        customRows = await computeCustomRows(cfg.custom)
         services = cfg.showStatus ? await fetchServiceStatus() : null
         lastUpdated = Date.now()
       } catch (err) {

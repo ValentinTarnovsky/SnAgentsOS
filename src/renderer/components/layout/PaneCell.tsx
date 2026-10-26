@@ -1,15 +1,22 @@
 import { useEffect, useState, type DragEvent } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   ArchiveRestore,
   ArchiveX,
   ArrowRightLeft,
+  Bell,
+  BellOff,
+  CheckCheck,
   Clock,
   ClipboardCopy,
   Eraser,
+  FileText,
   GitBranch,
   GripVertical,
   History,
+  Hourglass,
   Maximize2,
+  MessageSquare,
   Mic,
   Minimize2,
   Minus,
@@ -19,11 +26,14 @@ import {
   RotateCw,
   Share2,
   SquarePen,
+  SquareTerminal,
   Undo2,
   X,
 } from 'lucide-react'
 import { motion } from 'framer-motion'
-import type { AgentPreset, Pane, Workspace } from '@shared/types'
+import type { AgentPreset, Pane, PaneSchedule, Workspace } from '@shared/types'
+import { labOn } from '@shared/labs'
+import { isScheduleEnabled, paneSchedules } from '@shared/schedule'
 import { useAppStore } from '@/lib/store'
 import { isPaneMounted } from '@/lib/mounting'
 import { resolveLaunch } from '@/lib/launch'
@@ -31,7 +41,7 @@ import { getPtyId } from '@/lib/ptyRegistry'
 import { clearSavedScrollback } from '@/lib/scrollback'
 import { redrawPane } from '@/lib/redrawRegistry'
 import { copyLastOutput, hasLastOutput } from '@/lib/shellMarksRegistry'
-import { focusPane } from '@/lib/focus'
+import { focusPane, setFocusedPane } from '@/lib/focus'
 import { isBracketedPaste, pasteToPane } from '@/lib/pasteRegistry'
 import { isAgentPane } from '@/lib/agentPane'
 import { buildDropPayload, type DropMode } from '@/lib/dropPaths'
@@ -52,11 +62,17 @@ import { PaneErrorBoundary } from '@/components/common/ErrorBoundary'
 import { ResumeChip } from '@/components/agents/ResumeChip'
 import { SleepingOverlay } from '@/components/agents/SleepingOverlay'
 import { CacheChip } from '@/components/agents/CacheChip'
+import { TakeoverChip, TakeoverReleaseConfirm, requestRelease } from '@/components/teams/TakeoverChip'
+import { useTeamsStore } from '@/lib/teamsStore'
+import { PaneSignals } from '@/components/status/PaneSignals'
+import { ConsoleChatView } from '@/components/chat/ConsoleChatView'
+import { chatCapablePane, showPaneView, usePaneView, type PaneView } from '@/lib/consoleChatStore'
+import { openPlan, planRequestOf } from '@/lib/planModal'
 import { useAgentStore } from '@/lib/agentStore'
 import { useGitStore } from '@/lib/gitStore'
 import { workspaceGitKey } from '@/lib/gitChip'
 import { useWorktreeStore } from '@/lib/worktreeStore'
-import { templateFromPane, worktreeOffer } from '@/lib/worktrees'
+import { MAX_PANES, paneInWorktree, templateFromPane, worktreeOffer } from '@/lib/worktrees'
 import { PaneWorktreeChip } from '@/components/git/PaneWorktreeChip'
 import { WorktreeMissingCard } from '@/components/layout/WorktreeMissingCard'
 import { RepoSetupPlaceholder } from '@/components/layout/RepoSetupPlaceholder'
@@ -87,6 +103,13 @@ interface PaneCellProps {
   onDragEndCell: () => void
 }
 
+/** The active schedule that runs first (the header clock's), if any. */
+function nearestActive(schedules: readonly PaneSchedule[]): PaneSchedule | undefined {
+  let best: PaneSchedule | undefined
+  for (const s of schedules) if (isScheduleEnabled(s) && (!best || s.dueAt < best.dueAt)) best = s
+  return best
+}
+
 export function PaneCell({
   workspace,
   pane,
@@ -108,7 +131,22 @@ export function PaneCell({
   // a small badge; its title and saved type stay as they are.
   const statusProvider = useAppStore((s) => s.paneStatus[pane.id]?.provider)
   const runningAgent = runningAgentOf(pane, { provider: statusProvider })
+  const runningAgentLabel = runningAgent ? t(runningAgent === 'codex' ? 'pane.runningAgent.codex' : 'pane.runningAgent.claude') : ''
   const Icon = iconFor(agentIconName(pane, { provider: statusProvider }))
+  // App 2.7.0 (A6): what the agent menu items and the plan button read of the
+  // status, as plain values, so the cell (and its terminal) does not render
+  // again on every other status field. A `bare` status only carries a `snaos
+  // needs` of a pane with no agent: its chip shows (PaneSignals), never the
+  // agent menu items (nor a dot: PaneStatusDot skips it). The plan request,
+  // like the in-app card's, never for a title-only (approximate) stop.
+  const agentStatus = useAppStore(
+    useShallow((s) => {
+      const st = s.paneStatus[pane.id]
+      if (!st || st.bare) return null
+      const plan = st.precise ? planRequestOf(st) : null
+      return { state: st.state, muted: st.muted === true, silent: !!st.silence, plan: !!plan, planId: plan?.requestId, planSummary: plan?.summary ?? '' }
+    }),
+  )
   const connections = useAppStore((s) => s.connections)
   // A console moved here from another workspace keeps launching as at home
   // (folder, connection profile): the move only changes where it is shown.
@@ -179,7 +217,8 @@ export function PaneCell({
     }
     window.snApi.git
       .worktreeInspect({ path: wt.path, base: wt.base })
-      .then((r) => done(r.exists))
+      // A folder left without its `.git` (noCheckout) is no worktree to start a console in.
+      .then((r) => done(r.exists && !r.noCheckout))
       .catch(() => done(true))
     return () => {
       live = false
@@ -198,10 +237,15 @@ export function PaneCell({
   const [nameVal, setNameVal] = useState(pane.title)
   const [scheduling, setScheduling] = useState(false)
   // E8-FR-28: the clock is lit only for an active schedule; a paused one
-  // (or a fired one-shot) is dimmed and its tooltip says "Paused".
-  const hasSchedule = pane.schedule != null
-  const isScheduled = hasSchedule && pane.schedule!.enabled !== false
-  const scheduleTip = pane.schedule ? scheduleNextLabel(pane.schedule, t, lang) : t('pane.schedule')
+  // (or a fired one-shot) is dimmed and its tooltip says "Paused". App 2.7.0:
+  // with several, it shows the nearest next run among the active ones.
+  const schedules = paneSchedules(pane)
+  const hasSchedule = schedules.length > 0
+  const nearestSchedule = nearestActive(schedules)
+  const isScheduled = nearestSchedule !== undefined
+  const clockSchedule = nearestSchedule ?? schedules[0]
+  const scheduleLabel = clockSchedule ? scheduleNextLabel(clockSchedule, t, lang) : t('pane.schedule')
+  const scheduleTip = schedules.length > 1 ? t('schedule.clockMany', { label: scheduleLabel, count: schedules.length }) : scheduleLabel
   // Desktop dictation (app 2.4.0): the menu entry is there even with the header mic hidden.
   const dictating = useDictationStore((s) => s.phase !== 'idle' && s.scope === `pane:${pane.id}`)
 
@@ -274,6 +318,44 @@ export function PaneCell({
     requestAnimationFrame(() => focusPane(target))
   }
 
+  // App 2.7.0 (A6): main acknowledges only a done or error console (status:markRead);
+  // the renderer's own mark (paneAttention, snaos notify) goes with it.
+  const readable = agentStatus?.state === 'done' || agentStatus?.state === 'error'
+  const markRead = (): void => {
+    useAppStore.getState().clearPaneAttention(pane.id)
+    void window.snApi.status.markRead(pane.id).catch(() => false)
+  }
+  const muted = agentStatus?.muted === true
+  // "Leer plan completo" from the pane itself (the menu and a header button) while a plan waits for review.
+  const planReq = agentStatus?.plan ? { requestId: agentStatus.planId, summary: agentStatus.planSummary } : null
+  const readPlan = (): void => {
+    if (planReq) openPlan(pane.id, planReq)
+  }
+
+  // App 2.7.0 (A7, Labs `consoleChat`): Terminal | Chat on an agent console (a
+  // Claude or Codex pane, or a shell whose status names its agent), saved per
+  // pane. The chat covers the terminal, which only hides (display:none, out of
+  // isActive so it refits on the way back): never unmounted, its pty and screen
+  // live on. With the lab off the switch is gone and the terminal shows. The
+  // remappable `toggleConsoleChat` (no default) switches the focused one.
+  const chatCapable = labOn(settings, 'consoleChat') && chatCapablePane(pane, statusProvider)
+  const savedView = usePaneView(pane.id)
+  const chatView = chatCapable && savedView === 'chat'
+  // App 2.7.0 (E10 B9): a console that took over a team agent (from main's team list; nothing with Labs teams off).
+  const takenOver = useTeamsStore((s) => !!s.takeovers[pane.id])
+  // The keyboard follows the view: the terminal, or the chat's composer.
+  const showView = (view: PaneView): void => {
+    if (view !== (chatView ? 'chat' : 'terminal')) showPaneView(pane.id, view)
+  }
+
+  const newConsoleHere = (): void => {
+    const partial = paneInWorktree(pane, workspace, presets)
+    const id = partial ? useAppStore.getState().addPane(workspace.id, partial) : ''
+    if (!id) return
+    setFocusedPane(id, workspace.id)
+    requestAnimationFrame(() => focusPane(id))
+  }
+
   const menuItems: ContextMenuItem[] = [
     { label: t('ctx.rename'), icon: Pencil, onClick: startRename },
     {
@@ -287,7 +369,7 @@ export function PaneCell({
       : []),
     ...(homeWs ? [{ label: t('pane.moveBack', { name: homeWs.name }), icon: Undo2, onClick: () => moveTo(homeWs.id) }] : []),
     {
-      label: hasSchedule ? t('schedule.edit') : t('pane.schedule'),
+      label: schedules.length > 1 ? t('schedule.editMany', { count: schedules.length }) : hasSchedule ? t('schedule.edit') : t('pane.schedule'),
       icon: Clock,
       onClick: () => setScheduling(true),
     },
@@ -305,6 +387,28 @@ export function PaneCell({
           },
         ]
       : []),
+    // App 2.7.0 (A6): read and mute act on main's status of the console's agent.
+    ...(agentStatus
+      ? [
+          ...(planReq ? [{ label: t('plan.read'), icon: FileText, onClick: readPlan }] : []),
+          {
+            label: t('pane.menu.markRead'),
+            icon: CheckCheck,
+            disabled: !readable,
+            hint: readable ? undefined : t('pane.menu.markReadHint'),
+            onClick: markRead,
+          },
+          {
+            label: muted ? t('pane.menu.unmute') : t('pane.menu.mute'),
+            icon: muted ? Bell : BellOff,
+            onClick: () => void window.snApi.status.mute(pane.id, !muted).catch(() => false),
+          },
+          // The header's silence chip can shrink to its icon in a narrow pane: the ack stays here too.
+          ...(agentStatus.silent
+            ? [{ label: t('status.silence.ack'), icon: Hourglass, onClick: () => void window.snApi.status.silenceAck(pane.id).catch(() => false) }]
+            : []),
+        ]
+      : []),
     ...(offer.show
       ? [
           {
@@ -313,6 +417,18 @@ export function PaneCell({
             disabled: !!offer.blocked,
             hint: offer.blocked ? t(offer.blocked) : undefined,
             onClick: () => openWorktreeLaunch({ workspaceId: workspace.id, repoCwd: offer.repoCwd, template: templateFromPane(pane, presets) }),
+          },
+        ]
+      : []),
+    // App 2.7.0 (A9): one more console on this pane's worktree (no new branch, nothing asked of main).
+    ...(wt
+      ? [
+          {
+            label: t('worktree.newHere'),
+            icon: SquareTerminal,
+            disabled: workspace.panes.length >= MAX_PANES || wtMissing,
+            hint: workspace.panes.length >= MAX_PANES ? t('worktree.full') : wtMissing ? t('worktree.missing.title') : undefined,
+            onClick: newConsoleHere,
           },
         ]
       : []),
@@ -340,6 +456,8 @@ export function PaneCell({
     ...(closedCount > 0
       ? [{ label: t('agents.reopenClosed'), icon: ArchiveRestore, separated: true, onClick: () => void reopenClosedConsole() }]
       : []),
+    // App 2.7.0 (E10 B9): the chip's "Devolver al Equipo", also here (the chip can shrink in a narrow pane).
+    ...(takenOver ? [{ label: t('teams.takeover.release'), icon: Undo2, separated: true, onClick: () => requestRelease(pane.id, t) }] : []),
     { label: t('pane.close'), icon: X, danger: true, separated: true, onClick: onClose },
   ]
   const restartTip = resume.show && resume.button === 'resume' ? t('agents.restartTipResume') : t('pane.restart')
@@ -417,24 +535,43 @@ export function PaneCell({
             className="min-w-0 flex-1 rounded border border-accent-violet/50 bg-bg-primary px-1.5 py-0.5 text-xs text-text-primary outline-none"
           />
         ) : (
-          // The topic gives way first: it shrinks to nothing before the title truncates.
-          <span className="flex min-w-0 flex-1 items-baseline overflow-hidden text-xs" title={topic ? `${pane.title} · ${topic}` : undefined}>
-            {runningAgent && (
-              <span
-                data-pane-running-agent={runningAgent}
-                title={t('pane.runningAgent.tip')}
-                className="mr-1.5 shrink-0 rounded border border-border px-1 text-[10px] leading-4 text-text-secondary"
-              >
-                {t(runningAgent === 'codex' ? 'pane.runningAgent.codex' : 'pane.runningAgent.claude')}
+          // App 2.7.0 (A6): the title keeps its first 5rem (all of it when shorter, at least
+          // 2.5rem) and the signal chips truncate before it does. The invisible strut in the
+          // same grid cell sets that floor as the cell's flex basis; the box has no intrinsic
+          // width of its own ([contain:inline-size]), so the doing line and the topic never
+          // raise it. The chips shrink with a far larger factor; only a header too narrow for
+          // its buttons takes the title under its floor, so the buttons are never pushed out.
+          <span className="grid min-w-0 flex-auto">
+            {/* The topic gives way first: it shrinks to nothing before the title truncates. */}
+            <span
+              data-pane-title-box
+              className="col-start-1 row-start-1 flex min-w-0 items-baseline overflow-hidden text-xs [contain:inline-size]"
+              title={topic ? `${pane.title} · ${topic}` : undefined}
+            >
+              {runningAgent && (
+                <span
+                  data-pane-running-agent={runningAgent}
+                  title={t('pane.runningAgent.tip')}
+                  className="mr-1.5 shrink-0 rounded border border-border px-1 text-[10px] leading-4 text-text-secondary"
+                >
+                  {runningAgentLabel}
+                </span>
+              )}
+              <span data-pane-title className="min-w-0 truncate font-medium text-text-secondary">
+                {pane.title}
               </span>
-            )}
-            <span className="min-w-0 truncate font-medium text-text-secondary">{pane.title}</span>
-            <PaneStatusLine paneId={pane.id} />
-            {topic && (
-              <span data-pane-topic className="min-w-0 truncate whitespace-pre text-text-secondary/60 [flex-shrink:9999]">
-                {` · ${topic}`}
-              </span>
-            )}
+              <PaneStatusLine paneId={pane.id} />
+              {topic && (
+                <span data-pane-topic className="min-w-0 truncate whitespace-pre text-text-secondary/60 [flex-shrink:9999]">
+                  {` · ${topic}`}
+                </span>
+              )}
+            </span>
+            <span aria-hidden className="invisible col-start-1 row-start-1 flex h-0 min-w-0 overflow-hidden text-xs">
+              {runningAgent && <span className="mr-1.5 shrink-0 border px-1 text-[10px]">{runningAgentLabel}</span>}
+              {/* 1 px of slack: the title's sliver of the chips' shrink (well under 1 px) never ellipsizes a short title. */}
+              <span className="min-w-[2.5rem] max-w-[5rem] whitespace-pre pr-px font-medium">{pane.title}</span>
+            </span>
           </span>
         )}
         {homeWs && (
@@ -451,8 +588,28 @@ export function PaneCell({
             </button>
           </Tooltip>
         )}
-        {wt && <PaneWorktreeChip pane={pane} />}
+        {/* Like the signal chips, the branch gives way before the title does. */}
+        {wt && (
+          <span className="flex min-w-0 [flex-shrink:999]">
+            <PaneWorktreeChip pane={pane} />
+          </span>
+        )}
+        <PaneSignals paneId={pane.id} />
+        {planReq && (
+          <Tooltip label={t('plan.read')}>
+            <button
+              draggable={false}
+              data-pane-plan={pane.id}
+              aria-label={t('plan.read')}
+              onClick={readPlan}
+              className="rounded p-1 text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
+            >
+              <FileText size={13} />
+            </button>
+          </Tooltip>
+        )}
         <CacheChip paneId={pane.id} />
+        <TakeoverChip paneId={pane.id} />
         {exited && (
           <span
             data-pane-exited
@@ -460,6 +617,43 @@ export function PaneCell({
           >
             {t('pane.exited')}
           </span>
+        )}
+        {chatCapable && (
+          // A double click here switches twice, it never maximizes the pane.
+          <div
+            role="radiogroup"
+            aria-label={t('consoleChat.viewLabel')}
+            data-pane-view-toggle={chatView ? 'chat' : 'terminal'}
+            onDoubleClick={(e) => e.stopPropagation()}
+            className="flex shrink-0 items-center rounded border border-border p-px"
+          >
+            {(
+              [
+                ['terminal', SquareTerminal, t('consoleChat.viewTerminal')],
+                ['chat', MessageSquare, t('consoleChat.viewChat')],
+              ] as const
+            ).map(([view, Glyph, label]) => {
+              const on = (chatView ? 'chat' : 'terminal') === view
+              return (
+                <Tooltip key={view} label={label}>
+                  <button
+                    draggable={false}
+                    role="radio"
+                    aria-checked={on}
+                    aria-label={label}
+                    data-view-option={view}
+                    onClick={() => showView(view)}
+                    className={cn(
+                      'flex h-5 w-6 items-center justify-center rounded-[3px] transition-colors',
+                      on ? 'bg-accent-violet/15 text-text-primary' : 'text-text-secondary hover:text-text-primary',
+                    )}
+                  >
+                    <Glyph size={13} />
+                  </button>
+                </Tooltip>
+              )
+            })}
+          </div>
         )}
         <PaneMicButton paneId={pane.id} />
         <Tooltip label={scheduleTip}>
@@ -540,22 +734,28 @@ export function PaneCell({
         ) : sleepInfo ? (
           <SleepingOverlay paneId={pane.id} workspaceId={workspace.id} info={sleepInfo} />
         ) : mounted ? (
-          // A render failure swaps only the terminal for a fallback; the pty
-          // keeps running and [Reload console] reattaches (E4-FR-19).
-          <PaneErrorBoundary paneId={pane.id} epoch={epoch}>
-            <TerminalPane
-              key={epoch}
-              paneId={pane.id}
-              workspaceId={workspace.id}
-              cwd={cwd}
-              shell={shell}
-              initialCommand={initialCommand}
-              launchKind={launchKind}
-              setup={setup}
-              fontSize={pane.fontSize}
-              isActive={cellVisible}
-            />
-          </PaneErrorBoundary>
+          <>
+            {/* Always this wrapper (the chat only hides it), so switching views never remounts the terminal. */}
+            <div data-pane-terminal={pane.id} className={cn('h-full', chatView && 'hidden')}>
+              {/* A render failure swaps only the terminal for a fallback; the pty
+                  keeps running and [Reload console] reattaches (E4-FR-19). */}
+              <PaneErrorBoundary paneId={pane.id} epoch={epoch}>
+                <TerminalPane
+                  key={epoch}
+                  paneId={pane.id}
+                  workspaceId={workspace.id}
+                  cwd={cwd}
+                  shell={shell}
+                  initialCommand={initialCommand}
+                  launchKind={launchKind}
+                  setup={setup}
+                  fontSize={pane.fontSize}
+                  isActive={cellVisible && !chatView}
+                />
+              </PaneErrorBoundary>
+            </div>
+            {chatView && <ConsoleChatView pane={pane} active={cellVisible} onTerminal={() => showView('terminal')} />}
+          </>
         ) : (
           <div
             data-pane-placeholder={pane.id}
@@ -589,6 +789,8 @@ export function PaneCell({
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
       )}
 
+      {takenOver && <TakeoverReleaseConfirm paneId={pane.id} />}
+
       {movePicker && (
         <ContextMenu
           x={movePicker.x}
@@ -608,7 +810,7 @@ export function PaneCell({
           workspaceId={workspace.id}
           paneId={pane.id}
           paneTitle={pane.title}
-          schedule={pane.schedule}
+          scheduleId={clockSchedule?.id}
           onClose={() => setScheduling(false)}
         />
       )}

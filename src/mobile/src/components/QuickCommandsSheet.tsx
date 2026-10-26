@@ -29,6 +29,8 @@ const ERRORS: Record<string, MobileMessageKey> = {
   not_found: 'quick.err.notFound',
   not_running: 'quick.err.notRunning',
   multiline_unsafe: 'quick.err.multiline',
+  awaiting_user: 'quick.err.awaitingUser',
+  enter_held: 'quick.err.enterHeld',
   no_preset: 'quick.err.noPreset',
 }
 

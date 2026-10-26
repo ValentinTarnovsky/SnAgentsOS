@@ -32,7 +32,15 @@ export interface ManifestEntry {
   /** Worktree root in force when it was created (a later root change keeps it removable). */
   root: string
   createdAt: number
+  /**
+   * app 2.7.0 (E10 B4, decision 63): a team task worktree, `team:<teamId>:<gen>:<taskId>`. Set only by main
+   * (TaskWorktrees); never offered as an orphan, and removed only by that owner. Absent for a console's own.
+   */
+  owner?: string
 }
+
+/** What an owner may look like (teamWorktreeOwner); anything else is dropped at load, the entry kept. */
+const OWNER_RE = /^team:tm-[a-f0-9]{12}:[a-f0-9]{8}:t-[0-9]{1,5}$/
 
 const entrySchema = z.object({
   path: z.string().min(1).max(4096),
@@ -43,6 +51,7 @@ const entrySchema = z.object({
   linkedPaths: z.array(z.string().max(4096)).max(16).catch([]),
   root: z.string().max(4096).catch(''),
   createdAt: z.number().catch(0),
+  owner: z.string().regex(OWNER_RE).optional().catch(undefined),
 })
 
 export interface ManifestFs {
@@ -89,7 +98,10 @@ export class WorktreeManifest {
       if (raw && raw.version === MANIFEST_VERSION && Array.isArray(raw.entries)) {
         for (const item of raw.entries) {
           const r = entrySchema.safeParse(item)
-          if (r.success) list.push(r.data)
+          if (!r.success) continue
+          const e: ManifestEntry = r.data
+          if (e.owner === undefined) delete e.owner
+          list.push(e)
         }
       }
     } catch {
@@ -134,5 +146,43 @@ export class WorktreeManifest {
     this.entries = next
     this.save()
     return true
+  }
+
+  /** The entry an owner holds (decision 63: a team task's worktree), else null. */
+  ownedBy(owner: string): ManifestEntry | null {
+    if (!owner) return null
+    const hit = this.load().find((e) => e.owner === owner)
+    return hit ? { ...hit, linkedPaths: [...hit.linkedPaths] } : null
+  }
+
+  /** The entry of `path` loses its owner when it is exactly `owner` (a stale tree of a task that got a new one); whether it did. */
+  disownAt(path: string, owner: string): boolean {
+    if (!owner) return false
+    const key = this.key(path)
+    let hit = false
+    this.entries = this.load().map((e) => {
+      if (e.owner !== owner || this.key(e.path) !== key) return e
+      hit = true
+      const next = { ...e }
+      delete next.owner
+      return next
+    })
+    if (hit) this.save()
+    return hit
+  }
+
+  /** Every entry whose owner starts with `prefix` loses it (a removed team: its trees become ordinary orphans); how many. */
+  disown(prefix: string): number {
+    if (!prefix) return 0
+    let n = 0
+    this.entries = this.load().map((e) => {
+      if (e.owner === undefined || !e.owner.startsWith(prefix)) return e
+      n++
+      const next = { ...e }
+      delete next.owner
+      return next
+    })
+    if (n > 0) this.save()
+    return n
   }
 }

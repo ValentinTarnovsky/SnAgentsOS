@@ -19,7 +19,7 @@ Open *sets* of multiple terminals and AI CLI sessions (Claude Code, Codex, custo
 
 ---
 
-> **Status:** `v2.6.0`, stable. Upgrading from a 1.x version? Your data moves over by itself, see [Upgrading from 1.x](#upgrading-from-1x). Built in public as a VibeCoding showcase, open source under MIT.
+> **Status:** `v2.7.0`, stable. Upgrading from a 1.x version? Your data moves over by itself, see [Upgrading from 1.x](#upgrading-from-1x). Built in public as a VibeCoding showcase, open source under MIT.
 
 ## What it is
 
@@ -34,9 +34,10 @@ A collapsible sidebar lists **workspaces** (not chats). Opening a workspace show
 - 📁 **Per-workspace directory**: pick any folder, every console opens there.
 - 🔎 **Built for long sessions**: infinite (or capped) scrollback, in-pane find, a command palette (`Ctrl/Cmd+K`) and per-row settings search.
 - 🚦 **Agents first**: `Ctrl+K` opens on the consoles waiting for you, `Ctrl+Shift+J` jumps to the next one, sessions resume after a restart, an agents board (`Ctrl+Shift+A`) with idle hibernation, agent races across worktrees, `claude` or `codex` typed in a PowerShell console get their own status row, `/rename` renames the console, and the PC stays awake while agents work.
+- 🏢 **Teams (Labs, off by default)**: agents with roles (Lead, Dev, QA, Research) that work on one repo without a terminal, from a task board, with your approval for plans, the final OK and new roles, QA rounds, tasks in their own git worktrees, **Integrate** as a merge commit you start on the PC, routines with a daily summary, **Take control** of any agent in a real console, and the board, approvals and the Lead chat on the phone.
 - 🌿 **Git built in**: a branch and changes chip in the header and sidebar, a Changes panel (`Ctrl+Shift+D`) with diffs and review notes sent to a console in one paste, and consoles in isolated git worktrees.
 - ⚡ **Quick Commands**: saved prompts and actions, global or per workspace, from a `Ctrl+Shift+Q` popover, the palette or the phone.
-- 🛠️ **Automation**: the `snaos` CLI inside every console (`ls`, `spawn`, `send`, `read`, `peek`, `chat`, `wait`, `status`, `notify`, `note`, `notes`, `focus`, `rename`, `restart`, `kill`, `ws`, `usage`, `account`) so agents can drive the app, watch what another console is doing, keep the workspace notes, read the usage bars and switch the saved Claude account when you ask, a `.snagentsos.json` per repo (consoles, grid, setup, Quick Commands, trusted by hash), and recurring per-console schedules that wait for the agent to be free.
+- 🛠️ **Automation**: the `snaos` CLI inside every console (`ls`, `spawn`, `send`, `read`, `peek`, `chat`, `wait`, `status`, `notify`, `note`, `notes`, `focus`, `rename`, `restart`, `kill`, `ws`, `usage`, `account`, `needs`) so agents can drive the app, ask you for something without blocking (`snaos needs`), watch what another console is doing, keep the workspace notes, read the usage bars and switch the saved Claude account when you ask, a `.snagentsos.json` per repo (consoles, grid, setup, Quick Commands, trusted by hash), and recurring per-console schedules that wait for the agent to be free.
 - 🤝 **Share between PCs**: share a console or a whole workspace with another SnAgentsOS over Tailscale or your LAN, end-to-end encrypted, as View only, Type only (type without send) or Full control, with a password or an approval prompt for each guest, and per guest switches for consoles, Chat, Changes, editable Notes and read-only Files (secrets and `.git` always hidden).
 - 🎙️ **Dictation (Windows)**: dictate into any console from a mic button, the console menu or `Ctrl+Shift+H`, typed on one line and never with Enter, using a local Whisper model (large-v3-turbo on an NVIDIA GPU, small on the CPU) downloaded once from Settings. Audio never leaves the PC.
 - 👥 **Claude accounts**: save up to 8 Claude logins in priority order and switch between them by hand, from the phone, with `snaos account use` or automatically when one runs out.

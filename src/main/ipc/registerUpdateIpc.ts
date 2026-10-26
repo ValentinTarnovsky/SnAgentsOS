@@ -13,9 +13,11 @@ interface UpdateIpcHooks {
   /**
    * Saves the scrollback synchronously right before the NSIS setup starts
    * (E6-FR-10). Only the Windows installer: the portable swap and the
-   * AppImage quit through before-quit, which saves on its own.
+   * AppImage quit through before-quit, which saves on its own. The setup
+   * starts once a returned promise settles (app 2.7.0, E10 B6: a Teams
+   * integrate land already running finishes first).
    */
-  persistBeforeInstall?: () => void
+  persistBeforeInstall?: () => void | Promise<unknown>
   /**
    * The silent update that did not land, read from the marker at start (app
    * 2.4.0). `update:notApplied` hands it out once, then answers null.
@@ -23,7 +25,7 @@ interface UpdateIpcHooks {
   notApplied?: UpdateNotApplied | null
   /** Test seams: the check/install implementations and the state store. */
   check?: () => Promise<UpdateInfo>
-  install?: (onProgress: (p: UpdateProgress) => void, opts?: { beforeApply?: (kind: InstallKind) => void }) => Promise<{ relaunching: boolean }>
+  install?: (onProgress: (p: UpdateProgress) => void, opts?: { beforeApply?: (kind: InstallKind) => void | Promise<unknown> }) => Promise<{ relaunching: boolean }>
   state?: UpdateStateStore
 }
 
@@ -84,9 +86,8 @@ export function registerUpdateIpc(hooks: UpdateIpcHooks): void {
             send(CH.UPDATE_PROGRESS, p)
           },
           {
-            beforeApply: (kind) => {
-              if (kind === 'win-installer') hooks.persistBeforeInstall?.()
-            },
+            // The installer waits for what the hook returns (downloadAndInstall awaits it).
+            beforeApply: (kind) => (kind === 'win-installer' ? hooks.persistBeforeInstall?.() : undefined),
           },
         )
         state.installed(result.relaunching)

@@ -23,6 +23,7 @@ import type { ResolvedLaunch } from '@/lib/launch'
 import type { ShellKind } from '@shared/ipc-contract'
 import { useT } from '@/i18n'
 import { noteSpawnFailure } from '@/lib/worktrees'
+import { createFileLinkProvider, openTerminalRef } from '@/lib/termFileLinks'
 import { FIT_MIN_FONT, fitBaselineOf, fitGeometry, fitOwnerOf, releaseFitFromDesktop, setFitBaseline, useFitStore, type FitOwnerEntry } from '@/lib/fitStore'
 import { oneShotLaunch } from '@/lib/repoConfig'
 import { registerShellMarks, unregisterShellMarks, type ShellMarksApi } from '@/lib/shellMarksRegistry'
@@ -44,6 +45,10 @@ const plain = (s: string): string => s.replace(/[\x00-\x1f\x7f-\x9f]/g, '')
 /** The message of a failed spawn/restart invoke, without Electron's IPC wrapper. */
 const spawnError = (err: unknown): string =>
   plain(String(err instanceof Error ? err.message : err).replace(/^Error invoking remote method '[^']*': (?:Error: )?/, ''))
+
+/** The pane's preset id in the store (a spawn hint; main owns the preset env). */
+const presetIdOf = (paneId: string): string | undefined =>
+  useAppStore.getState().workspaces.flatMap((w) => w.panes).find((p) => p.id === paneId)?.presetId
 
 /** Keys that alone are not typing: they never take a phone-sized pane back (E3-FR-19). */
 const MODIFIER_KEYS = new Set(['Shift', 'Control', 'Alt', 'AltGraph', 'Meta', 'CapsLock', 'OS'])
@@ -233,6 +238,15 @@ export function useXterm(
     // addon's default opens window.open() with no URL (about:blank), which the
     // sandboxed renderer can't navigate, so links appeared dead.
     term.loadAddon(new WebLinksAddon((_event, uri) => window.snApi.system.openExternal(uri)))
+    // App 2.7.0 (A9): Ctrl+click on a `file:line` main finds in the console's
+    // tree opens it in the Files drawer at that line. URLs stay the addon's.
+    const paneId = opts.paneId
+    const fileLinks = term.registerLinkProvider(
+      createFileLinkProvider(term, {
+        resolve: (refs) => window.snApi.files.resolveRefs({ paneId, refs }),
+        open: (ref) => void openTerminalRef(paneId, ref),
+      }),
+    )
     term.loadAddon(search)
     term.open(container)
     // Unicode 11 widths (emoji and Claude/Codex box glyphs take 2 cells), loaded
@@ -736,6 +750,7 @@ export function useXterm(
           setup: launch.setup,
           cols: born?.cols ?? term.cols,
           rows: born?.rows ?? term.rows,
+          presetId: presetIdOf(o.paneId),
           // After a failed respawn, retry with the OS default shell.
           fallbackDefaultShell: prev?.error ? true : undefined,
         })
@@ -850,6 +865,8 @@ export function useXterm(
               restoreScrollback: !launch.resumed,
               // The CLI's console token carries the workspace (SNAOS_WORKSPACE_ID).
               workspaceId: useAppStore.getState().workspaces.find((w) => w.panes.some((p) => p.id === opts.paneId))?.id,
+              // Only a hint for a pane not saved yet: main resolves the preset env itself.
+              presetId: presetIdOf(opts.paneId),
             })
           })
           .then((spawned) => {
@@ -982,6 +999,7 @@ export function useXterm(
       unregisterShellMarks(opts.paneId, marksApi)
       marks.dispose()
       cwdOsc.dispose()
+      fileLinks.dispose()
       forgetPrompts(opts.paneId)
       exitRef.current = null
       shellKindRef.current = null

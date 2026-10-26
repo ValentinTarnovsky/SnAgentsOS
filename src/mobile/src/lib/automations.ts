@@ -7,7 +7,7 @@
 import { create } from 'zustand'
 import type { RemoteScheduleInfo, RemoteStateSnapshot } from '@shared/remote-protocol'
 import type { ScheduleRunStatus, WorkspaceTaskState } from '@shared/types'
-import { WEEK_ORDER } from '@shared/schedule'
+import { formatRunWhen, scheduleKey, WEEK_ORDER } from '@shared/schedule'
 import { getLang, t, type MobileMessageKey } from './i18n'
 import { isNoReply } from './pending'
 
@@ -37,9 +37,18 @@ export interface AutomationRow {
 }
 
 /**
- * The rows in the desktop's order (sidebar order). A schedule whose console
- * is no longer in the snapshot is dropped; an older desktop (no `schedules`)
- * lists nothing.
+ * The row's identity: a console can hold several schedules (app 2.7.0). An
+ * older desktop sends no `scheduleId` and one schedule per console, so the
+ * console id alone stays unique there.
+ */
+export function automationKey(schedule: Pick<RemoteScheduleInfo, 'paneId' | 'scheduleId'>): string {
+  return scheduleKey(schedule.paneId, schedule.scheduleId ?? '')
+}
+
+/**
+ * The rows in the desktop's order (sidebar order, then each console's
+ * schedules in order). A schedule whose console is no longer in the snapshot
+ * is dropped; an older desktop (no `schedules`) lists nothing.
  */
 export function automationRows(snapshot: RemoteStateSnapshot | null): AutomationRow[] {
   if (!snapshot?.schedules) return []
@@ -82,18 +91,24 @@ export function weekdayName(day: number): string {
   return f.format(new Date(2024, 0, 7 + day, 12)).replace(/\.$/, '')
 }
 
-const pad = (n: number): string => String(n).padStart(2, '0')
-
-/** "lun 09:00" / "Mon 09:00", the desktop table's format (phone clock). */
-export function formatWhen(at: number): string {
-  const d = new Date(at)
-  return `${weekdayName(d.getDay())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+/**
+ * "lun 09:00" / "Mon 09:00" within the next 6 days, else with its date
+ * ("dom, 1 nov, 09:00") and the year when it is another: the desktop table's
+ * rule (`formatRunWhen`), on the phone clock.
+ */
+export function formatWhen(at: number, now: number = Date.now()): string {
+  return formatRunWhen(at, getLang(), now)
 }
 
-/** "Lun-Vie", "Semanal: lun, mie", "Cada hora a los :15". */
-export function recurrenceText(schedule: Pick<RemoteScheduleInfo, 'recurrence' | 'time'>): string {
+/** "Lun-Vie", "Semanal: lun, mie", "Cada hora a los :15", "Cron: 0 9 * * 1-5". */
+export function recurrenceText(schedule: Pick<RemoteScheduleInfo, 'recurrence' | 'time' | 'cron'>): string {
   const rec = schedule.recurrence
+  // A cron rule (app 2.7.0) shows its expression, from `cron` when the
+  // desktop sends it beside the recurrence.
+  if (schedule.cron) return t('auto.cron.rule', { expr: schedule.cron })
   switch (rec.kind) {
+    case 'cron':
+      return t('auto.cron.rule', { expr: rec.expr })
     case 'weekly':
       return t('auto.rec.weeklyDays', { days: WEEK_ORDER.filter((d) => rec.days.includes(d)).map(weekdayName).join(', ') })
     case 'hourly':
@@ -107,9 +122,9 @@ export function recurrenceText(schedule: Pick<RemoteScheduleInfo, 'recurrence' |
   }
 }
 
-/** "Next: Mon 09:00" while active, "Paused" otherwise. */
-export function nextText(schedule: Pick<RemoteScheduleInfo, 'enabled' | 'dueAt'>): string {
-  return schedule.enabled ? t('auto.next', { when: formatWhen(schedule.dueAt) }) : t('auto.paused')
+/** "Next: Mon 09:00" ("Next: Sun, Nov 1, 09:00" 6 or more days away) while active, "Paused" otherwise. */
+export function nextText(schedule: Pick<RemoteScheduleInfo, 'enabled' | 'dueAt'>, now: number = Date.now()): string {
+  return schedule.enabled ? t('auto.next', { when: formatWhen(schedule.dueAt, now) }) : t('auto.paused')
 }
 
 /**

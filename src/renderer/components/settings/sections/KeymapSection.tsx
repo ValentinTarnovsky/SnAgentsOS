@@ -20,7 +20,8 @@ export function KeymapSection() {
 
   const resolved = resolveKeymap(keymap)
   const counts: Record<string, number> = {}
-  for (const a of KEY_ACTIONS) counts[resolved[a.id]] = (counts[resolved[a.id]] ?? 0) + 1
+  // An action with no key (toggleConsoleChat until the user records one) never conflicts.
+  for (const a of KEY_ACTIONS) if (resolved[a.id]) counts[resolved[a.id]] = (counts[resolved[a.id]] ?? 0) + 1
 
   const setAccel = (id: ActionId, accel: string): void =>
     updateSettings({ keymap: { ...keymap, [id]: accel } })
@@ -37,7 +38,7 @@ export function KeymapSection() {
 
       {KEY_ACTIONS.map((a) => {
         const acc = resolved[a.id]
-        const conflict = counts[acc] > 1
+        const conflict = !!acc && counts[acc] > 1
         const rec = recording === a.id
         return (
           <div
@@ -75,7 +76,7 @@ export function KeymapSection() {
                     : 'border-border text-text-primary hover:border-accent-violet/40',
               )}
             >
-              {rec ? t('keys.recording') : formatAccel(acc)}
+              {rec ? t('keys.recording') : acc ? formatAccel(acc) : <span data-keys-unset className="font-sans text-text-secondary">{t('keys.unset')}</span>}
             </button>
             <button
               onClick={() => reset(a.id)}

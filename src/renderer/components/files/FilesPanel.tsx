@@ -7,7 +7,9 @@
  * menu creates, renames (F2), deletes to the OS trash, copies the path,
  * inserts it into the console, reveals it in the file manager or opens it
  * outside (inert formats only). Main owns the disk: ids and relative paths go
- * out, never an absolute path.
+ * out, never an absolute path. A Ctrl+click on `file:line` in a terminal
+ * (app 2.7.0, A9) opens the file here at that line, in the tree of the
+ * console's worktree when it has one.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import {
@@ -26,6 +28,7 @@ import {
   Search,
   TextCursorInput,
   Trash2,
+  Undo2,
 } from 'lucide-react'
 import type { Workspace } from '@shared/types'
 import { baseName, isSafeName, joinRel, parentRel, type FilesError } from '@shared/files'
@@ -34,8 +37,11 @@ import { useSidePanels, closeSidePanel, setSidePanelMaximized } from '@/lib/side
 import {
   absPath,
   applyFilesChanged,
+  changedKey,
+  clearReveal,
   closeTab,
   collapseAll,
+  filesIds,
   isDirty,
   loadDir,
   openFile,
@@ -46,11 +52,14 @@ import {
   saveTab,
   setActiveTab,
   setTabText,
+  showFilesTree,
+  shownFilesKey,
   stashUnsaved,
   toggleDir,
   useFilesStore,
   wsFiles,
 } from '@/lib/filesStore'
+import { useAppStore } from '@/lib/store'
 import { insertPathToConsole } from '@/lib/insertPath'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/cn'
@@ -70,12 +79,32 @@ window.addEventListener('beforeunload', stashUnsaved)
 type Menu = { x: number; y: number; rel: string; kind: 'file' | 'dir' }
 type Draft = { mode: 'newFile' | 'newDir' | 'rename'; dir: string; rel?: string; value: string }
 
+/** A shown tree still names something: its workspace, or a console that has a worktree. */
+function treeAlive(workspaces: readonly Workspace[], key: string): boolean {
+  const { workspaceId, paneId } = filesIds(key)
+  if (!paneId) return workspaces.some((w) => w.id === workspaceId)
+  return workspaces.some((w) => w.panes.some((p) => p.id === paneId && !!p.worktree))
+}
+
+/**
+ * The drawer shows the workspace's tree, or the one a Ctrl+click on a
+ * terminal path switched it to (a worktree console's, `wsId#paneId`, app
+ * 2.7.0, A9); a switch starts that tree's view afresh.
+ */
 export default function FilesPanel({ workspace }: { workspace: Workspace }) {
+  const shown = useFilesStore((s) => shownFilesKey(s, workspace.id))
+  const alive = useAppStore((s) => treeAlive(s.workspaces, shown))
+  const tree = alive ? shown : workspace.id
+  return <FilesTree key={tree} workspace={workspace} tree={tree} />
+}
+
+function FilesTree({ workspace, tree }: { workspace: Workspace; tree: string }) {
   const t = useT()
   const look = useEditorLook()
-  const wsId = workspace.id
+  // What this tree names to main: its workspace, and the console of a worktree tree.
+  const ids = filesIds(tree)
   const maximized = useSidePanels((s) => !!s.maximized[workspace.id])
-  const ws = useFilesStore((s) => wsFiles(s, wsId))
+  const ws = useFilesStore((s) => wsFiles(s, tree))
   const [root, setRoot] = useState<{ root: string; name: string } | null>(null)
   const [rootError, setRootError] = useState<FilesError | null>(null)
   const [filter, setFilter] = useState('')
@@ -92,7 +121,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
   // The folder, its first level, the stash of a previous run, and the watch while the drawer shows.
   useEffect(() => {
     let alive = true
-    void window.snApi.files.root(wsId).then((res) => {
+    void window.snApi.files.root(ids.workspaceId, ids.paneId).then((res) => {
       if (!alive) return
       if (!res.ok) {
         setRootError(res.error)
@@ -100,23 +129,29 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
       }
       setRoot({ root: res.root, name: res.name })
       setRootError(null)
-      void reloadTree(wsId)
-      restoreUnsaved(wsId)
+      void reloadTree(tree)
+      restoreUnsaved(tree)
     })
-    window.snApi.files.watch(wsId)
+    window.snApi.files.watch(ids.workspaceId, ids.paneId)
     const off = window.snApi.files.onChanged((evt) => {
-      if (evt.workspaceId === wsId) void applyFilesChanged(evt)
+      if (changedKey(evt) === tree) void applyFilesChanged(evt)
     })
     return () => {
       alive = false
       off()
       window.snApi.files.watch(null)
     }
-  }, [wsId])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tree])
 
   const rows = useMemo(() => flatten(ws.dirs, ws.expanded, filter), [ws.dirs, ws.expanded, filter])
   const active = ws.tabs.find((tab) => tab.rel === ws.active) ?? null
   const isMd = !!active && active.kind === 'text' && isMarkdownName(active.rel)
+  // A Ctrl+click on `file:line` lands in the editor, not in a Markdown preview.
+  const revealing = active?.reveal?.seq
+  useEffect(() => {
+    if (revealing !== undefined) setPreview(false)
+  }, [revealing])
 
   const fail = useCallback((err: FilesError | null): boolean => {
     if (!err) return false
@@ -126,11 +161,11 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
 
   const open = async (rel: string): Promise<void> => {
     setSelected(rel)
-    fail(await openFile(wsId, rel))
+    fail(await openFile(tree, rel))
   }
 
   const save = async (rel: string, force = false): Promise<void> => {
-    const err = await saveTab(wsId, rel, force)
+    const err = await saveTab(tree, rel, force)
     if (err === 'conflict') return
     fail(err)
   }
@@ -149,16 +184,16 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
     }
     const target = joinRel(d.dir, name)
     if (d.mode === 'rename' && d.rel) {
-      const res = await window.snApi.files.rename({ workspaceId: wsId, from: d.rel, to: target })
+      const res = await window.snApi.files.rename({ ...ids, from: d.rel, to: target })
       if (!res.ok) return void fail(res.error)
-      renameTabs(wsId, d.rel, target)
+      renameTabs(tree, d.rel, target)
       setSelected(target)
     } else {
-      const res = await window.snApi.files.create({ workspaceId: wsId, rel: target, kind: d.mode === 'newDir' ? 'dir' : 'file' })
+      const res = await window.snApi.files.create({ ...ids, rel: target, kind: d.mode === 'newDir' ? 'dir' : 'file' })
       if (!res.ok) return void fail(res.error)
       if (d.mode === 'newFile') void open(target)
     }
-    await loadDir(wsId, d.dir)
+    await loadDir(tree, d.dir)
   }
 
   const startDraft = (mode: Draft['mode'], rel?: string): void => {
@@ -171,7 +206,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
       return
     }
     const dir = sel && selKind === 'dir' ? sel : parentRel(sel)
-    if (dir && !ws.expanded.includes(dir)) toggleDir(wsId, dir)
+    if (dir && !ws.expanded.includes(dir)) toggleDir(tree, dir)
     setDraft({ mode, dir, value: '' })
   }
 
@@ -179,10 +214,10 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
     const rel = trash
     setTrash(null)
     if (!rel) return
-    const res = await window.snApi.files.trash({ workspaceId: wsId, rel })
+    const res = await window.snApi.files.trash({ ...ids, rel })
     if (!res.ok) return void fail(res.error)
-    for (const tab of ws.tabs) if (tab.rel === rel || tab.rel.startsWith(`${rel}/`)) closeTab(wsId, tab.rel)
-    await loadDir(wsId, parentRel(rel))
+    for (const tab of ws.tabs) if (tab.rel === rel || tab.rel.startsWith(`${rel}/`)) closeTab(tree, tab.rel)
+    await loadDir(tree, parentRel(rel))
   }
 
   const onTreeKey = (e: ReactKeyboardEvent): void => {
@@ -196,7 +231,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
     } else if (e.key === 'Enter') {
       e.preventDefault()
       const row = rows.find((r) => r.rel === selected)
-      if (row?.kind === 'dir') toggleDir(wsId, row.rel)
+      if (row?.kind === 'dir') toggleDir(tree, row.rel)
       else if (row) void open(row.rel)
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
@@ -209,7 +244,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
   // Back to the first level: also clears the filter, which shows every loaded match open.
   // The button turns disabled under the focus, so the tree takes the keyboard (Esc, arrows).
   const collapse = (): void => {
-    collapseAll(wsId)
+    collapseAll(tree)
     setFilter('')
     if (selected?.includes('/')) setSelected(null)
     if (treeRef.current) {
@@ -222,6 +257,13 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
   const iconBtn = 'flex h-7 w-7 shrink-0 items-center justify-center rounded-btn text-text-secondary transition-colors hover:bg-card hover:text-text-primary disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-secondary'
   const headerActions = (
     <>
+      {tree !== workspace.id && (
+        <Tooltip label={t('files.backToWorkspace')} side="bottom">
+          <button type="button" aria-label={t('files.backToWorkspace')} onClick={() => showFilesTree(workspace.id, workspace.id)} className={iconBtn} data-files-back>
+            <Undo2 size={14} />
+          </button>
+        </Tooltip>
+      )}
       <Tooltip label={t('files.newFile')} side="bottom">
         <button type="button" aria-label={t('files.newFile')} onClick={() => startDraft('newFile')} className={iconBtn} data-files-new-file>
           <FilePlus2 size={14} />
@@ -233,7 +275,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
         </button>
       </Tooltip>
       <Tooltip label={t('files.refresh')} side="bottom">
-        <button type="button" aria-label={t('files.refresh')} onClick={() => void reloadTree(wsId)} className={iconBtn} data-files-refresh>
+        <button type="button" aria-label={t('files.refresh')} onClick={() => void reloadTree(tree)} className={iconBtn} data-files-refresh>
           <RefreshCw size={13} />
         </button>
       </Tooltip>
@@ -273,16 +315,16 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
   return (
     <RightDrawer
       id="files"
-      pinScope={wsId}
+      pinScope={workspace.id}
       title={root ? `${t('files.title')} - ${root.name}` : t('files.title')}
       icon={<FolderTree size={15} className="shrink-0 text-accent-violet" />}
       actions={headerActions}
       defaultWidth="clamp(640px, 62%, 1400px)"
       maximized={maximized}
-      onMaximize={(on) => setSidePanelMaximized(wsId, on)}
+      onMaximize={(on) => setSidePanelMaximized(workspace.id, on)}
       onClose={closeSidePanel}
     >
-      <div data-files-panel={wsId} className="flex min-h-0 min-w-0 flex-1">
+      <div data-files-panel={workspace.id} data-files-tree-key={tree} className="flex min-h-0 min-w-0 flex-1">
         <aside className="flex w-60 shrink-0 flex-col border-r border-border" onKeyDown={onTreeKey}>
           <div className="p-2">
             <div className="relative">
@@ -316,7 +358,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
                         current={ws.active === r.rel}
                         onClick={() => {
                           setSelected(r.rel)
-                          if (r.kind === 'dir') toggleDir(wsId, r.rel)
+                          if (r.kind === 'dir') toggleDir(tree, r.rel)
                           else void open(r.rel)
                         }}
                         onContextMenu={(e: ReactMouseEvent) => {
@@ -342,8 +384,8 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
                   key={tab.rel}
                   tab={tab}
                   active={tab.rel === ws.active}
-                  onPick={() => setActiveTab(wsId, tab.rel)}
-                  onClose={() => (isDirty(tab) ? setClosing(tab.rel) : closeTab(wsId, tab.rel))}
+                  onPick={() => setActiveTab(tree, tab.rel)}
+                  onClose={() => (isDirty(tab) ? setClosing(tab.rel) : closeTab(tree, tab.rel))}
                   closeLabel={t('files.closeTab')}
                 />
               ))}
@@ -355,7 +397,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
                 <div role="alert" data-file-external={active.external} className="flex shrink-0 items-center gap-2 border-b border-border bg-state-action/10 px-3 py-1.5 text-xs text-text-primary">
                   <span className="min-w-0 flex-1">{t(active.external === 'deleted' ? 'files.deletedOnDisk' : 'files.changedOnDisk')}</span>
                   {active.external !== 'deleted' && (
-                    <button type="button" onClick={() => void reloadTab(wsId, active.rel)} className="rounded-btn border border-border bg-card px-2 py-0.5 hover:border-accent-violet/40" data-file-reload>
+                    <button type="button" onClick={() => void reloadTab(tree, active.rel)} className="rounded-btn border border-border bg-card px-2 py-0.5 hover:border-accent-violet/40" data-file-reload>
                       {t('files.reload')}
                     </button>
                   )}
@@ -367,7 +409,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
               {active.restored && !active.external && (
                 <div role="status" className="flex shrink-0 items-center gap-2 border-b border-border bg-accent-violet/10 px-3 py-1.5 text-xs text-text-primary" data-file-restored>
                   <span className="min-w-0 flex-1">{t('files.restored')}</span>
-                  <button type="button" onClick={() => void reloadTab(wsId, active.rel)} className="rounded-btn border border-border bg-card px-2 py-0.5 hover:border-accent-violet/40">
+                  <button type="button" onClick={() => void reloadTab(tree, active.rel)} className="rounded-btn border border-border bg-card px-2 py-0.5 hover:border-accent-violet/40">
                     {t('files.discard')}
                   </button>
                 </div>
@@ -386,9 +428,11 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
                     .filter((tab) => tab.kind === 'text')
                     .map((tab) => (
                       <div key={`${tab.rel}:${tab.seq}`} className={cn('absolute inset-0', tab.rel !== ws.active && 'hidden')}>
+                        {/* The buffer, not the disk text: an editor mounted again (the drawer
+                            reopened, the tree switched, the preview left) keeps the edits. */}
                         <CodeEditor
                           docKey={`${tab.rel}:${tab.seq}`}
-                          initialText={tab.initial}
+                          initialText={tab.text}
                           fileName={baseName(tab.rel)}
                           readOnly={tab.readOnly}
                           tokens={look.tokens}
@@ -396,11 +440,13 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
                           fontFamily={look.fontFamily}
                           fontSize={look.fontSize}
                           autoFocus={tab.rel === ws.active}
-                          onChange={(text) => setTabText(wsId, tab.rel, text)}
+                          onChange={(text) => setTabText(tree, tab.rel, text)}
                           onSave={() => void save(tab.rel)}
                           onCursor={(line, col) => {
-                            if (tab.rel === useFilesStore.getState().byWs[wsId]?.active) setCursor({ line, col })
+                            if (tab.rel === useFilesStore.getState().byWs[tree]?.active) setCursor({ line, col })
                           }}
+                          reveal={tab.rel === ws.active ? tab.reveal : undefined}
+                          onRevealed={(seq) => clearReveal(tree, tab.rel, seq)}
                         />
                       </div>
                     ))
@@ -462,8 +508,8 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
               },
             },
             { label: t('files.copyRelPath'), icon: Copy, onClick: () => window.snApi.clipboard.writeText(menu.rel) },
-            { label: t('files.reveal'), icon: FolderOpen, onClick: () => void window.snApi.files.reveal({ workspaceId: wsId, rel: menu.rel }) },
-            ...(menu.kind === 'file' ? [{ label: t('files.openOutside'), icon: ExternalLink, onClick: () => void window.snApi.files.open({ workspaceId: wsId, rel: menu.rel }) }] : []),
+            { label: t('files.reveal'), icon: FolderOpen, onClick: () => void window.snApi.files.reveal({ ...ids, rel: menu.rel }) },
+            ...(menu.kind === 'file' ? [{ label: t('files.openOutside'), icon: ExternalLink, onClick: () => void window.snApi.files.open({ ...ids, rel: menu.rel }) }] : []),
             { label: t('files.trash'), icon: Trash2, danger: true, separated: true, onClick: () => setTrash(menu.rel) },
           ]}
         />
@@ -486,7 +532,7 @@ export default function FilesPanel({ workspace }: { workspace: Workspace }) {
         cancelLabel={t('common.cancel')}
         danger
         onConfirm={() => {
-          if (closing) closeTab(wsId, closing)
+          if (closing) closeTab(tree, closing)
           setClosing(null)
         }}
         onCancel={() => setClosing(null)}

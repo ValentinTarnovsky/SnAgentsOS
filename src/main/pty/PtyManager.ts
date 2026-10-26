@@ -6,9 +6,10 @@ import type { WebContents } from 'electron'
 import { CH } from '@shared/ipc-channels'
 import type { HeadlessMetrics, PtyDataEvt, PtyExitEvt, PtyPromptResultEvt, PtyReattachRes, PtyRestartReq, PtyRestartRes, PtySpawnReq, PtySpawnRes, PtySubmitRes, ShellKind, TerminalEngineSettings } from '@shared/ipc-contract'
 import type { AgentProvider, ClaudePaneState, SetupStep } from '@shared/types'
-import { inputEffect, tuneReady } from '@shared/agentTune'
+import { inputEffect, tuneReady, typingBlocked } from '@shared/agentTune'
 import { REPORTS_ONLY_RE } from '@shared/inputReports'
 import { AGENT_ENV, CLI_ENV } from '@shared/brand'
+import { applyPresetEnv, sanitizePresetEnv } from '@shared/presetEnv'
 import { appendPromptRef } from '@shared/agent-argv'
 import {
   INITIAL_PROMPT_ENV,
@@ -246,6 +247,13 @@ export function restartTail(label: string, rows?: number): string {
 
 /** Restores a pane's saved scrollback: the seed for `rows`, or null (E6-FR-11). */
 export type SeedSource = (paneId: string, rows: number) => string | null
+/** A pane's preset env from main's config; `presetHint` only counts while the pane is not saved yet. */
+export type PresetEnvSource = (paneId: string, presetHint?: string) => Record<string, string>
+/** The text of the notice a stopped setup leaves in the pane, for the 1-based `step`. */
+export type SetupNoticeSource = (step: number) => string
+/** How a setup sequence ended: `secret_missing` stopped at a secret step without text. */
+type SetupOutcome = 'done' | 'secret_missing'
+
 
 /** Bounded timing samples (ms) with a p95 read (E6-FR-07). */
 class Samples {
@@ -351,6 +359,10 @@ export class PtyManager {
   private seedSource: SeedSource | null = null
   /** Panes that already had their first spawn in this app session: the seed is consumed once. */
   private readonly seedConsumed = new Set<string>()
+  /** The env of a pane's preset from main's config, wired by main (never from the renderer). */
+  private presetEnvSource: PresetEnvSource | null = null
+  /** The localized notice of a stopped setup (secret step without text), wired by main. */
+  private setupNoticeSource: SetupNoticeSource | null = null
 
   private readonly promptListeners = new Set<PromptResultListener>()
   /**
@@ -443,7 +455,10 @@ export class PtyManager {
       } else if (promptReq.mode === 'argvOnly') promptRejected = true
       else prompt = { req: promptReq, mode: 'gate' }
     }
-    const env = cleanEnv({ ...req.env, ...this.statusEnv(ptyId, req.paneId, req.cwd || homeDir(), req.workspaceId), [AGENT_ENV.consoleId]: req.paneId, [AGENT_ENV.ptyId]: ptyId })
+    // Order: inherited env < req.env < the pane's preset env < the app's own
+    // SNAOS_ variables, so a preset can never override or inject one of them.
+    const env = applyPresetEnv(cleanEnv(req.env), this.presetEnvFor(req.paneId, req.presetId), this.platform === 'win32')
+    Object.assign(env, this.statusEnv(ptyId, req.paneId, req.cwd || homeDir(), req.workspaceId), { [AGENT_ENV.consoleId]: req.paneId, [AGENT_ENV.ptyId]: ptyId })
     // Never inherited from a preset's env: only an argv delivery sets it.
     delete env[INITIAL_PROMPT_ENV]
     Object.assign(env, promptEnv)
@@ -835,11 +850,19 @@ export class PtyManager {
    * `readyFor` (v2.3, agentTune): with `enter`, the pane's agent must be that
    * provider, precise and at rest (tuneReady) with no draft in its input
    * box, else `busy` and nothing is written.
+   * `userGate` (post 2.6.0, `typingBlocked` on main's own status): a console
+   * waiting on the user gets nothing (`awaiting_user`), and one that starts
+   * waiting before the deferred Enter (or a trailing line break) loses it
+   * (`enter_held`): the text stays typed, never submitted, so the Enter can
+   * not approve a permission or plan menu that opened in between. Opt-in:
+   * `snaos send` and Quick Commands; the scheduler has its own blocker.
    */
-  submit(ptyId: string, text: string, enter: boolean, forcePaste = false, origin: PtyInputOrigin = 'user', readyFor?: AgentProvider): Promise<PtySubmitRes> {
+  submit(ptyId: string, text: string, enter: boolean, forcePaste = false, origin: PtyInputOrigin = 'user', readyFor?: AgentProvider, userGate = false): Promise<PtySubmitRes> {
     const entry = this.entries.get(ptyId)
     if (!entry || entry.cancelled) return Promise.resolve({ ok: false, error: 'not_running' })
     if (enter && readyFor && (entry.draft || !tuneReady(this.agentState(entry.paneId), readyFor))) return Promise.resolve({ ok: false, error: 'busy' })
+    const held = userGate ? (): boolean => typingBlocked(this.agentState(entry.paneId)) : undefined
+    if (held?.()) return Promise.resolve({ ok: false, error: 'awaiting_user' })
     const prepared = prepareSubmit(text, entry.modes.bracketedPaste, forcePaste)
     if (!prepared.ok) return Promise.resolve(prepared)
     // Trailing line breaks are typed Enters: they wait like the submit's own
@@ -849,11 +872,14 @@ export class PtyManager {
     const body = prepared.data.slice(0, prepared.data.length - tail.length)
     if (body) this.write(ptyId, body, origin)
     else if (tail) this.write(ptyId, tail, origin)
-    const tailDone = body && tail ? this.enterWhenQuiet(ptyId, entry, tail, origin) : Promise.resolve(true)
-    return tailDone.then(async (alive) => {
-      if (!alive) return { ok: false, error: 'not_running' }
+    const tailDone = body && tail ? this.enterWhenQuiet(ptyId, entry, tail, origin, held) : Promise.resolve('sent' as const)
+    return tailDone.then(async (outcome): Promise<PtySubmitRes> => {
+      if (outcome === 'gone') return { ok: false, error: 'not_running' }
+      if (outcome === 'held') return { ok: false, error: 'enter_held' }
       if (!enter) return { ok: true }
-      if (!(await this.enterWhenQuiet(ptyId, entry, '\r', origin))) return { ok: false, error: 'not_running' }
+      const sent = await this.enterWhenQuiet(ptyId, entry, '\r', origin, held)
+      if (sent === 'gone') return { ok: false, error: 'not_running' }
+      if (sent === 'held') return { ok: false, error: 'enter_held' }
       entry.lastSubmitAt = Date.now()
       return { ok: true }
     })
@@ -868,7 +894,7 @@ export class PtyManager {
     const entry = this.entries.get(ptyId)
     if (!entry || entry.cancelled) return
     void this.enterWhenQuiet(ptyId, entry, '\r', origin).then((sent) => {
-      if (sent) entry.lastSubmitAt = Date.now()
+      if (sent === 'sent') entry.lastSubmitAt = Date.now()
     })
   }
 
@@ -877,20 +903,21 @@ export class PtyManager {
    * got no bytes for SUBMIT_DELAY_MS, counted from its last write rather than
    * from the call: Codex on Windows reads a paste as fast keys and takes an
    * Enter within about 60 ms of them as a newline inside the paste. Input
-   * that keeps landing pushes it back, at most SUBMIT_QUIET_MAX_MS. False
-   * (nothing written) when the pty went away.
+   * that keeps landing pushes it back, at most SUBMIT_QUIET_MAX_MS. `gone`
+   * (nothing written) when the pty went away; `held` (nothing written) when
+   * `held()` says the console now waits on the user (a gated submit).
    */
-  private enterWhenQuiet(ptyId: string, entry: Entry, seq: string, origin: PtyInputOrigin): Promise<boolean> {
+  private enterWhenQuiet(ptyId: string, entry: Entry, seq: string, origin: PtyInputOrigin, held?: () => boolean): Promise<'sent' | 'gone' | 'held'> {
     return new Promise((resolve) => {
       this.whenDrained(entry, (alive) => {
         if (!alive) {
-          resolve(false)
+          resolve('gone')
           return
         }
         const start = Date.now()
         const tick = (): void => {
           if (this.entries.get(ptyId) !== entry || entry.cancelled) {
-            resolve(false)
+            resolve('gone')
             return
           }
           const now = Date.now()
@@ -899,8 +926,13 @@ export class PtyManager {
             setTimeout(tick, wait)
             return
           }
+          // Checked at the last moment: a menu that opened while the text was typed must not get this Enter.
+          if (held?.()) {
+            resolve('held')
+            return
+          }
           this.write(ptyId, seq, origin)
-          resolve(true)
+          resolve('sent')
         }
         tick()
       })
@@ -908,9 +940,9 @@ export class PtyManager {
   }
 
   /** submit() into the pane's live pty, when `ptyId` is unknown or stale. */
-  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean, origin: PtyInputOrigin = 'user', readyFor?: AgentProvider): Promise<PtySubmitRes> {
+  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean, origin: PtyInputOrigin = 'user', readyFor?: AgentProvider, userGate = false): Promise<PtySubmitRes> {
     const id = ptyId && this.entries.has(ptyId) ? ptyId : paneId ? this.byPane.get(paneId) : undefined
-    return id ? this.submit(id, text, enter, false, origin, readyFor) : Promise.resolve({ ok: false, error: 'not_running' })
+    return id ? this.submit(id, text, enter, false, origin, readyFor, userGate) : Promise.resolve({ ok: false, error: 'not_running' })
   }
 
   /** Whether the pane's live pty has bracketed paste on, or null without one. */
@@ -1419,6 +1451,22 @@ export class PtyManager {
     this.seedSource = source
   }
 
+  /** Wires the preset env resolver (main, over its ConfigStore): every spawn and restart goes through it. */
+  setPresetEnvSource(source: PresetEnvSource | null): void {
+    this.presetEnvSource = source
+  }
+
+  private presetEnvFor(paneId: string, presetHint: string | undefined): Record<string, string> {
+    if (!this.presetEnvSource) return {}
+    try {
+      // Sanitized again here: a reserved or invalid key never reaches the shell whatever the source.
+      return sanitizePresetEnv(this.presetEnvSource(paneId, typeof presetHint === 'string' ? presetHint : undefined))
+    } catch (error) {
+      console.warn(`[pty] could not resolve the preset env of pane ${paneId}: ${String(error)}`)
+      return {}
+    }
+  }
+
   /** Persistence on and a snapshot mode other than 'off' (E6-FR-01/08). */
   persistEnabled(): boolean {
     return this.engine.persist && this.engine.snapshotMode !== 'off'
@@ -1560,46 +1608,88 @@ export class PtyManager {
    * survives renderer remounts and reads the same byte stream as the terminal.
    */
   private async runSetup(ptyId: string, entry: Entry, steps: SetupStep[], initialCommand?: string): Promise<void> {
+    let outcome: SetupOutcome = 'done'
     try {
-      await this.runSetupSteps(entry, steps, initialCommand)
+      outcome = await this.runSetupSteps(ptyId, entry, steps, initialCommand)
     } finally {
-      // A gate prompt starts once the agent command went out (or the sequence ended).
-      if (!entry.cancelled) this.afterInitialCommand(ptyId, entry)
+      if (!entry.cancelled) {
+        // A gate prompt starts once the agent command went out (or the sequence ended).
+        if (outcome === 'done') this.afterInitialCommand(ptyId, entry)
+        else if (entry.prompt) {
+          // The agent command never went out: the initial prompt is not delivered.
+          entry.prompt = null
+          this.emitPrompt(entry.paneId, 'not_delivered')
+        }
+      }
     }
   }
 
-  private async runSetupSteps(entry: Entry, steps: SetupStep[], initialCommand?: string): Promise<void> {
+  /** Wires the gray in-terminal notice of a stopped setup (main, with mainT). */
+  setSetupNoticeSource(source: SetupNoticeSource | null): void {
+    this.setupNoticeSource = source
+  }
+
+  /**
+   * A secret step without text (an imported export blanks it): the sequence
+   * stops before it, so no bare Enter goes into the password prompt and no
+   * later step (often the agent command) is typed there. The pane shows a gray
+   * notice, written to its output only (never to the pty), and main logs it.
+   */
+  private stopSetup(ptyId: string, entry: Entry, step: number): void {
+    console.warn(`[pty] connection setup of pane ${entry.paneId} stopped at step ${step}: the secret step has no text`)
+    let text = `Connection stopped at step ${step}: its secret is empty. Type it now or fill it in Settings > Connections.`
+    try {
+      if (this.setupNoticeSource) text = this.setupNoticeSource(step) || text
+    } catch {
+      /* keep the fallback text */
+    }
+    const line = `\r\n\x1b[2m--- ${text.replace(/[\x00-\x1f\x7f-\x9f]/g, '')} ---\x1b[0m\r\n`
+    entry.buf.push(line)
+    this.pushHistory(entry, line)
+    entry.modes.feed(line)
+    if (entry.timer === null) {
+      const fast = entry.active || this.forcedFast.has(entry.paneId)
+      entry.timer = setTimeout(() => this.flush(ptyId), fast ? FLUSH_MS : HIDDEN_FLUSH_MS)
+    }
+  }
+
+  private async runSetupSteps(ptyId: string, entry: Entry, steps: SetupStep[], initialCommand?: string): Promise<SetupOutcome> {
     entry.setupActive = true
     try {
       // Let the shell print its first prompt before we touch it.
       await sleep(SHELL_SETTLE_MS)
-      for (const step of steps) {
-        if (entry.cancelled) return
+      for (const [index, step] of steps.entries()) {
+        if (entry.cancelled) return 'done'
         if (step.waitFor && step.waitFor.trim()) {
           await this.waitForOutput(entry, step.waitFor.trim(), step.timeoutMs ?? DEFAULT_WAIT_MS)
         }
-        if (entry.cancelled) return
+        if (entry.cancelled) return 'done'
+        if (step.secret && !step.send) {
+          this.stopSetup(ptyId, entry, index + 1)
+          return 'secret_missing'
+        }
         await sleep(step.delayMs ?? 120)
-        if (entry.cancelled) return
+        if (entry.cancelled) return 'done'
         try {
           entry.pty.write(step.noEnter ? step.send : step.send + '\r')
         } catch {
-          return // pty exited mid-sequence
+          return 'done' // pty exited mid-sequence
         }
         // Only match the response to THIS step against the next waitFor.
         entry.scratch = ''
       }
       if (initialCommand) {
-        if (entry.cancelled) return
+        if (entry.cancelled) return 'done'
         // Give the post-setup shell (often a remote one) a beat to be ready.
         await sleep(steps.length ? 400 : SHELL_SETTLE_MS)
-        if (entry.cancelled) return
+        if (entry.cancelled) return 'done'
         try {
           entry.pty.write(initialCommand + '\r')
         } catch {
           /* pty exited */
         }
       }
+      return 'done'
     } finally {
       entry.setupActive = false
       entry.onChunk = null

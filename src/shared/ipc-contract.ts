@@ -11,6 +11,7 @@ import type {
   ConfigFile,
   Language,
   NotificationSettings,
+  PanePlan,
   PaneStatusEvt,
   RemoteSettings,
   SetupStep,
@@ -34,6 +35,7 @@ import type { SessionSummary, SessionsListReq } from './session-history'
 import type {
   RemoteCtlAction,
   RemoteEndpointKind,
+  RemoteServerMsg,
   RemoteStateSnapshot,
 } from './remote-protocol'
 import type { InitialPromptReq, LaunchKind, SubmitError } from './initialPrompt'
@@ -43,9 +45,10 @@ import type { OpenPathReq, OpenPathRes } from './inertOpen'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from './repo-config'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from './review-notes'
 import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResult, WsNoteWriteReq, WsNotesChangedEvt, WsNotesListRes } from './ws-notes'
-import type { FileCreateReq, FileReadRes, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesRootRes } from './files'
+import type { FileCreateReq, FileReadRes, FileRefResolved, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesPathReq, FilesResolveRefsReq, FilesRootRes } from './files'
 import type { CliCtlAction, CliUiState, SkillOp, SkillStatus, SkillTarget } from './ctl-protocol'
 import type { DictationError, WhisperInstallError, WhisperInstallProgress, WhisperPackId, WhisperStatus } from './dictation'
+import type { IntegrateProgressEvt, TeamChangedEvt, TeamReplyFor, TeamRequest, TeamRunAppendEvt } from './team-protocol'
 
 export type { GitArea, GitBaseStat, GitChangesRes, GitDiffError, GitDiffHunk, GitDiffLine, GitDiffReply, GitDiffRes, GitError, GitFileEntry, GitInfoRes, GitSummary, GitTarget, GitUpdateEvt } from './git-types'
 
@@ -365,6 +368,8 @@ export interface UsageRow {
   status: 'ok' | 'expired' | 'error' | 'nodata' | 'loading'
   /** True when main is holding the last good value through a failed poll (grace window). */
   stale?: boolean
+  /** Custom rows: the transcript scan has not caught up with the whole window yet (the count may be low). */
+  partial?: boolean
 }
 
 /** A full snapshot of every enabled usage row, pushed to the renderer. */
@@ -393,6 +398,12 @@ export interface PtySpawnReq {
   args?: string[] | string
   cwd?: string
   env?: Record<string, string>
+  /**
+   * The pane's preset id, only a hint: main reads the preset env from its own
+   * config by `paneId` and uses this id (which must name a saved preset) only
+   * while the pane is not saved yet. The renderer never sends the env itself.
+   */
+  presetId?: string
   /**
    * A command line typed into the shell after spawn (e.g. "claude").
    * Running inside the shell makes PATH/PATHEXT resolution work on Windows
@@ -455,6 +466,13 @@ export interface PtySubmitReq {
    * Validated in main; any other value is ignored.
    */
   readyFor?: AgentProvider
+  /**
+   * Post 2.6.0 (`typingBlocked`): true = main refuses with `awaiting_user`
+   * (nothing written) when the agent waits on the user, and drops the
+   * deferred Enter with `enter_held` (the text stays typed) when it starts
+   * waiting before that Enter. Quick Commands set it; only `true` counts.
+   */
+  userGate?: boolean
 }
 export type PtySubmitRes = { ok: true } | { ok: false; error: SubmitError }
 /** Outcome of a spawn's initial prompt (main -> renderer). */
@@ -552,6 +570,70 @@ export interface StatusTuneHintReq {
   model?: string
   effort?: string
   ultracode?: boolean
+}
+
+/** `status:mute` (app 2.7.0, A3): silence the pane until its effective state changes, or lift it. */
+export interface StatusMuteReq {
+  paneId: string
+  muted: boolean
+}
+
+/** `status:plan` (app 2.7.0, A3): the full ExitPlanMode plan; without `requestId`, the newest one. */
+export interface StatusPlanReq {
+  paneId: string
+  requestId?: string
+}
+
+// --- Desktop console chat (app 2.7.0, A7; settings.labs.consoleChat) ---
+
+/**
+ * The frames ChatHub sends a chat reader, exactly as the phone gets them
+ * (RemoteServerMsg without `v`). A page is oldest first; `cursor` is the
+ * `before` of the next "Load earlier" (null with nothing before). A page whose
+ * only item is the notice (chatNoticeOf) means no chat (FR-33); an empty page
+ * with `done` means the transcript is coming (a new console or a /clear).
+ */
+export type ChatPageFrame = Omit<Extract<RemoteServerMsg, { type: 'chatPage' }>, 'v'>
+export type ChatAppendFrame = Omit<Extract<RemoteServerMsg, { type: 'chatAppend' }>, 'v'>
+export type ChatFrame = ChatPageFrame | ChatAppendFrame
+
+/** `chat:sub` / `chat:unsub`: a console of this PC by id (main checks it exists). */
+export interface ChatSubReq {
+  paneId: string
+}
+
+/** `chat:more`: `before` is the `cursor` of the oldest page the window holds (digits). */
+export interface ChatMoreReq {
+  paneId: string
+  before: string
+}
+
+/**
+ * Why `chat:sub` / `chat:more` gave no page. `disabled`: labs.consoleChat is
+ * off in main's config (a `sub` first waits up to 2 s for the CONFIG_SAVE that
+ * turns it on, which the renderer sends 400 ms after the change);
+ * `unknown_pane`: no such console; `limit`: too many chats open in this
+ * window; `not_subscribed` / `busy`: a `more` without a `sub`, or with one
+ * still in flight; `timeout`: no page within 10 s (a first
+ * page that comes later still arrives as a chat:frame); `closed`: unsubscribed
+ * (or the lab went off) before the page came.
+ */
+export type ChatIpcError = 'disabled' | 'bad_request' | 'unknown_pane' | 'limit' | 'not_subscribed' | 'busy' | 'timeout' | 'closed'
+
+export type ChatPageRes = { ok: true; page: ChatPageFrame } | { ok: false; error: ChatIpcError }
+
+/**
+ * `chat:frame` (main -> renderer): a frame for a pane this window reads.
+ * `chatAppend` adds to the end; a `chatPage` here is a new first page that
+ * replaces the list (reset after /clear, a resume or a truncated file; the
+ * transcript that was coming; the notice when it is lost). `notice: 'paused'`
+ * (on an empty chatAppend, or on a first page): main closed this chat's
+ * watcher for another one (CHAT_MAX_WATCHERS) and sends nothing more until a
+ * new `chat:sub`, which is a fresh first page.
+ */
+export interface ChatFrameEvt {
+  paneId: string
+  frame: ChatFrame
 }
 
 // --- Remote control (embedded LAN/Tailscale server for phone clients) ---
@@ -1130,6 +1212,14 @@ export interface SnApi {
     /** Remove every hook handler of ours from ~/.claude/settings.json. */
     hooksUninstall(): Promise<StatusHooksStatusRes>
     hooksStatus(): Promise<StatusHooksStatusRes>
+    /** App 2.7.0 (A3): mark a done / error console read; false when it is neither (or unknown). */
+    markRead(paneId: string): Promise<boolean>
+    /** App 2.7.0 (A3): mute until the effective state changes (`muted: false` lifts it); false for an unknown console. */
+    mute(paneId: string, muted: boolean): Promise<boolean>
+    /** App 2.7.0 (A3): ignore this turn's silence (quiet / stalled), shown or not yet; false for an unknown or title-only console. */
+    silenceAck(paneId: string): Promise<boolean>
+    /** App 2.7.0 (A3): the full ExitPlanMode plan (newest without `requestId`), or null. */
+    plan(paneId: string, requestId?: string): Promise<PanePlan | null>
   }
   /** Remote control from a phone browser (embedded LAN/Tailscale server). */
   remote: {
@@ -1269,20 +1359,59 @@ export interface SnApi {
     prune(workspaceIds: string[]): void
     onChanged(cb: (e: WsNotesChangedEvt) => void): () => void
   }
-  /** Files drawer (v2.2, E9): a workspace id and a relative path, resolved and contained by main. */
+  /**
+   * Teams (app 2.7.0, E10 B, labs.teams): one request union validated in main,
+   * which owns every team state and answers `disabled` with the lab off. Ids
+   * only; the setup paths (`dir`, `repoRoot`) are resolved and checked in main.
+   */
+  teams: {
+    req<R extends TeamRequest>(r: R): Promise<TeamReplyFor<R>>
+    onChanged(cb: (e: TeamChangedEvt) => void): () => void
+    onRunAppend(cb: (e: TeamRunAppendEvt) => void): () => void
+    onIntegrateProgress(cb: (e: IntegrateProgressEvt) => void): () => void
+  }
+  /**
+   * Files drawer (v2.2, E9): a workspace id and a relative path, resolved and
+   * contained by main. app 2.7.0 (A9): `paneId` (optional everywhere) roots
+   * the tree at that pane's worktree when main manages it, else at the
+   * workspace folder.
+   */
   files: {
-    root(workspaceId: string): Promise<FilesRootRes>
+    root(workspaceId: string, paneId?: string): Promise<FilesRootRes>
     list(req: FilesListReq): Promise<FilesListRes>
-    read(req: { workspaceId: string; rel: string }): Promise<FileReadRes>
+    read(req: FilesPathReq): Promise<FileReadRes>
     write(req: FileWriteReq): Promise<FileWriteRes>
     create(req: FileCreateReq): Promise<FilesOpRes>
     rename(req: FileRenameReq): Promise<FilesOpRes>
-    trash(req: { workspaceId: string; rel: string }): Promise<FilesOpRes>
-    reveal(req: { workspaceId: string; rel: string }): Promise<FilesOpRes>
-    open(req: { workspaceId: string; rel: string }): Promise<FilesOpRes>
-    /** The one folder watched (null: none). */
-    watch(workspaceId: string | null): void
+    trash(req: FilesPathReq): Promise<FilesOpRes>
+    reveal(req: FilesPathReq): Promise<FilesOpRes>
+    open(req: FilesPathReq): Promise<FilesOpRes>
+    /** The one folder watched (null: none); with `paneId` its events carry it. */
+    watch(workspaceId: string | null, paneId?: string): void
     onChanged(cb: (e: FilesChangedEvt) => void): () => void
+    /**
+     * Ctrl+click on `file:line` (app 2.7.0, A9): up to FILE_REFS_MAX refs of
+     * a pane's terminal, one answer each, in order. Only `exists: true` refs
+     * can be opened (files:read with the same paneId and the `rel` returned).
+     * A malformed request (more refs, a ref too long or not a ref) answers [].
+     */
+    resolveRefs(req: FilesResolveRefsReq): Promise<FileRefResolved[]>
+  }
+  /**
+   * Desktop console chat (app 2.7.0, A7; settings.labs.consoleChat): the
+   * phone's chat of a console, read by this window. Main keeps ONE reader per
+   * window and pane: a repeated `sub` is a fresh first page and a single
+   * `unsub` ends it, so two views of one pane refcount in the renderer. While
+   * the lab is off everything answers `disabled` and no frame is sent.
+   */
+  chat: {
+    /** Starts reading the pane; resolves with its first page. */
+    sub(req: ChatSubReq): Promise<ChatPageRes>
+    unsub(req: ChatSubReq): void
+    /** The page before `before` (one at a time per pane). */
+    more(req: ChatMoreReq): Promise<ChatPageRes>
+    /** Appends and resets of the panes this window reads. Returns an unsubscribe function. */
+    onFrame(cb: (e: ChatFrameEvt) => void): () => void
   }
   /** Git chip (E7-FR-05..10). Main runs git; the renderer owns the targets and settings.gitChip. */
   git: {

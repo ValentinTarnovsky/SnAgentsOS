@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArchiveRestore, BellRing, Bot, FileDiff, FolderTree, GitBranch, LayoutDashboard, Megaphone, NotebookPen, Palette, PanelLeft, Plus, Search, Settings, Type } from 'lucide-react'
+import { ArchiveRestore, BellRing, Bot, FileDiff, FolderTree, GitBranch, LayoutDashboard, ListPlus, Megaphone, MessageSquare, NotebookPen, Palette, PanelLeft, Plus, Search, Settings, Type, UserPlus, Users } from 'lucide-react'
+import { labOn } from '@shared/labs'
 import { formatAgeShort } from '@shared/agents'
 import { visiblePaneIds } from '@shared/status'
 import { useAppStore } from '@/lib/store'
@@ -15,7 +16,9 @@ import { formatAccel, resolveKeymap, type ActionId } from '@/lib/keymap'
 import { getFocusedPane } from '@/lib/focus'
 import { revealPane } from '@/lib/revealPane'
 import { goToNextWaiting } from '@/lib/useGlobalKeys'
-import { agentPhrase, agentTitle, allAgents, navInputFrom, paletteWaiting, type AgentEntry } from '@/lib/agentNav'
+import { agentTitle, allAgents, isNoticeOnly, navInputFrom, needsYouEntries, paletteWaiting, type AgentEntry } from '@/lib/agentNav'
+import { needsYouPhrase } from '@/lib/statusSignals'
+import { rankList, rankMatch } from '@shared/fuzzyRank'
 import { StatusGlyph } from '@/components/ui/StatusDot'
 import { glyphOf, useNow } from '@/components/sidebar/AgentRows'
 import { orderQuickCommands } from '@shared/quickCommands'
@@ -26,6 +29,10 @@ import { workspaceGitKey } from '@/lib/gitChip'
 import { useWorktreeStore } from '@/lib/worktreeStore'
 import { templateFromPreset, worktreeOffer } from '@/lib/worktrees'
 import { toast } from '@/lib/toast'
+import { focusedChatConsole, togglePaneView } from '@/lib/consoleChatStore'
+import { closeTeams, openTeams, teamsOverlayActive, useTeamsStore } from '@/lib/teamsStore'
+import { openTeamSetup } from '@/lib/teams/setup'
+import { openNewTask } from '@/lib/teams/board'
 
 interface Command {
   id: string
@@ -35,9 +42,9 @@ interface Command {
   /** Bound keymap action: its accelerator shows on the row (E5-FR-18). */
   action?: ActionId
   /**
-   * Longer free text (an agent's topic and first prompt) the query must
-   * contain as a substring: a fuzzy subsequence over a 200 char prompt would
-   * match nearly any query.
+   * Longer free text (an agent's topic and first prompt, one per line) the
+   * query must find as substrings: a fuzzy subsequence over a 200 char prompt
+   * would match nearly any query.
    */
   search?: string
   /** Console rows (E5-FR-16) show its live glyph. */
@@ -45,14 +52,14 @@ interface Command {
   run: () => void
 }
 
-/** Case-insensitive subsequence match (fuzzy). */
-function matches(needle: string, hay: string): boolean {
-  if (!needle) return true
-  let i = 0
-  for (let j = 0; j < hay.length && i < needle.length; j++) {
-    if (hay[j] === needle[i]) i++
-  }
-  return i === needle.length
+/**
+ * The texts a command is ranked by (app 2.7.0, rankList): its label, plus the
+ * lines of its `search` text where every term of the query is a substring
+ * (score 2 or more, never the subsequence fallback).
+ */
+function rankTexts(c: Command, query: string): string[] {
+  if (!c.search) return [c.label]
+  return [c.label, ...c.search.split('\n').filter((line) => rankMatch(query, line) >= 2)]
 }
 
 /**
@@ -67,9 +74,12 @@ function lookedAtPane(): string | null {
   return visiblePaneIds(ws, s.minimized[ws.id] ?? [], s.maximized[ws.id]).includes(focused) ? focused : null
 }
 
-/** "Waiting for you" ids, frozen when the palette opens (E5-FR-15). */
+/**
+ * "Waiting for you" ids, frozen when the palette opens (E5-FR-15): the
+ * consoles that need the user, the badge's set in next waiting's order.
+ */
 function computeWaiting(): string[] {
-  return paletteWaiting(allAgents(navInputFrom(useAppStore.getState(), useAgentStore.getState())), lookedAtPane())
+  return paletteWaiting(navInputFrom(useAppStore.getState(), useAgentStore.getState()), lookedAtPane())
 }
 
 /** Ctrl/Cmd+K fuzzy launcher for switching workspaces and running actions. */
@@ -98,26 +108,37 @@ export function CommandPalette() {
   const sessions = useAgentStore((s) => s.sessions)
   const sleeping = useAgentStore((s) => s.sleeping)
   const canReopen = useAgentStore((s) => s.closedStack.length > 0)
+  // Teams (app 2.7.0, E10 B1): its entries with the lab on; under the overlay the
+  // entries that act on the hidden grid are left out, like their shortcuts.
+  const teamsOn = useAppStore((s) => labOn(s.settings, 'teams'))
+  const teamsList = useTeamsStore((s) => s.list)
+  const teamsOpen = useAgentStore((s) => s.view === 'teams')
+  const teamOpenId = useTeamsStore((s) => s.openTeamId)
 
   const [query, setQuery] = useState('')
   const [idx, setIdx] = useState(0)
   // The order is frozen when the palette opens; glyphs keep updating live.
   const [wasOpen, setWasOpen] = useState(false)
   const [frozen, setFrozen] = useState<string[]>([])
+  // App 2.7.0 (A7): the console "Toggle console chat" acts on, taken as the palette opens (it takes the focus).
+  const [chatTarget, setChatTarget] = useState<string | null>(null)
   if (open !== wasOpen) {
     setWasOpen(open)
     setFrozen(open ? computeWaiting() : [])
+    setChatTarget(open && !teamsOverlayActive() ? focusedChatConsole() : null)
   }
 
   const keymap = useMemo(() => resolveKeymap(keymapOverrides), [keymapOverrides])
   const topicAsTitle = agentSettings?.topicAsTitle !== false
-  const entries = useMemo(() => {
-    if (!open) return new Map<string, AgentEntry>()
+  // Every agent console (console rows' glyphs), and the ones that need the user
+  // with the shared rule's rank and age (the waiting rows).
+  const { entries, needing } = useMemo(() => {
+    if (!open) return { entries: new Map<string, AgentEntry>(), needing: new Map<string, AgentEntry>() }
     const input = navInputFrom({ workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, settings: { agents: agentSettings } }, { sessions, sleeping })
-    return new Map(allAgents(input).map((e) => [e.id, e]))
+    return { entries: new Map(allAgents(input).map((e) => [e.id, e])), needing: new Map(needsYouEntries(input).map((e) => [e.id, e])) }
   }, [open, workspaces, paneStatus, paneAttention, mountedWorkspaces, presets, agentSettings, sessions, sleeping])
   // Closed consoles (or ones whose agent went away) drop out of the frozen list.
-  const waiting = query.trim() ? [] : frozen.map((id) => entries.get(id)).filter((e): e is AgentEntry => !!e)
+  const waiting = query.trim() ? [] : frozen.map((id) => needing.get(id) ?? entries.get(id)).filter((e): e is AgentEntry => !!e)
 
   const commands = useMemo<Command[]>(() => {
     const cmds: Command[] = [
@@ -128,14 +149,34 @@ export function CommandPalette() {
       // E5-FR-27: the agents board over the workspace area.
       { id: 'agents-board', label: t('agents.board.toggle'), hint: t('palette.general'), icon: LayoutDashboard, action: 'agentsBoard', run: () => useAgentStore.getState().setView('board') },
     ]
+    if (teamsOn) {
+      // App 2.7.0 (E10 B1): Teams, a new team and one entry per team (found by its repo too).
+      cmds.push({ id: 'teams', label: t('teams.palette.open'), hint: t('palette.general'), icon: Users, action: 'teams', run: () => openTeams() })
+      cmds.push({ id: 'teams.new', label: t('teams.palette.new'), hint: t('palette.general'), icon: UserPlus, run: () => openTeamSetup() })
+      for (const team of teamsList) {
+        cmds.push({ id: `team:${team.id}`, label: t('teams.palette.team', { name: team.name }), hint: t('teams.palette.hint'), icon: Users, search: team.repoName, run: () => openTeams(team.id) })
+      }
+      // B3: a task in the team on screen.
+      const shown = teamsOpen && teamOpenId ? teamsList.find((x) => x.id === teamOpenId) : undefined
+      if (shown) cmds.push({ id: 'teams.newTask', label: t('teams.task.paletteNew', { name: shown.name }), hint: t('teams.palette.hint'), icon: ListPlus, run: () => openNewTask(shown.id) })
+    }
     if (canReopen) {
       // E5-FR-14: the last closed console, same id and place, resuming its chat.
       cmds.push({ id: 'reopen-closed', label: t('agents.reopenClosed'), hint: t('palette.console'), icon: ArchiveRestore, action: 'reopenClosedPane', run: () => void reopenClosedConsole() })
     }
-    for (const w of workspaces) {
-      cmds.push({ id: `ws-${w.id}`, label: w.name, hint: t('palette.workspace'), icon: iconFor(w.panes[0]?.icon), run: () => setActive(w.id) })
+    if (chatTarget) {
+      // Labs consoleChat: Terminal | Chat on the focused agent console, like its remappable shortcut.
+      cmds.push({ id: 'toggle-console-chat', label: t('keys.toggleConsoleChat'), hint: t('palette.console'), icon: MessageSquare, action: 'toggleConsoleChat', run: () => togglePaneView(chatTarget) })
     }
-    if (activeId) {
+    for (const w of workspaces) {
+      // Picking a workspace from over Teams lands on its grid, the active one included.
+      const pick = (): void => {
+        closeTeams({ refocus: false })
+        setActive(w.id)
+      }
+      cmds.push({ id: `ws-${w.id}`, label: w.name, hint: t('palette.workspace'), icon: iconFor(w.panes[0]?.icon), run: pick })
+    }
+    if (activeId && !teamsOpen) {
       cmds.push({
         id: 'global-prompt',
         label: t('globalPrompt.title'),
@@ -177,8 +218,8 @@ export function CommandPalette() {
         }
       }
     }
-    // E8-FR-06: globals and the active workspace's own, run like the popover.
-    for (const qc of orderQuickCommands(quickCommands, activeId)) {
+    // E8-FR-06: globals and the active workspace's own, run like the popover (not into a console Teams hides).
+    for (const qc of teamsOpen ? [] : orderQuickCommands(quickCommands, activeId)) {
       cmds.push({
         id: `qc-${qc.id}`,
         label: `${t('palette.run')}: ${qc.name}`,
@@ -191,7 +232,7 @@ export function CommandPalette() {
       cmds.push({ id: `theme-${th.name}`, label: `${t('palette.theme')}: ${th.label}`, hint: t('palette.appearance'), icon: Palette, run: () => updateSettings({ theme: th.name }) })
     }
     return cmds
-  }, [workspaces, presets, connections, quickCommands, activeId, canReopen, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
+  }, [workspaces, presets, connections, quickCommands, activeId, canReopen, chatTarget, teamsOn, teamsList, teamsOpen, teamOpenId, t, setActive, setWizardOpen, setSettingsOpen, toggleSidebar, addPane, updateSettings, setGlobalPromptOpen])
 
   // E5-FR-16: with a query every console is searchable by title, workspace,
   // its agent's topic and first prompt.
@@ -216,10 +257,11 @@ export function CommandPalette() {
     return out
   }, [query, workspaces, paneStatus, sessions, t])
 
+  // App 2.7.0: best match first (exact, prefix, substring, then subsequence for
+  // terms of 4+ letters; case and accents ignored), ties in list order.
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return commands
-    return [...consoleCommands, ...commands].filter((c) => matches(q, c.label.toLowerCase()) || !!c.search?.toLowerCase().includes(q))
+    if (!query.trim()) return commands
+    return rankList([...consoleCommands, ...commands], query, (c) => rankTexts(c, query))
   }, [commands, consoleCommands, query])
 
   useEffect(() => {
@@ -305,7 +347,14 @@ export function CommandPalette() {
                     )}
                   >
                     <span className="flex w-full min-w-0 items-center gap-2">
-                      <StatusGlyph kind={glyphOf(e)} unread={e.unread} size={14} />
+                      {/* A marked shell or a bare needs status has no agent state: a plain bell. */}
+                      {isNoticeOnly(e) ? (
+                        <span role="img" aria-label={t('attention.notice')} data-attention-notice className="inline-flex shrink-0 items-center justify-center text-text-secondary" style={{ width: 14, height: 14 }}>
+                          <BellRing size={12} />
+                        </span>
+                      ) : (
+                        <StatusGlyph kind={glyphOf(e)} unread={e.unread} size={14} />
+                      )}
                       <Icon size={14} className="shrink-0" style={{ color: e.pane.color }} />
                       <span className={cn('min-w-0 max-w-[60%] shrink-0 truncate text-text-primary', e.unread && 'font-semibold')}>{title}</span>
                       <span className="min-w-0 flex-1 truncate text-xs text-text-secondary/70">· {e.ws.name}</span>
@@ -314,7 +363,7 @@ export function CommandPalette() {
                       </span>
                       <kbd className="shrink-0 rounded border border-border px-1 font-mono text-[10px] text-text-secondary">Ctrl+{i + 1}</kbd>
                     </span>
-                    <span className="block truncate pl-[44px] text-xs text-text-secondary">{agentPhrase(e, t, lang, now, false)}</span>
+                    <span className="block truncate pl-[44px] text-xs text-text-secondary">{needsYouPhrase(e, t, lang, now)}</span>
                   </button>
                 )
               })}
@@ -327,7 +376,9 @@ export function CommandPalette() {
           {filtered.map((c, j) => {
             const i = j + waiting.length
             const Icon = c.icon
+            // A bare status (a `snaos needs` with no agent) has no agent state: no glyph.
             const entry = c.paneId ? entries.get(c.paneId) : undefined
+            const glyph = entry && entry.status?.bare !== true ? entry : undefined
             return (
               <button
                 key={c.id}
@@ -339,12 +390,13 @@ export function CommandPalette() {
                   i === idx ? 'bg-bg-secondary' : 'hover:bg-bg-secondary/50',
                 )}
               >
-                {entry && <StatusGlyph kind={glyphOf(entry)} unread={entry.unread} size={13} />}
+                {glyph && <StatusGlyph kind={glyphOf(glyph)} unread={glyph.unread} size={13} />}
                 {Icon && <Icon size={15} className="shrink-0 text-text-secondary" />}
                 <span className="min-w-0 flex-1 truncate text-text-primary">{c.label}</span>
-                {c.action && (
+                {/* An action with no key bound (toggleConsoleChat by default) shows no chip. */}
+                {c.action && keymap[c.action] ? (
                   <kbd className="shrink-0 rounded border border-border px-1 font-mono text-[10px] text-text-secondary">{formatAccel(keymap[c.action])}</kbd>
-                )}
+                ) : null}
                 {c.hint && <span className="shrink-0 text-[11px] text-text-secondary">{c.hint}</span>}
               </button>
             )

@@ -64,6 +64,7 @@ function testPlanner() {
     noPty: cand('x', { live: false }),
     recent: cand('x', { stateSince: now - 4 * MIN }),
     noSince: cand('x', { stateSince: undefined }),
+    needs: cand('x', { needs: true }),
   }
   for (const [name, c] of Object.entries(excluded)) check(!H.isEligible(c, 5, now), `excluded: ${name}`)
   check(H.isEligible(cand('x', { state: 'idle', provider: 'codex' }), 5, now), 'Codex idle is eligible too')
@@ -86,6 +87,10 @@ function testPlanner() {
   check(H.schedulePending({ time: '10:00', prompt: 'x', dueAt: now + 4 * MIN }, now, 5 * MIN) && H.schedulePending({ time: '10:00', prompt: 'x', dueAt: now - MIN }, now, 5 * MIN), 'a schedule due within the idle window (or overdue) keeps it awake')
   check(H.schedulePending({ time: '10:00', prompt: 'x', dueAt: now + 60 * MIN, waitingSince: now - MIN }, now, 5 * MIN), 'a run waiting for the agent keeps it awake')
   check(!H.schedulePending({ time: '10:00', prompt: 'x', dueAt: now + 60 * MIN }, now, 5 * MIN), 'a schedule an hour away does not')
+  // schedulesOf (schema 19): every schedule of every console, from the persisted config.
+  const many = H.schedulesOf({ workspaces: [{ id: 'w', panes: [{ id: 'p', schedules: [{ id: 's1', dueAt: 1 }, { id: 's2', dueAt: 2 }] }, { id: 'q', schedules: [] }, { id: 'r' }, { id: 'old', schedule: { dueAt: 3 } }] }, { id: 'x', panes: 'junk' }] })
+  check(many.size === 1 && many.get('p').map((s) => s.id).join() === 's1,s2', 'schedulesOf lists both schedules of a console; none, an empty list or a stale single schedule (never a parsed shape) count nothing')
+  check(H.schedulesOf(null).size === 0, 'no config, no schedules')
 }
 
 function testShared() {
@@ -116,7 +121,8 @@ function testCoordinator() {
     clearTimer: () => {},
     onChanged: (e) => changed.push(e),
   })
-  let cfg = { workspaces: [{ id: 'w', panes: [{ id: 'a', type: 'codex' }, { id: 'b', type: 'codex' }, { id: 's', type: 'codex', schedule: { time: '10:00', prompt: 'x', dueAt: clock + 2 * MIN } }] }] }
+  // Schema 19: console s holds two schedules; only the second one is close.
+  let cfg = { workspaces: [{ id: 'w', panes: [{ id: 'a', type: 'codex' }, { id: 'b', type: 'codex' }, { id: 's', type: 'codex', schedules: [{ id: 's1', time: '10:00', prompt: 'x', dueAt: clock + 600 * MIN }, { id: 's2', time: '10:00', prompt: 'x', dueAt: clock + 2 * MIN }] }] }] }
   store.load()
   for (const id of ['a', 'b', 's']) {
     store.onStatus({ paneId: id, state: 'idle', precise: true, notify: false, provider: 'codex', sessionId: UUID.replace('0b7c', id === 'a' ? '1b7c' : id === 'b' ? '2b7c' : '3b7c') }, { kind: 'start', provider: 'codex', sessionId: UUID.replace('0b7c', id === 'a' ? '1b7c' : id === 'b' ? '2b7c' : '3b7c'), paneId: id })
@@ -161,7 +167,7 @@ function testCoordinator() {
   check(configReads === reads0 + 1, 'the config (schedules) is read once per tick, only with candidates')
   clock += MIN
   const slept = coord.tick()
-  check(slept.join() === 'a', 'tick 2: the hidden idle console sleeps; the visible one (keep) and the one with a schedule in 2 min do not')
+  check(slept.join() === 'a', 'tick 2: the hidden idle console sleeps; the visible one (keep) and the one with a schedule in 2 min (its second one, app 2.7.0) do not')
   check(seq.map((s) => s[0]).join() === 'mark,send,kill' && seq[1][2] === 5 && seq[1][3] === clock, 'explicit order: hibernatedAt first, then the renderer event { paneId, at, idleMinutes }, then the kill')
   const viewA = store.list().find((v) => v.paneId === 'a')
   check(viewA && viewA.hibernatedAt === clock && viewA.endedAt === undefined, 'the end that follows the kill never marks endedAt: the chat stays resumable')
@@ -191,6 +197,54 @@ function testCoordinator() {
   check(!store.isAvailable('b'), 'a frozen store (exiting) never offers a console to hibernation')
 }
 
+/**
+ * App 2.7.0 (A3): a console with an open `snaos needs` never sleeps, muted or
+ * not. The minimal idle status StatusManager publishes for a live pane with
+ * no track (an idle Claude console with an old stateSince) carries it, and
+ * once cleared that status is gone, so it never makes the pane a candidate.
+ */
+function testNeeds() {
+  let clock = 1_000 * MIN
+  class FakeDate extends Date { static now() { return clock } }
+  const { StatusManager } = load('src/main/status/StatusManager.ts', {
+    require: (id) => (id === 'electron' ? { Notification: { isSupported: () => false } } : require(id)),
+    Date: FakeDate, setTimeout: () => 0, clearTimeout: () => {},
+  })
+  const cfg = { workspaces: [{ id: 'w', name: 'W', panes: [{ id: 'bare', type: 'claude', title: 'B' }, { id: 'done', type: 'codex', title: 'D' }] }] }
+  const status = new StatusManager(() => null, () => cfg, () => {})
+  status.onSpawn('pty-b', 'bare'); status.onSpawn('pty-d', 'done')
+  const codex = (kind) => status.onAgentEvent({ paneId: 'done', ptyId: 'pty-d', provider: 'codex', sessionId: UUID, kind })
+  codex('start'); codex('working'); codex('done')
+  check(status.setNeeds('bare', 'Revisá el diff') && status.setNeeds('done', 'Aprobá el deploy') && status.setMuted('done', true), 'needs on a pane with no track and on a done Codex console (muted)')
+  const bare = status.stateOf('bare')
+  check(bare.state === 'idle' && bare.provider === 'claude' && bare.stateSince === clock && bare.needs.text === 'Revisá el diff', 'the bare needs status is an idle Claude console')
+  check(status.stateOf('done').muted === true && status.stateOf('done').needs.text === 'Aprobá el deploy', 'muted keeps needs on the status')
+  const slept = []
+  const coord = new H.HibernationCoordinator({
+    statuses: () => status.snapshot(),
+    lastInputAt: () => undefined,
+    hasPty: () => true,
+    subscribedPaneIds: () => new Set(),
+    isAvailable: () => true,
+    getConfig: () => cfg,
+    hibernate: (evt) => slept.push(evt.paneId),
+    now: () => clock,
+    setInterval: () => 1,
+    clearInterval: () => {},
+  })
+  coord.setConfig({ idleMinutes: 5, keep: [] })
+  clock += 30 * MIN
+  const asCandidate = (s) => ({ paneId: s.paneId, provider: s.provider, state: s.state, stateSince: s.stateSince, live: true, visible: false, subscribed: false, schedulePending: false })
+  check(H.isEligible(asCandidate(status.stateOf('bare')), 5, clock) && H.isEligible(asCandidate(status.stateOf('done')), 5, clock), 'without its needs both statuses would pass every other rule')
+  coord.tick(); clock += MIN; coord.tick(); clock += MIN; coord.tick()
+  check(slept.length === 0, 'with needs open neither sleeps (the bare status and the muted done console)')
+  status.setNeeds('bare', null); status.setNeeds('done', null)
+  check(status.stateOf('bare') === null && !status.snapshot().some((s) => s.paneId === 'bare'), 'clearing the bare needs drops its status: no candidate at all')
+  coord.tick(); clock += MIN; coord.tick()
+  check(slept.join() === 'done', 'answered: the done console sleeps two ticks later, the pane with no track never')
+  status.dispose()
+}
+
 function testBoardAndNav() {
   const code = buildSync({ stdin: { contents: `
 export * from './agentsBoard'
@@ -218,7 +272,7 @@ export * from './agentNav'
   check(z && z.sleeping === true && z.rank === 4 && z.stateSince === now - 120 * MIN, 'a sleeping console is an entry of rank 4 with its sleep time')
   const t = (key, vars) => key + (vars ? JSON.stringify(vars) : '')
   check(B.agentPhrase(z, t, 'es', now) === 'agents.row.sleeping · 2h' && B.agentPhrase(z, t, 'es', now, false) === 'agents.row.sleeping', 'its row phrase: "Durmiendo · 2h" (no age when asked)')
-  check(B.waitingIds(entries).every((id) => id !== 'z'), 'a sleeping console never counts as waiting')
+  check(B.waitingIds({ ...input, paneAttention: { ...input.paneAttention, z: true } }).every((id) => id !== 'z'), 'a sleeping console never counts as waiting (not even with a local mark)')
   const cols = B.boardColumns(entries)
   check(cols.waiting.map((e) => e.id).join() === 'a,e' || cols.waiting.map((e) => e.id).join() === 'e,a', 'waiting on you: action and error')
   check(cols.waiting.map((e) => e.id).join() === 'a,e', 'waiting column: longest waiting first')
@@ -279,7 +333,8 @@ function testKeymapAndI18n() {
   const km = load('src/renderer/lib/keymap.ts')
   const keymap = km.resolveKeymap({})
   check(keymap.agentsBoard === 'Ctrl+Shift+A', 'agentsBoard defaults to Ctrl+Shift+A (D8 amendment)')
-  const accels = Object.values(keymap)
+  // An action with no default ('') cannot collide: only real chords are compared.
+  const accels = Object.values(keymap).filter(Boolean)
   check(new Set(accels).size === accels.length, 'no default accelerator is shared')
   const { en } = load('src/renderer/i18n/en.ts')
   const { es } = load('src/renderer/i18n/es.ts')
@@ -298,8 +353,9 @@ function testKeymapAndI18n() {
 testPlanner()
 testShared()
 testCoordinator()
+testNeeds()
 testBoardAndNav()
 testMobileTrack()
 testKeymapAndI18n()
 fs.rmSync(tmp, { recursive: true, force: true })
-console.log(`PASS: ${checks} hibernation checks (planner 2 ticks, lastInputAt, exclusions, 3 per tick, schedules, coordinator interval and explicit kill on a real session store, cache helpers, board columns and keys, sleeping entries, phone cache tracking with clock skew, keymap, i18n)`)
+console.log(`PASS: ${checks} hibernation checks (planner 2 ticks, lastInputAt, exclusions, 3 per tick, schedules, coordinator interval and explicit kill on a real session store, needs never sleeps, cache helpers, board columns and keys, sleeping entries, phone cache tracking with clock skew, keymap, i18n)`)

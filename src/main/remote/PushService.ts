@@ -25,7 +25,7 @@ import * as webpush from 'web-push'
 import { z } from 'zod'
 import { BRAND } from '@shared/brand'
 import type { AttentionReason, ConfigFile } from '@shared/types'
-import type { StatusNotice } from '../status/events'
+import { noticeDigestLine, type StatusNotice, type TeamNotice } from '../status/events'
 import { mainT } from '../i18n'
 
 /** Largest accepted subscribe body (E3 M14: 4KB). */
@@ -88,9 +88,12 @@ type PushFile = z.infer<typeof fileSchema>
 export interface PushMessage {
   title: string
   body: string
-  /** paneId: a newer push of the same console replaces the older one (FR-45). */
+  /**
+   * paneId: a newer push of the same console replaces the older one (FR-45). App 2.7.0 (E10 B8): a team push is tagged
+   * `team:<teamId>:<rowId>`, never a pane id, so the phone's tray reconcile leaves it alone.
+   */
   tag: string
-  /** Deep link relative to the PWA scope, `./#ws=<id>&pane=<id>` (E2 deep links). */
+  /** Deep link relative to the PWA scope, `./#ws=<id>&pane=<id>` (E2 deep links); a team push `./#team=<id>[&task=<id>]`. */
   url: string
   /** action: `urgency: high`. */
   urgent: boolean
@@ -101,12 +104,26 @@ export interface PushMessage {
   state?: 'action' | 'done' | 'error'
 }
 
+/** Tag of a summary push: a newer summary replaces the older one, and no console's note is touched. */
+export const PUSH_SUMMARY_TAG = 'snaos-summary'
+
+/** Longest push body. */
+const PUSH_BODY_TEXT_MAX = 200
+
 /**
  * The push of a StatusNotice (E3-FR-45): "<Agent> needs permission" style
  * title in the config language, "<console> - <workspace>" body, the pane as
  * tag and the deep link relative to the PWA scope. No agent text ever.
+ * App 2.7.0 (A5): a done body adds its digest line ('status.push.doneDigest',
+ * tool families and files); a summary (noticeCoalescer) is its text over its
+ * places, with PUSH_SUMMARY_TAG, the app root and no state (no console's
+ * note to reconcile).
  */
 export function buildPushMessage(notice: StatusNotice, config: ConfigFile | null): PushMessage {
+  if (notice.summary) {
+    const body = notice.summary.places || BRAND.productName
+    return { title: notice.summary.text, body: body.slice(0, PUSH_BODY_TEXT_MAX), tag: PUSH_SUMMARY_TAG, url: './', urgent: false }
+  }
   const agent = notice.provider === 'codex' ? 'Codex' : 'Claude'
   const reason: AttentionReason | 'done' =
     notice.state === 'done' ? 'done' : notice.state === 'error' ? 'failure' : (notice.reason ?? 'permission')
@@ -120,7 +137,22 @@ export function buildPushMessage(notice: StatusNotice, config: ConfigFile | null
     url = `./#ws=${encodeURIComponent(ws.id)}&pane=${encodeURIComponent(pane.id)}`
     break
   }
-  return { title, body: body.slice(0, 200), tag: notice.paneId, url, urgent: notice.state === 'action', state: notice.state }
+  body = body.slice(0, PUSH_BODY_TEXT_MAX)
+  const digest = noticeDigestLine(notice, config)
+  if (digest) body = `${body}\n${digest}`.slice(0, PUSH_BODY_TEXT_MAX)
+  return { title, body, tag: notice.paneId, url, urgent: notice.state === 'action', state: notice.state }
+}
+
+/**
+ * App 2.7.0 (E10 B8, design 6.3): the push of a TeamNotice. Its title and body are main's own words (the trusted team
+ * name and the task id only, redacted by TeamService), the body cut like every push; the deep link opens the team's
+ * board on the phone, then the task when there is one (`./#team=<id>[&task=<id>]`); the tag is the notice's
+ * `team:<teamId>:<rowId>`; `urgent` for a row that blocks the team. NO `state`: the tray reconcile reads a state's tag
+ * as a pane id.
+ */
+export function buildTeamPushMessage(n: TeamNotice): PushMessage {
+  const url = `./#team=${encodeURIComponent(n.teamId)}${n.taskId ? `&task=${encodeURIComponent(n.taskId)}` : ''}`
+  return { title: n.title, body: n.body.slice(0, PUSH_BODY_TEXT_MAX), tag: n.tag, url, urgent: n.urgent }
 }
 
 export interface PushSendOpts {

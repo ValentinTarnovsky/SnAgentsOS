@@ -6,8 +6,15 @@
  *  - `always`: hold the block with no agents at all,
  *  - `never`: never request it,
  *  - `auto` (default): hold it while at least one pane is `working` with an
- *    update younger than 2 h, or a pane waits in `action` with a phone
- *    connected. When that stops being true the block survives a 120 s grace.
+ *    update or a sign of life younger than 2 h, or a pane waits in `action`
+ *    with a phone connected. When that stops being true the block survives a
+ *    120 s grace.
+ *
+ * A pane's age (app 2.7.0, A3) counts from max(updatedAt, signalAt): an agent
+ * that streams for hours without a state change keeps it. StatusManager never
+ * publishes per signal, but republishes a working pane whose signals keep
+ * coming at least every SIGNAL_REFRESH_MS (10 min), so a fresh signalAt
+ * reaches this service well inside the 2 h lease.
  *
  * Electron's powerSaveBlocker, powerMonitor and the timers are injected so the
  * whole policy runs under fakes in scripts/test-agents.cjs. Re-evaluation is
@@ -18,7 +25,7 @@ import type { AwakeMode, ClaudePaneState, PaneStatusEvt } from '@shared/types'
 
 /** How long the block survives once Auto stops needing it. */
 export const AWAKE_GRACE_MS = 120 * 1000
-/** A `working` pane with no update for this long no longer keeps the PC awake. */
+/** A `working` pane with no update and no sign of life for this long no longer keeps the PC awake. */
 export const AWAKE_STALE_MS = 2 * 60 * 60 * 1000
 
 export type AwakeBlockerType = 'prevent-app-suspension' | 'prevent-display-sleep'
@@ -52,7 +59,8 @@ export function isAwakeMode(v: unknown): v is AwakeMode {
 
 interface PaneMark {
   state: ClaudePaneState
-  updatedAt: number
+  /** max(updatedAt, signalAt) of the pane's last status: where its age counts from. */
+  freshAt: number
 }
 
 export class AwakeService {
@@ -153,8 +161,13 @@ export class AwakeService {
 
   private track(evt: PaneStatusEvt): void {
     if (!evt || typeof evt.paneId !== 'string') return
-    if (evt.state === null || evt.state === undefined) this.panes.delete(evt.paneId)
-    else this.panes.set(evt.paneId, { state: evt.state, updatedAt: evt.updatedAt ?? this.now() })
+    if (evt.state === null || evt.state === undefined) {
+      this.panes.delete(evt.paneId)
+      return
+    }
+    const updatedAt = typeof evt.updatedAt === 'number' && Number.isFinite(evt.updatedAt) ? evt.updatedAt : this.now()
+    const signalAt = typeof evt.signalAt === 'number' && Number.isFinite(evt.signalAt) ? evt.signalAt : -Infinity
+    this.panes.set(evt.paneId, { state: evt.state, freshAt: Math.max(updatedAt, signalAt) })
   }
 
   /**
@@ -179,7 +192,7 @@ export class AwakeService {
     let nextStale = Infinity
     for (const pane of this.panes.values()) {
       if (pane.state === 'working') {
-        const staleAt = pane.updatedAt + AWAKE_STALE_MS
+        const staleAt = pane.freshAt + AWAKE_STALE_MS
         if (staleAt > now) {
           working += 1
           if (staleAt < nextStale) nextStale = staleAt

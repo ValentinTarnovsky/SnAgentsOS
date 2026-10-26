@@ -6,7 +6,7 @@ import { createInterface } from 'readline'
 import type { IncomingMessage } from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
 import { AGENT_ENV } from '@shared/brand'
-import { CodexProtocol } from './CodexProtocol'
+import { CodexProtocol, type CodexTokenUsage } from './CodexProtocol'
 import type { AgentEvent } from './events'
 import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import { samePath, statusBinDirs } from '../pty/shellResolver'
@@ -15,6 +15,14 @@ import { samePath, statusBinDirs } from '../pty/shellResolver'
 export const CODEX_RESCAN_MS = 60_000
 
 interface Binding { paneId: string; ptyId: string; cwd: string; env?: NodeJS.ProcessEnv; sessionId?: string; finished?: boolean; socket?: WebSocket; child?: ChildProcessWithoutNullStreams }
+
+/** App 2.7.0 (A3): optional observers of a pty's app-server connection; neither ever runs after the launcher finished. */
+export interface CodexBridgeOptions {
+  /** Every stdout line (a streamed delta included) is a sign of life (StatusManager.noteSignal). Keep it O(1). */
+  onSignal?: (paneId: string, ptyId: string) => void
+  /** The root thread's validated token usage (the A4 ledger and context indicator). */
+  onUsage?: (paneId: string, ptyId: string, usage: CodexTokenUsage) => void
+}
 
 /** Private loopback bridge. Each PTY gets a random bearer token and a single TUI connection. */
 export class CodexBridge implements PtySink {
@@ -32,7 +40,7 @@ export class CodexBridge implements PtySink {
   /** When the last start scanned for the executable (the lazy rescan's clock). */
   private lastScan = 0
   /** `onRename` (v2.4): the root thread's name, as CodexProtocol reports it (StatusManager.reportAgentTitle). */
-  constructor(private directory: () => string, private runtimePath: string, private emit: (evt: AgentEvent) => void, private onRename: (paneId: string, ptyId: string, sessionId: string, title: string | undefined, explicit: boolean) => void = () => {}) {}
+  constructor(private directory: () => string, private runtimePath: string, private emit: (evt: AgentEvent) => void, private onRename: (paneId: string, ptyId: string, sessionId: string, title: string | undefined, explicit: boolean) => void = () => {}, private options: CodexBridgeOptions = {}) {}
   get health() { return { enabled: this.enabled, available: !!this.executable, connected: [...this.bindings.values()].filter(b => b.socket?.readyState === WebSocket.OPEN).length, error: this.error, ...(this.enabled && this.missing ? { missing: true } : {}) } }
   async configure(enabled: boolean): Promise<void> {
     this.enabled = enabled
@@ -126,6 +134,8 @@ export class CodexBridge implements PtySink {
       if (!binding.finished) this.emit({ ...evt, cwd: binding.cwd })
     }, (sessionId, title, explicit) => {
       if (!binding.finished) this.onRename(binding.paneId, binding.ptyId, sessionId, title, explicit)
+    }, usage => {
+      if (!binding.finished) this.options.onUsage?.(binding.paneId, binding.ptyId, usage)
     })
     // An isolated stdio server gives this TUI exclusive, observable ownership.
     // The shared daemon control socket uses a different framing protocol.
@@ -140,6 +150,11 @@ export class CodexBridge implements PtySink {
     const lines = createInterface({ input: child.stdout })
     lines.on('line', line => {
       protocol.server(line)
+      // App 2.7.0 (A3): any line is a sign of life (SilenceWatch, AwakeService);
+      // an observer that throws never cuts the TUI's stream.
+      if (!binding.finished && this.options.onSignal) {
+        try { this.options.onSignal(binding.paneId, binding.ptyId) } catch { /* status only */ }
+      }
       if (socket.readyState === WebSocket.OPEN) socket.send(line)
     })
     child.stderr.on('data', () => { /* Never expose backend stderr: it may contain user data. */ })

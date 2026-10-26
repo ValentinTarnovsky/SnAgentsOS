@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useAppStore } from '@/lib/store'
+import { useAgentStore } from '@/lib/agentStore'
 import { playStatusSound } from '@/lib/sound'
 import { visiblePaneIds } from '@shared/status'
 import { revealPane } from './revealPane'
@@ -19,6 +20,8 @@ export function useStatusEvents(): void {
   const minimized = useAppStore((s) => s.minimized)
   const maximized = useAppStore((s) => s.maximized)
   const notifications = useAppStore((s) => s.settings.notifications)
+  // app 2.7.0 (E10 B1): the Teams overlay covers the grid, so no console is in view under it.
+  const teamsActive = useAgentStore((s) => s.view === 'teams')
 
   // Status updates pushed by main. The notify flag carries main's already
   // debounced notification decision, so the sound can never diverge from the
@@ -81,27 +84,28 @@ export function useStatusEvents(): void {
     })
   }, [])
 
-  // Regaining focus while a workspace is on screen acknowledges its consoles.
+  // Regaining focus while a workspace is on screen acknowledges its consoles (not under Teams).
   useEffect(() => {
     const onFocus = (): void => {
       const s = useAppStore.getState()
-      if (s.activeWorkspaceId) s.markWorkspaceSeen(s.activeWorkspaceId)
+      if (s.activeWorkspaceId && useAgentStore.getState().view !== 'teams') s.markWorkspaceSeen(s.activeWorkspaceId)
     }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [])
 
   // Tell main which consoles are actually in view (active workspace minus
-  // minimized): its notification rule treats everything else as unseen.
+  // minimized; none under the Teams overlay): its notification rule treats
+  // everything else as unseen.
   useEffect(() => {
     const ws = workspaces.find((w) => w.id === activeWorkspaceId)
-    const viewed = visiblePaneIds(ws, activeWorkspaceId ? minimized[activeWorkspaceId] ?? [] : [], activeWorkspaceId ? maximized[activeWorkspaceId] : null)
+    const viewed = teamsActive ? [] : visiblePaneIds(ws, activeWorkspaceId ? minimized[activeWorkspaceId] ?? [] : [], activeWorkspaceId ? maximized[activeWorkspaceId] : null)
     window.snApi.status.setViewed(viewed)
-    if (activeWorkspaceId && document.hasFocus()) {
+    if (!teamsActive && activeWorkspaceId && document.hasFocus()) {
       useAppStore.getState().markWorkspaceSeen(activeWorkspaceId)
       dismissAgentCardsInView(viewed)
     }
-  }, [activeWorkspaceId, workspaces, minimized, maximized])
+  }, [activeWorkspaceId, workspaces, minimized, maximized, teamsActive])
 
   // Keep main's notify rules + HookServer lifecycle in sync with settings.
   useEffect(() => {

@@ -9,6 +9,7 @@ import type { RemoteClientMsg } from './remote-protocol'
 import { WS_NOTE_ID_RE, WS_NOTE_PHONE_MAX } from './ws-notes'
 import { isClaudeModel } from './agentTune'
 import { ACCOUNT_ID_RE } from './claude-accounts'
+import { phoneTeamRequestSchema, teamCtlActionSchemas } from './team-protocol-schemas'
 
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/)
 const id = z.string().min(1).max(128)
@@ -95,9 +96,11 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
   }),
   // E8-FR-32 (v3.1, R31-00): pane membership and the schedule itself are the
   // executor's to check (ack not_found / no_schedule). scheduleRun carries no
-  // text: a stray field is stripped, never sent.
-  z.object({ kind: z.literal('scheduleRun'), workspaceId: id, paneId: id }),
-  z.object({ kind: z.literal('scheduleToggle'), workspaceId: id, paneId: id, enabled: z.boolean() }),
+  // text: a stray field is stripped, never sent. App 2.7.0: `scheduleId` is
+  // optional (an older phone acts on the first schedule) and, like the pane,
+  // the executor's to look up (an unknown one acks no_schedule).
+  z.object({ kind: z.literal('scheduleRun'), workspaceId: id, paneId: id, scheduleId: id.optional() }),
+  z.object({ kind: z.literal('scheduleToggle'), workspaceId: id, paneId: id, enabled: z.boolean(), scheduleId: id.optional() }),
   // app 2.3.0: only allowlisted values (the phone never builds another one);
   // the provider and the Enter gate are the executor's and main's to judge.
   z.object({
@@ -125,6 +128,15 @@ const ctlActionSchema = z.discriminatedUnion('kind', [
     n: z.number().int().min(1).max(9),
     label: z.string().min(1).max(160),
   }),
+  // app 2.7.0 (A3): status marks, handled in main (StatusManager). Only the
+  // pane id travels; main says whether the mark applies (ack not_found).
+  z.object({ kind: z.literal('markRead'), paneId: id }),
+  z.object({ kind: z.literal('mutePane'), paneId: id, muted: z.boolean() }),
+  z.object({ kind: z.literal('silenceAck'), paneId: id }),
+  // app 2.7.0 (E10 B8): Teams decisions, handled in main (TeamService with
+  // origin phone). Ids by the regexes of teams.ts, the note and the answer
+  // text by their caps; whether the approval, card or item exists is main's.
+  ...teamCtlActionSchemas,
 ])
 
 export const remoteClientMsgSchema = z.discriminatedUnion('type', [
@@ -166,6 +178,14 @@ export const remoteClientMsgSchema = z.discriminatedUnion('type', [
     text: z.string().max(WS_NOTE_PHONE_MAX).optional(),
     baseRev: z.string().max(64).optional(),
   }),
+  // app 2.7.0 (A3): the full ExitPlanMode plan; behind the bucket by name and
+  // a per-session window (SessionManager). `requestId` as answerMenu's pendingId.
+  z.object({ v: z.number(), type: z.literal('planReq'), id: gitReqId, paneId: id, requestId: z.string().min(1).max(200).optional() }),
+  // app 2.7.0 (E10 B8): one Teams request; the per-op union is nested under
+  // `req` (a discriminated union member stays a plain object) and is the very
+  // PHONE_TEAM_OPS subset of the desktop's teams:req union. Behind the bucket
+  // by name and a per-session window (SessionManager).
+  z.object({ v: z.number(), type: z.literal('teamReq'), id: gitReqId, req: phoneTeamRequestSchema }),
   // E3 M12 Chat view (R30-05); behind the per-session bucket by name. Main
   // clamps `before` to [0, size] and aligns it to the next line start.
   z.object({ v: z.number(), type: z.literal('chatSub'), paneId: id }),

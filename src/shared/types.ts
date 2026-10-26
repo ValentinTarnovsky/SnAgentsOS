@@ -3,6 +3,9 @@
  * Must stay free of Node/DOM imports so it is safe in the renderer bundle.
  */
 import type { PaneWorktree } from './worktree-types'
+import type { LabsSettings } from './labs'
+import type { ToolFamily, TurnDigest } from './toolActivity'
+import type { FailureInfo } from './failure'
 
 export type { PaneWorktree }
 
@@ -10,7 +13,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 18
+export const CONFIG_VERSION = 19
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -52,7 +55,9 @@ export interface ConnectionProfile {
 /**
  * How a pane schedule repeats (E8-FR-28, schema 13). Absent = `once`.
  * `weekly.days`: 0 = Sunday .. 6 = Saturday, 1..7 distinct entries; `hourly`
- * takes the minute from `PaneSchedule.time`.
+ * takes the minute from `PaneSchedule.time`. `cron` (app 2.7.0, schema 19):
+ * a 5-field expression in local time (`src/shared/cron.ts`), at least 15
+ * minutes between runs and with a next run; `PaneSchedule.time` is not used.
  */
 export type ScheduleRecurrence =
   | { kind: 'once' }
@@ -60,6 +65,7 @@ export type ScheduleRecurrence =
   | { kind: 'weekdays' }
   | { kind: 'weekly'; days: number[] }
   | { kind: 'hourly' }
+  | { kind: 'cron'; expr: string }
 
 /** Outcome of one schedule run (E8-FR-31, schema 13). */
 export type ScheduleRunStatus = 'sent' | 'sent_unconfirmed' | 'skipped_busy' | 'missed' | 'failed'
@@ -72,7 +78,11 @@ export interface ScheduleRun {
   scheduledFor: number
   trigger: 'scheduled' | 'manual'
   status: ScheduleRunStatus
-  reason?: 'agent_not_running' | 'multiline_unsafe' | 'not_delivered'
+  /**
+   * `enter_held` (post 2.6.0, `userGate`): the agent started waiting on the
+   * user after the text was typed, so the Enter was dropped (text left typed).
+   */
+  reason?: 'agent_not_running' | 'multiline_unsafe' | 'not_delivered' | 'enter_held'
 }
 
 /**
@@ -81,10 +91,16 @@ export interface ScheduleRun {
  * reached, using the local PC clock. Without `recurrence` it is one-shot and
  * cleared after firing. Schema 13 adds the optional automation fields (they
  * replace the contract's top-level `automations`, R30-01 amendment); an old
- * schedule without them keeps its one-shot behavior.
+ * schedule without them keeps its one-shot behavior. Schema 19 (app 2.7.0):
+ * a console holds several, each with its own `id`, in `Pane.schedules`.
  */
 export interface PaneSchedule {
-  /** "HH:MM" wall-clock time the user picked (for display/editing). */
+  /**
+   * `s1`..`s999` (`SCHEDULE_ID_RE`, src/shared/schedule.ts), unique within
+   * the pane (schema 19). The single schedule of schema <= 18 becomes `s1`.
+   */
+  id: string
+  /** "HH:MM" wall-clock time the user picked (for display/editing; unused by a `cron` rule). */
   time: string
   /** Prompt text sent into the console (Enter appended) when it fires. */
   prompt: string
@@ -118,8 +134,13 @@ export interface Pane {
   icon: string
   /** Per-pane terminal font size override (Ctrl +/-/0, Ctrl+wheel). */
   fontSize?: number
-  /** One-shot prompt scheduled to run in this console at a set time. */
-  schedule?: PaneSchedule
+  /**
+   * Prompts scheduled to run in this console (schema 19, app 2.7.0): at most
+   * `PANE_SCHEDULES_MAX` (8), ids unique, each run on its own. Replaces the
+   * single `schedule` of schema <= 18, which migrate() turns into
+   * `[{ id: 's1', ...schedule }]` and never writes again.
+   */
+  schedules?: PaneSchedule[]
   /**
    * Last agent session seen in this console (schema 11). A mirror written by
    * the renderer; main's agent-sessions.json is the source of truth and only
@@ -437,7 +458,8 @@ export interface AgentDetail {
 /**
  * Status enrichment shared by PaneStatus and PaneStatusEvt (E4-FR-09,
  * E5-FR-02). The first four also reach the phone (RemotePaneStatus); the
- * rest are desktop only and never leave main -> renderer.
+ * rest are desktop only and never leave main -> renderer, except the 2.7.0
+ * fields marked "Reaches the phone".
  */
 export interface PaneStatusDetails {
   /** Epoch ms of the last change of the effective state (not of updatedAt). */
@@ -475,6 +497,114 @@ export interface PaneStatusDetails {
   model?: string
   effort?: string
   ultracode?: boolean
+  /**
+   * App 2.7.0 (A3): family of the newest tool still open (`activity` is its
+   * summary). Absent while no tool runs. Reaches the phone.
+   */
+  toolFamily?: ToolFamily
+  /** App 2.7.0 (A3): why the last turn failed; cleared by the next `working`. Reaches the phone. */
+  failure?: FailureInfo
+  /** App 2.7.0 (A3): a working agent with no signal for a while (SilenceWatch). Reaches the phone. */
+  silence?: PaneSilence
+  /** App 2.7.0 (A3): open `snaos needs` request; raises attention, never `pending`. Reaches the phone. */
+  needs?: PaneNeeds
+  /** App 2.7.0 (A3): silenced by the user until the effective state changes. Reaches the phone. */
+  muted?: boolean
+  /** App 2.7.0 (A3): tools of the current turn, frozen as the last turn's on done. Desktop only. */
+  digest?: TurnDigest
+  /**
+   * App 2.7.0 (A3): epoch ms of the last sign of life (hook, Codex app-server
+   * line). Desktop only and never part of the publish signature.
+   */
+  signalAt?: number
+  /**
+   * App 2.7.0 (A3): minimal status that only carries `needs` for a pane
+   * without an agent track; consumers treat its state as no agent state.
+   * Desktop only (the phone gets the status without it). Absent = a real status.
+   */
+  bare?: true
+  /**
+   * App 2.7.0 (A4): tokens and cost the console's agent spent (ConsoleLedger),
+   * refreshed once per turn for Claude (its done) and on every model call for
+   * Codex (thread/tokenUsage/updated), always inside the detail throttle.
+   * Always an estimate ("estimado"). Desktop only.
+   */
+  usage?: PaneUsage
+  /**
+   * App 2.7.0 (A4): how full the agent's context window is, refreshed like
+   * `usage` (once per turn for Claude, on every model call for Codex, inside
+   * the detail throttle). Reaches the phone.
+   */
+  context?: PaneContext
+}
+
+/**
+ * App 2.7.0 (A4): what a console spent, from the ConsoleLedger in main. Every
+ * surface shows it as "estimado": the tokens come from the agent's own
+ * records and the cost from the agent (Claude's `cost-state`) or the dated
+ * rate card (`src/shared/rateCard.ts`, Codex), never from a bill. The four
+ * counts do not overlap: `inputTokens` is the input that was not read from a
+ * cache. Claude: every assistant message of the console's sessions (main and
+ * subagent transcripts) once per message id. Codex: each thread's cumulative
+ * total minus its total before the first call the console saw.
+ */
+export interface PaneUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  /** USD of the part with a known price (a lower bound with `unknownCost`); absent when no part has one. */
+  costUSD?: number
+  /** Some of the usage has no known price (a model off the rate card, a session without `cost-state`, Claude's `hasUnknownModelCost`). */
+  unknownCost?: boolean
+  /** The model of the latest call, when known. */
+  model?: string
+  estimated: true
+}
+
+/**
+ * App 2.7.0 (A4): share of the context window the latest call used. `exact`:
+ * Codex reports the call and its window (`thread/tokenUsage/updated`); Claude's
+ * is approximate (its last main-thread usage over an assumed window).
+ */
+export interface PaneContext {
+  /** 0..1. */
+  pct: number
+  /** Tokens the latest call held. */
+  used: number
+  /** The window, in tokens. */
+  window: number
+  exact: boolean
+}
+
+/** App 2.7.0 (A3): silence levels of a working agent, `quiet` after quietMin, `stalled` after stalledMin. */
+export type SilenceLevel = 'quiet' | 'stalled'
+
+/** App 2.7.0 (A3): `since` is the signalAt the silence counts from. */
+export interface PaneSilence {
+  level: SilenceLevel
+  since: number
+}
+
+/** Longest `snaos needs` text kept (one line). */
+export const NEEDS_TEXT_MAX = 200
+
+/** App 2.7.0 (A3): what the agent asked for with `snaos needs`, and when. */
+export interface PaneNeeds {
+  text: string
+  at: number
+}
+
+/** Longest ExitPlanMode plan kept for "Leer plan completo", in UTF-16 units. */
+export const PLAN_TEXT_MAX = 32 * 1024
+
+/** App 2.7.0 (A3): the full plan of an ExitPlanMode request (`status:plan`, `planReq`). */
+export interface PanePlan {
+  requestId: string
+  text: string
+  at: number
+  /** The plan was longer than PLAN_TEXT_MAX and was cut. */
+  truncated: boolean
 }
 
 /**
@@ -689,6 +819,19 @@ export interface AgentSettings {
   syncAgentRename: boolean
   /** A `claude`/`codex` typed in a shell console is tracked as an agent (OSC 133 `agent=`, schema 17). */
   shellAgentDetect: boolean
+  /** Silence watch of working agents (schema 19, app 2.7.0). */
+  silence: SilenceSettings
+}
+
+/**
+ * Silence watch (schema 19, app 2.7.0): a working agent without a signal for
+ * quietMin minutes reads `quiet`, for stalledMin `stalled`. It never kills or
+ * writes; quietMin < stalledMin.
+ */
+export interface SilenceSettings {
+  enabled: boolean
+  quietMin: number
+  stalledMin: number
 }
 
 /** Claude prompt cache timer (E5-FR-28, schema 13). */
@@ -867,6 +1010,8 @@ export interface Settings {
   dictation: DictationSettings
   /** Desktop-to-desktop console and workspace sharing (schema 17). */
   share: ShareSettings
+  /** Opt-in experimental modules, all off by default (schema 19, app 2.7.0). */
+  labs: LabsSettings
 }
 
 export interface ConfigFile {

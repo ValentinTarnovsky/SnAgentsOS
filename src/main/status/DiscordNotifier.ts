@@ -32,11 +32,30 @@ export class DiscordNotifier {
     if (this.cfg && JSON.stringify(this.cfg) !== JSON.stringify(cfg)) this.cancel()
     this.cfg = { ...cfg }
   }
+  /**
+   * True when this notice would be sent: the channel on and its kind wanted;
+   * a summary (noticeCoalescer) only needs the channel on, since every notice
+   * it stands for was wanted already.
+   */
+  wants(notice: StatusNotice): boolean {
+    const cfg = this.cfg
+    return !!cfg?.enabled && (!!notice.summary || (notice.state === 'done' ? cfg.notifyDone : cfg.notifyAction))
+  }
+  /** True when a `snaos notify` would be sent (the channel on). */
+  wantsCustom(): boolean {
+    return !!this.cfg?.enabled
+  }
+  /**
+   * "Claude: Turn complete", the place, a done notice's digest line (app
+   * 2.7.0) and the time. A summary is its text, its places when it has them
+   * and the time.
+   */
   notify(notice: StatusNotice, config: ConfigFile | null): void {
     const cfg = this.cfg
-    if (!cfg?.enabled || !(notice.state === 'done' ? cfg.notifyDone : cfg.notifyAction)) return
-    const { agent, message, place } = describeNotice(notice, config, BRAND.productName)
-    const text = `${agent}: ${message}\n${place}\n${new Date().toISOString()}`
+    if (!cfg || !this.wants(notice)) return
+    const { agent, message, place, digest } = describeNotice(notice, config, BRAND.productName)
+    const lines = notice.summary ? [message, notice.summary.places] : [`${agent}: ${message}`, place, digest]
+    const text = [...lines.filter(Boolean), new Date().toISOString()].join('\n')
     void this.enqueue(cfg, text).catch(() => {})
   }
   /**

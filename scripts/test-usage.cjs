@@ -422,9 +422,166 @@ async function main() {
     check(viewRow(row('custom.abc', 'custom', { provider: 'custom' }), t).label === 'RAW', 'custom rows keep their own label')
     check(viewRow(row('claude.5h', '5h', { stale: true }), t).title === en['aiusage.stale'] && viewRow(row('claude.5h', '5h'), t).title === undefined, 'a held (stale) row carries the tooltip, a fresh row does not')
     check(typeof es['aiusage.stale'] === 'string' && es['aiusage.stale'].length > 0 && en['aiusage.stale'] !== es['aiusage.stale'], 'the stale tooltip exists in es and en')
+    const custom = row('custom.abc', 'custom', { provider: 'custom', percent: null, used: 10 })
+    check(viewRow({ ...custom, partial: true }, t).title === en['aiusage.partial'] && viewRow(custom, t).title === undefined, 'a custom row still catching up carries the partial tooltip')
+    check(typeof es['aiusage.partial'] === 'string' && es['aiusage.partial'].length > 0 && en['aiusage.partial'] !== es['aiusage.partial'], 'the partial tooltip exists in es and en')
   }
 
-  console.log(`PASS: ${checks} usage checks (Codex window classification, live parsing and fetch, rollout tail fallback, live/local policy, Claude fetch and poll policy, sidebar row labels)`)
+  // ---- custom rows: per-id dedup, subagents, CLAUDE_CONFIG_DIR / CODEX_HOME, async reads ----
+  {
+    const savedEnv = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CODEX_HOME: process.env.CODEX_HOME }
+    const claudeDir = tmp('claude-home')
+    const codexDir = tmp('codex-home')
+    process.env.CLAUDE_CONFIG_DIR = claudeDir
+    process.env.CODEX_HOME = codexDir
+    try {
+      const { computeCustomRows } = load('src/main/usage/custom.ts')
+      const nowIso = new Date().toISOString()
+      const u = (i, o, cc, cr) => ({ input_tokens: i, output_tokens: o, cache_creation_input_tokens: cc, cache_read_input_tokens: cr })
+      const msg = (id, usage, { ts = nowIso, model = 'claude-fixture-opus', extra = {} } = {}) =>
+        JSON.stringify({ type: 'assistant', timestamp: ts, ...extra, message: { ...(id ? { id } : {}), model, role: 'assistant', usage } })
+      const projects = path.join(claudeDir, 'projects')
+      // One message per content block, usage repeated; output grows while it streams (real shape).
+      const mainLines = [
+        JSON.stringify({ type: 'user', timestamp: nowIso, message: { role: 'user', content: 'hi' } }),
+        msg('msg_A', u(2, 7, 100, 0)),
+        msg('msg_A', u(2, 478, 100, 0)),
+        msg('msg_B', u(10, 20, 0, 5)),
+        msg('msg_B', u(10, 20, 0, 5)),
+        msg(null, u(1, 1, 0, 0)),
+        msg(null, u(1, 1, 0, 0)),
+        '{"type":"assistant", broken json usage',
+        msg('msg_G', u(0, 50, 0, 0), { extra: { pad: 'x'.repeat(600 * 1024) } }),
+        msg('msg_H', u(1000, 0, 0, 0), { ts: '2020-01-01T00:00:00.000Z' }),
+        msg('msg_I', u(0, 9, 0, 0), { model: 'claude-fixture-haiku' }),
+        msg('msg_J', u(0, 1, 0, 0)),
+      ]
+      write(path.join(projects, 'C--repo', 'sid1.jsonl'), mainLines.join('\n')) // no trailing newline: the last line still counts
+      write(path.join(projects, 'C--repo', 'sid1', 'subagents', 'agent-a1.jsonl'), [msg('msg_C', u(5, 5, 0, 0), { extra: { isSidechain: true } }), msg('msg_B', u(10, 20, 0, 5))].join('\n') + '\n')
+      write(path.join(projects, 'C--repo', 'sid1', 'subagents', 'workflows', 'wf_1', 'agent-a2.jsonl'), msg('msg_D', u(3, 0, 0, 0)) + '\n')
+      write(path.join(projects, 'C--repo', 'sid1', 'subagents', 'workflows', 'wf_1', 'journal.jsonl'), msg('msg_E', u(5000, 0, 0, 0)) + '\n')
+      write(path.join(projects, 'C--repo', 'sid1', 'tool-results', 'x.jsonl'), msg('msg_F', u(7000, 0, 0, 0)) + '\n')
+      // A resumed session copies earlier messages into its own transcript.
+      write(path.join(projects, 'C--other', 'sid2.jsonl'), [msg('msg_A', u(2, 7, 100, 0)), msg('msg_A', u(2, 478, 100, 0)), msg('msg_K', u(0, 2, 0, 0))].join('\n') + '\n')
+
+      const row = (id, extra) => ({ id, label: '', source: 'claude', modelMatch: '', window: 'all', enabled: true, ...extra })
+      const pending = computeCustomRows([row('all')])
+      check(pending && typeof pending.then === 'function', 'computeCustomRows is async (returns a promise)')
+      const [all] = await pending
+      // main 580 + 35 + 4 + 50 + 1000 + 9 + 1, subagents 10 + 3, resumed 2 (msg_A and msg_B repeats count once)
+      check(all.used === 1694, `per-id dedup across files, id-less lines once each, subagents in (got ${all.used})`)
+      check(all.id === 'custom.all' && all.label === 'Custom' && all.percent === null, 'a row without budget or label keeps the default label and no percent')
+
+      check(all.partial === undefined, 'a row whose files were all read is not partial')
+
+      const [opus, haiku, today, budgeted, missing] = await computeCustomRows([
+        row('opus', { modelMatch: 'OPUS' }),
+        row('haiku', { modelMatch: 'haiku', label: 'Haiku' }),
+        row('today', { window: 'today' }),
+        row('off', { enabled: false }),
+        row('budget', { tokenBudget: 3388 }),
+      ])
+      check(opus.used === 1685 && haiku.used === 9 && haiku.label === 'Haiku', 'the model filter applies before the dedup')
+      check(today.used === 694, `a line before the window start is skipped (got ${today.used})`)
+      check(budgeted.id === 'custom.budget' && missing === undefined, 'a disabled row is not computed')
+      check(budgeted.percent === 50 && budgeted.limit === 3388, 'a token budget turns the deduplicated count into a percent')
+
+      // Subagent decision: the agent-*.jsonl files count, the workflow journal and other folders do not.
+      fs.rmSync(path.join(projects, 'C--repo', 'sid1', 'subagents'), { recursive: true, force: true })
+      const [noSub] = await computeCustomRows([row('nosub')])
+      check(noSub.used === 1694 - 13, 'removing the subagent transcripts drops exactly their own messages')
+
+      // Codex: CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl, model filter per file.
+      const day = path.join(codexDir, 'sessions', '2026', '10', '23')
+      const meta = model => JSON.stringify({ timestamp: nowIso, type: 'session_meta', payload: { model } })
+      const tok = n => JSON.stringify({ timestamp: nowIso, type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { total_tokens: n } } } })
+      write(path.join(day, 'rollout-2026-10-23T10-00-00-00000000-0000-0000-0000-000000000001.jsonl'), [meta('gpt-fixture-codex'), tok(100), otherLine(1), tok(25)].join('\n'))
+      write(path.join(day, 'rollout-2026-10-23T11-00-00-00000000-0000-0000-0000-000000000002.jsonl'), [meta('gpt-fixture-mini'), tok(7)].join('\n') + '\n')
+      write(path.join(day, 'notes.jsonl'), tok(9999) + '\n')
+      const [cxAll, cxCodex] = await computeCustomRows([row('cx', { source: 'codex' }), row('cxc', { source: 'codex', modelMatch: 'fixture-codex' })])
+      check(cxAll.used === 132 && cxCodex.used === 125, `CODEX_HOME is honored and a file whose model does not match is skipped (got ${cxAll.used} / ${cxCodex.used})`)
+
+      process.env.CLAUDE_CONFIG_DIR = tmp('claude-empty')
+      process.env.CODEX_HOME = tmp('codex-empty')
+      const [emptyClaude, emptyCodex] = await computeCustomRows([row('e1'), row('e2', { source: 'codex' })])
+      check(emptyClaude.used === 0 && emptyCodex.used === 0, 'the dirs are read on every refresh from CLAUDE_CONFIG_DIR / CODEX_HOME, never from the home folder')
+    } finally {
+      for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+    }
+  }
+
+  // ---- custom rows: one read budget per refresh, newest first, per-file cache ----
+  {
+    const savedEnv = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CODEX_HOME: process.env.CODEX_HOME }
+    const claudeDir = tmp('claude-budget')
+    const codexDir = tmp('codex-budget')
+    process.env.CLAUDE_CONFIG_DIR = claudeDir
+    process.env.CODEX_HOME = codexDir
+    try {
+      const nowIso = new Date().toISOString()
+      const nowS = Date.now() / 1000
+      const msg = (id, out, pad = 0) =>
+        JSON.stringify({ type: 'assistant', timestamp: nowIso, message: { ...(id ? { id } : {}), model: 'claude-fixture', role: 'assistant', usage: { input_tokens: 0, output_tokens: out }, pad: 'x'.repeat(pad) } })
+      const row = (id, extra) => ({ id, label: '', source: 'claude', modelMatch: '', window: 'all', enabled: true, ...extra })
+      const repo = path.join(claudeDir, 'projects', 'C--repo')
+      // Names sort oldest first, so only the mtime sort reads `c-new` first.
+      const files = [['a-old', 'msg_old', 100, 3], ['b-mid', 'msg_mid', 10, 2], ['c-new', 'msg_new', 1, 1]]
+      for (const [name, id, out, hoursAgo] of files) {
+        const p = path.join(repo, `${name}.jsonl`)
+        write(p, msg(id, out, 4000) + '\n')
+        fs.utimesSync(p, nowS - hoursAgo * 3600, nowS - hoursAgo * 3600)
+      }
+      const rollout = path.join(codexDir, 'sessions', '2026', '10', '23', 'rollout-2026-10-23T10-00-00-00000000-0000-0000-0000-000000000009.jsonl')
+      write(rollout, JSON.stringify({ timestamp: nowIso, type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { total_tokens: 7 } } } }) + '\n')
+      const lineBytes = fs.statSync(path.join(repo, 'c-new.jsonl')).size
+      const limits = { bytes: lineBytes + fs.statSync(rollout).size + 10 }
+      const rows = [row('a'), row('b'), row('cx', { source: 'codex' })]
+
+      const { computeCustomRows } = load('src/main/usage/custom.ts')
+      const [a1, b1, cx1] = await computeCustomRows(rows, limits)
+      check(a1.used === 1 && b1.used === 1, `the budget reads the newest transcript first and identical rows get the same count (got ${a1.used} / ${b1.used})`)
+      check(a1.partial === true && b1.partial === true && a1.status === 'ok', 'a row the budget cut short says partial')
+      check(cx1.used === 7 && cx1.partial === undefined, 'a later row is not starved: the read pass is newest first across every row and source')
+      const [a2, b2] = await computeCustomRows(rows, limits)
+      check(a2.used === 11 && b2.used === 11 && a2.partial === true, `the next refresh resumes where the budget stopped, older files next (got ${a2.used})`)
+      const [a3, b3, cx3] = await computeCustomRows(rows, limits)
+      check(a3.used === 111 && b3.used === 111 && a3.partial === undefined && cx3.used === 7, `the scan catches up without counting a file twice (got ${a3.used})`)
+
+      const one = load('src/main/usage/custom.ts').computeCustomRows
+      const [f1] = await one([row('f')], { files: 1 })
+      const [f2] = await one([row('f')], { files: 1 })
+      check(f1.used === 1 && f1.partial === true && f2.used === 11, `the file budget also takes the newest first (got ${f1.used} / ${f2.used})`)
+
+      // Per-file cache: a refresh reads only the bytes appended since the last one.
+      const solo = path.join(claudeDir, 'projects', 'C--solo')
+      fs.rmSync(repo, { recursive: true, force: true })
+      const s = path.join(solo, 'sid.jsonl')
+      write(s, msg('msg_A', 1, 50 * 1024) + '\n')
+      const inc = load('src/main/usage/custom.ts').computeCustomRows
+      check((await inc([row('s')]))[0].used === 1, 'the first refresh reads the whole transcript')
+      const unkeyed = msg(null, 2)
+      fs.appendFileSync(s, unkeyed.slice(0, 40))
+      const [half] = await inc([row('s')], { bytes: 4096 })
+      check(half.used === 1 && half.partial === undefined, 'a last line still being written is not counted yet')
+      fs.appendFileSync(s, unkeyed.slice(40) + '\n')
+      const [whole] = await inc([row('s')], { bytes: 4096 })
+      check(whole.used === 3 && whole.partial === undefined, `an append is read from the cached offset, never the whole file again (got ${whole.used})`)
+      check((await inc([row('s')], { bytes: 4096 }))[0].used === 3, 'an unchanged file is not read again and an id-less line is not counted twice')
+      // Over-long line: skipped through its newline, the scan keeps going.
+      fs.appendFileSync(s, msg('msg_L', 1000, 5000).slice(0, 3000))
+      await inc([row('s')], { line: 1000 })
+      fs.appendFileSync(s, msg('msg_L', 1000, 5000).slice(3000) + '\n' + msg('msg_M', 5) + '\n')
+      const [long] = await inc([row('s')], { line: 1000 })
+      check(long.used === 8 && long.partial === undefined, `a line over the line limit is skipped and the next ones count (got ${long.used})`)
+      // A rewrite (not an append) drops what the old content counted.
+      write(s, msg('msg_Z', 40, 60 * 1024) + '\n')
+      check((await inc([row('s')]))[0].used === 40, 'a rewritten transcript is read again from the start')
+    } finally {
+      for (const [k, v] of Object.entries(savedEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+    }
+  }
+
+  console.log(`PASS: ${checks} usage checks (Codex window classification, live parsing and fetch, rollout tail fallback, live/local policy, Claude fetch and poll policy, sidebar row labels, custom rows dedup, paths, read budget and per-file cache)`)
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 }).finally(() => { for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }) })

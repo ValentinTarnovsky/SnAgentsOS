@@ -13,7 +13,11 @@
  * it and the notes sheets above both. Automations (E8-FR-32, v3.1) is one too,
  * from the Home header or Settings. Notes (v2.2, E9) is one too, from a
  * workspace's menu. The mount confirmation (E2-FR-06) is
- * shared by every entry point.
+ * shared by every entry point. Teams (app 2.7.0, E10 B8) are five more: the
+ * list, a team's board, its Te necesita, the Lead chat and a task, from the
+ * Home card or a team push, each over the one opened before it. The in-page
+ * notices show inside the pushed screen on top while one is open (app 2.7.0,
+ * ToastStack); Home and the terminal keep their own for the rest.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { HomeScreen } from './HomeScreen'
@@ -28,6 +32,11 @@ import { NotesList } from './changes/NotesList'
 import { SendNotesSheet } from './changes/SendNotesSheet'
 import { MountConfirmSheet } from './MountConfirmSheet'
 import { WsNotesScreen } from './notes/WsNotesScreen'
+import { TeamsScreen } from './teams/TeamsScreen'
+import { TeamBoardScreen } from './teams/TeamBoardScreen'
+import { TeamNeedsScreen } from './teams/TeamNeedsScreen'
+import { LeadChatScreen } from './teams/LeadChatScreen'
+import { TaskScreen } from './teams/TaskScreen'
 import { SLIDE_EASING, SLIDE_MS } from './PushScreen'
 import { useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
@@ -95,6 +104,12 @@ export function LiveShell(): ReactNode {
       <NotesList />
       <SendNotesSheet />
       <WsNotesScreen />
+      {/* app 2.7.0 (E10 B8): Teams, a later screen over an earlier one (a task over its board or over Te necesita). */}
+      <TeamsScreen />
+      <TeamBoardScreen />
+      <TeamNeedsScreen />
+      <LeadChatScreen />
+      <TaskScreen />
       <DiagnosticsScreen />
     </BackStackHost>
   )

@@ -135,6 +135,11 @@ export const CH = {
   STATUS_HOOKS_INSTALL: 'status:hooksInstall', // invoke -> StatusHooksStatusRes
   STATUS_HOOKS_UNINSTALL: 'status:hooksUninstall', // invoke -> StatusHooksStatusRes
   STATUS_HOOKS_STATUS: 'status:hooksStatus', // invoke -> StatusHooksStatusRes
+  // App 2.7.0 (A3): read, mute and silence marks, and the full plan; main validates every paneId.
+  STATUS_MARK_READ: 'status:markRead', // invoke (paneId) -> boolean (done / error only)
+  STATUS_MUTE: 'status:mute', // invoke (StatusMuteReq) -> boolean
+  STATUS_SILENCE_ACK: 'status:silenceAck', // invoke (paneId) -> boolean
+  STATUS_PLAN: 'status:plan', // invoke (StatusPlanReq) -> PanePlan | null
 
   // Remote control (embedded LAN/Tailscale server for phone clients)
   REMOTE_SET_CONFIG: 'remote:setConfig', // send (renderer pushes RemoteSettings; main starts/stops/restarts)
@@ -241,18 +246,32 @@ export const CH = {
   WS_NOTES_PRUNE: 'wsNotes:prune', // send (workspaceIds still in the store)
   WS_NOTES_CHANGED: 'wsNotes:changed', // main -> renderer (WsNotesChangedEvt)
 
+  // Teams (app 2.7.0, E10 B, labs.teams): main owns everything; one zod-validated invoke; main answers 'disabled' with the lab off.
+  TEAMS_REQ: 'teams:req', // invoke (TeamRequest) -> TeamReply
+  TEAMS_CHANGED: 'teams:changed', // main -> renderer (TeamChangedEvt)
+  TEAMS_RUN_APPEND: 'teams:runAppend', // main -> renderer (TeamRunAppendEvt), only the watched run, split <= 48 KB with splitAppend
+  TEAMS_INTEGRATE_PROGRESS: 'teams:integrateProgress', // main -> renderer (IntegrateProgressEvt)
+
   // Files drawer (v2.2, E9): a workspace id and a relative path; main resolves the folder and contains every target.
-  FILES_ROOT: 'files:root', // invoke (workspaceId) -> FilesRootRes
+  // app 2.7.0 (A9): every one also takes an optional paneId (the pane's managed worktree is the root).
+  FILES_ROOT: 'files:root', // invoke (workspaceId, paneId?) -> FilesRootRes
   FILES_LIST: 'files:list', // invoke (FilesListReq) -> FilesListRes
-  FILES_READ: 'files:read', // invoke ({ workspaceId, rel }) -> FileReadRes
+  FILES_READ: 'files:read', // invoke (FilesPathReq) -> FileReadRes
   FILES_WRITE: 'files:write', // invoke (FileWriteReq) -> FileWriteRes
   FILES_CREATE: 'files:create', // invoke (FileCreateReq) -> FilesOpRes
   FILES_RENAME: 'files:rename', // invoke (FileRenameReq) -> FilesOpRes
-  FILES_TRASH: 'files:trash', // invoke ({ workspaceId, rel }) -> FilesOpRes (to the OS trash)
-  FILES_REVEAL: 'files:reveal', // invoke ({ workspaceId, rel }) -> FilesOpRes
-  FILES_OPEN: 'files:open', // invoke ({ workspaceId, rel }) -> FilesOpRes (inert formats open with their app, the rest is revealed)
-  FILES_WATCH: 'files:watch', // send (workspaceId | null): the one folder watched
+  FILES_TRASH: 'files:trash', // invoke (FilesPathReq) -> FilesOpRes (to the OS trash)
+  FILES_REVEAL: 'files:reveal', // invoke (FilesPathReq) -> FilesOpRes
+  FILES_OPEN: 'files:open', // invoke (FilesPathReq) -> FilesOpRes (inert formats open with their app, the rest is revealed)
+  FILES_WATCH: 'files:watch', // send (workspaceId | null, paneId?): the one folder watched
   FILES_CHANGED: 'files:changed', // main -> renderer (FilesChangedEvt)
+  FILES_RESOLVE_REFS: 'files:resolveRefs', // invoke (FilesResolveRefsReq) -> FileRefResolved[] (Ctrl+click on file:line, app 2.7.0, A9)
+
+  // Desktop console chat (app 2.7.0, A7; settings.labs.consoleChat): one ChatHub reader per window and pane; main checks the lab and the pane.
+  CHAT_SUB: 'chat:sub', // invoke (ChatSubReq) -> ChatPageRes (the first page; a repeat is a fresh first page)
+  CHAT_UNSUB: 'chat:unsub', // send (ChatSubReq)
+  CHAT_MORE: 'chat:more', // invoke (ChatMoreReq) -> ChatPageRes (the page before `before`)
+  CHAT_FRAME: 'chat:frame', // main -> renderer (ChatFrameEvt: appends, and a chatPage that resets the list)
 
   // Share, host side (app 2.4.0, item 8): ids only from the renderer; main resolves every scope against its own state.
   SHARE_HOST_STATE: 'share:hostState', // invoke -> ShareHostState

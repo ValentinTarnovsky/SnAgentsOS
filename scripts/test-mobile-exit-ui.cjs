@@ -49,7 +49,7 @@ window.result = (async () => {
  flushSync(() => useExitStore.getState().setExit({ paneId: 'b', exitCode: 1 })); await frames();
  check(!host.querySelector('[data-exit-strip]'), 'an exit of another pane shows no strip here');
  setLang('es'); flushSync(() => useExitStore.getState().setExit({ paneId: 'a', exitCode: 0 })); await frames();
- check(host.querySelector('[data-exit-strip]').textContent.includes('La consola termino (codigo 0)') && host.textContent.includes('Reiniciar'), 'strip is translated');
+ check(host.querySelector('[data-exit-strip]').textContent.includes('La consola terminó (código 0)') && host.textContent.includes('Reiniciar'), 'strip is translated');
  setLang('en');
  // Home rows (E2-FR-05): exited from RemotePaneInfo.exitCode and from the viewed pane's strip.
  flushSync(() => useExitStore.getState().setExit({ paneId: 'a', exitCode: 3 }));

@@ -62,6 +62,12 @@ export const CLI_ENV = {
   ctlEndpoint: 'SNAOS_CTL_ENDPOINT',
   ctlToken: 'SNAOS_CTL_TOKEN',
   cli: 'SNAOS_CLI',
+  /**
+   * App 2.7.0 (Teams): the run id, only in a team run's environment. With it
+   * set, the CLI never falls back to runtime.json (a lost team token gives
+   * `unauthorized`, never the master token).
+   */
+  teamRun: 'SNAOS_TEAM_RUN',
 } as const
 
 /**

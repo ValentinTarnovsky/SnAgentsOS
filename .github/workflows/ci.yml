@@ -21,3 +21,21 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: xvfb-run -a npm run test:mobile
+
+  # The release matrix (release.yml) runs npm test on these runners too: catch an
+  # OS-only failure on the PR instead of leaving a tagged release as a draft.
+  tests-os:
+    name: npm test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test

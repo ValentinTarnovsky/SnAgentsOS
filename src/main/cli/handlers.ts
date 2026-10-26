@@ -35,10 +35,12 @@ import {
   type CtlListPane,
   type CtlListWorkspace,
   type CtlMethod,
+  type CtlNeedsResult,
   type CtlPeekResult,
   type CtlRendererData,
   type CtlResponse,
   type CtlSpawnResult,
+  type CtlStatusSignals,
   type CtlUsageResult,
   type CtlUsageRow,
   type CtlWaitResult,
@@ -46,22 +48,28 @@ import {
 } from '@shared/ctl-protocol'
 import { resolveConsoleRef, resolveNoteRef, resolveWorkspaceRef, workspaceOfPane, type RefError } from '@shared/ctlRefs'
 import { stripAnsi, tailLines } from '@shared/ansi'
+import { typingBlocked } from '@shared/agentTune'
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { WS_NOTE_MAX_BYTES, WS_NOTE_TITLE_MAX, type WsNoteCreateReq, type WsNoteDoc, type WsNoteError, type WsNoteMeta, type WsNoteReadReq, type WsNoteResult, type WsNoteWriteReq, type WsNotesListRes } from '@shared/ws-notes'
 import { chatMessageOffset, type ChatBlock, type ChatMessage, type ChatUnavailableReason } from '@shared/chat-types'
-import type { AgentProvider, ClaudePaneState, ConfigFile, PaneStatusEvt, PaneType } from '@shared/types'
+import { NEEDS_TEXT_MAX, type AgentProvider, type ClaudePaneState, type ConfigFile, type PaneStatusEvt, type PaneType } from '@shared/types'
+import { digestLine, toolFamilyKey, type ToolFamily } from '@shared/toolActivity'
+import { redactCredentials } from '@shared/redact'
+import { TEAM_READS_PER_MIN, TEAM_WRITES_PER_MIN } from '@shared/teams'
+import { teamTool, type TeamCtlMethod } from '@shared/teamTools'
 import type { PtySubmitRes, UsageSnapshot } from '@shared/ipc-contract'
 import type { AccountsOpError } from '@shared/claude-accounts'
 import { readPage } from '../chat/TranscriptWatcher'
 import { decoderFor } from '../chat/ChatHub'
 import type { LocateResult } from '../chat/TranscriptLocator'
+import { mainTLang } from '../i18n'
 import type { BusResult, RendererBus } from './rendererBus'
-import type { CtlCaller } from './CtlTokens'
+import type { CtlCaller, CtlTeamCaller } from './CtlTokens'
 
 /** The PtyManager surface the CLI uses. */
 export interface CtlPtyView {
   ptyIdForPane(paneId: string): string | null
-  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean, origin?: 'user' | 'auto'): Promise<PtySubmitRes>
+  submitToPane(ptyId: string, paneId: string | undefined, text: string, enter: boolean, origin?: 'user' | 'auto', readyFor?: AgentProvider, userGate?: boolean): Promise<PtySubmitRes>
   lastSubmitAt(paneId: string): number | undefined
   lastOutputAt(paneId: string): number | undefined
   /** The live pty's raw ring (no side effects), or null. */
@@ -70,6 +78,11 @@ export interface CtlPtyView {
 
 export interface CtlStatusView {
   stateOf(paneId: string): PaneStatusEvt | null
+  /**
+   * App 2.7.0 (A3): opens (`text`, one line already clipped) or clears (null)
+   * the pane's `snaos needs` request. False when the pane has no live pty.
+   */
+  setNeeds(paneId: string, text: string | null): boolean
 }
 
 /** A `snaos notify` to deliver: native (respecting notifications.enabled) and, unless local, Discord/ntfy. */
@@ -135,6 +148,22 @@ export interface CtlAccountsView {
 }
 
 /**
+ * App 2.7.0 (Teams, design 3.9): `snaos team` of a team run. TeamService's
+ * ctlView (teams/teamCtl.ts) checks the params, the role and the run, applies
+ * the call to the store and maps its errors; the gate and the budgets stay here.
+ * B5 integration, fifth round: `secrets` (CtlTokens) lets it refuse a text that
+ * holds a live token of the app, right after the Labs gate.
+ */
+export interface CtlTeamsView {
+  handle(method: TeamCtlMethod, params: Record<string, unknown>, who: CtlTeamCaller, secrets?: CtlSecrets): Promise<CtlResponse>
+}
+
+/** B5 integration, fifth round: the live tokens of the app as a team call checks its texts against them (CtlTokens). */
+export interface CtlSecrets {
+  holdsToken(text: string): boolean
+}
+
+/**
  * Main services the CLI reaches once bootstrap built them (CliService.attach).
  * Each is optional: a missing one answers `disabled`.
  */
@@ -143,6 +172,7 @@ export interface CtlServices {
   chat?: CtlChatView
   usage?: CtlUsageView
   accounts?: CtlAccountsView
+  teams?: CtlTeamsView
 }
 
 export interface CtlHandlerDeps {
@@ -158,6 +188,8 @@ export interface CtlHandlerDeps {
   platform?: NodeJS.Platform
   /** Late-bound services (notes, transcripts). */
   services?: () => CtlServices
+  /** B5 integration, fifth round: the live tokens (CliService's CtlTokens); a team text that holds one is refused. */
+  secrets?: CtlSecrets
   /** `ws new`: the folder exists (a stat, nothing is opened or read). */
   isDir?: (path: string) => Promise<boolean>
 }
@@ -226,6 +258,29 @@ export function oneLine(text: string, max: number): string {
   return out
 }
 
+/** A family as the digest line names it: English whatever the app language (the CLI's output is English on purpose). */
+const familyWord = (family: ToolFamily): string => mainTLang('en', toolFamilyKey(family))
+
+/**
+ * App 2.7.0 (A3): main's status as the agent state of a pane. A `bare` one
+ * (only a `snaos needs` on a pane with no agent track) is no agent state:
+ * null, as a plain shell reads; signalsOf still takes its needs.
+ */
+function agentStatus(st: PaneStatusEvt | null): PaneStatusEvt | null {
+  return st?.bare ? null : st
+}
+
+/** App 2.7.0 (A3): main's signals of a pane, field by field (never the failure code, the files list or signalAt). */
+function signalsOf(st: PaneStatusEvt | null): CtlStatusSignals {
+  const out: CtlStatusSignals = {}
+  if (!st) return out
+  if (st.digest && st.digest.tools > 0) out.digest = { tools: st.digest.tools, line: digestLine(st.digest, familyWord) }
+  if (st.failure) out.failure = { kind: st.failure.kind, ...(st.failure.until !== undefined ? { until: st.failure.until } : {}) }
+  if (st.silence) out.silence = { level: st.silence.level, since: st.silence.since }
+  if (st.needs) out.needs = { text: st.needs.text, at: st.needs.at }
+  return out
+}
+
 /** Node's path rules of `platform`, never the host's (a test may pin another OS). */
 function pathFor(platform: NodeJS.Platform): typeof win32 {
   return platform === 'win32' ? win32 : posix
@@ -282,6 +337,12 @@ export class CtlHandlers {
   }
 
   readonly handle = async (method: CtlMethod, params: Record<string, unknown>, caller: CtlCaller | null, signal: AbortSignal): Promise<Out> => {
+    // App 2.7.0 (Teams): a team token reaches only its own tools. It has no workspace, and scope() falls back to the
+    // active one, so without this gate a team agent could send to or kill the user's consoles there.
+    if (caller?.team) {
+      if (method !== 'ping' && method !== 'usage' && !method.startsWith('team.')) return err('forbidden', 'a team agent may only use snaos team, ping and usage')
+    } else if (method.startsWith('team.')) return err('forbidden', 'snaos team works only inside a team run')
+    if (method.startsWith('team.')) return this.team(method as TeamCtlMethod, params, caller)
     switch (method) {
       case 'ping':
         return ok({ pong: true, appVersion: this.deps.appVersion, protocol: CTL_PROTOCOL_VERSION, self: caller?.paneId ?? null })
@@ -343,6 +404,8 @@ export class CtlHandlers {
         return this.accountStatus()
       case 'account.use':
         return this.accountUse(params)
+      case 'needs':
+        return this.needs(params, caller)
       default:
         return err('bad_request', 'unknown method')
     }
@@ -353,13 +416,15 @@ export class CtlHandlers {
   /** StatusManager listener: transitions feed `wait`. */
   onStatus(evt: PaneStatusEvt): void {
     const now = this.now()
+    // App 2.7.0 (A3): a bare status (needs only) counts as no state, like null.
+    const state = agentStatus(evt)?.state ?? null
     const prev = this.lastState.has(evt.paneId) ? this.lastState.get(evt.paneId) : undefined
-    if (prev !== evt.state) {
+    if (prev !== state) {
       this.lastTransitionAt.set(evt.paneId, now)
-      this.lastState.set(evt.paneId, evt.state)
+      this.lastState.set(evt.paneId, state)
     }
-    if (evt.state === 'working') this.lastWorkingAt.set(evt.paneId, now)
-    if (evt.state === null) this.lastState.delete(evt.paneId)
+    if (state === 'working') this.lastWorkingAt.set(evt.paneId, now)
+    if (state === null) this.lastState.delete(evt.paneId)
     for (const w of this.waiters) if (w.paneId === evt.paneId) this.evaluate(w)
   }
 
@@ -376,6 +441,12 @@ export class CtlHandlers {
 
   dispose(): void {
     for (const w of [...this.waiters]) this.finish(w, err('desktop_unavailable', `${BRAND.productName} is shutting down`))
+  }
+
+  /** A caller that is gone for good (a team run's revoked token, `team:<runId>`): its rate windows go too. */
+  forgetCaller(paneId: string): void {
+    const suffix = `:${paneId}`
+    for (const key of [...this.rateLog.keys()]) if (key.endsWith(suffix)) this.rateLog.delete(key)
   }
 
   private dropStatusLine(paneId: string): void {
@@ -477,7 +548,8 @@ export class CtlHandlers {
       ...(w.note ? { note: w.note } : {}),
       ...(w.taskState ? { taskState: w.taskState } : {}),
       consoles: w.panes.map((p, i): CtlConsoleInfo => {
-        const st = this.deps.status.stateOf(p.id)
+        const raw = this.deps.status.stateOf(p.id)
+        const st = agentStatus(raw)
         const line = list.statusLines[p.id]
         return {
           index: i + 1,
@@ -492,6 +564,7 @@ export class CtlHandlers {
           ...(line ? { statusLine: line } : {}),
           self: caller?.paneId === p.id,
           sshProtected: this.sshProtected(w, p),
+          ...signalsOf(raw),
         }
       }),
     }))
@@ -595,9 +668,21 @@ export class CtlHandlers {
     if (this.sshProtected(t.workspace, t.pane)) return err('ssh_protected', 'this console has a Connection Profile (cliProtectSsh)')
     const ptyId = this.deps.pty.ptyIdForPane(t.pane.id)
     if (!ptyId) return err('not_running', 'the console is not running')
+    // A menu waiting on the user (main's own status): a digit or an Enter
+    // would answer it, so one agent could approve another's permission.
+    if (typingBlocked(this.deps.status.stateOf(t.pane.id))) {
+      return err('awaiting_user', 'the console waits on the user (a permission, question or plan): nothing was typed')
+    }
     // v2.3: an agent's send answers the prompt (cards go away) but never marks the user's result as seen.
-    const res = await this.deps.pty.submitToPane(ptyId, t.pane.id, text, enter, 'auto')
-    if (!res.ok) return res.error === 'multiline_unsafe' ? err('multiline_unsafe', 'multi-line text: this console does not accept a safe paste') : err('not_running', 'the console is not running')
+    // userGate: main checks again right before the deferred Enter, so a menu
+    // that opens while the text is typed never gets it.
+    const res = await this.deps.pty.submitToPane(ptyId, t.pane.id, text, enter, 'auto', undefined, true)
+    if (!res.ok) {
+      if (res.error === 'multiline_unsafe') return err('multiline_unsafe', 'multi-line text: this console does not accept a safe paste')
+      if (res.error === 'awaiting_user') return err('awaiting_user', 'the console waits on the user (a permission, question or plan): nothing was typed')
+      if (res.error === 'enter_held') return err('awaiting_user', 'the console started waiting on the user (a permission, question or plan) before the Enter: the text was typed, not submitted')
+      return err('not_running', 'the console is not running')
+    }
     return ok({ paneId: t.pane.id, enter })
   }
 
@@ -675,7 +760,8 @@ export class CtlHandlers {
       this.finish(w, err('exited', 'the console exited'))
       return
     }
-    const st = this.deps.status.stateOf(w.paneId)
+    // A bare status (a needs on a pane with no agent) waits like a plain shell.
+    const st = agentStatus(this.deps.status.stateOf(w.paneId))
     const state = st?.state ?? null
     const precise = st?.precise ?? false
     const result = (extra: Partial<CtlWaitResult> = {}): Out => ok({ state, precise, waitedMs, ...extra } satisfies CtlWaitResult)
@@ -726,8 +812,9 @@ export class CtlHandlers {
     }
     const raw = str(params.text)
     if (raw === undefined) {
-      const st = this.deps.status.stateOf(paneId)
-      return ok({ paneId, state: st?.state ?? null, precise: st?.precise ?? false, statusLine: list.statusLines[paneId] ?? null })
+      const evt = this.deps.status.stateOf(paneId)
+      const st = agentStatus(evt)
+      return ok({ paneId, state: st?.state ?? null, precise: st?.precise ?? false, statusLine: list.statusLines[paneId] ?? null, ...signalsOf(evt) })
     }
     const text = oneLine(raw, CTL_STATUS_MAX)
     if (!text) return err('bad_request', 'empty status text (use --clear)')
@@ -737,10 +824,58 @@ export class CtlHandlers {
     return ok({ paneId, statusLine: text })
   }
 
+  /**
+   * App 2.7.0 (A3): `snaos needs "<action>" | --clear`. The request lives in
+   * main (StatusManager: attention, never `pending`), so a console token needs
+   * no renderer: it always targets its own pane. The master token names one
+   * with `--console`; a console naming another one is forbidden.
+   */
+  private async needs(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const clear = bool(params.clear)
+    const raw = str(params.text)
+    if (clear && raw !== undefined) return err('bad_request', 'use either a text or --clear')
+    if (!clear && raw === undefined) return err('bad_request', 'needs takes a text or --clear')
+    const text = clear ? null : oneLine(raw ?? '', NEEDS_TEXT_MAX)
+    if (text === '') return err('bad_request', 'empty needs text (use --clear)')
+    let paneId: string
+    if (str(params.console) !== undefined) {
+      const list = await this.list()
+      if ('ok' in list) return list
+      const t = this.target(list, params, caller)
+      if (!t.ok) return t
+      if (caller && t.pane.id !== caller.paneId) return err('forbidden', 'a console can only raise or clear its own needs')
+      paneId = t.pane.id
+    } else if (caller) paneId = caller.paneId
+    else return err('bad_request', 'outside a SnAgentsOS console, needs takes --console')
+    if (!this.take('mutate', caller, CTL_MUTATE_PER_MIN)) return err('rate_limited', `at most ${CTL_MUTATE_PER_MIN} console or workspace changes per minute`)
+    if (!this.deps.status.setNeeds(paneId, text)) return err('not_found', 'that console is not running')
+    const out: CtlNeedsResult = { paneId, needs: text }
+    return ok(out)
+  }
+
+  /**
+   * App 2.7.0 (Teams, design 5.1): `snaos team` of a team run (the gate in handle() let only a team caller through).
+   * Budgets per run (`team:<runId>`, freed by forgetCaller at revoke): 120 reads and 60 writes a minute. The live
+   * tokens go along (B5 integration, fifth round): teamCtl refuses a text that holds one (`detail: 'secret'`).
+   */
+  private async team(method: TeamCtlMethod, params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
+    const teams = this.services().teams
+    if (!teams) return err('disabled', 'snaos team is not available in this build')
+    const spec = teamTool(method)
+    if (!spec || !caller?.team) return err('bad_request', 'unknown method')
+    const write = spec.write
+    if (!this.take(write ? 'teamWrite' : 'teamRead', caller, write ? TEAM_WRITES_PER_MIN : TEAM_READS_PER_MIN))
+      return err('rate_limited', `at most ${TEAM_READS_PER_MIN} team reads and ${TEAM_WRITES_PER_MIN} team writes per minute and run: wait a minute`)
+    return teams.handle(spec.method, params, caller.team, this.deps.secrets)
+  }
+
   private async notify(params: Record<string, unknown>, caller: CtlCaller | null): Promise<Out> {
-    const body = oneLine(str(params.text) ?? '', CTL_NOTIFY_BODY_MAX)
+    // App 2.7.0 (A5): credentials never reach a channel nor the echo. Masked on
+    // the whole line, before the clip, so a key cut at the limit keeps no head.
+    const line = (v: unknown, max: number): string => oneLine(redactCredentials(oneLine(str(v) ?? '', Infinity)), max)
+    const body = line(params.text, CTL_NOTIFY_BODY_MAX)
     if (!body) return err('bad_request', 'notify needs a text')
-    const title = oneLine(str(params.title) ?? '', CTL_NOTIFY_TITLE_MAX) || BRAND.productName
+    const title = line(params.title, CTL_NOTIFY_TITLE_MAX) || BRAND.productName
     if (!this.take('notify', caller, CTL_NOTIFY_PER_MIN)) return err('rate_limited', `at most ${CTL_NOTIFY_PER_MIN} notifications per minute`)
     const local = bool(params.local)
     this.deps.notify({ paneId: caller?.paneId ?? null, title, body, local })
@@ -904,7 +1039,8 @@ export class CtlHandlers {
     if (this.sshProtected(t.workspace, t.pane)) return err('ssh_protected', 'this console has a Connection Profile (cliProtectSsh)')
     if (!this.take('read', caller, CTL_READS_PER_MIN)) return err('rate_limited', `at most ${CTL_READS_PER_MIN} chat or peek calls per minute`)
     const pane = t.pane
-    const st = this.deps.status.stateOf(pane.id)
+    const raw = this.deps.status.stateOf(pane.id)
+    const st = agentStatus(raw)
     const running = this.deps.pty.ptyIdForPane(pane.id) !== null
     const provider: AgentProvider | undefined = st?.provider ?? (pane.type === 'claude' || pane.type === 'codex' ? pane.type : undefined)
     const lastMessage = st?.lastMessage || (provider ? await this.lastReply(pane.id) : undefined)
@@ -929,6 +1065,7 @@ export class CtlHandlers {
       ...(st?.model ? { model: st.model } : {}),
       ...(st?.effort ? { effort: st.effort } : {}),
       ...(st?.ultracode !== undefined ? { ultracode: st.ultracode } : {}),
+      ...signalsOf(raw),
       lines: running ? await this.screen(pane.id, lines) : [],
     }
     return ok(out)

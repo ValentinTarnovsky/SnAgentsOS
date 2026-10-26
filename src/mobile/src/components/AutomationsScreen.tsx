@@ -1,10 +1,13 @@
 /**
  * Automations (E8-FR-32, v3.1), a pushed screen opened from the Home header
- * (while the PC has one) and from Settings. One card per console with a
- * schedule, in the desktop's order: workspace / console, repeat rule, next run
- * (or "Paused"), the last result, the Active switch (`scheduleToggle`) and
- * "Run now" (`scheduleRun`, the desktop's manual run: it waits for a free
- * agent and never moves the next run). Editing stays on the PC.
+ * (while the PC has one) and from Settings. One card per schedule (a console
+ * can hold several since app 2.7.0), in the desktop's order: workspace /
+ * console, repeat rule (a cron rule shows its expression), next run (or
+ * "Paused"), the last result, the Active switch (`scheduleToggle`) and "Run
+ * now" (`scheduleRun`, the desktop's manual run: it waits for a free agent
+ * and never moves the next run). Both carry the card's `scheduleId` when the
+ * desktop sent one; an older desktop acts on the console's only schedule.
+ * Editing stays on the PC.
  *
  * The switch flips at once and holds that value until the desktop's next
  * snapshot agrees or the ack fails (then it snaps back with a toast). "Run
@@ -21,6 +24,7 @@ import { historyAgo } from '../lib/history'
 import { STATUS_TICK_MS } from '../lib/statusText'
 import {
   automationErrorText,
+  automationKey,
   automationRows,
   closeAutomations,
   nextText,
@@ -74,6 +78,7 @@ function AutomationCard({
   return (
     <div
       data-auto-row={schedule.paneId}
+      data-auto-schedule={schedule.scheduleId}
       data-enabled={enabled}
       className="flex flex-col gap-1 rounded-card border border-border bg-bg-secondary px-3 pb-1 pt-2.5"
     >
@@ -84,10 +89,11 @@ function AutomationCard({
         <span data-auto-pane className="min-w-0 max-w-[60%] shrink-0 truncate font-medium text-text-primary">{paneTitle}</span>
       </div>
       <div className="flex flex-wrap gap-x-2 text-[11px] leading-snug text-text-secondary">
-        <span data-auto-rec>{recurrenceText(schedule)}</span>
+        {/* A long cron expression wraps instead of widening the card. */}
+        <span data-auto-rec className="min-w-0 break-words">{recurrenceText(schedule)}</span>
         <span aria-hidden>·</span>
         <span data-auto-next className={enabled ? 'text-text-primary' : undefined}>
-          {nextText({ enabled, dueAt: schedule.dueAt })}
+          {nextText({ enabled, dueAt: schedule.dueAt }, now)}
         </span>
         <span aria-hidden>·</span>
         <span data-auto-last>{last ? t('auto.last', { status: t(RUN_STATUS_KEY[last.status]), age: historyAgo(last.at, now) }) : t('auto.never')}</span>
@@ -116,7 +122,7 @@ function AutomationCard({
 export function AutomationsBody(): ReactNode {
   const snapshot = useRemoteStore((s) => s.snapshot)
   const rows = automationRows(snapshot)
-  // Switch values the desktop has not confirmed yet, by pane.
+  // Switch values the desktop has not confirmed yet, by `automationKey`.
   const [overrides, setOverrides] = useState<Record<string, boolean>>({})
   const [toggling, setToggling] = useState<Record<string, boolean>>({})
   const [running, setRunning] = useState<Record<string, boolean>>({})
@@ -133,10 +139,10 @@ export function AutomationsBody(): ReactNode {
     setOverrides((prev) => {
       const next = { ...prev }
       let changed = false
-      for (const paneId of Object.keys(prev)) {
-        const sched = snapshot?.schedules?.find((s) => s.paneId === paneId)
-        if (!sched || sched.enabled === prev[paneId]) {
-          delete next[paneId]
+      for (const key of Object.keys(prev)) {
+        const sched = snapshot?.schedules?.find((s) => automationKey(s) === key)
+        if (!sched || sched.enabled === prev[key]) {
+          delete next[key]
           changed = true
         }
       }
@@ -145,38 +151,40 @@ export function AutomationsBody(): ReactNode {
     setNow(Date.now())
   }, [snapshot])
 
-  const patch = (set: typeof setRunning, paneId: string, on: boolean): void =>
+  const patch = (set: typeof setRunning, key: string, on: boolean): void =>
     set((prev) => {
       const next = { ...prev }
-      if (on) next[paneId] = true
-      else delete next[paneId]
+      if (on) next[key] = true
+      else delete next[key]
       return next
     })
 
   const toggle = async (row: AutomationRow, enabled: boolean): Promise<void> => {
-    const { workspaceId, paneId } = row.schedule
-    setOverrides((prev) => ({ ...prev, [paneId]: enabled }))
-    patch(setToggling, paneId, true)
-    const res = await client.sendCtl({ kind: 'scheduleToggle', workspaceId, paneId, enabled })
-    patch(setToggling, paneId, false)
+    const { workspaceId, paneId, scheduleId } = row.schedule
+    const key = automationKey(row.schedule)
+    setOverrides((prev) => ({ ...prev, [key]: enabled }))
+    patch(setToggling, key, true)
+    const res = await client.sendCtl({ kind: 'scheduleToggle', workspaceId, paneId, ...(scheduleId ? { scheduleId } : {}), enabled })
+    patch(setToggling, key, false)
     if (res.ok) return
     setOverrides((prev) => {
       const next = { ...prev }
-      delete next[paneId]
+      delete next[key]
       return next
     })
     store.getState().setToast(automationErrorText('scheduleToggle', res.error))
   }
 
   const run = async (row: AutomationRow): Promise<void> => {
-    const { workspaceId, paneId } = row.schedule
+    const { workspaceId, paneId, scheduleId } = row.schedule
+    const key = automationKey(row.schedule)
     // A second tap before the re-render must not ask twice.
-    if (inFlight.current.has(paneId)) return
-    inFlight.current.add(paneId)
-    patch(setRunning, paneId, true)
-    const res = await client.sendCtl({ kind: 'scheduleRun', workspaceId, paneId })
-    inFlight.current.delete(paneId)
-    patch(setRunning, paneId, false)
+    if (inFlight.current.has(key)) return
+    inFlight.current.add(key)
+    patch(setRunning, key, true)
+    const res = await client.sendCtl({ kind: 'scheduleRun', workspaceId, paneId, ...(scheduleId ? { scheduleId } : {}) })
+    inFlight.current.delete(key)
+    patch(setRunning, key, false)
     store.getState().setToast(res.ok ? t('auto.runStarted', { pane: row.paneTitle }) : automationErrorText('scheduleRun', res.error))
   }
 
@@ -191,15 +199,15 @@ export function AutomationsBody(): ReactNode {
   return (
     <div data-auto-list className="flex flex-col gap-2">
       {rows.map((row) => {
-        const paneId = row.schedule.paneId
+        const key = automationKey(row.schedule)
         return (
           <AutomationCard
-            key={paneId}
+            key={key}
             row={row}
             now={now}
-            enabled={overrides[paneId] ?? row.schedule.enabled}
-            toggling={!!toggling[paneId]}
-            running={!!running[paneId]}
+            enabled={overrides[key] ?? row.schedule.enabled}
+            toggling={!!toggling[key]}
+            running={!!running[key]}
             onToggle={(on) => void toggle(row, on)}
             onRun={() => void run(row)}
           />

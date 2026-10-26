@@ -51,8 +51,9 @@ let code = ''
 let codeV3 = ''
 const entry = `
 export { RemoteManager, toRemoteStatus, PANE_STATUS_COALESCE_MS } from './src/main/remote/RemoteManager'
-export { isRateLimitedMsg, RATE_LIMITED_MSG_TYPES, RATE_LIMITED_CTL_KINDS } from './src/main/remote/SessionManager'
+export { isRateLimitedMsg, RATE_LIMITED_MSG_TYPES, RATE_LIMITED_CTL_KINDS, fitPlanRes, PLAN_REQ_MAX, PLAN_REQ_WINDOW_MS, PLAN_REQ_IN_FLIGHT, PLAN_RES_MAX_BYTES } from './src/main/remote/SessionManager'
 export { TokenBucket, REMOTE_RATE_PER_SEC, REMOTE_RATE_BURST } from './src/main/remote/TokenBucket'
+export { toShareStatus } from './src/main/share/StatusCoalescer'
 `
 const bundleWith = plugins => build({
   stdin: { resolveDir: root, loader: 'ts', contents: entry },
@@ -159,7 +160,18 @@ const snapshot = {
   ],
   activeWorkspaceId: 'w1', themeTokens: {}, language: 'en', fontFamily: '', fontSize: 14,
 }
-const DESKTOP_ONLY = ['sessionId', 'cwd', 'detail', 'topic', 'firstPrompt', 'cacheSince', 'notify', 'delivery', 'paneId', 'updatedAt']
+const DESKTOP_ONLY = ['sessionId', 'cwd', 'detail', 'topic', 'firstPrompt', 'cacheSince', 'notify', 'delivery', 'paneId', 'updatedAt', 'digest', 'signalAt']
+/** app 2.7.0 (A3): the five status fields that reach the phone. */
+const A3_FIELDS = ['toolFamily', 'failure', 'silence', 'needs', 'muted']
+const a3Status = () => ({
+  toolFamily: 'edit',
+  failure: { kind: 'limit', until: 1700000600000, code: 'rate_limit', text: 'You have hit your limit' },
+  silence: { level: 'quiet', since: 1700000000000, extra: 1 },
+  needs: { text: 'Aprobá el deploy', at: 1700000100000, by: 'x' },
+  muted: true,
+})
+const a3DesktopOnly = () => ({ digest: { tools: 3, families: { edit: 2, read: 1 }, files: ['src/a.ts'], lastFamily: 'edit' }, signalAt: 1700000200000 })
+const tick = () => new Promise(resolve => setImmediate(resolve))
 const evt = (paneId, state, rest = {}) => ({ paneId, state, precise: true, notify: false, provider: 'claude', pendingCount: 0, stateSince: 1000, updatedAt: 1234, ...rest })
 
 function testToRemoteStatus(api) {
@@ -168,12 +180,16 @@ function testToRemoteStatus(api) {
     pending: [{ id: 't1', kind: 'permission', summary: 'npm test' }],
     sessionId: '11111111-2222-3333-4444-555555555555', cwd: 'C:\\repo', detail: { kind: 'tool', text: 'x' },
     topic: 'tp', firstPrompt: 'fp', cacheSince: 5, notify: true, delivery: 'native',
+    ...a3DesktopOnly(),
   })
   const out = api.toRemoteStatus(rich)
   check(DESKTOP_ONLY.every(k => !(k in out)), 'toRemoteStatus never copies sessionId, cwd or desktop-only fields')
   check(out.state === 'action' && out.precise === false && out.reason === 'permission' && out.pendingCount === 1 && out.lastMessage === 'hi' && out.activity === 'Bash' && out.pending.length === 1 && out.stateSince === 1000, 'toRemoteStatus copies the contract fields')
   check(!('precise' in api.toRemoteStatus(evt('p1', 'idle'))), 'precise is omitted when true (absent = true)')
   check(api.toRemoteStatus(evt('p1', null)) === null, 'a cleared status maps to null')
+  const bareOut = api.toRemoteStatus(evt('p9', 'idle', { precise: false, bare: true, needs: { text: 'Aprobar', at: 5 }, attention: true }))
+  check(bareOut.bare === true && bareOut.needs.text === 'Aprobar' && bareOut.attention === true, 'a bare status keeps needs and attention and carries the bare mark')
+  check(!('bare' in api.toRemoteStatus(evt('p1', 'idle'))), 'a real status has no bare mark')
   // v2.3 attention: true and false are copied (false explicitly), absent stays absent.
   check(api.toRemoteStatus(evt('p1', 'done', { attention: true })).attention === true && api.toRemoteStatus(evt('p1', 'action', { attention: false })).attention === false, 'toRemoteStatus copies attention true and false')
   check(!('attention' in api.toRemoteStatus(evt('p1', 'done'))), 'toRemoteStatus omits attention when the desktop sends none')
@@ -183,6 +199,26 @@ function testToRemoteStatus(api) {
   const tuned = api.toRemoteStatus(evt('p1', 'idle', { model: 'claude-opus-4-5', effort: 'high', ultracode: false }))
   check(tuned.model === 'claude-opus-4-5' && tuned.effort === 'high' && tuned.ultracode === false, 'toRemoteStatus copies model, effort and ultracode')
   check(['model', 'effort', 'ultracode'].every(k => !(k in api.toRemoteStatus(evt('p1', 'idle')))), 'toRemoteStatus omits the tune fields when unknown')
+
+  // app 2.7.0 (A3): toolFamily, failure, silence, needs and muted reach the phone, field by field.
+  const src = evt('p1', 'error', { ...a3Status(), ...a3DesktopOnly() })
+  const a3 = api.toRemoteStatus(src)
+  check(a3.toolFamily === 'edit' && a3.failure.kind === 'limit' && a3.failure.until === 1700000600000 && a3.failure.code === 'rate_limit', 'toRemoteStatus copies toolFamily and failure (kind, until, code)')
+  check(a3.silence.level === 'quiet' && a3.silence.since === 1700000000000 && a3.needs.text === 'Aprobá el deploy' && a3.needs.at === 1700000100000 && a3.muted === true, 'toRemoteStatus copies silence, needs and muted')
+  check(!('text' in a3.failure) && !('extra' in a3.silence) && !('by' in a3.needs), 'field by field: a stray key of failure, silence or needs never travels')
+  check(a3.failure !== src.failure && a3.silence !== src.silence && a3.needs !== src.needs, 'and the phone status shares no object with the desktop event')
+  check(!('digest' in a3) && !('signalAt' in a3), 'digest and signalAt stay on the desktop')
+  const bare = api.toRemoteStatus(evt('p1', 'error', { failure: { kind: 'overloaded' } }))
+  check(Object.keys(bare.failure).join() === 'kind', 'a failure without until or code carries only its kind')
+  check(api.toRemoteStatus(evt('p1', 'idle', { muted: false })).muted === false, 'muted false is copied as well')
+  check(A3_FIELDS.every(k => !(k in api.toRemoteStatus(evt('p1', 'working')))), 'absent A3 fields stay absent')
+  // app 2.7.0 (A4): the ledger's context reaches the phone field by field; the token and cost usage never does, and a Share guest gets neither.
+  const ledger = { usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4, costUSD: 0.01, estimated: true }, context: { pct: 0.5, used: 100000, window: 200000, exact: false, extra: 1 } }
+  const a4 = api.toRemoteStatus(evt('p1', 'done', ledger))
+  check(a4.context.pct === 0.5 && a4.context.used === 100000 && a4.context.window === 200000 && a4.context.exact === false && !('extra' in a4.context) && a4.context !== ledger.context && !('usage' in a4) && !('context' in api.toRemoteStatus(evt('p1', 'done'))) && ['usage', 'context'].every(k => !(k in api.toShareStatus(evt('p1', 'done', ledger)))), 'toRemoteStatus copies context field by field and never usage; toShareStatus copies neither')
+  // Share guests never get them: toShareStatus is its own whitelist.
+  const share = api.toShareStatus(src)
+  check(share && share.state === 'error' && [...A3_FIELDS, 'digest', 'signalAt'].every(k => !(k in share)), 'toShareStatus never copies the A3 fields')
 }
 
 /** v2.3 attention: a flip goes out, and a phone looking at a pane acknowledges it. */
@@ -716,6 +752,10 @@ function testRateUnits(api) {
   check(limited({ type: 'ctl', action: { kind: 'agentTune', workspaceId: 'w1', paneId: 'p1', set: { kind: 'picker' }, enter: false } }), 'agentTune (app 2.3.0) is limited')
   check(limited({ type: 'ctl', action: { kind: 'claudeAccountUse', role: 'secondary' } }) && api.RATE_LIMITED_CTL_KINDS.has('claudeAccountUse'), 'claudeAccountUse (app 2.3.0) is limited')
   check(limited({ type: 'ctl', action: { kind: 'answerMenu', paneId: 'p1', pendingId: 't1', n: 1, label: 'Yes' } }) && api.RATE_LIMITED_CTL_KINDS.has('answerMenu'), 'answerMenu (app 2.4.0) is limited: each one reads the mirror and writes to the pty')
+  check(['markRead', 'mutePane', 'silenceAck'].every(kind => limited({ type: 'ctl', action: { kind, paneId: 'p1', muted: true } }) && api.RATE_LIMITED_CTL_KINDS.has(kind)), 'markRead, mutePane and silenceAck (app 2.7.0) are limited')
+  check(limited({ type: 'planReq', id: 'q1', paneId: 'p1' }) && api.RATE_LIMITED_MSG_TYPES.has('planReq'), 'planReq (app 2.7.0) is limited')
+  check(limited({ type: 'teamReq', id: 'q1', req: { op: 'list' } }) && api.RATE_LIMITED_MSG_TYPES.has('teamReq'), 'teamReq (app 2.7.0, E10 B8) is limited')
+  check(['teamDecide', 'teamAnswer', 'teamDispatch'].every(kind => limited({ type: 'ctl', action: { kind, teamId: 'tm-0123456789ab' } }) && api.RATE_LIMITED_CTL_KINDS.has(kind)), 'teamDecide, teamAnswer and teamDispatch (app 2.7.0, E10 B8) are limited: each one is a TeamService commit')
   check(!limited({ type: 'ctl', action: { kind: 'runQuickCommand' } }), 'runQuickCommand (v2.2) stays outside the bucket')
   check(limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1', resume: { provider: 'claude', sessionId: 'x' } } }), 'createPane with resume is limited')
   check(!limited({ type: 'ctl', action: { kind: 'createPane', workspaceId: 'w1' } }), 'a plain createPane is not')
@@ -907,11 +947,11 @@ async function testAutomationSurface() {
     version: 13,
     workspaces: [
       { id: 'w1', name: 'Api', cwd: 'C:/a', note: '  esperando\nCI  ', taskState: 'review', panes: [
-        { id: 'c1', type: 'claude', title: 'Claude', color: '#fff', icon: 'claude', schedule: sched({ history }) },
+        { id: 'c1', type: 'claude', title: 'Claude', color: '#fff', icon: 'claude', schedules: [{ id: 's1', ...sched({ history }) }, { id: 's2', ...sched({ time: '', prompt: 'segundo prompt', dueAt: DUE + 60000, recurrence: { kind: 'cron', expr: '0 9 * * 1-5' } }) }] },
         { id: 'c2', type: 'shell', title: 'Shell', color: '#fff', icon: 'terminal' },
       ] },
       { id: 'w2', name: 'Web', cwd: 'C:/b', taskState: 'bogus', panes: [
-        { id: 'd1', type: 'shell', title: 'Cron', color: '#fff', icon: 'terminal', schedule: sched({ time: '07:15', recurrence: { kind: 'hourly' }, enabled: false }) },
+        { id: 'd1', type: 'shell', title: 'Cron', color: '#fff', icon: 'terminal', schedules: [{ id: 's1', ...sched({ time: '07:15', recurrence: { kind: 'hourly' }, enabled: false }) }] },
       ] },
     ],
     presets: [], connections: [],
@@ -928,16 +968,18 @@ async function testAutomationSurface() {
   const c1 = ws1.panes.find(p => p.id === 'c1'), c2 = ws1.panes.find(p => p.id === 'c2')
   check(c1.statusLine.startsWith('corriendo') && !/[\u0000-\u001f]/.test(c1.statusLine) && c1.statusLine.length === r.REMOTE_STATUS_LINE_MAX, 'statusLine is one line without control characters, at most 120 (E8-FR-19)')
   check(!('statusLine' in c2), 'a console without a line has no statusLine')
-  check(Array.isArray(snap.schedules) && snap.schedules.map(s => s.paneId).join() === 'c1,d1', 'schedules lists every console automation in sidebar order (E8-FR-32)')
-  const s1 = snap.schedules[0], s2 = snap.schedules[1]
+  check(Array.isArray(snap.schedules) && snap.schedules.map(s => s.paneId).join() === 'c1,c1,d1', 'schedules lists every console automation in sidebar order (E8-FR-32)')
+  check(snap.schedules.map(s => `${s.paneId}#${s.scheduleId}`).join() === 'c1#s1,c1#s2,d1#s1', 'app 2.7.0: one info per schedule, in the console\'s stored order, each with its scheduleId')
+  const s1 = snap.schedules[0], s2 = snap.schedules[2], sc = snap.schedules[1]
+  check(sc.recurrence.kind === 'cron' && sc.recurrence.expr === '0 9 * * 1-5' && sc.cron === '0 9 * * 1-5' && sc.dueAt === DUE + 60000 && !('cron' in s1) && !('cron' in s2), 'a cron rule travels as is and in cron (the same expression); other rules have no cron')
   check(s1.workspaceId === 'w1' && s1.time === '09:00' && s1.recurrence.kind === 'weekdays' && s1.enabled === true && s1.waitIdle === true && s1.dueAt === DUE, 'a row carries time, recurrence, enabled, waitIdle and dueAt')
   check(s1.lastRun.at === 5000 && s1.lastRun.status === 'sent' && s1.lastRun.trigger === 'manual' && Object.keys(s1.lastRun).sort().join() === 'at,status,trigger', 'lastRun is the newest run: time, status and trigger only (no reason)')
   check(!('last' in s1), 'the row uses the contract name lastRun')
-  check(!JSON.stringify(snap.schedules).includes('corre los tests') && !('history' in s1) && !('prompt' in s1), 'neither the prompt nor the history leave the desktop')
+  check(!JSON.stringify(snap.schedules).includes('corre los tests') && !JSON.stringify(snap.schedules).includes('segundo prompt') && !('history' in s1) && !('prompt' in s1), 'neither the prompt nor the history leave the desktop')
   check(s2.workspaceId === 'w2' && s2.enabled === false && s2.recurrence.kind === 'hourly' && !('lastRun' in s2) && !('runPending' in s2), 'a paused schedule that never ran')
-  const legacy = r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedule: { time: '10:00', prompt: 'p', dueAt: 1 } }] }], () => false)
+  const legacy = r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedules: [{ id: 's1', time: '10:00', prompt: 'p', dueAt: 1 }] }] }], () => false)
   check(legacy[0].recurrence.kind === 'once' && legacy[0].enabled === true && legacy[0].waitIdle === true, 'a one-shot schedule without the schema 13 fields reads as once, active and waiting for idle')
-  check(r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedule: { time: '10:00', prompt: 'p', dueAt: 1, waitIdle: false } }] }], () => false)[0].waitIdle === false, 'waitIdle false travels as false')
+  check(r.remoteSchedules([{ id: 'x', name: 'x', cwd: '', panes: [{ id: 'y', type: 'shell', title: 'y', color: '', icon: '', schedules: [{ id: 's1', time: '10:00', prompt: 'p', dueAt: 1, waitIdle: false }] }] }], () => false)[0].waitIdle === false, 'waitIdle false travels as false')
 
   // The transient line lives in its own store: clearing it pushes again.
   const before = states.length
@@ -949,8 +991,9 @@ async function testAutomationSurface() {
   r.initRemoteCommands()
   const ctl = async action => { snApi._cmd({ id: `c${results.length}`, action }); await new Promise(res => setImmediate(res)); return results.at(-1) }
   const pane = id => S.getState().workspaces.flatMap(w => w.panes).find(p => p.id === id)
+  const schedOf = (id, sid = 's1') => pane(id).schedules.find(s => s.id === sid)
   let ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w2', paneId: 'c1', enabled: false })
-  check(!ack.ok && ack.error === 'not_found' && pane('c1').schedule.enabled !== false, 'a pane outside workspaceId is not_found and nothing changes')
+  check(!ack.ok && ack.error === 'not_found' && schedOf('c1').enabled !== false, 'a pane outside workspaceId is not_found and nothing changes')
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w2', paneId: 'c1' })
   check(!ack.ok && ack.error === 'not_found' && submits.length === 0, 'scheduleRun checks membership too')
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'gone', paneId: 'c1' })
@@ -958,22 +1001,38 @@ async function testAutomationSurface() {
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c2' })
   check(!ack.ok && ack.error === 'no_schedule', 'a console without a schedule is no_schedule')
   ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: false })
-  check(ack.ok && pane('c1').schedule.enabled === false && pane('c1').schedule.dueAt === DUE, 'scheduleToggle pauses it')
+  check(ack.ok && schedOf('c1').enabled === false && schedOf('c1').dueAt === DUE && schedOf('c1', 's2').enabled === undefined, 'scheduleToggle pauses it (without scheduleId, an older phone: the first schedule only)')
   await wait(150)
   check(states.at(-1).schedules[0].enabled === false, 'the next snapshot shows it paused')
-  S.getState().setPaneSchedule('w2', 'd1', { ...pane('d1').schedule, dueAt: Date.now() - 1000 })
+  S.getState().setPaneSchedule('w2', 'd1', 's1', { ...schedOf('d1'), dueAt: Date.now() - 1000 })
   ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w2', paneId: 'd1', enabled: true })
-  check(ack.ok && pane('d1').schedule.enabled === true && pane('d1').schedule.dueAt > Date.now(), 'resuming re-arms a past time to its next occurrence')
+  check(ack.ok && schedOf('d1').enabled === true && schedOf('d1').dueAt > Date.now(), 'resuming re-arms a past time to its next occurrence')
   await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: true })
-  check(pane('c1').schedule.enabled === true && pane('c1').schedule.dueAt === DUE, 'resuming a future time keeps it')
+  check(schedOf('c1').enabled === true && schedOf('c1').dueAt === DUE, 'resuming a future time keeps it')
+  // App 2.7.0: scheduleId picks one of the console's schedules.
+  ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: false, scheduleId: 's2' })
+  check(ack.ok && schedOf('c1', 's2').enabled === false && schedOf('c1').enabled === true, 'scheduleToggle with scheduleId s2 pauses that schedule only')
+  await wait(150)
+  check(states.at(-1).schedules[1].enabled === false && states.at(-1).schedules[0].enabled === true, 'the next snapshot shows only that row paused')
+  ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: true, scheduleId: 's9' })
+  check(!ack.ok && ack.error === 'no_schedule' && schedOf('c1', 's2').enabled === false, 'an unknown scheduleId is no_schedule and nothing changes')
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1', scheduleId: 's9' })
+  check(!ack.ok && ack.error === 'no_schedule' && submits.length === 0, 'scheduleRun with an unknown scheduleId is no_schedule too')
+  ack = await ctl({ kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'c1', enabled: true, scheduleId: 's2' })
+  check(ack.ok && schedOf('c1', 's2').enabled === true && schedOf('c1', 's2').dueAt > Date.now(), 'and switching it back on re-arms it')
 
   // "Run now" (E8-FR-31 path): a working agent waits, a free one gets the prompt; dueAt never moves.
   r.registerPty('c1', 'pty-c1')
   S.setState({ paneStatus: { c1: { state: 'working', precise: true, stateSince: 0 } } })
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' })
-  check(ack.ok && submits.length === 0 && 'c1' in r.useScheduleRuntime.getState().manual, 'scheduleRun on a working agent acks ok and waits like the desktop "Run now"')
+  check(ack.ok && submits.length === 0 && 'c1#s1' in r.useScheduleRuntime.getState().manual, 'scheduleRun on a working agent acks ok and waits like the desktop "Run now" (without scheduleId: the first schedule)')
   await wait(150)
-  check(states.at(-1).schedules[0].runPending === true, 'the snapshot marks the waiting run (runPending)')
+  check(states.at(-1).schedules[0].runPending === true && !('runPending' in states.at(-1).schedules[1]), 'the snapshot marks the waiting run (runPending) on its own row only')
+  ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1', scheduleId: 's2' })
+  check(ack.ok && Object.keys(r.useScheduleRuntime.getState().manual).sort().join() === 'c1#s1,c1#s2', 'a run now of the second schedule waits on its own')
+  await wait(150)
+  check(states.at(-1).schedules[1].runPending === true, 'and marks its own row')
+  r.useScheduleRuntime.setState((s) => { const manual = { ...s.manual }; delete manual['c1#s2']; return { manual } })
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' })
   check(ack.ok && Object.keys(r.useScheduleRuntime.getState().manual).length === 1, 'a second tap does not queue a second run')
   r.useScheduleRuntime.setState({ manual: {}, inflight: {} })
@@ -982,13 +1041,13 @@ async function testAutomationSurface() {
   S.setState({ paneStatus: { c1: { state: 'idle', precise: true, stateSince: 0 } } })
   ack = await ctl({ kind: 'scheduleRun', workspaceId: 'w1', paneId: 'c1' })
   await wait(20)
-  const ran = pane('c1').schedule
+  const ran = schedOf('c1')
   check(ack.ok && submits.length === 1 && submits[0].ptyId === 'pty-c1' && submits[0].text === 'corre los tests' && submits[0].enter === true, 'a free agent gets the saved prompt with Enter')
   check(ran.dueAt === DUE && ran.history.length === 4 && ran.history.some(h => h.trigger === 'manual' && h.status === 'sent' && h.at > 5000), 'the run is logged as manual and the next run does not move')
   await wait(150)
   check(states.at(-1).schedules[0].lastRun.status === 'sent' && states.at(-1).schedules[0].lastRun.at > 5000 && states.at(-1).schedules[0].dueAt === DUE, 'the phone sees the new last run and the same next run')
   stop()
-  S.getState().setPaneSchedule('w2', 'd1', { ...pane('d1').schedule, prompt: '' })
+  S.getState().setPaneSchedule('w2', 'd1', 's1', { ...schedOf('d1'), prompt: '' })
   check(r.runScheduleCtl({ kind: 'scheduleRun', workspaceId: 'w2', paneId: 'd1' }).error === 'no_schedule', 'a schedule with an empty prompt answers no_schedule (CONTRATOS v3.1)')
   check(r.runScheduleCtl({ kind: 'scheduleToggle', workspaceId: 'w2', paneId: 'd1', enabled: false }).ok, 'an empty prompt can still be paused')
 }
@@ -1050,11 +1109,14 @@ async function testAutomationRelay() {
   check(state.schedules.length === 1 && state.schedules[0].runPending === true, 'and passes schedules through')
   ws.msg({ type: 'ctl', id: 'a1', action: { kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: false } })
   const relayed = w.commands.at(-1)
-  check(relayed && relayed.action.kind === 'scheduleToggle' && relayed.action.enabled === false && relayed.action.paneId === 'p1', 'scheduleToggle reaches the renderer executor')
+  check(relayed && relayed.action.kind === 'scheduleToggle' && relayed.action.enabled === false && relayed.action.paneId === 'p1' && !('scheduleId' in relayed.action), 'scheduleToggle reaches the renderer executor')
   w.manager.onControlResult({ id: relayed.id, ok: false, error: 'no_schedule' })
   await new Promise(resolve => setImmediate(resolve))
   const ack = ws.of('ctlAck').find(a => a.id === 'a1')
   check(ack && !ack.ok && ack.error === 'no_schedule', 'the executor error comes back in the ctlAck')
+  ws.msg({ type: 'ctl', id: 'a3', action: { kind: 'scheduleRun', workspaceId: 'w1', paneId: 'p1', scheduleId: 's2' } })
+  const relayedId = w.commands.at(-1)
+  check(relayedId && relayedId.action.kind === 'scheduleRun' && relayedId.action.scheduleId === 's2', 'app 2.7.0: a scheduleId reaches the renderer executor as is')
   const count = w.commands.length
   ws.msg({ type: 'ctl', id: 'a2', action: { kind: 'scheduleToggle', workspaceId: 'w1', paneId: 'p1', enabled: 1 } })
   check(w.commands.length === count && !ws.of('ctlAck').some(a => a.id === 'a2'), 'a malformed scheduleToggle never reaches the renderer')
@@ -1071,6 +1133,257 @@ async function testAutomationRelay() {
   ws.msg({ type: 'ctl', id: 'acc4', action: { kind: 'claudeAccountUse', role: 'secondary' } })
   await new Promise(resolve => setImmediate(resolve))
   check(w.commands.filter(c => c.action.kind === 'claudeAccountUse').length === 4, 'a minute later the device may switch again')
+}
+
+/** The real main-side schema (zod), bundled once. */
+let schemasApi = null
+function loadSchemas() {
+  if (schemasApi) return schemasApi
+  const mod = { exports: {} }
+  const src = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/shared/remote-protocol-schemas.ts')], bundle: true, platform: 'node', format: 'cjs', write: false }).outputFiles[0].text
+  vm.runInNewContext(src, { module: mod, exports: mod.exports, require, URL })
+  schemasApi = mod.exports
+  return schemasApi
+}
+
+/** A fake StatusManager behind RemoteManager.setStatusControl; `answers` drives each method's boolean. */
+function fakeStatusControl(plans = {}) {
+  const calls = []
+  const answers = { markRead: true, setMuted: true, ackSilence: true }
+  const ctl = {
+    markRead: (paneId) => { calls.push(['markRead', paneId]); return answers.markRead },
+    setMuted: (paneId, muted) => { calls.push(['setMuted', paneId, muted]); return answers.setMuted },
+    ackSilence: (paneId) => { calls.push(['ackSilence', paneId]); return answers.ackSilence },
+    planOf: (paneId, requestId) => {
+      calls.push(['planOf', paneId, requestId])
+      const plan = plans[paneId]
+      return plan && (requestId === undefined || requestId === plan.requestId) ? plan : null
+    },
+  }
+  return { ctl, calls, answers, plans }
+}
+
+/** app 2.7.0 (A3): markRead, mutePane and silenceAck, handled in main like answerMenu. */
+async function testStatusCtls() {
+  const { parseRemoteClientMsg } = loadSchemas()
+  const frame = action => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'ctl', id: 'x', action }))
+  check(!!frame({ kind: 'markRead', paneId: 'c1' }) && !!frame({ kind: 'mutePane', paneId: 'c1', muted: true }) && !!frame({ kind: 'mutePane', paneId: 'c1', muted: false }) && !!frame({ kind: 'silenceAck', paneId: 'c1' }), 'the ctl schema accepts markRead, mutePane and silenceAck')
+  check(!frame({ kind: 'markRead' }) && !frame({ kind: 'markRead', paneId: '' }) && !frame({ kind: 'silenceAck', paneId: 'x'.repeat(129) }) && !frame({ kind: 'silenceAck', paneId: 7 }), 'each needs a paneId of 1..128')
+  check(!frame({ kind: 'mutePane', paneId: 'c1' }) && !frame({ kind: 'mutePane', paneId: 'c1', muted: 'true' }) && !frame({ kind: 'mutePane', paneId: 'c1', muted: 1 }), 'mutePane needs a boolean muted')
+  check(!frame({ kind: 'markAllRead', paneId: 'c1' }) && !frame({ kind: 'MarkRead', paneId: 'c1' }) && !frame({ paneId: 'c1' }) && !frame('markRead') && !frame(null) && !frame([]), 'ctlActionSchema refuses unknown kinds and junk actions')
+  check(!('text' in frame({ kind: 'markRead', paneId: 'c1', text: '\r' }).action) && !('workspaceId' in frame({ kind: 'silenceAck', paneId: 'c1', workspaceId: 'w1' }).action), 'a stray field in a status ctl is stripped')
+
+  // Earlier suites paired up to the 10-device cap in the shared registry file.
+  fs.rmSync(path.join(dataDir, 'remote-devices.json'), { force: true })
+  const w = world()
+  w.manager.pushState(snapshot)
+  const { ws } = await pair(w)
+  const ack = async (id, action) => { ws.msg({ type: 'ctl', id, action }); await tick(); return ws.of('ctlAck').find(a => a.id === id) }
+  const relayed = w.commands.length
+  const none = await ack('s0', { kind: 'markRead', paneId: 'p1' })
+  check(none && !none.ok && none.error === 'unknown_action' && w.commands.length === relayed, 'without StatusManager wired a status ctl acks unknown_action in main')
+
+  const fake = fakeStatusControl()
+  w.manager.setStatusControl(fake.ctl)
+  const acks = [
+    await ack('s1', { kind: 'markRead', paneId: 'p1' }),
+    await ack('s2', { kind: 'mutePane', paneId: 'p2', muted: true }),
+    await ack('s3', { kind: 'mutePane', paneId: 'p2', muted: false }),
+    await ack('s4', { kind: 'silenceAck', paneId: 'p1' }),
+  ]
+  check(acks.every(a => a && a.ok === true && a.error === undefined), 'markRead, mutePane and silenceAck ack ok')
+  check(JSON.stringify(fake.calls) === JSON.stringify([['markRead', 'p1'], ['setMuted', 'p2', true], ['setMuted', 'p2', false], ['ackSilence', 'p1']]), 'each one calls its StatusManager method with the pane (and muted)')
+  check(w.commands.length === relayed && w.writes.length === 0, 'none of them reaches the renderer relay or writes to a pty')
+
+  fake.answers.markRead = fake.answers.setMuted = fake.answers.ackSilence = false
+  const refused = [
+    await ack('s5', { kind: 'markRead', paneId: 'p1' }),
+    await ack('s6', { kind: 'mutePane', paneId: 'p9', muted: true }),
+    await ack('s7', { kind: 'silenceAck', paneId: 'p1' }),
+  ]
+  check(refused.every(a => a && a.ok === false && a.error === 'not_found'), 'a mark that does not apply (method false) acks not_found')
+  w.manager.setStatusControl({ ...fake.ctl, markRead: () => { throw new Error('boom') } })
+  const thrown = await ack('s8', { kind: 'markRead', paneId: 'p1' })
+  check(thrown && thrown.error === 'not_found' && ws.closed === null, 'a throwing StatusManager acks not_found and keeps the socket')
+  const bad = ws.inbox.length
+  ws.msg({ type: 'ctl', id: 's9', action: { kind: 'mutePane', paneId: 'p1', muted: 'yes' } })
+  check(!ws.of('ctlAck').some(a => a.id === 's9') && ws.inbox.slice(bad).some(m => m.type === 'err' && m.code === 'bad_msg') && w.commands.length === relayed, 'a malformed mutePane is bad_msg, never reaches main or the renderer')
+
+  // The per-session bucket: a burst of 41, the 41st acks rate before StatusManager.
+  const w2 = world()
+  w2.manager.pushState(snapshot)
+  const burst = fakeStatusControl()
+  w2.manager.setStatusControl(burst.ctl)
+  const p2 = await pair(w2)
+  for (let i = 0; i < 41; i++) p2.ws.msg({ type: 'ctl', id: 'b' + i, action: { kind: i % 3 === 0 ? 'markRead' : i % 3 === 1 ? 'silenceAck' : 'mutePane', paneId: 'p1', muted: true } })
+  await tick()
+  const last = p2.ws.of('ctlAck').find(a => a.id === 'b40')
+  check(burst.calls.length === 40 && last && !last.ok && last.error === 'rate' && p2.ws.closed === null, 'status ctls share the bucket: past it they ack rate, without a strike, and never reach StatusManager')
+}
+
+/** app 2.7.0 (A3): planReq / planRes. */
+async function testPlanReq() {
+  const { parseRemoteClientMsg } = loadSchemas()
+  const req = m => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'planReq', ...m }))
+  check(!!req({ id: 'abc123', paneId: 'p1' }) && !!req({ id: 'a_b-9', paneId: 'p1', requestId: 'toolu_01' }), 'the schema accepts planReq with and without requestId')
+  check(!req({ id: 'a b', paneId: 'p1' }) && !req({ id: 'x'.repeat(65), paneId: 'p1' }) && !req({ paneId: 'p1' }) && !req({ id: 'a1' }) && !req({ id: 'a1', paneId: '' }), 'planReq needs a gitReqId id and a paneId')
+  check(!req({ id: 'a1', paneId: 'p1', requestId: '' }) && !req({ id: 'a1', paneId: 'p1', requestId: 'r'.repeat(201) }) && !req({ id: 'a1', paneId: 'p1', requestId: 5 }), 'requestId is a string of 1..200')
+  check(!('text' in req({ id: 'a1', paneId: 'p1', text: 'x' })), 'a stray field in planReq is stripped')
+
+  fs.rmSync(path.join(dataDir, 'remote-devices.json'), { force: true })
+  const w = world()
+  w.manager.pushState(snapshot)
+  const { ws } = await pair(w)
+  const ask = async (id, rest) => { ws.msg({ type: 'planReq', id, ...rest }); await tick(); return ws.of('planRes').find(r => r.id === id) }
+  const r0 = await ask('q0', { paneId: 'p1' })
+  check(r0 && r0.ok === false && r0.error === 'not_found', 'without StatusManager wired planReq answers not_found')
+
+  const text = '# Plan\n\n1. Leer `src/a.ts`\n2. Editar "b"\n'
+  const fake = fakeStatusControl({ p1: { requestId: 'toolu_01', text, at: 1700000000500, truncated: false, secret: 'nope' } })
+  w.manager.setStatusControl(fake.ctl)
+  const relayed = w.commands.length
+  const r1 = await ask('q1', { paneId: 'p1' })
+  check(r1 && r1.ok === true && r1.error === undefined && r1.plan.text === text && r1.plan.requestId === 'toolu_01' && r1.plan.at === 1700000000500 && r1.plan.truncated === false, 'planReq answers planRes with the pane plan')
+  check(Object.keys(r1.plan).sort().join() === 'at,requestId,text,truncated', 'the plan travels field by field')
+  check(fake.calls.at(-1)[0] === 'planOf' && fake.calls.at(-1)[1] === 'p1' && fake.calls.at(-1)[2] === undefined, 'without requestId planOf is asked for the newest plan')
+  const r2 = await ask('q2', { paneId: 'p1', requestId: 'toolu_01' })
+  check(r2 && r2.ok && fake.calls.at(-1)[2] === 'toolu_01', 'requestId reaches planOf')
+  const r3 = await ask('q3', { paneId: 'p9' })
+  check(r3 && r3.ok === false && r3.error === 'not_found' && !('plan' in r3), 'an unknown pane answers not_found')
+  const r4 = await ask('q4', { paneId: 'p1', requestId: 'toolu_99' })
+  check(r4 && r4.ok === false && r4.error === 'not_found', 'an unknown request id answers not_found')
+  check(w.commands.length === relayed, 'planReq never reaches the renderer')
+
+  // Oversized: PLAN_TEXT_MAX of text whose JSON is far bigger is cut under 40KB.
+  const api = w.api
+  check(api.PLAN_RES_MAX_BYTES === 40 * 1024, 'the planRes budget is 40KB')
+  const high = s => { const c = s.length ? s.charCodeAt(s.length - 1) : 0; return c >= 0xd800 && c <= 0xdbff }
+  const cases = [['\n', 32768], ['\u0001', 32768], ['"', 32768], ['ñ', 32768], ['\u{1F600}', 16384], ['ab\u{1F600}', 8192]]
+  for (const [unit, n] of cases) {
+    const big = unit.repeat(n)
+    const f = api.fitPlanRes('id1', { ok: true, plan: { requestId: 'toolu_01', text: big, at: 1, truncated: false } })
+    const bytes = Buffer.byteLength(JSON.stringify(f))
+    const longer = { ...f, plan: { ...f.plan, text: big.slice(0, f.plan.text.length + (big.codePointAt(f.plan.text.length) > 0xffff ? 2 : 1)) } }
+    check(bytes <= 40 * 1024 && f.ok === true && f.plan.truncated === true && f.plan.text.length > 0 && big.startsWith(f.plan.text) && !high(f.plan.text), `a plan of ${JSON.stringify(unit)} x ${n} is cut under 40KB on a whole code point, truncated true`)
+    check(Buffer.byteLength(JSON.stringify(longer)) > 40 * 1024, `and the cut keeps the longest prefix that fits (${JSON.stringify(unit)})`)
+  }
+  const small = api.fitPlanRes('id2', { ok: true, plan: { requestId: 'r', text: 'ok', at: 2, truncated: false } })
+  check(small.plan.text === 'ok' && small.plan.truncated === false && small.v === 1 && small.type === 'planRes' && small.id === 'id2', 'a plan that fits is sent whole, truncated false')
+  check(api.fitPlanRes('id3', { ok: true, plan: { requestId: 'r', text: 'ok', at: 2, truncated: true } }).plan.truncated === true, 'a plan StatusManager already cut keeps truncated true')
+  check(!('plan' in api.fitPlanRes('id4', { ok: false, error: 'rate' })), 'an error frame carries no plan')
+
+  fake.plans.p2 = { requestId: 'toolu_02', text: '\u0001\n'.repeat(16384), at: 3, truncated: false }
+  ws.msg({ type: 'planReq', id: 'q5', paneId: 'p2' })
+  await tick()
+  const r5 = ws.of('planRes').find(r => r.id === 'q5')
+  check(r5 && r5.ok && r5.plan.truncated === true && Buffer.byteLength(JSON.stringify(r5)) <= 40 * 1024, 'through the socket an oversized plan arrives cut under 40KB, truncated true')
+
+  // Per-session window: PLAN_REQ_MAX per PLAN_REQ_WINDOW_MS, then rate (no strike).
+  check(api.PLAN_REQ_MAX === 10 && api.PLAN_REQ_WINDOW_MS === 5000 && api.PLAN_REQ_IN_FLIGHT === 2, 'planReq limits: 10 per 5 s, 2 in flight')
+  w.advance(5001)
+  const mark = ws.of('planRes').length
+  // One at a time (each answered before the next), so only the window counts.
+  for (let i = 0; i < 11; i++) {
+    ws.msg({ type: 'planReq', id: 'w' + i, paneId: 'p1' })
+    await tick()
+  }
+  const windowed = ws.of('planRes').slice(mark)
+  const eleventh = windowed.find(r => r.id === 'w10')
+  check(windowed.length === 11 && windowed.filter(r => r.ok).length === 10 && eleventh && eleventh.ok === false && eleventh.error === 'rate' && ws.closed === null, 'the 11th planReq in 5 s answers rate and keeps the socket')
+  w.advance(5001)
+  const again = await ask('w11', { paneId: 'p1' })
+  check(again && again.ok, 'once the window passes planReq answers again')
+
+  // In flight: a third request while two wait answers rate at once.
+  w.advance(5001)
+  const waiting = []
+  w.manager.planRequest = () => new Promise(resolve => waiting.push(resolve))
+  ws.msg({ type: 'planReq', id: 'f1', paneId: 'p1' })
+  ws.msg({ type: 'planReq', id: 'f2', paneId: 'p1' })
+  ws.msg({ type: 'planReq', id: 'f3', paneId: 'p1' })
+  await tick()
+  const f3 = ws.of('planRes').find(r => r.id === 'f3')
+  check(waiting.length === 2 && f3 && f3.error === 'rate' && !ws.of('planRes').some(r => r.id === 'f1' || r.id === 'f2'), 'with 2 planReq in flight the third answers rate')
+  for (const resolve of waiting) resolve({ ok: false, error: 'not_found' })
+  await tick()
+  check(['f1', 'f2'].every(id => ws.of('planRes').some(r => r.id === id && r.error === 'not_found')), 'the two waiting ones answer when main does')
+}
+
+/**
+ * app 2.7.0 (E10 B8): teamReq and the three Teams ctls are main's (TeamService through RemoteManager.setTeams), never
+ * relayed to the renderer; without a TeamService wired teamReq answers not_found and a ctl acks unknown_action. The
+ * whole Teams world (fits, rates, origin checks, push) is test-teams-remote.cjs.
+ */
+async function testTeamSurface() {
+  const { parseRemoteClientMsg } = loadSchemas()
+  const TEAM = 'tm-0123456789ab'
+  const req = (r, id = 'tq1') => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'teamReq', id, req: r }))
+  const ctl = action => parseRemoteClientMsg(JSON.stringify({ v: 1, type: 'ctl', id: 'c1', action }))
+  check(!!req({ op: 'list' }) && !!req({ op: 'board', teamId: TEAM, column: 'todo' }) && !!req({ op: 'leadSay', teamId: TEAM, text: 'hola' }), 'the schema accepts a teamReq of a phone op')
+  check(!req({ op: 'trust', teamId: TEAM, sha256: 'a'.repeat(64) }) && !req({ op: 'integrate', teamId: TEAM, taskId: 't-1', expectTip: 'a'.repeat(40) }) && !req({ op: 'decide', teamId: TEAM, approvalId: 'a-1', decision: 'approve' }), 'a desktop op (or a decision, which is a ctl) never parses as a teamReq')
+  check(!req({ op: 'list' }, 'a b') && !req({ op: 'board', teamId: 'tm-x' }) && !req(null) && !req({ op: 'list', teamId: TEAM, extra: 1 }).req.extra, 'teamReq needs a gitReqId id and the op\'s ids; a stray field is stripped')
+  check(!!ctl({ kind: 'teamDecide', teamId: TEAM, approvalId: 'a-1', decision: 'reject', note: 'otra vez' }) && !!ctl({ kind: 'teamAnswer', teamId: TEAM, cardId: 'k-2', answer: { choices: [1] } }) && !!ctl({ kind: 'teamDispatch', teamId: TEAM, queueId: 'all', go: true }), 'the ctl schema accepts teamDecide, teamAnswer and teamDispatch')
+  check(!ctl({ kind: 'teamDecide', teamId: TEAM, approvalId: 'k-1', decision: 'approve' }) && !ctl({ kind: 'teamAnswer', teamId: TEAM, cardId: 'k-1', answer: { choices: [9] } }) && !ctl({ kind: 'teamDispatch', teamId: TEAM, queueId: 'q-x', go: true }), 'bad ids and out of range answers never parse')
+
+  fs.rmSync(path.join(dataDir, 'remote-devices.json'), { force: true })
+  const w = world()
+  w.manager.pushState(snapshot)
+  const { ws } = await pair(w)
+  const relayed = w.commands.length
+  ws.msg({ type: 'teamReq', id: 'tq1', req: { op: 'list' } })
+  await tick()
+  const res = ws.of('teamRes').find(r => r.id === 'tq1')
+  check(res && res.res && res.res.ok === false && res.res.error === 'not_found', 'without a TeamService wired teamReq answers not_found')
+  const acks = []
+  for (const [id, action] of [['d1', { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-1', decision: 'approve' }], ['a1', { kind: 'teamAnswer', teamId: TEAM, cardId: 'k-1', answer: { confirm: true } }], ['p1', { kind: 'teamDispatch', teamId: TEAM, queueId: 'q-1', go: false }]]) {
+    ws.msg({ type: 'ctl', id, action })
+    await tick()
+    acks.push(ws.of('ctlAck').find(a => a.id === id))
+  }
+  check(acks.every(a => a && a.ok === false && a.error === 'unknown_action'), 'each Teams ctl acks unknown_action in main without a TeamService')
+  check(w.commands.length === relayed, 'teamReq and the Teams ctls never reach the renderer relay')
+  // A wired view answers them, still in main.
+  const seen = []
+  w.manager.setTeams({ request: async (r) => { seen.push(r.op); return { ok: true, teams: [] } }, ctl: async (a) => { seen.push(a.kind); return { id: '', ok: true } } })
+  ws.msg({ type: 'teamReq', id: 'tq2', req: { op: 'list' } })
+  ws.msg({ type: 'ctl', id: 'd2', action: { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-1', decision: 'approve' } })
+  await tick()
+  check(ws.of('teamRes').find(r => r.id === 'tq2')?.res.ok === true && ws.of('ctlAck').find(a => a.id === 'd2')?.ok === true && seen.join() === 'list,teamDecide' && w.commands.length === relayed, 'with setTeams the view answers both in main, nothing relayed')
+}
+
+/** app 2.7.0 (A3): status:markRead, status:mute, status:silenceAck and status:plan validate every renderer value in main. */
+function testStatusIpc() {
+  const handlers = {}
+  const electron = { ipcMain: { on() {}, handle: (ch, fn) => { handlers[ch] = fn } }, app: { getPath: () => os.tmpdir(), isPackaged: false, getAppPath: () => root } }
+  const src = require('esbuild').buildSync({ entryPoints: [path.join(root, 'src/main/ipc/registerStatusIpc.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['electron', 'ws'], alias: { '@shared': path.join(root, 'src/shared') } }).outputFiles[0].text
+  const mod = { exports: {} }
+  vm.runInNewContext(src, { module: mod, exports: mod.exports, require: id => id === 'electron' ? electron : require(id), console, process, Buffer, URL, fetch, Response, AbortController, setTimeout, clearTimeout })
+  const plan = { requestId: 'toolu_01', text: '# Plan', at: 1, truncated: false }
+  const calls = []
+  const answers = { markRead: true, setMuted: true, ackSilence: true }
+  const manager = {
+    onHookEvent() {},
+    markRead: (p) => { calls.push(['markRead', p]); return answers.markRead },
+    setMuted: (p, m) => { calls.push(['setMuted', p, m]); return answers.setMuted },
+    ackSilence: (p) => { calls.push(['ackSilence', p]); return answers.ackSilence },
+    planOf: (p, r) => { calls.push(['planOf', p, r]); return plan },
+  }
+  mod.exports.registerStatusIpc(manager, { onEvent() {} }, {}, {}, {})
+  const [markRead, mute, silenceAck, planOf] = ['status:markRead', 'status:mute', 'status:silenceAck', 'status:plan'].map(ch => handlers[ch])
+  check([markRead, mute, silenceAck, planOf].every(fn => typeof fn === 'function'), 'registerStatusIpc handles status:markRead, status:mute, status:silenceAck and status:plan')
+
+  const max = 'p'.repeat(64)
+  check(markRead({}, 'p1') === true && silenceAck({}, max) === true && mute({}, { paneId: 'p1', muted: true }) === true && mute({}, { paneId: 'p1', muted: false }) === true, 'a valid paneId (<= 64) reaches StatusManager')
+  check(planOf({}, { paneId: 'p1' }) === plan && planOf({}, { paneId: 'p1', requestId: 'toolu_01' }) === plan, 'status:plan answers the plan, with and without requestId')
+  check(JSON.stringify(calls) === JSON.stringify([['markRead', 'p1'], ['ackSilence', max], ['setMuted', 'p1', true], ['setMuted', 'p1', false], ['planOf', 'p1', null], ['planOf', 'p1', 'toolu_01']]), 'each handler calls its StatusManager method with the validated values')
+  calls.length = 0
+  const junk = ['', 'p'.repeat(65), 7, null, undefined, ['p1'], { paneId: 'p1' }]
+  check(junk.every(v => markRead({}, v) === false && silenceAck({}, v) === false), 'status:markRead and status:silenceAck answer false to a bad paneId')
+  check([...junk.map(paneId => ({ paneId, muted: true })), { paneId: 'p1' }, { paneId: 'p1', muted: 'true' }, { paneId: 'p1', muted: 1 }, 'p1', null, [{ paneId: 'p1', muted: true }]].every(v => mute({}, v) === false), 'status:mute answers false to a bad paneId or a muted that is not boolean')
+  check([...junk.map(paneId => ({ paneId })), { paneId: 'p1', requestId: '' }, { paneId: 'p1', requestId: 'r'.repeat(201) }, { paneId: 'p1', requestId: 5 }, { paneId: 'p1', requestId: null }, 'p1', null].every(v => planOf({}, v) === null), 'status:plan answers null to a bad paneId or requestId')
+  check(calls.length === 0, 'no bad payload reaches StatusManager')
+  answers.markRead = answers.setMuted = answers.ackSilence = false
+  check(markRead({}, 'p1') === false && mute({}, { paneId: 'p1', muted: true }) === false && silenceAck({}, 'p1') === false, 'a false from StatusManager comes back as false')
 }
 
 async function main() {
@@ -1092,8 +1405,12 @@ async function main() {
   await testSafePaste()
   await testAutomationSurface()
   await testAutomationRelay()
+  await testStatusCtls()
+  await testPlanReq()
+  await testTeamSurface()
+  testStatusIpc()
   fs.rmSync(dataDir, { recursive: true, force: true })
-  console.log(`PASS: ${checks} remote overlay, paneStatus, lastHost, visibility, agentResume, httpToken, rate limit, pending, safePaste and phone automation checks`)
+  console.log(`PASS: ${checks} remote overlay, paneStatus, lastHost, visibility, agentResume, httpToken, rate limit, pending, safePaste, phone automation, status ctl, planReq, Teams surface and status IPC checks`)
 }
 
 main().catch(error => { console.error(error); fs.rmSync(dataDir, { recursive: true, force: true }); process.exit(1) })

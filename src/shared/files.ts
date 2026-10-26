@@ -5,6 +5,11 @@
  * renderer only names a workspace and a relative path with `/` separators,
  * and main keeps the realpath of every target inside the folder, so a
  * junction or a symlink cannot reach out of it. Pure: no Node, no DOM.
+ *
+ * A pane's own tree (app 2.7.0, A9): every request may also name a pane of
+ * that workspace (`paneId`). The root is then the pane's worktree when main
+ * manages that folder (its worktrees.json), else the workspace folder, as
+ * without it; `files:resolveRefs` answers against the same root.
  */
 
 /** Entries listed per folder at most (the rest is `truncated`). */
@@ -43,8 +48,17 @@ export interface FileEntry {
 
 export type FilesRootRes = { ok: true; root: string; name: string } | { ok: false; error: FilesError }
 
+/** One target of a workspace's tree, or of one of its panes' (read, trash, reveal, open). */
+export interface FilesPathReq {
+  workspaceId: string
+  /** A pane of that workspace: its managed worktree is the root (app 2.7.0, A9). */
+  paneId?: string
+  rel: string
+}
+
 export interface FilesListReq {
   workspaceId: string
+  paneId?: string
   /** '' = the workspace folder itself. */
   rel: string
 }
@@ -69,6 +83,7 @@ export type FileReadRes =
 
 export interface FileWriteReq {
   workspaceId: string
+  paneId?: string
   rel: string
   text: string
   eol: 'lf' | 'crlf'
@@ -81,12 +96,14 @@ export type FileWriteRes = { ok: true; rev: string; size: number } | { ok: false
 
 export interface FileCreateReq {
   workspaceId: string
+  paneId?: string
   rel: string
   kind: 'file' | 'dir'
 }
 
 export interface FileRenameReq {
   workspaceId: string
+  paneId?: string
   from: string
   to: string
 }
@@ -96,9 +113,49 @@ export type FilesOpRes = { ok: true } | { ok: false; error: FilesError }
 /** Main -> renderer: folders of the watched workspace whose content changed ('' = its root). */
 export interface FilesChangedEvt {
   workspaceId: string
+  /** The watch named a pane (its tree, app 2.7.0, A9): the drawer keyed `workspaceId#paneId`. */
+  paneId?: string
   dirs: string[]
   /** Too many changes to name: reload everything shown. */
   all?: boolean
+}
+
+/** `files:resolveRefs`: refs per request at most (more is a bad request, answered []). */
+export const FILE_REFS_MAX = 32
+
+/**
+ * A file reference a terminal line shows: the text as the link provider cut
+ * it (`src/a.ts:12:3`, at most FILE_REL_MAX characters), or already split.
+ */
+export type FileRefInput = string | { path: string; line?: number; col?: number }
+
+/**
+ * `files:resolveRefs` (app 2.7.0, A9): Ctrl+click on `file:line` in a pane.
+ * Main finds the pane's workspace itself; a relative path is read against the
+ * folder the pane's shell started in, an absolute one as is.
+ */
+export interface FilesResolveRefsReq {
+  paneId: string
+  refs: FileRefInput[]
+}
+
+/** One answer per ref, in order. */
+export interface FileRefResolved {
+  /** The ref as sent (a split one as `path[:line[:col]]`). */
+  ref: string
+  /**
+   * A regular file inside the pane's root (its managed worktree, else the
+   * workspace folder), outside `.git`, that files:* with the same paneId
+   * opens by `rel`. False for anything else, a path out of the root included.
+   */
+  exists: boolean
+  /** Its realpath (only when it exists). */
+  path?: string
+  /** Relative to the root with '/' (only when it exists): `files:read { workspaceId, paneId, rel }`. */
+  rel?: string
+  /** 1-based, kept as parsed even when the file does not exist. */
+  line?: number
+  col?: number
 }
 
 /** The rev of a file version (mtime and size). */

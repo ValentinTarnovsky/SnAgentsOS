@@ -1,9 +1,10 @@
 import { existsSync } from 'fs'
 import { join } from 'path'
-import type { WebContents } from 'electron'
+import { app, type WebContents } from 'electron'
 import { CLI_ENV } from '@shared/brand'
 import type { CliUiState, SkillOp, SkillStatus, SkillTarget, SnaosRuntimeFile } from '@shared/ctl-protocol'
 import type { ConfigFile } from '@shared/types'
+import { teamPaneId, type RoleKind } from '@shared/teams'
 import type { PtyExitInfo, PtySink } from '../pty/PtyManager'
 import type { CustomNotice } from '../status/events'
 import { CtlServer, ctlEndpoint } from './CtlServer'
@@ -15,10 +16,24 @@ import { writeShim } from './shim'
 import { installSkill, refreshSkillOnStartup, removeSkill, repairSkill, skillStatus } from './skillInstaller'
 import { addToUserPath, isInUserPath, realRegistry, removeFromUserPath, type RegistryOps } from './userPath'
 
+/** package.json's version, defined by electron.vite.config (undefined in a bundle built without it, like the tests'). */
+declare const __SNAOS_APP_VERSION__: string | undefined
+const BUILD_VERSION = typeof __SNAOS_APP_VERSION__ === 'string' ? __SNAOS_APP_VERSION__ : undefined
+
 export interface CliServiceDeps {
   /** dataDir() (respects the portable). */
   dataDir: () => string
   appVersion: string
+  /**
+   * app.isPackaged (the default; false when electron's `app` is not there). An unpackaged run (`npm run dev`,
+   * `electron out/main/index.js`) never refreshes the user's skill stubs at startup (2.7.0 runtime walkthrough).
+   */
+  packaged?: boolean
+  /**
+   * The version the skill stub's marker carries: package.json's (BUILD_VERSION, else appVersion). Never
+   * app.getVersion() of an unpackaged run, which is Electron's (`v33.4.11`) when out/main is launched directly.
+   */
+  skillVersion?: string
   /** process.execPath: the exe the shim runs with ELECTRON_RUN_AS_NODE. */
   execPath: string
   /** out/main/cli.js. */
@@ -59,8 +74,16 @@ export class CliService {
   private transition: Promise<void> = Promise.resolve()
   /** Built later in bootstrap (notes store, transcript locator); a missing one answers `disabled`. */
   private readonly services: CtlServices = {}
+  /** App 2.7.0 (Teams, decision 71): told after every switch settles (server up, down or failed to start). */
+  private readonly stateListeners = new Set<() => void>()
+  /** The skill stub's version (CliServiceDeps.skillVersion). */
+  private readonly skillVersion: string
+  /** Only a packaged app refreshes the skill stubs at startup (CliServiceDeps.packaged). */
+  private readonly packaged: boolean
 
   constructor(private readonly deps: CliServiceDeps) {
+    this.skillVersion = deps.skillVersion ?? BUILD_VERSION ?? deps.appVersion
+    this.packaged = deps.packaged ?? app?.isPackaged === true
     this.master = newToken()
     this.tokens = new CtlTokens(this.master)
     this.bus = new IpcRendererBus(deps.getSender)
@@ -73,6 +96,8 @@ export class CliService {
       appVersion: deps.appVersion,
       platform: deps.platform ?? process.platform,
       services: () => this.services,
+      // B5 integration, fifth round: a team text that holds a live token (the master one too) is refused.
+      secrets: this.tokens,
       notify: (n) => {
         deps.status.notifyCustom(n.paneId, n.title, n.body)
         if (!n.local) deps.routeCustom({ kind: 'custom', paneId: n.paneId, title: n.title, body: n.body })
@@ -101,8 +126,10 @@ export class CliService {
   /**
    * Startup work that does not depend on the switch: rewrite the shim (the
    * portable's execPath changes per run), refresh an installed skill of
-   * another version (Claude and Codex), and re-add the PATH entry when the setting is on (an
-   * update's uninstaller may have removed it).
+   * another version (Claude and Codex; a packaged app only: a dev or out/main
+   * run never writes the user's ~/.claude or ~/.codex on its own), and re-add
+   * the PATH entry when the setting is on (an update's uninstaller may have
+   * removed it).
    */
   init(): void {
     try {
@@ -111,10 +138,12 @@ export class CliService {
       this.error = `shim: ${error instanceof Error ? error.message : String(error)}`
       console.warn('[cli] could not write the snaos shim:', this.error)
     }
-    try {
-      refreshSkillOnStartup(this.deps.appVersion, this.deps.skillEnv ?? process.env)
-    } catch {
-      /* the skill row reports it */
+    if (this.packaged) {
+      try {
+        refreshSkillOnStartup(this.skillVersion, this.deps.skillEnv ?? process.env)
+      } catch {
+        /* the skill row reports it */
+      }
     }
     if (this.userPathAvailable() && this.deps.config()?.settings?.automation?.cliUserPath === true) {
       void addToUserPath(this.binDir(), this.deps.registry ?? realRegistry).catch(() => undefined)
@@ -124,8 +153,36 @@ export class CliService {
   /** settings.cliEnabled (cli:setEnabled and the startup value). Serialized: toggles never overlap. */
   setEnabled(on: boolean): Promise<void> {
     this.enabled = on
-    this.transition = this.transition.then(() => (this.enabled ? this.start() : this.stop())).catch(() => undefined)
+    this.transition = this.transition
+      .then(() => (this.enabled ? this.start() : this.stop()))
+      .catch(() => undefined)
+      .then(() => this.notifyState())
     return this.transition
+  }
+
+  /** App 2.7.0 (Teams, decision 71): `fn` runs after every setEnabled settles. Returns the unsubscribe. */
+  onState(fn: () => void): () => void {
+    this.stateListeners.add(fn)
+    return () => this.stateListeners.delete(fn)
+  }
+
+  private notifyState(): void {
+    for (const fn of [...this.stateListeners]) {
+      try {
+        fn()
+      } catch (error) {
+        console.warn('[cli] state listener failed:', error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  /**
+   * App 2.7.0 (Teams, decision 71): team runs can call `snaos team` only now:
+   * the switch on, the server really listening (it can fail to start,
+   * EADDRINUSE, with the switch on) and the shim on disk.
+   */
+  ready(): boolean {
+    return this.enabled && this.running && this.shimExists()
   }
 
   private async start(): Promise<void> {
@@ -187,6 +244,30 @@ export class CliService {
     return env
   }
 
+  /**
+   * App 2.7.0 (Teams, design 5.1): env of a team run, on top of cleanEnv().
+   * A team token (key `team:<runId>`, no workspace), the endpoint, the shim
+   * and SNAOS_TEAM_RUN; never SNAOS_CONSOLE_ID, SNAOS_PTY_ID or
+   * SNAOS_WORKSPACE_ID (its hooks stay silent). Nothing unless ready(),
+   * stricter than envFor. The PATH prepend of the shim folder is the
+   * caller's. Never logged.
+   */
+  envForTeam(runId: string, teamId: string, agentId: string, roleKind: RoleKind): Record<string, string> {
+    if (!this.ready()) return {}
+    return {
+      [CLI_ENV.ctlEndpoint]: this.transport.endpoint,
+      [CLI_ENV.ctlToken]: this.tokens.issueTeam(runId, { runId, teamId, agentId, roleKind }),
+      [CLI_ENV.cli]: this.shimFile,
+      [CLI_ENV.teamRun]: runId,
+    }
+  }
+
+  /** Every team run end (and shutdownSync): its token and its rate windows go. */
+  revokeTeam(runId: string): void {
+    this.tokens.revokeTeam(runId)
+    this.handlers.forgetCaller(teamPaneId(runId))
+  }
+
   private workspaceOf(paneId: string): string {
     for (const ws of this.deps.config()?.workspaces ?? []) if (ws.panes.some((p) => p.id === paneId)) return ws.id
     return ''
@@ -229,9 +310,9 @@ export class CliService {
     }
   }
 
-  /** Skill op on one agent's skills folder (Claude Code by default, or Codex). */
+  /** Skill op on one agent's skills folder (Claude Code by default, or Codex): the user's own action in Settings, also unpackaged. */
   skill(op: SkillOp, target: SkillTarget = 'claude'): SkillStatus {
-    const v = this.deps.appVersion
+    const v = this.skillVersion
     const env = this.deps.skillEnv ?? process.env
     switch (op) {
       case 'install':

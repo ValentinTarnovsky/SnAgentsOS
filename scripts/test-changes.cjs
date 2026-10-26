@@ -408,8 +408,10 @@ const { parseUnifiedDiff, untrackedDiff, resolveRepoPath, canOpenWithDefaultApp,
   const km = load('src/renderer/lib/keymap.ts')
   const map = km.resolveKeymap({})
   check(map.toggleChanges === 'Ctrl+Shift+D' && map.globalPrompt === 'Ctrl+Shift+G', 'toggleChanges is Ctrl+Shift+D; Ctrl+Shift+G stays globalPrompt')
-  const accels = km.KEY_ACTIONS.map((a) => a.defaultAccel)
+  // An action with no default ('' : toggleConsoleChat) cannot collide; every real chord stays unique.
+  const accels = km.KEY_ACTIONS.map((a) => a.defaultAccel).filter(Boolean)
   check(new Set(accels).size === accels.length, 'no two default actions share a key')
+  check(km.KEY_ACTIONS.some((a) => a.id === 'toggleConsoleChat' && a.defaultAccel === '') && map.toggleConsoleChat === '' && km.resolveKeymap({ toggleConsoleChat: 'Ctrl+Shift+Y' }).toggleConsoleChat === 'Ctrl+Shift+Y', 'toggleConsoleChat has no default and is remappable')
   check(km.resolveKeymap({ toggleChanges: 'Ctrl+Alt+D' }).toggleChanges === 'Ctrl+Alt+D', 'toggleChanges is remappable')
   const { en } = load('src/renderer/i18n/en.ts')
   const { es } = load('src/renderer/i18n/es.ts')

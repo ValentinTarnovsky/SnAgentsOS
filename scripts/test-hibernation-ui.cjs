@@ -134,10 +134,10 @@ app.whenReady().then(async()=>{
  // Wake 4: a schedule 30 s away; its prompt waits for the resumed agent.
  await js("smoke.setAgents({launchIntent:{}})");
  await js("smoke.hibernate({paneId:'b2',at:smoke.now,idleMinutes:30})");
- await js("smoke.set({workspaces:smoke.app().workspaces.map(w=>w.id!=='w2'?w:{...w,panes:w.panes.map(p=>p.id!=='b2'?p:{...p,schedule:{time:'10:00',prompt:'hola',dueAt:smoke.now+10*60000,enabled:true}})})})");
+ await js("smoke.set({workspaces:smoke.app().workspaces.map(w=>w.id!=='w2'?w:{...w,panes:w.panes.map(p=>p.id!=='b2'?p:{...p,schedules:[{id:'s1',time:'10:00',prompt:'hola',dueAt:smoke.now+10*60000,enabled:true}]})})})");
  await js("smoke.schedulerTick(smoke.now)");
  ok(await js("!!smoke.agents().sleeping.b2"),'a schedule 10 min away leaves it asleep');
- await js("smoke.set({workspaces:smoke.app().workspaces.map(w=>w.id!=='w2'?w:{...w,panes:w.panes.map(p=>p.id!=='b2'?p:{...p,schedule:{...p.schedule,dueAt:smoke.now+20000}})})})");
+ await js("smoke.set({workspaces:smoke.app().workspaces.map(w=>w.id!=='w2'?w:{...w,panes:w.panes.map(p=>p.id!=='b2'?p:{...p,schedules:[{...p.schedules[0],dueAt:smoke.now+20000}]})})})");
  await js("smoke.schedulerTick(smoke.now)");await frames();
  s=await js("({sleep:!!smoke.agents().sleeping.b2,intent:smoke.agents().launchIntent.b2,waking:smoke.isWaking('b2'),submits:log.submits.length})");
  ok(!s.sleep&&s.intent==='resume'&&s.waking&&s.submits===0,'a schedule 20 s away wakes it, resuming, and sends nothing yet',s);
@@ -151,7 +151,7 @@ app.whenReady().then(async()=>{
  await js("smoke.schedulerTick(smoke.now+27000)");await wait(50);
  s=await js('log.submits.slice()');
  ok(s.length===1&&s[0].paneId==='b2'&&s[0].text==='hola'&&s[0].enter===true,'then the scheduled prompt goes, with Enter',s);
- await js("smoke.set({workspaces:smoke.app().workspaces.map(w=>w.id!=='w2'?w:{...w,panes:w.panes.map(p=>p.id!=='b2'?p:{...p,schedule:undefined})})})");
+ await js("smoke.set({workspaces:smoke.app().workspaces.map(w=>w.id!=='w2'?w:{...w,panes:w.panes.map(p=>p.id!=='b2'?p:{...p,schedules:undefined})})})");
 
  // Cache timer chip (E5-FR-28): header and sidebar row.
  await js("smoke.set({paneStatus:{...smoke.app().paneStatus,b2:{state:'done',precise:true,provider:'claude',stateSince:Date.now()-60000,cacheSince:Date.now()-60000,lastMessage:'Listo el fix'}}})");await frames();

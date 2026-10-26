@@ -79,7 +79,7 @@ function savePinned(id: string, pinned: boolean, scope?: string): void {
  */
 const TAKES_FOCUS = '.xterm, input, textarea, select, button, a[href], [contenteditable], [tabindex]'
 
-function useCloseOnOutsidePointer(rootRef: RefObject<HTMLDivElement | null>, enabled: boolean, onClose: (opts: { refocus: boolean }) => void): void {
+function useCloseOnOutsidePointer(rootRef: RefObject<HTMLDivElement | null>, enabled: boolean, onClose: (opts: { refocus: boolean }) => void, keepOpenOn?: string): void {
   const latest = useRef(onClose)
   latest.current = onClose
   useEffect(() => {
@@ -89,6 +89,8 @@ function useCloseOnOutsidePointer(rootRef: RefObject<HTMLDivElement | null>, ena
       if (!e.isTrusted || e.button !== 0) return
       const target = e.target as Element | null
       if (!target || target.closest?.('[data-drawer]')) return
+      // A press on something that shows its own content here (another task card) switches the drawer instead.
+      if (keepOpenOn && target.closest?.(keepOpenOn)) return
       const root = rootRef.current
       const active = document.activeElement
       if (root && active instanceof HTMLElement && root.contains(active)) active.blur()
@@ -96,7 +98,7 @@ function useCloseOnOutsidePointer(rootRef: RefObject<HTMLDivElement | null>, ena
     }
     scope.addEventListener('pointerdown', onDown, true)
     return () => scope.removeEventListener('pointerdown', onDown, true)
-  }, [rootRef, enabled])
+  }, [rootRef, enabled, keepOpenOn])
 }
 
 export function RightDrawer({
@@ -109,11 +111,14 @@ export function RightDrawer({
   maximized,
   onMaximize,
   onClose,
+  keepOpenOn,
   children,
 }: {
   id: string
   /** The pin is kept per scope (the workspace id), not shared by every drawer with this id. */
   pinScope?: string
+  /** CSS selector of elements beside the drawer whose press keeps it open (app 2.7.0: the task cards of a team board). */
+  keepOpenOn?: string
   title: ReactNode
   icon?: ReactNode
   /** Buttons of the header, before maximize and close. */
@@ -133,7 +138,7 @@ export function RightDrawer({
   const [pinned, setPinned] = useState(() => savedPinned(id, pinScope))
   const drag = useRef<{ startX: number; startW: number; max: number } | null>(null)
 
-  useCloseOnOutsidePointer(rootRef, !pinned && !maximized, onClose)
+  useCloseOnOutsidePointer(rootRef, !pinned && !maximized, onClose, keepOpenOn)
 
   // The drawer takes the keyboard when it opens (unless something inside already has it).
   useEffect(() => {

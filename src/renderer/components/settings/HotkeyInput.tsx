@@ -65,12 +65,18 @@ export function HotkeyInput({
     <div className="flex items-center gap-2">
       <button
         type="button"
+        data-hotkey-input={recording ? 'recording' : 'idle'}
         disabled={disabled}
         onClick={() => setRecording(true)}
         onBlur={() => setRecording(false)}
         onKeyDown={(e) => {
           if (!recording) return
+          // Prevented, so the Modal of Settings leaves this Esc alone: a bare one only cancels the recording.
           e.preventDefault()
+          if (e.key === 'Escape' && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) {
+            setRecording(false)
+            return
+          }
           const accel = buildAccel(e)
           if (accel) {
             onChange(accel)

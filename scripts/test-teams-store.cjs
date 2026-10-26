@@ -1,0 +1,1778 @@
+// Teams store, definition loader, trust and service (app 2.7.0, E10 B1): the zod
+// request union (accept and reject), the flow reducers of B1 and the invariants,
+// TeamStore (commit, rev, task rev, debounce on a manual clock, sync flush while
+// not live, idempotent flush, runs.json before state.json, terminal wins at load,
+// corrupt state -> stateReset card, salvage), the registry (ids, trash, purge by
+// shape, an unreadable index never cached as empty), TeamTrust (approve, snapshot
+// integrity, io when the trust write does not land), the loader (links and
+// junctions refused, caps, stamp cache, misnamed files named to the parser and
+// never read, write), and TeamService on real git repos with an isolated config:
+// enable ends with a list change, an unreadable index answers io and is retried
+// (never after dispose),
+// setup preview and write, adopt, the trust gate, a changed definition flipped by
+// the defwatch deadline, a misnamed role file, extra repos through repoOf, Labs
+// off with zero deadline keys, remove, settings, reveal and the IPC register.
+// B3 additions: the task and comment reducers through a strict TeamStore (create
+// with blockers and cycles, a cycle naming its loop, blocked{deps} on create, a cancelled
+// blocker card, userOwned reject whole, a Lead blocker edit that would move a task the user
+// placed refused with user_owned [state], "Lead decides" releasing the assignee, the Lead's
+// block recorded as by lead and kept by state.json, baseRev conflict with current, a move
+// with an active run answers running and with stopRun stops it, comment recipients and the
+// queue, caps and the archive), applyTool (roles, params, liveness), the board page and its
+// cursor (2000 tasks, half blocked{deps}, the tasks read a bounded number of times: work, not wall time),
+// the Lead's board summary, and the board ops through TeamService.
+// B4 additions: R2 of a Lead run triages the tasks its board listed, a reassignment by the user or the Lead
+// clears the old assignee's wake and queue item (and reconcileTasks drops a stale one), a loop of blockers
+// named through teams:req like the CLI names it (TeamFail.loop and loopMore, the CLI's data.loop), capped at its
+// first 20 ids on both paths, and Despachar todo answering only the items it approved now.
+// B5 review, second round: needsPlan changes only while the task is in todo (bad_request otherwise, like repo and
+// isolation), from the Lead's team.task.update, the user's updateTask reducer and the updateTask op alike.
+// Tanda B close: a trust file or a snapshot that exists but cannot be read (EISDIR here, like EBUSY) is never taken as
+// empty nor as tampered (TrustStore caches nothing and writes nothing from it, TeamTrust reads `unreadable`, no
+// stateReset card, read again next time); archiveSweep disowns an archived task's worktree; the userAllow setup
+// warning; the decide rev in the schemas.
+// Same esbuild + vm harness as test-status.cjs: no Electron, no user data.
+const { buildSync } = require('esbuild')
+const vm = require('node:vm')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const { execFileSync } = require('node:child_process')
+const root = path.resolve(__dirname, '..')
+let checks = 0
+function check(condition, label) { assert.ok(condition, label); checks++ }
+function same(actual, expected, label) { assert.deepEqual(JSON.parse(JSON.stringify(actual ?? null)), JSON.parse(JSON.stringify(expected ?? null)), label); checks++ }
+const json = (v) => JSON.parse(JSON.stringify(v ?? null))
+const EXTERNAL = ['electron', 'ws', 'node-pty', '@xterm/headless', '@xterm/addon-serialize', '@xterm/addon-unicode11']
+function loadEntry(contents, overrides = {}) {
+  const code = buildSync({ stdin: { contents, resolveDir: root, loader: 'ts' }, bundle: true, platform: 'node', format: 'cjs', write: false, external: EXTERNAL, alias: { '@shared': path.join(root, 'src/shared') }, logLevel: 'silent' }).outputFiles[0].text
+  const mod = { exports: {} }
+  vm.runInNewContext(code, { module: mod, exports: mod.exports, require, console, process, Buffer, URL, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, queueMicrotask, structuredClone, TextEncoder, TextDecoder, ...overrides })
+  return mod.exports
+}
+
+const M = loadEntry(`
+export * from './src/shared/team-protocol-schemas'
+export * from './src/shared/teams'
+export { PHONE_TEAM_OPS } from './src/shared/team-protocol'
+export { defaultDraft, renderTeamFiles, canonicalDefText, parseDefinition } from './src/shared/teamDefinition'
+export * from './src/main/teams/flow/agents'
+export * from './src/main/teams/flow/invariants'
+export * from './src/main/teams/flow/tasks'
+export { applyTool } from './src/main/teams/flow/tools'
+export { admitRun, markStarting, markRunning, requestStop } from './src/main/teams/flow/runs'
+export { boardPage, taskSummary, taskDetail, boardSummaryOf, leadView, commentPage, commentView, compareTaskOrder, BOARD_DONE_PAGE } from './src/main/teams/views'
+export { finishRun } from './src/main/teams/flow/runs'
+export { createClaudeStreamParser } from './src/main/teams/parsers/claudeStream'
+export { TeamStore, salvageRuntime, TEAM_FLUSH_MS } from './src/main/teams/TeamStore'
+export { TeamRegistry, teamIdOf, resolveMainRoot } from './src/main/teams/TeamRegistry'
+export { TeamDefinitionLoader } from './src/main/teams/TeamDefinitionLoader'
+export { TeamTrust, sha256Hex, goalHashOf } from './src/main/teams/TeamTrust'
+export { TeamService } from './src/main/teams/TeamService'
+export { reconcileTasks, enqueue, queueDecide } from './src/main/teams/flow/dispatch'
+export { createTeamCtl } from './src/main/teams/teamCtl'
+export { TrustStore, normTrustPath } from './src/main/repoConfig/TrustStore'
+export { DeadlineTimer } from './src/main/DeadlineTimer'
+export { writeAtomicSync } from './src/main/fsAtomic'
+export { createGitRunner, gitEnv } from './src/main/git/gitExec'
+`)
+
+const sha = (text) => crypto.createHash('sha256').update(text).digest('hex')
+const until = async (fn, ms = 5000, label = 'condition') => {
+  const end = Date.now() + ms
+  for (;;) {
+    if (await fn()) return
+    if (Date.now() > end) throw new Error(`timed out waiting for ${label}`)
+    await new Promise((r) => setTimeout(r, 15))
+  }
+}
+const settle = () => new Promise((r) => setTimeout(r, 40))
+
+/** A manual clock and the timer deps of DeadlineTimer on it. */
+function manualClock(start = 1_800_000_000_000) {
+  const c = { now: start, timers: new Map(), seq: 0 }
+  c.deps = {
+    now: () => c.now,
+    setTimeout: (fn, ms) => { const id = ++c.seq; c.timers.set(id, { fn, at: c.now + ms }); return id },
+    clearTimeout: (id) => c.timers.delete(id),
+  }
+  c.advance = (ms) => {
+    c.now += ms
+    for (;;) {
+      const due = [...c.timers].filter(([, t]) => t.at <= c.now)
+      if (due.length === 0) return
+      for (const [id, t] of due) { c.timers.delete(id); t.fn() }
+    }
+  }
+  return c
+}
+
+// ---- 1. schemas -------------------------------------------------------------------------------
+function schemaChecks() {
+  const ok = (req, label) => check(M.teamRequestSchema.safeParse(req).success, `schema accepts ${label}`)
+  const no = (req, label) => check(!M.teamRequestSchema.safeParse(req).success, `schema rejects ${label}`)
+  const teamId = 'tm-0123456789ab'
+  const draft = { ...json(M.defaultDraft('es')), goal: 'Hacer la app' }
+  ok({ op: 'list' }, 'list')
+  ok({ op: 'get', teamId }, 'get')
+  ok({ op: 'setupProbe', dir: 'C:\\repo' }, 'a Windows drive path')
+  ok({ op: 'setupProbe', dir: '/home/u/repo' }, 'a POSIX path')
+  ok({ op: 'setupProbe', dir: '\\\\server\\share\\repo' }, 'a UNC path')
+  no({ op: 'setupProbe', dir: 'repo' }, 'a relative dir')
+  no({ op: 'setupProbe', dir: 'C:\\re\0po' }, 'a NUL in the dir')
+  no({ op: 'setupProbe', dir: 'C:\\' + 'a'.repeat(4100) }, 'a dir over 4096')
+  ok({ op: 'setupPreview', repoRoot: 'C:\\repo', draft }, 'the default draft')
+  ok({ op: 'setupWrite', repoRoot: 'C:\\repo', draft, previewHash: 'a'.repeat(64) }, 'setupWrite')
+  no({ op: 'setupWrite', repoRoot: 'C:\\repo', draft, previewHash: 'xyz' }, 'a bad preview hash')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, roles: Array.from({ length: 13 }, (_, i) => ({ ...draft.roles[1], id: `r${i}` })) } }, 'more than ROLES_MAX roles')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, roles: [draft.roles[0], draft.roles[0]] } }, 'a duplicate role id')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, roles: [{ ...draft.roles[0], model: 'gpt-5' }] } }, 'a codex model on a claude role')
+  ok({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, roles: [{ ...draft.roles[0], provider: 'codex', model: 'gpt-5', effort: 'minimal' }] } }, 'a codex model and effort on a codex role')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, roles: [{ ...draft.roles[0], effort: 'minimal' }] } }, 'a codex effort on a claude role')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, roles: [{ ...draft.roles[1], count: 5 }] } }, 'count 5')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, roles: [{ ...draft.roles[1], id: 'Dev' }] } }, 'a role id off ROLE_ID_RE')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, name: 'a\u0007b' } }, 'a control char in the name')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, goal: 'x'.repeat(8 * 1024 + 1) } }, 'a goal over GOAL_MAX')
+  ok({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, goal: 'line 1\n\tline 2' } }, 'newline and tab in a body')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, goal: 'a\u0000b' } }, 'a NUL in a body')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, maxConcurrent: 4 } }, 'maxConcurrent 4')
+  no({ op: 'setupPreview', repoRoot: 'C:\\repo', draft: { ...draft, baseBranch: 'a..b' } }, 'a bad base branch')
+  ok({ op: 'adopt', repoRoot: '/r', sha256: 'b'.repeat(64) }, 'adopt')
+  ok({ op: 'trust', teamId, sha256: 'b'.repeat(64) }, 'trust')
+  no({ op: 'trust', teamId: 'tm-XYZ', sha256: 'b'.repeat(64) }, 'a bad team id')
+  ok({ op: 'settings', teamId, patch: { autoDispatch: true } }, 'settings')
+  no({ op: 'settings', teamId, patch: { autoDispatch: 'yes' } }, 'a non boolean flag')
+  ok({ op: 'reveal', teamId, what: 'data' }, 'reveal')
+  no({ op: 'reveal', teamId, what: 'C:\\Windows' }, 'reveal of a path')
+  ok({ op: 'runNow', teamId, agentId: 'dev-2', prompt: 'hola' }, 'runNow')
+  no({ op: 'runNow', teamId, agentId: 'Dev' }, 'a bad agent id')
+  ok({ op: 'runPage', teamId, runId: 'r-0123456789ab', before: '123' }, 'runPage')
+  no({ op: 'runPage', teamId, runId: 'r-0123456789ab', before: '12a' }, 'a non numeric runPage cursor')
+  ok({ op: 'watchRun', teamId, runId: null }, 'watchRun null')
+  ok({ op: 'board', teamId, column: 'done', limit: 500 }, 'board limit 500')
+  no({ op: 'board', teamId, limit: 0 }, 'board limit 0')
+  no({ op: 'board', teamId, limit: 501 }, 'board limit 501')
+  ok({ op: 'createTask', teamId, task: { title: 'T', blockedBy: ['t-1'], priority: 'urgent' } }, 'createTask')
+  no({ op: 'createTask', teamId, task: { title: '' } }, 'an empty title')
+  no({ op: 'createTask', teamId, task: { title: 'a\nb' } }, 'a newline in a title')
+  no({ op: 'createTask', teamId, task: { title: 'T', blockedBy: Array.from({ length: 17 }, (_, i) => `t-${i + 1}`) } }, 'more than BLOCKED_BY_MAX blockers')
+  ok({ op: 'updateTask', teamId, taskId: 't-3', baseRev: 2, patch: { assignee: null } }, 'updateTask unassign')
+  ok({ op: 'moveTask', teamId, taskId: 't-3', baseRev: 2, to: 'cancelled', stopRun: true }, 'moveTask')
+  no({ op: 'moveTask', teamId, taskId: 't-3', baseRev: 2, to: 'doing' }, 'a move into doing')
+  ok({ op: 'releaseOwned', teamId, taskId: 't-3', fields: ['priority', 'state'] }, 'releaseOwned')
+  no({ op: 'releaseOwned', teamId, taskId: 't-3', fields: ['owner'] }, 'an unknown task field')
+  ok({ op: 'dispatch', teamId, queueId: 'all', go: true }, 'dispatch all')
+  no({ op: 'dispatch', teamId, queueId: 'q-x', go: true }, 'a bad queue id')
+  ok({ op: 'resumeTask', teamId, taskId: 't-2' }, 'resumeTask (decision 38)')
+  no({ op: 'resumeTask', teamId, taskId: 'task-2' }, 'resumeTask of a task id off its shape')
+  check(!M.phoneTeamRequestSchema.safeParse({ op: 'resumeTask', teamId, taskId: 't-2' }).success, 'resumeTask stays desktop only')
+  ok({ op: 'answer', teamId, cardId: 'k-1', answer: { choices: [0, 5] } }, 'answer choices 0..5')
+  no({ op: 'answer', teamId, cardId: 'k-1', answer: { choices: [6] } }, 'answer choice 6')
+  no({ op: 'answer', teamId, cardId: 'k-1', answer: { choices: [0, 1, 2, 3, 4, 5, 0] } }, 'answer with 7 choices')
+  no({ op: 'answer', teamId, cardId: 'k-1', answer: { action: 'format' } }, 'an unknown card action')
+  ok({ op: 'integrate', teamId, taskId: 't-1', expectTip: 'c'.repeat(40) }, 'integrate')
+  no({ op: 'integrate', teamId, taskId: 't-1', expectTip: 'c'.repeat(12) }, 'a short expectTip')
+  ok({ op: 'confirmVerify', teamId, repoId: 'main', command: 'npm test' }, 'confirmVerify')
+  no({ op: 'confirmVerify', teamId, repoId: 'main', command: 'npm test\nrm -rf /' }, 'a two line verify command')
+  ok({ op: 'note', teamId, noteId: 'n-0123456789abcdef' }, 'note')
+  ok({ op: 'takeoverBound', teamId, agentId: 'dev', paneId: 'pane-1', workspaceId: 'w1' }, 'takeoverBound')
+  no({ op: 'nope', teamId }, 'an unknown op')
+  no(null, 'null')
+  check(M.parseTeamRequest({ op: 'list' })?.op === 'list' && M.parseTeamRequest({ op: 'x' }) === null, 'parseTeamRequest')
+  const phone = (req) => M.phoneTeamRequestSchema.safeParse(req).success
+  check(phone({ op: 'board', teamId }) && phone({ op: 'leadSay', teamId, text: 'hola' }) && phone({ op: 'list' }), 'phone schema accepts its ops')
+  check(!phone({ op: 'setupWrite', repoRoot: '/r', draft, previewHash: 'a'.repeat(64) }) && !phone({ op: 'trust', teamId, sha256: 'b'.repeat(64) }) && !phone({ op: 'integrate', teamId, taskId: 't-1', expectTip: 'c'.repeat(40) }), 'phone schema rejects desktop ops')
+  same(M.PHONE_TEAM_OPS.map((op) => M.phoneTeamRequestSchema.options.some((o) => o.shape.op.value === op)), M.PHONE_TEAM_OPS.map(() => true), 'the phone union holds every PHONE_TEAM_OPS member')
+  const [decide, answer, dispatch] = M.teamCtlActionSchemas
+  check(decide.safeParse({ kind: 'teamDecide', teamId, approvalId: 'a-1', decision: 'approve' }).success && answer.safeParse({ kind: 'teamAnswer', teamId, cardId: 'k-2', answer: { confirm: true } }).success && dispatch.safeParse({ kind: 'teamDispatch', teamId, queueId: 'q-1', go: false }).success, 'ctl action schemas')
+  // Tanda B close: the decide op and the teamDecide ctl carry an optional rev, a positive integer.
+  check(decide.safeParse({ kind: 'teamDecide', teamId, approvalId: 'a-1', decision: 'approve', rev: 2 }).data?.rev === 2 && M.parseTeamRequest({ op: 'decide', teamId, approvalId: 'a-1', decision: 'reject', rev: 3 })?.rev === 3, 'decide and teamDecide keep a rev')
+  check([0, -1, 1.5, '2', null].every((rev) => !decide.safeParse({ kind: 'teamDecide', teamId, approvalId: 'a-1', decision: 'approve', rev }).success && M.parseTeamRequest({ op: 'decide', teamId, approvalId: 'a-1', decision: 'approve', rev }) === null), 'a rev that is not a positive integer never parses')
+}
+
+// ---- 2. flow reducers and invariants ------------------------------------------------------------
+function defOf(roles) {
+  const base = json(M.defaultDraft('en'))
+  return { def: { name: 'T', goal: 'g', rules: '', verifyTimeoutMin: 20, maxRunMinutes: 45, maxConcurrent: 2, leadApprovesSmallPlans: true, extraRepos: [], routines: [], roles }, sha256: 'a'.repeat(64), goalHash: 'b'.repeat(64), trustedAt: 1, files: [], _base: base }
+}
+const role = (id, kind, count = 1, provider = 'claude') => ({ id, name: id, kind, provider, permission: kind === 'dev' ? 'total' : 'readonly', count, instructions: 'x' })
+
+function flowChecks() {
+  const ctxOf = (def) => ({ now: 1000, def, newRunId: () => 'r-000000000001', newSessionId: () => 'uuid' })
+  let rt = M.emptyRuntime('tm-0123456789ab', 'deadbeef')
+  const def1 = defOf([role('lead', 'lead'), role('dev', 'dev', 2), role('qa', 'qa')])
+  let r = M.reconcileAgents(rt, ctxOf(def1))
+  same(r.rt.agents.map((a) => a.id), ['lead', 'dev', 'dev-2', 'qa'], 'reconcileAgents: agentIdOf(role, 1..count) in definition order')
+  check(r.rt.agents.every((a) => a.status === 'idle' && !a.paused && a.interrupts === 0), 'new agents are idle')
+  check(M.assertInvariants(r.rt, def1).length === 0, 'the roster holds the invariants')
+  rt = r.rt
+  const again = M.reconcileAgents(rt, ctxOf(def1))
+  check(again.rt === rt, 'an unchanged roster returns the same rt (no commit)')
+  const def3 = defOf([role('lead', 'lead'), role('dev', 'dev', 3), role('qa', 'qa')])
+  r = M.reconcileAgents(rt, ctxOf(def3))
+  check(r.rt.agents.find((a) => a.id === 'dev') === rt.agents.find((a) => a.id === 'dev') && r.rt.agents.some((a) => a.id === 'dev-3'), 'raising count keeps the existing agents and adds dev-3')
+  // dev-2 running when the count drops: retired, removed once idle.
+  const running = { ...rt, agents: rt.agents.map((a) => (a.id === 'dev-2' ? { ...a, status: 'running', runId: 'r-000000000009' } : a)) }
+  const def1dev = defOf([role('lead', 'lead'), role('dev', 'dev', 1), role('qa', 'qa')])
+  r = M.reconcileAgents(running, ctxOf(def1dev))
+  check(r.rt.agents.find((a) => a.id === 'dev-2')?.retired === true, 'a running agent beyond the count is retired')
+  r = M.reconcileAgents(rt, ctxOf(def1dev))
+  check(!r.rt.agents.some((a) => a.id === 'dev-2'), 'an idle agent beyond the count is removed')
+  const withSession = { ...rt, agents: rt.agents.map((a) => (a.id === 'qa' ? { ...a, sessions: { 't-1': { provider: 'claude', sessionId: 's1', cwd: 'C:\\r', createdAt: 1, turns: 1, sysHash: 'h' } } } : a)) }
+  r = M.reconcileAgents(withSession, ctxOf(defOf([role('lead', 'lead'), role('dev', 'dev', 2), role('qa', 'qa', 1, 'codex')])))
+  const qa = r.rt.agents.find((a) => a.id === 'qa')
+  check(qa.provider === 'codex' && Object.keys(qa.sessions).length === 0, 'a provider change drops the sessions of a free agent')
+  // setTeamFlags.
+  let f = M.setTeamFlags(rt, { autoDispatch: true }, { now: 5 })
+  check(f.rt.autoDispatch === true && same0(f.effects, [{ kind: 'dispatch' }]), 'autonomy on pokes the dispatcher')
+  f = M.setTeamFlags(f.rt, { paused: true }, { now: 6 })
+  check(f.rt.paused.reason === 'user' && f.rt.paused.at === 6 && f.effects.length === 0, 'a user pause')
+  f = M.setTeamFlags(f.rt, { paused: false }, { now: 7 })
+  check(f.rt.paused === null && f.effects.length === 1, 'unpause pokes')
+  check(M.setTeamFlags(rt, {}, { now: 1 }).rt === rt, 'an empty patch changes nothing')
+  // system cards.
+  let c = M.openSystemCard(rt, { why: 'stateReset', actions: ['dismiss'], vars: { what: 'trust' } }, { now: 9 })
+  check(c.result.cardId === 'k-1' && c.rt.nextIds.card === 2 && c.rt.cards[0].question === '' && c.rt.cards[0].from.why === 'stateReset', 'openSystemCard mints k-1')
+  check(M.openSystemCard(c.rt, { why: 'stateReset', actions: ['dismiss'], vars: { what: 'trust' } }, { now: 10 }).rt === c.rt, 'the same open reason is raised once')
+  check(M.openSystemCard(c.rt, { why: 'stateReset', actions: ['dismiss'], vars: { what: 'state' } }, { now: 10 }).result.cardId === 'k-2', 'another what is another card')
+  check(M.dismissSystemCards(c.rt, 'stateReset', 'trust').rt.cards[0].state === 'dismissed', 'dismissSystemCards')
+  // invariants catch what they should.
+  const bad = (mut, rule) => {
+    const x = mut(json(rt))
+    check(M.assertInvariants(x, def1).some((l) => l.startsWith(rule + ':')), `invariant ${rule} detected`)
+  }
+  const task = (id, extra = {}) => ({ id, rev: 1, title: id, body: '', state: 'todo', phase: 'none', priority: 'normal', repoId: 'main', isolation: 'main', needsPlan: false, blockedBy: [], createdBy: { kind: 'user', via: 'desktop' }, createdAt: 1, updatedAt: 1, stateSince: 1, review: { round: 0, max: 3 }, userOwned: [], counters: { noProgress: 0, continuations: 0, retries: 0, interrupts: 0, unblockWakes: 0, unblockWindowStart: 0 }, ...extra })
+  bad((x) => { x.agents[1].status = 'running'; return x }, 'I2')
+  bad((x) => { x.tasks = [task('t-1', { state: 'doing', phase: 'none' })]; x.nextIds.task = 2; return x }, 'I6')
+  bad((x) => { x.tasks = [task('t-1', { state: 'blocked', phase: 'none' })]; x.nextIds.task = 2; return x }, 'I7')
+  bad((x) => { x.tasks = [task('t-5')]; return x }, 'I14')
+  bad((x) => { x.tasks = [task('t-1', { blockedBy: ['t-2'] }), task('t-2', { blockedBy: ['t-1'] })]; x.nextIds.task = 3; return x }, 'I17')
+  bad((x) => { x.tasks = [task('t-1', { userOwned: ['title', 'title'] })]; x.nextIds.task = 2; return x }, 'I16')
+  bad((x) => { x.tasks = [task('t-1')]; x.nextIds.task = 2; x.nextIds.comment = 2; x.comments = { 't-1': [{ id: 'm-1', target: 't-1', author: { kind: 'system' }, kind: 'system', at: 1, text: '', }] }; return x }, 'I22')
+  bad((x) => { x.queue = [{ id: 'q-1', agentId: 'ghost', sessionKey: 'free', mode: 'free', reason: 'manual', createdAt: 1 }]; x.nextIds.queue = 2; return x }, 'I13')
+  check(M.assertInvariants(rt, def1, { prev: rt }).length === 0, 'I15 holds for the same rt')
+}
+function same0(a, b) { return JSON.stringify(a) === JSON.stringify(b) }
+
+// ---- 2b. B3: tasks, comments, tools and the board views ------------------------------------------
+/** An in-memory SyncFs: the strict store below flushes into it on every commit (live() is false). */
+function memFs() {
+  const files = new Map()
+  const nf = () => Object.assign(new Error('missing'), { code: 'ENOENT' })
+  return {
+    files,
+    readFileSync: (p) => { if (!files.has(p)) throw nf(); return files.get(p) },
+    writeFileSync: (p, d) => { files.set(p, String(d)) },
+    renameSync: (a, b) => { if (!files.has(a)) throw nf(); files.set(b, files.get(a)); files.delete(a) },
+    mkdirSync: () => undefined,
+    rmSync: (p) => { files.delete(p) },
+    appendFileSync: (p, d) => { files.set(p, (files.get(p) ?? '') + d) },
+    statSync: (p) => ({ size: (files.get(p) ?? '').length }),
+  }
+}
+
+function boardChecks() {
+  const teamId = 'tm-0123456789ab'
+  const def = defOf([role('lead', 'lead'), role('dev', 'dev', 2), role('qa', 'qa'), role('research', 'research')])
+  const clock = { now: 1_800_000_000_000 }
+  let runSeq = 0
+  const ctx = () => ({ now: clock.now, def, newRunId: () => `r-${String(++runSeq).padStart(12, '0')}`, newSessionId: () => `0000000${runSeq}-0000-4000-8000-000000000000` })
+  const timer = new M.DeadlineTimer(() => undefined, { now: () => clock.now, setTimeout: () => 0, clearTimeout: () => undefined })
+  // A strict store: every commit is deep-frozen and asserts I1..I22 (a broken invariant throws).
+  const mfs = memFs()
+  const storeDeps = { dir: () => `/mem/${teamId}`, emit: () => undefined, timer, live: () => false, now: () => clock.now, fs: mfs, log: () => undefined, strict: true, newGen: () => 'cafebabe' }
+  const { store } = M.TeamStore.load(storeDeps, teamId, def)
+  const commit = (res, label) => { check(res.ok, `${label} (${res.ok ? 'ok' : res.error})`); return store.commit(res, ['board']) }
+  commit(M.reconcileAgents(store.rt, ctx()), 'the roster')
+  const user = { kind: 'user', via: 'desktop' }
+  const lead = { kind: 'agent', agentId: 'lead', runId: 'r-0000000000ff', roleKind: 'lead' }
+  const task = (id) => store.rt.tasks.find((t) => t.id === id)
+  const v = { def: def.def, needs: [] }
+  const tick = () => { clock.now += 1000 }
+
+  // T1: create, defaults, what the user owns.
+  let r = M.createTask(store.rt, user, { title: '  Login con Google  ' }, ctx())
+  commit(r, 'a user create')
+  const t1 = task('t-1')
+  check(t1.title === 'Login con Google' && t1.rev === 1 && t1.state === 'todo' && t1.phase === 'none' && t1.priority === 'normal' && t1.isolation === 'worktree' && t1.needsPlan === true && t1.repoId === 'main' && t1.review.max === 3, 'create: trimmed title, rev 1, todo; defaults normal, worktree, a plan first, main')
+  same(t1.userOwned, ['title'], 'a user create owns the fields it filled')
+  check(r.effects.some((e) => e.kind === 'dispatch'), 'a create pokes the dispatcher')
+  tick()
+  commit(M.createTask(store.rt, user, { title: 'Sync', priority: 'high', assignee: 'dev', needsPlan: false, isolation: 'main', body: 'cuerpo' }, ctx()), 'a user create with fields')
+  same(task('t-2').userOwned, ['title', 'body', 'priority', 'assignee', 'isolation', 'needsPlan'], 'every filled field is the user\'s, in TASK_FIELDS order')
+  same(M.createTask(store.rt, user, { title: '   ' }, ctx()).error, 'bad_request', 'a blank title')
+  same(M.createTask(store.rt, user, { title: 'x', assignee: 'lead' }, ctx()).error, 'bad_request', 'the Lead is never an assignee')
+  same(M.createTask(store.rt, user, { title: 'x', assignee: 'ghost' }, ctx()).error, 'not_found', 'an unknown assignee')
+  same(M.createTask(store.rt, user, { title: 'x', repoId: 'other' }, ctx()).error, 'bad_request', 'a repo the definition does not name')
+  same(M.createTask(store.rt, user, { title: 'x', body: 'a\u0007b' }, ctx()).error, 'bad_request', 'a control character in the body')
+
+  // Blockers: blocked{deps} on create, unknown, self, cycle, a cancelled blocker.
+  tick()
+  r = M.createTask(store.rt, lead, { title: 'Tests del sync', blockedBy: ['t-2', 't-1', 't-2'] }, ctx())
+  commit(r, 'a create with blockers')
+  const t3 = task('t-3')
+  check(t3.state === 'blocked' && t3.phase === 'none' && t3.blocked.reason.kind === 'deps' && t3.blocked.resume.state === 'todo' && t3.blocked.resume.phase === 'none', 'blockers not done: created blocked{deps}, resuming to todo')
+  same(t3.blockedBy, ['t-2', 't-1'], 'a repeated blocker is dropped, the order kept')
+  same(t3.userOwned, [], 'an agent create owns nothing')
+  same(M.taskSummary(store.rt, t3, v).blocked, { kind: 'deps', waitingOn: ['t-2', 't-1'] }, 'the card names what it waits on')
+  same(M.createTask(store.rt, lead, { title: 'x', blockedBy: ['t-99'] }, ctx()).error, 'not_found', 'an unknown blocker')
+  // A cycle names its loop (`current`, the path from the task back to itself): teamCtl prints it for the agent.
+  same(json(M.updateTask(store.rt, user, 't-1', { blockedBy: ['t-3'] }, 1, ctx())), { ok: false, error: 'cycle', current: { loop: ['t-1', 't-3', 't-1'], more: 0 } }, 't-1 waiting on t-3, which waits on t-1: cycle, with the loop')
+  same(M.blockersCycle(store.rt.tasks, 't-2', ['t-3']), ['t-2', 't-3', 't-2'], 'blockersCycle follows the live edges and returns the loop')
+  same(M.blockersCycle(store.rt.tasks, 't-3', ['t-1']), null, 'no loop: null')
+  const chain = [{ id: 't-1', blockedBy: [] }, { id: 't-2', blockedBy: ['t-1'] }, { id: 't-3', blockedBy: ['t-2'] }, { id: 't-4', blockedBy: ['t-3', 't-2'] }]
+  same(M.blockersCycle(chain, 't-1', ['t-4']), ['t-1', 't-4', 't-2', 't-1'], 'a longer loop names its middle tasks, a shortest one')
+  same(M.updateTask(store.rt, user, 't-1', { blockedBy: ['t-1'] }, 1, ctx()).error, 'bad_request', 'a task never waits on itself')
+  tick()
+  commit(M.createTask(store.rt, user, { title: 'Descartada' }, ctx()), 'create t-4')
+  commit(M.moveTask(store.rt, user, 't-4', 'cancelled', task('t-4').rev, {}, ctx()), 'cancel t-4')
+  check(task('t-4').state === 'cancelled' && task('t-4').userOwned.includes('state'), 'a user cancel owns the state')
+  same(M.moveTask(store.rt, user, 't-4', 'todo', task('t-4').rev, {}, ctx()).error, 'bad_request', 'a cancelled task stays cancelled')
+  tick()
+  commit(M.createTask(store.rt, lead, { title: 'Depende de la descartada', blockedBy: ['t-4'] }, ctx()), 'a create on a cancelled blocker')
+  const card5 = store.rt.cards.find((c) => c.taskId === 't-5')
+  check(task('t-5').state === 'blocked' && card5 && card5.state === 'open' && card5.from.why === 'depCancelled' && card5.from.actions.includes('dropBlocker') && card5.from.vars.blockers === 't-4', 'a cancelled blocker: blocked with a depCancelled card')
+  commit(M.updateTask(store.rt, user, 't-3', { blockedBy: [] }, task('t-3').rev, ctx()), 'clear the blockers')
+  check(task('t-3').state === 'todo' && !task('t-3').blocked && task('t-3').userOwned.includes('blockedBy'), 'clearing the blockers resumes it to todo and makes blockedBy the user\'s')
+
+  // userOwned: the user's re-prioritization survives the Lead's next update (B3 acceptance).
+  const rev3 = task('t-3').rev
+  commit(M.moveTask(store.rt, user, 't-3', 'todo', rev3, { priority: 'urgent' }, ctx()), 'a band drop')
+  check(task('t-3').priority === 'urgent' && task('t-3').rev === rev3 + 1 && task('t-3').userOwned.includes('priority'), 'a band drop sets the priority (rev + 1) and owns it')
+  const refused = M.updateTask(store.rt, lead, 't-3', { priority: 'low', title: 'Tests del sync (v2)' }, undefined, ctx())
+  same(json(refused), { ok: false, error: 'user_owned', fields: ['priority'] }, 'the Lead touching an owned field is refused whole')
+  check(task('t-3').title === 'Tests del sync' && task('t-3').priority === 'urgent', 'and nothing changed: the user\'s priority holds')
+  commit(M.updateTask(store.rt, lead, 't-3', { title: 'Tests del sync (v2)', priority: 'urgent' }, undefined, ctx()), 'a Lead edit of free fields')
+  check(task('t-3').title === 'Tests del sync (v2)' && task('t-3').userOwned.join() === 'priority,blockedBy', 'a free field and an owned one at its own value pass; nothing becomes the user\'s')
+  commit(M.releaseOwned(store.rt, 't-3', ['priority'], { now: clock.now }), 'release the priority')
+  commit(M.updateTask(store.rt, lead, 't-3', { priority: 'low' }, undefined, ctx()), 'the Lead after the release')
+  check(task('t-3').priority === 'low', 'handed back, the Lead may change it')
+
+  // A side effect counts too: a blocker edit of the Lead never moves a task whose state the user owns (refused whole).
+  tick()
+  commit(M.createTask(store.rt, lead, { title: 'Pantalla de notas', blockedBy: ['t-1'] }, ctx()), 'a Lead task waiting on t-1')
+  const placed = store.rt.tasks.at(-1).id
+  commit(M.moveTask(store.rt, user, placed, 'todo', task(placed).rev, {}, ctx()), 'the user starts it now anyway')
+  check(task(placed).state === 'todo' && task(placed).userOwned.includes('state'), 'pulled out of blocked{deps} by hand: todo, its state the user\'s')
+  const placedBefore = task(placed)
+  same(json(M.updateTask(store.rt, lead, placed, { blockedBy: ['t-1', 't-2'] }, undefined, ctx())), { ok: false, error: 'user_owned', fields: ['state'] }, 'the Lead adding a blocker that would block it again: user_owned [state]')
+  same(json(M.updateTask(store.rt, lead, placed, { blockedBy: ['t-2'], title: 'Pantalla de notas v2' }, undefined, ctx())), { ok: false, error: 'user_owned', fields: ['state'] }, 'refused whole: a free field in the same call does not land either')
+  check(task(placed) === placedBefore && task(placed).state === 'todo', 'and nothing changed: the user\'s todo holds')
+  tick()
+  commit(M.createTask(store.rt, lead, { title: 'Exportar notas' }, ctx()), 'a Lead task')
+  const free = store.rt.tasks.at(-1).id
+  commit(M.updateTask(store.rt, lead, free, { blockedBy: ['t-1'] }, undefined, ctx()), 'the Lead blocks it on t-1')
+  check(task(free).state === 'blocked' && task(free).blocked.reason.kind === 'deps', 'a state nobody owns: the Lead\'s blocker edit still moves it to blocked{deps}')
+
+  // "Lead decides" (assignee null) hands the assignee back to the Lead instead of fixing it to nobody.
+  commit(M.updateTask(store.rt, user, free, { assignee: 'dev' }, task(free).rev, ctx()), 'the user assigns it')
+  check(task(free).assignee === 'dev' && task(free).userOwned.includes('assignee'), 'a user assignee is the user\'s')
+  commit(M.updateTask(store.rt, user, free, { assignee: null, priority: 'high' }, task(free).rev, ctx()), '"Lead decides" with a priority')
+  check(task(free).assignee === undefined && !task(free).userOwned.includes('assignee') && task(free).userOwned.includes('priority'), '"Lead decides" clears the assignee and releases it; the other field it set stays the user\'s')
+  commit(M.updateTask(store.rt, lead, free, { assignee: 'dev-2' }, undefined, ctx()), 'the Lead assigns it next')
+  check(task(free).assignee === 'dev-2', 'so the Lead decides')
+
+  // The Lead's block says so: `by: 'lead'`, never read as the user's own; it survives a reload.
+  tick()
+  commit(M.createTask(store.rt, lead, { title: 'Buscar notas' }, ctx()), 'a Lead task')
+  const parked = store.rt.tasks.at(-1).id
+  commit(M.updateTask(store.rt, lead, parked, { state: 'blocked' }, undefined, ctx()), 'the Lead parks it (--state blocked)')
+  same(task(parked).blocked.reason, { kind: 'user', by: 'lead' }, 'the Lead\'s block records who: by lead')
+  same(M.taskSummary(store.rt, task(parked), v).blocked, { kind: 'user', by: 'lead' }, 'the card reads it was the Lead')
+  check(!task(parked).userOwned.includes('state'), 'and the state stays nobody\'s')
+  const reloaded = M.TeamStore.load(storeDeps, teamId, def).store.rt.tasks.find((t) => t.id === parked)
+  same(reloaded.blocked.reason, { kind: 'user', by: 'lead' }, 'state.json keeps by lead (the schema does not strip it)')
+  commit(M.moveTask(store.rt, user, parked, 'blocked', task(parked).rev, { text: 'Lo veo yo' }, ctx()), 'the user blocks it too')
+  same(M.taskSummary(store.rt, task(parked), v).blocked, { kind: 'user', text: 'Lo veo yo', by: 'user' }, 'a user move over the Lead\'s block makes it the user\'s')
+  check(task(parked).userOwned.includes('state') && task(parked).blocked.reason.by === undefined, 'with the state the user\'s')
+  commit(M.updateTask(store.rt, lead, parked, { blockedBy: ['t-1'] }, undefined, ctx()), 'a Lead blocker edit that moves nothing')
+  check(task(parked).state === 'blocked' && task(parked).blocked.reason.kind === 'user' && task(parked).blockedBy.join() === 't-1', 'a blocker edit that leaves the user\'s state where it is passes')
+
+  // baseRev.
+  const stale = M.updateTask(store.rt, user, 't-1', { title: 'Otro' }, 0, ctx())
+  check(!stale.ok && stale.error === 'conflict' && stale.reason === 'rev' && stale.current.id === 't-1' && stale.current.rev === 1, 'a stale baseRev: conflict {rev} with the current task')
+  same(M.moveTask(store.rt, user, 't-1', 'blocked', 0, {}, ctx()).reason, 'rev', 'moveTask checks the baseRev too')
+  same(M.updateTask(store.rt, lead, 't-1', { body: 'x' }, 7, ctx()).reason, 'rev', 'an agent --rev that does not match')
+
+  // A move with an active run: running without stopRun; stopRun stops it (decision 37).
+  const runReq = (agentId, taskId, mode) => ({ agentId, taskId, sessionKey: taskId ?? (mode === 'lead' ? 'lead' : 'free'), mode, reason: 'assigned', since: clock.now, priority: 'normal', approved: true, bypassCooldown: false })
+  const admit = (agentId, taskId, mode, profile) =>
+    commit(M.admitRun(store.rt, runReq(agentId, taskId, mode), { sessionKey: taskId ?? (mode === 'lead' ? 'lead' : 'free'), resume: null, cwd: 'C:\\repo', profile, sysHash: 'h' }, ctx()), `admit ${agentId}`).result.run.id
+  const start = (runId) => commit(M.markStarting(store.rt, runId, { pid: 4242, delivered: { comments: [], cards: [], approvals: [] } }, ctx()), `start ${runId}`)
+  const finish = (runId) => {
+    const facts = M.createClaudeStreamParser().facts({ code: 0 }, '', {}, clock.now)
+    commit(M.finishRun(store.rt, runId, { at: clock.now, exit: { code: 0, signal: null }, facts, teamWrites: 0 }, {}, { now: clock.now }), `finish ${runId}`)
+  }
+  let rid = admit('dev', 't-2', 'exec', 'total')
+  check(task('t-2').state === 'doing' && task('t-2').phase === 'executing' && task('t-2').frozen === true, 'admitted: doing/executing and frozen')
+  same(M.moveTask(store.rt, user, 't-2', 'todo', task('t-2').rev, {}, ctx()).error, 'running', 'a move with an active run and no stopRun: running')
+  same(M.updateTask(store.rt, user, 't-2', { assignee: 'dev-2' }, task('t-2').rev, ctx()).error, 'running', 'a new assignee under a run: the user stops it first')
+  same(M.updateTask(store.rt, lead, 't-2', { assignee: 'dev-2' }, undefined, ctx()).error, 'busy', 'and the Lead gets busy')
+  same(M.updateTask(store.rt, user, 't-2', { isolation: 'worktree' }, task('t-2').rev, ctx()).error, 'bad_request', 'isolation is fixed once admitted (frozen)')
+  r = M.moveTask(store.rt, user, 't-2', 'todo', task('t-2').rev, { stopRun: true }, ctx())
+  commit(r, 'a move with stopRun (queued run)')
+  const ended = r.effects.find((e) => e.kind === 'ended')
+  check(store.rt.activeRuns.length === 0 && store.rt.agents.find((a) => a.id === 'dev').status === 'idle' && ended && ended.run.state === 'cancelled' && ended.run.stopReason === 'taskMoved', 'a queued run ends at once: cancelled, taskMoved')
+  check(task('t-2').state === 'todo' && task('t-2').phase === 'none' && task('t-2').userOwned.includes('state'), 'the task is in todo and its state the user\'s')
+  rid = admit('dev', 't-2', 'exec', 'total')
+  start(rid)
+  commit(M.markRunning(store.rt, rid, { at: clock.now }, ctx()), 'running')
+  r = M.moveTask(store.rt, user, 't-2', 'blocked', task('t-2').rev, { stopRun: true, text: 'Esper\u00E1 al dise\u00F1o' }, ctx())
+  commit(r, 'a block with stopRun (running run)')
+  check(store.rt.activeRuns[0].state === 'stopping' && store.rt.activeRuns[0].stopReason === 'taskMoved' && r.effects.some((e) => e.kind === 'stopRun' && e.runId === rid), 'a running run turns stopping (taskMoved) and its tree is signalled')
+  same(task('t-2').blocked, { reason: { kind: 'user', text: 'Esper\u00E1 al dise\u00F1o' }, resume: { state: 'doing', phase: 'executing' }, at: clock.now }, 'blocked{user} with the text, resuming to doing/executing')
+  finish(rid)
+  check(store.rt.activeRuns.length === 0 && task('t-2').state === 'blocked', 'the stopped run ends and the task stays blocked')
+  commit(M.resumeTask(store.rt, user, 't-2', ctx()), 'resume t-2')
+  same([task('t-2').state, task('t-2').phase, task('t-2').next?.agentId, task('t-2').next?.mode, task('t-2').next?.reason, task('t-2').next?.bypassCooldown], ['doing', 'executing', 'dev', 'exec', 'retry', true], 'resumeTask: back to doing/executing with a retry level for the assignee')
+  same(M.resumeTask(store.rt, user, 't-2', ctx()).error, 'conflict', 'only a blocked task resumes')
+
+  // Comments: recipient at write time, the queue, delivery (4.5).
+  const devActor = { kind: 'agent', agentId: 'dev', runId: rid, roleKind: 'dev' }
+  r = M.addComment(store.rt, user, 't-2', 'Us\u00E1 la API v2', 'comment', { now: clock.now })
+  commit(r, 'a user comment')
+  const m1 = r.result.comment
+  check(m1.id === 'm-1' && m1.forAgent === 'dev' && m1.deliveredRunId === undefined && r.effects.some((e) => e.kind === 'dispatch'), 'a user comment on an assigned task is queued for its assignee and pokes')
+  check(M.taskSummary(store.rt, task('t-2'), v).queued === 1 && M.taskSummary(store.rt, task('t-2'), v).comments === 1, 'the card counts it, queued')
+  // The view carries the recipient fixed at write time: "Queued for dev" stays true after a reassignment.
+  const cv = M.commentView(store.rt, def.def, m1)
+  check(cv.queued && cv.recipient === 'dev' && cv.recipientName === 'dev' && M.commentView(store.rt, def.def, { ...m1, forAgent: 'dev-2' }).recipientName === 'dev 2', 'CommentView: the recipient and its name (role name, then the index)', cv)
+  const moved = { ...store.rt, tasks: store.rt.tasks.map((t) => (t.id === 't-2' ? { ...t, assignee: 'dev-2' } : t)) }
+  const cvMoved = M.commentView(moved, def.def, m1)
+  check(cvMoved.recipient === 'dev' && cvMoved.recipientName === 'dev' && M.taskDetail(moved, moved.tasks.find((t) => t.id === 't-2'), { ...v, trusted: def, recent: [] }).comments.find((c) => c.id === 'm-1').recipient === 'dev', 'after a reassignment to dev-2 the view still names dev (the task drawer too)', cvMoved)
+  check(!('recipient' in M.commentView(store.rt, def.def, { ...m1, forAgent: undefined })) && !('recipientName' in M.commentView(store.rt, def.def, { ...m1, forAgent: undefined })), 'a comment for nobody has no recipient')
+  r = M.addComment(store.rt, devActor, 't-2', 'Listo el endpoint', 'comment', { now: clock.now })
+  commit(r, 'an own comment')
+  check(r.result.comment.forAgent === undefined && !r.effects.some((e) => e.kind === 'dispatch'), 'an agent comment on its own task wakes nobody')
+  check(M.addComment(store.rt, { kind: 'agent', agentId: 'dev-2', runId: 'r-0000000000aa', roleKind: 'dev' }, 't-2', 'Ojo con el cache', 'comment', { now: clock.now }).result.comment.forAgent === 'dev', 'another agent\'s comment goes to the task\'s recipient')
+  const qaRt = { ...store.rt, tasks: store.rt.tasks.map((t) => (t.id === 't-2' ? { ...t, state: 'review', phase: 'qa', review: { ...t.review, qaAgentId: 'qa' } } : t)) }
+  check(M.recipientOf(qaRt, 't-2', devActor) === 'qa' && M.recipientOf(qaRt, 't-2', { kind: 'agent', agentId: 'qa', runId: 'r-0000000000bb', roleKind: 'qa' }) === undefined, 'phase qa: comments go to its QA agent, never to the author')
+  r = M.addComment(store.rt, user, 'lead', 'Prioriz\u00E1 el login', 'comment', { now: clock.now })
+  commit(r, 'a message to the Lead')
+  check(r.result.comment.forAgent === 'lead', 'a user message in the Lead thread is for the Lead')
+  check(M.addComment(store.rt, lead, 'lead', 'Anotado', 'comment', { now: clock.now }).result.comment.forAgent === undefined && M.addComment(store.rt, devActor, 'lead', 'hola', 'comment', { now: clock.now }).result.comment.forAgent === undefined, 'agent comments in the Lead thread never wake the Lead (risk 10)')
+  check(M.addComment(store.rt, user, 't-4', 'x', 'comment', { now: clock.now }).result.comment.forAgent === undefined, 'a cancelled task: nobody')
+  same(M.addComment(store.rt, user, 't-99', 'x', 'comment', { now: clock.now }).error, 'not_found', 'an unknown target')
+  same(M.addComment(store.rt, user, 't-2', '  \n ', 'comment', { now: clock.now }).error, 'bad_request', 'an empty comment')
+  check(M.addComment(store.rt, user, 't-2', 'a\r\nb', 'comment', { now: clock.now }).result.comment.text === 'a\nb', 'CRLF is stored as LF')
+  commit(M.deliverComments(store.rt, rid, 'dev', ['m-1']), 'deliver')
+  check(store.rt.comments['t-2'][0].deliveredRunId === rid && M.taskSummary(store.rt, task('t-2'), v).queued === 0, 'deliverComments: delivered to that run, no longer queued')
+  check(M.deliverComments(store.rt, rid, 'dev-2', ['m-1']).rt === store.rt, 'another agent never takes it')
+
+  // Caps: comments archive the oldest delivered; tasks archive old done first; the id ceilings.
+  const full = (queued) => ({ ...store.rt, comments: { ...store.rt.comments, 't-1': Array.from({ length: 200 }, (_, i) => ({ id: `m-${100 + i}`, target: 't-1', author: user, kind: 'comment', at: i, text: 'x', ...(queued ? { forAgent: 'dev' } : {}) })) }, nextIds: { ...store.rt.nextIds, comment: 400 } })
+  r = M.addComment(full(false), user, 't-1', 'otro', 'comment', { now: clock.now })
+  const arch = r.effects.find((e) => e.kind === 'archiveComments')
+  check(r.ok && r.rt.comments['t-1'].length === 200 && arch && arch.target === 't-1' && arch.comments.length === 1 && arch.comments[0].id === 'm-100', 'over TASK_COMMENTS_MAX the oldest delivered comment goes to the archive')
+  same(M.addComment(full(true), user, 't-1', 'otro', 'comment', { now: clock.now }).error, 'cap', '200 queued comments: cap')
+  same(M.addComment({ ...store.rt, nextIds: { ...store.rt.nextIds, comment: 10_000_000 } }, user, 't-1', 'x', 'comment', { now: clock.now }).error, 'cap', 'past m-9999999: cap')
+  const old = clock.now - 31 * 86_400_000
+  const many = (state) => Array.from({ length: 2000 }, (_, i) => ({ ...t1, id: `t-${i + 1}`, title: `T${i}`, state, stateSince: old }))
+  const idle = store.rt.agents.map((a) => { const x = { ...a, status: 'idle' }; delete x.runId; return x })
+  let big = { ...store.rt, tasks: many('done'), comments: {}, cards: [], queue: [], activeRuns: [], agents: idle, nextIds: { ...store.rt.nextIds, task: 2001 } }
+  r = M.createTask(big, user, { title: 'Nueva' }, ctx())
+  check(r.ok && r.rt.tasks.length === 1 && r.rt.tasks[0].id === 't-2001' && Object.keys(r.rt.archivedTasks).length === 2000 && r.effects.some((e) => e.kind === 'archiveTasks' && e.tasks.length === 2000), 'a full board archives its old done tasks first (decision 27), then creates')
+  big = { ...big, tasks: many('todo') }
+  same(M.createTask(big, user, { title: 'Nueva' }, ctx()).error, 'cap', 'TEAM_TASKS_MAX live tasks: cap')
+  same(M.createTask({ ...store.rt, nextIds: { ...store.rt.nextIds, task: 100_000 } }, user, { title: 'x' }, ctx()).error, 'cap', 'past t-99999: cap')
+
+  // archiveSweep.
+  const mk = (id, extra = {}) => ({ ...t1, id, title: id, userOwned: [], ...extra })
+  const sweepRt = {
+    ...store.rt,
+    tasks: [mk('t-10', { state: 'done', stateSince: old }), mk('t-11', { blockedBy: ['t-10'] }), mk('t-12', { state: 'cancelled', stateSince: old }), mk('t-13', { state: 'done', stateSince: clock.now })],
+    comments: { 't-12': [{ id: 'm-1', target: 't-12', author: user, kind: 'comment', at: 1, text: 'x' }] },
+    queue: [{ id: 'q-1', agentId: 'dev-2', taskId: 't-12', sessionKey: 't-12', mode: 'exec', reason: 'assigned', createdAt: 1 }],
+    activeRuns: [], agents: idle, nextIds: { ...store.rt.nextIds, task: 14 },
+  }
+  r = M.archiveSweep(sweepRt, { now: clock.now })
+  same(r.rt.tasks.map((t) => t.id), ['t-10', 't-11', 't-13'], 'archiveSweep: an old done or cancelled task goes; one a live blockedBy names, and a recent one, stay')
+  check(r.rt.archivedTasks['t-12'] === 'cancelled' && !r.rt.comments['t-12'] && r.rt.queue.length === 0, 'its id stays known in archivedTasks; its comments and queue items go')
+  check(r.effects.some((e) => e.kind === 'archiveTasks' && e.tasks.length === 1 && e.tasks[0].id === 't-12') && r.effects.some((e) => e.kind === 'archiveComments' && e.target === 't-12'), 'the effects write the task and its comments to the archive')
+  check(M.archiveSweep(r.rt, { now: clock.now }).rt === r.rt, 'nothing more to sweep: the same rt')
+  check(!r.effects.some((e) => e.kind === 'disownWorktree'), 'a task with no worktree disowns nothing')
+  // B close: an archived task's worktree is disowned (an ordinary orphan of Settings > Git), never left owned by a task gone from the board.
+  const wt12 = { path: 'C:\\wt\\t-12', branch: 'sn/t-12', base: 'C:\\repo', baseBranch: 'main', slug: 't-12', owner: 'team:tm-0123456789ab:g1:t-12' }
+  const withWt = M.archiveSweep({ ...sweepRt, tasks: sweepRt.tasks.map((t) => (t.id === 't-12' ? { ...t, worktree: wt12 } : t)) }, { now: clock.now })
+  same(withWt.effects.filter((e) => e.kind === 'disownWorktree'), [{ kind: 'disownWorktree', taskId: 't-12', path: wt12.path, owner: wt12.owner }], 'archiveSweep: the worktree of an archived task is disowned through its effect, with its owner')
+  // A chain in either order: an old task a live one names stays, and so does the old blocker it names in turn.
+  for (const order of [['t-21', 't-22', 't-20'], ['t-20', 't-21', 't-22']]) {
+    const byId = { 't-20': mk('t-20', { state: 'done', stateSince: old }), 't-21': mk('t-21', { state: 'done', stateSince: old, blockedBy: ['t-20'] }), 't-22': mk('t-22', { blockedBy: ['t-21'] }) }
+    const chain = M.archiveSweep({ ...sweepRt, tasks: order.map((id) => byId[id]), comments: {}, queue: [], nextIds: { ...sweepRt.nextIds, task: 23 } }, { now: clock.now })
+    check(chain.rt.tasks.length === 3 && !chain.effects.length, `archiveSweep keeps a kept task's own blockers (order ${order.join(',')})`)
+  }
+  const onArchived = M.createTask(r.rt, user, { title: 'x', blockedBy: ['t-12'] }, ctx())
+  check(onArchived.ok && onArchived.result.task.state === 'blocked' && onArchived.rt.cards.some((c) => c.taskId === onArchived.result.task.id && c.from.why === 'depCancelled'), 'an archived blocker is known: an archived cancelled one blocks with a card')
+
+  // applyTool: roles, params, liveness (5.3).
+  const leadRun = admit('lead', undefined, 'lead', 'readonly')
+  start(leadRun)
+  const leadActor = { kind: 'agent', agentId: 'lead', runId: leadRun, roleKind: 'lead' }
+  const tool = (actor, method, params, extra = {}) => M.applyTool(store.rt, actor, { method, params, ...extra }, ctx())
+  tick()
+  r = tool(leadActor, 'team.task.create', { title: 'API de notas', blockedBy: ['t-1'], priority: 'high', assign: 'dev-2', noPlan: true })
+  commit(r, 'team.task.create')
+  const nid = r.result.id
+  check(/^t-\d+$/.test(nid) && task(nid).state === 'blocked' && task(nid).assignee === 'dev-2' && task(nid).needsPlan === false && task(nid).createdBy.kind === 'agent' && task(nid).createdBy.agentId === 'lead', 'team.task.create: {id}; blocked by t-1, assigned, no plan, created by the Lead')
+  const revN = task(nid).rev
+  r = tool(leadActor, 'team.task.update', { task: nid, title: 'API de notas v2', rev: revN })
+  commit(r, 'team.task.update')
+  same(r.result, { id: nid, rev: task(nid).rev }, 'team.task.update answers the rev the commit gave it')
+  check(task(nid).rev === revN + 1, 'one more than before')
+  same(tool(leadActor, 'team.task.update', { task: nid, title: 'x', rev: revN }).reason, 'rev', 'a stale --rev: conflict {rev}')
+  same(tool(leadActor, 'team.task.update', { task: nid, title: 'API de notas v2' }).result, { id: nid, rev: task(nid).rev }, 'an update that changes nothing keeps the rev')
+  same(json(tool(leadActor, 'team.task.update', { task: 't-1', title: 'Otro' })), { ok: false, error: 'user_owned', fields: ['title'] }, 'a field the user owns: user_owned')
+  same(tool(leadActor, 'team.task.update', { task: 't-1', assign: 'none' }).ok, true, '--assign none unassigns (nothing to unassign here: accepted)')
+  same(json(tool(leadActor, 'team.task.update', { task: placed, blockedBy: ['t-2'] })), { ok: false, error: 'user_owned', fields: ['state'] }, 'team.task.update --blocked-by that would move a task the user placed: user_owned [state]')
+  // B5 review, second round (a deviation of T20): needsPlan changes only while the task is in todo, from the Lead's
+  // team.task.update and from the user's edit alike, refused like repo and isolation (bad_request, the drawer's words).
+  check(task(free).state === 'blocked' && task(free).needsPlan === true && !task(free).userOwned.includes('needsPlan') && task('t-2').state === 'doing' && task('t-2').needsPlan === false, 'a blocked task whose plan nobody owns, and one in doing')
+  const freeBefore = task(free)
+  same(json(tool(leadActor, 'team.task.update', { task: free, needsPlan: false })), { ok: false, error: 'bad_request' }, 'team.task.update --no-plan on a blocked task: bad_request')
+  same(json(M.updateTask(store.rt, user, free, { needsPlan: false }, task(free).rev, ctx())), { ok: false, error: 'bad_request' }, 'the user\'s edit of it on a blocked task: bad_request too')
+  same(json(M.updateTask(store.rt, user, 't-2', { needsPlan: true }, task('t-2').rev, ctx())), { ok: false, error: 'bad_request' }, 'and on a task in doing (it would strand its exec phase)')
+  same(json(M.updateTask(store.rt, user, free, { needsPlan: false, title: 'Otro' }, task(free).rev, ctx())), { ok: false, error: 'bad_request' }, 'refused whole: a free field in the same edit does not land either')
+  check(tool(leadActor, 'team.task.update', { task: free, needsPlan: true }).ok && task(free) === freeBefore, 'its own value changes nothing, so it passes; nothing changed')
+  r = tool(leadActor, 'team.task.update', { task: placed, needsPlan: false })
+  commit(r, 'the Lead turns the plan off on a todo task')
+  check(task(placed).state === 'todo' && task(placed).needsPlan === false, 'in todo the Lead still sets it')
+  commit(M.updateTask(store.rt, user, placed, { needsPlan: true }, task(placed).rev, ctx()), 'the user turns it back on in todo')
+  check(task(placed).needsPlan === true && task(placed).userOwned.includes('needsPlan'), 'and so does the user (the field becomes the user\'s)')
+  same(tool(leadActor, 'team.task.create', { title: 'x', blocked_by: ['t-1'] }).error, 'bad_request', 'a param outside 5.3 is a shape error, never dropped silently')
+  same(tool(leadActor, 'team.task.create', { title: 7 }).error, 'bad_request', 'a param of the wrong type')
+  same(tool(leadActor, 'team.plan', { text: 'p' }).error, 'forbidden', 'a tool of another role')
+  same(tool(leadActor, 'team.hire', { text: 'p' }).error, 'bad_request', 'a terminal tool (B5) checks its params: a hire text that is not a role file')
+  // B7: a team note is a file, not runtime state: the store is untouched and the note rides as a teamNote effect.
+  r = tool(leadActor, 'team.note', { text: 'p' })
+  check(r.ok && r.rt === store.rt && JSON.stringify(r.effects) === JSON.stringify([{ kind: 'teamNote', runId: leadRun, text: 'p' }]), 'team.note: the runtime as it is, a teamNote effect (B7)')
+  same(tool(leadActor, 'team.show', {}).error, 'bad_request', 'reads never reach applyTool')
+  r = tool(leadActor, 'team.comment', { target: 'lead', text: 'Arm\u00E9 las tareas' })
+  commit(r, 'team.comment')
+  check(/^m-\d+$/.test(r.result.id) && store.rt.comments.lead.at(-1).forAgent === undefined, 'team.comment in the Lead thread: {id}, for nobody')
+  same(tool({ ...leadActor, runId: 'r-0000000000ee' }, 'team.comment', { target: 'lead', text: 'x' }).error, 'forbidden', 'a run that is not active: forbidden')
+  same(tool({ ...leadActor, agentId: 'dev' }, 'team.comment', { target: 'lead', text: 'x' }).error, 'forbidden', 'a run of another agent: forbidden')
+  commit(M.updateTask(store.rt, user, 't-3', { assignee: 'dev-2', isolation: 'main', needsPlan: false }, task('t-3').rev, ctx()), 'give t-3 to dev-2')
+  const devRun = admit('dev-2', 't-3', 'exec', 'total')
+  start(devRun)
+  const dev2 = { kind: 'agent', agentId: 'dev-2', runId: devRun, roleKind: 'dev' }
+  same(tool(dev2, 'team.task.create', { title: 'Sub' }).error, 'forbidden', 'a Dev creates only subtasks of its task')
+  same(tool(dev2, 'team.task.create', { title: 'Sub', parent: 't-1' }).error, 'forbidden', 'and only of the task it runs')
+  r = tool(dev2, 'team.task.create', { title: 'Sub', parent: 't-3' })
+  commit(r, 'a Dev subtask')
+  check(task(r.result.id).parentId === 't-3' && task(r.result.id).createdBy.agentId === 'dev-2', 'a Dev subtask names its parent')
+  same(tool(dev2, 'team.task.update', { task: 't-3', title: 'x' }).error, 'forbidden', 'only the Lead updates tasks')
+  check(tool(dev2, 'team.comment', { target: 't-1', text: '\u00BFqui\u00E9n dise\u00F1a?' }).ok, 'any role comments')
+  const concludedRt = { ...store.rt, activeRuns: store.rt.activeRuns.map((x) => (x.id === leadRun ? { ...x, concludedBy: { tool: 'ask', at: clock.now } } : x)) }
+  same(json(M.applyTool(concludedRt, leadActor, { method: 'team.comment', params: { target: 'lead', text: 'x' } }, ctx())), { ok: false, error: 'conflict', reason: 'concluded' }, 'after a terminal tool: conflict {concluded} (decision 35)')
+  commit(M.requestStop(store.rt, leadRun, 'user', { now: clock.now }), 'stop the Lead run')
+  same(tool(leadActor, 'team.comment', { target: 'lead', text: 'x' }).error, 'stopping', 'a stopping run writes no more')
+  check(tool(leadActor, 'team.comment', { target: 'lead', text: 'x' }, { viaBlock: true }).ok, 'a Codex block applied at close admits a stopping run')
+
+  // The board page and its cursor; the Lead's board summary; the drawer and the Lead thread views.
+  let page = M.boardPage(store.rt, teamId, v)
+  const counts = { todo: 0, doing: 0, review: 0, done: 0, blocked: 0 }
+  let gone = 0
+  for (const t of store.rt.tasks) { const c = M.columnOf(t); if (c) counts[c]++; else gone++ }
+  check(page.teamId === teamId && page.rev === store.rt.rev && page.done && page.cursor === null && page.tasks.length === store.rt.tasks.length, 'the desktop page: every live task, no cursor')
+  same(page.counts, counts, 'counts per column')
+  check(page.cancelled === gone && gone === 1, 'cancelled counted apart')
+  const colIdx = page.tasks.map((t) => (t.column ? M.BOARD_COLUMNS.indexOf(t.column) : 99))
+  check(colIdx.every((c, i) => i === 0 || colIdx[i - 1] <= c), 'board order: by column, cancelled last')
+  const doneRt = { ...store.rt, tasks: Array.from({ length: 250 }, (_, i) => ({ ...t1, id: `t-${i + 1}`, state: 'done', stateSince: 1000 + (i % 50) })), comments: {}, nextIds: { ...store.rt.nextIds, task: 251 } }
+  page = M.boardPage(doneRt, teamId, v)
+  check(page.tasks.length === M.BOARD_DONE_PAGE && !page.done && /^done\./.test(page.cursor), 'the newest 100 done, a cursor of the done column for the rest')
+  const seen = new Set(page.tasks.map((t) => t.id))
+  const newest = Math.min(...page.tasks.map((t) => t.stateSince))
+  let cursor = page.cursor
+  let pages = 0
+  let dup = false
+  let older = true
+  while (cursor && pages < 10) {
+    const p = M.boardPage(doneRt, teamId, v, { column: 'done', cursor, limit: 100 })
+    for (const t of p.tasks) { if (seen.has(t.id)) dup = true; seen.add(t.id); if (t.stateSince > newest) older = false }
+    cursor = p.cursor
+    pages++
+  }
+  check(seen.size === 250 && !dup && older && pages === 2, 'the done column pages the rest newest first, without a repeat or a gap (ties by id)')
+  check(M.boardPage(doneRt, teamId, v, { column: 'done', cursor: 'todo.1.2.3' }) === null && M.boardPage(doneRt, teamId, v, { cursor: 'done.1.2' }) === null && M.boardPage(doneRt, teamId, v, { column: 'todo', cursor: 'todo.x.1.2' }) === null && M.boardPage(doneRt, teamId, v, { column: 'done', cursor: 'done.1.2.3' }) === null, 'a cursor that does not parse for the column: null (bad_request)')
+  const todoRt = { ...doneRt, tasks: doneRt.tasks.slice(0, 5).map((t, i) => ({ ...t, state: 'todo', priority: i % 2 ? 'urgent' : 'low', createdAt: i })) }
+  const p1 = M.boardPage(todoRt, teamId, v, { column: 'todo', limit: 2 })
+  const p2 = M.boardPage(todoRt, teamId, v, { column: 'todo', limit: 10, cursor: p1.cursor })
+  same([...p1.tasks, ...p2.tasks].map((t) => t.id), ['t-2', 't-4', 't-1', 't-3', 't-5'], 'a column page in board order (priority band, then age), continued by its cursor')
+  // A cursor belongs to the column that minted it: a Por hacer cursor never pages Bloqueado (same key shape).
+  check(/^todo\./.test(p1.cursor) && M.boardPage(todoRt, teamId, v, { column: 'blocked', cursor: p1.cursor }) === null && M.boardPage(todoRt, teamId, v, { column: 'doing', cursor: p1.cursor }) === null && M.boardPage(todoRt, teamId, v, { column: 'done', cursor: p1.cursor }) === null, 'a cursor of another column: null (bad_request)', p1.cursor)
+  check(M.boardPage(todoRt, teamId, v, { column: 'blocked', cursor: p1.cursor.replace(/^todo\./, 'blocked.') }) !== null, 'the same key with its own column parses')
+  // A full board, half of it blocked{deps}: one id -> state lookup per board, never one per blocked card (it ran 0.6 s).
+  const half = Array.from({ length: 2000 }, (_, i) => ({ ...t1, id: `t-${i + 1}`, title: `T${i}`, userOwned: [], ...(i % 2 ? { state: 'blocked', blockedBy: [`t-${i}`], blocked: { reason: { kind: 'deps' }, resume: { state: 'todo', phase: 'none' }, at: 1 } } : {}) }))
+  // Work, not wall time (a loaded machine made a 50 ms bound flaky): every read of an element of `rt.tasks` is counted
+  // through a proxy, a new array as every commit makes one, so the lookup is built inside the counted call. A linear
+  // page reads each task a handful of times; one lookup per blocked card would read about 1000 x 1000 (or 1000 x 2000).
+  let reads = 0
+  const counted = new Proxy([...half], { get: (target, key, recv) => { if (typeof key === 'string' && /^\d+$/.test(key)) reads++; return Reflect.get(target, key, recv) } })
+  const halfRt = { ...store.rt, tasks: counted, comments: {}, nextIds: { ...store.rt.nextIds, task: 2001 } }
+  const t0 = Date.now()
+  const halfPage = M.boardPage(halfRt, teamId, v)
+  const ms = Date.now() - t0
+  const waiting = halfPage.tasks.filter((x) => x.blocked?.kind === 'deps')
+  check(halfPage.tasks.length === 2000 && waiting.length === 1000 && waiting.every((x) => x.blocked.waitingOn.length === 1 && x.blocked.waitingOn[0] === `t-${Number(x.id.slice(2)) - 1}`), 'every blocked{deps} card names what it waits on')
+  check(reads > 0 && reads <= 20 * half.length, `boardPage of 2000 tasks with 1000 blocked{deps} reads the tasks a bounded number of times, never once per card (${reads} reads, ${ms} ms)`)
+  // The counter would see a lookup per card: the same page with a find per blocked card reads far past the bound.
+  let slow = 0
+  const probe = new Proxy([...half], { get: (target, key, recv) => { if (typeof key === 'string' && /^\d+$/.test(key)) slow++; return Reflect.get(target, key, recv) } })
+  for (const t of half) if (t.blocked) probe.find((x) => x.id === t.blockedBy[0])
+  check(slow > 20 * half.length, `a lookup per blocked card is what the bound refuses (${slow} reads)`)
+  const bs = M.boardSummaryOf(store.rt)
+  check(bs.rows.length > 0 && bs.rows.every((x) => x.state !== 'done' && x.state !== 'cancelled'), 'the Lead board: open tasks only')
+  check(bs.rows.every((x, i, a) => i === 0 || M.PRIORITY_RANK[a[i - 1].priority] <= M.PRIORITY_RANK[x.priority]), 'most urgent first')
+  check(bs.counts.cancelled === 1 && Object.values(bs.counts).reduce((s, n) => s + n, 0) === store.rt.tasks.length, 'counts of every state')
+  check(bs.agents.some((a) => a.id === 'dev-2' && a.status === 'running' && a.taskId === 't-3') && bs.agents.length === store.rt.agents.length, 'the roster with what each one runs')
+  same(bs.untriaged, store.rt.tasks.filter((t) => t.state === 'todo' && !t.assignee).sort(M.compareTaskOrder).map((t) => t.id), 'untriaged: the unassigned todo tasks')
+  const d = M.taskDetail(store.rt, task('t-2'), { ...v, trusted: def, recent: [], commentsLimit: 1 })
+  check(d.comments.length === 1 && d.comments[0].id === 'm-2' && d.commentsCursor === 'm-2' && d.commentsArchived === 0 && d.body === task('t-2').body && d.reviewInfo.max === 3 && d.runs.length === 0, 'taskDetail: the newest comment page and its cursor')
+  const before = M.commentPage(store.rt, def.def, 't-2', { before: 2, limit: 5 })
+  check(before.comments.length === 1 && before.comments[0].id === 'm-1' && before.cursor === null, 'the page before the cursor')
+  const lv = M.leadView(store.rt, def.def, { recent: [], lastLineAt: () => undefined })
+  check(lv.agent && lv.agent.id === 'lead' && lv.messages.length === 2 && lv.messages[0].author === 'user' && lv.messages[0].queued && lv.messages[1].authorName === 'lead', 'leadView: the thread oldest first and the Lead card')
+}
+
+// ---- 2c. B4: R2 triages the Lead's untriaged tasks, a reassignment ends the old wake, capped loops ----------
+async function b4StoreChecks() {
+  const teamId = 'tm-0123456789ab'
+  const def = defOf([role('lead', 'lead'), role('dev', 'dev', 2), role('qa', 'qa')])
+  const clock = { now: 1_800_000_000_000 }
+  let seq = 0
+  const ctx = () => ({ now: clock.now, def, newRunId: () => `r-${String(++seq).padStart(12, '0')}`, newSessionId: () => `0000000${seq}-0000-4000-8000-000000000000` })
+  const timer = new M.DeadlineTimer(() => undefined, { now: () => clock.now, setTimeout: () => 0, clearTimeout: () => undefined })
+  const storeDeps = { dir: () => `/mem/${teamId}`, emit: () => undefined, timer, live: () => false, now: () => clock.now, fs: memFs(), log: () => undefined, strict: true, newGen: () => 'cafebabe' }
+  const { store } = M.TeamStore.load(storeDeps, teamId, def)
+  const commit = (res, label) => { check(res.ok, `${label} (${res.ok ? 'ok' : res.error})`); return store.commit(res, ['board']) }
+  commit(M.reconcileAgents(store.rt, ctx()), 'the roster')
+  const user = { kind: 'user', via: 'desktop' }
+  const lead = { kind: 'agent', agentId: 'lead', runId: 'r-0000000000ff', roleKind: 'lead' }
+  const task = (id) => store.rt.tasks.find((t) => t.id === id)
+
+  // Item 4: R2 (markStarting) of a Lead run sets triagedAt on every task its board listed as untriaged, only those.
+  commit(M.createTask(store.rt, user, { title: 'Sin asignar' }, ctx()), 'an unassigned user task')
+  commit(M.createTask(store.rt, user, { title: 'Otra sin asignar' }, ctx()), 'another one')
+  same(M.boardSummaryOf(store.rt).untriaged, ['t-1', 't-2'], 'both wait to be triaged')
+  const admitted = M.admitRun(store.rt, { agentId: 'lead', sessionKey: 'lead', mode: 'lead', reason: 'triage', since: clock.now, priority: 'normal', approved: false, bypassCooldown: false }, { sessionKey: 'lead', resume: null, cwd: 'C:\\r', profile: 'readonly', sysHash: 'h' }, ctx())
+  commit(admitted, 'a Lead run admitted')
+  clock.now += 1000
+  commit(M.markStarting(store.rt, admitted.result.run.id, { pid: 42, delivered: { comments: [], cards: [], approvals: [] }, triaged: ['t-1'] }, ctx()), 'R2 of the Lead run')
+  check(task('t-1').triagedAt === clock.now && task('t-2').triagedAt === undefined, 'R2 triages the tasks the Lead was shown, and only those')
+  same(M.boardSummaryOf(store.rt).untriaged, ['t-2'], 'so the triage level no longer names t-1 (the Lead is not woken for it again)')
+
+  // Item 4: a reassignment, by the user or the Lead, ends the old assignee's wake on the task (and its queue item).
+  const withNext = (id, agentId, mode = 'plan') => {
+    const rt = store.rt
+    return { ok: true, rt: { ...rt, tasks: rt.tasks.map((t) => (t.id === id ? { ...t, next: { agentId, mode, reason: 'continuation', since: clock.now } } : t)) }, effects: [], result: undefined }
+  }
+  commit(M.createTask(store.rt, user, { title: 'Login', assignee: 'dev' }, ctx()), 'a task for dev')
+  commit(withNext('t-3', 'dev'), 'dev has a wake on t-3')
+  commit(M.updateTask(store.rt, user, 't-3', { assignee: 'dev-2' }, task('t-3').rev, ctx()), 'the user reassigns it')
+  check(task('t-3').assignee === 'dev-2' && task('t-3').next === undefined, 'a user reassignment clears task.next')
+  commit(withNext('t-3', 'dev-2'), 'dev-2 has a wake on t-3')
+  commit(M.releaseOwned(store.rt, 't-3', ['assignee'], { now: clock.now }), 'the user hands the assignee back')
+  commit(M.updateTask(store.rt, lead, 't-3', { assignee: 'dev' }, undefined, ctx()), 'the Lead reassigns it')
+  check(task('t-3').assignee === 'dev' && task('t-3').next === undefined, 'a Lead reassignment clears it too')
+  commit(withNext('t-3', 'dev'), 'the new assignee gets a wake')
+  commit(M.updateTask(store.rt, user, 't-3', { title: 'Login v2' }, task('t-3').rev, ctx()), 'an edit of another field')
+  check(task('t-3').next?.agentId === 'dev', 'an edit that is no reassignment keeps the wake')
+  commit(withNext('t-3', 'qa'), 'a wake of an agent that does not run this phase')
+  commit(M.reconcileTasks(store.rt, def.def, ctx()), 'a reconcile')
+  check(task('t-3').next === undefined, 'reconcileTasks drops a wake of an agent that is not the one of its phase (a reassignment that bypassed the edit)')
+  commit(M.enqueue(store.rt, [{ agentId: 'dev', taskId: 't-3', sessionKey: 't-3', mode: 'plan', reason: 'assigned', since: clock.now, priority: 'normal', approved: false, bypassCooldown: false }], ctx()), 'its Por despachar item')
+  check(store.rt.queue.some((q) => q.taskId === 't-3' && q.agentId === 'dev'), 'queued for dev')
+  commit(M.updateTask(store.rt, user, 't-3', { assignee: 'dev-2' }, task('t-3').rev, ctx()), 'reassigned again')
+  check(!store.rt.queue.some((q) => q.taskId === 't-3'), 'the old assignee\'s queue item goes with the reassignment')
+
+  // reconcileTasks raises a card once: a dismissed depCancelled card is not raised again by the next pass; an unblock
+  // window that refused a task raises unblockLimit once in that window and names its end as the pass's next deadline.
+  const patchTask = (id, patch) => ({ ok: true, rt: { ...store.rt, tasks: store.rt.tasks.map((t) => (t.id === id ? { ...t, ...patch } : t)) }, effects: [], result: undefined })
+  const dismissAll = (why) => ({ ok: true, rt: { ...store.rt, cards: store.rt.cards.map((c) => (c.from.kind === 'system' && c.from.why === why ? { ...c, state: 'dismissed' } : c)) }, effects: [], result: undefined })
+  const cardsOf = (id, why) => store.rt.cards.filter((c) => c.taskId === id && c.from.kind === 'system' && c.from.why === why)
+  commit(M.createTask(store.rt, user, { title: 'Bloqueante' }, ctx()), 'a blocker')
+  const blocker = store.rt.tasks[store.rt.tasks.length - 1].id
+  commit(M.createTask(store.rt, user, { title: 'Espera', blockedBy: [blocker] }, ctx()), 'a task blocked by it')
+  const waiter = store.rt.tasks[store.rt.tasks.length - 1].id
+  check(task(waiter).state === 'blocked' && task(waiter).blocked.reason.kind === 'deps', 'blocked{deps}')
+  commit(patchTask(blocker, { state: 'cancelled', phase: 'none' }), 'the blocker cancelled')
+  commit(M.reconcileTasks(store.rt, def.def, ctx()), 'a pass')
+  check(cardsOf(waiter, 'depCancelled').length === 1 && cardsOf(waiter, 'depCancelled')[0].state === 'open', 'a cancelled blocker opens its depCancelled card')
+  commit(dismissAll('depCancelled'), 'the user dismisses it')
+  const quiet = M.reconcileTasks(store.rt, def.def, ctx())
+  check(quiet.ok && quiet.rt === store.rt && cardsOf(waiter, 'depCancelled').length === 1, 'the next pass does not raise it again (a dismissed card stays dismissed)')
+  commit(M.createTask(store.rt, user, { title: 'Previa' }, ctx()), 'another blocker')
+  const prior = store.rt.tasks[store.rt.tasks.length - 1].id
+  commit(M.createTask(store.rt, user, { title: 'Limitada', blockedBy: [prior] }, ctx()), 'a task blocked by it')
+  const limited = store.rt.tasks[store.rt.tasks.length - 1].id
+  const start = clock.now - 10 * 60_000
+  commit(patchTask(limited, { counters: { ...task(limited).counters, unblockWakes: 3, unblockWindowStart: start } }), 'three unblock wakes this hour')
+  commit(patchTask(prior, { state: 'done', phase: 'none' }), 'its blocker done')
+  const refusedPass = M.reconcileTasks(store.rt, def.def, ctx())
+  check(refusedPass.ok && refusedPass.result.nextAt === start + 60 * 60_000, `the refused unblock names the end of its window as the next deadline (${refusedPass.ok && refusedPass.result.nextAt})`)
+  commit(refusedPass, 'that pass')
+  check(task(limited).state === 'blocked' && cardsOf(limited, 'unblockLimit').length === 1, 'still blocked, one unblockLimit card')
+  commit(dismissAll('unblockLimit'), 'dismissed')
+  const again = M.reconcileTasks(store.rt, def.def, ctx())
+  check(again.ok && again.rt === store.rt && cardsOf(limited, 'unblockLimit').length === 1, 'not raised again in the same window')
+  clock.now = start + 60 * 60_000
+  commit(M.reconcileTasks(store.rt, def.def, ctx()), 'the pass at the end of the window')
+  check(task(limited).state === 'todo' && task(limited).counters.unblockWakes === 1 && task(limited).counters.unblockWindowStart === clock.now, 'the window over: the task unblocks, a new window')
+
+  // Item 6: a loop of blockers names its tasks, capped at the first CYCLE_SHOWN_MAX ids (a 2000-task loop stays short).
+  const N = 2000
+  const chain = Array.from({ length: N }, (_, i) => ({ id: `t-${i + 1}`, blockedBy: i === 0 ? [] : [`t-${i}`] }))
+  const loop = M.blockersCycle(chain, 't-1', [`t-${N}`])
+  check(loop.length === N + 1 && loop[0] === 't-1' && loop[1] === `t-${N}` && loop[N] === 't-1', 'a 2000-task loop: the path from t-1 back to t-1')
+  const capped = M.cappedLoop(loop)
+  check(capped.loop.length === M.CYCLE_SHOWN_MAX && capped.loop.every((x) => M.TASK_ID_RE.test(x)) && capped.more === N + 1 - M.CYCLE_SHOWN_MAX && M.cycleText(capped).endsWith(` -> ... (+${N + 1 - M.CYCLE_SHOWN_MAX} more)`) && M.cycleText(capped).length < 400, 'capped: the first 20 ids (task ids only), then how many more')
+  same(M.cappedLoop(['t-1', 't-3', 't-1']), { loop: ['t-1', 't-3', 't-1'], more: 0 }, 'a short loop stays whole')
+  check(M.cycleText(null) === '' && M.cycleLoopOf(undefined) === null && M.cycleLoopOf(['t-1', 't-3']) === null && M.cycleLoopOf({ loop: ['t-1', 3] }) === null && M.cycleLoopOf({ loop: ['t-1', '<b>'] }) === null && M.cycleLoopOf({ loop: Array(21).fill('t-1') }) === null, 'cycleLoopOf: only a CycleLoop of task ids within the cap')
+  same(M.cycleLoopOf({ loop: ['t-1', 't-2'], more: -3 }), { loop: ['t-1', 't-2'], more: 0 }, 'a bad count reads as none')
+  const base = store.rt.tasks[0]
+  const big = { ...store.rt, tasks: chain.map((c) => ({ ...base, id: c.id, title: c.id, blockedBy: c.blockedBy, userOwned: [] })), nextIds: { ...store.rt.nextIds, task: N + 1 } }
+  const refused = M.updateTask(big, user, 't-1', { blockedBy: [`t-${N}`] }, base.rev, ctx())
+  check(!refused.ok && refused.error === 'cycle' && refused.current.loop.length === M.CYCLE_SHOWN_MAX && refused.current.more === N + 1 - M.CYCLE_SHOWN_MAX, 'updateTask refuses the 2000-task loop with the capped loop as current')
+  // The CLI path (teamCtl) prints that loop; the message stays short.
+  const ctl = M.createTeamCtl({
+    live: () => ({ teamId, run: { id: 'r-0123456789ab', agentId: 'lead', roleId: 'lead', roleKind: 'lead', mode: 'lead', state: 'running' }, agent: { id: 'lead', roleKind: 'lead' }, def: { def: {} } }),
+    read: () => ({ ok: true, data: {} }),
+    apply: () => refused,
+  })
+  const resp = await ctl.handle('team.task.update', { task: 't-1', blockedBy: [`t-${N}`] }, { runId: 'r-0123456789ab', teamId, agentId: 'lead', roleKind: 'lead' })
+  check(!resp.ok && resp.error.code === 'bad_request' && resp.error.message.startsWith(`--blocked-by makes a loop of blockers: t-1 -> t-${N} -> t-${N - 1}`) && resp.error.message.endsWith(`... (+${N + 1 - M.CYCLE_SHOWN_MAX} more)`) && resp.error.message.length < 500, `the CLI path names the loop, capped (${resp.error && resp.error.message.length} chars)`)
+  check(resp.data.loop.length === M.CYCLE_SHOWN_MAX && resp.data.loop[0] === 't-1' && resp.data.loopMore === N + 1 - M.CYCLE_SHOWN_MAX, 'and as fields: data.loop (20 ids) and data.loopMore')
+
+  // Item 5 of the B4 integration: Despachar todo names in `approved` only what it approved now.
+  const qRt = { ...store.rt, queue: [{ id: 'q-1', agentId: 'dev', sessionKey: 't-3', mode: 'exec', reason: 'assigned', createdAt: 1, approvedAt: 5, approvedBy: user }, { id: 'q-2', agentId: 'dev-2', sessionKey: 'free', mode: 'free', reason: 'interrupted', createdAt: 2 }] }
+  const all = M.queueDecide(qRt, user, 'all', true, ctx())
+  check(all.ok && JSON.stringify(all.result.approved) === '["q-2"]' && all.rt.queue[0].approvedAt === 5 && all.rt.queue[1].approvedAt === clock.now, `'all' approves only the items still waiting and answers only those (${all.ok && JSON.stringify(all.result.approved)})`)
+  const again2 = M.queueDecide(all.rt, user, 'all', true, ctx())
+  check(again2.ok && again2.result.approved.length === 0 && again2.rt === all.rt && again2.effects.some((e) => e.kind === 'dispatch'), "'all' again: nothing newly approved, nothing changed (a pass still runs)")
+  const one = M.queueDecide(all.rt, user, 'q-1', true, ctx())
+  check(one.ok && JSON.stringify(one.result.approved) === '["q-1"]' && one.rt.queue[0].approvedAt === 5, 'one item already dispatched: named, its first approval kept')
+}
+
+// ---- 3. TeamStore -------------------------------------------------------------------------------
+function storeChecks(tmp) {
+  const dir = path.join(tmp, 'store', 'tm-0123456789ab')
+  const clock = manualClock()
+  const timer = new M.DeadlineTimer((key) => { if (key === 'flush:tm-0123456789ab') store.flushSync() }, clock.deps)
+  let live = true
+  const emits = []
+  const logs = []
+  const writes = []
+  const realFs = { readFileSync: fs.readFileSync, writeFileSync: fs.writeFileSync, renameSync: fs.renameSync, mkdirSync: fs.mkdirSync, rmSync: fs.rmSync, appendFileSync: fs.appendFileSync, statSync: fs.statSync }
+  const spyFs = { ...realFs, renameSync: (a, b) => { writes.push(path.basename(b)); return fs.renameSync(a, b) } }
+  const deps = { dir: () => dir, emit: (scopes, hint) => emits.push({ scopes, hint }), timer, live: () => live, now: () => clock.now, fs: spyFs, log: (l) => logs.push(l), strict: true, newGen: () => 'cafebabe' }
+  let { store, repaired } = M.TeamStore.load(deps, 'tm-0123456789ab', null)
+  check(store.rt.rev === 0 && store.rt.gen === 'cafebabe' && repaired.length === 0, 'a missing state is a fresh runtime with the minted gen')
+  check(timer.has('flush:tm-0123456789ab'), 'a fresh runtime is written after the debounce')
+  check(Object.isFrozen(store.rt) && Object.isFrozen(store.rt.agents), 'strict mode deep-freezes rt')
+  clock.advance(M.TEAM_FLUSH_MS)
+  check(fs.existsSync(path.join(dir, 'state.json')) && !fs.readFileSync(path.join(dir, 'state.json')).subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])), 'state.json written, UTF-8 without BOM')
+  check(!fs.readdirSync(dir).some((f) => f.endsWith('.tmp')), 'no temp file left')
+  // commit, rev, task rev.
+  const task = { id: 't-1', rev: 1, title: 'A', body: '', state: 'todo', phase: 'none', priority: 'normal', repoId: 'main', isolation: 'main', needsPlan: false, blockedBy: [], createdBy: { kind: 'user', via: 'desktop' }, createdAt: 1, updatedAt: 1, stateSince: 1, review: { round: 0, max: 3 }, userOwned: [], counters: { noProgress: 0, continuations: 0, retries: 0, interrupts: 0, unblockWakes: 0, unblockWindowStart: 0 } }
+  const rt0 = store.rt
+  const res = store.commit({ ok: true, rt: { ...rt0, tasks: [task], nextIds: { ...rt0.nextIds, task: 2 } }, effects: [], result: 'x' }, ['board'], { taskId: 't-1' })
+  check(res.ok && res.result === 'x' && store.rt.rev === 1 && store.rt.tasks[0].rev === 1, 'commit bumps rt.rev; a new task keeps its rev')
+  same(emits.at(-1), { scopes: ['board'], hint: { taskId: 't-1' } }, 'commit emits its scopes and hint')
+  const t1 = store.rt.tasks[0]
+  store.commit({ ok: true, rt: { ...store.rt, tasks: [{ ...t1, title: 'B' }] }, effects: [], result: undefined }, ['task'])
+  check(store.rt.rev === 2 && store.rt.tasks[0].rev === 2 && store.rt.tasks[0].title === 'B', 'a changed task object gets rev + 1')
+  const kept = store.rt.tasks[0]
+  store.commit({ ok: true, rt: { ...store.rt, autoDispatch: true }, effects: [], result: undefined }, ['team'])
+  check(store.rt.tasks[0] === kept && store.rt.tasks[0].rev === 2, 'an untouched task keeps its rev')
+  const before = store.rt
+  check(store.commit({ ok: false, error: 'conflict', reason: 'rev' }, ['task']).ok === false && store.rt === before, 'a failed result changes nothing')
+  check(store.commit({ ok: true, rt: before, effects: [], result: undefined }, ['task']).ok && store.rt.rev === before.rev, 'an unchanged rt is not committed')
+  assert.throws(() => store.commit({ ok: true, rt: { ...store.rt, agents: [{ id: 'dev', roleId: 'dev', roleKind: 'dev', provider: 'claude', status: 'running', paused: false, sessions: {}, interrupts: 0 }] }, effects: [], result: undefined }, ['agents']), /I2/); checks++
+  check(store.rt === before, 'a commit that breaks an invariant (strict) does not land')
+  // debounce: one timer for a burst, written once due.
+  check(timer.has('flush:tm-0123456789ab'), 'a dirty commit arms flush')
+  const at = timer.at('flush:tm-0123456789ab')
+  clock.advance(100)
+  store.commit({ ok: true, rt: { ...store.rt, autoDispatch: false }, effects: [], result: undefined }, ['team'])
+  check(timer.at('flush:tm-0123456789ab') === at, 'a burst keeps the first deadline (250 ms debounce)')
+  writes.length = 0
+  clock.advance(M.TEAM_FLUSH_MS)
+  same(writes, ['state.json'], 'the debounce writes state.json once')
+  check(JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).rev === store.rt.rev, 'state.json holds the last rev')
+  check(store.lastBytes === Buffer.byteLength(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')), 'lastBytes is the size written')
+  writes.length = 0
+  store.flushSync()
+  check(writes.length === 0, 'flushSync of a clean store writes nothing (idempotent)')
+  // not live: commits flush synchronously.
+  live = false
+  store.commit({ ok: true, rt: { ...store.rt, autoDispatch: true }, effects: [], result: undefined }, ['team'])
+  check(writes.length === 1 && !timer.has('flush:tm-0123456789ab'), 'a commit while not live flushes at once')
+  live = true
+  // runs.json before state.json; recentRuns.
+  const run = { id: 'r-0123456789ab', agentId: 'dev', roleId: 'dev', roleKind: 'dev', sessionKey: 'free', provider: 'claude', profile: 'total', resumed: false, cwd: 'C:\\r', repoId: 'main', mode: 'free', trigger: { reason: 'manual', by: 'user' }, state: 'succeeded', reachedRunning: true, resultSeen: true, queuedAt: 1, endedAt: 2 }
+  writes.length = 0
+  store.commit({ ok: true, rt: { ...store.rt, autoDispatch: false }, effects: [], result: undefined }, ['team'])
+  store.recordRun(run)
+  store.flushSync()
+  same(writes, ['runs.json', 'state.json'], 'a flush writes runs.json before state.json')
+  check(store.recentRuns().length === 1 && store.recentRuns(1)[0].id === run.id, 'recentRuns holds the ring')
+  store.recordRun({ ...run, summary: 'again' })
+  check(store.recentRuns().length === 1 && store.recentRuns()[0].summary === 'again', 'recordRun replaces by id')
+  // setNeedsSeen: no rev, no emit.
+  const rev = store.rt.rev
+  const nEmits = emits.length
+  store.setNeedsSeen(['trust', 'k-1'])
+  check(store.rt.rev === rev && emits.length === nEmits && same0(store.rt.needsSeen, ['trust', 'k-1']), 'setNeedsSeen marks dirty without rev or emit')
+  store.appendArchive('tasks', [{ id: 't-9' }])
+  store.appendArchive('../x', [{ id: 't-9' }])
+  check(fs.readFileSync(path.join(dir, 'archive', 'tasks.jsonl'), 'utf8') === '{"id":"t-9"}\n' && !fs.existsSync(path.join(dir, 'x.jsonl')), 'appendArchive appends jsonl to a known file only')
+  store.dispose()
+  check(!timer.has('flush:tm-0123456789ab') && JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')).needsSeen.length === 2, 'dispose flushes and clears the key')
+
+  // terminal wins at load: a crash between runs.json and state.json.
+  const st = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'))
+  st.agents = [{ id: 'dev', roleId: 'dev', roleKind: 'dev', provider: 'claude', status: 'running', paused: false, runId: run.id, sessions: {}, interrupts: 0 }]
+  st.activeRuns = [{ ...run, state: 'running' }]
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(st))
+  ;({ store, repaired } = M.TeamStore.load({ ...deps, fs: realFs }, 'tm-0123456789ab', null))
+  check(store.rt.activeRuns.length === 0 && store.rt.agents[0].status === 'idle' && store.rt.agents[0].runId === undefined && repaired.some((r) => r.includes(run.id)), 'a run terminal in runs.json wins over its active copy')
+  store.dispose()
+
+  // B9 review: the load hands back the effects of its reaper step (TeamService runs them on the store: the comments a
+  // held Lead's escalation note archives from a full thread), and a runtime that step moved without reaping a run is
+  // written, so an archive appended at load never comes back from the old state.json.
+  const archived = { kind: 'archiveComments', target: 'lead', comments: [{ id: 'm-1', target: 'lead', author: { kind: 'system' }, kind: 'system', at: 1, text: 'a' }] }
+  const movedLoad = M.TeamStore.load({ ...deps, fs: realFs, reap: (rt) => ({ ok: true, rt: { ...rt, autoDispatch: !rt.autoDispatch }, effects: [archived], result: { reaped: [] } }) }, 'tm-0123456789ab', null)
+  same(movedLoad.effects, [archived], 'the load hands back the reaper step\'s effects')
+  check(movedLoad.reaped.length === 0 && timer.has('flush:tm-0123456789ab'), 'a runtime the reaper step moved without reaping a run is written')
+  movedLoad.store.dispose()
+  const stillLoad = M.TeamStore.load({ ...deps, fs: realFs, reap: (rt) => ({ ok: true, rt, effects: [], result: { reaped: [] } }) }, 'tm-0123456789ab', null)
+  check(stillLoad.effects.length === 0 && stillLoad.repaired.length === 0 && !timer.has('flush:tm-0123456789ab'), 'a reaper step that moved nothing: no effect and nothing to write')
+  stillLoad.store.dispose()
+
+  // salvage: a bad element is dropped and named.
+  const st2 = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'))
+  st2.agents.push({ id: 'broken' })
+  st2.cards = [{ junk: true }]
+  st2.nextIds = { task: 'x' }
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(st2))
+  ;({ store, repaired } = M.TeamStore.load({ ...deps, fs: realFs }, 'tm-0123456789ab', null))
+  check(store.rt.agents.length === 1 && store.rt.cards.length === 0 && repaired.includes('agents[1]') && repaired.includes('cards[0]') && repaired.includes('nextIds'), 'salvage drops bad elements and falls back per field')
+  check(store.rt.nextIds.task === 2, 'a salvaged counter is raised above the kept ids')
+  store.dispose()
+
+  // B5 integration item 4: the schema keeps a permission approval's denied commands and a task's QA diff stat (zod
+  // strips an unlisted key of a listed object).
+  const diffStat = { files: 1, insertions: 4, deletions: 2, top: [{ path: 'src/a.ts', add: 4, del: 2 }], at: 5 }
+  const perm = { id: 'a-1', taskId: 't-1', state: 'pending', decider: 'user', createdAt: 1, createdBy: { kind: 'system' }, kind: 'permission', payload: { roleId: 'dev', runId: 'r-0123456789ab', tools: ['Bash(npm test:*)'], denied: ['npm test -- --watch'] } }
+  const sv = M.salvageRuntime({ teamId: 'tm-0123456789ab', gen: 'cafebabe', rev: 3, tasks: [{ ...task, diffStat }], approvals: [perm], nextIds: { task: 2, comment: 1, approval: 2, card: 1, queue: 1 } }, 'tm-0123456789ab', 'cafebabe')
+  same([sv.rt.approvals[0]?.payload.denied, sv.rt.tasks[0]?.diffStat], [['npm test -- --watch'], diffStat], 'denied and diffStat survive a load')
+  check(!sv.repaired.some((r) => r.startsWith('tasks') || r.startsWith('approvals')), 'with nothing repaired')
+  // B6 review, second round: a failed integrate keeps its verify note and land mode across a load; a value this build
+  // does not know (a newer build's) drops that field only, never the task.
+  const failedInt = { state: 'failed', attempt: 2, step: 'land', error: 'timeout', verifyNote: 'leftStopped', landing: 'ffOnly', at: 7 }
+  const odd = { ...failedInt, verifyNote: 'fromANewerBuild', landing: 'alreadyMerged' }
+  const si = M.salvageRuntime({ teamId: 'tm-0123456789ab', gen: 'cafebabe', rev: 3, tasks: [{ ...task, integrate: failedInt }, { ...task, id: 't-2', integrate: odd }], nextIds: { task: 3, comment: 1, approval: 1, card: 1, queue: 1 } }, 'tm-0123456789ab', 'cafebabe')
+  same(si.rt.tasks[0]?.integrate, failedInt, 'a failed integrate keeps verifyNote and landing across a load')
+  same(si.rt.tasks[1]?.integrate, { state: 'failed', attempt: 2, step: 'land', error: 'timeout', at: 7 }, 'an unknown verifyNote or landing is dropped, the rest of the integrate kept')
+  check(si.rt.tasks.length === 2 && !si.repaired.some((r) => r.startsWith('tasks')), 'both tasks kept, nothing repaired')
+
+  // corrupt state -> moved aside, empty runtime with a stateReset card.
+  fs.writeFileSync(path.join(dir, 'state.json'), '{not json')
+  clock.now += 1000
+  ;({ store, repaired } = M.TeamStore.load({ ...deps, fs: realFs, newGen: () => '0badf00d' }, 'tm-0123456789ab', null))
+  check(fs.existsSync(path.join(dir, `state.corrupt-${clock.now}.json`)) && repaired.includes('state.json'), 'a corrupt state.json is moved to state.corrupt-<ts>.json')
+  const card = store.rt.cards[0]
+  check(store.rt.cards.length === 1 && card.from.kind === 'system' && card.from.why === 'stateReset' && card.from.vars.what === 'state' && card.state === 'open', 'a stateReset card is opened')
+  check(store.rt.gen === '0badf00d' && store.rt.tasks.length === 0, 'the reset runtime is empty with a new gen')
+  store.dispose()
+  fs.writeFileSync(path.join(dir, 'runs.json'), '[broken')
+  ;({ store, repaired } = M.TeamStore.load({ ...deps, fs: realFs }, 'tm-0123456789ab', null))
+  check(store.recentRuns().length === 0 && repaired.includes('runs.json'), 'a corrupt runs.json starts an empty ring')
+  store.dispose()
+  // A locked state.json (antivirus, EBUSY) fails the load and is never moved aside nor reset.
+  const lockedBefore = fs.readFileSync(path.join(dir, 'state.json'), 'utf8')
+  const lockedFs = { ...realFs, readFileSync: (p, enc) => { if (path.basename(p) === 'state.json') { const e = new Error('busy'); e.code = 'EBUSY'; throw e } return fs.readFileSync(p, enc) } }
+  assert.throws(() => M.TeamStore.load({ ...deps, fs: lockedFs }, 'tm-0123456789ab', null), /unreadable EBUSY/); checks++
+  check(fs.readFileSync(path.join(dir, 'state.json'), 'utf8') === lockedBefore && !fs.readdirSync(dir).some((f) => f.startsWith('state.corrupt-') && f !== `state.corrupt-${clock.now}.json`), 'a locked state.json stays as it was')
+  check(timer.size === 0, 'no key left after dispose')
+  timer.dispose()
+
+  // writeAtomicSync removes the temp file when the rename fails.
+  const target = path.join(tmp, 'atomic', 'x.json')
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  assert.throws(() => M.writeAtomicSync(target, 'x', {}, { writeFileSync: fs.writeFileSync, renameSync: () => { throw new Error('busy') }, rmSync: fs.rmSync })); checks++
+  check(fs.readdirSync(path.dirname(target)).length === 0, 'writeAtomicSync cleans its temp file on failure')
+}
+
+// ---- 4. registry ---------------------------------------------------------------------------------
+function registryChecks(tmp) {
+  const teams = path.join(tmp, 'reg', 'teams')
+  let clock = 1_800_000_000_000
+  const reg = new M.TeamRegistry({ file: () => path.join(teams, 'index.json'), trashDir: () => path.join(teams, '.trash'), now: () => clock })
+  check(reg.list().length === 0, 'a missing index registers nothing')
+  // normTrustPath resolves with the host path module: the win32 spellings only mean one folder on Windows.
+  const id = M.teamIdOf(path.join(tmp, 'Repos', 'App'))
+  check(/^tm-[a-f0-9]{12}$/.test(id) && id === M.teamIdOf(path.join(tmp, 'Repos', 'App') + path.sep), 'teamIdOf: a trailing separator is the same team')
+  if (process.platform === 'win32') {
+    check(M.teamIdOf('C:\\Repos\\App', 'win32') === M.teamIdOf('c:\\repos\\app\\', 'win32'), 'teamIdOf: case insensitive on win32')
+    check(M.teamIdOf('C:\\Repos\\App', 'win32') === 'tm-' + sha('c:\\repos\\app').slice(0, 12), 'teamIdOf is sha256(normTrustPath).slice(0, 12)')
+  } else {
+    check(M.teamIdOf('/r/App', 'linux') !== M.teamIdOf('/r/app', 'linux'), 'teamIdOf: case sensitive off Windows')
+    check(M.teamIdOf('/r/App', 'linux') === 'tm-' + sha('/r/App').slice(0, 12), 'teamIdOf is sha256(normTrustPath).slice(0, 12)')
+  }
+  reg.put({ id, repoRoot: path.join(tmp, 'repo'), name: 'App', baseBranch: 'main', createdAt: 1 })
+  check(new M.TeamRegistry({ file: () => path.join(teams, 'index.json'), trashDir: () => '' }).get(id)?.name === 'App', 'put persists the entry')
+  const raw = JSON.parse(fs.readFileSync(path.join(teams, 'index.json'), 'utf8'))
+  check(raw.v === 1 && raw.teams.length === 1, 'index.json {v:1, teams}')
+  fs.writeFileSync(path.join(teams, 'index.json'), JSON.stringify({ v: 1, teams: [raw.teams[0], { id: 'bad' }, raw.teams[0]] }))
+  check(new M.TeamRegistry({ file: () => path.join(teams, 'index.json'), trashDir: () => '' }).list().length === 1, 'junk and duplicate entries are dropped')
+  fs.mkdirSync(path.join(teams, id), { recursive: true })
+  fs.writeFileSync(path.join(teams, id, 'state.json'), '{}')
+  // Finding 2: a move that fails (EBUSY from an antivirus, EPERM) keeps the entry and says so.
+  const trashLogs = []
+  const busyFs = { mkdirSync: fs.mkdirSync, renameSync: () => { const e = new Error('busy'); e.code = 'EBUSY'; throw e } }
+  const regBusy = new M.TeamRegistry({ file: () => path.join(teams, 'index.json'), trashDir: () => path.join(teams, '.trash'), now: () => clock, log: (l) => trashLogs.push(l), fs: busyFs })
+  check(regBusy.trash(id) === false && regBusy.get(id)?.name === 'App' && fs.existsSync(path.join(teams, id, 'state.json')), 'a failed move: false, the entry and the folder stay')
+  check(JSON.parse(fs.readFileSync(path.join(teams, 'index.json'), 'utf8')).teams.some((e) => e.id === id) && trashLogs.includes(`registry trash ${id} failed EBUSY`), 'index.json keeps the entry; the log has the code')
+  const reg2 = new M.TeamRegistry({ file: () => path.join(teams, 'index.json'), trashDir: () => path.join(teams, '.trash'), now: () => clock })
+  check(reg2.trash(id) === true, 'trash answers true when the folder moved')
+  check(!fs.existsSync(path.join(teams, id)) && fs.existsSync(path.join(teams, '.trash', `${id}-${clock}`, 'state.json')) && reg2.list().length === 0, 'trash moves teams/<id> to .trash/<id>-<ts> and drops the entry')
+  const goneId = M.teamIdOf(path.join(tmp, 'gone'))
+  reg2.put({ id: goneId, repoRoot: path.join(tmp, 'gone'), name: 'Gone', baseBranch: 'main', createdAt: 1 })
+  check(reg2.trash(goneId) === true && !reg2.get(goneId), 'a team without a folder (ENOENT): true, the entry goes')
+  check(reg2.trash('not-an-id') === false, 'an id off TEAM_ID_RE is never moved')
+  // purge by shape only.
+  const trash = path.join(teams, '.trash')
+  const old = clock - 31 * 86_400_000
+  const recent = clock - 86_400_000
+  fs.mkdirSync(path.join(trash, `tm-aaaaaaaaaaaa-${old}`), { recursive: true })
+  fs.mkdirSync(path.join(trash, `tm-bbbbbbbbbbbb-${recent}`), { recursive: true })
+  fs.mkdirSync(path.join(trash, 'tm-123456789012'), { recursive: true })
+  fs.writeFileSync(path.join(trash, 'tm-123456789012', `n-old-${old}.md`), 'x')
+  fs.writeFileSync(path.join(trash, 'tm-123456789012', `n-new-${recent}.md`), 'x')
+  fs.writeFileSync(path.join(trash, 'tm-123456789012', 'keep.md'), 'x')
+  fs.mkdirSync(path.join(trash, `other-${old}`), { recursive: true })
+  reg2.purge()
+  check(!fs.existsSync(path.join(trash, `tm-aaaaaaaaaaaa-${old}`)) && fs.existsSync(path.join(trash, `tm-bbbbbbbbbbbb-${recent}`)), 'purge removes deleted teams past 30 days only')
+  check(fs.existsSync(path.join(trash, 'tm-123456789012')) && !fs.existsSync(path.join(trash, 'tm-123456789012', `n-old-${old}.md`)) && fs.existsSync(path.join(trash, 'tm-123456789012', `n-new-${recent}.md`)) && fs.existsSync(path.join(trash, 'tm-123456789012', 'keep.md')), 'a tm-123456789012 note-trash folder is never removed whole; only stamped entries past 30 days go')
+  check(fs.existsSync(path.join(trash, `other-${old}`)), 'an unknown shape is left alone')
+
+  // An index.json that cannot be read (here a folder: EISDIR; EBUSY or EACCES alike) is never cached as empty.
+  const lockedDir = path.join(tmp, 'reg-locked', 'teams')
+  const lockedFile = path.join(lockedDir, 'index.json')
+  fs.mkdirSync(lockedFile, { recursive: true })
+  const regLogs = []
+  const reg3 = new M.TeamRegistry({ file: () => lockedFile, trashDir: () => path.join(lockedDir, '.trash'), now: () => clock, log: (l) => regLogs.push(l) })
+  assert.throws(() => reg3.list()); checks++
+  check(regLogs.some((l) => /^registry read failed E[A-Z]+$/.test(l)), 'the read error is logged with its code only')
+  assert.throws(() => reg3.put({ id, repoRoot: path.join(tmp, 'repo2'), name: 'Two', baseBranch: 'main', createdAt: 2 })); checks++
+  check(fs.statSync(lockedFile).isDirectory(), 'a put() while unreadable writes nothing')
+  fs.rmSync(lockedFile, { recursive: true })
+  fs.writeFileSync(lockedFile, JSON.stringify({ v: 1, teams: [{ id, repoRoot: path.join(tmp, 'repo'), name: 'App', baseBranch: 'main', createdAt: 1 }] }))
+  check(reg3.get(id)?.name === 'App', 'the next call reads the file again')
+  const id2 = M.teamIdOf(path.join(tmp, 'repo2'))
+  reg3.put({ id: id2, repoRoot: path.join(tmp, 'repo2'), name: 'Two', baseBranch: 'main', createdAt: 2 })
+  same(JSON.parse(fs.readFileSync(lockedFile, 'utf8')).teams.map((e) => e.name), ['App', 'Two'], 'and a later put() keeps the entries the file had')
+}
+
+// ---- 5. loader ------------------------------------------------------------------------------------
+function writeDef(repo, files, o = {}) {
+  for (const f of files) {
+    const p = path.join(repo, '.snagentsos', 'team', ...f.rel.split('/'))
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    let text = f.text
+    if (o.crlf) text = text.replace(/\n/g, '\r\n')
+    fs.writeFileSync(p, (o.bom ? '\uFEFF' : '') + text)
+  }
+}
+
+async function loaderChecks(tmp) {
+  const L = new M.TeamDefinitionLoader({ watch: () => ({ on() { return this }, close() {} }) })
+  const repo = path.join(tmp, 'ldr')
+  fs.mkdirSync(repo, { recursive: true })
+  check(json(await L.load(repo)).error === 'missing', 'no folder -> missing')
+  const files = json(M.renderTeamFiles({ ...json(M.defaultDraft('en')), goal: 'Ship it' }))
+  writeDef(repo, files)
+  const a = await L.load(repo)
+  check(!a.error && a.result.ok && a.files.length === files.length, 'the default template loads clean')
+  check(a.sha256 === sha(M.canonicalDefText(files)), 'the hash is sha256(canonicalDefText)')
+  check((await L.load(repo)) === a && !(await L.changed(repo)), 'cached by stamp: the same load, changed() false')
+  const crlf = path.join(tmp, 'ldr-crlf')
+  writeDef(crlf, files, { crlf: true, bom: true })
+  check((await L.load(crlf)).sha256 === a.sha256, 'CRLF and a BOM hash the same')
+  fs.writeFileSync(path.join(repo, '.snagentsos', 'team', 'roles', 'README.txt'), 'notes')
+  check(await L.changed(repo), 'a new file off DEF_REL_RE moves the stamp')
+  const b = await L.load(repo)
+  check(!b.error && b.files.length === files.length && b.sha256 === a.sha256, 'a file off DEF_REL_RE is not part of the definition nor of its hash')
+  check(b.result.ok && b.result.warnings.some((w) => w.code === 'bad_name' && w.file === 'roles/README.txt' && w.severity === 'warning'), 'but the parser names it (bad_name warning)')
+  fs.writeFileSync(path.join(repo, '.snagentsos', 'team', 'roles', 'README.txt'), 'longer notes, written again')
+  check(!(await L.changed(repo)), 'its text is never read: an edit of it does not move the stamp')
+  // A misnamed role file: a bad_name warning with its name (decision a), never read nor hashed.
+  const reads = []
+  const lstats = []
+  const spyFs = {
+    lstat: (p) => { lstats.push(path.basename(p)); return fs.promises.lstat(p) },
+    readdir: (p) => fs.promises.readdir(p),
+    readFile: (p, enc) => { reads.push(path.basename(p)); return fs.promises.readFile(p, enc) },
+    realpath: (p) => fs.promises.realpath(p),
+    mkdir: (p) => fs.promises.mkdir(p),
+  }
+  const LS = new M.TeamDefinitionLoader({ fs: spyFs, watch: () => ({ on() { return this }, close() {} }) })
+  const writer = path.join(repo, '.snagentsos', 'team', 'roles', 'Writer.md')
+  fs.writeFileSync(writer, '---\nname: Writer\nkind: dev\nprovider: claude\npermission: total\n---\nWrite.\n')
+  const mis = await LS.load(repo)
+  check(!mis.error && mis.result.ok && mis.result.warnings.some((e) => e.code === 'bad_name' && e.file === 'roles/Writer.md' && e.severity === 'warning'), 'roles/Writer.md: a bad_name warning that names the file')
+  check(mis.sha256 === a.sha256 && !mis.files.some((f) => f.rel === 'roles/Writer.md') && !reads.includes('Writer.md') && !reads.includes('README.txt'), 'a misnamed file is never read nor hashed')
+  fs.rmSync(writer)
+  check(await LS.changed(repo) && (await LS.load(repo)).result.ok, 'renamed away: the stamp moves')
+  // Dotfiles (a macOS resource fork, an editor temp file, even a link) are skipped before any lstat.
+  const roleDir = path.join(repo, '.snagentsos', 'team', 'roles')
+  const settled = await LS.load(repo)
+  fs.writeFileSync(path.join(roleDir, '._dev.md'), Buffer.from([0, 5, 22, 7]))
+  fs.writeFileSync(path.join(repo, '.snagentsos', 'team', 'routines', '.daily-summary.md.swp'), 'x')
+  fs.symlinkSync(path.join(tmp), path.join(roleDir, '.cache'), 'junction')
+  lstats.length = 0
+  reads.length = 0
+  check(!(await LS.changed(repo)) && (await LS.load(repo)) === settled, 'a dotfile never moves the stamp: the same load')
+  check(!lstats.some((n) => n.startsWith('.') && n !== '.snagentsos') && !reads.some((n) => n.startsWith('.')), 'a dotfile is never lstat-ed nor read (a dot-named link is not followed)')
+  check(settled.result.ok && same0(settled.result.warnings.map((w) => w.file), ['roles/README.txt']), 'and never shown as a warning (only the README is)')
+  fs.rmSync(path.join(roleDir, '._dev.md'))
+  fs.rmSync(path.join(repo, '.snagentsos', 'team', 'routines', '.daily-summary.md.swp'))
+  fs.rmSync(path.join(roleDir, '.cache'))
+  // isRealDir: what the reveal op opens.
+  check(await L.isRealDir(roleDir) && !(await L.isRealDir(path.join(roleDir, 'dev.md'))) && !(await L.isRealDir(path.join(roleDir, 'nope'))), 'isRealDir: a folder yes; a file or a missing path no')
+  fs.rmSync(path.join(repo, '.snagentsos', 'team', 'roles', 'README.txt'))
+  fs.appendFileSync(path.join(repo, '.snagentsos', 'team', 'roles', 'dev.md'), '\nMore.\n')
+  check(await L.changed(repo), 'an edit moves the stamp')
+  const c = await L.load(repo)
+  check(c.sha256 !== a.sha256, 'and re-hashes')
+  // links and junctions.
+  const jrepo = path.join(tmp, 'ldr-junction')
+  writeDef(jrepo, files.filter((f) => f.rel === 'team.md'))
+  fs.symlinkSync(path.join(repo, '.snagentsos', 'team', 'roles'), path.join(jrepo, '.snagentsos', 'team', 'roles'), 'junction')
+  check(json(await L.load(jrepo)).error === 'link', 'a junction (or symlink) roles folder is refused')
+  check(!(await L.isRealDir(path.join(jrepo, '.snagentsos', 'team', 'roles'))) && await L.isRealDir(path.join(jrepo, '.snagentsos', 'team')), 'isRealDir: a junction no')
+  const trepo = path.join(tmp, 'ldr-teamlink')
+  fs.mkdirSync(path.join(trepo, '.snagentsos'), { recursive: true })
+  fs.symlinkSync(path.join(repo, '.snagentsos', 'team'), path.join(trepo, '.snagentsos', 'team'), 'junction')
+  check(json(await L.load(trepo)).error === 'link', 'a linked team folder is refused')
+  const frepo = path.join(tmp, 'ldr-filelink')
+  writeDef(frepo, files.filter((f) => f.rel !== 'team.md'))
+  let fileLink = true
+  try { fs.symlinkSync(path.join(repo, '.snagentsos', 'team', 'team.md'), path.join(frepo, '.snagentsos', 'team', 'team.md'), 'file') } catch { fileLink = false }
+  if (fileLink) check(json(await L.load(frepo)).error === 'link', 'a symlinked team.md is refused')
+  const mrepo = path.join(tmp, 'ldr-misnamed-link')
+  writeDef(mrepo, files)
+  fs.symlinkSync(path.join(repo, '.snagentsos', 'team', 'roles'), path.join(mrepo, '.snagentsos', 'team', 'roles', 'Archive'), 'junction')
+  check(json(await L.load(mrepo)).error === 'link', 'a link under a name off DEF_REL_RE is still refused')
+  // caps.
+  const many = path.join(tmp, 'ldr-many')
+  writeDef(many, [files[0], ...Array.from({ length: 64 }, (_, i) => ({ rel: `roles/r${i}.md`, text: '---\nname: x\n---\n' }))])
+  check(json(await L.load(many)).error === 'too_many', 'more than 64 files -> too_many')
+  const manyOdd = path.join(tmp, 'ldr-many-odd')
+  writeDef(manyOdd, [files[0], ...Array.from({ length: 63 }, (_, i) => ({ rel: `roles/r${i}.md`, text: '---\nname: x\n---\n' })), { rel: 'routines/notes.txt', text: 'x' }])
+  check(json(await L.load(manyOdd)).error === 'too_many', 'a misnamed file counts for the 64')
+  const big = path.join(tmp, 'ldr-big')
+  writeDef(big, [{ rel: 'team.md', text: '---\nname: x\n---\n' + 'x'.repeat(64 * 1024) }])
+  check(json(await L.load(big)).error === 'too_large', 'a file over 64 KB -> too_large')
+  const total = path.join(tmp, 'ldr-total')
+  writeDef(total, [files[0], ...Array.from({ length: 9 }, (_, i) => ({ rel: `roles/r${i}.md`, text: 'x'.repeat(60 * 1024) }))])
+  check(json(await L.load(total)).error === 'too_large', 'more than 512 KB in all -> too_large')
+  // write.
+  const w = path.join(tmp, 'ldr-write')
+  fs.mkdirSync(w, { recursive: true })
+  same(await L.write(w, [{ rel: 'team.md', text: '---\r\nname: W\r\n---\r\n' }], { overwrite: false }), { ok: true }, 'write creates the folders and the file')
+  const written = fs.readFileSync(path.join(w, '.snagentsos', 'team', 'team.md'))
+  check(written.toString('utf8') === '---\nname: W\n---\n' && written[0] !== 0xef, 'written as LF, UTF-8 without BOM')
+  same(await L.write(w, [{ rel: 'team.md', text: 'x' }], { overwrite: false }), { ok: false, error: 'exists' }, 'overwrite false refuses an existing file')
+  same(await L.write(w, [{ rel: '../evil.md', text: 'x' }], { overwrite: true }), { ok: false, error: 'io' }, 'a rel off DEF_REL_RE is refused')
+  const wl = path.join(tmp, 'ldr-write-link')
+  fs.mkdirSync(path.join(wl, '.snagentsos'), { recursive: true })
+  fs.symlinkSync(path.join(w, '.snagentsos', 'team'), path.join(wl, '.snagentsos', 'team'), 'junction')
+  same(await L.write(wl, [{ rel: 'roles/x.md', text: 'x' }], { overwrite: true }), { ok: false, error: 'link' }, 'write never follows a linked folder')
+  check(!fs.existsSync(path.join(w, '.snagentsos', 'team', 'roles', 'x.md')), 'nothing was written through the link')
+}
+
+// ---- 6. TeamTrust ----------------------------------------------------------------------------------
+async function trustChecks(tmp) {
+  const L = new M.TeamDefinitionLoader({ watch: () => ({ on() { return this }, close() {} }) })
+  const repo = path.join(tmp, 'trust-repo')
+  const files = json(M.renderTeamFiles({ ...json(M.defaultDraft('es')), goal: 'Meta' }))
+  writeDef(repo, files)
+  const loaded = await L.load(repo)
+  const data = path.join(tmp, 'trust-data')
+  const snap = (id) => path.join(data, 'teams', id, 'trusted-def.json')
+  const store = new M.TrustStore({ file: () => path.join(data, 'trusted-teams.json') })
+  const roots = { 'tm-0123456789ab': repo }
+  const T = new M.TeamTrust(store, snap, (id) => roots[id] ?? null, () => 42)
+  check(T.state(repo, loaded, 'tm-0123456789ab') === 'untrusted' && T.snapshotState('tm-0123456789ab') === 'none', 'never trusted -> untrusted, no snapshot')
+  check(T.state(repo, { error: 'missing' }) === 'missing' && T.state(repo, { error: 'link' }) === 'invalid', 'missing and a load error')
+  const ok = T.approve('tm-0123456789ab', repo, loaded, M.goalHashOf('Meta'))
+  check(!ok.error && ok.sha256 === loaded.sha256 && ok.trustedAt === 42 && ok.def.name === loaded.result.def.name, 'approve returns the trusted definition')
+  check(T.state(repo, loaded, 'tm-0123456789ab') === 'trusted' && T.trusted('tm-0123456789ab')?.sha256 === loaded.sha256, 'trusted after approve')
+  const onDisk = JSON.parse(fs.readFileSync(snap('tm-0123456789ab'), 'utf8'))
+  check(onDisk.v === 1 && onDisk.sha256 === loaded.sha256 && onDisk.files.length === files.length, 'trusted-def.json {v:1, sha256, trustedAt, goalHash, files}')
+  check(new M.TrustStore({ file: () => path.join(data, 'trusted-teams.json') }).get(repo)?.sha256 === loaded.sha256, 'the TrustStore entry landed')
+  // a fresh instance re-verifies the snapshot from disk.
+  const T2 = new M.TeamTrust(new M.TrustStore({ file: () => path.join(data, 'trusted-teams.json') }), snap, (id) => roots[id] ?? null)
+  check(T2.trusted('tm-0123456789ab')?.def.roles.length === 4, 'a fresh instance reads the verified snapshot')
+  // edited snapshot -> bad -> changed.
+  const edited = { ...onDisk, files: onDisk.files.map((f) => (f.rel === 'roles/dev.md' ? { ...f, text: f.text + '\nrm -rf\n' } : f)) }
+  fs.writeFileSync(snap('tm-0123456789ab'), JSON.stringify(edited))
+  const T3 = new M.TeamTrust(new M.TrustStore({ file: () => path.join(data, 'trusted-teams.json') }), snap, (id) => roots[id] ?? null)
+  check(T3.snapshotState('tm-0123456789ab') === 'bad' && T3.trusted('tm-0123456789ab') === null && T3.state(repo, loaded, 'tm-0123456789ab') === 'changed', 'an edited trusted-def.json fails its check: changed')
+  // a TrustStore entry that does not match the snapshot.
+  fs.writeFileSync(snap('tm-0123456789ab'), JSON.stringify(onDisk))
+  const ts = JSON.parse(fs.readFileSync(path.join(data, 'trusted-teams.json'), 'utf8'))
+  for (const k of Object.keys(ts.entries)) ts.entries[k].sha256 = 'f'.repeat(64)
+  fs.writeFileSync(path.join(data, 'trusted-teams.json'), JSON.stringify(ts))
+  const T4 = new M.TeamTrust(new M.TrustStore({ file: () => path.join(data, 'trusted-teams.json') }), snap, (id) => roots[id] ?? null)
+  check(T4.snapshotState('tm-0123456789ab') === 'bad' && T4.state(repo, loaded, 'tm-0123456789ab') === 'changed', 'a TrustStore entry that does not match the snapshot: changed')
+  // approve answers io when setChecked fails, and puts the previous snapshot back.
+  const prev = fs.readFileSync(snap('tm-0123456789ab'), 'utf8')
+  const failing = { get: () => null, setChecked: () => false, delete() {} }
+  const T5 = new M.TeamTrust(failing, snap, (id) => roots[id] ?? null)
+  same(T5.approve('tm-0123456789ab', repo, loaded, 'g'), { error: 'io' }, 'approve answers io when setChecked fails')
+  check(fs.readFileSync(snap('tm-0123456789ab'), 'utf8') === prev, 'the previous snapshot is put back')
+  roots['tm-ffffffffffff'] = repo
+  same(T5.approve('tm-ffffffffffff', repo, loaded, 'g'), { error: 'io' }, 'io for a first trust too')
+  check(!fs.existsSync(snap('tm-ffffffffffff')), 'and no snapshot is left behind')
+  // TrustStore.setChecked and delete.
+  const s2 = new M.TrustStore({ file: () => path.join(data, 'ts2', 'trusted.json') })
+  check(s2.setChecked(repo, 'a'.repeat(64)) && !s2.setChecked(repo, 'nope'), 'setChecked: true when written, false for a bad hash')
+  s2.delete(repo)
+  check(s2.get(repo) === null && new M.TrustStore({ file: () => path.join(data, 'ts2', 'trusted.json') }).get(repo) === null, 'TrustStore.delete forgets the repo on disk')
+  fs.writeFileSync(path.join(data, 'blocker'), 'file')
+  const s3 = new M.TrustStore({ file: () => path.join(data, 'blocker', 'x', 'trusted.json') })
+  const warn = console.warn
+  console.warn = () => {}
+  try {
+    check(s3.setChecked(repo, 'a'.repeat(64)) === false && s3.get(repo) === null, 'a write that cannot land: false, and memory keeps nothing')
+  } finally {
+    console.warn = warn
+  }
+
+  // B close: a trusted-teams.json that exists but cannot be read right now (a folder here: EISDIR, like EBUSY or
+  // EACCES) is never taken as empty: nothing cached, nothing trusted, and no write from a map never read.
+  const lockedFile = path.join(data, 'ts-locked', 'trusted.json')
+  fs.mkdirSync(lockedFile, { recursive: true })
+  const s4 = new M.TrustStore({ file: () => lockedFile })
+  check(s4.get(repo) === null && s4.readable() === false, 'an unreadable trust file: get answers null and readable() false')
+  check(s4.setChecked(repo, 'b'.repeat(64)) === false && fs.statSync(lockedFile).isDirectory(), 'setChecked refuses (false, so approve answers io) and writes nothing')
+  s4.delete(repo)
+  check(fs.statSync(lockedFile).isDirectory(), 'delete writes nothing either')
+  fs.rmSync(lockedFile, { recursive: true })
+  const other = path.join(tmp, 'trust-other')
+  fs.writeFileSync(lockedFile, JSON.stringify({ version: 1, entries: { [M.normTrustPath(other)]: { sha256: 'c'.repeat(64), approvedAt: 1 } } }))
+  check(s4.readable() === true && s4.get(other)?.sha256 === 'c'.repeat(64), 'the same store reads the file once it can (no empty map was cached)')
+  check(s4.setChecked(repo, 'b'.repeat(64)) && Object.keys(JSON.parse(fs.readFileSync(lockedFile, 'utf8')).entries).length === 2, 'a trust then keeps every other approval')
+  fs.writeFileSync(path.join(data, 'ts-corrupt.json'), '{not json')
+  const s5 = new M.TrustStore({ file: () => path.join(data, 'ts-corrupt.json') })
+  check(s5.readable() && s5.get(repo) === null && s5.setChecked(repo, 'a'.repeat(64)), 'a corrupt file still reads as empty (nothing trusted) and a trust rewrites it')
+
+  // TeamTrust over an unreadable store or snapshot: 'unreadable', never 'bad' (no stateReset card), never cached.
+  let storeOk = false
+  const lockable = { get: (d) => (storeOk ? store.get(d) : null), readable: () => storeOk, setChecked: (d, s) => storeOk && store.setChecked(d, s), delete() {} }
+  const T6 = new M.TeamTrust(lockable, snap, (id) => roots[id] ?? null)
+  check(T6.snapshotState('tm-0123456789ab') === 'unreadable' && T6.trusted('tm-0123456789ab') === null, 'an unreadable TrustStore: unreadable, nothing trusted')
+  storeOk = true
+  check(T6.snapshotState('tm-0123456789ab') === 'ok' && T6.trusted('tm-0123456789ab') !== null, 'and the next read, once it can, verifies the snapshot (unreadable is never cached)')
+  const T7 = new M.TeamTrust(store, snap, (id) => roots[id] ?? null)
+  const snapText = fs.readFileSync(snap('tm-0123456789ab'), 'utf8')
+  fs.rmSync(snap('tm-0123456789ab'))
+  fs.mkdirSync(snap('tm-0123456789ab'))
+  check(T7.snapshotState('tm-0123456789ab') === 'unreadable' && T7.trusted('tm-0123456789ab') === null, 'an unreadable snapshot with a TrustStore entry: unreadable, not bad')
+  same(T7.approve('tm-0123456789ab', repo, loaded, 'g'), { error: 'io' }, 'approve over an unreadable snapshot answers io (it could not be put back)')
+  check(fs.statSync(snap('tm-0123456789ab')).isDirectory(), 'and touches nothing')
+  fs.rmSync(snap('tm-0123456789ab'), { recursive: true })
+  fs.writeFileSync(snap('tm-0123456789ab'), snapText)
+  check(T7.snapshotState('tm-0123456789ab') === 'ok', 'readable again: the same instance verifies it')
+}
+
+// ---- 7. TeamService on real repositories -----------------------------------------------------------
+let gitOk = true
+try { execFileSync('git', ['--version'], { stdio: 'ignore' }) } catch { gitOk = false }
+
+async function serviceChecks(tmp) {
+  const cleanEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(tmp, 'gitconfig') }
+  fs.writeFileSync(cleanEnv.GIT_CONFIG_GLOBAL, '[core]\n\tautocrlf = false\n[init]\n\tdefaultBranch = main\n')
+  for (const k of Object.keys(cleanEnv)) if (/^GIT_(DIR|WORK_TREE|INDEX_FILE)$/i.test(k)) delete cleanEnv[k]
+  const git = (cwd, ...args) => execFileSync('git', args, { cwd, env: cleanEnv, stdio: ['ignore', 'pipe', 'pipe'] }).toString()
+  const runner = M.createGitRunner({ env: () => M.gitEnv(cleanEnv) })
+  const makeRepo = (dir) => {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'README.md'), '# r\n')
+    git(dir, 'init', '-q', '-b', 'main')
+    git(dir, 'add', '-A')
+    git(dir, 'commit', '-qm', 'init')
+    return dir
+  }
+  const app = makeRepo(path.join(tmp, 'app'))
+  const outside = (dir) => { try { git(dir, 'rev-parse', '--show-toplevel'); return false } catch { return true } }
+
+  // resolveMainRoot: a linked worktree resolves to its main checkout.
+  git(app, 'worktree', 'add', '-q', path.join(tmp, 'app-wt'), '-b', 'side')
+  check((await M.resolveMainRoot(runner, path.join(tmp, 'app-wt'))) === app, 'resolveMainRoot: a linked worktree -> its main root')
+  fs.mkdirSync(path.join(app, 'src', 'deep'), { recursive: true })
+  check((await M.resolveMainRoot(runner, path.join(app, 'src', 'deep'))) === app, 'resolveMainRoot: a subfolder -> the main root')
+  const plain = path.join(tmp, 'plain')
+  fs.mkdirSync(plain)
+  if (outside(plain)) check((await M.resolveMainRoot(runner, plain)) === null, 'resolveMainRoot: not git -> null')
+  const bare = path.join(tmp, 'bare.git')
+  git(tmp, 'init', '-q', '--bare', bare)
+  check((await M.resolveMainRoot(runner, bare)) === null, 'resolveMainRoot: bare -> null')
+
+  const data = path.join(tmp, 'data')
+  const clock = manualClock()
+  const watchers = []
+  const fakeWatch = (p, opts, cb) => {
+    const w = { p, cb, closed: false, on() { return w }, close() { w.closed = true } }
+    watchers.push(w)
+    return w
+  }
+  const fireWatch = () => { for (const w of watchers) if (!w.closed) w.cb('change', 'x') }
+  let cfg = { settings: { labs: { teams: true, consoleChat: false }, language: 'es', worktreesRoot: '' } }
+  const emitted = []
+  const opened = []
+  const logs = []
+  // Electron's shell.openPath resolves '' when it opened, else an error string.
+  let openResult = ''
+  let renameFails = false
+  const registryFs = { mkdirSync: fs.mkdirSync, renameSync: (a, b) => { if (renameFails) { const e = new Error('busy'); e.code = 'EPERM'; throw e } return fs.renameSync(a, b) } }
+  const mk = (extra = {}) => new M.TeamService({
+    dataDir: () => data,
+    config: () => cfg,
+    git: runner,
+    emit: (e) => emitted.push(json(e)),
+    openPath: async (p) => { opened.push(p); return openResult },
+    registryFs,
+    log: (l) => logs.push(l),
+    now: () => clock.now,
+    timerDeps: clock.deps,
+    loader: new M.TeamDefinitionLoader({ watch: fakeWatch }),
+    strict: true,
+    ...extra,
+  })
+
+  // Labs off: disabled, no timer at all.
+  const off = mk()
+  await off.start({ settings: { labs: { teams: false } } })
+  same(await off.request({ op: 'list' }, 'desktop'), { ok: false, error: 'disabled' }, 'Labs off: teams:req answers disabled')
+  check(off.pendingTimers === 0 && clock.timers.size === 0, 'Labs off: zero DeadlineTimer keys and no platform timer')
+  off.dispose()
+
+  // index.json unreadable (a folder here: EISDIR, like EBUSY or EACCES): no empty registry for the session.
+  const data2 = path.join(tmp, 'data-locked')
+  const index2 = path.join(data2, 'teams', 'index.json')
+  fs.mkdirSync(index2, { recursive: true })
+  const broken = mk({ dataDir: () => data2 })
+  await broken.start(cfg)
+  same(await broken.request({ op: 'list' }, 'desktop'), { ok: false, error: 'io' }, 'an unreadable index.json: the request answers io, not disabled nor an empty list')
+  same(await broken.request({ op: 'list' }, 'desktop'), { ok: false, error: 'io' }, 'and every request tries the read again')
+  check(broken.pendingTimers === 0 && logs.some((l) => /^registry read failed E[A-Z]+$/.test(l)), 'nothing armed; the log has the error code')
+  fs.rmSync(index2, { recursive: true })
+  fs.writeFileSync(index2, JSON.stringify({ v: 1, teams: [{ id: M.teamIdOf(app), repoRoot: app, name: 'Locked', baseBranch: 'main', createdAt: 1 }] }))
+  const e2 = emitted.length
+  const relisted = await broken.request({ op: 'list' }, 'desktop')
+  check(relisted.ok && relisted.teams.length === 1 && relisted.teams[0].name === 'Locked', 'once readable, the next request enables and lists the registered team')
+  await settle()
+  check(emitted.slice(e2).some((e) => e.teamId === '' && e.rev === 0 && same0(e.scopes, ['list'])), 'the enable that finally ran ends with a list change')
+  broken.dispose()
+  same(await broken.request({ op: 'list' }, 'desktop'), { ok: false, error: 'disabled' }, 'a disposed service never enables again: disabled')
+  check(broken.team(M.teamIdOf(app)) === null && broken.pendingTimers === 0, 'and holds no team')
+
+  const svc = mk()
+  const e0 = emitted.length
+  await svc.start(cfg)
+  await settle()
+  check(emitted.slice(e0).some((e) => e.teamId === '' && e.rev === 0 && same0(e.scopes, ['list'])), 'enable() ends with a list change (a renderer that got disabled pulls the list)')
+  same(await svc.request({ op: 'list' }, 'desktop'), { ok: true, teams: [] }, 'Labs on, no teams: an empty list')
+  same(await svc.request({ op: 'setupProbe', dir: 'C:\\x' }, 'phone'), { ok: false, error: 'bad_request' }, 'a phone asking a desktop op: bad_request')
+  check((await svc.request({ op: 'list' }, 'phone')).ok, 'list is a phone op')
+  same(await svc.request({ op: 'get', teamId: 'tm-0123456789ab' }, 'desktop'), { ok: false, error: 'not_found' }, 'an unknown team: not_found')
+
+  // setupProbe.
+  if (outside(plain)) same(await svc.request({ op: 'setupProbe', dir: plain }, 'desktop'), { ok: false, error: 'not_git' }, 'probe of a folder outside git: not_git')
+  const probe = await svc.request({ op: 'setupProbe', dir: path.join(app, 'src') }, 'desktop')
+  check(probe.ok && probe.probe.repoRoot === app && probe.probe.repoName === 'app' && probe.probe.branch === 'main' && probe.probe.branches.includes('main') && probe.probe.branches.includes('side'), 'probe resolves the main root, branch and branches')
+  check(probe.probe.defaults.lang === 'es' && probe.probe.defaults.baseBranch === 'main' && !probe.probe.registered && !probe.probe.existing, 'probe defaults: es template on the current branch; nothing registered or existing')
+
+  // setupPreview.
+  const draft = { ...probe.probe.defaults, goal: 'Una app de notas', verify: '' }
+  const prev = await svc.request({ op: 'setupPreview', repoRoot: app, draft }, 'desktop')
+  const rendered = json(M.renderTeamFiles(draft))
+  check(prev.ok && prev.preview.hash === sha(M.canonicalDefText(rendered)) && prev.preview.issues.length === 0, 'preview: the hash of the files main renders, no issues')
+  same(prev.preview.files.map((f) => f.rel), rendered.map((f) => f.rel), 'preview lists every file')
+  check(prev.preview.files.every((f) => f.bytes === Buffer.byteLength(f.text)), 'preview bytes are UTF-8 bytes')
+  same(prev.preview.warnings, ['totalBypass', 'userAllow', 'noVerify', 'notCommitted'], 'preview warnings: Total, the user\'s own allow rules (B close), no verify, not committed')
+  const codexDraft = { ...draft, verify: 'npm test', roles: draft.roles.map((r) => (r.id === 'dev' ? { ...r, provider: 'codex', model: 'gpt-5', effort: 'medium' } : r.id === 'qa' ? { ...r, provider: 'codex', model: undefined } : r)) }
+  const cprev = await svc.request({ op: 'setupPreview', repoRoot: app, draft: codexDraft }, 'desktop')
+  same(cprev.preview.warnings, ['codexTotal', 'codexReadonlyBlock', 'userAllow', 'notCommitted'], 'preview warnings: Codex Total and Codex readonly; the Claude Lead keeps userAllow')
+  const allCodex = { ...codexDraft, roles: codexDraft.roles.map((r) => (r.provider === 'claude' ? { ...r, provider: 'codex', model: undefined, effort: undefined } : r)) }
+  const xprev = await svc.request({ op: 'setupPreview', repoRoot: app, draft: allCodex }, 'desktop')
+  check(xprev.ok && !xprev.preview.warnings.includes('userAllow'), 'no Claude role: no userAllow warning')
+  same(await svc.request({ op: 'setupPreview', repoRoot: path.join(app, 'src'), draft }, 'desktop'), { ok: false, error: 'bad_request', detail: 'not_main_root' }, 'preview of a subfolder: bad_request')
+
+  // setupWrite.
+  same(await svc.request({ op: 'setupWrite', repoRoot: app, draft, previewHash: 'a'.repeat(64) }, 'desktop'), { ok: false, error: 'changed' }, 'setupWrite with a mismatched preview hash: changed')
+  check(!fs.existsSync(path.join(app, '.snagentsos')), 'and nothing was written')
+  const w = await svc.request({ op: 'setupWrite', repoRoot: app, draft, previewHash: prev.preview.hash }, 'desktop')
+  check(w.ok && w.teamId === M.teamIdOf(app), 'setupWrite registers the team')
+  const teamId = w.teamId
+  for (const f of rendered) {
+    const buf = fs.readFileSync(path.join(app, '.snagentsos', 'team', ...f.rel.split('/')))
+    check(buf.toString('utf8') === f.text && buf[0] !== 0xef && !buf.includes(13), `written ${f.rel}: the rendered text, LF, UTF-8 without BOM`)
+  }
+  const ts = JSON.parse(fs.readFileSync(path.join(data, 'trusted-teams.json'), 'utf8'))
+  check(Object.values(ts.entries)[0].sha256 === prev.preview.hash, 'the written hash is trusted')
+  check(fs.existsSync(path.join(data, 'teams', teamId, 'trusted-def.json')) && JSON.parse(fs.readFileSync(path.join(data, 'teams', 'index.json'), 'utf8')).teams[0].id === teamId, 'snapshot and registry written under dataDir()/teams')
+  same(await svc.request({ op: 'setupWrite', repoRoot: app, draft, previewHash: prev.preview.hash }, 'desktop'), { ok: false, error: 'exists' }, 'a second setupWrite: exists')
+  let list = await svc.request({ op: 'list' }, 'desktop')
+  check(list.ok && list.teams.length === 1 && list.teams[0].trust === 'trusted' && list.teams[0].agents === 5 && list.teams[0].needsCount === 0 && list.teams[0].repoRoot === app, 'list: one trusted team with 5 agents and nothing that needs the user')
+  const get = await svc.request({ op: 'get', teamId }, 'desktop')
+  check(get.ok && get.team.goal === 'Una app de notas' && get.team.roles.length === 4 && get.team.baseBranch === 'main' && get.team.maxConcurrent === 2 && get.team.defIssues.length === 0, 'get: the definition summary')
+  const order = svc.trusted(teamId).def.roles.flatMap((r) => (r.id === 'dev' ? ['dev', 'dev-2'] : [r.id]))
+  same(svc.team(teamId).store.rt.agents.map((a) => a.id), order, 'the roster follows the trusted definition, in its role order')
+  same([...order].sort(), ['dev', 'dev-2', 'lead', 'qa', 'research'], 'lead, dev x2, qa and research')
+  check(emitted.some((e) => e.teamId === teamId && e.scopes.includes('list')), 'setup emits a list change')
+
+  // The trust gate: runs pass the gate while trusted (the B2 op answers unsupported).
+  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'cliOff' } }, 'trusted: runNow passes the trust gate (this suite has no CLI: deferred cliOff)')
+  same(await svc.request({ op: 'decide', teamId, approvalId: 'a-1', decision: 'approve' }, 'desktop'), { ok: false, error: 'not_found' }, 'decide (B5) of an approval that does not exist: not_found')
+  // B4 answers needs already (the Por despachar section reads its queue rows).
+  const nv = await svc.request({ op: 'needs', teamId }, 'desktop')
+  check(nv.ok && nv.needs.teamId === teamId && Array.isArray(nv.needs.queue) && nv.needs.trust === 'trusted', 'B4: needs answers the TeamNeedsView')
+  await boardServiceChecks(svc, teamId, emitted)
+
+  // Editing roles/dev.md asks to trust again and blocks runs (B1 acceptance).
+  const devFile = path.join(app, '.snagentsos', 'team', 'roles', 'dev.md')
+  fs.appendFileSync(devFile, '\nSiempre corr\u00E9 los tests.\n')
+  fireWatch()
+  check(clock.timers.size > 0, 'a watch event arms the defwatch deadline')
+  clock.advance(299)
+  await settle()
+  check(svc.team(teamId).trust === 'trusted', 'debounced: not yet re-checked at 299 ms')
+  clock.advance(1)
+  await until(() => svc.team(teamId).trust === 'changed', 5000, 'defwatch flip')
+  check(svc.team(teamId).trust === 'changed', 'the defwatch deadline flips the cached state to changed')
+  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'untrusted' }, 'changed: runNow deferred untrusted')
+  same(await svc.request({ op: 'kickoff', teamId }, 'desktop'), { ok: false, error: 'untrusted' }, 'changed: kickoff untrusted')
+  same(await svc.request({ op: 'resumeTask', teamId, taskId: 't-1' }, 'desktop'), { ok: false, error: 'untrusted' }, 'changed: resumeTask (it can start a run) untrusted')
+  same(await svc.request({ op: 'dispatch', teamId, queueId: 'all', go: false }, 'desktop'), { ok: true, approved: [], dropped: [] }, 'dispatch go:false is not gated (B4: an empty queue, nothing dropped)')
+  same(await svc.request({ op: 'dispatch', teamId, queueId: 'all', go: true }, 'desktop'), { ok: false, error: 'untrusted' }, 'dispatch go:true is')
+  list = await svc.request({ op: 'list' }, 'desktop')
+  check(list.teams[0].trust === 'changed' && list.teams[0].needsCount === 1, 'the trust need row counts in the badge')
+  check(emitted.some((e) => e.teamId === teamId && e.scopes.includes('team') && e.scopes.includes('needs')), 'the flip emits team and needs')
+  const diff = await svc.request({ op: 'trustDiff', teamId }, 'desktop')
+  check(diff.ok && diff.trust.approvedSha === prev.preview.hash && diff.trust.sha256 !== prev.preview.hash, 'trustDiff: the approved sha and the new one')
+  same(diff.trust.diff.files.map((f) => [f.rel, f.status]), [['roles/dev.md', 'changed']], 'trustDiff: only roles/dev.md changed')
+  check(diff.trust.diff.risks.some((r) => r.code === 'instructionsChanged' && r.roleId === 'dev'), 'trustDiff: instructionsChanged risk')
+  same(await svc.request({ op: 'trust', teamId, sha256: prev.preview.hash }, 'desktop'), { ok: false, error: 'changed' }, 'trust of a sha the disk no longer has: changed')
+  const tr = await svc.request({ op: 'trust', teamId, sha256: diff.trust.sha256 }, 'desktop')
+  check(tr.ok && tr.team.trust === 'trusted' && svc.team(teamId).trust === 'trusted', 'trust approves the shown sha')
+  check(svc.trusted(teamId).files.find((f) => f.rel === 'roles/dev.md').text.includes('Siempre corr'), 'runs read the newly trusted snapshot')
+  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'cliOff' } }, 'trusted again: runNow passes the trust gate')
+
+  // A misnamed file in roles/ never vanishes (decision a): a bad_name warning with its name in the view; the trust
+  // state, the sha and the runs are untouched, yet the renderer is told (the problems changed).
+  await settle()
+  const m0 = emitted.length
+  const misnamed = path.join(app, '.snagentsos', 'team', 'roles', 'Writer.md')
+  fs.writeFileSync(misnamed, '---\nname: Writer\n---\n')
+  fireWatch()
+  clock.advance(300)
+  await until(() => emitted.slice(m0).some((e) => e.teamId === teamId && e.scopes.includes('team')), 5000, 'misnamed emit')
+  const gm = await svc.request({ op: 'get', teamId }, 'desktop')
+  same(gm.team.defIssues, [{ file: 'roles/Writer.md', line: 0, code: 'bad_name', severity: 'warning' }], 'a misnamed role file: one bad_name warning with its name in the view')
+  check(gm.team.trust === 'trusted' && svc.team(teamId).trust === 'trusted' && gm.team.needsCount === 0, 'a warning never changes the trust state nor counts as a need')
+  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'deferred', defer: { reason: 'cliOff' } }, 'a misnamed role file does not block runs (past the trust gate)')
+  const dw = await svc.request({ op: 'trustDiff', teamId }, 'desktop')
+  check(dw.ok && dw.trust.sha256 === dw.trust.approvedSha && same0(dw.trust.issues, [{ file: 'roles/Writer.md', line: 0, code: 'bad_name', severity: 'warning' }]), 'trustDiff lists the warning too (same sha: nothing to trust)')
+  // One more misnamed file: another warning, another emit.
+  await settle()
+  const m1 = emitted.length
+  const misnamed2 = path.join(app, '.snagentsos', 'team', 'routines', 'Daily.md')
+  fs.writeFileSync(misnamed2, 'x')
+  fireWatch()
+  clock.advance(300)
+  await until(() => emitted.slice(m1).some((e) => e.teamId === teamId && e.scopes.includes('team')), 5000, 'second misnamed emit')
+  const gm2 = await svc.request({ op: 'get', teamId }, 'desktop')
+  same(gm2.team.defIssues.map((i) => [i.file, i.severity]), [['roles/Writer.md', 'warning'], ['routines/Daily.md', 'warning']], 'a second warning shows in the view')
+  // A dotfile is ignored entirely: no stamp move, no emit, no issue.
+  await settle()
+  const m2 = emitted.length
+  fs.writeFileSync(path.join(app, '.snagentsos', 'team', 'roles', '._dev.md'), 'x')
+  fireWatch()
+  clock.advance(300)
+  await settle()
+  check(!emitted.slice(m2).some((e) => e.teamId === teamId) && (await svc.request({ op: 'get', teamId }, 'desktop')).team.defIssues.length === 2, 'a dotfile: no emit and no issue')
+  fs.rmSync(path.join(app, '.snagentsos', 'team', 'roles', '._dev.md'))
+  fs.rmSync(misnamed2)
+  fs.rmSync(misnamed)
+  fireWatch()
+  clock.advance(300)
+  await until(async () => (await svc.request({ op: 'get', teamId }, 'desktop')).team.defIssues.length === 0, 5000, 'misnamed gone')
+  check(svc.team(teamId).trust === 'trusted' && svc.trusted(teamId).sha256 === diff.trust.sha256, 'renamed away: still trusted with the same approved sha')
+
+  // settings and reveal.
+  const s1 = await svc.request({ op: 'settings', teamId, patch: { autoDispatch: true } }, 'desktop')
+  check(s1.ok && s1.team.autoDispatch === true && svc.team(teamId).store.rt.autoDispatch === true, 'settings: autonomy on')
+  const s2 = await svc.request({ op: 'settings', teamId, patch: { paused: true } }, 'desktop')
+  check(s2.team.paused.reason === 'user' && (await svc.request({ op: 'list' }, 'desktop')).teams[0].needsCount === 0, 'a user pause never counts as a need')
+  // Emits are coalesced per team per tick, scopes merged, with the rev at send time.
+  await settle()
+  const n0 = emitted.length
+  const r0 = svc.team(teamId).store.rt
+  svc.commit(teamId, { ok: true, rt: { ...r0, autoDispatch: false }, effects: [], result: undefined }, ['team'])
+  svc.commit(teamId, { ok: true, rt: { ...svc.team(teamId).store.rt, autoDispatch: true }, effects: [], result: undefined }, ['board'])
+  await settle()
+  const burst = emitted.slice(n0)
+  check(burst.length === 1 && burst[0].scopes.includes('team') && burst[0].scopes.includes('board') && burst[0].scopes.includes('list') && burst[0].rev === r0.rev + 2, 'two commits in one tick: one teamChanged with both scopes and the latest rev')
+  await svc.request({ op: 'reveal', teamId, what: 'definition' }, 'desktop')
+  await svc.request({ op: 'reveal', teamId, what: 'data' }, 'desktop')
+  same(opened, [path.join(app, '.snagentsos', 'team'), path.join(data, 'teams', teamId)], 'reveal opens only the two folders main computes')
+  // Finding 3: Electron's error string is the op's io detail (the renderer toasts it).
+  openResult = 'Failed to open path'
+  same(await svc.request({ op: 'reveal', teamId, what: 'definition' }, 'desktop'), { ok: false, error: 'io', detail: 'Failed to open path' }, 'a folder the OS did not open: io with Electron\'s error text')
+  openResult = ''
+  // Findings 1 and 5: only a real directory is ever handed to the OS opener, at every level the repo controls.
+  const opens = opened.length
+  const sn = path.join(app, '.snagentsos')
+  const teamDir = path.join(sn, 'team')
+  fs.renameSync(teamDir, path.join(sn, 'team-real'))
+  fs.symlinkSync(path.join(sn, 'team-real'), teamDir, 'junction')
+  same(await svc.request({ op: 'reveal', teamId, what: 'definition' }, 'desktop'), { ok: false, error: 'not_found' }, 'a linked team folder: not_found')
+  fs.rmSync(teamDir)
+  fs.writeFileSync(teamDir, '#!/bin/sh\necho pwned\n')
+  same(await svc.request({ op: 'reveal', teamId, what: 'definition' }, 'desktop'), { ok: false, error: 'not_found' }, 'a file where the team folder was: not_found')
+  fs.rmSync(teamDir)
+  same(await svc.request({ op: 'reveal', teamId, what: 'definition' }, 'desktop'), { ok: false, error: 'not_found' }, 'a missing team folder: not_found')
+  fs.renameSync(path.join(sn, 'team-real'), teamDir)
+  fs.renameSync(sn, path.join(app, '.snagentsos-real'))
+  fs.symlinkSync(path.join(app, '.snagentsos-real'), sn, 'junction')
+  same(await svc.request({ op: 'reveal', teamId, what: 'definition' }, 'desktop'), { ok: false, error: 'not_found' }, 'a linked .snagentsos (the team folder behind it is real): not_found')
+  fs.rmSync(sn)
+  fs.renameSync(path.join(app, '.snagentsos-real'), sn)
+  const dataDirOf = path.join(data, 'teams', teamId)
+  fs.renameSync(dataDirOf, dataDirOf + '-real')
+  fs.symlinkSync(dataDirOf + '-real', dataDirOf, 'junction')
+  same(await svc.request({ op: 'reveal', teamId, what: 'data' }, 'desktop'), { ok: false, error: 'not_found' }, 'a linked team data folder: not_found')
+  fs.rmSync(dataDirOf)
+  fs.renameSync(dataDirOf + '-real', dataDirOf)
+  check(opened.length === opens, 'none of them reached the OS opener')
+  check((await svc.request({ op: 'reveal', teamId, what: 'definition' }, 'desktop')).ok && opened.length === opens + 1, 'put back: it opens again')
+
+  // Labs off then on: flushed, zero keys, disabled, reloaded from disk.
+  const revBefore = svc.team(teamId).store.rt.rev
+  cfg = { settings: { ...cfg.settings, labs: { teams: false } } }
+  svc.setConfig(cfg)
+  check(svc.pendingTimers === 0 && clock.timers.size === 0, 'Labs off: zero DeadlineTimer keys')
+  same(await svc.request({ op: 'list' }, 'desktop'), { ok: false, error: 'disabled' }, 'Labs off: disabled')
+  check(emitted.at(-1).scopes[0] === 'disabled', 'Labs off emits disabled')
+  check(JSON.parse(fs.readFileSync(path.join(data, 'teams', teamId, 'state.json'), 'utf8')).rev === revBefore, 'Labs off flushed the state')
+  check(watchers.every((x) => x.closed), 'Labs off stops the watchers')
+
+  // Snapshot integrity while off: an edited trusted-def.json -> changed plus one stateReset card.
+  const snapFile = path.join(data, 'teams', teamId, 'trusted-def.json')
+  const goodSnap = fs.readFileSync(snapFile, 'utf8')
+  const evil = JSON.parse(goodSnap)
+  evil.files = evil.files.map((f) => (f.rel === 'roles/qa.md' ? { ...f, text: f.text.replace('readonly', 'total') } : f))
+  fs.writeFileSync(snapFile, JSON.stringify(evil))
+  cfg = { settings: { ...cfg.settings, labs: { teams: true } } }
+  svc.setConfig(cfg)
+  list = await svc.request({ op: 'list' }, 'desktop')
+  const resets = () => svc.team(teamId).store.rt.cards.filter((c) => c.state === 'open' && c.from.kind === 'system' && c.from.why === 'stateReset' && c.from.vars.what === 'trust')
+  check(list.teams[0].trust === 'changed' && resets().length === 1 && svc.trusted(teamId) === null, 'an edited snapshot: changed and a stateReset card, no definition for runs')
+  check(list.teams[0].needsCount === 2, 'trust row and the card both count')
+  same(await svc.request({ op: 'runNow', teamId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'untrusted' }, 'a failed snapshot blocks runs')
+  check(svc.team(teamId).store.rt.autoDispatch === true, 'Labs on again reloads the runtime from disk')
+  const d2 = await svc.request({ op: 'trustDiff', teamId }, 'desktop')
+  check(d2.ok && d2.trust.approvedSha === undefined, 'trustDiff without a verified snapshot has no approved sha')
+  const tr2 = await svc.request({ op: 'trust', teamId, sha256: d2.trust.sha256 }, 'desktop')
+  check(tr2.ok && resets().length === 0 && svc.trusted(teamId)?.sha256 === d2.trust.sha256, 'trusting again dismisses the stateReset card')
+  check(svc.pendingTimers > 0 && clock.timers.size === 1, 'after Labs on again a commit arms the same timer (flush key)')
+  clock.advance(M.TEAM_FLUSH_MS)
+  check(JSON.parse(fs.readFileSync(path.join(data, 'teams', teamId, 'state.json'), 'utf8')).rev === svc.team(teamId).store.rt.rev, 'and the debounced flush writes the state')
+  svc.setConfig({ settings: { ...cfg.settings, labs: { teams: false } } })
+  svc.setConfig(cfg)
+  await svc.request({ op: 'list' }, 'desktop')
+  check(svc.team(teamId).trust === 'trusted' && resets().length === 0, 'a verified snapshot reads trusted after a reload')
+  // B close: a snapshot that cannot be read right now (a folder here: EISDIR, like EBUSY or EACCES) is no tampering:
+  // nothing is trusted meanwhile, but no stateReset card opens, and the next load reads it again.
+  svc.setConfig({ settings: { ...cfg.settings, labs: { teams: false } } })
+  const snapNow = fs.readFileSync(snapFile, 'utf8')
+  fs.rmSync(snapFile)
+  fs.mkdirSync(snapFile)
+  svc.setConfig(cfg)
+  await svc.request({ op: 'list' }, 'desktop')
+  check(svc.team(teamId).trust !== 'trusted' && svc.trusted(teamId) === null && resets().length === 0, 'an unreadable snapshot: not trusted, and no stateReset card')
+  check(logs.includes(`trust ${teamId} unreadable`), 'the log names the unreadable trust')
+  svc.setConfig({ settings: { ...cfg.settings, labs: { teams: false } } })
+  fs.rmSync(snapFile, { recursive: true })
+  fs.writeFileSync(snapFile, snapNow)
+  svc.setConfig(cfg)
+  await svc.request({ op: 'list' }, 'desktop')
+  check(svc.team(teamId).trust === 'trusted' && resets().length === 0 && svc.trusted(teamId) !== null, 'readable again: trusted on the next load, still no card')
+
+  // adopt: a repo that already has a definition (CRLF and BOM, unregistered).
+  const lib = makeRepo(path.join(tmp, 'lib'))
+  const other = makeRepo(path.join(tmp, 'other'))
+  const base = json(M.renderTeamFiles({ ...json(M.defaultDraft('en')), name: 'Other', goal: 'Adopted' }))
+  const withRepos = (lines) => base.map((f) => (f.rel === 'team.md' ? { ...f, text: f.text.replace('name: Other\n', `name: Other\n${lines.join('\n')}\n`) } : f))
+  writeDef(other, withRepos(['repo.lib.path: ../lib', 'repo.gone.path: ../nope']), { crlf: true, bom: true })
+  const op = await svc.request({ op: 'setupProbe', dir: other }, 'desktop')
+  check(op.ok && op.probe.existing && op.probe.existing.files.length === base.length, 'probe of a repo with a definition: existing files')
+  const goneIssue = op.probe.existing.issues.find((i) => i.key === 'repo.gone.path')
+  check(goneIssue && goneIssue.code === 'repo' && goneIssue.detail === 'missing' && goneIssue.line === 4, 'probe issues: a missing extra repo with its team.md line')
+  const ad1 = await svc.request({ op: 'adopt', repoRoot: other, sha256: op.probe.existing.sha256 }, 'desktop')
+  check(!ad1.ok && ad1.error === 'invalid_definition' && ad1.issues.some((i) => i.detail === 'missing'), 'adopt with an unresolved extra repo: invalid_definition')
+  check(!svc.registry.get(M.teamIdOf(other)), 'and nothing is registered')
+  writeDef(other, withRepos(['repo.lib.path: ../lib', `repo.abs.path: ${path.join(tmp, 'lib2')}`, 'repo.abs.baseBranch: develop']))
+  makeRepo(path.join(tmp, 'lib2'))
+  same(await svc.request({ op: 'adopt', repoRoot: other, sha256: op.probe.existing.sha256 }, 'desktop'), { ok: false, error: 'changed' }, 'adopt of a sha the disk no longer has: changed')
+  const op2 = await svc.request({ op: 'setupProbe', dir: other }, 'desktop')
+  check(op2.probe.existing.issues.length === 0, 'probe: both extra repos resolve')
+  const ad2 = await svc.request({ op: 'adopt', repoRoot: other, sha256: op2.probe.existing.sha256 }, 'desktop')
+  check(ad2.ok && svc.team(ad2.teamId).trust === 'trusted', 'adopt trusts exactly the sha it read')
+  const otherId = ad2.teamId
+  same(svc.repoOf(otherId, 'lib'), { repoId: 'lib', repoRoot: lib, baseBranch: 'main' }, 'repoOf: a relative path resolved against the main root')
+  same(svc.repoOf(otherId, 'abs'), { repoId: 'abs', repoRoot: path.join(tmp, 'lib2'), baseBranch: 'develop' }, 'repoOf: an absolute path accepted, its own base branch')
+  same(svc.repoOf(otherId, 'main'), { repoId: 'main', repoRoot: other, baseBranch: 'main' }, 'repoOf main: the registry root and base branch')
+  check(svc.repoOf(otherId, 'zzz').code === 'repo', 'repoOf of an unknown repo: DefError repo')
+  const ov = await svc.request({ op: 'get', teamId: otherId }, 'desktop')
+  same(ov.team.extraRepos, [{ id: 'lib', name: 'lib', baseBranch: 'main' }, { id: 'abs', name: 'lib2', baseBranch: 'develop' }], 'get: the extra repos by name')
+  // A definition check whose repos are still resolving when a trust op replaces the load: the trust op's state stands.
+  const orec = svc.team(otherId)
+  const trustedLoad = orec.loaded
+  orec.loaded = { ...trustedLoad, sha256: 'f'.repeat(64) }
+  const stale = svc.recompute(orec)
+  orec.loaded = trustedLoad
+  await stale
+  check(orec.trust === 'trusted' && svc.repoOf(otherId, 'lib').repoRoot === lib, 'a stale recompute never overwrites the state of a newer load')
+  // An extra repo that went away: invalid after a reload, repoOf answers its DefError.
+  fs.renameSync(lib, path.join(tmp, 'lib-moved'))
+  svc.setConfig({ settings: { ...cfg.settings, labs: { teams: false } } })
+  svc.setConfig(cfg)
+  await svc.request({ op: 'list' }, 'desktop')
+  check(svc.team(otherId).trust === 'invalid' && svc.repoOf(otherId, 'lib').detail === 'missing', 'a missing extra repo: trust invalid and repoOf DefError')
+  same(await svc.request({ op: 'runNow', teamId: otherId, agentId: 'dev' }, 'desktop'), { ok: false, error: 'untrusted' }, 'invalid blocks runs')
+  fs.renameSync(path.join(tmp, 'lib-moved'), lib)
+
+  // Every refusal of the resolver.
+  const main = other
+  const ext = (id, p) => ({ id, path: p })
+  const sub = makeRepo(path.join(main, 'nested'))
+  const inData = makeRepo(path.join(data, 'repo-in-data'))
+  git(lib, 'worktree', 'add', '-q', path.join(tmp, 'lib-wt'), '-b', 'wt')
+  fs.symlinkSync(lib, path.join(tmp, 'lib-link'), 'junction')
+  const cases = [
+    [ext('link', '../lib-link'), 'link'],
+    [ext('nested', 'nested'), 'inside'],
+    [ext('data', inData), 'inside'],
+    [ext('wt', '../lib-wt'), 'not_main_root'],
+    [ext('dup1', '../lib'), null],
+    [ext('dup2', lib), 'duplicate'],
+    [ext('nope', '../does-not-exist'), 'missing'],
+  ]
+  if (outside(plain)) cases.push([ext('plain', plain), 'not_git'])
+  const res = await svc.resolveRepos(main, { extraRepos: cases.map((c) => c[0]) }, [])
+  for (const [x, want] of cases) {
+    const got = res.repos.get(x.id)
+    if (want === null) check(got && got.repoRoot === lib, `resolver: ${x.id} resolves`)
+    else check(got && got.code === 'repo' && got.detail === want, `resolver: ${x.id} -> ${want}`)
+  }
+  check(res.issues.length === cases.filter((c) => c[1] !== null).length, 'every refusal is an issue')
+  check(res.issues.every((i) => i.severity === 'error'), 'a repo that does not resolve is an error')
+  void sub
+
+  // Finding 4: a UNC or device path never reaches an lstat, a realpath or git (on Windows that lookup alone
+  // authenticates to the host), whether the parser saw it or not.
+  const touched = []
+  const spyRepoFs = {
+    lstat: (p) => { touched.push(['lstat', p]); return fs.promises.lstat(p) },
+    realpath: (p) => { touched.push(['realpath', p]); return fs.promises.realpath(p) },
+  }
+  const spyGit = { run: (args, o) => { touched.push(['git', o.cwd]); return runner.run(args, o) }, info: (f) => runner.info(f), get running() { return runner.running } }
+  const uncSvc = mk({ repoFs: spyRepoFs, git: spyGit, dataDir: () => path.join(tmp, 'data-unc') })
+  await uncSvc.start(cfg)
+  const UNC = ['\\\\203.0.113.5\\s\\lib', '//203.0.113.5/s/lib', '\\\\?\\UNC\\203.0.113.5\\s', '\\\\?\\C:\\work\\lib', '\\\\.\\pipe\\x', '/\\203.0.113.5\\s']
+  const uncRes = await uncSvc.resolveRepos(main, { extraRepos: [...UNC.map((p, i) => ext(`u${i}`, p)), ext('ok', '../lib')] }, [])
+  check(UNC.every((_, i) => { const e = uncRes.repos.get(`u${i}`); return e && e.code === 'repo' && e.detail === 'unc' && e.severity === 'error' }), 'resolver: every UNC or device path -> DefError repo unc')
+  check(uncRes.repos.get('ok')?.repoRoot === lib && touched.length > 0, 'the plain extra repo next to them still resolves (the spies see it)')
+  const isUnc = (p) => /^[\\/]{2}/.test(p)
+  check(!touched.some(([, p]) => isUnc(p)), 'no lstat, realpath or git call ever got a UNC or device path: ' + JSON.stringify(touched.filter(([, p]) => isUnc(p))))
+  if (process.platform === 'win32') {
+    touched.length = 0
+    const onShare = await uncSvc.resolveRepos('\\\\203.0.113.5\\s\\app', { extraRepos: [ext('rel', '../lib')] }, [])
+    check(onShare.repos.get('rel')?.detail === 'unc' && touched.length === 0, 'win32: a relative path that resolves to a share is refused before any call')
+  }
+  // The same path in a repo's team.md: the probe answers the parser's error on its line and resolves nothing.
+  const hostile = makeRepo(path.join(tmp, 'hostile'))
+  writeDef(hostile, withRepos(['repo.lib.path: \\\\203.0.113.5\\s\\lib']))
+  touched.length = 0
+  const hp = await uncSvc.request({ op: 'setupProbe', dir: hostile }, 'desktop')
+  check(hp.ok && hp.probe.existing.issues.some((i) => i.code === 'repo' && i.detail === 'unc' && i.key === 'repo.lib.path' && i.line === 3 && i.severity === 'error'), 'probe of a hostile team.md: repo unc on its line')
+  check(!touched.some(([, p]) => isUnc(p)) && !touched.some(([k]) => k === 'lstat' || k === 'realpath'), 'and no extra repo was looked up')
+  same(await uncSvc.request({ op: 'adopt', repoRoot: hostile, sha256: hp.probe.existing.sha256 }, 'desktop'), { ok: false, error: 'invalid_definition', issues: hp.probe.existing.issues }, 'adopt refuses it as invalid_definition')
+  uncSvc.dispose()
+
+  // approve io: the trust write does not land -> io, the team stays untrusted.
+  const third = makeRepo(path.join(tmp, 'third'))
+  const failing = mk({ trustStore: { get: () => null, setChecked: () => false, delete() {} } })
+  await failing.start(cfg)
+  const fprev = await failing.request({ op: 'setupPreview', repoRoot: third, draft }, 'desktop')
+  same(await failing.request({ op: 'setupWrite', repoRoot: third, draft, previewHash: fprev.preview.hash }, 'desktop'), { ok: false, error: 'io' }, 'setupWrite answers io when the trust write fails')
+  check(failing.team(M.teamIdOf(third))?.trust === 'untrusted', 'the team is registered but not trusted')
+  failing.dispose()
+
+  // Finding 2: a folder that does not move (EPERM, EBUSY) keeps the whole team: entry, trust, state and watcher.
+  // A definition edit whose debounced check is still pending when the remove fails is seen afterwards.
+  const pendingDev = path.join(app, '.snagentsos', 'team', 'roles', 'dev.md')
+  const pendingText = fs.readFileSync(pendingDev, 'utf8')
+  fs.writeFileSync(pendingDev, pendingText + '\nPending check.\n')
+  fireWatch()
+  renameFails = true
+  const openWatchers = watchers.filter((x) => !x.closed).length
+  same(await svc.request({ op: 'remove', teamId }, 'desktop'), { ok: false, error: 'io', detail: 'busy' }, 'remove with a folder that does not move: io (busy)')
+  check(svc.team(teamId) && svc.registry.get(teamId) && fs.existsSync(path.join(data, 'teams', teamId, 'state.json')) && !fs.readdirSync(path.join(data, 'teams', '.trash')).some((n) => n.startsWith(teamId + '-')), 'the team, its entry and its folder stay where they were')
+  check(Object.values(JSON.parse(fs.readFileSync(path.join(data, 'trusted-teams.json'), 'utf8')).entries).some((e) => e.sha256 === diff.trust.sha256) && svc.team(teamId).trust === 'trusted' && svc.trusted(teamId)?.sha256 === diff.trust.sha256, 'and so does its trust')
+  check(watchers.filter((x) => !x.closed).length === openWatchers, 'its definition watcher stays armed')
+  clock.advance(300)
+  await until(() => svc.team(teamId).trust === 'changed', 5000, 'pending defwatch after a failed remove')
+  check(svc.team(teamId).trust === 'changed', 'the definition check pending before the failed remove still runs')
+  fs.writeFileSync(pendingDev, pendingText)
+  fireWatch()
+  clock.advance(300)
+  await until(() => svc.team(teamId).trust === 'trusted', 5000, 'definition put back')
+  check((await svc.request({ op: 'get', teamId }, 'desktop')).ok && logs.some((l) => l === `registry trash ${teamId} failed EPERM`), 'the team still answers; the log has the code')
+  renameFails = false
+
+  // remove: trash, forget, repo files untouched.
+  fs.mkdirSync(path.join(data, 'teams', teamId, 'archive'), { recursive: true })
+  fs.writeFileSync(path.join(data, 'teams', teamId, 'archive', 't-9.jsonl'), '{"id":"m-1"}\n')
+  check(svc.archivedCount(teamId, 't-9') === 1, 'archivedCount reads the archive lines once')
+  const rm = await svc.request({ op: 'remove', teamId }, 'desktop')
+  check(rm.ok && !svc.team(teamId) && !svc.registry.get(teamId), 'remove drops the team')
+  check(!fs.existsSync(path.join(data, 'teams', teamId)) && fs.readdirSync(path.join(data, 'teams', '.trash')).some((n) => n.startsWith(teamId + '-')), 'the team folder goes to teams/.trash')
+  check(fs.existsSync(path.join(app, '.snagentsos', 'team', 'team.md')), 'the repo definition is never touched')
+  const tsAfter = JSON.parse(fs.readFileSync(path.join(data, 'trusted-teams.json'), 'utf8'))
+  check(!Object.values(tsAfter.entries).some((e) => e.sha256 === diff.trust.sha256), 'the trust entry is forgotten')
+  same(await svc.request({ op: 'get', teamId }, 'desktop'), { ok: false, error: 'not_found' }, 'a removed team: not_found')
+  const reprobe = await svc.request({ op: 'setupProbe', dir: app }, 'desktop')
+  check(reprobe.ok && !reprobe.probe.registered && reprobe.probe.existing, 'after remove the repo offers adopt')
+  same(await svc.request({ op: 'setupWrite', repoRoot: app, draft, previewHash: prev.preview.hash }, 'desktop'), { ok: false, error: 'exists' }, 'setupWrite over an existing folder of an unregistered repo: exists')
+  const readopt = await svc.request({ op: 'adopt', repoRoot: app, sha256: reprobe.probe.existing.sha256 }, 'desktop')
+  check(readopt.ok && readopt.teamId === teamId && svc.archivedCount(teamId, 't-9') === 0, 'set up again (same id): the archive counts of the removed team are gone')
+
+  // shutdownSync: flushed, frozen, thaw on a request.
+  svc.shutdownSync('quit')
+  check(svc.pendingTimers === 0, 'shutdownSync clears every key')
+  check((await svc.request({ op: 'list' }, 'desktop')).ok, 'a request while frozen and not quitting thaws')
+  svc.shutdownSync('quit')
+  svc.markQuitting()
+  same(await svc.request({ op: 'list' }, 'desktop'), { ok: false, error: 'disabled' }, 'quitting: no thaw')
+  svc.dispose()
+  check(clock.timers.size === 0, 'dispose leaves no platform timer')
+  check(!logs.some((l) => /Una app|Siempre/.test(l)), 'the log carries codes and ids, never definition text')
+}
+
+/** B3 ops through TeamService.request (a trusted team, no runs): board, task, edits, moves, comments, the Lead thread. */
+async function boardServiceChecks(svc, teamId, emitted) {
+  const req = (r, origin = 'desktop') => svc.request({ teamId, ...r }, origin)
+  let res = await req({ op: 'createTask', task: { title: 'Pantalla de login', priority: 'high' } })
+  check(res.ok && res.task.id === 't-1' && res.task.column === 'todo' && res.task.priority === 'high' && res.task.userOwned.includes('priority') && res.task.createdBy === 'user', 'createTask op: a TaskSummary in todo, its fields the user\'s')
+  const t1 = res.task
+  res = await req({ op: 'createTask', task: { title: 'Tests', blockedBy: ['t-1'] } })
+  check(res.ok && res.task.column === 'blocked' && res.task.blocked.kind === 'deps' && res.task.blocked.waitingOn[0] === 't-1', 'createTask with a blocker: blocked, waiting on it')
+  same(await req({ op: 'createTask', task: { title: 'x', assignee: 'lead' } }), { ok: false, error: 'bad_request' }, 'the Lead as assignee: bad_request')
+  res = await req({ op: 'updateTask', taskId: 't-1', baseRev: t1.rev, patch: { body: 'Con Google y GitHub' } })
+  check(res.ok && res.task.body === 'Con Google y GitHub' && res.task.rev === t1.rev + 1 && Array.isArray(res.task.comments) && res.task.userOwned.includes('body'), 'updateTask op: the TaskDetail at rev + 1')
+  res = await req({ op: 'updateTask', taskId: 't-1', baseRev: t1.rev, patch: { title: 'Otro' } })
+  check(!res.ok && res.error === 'conflict' && res.reason === 'rev' && res.current.id === 't-1' && res.current.rev === t1.rev + 1 && res.current.body === 'Con Google y GitHub' && svc.team(teamId).store.rt.tasks[0].title === 'Pantalla de login', 'a stale baseRev: conflict with the current TaskDetail, nothing changed')
+  res = await req({ op: 'comment', taskId: 't-1', text: 'Mirá el diseño' })
+  check(res.ok && res.comment.author === 'user' && res.comment.authorName === 'user' && res.comment.queued === false && res.comment.text === 'Mirá el diseño', 'comment op: a CommentView (no assignee: nobody waits for it)')
+  res = await req({ op: 'leadSay', text: 'Arrancá por el login' })
+  check(res.ok && res.comment.queued === true, 'leadSay: queued for the Lead')
+  res = await req({ op: 'lead' })
+  check(res.ok && res.lead.messages.length === 1 && res.lead.agent && res.lead.agent.kind === 'lead' && res.lead.cursor === null, 'lead op: the thread and the Lead card')
+  same(await req({ op: 'lead', before: 'x-1' }), { ok: false, error: 'bad_request' }, 'a Lead cursor that is not a comment id: bad_request')
+  res = await req({ op: 'board' })
+  check(res.ok && res.page.tasks.length === 2 && res.page.counts.todo === 1 && res.page.counts.blocked === 1 && res.page.done && res.page.cursor === null, 'board op: the desktop page')
+  check(res.page.tasks.find((t) => t.id === 't-1').comments === 1, 'a card counts its comments')
+  same(await req({ op: 'board', column: 'done', cursor: 'zzz' }), { ok: false, error: 'bad_request' }, 'a board cursor that does not parse: bad_request')
+  res = await req({ op: 'task', taskId: 't-1' })
+  check(res.ok && res.task.comments.length === 1 && res.task.commentsArchived === 0 && res.task.commentsCursor === null, 'task op: the drawer view')
+  same(await req({ op: 'task', taskId: 't-1', commentsBefore: 'k-1' }), { ok: false, error: 'bad_request' }, 'a comment cursor that is not a comment id: bad_request')
+  same(await req({ op: 'task', taskId: 't-77' }), { ok: false, error: 'not_found' }, 'an unknown task: not_found')
+  const rev2 = (await req({ op: 'task', taskId: 't-2' })).task.rev
+  // B5 review, second round: the user's path (teams:req updateTask) refuses a needsPlan change outside todo like repo
+  // and isolation (bad_request, nothing changed); in todo it lands.
+  same(await req({ op: 'updateTask', taskId: 't-2', baseRev: rev2, patch: { needsPlan: false } }), { ok: false, error: 'bad_request' }, 'updateTask op: needsPlan on a blocked task is bad_request')
+  check(svc.team(teamId).store.rt.tasks.find((t) => t.id === 't-2').needsPlan === true && (await req({ op: 'task', taskId: 't-2' })).task.rev === rev2, 'and nothing changed')
+  const rev1 = (await req({ op: 'task', taskId: 't-1' })).task.rev
+  res = await req({ op: 'updateTask', taskId: 't-1', baseRev: rev1, patch: { needsPlan: false } })
+  check(res.ok && res.task.needsPlan === false && res.task.state === 'todo', 'in todo the same edit lands')
+  res = await req({ op: 'moveTask', taskId: 't-2', baseRev: rev2, to: 'cancelled' })
+  check(res.ok && res.task.state === 'cancelled' && res.task.column === null && res.task.userOwned.includes('state'), 'moveTask op: cancelled, its state the user\'s')
+  res = await req({ op: 'releaseOwned', taskId: 't-1', fields: ['priority'] })
+  check(res.ok && !res.task.userOwned.includes('priority') && res.task.userOwned.includes('title'), 'releaseOwned op: only the named fields go back')
+  check((await req({ op: 'board' }, 'phone')).ok && (await req({ op: 'createTask', task: { title: 'Desde el celu' } }, 'phone')).ok, 'board and createTask are phone ops')
+  same(await req({ op: 'moveTask', taskId: 't-1', baseRev: 1, to: 'done' }, 'phone'), { ok: false, error: 'bad_request' }, 'moveTask is desktop only')
+  await settle()
+  check(emitted.some((e) => e.teamId === teamId && e.scopes.includes('board') && e.scopes.includes('task') && e.taskId === 't-1') && emitted.some((e) => e.teamId === teamId && e.scopes.includes('lead')), 'edits emit board and task with the task hint; the Lead thread emits lead')
+
+  // B4 item 6: a loop of blockers refused through teams:req (the user path) names it like the CLI does, capped.
+  const a = (await req({ op: 'createTask', task: { title: 'Loop A' } })).task.id
+  const b = (await req({ op: 'createTask', task: { title: 'Loop B', blockedBy: [a] } })).task.id
+  const aRev = (await req({ op: 'task', taskId: a })).task.rev
+  // Integration item 6: the loop is a field (TeamFail.loop, loopMore past 20 ids), so the renderer never reads `detail`.
+  same(await req({ op: 'updateTask', taskId: a, baseRev: aRev, patch: { blockedBy: [b] } }), { ok: false, error: 'cycle', loop: [a, b, a], detail: `${a} -> ${b} -> ${a}` }, 'the user path: cycle with the loop as TeamFail.loop (and the same line in detail)')
+  const ids = [a]
+  for (let i = 0; i < 25; i++) ids.push((await req({ op: 'createTask', task: { title: `Cadena ${i}`, blockedBy: [ids[ids.length - 1]] } })).task.id)
+  const longRefused = await req({ op: 'updateTask', taskId: a, baseRev: (await req({ op: 'task', taskId: a })).task.rev, patch: { blockedBy: [ids[ids.length - 1]] } })
+  check(!longRefused.ok && longRefused.error === 'cycle' && longRefused.detail.split(' -> ').length === 21 && longRefused.detail.startsWith(`${a} -> ${ids[ids.length - 1]}`) && longRefused.detail.endsWith(`... (+${ids.length + 1 - 20} more)`), `the user path caps a long loop too (${longRefused.detail})`)
+  check(longRefused.loop.length === 20 && longRefused.loop[0] === a && longRefused.loop[1] === ids[ids.length - 1] && longRefused.loopMore === ids.length + 1 - 20, `TeamFail.loop: the first 20 ids, loopMore the rest (${longRefused.loopMore})`)
+}
+
+// ---- 8. IPC register -----------------------------------------------------------------------------
+async function ipcChecks() {
+  const handlers = new Map()
+  const I = loadEntry(`export { registerTeamsIpc } from './src/main/teams/registerTeamsIpc'`, {
+    require: (id) => (id === 'electron' ? { ipcMain: { handle: (ch, fn) => handlers.set(ch, fn) } } : require(id)),
+  })
+  const seen = []
+  I.registerTeamsIpc({ request: async (req, origin) => { seen.push([req.op, origin]); if (req.op === 'remove') throw new Error('x'); return { ok: true, teams: [] } } })
+  const h = handlers.get('teams:req')
+  check(typeof h === 'function', 'teams:req is registered')
+  same(await h({}, { op: 'setupProbe', dir: 'relative' }), { ok: false, error: 'bad_request' }, 'a payload the union refuses: bad_request')
+  same(await h({}, 'junk'), { ok: false, error: 'bad_request' }, 'junk: bad_request')
+  same(await h({}, { op: 'list' }), { ok: true, teams: [] }, 'a valid payload reaches the service')
+  same(await h({}, { op: 'remove', teamId: 'tm-0123456789ab' }), { ok: false, error: 'io' }, 'a throwing service: io')
+  same(seen, [['list', 'desktop'], ['remove', 'desktop']], 'origin desktop, bad payloads never reach the service')
+}
+
+async function main() {
+  const tmp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-teams-store-')))
+  try {
+    schemaChecks()
+    flowChecks()
+    boardChecks()
+    await b4StoreChecks()
+    storeChecks(tmp)
+    registryChecks(tmp)
+    await loaderChecks(tmp)
+    await trustChecks(tmp)
+    if (gitOk) await serviceChecks(tmp)
+    else console.log('git not found: TeamService checks skipped')
+    await ipcChecks()
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 })
+  }
+  console.log(`PASS: ${checks} teams store checks (schemas, flow, board, B4 triage, reassignment and capped loops, needsPlan only in todo, store, registry, loader, trust, service, ipc)`)
+}
+
+main().catch((error) => { console.error(error); process.exitCode = 1 })

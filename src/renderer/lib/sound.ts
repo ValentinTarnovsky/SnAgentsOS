@@ -34,11 +34,27 @@ const SOUNDS: Record<'chime' | 'ping' | 'pop', Note[]> = {
   pop: [{ freq: 440, at: 0, duration: 0.12, type: 'triangle', glideTo: 220 }],
 }
 
+/** App 2.7.0 (A5): at most one status sound per this many ms. */
+export const SOUND_MIN_GAP_MS = 2000
+/** When the last sound played (Date.now()), or null before the first one. */
+let lastPlayedAt: number | null = null
+
+/**
+ * Plays one status sound. App 2.7.0 (A5): at most one every SOUND_MIN_GAP_MS;
+ * a sound inside the gap is dropped, not queued (a burst of done notices
+ * chimes once). The Settings test button goes through the same gate on
+ * purpose: a second click within 2 s is silent, so a test never piles up
+ * on a status sound. A clock that moved back plays at once. Nothing counts
+ * when no sound comes out (no AudioContext, volume 0).
+ */
 export function playStatusSound(id: 'chime' | 'ping' | 'pop', volume: number): void {
   const audio = audioContext()
   if (!audio) return
   const master = Math.max(0, Math.min(1, volume / 100)) * 0.35
   if (master <= 0) return
+  const at = Date.now()
+  if (lastPlayedAt !== null && at >= lastPlayedAt && at - lastPlayedAt < SOUND_MIN_GAP_MS) return
+  lastPlayedAt = at
   const now = audio.currentTime
   for (const note of SOUNDS[id] ?? SOUNDS.chime) {
     const osc = audio.createOscillator()

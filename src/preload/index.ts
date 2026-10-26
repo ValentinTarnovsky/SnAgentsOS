@@ -19,6 +19,8 @@ import type {
   PtySpawnReq,
   PtySpawnRes,
   PtySubmitReq,
+  StatusMuteReq,
+  StatusPlanReq,
   StatusTuneHintReq,
   PtySubmitRes,
   PtyWriteReq,
@@ -49,6 +51,7 @@ import type {
   ConfigFile,
   Language,
   NotificationSettings,
+  PanePlan,
   PaneStatusEvt,
   RemoteSettings,
   StatusHooksStatusRes,
@@ -62,14 +65,16 @@ import type { SessionSummary, SessionsListReq } from '@shared/session-history'
 import type { GitArea, GitBaseStat, GitChangesRes, GitDiffReply, GitInfoRes, GitTarget, GitUpdateEvt } from '@shared/git-types'
 import type { ReviewNote, ReviewNoteInput, ReviewNotesChangedEvt, ReviewNotesDeleteReq, ReviewNotesListRes, ReviewNotesMarkSentReq } from '@shared/review-notes'
 import type { WsNoteCreateReq, WsNoteDoc, WsNoteMeta, WsNoteReadReq, WsNoteResult, WsNoteWriteReq, WsNotesChangedEvt, WsNotesListRes } from '@shared/ws-notes'
-import type { FileCreateReq, FileReadRes, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesRootRes } from '@shared/files'
+import type { FileCreateReq, FileReadRes, FileRefResolved, FileRenameReq, FileWriteReq, FileWriteRes, FilesChangedEvt, FilesListReq, FilesListRes, FilesOpRes, FilesPathReq, FilesResolveRefsReq, FilesRootRes } from '@shared/files'
 import type { WorktreeAddReq, WorktreeAddRes, WorktreeInspectRes, WorktreeListRes, WorktreeProbeRes, WorktreeRemoveReq, WorktreeRemoveRes } from '@shared/worktree-types'
 import type { OpenPathReq, OpenPathRes } from '@shared/inertOpen'
 import type { CliUiState, SkillOp, SkillStatus, SkillTarget } from '@shared/ctl-protocol'
 import type { RepoConfigExportRes, RepoConfigFile, RepoConfigPreviewRes, RepoConfigReadRes, RepoConfigTrustRes } from '@shared/repo-config'
 import type { DictationEvt, DictationStartReq, DictationStartRes } from '@shared/ipc-contract'
+import type { ChatFrameEvt, ChatMoreReq, ChatPageRes, ChatSubReq } from '@shared/ipc-contract'
 import type { WhisperInstallError, WhisperInstallProgress, WhisperPackId, WhisperStatus } from '@shared/dictation'
 import type { ShareGuestApi } from '@shared/ipc-contract'
+import type { IntegrateProgressEvt, TeamChangedEvt, TeamRequest, TeamRunAppendEvt } from '@shared/team-protocol'
 import type {
   ShareCreateReq,
   ShareCreateRes,
@@ -294,6 +299,12 @@ const api: SnApi = {
     hooksUninstall: () =>
       ipcRenderer.invoke(CH.STATUS_HOOKS_UNINSTALL) as Promise<StatusHooksStatusRes>,
     hooksStatus: () => ipcRenderer.invoke(CH.STATUS_HOOKS_STATUS) as Promise<StatusHooksStatusRes>,
+    markRead: (paneId: string) => ipcRenderer.invoke(CH.STATUS_MARK_READ, paneId) as Promise<boolean>,
+    mute: (paneId: string, muted: boolean) =>
+      ipcRenderer.invoke(CH.STATUS_MUTE, { paneId, muted: muted === true } satisfies StatusMuteReq) as Promise<boolean>,
+    silenceAck: (paneId: string) => ipcRenderer.invoke(CH.STATUS_SILENCE_ACK, paneId) as Promise<boolean>,
+    plan: (paneId: string, requestId?: string) =>
+      ipcRenderer.invoke(CH.STATUS_PLAN, (requestId === undefined ? { paneId } : { paneId, requestId }) satisfies StatusPlanReq) as Promise<PanePlan | null>,
   },
   remote: {
     setConfig: (cfg: RemoteSettings) => ipcRenderer.send(CH.REMOTE_SET_CONFIG, cfg),
@@ -372,18 +383,31 @@ const api: SnApi = {
     prune: (workspaceIds: string[]) => ipcRenderer.send(CH.WS_NOTES_PRUNE, workspaceIds),
     onChanged: (cb: (e: WsNotesChangedEvt) => void) => sub<WsNotesChangedEvt>(CH.WS_NOTES_CHANGED, cb),
   },
+  teams: {
+    req: ((r: TeamRequest) => ipcRenderer.invoke(CH.TEAMS_REQ, r)) as SnApi['teams']['req'],
+    onChanged: (cb: (e: TeamChangedEvt) => void) => sub<TeamChangedEvt>(CH.TEAMS_CHANGED, cb),
+    onRunAppend: (cb: (e: TeamRunAppendEvt) => void) => sub<TeamRunAppendEvt>(CH.TEAMS_RUN_APPEND, cb),
+    onIntegrateProgress: (cb: (e: IntegrateProgressEvt) => void) => sub<IntegrateProgressEvt>(CH.TEAMS_INTEGRATE_PROGRESS, cb),
+  },
   files: {
-    root: (workspaceId: string) => ipcRenderer.invoke(CH.FILES_ROOT, workspaceId) as Promise<FilesRootRes>,
+    root: (workspaceId: string, paneId?: string) => ipcRenderer.invoke(CH.FILES_ROOT, workspaceId, paneId) as Promise<FilesRootRes>,
     list: (req: FilesListReq) => ipcRenderer.invoke(CH.FILES_LIST, req) as Promise<FilesListRes>,
-    read: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_READ, req) as Promise<FileReadRes>,
+    read: (req: FilesPathReq) => ipcRenderer.invoke(CH.FILES_READ, req) as Promise<FileReadRes>,
     write: (req: FileWriteReq) => ipcRenderer.invoke(CH.FILES_WRITE, req) as Promise<FileWriteRes>,
     create: (req: FileCreateReq) => ipcRenderer.invoke(CH.FILES_CREATE, req) as Promise<FilesOpRes>,
     rename: (req: FileRenameReq) => ipcRenderer.invoke(CH.FILES_RENAME, req) as Promise<FilesOpRes>,
-    trash: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_TRASH, req) as Promise<FilesOpRes>,
-    reveal: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_REVEAL, req) as Promise<FilesOpRes>,
-    open: (req: { workspaceId: string; rel: string }) => ipcRenderer.invoke(CH.FILES_OPEN, req) as Promise<FilesOpRes>,
-    watch: (workspaceId: string | null) => ipcRenderer.send(CH.FILES_WATCH, workspaceId),
+    trash: (req: FilesPathReq) => ipcRenderer.invoke(CH.FILES_TRASH, req) as Promise<FilesOpRes>,
+    reveal: (req: FilesPathReq) => ipcRenderer.invoke(CH.FILES_REVEAL, req) as Promise<FilesOpRes>,
+    open: (req: FilesPathReq) => ipcRenderer.invoke(CH.FILES_OPEN, req) as Promise<FilesOpRes>,
+    watch: (workspaceId: string | null, paneId?: string) => ipcRenderer.send(CH.FILES_WATCH, workspaceId, paneId),
     onChanged: (cb: (e: FilesChangedEvt) => void) => sub<FilesChangedEvt>(CH.FILES_CHANGED, cb),
+    resolveRefs: (req: FilesResolveRefsReq) => ipcRenderer.invoke(CH.FILES_RESOLVE_REFS, req) as Promise<FileRefResolved[]>,
+  },
+  chat: {
+    sub: (req: ChatSubReq) => ipcRenderer.invoke(CH.CHAT_SUB, req) as Promise<ChatPageRes>,
+    unsub: (req: ChatSubReq) => ipcRenderer.send(CH.CHAT_UNSUB, req),
+    more: (req: ChatMoreReq) => ipcRenderer.invoke(CH.CHAT_MORE, req) as Promise<ChatPageRes>,
+    onFrame: (cb: (e: ChatFrameEvt) => void) => sub<ChatFrameEvt>(CH.CHAT_FRAME, cb),
   },
   git: {
     setWatch: (targets: GitTarget[]) => ipcRenderer.send(CH.GIT_SET_WATCH, targets),
