@@ -22,6 +22,8 @@ export type TeamEffect =
   | { kind: 'deleteSystemFile'; runId: string }
   | { kind: 'archiveComments'; target: string; comments: TeamComment[] }
   | { kind: 'archiveTasks'; tasks: TeamTask[] }
+  /** B close: an archived task's worktree loses its owner (TaskWorktrees.disownTree): an ordinary orphan of Settings > Git. */
+  | { kind: 'disownWorktree'; taskId: string; path: string; owner: string }
   | { kind: 'applyHire'; approvalId: string }
   | { kind: 'startIntegrate'; taskId: string; attempt: number }
   | { kind: 'synthetic'; runId: string; on: boolean }
@@ -33,7 +35,7 @@ export type TeamEffect =
 
 export type FlowResult<R = undefined> =
   | { ok: true; rt: TeamRuntime; effects: TeamEffect[]; result: R }
-  | { ok: false; error: FlowError; reason?: ConflictReason; fields?: TaskField[]; current?: unknown; defer?: DeferInfo }
+  | { ok: false; error: FlowError; reason?: ConflictReason; fields?: TaskField[]; current?: unknown; defer?: DeferInfo; detail?: string }
 
 /** What every reducer may read besides the runtime: the clock, the trusted definition and the id minters. */
 export interface FlowCtx {

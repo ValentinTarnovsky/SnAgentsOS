@@ -21,7 +21,8 @@
  *     middle of a checkout can leave it half updated); the base checked out nowhere ->
  *     `update-ref refs/heads/<base> <mergeSha> <baseTip>` (CAS: "but
  *     expected" is `base_moved`); checked out in another worktree ->
- *     `base_checked_out_elsewhere`;
+ *     `base_checked_out_elsewhere` (also a worktree with a rebase or a
+ *     bisect of the base in progress; the main checkout with one: `base_busy`);
  *  6. cleanup, always: the junction unlinked as a link, `worktree remove
  *     --force`, a guarded tree removal as the fallback, `worktree prune`.
  * After any failure the user's HEAD, branch, index and status are exactly as
@@ -42,7 +43,7 @@
  */
 import { spawn as nodeSpawn } from 'child_process'
 import { createWriteStream, mkdirSync, promises as fsp, type WriteStream } from 'fs'
-import { dirname, join, win32 } from 'path'
+import { dirname, join, resolve, win32 } from 'path'
 import { stripAnsi } from '@shared/ansi'
 import { BRAND, LEGACY_BRAND } from '@shared/brand'
 import { TEAM_DIR } from '@shared/teamDefinition'
@@ -687,6 +688,11 @@ export class Integrator {
       return { blocked: 'git_error' }
     }
     const ref = `refs/heads/${base}`
+    // B close: a rebase or a bisect of the base leaves its worktree detached, yet git counts the base as checked out
+    // there (`git branch -f` refuses it) and the rebase's last update_ref would fail on a base moved meanwhile.
+    const busy = await this.operationOn(list, base)
+    if (busy === 0) return { blocked: 'base_busy' }
+    if (busy > 0) return { blocked: 'base_checked_out_elsewhere', path: list[busy].path }
     // git lists the main worktree first.
     if (list[0]?.branch === ref) {
       const key = this.deps.locks.key(repo.repoRoot)
@@ -711,6 +717,30 @@ export class Integrator {
     const other = list.find((w, i) => i > 0 && w.branch === ref)
     if (other) return { blocked: 'base_checked_out_elsewhere', path: other.path }
     return { mode: 'updateRef' }
+  }
+
+  /**
+   * B close: the index in `list` of the first worktree with a rebase (`rebase-merge/head-name`,
+   * `rebase-apply/head-name`) or a bisect (`BISECT_START`, the short name) of `base` in progress in its gitdir, or -1.
+   * The gitdir is the worktree's `.git` folder, or the one its `.git` file names; one that cannot be read has none.
+   */
+  private async operationOn(list: ReadonlyArray<{ path: string }>, base: string): Promise<number> {
+    const ref = `refs/heads/${base}`
+    const read = (p: string): Promise<string | null> => fsp.readFile(p, 'utf8').then((t) => t.trim(), () => null)
+    const busy = await Promise.all(list.map(async (w) => {
+      const dotGit = join(w.path, '.git')
+      const st = await fsp.lstat(dotGit).catch(() => null)
+      if (!st) return false
+      let gitDir = dotGit
+      if (!st.isDirectory()) {
+        const m = /^gitdir:\s*(.+)$/m.exec((await read(dotGit)) ?? '')
+        if (!m) return false
+        gitDir = resolve(w.path, m[1].trim())
+      }
+      const [merge, apply, bisect] = await Promise.all([read(join(gitDir, 'rebase-merge', 'head-name')), read(join(gitDir, 'rebase-apply', 'head-name')), read(join(gitDir, 'BISECT_START'))])
+      return merge === ref || apply === ref || bisect === base || bisect === ref
+    }))
+    return busy.indexOf(true)
   }
 
   /**

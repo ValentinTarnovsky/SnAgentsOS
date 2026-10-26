@@ -154,6 +154,16 @@ export function Spinner(): ReactNode {
   )
 }
 
+/** "Sigue en la PC": the PC sent only part of what is shown above. */
+export function MoreOnPc(): ReactNode {
+  return (
+    <p data-more-on-pc className="mt-1 flex items-center gap-1 text-[11px] text-text-secondary">
+      <Monitor size={13} aria-hidden />
+      {t('teams.task.morePc')}
+    </p>
+  )
+}
+
 /** `text` past `lines` lines folds behind "Ver más"; `cut` (the PC sent only part of it) adds "Sigue en la PC". */
 export function Folded({ text, lines = 12, markdown, cut, ...rest }: { text: string; lines?: number; markdown?: boolean; cut?: boolean } & Record<`data-${string}`, string | undefined>): ReactNode {
   const [open, setOpen] = useState(false)
@@ -168,12 +178,7 @@ export function Folded({ text, lines = 12, markdown, cut, ...rest }: { text: str
           {open ? t('teams.task.showLess') : t('teams.task.showMore')}
         </button>
       )}
-      {cut && (!folds || open) && (
-        <p data-more-on-pc className="mt-1 flex items-center gap-1 text-[11px] text-text-secondary">
-          <Monitor size={13} aria-hidden />
-          {t('teams.task.morePc')}
-        </p>
-      )}
+      {cut && (!folds || open) && <MoreOnPc />}
     </div>
   )
 }

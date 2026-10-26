@@ -206,7 +206,9 @@ const kickoffReq = op('kickoff', { teamId })
 const resumeTaskReq = op('resumeTask', { teamId, taskId })
 // B5
 const needsReq = op('needs', { teamId })
-const decideReq = op('decide', { teamId, approvalId: z.string().regex(APPROVAL_ID_RE), decision: z.enum(['approve', 'reject']), note: body(DECIDE_NOTE_MAX).optional() })
+// rev (B close): the permission approval's rev the user saw; a missing or older rev answers conflict {stale} (other kinds ignore it)
+const approvalRev = z.number().int().positive().optional()
+const decideReq = op('decide', { teamId, approvalId: z.string().regex(APPROVAL_ID_RE), decision: z.enum(['approve', 'reject']), note: body(DECIDE_NOTE_MAX).optional(), rev: approvalRev })
 const answerReq = op('answer', { teamId, cardId: z.string().regex(CARD_ID_RE), answer: cardAnswer })
 // B6
 const integratePreviewReq = op('integratePreview', { teamId, taskId })
@@ -245,7 +247,7 @@ export const phoneTeamRequestSchema = z.discriminatedUnion('op', [
 
 /** The three phone ctl actions (B8 adds them to ctlActionSchema of remote-protocol-schemas.ts). */
 export const teamCtlActionSchemas = [
-  z.object({ kind: z.literal('teamDecide'), teamId, approvalId: z.string().regex(APPROVAL_ID_RE), decision: z.enum(['approve', 'reject']), note: body(DECIDE_NOTE_MAX).optional() }),
+  z.object({ kind: z.literal('teamDecide'), teamId, approvalId: z.string().regex(APPROVAL_ID_RE), decision: z.enum(['approve', 'reject']), note: body(DECIDE_NOTE_MAX).optional(), rev: approvalRev }),
   z.object({ kind: z.literal('teamAnswer'), teamId, cardId: z.string().regex(CARD_ID_RE), answer: cardAnswer }),
   z.object({ kind: z.literal('teamDispatch'), teamId, queueId: z.union([z.string().regex(QUEUE_ID_RE), z.literal('all')]), go: z.boolean() }),
 ] as const

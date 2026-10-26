@@ -567,7 +567,9 @@ const SCOPE_FOLD_MS = 16
 /**
  * While the lab is on (startTeams): the steps main streams for the open
  * dialog's task, that task read again when main says it changed (its last
- * attempt, a run that ends), and `disabled` closes everything.
+ * attempt, a run that ends) or a `task` change names no task (a commit with
+ * no hint: any task of the team, CONTRATOS; like initBoardSync's drawer), and
+ * `disabled` closes everything.
  */
 export function initIntegrateSync(): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -579,7 +581,8 @@ export function initIntegrateSync(): () => void {
     }
     const o = useIntegrateStore.getState().open
     if (!o || e.teamId !== o.teamId) return
-    if (!(e.scopes.includes('task') && e.taskId === o.taskId) || timer) return
+    const task = e.scopes.includes('task') && (e.taskId === undefined || e.taskId === o.taskId)
+    if (!task || timer) return
     timer = setTimeout(() => {
       timer = null
       const cur = useIntegrateStore.getState().open

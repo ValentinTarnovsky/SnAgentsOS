@@ -460,7 +460,9 @@ const SCOPE_FOLD_MS = 16
  * Keeps the board and the drawer's task current while the lab is on: a
  * `board` change of the team on screen pulls its board again while the
  * Tablero shows (a run start or end too while a card shows a live run); a
- * `task` change of the drawer's task, or a run change while it is open, pulls
+ * `task` change of the drawer's task, one that names no task (a commit with
+ * no hint, such as the dispatch pass unblocking the tasks a done one held:
+ * any task of the team, CONTRATOS), or a run change while it is open, pulls
  * that task; `disabled` clears everything.
  */
 export function initBoardSync(): () => void {
@@ -483,7 +485,8 @@ export function initBoardSync(): () => void {
       if (e.scopes.includes('board') || liveCard) boards.add(e.teamId)
     }
     if (drawer?.kind === 'task' && st.tasks[taskKey(e.teamId, drawer.taskId)]) {
-      if ((e.scopes.includes('task') && e.taskId === drawer.taskId) || e.scopes.includes('run')) tasks.add(taskKey(e.teamId, drawer.taskId))
+      const task = e.scopes.includes('task') && (e.taskId === undefined || e.taskId === drawer.taskId)
+      if (task || e.scopes.includes('run')) tasks.add(taskKey(e.teamId, drawer.taskId))
     }
     if ((boards.size === 0 && tasks.size === 0) || timer) return
     timer = setTimeout(() => {

@@ -338,7 +338,7 @@ export function closeTaskNeeds(rt: TeamRuntime, taskId: string, ctx: Pick<FlowCt
 /**
  * A task leaves for `to` (T18 for the user, T19 for the Lead): its level and
  * queue items go; leaving its phase (todo, done, cancelled) cancels its
- * pending approvals; back to todo it starts over (the plan, the QA round and
+ * pending approvals and its last failed Integrar; back to todo it starts over (the plan, the QA round and
  * the counters go); to blocked it keeps its phase to resume to, and a block
  * of the Lead says so (`by: 'lead'`, never read as the user's own). Moot
  * cards are dismissed: the blocking card when it unblocks, every open card
@@ -380,6 +380,9 @@ function moveTo(
       delete t.review.lastVerdict
       t.counters = { ...t.counters, noProgress: 0, continuations: 0, retries: 0, interrupts: 0 }
     } else if (t.plan?.status === 'pending') delete t.plan
+    // B close: a failed Integrar belongs to the attempt this cycle made; a running one refuses the move (busy) first.
+    // A move to blocked keeps it, since blocked resumes to review/integrating.
+    if (t.integrate && t.integrate.state !== 'running') delete t.integrate
     t = { ...t, state: to, phase: 'none', stateSince: ctx.now }
     delete t.blocked
   }
@@ -728,7 +731,7 @@ export function deliverComments(rt: TeamRuntime, runId: string, agentId: string,
  * (since their state), with no active run and named by no blockedBy of a task
  * that stays, move to `archive/tasks.jsonl` with their comments; their ids
  * stay known in `archivedTasks` (blockers read them there) and their queue
- * items go.
+ * items go; a worktree one still has is disowned (`disownWorktree`).
  */
 export function archiveSweep(rt: TeamRuntime, ctx: Pick<FlowCtx, 'now'>): FlowResult {
   const cutoff = ctx.now - TASK_ARCHIVE_AFTER_MS
@@ -743,6 +746,9 @@ export function archiveSweep(rt: TeamRuntime, ctx: Pick<FlowCtx, 'now'>): FlowRe
   if (old.size === 0) return { ok: true, rt, effects: [], result: undefined }
   const gone = rt.tasks.filter((t) => old.has(t.id))
   const effects: TeamEffect[] = [{ kind: 'archiveTasks', tasks: gone }]
+  // B close: only the drawer of a task on the board removes its worktree; an archived one's tree is disowned instead,
+  // so Settings > Git offers it as an ordinary orphan (with its usual lost-commits checks).
+  for (const t of gone) if (t.worktree) effects.push({ kind: 'disownWorktree', taskId: t.id, path: t.worktree.path, owner: t.worktree.owner })
   const comments: TeamRuntime['comments'] = { ...rt.comments }
   for (const id of old) {
     const list = comments[id]

@@ -240,7 +240,15 @@ export class RunLog {
   private remember(msgs: ChatMessage[]): ChatMessage[] {
     if (!msgs.length) return msgs
     this._ring.push(...msgs)
-    if (this._ring.length > this.ringMax) this._ring.splice(0, this._ring.length - this.ringMax)
+    if (this._ring.length > this.ringMax) {
+      // Whole records only (B close): the messages of one line share its offset (a Codex file_change is `N.0` and
+      // `N.1`), so ring[0] always starts a record and a page from the ring never serves half of one. The newest
+      // record always stays.
+      let n = this._ring.length - this.ringMax
+      const at = chatMessageOffset(this._ring[n - 1].id)
+      while (n < this._ring.length - msgs.length && chatMessageOffset(this._ring[n].id) === at) n++
+      this._ring.splice(0, n)
+    }
     return msgs
   }
 
@@ -270,12 +278,31 @@ export class RunLog {
       let i = ring.length - 1
       while (i >= 0 && before !== null && offsetOf(ring[i]) >= before) i--
       let reachedOldest = false
-      for (; i >= 0; i--) {
-        const m = shrinkMessage(mask ? mask([ring[i]])[0] : ring[i], single)
-        if (!budget.fits([m])) break
-        budget.add([m])
-        picked.unshift(m)
-        if (i === 0) reachedOldest = true
+      while (i >= 0) {
+        // One record at a time, whole (B close, as readPage's take): its messages share one offset, and a page that
+        // ended between them would lose the older half for good (the next page starts below that offset).
+        const at = offsetOf(ring[i])
+        let j = i
+        while (j > 0 && offsetOf(ring[j - 1]) === at) j--
+        const raw = ring.slice(j, i + 1)
+        const group = (mask ? mask(raw) : raw).map((m) => shrinkMessage(m, single))
+        if (!budget.fits(group)) {
+          if (budget.count > 0) break
+          // A lone record that still does not fit: keep what does.
+          const some: ChatMessage[] = []
+          for (const m of group) {
+            if (!budget.fits([...some, m])) break
+            some.push(m)
+          }
+          budget.add(some)
+          picked.unshift(...some)
+          if (j === 0 && some.length) reachedOldest = true
+          break
+        }
+        budget.add(group)
+        picked.unshift(...group)
+        if (j === 0) reachedOldest = true
+        i = j - 1
       }
       const oldest = picked.length ? offsetOf(picked[0]) : before ?? 0
       let cursor: number | null = reachedOldest ? offsetOf(ring[0]) : oldest

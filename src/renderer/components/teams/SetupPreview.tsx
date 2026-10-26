@@ -17,6 +17,7 @@ const WARNING_KEY: Record<SetupWarning, MessageKey> = {
   codexReadonlyBlock: 'teams.setup.warning.codexReadonlyBlock',
   noVerify: 'teams.setup.warning.noVerify',
   notCommitted: 'teams.setup.warning.notCommitted',
+  userAllow: 'teams.setup.warning.userAllow',
 }
 
 /** What the access of the roles means, in amber (edit step from the draft, preview step from main). */

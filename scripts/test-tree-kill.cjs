@@ -298,6 +298,9 @@ function argvChecks() {
   // B5 integration, fourth round (security): no git log, diff or show (--output writes any file, diff --no-index reads any one).
   // Fifth round: no PowerShell(git status:*) either (a $(...) subexpression could run a command inside the prefix).
   const RO_ALLOW = ['Read', 'Grep', 'Glob', 'LS', 'WebSearch', 'WebFetch', 'TodoWrite', 'Bash(git status:*)']
+  // Tanda B close (finding 14): a readonly or plan line denies the git fence too (the user's own permissions.allow
+  // joins every Claude line through --setting-sources user, and under dontAsk only a deny wins over it).
+  const RO_DENY = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', ...TOTAL_DENY]
   // E10 SPIKE (deviation of decision 2): only the Bash rule; PowerShell would run snaos.cmd, whose %* cmd.exe re-parses.
   const TEAM = ['Bash(snaos team:*)']
   same(G.CLAUDE_ISOLATION_FLAGS, ISO, 'CLAUDE_ISOLATION_FLAGS')
@@ -312,9 +315,9 @@ function argvChecks() {
     'claude total resume': [claude('total', { kind: 'resume', sessionId: SID }),
       [...HEAD, '--resume', SID, '--append-system-prompt-file', sys, '--permission-mode', 'bypassPermissions', '--disallowedTools', ...TOTAL_DENY, ...PROTECT]],
     'claude readonly new': [claude('readonly', { kind: 'new', sessionId: SID }, { model: 'opus', effort: 'high', grants }),
-      [...HEAD, '--session-id', SID, '--model', 'opus', '--effort', 'high', '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', ...RO_ALLOW, ...TEAM, 'Bash(npm test:*)', '--disallowedTools', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', ...PROTECT]],
+      [...HEAD, '--session-id', SID, '--model', 'opus', '--effort', 'high', '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', ...RO_ALLOW, ...TEAM, 'Bash(npm test:*)', '--disallowedTools', ...RO_DENY, ...PROTECT]],
     'claude readonly resume': [claude('readonly', { kind: 'resume', sessionId: SID }, { model: 'haiku' }),
-      [...HEAD, '--resume', SID, '--model', 'haiku', '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', ...RO_ALLOW, ...TEAM, '--disallowedTools', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', ...PROTECT]],
+      [...HEAD, '--resume', SID, '--model', 'haiku', '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', ...RO_ALLOW, ...TEAM, '--disallowedTools', ...RO_DENY, ...PROTECT]],
     'claude custom new': [claude('custom', { kind: 'new', sessionId: SID }, { allowedTools: ['Read', 'Edit', 'Bash(npm test:*)', 'Read', 'bad tool'], grants: ['Bash(npm run:*)', 'Bash(snaos team:*)', 'Agent'] }),
       [...HEAD, '--session-id', SID, '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', 'Read', 'Edit', 'Bash(npm test:*)', ...TEAM, 'Bash(npm run:*)', '--disallowedTools', ...TOTAL_DENY, ...PROTECT]],
     'claude custom resume': [claude('custom', { kind: 'resume', sessionId: SID }, { allowedTools: ['Grep'] }),
@@ -326,7 +329,7 @@ function argvChecks() {
   snaps['claude custom with PowerShell CLI rules'] = [claude('custom', { kind: 'new', sessionId: SID }, { allowedTools: ['Read', ...psCli, 'Bash(snaos:*)', 'Bash(snaos.cmd team:*)', 'Bash(npm test:*)'], grants: ['PowerShell(snaos team:*)', 'PowerShell(npm test:*)'] }),
     [...HEAD, '--session-id', SID, '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', 'Read', 'Bash(npm test:*)', ...TEAM, '--disallowedTools', ...TOTAL_DENY, ...PROTECT]]
   snaps['claude readonly with a PowerShell CLI grant'] = [claude('readonly', { kind: 'new', sessionId: SID }, { grants: [...psCli, 'Bash(snaos team:*)'] }),
-    [...HEAD, '--session-id', SID, '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', ...RO_ALLOW, ...TEAM, '--disallowedTools', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', ...PROTECT]]
+    [...HEAD, '--session-id', SID, '--append-system-prompt-file', sys, '--permission-mode', 'dontAsk', '--allowedTools', ...RO_ALLOW, ...TEAM, '--disallowedTools', ...RO_DENY, ...PROTECT]]
   const allowOf = (argv) => (argv.includes('--allowedTools') ? argv.slice(argv.indexOf('--allowedTools') + 1, argv.indexOf('--disallowedTools')) : [])
   for (const [label, [res, expected]] of Object.entries(snaps)) {
     same(res.argv, expected, `argv snapshot: ${label}`)
@@ -342,6 +345,8 @@ function argvChecks() {
     const plan = claude(G.effectiveProfile(permission, 'plan'), { kind: 'new', sessionId: SID })
     check(allowOf(plan.argv).includes('Bash(snaos team:*)') && !plan.argv.some((a) => /^PowerShell\(snaos/i.test(a)), `a plan run of a ${permission} role: Bash(snaos team:*) only`)
     check(!allowOf(plan.argv).some((a) => GIT_READS_RE.test(a)) && allowOf(plan.argv).includes('Bash(git status:*)'), `a plan run of a ${permission} role: no git log, diff or show (fourth round); git status stays`, allowOf(plan.argv))
+    const deny = plan.argv.slice(plan.argv.indexOf('--disallowedTools') + 1)
+    check(TOTAL_DENY.every((d) => deny.includes(d)), `a plan run of a ${permission} role keeps the git fence of CLAUDE_TOTAL_DENY (Tanda B close)`, deny)
   }
   // Fourth round: no readonly line carries git log, diff or show, also when a stored grant of an older build names one.
   for (const [label, [res]] of Object.entries(snaps)) if (label.includes('readonly')) check(!allowOf(res.argv).some((a) => GIT_READS_RE.test(a)), `${label}: no git log, diff or show on the line`, allowOf(res.argv))

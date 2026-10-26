@@ -439,7 +439,8 @@ export type TeamApproval = ApprovalBase & (
   | { kind: 'plan'; payload: { planRev: number; small: boolean } }
   | { kind: 'final'; payload: { hasWorktree: boolean; summary: string } }
   | { kind: 'hire'; payload: { roleId: string; text: string; sha256: string; baseDefHash: string; replaces: boolean } }
-  | { kind: 'permission'; payload: { roleId: string; runId: string; tools: string[]; denied?: string[] /* B5: shell commands denied, redacted, DENIED_COMMANDS_MAX x DENIED_COMMAND_MAX */ } }
+  /** rev (B close): absent reads as 1; +1 each time permissionAsk merges new rules or denied lines into it (a decide must carry it). */
+  | { kind: 'permission'; rev?: number; payload: { roleId: string; runId: string; tools: string[]; denied?: string[] /* B5: shell commands denied, redacted, DENIED_COMMANDS_MAX x DENIED_COMMAND_MAX */ } }
   | { kind: 'integrate'; payload: { branch: string; base: string } }
 )
 export type CardAction = 'retry' | 'resume' | 'toTodo' | 'cancelTask' | 'stopRun' | 'keepWaiting' | 'dropBlocker' | 'resumeTeam' | 'newSession' | 'killOrphan' | 'dismiss'

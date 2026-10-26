@@ -28,7 +28,11 @@
 // notice shows once: inside the pushed screen on top (its live region in that
 // dialog) while one slides in or stays open, never also on Home or the
 // terminal under it, and not again on Home afterwards; a [Go] toast stays in
-// the terminal.
+// the terminal. Tanda B close: teamDecide carries the rev of the approval
+// shown; a permission the PC refuses as stale (a later run grew it) reads Te
+// necesita again and says it changed (en and es); grantsFull in words; rows
+// the PC could not send whole (pcOnly) read only with On the PC, no button,
+// and "The rest is on the PC".
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawnSync } = require('node:child_process')
@@ -111,12 +115,13 @@ const hireLines = Array.from({ length: 260 }, (_, i) => '+line ' + i);
 const freshNeeds = () => ({
  teamId: TEAM, rev: 5, trust: 'trusted', paused: null,
  approvals: [
-  { id: 'a-1', taskId: 't-1', state: 'pending', decider: 'user', requestedBy: 'dev', at: now - 9 * MIN, payload: { kind: 'plan', planRev: 2, small: false, text: '# Plan\\n- one ' + RLO + 'x\\n- two' } },
-  { id: 'a-2', state: 'pending', decider: 'user', requestedBy: 'lead', at: now - 8 * MIN, payload: { kind: 'hire', roleId: 'docs', diff: { rel: 'roles/docs.md', status: 'added', hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 260, lines: hireLines }], add: 260, del: 0 }, risks: [] } },
-  { id: 'a-3', taskId: 't-2', state: 'pending', decider: 'user', requestedBy: 'qa', at: now - 7 * MIN, payload: { kind: 'integrate', branch: 'sn/t-aaaaaa-2', base: 'main', ahead: 3 } },
-  { id: 'a-4', taskId: 't-1', state: 'pending', decider: 'user', requestedBy: 'dev', at: now - 6 * MIN, payload: { kind: 'permission', roleId: 'dev', tools: ['Bash(npm test:*)'], denied: ['npm test --watch'] } },
-  { id: 'a-5', taskId: 't-3', state: 'pending', decider: 'user', requestedBy: 'qa', at: now - 5 * MIN, payload: { kind: 'final', summary: 'All done', stat: { files: 2, insertions: 10, deletions: 3, top: [{ path: 'src/a.ts', add: 8, del: 1 }] } } },
-  { id: 'a-6', taskId: 't-5', state: 'pending', decider: 'lead', requestedBy: 'dev', at: now - 5 * MIN, payload: { kind: 'plan', planRev: 1, small: true, text: 'small' } },
+  { id: 'a-1', taskId: 't-1', state: 'pending', decider: 'user', requestedBy: 'dev', at: now - 9 * MIN, rev: 1, payload: { kind: 'plan', planRev: 2, small: false, text: '# Plan\\n- one ' + RLO + 'x\\n- two' } },
+  { id: 'a-2', state: 'pending', decider: 'user', requestedBy: 'lead', at: now - 8 * MIN, rev: 1, payload: { kind: 'hire', roleId: 'docs', diff: { rel: 'roles/docs.md', status: 'added', hunks: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 260, lines: hireLines }], add: 260, del: 0 }, risks: [] } },
+  { id: 'a-3', taskId: 't-2', state: 'pending', decider: 'user', requestedBy: 'qa', at: now - 7 * MIN, rev: 1, payload: { kind: 'integrate', branch: 'sn/t-aaaaaa-2', base: 'main', ahead: 3 } },
+  // rev 2: a later run of the task already merged a denial into this permission once (Tanda B close).
+  { id: 'a-4', taskId: 't-1', state: 'pending', decider: 'user', requestedBy: 'dev', at: now - 6 * MIN, rev: 2, payload: { kind: 'permission', roleId: 'dev', tools: ['Bash(npm test:*)'], denied: ['npm test --watch'] } },
+  { id: 'a-5', taskId: 't-3', state: 'pending', decider: 'user', requestedBy: 'qa', at: now - 5 * MIN, rev: 1, payload: { kind: 'final', summary: 'All done', stat: { files: 2, insertions: 10, deletions: 3, top: [{ path: 'src/a.ts', add: 8, del: 1 }] } } },
+  { id: 'a-6', taskId: 't-5', state: 'pending', decider: 'lead', requestedBy: 'dev', at: now - 5 * MIN, rev: 1, payload: { kind: 'plan', planRev: 1, small: true, text: 'small' } },
  ],
  cards: [
   { id: 'k-1', taskId: 't-1', agentId: 'dev', kind: 'choice', state: 'open', at: now - 4 * MIN, question: 'Which db?', options: ['sqlite', 'postgres'], multi: false },
@@ -235,6 +240,11 @@ const drop = (a) => {
 };
 // The ctl path: sendTeamCtl's version gate is the real one; the team kinds reach this ack.
 let ackFor = () => null;
+// The PC's rule for a permission (Tanda B close): a decide at a rev other than the one it holds now is stale.
+const staleUnlessRev = (a) => {
+ const cur = a.kind === 'teamDecide' && needs.approvals.find(x => x.id === a.approvalId);
+ return cur && cur.payload.kind === 'permission' && a.rev !== cur.rev ? { ok: false, error: 'conflict:stale' } : null;
+};
 client.sendCtl = async (action) => {
  if (!String(action.kind).startsWith('team')) return { ok: true };
  ctls.push(action);
@@ -476,7 +486,7 @@ window.runMain = async () => {
  // teamDecide: approve a plan.
  click($('[data-need-approve="a-1"]'));
  await until(() => !$('[data-team-need="a-1"]'), 'an approved plan hides');
- check(JSON.stringify(ctls.at(-1)) === JSON.stringify({ kind: 'teamDecide', teamId: TEAM, approvalId: 'a-1', decision: 'approve' }), 'teamDecide approve');
+ check(JSON.stringify(ctls.at(-1)) === JSON.stringify({ kind: 'teamDecide', teamId: TEAM, approvalId: 'a-1', decision: 'approve', rev: 1 }), 'teamDecide approve, with the rev of the approval shown');
  // Ask for changes: the note is required, dictated, sent only on Send.
  click($('[data-need-changes="a-5"]'));
  await until(() => !!$('[data-need-note]') && !!$('[data-sheet][data-open=true]'), 'Ask for changes opens the note');
@@ -486,7 +496,7 @@ window.runMain = async () => {
  check($('[data-need-note-text]').value === 'falta el test' && ctls.length === 1, 'a dictated note waits for Send');
  click($('[data-need-note-send]'));
  await until(() => !$('[data-team-need="a-5"]'), 'the changes ask hides the row');
- check(JSON.stringify(ctls.at(-1)) === JSON.stringify({ kind: 'teamDecide', teamId: TEAM, approvalId: 'a-5', decision: 'reject', note: 'falta el test' }), 'teamDecide reject with the note');
+ check(JSON.stringify(ctls.at(-1)) === JSON.stringify({ kind: 'teamDecide', teamId: TEAM, approvalId: 'a-5', decision: 'reject', note: 'falta el test', rev: 1 }), 'teamDecide reject with the note and the rev');
  // A permission: confirm first; the PC refuses with nothing left to grant.
  ackFor = a => (a.kind === 'teamDecide' && a.approvalId === 'a-4' && a.decision === 'approve' ? { ok: false, error: 'bad_request' } : null);
  click($('[data-need-approve="a-4"]'));
@@ -495,12 +505,29 @@ window.runMain = async () => {
  click($('[data-confirm-ok]'));
  await until(() => $('[data-team-need="a-4"] [data-need-error]')?.textContent === 'There is nothing to grant: the app no longer allows any rule of this request. Reject it.', 'nothingToGrant in words');
  check(!!$('[data-team-need="a-4"]'), 'a refused row stays');
- ackFor = a => (a.kind === 'teamDecide' && a.approvalId === 'a-4' ? { ok: false, error: 'conflict:stale' } : null);
+ check(ctls.at(-1).approvalId === 'a-4' && ctls.at(-1).rev === 2, 'teamDecide carries the rev of the permission shown (2), never a default: ' + JSON.stringify(ctls.at(-1)));
+ // Tanda B close: a later run grew the permission on the PC after the phone read it (one more rule, rev 3).
+ const grownA4 = needs.approvals.find(x => x.id === 'a-4');
+ grownA4.rev = 3; grownA4.payload.tools = [...grownA4.payload.tools, 'Bash(make release)'];
+ ackFor = staleUnlessRev;
+ const needsReads = reqs.filter(r => r.op === 'needs').length;
  await wait(320);
- click($('[data-need-reject="a-4"]'));
- await until(() => !!$('[data-confirm-ok]') && !!$('[data-sheet][data-open=true]'), 'reject asks first');
+ click($('[data-need-approve="a-4"]'));
+ await until(() => !!$('[data-confirm-ok]') && !!$('[data-sheet][data-open=true]'), 'approve asks first again');
  click($('[data-confirm-ok]'));
- await until(() => $('[data-team-need="a-4"] [data-need-error]')?.textContent === 'That no longer waits for you.', 'a stale permission: gone');
+ const changedWords = 'This request changed on the PC since you saw it: review it again before you decide.';
+ await until(() => $('[data-team-need="a-4"] [data-need-error]')?.textContent === changedWords, 'a stale permission: it changed, review it again');
+ check(ctls.at(-1).approvalId === 'a-4' && ctls.at(-1).rev === 2, 'that decide carried the rev the phone showed (2), so the PC refused it');
+ await until(() => reqs.filter(r => r.op === 'needs').length > needsReads && $$('[data-team-need="a-4"] [data-permission-rule]').some(e => e.textContent === 'Bash(make release)'), 'the stale refusal reads Te necesita again: the row shows the rule the run added');
+ check($('[data-team-need="a-4"] [data-need-error]')?.textContent === changedWords && !!$('[data-team-need="a-4"]'), 'the row stays with the words under it');
+ // Decided again at the rev it shows now: the PC answers that the task's grants are full.
+ ackFor = a => staleUnlessRev(a) || (a.kind === 'teamDecide' && a.approvalId === 'a-4' && a.decision === 'approve' ? { ok: false, error: 'bad_request:grantsFull' } : null);
+ await wait(320);
+ click($('[data-need-approve="a-4"]'));
+ await until(() => !!$('[data-confirm-ok]') && !!$('[data-sheet][data-open=true]'), 'approve asks first once more');
+ click($('[data-confirm-ok]'));
+ await until(() => $('[data-team-need="a-4"] [data-need-error]')?.textContent === 'This task already holds as many rules as it can, so nothing more can be granted. Reject this request.', 'grantsFull in words');
+ check(ctls.at(-1).rev === 3, 'the next decide carries the rev shown now (3)');
  ackFor = () => null;
  // teamAnswer: one option sends at once.
  click($('[data-team-need="k-1"] [data-card-option="1"]'));
@@ -542,6 +569,29 @@ window.runMain = async () => {
  check(JSON.stringify(ctls.at(-1)) === JSON.stringify({ kind: 'teamDispatch', teamId: TEAM, queueId: 'all', go: true }) && store.getState().toast === 'Runs dispatched: 2.', 'teamDispatch all, the toast counts the rows shown');
  check(new Set(ctls.map(c => c.kind)).size === 3, 'the three ctls went out');
  check(!ctls.some(c => c.approvalId === 'a-2' || c.approvalId === 'a-3' || (c.answer && c.answer.action === 'resumeTeam')), 'hire, integrate and resumeTeam were never sent');
+ // Rows the PC could not send whole (phoneFit pcOnly, Tanda B close): read only with On the PC, never a button, and
+ // what came of them says the rest is on the PC.
+ needs = {
+  ...freshNeeds(),
+  approvals: [
+   { id: 'a-7', taskId: 't-1', state: 'pending', decider: 'user', requestedBy: 'dev', at: now - MIN, rev: 1, pcOnly: true, payload: { kind: 'permission', roleId: 'dev', tools: ['Bash(npm run build:web-build:web-build:web-'], denied: ['npm run build:web-build:web-'], truncated: true } },
+   { id: 'a-8', taskId: 't-3', state: 'pending', decider: 'user', requestedBy: 'qa', at: now - MIN, rev: 1, pcOnly: true, payload: { kind: 'final', summary: 'All done, and then the', truncated: true } },
+  ],
+  cards: [{ id: 'k-6', taskId: 't-1', agentId: 'dev', kind: 'choice', state: 'open', at: now - MIN, question: 'Which of these do we', options: ['sqlite', 'postgres'], multi: false, pcOnly: true, truncated: true }],
+  queue: [],
+ };
+ const pcCtls = ctls.length;
+ teamChanged({ teamId: TEAM, rev: 9, scopes: ['needs'] });
+ await until(() => !!$('[data-team-need="a-7"]') && !!$('[data-team-need="a-8"]') && !!$('[data-team-need="k-6"]'), 'a needs change brings the rows the PC could not send whole');
+ for (const id of ['a-7', 'a-8', 'k-6']) {
+  const row = $('[data-team-need="' + id + '"]');
+  check(row.dataset.readOnly === 'true' && !!row.querySelector('[data-on-pc]') && row.querySelector('[data-need-fit-pc]')?.textContent === 'It is too long to show whole on the phone: decide it on the PC.', id + ' is read only with On the PC, and says why');
+  check(!row.querySelector('button[data-need-approve], button[data-need-reject], button[data-need-changes], button[data-card-option], button[data-card-send], textarea'), id + ' offers no Approve, Reject, Ask for changes nor answer');
+  check(!!row.querySelector('[data-more-on-pc]') && row.textContent.includes('The rest is on the PC'), id + ' says the rest is on the PC');
+ }
+ check($('[data-team-need="a-7"] [data-permission-rule]').textContent.startsWith('Bash(npm run') && $$('[data-team-need="k-6"] [data-card-option-pc]').map(e => e.textContent).join() === 'sqlite,postgres', 'what came of them shows, read only');
+ check(ctls.length === pcCtls, 'nothing was sent for them');
+ await shown(); check(noOverflow(), 'no horizontal overflow (rows decided on the PC): ' + wide.join('; '));
  await back();
  await until(() => top('team-board') && !screen('team-needs'), 'back returns to the board');
 
@@ -725,6 +775,17 @@ window.runMain = async () => {
  check($('[data-confirm-message]').textContent.includes('¿Concedés esta regla a los agentes de dev en esta tarea?'), 'Spanish confirmation');
  click($('[data-confirm-ok]'));
  await until(() => $('[data-team-need="a-4"] [data-need-error]')?.textContent === 'No hay nada para conceder: la app ya no permite ninguna regla de este pedido. Rechazalo.', 'nothingToGrant in Spanish');
+ // A later run grew it on the PC (Tanda B close): stale, in Spanish, and Te necesita reads it again.
+ needs.approvals.find(x => x.id === 'a-4').rev = 3;
+ ackFor = staleUnlessRev;
+ const needsReadsEs = reqs.filter(r => r.op === 'needs').length;
+ await wait(320);
+ click($('[data-need-approve="a-4"]'));
+ await until(() => !!$('[data-confirm-ok]') && !!$('[data-sheet][data-open=true]'), 'confirm in Spanish again');
+ click($('[data-confirm-ok]'));
+ await until(() => $('[data-team-need="a-4"] [data-need-error]')?.textContent === 'Este pedido cambió en la PC desde que lo viste: revisalo de nuevo antes de decidir.', 'a stale permission in Spanish');
+ await until(() => reqs.filter(r => r.op === 'needs').length > needsReadsEs, 'and Te necesita reads it again');
+ check(decideFailText(refusalOfAck('bad_request:grantsFull'), 'permission', 'approve') === 'Esta tarea ya tiene todas las reglas que puede tener, así que no se puede conceder nada más. Rechazá este pedido.', 'grantsFull in Spanish, in the same words as the desktop');
  ackFor = () => null;
  click($('[data-team-need="k-1"] [data-need-task]'));
  await until(() => top('team-task') && !!$('[data-task-screen="t-1"]'), 'a need row opens its task over Te necesita');

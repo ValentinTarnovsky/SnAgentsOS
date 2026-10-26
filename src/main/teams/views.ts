@@ -145,7 +145,8 @@ export type AheadOf = (taskId: string) => number | undefined
  * every commit's header key build it, the needs op and the task drawer build the full one.
  */
 export function approvalView(rt: Readonly<TeamRuntime>, a: TeamApproval, trusted: TrustedDefinition | null, o: { light?: boolean; ahead?: AheadOf } = {}): ApprovalView {
-  const base = { id: a.id, state: a.state, decider: a.decider, requestedBy: actorLabel(a.createdBy), at: a.createdAt }
+  // rev (B close): what a decide of a permission approval must carry back (it grows with each merge, permissionAsk).
+  const base = { id: a.id, state: a.state, decider: a.decider, requestedBy: actorLabel(a.createdBy), at: a.createdAt, rev: a.kind === 'permission' ? a.rev ?? 1 : 1 }
   let payload: ApprovalView['payload']
   switch (a.kind) {
     case 'plan': {
@@ -242,16 +243,41 @@ export function waitingOf(plan: DispatchPlan | null): { byAgent: Map<string, Def
   return { byAgent, byKey }
 }
 
+/** The defer reasons a dry run gives an agent's candidate that hold every level of that agent, not only that one. */
+const AGENT_WIDE: ReadonlySet<DeferInfo['reason']> = new Set<DeferInfo['reason']>(['disabled', 'untrusted', 'cliOff', 'paused', 'agentPaused', 'teamCap', 'globalCap', 'quota', 'takenOver', 'running', 'stopping'])
+
+/**
+ * B close: what holds a queue item the dry run has no request for (planDispatch makes one per free agent, its
+ * minimum): its agent's run (running, stopping), a takeover, or a reason of the agent's current candidate that holds
+ * the whole agent (`byAgent`); else undefined (nothing but the user's OK holds it).
+ */
+function agentDefer(rt: Readonly<TeamRuntime>, q: QueueItem, byAgent: ReadonlyMap<string, DeferInfo> | undefined): DeferInfo | undefined {
+  const agent = rt.agents.find((a) => a.id === q.agentId)
+  if (!agent) return undefined
+  const withTask = (d: DeferInfo): DeferInfo => (q.taskId ? { ...d, taskId: q.taskId } : d)
+  if (agent.runId || agent.status === 'running') {
+    const run = rt.activeRuns.find((r) => r.id === agent.runId)
+    return withTask({ reason: run?.state === 'stopping' ? 'stopping' : 'running' })
+  }
+  if (agent.status === 'takenOver' || agent.takeover) return withTask({ reason: 'takenOver' })
+  const d = byAgent?.get(agent.id)
+  if (!d || !AGENT_WIDE.has(d.reason)) return undefined
+  const out: DeferInfo = { reason: d.reason }
+  if (d.until !== undefined) out.until = d.until
+  return withTask(out)
+}
+
 /**
  * "Te necesita" of one team (design 2.4): the trust state, the pause, the pending approvals with their full bodies,
  * the open cards, the queue rows with their defer reason (B4), and the titles of the tasks the rows name. The same
  * rows as the count (needsInputOf): an approval, card or queue item of a task that is over is in neither. `ahead`:
- * the integrate rows' commits ahead (B6 integration, the needs op read them first).
+ * the integrate rows' commits ahead (B6 integration, the needs op read them first). `byAgent` (B close): the dry
+ * run's defer per agent, for a row whose own level has no request in it (agentDefer).
  */
-export function needsView(rec: TeamRecord, trusted: TrustedDefinition | null, defer: ReadonlyMap<string, DeferInfo>, o: { ahead?: AheadOf } = {}): TeamNeedsView {
+export function needsView(rec: TeamRecord, trusted: TrustedDefinition | null, defer: ReadonlyMap<string, DeferInfo>, o: { ahead?: AheadOf; byAgent?: ReadonlyMap<string, DeferInfo> } = {}): TeamNeedsView {
   const rt = rec.store.rt
   const input = needsInputOf(rt, rec.trust, rec.trustSince, trusted, { full: true, ...(o.ahead ? { ahead: o.ahead } : {}) })
-  const queue = rt.queue.filter((q) => openTask(rt, q.taskId)).map((q) => queueItemView(rt, q, defer.get(`${q.agentId}|${q.sessionKey}`)))
+  const queue = rt.queue.filter((q) => openTask(rt, q.taskId)).map((q) => queueItemView(rt, q, defer.get(`${q.agentId}|${q.sessionKey}`) ?? agentDefer(rt, q, o.byAgent)))
   const tasks: TeamNeedsView['tasks'] = {}
   const ids = new Set<string>()
   for (const x of [...input.approvals, ...input.cards, ...queue]) if (x.taskId) ids.add(x.taskId)

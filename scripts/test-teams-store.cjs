@@ -27,6 +27,10 @@
 // first 20 ids on both paths, and Despachar todo answering only the items it approved now.
 // B5 review, second round: needsPlan changes only while the task is in todo (bad_request otherwise, like repo and
 // isolation), from the Lead's team.task.update, the user's updateTask reducer and the updateTask op alike.
+// Tanda B close: a trust file or a snapshot that exists but cannot be read (EISDIR here, like EBUSY) is never taken as
+// empty nor as tampered (TrustStore caches nothing and writes nothing from it, TeamTrust reads `unreadable`, no
+// stateReset card, read again next time); archiveSweep disowns an archived task's worktree; the userAllow setup
+// warning; the decide rev in the schemas.
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -69,7 +73,7 @@ export { TeamTrust, sha256Hex, goalHashOf } from './src/main/teams/TeamTrust'
 export { TeamService } from './src/main/teams/TeamService'
 export { reconcileTasks, enqueue, queueDecide } from './src/main/teams/flow/dispatch'
 export { createTeamCtl } from './src/main/teams/teamCtl'
-export { TrustStore } from './src/main/repoConfig/TrustStore'
+export { TrustStore, normTrustPath } from './src/main/repoConfig/TrustStore'
 export { DeadlineTimer } from './src/main/DeadlineTimer'
 export { writeAtomicSync } from './src/main/fsAtomic'
 export { createGitRunner, gitEnv } from './src/main/git/gitExec'
@@ -183,6 +187,9 @@ function schemaChecks() {
   same(M.PHONE_TEAM_OPS.map((op) => M.phoneTeamRequestSchema.options.some((o) => o.shape.op.value === op)), M.PHONE_TEAM_OPS.map(() => true), 'the phone union holds every PHONE_TEAM_OPS member')
   const [decide, answer, dispatch] = M.teamCtlActionSchemas
   check(decide.safeParse({ kind: 'teamDecide', teamId, approvalId: 'a-1', decision: 'approve' }).success && answer.safeParse({ kind: 'teamAnswer', teamId, cardId: 'k-2', answer: { confirm: true } }).success && dispatch.safeParse({ kind: 'teamDispatch', teamId, queueId: 'q-1', go: false }).success, 'ctl action schemas')
+  // Tanda B close: the decide op and the teamDecide ctl carry an optional rev, a positive integer.
+  check(decide.safeParse({ kind: 'teamDecide', teamId, approvalId: 'a-1', decision: 'approve', rev: 2 }).data?.rev === 2 && M.parseTeamRequest({ op: 'decide', teamId, approvalId: 'a-1', decision: 'reject', rev: 3 })?.rev === 3, 'decide and teamDecide keep a rev')
+  check([0, -1, 1.5, '2', null].every((rev) => !decide.safeParse({ kind: 'teamDecide', teamId, approvalId: 'a-1', decision: 'approve', rev }).success && M.parseTeamRequest({ op: 'decide', teamId, approvalId: 'a-1', decision: 'approve', rev }) === null), 'a rev that is not a positive integer never parses')
 }
 
 // ---- 2. flow reducers and invariants ------------------------------------------------------------
@@ -485,6 +492,11 @@ function boardChecks() {
   check(r.rt.archivedTasks['t-12'] === 'cancelled' && !r.rt.comments['t-12'] && r.rt.queue.length === 0, 'its id stays known in archivedTasks; its comments and queue items go')
   check(r.effects.some((e) => e.kind === 'archiveTasks' && e.tasks.length === 1 && e.tasks[0].id === 't-12') && r.effects.some((e) => e.kind === 'archiveComments' && e.target === 't-12'), 'the effects write the task and its comments to the archive')
   check(M.archiveSweep(r.rt, { now: clock.now }).rt === r.rt, 'nothing more to sweep: the same rt')
+  check(!r.effects.some((e) => e.kind === 'disownWorktree'), 'a task with no worktree disowns nothing')
+  // B close: an archived task's worktree is disowned (an ordinary orphan of Settings > Git), never left owned by a task gone from the board.
+  const wt12 = { path: 'C:\\wt\\t-12', branch: 'sn/t-12', base: 'C:\\repo', baseBranch: 'main', slug: 't-12', owner: 'team:tm-0123456789ab:g1:t-12' }
+  const withWt = M.archiveSweep({ ...sweepRt, tasks: sweepRt.tasks.map((t) => (t.id === 't-12' ? { ...t, worktree: wt12 } : t)) }, { now: clock.now })
+  same(withWt.effects.filter((e) => e.kind === 'disownWorktree'), [{ kind: 'disownWorktree', taskId: 't-12', path: wt12.path, owner: wt12.owner }], 'archiveSweep: the worktree of an archived task is disowned through its effect, with its owner')
   // A chain in either order: an old task a live one names stays, and so does the old blocker it names in turn.
   for (const order of [['t-21', 't-22', 't-20'], ['t-20', 't-21', 't-22']]) {
     const byId = { 't-20': mk('t-20', { state: 'done', stateSince: old }), 't-21': mk('t-21', { state: 'done', stateSince: old, blockedBy: ['t-20'] }), 't-22': mk('t-22', { blockedBy: ['t-21'] }) }
@@ -1143,6 +1155,42 @@ async function trustChecks(tmp) {
   } finally {
     console.warn = warn
   }
+
+  // B close: a trusted-teams.json that exists but cannot be read right now (a folder here: EISDIR, like EBUSY or
+  // EACCES) is never taken as empty: nothing cached, nothing trusted, and no write from a map never read.
+  const lockedFile = path.join(data, 'ts-locked', 'trusted.json')
+  fs.mkdirSync(lockedFile, { recursive: true })
+  const s4 = new M.TrustStore({ file: () => lockedFile })
+  check(s4.get(repo) === null && s4.readable() === false, 'an unreadable trust file: get answers null and readable() false')
+  check(s4.setChecked(repo, 'b'.repeat(64)) === false && fs.statSync(lockedFile).isDirectory(), 'setChecked refuses (false, so approve answers io) and writes nothing')
+  s4.delete(repo)
+  check(fs.statSync(lockedFile).isDirectory(), 'delete writes nothing either')
+  fs.rmSync(lockedFile, { recursive: true })
+  const other = path.join(tmp, 'trust-other')
+  fs.writeFileSync(lockedFile, JSON.stringify({ version: 1, entries: { [M.normTrustPath(other)]: { sha256: 'c'.repeat(64), approvedAt: 1 } } }))
+  check(s4.readable() === true && s4.get(other)?.sha256 === 'c'.repeat(64), 'the same store reads the file once it can (no empty map was cached)')
+  check(s4.setChecked(repo, 'b'.repeat(64)) && Object.keys(JSON.parse(fs.readFileSync(lockedFile, 'utf8')).entries).length === 2, 'a trust then keeps every other approval')
+  fs.writeFileSync(path.join(data, 'ts-corrupt.json'), '{not json')
+  const s5 = new M.TrustStore({ file: () => path.join(data, 'ts-corrupt.json') })
+  check(s5.readable() && s5.get(repo) === null && s5.setChecked(repo, 'a'.repeat(64)), 'a corrupt file still reads as empty (nothing trusted) and a trust rewrites it')
+
+  // TeamTrust over an unreadable store or snapshot: 'unreadable', never 'bad' (no stateReset card), never cached.
+  let storeOk = false
+  const lockable = { get: (d) => (storeOk ? store.get(d) : null), readable: () => storeOk, setChecked: (d, s) => storeOk && store.setChecked(d, s), delete() {} }
+  const T6 = new M.TeamTrust(lockable, snap, (id) => roots[id] ?? null)
+  check(T6.snapshotState('tm-0123456789ab') === 'unreadable' && T6.trusted('tm-0123456789ab') === null, 'an unreadable TrustStore: unreadable, nothing trusted')
+  storeOk = true
+  check(T6.snapshotState('tm-0123456789ab') === 'ok' && T6.trusted('tm-0123456789ab') !== null, 'and the next read, once it can, verifies the snapshot (unreadable is never cached)')
+  const T7 = new M.TeamTrust(store, snap, (id) => roots[id] ?? null)
+  const snapText = fs.readFileSync(snap('tm-0123456789ab'), 'utf8')
+  fs.rmSync(snap('tm-0123456789ab'))
+  fs.mkdirSync(snap('tm-0123456789ab'))
+  check(T7.snapshotState('tm-0123456789ab') === 'unreadable' && T7.trusted('tm-0123456789ab') === null, 'an unreadable snapshot with a TrustStore entry: unreadable, not bad')
+  same(T7.approve('tm-0123456789ab', repo, loaded, 'g'), { error: 'io' }, 'approve over an unreadable snapshot answers io (it could not be put back)')
+  check(fs.statSync(snap('tm-0123456789ab')).isDirectory(), 'and touches nothing')
+  fs.rmSync(snap('tm-0123456789ab'), { recursive: true })
+  fs.writeFileSync(snap('tm-0123456789ab'), snapText)
+  check(T7.snapshotState('tm-0123456789ab') === 'ok', 'readable again: the same instance verifies it')
 }
 
 // ---- 7. TeamService on real repositories -----------------------------------------------------------
@@ -1260,10 +1308,13 @@ async function serviceChecks(tmp) {
   check(prev.ok && prev.preview.hash === sha(M.canonicalDefText(rendered)) && prev.preview.issues.length === 0, 'preview: the hash of the files main renders, no issues')
   same(prev.preview.files.map((f) => f.rel), rendered.map((f) => f.rel), 'preview lists every file')
   check(prev.preview.files.every((f) => f.bytes === Buffer.byteLength(f.text)), 'preview bytes are UTF-8 bytes')
-  same(prev.preview.warnings, ['totalBypass', 'noVerify', 'notCommitted'], 'preview warnings: Total, no verify, not committed')
+  same(prev.preview.warnings, ['totalBypass', 'userAllow', 'noVerify', 'notCommitted'], 'preview warnings: Total, the user\'s own allow rules (B close), no verify, not committed')
   const codexDraft = { ...draft, verify: 'npm test', roles: draft.roles.map((r) => (r.id === 'dev' ? { ...r, provider: 'codex', model: 'gpt-5', effort: 'medium' } : r.id === 'qa' ? { ...r, provider: 'codex', model: undefined } : r)) }
   const cprev = await svc.request({ op: 'setupPreview', repoRoot: app, draft: codexDraft }, 'desktop')
-  same(cprev.preview.warnings, ['codexTotal', 'codexReadonlyBlock', 'notCommitted'], 'preview warnings: Codex Total and Codex readonly')
+  same(cprev.preview.warnings, ['codexTotal', 'codexReadonlyBlock', 'userAllow', 'notCommitted'], 'preview warnings: Codex Total and Codex readonly; the Claude Lead keeps userAllow')
+  const allCodex = { ...codexDraft, roles: codexDraft.roles.map((r) => (r.provider === 'claude' ? { ...r, provider: 'codex', model: undefined, effort: undefined } : r)) }
+  const xprev = await svc.request({ op: 'setupPreview', repoRoot: app, draft: allCodex }, 'desktop')
+  check(xprev.ok && !xprev.preview.warnings.includes('userAllow'), 'no Claude role: no userAllow warning')
   same(await svc.request({ op: 'setupPreview', repoRoot: path.join(app, 'src'), draft }, 'desktop'), { ok: false, error: 'bad_request', detail: 'not_main_root' }, 'preview of a subfolder: bad_request')
 
   // setupWrite.
@@ -1450,6 +1501,22 @@ async function serviceChecks(tmp) {
   svc.setConfig(cfg)
   await svc.request({ op: 'list' }, 'desktop')
   check(svc.team(teamId).trust === 'trusted' && resets().length === 0, 'a verified snapshot reads trusted after a reload')
+  // B close: a snapshot that cannot be read right now (a folder here: EISDIR, like EBUSY or EACCES) is no tampering:
+  // nothing is trusted meanwhile, but no stateReset card opens, and the next load reads it again.
+  svc.setConfig({ settings: { ...cfg.settings, labs: { teams: false } } })
+  const snapNow = fs.readFileSync(snapFile, 'utf8')
+  fs.rmSync(snapFile)
+  fs.mkdirSync(snapFile)
+  svc.setConfig(cfg)
+  await svc.request({ op: 'list' }, 'desktop')
+  check(svc.team(teamId).trust !== 'trusted' && svc.trusted(teamId) === null && resets().length === 0, 'an unreadable snapshot: not trusted, and no stateReset card')
+  check(logs.includes(`trust ${teamId} unreadable`), 'the log names the unreadable trust')
+  svc.setConfig({ settings: { ...cfg.settings, labs: { teams: false } } })
+  fs.rmSync(snapFile, { recursive: true })
+  fs.writeFileSync(snapFile, snapNow)
+  svc.setConfig(cfg)
+  await svc.request({ op: 'list' }, 'desktop')
+  check(svc.team(teamId).trust === 'trusted' && resets().length === 0 && svc.trusted(teamId) !== null, 'readable again: trusted on the next load, still no card')
 
   // adopt: a repo that already has a definition (CRLF and BOM, unregistered).
   const lib = makeRepo(path.join(tmp, 'lib'))

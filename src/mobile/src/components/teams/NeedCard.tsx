@@ -13,10 +13,15 @@
  *  - the definition to trust, an auth or billing pause, a hire (its diff,
  *    cut to TEAM_PHONE_HIRE_LINES), an integrate and the PC-only card actions
  *    (resumeTeam, killOrphan): read only with "En la PC" (decision 50; main
- *    refuses them from the phone anyway).
+ *    refuses them from the phone anyway);
+ *  - an approval or a card the PC could not send whole (fitMarks pcOnly,
+ *    Tanda B close): read only with "En la PC", what came of it shown with
+ *    "Sigue en la PC" (never an Aprobar for a rule the user cannot read).
  *
  * Every agent and repo text goes through visibleText. Each send waits for
- * its ack; a refusal says why in words, an ok hides the row (onDone).
+ * its ack; a refusal says why in words, an ok hides the row (onDone). A
+ * decide carries the approval's rev; a stale one (a permission a later run
+ * grew) reads Te necesita again (onStale) and says it changed.
  */
 import { useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
@@ -30,16 +35,19 @@ import { Sheet } from '../Sheet'
 import { ConfirmSheet, type ConfirmState } from '../ConfirmSheet'
 import { MicButton, VoiceInterim } from '../MicButton'
 import { DiffBlock } from '../chat/DiffBlock'
-import { Chip, Folded, GHOST_BTN, OnPcChip, PRIMARY_BTN, bodyOk, bodyProblem, outgoingText } from './TeamBits'
+import { Chip, Folded, GHOST_BTN, MoreOnPc, OnPcChip, PRIMARY_BTN, bodyOk, bodyProblem, outgoingText } from './TeamBits'
 import {
   CARD_ACTION_KEY,
   MODE_KEY,
   answerFailText,
+  approvalRevOf,
   cardWhyText,
   decideFailText,
   deferText,
   dispatchFailText,
+  fitMarks,
   hasTeamKey,
+  isStaleRefusal,
   refusalOfAck,
   visibleName,
   visibleText,
@@ -166,19 +174,40 @@ function ApprovalError({ error }: { error?: string }): ReactNode {
   return <p className="text-[11px] text-state-action">{t(error === 'interrupted' ? 'teams.approval.interrupted' : 'teams.approval.lastFailed')}</p>
 }
 
-function ApprovalRow({ teamId, approval, onDone }: { teamId: string; approval: ApprovalView; onDone: () => void }): ReactNode {
+/** A row the PC could not send whole (fitMarks pcOnly): why, and "En la PC" in place of its buttons. */
+function FitPcNote(): ReactNode {
+  return (
+    <>
+      <p data-need-fit-pc className="text-xs text-text-secondary">
+        {t('teams.need.fitPc')}
+      </p>
+      <OnPcChip />
+    </>
+  )
+}
+
+function ApprovalRow({ teamId, approval, onDone, onStale }: { teamId: string; approval: ApprovalView; onDone: () => void; onStale: () => void }): ReactNode {
   const [busy, setBusy] = useState(false)
   const [noteOpen, setNoteOpen] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [fail, setFail] = useState<string | null>(null)
   const p = approval.payload
+  const pcOnly = fitMarks(approval).pcOnly
+  const cut = fitMarks(p).truncated
   /** The refusal's words, or null once the PC applied it. */
   const decide = async (decision: 'approve' | 'reject', note?: string): Promise<string | null> => {
     setBusy(true)
     let why: string | null = null
+    let stale = false
+    // The rev of what is shown (Tanda B close): main refuses a permission that grew since as stale.
+    const rev = approvalRevOf(approval)
     const ok = await sendCtl(
-      { kind: 'teamDecide', teamId, approvalId: approval.id, decision, ...(note ? { note } : {}) },
-      (e) => decideFailText(refusalOfAck(e), p.kind, decision),
+      { kind: 'teamDecide', teamId, approvalId: approval.id, decision, ...(note ? { note } : {}), ...(rev !== undefined ? { rev } : {}) },
+      (e) => {
+        const f = refusalOfAck(e)
+        stale = isStaleRefusal(f)
+        return decideFailText(f, p.kind, decision)
+      },
       (text) => {
         why = text
         // A note's refusal shows in its sheet, which stays open.
@@ -189,12 +218,20 @@ function ApprovalRow({ teamId, approval, onDone }: { teamId: string; approval: A
     if (ok) {
       toast(t(decision === 'approve' ? 'teams.approval.approved' : note ? 'teams.approval.changesSent' : 'teams.approval.rejected'))
       onDone()
+    } else if (stale) {
+      // What it decided on changed on the PC: Te necesita reads it again, the words stay under the row.
+      onStale()
     }
     return why
   }
   const applying = approval.state === 'applying'
   const buttons = (approve: ReactNode, second: ReactNode): ReactNode =>
-    applying ? (
+    pcOnly ? (
+      <>
+        <NeedError text={fail} />
+        <FitPcNote />
+      </>
+    ) : applying ? (
       <p className="flex items-center gap-1.5 text-xs text-text-secondary">
         <Loader2 size={13} className="spin" aria-hidden />
         {t('teams.approval.applying')}
@@ -245,7 +282,7 @@ function ApprovalRow({ teamId, approval, onDone }: { teamId: string; approval: A
               <p className="text-xs text-text-secondary">{t('teams.approval.finalHintNoQa')}</p>
               {p.summary.trim() ? (
                 <div className="min-w-0 rounded-btn border border-border bg-bg-primary px-3 py-2">
-                  <Folded data-need-summary={approval.id} text={visibleText(p.summary)} markdown />
+                  <Folded data-need-summary={approval.id} text={visibleText(p.summary)} markdown cut={cut} />
                 </div>
               ) : (
                 <p className="text-xs text-text-secondary">{t('teams.approval.noSummary')}</p>
@@ -323,6 +360,7 @@ function ApprovalRow({ teamId, approval, onDone }: { teamId: string; approval: A
               ))}
             </>
           )}
+          {cut && <MoreOnPc />}
           <ApprovalError error={approval.error} />
           {buttons(approve, reject)}
           <ConfirmSheet state={confirm} onClose={() => setConfirm(null)} />
@@ -415,6 +453,31 @@ function CardRow({ teamId, card, onDone }: { teamId: string; card: CardView; onD
   }
 
   const options = card.options ?? []
+  const marks = fitMarks(card)
+  if (marks.pcOnly) {
+    // The PC could not send it whole: what came of it, read only, answered on the PC.
+    return (
+      <div className="flex min-w-0 flex-col gap-2">
+        {card.agentId && <p className="text-[11px] text-text-secondary">{t('teams.need.q.asks', { agent: visibleName(card.agentId) })}</p>}
+        {card.question && (
+          <div className="min-w-0 rounded-btn border border-border bg-bg-primary px-3 py-2">
+            <Folded data-card-question={card.id} text={visibleText(card.question)} markdown />
+          </div>
+        )}
+        {options.length > 0 && (
+          <ul className="flex min-w-0 flex-col gap-1">
+            {options.map((opt, i) => (
+              <li key={i} data-card-option-pc={i} className="min-w-0 rounded border border-border px-2 py-1 text-xs text-text-primary [overflow-wrap:anywhere]">
+                {visibleName(opt)}
+              </li>
+            ))}
+          </ul>
+        )}
+        {marks.truncated && <MoreOnPc />}
+        <FitPcNote />
+      </div>
+    )
+  }
   const sendText = (): void => {
     const value = outgoingText(text).trim()
     if (!value) {
@@ -435,7 +498,7 @@ function CardRow({ teamId, card, onDone }: { teamId: string; card: CardView; onD
       {card.agentId && <p className="text-[11px] text-text-secondary">{t('teams.need.q.asks', { agent: visibleName(card.agentId) })}</p>}
       {card.question && (
         <div className="min-w-0 rounded-btn border border-border bg-bg-primary px-3 py-2">
-          <Folded data-card-question={card.id} text={visibleText(card.question)} markdown />
+          <Folded data-card-question={card.id} text={visibleText(card.question)} markdown cut={marks.truncated} />
         </div>
       )}
       {card.kind === 'choice' && (
@@ -556,12 +619,15 @@ export function NeedCard({
   row,
   needs,
   onDone,
+  onStale,
   showTask = true,
 }: {
   teamId: string
   row: TeamNeedRow
   needs: TeamNeedsView
   onDone: (rowId: string) => void
+  /** A decide the PC refused as stale (what it decided on changed): read the needs view again. */
+  onStale: () => void
   /** Off on the task's own screen. */
   showTask?: boolean
 }): ReactNode {
@@ -589,11 +655,12 @@ export function NeedCard({
         <OnPcChip label={t('teams.cardAction.resumeTeam')} />
       </>
     )
-  } else if (approval) body = <ApprovalRow teamId={teamId} approval={approval} onDone={done} />
+  } else if (approval) body = <ApprovalRow teamId={teamId} approval={approval} onDone={done} onStale={onStale} />
   else if (card) body = <CardRow teamId={teamId} card={card} onDone={done} />
   else if (queued) body = <DispatchRow teamId={teamId} item={queued} onDone={done} />
 
-  const readOnly = row.kind === 'trust' || row.kind === 'paused' || approval?.payload.kind === 'hire' || approval?.payload.kind === 'integrate'
+  const readOnly =
+    row.kind === 'trust' || row.kind === 'paused' || approval?.payload.kind === 'hire' || approval?.payload.kind === 'integrate' || fitMarks(approval).pcOnly || fitMarks(card).pcOnly
   return (
     <article
       data-team-need={row.id}

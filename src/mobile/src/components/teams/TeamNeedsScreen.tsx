@@ -149,7 +149,7 @@ export function TeamNeedsBody({ teamId }: { teamId: string }): ReactNode {
             </p>
           )}
           {g.rows.map((row) => (
-            <NeedCard key={row.id} teamId={teamId} row={row} needs={view} onDone={(id) => hide([id])} />
+            <NeedCard key={row.id} teamId={teamId} row={row} needs={view} onDone={(id) => hide([id])} onStale={() => void reload()} />
           ))}
         </section>
       ))}

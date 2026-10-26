@@ -64,6 +64,11 @@
 // base (error stale, out of Te necesita and the badge) and a decide that raced it answers conflict stale; a denied
 // command whose exact rule holds an sk- key or the master token (whole or split) opens no permission approval and a
 // prefix rule's denied command is masked whole.
+// Tanda B close: a live Codex run paged from its ring keeps each record whole (file_change `N.0` and `N.1`) and the ring
+// trim drops whole records; the prep backoff holds the user's message to the Lead too (only a manual entry skips it); a
+// Descartar of one Lead level (kickoff, triage, a message) leaves its other levels their item; a queue row whose agent
+// runs another run says `running`; a permission decide carries the approval's rev (stale without it, stale after a
+// later run merged a rule into it, which notifies once more).
 // Same esbuild + vm harness as test-status.cjs: no Electron, no user data, never a real agent.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -727,6 +732,47 @@ async function logChecks() {
   const finished = await M.RunLog.page(file, 'claude', 'r-0123456789ab', null, 48 * 1024, null, null)
   check(finished.items.some((m) => m.role === 'system' && m.blocks[0].text === M.RUN_LOG_CUT_TEXT) && M.RUN_LOG_CUT_TEXT.includes('Run log cut'), 'an ended run pages from the file and shows the cut row, the shared RUN_LOG_CUT_TEXT word for word (the renderer words it)')
 
+  // B close (finding 2): a line that decodes to several messages (a Codex file_change: `N.0` toolUse, `N.1` toolResult)
+  // stays whole on a ring page, as on a file page: paging a live run back serves every message once.
+  const cfile = path.join(TMP, 'log', 'codex-ring.jsonl')
+  const fileChange = (i) => JSON.stringify({ type: 'item.completed', item: { id: `fc${i}`, type: 'file_change', status: 'completed', changes: [{ path: `src/f${i}.ts`, kind: 'update' }] } })
+  const clog = new M.RunLog({ file: cfile, provider: 'codex', runId: 'r-0123456789ac', now: () => 1_800_000_000_000 })
+  clog.writePrompt('do it', { mode: 'exec', trigger: 'manual' })
+  for (let i = 0; i < 30; i++) clog.append(fileChange(i))
+  clog.append(JSON.stringify({ type: 'item.completed', item: { id: 'am', type: 'agent_message', text: 'done' } }))
+  const want = clog.ring.map((m) => m.id)
+  check(want.some((id) => id.endsWith('.1')), 'the file_change lines decode to two messages that share one offset')
+  const pageAll = async (ring, cut) => {
+    const got = []
+    let before = null
+    for (let n = 0; n < 20; n++) {
+      const pg = await M.RunLog.page(cfile, 'codex', 'r-0123456789ac', before, 48 * 1024, ring, cut)
+      got.unshift(...pg.items.map((m) => m.id))
+      if (pg.done || pg.cursor === null) break
+      before = Number(pg.cursor)
+    }
+    return got
+  }
+  same(await pageAll(clog.ring, clog.cutAt), want, 'a live run paged from its ring: every message once, no half record lost at a page end (50 messages a page)')
+  same(await pageAll(null, null), want, 'control: the same log paged from the file')
+  // The ring trim drops whole records: ring[0] always starts one, and the file serves the rest whole.
+  const tfile = path.join(TMP, 'log', 'codex-trim.jsonl')
+  const tlog = new M.RunLog({ file: tfile, provider: 'codex', runId: 'r-0123456789ad', now: () => 1_800_000_000_000, ring: 5 })
+  tlog.writePrompt('do it', { mode: 'exec', trigger: 'manual' })
+  for (let i = 0; i < 3; i++) tlog.append(fileChange(i))
+  check(tlog.ring.length === 4 && tlog.ring[0].id.endsWith('.0') && tlog.ring[1].id === tlog.ring[0].id.replace(/\.0$/, '.1'), `the trim past the ring cap drops whole records (${JSON.stringify(tlog.ring.map((m) => m.id))})`)
+  const tAll = []
+  let tBefore = null
+  for (let n = 0; n < 10; n++) {
+    const pg = await M.RunLog.page(tfile, 'codex', 'r-0123456789ad', tBefore, 48 * 1024, tlog.ring, tlog.cutAt)
+    tAll.unshift(...pg.items.map((m) => m.id))
+    if (pg.done || pg.cursor === null) break
+    tBefore = Number(pg.cursor)
+  }
+  same(tAll.length, 7, `a trimmed ring then the file: the prompt and the three records, each whole (${JSON.stringify(tAll)})`)
+  clog.close()
+  tlog.close()
+
   // B5 review (finding 5): a `snaos.note` record decodes to a system row of its key and vars (runNoteText), never a
   // sentence, for either provider; the old sentence shape, an unknown key and vars that are not short one-line values
   // decode to nothing, and runNoteOfText reads back only a note.
@@ -1307,6 +1353,100 @@ async function backoffChecks() {
   w.svc.dispose()
 }
 
+// B close (finding 5): a level that bypasses the cooldown (the user's message to the Lead) still waits out the prep
+// backoff; only a manual entry skips it. Without that a prep that keeps failing would be admitted on every pass.
+async function backoffUserChecks() {
+  const w = await world('backoff-user')
+  w.noCli = true
+  const said = await w.svc.request({ op: 'leadSay', teamId: w.teamId, text: 'Hola Lider' }, 'desktop')
+  check(said.ok, 'the user writes to the Lead')
+  await w.svc.request({ op: 'settings', teamId: w.teamId, patch: { autoDispatch: true } }, 'desktop')
+  w.clock.advance(0)
+  const leadRuns = () => w.ring().filter((r) => r.agentId === 'lead')
+  await until(() => leadRuns().length === 1 && w.rt().activeRuns.length === 0, 10000, 'the userMessage prep fails')
+  check(leadRuns()[0].trigger.reason === 'userMessage' && leadRuns()[0].failure?.code === 'spawnFailed', `autonomy on: the Lead's message run, spawnFailed (no CLI) (${JSON.stringify(leadRuns()[0].trigger)})`)
+  for (let i = 0; i < 5; i++) {
+    w.svc.poke()
+    w.clock.advance(0)
+    check(!w.rt().activeRuns.some((r) => r.agentId === 'lead'), `pass ${i + 1}: the failed message level is not admitted again at once`)
+  }
+  await settle()
+  check(leadRuns().length === 1, 'one failed run, not one per pass')
+  const failedAt = leadRuns()[0].endedAt
+  const roster = await w.svc.request({ op: 'roster', teamId: w.teamId }, 'desktop')
+  const wait = roster.ok && roster.agents.find((a) => a.id === 'lead').waiting
+  check(wait && wait.reason === 'cooldown' && wait.until === failedAt + M.RETRY_DELAY_MS, `the Lead reads cooldown until the backoff ends (${JSON.stringify(wait)})`)
+  w.clock.advance(M.RETRY_DELAY_MS)
+  await until(() => leadRuns().length === 2, 10000, 'the retry after the backoff')
+  check(leadRuns()[1].trigger.reason === 'userMessage', 'after RETRY_DELAY_MS the message level tries once more')
+  w.svc.dispose()
+}
+
+// B close (finding 6): a Descartar of one Lead level never hides the Lead's other levels (they share the session key
+// 'lead'): a level the runtime records (kickoff, triage) ends in the discard and needs no skip; the unread message, the
+// one it derives, is skipped by its reason until a new message comes.
+async function discardLeadChecks() {
+  const w = await world('discard-lead')
+  w.use('hang.json')
+  const q = () => w.rt().queue
+  const leadItem = () => q().find((x) => x.agentId === 'lead')
+  const drop = async (id) => same(await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: id, go: false }, 'desktop'), { ok: true, approved: [], dropped: [id] }, `Descartar ${id}`)
+  const u1 = await w.createTask({ title: 'Sin asignar' })
+  w.clock.advance(0)
+  check(leadItem()?.reason === 'kickoff', 'autonomy off: the Lead item is the kickoff (it beats triage)')
+  await drop(leadItem().id)
+  w.clock.advance(0)
+  check(w.rt().goalSeenHash === w.svc.trusted(w.teamId).goalHash && leadItem()?.reason === 'triage', `the kickoff discarded: the goal seen, and the Lead's triage gets its item at once (${JSON.stringify(q())})`)
+  await drop(leadItem().id)
+  w.clock.advance(0)
+  check(w.task(u1).triagedAt !== undefined && !leadItem(), 'the triage discarded: its task triaged, no Lead item')
+  await w.svc.request({ op: 'leadSay', teamId: w.teamId, text: 'Priorizá el login' }, 'desktop')
+  const u2 = await w.createTask({ title: 'Otra sin asignar' })
+  w.clock.advance(0)
+  check(leadItem()?.reason === 'userMessage', 'a message and an untriaged task: the message first')
+  await drop(leadItem().id)
+  w.clock.advance(0)
+  check(leadItem()?.reason === 'triage', `the message discarded: the Lead's triage still gets its item (${JSON.stringify(q())})`)
+  await drop(leadItem().id)
+  w.svc.poke()
+  w.clock.advance(0)
+  check(w.task(u2).triagedAt !== undefined && !leadItem(), 'the discarded message stays out while no new one comes')
+  await w.svc.request({ op: 'leadSay', teamId: w.teamId, text: 'Y el registro' }, 'desktop')
+  w.clock.advance(0)
+  check(leadItem()?.reason === 'userMessage', 'a new message offers it again')
+  w.svc.dispose()
+}
+
+// B close (finding 7): a queue row the dry run has no request for (its agent is running another run) says what holds
+// it, not "starts as soon as you dispatch it".
+async function queueDeferChecks() {
+  const w = await world('queue-defer')
+  w.use('hang.json')
+  const t2 = await w.createTask({ title: 'Normal', assignee: 'dev-2', needsPlan: false, isolation: 'main' })
+  w.clock.advance(0)
+  const q = () => w.rt().queue
+  const q1 = q().find((x) => x.taskId === t2)
+  check(!!q1, 'the first task waits in Por despachar')
+  const t1 = await w.createTask({ title: 'Urgente', assignee: 'dev-2', needsPlan: false, isolation: 'main', priority: 'high' })
+  w.clock.advance(0)
+  const q2 = q().find((x) => x.taskId === t1)
+  check(!!q2 && q().some((x) => x.id === q1.id), 'the urgent one gets its own item, the first stays')
+  await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: q2.id, go: true }, 'desktop')
+  w.clock.advance(0)
+  const run = w.rt().activeRuns.find((r) => r.taskId === t1)
+  check(!!run, 'Despachar starts the urgent task')
+  await w.waitState(run.id, 'running')
+  const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  const row = needs.ok && needs.needs.queue.find((x) => x.id === q1.id)
+  check(row && row.defer?.reason === 'running' && row.defer.taskId === t2, `the other row of that agent waits for its run (${JSON.stringify(row)})`)
+  await w.svc.request({ op: 'dispatch', teamId: w.teamId, queueId: q1.id, go: true }, 'desktop')
+  const after = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
+  check(after.needs.queue.find((x) => x.id === q1.id)?.defer?.reason === 'running', 'approved, it still says the run holds it')
+  await w.svc.request({ op: 'stop', teamId: w.teamId, runId: run.id }, 'desktop')
+  await w.waitEnded(run.id)
+  w.svc.dispose()
+}
+
 // ---- 12. B4: one sessionConflict card per session (extra requirement 2) ----------------------------------
 async function conflictChecks() {
   const w = await world('conflict')
@@ -1836,7 +1976,19 @@ async function permissionChecks() {
   check(mine.length === 1 && mine[0].taskId === t && mine[0].title === `Equipo ${w.svc.trusted(w.teamId).def.name}` && mine[0].body === M.mainTLang('es', 'teams.push.approval.permission', { task: t }) && mine[0].urgent === false, `one desktop notice for it (${JSON.stringify(mine)})`)
   const needs = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
   check(needs.ok && needs.needs.approvals.some((a) => a.id === ap.id && a.payload.kind === 'permission' && a.payload.tools[0] === 'Write') && needs.needs.tasks[t]?.title === 'Escribir b.txt', 'Te necesita: the permission row and its task title')
-  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve' }, 'desktop'), { ok: true }, 'decide approve')
+  // B close (finding 15): a permission decide is bound to the rev the user saw.
+  check(needs.needs.approvals.find((a) => a.id === ap.id).rev === 1, 'ApprovalView.rev: 1 for a new permission approval')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve' }, 'desktop'), { ok: false, error: 'conflict', reason: 'stale' }, 'a permission decide without a rev: conflict stale')
+  w.use(deniedScenario(['make release']))
+  const rg = await w.runTask('fixer', t)
+  await w.waitEnded(rg.runId)
+  const grown = w.rt().approvals.find((a) => a.id === ap.id)
+  check(grown.state === 'pending' && grown.rev === 2 && JSON.stringify(grown.payload.tools) === '["Write","Bash(make release:*)"]' && grown.payload.runId === rg.runId, `a later run of the task and role merges into it: rev 2 (${JSON.stringify(grown)})`)
+  await settle()
+  check(w.notices.filter((n) => n.tag === `team:${w.teamId}:${ap.id}`).length === 2, 'the grown approval notifies once more, like a new row')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve', rev: 1 }, 'desktop'), { ok: false, error: 'conflict', reason: 'stale' }, 'a decide of what the user saw before it grew: conflict stale')
+  check(!w.task(t).grants && w.rt().approvals.find((a) => a.id === ap.id).state === 'pending', 'and nothing changed')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve', rev: 2 }, 'desktop'), { ok: true }, 'decide approve with the rev it has now')
   const task = w.task(t)
   check(task.grants?.some((g) => g.tool === 'Write' && g.roleId === 'fixer' && g.approvalId === ap.id) && task.next?.reason === 'grant' && task.next.agentId === 'fixer', 'the rule granted to the task and role; the agent re-requested with `grant`')
   const again = await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'reject' }, 'desktop')
@@ -1891,9 +2043,9 @@ async function permissionChecks() {
   w.svc.commit(w.teamId, { ok: true, rt: { ...rt3, approvals: rt3.approvals.map((a) => (a.id === ap3.id ? { ...a, payload: { ...a.payload, tools: ['Bash(git log:*)', 'Bash(git diff:*)', 'PowerShell(git show:*)'] } } : a)) }, effects: [], result: undefined }, ['needs'])
   const n3 = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
   same(n3.needs.approvals.find((a) => a.id === ap3.id).payload.tools, [], 'Te necesita: the approval shows no rule (nothing to grant)')
-  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap3.id, decision: 'approve' }, 'desktop'), { ok: false, error: 'bad_request', detail: 'nothingToGrant' }, 'its Approve: bad_request, detail nothingToGrant')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap3.id, decision: 'approve', rev: 1 }, 'desktop'), { ok: false, error: 'bad_request', detail: 'nothingToGrant' }, 'its Approve: bad_request, detail nothingToGrant')
   check(w.rt().approvals.find((a) => a.id === ap3.id).state === 'pending' && !w.task(t3).grants, 'still pending, nothing granted')
-  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap3.id, decision: 'reject' }, 'desktop'), { ok: true }, 'Reject closes it')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap3.id, decision: 'reject', rev: 1 }, 'desktop'), { ok: true }, 'Reject closes it')
   w.svc.dispose()
 }
 
@@ -2371,7 +2523,7 @@ async function hintsChecks() {
   check(ap && JSON.stringify(ap.payload.tools) === '["Bash(npm test:*)"]' && JSON.stringify(ap.payload.denied) === '["npm test -- --watch"]', 'the approval: the Bash rule and the denied command', ap?.payload)
   const nv = await w.svc.request({ op: 'needs', teamId: w.teamId }, 'desktop')
   check(JSON.stringify(nv.needs.approvals.find((a) => a.id === ap.id).payload.denied) === '["npm test -- --watch"]', 'Te necesita sends the denied command (ApprovalPayloadView.denied)')
-  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve' }, 'desktop'), { ok: true }, 'approve it')
+  same(await w.svc.request({ op: 'decide', teamId: w.teamId, approvalId: ap.id, decision: 'approve', rev: 1 }, 'desktop'), { ok: true }, 'approve it')
   check(w.task(t).next?.reason === 'grant' && w.task(t).next.detail === undefined && JSON.stringify(w.task(t).next.refs) === JSON.stringify([ap.id]), 'the grant wake names the approval, no detail (that is the user request text only)', w.task(t).next)
   w.clock.advance(0)
   const qi = w.rt().queue.find((x) => x.taskId === t)
@@ -2436,9 +2588,12 @@ async function main() {
     await seriesChecks()
     await queueChecks()
     await backoffChecks()
+    await backoffUserChecks()
     await conflictChecks()
     await wakeChecks()
     await discardNextChecks()
+    await discardLeadChecks()
+    await queueDeferChecks()
     await leadGoalChecks()
     await orphanWaitChecks()
     await removeRaceChecks()

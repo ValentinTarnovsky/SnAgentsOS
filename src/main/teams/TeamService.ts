@@ -160,7 +160,7 @@ export interface TeamServiceDeps {
   /** Test seam (manual clock). */
   timerDeps?: DeadlineTimerDeps
   /** Test seams: a fake trust store, a fake loader, the store's fs, the registry's trash move, the extra repo lookups, strict invariants. */
-  trustStore?: Pick<TrustStore, 'get' | 'setChecked' | 'delete'>
+  trustStore?: Pick<TrustStore, 'get' | 'setChecked' | 'delete'> & Partial<Pick<TrustStore, 'readable'>>
   loader?: TeamDefinitionLoader
   storeFs?: SyncFs
   registryFs?: RegistryFs
@@ -253,7 +253,20 @@ function flowFail(res: Extract<FlowResult<unknown>, { ok: false }>): TeamFail {
   if (res.reason) extra.reason = res.reason
   if (res.fields) extra.fields = res.fields
   if (res.defer) extra.defer = res.defer
+  if (res.detail) extra.detail = res.detail
   return fail(res.error, extra)
+}
+
+/**
+ * A need row's key in the notices baseline (`needsSeen`): its id, and for a permission approval a later run grew (rev
+ * past 1, B close) the id with its rev, so the grown approval reads as new and notifies once more. A rev 1 row keeps
+ * the bare id, as a baseline written before the rev existed holds it.
+ */
+function needSeenKey(row: TeamNeedRow, rt: Readonly<TeamRuntime>): string {
+  if (row.kind !== 'approval' || row.approvalKind !== 'permission') return row.id
+  const a = rt.approvals.find((x) => x.id === row.id)
+  const rev = a?.kind === 'permission' ? a.rev ?? 1 : 1
+  return rev > 1 ? `${row.id}@${rev}` : row.id
 }
 
 /** The `teams.push.*` body key of a need row (design 6.3): its kind, the pause reason, the approval kind, a card with or without a task. */
@@ -866,7 +879,7 @@ export class TeamService implements TeamInternals {
     // with it: its only card is the repair's `stateReset`, which notifies once; the trust and pause rows stay seen.
     if (store.rt.needsSeen === undefined) {
       const reset = repaired.includes('state.json')
-      store.setNeedsSeen(needsRowsOf(rec, trusted).filter((r) => !(reset && r.kind === 'card')).map((r) => r.id))
+      store.setNeedsSeen(needsRowsOf(rec, trusted).filter((r) => !(reset && r.kind === 'card')).map((r) => needSeenKey(r, store.rt)))
     }
     this.recheckApplying(e.id, rec)
     // B7: a run's stalled card goes with its run (design 3.8); the reaper ended those runs without the run-end path.
@@ -883,9 +896,13 @@ export class TeamService implements TeamInternals {
     // reached the disk, a state written before the cancel existed) can never be approved: cancelled stale at load too.
     const trustedNow = this.trust.trusted(e.id)
     if (trustedNow) this.dropStaleHires(e.id, rec, trustedNow.sha256)
-    if (this.trust.snapshotState(e.id) === 'bad') {
+    const snap = this.trust.snapshotState(e.id)
+    if (snap === 'bad') {
       // Decision 34: an edited snapshot or a TrustStore entry that does not match it.
       this.commit(e.id, openSystemCard(store.rt, { why: 'stateReset', actions: ['dismiss'], vars: { what: 'trust' } }, { now: this.clock() }), ['needs', 'list'])
+    } else if (snap === 'unreadable') {
+      // B close: a lock or a permission is no tampering: no card, nothing trusted until a read lands.
+      this.deps.log(`trust ${e.id} unreadable`)
     }
     const ctx = this.flowCtx(e.id)
     if (ctx) this.commit(e.id, reconcileAgents(store.rt, ctx), ['agents'])
@@ -1470,6 +1487,10 @@ export class TeamService implements TeamInternals {
         }
         case 'archiveTasks':
           this.teams.get(teamId)?.store.appendArchive('tasks', e.tasks)
+          break
+        case 'disownWorktree':
+          // B close: only while the manifest still names this task as the owner (disownAt CASes it).
+          if (this.taskWorktrees?.disownTree({ path: e.path, owner: e.owner })) this.deps.log(`worktree ${teamId} ${e.taskId} disowned: archived`)
           break
         case 'applyHire':
           this.applyHire(teamId, e.approvalId)
@@ -2535,7 +2556,9 @@ export class TeamService implements TeamInternals {
 
   /**
    * planDispatch with the prep-failure backoff applied: a level whose prep just failed with a card waits
-   * RETRY_DELAY_MS (a user's "Ejecutar ahora" bypasses the cooldown and never does). Its agent sits out the plan
+   * RETRY_DELAY_MS (only a manual entry of `facts.manual`, the user's "Ejecutar ahora" or the kickoff op, never does;
+   * B close: a level that bypasses the cooldown, such as the user's message to the Lead, still waits it out, or a prep
+   * that keeps failing would loop on every pass). Its agent sits out the plan
    * (planDispatch reads it as paused), so it never takes a cap slot the next request in line could use, and its
    * row reads `cooldown` until the backoff ends. A level the user discarded and that did not change is skipped
    * before each agent's minimum (skipOf), so the agent's next level gets its queue item.
@@ -2543,13 +2566,15 @@ export class TeamService implements TeamInternals {
   private planOf(teamId: string, rt: Readonly<TeamRuntime>, def: TrustedDefinition, facts: DispatchFacts): DispatchPlan {
     const held = new Map<string, number>()
     const skip = this.skipOf(teamId, rt)
+    // A manual candidate (manualCandidate): approved, bypassing the cooldown, with the reason of its agent's entry.
+    const manual = (req: RunRequest): boolean => req.approved && req.bypassCooldown && facts.manual.some((m) => m.agentId === req.agentId && m.reason === req.reason)
     // Each round holds at least one more agent (a held one is paused, never a start again): at most one per agent.
     for (;;) {
       const view: Readonly<TeamRuntime> = held.size === 0 ? rt : { ...rt, agents: rt.agents.map((a) => (held.has(a.id) ? { ...a, paused: true } : a)) }
       const plan = planDispatch(view, def.def, def.goalHash, facts, { skip })
       let more = false
       for (const req of plan.start) {
-        const until = req.bypassCooldown ? undefined : this.backoffOf(teamId, req, facts.now)
+        const until = manual(req) ? undefined : this.backoffOf(teamId, req, facts.now)
         if (until === undefined) continue
         held.set(req.agentId, until)
         more = true
@@ -2654,16 +2679,18 @@ export class TeamService implements TeamInternals {
       this.deps.log(`run of ${req.agentId} not admitted: ${res.error}`)
       return null
     }
-    this.discarded.delete(`${teamId}|${req.agentId}|${req.sessionKey}`)
+    const level = `${teamId}|${req.agentId}|${req.sessionKey}`
+    for (const k of [...this.discarded.keys()]) if (k === level || k.startsWith(`${level}|`)) this.discarded.delete(k)
     this.deps.log(`run ${runId} admitted agent=${req.agentId} mode=${req.mode} reason=${req.reason}${req.taskId ? ` task=${req.taskId}` : ''} resume=${a.resume ? 'yes' : 'no'}`)
     return runId
   }
 
   /**
    * What a level the runtime derives looks like (a todo assignee, queued comments, an unread message, the Lead's
-   * goal and triage): a discarded item comes back only once this moves.
+   * goal and triage): a discarded item comes back only once this moves. `reason` (B close): a skip of one Lead level
+   * (userMessage) reads only what that level derives from, the unread messages.
    */
-  private levelSig(rt: Readonly<TeamRuntime>, agentId: string, sessionKey: string, taskId: string | undefined): string {
+  private levelSig(rt: Readonly<TeamRuntime>, agentId: string, sessionKey: string, taskId: string | undefined, reason?: string): string {
     const agent = rt.agents.find((a) => a.id === agentId)
     if (taskId) {
       const t = rt.tasks.find((x) => x.id === taskId)
@@ -2672,6 +2699,7 @@ export class TeamService implements TeamInternals {
     }
     if (agent?.roleKind === 'lead') {
       const msgs = (rt.comments[LEAD_THREAD] ?? []).filter((c) => c.author.kind === 'user' && c.forAgent === agentId && c.deliveredRunId === undefined)
+      if (reason === 'userMessage') return `m|${msgs.length}|${msgs.at(-1)?.id ?? ''}`
       const untriaged = rt.tasks.filter((t) => t.state === 'todo' && !t.assignee && t.triagedAt === undefined).length
       const smallPlans = rt.approvals.filter((x) => x.state === 'pending' && x.decider === 'lead' && !x.leadSeenRunId).length
       return `l|${rt.goalSeenHash ?? ''}|${msgs.length}|${msgs.at(-1)?.id ?? ''}|${untriaged}|${smallPlans}|${agent.next?.since ?? ''}`
@@ -2681,8 +2709,9 @@ export class TeamService implements TeamInternals {
 
   /**
    * The `agentId|sessionKey` levels of a team the user discarded and that did not change since (a changed one is
-   * forgotten here): planDispatch leaves them out before each agent's minimum, so the agent's next level is its
-   * candidate. Only while autonomy is off: with it on nothing waits in "Por despachar" and the level runs.
+   * forgotten here), and the `agentId|sessionKey|reason` ones of a single Lead level (B close): planDispatch leaves
+   * them out before each agent's minimum, so the agent's next level is its candidate. Only while autonomy is off:
+   * with it on nothing waits in "Por despachar" and the level runs.
    */
   private skipOf(teamId: string, rt: Readonly<TeamRuntime>): Set<string> {
     const out = new Set<string>()
@@ -2691,10 +2720,9 @@ export class TeamService implements TeamInternals {
     for (const [key, d] of [...this.discarded]) {
       if (!key.startsWith(prefix)) continue
       const rest = key.slice(prefix.length)
-      const bar = rest.indexOf('|')
-      const agentId = rest.slice(0, bar)
-      const sessionKey = rest.slice(bar + 1)
-      if (d.sig === this.levelSig(rt, agentId, sessionKey, d.taskId)) out.add(rest)
+      // Agent ids, session keys (a task id, 'lead', 'free') and reasons never hold a '|'.
+      const [agentId, sessionKey, reason] = rest.split('|')
+      if (d.sig === this.levelSig(rt, agentId, sessionKey, d.taskId, reason)) out.add(rest)
       else this.discarded.delete(key)
     }
     return out
@@ -2761,9 +2789,18 @@ export class TeamService implements TeamInternals {
     if (!res.ok) return fail(res.error)
     if (!go) {
       for (const q of targets) {
-        const d: { sig: string; taskId?: string } = { sig: this.levelSig(rec.store.rt, q.agentId, q.sessionKey, q.taskId) }
+        // B close: a task-less level the runtime records (the Lead's goal, triage, small plans, a wake mark) ended in
+        // queueDecide (consumeLevel) and needs no skip; the Lead's unread message is the one it derives, skipped by its
+        // reason (every Lead level shares the 'lead' session key, so its other levels still enqueue).
+        let key = `${teamId}|${q.agentId}|${q.sessionKey}`
+        if (!q.taskId) {
+          const lead = rec.store.rt.agents.find((a) => a.id === q.agentId)?.roleKind === 'lead'
+          if (!lead || q.reason !== 'userMessage') continue
+          key += `|${q.reason}`
+        }
+        const d: { sig: string; taskId?: string } = { sig: this.levelSig(rec.store.rt, q.agentId, q.sessionKey, q.taskId, q.taskId ? undefined : q.reason) }
         if (q.taskId) d.taskId = q.taskId
-        this.discarded.set(`${teamId}|${q.agentId}|${q.sessionKey}`, d)
+        this.discarded.set(key, d)
       }
       if (targets.length > 0) this.poke()
     }
@@ -2783,8 +2820,9 @@ export class TeamService implements TeamInternals {
    * worktree first reads how far its branch is ahead of its base (T11: nothing to merge goes straight to done); the
    * reducer CASes the approval's state after that await, so a second decide (the desktop and the phone) answers
    * `conflict {already_decided}`. A hire approve turns `applying`: its `applyHire` effect writes and trusts the role.
+   * `rev` (B close): the permission approval's rev the user saw (decideApproval answers `conflict {stale}` without it).
    */
-  async decide(teamId: string, approvalId: string, decision: 'approve' | 'reject', note: string | undefined, actor: Actor): Promise<TeamFail | null> {
+  async decide(teamId: string, approvalId: string, decision: 'approve' | 'reject', note: string | undefined, actor: Actor, rev?: number): Promise<TeamFail | null> {
     const rec = this.teams.get(teamId)
     if (!rec) return fail('not_found')
     const ap = rec.store.rt.approvals.find((a) => a.id === approvalId)
@@ -2797,7 +2835,10 @@ export class TeamService implements TeamInternals {
     }
     const ctx = this.flowCtx(teamId)
     if (!ctx) return fail('untrusted')
-    const res = decideApproval(rec.store.rt, actor, approvalId, decision, note, ctx, ahead !== undefined ? { ahead } : undefined)
+    const f: { ahead?: number; rev?: number } = {}
+    if (ahead !== undefined) f.ahead = ahead
+    if (rev !== undefined) f.rev = rev
+    const res = decideApproval(rec.store.rt, actor, approvalId, decision, note, ctx, f)
     // A permission approval with no rule the policy still grants (an earlier build stored them): its own words.
     if (!res.ok && res.error === 'bad_request' && ap.kind === 'permission' && decision === 'approve' && !ap.payload.tools.some(isGrantable)) return fail('bad_request', { detail: 'nothingToGrant' })
     if (!res.ok) return flowFail(res)
@@ -2961,10 +3002,10 @@ export class TeamService implements TeamInternals {
     const rec = this.teams.get(teamId)
     if (!rec || !this.live()) return
     const rows = needsRowsOf(rec, this.trust.trusted(teamId))
-    const ids = rows.map((r) => r.id)
+    const ids = rows.map((r) => needSeenKey(r, rec.store.rt))
     const seen = new Set(rec.store.rt.needsSeen ?? [])
-    for (const row of rows) {
-      if (!row.push || seen.has(row.id)) continue
+    for (const [i, row] of rows.entries()) {
+      if (!row.push || seen.has(ids[i])) continue
       this.notify(teamId, rec, { rowId: row.id, taskId: row.taskId, key: noticeKey(row, rec.store.rt.paused), urgent: row.rank === 1 })
     }
     rec.store.setNeedsSeen(ids)
@@ -3513,7 +3554,9 @@ export class TeamService implements TeamInternals {
    * task go, through TaskWorktrees.remove with the task's owner, compared against an inspect made right before
    * (a commit or a write in between is `conflict {stale}`). Nothing is ever dropped here: uncommitted files are
    * `dirty_worktree {files}`, commits its base branch does not have (a task moved to done by hand, a cancelled one)
-   * `dirty_worktree {commits}`. A run, an integrate, a takeover or any other lock holder on the tree -> `busy`.
+   * `dirty_worktree {commits}`. A run, an integrate, a takeover or any other lock holder on the tree -> `busy`; a
+   * console of the saved config in that folder (B close: the one "Abrir consola en el worktree" opens has no
+   * `worktree` attribute) -> `busy {detail: 'shared'}`.
    */
   async removeTaskWorktree(teamId: string, taskId: string): Promise<TeamFail | null> {
     const tw = this.taskWorktrees
@@ -3531,6 +3574,7 @@ export class TeamService implements TeamInternals {
     if (rt.activeRuns.some((r) => r.taskId === taskId || this.locks.key(r.cwd) === wtKey)) return fail('busy', { detail: 'run' })
     if (rt.agents.some((a) => a.takeover && 'cwd' in a.takeover && this.locks.key(a.takeover.cwd) === wtKey)) return fail('busy', { detail: 'takeover' })
     if (this.locks.holderOf(wtKey) !== null || this.lingeringOf(teamId).cwds.has(wtKey)) return fail('busy', { detail: 'lock' })
+    if (this.consoleIn(wt.path)) return fail('busy', { detail: 'shared' })
     const insp = await tw.inspect(task)
     const again = this.teams.get(teamId) === rec ? rec.store.rt.tasks.find((t) => t.id === taskId) : undefined
     if (!again || again.worktree?.path !== wt.path || (again.state !== 'done' && again.state !== 'cancelled')) return fail('conflict', { reason: 'stale' })
@@ -3539,6 +3583,8 @@ export class TeamService implements TeamInternals {
     if ('ok' in repo) return repo
     if (await this.branchLoses(repo.repoRoot, wt.branch, wt.baseBranch, insp.tip)) return fail('dirty_worktree', { detail: 'commits' })
     if (this.teams.get(teamId) !== rec) return fail('not_found')
+    // Again after the awaits: a console opened meanwhile keeps the folder too.
+    if (this.consoleIn(wt.path)) return fail('busy', { detail: 'shared' })
     const res = await tw.remove(again, { tip: insp.tip ?? '', dirty: insp.dirtyFiles })
     if (!res.ok) {
       this.deps.log(`worktree ${teamId} ${taskId} not removed ${res.error}${'detail' in res && res.detail ? ` ${res.detail}` : ''}`)
@@ -3558,6 +3604,17 @@ export class TeamService implements TeamInternals {
     const done = this.integrateCommit(teamId, rec, (r) => worktreeRemoved(r, taskId, wt.path, { now: this.clock() }), ['task', 'board'], taskId)
     this.deps.log(`worktree ${teamId} ${taskId} removed`)
     return done && !done.ok ? flowFail(done) : null
+  }
+
+  /** B close: a console of the saved config (any workspace) whose cwd, its own or its workspace's, is `tree` or inside it. */
+  private consoleIn(tree: string): boolean {
+    for (const ws of this.deps.config()?.workspaces ?? []) {
+      for (const p of ws.panes ?? []) {
+        const cwd = typeof p.cwd === 'string' && p.cwd ? p.cwd : ws.cwd
+        if (typeof cwd === 'string' && cwd && this.locks.within(cwd, tree)) return true
+      }
+    }
+    return false
   }
 
   /**

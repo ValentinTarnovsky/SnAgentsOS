@@ -1,12 +1,13 @@
 /**
  * "Nuevo equipo" (app 2.7.0, E10 B1). Steps: Repo (a workspace folder or the
  * folder picker; main finds the git main root), Adopt (the repo already
- * brings .snagentsos/team/: its risks, problems and diffs, Cancel focused,
- * "Confiar y agregar"), Edit (the draft main proposed: name, goal, rules,
- * base branch, agents at once, small plans, verify, roles, daily summary and
- * the access warnings) and Preview (the exact files, written only with the
- * hash of that preview). Main renders, validates, writes and trusts; a write
- * that lands opens the team. Mounted once in App; nothing while closed.
+ * brings .snagentsos/team/: its risks, problems, the note on the user's own
+ * allow rules and diffs, Cancel focused, "Confiar y agregar"), Edit (the
+ * draft main proposed: name, goal, rules, base branch, agents at once, small
+ * plans, verify, roles, daily summary and the access warnings) and Preview
+ * (the exact files, written only with the hash of that preview). Main
+ * renders, validates, writes and trusts; a write that lands opens the team.
+ * Mounted once in App; nothing while closed.
  */
 import { useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -30,6 +31,7 @@ import {
   setRoleDraft,
   setupBack,
   textBytes,
+  TRUST_WARNINGS,
   useTeamSetupStore,
   writeSetup,
   type SetupNotice,
@@ -199,6 +201,7 @@ function AdoptStep({ probe }: { probe: SetupProbe }) {
       <p className="text-xs text-text-secondary">{t('teams.setup.adopt.intro')}</p>
       <RepoChip probe={probe} />
       <DefIssueList issues={existing.issues} title={t('teams.setup.adopt.issues')} />
+      <SetupWarnings warnings={TRUST_WARNINGS} />
       <TeamDiffView diff={existing.diff} />
     </div>
   )

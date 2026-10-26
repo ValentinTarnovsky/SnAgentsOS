@@ -4,7 +4,10 @@
 // repo, team folder, user config or agent is touched. Checks: the repo step
 // lists the workspace folders once and shows not_git; probe -> edit with the
 // draft main proposed (the Lead always stays, with one agent); the Total and
-// Codex warnings follow the draft; the goal counter and the verify
+// Codex warnings follow the draft, and so does the note that the user's own
+// allow rules of ~/.claude/settings.json hold for the Claude roles (Tanda B
+// close, es and en; the preview, the adopt step and the trust dialog say it
+// too); the goal counter and the verify
 // suggestion; preview with one tab per file and the "No se commitean" note;
 // write sends the hash of the preview on screen, a `changed` answer makes the
 // preview again and the second write lands and opens the team host; a
@@ -71,11 +74,17 @@ const calls=[];let previews=0,trustLoads=0;
 const item=(id,name)=>({id,name,repoName:'r',trust:'trusted',paused:null,autoDispatch:false,agents:5,running:0,needsCount:0,rev:1,repoRoot:'C:/r',takeovers:[]});
 let list=[item(REG,'Registrado')];
 const probeOf=(dir,extra)=>({repoRoot:dir,repoName:dir.split('/').pop(),branch:'main',branches:['main','dev'],suggestedVerify:'npm test',defaults:defaultDraft('es'),...extra});
+// As main's setupWarnings: Tanda B close adds userAllow for any enabled Claude role (the user's own allow rules).
 const warningsOf=(d)=>{const on=d.roles.filter(r=>r.enabled);const w=[];
  if(on.some(r=>r.provider==='claude'&&r.permission==='total'))w.push('totalBypass');
  if(on.some(r=>r.provider==='codex'&&r.permission==='total'))w.push('codexTotal');
  if(on.some(r=>r.provider==='codex'&&r.permission==='readonly'))w.push('codexReadonlyBlock');
+ if(on.some(r=>r.provider==='claude'))w.push('userAllow');
  if(!d.verify)w.push('noVerify');w.push('notCommitted');return w};
+// The note on the user's own allow rules (design risk 24), in both languages: they also hold in the read only and
+// plan runs, all but the git fence every team run keeps (CLAUDE_TOTAL_DENY: push, merge, worktree, update-ref).
+const USER_ALLOW_ES='Los comandos que permitiste en permissions.allow de ~/.claude/settings.json también corren sin preguntar en las corridas de Claude del equipo, incluidas las de solo lectura y las de plan, salvo las operaciones de git que toda corrida del equipo mantiene bloqueadas (push, merge, worktree, update-ref).';
+const USER_ALLOW_EN='Commands you allowed in permissions.allow of ~/.claude/settings.json also run without asking in the Claude runs of the team, read only and plan runs included, except the git operations every team run keeps blocked (push, merge, worktree, update-ref).';
 const req=async(r)=>{calls.push(JSON.parse(JSON.stringify(r)));await new Promise(res=>setTimeout(res,30));
  switch(r.op){
   case 'list':return {ok:true,teams:list};
@@ -124,7 +133,9 @@ useAppStore.setState({hydrated:true,activeWorkspaceId:'w1',settings:{...s0.setti
   {id:'w4',name:'Cuatro',cwd:'',panes:[],layout:{grid:1,order:[]}}]});
 useTeamsStore.setState({ready:true,list});
 applyTheme('midnight');
-createRoot(document.getElementById('root')).render(<I18nProvider lang="es"><div style={{height:'100vh'}} className="flex bg-bg-primary text-text-primary"><main className="flex-1 p-6">equipos</main><TeamSetupDialog/><TeamTrustDialog/></div></I18nProvider>);
+// The copy follows the app language (smoke.setLang), es by default.
+function Root(){const lang=useAppStore(s=>s.settings.language);return <I18nProvider lang={lang}><div style={{height:'100vh'}} className="flex bg-bg-primary text-text-primary"><main className="flex-1 p-6">equipos</main><TeamSetupDialog/><TeamTrustDialog/></div></I18nProvider>}
+createRoot(document.getElementById('root')).render(<Root/>);
 const $=(s)=>document.querySelector(s);
 const setVal=(s,v)=>{const el=$(s);if(!el)return false;const proto=el.tagName==='SELECT'?HTMLSelectElement.prototype:el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
  Object.getOwnPropertyDescriptor(proto,'value').set.call(el,v);el.dispatchEvent(new Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}));return true};
@@ -137,6 +148,8 @@ window.smoke={
  grid:()=>useAgentStore.getState().setView('grid'),
  disable:(v)=>useTeamsStore.setState({disabled:v}),
  labs:(v)=>useAppStore.setState(s=>({settings:{...s.settings,labs:{...(s.settings.labs||{}),teams:v}}})),
+ setLang:(l)=>useAppStore.setState(s=>({settings:{...s.settings,language:l}})),
+ USER_ALLOW_ES,USER_ALLOW_EN,
  adoptRisks:()=>adoptDiff.risks.map(r=>r.code),trustRisks:()=>trustDiff.risks.map(r=>r.code),
  repoFileCount:()=>repoFiles.length,
  // The roles/dev.md diff lines on screen against the hunk lines main sent: the hiding characters of
@@ -171,6 +184,7 @@ app.whenReady().then(async()=>{
  let failures=[];w.webContents.on('console-message',(_e,level,message)=>{if(level>=3)failures.push(message)});
  await w.loadFile(path.join(__dirname,'index.html'));await wait(400);
  const js=c=>w.webContents.executeJavaScript(c);
+ const {USER_ALLOW_ES,USER_ALLOW_EN}=await js('({USER_ALLOW_ES:smoke.USER_ALLOW_ES,USER_ALLOW_EN:smoke.USER_ALLOW_EN})');
  const frames=()=>wait(120);
  const until=async(code,label,ms=3000)=>{const end=Date.now()+ms;for(;;){const v=await js(code);if(v)return v;if(Date.now()>end)throw new Error('timeout: '+label+' '+JSON.stringify(await js('smoke.setupState()')));await wait(40)}};
  const shot=async name=>{await js('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');await wait(150);fs.writeFileSync(path.join(__dirname,name+'.png'),(await w.webContents.capturePage()).toPNG())};
@@ -202,14 +216,18 @@ app.whenReady().then(async()=>{
  ok(await js("smoke.disabled('[data-setup-role=\\"lead\\"] [data-role-field=\\"count\\"]')")===true&&await js("smoke.value('[data-setup-role=\\"lead\\"] [data-role-field=\\"count\\"]')")==='1','the Lead keeps one agent');
  ok(await js("smoke.value('[data-setup-role=\\"dev\\"] [data-role-field=\\"count\\"]')")==='2','two Devs by default');
  let warns=await js("smoke.all('[data-setup-warning]','data-setup-warning')");
- ok(JSON.stringify(warns)===JSON.stringify(['totalBypass']),'a Claude Dev with Total warns that it bypasses permissions',warns);
+ ok(JSON.stringify(warns)===JSON.stringify(['totalBypass','userAllow']),'a Claude Dev with Total warns that it bypasses permissions; the Claude roles, that the user\\'s own allow rules hold for them',warns);
+ ok((await js("smoke.text('[data-setup-warning=\\"userAllow\\"]')"))===USER_ALLOW_ES,'the allow rules note names ~/.claude/settings.json, in Spanish',await js("smoke.text('[data-setup-warning=\\"userAllow\\"]')"));
+ await js("smoke.setLang('en')");await frames();
+ ok((await js("smoke.text('[data-setup-warning=\\"userAllow\\"]')"))===USER_ALLOW_EN,'en: the allow rules note',await js("smoke.text('[data-setup-warning=\\"userAllow\\"]')"));
+ await js("smoke.setLang('es')");await frames();
  await shot('setup-edit');
  await js("document.querySelector('[data-setup-roles]').scrollIntoView({block:'center'})");await shot('setup-roles');
  await noDash('edit step');
  await zoomCheck('edit step');
  ok(await js("smoke.setVal('[data-setup-role=\\"dev\\"] [data-role-field=\\"provider\\"]','codex')"),'the provider select changes');await frames();
  warns=await js("smoke.all('[data-setup-warning]','data-setup-warning')");
- ok(JSON.stringify(warns)===JSON.stringify(['codexTotal']),'a Codex Dev with Total warns about danger-full-access',warns);
+ ok(JSON.stringify(warns)===JSON.stringify(['codexTotal','userAllow']),'a Codex Dev with Total warns about danger-full-access (the Lead and QA stay Claude roles)',warns);
  ok(await js("smoke.value('[data-setup-role=\\"dev\\"] [data-role-field=\\"model\\"]')")==='','the Claude model does not follow the switch to Codex');
  ok(await js("smoke.value('[data-setup-role=\\"dev\\"] [data-role-field=\\"effort\\"]')")==='medium','an effort both providers know is kept');
  await js("smoke.setVal('[data-setup-role=\\"research\\"] [data-role-field=\\"provider\\"]','codex')");await frames();
@@ -246,6 +264,7 @@ app.whenReady().then(async()=>{
  ok(await js("smoke.attr('[data-setup-preview-text]','data-setup-preview-text')")==='roles/dev.md'&&(await js("smoke.text('[data-setup-preview-text]')")).includes('provider: codex'),'a tab click shows that file',await js("smoke.text('[data-setup-preview-text]')"));
  ok((await js("smoke.text('[data-setup-note]')")).includes('Se crean '+tabs.length+' archivos')&&(await js("smoke.text('[data-setup-note]')")).includes('No se commitean'),'the note counts the files and says they are not committed',await js("smoke.text('[data-setup-note]')"));
  ok((await js("smoke.all('[data-setup-warning]','data-setup-warning')")).includes('notCommitted'),'the preview shows the warnings main sends');
+ ok((await js("smoke.text('[data-setup-warning=\\"userAllow\\"]')"))===USER_ALLOW_ES,'main\\'s userAllow warning in words in the preview',await js("smoke.all('[data-setup-warning]','data-setup-warning')"));
  await shot('setup-preview');
  await noDash('preview step');
  await zoomCheck('preview step');
@@ -307,6 +326,7 @@ app.whenReady().then(async()=>{
  const adoptRisks=await js("smoke.all('[data-trust-risk]','data-trust-risk')");
  ok(JSON.stringify(adoptRisks)===JSON.stringify(await js('smoke.adoptRisks()'))&&adoptRisks.length>0,'adopt shows the risks of a first trust in order',adoptRisks);
  ok(await js("smoke.exists('[data-chat-diff] [data-diff-line=\\"+\\"]')"),'the diff goes through the chat patch block');
+ ok((await js("smoke.text('[data-setup-warning=\\"userAllow\\"]')"))===USER_ALLOW_ES&&await js("smoke.before('[data-setup-warning=\\"userAllow\\"]','[data-team-diff]')"),'adopt says the user\\'s own allow rules hold for the team too, before the diffs',await js("smoke.all('[data-setup-warning]','data-setup-warning')"));
  await shot('setup-adopt');
  await noDash('adopt step');
  await zoomCheck('adopt step');
@@ -327,6 +347,10 @@ app.whenReady().then(async()=>{
  ok((await js("smoke.text('[data-trust-risk=\\"verifyChanged\\"]')"))==='Comando de verificación: npm test','the verify risk of the team repo names no repo id',await js("smoke.text('[data-trust-risk=\\"verifyChanged\\"]')"));
  ok((await js("smoke.text('[data-team-trust-dialog]')")).includes('cambiaron desde que confiaste'),'a changed team says the files changed since the last trust');
  ok((await js("smoke.all('[data-trust-file]','data-file-status')")).every(s=>s==='changed'),'changed files read as changed');
+ ok(JSON.stringify(await js("smoke.all('[data-team-trust-dialog] [data-setup-warning]','data-setup-warning')"))==='["userAllow"]'&&(await js("smoke.text('[data-team-trust-dialog] [data-setup-warning=\\"userAllow\\"]')"))===USER_ALLOW_ES&&await js("smoke.before('[data-setup-warning=\\"userAllow\\"]','[data-team-diff]')"),'the trust dialog says the user\\'s own allow rules hold for the team too, before the diffs',await js("smoke.text('[data-team-trust-dialog] [data-setup-warnings]')"));
+ await js("smoke.setLang('en')");await frames();
+ ok((await js("smoke.text('[data-team-trust-dialog] [data-setup-warning=\\"userAllow\\"]')"))===USER_ALLOW_EN,'en: the trust dialog note',await js("smoke.text('[data-team-trust-dialog] [data-setup-warnings]')"));
+ await js("smoke.setLang('es')");await frames();
  await shot('trust');
  await noDash('trust dialog');
  await zoomCheck('trust dialog');
@@ -404,7 +428,7 @@ app.whenReady().then(async()=>{
  await js('smoke.labs(true)');
 
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+checks+' teams setup and trust UI checks (repo, edit, warnings, preview, write hash, changed, registered, adopt, trust, hidden characters, Esc, Labs off); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+checks+' teams setup and trust UI checks (repo, edit, warnings, own allow rules note, preview, write hash, changed, registered, adopt, trust, hidden characters, Esc, Labs off); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; delete env.ELECTRON_RENDERER_URL

@@ -1,12 +1,12 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Check, MessageSquareWarning, X } from 'lucide-react'
 import { DECIDE_NOTE_MAX } from '@shared/teams'
-import type { ApprovalView, TeamView } from '@shared/team-protocol'
+import type { ApprovalView, TeamFail, TeamView } from '@shared/team-protocol'
 import type { TeamDefinitionDiff } from '@shared/teamDiff'
 import { useT, type MessageKey } from '@/i18n'
 import { cn } from '@/lib/cn'
 import { toast } from '@/lib/toast'
-import { busyKey, decide, decideFailText, useNeedsStore } from '@/lib/teams/needs'
+import { approvalWaits, busyKey, decide, decideFailText, useNeedsStore } from '@/lib/teams/needs'
 import { visibleName } from '@/lib/teams/issues'
 import { ChatMarkdown } from '@/components/chat/Markdown'
 import { SMALL_BTN, SMALL_BTN_QUIET, SMALL_BTN_TEXT } from './RunHeader'
@@ -46,9 +46,13 @@ export function DecideControls({ teamId, approval, second, scope, onReply }: { t
     if (open) areaRef.current?.focus({ preventScroll: true })
   }, [open])
 
+  // A refusal in words: a stale permission still in the reloaded view grew under the user (its new rules show now).
+  const failText = (fail: TeamFail): string => decideFailText(fail, t, approval.payload.kind, approvalWaits(teamId, approval.id))
+  // The rev on screen; a view without one (the field is optional on the wire) reads as 1, as main reads a record.
+  const rev = approval.rev ?? 1
   const approve = (): void => {
-    void decide(teamId, approval.id, 'approve').then((fail) => {
-      if (fail) toast.error(decideFailText(fail, t, approval.payload.kind))
+    void decide(teamId, approval.id, 'approve', undefined, rev).then((fail) => {
+      if (fail) toast.error(failText(fail))
       else toast.success(t('teams.approval.approved'))
       onReply?.()
     })
@@ -64,8 +68,8 @@ export function DecideControls({ teamId, approval, second, scope, onReply }: { t
       return
     }
     setError(null)
-    void decide(teamId, approval.id, 'reject', text || undefined).then((fail) => {
-      if (fail) toast.error(decideFailText(fail, t, approval.payload.kind))
+    void decide(teamId, approval.id, 'reject', text || undefined, rev).then((fail) => {
+      if (fail) toast.error(failText(fail))
       else {
         toast.success(t(second === 'changes' ? 'teams.approval.changesSent' : 'teams.approval.rejected'))
         setOpen(false)

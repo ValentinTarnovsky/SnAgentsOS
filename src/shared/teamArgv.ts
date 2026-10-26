@@ -155,7 +155,9 @@ function claudeArgv(i: TeamArgvInput): string[] {
   } else if (i.profile === 'readonly') {
     argv.push('--permission-mode', 'dontAsk')
     argv.push('--allowedTools', ...dedupe([...CLAUDE_READONLY_ALLOW, ...CLAUDE_TEAM_TOOLS, ...grants]))
-    argv.push('--disallowedTools', ...dedupe([...CLAUDE_READONLY_DENY, ...protect]))
+    // B close: the git fence too. `--setting-sources user` keeps the user's own permissions.allow, and under dontAsk
+    // only a deny wins over one (a global `Bash(git:*)` would let a readonly or plan run push or merge).
+    argv.push('--disallowedTools', ...dedupe([...CLAUDE_READONLY_DENY, ...CLAUDE_TOTAL_DENY, ...protect]))
   } else {
     // A role's own shell rule for the CLI adds nothing a run needs (CLAUDE_TEAM_TOOLS is there; every other command
     // but ping and usage answers forbidden to a team run) and could reopen the cmd.exe hole: PowerShell(snaos ...),

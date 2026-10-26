@@ -30,6 +30,9 @@
 // raced it answers conflict stale. Second review round: reconcileTasks drops the "Por despachar" item and the exec wake
 // of an executing task that still needs a plan (modeFits reads it like teamDispatch modeFor), and an apply that fails
 // on a base that is no longer the trusted hash cancels its hire stale instead of leaving it pending.
+// Tanda B close: a permission approval's rev (a merge that grows it moves it; a decide without it or with another one
+// answers conflict stale, other kinds ignore it), and GRANTS_MAX per task (an ask offers only what still fits, an
+// approve with nothing that lands answers bad_request grantsFull and wakes nobody).
 // Same esbuild + vm harness as test-teams-store.cjs: no Electron, no processes, no user data.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
@@ -195,7 +198,13 @@ function world(o = {}) {
     const policy = M.afterRunPolicy(M.runEndFactsOf(store.rt, terminal, clock.now))
     return w.commit(M.finishRun(store.rt, runId, end, policy, { now: clock.now }), `finish ${runId}`)
   }
-  w.decide = (actor, id, decision, note, f) => M.decideApproval(store.rt, actor, id, decision, note, ctx(), f)
+  // B close: a permission decide carries the rev the user saw (ApprovalView.rev), as the desktop and the phone send it;
+  // `f` given is used as is (the rev checks pass their own).
+  const revOf = (id) => {
+    const a = store.rt.approvals.find((x) => x.id === id)
+    return a?.kind === 'permission' ? { rev: a.rev ?? 1 } : undefined
+  }
+  w.decide = (actor, id, decision, note, f) => M.decideApproval(store.rt, actor, id, decision, note, ctx(), f ?? revOf(id))
   w.answer = (actor, id, a) => M.answerCard(store.rt, actor, id, a, ctx())
   w.needs = () => M.teamNeedsRows(M.needsInputOf(store.rt, 'trusted', undefined, def))
   w.commit(M.reconcileAgents(store.rt, ctx()), 'the roster')
@@ -515,7 +524,7 @@ function finalChecks() {
   const f4 = w.rt().approvals.find((a) => a.kind === 'final' && a.taskId === t3 && a.state === 'pending').id
   same(json(M.approvalView(w.rt(), w.approval(f4), w.def).payload.stat), { files: 2, insertions: 10, deletions: 3, top: stat.top }, 'the final OK view carries that stat')
   check(M.approvalView(w.rt(), w.approval(f2), w.def).payload.stat === undefined && !('stat' in json(M.approvalView(w.rt(), w.approval(f2), w.def).payload)), 'a final OK whose task never had a QA stat: no stat field')
-  w.commit(w.decide(user, f4, 'approve', undefined, { ahead: 0 }), 'T11 approve with ahead 0')
+  w.commit(w.decide(user, f4, 'approve', undefined, { ahead: 0, rev: 7 }), 'T11 approve with ahead 0 (a rev on a final approval is ignored, B close)')
   check(w.task(t3).state === 'done' && !w.rt().approvals.some((a) => a.kind === 'integrate' && a.taskId === t3), 'T11 with ahead === 0: done, nothing to integrate')
 
   // Research closes from its plan run (T10); a Dev with a worktree task may not use done.
@@ -839,7 +848,8 @@ function permissionChecks() {
   same(json(w.approval(p1).payload.tools), ['Bash(npm test:*)'], 'a PowerShell denial asks only for its Bash rule (never PowerShell(npm test:*), E10 SPIKE B5)')
   check(w.approval(p1).decider === 'user' && w.approval(p1).payload.roleId === 'ops' && w.approval(p1).payload.runId === run1 && w.approval(p1).createdBy.agentId === 'ops', 'one pending permission approval of the task and the role')
   // Merge: the same denial again changes nothing; another one joins the same approval.
-  check(ask(run1, ps.denials).rt === w.rt(), 'the same denial again: the same approval, unchanged')
+  check(ask(run1, ps.denials).rt === w.rt(), 'the same denial again: the same approval, unchanged (its rev too)')
+  check(w.approval(p1).rev === undefined && M.approvalView(w.rt(), w.approval(p1), w.def).rev === 1, 'a new permission approval: no rev stored, its view reads rev 1')
   r = ask(run1, [{ tool: 'Bash', input: { command: 'npx cowsay hi' } }, { tool: 'Write', input: { file_path: 'C:\\repo\\src\\a.ts' } }])
   w.commit(r, 'merge')
   same([r.result.approvalId, json(w.approval(p1).payload.tools)], [p1, ['Bash(npm test:*)', 'Bash(npx cowsay hi)', 'Write']], 'a second denial merges into the same approval (deduped, in order)')
@@ -936,9 +946,14 @@ function permissionChecks() {
   const cr = cw.go('research', ct, 'exec')
   check(M.permissionAsk(cw.rt(), cw.run(cr), ps.denials, cw.ctx(), { protect: PROTECT }).result.approvalId === null, 'a Codex run asks nothing (no allow list, 5.4)')
 
+  // B close (finding 15): a permission decide is bound to the rev the user saw. p1 grew once (the merge above): rev 2.
+  check(w.approval(p1).rev === 2 && M.approvalView(w.rt(), w.approval(p1), w.def).rev === 2, 'the merge that grew p1 moved its rev to 2, and its view carries it')
+  check(M.approvalView(w.rt(), w.approval(pl), w.def).rev === 1, 'a permission approval nothing grew: rev 1 (absent reads as 1)')
+  same([w.decide(user, p1, 'approve', undefined, {}).reason, w.decide(user, p1, 'approve', undefined, { rev: 1 }).reason, w.decide(user, p1, 'reject', undefined, { rev: 3 }).reason], ['stale', 'stale', 'stale'], 'a decide without the rev, with the one before the merge or another one: conflict stale, approve or reject')
+  check(w.approval(p1).state === 'pending' && !w.task(t1).grants, 'and nothing changed')
   // The grant: Bash only, and the run it wakes is told to use Bash; its argv carries the rule.
   w.tick()
-  w.commit(w.decide(user, p1, 'approve'), 'approve the permission')
+  w.commit(w.decide(user, p1, 'approve', undefined, { rev: 2 }), 'approve the permission at its rev')
   const t = w.task(t1)
   same(json(t.grants.map((g) => [g.roleId, g.tool, g.approvalId])), [['ops', 'Bash(npm test:*)', p1], ['ops', 'Bash(npx cowsay hi)', p1], ['ops', 'Write', p1]], 'task.grants of the role gain the approved rules')
   check(t.next.agentId === 'ops' && t.next.mode === 'exec' && t.next.reason === 'grant' && t.next.bypassCooldown === true && t.next.refs[0] === p1, 'a grant wake for the agent of the phase (the denied run did not conclude)')
@@ -968,6 +983,28 @@ function permissionChecks() {
   w.commit(w.decide(user, r.result.approvalId, 'reject'), 'reject a permission (no note needed)')
   check(w.approval(r.result.approvalId).state === 'rejected' && !w.task(t4).grants, 'rejected: no grant')
   w.finish(r4)
+  // B close (finding 8): GRANTS_MAX counts every role's grants of the task. An ask offers only the rules that still fit
+  // (with their denied commands), a merge with no room adds nothing, and an approve none of whose rules lands answers
+  // bad_request {detail: grantsFull}, wakes nobody and leaves the approval pending.
+  const t9 = w.create('Full', { assignee: 'ops', needsPlan: false, isolation: 'main' })
+  const r9 = w.go('ops', t9, 'exec')
+  const oldGrants = (n) => Array.from({ length: n }, (_, i) => ({ roleId: i % 2 ? 'qa' : 'ops', tool: `Bash(old${i} go)`, at: w.clock.now, approvalId: 'a-1' }))
+  const setGrants = (grants, label) => w.commit({ ok: true, rt: { ...w.rt(), tasks: w.rt().tasks.map((x) => (x.id === t9 ? { ...x, grants } : x)) }, effects: [], result: undefined }, label)
+  setGrants(oldGrants(M.GRANTS_MAX - 2), 'the task holds GRANTS_MAX - 2 grants of two roles')
+  r = ask(r9, Array.from({ length: 5 }, (_, i) => ({ tool: 'Bash', input: { command: `new${i} go` } })))
+  w.commit(r, 'five denials with room for two')
+  const p9 = r.result.approvalId
+  same(json([w.approval(p9).payload.tools, w.approval(p9).payload.denied]), [['Bash(new0 go)', 'Bash(new1 go)'], ['new0 go', 'new1 go']], 'the ask offers only as many rules as the task has room for, and only their denied commands')
+  check(ask(r9, [{ tool: 'Bash', input: { command: 'new9 go' } }]).rt === w.rt(), 'no room left: a later denial merges nothing')
+  setGrants(oldGrants(M.GRANTS_MAX), 'another approval filled the task cap meanwhile')
+  const before9 = JSON.stringify(w.task(t9))
+  const full = w.decide(user, p9, 'approve')
+  same(json(full), { ok: false, error: 'bad_request', detail: 'grantsFull' }, 'an approve none of whose rules fits: bad_request, detail grantsFull')
+  check(w.approval(p9).state === 'pending' && JSON.stringify(w.task(t9)) === before9 && !w.task(t9).next, 'still pending, the task as it was: no grant wake (the woken run would be denied again)')
+  setGrants(oldGrants(M.GRANTS_MAX - 1), 'room for one again')
+  w.commit(w.decide(user, p9, 'approve'), 'an approve with room for one rule')
+  check(w.task(t9).grants.length === M.GRANTS_MAX && w.task(t9).grants.at(-1).tool === 'Bash(new0 go)' && w.task(t9).next?.reason === 'grant', 'the rule that fits lands and the grant wake is set')
+  w.finish(r9)
   // A permission approval whose run ended waiting on the user does not wake it (the answer does).
   const t5 = w.create('Waits', { assignee: 'ops', needsPlan: false, isolation: 'main' })
   const r5 = w.go('ops', t5, 'exec')
@@ -1288,7 +1325,7 @@ function endPathsChecks() {
   w.commit(asked, 'a permission ask')
   w.finish(er)
   const forged = { ...w.rt(), tasks: w.rt().tasks.map((t) => (t.id === e ? { ...t, state: 'cancelled', phase: 'none' } : t)) }
-  same(M.decideApproval(forged, user, asked.result.approvalId, 'approve', undefined, w.ctx()).reason, 'stale', 'an approval of a cancelled task is stale')
+  same(M.decideApproval(forged, user, asked.result.approvalId, 'approve', undefined, w.ctx(), { rev: 1 }).reason, 'stale', 'an approval of a cancelled task is stale')
 }
 
 // ---- 11. the grace window: team task get after team review leaves a newer comment queued ------------------
@@ -1386,7 +1423,8 @@ function randomChecks() {
           }
         } else if (op === 7) {
           const ap = pick(rt.approvals.filter((a) => a.state === 'pending' && a.kind !== 'integrate' && a.kind !== 'hire'))
-          if (ap) tryCommit(M.decideApproval(rt, pick([user, phone]), ap.id, pick(['approve', 'reject']), pick([undefined, 'nota']), w.ctx(), { ahead: pick([undefined, 0, 2]) }))
+          // A permission decide mostly with the rev it has (the view's), sometimes with an older one (stale, nothing moves).
+          if (ap) tryCommit(M.decideApproval(rt, pick([user, phone]), ap.id, pick(['approve', 'reject']), pick([undefined, 'nota']), w.ctx(), { ahead: pick([undefined, 0, 2]), ...(ap.kind === 'permission' ? { rev: pick([ap.rev ?? 1, ap.rev ?? 1, 1]) } : {}) }))
         } else if (op === 8) {
           const c = pick(rt.cards.filter((x) => x.state === 'open'))
           if (c) {

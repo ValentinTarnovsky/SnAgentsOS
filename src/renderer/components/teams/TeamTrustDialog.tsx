@@ -2,7 +2,8 @@
  * "Revisá la definición del equipo" (app 2.7.0, E10 B1): what the repo files
  * of a team let its agents do, before any run reads them. Risks first, then
  * every file diff; definition errors disable the approve (warnings are listed
- * in the warning style and never block). Cancel holds the
+ * in the warning style and never block), and beside them the note that the
+ * user's own Claude allow rules hold for the team too. Cancel holds the
  * focus (Enter never trusts on its own) and the approve sends exactly the
  * sha256 on screen; when the files moved meanwhile main answers `changed` and
  * the dialog shows the new version under "Los archivos cambiaron otra vez".
@@ -17,8 +18,10 @@ import type { TeamError } from '@shared/team-protocol'
 import { useAppStore } from '@/lib/store'
 import { useTeamsStore } from '@/lib/teamsStore'
 import { approveTrust, closeTeamTrust, reloadTeamTrust, useTeamTrustStore } from '@/lib/teams/trust'
+import { TRUST_WARNINGS } from '@/lib/teams/setup'
 import { hasDefErrors } from '@/lib/teams/issues'
 import { DefIssueList, TeamDiffView } from './TeamDiffView'
+import { SetupWarnings } from './SetupPreview'
 
 const ERROR_KEY: Partial<Record<TeamError, MessageKey>> = {
   disabled: 'teams.setup.err.disabled',
@@ -132,6 +135,7 @@ export function TeamTrustDialog() {
           {trust && (
             <>
               <DefIssueList issues={trust.issues} title={t('teams.trust.issues')} />
+              {trust.sha256 && <SetupWarnings warnings={TRUST_WARNINGS} />}
               <TeamDiffView diff={trust.diff} />
             </>
           )}

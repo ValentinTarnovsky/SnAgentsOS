@@ -64,6 +64,9 @@ function setupWarnings(draft: TeamSetupDraft): SetupWarning[] {
   if (roles.some((r) => r.permission === 'total' && r.provider === 'claude')) out.push('totalBypass')
   if (roles.some((r) => r.permission === 'total' && r.provider === 'codex')) out.push('codexTotal')
   if (roles.some((r) => r.permission === 'readonly' && r.provider === 'codex')) out.push('codexReadonlyBlock')
+  // B close (design risk 24): a Claude run keeps `--setting-sources user`, so the user's own permissions.allow of
+  // ~/.claude/settings.json joins its allow list (only the profile's deny rules win over it).
+  if (roles.some((r) => r.provider === 'claude')) out.push('userAllow')
   if (!draft.verify?.trim()) out.push('noVerify')
   out.push('notCommitted')
   return out

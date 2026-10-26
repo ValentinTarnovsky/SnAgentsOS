@@ -6,6 +6,7 @@
 // a console of the user holds the tree, a lingering orphan, a discarded level skipped before the agent's
 // minimum), nextAt, unblockReady and the 3 per hour throttle, claudeAllLimited, classifyOutcome in order
 // (with the codex-read and claude-tools fixtures through the B2 parsers) and afterRunPolicy row by row.
+// Tanda B close: a skip keyed `agentId|sessionKey|reason` leaves out one Lead level only (the others still enqueue).
 // Fixed `now`, no clock reads. Same esbuild + vm harness as test-status.cjs: the bundle runs in an empty
 // context (no require, no process), so the module is pure.
 const { buildSync } = require('esbuild')
@@ -211,6 +212,16 @@ function gateChecks() {
   p = D.planDispatch(two, DEF, GOAL, facts({ manual: [{ agentId: 'dev', reason: 'manual' }] }), skip)
   check(p.start.length === 1 && p.start[0].taskId === 't-21', `a manual entry without a task runs the level the roster names, not the discarded one (${JSON.stringify(p.start.map((x) => x.taskId ?? null))})`)
   check(!of(D.candidatesOf(two, DEF, GOAL, facts(), { skip: new Set(['dev|t-20', 'dev|t-21']) }), 'dev'), 'every level of the agent discarded: no candidate, nothing to wait for')
+  // Tanda B close (finding 6): every Lead level shares the session key 'lead'; a skip keyed `agentId|sessionKey|reason`
+  // leaves out only that level, so a discarded message never hides the Lead's triage or a small plan it decides.
+  const leadTwo = rt({ autoDispatch: false, tasks: [task(30)], comments: { lead: [comment(1, 'lead', { forAgent: 'lead' })] } })
+  same(of(reqs(leadTwo), 'lead').reason, 'userMessage', 'the Lead with a message and an untriaged task: the message is its candidate')
+  same(of(D.candidatesOf(leadTwo, DEF, GOAL, facts(), { skip: new Set(['lead|lead|userMessage']) }), 'lead').reason, 'triage', 'the message skipped by its reason: the Lead\'s triage is the candidate')
+  const smallPlan = { id: 'a-1', taskId: 't-30', kind: 'plan', state: 'pending', decider: 'lead', createdAt: NOW - 9000, createdBy: { kind: 'system' }, payload: { planRev: 1, small: true } }
+  const leadPlan = rt({ autoDispatch: false, approvals: [smallPlan], comments: { lead: [comment(1, 'lead', { forAgent: 'lead' })] } })
+  p = D.planDispatch(leadPlan, DEF, GOAL, facts(), { skip: new Set(['lead|lead|userMessage']) })
+  check(p.enqueue.some((x) => x.agentId === 'lead' && x.reason === 'leadApproval'), 'a pending small plan the Lead decides still enqueues while its message is skipped')
+  check(!of(D.candidatesOf(leadTwo, DEF, GOAL, facts(), { skip: new Set(['lead|lead']) }), 'lead'), 'control: a skip of the whole key leaves the Lead nothing (what the old key did)')
   // A manual entry of a busy agent: running, or stopping.
   const busy = work({ activeRuns: [run('r-000000000002', 'dev')] })
   busy.agents = busy.agents.map((a) => (a.id === 'dev' ? { ...a, status: 'running', runId: 'r-000000000002' } : a))

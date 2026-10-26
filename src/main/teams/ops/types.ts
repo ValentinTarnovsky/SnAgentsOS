@@ -90,7 +90,7 @@ export interface TeamInternals {
   /** B3: comments of a target (task id or `lead`) already moved to `archive/<target>.jsonl`. */
   archivedCount(teamId: string, target: string): number
   /** B5: decide an approval (the op checked the origin); null when it landed. */
-  decide(teamId: string, approvalId: string, decision: 'approve' | 'reject', note: string | undefined, actor: Actor): Promise<TeamFail | null>
+  decide(teamId: string, approvalId: string, decision: 'approve' | 'reject', note: string | undefined, actor: Actor, rev?: number): Promise<TeamFail | null>
   /** B5: answer a card or run its system action (the op checked the origin); null when it landed. */
   answer(teamId: string, cardId: string, answer: CardAnswer, actor: Actor): Promise<TeamFail | null>
   /** B5: the level of a prep-failure card's run leaves its prep backoff (Reintentar; Retomar of the task the card blocks). */

@@ -167,7 +167,7 @@ const approval = z.discriminatedUnion('kind', [
   z.object({ ...approvalBase, kind: z.literal('plan'), payload: z.object({ planRev: int, small: z.boolean() }) }).passthrough(),
   z.object({ ...approvalBase, kind: z.literal('final'), payload: z.object({ hasWorktree: z.boolean(), summary: str }) }).passthrough(),
   z.object({ ...approvalBase, kind: z.literal('hire'), payload: z.object({ roleId: str, text: str, sha256: str, baseDefHash: str, replaces: z.boolean() }) }).passthrough(),
-  z.object({ ...approvalBase, kind: z.literal('permission'), payload: z.object({ roleId: str, runId: str, tools: z.array(str), denied: z.array(str).optional() }) }).passthrough(),
+  z.object({ ...approvalBase, kind: z.literal('permission'), rev: z.number().int().min(1).optional().catch(undefined), payload: z.object({ roleId: str, runId: str, tools: z.array(str), denied: z.array(str).optional() }) }).passthrough(),
   z.object({ ...approvalBase, kind: z.literal('integrate'), payload: z.object({ branch: str, base: str }) }).passthrough(),
 ])
 const cardAnswer = z.object({

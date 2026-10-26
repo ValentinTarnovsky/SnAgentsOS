@@ -303,6 +303,8 @@ function decideFinal(rt: TeamRuntime, decided: TeamApproval, task: TeamTask, app
     // T11 with something to merge: the Integrar step (only the integrate op lands it, with expectTip).
     const t = withPair(task, 'review', 'integrating', ctx.now)
     delete t.next
+    // B close: a failure of an earlier cycle's Integrar is not this approval's last attempt.
+    if (t.integrate && t.integrate.state !== 'running') delete t.integrate
     out = { ...out, tasks: replaceTask(out.tasks, t) }
     const added = addApproval(out, { kind: 'integrate', taskId: task.id, decider: 'user', createdBy: { kind: 'system' }, payload: { branch: task.worktree.branch, base: task.worktree.baseBranch } }, ctx)
     if (!added.ok) return added
@@ -332,7 +334,8 @@ function decideFinal(rt: TeamRuntime, decided: TeamApproval, task: TeamTask, app
 /**
  * 4.3 permission: the rules join `task.grants` of that role (cap GRANTS_MAX; isGrantable again, so never a PowerShell
  * rule nor a prefix off GRANT_PREFIX_ALLOWLIST that an older version stored in the approval; an approve of an approval
- * with no rule left that isGrantable accepts answers `bad_request`, TeamService.decide adds `detail: 'nothingToGrant'`),
+ * with no rule left that isGrantable accepts answers `bad_request`, TeamService.decide adds `detail: 'nothingToGrant'`;
+ * one none of whose rules fits the task's cap answers `bad_request {detail: 'grantsFull'}`),
  * and the agent of the task's phase, when it is of that role and its run did not end waiting on the user (an open card
  * of that run), is woken with `grant` (cooldown bypassed: the user just allowed what stopped it). The wake names the
  * approval in its refs; the run it gets is told to use Bash by a system hint built from them (grantedByRefs), never
@@ -346,11 +349,18 @@ function decidePermission(rt: TeamRuntime, ap: Extract<TeamApproval, { kind: 'pe
   if (tools.length === 0) return fail('bad_request')
   const roleId = ap.payload.roleId
   const grants: TaskGrant[] = [...(task.grants ?? [])]
+  let full = false
   for (const tool of tools) {
     if (grants.some((g) => g.roleId === roleId && g.tool === tool)) continue
-    if (grants.length >= GRANTS_MAX) break
+    if (grants.length >= GRANTS_MAX) {
+      full = true
+      break
+    }
     grants.push({ roleId, tool, at: ctx.now, approvalId: ap.id })
   }
+  // B close: GRANTS_MAX counts every role of the task; an approve none of whose rules lands grants nothing and wakes
+  // nobody (the woken run would be denied again and ask again), the approval stays pending.
+  if (full && grants.length === (task.grants ?? []).length) return fail('bad_request', { detail: 'grantsFull' })
   let t: TeamTask = { ...task, grants, updatedAt: ctx.now }
   const agentId = phaseAgentOf(task)
   const agent = agentId ? rt.agents.find((a) => a.id === agentId) : undefined
@@ -374,7 +384,8 @@ function decidePermission(rt: TeamRuntime, ap: Extract<TeamApproval, { kind: 'pe
  * executing, or to planning with a plan wake when the task needs a plan and has none approved); a
  * permission approve grants and re-requests the run; a hire approve turns `applying` with the `applyHire` effect (its
  * definition base must still be the trusted one, else `conflict {stale}`), a reject leaves a `hireRejected` system
- * note in the Lead thread that wakes nobody.
+ * note in the Lead thread that wakes nobody. A permission decide carries the approval's rev the user saw (`f.rev`,
+ * ApprovalView.rev): a missing or different one (a later run merged rules into it) answers `conflict {stale}`.
  */
 export function decideApproval(
   rt: TeamRuntime,
@@ -383,7 +394,7 @@ export function decideApproval(
   decision: 'approve' | 'reject',
   note: string | undefined,
   ctx: FlowCtx,
-  f?: { ahead?: number },
+  f?: { ahead?: number; rev?: number },
 ): FlowResult {
   const ap = rt.approvals.find((a) => a.id === approvalId)
   if (!ap) return fail('not_found')
@@ -418,6 +429,8 @@ export function decideApproval(
     case 'final':
       return task ? decideFinal(rt, decided, task, approve, clean, actor, ctx, f?.ahead) : fail('conflict', { reason: 'stale' })
     case 'permission':
+      // B close: bound to the rules the user saw, never to rules a later run merged in since.
+      if (f?.rev !== (ap.rev ?? 1)) return fail('conflict', { reason: 'stale' })
       return task ? decidePermission(rt, ap, decided, task, approve, ctx) : fail('conflict', { reason: 'stale' })
     case 'hire': {
       if (approve) {
@@ -727,16 +740,21 @@ function unmasked(rule: string, mask: PermissionAskOpts['mask']): boolean {
 
 /**
  * permissionPatterns plus `denied`: the command of each shell denial that asks for a rule (deniedLine; at most
- * DENIED_COMMANDS_MAX, deduped, in order), what the user reads next to the rules (B5).
+ * DENIED_COMMANDS_MAX, deduped, in order), what the user reads next to the rules (B5). `hit`: some denial asks for a
+ * rule (new, or one of `have`).
  */
-function askOf(run: Pick<Run, 'provider' | 'profile' | 'roleId' | 'taskId'>, denials: readonly Pick<Denial, 'tool' | 'input'>[], task: Pick<TeamTask, 'grants'> | undefined, def: TrustedDefinition, o: PermissionAskOpts): { tools: string[]; denied: string[] } {
+function askOf(run: Pick<Run, 'provider' | 'profile' | 'roleId' | 'taskId'>, denials: readonly Pick<Denial, 'tool' | 'input'>[], task: Pick<TeamTask, 'grants'> | undefined, def: TrustedDefinition, o: PermissionAskOpts, have: readonly string[] = []): { tools: string[]; denied: string[]; hit: boolean } {
   const tools: string[] = []
   const denied: string[] = []
-  if (run.provider !== 'claude' || run.profile === 'total') return { tools, denied }
+  let hit = false
+  if (run.provider !== 'claude' || run.profile === 'total') return { tools, denied, hit }
   const allowed = new Set<string>(CLAUDE_TEAM_TOOLS)
   if (run.profile === 'readonly') for (const t of CLAUDE_READONLY_ALLOW) allowed.add(t)
   else for (const t of def.def.roles.find((r) => r.id === run.roleId)?.allowedTools ?? []) if (validToolPattern(t)) allowed.add(t)
   for (const g of task?.grants ?? []) if (g.roleId === run.roleId) allowed.add(g.tool)
+  // B close: GRANTS_MAX is per task (every role's grants): only the rules that can still land are asked for; `have`
+  // (the rules of the pending approval a merge grows) count as asked already.
+  const room = GRANTS_MAX - (task?.grants?.length ?? 0) - have.length
   for (const d of denials) {
     if (!d || typeof d.tool !== 'string' || isTeamCallDenial(d)) continue
     if (run.profile === 'readonly' && (CLAUDE_READONLY_DENY as readonly string[]).includes(d.tool)) continue
@@ -744,14 +762,19 @@ function askOf(run: Pick<Run, 'provider' | 'profile' | 'roleId' | 'taskId'>, den
     // A denial whose only rule a mask would change opens nothing (nor its denied line).
     const asks = grantPatternOf(d).filter((p) => isGrantable(p) && !allowed.has(p) && unmasked(p, o.mask))
     if (asks.length === 0) continue
-    for (const p of asks) if (!tools.includes(p)) tools.push(p)
+    const fresh = asks.filter((p) => !have.includes(p) && !tools.includes(p))
+    const fits = fresh.slice(0, Math.max(0, room - tools.length))
+    // A denial none of whose rules is asked (no room left for them) opens nothing either.
+    if (fits.length === 0 && fresh.length === asks.length) continue
+    hit = true
+    tools.push(...fits)
     const command = shellCommandOf(d)
     if (command !== null) {
       const line = deniedLine(command, o.mask)
       if (line && !denied.includes(line) && denied.length < DENIED_COMMANDS_MAX) denied.push(line)
     }
   }
-  return { tools, denied }
+  return { tools, denied, hit }
 }
 
 /** The command of a Bash or PowerShell denial, else null. */
@@ -769,7 +792,8 @@ export function isEscapeDenial(d: Pick<Denial, 'tool' | 'input'>): boolean {
 
 /**
  * The run end (finishRun, flow/runs.ts): a Claude task run's denials open, or merge into, ONE pending permission
- * approval of that task and the run's role (permissionPatterns; at most GRANTS_MAX rules), with the denied shell
+ * approval of that task and the run's role (permissionPatterns; at most the room GRANTS_MAX leaves in the task's
+ * grants of every role, counting the rules it holds already), with the denied shell
  * commands that ask for them (`denied`, merged like the rules, at most DENIED_COMMANDS_MAX). A task over (done,
  * cancelled, archived) or a run without a task asks nothing. Result: the approval it opened or grew, else null.
  */
@@ -778,18 +802,21 @@ export function permissionAsk(rt: TeamRuntime, run: Run, denials: readonly Denia
   if (!run.taskId || denials.length === 0) return none
   const task = rt.tasks.find((t) => t.id === run.taskId)
   if (!task || task.state === 'done' || task.state === 'cancelled') return none
-  const { tools, denied } = askOf(run, denials, task, ctx.def, o)
-  if (tools.length === 0) return none
   const cur = rt.approvals.find((a): a is Extract<TeamApproval, { kind: 'permission' }> => a.kind === 'permission' && a.state === 'pending' && a.taskId === task.id && a.payload.roleId === run.roleId)
+  const { tools, denied, hit } = askOf(run, denials, task, ctx.def, o, cur?.payload.tools)
+  if (!hit) return none
   if (cur) {
     const merged = [...cur.payload.tools]
     for (const t of tools) if (!merged.includes(t) && merged.length < GRANTS_MAX) merged.push(t)
     const lines = [...(cur.payload.denied ?? [])]
     for (const l of denied) if (!lines.includes(l) && lines.length < DENIED_COMMANDS_MAX) lines.push(l)
-    if (merged.length === cur.payload.tools.length && lines.length === (cur.payload.denied ?? []).length && cur.payload.runId === run.id) return { ...none, result: { approvalId: cur.id } }
+    const grew = merged.length > cur.payload.tools.length || lines.length > (cur.payload.denied ?? []).length
+    if (!grew && cur.payload.runId === run.id) return { ...none, result: { approvalId: cur.id } }
     const payload: typeof cur.payload = { ...cur.payload, runId: run.id, tools: merged }
     if (lines.length) payload.denied = lines
-    const next: TeamApproval = { ...cur, payload }
+    // B close: what the user decides on changed: its rev moves (a decide of the old one answers stale) and its need
+    // row reads as new again (TeamService.noticeNeeds keys a rev past 1 apart, so it notifies once more).
+    const next: TeamApproval = grew ? { ...cur, rev: (cur.rev ?? 1) + 1, payload } : { ...cur, payload }
     return { ok: true, rt: { ...rt, approvals: replaceApproval(rt.approvals, next) }, effects: [], result: { approvalId: cur.id } }
   }
   const by: Actor = { kind: 'agent', agentId: run.agentId, runId: run.id, roleKind: run.roleKind }

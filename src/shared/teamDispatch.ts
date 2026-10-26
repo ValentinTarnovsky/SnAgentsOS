@@ -195,7 +195,7 @@ function manualCandidate(rt: TeamRuntime, m: DispatchFacts['manual'][number], ag
     base = { req: request(agent.id, mode, t.id, m.reason, now, t.priority, { taskId: t.id, refs: level?.req.refs }), agent, task: t }
   } else if (!lead && !(m.detail && m.detail.trim())) {
     // No prompt: "run now" runs what the agent would run next; with nothing pending it is a free run.
-    const pending = skip && skip.size ? levels.filter((c) => !skip.has(`${c.req.agentId}|${c.req.sessionKey}`)) : levels
+    const pending = skip && skip.size ? levels.filter((c) => !skipped(skip, c.req)) : levels
     const best = [...pending].sort((a, b) => compareRequests(a.req, b.req))[0]
     if (best) {
       const req: RunRequest = { ...best.req, reason: m.reason, since: now }
@@ -217,9 +217,17 @@ function manualCandidate(rt: TeamRuntime, m: DispatchFacts['manual'][number], ag
  * What main adds to a pass beyond DispatchFacts. `skip`: the `agentId|sessionKey` levels the user discarded from "Por
  * despachar" and that did not change since (TeamService keeps them in memory while autonomy is off). They are left out
  * before each agent's minimum is picked, so the agent's next level becomes its candidate (and its queue item); a
- * manual entry is never left out (one that names no task runs the agent's best level among the ones kept).
+ * manual entry is never left out (one that names no task runs the agent's best level among the ones kept). B close:
+ * an entry `agentId|sessionKey|reason` leaves out only the level of that reason (the Lead's levels share one session
+ * key, so one discarded Lead level never hides the others).
  */
 export interface DispatchOptions { skip?: ReadonlySet<string> }
+
+/** True when `skip` names the request's level: by `agentId|sessionKey`, or by `agentId|sessionKey|reason`. */
+function skipped(skip: ReadonlySet<string>, r: Pick<RunRequest, 'agentId' | 'sessionKey' | 'reason'>): boolean {
+  const key = `${r.agentId}|${r.sessionKey}`
+  return skip.has(key) || skip.has(`${key}|${r.reason}`)
+}
 
 /** The candidates with what the gates need (candidatesOf drops the extra). */
 function collect(rt: TeamRuntime, def: TeamDefinition, goalHash: string, facts: Pick<DispatchFacts, 'now' | 'manual'>, o: DispatchOptions = {}): Candidate[] {
@@ -265,7 +273,7 @@ function collect(rt: TeamRuntime, def: TeamDefinition, goalHash: string, facts: 
   for (const a of rt.agents) {
     const m = manual.get(a.id)
     const levels = byAgent.get(a.id) ?? []
-    const list = m ? [m] : skip && skip.size ? levels.filter((c) => !skip.has(`${c.req.agentId}|${c.req.sessionKey}`)) : levels
+    const list = m ? [m] : skip && skip.size ? levels.filter((c) => !skipped(skip, c.req)) : levels
     let min: Candidate | null = null
     for (const c of list) {
       const item = items.get(`${c.req.agentId}|${c.req.sessionKey}`)

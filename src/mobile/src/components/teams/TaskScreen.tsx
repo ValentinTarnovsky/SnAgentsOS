@@ -76,7 +76,7 @@ export function TaskBody({ teamId, taskId, onTitle }: { teamId: string; taskId: 
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [runSheet, setRunSheet] = useState<string | null>(null)
-  const { needs, rows, hide } = useTeamNeeds(teamId)
+  const { needs, rows, hide, reload: reloadNeeds } = useTeamNeeds(teamId)
   const seq = useRef(0)
   const textRef = useRef(text)
   textRef.current = text
@@ -212,7 +212,7 @@ export function TaskBody({ teamId, taskId, onTitle }: { teamId: string; taskId: 
         <section className="flex min-w-0 flex-col gap-2">
           <h3 className={SECTION_TITLE}>{t('teams.card.needs')}</h3>
           {taskRows.map((row) => (
-            <NeedCard key={row.id} teamId={teamId} row={row} needs={needs.value as NonNullable<typeof needs.value>} showTask={false} onDone={(id) => hide([id])} />
+            <NeedCard key={row.id} teamId={teamId} row={row} needs={needs.value as NonNullable<typeof needs.value>} showTask={false} onDone={(id) => hide([id])} onStale={() => void reloadNeeds()} />
           ))}
         </section>
       )}

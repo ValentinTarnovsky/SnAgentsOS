@@ -195,7 +195,8 @@ export function setupBack(): void {
  * The warnings the edit step shows while the draft changes (main repeats them
  * in the preview, with `noVerify` and `notCommitted`): an enabled Claude role
  * with full access bypasses permissions, a Codex one runs without a sandbox,
- * and a read only Codex role reports its actions in a block.
+ * a read only Codex role reports its actions in a block, and any Claude role
+ * also runs with the user's own allow rules (design risk 24).
  */
 export function draftWarnings(draft: TeamSetupDraft): SetupWarning[] {
   const on = draft.roles.filter((r) => r.enabled || r.kind === 'lead')
@@ -203,8 +204,17 @@ export function draftWarnings(draft: TeamSetupDraft): SetupWarning[] {
   if (on.some((r) => r.provider === 'claude' && r.permission === 'total')) out.push('totalBypass')
   if (on.some((r) => r.provider === 'codex' && r.permission === 'total')) out.push('codexTotal')
   if (on.some((r) => r.provider === 'codex' && r.permission === 'readonly')) out.push('codexReadonlyBlock')
+  if (on.some((r) => r.provider === 'claude')) out.push('userAllow')
   return out
 }
+
+/**
+ * What the trust dialog and the adopt step always say beside the definition
+ * they ask to trust (design risk 24): a Claude run of the team keeps the
+ * user's own permissions.allow of ~/.claude/settings.json, so a command
+ * allowed there runs without asking, read only roles included.
+ */
+export const TRUST_WARNINGS: readonly SetupWarning[] = ['userAllow']
 
 /** UTF-8 bytes of a draft text (the goal counter). */
 export function textBytes(text: string): number {

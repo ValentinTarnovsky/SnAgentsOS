@@ -75,6 +75,13 @@ export class WriteLocks {
     return out
   }
 
+  /** True when `path` is the tree `tree` or inside it, compared by key (B close: a console in a task worktree). */
+  within(path: string, tree: string): boolean {
+    const k = this.key(path)
+    const t = this.key(tree)
+    return k === t || this.inside(k, t)
+  }
+
   /** Takes `key` for `holder`; false while another holder has it (the same holder again is a no-op true). */
   acquire(key: string, holder: string): boolean {
     const cur = this.held.get(key)

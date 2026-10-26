@@ -167,19 +167,27 @@ function setBusy(key: string, on: boolean): void {
  * Aprobar, Pedir cambios or Rechazar of one approval (`decide`: a plan, a
  * final OK, a hire, a permission; an integrate approval lands through Integrar
  * alone, B6, so it is never decided here). The note reaches the agent as a
- * review comment; "Pedir cambios" requires one (its editor checks it). The
- * buttons wait for main's answer and for the needs view that follows it, so a
- * row goes when main says so. Null once main applied it.
+ * review comment; "Pedir cambios" requires one (its editor checks it). `rev`:
+ * the ApprovalView.rev on screen, so main refuses a permission that a later
+ * run grew since (conflict stale) instead of granting rules the user never
+ * saw. The buttons wait for main's answer and for the needs view that follows
+ * it, so a row goes (or shows what it holds now) when main says so. Null once
+ * main applied it.
  */
-export async function decide(teamId: string, approvalId: string, decision: 'approve' | 'reject', note?: string): Promise<TeamFail | null> {
+export async function decide(teamId: string, approvalId: string, decision: 'approve' | 'reject', note?: string, rev?: number): Promise<TeamFail | null> {
   const key = busyKey(teamId, approvalId)
   setBusy(key, true)
   const text = note?.trim()
-  const res = await teamReq({ op: 'decide', teamId, approvalId, decision, ...(text ? { note: text } : {}) })
-  // A refusal (already decided, gone) or a decision: either way main's needs now are the truth.
+  const res = await teamReq({ op: 'decide', teamId, approvalId, decision, ...(text ? { note: text } : {}), ...(typeof rev === 'number' ? { rev } : {}) })
+  // A refusal (already decided, gone, changed) or a decision: either way main's needs now are the truth.
   await loadNeeds(teamId)
   setBusy(key, false)
   return res.ok ? null : res
+}
+
+/** The approval still waits in the needs view held for the team (a refused decide reloaded it). */
+export function approvalWaits(teamId: string, approvalId: string): boolean {
+  return !!useNeedsStore.getState().needs[teamId]?.approvals.some((a) => a.id === approvalId)
 }
 
 /**
@@ -199,12 +207,15 @@ export async function answerCard(teamId: string, cardId: string, answer: CardAns
 
 /**
  * A refused decision in the catalog's words (never main's detail). `kind`: the approval's, so a hire proposed against a
- * definition trusted since then (main cancels it; a decide that still races answers conflict stale) says so.
+ * definition trusted since then (main cancels it; a decide that still races answers conflict stale) says so. `waits`:
+ * the approval is still in the needs view main sent after the refusal, so a stale permission is one a later run grew
+ * (its rev moved on) and the user reviews it again; one that is gone (its task closed) is just gone.
  */
-export function decideFailText(f: TeamFail, t: TFn, kind?: ApprovalKind): string {
+export function decideFailText(f: TeamFail, t: TFn, kind?: ApprovalKind, waits?: boolean): string {
   switch (f.error) {
     case 'conflict':
       if (f.reason === 'already_decided') return t('teams.err.decided')
+      if (f.reason === 'stale' && kind === 'permission' && waits) return t('teams.err.permissionChanged')
       return t(f.reason === 'stale' && kind === 'hire' ? 'teams.err.hireStale' : 'teams.err.gone')
     case 'not_found':
       return t('teams.err.gone')
@@ -223,8 +234,10 @@ export function decideFailText(f: TeamFail, t: TFn, kind?: ApprovalKind): string
     case 'stopping':
       return t('teams.err.busy')
     case 'bad_request':
-      // A permission approval whose every rule the policy now refuses (an earlier build stored them): main's own code word.
-      return t(f.detail === 'nothingToGrant' ? 'teams.err.nothingToGrant' : 'teams.err.decideFailed')
+      // Main's own code words of a permission approve that grants nothing: every rule the policy now refuses (an
+      // earlier build stored them), or the task already holds GRANTS_MAX rules (grantsFull).
+      if (f.detail === 'nothingToGrant') return t('teams.err.nothingToGrant')
+      return t(f.detail === 'grantsFull' ? 'teams.err.grantsFull' : 'teams.err.decideFailed')
     default:
       return t('teams.err.decideFailed')
   }
@@ -260,7 +273,8 @@ const NEED_TOAST_MS = 8000
  * was not: a pending approval or an open card that was there is never
  * announced again), and each later pull announces the rows main pushes
  * (rank 1 and 2: trust, an auth or billing pause, approvals, cards) that were
- * not there. Off screen, or on another team, it starts over.
+ * not there, or a permission a later run grew (seenKey). Off screen, or on
+ * another team, it starts over.
  */
 let seen: { teamId: string; ids: Set<string> } | null = null
 
@@ -275,16 +289,27 @@ function rowLine(row: TeamNeedRow, needs: TeamNeedsView, lang: Language): string
   return row.taskId ? `${what} · ${row.taskId}` : what
 }
 
+/**
+ * A row's key in the baseline: its id, and for a permission approval a later run grew (rev past 1) the id with its
+ * rev, so what the user decides on changed reads as new and is announced once more (main's notices key it the same).
+ */
+function seenKey(row: TeamNeedRow, needs: TeamNeedsView): string {
+  if (row.kind !== 'approval' || row.approvalKind !== 'permission') return row.id
+  const rev = needs.approvals.find((a) => a.id === row.id)?.rev ?? 1
+  return rev > 1 ? `${row.id}@${rev}` : row.id
+}
+
 function noticeNewNeeds(teamId: string, needs: TeamNeedsView): void {
   if (!onScreen(teamId)) {
     if (seen?.teamId === teamId) seen = null
     return
   }
   const rows = teamNeedsRows(needs)
+  const keys = rows.map((r) => seenKey(r, needs))
   const prev = seen?.teamId === teamId ? seen.ids : null
-  seen = { teamId, ids: new Set(rows.map((r) => r.id)) }
+  seen = { teamId, ids: new Set(keys) }
   if (!prev) return
-  const fresh = rows.filter((r) => r.push && !prev.has(r.id))
+  const fresh = rows.filter((r, i) => r.push && !prev.has(keys[i]))
   // On Te necesita itself the new rows show right there.
   if (fresh.length === 0 || useTeamsStore.getState().tab === 'needs') return
   const lang = useAppStore.getState().settings.language

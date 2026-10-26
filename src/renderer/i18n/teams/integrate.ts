@@ -90,8 +90,9 @@ export const integrateEn = {
   'teams.integrate.err.base_moved': '{base} moved while integrating. Nothing landed and your checkout stayed as it was: check again to integrate on top of the new {base}.',
   // A file the merge would overwrite may be an ignored one: a plain stash leaves those where they are.
   'teams.integrate.err.base_dirty': 'Your checkout of {base} has changes that are not committed, or files the merge would overwrite, ignored ones included. Commit them, stash them (git stash -u for untracked files), or move an ignored file aside (a stash leaves ignored files where they are), and check again.',
-  'teams.integrate.err.base_busy': 'A console or a run is working in your checkout of {base}. Wait for it to finish and check again.',
-  'teams.integrate.err.base_checked_out_elsewhere': '{base} is open in another worktree, so it cannot move from here. Switch that worktree to another branch and check again.',
+  // Tanda B close: also a rebase or a bisect of the base in progress in the user's checkout (main reads its gitdir).
+  'teams.integrate.err.base_busy': 'A console or a run is working in your checkout of {base}, or a rebase or a bisect is in progress there. Wait for the console or the run to finish, or finish or abort the rebase or the bisect, and check again.',
+  'teams.integrate.err.base_checked_out_elsewhere': '{base} is open in another worktree, so it cannot move from here. Switch that worktree to another branch (or finish or abort a rebase or bisect of {base} there) and check again.',
   'teams.integrate.err.git_error': 'Git failed in one step of the integration. Your checkout stayed as it was: check again.',
   'teams.integrate.err.timeout': 'A git step took too long and was stopped. Your checkout stayed as it was: check again.',
   // A timeout of the ffOnly landing (the one that writes your checkout of the base), of the updateRef one (only the
@@ -214,8 +215,8 @@ export const integrateEs: Record<keyof typeof integrateEn, string> = {
   'teams.integrate.err.verify_timeout': 'La verificación no terminó a tiempo y se cortó, así que nada llegó a {base}. Pedile al Dev que lo mire, o subí verifyTimeoutMin en team.md.',
   'teams.integrate.err.base_moved': '{base} avanzó mientras se integraba. No llegó nada y tu checkout quedó como estaba: revisá de nuevo para integrar sobre el {base} nuevo.',
   'teams.integrate.err.base_dirty': 'Tu checkout de {base} tiene cambios sin commitear, o archivos que el merge pisaría, ignorados incluidos. Commitealos, guardalos con stash (git stash -u para los que no tienen seguimiento), o mové a otro lado un archivo ignorado (un stash deja los ignorados donde están), y revisá de nuevo.',
-  'teams.integrate.err.base_busy': 'Una consola o una corrida está trabajando en tu checkout de {base}. Esperá a que termine y revisá de nuevo.',
-  'teams.integrate.err.base_checked_out_elsewhere': '{base} está abierta en otro worktree, así que no se puede mover desde acá. Cambiá ese worktree a otra rama y revisá de nuevo.',
+  'teams.integrate.err.base_busy': 'Una consola o una corrida está trabajando en tu checkout de {base}, o hay un rebase o un bisect en curso ahí. Esperá a que termine la consola o la corrida, o terminá o abortá el rebase o el bisect, y revisá de nuevo.',
+  'teams.integrate.err.base_checked_out_elsewhere': '{base} está abierta en otro worktree, así que no se puede mover desde acá. Cambiá ese worktree a otra rama (o terminá o abortá ahí un rebase o un bisect de {base}) y revisá de nuevo.',
   'teams.integrate.err.git_error': 'Git falló en un paso de la integración. Tu checkout quedó como estaba: revisá de nuevo.',
   'teams.integrate.err.timeout': 'Un paso de git tardó demasiado y se cortó. Tu checkout quedó como estaba: revisá de nuevo.',
   'teams.integrate.err.timeoutLand': 'Llevar el merge a {base} tardó demasiado y se cortó, así que tu checkout de {base} puede haber quedado a medio actualizar. Mirá git status ahí antes de intentarlo de nuevo.',

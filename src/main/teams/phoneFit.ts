@@ -14,6 +14,12 @@
  *    was left out. A board page of a column is asked again with a smaller `limit` (its cursor stays the one views.ts
  *    mints). Past that, the longest texts are cut until the frame fits; a reply that still would not fit answers
  *    `too_big` (SessionManager measures the real envelope once more).
+ *  - The last pass never cuts what the user decides on (Tanda B close): a pending permission's rules and denied
+ *    commands, a final OK's summary, an open card's question and options. When the frame cannot fit with them whole,
+ *    the row whose long texts weigh the most goes read only (ApprovalView.pcOnly or CardView.pcOnly: the phone shows
+ *    "En la PC" and no Aprobar nor answer) and only then are its texts cut, marked `truncated` on the payload or the
+ *    card ("Sigue en la PC"; so is a cut of those texts on a row already decided). A row with nothing to cut never
+ *    goes read only.
  */
 import { chatMessageOffset, type ChatMessage } from '@shared/chat-types'
 import type { RemoteCommandResult } from '@shared/ipc-contract'
@@ -23,7 +29,9 @@ import {
   TEAM_PHONE_BODY_MAX,
   TEAM_PHONE_HIRE_LINES,
   TEAM_PHONE_PLAN_MAX,
+  type ApprovalPayloadView,
   type ApprovalView,
+  type CardView,
   type PhoneTeamListItem,
   type PhoneTeamOp,
   type PhoneTeamRequest,
@@ -60,7 +68,7 @@ const SHRINK_PASSES = 64
 /** Keys the last pass never cuts, whatever their length. */
 const SLOT_SKIP: ReadonlySet<string> = new Set(['id', 'cursor', 'commentsCursor', 'teamId', 'taskId', 'runId', 'agentId', 'approvalId', 'cardId'])
 /** Detail codes a ctl ack names after its error (`bad_request:nothingToGrant`): the phone has its own words for them. */
-export const PHONE_CTL_DETAILS: readonly string[] = ['nothingToGrant', 'secret']
+export const PHONE_CTL_DETAILS: readonly string[] = ['nothingToGrant', 'grantsFull', 'secret']
 
 /** UTF-8 bytes of the teamRes frame that carries `res`, with the widest id. */
 export function teamResBytes(res: unknown): number {
@@ -145,9 +153,57 @@ function ownsTruncated(o: Record<string, unknown>, key: string): boolean {
   return key === 'text' && ('planRev' in o || ('status' in o && 'small' in o) || 't' in o)
 }
 
-/** Every string of SLOT_MIN or more characters, with how to cut it and what it marks. */
-function slotsOf(root: unknown): Slot[] {
+/** The approval or card that goes read only on the phone (ApprovalView.pcOnly, CardView.pcOnly). */
+type DecisionRow = Pick<ApprovalView | CardView, 'pcOnly'>
+/** What holds the texts and their `truncated` mark: a final or permission payload, a card. */
+type DecisionOn = Pick<Extract<ApprovalPayloadView, { kind: 'final' | 'permission' }> | CardView, 'truncated'>
+
+/**
+ * Texts the user decides on (Tanda B close): `keys` of `on` (a final or permission payload, a card). While `live` (a
+ * pending approval, an open card) they are kept whole until `row` (its approval or card) goes `pcOnly`; any cut of
+ * them marks `on` truncated, live or not.
+ */
+interface Decision { row: DecisionRow; on: DecisionOn; keys: readonly string[]; live: boolean }
+
+/**
+ * The decisions of a reply's approvals and cards: a permission's rules and denied commands, a final OK's summary, a
+ * card's question and options. A plan travels cut to TEAM_PHONE_PLAN_MAX and marked (its row still decides); a system
+ * card's words are main's.
+ */
+function decisionsOf(approvals: readonly ApprovalView[], cards: readonly CardView[]): Decision[] {
+  const out: Decision[] = []
+  for (const a of approvals) {
+    const p = a.payload
+    const live = a.state === 'pending'
+    if (p.kind === 'permission') out.push({ row: a, on: p, keys: ['tools', 'denied'], live })
+    else if (p.kind === 'final') out.push({ row: a, on: p, keys: ['summary'], live })
+  }
+  for (const c of cards) if (!c.system) out.push({ row: c, on: c, keys: ['question', 'options'], live: c.state === 'open' })
+  return out
+}
+
+/** The decisions of one op's reply (Te necesita and the task carry approvals and cards). */
+function replyDecisions(op: PhoneTeamOp, res: TeamReply): Decision[] {
+  if (!res.ok) return []
+  if (op === 'needs') {
+    const n = (res as Extract<TeamReply<'needs'>, { ok: true }>).needs
+    return decisionsOf(n.approvals, n.cards)
+  }
+  if (op === 'task') {
+    const t = (res as Extract<TeamReply<'task'>, { ok: true }>).task
+    return decisionsOf(t.approvals, t.cards)
+  }
+  return []
+}
+
+/**
+ * Every string of SLOT_MIN or more characters, with how to cut it and what it marks. A live decision's texts are left
+ * out while its row is not `pcOnly`; a cut of a decision's text marks its holder `truncated`. The keys are matched on
+ * the object that holds them, so a rule inside `tools` (an array) is skipped as a whole.
+ */
+function slotsOf(root: unknown, decisions: readonly Decision[]): Slot[] {
   const out: Slot[] = []
+  const held = new Map<object, Decision>(decisions.map((d) => [d.on, d]))
   const walk = (v: unknown, mark: (() => void) | null): void => {
     if (Array.isArray(v)) {
       v.forEach((x, i) => {
@@ -160,12 +216,15 @@ function slotsOf(root: unknown): Slot[] {
     if (!v || typeof v !== 'object') return
     const o = v as Record<string, unknown>
     const own = isDiff(o) ? () => { o.truncated = true } : mark
+    const d = held.get(o)
     for (const [k, x] of Object.entries(o)) {
+      const decided = d !== undefined && d.keys.includes(k)
+      if (decided && d.live && !d.row.pcOnly) continue
+      const m = decided || ownsTruncated(o, k) ? () => { o.truncated = true } : own
       if (typeof x === 'string') {
         if (x.length < SLOT_MIN || SLOT_SKIP.has(k)) continue
-        const m = ownsTruncated(o, k) ? () => { o.truncated = true } : own
         out.push({ len: x.length, get: () => o[k] as string, set: (t) => { o[k] = t; m?.() } })
-      } else walk(x, own)
+      } else walk(x, decided ? m : own)
     }
   }
   walk(root, null)
@@ -178,16 +237,49 @@ function textBytes(text: string): number {
 }
 
 /**
- * Cuts the longest texts of `root` down to one shared length, just enough for the bytes over `max` (each text at its
- * own bytes per character), until `bytes()` is at most `max`; never a text below SLOT_FLOOR characters. Every text past
- * that length goes in the same pass, not one text per pass: a Te necesita with several hire diffs has hundreds of lines
- * of the same length. False when only short strings are left and it still does not fit.
+ * Bytes of a decision's texts the last pass could cut, those of SLOT_MIN or more characters (which goes read only
+ * first): a permission of many short rules weighs nothing here, since going read only frees nothing of it.
  */
-export function shrinkTexts(root: unknown, bytes: () => number, max: number): boolean {
+function decisionBytes(d: Decision): number {
+  const o = d.on as Record<string, unknown>
+  let n = 0
+  for (const k of d.keys) {
+    const v = o[k]
+    for (const s of Array.isArray(v) ? v : [v]) if (typeof s === 'string' && s.length >= SLOT_MIN) n += textBytes(s)
+  }
+  return n
+}
+
+/**
+ * Cuts the longest texts of `root` down to one shared length, just enough for the bytes over `max` (each text at its
+ * own bytes per character), until `bytes()` is at most `max`; never a text below SLOT_FLOOR characters, never a text of
+ * `decisions` while its row can still be decided. When the rest is cut and it still does not fit, the decision whose
+ * texts a cut frees the most goes `pcOnly` (read only on the phone) and its texts are cut too, one decision at a time;
+ * one none of whose texts got cut arrives whole and stays decidable. False when only short strings are left and it
+ * still does not fit.
+ */
+export function shrinkTexts(root: unknown, bytes: () => number, max: number, decisions: readonly Decision[] = []): boolean {
+  if (cutLongest(root, bytes, max, decisions)) return true
+  const open = decisions
+    .filter((d) => d.live && !d.row.pcOnly)
+    .map((d) => ({ d, n: decisionBytes(d) }))
+    .filter((x) => x.n > 0)
+    .sort((a, b) => b.n - a.n)
+  for (const { d } of open) {
+    d.row.pcOnly = true
+    const fits = cutLongest(root, bytes, max, decisions)
+    if (!d.on.truncated) delete d.row.pcOnly
+    if (fits) return true
+  }
+  return false
+}
+
+/** shrinkTexts' water level over the texts slotsOf lets it cut. */
+function cutLongest(root: unknown, bytes: () => number, max: number, decisions: readonly Decision[]): boolean {
   for (let pass = 0; pass < SHRINK_PASSES; pass++) {
     const over = bytes() - max
     if (over <= 0) return true
-    const slots = slotsOf(root).sort((a, b) => b.len - a.len)
+    const slots = slotsOf(root, decisions).sort((a, b) => b.len - a.len)
     if (!slots.length) return false
     // The water level: cutting every text past `cap` to `cap` frees about `over` bytes. For the k longest texts and a
     // level between the next one's length and the k-th's, the bytes freed are sum(f * len) - level * sum(f), with f
@@ -259,7 +351,7 @@ function fitTask(task: TaskDetail, wrap: (t: TaskDetail) => unknown, max: number
   }
   const body = task.body.length
   const plan = task.plan?.text.length
-  shrinkTexts(task, () => teamResBytes(wrap(task)), max)
+  shrinkTexts(task, () => teamResBytes(wrap(task)), max, decisionsOf(task.approvals, task.cards))
   if (task.body.length < body) task.truncated = { ...(task.truncated ?? {}), body: true }
   if (task.plan && plan !== undefined && task.plan.text.length < plan) task.truncated = { ...(task.truncated ?? {}), plan: true }
 }
@@ -374,7 +466,7 @@ export function fitPhoneReply(op: PhoneTeamOp, res: TeamReply, mask: PhoneMask, 
     }
   }
   if (teamResBytes(out) <= max) return out
-  if (shrinkTexts(out, () => teamResBytes(out), max)) return out
+  if (shrinkTexts(out, () => teamResBytes(out), max, replyDecisions(op, out))) return out
   return { ok: false, error: 'too_big' }
 }
 
@@ -417,7 +509,8 @@ export async function phoneTeamReply(req: PhoneTeamRequest, ask: (r: PhoneTeamRe
 export function teamCtlRequest(a: TeamCtlAction): Extract<TeamRequest, { op: 'decide' | 'answer' | 'dispatch' }> {
   switch (a.kind) {
     case 'teamDecide':
-      return { op: 'decide', teamId: a.teamId, approvalId: a.approvalId, decision: a.decision, ...(a.note !== undefined ? { note: a.note } : {}) }
+      // rev (Tanda B close): the permission approval the phone showed; main answers conflict {stale} when it grew since.
+      return { op: 'decide', teamId: a.teamId, approvalId: a.approvalId, decision: a.decision, ...(a.note !== undefined ? { note: a.note } : {}), ...(a.rev !== undefined ? { rev: a.rev } : {}) }
     case 'teamAnswer':
       return { op: 'answer', teamId: a.teamId, cardId: a.cardId, answer: a.answer }
     case 'teamDispatch':
@@ -428,7 +521,7 @@ export function teamCtlRequest(a: TeamCtlAction): Extract<TeamRequest, { op: 'de
 /**
  * The ctlAck of a phone ctl: ok, or the TeamError code; a conflict names its reason after a colon
  * (`conflict:already_decided`, `conflict:stale`) and a detail the phone words names it too (`bad_request:nothingToGrant`,
- * `bad_request:secret`). Never any text of the reply.
+ * `bad_request:grantsFull`, `bad_request:secret`). Never any text of the reply.
  */
 export function teamCtlResult(res: TeamReply): RemoteCommandResult {
   if (res.ok) return { id: '', ok: true }

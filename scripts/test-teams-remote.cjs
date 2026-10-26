@@ -8,12 +8,17 @@
 //    row of the run once, the Lead thread paged, a page without a column cut; phoneFit on crafted replies (paths and
 //    the conflict `current` dropped, list items without the desktop fields, texts of lone surrogates, a run page cut
 //    between two rows of one line never, a newest line too big for the frame kept whole, three hire diffs of long
-//    lines in one frame).
+//    lines in one frame). Tanda B close: the texts the user decides on are never cut (a long rule, its denied
+//    commands, a final summary, a card question and options next to three hire diffs arrive whole); when even they do
+//    not fit, the heaviest row goes read only (pcOnly) with its cut texts marked truncated, never a row with nothing to
+//    cut (32 short rules stay decidable); a decided final summary cut in the drawer is marked too.
 //  - Masking: no frame carries a credential or a piece of a live token of the app, while the desktop's reply does.
 //  - Limits: 30 teamReq per 10 s per session, then `rate` (no strike) until the window passes; 2 in flight.
 //  - The three ctls handled in main and never relayed: teamDecide on a hire approval and teamAnswer with resumeTeam
 //    forbidden, teamDecide on an integrate approval bad_request, a permission with nothing to grant
-//    `bad_request:nothingToGrant`, a second decide `conflict:already_decided`, a dispatch of all ok.
+//    `bad_request:nothingToGrant`, a second decide `conflict:already_decided`, a dispatch of all ok; Tanda B close: the
+//    phone reads each approval's rev, a permission decided at an older rev (or with none) `conflict:stale`, at its rev
+//    ok, on a task whose grants are full `bad_request:grantsFull`.
 //  - teamChanged: a phone hears of a team change; one per team per 500 ms, scopes merged, the hint only when shared.
 //  - Push: buildTeamPushMessage (the #team= link, the tag, urgent, never a state), notifyTeamPush behind https and
 //    notifyAction, routeTeam (the away gate, never held, push false goes nowhere, Discord and ntfy as custom notices
@@ -286,6 +291,7 @@ function fitUnits(api) {
   const hireOf = (i) => ({ id: `a-${i}`, state: 'pending', decider: 'user', requestedBy: 'lead', at: 1, payload: { kind: 'hire', roleId: `ops${i}`, risks: [], diff: { rel: `roles/ops${i}.md`, status: 'modified', truncated: false, hunks: [{ oldStart: 1, newStart: 1, lines: Array.from({ length: 400 }, (_, k) => `${k % 2 ? '+' : '-'}${'p'.repeat(300)}`) }] } } })
   const hires = F.fitPhoneReply('needs', { ok: true, needs: { teamId: 'tm-0123456789ab', rev: 1, trust: 'trusted', paused: null, approvals: [1, 2, 3].map(hireOf), cards: [], queue: [], tasks: {} } }, id)
   check(hires.ok && bytes(hires) <= MAX && hires.needs.approvals.length === 3 && hires.needs.approvals.every((a) => a.payload.diff.truncated === true && a.payload.diff.hunks[0].lines.length === api.TEAM_PHONE_HIRE_LINES), 'three hire diffs of 400 long lines each fit one frame: every row kept, each diff cut and marked', hires.ok ? bytes(hires) : hires)
+  decisionUnits(api, hireOf)
   // A run page: the newest whole lines, never between two rows of one line, the cursor at the oldest kept.
   const row = (offset, n, size) => ({ id: n === null ? String(offset) : `${offset}.${n}`, role: 'assistant', ts: null, blocks: [{ t: 'text', text: 'r'.repeat(size) }] })
   const items = [row(10, 0, 9000), row(10, 1, 9000), row(500, null, 9000), row(900, 0, 9000), row(900, 1, 9000), row(1300, null, 9000)]
@@ -302,9 +308,11 @@ function fitUnits(api) {
   check(masked.a === 'x [redacted]' && masked.b[1].c === 'Z' && masked.n === 3, 'maskDeep masks every string of the reply, deep')
   // The ctls: requests and acks.
   same(F.teamCtlRequest({ kind: 'teamDecide', teamId: 'tm-0123456789ab', approvalId: 'a-1', decision: 'reject', note: 'n', extra: 1 }), { op: 'decide', teamId: 'tm-0123456789ab', approvalId: 'a-1', decision: 'reject', note: 'n' }, 'teamDecide -> the decide op, field by field')
+  same(F.teamCtlRequest({ kind: 'teamDecide', teamId: 'tm-0123456789ab', approvalId: 'a-1', decision: 'approve', rev: 3 }), { op: 'decide', teamId: 'tm-0123456789ab', approvalId: 'a-1', decision: 'approve', rev: 3 }, 'teamDecide carries the rev of the approval the phone showed to the decide op (Tanda B close)')
   same(F.teamCtlRequest({ kind: 'teamDispatch', teamId: 'tm-0123456789ab', queueId: 'all', go: true }), { op: 'dispatch', teamId: 'tm-0123456789ab', queueId: 'all', go: true }, 'teamDispatch -> the dispatch op')
   same([F.teamCtlResult({ ok: true, approved: ['q-1'], dropped: [] }), F.teamCtlResult({ ok: false, error: 'conflict', reason: 'already_decided' }), F.teamCtlResult({ ok: false, error: 'bad_request', detail: 'nothingToGrant' }), F.teamCtlResult({ ok: false, error: 'busy', detail: 'C:\\x' })],
     [{ id: '', ok: true }, { id: '', ok: false, error: 'conflict:already_decided' }, { id: '', ok: false, error: 'bad_request:nothingToGrant' }, { id: '', ok: false, error: 'busy' }], 'acks: ok; a conflict with its reason; a detail the phone words; any other detail never travels')
+  same(F.teamCtlResult({ ok: false, error: 'bad_request', detail: 'grantsFull' }), { id: '', ok: false, error: 'bad_request:grantsFull' }, 'a permission approve the task\'s full grants refuse: bad_request:grantsFull (the phone has its words)')
   // fitTeamRes: the real envelope.
   const fine = api.fitTeamRes('q1', { ok: true, teams: [] })
   check(fine.res.ok && fine.type === 'teamRes' && fine.id === 'q1' && fine.v === 1, 'fitTeamRes passes a reply that fits')
@@ -313,6 +321,74 @@ function fitUnits(api) {
 function same(actual, expected, label) {
   assert.deepEqual(json(actual), json(expected), label)
   checks++
+}
+
+/**
+ * Tanda B close (findings 13 and 16): the last pass never cuts what the user decides on (a pending permission's rules
+ * and denied commands, a pending final OK's summary, an open card's question and options). A frame that cannot carry
+ * them whole sends the heaviest such row read only (pcOnly: "En la PC", no Aprobar), its cut texts marked truncated.
+ */
+function decisionUnits(api, hireOf) {
+  const F = api.F
+  const id = (s) => s
+  const bytes = (res) => F.teamResBytes(res)
+  const needsOf = (approvals, cards = []) => ({ ok: true, needs: { teamId: 'tm-0123456789ab', rev: 1, trust: 'trusted', paused: null, approvals, cards, queue: [], tasks: {} } })
+  const perm = (aid, tools, denied) => ({ id: aid, taskId: 't-1', state: 'pending', decider: 'user', requestedBy: 'dev', at: 1, rev: 1, payload: { kind: 'permission', roleId: 'dev', tools, ...(denied ? { denied } : {}) } })
+  const fin = (aid, summary, state = 'pending') => ({ id: aid, taskId: 't-2', state, decider: 'user', requestedBy: 'qa', at: 1, rev: 1, payload: { kind: 'final', summary } })
+  const card = (cid, question, options) => ({ id: cid, taskId: 't-1', agentId: 'dev', kind: 'choice', state: 'open', at: 1, question, options, multi: false })
+  // A 131 character exact rule: the flag the user must read sits past where the water level would cut it.
+  const rule = `Bash(npm run ${'build:web-'.repeat(10)} --flag=yyyyyyyyy)`
+  const denied = Array.from({ length: 3 }, (_, i) => `npm run ${'build:web-'.repeat(25)} --try=${i}`.slice(0, 300))
+  const question = `¿Qué base de datos usamos? ${'Contame por qué, ñandú. '.repeat(32)}`.slice(0, 800)
+  const options = ['sqlite '.repeat(17).slice(0, 120), 'postgres '.repeat(14).slice(0, 120)]
+  const summary = 'Listo: '.repeat(215).slice(0, 1500)
+  check(rule.length === 131, 'the rule is 131 characters')
+  const src = needsOf([1, 2, 3].map(hireOf).concat([perm('a-10', [rule], denied), fin('a-11', summary)]), [card('k-10', question, options)])
+  check(bytes(src) > MAX, 'the needs view (three long hires, a permission, a final OK, a card) is over 48 KB')
+  const out = F.fitPhoneReply('needs', json(src), id)
+  const ap = (aid) => out.needs.approvals.find((a) => a.id === aid)
+  check(out.ok && bytes(out) <= MAX, 'it fits one frame', out.ok ? bytes(out) : out)
+  check(ap('a-10').payload.tools[0] === rule && ap('a-10').payload.denied.join('\n') === denied.join('\n'), 'a long rule and its denied commands next to three hire diffs arrive whole (the last pass used to cut them with no mark)', ap('a-10').payload)
+  check(ap('a-11').payload.summary === summary && out.needs.cards[0].question === question && out.needs.cards[0].options.join() === options.join(), 'so do a final OK\'s summary and a card\'s question and options')
+  check(!('pcOnly' in ap('a-10')) && !('pcOnly' in ap('a-11')) && !('pcOnly' in out.needs.cards[0]) && !('truncated' in ap('a-10').payload) && !('truncated' in ap('a-11').payload) && !('truncated' in out.needs.cards[0]), 'nothing goes read only nor reads as cut while the rest can give way')
+  check([1, 2, 3].every((i) => ap(`a-${i}`).payload.diff.truncated === true && ap(`a-${i}`).payload.diff.hunks[0].lines[0].length < 301), 'the hire diffs give way instead (cut and marked)')
+
+  // The decisions alone are over the frame: the heaviest goes read only first, cut and marked; the rest arrive whole.
+  const bigSummary = 'ś'.repeat(30000)
+  const heavy = F.fitPhoneReply('needs', json(needsOf([fin('a-20', bigSummary), perm('a-21', [rule], denied)], [card('k-21', question, options)])), id)
+  const ha = (aid) => heavy.needs.approvals.find((a) => a.id === aid)
+  check(heavy.ok && bytes(heavy) <= MAX, 'a final OK whose summary alone is over 48 KB still fits', heavy.ok ? bytes(heavy) : heavy)
+  check(ha('a-20').pcOnly === true && ha('a-20').payload.truncated === true && ha('a-20').payload.summary.length < bigSummary.length && bigSummary.startsWith(ha('a-20').payload.summary), 'that approval goes read only (pcOnly: "En la PC", no Aprobar) and its cut summary is marked truncated ("Sigue en la PC")', { pcOnly: ha('a-20').pcOnly, truncated: ha('a-20').payload.truncated })
+  check(!('pcOnly' in ha('a-21')) && ha('a-21').payload.tools[0] === rule && !('pcOnly' in heavy.needs.cards[0]) && heavy.needs.cards[0].question === question, 'the other rows stay decidable, whole')
+
+  // Sixteen permission approvals of 32 rules and 10 denied commands each: only as many go read only as the frame needs.
+  const rules = (n) => Array.from({ length: 32 }, (_, i) => `Bash(npm run task-${n}-${i} ${'x'.repeat(100)})`)
+  const lines = (n) => Array.from({ length: 10 }, (_, i) => `npm run task-${n}-${i} ${'y'.repeat(280)}`)
+  const crowd = F.fitPhoneReply('needs', json(needsOf(Array.from({ length: 16 }, (_, n) => perm(`a-${30 + n}`, rules(n), lines(n))))), id)
+  const pc = crowd.ok ? crowd.needs.approvals.filter((a) => a.pcOnly === true) : []
+  const live = crowd.ok ? crowd.needs.approvals.filter((a) => a.pcOnly !== true) : []
+  check(crowd.ok && bytes(crowd) <= MAX && crowd.needs.approvals.length === 16, 'sixteen permission approvals of 32 long rules each fit one frame, every row kept', crowd.ok ? bytes(crowd) : crowd)
+  check(pc.length > 0 && live.length > 0 && pc.every((a) => a.payload.truncated === true), `the ones that cannot travel whole go read only, marked truncated (${pc.length} of 16)`)
+  check(live.every((a) => { const n = Number(a.id.slice(2)) - 30; return a.payload.tools.join() === rules(n).join() && a.payload.denied.join() === lines(n).join() && !('truncated' in a.payload) }), 'every row left to decide on the phone carries its rules and denied commands whole')
+
+  // A permission of 32 short rules (each under 64 characters: going read only frees nothing of it) next to many long
+  // questions: it is the heaviest row, yet it arrives whole and stays decidable; questions go read only instead.
+  const shortRules = Array.from({ length: 32 }, (_, i) => `Bash(npm run task-${String(i).padStart(2, '0')}-${'x'.repeat(30)})`)
+  const shortDenied = Array.from({ length: 10 }, (_, i) => `npm run task-${i} ${'y'.repeat(40)}`)
+  const asks = Array.from({ length: 24 }, (_, n) => card(`k-${40 + n}`, `q${n} ${'w'.repeat(1000)}`, ['a', 'b']))
+  const short = F.fitPhoneReply('needs', json(needsOf([1, 2, 3].map(hireOf).concat([perm('a-50', shortRules, shortDenied)]), asks)), id)
+  const sp = short.ok ? short.needs.approvals.find((a) => a.id === 'a-50') : null
+  check(short.ok && bytes(short) <= MAX && short.needs.cards.some((c) => c.pcOnly === true && c.truncated === true), 'many long questions next to a permission of 32 short rules fit one frame, some questions read only and marked', short.ok ? bytes(short) : short)
+  check(!('pcOnly' in sp) && !('truncated' in sp.payload) && sp.payload.tools.join() === shortRules.join() && sp.payload.denied.join() === shortDenied.join(), 'that permission, with nothing a cut could free, arrives whole and stays decidable (never read only while whole)', sp)
+
+  // A decided final OK in the task drawer: its summary may be cut (nothing to decide), and then it says so.
+  const done = {
+    id: 't-2', rev: 1, title: 'T', state: 'done', phase: 'none', column: 'done', priority: 'normal', repoId: 'main', isolation: 'worktree', needsPlan: false, blockedBy: [], createdBy: 'user', createdAt: 1, updatedAt: 1, stateSince: 1, userOwned: [], needs: 0, queued: 0,
+    body: 'b', reviewInfo: { round: 0, max: 3 }, comments: [], commentsCursor: null, commentsArchived: 0, runs: [], approvals: [fin('a-40', bigSummary, 'approved')], cards: [],
+  }
+  const drawer = F.fitPhoneReply('task', { ok: true, task: json(done) }, id)
+  const df = drawer.ok ? drawer.task.approvals[0] : null
+  check(drawer.ok && bytes(drawer) <= MAX && df.payload.summary.length < bigSummary.length && df.payload.truncated === true && !('pcOnly' in df), 'a decided final OK\'s summary cut in the task drawer carries truncated (and no pcOnly: nothing to decide)', df && { truncated: df.payload.truncated, len: df.payload.summary.length })
 }
 
 // ---- 2. the world: frames, masking, paging --------------------------------------------------------------
@@ -401,9 +477,12 @@ async function worldChecks(api, ctx) {
   const planTask = (await t.desk({ op: 'createTask', teamId: TEAM, task: { title: 'Plan grande', assignee: 'dev' } })).task.id
   const roleText = '---\nname: Ops\nkind: custom\nprovider: claude\npermission: readonly\ncount: 1\n---\n\n' + Array.from({ length: 2500 }, (_, i) => `Regla ${i}: revisá todo, ñandú.`).join('\n') + '\n'
   const system = { kind: 'system' }
+  // Tanda B close: a task whose grants are at GRANTS_MAX (every role counts), for a permission none of whose rules can land.
+  const fullTask = (await t.desk({ op: 'createTask', teamId: TEAM, task: { title: 'Sin lugar para reglas', assignee: 'dev' } })).task.id
+  const fullGrants = Array.from({ length: 32 }, (_, i) => ({ roleId: 'qa', tool: `Bash(make t${i})`, at: now, approvalId: 'a-1' }))
   t.inject((rt) => ({
     ...rt,
-    tasks: rt.tasks.map((x) => (x.id === planTask ? { ...x, plan: { rev: 1, text: `# Plan ${secret}\n` + 'paso ñandú y acción\n'.repeat(1700), status: 'pending', small: false, at: now } } : x)),
+    tasks: rt.tasks.map((x) => (x.id === planTask ? { ...x, plan: { rev: 1, text: `# Plan ${secret}\n` + 'paso ñandú y acción\n'.repeat(1700), status: 'pending', small: false, at: now } } : x.id === fullTask ? { ...x, grants: fullGrants } : x)),
     approvals: [
       ...rt.approvals,
       { id: 'a-901', kind: 'hire', state: 'pending', decider: 'user', createdAt: now, createdBy: system, payload: { roleId: 'ops', text: roleText, sha256: 'b'.repeat(64), baseDefHash: 'c'.repeat(64), replaces: false } },
@@ -411,6 +490,9 @@ async function worldChecks(api, ctx) {
       { id: 'a-903', kind: 'permission', taskId: planTask, state: 'pending', decider: 'user', createdAt: now, createdBy: system, payload: { roleId: 'dev', runId: 'r-0123456789ab', tools: ['Bash(npm test:*)'] } },
       { id: 'a-904', kind: 'permission', taskId: planTask, state: 'pending', decider: 'user', createdAt: now, createdBy: system, payload: { roleId: 'dev', runId: 'r-0123456789ab', tools: ['PowerShell(npm test:*)'] } },
       { id: 'a-905', kind: 'integrate', taskId: planTask, state: 'pending', decider: 'user', createdAt: now, createdBy: system, payload: { branch: 'sn/t-x', base: 'main' } },
+      // Tanda B close: a permission a later run grew (rev 2), and one on the task with no room left for grants.
+      { id: 'a-906', kind: 'permission', taskId: planTask, rev: 2, state: 'pending', decider: 'user', createdAt: now, createdBy: system, payload: { roleId: 'qa', runId: 'r-0123456789ab', tools: ['Bash(npm test:*)', 'Bash(npm run lint:*)'] } },
+      { id: 'a-907', kind: 'permission', taskId: fullTask, state: 'pending', decider: 'user', createdAt: now, createdBy: system, payload: { roleId: 'dev', runId: 'r-0123456789ab', tools: ['Bash(npm test:*)'] } },
     ],
     cards: [...rt.cards, { id: 'k-901', kind: 'confirm', question: '', options: [], multi: false, state: 'open', from: { kind: 'system', why: 'auth', actions: ['resumeTeam', 'dismiss'] }, createdAt: now }],
   }))
@@ -424,6 +506,8 @@ async function worldChecks(api, ctx) {
   const plan = N.res.needs.approvals.find((a) => a.id === 'a-902')
   check(plan.payload.text.length > 0 && plan.payload.text.length <= api.TEAM_PHONE_PLAN_MAX && plan.payload.truncated === true && !N.raw.includes(secret), 'the plan is cut and marked, its credential masked')
   check(N.res.needs.approvals.length === deskNeeds.needs.approvals.length && N.res.needs.cards.length === deskNeeds.needs.cards.length && api.teamNeedsCount(N.res.needs) === api.teamNeedsCount(deskNeeds.needs), 'the phone gets every row: the same Te necesita count as the desktop')
+  const grown = N.res.needs.approvals.find((a) => a.id === 'a-906')
+  check(grown.rev === 2 && N.res.needs.approvals.find((a) => a.id === 'a-903').rev === 1, 'each approval reaches the phone with its rev (a permission a later run grew: 2)', grown)
 
   // The ctls, handled in main, never relayed.
   const relayed = w.commands.length
@@ -433,12 +517,20 @@ async function worldChecks(api, ctx) {
   check(intAck.ok === false && intAck.error === 'bad_request', 'teamDecide on an integrate approval: bad_request (only the PC lands it)', intAck)
   const resumeAck = await w.ctl(ws, { kind: 'teamAnswer', teamId: TEAM, cardId: 'k-901', answer: { action: 'resumeTeam' } })
   check(resumeAck.ok === false && resumeAck.error === 'forbidden', 'teamAnswer with resumeTeam: forbidden (it lifts an auth or billing pause: PC only)', resumeAck)
-  const nothing = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-904', decision: 'approve' })
+  const nothing = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-904', decision: 'approve', rev: 1 })
   check(nothing.ok === false && nothing.error === 'bad_request:nothingToGrant', 'a permission with no rule left to grant: bad_request:nothingToGrant (the phone has its words)', nothing)
-  const rej = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-903', decision: 'reject' })
+  const rej = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-903', decision: 'reject', rev: 1 })
   check(rej.ok === true && t.rec().store.rt.approvals.find((a) => a.id === 'a-903').state === 'rejected' && t.rec().store.rt.approvals.find((a) => a.id === 'a-903').decidedBy.via === 'phone', 'teamDecide reject of a permission: ok, decided by the user via the phone', rej)
-  const again = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-903', decision: 'approve' })
+  const again = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-903', decision: 'approve', rev: 1 })
   check(again.ok === false && again.error === 'conflict:already_decided', 'a second decide: conflict:already_decided', again)
+  // Tanda B close: a permission decide is bound to the rev the phone showed; the ctl carries it to the decide op.
+  const older = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-906', decision: 'approve', rev: 1 })
+  const bare = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-906', decision: 'approve' })
+  check(older.ok === false && older.error === 'conflict:stale' && bare.ok === false && bare.error === 'conflict:stale' && t.rec().store.rt.approvals.find((a) => a.id === 'a-906').state === 'pending', 'a permission decided at an older rev, or with none: conflict:stale and nothing changes (the phone reloads Te necesita)', { older, bare })
+  const atRev = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-906', decision: 'reject', rev: grown.rev })
+  check(atRev.ok === true && t.rec().store.rt.approvals.find((a) => a.id === 'a-906').state === 'rejected', 'with the rev it showed, the decide goes through', atRev)
+  const full = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-907', decision: 'approve', rev: 1 })
+  check(full.ok === false && full.error === 'bad_request:grantsFull' && t.rec().store.rt.approvals.find((a) => a.id === 'a-907').state === 'pending', 'an approve on a task whose grants are full: bad_request:grantsFull (the phone has its words), still pending', full)
   const dismiss = await w.ctl(ws, { kind: 'teamAnswer', teamId: TEAM, cardId: 'k-901', answer: { action: 'dismiss' } })
   check(dismiss.ok === true && t.rec().store.rt.cards.find((c) => c.id === 'k-901').state !== 'open', 'teamAnswer dismiss of that card: ok', dismiss)
   const unknown = await w.ctl(ws, { kind: 'teamDecide', teamId: TEAM, approvalId: 'a-999', decision: 'approve' })

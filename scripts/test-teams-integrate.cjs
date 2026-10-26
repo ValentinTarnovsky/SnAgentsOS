@@ -35,8 +35,12 @@
 // T14 stores the verifyNote and, for a failure at step land, its mode (ffOnly or updateRef, on the result and the failed
 // land event; none for a land refused before its mode is known), the integrate approval view's lastStep and lastLanding,
 // the rebaseVerify comment with the runner's English words (a verify that could not start), and through the service a
-// spawnFailed verify and an ffOnly land timeout stored, in the drawer and in Te necesita. Same esbuild + vm harness as
-// test-teams-runner.cjs; never a real agent.
+// spawnFailed verify and an ffOnly land timeout stored, in the drawer and in Te necesita. Tanda B close: a rebase of the
+// base in progress (main checkout: base_busy; a linked worktree: base_checked_out_elsewhere with its path) and a bisect
+// of it are never landed under (preview and land, real git); a move out of review/integrating drops a failed integrate
+// and a later T11 opens its approval with no last failure; removeWorktree refuses busy shared while a console of the
+// saved config is in that folder; the archive sweep of a load disowns an archived task's worktree in the manifest.
+// Same esbuild + vm harness as test-teams-runner.cjs; never a real agent.
 const { buildSync } = require('esbuild')
 const vm = require('node:vm')
 const assert = require('node:assert/strict')
@@ -71,10 +75,12 @@ export { safeRemoveTree } from './src/main/migration/safeRemove'
 export { treeKillSync, pidAlive, childrenSince, CREATION_CLOCK_SLACK_MS } from './src/main/proc/treeKill'
 export { TeamService } from './src/main/teams/TeamService'
 export { TeamDefinitionLoader } from './src/main/teams/TeamDefinitionLoader'
-export { emptyRuntime, teamWorktreeOwner } from './src/shared/teams'
+export { emptyRuntime, teamWorktreeOwner, TASK_ARCHIVE_AFTER_MS } from './src/shared/teams'
 export { assertInvariants } from './src/main/teams/flow/invariants'
 export { openSystemCard } from './src/main/teams/flow/agents'
 export { approvalView } from './src/main/teams/views'
+export { moveTask } from './src/main/teams/flow/tasks'
+export { decideApproval } from './src/main/teams/flow/approvals'
 export { LEGACY_BRAND } from './src/shared/brand'
 export { mainTLang } from './src/main/i18n'
 `)
@@ -210,6 +216,24 @@ function reducerChecks() {
   same(apView(b.rt), { kind: 'integrate', branch, base: 'main' }, 'the integrate approval view of an attempt in flight: no last failure')
   const legacy = { ...lf.rt, tasks: [{ ...lf.rt.tasks[0], integrate: { state: 'failed', attempt: 1, error: 'timeout', at: NOW } }] }
   same(apView(legacy), { kind: 'integrate', branch, base: 'main', lastError: 'timeout' }, 'a failure stored without its step (an earlier build): lastError alone')
+
+  // B close (finding 10): a failed Integrar belongs to its cycle. Leaving review/integrating by moveTask drops it (to
+  // blocked it stays: blocked resumes there), and the T11 of a later cycle opens its approval with no last failure.
+  const rev = f.rt.tasks[0].rev
+  for (const to of ['todo', 'done', 'cancelled']) {
+    const mv = M.moveTask(f.rt, USER, 't-1', to, rev, {}, ctx)
+    check(mv.ok && mv.rt.tasks[0].state === to && mv.rt.tasks[0].integrate === undefined, `a move to ${to} drops the failed integrate`)
+  }
+  const blk = M.moveTask(f.rt, USER, 't-1', 'blocked', rev, {}, ctx)
+  check(blk.ok && blk.rt.tasks[0].integrate?.error === 'merge_conflict', 'a move to blocked keeps it (it resumes to review/integrating)')
+  same(M.moveTask(b.rt, USER, 't-1', 'todo', b.rt.tasks[0].rev, {}, ctx).error, 'busy', 'control: a move while it runs is refused, so a running integrate is never dropped')
+  // The second guard: a state that still holds an old failure (stored before the fix) reaches T11 of a new cycle.
+  const cycle = { ...f.rt, tasks: [{ ...f.rt.tasks[0], phase: 'userOk' }], approvals: [...f.rt.approvals.map((a) => (a.id === 'a-2' ? { ...a, state: 'cancelled', decidedAt: NOW } : a)), { id: 'a-9', taskId: 't-1', state: 'pending', decider: 'user', createdAt: NOW, createdBy: { kind: 'system' }, kind: 'final', payload: { hasWorktree: true, summary: 'otra vez' } }], nextIds: { ...f.rt.nextIds, approval: 10 } }
+  const t11 = M.decideApproval(cycle, USER, 'a-9', 'approve', undefined, ctx, { ahead: 2 })
+  const fresh = t11.ok && t11.rt.approvals.find((a) => a.kind === 'integrate' && a.state === 'pending')
+  check(t11.ok && t11.rt.tasks[0].phase === 'integrating' && t11.rt.tasks[0].integrate === undefined && !!fresh, 'T11 of a new cycle opens its integrate approval and drops the old failure')
+  same(M.approvalView(t11.rt, fresh, null).payload, { kind: 'integrate', branch, base: 'main' }, 'its view names no last failure')
+  same(F.askRebase(t11.rt, 't-1', 'conflict', USER, ctx), { ok: false, error: 'conflict', reason: 'stale' }, 'and Pedile al Dev que haga rebase of the old conflict answers stale')
 
   // T15
   same(F.askRebase(f.rt, 't-1', 'verify', USER, ctx), { ok: false, error: 'conflict', reason: 'stale' }, 'askRebase verify after a conflict: stale')
@@ -626,6 +650,43 @@ async function integratorChecks(autocrlf) {
 
 /** The preflight refusals, verify_timeout (the grandchild killed), one integrate per repo, another repo alongside, the logs prune, the sweep. */
 async function integratorOnceChecks() {
+  // B close (finding 9): a rebase or a bisect of the base in progress leaves its worktree detached, yet git counts the
+  // base as checked out there; the land never moves the base under it (the preview and the land say so).
+  {
+    const kit = makeKit('rebasing', {})
+    const task = await kit.task({ 'r.txt': 'r\n' })
+    git(kit.repo, 'branch', 'up')
+    git(kit.repo, 'checkout', '-q', 'up')
+    write(path.join(kit.repo, 'conflict.txt'), 'up side\n')
+    git(kit.repo, ...ID, 'commit', '-qam', 'up edit')
+    git(kit.repo, 'checkout', '-q', 'main')
+    write(path.join(kit.repo, 'conflict.txt'), 'main side\n')
+    git(kit.repo, ...ID, 'commit', '-qam', 'main edit')
+    check(gitTry(kit.repo, ...ID, 'rebase', 'up') === null && gitTry(kit.repo, 'symbolic-ref', '-q', 'HEAD') === null, 'control: the main checkout stopped mid rebase of main, detached')
+    same((await kit.integrator.preview(TEAM, kit.repoObj, task, null, [])).landing, { blocked: 'base_busy' }, 'preview: the main checkout mid rebase of the base: base_busy, never update-ref')
+    await failsIdentical(kit, task, 'a rebase of the base in the main checkout', {}, 'base_busy')
+    git(kit.repo, 'rebase', '--abort')
+    // The same in a linked worktree: base_checked_out_elsewhere with its path.
+    git(kit.repo, 'checkout', '-q', '-b', 'side')
+    const elsewhere = path.join(kit.dir, 'rebasing-elsewhere')
+    git(kit.repo, 'worktree', 'add', '-q', elsewhere, 'main')
+    check(gitTry(elsewhere, ...ID, 'rebase', 'up') === null && gitTry(elsewhere, 'symbolic-ref', '-q', 'HEAD') === null, 'control: a linked worktree stopped mid rebase of main')
+    const pe = await kit.integrator.preview(TEAM, kit.repoObj, task, null, [])
+    check(pe.landing.blocked === 'base_checked_out_elsewhere' && real(pe.landing.path) === real(elsewhere), `preview: a worktree mid rebase of the base names it (${JSON.stringify(pe.landing)})`)
+    const mainBefore = git(kit.repo, 'rev-parse', 'refs/heads/main')
+    await failsIdentical(kit, task, 'a rebase of the base in a linked worktree', {}, 'base_checked_out_elsewhere')
+    check(git(kit.repo, 'rev-parse', 'refs/heads/main') === mainBefore, 'and refs/heads/main never moved under it')
+    git(elsewhere, 'rebase', '--abort')
+    check((await kit.integrator.preview(TEAM, kit.repoObj, task, null, [])).landing.blocked === 'base_checked_out_elsewhere', 'control: the base checked out there after the abort still reads elsewhere')
+    git(kit.repo, 'worktree', 'remove', '--force', elsewhere)
+    same((await kit.integrator.preview(TEAM, kit.repoObj, task, null, [])).landing, { mode: 'updateRef' }, 'control: with the base checked out nowhere it is update-ref again')
+    // A bisect started on the base in the main checkout.
+    git(kit.repo, 'checkout', '-q', 'main')
+    git(kit.repo, 'bisect', 'start')
+    same((await kit.integrator.preview(TEAM, kit.repoObj, task, null, [])).landing, { blocked: 'base_busy' }, 'preview: a bisect of the base in the main checkout: base_busy')
+    git(kit.repo, 'bisect', 'reset')
+    same((await kit.integrator.preview(TEAM, kit.repoObj, task, null, [])).landing, { mode: 'ffOnly' }, 'control: after the bisect, ff-only')
+  }
   {
     const kit = makeKit('preflight', {})
     const task = await kit.task({ 'p.txt': 'p\n' })
@@ -1254,8 +1315,22 @@ async function serviceChecks() {
   check(w.notices.some((n) => n.tag === `team:${w.teamId}:integrated:${a.id}` && n.body.includes(a.id)), 'the integrated notice (teams.push.integrated)')
   check(git(w.repo, 'log', '-1', '--format=%s').trim().startsWith(`Merge ${a.wt.branch}: Agregar login (${a.id})`), 'a merge commit on main')
   check(w.svc.locks.size === 0, 'no lock left after the integrate')
-  // removeWorktree of the integrated task.
+  // B close (finding 11): a console of the saved config in that folder (as "Abrir consola en el worktree" opens it: a
+  // cwd, no worktree attribute), or in a folder inside it, or a workspace whose cwd is in it: busy shared, nothing touched.
+  const consoleCfg = (ws) => { w.cfg = { ...w.cfg, workspaces: [ws] } }
+  for (const [label, ws] of [
+    ['a pane with its cwd in the worktree', { id: 'ws-1', name: 'W', cwd: w.repo, panes: [{ id: 'pane-wt', title: 'wt', cwd: a.wt.path }] }],
+    ['a pane in a folder inside it', { id: 'ws-1', name: 'W', cwd: w.repo, panes: [{ id: 'pane-wt', title: 'wt', cwd: path.join(a.wt.path, 'src') }] }],
+    ['a pane of a workspace whose cwd is the worktree', { id: 'ws-2', name: 'W2', cwd: a.wt.path, panes: [{ id: 'pane-ws', title: 'ws' }] }],
+  ]) {
+    consoleCfg(ws)
+    same(await w.req({ op: 'removeWorktree', taskId: a.id }), { ok: false, error: 'busy', detail: 'shared' }, `removeWorktree with ${label}: busy shared`)
+    check(fs.existsSync(path.join(a.wt.path, '.git')) && w.task(a.id).worktree?.path === a.wt.path, `${label}: the tree and its .git untouched`)
+  }
+  consoleCfg({ id: 'ws-1', name: 'W', cwd: w.repo, panes: [{ id: 'pane-root', title: 'root', cwd: w.repo }] })
+  // removeWorktree of the integrated task (a console in the repo root, beside the worktree, does not hold it).
   same(await w.req({ op: 'removeWorktree', taskId: a.id }), { ok: true }, 'removeWorktree after the integrate')
+  w.cfg = { ...w.cfg, workspaces: [] }
   check(!fs.existsSync(a.wt.path) && gitTry(w.repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${a.wt.branch}`) === null && !w.manifest.find(a.wt.path) && w.task(a.id).worktree === undefined, 'the tree, its branch and its manifest entry gone; the task forgets it')
   same(await w.req({ op: 'removeWorktree', taskId: a.id }), { ok: false, error: 'missing_worktree' }, 'a second remove: missing_worktree')
 
@@ -1492,6 +1567,21 @@ async function serviceChecks() {
   await w.integrate(f.id, f.wt)
   check(w.task(f.id).state === 'done', 'an interrupted integrate is retried to done')
   check(w.svc.locks.size === 0, 'no lock left at the end')
+
+  // B close (finding 12), through the service: the archive sweep at load disowns the worktree of a done task it
+  // archives (its disownWorktree effect), so Settings > Git lists it as an ordinary orphan; the folder stays for it.
+  const ownedE = w.manifest.find(e.wt.path)
+  check(!!ownedE && ownedE.owner === e.wt.owner && fs.existsSync(e.wt.path), 'control: the done task e still owns its worktree in the manifest')
+  w.clock.now += M.TASK_ARCHIVE_AFTER_MS + 86_400_000
+  w.cfg = { ...w.cfg, settings: { ...w.cfg.settings, labs: { teams: false, consoleChat: false } } }
+  w.svc.setConfig(w.cfg)
+  w.cfg = { ...w.cfg, settings: { ...w.cfg.settings, labs: { teams: true, consoleChat: false } } }
+  w.svc.setConfig(w.cfg)
+  await until(() => !!w.svc.team(w.teamId), 20000, 'enabled again (31 days later)')
+  check(!w.task(e.id) && w.rt().archivedTasks[e.id] === 'done', 'the load 31 days later archived the done task')
+  const disownedE = w.manifest.find(e.wt.path)
+  check(!!disownedE && disownedE.owner === undefined && fs.existsSync(e.wt.path), `its manifest entry lost its owner, the folder stays (${JSON.stringify(disownedE?.owner ?? null)})`)
+  check(w.logs.includes(`worktree ${w.teamId} ${e.id} disowned: archived`), 'teams.log names the disown')
 }
 
 /**

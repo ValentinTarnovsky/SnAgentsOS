@@ -87,23 +87,35 @@ export interface AgentView {
   takeover?: { phase: Takeover['phase']; paneId?: string; at: number }
   context?: PaneContext
 }
+/**
+ * truncated (phone only, src/main/teams/phoneFit.ts): a plan text cut to TEAM_PHONE_PLAN_MAX (B8) and, since the
+ * Tanda B close, a final OK's summary or a permission's rules or denied commands cut to fit the frame ("Sigue en la PC").
+ */
 export type ApprovalPayloadView =
   | { kind: 'plan'; planRev: number; small: boolean; text: string; truncated?: boolean }
-  | { kind: 'final'; summary: string; stat?: DiffStat }   // stat: the last diff stat a QA run of the task read (B5); absent when none was computed
+  | { kind: 'final'; summary: string; stat?: DiffStat; truncated?: boolean }   // stat: the last diff stat a QA run of the task read (B5); absent when none was computed
   | { kind: 'hire'; roleId: string; diff: TeamFileDiff; risks: TeamRiskFlag[] }
-  | { kind: 'permission'; roleId: string; tools: string[]; denied?: string[] }   // denied: the shell commands the run was denied (redacted, <= 10 x 300 chars, B5)
+  | { kind: 'permission'; roleId: string; tools: string[]; denied?: string[]; truncated?: boolean }   // denied: the shell commands the run was denied (redacted, <= 10 x 300 chars, B5)
   /**
    * ahead: commits of the branch over its base, as main last read them (the needs and task ops); absent when unknown.
    * With `lastError` (the last attempt failed, B6 review second round): `lastStep` where, `lastLanding` the land mode of
    * a failure at step land whose mode was known (IntegrateStatus.step and .landing).
    */
   | { kind: 'integrate'; branch: string; base: string; ahead?: number; lastError?: IntegrateError; lastStep?: IntegrateStep; lastLanding?: 'ffOnly' | 'updateRef' }
-export interface ApprovalView { id: string; taskId?: string; state: ApprovalState; decider: 'user' | 'lead'; requestedBy: string; at: number; error?: string; payload: ApprovalPayloadView }
+/**
+ * rev (Tanda B close, optional like every new wire field): a permission approval's TeamApproval.rev (1 when absent;
+ * it grows when a later run merges rules into it), 1 for the other kinds; main always sets it, and a view without one
+ * reads as 1. pcOnly (phone only, phoneFit): the frame could not carry what is decided whole, so the phone shows the
+ * row read only ("En la PC").
+ */
+export interface ApprovalView { id: string; taskId?: string; state: ApprovalState; decider: 'user' | 'lead'; requestedBy: string; at: number; error?: string; rev?: number; pcOnly?: boolean; payload: ApprovalPayloadView }
+/** pcOnly and truncated (phone only, Tanda B close; phoneFit): as ApprovalView.pcOnly, and a question or an option cut ("Sigue en la PC"). */
 export interface CardView {
   id: string; taskId?: string; agentId?: string; kind: TeamCard['kind']; state: TeamCard['state']; at: number
   question?: string; options?: string[]; multi?: boolean
   system?: { why: CardReason; vars?: Record<string, string | number>; actions: CardAction[] }
   answer?: CardAnswer
+  pcOnly?: boolean; truncated?: boolean
 }
 export interface QueueItemView { id: string; agentId: string; taskId?: string; reason: WakeReason; mode: RunMode; priority: TaskPriority; at: number; approved: boolean; defer?: DeferInfo }
 /** TaskSummary's `comments` count becomes the comment list here (the count is `comments.length + commentsArchived` plus older pages). */
@@ -129,7 +141,8 @@ export interface RoutineView { id: string; cron: string; action: 'wake' | 'task'
 
 // ---- setup, trust ----
 export interface TeamFilePreview { rel: string; text: string; bytes: number }
-export type SetupWarning = 'totalBypass' | 'codexTotal' | 'codexReadonlyBlock' | 'noVerify' | 'notCommitted'
+/** userAllow (B close): the user's own permissions.allow of ~/.claude/settings.json still applies to the Claude runs of the team. */
+export type SetupWarning = 'totalBypass' | 'codexTotal' | 'codexReadonlyBlock' | 'noVerify' | 'notCommitted' | 'userAllow'
 export interface SetupProbe {
   repoRoot: string; repoName: string; branch: string | null; branches: string[]
   registered?: string                              // team id already registered for this repo
@@ -222,7 +235,8 @@ export type TeamRequest =
   | { op: 'resumeTask'; teamId: string; taskId: string }
   // B5
   | { op: 'needs'; teamId: string }
-  | { op: 'decide'; teamId: string; approvalId: string; decision: 'approve' | 'reject'; note?: string }
+  /** rev: the ApprovalView.rev the user saw; for a permission approval a missing or different rev answers conflict {stale} and changes nothing (other kinds ignore it). */
+  | { op: 'decide'; teamId: string; approvalId: string; decision: 'approve' | 'reject'; note?: string; rev?: number }
   | { op: 'answer'; teamId: string; cardId: string; answer: CardAnswer }
   // B6
   | { op: 'integratePreview'; teamId: string; taskId: string }
@@ -318,6 +332,6 @@ export const TEAM_PHONE_PLAN_MAX = 16000
 export const TEAM_PHONE_HIRE_LINES = 200
 /** Phone ctl actions (B8), handled in main. */
 export type TeamCtlAction =
-  | { kind: 'teamDecide'; teamId: string; approvalId: string; decision: 'approve' | 'reject'; note?: string }
+  | { kind: 'teamDecide'; teamId: string; approvalId: string; decision: 'approve' | 'reject'; note?: string; rev?: number }   // rev: as the decide op
   | { kind: 'teamAnswer'; teamId: string; cardId: string; answer: CardAnswer }
   | { kind: 'teamDispatch'; teamId: string; queueId: string; go: boolean }

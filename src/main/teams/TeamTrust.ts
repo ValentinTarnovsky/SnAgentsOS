@@ -19,8 +19,12 @@ interface SnapshotFile {
   files: DefFile[]
 }
 
-/** How the trusted snapshot of a team reads: none yet, intact, or failing the integrity check of decision 34. */
-export type SnapshotState = 'none' | 'ok' | 'bad'
+/**
+ * How the trusted snapshot of a team reads: none yet, intact, or failing the integrity check of decision 34.
+ * `unreadable` (B close): the snapshot or the TrustStore file exists but cannot be read right now (a lock, a
+ * permission): nothing is trusted, nothing is cached (the next read tries again) and no `stateReset` card opens.
+ */
+export type SnapshotState = 'none' | 'ok' | 'bad' | 'unreadable'
 
 interface Cached {
   repoRoot: string
@@ -50,7 +54,8 @@ export class TeamTrust {
   private readonly cache = new Map<string, Cached>()
 
   constructor(
-    private readonly store: Pick<TrustStore, 'get' | 'setChecked' | 'delete'>,
+    /** `readable` optional: a store without it always reads (a test fake). */
+    private readonly store: Pick<TrustStore, 'get' | 'setChecked' | 'delete'> & Partial<Pick<TrustStore, 'readable'>>,
     private readonly snapshotFile: (teamId: string) => string,
     /** The main root of a registered team, for the TrustStore half of the integrity check. */
     private readonly repoRootOf: (teamId: string) => string | null,
@@ -83,7 +88,9 @@ export class TeamTrust {
     let previous: string | null = null
     try {
       previous = readFileSync(file, 'utf8')
-    } catch {
+    } catch (err) {
+      // B close: a snapshot that cannot be read right now could not be put back on a failed write: never replaced.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return { error: 'io' }
       previous = null
     }
     const trusted: TrustedDefinition = {
@@ -119,7 +126,7 @@ export class TeamTrust {
     return this.read(teamId).def
   }
 
-  /** none: no approval and no snapshot; ok; bad: an approval or a snapshot that does not verify. */
+  /** none: no approval and no snapshot; ok; bad: an approval or a snapshot that does not verify; unreadable: read again later. */
   snapshotState(teamId: string): SnapshotState {
     return this.read(teamId).state
   }
@@ -142,11 +149,16 @@ export class TeamTrust {
     if (hit && hit.repoRoot === repoRoot) return hit
     const out: Cached = { repoRoot: repoRoot ?? '', state: 'none', def: null }
     if (repoRoot === null) return out
+    // B close: a TrustStore file or a snapshot that cannot be read right now is neither a missing approval nor a
+    // tampered snapshot (no 'bad', so no stateReset card): uncached, the next read tries again.
+    const unreadable: Cached = { repoRoot, state: 'unreadable', def: null }
+    if (this.store.readable?.() === false) return unreadable
     const entry = this.store.get(repoRoot)
     let raw: string | null = null
     try {
       raw = readFileSync(this.snapshotFile(teamId), 'utf8')
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return unreadable
       raw = null
     }
     if (raw === null) {

@@ -130,6 +130,8 @@ export const needsEn = {
   'teams.err.badAnswer': 'That answer does not fit this question.',
   'teams.err.busy': 'Something of that task is still running: try again in a moment.',
   'teams.err.nothingToGrant': 'There is nothing to grant: the app no longer allows any rule of this request. Reject it.',
+  'teams.err.grantsFull': 'This task already holds as many rules as it can, so nothing more can be granted. Reject this request.',
+  'teams.err.permissionChanged': 'This permission changed while you were deciding: a later run asked for more. Review it again before you decide.',
   'teams.err.decideFailed': 'Could not send the decision.',
   'teams.err.answerFailed': 'Could not send the answer.',
 }
@@ -255,6 +257,8 @@ export const needsEs: Record<keyof typeof needsEn, string> = {
   'teams.err.badAnswer': 'Esa respuesta no corresponde a esta pregunta.',
   'teams.err.busy': 'Algo de esa tarea todavía está corriendo: probá de nuevo en un momento.',
   'teams.err.nothingToGrant': 'No hay nada para conceder: la app ya no permite ninguna regla de este pedido. Rechazalo.',
+  'teams.err.grantsFull': 'Esta tarea ya tiene todas las reglas que puede tener, así que no se puede conceder nada más. Rechazá este pedido.',
+  'teams.err.permissionChanged': 'Este permiso cambió mientras lo decidías: una corrida posterior pidió más. Revisalo de nuevo antes de decidir.',
   'teams.err.decideFailed': 'No se pudo mandar la decisión.',
   'teams.err.answerFailed': 'No se pudo mandar la respuesta.',
 }

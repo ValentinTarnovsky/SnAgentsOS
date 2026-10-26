@@ -3,14 +3,14 @@
  * as it really is (visibleText: the characters that hide or reorder a line
  * spelled out, like the desktop's visibleLine), the labels of columns,
  * phases, priorities, modes, run states and card reasons, a comment main
- * wrote rendered from its key, main's run notes, and every refusal the phone
- * can get in the catalog's words (never main's code, never a record's JSON).
- * Pure: no React.
+ * wrote rendered from its key, main's run notes, the marks of a row the PC
+ * could not send whole, and every refusal the phone can get in the catalog's
+ * words (never main's code, never a record's JSON). Pure: no React.
  */
 import type { ChatBlock, ChatMessage } from '@shared/chat-types'
 import type { ApprovalKind, BoardColumn, CardAction, CardReason, DeferInfo, RunMode, RunState, TaskPhase, TaskPriority } from '@shared/teams'
 import { RUN_LOG_CUT_TEXT, runNoteOfText } from '@shared/teams'
-import type { CardView, CommentView, PhoneTeamListItem, TaskBlockedView, TeamFail } from '@shared/team-protocol'
+import type { ApprovalPayloadView, ApprovalView, CardView, CommentView, PhoneTeamListItem, TaskBlockedView, TeamFail } from '@shared/team-protocol'
 import type { PendingOutcome } from '../../lib/pending'
 import { isNoReply } from '../../lib/pending'
 import { clockTime } from '../../lib/statusText'
@@ -91,6 +91,26 @@ export function runSystemText(text: string): string | null {
       return t('teams.run.chat.note.blockStateFull', vars)
   }
   return null
+}
+
+// ---- what the PC could not send whole ------------------------------------------------------------------
+
+/**
+ * The marks the PC's phoneFit (Tanda B close) sets on a row of Te necesita it could not send whole, as the shared
+ * contract declares them (src/shared/team-protocol.ts): `pcOnly` on an ApprovalView or a CardView (read only here,
+ * "En la PC": never an Aprobar nor an answer for texts the user would not see whole), `truncated` on a final or
+ * permission payload and on a card (one of the texts the user decides on was cut: "Sigue en la PC").
+ */
+export type FitMarks = Required<Pick<CardView, 'pcOnly' | 'truncated'>>
+
+/** Only a `true` counts (a PC that sends no mark, or anything else, leaves the row as it is). */
+export function fitMarks(x: ApprovalView | CardView | ApprovalPayloadView | undefined): FitMarks {
+  return { pcOnly: !!x && 'pcOnly' in x && x.pcOnly === true, truncated: !!x && 'truncated' in x && x.truncated === true }
+}
+
+/** The rev a decide carries back (ApprovalView.rev, Tanda B close); undefined from a PC that sends none (the schema wants a positive integer). */
+export function approvalRevOf(a: { rev?: unknown }): number | undefined {
+  return typeof a.rev === 'number' && Number.isInteger(a.rev) && a.rev > 0 ? a.rev : undefined
 }
 
 // ---- labels ----------------------------------------------------------------------------------------
@@ -251,7 +271,7 @@ export interface TeamRefusal {
 }
 
 const CONFLICT_REASONS = ['rev', 'stale', 'concluded', 'already_decided', 'newer_comment_not_delivered']
-const BAD_DETAILS = ['nothingToGrant', 'secret']
+const BAD_DETAILS = ['nothingToGrant', 'grantsFull', 'secret']
 
 /**
  * A ctl ack's error (decide, answer, dispatch carry only a string): the code,
@@ -278,13 +298,23 @@ function commonWords(f: TeamRefusal): string | null {
   return null
 }
 
-/** A refused decision (teamDecide). `kind` and `decision` name what was decided: a stale hire, a permission with nothing to grant. */
+/** True for a decide the PC refused because what it decided on changed (`conflict:stale`): the phone reads it again. */
+export function isStaleRefusal(f: TeamRefusal): boolean {
+  return f.error === 'conflict' && f.reason === 'stale'
+}
+
+/**
+ * A refused decision (teamDecide). `kind` and `decision` name what was decided: a stale hire, a permission that
+ * changed since it was shown (a later run merged rules into it, Tanda B close), a permission with nothing to grant or
+ * on a task whose grants are full.
+ */
 export function decideFailText(f: TeamRefusal, kind?: ApprovalKind, decision?: 'approve' | 'reject'): string {
   const common = commonWords(f)
   if (common) return common
   switch (f.error) {
     case 'conflict':
       if (f.reason === 'already_decided') return t('teams.err.decided')
+      if (f.reason === 'stale' && kind === 'permission') return t('teams.err.approvalChanged')
       return t(f.reason === 'stale' && kind === 'hire' ? 'teams.err.hireStale' : 'teams.err.gone')
     case 'not_found':
       return t('teams.err.gone')
@@ -303,6 +333,7 @@ export function decideFailText(f: TeamRefusal, kind?: ApprovalKind, decision?: '
     case 'bad_request':
       // A permission whose every rule the app now refuses: the ack may carry only the code, and the phone never sends an
       // integrate decide (read only here), so a refused approve of a permission is that case.
+      if (f.detail === 'grantsFull') return t('teams.err.grantsFull')
       if (f.detail === 'nothingToGrant' || (!f.detail && kind === 'permission' && decision === 'approve')) return t('teams.err.nothingToGrant')
       return t('teams.err.decideFailed')
     default:

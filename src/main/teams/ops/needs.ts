@@ -25,13 +25,14 @@ export const needsOps: Pick<OpTable, 'needs' | 'decide' | 'answer'> = {
     const rec = svc.team(req.teamId)
     if (!rec) return fail('not_found')
     // The dry run first: dropping a dead orphan may commit (its card), so the view is built after it.
-    const waiting = svc.dispatchWaiting(req.teamId).byKey
+    const waiting = svc.dispatchWaiting(req.teamId)
     const tasks = new Map(rec.store.rt.tasks.map((t) => [t.id, t]))
     const ahead = (taskId: string): number | undefined => {
       const t = tasks.get(taskId)
       return t ? svc.worktreeLive(t)?.ahead : undefined
     }
-    return { ok: true, needs: needsView(rec, svc.trusted(req.teamId), waiting, { ahead }) }
+    // B close: a row the dry run has no request for reads what holds its agent (byAgent, its run, a takeover).
+    return { ok: true, needs: needsView(rec, svc.trusted(req.teamId), waiting.byKey, { ahead, byAgent: waiting.byAgent }) }
   },
 
   async decide(req, { svc, origin, actor }) {
@@ -41,7 +42,8 @@ export const needsOps: Pick<OpTable, 'needs' | 'decide' | 'answer'> = {
     if (!ap) return fail('not_found')
     if (ap.kind === 'integrate') return fail('bad_request')
     if (origin === 'phone' && ap.kind === 'hire') return fail('forbidden')
-    const failed = await svc.decide(req.teamId, req.approvalId, req.decision, req.note, actor)
+    // B close: a permission decide is bound to the rev the user saw (the reducer answers stale on any other).
+    const failed = await svc.decide(req.teamId, req.approvalId, req.decision, req.note, actor, req.rev)
     return failed ?? { ok: true }
   },
 
