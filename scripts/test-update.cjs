@@ -176,7 +176,12 @@ async function main() {
     let settled = false
     try {
       const run = up.mod.downloadAndInstall(() => {}, { beforeApply: (kind) => { kinds.push(kind); return gate } }).then((r) => { settled = true; return r })
-      for (let i = 0; i < 200 && kinds.length === 0; i++) await flush()
+      // Wait by time, not by event loop turns: the download writes and hashes a file, which a slow CI runner can take
+      // longer than a fixed number of turns to finish (the check then ran before beforeApply was even called).
+      const until = Date.now() + 15000
+      while (kinds.length === 0 && Date.now() < until) await new Promise(r => setTimeout(r, 10))
+      // A pending beforeApply must hold the setup for good: give a would-be spawn time to happen.
+      await new Promise(r => setTimeout(r, 100))
       for (let i = 0; i < 20; i++) await flush()
       check(kinds.join() === 'win-installer' && spawned.length === 0 && !settled, 'the setup never starts while the promise beforeApply returned is pending')
       open()
