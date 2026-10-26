@@ -310,7 +310,7 @@ export { buildPushMessage } from './src/main/remote/PushService'
   hook('Stop', { lastAssistantMessage: reply })
   flush()
   check(pushed.length === 1 && pushed[0].notice.state === 'done', 'the done notice reaches Web Push through the router')
-  check(pushed[0].msg.title === 'Claude finished' && pushed[0].msg.body === 'api - Web\nTools: Edit 1, Run 1 (src/a.ts)', 'a done push carries the digest line of the turn')
+  check(pushed[0].msg.title === 'Claude finished' && pushed[0].msg.body === 'api - Web\nTools: Edit 1, Run 1', 'a done push carries the digest line of the turn (counts only, no file names)')
   check(!JSON.stringify(pushed[0]).includes('REPLY-TEXT') && !JSON.stringify(pushed[0]).includes('hunter2'), 'and no text of the reply, in the notice or the push')
   for (const id of [...timers.keys()]) timers.delete(id)
 }
