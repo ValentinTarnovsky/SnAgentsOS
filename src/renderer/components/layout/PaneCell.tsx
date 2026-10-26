@@ -62,6 +62,8 @@ import { PaneErrorBoundary } from '@/components/common/ErrorBoundary'
 import { ResumeChip } from '@/components/agents/ResumeChip'
 import { SleepingOverlay } from '@/components/agents/SleepingOverlay'
 import { CacheChip } from '@/components/agents/CacheChip'
+import { TakeoverChip, TakeoverReleaseConfirm, requestRelease } from '@/components/teams/TakeoverChip'
+import { useTeamsStore } from '@/lib/teamsStore'
 import { PaneSignals } from '@/components/status/PaneSignals'
 import { ConsoleChatView } from '@/components/chat/ConsoleChatView'
 import { chatCapablePane, showPaneView, usePaneView, type PaneView } from '@/lib/consoleChatStore'
@@ -339,6 +341,8 @@ export function PaneCell({
   const chatCapable = labOn(settings, 'consoleChat') && chatCapablePane(pane, statusProvider)
   const savedView = usePaneView(pane.id)
   const chatView = chatCapable && savedView === 'chat'
+  // App 2.7.0 (E10 B9): a console that took over a team agent (from main's team list; nothing with Labs teams off).
+  const takenOver = useTeamsStore((s) => !!s.takeovers[pane.id])
   // The keyboard follows the view: the terminal, or the chat's composer.
   const showView = (view: PaneView): void => {
     if (view !== (chatView ? 'chat' : 'terminal')) showPaneView(pane.id, view)
@@ -452,6 +456,8 @@ export function PaneCell({
     ...(closedCount > 0
       ? [{ label: t('agents.reopenClosed'), icon: ArchiveRestore, separated: true, onClick: () => void reopenClosedConsole() }]
       : []),
+    // App 2.7.0 (E10 B9): the chip's "Devolver al Equipo", also here (the chip can shrink in a narrow pane).
+    ...(takenOver ? [{ label: t('teams.takeover.release'), icon: Undo2, separated: true, onClick: () => requestRelease(pane.id, t) }] : []),
     { label: t('pane.close'), icon: X, danger: true, separated: true, onClick: onClose },
   ]
   const restartTip = resume.show && resume.button === 'resume' ? t('agents.restartTipResume') : t('pane.restart')
@@ -603,6 +609,7 @@ export function PaneCell({
           </Tooltip>
         )}
         <CacheChip paneId={pane.id} />
+        <TakeoverChip paneId={pane.id} />
         {exited && (
           <span
             data-pane-exited
@@ -781,6 +788,8 @@ export function PaneCell({
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
       )}
+
+      {takenOver && <TakeoverReleaseConfirm paneId={pane.id} />}
 
       {movePicker && (
         <ContextMenu

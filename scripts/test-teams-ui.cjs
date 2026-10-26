@@ -147,7 +147,33 @@
 // confirm, its first `# <title>` line not repeated under the same title, switched
 // in place, gone, and refetched on a `notes` change; the silence chip of live runs on the task card and the agent
 // cards, Ignorar el silencio sending `runSilenceAck` (never status.silenceAck) and
-// hiding it at once, a refusal bringing it back; zoom; en; no dashes. No pty, user
+// hiding it at once, a refusal bringing it back; zoom; en; no dashes. Takeover
+// section (B9, part 3): Tomar el control of an idle agent makes one console the
+// way the phone's resume does (lastSession, setupId '', the grant's title and
+// cwd, the resume target spent by its first spawn: claude --resume in the run's
+// cwd, no prompt, no pty write), saves the config to main before takeoverBound
+// (sent with its id; the fake checks it there as main does) and reveals it
+// (Teams closes); with no workspace from main a new "Equipo Alfa" holds only
+// that console (no shell console), with the one main picked (its cwd is the
+// repo) the console joins it and no workspace is made; a running agent asks
+// first; a session another console holds sends takeoverAbort and reveals that
+// console; no_session, stopping, busy with an orphan on the session and a
+// refused takeoverBound in words, the last leaving no console nor workspace;
+// the chip and the pane menu item, Ir a la consola on the card and in the
+// drawer; Devolver al Equipo refused mid turn (nothing sent) and by main's busy
+// in the words of its detail (turn, kill, releasing), then release with
+// removePane and the closed stack unchanged, the "Equipo Alfa" workspace made
+// for that console removed with it (and its localStorage record), a workspace
+// the user had kept even left empty, a made one that holds another console
+// kept; main's notHeld in words of its own (the agent went back, the console
+// stays); the card's line and the drawer composer's blocked line per phase
+// (stopping its run, waiting for its console, going back, in a console only
+// once bound), es and en; a takeover still waiting for a console offers Tomar
+// el control again and main's grant opens it; K7, the console closed by hand
+// (main gives the agent back at the config save): the "Equipo Alfa" made for
+// it goes with its record once no console is left there, also when it was
+// shown in a workspace of the user (its home goes), never one that holds
+// another console nor one the user had; zoom; en; no dashes. No pty, user
 // config or real main is touched. Requires npm run build (for the CSS).
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -204,7 +230,9 @@ import {SettingsModal} from './src/renderer/components/settings/SettingsModal';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 import {initShareGuest, useShareGuestStore} from './src/renderer/lib/shareGuestStore';
 import {onPaneFocusRequest, setFocusedPane} from './src/renderer/lib/focus';
-const calls={spawn:[],setActive:[],viewed:[],req:[],save:[],focusReq:[],ptyWrite:[],ptySubmit:[],openExternal:[],statusAck:[]};
+import {useToastStore} from './src/renderer/lib/toast';
+import {snapshotConfig} from './src/renderer/lib/persist';
+const calls={spawn:[],spawnReq:[],setActive:[],viewed:[],req:[],save:[],focusReq:[],ptyWrite:[],ptySubmit:[],openExternal:[],statusAck:[]};
 onPaneFocusRequest(id=>calls.focusReq.push(id));
 const subs={changed:new Set(),append:new Set(),integrate:new Set()};
 const noop=()=>()=>{};
@@ -376,10 +404,16 @@ fake.emitNeeds=(teamId,taskId)=>{if(!fake.emitOn)return;queueMicrotask(()=>{cons
 const areaEvents=[];
 onTeamChanged(e=>areaEvents.push(e));
 window.snApi=fallback({platform:'win32',filePath:()=>'',
- pty:fallback({reattach:async()=>null,spawn:async r=>{calls.spawn.push(r.paneId);return{ptyId:'pty-'+r.paneId,shellKind:'powershell'}},
+ pty:fallback({reattach:async()=>null,spawn:async r=>{calls.spawn.push(r.paneId);calls.spawnReq.push(r);return{ptyId:'pty-'+r.paneId,shellKind:'powershell'}},
   write:(...a)=>{calls.ptyWrite.push(a)},submit:async r=>{calls.ptySubmit.push(r);return{ok:true}},resize(){},setActive:ids=>calls.setActive.push(ids),flow(){},kill:async()=>{},killPanes:async()=>0,onData:noop,onExit:noop}),
  system:fallback({openExternal:url=>{calls.openExternal.push(url)}}),
- config:fallback({save:cfg=>{calls.save.push(1);return Promise.resolve()}}),
+ // B9: main checks takeoverBound against the config it last got (fake.cfg); K7, as its setConfig reconcile: a bound
+ // console gone from that config gives its agent back to the team (the list and the roster no longer name it).
+ config:fallback({save:cfg=>{calls.save.push(1);fake.cfg=cfg;const live=new Set((cfg.workspaces||[]).flatMap(w=>w.panes.map(p=>p.id)));
+  for(const [agentId,b] of Object.entries(fake.bound||{})){if(live.has(b.paneId))continue;const a=(AGENTS[b.teamId]||[]).find(x=>x.id===agentId);if(a){delete a.takeover;a.status='idle'}
+   delete fake.bound[agentId];const it=fake.teams.find(x=>x.id===b.teamId);if(it)it.takeovers=it.takeovers.filter(x=>x.agentId!==agentId);fake.k7=(fake.k7||0)+1;
+   queueMicrotask(()=>subs.changed.forEach(cb=>cb({teamId:b.teamId,rev:++fake.rev,scopes:['list','agents']})))}
+  return Promise.resolve()}}),
  status:fallback({snapshot:async()=>[],setViewed:ids=>calls.viewed.push(ids),markRead:async()=>true,silenceAck:async p=>{calls.statusAck.push(p);return true}}),
  agents:fallback({list:async()=>[],startup:async()=>({trigger:null,interrupted:[]})}),
  share:{host:fallback({}),guest:fallback({links:async()=>({persisted:true,guestFingerprint:null,links:[],states:{}})})},
@@ -481,6 +515,34 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
     case 'note':{const d=NOTES[r.teamId]&&NOTE_DOCS[r.noteId];return d?{ok:true,...d}:{ok:false,error:'not_found'}}
     case 'runSilenceAck':{if(fake.ackFail){fake.ackFail=false;return{ok:false,error:'io'}}const x=RUNS[r.runId];if(!x)return{ok:false,error:'not_found'};delete x.view.silence;
      for(const t of BOARD[r.teamId]||[])if(t.run&&t.run.id===r.runId)delete t.run.silence;return{ok:true}}
+    // B9, as main answers: takeover grants the agent's session (its run stopped first; fake.tkRes answers once instead),
+    // no_session without one, busy while one is on (a waiting one whose grant never left, fake.granted, is handed to the
+    // retry); takeoverBound (fake.boundRes once instead) checks the console
+    // against the config main last got, as K4 does against config().workspaces (the pane under that workspace, holding
+    // the session), then binds it and names it in the list; takeoverAbort gives a pending one back; release (fake.releaseRes
+    // once instead) answers the bound console, which main killed and waited for.
+    case 'takeover':{if(fake.tkRes){const f=fake.tkRes;fake.tkRes=null;return f}const a=(AGENTS[r.teamId]||[]).find(x=>x.id===r.agentId);if(!a)return{ok:false,error:'not_found'};
+     const granted=fake.granted||(fake.granted={}),tk=a.takeover;
+     if(tk&&!(tk.phase==='bindPending'&&granted[a.id]!==tk.at))return{ok:false,error:'busy'};const g=(fake.grants||{})[r.agentId];if(!g)return{ok:false,error:'no_session'};
+     if(!tk){if(a.run){a.lastRun={...a.run,state:'takenOver'};delete a.run}a.status='takenOver';a.takeover={phase:'bindPending',at:Date.now()}}granted[a.id]=a.takeover.at;return{ok:true,grant:JSON.parse(JSON.stringify(g))}}
+    case 'takeoverBound':{const a=(AGENTS[r.teamId]||[]).find(x=>x.id===r.agentId);if(!a||!a.takeover||a.takeover.phase!=='bindPending')return{ok:false,error:'bad_request'};
+     if(fake.boundRes){const f=fake.boundRes;fake.boundRes=null;return f}
+     const g=fake.grants[r.agentId],ws=fake.cfg&&fake.cfg.workspaces.find(x=>x.id===r.workspaceId),p=ws&&ws.panes.find(x=>x.id===r.paneId);
+     if(!p||!p.lastSession||p.lastSession.sessionId!==g.sessionId)return{ok:false,error:'bad_request'};
+     a.takeover={phase:'bound',paneId:r.paneId,at:Date.now()};fake.bound[r.agentId]={paneId:r.paneId,workspaceId:r.workspaceId,teamId:r.teamId};
+     const it=fake.teams.find(x=>x.id===r.teamId);it.takeovers=[...it.takeovers,{paneId:r.paneId,agentId:a.id,agentName:g.agentName,...(g.taskId?{taskId:g.taskId}:{}),at:Date.now()}];
+     queueMicrotask(()=>subs.changed.forEach(cb=>cb({teamId:r.teamId,rev:++fake.rev,scopes:['list','agents']})));
+     // fake.reconciled: main's setConfig reconcile bound it at the config save, so this takeoverBound came second.
+     if(fake.reconciled){fake.reconciled=false;return{ok:false,error:'bad_request'}}
+     return{ok:true}}
+    case 'takeoverAbort':{const a=(AGENTS[r.teamId]||[]).find(x=>x.id===r.agentId);if(!a)return{ok:false,error:'not_found'};if(a.takeover&&a.takeover.phase==='bindPending'){delete a.takeover;a.status='idle'}return{ok:true}}
+    case 'release':{if(fake.releaseRes){const f=fake.releaseRes;fake.releaseRes=null;return f}const a=(AGENTS[r.teamId]||[]).find(x=>x.id===r.agentId),b=fake.bound[r.agentId];
+     if(!a)return{ok:false,error:'not_found'};if(!b||!a.takeover||a.takeover.phase!=='bound')return{ok:false,error:'conflict',reason:'stale'};
+     delete a.takeover;a.status='idle';delete fake.bound[r.agentId];const it=fake.teams.find(x=>x.id===r.teamId);it.takeovers=it.takeovers.filter(x=>x.agentId!==a.id);
+     queueMicrotask(()=>subs.changed.forEach(cb=>cb({teamId:r.teamId,rev:++fake.rev,scopes:['list','agents']})));
+     // fake.notHeld once: main's K6 re-check found the console off the session, so the agent went back and nothing was killed.
+     if(fake.notHeld){fake.notHeld=false;return{ok:false,error:'conflict',reason:'stale',detail:'notHeld'}}
+     return{ok:true,paneId:b.paneId,workspaceId:b.workspaceId}}
     default:return{ok:false,error:'unsupported'}}},
   onChanged:cb=>{subs.changed.add(cb);return()=>subs.changed.delete(cb)},onRunAppend:cb=>{subs.append.add(cb);return()=>subs.append.delete(cb)},onIntegrateProgress:cb=>{subs.integrate.add(cb);return()=>subs.integrate.delete(cb)}},
 });
@@ -599,6 +661,31 @@ window.smoke={calls,fake,TA,TB,areaEvents,seen,item,
  // B7: the routines, the notes and the run silence fixtures, the A10 label rule, and the drawer closed by hand.
  fillRoutines,silenceOn,ROUTINES,NOTES,NOTE_DOCS,formatRunWhen,closeDrawer:()=>useTeamsStore.setState({drawer:null}),
  counts:id=>({badge:document.querySelector('[data-team-row=\"'+id+'\"] [data-team-badge]')?.getAttribute('data-team-badge')??'0',tab:document.querySelector('[data-team-tab=needs] [data-team-tab-count]')?.getAttribute('data-team-tab-count')??'0',rows:String(document.querySelectorAll('[data-team-need]').length),rule:String(teamNeedsCount(needsOf(id)))}),
+ // B9 (part 3): Alfa back with its agents idle but Dev 2 (running on t-35), the sessions main grants (QA with no workspace,
+ // Dev 2 in the workspace main picked, w3 on the repo, the Lead's one held by a console of the user in w2, its id in
+ // capitals), none for Investigación; where a pane is, the panes holding a session, a console's status, the toasts
+ // queued (the store: a persistent error may keep a warning off screen), a pane menu, a button inside its pane cell.
+ SID:{qa:'0a0a0a0a-1111-4111-8111-000000000001',dev2:'0a0a0a0a-1111-4111-8111-000000000002',lead:'0a0a0a0a-1111-4111-8111-000000000003',dev:'0a0a0a0a-1111-4111-8111-000000000004'},
+ prepTakeover:()=>{const S=window.smoke.SID;fake.teams=[item(TA,'Alfa')];fake.bound={};fake.cfg=null;useToastStore.setState({items:[]});
+  const A=AGENTS[TA];for(const a of A){a.status='idle';a.paused=false;delete a.run;delete a.takeover;delete a.waiting}
+  RUNS[R3]={view:runV(R3,'dev-2',{state:'running',outcome:undefined,endedAt:undefined,taskId:'t-35',startedAt:Date.now()-60000}),items:[]};
+  Object.assign(A.find(a=>a.id==='dev-2'),{status:'running',taskId:'t-35',run:RUNS[R3].view});
+  fake.grants={qa:{provider:'claude',sessionId:S.qa,cwd:'C:/repos/alfa',agentName:'QA',teamName:'Alfa',title:'QA'},
+   'dev-2':{provider:'claude',sessionId:S.dev2,cwd:'C:/repos/alfa/.worktrees/t-aaaaaa-35',workspaceId:'w3',agentName:'Dev 2',teamName:'Alfa',taskId:'t-35',title:'Dev 2 (t-35)'},
+   lead:{provider:'claude',sessionId:S.lead,cwd:'C:/repos/alfa',agentName:'Líder',teamName:'Alfa',title:'Líder'},
+   dev:{provider:'claude',sessionId:S.dev,cwd:'C:/repos/alfa/.worktrees/t-aaaaaa-34',workspaceId:'w3',agentName:'Dev',teamName:'Alfa',taskId:'t-34',title:'Dev (t-34)'}};
+  const held={id:'held1',type:'claude',title:'Líder a mano',icon:'claude',color:'#d97757',lastSession:{provider:'claude',sessionId:S.lead.toUpperCase(),cwd:'C:/repos/alfa',at:1}};
+  useAppStore.setState(s=>({workspaces:[...s.workspaces.map(w=>w.id!=='w2'?w:{...w,panes:[...w.panes,held],layout:{grid:2,order:[...(w.layout?w.layout.order:w.panes.map(p=>p.id)),'held1']}}),
+   {id:'w3',name:'Alfa repo',cwd:'C:/repos/alfa',panes:[{...local,id:'local3',title:'Alfa'}],favorite:false,layout:{grid:1,order:['local3']}}]}))},
+ paneWhere:id=>{for(const w of useAppStore.getState().workspaces){const p=w.panes.find(x=>x.id===id);if(p)return{ws:w.id,pane:JSON.parse(JSON.stringify(p))}}return null},
+ panesWith:sid=>useAppStore.getState().workspaces.flatMap(w=>w.panes.filter(p=>p.lastSession&&p.lastSession.sessionId===sid).map(p=>p.id)),
+ paneCount:()=>useAppStore.getState().workspaces.reduce((n,w)=>n+w.panes.length,0),
+ setStatus:(id,state)=>useAppStore.setState(s=>{const paneStatus={...s.paneStatus};if(state)paneStatus[id]={state,precise:true,provider:'claude',updatedAt:Date.now()};else delete paneStatus[id];return{paneStatus}}),
+ toastN:(kind,text)=>useToastStore.getState().items.filter(x=>x.kind===kind&&(text===undefined||x.title===text)).length,
+ menuOn:sel=>{const el=document.querySelector(sel);if(!el)throw new Error('missing '+sel);const r=el.getBoundingClientRect();el.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:r.left+20,clientY:r.top+10}))},
+ inCell:(sel,id)=>{const el=document.querySelector(sel),c=document.querySelector('[data-pane-cell='+id+']');if(!el||!c)return false;const a=el.getBoundingClientRect(),b=c.getBoundingClientRect();return a.width>0&&a.left>=b.left-0.5&&a.right<=b.right+0.5},
+ // The debounced config save of persist.ts (not started here), sent now: main's setConfig reconcile runs on it (K7).
+ saveConfig:()=>window.snApi.config.save(snapshotConfig()),
 };
 createRoot(document.getElementById('root')).render(<Root/>);
 `, resolveDir: root, loader: 'tsx' }, bundle: true, platform: 'browser', format: 'iife', outfile: path.join(dir, 'renderer.js'), alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, loader: { '.ttf': 'empty', '.woff': 'empty', '.woff2': 'empty' }, logLevel: 'error' })
@@ -2583,8 +2670,281 @@ app.whenReady().then(async()=>{
  ok(await js("smoke.has('[data-team-setup]')"),'Crear equipo opens the setup dialog');
  await js("smoke.keyActive({key:'Escape',code:'Escape',keyCode:27})");await settle(200);
 
+ // B9 (part 3): Tomar el control and Devolver al Equipo. Alfa comes back with its agents; main grants each one's session
+ // (a run stopped first) or answers no_session, stopping or a takeoverBound it refuses, and checks takeoverBound against
+ // the config it last got. The console is made the way the phone's resume makes one and comes on screen; the chip and
+ // the menu item give it back (refused mid turn and by main's busy, then removePane with the closed stack as it was).
+ const SID=await js('smoke.SID');
+ const pw3=await js('smoke.calls.ptyWrite.length+smoke.calls.ptySubmit.length'),cl0=await js('smoke.agents().closedStack.length');
+ await js("smoke.prepTakeover();smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['list']})");
+ ok(await until("smoke.has('[data-teams-section] [data-team-row]')",4000),'part 3: Alfa is back');
+ await js("smoke.openTeams(smoke.TA,'agents')");
+ ok(await until("smoke.has('[data-agent-card=qa] [data-agent-takeover=qa]')&&smoke.has('[data-agent-card=dev-2] [data-agent-takeover=dev-2]')&&smoke.has('[data-agent-takeover=lead]')",3000),'part 3: every agent card offers Tomar el control');
+ ok((await js("smoke.text('[data-agent-takeover=qa]')"))==='Tomar el control','its words');
+
+ // An idle agent (QA), with no workspace from main: one console in a new Equipo Alfa, bound with its id, on screen.
+ let ws0=await js('smoke.app().workspaces.length');const sv0=await js('smoke.calls.save.length');
+ await js("smoke.click('[data-agent-takeover=qa]')");
+ ok(await until("smoke.reqs('takeoverBound').length===1&&smoke.agents().view==='grid'",3000),'an idle agent: no confirm, takeover then takeoverBound, and Teams closes on its console',await js("({tk:smoke.reqs('takeover'),toasts:smoke.toastsOf('error')})"));
+ v=await js("(()=>{const tk=smoke.reqs('takeover').at(-1),b=smoke.reqs('takeoverBound').at(-1),app=smoke.app(),ws=app.workspaces.find(w=>w.id===b.workspaceId);return{tk,b,n:app.workspaces.length,ws:ws&&{name:ws.name,cwd:ws.cwd,ids:ws.panes.map(p=>p.id).join(),order:ws.layout.order.join()},p:smoke.paneWhere(b.paneId),active:app.activeWorkspaceId,host:smoke.has('[data-team-host]'),saved:smoke.calls.save.length,confirm:smoke.has('[data-confirm]')}})()");
+ ok(v.tk.teamId===TA&&v.tk.agentId==='qa'&&v.b.teamId===TA&&v.b.agentId==='qa'&&v.p&&v.p.ws===v.b.workspaceId&&!v.confirm,'takeoverBound names the console made and its workspace',v);
+ ok(v.n===ws0+1&&v.ws.name==='Equipo Alfa'&&v.ws.cwd==='C:/repos/alfa'&&v.ws.ids===v.b.paneId&&v.ws.order===v.b.paneId,'no workspace from main: a new Equipo Alfa on the repo holding only this console (no shell console beside it)',v);
+ const P1=v.b.paneId,WS1=v.b.workspaceId;
+ ok((await js("JSON.parse(localStorage.getItem('snagentsos.teams.takeoverWorkspaces')||'[]')")).includes(WS1),'that workspace is recorded as made by a takeover (its release may remove it)');
+ ok(v.p.pane.type==='claude'&&v.p.pane.title==='QA'&&v.p.pane.cwd==='C:/repos/alfa'&&v.p.pane.setupId===''&&v.p.pane.presetId==='preset-claude'&&v.p.pane.lastSession.provider==='claude'&&v.p.pane.lastSession.sessionId===SID.qa&&v.p.pane.lastSession.cwd==='C:/repos/alfa','one pane: the provider preset look, the grant title and cwd, setupId empty, lastSession of the session',v.p);
+ ok(v.saved>sv0&&v.active===v.b.workspaceId&&!v.host,'the config went to main before takeoverBound (main checked the console there); the console is on screen and Teams closed',v);
+ ok(await until("smoke.calls.spawnReq.some(r=>r.paneId==='"+P1+"')",4000),'the console spawns');
+ v=await js("(()=>{const r=smoke.calls.spawnReq.filter(x=>x.paneId==='"+P1+"').at(-1);return{cmd:r.initialCommand,cwd:r.cwd,prompt:r.initialPrompt,target:smoke.agents().resumeTarget['"+P1+"']||null}})()");
+ ok(typeof v.cmd==='string'&&v.cmd.includes('--resume')&&v.cmd.includes(SID.qa)&&v.cwd==='C:/repos/alfa'&&v.prompt===undefined&&v.target===null,'its first spawn resumes that session in the run cwd (the resume target, spent there), with no prompt',v);
+ ok(await until("smoke.has('[data-takeover-chip="+P1+"]')",3000),'the chip renders on the console once the list names it');
+ v=await js("({text:smoke.text('[data-takeover-chip="+P1+"] [data-takeover-label]'),rel:smoke.attr('[data-takeover-release="+P1+"]','aria-label'),in:smoke.inCell('[data-takeover-release="+P1+"]','"+P1+"')})");
+ ok(v.text==='Equipo Alfa, QA'&&v.rel==='Devolver al Equipo'&&v.in,'the chip: Equipo Alfa, QA, with Devolver al Equipo inside the pane header',v);
+
+ // Its card and its drawer: En una consola, Ir a la consola (it brings the console on screen).
+ await js("smoke.openTeams(smoke.TA,'agents')");
+ ok(await until("smoke.has('[data-agent-card=qa] [data-agent-goto-console=qa]')",3000),'the card of an agent in a console offers Ir a la consola');
+ v=await js("({line:smoke.text('[data-agent-card=qa] [data-agent-line]'),take:smoke.has('[data-agent-takeover=qa]'),status:smoke.attr('[data-agent-card=qa]','data-agent-status'),go:smoke.text('[data-agent-goto-console=qa]')})");
+ ok(v.line==='En una consola'&&v.go==='Ir a la consola'&&!v.take&&v.status==='takenOver','its line says En una consola and Tomar el control is gone',v);
+ await js("smoke.openAgentDrawer('qa')");
+ ok(await until("smoke.has('[data-drawer=team-agent] [data-agent-goto-console=qa]')",3000),'its drawer header has Ir a la consola too');
+ // Its composer says so by the takeover's phase, as the card's line: bound, in a console (the other phases below).
+ const NOTE="smoke.text('[data-drawer=team-agent] [data-run-now-note]')",NOTE_BLOCKED="smoke.attr('[data-drawer=team-agent] [data-run-now-note]','data-run-now-note')==='blocked'&&document.querySelector('[data-drawer=team-agent] [data-run-now-send]').disabled";
+ ok(await until(NOTE+"==='QA está en una consola ahora.'&&"+NOTE_BLOCKED,2000),'its composer while bound: QA is in a console, nothing to send',await js(NOTE));
+ await js("smoke.click('[data-drawer=team-agent] [data-agent-goto-console=qa]')");
+ ok(await until("smoke.agents().view==='grid'&&smoke.app().activeWorkspaceId===smoke.paneWhere('"+P1+"').ws",3000),'Ir a la consola brings it on screen (Teams closes)');
+
+ // Devolver al Equipo: mid turn it says to wait and sends nothing; main busy says the same and the console stays.
+ const BUSY='Esperá a que termine el turno para devolverla.';
+ const rl0=await js("smoke.reqs('release').length");
+ await js("smoke.setStatus('"+P1+"','working')");await settle();
+ await js("smoke.click('[data-takeover-release="+P1+"]')");await settle();
+ v=await js("({busy:smoke.toastN('warning','"+BUSY+"'),confirm:smoke.has('[data-confirm]'),rel:smoke.reqs('release').length})");
+ ok(v.busy===1&&!v.confirm&&v.rel===rl0,'mid turn: Devolver al Equipo says to wait and sends nothing',v);
+ await js("smoke.setStatus('"+P1+"',null);smoke.fake.releaseRes={ok:false,error:'busy',detail:'turn'}");await settle();
+ await js("smoke.click('[data-takeover-release="+P1+"]')");
+ ok(await until("smoke.has('[data-confirm]')",2000),'idle: it asks first');
+ v=await js("smoke.text('body')");
+ ok(v.includes('¿Devolver a QA al equipo?')&&v.includes('Se cierra esta consola y QA vuelve al equipo. Su próxima corrida sigue esta misma conversación.'),'the confirm says the console closes and the next run continues this conversation');
+ await js("smoke.click('[data-confirm]')");
+ ok(await until("smoke.reqs('release').length==="+(rl0+1)+"&&smoke.toastN('warning','"+BUSY+"')===2",2000)&&!!(await js("smoke.paneWhere('"+P1+"')")),'main busy turn (a turn started meanwhile): the same words, the console stays');
+ // Main busy for the other reasons, each in its own words: the kill failed (still taken over), a release already on its way.
+ const RL_BUSY=[['kill','error','No se pudo cerrar esta consola, así que QA sigue en ella. Probá devolverlo de nuevo.'],['releasing','info','QA ya está volviendo al equipo.']];
+ for(const [i,[detail,kind,text]] of RL_BUSY.entries()){
+  await js("smoke.fake.releaseRes={ok:false,error:'busy',detail:'"+detail+"'};smoke.click('[data-takeover-release="+P1+"]')");
+  ok(await until("smoke.has('[data-confirm]')",2000),'it asks first (busy '+detail+')');
+  await js("smoke.click('[data-confirm]')");
+  ok(await until("smoke.reqs('release').length==="+(rl0+2+i)+"&&smoke.toastN('"+kind+"','"+text+"')===1",2000)&&!!(await js("smoke.paneWhere('"+P1+"')")),'main busy '+detail+': in its own words ('+kind+'), the console stays',await js("smoke.toastsOf('"+kind+"')"));
+ }
+ await js("smoke.click('[data-takeover-release="+P1+"]')");
+ ok(await until("smoke.has('[data-confirm]')",2000),'it asks again');
+ await js("smoke.click('[data-confirm]')");
+ ok(await until("smoke.reqs('release').length==="+(rl0+2+RL_BUSY.length)+"&&!smoke.paneWhere('"+P1+"')",3000),'confirmed: release, and the console goes');
+ v=await js("({r:smoke.reqs('release').at(-1),closed:smoke.agents().closedStack.length,chip:smoke.has('[data-takeover-chip]'),aborts:smoke.reqs('takeoverAbort').length})");
+ ok(v.r.teamId===TA&&v.r.agentId==='qa'&&Object.keys(v.r).length===3&&v.closed===cl0&&!v.chip&&v.aborts===0,'release names the team and the agent; the pane went with removePane (the closed stack as it was), no chip, no takeoverAbort',v);
+ v=await js("({ws:smoke.app().workspaces.some(w=>w.id==='"+WS1+"'),n:smoke.app().workspaces.length,made:JSON.parse(localStorage.getItem('snagentsos.teams.takeoverWorkspaces')||'[]')})");
+ ok(!v.ws&&v.n===ws0&&!v.made.includes(WS1),'the Equipo Alfa made only for that console goes with it, and so does its record',v);
+
+ // A running agent (Dev 2) asks first; the workspace main picked (w3, on the repo) gets the console, none is made.
+ await js("smoke.openTeams(smoke.TA,'agents')");
+ ok(await until("smoke.has('[data-agent-takeover=dev-2]')",3000),'back on Agentes');
+ const tkb0=await js("smoke.reqs('takeover').length"),w3n=await js("smoke.app().workspaces.find(w=>w.id==='w3').panes.length");ws0=await js('smoke.app().workspaces.length');
+ await js("smoke.click('[data-agent-takeover=dev-2]')");
+ ok(await until("smoke.has('[data-confirm]')",2000)&&(await js("smoke.reqs('takeover').length"))===tkb0,'a running agent asks first and sends nothing yet');
+ v=await js("smoke.text('body')");
+ ok(v.includes('¿Tomar el control de Dev 2?')&&v.includes('Se frena la corrida y esta conversación se abre en una consola. El equipo no usa a Dev 2 hasta que lo devuelvas.'),'the confirm says the run stops and the team does not use Dev 2 until it is back');
+ await js("smoke.click('[data-confirm]')");
+ ok(await until("smoke.reqs('takeoverBound').length===2&&smoke.agents().view==='grid'",3000),'confirmed: takeover, takeoverBound, on screen');
+ v=await js("(()=>{const b=smoke.reqs('takeoverBound').at(-1),app=smoke.app();return{b,n:app.workspaces.length,w3:app.workspaces.find(w=>w.id==='w3').panes.map(p=>p.id),p:smoke.paneWhere(b.paneId),active:app.activeWorkspaceId}})()");
+ ok(v.b.workspaceId==='w3'&&v.n===ws0&&v.w3.length===w3n+1&&v.w3.at(-1)===v.b.paneId&&v.active==='w3','the workspace main picked (its cwd is the repo): the console joins it and no workspace is made',v);
+ const P2=v.b.paneId;
+ ok(v.p.pane.title==='Dev 2 (t-35)'&&v.p.pane.cwd==='C:/repos/alfa/.worktrees/t-aaaaaa-35'&&v.p.pane.lastSession.sessionId===SID.dev2&&v.p.pane.setupId==='','its console: the title with the task, the worktree cwd, the session',v.p);
+ ok(await until("smoke.has('[data-takeover-chip="+P2+"]')",3000),'its chip renders');
+ // 1280 px and zoom: the chip gives way, its button stays inside the pane header.
+ for(const z of [1,1.25,1.5]){
+  w.webContents.setZoomFactor(z);await settle(250);
+  const laid=await until("!smoke.overflow()&&smoke.inCell('[data-takeover-release="+P2+"]','"+P2+"')",3000);
+  ok(laid,'zoom '+z+': the chip and its button fit the pane header',await js("({over:smoke.overflow(),in:smoke.inCell('[data-takeover-release="+P2+"]','"+P2+"')})"));
+  if(z===1.5){await shot('teams-takeover-chip-zoom150');await shot('teams-takeover-chip-zoom150')}
+ }
+ w.webContents.setZoomFactor(1);await settle(200);
+ await js("smoke.setLang('en')");await settle(200);
+ v=await js("({text:smoke.text('[data-takeover-chip="+P2+"] [data-takeover-label]'),rel:smoke.attr('[data-takeover-release="+P2+"]','aria-label'),copy:smoke.copy()})");
+ ok(v.text==='Team Alfa, Dev 2'&&v.rel==='Return to the Team'&&!/[\\u2013\\u2014]/.test(v.copy),'en: the chip, and no en or em dash',v.text);
+ await js("smoke.setLang('es')");await settle(200);
+ ok(!/[\\u2013\\u2014]/.test(await js('smoke.copy()')),'es: no en or em dash with the chip');
+ // The pane menu has Devolver al Equipo too. w3 is a workspace the user had: with its own console gone first, the
+ // release leaves it empty and it stays (only a workspace a takeover made goes).
+ await js("window.__l3=smoke.paneWhere('local3').pane;smoke.app().removePane('w3','local3')");
+ await js("smoke.menuOn('[data-pane-cell="+P2+"] header')");
+ ok(await until("[...document.querySelectorAll('[role=menuitem]')].some(e=>e.textContent.includes('Devolver al Equipo'))",2000),'the pane menu has Devolver al Equipo');
+ await js("smoke.clickText('[role=menuitem]','Devolver al Equipo')");
+ ok(await until("smoke.has('[data-confirm]')",2000),'it asks first');
+ await js("smoke.click('[data-confirm]')");
+ ok(await until("!smoke.paneWhere('"+P2+"')",3000),'confirmed: the console leaves w3');
+ v=await js("(()=>{const w3=smoke.app().workspaces.find(w=>w.id==='w3');return w3?{n:w3.panes.length,name:w3.name}:null})()");
+ ok(v&&v.n===0&&v.name==='Alfa repo','a workspace the user had stays even with no console left in it',v);
+ await js("smoke.app().restorePane('w3',window.__l3,0)");
+ ok((await js("smoke.app().workspaces.find(w=>w.id==='w3').panes.length"))===w3n,'(its own console back)');
+ ok((await js('smoke.agents().closedStack.length'))===cl0,'the closed stack is still as it was');
+
+ // A session a console of the user already holds (the Lead's, in w2): takeoverAbort and that console on screen.
+ await js("smoke.openTeams(smoke.TA,'agents')");
+ ok(await until("smoke.has('[data-agent-takeover=lead]')",3000),'back on Agentes');
+ const ab0=await js("smoke.reqs('takeoverAbort').length"),bd0=await js("smoke.reqs('takeoverBound').length"),pn0=await js('smoke.paneCount()');
+ await js("smoke.calls.focusReq.length=0;smoke.click('[data-agent-takeover=lead]')");
+ ok(await until("smoke.reqs('takeoverAbort').length==="+(ab0+1)+"&&smoke.agents().view==='grid'",3000),'a session another console holds: takeoverAbort and Teams closes');
+ v=await js("({bound:smoke.reqs('takeoverBound').length,panes:smoke.paneCount(),active:smoke.app().activeWorkspaceId,abort:smoke.reqs('takeoverAbort').at(-1),held:smoke.toastN('info','Esta conversación ya estaba abierta en esta consola.'),lead:smoke.AGENTS[smoke.TA].find(a=>a.id==='lead').takeover||null,focus:smoke.calls.focusReq.includes('held1')})");
+ ok(v.bound===bd0&&v.panes===pn0&&v.active==='w2'&&v.focus&&v.abort.agentId==='lead'&&v.held===1&&v.lead===null,'no second console: that console (w2) on screen and focused, it says so, and the Lead is back with the team',v);
+
+ // Refusals in words: no conversation yet, a run still stopping, a takeoverBound main refuses (nothing left behind).
+ await js("smoke.openTeams(smoke.TA,'agents')");
+ ok(await until("smoke.has('[data-agent-takeover=research]')",3000),'back on Agentes');
+ await js("smoke.click('[data-agent-takeover=research]')");
+ ok(await until("smoke.toastN('error','Investigación todavía no tiene una conversación para abrir: tomá el control después de su primera corrida.')===1",2000),'no conversation yet: no_session in words');
+ ok((await js('smoke.agents().view'))==='teams'&&(await js("smoke.reqs('takeoverAbort').length"))===ab0+1,'Teams stays and nothing is aborted');
+ await js("smoke.fake.tkRes={ok:false,error:'stopping'};smoke.click('[data-agent-takeover=dev]')");
+ ok(await until("smoke.toastN('warning','Esperá un momento: la corrida se está frenando.')===1",2000),'a run still stopping: wait a moment');
+ // busy with detail orphan: a process of the team from before the restart still writes that session (decision 64).
+ await js("smoke.fake.tkRes={ok:false,error:'busy',detail:'orphan'};smoke.click('[data-agent-takeover=dev]')");
+ ok(await until("smoke.toastN('error','Un proceso del equipo que quedó de antes de reiniciar la app todavía escribe la conversación de Dev. Terminalo desde Te necesita y después tomá el control.')===1",2000),'an orphan on that session: in its own words, pointing at Te necesita',await js("smoke.toastsOf('error')"));
+ ok((await js("smoke.toastN('warning','Ahora no se puede tomar el control de Dev. Probá de nuevo en un momento.')"))===0,'not the plain busy words');
+ ws0=await js('smoke.app().workspaces.length');const pc0=await js('smoke.paneCount()');
+ await js("smoke.fake.boundRes={ok:false,error:'bad_request'};smoke.click('[data-agent-takeover=qa]')");
+ ok(await until("smoke.reqs('takeoverAbort').length==="+(ab0+2)+"&&smoke.toastN('error','No se pudo abrir la consola de QA. Probá de nuevo.')===1",3000),'a takeoverBound main refuses: takeoverAbort, in words',await js("smoke.reqs('takeoverAbort').length"));
+ v=await js("({n:smoke.app().workspaces.length,panes:smoke.paneCount(),left:smoke.panesWith(smoke.SID.qa),view:smoke.agents().view,qa:smoke.AGENTS[smoke.TA].find(a=>a.id==='qa').status})");
+ ok(v.n===ws0&&v.panes===pc0&&v.left.length===0&&v.view==='teams'&&v.qa==='idle','no console nor workspace left behind, Teams still open, QA back with the team',v);
+ // 1280 px and zoom on Agentes with the takeover buttons; en.
+ for(const z of [1,1.25,1.5]){
+  w.webContents.setZoomFactor(z);await settle(250);
+  const laid=await until("!smoke.overflow()&&smoke.inView('[data-agent-takeover=dev-2]')&&smoke.inView('[data-agent-takeover=qa]')&&smoke.inView('[data-team-close]')",3000);
+  ok(laid,'zoom '+z+' on Agentes with Tomar el control: no overflow, the buttons on screen',await js("({over:smoke.overflow(),a:smoke.inView('[data-agent-takeover=qa]')})"));
+  if(z===1){await shot('teams-takeover-agents');await shot('teams-takeover-agents')}
+ }
+ w.webContents.setZoomFactor(1);await settle(200);
+ await js("smoke.setLang('en')");await settle(200);
+ v=await js("({take:smoke.text('[data-agent-takeover=qa]'),copy:smoke.copy()})");
+ ok(v.take==='Take control'&&!/[\\u2013\\u2014]/.test(v.copy),'en: Take control, and no en or em dash',v.take);
+ await js("smoke.setLang('es')");await settle(200);
+ // Main's setConfig reconcile bound the console at the config save, so takeoverBound came second and is refused: main's
+ // roster has it bound to that console, which stays (no takeoverAbort, no words).
+ const er0=await js("smoke.toastN('error')");
+ await js("smoke.fake.reconciled=true;smoke.click('[data-agent-takeover=dev]')");
+ ok(await until("smoke.agents().view==='grid'&&smoke.has('[data-takeover-chip]')",3000),'bound by main already: the console comes on screen with its chip',await js("({view:smoke.agents().view,aborts:smoke.reqs('takeoverAbort').length})"));
+ v=await js("({b:smoke.reqs('takeoverBound').at(-1),aborts:smoke.reqs('takeoverAbort').length,left:smoke.panesWith(smoke.SID.dev),err:smoke.toastN('error')})");
+ ok(v.b.agentId==='dev'&&v.left.length===1&&v.left[0]===v.b.paneId&&v.aborts===ab0+2&&v.err===er0,'the console stays, nothing is aborted and nothing is said',v);
+ // Main's K6 re-check: the console no longer holds the session (conflict stale, notHeld): the agent went back to the
+ // team without a kill, and the console stays, the user's, in words of its own (not the error of a console the team lost).
+ const P3=v.b.paneId;
+ await js("smoke.fake.notHeld=true;smoke.click('[data-takeover-release="+P3+"]')");
+ ok(await until("smoke.has('[data-confirm]')",2000),'Devolver al Equipo asks first');
+ await js("smoke.click('[data-confirm]')");
+ ok(await until("smoke.toastN('info','Esta consola ya no tenía la conversación de Dev, así que Dev volvió al equipo. La consola queda y es tuya.')===1",2000),'notHeld: the agent went back to the team, the console stays and is the user own, in words',await js("smoke.toastsOf('info')"));
+ ok(await until("!smoke.has('[data-takeover-chip="+P3+"]')",3000)&&!!(await js("smoke.paneWhere('"+P3+"')"))&&(await js("smoke.toastN('error','El equipo ya no tiene esta consola: no hay nada que devolver.')"))===0,'its chip goes with the refreshed list, the console stays, no error');
+ // The card's line follows the takeover's phase: stopping its run, waiting for its console, going back; "En una consola"
+ // only once a console holds it (above). A takeover still waiting for a console this window is not opening (main's
+ // stop outlived its wait, a restart): the card offers Tomar el control again (K2 retry), and main hands the session to
+ // that retry.
+ await js("(()=>{const A=smoke.AGENTS[smoke.TA],a=A.find(x=>x.id==='qa'),r=A.find(x=>x.id==='research');a.status='takenOver';a.takeover={phase:'bindPending',at:Date.now()};Object.assign(r,{status:'running',run:{...smoke.RUNS[smoke.R2].view,id:'r-555555555555',agentId:'research',roleId:'research',taskId:null,state:'stopping'},takeover:{phase:'stopping',at:Date.now()}})})();smoke.openTeams(smoke.TA,'agents');smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['agents']})");
+ const QA_TK='[data-agent-card=qa] [data-agent-takeover=qa]',LINES="({qa:smoke.text('[data-agent-card=qa] [data-agent-line]'),research:smoke.text('[data-agent-card=research] [data-agent-line]')})";
+ ok(await until("smoke.attr('[data-agent-card=qa]','data-agent-status')==='takenOver'&&smoke.has('"+QA_TK+"')",3000),'a takeover waiting for a console no window opens: its card offers Tomar el control again',await js("smoke.attr('[data-agent-card=qa]','data-agent-status')"));
+ ok(await until("smoke.text('[data-agent-card=research] [data-agent-line]')==='Frenando la corrida para pasártela'&&smoke.text('[data-agent-card=qa] [data-agent-line]')==='Esperando su consola'",3000),'the line while its run stops for the takeover, and while it waits for its console (not En una consola yet)',await js(LINES));
+ // The drawer's composer follows the same phases (never "en una consola" before one holds the agent).
+ await js("smoke.openAgentDrawer('research')");
+ ok(await until(NOTE+"==='Investigación está frenando su corrida para que lo tomes en una consola.'&&"+NOTE_BLOCKED,3000),'its composer while the run stops for the takeover says so, nothing to send',await js(NOTE));
+ await js("smoke.openAgentDrawer('qa')");
+ ok(await until(NOTE+"==='QA está esperando su consola.'&&"+NOTE_BLOCKED,3000),'and while it waits for its console',await js(NOTE));
+ await js("smoke.setLang('en')");await settle(200);
+ v=await js(LINES);
+ ok(v.research==='Stopping the run to hand it over to you'&&v.qa==='Waiting for its console','en: the same lines',v);
+ ok(await until(NOTE+"==='QA is waiting for its console.'",2000),'en: the composer while it waits for its console',await js(NOTE));
+ await js("smoke.openAgentDrawer('research')");
+ ok(await until(NOTE+"==='Investigación is stopping its run so you can take it over in a console.'",2000),'en: the composer while the run stops',await js(NOTE));
+ await js("smoke.setLang('es')");await settle(200);
+ await js("(()=>{const r=smoke.AGENTS[smoke.TA].find(x=>x.id==='research');delete r.run;r.status='takenOver';r.takeover={phase:'releasing',paneId:'gone-pane',at:Date.now()}})();smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['agents']})");
+ ok(await until("smoke.text('[data-agent-card=research] [data-agent-line]')==='Volviendo al equipo'",3000),'the line while it goes back to the team',await js(LINES));
+ ok(await until(NOTE+"==='Investigación está volviendo al equipo: esperá un momento.'&&"+NOTE_BLOCKED,3000),'its composer while it goes back to the team',await js(NOTE));
+ await js("smoke.setLang('en')");await settle(200);
+ ok(await until(NOTE+"==='Investigación is going back to the team: wait a moment.'",2000),'en: the composer while it goes back',await js(NOTE));
+ ok(!/[\\u2013\\u2014]/.test(await js('smoke.copy()')),'en: no en or em dash with the composer by phase');
+ await js("smoke.setLang('es')");await settle(200);
+ await js("(()=>{const r=smoke.AGENTS[smoke.TA].find(x=>x.id==='research');delete r.takeover;r.status='idle'})();smoke.push({teamId:smoke.TA,rev:++smoke.fake.rev,scopes:['agents']})");
+ ok(await until("smoke.text('[data-agent-card=research] [data-agent-line]')==='Libre'",3000),'(back to Libre)');
+ ok(await until(NOTE+"==='Le llega al agente como tu pedido. Enter es un salto de línea.'",3000),'(its composer takes a request again)',await js(NOTE));
+ await js('smoke.closeDrawer()');await settle();
+ v=await js("({dis:smoke.attr('"+QA_TK+"','disabled'),text:smoke.text('"+QA_TK+"')})");
+ ok(v.dis===null&&v.text==='Tomar el control','enabled, in its words',v);
+ const tb4=await js("smoke.reqs('takeoverBound').length");
+ await js("smoke.click('"+QA_TK+"')");
+ ok(await until("smoke.reqs('takeoverBound').length==="+(tb4+1)+"&&smoke.agents().view==='grid'",3000),'the retry: no confirm, main grants it, the console is bound and on screen');
+ v=await js("({left:smoke.panesWith(smoke.SID.qa),b:smoke.reqs('takeoverBound').at(-1)})");
+ ok(v.b.agentId==='qa'&&v.left.length===1&&v.left[0]===v.b.paneId,'one console of that session',v);
+ // A workspace made for a takeover in which the user opened a console of their own: the release takes only its console.
+ const P4=v.b.paneId,WS4=v.b.workspaceId;
+ ok((await js("smoke.app().workspaces.find(w=>w.id==='"+WS4+"').name"))==='Equipo Alfa'&&(await js("JSON.parse(localStorage.getItem('snagentsos.teams.takeoverWorkspaces')||'[]')")).includes(WS4),'the retry made an Equipo Alfa of its own, recorded');
+ await js("smoke.app().addPane('"+WS4+"',{type:'shell',title:'Mía'})");
+ ok(await until("smoke.has('[data-takeover-chip="+P4+"]')",3000),'its chip renders');
+ await js("smoke.click('[data-takeover-release="+P4+"]')");
+ ok(await until("smoke.has('[data-confirm]')",2000),'Devolver al Equipo asks first');
+ await js("smoke.click('[data-confirm]')");
+ ok(await until("!smoke.paneWhere('"+P4+"')",3000),'released: its console goes');
+ v=await js("(()=>{const ws=smoke.app().workspaces.find(w=>w.id==='"+WS4+"');return ws?{titles:ws.panes.map(p=>p.title)}:null})()");
+ ok(v&&v.titles.length===1&&v.titles[0]==='Mía','a workspace a takeover made that still holds another console stays, with it',v);
+
+ // K7: the console closed by hand (its X, Ctrl+W: closePane). Main gives the agent back on the next config save (its
+ // setConfig reconcile, as the fake's), and the Equipo Alfa made for that console goes with it, record and all, once no
+ // console is left there, even when the console was shown in a workspace of the user (its home goes); one that still
+ // holds another console stays, and so does a workspace the user had, even left empty. Nothing is released.
+ const MADE="JSON.parse(localStorage.getItem('snagentsos.teams.takeoverWorkspaces')||'[]')";
+ const rl7=await js("smoke.reqs('release').length"),k70=await js('smoke.fake.k7||0');
+ const takeK7=async(agentId,label)=>{const TK='[data-agent-card='+agentId+'] [data-agent-takeover='+agentId+']';
+  await js("smoke.openTeams(smoke.TA,'agents')");ok(await until("smoke.has('"+TK+"')",3000),label+': Tomar el control on its card');
+  const n=await js("smoke.reqs('takeoverBound').length");await js("smoke.click('"+TK+"')");
+  ok(await until("smoke.reqs('takeoverBound').length==="+(n+1)+"&&smoke.agents().view==='grid'",3000),label+': bound and on screen');
+  const b=await js("smoke.reqs('takeoverBound').at(-1)");ok(await until("smoke.has('[data-takeover-chip="+b.paneId+"]')",3000),label+': its chip renders');return b};
+ // A made workspace that still holds a console of the user's: it stays, with that console and its record.
+ const kA=await takeK7('qa','K7 beside a console of the user');
+ ok((await js(MADE)).includes(kA.workspaceId),'(a made Equipo Alfa, recorded)');
+ await js("smoke.app().addPane('"+kA.workspaceId+"',{type:'shell',title:'Mía 2'});smoke.app().closePane('"+kA.workspaceId+"','"+kA.paneId+"')");await settle();
+ v=await js("(()=>{const ws=smoke.app().workspaces.find(w=>w.id==='"+kA.workspaceId+"');return{titles:ws?ws.panes.map(p=>p.title).join():null,made:"+MADE+".includes('"+kA.workspaceId+"'),closed:smoke.agents().closedStack.at(-1)?.pane?.id}})()");
+ ok(v.titles==='Mía 2'&&v.made&&v.closed===kA.paneId,'closed by hand beside a console of the user: that made workspace stays, with it and its record (the console is in the closed stack, as any)',v);
+ await js('smoke.saveConfig()');
+ ok(await until("smoke.fake.k7==="+(k70+1)+"&&!smoke.has('[data-takeover-chip]')&&smoke.AGENTS[smoke.TA].find(a=>a.id==='qa').status==='idle'",3000),'main gives QA back at the config save (K7) and the chip goes',await js("({k7:smoke.fake.k7,chip:smoke.has('[data-takeover-chip]')})"));
+ // Alone in the Equipo Alfa made for it and closed by hand there: that workspace goes, and its record.
+ const kP=await takeK7('qa','K7 alone in its made workspace');
+ const wsP=await js('smoke.app().workspaces.length');
+ await js("smoke.app().closePane('"+kP.workspaceId+"','"+kP.paneId+"')");
+ ok(await until("!smoke.app().workspaces.some(w=>w.id==='"+kP.workspaceId+"')",3000),'closed by hand: the Equipo Alfa made only for it goes, before main says anything',await js("smoke.app().workspaces.map(w=>w.id+':'+w.panes.length).join()"));
+ v=await js("({n:smoke.app().workspaces.length,made:"+MADE+",rel:smoke.reqs('release').length,active:smoke.app().workspaces.some(w=>w.id===smoke.app().activeWorkspaceId)})");
+ ok(v.n===wsP-1&&!v.made.includes(kP.workspaceId)&&v.rel===rl7&&v.active,'its record is dropped, nothing is released, another workspace is on screen',v);
+ await js('smoke.saveConfig()');
+ ok(await until("smoke.fake.k7==="+(k70+2)+"&&!smoke.has('[data-takeover-chip]')",3000),'main gives QA back at the config save (K7)');
+ // Shown in a workspace of the user (moved, its home the made one) and closed by hand there: its made home goes.
+ const kB=await takeK7('qa','K7 moved away');
+ await js("smoke.app().movePaneToWorkspace('"+kB.paneId+"','w2')");await settle();
+ v=await js("(()=>{const ws=smoke.app().workspaces.find(w=>w.id==='"+kB.workspaceId+"');return{n:ws?ws.panes.length:null,at:(smoke.paneWhere('"+kB.paneId+"')||{}).ws,made:"+MADE+".includes('"+kB.workspaceId+"')}})()");
+ ok(v.n===0&&v.at==='w2'&&v.made,'moved to a workspace of the user: its Equipo Alfa stays while the console lives (its home), recorded',v);
+ const wsB=await js('smoke.app().workspaces.length'),w2B=await js("smoke.app().workspaces.find(w=>w.id==='w2').panes.length");
+ await js("smoke.app().closePane('w2','"+kB.paneId+"')");
+ ok(await until("!smoke.app().workspaces.some(w=>w.id==='"+kB.workspaceId+"')",3000),'closed by hand there: the Equipo Alfa made for it goes, before main says anything',await js("smoke.app().workspaces.map(w=>w.id+':'+w.panes.length).join()"));
+ v=await js("({n:smoke.app().workspaces.length,made:"+MADE+",w2:smoke.app().workspaces.find(w=>w.id==='w2').panes.length,rel:smoke.reqs('release').length})");
+ ok(v.n===wsB-1&&!v.made.includes(kB.workspaceId)&&v.w2===w2B-1&&v.rel===rl7,'its record is dropped, the workspace of the user it showed in stays with its own consoles, nothing is released',v);
+ await js('smoke.saveConfig()');
+ ok(await until("smoke.fake.k7==="+(k70+3)+"&&!smoke.has('[data-takeover-chip]')",3000),'main gives QA back at the config save (K7), moved away');
+ // In the workspace main picked, one the user had (w3), left with no console: it stays.
+ await js("window.__w3=smoke.app().workspaces.find(w=>w.id==='w3').panes.map(p=>JSON.parse(JSON.stringify(p)));for(const p of window.__w3)smoke.app().removePane('w3',p.id)");
+ const kC=await takeK7('dev-2','K7 in a workspace of the user');
+ ok(kC.workspaceId==='w3'&&!(await js(MADE)).includes('w3'),'(the console joined w3, which is not recorded)',kC);
+ await js("smoke.app().closePane('w3','"+kC.paneId+"')");await settle();
+ await js('smoke.saveConfig()');
+ ok(await until("smoke.fake.k7==="+(k70+4)+"&&!smoke.has('[data-takeover-chip]')",3000),'main gives Dev 2 back at the config save (K7)');
+ v=await js("(()=>{const w3=smoke.app().workspaces.find(w=>w.id==='w3');return w3?{n:w3.panes.length,name:w3.name}:null})()");
+ ok(v&&v.n===0&&v.name==='Alfa repo'&&(await js("smoke.reqs('release').length"))===rl7,'closed by hand: a workspace the user had stays even with no console left in it, nothing released',v);
+ await js("window.__w3.forEach((p,i)=>smoke.app().restorePane('w3',p,i))");
+ ok((await js("smoke.app().workspaces.find(w=>w.id==='w3').panes.length"))===(await js('window.__w3.length')),'(its own consoles back)');
+ ok((await js('smoke.calls.ptyWrite.length+smoke.calls.ptySubmit.length'))===pw3,'no takeover or release writes to a pty or submits anything');
+
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy; agents: roster, run now, run chat, stop, pauses, Labs confirm; board: columns, drag, bands, stopRun, keyboard, drawer, blocker loop, comments, new task, Lead thread; dispatch: autonomy switch, Por despachar, Despachar todo, kickoff; review: run now by phase, Retomar, consoleBusy; part 2: needs count parity, decide, answer, hire escaping, permission rule, plan section, Retomar after a dismissed card (the blocking card by cardId, the board card text, a refused card block), Esc keeps a draft, new-need toast; integrate: Integrar... in Te necesita, last attempt, preview, confirm verify, live steps and escaped tail, Esc and backdrop while running, sixteen errors with their actions, worktree console, blocked landing (none when already merged), refused start, a failed preflight ends the run, conflict files, askRebase, reopen while running (the outcome from the task main commits), merge commit, worktree removal, drawer section; B6 integration: ahead chip, no Marcar hecha, live worktree counts, dirty base files, install note; B6 review: verify runner notes in words, busy install and remove at the start, landing timeout apart from a temporary copy one; second round: base_dirty with ignored files, the stored step, landing and runner note in the row, the drawer, the last attempt and the result, an updateRef landing timeout; routines: panel, next run label, skipped fires, Correr ahora with a CLI that is off, team notes and their drawer with the title heading once, run silence and its ignore); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+n+' teams UI checks (part 1: section, shortcut, palette, host, overlay, refetch policy; agents: roster, run now, run chat, stop, pauses, Labs confirm; board: columns, drag, bands, stopRun, keyboard, drawer, blocker loop, comments, new task, Lead thread; dispatch: autonomy switch, Por despachar, Despachar todo, kickoff; review: run now by phase, Retomar, consoleBusy; part 2: needs count parity, decide, answer, hire escaping, permission rule, plan section, Retomar after a dismissed card (the blocking card by cardId, the board card text, a refused card block), Esc keeps a draft, new-need toast; integrate: Integrar... in Te necesita, last attempt, preview, confirm verify, live steps and escaped tail, Esc and backdrop while running, sixteen errors with their actions, worktree console, blocked landing (none when already merged), refused start, a failed preflight ends the run, conflict files, askRebase, reopen while running (the outcome from the task main commits), merge commit, worktree removal, drawer section; B6 integration: ahead chip, no Marcar hecha, live worktree counts, dirty base files, install note; B6 review: verify runner notes in words, busy install and remove at the start, landing timeout apart from a temporary copy one; second round: base_dirty with ignored files, the stored step, landing and runner note in the row, the drawer, the last attempt and the result, an updateRef landing timeout; routines: panel, next run label, skipped fires, Correr ahora with a CLI that is off, team notes and their drawer with the title heading once, run silence and its ignore; part 3: takeover console with lastSession, setupId and the resume target, takeoverBound after the config save, a new workspace with no shell console, the picked workspace, a held session revealed, refusals (an orphan in words), chip and menu item, release refused mid turn and busy by detail, removePane with the closed stack unchanged, the made workspace removed (never the user one, nor one with another console), notHeld in words, the line and the composer per phase, a waiting takeover retried, K7 a console closed by hand taking its made workspace); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; delete env.ELECTRON_RENDERER_URL

@@ -364,6 +364,13 @@ export interface AppState {
 
   hydrate: (config: ConfigFile | null) => void
   createWorkspace: (name: string, cwd: string) => string
+  /**
+   * App 2.7.0 (E10 B9, "Tomar el control"): a workspace holding exactly this
+   * one console, with no shell console beside it. Unlike createWorkspace it
+   * neither activates nor mounts anything: the caller mounts the console
+   * (ensureMounted with only its id) and brings it on screen (revealPane).
+   */
+  createWorkspaceWith: (name: string, cwd: string, pane: Partial<Pane>) => { workspaceId: string; paneId: string }
   createWorkspaceFull: (draft: WorkspaceDraft) => string
   /**
    * "Reload from .snagentsos.json" (E8-FR-27): replaces the grid, the consoles
@@ -693,6 +700,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       mountedWorkspaces: mountActive(s.mountedWorkspaces, ws.id),
     }))
     return ws.id
+  },
+
+  createWorkspaceWith: (name, cwd, pane) => {
+    const only: Pane = { ...makeShellPane(0), ...pane, id: uid('pane') }
+    const ws: Workspace = {
+      id: uid('ws'),
+      name,
+      cwd,
+      panes: [only],
+      favorite: false,
+      layout: { grid: 1, order: [only.id] },
+    }
+    set((s) => ({ workspaces: [...s.workspaces, ws] }))
+    return { workspaceId: ws.id, paneId: only.id }
   },
 
   createWorkspaceFull: (draft) => {

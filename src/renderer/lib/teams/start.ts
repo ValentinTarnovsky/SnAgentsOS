@@ -11,6 +11,7 @@ import { initLeadSync } from './lead'
 import { initNeedsSync } from './needs'
 import { initIntegrateSync } from './integrate'
 import { initRoutinesSync } from './routines'
+import { initTakeoverSync } from './takeover'
 
 export function startTeams(): () => void {
   const offs: Array<() => void> = [initTeams()]
@@ -20,6 +21,7 @@ export function startTeams(): () => void {
   offs.push(initNeedsSync())
   offs.push(initIntegrateSync())
   offs.push(initRoutinesSync())
+  offs.push(initTakeoverSync())
   return () => {
     // Areas first, the core last (its teardown closes the overlay and clears the store).
     for (const off of offs.reverse()) off()

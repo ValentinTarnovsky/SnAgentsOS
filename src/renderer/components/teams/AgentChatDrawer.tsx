@@ -12,6 +12,7 @@ import { RUN_STATE_KEY, RunHeader } from './RunHeader'
 import { RunChatView } from './RunChatView'
 import { RunNowComposer } from './RunNowComposer'
 import { LeadThreadView } from './LeadThreadView'
+import { TakeoverButton } from './TakeoverChip'
 import { segBtn } from './TaskFields'
 
 type AgentDrawer = Extract<NonNullable<TeamDrawer>, { kind: 'agent' }>
@@ -70,7 +71,8 @@ function LeadViewSwitch({ value, onPick }: { value: 'thread' | 'run'; onPick: (v
  * picker of its runs, the chosen run's header and chat, and the "Ejecutar
  * ahora" composer. With no run picked it follows the agent: its live run,
  * else its last one. Mounted with `key={agentId}`. The Lead's drawer (B3)
- * opens on the conversation (LeadThreadView) and switches to its runs.
+ * opens on the conversation (LeadThreadView) and switches to its runs. Its
+ * header carries "Tomar el control" or "Ir a la consola" (B9).
  */
 export function AgentChatDrawer({ teamId, view, drawer }: { teamId: string; view: TeamView; drawer: AgentDrawer }) {
   const t = useT()
@@ -108,6 +110,7 @@ export function AgentChatDrawer({ teamId, view, drawer }: { teamId: string; view
       pinScope={teamId}
       title={name}
       icon={<Bot size={15} className="shrink-0 text-text-secondary" />}
+      actions={agent ? <TakeoverButton teamId={teamId} agent={agent} name={name} variant="icon" /> : undefined}
       defaultWidth="clamp(420px, 46%, 860px)"
       maximized={maximized}
       onMaximize={setMaximized}

@@ -24,7 +24,7 @@ import type { DeadlineTimer } from '../DeadlineTimer'
 import { writeAtomicSync } from '../fsAtomic'
 import { openSystemCard } from './flow/agents'
 import { assertInvariants } from './flow/invariants'
-import type { FlowResult } from './flow/types'
+import type { FlowResult, TeamEffect } from './flow/types'
 
 /** Debounce of a dirty commit before the state files are written (design 3.3 rule 6). */
 export const TEAM_FLUSH_MS = 250
@@ -407,9 +407,11 @@ export class TeamStore {
    * team restarts empty with a `stateReset` card; a parseable one is salvaged
    * field by field. A file that cannot be read right now (a lock) throws and
    * stays as it is. Then the B2 reaper (when given) and the invariants
-   * (logged; thrown with `strict`).
+   * (logged; thrown with `strict`). The reaper's effects come back for
+   * TeamService to run on the store (B9: the comments a full thread
+   * archives), and a runtime it changed is written.
    */
-  static load(deps: TeamStoreDeps, teamId: string, def: TrustedDefinition | null): { store: TeamStore; repaired: string[]; reaped: Run[] } {
+  static load(deps: TeamStoreDeps, teamId: string, def: TrustedDefinition | null): { store: TeamStore; repaired: string[]; reaped: Run[]; effects: TeamEffect[] } {
     const fs = deps.fs ?? nodeSyncFs
     const dir = deps.dir()
     const repaired: string[] = []
@@ -485,11 +487,15 @@ export class TeamStore {
     }
 
     let reaped: Run[] = []
+    let effects: TeamEffect[] = []
+    let reapMoved = false
     if (deps.reap) {
       const r = deps.reap(rt, ring)
       if (r.ok) {
+        reapMoved = r.rt !== rt
         rt = r.rt
         reaped = r.result.reaped
+        effects = [...r.effects]
       }
     }
 
@@ -500,12 +506,14 @@ export class TeamStore {
       for (const i of issues) deps.log(`invariant ${teamId} ${i}`)
     }
     if (repaired.length > 0) deps.log(`store ${teamId} repaired ${repaired.slice(0, 20).join(',')}${repaired.length > 20 ? ` +${repaired.length - 20}` : ''}`)
-    if (fresh || reset || repaired.length > 0 || reaped.length > 0) {
+    // A runtime the reaper step moved without reaping a run (a takeover fixed at load) is written too: an archive its
+    // effects append must not come back again from the old state.json.
+    if (fresh || reset || repaired.length > 0 || reaped.length > 0 || reapMoved) {
       store.stateDirty = true
       store.runsDirty = runsRaw.kind === 'corrupt' || reaped.length > 0
       store.schedule()
     }
-    return { store, repaired, reaped }
+    return { store, repaired, reaped, effects }
   }
 
   get rt(): Readonly<TeamRuntime> {

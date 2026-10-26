@@ -14,11 +14,20 @@ const SEND_KEYS = ['Ctrl', 'Enter']
 /** teamId/agentId -> the unsent request while the drawer is closed (this session only, never stored). */
 const drafts = new Map<string, string>()
 
+/** A takeover blocks by its phase, as the agent card's line (B9): "en una consola" only once a console holds the agent. */
+const TAKEOVER_BLOCKED: Record<NonNullable<AgentView['takeover']>['phase'], MessageKey> = {
+  stopping: 'teams.run.composer.takeoverStopping',
+  bindPending: 'teams.run.composer.takeoverWaiting',
+  bound: 'teams.run.composer.inConsole',
+  releasing: 'teams.run.composer.takeoverReleasing',
+}
+
 /** Why this agent cannot take a request now, as the key of the line that says so (null: it can). */
 function blockedKey(agent: AgentView, trusted: boolean): MessageKey | null {
   if (!trusted) return 'teams.run.composer.untrusted'
   if (agent.retired) return 'teams.run.composer.retired'
-  if (agent.takeover || agent.status === 'takenOver') return 'teams.run.composer.inConsole'
+  if (agent.takeover) return TAKEOVER_BLOCKED[agent.takeover.phase]
+  if (agent.status === 'takenOver') return 'teams.run.composer.inConsole'
   if (agent.status === 'running') return 'teams.run.composer.busy'
   return null
 }

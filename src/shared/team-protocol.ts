@@ -261,6 +261,7 @@ export interface TeamReplyMap {
   confirmVerify: { team: TeamView }; removeWorktree: Empty
   routines: { routines: RoutineView[] }; routineRun: { runId?: string; taskId?: string }
   notes: { notes: WsNoteMeta[] }; note: { title: string; text: string; updatedAt: number }; runSilenceAck: Empty
+  // B9: a `busy` of takeover or release names its case in `detail` (TakeoverBusyDetail); a release `conflict` whose console stays, `notHeld`.
   takeover: { grant: TakeoverGrant }; takeoverBound: Empty; takeoverAbort: Empty; release: { paneId: string; workspaceId: string }
 }
 export type ConflictReason = 'rev' | 'stale' | 'concluded' | 'already_decided' | 'newer_comment_not_delivered'
@@ -280,6 +281,15 @@ export interface TeamFail {
   /** cycle: the task ids that close the loop (the path from the task back to itself), at most 20; loopMore = the ids past them. */
   loop?: string[]; loopMore?: number
 }
+/**
+ * B9: the `detail` of a takeover or release `busy`. `orphan` (takeover, any grant): a process of the team from before
+ * the restart still writes that session (decision 64; stop it from Te necesita). Release only: `turn` the console is
+ * mid turn (working, or asking for something); `kill` its pty outlived the kill (the console stays taken over);
+ * `releasing` a release of it is already running.
+ */
+export type TakeoverBusyDetail = 'orphan' | 'turn' | 'kill' | 'releasing'
+/** B9: the `detail` of a release `conflict {reason:'stale'}` whose console is still in the config: the agent went back to the team, the console stays the user's. */
+export type ReleaseStaleDetail = 'notHeld'
 export type TeamReply<O extends TeamOp = TeamOp> = ({ ok: true } & TeamReplyMap[O]) | TeamFail
 export type TeamReplyFor<R extends { op: TeamOp }> = TeamReply<R['op']>
 

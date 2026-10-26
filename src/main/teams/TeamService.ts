@@ -86,6 +86,7 @@ import { archiveSweep, changedScopes, deliverComments } from './flow/tasks'
 import { beginIntegrate, endIntegrate, integrateStep, interruptedIntegrates, worktreeRemoved, type IntegrateOutcome } from './flow/integrate'
 import { patchRoutine, routineOfRefs, routinePending, routineTask, routineWake } from './flow/routines'
 import { ackRunSilence as ackSilenceFlow, dismissStaleStalledCards, dismissStalledCard, openStalledCard } from './flow/silence'
+import { dropTakeover, reconcileTakeovers, settleTakeovers, TAKEOVER_CONFIRM_MS, TAKEOVER_STOP_WAIT_MS, takeoverBindAt, takeoverBindKey, takeoverPolicy, takeoversAtLoad, type TakeoverPane } from './flow/takeover'
 import { applyBlock, applyTool, noteOf, teamNoteText } from './flow/tools'
 import type { FlowCtx, FlowResult, TeamEffect, TeamToolCall } from './flow/types'
 import { createVerifyRunner, integrateHolder, Integrator, type IntegrateResult, type VerifyRunner } from './Integrator'
@@ -209,6 +210,10 @@ export interface TeamServiceDeps {
   // ---- B6 (Integrar). ----
   /** teams:integrateProgress to the renderer (every step of every integrate; the dialog filters its integrationId). */
   sendIntegrate?: (evt: IntegrateProgressEvt) => void
+
+  // ---- B9 (takeover). ----
+  /** Test seam: the takeover op's wait for a stopped run (TAKEOVER_STOP_WAIT_MS) and takeoverBound's wait for its console (TAKEOVER_CONFIRM_MS). */
+  takeoverWait?: { stopMs?: number; paneMs?: number }
 }
 
 /** A deferred run waits on a console (its session or its tree): a console status change pokes the dispatcher. */
@@ -224,6 +229,8 @@ export const REMOVE_WAIT_MS = STOP_GRACE_MS + 2_000
 const ORPHAN_IMAGES = new Set(['claude', 'codex', 'node', 'cmd'])
 /** B7: team notes one team keeps; `team note` past it answers busy (a Lead writes about one a day). */
 export const TEAM_NOTES_MAX = 500
+/** B9: consoles a notHeld release left in place that main remembers (consoleLeft); the oldest goes first. */
+export const LEFT_CONSOLES_MAX = 64
 
 /** A runtime built in place (B7: a routine's state, a card dismissed) as a reducer result for commit. */
 function committed(rt: TeamRuntime): FlowResult {
@@ -299,8 +306,17 @@ export class TeamService implements TeamInternals {
   readonly loader: TeamDefinitionLoader
   readonly trust: TeamTrust
   readonly git: GitRunner
-  /** B9 binds taken-over panes through it; until then a no-op consumer. */
-  readonly sink: PtySink = { id: 'teams', onSpawn: () => undefined, onData: () => undefined, onExit: () => undefined }
+  /**
+   * B9 (design 4.4): the ptys of the consoles. A spawn may be the console of a waiting takeover (K4, lazy: the saved
+   * config or its status names it); the exit of a bound console that left the config ends its takeover (K7, closed
+   * by hand). Never throws on the pty path.
+   */
+  readonly sink: PtySink = {
+    id: 'teams',
+    onSpawn: (_ptyId, paneId) => this.onConsoleSpawn(paneId),
+    onData: () => undefined,
+    onExit: (_ptyId, paneId, _code, info) => this.onConsoleExit(paneId, info.current),
+  }
   /**
    * B3: what `snaos team` reaches (CliService.attach({teams})): teamCtl checks
    * the params and the role, then reads and writes through this port (B7:
@@ -360,8 +376,11 @@ export class TeamService implements TeamInternals {
   private readonly runDetail = new Map<string, string>()
   /** The wake mark an admission consumed (R1), until the prep of its run reads it: a prep failure without a card puts it back (restoreWake). */
   private readonly consumedMark = new Map<string, WakeMark>()
-  /** afterRunPolicy, with the run's request text carried into a task-less re-wake (every run end of this service). */
-  private readonly runPolicy = (f: RunEndFacts): PolicyDecision => withRunDetail(afterRunPolicy(f), f.run, this.runDetail.get(f.run.id))
+  /**
+   * afterRunPolicy, with the run's request text carried into a task-less re-wake (every run end of this service). B9:
+   * a run a takeover stopped never blocks its task on a card (takeoverPolicy: the user drives that session now).
+   */
+  private readonly runPolicy = (f: RunEndFacts): PolicyDecision => takeoverPolicy(withRunDetail(afterRunPolicy(f), f.run, this.runDetail.get(f.run.id)), f)
   /** The run the renderer watches (teams:runAppend), one at a time (decision 49). */
   private watched: { teamId: string; runId: string } | null = null
   /** Last synthetic push per live run (decision 58). */
@@ -445,6 +464,19 @@ export class TeamService implements TeamInternals {
   private readonly silenceWatched = new Set<string>()
   /** The silence on show of a watched run (memory only, design 3.8). */
   private readonly runSilence = new Map<string, PaneSilence>()
+
+  // ---- B9 takeover ----
+  /** Takeover ops waiting for the run their takeover stops (K2), woken by the commit that ends it, or by their timeout. */
+  private readonly takeoverWaits = new Set<{ teamId: string; agentId: string; done: () => void }>()
+  /** takeoverBound ops waiting for their console (K4): each re-checks at a config save, a console status or a spawn. */
+  private readonly paneWaits = new Set<(final: boolean) => void>()
+  /** `<teamId>|<agentId>` -> the `at` of the waiting takeover whose grant already left main (a second click is busy). */
+  private readonly grantedAt = new Map<string, number>()
+  /**
+   * `<sessionId>|<paneId>` of each console a notHeld release left in place (K6), oldest first, at most
+   * LEFT_CONSOLES_MAX: that session binds to it again only once its live status names it. A bind to it clears it.
+   */
+  private readonly leftConsoles = new Set<string>()
 
   constructor(private readonly deps: TeamServiceDeps) {
     this.clock = deps.now ?? Date.now
@@ -603,11 +635,17 @@ export class TeamService implements TeamInternals {
   /**
    * CONFIG_SAVE: labs.teams off -> disable() (decision 57), on -> enable(); anything else pokes the dispatcher (a no-op
    * while not live). B7: `settings.agents.silence` configures the run silence watch (it arms nothing while no run is watched).
+   * B9 (4.4): the takeovers against the saved consoles (a waiting one finds its console, K4; a bound one whose console
+   * left the config goes back, K7), then every takeoverBound waiting for its console looks again.
    */
   setConfig(cfg: ConfigFile | null): void {
     this.configureSilence(cfg)
     const on = normalizeLabs(cfg?.settings?.labs).teams
     if (on === this.labOn) {
+      if (this.live()) {
+        for (const id of [...this.teams.keys()]) this.reconcileTakeoverPanes(id, cfg)
+        this.wakePaneWaits()
+      }
       // A saved config may free a session a run waits on (a console's lastSession, design 3.6 pokes); no-op while not live.
       this.poke()
       return
@@ -780,6 +818,13 @@ export class TeamService implements TeamInternals {
     for (const rec of loadedTeams) this.track(this.sweepIntegrate(rec))
     // B7 (design 3.8): routines armed again, with what came due while the app or the lab was off (once within 2 h).
     for (const rec of loadedTeams) this.armRoutines(rec.entry.id, true)
+    // B9 (4.4): every takeover against the saved consoles (a bound one whose console is gone goes back, a waiting one
+    // finds its console), then the `bind:` deadline of each one still waiting (deadlines are memory only).
+    const cfg = this.deps.config()
+    for (const rec of loadedTeams) {
+      this.reconcileTakeoverPanes(rec.entry.id, cfg)
+      this.syncBindKeys(rec.entry.id)
+    }
     this.deps.log(`enabled teams=${loadedTeams.length}`)
     this.emit('', ['list'])
     // The rows the load itself opened (a reaped run's card, a repair's) against each team's baseline (design 3.1).
@@ -801,7 +846,7 @@ export class TeamService implements TeamInternals {
     if (epoch !== this.epoch) return null
     this.trust.reload(e.id)
     const trusted = this.trust.trusted(e.id)
-    const { store, reaped, repaired } = TeamStore.load(this.storeDeps(e.id), e.id, trusted)
+    const { store, reaped, repaired, effects } = TeamStore.load(this.storeDeps(e.id), e.id, trusted)
     // Reaped runs (R10: interrupted {crash}) join the runs ring; their pids are never signalled here.
     for (const r of reaped) store.recordRun(r)
     if (reaped.length) this.deps.log(`reaped ${e.id} runs=${reaped.length}`)
@@ -811,6 +856,8 @@ export class TeamService implements TeamInternals {
     const rec: TeamRecord = { entry: e, store, loaded, trust: 'missing', repoIssues: [], repos: new Map(), stopWatch: null }
     this.teams.set(e.id, rec)
     this.newestRecs.set(e.id, rec)
+    // The effects of the load's reaper step (B9: the comments a held Lead's escalation note archived) run on this store.
+    this.runEffects(e.id, effects)
     await this.recompute(rec)
     if (epoch !== this.epoch) return rec
     // B5 notices (design 3.1): the baseline is the persisted `needsSeen`, never empty, so a restart re-notifies
@@ -882,9 +929,14 @@ export class TeamService implements TeamInternals {
       rec.stopWatch = null
       this.timer.clear(`defwatch:${id}`)
       for (const r of rec.store.rt.activeRuns) for (const k of ['max', 'conclude']) this.timer.clear(`run:${r.id}:${k}`)
+      // B9: a waiting takeover's `bind:` deadline is armed again by the next enable (from its `at`).
+      for (const a of rec.store.rt.agents) this.timer.clear(takeoverBindKey(id, a.id))
       rec.store.dispose()
     }
     this.teams.clear()
+    // B9: a takeover op waiting for its run or its console answers now (its team is gone: not_found).
+    for (const w of [...this.takeoverWaits]) w.done()
+    this.wakePaneWaits(true)
     // A removeTeam waiting for its runs goes on (it then finds its team gone: not_found).
     for (const id of [...this.idleWaiters.keys()]) this.wakeIdle(id)
     this.watched = null
@@ -909,10 +961,23 @@ export class TeamService implements TeamInternals {
       strict: this.deps.strict,
       reap: (rt, recent) => {
         const res = reapOnLoad(rt, recent, this.runPolicy, { now: this.clock() })
+        if (!res.ok) return res
         // B7: a routine wake the reaper's re-wake wrote over (a crash) is owed; the catch-up of this enable runs it.
-        const displaced = res.ok ? this.displacedWakes(teamId, rt, res.rt) : []
+        const displaced = this.displacedWakes(teamId, rt, res.rt)
         for (const d of displaced) this.deps.log(`routine ${teamId} ${d.routineId} wake displaced on ${d.agentId} by ${d.by} at load: ${d.owed ? 'owed to the catch-up' : 'dropped, the routine is off'}`)
-        return displaced.length && res.ok ? { ...res, rt: withDisplaced(res.rt, displaced) } : res
+        let out = displaced.length ? withDisplaced(res.rt, displaced) : res.rt
+        let effects = res.effects
+        // B9 (4.4): a releasing takeover is bound again, a stopping one whose run the reaper ended hands its session
+        // over (bindPending; enable arms its `bind:` deadline), before the load checks the invariants.
+        const tk = takeoversAtLoad(out, { now: this.clock() })
+        if (tk.ok && tk.rt !== out) {
+          out = tk.rt
+          // A held Lead's leadEscalation note in a full Lead thread archives its oldest delivered comments: loadTeam
+          // runs that effect once the store is held, or they would be cut.
+          effects = [...effects, ...tk.effects]
+          this.deps.log(`takeover ${teamId} at load: held=${tk.result.held.join(',') || '-'} dropped=${tk.result.dropped.join(',') || '-'} escalated=${tk.result.escalated.join(',') || '-'}`)
+        }
+        return out === res.rt ? res : { ...res, rt: out, effects }
       },
     }
   }
@@ -1125,6 +1190,9 @@ export class TeamService implements TeamInternals {
         this.commit(teamId, requestStop(rec.store.rt, m[1], reason, { now: this.clock() }, this.runPolicy), ['agents', 'run'], { runId: m[1] })
         return
       }
+      case 'bind':
+        this.onBindDue(rest)
+        return
       default:
         this.deps.log(`deadline ${kind} not handled`)
     }
@@ -1314,6 +1382,19 @@ export class TeamService implements TeamInternals {
   commit<R>(teamId: string, res: FlowResult<R>, scopes: TeamScope[], hint?: { taskId?: string; runId?: string }): FlowResult<R> {
     const rec = this.teams.get(teamId)
     if (!rec) return res
+    // B9 (K2): a run that ends while a takeover stops it hands its session over in that end's own commit, whatever
+    // path ended it (its close, a forced stop, Labs off, a quit); a held Lead's pending approvals go to the user in
+    // that same commit (escalateHeldLead). What it moved joins the scopes and its effects run with the rest.
+    if (res.ok) {
+      const settled = settleTakeovers(res.rt, { now: this.clock() })
+      if (settled.ok && settled.rt !== res.rt) {
+        scopes = [...new Set<TeamScope>([...scopes, ...changedScopes(res.rt, settled.rt)])]
+        res = { ...res, rt: settled.rt, effects: [...res.effects, ...settled.effects] }
+        if (settled.result.held.length) this.deps.log(`takeover ${teamId} run ended: holding ${settled.result.held.join(',')}`)
+        if (settled.result.dropped.length) this.deps.log(`takeover ${teamId} run ended without a session: ${settled.result.dropped.join(',')}`)
+        if (settled.result.escalated.length) this.deps.log(`takeover ${teamId} the Lead is in a console: ${settled.result.escalated.join(',')} to the user`)
+      }
+    }
     // A task run that is admitted, starts or ends moves its card (run glyph, phase): the board and the task drawer refresh.
     const hintRun = hint?.runId
     if (res.ok && hintRun && !hint?.taskId) {
@@ -1334,6 +1415,8 @@ export class TeamService implements TeamInternals {
     if (displaced.length) this.retryDisplaced(teamId, displaced)
     // The effects first: a run end joins the runs ring there (usageToday).
     this.runEffects(teamId, out.effects)
+    // B9: the takeover ops waiting on a run end and the `bind:` deadlines follow the committed agents.
+    if (out.rt.agents !== before.agents) this.takeoversMoved(teamId)
     if (header !== null && this.teams.get(teamId) === rec && teamHeaderKey(rec, this.trust.trusted(teamId), this.clock()) !== header) this.emit(teamId, ['team'], hint)
     return out
   }
@@ -1536,13 +1619,17 @@ export class TeamService implements TeamInternals {
     return this.integrating.size
   }
 
-  /** True for a session id in any AgentState.sessions or active run: TranscriptLocator never picks its transcript for a console. */
+  /**
+   * True for a session id in any AgentState.sessions or active run: TranscriptLocator never picks its transcript for a
+   * console. B9: except a session a takeover holds for a console of the user (bindPending, bound, releasing), whose
+   * console finds its own transcript like any other.
+   */
   ownsSession(sessionId: string): boolean {
     if (!sessionId) return false
     for (const rec of this.teams.values()) {
       const rt = rec.store.rt
       if (rt.activeRuns.some((r) => r.sessionId === sessionId)) return true
-      if (rt.agents.some((a) => Object.values(a.sessions).some((s) => s.sessionId === sessionId))) return true
+      if (rt.agents.some((a) => !(a.takeover && a.takeover.phase !== 'stopping' && a.takeover.sessionId === sessionId) && Object.values(a.sessions).some((s) => s.sessionId === sessionId))) return true
     }
     return false
   }
@@ -1558,6 +1645,8 @@ export class TeamService implements TeamInternals {
     // A console that stopped working may free a session or a tree a deferred run waits on (G5, G6): one pass.
     if (this.waitsOnConsoles.size > 0 && evt.state !== 'working' && evt.state !== 'action') this.poke()
     if (evt.state === null || !evt.sessionId) return
+    // B9 (K4, lazy): a console's status names the session a waiting takeover hands over.
+    this.onConsoleSession(evt.sessionId)
     for (const [teamId, rec] of this.teams) {
       for (const run of rec.store.rt.activeRuns) {
         if (run.sessionId !== evt.sessionId || (run.state !== 'starting' && run.state !== 'running')) continue
@@ -1597,6 +1686,266 @@ export class TeamService implements TeamInternals {
   /** The B3 CLI counts the team writes of a run (classifyOutcome reads them at close). */
   noteTeamWrite(runId: string): void {
     this.runWrites.set(runId, (this.runWrites.get(runId) ?? 0) + 1)
+  }
+
+  // ---- takeover (B9, design 4.4; the ops are ops/takeover.ts) ------------------------------------
+
+  paneHolder(provider: AgentProvider, sessionId: string): string | null {
+    try {
+      return this.deps.sessionHolder?.(provider, sessionId) ?? null
+    } catch {
+      return null
+    }
+  }
+
+  paneState(paneId: string): PaneStatusEvt | null {
+    try {
+      return this.deps.status?.stateOf(paneId) ?? null
+    } catch {
+      return null
+    }
+  }
+
+  paneSpawnCwd(paneId: string): string | undefined {
+    return this.deps.pty?.spawnCwd(paneId)
+  }
+
+  panePty(paneId: string): string | null {
+    return this.deps.pty?.ptyIdForPane(paneId) ?? null
+  }
+
+  async killPane(paneId: string): Promise<void> {
+    await this.deps.pty?.killPaneAndWait(paneId)
+  }
+
+  orphanSession(teamId: string, sessionId: string): boolean {
+    return this.lingeringOf(teamId).sessions.has(sessionId)
+  }
+
+  runEndPolicy(f: RunEndFacts): PolicyDecision {
+    return this.runPolicy(f)
+  }
+
+  takeoverGranted(teamId: string, agentId: string, at: number, mark = false): boolean {
+    const key = `${teamId}|${agentId}`
+    if (mark) this.grantedAt.set(key, at)
+    return this.grantedAt.get(key) === at
+  }
+
+  consoleLeft(sessionId: string, paneId: string, mark = false): boolean {
+    const key = `${sessionId}|${paneId}`
+    if (mark) {
+      this.leftConsoles.delete(key)
+      this.leftConsoles.add(key)
+      for (const old of this.leftConsoles) {
+        if (this.leftConsoles.size <= LEFT_CONSOLES_MAX) break
+        this.leftConsoles.delete(old)
+      }
+    }
+    return this.leftConsoles.has(key)
+  }
+
+  /** K2: resolves once the agent's takeover leaves `stopping` (takeoversMoved, after the commit that ended its run), or at the stop wait. Never polls. */
+  takeoverSettled(teamId: string, agentId: string): Promise<void> {
+    const stopping = (): boolean => this.teams.get(teamId)?.store.rt.agents.find((a) => a.id === agentId)?.takeover?.phase === 'stopping'
+    if (!stopping()) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const w: { teamId: string; agentId: string; done: () => void } = {
+        teamId,
+        agentId,
+        done: () => {
+          if (timer !== undefined) clearTimeout(timer)
+          this.takeoverWaits.delete(w)
+          resolve()
+        },
+      }
+      this.takeoverWaits.add(w)
+      timer = setTimeout(w.done, this.deps.takeoverWait?.stopMs ?? TAKEOVER_STOP_WAIT_MS)
+      timer.unref?.()
+    })
+  }
+
+  /** K4: `check` again at every config save, console status and spawn (wakePaneWaits) until it holds; false at the confirm wait. Never polls. */
+  awaitPane(check: () => boolean): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const w = (final: boolean): void => {
+        let ok = false
+        try {
+          ok = check()
+        } catch {
+          ok = false
+        }
+        if (!ok && !final) return
+        if (timer !== undefined) clearTimeout(timer)
+        this.paneWaits.delete(w)
+        resolve(ok)
+      }
+      this.paneWaits.add(w)
+      timer = setTimeout(() => w(true), this.deps.takeoverWait?.paneMs ?? TAKEOVER_CONFIRM_MS)
+      timer.unref?.()
+    })
+  }
+
+  /** Every takeoverBound waiting for its console looks again (`final`: it answers now, a teardown). */
+  private wakePaneWaits(final = false): void {
+    for (const w of [...this.paneWaits]) w(final)
+  }
+
+  /**
+   * After a commit that moved the agents: the takeover ops whose run ended go on, the `bind:` deadlines follow, and a
+   * console bound again (its live status named the session) is no longer one a notHeld release left in place.
+   */
+  private takeoversMoved(teamId: string): void {
+    const rec = this.teams.get(teamId)
+    if (!rec) return
+    for (const w of [...this.takeoverWaits]) {
+      if (w.teamId === teamId && rec.store.rt.agents.find((a) => a.id === w.agentId)?.takeover?.phase !== 'stopping') w.done()
+    }
+    this.syncBindKeys(teamId)
+    if (this.leftConsoles.size === 0) return
+    for (const a of rec.store.rt.agents) {
+      const tk = a.takeover
+      if (tk?.phase === 'bound') this.leftConsoles.delete(`${tk.sessionId}|${tk.paneId}`)
+    }
+  }
+
+  /** `bind:<teamId>:<agentId>` armed at `at + TAKEOVER_BIND_MS` for every waiting takeover while live, cleared for the rest (design 3.10). */
+  private syncBindKeys(teamId: string): void {
+    const rec = this.teams.get(teamId)
+    if (!rec) return
+    for (const a of rec.store.rt.agents) {
+      const key = takeoverBindKey(teamId, a.id)
+      const tk = a.takeover
+      if (tk?.phase === 'bindPending' && this.live()) {
+        const at = takeoverBindAt(tk)
+        if (this.timer.at(key) !== at) this.timer.set(key, at)
+      } else if (this.timer.has(key)) this.timer.clear(key)
+    }
+  }
+
+  /** K5: a waiting takeover's `bind:` deadline. A console that holds its session after all binds it; else the agent goes back (G5 still protects a console that shows up later). */
+  private onBindDue(rest: string): void {
+    const i = rest.indexOf(':')
+    const teamId = i < 0 ? rest : rest.slice(0, i)
+    const agentId = i < 0 ? '' : rest.slice(i + 1)
+    const rec = this.teams.get(teamId)
+    if (!rec || !this.live()) return
+    const waiting = (): boolean => rec.store.rt.agents.find((a) => a.id === agentId)?.takeover?.phase === 'bindPending'
+    if (!waiting()) return
+    this.reconcileTakeoverPanes(teamId, this.deps.config())
+    if (!waiting() || this.teams.get(teamId) !== rec) return
+    const rt = rec.store.rt
+    const res = dropTakeover(rt, agentId, { now: this.clock() })
+    if (!res.ok || res.rt === rt) return
+    this.commit(teamId, res, [...new Set<TeamScope>(['agents', 'list', ...changedScopes(rt, res.rt)])])
+    this.deps.log(`takeover ${teamId} ${agentId} bind timed out: back to the team`)
+  }
+
+  /** True when some team has a takeover in this phase. */
+  private anyTakeover(phase: 'bindPending' | 'bound'): boolean {
+    for (const rec of this.teams.values()) if (rec.store.rt.agents.some((a) => a.takeover?.phase === phase)) return true
+    return false
+  }
+
+  /**
+   * K4 by reconcile and K7, one team against the saved consoles: a waiting takeover binds to the console that fits
+   * its session best (takeoverPaneRank: its live status names it, else `sessionHolder` names it, else its lastSession
+   * is it; never one whose live status names another session or that a notHeld release left in place), a bound one
+   * whose console left the config goes back and one whose console sits under another workspace now records it.
+   * Commits only what moved.
+   */
+  private reconcileTakeoverPanes(teamId: string, cfg: ConfigFile | null): void {
+    const rec = this.teams.get(teamId)
+    if (!rec) return
+    const rt = rec.store.rt
+    if (!rt.agents.some((a) => a.takeover?.phase === 'bindPending' || a.takeover?.phase === 'bound')) return
+    const res = reconcileTakeovers(rt, this.consolePanes(cfg, rt), { now: this.clock() })
+    if (!res.ok || res.rt === rt) return
+    this.commit(teamId, res, [...new Set<TeamScope>(['agents', 'list', ...changedScopes(rt, res.rt)])])
+    if (res.result.bound.length) this.deps.log(`takeover ${teamId} bound by the saved consoles: ${res.result.bound.join(',')}`)
+    if (res.result.released.length) this.deps.log(`takeover ${teamId} console gone from the config: ${res.result.released.join(',')} back to the team`)
+    if (res.result.moved.length) this.deps.log(`takeover ${teamId} console under another workspace: ${res.result.moved.join(',')} follow it`)
+  }
+
+  /**
+   * The consoles of a saved config by pane id: their workspace, lastSession and the session their own live status
+   * names; for each waiting takeover, the console `sessionHolder` names (`holds`) and those a notHeld release left in
+   * place for its session (`left`).
+   */
+  private consolePanes(cfg: ConfigFile | null, rt: Readonly<TeamRuntime>): Map<string, TakeoverPane> {
+    const out = new Map<string, TakeoverPane>()
+    for (const ws of cfg?.workspaces ?? []) {
+      for (const p of ws?.panes ?? []) {
+        if (!p || typeof p.id !== 'string' || isTeamPaneId(p.id) || out.has(p.id)) continue
+        const pane: TakeoverPane = { workspaceId: ws.id }
+        if (p.lastSession?.sessionId) {
+          pane.sessionId = p.lastSession.sessionId
+          pane.provider = p.lastSession.provider
+        }
+        const live = this.paneState(p.id)?.sessionId
+        if (live) pane.live = live
+        out.set(p.id, pane)
+      }
+    }
+    for (const a of rt.agents) {
+      const tk = a.takeover
+      if (tk?.phase !== 'bindPending') continue
+      const holder = this.paneHolder(tk.provider, tk.sessionId)
+      const pane = holder ? out.get(holder) : undefined
+      if (holder && pane) out.set(holder, { ...pane, holds: tk.sessionId })
+      if (this.leftConsoles.size === 0) continue
+      for (const [paneId, p] of out) {
+        if (this.consoleLeft(tk.sessionId, paneId)) out.set(paneId, { ...p, left: [...(p.left ?? []), tk.sessionId] })
+      }
+    }
+    return out
+  }
+
+  /** The sink's spawn: the console of a waiting takeover may be listed by now (K4, lazy); every takeoverBound looks again. */
+  private onConsoleSpawn(paneId: string): void {
+    try {
+      if (!this.live() || isTeamPaneId(paneId)) return
+      if (this.anyTakeover('bindPending')) for (const id of [...this.teams.keys()]) this.reconcileTakeoverPanes(id, this.deps.config())
+      this.wakePaneWaits()
+    } catch (err) {
+      this.deps.log(`takeover spawn check failed ${(err as Error).name}`)
+    }
+  }
+
+  /**
+   * The sink's exit (K7): the live pty of a bound console ended and the console left the saved config (closed by
+   * hand): its takeover ends, nothing to kill. One still in the config stays bound (it can be restarted); the config
+   * save that drops it later reconciles it (setConfig). A release's own kill finds its takeover `releasing`: untouched.
+   */
+  private onConsoleExit(paneId: string, current: boolean): void {
+    try {
+      if (!this.live() || !current || isTeamPaneId(paneId) || !this.anyTakeover('bound')) return
+      const cfg = this.deps.config()
+      if ((cfg?.workspaces ?? []).some((w) => (w?.panes ?? []).some((p) => p?.id === paneId))) return
+      for (const [teamId, rec] of this.teams) {
+        for (const a of rec.store.rt.agents) {
+          const tk = a.takeover
+          if (tk?.phase !== 'bound' || tk.paneId !== paneId) continue
+          const rt = rec.store.rt
+          const res = dropTakeover(rt, a.id, { now: this.clock() })
+          if (!res.ok || res.rt === rt) continue
+          this.commit(teamId, res, [...new Set<TeamScope>(['agents', 'list', ...changedScopes(rt, res.rt)])])
+          this.deps.log(`takeover ${teamId} ${a.id} console closed: back to the team`)
+        }
+      }
+    } catch (err) {
+      this.deps.log(`takeover exit check failed ${(err as Error).name}`)
+    }
+  }
+
+  /** A console's status names a session: a waiting takeover of it may bind (K4, lazy), and every takeoverBound looks again. */
+  private onConsoleSession(sessionId: string): void {
+    let waiting = false
+    for (const rec of this.teams.values()) if (rec.store.rt.agents.some((a) => a.takeover?.phase === 'bindPending' && a.takeover.sessionId === sessionId)) waiting = true
+    if (waiting) for (const id of [...this.teams.keys()]) this.reconcileTakeoverPanes(id, this.deps.config())
+    if (waiting || this.paneWaits.size > 0) this.wakePaneWaits()
   }
 
   // ---- the `snaos team` port (B3, design 3.9) ---------------------------------------------------
@@ -3575,7 +3924,13 @@ export class TeamService implements TeamInternals {
     rec.stopWatch = null
     this.timer.clear(`defwatch:${teamId}`)
     this.routines.disarm(teamId)
+    // B9: a takeover of the team ends with it (its console stays an ordinary console of the user).
+    for (const a of rec.store.rt.agents) {
+      this.timer.clear(takeoverBindKey(teamId, a.id))
+      this.grantedAt.delete(`${teamId}|${a.id}`)
+    }
     this.teams.delete(teamId)
+    for (const w of [...this.takeoverWaits]) if (w.teamId === teamId) w.done()
     this.removedRecs.add(rec)
     if (this.newestRecs.get(teamId) === rec) this.newestRecs.delete(teamId)
     // Decision 63: its task worktrees lose their owner and read as ordinary orphans in Settings > Git (never deleted

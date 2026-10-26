@@ -829,6 +829,18 @@ function storeChecks(tmp) {
   check(store.rt.activeRuns.length === 0 && store.rt.agents[0].status === 'idle' && store.rt.agents[0].runId === undefined && repaired.some((r) => r.includes(run.id)), 'a run terminal in runs.json wins over its active copy')
   store.dispose()
 
+  // B9 review: the load hands back the effects of its reaper step (TeamService runs them on the store: the comments a
+  // held Lead's escalation note archives from a full thread), and a runtime that step moved without reaping a run is
+  // written, so an archive appended at load never comes back from the old state.json.
+  const archived = { kind: 'archiveComments', target: 'lead', comments: [{ id: 'm-1', target: 'lead', author: { kind: 'system' }, kind: 'system', at: 1, text: 'a' }] }
+  const movedLoad = M.TeamStore.load({ ...deps, fs: realFs, reap: (rt) => ({ ok: true, rt: { ...rt, autoDispatch: !rt.autoDispatch }, effects: [archived], result: { reaped: [] } }) }, 'tm-0123456789ab', null)
+  same(movedLoad.effects, [archived], 'the load hands back the reaper step\'s effects')
+  check(movedLoad.reaped.length === 0 && timer.has('flush:tm-0123456789ab'), 'a runtime the reaper step moved without reaping a run is written')
+  movedLoad.store.dispose()
+  const stillLoad = M.TeamStore.load({ ...deps, fs: realFs, reap: (rt) => ({ ok: true, rt, effects: [], result: { reaped: [] } }) }, 'tm-0123456789ab', null)
+  check(stillLoad.effects.length === 0 && stillLoad.repaired.length === 0 && !timer.has('flush:tm-0123456789ab'), 'a reaper step that moved nothing: no effect and nothing to write')
+  stillLoad.store.dispose()
+
   // salvage: a bad element is dropped and named.
   const st2 = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'))
   st2.agents.push({ id: 'broken' })

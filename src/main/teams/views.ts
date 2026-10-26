@@ -47,6 +47,7 @@ import {
   LEAD_THREAD,
   PRIORITY_RANK,
   REPO_MAIN,
+  TASK_ID_RE,
   TEAM_MAX_CONCURRENT,
   taskNumOf,
   type Actor,
@@ -304,13 +305,17 @@ export function needsRowsOf(rec: TeamRecord, trusted: TrustedDefinition | null):
   return teamNeedsRows(needsInputOf(rec.store.rt, rec.trust, rec.trustSince, trusted))
 }
 
+/**
+ * B9: the consoles that hold an agent's session (bound, or releasing while Devolver kills it): the chip of each
+ * console and its "Devolver al Equipo". A waiting takeover has no console yet and is not listed.
+ */
 function takeoversOf(rt: Readonly<TeamRuntime>, def: TeamDefinition | null): TeamTakeoverRef[] {
   const out: TeamTakeoverRef[] = []
   for (const a of rt.agents) {
     const t = a.takeover
     if (!t || (t.phase !== 'bound' && t.phase !== 'releasing')) continue
     const ref: TeamTakeoverRef = { paneId: t.paneId, agentId: a.id, agentName: agentName(rt, def, a.id), at: t.at }
-    if (t.sessionKey.startsWith('t-')) ref.taskId = t.sessionKey
+    if (TASK_ID_RE.test(t.sessionKey)) ref.taskId = t.sessionKey
     out.push(ref)
   }
   return out
@@ -504,10 +509,13 @@ export function agentView(
   const ctx = out.run?.context ?? out.lastRun?.context
   if (ctx) out.context = { ...ctx }
   if (waiting && !active) out.waiting = { ...waiting }
+  // B9: a takeover (its phase; the console once bound, "Ir a la consola"); a held one names the task its session is of
+  // (the card reads "En una consola" on that task, no run is active).
   const t = a.takeover
   if (t) {
     out.takeover = { phase: t.phase, at: t.at }
     if (t.phase === 'bound' || t.phase === 'releasing') out.takeover.paneId = t.paneId
+    if (!active && t.phase !== 'stopping' && TASK_ID_RE.test(t.sessionKey)) out.taskId = t.sessionKey
   }
   return out
 }

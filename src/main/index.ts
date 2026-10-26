@@ -1013,6 +1013,8 @@ async function bootstrap(): Promise<void> {
     },
   })
   teamService = teams
+  // B9: the consoles' ptys (a takeover's console spawning, a bound one closed by hand).
+  ptyManager.addSink(teams.sink)
   // B8: teamReq and the phone's three Teams ctls reach the service from the phone sessions (origin phone).
   remoteManager.setTeams(teams.remoteView)
   statusManager.addListener((evt) => teams.onPaneStatus(evt))

@@ -5,10 +5,10 @@
  * union and the preload never change after B1.
  */
 import type { ChatMessage } from '@shared/chat-types'
-import type { ConfigFile, PaneSilence } from '@shared/types'
+import type { AgentProvider, ConfigFile, PaneSilence, PaneStatusEvt } from '@shared/types'
 import type { IntegratePreview, RoutineView, TeamFail, TeamOp, TeamReply, TeamRequest, TeamScope, TeamTrustState } from '@shared/team-protocol'
 import type { WsNoteMeta } from '@shared/ws-notes'
-import type { Actor, CardAnswer, DefError, DeferInfo, ResolvedRepo, TeamDefinition, TeamTask, TrustedDefinition } from '@shared/teams'
+import type { Actor, CardAnswer, DefError, DeferInfo, PolicyDecision, ResolvedRepo, RunEndFacts, TeamDefinition, TeamTask, TrustedDefinition } from '@shared/teams'
 import type { VerifySuggestion } from '@shared/verifyDetect'
 import type { GitRunner } from '../../git/gitExec'
 import type { FlowCtx, FlowResult } from '../flow/types'
@@ -117,6 +117,31 @@ export interface TeamInternals {
   teamNote(teamId: string, noteId: string): Promise<{ title: string; text: string; updatedAt: number } | TeamFail>
   /** B7: runSilenceAck: the rest of the run's silence is ignored and its stalled card goes. */
   ackRunSilence(teamId: string, runId: string): TeamFail | null
+  /** B9: the console holding a session (a live precise status, an agent session record, a config lastSession; live ptys only), null when none. */
+  paneHolder(provider: AgentProvider, sessionId: string): string | null
+  /** B9: a console's status (a release waits while it is working or asks for something). */
+  paneState(paneId: string): PaneStatusEvt | null
+  /** B9: the cwd a console's live pty was spawned in (K4), undefined without one. */
+  paneSpawnCwd(paneId: string): string | undefined
+  /** B9: the live pty of a console, null when none. */
+  panePty(paneId: string): string | null
+  /** B9: ptyManager.killPaneAndWait (K6: only a console main verified holds the session). */
+  killPane(paneId: string): Promise<void>
+  /** B9: a process of an earlier app life (decision 64) still holds this session: a takeover would write beside it. */
+  orphanSession(teamId: string, sessionId: string): boolean
+  /** B9 (K2): resolves once the agent's takeover leaves `stopping` (its run ended), or after the stop wait. */
+  takeoverSettled(teamId: string, agentId: string): Promise<void>
+  /** B9 (K4): runs `check` again at every config save, console status and console spawn until it answers true; false once the confirm wait ends. */
+  awaitPane(check: () => boolean): Promise<boolean>
+  /** B9: whether the grant of a waiting takeover (its `at`) already left main; `mark` records that it did now. Memory only. */
+  takeoverGranted(teamId: string, agentId: string, at: number, mark?: boolean): boolean
+  /**
+   * B9: whether a notHeld release left this console in place for this session (K6); `mark` records that it did now.
+   * Such a console holds that session again only once its own live status names it (K4, reconcile). Memory only, capped.
+   */
+  consoleLeft(sessionId: string, paneId: string, mark?: boolean): boolean
+  /** B9: the service's run-end policy (afterRunPolicy, the request text kept, no card for a run a takeover stopped). */
+  runEndPolicy(f: RunEndFacts): PolicyDecision
 }
 
 export interface OpCtx {

@@ -15,6 +15,7 @@ import { ContextChip } from '@/components/status/ContextChip'
 import { SilenceChip } from '@/components/status/SilenceChip'
 import { KIND_KEY } from './TeamEmptyTab'
 import { ElapsedChip, RUN_CHIP, RUN_CHIP_NEUTRAL, SMALL_BTN, SMALL_BTN_QUIET, SMALL_BTN_TEXT, StopRunButton, UsageChip } from './RunHeader'
+import { TakeoverButton } from './TakeoverChip'
 
 const PROVIDER_KEY: Record<AgentView['provider'], MessageKey> = {
   claude: 'pane.runningAgent.claude',
@@ -31,9 +32,18 @@ function glyphOf(a: AgentView): GlyphKind {
   return 'idle'
 }
 
+/** A takeover's line by its phase (B9): "En una consola" only once a console holds the agent. */
+const TAKEOVER_LINE: Record<NonNullable<AgentView['takeover']>['phase'], MessageKey> = {
+  stopping: 'teams.agent.takeoverStopping',
+  bindPending: 'teams.agent.takeoverWaiting',
+  bound: 'teams.agent.inConsole',
+  releasing: 'teams.agent.takeoverReleasing',
+}
+
 /** Line 2 of a card: what the agent is on ("Trabajando en t-12", "Libre", "Esperando: ..."). */
 export function agentLine(a: AgentView, t: TFn): string {
-  if (a.takeover || a.status === 'takenOver') return t('teams.agent.inConsole')
+  if (a.takeover) return t(TAKEOVER_LINE[a.takeover.phase])
+  if (a.status === 'takenOver') return t('teams.agent.inConsole')
   const run = a.run && isActiveRun(a.run.state) ? a.run : undefined
   if (run) {
     if (run.state === 'queued' || run.state === 'starting') return t('teams.agent.starting')
@@ -91,7 +101,8 @@ export function RunSilenceChip({ run, teamId }: { run: Pick<RunView | TaskRunRef
  * failure, silence (B7, with its ignore button), context and spend (an
  * estimate); and its actions: the chat drawer,
  * "Ejecutar ahora" (an idle agent: it opens the drawer's composer, nothing
- * runs before its button), Frenar (a live run, after a confirm) and the
+ * runs before its button), Frenar (a live run, after a confirm), "Tomar el
+ * control" or, once a console holds it, "Ir a la consola" (B9) and the
  * agent's pause. `wide` is the Lead's full-width look; `children` goes under
  * the actions (the Lead card's extra lines).
  */
@@ -159,6 +170,7 @@ export function AgentCard({ teamId, agent: a, wide, hint, children }: { teamId: 
           </button>
         )}
         {live && <StopRunButton teamId={teamId} run={live} agentName={name} />}
+        <TakeoverButton teamId={teamId} agent={a} name={name} variant="card" />
         {!a.retired && (
           <button
             type="button"
