@@ -137,7 +137,34 @@ export async function linkNodeModules(repoRoot: string, path: string, fsx: Pick<
   }
   if (!isDir || (await lexists(fsx, link))) return []
   await fsx.symlink(target, link, 'junction')
+  if (process.platform !== 'win32') await excludeLinkedNodeModules(repoRoot)
   return [link]
+}
+
+/**
+ * On POSIX the link is a symlink, and the common `node_modules/` ignore rule only matches a directory, so an agent's
+ * `git add -A` in the tree would commit the symlink (and Integrate would then refuse a merge that replaces the
+ * user's node_modules). `/node_modules` in the repo's own `.git/info/exclude` (local, never committed, shared by its
+ * worktrees) ignores the link too. Only for a main checkout (`.git` is a folder); best effort, never fails the create.
+ */
+async function excludeLinkedNodeModules(repoRoot: string): Promise<void> {
+  const RULE = '/node_modules'
+  try {
+    const gitDir = join(repoRoot, '.git')
+    if (!(await nodeFsp.stat(gitDir)).isDirectory()) return
+    const file = join(gitDir, 'info', 'exclude')
+    let text = ''
+    try {
+      text = await nodeFsp.readFile(file, 'utf8')
+    } catch {
+      text = ''
+    }
+    if (text.split(/\r?\n/).some((l) => l.trim() === RULE)) return
+    await nodeFsp.mkdir(join(gitDir, 'info'), { recursive: true })
+    await nodeFsp.appendFile(file, `${text && !text.endsWith('\n') ? '\n' : ''}${RULE}\n`, 'utf8')
+  } catch {
+    /* best effort: a failure leaves the tree as before */
+  }
 }
 
 /** A link (junction or symlink) removed as a link: unlink, rmdir for a directory junction. Never recursive. */
