@@ -87,7 +87,7 @@ export * from './src/shared/teams'
 `)
 const C = M.C
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-teams-cli-'))
+const TMP = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-teams-cli-')))
 const sockRoot = win ? null : fs.mkdtempSync(path.join(os.tmpdir(), 'sn-'))
 const rand = () => Math.random().toString(16).slice(2, 10)
 const pipeName = () => (win ? `\\\\.\\pipe\\snaos-teams-test-${rand()}` : path.join(sockRoot, `t-${rand()}.sock`))

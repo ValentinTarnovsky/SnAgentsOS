@@ -546,8 +546,11 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * `schedule` becomes `schedules: [{ id: 's1', ...schedule }]` (only while
  * `schedules` is missing, like snippets) and `schedule` is never carried
  * forward. By presence, not by version, so it also covers a `schedule` an
- * older build wrote after a downgrade. Idempotent: a second parse changes
- * nothing.
+ * older build wrote after a downgrade. That only re-imports what the older
+ * build wrote itself: a 2.6.0 or older build strips `schedules` (zod drops the
+ * unknown key) and its next save loses them, so after a downgrade only
+ * config.json.bak and backups/ still hold them. Idempotent: a second parse
+ * changes nothing.
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)

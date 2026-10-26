@@ -45,7 +45,7 @@ const tick = () => new Promise((r) => setImmediate(r))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const MAX = 48 * 1024
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-teams-remote-'))
+const TMP = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-teams-remote-')))
 const remoteData = path.join(TMP, 'remote')
 fs.mkdirSync(remoteData)
 const stubs = {

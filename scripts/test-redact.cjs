@@ -102,7 +102,7 @@ function negatives() {
   keeps(`63 ${rep('0f1e2d3c', 63)} and 65 ${rep('0f1e2d3c', 65)}`, '63 and 65 hex runs are not the 64 hex token shape')
   keeps(`x${rep('0f1e2d3c', 64)} and ${rep('0f1e2d3c', 64)}g`, 'a 64 hex run glued to a letter or a digit is part of a longer word')
   keeps('session 123e4567-e89b-12d3-a456-426614174000 and pane-4f346061', 'UUIDs and pane ids stay')
-  keeps('C:\\Users\\tarno\\Desktop\\SnAgentsOS\\src\\shared\\redact.ts:42:7', 'Windows path with line:col stays')
+  keeps('C:\\Users\\user\\Desktop\\Repo\\src\\shared\\redact.ts:42:7', 'Windows path with line:col stays')
   keeps('/home/me/.ssh/id_rsa and ~/.claude/settings.json and src/sk-utils/file.ts', 'POSIX paths stay')
   keeps('\\\\server\\share\\folder', 'UNC path stays')
   const urls = [

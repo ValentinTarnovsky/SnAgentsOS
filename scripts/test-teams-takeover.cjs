@@ -48,7 +48,7 @@ const EXTERNAL = ['electron', 'ws', 'node-pty', '@xterm/headless', '@xterm/addon
 const FIX = path.join(__dirname, 'fixtures', 'teams')
 const FAKE = path.join(FIX, 'fake-agent.cjs')
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-teams-takeover-'))
+const TMP = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-teams-takeover-')))
 const electronStub = { app: { getPath: (name) => (name === 'userData' ? path.join(TMP, 'ud') : TMP), isPackaged: false, commandLine: { hasSwitch: () => false } } }
 function loadEntry(contents) {
   const code = buildSync({ stdin: { contents, resolveDir: root, loader: 'ts' }, bundle: true, platform: 'node', format: 'cjs', write: false, external: EXTERNAL, alias: { '@shared': path.join(root, 'src/shared') }, logLevel: 'silent' }).outputFiles[0].text

@@ -92,7 +92,7 @@ const EXTERNAL = ['electron', 'ws', 'node-pty', '@xterm/headless', '@xterm/addon
 const FIX = path.join(__dirname, 'fixtures', 'teams')
 const FAKE = path.join(FIX, 'fake-agent.cjs')
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-teams-runner-'))
+const TMP = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'snagentsos-teams-runner-')))
 const electronStub = { app: { getPath: (name) => (name === 'userData' ? path.join(TMP, 'ud') : TMP), isPackaged: false, commandLine: { hasSwitch: () => false } } }
 /** The delay of every real setTimeout the bundled code arms: removeTeam waits with one 12 s timeout and never polls. */
 const armed = []
@@ -1996,7 +1996,8 @@ async function finalTextChecks() {
 // cuts its line at 8191 characters, the permission list would arrive cut): the run ends spawnFailed with its own card
 // words (vars.what cmdLine); the same role through an .exe CLI runs.
 async function cmdLineChecks() {
-  const w = await world('b7-cmdline')
+  // The protect rules carry the data folder path; on POSIX the temp prefix is shorter, so a longer data folder keeps the line past CMD_LINE_MAX on every OS.
+  const w = await world('b7-cmdline', process.platform === 'win32' ? {} : { data: path.join(TMP, 'b7-cmdline', 'data-' + 'x'.repeat(200)) })
   const tools = Array.from({ length: 32 }, (_, i) => `Bash(npx tsc --noEmit -p packages/module-${String(i).padStart(2, '0')}/${'sub/'.repeat(15)}tsconfig.build.json)`)
   fs.writeFileSync(path.join(teamDirOf(w), 'roles', 'builder.md'), `---\nname: Builder\nkind: custom\nprovider: claude\npermission: custom\nallowedTools: ${tools.join(', ')}\n---\nCompilá los paquetes.\n`)
   await trustAgain(w)
@@ -2679,11 +2680,38 @@ async function qaStatChecks() {
   w.svc.dispose()
 }
 
+// Release review: a .cmd agent CLI spawns through cmd.exe with NoDefaultCurrentDirectoryInExePath, so the npm shim never
+// resolves a node.exe committed in the run's cwd; an .exe CLI keeps its env untouched.
+function cmdCwdChecks() {
+  const { EventEmitter } = require('node:events')
+  const { PassThrough } = require('node:stream')
+  const seen = []
+  const make = () => {
+    const child = Object.assign(new EventEmitter(), { pid: 47000 + seen.length, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() })
+    const clock = manualClock()
+    let sup
+    const timer = new M.DeadlineTimer((key) => sup.onDeadline(key), clock.deps)
+    sup = new M.RunSupervisor({
+      spawn: (file, args, opts) => { seen.push({ file, env: opts.env }); return child },
+      treeKill: { sync: () => true, signal: () => true }, groupKill: () => undefined,
+      timer, now: () => clock.now, platform: 'win32', log: () => undefined,
+      hooks: { firstLine() {}, append() {}, signal() {}, result() {}, closed() {}, spawnFailed() {} },
+    })
+    return sup
+  }
+  const spec = (cli, n) => ({ runId: 'r-00000000c0d' + n, teamId: 'tm-0123456789ab', agentId: 'dev', provider: 'claude', cli, argv: ['-p'], cwd: TMP, env: { KEEP: '1' }, stdin: 'hola', logFile: path.join(TMP, 'cmd-cwd-' + n + '.jsonl'), promptMeta: { mode: 'free', trigger: 'manual' }, base: {} })
+  check(make().start(spec({ file: 'C:\\npm\\claude.cmd', args: [], kind: 'cmd' }, 1)).ok, 'a .cmd CLI starts')
+  check(/cmd\.exe$/i.test(seen[0].file) && seen[0].env.NoDefaultCurrentDirectoryInExePath === '1' && seen[0].env.KEEP === '1', 'a .cmd CLI spawns through cmd.exe with NoDefaultCurrentDirectoryInExePath=1 and keeps its env', seen[0])
+  check(make().start(spec({ file: process.execPath, args: [], kind: 'exe' }, 2)).ok, 'an .exe CLI starts')
+  check(seen[1].env.NoDefaultCurrentDirectoryInExePath === undefined && seen[1].env.KEEP === '1', 'an .exe CLI env is passed as is', seen[1])
+}
+
 async function main() {
   try {
     reducerChecks()
     supervisorKillChecks()
     supervisorBeatChecks()
+    cmdCwdChecks()
     await lifecycleChecks()
     await stopChecks()
     await lifecycleExitChecks()

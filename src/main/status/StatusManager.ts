@@ -1606,13 +1606,14 @@ export class StatusManager implements PtySink {
       // ntfy) either; its key is spent all the same. A transition unmutes it
       // before this point, so the notice that comes with one flows.
       if (!evt.muted) {
-        // App 2.7.0 (A5): a done notice carries its turn's digest line (tool families
-        // in the config language and file names, never reply text), redacted, then clipped.
+        // App 2.7.0 (A5): a done notice carries its turn's digest line (tool family
+        // counts in the config language, never file names nor reply text: these go
+        // to Discord, ntfy and Web Push), redacted, then clipped.
         const turn = state === 'done' ? track.lastDigest : undefined
         let digest = ''
         if (turn && turn.tools > 0) {
           const config = this.getConfig()
-          digest = clip(redactCredentials(digestLine(turn, family => mainT(config, toolFamilyKey(family)))), NOTICE_DIGEST_MAX)
+          digest = clip(redactCredentials(digestLine({ ...turn, files: [] }, family => mainT(config, toolFamilyKey(family)))), NOTICE_DIGEST_MAX)
         }
         this.onNotice({ paneId, provider: track.provider, state, reason: evt.reason, ...(digest ? { digest } : {}) })
       }

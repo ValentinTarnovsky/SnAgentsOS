@@ -112,7 +112,9 @@ export class RunSupervisor {
     try {
       child = this.deps.spawn(target.file, target.args, {
         cwd: spec.cwd,
-        env: spec.env,
+        // Through cmd.exe (a .cmd agent CLI) the npm shim resolves `node` with the cwd first: a node.exe committed in
+        // the task's repo or worktree would run instead of the real one. This variable makes cmd.exe skip the cwd.
+        env: target.verbatim ? { ...spec.env, NoDefaultCurrentDirectoryInExePath: '1' } : spec.env,
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
         detached: this.deps.platform !== 'win32',

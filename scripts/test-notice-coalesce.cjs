@@ -341,13 +341,13 @@ function statusManagerChecks() {
   {
     const h = rig('en')
     const n = h.turn([['Edit', 'src/a.ts'], ['Edit', 'src/a.ts'], ['Read', 'src/b.ts'], ['Bash']])
-    check(n.state === 'done' && n.digest === 'Edit 2, Read 1, Run 1 (src/a.ts, src/b.ts)', 'a done notice carries the digest line of its turn (English families)')
+    check(n.state === 'done' && n.digest === 'Edit 2, Read 1, Run 1', 'a done notice carries the digest line of its turn (English families, counts only: no file names leave the PC)')
     check(!JSON.stringify(n).includes('SECRET') && !JSON.stringify(n).includes(GHP), 'and never any text of the reply')
   }
   {
     const h = rig('es')
     const n = h.turn([['Read', 'src/b.ts'], ['Grep']])
-    check(n.digest === 'Lectura 1, Búsqueda 1 (src/b.ts)', 'the families follow the config language (Spanish)')
+    check(n.digest === 'Lectura 1, Búsqueda 1', 'the families follow the config language (Spanish)')
     const before = h.configReads()
     const bare = h.turn([])
     check(bare.state === 'done' && bare.digest === undefined && h.configReads() === before, 'a turn with no tool: no digest, and no config read for it')
@@ -355,9 +355,9 @@ function statusManagerChecks() {
   {
     const h = rig('en')
     const n = h.turn([['Read', `keys/${GHP}`], ['Edit', `cfg/${SK}.env`]])
-    check(n.digest === 'Read 1, Edit 1 (keys/[redacted], cfg/[redacted].env)', 'a credential in a file name is redacted in the digest line')
+    check(n.digest === 'Read 1, Edit 1' && !n.digest.includes(GHP) && !n.digest.includes(SK), 'file names never reach the digest line, credentials in them included')
     const long = h.turn([['Read', 'a/' + 'x'.repeat(110)], ['Read', 'b/' + 'y'.repeat(110)]])
-    check(long.digest.length <= 160 && long.digest.endsWith('…') && long.digest.startsWith('Read 2 ('), 'a long digest line is clipped to 160 with an ellipsis')
+    check(long.digest === 'Read 2', 'long file names leave the digest line at its counts')
   }
   {
     const h = rig('en')
