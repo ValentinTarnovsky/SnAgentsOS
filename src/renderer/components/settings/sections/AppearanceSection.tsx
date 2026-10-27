@@ -2,7 +2,8 @@ import { Check } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT } from '@/i18n'
 import { THEME_LIST, UI_TOKENS, resolveTokens } from '@/themes'
-import { SettingRow } from '../ui'
+import { SettingRow, ToggleRow } from '../ui'
+import { sidebarBlockOn, type SidebarBlockKey } from '@shared/sidebarBlocks'
 import { cn } from '@/lib/cn'
 
 export function AppearanceSection() {
@@ -11,6 +12,13 @@ export function AppearanceSection() {
   const updateSettings = useAppStore((s) => s.updateSettings)
 
   const effective = resolveTokens(settings.theme, settings.customColors)
+
+  // App 2.8.0: one literal row per sidebar block (the catalog integrity check counts literal searchId attributes).
+  const blockOn = (key: SidebarBlockKey): boolean => sidebarBlockOn(settings, key)
+  const setBlock = (key: SidebarBlockKey, v: boolean): void => {
+    const current = useAppStore.getState().settings.sidebarBlocks
+    updateSettings({ sidebarBlocks: { ...current, [key]: v } })
+  }
 
   const onColorChange = (token: string, value: string): void => {
     // Seed the full current palette so switching to Custom preserves the look.
@@ -86,6 +94,19 @@ export function AppearanceSection() {
           })}
         </div>
       </SettingRow>
+
+      <section className="space-y-3 border-t border-border pt-5" aria-labelledby="appearance-sidebar" data-sidebar-blocks>
+        <h4 id="appearance-sidebar" className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
+          {t('settings.sidebarBlocks.group')}
+        </h4>
+        <p className="text-xs text-text-secondary">{t('settings.sidebarBlocks.intro')}</p>
+        <ToggleRow searchId="appearance.sidebarAgentsBoard" checked={blockOn('agentsBoard')} onChange={(v) => setBlock('agentsBoard', v)} title={t('settings.sidebarBlocks.agentsBoard')} />
+        <ToggleRow searchId="appearance.sidebarTeams" checked={blockOn('teams')} onChange={(v) => setBlock('teams', v)} title={t('settings.sidebarBlocks.teams')} description={t('settings.sidebarBlocks.teamsHint')} />
+        <ToggleRow searchId="appearance.sidebarSharedWithMe" checked={blockOn('sharedWithMe')} onChange={(v) => setBlock('sharedWithMe', v)} title={t('settings.sidebarBlocks.sharedWithMe')} />
+        <ToggleRow searchId="appearance.sidebarShareIndicator" checked={blockOn('shareIndicator')} onChange={(v) => setBlock('shareIndicator', v)} title={t('settings.sidebarBlocks.shareIndicator')} />
+        <ToggleRow searchId="appearance.sidebarRemoteIndicator" checked={blockOn('remoteIndicator')} onChange={(v) => setBlock('remoteIndicator', v)} title={t('settings.sidebarBlocks.remoteIndicator')} />
+        <ToggleRow searchId="appearance.sidebarUsageBars" checked={blockOn('usageBars')} onChange={(v) => setBlock('usageBars', v)} title={t('settings.sidebarBlocks.usageBars')} description={t('settings.sidebarBlocks.usageBarsHint')} />
+      </section>
     </div>
   )
 }

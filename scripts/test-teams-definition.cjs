@@ -83,7 +83,7 @@ function idChecks() {
   check(same(rt.agents, []) && same(rt.comments, {}) && same(rt.activeRuns, []) && same(rt.providerBlockedUntil, {}) && rt.needsSeen === undefined && T.TEAM_GEN_RE.test(rt.gen), 'emptyRuntime: every collection empty')
   check(T.emptyRuntime('tm-0123456789ab', 'deadbeef') !== rt && T.emptyRuntime('tm-0123456789ab', 'deadbeef').tasks !== rt.tasks, 'emptyRuntime returns fresh objects')
   check(T.PRIORITY_RANK.urgent === 0 && T.PRIORITY_RANK.low === 3 && same(T.TASK_PRIORITIES, ['urgent', 'high', 'normal', 'low']), 'priority words and ranks')
-  check(T.CONTINUATIONS_MAX === 1 && T.NO_PROGRESS_BLOCK_AT === 4 && same(T.NO_PROGRESS_COOLDOWN_MIN, [5, 10, 20]) && T.TEAM_PLAN_MAX === 32 * 1024, 'flow constants of decisions 31 and 32')
+  check(T.CONTINUATIONS_MAX === 1 && T.NO_PROGRESS_BLOCK_AT === 3 && same(T.NO_PROGRESS_COOLDOWN_MIN, [5, 10]) && T.TEAM_PLAN_MAX === 32 * 1024, 'flow constants of decisions 31 and 32')
   check(same(T.DESKTOP_ONLY_CARD_ACTIONS, ['resumeTeam', 'killOrphan']), 'desktop-only card actions (decision 50)')
   check(P.PHONE_TEAM_OPS.length === 9 && P.isPhoneTeamOp('leadSay') && P.isPhoneTeamOp('lead') && !P.isPhoneTeamOp('trust') && !P.isPhoneTeamOp('integrate') && !P.isPhoneTeamOp('takeover'), 'phone ops: the plan list plus lead; trust, integrate and takeover stay desktop only')
   check(P.TEAM_FRAME_MAX_BYTES === 48 * 1024 && P.TEAM_BOARD_PAGE === 150, 'phone frame caps')

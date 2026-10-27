@@ -1019,6 +1019,11 @@ export class RemoteManager {
     return this.sessions?.isPaneViewed(paneId) ?? false
   }
 
+  /** App 2.8.0: some phone has the app visible right now (noticeDelay). */
+  isPhoneVisible(): boolean {
+    return this.sessions?.isAnyDeviceVisible() ?? false
+  }
+
   /** v2.3: a phone looks at this pane right now, Terminal or Chat (attention acks). */
   isPaneSeen(paneId: string): boolean {
     return this.sessions?.isPaneSeen(paneId) ?? false

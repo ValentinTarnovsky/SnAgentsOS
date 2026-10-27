@@ -500,14 +500,14 @@ function policyChecks() {
   // Row: progress.
   same(P({}), { next: mark('continuation'), counters: { continuations: 1, noProgress: 0 } }, 'progress: one continuation (CONTINUATIONS_MAX = 1)')
   same(P({}, { task: { counters: { continuations: 1 } } }), { block: card('noProgress') }, 'progress at the second time: blocked with noProgress')
-  // Row: planOnly / empty: cooldowns 5, 10 and 20 min, the 4th blocks (decision 32, NO_PROGRESS_BLOCK_AT = 4).
-  check(D.NO_PROGRESS_BLOCK_AT === 4 && JSON.stringify(D.NO_PROGRESS_COOLDOWN_MIN) === '[5,10,20]', 'decision 32 constants')
-  for (const [n, min] of [[0, 5], [1, 10], [2, 20]]) {
+  // Row: planOnly / empty: cooldowns 5 and 10 min, the 3rd blocks (decision 32, NO_PROGRESS_BLOCK_AT = 3).
+  check(D.NO_PROGRESS_BLOCK_AT === 3 && JSON.stringify(D.NO_PROGRESS_COOLDOWN_MIN) === '[5,10]', 'decision 32 constants')
+  for (const [n, min] of [[0, 5], [1, 10]]) {
     for (const outcome of ['planOnly', 'empty']) {
       same(P({ outcome }, { task: { counters: { noProgress: n } } }), { cooldownUntil: NOW + min * MIN, next: mark('continuation', NOW + min * MIN), counters: { noProgress: n + 1 } }, `${outcome} #${n + 1}: cooldown ${min} min`)
     }
   }
-  same(P({ outcome: 'empty' }, { task: { counters: { noProgress: 3 } } }), { block: card('noProgress') }, 'no progress the 4th time: blocked')
+  same(P({ outcome: 'empty' }, { task: { counters: { noProgress: 2 } } }), { block: card('noProgress') }, 'no progress the 3rd time: blocked')
   // Row: task gone, done or cancelled -> only the provider rows.
   same(P({ outcome: 'progress' }, { task: null }), {}, 'task gone: nothing')
   same(P({ outcome: 'empty' }, { task: { state: 'done', phase: 'none' } }), {}, 'task done: nothing')
@@ -523,7 +523,7 @@ function policyChecks() {
   same(P({}, wait), {}, 'progress waiting on a permission: no continuation')
   same(P({}, { task: { counters: { continuations: 1 } }, ...wait }), {}, 'progress at the second time waiting on a permission: no noProgress block')
   for (const outcome of ['planOnly', 'empty']) same(P({ outcome }, { task: { counters: { noProgress: 2 } }, ...wait }), {}, `${outcome} waiting on a permission: no cooldown, no count`)
-  same(P({ outcome: 'empty' }, { task: { counters: { noProgress: 3 } }, ...wait }), {}, 'the 4th no progress waiting on a permission: no block')
+  same(P({ outcome: 'empty' }, { task: { counters: { noProgress: 2 } }, ...wait }), {}, 'the 3rd no progress waiting on a permission: no block')
   same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'request' } }, wait), {}, 'a failure waiting on a permission: no retry (the decision wakes it)')
   same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'unknown', code: 'timeout' } }, wait), {}, 'a timeout waiting on a permission: no timeout block')
   same(P({ state: 'failed', outcome: 'failed', failure: { kind: 'limit', until: NOW + 30 * MIN } }, wait), { providerBlock: { provider: 'claude', until: NOW + 30 * MIN } }, 'a limit waiting on a permission: the provider block, no retry wake')

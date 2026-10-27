@@ -59,7 +59,7 @@ function v11(extra = {}) {
 const qc = (i, extra = {}) => ({ id: `qc-${i}`, name: `Cmd ${i}`, text: `echo ${i}`, action: 'send', enter: false, ...extra })
 
 function schemaChecks() {
-  check(CONFIG_VERSION === 19, 'CONFIG_VERSION is 19')
+  check(CONFIG_VERSION === 20, 'CONFIG_VERSION is 20')
 
   // E8-FR-01: 3 snippets -> 3 global send commands, same order and ids, no Enter.
   const snippets = [{ id: 'snip-a', name: 'Continua', text: 'continua' }, { id: 'snip-b', name: 'Compact', text: '/compact' }, { id: 'snip-c', name: 'Tests', text: 'corre los tests\ny arregla' }]
@@ -318,7 +318,7 @@ function v13Real(extra = {}) {
 }
 
 async function schema14Checks() {
-  check(CONFIG_VERSION === 19, 'CONFIG_VERSION is 19 (app 2.7.0)')
+  check(CONFIG_VERSION === 20, 'CONFIG_VERSION is 20 (app 2.8.0)')
   const raw = v13Real()
   const a = parseConfig(clone(raw))
   check(a && a.version === CONFIG_VERSION, 'a real v13 config parses and is stamped with the current version')
@@ -378,7 +378,7 @@ async function schema14Checks() {
   const v17 = clone(up17); v17.version = 17
   v17.settings.dictation = { engine: 'offline', language: 'es-AR', headerButton: false }
   const up18 = parseConfig(clone(v17))
-  check(up18.version === 19, 'v17 -> v18 -> v19 is stamped 19')
+  check(up18.version === 20, 'v17 -> v18 -> v19 -> v20 is stamped 20')
   check(!('engine' in up18.settings.dictation), 'v18: the v17 dictation.engine key is stripped')
   check(JSON.stringify(up18.settings.dictation) === '{"device":"auto","language":"es-AR","headerButton":false,"interim":true,"vocabulary":""}', 'v18: the v17 language and header button are kept, device / interim / vocabulary gain their defaults')
   const v17Rest = clone(v17); delete v17Rest.settings.dictation
@@ -402,7 +402,7 @@ async function schema14Checks() {
   check(parseConfig(max).settings.dictation.vocabulary.length === 400, 'a 400-char vocabulary is kept')
   check(JSON.stringify(parseConfig(clone(up18))) === JSON.stringify(up18), 'v18 parse is idempotent')
   const fromV10c = parseConfig({ version: 10, workspaces: [], presets: [], settings: clone(baseSettings) })
-  check(fromV10c.version === 19 && JSON.stringify(fromV10c.settings.dictation) === DICTATION_V18_DEFAULTS, 'a v10 config walks up to 19 and gets the v18 dictation defaults')
+  check(fromV10c.version === 20 && JSON.stringify(fromV10c.settings.dictation) === DICTATION_V18_DEFAULTS, 'a v10 config walks up to 20 and gets the v18 dictation defaults')
 
   // Values kept, junk values fall back without rejecting the config.
   const set = (v) => { const c = v13Real(); c.settings.terminalShellIntegration = v; return parseConfig(c) }
@@ -456,7 +456,7 @@ async function schema19ScheduleChecks() {
   const v18 = v13Real({ version: 18 })
   v18.workspaces[0].panes[1].schedule = { time: '07:00', prompt: 'git pull', dueAt: 1760000000000 }
   const a = parseConfig(clone(v18))
-  check(a && a.version === 19 && CONFIG_VERSION === 19, 'a v18 config with console schedules parses as 19 (no further bump)')
+  check(a && a.version === 20 && CONFIG_VERSION === 20, 'a v18 config with console schedules parses as 20 (no further bump)')
   const [p1, p2] = a.workspaces[0].panes
   check(JSON.stringify(p1.schedules) === JSON.stringify([{ id: 's1', ...v18.workspaces[0].panes[0].schedule }]) && JSON.stringify(p2.schedules) === JSON.stringify([{ id: 's1', ...v18.workspaces[0].panes[1].schedule }]), "each console's schedule becomes schedules[0] with id s1, every field kept")
   check(a.workspaces.every((w) => w.panes.every((p) => !('schedule' in p))), 'schedule is never carried forward')
@@ -510,7 +510,7 @@ async function schema19ScheduleChecks() {
     fs.writeFileSync(file, text)
     new ConfigStore().load({ upgrade: true })
     const written = JSON.parse(fs.readFileSync(file, 'utf8'))
-    check(written.version === 19 && written.workspaces[0].panes.every((p) => !('schedule' in p) && p.schedules[0].id === 's1') && survives(v18, written), 'the upgrade write stores 19 with schedules[] and no schedule')
+    check(written.version === 20 && written.workspaces[0].panes.every((p) => !('schedule' in p) && p.schedules[0].id === 's1') && survives(v18, written), 'the upgrade write stores 20 with schedules[] and no schedule')
     check(fs.readFileSync(file + '.bak', 'utf8') === text, 'the pre-upgrade v18 file stays in .bak')
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 
