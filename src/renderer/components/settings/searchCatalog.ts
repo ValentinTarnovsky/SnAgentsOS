@@ -30,25 +30,29 @@ export type CategoryId =
   | 'updates'
   | 'about'
 
-/** Nav order, most important first (cosmetic and info sink to the bottom). */
+/**
+ * Nav order (app 2.8.0): agents and their accounts and usage first, then the
+ * console and its repos, then the phone, notices and connections, then the
+ * general preferences, and system and info last.
+ */
 export const CATEGORY_ORDER: CategoryId[] = [
   'terminal',
   'agents',
-  'connections',
+  'claudeaccounts',
+  'aiusage',
   'quick',
   'automation',
-  'startup',
+  'git',
   'notifications',
-  'keys',
-  'data',
-  'appearance',
-  'language',
-  'aiusage',
-  'claudeaccounts',
-  'usage',
   'remote',
   'share',
-  'git',
+  'connections',
+  'startup',
+  'appearance',
+  'keys',
+  'language',
+  'data',
+  'usage',
   'labs',
   'updates',
   'about',
@@ -197,6 +201,7 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('notifications.ntfy', 'notif.ntfy.title', 'notif.ntfy.desc', { keywords: ['ntfy', 'push', 'phone', 'celular', 'movil', 'topic'], toggle: { path: 'notifications.ntfy.enabled' } }),
   e('notifications.ntfyAction', 'notif.action', undefined, { groupKey: 'notif.ntfy.title', keywords: ['ntfy', 'push'], toggle: { path: 'notifications.ntfy.notifyAction', disabledUnless: ['notifications.ntfy.enabled'] } }),
   e('notifications.ntfyDone', 'notif.done', undefined, { groupKey: 'notif.ntfy.title', keywords: ['ntfy', 'push'], toggle: { path: 'notifications.ntfy.notifyDone', disabledUnless: ['notifications.ntfy.enabled'] } }),
+  e('notifications.remoteDelay', 'notif.remoteDelay', 'notif.remoteDelayHint', { keywords: ['delay', 'retraso', 'demora', 'wait', 'esperar', 'seconds', 'segundos', 'phone', 'celular', 'celu', 'push', 'watch', 'reloj', 'discord', 'ntfy'] }),
   e('notifications.onlyWhenAway', 'notif.away.title', 'notif.away.desc', { keywords: ['away', 'ausente', 'idle', 'inactivo', 'locked', 'bloqueada', 'discord', 'ntfy'], toggle: { path: 'notifications.onlyWhenAway' } }),
 
   // Data
@@ -205,6 +210,12 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   // Appearance, language
   e('appearance.theme', 'settings.theme', 'settings.themeHint', { keywords: ['theme', 'tema', 'color', 'dark', 'oscuro', 'light', 'claro'] }),
   e('appearance.customColors', 'settings.customColors', 'settings.customColorsHint', { keywords: ['color', 'custom', 'personalizado', 'palette'] }),
+  e('appearance.sidebarAgentsBoard', 'settings.sidebarBlocks.agentsBoard', undefined, { groupKey: 'settings.sidebarBlocks.group', keywords: ['sidebar', 'barra lateral', 'hide', 'ocultar', 'show', 'mostrar', 'board', 'tablero', 'agents', 'agentes'], toggle: { path: 'sidebarBlocks.agentsBoard' } }),
+  e('appearance.sidebarTeams', 'settings.sidebarBlocks.teams', 'settings.sidebarBlocks.teamsHint', { groupKey: 'settings.sidebarBlocks.group', keywords: ['sidebar', 'barra lateral', 'hide', 'ocultar', 'show', 'mostrar', 'teams', 'equipos'], toggle: { path: 'sidebarBlocks.teams' } }),
+  e('appearance.sidebarSharedWithMe', 'settings.sidebarBlocks.sharedWithMe', undefined, { groupKey: 'settings.sidebarBlocks.group', keywords: ['sidebar', 'barra lateral', 'hide', 'ocultar', 'show', 'mostrar', 'shared', 'compartido', 'share'], toggle: { path: 'sidebarBlocks.sharedWithMe' } }),
+  e('appearance.sidebarShareIndicator', 'settings.sidebarBlocks.shareIndicator', undefined, { groupKey: 'settings.sidebarBlocks.group', keywords: ['sidebar', 'barra lateral', 'hide', 'ocultar', 'show', 'mostrar', 'share', 'compartir', 'indicator', 'indicador'], toggle: { path: 'sidebarBlocks.shareIndicator' } }),
+  e('appearance.sidebarRemoteIndicator', 'settings.sidebarBlocks.remoteIndicator', undefined, { groupKey: 'settings.sidebarBlocks.group', keywords: ['sidebar', 'barra lateral', 'hide', 'ocultar', 'show', 'mostrar', 'remote', 'remoto', 'phone', 'celular', 'indicator', 'indicador'], toggle: { path: 'sidebarBlocks.remoteIndicator' } }),
+  e('appearance.sidebarUsageBars', 'settings.sidebarBlocks.usageBars', 'settings.sidebarBlocks.usageBarsHint', { groupKey: 'settings.sidebarBlocks.group', keywords: ['sidebar', 'barra lateral', 'hide', 'ocultar', 'show', 'mostrar', 'usage', 'uso', 'bars', 'barras', 'quota', 'cuota', 'limits', 'limites'], toggle: { path: 'sidebarBlocks.usageBars' } }),
   e('language.language', 'settings.language', 'settings.languageHint', { keywords: ['language', 'idioma', 'english', 'ingles', 'espanol', 'spanish'] }),
 
   // AI usage

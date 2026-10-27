@@ -1258,6 +1258,14 @@ export class SessionManager implements PtySink {
     return false
   }
 
+  /** App 2.8.0: some phone has the app visible right now (isDeviceVisible for any device); noticeDelay drops on it. */
+  isAnyDeviceVisible(now: number = Date.now()): boolean {
+    for (const session of this.sessions) {
+      if (session.authed && session.visible && now - session.lastSeen <= VIEWED_FRESH_MS) return true
+    }
+    return false
+  }
+
   /**
    * Panes an authenticated phone is subscribed to (E5-FR-25): hibernation
    * never puts them to sleep. A sub itself never wakes a sleeping pane. The

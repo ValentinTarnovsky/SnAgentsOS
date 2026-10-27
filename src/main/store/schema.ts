@@ -5,6 +5,8 @@ import { cronRuleError, PANE_SCHEDULES_MAX, SCHEDULE_ID_RE } from '@shared/sched
 import { migrateQuickCommandsConfig, QUICK_COMMAND_ID_MAX } from '@shared/quickCommands'
 import { LABS_KEYS, type LabsKey } from '@shared/labs'
 import { DEFAULT_SILENCE, normalizeSilence, SILENCE_QUIET_MIN, SILENCE_STALLED_MIN } from '@shared/silence'
+import { SIDEBAR_BLOCK_KEYS, type SidebarBlockKey } from '@shared/sidebarBlocks'
+import { NOTICE_DELAY_MAX_SEC } from '@shared/noticeDelay'
 
 export { CONFIG_VERSION }
 
@@ -34,6 +36,8 @@ export const notificationSettingsSchema = z.object({
   // rejecting the whole config (the field-level catches only cover fields).
   ntfy: ntfySettingsSchema.default({}).catch(() => ntfySettingsSchema.parse({})),
   onlyWhenAway: z.boolean().catch(false).default(false), // schema 12
+  // Schema 20 (app 2.8.0): seconds the remote notices wait; 0 sends at once, junk falls back to 0.
+  remoteDelaySec: z.number().int().min(0).max(NOTICE_DELAY_MAX_SEC).catch(0).default(0),
 })
 
 // Schema 13 (E5-FR-28): Claude prompt cache countdown.
@@ -117,6 +121,13 @@ export const shareSettingsSchema = z.object({
 const labFlag = () => z.boolean().catch(false).default(false)
 export const labsSettingsSchema = z.object(
   Object.fromEntries(LABS_KEYS.map((k) => [k, labFlag()])) as Record<LabsKey, ReturnType<typeof labFlag>>,
+)
+
+// Schema 20 (app 2.8.0): sidebar blocks, one flag per SIDEBAR_BLOCK_KEYS entry (@shared/sidebarBlocks).
+// Shown by default, and a junk value shows the block instead of failing the config.
+const blockFlag = () => z.boolean().catch(true).default(true)
+export const sidebarBlocksSettingsSchema = z.object(
+  Object.fromEntries(SIDEBAR_BLOCK_KEYS.map((k) => [k, blockFlag()])) as Record<SidebarBlockKey, ReturnType<typeof blockFlag>>,
 )
 
 // Schema 13 (E3-FR-42). Only `tailscaleServe` exists (manualCert retired, E3-FR-51).
@@ -482,6 +493,8 @@ const settingsSchema = z.object({
   share: shareSettingsSchema.default({}).catch(() => shareSettingsSchema.parse({})),
   // Schema 19 (app 2.7.0): Labs; a missing or non-object block gives every lab off.
   labs: labsSettingsSchema.default({}).catch(() => labsSettingsSchema.parse({})),
+  // Schema 20 (app 2.8.0): sidebar blocks; a missing or non-object block shows them all.
+  sidebarBlocks: sidebarBlocksSettingsSchema.default({}).catch(() => sidebarBlocksSettingsSchema.parse({})),
 })
 
 const keyButtonSchema = z.object({

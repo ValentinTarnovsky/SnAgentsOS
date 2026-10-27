@@ -61,6 +61,7 @@ import { statusBinDir } from './pty/shellResolver'
 import { DiscordNotifier } from './status/DiscordNotifier'
 import { NtfyNotifier } from './status/NtfyNotifier'
 import { createNoticeRouter, type NoticeRouter } from './status/noticeRouter'
+import { createNoticeDelay } from './status/noticeDelay'
 import { isDesktopAway } from './status/desktopAway'
 import { join } from 'path'
 import { homedir, hostname } from 'os'
@@ -138,7 +139,7 @@ let noticeRouter: NoticeRouter | null = null
 const statusManager = new StatusManager(
   () => mainWindow,
   () => configStore.load(),
-  notice => noticeRouter?.route(notice),
+  notice => noticeDelay.route(notice),
 )
 noticeRouter = createNoticeRouter({
   discord: discordNotifier,
@@ -153,6 +154,17 @@ noticeRouter = createNoticeRouter({
   // Teams (app 2.7.0, E10 B8): the push of a new "Te necesita" row or an integrate result, with the #team= deep link.
   pushTeam: (notice, config) => void remoteManager.notifyTeamPush(notice, config),
 })
+// App 2.8.0: the remote notices wait settings.notifications.remoteDelaySec and go out only if they still stand.
+const noticeDelay = createNoticeDelay({
+  loadConfig: () => configStore.load(),
+  route: (notice) => noticeRouter?.route(notice),
+  routeTeam: (notice) => noticeRouter?.routeTeam(notice),
+  isCurrent: (paneId, seq) => statusManager.noticeCurrent(paneId, seq),
+  isPhoneVisible: () => remoteManager.isPhoneVisible(),
+  // powerMonitor needs app ready; before that the idle time is unknown and the notice goes out.
+  idleSec: () => (app.isReady() ? powerMonitor.getSystemIdleTime() : undefined),
+})
+statusManager.setSeenListener((paneId) => noticeDelay.seen(paneId))
 // App 2.7.0 (A4): tokens, cost and context per console, recomputed once per turn for Claude (its done) and on
 // every model call for Codex (thread/tokenUsage/updated), always published as status detail (inside its throttle).
 const consoleLedger = new ConsoleLedger({
@@ -1009,7 +1021,7 @@ async function bootstrap(): Promise<void> {
     // routes it to the phone push, Discord and ntfy (routeTeam: the away gate; nothing remote for a push: false one).
     notice: (n) => {
       statusManager.notifyCustom(null, n.title, n.body)
-      noticeRouter?.routeTeam(n)
+      noticeDelay.routeTeam(n)
     },
   })
   teamService = teams
@@ -1104,6 +1116,7 @@ app.on('before-quit', () => {
   accountService?.dispose()
   // The only place the Teams DeadlineTimer is disposed (shutdownSync above only cleared its keys).
   teamService?.dispose()
+  noticeDelay.dispose()
   statusManager.dispose()
   codexBridge.dispose()
   discordNotifier.dispose()

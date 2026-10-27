@@ -22,6 +22,7 @@ import type {
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { DEFAULT_CLAUDE_ACCOUNTS_SETTINGS } from '@shared/claude-accounts'
 import { DEFAULT_LABS } from '@shared/labs'
+import { DEFAULT_SIDEBAR_BLOCKS } from '@shared/sidebarBlocks'
 import { DEFAULT_SILENCE } from '@shared/silence'
 import { PANE_SCHEDULES_MAX, SCHEDULE_ID_RE } from '@shared/schedule'
 import { gridForCount, orderPanes } from '@/components/layout/gridTemplates'
@@ -142,6 +143,7 @@ const DEFAULT_SETTINGS: Settings = {
     inAppWhenFocused: true,
     ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', token: '', notifyAction: true, notifyDone: false },
     onlyWhenAway: false,
+    remoteDelaySec: 0,
   },
   agents: {
     resumeOnStartup: 'ask',
@@ -170,6 +172,7 @@ const DEFAULT_SETTINGS: Settings = {
   dictation: { device: 'auto', language: 'auto', headerButton: true, interim: true, vocabulary: '' },
   share: { enabled: false, port: 4527, guestName: '', defaultPerm: 'view' },
   labs: { ...DEFAULT_LABS },
+  sidebarBlocks: { ...DEFAULT_SIDEBAR_BLOCKS },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */

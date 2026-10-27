@@ -88,6 +88,11 @@ export interface StatusNotice {
    */
   digest?: string
   /**
+   * App 2.8.0: the pane's stateSeq when the notice was raised. noticeDelay drops
+   * a delayed notice whose pane moved on since (StatusManager.noticeCurrent).
+   */
+  seq?: number
+  /**
    * App 2.7.0 (A5): set only on the one notice a channel sends for the
    * notices it held in a window (noticeCoalescer). Its paneId is '' and its
    * state is 'error' when any held one was an error, else 'done'.

@@ -764,7 +764,7 @@ function systemCardChecks() {
   // A card that blocks the task (noProgress): retry resumes, toTodo, cancelTask.
   const blockWith = (taskId) => {
     const run = w.go('dev', taskId, 'exec')
-    const policy = { block: { reason: { kind: 'card', cardId: '', why: 'noProgress' }, card: { why: 'noProgress', actions: ['retry', 'toTodo', 'cancelTask'] } }, counters: { noProgress: 4 } }
+    const policy = { block: { reason: { kind: 'card', cardId: '', why: 'noProgress' }, card: { why: 'noProgress', actions: ['retry', 'toTodo', 'cancelTask'] } }, counters: { noProgress: 3 } }
     const end = { at: w.clock.now, exit: { code: 0, signal: null }, facts: baseFacts(), teamWrites: 0 }
     w.commit(M.finishRun(w.rt(), run, end, policy, { now: w.clock.now }), 'a run that blocks its task')
     return w.task(taskId).blocked.reason.cardId

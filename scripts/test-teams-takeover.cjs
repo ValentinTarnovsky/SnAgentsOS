@@ -344,9 +344,9 @@ function reducerChecks() {
   check(lead.ok && lead.rt.tasks.every((t) => !t.next), 'give back: a lead session wakes no task')
 
   // The takeover run-end policy: no card blocks the task of a run a takeover stopped; the rest stands.
-  const block = { block: { reason: { kind: 'card', cardId: '', why: 'noProgress' }, card: { why: 'noProgress', actions: ['retry', 'dismiss'] } }, counters: { noProgress: 4 }, providerBlock: { provider: 'claude', until: NOW + 1 } }
+  const block = { block: { reason: { kind: 'card', cardId: '', why: 'noProgress' }, card: { why: 'noProgress', actions: ['retry', 'dismiss'] } }, counters: { noProgress: 3 }, providerBlock: { provider: 'claude', until: NOW + 1 } }
   const tp = M.takeoverPolicy(block, { run: { stopReason: 'takeover' } })
-  check(!tp.block && tp.counters.noProgress === 4 && tp.providerBlock.until === NOW + 1, 'takeover policy: the card block goes, the counters and provider facts stay', tp)
+  check(!tp.block && tp.counters.noProgress === 3 && tp.providerBlock.until === NOW + 1, 'takeover policy: the card block goes, the counters and provider facts stay', tp)
   check(M.takeoverPolicy(block, { run: { stopReason: 'user' } }) === block && M.takeoverPolicy({ next: null }, { run: { stopReason: 'takeover' } }).next === null, 'takeover policy: any other stop untouched')
 
   // The grant's workspace (plan 3.10.2): the team's, else the cwd's, else the repo root's, else absent.
@@ -931,14 +931,14 @@ async function stateChecks() {
   // (t-1 is blocked {stopped} by that Frenar: the linger run takes another task.)
   const c2 = await w.req({ op: 'createTask', task: { title: 'Con resultado', assignee: 'dev', needsPlan: false, isolation: 'main' } })
   check(c2.ok && c2.task.id === 't-2', 'task t-2')
-  // Three runs that end `empty` first: the fourth would block the task on a noProgress card (decision 32).
+  // Two runs that end `empty` first: the third would block the task on a noProgress card (decision 32).
   w.use('claude-simple.json')
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 2; i++) {
     const e = await w.req({ op: 'runNow', agentId: 'dev', taskId: 't-2' })
     check(e.ok, `empty run ${i + 1}`, e)
     await w.waitState(e.runId, 'ended')
   }
-  check(w.task('t-2').counters.noProgress === 3 && w.task('t-2').state === 'doing', 'three empty runs: noProgress 3, still doing', w.task('t-2').counters)
+  check(w.task('t-2').counters.noProgress === 2 && w.task('t-2').state === 'doing', 'two empty runs: noProgress 2, still doing', w.task('t-2').counters)
   w.use({ steps: [{ fixture: 'claude-simple.jsonl', rewriteSession: true }, { hang: true }] })
   const l = await w.req({ op: 'runNow', agentId: 'dev', taskId: 't-2' })
   check(l.ok, 'the linger run', l)
@@ -951,7 +951,7 @@ async function stateChecks() {
   check(tl.ok && tl.grant.taskId === 't-2', 'takeover in the linger window: granted', tl)
   check(w.ended(l.runId).state === 'succeeded' && w.ended(l.runId).resultSeen && w.ended(l.runId).stopReason === 'takeover', 'the run ended from its result (succeeded)', w.ended(l.runId))
   check(w.rt().cards.filter((x) => x.state === 'open').length === cards, 'no card opened by that run\'s end')
-  check(w.task('t-2').state === 'doing' && !w.task('t-2').blocked && w.ended(l.runId).outcome === 'empty', 'a fourth empty outcome blocks nothing: no card about a run the user now drives', w.task('t-2'))
+  check(w.task('t-2').state === 'doing' && !w.task('t-2').blocked && w.ended(l.runId).outcome === 'empty', 'a third empty outcome blocks nothing: no card about a run the user now drives', w.task('t-2'))
   check(w.agent('dev').takeover.phase === 'bindPending', 'bindPending')
 
   // Autonomy on and a comment waiting for the agent: the dispatcher never starts a taken-over agent (G5 takenOver).

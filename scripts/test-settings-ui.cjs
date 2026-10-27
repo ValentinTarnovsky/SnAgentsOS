@@ -85,6 +85,8 @@ window.smoke={calls,created,termKeys,explorerArgs,hotkeyArgs,accountCalls,theme:
  set:p=>useAppStore.setState(p),
  ntfy:()=>useAppStore.getState().settings.notifications.ntfy,
  silence:()=>useAppStore.getState().settings.agents.silence,
+ remoteDelay:()=>useAppStore.getState().settings.notifications.remoteDelaySec,
+ blocks:()=>useAppStore.getState().settings.sidebarBlocks,
  // React's onBlur listens to focusout: a hidden window may never hand the input real focus.
  commit:(sel,how)=>{const el=document.querySelector(sel);if(how==='enter')el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));else el.dispatchEvent(new FocusEvent('focusout',{bubbles:true}))},
  settings:p=>useAppStore.getState().updateSettings(p),
@@ -384,6 +386,35 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
  await js("document.querySelector('[data-search-result=\\"agents.silence\\"] [role=switch]').click()");await frame();
  eq([await js('smoke.silence()'),(await js('smoke.state()')).query],[{enabled:true,quietMin:15,stalledMin:16},'silencio'],'the inline switch (agents.silence.enabled) turns it back on without leaving the search');
  await js("smoke.search('')");await js("smoke.set({settingsOpen:false})");await frame();
+
+ // --- app 2.8.0: the nav order, the phone notice delay and the sidebar blocks ----------------
+ await js("smoke.openSettings()");await frame();
+ eq(await js("[...document.querySelectorAll('[data-settings-nav]')].map(e=>e.getAttribute('data-settings-nav'))"),['terminal','agents','claudeaccounts','aiusage','quick','automation','git','notifications','remote','share','connections','startup','appearance','keys','language','data','usage','labs','updates','about'],'the nav comes in the 2.8.0 order');
+ await js("smoke.openSettings('notifications#remoteDelay')");await frame();await frame();
+ eq([await js("document.querySelector('[data-remote-delay]').value"),await js('smoke.remoteDelay()')],['0',0],'the phone notice delay: 0 by default');
+ await js("smoke.setInput('[data-remote-delay]','120')");await frame();
+ ok(await js("smoke.remoteDelay()===0"),'typing never commits mid-word');
+ await js("smoke.commit('[data-remote-delay]','enter')");await frame();
+ ok(await js("smoke.remoteDelay()===120"),'Enter commits 120 seconds');
+ await js("smoke.setInput('[data-remote-delay]','99999')");await js("smoke.commit('[data-remote-delay]')");await frame();
+ eq([await js("document.querySelector('[data-remote-delay]').value"),await js('smoke.remoteDelay()')],['3600',3600],'a delay past the max is clamped to 3600 on blur');
+ await js("smoke.setInput('[data-remote-delay]','abc')");await js("smoke.commit('[data-remote-delay]')");await frame();
+ ok(await js("smoke.remoteDelay()===0"),'junk commits 0 (send at once)');
+ await js("smoke.search('celular')");await frame();
+ ok(await js("!!document.querySelector('[data-search-result=\\"notifications.remoteDelay\\"]')"),'search "celular" finds the delay row');
+ await js("smoke.search('')");await js("smoke.usageOn(true);smoke.openSettings('appearance#sidebarUsageBars')");await frame();await frame();
+ ok(await js("!!document.querySelector('[data-sidebar-blocks]')&&document.querySelectorAll('[data-sidebar-blocks] [role=switch]').length===6"),'Apariencia has the six sidebar block switches');
+ eq(await js("[!!document.querySelector('[data-agents-board-toggle]'),!!document.querySelector('[data-usage-row],[data-usage-rail],[data-usage-folded],[data-usage-fold],[data-usage-account]'),JSON.stringify(smoke.blocks())]"),[true,true,JSON.stringify({agentsBoard:true,teams:true,sharedWithMe:true,shareIndicator:true,remoteIndicator:true,usageBars:true})],'every block shown by default');
+ await js("document.querySelector('[data-setting-id=\\"appearance.sidebarAgentsBoard\\"] [role=switch]').click()");await frame();
+ await js("document.querySelector('[data-setting-id=\\"appearance.sidebarUsageBars\\"] [role=switch]').click()");await frame();
+ ok(await js("smoke.blocks().agentsBoard===false&&smoke.blocks().usageBars===false&&smoke.blocks().teams===true"),'the switches write settings.sidebarBlocks');
+ eq(await js("[...document.querySelectorAll('[data-sidebar-blocks] [role=switch]')].map(e=>e.getAttribute('aria-checked'))"),['false','true','true','true','true','false'],'the switches show the hidden blocks off');
+ ok(await js("!document.querySelector('[data-agents-board-toggle]')&&!document.querySelector('[data-usage-row],[data-usage-rail],[data-usage-folded],[data-usage-fold],[data-usage-account]')&&!!document.querySelector('[data-sidebar-new]')&&!!document.querySelector('[data-sidebar-settings]')"),'hidden blocks leave the sidebar; New workspace and Settings stay');
+ await shot('sidebar-blocks');
+ await js("smoke.search('ocultar')");await frame();
+ await js("document.querySelector('[data-search-result=\\"appearance.sidebarAgentsBoard\\"] [role=switch]').click()");await frame();
+ ok(await js("smoke.blocks().agentsBoard===true&&!!document.querySelector('[data-agents-board-toggle]')"),'the inline search switch brings the board button back');
+ await js("smoke.search('');smoke.settings({sidebarBlocks:{...smoke.blocks(),usageBars:true}});smoke.usageOn(false);smoke.set({settingsOpen:false})");await frame();
 
  // Light theme and zoom: the results list fits.
  await js("smoke.theme('light');smoke.openSettings()");await frame();await js("smoke.search('notif')");

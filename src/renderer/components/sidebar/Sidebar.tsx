@@ -53,6 +53,7 @@ import { PANE_DRAG_MIME, isPaneDrag, paneDragId } from '@/lib/paneDrag'
 import { revealPane } from '@/lib/revealPane'
 import { AttentionBadge, FOCUS_RING } from '@/components/sidebar/AttentionBadge'
 import { TeamsSection } from '@/components/teams/TeamsSection'
+import { sidebarBlockOn, type SidebarBlockKey } from '@shared/sidebarBlocks'
 
 interface MenuState {
   x: number
@@ -185,6 +186,9 @@ export function Sidebar() {
   )
   const sessions = useAgentStore((s) => s.sessions)
   const sleeping = useAgentStore((s) => s.sleeping)
+  // App 2.8.0: the blocks the user hid from the sidebar (Settings > Appearance); absent or junk shows them.
+  const blocks = useAppStore((s) => s.settings.sidebarBlocks)
+  const show = (key: SidebarBlockKey): boolean => sidebarBlockOn({ sidebarBlocks: blocks }, key)
   // Agents board (E5-FR-27): the header button toggles it like Ctrl+Shift+A.
   const boardOpen = useAgentStore((s) => s.view === 'board')
   const boardKeys = useActionKeys('agentsBoard')
@@ -391,7 +395,7 @@ export function Sidebar() {
             )}
           </button>
         </Tooltip>
-        <Tooltip label={<ActionTooltipLabel label={t('agents.board.toggle')} action="agentsBoard" />} side="right" className="shrink-0">
+        {show('agentsBoard') && <Tooltip label={<ActionTooltipLabel label={t('agents.board.toggle')} action="agentsBoard" />} side="right" className="shrink-0">
           <button
             type="button"
             data-agents-board-toggle
@@ -410,11 +414,11 @@ export function Sidebar() {
           >
             <LayoutDashboard size={16} />
           </button>
-        </Tooltip>
+        </Tooltip>}
       </div>
 
       {/* Teams (app 2.7.0, Labs teams): never workspaces, never in the sidebar order or Alt+digit. */}
-      <TeamsSection />
+      {show('teams') && <TeamsSection />}
 
       <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto overflow-x-hidden px-2">
         {sorted.map((w) => {
@@ -685,10 +689,10 @@ export function Sidebar() {
       </nav>
 
       {/* Shared with me (app 2.4.0): joined shares, never workspaces of this store. */}
-      <SharedWithMeSection />
-      <ShareHostIndicator />
-      <RemoteIndicator />
-      <UsageBars />
+      {show('sharedWithMe') && <SharedWithMeSection />}
+      {show('shareIndicator') && <ShareHostIndicator />}
+      {show('remoteIndicator') && <RemoteIndicator />}
+      {show('usageBars') && <UsageBars />}
 
       <div className="shrink-0 border-t border-border p-2">
         <Tooltip label={sidebarCollapsed ? <ActionTooltipLabel label={t('sidebar.settings')} action="openSettings" /> : ''} side="right" className="w-full">

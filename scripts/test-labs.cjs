@@ -59,7 +59,7 @@ function sharedChecks() {
 
 function schemaChecks() {
   const { labsSettingsSchema: S, parseConfig, CONFIG_VERSION } = load('src/main/store/schema.ts')
-  check(CONFIG_VERSION === 19, 'CONFIG_VERSION is 19 (app 2.7.0)')
+  check(CONFIG_VERSION === 20, 'CONFIG_VERSION is 20 (app 2.8.0)')
   check(Object.keys(S.shape).join() === KEYS.join(), 'labsSettingsSchema keys === LABS_KEYS, same order')
   check(same(S.parse({}), OFF) && same(S.parse({}), L.DEFAULT_LABS), 'an empty labs block parses to DEFAULT_LABS')
   for (const k of KEYS) {
@@ -79,12 +79,12 @@ function schemaChecks() {
     activeWorkspaceId: 'w1',
   }
   const up = parseConfig(clone(v18))
-  check(up && up.version === 19, 'a v18 config parses and is stamped 19')
+  check(up && up.version === 20, 'a v18 config parses and is stamped 20')
   check(same(up.settings.labs, OFF) && Object.keys(up.settings.labs).join() === KEYS.join(), 'v18 -> v19: settings.labs gains every lab off')
   check(survives(v18, up), 'v18 -> v19 keeps every other value')
   check(same(parseConfig(clone(up)), up), 'v19 parse is idempotent')
   const fromV10 = parseConfig({ version: 10, workspaces: [], presets: [], settings: clone(baseSettings) })
-  check(fromV10 && fromV10.version === 19 && same(fromV10.settings.labs, OFF), 'a v10 config walks up to 19 and gets the labs defaults')
+  check(fromV10 && fromV10.version === 20 && same(fromV10.settings.labs, OFF), 'a v10 config walks up to 20 and gets the labs defaults')
 
   // The labs block in a whole config: kept, junk and non-object values fall back without rejecting it.
   const withLabs = (labs) => { const c = clone(up); c.settings.labs = labs; return parseConfig(c) }

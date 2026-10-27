@@ -185,8 +185,8 @@ export const TEAM_WRITES_PER_MIN = 60
 // ---- flow constants -----------------------------------------------------------------------------
 export const QA_ROUNDS_MAX = 3
 export const CONTINUATIONS_MAX = 1                   // decision 31
-export const NO_PROGRESS_COOLDOWN_MIN: readonly number[] = [5, 10, 20]
-export const NO_PROGRESS_BLOCK_AT = 4                // decision 32
+export const NO_PROGRESS_COOLDOWN_MIN: readonly number[] = [5, 10]
+export const NO_PROGRESS_BLOCK_AT = 3                // decision 32
 export const RETRIES_MAX = 1                         // overloaded / request / unknown
 export const RETRY_DELAY_MS = 2 * 60_000
 export const LIMIT_FALLBACK_MS = 15 * 60_000
