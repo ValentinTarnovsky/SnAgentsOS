@@ -764,7 +764,7 @@ async function oldDesktopChecks(api, oldApi, oldCtx) {
   const start = index.indexOf('new ShareHost({')
   const block = index.slice(start, index.indexOf('\n  })', start))
   check(start > 0 && block.length > 0 && !/team/i.test(block), 'the ShareHost construction in index.ts carries no team dep (ShareState never holds team data)')
-  check(/remoteManager\.setTeams\(teams\.remoteView\)/.test(index) && /remoteManager\.teamChanged\(evt\)/.test(index) && /noticeRouter\?\.routeTeam\(n\)/.test(index) && /pushTeam: \(notice, config\) => void remoteManager\.notifyTeamPush\(notice, config\)/.test(index), 'index.ts wires setTeams, the teamChanged relay, routeTeam and the team push (design 3.12 steps 7 and 11)')
+  check(/remoteManager\.setTeams\(teams\.remoteView\)/.test(index) && /remoteManager\.teamChanged\(evt\)/.test(index) && /noticeDelay\.routeTeam\(n\)/.test(index) && /routeTeam: \(notice\) => noticeRouter\?\.routeTeam\(notice\)/.test(index) && /pushTeam: \(notice, config\) => void remoteManager\.notifyTeamPush\(notice, config\)/.test(index), 'index.ts wires setTeams, the teamChanged relay, routeTeam through noticeDelay (app 2.8.0) and the team push (design 3.12 steps 7 and 11)')
 }
 
 async function main() {

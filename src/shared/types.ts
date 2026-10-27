@@ -4,6 +4,7 @@
  */
 import type { PaneWorktree } from './worktree-types'
 import type { LabsSettings } from './labs'
+import type { SidebarBlocksSettings } from './sidebarBlocks'
 import type { ToolFamily, TurnDigest } from './toolActivity'
 import type { FailureInfo } from './failure'
 
@@ -13,7 +14,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 19
+export const CONFIG_VERSION = 20
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -785,6 +786,11 @@ export interface NotificationSettings {
    * unknown idle state still delivers. Native notifications ignore it (schema 12).
    */
   onlyWhenAway: boolean
+  /**
+   * Seconds the remote notices (Web Push, Discord, ntfy) wait before going out; one
+   * that no longer stands by then is dropped (schema 20, app 2.8.0). 0 sends at once.
+   */
+  remoteDelaySec: number
 }
 
 /** Keep the PC awake while agents work (schema 11). */
@@ -1012,6 +1018,8 @@ export interface Settings {
   share: ShareSettings
   /** Opt-in experimental modules, all off by default (schema 19, app 2.7.0). */
   labs: LabsSettings
+  /** Sidebar blocks shown, all on by default (schema 20, app 2.8.0). */
+  sidebarBlocks: SidebarBlocksSettings
 }
 
 export interface ConfigFile {

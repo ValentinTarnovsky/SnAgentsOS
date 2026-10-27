@@ -6,6 +6,7 @@ import { useT } from '@/i18n'
 import { playStatusSound } from '@/lib/sound'
 import { inputCls, labelCls, SettingRow, ToggleRow } from '../ui'
 import { Button } from '@/components/ui/Button'
+import { normalizeNoticeDelay, NOTICE_DELAY_MAX_SEC } from '@shared/noticeDelay'
 
 function randomToken(): string {
   const bytes = new Uint8Array(16)
@@ -18,6 +19,40 @@ export function generateNtfyTopic(): string {
   const bytes = new Uint8Array(8)
   crypto.getRandomValues(bytes)
   return `snaos-${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`
+}
+
+/**
+ * App 2.8.0: seconds the remote notices (phone push, Discord, ntfy) wait; they go
+ * out only if nobody answered or looked meanwhile. Commits on blur or Enter.
+ */
+function RemoteDelayRow({ value, onSave }: { value: number; onSave: (sec: number) => void }) {
+  const t = useT()
+  const [draft, setDraft] = useState<string | null>(null)
+  const commit = (): void => {
+    if (draft === null) return
+    const sec = normalizeNoticeDelay(Number(draft))
+    if (sec !== value) onSave(sec)
+    setDraft(null)
+  }
+  return (
+    <SettingRow searchId="notifications.remoteDelay" title={t('notif.remoteDelay')} description={t('notif.remoteDelayHint')}>
+      <input
+        type="number"
+        min={0}
+        max={NOTICE_DELAY_MAX_SEC}
+        step={1}
+        data-remote-delay
+        aria-label={t('notif.remoteDelay')}
+        className={`${inputCls} w-28`}
+        value={draft ?? String(value)}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit()
+        }}
+      />
+    </SettingRow>
+  )
 }
 
 export function NotificationsSection() {
@@ -250,6 +285,7 @@ export function NotificationsSection() {
       </div>
       <div className="space-y-3 border-t border-border pt-5">
         <ToggleRow checked={n.onlyWhenAway} onChange={v => patch({ onlyWhenAway: v })} searchId="notifications.onlyWhenAway" title={t('notif.away.title')} description={t('notif.away.desc')} />
+        <RemoteDelayRow value={normalizeNoticeDelay(n.remoteDelaySec)} onSave={(sec) => patch({ remoteDelaySec: sec })} />
       </div>
     </div>
   )

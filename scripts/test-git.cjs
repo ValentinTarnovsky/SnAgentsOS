@@ -239,7 +239,7 @@ const schema13Start = checks
     settings: { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false, gitChip: false },
     activeWorkspaceId: 'w1',
   })
-  check(CONFIG_VERSION === 19, 'the current schema still carries the schema 13 worktree keys')
+  check(CONFIG_VERSION === 20, 'the current schema still carries the schema 13 worktree keys')
   const up = parseConfig(v12())
   check(up.version === CONFIG_VERSION && up.settings.worktreesRoot === '' && up.settings.gitChip === false && up.workspaces[0].panes[0].cwd === wt.path, 'v12 -> v14: worktreesRoot defaults to empty (dataDir()/worktrees), gitChip and pane cwd kept')
   check(up.workspaces[0].panes.every((p) => !('worktree' in p)), 'a pane without worktree stays without one')

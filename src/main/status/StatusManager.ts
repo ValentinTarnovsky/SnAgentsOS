@@ -301,6 +301,7 @@ export class StatusManager implements PtySink {
   private readonly flashing = new Set<string>()
   /** v2.3: a paired phone is looking at the pane right now (SessionManager.isPaneSeen). */
   private remoteSeen: (paneId: string) => boolean = () => false
+  private seenListener: ((paneId: string) => void) | null = null
   // v2.4: `claude` / `codex` typed in an integrated PowerShell (OSC 133 C;agent=).
   /** The pty's mark nonce (PtyManager.shellMarkOf), read on spawn; no entry = not integrated. */
   private shellMark: (ptyId: string) => string | undefined = () => undefined
@@ -496,6 +497,22 @@ export class StatusManager implements PtySink {
   /** v2.3: who tells whether a phone is looking at a pane (main wiring). */
   setRemoteSeen(fn: (paneId: string) => boolean): void { this.remoteSeen = fn }
   /**
+   * App 2.8.0: told every time a device sees a pane (the ackPane paths: a focused
+   * desktop view, the window gaining focus, a phone opening it), an `action`
+   * included, so noticeDelay drops that pane's delayed remote notice.
+   */
+  setSeenListener(fn: ((paneId: string) => void) | null): void { this.seenListener = fn }
+  /**
+   * App 2.8.0: a notice raised at `seq` still stands: the pane did not move to
+   * another state since and still asks for attention (not seen, not answered,
+   * not muted). noticeDelay checks it before sending a delayed remote notice.
+   */
+  noticeCurrent(paneId: string, seq: number | undefined): boolean {
+    const track = this.panes.get(paneId)
+    if (!track || (seq !== undefined && track.stateSeq !== seq)) return false
+    return this.attentionOf(track, undefined, true)
+  }
+  /**
    * v2.3: a device saw the pane (a focused desktop view, a phone with it
    * open): its done / error stops asking for attention. An open request is
    * not answered by looking at it, so an `action` keeps its attention.
@@ -503,6 +520,7 @@ export class StatusManager implements PtySink {
    * own, so an open `needs` still lets its toast close).
    */
   ackPane(paneId: string): void {
+    try { this.seenListener?.(paneId) } catch { /* a listener never blocks the ack */ }
     const track = this.panes.get(paneId)
     if (!track || track.ackedSeq === track.stateSeq) return
     const before = this.attentionOf(track, undefined, true)
@@ -1615,7 +1633,7 @@ export class StatusManager implements PtySink {
           const config = this.getConfig()
           digest = clip(redactCredentials(digestLine({ ...turn, files: [] }, family => mainT(config, toolFamilyKey(family)))), NOTICE_DIGEST_MAX)
         }
-        this.onNotice({ paneId, provider: track.provider, state, reason: evt.reason, ...(digest ? { digest } : {}) })
+        this.onNotice({ paneId, provider: track.provider, state, reason: evt.reason, seq: track.stateSeq, ...(digest ? { digest } : {}) })
       }
       const focused = this.getWindow()?.isFocused() ?? false
       const inView = this.viewed.has(paneId) && focused
