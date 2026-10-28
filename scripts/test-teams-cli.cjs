@@ -372,6 +372,50 @@ async function clientChecks() {
   check(fine.code === 0 && fine.sent.length === 1 && fine.sent[0].params.text === 'el plan del repo', 'a repo file is read and sent as before')
   const repoConfig = await runGuard(['team', 'comment', 't-3', '--file', files.repoConfig, '--json'])
   check(repoConfig.code === 0 && repoConfig.sent.length === 1 && repoConfig.sent[0].params.text === '{"port":3000}', 'a config.json of the repo is read: only the data folder\'s is a secret (its name is common, sixth round)', repoConfig.json)
+
+  // App 2.9.1: `--part` keeps parts of a long plan in the client (Claude Code refuses a Bash command over 10,000
+  // characters); the call without it sends them joined by a line break and, once the app took it, drops them.
+  const store = new Map()
+  const memParts = (runId) => ({
+    read: (sub) => store.get(`${runId}.${sub}`) ?? [],
+    append: (sub, text) => { const parts = [...(store.get(`${runId}.${sub}`) ?? []), text]; store.set(`${runId}.${sub}`, parts); return parts },
+    clear: (sub) => { store.delete(`${runId}.${sub}`) },
+  })
+  let answer = { ok: true, data: { approvalId: 'a-1', concluded: 'plan' } }
+  const runPart = async (argv, stdin, env = teamEnv) => {
+    const out = []
+    const sent = []
+    const partIo = { ...io({}, stdin), teamParts: memParts }
+    const code = await C.run(argv, { io: partIo, env, out: (s) => out.push(s), err: () => undefined, send: async (_c, call) => { sent.push(call); return answer }, appVersion: '2.7.0' })
+    let json = null
+    try { json = JSON.parse(out.at(-1) ?? '') } catch { /* human */ }
+    return { code, json, sent, out: out.join('\n') }
+  }
+  const p1 = await runPart(['team', 'plan', '--part', '--file', '-', '--json'], '# Plan\n\nuno\n')
+  check(p1.code === 0 && p1.sent.length === 0 && p1.json.ok === true && p1.json.data.part === 1 && p1.json.data.chars === '# Plan\n\nuno'.length, '--part: nothing is sent, the part waits (part 1)', p1.json)
+  const p2 = await runPart(['team', 'plan', '--part', '-'], 'dos')
+  check(p2.code === 0 && p2.sent.length === 0 && /^part 2 kept/.test(p2.out), '--part with a lone - and human output: part 2', p2.out)
+  answer = { ok: false, error: { code: 'conflict', message: 'stale' } }
+  const refused = await runPart(['team', 'plan', '--small', '--file', '-', '--json'], 'tres')
+  check(refused.sent.length === 1 && refused.sent[0].params.text === '# Plan\n\nuno\ndos\ntres' && refused.sent[0].params.small === true && store.get(`${RUN}.plan`)?.length === 2, 'the last part sends the parts joined by a line break; a refused call keeps them', refused.sent)
+  answer = { ok: true, data: { approvalId: 'a-1', concluded: 'plan' } }
+  const sentAll = await runPart(['team', 'plan', '--file', '-', '--json'], 'tres')
+  check(sentAll.code === 0 && sentAll.sent[0].params.text === '# Plan\n\nuno\ndos\ntres' && !store.has(`${RUN}.plan`), 'the call the app takes drops the parts', sentAll.sent)
+  const plain = await runPart(['team', 'plan', '--file', '-', '--json'], 'solo')
+  check(plain.sent[0].params.text === 'solo', 'without parts the plan goes as before')
+  store.set(`${RUN}.plan`, ['x'.repeat(30 * 1024)])
+  const over = await runPart(['team', 'plan', '--part', '-', '--json'], 'y'.repeat(3 * 1024))
+  check(over.code === 2 && /the plan is longer than/.test(over.json.error.message) && store.get(`${RUN}.plan`).length === 1, '--part refuses a part that takes the whole plan over TEAM_PLAN_MAX, and keeps none of it', over.json)
+  store.clear()
+  const outside = await runPart(['team', 'plan', '--part', '-', '--json'], 'x', {})
+  check(outside.code === 2 && /--part works only inside a team run/.test(outside.json.error.message), '--part outside a team run is a usage error', outside.json)
+  check(/--part does not apply to team comment/.test((await runPart(['team', 'comment', 't-3', '--part', 'x', '--json'], '')).json.error.message), '--part only on plan and hire (the other texts fit in one command)')
+  // nodeIo's store: one JSON file per run and sub under the OS temp folder.
+  const realParts = C.nodeIo.teamParts(`r-test-${process.pid}`)
+  realParts.clear('plan')
+  check(realParts.append('plan', 'á').length === 1 && realParts.append('plan', 'b').join('|') === 'á|b' && realParts.read('hire').length === 0, 'nodeIo parts: append, read per sub')
+  realParts.clear('plan')
+  check(realParts.read('plan').length === 0, 'nodeIo parts: clear')
   const notTeam = await runGuard(['team', 'comment', 't-3', '--file', files.runtime, '--json'], { SNAOS_CTL_ENDPOINT: 'x', SNAOS_CTL_TOKEN: 'y'.repeat(64) })
   check(notTeam.sent.length === 1, 'outside a team run the client reads the file (main answers snaos team forbidden there)')
   // The default root of the task worktrees is <dataDir>/worktrees: a Dev or QA run's own tree stays readable, but a
@@ -658,7 +702,10 @@ async function serverChecks() {
     await roleCase(() => port.setRun({ roleKind: 'custom', mode: 'exec' }), ['team', 'done'], true)
     await roleCase(() => port.setRun({ roleKind: 'research', mode: 'plan' }), ['team', 'done', 'informe'], true)
     await roleCase(() => port.setRun({ roleKind: 'research', mode: 'plan' }), ['team', 'review'], false, /not a tool of the research role/)
-    await roleCase(() => port.setRun({ roleKind: 'qa', mode: 'qa' }), ['team', 'plan', 'x'], false, /not a tool of the qa role/)
+    await roleCase(() => port.setRun({ roleKind: 'qa', mode: 'qa' }), ['team', 'plan', 'x'], false, /works only in plan runs; this run is in qa mode/)
+    // App 2.9.1: QA plans and closes a task of its own.
+    await roleCase(() => port.setRun({ roleKind: 'qa', mode: 'plan' }), ['team', 'plan', 'x'], true)
+    await roleCase(() => port.setRun({ roleKind: 'qa', mode: 'exec', isolation: 'worktree', profile: 'readonly' }), ['team', 'done', 'informe'], true)
     await roleCase(() => port.setRun({ roleKind: 'qa', mode: 'qa' }), ['team', 'comment', 't-3', 'mirá'], true)
     await roleCase(lead, ['team', 'task', 'create', '--title', 'Sin padre', '--blocked-by', 't-1'], true)
     await roleCase(lead, ['team', 'review'], false, /not a tool of the lead role/)
