@@ -59,18 +59,19 @@ export const TEAM_TOOLS: readonly TeamToolSpec[] = [
     usage: 'snaos team ask [<text...>] [--file <file>|-] [--options "A|B|C"] [--recommended <n>] [--multi] [--confirm]', summary: 'Ask the user a question, with options when there are a few clear answers; --recommended marks the one you would pick.' },
   { name: 'needs', method: 'team.needs', terminal: 'needs', write: true, roles: ALL, modes: [],
     usage: 'snaos team needs [<text...>] [--file <file>|-]', summary: 'Tell the user what you need them to do before you can go on.' },
-  { name: 'plan', method: 'team.plan', terminal: 'plan', write: true, roles: ['dev', 'research', 'custom'], modes: ['plan'],
-    usage: 'snaos team plan --file <file>|- [--small]', summary: 'Send your plan for approval; --small for a small change.' },
+  // App 2.9.1: QA plans and closes a task of its own too (a Lead gives it a full review before a deploy).
+  { name: 'plan', method: 'team.plan', terminal: 'plan', write: true, roles: ['dev', 'research', 'custom', 'qa'], modes: ['plan'],
+    usage: 'snaos team plan --file <file>|- [--small] [--part]', summary: 'Send your plan for approval; --small for a small change; --part keeps one part of a long plan (the call without it sends them all).' },
   { name: 'review', method: 'team.review', terminal: 'review', write: true, roles: ['dev', 'custom'], modes: ['exec'],
     usage: 'snaos team review [<text...>] [--file <file>|-]', summary: 'Ask for review of your committed work, with a short summary.' },
   { name: 'verdict', method: 'team.verdict', terminal: 'verdict', write: true, roles: ['qa'], modes: ['qa'],
     usage: 'snaos team verdict approve|changes [<text...>] [--file <file>|-]', summary: 'Approve the work, or ask for changes with a concrete list.' },
-  { name: 'done', method: 'team.done', terminal: 'done', write: true, roles: ['research', 'custom', 'dev'], modes: ['plan', 'exec'], requires: 'mainIsolation',
+  { name: 'done', method: 'team.done', terminal: 'done', write: true, roles: ['research', 'custom', 'dev', 'qa'], modes: ['plan', 'exec'], requires: 'mainIsolation',
     usage: 'snaos team done [<text...>] [--file <file>|-]', summary: 'Report the task finished, with your report.' },
   { name: 'approve', method: 'team.approve', terminal: 'approvePlan', write: true, roles: ['lead'], modes: ['lead'], requires: 'smallPlan',
     usage: 'snaos team approve --plan <t-N>', summary: 'Approve a small plan you read in full (the user decides the rest).' },
   { name: 'hire', method: 'team.hire', terminal: 'hire', write: true, roles: ['lead'], modes: ['lead'],
-    usage: 'snaos team hire --file <file>|-', summary: 'Propose a new role (a full role file: frontmatter and instructions) for the user to approve. An optional `id: <role-id>` line in the frontmatter names the role; without it the id is the slug of `name` (`QA Movil` -> `qa-movil`).' },
+    usage: 'snaos team hire --file <file>|- [--part]', summary: 'Propose a new role (a full role file: frontmatter and instructions) for the user to approve. An optional `id: <role-id>` line in the frontmatter names the role; without it the id is the slug of `name` (`QA Movil` -> `qa-movil`).' },
 ]
 
 export const TEAM_CTL_METHODS: readonly TeamCtlMethod[] = TEAM_TOOLS.map((t) => t.method)
@@ -98,8 +99,9 @@ export function allowedFor(kind: RoleKind, spec: TeamToolSpec, ctx: { mode: RunM
     case 'done':
       // A Dev closes only a task with nothing to integrate: isolation main, or an exec run of a readonly role (its
       // worktree task runs in the repo root and commits nothing, decision 24). A writing Dev's plan run is readonly
-      // only for its phase: it never closes the task. Research may close from its plan run too.
-      if (kind === 'dev' && ctx.isolation !== 'main' && !(ctx.mode === 'exec' && ctx.profile === 'readonly')) return false
+      // only for its phase: it never closes the task. Research may close from its plan run too. QA, on a task of its
+      // own (app 2.9.1), by the Dev rule.
+      if ((kind === 'dev' || kind === 'qa') && ctx.isolation !== 'main' && !(ctx.mode === 'exec' && ctx.profile === 'readonly')) return false
       return kind === 'research' || ctx.mode === 'exec'
     case 'review':
       // A readonly exec run commits nothing, so there is nothing to review: it reports with `team done`.
@@ -115,7 +117,7 @@ const MODE_WORD: Readonly<Record<RunMode, string>> = { plan: 'plan', exec: 'exec
 function whenOf(kind: RoleKind, spec: TeamToolSpec): string {
   if (kind === 'lead') return ''
   if (spec.name === 'task.create') return 'exec runs, only a subtask of your task: --parent <your task>'
-  if (spec.name === 'done') return kind === 'research' ? 'plan or exec runs' : kind === 'dev' ? 'exec runs of a task with isolation main, or any exec run when your role is read-only' : 'exec runs'
+  if (spec.name === 'done') return kind === 'research' ? 'plan or exec runs' : kind === 'dev' || kind === 'qa' ? 'exec runs of a task with isolation main, or any exec run when your role is read-only' : 'exec runs'
   if (spec.name === 'review') return 'exec runs, when your role may write'
   return spec.modes.length === 0 ? '' : `${spec.modes.map((m) => MODE_WORD[m]).join(' or ')} runs`
 }
@@ -170,6 +172,11 @@ export function teamChannelText(reportsByBlock: boolean, o: { win32: boolean; pr
         : 'Call the team tools from your shell as `snaos team <tool> ... --json` (for example `snaos team show --json`). Each call prints one JSON line: `{"ok":true,"data":...}` or `{"ok":false,"error":{"code":...,"message":...}}`.',
       'Long text goes in a file: `--file <path>` (`--body-file <path>` for a task body), or `-` to read it from stdin.',
     ]
+    // App 2.9.1: Claude Code refuses a Bash command over 10,000 characters, and a run has nobody to approve it.
+    if (claude)
+      lines.push(
+        "Keep every Bash command under 9,000 characters (a longer one is refused and nobody can approve it here). A longer plan or role file goes in parts split at a line break: `snaos team plan --part --file - <<'EOF'` ... `EOF` once per part, then the call without `--part` with the last part; the team joins them with a line break.",
+      )
     if (o.win32) {
       lines.push(
         claude

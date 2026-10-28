@@ -5,10 +5,10 @@
  * path that came from the CLI), the HTTP client over the pipe or socket,
  * human or `--json` output and the exit codes. Output is English on purpose.
  */
-import { readFileSync, realpathSync, statSync } from 'fs'
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { request } from 'http'
-import { homedir } from 'os'
-import { posix, resolve, win32 } from 'path'
+import { homedir, tmpdir } from 'os'
+import { join, posix, resolve, win32 } from 'path'
 import { CLI_ENV } from '@shared/brand'
 import {
   CTL_EXIT,
@@ -71,6 +71,8 @@ const VALUE_FLAGS = new Set([
 const BOOL_FLAGS = new Set([
   'json', 'focus', 'no-profile', 'enter', 'clear', 'local', 'idle', 'agent', 'help', 'tools', 'thinking', 'yes', 'resume', 'fresh', 'close', 'off', 'composer', 'open',
   'mine', 'no-plan', 'needs-plan', 'small', 'multi', 'confirm', 'stat',
+  // app 2.9.1: team plan / hire --part.
+  'part',
 ])
 const ALIASES: Record<string, string> = { w: 'workspace', c: 'console', n: 'lines', h: 'help', t: 'title', y: 'yes' }
 
@@ -97,12 +99,12 @@ const SUBS: Partial<Record<Command, Record<string, string[]>>> = {
     note: ['file', 'title'],
     ask: ['file', 'options', 'multi', 'confirm', 'recommended'],
     needs: ['file'],
-    plan: ['file', 'small'],
+    plan: ['file', 'small', 'part'],
     review: ['file'],
     verdict: ['file'],
     done: ['file'],
     approve: ['plan'],
-    hire: ['file'],
+    hire: ['file', 'part'],
   },
 }
 /** `notes` alone lists, `account` alone is `account status`; `ws` and `team` alone are usage errors. */
@@ -220,6 +222,57 @@ export interface ClientIo {
    * run (teamReadGuard); every `--file`, `--body-file` and `--prompt-file` asks it before reading.
    */
   refuse?(path: string): string | null
+  /** App 2.9.1: the `--part` store of one team run (teamPartsOf); run() sets `parts` from it inside a team run. */
+  teamParts?(runId: string): TeamParts
+  parts?: TeamParts
+}
+
+/**
+ * App 2.9.1: the parts of a long `team plan` or `team hire` text a run sent with `--part`, per sub. Claude Code refuses
+ * a Bash command over 10,000 characters and a team run has nobody to approve it, while a plan may hold
+ * TEAM_PLAN_MAX: the run sends it in parts and the call without `--part` sends them joined by a line break.
+ */
+export interface TeamParts {
+  read(sub: string): string[]
+  append(sub: string, text: string): string[]
+  clear(sub: string): void
+}
+
+/** The subs that take `--part` (SUBS.team), with the cap of their whole text. */
+const PART_CAPS: Readonly<Record<string, readonly [number, string]>> = { plan: [TEAM_PLAN_MAX, 'the plan'], hire: [HIRE_TEXT_MAX, 'the role file'] }
+
+/** A `--part` call: nothing goes to the app, the part waits in the client store (run() prints it). */
+class TeamPartSaved {
+  constructor(readonly parts: number, readonly chars: number) {}
+}
+
+/** One JSON file per run and sub under the OS temp folder, never in the data folder or the run cwd. */
+function teamPartsOf(runId: string): TeamParts {
+  const dir = join(tmpdir(), 'snagentsos-team-parts')
+  const safe = runId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'run'
+  const file = (sub: string): string => join(dir, `${safe}.${sub}.json`)
+  const read = (sub: string): string[] => {
+    try {
+      const j = JSON.parse(readFileSync(file(sub), 'utf8')) as { parts?: unknown }
+      return Array.isArray(j.parts) && j.parts.every((p) => typeof p === 'string') ? (j.parts as string[]) : []
+    } catch {
+      return []
+    }
+  }
+  return {
+    read,
+    append(sub, text) {
+      const parts = [...read(sub), text]
+      mkdirSync(dir, { recursive: true })
+      const tmp = `${file(sub)}.${process.pid}.tmp`
+      writeFileSync(tmp, JSON.stringify({ parts }), 'utf8')
+      renameSync(tmp, file(sub))
+      return parts
+    },
+    clear(sub) {
+      rmSync(file(sub), { force: true })
+    },
+  }
 }
 
 function stdinBytes(): Promise<Buffer> {
@@ -237,6 +290,7 @@ export const nodeIo: ClientIo = {
   cwd: () => process.cwd(),
   readFileBytes: (path) => readFileSync(path),
   readStdinBytes: stdinBytes,
+  teamParts: teamPartsOf,
 }
 
 const stripBom = (s: string): string => s.replace(/^\uFEFF/, '')
@@ -548,7 +602,23 @@ async function buildTeamCall(args: ParsedArgs, io: ClientIo): Promise<RpcCall> {
     if (pos.length) throw new UsageError(`${label} takes no argument`)
   }
   const call = (method: TeamCtlMethod, params: Record<string, unknown>): RpcCall => checkTeamCall({ method, params })
-  const fileText = (p: string[]): Promise<string | undefined> => teamBody(p, flag('file'), io)
+  const fileText = async (p: string[]): Promise<string | undefined> => {
+    const text = await teamBody(p, flag('file'), io)
+    const cap = args.sub !== undefined ? PART_CAPS[args.sub] : undefined
+    if (!cap) return text
+    const sub = args.sub as string
+    const before = io.parts?.read(sub) ?? []
+    if (on('part')) {
+      if (!io.parts) throw new UsageError('--part works only inside a team run')
+      if (text === undefined || text.trim() === '') throw new UsageError(`team ${sub} --part needs a text, - (stdin) or --file <path>`)
+      capped([...before, text].join('\n'), cap[0], cap[1])
+      const parts = io.parts.append(sub, text)
+      throw new TeamPartSaved(parts.length, parts.join('\n').length)
+    }
+    // The last part: run() clears the store once the app took the joined text.
+    if (!before.length) return text
+    return text === undefined || text.trim() === '' ? before.join('\n') : [...before, text].join('\n')
+  }
   switch (args.sub) {
     case 'show':
       none('team show')
@@ -1383,7 +1453,7 @@ Inside a team run only (snaos help --agent, section Teams):
              [--no-plan | --needs-plan]
   snaos team comment <t-N|lead> <text|-> | --file <file>|-
   snaos team note [--title <t>] | ask [--options "A|B|C"] [--recommended <n>] [--multi] [--confirm] | needs <text|-> | --file <file>|-
-  snaos team plan --file <file>|- [--small] | review | done [<text|-> | --file <file>|-]
+  snaos team plan --file <file>|- [--small] [--part] | review | done [<text|-> | --file <file>|-]
   snaos team verdict approve|changes <text|-> | --file <file>|-
   snaos team approve --plan <t-N> | hire --file <file>|-
              (hire: a whole role file; an optional id: line in its frontmatter names the role, else the slug of name)
@@ -1411,6 +1481,7 @@ export async function run(argv: readonly string[], deps: RunDeps): Promise<numbe
   }
   let args: ParsedArgs
   let call: RpcCall | null
+  let io: ClientIo = deps.io
   try {
     args = parseArgs(argv)
     json = args.flags.json === true
@@ -1419,9 +1490,16 @@ export async function run(argv: readonly string[], deps: RunDeps): Promise<numbe
       return 0
     }
     // B5 integration, fifth round: a team run reads no file of the data folder and no credentials file (teamReadGuard).
-    const io = deps.env[CLI_ENV.teamRun] ? { ...deps.io, refuse: teamReadGuard(args.flags, deps.env) } : deps.io
+    const teamRun = deps.env[CLI_ENV.teamRun]
+    io = teamRun ? { ...deps.io, refuse: teamReadGuard(args.flags, deps.env), ...(deps.io.teamParts ? { parts: deps.io.teamParts(teamRun) } : {}) } : deps.io
     call = await buildCall(args, io)
   } catch (e) {
+    if (e instanceof TeamPartSaved) {
+      const data = { part: e.parts, chars: e.chars }
+      if (json) deps.out(JSON.stringify({ ok: true, data }))
+      else deps.out(`part ${e.parts} kept (${e.chars} characters in all): send the last part without --part`)
+      return 0
+    }
     if (e instanceof UsageError) return fail('usage', e.message, 2)
     return fail('internal', e instanceof Error ? e.message : String(e), 1)
   }
@@ -1452,6 +1530,8 @@ export async function run(argv: readonly string[], deps: RunDeps): Promise<numbe
     }
     return CTL_EXIT[res.error.code] ?? 1
   }
+  // The joined text reached the app: its parts go (a refused call keeps them for the next try).
+  if (args.command === 'team' && args.sub !== undefined && PART_CAPS[args.sub] && io.parts) io.parts.clear(args.sub)
   if (!json) {
     const text = formatHuman(call.method, res.data)
     if (text) deps.out(text)
