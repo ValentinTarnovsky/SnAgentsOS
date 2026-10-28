@@ -58,6 +58,10 @@ window.smoke={
  wsMenu(wsId){const row=document.querySelector('[data-sidebar-ws='+wsId+'] button');row.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:120,clientY:120}))},
  menuItem(label){return [...document.querySelectorAll('[role=menu] [role=menuitem]')].find(b=>b.textContent===label)},
  key(sel,key,mods){const el=sel?document.querySelector(sel):document.body;if(el&&el.focus)el.focus();const e=new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true,...(mods||{})});(el||document.body).dispatchEvent(e);return e.defaultPrevented},
+ // Workspace reorder by drag: dragstart on the row handle, then dragover on the upper or lower half of the target row.
+ wsDrag(from,to,after){const d=new DataTransfer();const src=document.querySelector('[data-sidebar-ws='+from+'] > [draggable=true]');if(!src)throw new Error('no handle '+from);window.__wsDrag={d,src};src.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:d}));const t=document.querySelector('[data-sidebar-ws='+to+']'),r=t.getBoundingClientRect();window.__wsDrag.at={clientX:r.left+20,clientY:after?r.bottom-2:r.top+2};for(const type of ['dragenter','dragover'])t.dispatchEvent(new DragEvent(type,{bubbles:true,cancelable:true,dataTransfer:d,...window.__wsDrag.at}))},
+ wsDrop(to){const {d,src,at}=window.__wsDrag;const e=new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:d,...at});document.querySelector('[data-sidebar-ws='+to+']').dispatchEvent(e);src.dispatchEvent(new DragEvent('dragend',{bubbles:true,dataTransfer:d}));return e.defaultPrevented},
+ order(){return smoke.app().workspaces.map(w=>w.id).join()},
  rows(wsId){const box=[...document.querySelectorAll('[data-agent-rows]')];return [...document.querySelectorAll('[data-agent-row]')].map(b=>({id:b.dataset.agentRow,state:b.dataset.agentState,glyph:b.querySelector('[data-glyph]')?.dataset.glyph,text:b.textContent,bold:!!b.querySelector('.font-semibold')}))},
 };
 `, resolveDir: root, loader: 'tsx' }, bundle: true, platform: 'browser', format: 'iife', outfile: path.join(dir, 'renderer.js'), alias: { '@shared': path.join(root, 'src/shared'), '@': path.join(root, 'src/renderer') }, jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' } })
@@ -291,7 +295,18 @@ app.whenReady().then(async()=>{
  const bareRow=await js("({row:!!document.querySelector('[data-palette-cmd=console-b2]'),glyph:!!document.querySelector('[data-palette-cmd=console-b2] [data-glyph]')})");
  ok(bareRow.row&&!bareRow.glyph,'ranked: the console row of a bare needs status shows no agent glyph',{hits,bareRow});
  await js("smoke.key('.relative input','Escape')");await frames();
- await js("(()=>{const ps={...smoke.app().paneStatus};delete ps.b2;smoke.set({workspaces:smoke.app().workspaces.filter(w=>!/^n\\d$/.test(w.id)),paneAttention:{},paneStatus:ps});smoke.setAgents({sleeping:{}})})()");await frames();
+ await js("(()=>{const ps={...smoke.app().paneStatus};delete ps.b2;smoke.set({workspaces:smoke.app().workspaces.filter(w=>!/^n[1-5]$/.test(w.id)),paneAttention:{},paneStatus:ps});smoke.setAgents({sleeping:{}})})()");await frames();
+
+ // Workspace reorder by drag (manual order): the line shows the gap and the drop moves the row. The frames()
+ // between dragover and drop let the window reset listener register, the state where the drop used to be lost.
+ ok(await js('smoke.order()')==='wa,wb,wc','reorder starts from wa,wb,wc',await js('smoke.order()'));
+ await js("smoke.wsDrag('wc','wa',false)");await frames();
+ ok(await js("document.querySelector('[data-sidebar-ws=wa] [data-ws-drop-line]')?.dataset.wsDropLine")==='before','dragging wc over the top half of wa shows the line before wa');
+ ok(await js("smoke.wsDrop('wa')"),'the drop on a workspace row is accepted');await frames();
+ ok(await js('smoke.order()')==='wc,wa,wb'&&!(await js("!!document.querySelector('[data-ws-drop-line]')")),'wc lands before wa and the line goes away',await js('smoke.order()'));
+ await js("smoke.wsDrag('wc','wb',true)");await frames();
+ ok(await js("smoke.wsDrop('wb')"),'the drop after the last row is accepted');await frames();
+ ok(await js('smoke.order()')==='wa,wb,wc','dragged below wb, wc goes back to the end',await js('smoke.order()'));
 
  for(const theme of ['midnight','light'])for(const scale of [1,1.25,1.5]){
   await js("smoke.theme('"+theme+"')");w.setSize(900,600);w.webContents.setZoomFactor(scale);await wait(200);
@@ -300,7 +315,7 @@ app.whenReady().then(async()=>{
   if(scale===1.5)await shot('rows-'+theme+'-150');
  }
  if(failures.length)throw new Error(failures.join('\\n'));
- console.log('PASS: '+checks+' agent navigation UI checks (rows per state, +N, not started, chevron, palette Ctrl+1, next waiting, one needs-you rule for badge, palette and next waiting, mark all read, palette doing now, palette ranking, Ctrl+1..9 rules, reopen, focus next, 200 ms tooltips, dark/light 100-150%); screenshots '+__dirname);w.destroy();app.quit();
+ console.log('PASS: '+checks+' agent navigation UI checks (rows per state, +N, not started, chevron, palette Ctrl+1, next waiting, one needs-you rule for badge, palette and next waiting, mark all read, palette doing now, palette ranking, workspace reorder by drag, Ctrl+1..9 rules, reopen, focus next, 200 ms tooltips, dark/light 100-150%); screenshots '+__dirname);w.destroy();app.quit();
 }).catch(e=>{console.error(e);app.exit(1)});
 `)
 const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
