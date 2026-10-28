@@ -316,7 +316,9 @@ function phaseChecks() {
   check(end({ phase: { mode: 'exec' } }) === 'review,ask,needs' && !exec.includes('`team done`'), 'a writing Dev\'s exec run in a worktree: `team review`, never `team done`')
   check(end({ task: tk({ isolation: 'main' }), phase: { mode: 'exec' } }) === 'review,done,ask,needs' && end({ rules: 'reader', role: qaRole, phase: { mode: 'qa', stat: '', round: 0, max: 3 } }) === 'verdict,ask,needs' && end({ rules: 'reader', role: researchRole, phase: { mode: 'plan' } }) === 'plan,done,ask,needs', 'isolation main, QA and a research plan: their own tools')
   const qaExec = P.buildRunPrompt(tb({ rules: 'reader', role: qaRole, task: tk({ needsPlan: false }), phase: { mode: 'exec' } })).stdin
-  check(!qaExec.includes('`team done`') && qaExec.includes('end the run with one of the tools above'), 'a role without `team done` (QA) is never told it, also in a readonly exec run')
+  // App 2.9.1: QA closes a task of its own like a readonly Dev.
+  check(end({ rules: 'reader', role: qaRole, task: tk({ needsPlan: false }), phase: { mode: 'exec' } }) === 'done,ask,needs' && qaExec.includes('`team done`'), 'QA on a task of its own: a readonly exec run names `team done`')
+  check(end({ rules: 'reader', role: qaRole, phase: { mode: 'plan' } }) === 'plan,ask,needs', 'QA on a task of its own: its plan run ends with `team plan`, never `team done`')
   // Every role, mode, isolation and profile: section 4 names `team done` exactly when the CLI admits it.
   const doneSpec = T.teamTool('team.done')
   let pairs = 0
