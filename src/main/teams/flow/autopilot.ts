@@ -12,7 +12,12 @@
  *  - a task waiting on Integrar integrates (TeamService checks the preview
  *    first: a landing that is blocked or a merge that changes the team
  *    definition stays the user's), and one whose integrate failed on a merge
- *    conflict or on the verify goes back to its Dev (T15).
+ *    conflict or on the verify goes back to its Dev (T15). While a run of the
+ *    task is still active (the QA run that just gave its verdict) it waits:
+ *    Integrar would answer `busy`, and that run's end is a commit that asks
+ *    for another pass. An integrate that failed on something passing (the base
+ *    moved, the app quit, a git timeout) is tried again, within
+ *    AUTOPILOT_TRIES_MAX tries of its key.
  *
  * Nothing while the team is paused. `skip` holds the keys TeamService gave up
  * on (a decide that failed, a blocked preview, AUTOPILOT_REBASE_MAX rebases in
@@ -73,6 +78,17 @@ function integrating(t: TeamTask | undefined): t is TeamTask {
   return !!t && t.state === 'review' && t.phase === 'integrating'
 }
 
+/** A run of the task is active: Integrar would answer `busy` until it ends. */
+function taskRunning(rt: Readonly<TeamRuntime>, taskId: string): boolean {
+  return rt.activeRuns.some((r) => r.taskId === taskId)
+}
+
+/** The task's last integrate failed on something that passes by itself: Integrar again. */
+function retryable(t: TeamTask): boolean {
+  const i = t.integrate
+  return !!i && i.state === 'failed' && (i.error === 'base_moved' || i.error === 'interrupted' || i.error === 'timeout')
+}
+
 /** Why a failed integrate goes back to the Dev; undefined for a failure the Dev cannot fix (the user's checkout, git itself). */
 function rebaseWhy(t: TeamTask): 'conflict' | 'verify' | undefined {
   const i = t.integrate
@@ -89,7 +105,10 @@ function approvalPick(rt: Readonly<TeamRuntime>, a: TeamApproval, skip: Readonly
     const task = rt.tasks.find((t) => t.id === a.taskId)
     if (!integrating(task)) return null
     const i = task.integrate
-    if (!i || i.state === 'idle') return skip.has(integrateKey(task.id)) ? null : { kind: 'integrate', key: integrateKey(task.id), taskId: task.id }
+    if (!i || i.state === 'idle' || retryable(task)) {
+      if (taskRunning(rt, task.id)) return null
+      return skip.has(integrateKey(task.id)) ? null : { kind: 'integrate', key: integrateKey(task.id), taskId: task.id }
+    }
     const why = rebaseWhy(task)
     return why && !skip.has(rebaseKey(task.id)) ? { kind: 'rebase', key: rebaseKey(task.id), taskId: task.id, why } : null
   }
@@ -131,6 +150,8 @@ export function autopilotTakes(row: Pick<TeamNeedRow, 'id' | 'kind'>, rt: Readon
     if (a.kind === 'integrate' && a.state === 'pending') {
       const task = rt.tasks.find((t) => t.id === a.taskId)
       if (integrating(task) && task.integrate?.state === 'running' && !skip.has(integrateKey(task.id))) return true
+      // One waiting on the task's own run to end is too (it integrates then).
+      if (integrating(task) && (!task.integrate || task.integrate.state === 'idle' || retryable(task)) && taskRunning(rt, task.id) && !skip.has(integrateKey(task.id))) return true
     }
     return approvalPick(rt, a, skip) !== null
   }

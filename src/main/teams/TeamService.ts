@@ -2993,7 +2993,12 @@ export class TeamService implements TeamInternals {
         }
         tries.set(p.key, n + 1)
         const failed = await this.autopilotApply(teamId, p)
-        if (failed) {
+        if (failed && p.kind === 'integrate' && failed.error === 'busy' && !failed.detail) {
+          // A run of the task admitted since the pick, or an integrate in flight: its end is a commit that asks for
+          // another pass, so this one waits without spending a try.
+          tries.set(p.key, n)
+          this.deps.log(`autopilot ${teamId} ${p.kind} ${p.key} waits: busy`)
+        } else if (failed) {
           skip.add(p.key)
           this.deps.log(`autopilot ${teamId} ${p.kind} ${p.key} left: ${failed.error}${failed.reason ? ` ${failed.reason}` : ''}${failed.detail ? ` ${failed.detail}` : ''}`)
         } else this.deps.log(`autopilot ${teamId} ${p.kind} ${p.key}`)
