@@ -219,11 +219,13 @@ export function Sidebar() {
       setWsDrop(null)
       wsDragId.current = null
     }
+    // Drop in the bubble phase: a capture listener on window runs before the
+    // row's React onDrop and would clear wsDragId before the reorder reads it.
     window.addEventListener('dragend', reset, true)
-    window.addEventListener('drop', reset, true)
+    window.addEventListener('drop', reset)
     return () => {
       window.removeEventListener('dragend', reset, true)
-      window.removeEventListener('drop', reset, true)
+      window.removeEventListener('drop', reset)
     }
   }, [paneDropWs, wsDrop])
   const [confirmWs, setConfirmWs] = useState<string | null>(null)
