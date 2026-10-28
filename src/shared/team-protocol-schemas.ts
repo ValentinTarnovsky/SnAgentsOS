@@ -172,7 +172,7 @@ const adoptReq = op('adopt', { repoRoot: repoDir, sha256: z.string().regex(SHA25
 const trustDiffReq = op('trustDiff', { teamId })
 const trustReq = op('trust', { teamId, sha256: z.string().regex(SHA256_RE) })
 const removeReq = op('remove', { teamId })
-const settingsReq = op('settings', { teamId, patch: z.object({ autoDispatch: z.boolean().optional(), paused: z.boolean().optional() }) })
+const settingsReq = op('settings', { teamId, patch: z.object({ autoDispatch: z.boolean().optional(), paused: z.boolean().optional(), autopilot: z.boolean().optional() }) })
 const revealReq = op('reveal', { teamId, what: z.enum(['definition', 'data']) })
 // B2
 const rosterReq = op('roster', { teamId })

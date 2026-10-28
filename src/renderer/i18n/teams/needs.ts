@@ -61,6 +61,7 @@ export const needsEn = {
   // Questions (agent cards)
   'teams.need.q.asks': '{agent} asks',
   'teams.need.q.multi': 'Pick one or more',
+  'teams.need.q.recommended': 'Recommended',
   'teams.need.q.answer': 'Answer',
   'teams.need.q.placeholder': 'Your answer (the agent reads it)',
   'teams.need.q.textRequired': 'Write an answer.',
@@ -192,6 +193,7 @@ export const needsEs: Record<keyof typeof needsEn, string> = {
   'teams.approval.changesSent': 'Pediste cambios: el agente lee tu nota.',
   'teams.need.q.asks': '{agent} pregunta',
   'teams.need.q.multi': 'Elegí una o más',
+  'teams.need.q.recommended': 'Recomendada',
   'teams.need.q.answer': 'Responder',
   'teams.need.q.placeholder': 'Tu respuesta (la lee el agente)',
   'teams.need.q.textRequired': 'Escribí una respuesta.',

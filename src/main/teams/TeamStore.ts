@@ -86,7 +86,7 @@ const taskField = z.enum(TASK_FIELDS as unknown as [TaskField, ...TaskField[]])
 const vars = z.record(z.union([str, num]))
 const failure = z.object({ kind: z.enum(FAILURE_KINDS as unknown as [FailureKind, ...FailureKind[]]), until: num.optional(), code: str.optional() }).passthrough()
 const actor = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('user'), via: z.enum(['desktop', 'phone']) }),
+  z.object({ kind: z.literal('user'), via: z.enum(['desktop', 'phone', 'auto']) }),
   z.object({ kind: z.literal('agent'), agentId: str, runId: str, roleKind }),
   z.object({ kind: z.literal('system') }),
 ])
@@ -174,7 +174,7 @@ const cardAnswer = z.object({
   choices: z.array(int).optional(), text: str.optional(), confirm: z.boolean().optional(), action: cardAction.optional(), by: actor, at: num,
 })
 const card = z.object({
-  id: str, taskId: str.optional(), kind: z.enum(['choice', 'text', 'confirm']), question: str, options: z.array(str), multi: z.boolean(),
+  id: str, taskId: str.optional(), kind: z.enum(['choice', 'text', 'confirm']), question: str, options: z.array(str), multi: z.boolean(), recommended: int.optional(),
   state: z.enum(['open', 'answered', 'dismissed']),
   from: z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('agent'), agentId: str, runId: str, tool: z.enum(['ask', 'needs']) }),
@@ -298,6 +298,7 @@ export function salvageRuntime(raw: Record<string, unknown>, teamId: string, gen
     routines: salvageRecord(routineState, raw.routines, 'routines', repaired),
     archivedTasks: salvageRecord(z.enum(['done', 'cancelled']), raw.archivedTasks, 'archivedTasks', repaired),
   }
+  if (raw.autopilot === true) rt.autopilot = true
   if (typeof raw.goalSeenHash === 'string') rt.goalSeenHash = raw.goalSeenHash
   if (typeof raw.workspaceId === 'string') rt.workspaceId = raw.workspaceId
   if (Array.isArray(raw.needsSeen)) rt.needsSeen = raw.needsSeen.filter((x): x is string => typeof x === 'string')

@@ -76,7 +76,7 @@ export { reconcileAgents, openSystemCard, setTeamFlags } from './src/main/teams/
 export { admitRun, markStarting, markRunning, requestStop, finishRun, terminalOf, runEndFactsOf, prepFailed, setRunWorktree, permissionWaitOf } from './src/main/teams/flow/runs'
 export { reconcileTasks, modeFits, todoModeOf } from './src/main/teams/flow/dispatch'
 export { assertInvariants } from './src/main/teams/flow/invariants'
-export { needsInputOf, approvalView, taskSummary, taskDetail } from './src/main/teams/views'
+export { needsInputOf, approvalView, cardView, taskSummary, taskDetail } from './src/main/teams/views'
 export { createClaudeStreamParser } from './src/main/teams/parsers/claudeStream'
 export { TeamStore } from './src/main/teams/TeamStore'
 export { DeadlineTimer } from './src/main/DeadlineTimer'
@@ -657,6 +657,20 @@ function cardChecks() {
   same(w.tool(ex, 'team.ask', { text: 'x', multi: true }).error, 'bad_request', 'multi without options')
   same(w.tool(ex, 'team.ask', { text: 'x', confirm: true, options: ['a'] }).error, 'bad_request', 'confirm with options')
   same(w.tool(ex, 'team.ask', { text: 'x', options: Array.from({ length: 7 }, (_, i) => `o${i}`) }).error, 'bad_request', 'seven options')
+  // 2.9.0: the recommended option (1 based) is stored 0 based on the card; out of range, with multi or without options: bad_request.
+  for (const [params, label] of [
+    [{ text: 'x', options: ['a', 'b'], recommended: 3 }, 'recommended past the options'],
+    [{ text: 'x', options: ['a', 'b'], recommended: 0 }, 'recommended 0'],
+    [{ text: 'x', options: ['a', 'b'], multi: true, recommended: 1 }, 'recommended with multi'],
+    [{ text: 'x', recommended: 1 }, 'recommended without options'],
+  ]) same(w.tool(ex, 'team.ask', params).error, 'bad_request', label)
+  const recd = w.tool(ex, 'team.ask', { text: '¿Cuál?', options: ['Stripe', 'MP'], recommended: 2 })
+  check(recd.ok && recd.rt.cards.find((c) => c.id === recd.result.cardId).recommended === 1, 'recommended 2: the card recommends option index 1')
+  const suff = w.tool(ex, 'team.ask', { text: '¿Cuál?', options: ['Stripe (recomendado)', 'MP'] })
+  check(suff.ok && suff.rt.cards.find((c) => c.id === suff.result.cardId).recommended === 0, 'no recommended: the (recomendado) suffix marks it')
+  const plainAsk = w.tool(ex, 'team.ask', { text: '¿Cuál?', options: ['Stripe', 'MP'] })
+  check(plainAsk.ok && !('recommended' in plainAsk.rt.cards.find((c) => c.id === plainAsk.result.cardId)), 'neither: no recommended on the card')
+  check(M.cardView(recd.rt.cards.find((c) => c.id === recd.result.cardId)).recommended === 1, 'the card view carries it')
   w.tick()
   let r = w.tool(ex, 'team.ask', { text: '¿Stripe o MP?', options: ['Stripe', '  Mercado\tPago  '], multi: true })
   w.commit(r, 'team.ask with options')

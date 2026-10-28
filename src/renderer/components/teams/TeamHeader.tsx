@@ -12,6 +12,7 @@ import { cn } from '@/lib/cn'
 import { Tooltip } from '@/components/ui/Tooltip'
 import { useNow } from '@/components/sidebar/AgentRows'
 import { DispatchToggle } from './DispatchToggle'
+import { AutopilotToggle } from './AutopilotToggle'
 
 const CHIP = 'inline-flex max-w-[16rem] shrink-0 items-center gap-1 rounded border px-1.5 text-[11px] leading-5'
 // The chips that give way first when the header is tight (zoom, the B4 switch and count on the right): repo, base,
@@ -187,6 +188,8 @@ export function TeamHeader({ team, view }: { team: TeamListItem; view?: TeamView
       <div className="ml-auto flex shrink-0 items-center gap-1">
         {/* B4: the autonomy switch and, while it is off, how many runs wait in "Por despachar". */}
         <DispatchToggle teamId={team.id} on={view ? view.autoDispatch : team.autoDispatch} />
+        {/* 2.9.0: Piloto automatico, what Te necesita would ask the user, decided for them. */}
+        <AutopilotToggle teamId={team.id} on={!!view?.autopilot} />
         {/* B3: a task for the board, from any tab (the dialog opens over the team). */}
         <button
           type="button"

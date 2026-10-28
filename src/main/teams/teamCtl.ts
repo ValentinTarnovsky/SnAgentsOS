@@ -344,10 +344,16 @@ function normalize(spec: TeamToolSpec, p: Params): Params {
       onlyKeys(p, ['text', 'title'], spec)
       return defined({ text: text(p, 'text', COMMENT_TEXT_MAX, { required: true }), title: text(p, 'title', WS_NOTE_TITLE_MAX, { line: true }) })
     case 'team.ask': {
-      onlyKeys(p, ['text', 'options', 'multi', 'confirm'], spec)
-      const out = defined({ text: text(p, 'text', CARD_QUESTION_MAX, { required: true }), options: options(p), multi: flag(p, 'multi'), confirm: flag(p, 'confirm') })
+      onlyKeys(p, ['text', 'options', 'multi', 'confirm', 'recommended'], spec)
+      const out = defined({ text: text(p, 'text', CARD_QUESTION_MAX, { required: true }), options: options(p), multi: flag(p, 'multi'), confirm: flag(p, 'confirm'), recommended: p.recommended })
       if (out.multi === true && out.options === undefined) throw new ParamError('multi needs options')
       if (out.confirm === true && (out.options !== undefined || out.multi === true)) throw new ParamError('confirm is a yes or no question: leave out options and multi')
+      if (out.recommended !== undefined) {
+        const n = out.recommended
+        const opts = out.options as string[] | undefined
+        if (!opts || out.multi === true) throw new ParamError('recommended names one of the options: leave out multi')
+        if (!(typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= opts.length)) throw new ParamError(`recommended must be the number of an option, from 1 to ${opts.length}`)
+      }
       return out
     }
     case 'team.needs':
