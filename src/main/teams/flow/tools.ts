@@ -55,7 +55,7 @@ const PARAMS: Readonly<Partial<Record<TeamToolName, readonly string[]>>> = {
   'task.update': ['task', 'rev', 'title', 'body', 'assign', 'priority', 'blockedBy', 'isolation', 'state', 'needsPlan'],
   comment: ['target', 'text'],
   note: ['text', 'title'],
-  ask: ['text', 'options', 'multi', 'confirm'],
+  ask: ['text', 'options', 'multi', 'confirm', 'recommended'],
   needs: ['text'],
   plan: ['text', 'small'],
   review: ['text'],
@@ -113,6 +113,24 @@ function optionsOf(v: unknown): string[] | null | undefined {
   return out
 }
 
+/** An option that names itself the recommended one (`... (recomendado)`): the agent's mark when it left out `recommended`. */
+const RECOMMENDED_SUFFIX_RE = /\((?:recomendad[oa]|recommended)\)\s*$/i
+
+/**
+ * 2.9.0: the option index (0 based) a choice card recommends. `recommended` (1 based, as the agent reads the list),
+ * else the one option whose text ends in `(recomendado)`, `(recomendada)` or `(recommended)`; undefined when there is
+ * none, or for a multi question. null when `recommended` is not one of the options.
+ */
+export function recommendedOf(v: unknown, options: readonly string[], multi: boolean): number | null | undefined {
+  if (v !== undefined && v !== null) {
+    if (multi || typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > options.length) return null
+    return v - 1
+  }
+  if (multi) return undefined
+  const marked = options.flatMap((o, i) => (RECOMMENDED_SUFFIX_RE.test(o) ? [i] : []))
+  return marked.length === 1 ? marked[0] : undefined
+}
+
 /**
  * B7: a `team note`'s params, checked as every agent text is (agentText: redacted, within COMMENT_TEXT_MAX, no control
  * character) and its title one line of WS_NOTE_TITLE_MAX at most (controls and runs of spaces to one space, redacted).
@@ -148,10 +166,11 @@ function conclude(rt: TeamRuntime, runId: string, tool: TerminalTool, ctx: Pick<
 type Moved = { ok: true; rt: TeamRuntime; effects: TeamEffect[]; result: Record<string, unknown> } | Fail
 
 /** `team ask` / `team needs` (4.5): an agent card for the user; the run concludes and the answer wakes it again. */
-function openAgentCard(rt: TeamRuntime, run: Run, tool: 'ask' | 'needs', c: Pick<TeamCard, 'kind' | 'question' | 'options' | 'multi'>, ctx: Pick<FlowCtx, 'now'>): Moved {
+function openAgentCard(rt: TeamRuntime, run: Run, tool: 'ask' | 'needs', c: Pick<TeamCard, 'kind' | 'question' | 'options' | 'multi' | 'recommended'>, ctx: Pick<FlowCtx, 'now'>): Moved {
   if (rt.nextIds.card > CARD_NUM_MAX) return fail('cap')
   const id = `k-${rt.nextIds.card}`
   const card: TeamCard = { id, kind: c.kind, question: c.question, options: [...c.options], multi: c.multi, state: 'open', from: { kind: 'agent', agentId: run.agentId, runId: run.id, tool }, createdAt: ctx.now }
+  if (c.recommended !== undefined) card.recommended = c.recommended
   if (run.taskId) card.taskId = run.taskId
   return { ok: true, rt: { ...rt, cards: [...rt.cards, card], nextIds: { ...rt.nextIds, card: rt.nextIds.card + 1 } }, effects: [], result: { cardId: id } }
 }
@@ -204,9 +223,11 @@ function terminal(rt: TeamRuntime, run: Run, task: TeamTask | undefined, name: T
       if (options === null || !optBool(p.multi) || !optBool(p.confirm)) return fail('bad_request')
       if (p.multi === true && !options) return fail('bad_request')
       if (p.confirm === true && (options || p.multi === true)) return fail('bad_request')
+      const recommended = options ? recommendedOf(p.recommended, options, p.multi === true) : p.recommended === undefined ? undefined : null
+      if (recommended === null) return fail('bad_request')
       if (newerComment(rt, run)) return fail('conflict', { reason: 'newer_comment_not_delivered' })
       const kind: TeamCard['kind'] = p.confirm === true ? 'confirm' : options ? 'choice' : 'text'
-      return openAgentCard(rt, run, 'ask', { kind, question, options: options ?? [], multi: p.multi === true && !!options }, ctx)
+      return openAgentCard(rt, run, 'ask', { kind, question, options: options ?? [], multi: p.multi === true && !!options, recommended }, ctx)
     }
 
     case 'plan': {

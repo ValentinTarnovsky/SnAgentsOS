@@ -519,6 +519,9 @@ function CardRow({ teamId, card, onDone }: { teamId: string; card: CardView; onD
                 >
                   {card.multi && <span aria-hidden className={clsx('flex h-4 w-4 shrink-0 items-center justify-center rounded border', on ? 'border-accent-violet bg-accent-violet text-white' : 'border-border')}>{on && <Check size={12} />}</span>}
                   <span className="min-w-0 [overflow-wrap:anywhere]">{visibleName(opt)}</span>
+                  {card.recommended === i && (
+                    <span data-card-recommended className="ml-auto shrink-0 rounded border border-border px-1.5 text-[10px] leading-4 text-text-secondary">{t('teams.need.q.recommended')}</span>
+                  )}
                 </button>
               )
             })}

@@ -266,6 +266,10 @@ async function clientChecks() {
   const ask = await b(['team', 'ask', '¿Cuál', 'base?', '--options', 'A | B|| C', '--multi'])
   check(JSON.stringify(ask.params) === JSON.stringify({ text: '¿Cuál base?', options: ['A', 'B', 'C'], multi: true }), '--options splits on | (trimmed, empty pieces dropped)', ask.params)
   check(/1 to 6 answers/.test(await bad(['team', 'ask', 'q', '--options', 'a|b|c|d|e|f|g'])) && /longer than 120/.test(await bad(['team', 'ask', 'q', '--options', `a|${'x'.repeat(121)}`])) && /--multi needs --options/.test(await bad(['team', 'ask', 'q', '--multi'])) && /--confirm is a yes or no/.test(await bad(['team', 'ask', 'q', '--confirm', '--options', 'a|b'])), '--options: 6 answers of 120 at most; --multi needs them; --confirm excludes them')
+  // 2.9.0: --recommended <n>, the number of one answer.
+  const rec = await b(['team', 'ask', 'q', '--options', 'A|B|C', '--recommended', '2'])
+  check(JSON.stringify(rec.params) === JSON.stringify({ text: 'q', options: ['A', 'B', 'C'], recommended: 2 }), '--recommended sends the number of the answer', rec.params)
+  check(/from 1 to 3/.test(await bad(['team', 'ask', 'q', '--options', 'A|B|C', '--recommended', '4'])) && /from 1 to 2/.test(await bad(['team', 'ask', 'q', '--options', 'A|B', '--recommended', 'x'])) && /leave out --multi/.test(await bad(['team', 'ask', 'q', '--options', 'A|B', '--multi', '--recommended', '1'])) && /names one answer of --options/.test(await bad(['team', 'ask', 'q', '--recommended', '1'])), '--recommended: within the answers, a number, never with --multi nor without --options')
 
   // Texts: --file -, --body-file -, files and stdin decoded the same way.
   const bomCrlf = Buffer.from('\uFEFF# Plan\r\n\r\npaso 1\r\n\r\n', 'utf8')
@@ -528,6 +532,12 @@ async function serverChecks() {
       ['team.task.update', { task: 't-1', state: 'done' }, /state must be one of todo, blocked, cancelled/],
       ['team.ask', { text: 'q', multi: true }, /multi needs options/],
       ['team.ask', { text: 'q', options: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] }, /1 to 6 answers/],
+      // 2.9.0: recommended is the number of one option, never with multi nor without options.
+      ['team.ask', { text: 'q', options: ['a', 'b'], recommended: 3 }, /recommended must be the number of an option, from 1 to 2/],
+      ['team.ask', { text: 'q', options: ['a', 'b'], recommended: 0 }, /recommended must be the number/],
+      ['team.ask', { text: 'q', options: ['a', 'b'], recommended: '1' }, /recommended must be the number/],
+      ['team.ask', { text: 'q', options: ['a', 'b'], multi: true, recommended: 1 }, /leave out multi/],
+      ['team.ask', { text: 'q', recommended: 1 }, /recommended names one of the options/],
       ['team.verdict', { verdict: 'maybe', text: 'x' }, /verdict must be one of approve, changes/],
       ['team.hire', { text: 'x'.repeat(M.HIRE_TEXT_MAX + 1) }, /longer than 65536/],
       ['team.approve', {}, /plan is required/],

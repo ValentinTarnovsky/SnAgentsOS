@@ -169,6 +169,7 @@ function AgentCard({ teamId, card }: { teamId: string; card: CardView }) {
                   key={i}
                   type="button"
                   data-card-option={i}
+                  data-card-recommended={card.recommended === i ? '' : undefined}
                   aria-pressed={card.multi ? on : undefined}
                   disabled={busy}
                   onClick={() => {
@@ -186,6 +187,9 @@ function AgentCard({ teamId, card }: { teamId: string; card: CardView }) {
                 >
                   {card.multi && <Check size={12} aria-hidden className={cn('shrink-0', on ? 'opacity-100' : 'opacity-0')} />}
                   <span className="min-w-0 break-words">{o}</span>
+                  {card.recommended === i && (
+                    <span className="shrink-0 rounded border border-border px-1.5 text-[10px] leading-4 text-text-secondary">{t('teams.need.q.recommended')}</span>
+                  )}
                 </button>
               )
             })}

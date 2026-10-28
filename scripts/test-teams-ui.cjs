@@ -259,7 +259,7 @@ const ROLES=[
  {id:'qa',name:'QA',kind:'qa',provider:'claude',model:'sonnet',permission:'readonly',count:1},
  {id:'research',name:'Investigación',kind:'research',provider:'codex',permission:'readonly',count:1}];
 // B5: main counts needsCount with the one rule (teamNeedsCount) over the same view Te necesita shows.
-const viewOf=(it)=>({id:it.id,name:it.name,repoRoot:it.repoRoot,repoName:it.repoName,baseBranch:'main',extraRepos:[],goal:'Meta de '+it.name+': que el login ande con OAuth.',trust:it.trust,defIssues:it.issues||[],autoDispatch:!!it.autoDispatch,paused:it.paused,maxConcurrent:2,maxRunMinutes:45,leadApprovesSmallPlans:true,verify:[{repoId:'main',command:'npm test',confirmed:!!fake.verifyConfirmed}],roles:ROLES,rev:it.rev,needsCount:teamNeedsCount(needsOf(it.id)),running:it.running,providerBlockedUntil:it.limit?{claude:Date.now()+3600000}:{},...(it.usage?{usageToday:it.usage}:{})});
+const viewOf=(it)=>({id:it.id,name:it.name,repoRoot:it.repoRoot,repoName:it.repoName,baseBranch:'main',extraRepos:[],goal:'Meta de '+it.name+': que el login ande con OAuth.',trust:it.trust,defIssues:it.issues||[],autoDispatch:!!it.autoDispatch,paused:it.paused,maxConcurrent:2,maxRunMinutes:45,leadApprovesSmallPlans:true,verify:[{repoId:'main',command:'npm test',confirmed:!!fake.verifyConfirmed}],roles:ROLES,rev:it.rev,needsCount:teamNeedsCount(needsOf(it.id)),running:it.running,providerBlockedUntil:it.limit?{claude:Date.now()+3600000}:{},...(it.usage?{usageToday:it.usage}:{}),...(it.autopilot?{autopilot:true}:{})});
 // B2: the roster, the runs and their pages main would answer for Alfa.
 const R1='r-111111111111',R2='r-222222222222',R3='r-333333333333';
 const NOW0=Date.now();
@@ -373,7 +373,7 @@ function fillNeeds(){
  const cd=(id,x)=>({id,kind:'choice',state:'open',at:now-100000+Number(id.slice(2))*1000,...x});
  CARDS[TA]=[
   cd('k-1',{system:{why:'auth',actions:['resumeTeam','dismiss']}}),
-  cd('k-2',{taskId:'t-34',agentId:'dev',question:'¿Qué base uso para los **pedidos**?',options:['Postgres','SQLite'],multi:false}),
+  cd('k-2',{taskId:'t-34',agentId:'dev',question:'¿Qué base uso para los **pedidos**?',options:['Postgres','SQLite'],multi:false,recommended:1}),
   cd('k-3',{taskId:'t-35',agentId:'dev-2',question:'¿Qué navegadores pruebo?',options:['Chrome','Firefox','Safari'],multi:true}),
   cd('k-4',{taskId:'t-36',agentId:'dev-2',kind:'text',question:'¿En qué rama trabajo?'}),
   cd('k-5',{taskId:'t-37',agentId:'dev',kind:'confirm',question:'Cargá la clave de la API en el .env y avisame.'}),
@@ -448,7 +448,7 @@ window.snApi=fallback({platform:'win32',filePath:()=>'',
     case 'runNow':return fake.runNow(r);
     case 'stop':return{ok:true};
     case 'pauseAgent':{const a=(AGENTS[r.teamId]||[]).find(x=>x.id===r.agentId);if(!a)return{ok:false,error:'not_found'};a.paused=r.on;return{ok:true}}
-    case 'settings':{const it=fake.teams.find(x=>x.id===r.teamId);if(!it)return{ok:false,error:'not_found'};if(r.patch.paused!==undefined)it.paused=r.patch.paused?{reason:'user',at:Date.now()}:null;if(r.patch.autoDispatch!==undefined)it.autoDispatch=r.patch.autoDispatch;fake.emitNeeds(r.teamId);return{ok:true,team:viewOf(it)}}
+    case 'settings':{const it=fake.teams.find(x=>x.id===r.teamId);if(!it)return{ok:false,error:'not_found'};if(r.patch.paused!==undefined)it.paused=r.patch.paused?{reason:'user',at:Date.now()}:null;if(r.patch.autoDispatch!==undefined)it.autoDispatch=r.patch.autoDispatch;if(r.patch.autopilot!==undefined){it.autopilot=r.patch.autopilot;if(r.patch.autopilot&&r.patch.autoDispatch===undefined)it.autoDispatch=true}fake.emitNeeds(r.teamId);return{ok:true,team:viewOf(it)}}
     // B3, as main answers: a user write marks the fields it touched userOwned and bumps the task rev.
     case 'board':return{ok:true,page:pageOf(r.teamId)};
     case 'task':{const t=findTask(r);return t?{ok:true,task:detailOf(t)}:{ok:false,error:'not_found'}}
@@ -1581,6 +1581,18 @@ app.whenReady().then(async()=>{
  await js("smoke.click('[data-team-menu="+TA+"]')");await settle(150);
  await js("smoke.clickText('[role=menuitem]','Apagar despacho automático')");
  ok(await until("smoke.reqs('settings').length==="+(s0+4)+"&&smoke.attr('[data-team-autodispatch]','data-team-autodispatch')==='off'",2000),'on, the kebab offers Apagar despacho automático and it turns it off');
+ // 2.9.0: Piloto automático, settings {autopilot}; on turns auto dispatch on too (main, the fake follows it).
+ ok((await js("smoke.attr('[data-team-autopilot]','data-team-autopilot')"))==='off'&&(await js("smoke.text('[data-team-autopilot] label')"))==='Piloto automático','the autopilot switch, off, with its label');
+ await js("smoke.click('[data-team-autopilot] [role=switch]')");
+ ok(await until("smoke.reqs('settings').length==="+(s0+5)+"&&smoke.attr('[data-team-autopilot]','data-team-autopilot')==='on'&&smoke.attr('[data-team-autodispatch]','data-team-autodispatch')==='on'",2000),'on: the autopilot shows it and auto dispatch follows');
+ v=await js("smoke.reqs('settings').at(-1)");
+ ok(v.teamId===TA&&v.patch.autopilot===true&&!('autoDispatch' in v.patch),'settings carries autopilot true only',v);
+ ok(await until("smoke.toastsOf('info').some(x=>x.includes('Piloto automático prendido'))",2000),'a toast says what on means',await js("smoke.toastsOf('info')"));
+ await js("smoke.click('[data-team-autopilot] label span')");
+ ok(await until("smoke.reqs('settings').length==="+(s0+6)+"&&smoke.attr('[data-team-autopilot]','data-team-autopilot')==='off'&&smoke.attr('[data-team-autodispatch]','data-team-autodispatch')==='on'",2000),'off: the autopilot goes, auto dispatch stays');
+ ok(await until("smoke.toastsOf('info').some(x=>x.includes('Piloto automático apagado'))",2000),'and its toast');
+ await js("smoke.click('[data-team-autodispatch] [role=switch]')");
+ ok(await until("smoke.reqs('settings').length==="+(s0+7)+"&&smoke.attr('[data-team-autodispatch]','data-team-autodispatch')==='off'",2000),'auto dispatch off again for the checks below');
  // en.
  await js("smoke.setLang('en')");
  ok(await until("smoke.text('[data-dispatch-pending]')==='1 to dispatch'",2000),'en: 1 to dispatch',await js("smoke.text('[data-dispatch-pending]')"));
@@ -1773,8 +1785,8 @@ app.whenReady().then(async()=>{
  // The final OK's diff stat is the view's stat: its paths spelled out; a final OK main computed none for shows none.
  v=await js("({paths:[...document.querySelectorAll('[data-team-need=a-2] [data-approval-stat] li')].map(e=>e.textContent).join('|'),raw:smoke.text('[data-team-need=a-2]').includes(String.fromCodePoint(0x200B)),none:smoke.has('[data-team-need=a-7] [data-approval-stat]')})");
  ok(v.paths==='src/perfil.ts+100 -10|src/fo<U+200B>to.ts+20 -4'&&!v.raw&&!v.none,'the final OK stat: each path escaped; none without a stat',v);
- v=await js("({choice:[...document.querySelectorAll('[data-team-need=k-2] [data-card-option]')].map(e=>e.textContent).join('|'),q:smoke.text('[data-team-need=k-2] [data-card-question]'),asks:smoke.text('[data-team-need=k-2] [data-need-from]'),confirm:[...document.querySelectorAll('[data-team-need=k-5] [data-card-confirm]')].map(e=>e.textContent).join('|'),k6:smoke.text('[data-team-need=k-6] [data-card-why]'),k6a:[...document.querySelectorAll('[data-team-need=k-6] [data-card-action]')].map(e=>e.textContent).join('|'),primary:[...document.querySelectorAll('[data-team-needs] button')].filter(b=>b.className.includes('linear-gradient')).length})");
- ok(v.choice==='Postgres|SQLite'&&v.q.includes('¿Qué base uso para los pedidos?')&&v.asks==='Dev pregunta'&&v.confirm==='Hecho|No puedo','the questions: their Markdown, options and Hecho / No puedo, who asks',v);
+ v=await js("({choice:[...document.querySelectorAll('[data-team-need=k-2] [data-card-option]')].map(e=>e.textContent).join('|'),q:smoke.text('[data-team-need=k-2] [data-card-question]'),asks:smoke.text('[data-team-need=k-2] [data-need-from]'),rec:[...document.querySelectorAll('[data-team-need=k-2] [data-card-recommended]')].map(e=>e.getAttribute('data-card-option')).join('|'),confirm:[...document.querySelectorAll('[data-team-need=k-5] [data-card-confirm]')].map(e=>e.textContent).join('|'),k6:smoke.text('[data-team-need=k-6] [data-card-why]'),k6a:[...document.querySelectorAll('[data-team-need=k-6] [data-card-action]')].map(e=>e.textContent).join('|'),primary:[...document.querySelectorAll('[data-team-needs] button')].filter(b=>b.className.includes('linear-gradient')).length})");
+ ok(v.choice==='Postgres|SQLiteRecomendada'&&v.rec==='1'&&v.q.includes('¿Qué base uso para los pedidos?')&&v.asks==='Dev pregunta'&&v.confirm==='Hecho|No puedo','the questions: their Markdown, options (2.9.0: the recommended one marked Recomendada) and Hecho / No puedo, who asks',v);
  ok(v.k6.includes('QA pidió cambios en todas las rondas')&&v.k6a==='Reintentar|Volver a Por hacer|Cancelar tarea','a system card: why and its actions',v);
  ok(v.primary===0,'no primary button in the tab',v); // Pedir cambios needs a note: without one nothing goes; Esc closes the note only.
  const dc0=await js("smoke.reqs('decide').length");

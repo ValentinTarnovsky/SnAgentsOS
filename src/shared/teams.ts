@@ -257,9 +257,12 @@ export type DeferReason =
   | 'quota' | 'cooldown' | 'sessionBusy' | 'takenOver' | 'treeBusy' | 'consoleBusy' | 'running' | 'stopping'
 export interface DeferInfo { reason: DeferReason; until?: number; taskId?: string }
 
-/** Who did it. A user edit from the phone is still a user edit. */
+/**
+ * Who did it. A user edit from the phone is still a user edit; `via: 'auto'` is the team's Piloto automatico
+ * deciding for the user (their standing OK, `TeamRuntime.autopilot`).
+ */
 export type Actor =
-  | { kind: 'user'; via: 'desktop' | 'phone' }
+  | { kind: 'user'; via: 'desktop' | 'phone' | 'auto' }
   | { kind: 'agent'; agentId: string; runId: string; roleKind: RoleKind }
   | { kind: 'system' }
 
@@ -451,6 +454,7 @@ export interface TeamCard {
   id: string; taskId?: string; kind: 'choice' | 'text' | 'confirm'
   question: string                                 // agent text (redacted before any notice); '' for system cards
   options: string[]; multi: boolean
+  recommended?: number                             // agent choice card: the option index the agent recommends (`team ask --recommended`)
   state: 'open' | 'answered' | 'dismissed'
   from:
     | { kind: 'agent'; agentId: string; runId: string; tool: 'ask' | 'needs' }
@@ -496,6 +500,7 @@ export interface TeamRuntime {
   v: typeof TEAM_STATE_VERSION; teamId: string; rev: number
   gen: string                                      // 8 hex minted by main (randomBytes) for emptyRuntime: a re-created team never adopts the old team's worktrees (decision 63)
   autoDispatch: boolean                            // default false
+  autopilot?: true                                 // Piloto automatico: main decides what the user would (flow/autopilot.ts); absent = off
   paused: TeamPause | null
   verifyConfirmed: Record<string, { command: string; sha256: string; at: number }>   // by repoId
   agents: AgentState[]

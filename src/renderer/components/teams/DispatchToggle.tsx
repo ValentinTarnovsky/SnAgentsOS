@@ -10,21 +10,21 @@ import { Toggle } from '@/components/settings/ui'
 /** Wide enough for the switch's label beside it; narrower (zoom), the switch alone and a tooltip names it. */
 const WIDE_QUERY = '(min-width: 1024px)'
 
-function wideNow(): boolean {
-  return typeof window === 'undefined' || typeof window.matchMedia !== 'function' || window.matchMedia(WIDE_QUERY).matches
+function wideNow(query: string): boolean {
+  return typeof window === 'undefined' || typeof window.matchMedia !== 'function' || window.matchMedia(query).matches
 }
 
-/** Follows WIDE_QUERY through the media query's own change event (no polling). */
-function useWide(): boolean {
-  const [wide, setWide] = useState(wideNow)
+/** Follows `query` (WIDE_QUERY by default) through the media query's own change event (no polling). The header's AutopilotToggle shares it. */
+export function useWide(query: string = WIDE_QUERY): boolean {
+  const [wide, setWide] = useState(() => wideNow(query))
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return
-    const mq = window.matchMedia(WIDE_QUERY)
+    const mq = window.matchMedia(query)
     const on = (): void => setWide(mq.matches)
     on()
     mq.addEventListener('change', on)
     return () => mq.removeEventListener('change', on)
-  }, [])
+  }, [query])
   return wide
 }
 
