@@ -79,11 +79,22 @@ export function reconcileAgents(rt: TeamRuntime, ctx: FlowCtx): FlowResult {
  * The B1 `settings` op: autonomy on/off and the user pause. Unpausing lifts any
  * pause (the user always wins); lifting an auth or billing pause dismisses its
  * open auth and billing cards, as the card's own resumeTeam does (B5).
- * Turning autonomy on or lifting a pause pokes the dispatcher.
+ * Turning autonomy on or lifting a pause pokes the dispatcher. 2.9.0: the
+ * Piloto automatico switch; turning it on turns autonomy on too (runs waiting
+ * in "Por despachar" would still wait on the user), turning it off leaves
+ * autonomy as it is.
  */
-export function setTeamFlags(rt: TeamRuntime, f: { autoDispatch?: boolean; paused?: boolean }, ctx: Pick<FlowCtx, 'now'>): FlowResult {
+export function setTeamFlags(rt: TeamRuntime, f: { autoDispatch?: boolean; paused?: boolean; autopilot?: boolean }, ctx: Pick<FlowCtx, 'now'>): FlowResult {
   let out = rt
   let poke = false
+  if (f.autopilot === true && !rt.autopilot) {
+    out = { ...out, autopilot: true }
+    if (f.autoDispatch === undefined) f = { ...f, autoDispatch: true }
+    poke = true
+  } else if (f.autopilot === false && rt.autopilot) {
+    out = { ...out }
+    delete out.autopilot
+  }
   if (f.autoDispatch !== undefined && f.autoDispatch !== rt.autoDispatch) {
     out = { ...out, autoDispatch: f.autoDispatch }
     poke ||= f.autoDispatch

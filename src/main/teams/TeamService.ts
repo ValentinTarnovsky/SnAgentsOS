@@ -83,7 +83,8 @@ import { enqueue, phaseAgentOf, queueDecide, reconcileTasks } from './flow/dispa
 import { admitRun, finishRun, interruptAll, markRunning, orphanCards, permissionWaitOf, reapOnLoad, requestStop, restoreWake, runEndFactsOf, sessionCardVars, terminalOf, withRunDetail, type AdmitFacts, type RunEnd } from './flow/runs'
 import { answerCard, cancelStaleHires, completeApproval, decideApproval, HIRE_STALE, PERMISSION_NOT_NEEDED } from './flow/approvals'
 import { archiveSweep, changedScopes, deliverComments } from './flow/tasks'
-import { beginIntegrate, endIntegrate, integrateStep, interruptedIntegrates, worktreeRemoved, type IntegrateOutcome } from './flow/integrate'
+import { askRebase, beginIntegrate, endIntegrate, integrateStep, interruptedIntegrates, worktreeRemoved, type IntegrateOutcome } from './flow/integrate'
+import { approvalKey, AUTOPILOT_ACTOR, AUTOPILOT_REBASE_MAX, AUTOPILOT_TRIES_MAX, autopilotPicks, autopilotTakes, keyTask, type AutopilotPick } from './flow/autopilot'
 import { patchRoutine, routineOfRefs, routinePending, routineTask, routineWake } from './flow/routines'
 import { ackRunSilence as ackSilenceFlow, dismissStaleStalledCards, dismissStalledCard, openStalledCard } from './flow/silence'
 import { dropTakeover, reconcileTakeovers, settleTakeovers, TAKEOVER_CONFIRM_MS, TAKEOVER_STOP_WAIT_MS, takeoverBindAt, takeoverBindKey, takeoverPolicy, takeoversAtLoad, type TakeoverPane } from './flow/takeover'
@@ -458,6 +459,22 @@ export class TeamService implements TeamInternals {
   private readonly newestRecs = new Map<string, TeamRecord>()
   /** Integrates and sweeps in flight (integrateIdle, tests). */
   private readonly integrateJobs = new Set<Promise<unknown>>()
+
+  // ---- 2.9.0 Piloto automatico ----
+  /**
+   * Per team, the autopilotPicks keys the autopilot gave up on (a decide or answer refused, a preview it may not land,
+   * AUTOPILOT_REBASE_MAX rebases): their rows stay the user's, and notify. Each key goes once its subject is no longer
+   * waiting (autopilotSkipOf). Memory only: a restart tries them once more.
+   */
+  private readonly autopilotSkip = new Map<string, Set<string>>()
+  /** Per team, how many times each key was applied while its subject kept waiting (AUTOPILOT_TRIES_MAX). */
+  private readonly autopilotTries = new Map<string, Map<string, number>>()
+  /** `<teamId>|<taskId>` -> rebases the autopilot asked for since the task last integrated. Memory only. */
+  private readonly autopilotRebases = new Map<string, number>()
+  /** Teams with a pass queued (one microtask) or running, and `again` when a commit landed while it ran. */
+  private readonly autopilotState = new Map<string, 'queued' | 'running' | 'again'>()
+  /** Passes in flight (autopilotIdle, tests). */
+  private readonly autopilotJobs = new Set<Promise<void>>()
 
   // ---- B7 routines, team notes, run silence ----
   /** Routine deadlines on the shared timer (design 3.8, 3.10): armed at enable (with catch-up), after a fire and a trust. */
@@ -842,6 +859,7 @@ export class TeamService implements TeamInternals {
     this.emit('', ['list'])
     // The rows the load itself opened (a reaped run's card, a repair's) against each team's baseline (design 3.1).
     for (const rec of loadedTeams) this.noticeNeeds(rec.entry.id)
+    for (const rec of loadedTeams) if (rec.store.rt.autopilot) this.autopilotSoon(rec.entry.id)
     // Decision 64: the processes of reaped runs that still live (main crashed, the children did not).
     for (const rec of loadedTeams) {
       // Dropped from reapedAtLoad only by a check that completes (a teardown first leaves it for the next enable).
@@ -1435,6 +1453,8 @@ export class TeamService implements TeamInternals {
     // B9: the takeover ops waiting on a run end and the `bind:` deadlines follow the committed agents.
     if (out.rt.agents !== before.agents) this.takeoversMoved(teamId)
     if (header !== null && this.teams.get(teamId) === rec && teamHeaderKey(rec, this.trust.trusted(teamId), this.clock()) !== header) this.emit(teamId, ['team'], hint)
+    // 2.9.0: what this commit opened (an approval, a question, a failed integrate) the autopilot may clear.
+    if (out.rt.autopilot && out.rt !== before && this.teams.get(teamId) === rec) this.autopilotSoon(teamId)
     return out
   }
 
@@ -2898,6 +2918,141 @@ export class TeamService implements TeamInternals {
     if (run) this.prepBackoff.delete(`${teamId}|${run.agentId}|${run.sessionKey}`)
   }
 
+  // ---- 2.9.0 Piloto automatico -------------------------------------------------------------------
+
+  /** A pass of the autopilot after this tick (one per team: a commit while it runs owes one more when it ends). */
+  private autopilotSoon(teamId: string): void {
+    const s = this.autopilotState.get(teamId)
+    if (s === 'queued' || s === 'again') return
+    if (s === 'running') {
+      this.autopilotState.set(teamId, 'again')
+      return
+    }
+    this.autopilotState.set(teamId, 'queued')
+    queueMicrotask(() => {
+      const job = this.autopilotPass(teamId)
+      this.autopilotJobs.add(job)
+      void job.finally(() => this.autopilotJobs.delete(job))
+    })
+  }
+
+  /** Every autopilot pass settled, the ones they owe included (tests). */
+  async autopilotIdle(): Promise<void> {
+    for (;;) {
+      await Promise.resolve()
+      if (this.autopilotJobs.size === 0 && this.autopilotState.size === 0) return
+      await Promise.allSettled([...this.autopilotJobs])
+    }
+  }
+
+  /** The skip keys of a team, without the ones whose subject no longer waits (decided, answered, out of Integrar). */
+  private autopilotSkipOf(teamId: string, rt: Readonly<TeamRuntime>): Set<string> {
+    let skip = this.autopilotSkip.get(teamId)
+    if (!skip) {
+      skip = new Set()
+      this.autopilotSkip.set(teamId, skip)
+    }
+    const waits = (key: string): boolean => {
+      const taskId = keyTask(key)
+      if (taskId) return rt.tasks.some((t) => t.id === taskId && t.state === 'review' && t.phase === 'integrating')
+      // A hire `applying` still waits: its apply may fail it back to pending (the tries must survive that).
+      return rt.approvals.some((a) => (a.state === 'pending' || a.state === 'applying') && approvalKey(a) === key) || rt.cards.some((c) => c.state === 'open' && c.id === key)
+    }
+    for (const key of [...skip]) if (!waits(key)) skip.delete(key)
+    const tries = this.autopilotTries.get(teamId)
+    if (tries) for (const key of [...tries.keys()]) if (!waits(key)) tries.delete(key)
+    for (const key of [...this.autopilotRebases.keys()]) {
+      if (!key.startsWith(`${teamId}|`)) continue
+      const task = rt.tasks.find((t) => `${teamId}|${t.id}` === key)
+      if (!task || task.state === 'done' || task.state === 'cancelled') this.autopilotRebases.delete(key)
+    }
+    return skip
+  }
+
+  /** One pass: every pick of autopilotPicks in order, each through the method the user's click reaches. */
+  private async autopilotPass(teamId: string): Promise<void> {
+    this.autopilotState.set(teamId, 'running')
+    try {
+      const rec = this.teams.get(teamId)
+      if (!rec || !this.live() || !this.trust.trusted(teamId)) return
+      const skip = this.autopilotSkipOf(teamId, rec.store.rt)
+      let tries = this.autopilotTries.get(teamId)
+      if (!tries) {
+        tries = new Map()
+        this.autopilotTries.set(teamId, tries)
+      }
+      const picks = autopilotPicks(rec.store.rt, skip)
+      for (const p of picks) {
+        if (this.teams.get(teamId) !== rec || !rec.store.rt.autopilot) break
+        const n = tries.get(p.key) ?? 0
+        if (n >= AUTOPILOT_TRIES_MAX) {
+          // Applied before and waiting again (a hire whose apply failed): it is the user's now.
+          skip.add(p.key)
+          this.deps.log(`autopilot ${teamId} ${p.kind} ${p.key} left: no progress`)
+          continue
+        }
+        tries.set(p.key, n + 1)
+        const failed = await this.autopilotApply(teamId, p)
+        if (failed) {
+          skip.add(p.key)
+          this.deps.log(`autopilot ${teamId} ${p.kind} ${p.key} left: ${failed.error}${failed.reason ? ` ${failed.reason}` : ''}${failed.detail ? ` ${failed.detail}` : ''}`)
+        } else this.deps.log(`autopilot ${teamId} ${p.kind} ${p.key}`)
+      }
+      // What it left now waits on the user: its rows notify.
+      if (picks.length && this.teams.get(teamId) === rec) this.noticeNeeds(teamId)
+    } catch (err) {
+      this.deps.log(`autopilot ${teamId} failed ${(err as Error).name}`)
+    } finally {
+      const again = this.autopilotState.get(teamId) === 'again'
+      this.autopilotState.delete(teamId)
+      if (again) this.autopilotSoon(teamId)
+    }
+  }
+
+  private async autopilotApply(teamId: string, p: AutopilotPick): Promise<TeamFail | null> {
+    switch (p.kind) {
+      case 'decide':
+        return this.decide(teamId, p.approvalId, 'approve', undefined, AUTOPILOT_ACTOR, p.rev)
+      case 'answer':
+        return this.answer(teamId, p.cardId, { choices: [p.choice] }, AUTOPILOT_ACTOR)
+      case 'integrate':
+        return this.autopilotIntegrate(teamId, p.taskId)
+      case 'rebase':
+        return this.autopilotRebase(teamId, p.taskId, p.why)
+    }
+  }
+
+  /**
+   * Integrar for the user: the preview first, and only a clean one lands (no preflight error, a landing mode, no change
+   * to the team definition, which would leave the team untrusted); its verify runs as the user's Integrar runs it.
+   */
+  private async autopilotIntegrate(teamId: string, taskId: string): Promise<TeamFail | null> {
+    const pre = await this.integratePreview(teamId, taskId)
+    if ('ok' in pre) return pre
+    const v = pre.preview
+    if (v.error) return fail(v.error)
+    if (!('mode' in v.landing)) return fail(v.landing.blocked)
+    if (v.touchesDefinition) return fail('conflict', { detail: 'touchesDefinition' })
+    const res = await this.integrate(teamId, taskId, v.tip, AUTOPILOT_ACTOR)
+    return 'ok' in res ? res : null
+  }
+
+  /** T15 for the user: a merge conflict or a failed verify back to the task's Dev, AUTOPILOT_REBASE_MAX times in a row at most. */
+  private autopilotRebase(teamId: string, taskId: string, why: 'conflict' | 'verify'): TeamFail | null {
+    const rec = this.teams.get(teamId)
+    const ctx = this.flowCtx(teamId)
+    if (!rec) return fail('not_found')
+    if (!ctx) return fail('untrusted')
+    const key = `${teamId}|${taskId}`
+    const n = this.autopilotRebases.get(key) ?? 0
+    if (n >= AUTOPILOT_REBASE_MAX) return fail('cap', { detail: 'rebases' })
+    const res = askRebase(rec.store.rt, taskId, why, AUTOPILOT_ACTOR, ctx)
+    if (!res.ok) return flowFail(res)
+    this.autopilotRebases.set(key, n + 1)
+    this.commit(teamId, res, [...new Set<TeamScope>([...changedScopes(rec.store.rt, res.rt), 'needs'])], { taskId })
+    return null
+  }
+
   /** The `applyHire` effect (design 4.3): through the team's serial chain of disk-writing ops (3.0 item 5). */
   private applyHire(teamId: string, approvalId: string): void {
     void this.serial(teamId, () => this.applyHireNow(teamId, approvalId)).catch((err) => this.deps.log(`hire ${teamId} ${approvalId} failed ${(err as Error).name}`))
@@ -3014,7 +3169,9 @@ export class TeamService implements TeamInternals {
   private noticeNeeds(teamId: string): void {
     const rec = this.teams.get(teamId)
     if (!rec || !this.live()) return
-    const rows = needsRowsOf(rec, this.trust.trusted(teamId))
+    // 2.9.0: a row the autopilot is about to clear never notifies nor joins the baseline (one it gives up on notifies then).
+    const skip = this.autopilotSkip.get(teamId) ?? new Set<string>()
+    const rows = needsRowsOf(rec, this.trust.trusted(teamId)).filter((r) => !autopilotTakes(r, rec.store.rt, skip))
     const ids = rows.map((r) => needSeenKey(r, rec.store.rt))
     const seen = new Set(rec.store.rt.needsSeen ?? [])
     for (const [i, row] of rows.entries()) {

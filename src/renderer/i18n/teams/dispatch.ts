@@ -39,6 +39,10 @@ export const dispatchEn = {
   'teams.kickoff.busy': 'The Lead is working',
   'teams.kickoff.started': 'The Lead is setting up the tasks.',
   'teams.kickoff.watch': 'Watch',
+  'teams.autopilot.label': 'Autopilot',
+  'teams.autopilot.onToast': 'Autopilot on: the team approves, answers the recommended option and integrates on its own. Auto dispatch is on too.',
+  'teams.autopilot.offToast': 'Autopilot off: decisions wait for you in Needs you again.',
+  'teams.autopilot.toggleFailed': 'Could not change the autopilot.',
 }
 
 export const dispatchEs: Record<keyof typeof dispatchEn, string> = {
@@ -80,4 +84,8 @@ export const dispatchEs: Record<keyof typeof dispatchEn, string> = {
   'teams.kickoff.busy': 'El Líder está trabajando',
   'teams.kickoff.started': 'El Líder está armando las tareas.',
   'teams.kickoff.watch': 'Ver',
+  'teams.autopilot.label': 'Piloto automático',
+  'teams.autopilot.onToast': 'Piloto automático prendido: el equipo aprueba, responde la opción recomendada e integra solo. El despacho automático también quedó prendido.',
+  'teams.autopilot.offToast': 'Piloto automático apagado: las decisiones vuelven a esperarte en Te necesita.',
+  'teams.autopilot.toggleFailed': 'No se pudo cambiar el piloto automático.',
 }

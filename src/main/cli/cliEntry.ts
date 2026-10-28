@@ -65,6 +65,8 @@ const VALUE_FLAGS = new Set([
   'workspace', 'console', 'path', 'prompt', 'prompt-file', 'title', 'file', 'lines', 'timeout', 'quiet-ms', 'task-state', 'runtime', 'turns', 'before', 'rev', 'provider',
   // app 2.7.0 (Teams): snaos team.
   'body-file', 'assign', 'repo', 'isolation', 'blocked-by', 'priority', 'parent', 'state', 'options', 'plan', 'task',
+  // app 2.9.0: team ask --recommended.
+  'recommended',
 ])
 const BOOL_FLAGS = new Set([
   'json', 'focus', 'no-profile', 'enter', 'clear', 'local', 'idle', 'agent', 'help', 'tools', 'thinking', 'yes', 'resume', 'fresh', 'close', 'off', 'composer', 'open',
@@ -93,7 +95,7 @@ const SUBS: Partial<Record<Command, Record<string, string[]>>> = {
     log: ['lines', 'task'],
     comment: ['file'],
     note: ['file', 'title'],
-    ask: ['file', 'options', 'multi', 'confirm'],
+    ask: ['file', 'options', 'multi', 'confirm', 'recommended'],
     needs: ['file'],
     plan: ['file', 'small'],
     review: ['file'],
@@ -625,7 +627,14 @@ async function buildTeamCall(args: ParsedArgs, io: ClientIo): Promise<RpcCall> {
       const options = optionsFlag(flag('options'))
       if (on('multi') && !options) throw new UsageError('--multi needs --options "A|B|C"')
       if (on('confirm') && (options || on('multi'))) throw new UsageError('--confirm is a yes or no question: leave out --options and --multi')
-      return call('team.ask', { text, ...(options ? { options } : {}), ...(on('multi') ? { multi: true } : {}), ...(on('confirm') ? { confirm: true } : {}) })
+      const rec = flag('recommended')
+      let recommended: number | undefined
+      if (rec !== undefined) {
+        if (!options || on('multi')) throw new UsageError('--recommended names one answer of --options "A|B|C": leave out --multi')
+        recommended = /^\d{1,2}$/.test(rec) ? Number(rec) : NaN
+        if (!(recommended >= 1 && recommended <= options.length)) throw new UsageError(`--recommended takes the number of an answer of --options, from 1 to ${options.length}`)
+      }
+      return call('team.ask', { text, ...(options ? { options } : {}), ...(on('multi') ? { multi: true } : {}), ...(on('confirm') ? { confirm: true } : {}), ...(recommended ? { recommended } : {}) })
     }
     case 'needs':
       return call('team.needs', { text: capped(needText(await fileText(pos), 'team needs'), CARD_QUESTION_MAX, 'the request') })
@@ -1373,7 +1382,7 @@ Inside a team run only (snaos help --agent, section Teams):
              [--priority <p>] [--blocked-by t-1,t-2|none] [--isolation <i>] [--state todo|blocked|cancelled]
              [--no-plan | --needs-plan]
   snaos team comment <t-N|lead> <text|-> | --file <file>|-
-  snaos team note [--title <t>] | ask [--options "A|B|C"] [--multi] [--confirm] | needs <text|-> | --file <file>|-
+  snaos team note [--title <t>] | ask [--options "A|B|C"] [--recommended <n>] [--multi] [--confirm] | needs <text|-> | --file <file>|-
   snaos team plan --file <file>|- [--small] | review | done [<text|-> | --file <file>|-]
   snaos team verdict approve|changes <text|-> | --file <file>|-
   snaos team approve --plan <t-N> | hire --file <file>|-

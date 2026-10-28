@@ -206,6 +206,7 @@ export function cardView(c: TeamCard): CardView {
     out.question = c.question
     out.options = [...c.options]
     out.multi = c.multi
+    if (c.recommended !== undefined) out.recommended = c.recommended
   } else {
     out.system = { why: c.from.why, actions: [...c.from.actions] }
     if (c.from.vars) out.system.vars = { ...c.from.vars }
@@ -406,6 +407,7 @@ export function teamView(rec: TeamRecord, def: TeamDefinition | null, trusted: T
     running: liveRuns(rt),
     providerBlockedUntil: { ...rt.providerBlockedUntil },
   }
+  if (rt.autopilot) out.autopilot = true
   const usage = usageToday(rec.store.recentRuns(), now)
   if (usage) out.usageToday = usage
   if (rt.workspaceId) out.workspaceId = rt.workspaceId
@@ -424,6 +426,7 @@ export function teamHeaderKey(rec: TeamRecord, trusted: TrustedDefinition | null
   return JSON.stringify([
     rt.paused ?? null,
     rt.autoDispatch,
+    rt.autopilot ?? false,
     liveRuns(rt),
     teamNeedsCount(needsInputOf(rt, rec.trust, rec.trustSince, trusted)),
     rt.providerBlockedUntil,

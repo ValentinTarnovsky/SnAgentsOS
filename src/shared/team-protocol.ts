@@ -38,6 +38,8 @@ export interface TeamView {
   extraRepos: Array<{ id: string; name: string; baseBranch: string }>
   goal: string; trust: TeamTrustState; defIssues: DefError[]
   autoDispatch: boolean; paused: TeamPause | null; maxConcurrent: number; maxRunMinutes: number; leadApprovesSmallPlans: boolean
+  /** Piloto automatico (2.9.0): main approves, answers the recommended option and integrates for the user. Absent reads as off. */
+  autopilot?: boolean
   verify: Array<{ repoId: string; command: string; confirmed: boolean }>
   roles: RoleSummary[]; rev: number; needsCount: number; running: number
   providerBlockedUntil: Partial<Record<AgentProvider, number>>
@@ -115,6 +117,8 @@ export interface ApprovalView { id: string; taskId?: string; state: ApprovalStat
 export interface CardView {
   id: string; taskId?: string; agentId?: string; kind: TeamCard['kind']; state: TeamCard['state']; at: number
   question?: string; options?: string[]; multi?: boolean
+  /** The option index the agent recommends (`team ask --recommended`, 2.9.0); absent when none. */
+  recommended?: number
   system?: { why: CardReason; vars?: Record<string, string | number>; actions: CardAction[] }
   answer?: CardAnswer
   pcOnly?: boolean; truncated?: boolean
@@ -210,7 +214,7 @@ export type TeamRequest =
   | { op: 'trustDiff'; teamId: string }
   | { op: 'trust'; teamId: string; sha256: string }
   | { op: 'remove'; teamId: string }
-  | { op: 'settings'; teamId: string; patch: { autoDispatch?: boolean; paused?: boolean } }
+  | { op: 'settings'; teamId: string; patch: { autoDispatch?: boolean; paused?: boolean; autopilot?: boolean } }
   | { op: 'reveal'; teamId: string; what: 'definition' | 'data' }
   // B2
   | { op: 'roster'; teamId: string }

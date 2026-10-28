@@ -140,6 +140,15 @@ export async function setAutoDispatch(teamId: string, on: boolean): Promise<Team
   return null
 }
 
+/** The Piloto automatico switch (header): the `settings` op; on, main turns auto dispatch on too. Null once main applied it. */
+export async function setAutopilot(teamId: string, on: boolean): Promise<TeamFail | null> {
+  const res = await teamReq({ op: 'settings', teamId, patch: { autopilot: on } })
+  if (!res.ok) return res
+  useTeamsStore.setState((s) => ({ views: { ...s.views, [teamId]: res.team } }))
+  void refreshTeamList()
+  return null
+}
+
 /** The header's "N por despachar": Te necesita opens and its "Por despachar" section takes the keyboard. */
 export function openDispatchQueue(teamId: string): void {
   useNeedsStore.setState({ focusQueue: teamId })
