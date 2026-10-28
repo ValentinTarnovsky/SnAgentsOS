@@ -162,6 +162,19 @@ function pickChecks() {
   check(!takes('k-1', 'card', new Set(['k-1'])), 'a skipped card notifies')
   check(!takes('trust', 'trust') && !takes('paused', 'paused') && !takes('q-1', 'dispatch'), 'trust, pause and dispatch rows are never the autopilot\'s')
   check(!takes('a-1', 'approval', none, rtFixture((x) => ({ ...x, paused: { reason: 'user', at: NOW } }))), 'paused: every row notifies')
+  // The QA run that just gave its verdict is still active: Integrar would be busy, so the autopilot waits (no notice).
+  const qaRun = { id: 'r-0123456789ab', agentId: 'dev', taskId: 't-4', mode: 'qa', state: 'running', concludedBy: { tool: 'verdict', at: NOW } }
+  const running = rtFixture((x) => ({ ...x, activeRuns: [qaRun] }))
+  check(!A.autopilotPicks(running, none).some((p) => p.key === 'integrate:t-4'), 'a run of the task still active: no integrate pick yet')
+  check(takes('a-5', 'approval', none, running), 'and the row stays the autopilot\'s while it waits for that run')
+  check(!takes('a-5', 'approval', new Set(['integrate:t-4']), running), 'unless it gave up on it')
+  // A failure that passes by itself is tried again; one on the user's side is not.
+  for (const error of ['base_moved', 'interrupted', 'timeout']) {
+    const r = rtFixture((x) => ({ ...x, tasks: x.tasks.map((t) => (t.id === 't-7' ? { ...t, integrate: { state: 'failed', attempt: 1, error, at: NOW } } : t)) }))
+    check(A.autopilotPicks(r, none).some((p) => p.kind === 'integrate' && p.key === 'integrate:t-7'), `${error}: Integrar again`)
+    check(takes('a-8', 'approval', none, r), `${error}: the row stays the autopilot's`)
+    check(!A.autopilotPicks(r, new Set(['integrate:t-7'])).some((p) => p.key === 'integrate:t-7'), `${error}: not once it gave up`)
+  }
   same(A.keyTask('integrate:t-4'), 't-4', 'keyTask of an integrate key')
   same(A.keyTask('rebase:t-12'), 't-12', 'keyTask of a rebase key')
   same(A.keyTask('a-3@2'), undefined, 'keyTask of an approval key')
@@ -360,6 +373,48 @@ async function serviceChecks() {
   await w.settle()
   check(w.task(dirty.id).state === 'done', 'done')
 
+  // 2.9.2: the final OK lands while the QA run that gave the verdict still finishes its turn. The autopilot waits for
+  // that run (it used to try, get busy and leave the task to the user for good), then integrates when it ends.
+  const qa = await w.integratingTask('Agregar ajustes', { 'ajustes.txt': 'a\n' })
+  const qaRunId = 'r-0123456789ac'
+  const t3 = w.clock.now
+  w.put((cur) => ({
+    ...cur,
+    agents: cur.agents.map((a) => (a.id === 'dev' ? { ...a, status: 'running', runId: qaRunId } : a)),
+    activeRuns: [...cur.activeRuns, {
+      id: qaRunId, agentId: 'dev', roleId: 'dev', roleKind: 'dev', taskId: qa.id, sessionKey: qa.id, provider: 'claude', profile: 'readonly', resumed: false,
+      cwd: qa.wt.path, repoId: 'main', mode: 'qa', trigger: { reason: 'review', by: 'system' }, state: 'running', reachedRunning: true, resultSeen: false,
+      queuedAt: t3, startedAt: t3, concludedBy: { tool: 'verdict', at: t3 },
+    }],
+  }))
+  const nq = w.notices.length
+  w.poke()
+  await w.settle()
+  check(w.task(qa.id).phase === 'integrating' && w.approval(qa.integrateApproval).state === 'pending', 'its run still active: nothing integrated yet')
+  check(!w.logs.some((l) => l.startsWith(`autopilot ${w.teamId} integrate integrate:${qa.id} left:`)), 'and the autopilot did not give up on it')
+  check(!w.notices.slice(nq).some((x) => x.tag === `team:${w.teamId}:${qa.integrateApproval}`), 'nor notified its row')
+  // The run ends (a commit through the service, as the run supervisor's end makes).
+  w.svc.commit(w.teamId, {
+    ok: true,
+    rt: { ...w.rt(), agents: w.rt().agents.map((a) => { if (a.id !== 'dev') return a; const { runId: _gone, ...rest } = a; return { ...rest, status: 'idle' } }), activeRuns: w.rt().activeRuns.filter((r) => r.id !== qaRunId) },
+    effects: [],
+    result: undefined,
+  }, ['team', 'task'])
+  await w.settle()
+  const tq = w.task(qa.id)
+  check(tq.state === 'done' && tq.integrated?.landed === 'ffOnly', `the run ended: integrated (${JSON.stringify(tq.integrate ?? tq.integrated)})`)
+  same(w.approval(qa.integrateApproval).decidedBy, AUTO, 'as the user via auto')
+  check(!w.notices.slice(nq).some((x) => x.tag === `team:${w.teamId}:${qa.integrateApproval}`), 'and its row never notified')
+
+  // An integrate that failed on something passing (the base moved under it): Integrar again.
+  const moved = await w.integratingTask('Agregar ayuda', { 'ayuda.txt': 'h\n' })
+  const t4 = w.clock.now
+  w.put((cur) => ({ ...cur, tasks: cur.tasks.map((x) => (x.id === moved.id ? { ...x, integrate: { state: 'failed', attempt: 1, error: 'base_moved', step: 'land', at: t4 } } : x)) }))
+  w.poke()
+  await w.settle()
+  const tm = w.task(moved.id)
+  check(tm.state === 'done' && tm.integrated?.landed === 'ffOnly', `a base_moved failure is tried again and lands (${JSON.stringify(tm.integrate ?? tm.integrated)})`)
+
   // A merge conflict: back to the Dev, then AUTOPILOT_REBASE_MAX in a row and the next one left to the user.
   const conf = await w.integratingTask('Cambiar conflicto', { 'conflict.txt': 'rama\n' })
   write(path.join(w.repo, 'conflict.txt'), 'main\n')
@@ -449,7 +504,7 @@ async function main() {
     flagChecks()
     pickChecks()
     await serviceChecks()
-    console.log(`PASS: ${checks} teams autopilot checks (recommendedOf and its suffix fallback, setTeamFlags, autopilotPicks and autopilotTakes, the settings op, a plan, a permission and a recommended answer decided as the user via auto with no notice, a free question left and notified, a clean merge integrated, a dirty checkout left and notified, a conflict back to the Dev and the rebase cap, paused and off)`)
+    console.log(`PASS: ${checks} teams autopilot checks (recommendedOf and its suffix fallback, setTeamFlags, autopilotPicks and autopilotTakes, the settings op, a plan, a permission and a recommended answer decided as the user via auto with no notice, a free question left and notified, a clean merge integrated, a dirty checkout left and notified, an integrate that waits for the task's run to end, a transient failure tried again, a conflict back to the Dev and the rebase cap, paused and off)`)
   } finally {
     for (const s of services) { try { s.dispose() } catch { /* already gone */ } }
     await new Promise((r) => setTimeout(r, 200))
