@@ -731,6 +731,18 @@ export class StatusManager implements PtySink {
   isEnded(paneId: string): boolean {
     return this.panes.get(paneId)?.ended === true
   }
+  /**
+   * App 2.11.0 (hands-free voice): the last reply of the console's agent
+   * (<= 2000, sanitized, line breaks kept) and the turn it belongs to, for
+   * main's narration only (it never goes to the renderer). Null without a
+   * precise track or a reply.
+   */
+  replyOf(paneId: string): { text: string; turn: string } | null {
+    const track = this.panes.get(paneId)
+    if (!track || !track.precise || !track.reply) return null
+    const text = sanitize(track.reply)
+    return text ? { text, turn: track.replyTurn ?? track.turnId } : null
+  }
   /** Current status of one console, or null when it has none. */
   stateOf(paneId: string): PaneStatusEvt | null {
     const track = this.panes.get(paneId)

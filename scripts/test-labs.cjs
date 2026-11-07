@@ -39,7 +39,7 @@ const KEYS = [...L.LABS_KEYS]
 const OFF = Object.fromEntries(KEYS.map((k) => [k, false]))
 
 function sharedChecks() {
-  check(same(KEYS, ['consoleChat', 'teams']), 'LABS_KEYS is consoleChat, teams')
+  check(same(KEYS, ['consoleChat', 'teams', 'voice']), 'LABS_KEYS is consoleChat, teams, voice')
   check(same(L.DEFAULT_LABS, OFF) && Object.keys(L.DEFAULT_LABS).join() === KEYS.join(), 'DEFAULT_LABS has every lab off, in LABS_KEYS order')
 
   // labOn: only an explicit true is on.
@@ -51,15 +51,15 @@ function sharedChecks() {
   // normalizeLabs: any value becomes a full LabsSettings.
   for (const v of [undefined, null, 'on', 7, [true, true], {}]) check(same(L.normalizeLabs(v), OFF), `normalizeLabs(${JSON.stringify(v)}) gives every lab off`)
   const n = L.normalizeLabs({ teams: true, consoleChat: 'yes', extra: true })
-  check(same(n, { consoleChat: false, teams: true }) && !('extra' in n), 'normalizeLabs keeps an explicit true, turns junk off and drops unknown keys')
-  check(same(L.normalizeLabs({ consoleChat: true, teams: true }), { consoleChat: true, teams: true }), 'normalizeLabs keeps every lab on')
+  check(same(n, { consoleChat: false, teams: true, voice: false }) && !('extra' in n), 'normalizeLabs keeps an explicit true, turns junk off and drops unknown keys')
+  check(same(L.normalizeLabs({ consoleChat: true, teams: true, voice: true }), { consoleChat: true, teams: true, voice: true }), 'normalizeLabs keeps every lab on')
   n.consoleChat = true
   check(L.DEFAULT_LABS.consoleChat === false && L.normalizeLabs(null) !== L.DEFAULT_LABS, 'normalizeLabs returns a fresh object (DEFAULT_LABS is never shared)')
 }
 
 function schemaChecks() {
   const { labsSettingsSchema: S, parseConfig, CONFIG_VERSION } = load('src/main/store/schema.ts')
-  check(CONFIG_VERSION === 21, 'CONFIG_VERSION is 21 (app 2.10.0)')
+  check(CONFIG_VERSION === 22, 'CONFIG_VERSION is 22 (app 2.11.0)')
   check(Object.keys(S.shape).join() === KEYS.join(), 'labsSettingsSchema keys === LABS_KEYS, same order')
   check(same(S.parse({}), OFF) && same(S.parse({}), L.DEFAULT_LABS), 'an empty labs block parses to DEFAULT_LABS')
   for (const k of KEYS) {
@@ -67,7 +67,7 @@ function schemaChecks() {
     check(S.parse({ [k]: false })[k] === false, `labs.${k} false is kept`)
     for (const bad of ['yes', 1, null, 'true', {}]) check(S.parse({ [k]: bad })[k] === false, `a junk labs.${k} ${JSON.stringify(bad)} becomes false`)
   }
-  check(same(S.parse({ consoleChat: true, teams: 'yes', other: true }), { consoleChat: true, teams: false }), 'junk in one flag keeps the other, an unknown flag is stripped')
+  check(same(S.parse({ consoleChat: true, teams: 'yes', other: true }), { consoleChat: true, teams: false, voice: false }), 'junk in one flag keeps the other, an unknown flag is stripped')
 
   // A v18 config as the 2.6.0 renderer writes it (minimal valid settings plus a few blocks).
   const baseSettings = { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false }
@@ -79,18 +79,18 @@ function schemaChecks() {
     activeWorkspaceId: 'w1',
   }
   const up = parseConfig(clone(v18))
-  check(up && up.version === 21, 'a v18 config parses and is stamped 21')
+  check(up && up.version === 22, 'a v18 config parses and is stamped 22')
   check(same(up.settings.labs, OFF) && Object.keys(up.settings.labs).join() === KEYS.join(), 'v18 -> v19: settings.labs gains every lab off')
   check(survives(v18, up), 'v18 -> v19 keeps every other value')
   check(same(parseConfig(clone(up)), up), 'v19 parse is idempotent')
   const fromV10 = parseConfig({ version: 10, workspaces: [], presets: [], settings: clone(baseSettings) })
-  check(fromV10 && fromV10.version === 21 && same(fromV10.settings.labs, OFF), 'a v10 config walks up to 21 and gets the labs defaults')
+  check(fromV10 && fromV10.version === 22 && same(fromV10.settings.labs, OFF), 'a v10 config walks up to 22 and gets the labs defaults')
 
   // The labs block in a whole config: kept, junk and non-object values fall back without rejecting it.
   const withLabs = (labs) => { const c = clone(up); c.settings.labs = labs; return parseConfig(c) }
-  const on = withLabs({ consoleChat: true, teams: true })
-  check(on && same(on.settings.labs, { consoleChat: true, teams: true }) && same(parseConfig(clone(on)), on), 'labs on are kept, and a second parse changes nothing')
-  check(same(withLabs({ teams: true }).settings.labs, { consoleChat: false, teams: true }), 'a partial block gains the missing flag off')
+  const on = withLabs({ consoleChat: true, teams: true, voice: true })
+  check(on && same(on.settings.labs, { consoleChat: true, teams: true, voice: true }) && same(parseConfig(clone(on)), on), 'labs on are kept, and a second parse changes nothing')
+  check(same(withLabs({ teams: true }).settings.labs, { consoleChat: false, teams: true, voice: false }), 'a partial block gains the missing flag off')
   const junk = withLabs({ consoleChat: 'yes', teams: 1 })
   check(junk && junk.settings.fontSize === 13 && same(junk.settings.labs, OFF), 'junk flags become false and the config still loads')
   for (const bad of ['on', 7, null, [true], true]) {

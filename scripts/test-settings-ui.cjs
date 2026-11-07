@@ -389,7 +389,7 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
 
  // --- app 2.8.0: the nav order, the phone notice delay and the sidebar blocks ----------------
  await js("smoke.openSettings()");await frame();
- eq(await js("[...document.querySelectorAll('[data-settings-nav]')].map(e=>e.getAttribute('data-settings-nav'))"),['terminal','agents','claudeaccounts','aiusage','quick','automation','git','notifications','remote','share','connections','startup','appearance','keys','language','data','usage','labs','updates','about'],'the nav comes in the 2.8.0 order');
+ eq(await js("[...document.querySelectorAll('[data-settings-nav]')].map(e=>e.getAttribute('data-settings-nav'))"),['terminal','agents','claudeaccounts','aiusage','quick','automation','git','notifications','remote','share','connections','startup','appearance','keys','language','data','usage','voice','labs','updates','about'],'the nav comes in the 2.8.0 order (app 2.11.0: Voice before Labs)');
  await js("smoke.openSettings('notifications#remoteDelay')");await frame();await frame();
  eq([await js("document.querySelector('[data-remote-delay]').value"),await js('smoke.remoteDelay()')],['0',0],'the phone notice delay: 0 by default');
  await js("smoke.setInput('[data-remote-delay]','120')");await frame();

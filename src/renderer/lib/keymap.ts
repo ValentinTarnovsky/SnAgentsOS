@@ -37,6 +37,8 @@ export type ActionId =
   | 'toggleConsoleChat'
   // Open or close Teams (app 2.7.0, E10 B1; CONTRATOS "Atajos"): inert with Labs teams off (the key reaches the console).
   | 'teams'
+  // Hands-free voice on or off (app 2.11.0, Labs voice; CONTRATOS "Atajos"): no default, inert with the lab off.
+  | 'toggleHandsFree'
 
 export interface KeyAction {
   id: ActionId
@@ -83,6 +85,8 @@ export const KEY_ACTIONS: KeyAction[] = [
   { id: 'dictate', labelKey: 'keys.dictate', defaultAccel: 'Ctrl+Shift+H' },
   // No default: any chord it took by itself would stop reaching the agent. The user binds one.
   { id: 'toggleConsoleChat', labelKey: 'keys.toggleConsoleChat', defaultAccel: '' },
+  // No default either: the user binds one (a global hotkey that works inside a game is in Settings > Labs > Voz).
+  { id: 'toggleHandsFree', labelKey: 'keys.toggleHandsFree', defaultAccel: '' },
 ]
 
 /** Actions that stay out of text fields so the field keeps the key (E5-FR-18). */

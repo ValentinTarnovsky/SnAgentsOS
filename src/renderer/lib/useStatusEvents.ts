@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useAppStore } from '@/lib/store'
 import { useAgentStore } from '@/lib/agentStore'
 import { playStatusSound } from '@/lib/sound'
+import { handsFreeOn } from '@/lib/handsFree'
 import { visiblePaneIds } from '@shared/status'
 import { revealPane } from './revealPane'
 import { dismissAgentCardsInView, onAgentStatus } from './agentNotice'
@@ -34,7 +35,9 @@ export function useStatusEvents(): void {
       changed.add(evt.paneId)
       useAppStore.getState().setPaneStatus(evt)
       const cfg = useAppStore.getState().settings.notifications
-      if (evt.notify && cfg.sound) playStatusSound(cfg.soundId, cfg.volume)
+      // App 2.11.0: with hands-free on, the voice says it (narration.muteChimes).
+      const quiet = handsFreeOn() && useAppStore.getState().settings.voice?.narration?.muteChimes !== false
+      if (evt.notify && cfg.sound && !quiet) playStatusSound(cfg.soundId, cfg.volume)
       onAgentStatus(evt)
     })
     void window.snApi.status.snapshot().then(events => {

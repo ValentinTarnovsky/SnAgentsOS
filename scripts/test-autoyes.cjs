@@ -49,9 +49,9 @@ const config = (version, agents) => ({ version, workspaces: [{ id: 'w1', name: '
 
 function testSchema() {
   const { parseConfig, CONFIG_VERSION } = load('src/main/store/schema.ts')
-  check(CONFIG_VERSION === 21, 'CONFIG_VERSION is 21 (app 2.10.0)')
+  check(CONFIG_VERSION >= 21, 'CONFIG_VERSION is 21 or later (autoYes since app 2.10.0)')
   const v20 = parseConfig(config(20))
-  check(v20 && v20.version === 21 && v20.settings.agents.autoYes === 'off', 'a v20 config gains autoYes off and is stamped 21')
+  check(v20 && v20.version === CONFIG_VERSION && v20.settings.agents.autoYes === 'off', 'a v20 config gains autoYes off and is stamped with the current version')
   check(parseConfig(config(21, { autoYes: 'bypass' })).settings.agents.autoYes === 'bypass' && parseConfig(config(21, { autoYes: 'all' })).settings.agents.autoYes === 'all', 'bypass and all survive a parse')
   for (const junk of ['yes', true, 1, null, { on: true }]) {
     const cfg = parseConfig(config(21, { autoYes: junk, sidebarSort: 'smart' }))

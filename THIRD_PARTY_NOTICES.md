@@ -199,3 +199,30 @@ SOFTWARE.
 - Used as: `cudart64_12.dll`, `cublas64_12.dll` and `cublasLt64_12.dll`, only in
   the GPU pack. The NVIDIA display driver (`nvcuda.dll`) comes from the user's
   own driver install and is never downloaded.
+
+## Hands-free voice pack (downloaded at runtime)
+
+Nothing below is bundled with SnAgentsOS either: the voice pack is downloaded
+only when the user installs it in Settings > Voice, from the URLs pinned in
+`src/main/voice/catalog.ts` (the npm registry and the GitHub releases of
+k2-fsa/sherpa-onnx), checked against its SHA-256 and stored under the app's
+data folder (`voice/`). Removing the pack in Settings deletes its files.
+
+### sherpa-onnx
+
+- Source: https://github.com/k2-fsa/sherpa-onnx (npm package `sherpa-onnx-win-x64` 2.0.1)
+- License: Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+- Used as: the N-API addon `sherpa-onnx.node` with `sherpa-onnx-c-api.dll`,
+  `sherpa-onnx-cxx-api.dll` and the ONNX Runtime DLLs it ships
+  (`onnxruntime.dll`, `onnxruntime_providers_shared.dll`, MIT, Microsoft),
+  loaded only inside a separate utility process.
+
+### Supertonic 3
+
+- Source: https://github.com/supertone-inc/supertonic and
+  https://huggingface.co/Supertone/supertonic-3, as republished by sherpa-onnx
+  (`sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2`)
+- License: the code under MIT; the model weights under the OpenRAIL-M license
+  (https://huggingface.co/Supertone/supertonic-3/blob/main/LICENSE), whose use
+  restrictions apply to the voice the user generates
+- Used as: the local text-to-speech model of hands-free voice (speakers 9 and 4).

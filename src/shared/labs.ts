@@ -8,14 +8,14 @@
  * Every lab flag, in Settings > Labs order. A new lab is one more key here plus
  * its literal LabsSection row, catalog entry and i18n keys (test-labs.cjs checks them).
  */
-export const LABS_KEYS = ['consoleChat', 'teams'] as const
+export const LABS_KEYS = ['consoleChat', 'teams', 'voice'] as const
 
 export type LabsKey = (typeof LABS_KEYS)[number]
 
 /** settings.labs: one boolean per lab. */
 export type LabsSettings = Record<LabsKey, boolean>
 
-export const DEFAULT_LABS: LabsSettings = { consoleChat: false, teams: false }
+export const DEFAULT_LABS: LabsSettings = { consoleChat: false, teams: false, voice: false }
 
 /** Absent or junk means off: only an explicit `true` turns a lab on. */
 export function labOn(

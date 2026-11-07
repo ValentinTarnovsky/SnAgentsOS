@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron'
 import { CH } from '@shared/ipc-channels'
+import type { VoiceCmd, VoiceCmdRes, VoiceEvent, VoiceInstallProgress, VoiceMode, VoicePlay, VoicePlayOutcome, VoiceRoster, VoiceStatus } from '@shared/voice'
 import type {
   AppInfo,
   AppMetrics,
@@ -343,6 +344,26 @@ const api: SnApi = {
     cancelInstall: (pack: WhisperPackId) => ipcRenderer.invoke(CH.DICTATION_CANCEL_INSTALL, pack) as Promise<void>,
     remove: (pack: WhisperPackId) => ipcRenderer.invoke(CH.DICTATION_REMOVE, pack) as Promise<{ ok: boolean; error?: WhisperInstallError }>,
     onInstallProgress: (cb: (p: WhisperInstallProgress) => void) => sub<WhisperInstallProgress>(CH.DICTATION_INSTALL_PROGRESS, cb),
+  },
+  // App 2.11.0 (Labs voice): hands-free voice.
+  voice: {
+    status: () => ipcRenderer.invoke(CH.VOICE_STATUS) as Promise<VoiceStatus>,
+    setActive: (on: boolean) => ipcRenderer.invoke(CH.VOICE_SET_ACTIVE, on) as Promise<VoiceCmdRes>,
+    roster: (r: VoiceRoster) => ipcRenderer.send(CH.VOICE_ROSTER, r),
+    mode: (m: VoiceMode) => ipcRenderer.send(CH.VOICE_MODE, m),
+    cmd: (c: VoiceCmd) => ipcRenderer.invoke(CH.VOICE_CMD, c) as Promise<VoiceCmdRes>,
+    played: (id: number, outcome: VoicePlayOutcome) => ipcRenderer.send(CH.VOICE_PLAYED, { id, outcome }),
+    onPlay: (cb: (p: VoicePlay) => void) => sub<VoicePlay>(CH.VOICE_PLAY, cb),
+    onEvent: (cb: (e: VoiceEvent) => void) => sub<VoiceEvent>(CH.VOICE_EVENT, cb),
+    install: () => ipcRenderer.invoke(CH.VOICE_INSTALL) as Promise<{ ok: boolean; error?: string }>,
+    cancelInstall: () => ipcRenderer.invoke(CH.VOICE_CANCEL_INSTALL) as Promise<void>,
+    remove: () => ipcRenderer.invoke(CH.VOICE_REMOVE) as Promise<{ ok: boolean; error?: string }>,
+    onInstallProgress: (cb: (p: VoiceInstallProgress) => void) => sub<VoiceInstallProgress>(CH.VOICE_INSTALL_PROGRESS, cb),
+    setKey: (key: string | null) => ipcRenderer.invoke(CH.VOICE_SET_KEY, key) as Promise<{ ok: boolean; error?: string }>,
+    testEleven: () => ipcRenderer.invoke(CH.VOICE_TEST_ELEVEN) as Promise<{ ok: boolean; error?: string; used?: number; limit?: number }>,
+    preview: () => ipcRenderer.invoke(CH.VOICE_PREVIEW) as Promise<VoiceCmdRes>,
+    warmPhrases: (dryRun: boolean) => ipcRenderer.invoke(CH.VOICE_WARM_PHRASES, { dryRun }) as Promise<{ ok: boolean; phrases: number; chars: number; error?: string }>,
+    clearCache: () => ipcRenderer.invoke(CH.VOICE_CLEAR_CACHE) as Promise<void>,
   },
   agents: {
     setConfig: (cfg: AgentSettings) => ipcRenderer.send(CH.AGENTS_SET_CONFIG, cfg),

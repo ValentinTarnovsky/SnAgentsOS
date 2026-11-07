@@ -22,6 +22,7 @@ import type {
 import { isTaskState, normalizeWorkspaceNote } from '@shared/workspaceNote'
 import { DEFAULT_CLAUDE_ACCOUNTS_SETTINGS } from '@shared/claude-accounts'
 import { DEFAULT_LABS } from '@shared/labs'
+import { DEFAULT_VOICE_SETTINGS } from '@shared/voice'
 import { DEFAULT_SIDEBAR_BLOCKS } from '@shared/sidebarBlocks'
 import { DEFAULT_SILENCE } from '@shared/silence'
 import { PANE_SCHEDULES_MAX, SCHEDULE_ID_RE } from '@shared/schedule'
@@ -174,6 +175,7 @@ const DEFAULT_SETTINGS: Settings = {
   share: { enabled: false, port: 4527, guestName: '', defaultPerm: 'view' },
   labs: { ...DEFAULT_LABS },
   sidebarBlocks: { ...DEFAULT_SIDEBAR_BLOCKS },
+  voice: { ...DEFAULT_VOICE_SETTINGS, narration: { ...DEFAULT_VOICE_SETTINGS.narration }, tts: { ...DEFAULT_VOICE_SETTINGS.tts }, eleven: { ...DEFAULT_VOICE_SETTINGS.eleven } },
 }
 
 /** A single terminal cell chosen in the new-workspace wizard. */

@@ -22,6 +22,7 @@ import type {
   UsageSettings,
 } from './types'
 import type { AgentSessionView, AgentsChangedEvt, AgentsReadyEvt, AgentsStartup } from './agents'
+import type { VoiceCmd, VoiceCmdRes, VoiceEvent, VoiceInstallProgress, VoiceMode, VoicePlay, VoicePlayOutcome, VoiceRoster, VoiceStatus } from './voice'
 import type {
   AccountsCaptureReq,
   AccountsOpRes,
@@ -77,6 +78,13 @@ export interface DictationStartReq {
   lang?: string
   /** The console being dictated into: its workspace and folder names bias the prompt (validated in main). */
   paneId?: string
+  /**
+   * App 2.11.0 (Labs voice): a hands-free listening session: no 10 minute cap,
+   * no `hyp`, the wake word and the roster names in the prompt. Answers
+   * `disabled` with the lab off and `busy` while a manual dictation runs; a
+   * manual start ends it with `end { reason: 'replaced' }`.
+   */
+  mode?: 'handsfree'
 }
 
 export interface DictationStartRes {
@@ -99,6 +107,8 @@ export interface DictationEvt {
   engine?: 'gpu' | 'cpu'
   lang?: string
   fallback?: 'gpu_failed'
+  /** App 2.11.0, on `end`: a manual dictation took the engine from a hands-free session. */
+  reason?: 'replaced'
 }
 
 export interface AppInfo {
@@ -1296,6 +1306,27 @@ export interface SnApi {
     remove(pack: WhisperPackId): Promise<{ ok: boolean; error?: WhisperInstallError }>
     /** Install progress (every window, throttled). Returns unsubscribe. */
     onInstallProgress(cb: (p: WhisperInstallProgress) => void): () => void
+  }
+  /** App 2.11.0 (Labs voice): hands-free voice. Main checks every id; the renderer never sends text to say. */
+  voice: {
+    status(): Promise<VoiceStatus>
+    setActive(on: boolean): Promise<VoiceCmdRes>
+    roster(r: VoiceRoster): void
+    mode(m: VoiceMode): void
+    cmd(c: VoiceCmd): Promise<VoiceCmdRes>
+    played(id: number, outcome: VoicePlayOutcome): void
+    onPlay(cb: (p: VoicePlay) => void): () => void
+    onEvent(cb: (e: VoiceEvent) => void): () => void
+    install(): Promise<{ ok: boolean; error?: string }>
+    cancelInstall(): Promise<void>
+    remove(): Promise<{ ok: boolean; error?: string }>
+    onInstallProgress(cb: (p: VoiceInstallProgress) => void): () => void
+    /** Stores the ElevenLabs key (null removes it); it is never read back. */
+    setKey(key: string | null): Promise<{ ok: boolean; error?: string }>
+    testEleven(): Promise<{ ok: boolean; error?: string; used?: number; limit?: number }>
+    preview(): Promise<VoiceCmdRes>
+    warmPhrases(dryRun: boolean): Promise<{ ok: boolean; phrases: number; chars: number; error?: string }>
+    clearCache(): Promise<void>
   }
   /** Agent behavior settings and durable sessions (E5 G2). */
   agents: {

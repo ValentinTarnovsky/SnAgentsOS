@@ -29,6 +29,7 @@ import { UsageBars } from '@/components/sidebar/UsageBars'
 import { RemoteIndicator } from '@/components/sidebar/RemoteIndicator'
 import { SharedWithMeSection } from '@/components/share/SharedWithMeSection'
 import { ShareHostIndicator } from '@/components/sidebar/ShareHostIndicator'
+import { HandsFreePill } from '@/components/voice/HandsFreePill'
 import { openShareDialog } from '@/lib/shareHostStore'
 import { iconFor } from '@/lib/icons'
 import { focusWorkspaceConsole } from '@/lib/focusWorkspace'
@@ -696,6 +697,7 @@ export function Sidebar() {
 
       {/* Shared with me (app 2.4.0): joined shares, never workspaces of this store. */}
       {show('sharedWithMe') && <SharedWithMeSection />}
+      <HandsFreePill />
       {show('shareIndicator') && <ShareHostIndicator />}
       {show('remoteIndicator') && <RemoteIndicator />}
       {show('usageBars') && <UsageBars />}

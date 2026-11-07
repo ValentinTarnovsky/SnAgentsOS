@@ -26,6 +26,7 @@ export type CategoryId =
   | 'remote'
   | 'share'
   | 'git'
+  | 'voice'
   | 'labs'
   | 'updates'
   | 'about'
@@ -53,6 +54,7 @@ export const CATEGORY_ORDER: CategoryId[] = [
   'language',
   'data',
   'usage',
+  'voice',
   'labs',
   'updates',
   'about',
@@ -76,6 +78,7 @@ export const CATEGORY_LABEL: Record<CategoryId, MessageKey> = {
   remote: 'settings.cat.remote',
   share: 'settings.cat.share',
   git: 'settings.cat.git',
+  voice: 'settings.cat.voice',
   labs: 'settings.cat.labs',
   updates: 'settings.cat.updates',
   about: 'settings.cat.about',
@@ -258,7 +261,31 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('git.worktrees', 'settings.git.worktrees', 'settings.git.worktreesHint', { keywords: ['worktree', 'worktrees', 'orphan', 'huerfano', 'huerfanos', 'branch', 'rama', 'borrar', 'delete'] }),
 
   // Labs (app 2.7.0): opt-in experimental modules, off by default (plain booleans, inline switches).
+  // Voice (app 2.11.0, Labs voice)
+  e('voice.wakeWord', 'settings.voice.wakeWord', 'settings.voice.wakeWordHint', { groupKey: 'settings.voice.handsFree', keywords: ['wake', 'activacion', 'palabra', 'agente', 'agent', 'hands free', 'manos libres', 'voice', 'voz'] }),
+  e('voice.language', 'settings.voice.language', 'settings.voice.languageHint', { groupKey: 'settings.voice.handsFree', keywords: ['language', 'idioma', 'voice', 'voz'] }),
+  e('voice.hotkey', 'settings.voice.hotkey', 'settings.voice.hotkeyHint', { groupKey: 'settings.voice.handsFree', keywords: ['hotkey', 'shortcut', 'atajo', 'global', 'game', 'juego'] }),
+  e('voice.autoOff', 'settings.voice.autoOff', 'settings.voice.autoOffHint', { groupKey: 'settings.voice.handsFree', keywords: ['auto off', 'apagar', 'minutes', 'minutos', 'microphone', 'microfono'] }),
+  e('voice.bareCommands', 'settings.voice.bareCommands', 'settings.voice.bareCommandsHint', { groupKey: 'settings.voice.handsFree', keywords: ['send', 'enviar', 'dictate', 'dictar', 'wake'] }),
+  e('voice.pack', 'settings.voice.pack', 'settings.voice.packHint', { groupKey: 'settings.voice.local', keywords: ['pack', 'paquete', 'supertonic', 'sherpa', 'download', 'descargar', 'local', 'tts'] }),
+  e('voice.voice', 'settings.voice.voice', 'settings.voice.voiceHint', { groupKey: 'settings.voice.local', keywords: ['voice', 'voz', 'male', 'female', 'hombre', 'mujer', 'preview', 'probar'] }),
+  e('voice.speed', 'settings.voice.speed', 'settings.voice.speedHint', { groupKey: 'settings.voice.local', keywords: ['speed', 'velocidad', 'rate'] }),
+  e('voice.volume', 'settings.voice.volume', 'settings.voice.volumeHint', { groupKey: 'settings.voice.local', keywords: ['volume', 'volumen'] }),
+  e('voice.narration', 'settings.voice.narrationOn', 'settings.voice.narrationOnHint', { groupKey: 'settings.voice.narration', keywords: ['narration', 'narracion', 'narrator', 'announce', 'anunciar', 'finished', 'termino'] }),
+  e('voice.announceDone', 'settings.voice.announceDone', undefined, { groupKey: 'settings.voice.narration', keywords: ['done', 'termino', 'finished'] }),
+  e('voice.announceAction', 'settings.voice.announceAction', undefined, { groupKey: 'settings.voice.narration', keywords: ['permission', 'permiso', 'question', 'pregunta', 'plan'] }),
+  e('voice.announceError', 'settings.voice.announceError', undefined, { groupKey: 'settings.voice.narration', keywords: ['error', 'fallo', 'failed'] }),
+  e('voice.summarizer', 'settings.voice.summarizer', 'settings.voice.summarizerHint', { groupKey: 'settings.voice.narration', keywords: ['summary', 'resumen', 'haiku', 'claude'] }),
+  e('voice.muteChimes', 'settings.voice.muteChimes', 'settings.voice.muteChimesHint', { groupKey: 'settings.voice.narration', keywords: ['chime', 'campana', 'aviso'] }),
+  e('voice.engine', 'settings.voice.engine', 'settings.voice.engineHint', { groupKey: 'settings.voice.eleven', keywords: ['engine', 'motor', 'elevenlabs', 'eleven', 'local'] }),
+  e('voice.elevenKey', 'settings.voice.key', 'settings.voice.keyHint', { groupKey: 'settings.voice.eleven', keywords: ['api key', 'key', 'elevenlabs', 'clave'] }),
+  e('voice.elevenVoice', 'settings.voice.voiceId', 'settings.voice.voiceIdHint', { groupKey: 'settings.voice.eleven', keywords: ['voice id', 'voz', 'elevenlabs', 'clone', 'clon'] }),
+  e('voice.elevenModel', 'settings.voice.model', 'settings.voice.modelHint', { groupKey: 'settings.voice.eleven', keywords: ['model', 'modelo', 'flash', 'elevenlabs'] }),
+  e('voice.elevenMode', 'settings.voice.mode', 'settings.voice.modeHint', { groupKey: 'settings.voice.eleven', keywords: ['mode', 'modo', 'fixed', 'fijas', 'credits', 'creditos'] }),
+  e('voice.elevenCap', 'settings.voice.cap', 'settings.voice.capHint', { groupKey: 'settings.voice.eleven', keywords: ['cap', 'tope', 'characters', 'caracteres', 'credits', 'creditos', 'monthly', 'mensual'] }),
+  e('voice.phrases', 'settings.voice.warm', 'settings.voice.warmHint', { groupKey: 'settings.voice.eleven', keywords: ['phrases', 'frases', 'cache', 'generate', 'generar'] }),
   e('labs.consoleChat', 'labs.consoleChat', 'labs.consoleChatHint', { keywords: ['labs', 'experimental', 'beta', 'chat', 'console', 'consola', 'messages', 'mensajes', 'conversation', 'conversacion'], toggle: { path: 'labs.consoleChat' } }),
+  e('labs.voice', 'labs.voice', 'labs.voiceHint', { keywords: ['labs', 'experimental', 'beta', 'voice', 'voz', 'hands free', 'manos libres', 'wake word', 'narration', 'narracion', 'elevenlabs', 'microphone'], toggle: { path: 'labs.voice' } }),
   e('labs.teams', 'labs.teams', 'labs.teamsHint', { keywords: ['labs', 'experimental', 'beta', 'teams', 'team', 'equipos', 'equipo', 'agents', 'agentes', 'roles', 'board', 'tablero', 'tasks', 'tareas'], toggle: { path: 'labs.teams' } }),
 
   // Updates (the status block checks on mount: summary only)

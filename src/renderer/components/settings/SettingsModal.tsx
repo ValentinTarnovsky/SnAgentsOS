@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
-import { Activity, Bell, Bot, Database, DownloadCloud, FlaskConical, Gauge, GitBranch, Info, Keyboard, Languages, Palette, PlugZap, Power, Search, Share2, Smartphone, TerminalSquare, Users, Workflow, Zap, type LucideIcon } from 'lucide-react'
+import { Activity, Bell, Bot, Database, DownloadCloud, FlaskConical, Gauge, GitBranch, Info, Keyboard, Languages, Mic, Palette, PlugZap, Power, Search, Share2, Smartphone, TerminalSquare, Users, Workflow, Zap, type LucideIcon } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { useT, type TFn } from '@/i18n'
 import { Modal } from '@/components/common/Modal'
@@ -39,6 +39,7 @@ import { UpdatesSection } from './sections/UpdatesSection'
 import { AboutSection } from './sections/AboutSection'
 import { GitSection } from './sections/GitSection'
 import { LabsSection } from './sections/LabsSection'
+import { VoiceSection } from './sections/VoiceSection'
 
 const ICONS: Record<CategoryId, LucideIcon> = {
   terminal: TerminalSquare,
@@ -58,6 +59,7 @@ const ICONS: Record<CategoryId, LucideIcon> = {
   remote: Smartphone,
   share: Share2,
   git: GitBranch,
+  voice: Mic,
   labs: FlaskConical,
   updates: DownloadCloud,
   about: Info,
@@ -81,6 +83,7 @@ const SECTIONS: Record<CategoryId, ComponentType> = {
   remote: RemoteSection,
   share: SharingSection,
   git: GitSection,
+  voice: VoiceSection,
   labs: LabsSection,
   updates: UpdatesSection,
   about: AboutSection,

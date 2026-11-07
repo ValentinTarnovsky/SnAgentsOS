@@ -13,6 +13,7 @@ import { translate } from '@/i18n'
 import { toggleChangesPanel } from './changesPanel'
 import { toggleSidePanel } from './sidePanels'
 import { runDictateShortcut } from './dictation'
+import { toggleHandsFree } from './handsFree'
 import { panelKeyOf } from './changes'
 import { sharedOverlayActive } from './shareGuestStore'
 import { closeTeams, openTeams, teamsOverlayActive } from './teamsStore'
@@ -248,6 +249,10 @@ function runAction(id: ActionId): void {
       if (teamsOverlayActive()) closeTeams()
       else if (!quickBlocked() && !s.quickPopoverOpen) openTeams()
       break
+    case 'toggleHandsFree':
+      // App 2.11.0: the scan below skips the key with the Voice lab off.
+      toggleHandsFree()
+      break
   }
 }
 
@@ -318,6 +323,8 @@ export function useGlobalKeys(): void {
           if (id === 'toggleConsoleChat' && !overlay && !consoleChatKeyTarget()) continue
           // Labs teams off: Ctrl+Shift+O is not eaten, it reaches the console (CONTRATOS Atajos).
           if (id === 'teams' && !labOn(useAppStore.getState().settings, 'teams')) continue
+          // Labs voice off: the chord reaches the console too.
+          if (id === 'toggleHandsFree' && !labOn(useAppStore.getState().settings, 'voice')) continue
           e.preventDefault()
           e.stopPropagation()
           if (overlay && PANE_ACTIONS.has(id)) return

@@ -82,6 +82,7 @@ import { CliService } from './cli/CliService'
 import { removeFromUserPath } from './cli/userPath'
 import { registerCliIpc } from './ipc/registerCliIpc'
 import { registerDictationIpc } from './ipc/registerDictationIpc'
+import { registerVoiceIpc, type VoiceIpc } from './ipc/registerVoiceIpc'
 import { registerShareGuestIpc } from './ipc/registerShareGuestIpc'
 import { createShareIdentityStore, type ShareIdentityStore } from './share/identity'
 import type { ShareGuest } from './share/guest/ShareGuest'
@@ -225,6 +226,8 @@ let teamService: TeamService | null = null
 let reviewNotes: ReviewNoteStore | null = null
 // Desktop dictation (app 2.5.0): created in bootstrap; its whisper-server dies on quit.
 let dictationService: DictationService | null = null
+// App 2.11.0 (Labs voice): hands-free voice; created in bootstrap next to dictation, idle with the lab off.
+let voiceIpc: VoiceIpc | null = null
 // Desktop console chat (app 2.7.0, A7): created in bootstrap next to ChatHub; CONFIG_SAVE re-reads its lab.
 let chatIpc: ChatIpc | null = null
 // An NVIDIA GPU (app.getGPUInfo, read once at bootstrap): picks the GPU pack for device 'auto'.
@@ -439,6 +442,8 @@ function registerConfigIpc(): void {
     // v2.5: dictation reads its settings and the workspaces from this cache, never from disk
     // (the renderer saves through a debounce, so a disk read could be stale).
     dictationService?.setConfig(config)
+    // App 2.11.0: labs.voice and settings.voice (off drops the queue, the worker and the hotkey).
+    voiceIpc?.configure(config)
     // App 2.7.0 (A7): labs.consoleChat off drops every desktop chat reader.
     chatIpc?.setConfig(config)
     // App 2.7.0 (E10 B1): labs.teams on loads the teams, off flushes and idles them.
@@ -612,6 +617,13 @@ async function bootstrap(): Promise<void> {
   )
   dictationService = registerDictationIpc({ nvidia: () => nvidiaGpu })
   dictationService.setConfig(configStore.load())
+  voiceIpc = registerVoiceIpc({
+    getConfig: () => configStore.load(),
+    status: statusManager,
+    throttleHold: (on) => remoteManager.setThrottleHold('voice', on),
+    dictationReady: () => dictationService?.packReady ?? false,
+  })
+  voiceIpc.configure(configStore.load())
   void app.getGPUInfo('basic').then(
     (info) => {
       nvidiaGpu = hasNvidiaGpu(info)
@@ -1115,6 +1127,7 @@ app.on('before-quit', () => {
   scrollbackCheckpoint?.stop()
   awakeService?.dispose()
   dictationService?.dispose()
+  voiceIpc?.dispose()
   shareGuest?.dispose()
   accountService?.dispose()
   // The only place the Teams DeadlineTimer is disposed (shutdownSync above only cleared its keys).

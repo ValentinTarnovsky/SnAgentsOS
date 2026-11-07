@@ -20,6 +20,8 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
           statusRuntime: resolve(__dirname, 'src/main/status/statusRuntime.ts'),
+          // App 2.11.0: the local voice engine, run in a utilityProcess (src/main/voice/LocalTts.ts).
+          voiceWorker: resolve(__dirname, 'src/main/voice/ttsWorker.ts'),
           // `snaos` binary (E8-FR-13), run by the shim with ELECTRON_RUN_AS_NODE: Node core only.
           cli: resolve(__dirname, 'src/main/cli/cliEntry.ts'),
         },
