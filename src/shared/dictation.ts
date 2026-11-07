@@ -34,6 +34,9 @@ export const DICTATION_CHUNK_MAX_BYTES = 32000
  *  - unsupported: not Windows x64.
  */
 export const DICTATION_ERRORS = [
+  // App 2.11.0 (hands-free voice): another session holds the engine, or the Voice lab is off.
+  'busy',
+  'disabled',
   'model_missing',
   'vcredist',
   'gpu_failed',

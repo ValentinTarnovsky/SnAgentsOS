@@ -75,7 +75,17 @@ export interface InstallerDeps {
   /** Tests only. */
   idleTimeoutMs?: number
   fsRetryDelaysMs?: readonly number[]
-  catalog?: { assets: Readonly<Record<AssetId, WhisperAsset>>; packs: Readonly<Record<WhisperPackId, readonly AssetId[]>> }
+  /**
+   * Another set of packs (tests; app 2.11.0: the voice pack, `src/main/voice/catalog.ts`).
+   * `packIds`, `extractBytes` and `allowHost` default to Whisper's own.
+   */
+  catalog?: {
+    assets: Readonly<Record<AssetId, WhisperAsset>>
+    packs: Readonly<Record<WhisperPackId, readonly AssetId[]>>
+    packIds?: readonly WhisperPackId[]
+    extractBytes?: Partial<Record<AssetId, number>>
+    allowHost?: (host: string) => boolean
+  }
 }
 
 /** What `remove` needs from the service. */
@@ -185,10 +195,16 @@ export class WhisperInstaller {
   private lastEmitAt = 0
   private readonly assets: Readonly<Record<AssetId, WhisperAsset>>
   private readonly packs: Readonly<Record<WhisperPackId, readonly AssetId[]>>
+  private readonly packIds: readonly WhisperPackId[]
+  private readonly extractBytes: Partial<Record<AssetId, number>>
+  private readonly allowHost: (host: string) => boolean
 
   constructor(private readonly deps: InstallerDeps) {
     this.assets = deps.catalog?.assets ?? ASSETS
     this.packs = deps.catalog?.packs ?? PACKS
+    this.packIds = deps.catalog?.packIds ?? PACK_IDS
+    this.extractBytes = deps.catalog?.extractBytes ?? EXTRACT_BYTES
+    this.allowHost = deps.catalog?.allowHost ?? isAllowedDownloadHost
   }
 
   /** An install (warmup included) or a removal is running. */
@@ -257,7 +273,7 @@ export class WhisperInstaller {
 
   private diskBytes(id: AssetId): number {
     const a = this.assets[id]
-    return a.kind === 'zip' ? (EXTRACT_BYTES[id] ?? a.bytes) : a.bytes
+    return a.kind === 'zip' ? (this.extractBytes[id] ?? a.bytes) : a.bytes
   }
 
   /** The asset's files are on disk: a model with its exact size, a runtime with every member. */
@@ -293,7 +309,7 @@ export class WhisperInstaller {
   /** The installer's part of `dictation:models`; the service adds supported, nvidia, vcRuntime and loaded. */
   status(): Pick<WhisperStatus, 'dataDir' | 'packs' | 'install' | 'warming'> {
     const have = this.installed()
-    const packs: WhisperPackInfo[] = PACK_IDS.map((id) => ({
+    const packs: WhisperPackInfo[] = this.packIds.map((id) => ({
       id,
       installed: this.packInstalled(id, have),
       downloadBytes: this.packs[id].reduce((n, a) => n + this.assets[a].bytes, 0),
@@ -463,7 +479,7 @@ export class WhisperInstaller {
       } catch {
         throw new InstallFail('http', 'url')
       }
-      if (u.protocol !== 'https:' || u.username || u.password || !isAllowedDownloadHost(u.hostname)) throw new InstallFail('http', 'host')
+      if (u.protocol !== 'https:' || u.username || u.password || !this.allowHost(u.hostname)) throw new InstallFail('http', 'host')
       const reqCtrl = new AbortController()
       const onAbort = (): void => reqCtrl.abort()
       signal.addEventListener('abort', onAbort, { once: true })
@@ -722,7 +738,7 @@ export class WhisperInstaller {
       }
       const have = this.installed()
       const keep = new Set<AssetId>()
-      for (const other of PACK_IDS) if (other !== pack && this.packInstalled(other, have)) for (const id of this.packs[other]) keep.add(id)
+      for (const other of this.packIds) if (other !== pack && this.packInstalled(other, have)) for (const id of this.packs[other]) keep.add(id)
       const drop = this.packs[pack].filter((id) => !keep.has(id))
       // The record goes first: a file that stays locked is then just a leftover the next install replaces.
       const rec = this.readRecord()
@@ -733,7 +749,7 @@ export class WhisperInstaller {
         await this.retry(() => fsp.rm(this.partPath(id), { force: true }))
       }
       const after = this.installed()
-      if (!PACK_IDS.some((p) => this.isGpuPack(p) && this.packInstalled(p, after))) {
+      if (!this.packIds.some((p) => this.isGpuPack(p) && this.packInstalled(p, after))) {
         await this.retry(() => fsp.rm(this.path('cuda-cache'), { recursive: true, force: true }))
       }
       if (this.last?.pack === pack) this.last = null

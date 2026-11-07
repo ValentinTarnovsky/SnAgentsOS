@@ -439,8 +439,10 @@ async function main() {
   // --- Pure service helpers ------------------------------------------------------------
   const S = load('src/main/dictation/DictationService.ts')
   {
-    check(JSON.stringify(S.normalizeStart({ lang: 'es-AR', paneId: 'p1' })) === '{"lang":"es-AR","paneId":"p1"}', 'a valid request is kept')
-    check(JSON.stringify(S.normalizeStart({ lang: 'es-AR"; calc', paneId: 3, engine: 'cloud' })) === '{"lang":"","paneId":null}' && JSON.stringify(S.normalizeStart(null)) === '{"lang":"","paneId":null}', 'a bad tag is empty (Whisper detects), a bad pane id null, unknown keys ignored')
+    check(JSON.stringify(S.normalizeStart({ lang: 'es-AR', paneId: 'p1' })) === '{"lang":"es-AR","paneId":"p1","handsFree":false}', 'a valid request is kept')
+    check(S.normalizeStart({ mode: 'handsfree' }).handsFree === true && S.normalizeStart({ mode: 'HANDSFREE' }).handsFree === false, 'app 2.11.0: only mode handsfree starts a hands-free session')
+    check(JSON.stringify(S.rosterNamesOf({ activeWorkspaceId: 'w2', workspaces: [{ id: 'w1', name: 'Uno', panes: [{ id: 'a', title: 'API' }] }, { id: 'w2', name: 'Dos', panes: [{ id: 'b', title: 'Pagos' }] }] })) === '["Dos","Pagos","Uno","API"]' && JSON.stringify(S.rosterNamesOf(null)) === '[]', 'rosterNamesOf: the active workspace first, then the others, with their console titles')
+    check(JSON.stringify(S.normalizeStart({ lang: 'es-AR"; calc', paneId: 3, engine: 'cloud' })) === '{"lang":"","paneId":null,"handsFree":false}' && JSON.stringify(S.normalizeStart(null)) === '{"lang":"","paneId":null,"handsFree":false}', 'a bad tag is empty (Whisper detects), a bad pane id null, unknown keys ignored')
     check(S.normalizeStart({ lang: 'auto' }).lang === '' && S.normalizeStart({ paneId: 'x'.repeat(200) }).paneId === null, "'auto' and an over-long pane id")
     check(JSON.stringify(S.paneContextOf(cfg(), 'p1')) === '{"workspace":"MiProyecto","folder":"mi-repo"}' && JSON.stringify(S.paneContextOf(cfg(), 'p2')) === '{"workspace":"MiProyecto","folder":"otro"}', 'prompt context from main\'s config: workspace name and the console folder (pane cwd, else the workspace\'s)')
     check(JSON.stringify(S.paneContextOf(cfg(), 'zz')) === '{}' && JSON.stringify(S.paneContextOf(null, 'p1')) === '{}' && JSON.stringify(S.paneContextOf({ workspaces: 'x' }, 'p1')) === '{}', 'an unknown pane or a broken config gives nothing')
@@ -577,6 +579,32 @@ async function main() {
     await h4.start()
     await h4.c.advance(10 * 60_000 + 100)
     check(h4.events.at(-1).t === 'end' && h4.logs.includes('session max'), 'SESSION_MAX_MS acts like stop')
+  }
+
+  // --- App 2.11.0: hands-free sessions (Labs voice) ----------------------------------------
+  {
+    const off = harness()
+    check(JSON.stringify(await off.start({ lang: 'es', mode: 'handsfree' })) === '{"ok":false,"error":"disabled"}' && off.servers.length === 0, 'hands-free with the Voice lab off answers disabled and starts nothing')
+    const labCfg = { ...cfg(), settings: { ...cfg().settings, labs: { voice: true }, voice: { wakeWord: 'Jarvis' } } }
+    const h = harness({ config: labCfg })
+    const hf = await h.start({ lang: 'es', mode: 'handsfree' }, 1, h.send)
+    check(hf.ok && h.logs.some((l) => /start device=cpu lang=es handsfree/.test(l)), 'with the lab on it starts (logged as handsfree)')
+    check(h.servers[0].infers.length === 0, 'nothing inferred before a phrase')
+    await h.phrase('d1')
+    const prompt = h.servers[0].infers[0]?.p?.prompt ?? ''
+    check(prompt.includes('Jarvis') && prompt.includes('MiProyecto') && !/enviar|consola dos/i.test(prompt), 'its prompt carries the wake word and the roster names, never an example command')
+    await h.c.advance(15 * 60_000)
+    check(h.svc.activeId === 'd1' && !h.logs.includes('session max'), 'no SESSION_MAX_MS: it is still live after 15 minutes')
+    // Hours of audio: the rate budget is a rolling window, so real-time audio is never dropped.
+    for (let i = 0; i < 3; i++) await h.feed('d1', new Int16Array(16000 * 61))
+    check(!h.logs.includes('audio dropped rate'), 'the rolling rate window never drops real-time audio')
+    const manualEvents = []
+    const busyTry = harness({ config: labCfg })
+    await busyTry.start({ lang: 'es-AR', paneId: 'p1' })
+    check(JSON.stringify(await busyTry.start({ lang: 'es', mode: 'handsfree' })) === '{"ok":false,"error":"busy"}' && busyTry.svc.activeId === 'd1', 'hands-free while a manual dictation runs answers busy and leaves it alone')
+    const m = await h.start({ lang: 'es-AR', paneId: 'p1' }, 1, (e) => manualEvents.push(e))
+    const hfEnd = h.events.filter((e) => e.sessionId === 'd1' && e.t === 'end').at(-1)
+    check(m.ok && hfEnd && hfEnd.reason === 'replaced' && h.svc.activeId === m.sessionId, 'a manual start ends the hands-free session with end { reason: replaced }')
   }
 
   // --- Slow start: audio buffered, queue capped -------------------------------------------

@@ -16,7 +16,9 @@ import {
 import { join } from 'path'
 import { packInstalled, resolveEngine, type AssetId, type EnginePlan } from './whisper/catalog'
 import { keptText } from './whisper/hallucination'
-import { buildPrompt, whisperLang } from './whisper/prompt'
+import { buildHandsFreePrompt, buildPrompt, whisperLang } from './whisper/prompt'
+import { labOn } from '@shared/labs'
+import { wakeWordFor, voiceLangOf } from '@shared/voice'
 import { Segmenter } from './whisper/segmenter'
 import { pcmToWav } from './whisper/wav'
 import { FIRST_GPU_REQ_TIMEOUT_MS, sameSpec, type ServerSpec, type ServerStartResult, type WhisperServer } from './whisper/WhisperServer'
@@ -83,6 +85,8 @@ export const HYP_MIN_MS = 800
 export const AUDIO_CTX_CPU = 512
 export const CPU_SHORT_MS = 9500
 export const SESSION_MAX_MS = 10 * 60_000
+/** App 2.11.0: a hands-free session's audio budget window (it has no SESSION_MAX_MS). */
+export const HANDSFREE_RATE_WINDOW_MS = 60_000
 export const GPU_BEAM_SIZE = 5
 /** Closed phrases waiting for the server (slow start): the oldest go first past these caps. */
 export const QUEUE_MAX_SEGMENTS = 8
@@ -111,11 +115,24 @@ export function normalizeDictationSettings(v: unknown): DictationSettings {
 }
 
 /** The start request as main accepts it: a bad tag is '' (Whisper detects the language), a bad pane id is null. */
-export function normalizeStart(req: unknown): { lang: string; paneId: string | null } {
-  const r = req && typeof req === 'object' ? (req as { lang?: unknown; paneId?: unknown }) : {}
+export function normalizeStart(req: unknown): { lang: string; paneId: string | null; handsFree: boolean } {
+  const r = req && typeof req === 'object' ? (req as { lang?: unknown; paneId?: unknown; mode?: unknown }) : {}
   const lang = typeof r.lang === 'string' && r.lang.length <= 35 && DICTATION_LANG_RE.test(r.lang) ? r.lang : ''
   const paneId = typeof r.paneId === 'string' && r.paneId.length > 0 && r.paneId.length <= 128 ? r.paneId : null
-  return { lang, paneId }
+  return { lang, paneId, handsFree: r.mode === 'handsfree' }
+}
+
+/** App 2.11.0: the names a hands-free prompt carries, from main's config: workspaces (the active one's first) and console titles. */
+export function rosterNamesOf(cfg: ConfigFile | null | undefined): string[] {
+  const ws = [...(cfg?.workspaces ?? [])]
+  const active = cfg?.activeWorkspaceId
+  ws.sort((a, b) => (a.id === active ? -1 : b.id === active ? 1 : 0))
+  const out: string[] = []
+  for (const w of ws) {
+    out.push(w.name)
+    for (const p of w.panes) out.push(p.title)
+  }
+  return out
 }
 
 function lastSegment(p: unknown): string | undefined {
@@ -195,6 +212,8 @@ interface Phrase {
 
 interface Session {
   id: string
+  /** App 2.11.0: a hands-free listening session (no max timer, no hyp, rolling rate window). */
+  kind: 'manual' | 'handsfree'
   owner: number
   send: (e: DictationEvt) => void
   /** The request tag ('' when Whisper detects it), echoed in `ready`. */
@@ -210,6 +229,8 @@ interface Session {
   segCount: number
   startedAt: number
   audioBytes: number
+  /** Hands-free only: the start of the current rate window (audioBytes counts from it). */
+  windowAt: number
   rateDropped: boolean
   /** The plan the server runs for this session, once it is up. */
   plan: EnginePlan | null
@@ -285,7 +306,10 @@ export class DictationService {
 
   async start(owner: number, send: (e: DictationEvt) => void, req: unknown): Promise<DictationStartRes> {
     if (!this.supported || this.disposed) return { ok: false, error: 'unsupported' }
-    const { lang, paneId } = normalizeStart(req)
+    const { lang, paneId, handsFree } = normalizeStart(req)
+    if (handsFree && !labOn(this.config?.settings, 'voice')) return { ok: false, error: 'disabled' }
+    // A manual dictation keeps the engine: hands-free waits until it ends.
+    if (handsFree && this.session && this.session.phase !== 'ended' && this.session.kind === 'manual') return { ok: false, error: 'busy' }
     let vc = false
     try {
       vc = await this.deps.vcRuntime()
@@ -309,7 +333,7 @@ export class DictationService {
       this.log('start error=model_missing')
       return { ok: false, error: 'model_missing' }
     }
-    if (this.session) this.finish(this.session)
+    if (this.session) this.finish(this.session, !handsFree && this.session.kind === 'handsfree' ? 'replaced' : undefined)
     this.clearIdle()
 
     let primary = r.primary
@@ -325,23 +349,28 @@ export class DictationService {
 
     const wl = lang ? whisperLang(lang) : 'auto'
     const appLang: Language = this.config?.settings?.language === 'es' ? 'es' : 'en'
-    const prompt = buildPrompt(wl, { ...paneContextOf(this.config, paneId), vocabulary: settings.vocabulary, appLang })
+    const prompt = handsFree
+      ? buildHandsFreePrompt(wl, { wake: wakeWordFor(this.config?.settings?.voice?.wakeWord, voiceLangOf(this.config?.settings?.voice?.language, appLang)), names: rosterNamesOf(this.config), vocabulary: settings.vocabulary, appLang })
+      : buildPrompt(wl, { ...paneContextOf(this.config, paneId), vocabulary: settings.vocabulary, appLang })
     const id = this.deps.newId?.() ?? `dict-${Date.now().toString(36)}-${++this.seq}`
     const s: Session = {
-      id, owner, send, reqLang: lang, lang: wl, prompt, phase: 'live',
+      id, kind: handsFree ? 'handsfree' : 'manual', owner, send, reqLang: lang, lang: wl, prompt, phase: 'live',
       seg: null as unknown as Segmenter,
-      queue: [], queuedMs: 0, segCount: 0, startedAt: this.now(), audioBytes: 0, rateDropped: false,
+      queue: [], queuedMs: 0, segCount: 0, startedAt: this.now(), audioBytes: 0, windowAt: this.now(), rateDropped: false,
       plan: null, fallback, ready: false, recovering: false, gpuTimeouts: 0, cpuRestarts: 0,
       drainTimer: null, maxTimer: null, hypTimer: null,
     }
     s.seg = new Segmenter((pcm, ms) => this.onPhrase(s, pcm, ms))
-    s.maxTimer = setTimeout(() => {
-      s.maxTimer = null
-      this.log('session max')
-      this.stop(s.id)
-    }, SESSION_MAX_MS)
+    // A hands-free session runs until it is turned off (the renderer, the lab, auto-off in VoiceService).
+    if (!handsFree) {
+      s.maxTimer = setTimeout(() => {
+        s.maxTimer = null
+        this.log('session max')
+        this.stop(s.id)
+      }, SESSION_MAX_MS)
+    }
     this.session = s
-    this.log(`start device=${primary.device} lang=${wl}`)
+    this.log(`start device=${primary.device} lang=${wl}${handsFree ? ' handsfree' : ''}`)
     void this.boot(s, primary, fallback, reported)
     return { ok: true, sessionId: id }
   }
@@ -353,7 +382,12 @@ export class DictationService {
     const samples = pcmChunk(pcm)
     if (!samples) return
     const n = samples.byteLength
-    if (s.audioBytes + n > (this.now() - s.startedAt + RATE_SLACK_MS) * BYTES_PER_MS) {
+    // Hands-free runs for hours: its budget is counted over rolling 60 s windows, not since the start.
+    if (s.kind === 'handsfree' && this.now() - s.windowAt >= HANDSFREE_RATE_WINDOW_MS) {
+      s.windowAt = this.now()
+      s.audioBytes = 0
+    }
+    if (s.audioBytes + n > (this.now() - (s.kind === 'handsfree' ? s.windowAt : s.startedAt) + RATE_SLACK_MS) * BYTES_PER_MS) {
       if (!s.rateDropped) this.log('audio dropped rate')
       s.rateDropped = true
       return
@@ -575,7 +609,7 @@ export class DictationService {
     s.ready = true
     this.log(`ready engine=${plan.device}${reported ? ' fallback=gpu_failed' : ''}`)
     this.emit(s, { t: 'ready', engine: plan.device, ...(s.reqLang ? { lang: s.reqLang } : {}), ...(reported ? { fallback: 'gpu_failed' as const } : {}) })
-    if (plan.device === 'gpu' && s.phase === 'live') this.armHyp(s)
+    if (plan.device === 'gpu' && s.phase === 'live' && s.kind === 'manual') this.armHyp(s)
     this.pump()
   }
 
@@ -816,7 +850,7 @@ export class DictationService {
   }
 
   /** The session is over: one `end`, last; queued phrases are dropped; the idle timer starts. */
-  private finish(s: Session): void {
+  private finish(s: Session, reason?: 'replaced'): void {
     if (s.phase === 'ended') return
     s.phase = 'ended'
     s.ready = false
@@ -828,8 +862,8 @@ export class DictationService {
     s.drainTimer = null
     s.maxTimer = null
     if (this.session === s) this.session = null
-    this.log('end')
-    this.emit(s, { t: 'end' })
+    this.log(reason ? `end ${reason}` : 'end')
+    this.emit(s, { t: 'end', ...(reason ? { reason } : {}) })
     this.armIdle()
   }
 
@@ -865,6 +899,11 @@ export class DictationService {
     }
   }
 
+  /** App 2.11.0: a pack is installed, so a session could start (hands-free tells the user when not). */
+  get packReady(): boolean {
+    return resolveEngine(this.settings, this.installedSafe(), this.nvidiaSafe(), this.gpuBroken).ok
+  }
+
   private installedSafe(): ReadonlySet<AssetId> {
     try {
       return this.deps.installer.installed()
@@ -885,10 +924,13 @@ export class DictationService {
 /** Rotated at 128 KB; one previous file is kept as dictation.log.1. */
 const LOG_MAX_BYTES = 128 * 1024
 
-/** dataDir()/logs/dictation.log: one timestamped line per event, codes only. Never throws. */
-export function createDictationLog(dataDir: string, now: () => number = Date.now): (line: string) => void {
+/**
+ * dataDir()/logs/dictation.log: one timestamped line per event, codes only. Never throws.
+ * App 2.11.0: `name` gives another log the same format and rotation (voice.log).
+ */
+export function createDictationLog(dataDir: string, now: () => number = Date.now, name = 'dictation.log'): (line: string) => void {
   const dir = join(dataDir, 'logs')
-  const file = join(dir, 'dictation.log')
+  const file = join(dir, name)
   return (line: string) => {
     try {
       mkdirSync(dir, { recursive: true })

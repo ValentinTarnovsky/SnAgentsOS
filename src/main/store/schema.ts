@@ -7,6 +7,7 @@ import { LABS_KEYS, type LabsKey } from '@shared/labs'
 import { DEFAULT_SILENCE, normalizeSilence, SILENCE_QUIET_MIN, SILENCE_STALLED_MIN } from '@shared/silence'
 import { SIDEBAR_BLOCK_KEYS, type SidebarBlockKey } from '@shared/sidebarBlocks'
 import { NOTICE_DELAY_MAX_SEC } from '@shared/noticeDelay'
+import { DEFAULT_VOICE_SETTINGS as DV, VOICE_LIMITS as VL } from '@shared/voice'
 
 export { CONFIG_VERSION }
 
@@ -131,6 +132,50 @@ const blockFlag = () => z.boolean().catch(true).default(true)
 export const sidebarBlocksSettingsSchema = z.object(
   Object.fromEntries(SIDEBAR_BLOCK_KEYS.map((k) => [k, blockFlag()])) as Record<SidebarBlockKey, ReturnType<typeof blockFlag>>,
 )
+
+// Schema 22 (app 2.11.0, Labs voice): hands-free voice. Every field falls back
+// to its own default (a junk value never fails the config or a sibling).
+const intIn = (r: readonly [number, number], d: number) => z.number().int().min(r[0]).max(r[1]).catch(d).default(d)
+const numIn = (r: readonly [number, number], d: number) => z.number().min(r[0]).max(r[1]).catch(d).default(d)
+const flag = (d: boolean) => z.boolean().catch(d).default(d)
+const voiceNarrationSchema = z.object({
+  enabled: flag(DV.narration.enabled),
+  done: flag(DV.narration.done),
+  action: flag(DV.narration.action),
+  error: flag(DV.narration.error),
+  groupMs: intIn(VL.groupMs, DV.narration.groupMs),
+  shortMaxChars: intIn(VL.shortMaxChars, DV.narration.shortMaxChars),
+  summarizer: z.enum(['claude', 'local']).catch(DV.narration.summarizer).default(DV.narration.summarizer),
+  prefetch: flag(DV.narration.prefetch),
+  skipInView: flag(DV.narration.skipInView),
+  muteChimes: flag(DV.narration.muteChimes),
+})
+const voiceTtsSchema = z.object({
+  engine: z.enum(['local', 'elevenlabs']).catch(DV.tts.engine).default(DV.tts.engine),
+  voice: z.enum(['male', 'female']).catch(DV.tts.voice).default(DV.tts.voice),
+  speed: numIn(VL.speed, DV.tts.speed),
+  volume: intIn(VL.volume, DV.tts.volume),
+})
+const voiceElevenSchema = z.object({
+  voiceId: z.string().regex(/^[A-Za-z0-9_-]{0,64}$/).catch(DV.eleven.voiceId).default(DV.eleven.voiceId),
+  model: z.string().regex(/^[A-Za-z0-9_.-]{1,64}$/).catch(DV.eleven.model).default(DV.eleven.model),
+  mode: z.enum(['fixedOnly', 'all']).catch(DV.eleven.mode).default(DV.eleven.mode),
+  monthlyCap: intIn(VL.monthlyCap, DV.eleven.monthlyCap),
+  resetDay: intIn(VL.resetDay, DV.eleven.resetDay),
+  cacheMaxMb: intIn(VL.cacheMaxMb, DV.eleven.cacheMaxMb),
+})
+export const voiceSettingsSchema = z.object({
+  wakeWord: z.string().max(VL.wakeWordMax).regex(/^[\p{L} ]*$/u).catch(DV.wakeWord).default(DV.wakeWord),
+  language: z.enum(['auto', 'es', 'en']).catch(DV.language).default(DV.language),
+  followUpSec: intIn(VL.followUpSec, DV.followUpSec),
+  dictateIdleSec: intIn(VL.dictateIdleSec, DV.dictateIdleSec),
+  bareCommands: flag(DV.bareCommands),
+  autoOffMin: intIn(VL.autoOffMin, DV.autoOffMin),
+  globalHotkey: z.string().max(VL.hotkeyMax).regex(/^[A-Za-z0-9+]*$/).catch(DV.globalHotkey).default(DV.globalHotkey),
+  narration: voiceNarrationSchema.default({}).catch(() => voiceNarrationSchema.parse({})),
+  tts: voiceTtsSchema.default({}).catch(() => voiceTtsSchema.parse({})),
+  eleven: voiceElevenSchema.default({}).catch(() => voiceElevenSchema.parse({})),
+})
 
 // Schema 13 (E3-FR-42). Only `tailscaleServe` exists (manualCert retired, E3-FR-51).
 export const remoteHttpsSettingsSchema = z.object({
@@ -497,6 +542,8 @@ const settingsSchema = z.object({
   labs: labsSettingsSchema.default({}).catch(() => labsSettingsSchema.parse({})),
   // Schema 20 (app 2.8.0): sidebar blocks; a missing or non-object block shows them all.
   sidebarBlocks: sidebarBlocksSettingsSchema.default({}).catch(() => sidebarBlocksSettingsSchema.parse({})),
+  // Schema 22 (app 2.11.0): hands-free voice; a missing or non-object block gives the defaults.
+  voice: voiceSettingsSchema.default({}).catch(() => voiceSettingsSchema.parse({})),
 })
 
 const keyButtonSchema = z.object({
@@ -569,6 +616,8 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * v19 -> v20 (app 2.8.0) is defaults only: notifications.remoteDelaySec.
  * v20 -> v21 (app 2.10.0) is defaults only (no logic): settings.agents.autoYes
  * ('off').
+ * v21 -> v22 (app 2.11.0) is defaults only (no logic): settings.labs.voice
+ * (false) and settings.voice.*.
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)

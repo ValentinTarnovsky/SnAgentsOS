@@ -53,6 +53,7 @@ import { WorktreeLaunchDialog } from '@/components/workspace/WorktreeLaunchDialo
 import { WorktreeCloseDialog } from '@/components/layout/WorktreeCloseDialog'
 import { QuickCommandPopover } from '@/components/workspace/QuickCommandPopover'
 import { NotificationStack } from '@/components/ui/NotificationStack'
+import { HandsFreeDock } from '@/components/voice/HandsFreeDock'
 import { ResumeDialog } from '@/components/agents/ResumeDialog'
 import { AgentsBoard } from '@/components/agents/AgentsBoard'
 import { SharedWorkspaceHost } from '@/components/share/SharedWorkspaceHost'
@@ -267,6 +268,7 @@ export function App() {
       </div>
       {/* Outside AppBody so toasts stay up even if the body fails (E4-FR-03). */}
       <NotificationStack />
+      <HandsFreeDock />
     </I18nProvider>
   )
 }

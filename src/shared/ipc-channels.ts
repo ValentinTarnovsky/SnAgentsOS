@@ -175,6 +175,24 @@ export const CH = {
   DICTATION_CANCEL_INSTALL: 'dictation:cancelInstall', // invoke (WhisperPackId) -> void
   DICTATION_REMOVE: 'dictation:remove', // invoke (WhisperPackId) -> { ok, error? }
   DICTATION_INSTALL_PROGRESS: 'dictation:installProgress', // main -> renderer (WhisperInstallProgress), every window, throttled 4/s
+  // App 2.11.0 (Labs voice): hands-free voice. Desktop IPC only, never on the phone or Share protocols.
+  VOICE_STATUS: 'voice:status', // invoke -> VoiceStatus
+  VOICE_SET_ACTIVE: 'voice:setActive', // invoke (boolean) -> VoiceCmdRes ('disabled' with the lab off)
+  VOICE_ROSTER: 'voice:roster', // send (VoiceRoster), ids checked against main's config
+  VOICE_MODE: 'voice:mode', // send (VoiceMode)
+  VOICE_CMD: 'voice:cmd', // invoke (VoiceCmd) -> VoiceCmdRes (phrase keys and ids only, never text to say)
+  VOICE_PLAY: 'voice:play', // main -> renderer (VoicePlay): s16 PCM, one item at a time
+  VOICE_PLAYED: 'voice:played', // send ({ id, outcome }), renderer -> main
+  VOICE_EVENT: 'voice:event', // main -> renderer (VoiceEvent)
+  VOICE_INSTALL: 'voice:install', // invoke -> { ok, error? } (the one local voice pack)
+  VOICE_CANCEL_INSTALL: 'voice:cancelInstall', // invoke -> void
+  VOICE_REMOVE: 'voice:remove', // invoke -> { ok, error? }
+  VOICE_INSTALL_PROGRESS: 'voice:installProgress', // main -> renderer (VoiceInstallProgress), throttled
+  VOICE_SET_KEY: 'voice:setKey', // invoke (string | null) -> { ok, error? } (the ElevenLabs key; never read back)
+  VOICE_TEST_ELEVEN: 'voice:testEleven', // invoke -> { ok, error?, used?, limit? }
+  VOICE_PREVIEW: 'voice:preview', // invoke -> VoiceCmdRes (a short sample with the voice in force)
+  VOICE_WARM_PHRASES: 'voice:warmPhrases', // invoke ({ dryRun }) -> { ok, phrases, chars, error? }
+  VOICE_CLEAR_CACHE: 'voice:clearCache', // invoke -> void
 
   // Agent behavior settings (settings.agents). awakeDisplay rides here.
   AGENTS_SET_CONFIG: 'agents:setConfig', // send (AgentSettings)

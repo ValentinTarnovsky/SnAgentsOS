@@ -56,6 +56,8 @@ const ERR_KEY: Record<DictationError, MessageKey> = {
   spawn: 'dictation.err.spawn',
   exit: 'dictation.err.exit',
   unsupported: 'dictation.err.unsupported',
+  busy: 'dictation.err.busy',
+  disabled: 'dictation.err.disabled',
 }
 
 /** The text of a dictation error code. */

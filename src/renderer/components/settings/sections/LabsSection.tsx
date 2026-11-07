@@ -4,6 +4,7 @@ import { useTeamsStore } from '@/lib/teamsStore'
 import { useT } from '@/i18n'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { ToggleRow } from '../ui'
+import { stopHandsFree, handsFreeOn } from '@/lib/handsFree'
 
 /**
  * Settings > Labs (app 2.7.0): opt-in experimental modules (settings.labs,
@@ -43,6 +44,17 @@ export function LabsSection() {
         title={t('labs.teams')}
         description={t('labs.teamsHint')}
       />
+      <ToggleRow
+        searchId="labs.voice"
+        checked={labs.voice}
+        onChange={(v) => {
+          if (!v && handsFreeOn()) void stopHandsFree(false)
+          updateSettings({ labs: { ...useAppStore.getState().settings.labs, voice: v } })
+        }}
+        title={t('labs.voice')}
+        description={t('labs.voiceHint')}
+      />
+
       <ConfirmDialog
         open={confirmOff > 0}
         title={t('teams.run.labsOffTitle')}

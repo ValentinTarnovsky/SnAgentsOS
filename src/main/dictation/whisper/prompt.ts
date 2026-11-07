@@ -93,3 +93,35 @@ export function buildPrompt(lang: string, ctx: PromptContext = {}): string {
   const text = oneLine(extra ? `${basePrompt(lang, ctx.appLang)} ${extra}` : basePrompt(lang, ctx.appLang))
   return cutAtWord(text, PROMPT_MAX_CHARS)
 }
+
+export interface HandsFreeContext {
+  /** The wake word in force (wakeWordFor). */
+  wake: string
+  /** Workspace names and console titles, the active workspace's first. */
+  names: readonly string[]
+  vocabulary?: string
+  appLang?: Language
+}
+
+/**
+ * App 2.11.0 (hands-free voice): the prompt of a listening session. The same
+ * base as dictation (so the echo filter still knows it and dictated text
+ * keeps the coding terms), then the wake word and the roster names, never an
+ * example command: Whisper reads its prompt back on near silence, and a
+ * command in it could come back as one the user never said.
+ */
+export function buildHandsFreePrompt(lang: string, ctx: HandsFreeContext): string {
+  const seen = new Set<string>()
+  const names: string[] = []
+  for (const raw of [ctx.wake, ...ctx.names]) {
+    const name = typeof raw === 'string' ? cutAtWord(oneLine(raw), NAME_MAX_CHARS) : ''
+    const key = name.toLowerCase()
+    if (name && !seen.has(key)) {
+      seen.add(key)
+      names.push(name)
+    }
+  }
+  const vocab = cleanVocabulary(ctx.vocabulary ?? '')
+  const extra = [...names, vocab].filter(Boolean).join(', ')
+  return cutAtWord(oneLine(`${basePrompt(lang, ctx.appLang)} ${extra}`), PROMPT_MAX_CHARS)
+}
