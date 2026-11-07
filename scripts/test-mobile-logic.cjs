@@ -57,7 +57,7 @@ export { loadPagePrefs, savePagePrefs } from './src/mobile/src/lib/prefs'
 export { viewedWorkspaceId, paneOpenable, isWorkspaceMounted, homeRows, isUnread, actionCount, waitingPanes, nextWaitingPane, statusMapOf, attentionItems, needsYouPanes, markReadTargets } from './src/mobile/src/lib/workspace'
 export { needsYouRows, needsYouCount } from './src/shared/attention'
 export { planLoadOf } from './src/mobile/src/lib/plan'
-export { statusMarkIds, statusMarkAction, statusMarksSupported } from './src/mobile/src/lib/paneActions'
+export { statusMarkIds, statusMarkAction, statusMarksSupported, wideMarkRead } from './src/mobile/src/lib/paneActions'
 export { withViewed, LAST_VIEWED_MAX } from './src/mobile/src/lib/prefs'
 export { setLang, t } from './src/mobile/src/lib/i18n'
 export { createBackStack } from './src/mobile/src/lib/backStack'
@@ -1135,6 +1135,8 @@ function testAttention(p) {
   check(p.waitingPanes(snap, statuses, null).map(r => r.paneId).join() === 'a1,a2,a4,a5,b1' && p.waitingPanes(snap, statuses, 'a4').map(r => r.paneId).join() === 'a1,a2,a5,b1', 'the waiting pill counts the same set, in workspace order, without the viewed console')
   check(p.nextWaitingPane(snap, statuses, 'a4').paneId === 'a5' && p.nextWaitingPane(snap, statuses, 'b1').paneId === 'a1' && p.nextWaitingPane(snap, statuses, 'a6').paneId === 'b1', 'next waiting walks that set (a needs and a bare needs included), wrapping around')
   check(p.markReadTargets(snap.workspaces[0], statuses).join() === 'a2,a4' && p.markReadTargets(snap.workspaces[1], statuses).join() === 'b3', 'Mark all read: unseen done and error consoles, a muted one included, never a seen or a bare one')
+  check(p.markReadTargets(snap.workspaces[0], statuses, true).join() === 'a1,a2,a4,a5' && p.markReadTargets(snap.workspaces[1], statuses, true).join() === 'b1,b3', 'app 2.10.0 (wide): everything the badge counts, in layout order: the open request, the unseen done and error, the needs and the bare needs, plus a muted done; never the muted request')
+  check(snap.workspaces.every(ws => p.markReadTargets(ws, statuses, true).filter(id => statuses[id]?.muted !== true).length === p.actionCount(ws, statuses)), 'wide: besides a muted done or error, one target per console the workspace badge counts')
   const order = ws => p.homeRows(ws, statuses, {}).map(x => x.id).join()
   check(order(snap.workspaces[0]) === 'a1,a5,a4,a2,a3,a6' && order(snap.workspaces[1]) === 'b1,b4,b2,b3', 'Home rows: a snaos needs not muted ranks with the open requests (got ' + order(snap.workspaces[0]) + ' / ' + order(snap.workspaces[1]) + ')')
 
@@ -1166,6 +1168,9 @@ function testAttention(p) {
   check(ids(statuses.a3) === 'mute,silenceAck,rename,restart,reveal,copyTitle,close' && ids(statuses.a6) === 'unmute,rename,restart,reveal,copyTitle,close', 'a silent one adds Ignore this turn; a muted one offers Unmute')
   check(ids(statuses.b1) === 'rename,restart,reveal,copyTitle,close' && ids(undefined) === 'rename,restart,reveal,copyTitle,close' && p.statusMarkIds(statuses.b1).length === 0, 'a bare status or none gets no marks')
   check(p.paneActionIds({ resumable: true }, { status: statuses.a2, marks: true, rename: false }).join() === 'markRead,mute,restart,restartResume,restartFresh,reveal,copyTitle,close', 'with the resume rows and without Rename')
+  check(!p.wideMarkRead('2.9.3') && p.wideMarkRead('2.10.0') && p.wideMarkRead('dev'), 'the wide Mark as read needs a 2.10.0 desktop')
+  const wide = (status) => p.paneActionIds({}, { status, marks: true, wideRead: true }).join()
+  check(wide(statuses.a1).startsWith('markRead,mute') && wide(statuses.a5).startsWith('markRead,mute') && !wide(statuses.a3).includes('markRead') && wide(statuses.b2).includes('markRead') && wide(statuses.b3).includes('markRead') && !wide(statuses.a6).includes('markRead'), 'wide: Mark as read on an open request and a needs too, any done or error as before; never on a working one or a muted request')
   check(JSON.stringify(p.statusMarkAction('p', 'markRead')) === '{"kind":"markRead","paneId":"p"}' && JSON.stringify(p.statusMarkAction('p', 'mute')) === '{"kind":"mutePane","paneId":"p","muted":true}' && JSON.stringify(p.statusMarkAction('p', 'unmute')) === '{"kind":"mutePane","paneId":"p","muted":false}' && JSON.stringify(p.statusMarkAction('p', 'silenceAck')) === '{"kind":"silenceAck","paneId":"p"}', 'each mark sends its ctl: markRead, mutePane true / false, silenceAck')
 
   // The plan sheet's outcomes.

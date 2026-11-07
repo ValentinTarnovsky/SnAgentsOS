@@ -5,7 +5,7 @@ import { BRAND } from '@shared/brand'
 import { effectiveProvider } from '@shared/agents'
 import { REPORTS_ONLY_RE } from '@shared/inputReports'
 import type { TuneHint } from '@shared/agentTune'
-import { AGENT_END_REASONS, NEEDS_TEXT_MAX, PLAN_TEXT_MAX, type AgentDetail, type AgentProvider, type AgentRenameEvt, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type ConfigFile, type NotificationSettings, type PaneContext, type PaneNeeds, type PanePlan, type PaneSilence, type PaneStatusEvt, type PaneUsage, type RemotePending } from '@shared/types'
+import { AGENT_END_REASONS, NEEDS_TEXT_MAX, PLAN_TEXT_MAX, type AgentDetail, type AgentProvider, type AgentRenameEvt, type AgentSessionEndEvt, type AgentWaiting, type AttentionReason, type ClaudePaneState, type AutoYesMode, type ConfigFile, type NotificationSettings, type PaneContext, type PaneNeeds, type PanePlan, type PaneSilence, type PaneStatusEvt, type PaneUsage, type RemotePending } from '@shared/types'
 import { addTool, digestLine, emptyDigest, familyOf, toolFamilyKey, type ToolFamily, type TurnDigest } from '@shared/toolActivity'
 import { redactCredentials } from '@shared/redact'
 import { claudeFailure, type FailureInfo } from '@shared/failure'
@@ -17,6 +17,7 @@ import { revealWindow } from '../window/revealWindow'
 import type { BackgroundTasks, HookEvent } from './HookServer'
 import { NOTICE_DIGEST_MAX, type AgentEvent, type StatusNotice } from './events'
 import { SilenceWatch } from './SilenceWatch'
+import { autoYesDecision, autoYesLogLine } from './autoYes'
 import { LIMITS, clip, cleanFailure, firstLine, readLastAssistantMessage, readLastCustomTitle, sanitize } from './statusDetails'
 
 interface PendingEntry {
@@ -31,6 +32,12 @@ interface PendingEntry {
    */
   requestAt: number
   invalidated?: boolean
+  /**
+   * App 2.10.0: the user marked the console read while this request was open
+   * (`markRead`). It stays pending, answerable and in `pending[]`; it only
+   * stops asking for attention. A new request comes in without it.
+   */
+  seen?: boolean
 }
 
 /** App 2.7.0 (A3): a tool call that started and did not finish yet. */
@@ -271,6 +278,9 @@ export class StatusManager implements PtySink {
   readonly id = 'status'
   private readonly panes = new Map<string, PaneTrack>()
   private readonly ptys = new Map<string, string>()
+  /** App 2.10.0: settings.agents.autoYes as setAgentSettings last normalized it. */
+  private autoYesMode: AutoYesMode = 'off'
+  private autoYesLog: ((line: string) => void) | null = null
   private viewed = new Set<string>()
   private cfg: NotificationSettings | null = null
   private promptSequence = 0
@@ -387,14 +397,39 @@ export class StatusManager implements PtySink {
   setConfig(cfg: NotificationSettings): void { this.cfg = cfg }
   /** v2.4: main's wiring to PtyManager.shellMarkOf (the nonce of an integrated pty). */
   setShellMarks(fn: (ptyId: string) => string | undefined): void { this.shellMark = fn }
+  /** App 2.10.0: where an auto-yes answer is logged (autoyes.log; codes only). */
+  setAutoYesLog(fn: ((line: string) => void) | null): void { this.autoYesLog = fn }
+  /**
+   * App 2.10.0 (`settings.agents.autoYes`, HookServer.setDecider): whether main
+   * answers this PermissionRequest itself (autoYesDecision). Only for a console
+   * that is a live pty of the app (its pty id, when the hook sends one, must
+   * match); a `claude -p` sub-session never. Each answer leaves one log line.
+   */
+  autoYesFor(evt: HookEvent): 'allow' | null {
+    const live = this.ptys.get(evt.consoleId)
+    const decision = autoYesDecision({
+      mode: this.autoYesMode,
+      event: evt.name,
+      toolName: evt.toolName,
+      permissionMode: evt.permissionMode,
+      consoleKnown: live !== undefined && (!evt.ptyId || evt.ptyId === live),
+      nested: evt.nested,
+    })
+    if (decision) {
+      try { this.autoYesLog?.(autoYesLogLine(evt.consoleId, evt.toolName ?? '', !!evt.agentId, evt.permissionMode)) } catch { /* logging never blocks the answer */ }
+    }
+    return decision
+  }
   /**
    * v2.4: the agents settings main acts on, pushed at boot and on every config
    * save (a raw `config:save` blob: every field is normalized here). App 2.7.0:
    * `silence` configures the SilenceWatch, which arms nothing before the first
    * call; a change re-judges every silence on show at once.
    */
-  setAgentSettings(agents: { shellAgentDetect?: boolean; silence?: unknown } | null | undefined): void {
+  setAgentSettings(agents: { shellAgentDetect?: boolean; silence?: unknown; autoYes?: unknown } | null | undefined): void {
     this.shellAgentDetect = agents?.shellAgentDetect !== false
+    // App 2.10.0: only an explicit 'bypass' or 'all' turns auto-yes on.
+    this.autoYesMode = agents?.autoYes === 'bypass' || agents?.autoYes === 'all' ? agents.autoYes : 'off'
     if (!this.silenceWatch.configure(normalizeSilence(agents?.silence))) return
     const now = Date.now()
     for (const [paneId, track] of this.panes) {
@@ -528,16 +563,28 @@ export class StatusManager implements PtySink {
     if (before && !this.attentionOf(track, undefined, true)) this.publish(paneId, track)
   }
   /**
-   * App 2.7.0 (A3, `status:markRead`, ctl `markRead`): the user marks a done
-   * or error console read. Acknowledges it like ackPane (attention false,
-   * unless `needs` still asks); false for any other state or no track.
+   * App 2.7.0 (A3, `status:markRead`, ctl `markRead`); app 2.10.0: the user
+   * saw the console, whatever it asks for. A done or error is acknowledged
+   * like ackPane; every open request is marked `seen` (it stays pending and
+   * answerable, the state stays `action`, and a new request asks again); a
+   * `needs` is cleared. So nothing of it is left in needsYouRows until a new
+   * event. False only without a track and without a bare `needs`.
    */
   markRead(paneId: string): boolean {
     const track = this.panes.get(paneId)
-    if (!track) return false
-    const state = this.stateOfTrack(track)
-    if (state !== 'done' && state !== 'error') return false
+    if (!track) return this.bareNeeds.has(paneId) ? this.setNeeds(paneId, null) : false
     this.ackPane(paneId)
+    let changed = false
+    for (const entry of track.pending.values()) {
+      if (entry.invalidated || entry.seen) continue
+      entry.seen = true
+      changed = true
+    }
+    if (track.needs) {
+      this.clearNeeds(paneId, track)
+      changed = true
+    }
+    if (changed) this.publish(paneId, track)
     return true
   }
   /**
@@ -937,6 +984,10 @@ export class StatusManager implements PtySink {
         break
       }
       case 'PermissionRequest':
+        // App 2.10.0: auto-yes answered it in the hook response, so no prompt
+        // shows: no request, no notice, no action (its PreToolUse already told
+        // the tool; PostToolUse ends it).
+        if (evt.autoApproved) break
         // AskUserQuestion and ExitPlanMode also go through a permission prompt
         // (with no tool_use_id): their PreToolUse already registered the request.
         if (!requestId && PROMPT_TOOLS.has(evt.toolName ?? '') && this.hasPendingTool(evt.consoleId, evt.toolName!)) break
@@ -1163,7 +1214,7 @@ export class StatusManager implements PtySink {
         const promoted = !!evt.requestId && track.pending.delete(fallbackId)
         // E2-FR-48: the promoted request is the prompt the fallback stood for;
         // one already answered keeps its mark, so no card comes back for it.
-        track.pending.set(id, { reason: evt.reason ?? 'question', toolName, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions, requestAt: fallback?.requestAt ?? Date.now(), ...(fallback?.invalidated ? { invalidated: true } : {}) })
+        track.pending.set(id, { reason: evt.reason ?? 'question', toolName, summary: clip(evt.summary ?? '', LIMITS.summary), questions: evt.questions, requestAt: fallback?.requestAt ?? Date.now(), ...(fallback?.invalidated ? { invalidated: true } : {}), ...(fallback?.seen ? { seen: true } : {}) })
         if (!promoted) notice = 'action'
         // App 2.7.0 (A3): a permission prompt with its id is that tool, open;
         // the PreToolUse of a prompt tool (plan, question) is one more tool of
@@ -1478,7 +1529,7 @@ export class StatusManager implements PtySink {
     if (track.mutedSeq === track.stateSeq) return false
     if (track.needs && !ignoreNeeds) return true
     if (state === 'action') {
-      for (const entry of track.pending.values()) if (!entry.invalidated) return true
+      for (const entry of track.pending.values()) if (!entry.invalidated && !entry.seen) return true
       return false
     }
     return (state === 'done' || state === 'error') && track.ackedSeq !== track.stateSeq

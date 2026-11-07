@@ -45,6 +45,8 @@ export interface StatusIpc {
  */
 export function registerStatusIpc(statusManager: StatusManager, hookServer: HookServer, codex: CodexBridge, discord: DiscordNotifier, ntfy: NtfyNotifier): StatusIpc {
   hookServer.onEvent((evt) => statusManager.onHookEvent(evt))
+  // App 2.10.0: auto-yes answers a permission prompt in the hook's response.
+  hookServer.setDecider((evt) => statusManager.autoYesFor(evt))
 
   let chain: Promise<unknown> = Promise.resolve()
   /** Port+token the server was last started with (requested port, not bound). */

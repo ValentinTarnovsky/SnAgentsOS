@@ -14,7 +14,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 20
+export const CONFIG_VERSION = 21
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -827,7 +827,17 @@ export interface AgentSettings {
   shellAgentDetect: boolean
   /** Silence watch of working agents (schema 19, app 2.7.0). */
   silence: SilenceSettings
+  /**
+   * Schema 21 (app 2.10.0): main answers Claude Code permission prompts on its
+   * own (a PermissionRequest hook decision), the console's teammates included.
+   * 'bypass' only for a session in bypassPermissions, 'all' in any mode; never
+   * AskUserQuestion or ExitPlanMode. Needs the status hooks.
+   */
+  autoYes: AutoYesMode
 }
+
+/** Schema 21 (app 2.10.0): `settings.agents.autoYes`. */
+export type AutoYesMode = 'off' | 'bypass' | 'all'
 
 /**
  * Silence watch (schema 19, app 2.7.0): a working agent without a signal for

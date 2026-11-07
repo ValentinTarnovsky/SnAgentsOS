@@ -33,6 +33,7 @@ import {
 import { motion } from 'framer-motion'
 import type { AgentPreset, Pane, PaneSchedule, Workspace } from '@shared/types'
 import { labOn } from '@shared/labs'
+import { needsYou } from '@shared/attention'
 import { isScheduleEnabled, paneSchedules } from '@shared/schedule'
 import { useAppStore } from '@/lib/store'
 import { isPaneMounted } from '@/lib/mounting'
@@ -144,7 +145,10 @@ export function PaneCell({
       const st = s.paneStatus[pane.id]
       if (!st || st.bare) return null
       const plan = st.precise ? planRequestOf(st) : null
-      return { state: st.state, muted: st.muted === true, silent: !!st.silence, plan: !!plan, planId: plan?.requestId, planSummary: plan?.summary ?? '' }
+      // App 2.10.0: "Marcar leido" whenever the shared rule counts it (the badge's set), and on
+      // any done or error as before (a muted one may be unread under the mute).
+      const readable = st.state === 'done' || st.state === 'error' || needsYou({ paneId: pane.id, workspaceId: '', status: st, marked: !!s.paneAttention[pane.id] })
+      return { state: st.state, muted: st.muted === true, silent: !!st.silence, plan: !!plan, planId: plan?.requestId, planSummary: plan?.summary ?? '', readable }
     }),
   )
   const connections = useAppStore((s) => s.connections)
@@ -318,9 +322,10 @@ export function PaneCell({
     requestAnimationFrame(() => focusPane(target))
   }
 
-  // App 2.7.0 (A6): main acknowledges only a done or error console (status:markRead);
+  // App 2.7.0 (A6; app 2.10.0: whatever makes it need you): main clears an unseen
+  // done or error, an open request's attention and a `needs` (status:markRead);
   // the renderer's own mark (paneAttention, snaos notify) goes with it.
-  const readable = agentStatus?.state === 'done' || agentStatus?.state === 'error'
+  const readable = agentStatus?.readable === true
   const markRead = (): void => {
     useAppStore.getState().clearPaneAttention(pane.id)
     void window.snApi.status.markRead(pane.id).catch(() => false)

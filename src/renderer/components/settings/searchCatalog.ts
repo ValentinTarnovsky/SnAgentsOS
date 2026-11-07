@@ -140,6 +140,7 @@ export const SETTINGS_CATALOG: SettingSearchEntry[] = [
   e('terminal.dictationHeaderButton', 'settings.dictation.headerButton', 'settings.dictation.headerButtonHint', { groupKey: 'settings.dictation.group', keywords: ['dictation', 'dictado', 'microphone', 'microfono', 'mic', 'header', 'encabezado'], toggle: { path: 'dictation.headerButton' } }),
 
   // Agents
+  e('agents.autoYes', 'settings.agents.autoYes', 'settings.agents.autoYesHint', { groupKey: 'settings.agents.behavior', keywords: ['auto yes', 'autoyes', 'auto-yes', 'permission', 'permiso', 'approve', 'aprobar', 'bypass', 'yes', 'si', 'prompt', 'night', 'noche', 'rm'] }),
   e('agents.resume', 'settings.agents.resume', 'settings.agents.resumeHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'session', 'sesion', 'chat', 'restart', 'reinicio'] }),
   e('agents.resumeTimeout', 'settings.agents.resumeTimeout', 'settings.agents.resumeTimeoutHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'countdown', 'cuenta regresiva', 'timeout', 'dialog', 'aviso', 'modal'] }),
   e('agents.resumeNudge', 'settings.agents.resumeNudge', 'settings.agents.resumeNudgeHint', { groupKey: 'settings.agents.behavior', keywords: ['resume', 'retomar', 'nudge', 'continue', 'continuar', 'seguir'] }),
