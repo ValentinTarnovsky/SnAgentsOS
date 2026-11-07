@@ -159,6 +159,7 @@ const DEFAULT_SETTINGS: Settings = {
     syncAgentRename: true,
     shellAgentDetect: true,
     silence: { ...DEFAULT_SILENCE },
+    autoYes: 'off',
   },
   automation: {
     defaultAgentPresetId: '',

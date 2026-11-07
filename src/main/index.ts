@@ -55,6 +55,7 @@ import type { ExitTrigger } from '@shared/agents'
 import { RemoteManager } from './remote/RemoteManager'
 import { StatusManager } from './status/StatusManager'
 import { HookServer } from './status/HookServer'
+import { createAutoYesLog } from './status/autoYesLog'
 import { CodexBridge } from './status/CodexBridge'
 import { ConsoleLedger } from './usage/ConsoleLedger'
 import { statusBinDir } from './pty/shellResolver'
@@ -1038,6 +1039,8 @@ async function bootstrap(): Promise<void> {
   // v2.4: on by default (schema 17), a first run without a config included.
   await codexBridge.configure(startupCfg?.settings.notifications.codexEnabled ?? true)
   statusManager.setAgentSettings(startupCfg?.settings.agents)
+  // App 2.10.0: auto-yes answers land in dataDir()/logs/autoyes.log (codes only).
+  statusManager.setAutoYesLog(createAutoYesLog(dataDir()))
   // snaos CLI: shim, skill refresh and PATH first; switched on before the first console spawns.
   registerCliIpc(cliService)
   cliService.init()

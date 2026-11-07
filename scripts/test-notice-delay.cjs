@@ -228,7 +228,7 @@ function schemaChecks() {
   const { notificationSettingsSchema, sidebarBlocksSettingsSchema, CONFIG_VERSION } = load('src/main/store/schema.ts')
   const { SIDEBAR_BLOCK_KEYS, DEFAULT_SIDEBAR_BLOCKS, sidebarBlockOn } = load('src/shared/sidebarBlocks.ts')
   const { normalizeNoticeDelay, NOTICE_DELAY_MAX_SEC } = load('src/shared/noticeDelay.ts')
-  check(CONFIG_VERSION === 20, 'schema 20')
+  check(CONFIG_VERSION >= 20, 'schema 20 or later')
   check(notificationSettingsSchema.parse({}).remoteDelaySec === 0, 'remoteDelaySec defaults to 0')
   check(notificationSettingsSchema.parse({ remoteDelaySec: 120 }).remoteDelaySec === 120, 'remoteDelaySec keeps 120')
   for (const junk of [-1, 1.5, 'x', 99999, null]) check(notificationSettingsSchema.parse({ remoteDelaySec: junk }).remoteDelaySec === 0, `remoteDelaySec junk ${JSON.stringify(junk)} falls back to 0`)

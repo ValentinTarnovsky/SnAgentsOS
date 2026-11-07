@@ -1368,7 +1368,7 @@ function testStatusIpc() {
     ackSilence: (p) => { calls.push(['ackSilence', p]); return answers.ackSilence },
     planOf: (p, r) => { calls.push(['planOf', p, r]); return plan },
   }
-  mod.exports.registerStatusIpc(manager, { onEvent() {} }, {}, {}, {})
+  mod.exports.registerStatusIpc(manager, { onEvent() {}, setDecider() {} }, {}, {}, {})
   const [markRead, mute, silenceAck, planOf] = ['status:markRead', 'status:mute', 'status:silenceAck', 'status:plan'].map(ch => handlers[ch])
   check([markRead, mute, silenceAck, planOf].every(fn => typeof fn === 'function'), 'registerStatusIpc handles status:markRead, status:mute, status:silenceAck and status:plan')
 

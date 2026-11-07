@@ -12,7 +12,8 @@
  * or Unmute, and Ignore this turn while its agent is silent.
  */
 import type { RemoteCtlAction, RemotePaneInfo, RemotePaneStatus } from '@shared/remote-protocol'
-import { APP_2_7_0, appVersionAtLeast } from '@shared/agentTune'
+import { APP_2_10_0, APP_2_7_0, appVersionAtLeast } from '@shared/agentTune'
+import { needsYou } from '@shared/attention'
 
 export type StatusMarkId = 'markRead' | 'mute' | 'unmute' | 'silenceAck'
 
@@ -24,6 +25,8 @@ export interface PaneActionOpts {
   status?: RemotePaneStatus
   /** App 2.7.0: the desktop handles markRead, mutePane and silenceAck (statusMarksSupported). */
   marks?: boolean
+  /** App 2.10.0: its markRead clears anything that needs the user (wideMarkRead). */
+  wideRead?: boolean
 }
 
 /** The desktop handles the status mark ctls (app 2.7.0). */
@@ -31,18 +34,29 @@ export function statusMarksSupported(appVersion: string | undefined): boolean {
   return appVersionAtLeast(appVersion, APP_2_7_0)
 }
 
-/** The status marks of one console; none without an agent status (a bare `snaos needs` included). */
-export function statusMarkIds(status: RemotePaneStatus | undefined): StatusMarkId[] {
+/** The desktop's markRead clears an open request's attention and a `needs` too (app 2.10.0). */
+export function wideMarkRead(appVersion: string | undefined): boolean {
+  return appVersionAtLeast(appVersion, APP_2_10_0)
+}
+
+/**
+ * The status marks of one console; none without an agent status (a bare
+ * `snaos needs` included). "Marcar leido": a done or error; with `wide` (a
+ * desktop >= 2.10.0) also whenever the shared rule says it needs the user.
+ */
+export function statusMarkIds(status: RemotePaneStatus | undefined, wide = false): StatusMarkId[] {
   if (!status || status.bare) return []
   const ids: StatusMarkId[] = []
-  if (status.state === 'done' || status.state === 'error') ids.push('markRead')
+  const finished = status.state === 'done' || status.state === 'error'
+  const readable = finished || (wide && needsYou({ paneId: '', workspaceId: '', status }))
+  if (readable) ids.push('markRead')
   ids.push(status.muted === true ? 'unmute' : 'mute')
   if (status.silence) ids.push('silenceAck')
   return ids
 }
 
 export function paneActionIds(pane: Pick<RemotePaneInfo, 'resumable'>, opts: PaneActionOpts = {}): PaneActionId[] {
-  const ids: PaneActionId[] = opts.marks ? statusMarkIds(opts.status) : []
+  const ids: PaneActionId[] = opts.marks ? statusMarkIds(opts.status, opts.wideRead === true) : []
   if (opts.rename !== false) ids.push('rename')
   ids.push('restart')
   if (pane.resumable === true) ids.push('restartResume', 'restartFresh')

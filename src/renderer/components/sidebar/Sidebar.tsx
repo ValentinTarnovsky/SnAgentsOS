@@ -37,7 +37,8 @@ import { StatusDot } from '@/components/ui/StatusDot'
 import { aggregateStatus, displayStatus } from '@shared/status'
 import type { PaneStatus, Workspace } from '@shared/types'
 import { useAgentStore } from '@/lib/agentStore'
-import { hasUnread, markReadTargets, navInputFrom, workspaceAgents, workspaceNeedsCount } from '@/lib/agentNav'
+import { hasUnread, markReadTargets, navInputFrom, workspaceAgents, workspaceNeedsCount, type NavInput } from '@/lib/agentNav'
+import { toast } from '@/lib/toast'
 import { agentStatusOf } from '@/lib/statusSignals'
 import { formatSince, STATUS_LABEL_KEY } from '@/lib/formatSince'
 import { dropWorkspace, freezeSidebarOrder, releaseSidebarOrder, sidebarOrder, useSidebarFreeze } from '@/lib/sidebarOrder'
@@ -62,17 +63,20 @@ interface MenuState {
 }
 
 /**
- * Workspace menu "Mark all read" (app 2.7.0): main acknowledges every done
- * and error console of it, muted ones included (status:markRead; main
- * ignores any other state and one already seen), and the local marks of its
- * consoles are cleared.
+ * Workspace menu "Mark all read" (app 2.7.0; app 2.10.0: everything its badge
+ * counts): main clears each console that needs the user (status:markRead: a
+ * done or error is acknowledged, an open request stops asking, a `needs` is
+ * cleared) and the local marks of its consoles go. One toast when main
+ * refuses any (the console went away meanwhile).
  */
-function markWorkspaceRead(wsId: string): void {
+function markWorkspaceRead(ws: Workspace, input: NavInput, failed: string): void {
+  const targets = markReadTargets(ws, input)
   const s = useAppStore.getState()
-  const ws = s.workspaces.find((w) => w.id === wsId)
-  if (!ws) return
-  for (const id of markReadTargets(ws, s.paneStatus)) void window.snApi.status.markRead(id).catch(() => {})
   for (const p of ws.panes) s.clearPaneAttention(p.id)
+  if (!targets.length) return
+  void Promise.all(targets.map((id) => window.snApi.status.markRead(id).catch(() => false))).then((oks) => {
+    if (oks.some((ok) => !ok)) toast.warning(failed, { dedupeKey: `markRead:${ws.id}` })
+  })
 }
 
 /** DataTransfer type of a workspace row being dragged to reorder. */
@@ -284,7 +288,7 @@ export function Sidebar() {
 
   const menuItems = (wsId: string): ContextMenuItem[] => {
     const ws = workspaces.find((w) => w.id === wsId)
-    const unread = !!ws && hasUnread(ws, paneStatus, paneAttention)
+    const unread = !!ws && hasUnread(ws, navInput)
     return [
       {
         label: ws?.favorite ? t('ctx.unfavorite') : t('ctx.favorite'),
@@ -295,13 +299,13 @@ export function Sidebar() {
       { label: t('note.menu'), icon: StickyNote, onClick: () => setNotePopover(menu ? { ...menu, wsId } : { x: 80, y: 80, wsId }) },
       // Share (app 2.4.0, item 8): the Share dialog on the whole workspace.
       { label: t('shareHost.menu.shareWorkspace'), icon: Share2, onClick: () => openShareDialog({ kind: 'workspace', workspaceId: wsId }) },
-      // App 2.7.0: acknowledge every finished console at once (disabled with nothing unread).
+      // App 2.7.0: clear the workspace badge at once (app 2.10.0: all it counts; disabled at 0).
       {
         label: t('workspace.menu.markAllRead'),
         icon: CheckCheck,
         disabled: !unread,
         hint: unread ? undefined : t('workspace.menu.nothingUnread'),
-        onClick: () => markWorkspaceRead(wsId),
+        onClick: () => { if (ws) markWorkspaceRead(ws, navInput, t('workspace.menu.markReadFailed')) },
       },
       // Per-repo .snagentsos.json (E8-FR-26/27): reload only for a workspace made or exported with one.
       ...(ws?.cwd

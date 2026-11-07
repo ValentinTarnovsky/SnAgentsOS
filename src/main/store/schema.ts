@@ -75,6 +75,8 @@ export const agentSettingsSchema = z.object({
   shellAgentDetect: z.boolean().catch(true).default(true),
   // Schema 19 (app 2.7.0, A3).
   silence: silenceSettingsSchema.default({}).catch(() => silenceSettingsSchema.parse({})),
+  // Schema 21 (app 2.10.0): auto-yes to permission prompts; opt-in, junk falls back to off.
+  autoYes: z.enum(['off', 'bypass', 'all']).catch('off').default('off'),
 })
 
 // Schema 12 (E8-FR-08/09).
@@ -564,6 +566,9 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * unknown key) and its next save loses them, so after a downgrade only
  * config.json.bak and backups/ still hold them. Idempotent: a second parse
  * changes nothing.
+ * v19 -> v20 (app 2.8.0) is defaults only: notifications.remoteDelaySec.
+ * v20 -> v21 (app 2.10.0) is defaults only (no logic): settings.agents.autoYes
+ * ('off').
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)

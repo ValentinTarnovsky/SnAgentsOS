@@ -29,7 +29,7 @@ import { StatusIndicator } from './StatusIndicator'
 import { store, useRemoteStore } from '../lib/store'
 import { client } from '../lib/client'
 import { PaneIcon } from '../lib/paneIcon'
-import { paneActionIds, restartAction, statusMarkAction, statusMarksSupported, type PaneActionId, type StatusMarkId } from '../lib/paneActions'
+import { paneActionIds, restartAction, statusMarkAction, statusMarksSupported, wideMarkRead, type PaneActionId, type StatusMarkId } from '../lib/paneActions'
 import { agentStatusOf } from '../lib/statusText'
 import type { PaneRef } from '../lib/workspace'
 import { t, type MobileMessageKey } from '../lib/i18n'
@@ -138,12 +138,13 @@ export function usePaneActionItems(
   })
   const status = useRemoteStore((s) => (ref ? s.paneStatus[ref.paneId] : undefined))
   const marks = useRemoteStore((s) => statusMarksSupported(s.appVersion))
+  const wideRead = useRemoteStore((s) => wideMarkRead(s.appVersion))
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [renaming, setRenaming] = useState<{ ref: PaneRef; title: string } | null>(null)
 
   const items: ActionItem[] =
     ref && pane
-      ? paneActionIds(pane, { ...opts, status, marks }).map((id) => ({
+      ? paneActionIds(pane, { ...opts, status, marks, wideRead }).map((id) => ({
           id,
           icon: ICON[id],
           label: t(LABEL[id]),

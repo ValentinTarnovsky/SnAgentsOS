@@ -28,7 +28,7 @@ import {useGlobalKeys} from './src/renderer/lib/useGlobalKeys';
 import {registerFocuser, getFocusedPane, setFocusedPane} from './src/renderer/lib/focus';
 import {applyTheme} from './src/renderer/themes/applyTheme';
 window.markReadLog=[];
-window.snApi={platform:'win32',agents:{forget(){},list:async()=>[],startup:async()=>({trigger:null,interrupted:[]}),consumeStartup:async()=>false,onChanged:()=>()=>{},onReady:()=>()=>{}},status:{markRead:async id=>{window.markReadLog.push(id);return true}}};
+window.snApi={platform:'win32',agents:{forget(){},list:async()=>[],startup:async()=>({trigger:null,interrupted:[]}),consumeStartup:async()=>false,onChanged:()=>()=>{},onReady:()=>()=>{}},status:{markRead:async id=>{window.markReadLog.push(id);if(window.markReadAsMain){useAppStore.setState(s=>{const cur=s.paneStatus[id];if(!cur)return {};const {needs,...rest}=cur;return {paneStatus:{...s.paneStatus,[id]:{...rest,attention:false}}}})}return true}}};
 const now=Date.now(), M=60000;
 const preset={id:'pc',name:'Claude Code',type:'claude',command:'claude',args:[],color:'#d97757',icon:'claude'};
 const pane=(id,title)=>({id,type:'claude',presetId:'pc',title:title??'Claude Code',color:'#d97757',icon:'claude'});
@@ -252,17 +252,22 @@ app.whenReady().then(async()=>{
  for(let i=0;i<6;i++){await js("smoke.key(null,'J',{ctrlKey:true,shiftKey:true})");await wait(30);mixedWalk.push(await js('smoke.focused()'))}
  ok(mixedWalk.join()==='a1,c1,a2,a3,b2,a1','mixed: Ctrl+Shift+J walks the palette order and wraps',mixedWalk);
 
- // Workspace menu "Marcar todo leído": markRead for every done and error console (the muted a4 included), local marks cleared.
+ // Workspace menu "Marcar todo leído" (app 2.10.0): markRead for every console the badge counts (needs, open request,
+ // unseen done, marked idle, plus the muted error a4), local marks cleared; the stub then answers as main does (attention false, needs gone).
  await js("smoke.set({paneAttention:{...smoke.app().paneAttention,a5:true}})");await frames();
  ok(await js('smoke.badges()')==='wa:4,wb:0,wc:1','a marked idle console counts (wa:4; revealing b2 cleared its mark)',await js('smoke.badges()'));
  await js("smoke.wsMenu('wa')");await frames();
  const markItem=await js("(()=>{const b=smoke.menuItem('Marcar todo leído');return b?{disabled:b.getAttribute('aria-disabled')}:null})()");
  ok(markItem&&markItem.disabled===null,'the workspace menu offers "Marcar todo leído"',markItem);
- await js("window.markReadLog=[];smoke.menuItem('Marcar todo leído').click()");await frames();
+ await js("window.markReadLog=[];window.markReadAsMain=true;smoke.menuItem('Marcar todo leído').click()");await frames();
  const marked=await js("({log:window.markReadLog.join(),att:Object.keys(smoke.app().paneAttention).filter(id=>id.startsWith('a')).join(),menu:!!document.querySelector('[role=menu]'),badges:smoke.badges()})");
- ok(marked.log==='a3,a4'&&marked.att===''&&!marked.menu,'"Marcar todo leído" calls markRead for the done a3 and the muted error a4 (attention false) only and clears the marks of the workspace',marked);
- ok(marked.badges==='wa:3,wb:0,wc:1','without the local mark wa counts its own three again (main acknowledges a3 itself)',marked.badges);
- await js("smoke.set({paneStatus:{...smoke.app().paneStatus,c2:{...smoke.app().paneStatus.c2,attention:false}}})");
+ ok(marked.log==='a1,a2,a3,a4,a5'&&marked.att===''&&!marked.menu,'"Marcar todo leído" calls markRead for the needs a1, the request a2, the done a3, the muted error a4 (unread under the mute) and the marked a5, and clears the marks of the workspace',marked);
+ ok(marked.badges==='wa:0,wb:0,wc:1','once main answers, the wa badge is 0 (other workspaces untouched)',marked.badges);
+ await js("smoke.wsMenu('wa')");await frames();
+ const waItem=await js("(()=>{const b=smoke.menuItem('Marcar todo leído');return b?{disabled:b.getAttribute('aria-disabled')}:null})()");
+ ok(waItem&&waItem.disabled==='true','with the badge at 0 the item is disabled (the muted a4 does not keep it on)',waItem);
+ await js("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))");await frames();
+ await js("window.markReadAsMain=false;smoke.set({paneStatus:{...smoke.app().paneStatus,c1:{...smoke.app().paneStatus.c1,attention:false},c2:{...smoke.app().paneStatus.c2,attention:false}}})");
  await js("smoke.wsMenu('wc')");await frames();
  const wcItem=await js("(()=>{const b=smoke.menuItem('Marcar todo leído');return b?{disabled:b.getAttribute('aria-disabled'),title:b.title}:null})()");
  ok(wcItem&&wcItem.disabled==='true'&&wcItem.title==='No hay nada sin leer en este workspace','with nothing unread the item is disabled and says why',wcItem);
