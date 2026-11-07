@@ -222,8 +222,17 @@ export function actionCount(ws: RemoteWorkspaceInfo, statuses: Record<string, Re
  * not seen yet (`attention` not false), muted ones included (main publishes
  * a muted console with `attention: false`, so it may be unread under the
  * mute). Main's markRead does nothing for one already seen.
+ * App 2.10.0, `wide` (a desktop >= 2.10.0, wideMarkRead): every console the
+ * workspace badge counts (actionCount), so the badge goes to 0: an open
+ * request, a `needs` (a bare one included) and an unseen done or error, plus
+ * a muted done or error as before; main clears each one.
  */
-export function markReadTargets(ws: RemoteWorkspaceInfo, statuses: Record<string, RemotePaneStatus>): string[] {
+export function markReadTargets(ws: RemoteWorkspaceInfo, statuses: Record<string, RemotePaneStatus>, wide = false): string[] {
+  if (wide) {
+    return attentionItems([ws], statuses)
+      .filter((item) => needsYou(item) || (item.status?.muted === true && !item.status.bare && (item.status.state === 'done' || item.status.state === 'error')))
+      .map((item) => item.paneId)
+  }
   return orderedPanes(ws)
     .filter((p) => {
       const st = statuses[p.id]

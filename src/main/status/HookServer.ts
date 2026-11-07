@@ -4,6 +4,7 @@ import { PLAN_TEXT_MAX, type RemotePending } from '@shared/types'
 import { isTuneEffort } from '@shared/agentTune'
 import { fileOfToolInput } from '@shared/toolActivity'
 import { LIMITS, claudeConfigDir, clip, cleanString, extractQuestions, isSafeCwd, isSafeTranscriptPath, sanitize, summarizeRequest, summarizeTool } from './statusDetails'
+import { AUTO_YES_ALLOW_BODY, permissionModeOf, type PermissionMode } from './autoYes'
 
 /** One Claude Code hook event, already attributed to a console. */
 export interface HookEvent {
@@ -75,6 +76,10 @@ export interface HookEvent {
    * (its `currentSessionTitle`), never with the AI title.
    */
   sessionTitle?: string
+  /** App 2.10.0: json.permission_mode, only a known value (PermissionRequest, Stop, PreToolUse...). */
+  permissionMode?: PermissionMode
+  /** App 2.10.0: the HookServer answered this PermissionRequest with an allow (auto-yes): no prompt is shown. */
+  autoApproved?: boolean
 }
 
 /**
@@ -130,9 +135,11 @@ function safeEqual(a: string, b: string): boolean {
  * `http://127.0.0.1:<port>/cc-hook/<token>` plus an X-Console-Id header
  * interpolated from the SNAOS_CONSOLE_ID env var each pty injects.
  *
- * Contract with Claude Code: ALWAYS answer 200 with an empty body. A non-empty
- * body could be parsed as a hook decision and a non-2xx would surface as a
- * hook error inside the user's session, so even malformed requests get 200.
+ * Contract with Claude Code: ALWAYS answer 200, with an empty body (no
+ * decision) except one case: app 2.10.0's auto-yes, where the decider says
+ * 'allow' for a PermissionRequest and the body is AUTO_YES_ALLOW_BODY (a JSON
+ * body is read as a hook decision). A non-2xx would surface as a hook error
+ * inside the user's session, so even malformed requests get 200 (empty).
  *
  * Deliberately separate from RemoteServer: that one is LAN-facing and keeps a
  * "no REST endpoints" invariant; this one never leaves 127.0.0.1.
@@ -142,6 +149,7 @@ export class HookServer {
   private token = ''
   private port = 0
   private listener: ((evt: HookEvent) => void) | null = null
+  private decider: ((evt: HookEvent) => 'allow' | null) | null = null
 
   /** Port actually bound (configured port, or +1 when it was taken). */
   get activePort(): number {
@@ -154,6 +162,15 @@ export class HookServer {
 
   onEvent(cb: (evt: HookEvent) => void): void {
     this.listener = cb
+  }
+
+  /**
+   * App 2.10.0 (auto-yes): asked for every parsed PermissionRequest before the
+   * response goes out; 'allow' answers it (AUTO_YES_ALLOW_BODY) and marks the
+   * event `autoApproved`. A throwing decider is no answer.
+   */
+  setDecider(fn: ((evt: HookEvent) => 'allow' | null) | null): void {
+    this.decider = fn
   }
 
   /** Starts listening on 127.0.0.1; falls back to port+1 once if taken. */
@@ -211,24 +228,42 @@ export class HookServer {
       res.end()
     })
     req.on('end', () => {
-      // Always 200 + empty body (see class comment).
-      res.statusCode = 200
-      res.end()
-      if (overflow) return
-      const consoleId = String(req.headers['x-console-id'] ?? '').trim()
-      // Empty id => a claude launched outside the app; not ours to track.
-      if (!consoleId) return
-      try {
-        const json = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
-        const name = typeof json.hook_event_name === 'string' ? json.hook_event_name : ''
-        if (!name) return
-        const evt = parseHookPayload(consoleId, String(req.headers['x-pty-id'] ?? ''), name, json)
-        if (nestedFromHeaders(req.headers['x-agent-child'], req.headers['x-agent-parent'])) evt.nested = true
-        this.listener?.(evt)
-      } catch {
-        console.warn('[hooks] discarded malformed hook payload')
+      const evt = overflow ? null : this.parse(req, chunks)
+      // Always 200; the body is empty unless auto-yes answers (see class comment).
+      let body = ''
+      if (evt?.name === 'PermissionRequest' && this.decider) {
+        try {
+          if (this.decider(evt) === 'allow') {
+            body = AUTO_YES_ALLOW_BODY
+            evt.autoApproved = true
+          }
+        } catch { /* a decider error is no answer: the prompt shows */ }
       }
+      res.statusCode = 200
+      if (body) {
+        res.setHeader('Content-Type', 'application/json')
+        res.end(body)
+      } else res.end()
+      if (evt) this.listener?.(evt)
     })
+  }
+
+  /** The request's HookEvent, or null (no console id: a claude outside the app; malformed). */
+  private parse(req: IncomingMessage, chunks: Buffer[]): HookEvent | null {
+    const consoleId = String(req.headers['x-console-id'] ?? '').trim()
+    // Empty id => a claude launched outside the app; not ours to track.
+    if (!consoleId) return null
+    try {
+      const json = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+      const name = typeof json.hook_event_name === 'string' ? json.hook_event_name : ''
+      if (!name) return null
+      const evt = parseHookPayload(consoleId, String(req.headers['x-pty-id'] ?? ''), name, json)
+      if (nestedFromHeaders(req.headers['x-agent-child'], req.headers['x-agent-parent'])) evt.nested = true
+      return evt
+    } catch {
+      console.warn('[hooks] discarded malformed hook payload')
+      return null
+    }
   }
 }
 
@@ -252,6 +287,8 @@ export function parseHookPayload(consoleId: string, ptyId: string, name: string,
     agentId: typeof json.agent_id === 'string' ? json.agent_id : undefined,
   }
   if (isSafeCwd(json.cwd)) evt.cwd = json.cwd
+  const permissionMode = permissionModeOf(json.permission_mode)
+  if (permissionMode) evt.permissionMode = permissionMode
   if (sessionId && isSafeTranscriptPath(json.transcript_path, sessionId, claudeDir)) evt.transcriptPath = json.transcript_path
   if (name === 'UserPromptSubmit') evt.prompt = cleanString(json.prompt, LIMITS.text)
   // v2.4: the session's name, wherever Claude sends it.

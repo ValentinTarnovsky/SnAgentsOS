@@ -224,27 +224,31 @@ export function stillWaiting(input: NavInput, id: string): boolean {
 }
 
 /**
- * Workspace menu "Mark all read" (app 2.7.0): every done and error console of
- * the workspace, muted ones included (main publishes a muted console with
- * `attention: false`, so its read state does not show); main's status:markRead
- * acknowledges each one and does nothing for one already seen.
+ * Workspace menu "Mark all read" (app 2.7.0; app 2.10.0: what the badge
+ * counts): the consoles of the workspace that need the user and have a live
+ * status (an unseen done or error, an open request, a `needs`, a `bare` one
+ * included), plus a muted done or error (main publishes it with `attention:
+ * false`, so it may be unread under the mute), in layout order. Main's
+ * status:markRead clears each one; a console with only the local mark (a
+ * shell after `snaos notify`) has no status to clear and is left to
+ * clearPaneAttention.
  */
-export function markReadTargets(ws: Workspace, paneStatus: Record<string, PaneStatus>): string[] {
-  return ws.panes
-    .filter((p) => {
-      const st = paneStatus[p.id]
-      return !!st && (st.state === 'done' || st.state === 'error')
+export function markReadTargets(ws: Workspace, input: NavInput): string[] {
+  return attentionPanes(input, [ws])
+    .filter((item) => {
+      const st = item.status
+      if (!st || st.state == null || item.dormant) return false
+      return needsYou(item) || (st.muted === true && (st.state === 'done' || st.state === 'error'))
     })
-    .map((p) => p.id)
+    .map((item) => item.paneId)
 }
 
 /**
- * Whether "Mark all read" has anything to do: a local mark, or a target not
- * seen yet (`attention` not false) or muted (it may be unread under the mute).
+ * Whether "Mark all read" has anything to do: the workspace badge is not 0.
+ * A muted console never counts (it needs nobody until its state changes).
  */
-export function hasUnread(ws: Workspace, paneStatus: Record<string, PaneStatus>, paneAttention: Record<string, true>): boolean {
-  if (ws.panes.some((p) => !!paneAttention[p.id])) return true
-  return markReadTargets(ws, paneStatus).some((id) => paneStatus[id].attention !== false || paneStatus[id].muted === true)
+export function hasUnread(ws: Workspace, input: NavInput): boolean {
+  return workspaceNeedsCount(ws, input) > 0
 }
 
 /** Presses of "next waiting" this close together walk one frozen list. */

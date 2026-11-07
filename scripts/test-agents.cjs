@@ -493,11 +493,13 @@ function testNavigation() {
     const seen = { ...mixed, paneAttention: {}, paneStatus: { ...mixed.paneStatus, p5: { ...mixed.paneStatus.p5, attention: false }, p2: { ...mixed.paneStatus.p2, attention: false } } }
     check(nav.stillWaiting(seen, 'p5') && nav.stillWaiting(seen, 'p4') && nav.stillWaiting(seen, 'p1') && nav.stillWaiting(seen, 'q2'), 'stillWaiting: a seen done and a seen shell stay on the frozen walk, open asks too')
     check(!nav.stillWaiting(seen, 'p2') && !nav.stillWaiting(seen, 'p3') && !nav.stillWaiting(seen, 'q3') && !nav.stillWaiting(seen, 'r1') && !nav.stillWaiting(seen, 'gone'), 'stillWaiting: an answered action, a muted, an asleep, a working and a closed console drop out')
-    // Workspace menu "Marcar todo leído".
-    check(nav.markReadTargets(wsA, mixed.paneStatus).join() === 'p3,p5' && nav.markReadTargets(wsA, seen.paneStatus).join() === 'p3,p5', 'markReadTargets: every done and error console, muted (attention false) and seen ones included (main ignores the rest), never working, action or a shell')
-    const allSeen = { ...seen.paneStatus, p3: { ...seen.paneStatus.p3, muted: undefined } }
-    check(nav.hasUnread(wsA, mixed.paneStatus, {}) && nav.hasUnread(wsA, seen.paneStatus, {}) && !nav.hasUnread(wsA, allSeen, {}), 'hasUnread: an unseen or a muted done/error enables "Marcar todo leído"; seen ones alone do not')
-    check(!nav.hasUnread(wsC, mixed.paneStatus, {}) && nav.hasUnread(wsC, mixed.paneStatus, { r1: true }), 'hasUnread: a local mark enables it too')
+    // Workspace menu "Marcar todo leído" (app 2.10.0: everything the badge counts, so it goes to 0).
+    check(nav.markReadTargets(wsA, mixed).join() === 'p1,p2,p3,p5', 'markReadTargets: the needs, the open request and the unseen done (the badge set with a live status), plus the muted error (it may be unread under the mute); the status-less marked shell is out (got ' + nav.markReadTargets(wsA, mixed).join() + ')')
+    check(nav.markReadTargets(wsA, seen).join() === 'p1,p3' && nav.markReadTargets(wsB, mixed).join() === 'q2', 'markReadTargets: a seen done and an answered request drop out; asleep and not started never count')
+    const noNeeds = { ...seen, paneStatus: { ...seen.paneStatus, p1: { ...seen.paneStatus.p1, needs: undefined } } }
+    check(nav.hasUnread(wsA, mixed) && nav.hasUnread(wsA, seen) && !nav.hasUnread(wsA, noNeeds), 'hasUnread: the badge is not 0; a muted error alone leaves it disabled (it needs nobody)')
+    check(!nav.hasUnread(wsC, mixed) && nav.hasUnread(wsC, { ...mixed, paneAttention: { r1: true } }) && nav.markReadTargets(wsC, { ...mixed, paneAttention: { r1: true } }).join() === 'r1', 'hasUnread: a local mark enables it too, and a marked console with a status is a target')
+    check(mixed.workspaces.every(w => nav.hasUnread(w, mixed) === nav.workspaceNeedsCount(w, mixed) > 0), 'hasUnread agrees with every badge')
   }
 
   // Next waiting: three in action, three presses walk them, the fourth wraps.

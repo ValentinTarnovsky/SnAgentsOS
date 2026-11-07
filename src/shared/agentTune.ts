@@ -179,6 +179,13 @@ export const APP_2_4_0 = '2.4.0'
 export const APP_2_7_0 = '2.7.0'
 
 /**
+ * First desktop whose `markRead` clears whatever makes a console need the
+ * user (an open request's attention and a `needs` too, not only an unseen
+ * done or error); the phone widens "Marcar leido" with `appVersionAtLeast(v, APP_2_10_0)`.
+ */
+export const APP_2_10_0 = '2.10.0'
+
+/**
  * `appVersion` (authOk) is at least `min`. 'dev' counts as new; an empty or
  * unparsable version as old. Pre-release tags are ignored.
  */

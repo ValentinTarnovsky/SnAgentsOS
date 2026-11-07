@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
-import type { AgentPreset, AgentSettings, AwakeMode, ResumeOnStartup, SilenceSettings } from '@shared/types'
+import type { AgentPreset, AgentSettings, AutoYesMode, AwakeMode, ResumeOnStartup, SilenceSettings } from '@shared/types'
 import { HIBERNATE_MAX_MINUTES, HIBERNATE_MIN_MINUTES, HIBERNATE_SUGGESTED_MINUTES, normalizeIdleMinutes } from '@shared/hibernation'
 import { normalizeSilence, SILENCE_QUIET_MIN, SILENCE_STALLED_MIN } from '@shared/silence'
 import { useAppStore } from '@/lib/store'
@@ -20,6 +20,13 @@ const RESUME_POLICIES: Array<{ policy: ResumeOnStartup; key: MessageKey }> = [
   { policy: 'ask', key: 'settings.agents.resume.ask' },
   { policy: 'auto', key: 'settings.agents.resume.auto' },
   { policy: 'off', key: 'settings.agents.resume.off' },
+]
+
+// App 2.10.0 (schema 21): auto-yes to Claude Code permission prompts.
+const AUTO_YES_MODES: Array<{ mode: AutoYesMode; key: MessageKey }> = [
+  { mode: 'off', key: 'settings.agents.autoYes.off' },
+  { mode: 'bypass', key: 'settings.agents.autoYes.bypass' },
+  { mode: 'all', key: 'settings.agents.autoYes.all' },
 ]
 
 const SIDEBAR_SORTS: Array<{ sort: AgentSettings['sidebarSort']; key: MessageKey }> = [
@@ -183,19 +190,49 @@ function SilenceRows() {
  * nudge (E5-FR-13), keep the PC awake and its display variant (E5-FR-23/24),
  * sidebar agent rows and topic as title (E5-FR-19), the sidebar order
  * (E5-FR-22), Ctrl+1..9 (E5-FR-18), hibernation (E5-FR-25), the Claude
- * cache timer (E5-FR-28) and the silence watch (app 2.7.0).
+ * cache timer (E5-FR-28), the silence watch (app 2.7.0) and auto-yes to
+ * permission prompts (app 2.10.0, first: it needs the hooks integration).
  */
 function BehaviorBlock() {
   const t = useT()
   const awakeMode = useAppStore((s) => s.settings.awakeMode)
   const agents = useAppStore((s) => s.settings.agents)
+  const hooksOn = useAppStore((s) => s.settings.notifications.hooksEnabled)
   const updateSettings = useAppStore((s) => s.updateSettings)
+  const autoYes = agents.autoYes ?? 'off'
 
   return (
     <section className="space-y-4" aria-labelledby="agents-behavior">
       <h4 id="agents-behavior" className={headingCls}>
         {t('settings.agents.behavior')}
       </h4>
+      <SettingRow
+        searchId="agents.autoYes"
+        title={t('settings.agents.autoYes')}
+        description={hooksOn ? t('settings.agents.autoYesHint') : `${t('settings.agents.autoYesHint')} ${t('settings.agents.autoYesNeedsHooks')}`}
+      >
+        <div role="radiogroup" aria-label={t('settings.agents.autoYes')} aria-disabled={!hooksOn || undefined} className="flex flex-wrap gap-2">
+          {AUTO_YES_MODES.map(({ mode, key }) => (
+            <button
+              key={mode}
+              type="button"
+              role="radio"
+              aria-checked={autoYes === mode}
+              data-auto-yes={mode}
+              disabled={!hooksOn}
+              onClick={() => updateSettings({ agents: { ...agents, autoYes: mode } })}
+              className={cn(
+                'rounded-btn border px-3 py-1 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50',
+                autoYes === mode
+                  ? 'border-accent-violet bg-accent-violet text-white'
+                  : 'border-border bg-bg-secondary text-text-primary hover:border-accent-violet/40',
+              )}
+            >
+              {t(key)}
+            </button>
+          ))}
+        </div>
+      </SettingRow>
       <SettingRow searchId="agents.resume" title={t('settings.agents.resume')} description={t('settings.agents.resumeHint')}>
         <div role="radiogroup" aria-label={t('settings.agents.resume')} className="flex flex-wrap gap-2">
           {RESUME_POLICIES.map(({ policy, key }) => (

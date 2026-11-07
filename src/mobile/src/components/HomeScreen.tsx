@@ -47,7 +47,7 @@ import { openHistory } from '../lib/history'
 import { openWsNotes } from '../lib/wsNotes'
 import { openAutomations } from '../lib/automations'
 import { rowShowsTime, STATUS_TICK_MS } from '../lib/statusText'
-import { statusMarksSupported } from '../lib/paneActions'
+import { statusMarksSupported, wideMarkRead } from '../lib/paneActions'
 import { isWorkspaceMounted, markReadTargets, needsYouPanes, type PaneRef } from '../lib/workspace'
 import { t } from '../lib/i18n'
 
@@ -116,6 +116,7 @@ export function HomeScreen(): ReactNode {
   const setScreen = useRemoteStore((s) => s.setScreen)
   const viewedPaneId = useRemoteStore((s) => s.activePaneId)
   const marks = useRemoteStore((s) => statusMarksSupported(s.appVersion))
+  const wideRead = useRemoteStore((s) => wideMarkRead(s.appVersion))
   const [usageOpen, setUsageOpen] = useState(false)
   const [newFor, setNewFor] = useState<{ workspaceId: string | null } | null>(null)
   const [menuFor, setMenuFor] = useState<string | null>(null)
@@ -153,7 +154,8 @@ export function HomeScreen(): ReactNode {
     })
   }
   // App 2.7.0: main acknowledges each one (markRead, handled in main); one toast for any failure.
-  const readTargets = menuWs && marks ? markReadTargets(menuWs, paneStatus) : []
+  // App 2.10.0: with a desktop >= 2.10.0, everything the badge counts (wideRead).
+  const readTargets = menuWs && marks ? markReadTargets(menuWs, paneStatus, wideRead) : []
   const markAllRead = (paneIds: readonly string[]): void => {
     void Promise.all(paneIds.map((paneId) => client.sendCtl({ kind: 'markRead', paneId }))).then((acks) => {
       if (acks.some((res) => !res.ok)) useRemoteStore.getState().setToast(t('toast.actionFailed'))

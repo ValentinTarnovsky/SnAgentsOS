@@ -629,12 +629,12 @@ async function schemaV11Checks() {
     connections: [{ id: 'c1', name: 'SSH', steps: [{ send: 'ssh host', waitFor: 'password:', secret: false }] }],
     keyButtons: [{ id: 'k1', label: 'Esc', seq: '\u001b' }],
   }
-  check(CONFIG_VERSION === 20, 'CONFIG_VERSION is 20 (app 2.8.0)')
+  check(CONFIG_VERSION === 21, 'CONFIG_VERSION is 21 (app 2.10.0)')
   const c = parseConfig(JSON.parse(JSON.stringify(v10)))
   check(c && c.version === CONFIG_VERSION, 'a v10 config parses and is stamped with the current version')
   const st = c.settings
   check(st.awakeMode === 'auto' && st.terminalUnicode11 === true && st.terminalAgentEndChip === true && st.notifications.inAppWhenFocused === true, 'v10 gains awakeMode, terminalUnicode11, terminalAgentEndChip and inAppWhenFocused defaults')
-  check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual', cacheTimer: { enabled: false, ttlMinutes: 5 }, syncAgentRename: true, shellAgentDetect: true, silence: { enabled: true, quietMin: 10, stalledMin: 20 } }), 'v10 gains the settings.agents defaults (v11, v12, v13, v17 and v19 keys)')
+  check(JSON.stringify(st.agents) === JSON.stringify({ resumeOnStartup: 'ask', awakeDisplay: false, sidebarAgentRows: true, topicAsTitle: true, ctrlDigitFocus: true, resumeModalTimeoutSec: 60, resumeNudge: false, resumeNudgeText: '', sidebarSort: 'manual', cacheTimer: { enabled: false, ttlMinutes: 5 }, syncAgentRename: true, shellAgentDetect: true, silence: { enabled: true, quietMin: 10, stalledMin: 20 }, autoYes: 'off' }), 'v10 gains the settings.agents defaults (v11, v12, v13, v17, v19 and v21 keys)')
   check(c.workspaces.every(w => w.agentsCollapsed === undefined && w.panes.every(p => p.lastSession === undefined)), 'agentsCollapsed and lastSession stay absent')
   const same = (a, b) => { if (a === b) return true; if (typeof a !== 'object' || typeof b !== 'object' || !a || !b) return false; return Object.keys(a).every(k => k === 'version' || k === 'snippets' || k === 'schedule' || same(a[k], b[k])) }
   check(same(v10, c), 'every v10 value survives the parse unchanged')
@@ -2038,6 +2038,9 @@ function statusSignalChecks() {
     const { bare: _mark, ...unmarked } = b
     check(toShareStatus(b) === null && toShareStatus(h.st('pane3')) === null && toShareStatus(unmarked)?.state === 'idle', 'Share: a bare status is no status for a guest (the mark alone decides)')
     check(h.manager.snapshot().some(s => s.paneId === 'pane3' && s.needs) && needsYouRows([{ paneId: 'pane3', workspaceId: 'w', status: h.st('pane3') }]).length === 1, 'snapshot carries it and needsYouRows counts it')
+    check(h.manager.markRead('pane3') === true && h.last('pane3').state === null && h.st('pane3') === null, 'app 2.10.0: markRead of a bare needs clears it (drops that status)')
+    check(h.manager.markRead('pane3') === false, 'and is false once nothing is left (no track, no bare needs)')
+    h.manager.setNeeds('pane3', 'again')
     h.manager.setNeeds('pane3', null)
     check(h.last('pane3').state === null && h.st('pane3') === null, 'clearing it drops that status')
     h.manager.setNeeds('pane3', 'x')
@@ -2110,7 +2113,7 @@ function statusSignalChecks() {
     check(h.st().needs === undefined && h.st().sessionId === other, 'a resume of another session clears it')
   }
 
-  // 8. Muted until the state changes; markRead only for done and error.
+  // 8. Muted until the state changes; markRead (app 2.10.0) clears whatever asks for attention.
   {
     const h = rig({ silence: false })
     h.hook('UserPromptSubmit', { prompt: 'x' }); h.done()
@@ -2132,9 +2135,17 @@ function statusSignalChecks() {
     check(h.manager.markRead('pane') === true && h.st().attention === false && h.last().attention === false, 'markRead acknowledges a done')
     check(h.manager.markRead('pane') === true, 'and is true again on a done already read')
     h.hook('UserPromptSubmit', { prompt: 'z' })
-    check(h.manager.markRead('pane') === false && h.st().state === 'working', 'markRead of a working console is false')
+    const quiet = h.events.length
+    check(h.manager.markRead('pane') === true && h.st().state === 'working' && h.events.length === quiet, 'markRead of a working console with nothing to clear is true and publishes nothing')
     h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'q', toolSummary: 'Bash: ls' })
-    check(h.manager.markRead('pane') === false && h.st().attention === true, 'markRead of an action is false (a request is not answered by reading it)')
+    check(h.st().attention === true && h.manager.markRead('pane') === true && h.st().attention === false && h.last().attention === false, 'app 2.10.0: markRead of an action drops its attention')
+    check(h.st().state === 'action' && h.st().pendingCount === 1 && h.st().pending?.length === 1 && h.st().pending[0].id === 'q', 'the request stays open: state action, pendingCount and its answer card kept (a request is not answered by reading it)')
+    check(needsYouRows([{ paneId: 'pane', workspaceId: 'w', status: h.st() }]).length === 0, 'a seen request is out of needsYouRows (the badge goes to 0)')
+    h.hook('PermissionRequest', { toolName: 'Bash', toolUseId: 'q2', toolSummary: 'Bash: pwd' })
+    check(h.st().attention === true && h.st().pendingCount === 2, 'a new request asks for attention again')
+    h.manager.markRead('pane')
+    h.hook('PostToolUse', { toolUseId: 'q2' })
+    check(h.st().attention === false && h.st().pendingCount === 1, 'the seen request left open keeps its attention off')
     h.hook('PostToolUse', { toolUseId: 'q' }); h.hook('StopFailure', { failureCode: 'overloaded' })
     check(h.st().attention === true && h.manager.markRead('pane') === true && h.st().attention === false, 'markRead acknowledges an error')
     check(h.manager.markRead('nope') === false, 'markRead without a track is false')
@@ -2331,8 +2342,8 @@ async function attentionChecks() {
     h.manager.setNeeds('pane2', 'pick the engine')
     h.hook('Stop', { lastAssistantMessage: 'ok' }, 'pane2'); h.flush()
     check(h.last('pane2').notify === true && h.natives.length === 1 && h.flashes.join() === 'true', 'an unseen done with needs open still notifies')
-    check(h.manager.markRead('pane2') === true && h.last('pane2').attention === true && h.last('pane2').needs?.text === 'pick the engine', 'markRead keeps the published attention while needs is open')
-    check(h.natives[0].closed === 1 && h.flashes.join() === 'true,false', 'markRead closes the done toast and stops the flash despite needs')
+    check(h.manager.markRead('pane2') === true && h.last('pane2').attention === false && h.last('pane2').needs === undefined, 'app 2.10.0: markRead clears needs too, so attention goes false')
+    check(h.natives[0].closed === 1 && h.flashes.join() === 'true,false', 'markRead closes the done toast and stops the flash')
     h.hook('UserPromptSubmit', { prompt: 'x' }, 'pane2'); h.tick(1); h.manager.setNeeds('pane2', 'again')
     h.hook('Stop', { lastAssistantMessage: 'ok' }, 'pane2'); h.flush()
     check(h.natives.length === 2 && h.natives[1].closed === 0, 'the next unseen done shows its toast')
@@ -2690,7 +2701,9 @@ function tuneReadbackChecks() {
     const { registerStatusIpc } = load('src/main/ipc/registerStatusIpc.ts', {
       require: id => id === 'electron' ? { ipcMain: { on: (ch, fn) => { handlers[ch] = fn }, handle() {} }, app: { getPath: () => os.tmpdir(), isPackaged: false, getAppPath: () => root } } : require(id),
     })
-    registerStatusIpc(h.manager, { onEvent() {} }, {}, {}, {})
+    let decider = null
+    registerStatusIpc(h.manager, { onEvent() {}, setDecider(fn) { decider = fn } }, {}, {}, {})
+    check(typeof decider === 'function' && decider({ consoleId: 'nope', name: 'PermissionRequest', toolName: 'Bash', permissionMode: 'bypassPermissions' }) === null, 'app 2.10.0: registerStatusIpc hands the HookServer the auto-yes decider (off by default: no answer)')
     const send = handlers['status:tuneHint']
     check(typeof send === 'function', 'registerStatusIpc listens on status:tuneHint')
     send({}, { paneId: 'pane', effort: 'max' })
