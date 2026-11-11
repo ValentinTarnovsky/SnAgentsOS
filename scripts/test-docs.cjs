@@ -4,7 +4,6 @@
 //   - docs/STYLEGUIDE.md: 80 to 140 lines, the 12 numbered sections in order,
 //     mobile tokens, one primary per screen, and state tokens that match the
 //     @theme blocks of the desktop and the mobile CSS.
-//   - CLAUDE.md: at most 60 lines with the rules E4-FR-02 lists.
 //   - THIRD_PARTY_NOTICES.md: a section with the full MIT text of every adapted
 //     project (UPSTREAMS), shipped with the app; an attribution header is well
 //     formed and on line 1.
@@ -196,27 +195,10 @@ function main() {
   assert.deepStrictEqual(desktopTokens, docTokens, 'desktop state tokens match the STYLEGUIDE'); checks++
   assert.deepStrictEqual(mobileTokens, docTokens, 'mobile state tokens match the STYLEGUIDE'); checks++
 
-  // E4-FR-02: CLAUDE.md.
-  const claude = read('CLAUDE.md')
-  check(lineCount(claude) <= 60, `CLAUDE.md has at most 60 lines (${lineCount(claude)})`)
-  check(claude.includes('docs/STYLEGUIDE.md'), 'CLAUDE.md points to the STYLEGUIDE')
-  for (const cmd of ['npm run typecheck', 'npm test', 'npm run test:ui', 'npm run test:mobile']) check(claude.includes(cmd), `verification command ${cmd}`)
-  check(/Enter automatico/.test(claude) && /opt-in/.test(claude), 'no automatic Enter without opt-in')
-  check(/Canvas es el renderer por defecto/.test(claude), 'Canvas default renderer')
+  // xterm stays pinned exact on 5.5.0 (it does not go up to xterm 6).
   const deps = JSON.parse(read('package.json')).dependencies
-  for (const pkg of ['@xterm/xterm', '@xterm/addon-canvas', '@xterm/headless', '@xterm/addon-serialize', '@xterm/addon-unicode11']) check(/^\d+\.\d+\.\d+$/.test(deps[pkg] || ''), `${pkg} pinned exact as CLAUDE.md says (${deps[pkg]})`)
-  check(deps['@xterm/xterm'] === '5.5.0' && claude.includes('5.5.0'), 'xterm stays on 5.5.0')
-  check(claude.includes('CONFIG_VERSION') && /zod/.test(claude), 'CONFIG_VERSION rule')
-  check(/`src\/shared` no importa nada de Node/.test(claude) && /ni del DOM/.test(claude), 'src/shared rule')
-  check(/nunca mata su pty/.test(claude) && /kills son explicitos/.test(claude), 'explicit kills rule')
-  check(claude.includes('dataDir()') && claude.includes('src/main/paths.ts'), 'dataDir() rule')
-  check(claude.includes('src/main/DeadlineTimer.ts') && /setInterval/.test(claude), 'background work at rest rule')
-  for (const u of UPSTREAMS) check(claude.includes(`Adaptado de ${u.name} (MIT)`), `attribution header rule for ${u.name}`)
-  check(claude.includes('--user-data-dir'), 'separate --user-data-dir note')
-  const brand = read('src/shared/brand.ts')
-  const brandValue = key => brand.match(new RegExp(`\\b${key}: '([^']+)'`))[1]
-  for (const key of ['envPrefix', 'cliBin', 'repoConfigFile', 'mobileStoragePrefix']) check(claude.includes(brandValue(key)), `naming convention ${key} = ${brandValue(key)}`)
-  check(claude.includes(`~/.claude/skills/${brandValue('skillDir')}`), 'skill dir naming')
+  for (const pkg of ['@xterm/xterm', '@xterm/addon-canvas', '@xterm/headless', '@xterm/addon-serialize', '@xterm/addon-unicode11']) check(/^\d+\.\d+\.\d+$/.test(deps[pkg] || ''), `${pkg} pinned exact (${deps[pkg]})`)
+  check(deps['@xterm/xterm'] === '5.5.0', 'xterm stays on 5.5.0')
 
   // Notices: one section per upstream with its source and full MIT text, shipped with the app.
   const notices = read('THIRD_PARTY_NOTICES.md')
@@ -274,7 +256,7 @@ function main() {
   check(read('docs/snagentsos/README.md').includes('](FEATURES.md)'), 'docs/snagentsos/README.md links FEATURES.md')
 
   // The docs carry no en/em dash (check-brand covers the repo; fail here with a precise label).
-  for (const file of ['docs/STYLEGUIDE.md', 'CLAUDE.md', 'THIRD_PARTY_NOTICES.md', 'docs/snagentsos/FEATURES.md']) check(!DASH_RE.test(read(file)), `${file} has no en/em dash`)
+  for (const file of ['docs/STYLEGUIDE.md', 'THIRD_PARTY_NOTICES.md', 'docs/snagentsos/FEATURES.md']) check(!DASH_RE.test(read(file)), `${file} has no en/em dash`)
 
   // v2.1 contract amendments (closed by R21-00).
   const contracts = read('docs/snagentsos/CONTRATOS.md')
@@ -296,7 +278,7 @@ function main() {
     check(offenders.length === 0, `${file}: every table row has its header's cell count (escape a pipe in a cell as \\|): ${offenders.join(', ')}`)
   }
 
-  console.log(`PASS: ${checks} docs checks (styleguide, CLAUDE.md, notices of ${UPSTREAMS.length} upstreams, ${adapted} adapted files, ${rows.length} features, contract amendments, ${tables} tables)`)
+  console.log(`PASS: ${checks} docs checks (styleguide, notices of ${UPSTREAMS.length} upstreams, ${adapted} adapted files, ${rows.length} features, contract amendments, ${tables} tables)`)
 }
 
 main()

@@ -7,7 +7,7 @@
  * "insertar". Main says everything out loud (voice:cmd with phrase keys and
  * ids); this file never sends text to say.
  *
- * The Enter rule (CLAUDE.md): the opt-in is the lab, hands-free on and a
+ * The Enter rule: the opt-in is the lab, hands-free on and a
  * spoken send; the precise signal is `userGate` (main refuses `awaiting_user`
  * and holds a late Enter) plus menuPending here. A refusal is said out loud
  * and the buffer is kept.

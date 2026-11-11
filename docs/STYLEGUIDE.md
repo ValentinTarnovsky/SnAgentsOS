@@ -1,7 +1,6 @@
 # Guia de estilo de UI
 
-Reglas de UI y de copy para el desktop (`src/renderer`) y el cliente mobile (`src/mobile`). Es corta a proposito: ante la duda, copiar el componente vecino que ya cumple. Owner: E4. Las reglas de arquitectura viven en `CLAUDE.md`.
-
+Reglas de UI y de copy para el desktop (`src/renderer`) y el cliente mobile (`src/mobile`). Es corta a proposito: ante la duda, copiar el componente vecino que ya cumple. Owner: E4.
 ## 1. Feedback por duracion
 
 | Duracion esperada | Que se muestra |
