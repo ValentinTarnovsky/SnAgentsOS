@@ -88,7 +88,7 @@ export class NarrationQueue {
     this.timer = new DeadlineTimer<string>((key) => this.due(key), deps.timer)
   }
 
-  /** Hands-free is on (nothing is said while it is off). Turning it off drops everything. */
+  /** The voice narrates: hands-free is on, or narration runs without it (2.12.0). Nothing is said while off; turning it off drops everything. */
   setActive(on: boolean): void {
     this.active = on
     if (!on) this.stop(true)
@@ -152,6 +152,32 @@ export class NarrationQueue {
     for (let i = this.items.length - 1; i >= 0; i--) if (all || this.items[i].priority === 0) this.items.splice(i, 1)
     this.notify()
     if (!all) this.pump()
+  }
+
+  /**
+   * App 2.12.0: drops what waits with `tag` and cuts the item being said if
+   * it carries it (a console got a new prompt while its reply was read).
+   * The next item starts.
+   */
+  cancel(tag: string): void {
+    let changed = false
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      if (this.items[i].tag === tag) {
+        this.items.splice(i, 1)
+        changed = true
+      }
+    }
+    const cur = this.current
+    if (cur && cur.item.tag === tag) {
+      cur.ctrl.abort()
+      this.timer.clear('watchdog')
+      this.current = null
+      if (cur.playing) this.deps.stopPlayback()
+      changed = true
+    }
+    if (!changed) return
+    this.notify()
+    this.pump()
   }
 
   /** Says the last played audio again (priority 0, nothing to synthesize). */

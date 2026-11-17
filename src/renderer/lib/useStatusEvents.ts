@@ -3,6 +3,7 @@ import { useAppStore } from '@/lib/store'
 import { useAgentStore } from '@/lib/agentStore'
 import { playStatusSound } from '@/lib/sound'
 import { handsFreeOn } from '@/lib/handsFree'
+import { labOn } from '@shared/labs'
 import { visiblePaneIds } from '@shared/status'
 import { revealPane } from './revealPane'
 import { dismissAgentCardsInView, onAgentStatus } from './agentNotice'
@@ -35,8 +36,12 @@ export function useStatusEvents(): void {
       changed.add(evt.paneId)
       useAppStore.getState().setPaneStatus(evt)
       const cfg = useAppStore.getState().settings.notifications
-      // App 2.11.0: with hands-free on, the voice says it (narration.muteChimes).
-      const quiet = handsFreeOn() && useAppStore.getState().settings.voice?.narration?.muteChimes !== false
+      // App 2.11.0: with hands-free on, the voice says it (narration.muteChimes);
+      // app 2.12.0: also while it narrates without hands-free.
+      const settings = useAppStore.getState().settings
+      const narration = settings.voice?.narration
+      const narrates = handsFreeOn() || (labOn(settings, 'voice') && narration?.enabled !== false && narration?.withoutHandsFree === true)
+      const quiet = narrates && narration?.muteChimes !== false
       if (evt.notify && cfg.sound && !quiet) playStatusSound(cfg.soundId, cfg.volume)
       onAgentStatus(evt)
     })

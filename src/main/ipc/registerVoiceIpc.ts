@@ -1,5 +1,4 @@
 import { spawn } from 'child_process'
-import { readFileSync } from 'fs'
 import { join } from 'path'
 import { BrowserWindow, globalShortcut, ipcMain, net, utilityProcess } from 'electron'
 import { CH } from '@shared/ipc-channels'
@@ -17,6 +16,7 @@ import { resolveAgentCli, spawnTarget } from '../teams/agentCli'
 import { packPaths, voiceDir, voiceInstallerCatalog, VOICE_PACK_ID } from '../voice/catalog'
 import { ElevenLabs, type FetchLike } from '../voice/ElevenLabs'
 import { LocalTts, type WorkerLike } from '../voice/LocalTts'
+import { narratorModOn } from '../voice/narratorMod'
 import { PhraseCache } from '../voice/PhraseCache'
 import { Summarizer } from '../voice/Summarizer'
 import { VoiceService, type VoiceStatusSource } from '../voice/VoiceService'
@@ -35,16 +35,6 @@ export interface VoiceIpc {
   /** CONFIG_SAVE and boot: the lab, the settings and the global hotkey. */
   configure(cfg: ConfigFile | null): void
   dispose(): void
-}
-
-/** narrator@better-claude is on in the user's Claude settings (read only, never written). */
-function narratorModOn(): boolean {
-  try {
-    const raw = JSON.parse(readFileSync(join(claudeConfigDir(), 'settings.json'), 'utf8').replace(/^﻿/, '')) as { enabledPlugins?: Record<string, unknown> }
-    return raw?.enabledPlugins?.['narrator@better-claude'] === true
-  } catch {
-    return false
-  }
 }
 
 function broadcast(channel: string, payload: unknown): void {
@@ -129,7 +119,7 @@ export function registerVoiceIpc(opts: VoiceIpcOptions): VoiceIpc {
     send: (msg) => broadcast(msg.ch === 'play' ? CH.VOICE_PLAY : CH.VOICE_EVENT, msg.payload),
     throttleHold: opts.throttleHold,
     dictationReady: opts.dictationReady,
-    narratorMod: narratorModOn,
+    narratorMod: () => narratorModOn(claudeConfigDir()),
     supported,
     log,
   })

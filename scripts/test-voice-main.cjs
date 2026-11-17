@@ -115,6 +115,18 @@ async function testQueue(Q) {
   q.enqueue({ priority: 2, parts: [{ text: 'fresh', fixed: true }] })
   await settle()
   check(!said.includes('stale') && said.at(-1) === 'fresh', 'stillValid false drops an item when its turn comes')
+  // App 2.12.0: cancel(tag) drops what waits with the tag and cuts the item being said.
+  q.played(played.at(-1).id)
+  await settle()
+  q.enqueue({ priority: 2, tag: 'read:a', parts: [{ text: 'A dice', fixed: false }] })
+  q.enqueue({ priority: 2, tag: 'read:b', parts: [{ text: 'B dice', fixed: false }] })
+  await settle()
+  const stops0 = stops.length
+  q.cancel('read:zzz')
+  check(said.at(-1) === 'A dice' && stops.length === stops0 && q.size === 2, 'cancel with a tag nothing carries changes nothing')
+  q.cancel('read:a')
+  await settle()
+  check(stops.length === stops0 + 1 && said.at(-1) === 'B dice' && q.size === 1, 'cancel cuts the item with that tag (stopPlayback) and the next one starts')
   q.setActive(false)
   check(!q.speaking && q.size === 0 && c.pending() === 0, 'turning off drops everything and leaves no timer')
   // joinAudio and the gap.
@@ -170,7 +182,8 @@ async function testService(V) {
   check(JSON.stringify(off.svc.setActive(true)) === '{"ok":false,"error":"disabled"}' && off.listeners.length === 0, 'lab off: setActive answers disabled and no status listener is added')
   check(JSON.stringify(await off.svc.cmd({ kind: 'status' })) === '{"ok":false,"error":"disabled"}', 'lab off: every command answers disabled')
 
-  const h = voiceService(V)
+  // The 2.11.0 behaviour: announcements only while hands-free is on, names only, never the console in view.
+  const h = voiceService(V, { voice: { narration: { readReplies: false, withoutHandsFree: false, includeInView: false } } })
   check(h.listeners.length === 1, 'lab on: one status listener')
   h.svc.setRoster({ workspaces: [{ id: 'w1', label: 'SnLib', panes: [{ id: 'p1', label: 'API' }, { id: 'p2', label: 'Pagos' }, { id: 'ghost', label: 'X' }] }, { id: 'wx', label: 'Nope', panes: [] }, { id: 'w2', label: 'MineBosh\u0007\n', panes: [{ id: 'p3', label: 'Gens' }] }] })
   check(h.svc.setActive(true).ok && h.sent.some((m) => m.ch === 'hold' && m.on), 'on: holds the renderer unthrottled (a game may be in front)')
@@ -281,6 +294,124 @@ async function testService(V) {
   await settle()
   check(f.synth.map((s) => s.engine).join() === 'elevenlabs,local' && f.sent.some((x) => x.ch === 'event' && x.payload.code === 'elevenFailed'), 'an ElevenLabs failure falls back to the local voice and tells the renderer once')
   check(V.chunk(['a'.repeat(250), 'b'.repeat(250), 'c'], 400).length === 2 && V.cleanLabel('x\u0000y\nz') === 'x y z', 'chunk and cleanLabel')
+}
+
+// App 2.12.0: narrator-like reading (readReplies, withoutHandsFree, includeInView, all on by default).
+async function testNarrator(V) {
+  const st = (paneId, state, extra = {}) => ({ paneId, state, precise: true, notify: true, attention: false, stateSince: 100, ...extra })
+  const holds = (x) => x.sent.filter((m) => m.ch === 'hold').map((m) => m.on).join()
+  const stopsOf = (x) => x.sent.filter((m) => m.ch === 'event' && m.payload.t === 'stopPlayback').length
+  const d = voiceService(V)
+  d.svc.setRoster({ workspaces: [{ id: 'w1', label: 'SnLib', panes: [{ id: 'p1', label: 'API' }, { id: 'p2', label: 'Pagos' }] }, { id: 'w2', label: 'MineBosh', panes: [{ id: 'p3', label: 'Gens' }] }] })
+  check(!d.svc.isActive && d.listeners.length === 1 && holds(d) === '', 'defaults: lab on, hands-free off, nothing held')
+  // Hands-free off, the console in view (attention false): its name and its short reply.
+  d.replies.set('p1', { text: 'Listo, pasa.', turn: 't1' })
+  d.emit(st('p1', 'working', { stateSince: 50 }))
+  d.emit(st('p1', 'done'))
+  check(d.plays().length === 0, 'nothing before the announcement window closes')
+  await d.c.advance(2600)
+  check(d.synth.slice(-2).map((s) => s.text).join(' | ') === 'Terminó API. | Listo, pasa.' && d.plays().length === 1, 'hands-free off, console in view: "Terminó API." and its short reply, in one item (got ' + d.synth.map((s) => s.text).join(' | ') + ')')
+  check(holds(d) === 'true', 'while it speaks the renderer is held unthrottled')
+  await d.playedAll()
+  check(holds(d) === 'true,false' && !d.marked.includes('p1'), 'and let go once said; an automatic reading never marks the console read')
+  // Two consoles together: one item each, in the order they finished; a long reply is summarized.
+  d.replies.set('p3', { text: 'Hice el wipe. Conecté MySQL. Verifiqué hashes. ¿Borro el archivo?', turn: 't2' })
+  d.replies.set('p2', { text: 'Pagado.', turn: 't3' })
+  d.emit(st('p3', 'done', { stateSince: 200 }))
+  d.emit(st('p2', 'done', { stateSince: 210 }))
+  await d.c.advance(2600)
+  check(d.summarizer.calls.length === 1 && d.synth.slice(-2).map((s) => s.text).join(' | ') === 'Terminó Gens. | Resumen corto.' && d.plays().length === 2, 'the first console to finish goes first, its long reply summarized')
+  await d.playedAll()
+  check(d.synth.slice(-2).map((s) => s.text).join(' | ') === 'Terminó Pagos. | Pagado.' && d.plays().length === 3, 'then the next console with its own reply, never two voices')
+  // A new prompt cuts the console's reply short and the next one speaks.
+  d.replies.set('p1', { text: 'Otra respuesta.', turn: 't4' })
+  d.replies.set('p2', { text: 'Segunda.', turn: 't5' })
+  d.emit(st('p1', 'done', { stateSince: 300 }))
+  d.emit(st('p2', 'done', { stateSince: 310 }))
+  await d.c.advance(2600)
+  check(d.synth.at(-1).text === 'Otra respuesta.' && d.plays().length === 4, 'API reads its new reply (its name comes from the phrase cache)')
+  const s0 = stopsOf(d)
+  d.emit(st('p1', 'working', { stateSince: 400 }))
+  await settle()
+  check(stopsOf(d) === s0 + 1 && d.synth.at(-1).text === 'Segunda.' && d.plays().length === 5, 'a new prompt to API cuts its reply (stopPlayback) and Pagos speaks')
+  await d.playedAll()
+  // Asked for by name, a reply replaces the same console's automatic one.
+  d.replies.set('p3', { text: 'Wipe hecho.', turn: 't6' })
+  d.emit(st('p3', 'done', { stateSince: 500 }))
+  await d.c.advance(2600)
+  await d.svc.cmd({ kind: 'read', paneId: 'p3' })
+  await settle()
+  await d.playedAll()
+  check(d.synth.filter((s) => s.text === 'Wipe hecho.').length === 2 && d.plays().length === 7 && d.marked.includes('p3'), '"leé Gens" while its reply plays says it once more, marks it read, and nothing is left to repeat it')
+  // Muted: never.
+  d.emit(st('p2', 'done', { stateSince: 600, muted: true }))
+  await d.c.advance(3000)
+  check(d.plays().length === 7, 'a muted console is never narrated')
+  // includeInView off: only consoles the user does not see.
+  const q = voiceService(V, { voice: { narration: { includeInView: false } } })
+  q.emit(st('p1', 'done'))
+  await q.c.advance(3000)
+  check(q.plays().length === 0, 'includeInView off: the console in view is not narrated')
+  q.emit(st('p1', 'done', { attention: true, stateSince: 150 }))
+  await q.c.advance(3000)
+  check(q.plays().length === 1 && q.synth[0].text === 'Terminó API.', 'one the user does not see still is (the config title without a roster)')
+  // withoutHandsFree off: only while hands-free is on.
+  const w = voiceService(V, { voice: { narration: { withoutHandsFree: false } } })
+  w.emit(st('p1', 'done'))
+  await w.c.advance(3000)
+  check(w.plays().length === 0, 'withoutHandsFree off: nothing is said with hands-free off')
+  w.svc.setActive(true)
+  w.emit(st('p1', 'done', { stateSince: 160 }))
+  await w.c.advance(3000)
+  check(w.plays().length === 1, 'and hands-free on narrates')
+  // Turning hands-free off keeps narration and what waited, with withoutHandsFree.
+  const k = voiceService(V)
+  k.svc.setActive(true)
+  k.emit(st('p1', 'done'))
+  k.svc.setActive(false)
+  await k.c.advance(3000)
+  check(k.plays().length === 1, 'hands-free off keeps narrating (and the open window) with withoutHandsFree')
+  // A save that turns withoutHandsFree off stops it while hands-free is off.
+  k.cfg.settings.voice = { narration: { withoutHandsFree: false } }
+  k.svc.configure(k.cfg)
+  k.emit(st('p2', 'done', { stateSince: 170 }))
+  await k.c.advance(3000)
+  check(k.plays().length === 1 && k.c.pending() === 0, 'a save with withoutHandsFree off stops narration and leaves no timer')
+  // A preview leaves narration on.
+  const p = voiceService(V)
+  await p.svc.preview()
+  await settle()
+  await p.playedAll()
+  p.emit(st('p1', 'done'))
+  await p.c.advance(3000)
+  check(p.plays().length === 2, 'a preview leaves narration on')
+  // The lab off stops everything.
+  p.cfg.settings.labs.voice = false
+  p.svc.configure(p.cfg)
+  check(p.listeners.length === 0 && p.c.pending() === 0, 'the lab off drops the listener, the queue and every timer')
+}
+
+function testNarratorMod(M) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'snaos-narrator-'))
+  try {
+    check(M.narratorModOn(dir) === false, 'no settings.json: no warning')
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ enabledPlugins: { 'narrator@better-claude': false } }))
+    check(M.narratorModOn(dir) === false, 'the plugin disabled: no warning')
+    fs.writeFileSync(path.join(dir, 'settings.json'), '﻿' + JSON.stringify({ enabledPlugins: { 'narrator@better-claude': true } }))
+    check(M.narratorModOn(dir) === true, 'enabled with no store file (a BOM in settings.json): the state is unknown, so it warns')
+    const storeDir = path.join(dir, 'plugins', 'store')
+    fs.mkdirSync(storeDir, { recursive: true })
+    fs.writeFileSync(path.join(storeDir, 'image-preview_better-claude-aaaa.json'), JSON.stringify({ enabled: true }))
+    const store = path.join(storeDir, 'narrator_better-claude-16763c60208e.json')
+    fs.writeFileSync(store, JSON.stringify({ enabled: false }))
+    check(M.narratorModOn(dir) === false, 'enabled but switched off with /narrator off (its store says false): no warning, another plugin store is ignored')
+    fs.writeFileSync(store, JSON.stringify({ enabled: true }))
+    check(M.narratorModOn(dir) === true, '/narrator on: it warns')
+    fs.writeFileSync(store, '{broken')
+    check(M.narratorModOn(dir) === false, 'a broken store file does not count as on')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 function fakeChild() {
@@ -480,12 +611,14 @@ function testCatalog(C) {
 async function main() {
   await testQueue(load('src/main/voice/NarrationQueue.ts'))
   await testService(load('src/main/voice/VoiceService.ts'))
+  await testNarrator(load('src/main/voice/VoiceService.ts'))
+  testNarratorMod(load('src/main/voice/narratorMod.ts'))
   await testSummarizer(load('src/main/voice/Summarizer.ts'))
   await testCache(load('src/main/voice/PhraseCache.ts'))
   await testEleven(load('src/main/voice/ElevenLabs.ts'))
   await testLocal(load('src/main/voice/LocalTts.ts'))
   testCatalog(load('src/main/voice/catalog.ts'))
-  console.log(`PASS: ${checks} voice main checks (narration queue, VoiceService, summarizer, phrase cache, ElevenLabs, local engine, catalog)`)
+  console.log(`PASS: ${checks} voice main checks (narration queue, VoiceService, narrator-like reading, narrator mod, summarizer, phrase cache, ElevenLabs, local engine, catalog)`)
 }
 
 main().catch((e) => { console.error(e); process.exit(1) })
