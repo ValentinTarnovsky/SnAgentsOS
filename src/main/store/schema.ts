@@ -147,8 +147,12 @@ const voiceNarrationSchema = z.object({
   shortMaxChars: intIn(VL.shortMaxChars, DV.narration.shortMaxChars),
   summarizer: z.enum(['claude', 'local']).catch(DV.narration.summarizer).default(DV.narration.summarizer),
   prefetch: flag(DV.narration.prefetch),
-  skipInView: flag(DV.narration.skipInView),
   muteChimes: flag(DV.narration.muteChimes),
+  // Schema 23 (app 2.12.0): narrator-like reading. The 2.11.0 skipInView key
+  // was never read and is stripped (includeInView is its replacement).
+  readReplies: flag(DV.narration.readReplies),
+  withoutHandsFree: flag(DV.narration.withoutHandsFree),
+  includeInView: flag(DV.narration.includeInView),
 })
 const voiceTtsSchema = z.object({
   engine: z.enum(['local', 'elevenlabs']).catch(DV.tts.engine).default(DV.tts.engine),
@@ -618,6 +622,10 @@ export function parseConfig(raw: unknown): ConfigFile | null {
  * ('off').
  * v21 -> v22 (app 2.11.0) is defaults only (no logic): settings.labs.voice
  * (false) and settings.voice.*.
+ * v22 -> v23 (app 2.12.0) is defaults only (no logic):
+ * settings.voice.narration.{readReplies, withoutHandsFree, includeInView}
+ * (all true); settings.voice.narration.skipInView is dropped (zod strips it,
+ * nothing ever read it).
  */
 function migrate(config: ConfigFile): ConfigFile {
   const m = migrateQuickCommandsConfig(config)

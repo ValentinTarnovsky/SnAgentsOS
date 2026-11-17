@@ -133,11 +133,19 @@ function testSettings() {
   check(V.wakeWordFor('', 'es') === 'Agente' && V.wakeWordFor('  ', 'en') === 'Agent' && V.wakeWordFor('Jarvis', 'es') === 'Jarvis', 'wakeWordFor')
   check(V.voiceLangOf('auto', 'en') === 'en' && V.voiceLangOf('auto', 'es') === 'es' && V.voiceLangOf('en', 'es') === 'en', 'voiceLangOf')
   const { parseConfig, CONFIG_VERSION, voiceSettingsSchema } = load('src/main/store/schema.ts')
-  check(CONFIG_VERSION === 22, 'CONFIG_VERSION is 22 (app 2.11.0)')
+  check(CONFIG_VERSION === 23, 'CONFIG_VERSION is 23 (app 2.12.0)')
   const baseSettings = { defaultShell: {}, fontFamily: 'mono', fontSize: 13, scrollback: 1000, restoreLastWorkspace: true, confirmCloseRunning: true, sidebarCollapsed: false }
   const cfg = (version, extra = {}) => ({ version, workspaces: [{ id: 'w1', name: 'Uno', cwd: 'C:/a', panes: [{ id: 'p1', type: 'shell', title: 'Shell', color: '#fff', icon: 'terminal' }] }], presets: [], settings: { ...baseSettings, ...extra }, activeWorkspaceId: 'w1' })
   const up = parseConfig(cfg(21))
-  check(up && up.version === 22 && J(up.settings.voice) === J(V.DEFAULT_VOICE_SETTINGS) && up.settings.labs.voice === false, 'a v21 config gains the voice defaults and labs.voice off, stamped 22')
+  check(up && up.version === 23 && J(up.settings.voice) === J(V.DEFAULT_VOICE_SETTINGS) && up.settings.labs.voice === false, 'a v21 config gains the voice defaults and labs.voice off, stamped 23')
+  // Schema 23 (app 2.12.0): narrator-like reading, defaults only; the never-read skipInView is stripped.
+  const n22 = { enabled: true, done: true, action: false, error: true, groupMs: 3000, shortMaxChars: 240, summarizer: 'claude', prefetch: true, skipInView: true, muteChimes: true }
+  const up23 = parseConfig(cfg(22, { labs: { voice: true }, voice: { narration: n22, tts: { engine: 'elevenlabs' } } }))
+  const n23 = up23 && up23.settings.voice.narration
+  check(up23 && up23.version === 23 && n23.readReplies === true && n23.withoutHandsFree === true && n23.includeInView === true, 'a v22 config gains readReplies, withoutHandsFree and includeInView (all on), stamped 23')
+  check(n23 && !('skipInView' in n23) && n23.action === false && n23.groupMs === 3000 && up23.settings.voice.tts.engine === 'elevenlabs' && up23.settings.labs.voice === true, 'v22 -> v23 keeps every v22 value and drops skipInView')
+  const off23 = voiceSettingsSchema.parse({ narration: { readReplies: false, withoutHandsFree: 'yes', includeInView: false } })
+  check(off23.narration.readReplies === false && off23.narration.withoutHandsFree === true && off23.narration.includeInView === false, 'the new flags keep a false and a junk value falls back to its default')
   const junk = voiceSettingsSchema.parse({ wakeWord: 'x'.repeat(99), followUpSec: 99, language: 'fr', tts: { voice: 'robot', speed: 9, engine: 'cloud' }, eleven: { resetDay: 40, mode: 'x' }, narration: { groupMs: 'a', summarizer: 'gpt' } })
   check(junk.wakeWord === '' && junk.followUpSec === 6 && junk.language === 'auto' && junk.tts.voice === 'male' && junk.tts.speed === 1.15 && junk.tts.engine === 'local' && junk.eleven.resetDay === 1 && junk.eleven.mode === 'fixedOnly' && junk.narration.groupMs === 2500 && junk.narration.summarizer === 'claude', 'every junk field falls back to its own default')
   const kept = voiceSettingsSchema.parse({ wakeWord: 'Jarvis', tts: { voice: 'female', speed: 1.3 }, eleven: { voiceId: 'abc123', mode: 'all' } })
@@ -151,7 +159,7 @@ function main() {
   testNames(load('src/shared/spokenNames.ts'))
   testSpeech(load('src/shared/speechText.ts'))
   testSettings()
-  console.log(`PASS: ${checks} voice checks (wake word, grammar es/en, spoken names, speech text, local summary, schema 22)`)
+  console.log(`PASS: ${checks} voice checks (wake word, grammar es/en, spoken names, speech text, local summary, schema 23)`)
 }
 
 main()

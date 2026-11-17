@@ -34,10 +34,18 @@ export interface VoiceNarrationSettings {
   summarizer: VoiceSummarizer
   /** Summarize a reply as soon as its console is announced, so "lee X" is instant. */
   prefetch: boolean
-  /** No announcement for the console in view while the window has focus. */
-  skipInView: boolean
-  /** No status chime while hands-free is on (the voice says it). */
+  /** No status chime while the voice narrates (hands-free on, or withoutHandsFree). */
   muteChimes: boolean
+  /**
+   * App 2.12.0 (schema 23): a console that finishes is said with its reply
+   * ("Terminó API. <reply or summary>"), one console at a time, instead of
+   * only its name.
+   */
+  readReplies: boolean
+  /** App 2.12.0: narration also while hands-free is off (the Voice lab on is enough; commands still need hands-free). */
+  withoutHandsFree: boolean
+  /** App 2.12.0: the console in view (window focused) is narrated too, not only the ones the user does not see. */
+  includeInView: boolean
 }
 
 export interface VoiceTtsSettings {
@@ -103,7 +111,7 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   bareCommands: true,
   autoOffMin: 240,
   globalHotkey: '',
-  narration: { enabled: true, done: true, action: true, error: true, groupMs: 2500, shortMaxChars: 240, summarizer: 'claude', prefetch: true, skipInView: true, muteChimes: true },
+  narration: { enabled: true, done: true, action: true, error: true, groupMs: 2500, shortMaxChars: 240, summarizer: 'claude', prefetch: true, muteChimes: true, readReplies: true, withoutHandsFree: true, includeInView: true },
   tts: { engine: 'local', voice: 'male', speed: 1.15, volume: 80 },
   eleven: { voiceId: '', model: 'eleven_flash_v2_5', mode: 'fixedOnly', monthlyCap: 10_000, resetDay: 1, cacheMaxMb: 256 },
 }

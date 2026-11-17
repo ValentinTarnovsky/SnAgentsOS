@@ -50,6 +50,8 @@ window.snApi=fallback({platform:'win32',
  app:fallback({info:async()=>({version:'2.0.0',portable:false,platform:'win32'})}),
  remote:fallback({onStatus:noop,onDevices:noop,getStatus:async()=>({state:'stopped',connectedCount:0}),listDevices:async()=>[]}),
  pty:fallback({write(){}}),config:fallback({save(){}}),
+ // app 2.12.0: Settings > Voice needs a status (no pack, engine or key is touched).
+ voice:fallback({status:()=>Promise.resolve({supported:true,lab:true,pack:{installed:true,downloadBytes:1,diskBytes:2},install:null,dictationReady:true,eleven:{keySet:false,last4:'',usedChars:0,periodStart:'2026-11-01'},claudeFound:true,narratorMod:false}),onInstallProgress:noop,onEvent:noop,onPlay:noop}),
  accounts:fallback({getState:()=>{calls['accounts.getState']=(calls['accounts.getState']||0)+1;return Promise.resolve(accountsState)},onChanged:noop,onEvent:noop,setConfig(){},
   switchTo:(target,reason)=>{accountCalls.push(['switch',target,reason]);return accRes()},resumeAuto:()=>{accountCalls.push(['resume']);return accRes()},capture:(req)=>{accountCalls.push(['capture',req]);return accRes()},reorder:(ids)=>{accountCalls.push(['reorder',ids]);return accRes()}})});
 const created=[];
@@ -87,6 +89,7 @@ window.smoke={calls,created,termKeys,explorerArgs,hotkeyArgs,accountCalls,theme:
  silence:()=>useAppStore.getState().settings.agents.silence,
  remoteDelay:()=>useAppStore.getState().settings.notifications.remoteDelaySec,
  blocks:()=>useAppStore.getState().settings.sidebarBlocks,
+ narration:()=>useAppStore.getState().settings.voice.narration,
  // React's onBlur listens to focusout: a hidden window may never hand the input real focus.
  commit:(sel,how)=>{const el=document.querySelector(sel);if(how==='enter')el.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));else el.dispatchEvent(new FocusEvent('focusout',{bubbles:true}))},
  settings:p=>useAppStore.getState().updateSettings(p),
@@ -415,6 +418,22 @@ const js=c=>w.webContents.executeJavaScript(c);const wait=ms=>new Promise(r=>set
  await js("document.querySelector('[data-search-result=\\"appearance.sidebarAgentsBoard\\"] [role=switch]').click()");await frame();
  ok(await js("smoke.blocks().agentsBoard===true&&!!document.querySelector('[data-agents-board-toggle]')"),'the inline search switch brings the board button back');
  await js("smoke.search('');smoke.settings({sidebarBlocks:{...smoke.blocks(),usageBars:true}});smoke.usageOn(false);smoke.set({settingsOpen:false})");await frame();
+
+ // --- app 2.12.0: narrator-like narration in Settings > Voice ---------------------------------
+ await js("smoke.settings({labs:{consoleChat:false,teams:false,voice:true}});smoke.clearFlash();smoke.openSettings('voice#readReplies')");await frame();await frame();
+ ok(await js("smoke.inView('#setting-voice-readReplies')&&smoke.flashed('setting-voice-readReplies')"),"openSettings('voice#readReplies') shows and rings the row");
+ const narr=()=>js("['readReplies','withoutHandsFree','includeInView'].map(k=>document.querySelector('[data-setting-id=\\"voice.'+k+'\\"] [role=switch]')?.getAttribute('aria-checked'))");
+ eq(await narr(),['true','true','true'],'Narration has the three 2.12.0 switches, all on by default');
+ await js("document.querySelector('[data-setting-id=\\"voice.readReplies\\"] [role=switch]').click()");await frame();
+ await js("document.querySelector('[data-setting-id=\\"voice.includeInView\\"] [role=switch]').click()");await frame();
+ ok(await js("smoke.narration().readReplies===false&&smoke.narration().includeInView===false&&smoke.narration().withoutHandsFree===true"),'the switches write settings.voice.narration');
+ eq(await narr(),['false','true','false'],'the switches show what was saved');
+ await shot('voice-narration');
+ await js("document.querySelector('[data-setting-id=\\"voice.announceDone\\"] [role=switch]').click()");await frame();
+ ok(await js("document.querySelector('[data-setting-id=\\"voice.readReplies\\"] [role=switch]').disabled===true"),'Read the reply is disabled while finished consoles are not announced');
+ await js("smoke.set({settingsOpen:false});smoke.openSettings()");await frame();await js("smoke.search('narrador')");await frame();
+ ok(await js("!!document.querySelector('[data-search-result=\\"voice.readReplies\\"]')&&!!document.querySelector('[data-search-result=\\"voice.withoutHandsFree\\"]')"),'searching narrador finds the new rows');
+ await js("smoke.search('');smoke.settings({labs:{consoleChat:false,teams:false,voice:false}});smoke.set({settingsOpen:false})");await frame();
 
  // Light theme and zoom: the results list fits.
  await js("smoke.theme('light');smoke.openSettings()");await frame();await js("smoke.search('notif')");

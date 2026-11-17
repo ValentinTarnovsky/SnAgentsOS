@@ -15,7 +15,7 @@ export type { PaneWorktree }
  * Persisted config schema version. Single source of truth for both the main
  * process (schema/migrations) and the renderer (persistence writer).
  */
-export const CONFIG_VERSION = 22
+export const CONFIG_VERSION = 23
 
 export type PaneType = 'shell' | 'claude' | 'codex' | 'custom'
 
@@ -1031,7 +1031,7 @@ export interface Settings {
   labs: LabsSettings
   /** Sidebar blocks shown, all on by default (schema 20, app 2.8.0). */
   sidebarBlocks: SidebarBlocksSettings
-  /** Hands-free voice (schema 22, app 2.11.0, Labs `voice`). */
+  /** Hands-free voice (schema 22, app 2.11.0, Labs `voice`; narration reading schema 23, app 2.12.0). */
   voice: VoiceSettings
 }
 

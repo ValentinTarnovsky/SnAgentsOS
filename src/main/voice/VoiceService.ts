@@ -7,6 +7,12 @@
  * with the phrase cache, and the voice pack install. With the lab off it
  * answers `disabled`, keeps no timer and no worker.
  *
+ * App 2.12.0 (narrator-like): with narration.readReplies a finished console
+ * is said with its reply; with narration.withoutHandsFree the queue runs
+ * whenever the lab is on (commands still need hands-free); with
+ * narration.includeInView the console in view is narrated too. A new prompt
+ * cuts that console's reply short.
+ *
  * Everything the renderer names is checked here: pane and workspace ids
  * against main's config, phrase keys against VOICE_SAY_KEYS. The renderer
  * never sends text to say.
@@ -83,8 +89,18 @@ const ACTION_KEY: Record<string, MainKey> = {
   plan: 'voice.say.plan',
 }
 
+/** App 2.12.0: the queue tag of a console's spoken reply (a new prompt cuts it). */
+export function readTag(paneId: string): string {
+  return `read:${paneId}`
+}
+
 export class VoiceService {
   private active = false
+  /** App 2.12.0: the queue is on (hands-free on, or narration without it). */
+  private narrating = false
+  /** The queue is saying something now (with hands-free, it holds the renderer unthrottled). */
+  private speakingNow = false
+  private held = false
   private lab = false
   private settings: VoiceSettings = DEFAULT_VOICE_SETTINGS
   private appLang: 'es' | 'en' = 'es'
@@ -108,7 +124,11 @@ export class VoiceService {
       synth: (part, signal) => this.synth(part, signal),
       play: (id, audio) => this.deps.send({ ch: 'play', payload: { id, rate: audio.rate, pcm: audio.pcm, gain: Math.max(0, Math.min(1, this.settings.tts.volume / 100)) } }),
       stopPlayback: () => this.deps.send({ ch: 'event', payload: { t: 'stopPlayback' } }),
-      onSpeaking: (on, queued) => this.deps.send({ ch: 'event', payload: { t: 'speaking', on, queued } }),
+      onSpeaking: (on, queued) => {
+        this.speakingNow = on
+        this.syncHold()
+        this.deps.send({ ch: 'event', payload: { t: 'speaking', on, queued } })
+      },
       timer: deps.timer,
       log: (l) => this.log(l),
     })
@@ -127,16 +147,19 @@ export class VoiceService {
       this.settings = DEFAULT_VOICE_SETTINGS
     }
     this.appLang = cfg?.settings?.language === 'en' ? 'en' : 'es'
-    if (lab === this.lab) return
-    this.lab = lab
-    if (lab) {
-      this.unsubscribe = this.deps.status.addListener((evt) => this.onStatus(evt))
-    } else {
-      this.setActive(false)
-      this.unsubscribe?.()
-      this.unsubscribe = null
-      this.deps.local.unload()
+    if (lab !== this.lab) {
+      this.lab = lab
+      if (lab) {
+        this.unsubscribe = this.deps.status.addListener((evt) => this.onStatus(evt))
+      } else {
+        this.setActive(false)
+        this.unsubscribe?.()
+        this.unsubscribe = null
+        this.deps.local.unload()
+      }
     }
+    // A save can turn narration without hands-free on or off.
+    this.syncNarration()
   }
 
   get isActive(): boolean {
@@ -164,20 +187,46 @@ export class VoiceService {
       return { ok: true }
     }
     this.active = on
-    this.queue.setActive(on)
-    this.deps.throttleHold(on)
     if (on) {
       this.touch()
     } else {
-      this.pending.clear()
       this.unread = []
       this.noticed.clear()
-      this.timer.clear('group')
       this.timer.clear('autoOff')
       this.mode = 'off'
+      this.queue.setDictating(false)
     }
+    // Off keeps the queue (and what it waits to say) when narration runs without hands-free.
+    this.syncNarration()
+    this.syncHold()
     this.log(`active=${on}`)
     return { ok: true }
+  }
+
+  /**
+   * App 2.12.0: the queue runs while hands-free is on, or always (with the
+   * lab on) when narration.withoutHandsFree is set. Stopping it drops what
+   * waits to be said and the open announcement window.
+   */
+  private syncNarration(): void {
+    const n = this.settings.narration
+    const want = this.lab && (this.active || (n.enabled && n.withoutHandsFree))
+    if (want === this.narrating) return
+    this.narrating = want
+    this.queue.setActive(want)
+    if (!want) {
+      this.pending.clear()
+      this.timer.clear('group')
+    }
+    this.log(`narrating=${want}`)
+  }
+
+  /** The renderer stays unthrottled while hands-free listens (a game may be in front) or while the voice speaks. */
+  private syncHold(): void {
+    const want = this.active || this.speakingNow
+    if (want === this.held) return
+    this.held = want
+    this.deps.throttleHold(want)
   }
 
   /** The roster the renderer computed (spokenLabels): ids checked against the config, labels one line. */
@@ -301,9 +350,8 @@ export class VoiceService {
   /** Settings > Voz > Probar: a short sample with the voice in force (the queue does not need hands-free on). */
   preview(): VoiceCmdRes {
     if (!this.lab) return { ok: false, error: 'disabled' }
-    const wasActive = this.active
-    if (!wasActive) this.queue.setActive(true)
-    this.queue.enqueue({ priority: 0, parts: [{ text: this.t('voice.say.preview', { app: BRAND.productName }), fixed: true }], onSpoken: () => { if (!this.active) this.queue.setActive(false) } })
+    if (!this.narrating) this.queue.setActive(true)
+    this.queue.enqueue({ priority: 0, parts: [{ text: this.t('voice.say.preview', { app: BRAND.productName }), fixed: true }], onSpoken: () => { if (!this.narrating) this.queue.setActive(false) } })
     return { ok: true }
   }
 
@@ -356,10 +404,13 @@ export class VoiceService {
     const sig = `${evt.state}:${evt.stateSince ?? ''}`
     const prev = this.last.get(evt.paneId)
     this.last.set(evt.paneId, sig)
-    if (!this.active || prev === sig || !this.paneKnown(evt.paneId)) return
-    // A console the user saw meanwhile, or muted, is not announced.
-    if (evt.muted === true || evt.attention !== true) return
+    if (prev === sig) return
+    // App 2.12.0: a new prompt cuts the console's reply short, being said or waiting.
+    if (evt.state === 'working') this.queue.cancel(readTag(evt.paneId))
+    if (!this.narrating || !this.paneKnown(evt.paneId)) return
     const n = this.settings.narration
+    // A muted console is never announced; one the user saw meanwhile only with includeInView.
+    if (evt.muted === true || (!n.includeInView && evt.attention !== true)) return
     if (!n.enabled) return
     let pending: Pending | null = null
     if (evt.state === 'done' && n.done) pending = { kind: 'done', key: 'voice.say.done1', since: evt.stateSince ?? 0 }
@@ -375,10 +426,11 @@ export class VoiceService {
   private flushGroup(): void {
     const entries = [...this.pending.entries()]
     this.pending.clear()
-    if (!this.active || !entries.length) return
+    if (!this.narrating || !entries.length) return
+    const n = this.settings.narration
     const still = (paneId: string, p: Pending): boolean => {
       const st = this.deps.status.stateOf(paneId)
-      return !!st && st.attention === true && st.muted !== true && (st.stateSince ?? 0) === p.since && (p.kind === 'done' ? st.state === 'done' : p.kind === 'action' ? st.state === 'action' : st.state === 'error')
+      return !!st && (n.includeInView || st.attention === true) && st.muted !== true && (st.stateSince ?? 0) === p.since && (p.kind === 'done' ? st.state === 'done' : p.kind === 'action' ? st.state === 'action' : st.state === 'error')
     }
     const live = entries.filter(([id, p]) => still(id, p))
     const done = live.filter(([, p]) => p.kind === 'done')
@@ -390,7 +442,13 @@ export class VoiceService {
         stillValid: () => urgent.some(([id, p]) => still(id, p)),
       })
     }
-    if (done.length) {
+    if (done.length && n.readReplies) {
+      for (const [id] of done) {
+        this.unread = this.unread.filter((u) => u !== id)
+        this.unread.push(id)
+      }
+      void this.readFinished(done, still)
+    } else if (done.length) {
       const names = done.map(([id]) => this.paneLabel(id))
       const text = names.length === 1 ? this.t('voice.say.done1', { name: names[0] }) : this.t('voice.say.doneN', { names: joinNames(names, this.lang) })
       for (const [id] of done) {
@@ -400,6 +458,54 @@ export class VoiceService {
       }
       // A group of several names is variable; one name is a fixed phrase (cached per console).
       this.queue.enqueue({ priority: 2, tag: 'done', parts: [{ text, fixed: names.length === 1 }], stillValid: () => done.some(([id, p]) => still(id, p)) })
+    }
+  }
+
+  /**
+   * App 2.12.0 (narration.readReplies): each finished console is said with
+   * its reply, "Terminó API." then the reply as it is when short or its
+   * summary, one console per item, in the order they finished. Every summary
+   * starts at once (the summarizer runs one at a time and dedupes); an item
+   * goes into the queue when its text is ready, if the console is still done.
+   */
+  private async readFinished(done: Array<[string, Pending]>, still: (paneId: string, p: Pending) => boolean): Promise<void> {
+    const bodies = done.map(([id]) => this.replyBody(id))
+    for (let i = 0; i < done.length; i++) {
+      const [id, p] = done[i]
+      const body = await bodies[i]
+      if (!this.narrating || !still(id, p)) continue
+      this.queue.enqueue({
+        priority: 2,
+        tag: readTag(id),
+        parts: [{ text: this.t('voice.say.done1', { name: this.paneLabel(id) }), fixed: true }, ...body.map((text) => ({ text, fixed: false }))],
+        stillValid: () => still(id, p),
+        onSpoken: () => {
+          this.unread = this.unread.filter((u) => u !== id)
+        },
+      })
+    }
+  }
+
+  /** A console's last reply as spoken text: as it is when short, else its summary; [] without one. */
+  private async replyBody(paneId: string): Promise<string[]> {
+    const reply = this.deps.status.replyOf(paneId)
+    if (!reply) return []
+    const clean = cleanForSpeech(reply.text, this.lang)
+    if (!clean.trim()) return []
+    const text = await this.spokenBody(clean)
+    return text ? [text] : []
+  }
+
+  /** A cleaned reply as it is when short, else summarized (Claude or local); never rejects. */
+  private async spokenBody(clean: string): Promise<string> {
+    const lang = this.lang
+    const n = this.settings.narration
+    if (isShortReply(clean, n.shortMaxChars)) return clean
+    if (n.summarizer !== 'claude') return localSummary(clean, lang)
+    try {
+      return await this.deps.summarizer.summarize(clean, lang)
+    } catch {
+      return localSummary(clean, lang)
     }
   }
 
@@ -418,17 +524,15 @@ export class VoiceService {
       this.sayKey('nothingToRead')
       return { ok: false, error: 'nothing' }
     }
-    const lang = this.lang
-    const clean = cleanForSpeech(reply.text, lang)
-    const n = this.settings.narration
-    let body: string[]
-    if (full) body = chunk(sentencesOf(clean), READ_PART_MAX)
-    else if (isShortReply(clean, n.shortMaxChars)) body = [clean]
-    else body = [n.summarizer === 'claude' ? await this.deps.summarizer.summarize(clean, lang) : localSummary(clean, lang)]
+    const clean = cleanForSpeech(reply.text, this.lang)
+    const body = full ? chunk(sentencesOf(clean), READ_PART_MAX) : [await this.spokenBody(clean)]
     const parts: NarrationPart[] = [{ text: this.t('voice.say.reading', { name: this.paneLabel(paneId) }), fixed: true }, ...body.filter(Boolean).map((text) => ({ text, fixed: false }))]
     this.queue.stop()
+    // Asked for by name, it replaces this console's own reply if that was waiting or being said.
+    this.queue.cancel(readTag(paneId))
     this.queue.enqueue({
       priority: 0,
+      tag: readTag(paneId),
       parts,
       onSpoken: () => {
         this.unread = this.unread.filter((u) => u !== paneId)
